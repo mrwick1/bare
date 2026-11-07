@@ -214,14 +214,34 @@ impl WebStorage {
 
 // ------------------------------------------------------------------------------------------ JS bindings
 
-/// Which area `this` is, and the origin of the document. `Unsupported` while the document URL is not configured.
-fn target(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<(bool, String)> {
-    let session = match (this, d.nav.p.get()) {
-        (Value::Object(o), Some(p)) if o == p.local => false,
-        (Value::Object(o), Some(p)) if o == p.session => true,
-        _ => return Err(it.type_error("Illegal invocation")),
+/// Which area `this` is (`true`: `sessionStorage`). A method of another receiver throws "Illegal invocation".
+fn area(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<bool> {
+    match this {
+        Value::Object(o) => d.storage_area(o),
+        _ => None,
+    }
+    .ok_or_else(|| it.type_error("Illegal invocation"))
+}
+
+/// The getter of `window.localStorage` and `window.sessionStorage`. It makes the object on the first read.
+pub(crate) fn area_get(d: &Dom, it: &mut Interp<'_>, session: bool) -> R<Value> {
+    let cell = &d.nav.areas[session as usize];
+    let o = match cell.get() {
+        Some(o) => o,
+        None => {
+            let proto = d.nav.p.get().map(|p| p.storage_proto);
+            let o = it.heap.new_named_open(proto).map_err(|e| it.heap_error(e))?;
+            cell.set(Some(o));
+            d.fixed.borrow_mut().push(o);
+            o
+        }
     };
-    Ok((session, origin_of(d)?))
+    Ok(Value::Object(o))
+}
+
+/// `area`, and the origin of the document. `Unsupported` while the document URL is not configured.
+fn target(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<(bool, String)> {
+    Ok((area(d, it, this)?, origin_of(d)?))
 }
 
 /// The origin of the document. `Unsupported` while the document URL is not configured.
@@ -233,8 +253,7 @@ fn origin_of(d: &Dom) -> R<String> {
 impl Dom {
     /// Which area `o` is (`true`: `sessionStorage`), or `None` when `o` is no `Storage` object.
     pub(crate) fn storage_area(&self, o: ObjId) -> Option<bool> {
-        let p = self.nav.p.get()?;
-        if o == p.local { Some(false) } else if o == p.session { Some(true) } else { None }
+        if self.nav.areas[0].get() == Some(o) { Some(false) } else if self.nav.areas[1].get() == Some(o) { Some(true) } else { None }
     }
 
     /// `f` with the store and the origin of the document. `None` while the document URL is not configured.
@@ -243,16 +262,16 @@ impl Dom {
         Ok(s.entries.get(s.cur).map(|e| f(&s.store, &e.url.origin())))
     }
 
-    pub(crate) fn storage_get(&self, session: bool, key: &[u16]) -> Result<Option<Box<[u16]>>, HeapError> {
-        Ok(self.storage_with(|st, o| st.get(session, o, key))?.flatten())
+    pub(crate) fn storage_get(&self, session: bool, key: &[u16]) -> Result<Option<Vec<u16>>, HeapError> {
+        Ok(self.storage_with(|st, o| st.get(session, o, key))?.flatten().map(Vec::from))
     }
 
     pub(crate) fn storage_len(&self, session: bool) -> Result<usize, HeapError> {
         Ok(self.storage_with(|st, o| st.len(session, o))?.unwrap_or(0))
     }
 
-    pub(crate) fn storage_keys(&self, session: bool) -> Result<Vec<Box<[u16]>>, HeapError> {
-        Ok(self.storage_with(|st, o| st.keys(session, o))?.unwrap_or_default())
+    pub(crate) fn storage_keys(&self, session: bool) -> Result<Vec<Vec<u16>>, HeapError> {
+        Ok(self.storage_with(|st, o| st.keys(session, o))?.unwrap_or_default().into_iter().map(Vec::from).collect())
     }
 }
 
@@ -262,16 +281,16 @@ fn lossy(u: &[u16]) -> String {
 }
 
 /// `Host::named_write` for `localStorage` and `sessionStorage`: the named setter, deleter and `[[DefineOwnProperty]]`.
-/// `Ok(None)`: `req.owner` is no `Storage` object.
-pub(crate) fn write(d: &Dom, it: &mut Interp<'_>, req: NamedRequest) -> R<Option<bool>> {
-    let Some(session) = d.storage_area(req.owner) else { return Ok(None) };
+/// `Ok(false)` when `req.owner` is no `Storage` object (`Dom::named_write` calls this for `Storage` objects only).
+pub(crate) fn write(d: &Dom, it: &mut Interp<'_>, req: NamedRequest) -> R<bool> {
+    let Some(session) = d.storage_area(req.owner) else { return Ok(false) };
     let key: Vec<u16> = match req.key {
         PropertyKey::Index(i) => i.to_string().encode_utf16().collect(),
         PropertyKey::String(s) => match it.heap.str_units(s) {
             Ok(u) => u.to_vec(),
             Err(e) => return Err(it.heap_error(e)),
         },
-        PropertyKey::Symbol(_) => return Ok(Some(false)),
+        PropertyKey::Symbol(_) => return Ok(false),
     };
     let named = format!("Failed to set a named property '{}' on 'Storage'", lossy(&key));
     let value = match req.op {
@@ -282,7 +301,7 @@ pub(crate) fn write(d: &Dom, it: &mut Interp<'_>, req: NamedRequest) -> R<Option
             }
             // WebIDL: only a data descriptor (a `value` or a `writable` field) runs the setter. Its flags are ignored.
             if desc.value.is_none() && desc.writable.is_none() {
-                return Ok(Some(false));
+                return Ok(false);
             }
             desc.value.unwrap_or(Value::Undefined)
         }
@@ -290,12 +309,12 @@ pub(crate) fn write(d: &Dom, it: &mut Interp<'_>, req: NamedRequest) -> R<Option
             let origin = origin_of(d)?;
             let store = d.nav.s.borrow().store.clone();
             store.remove(session, &origin, &key);
-            return Ok(Some(true));
+            return Ok(true);
         }
     };
     let v = units(d, it, value, &named)?;
     let origin = origin_of(d)?;
-    store_set(d, it, session, &origin, &key, &v, &named).map(|()| Some(true))
+    store_set(d, it, session, &origin, &key, &v, &named).map(|()| true)
 }
 
 /// The write of `setItem` and of the named setter. `who` starts the quota message.
@@ -344,7 +363,7 @@ fn str_value(it: &mut Interp<'_>, u: &[u16]) -> R<Value> {
 }
 
 pub(crate) fn get_item(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    let (session, _) = target(d, it, this)?;
+    let session = area(d, it, this)?;
     need(it, a, 1, "getItem")?;
     let k = units(d, it, a[0], "Failed to execute 'getItem' on 'Storage'")?;
     let (_, origin) = target(d, it, this)?;
@@ -357,7 +376,7 @@ pub(crate) fn get_item(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -
 }
 
 pub(crate) fn set_item(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    let (session, _) = target(d, it, this)?;
+    let session = area(d, it, this)?;
     need(it, a, 2, "setItem")?;
     let who = "Failed to execute 'setItem' on 'Storage'";
     let k = units(d, it, a[0], who)?;
@@ -369,7 +388,7 @@ pub(crate) fn set_item(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -
 }
 
 pub(crate) fn remove_item(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    let (session, _) = target(d, it, this)?;
+    let session = area(d, it, this)?;
     need(it, a, 1, "removeItem")?;
     let k = units(d, it, a[0], "Failed to execute 'removeItem' on 'Storage'")?;
     let (_, origin) = target(d, it, this)?;
@@ -387,7 +406,7 @@ pub(crate) fn clear(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R
 }
 
 pub(crate) fn key(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    let (session, _) = target(d, it, this)?;
+    let session = area(d, it, this)?;
     need(it, a, 1, "key")?;
     let n = it.to_js_number(a[0])?;
     let (_, origin) = target(d, it, this)?;

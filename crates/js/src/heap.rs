@@ -1551,9 +1551,11 @@ impl Heap {
             return Ok(rest);
         }
         let mut keys = self.named_keys(o)?;
-        // A name that is also an ordinary property (a hidden name) is listed once.
-        let names: std::collections::HashSet<PropertyKey> = keys.iter().copied().collect();
-        keys.extend(rest.into_iter().filter(|k| !names.contains(k)));
+        if !rest.is_empty() {
+            // A name that is also an ordinary property (a hidden name) is listed once.
+            let names: std::collections::HashSet<PropertyKey> = keys.iter().copied().collect();
+            keys.extend(rest.into_iter().filter(|k| !names.contains(k)));
+        }
         Ok(keys)
     }
 
@@ -1892,7 +1894,7 @@ impl Heap {
         if ob.exotic == EXOTIC_PROXY {
             return Err(HeapError::Proxy(o));
         }
-        if self.named_open(o) || frozen && ob.exotic != 0 && ob.exotic != EXOTIC_STR && self.virtual_len(o)? > 0 {
+        if ob.exotic == EXOTIC_NAMED && self.named_open(o) || frozen && ob.exotic != 0 && ob.exotic != EXOTIC_STR && self.virtual_len(o)? > 0 {
             return Ok(false);
         }
         let moved = ob.elems.iter().flatten().count();

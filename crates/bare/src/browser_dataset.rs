@@ -77,20 +77,27 @@ fn is_data(attr: &str) -> bool {
     attr.strip_prefix("data-").is_some_and(|t| !t.bytes().any(|b| b.is_ascii_uppercase()))
 }
 
-/// `data-foo-bar` -> `fooBar`. `None` when `attr` is not a dataset attribute.
-fn prop_of(attr: &str) -> Option<String> {
+/// `data-foo-bar` -> the characters of `fooBar`. `None` when `attr` is not a dataset attribute.
+fn prop_chars(attr: &str) -> Option<impl Iterator<Item = char> + '_> {
     let tail = attr.strip_prefix("data-").filter(|t| !t.bytes().any(|b| b.is_ascii_uppercase()))?;
-    let mut out = String::with_capacity(tail.len());
     let mut cs = tail.chars().peekable();
-    while let Some(c) = cs.next() {
+    Some(std::iter::from_fn(move || {
+        let c = cs.next()?;
         match cs.peek() {
             Some(&n) if c == '-' && n.is_ascii_lowercase() => {
-                out.push(n.to_ascii_uppercase());
                 cs.next();
+                Some(n.to_ascii_uppercase())
             }
-            _ => out.push(c),
+            _ => Some(c),
         }
-    }
+    }))
+}
+
+/// `data-foo-bar` -> `fooBar`. `None` when `attr` is not a dataset attribute.
+fn prop_of(attr: &str) -> Option<String> {
+    let cs = prop_chars(attr)?;
+    let mut out = String::with_capacity(attr.len());
+    out.extend(cs);
     Some(out)
 }
 
@@ -152,6 +159,18 @@ impl Dom {
     }
 }
 
+/// The UTF-16 units of `cs`, in one allocation when `cap` is at least their number (`collect` grows step by step).
+fn units(cs: impl Iterator<Item = char>, cap: usize) -> Vec<u16> {
+    let mut v = Vec::with_capacity(cap);
+    for c in cs {
+        match u16::try_from(c) {
+            Ok(u) if !(0xD800..0xE000).contains(&u) => v.push(u),
+            _ => v.extend_from_slice(c.encode_utf16(&mut [0; 2])),
+        }
+    }
+    v
+}
+
 impl NamedSource for Dom {
     fn named_has(&self, owner: ObjId, key: &[u16]) -> Result<bool, HeapError> {
         if let Some(session) = self.storage_area(owner) {
@@ -164,7 +183,7 @@ impl NamedSource for Dom {
         Ok(doc.attrs(attrs).iter().any(|a| matches(doc.atom_str(a.name), key)))
     }
 
-    fn named_get(&self, owner: ObjId, key: &[u16]) -> Result<Option<Box<[u16]>>, HeapError> {
+    fn named_get(&self, owner: ObjId, key: &[u16]) -> Result<Option<Vec<u16>>, HeapError> {
         if let Some(session) = self.storage_area(owner) {
             return self.storage_get(session, key);
         }
@@ -172,7 +191,10 @@ impl NamedSource for Dom {
         let doc = self.doc.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
         // No gate: the heap calls this right after `named_has`, and that call paid for the scan.
         let NodeData::Element { attrs, .. } = *doc.data(el) else { return Ok(None) };
-        Ok(doc.attrs(attrs).iter().find(|a| matches(doc.atom_str(a.name), key)).map(|a| doc.text(a.value).encode_utf16().collect()))
+        Ok(doc.attrs(attrs).iter().find(|a| matches(doc.atom_str(a.name), key)).map(|a| {
+            let t = doc.text(a.value);
+            units(t.chars(), t.len())
+        }))
     }
 
     fn named_len(&self, owner: ObjId) -> Result<usize, HeapError> {
@@ -187,14 +209,17 @@ impl NamedSource for Dom {
     }
 
     /// No gate here: the heap calls `named_len` first, and that call paid for the scan.
-    fn named_keys(&self, owner: ObjId) -> Result<Vec<Box<[u16]>>, HeapError> {
+    fn named_keys(&self, owner: ObjId) -> Result<Vec<Vec<u16>>, HeapError> {
         if let Some(session) = self.storage_area(owner) {
             return self.storage_keys(session);
         }
         let Some(el) = self.dataset_el(owner)? else { return Ok(Vec::new()) };
         let doc = self.doc.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
         let NodeData::Element { attrs, .. } = *doc.data(el) else { return Ok(Vec::new()) };
-        Ok(doc.attrs(attrs).iter().filter_map(|a| prop_of(doc.atom_str(a.name))).map(|p| p.encode_utf16().collect()).collect())
+        Ok(doc.attrs(attrs).iter().filter_map(|a| {
+            let n = doc.atom_str(a.name);
+            prop_chars(n).map(|cs| units(cs, n.len()))
+        }).collect())
     }
 
     /// `Storage` names do not hide the prototype chain: its methods win.

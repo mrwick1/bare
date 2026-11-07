@@ -30,7 +30,7 @@ impl NamedSource for X {
         let k = text(key);
         Ok(self.owner.get() == Some(owner) && self.pairs.try_borrow().map_err(|_| HeapError::HostUnavailable)?.iter().any(|(n, _)| *n == k))
     }
-    fn named_get(&self, owner: ObjId, key: &[u16]) -> Result<Option<Box<[u16]>>, HeapError> {
+    fn named_get(&self, owner: ObjId, key: &[u16]) -> Result<Option<Vec<u16>>, HeapError> {
         let k = text(key);
         if self.owner.get() != Some(owner) {
             return Ok(None);
@@ -40,7 +40,7 @@ impl NamedSource for X {
     fn named_len(&self, owner: ObjId) -> Result<usize, HeapError> {
         Ok(if self.owner.get() == Some(owner) { self.pairs.try_borrow().map_err(|_| HeapError::HostUnavailable)?.len() } else { 0 })
     }
-    fn named_keys(&self, owner: ObjId) -> Result<Vec<Box<[u16]>>, HeapError> {
+    fn named_keys(&self, owner: ObjId) -> Result<Vec<Vec<u16>>, HeapError> {
         if self.owner.get() != Some(owner) {
             return Ok(Vec::new());
         }
@@ -58,7 +58,7 @@ impl Host for X {
             // make(proto?): the named object
             0 => {
                 let proto = match n(0) { Value::Object(o) => o, _ => it.object_prototype() };
-                let o = it.heap.new_named(Some(proto)).unwrap();
+                let o = if self.open.get() { it.heap.new_named_open(Some(proto)) } else { it.heap.new_named(Some(proto)) }.unwrap();
                 self.owner.set(Some(o));
                 Ok(Value::Object(o))
             }
@@ -317,9 +317,9 @@ fn heap_without_a_source_and_host_without_named_write_fail_loudly() {
         struct Bare;
         impl NamedSource for Bare {
             fn named_has(&self, _: ObjId, _: &[u16]) -> Result<bool, HeapError> { Ok(false) }
-            fn named_get(&self, _: ObjId, _: &[u16]) -> Result<Option<Box<[u16]>>, HeapError> { Ok(None) }
+            fn named_get(&self, _: ObjId, _: &[u16]) -> Result<Option<Vec<u16>>, HeapError> { Ok(None) }
             fn named_len(&self, _: ObjId) -> Result<usize, HeapError> { Ok(0) }
-            fn named_keys(&self, _: ObjId) -> Result<Vec<Box<[u16]>>, HeapError> { Ok(Vec::new()) }
+            fn named_keys(&self, _: ObjId) -> Result<Vec<Vec<u16>>, HeapError> { Ok(Vec::new()) }
         }
         impl Host for Bare {
             fn call(&self, it: &mut Interp<'_>, _: u32, _: Value, _: &[Value], _: bool) -> Result<Value, Error> {
