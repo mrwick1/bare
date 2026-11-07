@@ -16,6 +16,7 @@ pub mod regexp;
 pub mod text;
 
 pub mod eval;
+pub mod bc;
 
 mod number;
 mod obj_tab;
