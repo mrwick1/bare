@@ -14,6 +14,8 @@ use bare_js::value::Value;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use std::time::Instant;
+#[path = "common/exec.rs"]
+mod exec;
 
 struct Counting;
 static ALLOCS: AtomicUsize = AtomicUsize::new(0);
@@ -210,6 +212,7 @@ fn run_case(name: String, scale: usize) {
     let t1 = Instant::now();
     let limits = EvalLimits { max_steps: u64::MAX / 2, max_call_depth: 100, max_envs: 1 << 22, max_functions: 1 << 22, ..Default::default() };
     let mut it = Interp::new(&prog, Heap::default(), limits).unwrap_or_else(|e| die(format!("setup: {e:?}")));
+    exec::set(&mut it);
     let setup_ms = t1.elapsed().as_secs_f64() * 1e3;
     let (a0, b0, cpu0) = (ALLOCS.load(Relaxed), BYTES.load(Relaxed), cpu_ms());
     PEAK.store(LIVE.load(Relaxed), Relaxed);

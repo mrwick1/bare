@@ -15,6 +15,8 @@ use bare_js::value::Value;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use std::time::Instant;
+#[path = "common/exec.rs"]
+mod exec;
 
 struct Counting;
 static ALLOCS: AtomicUsize = AtomicUsize::new(0);
@@ -100,6 +102,7 @@ fn exec(name: &str, scale: usize) {
         limits.max_scripts = 64;
     }
     let mut it = Interp::realm(Heap::default(), limits).unwrap_or_else(|e| die(format!("realm: {e:?}")));
+    exec::set(&mut it);
     let (a0, b0, cpu0) = (ALLOCS.load(Relaxed), BYTES.load(Relaxed), cpu_ms());
     PEAK.store(LIVE.load(Relaxed), Relaxed);
     let t = Instant::now();
@@ -178,6 +181,7 @@ fn exec(name: &str, scale: usize) {
                 expect("reject count", run(&mut it, "var z = 1;"), "ERR Limit(Scripts)".into());
             }
             let mut it2 = Interp::realm(Heap::default(), EvalLimits { max_steps: u64::MAX / 2, ..Default::default() }).unwrap();
+            exec::set(&mut it2);
             for i in 0..1000 * scale {
                 if !run(&mut it2, &format!("var q{i} = ;")).starts_with("ERR Throw") {
                     die("reject syntax".into());

@@ -15,6 +15,8 @@ use bare_js::eval::{EvalLimits, Interp, Error, LimitKind};
 use bare_js::heap::Heap;
 use bare_js::parse::{parse_script, Limits};
 use std::time::Instant;
+#[path = "common/exec.rs"]
+mod exec;
 
 const COMMIT: &str = "
 var MASK = 3;
@@ -69,6 +71,7 @@ fn run_case(name: String, depth: usize) {
     let prog = parse_script(&src, Limits::default()).unwrap_or_else(|e| die(format!("parse: {e}")));
     let limits = EvalLimits { max_steps: u64::MAX / 4, ..EvalLimits::session() };
     let mut it = Interp::new(&prog, Heap::default(), limits).unwrap_or_else(|e| die(format!("setup: {e:?}")));
+    exec::set(&mut it);
     let (rss0, t) = (status_kib("VmRSS:"), Instant::now());
     let got = match it.run() {
         Ok(v) => it.display(v),

@@ -99,6 +99,9 @@ pub(super) struct Gen<'g, 'p> {
     /// The source offset of the node being compiled, for `Code::lines`.
     pos: u32,
     strict: bool,
+    /// The completion register of a script body: each expression statement writes it, and `if`, loops, `switch` and `try`
+    /// clear it as they start (`enter` and `exec_simple` at depth 0). `None` in a function.
+    compl: Option<u32>,
 }
 
 /// The result of `bc_gen_check`.
@@ -142,6 +145,7 @@ impl<'p> Interp<'p> {
             fins: Vec::new(),
             pos: f.span.start,
             strict: f.strict,
+            compl: None,
         };
         match f.body {
             Body::Expr(e) => {
@@ -165,6 +169,44 @@ impl<'p> Interp<'p> {
                 g.emit(Op::RetUndef, 0, 0, 0)?;
             }
         }
+        let mut c = g.code;
+        c.nregs = g.max as u16;
+        c.ics = (0..g.ics).map(|_| Cell::new(Ic::EMPTY)).collect();
+        Ok(c)
+    }
+
+    /// Compile the body of the current script. Call it after `declare_scope` ran for it (`exec_current`): the code does not
+    /// declare the names of the script. The code returns the completion value.
+    pub(super) fn bc_compile_script(&mut self) -> G<Code> {
+        let root = self.bc_root().ok_or("no scope")?;
+        let w = self.bc_walk(None, root);
+        if w.bad.is_some() {
+            return Err("scope walk");
+        }
+        let prog = self.prog.clone();
+        let mut g = Gen {
+            prog: prog.clone(),
+            strict: prog.strict,
+            it: self,
+            code: Code::new(0),
+            pool: HashMap::new(),
+            ics: 0,
+            top: 0,
+            max: 0,
+            sites: w.sites.into_iter().collect(),
+            scopes: w.stmts.into_iter().collect(),
+            depth: 0,
+            jumps: Vec::new(),
+            fins: Vec::new(),
+            pos: 0,
+            compl: None,
+        };
+        let c = g.reg()?;
+        g.compl = Some(c);
+        for s in prog.list(prog.body) {
+            g.stmt(s)?;
+        }
+        g.emit(Op::Ret, c, 0, 0)?;
         let mut c = g.code;
         c.nregs = g.max as u16;
         c.ics = (0..g.ics).map(|_| Cell::new(Ic::EMPTY)).collect();

@@ -10,6 +10,8 @@ use bare_js::eval::*;
 use bare_js::heap::Heap;
 use bare_js::parse::{parse_script, Limits};
 use std::time::Instant;
+#[path = "common/exec.rs"]
+mod exec;
 
 fn rss_kib() -> u64 {
     let s = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
@@ -19,6 +21,7 @@ fn rss_kib() -> u64 {
 fn run(src: &str) -> (String, f64) {
     let prog = parse_script(src, Limits::default()).expect("parse");
     let mut it = Interp::new(&prog, Heap::default(), EvalLimits { max_steps: u64::MAX / 4, ..Default::default() }).expect("setup");
+    exec::set(&mut it);
     let t = Instant::now();
     let r = match it.run() {
         Ok(v) => it.display(v),
