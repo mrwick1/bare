@@ -50,7 +50,15 @@ fn run_case(src: &str) -> String {
 
 #[test]
 fn corpus_matches_node() {
-    let (cases, expected) = (include_str!("../../../tools/fixtures/js/async-cases.txt"), include_str!("../../../tools/fixtures/js/async-cases.expected"));
+    corpus(include_str!("../../../tools/fixtures/js/async-cases.txt"), include_str!("../../../tools/fixtures/js/async-cases.expected"), 90);
+}
+
+#[test]
+fn asyncgen_corpus_matches_node() {
+    corpus(include_str!("../../../tools/fixtures/js/asyncgen-cases.txt"), include_str!("../../../tools/fixtures/js/asyncgen-cases.expected"), 60);
+}
+
+fn corpus(cases: &'static str, expected: &'static str, min: usize) {
     big(move || {
         let mut list: Vec<(&str, Vec<&str>)> = Vec::new();
         for line in cases.lines() {
@@ -62,7 +70,7 @@ fn corpus_matches_node() {
         }
         let want: Vec<&str> = expected.lines().collect();
         assert_eq!(list.len(), want.len());
-        assert!(list.len() >= 90);
+        assert!(list.len() >= min);
         let mut bad = Vec::new();
         for ((name, lines), w) in list.iter().zip(want) {
             let got = format!("{name}\t{}", run_case(lines.join("\n").trim_end_matches('\n')));
@@ -135,7 +143,6 @@ fn unsupported_await_positions_are_found_before_any_effect() {
             ("async function f() { try {} catch ({ a = await 1 }) {} }", "await in a catch binding"),
             ("async function f() { for (var [a = await 1] of []) {} }", "await in a binding pattern"),
             ("async function f(o) { [o.x = await 1] = []; }", "await in an assignment pattern"),
-            ("async function f() { for await (var x of []) {} }", "for await"),
             ("async function f(t) { return t`${await 1}`; }", "await in a tagged template"),
             ("async function f(t) { return (await t)`x`; }", "await in a tagged template"),
             ("async function f(o) { return (o?.a)(await 1); }", "await in a call of an optional chain"),
@@ -152,8 +159,6 @@ fn unsupported_await_positions_are_found_before_any_effect() {
             let r = it.run_script(src);
             assert!(matches!(r, Err(Error::Throw(_))), "{src}: {r:?}");
         }
-        let r = it.run_script("async function* g() {}");
-        assert!(matches!(r, Err(Error::Unsupported(_))), "{r:?}");
         // the first program of `Interp::new` is checked the same way
         let prog = parse_script("var effect = 1; async function f() { for (var k in await 1) {} }", Limits::default()).unwrap();
         assert!(matches!(Interp::new(&prog, Heap::default(), EvalLimits::default()), Err(Error::Unsupported(_))));
@@ -600,5 +605,50 @@ fn a_second_script_can_start_async_functions_of_the_first_and_both_share_the_que
         out(&mut it, "async function b(t) { out.push(t + 1); await 0; out.push(t + 2); } a('a'); b('b'); a('c'); out.push('s'); 0");
         it.drain_microtasks().unwrap();
         assert_eq!(out(&mut it, "out.join('|')"), "a1|b1|c1|s|a2|b2|c2");
+    });
+}
+
+// ------------------------------------------------------------------ async generators: what Node 22 cannot show
+
+#[test]
+fn async_from_sync_iterators_follow_the_current_spec() {
+    // Node 22 predates these rules (test262 checks them): a rejected value closes the sync iterator, and a missing
+    // `throw` closes it and rejects with a TypeError.
+    let it = "var closed = 0; var out = [];
+        function mk(v) { return { [Symbol.iterator]() { return { next() { return { value: v, done: false }; }, return() { closed++; return {}; } }; } }; }";
+    assert_eq!(run_out(&format!("{it} async function f() {{ try {{ for await (var x of mk(Promise.reject('r'))) {{}} }} catch (e) {{ out.push(e, closed); }} }} f();")), "r|1");
+    assert_eq!(run_out(&format!("{it} async function* g() {{ yield* mk(Promise.reject('r')); }} g().next().catch(function (e) {{ out.push(e, closed); }});")), "r|1");
+    assert_eq!(run_out(&format!("{it} async function* g() {{ yield* mk(1); }} var o = g(); o.next().then(function () {{ return o.throw('t'); }}).catch(function (e) {{ out.push(e.name, closed); }});")), "TypeError|1");
+}
+
+#[test]
+fn async_generator_requests_queue_and_settle_in_order() {
+    assert_eq!(
+        run_out("var out = []; async function* g() { try { out.push('s'); yield 1; yield 2; } finally { out.push('f'); } }
+            var o = g(); function L(t) { return function (r) { out.push(t + r.value + r.done); }; }
+            o.next().then(L('a')); o.return(9).then(L('b')); o.next().then(L('c')); o.throw('x').catch(function (e) { out.push('d' + e); });"),
+        "s|a1false|f|b9true|cundefinedtrue|dx"
+    );
+}
+
+#[test]
+fn unreachable_suspended_async_generators_are_collected_and_reachable_ones_stay() {
+    big(|| {
+        let mut it = realm(lim());
+        out(&mut it, "var out = []; async function* d(t) { var big = { t: t }; yield 1; await new Promise(function () {}); }
+            for (var i = 0; i < 20; i++) { var x = d(i); x.next(); x.next(); } x = null;
+            async function* k() { var big = { v: 'kept' }; yield 1; yield big.v; } var keep = k(); keep.next(); 0");
+        it.drain_microtasks().unwrap();
+        assert_eq!(it.aw.agens.len(), 21);
+        it.collect(&[]).unwrap();
+        it.collect(&[]).unwrap();
+        assert_eq!(it.aw.agens.len(), 1);
+        out(&mut it, "keep.next().then(function (r) { out.push(r.value); }); 0");
+        it.drain_microtasks().unwrap();
+        assert_eq!(out(&mut it, "out.join('|')"), "kept");
+        out(&mut it, "keep = null; 0");
+        it.collect(&[]).unwrap();
+        let st = it.async_stats();
+        assert_eq!((it.aw.agens.len(), st.activations, st.frames, st.slots), (0, 0, 0, 0));
     });
 }

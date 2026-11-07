@@ -378,19 +378,21 @@ pub struct Func {
 pub enum FuncMode {
     Plain,
     Async,
-    /// `function*` or a `*` method. Async generators are not supported.
+    /// `function*` or a `*` method.
     Generator,
+    /// `async function*` or an `async *` method.
+    AsyncGen,
     /// A plain function that always keeps its environment: a class member (the parser sets it). Its call checks nothing for frame slots.
     Env,
 }
 
 impl Func {
     pub fn is_async(&self) -> bool {
-        self.mode == FuncMode::Async
+        matches!(self.mode, FuncMode::Async | FuncMode::AsyncGen)
     }
 
     pub fn is_generator(&self) -> bool {
-        self.mode == FuncMode::Generator
+        matches!(self.mode, FuncMode::Generator | FuncMode::AsyncGen)
     }
 
     /// An ordinary `function` (not an arrow, method, async function or generator): `new` can call it.

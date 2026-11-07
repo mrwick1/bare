@@ -1,0 +1,371 @@
+# bare-js async generator and for-await cases. Same format as async-cases.txt: `=== name`, a log through L(), the last
+# expression is a reader. The tools read the log before the microtask checkpoint and after it: `pre ## post`. Node (vm,
+# empty context) is the oracle, so the order of microtasks must match. Only our own tiny programs run here.
+# Helpers of each case: L(x) logs; R(t) logs an iterator result; E(t) logs a rejection.
+=== ag_basic
+var log = []; function L(x) { log.push(String(x)); } function R(t) { return function (r) { L(t + ":" + r.value + ":" + r.done); }; }
+async function* g() { L("a"); yield 1; L("b"); yield 2; L("c"); return 3; }
+var it = g(); L("made");
+it.next().then(R("1")); L("sync");
+it.next().then(R("2")); it.next().then(R("3")); it.next().then(R("4"));
+(function () { return log.join("|"); })
+=== ag_order_against_ticks
+var log = []; function L(x) { log.push(String(x)); } function R(t) { return function (r) { L(t + ":" + r.value + ":" + r.done); }; }
+async function* g() { L("g1"); yield 1; L("g2"); yield 2; L("g3"); }
+var it = g();
+it.next().then(R("r1"));
+Promise.resolve().then(() => L("t1")).then(() => L("t2")).then(() => L("t3")).then(() => L("t4")).then(() => L("t5"));
+it.next().then(R("r2")); it.next().then(R("r3"));
+L("sync");
+(function () { return log.join("|"); })
+=== ag_yield_awaits_promise
+var log = []; function L(x) { log.push(String(x)); } function R(t) { return function (r) { L(t + ":" + r.value + ":" + r.done); }; }
+async function* g() { yield Promise.resolve("p"); yield { then(r) { L("then"); r("t"); } }; }
+var it = g(); it.next().then(R("1")); it.next().then(R("2")); it.next().then(R("3"));
+Promise.resolve().then(() => L("x1")).then(() => L("x2")).then(() => L("x3")).then(() => L("x4"));
+(function () { return log.join("|"); })
+=== ag_yield_rejected_throws_inside
+var log = []; function L(x) { log.push(String(x)); } function R(t) { return function (r) { L(t + ":" + r.value + ":" + r.done); }; }
+async function* g() { try { yield Promise.reject("bad"); } catch (e) { L("caught " + e); yield "after"; } }
+var it = g(); it.next().then(R("1")); it.next().then(R("2"));
+(function () { return log.join("|"); })
+=== ag_await_inside
+var log = []; function L(x) { log.push(String(x)); } function R(t) { return function (r) { L(t + ":" + r.value + ":" + r.done); }; }
+async function* g() { var a = await Promise.resolve(1); L("a" + a); var b = yield a + 1; L("b" + b); await null; yield b * 2; }
+var it = g(); it.next("ignored").then(R("1")); it.next(5).then(R("2")); it.next().then(R("3"));
+Promise.resolve().then(() => L("t1")).then(() => L("t2")).then(() => L("t3"));
+(function () { return log.join("|"); })
+=== ag_return_value_awaited
+var log = []; function L(x) { log.push(String(x)); } function R(t) { return function (r) { L(t + ":" + r.value + ":" + r.done); }; }
+async function* g() { yield 1; return Promise.resolve("ret"); }
+var it = g(); it.next().then(R("1")); it.next().then(R("2")); it.next().then(R("3"));
+Promise.resolve().then(() => L("t1")).then(() => L("t2")).then(() => L("t3")).then(() => L("t4"));
+(function () { return log.join("|"); })
+=== ag_return_rejected_caught
+var log = []; function L(x) { log.push(String(x)); } function R(t) { return function (r) { L(t + ":" + r.value + ":" + r.done); }; }
+async function* g() { try { return Promise.reject("no"); } catch (e) { L("caught " + e); yield "y"; } finally { L("fin"); } }
+var it = g(); it.next().then(R("1")); it.next().then(R("2"));
+(function () { return log.join("|"); })
+=== ag_return_plain_in_if
+var log = []; function L(x) { log.push(String(x)); } function R(t) { return function (r) { L(t + ":" + r.value + ":" + r.done); }; }
+async function* g(x) { if (x) return x; yield "never"; }
+g(Promise.resolve(7)).next().then(R("1")); g(0).next().then(R("2"));
+(function () { return log.join("|"); })
+=== ag_throw_in_body
+var log = []; function L(x) { log.push(String(x)); } function R(t) { return function (r) { L(t + ":" + r.value + ":" + r.done); }; } function E(t) { return function (e) { L(t + "!" + (e && e.message || e)); }; }
+async function* g() { yield 1; throw new Error("boom"); }
+var it = g(); it.next().then(R("1")); it.next().then(R("2"), E("2")); it.next().then(R("3"));
+(function () { return log.join("|"); })
+=== ag_return_method
+var log = []; function L(x) { log.push(String(x)); } function R(t) { return function (r) { L(t + ":" + r.value + ":" + r.done); }; }
+async function* g() { try { yield 1; yield 2; } finally { L("fin"); } }
+var it = g(); it.next().then(R("1")); it.return(9).then(R("ret")); it.next().then(R("3"));
+(function () { return log.join("|"); })
+=== ag_return_before_start
+var log = []; function L(x) { log.push(String(x)); } function R(t) { return function (r) { L(t + ":" + r.value + ":" + r.done); }; }
+async function* g() { L("ran"); yield 1; }
+var it = g(); it.return(Promise.resolve("v")).then(R("ret")); it.next().then(R("n"));
+Promise.resolve().then(() => L("t1")).then(() => L("t2")).then(() => L("t3")).then(() => L("t4"));
+(function () { return log.join("|"); })
+=== ag_return_rejected_before_start
+var log = []; function L(x) { log.push(String(x)); } function R(t) { return function (r) { L(t + ":" + r.value + ":" + r.done); }; } function E(t) { return function (e) { L(t + "!" + (e && e.message || e)); }; }
+async function* g() { yield 1; }
+var it = g(); it.return(Promise.reject("r")).then(R("ret"), E("ret")); it.next().then(R("n"));
+(function () { return log.join("|"); })
+=== ag_return_after_done
+var log = []; function L(x) { log.push(String(x)); } function R(t) { return function (r) { L(t + ":" + r.value + ":" + r.done); }; }
+async function* g() {}
+var it = g(); it.next().then(R("1")); it.return(4).then(R("2")); it.return({ then(r) { r("th"); } }).then(R("3"));
+(function () { return log.join("|"); })
+=== ag_return_while_suspended_yield_promise
+var log = []; function L(x) { log.push(String(x)); } function R(t) { return function (r) { L(t + ":" + r.value + ":" + r.done); }; }
+async function* g() { try { yield 1; } finally { L("fin"); } }
+var it = g(); it.next().then(function (r) { R("1")(r); it.return(Promise.resolve("pv")).then(R("ret")); Promise.resolve().then(() => L("u1")).then(() => L("u2")).then(() => L("u3")); });
+(function () { return log.join("|"); })
+=== ag_return_caught_by_finally_yield
+var log = []; function L(x) { log.push(String(x)); } function R(t) { return function (r) { L(t + ":" + r.value + ":" + r.done); }; }
+async function* g() { try { yield 1; } finally { yield "cleanup"; L("after cleanup"); } }
+var it = g(); it.next().then(R("1")); it.return(5).then(R("2")); it.next().then(R("3")); it.next().then(R("4"));
+(function () { return log.join("|"); })
+=== ag_throw_method_caught
+var log = []; function L(x) { log.push(String(x)); } function R(t) { return function (r) { L(t + ":" + r.value + ":" + r.done); }; }
+async function* g() { try { yield 1; } catch (e) { yield "caught " + e; } }
+var it = g(); it.next().then(R("1")); it.throw("x").then(R("2")); it.next().then(R("3"));
+(function () { return log.join("|"); })
+=== ag_throw_before_start
+var log = []; function L(x) { log.push(String(x)); } function R(t) { return function (r) { L(t + ":" + r.value + ":" + r.done); }; } function E(t) { return function (e) { L(t + "!" + (e && e.message || e)); }; }
+async function* g() { L("ran"); yield 1; }
+var it = g(); it.throw(new Error("early")).then(R("t"), E("t")); it.next().then(R("n"));
+(function () { return log.join("|"); })
+=== ag_throw_uncaught
+var log = []; function L(x) { log.push(String(x)); } function R(t) { return function (r) { L(t + ":" + r.value + ":" + r.done); }; } function E(t) { return function (e) { L(t + "!" + (e && e.message || e)); }; }
+async function* g() { yield 1; L("no"); }
+var it = g(); it.next().then(R("1")); it.throw("E").then(R("t"), E("t")); it.next().then(R("n")); it.throw("F").then(R("t2"), E("t2"));
+(function () { return log.join("|"); })
+=== ag_queue_while_awaiting
+var log = []; function L(x) { log.push(String(x)); } function R(t) { return function (r) { L(t + ":" + r.value + ":" + r.done); }; }
+var res; var p = new Promise(r => res = r);
+async function* g() { L("start"); var v = await p; L("got " + v); yield v; yield "two"; }
+var it = g(); it.next().then(R("1")); it.next().then(R("2")); it.return("r").then(R("3")); it.next().then(R("4"));
+L("queued"); res("P");
+(function () { return log.join("|"); })
+=== ag_next_receives_values
+var log = []; function L(x) { log.push(String(x)); } function R(t) { return function (r) { L(t + ":" + r.value + ":" + r.done); }; }
+async function* g() { var a = yield "first"; L("a=" + a); var b = yield "second"; L("b=" + b); return a + b; }
+var it = g(); it.next("lost").then(R("1")); it.next("A").then(R("2")); it.next("B").then(R("3"));
+(function () { return log.join("|"); })
+=== ag_bare_yield_tick
+var log = []; function L(x) { log.push(String(x)); } function R(t) { return function (r) { L(t + ":" + r.value + ":" + r.done); }; }
+async function* g() { yield; yield; }
+var it = g(); it.next().then(R("1")); it.next().then(R("2"));
+Promise.resolve().then(() => L("t1")).then(() => L("t2")).then(() => L("t3"));
+(function () { return log.join("|"); })
+=== ag_prototype_chain
+var AGF = Object.getPrototypeOf(async function* () {});
+var AGP = AGF.prototype; var AIP = Object.getPrototypeOf(AGP);
+async function* f() {}
+var r = [typeof f, Object.getPrototypeOf(f) === AGF, Object.getPrototypeOf(f.prototype) === AGP, Object.getPrototypeOf(f()) === f.prototype,
+  AGF[Symbol.toStringTag], AGP[Symbol.toStringTag], AIP[Symbol.toStringTag], Object.prototype.toString.call(f), Object.prototype.toString.call(f()),
+  typeof AIP[Symbol.asyncIterator], AIP[Symbol.asyncIterator].call(5) === 5, AIP[Symbol.asyncIterator].name, Object.getPrototypeOf(AIP) === Object.prototype,
+  f.hasOwnProperty("prototype"), f.prototype.hasOwnProperty("constructor"), Object.getOwnPropertyNames(f.prototype).length, AGP.constructor === AGF, AGF.constructor.name, AGF.constructor.length,
+  Object.getPrototypeOf(AGF.constructor) === Function, Object.getPrototypeOf(AGF) === Function.prototype, AGP.next.length, AGP.return.name, AGP.throw.length,
+  Object.keys(AGP).length, Object.getOwnPropertyNames(AGP).sort().join("."), Object.getOwnPropertyNames(AGF).sort().join("."),
+  JSON.stringify(Object.getOwnPropertyDescriptor(f, "prototype")), JSON.stringify(Object.getOwnPropertyDescriptor(AGF, "prototype")), JSON.stringify(Object.getOwnPropertyDescriptor(AGF.constructor, "prototype")),
+  JSON.stringify(Object.getOwnPropertyDescriptor(AGP, "constructor")), Object.getOwnPropertyNames(AIP).length];
+(function () { return r.join("|"); })
+=== ag_not_constructor
+var log = []; function L(x) { log.push(String(x)); }
+async function* f() {} var o = { async *m() {} };
+try { new f(); } catch (e) { L(e.name); } try { new o.m(); } catch (e) { L(e.name); }
+L(f.name + "," + f.length + "," + o.m.name);
+(function () { return log.join("|"); })
+=== ag_function_ctor
+var log = []; function L(x) { log.push(String(x)); } function R(t) { return function (r) { L(t + ":" + r.value + ":" + r.done); }; }
+var AGF = Object.getPrototypeOf(async function* () {}).constructor;
+var f = AGF("a", "b", "yield a; yield await b;");
+var g = new AGF("return 1");
+L(typeof f + "," + f.name + "," + f.length + "," + (Object.getPrototypeOf(f) === AGF.prototype) + "," + (Object.getPrototypeOf(f.prototype) === AGF.prototype.prototype));
+var it = f(1, Promise.resolve(2)); it.next().then(R("1")); it.next().then(R("2")); it.next().then(R("3")); g().next().then(R("g"));
+(function () { return log.join("|"); })
+=== ag_wrong_receiver
+var log = []; function L(x) { log.push(String(x)); } function E(t) { return function (e) { L(t + "!" + e.name); }; }
+var AG = Object.getPrototypeOf(async function* () {}).prototype;
+function* sg() {}
+var p = AG.next.call({}); L(p instanceof Promise); p.then(null, E("obj"));
+AG.return.call(sg()).then(null, E("gen")); AG.throw.call(5).then(null, E("num"));
+(function () { return log.join("|"); })
+=== ag_methods_object_class
+var log = []; function L(x) { log.push(String(x)); }
+var o = { k: 2, async *m(n) { for (var i = 0; i < n; i++) yield this.k * i; }, async *["c" + "k"]() { yield "computed"; } };
+class C { constructor() { this.v = "inst"; } async *m() { yield this.v; } static async *s() { yield "static"; } async *[Symbol.asyncIterator]() { yield "iter"; } }
+(async function () {
+  for await (var x of o.m(3)) L(x);
+  for await (var y of o.ck()) L(y);
+  for await (var z of new C().m()) L(z);
+  for await (var w of C.s()) L(w);
+  for await (var u of new C()) L(u);
+})();
+(function () { return log.join("|"); })
+=== ag_this_and_arguments
+var log = []; function L(x) { log.push(String(x)); } function R(t) { return function (r) { L(t + ":" + r.value + ":" + r.done); }; }
+async function* g() { yield this.n; yield arguments.length; yield arguments[1]; }
+var it = g.call({ n: "N" }, "a", "b"); it.next().then(R("1")); it.next().then(R("2")); it.next().then(R("3"));
+(function () { return log.join("|"); })
+=== ag_param_error_rejects
+var log = []; function L(x) { log.push(String(x)); } function E(t) { return function (e) { L(t + "!" + (e && e.message || e)); }; }
+async function* g(a = (function () { throw new Error("p"); })()) { yield 1; }
+try { g(); L("no throw at call"); } catch (e) { L("threw " + e.message); }
+(function () { return log.join("|"); })
+=== ag_running_reentry
+var log = []; function L(x) { log.push(String(x)); } function R(t) { return function (r) { L(t + ":" + r.value + ":" + r.done); }; }
+var it; async function* g() { var p = it.next(); L("inner " + (p instanceof Promise)); p.then(R("inner")); yield "outer"; }
+it = g(); it.next().then(R("1"));
+(function () { return log.join("|"); })
+=== ag_delegate_async
+var log = []; function L(x) { log.push(String(x)); } function R(t) { return function (r) { L(t + ":" + r.value + ":" + r.done); }; }
+async function* inner() { var r = yield 1; L("inner got " + r); yield 2; return "iret"; }
+async function* outer() { var v = yield* inner(); L("v=" + v); yield v; }
+var it = outer(); it.next("a").then(R("1")); it.next("b").then(R("2")); it.next("c").then(R("3")); it.next("d").then(R("4"));
+Promise.resolve().then(() => L("t1")).then(() => L("t2")).then(() => L("t3")).then(() => L("t4")).then(() => L("t5")).then(() => L("t6"));
+(function () { return log.join("|"); })
+=== ag_delegate_sync_iterable
+var log = []; function L(x) { log.push(String(x)); } function R(t) { return function (r) { L(t + ":" + r.value + ":" + r.done); }; }
+async function* g() { yield* [1, Promise.resolve(2), 3]; yield* "ab"; }
+var it = g(); for (var i = 0; i < 6; i++) it.next().then(R(i));
+Promise.resolve().then(() => L("t1")).then(() => L("t2")).then(() => L("t3")).then(() => L("t4"));
+(function () { return log.join("|"); })
+=== ag_delegate_custom_async_iterator
+var log = []; function L(x) { log.push(String(x)); } function R(t) { return function (r) { L(t + ":" + r.value + ":" + r.done); }; }
+var n = 0; var inner = { [Symbol.asyncIterator]() { L("get iter"); return this; }, next(v) { L("next " + v); return n < 2 ? { value: n++, done: false } : Promise.resolve({ value: "end", done: true }); } };
+async function* g() { var r = yield* inner; L("r=" + r); }
+var it = g(); it.next("a").then(R("1")); it.next("b").then(R("2")); it.next("c").then(R("3"));
+(function () { return log.join("|"); })
+=== ag_delegate_throw_forwarded
+var log = []; function L(x) { log.push(String(x)); } function R(t) { return function (r) { L(t + ":" + r.value + ":" + r.done); }; }
+async function* inner() { try { yield 1; } catch (e) { L("inner caught " + e); yield "ic"; } }
+async function* outer() { yield* inner(); yield "after"; }
+var it = outer(); it.next().then(R("1")); it.throw("E").then(R("2")); it.next().then(R("3")); it.next().then(R("4"));
+(function () { return log.join("|"); })
+=== ag_delegate_throw_no_method
+var log = []; function L(x) { log.push(String(x)); } function R(t) { return function (r) { L(t + ":" + r.value + ":" + r.done); }; } function E(t) { return function (e) { L(t + "!" + e.name); }; }
+var inner = { [Symbol.asyncIterator]() { return this; }, next() { return { value: 1, done: false }; }, return() { L("return called"); return {}; } };
+async function* g() { yield* inner; }
+var it = g(); it.next().then(R("1")); it.throw("x").then(R("2"), E("2"));
+(function () { return log.join("|"); })
+=== ag_delegate_return_forwarded
+var log = []; function L(x) { log.push(String(x)); } function R(t) { return function (r) { L(t + ":" + r.value + ":" + r.done); }; }
+async function* inner() { try { yield 1; } finally { L("inner fin"); } }
+async function* outer() { try { yield* inner(); } finally { L("outer fin"); } }
+var it = outer(); it.next().then(R("1")); it.return(8).then(R("2")); it.next().then(R("3"));
+Promise.resolve().then(() => L("t1")).then(() => L("t2")).then(() => L("t3")).then(() => L("t4")).then(() => L("t5"));
+(function () { return log.join("|"); })
+=== ag_delegate_return_no_method
+var log = []; function L(x) { log.push(String(x)); } function R(t) { return function (r) { L(t + ":" + r.value + ":" + r.done); }; }
+var inner = { [Symbol.asyncIterator]() { return this; }, next() { return { value: 1, done: false }; } };
+async function* g() { try { yield* inner; } finally { L("fin"); } }
+var it = g(); it.next().then(R("1")); it.return(Promise.resolve("rv")).then(R("2"));
+(function () { return log.join("|"); })
+=== ag_delegate_not_object_result
+var log = []; function L(x) { log.push(String(x)); } function E(t) { return function (e) { L(t + "!" + e.name); }; }
+var inner = { [Symbol.asyncIterator]() { return this; }, next() { return 5; } };
+async function* g() { yield* inner; }
+g().next().then(null, E("1"));
+(function () { return log.join("|"); })
+=== fa_array
+var log = []; function L(x) { log.push(String(x)); }
+(async function () { for await (var x of [1, Promise.resolve(2), 3]) L(x); L("end"); })();
+Promise.resolve().then(() => L("t1")).then(() => L("t2")).then(() => L("t3")).then(() => L("t4")).then(() => L("t5")).then(() => L("t6")).then(() => L("t7"));
+(function () { return log.join("|"); })
+=== fa_async_gen
+var log = []; function L(x) { log.push(String(x)); }
+async function* g() { yield "a"; yield "b"; }
+(async function () { for await (const x of g()) L(x); L("end"); })();
+Promise.resolve().then(() => L("t1")).then(() => L("t2")).then(() => L("t3")).then(() => L("t4")).then(() => L("t5")).then(() => L("t6")).then(() => L("t7")).then(() => L("t8"));
+(function () { return log.join("|"); })
+=== fa_custom_async_iterator
+var log = []; function L(x) { log.push(String(x)); }
+var src = { [Symbol.asyncIterator]() { var i = 0; return { next() { L("next"); return Promise.resolve(i < 2 ? { value: i++, done: false } : { done: true, value: "unused" }); } }; } };
+(async function () { for await (let x of src) L("x" + x); L("end"); })();
+(function () { return log.join("|"); })
+=== fa_break_calls_return
+var log = []; function L(x) { log.push(String(x)); }
+var src = { [Symbol.asyncIterator]() { return { next() { return { value: 1, done: false }; }, return(v) { L("return " + v); return Promise.resolve({}); } }; } };
+(async function () { for await (var x of src) { L("x" + x); break; } L("after"); })();
+(function () { return log.join("|"); })
+=== fa_throw_calls_return
+var log = []; function L(x) { log.push(String(x)); }
+var src = { [Symbol.asyncIterator]() { return { next() { return { value: 1, done: false }; }, return() { L("return"); throw new Error("ignored"); } }; } };
+(async function () { try { for await (var x of src) throw new Error("body"); } catch (e) { L("caught " + e.message); } })();
+(function () { return log.join("|"); })
+=== fa_return_result_not_object
+var log = []; function L(x) { log.push(String(x)); }
+var src = { [Symbol.asyncIterator]() { return { next() { return { value: 1, done: false }; }, return() { return 5; } }; } };
+(async function () { try { for await (var x of src) break; } catch (e) { L("caught " + e.name); } })();
+(function () { return log.join("|"); })
+=== fa_return_in_body
+var log = []; function L(x) { log.push(String(x)); }
+async function* g() { try { yield 1; yield 2; } finally { L("gen fin"); } }
+async function f() { for await (var x of g()) { L("x" + x); return "r" + x; } }
+f().then(v => L("f " + v));
+(function () { return log.join("|"); })
+=== fa_continue_and_labels
+var log = []; function L(x) { log.push(String(x)); }
+async function* g() { yield 1; yield 2; yield 3; }
+(async function () { outer: for (var i = 0; i < 2; i++) { for await (var x of g()) { if (x === 2) continue; if (x === 3 && i === 0) continue outer; L(i + ":" + x); } } L("end"); })();
+(function () { return log.join("|"); })
+=== fa_destructuring
+var log = []; function L(x) { log.push(String(x)); }
+async function* g() { yield [1, 2]; yield { a: "A", b: "B" }; }
+(async function () { var it = g(); for await (var [p, q] of [[1, 2], Promise.resolve([3, 4])]) L(p + q); for await (const { a, b = "d" } of [{ a: 5 }]) L(a + b); var t; for await (t of ["T"]) L(t); var o = {}; for await (o.k of ["K"]) L(o.k); })();
+(function () { return log.join("|"); })
+=== fa_sync_iterator_closed
+var log = []; function L(x) { log.push(String(x)); }
+var src = { [Symbol.iterator]() { return { next() { return { value: "v", done: false }; }, return() { L("sync return"); return {}; } }; } };
+(async function () { for await (var x of src) { L(x); break; } L("after"); })();
+(function () { return log.join("|"); })
+=== fa_closure_per_iteration
+var log = []; function L(x) { log.push(String(x)); }
+(async function () { var fs = []; for await (let x of [1, 2, 3]) fs.push(() => x); L(fs.map(f => f()).join()); })();
+(function () { return log.join("|"); })
+=== fa_await_in_body
+var log = []; function L(x) { log.push(String(x)); }
+async function* g() { yield 1; yield 2; }
+(async function () { for await (var x of g()) { var y = await Promise.resolve(x * 10); L(y); } L("done"); })();
+(function () { return log.join("|"); })
+=== fa_nested
+var log = []; function L(x) { log.push(String(x)); }
+async function* g(n) { for (var i = 0; i < n; i++) yield i; }
+(async function () { for await (var a of g(2)) for await (var b of g(2)) L(a + "" + b); })();
+(function () { return log.join("|"); })
+=== fa_in_async_gen
+var log = []; function L(x) { log.push(String(x)); }
+async function* src() { yield 1; yield 2; }
+async function* map(it) { for await (var x of it) yield x * 2; }
+(async function () { for await (var y of map(src())) L(y); })();
+(function () { return log.join("|"); })
+=== fa_next_not_object
+var log = []; function L(x) { log.push(String(x)); }
+var src = { [Symbol.asyncIterator]() { return { next() { return 3; } }; } };
+(async function () { try { for await (var x of src) L("no"); } catch (e) { L("caught " + e.name); } })();
+(function () { return log.join("|"); })
+=== fa_not_iterable
+var log = []; function L(x) { log.push(String(x)); }
+(async function () { try { for await (var x of 5) L("no"); } catch (e) { L("caught " + e.name); } })();
+(async function () { try { for await (var x of { [Symbol.asyncIterator]: 1 }) L("no"); } catch (e) { L("caught2 " + e.name); } })();
+(function () { return log.join("|"); })
+=== fa_async_iterator_preferred
+var log = []; function L(x) { log.push(String(x)); }
+var src = { [Symbol.asyncIterator]() { L("async"); return [7][Symbol.iterator](); }, [Symbol.iterator]() { L("sync"); return [8][Symbol.iterator](); } };
+(async function () { for await (var x of src) L(x); })();
+(function () { return log.join("|"); })
+=== fa_null_async_iterator_uses_sync
+var log = []; function L(x) { log.push(String(x)); }
+var src = { [Symbol.asyncIterator]: null, [Symbol.iterator]() { L("sync"); return [9][Symbol.iterator](); } };
+(async function () { for await (var x of src) L(x); })();
+(function () { return log.join("|"); })
+=== fa_order_two_loops
+var log = []; function L(x) { log.push(String(x)); }
+async function* g(t) { yield t + 1; yield t + 2; }
+(async function () { for await (var x of g("a")) L(x); })();
+(async function () { for await (var x of ["b1", "b2"]) L(x); })();
+(function () { return log.join("|"); })
+=== fa_throw_in_head_value
+var log = []; function L(x) { log.push(String(x)); }
+async function* g() { yield 1; throw new Error("gen err"); }
+(async function () { try { for await (var x of g()) L(x); } catch (e) { L("caught " + e.message); } })();
+(function () { return log.join("|"); })
+=== afs_next_method
+var log = []; function L(x) { log.push(String(x)); }
+async function* g() { yield* { [Symbol.iterator]() { return { next(v) { L("next " + v + " " + arguments.length); return { value: "x", done: false }; } }; } }; }
+var it = g(); it.next("a").then(r => L(r.value)); it.next("b").then(r => L(r.value));
+(function () { return log.join("|"); })
+=== afs_return_without_method
+var log = []; function L(x) { log.push(String(x)); }
+async function* g() { yield* { [Symbol.iterator]() { return { next() { return { value: 1, done: false }; } }; } }; }
+var it = g(); it.next().then(r => L(r.value)); it.return("rv").then(r => L(r.value + ":" + r.done));
+(function () { return log.join("|"); })
+=== symbol_async_iterator
+var log = []; function L(x) { log.push(String(x)); }
+L(typeof Symbol.asyncIterator); L(Symbol.asyncIterator.toString()); L(Symbol.asyncIterator.description);
+var d = Object.getOwnPropertyDescriptor(Symbol, "asyncIterator"); L(d.writable + "," + d.enumerable + "," + d.configurable);
+(function () { return log.join("|"); })
+=== ag_spread_in_args_and_destructure
+var log = []; function L(x) { log.push(String(x)); }
+async function* g(...xs) { var [a, ...b] = xs; yield a; yield b.length; }
+(async function () { var out = []; for await (var v of g(...[4, 5, 6])) out.push(v); L(out.join()); })();
+(function () { return log.join("|"); })
+=== ag_expression_named
+var log = []; function L(x) { log.push(String(x)); }
+var f = async function* named(n) { if (n > 0) yield* named(n - 1); yield n; };
+(async function () { var out = []; for await (var v of f(3)) out.push(v); L(out.join() + " " + f.name); })();
+(function () { return log.join("|"); })
+=== ag_yield_in_loops_switch_try
+var log = []; function L(x) { log.push(String(x)); }
+async function* g() { for (let i = 0; i < 2; i++) { switch (i) { case 0: yield "s0"; break; default: try { yield "t" + i; throw "x"; } catch (e) { yield "c" + e; } finally { yield "f"; } } } var j = 0; while (j < 2) yield "w" + j++; }
+(async function () { var out = []; for await (var v of g()) out.push(v); L(out.join()); })();
+(function () { return log.join("|"); })
+=== ag_gc_reachable_suspended
+var log = []; function L(x) { log.push(String(x)); }
+async function* g() { var big = []; for (var i = 0; i < 100; i++) big.push({ i }); yield big.length; yield big[99].i; }
+var it = g(); it.next().then(r => { L(r.value); return it.next(); }).then(r => L(r.value));
+(function () { return log.join("|"); })

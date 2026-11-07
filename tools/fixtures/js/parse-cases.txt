@@ -1878,7 +1878,6 @@ class A { static [yield] = 1 }
 %%
 class A { x = yield }
 %%
-//! unsupported
 class A { static async *[x](){} }
 %%
 class A { *g(){} }
@@ -1895,10 +1894,8 @@ x = function*(){}
 %%
 ({ *g(){} })
 %%
-//! unsupported
 async function* g(){}
 %%
-//! unsupported
 ({ async *g(){} })
 %%
 function f(){ yield }

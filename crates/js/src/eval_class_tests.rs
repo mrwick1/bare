@@ -186,11 +186,9 @@ fn unsupported_class_shapes_are_found_before_anything_runs() {
     // Nothing ran: the script would have set a global first.
     let prog = parse_script("var ran = 1; class A { x = new.target; }", Limits::default()).unwrap();
     assert!(Interp::new(&prog, Heap::default(), EvalLimits::default()).is_err());
-    // The parser rejects these: they never reach the evaluator.
-    for src in ["class A { static { } }", "class A { async *g() {} }", "class A { static async *g() {} }"] {
-        let e = parse_script(src, Limits::default()).unwrap_err();
-        assert_eq!(e.kind, crate::parse::ErrorKind::Unsupported, "{src}");
-    }
+    // The parser rejects a static block: it never reaches the evaluator.
+    let e = parse_script("class A { static { } }", Limits::default()).unwrap_err();
+    assert_eq!(e.kind, crate::parse::ErrorKind::Unsupported);
 }
 
 #[test]

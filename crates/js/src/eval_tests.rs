@@ -98,8 +98,8 @@ fn unsupported_is_found_before_anything_runs() {
             Ok(_) => panic!("{src}: accepted"),
         }
     }
-    // Async generators and modules are rejected by the parser as Unsupported: they never reach the evaluator.
-    let e = parse_script("async function* g() {}", Limits::default()).unwrap_err();
+    // Modules are rejected by the parser as Unsupported: they never reach the evaluator.
+    let e = parse_script("import a from 'b'", Limits::default()).unwrap_err();
     assert_eq!(e.kind, crate::parse::ErrorKind::Unsupported);
 }
 

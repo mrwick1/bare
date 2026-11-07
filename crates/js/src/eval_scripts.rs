@@ -162,7 +162,7 @@ impl<'p> Interp<'p> {
     /// The text is a script of one function declaration, which is parsed and walked but not run, so no global changes. The closure
     /// has the global environment. The parameters and the body must parse alone, so a comment or a brace cannot reach across.
     fn dynamic_function(&mut self, kind: u8, args: &[Value]) -> Res<Value> {
-        let (head, last) = (["function", "function*", "async function"][kind as usize], args.len().saturating_sub(1));
+        let (head, last) = (["function", "function*", "async function", "async function*"][kind as usize], args.len().saturating_sub(1));
         let mut params = String::new();
         for (i, &a) in args[..last].iter().enumerate() {
             let s = self.coerce_string(a)?;
