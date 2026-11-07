@@ -4135,11 +4135,11 @@ Order check: `tools/fixtures/ui/imports-cases.txt` (tree of 19 sheets with 18 pa
 
 Cost: `tools/js/instr.sh` (min of 3), origin/main 3a8cc29 against this change, 27 rows: `sheets_load` linked and imports, `loader_load` blocking, dynamic and mixed, `preload_load` font and style, `resources_load` small and dups, each at 1x/10x/100x. Range -0.23% to +0.21%, plus `resources_load small 100` at +1.28% in one run; five runs of that row then gave -0.01% to +0.00% (allocator layout noise, no sheet runs in it). A first version scanned each sheet for `@import` twice and cost +1.3% to +3.5% on `preload_load style`; the call is now inside the scan that `flatten` already makes.
 
-Not tested: a server with many imports that closes the connection after each reply; HTTP/2; `@import supports()` (bare ignores it today); a live site with nested imports; `https` (loopback only); a Chrome timing of the same tree.
+Not tested: HTTP/2; `@import supports()` (bare ignores it today); a live site with nested imports; `https` (loopback only); a Chrome timing of the same tree.
 
 ### Not tested
 
-HTTP/2 (staging offers none); a server that closes the connection after each reply, with parallel downloads (the code opens a new connection for each; the tests use keep-alive); upload bodies in parallel (POST runs alone); `requestIdleCallback` together with this settle change (an idle callback that a tick requests still counts as work, so such a page does not settle early; it may not settle at all if it asks at each tick; not measured); other routes than `/login` and `/calls`; Windows or macOS.
+HTTP/2 (staging offers none); upload bodies in parallel (POST runs alone); `requestIdleCallback` together with this settle change (an idle callback that a tick requests still counts as work, so such a page does not settle early; it may not settle at all if it asks at each tick; not measured); other routes than `/login` and `/calls`; Windows or macOS.
 
 Follow-ups: `Accept-Encoding` and the connect backup are done (see [Compressed bodies and the connect backup](#compressed-bodies-and-the-connect-backup)); `<link rel=preload>` lookahead is still one at a time (nested `@import` sheets: see the next section); HTTP/2 for servers that offer it.
 
@@ -4205,6 +4205,31 @@ Runs of the RSS: base 27,720 to 27,976 KiB, new 28,636 to 28,884 KiB, so the gap
 ### Not tested
 
 br against a real server (only a fixture made with the `brotli` CLI, and the bench on real data; staging answers gzip only). HTTP/2. zstd (not implemented). XHR `progress` `total` (it is the wire `Content-Length`, as the spec says, so `loaded` can pass `total` on a compressed body). A server-side capture to tell a lost SYN from a lost SYN-ACK. A host with IPv6 and IPv4 (the backup with two addresses is tested with fake attempts only). Windows and macOS. A decoded body of 128 MiB in `fetch` (the vector can double, as for an uncompressed body). Multi-member gzip and trailing bytes beyond the unit tests. Chrome wall time again. The network windows ran under machine load 12 to 18.
+
+### Servers that close connections
+
+2026-11-07, archMachine. Tests: `crates/net/tests/close_pool.rs` (the worker pool, `Client::spawn`) and `crates/bare/src/browser_loader/close_tests.rs` (a page). Both use `crates/net/tests/common/quirky.rs`: a loopback server whose reply style is chosen per request (`Connection: close`; HTTP/1.0 with a body that ends at the close; a close with no header; keep-alive), with a delay per reply and an optional cap on the connections served at once. The cap closes idle kept-alive connections for a waiting one (an event, not a timer). The page has 10 style sheets (a tree of `@import` with 7 sheets, and 3 links), 6 parsed scripts and 4 dynamic scripts. Each case checks the script order, the import cascade (9 pairs that are `ltr` only when the later sheet is later in the cascade), the requests (each URL once, none missing) and that the page ends (30 s hang guard).
+
+| Case | Delay | Result |
+| --- | --- | --- |
+| `Connection: close` after each reply | 0, 30 ms | pass (page and pool) |
+| HTTP/1.0, body ends at the close | 0, 30 ms | pass |
+| close with no header (the client finds out on reuse) | 0, 30 ms | pass; a GET is retried once on a new connection, no URL twice |
+| POST after such a close | 10, 30 ms | a POST reached the server at most once in 30 rounds, on the page thread and on a worker (it may fail; it is never sent twice) |
+| cap of 2 connections, new ones wait | 0, 30 ms | pass, in page order; at most 2 served at once |
+| cap of 2 with `Connection: close` | 30 ms | pass |
+| slow server (100 ms) that mixes keep-alive and the three closes | 100 ms | pass |
+| cap of 2, extra connections closed with no reply | 30 ms | not a page load: the request fails with an error, none hangs, none repeats (no retry on a new connection that got no reply, by design) |
+
+Bug found and fixed (not a close bug; it shows with keep-alive too). With a server slow enough for workers (10 ms or more), the first file that the page thread fetched itself was fetched a second time: `prefetch` starts the targets from its cursor, and that target is the one just fetched, so it started it again. The copy was never taken. The first `<link rel=stylesheet>` and the first parsed `<script src>` each cost one extra request (`the_first_style_sheet_is_fetched_once`, `the_first_script_is_fetched_once` failed with 2 requests for `/c0.css` and `/s0.js`). Fix (`browser_loader.rs`): `Net::fetch` notes a 64-bit tag of each target that it fetches itself, and `prefetch` skips a target with a noted tag. A clash only skips one early start. A first version formatted the string key for every fetch and cost +0.9% to +4.3% on `loader_load` and `preload_load`; the tag is a multiply hash over the path, 8 bytes at a time.
+
+A flaky test of #186 also failed in the workspace run: `jobs_that_come_one_by_one_run_on_one_parked_thread` (2 threads, not 1, in 2 of 3 runs of the net lib tests). A job reports its result before its worker parks again, and a job that comes in that gap starts a second thread. The test now waits for the park before the next job. The pool code is not changed. 8 of 8 runs of the net lib tests pass.
+
+Cost: `tools/js/instr.sh` (min of 3, pinned to one core), origin/main 9bb8a04 against this change, 48 rows: `loader_load` (blocking, dynamic, mixed), `preload_load` (font, style, script, dups), `sheets_load` (linked, imports), `resources_load` (small, dups), `fetch_load` (post, bytes), `xhr_load` and `session_load` (chain, heavy), at 1x, 10x and 100x (`sheets_load linked 100` failed once under `perf` and passed alone). Range -0.55% (`resources_load small 1`) to +0.26% (`preload_load font 100`). The first version was over the limit: `loader_load dynamic 100` +2.7%, `preload_load font 100` +4.3%. Cross-check with jemalloc (`LD_PRELOAD`) of the four worst rows: +0.13%, +0.11%, +0.28%, +0.10%.
+
+Stress: the 17 new tests ran 50 times (net and page binaries one after the other) under `stress-ng --cpu 2`, with the tests and the 2 stress workers pinned to one core (`taskset -c 5`), debug build. 50 of 50 runs passed, none hung. `cargo test --workspace` (after the rebase on #196): 2562 passed, 0 failed.
+
+Not tested: a real connection refusal (RST) at connect (a parallel change adds a connect retry); HTTP/2; `https` (loopback only); a live server that closes; a server that closes in the middle of a body with workers on; a cap lower than 2.
 
 ## Dense host tables and cached option names
 
