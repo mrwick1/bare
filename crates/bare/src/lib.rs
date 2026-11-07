@@ -23,6 +23,8 @@ mod browser_point;
 mod browser_uievent;
 pub mod page;
 #[cfg(test)]
+mod page_tests;
+#[cfg(test)]
 mod browser_ui_tests;
 mod browser_scroll;
 #[cfg(test)]

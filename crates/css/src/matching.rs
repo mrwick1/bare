@@ -125,6 +125,11 @@ fn simple_matches(doc: &Document, el: NodeId, simple: &Simple) -> bool {
         Simple::State(s) => doc.states(el).iter().any(|t| t == s),
         Simple::Form(f) => crate::form::matches(doc, el, *f),
         Simple::Never => false,
+        Simple::Hover => doc.user().hover.contains(&el),
+        Simple::Active => doc.user().active.contains(&el),
+        Simple::Focus => doc.user().focus.first() == Some(&el),
+        Simple::FocusWithin => doc.user().focus.contains(&el),
+        Simple::FocusVisible => doc.user().focus_visible && doc.user().focus.first() == Some(&el),
         Simple::Is(args) => args.iter().any(|simples| compound_matches(doc, el, simples)),
         Simple::Not(args) => !args.iter().any(|simples| compound_matches(doc, el, simples)),
     }
@@ -391,5 +396,55 @@ mod tests {
         let list = parse_selector_list("div div div p, section p", &mut doc).unwrap();
         assert!(matches(&doc, p, &list[0]));
         assert!(!matches(&doc, p, &list[1]));
+    }
+
+    /// The user action pseudo-classes read `Document::user`: `:hover` and `:active` match the element and its ancestors, `:focus`
+    /// only the focused element, `:focus-within` it and its ancestors, `:focus-visible` it while it shows a ring.
+    #[test]
+    fn user_action_state() {
+        let mut doc = parse(PAGE);
+        let by_id = |doc: &Document, id: &str| {
+            let mut stack = vec![doc.root()];
+            while let Some(n) = stack.pop() {
+                if is_element(doc, n) && doc.attr(n, Atom::ID) == Some(id) {
+                    return n;
+                }
+                stack.extend(doc.children(n));
+            }
+            panic!("{id}")
+        };
+        let ids = |doc: &mut Document, sel: &str| {
+            let list = parse_selector_list(sel, doc).unwrap();
+            let mut out: Vec<String> = Vec::new();
+            let mut stack = vec![doc.root()];
+            while let Some(n) = stack.pop() {
+                let kids: Vec<_> = doc.children(n).collect();
+                stack.extend(kids.into_iter().rev());
+                if is_element(doc, n) && list.iter().any(|s| matches(doc, n, s)) {
+                    out.push(doc.attr(n, Atom::ID).unwrap_or("?").to_string());
+                }
+            }
+            out
+        };
+        let a1 = by_id(&doc, "a1");
+        assert!(doc.set_hover(Some(a1)));
+        assert!(!doc.set_hover(Some(a1)), "the same element is no change");
+        assert_eq!(ids(&mut doc, "a:hover"), ["a1"]);
+        assert_eq!(ids(&mut doc, "li:hover, div:hover"), ["d2", "l1"]);
+        assert_eq!(ids(&mut doc, ":not(:hover)").len(), 8, "14 elements (with `head`), 6 on the way to `a1`");
+        doc.set_active(Some(by_id(&doc, "l2")));
+        assert_eq!(ids(&mut doc, "li:active"), ["l2"]);
+        assert_eq!(ids(&mut doc, ":active:hover"), ["html", "body", "d2", "u1"]);
+        doc.set_focus(Some(a1), false);
+        assert_eq!(ids(&mut doc, ":focus"), ["a1"]);
+        assert_eq!(ids(&mut doc, "ul:focus-within"), ["u1"]);
+        assert_eq!(ids(&mut doc, ":focus-visible"), Vec::<String>::new());
+        doc.set_focus(Some(a1), true);
+        assert_eq!(ids(&mut doc, "a:focus-visible"), ["a1"]);
+        assert_eq!(doc.user().revision, [1, 1, 2]);
+        doc.set_hover(None);
+        doc.set_active(None);
+        doc.set_focus(None, true);
+        assert_eq!(ids(&mut doc, ":hover, :active, :focus, :focus-within"), Vec::<String>::new());
     }
 }

@@ -1546,4 +1546,9 @@ impl Browser {
     pub fn input_value(&self, input: NodeId) -> Option<String> {
         self.dom.input_value_of(input)
     }
+
+    /// The checkedness of a checkbox or a radio (what JS `input.checked` reads).
+    pub fn input_checked(&self, input: NodeId) -> bool {
+        self.dom.input_checked(input)
+    }
 }

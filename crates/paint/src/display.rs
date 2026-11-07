@@ -102,6 +102,9 @@ pub struct DisplayList {
     /// The option that a closed `<select>` shows now, when the host knows it (script and the window can change it): the select, and
     /// its option or `None`. A select that is not here shows the option with the `selected` attribute, or the first. The host sets it before `build`.
     pub chosen: Vec<(NodeId, Option<NodeId>)>,
+    /// The checkedness of a checkbox or a radio, when the host knows it (a click or a script changes it): the input and whether it is
+    /// checked. An input that is not here is checked when it has the `checked` attribute. The host sets it before `build`.
+    pub ticked: Vec<(NodeId, bool)>,
     // The scratch lists of `build`. They keep their memory from one frame to the next.
     lines: Vec<Item>,
     floats: Vec<u32>,
@@ -783,7 +786,10 @@ impl Builder<'_> {
     /// The look of Chrome's own form controls, for a control whose style is the one of the UA style sheet (`is_native`).
     fn native(&mut self, f: &Fragment, b: IRect, c: Control) {
         let a = &self.tree.controls;
-        let checked = a.checked.is_some_and(|at| self.doc.attr(f.node, at).is_some());
+        let checked = match self.list.ticked.iter().find(|t| t.0 == f.node) {
+            Some(t) => t.1,
+            None => a.checked.is_some_and(|at| self.doc.attr(f.node, at).is_some()),
+        };
         const GRAY: u32 = 0xff76_7676;
         const BLUE: u32 = 0xff00_75ff;
         let (x, y) = (b.x0 as f32, b.y0 as f32);

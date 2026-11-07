@@ -276,12 +276,13 @@ fn paint_file(path: &str, out: &str, viewport: (f32, f32)) -> i32 {
     }
 }
 
-/// The page in the window. A new size lays the page out again at that size and makes a new canvas. The style is not
-/// computed again (a `@media` rule or a `vw` length does not follow the resize; S4 topic 6 does that). A frame paints the
-/// layout of the last size.
+/// The page in the window. A new size computes the style again (`@media`, `vw`, `vh`), lays the page out at that size and
+/// makes a new canvas. A frame paints the layout of the last size.
 struct Page {
     doc: bare_html::dom::Document,
     styles: cascade::Styles,
+    /// The window size that `styles` was computed for.
+    styled: (f32, f32),
     layout: Option<bare_layout::fragment::Layout>,
     painter: bare_paint::Painter,
     canvas: bare_paint::canvas::Canvas,
@@ -292,7 +293,12 @@ struct Page {
 
 impl bare_window::App for Page {
     fn resize(&mut self, width: u32, height: u32) {
-        self.layout = Some(bare_layout::layout(&self.doc, &self.styles, (width as f32, height as f32)));
+        let vp = (width as f32, height as f32);
+        if vp != self.styled {
+            self.styles = computed_styles(&mut self.doc, None, vp);
+            self.styled = vp;
+        }
+        self.layout = Some(bare_layout::layout(&self.doc, &self.styles, vp));
         self.canvas = bare_paint::canvas::Canvas::new(width, height);
     }
 
@@ -319,7 +325,7 @@ fn show_window(arg: &str, viewport: (f32, f32)) -> i32 {
         }
     };
     let config = bare_window::Config { title: format!("bare: {arg}"), app_id: "bare".into(), size: (viewport.0 as u32, viewport.1 as u32) };
-    let mut page = Page { doc, styles, layout: None, painter: bare_paint::Painter::new(), canvas: bare_paint::canvas::Canvas::new(1, 1), started, first_frame: None };
+    let mut page = Page { doc, styles, styled: viewport, layout: None, painter: bare_paint::Painter::new(), canvas: bare_paint::canvas::Canvas::new(1, 1), started, first_frame: None };
     let result = bare_window::Window::open(&config).and_then(|w| w.run(&mut page));
     match result {
         Ok(stats) => {

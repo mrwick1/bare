@@ -1,0 +1,18 @@
+<!doctype html>
+<style>
+html{overflow:hidden}body{margin:0}:focus{outline:none}
+.b{position:absolute;width:60px;height:30px;background:#cde}
+#h{left:10px;top:10px}#h:hover{background:#d00}
+#w{position:absolute;left:80px;top:10px;width:110px;height:60px;background:#eee}#w:focus-within{background:#fd0}
+#f{position:absolute;left:10px;top:10px;width:40px;height:20px;background:#00d;border:2px solid #000}#f:focus{border-color:#0d0}
+#g{position:absolute;left:60px;top:10px;width:40px;height:40px;background:#888}#g:focus{background:#08f}#g:focus-visible{background:#f0f}
+#a{left:10px;top:50px}#a:active{background:#0a0}#a:hover:not(:active){background:#a0a}
+#d{left:10px;top:90px}#d.on{background:#333;width:120px}
+#list{position:absolute;left:140px;top:80px;width:50px}#list div{height:10px;background:#c60;margin-bottom:2px}
+@media (max-width:150px){body{background:#ccc}#w{display:none}}
+</style>
+<div id=h class=b></div>
+<div id=w><div id=f tabindex=0></div><div id=g tabindex=0></div></div>
+<div id=a class=b></div>
+<div id=d class=b></div>
+<div id=list></div>

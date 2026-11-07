@@ -153,6 +153,8 @@ pub(crate) struct UiState {
     nomouse: bool,
     /// A drag that selects text: the text field and the offset where the press fell (the anchor).
     pub(crate) sel_drag: Option<(NodeId, u32)>,
+    /// The last user input was the pointer, not a key: a focus that follows it shows no focus ring (`:focus-visible`), except in a text field.
+    pub(crate) by_pointer: bool,
 }
 
 // ------------------------------------------------------------------------------------------ getters
@@ -397,7 +399,7 @@ impl Dom {
         // A captured pointer has no boundary events: the moves go to the element that holds it.
         let to = if captured.is_some() { captured } else { to };
         if captured.is_none() {
-            self.st.borrow_mut().ui.hover = to;
+            self.hover_to(to);
         }
         if old != to && captured.is_none() {
             self.pointer_boundary(it, old, to, p)?;
@@ -439,8 +441,16 @@ impl Dom {
         if old == to || self.st.borrow().ui.capture.is_some() {
             return Ok(());
         }
-        self.st.borrow_mut().ui.hover = to;
+        self.hover_to(to);
         self.pointer_boundary(it, old, to, p)
+    }
+
+    /// The element under the pointer is `to` now. When a rule reads `:hover`, the page may look different: ask for a frame.
+    fn hover_to(&self, to: Option<NodeId>) {
+        self.st.borrow_mut().ui.hover = to;
+        if self.doc.borrow_mut().set_hover(to) && self.user_rules() & bare_css::selector::USES_HOVER != 0 {
+            self.bump();
+        }
     }
 
     /// The pointer capture steps (Pointer Events 3, "process pending pointer capture"): `lostpointercapture` at the old holder and
@@ -464,7 +474,8 @@ impl Dom {
     }
 
     pub(crate) fn ui_leave(&self, it: &mut Interp<'_>, p: &Pointer) -> R<()> {
-        let old = self.st.borrow_mut().ui.hover.take();
+        let old = self.st.borrow().ui.hover;
+        self.hover_to(None);
         if let Some(o) = old {
             for (out, leave) in [("pointerout", "pointerleave"), ("mouseout", "mouseleave")] {
                 self.mouse_ev(it, o, out, p, if out.starts_with('p') { -1 } else { 0 }, p.buttons, 0, None)?;
@@ -482,6 +493,10 @@ impl Dom {
         self.st.borrow_mut().ui.held = p.buttons;
         if !pressed && button == 0 {
             self.st.borrow_mut().ui.sel_drag = None;
+            self.doc.borrow_mut().set_active(None);
+        }
+        if pressed {
+            self.st.borrow_mut().ui.by_pointer = true;
         }
         let held = self.st.borrow().ui.capture;
         let Some(t) = held.or(target) else {
@@ -503,6 +518,9 @@ impl Dom {
                 self.st.borrow_mut().ui.last = Some((t, now, count, (p.x, p.y)));
             }
             self.st.borrow_mut().ui.down = Some(t);
+            if button == 0 && !disabled {
+                self.doc.borrow_mut().set_active(Some(t));
+            }
             self.capture_events(it, p, b)?;
             let go = self.mouse_ev(it, t, "pointerdown", p, b, p.buttons, 0, None)?;
             self.st.borrow_mut().ui.nomouse = !go;
@@ -744,6 +762,7 @@ impl Dom {
     pub(crate) fn ui_key(&self, it: &mut Interp<'_>, k: &KeyInput, down: bool) -> R<()> {
         let t = self.focus_target(it)?;
         if down {
+            self.st.borrow_mut().ui.by_pointer = false;
             if self.key_ev(it, t, "keydown", k)? {
                 self.key_default(it, k)?;
             }
@@ -1023,14 +1042,40 @@ impl Browser {
     /// Cascade and lay out the page now, with the caps of `getComputedStyle` and `offsetWidth` (a linked style sheet that
     /// was not supplied is `Unsupported`, as there).
     pub fn render(&mut self) -> R<Frame> {
+        let styles = self.restyle()?;
+        self.render_with(styles)
+    }
+
+    /// The cascade of `render`, with no layout.
+    pub fn restyle(&mut self) -> R<bare_css::cascade::Styles> {
+        let dom = self.dom.clone();
+        self.it.host_scope(|it| dom.cascade_now(it))
+    }
+
+    /// The layout of `render` with `styles`, the cascade of the page now (`restyle`).
+    pub fn render_with(&mut self, styles: bare_css::cascade::Styles) -> R<Frame> {
         let dom = self.dom.clone();
         self.it.host_scope(|it| {
-            let styles = dom.cascade_now(it)?;
             let (layout, areas, bars) = dom.layout_areas(it, &styles)?;
             // A page that got shorter (or a box that is not a container now) puts its offsets back in range.
             dom.clamp_scroll(&styles, &layout, &areas, bars);
             Ok(Frame { styles, layout, areas, bars })
         })
+    }
+
+    /// What the styles and the layout of `render` are made from, the scroll offsets left out: the tree and its text, the window
+    /// size, the supplied sheets, and the user action and form state that the rules read. Two renders with the same key give the same
+    /// frame. The form state is out of the tree part: a checkbox click with no `:checked` rule keeps the layout.
+    pub fn render_key(&self) -> [u64; 8] {
+        let dom = &self.dom;
+        let doc = dom.doc.borrow();
+        let vp = dom.plat.s.borrow().viewport;
+        let (rules, user) = (dom.user_rules(), &doc.user().revision);
+        let used = |bit: u8, i: usize| if rules & bit != 0 { user[i] } else { 0 };
+        use bare_css::selector::{USES_ACTIVE, USES_FOCUS, USES_FORM, USES_HOVER};
+        let vp = u64::from(vp.0.to_bits()) << 32 | u64::from(vp.1.to_bits());
+        let form = if rules & USES_FORM != 0 { doc.ui_revision() } else { 0 };
+        [doc.revision() - doc.ui_revision(), doc.text_revision(), vp, dom.computed.sheet_gen.get(), used(USES_HOVER, 0), used(USES_ACTIVE, 1), used(USES_FOCUS, 2), form]
     }
 
     pub(crate) fn ui_call(&mut self, always: bool, f: impl FnOnce(&Dom, &mut Interp<'_>) -> R<()>) -> R<UiOutcome> {
@@ -1059,6 +1104,11 @@ impl Browser {
     /// Send the `scroll` events that wait (one for each target that moved).
     pub fn ui_scroll_events(&mut self) -> R<UiOutcome> {
         self.ui_call(false, |d, it| d.flush_scroll(it))
+    }
+
+    /// The pointer did not move, but the page under it changed: `to` is under it now.
+    pub fn ui_pointer_settle(&mut self, to: Option<NodeId>, p: Pointer) -> R<UiOutcome> {
+        self.ui_call(false, |d, it| d.ui_settle(it, to, &p))
     }
 
     /// The pointer left the window.

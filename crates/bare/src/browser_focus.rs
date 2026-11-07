@@ -148,9 +148,16 @@ impl Dom {
     }
 
     fn set_focus(&self, n: Option<NodeId>) {
-        let mut st = self.st.borrow_mut();
-        st.focus.node = n;
-        st.focus.epoch += 1;
+        let by_pointer = {
+            let mut st = self.st.borrow_mut();
+            st.focus.node = n;
+            st.focus.epoch += 1;
+            st.ui.by_pointer
+        };
+        // `:focus-visible` (Chrome): a text field always shows its ring; another element only after a key or a script, not after a press.
+        let mut doc = self.doc.borrow_mut();
+        let text = n.is_some_and(|n| doc.is_html(n, "textarea") || (doc.is_html(n, "input") && matches!(crate::browser_dom::input_kind(&doc, n), "text" | "search" | "tel" | "url" | "email" | "password" | "number")));
+        doc.set_focus(n, text || !by_pointer);
     }
 
     fn epoch(&self) -> u64 {
