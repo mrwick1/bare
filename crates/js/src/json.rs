@@ -140,7 +140,7 @@ pub fn parse(heap: &mut Heap, src: &[u16], opts: &JsonOptions, lim: &JsonLimits)
         text_left: lim.max_text_units,
         scratch: Vec::new(),
         num: Vec::new(),
-        keys: [(0, usize::MAX, PropertyKey::Index(0)); 64],
+        keys: None,
     };
     p.run()
 }
@@ -173,8 +173,9 @@ struct Parser<'h, 's> {
     /// Reused ASCII buffer for numbers that need the general float parser.
     num: Vec<u8>,
     /// Recent short keys without escapes as (start in `src`, length, key), placed by length and first and last unit.
-    /// A repeated key skips the interner (V8 keeps a similar cache in its JSON parser).
-    keys: [(usize, usize, PropertyKey); 64],
+    /// A repeated key skips the interner (V8 keeps a similar cache in its JSON parser). Empty until the text has 64
+    /// values, so a small text does not pay for it.
+    keys: Option<Box<[(usize, usize, PropertyKey); 64]>>,
 }
 
 fn is_digit(c: u16) -> bool {
@@ -344,11 +345,14 @@ impl Parser<'_, '_> {
         let (src, start) = (self.src, self.pos + 1);
         let end = plain_end(src, start);
         let len = end - start;
-        let slot = (src.get(end) == Some(&0x22) && len <= 32).then(|| {
+        if self.keys.is_none() && self.nodes >= 64 {
+            self.keys = Some(Box::new([(0, usize::MAX, PropertyKey::Index(0)); 64]));
+        }
+        let slot = (self.keys.is_some() && src.get(end) == Some(&0x22) && len <= 32).then(|| {
             let (a, b) = if len == 0 { (0, 0) } else { (src[start] as usize, src[end - 1] as usize) };
             (len * 7 + a * 31 + b) & 63
         });
-        let k = match slot.map(|i| self.keys[i]) {
+        let k = match slot.and_then(|i| Some(self.keys.as_ref()?[i])) {
             Some((at, n, k)) if n == len && src[at..at + n] == src[start..end] => {
                 self.charge_text(len, start)?;
                 self.pos = end + 1;
@@ -360,8 +364,8 @@ impl Parser<'_, '_> {
                     Ok(k) => k,
                     Err(e) => return self.heap_err(e, self.pos),
                 };
-                if let Some(i) = slot {
-                    self.keys[i] = (start, len, k);
+                if let (Some(i), Some(c)) = (slot, self.keys.as_mut()) {
+                    c[i] = (start, len, k);
                 }
                 k
             }
