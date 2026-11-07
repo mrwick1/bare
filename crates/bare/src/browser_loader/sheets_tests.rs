@@ -195,7 +195,7 @@ fn a_failed_sheet_has_no_rules_but_is_counted_and_gets_an_error_event() {
             ("/gone.css", || Reply::new(404, Some("text/css"), "#p { direction: rtl }")),
             ("/plain.css", || Reply::new(200, Some("text/plain"), "#p { direction: rtl }")),
             ("/none.css", || Reply::new(200, None, "#p { direction: rtl }")),
-            ("/gz.css", || Reply::new(200, Some("text/css"), "#p { direction: rtl }").header("Content-Encoding", "gzip")),
+            ("/gz.css", || Reply::new(200, Some("text/css"), "#p { direction: rtl }").header("Content-Encoding", "zstd")),
             ("/cut.css", || Reply::css("#p { direction: rtl }").shaped(Shape::Truncated(50))),
             ("/blank.css", || Reply::css("  /* nothing */\n")),
         ]);

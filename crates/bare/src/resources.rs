@@ -17,8 +17,9 @@
 //! - Stylesheets: `<link rel=stylesheet>` without `alternate`. `media` is not read: the node is kept, so a later step can.
 //!   Preloads, icons and `<style>` are not resources of this step. Elements inside `<template>` are ignored.
 //! - A response is good when the status is 2xx, the `Content-Type` is a JavaScript type (scripts) or `text/css`
-//!   (styles), and `Content-Encoding` is absent or `identity`. We send no `Accept-Encoding`, so the server sends
-//!   plain bytes. A compressed body is an error: we never treat compressed bytes as source.
+//!   (styles), and `Content-Encoding` is absent, `identity`, or one that the client undoes (gzip, deflate, br: `bare_net`
+//!   sends `Accept-Encoding` and gives the decoded bytes). A coding that it could not undo is an error: we never treat
+//!   compressed bytes as source.
 //! - The text is UTF-8 unless `charset` names another encoding that `bare_html::encoding` knows.
 //!
 //! Memory: the body is read into one buffer that becomes the `String` (no second copy for UTF-8). The client cache is
@@ -385,7 +386,7 @@ pub enum LoadError {
     Status(u16),
     /// The `Content-Type` is not allowed. Holds the type (up to 64 chars), or `None` when it is missing.
     Mime(Option<String>),
-    /// A `Content-Encoding` other than `identity`.
+    /// A `Content-Encoding` that the client could not undo (`Response::encoded`).
     Encoding(String),
     /// The resource is over `max_resource_bytes`, by `Content-Length` or by the bytes that came.
     TooLarge,
@@ -495,11 +496,9 @@ pub fn fetch(client: &mut http::Client, target: &Target, limits: &Limits, deadli
     if !good {
         return Err(LoadError::Mime(content_type.map(|c| short(essence(c)))));
     }
-    if target.expect != Expect::Opaque
-        && let Some(e) = response.header("content-encoding")
-        && !e.trim_matches(WS).eq_ignore_ascii_case("identity")
-    {
-        return Err(LoadError::Encoding(short(e)));
+    let coding = response.header("content-encoding");
+    if target.expect != Expect::Opaque && coding.is_some() && response.encoded() {
+        return Err(LoadError::Encoding(short(coding.unwrap_or(""))));
     }
     if target.expect == Expect::Opaque {
         // Count the bytes against the size cap of one resource, in one small buffer. Nothing is kept.
@@ -533,8 +532,11 @@ pub fn fetch(client: &mut http::Client, target: &Target, limits: &Limits, deadli
     if declared.is_some_and(|d| d > room) {
         return Err(LoadError::TotalTooLarge);
     }
-    // One byte more than the declared size, so that the read that sees the end of the body has room.
-    let mut buf = vec![0u8; declared.map_or(16 * 1024, |d| d.saturating_add(1)).min(cap.saturating_add(1))];
+    // One byte more than the declared size, so that the read that sees the end of the body has room. A coded body is
+    // about 4 times its size on the wire (gzip of text: 3 to 5): start there, so that it does not grow by doubling.
+    // The room is zeroed pages that no byte has touched, and `shrink_to_fit` below gives back what is left.
+    let scale = if coding.is_some() { 4 } else { 1 };
+    let mut buf = vec![0u8; declared.map_or(16 * 1024, |d| d.saturating_mul(scale).saturating_add(1)).min(cap.saturating_add(1))];
     let mut filled = 0;
     loop {
         if Instant::now() >= deadline {
@@ -823,7 +825,7 @@ mod tests {
         assert_eq!(loaded.results[1].as_ref().unwrap().text, "var a=1;");
         assert_eq!(loaded.retained, 3 + 8);
         assert_eq!((server.hits("/dir/a.js"), server.hits("/dir/s.css")), (1, 1));
-        // We never ask for compression, and never send a body or a cookie.
+        // We never ask for compression of a loopback server, and never send a body or a cookie.
         let heads = server.heads.lock().unwrap();
         assert!(heads.iter().all(|h| !h.contains("accept-encoding") && !h.contains("cookie") && !h.contains("authorization")));
     }
@@ -894,18 +896,22 @@ mod tests {
     }
 
     #[test]
-    fn compressed_bodies_are_errors() {
+    fn a_coding_that_the_client_cannot_undo_is_an_error_and_a_gzip_body_is_decoded() {
         let server = serve(|path| match path {
-            "/dir/a.js" => Reply::js(b"\x1f\x8b gz".to_vec()).header("Content-Encoding", "gzip"),
+            "/dir/a.js" => Reply::js(b"zzz".to_vec()).header("Content-Encoding", "zstd"),
             "/dir/b.js" => Reply::js("x").header("Content-Encoding", "Identity"),
-            "/dir/c.js" => Reply::js("x").header("Content-Encoding", "br"),
-            _ => Reply::js("x").header("Content-Encoding", "deflate, gzip"),
+            "/dir/c.js" => Reply::js(GZ.to_vec()).header("Content-Encoding", "gzip"),
+            "/dir/d.js" => Reply::js("this is not a gzip body").header("Content-Encoding", "gzip"),
+            _ => Reply::js("x").header("Content-Encoding", "gzip, gzip, gzip, gzip, gzip, gzip"),
         });
-        let (_, _, loaded) = load_html(&server, "<script src=a.js></script><script src=b.js></script><script src=c.js></script><script src=d.js></script>", &Limits::default());
-        assert_eq!(loaded.results[0].as_ref().unwrap_err(), &LoadError::Encoding("gzip".into()));
+        const GZ: &[u8] = b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x02\xff\x2b\xcf\xcc\x4b\xc9\x2f\xd7\x4b\xaf\x52\xb0\x55\x30\xb4\x06\x00\x1f\x90\xf0\xc6\x0e\x00\x00\x00";
+        let (_, _, loaded) = load_html(&server, "<script src=a.js></script><script src=b.js></script><script src=c.js></script><script src=d.js></script><script src=e.js></script>", &Limits::default());
+        assert_eq!(loaded.results[0].as_ref().unwrap_err(), &LoadError::Encoding("zstd".into()));
         assert!(loaded.results[1].is_ok());
-        assert_eq!(loaded.results[2].as_ref().unwrap_err(), &LoadError::Encoding("br".into()));
-        assert!(matches!(loaded.results[3], Err(LoadError::Encoding(_))));
+        assert_eq!(loaded.results[2].as_ref().unwrap().text, "window.gz = 1;");
+        // A bad gzip body is a read error, never source text.
+        assert!(matches!(loaded.results[3], Err(LoadError::Read(_))), "{:?}", loaded.results[3]);
+        assert!(matches!(loaded.results[4], Err(LoadError::Encoding(_))));
     }
 
     #[test]

@@ -16,7 +16,7 @@
 //!
 //! Comments compare Rust with JavaScript, because you know JS.
 
-use crate::{dns, parallel, tcp, trace};
+use crate::{dns, encoding, parallel, tcp, trace};
 // JS: like `import * as dns from "./dns"`: other files in this crate.
 use bare_tls::client::{self, ClientStream};
 use bare_tls::trust_store::{self, TrustStore};
@@ -49,7 +49,7 @@ const MAX_HEAD: usize = 256 * 1024;
 // The status line and headers of a reply may be 256 KB at most. Chrome allows 256 KB too. Without a limit, a server
 // that sends headers for ever fills our memory.
 
-const MAX_REPLY: usize = 128 * 1024 * 1024;
+pub(crate) const MAX_REPLY: usize = 128 * 1024 * 1024;
 // A reply (head and body) may be 128 MB at most. Without a limit, a server that never stops fills our memory.
 
 const MAX_TIME: Duration = Duration::from_secs(120);
@@ -403,13 +403,13 @@ impl Client {
         match freshness(&response) {
             Some(fresh_for)
                 if response.status == 200
-                    && response.header("vary").is_none()
+                    && vary_ok(&response)
                     && (!fresh_for.is_zero() || response.header("etag").is_some() || response.header("last-modified").is_some()) =>
             {
                 // We keep a reply only if all of these are true:
                 // - It is a 200 and the server did not say `no-store`.
-                // - It has no `Vary` header. `Vary` says the reply depends on a request header.
-                //   We do not handle that yet.
+                // - It has no `Vary` header, or only `Vary: Accept-Encoding`. `Vary` says the reply depends on a request
+                //   header. We do not handle that, except for the one header that this client always sends the same.
                 // - It is useful: it is fresh for a while, or we can ask the server about it later.
                 self.forget(&key);
                 if self.cache_bytes + cache_size(&response) > MAX_CACHE {
@@ -500,9 +500,14 @@ impl Client {
             return Err("the reply is too big".into());
         }
         let reusable = !head.response.close && head.framing != Framing::UntilClose;
+        let undo = if head.framing == Framing::None { None } else { head.response.header("content-encoding").and_then(encoding::codings).filter(|c| !c.is_empty()) };
         let mut live = Live::new(stream, leftover, head.framing, reusable.then(|| (self.idle.clone(), server)), head_end);
         live.rec = rec;
-        Ok((head.response, Body(Source::Live(Box::new(live)))))
+        let live = Body(Source::Live(Box::new(live)));
+        Ok((head.response, match undo {
+            Some(codings) => Body(Source::Decoded(Box::new(encoding::Decoded::new(live, codings)))),
+            None => live,
+        }))
     }
 
     /// One hop of `send_stream`: a fresh copy from the cache, or a reply from the server whose body is still on the connection.
@@ -560,6 +565,13 @@ fn open(url: &Url, roots: &OnceLock<Result<TrustStore, String>>, rec: &mut Optio
     Ok(Stream::Tls(Box::new(tls)))
 }
 
+/// A host that is this machine. A compressed body costs the CPU of both ends and saves no byte on a loopback link, so we do not ask for one
+/// (`Accept-Encoding`). A caller that sets the header gets it sent. A reply that has a coding is decoded in any case.
+fn loopback(host: &str) -> bool {
+    // The URL parser gives an IPv4 host as digits and dots, and an IPv6 host in its short form. `parse::<IpAddr>` would cost about 380 instructions for each request.
+    host == "localhost" || host == "::1" || host.strip_prefix("127.").is_some_and(|rest| rest.bytes().all(|b| b.is_ascii_digit() || b == b'.'))
+}
+
 /// The request line, the headers and the blank line. A small body is added to the end by the caller.
 fn request_head(url: &Url, plan: &Plan, conditions: &str, extra: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(256 + extra + conditions.len() + plan.headers.iter().map(|(n, v)| n.len() + v.len() + 4).sum::<usize>());
@@ -570,6 +582,10 @@ fn request_head(url: &Url, plan: &Plan, conditions: &str, extra: usize) -> Vec<u
     // There is no `Connection:` header. For HTTP/1.1 "keep the connection" is the default.
     if !plan.headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("user-agent")) {
         out.extend_from_slice(b"User-Agent: bare/0.1\r\n");
+    }
+    if !loopback(&url.host) && !plan.headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("accept-encoding")) {
+        // `br` only over https, as Chrome does: some plain proxies break it.
+        out.extend_from_slice(if url.scheme == Scheme::Https { b"Accept-Encoding: gzip, deflate, br\r\n" } else { b"Accept-Encoding: gzip, deflate\r\n" });
     }
     for (name, value) in plan.headers.iter() {
         let _ = write!(out, "{name}: {value}\r\n");
@@ -679,6 +695,11 @@ impl Response {
         self.headers.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str())
         // JS: `headers.find(([n]) => n === name)?.[1]`. `Option` is like a value that may be `undefined`.
     }
+}
+
+/// The reply does not depend on a request header that can change: it has no `Vary`, or only `Accept-Encoding`, which this client sends the same for its whole life.
+fn vary_ok(response: &Response) -> bool {
+    response.headers.iter().filter(|(n, _)| n == "vary").all(|(_, v)| v.split(',').all(|t| t.trim().eq_ignore_ascii_case("accept-encoding")))
 }
 
 /// Where a redirect sends us, or `None` when the reply is not a redirect.
@@ -836,6 +857,8 @@ enum Source {
     Memory(Arc<Response>, usize),
     /// A reply that comes from a server now.
     Live(Box<Live>),
+    /// The same, with a `Content-Encoding` that is undone as it is read (see `encoding.rs`).
+    Decoded(Box<encoding::Decoded>),
 }
 
 /// Where the chunks of a chunked body are.
@@ -1061,6 +1084,7 @@ impl Read for Body {
                 return Ok(n);
             }
             Source::Live(live) => live,
+            Source::Decoded(decoded) => return decoded.read(out),
         };
         if live.done || out.is_empty() {
             return Ok(0);
@@ -1121,6 +1145,8 @@ impl Body {
                 _ => 0,
             },
             Source::Memory(response, _) => response.body.len(),
+            // The length on the wire is not the length of the decoded body.
+            Source::Decoded(_) => 0,
         }
     }
 }
@@ -1176,6 +1202,28 @@ mod tests {
         let Stream::Fake(cursor, _) = &live.stream else { unreachable!() };
         let unread = (live.buf.len() - live.at) + (raw.len() - cursor.position() as usize);
         Ok(Some((response, raw.len() - unread)))
+    }
+
+    #[test]
+    fn asks_for_compression_except_on_this_machine_and_br_only_over_https() {
+        let ask = |input, headers: &[(&str, &str)]| {
+            let plan = Plan { method: Method::Get, headers: Cow::Borrowed(headers), body: b"" };
+            String::from_utf8(request_head(&Url::parse(input).unwrap(), &plan, "", 0)).unwrap()
+        };
+        assert!(ask("https://a.com/", &[]).contains("\r\nAccept-Encoding: gzip, deflate, br\r\n"));
+        assert!(ask("http://a.com/", &[]).contains("\r\nAccept-Encoding: gzip, deflate\r\n"));
+        // A name that only starts with 127. is a remote host.
+        assert!(ask("http://127.example.com/", &[]).contains("ccept-Encoding"));
+        for local in ["http://127.0.0.1:80/", "https://127.9.9.9/", "http://localhost/", "http://[::1]:8080/", "http://[0:0:0:0:0:0:0:1]/", "http://0x7f.1/"] {
+            assert!(!ask(local, &[]).contains("ccept-"), "{local}");
+        }
+        // The caller's header is sent once, as it is, on any host, and ours is not added.
+        for input in ["http://a.com/", "http://127.0.0.1/"] {
+            let head = ask(input, &[("accept-ENCODING", "identity")]);
+            let lower = head.to_ascii_lowercase();
+            assert_eq!(lower.matches("accept-encoding").count(), 1);
+            assert!(head.contains("\r\naccept-ENCODING: identity\r\n"));
+        }
     }
 
     #[test]
@@ -2273,10 +2321,11 @@ mod tests {
             let plan = Plan { method, headers: Cow::Borrowed(&headers), body: b"" };
             let head = request_head(&url, &plan, "", 0);
             let lines = head.split(|&b| b == b'\n').count() - 1;
-            // Each line ends with "\n": the pieces are the lines and one empty rest. Request line, Host, User-Agent (unless
-            // the caller sets it), the two headers, Content-Length (POST), and the blank line.
+            // Each line ends with "\n": the pieces are the lines and one empty rest. Request line, Host, User-Agent and
+            // Accept-Encoding (unless the caller sets them), the two headers, Content-Length (POST), and the blank line.
             let ua = headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("user-agent"));
-            assert_eq!(lines, 2 + usize::from(!ua) + 2 + usize::from(method == Method::Post) + 1, "{:?}", String::from_utf8_lossy(&head));
+            let ae = headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("accept-encoding"));
+            assert_eq!(lines, 2 + usize::from(!ua) + usize::from(!ae) + 2 + usize::from(method == Method::Post) + 1, "{:?}", String::from_utf8_lossy(&head));
             assert!(head.ends_with(b"\r\n\r\n") && !head.windows(2).any(|w| w == b"\n\n" || w == b"\r\r"));
             assert!(head.iter().filter(|&&b| b == b'\r').count() == lines && !head.contains(&0));
         }

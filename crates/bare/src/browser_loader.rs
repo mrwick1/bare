@@ -38,7 +38,7 @@
 //!   script is skipped (`resources::discover`). Other `type` values are data. Every `<script>` element runs separately, even
 //!   when two elements name one URL (the bytes are fetched once: they are kept for the repeats and freed after the last).
 //! - A response is used only as `resources::fetch` allows: 2xx, a JavaScript `Content-Type` (a 404 or HTML page never runs),
-//!   no `Content-Encoding`, size caps. A failed external script is never run. It gets an `error` event, a successful one
+//!   no `Content-Encoding` that `bare_net` cannot undo (it undoes gzip, deflate and br), size caps. A failed external script is never run. It gets an `error` event, a successful one
 //!   a `load` event (also when the script threw). Inline scripts get no event. Events go through the DOM dispatch: listeners
 //!   and `onload`/`onerror` handlers run as normal listeners.
 //! - `document.currentScript` is the element while its script runs (inline, external, dynamic), else `null`. It is cleared

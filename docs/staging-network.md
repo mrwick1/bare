@@ -88,7 +88,7 @@ Observed facts give these needs. This is a sufficient algorithm set for the obse
 - The server compresses text only (HTML, JS, CSS) and only above a size threshold. Files of 780 bytes or fewer were plain with every header. Files of 1,325 bytes or more were compressed. The exact threshold is **not measured**.
 - Fonts (`woff2`) and the SVG are never compressed.
 - For all 52 files, gzip and deflate decoded to the identity bytes (SHA-256 equal).
-- Decision: `bare` needs **no decoder** if it sends no `Accept-Encoding`. It then gets identity bytes (observed with `Host` only; `bare` sends `Host` and `User-Agent` only, so equivalent behavior is expected for its request). A decoder (gzip with deflate) is needed only to cut the 1.86 MB of wire bytes to 0.62 MB. Brotli is not needed. A `Content-Encoding` header that `bare` cannot decode must be an error (not shown as text). This is a design choice, not a server rule.
+- Superseded on 2026-11-07: `bare` now sends `Accept-Encoding` and decodes gzip, deflate and br (see [resources.md](resources.md#compressed-bodies-and-the-connect-backup)). Original decision: `bare` needs **no decoder** if it sends no `Accept-Encoding`. It then gets identity bytes (observed with `Host` only; `bare` sends `Host` and `User-Agent` only, so equivalent behavior is expected for its request). A decoder (gzip with deflate) is needed only to cut the 1.86 MB of wire bytes to 0.62 MB. Brotli is not needed. A `Content-Encoding` header that `bare` cannot decode must be an error (not shown as text). This is a design choice, not a server rule.
 
 ## Resources (observed)
 
@@ -176,7 +176,7 @@ The time grows with the input (about 20 MB/s). The live fetch was 315 requests i
 
 ## First failing bare HTTPS check
 
-Raw bytes: `bare` sends `GET <path> HTTP/1.1`, `Host`, `User-Agent: bare/0.1` and no `Accept-Encoding`. The server answers this shape with identity bytes and `Content-Length` (observed with a Host-only request). So the first `https://` fetch needs TLS and the existing HTTP parser. It does not need a decoder.
+Raw bytes (before 2026-11-07; `bare` now also sends `Accept-Encoding`): `bare` sends `GET <path> HTTP/1.1`, `Host`, `User-Agent: bare/0.1` and no `Accept-Encoding`. The server answers this shape with identity bytes and `Content-Length` (observed with a Host-only request). So the first `https://` fetch needs TLS and the existing HTTP parser. It does not need a decoder.
 
 Today `target/release/bare --source https://staging.app.8vox.ai/login` fails with `error: only http:// is supported`. `http://staging.app.8vox.ai/login` fails the same way after the `301` (the redirect goes to `https://`). Both are observed on 2026-11-04.
 

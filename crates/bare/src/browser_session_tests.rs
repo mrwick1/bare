@@ -231,7 +231,7 @@ fn a_bad_status_type_encoding_or_size_ends_the_session_with_a_fixed_label() {
                 ("/404", Reply::new(404, Some("text/html"), "<script>localStorage.setItem('ran','1')</script>")),
                 ("/json", Reply::new(200, Some("application/json"), "{}")),
                 ("/notype", Reply::new(200, None, "<p>")),
-                ("/gz", html("x").header("Content-Encoding", "gzip")),
+                ("/gz", html("x").header("Content-Encoding", "zstd")),
                 ("/big", html(&"a".repeat(5000))),
             ]
         });
