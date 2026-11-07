@@ -250,7 +250,7 @@ impl<'a> Pass<'a> {
     fn x_at(&self, t: NodeId, text: &str, f: &Fragment, s: usize, o: usize, m: Metrics) -> f32 {
         let style = self.doc().flat_parent(t).and_then(|p| self.g.styles.style(p));
         let collapse = style.is_some_and(|st| WhiteSpace::of(st).collapse);
-        let spacing = style.map_or((0.0, 0.0), font::spacing);
+        let spacing = style.map_or((0.0, 0.0), |s| font::spacing(true, s));
         let (mut units, mut prev, mut extra) = (0, false, 0.0);
         for c in text[s..o].chars() {
             let sp = is_space(c);

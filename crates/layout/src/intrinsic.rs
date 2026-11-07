@@ -110,7 +110,7 @@ pub(crate) fn lines(cx: &mut Cx, first: NodeId, last: NodeId) -> (f32, f32) {
                 let style = tree.style(node);
                 let (ws, transform, m) = (WhiteSpace::of(style), Transform::of(style), Metrics::of(style));
                 let text = tree.doc.text(span);
-                let sp = font::spacing(style);
+                let sp = font::spacing(tree.styles.spaced(), style);
                 let spaced = sp != (0.0, 0.0);
                 for piece in text::pieces(text, ws, transform, &mut flow) {
                     match piece {

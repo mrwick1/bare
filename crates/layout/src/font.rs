@@ -130,9 +130,9 @@ pub fn width(text: &str) -> Units {
     // `saturating_add`: a sum that is too big stops at the largest `u32`, and does not wrap round to a small number.
 }
 
-/// `letter-spacing` and `word-spacing` of a style, in pixels.
-pub fn spacing(style: &ComputedStyle) -> (f32, f32) {
-    (style.px(Property::LetterSpacing), style.px(Property::WordSpacing))
+/// `letter-spacing` and `word-spacing` of a style, in pixels. `spaced`: `Styles::spaced`, false for most pages.
+pub fn spacing(spaced: bool, style: &ComputedStyle) -> (f32, f32) {
+    if spaced { (style.px(Property::LetterSpacing), style.px(Property::WordSpacing)) } else { (0.0, 0.0) }
 }
 
 /// The width that `letter-spacing` and `word-spacing` add to a piece of text: `letter` after each letter (also the last one,

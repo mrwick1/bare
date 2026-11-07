@@ -221,7 +221,18 @@ fn moved(s: &canvas::Shape, (dx, dy): (i32, i32)) -> canvas::Shape {
 /// Draw one run of text. The letters are `font::width_of` apart, as layout placed them: whole units of a tenth of an
 /// em, added up, so a line of 1,000 letters ends where layout says.
 #[allow(clippy::too_many_arguments)]
-pub fn text(canvas: &mut Canvas, glyphs: &mut Glyphs, clip: IRect, x: f32, baseline: i32, size: f32, color: u32, bold: bool, (letter, word): (f32, f32), run: &str) {
+pub fn text(canvas: &mut Canvas, glyphs: &mut Glyphs, clip: IRect, x: f32, baseline: i32, size: f32, color: u32, bold: bool, spacing: (f32, f32), run: &str) {
+    // A run with no spacing (nearly all of them) takes the loop that has no spacing in it.
+    if spacing == (0.0, 0.0) {
+        letters::<false>(canvas, glyphs, clip, x, baseline, size, color, bold, spacing, run);
+    } else {
+        letters::<true>(canvas, glyphs, clip, x, baseline, size, color, bold, spacing, run);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn letters<const SPACED: bool>(canvas: &mut Canvas, glyphs: &mut Glyphs, clip: IRect, x: f32, baseline: i32, size: f32, color: u32, bold: bool, (letter, word): (f32, f32), run: &str) {
     // Not even the tallest letter reaches the clip: skip the run.
     if (baseline as f32 + size * 0.4) < clip.y0 as f32 || (baseline as f32 - size * 1.2) > clip.y1 as f32 {
         return;
@@ -233,15 +244,18 @@ pub fn text(canvas: &mut Canvas, glyphs: &mut Glyphs, clip: IRect, x: f32, basel
         if c < ' ' {
             continue;
         }
-        let at = x + units as f32 * px + extra;
         let w = font::width_of(c);
+        let mut at = x + units as f32 * px;
         units += w;
         // `letter-spacing` comes after each letter, and `word-spacing` after each space (`font::extra`).
-        if w != 0 {
-            extra += letter;
-        }
-        if c == ' ' || c == '\u{a0}' {
-            extra += word;
+        if SPACED {
+            at += extra;
+            if w != 0 {
+                extra += letter;
+            }
+            if c == ' ' || c == '\u{a0}' {
+                extra += word;
+            }
         }
         if at > clip.x1 as f32 {
             break;

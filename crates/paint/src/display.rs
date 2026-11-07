@@ -961,7 +961,7 @@ impl Builder<'_> {
             return;
         }
         let bold = matches!(style.get(Property::FontWeight), Value::Number(w) if w >= 600.0);
-        let (letter, word) = font::spacing(style);
+        let (letter, word) = font::spacing(self.tree.styles.spaced(), style);
         if (letter, word) != (0.0, 0.0) {
             self.list.lines.push(Item::Spacing { letter, word });
         }

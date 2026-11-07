@@ -309,7 +309,7 @@ impl RuleSet {
     #[inline(always)]
     fn walk<const WANT: bool>(&self, doc: &Document, want: Option<NodeId>) -> Styles {
         let mut way = Way { want, path: Vec::new(), sorted: Vec::new(), on: false, at: 0 };
-        let mut styles = Styles { styles: vec![ComputedStyle::initial()], of_node: vec![NONE; doc.len()], calcs: Vec::new(), grids: Vec::new(), customs: Vec::new() };
+        let mut styles = Styles { styles: vec![ComputedStyle::initial()], of_node: vec![NONE; doc.len()], calcs: Vec::new(), grids: Vec::new(), customs: Vec::new(), spaced: false };
         // Style 0 is the starting style. It is the parent style of the `html` element.
         let mut cx = Cx { viewport: self.viewport, root_font_size: 16.0, layer_order: self.layer_order(), declared: &self.side, inline: RefCell::default(), computed: RefCell::default(), grids: RefCell::default(), customs: RefCell::default() };
         let style_atom = doc.find_atom("style");
@@ -432,6 +432,7 @@ impl RuleSet {
         let same = memo.by_hash.get(&hash).and_then(|list| list.iter().copied().find(|&i| styles.styles[i as usize] == style));
         let id = same.unwrap_or_else(|| {
             let id = styles.styles.len() as u32;
+            styles.spaced |= style.px(Property::LetterSpacing) != 0.0 || style.px(Property::WordSpacing) != 0.0;
             styles.styles.push(style);
             memo.by_hash.entry(hash).or_default().push(id);
             id
@@ -446,6 +447,8 @@ impl RuleSet {
     fn cascade(&self, matched: &[u32], inline: Option<&str>, hint: Option<&str>, parent: &ComputedStyle, cx: &Cx<'_>) -> ComputedStyle {
         let mut winners = [None::<Value>; Property::COUNT];
         let mut keys = [0u128; Property::COUNT];
+        // The properties that have a winner, one bit each: the loops below visit only these.
+        let mut set = 0u128;
         // The key of a declaration: the one with the bigger key wins. The parts, from the most important: the origin and `!important`,
         // the layer, the specificity, and the place in the page. A `style=""` attribute has no layer (`None`): it beats every layer.
         let key = |important: bool, origin: Origin, layer: Option<u32>, specificity: u32, order: u32| {
@@ -473,6 +476,7 @@ impl RuleSet {
                 let p = d.property as usize;
                 winners[p] = Some(d.value);
                 keys[p] = 1 << 96;
+                set |= 1 << p;
             }
         }
         let mut apply = |d: &Declared, origin: Origin, layer: Option<u32>, specificity: u32, order: u32| {
@@ -481,6 +485,7 @@ impl RuleSet {
             if winners[p].is_none() || key >= keys[p] {
                 winners[p] = Some(d.value);
                 keys[p] = key;
+                set |= 1 << p;
             }
         };
         // The custom properties of the `style=""` attribute. They live until the end of the function, because `own` points into them.
@@ -555,12 +560,15 @@ impl RuleSet {
             cx.customs.borrow_mut().keep(merged)
         };
         // A value with `var()` is read now, with the custom properties of this element.
-        for p in 0..Property::COUNT {
+        let mut rest = set;
+        while rest != 0 {
+            let p = rest.trailing_zeros() as usize;
+            rest &= rest - 1;
             if let Some(Value::Var(i)) = winners[p] {
                 winners[p] = Some(self.read_var(i, Property::ALL[p], custom, cx));
             }
         }
-        let mut style = compute(&winners, parent, cx);
+        let mut style = compute(&winners, set, parent, cx);
         style.1 = custom;
         style
     }
@@ -806,9 +814,15 @@ pub struct Styles {
     grids: Vec<Grid>,
     /// The sets of custom properties. `ComputedStyle::1` is a place in this list. Set 0 is empty.
     customs: Vec<var::Set>,
+    /// Does any style have a `letter-spacing` or a `word-spacing` that is not 0? Layout and paint read the two only then.
+    spaced: bool,
 }
 
 impl Styles {
+    pub fn spaced(&self) -> bool {
+        self.spaced
+    }
+
     /// The custom properties of a style, sorted by name, with their text: `--gap`, `8px`.
     pub fn custom_properties(&self, style: &ComputedStyle) -> &[(Box<str>, Box<str>)] {
         &self.customs[style.1 as usize]
@@ -1066,7 +1080,7 @@ fn length_to_px(l: Length, font_size: f32, cx: &Cx<'_>) -> f32 {
 }
 
 /// Make the computed style from the winning declarations and the style of the parent.
-fn compute(winners: &[Option<Value>; Property::COUNT], parent: &ComputedStyle, cx: &Cx<'_>) -> ComputedStyle {
+fn compute(winners: &[Option<Value>; Property::COUNT], mut set: u128, parent: &ComputedStyle, cx: &Cx<'_>) -> ComputedStyle {
     use Property::*;
     let fs = font_size(winners[FontSize as usize], parent.px(FontSize), cx);
     // A property with no winner keeps the initial value, or the one of the parent: only the others need a look.
@@ -1078,8 +1092,10 @@ fn compute(winners: &[Option<Value>; Property::COUNT], parent: &ComputedStyle, c
         out[i] = parent.0[i];
     }
     out[FontSize as usize] = Value::Length(Length::Px(fs));
-    for (i, &winner) in winners.iter().enumerate() {
-        let (p, Some(v)) = (Property::ALL[i], winner) else { continue };
+    while set != 0 {
+        let i = set.trailing_zeros() as usize;
+        set &= set - 1;
+        let (p, Some(v)) = (Property::ALL[i], winners[i]) else { continue };
         if p == FontSize {
             continue;
         }
