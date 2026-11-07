@@ -3198,14 +3198,14 @@ impl<'p> Interp<'p> {
                 match mode {
                     Bind::Assign => self.assign_name(n, v, self.pat_site(p.index())),
                     Bind::Declare => {
-                        match self.pat_frame(n, self.pat_site(p.index())) {
+                        match if self.fr_any { self.pat_frame(n, self.pat_site(p.index())) } else { None } {
                             Some(i) => self.envs[FRAME_ENV as usize].bindings[i].value = v,
                             None => self.env_declare(self.env, n, INIT | MUT, v),
                         }
                         Ok(())
                     }
                     Bind::Init => {
-                        if let Some(i) = self.pat_frame(n, self.pat_site(p.index())) {
+                        if let Some(i) = if self.fr_any { self.pat_frame(n, self.pat_site(p.index())) } else { None } {
                             let b = &mut self.envs[FRAME_ENV as usize].bindings[i];
                             b.flags |= INIT;
                             b.value = v;

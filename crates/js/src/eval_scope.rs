@@ -588,7 +588,7 @@ impl<'p> Interp<'p> {
     }
 
     /// A block, loop head or `switch` with `let` or `const` in frame slots starts: the slots are in their TDZ.
-    #[inline]
+    #[inline(never)]
     fn fr_tdz(&mut self, mark: u32) {
         let b = self.fp + (mark >> 12 & 0xFFF) as usize;
         for x in &mut self.envs[FRAME_ENV as usize].bindings[b..b + (mark & 0xFFF) as usize] {
@@ -598,7 +598,7 @@ impl<'p> Interp<'p> {
 
     /// The frame slot (an index in `envs[FRAME_ENV].bindings`) of the name of the pattern site `site`, if it is in a function with
     /// frame slots. For `let`, `const` and `catch` names, which are declared and not searched.
-    #[inline(always)]
+    #[inline(never)]
     fn pat_frame(&mut self, n: u32, site: u32) -> Option<usize> {
         let s = self.slots.sites[site as usize];
         if s & (UNRES | FRAME) == 0 { None } else { self.pat_frame_slow(n, site, s) }
