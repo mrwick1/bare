@@ -1523,3 +1523,27 @@ Gaps (Chrome differs):
 - Differences that remain in the full-page diffs, with a cause that is not this change: `:disabled` is not supported; a dashed border on a rounded box is drawn solid; `letter-spacing` is not supported; the text of a grid item that has no element (a letter in a grid with `place-items: center`) is not centered; glyph shading.
 
 Not tested: the live staging pages on a build with this change (only local copies); `svg` in `foreignObject`; an `<svg>` with `width` or `height` in `%` inside a flex or grid item; very large paths (a path of 100,000 commands); `bare-stress` rows with a network (`net-*`); memory (only instructions were measured); other allocators than glibc (jemalloc was used for the cross-check of the first build only).
+
+## Function table by slot (step C1 of the engine plan)
+
+`Interp::funcs` was a hash map from `ObjId` to `Callee`. It is now an `ObjTab<Callee>` (`crates/js/src/obj_tab.rs`). The table is indexed by the slot of the handle. `at[slot]` holds the generation and the position of the entry in a dense `Vec<(ObjId, Callee)>`. A read is two loads and two compares, with no hash. The generation check means the entry of a dead object never answers for a new object in the same slot. `collect` still prunes the table before the heap frees objects. The pruning moves the last entry into the freed place, so the order of the entries is not fixed (the hash map had no fixed order either). The call sites are the same as before: `get`, `get_mut`, `contains_key`, `insert`, `retain`, `values`, `len`, `capacity`.
+
+Who calls `HashMap::contains_key` (the plan could not see the chain): `Interp::is_callable` (`eval.rs`), which the compiler inlines at 64 sites. The hot instance has call sites in `link_inner` (the call check), `eval_unary` (`typeof`) and in the native dispatchers (`call_native`, `call_ext`, `call_object_more`, `call_promise`, `call_iter` and others), found with `perf script` (the sampled address of the instance) and `objdump` (its callers). A `perf` call graph did not work on this build (frames stay `[unknown]`). In the profile of the base build `contains_key` is 5.5 M for each key. In the new build it is gone as a symbol.
+
+Check, `type_load` on the typing page (`tools/js/typing/build.sh`, 60 inputs, `#a1`), `instructions:u`, minimum of 3, glibc with the tcache setting. One key is the difference of 50 keys and 0 keys, divided by 50.
+
+| | base (25c7137) | C1 | change |
+| --- | ---: | ---: | ---: |
+| 0 keys | 779.92 M | 774.70 M | -5.2 M |
+| 50 keys | 21,496.4 M | 21,339.5 M | -156.9 M |
+| one key | 414.3 M | 411.3 M | -3.0 M (-0.72%) |
+
+This is less than the plan estimate of -6 to -10 M. The lookup saves 5.5 M. The inlined check at the 64 sites costs about 2.5 M. The plan counted `reserve_rehash` and `HashMap::insert` too. `reserve_rehash` did not fall, because other tables cause it. Hypothesis: a check in the heap object (a `callable` flag) would cost about the same as this table, so it was not tried. `#[inline(never)]` on `contains_key` gave 411.8 M for each key, so it is not used.
+
+Memory (`MEM=1`, 50 keys, 3 runs each): peak RSS 37.0 MiB base, 36.5 to 36.6 MiB now. Allocator live bytes 20.2 base, 20.6 now (peak 27.0 and 27.4). The function table is 0.48 MiB base and 1.27 MiB now: `at` has 8 bytes for each slot up to the highest slot of a function (about 100 K slots after the typing, because the object slab keeps its slots), and the dense vector is the same size as the hash table was. The RSS did not rise.
+
+Cost rows (`tools/js/instr.sh`, minimum of 3, release, 566 rows of `bare-js` and `bare` examples at scale 1 and 10; the `numeric_load` rows use 1,000 and 10,000), origin/main 25c7137 against this change, with glibc and with `LD_PRELOAD=/usr/lib/libjemalloc.so.2`. No row is over +0.5% with both allocators. Median change: -0.98% (glibc), -0.84% (jemalloc). Rows that the plan names: `eval_load closures 10` 813,519,405 to 800,000,633 (-1.66%), `class_load construct 10` 2,143,627,229 to 2,139,186,240 (-0.21%), `eval_load calls 10` -1.18%, `fib 10` -2.24%. Over +0.5% with glibc only (heap noise by the rule of the plan): `scripts_load reject 1` +0.66% (jemalloc -0.22%), `reflect_load views 10` +0.62% (jemalloc -0.08%).
+
+Tests: `cargo test --workspace` debug 2,734 passed, 0 failed. Release 2,733 passed and 1 failed: `a_request_over_the_stream_limit_waits_for_a_slot` (`bare-net`, a timing test seen to fail beside other builds before). It passed 3 times in a row when run alone. 4 new tests in `obj_tab.rs` (insert and replace, a reused slot, `retain` with the index in step, 20,000 random operations against a `HashMap`). 38 of the 41 `tools/js/*_check.sh` match Node. `number_check` and `intl_check` differ from Node in one or a few cases where Node reports `limit` for a very large matrix case. The output of the base build is the same bytes, and both match `number-cases.expected` and `intl-cases.expected`. `parse_check.sh` needs `acorn` and does not start.
+
+Not tested: the rows at scale 100; `parse_check.sh`; wall time; the live staging pages; a function table with more than about 100 K object slots in use.
