@@ -860,7 +860,7 @@ impl<'p> Interp<'p> {
             }
             ExprKind::Paren(i) => self.member_target(i),
             ExprKind::Member { obj, .. } => {
-                let base = self.eval_expr(obj)?;
+                let base = self.operand(obj)?;
                 Ok(Ref::Site(base, me))
             }
             _ => {

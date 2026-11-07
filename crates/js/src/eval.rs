@@ -3266,11 +3266,11 @@ impl<'p> Interp<'p> {
         let ex = *self.prog.expr(e);
         match ex.kind {
             ExprKind::Member { obj, name, .. } => {
-                let base = self.eval_expr(obj)?;
+                let base = self.operand(obj)?;
                 Ok((base, self.expr_key(e, name)?))
             }
             ExprKind::Index { obj, index, .. } => {
-                let base = self.eval_expr(obj)?;
+                let base = self.operand(obj)?;
                 let iv = self.operand(index)?;
                 if is_nullish(base) {
                     let t = self.display(base);
