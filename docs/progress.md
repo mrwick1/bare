@@ -2793,3 +2793,23 @@ Results (archMachine, against `c4e38c2` from `base-build`):
 - `cargo test --release --workspace --no-fail-fast`: 50 binaries, 2,960 passed, 0 failed.
 
 Not tested: the window path (`--window`): `Remote` still builds the new page before it drops the old one; a machine other than archMachine; more than 3 runs of each build.
+
+## Two tests that failed under load
+
+`cargo test --workspace --release` failed two tests on a loaded machine. Both passed alone.
+
+`a_window_open_keeps_the_connections_and_the_cache` found a real bug. A driver `open` in a window made the new page at the size of the run (800x600). The window can have a different size: cage makes it 1280x720. The window loop calls `resize` only when the window size changes. So when the configure of the compositor came before the second `open`, the next frame had 480000 pixels for a 1280x720 window, the loop stopped, and the step failed with "the window closed". Without load the configure usually came later, and a `resize` fixed the size. Now an `open` in a window takes the size of the current page (`Page::viewport`).
+
+`dns::tests::falls_back_to_tcp` bound a free UDP port, then TCP on the same number. That TCP port can belong to another socket, for example the client side of a loopback connection of a parallel test. Now the test tries other ports until it finds one that is free for both. The client is not changed.
+
+Results (archMachine, 50 loops each):
+
+| Test | Load | Before | After |
+| --- | --- | ---: | ---: |
+| `cache` test binary (3 tests) | `stress-ng --cpu 32` | 5 of 50 failed (and 5 of 40 in a second run) | 0 of 50 |
+| `falls_back_to_tcp` | 20,000 open loopback TCP connections | 34 of 50 failed (`AddrInUse`) | 0 of 50 |
+
+- `cargo test --release --workspace`: all passed.
+- Full cost matrix (805 rows): mean change glibc -0.001%, jemalloc +0.000%. Over under one allocator: 0. Over under both: 0. Failed: 0.
+
+Not tested: a window on a real desktop compositor; a resize of the window during an `open`; the loops on arjun-e16.

@@ -388,6 +388,11 @@ impl Page {
         }
     }
 
+    /// The size of the canvas: the viewport given at the open, or the window size after a `resize`.
+    pub fn viewport(&self) -> (u32, u32) {
+        (self.canvas.width, self.canvas.height)
+    }
+
     /// The layout of the last frame, made now if the page changed. A stale frame with the same render key keeps its layout.
     pub fn frame_now(&mut self) -> Option<&Frame> {
         if self.frame.is_none() || self.stale {
