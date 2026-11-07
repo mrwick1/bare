@@ -30,6 +30,8 @@ pub fn connect(addrs: &[SocketAddr]) -> io::Result<TcpStream> {
     stream.set_read_timeout(Some(READ_TIMEOUT))?;
     stream.set_write_timeout(Some(READ_TIMEOUT))?;
     // From now on, a read or write that waits longer than 30 seconds gives an error.
+    // Send each write at once (no Nagle). Else the first request on a TLS connection waits for the ACK of the client Finished.
+    stream.set_nodelay(true)?;
     Ok(stream)
 }
 
@@ -157,6 +159,13 @@ mod tests {
         let stream = connect(&[server.local_addr().unwrap()]).unwrap();
         assert_eq!(stream.read_timeout().unwrap(), Some(READ_TIMEOUT));
         assert_eq!(stream.write_timeout().unwrap(), Some(READ_TIMEOUT));
+    }
+
+    #[test]
+    fn a_real_connection_sends_small_writes_at_once() {
+        // Nagle off: on staging the first request of each TLS connection waited about 80 ms for the ACK of the client Finished.
+        let server = TcpListener::bind("127.0.0.1:0").unwrap();
+        assert!(connect(&[server.local_addr().unwrap()]).unwrap().nodelay().unwrap());
     }
 
     #[test]

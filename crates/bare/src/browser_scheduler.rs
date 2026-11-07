@@ -120,6 +120,7 @@ struct Mark {
 /// `(due time as f64 bits, sequence)`. The bits of a non-negative f64 sort like the number.
 pub(crate) type Key = (u64, u64);
 
+#[derive(Debug)]
 pub(crate) enum Task {
     Timer(u64),
     Deliver(ObjId),
@@ -1167,6 +1168,17 @@ impl Browser {
     pub fn blocks_settle(&self, limit: f64) -> bool {
         let s = self.dom.sched.borrow();
         s.tasks.iter().take_while(|(k, _)| f64::from_bits(k.0) <= limit).any(|(_, t)| !s.skips(t))
+    }
+
+    /// For `BARE_NET_TRACE`: the first queued task due at `limit` ms or before that blocks the settle, and its due time.
+    pub fn settle_blocker(&self, limit: f64) -> Option<(String, f64)> {
+        let s = self.dom.sched.borrow();
+        let (k, t) = s.tasks.iter().take_while(|(k, _)| f64::from_bits(k.0) <= limit).find(|(_, t)| !s.skips(t))?;
+        let what = match t {
+            Task::Timer(id) => s.timers.get(id).map_or("timer".into(), |t| format!("timer interval={:?} period={}", t.interval, t.period)),
+            t => format!("{t:?}"),
+        };
+        Some((what, f64::from_bits(k.0)))
     }
 
     /// What the settle rule skips and leaves queued: the period (ms) of each such recurring timer in due order, and whether a quiet

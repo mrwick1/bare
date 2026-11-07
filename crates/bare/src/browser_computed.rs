@@ -4,8 +4,10 @@
 //! - A computed declaration stores its element and nothing else. Every read builds the style again from the real document:
 //!   the browser sheet (`UA_CSS`), then the author sheets in document order, then `compute`. So a held object always sees
 //!   the current classes, `id`, `dir`, `style` attributes, `<style>` text, `<link>` elements and viewport. No snapshot is kept
-//!   and no computed value is stored as JS data. Only the parsed `RuleSet` is cached, and only while its inputs (the sheet texts, the
-//!   layers and the viewport) are equal to the inputs of the last build.
+//!   and no computed value is stored as JS data. The parsed `RuleSet` is cached while its inputs (the sheet texts, the layers and
+//!   the viewport) are equal to the inputs of the last build. The last cascade of that `RuleSet` is cached too, while the document
+//!   counters (`revision`, `text_revision`, length, user state revisions) are the same and no element has custom element state
+//!   (see `cascade_for`).
 //! - Author sheets: `<style>` text comes from the document. A `<link rel=stylesheet href>` has no text here: the embedder supplies it
 //!   with `Browser::set_external_stylesheet(href, parts)`, keyed by the exact `href` attribute text (`@import` of an inline `<style>`:
 //!   keyed by the exact url text). `parts` are the flattened sheets in cascade order, imports first (what `main.rs` `add_sheet` does).
@@ -82,6 +84,7 @@ use bare_html::dom::{NodeData, NodeId};
 use bare_js::eval::{Error, Interp, LimitKind};
 use bare_js::value::{ObjId, Value};
 use std::cell::{Cell, OnceCell, RefCell};
+use std::rc::Rc;
 use std::collections::HashMap;
 
 /// Bounds of the computed-style module (see the header). Each is checked before the thing grows.
@@ -152,6 +155,9 @@ pub(crate) struct Built {
     vp: (f32, f32),
     pub(crate) key: Vec<(Option<String>, String)>,
     rules: RuleSet,
+    /// The last cascade of these rules, and its key: `revision`, `text_revision`, length and user state revisions of the
+    /// document, and `want`.
+    last: Option<((u64, u64, usize, [u64; 3], Option<NodeId>), Rc<Styles>)>,
     /// Does a sheet use what the engine does not model (`content-visibility`, `display: contents`)? Read by `checkVisibility` only.
     pub(crate) odd: OnceCell<bool>,
 }
@@ -203,7 +209,7 @@ pub(crate) fn join_layer(outer: Option<&str>, inner: Option<&str>) -> Option<Str
 
 /// The styles of the document at one read, and the style of the element asked about.
 pub(crate) struct Snap {
-    pub(crate) styles: Styles,
+    pub(crate) styles: Rc<Styles>,
     pub(crate) style: ComputedStyle,
     /// The element is not rendered: it, or an ancestor, is `display:none`. Its resolved values are the computed ones.
     pub(crate) hidden: bool,
@@ -394,12 +400,12 @@ impl Dom {
     }
 
     /// The styles of the whole document now (the cascade of one read). Charged and capped as described in the header.
-    pub(crate) fn cascade_now(&self, it: &mut Interp<'_>) -> R<Styles> {
+    pub(crate) fn cascade_now(&self, it: &mut Interp<'_>) -> R<Rc<Styles>> {
         self.cascade_for(it, None)
     }
 
     /// The same, and `want` is styled even inside `display:none` (`RuleSet::compute_for`).
-    fn cascade_for(&self, it: &mut Interp<'_>, want: Option<NodeId>) -> R<Styles> {
+    fn cascade_for(&self, it: &mut Interp<'_>, want: Option<NodeId>) -> R<Rc<Styles>> {
         let l = self.computed.lim.get();
         let vp = self.plat.s.borrow().viewport;
         if self.doc.borrow().len() > l.max_nodes {
@@ -428,20 +434,33 @@ impl Dom {
                 if doc.name_count() > self.lim.max_names {
                     return Err(self.lim("dom-names"));
                 }
-                *cache = Some(Built { vp, key: plan.parts, rules, odd: OnceCell::new() });
+                *cache = Some(Built { vp, key: plan.parts, rules, last: None, odd: OnceCell::new() });
             }
         }
-        let cache = self.computed.cache.borrow();
-        let rules = &cache.as_ref().expect("built").rules;
-        let work = (doc.len() as u64).saturating_mul(rules.len() as u64 + 1);
+        let mut cache = self.computed.cache.borrow_mut();
+        let built = cache.as_mut().expect("built");
+        let work = (doc.len() as u64).saturating_mul(built.rules.len() as u64 + 1);
         if work > l.max_work {
             return Err(self.lim("computed-work"));
         }
         it.charge(work)?;
+        // The cascade reads only the tree, the attributes, the text, the `set_ui` and `set_states` state (they move
+        // `revision`), the hover, active and focus state (`UserState::revision`) and the custom element state. `attach_shadow`
+        // adds a node, so the length moves. A custom element state change moves no counter, so the cascade is kept and used
+        // only while no element has custom element state.
+        let key = (doc.revision(), doc.text_revision(), doc.len(), doc.user().revision, want);
+        if let Some((k, styles)) = &built.last
+            && *k == key
+            && !doc.has_custom()
+        {
+            return Ok(styles.clone());
+        }
         drop(doc);
         let doc = self.doc.borrow();
         self.computed.computes.set(self.computed.computes.get() + 1);
-        Ok(rules.compute_for(&doc, want))
+        let styles = Rc::new(built.rules.compute_for(&doc, want));
+        built.last = (!doc.has_custom()).then(|| (key, styles.clone()));
+        Ok(styles)
     }
 
     /// The style of `el` now, or `None` when the element is not connected (an empty declaration).

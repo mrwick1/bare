@@ -67,12 +67,14 @@ use crate::browser_streams as streams;
 use bare_js::eval::{Error, Interp};
 use bare_js::value::{ObjId, Value};
 use bare_net::http::{Client, Method, Request as NetRequest};
-use bare_net::parallel::{MAX_WORKERS, Task};
+use bare_net::parallel::Task;
 use bare_url::{Scheme, Url};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Hard bounds of the fetch layer. Each is checked before the thing grows.
 #[derive(Clone, Copy, Debug)]
@@ -347,8 +349,9 @@ struct Pending {
     xhr: Option<(ObjId, u64)>,
     /// When it was queued (only when `BARE_NET_TRACE` is set).
     queued: Option<std::time::Instant>,
-    /// Its I/O, started on a worker thread before its turn (see `start_queued`). The outcome and the diagnostics.
-    started: Option<Task<(Outcome, Vec<String>)>>,
+    /// Its I/O, started on a worker thread before its turn (see `start_queued`). The outcome and the diagnostics. `None`: the job
+    /// did not send it (the bodies that wait were at the cap, or the page is gone); the page thread sends it at its turn.
+    started: Option<Task<Option<(Outcome, Vec<String>)>>>,
 }
 
 /// What a worker thread needs to send a queued request. It owns its data: a `Pending` holds values of the realm.
@@ -398,6 +401,8 @@ struct FetchState {
     diag: VecDeque<String>,
     dropped_diag: u64,
     halted: Option<Error>,
+    /// Body bytes of the replies that workers read and that wait for their turn. `usize::MAX` once the page is gone.
+    done: Arc<AtomicUsize>,
 }
 
 #[derive(Clone, Copy)]
@@ -425,6 +430,16 @@ impl Default for Fetch {
         Fetch { st: RefCell::default(), lim: Cell::new(FetchLimits::default()), client: RefCell::new(Client::new()), protos: OnceCell::new(), fixed: RefCell::default(), json_parse: Cell::new(None) }
     }
 }
+
+impl Drop for Fetch {
+    /// A queued job that has not begun does not send its request: the page is gone, and the workers serve the next document.
+    fn drop(&mut self) {
+        self.st.borrow().done.store(usize::MAX, Ordering::Relaxed);
+    }
+}
+
+/// Queued GET and HEAD requests that may run on the workers at once. The workers run `MAX_WORKERS` of them at a time, in order.
+const AHEAD: usize = 32;
 
 impl Fetch {
     pub(crate) fn roots(&self, out: &mut Vec<Value>) {
@@ -1810,7 +1825,9 @@ impl Browser {
     }
 
     /// Start the I/O of the first queued requests on worker threads, so that they run together. They settle in the order of the queue,
-    /// as before: only the waiting is shared. At most `MAX_WORKERS` run at once, and the queue is not scanned further.
+    /// as before: only the waiting is shared. Up to `AHEAD` are started, and `MAX_WORKERS` of them run at once: a slow reply holds one
+    /// worker, and the others go on with the requests after it. A job does not send its request while the bodies that wait for their
+    /// turn hold `max_retained` bytes; the page thread sends it at its turn. So the result does not change, only the time.
     /// A request that is not a GET or a HEAD may change the server. It runs when all before it are done, on the thread that settles
     /// it (a worker gains nothing: nothing after it starts before it is done), so the server sees these requests in the order of the script.
     fn start_queued(&self) {
@@ -1822,18 +1839,28 @@ impl Browser {
         if !client.parallel_pays() {
             return;
         }
-        for p in self.dom.fetch.st.borrow_mut().queue.iter_mut().take(MAX_WORKERS) {
+        let mut st = self.dom.fetch.st.borrow_mut();
+        let st = &mut *st;
+        for p in st.queue.iter_mut().take(AHEAD) {
             if !p.method.safe() {
                 break;
             }
             if p.started.is_none() {
-                let wire = p.wire();
+                let (wire, done) = (p.wire(), st.done.clone());
                 p.started = Some(client.spawn(move |client| {
+                    if done.load(Ordering::Relaxed) >= lim.max_retained {
+                        return None;
+                    }
                     if let Some(t) = wire.queued {
                         bare_net::trace::wanted(t);
                     }
                     let mut diag = Vec::new();
-                    (run_one(client, &lim, wire.parts(), &mut diag), diag)
+                    let out = run_one(client, &lim, wire.parts(), &mut diag);
+                    if let Outcome::Done { body, .. } = &out {
+                        // Saturating: `usize::MAX` marks a page that is gone (`Drop for Fetch`).
+                        let _ = done.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |d| Some(d.saturating_add(body.len())));
+                    }
+                    Some((out, diag))
                 }));
             }
         }
@@ -1857,10 +1884,16 @@ impl Browser {
                 break;
             };
             n += 1;
-            let (outcome, diag) = bare_net::trace::blocked(|| match task.started.take() {
+            let (outcome, diag) = bare_net::trace::blocked(|| match task.started.take().map(|t| t.wait()) {
+                Some(Some(Some(out))) => {
+                    if let Outcome::Done { body, .. } = &out.0 {
+                        dom.fetch.st.borrow().done.fetch_sub(body.len(), Ordering::Relaxed);
+                    }
+                    out
+                }
                 // A lost worker is a network error.
-                Some(t) => t.wait().unwrap_or((Outcome::Failed("network error"), Vec::new())),
-                None => {
+                Some(None) => (Outcome::Failed("network error"), Vec::new()),
+                Some(Some(None)) | None => {
                     let mut diag = Vec::new();
                     if let Some(t) = task.queued {
                         bare_net::trace::wanted(t);

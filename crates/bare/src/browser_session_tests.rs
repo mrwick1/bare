@@ -505,3 +505,25 @@ fn a_react_commit_walk_2000_levels_deep_runs_under_the_default_session_limits() 
         assert_eq!(get(&s, &srv, "count").as_deref(), Some("3500"));
     });
 }
+
+#[test]
+fn the_documents_and_the_inputs_of_a_session_share_its_connections() {
+    big(|| {
+        // Chrome keeps its sockets through a navigation and a click. A new pool for each document or input cost a TCP and a TLS
+        // handshake each time on staging (one round trip each), and the first scripts after it ran one at a time.
+        let srv = server(|| {
+            vec![
+                ("/r", html("<button id=b>b</button><script>var n = +(localStorage.getItem('n') || 0) + 1; localStorage.setItem('n', String(n));
+                    if (n < 3) location.reload();
+                    document.getElementById('b').addEventListener('click', function () { var s = document.createElement('script'); s.src = '/s.js'; document.body.appendChild(s) })</script>")),
+                ("/s.js", js("localStorage.setItem('s', 'ran')")),
+            ]
+        });
+        let mut s = Session::new(cfg(srv.url("/r")));
+        let r = s.run();
+        assert_eq!((r.stop, r.pages.len()), (SessionStop::Page(Stop::Settled), 3));
+        assert_eq!(s.resume(&[crate::browser_loader::Input::Click("#b")]).stop, SessionStop::Page(Stop::Settled));
+        assert_eq!(get(&s, &srv, "s").as_deref(), Some("ran"));
+        assert_eq!((srv.total(), srv.connections()), (4, 1));
+    });
+}

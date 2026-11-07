@@ -1030,7 +1030,7 @@ pub struct UiOutcome {
 
 /// The style and the layout of the page at one time: what a frame paints and what hit testing reads.
 pub struct Frame {
-    pub styles: bare_css::cascade::Styles,
+    pub styles: std::rc::Rc<bare_css::cascade::Styles>,
     pub layout: bare_layout::fragment::Layout,
     /// The scroll containers and the size of the page content.
     pub areas: bare_layout::scroll::Areas,
@@ -1047,13 +1047,13 @@ impl Browser {
     }
 
     /// The cascade of `render`, with no layout.
-    pub fn restyle(&mut self) -> R<bare_css::cascade::Styles> {
+    pub fn restyle(&mut self) -> R<std::rc::Rc<bare_css::cascade::Styles>> {
         let dom = self.dom.clone();
         self.it.host_scope(|it| dom.cascade_now(it))
     }
 
     /// The layout of `render` with `styles`, the cascade of the page now (`restyle`).
-    pub fn render_with(&mut self, styles: bare_css::cascade::Styles) -> R<Frame> {
+    pub fn render_with(&mut self, styles: std::rc::Rc<bare_css::cascade::Styles>) -> R<Frame> {
         let dom = self.dom.clone();
         self.it.host_scope(|it| {
             let (layout, areas, bars) = dom.layout_areas(it, &styles)?;

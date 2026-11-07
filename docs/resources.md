@@ -4196,6 +4196,26 @@ HTTP/2 (staging offers none); upload bodies in parallel (POST runs alone); `requ
 
 Follow-ups: `Accept-Encoding` and the connect backup are done (see [Compressed bodies and the connect backup](#compressed-bodies-and-the-connect-backup)); `<link rel=preload>` lookahead is still one at a time (nested `@import` sheets: see the next section); HTTP/2 for servers that offer it.
 
+## Page load on live staging
+
+2026-11-07, archMachine, release. The results and the before/after table are in [progress.md](progress.md#page-load-on-live-staging-settle-network-and-host-work). This section gives the method and the net trace details.
+
+Method:
+- bare: a local flow runner (not in the repository) with the credential handling of `run_live.sh`. It runs one session: load `/login`, log in, open `/`, `/agents`, `/agents/new`, `/agents`, type 8 characters in the search field, and reload. Each `open` is a new document in the same session. `BARE_NET_TRACE=1` was on for all runs, before and after.
+- Chrome 155 headless: each route in a new browser context (new connections, cache off), with the session and local storage of the logged-in tab put back before any page script runs. Chrome CPU is the CPU time of all Chrome processes (`SystemInfo.getProcessInfo`). Task time is `TaskDuration` of `Performance.getMetrics`.
+- "data on screen": a JS predicate for each route (for example: a link to an agent exists). bare checks it after each round that did work and writes the trace mark `probe`. Chrome checks it in a `MutationObserver`.
+- Critical chain: from the last request that ended before "settled", go back to the request that ended last before it started, and so on. "net" is the sum of their times from start to end. It is a lower bound for any browser that runs the same JS.
+
+New trace marks (only with `BARE_NET_TRACE`): `DOMContentLoaded`, `load`, `round N did D` (a round that did work), `probe` (`bare_net::trace::set_probe`), `wait G ms, blocker ...` (the task that keeps the page from settling, `Scheduler::settle_blocker`) and `settled`.
+
+Settle: `slept_us` is about 0 on every route. The quiet window adds time only when a blocking task is due inside it. On staging the last task is the link prefetch of the app router, about 0.4 to 1 s after the data is on screen. Chrome sends the same prefetch requests (`?_rsc` and the route chunks), so this tail is network.
+
+Network, before the fixes: the critical chain of `/agents` is the document, chained waves of chunks and API calls, and the 1.16 MB `/api/agents` reply. A new connection took 136 ms to the first byte of its first reply (mean) and a reused one 54 ms. The difference was Nagle: the request waited for the ACK of the client Finished. After `TCP_NODELAY` both take about 54 ms.
+
+Window: with a window of 6, a slow reply (the 600 ms file of the tests, or a slow API call) held the 7th and later requests in the queue, though workers were free. The window is 32 now. The 6 workers and 6 connections for each server limit the wire, as before. A finished download that is not taken yet counts its bytes. When they reach the total byte cap of the page (`max_total_bytes`), the next queued jobs do not download and the page thread fetches them at their turn, so a page fails exactly as it did with one download at a time. `fetch` uses `max_retained` the same way.
+
+Geometry: `perf` (frame pointers) of the agents flow showed `with_geo` at 12%, `bounding_rect` at 4.6%, `element_rects` at 2.6% and `RuleSet::cascade` at 4.4% self time. 95% of the geometry time was the cascade. Calls to `with_geo` and their style time, one run before the cascade reuse: login 153 calls and 319 ms, `/` 22 and 238 ms, `/agents` 14 and 64 ms, typing 7 and 86 ms. After: login 150 calls and 159 to 178 ms, `/` 15 to 20 and 87 to 141 ms, `/agents` 13 to 15 and 32 to 57 ms, typing 5 and 6 to 14 ms.
+
 ## Compressed bodies and the connect backup
 
 2026-11-07, archMachine, release. Baseline: origin/main 9bb8a04. Each build has its own `CARGO_TARGET_DIR` under `/data/bare-tmp`. Staging: `https://staging.app.8vox.ai/login` (no login). Machine load was 12 to 18 from other builds. Choices: [decisions.md](decisions.md#compressed-bodies-and-the-connect-backup).

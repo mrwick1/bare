@@ -2,7 +2,7 @@
 //! navigations that its scripts ask for. One `Session` is one browsing session: the same [`WebStorage`] (local and
 //! session storage) lives through every document, and nothing else does.
 //!
-//! One document = one fresh `Browser` (a new JS realm, a new DOM, new timers, a new `fetch` queue, a new client).
+//! One document = one fresh `Browser` (a new JS realm, a new DOM, new timers, a new `fetch` queue, a new fork of the session client: the connections stay, the cache does not).
 //! `location.assign/replace/reload`, `history.go(0)` and a changed `location.href` end the run of the old document at
 //! once ([`Stop::Navigate`]): no old script, timer, event or `fetch` callback runs after the request. The old `Browser` is
 //! dropped BEFORE the next document is requested, so a heap is never held twice. A navigation to another origin gets the
@@ -86,8 +86,8 @@ impl Default for SessionLimits {
 pub struct SessionConfig {
     /// The first document (http or https). A fragment is kept for `location.hash`.
     pub url: String,
-    /// Makes the client of a document. The document download, the script download and `fetch` share its connections (`Client::fork`). A test passes
-    /// a `Client::with_roots` factory.
+    /// Makes the client of the session, once. Every document download, script download and `fetch` of the session uses a fork of it, so
+    /// they share its connections (`Client::fork`). A test passes a `Client::with_roots` factory.
     pub client: Box<dyn FnMut() -> Client>,
     /// The limits of each document. `max_time`, `max_tasks` and `max_rounds` are cut to what the session has left.
     pub page: PageLimits,
@@ -182,6 +182,9 @@ pub struct Session {
     browser: Option<Browser>,
     /// What the session has used so far, shared by `run` and every `resume`.
     used: Used,
+    /// The first client that `cfg.client` made. Each document and each `resume` gets a fork: they share the connections, as the
+    /// sockets of a browser outlive a navigation.
+    client: Option<Client>,
 }
 
 #[derive(Default)]
@@ -275,7 +278,13 @@ fn load_document(client: &mut Client, url: &str, body: Option<&Body>, lim: &Sess
 impl Session {
     pub fn new(mut cfg: SessionConfig) -> Session {
         let store = cfg.storage.take().unwrap_or_default();
-        Session { cfg, store, browser: None, used: Used::default(), hist: Vec::new(), at: 0 }
+        Session { cfg, store, browser: None, used: Used::default(), hist: Vec::new(), at: 0, client: None }
+    }
+
+    /// A client that shares the connections of the session.
+    fn fork(&mut self) -> Client {
+        let make = &mut self.cfg.client;
+        self.client.get_or_insert_with(|| make()).fork()
     }
 
     /// The storage of the session: it lives through every document.
@@ -358,13 +367,13 @@ impl Session {
                 None => {
                     // The settled document goes on: same realm, no load.
                     let mut b = self.browser.take().expect("resume checked the browser");
-                    let r = b.resume_page((self.cfg.client)(), page, steps);
+                    let r = b.resume_page(self.fork(), page, steps);
                     (b, r)
                 }
                 Some(Next { url, body, how }) => {
                     // The old document ends here: its realm, timers and callbacks are gone before the next load starts.
                     self.browser = None;
-                    let mut base = (self.cfg.client)();
+                    let mut base = self.fork();
                     let (url, html) = match load_document(&mut base, &url, body.as_ref(), &lim, deadline) {
                         Ok(d) => d,
                         Err(why) => return SessionStop::LoadFailed(why),

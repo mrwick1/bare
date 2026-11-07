@@ -164,12 +164,14 @@ A page asks for many files. Each one costs a round trip (about 40 ms to staging)
 - At most 6 workers and 6 idle connections for each server, as Chrome does for HTTP/1.1. A `Client` and its forks (`Client::fork`) share the pool, the root certificates and the workers. A page makes three clients (document, scripts, `fetch`); before, each opened its own connection and read the system roots.
 - A worker waits 1 s for a job, then its thread ends. A page that asks for a few files at a time starts at most 6 threads, not one for each file. A parked thread uses no CPU.
 - At most 2 new connections are set up at once (`Gate`). A burst of 6 new connections to staging loses SYN packets, and each lost one costs a retry after about 1 s. Measured: 6 at once, 2 to 4 late; 2 at once, none (to verify on other servers).
-- The loader reads the targets of the parsed document in order and starts the next ones while fewer than `WINDOW` (6) wait. A result is taken when it is the turn of the element. Script order, `defer`, `async`, `onload` order and the errors are the same as before; only the waiting is shared. The text of a file that finished early counts against the byte caps when it is taken, not when it is read.
-- `fetch` and XHR: the first 6 queued requests that are a GET or a HEAD start together. A request with another method runs alone, when all before it are done, on the page thread. The server sees these in the order of the script.
+- The loader reads the targets of the parsed document in order and starts the next ones while fewer than `WINDOW` (32) wait. The window was 6 at first: one slow file then held back every file after it, though workers were free. The workers limit the wire, so a larger window costs only queued jobs. A page that ends drops the jobs that have not started. A result is taken when it is the turn of the element. Script order, `defer`, `async`, `onload` order and the errors are the same as before; only the waiting is shared. The text of a file that finished early counts against the byte caps when it is taken, not when it is read.
+- `fetch` and XHR: the first 32 queued requests (`AHEAD`) that are a GET or a HEAD start together, up to the first request of another method. A request with another method runs alone, when all before it are done, on the page thread. The server sees these in the order of the script.
 - No worker is used until a reply took 10 ms or more to start (`Client::parallel_pays`), and not for a single download. On a fast link (loopback, a LAN) a thread costs more than the round trip it hides: without this the loader rows of `resources.md` rose by up to 4% in instructions. The first request of a page is the document, so a remote server marks itself before the first script.
 - Timing is off unless `BARE_NET_TRACE` is set. When it is off, the cost is one read of a `OnceLock` for each request, and no clock read for the trace.
 - HTTP/2 is used when the server picks `h2` in ALPN (see [HTTP/2 is our own code](#http2-is-our-own-code-one-reader-thread-for-each-connection)). Staging answers HTTP/1.1 only (Chrome reports `http/1.1` for all 69 requests of three loads; `h2` gets no ALPN, see [staging-network.md](staging-network.md)), so staging does not change.
 - The request body is copied for a worker (a `Pending` holds values of the realm and cannot leave the thread).
+- A session keeps its first client. Each document and each input (`Session::resume`) gets a fork, so the idle connections and the slow-link flag (`parallel_pays`) stay, and the cache of each document is its own. Before, each input made a new client with no connections.
+- Every connection sets `TCP_NODELAY`. With Nagle, the first request on a new TLS 1.3 connection waited for the ACK of the client Finished (about one round trip).
 
 ## Compressed bodies and the connect backup
 
@@ -461,3 +463,15 @@ To follow the standard, add the five names to the first arm of `Builder::in_temp
 
 - A separate process for sensitive sites, for example banking.
 - When to replace the bitmap font with TrueType.
+
+## Cascade reuse for geometry reads
+
+A geometry read (`getBoundingClientRect`, `getClientRects`, `offsetWidth`, an IntersectionObserver frame) ran a full cascade of the document each time. On the staging login this was 150 reads and 320 to 450 ms. The numbers are in [resources.md](resources.md#page-load-on-live-staging). The choices:
+
+- Keep the last cascade (`Built::last`, an `Rc<Styles>`) with the rule set that made it. A new rule set drops it.
+- Key: `revision`, `text_revision`, the node count, `UserState::revision` (hover, active, focus) and `want`. These move at every change that the selectors read: tree, attributes, text, `set_ui`, `set_states` and the user state. `attach_shadow` moves no counter, but it adds a node, so the node count moves.
+- A custom element state change moves no counter. A document with custom element state does not keep or use the cascade. Moving `revision` in `set_custom_state` was rejected: it would also drop the query caches at each state change.
+- The charges and caps of a read are the same with or without reuse, so a page hits the same limits.
+- The layout is not kept: the cascade was 95% of the geometry time.
+- `Styles` is shared as `Rc`, not cloned: a clone costs on each miss.
+

@@ -78,11 +78,13 @@ use bare_html::dom::{NodeData, NodeId};
 use bare_js::eval::{Error, Interp};
 use bare_js::value::{ObjId, Value};
 use bare_net::http::Client;
-use bare_net::parallel::{MAX_WORKERS, Task};
+use bare_net::parallel::Task;
 use bare_url::Url;
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 mod preload;
@@ -741,6 +743,7 @@ impl Browser {
             items,
             async_queue: VecDeque::new(),
             loaded: false,
+            probed: false,
         };
         let stop = run.go();
         let mut res = run.res;
@@ -800,6 +803,7 @@ impl Browser {
             items: Vec::new(),
             async_queue: VecDeque::new(),
             loaded: dom.scripts.ready.get() == 2,
+            probed: false,
         };
         let stop = run.resume(steps).err().unwrap_or(Stop::Settled);
         let mut res = run.res;
@@ -833,19 +837,24 @@ struct Parsed {
 struct Net {
     client: Client,
     /// By the kind and the URL of the target. A download that finished waits here, with its text, until it is taken.
-    started: HashMap<String, Task<Result<resources::Resource, LoadError>>>,
+    /// `None`: the job did not download (see `done`), and the page thread does it when it takes the file.
+    started: HashMap<String, Task<Option<Result<resources::Resource, LoadError>>>>,
     /// Targets that the page thread fetched itself. `prefetch` does not start them again.
     /// By `Net::tag`. A clash only skips one early start.
     direct: HashSet<u64, std::hash::BuildHasherDefault<IdHash>>,
+    /// Bytes of the started downloads that are done and not taken. A job that finds them at the total cap does not download, so the
+    /// text that waits stays within the cap, plus the `MAX_WORKERS` bodies that are read at once. The result of a file does not change.
+    done: Arc<AtomicUsize>,
 }
 
-/// Downloads that are started and not taken at once: the connections that a server gets (Chrome opens 6 for HTTP/1.1). It also bounds
-/// the text that finished early and waits to be taken.
-const WINDOW: usize = MAX_WORKERS;
+/// Downloads that are started and not taken at once. The workers run `MAX_WORKERS` of them at a time (Chrome opens 6 connections for
+/// HTTP/1.1), in the order they were started. A file that is done waits here until its element takes it, and does not hold a worker:
+/// with a window of 6, a slow first script kept the 5 files after it from being replaced, and the connections stood idle.
+const WINDOW: usize = 32;
 
 impl Net {
     fn new(client: Client) -> Net {
-        Net { client, started: HashMap::new(), direct: HashSet::default() }
+        Net { client, started: HashMap::new(), direct: HashSet::default(), done: Arc::default() }
     }
 
     fn tag(expect: Expect, url: &Url) -> u64 {
@@ -870,8 +879,18 @@ impl Net {
             return;
         }
         let url = Url { scheme: url.scheme, host: url.host.clone(), port: url.port, path: url.path.clone() };
-        let (target, lim) = (resources::Target { expect, url }, lim.clone());
-        self.started.insert(key, self.client.spawn(move |client| resources::fetch(client, &target, &lim, deadline, retained)));
+        let (target, lim, done) = (resources::Target { expect, url }, lim.clone(), self.done.clone());
+        self.started.insert(key, self.client.spawn(move |client| {
+            if done.load(Ordering::Relaxed) >= lim.max_total_bytes {
+                return None;
+            }
+            let r = resources::fetch(client, &target, &lim, deadline, retained);
+            if let Ok(r) = &r {
+                // Saturating: `usize::MAX` marks a page that is done (`Drop`).
+                let _ = done.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |d| Some(d.saturating_add(r.text.len())));
+            }
+            Some(r)
+        }));
     }
 
     /// The result for `target`: the download that was started, or a new one that this thread waits for.
@@ -883,12 +902,23 @@ impl Net {
         match self.started.remove(&Net::key(target.expect, &target.url)) {
             // The text counts against the total cap now, with what the page keeps now (it was read with the room of the time it started).
             Some(task) => match task.wait() {
-                Some(Ok(r)) if r.text.len() > lim.max_total_bytes.saturating_sub(retained) => Err(LoadError::TotalTooLarge),
-                Some(r) => r,
+                Some(Some(Ok(r))) => {
+                    self.done.fetch_sub(r.text.len(), Ordering::Relaxed);
+                    if r.text.len() > lim.max_total_bytes.saturating_sub(retained) { Err(LoadError::TotalTooLarge) } else { Ok(r) }
+                }
+                Some(Some(Err(e))) => Err(e),
+                Some(None) => resources::fetch(&mut self.client, target, lim, deadline, retained),
                 None => Err(LoadError::Network("a download thread failed".into())),
             },
             None => resources::fetch(&mut self.client, target, lim, deadline, retained),
         }
+    }
+}
+
+impl Drop for Net {
+    /// The page is done: a job that has not begun does not download (the workers serve the next document of the session).
+    fn drop(&mut self) {
+        self.done.store(usize::MAX, Ordering::Relaxed);
     }
 }
 
@@ -910,6 +940,8 @@ struct Run<'a> {
     items: Vec<Parsed>,
     async_queue: VecDeque<Parsed>,
     loaded: bool,
+    /// `BARE_NET_TRACE` only: the probe of the trace gave true.
+    probed: bool,
 }
 
 type Flow = Result<(), Stop>;
@@ -1274,10 +1306,24 @@ impl Run<'_> {
             self.run_parsed(*p)?;
         }
         let root = self.dom.doc.borrow().root();
+        bare_net::trace::mark(|| "DOMContentLoaded".into(), 0);
         self.fire(EvTarget::Node(root), "DOMContentLoaded", true)?;
         self.after_js()?;
         self.async_queue.extend(items.iter().filter(|p| p.timing == Timing::Async));
         self.rounds()
+    }
+
+    /// `BARE_NET_TRACE` only: run the probe script of the trace once, and mark the first round where it is true.
+    fn probe(&mut self) {
+        if self.probed {
+            return;
+        }
+        let Some(js) = bare_net::trace::probe() else { return };
+        if let Ok(v) = self.b.run_script(&js)
+            && matches!(v, bare_js::value::Value::Bool(true)) {
+            self.probed = true;
+            bare_net::trace::mark(|| "probe".into(), 0);
+        }
     }
 
     /// The rounds of tasks. Returns the reason to stop (always an `Err`).
@@ -1294,6 +1340,7 @@ impl Run<'_> {
             if !self.loaded && self.async_queue.is_empty() && self.dom.scripts.external.borrow().is_empty() {
                 self.loaded = true;
                 self.set_ready(2)?;
+                bare_net::trace::mark(|| "load".into(), 0);
                 self.fire(EvTarget::Window, "load", false)?;
                 self.after_js()?;
                 did += 1;
@@ -1342,16 +1389,25 @@ impl Run<'_> {
                 self.b.collect(&[]).map_err(fatal_of)?;
             }
             if did > 0 {
+                if bare_net::trace::on() {
+                    bare_net::trace::mark(|| format!("round {} did {did}", self.res.rounds), 0);
+                    self.probe();
+                }
                 continue;
             }
             // Idle: wait for the next task if one that blocks the settle is near, else the page is settled. The wait is
             // for the next task of any kind, so a recurring timer that the rule skips still runs on time on the way.
             let now = self.b.now();
             if !self.b.blocks_settle(now + self.lim.quiet.as_secs_f64() * 1000.0) {
+                bare_net::trace::mark(|| "settled".into(), 0);
                 return Err(Stop::Settled);
             }
             let due = self.b.next_scheduled_due().unwrap_or(now);
             let gap = due - now;
+            if bare_net::trace::on() {
+                let b = self.b.settle_blocker(now + self.lim.quiet.as_secs_f64() * 1000.0);
+                bare_net::trace::mark(|| format!("wait {gap:.0} ms, blocker {b:?} now {now:.0}"), 0);
+            }
             if self.b.uses_virtual_clock() {
                 let pump = self.b.advance_to(due, 1).map_err(fatal_of)?;
                 self.res.tasks += pump.ran;

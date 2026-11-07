@@ -103,6 +103,22 @@ pub fn mark(name: impl FnOnce() -> String, us: u64) {
     }
 }
 
+static PROBE: Mutex<Option<String>> = Mutex::new(None);
+
+/// A script that the page loader runs after each round while tracing is on, until it gives `true`. Then the loader marks
+/// "probe". A measurement tool sets it to find when the data of an app is in the DOM. `None` clears it.
+pub fn set_probe(js: Option<String>) {
+    *PROBE.lock().unwrap() = js;
+}
+
+/// The probe, while tracing is on.
+pub fn probe() -> Option<String> {
+    if !on() {
+        return None;
+    }
+    PROBE.lock().unwrap().clone()
+}
+
 static RECS: Mutex<Vec<Rec>> = Mutex::new(Vec::new());
 static BLOCKED: AtomicU64 = AtomicU64::new(0);
 static SLEPT: AtomicU64 = AtomicU64::new(0);
