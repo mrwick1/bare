@@ -519,13 +519,7 @@ impl Dom {
     }
 
     fn rect_obj(&self, it: &mut Interp<'_>, b: Box4) -> R<Value> {
-        let rect = self.obj(it, it.object_prototype())?;
-        let (x, y, w, h) = (b.0 as f64, b.1 as f64, (b.2 - b.0) as f64, (b.3 - b.1) as f64);
-        for (name, v) in [("x", x), ("y", y), ("width", w), ("height", h), ("top", y), ("right", x + w), ("bottom", y + h), ("left", x)] {
-            let k = self.key(it, name)?;
-            it.define_data(rect, k, Value::Number(v), false, true, true)?;
-        }
-        Ok(Value::Object(rect))
+        crate::browser_geom::rect_object(self, it, [b.0 as f64, b.1 as f64, (b.2 - b.0) as f64, (b.3 - b.1) as f64], false)
     }
 
     /// Compute every observation once, queue the entries of those that changed, and ask for their delivery.

@@ -493,12 +493,13 @@ impl Dom {
     fn pop_due(&self, upto: f64) -> Option<(f64, Run)> {
         let mut s = self.sched.borrow_mut();
         let s = &mut *s;
-        let key = *s.tasks.keys().next()?;
-        let due = f64::from_bits(key.0);
+        let first = s.tasks.first_entry()?;
+        let due = f64::from_bits(first.key().0);
         if due > upto {
             return None;
         }
-        let task = s.tasks.remove(&key).expect("key exists");
+        let key = *first.key();
+        let task = first.remove();
         let run = match task {
             Task::Timer(id) => match s.timers.get_mut(&id) {
                 None => Run::Nothing,

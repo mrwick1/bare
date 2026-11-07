@@ -15,8 +15,7 @@
 //! - `getBoundingClientRect` of a range, and of an element with no box fragment, is the union of the rectangles that are not empty.
 //!   With none that is not empty, the first one. With no rectangle, all zero.
 //!
-//! The list is an `Array` with a method `item` (own, not enumerable). Chrome gives a `DOMRectList` (not an `Array`, and its methods are
-//! on the prototype). The rectangles are plain objects with the eight fields, as `getBoundingClientRect`.
+//! The list is a `DOMRectList` and the rectangles are `DOMRect` (`browser_geom.rs`).
 //!
 //! Gates and gaps (recorded, none is faked)
 //! - An SVG or MathML element, or a range that holds one, is `Unsupported` (SVG has no layout here). So is a `col` or `colgroup` (layout makes
@@ -32,7 +31,7 @@ use crate::browser_range::bounds;
 use bare_css::values::{Keyword, Property, Value as Cv};
 use bare_html::dom::{Document, NodeData, NodeId};
 use bare_js::eval::{Error, Interp};
-use bare_js::value::{PropertyKey, Value};
+use bare_js::value::Value;
 use bare_layout::boxes::{Kind, Tree};
 use bare_layout::font::{self, Metrics};
 use bare_layout::fragment::{Fragment, Kind as Frag, Layout, Rect};
@@ -413,54 +412,6 @@ fn gate(what: &'static str) -> Error {
     Error::Unsupported(unsupported(what))
 }
 
-/// A plain object with the eight fields of `DOMRect`.
-pub(crate) fn rect_object(d: &Dom, it: &mut Interp<'_>, r: Rect) -> V {
-    let rect = d.obj(it, it.object_prototype())?;
-    let (x, y, w, h) = (r.x as f64, r.y as f64, r.w as f64, r.h as f64);
-    for (name, v) in [("x", x), ("y", y), ("width", w), ("height", h), ("top", y), ("right", x + w), ("bottom", y + h), ("left", x)] {
-        let k = d.key(it, name)?;
-        it.define_data(rect, k, Value::Number(v), true, true, true)?;
-    }
-    Ok(Value::Object(rect))
-}
-
-/// The list of rectangles: an array with a method `item`.
-fn list(d: &Dom, it: &mut Interp<'_>, rects: &[Rect]) -> V {
-    let items = rects.iter().map(|&r| rect_object(d, it, r)).collect::<R<Vec<_>>>()?;
-    let a = it.array_from(&items)?;
-    let Value::Object(o) = a else { return Ok(a) };
-    let f = d.rect_item(it)?;
-    let k = d.key(it, "item")?;
-    it.define_data(o, k, Value::Object(f), true, false, true)?;
-    Ok(a)
-}
-
-fn item(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let Some(&i) = a.first() else {
-        return Err(it.type_error("Failed to execute 'item' on 'DOMRectList': 1 argument required, but only 0 present."));
-    };
-    let n = it.to_js_number(i)?;
-    let i = if n.is_finite() { n.trunc().rem_euclid(4294967296.0) as u32 } else { 0 };
-    let key = d.key(it, "length")?;
-    let len = match it.get_value(this, key)? {
-        Value::Number(n) => n as u32,
-        _ => 0,
-    };
-    if i < len { it.get_value(this, PropertyKey::Index(i)) } else { Ok(Value::Null) }
-}
-
-impl Dom {
-    /// The function `item` of every list: one for the realm.
-    fn rect_item(&self, it: &mut Interp<'_>) -> R<bare_js::value::ObjId> {
-        if let Some(f) = self.range_rect_item() {
-            return Ok(f);
-        }
-        let f = self.add_fn(it, item, "item", 1, false)?;
-        self.set_range_rect_item(f);
-        Ok(f)
-    }
-}
-
 /// The rectangles of an element, in window coordinates.
 pub(crate) fn element_rects(d: &Dom, it: &mut Interp<'_>, el: NodeId) -> R<Vec<Rect>> {
     if !d.in_document(it, el)? {
@@ -496,7 +447,7 @@ pub(crate) fn element_rects(d: &Dom, it: &mut Interp<'_>, el: NodeId) -> R<Vec<R
 fn client_rects(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let el = d.el(it, this)?;
     let r = element_rects(d, it, el)?;
-    list(d, it, &r)
+    crate::browser_geom::rect_list(d, it, &r)
 }
 
 fn range_rects(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<Vec<Rect>> {
@@ -519,12 +470,12 @@ fn range_rects(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<Vec<Rect>> {
 
 pub(crate) fn range_client_rects(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let r = range_rects(d, it, this)?;
-    list(d, it, &r)
+    crate::browser_geom::rect_list(d, it, &r)
 }
 
 pub(crate) fn range_bounding_rect(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let r = range_rects(d, it, this)?;
-    rect_object(d, it, union(&r))
+    crate::browser_geom::layout_rect(d, it, union(&r))
 }
 
 /// `getBoundingClientRect` of an element that has no box fragment: the union of its rectangles.

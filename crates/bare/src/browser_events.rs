@@ -172,7 +172,14 @@ impl Dom {
         // Most calls find no listener: they leave before the event is looked up.
         let snapshot: Vec<Listener> = {
             let st = self.st.borrow();
-            st.listeners.get(&t).into_iter().flatten().filter(|l| l.capture == capture && *l.ty == *ty).cloned().collect()
+            // A plain loop: the iterator chain keeps `Cloned::next` out of line, and its cost moves with unrelated code.
+            let mut list = Vec::new();
+            for l in st.listeners.get(&t).into_iter().flatten() {
+                if l.capture == capture && *l.ty == *ty {
+                    list.push(l.clone());
+                }
+            }
+            list
         };
         if snapshot.is_empty() || self.st.borrow().events[&ev].stop {
             return Ok(());

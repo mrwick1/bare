@@ -891,7 +891,7 @@ pub(crate) fn needs_new(it: &mut Interp<'_>, h: H) -> Error {
     match HANDLERS.iter().position(|&x| x as usize == h as usize) {
         Some(k) => it.type_error(&format!("Failed to construct '{}': Please use the 'new' operator, this DOM object constructor cannot be called as a function.", IFACES[k])),
         None if h as usize == unknown_ctor as *const () as usize => it.type_error("Illegal constructor"),
-        None => it.type_error("Failed to construct: please use the 'new' operator"),
+        None => crate::browser_geom::needs_new(it, h).unwrap_or_else(|| it.type_error("Failed to construct: please use the 'new' operator")),
     }
 }
 
