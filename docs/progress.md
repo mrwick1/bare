@@ -2260,3 +2260,50 @@ Checks:
 - 41 of the 42 `tools/js/*_check.sh` match Node. `parse_check.sh` needs `acorn` and does not start, as on main.
 
 Not tested: a machine other than archMachine; wall time; scale 100 of the load rows; a live page other than the typing page; the bytecode interpreter with these caches (it keeps its own entries); a host that uses setup mode around `Browser::install`.
+
+## Shapes and member read caches (A1 and A2): the cost rows, second pass, not merged
+
+Status: the code is on branch `t3/js-cost-regression-fixes`, rebased on `16b5c83`. It is not merged. The typing page and the RSS pass. The cost matrix still fails: 23 of 805 rows are over +0.5% under both allocators (186 before this pass). The task rule is to stop after two fix attempts and report.
+
+Changes in this pass:
+- Exotic receivers that hold no named properties of their own (`ArrayBuffer`, `DataView`, typed arrays, wrappers of numbers, booleans, symbols and BigInts) get a new root shape `ROOT_PLAIN`. The member cache accepts them, and their prototypes, for every key that is not a canonical numeric string. Proxies, named host objects and `String` wrappers keep `ROOT_EXOTIC` and stay uncached.
+- `member_ic` reads a receiver that is never cached (`Heap::ic_refuses`) with the plain read at once, with no entry.
+- A proxy trap is read through 4 cache entries for each trap (`ProxyState::ics`), as `toJSON` is.
+- `Heap::intern_str` copies an ASCII name to UTF-16 with no decoding. The interner starts with 4,096 slots. The realm interns about 2,000 names. Realm start-up: about 123 K fewer instructions.
+- `define_own_property` adds a new plain data property to an extensible shape-mode object in one step (`add_data_fast`). Not in setup mode.
+- `Shapes::add` keeps the last 256 transitions that missed the first child (`recent`), so a literal with keys in another order does not reach the children map.
+- `own_keys` reads keys from the shape entries with no property build (`Object::each_key`). `for-in` over a `String` wrapper: +1,285 to about 0 instructions for each loop.
+- Template objects (`GetTemplateObject`) are built frozen in one step (`Heap::new_frozen_array`), in dictionary mode at once.
+
+Results (archMachine, against `16b5c83` from `base-build`):
+- `keycost.sh`: `#a1` 365.5 M for each key against 411.1 M (-11.1%). `#f0` 372.2 M against 419.0 M (-11.2%). Load and mount 719.4 M against 771.2 M (-6.7%).
+- Peak RSS of `#a1`: 32.3 MiB at 20 keys and 33.0 MiB at 50 keys. Main: 36.9 MiB and 36.8 MiB.
+- Full cost matrix (805 rows): mean -1.12% under glibc. 23 rows are over +0.5% under both allocators. 8 rows are over under one allocator only.
+- Rows that pass now: `tagged_load sites` -8.6% (scale 1) and -9.5% (scale 10), `binary_load dataview` -7.7%, `binary_load scan` -6.5%, `web_apis_load segmenter` -7.8%, `proxy_load keys` -2.1%, `proxy_load noop` +0.1%, `wrapper_load forin 1000` +0.46%, `numeric_load empty`, `sc_load custom_iter`, `gen_load iterobj`, `stringify_load shallow`, `session_load chain`, `xhr_load`.
+
+Rows still over under both allocators (glibc, jemalloc):
+- `intl_load nf_locale_opts` +2.46% and +2.25% (scale 1), +2.52% and +2.38% (scale 10).
+- `tagged_load call` +2.15% and +1.85% (scale 1), +2.28% and +2.24% (scale 10).
+- `intl_load cmp_opts` +1.74% and +1.62%, +1.78% and +1.76%. `intl_load locale` +1.57% and +1.42%, +1.63% and +1.50%. `intl_load make 10` +0.79% and +0.81%.
+- `proxy_load get_trap 10` +1.46% and +1.27%.
+- `revive_load shallow` +1.16% and +0.85%, +1.02% and +0.96%. `revive_load gc 10` +1.17% and +0.79%.
+- `sc_load symbol_keys` +1.01% and +0.68%, +0.94% and +0.89%. `sc_load toprim 10` +0.89% and +0.80%.
+- `iterator_load flatmap` +0.92% and +0.69%, +1.00% and +0.68%.
+- `gen_load delegate` +0.78% and +0.57%, +0.89% and +0.85%.
+- `seam_load forof_break 10` +0.68% and +0.59%. `range_load iter 10` +0.54% and +0.60%. `wrapper_load forin 10000` +0.59% and +0.57%.
+
+Causes, measured with exact instruction counts (gdb single steps of one call, both builds):
+- Native reads of small objects. Native code (intl option bags, the reviver, iterator results, `Symbol.toPrimitive` and other symbol keys) reads with `Heap::get` or `has_property`, with no cache. `shape_get` on a 2-key object costs about 60 to 80 instructions; `PropMap::find` cost 35 to 42. The extra cost is the loads of the shape, the table and the entries with their bounds checks, and the build of a `Property` from the attribute bits. One `Intl.Collator` options read: lookups 1,491 instructions against 1,323 (+168, 7 option keys). `has_property` with an own hit: 158 against 122. A hit on the prototype: 306 against 223.
+- Frozen receivers. A frozen object is in dictionary mode, so the cache refuses it. A member read then pays the inline test and `member_ic` before the plain read: 279 instructions against 197 on main (+82). The `s.length` read of each `tagged_load call` iteration is such a read.
+- Proxy `get` traps: the trap result path still has about +36 for each read (`q.x`).
+
+Fixes not done (to verify):
+- Freeze and seal as shape transitions, and a flag for frozen elements, so frozen objects and template arrays keep shapes and cache hits.
+- A cheaper `shape_get`: one table load for each shape, no `Property` build for `has_property` and for a miss.
+- Caches for the native option and iterator-result reads, as for `toJSON` and the proxy traps.
+
+Checks:
+- `cargo test --release -p bare-js --lib`: 780 passed, 1 ignored. New test: `frozen_array_is_built_frozen_in_order`.
+- Not run, because the cost gate fails first: `cargo test --release --workspace`, `tools/js/test262_check.sh`, the `*_check.sh` scripts.
+
+Not tested: a machine other than archMachine; wall time; scale 100 of the load rows; a live page other than the typing page; the workspace tests after the rebase on `16b5c83`.
