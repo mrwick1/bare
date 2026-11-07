@@ -1,0 +1,29 @@
+disabled-basic	a:disabled,optional,read-only b:disabled,optional,read-only c:disabled,optional,read-only d:disabled,optional,read-only e:disabled,read-only f:read-only g:read-only h:disabled,optional,read-only i:enabled,optional,read-only j:enabled,optional,read-write k:enabled,optional,read-only l:enabled,optional,read-write m:enabled,read-only n:read-only
+disabled-optgroup-option	a:disabled,read-only b:disabled,read-only c:enabled,read-only d:disabled,read-only e:enabled,checked,read-only f:enabled,read-only
+disabled-fieldset-descendants	a:disabled,read-only b:enabled,optional,read-write c:disabled,optional,read-only d:disabled,optional,read-only e:disabled,optional,read-only f:disabled,read-only g:disabled,optional,read-only h:read-only i:disabled,optional,read-only j:enabled,optional,read-write
+disabled-fieldset-legend-not-first-child	a:disabled,read-only b:enabled,optional,read-write c:disabled,read-only d:enabled,optional,read-write
+disabled-changes	b:enabled,optional,read-write c:enabled,optional,read-only d:enabled,optional,read-write | a:disabled,read-only b:disabled,optional,read-only c:disabled,optional,read-only d:enabled,optional,read-write | d:disabled,optional,read-only | a:enabled,read-only b:enabled,optional,read-write c:enabled,optional,read-only d:enabled,optional,read-write | c:disabled,optional,read-only
+enabled-set-of-elements	a,b,c,d,e,f,g,h 
+required-and-optional-by-type	a,b,f,g,h,j,k,o / c,d,e,i,l,m,n,p,q,r,s,t
+required-select-textarea-others	a,c / b,d,e
+required-changes	a:enabled,optional,read-write b:enabled,required,read-write | a:enabled,required,read-write b:enabled,optional,read-write | a:enabled,optional,read-only
+read-write-inputs	a,f,i,j / ,,,,b,c,d,e,g,h,k,l,m,n
+read-write-textarea-select	a:enabled,optional,read-write b:enabled,optional,read-only c:disabled,optional,read-only d:enabled,optional,read-only e:enabled,optional,read-only f:read-only
+read-write-contenteditable	a:read-write b:read-write c:read-write d:read-only e:read-only f:read-write g:read-only h:read-only i:enabled,optional,read-only
+read-write-changes	a:enabled,optional,read-write b:read-only | a:enabled,optional,read-only b:read-write | a:enabled,optional,read-write b:read-only
+placeholder-shown-basic	a,c,e,h,i,l,p
+placeholder-shown-value-changes	a,b | c | a,b,c | b,c
+checked-basic	a,c,h
+checked-property-changes	b,c | a,c | a,c | a,c
+checked-clean-follows-attribute	a | b
+checked-radio-group	b | c | a
+checked-reset	b | a
+checked-clone	a,a 2
+default-basic	a,c,d,h
+default-submit-button	c,e
+default-property-changes	b | b | a,b
+indeterminate-progress-radio	a,d,e,h,i
+indeterminate-radio-group-changes	a,b |  | 
+indeterminate-property	c | a,c truefalsetrue | c
+combined-selectors	a b a,c c
+style-follows-state	rgb(0, 0, 0)/0px/9px/0px/0px/0px rgb(0, 0, 0)/4px/3px/3px/3px/4px rgb(255, 0, 0)/0px/0px/5px/3px/4px rgb(255, 0, 0)/7px/3px/5px/3px/4px rgb(0, 0, 0)/0px/9px/0px/3px/0px rgb(0, 0, 0)/4px/3px/3px/3px/4px

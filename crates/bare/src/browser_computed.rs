@@ -246,6 +246,8 @@ impl Snap {
             }
         }
         Ok(match v {
+            // Chrome gives `normal` for `letter-spacing` and `0px` for `word-spacing`.
+            Cv::Keyword(Keyword::Normal) if p == Property::WordSpacing => "0px".to_string(),
             Cv::Keyword(k) => k.name().to_string(),
             // A number `line-height` is times the font size of the element, in pixels.
             Cv::Number(n) if p == Property::LineHeight => format!("{}px", num(n * self.style.px(Property::FontSize))),

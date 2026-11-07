@@ -814,8 +814,10 @@ impl Dom {
         if kind == "radio" && self.input_checked(n) {
             for o in self.radio_group(it, n)? {
                 self.st.borrow_mut().inputs.entry(o).or_default().checked = Some(false);
+                self.sync_ui(o);
             }
         }
+        self.sync_ui(n);
         Ok(())
     }
 

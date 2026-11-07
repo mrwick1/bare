@@ -41,6 +41,7 @@
 //!   the end of a selector, but they never match, so `li::before, p` styles only `p` (as in Chrome). Module 4 may bring back
 //!   `::before` and `::after`, which make boxes.
 //! - Namespaces (`svg|a`).
+//! - The form pseudo-classes (`:disabled`, `:checked`, ...) are in `form.rs`.
 //! - Dynamic pseudo-classes (`:hover`, `:focus`, `:active`, `:visited`) are valid, but they never match,
 //!   because a page that is only shown has no pointer and no focus.
 //!
@@ -48,6 +49,7 @@
 
 use bare_html::dom::{Atom, Document};
 
+use crate::form::Form;
 use crate::tokenizer::{Token, Tokens, tokenize};
 
 /// How deep `:not(:not(...))` may go. A deeper selector is thrown away, so a bad style sheet cannot overflow the stack.
@@ -110,6 +112,8 @@ pub enum Simple {
     Defined,
     /// `:state(name)`: a custom element with that custom state (`Document::states`).
     State(Box<str>),
+    /// `:disabled`, `:checked` and the other form pseudo-classes. See `form.rs`.
+    Form(crate::form::Form),
     /// `:hover` and friends. Never true.
     Never,
     /// `:not(.a, b)`: true when none of the compounds match. Each one is a list of simple selectors.
@@ -385,6 +389,16 @@ impl Parser<'_, '_> {
                     "empty" => Simple::Empty,
                     "link" | "any-link" => Simple::Link,
                     "defined" => Simple::Defined,
+                    "disabled" => Simple::Form(Form::Disabled),
+                    "enabled" => Simple::Form(Form::Enabled),
+                    "required" => Simple::Form(Form::Required),
+                    "optional" => Simple::Form(Form::Optional),
+                    "read-only" => Simple::Form(Form::ReadOnly),
+                    "read-write" => Simple::Form(Form::ReadWrite),
+                    "placeholder-shown" => Simple::Form(Form::PlaceholderShown),
+                    "checked" => Simple::Form(Form::Checked),
+                    "default" => Simple::Form(Form::Default),
+                    "indeterminate" => Simple::Form(Form::Indeterminate),
                     "first-of-type" => Simple::Nth(Nth { a: 0, b: 1, from_end: false, of_type: true }),
                     "last-of-type" => Simple::Nth(Nth { a: 0, b: 1, from_end: true, of_type: true }),
                     "hover" | "active" | "focus" | "focus-within" | "focus-visible" | "visited" | "target" | "invalid" | "valid" => Simple::Never,
