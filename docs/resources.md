@@ -4200,7 +4200,38 @@ The cause of the loopback cost: the in-process test server scans the request hea
 | `.text` | 6,037,767 B | 6,134,983 B | +97,216 B (+1.6%) |
 | Peak RSS of `bare --run` on `/login` (5 runs, median) | 27,848 KiB | 28,648 KiB | +800 KiB (+2.9%) |
 
-Runs of the RSS: base 27,720 to 27,976 KiB, new 28,636 to 28,884 KiB, so the gap is not noise. The cause is not fully known. Each decode holds a window and its tables, and 6 workers can decode at once. Cutting the `BufReader` from 32 KiB to 8 KiB and starting the buffer at 4 times the wire length recovered about 0.4 MiB. Hypothesis: the rest is decoder state on the workers, not leaked memory. To verify: a heap profile.
+Runs of the RSS: base 27,720 to 27,976 KiB, new 28,636 to 28,884 KiB, so the gap is not noise. Cause and fix: [Peak RSS of the decoders](#peak-rss-of-the-decoders).
+
+### Peak RSS of the decoders
+
+2026-11-07, archMachine, release, `bare --run https://staging.app.8vox.ai/login`. Peak RSS is `ru_maxrss` (`wait4`). Two blocks of 5 runs for each build, one block after the other. Builds: dd52611 (before #196), 92145ba (#196), and #196 with this fix.
+
+| Build | Block 1 median (range), KiB | Block 2 median (range), KiB |
+| --- | --- | --- |
+| before #196 | 28,084 (27,808 to 28,260) | 28,000 (27,500 to 28,200) |
+| #196 | 29,028 (28,808 to 29,284) | 28,920 (28,868 to 29,216) |
+| #196 and this fix | 28,512 (28,204 to 28,624) | 28,584 (28,516 to 28,724) |
+
+The fix gives back about half of the gap: #196 is +944 and +920 KiB over before #196, and the fix is +428 and +584 KiB over it.
+
+How the cause was found:
+
+- A counting allocator (a local patch, not committed) gave the same peak live heap in both builds: 18,098 KiB before #196 and 18,076 KiB with #196. So the extra memory is not live data. It is memory that the heaps keep after a free.
+- `/proc/PID/smaps` at the peak, grouped by kind of mapping. The heaps of the worker threads (one arena for each thread) hold 884 to 896 KiB before #196 and 1,396 to 1,472 KiB with #196. The code and read-only data of the binary are larger by about 100 KiB each, but they vary by 100 to 150 KiB from run to run, so they are within noise. The main heap is the same (about 12.4 MiB).
+- `MALLOC_ARENA_MAX=1` (one heap for all threads) cut the gap from about +1,000 to +330 KiB (27,660 against 27,988 KiB). A fixed mmap threshold did not change the gap. With jemalloc the gap was larger (32,088 against 33,960 KiB), so it is not only a quirk of glibc.
+- Cutting the growth of the buffers in `Client::fetch`, and the read loop alone, gave at most 150 KiB. The first idea did not explain the gap.
+
+Cause: each download on a worker thread built a streaming decoder, with the 32 KiB window of `miniz_oxide`, and the loader read the decoded body in pieces into a growing buffer. Up to 6 workers do this at once, each in its own heap, and a heap keeps its high-water mark.
+
+Fix: `Body::decoded_whole` (`encoding.rs`) reads the whole wire body of a gzip or deflate reply, and then decodes it in one call into one buffer. The decoder then needs no window, because the output buffer is the window. The gzip trailer gives the output size, so the buffer has its final size at once. A wrong size in the trailer costs at most 1,032 times the wire size, and never more than the cap. The gzip CRC-32 and length, and the zlib header, are checked. `resources::fetch` uses it. A stream (`fetch` and XHR bodies), `br`, and a list of codings keep the streaming decoders. The caps and the deadline are the same: the read checks the deadline every 16 KiB, and a decoded size over `cap` is `TooLarge`.
+
+The rest of the gap (+428 to +584 KiB) is not explained. Hypothesis: the code and tables of the new decoders (file pages), and the wire buffer that now sits beside the output buffer. To verify: compare `smaps` of the fix with before #196, with more runs.
+
+Cost: `tools/js/instr.sh` (min of 3), origin/main against this change, all rows of the loader, resources, preload, sheets, fetch, streams, session and https examples. No row was over +0.5% except `resources_load small 1` (2,483,468 to 2,513,594, +1.21%) and `small 10` (19,845,166 to 20,221,121, +1.89%). That row runs the test server in the same process, and the repeated runs of main and of the change gave the same spread, so the difference is noise (to verify: it moves between runs by about 1% with no code change). With jemalloc (`LD_PRELOAD`) the row gave 24,754,049 and 24,956,501 for main, and 24,959,317 and 24,951,287 for the change.
+
+Tests: 5 new in `encoding.rs` for the whole-body decode, and 1 in `resources.rs` (a gzip body against the per-resource cap, the total cap, chunked framing and a cut body). `cargo test -p bare-net` and `cargo test -p bare --lib` pass.
+
+Not tested: a compressed body near the 128 MiB cap on this path; a gzip body with more than one member; the speed of the whole-body decode on its own (only the instruction rows, which do not send `Accept-Encoding`: to verify).
 
 ### Not tested
 

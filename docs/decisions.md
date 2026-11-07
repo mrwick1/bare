@@ -170,7 +170,7 @@ A page asks for many files. Each one costs a round trip (about 40 ms to staging)
 
 Follow-ups of [Parallel downloads](#parallel-downloads). The numbers are in [resources.md](resources.md#compressed-bodies-and-the-connect-backup). The choices:
 
-- The client asks for `gzip, deflate` and, over https only, `br` (as Chrome does). The decoder is a chain of `Read` stages over the body, built on the first read. A body is never held whole for decoding.
+- The client asks for `gzip, deflate` and, over https only, `br` (as Chrome does). The decoder is a chain of `Read` stages over the body, built on the first read. The page loader is the exception: a gzip or deflate download is read whole and decoded in one step (see the end of this section).
 - Fetch rules: codings are undone from the last to the first, at most 5. Headers stay as sent, so `content-encoding` and `content-length` are visible to a script, and `fetch` shows the decoded bytes. A coding that the client does not know (`zstd`) is passed through unchanged, and `Response::encoded()` is true. The callers (loader, session, `fetch`) refuse such a body with an error, as before.
 - The decoded size has the cap of the wire size (`MAX_REPLY`, 128 MiB), and the caller caps apply to decoded bytes. A body that grows past the cap is an error, so a zip bomb stops at the limit. A bad gzip, deflate or br body is an error. A body with no content (HEAD, 204, 304) is not decoded.
 - When the decoder ends, the client drains the raw body. That checks the framing and returns the connection to the pool. A connection that is not drained is not reused.
@@ -181,6 +181,7 @@ Follow-ups of [Parallel downloads](#parallel-downloads). The numbers are in [res
 - Connect backup: a connect that is not done 250 ms after the first SYN starts a second socket to the same address (as the backup connect job of Chrome). The first socket to finish wins and the other is closed. A failed connect (a refusal) starts no backup. The `Gate` of 2 new connections is not changed, because the backup runs inside the same `connect` call. The staging stall was a lost SYN: the kernel retry comes at 1 s; the backup connects at about 285 ms.
 - Happy Eyeballs between IPv6 and IPv4 already existed in `tcp.rs` (interleaved addresses, 250 ms). Staging has one IPv4 address.
 - XHR `progress`: `total` stays the wire `Content-Length` and `loaded` counts decoded bytes, as the spec says.
+- Whole-body decode (added after the RSS check): the loader keeps every script and style sheet whole, so it reads a gzip or deflate body whole and decodes it in one call (`Body::decoded_whole`). The decoder needs no 32 KiB window then, and the output has its final size from the gzip trailer. 6 workers decode at once, and each keeps its high-water mark in its own heap. It gave back about half of the +920 to +944 KiB that the streaming decoders added to the peak RSS of `/login`. Streams, `br` and a list of codings keep the streaming decoders. Details: [resources.md](resources.md#peak-rss-of-the-decoders).
 
 ## Identifier lookup
 

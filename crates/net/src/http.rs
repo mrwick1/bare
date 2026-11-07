@@ -1137,6 +1137,15 @@ impl Read for Body {
 }
 
 impl Body {
+    /// The whole decoded body of a gzip or deflate reply, in one step (see `encoding::Decoded::read_all`). `None` for any other body, or one that
+    /// was read from already: read it with `Read`.
+    pub fn decoded_whole(&mut self, max: usize, deadline: Instant) -> Option<io::Result<Vec<u8>>> {
+        match &mut self.0 {
+            Source::Decoded(decoded) => decoded.read_all(max, deadline),
+            _ => None,
+        }
+    }
+
     /// How many bytes the body will have, when the server said so (up to the limit). Used to make room at once.
     fn size_hint(&self) -> usize {
         match &self.0 {

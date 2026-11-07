@@ -120,7 +120,9 @@ dependencies = [
  "bare-tls",
  "bare-url",
  "brotli-decompressor",
+ "crc32fast",
  "flate2",
+ "miniz_oxide 0.9.1",
 ]
 
 [[package]]
