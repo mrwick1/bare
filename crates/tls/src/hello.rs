@@ -11,7 +11,7 @@
 //!   limits only signatures inside certificates. The staging chain is signed with P-384/SHA-384
 //!   (RFC 8446 §4.2.3: when this extension is present, `signature_algorithms` does not apply
 //!   to certificates);
-//! - SNI host name and ALPN `http/1.1`.
+//! - SNI host name and ALPN `http/1.1`, with `h2` before it when the caller offers it.
 //!
 //! No PSK, no early data, no TLS 1.2 fallback, no compression, no renegotiation.
 //! `HelloRetryRequest` is detected and rejected with `HelloError::HelloRetryRequest`.
@@ -41,7 +41,7 @@ pub const ECDSA_SECP384R1_SHA384: u16 = 0x0503;
 pub const MAX_SESSION_ID_LEN: usize = 32;
 pub const MAX_SERVER_NAME_LEN: usize = 253;
 /// Size of the longest ClientHello we can write (32-byte session ID, 253-byte name).
-pub const MAX_CLIENT_HELLO_LEN: usize = 431;
+pub const MAX_CLIENT_HELLO_LEN: usize = 434;
 
 /// SHA-256("HelloRetryRequest"). A ServerHello with this random is a HelloRetryRequest.
 pub const HELLO_RETRY_REQUEST_RANDOM: [u8; 32] = [
@@ -220,6 +220,8 @@ pub struct ClientHelloParams<'a> {
     pub x25519_public: &'a [u8; 32],
     /// DNS host name, 1 to 253 ASCII bytes, no trailing dot, not an IP address (RFC 6066 §3).
     pub server_name: &'a [u8],
+    /// Offer `h2` before `http/1.1`.
+    pub alpn_h2: bool,
 }
 
 fn valid_server_name(n: &[u8]) -> bool {
@@ -284,6 +286,10 @@ pub fn encode_client_hello(p: &ClientHelloParams, out: &mut [u8]) -> Result<usiz
     })?;
     w.ext(EXT_ALPN, |w| {
         let list = w.open(2)?;
+        if p.alpn_h2 {
+            w.u8(2)?;
+            w.put(b"h2")?;
+        }
         w.u8(8)?;
         w.put(b"http/1.1")?;
         w.close(list, 2)
@@ -422,9 +428,13 @@ mod tests {
     const RFC8448_SERVER_PUB: &str = "c9828876112095fe66762bdbf7c672e156d6cc253b833df1dd69b1b04e751f0f";
 
     fn enc(random: u8, sid: &[u8], pubk: u8, name: &[u8]) -> Result<Vec<u8>, HelloError> {
+        enc_alpn(random, sid, pubk, name, false)
+    }
+
+    fn enc_alpn(random: u8, sid: &[u8], pubk: u8, name: &[u8], alpn_h2: bool) -> Result<Vec<u8>, HelloError> {
         let mut out = [0u8; MAX_CLIENT_HELLO_LEN];
         let n = encode_client_hello(
-            &ClientHelloParams { random: &[random; 32], session_id: sid, x25519_public: &[pubk; 32], server_name: name },
+            &ClientHelloParams { random: &[random; 32], session_id: sid, x25519_public: &[pubk; 32], server_name: name, alpn_h2 },
             &mut out,
         )?;
         Ok(out[..n].to_vec())
@@ -434,6 +444,15 @@ mod tests {
     fn client_hello_known_encodings() {
         assert_eq!(hex(&enc(0x11, &[0x22; 32], 0x33, b"example.com").unwrap()), CH_FULL);
         assert_eq!(hex(&enc(0x44, b"", 0x55, b"a").unwrap()), CH_NOSID);
+    }
+
+    #[test]
+    fn client_hello_offers_h2_before_http11() {
+        let (plain, h2) = (hex(&enc(1, b"", 2, b"x.test").unwrap()), hex(&enc_alpn(1, b"", 2, b"x.test", true).unwrap()));
+        assert!(plain.ends_with("0010000b000908687474702f312e31"));
+        assert!(h2.ends_with("0010000e000c02683208687474702f312e31"));
+        // Only the lengths of the ClientHello (3 bytes), its extensions (2 bytes at 0x00..) and the ALPN extension change.
+        assert_eq!(h2.len(), plain.len() + 6);
     }
 
     #[test]
@@ -448,8 +467,9 @@ mod tests {
     #[test]
     fn client_hello_max_size_is_exact_and_framing_is_valid() {
         let name = ["a".repeat(63), "a".repeat(63), "a".repeat(63), "a".repeat(61)].join(".").into_bytes();
-        let m = enc(1, &[9; 32], 2, &name).unwrap();
+        let m = enc_alpn(1, &[9; 32], 2, &name, true).unwrap();
         assert_eq!(m.len(), MAX_CLIENT_HELLO_LEN);
+        assert_eq!(enc(1, &[9; 32], 2, &name).unwrap().len(), MAX_CLIENT_HELLO_LEN - 3);
         let (whole, rest) = next_message(&m, MAX_BODY_LEN).unwrap();
         assert_eq!((whole.len(), rest.len()), (m.len(), 0));
     }
@@ -470,7 +490,7 @@ mod tests {
         let full = enc(1, b"", 2, b"a.b").unwrap();
         for cap in 0..full.len() {
             let mut out = vec![0u8; cap];
-            let p = ClientHelloParams { random: &[1; 32], session_id: b"", x25519_public: &[2; 32], server_name: b"a.b" };
+            let p = ClientHelloParams { random: &[1; 32], session_id: b"", x25519_public: &[2; 32], server_name: b"a.b", alpn_h2: false };
             assert_eq!(encode_client_hello(&p, &mut out), Err(HelloError::BufferTooSmall), "cap {cap}");
         }
     }

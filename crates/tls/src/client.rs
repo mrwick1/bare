@@ -2,7 +2,7 @@
 //!
 //! Composes `record`, `hello`, `key_schedule`, `x25519` and a chain verifier into one
 //! `std::io::{Read, Write}` stream. It offers one suite (TLS_AES_128_GCM_SHA256), one group
-//! (X25519), CertificateVerify scheme 0x0403 (ecdsa_secp256r1_sha256) and ALPN `http/1.1`.
+//! (X25519), CertificateVerify scheme 0x0403 (ecdsa_secp256r1_sha256) and ALPN `h2` and `http/1.1` (`h2` only when the caller offers it).
 //!
 //! Handshake order is fixed. Any other message is an error:
 //! `ClientHello -> ServerHello -> EncryptedExtensions -> Certificate -> CertificateVerify
@@ -225,6 +225,7 @@ pub struct ClientStream<T: Read + Write> {
     pending_pos: usize,
     state: State,
     http11: bool,
+    h2: bool,
 }
 
 /// Overwrite with zeros in a way the compiler keeps.
@@ -253,7 +254,12 @@ impl ChainVerifier for Roots<'_> {
 /// (never against certificates the peer sends), the real clock and OS random.
 /// The caller must set socket read and write timeouts.
 pub fn connect<T: Read + Write>(io: T, host: &str, roots: &TrustStore) -> Result<ClientStream<T>, Error> {
-    connect_with(io, host, &Roots(roots))
+    connect_with(io, host, &Roots(roots), false)
+}
+
+/// Same as `connect`, and offers ALPN `h2` before `http/1.1`. Check `alpn_h2` after.
+pub fn connect_h2<T: Read + Write>(io: T, host: &str, roots: &TrustStore) -> Result<ClientStream<T>, Error> {
+    connect_with(io, host, &Roots(roots), true)
 }
 
 /// Connect over `io` with the real clock and OS random.
@@ -261,6 +267,7 @@ pub(crate) fn connect_with<T: Read + Write, V: ChainVerifier>(
     io: T,
     host: &str,
     verifier: &V,
+    h2: bool,
 ) -> Result<ClientStream<T>, Error> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -268,18 +275,30 @@ pub(crate) fn connect_with<T: Read + Write, V: ChainVerifier>(
         .as_secs() as i64;
     let mut rnd = [0u8; RANDOM_LEN];
     random::fill(&mut rnd).map_err(|_| Error::Random)?;
-    let r = connect_inner(io, host, verifier, now, &rnd);
+    let r = connect_alpn(io, host, verifier, now, &rnd, h2);
     wipe(&mut rnd);
     r
 }
 
 /// Same, with the time and the random bytes given (tests only call this one).
+#[cfg(test)]
 pub(crate) fn connect_inner<T: Read + Write, V: ChainVerifier>(
     io: T,
     host: &str,
     verifier: &V,
     now: i64,
     rnd: &[u8; RANDOM_LEN],
+) -> Result<ClientStream<T>, Error> {
+    connect_alpn(io, host, verifier, now, rnd, false)
+}
+
+fn connect_alpn<T: Read + Write, V: ChainVerifier>(
+    io: T,
+    host: &str,
+    verifier: &V,
+    now: i64,
+    rnd: &[u8; RANDOM_LEN],
+    h2: bool,
 ) -> Result<ClientStream<T>, Error> {
     let guard = Guard { io, budget: HANDSHAKE_WIRE_BUDGET, deadline: Some(Instant::now() + HANDSHAKE_DEADLINE), why: None };
     let mut s = ClientStream {
@@ -290,8 +309,9 @@ pub(crate) fn connect_inner<T: Read + Write, V: ChainVerifier>(
         pending_pos: 0,
         state: State::Open,
         http11: false,
+        h2: false,
     };
-    match s.handshake(host, verifier, now, rnd) {
+    match s.handshake(host, verifier, now, rnd, h2) {
         Ok(()) => {
             let g = s.rl.get_mut();
             g.budget = usize::MAX;
@@ -341,13 +361,14 @@ impl<'a> R<'a> {
     }
 }
 
-/// EncryptedExtensions (section 4.3.1). Returns whether ALPN `http/1.1` was selected.
-/// Allowed: server_name (empty ack), supported_groups (a list), ALPN with one protocol.
-fn parse_encrypted_extensions(body: &[u8]) -> Result<bool, Error> {
+/// EncryptedExtensions (section 4.3.1). Returns whether ALPN `http/1.1` and whether `h2` was selected.
+/// Allowed: server_name (empty ack), supported_groups (a list), ALPN with one protocol (`h2` only if offered).
+fn parse_encrypted_extensions(body: &[u8], offer_h2: bool) -> Result<(bool, bool), Error> {
     let mut r = R(body);
     let list = r.vec16()?;
     r.done()?;
     let (mut sni, mut groups, mut alpn) = (false, false, false);
+    let mut h2 = false;
     let mut e = R(list);
     while !e.0.is_empty() {
         let ty = e.u16()? as u16;
@@ -378,14 +399,15 @@ fn parse_encrypted_extensions(body: &[u8]) -> Result<bool, Error> {
                 let mut n = R(names);
                 let name = n.vec8()?;
                 n.done()?; // the server picks exactly one
-                if name != b"http/1.1" {
+                h2 = name == b"h2" && offer_h2;
+                if name != b"http/1.1" && !h2 {
                     return Err(Error::Alpn);
                 }
             }
             _ => {}
         }
     }
-    Ok(alpn)
+    Ok((alpn && !h2, h2))
 }
 
 /// Certificate (section 4.4.2). Fills `chain` with slices of `body`. Returns the count.
@@ -538,7 +560,7 @@ impl<T: Read + Write> ClientStream<T> {
         if self.hs_pos == self.hs.len() { Ok(()) } else { Err(Error::Unexpected("message data across a key change")) }
     }
 
-    fn handshake<V: ChainVerifier>(&mut self, host: &str, verifier: &V, now: i64, rnd: &[u8; RANDOM_LEN]) -> Result<(), Error> {
+    fn handshake<V: ChainVerifier>(&mut self, host: &str, verifier: &V, now: i64, rnd: &[u8; RANDOM_LEN], offer_h2: bool) -> Result<(), Error> {
         let scalar: &[u8; 32] = rnd[..32].try_into().unwrap();
         let client_random: &[u8; 32] = rnd[32..64].try_into().unwrap();
         let session_id = &rnd[64..];
@@ -547,7 +569,7 @@ impl<T: Read + Write> ClientStream<T> {
         let public = x25519::public_key(scalar);
         let mut ch = [0u8; hello::MAX_CLIENT_HELLO_LEN];
         let n = hello::encode_client_hello(
-            &ClientHelloParams { random: client_random, session_id, x25519_public: &public, server_name: host.as_bytes() },
+            &ClientHelloParams { random: client_random, session_id, x25519_public: &public, server_name: host.as_bytes(), alpn_h2: offer_h2 },
             &mut ch,
         )?;
         let mut t = Transcript::new();
@@ -579,7 +601,7 @@ impl<T: Read + Write> ClientStream<T> {
         // EncryptedExtensions.
         let n = self.read_message(ENCRYPTED_EXTENSIONS, MAX_ENCRYPTED_EXTENSIONS)?;
         let msg = &self.hs[self.hs_pos..self.hs_pos + n];
-        self.http11 = parse_encrypted_extensions(&msg[hello::HANDSHAKE_HEADER_LEN..])?;
+        (self.http11, self.h2) = parse_encrypted_extensions(&msg[hello::HANDSHAKE_HEADER_LEN..], offer_h2)?;
         t.update(msg);
         self.consume(n);
 
@@ -630,6 +652,11 @@ impl<T: Read + Write> ClientStream<T> {
     /// True when the server selected ALPN `http/1.1`. False means no ALPN (HTTP/1.1 by default).
     pub fn alpn_http11(&self) -> bool {
         self.http11
+    }
+
+    /// True when the server selected ALPN `h2`. Only `connect_h2` offers it.
+    pub fn alpn_h2(&self) -> bool {
+        self.h2
     }
 
     pub fn get_ref(&self) -> &T {
@@ -994,8 +1021,9 @@ mod tests {
             pending_pos: 0,
             state: State::Open,
             http11: false,
+            h2: false,
         };
-        assert!(s.handshake(HOST, &Pin(HOST), NOW, &client_random()).is_err());
+        assert!(s.handshake(HOST, &Pin(HOST), NOW, &client_random(), false).is_err());
         let _ = s.fail(Error::Hello(HelloError::HelloRetryRequest));
         let out = &s.rl.get_ref().io.output;
         assert_eq!(&out[out.len() - 7..], &[21, 3, 3, 0, 2, 2, 47]);
@@ -1087,6 +1115,24 @@ mod tests {
             s.push(&certificate_verify(0x0403, CV_ALPN));
         });
         assert_eq!(e, Error::BadSignature);
+    }
+
+    #[test]
+    fn h2_is_selected_only_when_it_was_offered() {
+        let alpn = |name: &[u8]| {
+            let mut l = vec![name.len() as u8];
+            l.extend_from_slice(name);
+            let mut d = (l.len() as u16).to_be_bytes().to_vec();
+            d.extend_from_slice(&l);
+            extension(16, &d)
+        };
+        let body = |exts: &[u8]| [&(exts.len() as u16).to_be_bytes()[..], exts].concat();
+        assert_eq!(parse_encrypted_extensions(&body(&alpn(b"h2")), true), Ok((false, true)));
+        assert_eq!(parse_encrypted_extensions(&body(&alpn(b"h2")), false), Err(Error::Alpn));
+        assert_eq!(parse_encrypted_extensions(&body(&alpn(b"http/1.1")), true), Ok((true, false)));
+        assert_eq!(parse_encrypted_extensions(&body(&alpn(b"http/1.1")), false), Ok((true, false)));
+        assert_eq!(parse_encrypted_extensions(&body(&[]), true), Ok((false, false)));
+        assert_eq!(parse_encrypted_extensions(&body(&alpn(b"h3")), true), Err(Error::Alpn));
     }
 
     #[test]
