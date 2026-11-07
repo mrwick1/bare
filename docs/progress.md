@@ -1897,3 +1897,50 @@ The headless journey of 2026-11-07 showed two gaps (see "Journey status"): `Obje
 - The first version failed the cost rule. It made both Storage objects at start, so `Heap::has_exotics` was true on every page. Browser rows rose by 1% to 2% (`range_load live`, `session_load heavy`, `observer_load raf`, `web_apis_load matchall`) although the heap had 2 more objects. The `dataset_load keys` rows rose by 7% (a hash set in `own_keys`, then boxed slices from the dataset) and the `write` rows by 1.3% (a call to the host on each write). After the fixes (lazy objects, `Vec` results, no set when there are no ordinary keys, a heap flag that skips the prototype checks until an open named object exists) no row is over.
 
 Not tested: the live staging site after the change (not allowed in this task); Chrome rows other than the 64 cases above; `tools/js/test262_check.sh` and `tools/js/exec_diff.sh` (the change touches only host named objects, and test262 has none); a `Set-Cookie` header of a response and a `Cookie` header of a request (not built); a page that reads `localStorage` on the full default quota; a machine other than archMachine.
+
+## Page load on live staging: settle, network and host work
+
+Measured on 2026-11-07, archMachine, release, staging `https://staging.app.8vox.ai`, logged in as the staging admin. Read only: no data was created, changed or deleted. Each route ran 5 times in bare and 5 times in Chrome 155 headless. All times are medians in ms from the start of the step. Load average: 5.0 to 6.5 for "before", 4.7 to 6.3 for "after", 3.8 to 5.1 for Chrome. The tool and the method are in [resources.md](resources.md#page-load-on-live-staging).
+
+The question was why a route takes 2 to 4 s in bare. The hypothesis was the 1,500 ms quiet window of the settle rule. The numbers do not support it: `slept_us` is about 0 on all routes. The quiet window waits only for blocking tasks that are due inside it. It is not a wait after the last task. The time after the app data is on screen is the link prefetch of the Next.js app router (`?_rsc` requests and route chunks). Chrome sends the same requests.
+
+Causes that were not the network, and the fixes:
+- TCP Nagle (`crates/net/src/tcp.rs`). The first request on a new TLS connection waited for the ACK of the client Finished. Time to first byte on a new connection went from 136 ms to 54 ms (mean), the same as on a reused connection. `set_nodelay(true)` on each connection.
+- A new client for each input (`browser_session.rs`). `Session::resume` made a new `Client`, so a click or a typed text had no idle connections and the slow-link flag was reset. The session keeps its first client now. Each document and each input gets a fork: the connections stay, the cache does not.
+- A window of 6 in queue order (`browser_loader.rs`, `browser_fetch.rs`). The loader started a download only while fewer than 6 waited. One slow file held back all files after it. The loader and `fetch` now start up to 32 queued requests ahead. The 6 workers still limit the requests on the wire. Results are still taken in the order of the page. A page that ends drops the downloads that have not started.
+- The same cascade again (`browser_computed.rs`). Each geometry read (`getBoundingClientRect`, `getClientRects`, IntersectionObserver frames) ran a full cascade of the document. With no change between two reads, the cascade is used again. The key is `revision`, `text_revision`, the node count and the hover, active and focus revisions of the document. A document with custom element state does not keep it. Style time of geometry reads (3 runs before, 3 runs after): login 320 to 450 ms to 160 to 180 ms, `/` 240 to 340 ms to 90 to 140 ms, typing 70 to 90 ms to 6 to 14 ms.
+
+Breakdown. "data" is the time when the app data is on screen (a probe in the page, see resources.md). "settled" is the end of the settle rule in bare and the start of 1,500 ms of network quiet in Chrome. "net" is the network time of the critical chain to "settled": the greedy chain of requests that each started after the one before ended. "CPU" is the process CPU of bare. For Chrome, "task" is the main-thread task time of the page and "CPU" is the CPU of all Chrome processes.
+
+| Route | bare before: data / settled / CPU | bare after: data / settled / CPU | after: net / not net | Chrome: data / settled / task / CPU |
+| --- | --- | --- | --- | --- |
+| load `/login` | 872 / 894 / 90 | 687 / 716 / 80 | 537 / 179 | 618 / 665 / 80 / 590 |
+| login (submit to overview) | 2515 / 3646 / 1360 | 1494 / 2472 / 1030 | 1422 / 1050 | 1136 / 1579 / 340 / 1270 |
+| open `/` | 1365 / 2617 / 830 | 893 / 1859 / 600 | 1320 / 539 | 780 / 1325 / 348 / 1270 |
+| open `/agents` | 1887 / 2458 / 580 | 1405 / 1846 / 460 | 1430 / 416 | 1366 / 1474 / 275 / 1290 |
+| open `/agents/new` | 1353 / 1891 / 520 | 1017 / 1439 / 410 | 999 / 440 | 842 / 1084 / 220 / 1380 |
+| type 8 characters in the search | 366 / 372 / 310 | 293 / 294 / 240 | 82 / 212 | 115 / 163 / 46 / 90 |
+| reload `/agents` with the search query | 1816 / 2371 / 500 | 1425 / 1950 / 400 | 1575 / 375 | 1167 / 1252 / 271 / 1150 |
+
+Result: "settled" fell 18% to 32% on each route, and "data" fell 20% to 41%. On `/agents` the data is on screen 39 ms after Chrome. On each page load the CPU of bare is lower than the CPU of all Chrome processes. It is 1.0 to 3.0 times the main-thread task time of Chrome. Typing is the exception: 240 ms against 90 ms (all processes) and 46 ms (task).
+
+What is left that is not the network (after):
+- JS run time. Most of the CPU is the JS engine: the webpack bootstrap, React render and the JSON parse of the replies. On `/agents`: 48 ms before the lazy chunk request, 120 ms between `/api/clients` and `/api/agents`, and 175 ms from the 1.16 MB `/api/agents` reply to the data on screen. The engine work (bytecode, shapes and inline caches) is in other changes.
+- Geometry reads after a DOM change still run a full cascade and a full layout: about 160 ms on login, about 115 ms on `/`.
+- Typing: React renders the list again for each key. bare 240 ms CPU for 8 keys, Chrome 46 ms of main-thread task time.
+- The tail after "data" is the link prefetch, and it is network. In bare it ends later than in Chrome because each request waits for JS that starts it.
+
+Tests (each failed before its fix):
+- `a_real_connection_sends_small_writes_at_once` (net).
+- `the_documents_and_the_inputs_of_a_session_share_its_connections`: 3 documents and one input, 4 requests on 1 connection (it was 4).
+- `a_slow_script_does_not_hold_back_the_downloads_after_it`: 26 scripts, the second takes 600 ms, done in 0.73 s (it was 1.10 s).
+- `a_slow_fetch_does_not_hold_back_the_requests_queued_after_it`: 26 fetches, the second takes 600 ms, under 0.9 s (it was 1.11 s).
+- `a_page_that_ends_drops_the_downloads_that_have_not_begun`: at most 7 requests (it was 30).
+- `styles_are_reused_until_the_document_changes`: one cascade for three reads; a new one after an attribute, a tree change, a text edit, a focus change and a custom element definition. The test fails if the focus revision or the custom element check is taken out of the key.
+- `rule_set_is_reused_until_an_input_changes`: three reads with no change now give 1 cascade (it was 3).
+
+Checks:
+- `cargo test --workspace` (debug): all 39 test binaries pass.
+- `tools/js/cost_matrix.sh`, all 803 rows, base origin/main 088d316 against this change, glibc and jemalloc. No row is over +0.5% under either allocator. Mean change: glibc -0.03% and jemalloc -0.02% (rows a to l and `bare-stress`), glibc -0.34% and jemalloc -0.30% (rows m to z). The 78 rows of the loader, fetch, session, scheduler, sheets, geometry, scroll, style and observer examples: glibc -1.60%, jemalloc -1.38%.
+
+Not tested: other staging routes; a cold DNS cache; a link with packet loss; HTTP/2 servers with the window of 32; a page with custom elements on the cascade path (the cache is off there); `dom_check.sh` and `browser_check.sh`; arjun-e16; Chrome on the same flows with the CPU throttled to match the load.
