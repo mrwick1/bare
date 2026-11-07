@@ -804,3 +804,7 @@ Tests (`browser_settle_tests.rs`, 10 new): quiet self-re-request settles (1 run)
 Cost: `tools/js/instr.sh` (`instructions:u`, minimum of 3, large malloc cache), origin/main 855e8aa against this change, release, each in its own `CARGO_TARGET_DIR` under `/data/bare-tmp`. 30 rows at scale 1 and 10: `scheduler_load` (3), `observer_load` (mo, raf), `loader_load` (3), `preload_load` (4), `sheets_load` (linked, imports) and `session_load chain`. No row is over +0.5%. The worst is `preload_load script 10` at +0.120%; `scheduler_load mixed 10` is +0.010% and `observer_load raf 1` +0.014%. The best is `preload_load dups 1` at -0.282%. Not measured: `browser_load`, `style_load`, `form_load`, `sheets_load dynamic`, `eval_load` (the change touches no code that they run).
 
 Not tested: the real clock with an idle chain; an idle chain that is judged noisy after a quiet verdict inside one settle window; `<img>` (the loader fetches no image).
+
+## Nested `@import` sheets download in parallel
+
+The `@import` tree of a style sheet now loads on the same parallel workers as other files (follow-up of #186). After a slow reply, `warm_imports` reads the tree breadth first and fills the sheet cache; `flatten` keeps the cascade order, layers, media, cycle cut and limits. A 19-sheet tree at 100 ms per reply went from 1,922 ms to 508 ms. The order matches headless Chrome on six cases (`tools/fixtures/ui/imports-chrome.txt`). Cost and what is not tested: [resources.md](resources.md#nested-import-sheets-in-parallel).

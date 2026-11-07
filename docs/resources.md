@@ -4121,11 +4121,27 @@ Fix (`browser_scheduler.rs`): the rendering step and a message do not count as w
 
 (The first version of the fix counted only the frame. It still ran 95 rounds in 2 of 3 runs, because the message of the tick also counted. That build is not kept.) The number of rounds depends on timing: 1 run of main, with the trace prints on, settled in 10 rounds after 10.6 s.
 
+### Nested `@import` sheets in parallel
+
+2026-11-07, archMachine, release. `Run::warm_imports` (`crates/bare/src/browser_loader/sheets.rs`) runs when a supplied sheet has an `@import` and a reply took 10 ms or more (`Client::parallel_pays`). It reads the `@import` tree breadth first: up to 6 sheets of the queue download together on the same `Net` workers (`Net::start`), and the imports of a sheet join the queue when its text is taken. The texts go to the `fetched` cache. `flatten` then runs as before and finds each text there, so the cascade keeps the import tree order, `layer(...)`, `(media)`, the cycle cut, the depth limit (8), the 256 references, the parts and byte caps, and the fetch budget (a start never goes past `max_fetches`). A failed import is cached and ignored, as in Chrome. A cycle ends in the queue: a URL that is cached or queued is not asked again. With a fast server the function returns at once and nothing changes.
+
+Latency server (100 ms per reply, in-process, `parallel_tests.rs`): a sheet that imports 6 sheets that import 2 each (19 sheets).
+
+| Case | Before | After |
+| --- | --- | --- |
+| 19-sheet tree, 100 ms per reply | 1,922 ms | 508 ms (root, 6 together, 12 in two waves) |
+
+Order check: `tools/fixtures/ui/imports-cases.txt` (tree of 19 sheets with 18 pairs that must resolve in import order, cycle, 404 import, layer, media, chain of 9 at the depth limit). `node tools/ui/chrome_imports.mjs` recorded headless Chrome in `tools/fixtures/ui/imports-chrome.txt`. The test `import_cases_match_chrome_with_and_without_latency` gives the same text at 0 ms (serial path) and 30 ms (workers). A chain past the depth limit still stops with `css-import-depth` at 30 ms.
+
+Cost: `tools/js/instr.sh` (min of 3), origin/main 3a8cc29 against this change, 27 rows: `sheets_load` linked and imports, `loader_load` blocking, dynamic and mixed, `preload_load` font and style, `resources_load` small and dups, each at 1x/10x/100x. Range -0.23% to +0.21%, plus `resources_load small 100` at +1.28% in one run; five runs of that row then gave -0.01% to +0.00% (allocator layout noise, no sheet runs in it). A first version scanned each sheet for `@import` twice and cost +1.3% to +3.5% on `preload_load style`; the call is now inside the scan that `flatten` already makes.
+
+Not tested: a server with many imports that closes the connection after each reply; HTTP/2; `@import supports()` (bare ignores it today); a live site with nested imports; `https` (loopback only); a Chrome timing of the same tree.
+
 ### Not tested
 
 HTTP/2 (staging offers none); a server that closes the connection after each reply, with parallel downloads (the code opens a new connection for each; the tests use keep-alive); upload bodies in parallel (POST runs alone); `requestIdleCallback` together with this settle change (an idle callback that a tick requests still counts as work, so such a page does not settle early; it may not settle at all if it asks at each tick; not measured); other routes than `/login` and `/calls`; Windows or macOS.
 
-Follow-ups: send `Accept-Encoding: gzip` and inflate (the bodies are 3.4 times larger than Chrome reads, 113 ms of bodies in the run above); a connect retry on a second address or after 250 ms against the lost SYN (3 of 9 runs, 1 s each); nested `@import` sheets and `<link rel=preload>` lookahead are still one at a time; HTTP/2 for servers that offer it.
+Follow-ups: send `Accept-Encoding: gzip` and inflate (the bodies are 3.4 times larger than Chrome reads, 113 ms of bodies in the run above); a connect retry on a second address or after 250 ms against the lost SYN (3 of 9 runs, 1 s each); `<link rel=preload>` lookahead is still one at a time (nested `@import` sheets: see the next section); HTTP/2 for servers that offer it.
 
 ## Dense host tables and cached option names
 

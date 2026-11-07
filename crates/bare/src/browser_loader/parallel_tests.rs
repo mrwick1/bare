@@ -168,3 +168,100 @@ fn a_request_that_changes_things_keeps_its_place_between_the_others() {
         assert!(took >= LATENCY * 3 && took < LATENCY * 5, "took {took:?}");
     });
 }
+
+/// The `@import` cases of `tools/fixtures/ui/imports-cases.txt` (name, files with `/page.html`, ids to read) and what Chrome answered.
+type ImportCase = (String, Vec<(String, String)>, Vec<String>);
+
+fn import_cases() -> Vec<ImportCase> {
+    let mut cases: Vec<ImportCase> = Vec::new();
+    for line in include_str!("../../../../tools/fixtures/ui/imports-cases.txt").lines() {
+        if let Some(name) = line.strip_prefix("=== ") {
+            cases.push((name.trim().to_string(), Vec::new(), Vec::new()));
+        } else if let Some(path) = line.strip_prefix("@file ") {
+            cases.last_mut().unwrap().1.push((path.to_string(), String::new()));
+        } else if let Some(ids) = line.strip_prefix("@read ") {
+            cases.last_mut().unwrap().2 = ids.split(' ').map(str::to_string).collect();
+        } else if let Some(file) = cases.last_mut().and_then(|c| c.1.last_mut()) {
+            file.1 += line;
+            file.1 += "\n";
+        }
+    }
+    cases
+}
+
+/// Run one case with `delay` before each style sheet reply. Gives what the page reads, as the Chrome file does, and the time.
+fn run_import_case(case: &ImportCase, delay: Duration) -> (String, PageResult, Duration) {
+    let files: std::collections::HashMap<String, String> = case.1.iter().cloned().collect();
+    let srv = serve(move |path| match files.get(path) {
+        Some(t) => {
+            std::thread::sleep(delay);
+            Reply::css(t.as_str())
+        }
+        None => Reply::new(404, Some("text/plain"), "no"),
+    });
+    let mut b = Browser::new(tree::parse(&case.1[0].1), BrowserLimits::default(), EvalLimits::default(), HeapLimits::default()).expect("browser");
+    b.use_virtual_clock();
+    let limits = PageLimits { quiet: Duration::from_millis(100), ..Default::default() };
+    let start = Instant::now();
+    let r = b.run_page(PageConfig { url: srv.url("/page.html"), client: Client::new(), limits, fetch: None });
+    let took = start.elapsed();
+    let ids = ids_js(&case.2);
+    let v = b.run_script(&format!("{ids}.map(function (i) {{ return i + '=' + getComputedStyle(document.getElementById(i)).direction }}).join()")).unwrap();
+    (b.it.display(v), r, took)
+}
+
+fn ids_js(ids: &[String]) -> String {
+    format!("[{}]", ids.iter().map(|i| format!("'{i}'")).collect::<Vec<_>>().join(","))
+}
+
+fn chrome_import_results() -> Vec<(String, String)> {
+    include_str!("../../../../tools/fixtures/ui/imports-chrome.txt").lines().map(|l| l.split_once('\t').map(|(a, b)| (a.to_string(), b.to_string())).unwrap()).collect()
+}
+
+#[test]
+fn import_cases_match_chrome_with_and_without_latency() {
+    big(|| {
+        let (cases, want) = (import_cases(), chrome_import_results());
+        assert_eq!(cases.len(), want.len());
+        for (case, (name, expected)) in cases.iter().zip(&want) {
+            assert_eq!(&case.0, name);
+            // 0 ms: serial path. 30 ms: workers (a reply of 10 ms or more turns them on).
+            for ms in [0, 30] {
+                let (got, r, _) = run_import_case(case, Duration::from_millis(ms));
+                assert_eq!(&got, expected, "{name} at {ms} ms");
+                assert_eq!(r.stop, Stop::Settled, "{name} at {ms} ms");
+            }
+        }
+    });
+}
+
+#[test]
+fn a_tree_of_imports_downloads_by_level_and_keeps_the_import_order() {
+    big(|| {
+        let case = import_cases().into_iter().next().unwrap();
+        let (got, r, took) = run_import_case(&case, LATENCY);
+        assert_eq!(got, chrome_import_results()[0].1);
+        // 19 sheets: one at a time they take 1900 ms. By level: the root, 6 sheets, 12 sheets (two waves of 6 at most).
+        assert_eq!((r.css.loaded, r.css.failed, r.fetches), (19, 0, 19));
+        assert!(took < LATENCY * 7, "took {took:?}");
+    });
+}
+
+#[test]
+fn a_chain_past_the_depth_limit_still_stops_the_page_with_slow_replies() {
+    big(|| {
+        let srv = serve(|path| {
+            std::thread::sleep(Duration::from_millis(30));
+            match path.trim_start_matches("/d").trim_end_matches(".css").parse::<usize>() {
+                Ok(i) => Reply::css(format!("@import 'd{}.css';", i + 1)),
+                Err(_) => Reply::new(404, Some("text/plain"), "no"),
+            }
+        });
+        let mut b = Browser::new(tree::parse("<link rel=stylesheet href=d0.css><script>var log = []</script>"), BrowserLimits::default(), EvalLimits::default(), HeapLimits::default()).unwrap();
+        b.use_virtual_clock();
+        let r = b.run_page(PageConfig { url: srv.url("/page.html"), client: Client::new(), limits: PageLimits::default(), fetch: None });
+        assert_eq!(r.stop, Stop::Fatal(Fatal::Limit("css-import-depth".into())));
+        assert_eq!(r.scripts_run, 0);
+        assert!(srv.total() <= 10, "{} requests", srv.total());
+    });
+}
