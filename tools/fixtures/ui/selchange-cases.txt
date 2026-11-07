@@ -1,0 +1,221 @@
+var $ = function (i) { return document.getElementById(i) };
+var log = [];
+function nm(n) { return n === document ? '#document' : n === window ? '#window' : n.nodeType === 1 ? n.tagName.toLowerCase() + (n.id ? '#' + n.id : '') : n.nodeName }
+function ev(e) { log.push(e.type + '@' + nm(e.target) + '/' + nm(e.currentTarget) + ' b=' + e.bubbles + ' c=' + e.cancelable + ' t=' + e.isTrusted + ' ' + e.constructor.name + ' p=' + e.eventPhase) }
+function at(f) { setTimeout(function () { watch(); f() }, 100) }
+function watch() { [document, window, $('i'), $('d')].forEach(function (t) { if (t) t.addEventListener('selectionchange', ev) }) }
+var out = function () { return log.join(' | ') };
+function rng(a, b) { var r = document.createRange(); r.setStart($('d').firstChild, a); r.setEnd($('d').firstChild, b); return r }
+=== add-range
+@html <div id=d>hello world</div><input id=i value=abcdef>
+setTimeout(function () { watch(); getSelection().addRange(rng(1, 3))}, 100); out
+=== add-range-twice
+@html <div id=d>hello world</div><input id=i value=abcdef>
+setTimeout(function () { watch(); getSelection().addRange(rng(1, 3)); getSelection().removeAllRanges(); getSelection().addRange(rng(2, 4))}, 100); out
+=== add-collapsed
+@html <div id=d>hello world</div><input id=i value=abcdef>
+setTimeout(function () { watch(); getSelection().addRange(rng(2, 2))}, 100); out
+=== remove-none
+@html <div id=d>hello world</div><input id=i value=abcdef>
+setTimeout(function () { watch(); getSelection().removeAllRanges()}, 100); out
+=== remove-all
+@html <div id=d>hello world</div><input id=i value=abcdef>
+getSelection().addRange(rng(1, 3));
+setTimeout(function () { watch(); getSelection().removeAllRanges() }, 100); out
+=== range-edit
+@html <div id=d>hello world</div><input id=i value=abcdef>
+var r = rng(1, 3); getSelection().addRange(r);
+setTimeout(function () { watch(); r.setEnd($('d').firstChild, 5) }, 100); out
+=== range-edit-same
+@html <div id=d>hello world</div><input id=i value=abcdef>
+var r = rng(1, 3); getSelection().addRange(r);
+setTimeout(function () { watch(); r.setEnd($('d').firstChild, 3) }, 100); out
+=== collapse
+@html <div id=d>hello world</div><input id=i value=abcdef>
+getSelection().addRange(rng(1, 3));
+setTimeout(function () { watch(); getSelection().collapse($('d').firstChild, 2) }, 100); out
+=== collapse-same
+@html <div id=d>hello world</div><input id=i value=abcdef>
+getSelection().collapse($('d').firstChild, 2);
+setTimeout(function () { watch(); getSelection().collapse($('d').firstChild, 2) }, 100); out
+=== select-all-children
+@html <div id=d>hello world</div><input id=i value=abcdef>
+setTimeout(function () { watch(); getSelection().selectAllChildren($('d'))}, 100); out
+=== collapse-to-start
+@html <div id=d>hello world</div><input id=i value=abcdef>
+getSelection().addRange(rng(1, 3));
+setTimeout(function () { watch(); getSelection().collapseToStart() }, 100); out
+=== collapse-to-end-collapsed
+@html <div id=d>hello world</div><input id=i value=abcdef>
+getSelection().collapse($('d').firstChild, 2);
+setTimeout(function () { watch(); getSelection().collapseToEnd() }, 100); out
+=== two-ticks
+@html <div id=d>hello world</div><input id=i value=abcdef>
+setTimeout(function () { watch(); getSelection().addRange(rng(1, 3)); setTimeout(function () { getSelection().removeAllRanges() }, 50)}, 100); out
+=== in-listener
+@html <div id=d>hello world</div><input id=i value=abcdef>
+var n = 0; document.addEventListener('selectionchange', function () { if (n++ < 2) getSelection().collapse($('d').firstChild, n) });
+setTimeout(function () { watch(); getSelection().addRange(rng(1, 3)); setTimeout(function () { log.push('t=' + n) }, 100)}, 100); out
+=== dom-removal
+@html <div id=d>hello world</div><input id=i value=abcdef>
+getSelection().addRange(rng(1, 3));
+setTimeout(function () { watch(); $('d').remove() }, 100); out
+=== dom-text-edit
+@html <div id=d>hello world</div><input id=i value=abcdef>
+getSelection().addRange(rng(1, 3));
+setTimeout(function () { watch(); $('d').firstChild.data = 'xy' }, 100); out
+=== dom-insert-before
+@html <div id=d>hello world</div><input id=i value=abcdef>
+getSelection().collapse($('d'), 1);
+setTimeout(function () { watch(); $('d').insertBefore(document.createElement('b'), $('d').firstChild) }, 100); out
+=== detached-range-edit
+@html <div id=d>hello world</div><input id=i value=abcdef>
+var r = rng(1, 3); watch(); r.setEnd($('d').firstChild, 5); out
+=== input-set-range
+@html <div id=d>hello world</div><input id=i value=abcdef>
+setTimeout(function () { watch(); $('i').focus(); $('i').setSelectionRange(1, 3)}, 100); out
+=== input-set-range-unfocused
+@html <div id=d>hello world</div><input id=i value=abcdef>
+setTimeout(function () { watch(); $('i').setSelectionRange(1, 3)}, 100); out
+=== input-focus-only
+@html <div id=d>hello world</div><input id=i value=abcdef>
+setTimeout(function () { watch(); $('i').focus()}, 100); out
+=== input-select
+@html <div id=d>hello world</div><input id=i value=abcdef>
+setTimeout(function () { watch(); $('i').select()}, 100); out
+=== input-twice
+@html <div id=d>hello world</div><input id=i value=abcdef>
+setTimeout(function () { watch(); $('i').focus(); $('i').setSelectionRange(1, 3); setTimeout(function () { $('i').setSelectionRange(2, 4) }, 50)}, 100); out
+=== input-same
+@html <div id=d>hello world</div><input id=i value=abcdef>
+$('i').focus(); $('i').setSelectionRange(1, 3);
+setTimeout(function () { watch(); $('i').setSelectionRange(1, 3) }, 100); out
+=== input-value-set
+@html <div id=d>hello world</div><input id=i value=abcdef>
+$('i').focus();
+setTimeout(function () { watch(); $('i').value = 'xyz' }, 100); out
+=== input-blur
+@html <div id=d>hello world</div><input id=i value=abcdef>
+$('i').focus(); $('i').setSelectionRange(1, 3);
+setTimeout(function () { watch(); $('i').blur() }, 100); out
+=== textarea-set-range
+@html <div id=d>hello world</div><textarea id=i>abcdef</textarea>
+setTimeout(function () { watch(); $('i').focus(); $('i').setSelectionRange(1, 3)}, 100); out
+=== input-set-range-both-listeners-order
+@html <div id=d>hello world</div><input id=i value=abcdef>
+setTimeout(function () { watch(); getSelection().addRange(rng(1, 3)); $('i').focus(); $('i').setSelectionRange(1, 3)}, 100); out
+=== input-detached
+@html <div id=d>hello world</div>
+var i = document.createElement('input'); i.value = 'abc'; i.addEventListener('selectionchange', ev); document.addEventListener('selectionchange', ev); i.setSelectionRange(1, 2); out
+=== setrangetext
+@html <div id=d>hello world</div><input id=i value=abcdef>
+$('i').focus();
+setTimeout(function () { watch(); $('i').setRangeText('XY', 1, 3, 'select') }, 100); out
+
+=== data-append-end
+@html <div id=d>hello world</div><input id=i value=abcdef>
+getSelection().addRange(rng(1, 3));
+at(function () { $('d').firstChild.appendData('!!') }); out
+=== data-insert-before
+@html <div id=d>hello world</div><input id=i value=abcdef>
+getSelection().addRange(rng(1, 3));
+at(function () { $('d').firstChild.insertData(0, 'ab') }); out
+=== data-delete-cover
+@html <div id=d>hello world</div><input id=i value=abcdef>
+getSelection().addRange(rng(1, 3));
+at(function () { $('d').firstChild.deleteData(0, 5) }); out
+=== data-replace-same-len
+@html <div id=d>hello world</div><input id=i value=abcdef>
+getSelection().addRange(rng(1, 3));
+at(function () { $('d').firstChild.replaceData(0, 5, 'HELLO') }); out
+=== data-set-same
+@html <div id=d>hello world</div><input id=i value=abcdef>
+getSelection().addRange(rng(1, 3));
+at(function () { $('d').firstChild.data = 'hello world' }); out
+=== split-text
+@html <div id=d>hello world</div><input id=i value=abcdef>
+getSelection().addRange(rng(1, 8));
+at(function () { $('d').firstChild.splitText(4) }); out
+=== text-content-set
+@html <div id=d>hello world</div><input id=i value=abcdef>
+getSelection().addRange(rng(1, 3));
+at(function () { $('d').textContent = 'x' }); out
+=== remove-child-in-range
+@html <div id=d>hello <b>big</b> world</div><input id=i value=abcdef>
+var r = document.createRange(); r.setStart($('d'), 0); r.setEnd($('d'), 3); getSelection().addRange(r);
+at(function () { $('d').querySelector('b').remove() }); out
+=== remove-before-boundary
+@html <div id=d>hello <b>big</b> world</div><input id=i value=abcdef>
+var r = document.createRange(); r.setStart($('d'), 1); r.setEnd($('d'), 3); getSelection().addRange(r);
+at(function () { $('d').firstChild.remove() }); out
+=== insert-in-range
+@html <div id=d>hello <b>big</b> world</div><input id=i value=abcdef>
+var r = document.createRange(); r.setStart($('d'), 0); r.setEnd($('d'), 3); getSelection().addRange(r);
+at(function () { $('d').insertBefore(document.createElement('i'), $('d').lastChild) }); out
+=== normalize
+@html <div id=d>hello world</div><input id=i value=abcdef>
+$('d').appendChild(document.createTextNode('!'));
+getSelection().addRange(rng(1, 3));
+at(function () { $('d').normalize() }); out
+=== order-timeout0
+@html <div id=d>hello world</div><input id=i value=abcdef>
+at(function () { setTimeout(function () { log.push('t0-before') }, 0); getSelection().addRange(rng(1, 3)); setTimeout(function () { log.push('t0-after') }, 0); Promise.resolve().then(function () { log.push('micro') }); log.push('sync') }); out
+=== order-raf
+@html <div id=d>hello world</div><input id=i value=abcdef>
+at(function () { requestAnimationFrame(function () { log.push('raf') }); getSelection().addRange(rng(1, 3)) }); out
+=== order-message
+@html <div id=d>hello world</div><input id=i value=abcdef>
+at(function () { var c = new MessageChannel(); c.port1.onmessage = function () { log.push('msg') }; c.port2.postMessage(1); getSelection().addRange(rng(1, 3)) }); out
+=== prevent-default-ignored
+@html <div id=d>hello world</div><input id=i value=abcdef>
+at(function () { document.addEventListener('selectionchange', function (e) { e.preventDefault(); log.push('dp=' + e.defaultPrevented) }); getSelection().addRange(rng(1, 3)) }); out
+=== removed-listener
+@html <div id=d>hello world</div><input id=i value=abcdef>
+at(function () { watch(); getSelection().addRange(rng(1, 3)); document.removeEventListener('selectionchange', ev) }); out
+=== set-base-and-extent-type
+@html <div id=d>hello world</div><input id=i value=abcdef>
+at(function () { getSelection().addRange(rng(1, 3)); log.push(getSelection().type) }); out
+=== focus-input-with-doc-selection
+@html <div id=d>hello world</div><input id=i value=abcdef>
+getSelection().addRange(rng(1, 3));
+at(function () { $('i').focus() }); out
+=== input-value-edit-while-doc-range
+@html <div id=d>hello world</div><input id=i value=abcdef>
+getSelection().addRange(rng(1, 3));
+at(function () { $('i').value = 'q' }); out
+=== window-listener-only
+@html <div id=d>hello world</div><input id=i value=abcdef>
+at(function () { window.addEventListener('selectionchange', ev); getSelection().addRange(rng(1, 3)) }); out
+=== capture-on-window
+@html <div id=d>hello world</div><input id=i value=abcdef>
+at(function () { window.addEventListener('selectionchange', ev, true); document.addEventListener('selectionchange', ev, true); getSelection().addRange(rng(1, 3)) }); out
+=== range-in-other-root
+@html <div id=d>hello world</div><input id=i value=abcdef>
+at(function () { var x = document.createElement('p'); x.textContent = 'abc'; var r = document.createRange(); r.selectNodeContents(x); getSelection().addRange(r); getSelection().collapse(x, 0) }); out
+=== detached-input-fires-at-itself
+@html <div id=d></div>
+var i = document.createElement('input'); i.id = 'i'; i.value = 'abc'; i.addEventListener('selectionchange', ev); i.setSelectionRange(1, 2); out
+=== detached-input-not-seen-by-document
+@html <div id=d></div>
+var i = document.createElement('input'); i.id = 'i'; i.value = 'abc'; i.addEventListener('selectionchange', ev); document.addEventListener('selectionchange', ev); i.setSelectionRange(1, 2); out
+=== removed-after-the-change
+@html <div id=d><input id=i value=abc></div>
+$('i').addEventListener('selectionchange', ev); $('i').setSelectionRange(1, 2); $('i').remove(); out
+=== removed-before-the-change
+@html <div id=d><input id=i value=abc></div>
+var x = $('i'); x.addEventListener('selectionchange', ev); x.remove(); x.setSelectionRange(1, 2); out
+=== appended-after-the-change
+@html <div id=d></div>
+var i = document.createElement('input'); i.id = 'i'; i.value = 'abc'; i.addEventListener('selectionchange', ev); i.setSelectionRange(1, 2); $('d').appendChild(i); out
+=== detached-textarea
+@html <div id=d></div>
+var i = document.createElement('textarea'); i.id = 'i'; i.value = 'abc'; i.addEventListener('selectionchange', ev); i.setSelectionRange(1, 2); out
+=== detached-no-change
+@html <div id=d></div>
+var i = document.createElement('input'); i.id = 'i'; i.addEventListener('selectionchange', ev); i.setSelectionRange(0, 0); out
+=== detached-value-set
+@html <div id=d></div>
+var i = document.createElement('input'); i.id = 'i'; i.addEventListener('selectionchange', ev); i.value = 'abc'; out
+=== detached-in-fragment
+@html <div id=d></div>
+var f = document.createDocumentFragment(), i = document.createElement('input'); i.id = 'i'; i.value = 'abc'; f.appendChild(i); f.addEventListener('selectionchange', ev); i.setSelectionRange(1, 2); out

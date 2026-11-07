@@ -5,13 +5,18 @@
 //! The result is that root and its children. A host copies them where it wants (`Document::import_node`).
 //!
 //! Supported contexts: an HTML element that the "in body" rules read: `div`, `span`, `body`, `head`, `p`, `ul`, `a`, `button`, `script`, `style`,
-//! `textarea`, `title`, `xmp`, `iframe`, `noembed`, `noframes`, `plaintext`, and every element that is not in the gate list. When the context is in a
-//! `form`, `in_form` is true: the form element pointer is set, so a nested `<form>` start tag is ignored.
+//! `textarea`, `title`, `xmp`, `iframe`, `noembed`, `noframes`, `plaintext`, `template`, `noscript`, and every element that is not in the gate list.
+//! When the context is in a `form`, `in_form` is true: the form element pointer is set, so a nested `<form>` start tag is ignored.
+//! `template` is read like `div`: the builder has no "in template" insertion mode, so a `tr` or `td` start tag is ignored, as it is in a page.
+//! The host puts the result in the contents of the template.
+//!
+//! The scripting flag (`scripting`) is true when the context is in the document of the page. Then a `noscript` start tag, and the context
+//! `noscript`, have raw text. It is false for a context that is a `template` or in the contents of one (an inert document): `noscript` is an element.
 //!
 //! Gates (`Unsupported`, nothing is parsed): the contexts `table`, `thead`, `tbody`, `tfoot`, `tr`, `td`, `th`, `caption`, `colgroup`, `col`, `select`,
-//! `template`, `html`, `frameset`, `frame`, and `noscript` (the standard needs table insertion modes, the select mode, template contents, the before-head
-//! and frameset modes, and the scripting flag, which this builder does not have); and every context that is not in the HTML namespace (SVG and MathML
-//! context elements need the adjusted current node of the foreign rules to be the context element). A start tag `noscript`, `frameset` or
+//! `html`, `frameset`, `frame` (the standard needs table insertion modes, the select mode, and the before-head
+//! and frameset modes); and every context that is not in the HTML namespace (SVG and MathML
+//! context elements need the adjusted current node of the foreign rules to be the context element). A start tag `frameset` or
 //! `frame` in the input is gated the same way, because the builder would make a tree that a browser does not make. Nested `table` and `select`
 //! are read by the page rules (see the known gaps of the tree builder): the same tree as for a page.
 //!
@@ -59,9 +64,7 @@ pub fn context_gate(name: &str) -> Option<&'static str> {
     Some(match name {
         "table" | "thead" | "tbody" | "tfoot" | "tr" | "td" | "th" | "caption" | "colgroup" | "col" => "fragment context: table insertion modes",
         "select" => "fragment context: select insertion mode",
-        "template" => "fragment context: template contents",
         "html" | "frameset" | "frame" => "fragment context: before-head, after-head and frameset insertion modes",
-        "noscript" => "fragment context: noscript depends on the scripting flag",
         _ => return None,
     })
 }
@@ -69,19 +72,19 @@ pub fn context_gate(name: &str) -> Option<&'static str> {
 /// The reason why this start tag in a fragment is not supported, if it is not.
 fn tag_gate(name: &str) -> Option<&'static str> {
     Some(match name {
-        "noscript" => "noscript element in a fragment (depends on the scripting flag)",
         "frameset" | "frame" => "frameset in a fragment",
         _ => return None,
     })
 }
 
 /// Parse `input` as the children of an element named `context` in namespace `ns` (lowercase local name for HTML). `in_form` is true when the context
-/// element is a `form` or has a `form` ancestor. Gives the fragment, or says why not. See the header for the gates and the caps.
+/// element is a `form` or has a `form` ancestor. `scripting` is the scripting flag. Gives the fragment, or says why not. See the header for the gates and the caps.
 pub fn parse_fragment(
     input: &str,
     context: &str,
     ns: Ns,
     in_form: bool,
+    scripting: bool,
     lim: &FragmentLimits,
     tick: &mut dyn FnMut(u64) -> bool,
 ) -> Result<Fragment, FragmentError> {
@@ -97,11 +100,14 @@ pub fn parse_fragment(
     let mut b = Builder::new();
     let root = b.insert_element("html", &[], true);
     b.mode = Mode::InBody;
+    b.scripting = scripting;
     if in_form {
         b.form = Some(root);
     }
     let mut tokens = Tokens::for_tree(input, Mark::default(), false);
-    tokens.enter_fragment_raw(context);
+    if scripting || context != "noscript" {
+        tokens.enter_fragment_raw(context);
+    }
     tokens.set_foreign(false);
     let mut seen = b.doc.len();
     while let Some(token) = tokens.next() {
@@ -151,7 +157,7 @@ mod tests {
     const BIG: FragmentLimits = FragmentLimits { max_source: 1 << 20, max_nodes: 1 << 16, max_text_bytes: 1 << 20, max_attr_slots: 1 << 16, max_names: 1 << 12, max_depth: 64 };
 
     fn parse(input: &str, context: &str) -> Result<Fragment, FragmentError> {
-        parse_fragment(input, context, Ns::Html, false, &BIG, &mut |_| true)
+        parse_fragment(input, context, Ns::Html, false, true, &BIG, &mut |_| true)
     }
 
     /// The children of the root in the html5lib text format (the lines of `Document::dump`, without the root `html` line and one indent level).
@@ -191,15 +197,30 @@ mod tests {
 
     #[test]
     fn the_gates_refuse_before_parsing() {
-        for name in ["table", "thead", "tbody", "tfoot", "tr", "td", "th", "caption", "colgroup", "col", "select", "template", "html", "frameset", "frame", "noscript"] {
+        for name in ["table", "thead", "tbody", "tfoot", "tr", "td", "th", "caption", "colgroup", "col", "select", "html", "frameset", "frame"] {
             assert!(matches!(parse("x", name), Err(FragmentError::Unsupported(_))), "{name}");
         }
-        assert!(matches!(parse_fragment("x", "g", Ns::Svg, false, &BIG, &mut |_| true), Err(FragmentError::Unsupported(_))));
-        assert!(matches!(parse_fragment("x", "mi", Ns::MathMl, false, &BIG, &mut |_| true), Err(FragmentError::Unsupported(_))));
-        for html in ["a<noscript>", "<frameset>", "<frame>"] {
+        assert!(matches!(parse_fragment("x", "g", Ns::Svg, false, true, &BIG, &mut |_| true), Err(FragmentError::Unsupported(_))));
+        assert!(matches!(parse_fragment("x", "mi", Ns::MathMl, false, true, &BIG, &mut |_| true), Err(FragmentError::Unsupported(_))));
+        for html in ["<frameset>", "<frame>"] {
             assert!(matches!(parse(html, "div"), Err(FragmentError::Unsupported(_))), "{html}");
         }
         assert!(parse("&lt;template&gt;<!--<noscript>--><style><template></style>", "div").is_ok());
+    }
+
+    #[test]
+    fn noscript_is_raw_text_when_scripting_is_on_and_an_element_when_it_is_off() {
+        let run = |input: &str, ctx: &str, scripting: bool| {
+            let f = parse_fragment(input, ctx, Ns::Html, false, scripting, &BIG, &mut |_| true).expect("parsed");
+            f.doc.dump().lines().skip(1).map(|l| format!("| {}\n", &l[4..])).collect::<String>()
+        };
+        assert_eq!(run("<noscript><p>a&amp;</noscript><i>", "div", true), "| <noscript>\n|   \"<p>a&amp;\"\n| <i>\n");
+        assert_eq!(run("<noscript><b>a&amp;</b></noscript><i>", "div", false), "| <noscript>\n|   <b>\n|     \"a&\"\n| <i>\n");
+        // the context `noscript`: text only with scripting; without it, `</noscript>` is a stray end tag (the open `p` is special, so it is ignored)
+        assert_eq!(run("<p>x</noscript>y", "noscript", true), "| \"<p>x</noscript>y\"\n");
+        assert_eq!(run("<p>x</noscript>y", "noscript", false), "| <p>\n|   \"xy\"\n");
+        // a `template` context reads like `div`
+        assert_eq!(run("<b>x</b>y", "template", false), "| <b>\n|   \"x\"\n| \"y\"\n");
     }
 
     #[test]
@@ -217,7 +238,7 @@ mod tests {
 
     #[test]
     fn a_form_in_a_form_is_ignored_with_the_form_pointer() {
-        let r = parse_fragment("<form>a</form>b", "div", Ns::Html, true, &BIG, &mut |_| true).unwrap();
+        let r = parse_fragment("<form>a</form>b", "div", Ns::Html, true, true, &BIG, &mut |_| true).unwrap();
         assert_eq!(r.doc.children(r.root).count(), 1);
         assert_eq!(parse("<form>a</form>b", "div").unwrap().doc.children(parse("<form>a</form>b", "div").unwrap().root).count(), 2);
     }
@@ -229,7 +250,7 @@ mod tests {
             f(&mut l);
             l
         };
-        let run = |input: &str, l: &FragmentLimits| parse_fragment(input, "div", Ns::Html, false, l, &mut |_| true).err();
+        let run = |input: &str, l: &FragmentLimits| parse_fragment(input, "div", Ns::Html, false, true, l, &mut |_| true).err();
         assert_eq!(run(&"<i></i>".repeat(50), &lim(|l| l.max_nodes = 40)), Some(FragmentError::Limit("dom-nodes")));
         assert_eq!(run(&"<i></i>".repeat(20), &lim(|l| l.max_nodes = 20)), None);
         assert_eq!(run(&"x".repeat(500), &lim(|l| l.max_text_bytes = 100)), Some(FragmentError::Limit("dom-text")));
@@ -239,7 +260,7 @@ mod tests {
         assert_eq!(run(&"<div>".repeat(9), &lim(|l| l.max_depth = 9)), None);
         assert_eq!(run("abcdef", &lim(|l| l.max_source = 5)), Some(FragmentError::Limit("dom-string")));
         let mut budget = 10u64;
-        let stopped = parse_fragment(&"<i>".repeat(100), "div", Ns::Html, false, &BIG, &mut |n| {
+        let stopped = parse_fragment(&"<i>".repeat(100), "div", Ns::Html, false, true, &BIG, &mut |n| {
             budget = budget.saturating_sub(n);
             budget > 0
         });

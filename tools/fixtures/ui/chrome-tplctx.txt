@@ -1,0 +1,37 @@
+set-puts-the-markup-in-the-contents	0 2 b,"y" <b>x</b>y
+set-replaces-the-contents	true b true <b>new</b>
+set-empty-clears-the-contents	0 true
+set-null-clears-the-contents	0 []
+set-leaves-own-children-alone	s b <b>x</b>
+set-on-created-template	 p#p,<!--c--> <p id="p">a</p><!--c-->
+set-nested-template	p  i <p>a<template id="n"><i>n</i></template></p>
+set-attributes-and-entities	x&y 1 < 2 & 3 <a href="x&amp;y" data-k="1">1 &lt; 2 &amp; 3</a>
+set-scripts-stay-inert	 script,img window.ran = 1
+set-style-and-textarea	style,textarea,title a>b{} < <style>a>b{}</style><textarea>&lt;</textarea><title>x</title>
+set-comment-and-text	"a",<!--b-->,"c" a<!--b-->c
+set-html-body-head-tags-are-ignored	"x" x
+set-option	option,option <option>a</option><option>b</option>
+set-form-in-template	form#f1 <form id="f1"></form>
+set-form-pointer-from-an-ancestor-form	p <p>x</p>
+set-formatting-recovery	b,i,"z",p,p <b><i>x</i></b><i>y</i>z<p>1</p><p>2</p>
+set-svg	svg,math http://www.w3.org/2000/svg <svg><circle r="1"></circle></svg><math><mi>x</mi></math>
+set-mutation-records-go-to-the-contents	childList #document-fragment +[b,u] -[i]
+set-mutation-observer-on-the-template-sees-nothing	0:
+set-twice	b  <b></b>
+set-then-clone	p <p>x</p> true
+set-then-import	p#in true <p id="in">x</p>
+set-then-append-the-contents	p,q  true
+get-after-direct-content-edit	<hr>&lt;&amp;&gt;
+set-in-a-template-in-the-contents	 b <template id="i"><b>1</b></template>
+set-of-a-template-with-noscript	p | <noscript><p>x</p></noscript>
+insert-adjacent-beforeend-on-a-template	b  
+insert-adjacent-afterbegin-on-a-template	b i <i>old</i>
+insert-adjacent-beforebegin-of-a-template	b,template#t 
+outer-html-set-of-a-child-of-the-contents	b,u <b>x</b><u>y</u>
+outer-html-set-of-a-template	template#u b <template id="u"><b>x</b></template>
+outer-html-set-in-a-template-in-body-context	"x" x
+set-div-in-the-contents	b <div id="n"><b>1</b></div>
+set-too-deep-reads-the-template-depth	3 x
+set-returns-undefined-and-getter-is-a-string	string string true
+insert-adjacent-noscript-on-a-template	noscript p
+outer-html-noscript-in-the-contents	noscript p

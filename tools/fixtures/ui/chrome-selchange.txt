@@ -1,0 +1,61 @@
+add-range	selectionchange@#document/#document b=false c=false t=true Event p=2
+add-range-twice	selectionchange@#document/#document b=false c=false t=true Event p=2
+add-collapsed	selectionchange@#document/#document b=false c=false t=true Event p=2
+remove-none	
+remove-all	selectionchange@#document/#document b=false c=false t=true Event p=2
+range-edit	selectionchange@#document/#document b=false c=false t=true Event p=2
+range-edit-same	
+collapse	selectionchange@#document/#document b=false c=false t=true Event p=2
+collapse-same	
+select-all-children	selectionchange@#document/#document b=false c=false t=true Event p=2
+collapse-to-start	selectionchange@#document/#document b=false c=false t=true Event p=2
+collapse-to-end-collapsed	
+two-ticks	selectionchange@#document/#document b=false c=false t=true Event p=2 | selectionchange@#document/#document b=false c=false t=true Event p=2
+in-listener	selectionchange@#document/#document b=false c=false t=true Event p=2 | selectionchange@#document/#document b=false c=false t=true Event p=2 | selectionchange@#document/#document b=false c=false t=true Event p=2 | t=3
+dom-removal	
+dom-text-edit	selectionchange@#document/#document b=false c=false t=true Event p=2
+dom-insert-before	
+detached-range-edit	
+input-set-range	selectionchange@input#i/input#i b=true c=false t=true Event p=2 | selectionchange@input#i/#document b=true c=false t=true Event p=3 | selectionchange@input#i/#window b=true c=false t=true Event p=3
+input-set-range-unfocused	selectionchange@input#i/input#i b=true c=false t=true Event p=2 | selectionchange@input#i/#document b=true c=false t=true Event p=3 | selectionchange@input#i/#window b=true c=false t=true Event p=3
+input-focus-only	selectionchange@input#i/input#i b=true c=false t=true Event p=2 | selectionchange@input#i/#document b=true c=false t=true Event p=3 | selectionchange@input#i/#window b=true c=false t=true Event p=3
+input-select	selectionchange@input#i/input#i b=true c=false t=true Event p=2 | selectionchange@input#i/#document b=true c=false t=true Event p=3 | selectionchange@input#i/#window b=true c=false t=true Event p=3
+input-twice	selectionchange@input#i/input#i b=true c=false t=true Event p=2 | selectionchange@input#i/#document b=true c=false t=true Event p=3 | selectionchange@input#i/#window b=true c=false t=true Event p=3 | selectionchange@input#i/input#i b=true c=false t=true Event p=2 | selectionchange@input#i/#document b=true c=false t=true Event p=3 | selectionchange@input#i/#window b=true c=false t=true Event p=3
+input-same	
+input-value-set	selectionchange@input#i/input#i b=true c=false t=true Event p=2 | selectionchange@input#i/#document b=true c=false t=true Event p=3 | selectionchange@input#i/#window b=true c=false t=true Event p=3
+input-blur	
+textarea-set-range	selectionchange@textarea#i/textarea#i b=true c=false t=true Event p=2 | selectionchange@textarea#i/#document b=true c=false t=true Event p=3 | selectionchange@textarea#i/#window b=true c=false t=true Event p=3
+input-set-range-both-listeners-order	selectionchange@#document/#document b=false c=false t=true Event p=2 | selectionchange@input#i/input#i b=true c=false t=true Event p=2 | selectionchange@input#i/#document b=true c=false t=true Event p=3 | selectionchange@input#i/#window b=true c=false t=true Event p=3
+input-detached	selectionchange@input/input b=true c=false t=true Event p=2
+setrangetext	selectionchange@input#i/input#i b=true c=false t=true Event p=2 | selectionchange@input#i/#document b=true c=false t=true Event p=3 | selectionchange@input#i/#window b=true c=false t=true Event p=3
+data-append-end	
+data-insert-before	selectionchange@#document/#document b=false c=false t=true Event p=2
+data-delete-cover	selectionchange@#document/#document b=false c=false t=true Event p=2
+data-replace-same-len	selectionchange@#document/#document b=false c=false t=true Event p=2
+data-set-same	selectionchange@#document/#document b=false c=false t=true Event p=2
+split-text	selectionchange@#document/#document b=false c=false t=true Event p=2
+text-content-set	
+remove-child-in-range	
+remove-before-boundary	
+insert-in-range	
+normalize	
+order-timeout0	sync | micro | t0-before | selectionchange@#document/#document b=false c=false t=true Event p=2 | t0-after
+order-raf	selectionchange@#document/#document b=false c=false t=true Event p=2 | raf
+order-message	msg | selectionchange@#document/#document b=false c=false t=true Event p=2
+prevent-default-ignored	selectionchange@#document/#document b=false c=false t=true Event p=2 | dp=false
+removed-listener	
+set-base-and-extent-type	Range | selectionchange@#document/#document b=false c=false t=true Event p=2
+focus-input-with-doc-selection	selectionchange@input#i/input#i b=true c=false t=true Event p=2 | selectionchange@input#i/#document b=true c=false t=true Event p=3 | selectionchange@input#i/#window b=true c=false t=true Event p=3
+input-value-edit-while-doc-range	selectionchange@input#i/input#i b=true c=false t=true Event p=2 | selectionchange@input#i/#document b=true c=false t=true Event p=3 | selectionchange@input#i/#window b=true c=false t=true Event p=3
+window-listener-only	selectionchange@#document/#document b=false c=false t=true Event p=2
+capture-on-window	selectionchange@#document/#window b=false c=false t=true Event p=1 | selectionchange@#document/#document b=false c=false t=true Event p=2 | selectionchange@#document/#document b=false c=false t=true Event p=2
+range-in-other-root	
+detached-input-fires-at-itself	selectionchange@input#i/input#i b=true c=false t=true Event p=2
+detached-input-not-seen-by-document	selectionchange@input#i/input#i b=true c=false t=true Event p=2
+removed-after-the-change	selectionchange@input#i/input#i b=true c=false t=true Event p=2
+removed-before-the-change	selectionchange@input#i/input#i b=true c=false t=true Event p=2
+appended-after-the-change	selectionchange@input#i/input#i b=true c=false t=true Event p=2
+detached-textarea	selectionchange@textarea#i/textarea#i b=true c=false t=true Event p=2
+detached-no-change	
+detached-value-set	selectionchange@input#i/input#i b=true c=false t=true Event p=2
+detached-in-fragment	selectionchange@input#i/#document-fragment b=true c=false t=true Event p=3

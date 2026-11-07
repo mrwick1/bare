@@ -1,0 +1,148 @@
+var $ = function (i) { return document.getElementById(i) };
+function kids(n) { return Array.prototype.map.call(n.childNodes, function (c) { return c.nodeType === 3 ? '"' + c.data + '"' : c.nodeType === 8 ? '<!--' + c.data + '-->' : c.nodeName.toLowerCase() }).join(',') }
+=== set-inner-html-is-raw-text
+@html <div id=d></div>
+var d = $('d'); d.innerHTML = '<noscript><p>a</p><!--c--></noscript>';
+(function () { var n = d.firstChild; return [d.childNodes.length, n.tagName, kids(n), n.textContent].join() })
+=== entities-stay-raw
+@html <div id=d></div>
+var d = $('d'); d.innerHTML = '<noscript>&amp;<b>&lt;</b></noscript>';
+(function () { return [kids(d.firstChild), d.innerHTML].join(' ') })
+=== unclosed-runs-to-the-end
+@html <div id=d></div>
+var d = $('d'); d.innerHTML = '<noscript><p>a<b>c';
+(function () { return [d.childNodes.length, kids(d.firstChild)].join() })
+=== siblings-after-the-end-tag
+@html <div id=d></div>
+var d = $('d'); d.innerHTML = 'x<noscript><i>1</i></noscript><u>y</u>z';
+(function () { return [kids(d), kids(d.childNodes[1])].join(' ') })
+=== empty
+@html <div id=d></div>
+var d = $('d'); d.innerHTML = '<noscript></noscript>';
+(function () { return [d.firstChild.childNodes.length, d.innerHTML].join() })
+=== attributes
+@html <div id=d></div>
+var d = $('d'); d.innerHTML = '<noscript id=n class="a b"><p></noscript>';
+(function () { var n = $('n'); return [n.className, kids(n), n.outerHTML].join(' ') })
+=== getter-roundtrip
+@html <div id=d></div>
+var d = $('d'); d.innerHTML = '<noscript><p>a &amp; b</p></noscript>';
+(function () { return d.innerHTML })
+=== getter-escapes-nothing-in-text
+@html <div id=d></div>
+var n = document.createElement('noscript'); n.textContent = 'a<b&c>d e"f';
+(function () { return [n.innerHTML, n.outerHTML].join(' | ') })
+=== getter-element-child-is-written
+@html <div id=d></div>
+var n = document.createElement('noscript'); n.appendChild(document.createElement('p')).textContent = 'x<y';
+(function () { return [n.innerHTML, n.outerHTML].join(' | ') })
+=== getter-text-and-element-mixed
+@html <div id=d></div>
+var n = document.createElement('noscript'); n.appendChild(document.createTextNode('1<2')); n.appendChild(document.createElement('b')).textContent = '3<4'; n.appendChild(document.createTextNode('5&6'));
+(function () { return n.innerHTML })
+=== getter-in-parent
+@html <div id=d></div>
+var d = $('d'); var n = d.appendChild(document.createElement('noscript')); n.textContent = '<i>&';
+(function () { return d.innerHTML })
+=== getter-comment-child
+@html <div id=d></div>
+var n = document.createElement('noscript'); n.appendChild(document.createComment('c')); n.appendChild(document.createTextNode('<x>'));
+(function () { return n.innerHTML })
+=== getter-nested-noscript
+@html <div id=d></div>
+var n = document.createElement('noscript'), m = n.appendChild(document.createElement('noscript')); m.textContent = '<a>&'; n.appendChild(document.createTextNode('<b>'));
+(function () { return n.innerHTML })
+=== getter-in-template-content
+@html <div id=d></div>
+var t = document.createElement('template'); var n = document.createElement('noscript'); n.textContent = '<i>&'; t.content.appendChild(n);
+(function () { return [t.innerHTML, n.innerHTML, n.outerHTML].join(' | ') })
+=== context-set-inner-html
+@html <noscript id=n></noscript>
+var n = $('n'); n.innerHTML = '<p>x&amp;</p>';
+(function () { return [kids(n), n.innerHTML].join(' ') })
+=== context-set-text-with-end-tag
+@html <noscript id=n></noscript>
+var n = $('n'); n.innerHTML = 'a</noscript><b>c';
+(function () { return kids(n) })
+=== context-created-noscript
+@html <div id=d></div>
+var n = document.createElement('noscript'); n.innerHTML = '<p>x</p>';
+(function () { return kids(n) })
+=== context-in-template-content
+@html <template id=t><noscript id=n></noscript></template>
+var n = $('t').content.firstChild; n.innerHTML = '<p>x</p>';
+(function () { return [kids(n)].join(' ') })
+=== div-context-in-template-content
+@html <template id=t><div id=n></div></template>
+var n = $('t').content.firstChild; n.innerHTML = '<noscript><p>x</p></noscript>';
+(function () { return [kids(n), kids(n.firstChild)].join(' ') })
+=== insert-adjacent-beforeend
+@html <div id=d></div>
+var d = $('d'); d.insertAdjacentHTML('beforeend', '<noscript><b>1</b></noscript>');
+(function () { return [kids(d), kids(d.firstChild)].join(' ') })
+=== insert-adjacent-afterbegin-and-around
+@html <div id=w><div id=d>m</div></div>
+var d = $('d'); d.insertAdjacentHTML('afterbegin', '<noscript><b>1</b></noscript>'); d.insertAdjacentHTML('beforebegin', '<noscript>2<i></noscript>'); d.insertAdjacentHTML('afterend', '<noscript></p>3</noscript>');
+(function () { return [kids($('w')), kids(d.firstChild), kids($('w').firstChild), kids($('w').lastChild)].join(' ') })
+=== insert-adjacent-in-noscript-context
+@html <noscript id=n></noscript>
+var n = $('n'); n.insertAdjacentHTML('beforeend', '<p>x</p>'); n.insertAdjacentHTML('afterbegin', '<b>');
+(function () { return kids(n) })
+=== outer-html-set
+@html <div id=d><span id=s></span></div>
+var s = $('s'); s.outerHTML = '<noscript><p>x</p></noscript>';
+(function () { var d = $('d'); return [kids(d), kids(d.firstChild)].join(' ') })
+=== outer-html-set-on-noscript
+@html <div id=d><noscript id=s>old</noscript></div>
+var s = $('s'); s.outerHTML = '<b>1</b><noscript>2</noscript>';
+(function () { var d = $('d'); return [kids(d), kids(d.lastChild)].join(' ') })
+=== outer-html-getter
+@html <div id=d><noscript id=s>a<b>&amp;</noscript></div>
+(function () { return [$('s').outerHTML, $('d').innerHTML, $('d').outerHTML].join(' | ') })
+=== in-page-markup
+@html <noscript id=n><p>page</p><img src=x></noscript><p id=after>y</p>
+(function () { return [kids($('n')), $('n').childNodes.length, $('after').previousSibling === $('n')].join(' ') })
+=== in-page-markup-query
+@html <noscript id=n><p class=q>page</p></noscript>
+(function () { return [document.querySelectorAll('.q').length, document.getElementsByTagName('p').length, $('n').children.length, $('n').firstElementChild, $('n').textContent].join(' ') })
+=== in-page-unclosed-eats-the-rest
+@html <noscript id=n><p>a</p><div id=late>b</div>
+(function () { return [kids($('n')), !!$('late')].join(' ') })
+=== in-p-keeps-the-paragraph-open
+@html <p id=p>a<noscript>b</noscript>c</p><b id=after>z</b>
+(function () { return [kids($('p')), $('p').nextSibling === $('after')].join(' ') })
+=== in-table-is-fostered
+@html <table id=t><noscript>a</noscript><tr><td>x</td></tr></table>
+(function () { var t = $('t'); return [kids(t.parentNode), kids(t)].join(' ') })
+=== in-svg-is-an-element
+@html <div id=d></div>
+var d = $('d'); d.innerHTML = '<svg><noscript id=n><p>x</p></noscript></svg>';
+(function () { var n = $('n'); return [n.namespaceURI, kids(n), kids(d)].join(' ') })
+=== style-inside-is-text
+@html <div id=d></div>
+var d = $('d'); d.innerHTML = '<noscript><style>a{}</style></noscript>';
+(function () { return kids(d.firstChild) })
+=== noscript-in-noscript-text
+@html <div id=d></div>
+var d = $('d'); d.innerHTML = '<noscript><noscript>x</noscript>y</noscript>z';
+(function () { return [kids(d), kids(d.firstChild)].join(' ') })
+=== clone
+@html <noscript id=n><p>c</p></noscript>
+var c = $('n').cloneNode(true);
+(function () { return [kids(c), c.outerHTML].join(' ') })
+=== inside-template-markup
+@html <div id=d></div>
+var d = $('d'); d.innerHTML = '<template id=t><noscript><p>a</p></noscript></template>';
+(function () { var n = $('t').content.firstChild; return [kids(n), d.innerHTML].join(' ') })
+=== created-text-node-then-inner-html-read
+@html <div id=d></div>
+var d = $('d'); d.innerHTML = '<noscript>a</noscript>'; d.firstChild.firstChild.data = '<b>';
+(function () { return [d.innerHTML, d.textContent].join(' ') })
+=== textarea-and-title-inside-noscript
+@html <div id=d></div>
+var d = $('d'); d.innerHTML = '<noscript><textarea>a</textarea><title>t</title></noscript>';
+(function () { return kids(d.firstChild) })
+=== script-inside-noscript-is-text
+@html <div id=d></div>
+var d = $('d'); d.innerHTML = '<noscript><script>window.ran=1<\/script></noscript>';
+(function () { return [kids(d.firstChild), window.ran].join(' ') })

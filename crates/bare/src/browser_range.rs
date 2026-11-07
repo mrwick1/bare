@@ -37,6 +37,7 @@
 //! Bound (`Limit(Host(name))`): `ranges` (live ranges, set free by the collector).
 
 use crate::browser::*;
+use crate::browser_scheduler::Task;
 use crate::browser_lazy::lazy_global;
 use bare_html::dom::{Change, Document, NodeData, NodeId};
 use bare_js::eval::{Error, Interp};
@@ -50,7 +51,7 @@ type V = R<Value>;
 
 const MAX_RANGES: usize = 1 << 16;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 struct Rng {
     sc: NodeId,
     so: u32,
@@ -65,6 +66,8 @@ pub(crate) struct State {
     ranges: HashMap<ObjId, Rng>,
     /// The selection object and its range.
     sel: Option<(ObjId, Option<ObjId>)>,
+    /// A `Task::DocSelectionChange` is queued (Selection API "has scheduled selectionchange event").
+    sc_pending: bool,
 }
 
 #[derive(Default)]
@@ -108,6 +111,11 @@ fn inside(doc: &Document, mut n: NodeId, anc: NodeId) -> bool {
 }
 
 impl State {
+    /// The range of the selection, as it is now.
+    fn sel_rng(&self) -> Option<Rng> {
+        self.sel.and_then(|(_, r)| r).and_then(|o| self.ranges.get(&o).copied())
+    }
+
     /// The "insert" and "remove" steps of the standard for the live ranges, given the change of the tree.
     pub(crate) fn on_change(&mut self, doc: &Document, ch: Change) {
         if self.ranges.is_empty() {
@@ -268,7 +276,13 @@ fn offset_arg(it: &mut Interp<'_>, v: Value) -> R<u32> {
 }
 
 fn set(d: &Dom, o: ObjId, r: Rng) {
-    state(d).borrow_mut().ranges.insert(o, r);
+    let moved = {
+        let mut st = state(d).borrow_mut();
+        st.ranges.insert(o, r).is_some_and(|old| old != r) && st.sel.is_some_and(|s| s.1 == Some(o))
+    };
+    if moved {
+        d.schedule_doc_selectionchange();
+    }
 }
 
 fn is_doctype(d: &Dom, n: NodeId) -> bool {
@@ -586,9 +600,14 @@ fn sel_of(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<Option<ObjId>> {
     }
 }
 
+/// Change the range of the selection. Chrome sends `selectionchange` when the selected range differs, not for an equal new range object.
 fn set_sel(d: &Dom, r: Option<ObjId>) {
-    if let Some(s) = state(d).borrow_mut().sel.as_mut() {
-        s.1 = r;
+    let old = match state(d).borrow_mut().sel.as_mut() {
+        Some(s) => std::mem::replace(&mut s.1, r),
+        None => return,
+    };
+    if old != r && (old.is_none() || r.is_none() || sel_range(d, old) != sel_range(d, r)) {
+        d.schedule_doc_selectionchange();
     }
 }
 
@@ -948,6 +967,7 @@ impl Dom {
     /// The "replace data" steps for `count` UTF-16 units at `offset` of the text `node`, replaced by `len` units. Call it before the change.
     pub(crate) fn range_data(&self, node: NodeId, offset: u32, count: u32, len: u32) {
         let Some(st) = self.range.st.get() else { return };
+        let before = st.borrow().sel_rng();
         for r in st.borrow_mut().ranges.values_mut() {
             for (n, o) in [(r.sc, &mut r.so), (r.ec, &mut r.eo)] {
                 if n == node && *o > offset {
@@ -955,6 +975,7 @@ impl Dom {
                 }
             }
         }
+        self.moved_selection(st, before);
     }
 
     /// The range steps of `splitText(offset)`: `new` is in the tree after `node`. The points in `node` after `offset` go to `new`, and the points
@@ -963,6 +984,7 @@ impl Dom {
         let Some(st) = self.range.st.get() else { return };
         let parent = doc.parent(node);
         let after = index(doc, node) + 1;
+        let before = st.borrow().sel_rng();
         for r in st.borrow_mut().ranges.values_mut() {
             for (n, o) in [(&mut r.sc, &mut r.so), (&mut r.ec, &mut r.eo)] {
                 if *n == node && *o > offset {
@@ -972,12 +994,14 @@ impl Dom {
                 }
             }
         }
+        self.moved_selection(st, before);
     }
 
     /// The range steps of `normalize` for the text node `cur`, which joins `node` after its first `len` units.
     pub(crate) fn range_merge(&self, doc: &Document, node: NodeId, cur: NodeId, len: u32) {
         let Some(st) = self.range.st.get() else { return };
         let (parent, at) = (doc.parent(cur), index(doc, cur));
+        let before = st.borrow().sel_rng();
         for r in st.borrow_mut().ranges.values_mut() {
             for (n, o) in [(&mut r.sc, &mut r.so), (&mut r.ec, &mut r.eo)] {
                 if *n == cur {
@@ -987,5 +1011,26 @@ impl Dom {
                 }
             }
         }
+        self.moved_selection(st, before);
+    }
+
+    /// A text change moved the boundary of the selected range: Chrome sends `selectionchange` (a node insert or remove does not).
+    fn moved_selection(&self, st: &RefCell<State>, before: Option<Rng>) {
+        if before != st.borrow().sel_rng() {
+            self.schedule_doc_selectionchange();
+        }
+    }
+
+    /// Selection API "schedule a selectionchange event" for the document: one task at a time, due now (Chrome, `selchange-cases.txt`).
+    fn schedule_doc_selectionchange(&self) {
+        let st = state(self);
+        if !std::mem::replace(&mut st.borrow_mut().sc_pending, true) && self.schedule(self.now_ms(), Task::DocSelectionChange).is_err() {
+            st.borrow_mut().sc_pending = false;
+        }
+    }
+
+    /// The task runs: the flag is cleared before the event, so a listener's own change queues another.
+    pub(crate) fn range_task_done(&self) {
+        state(self).borrow_mut().sc_pending = false;
     }
 }

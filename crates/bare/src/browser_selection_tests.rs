@@ -14,6 +14,8 @@ use bare_js::value::Value;
 topic_test!(setrange_chrome_cases, "setrange", 70);
 // The selection of a fresh, set and reset control (`tools/fixtures/ui/selmodel-cases.txt`).
 topic_test!(selmodel_chrome_cases, "selmodel", 18);
+// `selectionchange` at the document (Range and Selection changes) and at text controls (`tools/fixtures/ui/selchange-cases.txt`).
+topic_test!(selchange_chrome_cases, "selchange", 61);
 
 fn big<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
     std::thread::Builder::new().stack_size(64 << 20).spawn(f).unwrap().join().unwrap()
@@ -547,10 +549,13 @@ fn selectionchange_is_scheduled_for_each_input_on_its_own() {
         assert_eq!(tasks(&b), 3 + 5 + 1);
         pump(&mut b);
         assert_eq!(js(&mut b, "log.join()"), "t,v,ro");
-        // a detached input gets no event (Chrome)
+        // a detached input gets its events too (Chrome): the value set before the listener queued the first one
         js(&mut b, "log = []; var d = document.createElement('input'); d.value = 'ab'; d.addEventListener('selectionchange', function (e) { log.push('d:' + (e.target === d)) })");
         pump(&mut b);
-        assert_eq!(js(&mut b, "log.join()"), "");
+        assert_eq!(js(&mut b, "log.join()"), "d:true");
+        js(&mut b, "log = []; d.setSelectionRange(0, 1)");
+        pump(&mut b);
+        assert_eq!(js(&mut b, "log.join()"), "d:true");
     });
 }
 

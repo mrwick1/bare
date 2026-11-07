@@ -155,7 +155,7 @@ fn raw_text_and_rcdata_contexts_are_parser_controlled() {
 
 #[test]
 fn unsupported_contexts_fail_before_any_change() {
-    for name in ["table", "thead", "tbody", "tfoot", "tr", "td", "th", "caption", "colgroup", "select", "template", "html", "frameset"] {
+    for name in ["table", "thead", "tbody", "tfoot", "tr", "td", "th", "caption", "colgroup", "select", "html", "frameset"] {
         let mut b = browser();
         let before = b.document().borrow().len();
         let r = js(&mut b, &format!("var e = document.createElement('{name}'); var k = e.appendChild(document.createElement('i')); e.innerHTML = '<b>x</b>'; 'done'"));
@@ -179,7 +179,7 @@ fn unsupported_contexts_fail_before_any_change() {
 
 #[test]
 fn markup_the_tree_builder_cannot_read_correctly_is_refused_before_any_change() {
-    for html in ["<p>a</p><noscript><b></b></noscript>", "<noscript><p>x</p></noscript>", "<frameset><frame></frameset>", "<div><noscript>"] {
+    for html in ["<p>a</p><frameset><b></b></frameset>", "<frameset><frame></frameset>", "<div><frame>"] {
         let mut b = browser();
         let r = js(&mut b, &format!("var e = document.getElementById('a'); e.innerHTML = '{html}'"));
         assert!(r.starts_with("other:Unsupported"), "{html}: {r}");
@@ -191,10 +191,9 @@ fn markup_the_tree_builder_cannot_read_correctly_is_refused_before_any_change() 
 }
 
 #[test]
-fn getter_refuses_noscript_in_the_tree_and_writes_the_contents_of_a_template() {
+fn getter_writes_noscript_and_the_contents_of_a_template() {
     let mut b = browser();
-    let r = js(&mut b, "var q = document.createElement('div'); q.appendChild(document.createElement('noscript')); q.innerHTML");
-    assert!(r.starts_with("other:Unsupported"), "{r}");
+    assert_eq!(js(&mut b, "var q = document.createElement('div'); q.appendChild(document.createElement('noscript')); q.innerHTML"), "<noscript></noscript>");
     // A template is written with its contents. Its own children (added with appendChild) are not written.
     assert_eq!(js(&mut b, "var t = document.createElement('template'); t.appendChild(document.createElement('p')); t.content.appendChild(document.createElement('b')); var q = document.createElement('div'); q.appendChild(t); q.innerHTML"), "<template><b></b></template>");
 }
@@ -492,15 +491,15 @@ fn outer_html_setter_uses_the_parent_as_context() {
 #[test]
 fn outer_html_setter_gates_what_the_parser_does_not_build() {
     let mut b = browser();
-    for ctx in ["td", "table", "select", "template", "noscript"] {
+    for ctx in ["td", "table", "select"] {
         let got = js(&mut b, &format!("var p = document.createElement('{ctx}'), e = document.createElement('p'); p.appendChild(e); e.outerHTML = 'x'; p.childNodes.length"));
         assert!(got.starts_with("other:Unsupported"), "{ctx}: {got}");
     }
     // The tree is unchanged after a gate.
     js(&mut b, "var p = document.createElement('table'), e = document.createElement('p'); p.appendChild(e); e.outerHTML = 'x'");
     assert_eq!(js(&mut b, "[p.firstChild === e, e.parentNode === p].join()"), "true,true");
-    assert!(js(&mut b, "var d = document.createElement('div'); d.innerHTML = '<a></a>'; d.firstChild.outerHTML = '<noscript></noscript>'").starts_with("other:Unsupported"));
-    assert!(js(&mut b, "document.createElement('noscript').outerHTML").starts_with("other:Unsupported"));
+    assert!(js(&mut b, "var d = document.createElement('div'); d.innerHTML = '<a></a>'; d.firstChild.outerHTML = '<frameset></frameset>'").starts_with("other:Unsupported"));
+    assert_eq!(js(&mut b, "document.createElement('noscript').outerHTML"), "<noscript></noscript>");
 }
 
 #[test]

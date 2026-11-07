@@ -19,6 +19,9 @@ topic_test!(insert_cases, "insert", 63);
 topic_test!(nodecmp_cases, "nodecmp", 126);
 topic_test!(docnode_cases, "docnode", 179);
 topic_test!(tplhtml_cases, "tplhtml", 46);
+// `template.innerHTML` as a setter, and `noscript` markup (`tools/fixtures/ui/{tplctx,noscript}-cases.txt`).
+topic_test!(tplctx_cases, "tplctx", 37);
+topic_test!(noscript_cases, "noscript", 38);
 
 fn big<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
     std::thread::Builder::new().stack_size(64 << 20).spawn(f).unwrap().join().unwrap()
