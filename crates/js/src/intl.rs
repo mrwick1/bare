@@ -224,7 +224,7 @@ impl Iterator for Tokens {
             self.0 = &rest[3..];
             return Some(Ok((b[0], b[1])));
         }
-        let end = s.find('{').unwrap_or(s.len());
+        let end = s.find(|c| c == '{').unwrap_or(s.len());
         self.0 = &s[end..];
         Some(Err(&s[..end]))
     }
