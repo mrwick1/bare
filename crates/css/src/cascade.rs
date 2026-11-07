@@ -130,8 +130,9 @@ pub struct RuleSet {
     user: u8,
     /// Where the selectors read each kind of state (`Scopes`).
     scopes: Scopes,
-    /// Where the selectors read each class, id and attribute (`Reach`).
-    reach: Reach,
+    /// Where the selectors read each class, id and attribute (`Reach`). Made at the first change, so a page that never
+    /// changes does not pay for it.
+    reach: std::cell::OnceCell<Reach>,
 }
 
 /// The invalidation sets: for each class, id and attribute name that a selector reads, the widest `Scope` where it reads it.
@@ -311,7 +312,7 @@ impl RuleSet {
     }
 
     pub fn new(viewport: (f32, f32)) -> RuleSet {
-        RuleSet { viewport, entries: Vec::new(), decls: Vec::new(), side: Side::default(), layers: vec![Layer { parent: 0 }], layer_by_name: HashMap::new(), customs: Vec::new(), by_id: Buckets::default(), by_class: Buckets::default(), by_tag: Buckets::default(), by_attr: Buckets::default(), other: Vec::new(), user: 0, scopes: Scopes::default(), reach: Reach::default() }
+        RuleSet { viewport, entries: Vec::new(), decls: Vec::new(), side: Side::default(), layers: vec![Layer { parent: 0 }], layer_by_name: HashMap::new(), customs: Vec::new(), by_id: Buckets::default(), by_class: Buckets::default(), by_tag: Buckets::default(), by_attr: Buckets::default(), other: Vec::new(), user: 0, scopes: Scopes::default(), reach: std::cell::OnceCell::new() }
     }
 
     /// Which user action state (`:hover`, `:active`, the focus pseudo-classes) some rule reads: the bits `selector::USES_*`.
@@ -356,7 +357,13 @@ impl RuleSet {
                     return true;
                 }
                 let named = |list: &[&str]| list.iter().any(|&n| doc.find_atom(n) == Some(name));
-                let r = &self.reach;
+                let r = self.reach.get_or_init(|| {
+                    let mut r = Reach::default();
+                    for e in &self.entries {
+                        r.add(&e.selector);
+                    }
+                    r
+                });
                 let mut scope = r.attr.get(&name).copied().unwrap_or_default();
                 if sc.form != Scope::None {
                     // The elements whose form state changes, and then what the selectors that read it reach from them.
@@ -549,7 +556,7 @@ impl RuleSet {
         }
         self.user |= crate::selector::user_flags(&selector);
         self.scopes.add(&selector);
-        self.reach.add(&selector);
+        self.reach.take();
         let index = self.entries.len() as u32;
         // The bucket: an id is the most specific, then a class, then an attribute, then a tag. An attribute comes before a tag:
         // `input[type=checkbox]` is in the list of `type`, and few elements have a `type`; most elements are a `div`.

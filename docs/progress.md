@@ -2644,3 +2644,44 @@ Checks:
 - All 42 other `tools/js/*_check.sh` scripts pass (`parse_check.sh` with `ACORN=` set).
 
 Not tested: a machine other than archMachine; wall time; scale 100 of the load rows; a live page that sweeps (none of the measured pages reaches 8,192 shapes); the debug build (`ic_verify` across a sweep); the bytecode paths (no entries yet).
+
+## Invalidation sets for attribute and class changes
+
+Before this change, a restyle refused every page with a shadow root. The staging journey has one (Next.js attaches one, hypothesis: the route announcer). So the frame restyle refused 13 times on the journey. A read (`getComputedStyle`, geometry) always ran a full cascade. A form attribute (`Scopes::form`) also sent each attribute change to a full cascade.
+
+Change:
+- `RuleSet` keeps invalidation sets (`Reach`): for each class, id and attribute name that a selector reads, the widest scope (own element, subtree, or later siblings). It makes them at the first change, so a page that never changes does not pay for them.
+- The damage log keeps the old attribute value (`Mark::Attr { old }`). A class change looks up only the added and removed classes. An id change looks up the old and the new id. `style`, presentational hints and `href` (`:link`) have fixed scopes.
+- `form_reach` gives the scope of each form attribute: `value` and `placeholder` reach the element, `disabled` on a `fieldset` reaches the subtree, `type`, `checked`, `selected` and `name` on a radio still give a full cascade.
+- `restyle` walks the flat tree, as `walk` does. Inside a shadow tree only the browser's rules match. A page with a shadow root no longer refuses.
+- The damage log has two readers with their own cursors: the frame (`DAMAGE_FRAME`) and the reads (`DAMAGE_STYLE`). A log overflow drops only the reader that is most behind.
+- A read after a change restyles the kept read styles from the log (`browser_computed.rs`). A read of an element under `display: none` styles only its path (`RuleSet::style_hidden`), not the whole document.
+
+Results (archMachine, against `cc944bb` from `base-build`):
+- Restyle counts on the journey. Before: 124 full read cascades, 97 full cascades for hidden elements, 35 full frame cascades, 0 partial for reads. After: 125 to 138 partial restyles, 25 to 26 full read cascades, 3 to 4 full frame cascades, 97 hidden reads by path with 0 fallbacks over 4 runs. The full read cascades that stay come from new documents, sheet changes, a button `type` and a lost log.
+- A temporary check compared each partial result with a full cascade on 2 live runs (227 and 226 partial results). All were equal. `cascade_load` dumps for full, read and restyle at scale 1 are byte-identical to main.
+- Journey page-thread CPU, 7 runs of each, alternating, median (min) in ms:
+
+| Step | Main | This change | Change |
+|---|---|---|---|
+| 1 | 120.8 (108.0) | 111.0 (99.3) | -8.1% |
+| 2 and 3 | 435.4 (408.1) | 395.6 (363.3) | -9.1% |
+| 4 | 396.7 (378.4) | 367.6 (342.4) | -7.3% |
+| 5 | 306.6 (297.0) | 297.9 (284.3) | -2.8% |
+| 6 | 318.7 (301.1) | 322.8 (287.3) | +1.3% |
+| 7 | 237.5 (232.0) | 218.2 (213.4) | -8.1% |
+| 8 | 88.6 (81.5) | 88.9 (84.2) | +0.3% |
+| Total | 1916.2 (1859.6) | 1794.0 (1729.9) | -6.4% |
+
+- Full cost matrix (805 rows): mean change glibc +0.040%, jemalloc +0.472% (5 rows measured). Over under one allocator: 2. Over under both: 3. Failed: 0.
+
+Gate failure (not merged):
+- Over under both allocators: `bare-stress run block-deep-over-limit 20000` +0.688%, +0.601%; `boxes-deep-blocks 20000` +0.568%, +0.506%; `boxes-deep-inline 20000` +0.688%, +0.545%. Over under glibc only: `position-fixed-deep 3000`, `position-nested-relative 3000` (+0.6%).
+- All `bare-stress` rows rise by about 15 to 18 instructions for each element. `bare-stress` calls `RuleSet::compute`, and this change does not edit its source. Main's `cascade.rs` with this `dom.rs` gives the base count, so the cost comes from the code generation of `cascade.rs` (hypothesis: inlining changes in `compute` and `cascade`; `nm` shows other sizes for both).
+- Fix attempts that failed: `Document::notify` cold and out of line (no change); `Reach` in a `Box` (53,289,288 against 53,231,208, worse). The lazy `Reach` fixed `sheets_load dynamic 10` (+1.1% to +0.405%).
+
+Checks:
+- New tests: `a_data_state_toggle_restyles_only_what_it_reaches`, `form_changes_restyle_like_a_full_cascade`, `two_readers_of_the_damage_log_see_every_mark`, `a_data_state_toggle_needs_no_full_cascade`. The random test `a_restyle_of_the_picked_roots_equals_a_full_cascade` now covers classes, ids, `data-state`, `style` and a shadow root.
+- `cargo test --release --workspace --no-fail-fast`: 49 binaries, 2,959 passed, 0 failed.
+
+Not tested: a machine other than archMachine; the window (`--window`) path; wall time; rustfmt (the files are not rustfmt-clean on main).
