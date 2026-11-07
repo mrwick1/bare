@@ -485,7 +485,7 @@ impl<'p> Interp<'p> {
     fn intl_opt_for(&mut self, who: &str, opts: Option<Value>, name: &str, values: &[&str]) -> Res<Option<usize>> {
         let Some(o) = opts else { return Ok(None) };
         let k = self.intl_key(name)?;
-        let v = self.get_prop(o, k)?;
+        let v = self.get_prop_nat(o, k)?;
         if matches!(v, Value::Undefined) {
             return Ok(None);
         }
@@ -501,7 +501,7 @@ impl<'p> Interp<'p> {
     fn intl_opt_str(&mut self, opts: Option<Value>, name: &str) -> Res<Option<String>> {
         let Some(o) = opts else { return Ok(None) };
         let k = self.intl_key(name)?;
-        let v = self.get_prop(o, k)?;
+        let v = self.get_prop_nat(o, k)?;
         if matches!(v, Value::Undefined) {
             return Ok(None);
         }
@@ -577,7 +577,7 @@ impl<'p> Interp<'p> {
         let hour12 = match opts {
             Some(o) => {
                 let k = self.intl_key("hour12")?;
-                let v = self.get_prop(o, k)?;
+                let v = self.get_prop_nat(o, k)?;
                 if matches!(v, Value::Undefined) { None } else { Some(self.truthy(v)?) }
             }
             None => None,

@@ -61,11 +61,13 @@ enum PxFn {
 struct ProxyState {
     keys: [PropertyKey; 13],
     ready: bool,
+    /// The cache of each trap read on a handler (`Interp::get_prop_ic`): a handler that has no such trap is an absent hit.
+    ics: [[Ic; 4]; 13],
 }
 
 impl Default for ProxyState {
     fn default() -> Self {
-        ProxyState { keys: [PropertyKey::Index(0); 13], ready: false }
+        ProxyState { keys: [PropertyKey::Index(0); 13], ready: false, ics: [[Ic::EMPTY; 4]; 13] }
     }
 }
 
@@ -167,7 +169,10 @@ impl<'p> Interp<'p> {
     fn px_enter(&mut self, p: ObjId, t: Trap) -> Res<(ObjId, ObjId, Option<Value>)> {
         self.tick()?;
         let (target, handler) = self.px_parts(p, TRAP_NAMES[t as usize])?;
-        let f = self.get_prop(Value::Object(handler), self.px.keys[t as usize])?;
+        let mut ics = self.px.ics[t as usize];
+        let f = self.get_prop_ic(Value::Object(handler), self.px.keys[t as usize], &mut ics);
+        self.px.ics[t as usize] = ics;
+        let f = f?;
         if is_nullish(f) {
             return Ok((target, handler, None));
         }

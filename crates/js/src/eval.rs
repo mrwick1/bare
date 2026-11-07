@@ -669,6 +669,7 @@ impl<'p> Interp<'p> {
         Self::check_code_limits(prog, &limits)?;
         let mut it = Self::with_code(Rc::new(prog.clone().into_owned()), heap, limits)?;
         it.in_call(|it| it.walk_program())?;
+        it.heap.set_setup(true);
         it.install_builtins()?;
         it.install_sc()?;
         it.install_ext()?;
@@ -679,6 +680,7 @@ impl<'p> Interp<'p> {
         it.install_date()?;
         it.install_intl()?;
         it.install_bigint()?;
+        it.heap.set_setup(false);
         Ok(it)
     }
 
@@ -712,7 +714,7 @@ impl<'p> Interp<'p> {
         let object_proto = e!(heap.new_object(None));
         let function_proto = e!(heap.new_object(Some(object_proto)));
         let array_proto = e!(heap.new_array(Some(object_proto)));
-        let global = e!(heap.new_object(Some(object_proto)));
+        let global = e!(heap.new_dict_object(Some(object_proto)));
         let mut error_protos = [object_proto; 7];
         for p in error_protos.iter_mut() {
             *p = e!(heap.new_object(Some(object_proto)));
@@ -2267,34 +2269,24 @@ impl<'p> Interp<'p> {
         }
         let prog = self.prog.clone();
         let t = *prog.template(t);
-        let strings = h!(self, self.heap.new_array(Some(self.array_proto)));
-        let raw = h!(self, self.heap.new_array(Some(self.array_proto)));
-        let mut u = Vec::new();
-        for (i, q) in prog.template_quasis(&t).enumerate() {
+        let (mut cooked, mut raws, mut u) = (Vec::new(), Vec::new(), Vec::new());
+        for q in prog.template_quasis(&t) {
             let q = prog.quasi_node(q);
-            let k = PropertyKey::Index(i as u32);
             u.clear();
-            let cooked = if q.bad_escape {
+            cooked.push(if q.bad_escape {
                 Value::Undefined
             } else {
                 let _ = prog.quasi(q, false, &mut u);
                 Value::String(h!(self, self.heap.intern_vec(std::mem::take(&mut u))))
-            };
-            self.def(strings, k, cooked, false, true, false)?;
+            });
             u.clear();
             let _ = prog.quasi(q, true, &mut u);
-            let r = h!(self, self.heap.intern_vec(std::mem::take(&mut u)));
-            self.def(raw, k, Value::String(r), false, true, false)?;
+            raws.push(Value::String(h!(self, self.heap.intern_vec(std::mem::take(&mut u)))));
         }
-        for a in [strings, raw] {
-            let d = PropertyDescriptor { writable: Some(false), ..Default::default() };
-            hxw!(self, self.heap.define_own_property(a, self.k_length, &d));
-        }
-        h!(self, self.heap.prevent_extensions(raw));
-        let d = PropertyDescriptor { value: Some(Value::Object(raw)), writable: Some(false), enumerable: Some(false), configurable: Some(false), ..Default::default() };
+        // Both arrays are frozen, and `strings.raw` is a frozen data property.
+        let raw = h!(self, self.heap.new_frozen_array(Some(self.array_proto), &raws, None));
         let rk = PropertyKey::String(h!(self, self.heap.intern_str("raw")));
-        hxw!(self, self.heap.define_own_property(strings, rk, &d));
-        h!(self, self.heap.prevent_extensions(strings));
+        let strings = h!(self, self.heap.new_frozen_array(Some(self.array_proto), &cooked, Some((rk, Value::Object(raw)))));
         self.tpl_objs.insert(site, strings);
         Ok(Value::Object(strings))
     }
@@ -2715,6 +2707,13 @@ impl<'p> Interp<'p> {
                 let Some((base, _)) = self.link_base(obj)? else { return Ok(None) };
                 if optional && is_nullish(base) {
                     return Ok(None);
+                }
+                if let Value::Object(o) = base {
+                    if let Some(v) = self.heap.ic_own(o, &self.ics.ics[self.expr_name[e.index()] as usize]) {
+                        self.ics.own_hits += 1;
+                        return Ok(Some((v, base)));
+                    }
+                    return Ok(Some((self.member_ic(e, name, o, base)?, base)));
                 }
                 let key = self.expr_key(e, name)?;
                 Ok(Some((self.get_prop(base, key)?, base)))
@@ -3801,3 +3800,7 @@ mod recursion_tests;
 #[cfg(test)]
 #[path = "eval_statements_tests.rs"]
 mod statements_tests;
+
+#[cfg(test)]
+#[path = "eval_ic_tests.rs"]
+mod ic_tests;

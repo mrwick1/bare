@@ -149,7 +149,8 @@ mod prim;
 mod proxy;
 #[path = "heap_shape.rs"]
 mod shape;
-pub use shape::Ic;
+pub use shape::{Ic, IcStats};
+use shape::Shapes;
 
 // ---------- property model ----------
 
@@ -374,11 +375,13 @@ impl PropMap {
     }
 }
 
-/// Largest gap of holes a dense element vector accepts. A write farther out goes to `props`.
+/// Largest gap of holes a dense element vector accepts. A write farther out goes to `dict`.
 const ELEM_GAP: usize = 1024;
 
 struct Object {
     proto: Option<ObjId>,
+    /// The shape of the named properties; 0 in dictionary mode.
+    shape: u32,
     extensible: bool,
     is_array: bool,
     /// 0 for an ordinary object. `EXOTIC`: the payload is in `Heap::exotics` (a buffer, a view, a text codec). See
@@ -388,12 +391,19 @@ struct Object {
     /// Bit 1: a function whose own `prototype` holds a placeholder (`LAZY_PROTO`). Bit 2: the host defines the `on*` accessors of this object
     /// on demand (`LAZY_ONS`, `Heap::set_lazy_on`).
     lazy: u8,
+    /// An inline cache fill walked over this object as a prototype (`heap_shape.rs`). A change of its keys, its attributes or its
+    /// prototype bumps `Heap::proto_epoch`.
+    ic_chain: bool,
+    /// A dictionary made in setup mode (`Heap::set_setup`). The first cache fill that walks it gives it shapes.
+    fast_on_use: bool,
     /// Dense index properties that are plain data (writable, enumerable, configurable).
-    /// `None` is a hole. An index lives here or in `props`, never in both.
+    /// `None` is a hole. An index lives here or in `dict`, never in both.
     elems: Vec<Option<Value>>,
-    /// Everything else: named keys, symbols, and index properties that are sparse or special.
-    /// An array's `length` is the first entry.
-    props: PropMap,
+    /// The values of the named properties in shape mode (`heap_shape.rs`). An accessor uses two slots. An array's `length` is slot 0.
+    slots: Vec<Value>,
+    /// The properties in dictionary mode: named keys, symbols, and index properties that are sparse or special. `shape` is 0 exactly when
+    /// this is `Some`, and `slots` is empty then. An array's `length` is the first entry.
+    dict: Option<Box<PropMap>>,
 }
 
 const EXOTIC: u8 = 1;
@@ -407,6 +417,7 @@ const EXOTIC_PROXY: u8 = 8;
 const _: () = assert!(std::mem::size_of::<Object>() <= 80);
 
 const ENTRY_BYTES: usize = std::mem::size_of::<Option<(PropertyKey, Property)>>();
+const SLOT_BYTES: usize = std::mem::size_of::<Value>();
 const ELEM_BYTES: usize = std::mem::size_of::<Option<Value>>();
 /// Accounted cost of one hash-index entry (key + position + table overhead, estimate).
 const INDEX_ENTRY_BYTES: usize = 24;
@@ -419,8 +430,10 @@ const fn slot_bytes<T>() -> usize {
 fn obj_bytes(o: &Object) -> usize {
     slot_bytes::<Object>()
         + o.elems.len() * ELEM_BYTES
-        + o.props.entries.len() * ENTRY_BYTES
-        + if o.props.index.is_some() { o.props.live as usize * INDEX_ENTRY_BYTES } else { 0 }
+        + o.slots.len() * SLOT_BYTES
+        + o.dict.as_ref().map_or(0, |d| {
+            std::mem::size_of::<PropMap>() + d.entries.len() * ENTRY_BYTES + if d.index.is_some() { d.live as usize * INDEX_ENTRY_BYTES } else { 0 }
+        })
 }
 
 struct Str {
@@ -669,14 +682,22 @@ pub struct Footprint {
     pub object_slab: usize,
     pub string_slab: usize,
     pub interner: usize,
+    /// Property entries of dictionary objects (`PropMap`), 48 bytes each.
     pub entries_used: usize,
     pub entries_cap: usize,
+    /// Slots of objects in shape mode, 16 bytes each.
+    pub slots_used: usize,
+    pub slots_cap: usize,
+    /// Shapes and their key tables, by capacity. They are shared by all objects.
+    pub shape_bytes: usize,
+    pub shapes: usize,
+    pub dict_objects: usize,
     pub elems_used: usize,
     pub elems_cap: usize,
     pub index_tables: usize,
     pub string_units: usize,
     pub objects_with_props: usize,
-    /// Objects, and capacity bytes of their property vectors, by the number of entries: 0, 1, 2, 3, 4, 5 to 8, 9 to 16, 17 to 64, more.
+    /// Objects, and capacity bytes of their property vectors (slots or dictionary entries), by the number of properties: 0, 1, 2, 3, 4, 5 to 8, 9 to 16, 17 to 64, more.
     pub by_len: [(usize, usize, usize); 9],
 }
 
@@ -690,6 +711,8 @@ pub struct Collected {
 pub struct Heap {
     limits: HeapLimits,
     objects: Slab<Object>,
+    /// The shapes of the named properties of all objects (`heap_shape.rs`).
+    shapes: Shapes,
     strings: Slab<Str>,
     symbols: Slab<Symbol>,
     bigs: Slab<big::Big>,
@@ -718,6 +741,14 @@ pub struct Heap {
     lazy_key: std::cell::Cell<Option<PropertyKey>>,
     /// Some object has `LAZY_ONS`.
     lazy_on_set: std::cell::Cell<bool>,
+    /// Bumped when an object with `ic_chain` changes its keys, its attributes or its prototype: every prototype and absent cache entry
+    /// filled before stops hitting. It saturates: at `u32::MAX` no such entry is filled again.
+    proto_epoch: u32,
+    ic_stats: IcStats,
+    /// The cache entries of the reads with no site (`get_stub`), direct-mapped by the receiver's shape and the key.
+    stubs: Box<[(PropertyKey, Ic); shape::STUBS]>,
+    /// Setup mode (`set_setup`).
+    setup: bool,
 }
 
 impl Default for Heap {
@@ -734,11 +765,12 @@ impl Heap {
         let mut h = Heap {
             limits,
             objects: Slab::new(limits.max_objects),
+            shapes: Shapes::new(PropertyKey::Index(0)),
             strings: Slab::new(limits.max_strings),
             symbols: Slab::new(limits.max_symbols),
             bigs: Slab::new(limits.max_bigs),
             big_table: big::BigTable::new(),
-            interner: Interner { table: vec![0; 16], count: 0 },
+            interner: Interner { table: vec![0; 4096], count: 0 },
             bytes: 0,
             collections: 0,
             gray: Vec::new(),
@@ -753,8 +785,13 @@ impl Heap {
             lazy_asked: Default::default(),
             lazy_key: Default::default(),
             lazy_on_set: Default::default(),
+            proto_epoch: 0,
+            ic_stats: IcStats::default(),
+            stubs: Box::new([(PropertyKey::Index(0), Ic::EMPTY); shape::STUBS]),
+            setup: false,
         };
         h.length = h.intern_str("length")?;
+        h.shapes = Shapes::new(PropertyKey::String(h.length));
         Ok(h)
     }
 
@@ -765,18 +802,30 @@ impl Heap {
     /// Where the memory of the heap is, by capacity (real bytes asked of the allocator, not the accounted `Stats::bytes`). It walks every object, so it is for a load tool, not for a hot path.
     pub fn footprint(&self) -> Footprint {
         let mut f = Footprint { object_slab: self.objects.capacity_bytes(), string_slab: self.strings.capacity_bytes(), interner: self.interner.table.capacity() * 4, ..Default::default() };
+        f.shape_bytes = self.shapes.bytes();
+        f.shapes = self.shapes.len();
         for o in &self.objects.live {
-            f.entries_used += o.props.entries.len() * ENTRY_BYTES;
-            f.entries_cap += o.props.entries.capacity() * ENTRY_BYTES;
+            let (n, used, cap) = match &o.dict {
+                Some(d) => {
+                    f.dict_objects += 1;
+                    f.entries_used += d.entries.len() * ENTRY_BYTES;
+                    f.entries_cap += d.entries.capacity() * ENTRY_BYTES;
+                    f.index_tables += d.index.as_ref().map_or(0, |m| m.capacity() * (std::mem::size_of::<(PropertyKey, u32)>() + 1));
+                    (d.entries.len(), d.entries.len() * ENTRY_BYTES, d.entries.capacity() * ENTRY_BYTES)
+                }
+                None => {
+                    f.slots_used += o.slots.len() * SLOT_BYTES;
+                    f.slots_cap += o.slots.capacity() * SLOT_BYTES;
+                    (self.shapes.count(o.shape), o.slots.len() * SLOT_BYTES, o.slots.capacity() * SLOT_BYTES)
+                }
+            };
             f.elems_used += o.elems.len() * ELEM_BYTES;
             f.elems_cap += o.elems.capacity() * ELEM_BYTES;
-            f.index_tables += o.props.index.as_ref().map_or(0, |m| m.capacity() * (std::mem::size_of::<(PropertyKey, u32)>() + 1));
-            f.objects_with_props += (!o.props.entries.is_empty()) as usize;
-            let n = o.props.entries.len();
+            f.objects_with_props += (n != 0) as usize;
             let b = match n { 0..=4 => n, 5..=8 => 5, 9..=16 => 6, 17..=64 => 7, _ => 8 };
             f.by_len[b].0 += 1;
-            f.by_len[b].1 += n * ENTRY_BYTES;
-            f.by_len[b].2 += o.props.entries.capacity() * ENTRY_BYTES;
+            f.by_len[b].1 += used;
+            f.by_len[b].2 += cap;
         }
         f.string_units = self.strings.live.iter().map(|s| s.units.len() * 2).sum();
         f
@@ -871,16 +920,25 @@ impl Heap {
     }
 
     pub fn intern_str(&mut self, s: &str) -> R<StrId> {
-        let units = if s.is_ascii() { s.len() } else { s.encode_utf16().count() };
+        let ascii = s.is_ascii();
+        let units = if ascii { s.len() } else { s.encode_utf16().count() };
         if units > self.limits.max_string_units { return Err(HeapError::Limit(Limit::StringLength)); }
         if string_cost(units) > self.limits.max_bytes { return Err(HeapError::Limit(Limit::Bytes)); }
         // A short string is looked up from a stack buffer: only a new string allocates (V8 `StringTable::LookupKey`).
         if s.len() <= SHORT_UNITS {
             let mut buf = [0u16; SHORT_UNITS];
             let mut n = 0;
-            for u in s.encode_utf16() {
-                buf[n] = u;
-                n += 1;
+            if ascii {
+                // Each byte is one code unit: a plain widening copy, no UTF-8 decoding (the realm interns about 2,000 names).
+                for (d, &b) in buf.iter_mut().zip(s.as_bytes()) {
+                    *d = b as u16;
+                }
+                n = s.len();
+            } else {
+                for u in s.encode_utf16() {
+                    buf[n] = u;
+                    n += 1;
+                }
             }
             return self.intern(std::borrow::Cow::Borrowed(&buf[..n]));
         }
@@ -1125,12 +1183,9 @@ impl Heap {
     fn alloc_object(&mut self, proto: Option<ObjId>, is_array: bool) -> R<ObjId> {
         self.check_opt_obj(proto)?;
         if !self.objects.can_alloc() { return Err(HeapError::Limit(Limit::Objects)); }
-        let mut props = PropMap::new();
-        if is_array {
-            let len = PropertyKey::String(self.length);
-            props.set(len, Property::Data { value: Value::Number(0.0), writable: true, enumerable: false, configurable: false });
-        }
-        let o = Object { proto, extensible: true, is_array, exotic: 0, lazy: 0, elems: Vec::new(), props };
+        // An array starts with its `length` in slot 0: the array root shape names it.
+        let (shape, slots) = if is_array { (shape::ROOT_ARRAY, vec![Value::Number(0.0)]) } else { (shape::ROOT, Vec::new()) };
+        let o = Object { proto, shape, extensible: true, is_array, exotic: 0, lazy: 0, ic_chain: false, fast_on_use: false, elems: Vec::new(), slots, dict: None };
         let cost = obj_bytes(&o);
         self.charge(cost)?;
         let (index, gn) = self.objects.alloc(o, Limit::Objects)?;
@@ -1143,9 +1198,44 @@ impl Heap {
         self.alloc_object(proto, false)
     }
 
+    /// A new ordinary object that keeps its properties in a dictionary from the start. For the global object: its names are read through
+    /// position hints (`own_pos`), and a hint into a dictionary is one load, where a hint into a shape takes three (V8 does this too).
+    pub fn new_dict_object(&mut self, proto: Option<ObjId>) -> R<ObjId> {
+        let o = self.alloc_object(proto, false)?;
+        self.edit_with(o, |ob, sh| ob.to_dict(sh));
+        Ok(o)
+    }
+
     /// A new empty array with the exotic `length`.
     pub fn new_array(&mut self, proto: Option<ObjId>) -> R<ObjId> {
         self.alloc_object(proto, true)
+    }
+
+    /// A frozen array of `items`, with one more named property `extra` (not enumerable) when given: a template object (`GetTemplateObject`,
+    /// section 13.2.8.4). It is built in dictionary mode at once, as `set_integrity` would leave it, without the shape and slot steps.
+    pub fn new_frozen_array(&mut self, proto: Option<ObjId>, items: &[Value], extra: Option<(PropertyKey, Value)>) -> R<ObjId> {
+        for &v in items.iter().chain(extra.as_ref().map(|e| &e.1)) {
+            self.check_value(v)?;
+        }
+        if let Some((k, _)) = extra {
+            self.check_key(k)?;
+        }
+        let n = items.len() + 1 + extra.is_some() as usize;
+        self.charge(std::mem::size_of::<PropMap>() + n * (ENTRY_BYTES + INDEX_ENTRY_BYTES))?;
+        let o = self.alloc_object(proto, true)?;
+        let length = PropertyKey::String(self.length);
+        self.edit(o, |ob| {
+            let p = |value, enumerable| Property::Data { value, writable: false, enumerable, configurable: false };
+            let mut m = PropMap::new();
+            m.entries.reserve_exact(n);
+            m.entries.push(Some((length, p(Value::Number(items.len() as f64), false))));
+            m.entries.extend(items.iter().enumerate().map(|(i, &v)| Some((PropertyKey::Index(i as u32), p(v, true)))));
+            m.entries.extend(extra.map(|(k, v)| Some((k, p(v, false)))));
+            (m.live, m.index_keys) = (n as u32, items.len() as u32);
+            m.rebuild_index();
+            (ob.slots, ob.shape, ob.extensible, ob.dict) = (Vec::new(), 0, false, Some(Box::new(m)));
+        });
+        Ok(o)
     }
 
     /// `IsArray` of an object that is not a proxy. A proxy is `Err(Proxy)`: the answer is the one of its target.
@@ -1191,7 +1281,12 @@ impl Heap {
             }
             p = self.obj(x)?.proto;
         }
-        self.objects.get_mut(o.index, o.gn).unwrap().proto = proto;
+        // A new prototype sends the object to dictionary mode: a cache that names its shape must not outlive a change of chain.
+        self.chain_changed(o);
+        self.edit_with(o, |ob, sh| {
+            ob.to_dict(sh);
+            ob.proto = proto;
+        });
         Ok(true)
     }
 
@@ -1211,12 +1306,13 @@ impl Heap {
         Ok(())
     }
 
+    #[inline]
     fn own(&self, o: &Object, key: PropertyKey) -> Option<Property> {
         if let PropertyKey::Index(i) = key
             && let Some(Some(v)) = o.elems.get(i as usize) {
             return Some(Property::Data { value: *v, writable: true, enumerable: true, configurable: true });
         }
-        o.props.get(key)
+        o.get_prop(&self.shapes, key)
     }
 
     /// Give the heap what a lazy function prototype needs: `Object.prototype` and the keys `prototype` and
@@ -1232,10 +1328,11 @@ impl Heap {
     /// added now, so key order and `in` are as if the object existed.
     pub fn add_lazy_prototype(&mut self, f: ObjId) -> R<()> {
         let Some((_, kp, _)) = self.lazy else { return Err(HeapError::NeedsExecution("set_lazy_prototype first")) };
-        self.obj(f)?;
-        self.charge(ENTRY_BYTES)?;
-        self.edit(f, |ob| {
-            ob.props.set(kp, Property::Data { value: Value::Undefined, writable: true, enumerable: false, configurable: false });
+        let ob = self.obj(f)?;
+        self.charge(ob.prop_cost())?;
+        self.chain_changed(f);
+        self.edit_with(f, |ob, sh| {
+            ob.set_prop(sh, kp, Property::Data { value: Value::Undefined, writable: true, enumerable: false, configurable: false });
             ob.lazy |= LAZY_PROTO;
         });
         Ok(())
@@ -1287,11 +1384,11 @@ impl Heap {
         let p = self.alloc_object(Some(op), false)?;
         let d = PropertyDescriptor { value: Some(Value::Object(o)), writable: Some(true), enumerable: Some(false), configurable: Some(true), ..Default::default() };
         self.define_own_property(p, kc, &d)?;
-        self.edit(o, |ob| {
+        self.edit_with(o, |ob, sh| {
             ob.lazy &= !LAZY_PROTO;
-            if let Some(Property::Data { value, writable, enumerable, configurable }) = ob.props.get(kp) {
+            if let Some(Property::Data { value, writable, enumerable, configurable }) = ob.get_prop(sh, kp) {
                 debug_assert!(matches!(value, Value::Undefined));
-                ob.props.set(kp, Property::Data { value: Value::Object(p), writable, enumerable, configurable });
+                ob.set_prop(sh, kp, Property::Data { value: Value::Object(p), writable, enumerable, configurable });
             }
         });
         Ok(())
@@ -1452,7 +1549,12 @@ impl Heap {
 
     /// The position of the own named property `key` of `o`: the hint for `own_data_at` and `set_own_data_at`.
     pub fn own_pos(&self, o: ObjId, key: PropertyKey) -> Option<u32> {
-        self.obj(o).ok()?.props.find(key).map(|p| p as u32)
+        let ob = self.obj(o).ok()?;
+        match &ob.dict {
+            Some(d) => d.find(key),
+            None => self.shapes.pos(ob.shape, key),
+        }
+        .map(|p| p as u32)
     }
 
     /// The value of the own data property `key` of `o` if it sits at position `hint`. `None` is not "absent": it asks the caller to
@@ -1460,10 +1562,10 @@ impl Heap {
     #[inline]
     pub fn own_data_at(&self, o: ObjId, hint: u32, key: PropertyKey) -> Option<Value> {
         let ob = self.obj(o).ok()?;
-        match ob.props.entries.get(hint as usize) {
-            Some(Some((k, Property::Data { value, .. }))) if *k == key && ob.exotic == 0 && ob.lazy & (LAZY_PROTO | LAZY_HS) == 0 => Some(*value),
-            _ => None,
+        if ob.exotic != 0 || ob.lazy & (LAZY_PROTO | LAZY_HS) != 0 {
+            return None;
         }
+        ob.read_at(&self.shapes, hint as usize, key)
     }
 
     /// Store `v` in the own writable data property `key` of `o` if it sits at position `hint`. `false` asks the caller to use `set`.
@@ -1476,13 +1578,7 @@ impl Heap {
         if ob.exotic != 0 || ob.lazy & (LAZY_PROTO | LAZY_HS) != 0 {
             return false;
         }
-        match ob.props.entries.get_mut(hint as usize) {
-            Some(Some((k, Property::Data { value, writable: true, .. }))) if *k == key => {
-                *value = v;
-                true
-            }
-            _ => false,
-        }
+        ob.write_at(&self.shapes, hint as usize, key, v)
     }
 
     /// `o[key]` without calling anything.
@@ -1504,6 +1600,15 @@ impl Heap {
             Some((_, Property::Accessor { set: Some(s), .. })) => return Ok(Set::Setter(s)),
             Some((_, Property::Accessor { set: None, .. })) => return Ok(Set::Rejected),
             Some((_, Property::Data { writable: false, .. })) => return Ok(Set::Rejected),
+            // An own writable data property of an ordinary object: only its value changes, so the steps below (which find the key
+            // three more times) are not needed. Array `length` and index keys keep their own rules.
+            Some((h, _)) if h == o && !matches!(key, PropertyKey::Index(_)) => {
+                let length = PropertyKey::String(self.length);
+                let ob = self.objects.get_mut(o.index, o.gn).expect("lookup checked it");
+                if ob.exotic == 0 && ob.lazy == 0 && !(ob.is_array && key == length) && ob.set_value(&self.shapes, key, value) {
+                    return Ok(Set::Done);
+                }
+            }
             _ => {}
         }
         // Writable data property found (maybe on a prototype), or nothing: act on the receiver.
@@ -1531,7 +1636,8 @@ impl Heap {
         if !p.configurable() {
             return Ok(false);
         }
-        self.edit(o, |ob| ob.remove(key));
+        self.chain_changed(o);
+        self.edit_with(o, |ob, sh| ob.remove(sh, key));
         Ok(true)
     }
 
@@ -1564,7 +1670,8 @@ impl Heap {
     pub fn own_key_slots(&self, o: ObjId) -> R<usize> {
         let ob = self.obj(o)?;
         let virtual_len = self.virtual_len(o)?;
-        Ok(ob.elems.len().saturating_add(ob.props.entries.len()).saturating_add(virtual_len))
+        let named = ob.dict.as_ref().map_or_else(|| self.shapes.count(ob.shape), |d| d.entries.len());
+        Ok(ob.elems.len().saturating_add(named).saturating_add(virtual_len))
     }
 
     /// Like `own_keys`, but without the virtual integer indices of a byte view. For tracing: those hold no references.
@@ -1573,12 +1680,16 @@ impl Heap {
     pub fn stored_edges(&self, o: ObjId, out: &mut Vec<Value>) -> R<()> {
         let ob = self.obj(o)?;
         out.extend(ob.elems.iter().flatten());
-        for (_, p) in ob.props.iter() {
-            match p {
-                Property::Data { value, .. } => out.push(value),
-                Property::Accessor { get, set, .. } => {
-                    out.extend(get.map(Value::Object));
-                    out.extend(set.map(Value::Object));
+        // The slots of a shape-mode object hold data values and, for an accessor, a function or `undefined`.
+        out.extend_from_slice(&ob.slots);
+        if let Some(d) = &ob.dict {
+            for (_, p) in d.iter() {
+                match p {
+                    Property::Data { value, .. } => out.push(value),
+                    Property::Accessor { get, set, .. } => {
+                        out.extend(get.map(Value::Object));
+                        out.extend(set.map(Value::Object));
+                    }
                 }
             }
         }
@@ -1588,15 +1699,13 @@ impl Heap {
     fn own_keys_with(&self, o: ObjId, virt: bool) -> R<Vec<PropertyKey>> {
         let ob = self.obj(o)?;
         let mut idx: Vec<u32> = ob.elems.iter().enumerate().filter(|(_, v)| v.is_some()).map(|(i, _)| i as u32).collect();
-        let sparse = ob.props.index_keys > 0;
+        let sparse = ob.index_keys() > 0;
         let (mut strs, mut syms) = (Vec::new(), Vec::new());
-        for (k, _) in ob.props.iter() {
-            match k {
-                PropertyKey::Index(i) => idx.push(i),
-                PropertyKey::String(_) => strs.push(k),
-                PropertyKey::Symbol(_) => syms.push(k),
-            }
-        }
+        ob.each_key(&self.shapes, |k| match k {
+            PropertyKey::Index(i) => idx.push(i),
+            PropertyKey::String(_) => strs.push(k),
+            PropertyKey::Symbol(_) => syms.push(k),
+        });
         if sparse {
             idx.sort_unstable();
         }
@@ -1612,19 +1721,24 @@ impl Heap {
 
     /// Run `f` on an object and keep `bytes` exact. `id` must be valid.
     fn edit<T>(&mut self, id: ObjId, f: impl FnOnce(&mut Object) -> T) -> T {
+        self.edit_with(id, |o, _| f(o))
+    }
+
+    /// `edit` for a change of the named properties, which needs the shapes.
+    fn edit_with<T>(&mut self, id: ObjId, f: impl FnOnce(&mut Object, &mut Shapes) -> T) -> T {
         let o = self.objects.get_mut(id.index, id.gn).expect("edit on a checked handle");
         let before = obj_bytes(o);
-        let r = f(o);
+        let r = f(o, &mut self.shapes);
         let after = obj_bytes(o);
         self.bytes = self.bytes + after - before;
         r
     }
 
-    /// Room for `n` more own properties, in one allocation of that size. A vector that grows by push takes 4, 8, 16 entries (40 bytes each): an
+    /// Room for `n` more own properties, in one allocation of that size. A vector that grows by push takes 4, 8, 16 slots (16 bytes each): an
     /// object made from a literal, or a closure, knows how many it will have, so the slack is not made.
     pub fn reserve_props(&mut self, o: ObjId, n: usize) -> R<()> {
         self.obj(o)?;
-        self.edit(o, |ob| ob.props.entries.reserve_exact(n));
+        self.edit(o, |ob| ob.reserve_props(n));
         Ok(())
     }
 
@@ -1632,13 +1746,16 @@ impl Heap {
     /// not enumerable, configurable). The same result as two `define_own_property` calls, in one step: a realm makes
     /// hundreds of host functions at start, and each saved check shows in the start-up cost.
     pub fn init_function(&mut self, o: ObjId, length: (PropertyKey, f64), name: (PropertyKey, StrId)) -> R<()> {
-        self.obj(o)?;
-        self.charge(2 * ENTRY_BYTES)?;
+        let ob = self.obj(o)?;
+        self.charge(2 * ob.prop_cost())?;
         let data = |value| Property::Data { value, writable: false, enumerable: false, configurable: true };
-        self.edit(o, |ob| {
-            ob.props.entries.reserve_exact(2);
-            ob.props.set(length.0, data(Value::Number(length.1)));
-            ob.props.set(name.0, data(Value::String(name.1)));
+        self.edit_with(o, |ob, sh| {
+            ob.reserve_props(2);
+            // A fresh object has no key to find first. Any other object takes the general path.
+            if !(ob.shape == shape::ROOT && ob.init_fn(sh, (length.0, name.0), [Value::Number(length.1), Value::String(name.1)])) {
+                ob.set_prop(sh, length.0, data(Value::Number(length.1)));
+                ob.set_prop(sh, name.0, data(Value::String(name.1)));
+            }
         });
         Ok(())
     }
@@ -1647,6 +1764,9 @@ impl Heap {
     /// Errors: stale handles, a descriptor mixing data and accessor fields, an invalid array
     /// length, or a size limit.
     pub fn define_own_property(&mut self, o: ObjId, key: PropertyKey, d: &PropertyDescriptor) -> R<bool> {
+        if !self.setup && let Some(r) = self.add_data_fast(o, key, d)? {
+            return Ok(r);
+        }
         let mut obj = self.obj(o)?;
         self.check_key(key)?;
         if self.is_lazy(obj, key) {
@@ -1693,13 +1813,45 @@ impl Heap {
             return Ok(false);
         }
         if i >= len {
-            self.edit(o, |ob| ob.set_length(Some(i + 1), None));
+            self.edit_with(o, |ob, sh| ob.set_length(sh, Some(i + 1), None));
         }
         Ok(true)
     }
 
+    /// The common define: a full data descriptor for a new named key of an ordinary object in shape mode (object literals, `JSON.parse`,
+    /// a new key by assignment). One key search and one transition, with no `Property` built. `None`: any other case, for the general path.
+    #[inline]
+    fn add_data_fast(&mut self, o: ObjId, key: PropertyKey, d: &PropertyDescriptor) -> R<Option<bool>> {
+        let (Some(v), Some(w), Some(e), Some(c), None, None) = (d.value, d.writable, d.enumerable, d.configurable, d.get, d.set) else { return Ok(None) };
+        if matches!(key, PropertyKey::Index(_)) || self.setup {
+            return Ok(None);
+        }
+        let Some(ob) = self.objects.get(o.index, o.gn) else { return Ok(None) };
+        if ob.exotic != 0 || ob.lazy != 0 || ob.dict.is_some() || !ob.extensible || ob.is_array || ob.ic_chain || ob.slots.len() >= shape::MAX_PROPS {
+            return Ok(None);
+        }
+        if self.shapes.find(ob.shape, key).is_some() {
+            return Ok(None);
+        }
+        self.check_key(key)?;
+        self.check_value(v)?;
+        let attrs = w as u8 * shape::A_W | e as u8 * shape::A_E | c as u8 * shape::A_C;
+        let Some(next) = self.shapes.add(ob.shape, key, attrs) else { return Ok(None) };
+        self.charge(SLOT_BYTES)?;
+        let ob = self.objects.get_mut(o.index, o.gn).expect("checked above");
+        ob.shape = next;
+        ob.slots.push(v);
+        self.bytes += SLOT_BYTES;
+        Ok(Some(true))
+    }
+
     fn array_len(&self, o: &Object) -> (u32, bool) {
-        match o.props.get(PropertyKey::String(self.length)) {
+        // In shape mode `length` is slot 0 and is writable (a read-only `length` is a change of attributes: dictionary mode).
+        if o.dict.is_none() {
+            let Value::Number(n) = o.slots[0] else { unreachable!("an array always has a numeric `length`") };
+            return (n as u32, true);
+        }
+        match o.get_prop(&self.shapes, PropertyKey::String(self.length)) {
             Some(Property::Data { value: Value::Number(n), writable, .. }) => (n as u32, writable),
             _ => unreachable!("an array always has a data `length`"),
         }
@@ -1713,15 +1865,28 @@ impl Heap {
         let in_elems = matches!(key, PropertyKey::Index(i) if matches!(obj.elems.get(i as usize), Some(Some(_))));
         let extra = match key {
             PropertyKey::Index(i) if obj.dense_ok(i, &new) => (i as usize + 1).saturating_sub(obj.elems.len()) * ELEM_BYTES,
-            _ if cur.is_none() || in_elems => ENTRY_BYTES + if obj.props.index.is_some() {
-                INDEX_ENTRY_BYTES
-            } else if obj.props.entries.len() + 1 > INDEX_AT {
-                (obj.props.live as usize + 1) * INDEX_ENTRY_BYTES
-            } else { 0 },
+            _ if cur.is_none() || in_elems => obj.add_cost(&self.shapes, key, &new),
             _ => 0,
         };
         self.charge(extra)?;
-        self.edit(o, |ob| ob.store(key, new));
+        // Setup mode: a key that would make a new shape sends the object to a dictionary. Most objects of the realm (prototypes,
+        // namespaces) share no shape with another object, and most of them are never used. The first cache fill that walks one gives
+        // it shapes (`Heap::make_fast`).
+        let to_dict = self.setup && obj.dict.is_none() && obj.exotic == 0 && !self.shapes.has_child(obj.shape, key, shape::attrs_of(&new));
+        if obj.ic_chain && cur.map(|c| shape::attrs_of(&c)) != Some(shape::attrs_of(&new)) {
+            self.chain_changed(o);
+        }
+        if cur.is_none() && !matches!(key, PropertyKey::Index(_)) {
+            self.edit_with(o, |ob, sh| {
+                if to_dict {
+                    ob.to_dict(sh);
+                    ob.fast_on_use = true;
+                }
+                ob.add_prop(sh, key, new)
+            });
+        } else {
+            self.edit_with(o, |ob, sh| ob.store(sh, key, new));
+        }
         Ok(true)
     }
 
@@ -1752,26 +1917,28 @@ impl Heap {
         if !self.ordinary_define(o, key, &nd)? {
             return Ok(false);
         }
-        let blocked = self.edit(o, |ob| {
-            let floor = ob.props.iter().filter_map(|(k, p)| match k {
+        let blocked = self.edit_with(o, |ob, sh| {
+            // Index keys are only in a dictionary.
+            let floor = ob.dict.iter().flat_map(|d| d.iter()).filter_map(|(k, p)| match k {
                 PropertyKey::Index(i) if i >= n && !p.configurable() => Some(i),
                 _ => None,
             }).max();
             let keep = floor.map_or(n, |f| f + 1);
             ob.truncate_elems(keep as usize);
-            if ob.props.index_keys > 0 {
-                let dead: Vec<_> = ob.props.iter().map(|e| e.0).filter(|k| matches!(k, PropertyKey::Index(i) if *i >= keep)).collect();
+            if let Some(d) = ob.dict.as_mut().filter(|d| d.index_keys > 0) {
+                let dead: Vec<_> = d.iter().map(|e| e.0).filter(|k| matches!(k, PropertyKey::Index(i) if *i >= keep)).collect();
                 for k in dead {
-                    ob.props.remove(k);
+                    d.remove(k);
                 }
             }
             if floor.is_some() {
-                ob.set_length(Some(keep), None);
+                ob.set_length(sh, Some(keep), None);
             }
             floor.is_some()
         });
         if !new_writable {
-            self.edit(o, |ob| ob.set_length(None, Some(false)));
+            self.chain_changed(o);
+            self.edit_with(o, |ob, sh| ob.set_length(sh, None, Some(false)));
         }
         Ok(!blocked)
     }
@@ -1787,7 +1954,7 @@ impl Heap {
             self.check_value(v)?;
         }
         let obj = self.obj(o)?;
-        if !obj.is_array || obj.props.index_keys != 0 || obj.elems.len() != len as usize || start.saturating_add(del) > len as usize {
+        if !obj.is_array || obj.index_keys() != 0 || obj.elems.len() != len as usize || start.saturating_add(del) > len as usize {
             return Ok(None);
         }
         let (alen, writable) = self.array_len(obj);
@@ -1799,10 +1966,10 @@ impl Heap {
             return Ok(None);
         }
         self.charge(items.len().saturating_sub(del) * ELEM_BYTES)?;
-        Ok(Some(self.edit(o, |ob| {
+        Ok(Some(self.edit_with(o, |ob, sh| {
             let removed: Vec<Option<Value>> = ob.elems.splice(start..start + del, items.iter().map(|&v| Some(v))).collect();
             ob.trim_elems();
-            ob.set_length(Some(new_len as u32), None);
+            ob.set_length(sh, Some(new_len as u32), None);
             removed
         })))
     }
@@ -1812,7 +1979,7 @@ impl Heap {
     fn no_indexed_protos(&self, mut p: Option<ObjId>) -> R<bool> {
         while let Some(c) = p {
             let po = self.obj(c)?;
-            if !po.elems.is_empty() || po.props.index_keys != 0 || po.exotic != 0 {
+            if !po.elems.is_empty() || po.index_keys() != 0 || po.exotic != 0 {
                 return Ok(false);
             }
             p = po.proto;
@@ -1832,7 +1999,7 @@ impl Heap {
     /// The slice is valid until the next heap change, and a hole is `None`.
     pub fn dense_elems(&self, o: ObjId, len: u64) -> R<Option<&[Option<Value>]>> {
         let obj = self.obj(o)?;
-        if !obj.is_array || obj.props.index_keys != 0 || obj.elems.len() as u64 != len || len > MAX_INDEX as u64 {
+        if !obj.is_array || obj.index_keys() != 0 || obj.elems.len() as u64 != len || len > MAX_INDEX as u64 {
             return Ok(None);
         }
         if self.array_len(obj).0 as u64 != len || !self.no_indexed_protos(obj.proto)? {
@@ -1846,7 +2013,7 @@ impl Heap {
     /// element or a hole of an extensible array. `Ok(false)` and no change unless they hold.
     pub fn edit_dense(&mut self, o: ObjId, len: u32, f: impl FnOnce(&mut [Option<Value>])) -> R<bool> {
         let obj = self.obj(o)?;
-        if !obj.is_array || obj.props.index_keys != 0 || obj.elems.len() != len as usize || !obj.extensible {
+        if !obj.is_array || obj.index_keys() != 0 || obj.elems.len() != len as usize || !obj.extensible {
             return Ok(false);
         }
         if self.array_len(obj).0 != len || !self.no_indexed_protos(obj.proto)? {
@@ -1867,7 +2034,7 @@ impl Heap {
             self.check_value(*v)?;
         }
         let obj = self.obj(o)?;
-        if !obj.is_array || !obj.elems.is_empty() || obj.props.index_keys != 0 || !obj.extensible {
+        if !obj.is_array || !obj.elems.is_empty() || obj.index_keys() != 0 || !obj.extensible {
             return Ok(false);
         }
         while matches!(elems.last(), Some(None)) {
@@ -1877,9 +2044,9 @@ impl Heap {
             return Ok(false);
         }
         self.charge(elems.len() * ELEM_BYTES)?;
-        self.edit(o, |ob| {
+        self.edit_with(o, |ob, sh| {
             ob.elems = elems;
-            ob.set_length(Some(len), None);
+            ob.set_length(sh, Some(len), None);
         });
         Ok(true)
     }
@@ -1897,16 +2064,24 @@ impl Heap {
         if ob.exotic == EXOTIC_NAMED && self.named_open(o) || frozen && ob.exotic != 0 && ob.exotic != EXOTIC_STR && self.virtual_len(o)? > 0 {
             return Ok(false);
         }
+        // Changing the attributes of a property, or moving an element to the property table, is dictionary mode.
         let moved = ob.elems.iter().flatten().count();
-        self.charge(moved * (ENTRY_BYTES + INDEX_ENTRY_BYTES))?;
-        self.edit(o, |ob| {
+        let named = ob.dict.as_ref().map_or_else(|| self.shapes.count(ob.shape), |d| d.live as usize);
+        self.charge((moved + if ob.dict.is_some() { 0 } else { named }) * (ENTRY_BYTES + INDEX_ENTRY_BYTES))?;
+        self.chain_changed(o);
+        self.edit_with(o, |ob, sh| {
             ob.extensible = false;
+            if moved + named == 0 {
+                return;
+            }
+            ob.to_dict(sh);
+            let d = ob.dict.as_mut().unwrap();
             for (i, v) in std::mem::take(&mut ob.elems).into_iter().enumerate() {
                 if let Some(value) = v {
-                    ob.props.set(PropertyKey::Index(i as u32), Property::Data { value, writable: !frozen, enumerable: true, configurable: false });
+                    d.set(PropertyKey::Index(i as u32), Property::Data { value, writable: !frozen, enumerable: true, configurable: false });
                 }
             }
-            for (_, p) in ob.props.entries.iter_mut().flatten() {
+            for (_, p) in d.entries.iter_mut().flatten() {
                 match p {
                     Property::Data { writable, configurable, .. } => {
                         *configurable = false;
@@ -1928,7 +2103,7 @@ impl Heap {
         if ob.extensible || ob.elems.iter().any(Option::is_some) || (frozen && ob.exotic != 0 && ob.exotic != EXOTIC_STR && self.virtual_len(o)? > 0) {
             return Ok(false);
         }
-        Ok(ob.props.iter().all(|(_, p)| !(p.configurable() || frozen && matches!(p, Property::Data { writable: true, .. }))))
+        Ok(ob.props(&self.shapes).all(|(_, p)| !(p.configurable() || frozen && matches!(p, Property::Data { writable: true, .. }))))
     }
 
     // ----- collection -----
@@ -1940,7 +2115,7 @@ impl Heap {
             self.check_value(r)?;
         }
         self.collections += 1;
-        let Heap { objects, strings, symbols, bigs, gray, length, exotics, .. } = self;
+        let Heap { objects, shapes, strings, symbols, bigs, gray, length, exotics, .. } = self;
         for sl in [&mut strings.marks, &mut symbols.marks] {
             sl.clear();
         }
@@ -1964,6 +2139,8 @@ impl Heap {
         }
         // Work list of dense positions: pop an object, mark everything it points to. No recursion.
         let ol = &objects.live;
+        // The shapes whose keys are marked: most objects share a shape, and its keys are marked once.
+        let mut keyed = vec![false; shapes.len()];
         while let Some(d) = m.gray.pop() {
             let o = &ol[d as usize];
             if let Some(p) = o.proto {
@@ -1983,17 +2160,37 @@ impl Heap {
             for v in o.elems.iter().flatten() {
                 m.value(*v);
             }
-            for (k, p) in o.props.iter() {
-                match k {
-                    PropertyKey::String(s) => m.str(s),
-                    PropertyKey::Symbol(s) => m.sym(s),
-                    PropertyKey::Index(_) => {}
+            match &o.dict {
+                None => {
+                    // Shape mode: the keys of the shape (a shape holds its keys, but does not keep them alive), once for each shape,
+                    // and every slot. A slot of an accessor holds a function or `undefined`, which `value` ignores.
+                    if !std::mem::replace(&mut keyed[o.shape as usize], true) {
+                        for e in shapes.entries(o.shape) {
+                            match e.key {
+                                PropertyKey::String(s) => m.str(s),
+                                PropertyKey::Symbol(s) => m.sym(s),
+                                PropertyKey::Index(_) => {}
+                            }
+                        }
+                    }
+                    for &v in &o.slots {
+                        m.value(v);
+                    }
                 }
-                match p {
-                    Property::Data { value, .. } => m.value(value),
-                    Property::Accessor { get, set, .. } => {
-                        if let Some(g) = get { m.obj(g); }
-                        if let Some(s) = set { m.obj(s); }
+                Some(dict) => {
+                    for (k, p) in dict.iter() {
+                        match k {
+                            PropertyKey::String(s) => m.str(s),
+                            PropertyKey::Symbol(s) => m.sym(s),
+                            PropertyKey::Index(_) => {}
+                        }
+                        match p {
+                            Property::Data { value, .. } => m.value(value),
+                            Property::Accessor { get, set, .. } => {
+                                if let Some(g) = get { m.obj(g); }
+                                if let Some(s) = set { m.obj(s); }
+                            }
+                        }
                     }
                 }
             }
@@ -2070,8 +2267,29 @@ impl Object {
         matches!(p, Property::Data { writable: true, enumerable: true, configurable: true, .. }) && i as usize <= self.elems.len() + ELEM_GAP
     }
 
-    fn store(&mut self, key: PropertyKey, p: Property) {
-        let PropertyKey::Index(i) = key else { return self.props.set(key, p) };
+    /// The bytes that one more named property may cost (an upper bound is enough: `edit` keeps the count exact).
+    fn prop_cost(&self) -> usize {
+        if self.dict.is_some() { ENTRY_BYTES } else { SLOT_BYTES }
+    }
+
+    /// The bytes that adding the property `key` may cost: a slot or two in shape mode, an entry and its index share in a dictionary, and
+    /// all the entries when an index key or the 129th property sends the object to a dictionary.
+    fn add_cost(&self, sh: &Shapes, key: PropertyKey, p: &Property) -> usize {
+        match &self.dict {
+            Some(d) => ENTRY_BYTES + if d.index.is_some() {
+                INDEX_ENTRY_BYTES
+            } else if d.entries.len() + 1 > INDEX_AT {
+                (d.live as usize + 1) * INDEX_ENTRY_BYTES
+            } else { 0 },
+            None if matches!(key, PropertyKey::Index(_)) || self.slots.len() >= shape::MAX_PROPS && sh.count(self.shape) >= shape::MAX_PROPS => {
+                (sh.count(self.shape) + 1) * (ENTRY_BYTES + INDEX_ENTRY_BYTES)
+            }
+            None => SLOT_BYTES * (1 + matches!(p, Property::Accessor { .. }) as usize),
+        }
+    }
+
+    fn store(&mut self, sh: &mut Shapes, key: PropertyKey, p: Property) {
+        let PropertyKey::Index(i) = key else { return self.set_prop(sh, key, p) };
         match p {
             Property::Data { value, .. } if self.dense_ok(i, &p) => {
                 let i = i as usize;
@@ -2079,8 +2297,8 @@ impl Object {
                     self.elems.resize(i + 1, None);
                 }
                 self.elems[i] = Some(value);
-                if self.props.index_keys > 0 {
-                    self.props.remove(key);
+                if self.index_keys() > 0 {
+                    self.remove_prop(sh, key);
                 }
             }
             _ => {
@@ -2088,19 +2306,19 @@ impl Object {
                     *e = None;
                     self.trim_elems();
                 }
-                self.props.set(key, p);
+                self.set_prop(sh, key, p);
             }
         }
     }
 
-    fn remove(&mut self, key: PropertyKey) -> bool {
+    fn remove(&mut self, sh: &mut Shapes, key: PropertyKey) -> bool {
         if let PropertyKey::Index(i) = key
             && let Some(e @ Some(_)) = self.elems.get_mut(i as usize) {
             *e = None;
             self.trim_elems();
             return true;
         }
-        self.props.remove(key)
+        self.remove_prop(sh, key)
     }
 
     fn trim_elems(&mut self) {
@@ -2112,17 +2330,6 @@ impl Object {
     fn truncate_elems(&mut self, n: usize) {
         self.elems.truncate(n);
         self.trim_elems();
-    }
-
-    /// Write the array `length` entry (the first one): a new value and/or `writable`.
-    fn set_length(&mut self, len: Option<u32>, writable: Option<bool>) {
-        let Some(Some((_, Property::Data { value, writable: w, .. }))) = self.props.entries.first_mut() else { unreachable!() };
-        if let Some(l) = len {
-            *value = Value::Number(l as f64);
-        }
-        if let Some(x) = writable {
-            *w = x;
-        }
     }
 }
 
@@ -2167,6 +2374,7 @@ mod tests {
         let mut h = Heap::default();
         let keys: Vec<_> = (0..=INDEX_AT).map(|i| h.key_from_str(&format!("key{i}")).unwrap()).collect();
         let o = h.new_object(None).unwrap();
+        h.edit_with(o, |ob, sh| ob.to_dict(sh)); // the byte cost of the hash index is a dictionary's
         for &k in &keys[..INDEX_AT] { h.set(o, k, Value::Null).unwrap(); }
         let before = h.stats().bytes;
         h.limits.max_bytes = before + ENTRY_BYTES + INDEX_ENTRY_BYTES;
@@ -2561,6 +2769,20 @@ mod tests {
     }
 
     #[test]
+    fn frozen_array_is_built_frozen_in_order() {
+        let mut h = Heap::default();
+        let raw = key(&mut h, "raw");
+        let a = h.new_frozen_array(None, &[n(1.0), n(2.0)], Some((raw, n(3.0)))).unwrap();
+        assert!(h.test_integrity(a, true).unwrap() && h.is_array(a).unwrap());
+        assert_eq!(h.array_length(a).unwrap(), Some(2));
+        let len = key(&mut h, "length");
+        assert_eq!(h.own_keys(a).unwrap(), vec![PropertyKey::Index(0), PropertyKey::Index(1), len, raw]);
+        assert!(matches!(h.get_own_property(a, PropertyKey::Index(1)).unwrap(), Some(Property::Data { value: Value::Number(2.0), writable: false, enumerable: true, configurable: false })));
+        assert!(matches!(h.get_own_property(a, raw).unwrap(), Some(Property::Data { writable: false, enumerable: false, configurable: false, .. })));
+        assert!(!h.define_own_property(a, PropertyKey::Index(2), &locked(true, true, true, 0.0)).unwrap());
+    }
+
+    #[test]
     fn array_length_stops_at_non_configurable_element() {
         let mut h = Heap::default();
         let a = h.new_array(None).unwrap();
@@ -2601,7 +2823,7 @@ mod tests {
         assert_eq!(setn(&mut h, a, PropertyKey::Index(0), 3.0), Set::Rejected);
         assert!(h.define_own_property(a, PropertyKey::Index(0), &PropertyDescriptor { writable: Some(true), ..Default::default() }).unwrap());
         assert_eq!(h.objects.get(a.index, a.gn).unwrap().elems.len(), 1);
-        assert_eq!(h.objects.get(a.index, a.gn).unwrap().props.index_keys, 1); // only 5000 left sparse
+        assert_eq!(h.objects.get(a.index, a.gn).unwrap().index_keys(), 1); // only 5000 left sparse
         assert_eq!(names(&mut h, a), ["0", "5000", "length"]);
         assert_eq!(num(&mut h, a, len), 5001.0);
         // Deleting the last dense element trims the vector.
@@ -3089,11 +3311,11 @@ mod tests {
         let pk = key(&mut h, "prototype");
         h.set(o, pk, n(1.0)).unwrap();
         let f = h.footprint();
-        assert_eq!((f.entries_used, f.entries_cap), (3 * ENTRY_BYTES, 3 * ENTRY_BYTES));
+        assert_eq!((f.slots_used, f.slots_cap), (3 * SLOT_BYTES, 3 * SLOT_BYTES));
         let p = h.new_object(None).unwrap();
         h.set(p, k, n(1.0)).unwrap();
         let f = h.footprint();
-        assert_eq!(f.entries_cap - f.entries_used, 3 * ENTRY_BYTES, "a pushed vector of one entry has room for 4");
+        assert_eq!(f.slots_cap - f.slots_used, 3 * SLOT_BYTES, "a pushed vector of one slot has room for 4");
         let stale = h_stale(&mut h);
         assert_eq!(h.reserve_props(stale, 1), Err(HeapError::Stale));
     }

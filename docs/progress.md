@@ -2172,3 +2172,174 @@ Cost: `tools/js/cost_matrix.sh`, origin/main 65bbf8e against this change, 805 ro
 Tests: `cargo test --release --workspace`, 2,887 passed, 0 failed, 12 ignored (after the rebase on 65bbf8e).
 
 Not tested: a DNS failure through the driver (a unit test makes the error; no resolver fault was made); a TLS failure on a `fetch` (the test uses the document load); an HTTP/2 GOAWAY on a live connection (the kind comes from the text of the error, checked in a unit test); the `bare` binary with `--window` under the arena limit; musl or macOS (the limit is Linux and glibc only); more than 15 runs on staging; arjun-e16; `tools/js/cost_matrix.sh` with jemalloc on every row.
+
+## Shapes with no cache (step A1 of the engine plan): not merged
+
+Status: the code is on branch `t3/heap-object-shapes`. It is not merged. The cost gate fails, and the plan says A1 then merges stacked on A2 (one merge unit).
+
+Change:
+- `Object` is `{ proto, shape, flags, elems, slots, dict }` (80 bytes, asserted by a test). Named properties of an ordinary object are values in `slots`; their keys and attributes are in the shape. An accessor uses 2 slots. An array keeps `length` in slot 0 of `ROOT_ARRAY`.
+- `heap_shape.rs`: the transition tree (`Shapes`), a single-entry `child` cache in each shape, key tables shared along a chain (a second branch copies its part), a scan up to 8 entries, a hash index above 8 (made at the first probe), and dictionary mode (`shape` 0, a `PropMap`).
+- Dictionary triggers: delete of a property that is not the last one added, any change of attributes (freeze, seal, data to accessor, read-only array `length`), `setPrototypeOf` to another prototype, the 129th property, an index key that is not dense, a full shape table (65,536).
+- `own_pos`, `own_data_at` and `set_own_data_at` work on shape slots and on dictionary objects.
+- Deviation from the plan: an exotic object has its own root shape (`ROOT_EXOTIC`), not dictionary mode. A dictionary for each wrapper cost 48 bytes and broke the wrapper-cost test (144 bytes against 120). A2 must not fill a cache for an exotic object.
+- Deviation from the plan: the global object is made in dictionary mode (`Heap::new_dict_object`). Its names are read through position hints. A hint into a shape needs about 3 dependent loads and about 35 more instructions.
+- The 1024-chain-length trigger of the plan cannot fire: the chain length is the property count, and the 129th property triggers first.
+- `crates/bare/examples/type_load.rs`: the `MEM=1` footprint line counts slots, dictionary entries, dictionary objects and shapes.
+
+Checks that pass:
+- `cargo test -p bare-js --lib`, debug: 745 passed. New tests: shape sharing, key order, attributes, accessors in 2 slots, delete and re-add, every dictionary trigger, exotic roots, arrays with `length` in slot 0, tables over 8 keys, the shape cap, GC trace of slots, footprint, position hints, and a property test (100,000 random define, delete, set, freeze, `setPrototypeOf` and `defineProperty` operations on 6 objects, compared with a `PropMap` model after each one). The property test found one bug: `set_integrity` skipped a dictionary object that had no dense elements.
+- Memory (`type_load` with `MEM=1`, after load, before any collect). Before: property entries 4.47 MiB used of 5.84, index tables 0.77 MiB. After: property slots 1.51 MiB used of 1.88, dictionary entries 0.06 MiB, shapes 0.33 MiB (2,843 shapes), index tables 0.01 MiB. Alloc live after load: 17.0 MiB to 12.6 MiB. Collections on the typing page: 9 to 6.
+- Peak RSS of `keycost.sh`: 31.8 MiB at 20 keys and 32.3 MiB at 50 keys. Main: 36.6 MiB at 50 keys.
+
+Checks that fail:
+- `keycost.sh`: `#a1` 424.8 M for each key against 411.1 M on main (+3.3%). `#f0` 432.9 M. Load and mount 794 M against 774 M. The budget is +-0.5%.
+- Cost matrix subset against a base build of `1859e0e`, glibc and jemalloc: `arrobj_load objects 1` +2.46% and +1.51%, `eval_load closures 10` +1.04% and +0.98%. Others: `loop 10` +0.43%, `calls 10` +0.35%, `fib 10` +0.18%, `objects 10` -0.15%, `arrobj_load objects 10` -0.68% and -0.80%. `arrobj_load objects 1` is mostly start-up: the realm makes about 1,000 shapes that are never shared.
+- Heap-level benchmark (instructions for each operation, main against A1 after the fixes below): create 3 properties +8.9%, literal with 3 properties +3.1%, read 3 +5.1%, read 10 +19%, read through the prototype +17%, write 3 +8.0%, 100-element array -17%, 997-key dictionary +4.2%, collect +8.1%. The read of a table over 8 keys costs one more indirection (shapes, tables, entries, slots) and a copy of the property out of the slots. A cache (A2) removes that walk. A cache-less shape cannot match a flat scan of a 3-entry `PropMap` in instructions.
+
+Fixes tried: `find` and `get_prop` inline; position-hint paths for shapes out of line; the global object in a dictionary (typing page 444.9 M to 437.0 M to 424.8 M for each key together with the next items); one lookup on the add path (`add_prop`); a cheaper `add_cost`; a lazy hash index. They cut the create rows from +29% to +9%.
+
+Not run: the full cost matrix, `test262_check.sh`, the `*_check.sh` scripts against Node, `cargo test --workspace`, release tests (the gate fails first, so they would not decide the merge).
+
+## Member read caches (step A2 of the engine plan): not merged
+
+Status: the code is on branch `t3/heap-shapes-inline-cache`, with A1 below it, rebased on `088d316`. It is not merged. The typing page and the RSS pass. The cost matrix fails: 186 of 803 rows are over +0.5% under both allocators.
+
+Change:
+- `Ic` (24 bytes in release): `shape`, `slot`, `kind`, `depth`, `first` (the receiver prototype at fill time) and `epoch`. The kinds are own, own accessor, prototype, prototype accessor and absent. Every kind except own adds `SHAPE_TAG` to `shape`, so the inline own test is one compare.
+- `Heap::ic_own` (inline): the shape compare and one slot load. `Heap::get_ic` (out of line): the other hits, else a fill. A prototype hit checks the shape, the epoch and `proto == first`, then walks `depth - 1` steps to the holder. A holder in dictionary mode is read at its entry position.
+- `proto_epoch`: a fill flags each prototype it walks (`ic_chain`). A change of keys, attributes or prototype on a flagged object bumps the epoch, and all prototype and absent entries stop hitting. The epoch saturates. After that, only own entries fill.
+- The fill refuses: index keys, exotic objects, dictionary receivers, the lazy `prototype` key, `on*` keys through a `LAZY_CHAIN` object, and chains deeper than 255. A refused dictionary or exotic receiver skips the fill attempt.
+- The tree walker keeps the entry number of a member site in `expr_name` of the node: 0 = not run, 1 = ran once, n >= 2 = `ics[n]`. A site that runs once gets no entry.
+- Debug builds compare every hit with the plain walk and panic on a difference.
+- Setup mode (`Heap::set_setup`): while the realm installs builtins, an object whose next key would make a new shape goes to a dictionary (`fast_on_use`). The first fill that walks it, or reads it as a receiver, gives it shapes (`to_shapes`). The realm keeps 6 shapes instead of 484.
+- `init_function` gives a fresh function object its `length` and `name` shape in one step (`Object::init_fn`, the shape is kept in `Shapes::fn_shape`).
+- `JSON.stringify` reads `toJSON` through 4 entries (`Interp::get_prop_ic`). A miss moves the entries down and fills the first.
+- A delete in an object of at most 8 properties keeps shape mode: the shape before the key takes the later keys again, and the later values move down. This replaces the A1 dictionary trigger for small objects.
+- `Heap::set` on an own writable data property of an ordinary object writes the value at once. Before, it found the key three more times (get_own_property, define, store).
+- A shape-mode object with no slots answers `own` with no shape read. `shape_get` is out of line, so `Heap::own` inlines into its callers as on main.
+- `MEM=1` of `type_load` prints a member cache line: reads, hit rates, fills by kind, refusals, entries and epoch bumps.
+
+Deviations from the plan:
+- No `expr_ic` table: the entry number is in `expr_name`. This saves 4 bytes for each node.
+- A prototype entry keeps `first` and `depth`, not the holder. The holder can change with no shape change on the receiver.
+- `get_ic` is out of line but not cold: prototype hits run there.
+- Setup mode, the `toJSON` cache, the delete rebuild and the `set` shortcut are not in the plan. Each one fixes a row that A1 or A2 made slower.
+
+Results (archMachine, against `088d316` from `base-build`):
+- `keycost.sh`: `#a1` 370.4 M for each key against 411.2 M (-9.9%). `#f0` 377.2 M against 419.0 M (-10.0%). Load and mount 736.2 M against 774.0 M (-4.9%).
+- Peak RSS of `#a1`: 32.0 MiB at 20 keys and 32.9 MiB at 50 keys. Main: 37.1 MiB and 36.7 MiB.
+- Member caches after 50 keys (`MEM=1`): 6,635,596 reads. Own hits 88.8%, other hits 7.1%, first runs 0.0%, fills 3.8% (96,681 own, 29,485 prototype, 122,673 absent), refused 0.3%. 1,373 entries (0.03 MiB). 5 epoch bumps.
+- Realm start-up: 1.573 M instructions against 1.502 M (+71 K). Without setup mode: 1.645 M.
+- Full cost matrix (803 rows, glibc and jemalloc): mean -0.01% and -0.12%. 186 rows are under -0.5% under both. 186 rows are over +0.5% under both. 34 rows are over under one allocator only.
+- Best rows: `stringify_load dag` -14.8%, `builtins_load json 10` -8.5%, `observer_load mo 10` -7.3%, `recursion_load react 1000` -8.0%, `date_load clock 10` -7.1%, `proxy_load set_trap 10` -6.6%, `arrobj_load fill 10` -5.7%, `eval_load objects 10` -3.7%, `class_load construct 10` -1.7%.
+- Worst rows: `tagged_load sites` +15.0% (scale 10) and +13.4% (scale 1); `gen_load iterobj 10` +4.4%; `binary_load dataview` +4.4%; `proxy_load keys`, `get_trap` and `noop` +4.2%; `sc_load custom_iter 10` +3.7%; `gen_load delegate 10` +3.4%; `binary_load scan` +3.2%; `wrapper_load forin` +3.1%; `revive_load shallow` +3.0%; `intl_load nf_locale_opts` +2.9%.
+- 94 of the 186 rows grow by less than 400 K instructions (median +267 K): start-up and first-use cost. The realm gives +71 K. The rest comes from the first fills (`to_shapes` of large prototypes, new entries) and from the first objects of each shape.
+- The other 92 rows read without a cache: native code that calls `Heap::get` or `own`, proxy traps, and receivers that are exotic (`DataView`, typed arrays) or frozen (dictionary mode). A shape read of a small object costs about 20 more instructions than the scan of a `PropMap` (shape, table and entry loads, then the property build).
+- `tagged_load sites`: each template object is a frozen array, so freeze sends it to a dictionary. Every `s.length` read of the tag function is then refused.
+
+Fixes tried, with results:
+- Fused `init_function` shape, one edit in the setup define path: realm +103 K to +70 K.
+- A refused receiver skips the fill attempt; an empty object skips the shape read; `shape_get` out of line: `proxy_load chain 10` +8.6% to +0.2%, `noop 10` +7% to +4.2%.
+- The `toJSON` cache: `stringify_load dag 10` +8.8% to -14.8%. 4 entries instead of 2: the fills of `revive_load shallow` went from 10,000 to 3.
+- The delete rebuild: `revive_load shallow 10` +5.0% to +4.1%.
+- The `set` shortcut: a 997-key dictionary loop went from +1.4% to -7.3%. `eval_load objects 10` +0.07% to -3.7%.
+- Reverted: a define that skips the key scan when the first transition adds that key. `eval_load objects 10` went from +0.07% to +0.68%.
+- Reverted: dictionary prototypes read in place, with no `to_shapes`. The first `JSON.stringify` cost went from +31 K to +5 K. But `arrobj_load lastindexof 1` went from -0.50% to +0.73% and `freeze 1` from -0.21% to +0.72%. A hot method read is cheaper from shape slots.
+
+Next steps (to verify):
+- Freeze and seal transitions in the shape tree, so frozen arrays and template objects keep shapes.
+- Caches for native sites that read many objects (`Object.keys`, `for-in`, `Array.from`, intl option bags), as for `toJSON`.
+- Caches for named reads of `DataView` and typed arrays. A key that is a canonical numeric string must stay uncached.
+- Cheaper start-up: share the shapes of the builtin prototypes between realms, or make the first `to_shapes` cheaper.
+- Polymorphic entries: the absent fills on the typing page (122,673 in 50 keys) come from React sites that see more than one shape.
+
+Checks:
+- `cargo test --workspace`, release: 2,869 passed and 0 failed. `cargo test -p bare-js`, debug (every hit compared with the plain walk): 775 passed. New tests: entry size, own hits and refills, shadowing on the receiver, a middle prototype and the holder, absent keys, prototype replacement, a getter turned into data and back, exotic and dictionary receivers, a dictionary holder, a collect that frees the holder, polymorphic sites with 2 and 5 shapes, a saturated epoch, a middle delete with accessors, and 12 JS programs whose output comes from Node 22.
+- `tools/js/test262_check.sh`: gate ok, 27,182 pass, the same as the baseline.
+- 41 of the 42 `tools/js/*_check.sh` match Node. `parse_check.sh` needs `acorn` and does not start, as on main.
+
+Not tested: a machine other than archMachine; wall time; scale 100 of the load rows; a live page other than the typing page; the bytecode interpreter with these caches (it keeps its own entries); a host that uses setup mode around `Browser::install`.
+
+## Shapes and member read caches (A1 and A2): the cost rows, second pass, not merged
+
+Status: the code is on branch `t3/js-cost-regression-fixes`, rebased on `16b5c83`. It is not merged. The typing page and the RSS pass. The cost matrix still fails: 23 of 805 rows are over +0.5% under both allocators (186 before this pass). The task rule is to stop after two fix attempts and report.
+
+Changes in this pass:
+- Exotic receivers that hold no named properties of their own (`ArrayBuffer`, `DataView`, typed arrays, wrappers of numbers, booleans, symbols and BigInts) get a new root shape `ROOT_PLAIN`. The member cache accepts them, and their prototypes, for every key that is not a canonical numeric string. Proxies, named host objects and `String` wrappers keep `ROOT_EXOTIC` and stay uncached.
+- `member_ic` reads a receiver that is never cached (`Heap::ic_refuses`) with the plain read at once, with no entry.
+- A proxy trap is read through 4 cache entries for each trap (`ProxyState::ics`), as `toJSON` is.
+- `Heap::intern_str` copies an ASCII name to UTF-16 with no decoding. The interner starts with 4,096 slots. The realm interns about 2,000 names. Realm start-up: about 123 K fewer instructions.
+- `define_own_property` adds a new plain data property to an extensible shape-mode object in one step (`add_data_fast`). Not in setup mode.
+- `Shapes::add` keeps the last 256 transitions that missed the first child (`recent`), so a literal with keys in another order does not reach the children map.
+- `own_keys` reads keys from the shape entries with no property build (`Object::each_key`). `for-in` over a `String` wrapper: +1,285 to about 0 instructions for each loop.
+- Template objects (`GetTemplateObject`) are built frozen in one step (`Heap::new_frozen_array`), in dictionary mode at once.
+
+Results (archMachine, against `16b5c83` from `base-build`):
+- `keycost.sh`: `#a1` 365.5 M for each key against 411.1 M (-11.1%). `#f0` 372.2 M against 419.0 M (-11.2%). Load and mount 719.4 M against 771.2 M (-6.7%).
+- Peak RSS of `#a1`: 32.3 MiB at 20 keys and 33.0 MiB at 50 keys. Main: 36.9 MiB and 36.8 MiB.
+- Full cost matrix (805 rows): mean -1.12% under glibc. 23 rows are over +0.5% under both allocators. 8 rows are over under one allocator only.
+- Rows that pass now: `tagged_load sites` -8.6% (scale 1) and -9.5% (scale 10), `binary_load dataview` -7.7%, `binary_load scan` -6.5%, `web_apis_load segmenter` -7.8%, `proxy_load keys` -2.1%, `proxy_load noop` +0.1%, `wrapper_load forin 1000` +0.46%, `numeric_load empty`, `sc_load custom_iter`, `gen_load iterobj`, `stringify_load shallow`, `session_load chain`, `xhr_load`.
+
+Rows still over under both allocators (glibc, jemalloc):
+- `intl_load nf_locale_opts` +2.46% and +2.25% (scale 1), +2.52% and +2.38% (scale 10).
+- `tagged_load call` +2.15% and +1.85% (scale 1), +2.28% and +2.24% (scale 10).
+- `intl_load cmp_opts` +1.74% and +1.62%, +1.78% and +1.76%. `intl_load locale` +1.57% and +1.42%, +1.63% and +1.50%. `intl_load make 10` +0.79% and +0.81%.
+- `proxy_load get_trap 10` +1.46% and +1.27%.
+- `revive_load shallow` +1.16% and +0.85%, +1.02% and +0.96%. `revive_load gc 10` +1.17% and +0.79%.
+- `sc_load symbol_keys` +1.01% and +0.68%, +0.94% and +0.89%. `sc_load toprim 10` +0.89% and +0.80%.
+- `iterator_load flatmap` +0.92% and +0.69%, +1.00% and +0.68%.
+- `gen_load delegate` +0.78% and +0.57%, +0.89% and +0.85%.
+- `seam_load forof_break 10` +0.68% and +0.59%. `range_load iter 10` +0.54% and +0.60%. `wrapper_load forin 10000` +0.59% and +0.57%.
+
+Causes, measured with exact instruction counts (gdb single steps of one call, both builds):
+- Native reads of small objects. Native code (intl option bags, the reviver, iterator results, `Symbol.toPrimitive` and other symbol keys) reads with `Heap::get` or `has_property`, with no cache. `shape_get` on a 2-key object costs about 60 to 80 instructions; `PropMap::find` cost 35 to 42. The extra cost is the loads of the shape, the table and the entries with their bounds checks, and the build of a `Property` from the attribute bits. One `Intl.Collator` options read: lookups 1,491 instructions against 1,323 (+168, 7 option keys). `has_property` with an own hit: 158 against 122. A hit on the prototype: 306 against 223.
+- Frozen receivers. A frozen object is in dictionary mode, so the cache refuses it. A member read then pays the inline test and `member_ic` before the plain read: 279 instructions against 197 on main (+82). The `s.length` read of each `tagged_load call` iteration is such a read.
+- Proxy `get` traps: the trap result path still has about +36 for each read (`q.x`).
+
+Fixes not done (to verify):
+- Freeze and seal as shape transitions, and a flag for frozen elements, so frozen objects and template arrays keep shapes and cache hits.
+- A cheaper `shape_get`: one table load for each shape, no `Property` build for `has_property` and for a miss.
+- Caches for the native option and iterator-result reads, as for `toJSON` and the proxy traps.
+
+Checks:
+- `cargo test --release -p bare-js --lib`: 780 passed, 1 ignored. New test: `frozen_array_is_built_frozen_in_order`.
+- Not run, because the cost gate fails first: `cargo test --release --workspace`, `tools/js/test262_check.sh`, the `*_check.sh` scripts.
+
+Not tested: a machine other than archMachine; wall time; scale 100 of the load rows; a live page other than the typing page; the workspace tests after the rebase on `16b5c83`.
+
+## A1 and A2 cost rows: third pass (merged)
+
+The branch `t3/js-cost-regression-fixes` is rebased on `65bbf8e`. This pass makes 2 fix attempts on the 23 rows over +0.5% under both allocators.
+
+Changes:
+- A dictionary receiver is cached by identity (`IC_DICT`). The entry holds the object, the position of the key in its `PropMap` (below 256) and the key `StrId`. `ic_own` tests it inline. A frozen or sealed object and a template object hit the cache now. A miss on such a receiver reads with no fill (`Heap::get_dict`).
+- `Shapes::found` keeps the last 256 answers of `shape_get` for each (shape, key) pair, present or absent.
+- Native reads of small objects use `Heap::get_stub` (`get_prop_nat`): 256 cache entries keyed by (shape, key). A refused pair stays refused. The sites: the Intl option reads, `Symbol.toPrimitive`, the iterator result `done` and `value` reads, the generator and async generator result reads, and the JSON reviver. `get_prop` keeps the plain read: a global stub made `arrobj_load arrays` +2.8% and `class_load churn` +1.8%.
+- `Heap::collect` marks the keys of each shape once for each collection, not once for each object. One collection of `revive_load gc`: 411.7 K instructions against 426.3 K on main.
+
+Results (archMachine, against `65bbf8e` from `base-build`):
+- Full cost matrix: 805 rows in 46 s. Mean change: glibc -1.644%, jemalloc +0.545% (9 rows measured). Over under one allocator: 5. Over under both: 4. Failed: 0.
+- Rows that pass now (glibc, scale 1 and 10): `intl_load nf_locale_opts` -15.4% and -15.6%, `intl_load locale` -14.2% and -14.4%, `intl_load make` -12.3% and -15.8%, `intl_load cmp_opts` -8.0% and -8.2%, `tagged_load call` -4.2% and -4.4%, `gen_load delegate` -6.7% and -7.4%, `sc_load toprim` -1.5% and -1.9%, `revive_load gc` -0.9% and -2.0%, `revive_load shallow` -0.5% and -0.7%, `range_load iter` -2.1% and -0.5%, `iterator_load flatmap` 0.0%.
+- `tagged_load call`: one iteration costs 189 instructions less than main. Before this pass it cost 47 more.
+- `keycost.sh`: `#a1` 359.7 M for each key against 411.1 M on main (-12.5%). `#f0` 366.4 M. Load and mount 712.5 M.
+- Peak RSS of `#a1`: 32.2 MiB at 20 keys and 32.8 MiB at 50 keys.
+
+Known regressions (row, glibc, jemalloc, cause):
+- `proxy_load get_trap 10`: +1.380%, +1.196%. A read through a proxy pays `member_ic`, the refusal and the trap cache lookup before the trap call.
+- `sc_load symbol_keys 1`: +0.780%, +0.518%. A symbol key read misses the inline cache. A hit in `Shapes::found` costs about 70 instructions; `PropMap::find` on main cost about 40.
+- `sc_load symbol_keys 10`: +0.705%, +0.663%. The cause is the same.
+- `wrapper_load forin 10000 30000`: +0.591%, +0.573%. Reads and writes of dictionary-mode globals pay 3 to 6 instructions more for the `Box<PropMap>` load.
+
+Attempts that failed:
+- `get_stub` in `get_prop` for all reads: 20 rows over under both allocators.
+- `get_stub` not inlined: one `Intl.NumberFormat` with options costs 629 instructions more than inlined.
+- A narrower lazy `prototype` refusal in `ic_make`: not safe. A lazy function and a function with its `prototype` built can share a shape.
+
+Checks:
+- `cargo test --release --workspace`: all pass. New tests in `heap_shape.rs`: `a_dictionary_receiver_is_cached_by_identity_and_position`, `stub_entries_hit_and_keep_refusals`, `shape_reads_stay_right_when_answers_share_a_slot_of_found`, `a_collection_keeps_the_keys_of_shared_shapes`.
+- `tools/js/test262_check.sh`: gate ok.
+- `tools/js/exec_diff.sh`: 79 runs, 0 differences.
+- All `tools/js/*_check.sh` scripts pass. `parse_check.sh` needs `ACORN=` to name a local `acorn.mjs`.
+
+Not tested: a machine other than archMachine; wall time; scale 100 of the load rows; a live page other than the typing page.
