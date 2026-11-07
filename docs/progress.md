@@ -1198,13 +1198,65 @@ Not tested: a live React page that plays a sample (no run against the real serve
 
 Problem: the page of `tools/js/typing` (60 inputs, 2 textareas, Radix controls) peaked at 106 MiB RSS with 20 keys and 214 MiB with 50 keys.
 
-Result: 33.2 MiB with 20 keys and 32.9 MiB with 50 keys. The load peak went from 27.4 to 26.4 MiB. The numbers, the breakdown of the live heap and the comparison with Chrome are in [resources.md](resources.md#memory-of-this-page). The decision is in [decisions.md](decisions.md#the-heap-collects-when-it-has-grown-by-half).
+Result: 33.2 MiB with 20 keys and 32.9 MiB with 50 keys. The load peak went from 27.4 to 26.4 MiB. The numbers, the breakdown of the live heap and the comparison with Chrome are in [resources.md](resources.md#memory-of-this-page). The decision is in [decisions.md](decisions.md#the-heap-collects-when-it-has-grown-by-three-quarters).
 
 Changes: `Interp::gc_due` (collect at the end of a driver call and in each loader round when the heap has grown by half), `Heap::stored_edges` (a collect pass 2.5 times cheaper), `Heap::reserve_props` for closures and object literals, and the `MEM=1` report of `type_load`.
 
 Tests: `gc_is_due_when_the_heap_has_grown_by_half_since_the_last_collect`, `typing_collects_the_garbage_of_its_own_keys`, `stored_edges_lists_every_value_a_property_holds` and `reserved_property_room_leaves_no_slack`. `cargo test --workspace` passes.
 
 Not tested: a page where one synchronous script makes the garbage (the collect waits for depth 0); a machine other than this one; scale 100; the floor of 8 MiB (no sweep); the `type_load` rows of the cost matrix (they need a directory argument, so the matrix cannot run them; the cost of a key was measured by hand); the effect on RSS of a real browser window (paint buffers, fonts).
+
+## Cost of a key on the React typing page: host work and the collect
+
+Problem: a key into the React form costs 428 M instructions (about 80 ms). The first collect trigger added 3.6% to that. Task: find the host work in each key (events, selection, value, style, layout, microtasks, timers) and the cost of the collect, and cut them. The evaluator (`crates/js`, frame slots) was out of scope.
+
+Profile (`perf record -e instructions:u -c 500000 --call-graph fp`, `type_load` with 50 keys minus 0 keys, main 3018876):
+
+| Area, in M instructions for each key | Main 3018876 | This change | Change |
+| ------------------------------------ | -----------: | ----------: | -----: |
+| evaluator (`eval_expr_inner`, `machine`, `link_inner`, `get_name`, ...) | 288.2 | 296.2 | +2.8% |
+| heap property access (`Heap::lookup`, `PropMap::find`, `set`, `define`) | 100.5 | 92.6 | -7.9% |
+| collect and everything it calls | 29.1 | 13.5 | -53.6% |
+| libc (`malloc`, `free`), hash tables, `alloc` | 28.4 | 28.5 | +0.4% |
+| host (events, selection, value setter, style, layout) | 0.5 | 0.4 | -8.5% |
+| other `bare-js` (builtins, strings) | 0.3 | 0.3 | -22.9% |
+| total of the sampled stacks | 447.1 | 431.5 | -3.5% |
+
+The profile build has frame pointers, so its totals are 4% higher than the `instr.sh` numbers below. The evaluator and heap rows move in opposite ways by the same amount, so that is a different inlining choice between the two builds: without the collect, the two rows add to 388.7 and 388.8.
+
+Host work is 0.1% of a key: events, selection, the value setter, style and layout together cost 0.4 M instructions for each key, and no single host function is above 0.1 M. The handlers that React runs from `fire` are evaluator work and count there. So the host has no per-key work to make lazy. Layout and style do not run for a key.
+
+Evaluator and heap, top functions (M instructions for each key, after this change): `eval_expr_inner` 68.9, `machine` 38.1, `link_inner` 36.4, `Heap::lookup` 31.9, `PropMap::find` 28.6, `get_name` 17.4, `eval_assign` 15.7, `enter_rare` 11.2, `exec_simple` 9.7, `link_base` 9.5, `eval_seq` 7.9, `get_prop` 6.7, `HashMap::contains_key` 6.5. With the heap row, the evaluator is 90% of a key. That part is evaluator work, so it stays out of this change.
+
+Changes (all in the collect, none in the evaluator loop):
+
+- `Seen` (`eval.rs`): the objects that the mark pass reached are a table by heap slot that holds the generation of the handle, not a hash set of handles. An insert and a test are one load. A handle of an older generation of the slot is not in the table. `Heap::object_slots` gives the size.
+- The host maps that `Dom::trace` reads for each object (`ports` and `msg_events` of the scheduler, `sigs` and `ctls` of abort, `objs` of computed style and of `style`) use `IdMap` (the multiply hash) and not SipHash. The collect asks each map for every live object.
+- The collect trigger is 1.75 x the live heap (was 1.5). The sweep is in [decisions.md](decisions.md#the-heap-collects-when-it-has-grown-by-three-quarters).
+
+Result (`tools/js/instr.sh`, minimum of 3 runs of `instructions:u`, main 3018876 against this change, cost of a key from 50 keys minus 0 keys):
+
+| Row | Main 3018876 | This change | Change |
+| --- | -----------: | ----------: | -----: |
+| load and mount (0 keys) | 777,253,173 | 777,236,516 | -0.00% |
+| one key into `#a1` | 428,370,334 | 413,264,671 | -3.5% |
+| one key into `#f0` | 436,252,372 | 421,135,812 | -3.5% |
+| one key into `#a1`, jemalloc | 430,518,207 | 415,453,853 | -3.5% |
+| one key into `#f0`, jemalloc | 438,397,929 | 423,340,422 | -3.5% |
+
+A page with no collect at all costs 410.7 M for each key. So the collect now costs 0.6% of a key. On main 3018876 it cost 17.7 M for each key, if main has the same cost without a collect (4.3%).
+
+Peak RSS: 36.1 MiB with 20 keys and 36.0 MiB with 50 keys (33.2 and 33.1 MiB before). Load: 26.3 MiB (26.5). The budget was 40 MiB.
+
+Cost rule: 506 rows (every `*_load` case list of `tools/js` at scale 1 and 10, `select_load` at 10 and 1000, `dataset_load` at 1,000 and 10,000 operations with 10 attributes), minimum of 3 runs each, main 3018876 against this change, release builds in separate target directories. Median -0.52%. 254 rows are lower by more than 0.5%. None is worse than +0.5%; the worst are `select_load react 10` (+0.08%) and `session_load chain 1` (+0.03%). The best are `revive_load gc 10` (-18.7%), `stringify_load gc 10` (-18.2%), `scheduler_load messages 10` (-13.2%) and `select_load churn 10` (-13.1%): the two `gc` cases collect by design, and a collect is cheaper now. Hypothesis: the other two collect often too (not checked). No row needed the jemalloc cross-check.
+
+Wall time per key (`type_load` into `#a1`, 30 keys, best of 5; the machine had a load average of 8 to 11): main 82.9 ms, this change 73.0 ms (median of 5: 83.7 and 82.0 ms). Chrome 155 on the same page (`tools/ui/chrome_type.mjs`, headless, one CDP round trip for each key): 3.4 to 4.7 ms for each key into `#a1` (100 keys) and 6.2 ms into `#f0` (50 keys). bare is about 20 times slower than Chrome on this page. The gap is the evaluator against a JIT, as in "Cost of one typed key on a React form" above.
+
+Tests: `cargo test --workspace` passes (`bare` 985 library tests, `bare-js` 722). The two `gc_due` tests use the new factor (`gc_is_due_when_the_heap_has_grown_by_three_quarters_since_the_last_collect`, `typing_collects_the_garbage_of_its_own_keys`). Every `tools/js/*_check.sh` script that ran matches Node or Chrome (`parse_check.sh` needs the `acorn` package, which is not installed).
+
+Rejected, measured: one `Heap::stored_edges` call that also lists the prototype and the buffer of a view (three heap lookups for each object became one) saved 0.04% (440.84 M against 440.99 M). The cost moved to the first touch of the object, so it is not in.
+
+Not tested: the live Next.js page; a page whose live heap is under 4.6 MiB (the 8 MiB floor sets the limit there, and the sweep did not vary it); scale 100; a quiet machine for wall time; `https_load`, `handler_load`, `xhr_load`, `sticky_load`, `wrapper_load`, `numeric_load` and `regexp_load` rows; the window (paint, fonts) RSS of a real session.
 
 ## HTML tree builder: the in template insertion mode
 
