@@ -70,3 +70,6 @@ var T = function (ids) { return ids.split(' ').map(function (id) { var g = docum
 === flex-column-stretch
 @html <div id=a class=f style="flex-direction:column;text-align:center">S</div>
 (function () { return T('a') })
+=== inline-grid-baseline-of-an-aligned-text-item
+@html <div id=a>a<span id=i style="display:inline-grid;height:50px;align-items:end">x</span></div><div id=b>a<span id=j style="display:inline-grid;height:50px;align-items:center">x</span></div><div id=c>a<span id=k style="display:inline-grid;height:50px;align-items:end"><i id=m>x</i></span></div>
+(function () { return ['a', 'i', 'b', 'j', 'c', 'k', 'm'].map(function (id) { var r = $(id).getBoundingClientRect(); return [r.y, r.height].map(function (v) { return Math.round(v * 10) / 10 }).join(',') }).join(' ') })

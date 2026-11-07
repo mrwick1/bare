@@ -21,3 +21,4 @@ flex-column-center-wraps	0,0,28.8,66
 flex-column-center-text-align-end	76,0,48,22
 flex-run-between-items	0,20,38.4,60 0,20,9.6,22 28.8,39,9.6,22
 flex-column-stretch	95.2,0,9.6,22
+inline-grid-baseline-of-an-aligned-text-item	0,50 0,50 50,50 50,50 100,50 100,50 128,22

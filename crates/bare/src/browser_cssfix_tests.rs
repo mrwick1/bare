@@ -4,6 +4,6 @@
 use crate::browser_topic_tests::topic_test;
 
 topic_test!(flexhuge_cases, "flexhuge", 7);
-topic_test!(anonalign_cases, "anonalign", 23);
+topic_test!(anonalign_cases, "anonalign", 24);
 topic_test!(letterspace_cases, "letterspace", 18);
 topic_test!(formstate_cases, "formstate", 29);

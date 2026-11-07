@@ -1405,7 +1405,9 @@ pub(crate) fn layout(cx: &mut Cx, node: NodeId, space: Space, bp: Sides) -> Kids
     // The shared baseline of the item, else its first baseline, read from a few fragments.
     let baseline = best.map(|(_, _, i, y)| {
         let (it, l) = (&g.items[i], &lays[i]);
-        y + if l.kind != 0 { l.asc - l.mt } else { block::first_baseline(cx, it.node, it.run.is_none(), &cx.out, l.frag, l.end as usize, l.base, l.h, block::PEEK).unwrap_or(0.0) }
+        let first = block::first_baseline(cx, it.node, it.run.is_none(), &cx.out, l.frag, l.end as usize, l.base, l.h, block::PEEK).unwrap_or(0.0);
+        // The fragments of a run are at their place already, with `y`.
+        if l.kind != 0 { y + l.asc - l.mt } else if it.run.is_some() { first } else { y + first }
     });
 
     // 5. The live fragments go to the page, in the order of the items. The first layout of an item that was laid out again is left.
