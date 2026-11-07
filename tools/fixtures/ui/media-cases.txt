@@ -1,0 +1,163 @@
+var log = [];
+var U = 'http://127.0.0.1:1/x.mp3';
+var EV = 'abort canplay canplaythrough durationchange emptied ended error loadeddata loadedmetadata loadstart pause play playing progress ratechange seeked seeking stalled suspend timeupdate volumechange waiting'.split(' ');
+function watch(a, tag) { tag = tag || ''; EV.forEach(function (t) { a.addEventListener(t, function () { log.push(tag + t + '(' + a.readyState + a.networkState + (a.paused ? 'P' : '') + (t === 'error' ? ' code' + (a.error && a.error.code) : '') + ')') }) }); return a }
+function settle(p, tag) { p.then(function () { log.push(tag + ' resolved') }, function (e) { log.push(tag + ' rejected ' + e.name + ': ' + e.message) }) }
+function st(a) { return [a.readyState, a.networkState, a.paused, a.ended, a.error && a.error.code, JSON.stringify(a.currentSrc), a.duration, a.seeking, a.currentTime].join('|') }
+function T(f) { try { var v = f(); return typeof v === 'string' ? JSON.stringify(v) : String(v) } catch (e) { return 'throws ' + e.name + ': ' + e.message } }
+function el(t) { return document.createElement(t || 'audio') }
+function out() { return log.join('\n') }
+=== media-interface-shape
+var R = (function () { var a = el(), v = el('video'), d = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'src'), r = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'duration'); return [typeof HTMLMediaElement, HTMLMediaElement.name, Object.getPrototypeOf(a) === HTMLAudioElement.prototype, Object.getPrototypeOf(v) === HTMLVideoElement.prototype, Object.getPrototypeOf(HTMLAudioElement.prototype) === HTMLMediaElement.prototype, Object.getPrototypeOf(HTMLVideoElement.prototype) === HTMLMediaElement.prototype, Object.getPrototypeOf(HTMLMediaElement.prototype) === HTMLElement.prototype, a instanceof HTMLMediaElement, v instanceof HTMLAudioElement, Object.prototype.toString.call(a), Object.prototype.toString.call(v), Object.prototype.toString.call(HTMLMediaElement.prototype), Audio.prototype === HTMLAudioElement.prototype, Audio.name, Audio.length, typeof Audio, typeof d.get, typeof d.set, d.enumerable, d.configurable, d.get.name, d.set.name, typeof r.get, r.set, Object.getOwnPropertyNames(HTMLAudioElement.prototype).join(), a.tagName, v.tagName].join() })(); (function () { return R })
+=== media-illegal-constructors
+var R = (function () { return [HTMLMediaElement, HTMLAudioElement, HTMLVideoElement, TimeRanges, MediaError].map(function (C) { return T(function () { return new C() }) }).concat([T(function () { return Audio() }).slice(0, 18)]).join('\n') })(); (function () { return R })
+=== media-svg-and-other-elements
+var R = (function () { var s = document.createElementNS('http://www.w3.org/2000/svg', 'audio'); var t = el('template').content.appendChild(el('video')); var d = document.createElement('div'); d.innerHTML = '<audio controls></audio><video muted autoplay loop></video><source src="a.mp3">'; return [Object.getPrototypeOf(s) === SVGElement.prototype, s instanceof HTMLMediaElement, Object.getPrototypeOf(t) === HTMLVideoElement.prototype, d.firstChild instanceof HTMLAudioElement, d.childNodes[1] instanceof HTMLVideoElement, d.firstChild.controls, d.childNodes[1].muted, d.childNodes[1].defaultMuted, d.childNodes[1].autoplay, d.childNodes[1].loop, d.innerHTML].join() })(); (function () { return R })
+=== media-brand-checks
+var R = (function () { var d = el('div'), g = function (iface, k) { return Object.getOwnPropertyDescriptor(iface.prototype, k).get }; return [T(function () { return g(HTMLMediaElement, 'src').call(d) }), T(function () { return g(HTMLMediaElement, 'paused').call({}) }), T(function () { return g(HTMLVideoElement, 'poster').call(el()) }), T(function () { return HTMLMediaElement.prototype.pause.call(d) }), T(function () { return HTMLMediaElement.prototype.load.call({}) }), T(function () { return HTMLMediaElement.prototype.canPlayType.call(d, 'x') }), T(function () { return Object.getOwnPropertyDescriptor(TimeRanges.prototype, 'length').get.call({}) })].join('\n') })(); (function () { return R })
+=== media-play-brand-check
+(function () { var p = HTMLMediaElement.prototype.play.call({}); settle(p, 'p'); })(); out
+=== media-constants
+var R = (function () { var a = el(); return [HTMLMediaElement.NETWORK_EMPTY, HTMLMediaElement.NETWORK_IDLE, HTMLMediaElement.NETWORK_LOADING, HTMLMediaElement.NETWORK_NO_SOURCE, HTMLMediaElement.HAVE_NOTHING, HTMLMediaElement.HAVE_METADATA, HTMLMediaElement.HAVE_CURRENT_DATA, HTMLMediaElement.HAVE_FUTURE_DATA, HTMLMediaElement.HAVE_ENOUGH_DATA, a.HAVE_ENOUGH_DATA, a.NETWORK_NO_SOURCE, JSON.stringify(Object.getOwnPropertyDescriptor(HTMLMediaElement, 'HAVE_NOTHING')), JSON.stringify(Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'NETWORK_EMPTY')), MediaError.MEDIA_ERR_ABORTED, MediaError.MEDIA_ERR_NETWORK, MediaError.MEDIA_ERR_DECODE, MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED, MediaError.prototype.MEDIA_ERR_DECODE, Object.getOwnPropertyNames(MediaError.prototype).join(), Object.getOwnPropertyNames(TimeRanges.prototype).join()].join() })(); (function () { return R })
+=== media-defaults-audio
+var R = (function () { var a = el(); return [a.src, a.currentSrc, a.srcObject, a.preload, a.autoplay, a.loop, a.muted, a.defaultMuted, a.volume, a.playbackRate, a.defaultPlaybackRate, a.currentTime, a.duration, a.paused, a.ended, a.seeking, a.readyState, a.networkState, a.error, a.controls, a.crossOrigin].map(function (x) { return typeof x === 'string' ? JSON.stringify(x) : String(x) }).join(' ') })(); (function () { return R })
+=== media-defaults-video
+var R = (function () { var v = el('video'), a = el(); return [v.videoWidth, v.videoHeight, v.poster, v.width, v.height, v.playsInline, v.preload, 'videoWidth' in a, 'poster' in a, 'width' in a, 'playsInline' in a].map(function (x) { return JSON.stringify(x) }).join(' ') })(); (function () { return R })
+=== media-audio-constructor
+var R = (function () { return [T(function () { return new Audio().outerHTML }), T(function () { return new Audio('x.mp3').outerHTML }), T(function () { return new Audio(undefined).outerHTML }), T(function () { return new Audio(null).outerHTML }), T(function () { return new Audio('').outerHTML }), T(function () { return new Audio(5).outerHTML }), T(function () { var x = new Audio(); return [x instanceof HTMLAudioElement, x.tagName, x.ownerDocument === document, x.preload, x.parentNode, x.getAttribute('src')].join() })].join('\n') })(); (function () { return R })
+=== media-time-ranges
+var R = (function () { var a = el(), b = a.buffered; return [Object.prototype.toString.call(b), b.length, b === a.buffered, b instanceof TimeRanges, a.played.length, a.seekable.length, a.played === a.buffered, T(function () { return b.start(0) }), T(function () { return b.end(0) }), T(function () { return b.start() }), T(function () { return b.end(-1) }), T(function () { return b.start('x') })].join('\n') })(); (function () { return R })
+=== media-volume
+var R = (function () { var a = el(); return [T(function () { a.volume = 2 }), T(function () { a.volume = -1 }), T(function () { a.volume = NaN }), T(function () { a.volume = Infinity }), T(function () { a.volume = undefined }), T(function () { a.volume = '0.5'; return a.volume }), T(function () { a.volume = null; return a.volume }), T(function () { a.volume = 0.3; return a.volume }), T(function () { try { a.volume = 1.5 } catch (e) { return [e.name, e.code, e instanceof DOMException, e.message].join('|') } }), T(function () { a.volume = 1; return a.volume }), T(function () { a.volume = 0; return a.volume })].join('\n') })(); (function () { return R })
+=== media-playback-rate
+var R = (function () { var a = el(), r = []; [0.0625, 0.06, 0.0624, 0.5, 16, 16.01, 0, -1, 100, NaN, 3].forEach(function (v) { r.push(v + ':' + T(function () { a.playbackRate = v; return a.playbackRate })) }); [0.0625, 0.01, -1, 17, 0, 5].forEach(function (v) { r.push('d' + v + ':' + T(function () { a.defaultPlaybackRate = v; return a.defaultPlaybackRate + '/' + a.playbackRate })) }); r.push(T(function () { a.defaultPlaybackRate = NaN })); return r.join('\n') })(); (function () { return R })
+=== media-current-time-and-readonly
+var R = (function () { var a = el(); return [T(function () { a.currentTime = 5; return a.currentTime }), T(function () { a.currentTime = -3; return a.currentTime }), T(function () { a.currentTime = '4'; return a.currentTime }), T(function () { a.currentTime = NaN }), T(function () { a.currentTime = Infinity }), T(function () { a.duration = 1; return a.duration }), T(function () { a.paused = false; return a.paused }), T(function () { 'use strict'; try { a.readyState = 3 } catch (e) { return e.name } }), T(function () { a.currentSrc = 'z'; return a.currentSrc }), a.seeking, a.ended, a.readyState, a.videoWidth, T(function () { return el('video').videoWidth + ',' + el('video').videoHeight })].join('\n') })(); (function () { return R })
+=== media-src-reflection
+var R = (function () { var a = el(); return [T(function () { a.src = 'http://e.com/x.mp3'; return a.src + ' ' + a.getAttribute('src') }), T(function () { a.src = '  http://e.com/y.mp3  '; return a.src + ' ' + JSON.stringify(a.getAttribute('src')) }), T(function () { a.src = 'http://[bad'; return a.src }), T(function () { a.src = 'foo:Bar'; return a.src }), T(function () { a.src = 'FOO:bar'; return a.src }), T(function () { a.src = ''; return JSON.stringify(a.getAttribute('src')) }), T(function () { a.removeAttribute('src'); return JSON.stringify(a.src) + JSON.stringify(a.getAttribute('src')) }), T(function () { a.setAttribute('src', 'data:audio/x-unknown,abc'); return a.src })].join('\n') })(); (function () { return R })
+=== media-preload-reflection
+var R = (function () { var a = el(), r = [a.preload, el('video').preload]; ['none', 'metadata', 'auto', 'NONE', '', 'foo', 'Auto'].forEach(function (x) { a.preload = x; r.push(x + '>' + a.preload + '/' + a.getAttribute('preload')) }); a.removeAttribute('preload'); r.push(a.preload); return r.join(' ') })(); (function () { return R })
+=== media-cross-origin-reflection
+var R = (function () { var a = el(), r = [a.crossOrigin]; ['', 'anonymous', 'use-credentials', 'foo', 'ANONYMOUS', null].forEach(function (x) { a.crossOrigin = x; r.push(x + '>' + a.crossOrigin + '/' + a.getAttribute('crossorigin')) }); a.removeAttribute('crossorigin'); r.push(a.crossOrigin); return r.join(' ') })(); (function () { return R })
+=== media-boolean-reflection
+var R = (function () { var a = el(), r = []; a.autoplay = true; a.loop = true; a.controls = true; a.defaultMuted = true; r.push(a.outerHTML); a.autoplay = false; a.loop = false; a.controls = false; a.defaultMuted = false; r.push(a.outerHTML); var x = el(); x.setAttribute('muted', ''); r.push(x.muted + ' ' + x.defaultMuted); x = el(); x.muted = true; r.push(x.muted + ' ' + x.defaultMuted + ' ' + x.outerHTML); x = el(); x.defaultMuted = true; r.push(x.muted + ' ' + x.defaultMuted + ' ' + x.outerHTML); return r.join('\n') })(); (function () { return R })
+=== media-video-members
+var R = (function () { var v = el('video'); return [T(function () { v.poster = 'http://e.com/p.png'; return v.poster + ' ' + v.getAttribute('poster') }), T(function () { v.width = 100; v.height = '50'; return v.width + ' ' + v.height + ' ' + v.getAttribute('width') }), T(function () { v.width = -1; return v.width + ' ' + v.getAttribute('width') }), T(function () { v.setAttribute('height', 'abc'); return v.height }), T(function () { v.playsInline = true; return v.outerHTML }), T(function () { v.width = 7.9; return v.width })].join('\n') })(); (function () { return R })
+=== media-src-object
+var R = (function () { var a = el(); return [T(function () { a.srcObject = null; return a.srcObject }), T(function () { a.srcObject = undefined; return a.srcObject }), T(function () { a.srcObject = {} }), T(function () { a.srcObject = 1 }), a.srcObject].join('\n') })(); (function () { return R })
+=== media-methods-shape
+var R = (function () { var a = el(); return [a.play.length, a.pause.length, a.load.length, a.canPlayType.length, a.play.name, typeof a.fastSeek, T(function () { return a.load() }), T(function () { return a.pause() }), T(function () { return a.canPlayType() }), Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'play').enumerable].join() })(); (function () { return R })
+=== media-events-src-unreachable
+(function () { var a = watch(el()); a.src = U; log.push('sync ' + st(a)); })(); out
+=== media-events-new-audio
+(function () { var a = watch(new Audio(U)); log.push('sync ' + st(a) + ' ' + a.preload); })(); out
+=== media-events-set-attribute
+(function () { var a = watch(el('video')); a.setAttribute('src', U); log.push('sync ' + st(a)); })(); out
+=== media-events-data-url
+(function () { var a = watch(el()); a.src = 'data:audio/x-unknown,abc'; log.push('sync ' + st(a)); setTimeout(function () { log.push('late ' + st(a) + ' ' + a.error.message) }, 100); })(); out
+=== media-events-empty-src
+(function () { var a = watch(el()); a.src = ''; log.push('sync ' + st(a)); setTimeout(function () { log.push('late ' + st(a) + ' ' + a.error.message) }, 100); })(); out
+=== media-events-invalid-url
+(function () { var a = watch(el()); a.src = 'http://[bad'; setTimeout(function () { log.push('late ' + st(a) + ' ' + a.error.message) }, 100); })(); out
+=== media-events-other-scheme
+(function () { var a = watch(el()); a.src = 'foo:bar'; setTimeout(function () { log.push('late ' + st(a) + ' ' + a.error.message) }, 100); })(); out
+=== media-error-object
+(function () { var a = el(); a.src = U; setTimeout(function () { var e = a.error; log.push([Object.prototype.toString.call(e), e instanceof MediaError, e === a.error, e.code, e.message, e.MEDIA_ERR_DECODE].join()) }, 100); })(); out
+=== media-events-order-with-timers
+(function () { var a = watch(el()); a.src = U; queueMicrotask(function () { log.push('micro') }); setTimeout(function () { log.push('t0') }, 0); setTimeout(function () { log.push('t50') }, 50); })(); out
+=== media-events-load-after-error
+(function () { var a = watch(el()); a.src = U; setTimeout(function () { log.length = 0; a.load(); log.push('sync ' + st(a)); setTimeout(function () { log.push('late ' + st(a)) }, 100) }, 100); })(); out
+=== media-events-src-change-after-error
+(function () { var a = watch(el()); a.src = U; setTimeout(function () { log.length = 0; a.src = U + '2'; log.push('sync ' + st(a)); setTimeout(function () { log.push('late ' + st(a)) }, 100) }, 100); })(); out
+=== media-events-src-same-turn-twice
+(function () { var a = watch(el()); a.src = U + '1'; a.src = U + '2'; log.push('sync ' + st(a)); setTimeout(function () { log.push('late ' + st(a)) }, 100); })(); out
+=== media-events-remove-src-after-error
+(function () { var a = watch(el()); a.src = U; setTimeout(function () { log.length = 0; a.removeAttribute('src'); log.push('sync ' + st(a)); setTimeout(function () { log.push('late ' + st(a)) }, 100) }, 100); })(); out
+=== media-events-load-no-src
+(function () { var a = watch(el()); a.load(); log.push('sync ' + st(a)); setTimeout(function () { log.push('late ' + st(a)) }, 100); })(); out
+=== media-events-load-twice
+(function () { var a = watch(el()); a.src = U; a.load(); a.load(); })(); out
+=== media-events-src-then-remove-same-turn
+(function () { var a = watch(el()); a.src = U; a.removeAttribute('src'); log.push('sync ' + st(a)); setTimeout(function () { log.push('late ' + st(a)) }, 100); })(); out
+=== media-events-src-same-value-again
+(function () { var a = watch(el()); a.src = U; setTimeout(function () { log.length = 0; a.src = U; setTimeout(function () { log.push('late ' + st(a)) }, 100) }, 100); })(); out
+=== media-events-src-object-null-after-src
+(function () { var a = watch(el()); a.src = U; setTimeout(function () { log.length = 0; a.srcObject = null; log.push('sync ' + st(a)); setTimeout(function () { log.push('late ' + st(a)) }, 100) }, 100); })(); out
+=== media-play-with-src
+(function () { var a = watch(el()); a.src = U; settle(a.play(), 'p'); log.push('sync ' + st(a)); setTimeout(function () { log.push('late ' + st(a)) }, 100); })(); out
+=== media-play-new-audio
+(function () { var a = watch(new Audio(U)); settle(a.play(), 'p'); setTimeout(function () { log.push('late ' + st(a)) }, 100); })(); out
+=== media-play-video
+(function () { var a = watch(el('video')); a.src = U; settle(a.play(), 'p'); setTimeout(function () { log.push('late ' + st(a)) }, 100); })(); out
+=== media-play-without-src
+(function () { var a = watch(el()); settle(a.play(), 'p'); log.push('sync ' + st(a)); setTimeout(function () { log.push('late ' + st(a)) }, 100); })(); out
+=== media-play-without-src-twice
+(function () { var a = watch(el()); settle(a.play(), 'p1'); settle(a.play(), 'p2'); setTimeout(function () { log.push('late ' + st(a)) }, 100); })(); out
+=== media-play-then-src
+(function () { var a = watch(el()); settle(a.play(), 'p'); setTimeout(function () { log.push('|src|'); a.src = U; setTimeout(function () { log.push('late ' + st(a)) }, 100) }, 100); })(); out
+=== media-play-after-error
+(function () { var a = watch(el()); a.src = U; setTimeout(function () { log.length = 0; settle(a.play(), 'p'); log.push('sync ' + st(a)); setTimeout(function () { log.push('late ' + st(a)); a.pause(); setTimeout(function () { log.push('paused ' + st(a)) }, 100) }, 100) }, 100); })(); out
+=== media-play-twice-after-error
+(function () { var a = watch(el()); a.src = U; settle(a.play(), 'p1'); setTimeout(function () { log.push('|again|'); settle(a.play(), 'p2'); setTimeout(function () { log.push('late ' + st(a)) }, 100) }, 100); })(); out
+=== media-play-twice-same-turn
+(function () { var a = watch(el()); a.src = U; settle(a.play(), 'p1'); settle(a.play(), 'p2'); })(); out
+=== media-play-then-pause-same-turn
+(function () { var a = watch(el()); a.src = U; settle(a.play(), 'p'); a.pause(); log.push('sync ' + st(a)); setTimeout(function () { log.push('late ' + st(a)) }, 100); })(); out
+=== media-play-nosrc-then-pause
+(function () { var a = watch(el()); settle(a.play(), 'p'); setTimeout(function () { log.length = 0; a.pause(); log.push('sync ' + st(a)); setTimeout(function () { log.push('late ' + st(a)) }, 100) }, 100); })(); out
+=== media-pause-fresh
+(function () { var a = watch(el()); a.pause(); a.pause(); setTimeout(function () { log.push('late ' + st(a)) }, 100); })(); out
+=== media-pause-after-play-error
+(function () { var a = watch(el()); a.src = U; settle(a.play(), 'p'); setTimeout(function () { log.length = 0; a.pause(); a.pause(); setTimeout(function () { log.push('late ' + st(a)) }, 100) }, 100); })(); out
+=== media-play-then-load
+(function () { var a = watch(el()); a.src = U; settle(a.play(), 'p'); a.load(); log.push('sync ' + st(a)); setTimeout(function () { log.push('late ' + st(a)) }, 100); })(); out
+=== media-play-then-src-twice
+(function () { var a = watch(el()); settle(a.play(), 'p'); setTimeout(function () { log.length = 0; a.src = U + '1'; a.src = U + '2'; log.push('sync ' + st(a)); setTimeout(function () { log.push('late ' + st(a)) }, 100) }, 100); })(); out
+=== media-autoplay-attribute
+(function () { var a = watch(el()); a.autoplay = true; a.src = U; setTimeout(function () { log.push('late ' + st(a)) }, 100); })(); out
+=== media-volume-and-muted-events
+(function () { var a = watch(el()); a.volume = 0.5; a.volume = 0.5; a.volume = 0.2; a.muted = false; a.muted = true; a.muted = true; log.push('sync ' + a.volume + ' ' + a.muted); })(); out
+=== media-rate-events
+(function () { var a = watch(el()); a.playbackRate = 1; a.playbackRate = 2; a.playbackRate = 2; a.defaultPlaybackRate = 2; a.defaultPlaybackRate = 2; })(); out
+=== media-no-events-for-attributes
+(function () { var a = watch(el()); a.loop = true; a.autoplay = true; a.controls = true; a.currentTime = 3; a.currentTime = 3; a.preload = 'none'; a.crossOrigin = 'anonymous'; })(); out
+=== media-load-cancels-queued-events
+(function () { var a = watch(el()); a.volume = 0.5; a.defaultPlaybackRate = 3; a.playbackRate = 2; a.load(); log.push('sync ' + a.playbackRate + ' ' + a.defaultPlaybackRate + ' ' + a.volume); })(); out
+=== media-load-resets-rate-and-time-after-error
+(function () { var a = watch(el()); a.src = U; setTimeout(function () { a.currentTime = 5; a.defaultPlaybackRate = 3; a.playbackRate = 2; log.length = 0; a.load(); log.push('sync ' + a.currentTime + ' ' + a.playbackRate); setTimeout(function () { log.push('late ' + st(a) + ' ' + a.playbackRate) }, 100) }, 100); })(); out
+=== media-load-keeps-volume-and-muted
+(function () { var a = watch(el()); a.volume = 0.4; a.muted = true; a.src = U; setTimeout(function () { log.length = 0; a.load(); setTimeout(function () { log.push('late ' + a.volume + ' ' + a.muted) }, 100) }, 100); })(); out
+=== media-current-time-before-src
+(function () { var a = watch(el()); a.currentTime = 5; log.push(a.currentTime); a.src = U; log.push(a.currentTime); setTimeout(function () { log.push(a.currentTime + ' ' + a.seeking); a.currentTime = 7; log.push(a.currentTime + ' ' + a.seeking) }, 100); })(); out
+=== media-src-change-inside-loadstart
+(function () { var a = watch(el()); a.addEventListener('loadstart', function () { if (!a.x) { a.x = 1; log.push('[src]'); a.src = U + '2' } }); a.src = U; setTimeout(function () { log.push('late ' + st(a)) }, 100); })(); out
+=== media-load-inside-error
+(function () { var a = watch(el()); a.addEventListener('error', function () { if (!a.x) { a.x = 1; log.push('[load]'); a.load() } }); a.src = U; setTimeout(function () { log.push('late ' + st(a)) }, 100); })(); out
+=== media-pause-inside-error
+(function () { var a = watch(el()); a.addEventListener('error', function () { log.push('[pause]'); a.pause() }); a.src = U; settle(a.play(), 'p'); setTimeout(function () { log.push('late ' + st(a)) }, 100); })(); out
+=== media-event-properties
+(function () { var a = el(); ['loadstart', 'error', 'emptied', 'play', 'waiting', 'pause', 'timeupdate', 'volumechange', 'ratechange', 'suspend', 'abort'].forEach(function (t) { a.addEventListener(t, function (e) { log.push([e.type, e.bubbles, e.cancelable, e.composed, e.isTrusted, e.target === a, e.currentTarget === a, e.eventPhase, typeof e, e.constructor === Event, e.defaultPrevented].join()) }) }); a.src = U; a.play(); a.volume = 0.5; a.playbackRate = 2; setTimeout(function () { a.pause(); a.src = U + '2' }, 100); })(); out
+=== media-events-reach-ancestors
+(function () { var d = el('div'), a = el(); d.appendChild(a); document.body.appendChild(d); var f = function (e) { log.push(e.type + ' ' + e.eventPhase + ' ' + (e.target === a)) }; ['loadstart', 'error'].forEach(function (t) { document.addEventListener(t, f, true); document.addEventListener(t, f, false); window.addEventListener(t, f, true); d.addEventListener(t, f, false) }); a.src = U; })(); out
+=== media-events-detached-and-removed
+(function () { var a = watch(el()); document.body.appendChild(a); a.src = U; a.remove(); var b = watch(el(), 'b:'); b.src = U; })(); out
+=== media-event-handlers
+(function () { var a = el(); var names = ['onplay', 'onpause', 'onerror', 'onloadstart', 'onemptied', 'onvolumechange', 'onratechange', 'onsuspend', 'ontimeupdate', 'onwaiting', 'onabort']; var r = names.map(function (n) { return n + ':' + (n in a) + ':' + a[n] }); a.onerror = function (e) { log.push('[onerror ' + e.type + ' ' + (this === a) + ']') }; a.onloadstart = function () { log.push('[onloadstart]') }; a.src = U; log.push(r.join(',')); })(); out
+=== media-preload-none
+(function () { var a = watch(el()); a.preload = 'none'; a.src = U; log.push('sync ' + st(a)); setTimeout(function () { log.push('late ' + st(a)) }, 100); })(); out
+=== media-preload-none-then-play
+(function () { var a = watch(el()); a.preload = 'none'; a.src = U; setTimeout(function () { log.push('|play|'); settle(a.play(), 'p'); log.push('sync ' + st(a) + ' ' + a.paused); setTimeout(function () { log.push('late ' + st(a)) }, 100) }, 100); })(); out
+=== media-preload-none-then-load
+(function () { var a = watch(el()); a.preload = 'none'; a.src = U; setTimeout(function () { log.push('|load|'); a.load(); setTimeout(function () { log.push('late ' + st(a)) }, 100) }, 100); })(); out
+=== media-preload-none-then-auto
+(function () { var a = watch(el()); a.preload = 'none'; a.src = U; setTimeout(function () { log.push('|auto|'); a.preload = 'auto'; setTimeout(function () { log.push('late ' + st(a)) }, 100) }, 100); })(); out
+=== media-preload-none-then-pause
+(function () { var a = watch(el()); a.preload = 'none'; a.src = U; setTimeout(function () { log.push('|pause|'); a.pause(); setTimeout(function () { log.push('late ' + st(a)) }, 100) }, 100); })(); out
+=== media-preload-none-play-before-loadstart
+(function () { var a = watch(el()); a.preload = 'none'; a.src = U; settle(a.play(), 'p'); })(); out
+=== media-preload-read-late
+(function () { var a = watch(el()); a.src = U; a.preload = 'none'; setTimeout(function () { log.push('late ' + st(a)) }, 100); })(); out
+=== media-new-audio-preload-none-after
+(function () { var a = watch(new Audio(U)); a.preload = 'none'; setTimeout(function () { log.push('late ' + st(a)) }, 100); })(); out
+=== media-preload-auto-and-metadata
+(function () { var a = watch(el(), 'a:'), b = watch(el(), 'b:'); a.preload = 'auto'; b.preload = 'metadata'; a.src = U; b.src = U; })(); out

@@ -9,10 +9,10 @@ import { join, resolve } from 'node:path';
 
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-export async function open(file, width, height, { bars = false } = {}) {
+export async function open(file, width, height, { bars = false, args = [] } = {}) {
   const dir = mkdtempSync(join(process.env.BARE_TMP ?? tmpdir(), 'chrome-cdp-'));
   const port = 9400 + Math.floor(Math.random() * 400);
-  const flags = ['--headless=new', '--no-sandbox', '--disable-gpu', '--force-device-scale-factor=1', `--window-size=${width},${height}`, `--user-data-dir=${dir}`, `--remote-debugging-port=${port}`];
+  const flags = ['--headless=new', '--no-sandbox', '--disable-gpu', '--force-device-scale-factor=1', `--window-size=${width},${height}`, `--user-data-dir=${dir}`, `--remote-debugging-port=${port}`, ...args];
   if (!bars) flags.push('--hide-scrollbars');
   const chrome = spawn('google-chrome-stable', [...flags, 'about:blank'], { stdio: 'ignore' });
   let targets;

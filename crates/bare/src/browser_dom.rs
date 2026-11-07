@@ -1400,6 +1400,7 @@ pub(crate) fn set_attribute(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Valu
     }
     if name == "src" {
         d.script_src_changed(it, n)?;
+        crate::browser_media::src_changed(d, it, n)?;
     }
     Ok(Value::Undefined)
 }

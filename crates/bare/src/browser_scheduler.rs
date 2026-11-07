@@ -95,11 +95,13 @@ pub struct SchedLimits {
     pub max_select_tasks: usize,
     /// Queued `selectionchange` tasks of text controls, at most one per control (`selectionchange-tasks`).
     pub max_selectionchange_tasks: usize,
+    /// Queued events and steps of media elements (`media-tasks`).
+    pub max_media_tasks: usize,
 }
 
 impl Default for SchedLimits {
     fn default() -> Self {
-        SchedLimits { max_timers: 1 << 16, max_timer_args: 256, max_ports: 1 << 14, max_queued_messages: 1 << 16, max_queued_message_bytes: 16 << 20, max_select_tasks: 1 << 14, max_selectionchange_tasks: 1 << 14 }
+        SchedLimits { max_timers: 1 << 16, max_timer_args: 256, max_ports: 1 << 14, max_queued_messages: 1 << 16, max_queued_message_bytes: 16 << 20, max_select_tasks: 1 << 14, max_selectionchange_tasks: 1 << 14, max_media_tasks: 1 << 14 }
     }
 }
 
@@ -139,6 +141,8 @@ pub(crate) enum Task {
     Idle,
     /// The timeout of a `requestIdleCallback` callback (`browser_idle.rs`).
     IdleTimeout(u32),
+    /// An event or a step of a media element (`browser_media.rs`): the node, the epoch of its load algorithm, the step.
+    Media(NodeId, u32, u8),
 }
 
 struct Timer {
@@ -202,6 +206,8 @@ pub(crate) struct Sched {
     selects: usize,
     /// Queued `Task::SelectionChange`.
     changes: usize,
+    /// Queued `Task::Media`.
+    media: usize,
     /// Nesting level of the timer task that runs now (0 outside a timer task).
     nesting: u32,
     halted: Option<Error>,
@@ -268,6 +274,7 @@ enum Run {
     Notify,
     Idle,
     IdleTimeout(u32),
+    Media(NodeId, u32, u8),
     Nothing,
 }
 
@@ -322,7 +329,7 @@ impl Dom {
         let ports = &s.ports;
         s.tasks.retain(|_, t| match t {
             Task::Deliver(o) => ports.contains_key(o),
-            Task::Timer(_) | Task::Select(_) | Task::SelectionChange(_) | Task::DocSelectionChange | Task::Render | Task::Scroll | Task::AbortTimeout(_) | Task::Notify | Task::Idle | Task::IdleTimeout(_) => true,
+            Task::Timer(_) | Task::Select(_) | Task::SelectionChange(_) | Task::DocSelectionChange | Task::Render | Task::Scroll | Task::AbortTimeout(_) | Task::Notify | Task::Idle | Task::IdleTimeout(_) | Task::Media(..) => true,
         });
         s.queued = s.ports.values().map(|p| p.inbox.len()).sum();
         s.queued_bytes = s.ports.values().flat_map(|p| p.inbox.iter().map(|m| m.1)).sum();
@@ -452,6 +459,19 @@ impl Dom {
         Ok(())
     }
 
+    /// Queue a step of the media element `n` (`browser_media.rs`), `delay` ms after the tasks that are due now. Counts against `max_media_tasks`.
+    pub(crate) fn queue_media(&self, n: NodeId, epoch: u32, step: u8, delay: f64) -> R<()> {
+        {
+            let s = self.sched.borrow();
+            if s.media >= s.limits.max_media_tasks {
+                return Err(self.lim("media-tasks"));
+            }
+        }
+        self.schedule(self.now_ms() + delay, Task::Media(n, epoch, step))?;
+        self.sched.borrow_mut().media += 1;
+        Ok(())
+    }
+
     /// Queue the abort of a `AbortSignal.timeout` signal in `ms` ms. It counts against `max_timers`.
     pub(crate) fn queue_abort_timeout(&self, o: ObjId, ms: f64) -> R<()> {
         let n = self.sched.borrow().tasks.values().filter(|t| matches!(t, Task::AbortTimeout(_))).count();
@@ -507,6 +527,10 @@ impl Dom {
             Task::DocSelectionChange => {
                 self.range_task_done();
                 Run::DocSelectionChange
+            }
+            Task::Media(n, epoch, step) => {
+                s.media -= 1;
+                Run::Media(n, epoch, step)
             }
             Task::Render => {
                 self.frame.queued.set(false);
@@ -585,6 +609,11 @@ impl Dom {
             Run::DocSelectionChange => it.host_scope(|it| {
                 it.charge(1)?;
                 self.fire_at_document(it, "selectionchange")?;
+                it.host_checkpoint().map(|_| ())
+            }),
+            Run::Media(n, epoch, step) => it.host_scope(|it| {
+                it.charge(1)?;
+                self.media_task(it, n, epoch, step)?;
                 it.host_checkpoint().map(|_| ())
             }),
             Run::Render => {

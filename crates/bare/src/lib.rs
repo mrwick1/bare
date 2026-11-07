@@ -143,6 +143,9 @@ mod browser_idle_tests;
 #[cfg(test)]
 mod browser_element_tests;
 mod browser_elements;
+mod browser_media;
+#[cfg(test)]
+mod browser_media_tests;
 #[cfg(test)]
 mod browser_elements_tests;
 #[cfg(test)]
