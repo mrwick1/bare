@@ -114,6 +114,7 @@ mod browser_platform_tests;
 mod browser_style;
 mod browser_style_block;
 pub mod browser_computed;
+mod browser_used;
 pub mod browser_geometry;
 pub mod browser_resize;
 mod browser_element;

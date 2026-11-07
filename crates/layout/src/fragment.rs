@@ -62,6 +62,17 @@ pub struct Layout {
     pub bars: crate::Fast<(bool, bool)>,
     /// The work that layout did again, in fragments (`Cx::work`). 0 for a page that lays nothing out twice.
     pub work: u64,
+    /// The used tracks of the grid container that `layout_probing` was asked about. `None` for any other layout.
+    pub tracks: Option<Tracks>,
+}
+
+/// The tracks of a grid container after layout, rows (0) and columns (1): their sizes, how many implicit tracks come before the
+/// explicit ones, and the names of the explicit lines as (name, line number from 1).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Tracks {
+    pub sizes: [Vec<f32>; 2],
+    pub before: [usize; 2],
+    pub names: [Vec<(String, i32)>; 2],
 }
 
 /// Turn the places of all fragments from "relative to the parent fragment" into page coordinates.

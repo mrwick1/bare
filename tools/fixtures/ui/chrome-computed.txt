@@ -1,0 +1,107 @@
+block-auto-width-fills-the-body	384px 0px 0px 0px 0px
+block-content-box-with-padding-and-border	100px 50px 10px 5px 3px
+block-border-box-with-padding-and-border	100px 50px
+block-min-width-beats-width	150px 10px
+block-max-width-beats-width	120px 10px
+block-min-and-max-height	40px | 30px
+block-height-from-children	384px 60px
+block-margin-auto-centers	142px 142px 0px
+block-margin-left-auto-takes-the-rest	264px 20px
+block-margin-auto-with-no-width-is-zero	384px 0px 0px
+block-margin-auto-over-max-width	100px 142px 142px
+block-margin-vertical-auto-is-zero	0px 0px 142px
+block-margin-percent-of-the-width	38.3906px 19.1875px 7.67188px 3.82812px
+block-margin-px-stays-computed	-7px 3px 32px 1px
+block-padding-percent	38.3906px 19.1875px 38.3906px 19.1875px 345.625px
+block-padding-calc	41.3906px 5px 342.609px
+block-percent-padding-inside-a-nested-percent-padding	160px 160px
+block-width-percent-and-calc	192px | 354px
+block-width-percent-with-a-fraction	127.984px | 47.375px
+block-width-in-viewport-units	200px 30px
+block-height-percent-of-a-fixed-parent	20px
+block-height-percent-of-an-auto-parent	12px
+block-visibility-hidden-keeps-the-size	70px 20px
+block-the-root-and-the-body	384px 40px | 400px 56px
+line-height-number-is-pixels	30px | 19.2px
+line-height-normal-stays-normal	normal
+line-height-percent-em-and-px	30px | 40px | 17px
+line-height-number-inherits-as-a-number	15px
+inline-keeps-the-computed-width-and-percent	50px auto 10% 10% 0px
+inline-block-size	30px 20px 0px
+inline-block-margin-and-padding-percent	20px 10px 30px
+float-keeps-its-width-and-auto-margin-is-zero	80px 30px 0px 0px
+flex-items-share-the-width	100px 10px | 200px 10px
+flex-items-shrink	150px | 150px
+flex-item-stretches-in-the-cross-axis	60px | 25px
+flex-column-item-height-grows	100px 30px | 100px 60px
+flex-container-size	300px 44px
+flex-item-percent-padding-uses-the-container-width	30px 50px
+flex-item-percent-margin-uses-the-container-width	30px
+flex-keywords	space-between center flex-start auto auto normal | normal normal normal auto auto normal
+flex-keywords-end-and-stretch	flex-end flex-end stretch auto auto | normal normal normal center end
+flex-keywords-baseline-and-space	space-evenly baseline space-around | center stretch normal
+keywords-set-with-the-safe-and-the-start-forms	start self-end end | left start normal
+keywords-in-a-hidden-subtree	center flex-start
+text-decoration-line-and-shorthand	underline underline | none none | line-through line-through | none none
+grid-container-fixed-and-fr-columns	100px 100px 200px 50px 150px 400px 200px
+grid-container-auto-rows-from-content	60px 60px 60px 10px 25px 35px
+grid-container-line-names	[a] 100px [b c] 50px [d]
+grid-container-repeat-and-gap	100px 100px 100px
+grid-container-auto-fill	50px 50px 50px 50px
+grid-container-implicit-tracks	50px 30px 30px 0px
+grid-container-percent-columns	50px 150px
+grid-container-minmax-and-auto-columns	100px 30px 170px
+grid-item-fills-its-area	100px 40px | 200px 40px
+grid-item-spans-columns	300px 15px 1 / span 2 1 span 2
+grid-inline-container	30px 40px 20px 70px 20px
+grid-non-container-keeps-the-computed-list	100px 1fr repeat(2, 20px)
+grid-hidden-container-keeps-the-computed-list	100px minmax(10px, 1fr) [x] 2fr
+grid-no-template-is-none	none none none | none none none
+grid-auto-tracks-and-flow	minmax(10px, 1fr) 20px column dense | min-content max-content fit-content(30px) dense
+grid-template-areas-text	"x y" "z w" | none
+grid-placement-longhands	2 4 span 2 5 | a auto auto 2 b | auto auto auto auto
+grid-placement-shorthands	2 / 4 span 2 / 5 | 3 auto | auto auto
+abs-all-auto-takes-the-static-place	5px 5px 185px 95px
+abs-offsets-px-stay-computed	7px 3px 177px 83px
+abs-right-and-bottom-give-left-and-top	97px 180px 10px 3px
+abs-percent-and-calc-offsets	13px 21px 169px 87px
+abs-stretches-between-left-and-right	160px 10px 0px
+abs-auto-margins-center	50px 50px 30px 30px 0px 0px
+abs-margin-percent	22px 11px
+abs-without-a-positioned-parent-uses-the-window	285px 375px 5px 5px 20px
+fixed-offsets-come-from-the-window	270px 350px 0px 10px | 8px 8px 342px 272px
+fixed-percent-offsets	30px 100px
+relative-auto-offsets-are-zero-or-the-opposite	0px 0px 0px 0px | 0px 7px -7px 0px | 3px -7px 7px -3px
+relative-percent-offset	20px -20px
+static-offsets-stay-computed	7px 10% auto auto | auto auto auto auto
+sticky-keeps-auto-and-px	5px auto auto auto
+abs-in-a-scroll-container-measures-from-the-client-edge	65px 155px 10px 10px
+border-box-percent-sizes	150px 80px
+border-box-with-min-height	384px 60px
+none-has-the-computed-sizes	50% 30px 10% 5% 5%
+none-auto-stays-auto	auto auto auto 0px | auto auto auto 0px
+inside-none-the-computed-values	40% 10% calc(5% + 1px)
+scroll-auto-with-a-bar-takes-room	85px 50px
+scroll-auto-without-a-bar	100px 50px
+scroll-always-has-both-bars	85px 35px
+scroll-hidden-has-no-bar	100px 50px
+scroll-border-box-with-a-bar	100px 60px
+scroll-nested-containers	185px 105px | 170px 60px
+scroll-nested-percent-padding	18.5px 166.5px
+scroll-auto-block-child-fills-the-client-width	121.5px 13.5px
+table-width-and-cells	200px 30px | 60px 30px | 140px 30px
+calc-with-a-percent-keeps-its-text	calc(100% - 20px) calc(50% + 10px) calc(10% + 5px) 10px
+calc-without-a-percent-is-pixels	15px 6px 12px 3px
+calc-percent-in-a-hidden-subtree	calc(100% - 32px) calc(50% + 1px)
+shorthands-from-the-used-longhands	38.3906px 0px 19.1875px
+flex-auto-margin-takes-the-free-width	200px 0px | 0px 0px
+flex-auto-margins-on-both-sides-split-the-free-width	125px 125px
+flex-auto-margins-of-two-items-share-the-free-width	0px 90px | 90px 20px
+flex-auto-margin-in-a-reversed-row	190px 0px | 0px 0px
+flex-auto-margin-in-a-column	75px 0px | 0px 75px
+flex-auto-margin-in-the-cross-axis	70px 0px | 35px 35px | 0px 70px
+flex-auto-margin-with-a-fixed-margin-in-the-cross-axis	60px 10px
+flex-auto-margin-with-no-free-space-is-zero	0px 50px | 0px 50px
+flex-auto-margin-beside-a-growing-item	0px 250px | 0px 50px
+flex-auto-margin-in-an-inline-flex-with-a-button	240px 0px 60px
+flex-auto-margin-with-a-percent-margin-beside	30px | 170px

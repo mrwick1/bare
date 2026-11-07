@@ -428,7 +428,9 @@ pub(crate) fn sized_with(cx: &mut Cx, node: NodeId, space: Space, forced: Option
     }
     if position != Keyword::Static && cx.waiting > 0 {
         // The containing block of the absolute boxes inside: this padding box.
-        let pad = Rect { x: border.left, y: border.top, w: width + padding.horizontal(), h: done.height - border.vertical() };
+        // The scrollbars are not in it: absolute boxes measure from the client edge.
+        let gx = if bars.0 { SCROLLBAR } else { 0.0 };
+        let pad = Rect { x: border.left, y: border.top, w: width + padding.horizontal() - gx, h: done.height - border.vertical() - gy };
         out_of_flow(cx, fragment, pad, false, true);
     }
     let end = cx.out.len() as u32;

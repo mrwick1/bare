@@ -2,11 +2,14 @@
 //! Cascade and the HTML rendering section, read by hand. Node has no DOM, so it is not an oracle here.
 
 use crate::browser::*;
+use crate::browser_topic_tests::topic_test;
 use crate::browser_computed::ComputedLimits;
 use bare_html::tree;
 use bare_js::eval::{Error, EvalLimits, LimitKind};
 use bare_js::heap::HeapLimits;
 use bare_js::value::Value;
+
+topic_test!(chrome_cases, "computed", 107);
 
 const PAGE: &str = "<!doctype html><html id=h><head><style>.r { direction: rtl } #c { color: red }</style></head><body id=b><div id=a class=x><p id=p>t</p></div><span id=s dir=rtl><i id=i></i></span></body></html>";
 
@@ -170,6 +173,37 @@ fn writes_are_no_modification_allowed() {
 }
 
 #[test]
+fn used_values_that_layout_does_not_keep_are_gated_and_layout_limits_end_the_read() {
+    // A percent padding of a grid item needs the grid area, and an auto margin of an item of a wrapping flex container needs the free space of its line.
+    let mut b = at("<body style='margin:0'><div style='display:grid;width:200px'><i id=g style='display:block;padding-left:10%'></i></div><div style='display:flex;flex-wrap:wrap'><i id=f style='display:block;margin-left:auto'></i></div></body>");
+    assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('g')).paddingLeft"), "unsupported:a percent padding or margin of a grid item (the grid area is not kept)");
+    assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('f')).marginLeft"), "unsupported:an auto margin of a grid item or of an item of a wrapping flex container (the free space of its line is not kept)");
+    // A px value needs no layout, so it is never gated.
+    let mut b = at("<body style='margin:0'><div style='display:grid;width:200px'><i id=g style='display:block;padding-left:10px;margin-left:5px'></i></div></body>");
+    assert_eq!(js(&mut b, "var g = getComputedStyle(document.getElementById('g')); g.paddingLeft + g.marginLeft + g.width"), "10px5px185px");
+    // The layout limits of the geometry API stop a read that needs layout, and a read that needs none.
+    let mut b = at(&format!("<body><div id=t></div>{}</body>", "<p></p>".repeat(50)));
+    b.set_geometry_limits(crate::browser_geometry::GeometryLimits { max_nodes: 20, ..Default::default() });
+    assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('t')).width"), lim("geometry-nodes"));
+    assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('t')).display"), "block");
+}
+
+/// What floating-ui reads when a Radix Select opens (`getComputedStyle` of the trigger and its ancestors): no read may stop the page.
+#[test]
+fn the_reads_of_a_floating_popper_do_not_stop() {
+    let mut b = at("<body style='margin:0'><div id=sc style='overflow:auto;height:100px;width:300px;position:relative'><div style='padding:5%;display:flex'><button id=t type=button style='position:relative;margin:auto 0 0 10%;width:50%;border:2px solid;box-sizing:border-box'>x</button></div></div><div id=pop style='position:fixed;left:0;top:0;transform:none'></div></body>");
+    let all = "['width','height','marginTop','marginLeft','paddingLeft','paddingTop','top','left','right','bottom','position','overflow','overflowX','overflowY','direction','display','boxSizing','borderTopWidth','borderLeftWidth','transform','translate','perspective','containerType','backdropFilter','filter','willChange','contain'].map(function (k) { return k + '=' + cs[k]; }).join()";
+    for id in ["t", "sc", "pop"] {
+        js(&mut b, &format!("var cs = getComputedStyle(document.getElementById('{id}')); 0"));
+        let r = js(&mut b, all);
+        assert!(!r.starts_with("unsupported") && !r.starts_with("limit"), "{id}: {r}");
+        assert!(!r.contains("undefined") || r.contains("transform=undefined"), "{id}: {r}");
+    }
+    js(&mut b, "var cs = getComputedStyle(document.getElementById('t')); 0");
+    assert_eq!(js(&mut b, "cs.getPropertyValue('width') + ' ' + cs.getPropertyValue('transform') + '|' + cs.getPropertyValue('will-change') + '|' + cs.position"), "135px ||relative");
+}
+
+#[test]
 fn supported_names_only_and_gates_for_unavailable_values() {
     let mut b = at(PAGE);
     js(&mut b, "var cs = getComputedStyle(document.getElementById('a')); 0");
@@ -180,19 +214,16 @@ fn supported_names_only_and_gates_for_unavailable_values() {
     // Computed values that are known without layout.
     assert_eq!(js(&mut b, "cs.getPropertyValue('Display') + cs.position + cs.visibility + cs.fontWeight + cs.fontSize + cs.borderTopWidth + cs.paddingLeft"), "blockstaticvisible40016px0px0px");
     assert_eq!(js(&mut b, "cs.getPropertyValue('DIRECTION')"), "ltr");
-    // Used values (layout) are gated, not guessed: `auto` width, margin, positioned offsets.
-    let used = "unsupported:the resolved value is the used value, which needs layout";
-    assert_eq!(js(&mut b, "cs.width"), used);
-    assert_eq!(js(&mut b, "cs.getPropertyValue('margin-top')"), used);
-    assert_eq!(js(&mut b, "cs.height"), used);
-    // `top` of a static element is its computed value `auto`; a positioned one needs layout.
+    // Used values come from layout: the box size, the `auto` margins and the offsets of a positioned box.
+    assert_eq!(js(&mut b, "cs.width + ' ' + cs.height + ' ' + cs.getPropertyValue('margin-top')"), "1264px 22px 0px");
+    // `top` of a static element is its computed value `auto`; a relative one with a px offset is that offset.
     assert_eq!(js(&mut b, "cs.top"), "auto");
-    assert_eq!(js(&mut b, "document.getElementById('a').style.position = 'relative'; cs.top"), used);
+    assert_eq!(js(&mut b, "document.getElementById('a').style.position = 'relative'; cs.top"), "0px");
+    assert_eq!(js(&mut b, "document.getElementById('a').style.bottom = '5px'; cs.top"), "-5px");
     // A display:none element: the resolved value is the computed one.
     assert_eq!(js(&mut b, "var h = getComputedStyle(document.head); h.display + h.width + h.marginTop"), "noneauto0px");
     // The engine reads these only loosely: no text is made up.
-    assert_eq!(js(&mut b, "cs.alignItems"), "unsupported:this property is read only approximately by the engine (no faithful computed text)");
-    assert_eq!(js(&mut b, "cs.gridTemplateColumns"), "unsupported:this property is read only approximately by the engine (no faithful computed text)");
+    assert_eq!(js(&mut b, "cs.alignItems + '|' + cs.gridTemplateColumns + '|' + cs.textDecoration"), "normal|none|none");
     // Shorthands are built from longhands with the existing serializer.
     assert_eq!(js(&mut b, "document.getElementById('a').style.position = ''; cs.getPropertyValue('padding') + '|' + cs.getPropertyValue('border-width')"), "0px|0px");
     // Custom properties: the computed text, inherited.
@@ -265,11 +296,11 @@ fn elements_inside_display_none_have_computed_values() {
     js(&mut b, "var dp = document.createElement('div'); dp.id = 'dp'; dp.style.cssText = 'display:none;color:rgb(5,6,7)'; dp.innerHTML = '<div>'.repeat(40) + '<div id=dpe style=\\'position:fixed;width:10%\\'>e</div>' + '</div>'.repeat(40); document.body.appendChild(dp);");
     assert_eq!(js(&mut b, "g('dp', 'display') + ' ' + g('dpe', 'position') + ' ' + g('dpe', 'color') + ' ' + g('dpe', 'display') + ' ' + g('dpe', 'width')"), "none fixed rgb(5, 6, 7) block 10%");
     // A rendered element still needs layout for its used values.
-    assert_eq!(js(&mut b, "g('v', 'position') + ' ' + g('v', 'top')"), "unsupported:the resolved value is the used value, which needs layout");
+    assert_eq!(js(&mut b, "g('v', 'position') + ' ' + g('v', 'top') + ' ' + g('v', 'width') + ' ' + g('v', 'margin-top')"), "relative 2px 120px 4px");
     // The object is live: the next read sees a change inside the hidden subtree and the end of `display:none`.
     assert_eq!(js(&mut b, "var cs = getComputedStyle(document.getElementById('c1')); document.getElementById('c1').style.position = 'fixed'; cs.position"), "fixed");
     assert_eq!(js(&mut b, "document.getElementById('h1').style.color = 'rgb(9, 8, 7)'; getComputedStyle(document.getElementById('g1')).color"), "rgb(9, 8, 7)");
-    assert_eq!(js(&mut b, "document.getElementById('h1').style.display = 'block'; getComputedStyle(document.getElementById('c1')).width"), "unsupported:the resolved value is the used value, which needs layout");
+    assert_eq!(js(&mut b, "document.getElementById('h1').style.display = 'block'; getComputedStyle(document.getElementById('c1')).width"), "512px", "c1 is `position: fixed` here, so a box: 40% of the 1280px window");
     assert_eq!(js(&mut b, "document.getElementById('h1').style.display = ''; g('c1', 'width')"), "40%");
 }
 
