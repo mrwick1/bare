@@ -28,6 +28,10 @@ struct Compiled {
     code: crate::bc::Code,
     /// For each constant: a number, an interned string (rooted by `bc_roots`), or `undefined` for a name.
     kv: Box<[Value]>,
+    /// For each constant: its global cell. A name has its key and the position of the property in the dictionary of the global
+    /// object (`u32::MAX` until a slow path learns it). `GetGlobal` and `SetGlobal` read it. Other constants hold a key that is never
+    /// read.
+    cells: Box<[(PropertyKey, std::cell::Cell<u32>)]>,
 }
 
 /// The state of one function for the switch.

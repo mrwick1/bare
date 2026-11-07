@@ -2,6 +2,8 @@
 # Differential gate (G6): run every fixture of tools/fixtures/js/*-cases.txt with its runner under BARE_JS_EXEC=tree, auto and
 # byte, and compare the outputs. They must be equal. The load examples that check their own result (eval, gen, async, class,
 # proxy; scale 1) run in each mode too: their exit status must be 0 in every mode.
+# A fixture row whose result is `limit` (the step limit) in one mode matches any result in the other: the tree walker counts a step
+# for each node, and the bytecode loop counts one for each backward jump and each call.
 #   tools/js/exec_diff.sh [-m "MODES"] [-g REGEX] [TARGET_DIR]
 # TARGET_DIR is a CARGO_TARGET_DIR (default: CARGO_TARGET_DIR, else target). The runners are built there first, inside `heavy`.
 # -m changes the modes (default "tree auto byte"). -g keeps
@@ -13,7 +15,7 @@ set -u
 here=$(dirname "$0")
 modes="tree auto byte" pat=.
 while getopts m:g: o; do
-  case $o in m) modes=$OPTARG ;; g) pat=$OPTARG ;; *) sed -n '2,12p' "$0"; exit 2 ;; esac
+  case $o in m) modes=$OPTARG ;; g) pat=$OPTARG ;; *) sed -n '2,14p' "$0"; exit 2 ;; esac
 done
 shift $((OPTIND - 1))
 [ -d "${BARE_TMP:-}" ] || { [ -d /data/bare-tmp ] && BARE_TMP=/data/bare-tmp || BARE_TMP=$HOME/bare-tmp; }
@@ -67,6 +69,12 @@ $heavy cargo build --release -q -p bare-js --example eval_check --example async_
   --example eval_load --example gen_load --example async_load --example class_load --example proxy_load || exit 1
 $heavy cargo build --release -q -p bare --example browser_check --example dom_check --example fetch_check \
   --example navigation_check --example scheduler_check || exit 1
+# Two outputs match when each row is equal, or when the rows have one name and one of them is `limit`.
+same() {
+  awk -F'\t' 'NR == FNR { a[FNR] = $0; n = FNR; next }
+    a[FNR] != $0 { split(a[FNR], p, "\t"); if (p[1] != $1 || (p[2] != "limit" && $2 != "limit")) bad = 1 }
+    END { if (FNR != n) bad = 1; exit bad }' "$1" "$2"
+}
 tmp=$(mktemp -d "$TMPDIR/exec-diff.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 bin=$CARGO_TARGET_DIR/release/examples
@@ -77,7 +85,7 @@ echo "$pairs" | grep -E -e "$pat" | while read -r runner cases; do
     BARE_JS_EXEC=$m "$bin/$runner" "$fix/$cases" > "$tmp/out.$m" 2>/dev/null
     echo "rc=$?" >> "$tmp/out.$m"
     if [ -z "$first" ]; then first=$m
-    elif ! cmp -s "$tmp/out.$first" "$tmp/out.$m"; then
+    elif ! same "$tmp/out.$first" "$tmp/out.$m"; then
       echo "DIFFERENT: $runner $cases: $first against $m"; diff "$tmp/out.$first" "$tmp/out.$m" | head -10
       echo x >> "$tmp/bad"
     fi

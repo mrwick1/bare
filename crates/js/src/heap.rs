@@ -1563,6 +1563,41 @@ impl Heap {
         .map(|p| p as u32)
     }
 
+    /// A global cell of the bytecode loop (`bc_vm.rs`): the data property `key` at position `pos` of the dictionary of `o`. The
+    /// global object is a dictionary. `None` asks the caller to use the full path, as `own_data_at` does.
+    #[inline(always)]
+    pub fn cell_get(&self, o: ObjId, pos: u32, key: PropertyKey) -> Option<Value> {
+        let ob = self.objects.get(o.index, o.gn)?;
+        if ob.exotic != 0 || ob.lazy & (LAZY_PROTO | LAZY_HS) != 0 {
+            return None;
+        }
+        match ob.dict.as_ref()?.entries.get(pos as usize) {
+            Some(Some((k, Property::Data { value, .. }))) if *k == key => Some(*value),
+            _ => None,
+        }
+    }
+
+    /// Store `v` in a global cell (`cell_get`) if the property is a writable data property. `false` asks the caller to use the full
+    /// path.
+    #[inline(always)]
+    pub fn cell_set(&mut self, o: ObjId, pos: u32, key: PropertyKey, v: Value) -> bool {
+        if self.check_value(v).is_err() {
+            return false;
+        }
+        let Some(ob) = self.objects.get_mut(o.index, o.gn) else { return false };
+        if ob.exotic != 0 || ob.lazy & (LAZY_PROTO | LAZY_HS) != 0 {
+            return false;
+        }
+        let Some(d) = &mut ob.dict else { return false };
+        match d.entries.get_mut(pos as usize) {
+            Some(Some((k, Property::Data { value, writable: true, .. }))) if *k == key => {
+                *value = v;
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// The value of the own data property `key` of `o` if it sits at position `hint`. `None` is not "absent": it asks the caller to
     /// use `lookup` (another position, an accessor, a lazy or exotic object). A hit is what `lookup` would give.
     #[inline]
