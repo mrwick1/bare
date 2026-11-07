@@ -1607,3 +1607,17 @@ Baseline (pass, fail, skip; 22,305 pass, 8,460 fail and 1,951 skip in all):
 The most common reasons for a failure: async generators are not supported (4,504 at the first run, before the module features were skipped), a non-ASCII character outside a string (965), `eval` is not defined (532), `for await` (390), the `Function` constructor (329), `with` (269). The per-directory numbers are in the baseline file.
 
 Not tested: the cost matrix with two different builds (both trees were the same build, so only the zero case and the noise were measured); `cost_matrix.sh` and `test262_check.sh` on arjun-e16 (only the paths are parametrized); the jemalloc column on a machine with a different jemalloc; `exec_diff.sh` with a real switch (the engine ignores `BARE_JS_EXEC` until B3); `test262_run` with `BARE_JS_EXEC`; test262 directories outside the subset, `intl402`, `annexB` and `staging`; wall time of the typing page; a test262 run on a quiet machine.
+
+## Cache API stub and the engine plan (step A0 of the engine plan)
+
+Change:
+- `crates/js/src/heap_shape.rs` (new, a submodule of `heap.rs`): `Ic` (plain `Copy` data, 24 bytes), `Heap::ic_own` (always `None`), `Heap::get_ic` and `Heap::set_ic` (call `get` and `set`). No cache is filled. The tree walker and the bytecode interpreter can code against the API before shapes exist.
+- `Interp::ics: IcState` (`eval_ic.rs`), an empty struct. Later steps add their tables there and do not add fields to `Interp`.
+- `docs/decisions.md`: the section "Shapes and inline caches" (the API, the sharing rules, the shapes and invalidation design, the perf rule). It records the decision of Arjun (2026-11-07) to keep the tree walker as tier 0 (step B13).
+- `docs/engine-plan.md`: the plan, with step C1 marked done and step B13 written as decided.
+
+Check: no code runs, so the cost rows must not move. `tools/js/instr.sh`, minimum of 3, release, origin/main 2b6d6b0 against this change, 566 rows at scale 1 and 10 (the `numeric_load` rows use 1,000 and 10,000), with glibc and with jemalloc. No row is over +0.5%. The median is -0.001% (glibc) and -0.006% (jemalloc). The worst rows are `platform_load media 10` +0.088% and `select_load react 10` +0.086%. `eval_load calls 10`, `closures 10` and `class_load construct 10` are within 0.001%.
+
+Tests: `cargo test --workspace` debug and release, 2,747 passed and 0 failed in each (1 new test: the stub never hits, runs the plain path, and `Ic` is 24 bytes). 40 of the 41 `tools/js/*_check.sh` match Node (`number_check` 22 cases, `intl_check` 90 cases). `parse_check.sh` needs `acorn` and does not start.
+
+Not tested: the rows at scale 100; `parse_check.sh`; wall time; memory (no data changed, and `Ic` is not stored anywhere yet).

@@ -640,6 +640,9 @@ pub struct Interp<'p> {
     n_arguments: u32,
     /// Class state (see `eval_classes.rs`).
     cls: ClassState,
+    /// Inline caches of the member sites of the tree walker (see `eval_ic.rs`).
+    #[allow(dead_code)] // read from step A2
+    ics: IcState,
     /// Call frames for `Error.stack` (see `eval_stack.rs`).
     stk: StackState,
     /// `new.target` of the host constructor that is running (see `call_host`). Only set for the length of that call.
@@ -810,6 +813,7 @@ impl<'p> Interp<'p> {
             host_nt: None,
             n_arguments: 0,
             cls: ClassState::default(),
+            ics: IcState::default(),
         };
         it.n_arguments = it.intern_name("arguments");
         it.cls_init();
@@ -3632,6 +3636,7 @@ include!("eval_wrapper.rs");
 include!("eval_async.rs");
 include!("eval_generator.rs");
 include!("eval_clone.rs");
+include!("eval_ic.rs");
 
 #[cfg(test)]
 #[path = "eval_class_tests.rs"]

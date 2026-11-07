@@ -147,6 +147,9 @@ pub use named::{NamedOp, NamedRequest, NamedSource};
 mod prim;
 #[path = "heap_proxy.rs"]
 mod proxy;
+#[path = "heap_shape.rs"]
+mod shape;
+pub use shape::Ic;
 
 // ---------- property model ----------
 
