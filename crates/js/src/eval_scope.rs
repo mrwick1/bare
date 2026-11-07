@@ -92,7 +92,8 @@ struct RScope {
 /// Slots of the identifier sites of one script. The scopes that they refer to are in `Interp::sc_all`.
 #[derive(Default)]
 struct Slots {
-    /// One word for each expression, then one for each pattern: 0, `UNRES | scope + 1` or a resolved slot.
+    /// One word for each expression, then one for each pattern: 0, `UNRES | scope + 1` or a resolved slot. A string literal or
+    /// member name site holds a position in `Interp::site_strs` instead.
     sites: Box<[u32]>,
 }
 

@@ -13,6 +13,8 @@
 //!   `Limit(Nodes)` is only known for a room up to the one it had; more room parses again.
 //! - Memory: at most [`MAX_BYTES`] of source and tree per thread. The oldest entries go first. Sources under
 //!   [`MIN_SOURCE`] bytes are not kept (a short `eval` or `Function` text parses faster than an entry costs).
+//! - Age: each new realm (one document) calls [`new_realm`]. It drops the entries that no realm used in the last
+//!   [`MAX_IDLE`] realms. A realm that still runs such a script keeps its own `Rc` of the tree.
 
 use crate::ast::Program;
 use crate::parse::{parse_script_used, Error, ErrorKind, LimitKind, Limits};
@@ -24,6 +26,8 @@ use std::rc::Rc;
 pub const MAX_BYTES: usize = 32 << 20;
 /// Shorter sources are not kept.
 pub const MIN_SOURCE: usize = 512;
+/// An entry that the last this many realms did not use goes at the next [`new_realm`].
+pub const MAX_IDLE: u64 = 2;
 
 /// The grammar of the source. The same bytes as a module and as a classic script are two entries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -54,6 +58,8 @@ struct Entry {
     /// The `max_nodes` of the parse that gave `Limit(Nodes)`.
     room: u32,
     bytes: usize,
+    /// The realm count at the last parse or hit.
+    last: u64,
 }
 
 #[derive(Default)]
@@ -61,6 +67,7 @@ struct Cache {
     map: HashMap<(u64, Kind), Entry>,
     order: VecDeque<(u64, Kind)>,
     counts: Counts,
+    realms: u64,
 }
 
 thread_local! {
@@ -97,7 +104,8 @@ pub fn parse(kind: Kind, source: &str, limits: Limits) -> Result<Rc<Program<'sta
     }
     let key = (hash(source.as_bytes()), kind);
     let hit = CACHE.with_borrow_mut(|c| {
-        let e = c.map.get(&key)?;
+        let realms = c.realms;
+        let e = c.map.get_mut(&key)?;
         let r = match &e.res {
             Res::Ok(p) if *p.source == *source => Ok(p.clone()),
             Res::Err(err, s) if **s == *source => {
@@ -108,6 +116,7 @@ pub fn parse(kind: Kind, source: &str, limits: Limits) -> Result<Rc<Program<'sta
             }
             _ => return None,
         };
+        e.last = realms;
         c.counts.hits += 1;
         Some(if limits.max_nodes < e.used { Err(nodes_err(0)) } else { r })
     });
@@ -133,7 +142,7 @@ pub fn parse(kind: Kind, source: &str, limits: Limits) -> Result<Rc<Program<'sta
                 c.counts.bytes -= old.bytes;
             }
         }
-        c.map.insert(key, Entry { res, used, room: limits.max_nodes, bytes });
+        c.map.insert(key, Entry { res, used, room: limits.max_nodes, bytes, last: c.realms });
         c.order.push_back(key);
         c.counts.bytes += bytes;
         c.counts.entries = c.map.len();
@@ -144,6 +153,26 @@ pub fn parse(kind: Kind, source: &str, limits: Limits) -> Result<Rc<Program<'sta
 /// The counts of this thread.
 pub fn counts() -> Counts {
     CACHE.with_borrow(|c| Counts { entries: c.map.len(), ..c.counts })
+}
+
+/// A new realm starts on this thread: drop the entries that the last [`MAX_IDLE`] realms did not use.
+pub fn new_realm() {
+    CACHE.with_borrow_mut(|c| {
+        c.realms += 1;
+        let before = c.map.len();
+        let (realms, mut freed) = (c.realms, 0);
+        c.map.retain(|_, e| {
+            let keep = realms - e.last <= MAX_IDLE;
+            if !keep {
+                freed += e.bytes;
+            }
+            keep
+        });
+        if c.map.len() != before {
+            c.counts.bytes -= freed;
+            c.order.retain(|k| c.map.contains_key(k));
+        }
+    });
 }
 
 /// Drop every entry of this thread and reset the counts.
@@ -232,5 +261,23 @@ mod tests {
             assert!(counts().bytes <= MAX_BYTES);
         }
         assert_eq!(counts().entries, 2);
+    }
+
+    #[test]
+    fn an_entry_that_no_recent_realm_used_goes() {
+        clear();
+        let (a, b) = (src("var a = 1;"), src("var b = 1;"));
+        parse(Kind::Classic, &a, Limits::default()).unwrap();
+        parse(Kind::Classic, &b, Limits::default()).unwrap();
+        for _ in 0..MAX_IDLE {
+            new_realm();
+            parse(Kind::Classic, &a, Limits::default()).unwrap();
+        }
+        assert_eq!(counts().entries, 2);
+        new_realm();
+        assert_eq!(counts().entries, 1);
+        assert_eq!(counts().bytes, a.len() + parse(Kind::Classic, &a, Limits::default()).unwrap().stats().bytes);
+        parse(Kind::Classic, &b, Limits::default()).unwrap();
+        assert_eq!((counts().parses, counts().entries), (3, 2));
     }
 }

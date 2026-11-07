@@ -563,7 +563,10 @@ pub struct Interp<'p> {
     pat_name: Vec<u32>,
     stmt_label: Vec<u32>,
     func_name: Vec<u32>,
-    expr_str: Vec<Option<StrId>>,
+    /// The strings of the string literal and member name sites that ran, in the order they first ran. The site of such an
+    /// expression in `slots` holds its position + 1 (0: not yet), since only identifier sites use `slots`. A dense table of
+    /// 12 bytes for each expression cost about half of the per-script tables.
+    site_strs: Vec<StrId>,
     prop_str: Vec<Option<StrId>>,
     scopes: Vec<FScope>,
     /// Static scopes and identifier slots of the current script (see `eval_scope.rs`), and the scope the first walk is in.
@@ -757,7 +760,7 @@ impl<'p> Interp<'p> {
             pat_name: vec![0; p.stats().pats],
             stmt_label: vec![0; p.stats().stmts],
             func_name: vec![0; p.stats().funcs],
-            expr_str: vec![None; p.stats().exprs],
+            site_strs: Vec::new(),
             prop_str: vec![None; p.stats().props],
             scopes: (0..=p.stats().funcs).map(|_| FScope::default()).collect(),
             slots: Slots::new(&p.stats()),
@@ -892,7 +895,7 @@ impl<'p> Interp<'p> {
             }
         }
         v.extend(self.name_strs.iter().flatten().map(|&s| Value::String(s)));
-        v.extend(self.expr_str.iter().flatten().map(|&s| Value::String(s)));
+        v.extend(self.site_strs.iter().map(|&s| Value::String(s)));
         v.extend(self.prop_str.iter().flatten().map(|&s| Value::String(s)));
         v.extend(self.tpl_objs.values().map(|&o| Value::Object(o)));
         self.script_roots(&mut v);
@@ -2522,14 +2525,14 @@ impl<'p> Interp<'p> {
     }
 
     fn expr_key(&mut self, e: ExprId, name: Span) -> Res<PropertyKey> {
-        if let Some(s) = self.expr_str[e.index()] {
+        if let Some(s) = self.site_str(e) {
             // A name after a dot is an identifier name: it never starts with a digit, so it is never an array index. The string is
-            // rooted by `expr_str`, so it is never stale.
+            // rooted by `site_strs`, so it is never stale.
             return Ok(PropertyKey::String(s));
         }
         let n = self.prog.name(name);
         let s = h!(self, self.heap.intern_str(&n));
-        self.expr_str[e.index()] = Some(s);
+        self.set_site_str(e, s);
         Ok(PropertyKey::String(s))
     }
 
@@ -2832,7 +2835,7 @@ impl<'p> Interp<'p> {
             ExprKind::Bool(b) => Ok(Value::Bool(b)),
             ExprKind::Number(base) => Ok(Value::Number(self.num_lit(ex.span, base))),
             ExprKind::BigInt => self.big_literal(ex.span),
-            ExprKind::String => match self.expr_str[e.index()] {
+            ExprKind::String => match self.site_str(e) {
                 Some(s) => Ok(Value::String(s)),
                 None => self.string_literal(e, ex.span),
             },
@@ -2883,8 +2886,20 @@ impl<'p> Interp<'p> {
         let mut u = Vec::new();
         let _ = prog.string(span, &mut u);
         let s = h!(self, self.heap.intern_vec(u));
-        self.expr_str[e.index()] = Some(s);
+        self.set_site_str(e, s);
         Ok(Value::String(s))
+    }
+
+    /// The cached string of a string literal or member name site `e` (see `site_strs`).
+    #[inline(always)]
+    fn site_str(&self, e: ExprId) -> Option<StrId> {
+        // 0 (not yet) wraps to an index past the end: one check for both cases.
+        self.site_strs.get((self.slots.sites[e.index()] as usize).wrapping_sub(1)).copied()
+    }
+
+    fn set_site_str(&mut self, e: ExprId, s: StrId) {
+        self.site_strs.push(s);
+        self.slots.sites[e.index()] = self.site_strs.len() as u32;
     }
 
     #[inline(never)]

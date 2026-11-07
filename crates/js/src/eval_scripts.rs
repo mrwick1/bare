@@ -26,7 +26,7 @@ struct Code {
     pat_name: Vec<u32>,
     stmt_label: Vec<u32>,
     func_name: Vec<u32>,
-    expr_str: Vec<Option<StrId>>,
+    site_strs: Vec<StrId>,
     prop_str: Vec<Option<StrId>>,
     scopes: Vec<FScope>,
     slots: Slots,
@@ -40,12 +40,12 @@ impl Code {
     fn cache_bytes(&self) -> usize {
         use std::mem::size_of;
         (self.expr_name.capacity() + self.pat_name.capacity() + self.stmt_label.capacity() + self.func_name.capacity() + self.slots.sites.len()) * 4
-            + (self.expr_str.capacity() + self.prop_str.capacity()) * size_of::<Option<StrId>>()
+            + self.site_strs.capacity() * size_of::<StrId>() + self.prop_str.capacity() * size_of::<Option<StrId>>()
             + self.scopes.capacity() * size_of::<FScope>() + self.fflags.capacity() + self.cflags.capacity()
     }
 
     fn placeholder(prog: &Rc<Program<'static>>) -> Code {
-        Code { prog: prog.clone(), expr_name: Vec::new(), pat_name: Vec::new(), stmt_label: Vec::new(), func_name: Vec::new(), expr_str: Vec::new(), prop_str: Vec::new(), scopes: Vec::new(), slots: Slots::default(), fflags: Vec::new(), cflags: Vec::new() }
+        Code { prog: prog.clone(), expr_name: Vec::new(), pat_name: Vec::new(), stmt_label: Vec::new(), func_name: Vec::new(), site_strs: Vec::new(), prop_str: Vec::new(), scopes: Vec::new(), slots: Slots::default(), fflags: Vec::new(), cflags: Vec::new() }
     }
 
     /// Empty caches sized for the tree.
@@ -56,7 +56,7 @@ impl Code {
             pat_name: vec![0; st.pats],
             stmt_label: vec![0; st.stmts],
             func_name: vec![0; st.funcs],
-            expr_str: vec![None; st.exprs],
+            site_strs: Vec::new(),
             prop_str: vec![None; st.props],
             scopes: (0..=st.funcs).map(|_| FScope::default()).collect(),
             slots: Slots::new(&st),
@@ -75,6 +75,7 @@ impl<'p> Interp<'p> {
     /// A realm with no script yet. Builtins are installed. Add code with [`Interp::run_script`].
     /// The first slot holds an empty script and counts toward `max_scripts`.
     pub fn realm(heap: Heap, limits: EvalLimits) -> Result<Interp<'p>, Error> {
+        crate::parse_cache::new_realm();
         let empty = crate::parse::parse_script("", Default::default()).map_err(|_| unsupported("empty script", Span::default()))?;
         let mut it = Self::with_code(Rc::new(empty.into_owned()), heap, limits)?;
         it.heap.set_setup(true);
@@ -207,7 +208,7 @@ impl<'p> Interp<'p> {
         std::mem::swap(&mut self.pat_name, &mut c.pat_name);
         std::mem::swap(&mut self.stmt_label, &mut c.stmt_label);
         std::mem::swap(&mut self.func_name, &mut c.func_name);
-        std::mem::swap(&mut self.expr_str, &mut c.expr_str);
+        std::mem::swap(&mut self.site_strs, &mut c.site_strs);
         std::mem::swap(&mut self.prop_str, &mut c.prop_str);
         std::mem::swap(&mut self.scopes, &mut c.scopes);
         std::mem::swap(&mut self.slots, &mut c.slots);
@@ -226,7 +227,7 @@ impl<'p> Interp<'p> {
     /// Cached strings of the parked scripts, for `roots`.
     fn script_roots(&self, v: &mut Vec<Value>) {
         for c in &self.scripts {
-            v.extend(c.expr_str.iter().flatten().map(|&s| Value::String(s)));
+            v.extend(c.site_strs.iter().map(|&s| Value::String(s)));
             v.extend(c.prop_str.iter().flatten().map(|&s| Value::String(s)));
         }
     }
