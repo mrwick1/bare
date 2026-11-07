@@ -1338,19 +1338,26 @@ impl Heap {
     }
 
     /// `has_property` that asks the host about an `on<x>` name when it has found nothing: the loop of `has_property` stays as it is.
+    #[inline]
     pub fn has_property_lazy(&self, o: ObjId, key: PropertyKey) -> R<bool> {
         let has = self.has_property(o, key)?;
         if !has && self.lazy_on_set.get() {
-            let mut cur = Some(o);
-            while let Some(c) = cur {
-                let ob = self.obj(c)?;
-                if ob.lazy & LAZY_CHAIN != 0 && let PropertyKey::String(s) = key && self.on_name(s) {
-                    self.lazy_ask_name(c, s, key)?;
-                }
-                cur = ob.proto;
-            }
+            self.lazy_miss(o, key)?;
         }
         Ok(has)
+    }
+
+    #[cold]
+    fn lazy_miss(&self, o: ObjId, key: PropertyKey) -> R<()> {
+        let mut cur = Some(o);
+        while let Some(c) = cur {
+            let ob = self.obj(c)?;
+            if ob.lazy & LAZY_CHAIN != 0 && let PropertyKey::String(s) = key && self.on_name(s) {
+                self.lazy_ask_name(c, s, key)?;
+            }
+            cur = ob.proto;
+        }
+        Ok(())
     }
 
     #[cold]

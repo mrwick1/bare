@@ -78,17 +78,22 @@ const BODY_NAMES: &str = "\
     blur error focus load resize scroll afterprint beforeprint beforeunload hashchange languagechange message messageerror offline online pagehide \
     pageshow popstate rejectionhandled storage unhandledrejection unload gamepadconnected gamepaddisconnected";
 
-fn listed(list: &str, n: &str) -> bool {
+fn listed(list: &'static str, n: &str) -> bool {
+    find_in(list, n).is_some()
+}
+
+/// The word `n` of `list`, as a slice of `list`.
+fn find_in(list: &'static str, n: &str) -> Option<&'static str> {
     let b = list.as_bytes();
     let mut from = 0;
     while !n.is_empty() && let Some(i) = list[from..].find(n) {
         let (s, e) = (from + i, from + i + n.len());
         if (s == 0 || b[s - 1].is_ascii_whitespace()) && (e == b.len() || b[e].is_ascii_whitespace()) {
-            return true;
+            return Some(&list[s..e]);
         }
         from = s + 1;
     }
-    false
+    None
 }
 
 /// Does the interface of kind `k` have the handler `on<n>`?
@@ -139,10 +144,10 @@ pub(crate) struct Hd {
     pub atoms: Vec<(Atom, Rc<str>)>,
     /// How many names of the document table `atoms` has looked at.
     pub scanned: usize,
-    /// Host function id of an accessor function -> (interface kind, event type).
-    pub fns: IdMap<u32, (u8, &'static str)>,
+    /// Host function id of an accessor function -> (interface kind, event type). Indexed by the id.
+    pub fns: Vec<(u8, &'static str)>,
     /// The names `n` of `on<n>` that the host defined on every interface (the `EventTarget.prototype` ask), for a `body` prototype made later.
-    pub asked: Vec<Rc<str>>,
+    pub asked: Vec<&'static str>,
     /// A window `error` event is running: an exception in it is not reported again.
     pub in_error: bool,
 }
@@ -196,7 +201,7 @@ impl Dom {
     /// The kind and event type of the accessor function that is running.
     fn handler_fn(&self) -> (u8, &'static str) {
         let (st, id) = (self.st.borrow(), self.style.cur.get());
-        st.hd.fns[&id]
+        st.hd.fns[id as usize]
     }
 }
 
@@ -564,7 +569,7 @@ pub(crate) fn lazy(d: &Dom, it: &mut Interp<'_>, owner: ObjId, all: bool) -> R<(
             _ => Ok(()),
         };
     };
-    let Some(n) = key.strip_prefix("on") else { return Ok(()) };
+    let Some(n) = key.strip_prefix("on").and_then(|n| find_in(ELEMENT, n).or_else(|| find_in(DOC_EXTRA, n)).or_else(|| find_in(WIN_EXTRA, n))) else { return Ok(()) };
     if owner != d.p().et {
         return match kind_of(d, owner) {
             Some(k) if has(k, n) => define(d, it, owner, k, n),
@@ -581,12 +586,12 @@ pub(crate) fn lazy(d: &Dom, it: &mut Interp<'_>, owner: ObjId, all: bool) -> R<(
             define(d, it, o, k, n)?;
         }
     }
-    d.st.borrow_mut().hd.asked.push(Rc::from(n));
+    d.st.borrow_mut().hd.asked.push(n);
     Ok(())
 }
 
 /// Define the accessor `on<n>` of kind `k` on `owner`, unless it is there.
-fn define(d: &Dom, it: &mut Interp<'_>, owner: ObjId, k: u8, n: &str) -> R<()> {
+fn define(d: &Dom, it: &mut Interp<'_>, owner: ObjId, k: u8, n: &'static str) -> R<()> {
     let name = format!("on{n}");
     let key = d.key(it, &name)?;
     if it.heap.has_own_property(owner, key).map_err(|e| it.heap_error(e))? {
@@ -595,10 +600,10 @@ fn define(d: &Dom, it: &mut Interp<'_>, owner: ObjId, k: u8, n: &str) -> R<()> {
     let id = d.handlers.borrow().len() as u32;
     let gf = d.add_fn(it, hget, &format!("get {name}"), 0, false)?;
     let sf = d.add_fn(it, hset, &format!("set {name}"), 1, false)?;
-    let ty: &'static str = [ELEMENT, DOC_EXTRA, WIN_EXTRA].into_iter().flat_map(str::split_whitespace).find(|x| *x == n).map_or("", etype);
+    let ty = etype(n);
     let mut st = d.st.borrow_mut();
-    st.hd.fns.insert(id, (k, ty));
-    st.hd.fns.insert(id + 1, (k, ty));
+    st.hd.fns.resize(id as usize + 2, (0, ""));
+    st.hd.fns[id as usize..].fill((k, ty));
     drop(st);
     d.define_accessor(it, owner, key, gf, Some(sf))
 }
@@ -637,7 +642,7 @@ pub(crate) fn body_proto(d: &Dom, it: &mut Interp<'_>, i: usize) -> R<[ObjId; 2]
     it.heap.set_lazy_on(proto).map_err(|e| it.heap_error(e))?;
     d.hh.body[i].set(Some([proto, f]));
     let asked = d.st.borrow().hd.asked.clone();
-    for n in asked.iter().filter(|n| has(BODY, n)) {
+    for &n in asked.iter().filter(|n| has(BODY, n)) {
         define(d, it, proto, BODY, n)?;
     }
     Ok([proto, f])

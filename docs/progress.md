@@ -1381,14 +1381,29 @@ Check:
 
 Cost (`tools/js/instr.sh`, `instructions:u`, minimum of 3, origin/main e164721 against this change, release, each in its own `CARGO_TARGET_DIR`): 72 rows of the `browser_load`, `handler_load`, `form_load`, `focus_load`, `loader_load`, `selection_load`, `scheduler_load`, `platform_load`, `observer_load`, `attr_load`, `fragment_load`, `nodelist_load` and `web_apis_load` examples at scale 1 and 10. The change is -0.33% to +0.70%.
 
-| row | main | this change | change |
-| --- | ---: | ----------: | -----: |
-| `handler_load 1` | 40,341,153 | 40,625,207 | +0.70% |
-| `handler_load 1` (jemalloc) | 43,786,928 | 44,075,017 | +0.66% |
-| `handler_load 10` | 421,077,798 | 423,442,422 | +0.56% |
-| `handler_load 10` (jemalloc) | 426,783,606 | 429,069,820 | +0.54% |
+The first measurement of this change, against main e164721, put `handler_load 1` at +0.70% (jemalloc +0.66%) and `handler_load 10` at +0.56% (jemalloc +0.54%). The follow-up below removed that cost. Same method, release, each build in its own `CARGO_TARGET_DIR`:
 
-- Two rows are over the +0.5% limit, both `handler_load`. They call the `oninput` and `onchange` accessors about 700 times per 1000 operations, and each call now finds its name from the function id and tests the attribute flag. The cost is about 230 instructions per operation and it is not heap noise (jemalloc agrees). All other rows are at most +0.45%.
+| row | e164721 | main 2b6d6b0 (with the change of this section) | follow-up | follow-up against e164721 | follow-up against main |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `handler_load 1` | 39,545,647 | 39,425,788 | 39,160,095 | -0.97% | -0.67% |
+| `handler_load 1` (jemalloc) | 43,001,301 | 42,846,647 | 42,572,962 | -1.00% | -0.64% |
+| `handler_load 10` | 412,716,352 | 410,827,289 | 408,224,178 | -1.09% | -0.63% |
+| `handler_load 10` (jemalloc) | 418,501,701 | 416,543,639 | 413,916,514 | -1.10% | -0.63% |
+
+The numbers of e164721 and 2b6d6b0 are lower than the first table because later pull requests (the function slot table, #222) also cut cost. The column "against main" is the check of the rule.
+
+Follow-up (the "known exception" is gone). The two `handler_load` rows called the `on*` accessors about 700 times per 1000 operations and each call did more work than before. The profile came from callgrind, not `perf` (sampling moved the same binary by about 20 M instructions per symbol). It found four places:
+- `Interp::fire` (event dispatch) looked up the event and took its `stop` flag before it looked for a listener, and most calls find none. It now builds the listener snapshot first, leaves when it is empty, and takes the type as `&str` (no `Rc` clone for each call).
+- The handler function table (`Hd::fns`) is a `Vec` indexed by function id and holds the kind and the interned type name. A handler call no longer searches a name list. `find_in` gives the interned name for `lazy`, `listed` and `define`.
+- `Heap::has_property_lazy` kept the walk of the prototype chain inline. The walk is now `lazy_miss` (`#[cold]`), and the hit path is one flag test. `ao_has` (the `in` operator on arrays and objects) calls the new `o_has_plain`, which never asks the host, so `in` on a plain object pays nothing for lazy `on*` names.
+- `Interp::is_scoped_function` is `#[inline]`.
+
+Rejected: any change to `Heap::get`, `lookup`, `set` or `lookup_lazy`. Each of them moved the inlining of `get` into `get_prop` and made JS-only rows slower by +1.7% to +17%. Those four functions are as in the first version.
+
+Result: the cost gate `tools/js/cost_matrix.sh` (803 rows, minimum of 3, glibc and jemalloc) on the follow-up rebased on origin/main 6950318, against that commit: 627 rows of the examples (mean -0.071% glibc, -0.064% jemalloc) and 176 rows of `bare-stress` (mean -0.009%, -0.011%). No row is over +0.5% under one allocator or under both. Failed rows: 0. An earlier run of the 494 `*_load` rows at scale 1 and 10 on main 2b6d6b0 (glibc) gave the largest growth at +0.31% (`fetch_load bytes 10`) and the largest fall at -3.1% (`focus_load focus 10`, the `fire` change).
+
+Tests of the follow-up: `cargo test --workspace --release`: 2,747 passed, 0 failed, 11 ignored (the 82 cases of `chrome_cases` and the 23 handler tests included). Not tested: the rows at scale 100; `tools/js/*_check.sh` (they need Chrome or Node); a new run of headless Chrome (`chrome_cases` compares with the saved output); real-web pages; memory (RSS).
+
 - Earlier builds were worse. A per-level flag test in `Heap::lookup`, in `has_property` and in `get_global` cost 0.2% to 0.7% on engine rows. Each hook was moved to a place the hot loops do not run: the lazy test of `lookup` is the existing `prototype` flag byte, the scope check of `get_global` sits after the fast path, and the ask hangs on one object (`EventTarget.prototype`).
 - A profile with `perf` cannot resolve a change under 0.2%, so the steps above were found by experiments with `instr.sh`.
 
