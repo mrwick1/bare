@@ -1753,3 +1753,37 @@ Gaps (recorded, none is hidden):
 - Engine messages differ in a few cases that the fixtures avoid on purpose (strict-mode "has only a getter", `Function.prototype.toString`, the text of "is not a constructor"). They belong to `crates/js`.
 
 Not tested: the `geometry-cases.txt` cases on other Chrome versions; the WPT geometry tests (a few cases of them are in the fixtures, not the whole suite); `DOMMatrix` strings with `calc()`; a page that holds 10^6 rectangles (the rows measure up to 10^4); wall time (only instructions); memory per rectangle (not measured); macOS.
+
+## Native subclass conformance
+
+Added on 2026-11-07. PR #210 left some `class X extends <builtin>` forms gated. All of them now work as in Node 22 (pure JS) or headless Chrome 155 (host objects). The decisions are in `docs/decisions.md` ("Native subclass conformance").
+
+Done:
+- `extends Request`, `Response`, `Headers`, `URL`, `Blob`, `File`, `FormData`, `AbortController` and `URLSearchParams`. `AbortSignal` throws `Failed to construct 'AbortSignal': Illegal constructor`, as Chrome does.
+- `extends Function`, and `AsyncFunction` and `GeneratorFunction` through the constructor (`Nat::FnCtor`). `new Function(...)` works.
+- `extends Symbol` is legal. `new X` throws `Symbol is not a constructor`.
+- The `Intl` constructors read `new.target`.
+- `flat` and `flatMap` of an `Array` subclass with a custom species.
+- An own `exec` on a `RegExp` subclass in `match`, `matchAll`, `replace`, `search`, `split` and `test`. `RegExp[Symbol.species]` exists now.
+
+Changes that a page can see:
+- A host constructor reads `new.target.prototype` before it converts its arguments (Chrome order). `URLSearchParams`, `Blob`, `File` and `FormData` read it after before. Their unit tests were changed.
+- A non-object `prototype` gives `Object.prototype` for a host constructor (Chrome). It gave the intrinsic prototype before.
+- `Response.length` is 0, as in Chrome (it was 1).
+
+Checks:
+- `tools/fixtures/js/subclass-cases.txt`: 241 cases match Node (`tools/js/subclass_check.sh`). 11 Promise cases match.
+- `tools/fixtures/ui/hostsub-cases.txt`: 61 cases match Chrome (`chrome-hostsub.txt`, test `hostsub_cases`).
+- `cargo test --release --workspace` passes.
+- `tools/js/test262_check.sh`: gate ok. Pass count 22,305 to 22,539 (+234), fail 8,460 to 8,226. No directory lost a test. The baseline file is updated. Most gains are in `built-ins/Function` (+74), `Function/prototype/call` (+25) and `apply` (+24), and the new `subclass/builtin-objects` directories.
+- Cost: `tools/js/cost_matrix.sh`, 803 rows, both allocators, base dfda2ce (origin/main) against this change. No row is over +0.5% under both allocators. Mean change: glibc +0.02%, jemalloc +0.02%. Three rows are over +0.5% under glibc only and within 0.08% under jemalloc: `gen_load finally 1` (+0.54%), `interact_load asyncpriv 1` (+0.80%) and `asyncpriv 10` (+0.78%). They are noise candidates by the rule of the script.
+
+Known differences (not done):
+- `AsyncGeneratorFunction`: the parser has no async generators.
+- `Function.prototype.toString` of a dynamic function does not give its source text. A dynamic function has no own `arguments` and `caller`. A lone surrogate in a dynamic function body is lossy.
+- A Proxy as the result of a species constructor runs no trap.
+- `replace` and `match` do not read the `global` and `unicode` getters in the V8 order.
+- A RegExp method on a receiver that is not a real RegExp still throws or is unsupported.
+- Not matched with Chrome and not part of this change: `Object.prototype.toString` of a `Headers`, `Request`, `Response` or `URL` object gives `[object Object]` (Chrome gives the class name); `Response.json`, `Response.error`, `Response.redirect` and `URL.canParse` do not exist; error texts of `Headers`, `Response` and `URL` differ in wording.
+
+Not tested: a live page that subclasses these constructors; `AsyncGeneratorFunction`; a machine other than archMachine; wall time; scale 100 of the load rows; `tools/js/dom_check.sh` and `browser_check.sh` (they need a Chrome run that this change did not need).
