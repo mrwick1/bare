@@ -3420,7 +3420,7 @@ Open items:
 - `dataset_load keys`: a standing known regression of about +0.5% (a code-layout effect, #243 and #262).
 - Window mode: tested only in `cage`. Not tested on a real Hyprland desktop or on HiDPI.
 - arjun-e16: no staging journey runs there (no credentials on that machine).
-- Expired cached scripts are fetched again in full in headless mode. #252 added revalidation for the window path; check that it covers the driver too.
+- The HTTP cache: a 304 with `Vary`, heuristic freshness, and the main document (documents skip the cache) are not tested (#252).
 - The parse cache has no module mode, so only classic scripts use it.
 - Branch `t3/engine-b3`: the bytecode VM at 2.49x, not merged.
 - Other sites: bare is measured on one app only.
