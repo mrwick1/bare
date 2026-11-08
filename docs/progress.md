@@ -3392,3 +3392,35 @@ Results (`tools/js/instr.sh`, minimum of 3 runs):
 Decision: no refactor. The task needed a gain of 3% or more on typing or on the journey. Both prototypes cost more. The full refactor would remove the conversions, but its 16-byte enum result would still go through memory and save no instructions. Register results need `Value` as two scalars in every result type. That is a larger change, and these numbers do not support it.
 
 Not tested: arjun-e16; P2 on the journey; a full refactor (the estimate above comes from the ABI and the prototypes, not from a build).
+
+## State at the pause (2026-11-08)
+
+Arjun paused the work after the 16-byte result test (#272). This section gives the state and the open items.
+
+Staging journey, read-only, 8 steps, archMachine, main `5666ed8`, 3 runs each:
+
+| | bare (`bare-drive`, headless) | Chrome |
+|---|---|---|
+| Journey time | 3.5 to 4.5 s | 3.1 to 3.7 s (steps only, measured on 2026-11-07) |
+| Peak PSS | 68.9 to 71.9 MiB | 508.8 to 513.1 MiB |
+
+Since 2026-11-07:
+- Journey time: 9.4 to 9.9 s before, 3.5 to 4.5 s now.
+- Page-thread CPU: about 3 s before, about 1.5 s now.
+- Typing on the React page: 411 M instructions for each key before, 282 M now (-31%).
+- Requests for each journey: about 205 before, 118 now.
+- Peak PSS: 91 to 94 MiB before, 69 to 72 MiB now.
+- The longest tick of the first `open`: 600 to 800 ms before, 24 ms now.
+
+Engine: shapes and inline caches (A1 to A4, A6) are merged. A7 is not needed (miss rate 3.8%). The bytecode lane stopped at the R1 gate (2.49x, #265). The tree walker is the only executor. Each tree walker round now gives 2 to 5%.
+
+Open items:
+- Ticks over 50 ms: the scripts of the next page after a link (75 to 100 ms), the two sign-out clicks (95 to 136 ms), and `shot`.
+- Partial-restyle cost rows: three `bare-stress` deep rows, +0.51% to +0.69%, approved in #256 (a code-layout effect).
+- `dataset_load keys`: a standing known regression of about +0.5% (a code-layout effect, #243 and #262).
+- Window mode: tested only in `cage`. Not tested on a real Hyprland desktop or on HiDPI.
+- arjun-e16: no staging journey runs there (no credentials on that machine).
+- Expired cached scripts are fetched again in full in headless mode. #252 added revalidation for the window path; check that it covers the driver too.
+- The parse cache has no module mode, so only classic scripts use it.
+- Branch `t3/engine-b3`: the bytecode VM at 2.49x, not merged.
+- Other sites: bare is measured on one app only.
