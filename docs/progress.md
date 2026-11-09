@@ -4696,6 +4696,8 @@ Stack Overflow is still behind a Cloudflare challenge. The initial path can retu
 
 GNU is unreachable from archMachine and arjun-e16. curl resolved `209.51.188.116` and timed out connecting to port 443 after eight seconds on both machines. IPv6 `2001:470:142:5::116` has no route on both. No TLS or HTTP exchange occurred. No code change applies to this network failure.
 
-The public runner passed all 33 journeys with zero failures, skips or flakes. The crate tests passed: 1,115 passed, six ignored. The release workspace suite passed: 3,229 tests passed, 13 ignored, zero failures. Cost results follow below.
+The public runner passed all 33 journeys with zero failures, skips or flakes. The crate tests passed: 1,115 passed, six ignored. The release workspace suite passed: 3,229 tests passed, 13 ignored, zero failures. The cost gate failed: 11 of 805 rows exceeded +0.5% under both allocators, 190 exceeded it under one allocator, and zero failed to run. The matrix took 152 seconds. Mean changes: glibc +0.461%, jemalloc +0.080% (201 rows measured). The task rule blocks merge.
 
 Not tested: exact Chrome wire headers and header-order isolation, GNU rendering or TLS after connectivity returns, Substack content beyond the body-visible assertion, and resource loads above the configured cap.
+
+Cost failures (glibc / jemalloc): `block-deep 40` +5.258% / +1.789%; `block-nested-collapse 20` +5.430% / +1.795%; `flex-ref-block-items 2000` +0.615% / +0.591%; `floats-one-tall 20000` +0.903% / +0.776%; `inline-blocks-nested 40` +4.625% / +1.726%; `inline-blocks-nested 400` +2.042% / +1.222%; `inline-deep-spans-many-lines 100` +4.744% / +1.733%; `inline-deep-spans-many-lines 1000` +1.864% / +1.200%; `inline-paragraph 20000` +0.952% / +0.803%; `overflow-nested-auto 20` +5.374% / +1.796%; `fetch_load post 1` +0.546% / +0.665%. Raw counts: `cost.tsv`. Full table: `cost.log`. The cause of the increases is not verified.
