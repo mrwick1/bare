@@ -6319,8 +6319,13 @@ Tests (written first, all failed on main): `crates/bare/src/browser_gaps_tests.r
 
 ### Checks
 
-- Cost: full matrix, 805 rows, after the last rebase (main `3f2ce54039`, fresh `base-build`): 0 rows over under both allocators, 0 over under one, 0 failed. Mean glibc +0.016%. The largest row is `xhr_load 1` at +0.375%. The first run found `nodelist_load live 10` at +0.526% / +0.577% (the `set_prototype_of` call, see above); the fix is in.
-- `cargo test --release --workspace --no-fail-fast`: 0 failed (`bare` lib 1183 passed).
+- Cost: full matrix, 805 rows, before the last rebase (main `3f2ce54039`): 0 over under both, 0 over under one, mean glibc +0.016%, largest row `xhr_load 1` +0.375%. The first run found `nodelist_load live 10` at +0.526% / +0.577% (the `set_prototype_of` call, see above); the fix is in.
+- Cost: full matrix, 805 rows, after the last rebase (main `1bec71ae9b`, fresh `base-build`): 1 row over under both allocators, 2 over under glibc only (`focus_load focus 1` +0.63% / +0.22%, `focus_load focus 10` +0.56% / +0.27%), 0 failed. Mean glibc +0.023%. The row over under both is `scheduler_load timers 10`: 192,244,805 -> 193,392,555 (+0.60%) under glibc and 200,314,068 -> 201,374,733 (+0.53%) under jemalloc. I think it is layout, not logic (hypothesis, not proven):
+  - The row does not run any new code. `allocs=30973`, `freed_objs=10022` and `tasks=8060` are equal on both builds.
+  - This branch gave 193,331,020 before the rebase and 193,392,555 after (+0.03%). The base gave 193,032,915 on `3f2ce54039` and 192,244,805 on `1bec71ae9b` (-0.41%). The commits between them (images, `Worker`, peak RSS) do not touch the timer path. The same row against the older base is +0.15%.
+  - A build without the only eager additions (`console.assert`, the `noModule` accessor) gave 193,063,156 (+0.43% against the new base). So the eager objects explain at most 0.17%, and the rest stays with no code on the path.
+  - Same pattern as `form_load gates` in the section of PR 1 (#327). `perf record` at this size gave too few samples to name a function.
+- `cargo test --release --workspace --no-fail-fast`: 0 failed (`bare` lib 1183 passed). After the last rebase: 3367 passed, 0 failed.
 - `tools/js/exec_diff.sh`: 79 runs, 0 differences.
 - `tools/js/test262_check.sh` on `built-ins/RegExp/(match-indices|named-groups)`, `language/expressions/object` and `built-ins/Array/prototype/(forEach|map)`: gate ok (the object directory passes 3 more tests). The full run waited more than 30 minutes for a slot and was stopped; the change in `crates/js` is a name list in `Heap::browser_name` and one wrapper function.
 - `tools/drive/public/run.sh`: pass 48, fail 0, known 0, skip 0, flakes 0.
