@@ -1046,13 +1046,6 @@ impl<'p> Interp<'p> {
 
     fn eval_node(&mut self, run: &mut Run, e: ExprId) -> Res<Step> {
         if !self.aw_expr(e) {
-            // A link of the spine of an optional chain that waits for an `await`: its `?.` short-circuits the whole chain.
-            if matches!(self.prog.expr(e).kind, ExprKind::Member { .. } | ExprKind::Index { .. } | ExprKind::PrivateMember { .. } | ExprKind::Call { .. }) {
-                return match self.descend(|it| it.link(e))? {
-                    Some((v, _)) => val(v),
-                    None => self.chain_short(run),
-                };
-            }
             let v = self.eval_expr(e)?;
             return val(v);
         }
@@ -1090,7 +1083,7 @@ impl<'p> Interp<'p> {
                 self.spush(run, Slot::V(Value::Object(o)))?;
                 self.obj_next(run, e, base, 0)
             }
-            ExprKind::Member { obj, .. } | ExprKind::Index { obj, .. } | ExprKind::PrivateMember { obj, .. } => self.ask(run, e, 0, base, obj),
+            ExprKind::Member { obj, .. } | ExprKind::Index { obj, .. } | ExprKind::PrivateMember { obj, .. } => self.ask_spine(run, e, base, obj),
             ExprKind::PrivateIn { right, .. } => self.ask(run, e, 0, base, right),
             ExprKind::Call { callee, .. } => {
                 let first = match self.callee_shape(callee) {
@@ -1106,7 +1099,7 @@ impl<'p> Interp<'p> {
                         return self.args_next(run, e, base, 1, 0);
                     }
                 };
-                self.ask(run, e, 0, base, first)
+                self.ask_spine(run, e, base, first)
             }
             ExprKind::New { callee, .. } => self.ask(run, e, 0, base, callee),
             ExprKind::Assign { target, .. } => match prog.pat(target).kind {
@@ -1129,6 +1122,21 @@ impl<'p> Interp<'p> {
                 _ => self.assign_ready(run, e, base),
             },
             _ => Err(unsupported("await in this expression", ex.span)),
+        }
+    }
+
+    /// `ask` for the first operand of a link of an optional chain. An operand that is a link without an `await` runs here, so that its `?.`
+    /// can short-circuit the whole chain (`eval_expr` would only give `undefined` for that link).
+    fn ask_spine(&mut self, run: &mut Run, e: ExprId, base: u32, x: ExprId) -> Res<Step> {
+        if self.aw_expr(x) || !matches!(self.prog.expr(x).kind, ExprKind::Member { .. } | ExprKind::Index { .. } | ExprKind::PrivateMember { .. } | ExprKind::Call { .. }) {
+            return self.ask(run, e, 0, base, x);
+        }
+        match self.descend(|it| it.link(x))? {
+            Some((v, _)) => {
+                self.fpush(run, Fr::Op { e, i: 0, base })?;
+                val(v)
+            }
+            None => self.chain_short(run),
         }
     }
 

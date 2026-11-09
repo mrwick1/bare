@@ -377,7 +377,7 @@ language/expressions/object/dstr 561 0 0
 language/expressions/object/method-definition 248 35 0
 language/expressions/object/method-definition/forbidden-ext/b1 8 0 0
 language/expressions/object/method-definition/forbidden-ext/b2 12 0 0
-language/expressions/optional-chaining 35 3 0
+language/expressions/optional-chaining 37 1 0
 language/expressions/postfix-decrement 32 5 0
 language/expressions/postfix-increment 33 5 0
 language/expressions/prefix-decrement 29 5 0
@@ -443,7 +443,7 @@ language/module-code/namespace 2 0 0
 language/module-code/namespace/internals 28 8 0
 language/module-code/source-phase-import 0 0 3
 language/module-code/top-level-await 40 0 0
-language/module-code/top-level-await/syntax 162 49 0
+language/module-code/top-level-await/syntax 174 37 0
 language/punctuators 11 0 0
 language/reserved-words 27 0 0
 language/rest-parameters 11 0 0
