@@ -1,0 +1,10 @@
+# rust-lang.org: the home page heading and sections, then the learn page by address.
+#   bare-drive --var URL=https://rust-lang.org/ rust-lang-org-home.steps
+timeout 30000
+open ${URL}
+expect title="Rust Programming Language"
+expect css="h1" text~"Rust"
+expect js "[...document.querySelectorAll('h2')].some(e => e.textContent.includes('Why Rust?'))"
+goto ${URL}learn
+expect url~"/learn"
+expect css="h1" text~"Learn"

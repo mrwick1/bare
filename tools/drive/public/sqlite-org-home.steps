@@ -1,0 +1,12 @@
+# sqlite.org: the home page and its menu, then the documentation index by address.
+#   bare-drive --var URL=https://sqlite.org/ sqlite-org-home.steps
+timeout 30000
+open ${URL}
+expect title="SQLite Home Page"
+expect css="body" text~"SQLite is"
+expect js "document.querySelectorAll('a[href=\"docs.html\"]').length > 0"
+expect js "document.querySelectorAll('a[href=\"download.html\"]').length > 0"
+goto ${URL}docs.html
+expect url~"/docs.html"
+expect title~"Documentation"
+expect js "document.querySelectorAll('a').length > 50"

@@ -5214,3 +5214,53 @@ Checks. `cargo test --release --workspace` before the rebase: 3,290 passed, 0 fa
 Limits. The `Refresh` response header is not read (the loader returns no headers). A `<meta>` that a script inserts later, or one inside `<body>`, does not start a refresh. `<base>` is not used to resolve the URL. `Session::run` settles when a timer is more than `PageLimits::quiet` away, so a refresh later than that does not hold a non-live run; a live page waits for it. `Vary: Accept-Language` replies are not cached.
 
 Not tested. Other sites that depend on `Accept-Language`. A server that rejects the header. `Refresh` with a fractional delay on a real site. Pages that assign `document.domain` to a parent domain (they now get `SecurityError`; Chrome ignores the assignment).
+
+## Public journeys 3 (2026-11-10)
+
+Task: add public journeys for sites that passed survey 5 and had no journey. The suite grows from 33 to 48 journeys. No Rust code changed.
+
+### New journeys
+
+| Journey | Site | What it checks |
+|---|---|---|
+| `wiktionary-portal` | wiktionary.org | title, heading, over 50 edition links, a click to the English edition |
+| `cnn-lite-front` | lite.cnn.com | title, over 20 story links, home link |
+| `docs-rs-home` | docs.rs | title, heading, about and release links, the about page by address |
+| `kernel-org-home` | kernel.org | title, section heading, download links, the releases category by address |
+| `archlinux-org-home` | archlinux.org | title, heading, packages and download links, news links, the packages page |
+| `sqlite-org-home` | sqlite.org | title, intro text, menu links, the documentation index by address |
+| `curl-se-home` | curl.se | title, section headings, docs links, a click to the FAQ |
+| `debian-org-home` | debian.org | title, headings, a click to the philosophy page |
+| `paulgraham-home` | paulgraham.com | title, one link, the essay index by address |
+| `blog-rust-lang-home` | blog.rust-lang.org | title, releases link, post links, the releases page |
+| `go-dev-home` | go.dev | title, heading, section heading, the learn page by address |
+| `nodejs-org-home` | nodejs.org | title, heading, download and about links, the about page |
+| `rust-lang-org-home` | rust-lang.org | title, heading, section heading, the learn page |
+| `wikipedia-portal` | wikipedia.org | title, heading, over 100 edition links, a click to the English edition |
+| `github-docs-home` | docs.github.com | title, heading, section heading, links, the get-started page |
+
+### Method
+
+- `tools/drive/public/chrome_check.mjs` reads a `.steps` file and runs `open`, `goto`, `click`, and `expect title/url/css/js` in headless Chrome. A `css` target must match exactly one element, as in bare-drive.
+- I checked every journey in Chrome first. Chrome found two wrong assertions (a hidden docs.rs link, a go.dev heading that does not exist). I fixed them.
+- bare-drive found 9 journeys that used a `css` selector with several matches. bare-drive needs exactly one match; Chrome reported them as true with a looser check. These were journey errors, not bare defects. I changed them to `js` checks or unique selectors. Wiktionary has two elements with the id `js-link-box-en`, so its journey uses a class selector.
+- bare-drive is the main build at `10374591` (`base-build`, `-p bare-drive`). `/data/bare-tmp/bin` (the `heavy` wrapper) disappeared during the task. I ran Chrome and the journeys without `heavy`.
+
+### Results
+
+- 3 runs of each new journey: 15 of 15 pass 3 of 3. No flake.
+- Full `tools/drive/public/run.sh`: pass 48, fail 0, known 0, skip 0, flakes 0. Total time 60 s.
+- Known bugs found: none. No journey needed `# known-bug`.
+- `crates-io-home.steps` only checks `body visible`. It passes while the app does not mount. Task 11 owns that fix.
+
+### Sites dropped
+
+- gnu.org: Chrome on this machine cannot reach it ("This site can't be reached").
+- Not tried, to keep to about 15: ja-wikipedia, hi-wikipedia, gov-uk, usa-gov, npmjs, users-rust-lang, kubernetes-docs, overreacted.
+- paulgraham.com failed one Chrome run (title and link missing) and passed the next three. I kept it. It passed 3 of 3 in bare.
+
+### Not tested
+
+- Runs on another network or from a different region.
+- Content drift: a site redesign can break a journey. Assertions use stable text, but no site is fixed.
+- Rebuild of bare-drive after other merges beyond the rebase check below.

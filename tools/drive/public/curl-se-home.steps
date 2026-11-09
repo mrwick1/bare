@@ -1,0 +1,12 @@
+# curl.se: the home page sections and its documentation links.
+#   bare-drive --var URL=https://curl.se/ curl-se-home.steps
+timeout 30000
+open ${URL}
+expect title="curl"
+expect js "[...document.querySelectorAll('h2')].some(e => e.textContent.includes('What is curl used for?'))"
+expect js "[...document.querySelectorAll('h2')].some(e => e.textContent.includes('Who makes curl?'))"
+expect css="a[href='/docs/']" visible
+expect js "document.querySelectorAll('a[href^=\"/docs/\"]').length > 15"
+click css="a[href='/docs/faq.html']"
+expect url~"/docs/faq.html"
+expect css="body" text~"curl"

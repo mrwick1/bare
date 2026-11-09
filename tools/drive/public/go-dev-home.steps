@@ -1,0 +1,10 @@
+# go.dev: the home page heading, the sections, and the learn page by address.
+#   bare-drive --var URL=https://go.dev/ go-dev-home.steps
+timeout 30000
+open ${URL}
+expect title="The Go Programming Language"
+expect css="h1" text~"Build simple, secure, scalable systems with Go"
+expect js "[...document.querySelectorAll('h2')].some(e => e.textContent.includes('Try Go'))"
+goto ${URL}learn/
+expect url~"/learn/"
+expect title~"Get Started"

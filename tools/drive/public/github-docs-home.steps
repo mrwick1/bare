@@ -1,0 +1,12 @@
+# docs.github.com: the home page heading, the product links, then one section by address.
+#   bare-drive --var URL=https://docs.github.com/en github-docs-home.steps
+timeout 40000
+open ${URL}
+expect title="GitHub Docs"
+expect css="h1" text~"GitHub Docs"
+expect js "[...document.querySelectorAll('h2')].some(e => e.textContent.includes('All docs'))"
+expect css="a[href='/en/get-started']" visible
+expect js "document.querySelectorAll('a[href^=\"/en/\"]').length > 20"
+goto https://docs.github.com/en/get-started
+expect url~"/en/get-started"
+expect css="h1" text~"Get started"

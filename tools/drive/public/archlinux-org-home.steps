@@ -1,0 +1,12 @@
+# archlinux.org: the front page heading, the top navigation links and the news list.
+#   bare-drive --var URL=https://archlinux.org/ archlinux-org-home.steps
+timeout 30000
+open ${URL}
+expect title="Arch Linux"
+expect css="h2" text~"A simple, lightweight distribution"
+expect css="a[href='/packages/']" visible
+expect css="a[href='/download/']" visible
+expect js "document.querySelectorAll('a[href^=\"/news/\"]').length > 3"
+goto ${URL}packages/
+expect url~"/packages/"
+expect title~"Package Search"

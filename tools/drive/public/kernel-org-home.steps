@@ -1,0 +1,9 @@
+# kernel.org: the front page names the project and lists download links; the releases category opens by address.
+#   bare-drive --var URL=https://www.kernel.org/ kernel-org-home.steps
+timeout 30000
+open ${URL}
+expect title="The Linux Kernel Archives"
+expect js "[...document.querySelectorAll('h2')].some(e => e.textContent.includes('Other resources'))"
+expect js "document.querySelectorAll('a[href*=\"cdn.kernel.org/pub/linux/kernel/\"]').length > 1"
+goto ${URL}category/releases.html
+expect url~"/category/releases.html"
