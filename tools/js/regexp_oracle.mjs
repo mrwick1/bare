@@ -34,6 +34,11 @@ function add(label, flags, pat, input, li = 0, unsup = false) {
   }
   out.push([label + ' ' + show(pat), flags, hex(pat), hex(input), li, exp].join('\t'));
 }
+for (const p of ["(?<=([ab]+)([bc]+))$", "(?<=([ab])+)c", "(?<=a|ba)c", "(?<=a(?=b))b", "(?<=\\1(a))b", "(?<=(a)\\1)b", "(?<!(a+))b", "(?<=a*?)b", "(?<=a(?<!b))b", "(?<=(a|ab))c", "(?<=(?<x>a+))b", "(?<=😀+)x", "(?<=k)x", "(?<=[^a]+)x", "(?<=.)x", "(?<=a)$", "(?<=a)+"]) {
+  for (const f of ['', 'u', 'i', 'iu']) {
+    for (const input of ['', 'ab', 'abc', 'aab', 'bac', '😀x', 'Kx', 'Ax', '😀😀x']) add('lookbehind', f, p, input);
+  }
+}
 const H = [
   // [flags, pattern, input, lastIndex, unsupported]
   ['', 'abc', 'xxabcxx'], ['', '', ''], ['', '', 'abc', 2], ['', 'a*', 'baaa'], ['', 'a*?', 'aaa'], ['', 'a+?b', 'aaab'],
@@ -43,7 +48,7 @@ const H = [
   ['', '(?=(a+))a*b\\1', 'baaabac'], ['', '(?=(a+))', 'baaabac'], ['', '(.*?)a(?!(a+)b\\2c)\\2(.*)', 'baaabaac'],
   ['', '(?!a)b', 'ab'], ['', '^\\/journeys\\/(?!new\\/?$)[^/]+\\/?$', '/journeys/abc/'], ['', '^\\/journeys\\/(?!new\\/?$)[^/]+\\/?$', '/journeys/new/'],
   ['', '^\\/journeys\\/(?!new\\/?$)[^/]+\\/?$', '/journeys/new2'], ['', '(?=a)*', 'a', 0, true], ['', '(?!a){2}', 'b', 0, true],
-  ['', '(?<=a)b', 'ab', 0, true], ['', '(?<!a)b', 'ab', 0, true], ['', '(?<n>a)\\k<n>', 'aa', 0, true],
+  ['', '(?<=a)b', 'ab'], ['', '(?<!a)b', 'ab'], ['', '(?<n>a)\\k<n>', 'aa', 0, true],
   ['u', 'a', 'a'], ['v', 'a', 'a', 0, true], ['gg', 'a', 'a'], ['x', 'a', 'a'],
   ['', '(', ''], ['', ')', ''], ['', '[', ''], ['', ']', ']'], ['', '}', '}'], ['', '{', '{'], ['', 'a{', 'a{'], ['', 'a{1', 'a{1'], ['', 'a{,5}', 'a{,5}'],
   ['', '{1}', ''], ['', 'a{2,1}', 'aa'], ['', '*', ''], ['', 'a**', ''], ['', '+a', ''], ['', '?', ''], ['', '^*', ''], ['', '\\b+', ''], ['', '$?', ''],

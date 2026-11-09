@@ -168,3 +168,25 @@ fn runaway_recursion_ends_the_task_and_the_next_one_runs() {
         assert_eq!(r.pages[0].aborted, 2);
     });
 }
+
+#[test]
+fn a_long_selector_ends_only_its_task() {
+    big(|| {
+        let srv = page("<button id=go></button><script>
+            document.getElementById('go').addEventListener('click', function () { localStorage.setItem('click', '1') });
+            document.querySelector('a'.repeat(1025));
+            localStorage.setItem('unreachable', '1');
+          </script><script>localStorage.setItem('next', '1')</script>");
+        let mut s = Session::new(cfg(&srv));
+        let r = s.run();
+        assert_eq!(r.stop, SessionStop::Page(Stop::Settled), "{r:?}");
+        assert_eq!(get(&s, &srv, "unreachable"), None);
+        assert_eq!(get(&s, &srv, "next").as_deref(), Some("1"));
+        let e = errors(&mut s);
+        assert_eq!(e.len(), 1, "{e:?}");
+        assert!(e[0].contains("dom-selector"), "{e:?}");
+        let r = s.resume(&[Input::Click("#go")]);
+        assert_eq!(r.stop, SessionStop::Page(Stop::Settled), "{r:?}");
+        assert_eq!(get(&s, &srv, "click").as_deref(), Some("1"));
+    });
+}

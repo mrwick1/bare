@@ -79,7 +79,6 @@ fn unsupported_is_found_before_anything_runs() {
         // A generator has the same preflight as an async function, and its messages name `await` too.
         ("function* g() { var [a = yield] = []; }", "await in a binding pattern"),
         ("function* g(t) { t`${yield}`; }", "await in a tagged template"),
-        ("var r = /a(?<=b)/;", "lookbehind"),
         ("var o = { m() { return super.x; } };", "super outside a class element"),
         ("class A { x = new.target; }", "new.target in a class field initializer"),
         ("with ({}) {}", "with statement"),

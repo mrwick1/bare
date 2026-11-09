@@ -16,7 +16,7 @@
 //! implemented gives [`Error::Unsupported`] with its span: async functions and `await`, tagged
 //! templates, `super` outside a class element, `new.target` in a field initializer, `with`, and `await` in `switch`, `for-in`, optional chains, `delete`, `++`/`--`, computed keys and binding patterns.
 //! Async functions and arrows run in a bounded continuation machine: see `eval_async.rs`. A regexp literal is compiled by `Interp::new`;
-//! an invalid pattern, lookbehind, named groups or the flags `u`, `v`, `d` are `Unsupported` there (see `eval_builtins.rs`).
+//! an invalid pattern or the flags `v`, `d` are `Unsupported` there (see `eval_builtins.rs`).
 //! A missing builtin (`WeakRef`, ...) is an ordinary `ReferenceError` at run time, as in a bare engine.
 //! `JSON.parse`, `RegExp` and a small `String.prototype` are bound in `eval_builtins.rs`, which lists what is and is not there.
 //! Classes are supported: see `eval_classes.rs` for what runs and what does not.
