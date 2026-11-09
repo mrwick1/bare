@@ -50,7 +50,7 @@ use crate::browser::*;
 use crate::browser_platform::V;
 use bare_css::cascade::Styles;
 use bare_css::values::{Keyword, Property, Value as Cv};
-use bare_html::dom::{Children, Document, NodeData, NodeId};
+use bare_html::dom::{Document, FlatChildren, NodeData, NodeId};
 use bare_js::eval::Interp;
 use bare_js::value::Value;
 use std::cell::{Cell, RefCell};
@@ -128,7 +128,7 @@ struct Bound {
 }
 
 struct Frame<'a> {
-    kids: Children<'a>,
+    kids: FlatChildren<'a>,
     units: u64,
     inline: bool,
 }
