@@ -16,6 +16,7 @@
 //!
 //! Comments compare Rust with JavaScript, because you know JS.
 
+use crate::cookie::{self, Jar, Party, Via};
 use crate::{cause, dns, encoding, h2, parallel, tcp, trace};
 // JS: like `import * as dns from "./dns"`: other files in this crate.
 use bare_tls::client::{self, ClientStream};
@@ -200,20 +201,50 @@ pub struct Request<'a> {
     pub headers: &'a [(&'a str, &'a str)],
     /// The body. GET and HEAD have none (`check_request` refuses one).
     pub body: &'a [u8],
+    /// Cookies. A `Cookie` header in `headers` stops the jar from adding one.
+    pub cookies: Cookies<'a>,
+}
+
+/// How a request relates to the page, for the cookie jar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ctx<'a> {
+    /// A subresource, `fetch` or XHR of the document of this client (`Client::set_site`). A cross-site one gets only `SameSite=None`
+    /// cookies, and its reply sets only those.
+    Embedded,
+    /// A top-level navigation. `None`: the user started it (every cookie goes). `Some(site)`: a page of that site started it (`cookie::site_of`).
+    /// A cross-site one gets `Lax` cookies on a safe method, and never `Strict` ones. A redirect that leaves the site makes the rest of
+    /// the chain cross-site (the site `""` stands for that). A reply to a navigation may set any cookie.
+    Navigation(Option<&'a str>),
+}
+
+/// What a request does with cookies. The default is the cookies of the jar, in the context of the document of the client.
+#[derive(Clone, Copy, Debug)]
+pub struct Cookies<'a> {
+    /// False: no `Cookie` header, and the `Set-Cookie` headers of the reply are dropped (`credentials: "omit"`, or a cross-origin
+    /// request without credentials).
+    pub on: bool,
+    pub ctx: Ctx<'a>,
+}
+
+impl Default for Cookies<'_> {
+    fn default() -> Self {
+        Cookies { on: true, ctx: Ctx::Embedded }
+    }
 }
 
 impl<'a> Request<'a> {
     pub fn get(url: &'a Url) -> Request<'a> {
-        Request { method: Method::Get, url, headers: &[], body: &[] }
+        Request { cookies: Cookies::default(), method: Method::Get, url, headers: &[], body: &[] }
     }
 
     pub fn post(url: &'a Url, headers: &'a [(&'a str, &'a str)], body: &'a [u8]) -> Request<'a> {
-        Request { method: Method::Post, url, headers, body }
+        Request { cookies: Cookies::default(), method: Method::Post, url, headers, body }
     }
 }
 
 /// What to send for one hop of a redirect chain. A redirect can change the method, the body and the headers.
 struct Plan<'a> {
+    cookies: Cookies<'a>,
     method: Method,
     headers: Cow<'a, [(&'a str, &'a str)]>,
     body: &'a [u8],
@@ -261,6 +292,10 @@ pub struct Client {
     // The roots never come from a peer. A fork of the client shares them: the bundle is read once.
     pub(crate) workers: Arc<parallel::Workers>,
     // The worker threads of this client and its forks (see `parallel.rs`).
+    pub(crate) jar: Arc<Mutex<Jar>>,
+    // The cookies. In memory only. A fork shares it, so a new document of the same session keeps its cookies; a new client starts empty.
+    pub(crate) site: Option<Arc<str>>,
+    // The site of the document that this client serves (`cookie::site_of`), for `SameSite`. `None`: every request is first-party.
 }
 
 /// Check a request before any DNS lookup or socket. The messages name no header value and no body byte.
@@ -323,7 +358,23 @@ impl Client {
 
     /// A second client that shares the connections, the root certificates and the worker threads of this one. The reply cache is not shared.
     pub fn fork(&self) -> Client {
-        Client { idle: self.idle.clone(), sessions: self.sessions.clone(), cache: self.cache.clone(), roots: self.roots.clone(), workers: self.workers.clone() }
+        Client { idle: self.idle.clone(), sessions: self.sessions.clone(), cache: self.cache.clone(), roots: self.roots.clone(), workers: self.workers.clone(), jar: self.jar.clone(), site: self.site.clone() }
+    }
+
+    /// The cookie jar of this client and its forks.
+    pub fn jar(&self) -> Arc<Mutex<Jar>> {
+        self.jar.clone()
+    }
+
+    /// Use this jar from now on: the jar of a session, which `document.cookie` reads too.
+    pub fn use_jar(&mut self, jar: Arc<Mutex<Jar>>) {
+        self.jar = jar;
+    }
+
+    /// The site of the document that this client serves (`cookie::site_of`). A request of the default `Cookies` to another site gets
+    /// only `SameSite=None` cookies.
+    pub fn set_site(&mut self, site: Option<String>) {
+        self.site = site.map(Into::into);
     }
 
     /// Fetch a URL. Follow redirects, and use the cache. Any status can come back: a 404 is still a page.
@@ -349,7 +400,7 @@ impl Client {
     /// close-ended body fails when it passes the limit. The error names no header value and no body byte.
     pub fn send_once(&mut self, req: &Request, max_body: usize) -> Result<Arc<Response>, Error> {
         check_request(req)?;
-        let plan = Plan { method: req.method, headers: Cow::Borrowed(req.headers), body: req.body };
+        let plan = Plan { cookies: req.cookies, method: req.method, headers: Cow::Borrowed(req.headers), body: req.body };
         let (mut response, mut body) = self.start(req.url, &plan, "")?;
         if body.size_hint() > max_body {
             body.note(&io::Error::new(ErrorKind::InvalidData, "the reply is too big"));
@@ -368,7 +419,7 @@ impl Client {
     /// Send one checked request without cache or redirects. The caller reads the body and checks each redirect.
     pub fn send_stream_once(&mut self, req: &Request) -> Result<Streamed, Error> {
         check_request(req)?;
-        let plan = Plan { method: req.method, headers: Cow::Borrowed(req.headers), body: req.body };
+        let plan = Plan { cookies: req.cookies, method: req.method, headers: Cow::Borrowed(req.headers), body: req.body };
         let (response, body) = self.start(req.url, &plan, "")?;
         Ok(Streamed { response: Arc::new(response), body })
     }
@@ -377,7 +428,7 @@ impl Client {
     /// caller reads the body and gives it to `keep`, so that the next request can use it. For scripts and style sheets.
     pub fn send_stream_cached(&mut self, req: &Request) -> Result<Streamed, Error> {
         check_request(req)?;
-        let plan = Plan { method: req.method, headers: Cow::Borrowed(req.headers), body: req.body };
+        let plan = Plan { cookies: req.cookies, method: req.method, headers: Cow::Borrowed(req.headers), body: req.body };
         let (response, body) = self.hop_stream(req.url, &plan)?;
         Ok(Streamed { response, body: body.expect("a streamed hop has a body") })
     }
@@ -417,7 +468,7 @@ impl Client {
     ///   `Proxy-Authorization`.
     fn follow(&mut self, req: &Request, stream: bool) -> Result<(Arc<Response>, Option<Body>), Error> {
         check_request(req)?;
-        let mut plan = Plan { method: req.method, headers: Cow::Borrowed(req.headers), body: req.body };
+        let mut plan = Plan { cookies: req.cookies, method: req.method, headers: Cow::Borrowed(req.headers), body: req.body };
         let mut current = req.url;
         // The URL we ask for now. It starts as the one we were given.
         let mut next;
@@ -446,6 +497,13 @@ impl Client {
             // The body of a redirect is not wanted. Read it (a redirect has a small one) so that the connection can be used again.
             if let Some(mut body) = body {
                 io::copy(&mut (&mut body).take(MAX_REDIRECT_BODY), &mut io::sink())?;
+            }
+            // A chain that leaves the site of the page that started the navigation stays cross-site (6265bis, "same-site" of a redirect chain).
+            if let Ctx::Navigation(Some(from)) = plan.cookies.ctx
+                && !from.is_empty()
+                && !cookie::same_site(from, &target)
+            {
+                plan.cookies.ctx = Ctx::Navigation(Some(""));
             }
             next = target;
             current = &next;
@@ -578,10 +636,58 @@ impl Client {
     }
 
     fn start(&mut self, url: &Url, plan: &Plan, conditions: &str) -> Result<(Response, Body), Error> {
-        match self.attempt(url, plan, conditions) {
+        let with_cookies;
+        let conditions = match self.cookie_line(url, plan) {
+            Some(line) => {
+                with_cookies = format!("{conditions}Cookie: {line}\r\n");
+                &with_cookies
+            }
+            None => conditions,
+        };
+        let (response, body) = match self.attempt(url, plan, conditions) {
             // The server did not start the request (`GOAWAY`, a refused stream): any method may run again, once, on a new connection.
-            Err(e) if e.is::<h2::Unprocessed>() => self.attempt(url, plan, conditions),
-            result => result,
+            Err(e) if e.is::<h2::Unprocessed>() => self.attempt(url, plan, conditions)?,
+            result => result?,
+        };
+        self.store_cookies(url, plan, &response);
+        Ok((response, body))
+    }
+
+    /// How the request relates to the document, for `SameSite`.
+    fn party(&self, url: &Url, plan: &Plan) -> Party {
+        let same = |doc: &str| cookie::same_site(doc, url);
+        match plan.cookies.ctx {
+            Ctx::Embedded if self.site.as_deref().is_none_or(same) => Party::First,
+            Ctx::Navigation(from) if from.is_none_or(same) => Party::First,
+            Ctx::Navigation(_) if plan.method.safe() => Party::Nav,
+            _ => Party::Third,
+        }
+    }
+
+    /// The `Cookie` header for this request, or `None`: credentials are off, the caller sent its own, or no cookie matches. A request to a
+    /// host with no cookies costs one lock and one hash lookup.
+    fn cookie_line(&self, url: &Url, plan: &Plan) -> Option<String> {
+        if !plan.cookies.on {
+            return None;
+        }
+        let mut jar = self.jar.lock().unwrap_or_else(|e| e.into_inner());
+        if jar.is_empty() || plan.headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("cookie")) {
+            return None;
+        }
+        let now = jar.now();
+        jar.header(&cookie::At::of(url), self.party(url, plan), now)
+    }
+
+    /// Store the `Set-Cookie` headers of a reply (not when credentials are off).
+    fn store_cookies(&self, url: &Url, plan: &Plan, response: &Response) {
+        if !plan.cookies.on || !response.headers.iter().any(|(n, _)| n == "set-cookie") {
+            return;
+        }
+        let third = matches!(plan.cookies.ctx, Ctx::Embedded) && self.party(url, plan) == Party::Third;
+        let mut jar = self.jar.lock().unwrap_or_else(|e| e.into_inner());
+        let now = jar.now();
+        for (_, v) in response.headers.iter().filter(|(n, _)| n == "set-cookie") {
+            jar.set(&cookie::At::of(url), v, Via::Http { third }, now);
         }
     }
 
@@ -1456,7 +1562,7 @@ mod tests {
     #[test]
     fn asks_for_compression_except_on_this_machine_and_br_only_over_https() {
         let ask = |input, headers: &[(&str, &str)]| {
-            let plan = Plan { method: Method::Get, headers: Cow::Borrowed(headers), body: b"" };
+            let plan = Plan { method: Method::Get, headers: Cow::Borrowed(headers), body: b"", cookies: Default::default() };
             String::from_utf8(request_head(&Url::parse(input).unwrap(), &plan, "", 0)).unwrap()
         };
         assert!(ask("https://a.com/", &[]).contains("\r\nAccept-Encoding: gzip, deflate, br\r\n"));
@@ -1478,7 +1584,7 @@ mod tests {
     #[test]
     fn the_headers_of_an_h2_request_have_the_pseudo_headers_first_and_no_host() {
         let url = Url::parse("https://example.com:8443/a/b?q=1").unwrap();
-        let plan = Plan { method: Method::Post, headers: Cow::Owned(vec![("X-Token", "t")]), body: b"abc" };
+        let plan = Plan { method: Method::Post, headers: Cow::Owned(vec![("X-Token", "t")]), body: b"abc", cookies: Default::default() };
         let h = h2_headers(&url, &plan, "If-None-Match: \"v1\"\r\nIf-Modified-Since: yesterday\r\n", "example.com:8443", "3");
         assert_eq!(
             h,
@@ -1497,7 +1603,7 @@ mod tests {
         );
         // A header of the caller replaces the default. A GET has no content-length. A loopback host asks for no coding.
         let url = Url::parse("https://localhost/").unwrap();
-        let plan = Plan { method: Method::Get, headers: Cow::Owned(vec![("User-Agent", "mine")]), body: b"" };
+        let plan = Plan { method: Method::Get, headers: Cow::Owned(vec![("User-Agent", "mine")]), body: b"", cookies: Default::default() };
         assert_eq!(h2_headers(&url, &plan, "", "localhost", "0")[4..], [("User-Agent", "mine")]);
     }
 
@@ -2311,7 +2417,7 @@ mod tests {
     fn a_get_with_headers_has_no_content_length() {
         let (port, requests) = serve(vec![(vec![OK], false)]);
         let url = post_url(port, "/me");
-        let req = Request { method: Method::Get, url: &url, headers: &[("Authorization", "Bearer t"), ("User-Agent", "other/1")], body: b"" };
+        let req = Request { method: Method::Get, url: &url, headers: &[("Authorization", "Bearer t"), ("User-Agent", "other/1")], body: b"", cookies: Default::default() };
         Client::new().send(&req).unwrap();
         let want = format!("GET /me HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer t\r\nUser-Agent: other/1\r\n\r\n");
         assert_eq!(seen(&requests), vec![want]);
@@ -2350,7 +2456,7 @@ mod tests {
         for name in managed {
             assert!(client.post(&url, &[(name, "1")], b"x").is_err(), "{name}");
         }
-        assert!(client.send(&Request { method: Method::Get, url: &url, headers: &[], body: b"x" }).is_err());
+        assert!(client.send(&Request { method: Method::Get, url: &url, headers: &[], body: b"x", cookies: Default::default() }).is_err());
         assert!(nothing_connects(&target));
         // Each check failed before DNS and before a socket. Valid names with all the token marks pass:
         assert!(check_request(&Request::post(&url, &[("X-A_b.c~`|^$%&'*+!#-9", "tab\tinside and \u{e9}")], b"")).is_ok());
@@ -2395,7 +2501,7 @@ mod tests {
     }
 
     fn with<'a>(method: Method, url: &'a Url, body: &'a [u8]) -> Request<'a> {
-        Request { method, url, headers: &[("X-A", "1")], body }
+        Request { method, url, headers: &[("X-A", "1")], body, cookies: Default::default() }
     }
 
     #[test]
@@ -2470,7 +2576,7 @@ mod tests {
             for code in [301, 302, 303, 307, 308] {
                 let (port, requests) = serve(vec![(vec![redirect(code, "/next"), OK], false)]);
                 let body: &[u8] = if method.safe() { b"" } else { b"abc" };
-                Client::new().send(&Request { method, url: &post_url(port, "/old"), headers: &[("Content-Type", "text/x")], body }).unwrap();
+                Client::new().send(&Request { method, url: &post_url(port, "/old"), headers: &[("Content-Type", "text/x")], body, cookies: Default::default() }).unwrap();
                 let second = seen(&requests).remove(1);
                 let after = want(method, code);
                 assert!(second.starts_with(&format!("{} /next ", after.as_str())), "{method:?} {code}: {second}");
@@ -2485,7 +2591,7 @@ mod tests {
     fn a_get_stays_a_get_through_every_redirect_code() {
         for code in [301, 302, 303, 307, 308] {
             let (port, requests) = serve(vec![(vec![redirect(code, "/n"), OK], false)]);
-            Client::new().send(&Request { method: Method::Get, url: &post_url(port, "/"), headers: &[("X-A", "1")], body: b"" }).unwrap();
+            Client::new().send(&Request { method: Method::Get, url: &post_url(port, "/"), headers: &[("X-A", "1")], body: b"", cookies: Default::default() }).unwrap();
             let seen = seen(&requests);
             assert!(seen[1].starts_with("GET /n HTTP/1.1") && seen[1].contains("X-A: 1\r\n"), "{code}");
         }
@@ -2514,7 +2620,7 @@ mod tests {
         // A to B (cross origin: stripped), B to B/x (same origin): the header does not come back.
         let (b, requests) = serve(vec![(vec![redirect(302, "/x"), OK], false)]);
         let (a, _) = serve(vec![(vec![redirect(302, leak(format!("http://127.0.0.1:{b}/y")))], false)]);
-        Client::new().send(&Request { method: Method::Get, url: &post_url(a, "/"), headers: &[("Authorization", "t")], body: b"" }).unwrap();
+        Client::new().send(&Request { method: Method::Get, url: &post_url(a, "/"), headers: &[("Authorization", "t")], body: b"", cookies: Default::default() }).unwrap();
         assert!(seen(&requests).iter().all(|r| !r.contains("Authorization")));
     }
 
@@ -2657,7 +2763,7 @@ mod tests {
         let url = url(port);
         assert_eq!(client.get(&url).unwrap().body, b"a");
         // An authenticated GET gets neither the cached copy nor a place in the cache, and a POST to the same URL too.
-        let auth = Request { method: Method::Get, url: &url, headers: &[("Authorization", "t")], body: b"" };
+        let auth = Request { method: Method::Get, url: &url, headers: &[("Authorization", "t")], body: b"", cookies: Default::default() };
         assert_eq!(client.send(&auth).unwrap().body, b"b");
         assert_eq!(client.post(&url, &[], b"x").unwrap().body, b"c");
         assert_eq!(client.send_stream(&auth).unwrap().response.status, 200);
@@ -2709,12 +2815,12 @@ mod tests {
             let (n1, v1, n2, v2) = (make(5), make(6), make(5), make(6));
             let headers = [(n1.as_str(), v1.as_str()), (n2.as_str(), v2.as_str())];
             let method = if next() % 2 == 0 { Method::Get } else { Method::Post };
-            let req = Request { method, url: &url, headers: &headers, body: b"" };
+            let req = Request { method, url: &url, headers: &headers, body: b"", cookies: Default::default() };
             if check_request(&req).is_err() {
                 continue;
             }
             accepted += 1;
-            let plan = Plan { method, headers: Cow::Borrowed(&headers), body: b"" };
+            let plan = Plan { method, headers: Cow::Borrowed(&headers), body: b"", cookies: Default::default() };
             let head = request_head(&url, &plan, "", 0);
             let lines = head.split(|&b| b == b'\n').count() - 1;
             // Each line ends with "\n": the pieces are the lines and one empty rest. Request line, Host, User-Agent and

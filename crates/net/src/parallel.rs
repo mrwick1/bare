@@ -188,7 +188,12 @@ impl Client {
     pub fn spawn<R: Send + 'static>(&self, job: impl FnOnce(&mut Client) -> R + Send + 'static) -> Task<R> {
         let task = Arc::new((Mutex::new(Slot::Waiting), Condvar::new()));
         let finish = Finish(task.clone());
+        // A worker is shared by all forks, and it was made for the first one. The job must use the jar and the site of the client that
+        // spawned it, or a new profile would send the cookies of an old one.
+        let (jar, site) = (self.jar.clone(), self.site.clone());
         let job: Job = Box::new(move |client| {
+            client.jar = jar;
+            client.site = site;
             let r = job(client);
             finish.set(Slot::Done(r));
         });

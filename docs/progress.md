@@ -1889,10 +1889,10 @@ Not tested: a live page that uses async generators; `dom_check.sh` and `browser_
 
 ## Storage named properties and `document.cookie`
 
-The headless journey of 2026-11-07 showed two gaps (see "Journey status"): `Object.keys(sessionStorage)` was `[]` while `length` was 1, and `document.cookie` was `undefined`. Both are fixed. The reasons and the choices are in [decisions.md](decisions.md#storage-objects-have-named-properties-and-are-made-on-the-first-read) and [decisions.md](decisions.md#cookies-a-jar-for-scripts-only).
+The headless journey of 2026-11-07 showed two gaps (see "Journey status"): `Object.keys(sessionStorage)` was `[]` while `length` was 1, and `document.cookie` was `undefined`. Both are fixed. The reasons and the choices are in [decisions.md](decisions.md#storage-objects-have-named-properties-and-are-made-on-the-first-read) and [decisions.md](decisions.md#cookies-one-jar-for-the-network-and-for-scripts).
 
 - Storage: `localStorage` and `sessionStorage` are host named objects whose names do not hide the prototype chain. They are made on the first read of the `window` accessor. The engine has `Heap::new_named_open` and `NamedSource::named_masking` for this, and `named_get` and `named_keys` give UTF-16 in a `Vec`. `tools/fixtures/ui/storage-cases.txt` has 45 cases and `chrome-storage.txt` has the answers of headless Chrome 155. All 45 match. The old test `storage_keeps_utf16_and_is_not_a_property_bag` conflicted with Chrome and was changed (`decisions.md`).
-- Cookies: an in-memory jar for scripts only, `crates/bare/src/browser_cookie.rs`. A shared HTTP jar was not built: it needs changes in `bare-net`, `fetch` and XHR, and a public suffix list. `tools/fixtures/ui/cookie-cases.txt` has 19 cases and `chrome-cookie.txt` has the answers of Chrome. All 19 match. 7 unit tests cover dates, default paths, replace and expiry, scope, domain rules, control characters and prefixes, and the size and count limits.
+- Cookies: an in-memory jar for scripts only, `crates/bare/src/browser_cookie.rs`. (Later, the jar moved to `bare-net` and HTTP shares it: see [HTTP cookie jar](#http-cookie-jar).) `tools/fixtures/ui/cookie-cases.txt` has 19 cases and `chrome-cookie.txt` has the answers of Chrome. All 19 match. 7 unit tests cover dates, default paths, replace and expiry, scope, domain rules, control characters and prefixes, and the size and count limits.
 - The fixture runner gives each case a real `https://a.test/` origin (`@url`): `tools/ui/chrome_cdp.mjs` answers that URL through CDP `Fetch`, and `chrome_topic.mjs` clears the cookies of Chrome between cases.
 - Tests on archMachine, debug: `cargo test --workspace` passes (`bare` 1,046 passed and 6 ignored, `bare-js` 750 passed and 1 ignored).
 - Cost: `tools/js/cost_matrix.sh` over all 803 rows, against main 088d316, both allocators, `instr.sh` minimum of 3. No row is over +0.5% under either allocator. Mean change: glibc -0.015%, jemalloc -0.021%. The worst row is `focus_load focus 10` at +0.47% (glibc) and +0.08% (jemalloc). The `navigation_load storage` rows fall by 6.0% to 9.6%, because a method call on a named object now skips the store.
@@ -4157,7 +4157,7 @@ Another origin, in `run_one` (on the worker thread):
 - A `http:` URL from an `https:` page is blocked (mixed content), except loopback.
 - A failed check rejects with `TypeError: Failed to fetch` (XHR: `error` event, status 0, `readyState` 4). One console error line says why, for example `Access to fetch at 'https://console.python.org' from origin 'https://www.python.org' has been blocked by CORS policy: No 'Access-Control-Allow-Origin' header is present on the requested resource.` The wording is Chrome's. The line has the origin and not the path or query (Chrome prints the whole URL), because the fetch diagnostics never hold a path. Not fatal: the page goes on.
 
-Cookies: there is no HTTP cookie jar in this engine (`document.cookie` has its own). I kept that. No request sends `Cookie` or `Referer`. `credentials: "include"` and `withCredentials` change only the CORS check, so a page that passes here passes in Chrome. A same-origin POST sends no `Origin` (Chrome does). Not changed.
+Cookies: there was no HTTP cookie jar when this was written (a jar was added later: see [HTTP cookie jar](#http-cookie-jar)). No request sent `Cookie` or `Referer`. `credentials: "include"` and `withCredentials` changed only the CORS check. A same-origin POST sends no `Origin` (Chrome does). Not changed.
 
 Tests (they failed before the change, 16 of 17 on the first run): `crates/bare/src/browser_cors_tests.rs`, with two loopback servers as two origins (`serve` of `browser_fetch_tests.rs`). They cover each rule above, the console text, XHR, and the cache with a real 1 s expiry. The tests of the old gate (cross-origin is `Unsupported`) were rewritten or removed: `a_refused_cross_origin_request_leaks_no_secret_into_the_diagnostics_or_the_console`, `crates/bare/tests/fetch_https.rs` (a 308 to another https origin now arrives without `Authorization` and fails the CORS check). A check against the live python.org: `$.getJSON('https://console.python.org/...')` gives the console line above and the page goes on.
 
@@ -4358,3 +4358,58 @@ The cost matrix has 805 rows. Four jobs ran, with a limit of +0.5% under both al
 The cause is not proven. A possible cause is a layout shift in `resolve`. Hypothesis: to verify.
 
 Full row list: `/data/tmp/cm.txt`. Raw data: `/data/tmp/raw.tsv`.
+
+## HTTP cookie jar
+
+Before this change, only `document.cookie` had a jar. The network sent no `Cookie` header and read no `Set-Cookie` header. Now one jar serves both. Code: `crates/net/src/cookie.rs` (the jar), `crates/net/src/http.rs` (`Client::start` adds `Cookie` and stores `Set-Cookie`, so h1, h2, redirects, streams and cache paths all use it), `crates/bare/src/browser_cookie.rs` (`document.cookie` glue). Decision record: `docs/decisions.md`, "Cookies: one jar for the network and for scripts".
+
+### Rules done
+
+- `Set-Cookie`: `Expires`, `Max-Age` (wins over `Expires`; zero or less deletes), `Domain`, `Path`, `Secure`, `HttpOnly`, `SameSite`. `Partitioned` is ignored. The `__Secure-` and `__Host-` prefixes are enforced. A host-only cookie differs from a domain cookie. The default path is the URL path up to the last `/`. A control character (other than TAB) makes the line ignored.
+- Public suffixes: a domain cookie for a public suffix is refused, unless it is the host itself (then it is host-only).
+- `Cookie` request header: sent on every request, including each redirect hop. Domain and path match. Longer paths first, then oldest creation. `Secure` cookies go only to https, or to loopback (`localhost`, `*.localhost`, `127.x`, `::1`).
+- `SameSite`: first-party requests send all. A cross-site top-level navigation with a safe method sends `Lax`, unset and `None` cookies. A cross-site subresource sends only `None`. A redirect chain that left the site stays tainted for later hops. A cross-site subresource reply sets only `SameSite=None; Secure` cookies.
+- Credentials: `fetch` `omit` sends and stores nothing. `same-origin` (the default) uses cookies only for the document origin. `include` uses them everywhere, with the CORS rules of #294. `XMLHttpRequest.withCredentials` follows the same rule. A cross-origin reply without credentials sets no cookie.
+- `document.cookie`: the getter hides `HttpOnly` cookies. The setter ignores `HttpOnly`, cannot replace an `HttpOnly` cookie, and refuses `Secure` on http (not on loopback). `navigator.cookieEnabled` is `true`.
+- bare-drive: step `cookie set NAME VALUE [domain=..] [path=..]`. Checks `expect cookie NAME [value~"re"]` and `expect cookie NAME absent`. The JSON result has a `cookies` array with name, domain, host_only, path, secure, http_only, same_site and session. It never has a value. A failed check never prints a value.
+- Persistence: memory only. A new page in the same `Session` keeps the jar. A new profile (each drive `open`) starts empty, so each `--repeat` run starts empty. There is no profile directory and no disk store in this engine.
+- Privacy: no cookie value goes to diagnostics, the console or the drive output. A test checks this. `HttpOnly` is never visible to script.
+
+### Limits and numbers
+
+| Item | Value |
+|---|---|
+| Name plus value | 4096 bytes |
+| One attribute value | 1024 bytes (longer is ignored) |
+| Cookies per domain | 180, then the least recently used go until 150 are left (Chrome: the same) |
+| Cookies in total | 3000 |
+| Lifetime cap | 400 days |
+| Cost for a host with no cookie | one hash lookup by site; an empty jar skips it |
+
+The per-domain limit is 180, not 50. RFC 6265 asks for at least 50, and Chrome keeps 180. The jar follows Chrome.
+
+Known gaps:
+
+- The public suffix list is short: every one-label name and about 80 two-label suffixes. A suffix with three labels (`k12.ca.us`) is not known.
+- The per-domain count is for each host name or domain, not each site.
+- The date parser follows RFC 6265. Chrome reads a few odd dates differently.
+- `Partitioned` (CHIPS) is ignored, so a cookie is not split by top-level site.
+- No `Set-Cookie2`, no cookie store API (`cookieStore`), and no `Clear-Site-Data`.
+
+### Bug found while testing
+
+A second `open` (a new profile) sent the cookies of the first. A worker thread of the shared pool kept the jar of the first spawner. `parallel::spawn` now carries the jar and the site of its caller into the job. A net test (`a_worker_job_uses_the_jar_and_the_site_of_the_client_that_spawned_it`) covers it.
+
+### Checks
+
+- Tests written first, on loopback with the host names `localhost`, `a.localhost`, `b.localhost` and `127.0.0.1` (different sites, no public network): `crates/net/src/cookie/tests.rs` (21), `crates/net/tests/cookies.rs` (12), `crates/bare/src/browser_cookie_http_tests.rs` (5), `crates/drive/tests/cookies.rs` (3) and the step parser tests.
+- `cargo test --release --workspace` after the rebase on ed0f072: 3170 passed, 0 failed, 12 ignored. The unit tests of `http.rs` first failed to compile (the new `cookies` field), and I fixed the literals.
+- Cost matrix against the base build of ed0f072: 805 rows, mean glibc -0.006%, 0 rows over the limit under both allocators. One row is over under one allocator only: `resources_load small 10` (+0.574% glibc, +0.225% jemalloc). A host with no cookie pays one hash lookup per request; no matrix row makes requests.
+- Live: `tools/drive/public/httpbin-cookies.steps` (`/cookies/set?bare=1`, then `/cookies`, then `cookie set` and a second read). `tools/drive/public/run.sh` three times in a row: pass 27, fail 0, known 1 (rust-book-sidebar), flakes 0 each time. The en.wikipedia.org and news.ycombinator.com journeys pass. Wikipedia sets real cookies (`GeoIP`, `WMF-*`).
+
+### Not tested
+
+- A site that needs a login with a real account.
+- A three-label public suffix.
+- Cookies with the window (non-headless) driver.
+- Sites where a cookie is `Partitioned`.

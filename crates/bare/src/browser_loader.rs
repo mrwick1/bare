@@ -683,7 +683,7 @@ impl Browser {
 
     /// Run the classic scripts of the page, then its tasks, within `cfg.limits`. See the module comment for the order.
     /// It never panics on page input and never returns an `Err`: the result says why it stopped.
-    pub fn run_page(&mut self, cfg: PageConfig) -> PageResult {
+    pub fn run_page(&mut self, mut cfg: PageConfig) -> PageResult {
         let dom = self.dom.clone();
         let mut res = PageResult { stop: Stop::Settled, ready_state: "loading", scripts_run: 0, script_throws: 0, load_errors: 0, tasks: 0, rounds: 0, fetches: 0, bytes: 0, css: CssStats::default(), preload: PreloadStats::default(), diagnostics: Vec::new(), dropped_diagnostics: 0, idle_timers: Vec::new(), idle_frames: false, idle_callbacks: 0, intercepted: Vec::new(), aborted: 0 };
         let prior = dom.scripts.fatal.borrow().clone();
@@ -705,6 +705,14 @@ impl Browser {
                 return res;
             }
         };
+        // One jar for the page client, the `fetch` client and `document.cookie`, and the site of this document for `SameSite`.
+        let jar = cfg.client.jar();
+        cfg.client.set_site(Some(bare_net::cookie::site_of(&page)));
+        match &mut cfg.fetch {
+            Some((c, _)) => c.use_jar(jar.clone()),
+            None => dom.fetch.client.borrow_mut().use_jar(jar.clone()),
+        }
+        dom.nav.s.borrow_mut().store.use_jar(jar);
         if let Some((client, limits)) = cfg.fetch
             && self.configure_fetch(FetchConfig { base_url: Some(cfg.url.clone()), client, limits }).is_err() {
             setup(&mut res, "the fetch origin could not be configured".into());

@@ -1,0 +1,12 @@
+# httpbin.org cookies: /cookies/set?bare=1 answers with a redirect that sets the cookie, then /cookies lists the cookies that the request sent.
+# The second page is a JSON document (shown as text); it has the cookie only if the jar stored the one from the redirect and sent it back.
+#   bare-drive --var URL=https://httpbin.org/cookies/set?bare=1 httpbin-cookies.steps
+timeout 30000
+open ${URL}
+expect cookie bare value="1"
+expect js "JSON.parse(document.body.innerText).cookies.bare === '1'"
+goto https://httpbin.org/cookies
+expect js "JSON.parse(document.body.innerText).cookies.bare === '1'"
+cookie set extra 2
+goto https://httpbin.org/cookies
+expect js "JSON.parse(document.body.innerText).cookies.extra === '2'"

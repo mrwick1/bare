@@ -91,6 +91,7 @@ dependencies = [
  "bare-js",
  "bare-net",
  "bare-paint",
+ "bare-url",
  "bare-window",
  "png",
 ]

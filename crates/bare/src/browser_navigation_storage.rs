@@ -35,6 +35,7 @@ use bare_js::value::{ObjId, PropertyKey, Value};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Copy, Debug)]
 pub struct StorageLimits {
@@ -80,8 +81,9 @@ pub enum StoreError {
 pub struct WebStorage {
     local: Rc<RefCell<Areas>>,
     session: Rc<RefCell<Areas>>,
-    /// The cookies that scripts set (`browser_cookie.rs`). A new tab shares them, as it shares `localStorage`.
-    cookies: Rc<RefCell<crate::browser_cookie::Jar>>,
+    /// The cookie jar: the one of the network client (`Client::jar`) and of `document.cookie` (`browser_cookie.rs`). A new tab shares it, as it
+    /// shares `localStorage`. It is in memory only.
+    cookies: Arc<Mutex<bare_net::cookie::Jar>>,
     lim: StorageLimits,
 }
 
@@ -101,8 +103,13 @@ impl WebStorage {
         WebStorage { local: self.local.clone(), session: Default::default(), cookies: self.cookies.clone(), lim: self.lim }
     }
 
-    pub(crate) fn cookies(&self) -> Rc<RefCell<crate::browser_cookie::Jar>> {
+    pub fn jar(&self) -> Arc<Mutex<bare_net::cookie::Jar>> {
         self.cookies.clone()
+    }
+
+    /// Use the jar of the network client from now on. Only this value changes: a clone made before keeps the old jar.
+    pub fn use_jar(&mut self, jar: Arc<Mutex<bare_net::cookie::Jar>>) {
+        self.cookies = jar;
     }
 
     fn areas(&self, session: bool) -> &RefCell<Areas> {

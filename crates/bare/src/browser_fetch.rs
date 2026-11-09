@@ -34,9 +34,11 @@
 //!   `"manual"` is `Unsupported`. 301/302 (POST) and 303 (all but GET and HEAD) turn the request into a GET without a body; 307/308 keep both.
 //! - JS cannot set `Host`, `Content-Length`, `Cookie`, `Origin`, `Referer`, `Connection`, `Transfer-Encoding`, `Accept-Encoding`,
 //!   `Sec-*`, `Proxy-*` and the other forbidden names of the Fetch Standard: they are dropped, as a browser does. `Host` and
-//!   `Content-Length` come from the client. `Set-Cookie` of a response is never put in `response.headers`. There is no jar
-//!   for HTTP (`document.cookie` has its own, `browser_cookie.rs`), so no `Cookie` or `Referer` is ever sent, and `credentials` changes only the CORS
-//!   check (`include` needs the exact origin and `Allow-Credentials`, as in Chrome). `Origin` is sent only to another origin. A same-origin POST sends none (Chrome does).
+//!   `Content-Length` come from the client. `Set-Cookie` of a response is never put in `response.headers`. Cookies: the
+//!   jar of the client (`bare_net::cookie`, shared with `document.cookie`) fills from every reply and gives the `Cookie` header of every hop. `credentials`
+//!   decides: `omit` sends and stores none, `same-origin` (the default, and XHR) only for the origin of the document, `include` (and `withCredentials`)
+//!   for any origin. A cross-site request sends only `SameSite=None` cookies, and its reply sets only those. No `Referer` is sent. `include` also needs the
+//!   exact origin and `Allow-Credentials` for the CORS check, as in Chrome. `Origin` is sent only to another origin. A same-origin POST sends none (Chrome does).
 //! - A failed network request rejects with `TypeError: Failed to fetch`. Errors and diagnostics never hold a header value, a
 //!   body byte, a path or a query. [`Browser::take_fetch_diagnostics`] gives fixed labels and the origin.
 //!
@@ -82,7 +84,7 @@ use crate::browser_navigation_url::form_serialize;
 use crate::browser_streams as streams;
 use bare_js::eval::{Error, Interp};
 use bare_js::value::{ObjId, Value};
-use bare_net::http::{Client, Method, Request as NetRequest};
+use bare_net::http::{Client, Cookies, Ctx, Method, Request as NetRequest};
 use bare_net::parallel::Task;
 use bare_url::{Scheme, Url};
 use std::cell::{Cell, OnceCell, RefCell};
@@ -339,6 +341,8 @@ struct Cors {
     mode: Mode,
     /// `credentials: "include"` or `withCredentials`.
     include: bool,
+    /// `credentials: "omit"`: no cookie goes and no cookie is stored, also for the document origin.
+    omit: bool,
     /// The origin of the document, for a request to another origin. `None`: the first URL is the document origin.
     doc: Option<Url>,
     /// The request is not sent: the text for the console.
@@ -349,13 +353,13 @@ struct Cors {
 
 impl Clone for Cors {
     fn clone(&self) -> Cors {
-        Cors { mode: self.mode, include: self.include, doc: self.doc.as_ref().map(dup), blocked: self.blocked.clone(), api: self.api }
+        Cors { mode: self.mode, include: self.include, omit: self.omit, doc: self.doc.as_ref().map(dup), blocked: self.blocked.clone(), api: self.api }
     }
 }
 
 impl Cors {
     fn same(api: &'static str) -> Cors {
-        Cors { mode: Mode::Cors, include: false, doc: None, blocked: None, api }
+        Cors { mode: Mode::Cors, include: false, omit: false, doc: None, blocked: None, api }
     }
 }
 
@@ -481,7 +485,7 @@ enum Pr {
 pub(crate) struct Fetch {
     st: RefCell<FetchState>,
     lim: Cell<FetchLimits>,
-    client: RefCell<Client>,
+    pub(crate) client: RefCell<Client>,
     protos: OnceCell<[ObjId; 6]>,
     fixed: RefCell<Vec<ObjId>>,
     pub(crate) json_parse: Cell<Option<Value>>,
@@ -1696,6 +1700,7 @@ fn prepare(d: &Dom, it: &mut Interp<'_>, promise: Value, a: &[Value]) -> R<()> {
     let method = wire_method(&core.method)?;
     let mut cors = policy(d, &lim, &core.url, Mode::of(core.mode), "fetch")?;
     cors.include = core.credentials == "include";
+    cors.omit = core.credentials == "omit";
     let n = core.body.as_ref().map_or(0, |b| b.len());
     {
         let mut st = d.fetch.st.borrow_mut();
@@ -1847,7 +1852,10 @@ fn run_one(client: &mut Client, lim: &FetchLimits, first: Parts<'_>, diag: &mut 
         if let Some(o) = &origin_s {
             wire.push(("origin", o));
         }
-        let req = NetRequest { method, url: &url, headers: &wire, body: body.unwrap_or(&[]) };
+        // Cookies: `include` sends them to any origin, `same-origin` (the default, and XHR without `withCredentials`) only to the origin of the
+        // document, `omit` never. The same rule decides if the reply may set one.
+        let cookies = Cookies { on: cors.include || !cors.omit && doc.same_origin(&url), ctx: Ctx::Embedded };
+        let req = NetRequest { cookies, method, url: &url, headers: &wire, body: body.unwrap_or(&[]) };
         let resp = match client.send_once(&req, lim.max_response_body) {
             Ok(r) => r,
             Err(e) if e.to_string() == "the reply is too big" => return Outcome::TooBig,
@@ -2013,7 +2021,7 @@ fn preflight(client: &mut Client, lim: &FetchLimits, url: &Url, method: Method, 
     if !names.is_empty() {
         h.push(("access-control-request-headers", &names));
     }
-    let req = NetRequest { method: Method::Options, url, headers: &h, body: &[] };
+    let req = NetRequest { cookies: Default::default(), method: Method::Options, url, headers: &h, body: &[] };
     let resp = match client.send_once(&req, lim.max_response_body) {
         Ok(r) => unwrap_arc(r),
         Err(e) => return Err(Outcome::Net(bare_net::cause::describe(&*e))),
@@ -2087,7 +2095,11 @@ impl Browser {
         let base = cfg.base_url.as_deref().map(Url::parse).transpose()?;
         let f = &self.dom.fetch;
         f.lim.set(cfg.limits);
-        *f.client.borrow_mut() = cfg.client;
+        let mut client = cfg.client;
+        client.set_site(base.as_ref().map(bare_net::cookie::site_of));
+        // `document.cookie` uses the jar of the client that `fetch` uses (`run_page` makes all clients of a page share one).
+        self.dom.nav.s.borrow_mut().store.use_jar(client.jar());
+        *f.client.borrow_mut() = client;
         f.st.borrow_mut().base = base;
         Ok(())
     }

@@ -189,6 +189,8 @@ mod browser_storage_tests;
 #[cfg(test)]
 mod browser_cookie_tests;
 #[cfg(test)]
+mod browser_cookie_http_tests;
+#[cfg(test)]
 mod browser_svg_tests;
 #[cfg(test)]
 mod browser_walker_tests;

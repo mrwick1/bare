@@ -14,7 +14,7 @@
 //! dots, so it does not count).
 
 use crate::locate::{self, Locator};
-use crate::steps::{Action, Check, State, Step};
+use crate::steps::{Action, Check, CookieState, State, Step};
 use bare::control::{Handle, Log, Refusal, Remote, Ticks};
 use bare::page::Page;
 use bare_paint::canvas::Canvas;
@@ -202,6 +202,19 @@ pub struct Report {
     pub window: bool,
     /// The ticks of all the steps.
     pub ticks: Ticks,
+    /// The cookie jar of the last session at the end: names and flags, never a value.
+    pub cookies: Vec<CookieOut>,
+}
+
+pub struct CookieOut {
+    pub name: String,
+    pub domain: String,
+    pub host_only: bool,
+    pub path: String,
+    pub secure: bool,
+    pub http_only: bool,
+    pub same_site: &'static str,
+    pub session: bool,
 }
 
 /// Run the steps in order until one fails. `red` gets the secrets that the steps type into password fields.
@@ -217,7 +230,7 @@ pub fn run(steps: &[Step], opt: &Options, red: &mut Redactor) -> Report {
     let mut window_cpu = 0u64;
     // The first network record of the last step that loaded a document: the ticks of later steps load it.
     let mut nav_first = 0;
-    let mut rep = Report { ok: true, steps: Vec::new(), failure: None, logs: Vec::new(), net: Vec::new(), ms: 0.0, window: opt.window, ticks: Ticks::default() };
+    let mut rep = Report { ok: true, steps: Vec::new(), failure: None, logs: Vec::new(), net: Vec::new(), ms: 0.0, window: opt.window, ticks: Ticks::default(), cookies: Vec::new() };
     for step in steps {
         let t0 = Instant::now();
         let deadline = t0 + timeout;
@@ -345,9 +358,33 @@ pub fn run(steps: &[Step], opt: &Options, red: &mut Redactor) -> Report {
             break;
         }
     }
+    rep.cookies = host.run(|p| p.storage().map(|s| dump(&s.jar().lock().unwrap_or_else(|e| e.into_inner())))).ok().flatten().unwrap_or_default();
     drop(host);
     rep.ms = start.elapsed().as_secs_f64() * 1000.0;
     rep
+}
+
+/// The jar for the result: the names and the flags of each cookie. A value never goes in (a cookie is a credential).
+fn dump(j: &bare_net::cookie::Jar) -> Vec<CookieOut> {
+    use bare_net::cookie::SameSite;
+    j.list()
+        .into_iter()
+        .map(|c| CookieOut {
+            name: c.name.clone(),
+            domain: c.domain.clone(),
+            host_only: c.host_only,
+            path: c.path.clone(),
+            secure: c.secure,
+            http_only: c.http_only,
+            same_site: match c.same_site {
+                SameSite::Unset => "unset",
+                SameSite::None => "none",
+                SameSite::Lax => "lax",
+                SameSite::Strict => "strict",
+            },
+            session: c.expires.is_none(),
+        })
+        .collect()
 }
 
 /// The CPU time of this thread in nanoseconds, from `/proc/thread-self/schedstat` (0 where it cannot be read).
@@ -472,6 +509,7 @@ fn attempt(p: &mut Page, m: &mut Memo, a: &Action, out: Option<&PathBuf>, red: &
                 }
             }
             Action::Expect(c) => check(p, m, c)?,
+            Action::CookieSet { name, value, domain, path } => cookie_set(p, name, value, domain.as_deref(), path.as_deref())?,
             Action::Shot(name) => {
                 let Some(dir) = out else { return Ok(Some("no --out: not saved".into())) };
                 if p.images_pending() {
@@ -492,9 +530,48 @@ fn attempt(p: &mut Page, m: &mut Memo, a: &Action, out: Option<&PathBuf>, red: &
     }
 }
 
+/// The host and the path of the page, for the jar.
+fn page_at(p: &mut Page) -> Option<(String, String)> {
+    let u = bare_url::Url::parse(p.url()?.split('#').next()?).ok()?;
+    Some((u.host.clone(), u.path.split('?').next().unwrap_or("/").to_string()))
+}
+
+/// `cookie set`: put a cookie in the jar of the session as a response of the host would. The value is never in a message.
+fn cookie_set(p: &mut Page, name: &str, value: &str, domain: Option<&str>, path: Option<&str>) -> Result<(), Try> {
+    let jar = p.storage().ok_or_else(|| Try::Stop(fail("page", "the page has no session")))?.jar();
+    let host = match domain {
+        Some(d) => d.trim_start_matches('.').to_ascii_lowercase(),
+        None => page_at(p).ok_or_else(|| Try::Stop(fail("page", "cookie set needs a page: the first step must be open")))?.0,
+    };
+    let text = format!("{name}={value}; Path={}", path.unwrap_or("/"));
+    let at = bare_net::cookie::At { secure: true, host: &host, path: path.unwrap_or("/") };
+    let mut j = jar.lock().unwrap_or_else(|e| e.into_inner());
+    let now = j.now();
+    j.set(&at, &text, bare_net::cookie::Via::Http { third: false }, now);
+    if j.lookup(&at, name, now).is_none() {
+        return Err(Try::Stop(fail("cookie", format!("the jar refused the cookie {name} for {host} (a public suffix, a bad name or a bad prefix)"))));
+    }
+    Ok(())
+}
+
 fn check(p: &mut Page, m: &mut Memo, c: &Check) -> Result<(), Try> {
     let no = |msg: String| Err(Try::Again(fail("expect", msg)));
     match c {
+        Check::Cookie(name, state) => {
+            let Some((host, path)) = page_at(p) else { return Err(Try::Again(fail("page", p.no_document()))) };
+            let Some(jar) = p.storage().map(|s| s.jar()) else { return Err(Try::Stop(fail("page", "the page has no session"))) };
+            let j = jar.lock().unwrap_or_else(|e| e.into_inner());
+            let secure = p.url().is_some_and(|u| u.starts_with("https:")) || bare_net::cookie::loopback(&host);
+            let found = j.lookup(&bare_net::cookie::At { secure, host: &host, path: &path }, name, j.now());
+            // A message names the cookie and what was asked, never the value of the cookie.
+            match (state, found) {
+                (CookieState::Present, None) => return no(format!("no cookie {name} would go to this page")),
+                (CookieState::Absent, Some(_)) => return no(format!("the cookie {name} goes to this page, and it should not")),
+                (CookieState::Value(t), Some(c)) if !t.matches(&c.value) => return no(format!("the value of the cookie {name} is not {t}")),
+                (CookieState::Value(t), None) => return no(format!("no cookie {name} would go to this page (expected value{t})")),
+                _ => {}
+            }
+        }
         Check::Url(t) => {
             let url = p.url().unwrap_or_default();
             if !t.matches(&url) {
@@ -652,8 +729,25 @@ impl Report {
                 )
             })
             .collect();
+        let cookies: Vec<String> = self
+            .cookies
+            .iter()
+            .map(|c| {
+                format!(
+                    "{{\"name\":{},\"domain\":{},\"host_only\":{},\"path\":{},\"secure\":{},\"http_only\":{},\"same_site\":{},\"session\":{}}}",
+                    s(&c.name),
+                    s(&c.domain),
+                    c.host_only,
+                    s(&c.path),
+                    c.secure,
+                    c.http_only,
+                    q(c.same_site),
+                    c.session
+                )
+            })
+            .collect();
         format!(
-            "{{\"ok\":{},\"window\":{},\"ms\":{:.1},{},\"steps\":[{}],\"failure\":{},\"console\":[{}],\"network\":[{}]}}",
+            "{{\"ok\":{},\"window\":{},\"ms\":{:.1},{},\"steps\":[{}],\"failure\":{},\"console\":[{}],\"network\":[{}],\"cookies\":[{}]}}",
             self.ok,
             self.window,
             self.ms,
@@ -661,7 +755,8 @@ impl Report {
             steps.join(","),
             failure,
             logs.join(","),
-            net.join(",")
+            net.join(","),
+            cookies.join(",")
         )
     }
 }

@@ -746,7 +746,7 @@ fn a_server_that_closes_after_a_complete_reply_and_a_head_request_work_over_one_
     let (_pki, mut peer, client) = setup();
     let c2 = client.fork();
     let u = url(&peer, "/h");
-    let t = spawn(client, move |c| c.send(&Request { method: Method::Head, url: &u, headers: &[], body: &[] }).map(|r| (r.status, r.body.len(), r.header("content-length").map(str::to_string))).map_err(|e| e.to_string()));
+    let t = spawn(client, move |c| c.send(&Request { cookies: Default::default(), method: Method::Head, url: &u, headers: &[], body: &[] }).map(|r| (r.status, r.body.len(), r.header("content-length").map(str::to_string))).map_err(|e| e.to_string()));
     peer.open(&[]);
     let r = peer.request();
     assert!(r.end_stream);
