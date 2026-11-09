@@ -3620,3 +3620,11 @@ There was no new error on any site. I did not run staging steps (the owner runs 
 Limits: RSA keys of 2048 to 4096 bits only (a root with a smaller RSA key does not parse and is never an anchor). No RSA-PSS signatures on certificates, no SHA-512 or SHA-1 certificate signatures (the crate has no SHA-512), no `rsassaPss` keys (only `rsaEncryption`), no PKCS#1 v1.5 CertificateVerify (TLS 1.3 forbids it), no client certificates. Variable-time code: public values only. `tools/crypto/client_load.rs` did not build before this change (`connect_inner` is gone); I added the new module lines to it and did not repair it.
 
 Not tested: other RSA chains than the six sites and the OpenSSL ones (for example a 4096-bit leaf or an intermediate with e = 3 from a real CA), a chain with RSA-PSS certificate signatures, non-x86 hardware, the portable SHA-256 path with RSA, `bare` against staging after this change, arjun-e16.
+
+## Public sites e2e after RSA (2026-11-09)
+
+After #280 (RSA) the four skipped journeys run. `tools/drive/public/run.sh BINARY` on main `46eab19` (archMachine): 10 pass, 1 fail. The failure was a wrong step, not a bare bug: react.dev has two `h1` elements and six "Learn" links, and a locator must match one element. `react-docs.steps` now reads the headings with `expect js` and goes to `/learn` with `goto`. The `# needs-rsa` marks are removed from the journeys. `run.sh` keeps the skip rule for a future TLS gap.
+
+Result, 3 full runs one after another: 11 pass, 0 fail, 0 skip, 0 flakes each time. Times: example 0.09 s, Hacker News 1.2 to 1.6 s, Wikipedia 0.6 to 1.1 s, MDN 2.6 s (37 requests), nextjs.org 1.0 to 1.4 s (38 requests, 36 MiB peak RSS), react.dev 0.3 s. Peak RSS is 13 to 36 MiB.
+
+Not tested: arjun-e16, the window, a repeat past 3, journeys that need a login, and pages that the journeys do not open.
