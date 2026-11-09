@@ -232,7 +232,7 @@ keywords! {
     TableHeaderGroup => "table-header-group", TableFooterGroup => "table-footer-group", TableColumn => "table-column", TableColumnGroup => "table-column-group",
     TableCaption => "table-caption", Flex => "flex", InlineFlex => "inline-flex", Grid => "grid",
     InlineGrid => "inline-grid", Left => "left", Right => "right", Both => "both",
-    Center => "center", Justify => "justify", Start => "start", End => "end",
+    Center => "center", Justify => "justify", Start => "start", End => "end", InlineStart => "inline-start", InlineEnd => "inline-end",
     Visible => "visible", Hidden => "hidden", Collapse => "collapse", Solid => "solid",
     Dashed => "dashed", Dotted => "dotted", Double => "double", Groove => "groove",
     Ridge => "ridge", Inset => "inset", Outset => "outset", Pre => "pre",
@@ -287,6 +287,8 @@ pub struct Declared {
     pub property: Property,
     pub value: Value,
     pub important: bool,
+    /// A logical declaration of the inline axis (`margin-inline-start`). `property` is the one for `ltr`: the cascade swaps left and right in an `rtl` element.
+    pub mirror: bool,
 }
 
 /// Read one declaration, and add what it means to `out`: one item for a longhand, more for a shorthand.
@@ -301,10 +303,11 @@ pub fn parse_declaration(name: &str, value: &str, important: bool, side: &mut Si
         }
         // The value is not known until the custom properties are. A shorthand gives all its longhands the same value.
         let single = Property::from_name(name).map(|p| [p]);
-        let Some(list) = shorthand_longhands(name).or(single.as_ref().map(|p| &p[..])) else { return false };
+        let Some(list) = shorthand_longhands(name).or_else(|| logical(name)).or(single.as_ref().map(|p| &p[..])) else { return false };
+        let mirror = mirrors(name);
         side.vars.push(VarDecl { name: name.into(), text: value.trim().into() });
         let index = side.vars.len() as u32 - 1;
-        out.extend(list.iter().map(|&property| Declared { property, value: Value::Var(index), important }));
+        out.extend(list.iter().map(|&property| Declared { property, value: Value::Var(index), important, mirror }));
         return true;
     }
     if let Some(ok) = crate::grid::declaration(name, value, important, side, out) {
@@ -312,7 +315,9 @@ pub fn parse_declaration(name: &str, value: &str, important: bool, side: &mut Si
     }
     let Some(parts) = Parts::read(value, &mut side.calcs) else { return false };
     let start = out.len();
-    let ok = expand(name, &parts, &mut |property, value| out.push(Declared { property, value, important }));
+    // `expand` says so when `name` is a logical property of the inline axis. It is the last arm there: a physical name never pays for it.
+    let mirror = std::cell::Cell::new(false);
+    let ok = expand(name, &parts, &mirror, &mut |property, value| out.push(Declared { property, value, important, mirror: mirror.get() }));
     if !ok {
         out.truncate(start);
         // A shorthand may have added some items before it found the mistake. Take them back.
@@ -506,7 +511,7 @@ pub(crate) fn length(value: f32, unit: &str) -> Option<Length> {
 }
 
 /// Give each longhand of the declaration `name` to `emit`. `false` if the name or the value is not good.
-fn expand(name: &str, parts: &Parts, emit: &mut dyn FnMut(Property, Value)) -> bool {
+fn expand(name: &str, parts: &Parts, mirror: &std::cell::Cell<bool>, emit: &mut dyn FnMut(Property, Value)) -> bool {
     use Property::*;
     let slice = parts.as_slice();
     // `inherit`, `initial` and `unset` are the whole value, for a longhand and for a shorthand.
@@ -516,7 +521,17 @@ fn expand(name: &str, parts: &Parts, emit: &mut dyn FnMut(Property, Value)) -> b
                 list.iter().for_each(|&p| emit(p, *wide));
                 true
             }
-            None => Property::from_name(name).map(|p| emit(p, *wide)).is_some(),
+            None => match Property::from_name(name) {
+                Some(p) => {
+                    emit(p, *wide);
+                    true
+                }
+                None => logical(name).is_some_and(|list| {
+                    mirror.set(mirrors(name));
+                    list.iter().for_each(|&p| emit(p, *wide));
+                    true
+                }),
+            },
         };
     }
     if parts.more && name != "font" {
@@ -595,6 +610,21 @@ fn expand(name: &str, parts: &Parts, emit: &mut dyn FnMut(Property, Value)) -> b
         "border-right" => border(slice, &[(BorderRightWidth, BorderRightStyle, BorderRightColor)], emit),
         "border-bottom" => border(slice, &[(BorderBottomWidth, BorderBottomStyle, BorderBottomColor)], emit),
         "border-left" => border(slice, &[(BorderLeftWidth, BorderLeftStyle, BorderLeftColor)], emit),
+        "border-inline-start" => {
+            mirror.set(true);
+            border(slice, &[(BorderLeftWidth, BorderLeftStyle, BorderLeftColor)], emit)
+        }
+        "border-inline-end" => {
+            mirror.set(true);
+            border(slice, &[(BorderRightWidth, BorderRightStyle, BorderRightColor)], emit)
+        }
+        "border-block-start" => border(slice, &[(BorderTopWidth, BorderTopStyle, BorderTopColor)], emit),
+        "border-block-end" => border(slice, &[(BorderBottomWidth, BorderBottomStyle, BorderBottomColor)], emit),
+        "border-inline" => {
+            mirror.set(true);
+            border(slice, &[(BorderLeftWidth, BorderLeftStyle, BorderLeftColor), (BorderRightWidth, BorderRightStyle, BorderRightColor)], emit)
+        }
+        "border-block" => border(slice, &[(BorderTopWidth, BorderTopStyle, BorderTopColor), (BorderBottomWidth, BorderBottomStyle, BorderBottomColor)], emit),
         // The vertical radii after a `/` are dropped: a corner is a circle here.
         "border-radius" => {
             let end = slice.iter().position(|p| matches!(p, Part::Slash)).unwrap_or(slice.len());
@@ -634,10 +664,116 @@ fn expand(name: &str, parts: &Parts, emit: &mut dyn FnMut(Property, Value)) -> b
             _ => false,
         },
         _ => {
-            let Some(property) = Property::from_name(name) else { return false };
-            let [one] = slice else { return false };
-            longhand(property, *one).map(|v| emit(property, v)).is_some()
+            // A physical name goes first: it pays nothing for the table of logical names.
+            if let Some(property) = Property::from_name(name) {
+                let [one] = slice else { return false };
+                return longhand(property, *one).map(|v| emit(property, v)).is_some();
+            }
+            let Some(list) = logical(name) else { return false };
+            mirror.set(mirrors(name));
+            match (list, slice) {
+                (&[p], &[one]) => longhand(p, one).map(|v| emit(p, v)).is_some(),
+                // `margin-inline: a b`: the start and the end. One value is for both.
+                (&[a, b], &[x] | &[x, _]) => {
+                    let y = slice[slice.len() - 1];
+                    let (Some(x), Some(y)) = (longhand(a, x), longhand(b, y)) else { return false };
+                    emit(a, x);
+                    emit(b, y);
+                    true
+                }
+                _ => false,
+            }
         }
+    }
+}
+
+/// The physical longhands of a logical name, for a horizontal writing mode and `ltr`: the inline axis is left to right, the block axis top to bottom.
+/// `None` if `name` is not a logical property. The cascade swaps left and right in an `rtl` element (`mirrors`). Other writing modes are not built.
+fn logical(name: &str) -> Option<&'static [Property]> {
+    use Property::*;
+    Some(match name {
+        "margin-inline" => &[MarginLeft, MarginRight],
+        "margin-inline-start" => &[MarginLeft],
+        "margin-inline-end" => &[MarginRight],
+        "margin-block" => &[MarginTop, MarginBottom],
+        "margin-block-start" => &[MarginTop],
+        "margin-block-end" => &[MarginBottom],
+        "padding-inline" => &[PaddingLeft, PaddingRight],
+        "padding-inline-start" => &[PaddingLeft],
+        "padding-inline-end" => &[PaddingRight],
+        "padding-block" => &[PaddingTop, PaddingBottom],
+        "padding-block-start" => &[PaddingTop],
+        "padding-block-end" => &[PaddingBottom],
+        "inset-inline" => &[Left, Right],
+        "inset-inline-start" => &[Left],
+        "inset-inline-end" => &[Right],
+        "inset-block" => &[Top, Bottom],
+        "inset-block-start" => &[Top],
+        "inset-block-end" => &[Bottom],
+        "border-inline-width" => &[BorderLeftWidth, BorderRightWidth],
+        "border-inline-start-width" => &[BorderLeftWidth],
+        "border-inline-end-width" => &[BorderRightWidth],
+        "border-block-width" => &[BorderTopWidth, BorderBottomWidth],
+        "border-block-start-width" => &[BorderTopWidth],
+        "border-block-end-width" => &[BorderBottomWidth],
+        "border-inline-style" => &[BorderLeftStyle, BorderRightStyle],
+        "border-inline-start-style" => &[BorderLeftStyle],
+        "border-inline-end-style" => &[BorderRightStyle],
+        "border-block-style" => &[BorderTopStyle, BorderBottomStyle],
+        "border-block-start-style" => &[BorderTopStyle],
+        "border-block-end-style" => &[BorderBottomStyle],
+        "border-inline-color" => &[BorderLeftColor, BorderRightColor],
+        "border-inline-start-color" => &[BorderLeftColor],
+        "border-inline-end-color" => &[BorderRightColor],
+        "border-block-color" => &[BorderTopColor, BorderBottomColor],
+        "border-block-start-color" => &[BorderTopColor],
+        "border-block-end-color" => &[BorderBottomColor],
+        "border-inline" => &[BorderLeftWidth, BorderRightWidth, BorderLeftStyle, BorderRightStyle, BorderLeftColor, BorderRightColor],
+        "border-inline-start" => &[BorderLeftWidth, BorderLeftStyle, BorderLeftColor],
+        "border-inline-end" => &[BorderRightWidth, BorderRightStyle, BorderRightColor],
+        "border-block" => &[BorderTopWidth, BorderBottomWidth, BorderTopStyle, BorderBottomStyle, BorderTopColor, BorderBottomColor],
+        "border-block-start" => &[BorderTopWidth, BorderTopStyle, BorderTopColor],
+        "border-block-end" => &[BorderBottomWidth, BorderBottomStyle, BorderBottomColor],
+        "border-start-start-radius" => &[BorderTopLeftRadius],
+        "border-start-end-radius" => &[BorderTopRightRadius],
+        "border-end-start-radius" => &[BorderBottomLeftRadius],
+        "border-end-end-radius" => &[BorderBottomRightRadius],
+        "inline-size" => &[Width],
+        "block-size" => &[Height],
+        "min-inline-size" => &[MinWidth],
+        "max-inline-size" => &[MaxWidth],
+        "min-block-size" => &[MinHeight],
+        "max-block-size" => &[MaxHeight],
+        _ => return None,
+    })
+}
+
+/// Does the logical `name` follow the inline axis, so that the cascade swaps its left and right in an `rtl` element? The sizes and the block axis do not.
+fn mirrors(name: &str) -> bool {
+    (name.contains("-inline") && !name.ends_with("-size")) || name.starts_with("border-start-") || name.starts_with("border-end-")
+}
+
+/// The property on the other side: left for right, `border-top-left-radius` for `border-top-right-radius`. The others stay.
+pub fn mirror(p: Property) -> Property {
+    use Property::*;
+    match p {
+        MarginLeft => MarginRight,
+        MarginRight => MarginLeft,
+        PaddingLeft => PaddingRight,
+        PaddingRight => PaddingLeft,
+        Left => Right,
+        Right => Left,
+        BorderLeftWidth => BorderRightWidth,
+        BorderRightWidth => BorderLeftWidth,
+        BorderLeftStyle => BorderRightStyle,
+        BorderRightStyle => BorderLeftStyle,
+        BorderLeftColor => BorderRightColor,
+        BorderRightColor => BorderLeftColor,
+        BorderTopLeftRadius => BorderTopRightRadius,
+        BorderTopRightRadius => BorderTopLeftRadius,
+        BorderBottomLeftRadius => BorderBottomRightRadius,
+        BorderBottomRightRadius => BorderBottomLeftRadius,
+        other => other,
     }
 }
 
@@ -908,7 +1044,7 @@ fn longhand(property: Property, part: Part) -> Option<Value> {
             K::TableHeaderGroup, K::TableFooterGroup, K::TableColumn, K::TableColumnGroup, K::TableCaption, K::Flex, K::InlineFlex,
             K::Grid, K::InlineGrid, K::FlowRoot, K::InlineTable,
         ]),
-        Float => one_of(part, &[K::None, K::Left, K::Right]),
+        Float => one_of(part, &[K::None, K::Left, K::Right, K::InlineStart, K::InlineEnd]),
         Clear => one_of(part, &[K::None, K::Left, K::Right, K::Both]),
         Visibility => one_of(part, &[K::Visible, K::Hidden, K::Collapse]),
         Direction => one_of(part, &[K::Ltr, K::Rtl]),

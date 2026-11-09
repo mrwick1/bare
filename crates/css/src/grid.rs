@@ -223,11 +223,11 @@ pub fn declaration(name: &str, value: &str, important: bool, side: &mut Side, ou
         _ => longhands(name)?,
     };
     if let Some(w) = wide(text) {
-        out.extend(list.iter().map(|&property| Declared { property, value: w, important }));
+        out.extend(list.iter().map(|&property| Declared { property, value: w, important, mirror: false }));
         return Some(true);
     }
     let start = out.len();
-    let mut emit = |property, value| out.push(Declared { property, value, important });
+    let mut emit = |property, value| out.push(Declared { property, value, important, mirror: false });
     let ok = read(name, text, side, &mut emit);
     if !ok {
         out.truncate(start);
