@@ -43,8 +43,8 @@ use std::time::{Duration, Instant};
 
 /// Elements (scripts and style sheet links) in one page. More is an error: a page cannot make us hold a million nodes.
 pub const MAX_REFERENCES: usize = 4096;
-/// Distinct URLs to download. The staging login page needs 18, and its home page 41.
-pub const MAX_FETCHES: usize = 128;
+/// Distinct URLs to download. Public pages can exceed 128. Byte and time caps still bound the load.
+pub const MAX_FETCHES: usize = 1024;
 /// One resource, after decoding. The biggest staging file is 391 KB, so this is 20 times more.
 pub const MAX_RESOURCE_BYTES: usize = 8 * 1024 * 1024;
 /// All the text that we keep. The 52 staging files have 1.86 MB.
@@ -806,6 +806,13 @@ mod tests {
         assert_eq!(kinds[10], Kind::Skipped(Skip::EmptyUrl)); // link with no href
         assert_eq!(kinds.len(), 12);
         assert_eq!(paths(&d), ["/dir/m.js", "/dir/ok.css"]);
+    }
+
+    #[test]
+    fn default_discovers_1024_resources() {
+        let html = (0..1024).map(|i| format!("<script src=s{i}.js></script>")).collect::<String>();
+        let d = discover(&parse(&html), &page(1), &Limits::default()).unwrap();
+        assert_eq!(d.targets.len(), 1024);
     }
 
     #[test]

@@ -4681,3 +4681,21 @@ Full cost matrix against 94727a6 (805 rows): 0 rows over the limit under both al
 - A page that appends a sheet in a shadow tree between two reads (the key holds the scope, so it goes through the same prefix test; no test covers it).
 - `tools/js/typing/keycost.sh` (no change in `crates/js` or the DOM hot path).
 - The cost matrix on arjun-e16.
+
+## Public navigation headers and resource capacity (2026-11-09)
+
+Baseline: `a1b7a802580b992cceccc861b513bebff9c027e4`. Machine: archMachine. Evidence files are in `/data/bare-tmp/site-net-evidence/`.
+
+Document navigation now sends `Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8` on GET and POST, including redirects. The HTTP UA stays `bare/0.1`. Resource and script fetch headers do not change. curl returned 404 from crates.io without Accept and 200 with `Accept: text/html`, under both HTTP/1.1 and h2. The baseline drive probe returned 404. The new public journey passes in 1,189.7 ms.
+
+Resource discovery now allows 1,024 distinct fetches instead of 128. The old comment sized this allowance for staging pages with 18 and 41 URLs. The 4,096-reference, 8 MiB resource, 32 MiB retained-text and 60-second download caps stay in place. The discovery test for 1,024 URLs failed with `TooManyFetches(128)` before the change. The navigation test failed because Accept was absent. Both pass after the change. The existing exact custom-cap test still passes. This raises the default; it does not remove the limit or change failures above the configured cap.
+
+The resource harness loaded 100 and 1,000 scripts of 2 KiB each in three runs per size. At 100 resources, median discovery took 0.14 ms, median load took 3.39 ms, peak load heap was 226 KiB and process peak RSS was 4,652 KiB. At 1,000 resources: Median discovery: 0.76 ms. Median load: 27.96 ms. Peak load heap: 2,217 KiB. Process peak RSS: 7,216 KiB. This approximates the new capacity; the unit test checks exactly 1,024 targets. Substack passes three consecutive runs: 2,261.7, 2,974.2 and 3,500.5 ms. Peak RSS: 77,580, 144,252 and 146,780 KiB. The combined network log has 163 entries. The public journey also passes in 1,493.9 ms. The baseline probe passed once; survey 4 records the intermittent discovery failure.
+
+Stack Overflow is still behind a Cloudflare challenge. The initial path can return 302, then `/questions` returns 403 with `cf-mitigated: challenge` and a `/cdn-cgi/challenge-platform` script. curl variations for the bare UA, HTML Accept, Accept-Language, Sec-Fetch headers and a Chrome UA all returned final 403 responses under HTTP/1.1 and h2. Chrome 157 first showed `Just a moment...`, then loaded `Newest Questions - Stack Overflow` with h2 status 200. The response requires challenge handling; no UA spoof or challenge bypass was added. The source sends Host, UA and Accept-Encoding before caller headers under HTTP/1.1. h2 sends pseudo headers first, then UA and Accept-Encoding. Bare has no default Accept-Language or Sec-Fetch headers. Exact Chrome wire header order was not captured.
+
+GNU is unreachable from archMachine and arjun-e16. curl resolved `209.51.188.116` and timed out connecting to port 443 after eight seconds on both machines. IPv6 `2001:470:142:5::116` has no route on both. No TLS or HTTP exchange occurred. No code change applies to this network failure.
+
+The public runner passed all 33 journeys with zero failures, skips or flakes. The crate tests passed: 1,115 passed, six ignored. The release workspace suite passed: 3,229 tests passed, 13 ignored, zero failures. Cost results follow below.
+
+Not tested: exact Chrome wire headers and header-order isolation, GNU rendering or TLS after connectivity returns, Substack content beyond the body-visible assertion, and resource loads above the configured cap.
