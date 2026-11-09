@@ -5961,7 +5961,7 @@ The page runs further than before and no run stops at `with`. The result changes
 - Jemalloc cost rows (none was over the limit under glibc).
 - A real `eval` (the engine has none): 49 test262 tests wait for it.
 
-## #331 `currentScript` through the microtask checkpoint, and `ImageData`
+## #332 `currentScript` through the microtask checkpoint, and `ImageData`
 
 ### Problems
 
