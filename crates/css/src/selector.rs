@@ -64,6 +64,28 @@ pub struct Selector {
     pub compounds: Vec<Compound>,
     /// (ids, classes, tags), 10 bits each: `ids << 20 | classes << 10 | tags`. A count over 1023 stays at 1023.
     pub specificity: u32,
+    /// `::slotted(...)` or `::part(...)` at the end. The compounds then say which element the pseudo-element belongs to.
+    pub pseudo: Option<ShadowPseudo>,
+}
+
+/// The two pseudo-elements that reach into a shadow tree (CSS Scoping).
+#[derive(Debug, PartialEq)]
+pub enum ShadowPseudo {
+    /// `slot::slotted(.x)`: the nodes that the slot takes, when they match the compound.
+    Slotted(Vec<Simple>),
+    /// `host::part(a b):hover`: the elements of the shadow tree of the host that have all the names in `part`, and match `then`.
+    Part { names: Vec<Box<str>>, then: Vec<Simple> },
+}
+
+/// Where a selector is read. It decides what `:host`, `::slotted()` and `::part()` are.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Mode {
+    /// A script asks (`querySelector`, `matches`): the three are valid and match nothing.
+    Script,
+    /// A style sheet of the document (or an `@supports` test): `::part()` works, `:host` and `::slotted()` match nothing.
+    Document,
+    /// A style sheet of a shadow tree: all three work.
+    Shadow,
 }
 
 #[derive(Debug, PartialEq)]
@@ -122,6 +144,14 @@ pub enum Simple {
     Not(Vec<Vec<Simple>>),
     /// `:is(.a, b)` and `:where(.a, b)`: true when one of the compounds matches. They match the same. Only the specificity differs.
     Is(Vec<Vec<Simple>>),
+    /// `:host` (no compound) and `:host(.a)`: the host of the shadow tree that the sheet belongs to. The cascade offers the rule only to the host.
+    Host(Vec<Vec<Simple>>),
+    /// `:host-context(.a)`: a host that has an ancestor (or is itself) that matches the compound.
+    HostContext(Vec<Vec<Simple>>),
+}
+
+fn is_host(s: &Simple) -> bool {
+    matches!(s, Simple::Host(_) | Simple::HostContext(_))
 }
 
 /// The bits of `user_flags`: which user action state a selector reads.
@@ -204,7 +234,12 @@ pub enum Case {
 /// Parse the prelude of a style rule: `a, b > c`. Gives `None` when any selector in it is not valid.
 /// The names go in the name table of `doc`.
 pub fn parse_selector_list(text: &str, doc: &mut Document) -> Option<Vec<Selector>> {
-    let mut parser = Parser { tokens: Peek { tokens: tokenize(text), peeked: None }, doc };
+    parse_selector_list_in(text, doc, Mode::Script)
+}
+
+/// `parse_selector_list` for a style sheet: `mode` says what `:host`, `::slotted()` and `::part()` are.
+pub fn parse_selector_list_in(text: &str, doc: &mut Document, mode: Mode) -> Option<Vec<Selector>> {
+    let mut parser = Parser { tokens: Peek { tokens: tokenize(text), peeked: None }, doc, mode, pseudo: None };
     let mut list = Vec::new();
     loop {
         list.push(parser.selector(0)?);
@@ -217,9 +252,22 @@ pub fn parse_selector_list(text: &str, doc: &mut Document) -> Option<Vec<Selecto
     }
 }
 
+/// What `Parser::pseudo_element` found.
+enum Pe {
+    /// No pseudo-element.
+    No,
+    /// One that never matches.
+    Never,
+    /// `::slotted()` or `::part()`: kept in `Parser::pseudo`.
+    Taken,
+}
+
 struct Parser<'a, 'd> {
     tokens: Peek<'a>,
     doc: &'d mut Document,
+    mode: Mode,
+    /// The `::slotted()` or `::part()` that the last compound had.
+    pseudo: Option<ShadowPseudo>,
 }
 
 /// The tokens, and a way to look at the next one without taking it (JS: like an iterator with a `peek()`).
@@ -276,6 +324,10 @@ impl Parser<'_, '_> {
                 Some(_) => return None,
                 // No space and no combinator, and still not the end of the compound: like `a"b"`.
             };
+            if self.pseudo.is_some() {
+                // `a::part(x) b`: a pseudo-element ends the selector.
+                return None;
+            }
             if combinator != Combinator::Descendant || !spaced {
                 self.tokens.next();
                 self.skip_space();
@@ -293,13 +345,20 @@ impl Parser<'_, '_> {
         // Check: `a > b c`. Left to right: [a(>), b(descendant), c(-)]. After the shift: [a(-), b(>), c(descendant)].
         // After the reverse: [c(descendant), b(>), a(-)]. `c` is joined to `b` by a space, `b` to `a` by `>`. Right.
         let specificity = counts[0].min(1023) << 20 | counts[1].min(1023) << 10 | counts[2].min(1023);
-        Some(Selector { compounds, specificity })
+        // `:host` is the shadow host: nothing can be to its left.
+        let last = compounds.len() - 1;
+        if compounds[..last].iter().any(|c| c.simples.iter().any(is_host)) {
+            return None;
+        }
+        Some(Selector { compounds, specificity, pseudo: self.pseudo.take() })
     }
 
     /// A compound selector: `li.item:first-child`. It has at least one simple selector, or `*`.
     fn compound(&mut self, depth: u32, counts: &mut [u32; 3]) -> Option<Vec<Simple>> {
         let mut simples = Vec::new();
         let mut any = false;
+        // Where `::part()` came in `simples`: what follows it is for the part, not for the host.
+        let mut taken = None;
         // `*` adds no simple selector, but it makes a compound that is not empty.
         match self.tokens.peek() {
             Some(Token::Ident(_)) => {
@@ -334,36 +393,99 @@ impl Parser<'_, '_> {
                 }
                 Some(Token::Colon) => {
                     self.tokens.next();
-                    if self.pseudo_element(depth)? {
-                        simples.push(Simple::Never);
-                    } else {
-                        let simple = self.pseudo(depth, counts)?;
-                        simples.push(simple);
+                    match self.pseudo_element(depth, counts)? {
+                        Pe::Never => simples.push(Simple::Never),
+                        Pe::Taken => taken = Some(simples.len()),
+                        Pe::No => {
+                            let simple = self.pseudo(depth, counts)?;
+                            simples.push(simple);
+                        }
                     }
                 }
                 _ => break,
             }
             any = true;
         }
+        if let (Some(at), Some(ShadowPseudo::Part { then, .. })) = (taken, &mut self.pseudo) {
+            *then = simples.split_off(at);
+        }
+        // The host has no type, id, class or attribute of its own that a rule of the shadow tree may read (CSS Scoping: it is featureless).
+        if simples.iter().any(is_host) && simples.iter().any(|s| matches!(s, Simple::Tag(_) | Simple::Id(_) | Simple::Class(_) | Simple::Attr { .. })) {
+            return None;
+        }
         any.then_some(simples)
     }
 
-    /// After the first `:`. Reads `::before` (or the old `:before`) and gives `Some(true)`, or reads nothing and gives
-    /// `Some(false)`. A pseudo-element styles a part that is not in the DOM, so it never matches an element. It must end
+    /// After the first `:`. Reads `::before` (or the old `:before`) and gives `Pe::Never`, `::slotted()` or `::part()` and gives `Pe::Taken`,
+    /// or reads nothing and gives `Pe::No`. A pseudo-element styles a part that is not in the DOM, so it never matches an element. It must end
     /// the selector, and it cannot be inside `:not()`. Unknown names drop the rule, except `::-webkit-` ones (as in Chrome).
-    fn pseudo_element(&mut self, depth: u32) -> Option<bool> {
+    fn pseudo_element(&mut self, depth: u32, counts: &mut [u32; 3]) -> Option<Pe> {
         const OLD: [&str; 4] = ["before", "after", "first-line", "first-letter"];
         const KNOWN: [&str; 9] = ["before", "after", "first-line", "first-letter", "marker", "placeholder", "selection", "backdrop", "file-selector-button"];
         let double = self.tokens.next_if(|t| *t == Token::Colon).is_some();
         let old = |t: &Token| matches!(t, Token::Ident(n) if OLD.iter().any(|o| n.eq_ignore_ascii_case(o)));
+        if double {
+            let which = match self.tokens.peek() {
+                Some(Token::Function(f)) if f.eq_ignore_ascii_case("slotted") => Some(true),
+                Some(Token::Function(f)) if f.eq_ignore_ascii_case("part") => Some(false),
+                _ => None,
+            };
+            if let Some(slotted) = which {
+                self.tokens.next();
+                return self.shadow_pseudo(slotted, depth, counts);
+            }
+        }
         if !double && !self.tokens.peek().is_some_and(old) {
-            return Some(false);
+            return Some(Pe::No);
         }
         let Some(Token::Ident(name)) = self.tokens.next() else { return None };
         let known = KNOWN.iter().any(|k| name.eq_ignore_ascii_case(k)) || name.starts_with("-webkit-");
         self.skip_space();
         let end = matches!(self.tokens.peek(), None | Some(Token::Comma));
-        (known && end && depth == 0).then_some(true)
+        (known && end && depth == 0).then_some(Pe::Never)
+    }
+
+    /// After `::slotted(` or `::part(`: the argument and the `)`. `::part()` may have pseudo-classes after it. Only a sheet that can use the
+    /// pseudo-element keeps it (`Mode`): else it is `Pe::Never`.
+    fn shadow_pseudo(&mut self, slotted: bool, depth: u32, counts: &mut [u32; 3]) -> Option<Pe> {
+        if depth != 0 || self.pseudo.is_some() {
+            return None;
+        }
+        counts[2] += 1;
+        let pseudo = if slotted {
+            self.skip_space();
+            let mut c = [0u32; 3];
+            let arg = self.compound(depth + 1, &mut c)?;
+            self.skip_space();
+            if self.tokens.next()? != Token::CloseParen || !matches!(self.tokens.peek(), None | Some(Token::Comma)) {
+                return None;
+            }
+            for (total, add) in counts.iter_mut().zip(c) {
+                *total += add;
+            }
+            ShadowPseudo::Slotted(arg)
+        } else {
+            let mut names: Vec<Box<str>> = Vec::new();
+            loop {
+                self.skip_space();
+                match self.tokens.next()? {
+                    Token::Ident(n) => names.push(n.as_ref().into()),
+                    Token::CloseParen if !names.is_empty() => break,
+                    _ => return None,
+                }
+            }
+            ShadowPseudo::Part { names, then: Vec::new() }
+        };
+        let works = match self.mode {
+            Mode::Shadow => true,
+            Mode::Document => !slotted,
+            Mode::Script => false,
+        };
+        if !works {
+            return Some(Pe::Never);
+        }
+        self.pseudo = Some(pseudo);
+        Some(Pe::Taken)
     }
 
     /// After `[`. Reads up to and with the `]`.
@@ -428,6 +550,7 @@ impl Parser<'_, '_> {
                     "only-child" => Simple::OnlyChild,
                     "root" => Simple::Root,
                     "empty" => Simple::Empty,
+                    "host" => if self.mode == Mode::Shadow { Simple::Host(Vec::new()) } else { Simple::Never },
                     "link" | "any-link" => Simple::Link,
                     "defined" => Simple::Defined,
                     "disabled" => Simple::Form(Form::Disabled),
@@ -478,6 +601,29 @@ impl Parser<'_, '_> {
                     }
                 }
                 Some(if kind == "not" { Simple::Not(args) } else { Simple::Is(args) })
+            }
+            Token::Function(name) if name.eq_ignore_ascii_case("host") || name.eq_ignore_ascii_case("host-context") => {
+                // The argument is one compound. It counts like the argument of `:is()`, and the pseudo-class like a class.
+                let context = name.eq_ignore_ascii_case("host-context");
+                if depth >= MAX_DEPTH {
+                    return None;
+                }
+                let mut c = [0u32; 3];
+                self.skip_space();
+                let arg = self.compound(depth + 1, &mut c)?;
+                self.skip_space();
+                if self.tokens.next()? != Token::CloseParen {
+                    return None;
+                }
+                counts[1] += 1;
+                for (total, add) in counts.iter_mut().zip(c) {
+                    *total += add;
+                }
+                Some(match (self.mode == Mode::Shadow, context) {
+                    (false, _) => Simple::Never,
+                    (true, false) => Simple::Host(vec![arg]),
+                    (true, true) => Simple::HostContext(vec![arg]),
+                })
             }
             Token::Function(name) if name.eq_ignore_ascii_case("state") => {
                 counts[1] += 1;

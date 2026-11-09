@@ -1027,7 +1027,7 @@ fn collect(cx: &Cx, node: NodeId, lines: &[Lines; 2]) -> (Vec<Item>, Vec<NodeId>
                 let (mut real, mut at) = (false, Some(first));
                 while let Some(n) = at {
                     real |= tree.kind(n) == Kind::Text && !tree.is_collapsible_space(n);
-                    at = if n == last { None } else { tree.doc.next_sibling(n) };
+                    at = if n == last { None } else { tree.doc.flat_next(n) };
                 }
                 if real {
                     items.push(Item { node, run: Some((first, last)), order: 0, number: 0, place: [auto; 2], area: [(0, 0); 2], contrib: [[0.0; 3]; 2] });
@@ -1037,7 +1037,7 @@ fn collect(cx: &Cx, node: NodeId, lines: &[Lines; 2]) -> (Vec<Item>, Vec<NodeId>
                         if tree.kind(n) == Kind::OutOfFlow {
                             statics.push(n);
                         }
-                        at = if n == last { None } else { tree.doc.next_sibling(n) };
+                        at = if n == last { None } else { tree.doc.flat_next(n) };
                     }
                 }
             }

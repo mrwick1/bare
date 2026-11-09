@@ -63,9 +63,9 @@ use crate::at_rules;
 use crate::calc::{self, Linear, Node};
 use crate::color::Color;
 use crate::grid::{self, Grid};
-use crate::matching::matches;
+use crate::matching::{compound_matches, matches};
 use crate::parser::{AtBody, Rule, parse_declarations, parse_stylesheet};
-use crate::selector::{Combinator, Selector, Simple, parse_selector_list};
+use crate::selector::{Combinator, Mode, Selector, ShadowPseudo, Simple, parse_selector_list_in};
 use crate::values::{Declared, Keyword, Length, Property, Side, Value, parse_declaration};
 use crate::var::{self, CustomDecl, VarDecl};
 
@@ -98,6 +98,91 @@ struct Entry {
     origin: Origin,
     /// The hashes of up to 4 tags, ids or classes that the ancestors must have. 0 means no hash.
     ancestors: [u32; 4],
+    /// The tree context of the rule against the element that it styles (CSS Scoping): `OWN`, `INNER` (a rule of a shadow tree for its host
+    /// or for a node that it slots), `OUTER` (a `::part()` rule of the shadow tree around the host) or `OUTERMOST` (one of the document).
+    ctx: u8,
+}
+
+const OWN: u8 = 0;
+const INNER: u8 = 1;
+const OUTER: u8 = 2;
+/// A `::part()` rule of the document: outside every shadow tree.
+const OUTERMOST: u8 = 3;
+
+/// The rules of one tree, found by what the last compound reads. The document, and each shadow tree, has one.
+#[derive(Default)]
+struct Index {
+    by_id: Buckets<Box<str>>,
+    by_class: Buckets<Box<str>>,
+    by_tag: Buckets<Atom>,
+    /// The rules with an attribute test and no id or class in the last part, by the name of the attribute: `[data-state=open]`.
+    /// An element looks up the names of its own attributes, so a rule for an attribute that it does not have costs nothing.
+    by_attr: Buckets<Atom>,
+    /// The rules that have no id, no class, no attribute and no tag in the last part: `*`, `:first-child`.
+    other: Vec<u32>,
+}
+
+impl Index {
+    fn push(&mut self, index: u32, selector: &Selector) {
+        // The bucket: an id is the most specific, then a class, then an attribute, then a tag. An attribute comes before a tag:
+        // `input[type=checkbox]` is in the list of `type`, and few elements have a `type`; most elements are a `div`.
+        let last = &selector.compounds[0].simples;
+        if let Some(Simple::Id(id)) = last.iter().find(|s| matches!(s, Simple::Id(_))) {
+            self.by_id.entry(id.clone()).or_default().push(index);
+        } else if let Some(Simple::Class(class)) = last.iter().find(|s| matches!(s, Simple::Class(_))) {
+            self.by_class.entry(class.clone()).or_default().push(index);
+        } else if let Some(&Simple::Attr { name, .. }) = last.iter().find(|s| matches!(s, Simple::Attr { .. })) {
+            // Every attribute test needs the attribute: an element without it never matches.
+            self.by_attr.entry(name).or_default().push(index);
+        } else if let Some(&Simple::Tag(tag)) = last.iter().find(|s| matches!(s, Simple::Tag(_))) {
+            self.by_tag.entry(tag).or_default().push(index);
+        } else {
+            self.other.push(index);
+        }
+    }
+
+    /// Add to `out` the rules that may match the element: the ones in the lists for its id, its classes, its attributes and its tag, and the "other" list.
+    #[inline(always)]
+    fn collect(&self, doc: &Document, el: NodeId, out: &mut Vec<u32>) {
+        out.extend_from_slice(&self.other);
+        if let NodeData::Element { name, attrs } = *doc.data(el) {
+            if let Some(list) = self.by_tag.get(&name) {
+                out.extend_from_slice(list);
+            }
+            if !self.by_attr.is_empty() {
+                for a in doc.attrs(attrs) {
+                    if let Some(list) = self.by_attr.get(&a.name) {
+                        out.extend_from_slice(list);
+                    }
+                }
+            }
+        }
+        if let Some(id) = doc.attr(el, Atom::ID)
+            && let Some(list) = self.by_id.get(id)
+        {
+            out.extend_from_slice(list);
+        }
+        if let Some(classes) = doc.attr(el, Atom::CLASS) {
+            for class in classes.split_ascii_whitespace() {
+                if let Some(list) = self.by_class.get(class) {
+                    out.extend_from_slice(list);
+                }
+            }
+        }
+    }
+}
+
+/// The rules of one shadow tree (the sheets of its `<style>` elements and of its adopted sheets).
+#[derive(Default)]
+struct Shadowed {
+    /// The rules for the elements of the tree.
+    index: Index,
+    /// The rules for its host: `:host`, `:host(.a)`, `:host-context(.a)`.
+    host: Vec<u32>,
+    /// The rules for the nodes that its slots take: `::slotted()`.
+    slotted: Vec<u32>,
+    /// The `::part()` rules for the parts of the shadow trees of the hosts that this tree holds.
+    parts: Vec<u32>,
 }
 
 type Buckets<K> = HashMap<K, Vec<u32>, BuildHasherDefault<Fnv>>;
@@ -118,14 +203,12 @@ pub struct RuleSet {
     layer_by_name: HashMap<(u32, Box<str>), u32>,
     /// The custom properties of all rules (`--gap: 8px`), one after the other.
     customs: Vec<CustomDecl>,
-    by_id: Buckets<Box<str>>,
-    by_class: Buckets<Box<str>>,
-    by_tag: Buckets<Atom>,
-    /// The rules with an attribute test and no id or class in the last part, by the name of the attribute: `[data-state=open]`.
-    /// An element looks up the names of its own attributes, so a rule for an attribute that it does not have costs nothing.
-    by_attr: Buckets<Atom>,
-    /// The rules that have no id, no class, no attribute and no tag in the last part: `*`, `:first-child`.
-    other: Vec<u32>,
+    /// The rules of the document (and the browser's), found by what the last compound reads.
+    index: Index,
+    /// The rules of each shadow tree that has any, by `NodeId::index` of its root.
+    shadows: HashMap<u32, Shadowed, BuildHasherDefault<Fnv>>,
+    /// The `::part()` rules of the document.
+    parts: Vec<u32>,
     /// The user action state that some selector reads (`selector::USES_*`).
     user: u8,
     /// Where the selectors read each kind of state (`Scopes`).
@@ -312,7 +395,7 @@ impl RuleSet {
     }
 
     pub fn new(viewport: (f32, f32)) -> RuleSet {
-        RuleSet { viewport, entries: Vec::new(), decls: Vec::new(), side: Side::default(), layers: vec![Layer { parent: 0 }], layer_by_name: HashMap::new(), customs: Vec::new(), by_id: Buckets::default(), by_class: Buckets::default(), by_tag: Buckets::default(), by_attr: Buckets::default(), other: Vec::new(), user: 0, scopes: Scopes::default(), reach: std::cell::OnceCell::new() }
+        RuleSet { viewport, entries: Vec::new(), decls: Vec::new(), side: Side::default(), layers: vec![Layer { parent: 0 }], layer_by_name: HashMap::new(), customs: Vec::new(), index: Index::default(), shadows: HashMap::default(), parts: Vec::new(), user: 0, scopes: Scopes::default(), reach: std::cell::OnceCell::new() }
     }
 
     /// Which user action state (`:hover`, `:active`, the focus pseudo-classes) some rule reads: the bits `selector::USES_*`.
@@ -431,12 +514,20 @@ impl RuleSet {
         self.add_in_layer(doc, text, origin, None);
     }
 
+    /// The same, for a style sheet of the shadow tree `scope` (a shadow root).
+    pub fn add_scoped(&mut self, doc: &mut Document, text: &str, origin: Origin, layer: Option<&str>, scope: NodeId) {
+        let layer = layer.map_or(Some(0), |path| self.layer_path(0, path));
+        if let Some(layer) = layer {
+            self.add_rules(doc, parse_stylesheet(text), origin, layer, scope.index() as u32, 0);
+        }
+    }
+
     /// The same, for a style sheet that is in a layer: `@import url(a.css) layer(x)`. `layer` is the name (`x`, or `x.y`).
     /// An empty name is a layer with no name.
     pub fn add_in_layer(&mut self, doc: &mut Document, text: &str, origin: Origin, layer: Option<&str>) {
         let layer = layer.map_or(Some(0), |path| self.layer_path(0, path));
         if let Some(layer) = layer {
-            self.add_rules(doc, parse_stylesheet(text), origin, layer, 0);
+            self.add_rules(doc, parse_stylesheet(text), origin, layer, 0, 0);
         }
     }
 
@@ -495,7 +586,8 @@ impl RuleSet {
 
     /// Add the rules. A `@media` or `@supports` block that says yes adds the rules inside it, and so does a `@layer` block (in its layer). Other at-rules add nothing:
     /// `@import` is for the app (see `imports`), and `@container` waits for layout.
-    fn add_rules(&mut self, doc: &mut Document, rules: Vec<Rule<'_>>, origin: Origin, layer: u32, depth: usize) {
+    /// `scope` is the root of the shadow tree that the sheet belongs to, or 0 for the document.
+    fn add_rules(&mut self, doc: &mut Document, rules: Vec<Rule<'_>>, origin: Origin, layer: u32, scope: u32, depth: usize) {
         for rule in rules {
             let rule = match rule {
                 Rule::Style(rule) => rule,
@@ -509,7 +601,7 @@ impl RuleSet {
                         }
                         AtBody::Rules(inner) if depth < 32 => {
                             if let Some(inner_layer) = self.layer_path(layer, at.prelude) {
-                                self.add_rules(doc, inner, origin, inner_layer, depth + 1);
+                                self.add_rules(doc, inner, origin, inner_layer, scope, depth + 1);
                             }
                         }
                         _ => {}
@@ -525,13 +617,13 @@ impl RuleSet {
                     };
                     // The parser stops at depth 32, so this is a safety net for the stack.
                     if yes && depth < 32 {
-                        self.add_rules(doc, inner, origin, layer, depth + 1);
+                        self.add_rules(doc, inner, origin, layer, scope, depth + 1);
                     }
                     continue;
                 }
             };
             // A rule with a selector that is not valid is dropped, with all its selectors (the standard says so).
-            let Some(selectors) = parse_selector_list(rule.prelude, doc) else { continue };
+            let Some(selectors) = parse_selector_list_in(rule.prelude, doc, if scope == 0 { Mode::Document } else { Mode::Shadow }) else { continue };
             let (start, custom_start) = (self.decls.len(), self.customs.len());
             for d in &rule.declarations {
                 if d.name.starts_with("--") {
@@ -546,12 +638,12 @@ impl RuleSet {
             let decls = (start as u32, self.decls.len() as u32);
             let customs = (custom_start as u32, self.customs.len() as u32);
             for selector in selectors {
-                self.push(selector, decls, customs, layer, origin);
+                self.push(selector, decls, customs, layer, origin, scope);
             }
         }
     }
 
-    fn push(&mut self, selector: Selector, decls: (u32, u32), customs: (u32, u32), layer: u32, origin: Origin) {
+    fn push(&mut self, selector: Selector, decls: (u32, u32), customs: (u32, u32), layer: u32, origin: Origin, scope: u32) {
         if selector.compounds.iter().any(|c| c.simples.contains(&Simple::Never)) {
             return;
             // `a:hover` never matches. Keep it out of the index: it only costs time.
@@ -560,23 +652,31 @@ impl RuleSet {
         self.scopes.add(&selector);
         self.reach.take();
         let index = self.entries.len() as u32;
-        // The bucket: an id is the most specific, then a class, then an attribute, then a tag. An attribute comes before a tag:
-        // `input[type=checkbox]` is in the list of `type`, and few elements have a `type`; most elements are a `div`.
-        let last = &selector.compounds[0].simples;
-        if let Some(Simple::Id(id)) = last.iter().find(|s| matches!(s, Simple::Id(_))) {
-            self.by_id.entry(id.clone()).or_default().push(index);
-        } else if let Some(Simple::Class(class)) = last.iter().find(|s| matches!(s, Simple::Class(_))) {
-            self.by_class.entry(class.clone()).or_default().push(index);
-        } else if let Some(&Simple::Attr { name, .. }) = last.iter().find(|s| matches!(s, Simple::Attr { .. })) {
-            // Every attribute test needs the attribute: an element without it never matches.
-            self.by_attr.entry(name).or_default().push(index);
-        } else if let Some(&Simple::Tag(tag)) = last.iter().find(|s| matches!(s, Simple::Tag(_))) {
-            self.by_tag.entry(tag).or_default().push(index);
+        // A rule for the host, for a slotted node or for a part is not offered to the elements of its tree: the cascade looks for it where it applies.
+        let host = selector.compounds[0].simples.iter().any(|s| matches!(s, Simple::Host(_) | Simple::HostContext(_)));
+        let mut ctx = match (&selector.pseudo, host) {
+            (Some(ShadowPseudo::Part { .. }), _) => OUTER,
+            (Some(ShadowPseudo::Slotted(_)), _) | (None, true) => INNER,
+            (None, false) => OWN,
+        };
+        if scope == 0 {
+            if ctx == OUTER {
+                self.parts.push(index);
+                ctx = OUTERMOST;
+            } else if ctx == OWN {
+                self.index.push(index, &selector);
+            }
         } else {
-            self.other.push(index);
+            let tree = self.shadows.entry(scope).or_default();
+            match (&selector.pseudo, host) {
+                (Some(ShadowPseudo::Part { .. }), _) => tree.parts.push(index),
+                (Some(ShadowPseudo::Slotted(_)), _) => tree.slotted.push(index),
+                (None, true) => tree.host.push(index),
+                (None, false) => tree.index.push(index, &selector),
+            }
         }
         let ancestors = ancestor_hashes(&selector);
-        self.entries.push(Entry { selector, decls, customs, layer, origin, ancestors });
+        self.entries.push(Entry { selector, decls, customs, layer, origin, ancestors, ctx });
     }
 
     /// Find the style of every element that is shown. The selectors must come from `add` with this same `doc`.
@@ -610,32 +710,34 @@ impl RuleSet {
         let mut filter = AncestorFilter::new();
         let mut memo = Memo::default();
         let (mut candidates, mut matched): (Vec<u32>, Vec<u32>) = (Vec::new(), Vec::new());
-        let mut stack = vec![(doc.root(), false, false)];
+        let mut stack = vec![(doc.root(), false, 0u32)];
         // The walk is a loop with a stack, and not a function that calls itself: a deep tree cannot overflow the call stack.
         // `true` means that we leave the node, and we take its hashes out of the filter.
-        // It walks the flat tree: a host's children are those of its shadow root. The third value says the node is in a shadow tree.
-        // There, only the browser's rules match: the page's rules do not reach into a shadow tree (Stylo, Blink), and the
-        // shadow tree's own sheets are not built (the geometry module refuses a shadow tree that has one).
-        while let Some((node, leaving, shadow)) = stack.pop() {
+        // It walks the tree of the cascade: a host's children are those of its shadow root, and a slot's are the nodes that it takes (or its own
+        // children when it takes none). The third value is the tree of the node: 0 for the document, else its shadow root. In a shadow tree
+        // the rules of the document do not match (Stylo, Blink): the browser's rules and the rules of the tree do.
+        let shadowed = doc.has_shadow_roots();
+        while let Some((node, leaving, scope)) = stack.pop() {
             match doc.data(node) {
                 NodeData::Element { .. } if leaving => {
                     element_hashes(doc, node, &mut |h| filter.remove(h));
                     continue;
                 }
                 NodeData::Element { .. } => {
-                    let parent = doc.flat_parent(node).map_or(0, |p| styles.of_node[p.index()]);
+                    let parent = doc.style_parent(node).map_or(0, |p| styles.of_node[p.index()]);
                     let parent = if parent == NONE { 0 } else { parent };
-                    self.candidates(doc, node, &mut candidates);
-                    if shadow {
-                        // Outside the hot loop: a light-tree element pays nothing for this.
-                        candidates.retain(|&i| self.entries[i as usize].origin == Origin::UserAgent);
-                    }
-                    matched.clear();
-                    for &i in &candidates {
-                        let e = &self.entries[i as usize];
-                        let possible = e.ancestors.iter().take_while(|&&h| h != 0).all(|&h| filter.may_contain(h));
-                        if possible && matches(doc, node, &e.selector) {
-                            matched.push(i);
+                    if shadowed {
+                        // Outside the hot loop: a page without a shadow root pays one test of a local for this.
+                        self.match_shadowed(doc, node, scope, &filter, &mut (&mut candidates, &mut matched));
+                    } else {
+                        self.candidates(doc, node, &mut candidates);
+                        matched.clear();
+                        for &i in &candidates {
+                            let e = &self.entries[i as usize];
+                            let possible = e.ancestors.iter().take_while(|&&h| h != 0).all(|&h| filter.may_contain(h));
+                            if possible && matches(doc, node, &e.selector) {
+                                matched.push(i);
+                            }
                         }
                     }
                     matched.sort_unstable();
@@ -648,12 +750,12 @@ impl RuleSet {
                     if hidden {
                         // No style for what is inside, and no filter work. `compute_for` goes on only to the node on the way to `want`.
                         if WANT {
-                            way.visit(doc, node, id, true, shadow, (&styles, &mut cx, &mut filter, &mut stack));
+                            way.visit(doc, node, id, true, scope, (&styles, &mut cx, &mut filter, &mut stack));
                         }
                         continue;
                     }
                     if WANT && way.on {
-                        way.visit(doc, node, id, false, shadow, (&styles, &mut cx, &mut filter, &mut stack));
+                        way.visit(doc, node, id, false, scope, (&styles, &mut cx, &mut filter, &mut stack));
                         continue;
                     }
                     if doc.parent(node) == Some(doc.root()) {
@@ -661,16 +763,19 @@ impl RuleSet {
                         cx.root_font_size = styles.styles[id as usize].px(Property::FontSize);
                     }
                     element_hashes(doc, node, &mut |h| filter.add(h));
-                    stack.push((node, true, shadow));
+                    stack.push((node, true, scope));
                 }
                 NodeData::Document => {}
                 _ => continue,
             }
             // The children, so that the first child comes out of the stack first.
-            let root = doc.shadow_root(node);
-            let mut child = doc.last_child(root.unwrap_or(node));
+            if shadowed {
+                push_children(doc, node, scope, &mut stack);
+                continue;
+            }
+            let mut child = doc.last_child(node);
             while let Some(c) = child {
-                stack.push((c, false, shadow || root.is_some()));
+                stack.push((c, false, 0));
                 child = doc.prev_sibling(c);
             }
         }
@@ -691,6 +796,9 @@ impl RuleSet {
     /// cache, the font size of the root element changes, or the styles grew too much): then the caller runs
     /// `compute_kept`; no node has a new style then. Equal style numbers mean equal values, so a style that did not change keeps its number.
     pub fn restyle(&self, doc: &Document, styles: &mut Styles, roots: &[(NodeId, bool)], changed: &mut Vec<(NodeId, u32)>) -> bool {
+        if self.scoped(doc) {
+            return false;
+        }
         let html = doc.children(doc.root()).find(|&n| matches!(doc.data(n), NodeData::Element { .. }));
         let Some(mut k) = styles.kept.take() else { return false };
         // A style that a restyle makes stays in the list: a page that makes new ones all the time starts again from time to time.
@@ -800,6 +908,12 @@ impl RuleSet {
         ok
     }
 
+    /// Does the cascade of `doc` use the rules of a shadow tree, or slots? A partial restyle cannot follow them: a change reaches through the host, a slot
+    /// and a part, and `restyle` and `style_hidden` give up (the caller runs the whole cascade).
+    fn scoped(&self, doc: &Document) -> bool {
+        doc.has_shadow_roots() && (!self.shadows.is_empty() || !self.parts.is_empty() || doc.has_slots())
+    }
+
     /// A `Cx` that adds to the value lists of `styles` and to the indexes of `k`, so that equal values keep their numbers.
     fn kept_cx(&self, styles: &mut Styles, k: &mut StyleKeep) -> Cx<'_> {
         Cx {
@@ -837,6 +951,9 @@ impl RuleSet {
     /// of `want`, not the size of the page. `None` when it cannot: the styles keep no cache or grew too much, the root element
     /// is hidden (`rem`), or `want` is not on a way that the walk takes (a light child of a shadow host). Then use `compute_for`.
     pub fn style_hidden(&self, doc: &Document, styles: &mut Styles, want: NodeId) -> Option<ComputedStyle> {
+        if self.scoped(doc) {
+            return None;
+        }
         let mut path: Vec<NodeId> = std::iter::successors(Some(want), |&n| doc.flat_parent(n)).collect();
         if path.pop() != Some(doc.root()) || path.is_empty() {
             return None;
@@ -889,35 +1006,94 @@ impl RuleSet {
         Some(styles.styles[parent as usize].clone())
     }
 
-    /// The rules that may match the element: the ones in the lists for its id, its classes, its attributes and its tag, and the "other" list.
+    /// The rules that match `node` when the document has a shadow root: `matched` is the list (not sorted). `scope` is the tree of `node` (0 for the
+    /// document). The rules of the document do not reach into a shadow tree: its elements get the browser's rules and the rules of the
+    /// tree. A host also gets the `:host` rules of its tree, a node that a slot takes the `::slotted()` rules of the tree of the slot, and an
+    /// element with a `part` the `::part()` rules of the trees around it.
+    #[inline(never)]
+    fn match_shadowed(&self, doc: &Document, node: NodeId, scope: u32, filter: &AncestorFilter, (candidates, matched): &mut (&mut Vec<u32>, &mut Vec<u32>)) {
+        self.candidates(doc, node, candidates);
+        if scope != 0 {
+            candidates.retain(|&i| self.entries[i as usize].origin == Origin::UserAgent);
+            if let Some(tree) = self.shadows.get(&scope) {
+                tree.index.collect(doc, node, candidates);
+            }
+        }
+        matched.clear();
+        for &i in candidates.iter() {
+            let e = &self.entries[i as usize];
+            let possible = e.ancestors.iter().take_while(|&&h| h != 0).all(|&h| filter.may_contain(h));
+            if possible && matches(doc, node, &e.selector) {
+                matched.push(i);
+            }
+        }
+        if self.shadows.is_empty() && self.parts.is_empty() {
+            return;
+        }
+        if let Some(root) = doc.shadow_root(node)
+            && let Some(tree) = self.shadows.get(&(root.index() as u32))
+        {
+            matched.extend(tree.host.iter().copied().filter(|&i| matches(doc, node, &self.entries[i as usize].selector)));
+        }
+        if let Some(slot) = doc.assigned_slot(node)
+            && let Some(tree) = self.shadows.get(&(doc.tree_root(slot).index() as u32))
+        {
+            for &i in &tree.slotted {
+                let e = &self.entries[i as usize];
+                if let Some(ShadowPseudo::Slotted(arg)) = &e.selector.pseudo
+                    && compound_matches(doc, node, arg)
+                    && matches(doc, slot, &e.selector)
+                {
+                    matched.push(i);
+                }
+            }
+        }
+        if scope != 0 {
+            self.match_parts(doc, node, matched);
+        }
+    }
+
+    /// The `::part()` rules for `node`, an element of a shadow tree. A rule of the tree around the host matches when the host matches the selector
+    /// and `node` has all the names. Each host on the way out passes on the parts that its `exportparts` names.
+    fn match_parts(&self, doc: &Document, node: NodeId, matched: &mut Vec<u32>) {
+        let Some(part) = doc.find_atom("part") else { return };
+        let export = doc.find_atom("exportparts");
+        let Some(names) = doc.attr(node, part) else { return };
+        let mut names: Vec<String> = names.split_ascii_whitespace().map(str::to_string).collect();
+        let mut root = doc.tree_root(node);
+        while !names.is_empty()
+            && let Some(host) = doc.shadow_host(root)
+        {
+            let outer = doc.tree_root(host);
+            let rules = if outer == doc.root() { Some(&self.parts) } else { self.shadows.get(&(outer.index() as u32)).map(|t| &t.parts) };
+            for &i in rules.into_iter().flatten() {
+                let e = &self.entries[i as usize];
+                if let Some(ShadowPseudo::Part { names: want, then }) = &e.selector.pseudo
+                    && want.iter().all(|w| names.iter().any(|n| n == &**w))
+                    && compound_matches(doc, node, then)
+                    && matches(doc, host, &e.selector)
+                {
+                    matched.push(i);
+                }
+            }
+            // `exportparts="inner: outer, same"`
+            let mut next = Vec::new();
+            for item in export.and_then(|e| doc.attr(host, e)).unwrap_or("").split(',') {
+                let (inner, outer) = item.split_once(':').map_or((item.trim(), item.trim()), |(a, b)| (a.trim(), b.trim()));
+                if !outer.is_empty() && names.iter().any(|n| n == inner) {
+                    next.push(outer.to_string());
+                }
+            }
+            names = next;
+            root = outer;
+        }
+    }
+
+    /// The rules of the document that may match the element (`Index::collect`).
     #[inline(always)]
     fn candidates(&self, doc: &Document, el: NodeId, out: &mut Vec<u32>) {
         out.clear();
-        out.extend_from_slice(&self.other);
-        if let NodeData::Element { name, attrs } = *doc.data(el) {
-            if let Some(list) = self.by_tag.get(&name) {
-                out.extend_from_slice(list);
-            }
-            if !self.by_attr.is_empty() {
-                for a in doc.attrs(attrs) {
-                    if let Some(list) = self.by_attr.get(&a.name) {
-                        out.extend_from_slice(list);
-                    }
-                }
-            }
-        }
-        if let Some(id) = doc.attr(el, Atom::ID)
-            && let Some(list) = self.by_id.get(id)
-        {
-            out.extend_from_slice(list);
-        }
-        if let Some(classes) = doc.attr(el, Atom::CLASS) {
-            for class in classes.split_ascii_whitespace() {
-                if let Some(list) = self.by_class.get(class) {
-                    out.extend_from_slice(list);
-                }
-            }
-        }
+        self.index.collect(doc, el, out);
     }
 
     /// The number of the style of an element. It is found in the cache, or it is made.
@@ -960,7 +1136,7 @@ impl RuleSet {
         let mut set = 0u128;
         // The key of a declaration: the one with the bigger key wins. The parts, from the most important: the origin and `!important`,
         // the layer, the specificity, and the place in the page. A `style=""` attribute has no layer (`None`): it beats every layer.
-        let key = |important: bool, origin: Origin, layer: Option<u32>, specificity: u32, order: u32| {
+        let key = |important: bool, origin: Origin, ctx: u8, layer: Option<u32>, specificity: u32, order: u32| {
             let rank = match (important, origin) {
                 (false, Origin::UserAgent) => 0u128,
                 (false, Origin::Author) => 1,
@@ -973,7 +1149,16 @@ impl RuleSet {
                 Some(l) if important => u32::MAX - 1 - cx.layer_order[l as usize],
                 Some(l) => cx.layer_order[l as usize],
             };
-            rank << 96 | u128::from(layer) << 64 | u128::from(specificity) << 32 | u128::from(order)
+            // The tree context comes after the origin and before the layer: the outer context wins for a normal declaration, the inner one for
+            // an important one. The tree of the element (`OWN`) is between them, and a `style=""` attribute is in it.
+            let outer = match ctx {
+                INNER => 0u128,
+                OWN => 1,
+                OUTER => 2,
+                _ => 3,
+            };
+            let tree = if important { 3 - outer } else { outer };
+            rank << 98 | tree << 96 | u128::from(layer) << 64 | u128::from(specificity) << 32 | u128::from(order)
         };
         // The presentational hints (`hints.rs`): author declarations that any rule beats. Their key is the least of the author origin.
         if let Some(text) = hint {
@@ -984,12 +1169,12 @@ impl RuleSet {
             for d in &out {
                 let p = d.property as usize;
                 winners[p] = Some(d.value);
-                keys[p] = 1 << 96;
+                keys[p] = 1 << 98;
                 set |= 1 << p;
             }
         }
-        let mut apply = |d: &Declared, origin: Origin, layer: Option<u32>, specificity: u32, order: u32| {
-            let key = key(d.important, origin, layer, specificity, order);
+        let mut apply = |d: &Declared, origin: Origin, ctx: u8, layer: Option<u32>, specificity: u32, order: u32| {
+            let key = key(d.important, origin, ctx, layer, specificity, order);
             let p = d.property as usize;
             if winners[p].is_none() || key >= keys[p] {
                 winners[p] = Some(d.value);
@@ -1021,11 +1206,11 @@ impl RuleSet {
         for &i in matched {
             let e = &self.entries[i as usize];
             for d in &self.decls[e.decls.0 as usize..e.decls.1 as usize] {
-                apply(d, e.origin, Some(e.layer), e.selector.specificity, i);
+                apply(d, e.origin, e.ctx, Some(e.layer), e.selector.specificity, i);
             }
             if merged.is_none() {
                 for d in &self.customs[e.customs.0 as usize..e.customs.1 as usize] {
-                    apply_custom(&mut own, &mut own_at, d, key(d.important, e.origin, Some(e.layer), e.selector.specificity, i));
+                    apply_custom(&mut own, &mut own_at, d, key(d.important, e.origin, e.ctx, Some(e.layer), e.selector.specificity, i));
                 }
             }
         }
@@ -1059,10 +1244,10 @@ impl RuleSet {
             *cx.inline.borrow_mut() = inline_side;
             // The specificity of a `style=""` attribute is more than the most that a selector can have (1 << 30, and the most is one less).
             for d in &inline_decls {
-                apply(d, Origin::Author, None, 1 << 30, u32::MAX >> 1);
+                apply(d, Origin::Author, OWN, None, 1 << 30, u32::MAX >> 1);
             }
             for d in &inline_customs {
-                apply_custom(&mut own, &mut own_at, d, key(d.important, Origin::Author, None, 1 << 30, u32::MAX >> 1));
+                apply_custom(&mut own, &mut own_at, d, key(d.important, Origin::Author, OWN, None, 1 << 30, u32::MAX >> 1));
             }
         }
         // The custom properties: the ones of the parent, and the ones of this element. Most elements set none, and share the set of the parent.
@@ -1288,10 +1473,44 @@ impl Cx<'_> {
 
 const NONE: u32 = u32::MAX;
 
+/// The tree of `n`: 0 for the document, else the number of its shadow root.
+fn scope_of(doc: &Document, n: NodeId) -> u32 {
+    let root = doc.tree_root(n);
+    if root == doc.root() { 0 } else { root.index() as u32 }
+}
+
+/// Push the children of `node` in the tree of the cascade, last first: its shadow root's if it is a host, what it takes (or its own fallback
+/// children) if it is a slot, else its own. `scope` is the tree of `node`.
+#[inline(never)]
+fn push_children(doc: &Document, node: NodeId, scope: u32, stack: &mut Vec<(NodeId, bool, u32)>) {
+    if let Some(root) = doc.shadow_root(node) {
+        let mut child = doc.last_child(root);
+        while let Some(c) = child {
+            stack.push((c, false, root.index() as u32));
+            child = doc.prev_sibling(c);
+        }
+        return;
+    }
+    if doc.is_slot(node) {
+        let taken = doc.assigned_nodes(node);
+        if !taken.is_empty() {
+            // The nodes are in the tree of the host.
+            let outer = doc.shadow_host(doc.tree_root(node)).map_or(0, |host| scope_of(doc, host));
+            stack.extend(taken.into_iter().rev().map(|c| (c, false, outer)));
+            return;
+        }
+    }
+    let mut child = doc.last_child(node);
+    while let Some(c) = child {
+        stack.push((c, false, scope));
+        child = doc.prev_sibling(c);
+    }
+}
+
 /// The way from the root to the element that `compute_for` was asked about. It is made at the first `display:none` element.
 struct Way {
     want: Option<NodeId>,
-    /// The flat ancestors of `want` from the root down to `want`. Empty when `want` is not connected, or not made yet.
+    /// The ancestors of `want` in the tree of the cascade, from the root down to `want`. Empty when `want` is not connected, or not made yet.
     path: Vec<NodeId>,
     /// The places (`NodeId::index`) of `path`, sorted: is a node on the path?
     sorted: Vec<u32>,
@@ -1307,14 +1526,14 @@ impl Way {
     /// A `display:none` element, or a node on the way to `want`, was styled: go on to the next node on the way, if there is one.
     #[cold]
     #[inline(never)]
-    fn visit(&mut self, doc: &Document, node: NodeId, id: u32, hidden: bool, shadow: bool, (styles, cx, filter, stack): (&Styles, &mut Cx<'_>, &mut AncestorFilter, &mut Vec<(NodeId, bool, bool)>)) {
+    fn visit(&mut self, doc: &Document, node: NodeId, id: u32, hidden: bool, scope: u32, (styles, cx, filter, stack): (&Styles, &mut Cx<'_>, &mut AncestorFilter, &mut Vec<(NodeId, bool, u32)>)) {
         let Some(next) = self.step(doc, node, hidden) else { return };
         if doc.parent(node) == Some(doc.root()) {
             cx.root_font_size = styles.styles[id as usize].px(Property::FontSize);
         }
         element_hashes(doc, node, &mut |h| filter.add(h));
-        stack.push((node, true, shadow));
-        stack.push((next, false, shadow || doc.shadow_root(node).is_some()));
+        stack.push((node, true, scope));
+        stack.push((next, false, scope_of(doc, next)));
     }
 
     #[cold]
@@ -1325,7 +1544,7 @@ impl Way {
                 let mut up = Some(want);
                 while let Some(n) = up {
                     self.path.push(n);
-                    up = doc.flat_parent(n);
+                    up = doc.style_parent(n);
                 }
                 self.path.reverse();
                 if self.path[0] != doc.root() {

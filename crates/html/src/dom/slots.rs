@@ -80,6 +80,11 @@ impl Document {
         self.slots().of.get(&(node.index() as u32)).map(|&(s, _)| s)
     }
 
+    /// Does any shadow tree have a `<slot>`?
+    pub fn has_slots(&self) -> bool {
+        !self.shadow_of.is_empty() && !self.slots().assigned.is_empty()
+    }
+
     /// Is `el` a `<slot>` element of a shadow tree?
     pub fn is_slot(&self, el: NodeId) -> bool {
         !self.shadow_of.is_empty() && self.slots().assigned.contains_key(&(el.index() as u32))
