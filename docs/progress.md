@@ -4696,7 +4696,7 @@ Stack Overflow is still behind a Cloudflare challenge. The initial path can retu
 
 GNU is unreachable from archMachine and arjun-e16. curl resolved `209.51.188.116` and timed out connecting to port 443 after eight seconds on both machines. IPv6 `2001:470:142:5::116` has no route on both. No TLS or HTTP exchange occurred. No code change applies to this network failure.
 
-The public runner passed all 33 journeys with zero failures, skips or flakes. The crate tests passed: 1,115 passed, six ignored. The release workspace suite passed: 3,229 tests passed, 13 ignored, zero failures. The corrected full cost gate passed: 805 rows, zero over +0.5% under either allocator, zero failures. Mean glibc change: -0.002%. The matrix took 146 seconds. No row needed the conditional jemalloc rerun. The 11-row repeats below measured both allocators.
+The public runner passed all 33 journeys with zero failures, skips or flakes. The crate tests passed: 1,115 passed, six ignored. The release workspace suite passed: 3,229 tests passed, 13 ignored, zero failures. The corrected full cost gate passed: 805 rows, zero rows over +0.5% under glibc, zero failures. Mean glibc change: -0.002%. The matrix took 146 seconds. No row needed the conditional jemalloc rerun. The 11-row repeats below measured both allocators.
 
 Not tested: exact Chrome wire headers and header-order isolation, GNU rendering or TLS after connectivity returns, Substack content beyond the body-visible assertion, and resource loads above the configured cap.
 
