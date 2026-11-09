@@ -4638,3 +4638,46 @@ No journey was added for archive.org. The task asked for a typed search. A locat
 - A shadow tree with a `<link rel=stylesheet>` (the plan code handles it like a document link; no test fetches one).
 - Chrome 155 comparison of the computed values in the new tests (the expectations are from CSS Scoping, read by hand).
 - Events that start in a shadow tree: a composed event is still refused with `Unsupported`.
+
+## Cost fix for `sheets_load dynamic 10` and `platform_load media` (after #301)
+
+After #301 two cost rows were over the limit under both allocators against the base build of 94727a6 (the parent of the #301 merge): `sheets_load dynamic 10` (+0.67% glibc, +0.67% jemalloc) and `platform_load media` 1 and 10 (+0.99% and +1.26% glibc, +0.97% and +1.26% jemalloc). Both come from #301 alone: the build of the merge commit a1b7a80 gives the same counts as origin/main.
+
+### Cause
+
+- `sheets_load dynamic` adds one `<link>` for each timer and reads after each. The rules of the cascade (`Built`) are cached by the list of sheets, but the list is longer at each read, so the cache never hits. Each of the 50 reads parsed the browser's sheet and all earlier sheets again. Hypothesis: #301 made each parsed rule dearer (a scope, a context and the shadow pseudo-elements in the selector parser). The per-function samples show more tokenizer, parser and selector work, and that cost repeats for every sheet at every read.
+- `platform_load media` has no sheet. It calls `at_rules::feature` for every media list at every viewport change. That function was not changed. The code for `trim_start_matches("min-")` changed because the crate grew: the build of a1b7a80 runs the string searcher (`StrSearcher::next`) for it, the base build ran a short function. Measured with `perf record -e instructions:u -c <period>`: about 270 samples in `StrSearcher::next` against 190 in `trim_start_matches`, of 8700. `perf record` loses about half of the samples on runs this short, so the sample counts only show where the extra instructions are. The `perf stat` counts of the rows are the proof.
+
+### Change
+
+- `browser_computed.rs`, `cascade_with`: when the new list of sheets starts with the list of the last build (the same scope, layer and text for each earlier sheet) and the viewport is the same, the new sheets are added to the rules of the last build. Adding in order gives the same rules as a new build. Any other change (a sheet before another, a changed text, a removed sheet) builds the rules again as before. `builds` still counts each change, so `restyle_frame` still sees it.
+- `at_rules.rs`, `feature`: `strip_prefix` in two loops in place of two `trim_start_matches` calls. The result is the same for every name, including `min-max-width`.
+- Test `appended_sheets_add_to_the_rules_and_an_earlier_sheet_rebuilds_them`: one sheet added at the end (a new layer, a later rule that wins a tie), one added before the first sheet, one removed. It was not run against the old code. It pins the result that the incremental add must keep.
+
+### Results
+
+Instructions of `instr.sh` (minimum of 3 runs), base build of 94727a6 against this change. Each row was run 3 times; the three runs differ by less than 0.05%.
+
+| Row | glibc before | glibc after | jemalloc before | jemalloc after |
+|---|---|---|---|---|
+| `sheets_load dynamic 1` | 14208829 | 9928652 (-30.1%) | 20716182 | 16243633 (-21.6%) |
+| `sheets_load dynamic 10` | 116653238 | 55584277 (-52.4%) | 127156955 | 63265076 (-50.2%) |
+| `platform_load media 1` | 62377890 | 56566371 (-9.3%) | 68688944 | 62915274 (-8.4%) |
+| `platform_load media 10` | 522811469 | 465162948 (-11.0%) | 530950387 | 473372155 (-10.8%) |
+
+Before the change, against the same base: `dynamic 10` was 117435766 glibc and 128011252 jemalloc; `media 10` was 529387118 and 537599815.
+
+Full cost matrix against 94727a6 (805 rows): 0 rows over the limit under both allocators. Six rows are over under glibc only and under +0.1% with jemalloc: `block-deep 40`, `block-nested-collapse 20`, `overflow-nested-auto 20`, `overflow-wide-content 2000` (bare-stress) and `resources_load small 1` and `small 10`. They are the glibc noise that the rule allows. Mean change: glibc -0.38%, jemalloc +0.06%.
+
+### Checks
+
+- `cargo test --release --workspace`: 3228 passed, 0 failed.
+- `tools/drive/public/run.sh`: pass 31, fail 0, known 0, flakes 0.
+- The shadow DOM tests (`browser_shadow_tests`, `shadow_tests`) are in the workspace run.
+
+### Not tested
+
+- Chrome 155 comparison of the media feature parse (the code gives the same result as before for every name; no new case was compared).
+- A page that appends a sheet in a shadow tree between two reads (the key holds the scope, so it goes through the same prefix test; no test covers it).
+- `tools/js/typing/keycost.sh` (no change in `crates/js` or the DOM hot path).
+- The cost matrix on arjun-e16.

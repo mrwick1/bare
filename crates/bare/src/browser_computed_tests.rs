@@ -106,6 +106,22 @@ fn held_object_follows_class_style_and_style_element_changes() {
 }
 
 #[test]
+fn appended_sheets_add_to_the_rules_and_an_earlier_sheet_rebuilds_them() {
+    let mut b = at("<!doctype html><html><head><style>@layer a, b; @layer b { #a { color: red } } #p { display: inline }</style></head><body><div id=a></div><p id=p></p></body></html>");
+    js(&mut b, "var cs = getComputedStyle(document.getElementById('a')), ps = getComputedStyle(document.getElementById('p')); 0");
+    assert_eq!(js(&mut b, "cs.color + '|' + ps.display"), "rgb(255, 0, 0)|inline");
+    let builds = b.computed_stats().builds;
+    // Added at the end: a later sheet wins a tie, and a layer that is new comes after the layers that exist.
+    let add = "var n = document.createElement('style'); n.textContent = '@layer a { #a { color: blue } } #p { display: flex }'; document.head.appendChild(n); cs.color + '|' + ps.display";
+    assert_eq!(js(&mut b, add), "rgb(255, 0, 0)|flex");
+    assert_eq!(b.computed_stats().builds, builds + 1);
+    // Added before the first sheet: the rules are made again, in the order of the page.
+    let first = "var m = document.createElement('style'); m.textContent = '#p { display: grid }'; document.head.insertBefore(m, document.head.firstChild); cs.color + '|' + ps.display";
+    assert_eq!(js(&mut b, first), "rgb(255, 0, 0)|flex");
+    assert_eq!(js(&mut b, "document.head.removeChild(n); cs.color + '|' + ps.display"), "rgb(255, 0, 0)|inline");
+}
+
+#[test]
 fn viewport_changes_reach_the_held_object() {
     let mut b = at("<!doctype html><html><head><style>@media (max-width: 500px) { #a { direction: rtl } }</style></head><body><div id=a></div></body></html>");
     js(&mut b, "var cs = getComputedStyle(document.getElementById('a')); 0");
