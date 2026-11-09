@@ -327,7 +327,7 @@ Design rules, so that a port is small:
 
 ## Fonts
 
-Changed on 2026-11-05. Text is drawn from the outlines of Noto Sans Mono, the font whose numbers layout uses. `data/fonts/` holds Regular and Bold, each cut down to 22 KB (Basic Latin, Latin-1, common punctuation, bullets, boxes and arrows), with the OFL license. The files are built into the program, so no system font is read and the pixels do not depend on the machine. A letter that the files lack is not drawn. There is no fallback font yet. There is no bitmap font.
+Changed on 2026-11-05. Text is drawn from the outlines of Noto Sans Mono, the font whose numbers layout uses. `data/fonts/` holds Regular and Bold, each cut down to 22 KB (Basic Latin, Latin-1, common punctuation, bullets, boxes and arrows), with the OFL license. The files are built into the program, so no system font is read and the pixels do not depend on the machine. Two more built-in faces fill the gaps: a Noto Sans Symbols2 subset (4 KB; check marks, crosses, stars) and a Noto Sans Arabic Regular subset (86 KB; the Arabic blocks U+0600-06FF, 0750-077F, 08A0-08FF, FB50-FDFF, FE70-FEFF). So there are four built-in faces. The Arabic face is read on the first Arabic letter, so a page with none pays nothing. A letter that no face has (Chinese, Japanese, Korean, emoji) is not drawn. No system font is read, ever. Pull request #313 read an installed Arabic font; that broke this rule and was removed. There is no bitmap font.
 
 ## Paint
 

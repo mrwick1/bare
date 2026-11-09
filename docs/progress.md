@@ -5069,3 +5069,21 @@ The counts use perf stat -e instructions:u, with the minimum of three runs per a
 The test262 baseline gate passes. exec_diff reports zero differences in 79 runs. Typing costs 282.5 M instructions per textarea key and 287.9 M per input key. Peak RSS at 50 keys is 33.0 MiB. After the final rebase, 1,134 browser library tests and 840 JS library tests pass.
 
 Not tested: the full test262 suite and authenticated GitHub or GitLab flows.
+
+## Built-in Arabic glyph subset (2026-11-10)
+
+Problem. Pull request #313 drew Arabic letters from `/usr/share/fonts/noto/NotoSansArabic-Regular.ttf`, read at run time. This broke the "Fonts" decision in `docs/decisions.md`: no system font is read, and the pixels do not depend on the machine. arjun-e16 has no such file, so Arabic pages drew blank there. The test `installed_arabic_font_supplies_missing_letters` returned early when the file was missing. It passed on e16 and checked nothing.
+
+Change. `data/fonts/NotoSansArabic-subset.ttf` is a subset of Noto Sans Arabic Regular. It covers U+0600-06FF, 0750-077F, 08A0-08FF, FB50-FDFF and FE70-FEFF (644 characters). It is made with `pyftsubset` (fonttools 4.63) with no hinting and no layout tables. It is built in with `include_bytes!` and made on the first Arabic letter, as the symbols face is. The system path read is gone. `fallback` stays `#[cold] #[inline(never)]`. The license is `data/fonts/OFL-Arabic.txt`. `docs/decisions.md` now lists four built-in faces and no system font.
+
+Size. The font is 87,612 bytes. The `bare-drive` release binary grew from 15,308,104 to 15,393,304 bytes (+85,200).
+
+Checks.
+
+- The new test `built_in_arabic_face_supplies_missing_letters` never skips. It checks face 3 and a non-zero mask for four letters: `ع` and `ب` (U+0600 block), `ﻋ` (FE70 block) and `ﷲ` (FB50 block). I ran it on the old code with `/usr/share/fonts` hidden (`bwrap --tmpfs /usr/share/fonts`). It failed (`left: 0, right: 3`). With the fix it passes under the same hidden path.
+- Cost: 805 rows against main `29ab4eaa02`, both allocators. Over under both: 0. Over under one: 0. Failed: 0. Mean change: glibc -0.002%, jemalloc +0.003%. Worst row: glibc +0.208% (`preload_load style 10`), jemalloc +0.119% (`bare-stress run boxes-inline-blocks 20000`). The branch had no rebase to do: main did not move after the branch point, so these are the final-rebase numbers.
+- `cargo test --release --workspace`: 3,283 passed, 0 failed.
+- Public journeys: 33 pass, 0 fail, 0 flakes.
+- Live check on https://ar.wikipedia.org with `bare-drive` (steps: `timeout 30000`, `open`, `expect css="body" visible`, `shot s`) on archMachine and on arjun-e16 (no Arabic font installed). Both captures are 1280 by 800. I compared them pixel by pixel. The page is live, so I compared the top 510 rows, which hold all the Arabic text of the first screen. Only 64 pixels differ, at the scrollbar thumb, because images loaded at different times. The rest of the difference is two news photos that had loaded on archMachine only. I removed my files from e16.
+
+Not tested. Arabic joining and right-to-left order (letters still draw one by one). Other machines. Fonts other than Regular (no bold Arabic). A page that uses Arabic characters outside the five blocks.
