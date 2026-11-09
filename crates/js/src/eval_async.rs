@@ -1235,10 +1235,37 @@ impl<'p> Interp<'p> {
             } else if matches!(p.kind, PropKind::Init | PropKind::Shorthand | PropKind::Spread) && self.aw_expr(p.value) {
                 return self.ask(run, e, 2 * j as u32 + 1, base, p.value);
             }
-            self.object_prop(o, pid, None, None)?;
+            self.object_prop(o, pid, None)?;
         }
         self.strunc(run, b);
         val(Value::Object(o))
+    }
+
+    /// `object_prop` for a computed key that was already evaluated (`key`). `pre` is the value when it was awaited.
+    #[cold]
+    #[inline(never)]
+    fn object_prop_k(&mut self, o: ObjId, pid: Id<Prop>, pre: Option<Value>, key: PropertyKey) -> Res<()> {
+        let p = *self.prog.prop(pid);
+        if matches!(p.kind, PropKind::Get | PropKind::Set) {
+            let ExprKind::Function(fid) = self.prog.expr(p.value).kind else { return Err(unsupported("accessor", p.span)) };
+            let Value::Object(f) = self.make_closure(fid, None, false)? else { return Err(unsupported("accessor", p.span)) };
+            let d = if p.kind == PropKind::Get {
+                PropertyDescriptor { get: Some(Some(f)), enumerable: Some(true), configurable: Some(true), ..Default::default() }
+            } else {
+                PropertyDescriptor { set: Some(Some(f)), enumerable: Some(true), configurable: Some(true), ..Default::default() }
+            };
+            hxw!(self, self.heap.define_own_property(o, key, &d));
+            return Ok(());
+        }
+        let name = match key {
+            PropertyKey::Symbol(s) => self.symbol_fn_name(s)?,
+            k => self.key_str(k)?,
+        };
+        let v = match pre {
+            Some(v) => v,
+            None => self.eval_named(p.value, Some(name))?,
+        };
+        self.def(o, key, v, true, true, true)
     }
 
     fn args_next(&mut self, run: &mut Run, e: ExprId, base: u32, np: u32, k: u32) -> Res<Step> {
@@ -1434,13 +1461,13 @@ impl<'p> Interp<'p> {
                         self.spush(run, Slot::K(key))?;
                         return self.ask(run, e, i + 1, base, p.value);
                     }
-                    self.object_prop(o, pid, None, Some(key))?;
+                    self.object_prop_k(o, pid, None, key)?;
                 } else if matches!(prog.prop(pid).key, Key::Computed(_)) {
                     let key = skey(run, b + 1);
                     self.strunc(run, b + 1);
-                    self.object_prop(o, pid, Some(v), Some(key))?;
+                    self.object_prop_k(o, pid, Some(v), key)?;
                 } else {
-                    self.object_prop(o, pid, Some(v), None)?;
+                    self.object_prop(o, pid, Some(v))?;
                 }
                 self.obj_next(run, e, base, i / 2 + 1)
             }

@@ -3090,7 +3090,7 @@ impl<'p> Interp<'p> {
         let o = h!(self, self.heap.new_object(Some(self.object_proto)));
         h!(self, self.heap.reserve_props(o, l.len()));
         for pid in prog.list(l) {
-            self.object_prop(o, pid, None, None)?;
+            self.object_prop(o, pid, None)?;
         }
         if site == 0 {
             let named = prog.list(l).all(|pid| {
@@ -3125,7 +3125,7 @@ impl<'p> Interp<'p> {
 
     /// Define one property of an object literal. `pre` is the already evaluated value of a spread, `key: value`
     /// or shorthand property (the async evaluator awaits it first).
-    fn object_prop(&mut self, o: ObjId, pid: Id<Prop>, pre: Option<Value>, pk: Option<PropertyKey>) -> Res<()> {
+    fn object_prop(&mut self, o: ObjId, pid: Id<Prop>, pre: Option<Value>) -> Res<()> {
         let prog = self.prog.clone();
         let p = *prog.prop(pid);
         match p.kind {
@@ -3137,10 +3137,7 @@ impl<'p> Interp<'p> {
                 self.copy_props(o, v, &[])?;
             }
             PropKind::Init | PropKind::Shorthand | PropKind::Method => {
-                let key = match pk {
-                    Some(k) => k,
-                    None => self.prop_key(pid, p.key)?,
-                };
+                let key = self.prop_key(pid, p.key)?;
                 if p.kind == PropKind::Init && !matches!(p.key, Key::Computed(_)) && key == self.k_proto {
                     let v = match pre {
                         Some(v) => v,
@@ -3164,10 +3161,7 @@ impl<'p> Interp<'p> {
                 self.def(o, key, v, true, true, true)?;
             }
             PropKind::Get | PropKind::Set => {
-                let key = match pk {
-                    Some(k) => k,
-                    None => self.prop_key(pid, p.key)?,
-                };
+                let key = self.prop_key(pid, p.key)?;
                 let ExprKind::Function(fid) = prog.expr(p.value).kind else { return Err(unsupported("accessor", p.span)) };
                 let Value::Object(f) = self.make_closure(fid, None, false)? else { return Err(unsupported("accessor", p.span)) };
                 let d = if p.kind == PropKind::Get {
