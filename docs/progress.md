@@ -4920,59 +4920,92 @@ gitlab.com, the "Ship faster" cards: the box is `.one-feature-cards__media` (`#1
 - A live page that uses `matchAll` with names, or `\k<name>` in a real bundle. Only the six sites below ran.
 - `Symbol.replace` with a user `exec` that returns a `groups` object (the generic path was not changed).
 - Chrome 155 comparison of the error messages of the `SyntaxError` cases (the tests check the name only).
-## Script console triage: cost gate stop (2026-11-09)
-Base: `a1b7a802580b992cceccc861b513bebff9c027e4`. Built a new driver. Re-ran all 16 survey sites before and after the changes. Used the survey timeout, body expectation and screenshot steps. Raw output, full error strings and ranked JSON are in `/data/bare-tmp/script-errors-triage/`. Count each distinct first-line message once per site. Strip the listener prefix. Keep other error text unchanged. The table includes excluded topics for audit.
-Added standalone window aliases, an empty window name and a lazy virtual screen. Added scoped selector matching for querySelector, querySelectorAll, matches and closest. The initial window and selector regressions failed before the fixes and passed after them. Later selector assertions have not run. The CSSOM regression fails. CSSOM has no implementation in this branch.
-The fresh site run removes the missing name, screen, frame lookup and Go selector errors. OpenStreetMap reaches later maplibregl and object URL failures. Guardian stops at unsupported user info in a URL. Its missing eval error is therefore not verified as fixed. Sites are live. A changed error count alone does not prove a fix.
-| Rank | Console error | Before sites | After sites | Before site names |
-|---|---|---:|---:|---|
-| 1 | TypeError: performance.mark is not a function | 4 | 4 | bing, github-readme, github-repo, ubuntu-com |
-| 2 | TypeError: Cannot read properties of undefined (reading 'length') | 3 | 3 | bbc-news, git-scm, wolframalpha |
-| 3 | page: Unsupported("named group") | 3 | 3 | github-readme, github-repo, gitlab |
-| 4 | Next.js client-side exception summary | 2 | 2 | bbc-news, wolframalpha |
-| 5 | ReferenceError: HTMLSpanElement is not defined | 1 | 1 | gitlab |
-| 6 | ReferenceError: L is not defined | 1 | 0 | openstreetmap |
-| 7 | ReferenceError: Modernizr is not defined | 1 | 1 | git-scm |
-| 8 | ReferenceError: SVGAnimatedString is not defined | 1 | 1 | vuejs |
-| 9 | ReferenceError: _w is not defined | 1 | 1 | bing |
-| 10 | ReferenceError: eval is not defined | 1 | 0 | guardian |
-| 11 | ReferenceError: name is not defined | 1 | 0 | stackexchange |
-| 12 | ReferenceError: screen is not defined | 1 | 0 | git-scm |
-| 13 | ReferenceError: sj_be is not defined | 1 | 1 | bing |
-| 14 | Script aborted: the CallDepth budget ended the https://code.jquery.com:443/ui/1.14.1/jquery-ui.min.js. The page goes on (1 of 5 aborts used) | 1 | 1 | git-scm |
-| 15 | SyntaxError: Go navigation selector with :scope | 1 | 0 | go-dev |
-| 16 | TypeError: Cannot read properties of undefined (reading '__tcfapiLocator') | 1 | 0 | guardian |
-| 17 | TypeError: Cannot read properties of undefined (reading 'deviceXDPI') | 1 | 0 | openstreetmap |
-| 18 | TypeError: Cannot read properties of undefined (reading 'navigationStart') | 1 | 1 | bing |
-| 19 | TypeError: Cannot read properties of undefined (reading 'store') | 1 | 1 | openstreetmap |
-| 20 | TypeError: Cannot read properties of undefined (reading 'width') | 1 | 0 | bing |
-| 21 | TypeError: Failed to execute 'observe' on 'IntersectionObserver': parameter 1 is not of type 'Element'. | 1 | 1 | vuejs |
-| 22 | Data module: STICKY_CANARY | 1 | 1 | old-reddit |
-| 23 | Data module: script loader | 1 | 1 | old-reddit |
-| 24 | Data module: navigation polyfill | 1 | 1 | old-reddit |
-| 25 | TypeError: document.createEvent is not a function | 1 | 1 | gitlab |
-| 26 | TypeError: document.write is not a function | 1 | 1 | apache-org |
-| 27 | TypeError: globalThis.performance.getEntriesByType is not a function | 1 | 1 | gitlab |
-| 28 | TypeError: performance.getEntriesByType is not a function | 1 | 1 | hashnode |
-| 29 | TypeError: window.performance.mark is not a function | 1 | 1 | bbc-news |
-| 30 | page: Unsupported("Date string that is not ISO 8601 or toUTCString format") | 1 | 1 | ubuntu-com |
 
-New messages after the fixes:
+## Script console triage: CSSOM, window properties and scoped selectors (2026-11-09)
+Built the initial driver from `a1b7a802580b992cceccc861b513bebff9c027e4`. Re-ran all 16 survey sites. Rebased the final change on `4bd0d0e3d25723ea05f9bbac2976086d9ab93523`. Rebuilt the driver and re-ran the same sites. All 16 body probes pass before and after. Each probe uses `timeout 20000`, `open URL`, `expect css="body" visible` and `shot s`.
+Count each distinct first-line error once per site. Strip the listener prefix. Keep other message text unchanged. The local evidence directory is `/data/bare-tmp/script-errors-triage/`. It holds the full recorded strings, stacks, per-site results and screenshots. `before.json` and `merge.json` hold the ranked messages. The tables shorten the three data-module payloads and the Go selector. Excluded topics remain in the tables for audit. The after snapshot includes the other changes merged into main. Their fixes are not attributed to this change.
+Added a bounded CSSOM surface: live StyleSheetList and CSSRuleList objects; sheet ownerNode, href, disabled, cssRules, insertRule and deleteRule; rule selectorText, style and cssText. Inline rule edits update the style text through the DOM. Declaration writes use wrappers over the existing CSSStyleDeclaration. Ordinary element style writes have no new dispatch check. Group rules retain their text. Objects remain rooted for the realm lifetime. The root table has a 65,536-entry cap.
+Window frames, parent and top refer to the standalone window. Its initial name is empty and its frame count is zero. The virtual screen is 1280 by 800 with 24-bit colour. Iframes remain inert. These properties and CSSOM members use the existing lazy host-property miss path. They allocate only when read. Deviation: property enumeration can omit a deferred member before its first read. The HTMLStyleElement constructor reuses the CSSOM style prototype.
+Cached selectors share a reference cell. Each query sets its reference element. The matcher reads that cell only for :scope. querySelector, querySelectorAll, matches and closest have no new selector scan on a cache hit. No cascade, layout or logical-property algorithm changed.
+Fixed the nextjs-docs journey. checkVisibility no longer rejects content-visibility:auto by default. It keeps the gate when contentVisibilityAuto is requested. The failing local regression now passes. The targeted public journey and the full public set pass.
+Window, scope, CSSOM list/rule edits, declaration writes, interface identity, visibility and imported-sheet safety have regressions that failed before their fixes. The CSSOM length diagnostic is gone on BBC News, Git SCM and WolframAlpha. Later errors remain on those sites. Guardian stops at an unsupported user-info URL, so the absence of its later eval error does not prove an eval fix. Live-site results can change between requests.
+### Ranked errors before
 
-| Error | Sites |
-|---|---|
-| ReferenceError: maplibregl is not defined | openstreetmap |
-| TypeError: L.OSM.Map is not a constructor | openstreetmap |
-| TypeError: window.URL.createObjectURL is not a function | openstreetmap |
-| page: Unsupported("user info in a URL") | guardian |
+| Rank | Console error | Sites | Site names |
+|---|---|---:|---|
+| 1 | TypeError: performance.mark is not a function | 4 | bing, github-readme, github-repo, ubuntu-com |
+| 2 | TypeError: Cannot read properties of undefined (reading 'length') | 3 | bbc-news, git-scm, wolframalpha |
+| 3 | page: Unsupported("named group") | 3 | github-readme, github-repo, gitlab |
+| 4 | Next.js client-side exception summary | 2 | bbc-news, wolframalpha |
+| 5 | ReferenceError: HTMLSpanElement is not defined | 1 | gitlab |
+| 6 | ReferenceError: L is not defined | 1 | openstreetmap |
+| 7 | ReferenceError: Modernizr is not defined | 1 | git-scm |
+| 8 | ReferenceError: SVGAnimatedString is not defined | 1 | vuejs |
+| 9 | ReferenceError: _w is not defined | 1 | bing |
+| 10 | ReferenceError: eval is not defined | 1 | guardian |
+| 11 | ReferenceError: name is not defined | 1 | stackexchange |
+| 12 | ReferenceError: screen is not defined | 1 | git-scm |
+| 13 | ReferenceError: sj_be is not defined | 1 | bing |
+| 14 | CallDepth: jQuery UI | 1 | git-scm |
+| 15 | SyntaxError: Go navigation selector with :scope | 1 | go-dev |
+| 16 | TypeError: Cannot read properties of undefined (reading '__tcfapiLocator') | 1 | guardian |
+| 17 | TypeError: Cannot read properties of undefined (reading 'deviceXDPI') | 1 | openstreetmap |
+| 18 | TypeError: Cannot read properties of undefined (reading 'navigationStart') | 1 | bing |
+| 19 | TypeError: Cannot read properties of undefined (reading 'store') | 1 | openstreetmap |
+| 20 | TypeError: Cannot read properties of undefined (reading 'width') | 1 | bing |
+| 21 | TypeError: Failed to execute 'observe' on 'IntersectionObserver': parameter 1 is not of type 'Element'. | 1 | vuejs |
+| 22 | TypeError: data module (STICKY_CANARY) | 1 | old-reddit |
+| 23 | TypeError: data module (script loader) | 1 | old-reddit |
+| 24 | TypeError: data module (navigation polyfill) | 1 | old-reddit |
+| 25 | TypeError: document.createEvent is not a function | 1 | gitlab |
+| 26 | TypeError: document.write is not a function | 1 | apache-org |
+| 27 | TypeError: globalThis.performance.getEntriesByType is not a function | 1 | gitlab |
+| 28 | TypeError: performance.getEntriesByType is not a function | 1 | hashnode |
+| 29 | TypeError: window.performance.mark is not a function | 1 | bbc-news |
+| 30 | page: Unsupported("Date string that is not ISO 8601 or toUTCString format") | 1 | ubuntu-com |
 
-The full cost matrix ran 805 rows. Three rows exceed +0.5% under both allocators. Stop work under the owner rule. Do not merge this branch. No exception was requested.
-| Row | glibc | jemalloc |
+### Ranked errors after
+
+| Rank | Console error | Sites | Site names |
+|---|---|---:|---|
+| 1 | page: Unsupported("named group") | 3 | github-readme, github-repo, gitlab |
+| 2 | ReferenceError: SVGAnimatedString is not defined | 1 | vuejs |
+| 3 | ReferenceError: _w is not defined | 1 | bing |
+| 4 | ReferenceError: maplibregl is not defined | 1 | openstreetmap |
+| 5 | ReferenceError: sj_be is not defined | 1 | bing |
+| 6 | CallDepth: jQuery UI | 1 | git-scm |
+| 7 | TypeError: Cannot read properties of undefined (reading 'navigationStart') | 1 | bing |
+| 8 | TypeError: Cannot read properties of undefined (reading 'store') | 1 | openstreetmap |
+| 9 | TypeError: Failed to execute 'observe' on 'IntersectionObserver': parameter 1 is not of type 'Element'. | 1 | vuejs |
+| 10 | TypeError: data module (STICKY_CANARY) | 1 | old-reddit |
+| 11 | TypeError: data module (script loader) | 1 | old-reddit |
+| 12 | TypeError: data module (navigation polyfill) | 1 | old-reddit |
+| 13 | TypeError: L.OSM.Map is not a constructor | 1 | openstreetmap |
+| 14 | TypeError: document.createElement("canvas").getContext is not a function | 1 | wolframalpha |
+| 15 | TypeError: document.write is not a function | 1 | apache-org |
+| 16 | TypeError: navigator.userAgentData.getHighEntropyValues is not a function | 1 | git-scm |
+| 17 | TypeError: window.URL.createObjectURL is not a function | 1 | openstreetmap |
+| 18 | page: Unsupported("Date string that is not ISO 8601 or toUTCString format") | 1 | ubuntu-com |
+| 19 | page: Unsupported("a ReadableStream as a body") | 1 | bbc-news |
+| 20 | page: Unsupported("user info in a URL") | 1 | guardian |
+
+### Cost and verification
+Ran on archMachine. The first matrix stopped on three startup rows. A later matrix also found a cached-selector scan and eager CSSOM setup. The final code defers browser members through the existing cold host path. It removes the selector scan and the eager style prototype.
+The full matrix ran all 805 rows under both allocators against `93559738b15b9479603a058deb82ce86eff0e31a`. Result: zero rows over +0.5% under either allocator, and zero failed rows. Mean change: glibc -0.001%; jemalloc +0.000%. After the final rebase, 17 touched rows pass against `4bd0d0e3d25723ea05f9bbac2976086d9ab93523`, again under both allocators. The limits did not change.
+The shared cache gave a lower dynamic-1 BASE count than fresh A/B runs of the same binary. Cached jemalloc BASE: 16,276,195 instructions. Fresh BASE: 16,428,826. Fresh NEW: 16,430,353. Used fresh, matched-path views for the full matrix and final focused run. Each view links to the unchanged shared or task binaries. It has its own count cache. No shared baseline binary changed. Direct instr.sh A/B and perf stat -e instructions:u results are retained in the evidence directory. Each instr.sh count is the minimum of three runs.
+Final focused rows, after the last rebase:
+
+| Row | glibc change | jemalloc change |
 |---|---:|---:|
-| loader_load mixed 1 | +1.214% | +0.622% |
-| preload_load style 1 | +1.427% | +0.591% |
-| session_load chain 1 | +1.767% | +0.589% |
+| examples/loader_load mixed 1 | -0.027% | -0.065% |
+| examples/preload_load style 1 | +0.069% | +0.005% |
+| examples/session_load chain 1 | +0.019% | +0.002% |
+| examples/browser_load lookup 10 | +0.073% | +0.211% |
+| examples/sheets_load dynamic 1 | -0.090% | -0.020% |
+| examples/sheets_load dynamic 10 | -0.002% | -0.002% |
 
-The public journeys ran once: 30 pass and 1 fail. nextjs-docs fails at checkVisibility with an unsupported content-visibility or display: contents style. A targeted run with the survey baseline binary passes. Treat this as an unresolved regression.
-
-Not tested: release workspace suite, typing keycost, test262_check, exec_diff, later selector assertions, full CSSOM behavior and the remaining top-six fixes. The cost gate stopped the task before these checks. No PR was opened or merged.
+Release workspace: 3273 passed, zero failed, 13 ignored. The post-rebase bare, bare-js and bare-css library suites also pass. Test262: 585 directories, baseline gate passes. Exec-diff: 79 fixture/load runs, zero differences across tree, auto and byte. Typing: 282.5 M instructions per textarea key and 287.9 M per input key. Peak RSS at 50 keys: 33.0 MiB. Public journeys: 33 pass, zero fail, zero flakes. Builds, Rust and JS suites, and instruction measurements used heavy slots.
+Existing warnings remain: the unused rgb helper in crates/css/src/shadow_tests.rs and an unused variable in the drive image test. They are outside this change.
+### Remaining limits and not tested
+document.write remains missing. The loader uses a pre-parsed DOM. Correct parser insertion needs an insertion point and stream state; fragment insertion would not preserve that behavior. External sheet edits and flattened imported-sheet reads remain gated. Flattened parts lack the origin data that CSSOM needs. Nested group-rule lists are not exposed. The disabled property uses the native disabled attribute behavior. Inline-sheet disabling remains a limitation of the existing cascade.
+Not tested: full CSSOM conformance or visual correctness. The probes check a visible body and capture the first viewport. The excluded survey topics remain outside this change.
