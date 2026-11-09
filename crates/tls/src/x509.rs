@@ -41,7 +41,8 @@ pub enum Error {
     Name,
     /// Date is malformed or out of range.
     Time,
-    /// SubjectPublicKeyInfo is malformed, or an EC point is not 0x04 || X || Y.
+    /// SubjectPublicKeyInfo is malformed, an EC point is not 0x04 || X || Y, or an RSA key is
+    /// malformed or outside the policy of `rsa` (2048 to 4096 bits, e below 2^32).
     PublicKey,
     /// Extension encoding is malformed, empty, or repeats an OID.
     Extension,
@@ -62,6 +63,8 @@ type Result<T> = core::result::Result<T, Error>;
 const OID_ECDSA_SHA256: &[u8] = &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02];
 const OID_ECDSA_SHA384: &[u8] = &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x03];
 const OID_RSA_SHA256: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b];
+const OID_RSA_SHA384: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0c];
+const OID_RSA_ENCRYPTION: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01];
 const OID_EC_PUBLIC_KEY: &[u8] = &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01];
 const OID_P256: &[u8] = &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07];
 const OID_P384: &[u8] = &[0x2b, 0x81, 0x04, 0x00, 0x22];
@@ -80,9 +83,10 @@ const OID_EKU_SERVER_AUTH: &[u8] = &[0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0
 pub enum SigAlg<'a> {
     EcdsaSha256,
     EcdsaSha384,
-    /// sha256WithRSAEncryption. Recognised only so a server-sent RSA cross-sign parses.
-    /// This crate has no RSA verifier.
+    /// sha256WithRSAEncryption (RSASSA-PKCS1-v1_5 with SHA-256).
     RsaPkcs1Sha256,
+    /// sha384WithRSAEncryption.
+    RsaPkcs1Sha384,
     Unsupported(&'a [u8]),
 }
 
@@ -107,7 +111,9 @@ pub enum PublicKey<'a> {
     /// `point` is the uncompressed SEC1 point 0x04 || X || Y (65 or 97 octets).
     /// It is NOT checked to lie on the curve.
     Ec { curve: Curve, point: &'a [u8] },
-    /// Any other algorithm or curve (for example RSA). `algorithm` is the OID content.
+    /// rsaEncryption, 2048 to 4096 bits, odd modulus, odd exponent below 2^32.
+    Rsa(crate::rsa::PublicKey<'a>),
+    /// Any other algorithm or curve. `algorithm` is the OID content.
     Unsupported { algorithm: &'a [u8] },
 }
 
@@ -355,8 +361,9 @@ fn sig_alg(t: Tlv<'_>) -> Result<SigAlg<'_>> {
         OID_ECDSA_SHA256 => Ok(SigAlg::EcdsaSha256),
         OID_ECDSA_SHA384 => Ok(SigAlg::EcdsaSha384),
         // RFC 4055 5: parameters MUST be NULL.
-        OID_RSA_SHA256 if !null(params) => Err(Error::Algorithm),
+        OID_RSA_SHA256 | OID_RSA_SHA384 if !null(params) => Err(Error::Algorithm),
         OID_RSA_SHA256 => Ok(SigAlg::RsaPkcs1Sha256),
+        OID_RSA_SHA384 => Ok(SigAlg::RsaPkcs1Sha384),
         _ => Ok(SigAlg::Unsupported(oid)),
     }
 }
@@ -447,7 +454,9 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     era * 146097 + doe - 719468
 }
 
-/// RFC 5480 2.1.1: id-ecPublicKey with a namedCurve OID. Other keys are `Unsupported`.
+/// RFC 5480 2.1.1: id-ecPublicKey with a namedCurve OID. RFC 8017 A.1: rsaEncryption with NULL
+/// parameters and an RSAPublicKey; a key outside the policy of [`crate::rsa`] is an error.
+/// Other keys are `Unsupported`.
 fn public_key(spki: Tlv<'_>) -> Result<PublicKey<'_>> {
     let mut r = Reader::new(spki.content);
     let alg = r.read_tag(der::SEQUENCE)?;
@@ -462,6 +471,12 @@ fn public_key(spki: Tlv<'_>) -> Result<PublicKey<'_>> {
     der::check_oid(oid)?;
     let params = if a.is_empty() { None } else { Some(a.read()?) };
     a.finish()?;
+    if oid == OID_RSA_ENCRYPTION {
+        if !matches!(params, Some(p) if p.tag == der::NULL && p.content.is_empty()) {
+            return Err(Error::PublicKey);
+        }
+        return crate::rsa::PublicKey::from_pkcs1(point).map(PublicKey::Rsa).ok_or(Error::PublicKey);
+    }
     if oid != OID_EC_PUBLIC_KEY {
         return Ok(PublicKey::Unsupported { algorithm: oid });
     }
@@ -1134,6 +1149,57 @@ mod tests {
         }
     }
 
+    /// An RSA SubjectPublicKeyInfo for `n` and `e` (big-endian, no sign octet added by the caller).
+    fn rsa_spki(n: &[u8], e: &[u8], params: &[u8]) -> Vec<u8> {
+        let int = |v: &[u8]| tlv(2, &if v[0] & 0x80 != 0 { cat(&[&[0], v]) } else { v.to_vec() });
+        let key = tlv(0x30, &cat(&[&int(n), &int(e)]));
+        let a = tlv(0x30, &cat(&[&tlv(6, OID_RSA_ENCRYPTION), params]));
+        tlv(0x30, &cat(&[&a, &tlv(3, &cat(&[&[0], &key]))]))
+    }
+
+    #[test]
+    fn rsa_keys_and_algorithms() {
+        let mut n = vec![0xc5u8; 256];
+        n[255] = 0xc7;
+        let mut p = Parts::ok();
+        p.spki = rsa_spki(&n, &[1, 0, 1], &[5, 0]);
+        match parse(&p.build()).unwrap().public_key {
+            PublicKey::Rsa(k) => assert_eq!((k.modulus(), k.exponent(), k.bits()), (&n[..], 65537, 2048)),
+            other => panic!("{other:?}"),
+        }
+        // NULL parameters are required (RFC 3279 2.3.1).
+        for params in [&[][..], &[5, 1, 0], &[6, 1, 0x2a], &[0x30, 0]] {
+            p.spki = rsa_spki(&n, &[1, 0, 1], params);
+            assert_eq!(p.err(), Error::PublicKey);
+        }
+        // Key policy: 1024 bits, 4097 bits, even n, e of 33 bits, even e, e = 1.
+        let mut big = vec![0xc5u8; 513];
+        big[0] = 1;
+        big[512] = 7;
+        for (n, e) in [(&n[..128], &[1u8, 0, 1][..]), (&big[..], &[1, 0, 1]), (&n[..255], &[1, 0, 1]), (&n[..], &[1, 0, 0, 0, 1]), (&n[..], &[1, 0, 0]), (&n[..], &[1])] {
+            p.spki = rsa_spki(n, e, &[5, 0]);
+            assert_eq!(p.err(), Error::PublicKey, "{} {e:?}", n.len());
+        }
+        let mut even = n.clone();
+        even[255] = 0xc6;
+        p.spki = rsa_spki(&even, &[1, 0, 1], &[5, 0]);
+        assert_eq!(p.err(), Error::PublicKey);
+        let mut max = big.clone();
+        max.truncate(512);
+        max[0] = 0xc5;
+        p.spki = rsa_spki(&max, &[0xff, 0xff, 0xff, 0xff], &[5, 0]);
+        assert!(matches!(parse(&p.build()).unwrap().public_key, PublicKey::Rsa(_)), "4096 bits and e = 2^32 - 1");
+        // Signature algorithms: sha384WithRSAEncryption needs NULL too.
+        let rsa384 = tlv(0x30, &cat(&[&tlv(6, OID_RSA_SHA384), &[5, 0]]));
+        p.inner = rsa384.clone();
+        p.outer = rsa384;
+        assert_eq!(parse(&p.build()).unwrap().sig_alg, SigAlg::RsaPkcs1Sha384);
+        let bare = alg(OID_RSA_SHA384);
+        p.inner = bare.clone();
+        p.outer = bare;
+        assert_eq!(p.err(), Error::Algorithm);
+    }
+
     #[test]
     fn validity_rules() {
         let mut p = Parts::ok();
@@ -1182,8 +1248,7 @@ mod tests {
         let rsa_oid = [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01];
         let rsa = tlv(0x30, &cat(&[&tlv(0x30, &cat(&[&tlv(6, &rsa_oid), &[5, 0]])), &tlv(3, &[0, 0x30, 0])]));
         p.spki = rsa;
-        let b = p.build();
-        assert_eq!(parse(&b).unwrap().public_key, PublicKey::Unsupported { algorithm: &rsa_oid });
+        assert_eq!(p.err(), Error::PublicKey, "an empty RSAPublicKey is an error, not Unsupported");
         // Wrong structure.
         p.spki = tlv(0x30, &tlv(3, &[0]));
         assert!(p.parse().is_err());

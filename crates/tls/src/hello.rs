@@ -38,6 +38,10 @@ pub const TLS_AES_128_GCM_SHA256: u16 = 0x1301;
 pub const GROUP_X25519: u16 = 0x001d;
 pub const ECDSA_SECP256R1_SHA256: u16 = 0x0403;
 pub const ECDSA_SECP384R1_SHA384: u16 = 0x0503;
+pub const RSA_PSS_RSAE_SHA256: u16 = 0x0804;
+pub const RSA_PSS_RSAE_SHA384: u16 = 0x0805;
+pub const RSA_PKCS1_SHA256: u16 = 0x0401;
+pub const RSA_PKCS1_SHA384: u16 = 0x0501;
 pub const MAX_SESSION_ID_LEN: usize = 32;
 pub const MAX_SERVER_NAME_LEN: usize = 253;
 /// Size of the longest ClientHello we can write (32-byte session ID, 253-byte name).
