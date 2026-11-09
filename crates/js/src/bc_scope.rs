@@ -554,7 +554,7 @@ impl<'p> Interp<'p> {
                 self.sw_expr(w, k);
             }
             match e.kind {
-                ElemKind::Method(f) | ElemKind::Getter(f) | ElemKind::Setter(f) => self.sw_func(w, f),
+                ElemKind::Method(f) | ElemKind::Getter(f) | ElemKind::Setter(f) | ElemKind::StaticBlock(f) => self.sw_func(w, f),
                 ElemKind::Field(Some(init)) => self.sw_expr(w, init),
                 ElemKind::Field(None) => {}
             }

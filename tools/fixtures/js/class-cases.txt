@@ -261,3 +261,18 @@ class A { static count = 0; id = ++A.count; } var a = new A(), b = new A(); [a.i
 var o = { K: class { static v = 1; } }; var arr = [class { static v = 2; }]; [o.K.v, arr[0].v].join()
 === sloppy_function_vs_class_this
 function S() { return this === undefined ? "u" : "g"; } class C { m() { return S(); } } new C().m()
+=== static_block_basic
+var log = []; class A { static x = log.push("x"); static { log.push("b1:" + (this === A)); } static y = log.push("y"); static { log.push("b2"); } } log.join()
+=== static_block_scope
+var v = "outer"; class A { static { var v = "inner"; let w = 2; A.r = v + w; } } [A.r, v, typeof w].join()
+=== static_block_private_and_super
+class B { static g() { return "bg"; } } class A extends B { static #p = 5; static { A.r = super.g() + A.#p + new.target; } } A.r
+=== static_block_throws
+function t(f) { try { return String(f()); } catch (e) { return e.name + ": " + e.message; } }
+t(() => { class A { static { throw new TypeError("boom"); } } })
+=== static_block_not_a_method_name
+class A { static static() { return 1; } static async() { return 2; } static get() { return 3; } static set() { return 4; } } [A.static(), A.async(), A.get(), A.set()].join()
+=== static_block_arrow_and_closure
+class A { static { var f = () => this; A.same = f() === A; A.fn = function () { return typeof this; }; } } [A.same, A.fn()].join()
+=== static_block_each_class_evaluation
+var n = 0; function mk() { return class { static { n++; } }; } mk(); mk(); n

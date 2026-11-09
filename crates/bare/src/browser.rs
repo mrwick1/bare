@@ -523,6 +523,8 @@ pub struct Dom {
     pub(crate) els: crate::browser_elements::Els,
     /// `HTMLMediaElement` and its kin (`browser_media.rs`).
     pub(crate) media: crate::browser_media::Media,
+    /// `Image`, `decode()` and the picture requests of scripts (`browser_img.rs`).
+    pub(crate) img: crate::browser_img::Img,
     /// `HTMLBodyElement`, `HTMLFrameSetElement` and `ErrorEvent` (`browser_handlers.rs`).
     pub(crate) hh: crate::browser_handlers::Hh,
     /// Constraint validation, `labels` and `form.reset()` (`browser_controls.rs`).
@@ -568,6 +570,7 @@ impl Host for Dom {
         crate::browser_web::roots(self, out);
         crate::browser_elements::roots(self, out);
         crate::browser_media::roots(self, out);
+        crate::browser_img::roots(self, out);
         crate::browser_handlers::roots(self, out);
         crate::browser_controls::roots(self, out);
         self.resize_roots(out);
@@ -1134,6 +1137,7 @@ impl Dom {
         nd::install_late(self, it)?;
         crate::browser_controls::install(self, it)?;
         crate::browser_media::install(self, it)?;
+        crate::browser_img::install(self, it)?;
         crate::browser_custom::install(self, it)?;
         crate::browser_geom::install(self, it)
     }
@@ -1432,6 +1436,7 @@ impl Browser {
             web: Default::default(),
             els: Default::default(),
             media: Default::default(),
+            img: Default::default(),
             hh: Default::default(),
             ctl: Default::default(),
             ce: Default::default(),

@@ -7,8 +7,8 @@
 //! `HTMLImageElement`: `src` (the attribute resolved against the base URL, else the attribute text), `currentSrc` (the same, `""` without `src`),
 //! `alt`, `srcset`, `sizes`, `loading`, `decoding` (reflected strings), `naturalWidth`, `naturalHeight` (the picture that `bare/src/images.rs`
 //! decoded, else 0), `width`, `height` (the attribute as an unsigned number, else the natural size: deviation, Chrome gives the rendered size),
-//! `complete` (no `src`, or the picture is in: deviation, a picture that failed to load stays incomplete). Absent: `new Image()`, `crossOrigin`,
-//! `decode()`, `x`, `y`, `isMap`, `useMap`, `referrerPolicy`.
+//! `complete` (false while a download is on the way, see `browser_img.rs`). `new Image()`, `decode()`, `onload` and `onerror` are in
+//! `browser_img.rs`. Absent: `crossOrigin`, `x`, `y`, `isMap`, `useMap`, `referrerPolicy`.
 //!
 //! Hyperlink members (`HTMLHyperlinkElementUtils`, on `a` and `area`): `href`, `protocol`, `host`, `hostname`, `port`, `pathname`, `search`,
 //! `hash` (all with setters), the read-only `origin`, and `toString` (the `href`). The getter of `href` is the `href` attribute resolved against
@@ -325,7 +325,11 @@ macro_rules! img_attr {
 }
 
 fn image_members(d: &Dom, it: &mut Interp<'_>, o: ObjId) -> R<()> {
-    d.def_get(it, o, "src", |d, it, t, _| img_url(d, it, t, false), Some(|d, it, t, a| img_set(d, it, t, a, "src")))?;
+    d.def_get(it, o, "src", |d, it, t, _| img_url(d, it, t, false), Some(|d, it, t, a| {
+        let r = img_set(d, it, t, a, "src");
+        crate::browser_img::src_changed(d, image(d, it, t)?);
+        r
+    }))?;
     d.def_get(it, o, "currentSrc", |d, it, t, _| img_url(d, it, t, true), None)?;
     img_attr!(d, it, o, "alt");
     img_attr!(d, it, o, "srcset");
@@ -338,6 +342,7 @@ fn image_members(d: &Dom, it: &mut Interp<'_>, o: ObjId) -> R<()> {
     d.def_get(it, o, "naturalHeight", |d, it, t, _| Ok(Value::Number(natural(d, image(d, it, t)?).1 as f64)), None)?;
     d.def_get(it, o, "complete", |d, it, t, _| {
         let n = image(d, it, t)?;
-        Ok(Value::Bool(attr_text(d, n, "src").is_none_or(|s| s.trim().is_empty()) || d.doc.borrow().image(n).is_some()))
-    }, None)
+        Ok(Value::Bool(!d.img.pending.borrow().contains(&n)))
+    }, None)?;
+    crate::browser_img::members(d, it, o)
 }

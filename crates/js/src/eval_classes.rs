@@ -53,6 +53,8 @@ enum FKey {
 struct Field {
     key: FKey,
     init: Option<ExprId>,
+    /// A static block: the key and `init` are not used.
+    block: Option<FuncId>,
 }
 
 struct ClassData {
@@ -180,7 +182,7 @@ impl<'p> Interp<'p> {
                 _ => {}
             }
             match e.kind {
-                ElemKind::Method(f) | ElemKind::Getter(f) | ElemKind::Setter(f) => {
+                ElemKind::Method(f) | ElemKind::Getter(f) | ElemKind::Setter(f) | ElemKind::StaticBlock(f) => {
                     if prog.func(f).kind == FuncKind::DerivedConstructor {
                         self.cls.fflags[f.index()] |= F_DERIVED;
                     }
@@ -970,7 +972,7 @@ impl<'p> Interp<'p> {
             let flag = match e.kind {
                 ElemKind::Method(_) => PRIV_M,
                 ElemKind::Getter(_) | ElemKind::Setter(_) => PRIV_A,
-                ElemKind::Field(_) => 0,
+                ElemKind::Field(_) | ElemKind::StaticBlock(_) => 0,
             };
             match self.find_in(env_c, n) {
                 Some(i) => self.envs[env_c as usize].bindings[i].flags |= flag,
@@ -1062,9 +1064,12 @@ impl<'p> Interp<'p> {
                         }
                     }
                 }
+                ElemKind::StaticBlock(f) => {
+                    static_fields.push(Field { key: FKey::Prop(PropertyKey::Index(0)), init: None, block: Some(f) });
+                }
                 ElemKind::Field(init) => {
                     let key = self.elem_key(e.key, env_c)?;
-                    let field = Field { key, init };
+                    let field = Field { key, init, block: None };
                     if e.is_static { static_fields.push(field) } else { cd.fields.push(field) }
                 }
             }
@@ -1112,6 +1117,11 @@ impl<'p> Interp<'p> {
     }
 
     fn define_field(&mut self, obj: ObjId, f: &Field) -> Res<()> {
+        if let Some(b) = f.block {
+            let made = self.make_closure(b, None, false)?;
+            self.call(made, Value::Object(obj), &[])?;
+            return Ok(());
+        }
         let v = match f.init {
             Some(x) => {
                 let name = match f.key {

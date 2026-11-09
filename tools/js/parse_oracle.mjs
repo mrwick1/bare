@@ -48,6 +48,7 @@ function dumpTree(src) {
       const st = el.static ? 'static' : 'inst';
       if (el.type === 'MethodDefinition') o += ` (method${S(el)} ${el.kind} ${st} ${key(el)} ${D(el.value)})`;
       else if (el.type === 'PropertyDefinition') o += ` (field${S(el)} ${st} ${key(el)} ${el.value ? D(el.value) : '-'})`;
+      else if (el.type === 'StaticBlock') o += ` (staticblock${S(el)}${L(el.body)})`;
       else o += ` (? ${el.type})`;
     }
     return o + ')';

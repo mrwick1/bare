@@ -105,3 +105,10 @@ getter_in_computed_key_class_static	string:2,2
 instance_count_and_identity	string:1,2,2
 class_value_in_array_and_object	string:1,2
 sloppy_function_vs_class_this	string:g
+static_block_basic	string:x,b1:true,y,b2
+static_block_scope	string:inner2,outer,undefined
+static_block_private_and_super	string:bg5undefined
+static_block_throws	string:TypeError: boom
+static_block_not_a_method_name	string:1,2,3,4
+static_block_arrow_and_closure	string:true,function
+static_block_each_class_evaluation	number:2

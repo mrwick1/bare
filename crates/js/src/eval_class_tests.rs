@@ -142,6 +142,7 @@ fn class_inventory() {
                     ElemKind::Setter(_) => "setter",
                     ElemKind::Field(Some(_)) => "field+init",
                     ElemKind::Field(None) => "field",
+                    ElemKind::StaticBlock(_) => "static block",
                 };
                 let key = match e.key { Key::Name(_) => "name", Key::Str(_) => "str", Key::Num(_) => "num", Key::Computed(_) => "computed", Key::Private(_) => "private", _ => "other" };
                 bump(format!("elem.{}{}.{}", if e.is_static { "static." } else { "" }, kind, key));
@@ -186,9 +187,6 @@ fn unsupported_class_shapes_are_found_before_anything_runs() {
     // Nothing ran: the script would have set a global first.
     let prog = parse_script("var ran = 1; class A { x = new.target; }", Limits::default()).unwrap();
     assert!(Interp::new(&prog, Heap::default(), EvalLimits::default()).is_err());
-    // The parser rejects a static block: it never reaches the evaluator.
-    let e = parse_script("class A { static { } }", Limits::default()).unwrap_err();
-    assert_eq!(e.kind, crate::parse::ErrorKind::Unsupported);
 }
 
 #[test]

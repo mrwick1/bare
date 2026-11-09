@@ -845,7 +845,7 @@
 844 ok
 845 ok
 846 ok
-847 unsupported
+847 ok
 848 ok
 849 ok
 850 ok
@@ -911,8 +911,8 @@
 910 err
 911 ok
 912 ok
-913 unsupported
-914 unsupported
+913 ok
+914 ok
 915 ok
 916 ok
 917 ok

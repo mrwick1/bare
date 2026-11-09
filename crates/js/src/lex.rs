@@ -22,9 +22,9 @@
 //! This is scanning, not parsing. Left out on purpose:
 //! - Regexp *grammar*: the lexer finds where `/.../flags` ends and checks the flags. It does not check
 //!   the pattern (`/(/` scans fine). Only a regexp engine can do that.
-//! - Identifiers with non-ASCII letters (`é`, `日本`): the repo has no verified ID_Start/ID_Continue
-//!   data in this crate, and `char::is_alphabetic` is not that set. They are an error
-//!   ([`ErrorKind::NonAscii`]), never silently accepted. `\u0061`-style escapes that decode to ASCII work.
+//! - Nothing for identifiers: names may have non-ASCII letters (`é`, `日本`) and `\u00e9` or `\u{1F600}`
+//!   escapes. The ID_Start and ID_Continue sets come from `icu_properties` (Unicode data, not
+//!   `char::is_alphabetic`). A non-ASCII character that is not in them is an error ([`ErrorKind::NonAscii`]).
 //! - HTML-like comments (`<!--`, `-->`, Annex B). They scan as operators.
 //! - Strict-mode rules (legacy octal, reserved words as names). The token reports the facts
 //!   (`Kind::String { legacy_octal }`, `NumberBase::LegacyOctal`, `escapes`); the parser decides.
@@ -325,6 +325,20 @@ pub fn utf16_offset(src: &str, byte: usize) -> usize {
     src[..end].chars().map(char::len_utf16).sum()
 }
 
+/// Is `cp` (not ASCII) allowed in a name? ID_Start for the first character, ID_Continue after it (plus ZWNJ and ZWJ).
+fn id_char(cp: u32, first: bool) -> bool {
+    use icu_properties::{props::{IdContinue, IdStart}, CodePointSetData};
+    // Latin-1 is fixed: the letters, and the middle dot (ID_Continue only).
+    if cp < 0x100 {
+        return matches!(cp, 0xAA | 0xB5 | 0xBA | 0xC0..=0xD6 | 0xD8..=0xF6 | 0xF8..=0xFF) || (cp == 0xB7 && !first);
+    }
+    if first {
+        CodePointSetData::new::<IdStart>().contains32(cp)
+    } else {
+        cp == 0x200C || cp == 0x200D || CodePointSetData::new::<IdContinue>().contains32(cp)
+    }
+}
+
 const IDSTART: u8 = 1;
 const IDPART: u8 = 2;
 
@@ -491,9 +505,10 @@ impl<'a> Lexer<'a> {
             b'#' => {
                 let n = self.at(start + 1);
                 if n >= 0x80 {
-                    return Err(self.err(ErrorKind::NonAscii, start + 1));
-                }
-                if cls(n) & IDSTART == 0 && n != b'\\' {
+                    if self.unicode_id(start + 1, true).is_none() {
+                        return Err(self.err(ErrorKind::NonAscii, start + 1));
+                    }
+                } else if cls(n) & IDSTART == 0 && n != b'\\' {
                     return Err(self.err(ErrorKind::InvalidPrivateName, start));
                 }
                 self.pos += 1;
@@ -512,7 +527,13 @@ impl<'a> Lexer<'a> {
                     self.pos += n;
                     Kind::Punct(p)
                 }
-                None if c >= 0x80 => return Err(self.err(ErrorKind::NonAscii, start)),
+                None if c >= 0x80 => {
+                    if self.unicode_id(start, true).is_none() {
+                        return Err(self.err(ErrorKind::NonAscii, start));
+                    }
+                    escapes = self.ident()?;
+                    Kind::Ident
+                }
                 None => return Err(self.err(ErrorKind::UnexpectedChar, start)),
             },
         };
@@ -606,6 +627,14 @@ impl<'a> Lexer<'a> {
         })
     }
 
+    /// The length in bytes of the character at `at` (not ASCII) if it belongs in a name.
+    #[cold]
+    #[inline(never)]
+    fn unicode_id(&self, at: usize, first: bool) -> Option<usize> {
+        let ch = self.src[at..].chars().next()?;
+        id_char(ch as u32, first).then(|| ch.len_utf8())
+    }
+
     /// An identifier name from `self.pos`. Returns true if it has `\u` escapes.
     fn ident(&mut self) -> Result<bool, Error> {
         let b = self.src.as_bytes();
@@ -622,20 +651,19 @@ impl<'a> Lexer<'a> {
                 let Some(cp) = unicode_escape(b, &mut i) else {
                     return Err(self.err(ErrorKind::InvalidEscape, at));
                 };
-                if cp >= 0x80 {
-                    return Err(self.err(ErrorKind::NonAscii, at));
-                }
-                if cls(cp as u8) & if first { IDSTART } else { IDPART } == 0 {
-                    return Err(self.err(ErrorKind::InvalidEscape, at));
+                let ok = if cp < 0x80 { cls(cp as u8) & if first { IDSTART } else { IDPART } != 0 } else { id_char(cp, first) };
+                if !ok {
+                    let kind = if cp >= 0x80 { ErrorKind::NonAscii } else { ErrorKind::InvalidEscape };
+                    return Err(self.err(kind, at));
                 }
                 self.pos = i;
                 esc = true;
             } else if c >= 0x80 {
-                // Could be a letter or a space. Spaces end the name; letters are not supported.
-                if unicode_space(b, self.pos).is_some() {
-                    break;
+                // A letter continues the name. Anything else ends it; the next token reports it if it is bad.
+                match self.unicode_id(self.pos, first) {
+                    Some(n) => self.pos += n,
+                    None => break,
                 }
-                return Err(self.err(ErrorKind::NonAscii, self.pos));
             } else {
                 break;
             }
@@ -1123,8 +1151,9 @@ pub fn ident_name<'a>(src: &'a str, tok: &Token) -> Result<Cow<'a, str>, Error> 
                 None => return Err(bad_token(tok)),
             }
         } else {
-            s.push(b[i] as char); // Names are ASCII: the lexer rejects the rest.
-            i += 1;
+            let ch = text[i..].chars().next().ok_or_else(|| bad_token(tok))?;
+            s.push(ch);
+            i += ch.len_utf8();
         }
     }
     Ok(Cow::Owned(s))
@@ -1275,16 +1304,34 @@ mod tests {
         assert_eq!(err("#"), ErrorKind::InvalidPrivateName);
         assert_eq!(err("# x"), ErrorKind::InvalidPrivateName);
         assert_eq!(err("#1"), ErrorKind::InvalidPrivateName);
-        assert_eq!(err("#é"), ErrorKind::NonAscii);
+        assert_eq!(err("#€"), ErrorKind::NonAscii);
     }
 
     #[test]
-    fn non_ascii_names_are_rejected_not_guessed() {
-        assert_eq!(err("é"), ErrorKind::NonAscii);
-        assert_eq!(err("a\u{3b2}"), ErrorKind::NonAscii);
-        assert_eq!(err("\\u00e9"), ErrorKind::NonAscii);
-        assert_eq!(err("\\u{1F600}"), ErrorKind::NonAscii);
+    fn non_ascii_names_follow_id_start_and_id_continue() {
+        let name = |src: &str| {
+            let t = lex(src).unwrap();
+            assert_eq!(t.len(), 1, "{src}");
+            assert_eq!(t[0].kind, Kind::Ident, "{src}");
+            ident_name(src, &t[0]).unwrap().into_owned()
+        };
+        assert_eq!(name("é"), "é");
+        assert_eq!(name("a\u{b7}"), "a\u{b7}"); // the middle dot continues a name
+        assert_eq!(err("\u{b7}"), ErrorKind::NonAscii);
+        assert_eq!(err("\u{d7}"), ErrorKind::NonAscii); // the multiplication sign is not a letter
+        assert_eq!(err("\u{b1}"), ErrorKind::NonAscii);
+        assert_eq!(name("日本"), "日本");
+        assert_eq!(name("a\u{3b2}b"), "aβb");
+        assert_eq!(name("\\u00e9"), "é");
+        assert_eq!(name("a\\u{3b2}"), "aβ");
+        assert_eq!(name("x\u{200c}y"), "x\u{200c}y"); // ZWNJ continues a name
+        assert_eq!(name("a\u{0301}"), "a\u{0301}"); // a combining mark continues a name
+        assert_eq!(err("\u{0301}"), ErrorKind::NonAscii); // but cannot start one
+        assert_eq!(err("\\u{1F600}"), ErrorKind::NonAscii); // an emoji is not a letter
         assert_eq!(err("€"), ErrorKind::NonAscii);
+        assert_eq!(err("a€"), ErrorKind::NonAscii);
+        assert_eq!(lex("#é").unwrap()[0].kind, Kind::PrivateName);
+        assert_eq!(lex("({À:'A'})").unwrap().len(), 7);
         assert_eq!(err("\\u0031"), ErrorKind::InvalidEscape); // a digit cannot start a name
         assert_eq!(err("a\\x41"), ErrorKind::InvalidEscape);
         assert_eq!(err("a\\u12"), ErrorKind::InvalidEscape);
@@ -1570,7 +1617,7 @@ mod tests {
 
     #[test]
     fn regexp_flag_followed_by_unsupported_char() {
-        let src = "/a/gé";
+        let src = "/a/g€";
         let mut l = Lexer::new(src).unwrap();
         assert_eq!(l.next(Goal::RegExp).unwrap().text(src), "/a/g");
         assert_eq!(l.next(Goal::Div).unwrap_err().kind, ErrorKind::NonAscii);

@@ -20,10 +20,10 @@
 //! The parser stops at the first error. It does not recover.
 //!
 //! Not supported, with a precise error ([`ErrorKind::Unsupported`]): generators and `yield`, `import`/
-//! `export`/`import()`/`import.meta`, class static blocks. The tested corpus and observed staging
+//! `export`/`import()`/`import.meta`. The tested corpus and observed staging
 //! syntax are covered; this is not a claim of complete ES2022 compatibility.
-//! Not done here: regexp pattern grammar ([`REGEXP_PATTERN_VALIDATED`]), HTML-like comments, non-ASCII
-//! identifiers (the lexer reports them), scope resolution of names.
+//! Not done here: regexp pattern grammar ([`REGEXP_PATTERN_VALIDATED`]), HTML-like comments, scope
+//! resolution of names.
 //!
 //! Specification sections used for the subtle rules (ECMA-262, 2022):
 //! - 12.9.4 / B.1.2: legacy octal numbers and string escapes are errors in strict code.
@@ -298,6 +298,7 @@ struct Ctx {
     super_prop: bool, // `super.x` is allowed
     super_call: bool, // `super()` is allowed
     field_init: bool, // inside a class field initializer: `arguments` is not allowed
+    static_block: bool, // inside a class static block (not in a nested function): `await` is not an identifier
 }
 
 /// Pending cover-grammar facts (`{a = 1}` and duplicate `__proto__`): counts of what a pattern must still consume.
@@ -694,7 +695,7 @@ impl<'a> Parser<'a> {
         if self.strict && is_strict_reserved(&name) {
             return Err(self.early("reserved word in strict mode", span));
         }
-        if self.ctx.is_async && name == "await" {
+        if (self.ctx.is_async || self.ctx.static_block) && name == "await" {
             return Err(self.early("'await' is not an identifier in an async function", span));
         }
         if self.ctx.is_gen && name == "yield" {
@@ -2180,7 +2181,7 @@ impl<'a> Parser<'a> {
         // A plain name.
         let span = self.tspan();
         self.check_word(span)?;
-        if self.ctx.field_init && self.text() == "arguments" {
+        if self.ctx.field_init && self.name_of(span) == "arguments" {
             return Err(self.early("'arguments' is not allowed in a class field initializer", span));
         }
         self.advance()?;
@@ -2470,7 +2471,7 @@ impl<'a> Parser<'a> {
         }
         let span = Span { start: kt.start, end: kt.end };
         self.check_word(span)?;
-        if self.ctx.field_init && self.p.text(span) == "arguments" {
+        if self.ctx.field_init && self.name_of(span) == "arguments" {
             return Err(self.early("'arguments' is not allowed in a class field initializer", span));
         }
         let ident = self.mk_expr_at(ExprKind::Ident, span.start, span.end)?;
@@ -2628,6 +2629,7 @@ impl<'a> Parser<'a> {
             super_prop: kind != FuncKind::Normal,
             super_call: kind == FuncKind::DerivedConstructor,
             field_init: false,
+            static_block: false,
         };
         self.label_base = self.labels.len();
         self.push_scope(S_VAR | S_FUNC);
@@ -2731,6 +2733,7 @@ impl<'a> Parser<'a> {
         let (saved_ctx, saved_strict, saved_lb, saved_arrow) = (self.ctx, self.strict, self.label_base, self.arrow_at);
         // An arrow keeps `this`, `super`, `new.target` and the field-initializer rule of the code around it.
         self.ctx.in_func = true;
+        self.ctx.static_block = false;
         self.ctx.is_async = is_async;
         self.ctx.is_gen = false;
         self.label_base = self.labels.len();
@@ -2860,13 +2863,34 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// `static { ... }` (the current token is `{`). The body is a method body with no parameters. `return`
+    /// and `arguments` are errors; `this`, `super.x` and `new.target` work as in a method.
+    fn parse_static_block(&mut self, start: u32) -> R<Id<ClassElem>> {
+        let saved = (self.ctx, self.label_base, self.arrow_at);
+        self.ctx = Ctx { in_func: false, is_async: false, is_gen: false, new_target: true, super_prop: true, super_call: false, field_init: true, static_block: true };
+        self.label_base = self.labels.len();
+        self.push_scope(S_VAR | S_FUNC);
+        let old_await = std::mem::take(&mut self.await_pos);
+        let params: List<Pat> = { let base = self.lbegin(); self.lend(base) };
+        let body = self.parse_function_body(BodyInfo { params, name: None, simple: true, first_dup: None });
+        self.await_pos = old_await;
+        self.pop_scope();
+        self.labels.truncate(self.label_base);
+        (self.ctx, self.label_base, self.arrow_at) = saved;
+        let body = body?;
+        let span = Span { start, end: self.prev_end };
+        let f = mk!(self, funcs, Func { name: None, params, body: Body::Block(body), kind: FuncKind::Method, mode: FuncMode::Env, strict: true, simple_params: true, span });
+        Ok(mk!(self, elems, ClassElem { kind: ElemKind::StaticBlock(f), is_static: true, key: Key::None, span }))
+    }
+
     fn parse_class_elem(&mut self, derived: bool, ctor_seen: &mut bool) -> R<Id<ClassElem>> {
         let start = self.tok.start;
         let mut is_static = false;
         if self.is_word("static") {
             let n = self.peek()?;
             if n.kind == Kind::Punct(P::LBrace) {
-                return Err(self.unsupported("class static blocks are not supported", self.tok.start, n.end));
+                self.advance()?; // `static`
+                return self.parse_static_block(start);
             }
             if !Self::ends_key_word(n.kind) {
                 is_static = true;
@@ -2953,7 +2977,7 @@ impl<'a> Parser<'a> {
         }
         let init = if self.eat(P::Assign)? {
             let saved = (self.ctx, self.label_base, self.arrow_at);
-            self.ctx = Ctx { in_func: false, is_async: false, is_gen: false, new_target: true, super_prop: true, super_call: false, field_init: true };
+            self.ctx = Ctx { in_func: false, is_async: false, is_gen: false, new_target: true, super_prop: true, super_call: false, field_init: true, static_block: false };
             self.label_base = self.labels.len();
             let r = self.parse_assign(false, false);
             (self.ctx, self.label_base, self.arrow_at) = saved;

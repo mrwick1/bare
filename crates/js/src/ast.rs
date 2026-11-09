@@ -12,7 +12,7 @@
 //! - Every node has a byte span. [`Program::location`] turns an offset into a line and UTF-16 column.
 //!
 //! The tree is executable structure: nothing is skipped or kept as opaque source text. Things that
-//! are valid syntax but not supported yet (generators, modules, class static blocks) are parse
+//! are valid syntax but not supported yet (generators, modules) are parse
 //! errors with [`crate::parse::ErrorKind::Unsupported`]. They never produce a tree.
 //!
 //! Distinctions an executor needs, kept on purpose:
@@ -417,6 +417,8 @@ pub enum ElemKind {
     Setter(FuncId),
     /// A field and its initializer.
     Field(Option<ExprId>),
+    /// `static { ... }`: the body as a method with no parameters. The element is static and has [`Key::None`].
+    StaticBlock(FuncId),
 }
 
 #[derive(Clone, Copy, Debug)]

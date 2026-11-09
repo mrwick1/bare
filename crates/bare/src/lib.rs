@@ -161,6 +161,9 @@ mod browser_idle_tests;
 mod browser_element_tests;
 mod browser_elements;
 mod browser_media;
+mod browser_img;
+#[cfg(test)]
+mod browser_img_tests;
 #[cfg(test)]
 mod browser_media_tests;
 #[cfg(test)]
