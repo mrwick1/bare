@@ -391,6 +391,23 @@ fn imports_resolve_against_the_module_url_and_load_once_per_page() {
     });
 }
 
+/// An import of a `data:` URL (HTML Standard, "resolve a module specifier": any URL with a fetch scheme) takes its text from the URL.
+/// old.reddit.com imports its page setup and its script loader this way.
+#[test]
+fn a_module_imports_and_dynamically_imports_data_urls() {
+    big(|| {
+        let html = format!(
+            "{PRE}<script type=module>import d, {{ v }} from 'data:text/javascript,export%20const%20v%3D1%3Bexport%20default%202%3Blog.push(%22data-ran%22)'; import 'data:text/javascript;base64,bG9nLnB1c2goJ2I2NCcp';
+              import('data:text/javascript,import(%22%2Fabs.js%22).then(function(m)%7Blog.push(%22nested:%22%2Bm.x)%7D)%3Bexport%20const%20w%3D3').then(function (m) {{ log.push('dyn:' + m.w + ':' + d + v) }});
+              import('data:text/plain,1').catch(function (e) {{ log.push('type:' + (e instanceof TypeError)) }});</script>"
+        );
+        let routes = vec![js("/abs.js", "export const x = 'abs'")];
+        let (log, r, _) = page(&html, routes, quick());
+        assert_eq!(log, "data-ran|b64|type:true|dyn:3:21|nested:abs");
+        assert_eq!((r.script_throws, r.load_errors), (0, 0));
+    });
+}
+
 #[test]
 fn a_cycle_of_modules_loads_and_runs() {
     big(|| {

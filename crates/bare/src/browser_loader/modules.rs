@@ -32,7 +32,7 @@
 //! the promise with the namespace. A fetch or resolution failure rejects with a `TypeError`, a syntax error with a `SyntaxError`.
 
 use super::{EvTarget, Flow, Run, Stop, WS, download, label};
-use crate::resources::{self, Expect, Target};
+use crate::resources::{self, Expect, JS_TYPES, Target};
 use bare_html::dom::NodeId;
 use bare_js::eval::{Error, PromiseStatus};
 use bare_js::value::{ObjId, Value};
@@ -55,6 +55,17 @@ pub(crate) struct Modules {
     evals: Vec<(ObjId, String)>,
     /// Script elements that a script added with `type=module`.
     pub(super) nodes: HashSet<NodeId>,
+}
+
+/// One import of a module: a URL to download, or a `data:` URL that holds its own text.
+enum Dep {
+    Url(Url),
+    Data(String),
+}
+
+/// Is `spec` a `data:` URL (any case)?
+fn is_data(spec: &str) -> bool {
+    spec.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("data:"))
 }
 
 /// Why a graph did not load.
@@ -443,18 +454,53 @@ impl Run<'_> {
         Ok(id)
     }
 
+    /// The module of a `data:` URL: its text is in the URL, so there is no download. Cached by the URL text, like any module. Its own
+    /// imports resolve against the document URL (a `data:` base has no path: a relative import is a `TypeError` in a browser; here it
+    /// reads the document directory).
+    #[cold]
+    #[inline(never)]
+    fn load_data(&mut self, spec: &str, depth: u32, made: &mut Vec<String>) -> Result<u32, Load> {
+        if let Some(&id) = self.dom.scripts.modules.borrow().ids.get(spec) {
+            return Ok(id);
+        }
+        if depth > MAX_DEPTH {
+            return Err(Load::Net(format!("module graph deeper than {MAX_DEPTH}")));
+        }
+        let head = spec.get(5..).and_then(|r| r.split_once(',')).map_or("", |h| h.0);
+        let essence = head.split(';').next().unwrap_or("").trim();
+        if !JS_TYPES.iter().any(|j| essence.eq_ignore_ascii_case(j)) {
+            return Err(Load::Net(format!("a data: module must have a JavaScript MIME type, not \"{essence}\"")));
+        }
+        let Some(bytes) = crate::images::data_url(spec) else { return Err(Load::Net("bad data: URL".into())) };
+        let Some(base) = self.doc_base() else { return Err(Load::Net("no base URL".into())) };
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        let id = match self.b.it.module_parse(&text, spec) {
+            Ok(id) => id,
+            Err(Error::Throw(v)) => return Err(Load::Throw(v)),
+            Err(e) => return Err(Load::Fatal(e)),
+        };
+        self.dom.scripts.modules.borrow_mut().ids.insert(spec.to_string(), id);
+        made.push(spec.to_string());
+        self.load_deps(id, &base, depth, made)?;
+        Ok(id)
+    }
+
     /// Resolve the imports of module `id` (at `url`), fetch them (in parallel from two), and give them to the engine.
     fn load_deps(&mut self, id: u32, url: &Url, depth: u32, made: &mut Vec<String>) -> Result<(), Load> {
         let specs = self.b.it.module_requests(id);
         let mut urls = Vec::with_capacity(specs.len());
         for s in &specs {
-            urls.push(self.resolve_spec(s, url)?);
+            urls.push(if is_data(s) { Dep::Data(s.clone()) } else { Dep::Url(self.resolve_spec(s, url)?) });
         }
         {
             let m = self.dom.scripts.modules.borrow();
             let preloads = self.dom.scripts.preloads.borrow();
             let todo: Vec<&Url> = urls
                 .iter()
+                .filter_map(|d| match d {
+                    Dep::Url(u) => Some(u),
+                    Dep::Data(_) => None,
+                })
                 .filter(|u| !m.ids.contains_key(&u.to_string()) && !m.failed.contains_key(&u.to_string()) && !preloads.has_script(u))
                 .filter(|u| !(self.https_only && u.scheme == bare_url::Scheme::Http))
                 .collect();
@@ -467,7 +513,10 @@ impl Run<'_> {
         }
         let mut deps = Vec::with_capacity(urls.len());
         for u in &urls {
-            deps.push(self.load_rec(u, None, depth + 1, made)?);
+            deps.push(match u {
+                Dep::Url(u) => self.load_rec(u, None, depth + 1, made)?,
+                Dep::Data(s) => self.load_data(s, depth + 1, made)?,
+            });
         }
         self.b.it.module_set_requested(id, &deps);
         Ok(())
@@ -547,11 +596,23 @@ impl Run<'_> {
         for r in reqs {
             self.budget()?;
             self.res.tasks += 1;
+            // The referrer of a `data:` module has no URL to resolve against: the document stands in (see `load_data`).
             let base = match r.referrer {
-                Some(m) => Url::parse(self.b.it.module_url(m)).ok(),
+                Some(m) => Url::parse(self.b.it.module_url(m)).ok().or_else(|| self.doc_base()),
                 None => self.doc_base(),
             };
             let loaded = match base {
+                Some(_) if is_data(&r.specifier) => {
+                    let mut made = Vec::new();
+                    let r = self.load_data(&r.specifier, 0, &mut made);
+                    if r.is_err() {
+                        let mut m = self.dom.scripts.modules.borrow_mut();
+                        for k in made {
+                            m.ids.remove(&k);
+                        }
+                    }
+                    r
+                }
                 None => Err(Load::Net("no base URL".into())),
                 Some(base) => match self.resolve_spec(&r.specifier, &base) {
                     Ok(u) => self.load_graph(&u, None).map_err(|e| match e {
