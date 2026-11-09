@@ -2038,7 +2038,8 @@ mod tests {
         let re = Regex::from_str("(a)(?<n>b)\\k<n>(?<m>c)?", "").unwrap();
         assert_eq!(re.group_names(), &[("n".to_string(), 2), ("m".to_string(), 3)]);
         assert!(Regex::from_str("(a)", "").unwrap().group_names().is_empty());
-        assert!(matches!(Regex::from_str("(?=a)*", ""), Err(CompileError::Unsupported { .. })));
+        assert!(Regex::from_str("(?=a)*", "").is_ok());
+        assert!(matches!(Regex::from_str("(?=a)*", "u"), Err(CompileError::Syntax { .. })));
         for f in ["v", "d", "gv"] {
             assert!(matches!(Regex::from_str("a", f), Err(CompileError::UnsupportedFlag(_))), "{f}");
         }
