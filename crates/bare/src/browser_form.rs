@@ -193,7 +193,7 @@ impl Dom {
         let mut cur = Some(n);
         while let Some(c) = cur {
             it.charge(1)?;
-            if tag_is(&doc, c, &["a", "area", "label", "input", "button", "summary"]) {
+            if tag_is(&doc, c, &["a", "area", "label", "input", "button", "summary", "textarea", "select"]) {
                 return Ok(Some(c));
             }
             cur = doc.parent(c);

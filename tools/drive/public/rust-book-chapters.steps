@@ -1,0 +1,11 @@
+# The Rust book: open a chapter page, follow the next-page arrow, then the previous-page arrow. Titles and urls are stable.
+#   bare-drive --var URL=https://doc.rust-lang.org/book/ch01-00-getting-started.html rust-book-chapters.steps
+timeout 30000
+open ${URL}
+expect css="main h1" text~"Getting Started"
+click css="a.nav-chapters.next"
+expect url~"/book/ch01-01-installation.html"
+expect css="main h2#installation" text~"Installation"
+click css="a.nav-chapters.previous"
+expect url~"/book/ch01-00-getting-started.html"
+expect css="main h1" text~"Getting Started"

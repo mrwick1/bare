@@ -1,0 +1,15 @@
+# Wikipedia main page: the featured article box has an "About" link to a help page; the Random article link in the sidebar opens an article.
+#   bare-drive --var URL=https://en.wikipedia.org/wiki/Main_Page wikipedia-main-random.steps
+timeout 40000
+open ${URL}
+expect title~"Wikipedia"
+expect js "document.querySelectorAll('#mp-tfa p a').length > 0"
+click css="#mp-tfa a[title^='Wikipedia:About']"
+expect url~"/wiki/Wikipedia:About_Today"
+expect css="h1#firstHeading" text~"About Today"
+goto ${URL}
+click css="input#vector-main-menu-dropdown-checkbox"
+expect css="a[href='/wiki/Special:Random']" visible
+click css="a[href='/wiki/Special:Random']"
+expect url~"/wiki/"
+expect js "!location.pathname.endsWith('Special:Random') && document.querySelector('h1#firstHeading') !== null"

@@ -1,0 +1,13 @@
+# docs.python.org: open the tutorial, click the first chapter in its contents; the url and the heading change, then the next-page link.
+#   bare-drive --var URL=https://docs.python.org/3/tutorial/index.html python-docs-tutorial.steps
+timeout 30000
+open ${URL}
+expect css="h1" text~"The Python Tutorial"
+click css="div.toctree-wrapper a[href='appetite.html']"
+expect url~"/tutorial/appetite.html"
+expect css="h1" text~"Whetting Your Appetite"
+click css="a[accesskey=N]"
+expect url~"/tutorial/interpreter.html"
+expect css="h1" text~"Using the Python Interpreter"
+click css="a[accesskey=P]"
+expect url~"/tutorial/appetite.html"

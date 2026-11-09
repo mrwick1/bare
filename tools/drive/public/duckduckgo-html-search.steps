@@ -1,0 +1,8 @@
+# DuckDuckGo (html version, no JS): type a query in the search box, press Enter; the results page has a result list with links.
+#   bare-drive --var URL=https://html.duckduckgo.com/html/ duckduckgo-html-search.steps
+timeout 30000
+open ${URL}
+expect css="input[name=q]" visible
+type css="input[name=q]" "rust programming language\n"
+expect js "document.querySelectorAll('.result a.result__a').length > 3"
+expect js "document.querySelector('input[name=q]').value === 'rust programming language'"

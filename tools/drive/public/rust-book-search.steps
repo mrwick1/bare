@@ -1,0 +1,10 @@
+# The Rust book: open the search box with the magnifier button, type a word; the result list gets entries.
+#   bare-drive --var URL=https://doc.rust-lang.org/book/ rust-book-search.steps
+timeout 30000
+open ${URL}
+expect css="main h1" text~"The Rust Programming Language"
+expect js "document.readyState === 'complete'"
+click css="button#mdbook-search-toggle"
+expect css="input#mdbook-searchbar" visible
+type css="input#mdbook-searchbar" "ownership"
+expect js "document.querySelectorAll('#mdbook-searchresults > li').length > 3"

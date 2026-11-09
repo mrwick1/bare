@@ -1,0 +1,13 @@
+# Lobsters: the front page has stories; open the comments of the first one, go back to the front page, and the stories are still there.
+#   bare-drive --var URL=https://lobste.rs/ lobsters-comments-back.steps
+# known-bug: the page loads `<script type=module>`, which stops the page (Fatal Unsupported "module script"), and then a click on a link does not navigate
+timeout 30000
+open ${URL}
+expect js "document.querySelectorAll('li.story').length >= 20"
+expect js "document.querySelectorAll('li.story .comments_label a').length === document.querySelectorAll('li.story').length"
+click css="li.story:first-child .comments_label a"
+expect url~"/s/"
+expect css="a.u-url" count 1
+goto ${URL}
+expect url="${URL}"
+expect js "document.querySelectorAll('li.story').length >= 20"

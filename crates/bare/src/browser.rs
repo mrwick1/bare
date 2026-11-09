@@ -1273,6 +1273,7 @@ pub(crate) static DEFS: &[Def] = &[
     Def { on: &[Link], name: "as", len: 0, kind: A(nd::link_as, nd::set_link_as) },
     Def { on: &[Link], name: "crossOrigin", len: 0, kind: A(nd::link_cross_origin, nd::set_link_cross_origin) },
     Def { on: &[Document], name: "scripts", len: 0, kind: G(crate::browser_platform_query::scripts) },
+    Def { on: &[Document], name: "forms", len: 0, kind: G(crate::browser_platform_query::forms) },
     Def { on: &[Input], name: "name", len: 0, kind: A(fm::input_name, fm::set_input_name) },
     Def { on: &[Input], name: "disabled", len: 0, kind: A(fm::input_disabled, fm::set_input_disabled) },
     Def { on: &[Input], name: "readOnly", len: 0, kind: A(fm::input_read_only, fm::set_input_read_only) },

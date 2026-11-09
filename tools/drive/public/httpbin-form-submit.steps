@@ -1,0 +1,19 @@
+# httpbin.org: fill the pizza order form and submit it; the result page echoes the values as JSON.
+#   bare-drive --var URL=https://httpbin.org/forms/post httpbin-form-submit.steps
+# known-bug: bare refuses a document that is not HTML ("the content type is not HTML"), and the result page is application/json
+timeout 30000
+open ${URL}
+expect css="form" visible
+type label="Customer name:" "Ada Lovelace"
+type label="Telephone:" "5551234"
+type label="E-mail address:" "ada@example.com"
+click label="Large"
+click label="Bacon"
+click label="Onion"
+expect label="Large" checked
+expect label="Bacon" checked
+expect label="Extra Cheese" unchecked
+type label="Delivery instructions:" "Ring twice"
+click role=button name="Submit order"
+expect url~"/post"
+expect js "(() => { const f = JSON.parse(document.body.innerText).form; return f.custname === 'Ada Lovelace' && f.custtel === '5551234' && f.custemail === 'ada@example.com' && f.size === 'large' && f.topping.join() === 'bacon,onion' && f.comments === 'Ring twice'; })()"

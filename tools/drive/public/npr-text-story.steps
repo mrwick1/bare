@@ -1,0 +1,11 @@
+# text.npr.org: the text-only front page lists stories; open the first story, then go back to the list.
+#   bare-drive --var URL=https://text.npr.org/ npr-text-story.steps
+timeout 30000
+open ${URL}
+expect title~"NPR"
+expect js "document.querySelectorAll('ul a').length >= 10"
+click css="ul li:first-child a.topic-title"
+expect url~"/nx-s1-"
+expect js "document.querySelector('h1') !== null && document.querySelectorAll('p').length > 3"
+goto ${URL}
+expect js "document.querySelectorAll('ul a').length >= 10"

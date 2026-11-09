@@ -1,0 +1,10 @@
+# The Rust book: click a chapter in the sidebar of the title page.
+#   bare-drive --var URL=https://doc.rust-lang.org/book/ rust-book-sidebar.steps
+# known-bug: the sidebar has width 0 and the page covers it: `width: var(--sidebar-width)` with `--sidebar-width: min(300px, 80vw)` (min() in a size is not read)
+timeout 30000
+open ${URL}
+expect css="main h1" text~"The Rust Programming Language"
+expect js "document.querySelectorAll('ol.chapter a').length > 50"
+click css="ol.chapter a[href='ch01-00-getting-started.html']"
+expect url~"/book/ch01-00-getting-started.html"
+expect css="main h1" text~"Getting Started"

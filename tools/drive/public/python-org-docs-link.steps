@@ -1,0 +1,12 @@
+# python.org: the Documentation menu link opens /doc/, which has a title, a heading and links to docs.python.org.
+#   bare-drive --var URL=https://www.python.org/ python-org-docs-link.steps
+# known-bug: a click on the link or the submit button does not navigate once the page is idle (a click made before the load ends works); hypothesis: a page script or an unfinished load (document.readyState stays interactive)
+timeout 30000
+open ${URL}
+expect css="#mainnav" visible
+expect js "document.querySelectorAll('#mainnav > ul > li').length === 7 && document.readyState !== 'loading'"
+click css="#documentation > a"
+expect url~"/doc/"
+expect title~"Our Documentation"
+expect css="h1" text~"Browse the docs online"
+expect js "document.querySelectorAll('a[href*=\"docs.python.org\"]').length > 0"
