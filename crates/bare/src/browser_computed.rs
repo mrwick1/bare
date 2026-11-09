@@ -835,7 +835,7 @@ fn set_css_text(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
 }
 
 fn names(s: &Snap) -> Vec<&str> {
-    let mut names = Property::ALL.iter().map(|p| p.name()).collect::<Vec<_>>();
+    let mut names = Property::LISTED.iter().map(|p| p.name()).collect::<Vec<_>>();
     names.sort_unstable();
     names.extend(s.styles.custom_properties(&s.style).iter().map(|(name, _)| &**name));
     names
@@ -843,7 +843,7 @@ fn names(s: &Snap) -> Vec<&str> {
 
 fn length(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let el = d.computed_el(it, this)?;
-    let n = d.snapshot(it, el)?.map_or(0, |s| Property::COUNT + s.styles.custom_properties(&s.style).len());
+    let n = d.snapshot(it, el)?.map_or(0, |s| Property::LISTED.len() + s.styles.custom_properties(&s.style).len());
     Ok(Value::Number(n as f64))
 }
 
@@ -857,7 +857,7 @@ fn item(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     required(it, a, 1, "item")?;
     let i = crate::browser_platform_class::to_u32(it, a[0])? as usize;
     let Some(s) = d.snapshot(it, el)? else { return d.js_str(it, "") };
-    it.charge((Property::COUNT + s.styles.custom_properties(&s.style).len()) as u64)?;
+    it.charge((Property::LISTED.len() + s.styles.custom_properties(&s.style).len()) as u64)?;
     d.js_str(it, names(&s).get(i).copied().unwrap_or(""))
 }
 

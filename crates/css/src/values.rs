@@ -186,6 +186,14 @@ properties! {
     MaskRepeat => "mask-repeat",
 }
 
+impl Property {
+    /// The properties that the CSS object model of a page (`style`, `getComputedStyle`) lists and has an accessor for. The background and
+    /// mask properties that come last are read by the cascade and by paint only: the engine makes an accessor for each listed property
+    /// each time a page starts, and that costs instructions for each page. `from_name` still knows them, so `setProperty` and
+    /// `getPropertyValue` work for them.
+    pub const LISTED: &'static [Property] = Property::ALL.split_at(Property::BackgroundImage as usize).0;
+}
+
 /// A length or a percent. The fixed units are already `Px`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Length {
@@ -316,7 +324,7 @@ pub fn parse_declaration(name: &str, value: &str, important: bool, side: &mut Si
         }
         // The value is not known until the custom properties are. A shorthand gives all its longhands the same value.
         let single = Property::from_name(name).map(|p| [p]);
-        let Some(list) = shorthand_longhands(name).or(single.as_ref().map(|p| &p[..])) else { return false };
+        let Some(list) = all_longhands(name).or(single.as_ref().map(|p| &p[..])) else { return false };
         side.vars.push(VarDecl { name: name.into(), text: value.trim().into() });
         let index = side.vars.len() as u32 - 1;
         out.extend(list.iter().map(|&property| Declared { property, value: Value::Var(index), important }));
@@ -580,7 +588,7 @@ fn expand(name: &str, parts: &Parts, emit: &mut dyn FnMut(Property, Value)) -> b
     let slice = parts.as_slice();
     // `inherit`, `initial` and `unset` are the whole value, for a longhand and for a shorthand.
     if let [Part::Wide(wide)] = slice {
-        return match shorthand_longhands(name) {
+        return match all_longhands(name) {
             Some(list) => {
                 list.iter().for_each(|&p| emit(p, *wide));
                 true
@@ -720,12 +728,26 @@ fn expand(name: &str, parts: &Parts, emit: &mut dyn FnMut(Property, Value)) -> b
 /// The shorthands that `parse_declaration` splits into longhands: every name for which `shorthand_longhands` answers.
 pub const SHORTHANDS: &[&str] = &[
     "margin", "padding", "inset", "flex", "flex-flow", "gap", "border-spacing", "border-width", "border-style", "border-color",
-    "border", "border-top", "border-right", "border-bottom", "border-left", "background", "mask", "background-size", "mask-size",
-    "background-position", "mask-position", "font", "list-style", "text-decoration",
+    "border", "border-top", "border-right", "border-bottom", "border-left", "background", "font", "list-style", "text-decoration",
     "overflow", "border-radius", "grid-row", "grid-column", "grid-area", "place-items", "place-self", "place-content",
 ];
 
 /// The longhands of a shorthand, for `inherit` and the like. `None` if `name` is not a shorthand.
+/// `shorthand_longhands`, and for the shorthands of the background and mask properties all the longhands that the parser sets. (The object
+/// model lists only `background-color` for `background`: see `Property::LISTED`.)
+pub fn all_longhands(name: &str) -> Option<&'static [Property]> {
+    use Property::*;
+    Some(match name {
+        "background" => &[BackgroundColor, BackgroundImage, BackgroundSizeX, BackgroundSizeY, BackgroundPositionX, BackgroundPositionY, BackgroundRepeat],
+        "mask" => &[MaskImage, MaskSizeX, MaskSizeY, MaskPositionX, MaskPositionY, MaskRepeat],
+        "background-size" => &[BackgroundSizeX, BackgroundSizeY],
+        "mask-size" => &[MaskSizeX, MaskSizeY],
+        "background-position" => &[BackgroundPositionX, BackgroundPositionY],
+        "mask-position" => &[MaskPositionX, MaskPositionY],
+        _ => return shorthand_longhands(name),
+    })
+}
+
 pub fn shorthand_longhands(name: &str) -> Option<&'static [Property]> {
     use Property::*;
     let list: &'static [Property] = match name {
@@ -747,12 +769,7 @@ pub fn shorthand_longhands(name: &str) -> Option<&'static [Property]> {
         "border-right" => &[BorderRightWidth, BorderRightStyle, BorderRightColor],
         "border-bottom" => &[BorderBottomWidth, BorderBottomStyle, BorderBottomColor],
         "border-left" => &[BorderLeftWidth, BorderLeftStyle, BorderLeftColor],
-        "background" => &[BackgroundColor, BackgroundImage, BackgroundSizeX, BackgroundSizeY, BackgroundPositionX, BackgroundPositionY, BackgroundRepeat],
-        "mask" => &[MaskImage, MaskSizeX, MaskSizeY, MaskPositionX, MaskPositionY, MaskRepeat],
-        "background-size" => &[BackgroundSizeX, BackgroundSizeY],
-        "mask-size" => &[MaskSizeX, MaskSizeY],
-        "background-position" => &[BackgroundPositionX, BackgroundPositionY],
-        "mask-position" => &[MaskPositionX, MaskPositionY],
+        "background" => &[BackgroundColor],
         "font" => &[FontStyle, FontWeight, FontSize, LineHeight],
         "list-style" => &[ListStyleType],
         "text-decoration" => &[TextDecoration],

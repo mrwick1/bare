@@ -240,7 +240,7 @@ fn elements_without_a_style_say_so() {
     // Detached: an empty declaration (CSSOM): no values and no length.
     assert_eq!(js(&mut b, "var d = document.createElement('div'); var cs = getComputedStyle(d); cs.display + '|' + cs.direction + '|' + cs.length + '|' + cs.item(0) + '|' + cs.getPropertyValue('--x')"), "||0||");
     // Attached later: the same object now has values.
-    assert_eq!(js(&mut b, "document.body.appendChild(d); cs.display + cs.length"), format!("block{}", bare_css::values::Property::COUNT));
+    assert_eq!(js(&mut b, "document.body.appendChild(d); cs.display + cs.length"), format!("block{}", bare_css::values::Property::LISTED.len()));
     // Inside `display:none`: the computed values, as in Chrome.
     assert_eq!(js(&mut b, "getComputedStyle(document.head).display"), "none");
     assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('t')).display"), "none");
@@ -635,7 +635,7 @@ fn cascade_work_is_reserved_before_the_cascade_runs() {
 #[test]
 fn computed_names_are_sorted_and_include_live_custom_properties() {
     let mut b = at("<body><p id=p style='--z: red; --a: blue'>x</p>");
-    let count = bare_css::values::Property::COUNT;
+    let count = bare_css::values::Property::LISTED.len();
     assert_eq!(js(&mut b, &format!("var cs=getComputedStyle(document.getElementById('p')); var names=[]; for(var i=0;i<{count};i++) names.push(cs.item(i)); [names.join()===names.slice().sort().join(),cs.length==={count}+2,cs.item({count}).slice(0,2)==='--'].join()")), "true,true,true");
 }
 
