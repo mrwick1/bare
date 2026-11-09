@@ -1,6 +1,6 @@
 # python.org: type in the search box, press Enter; the search page gets the query in its url and keeps it in the box, and lists results.
 #   bare-drive --var URL=https://www.python.org/ python-org-search.steps
-# known-bug: a click on the link or the submit button does not navigate once the page is idle (a click made before the load ends works); hypothesis: a page script or an unfinished load (document.readyState stays interactive)
+# known-bug: the page stops with Limit(Steps) in masonry's getSize(#container), so the session ends and later clicks do nothing; see docs/progress.md, section Non-HTML documents and python.org
 timeout 30000
 open ${URL}
 expect css="input#id-search-field" visible

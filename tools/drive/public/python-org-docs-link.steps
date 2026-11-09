@@ -1,6 +1,6 @@
 # python.org: the Documentation menu link opens /doc/, which has a title, a heading and links to docs.python.org.
 #   bare-drive --var URL=https://www.python.org/ python-org-docs-link.steps
-# known-bug: a click on the link or the submit button does not navigate once the page is idle (a click made before the load ends works); hypothesis: a page script or an unfinished load (document.readyState stays interactive)
+# known-bug: the page stops with Limit(Steps) in masonry's getSize(#container), so the session ends and later clicks do nothing; see docs/progress.md, section Non-HTML documents and python.org
 timeout 30000
 open ${URL}
 expect css="#mainnav" visible
