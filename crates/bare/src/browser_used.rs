@@ -98,6 +98,10 @@ fn is_box(k: Kind) -> bool {
 /// Does the resolved value of `p` need layout? `kind` is the box kind of the element, `rendered` is false inside `display: none`.
 pub(crate) fn needs_layout(style: &bare_css::cascade::ComputedStyle, kind: Kind, p: Property) -> bool {
     use Property::*;
+    // A picture property is the same at any size of the box.
+    if p.is_picture() {
+        return false;
+    }
     let v = style.get(p);
     let fixed = matches!(v, Cv::Length(Length::Px(_)));
     match p {
@@ -463,6 +467,11 @@ pub(crate) fn calc_text(styles: &Styles, i: u32) -> String {
     if px.is_nan() {
         return styles.math_text(i);
     }
+    calc_of((px, pct))
+}
+
+/// `calc_text` for the pixels and the percent.
+pub(crate) fn calc_of((px, pct): (f32, f32)) -> String {
     let sign = |x: f32| if x < 0.0 { '-' } else { '+' };
     match (px == 0.0, pct == 0.0) {
         (true, _) => format!("calc({}%)", num(pct)),

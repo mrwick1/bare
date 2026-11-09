@@ -510,7 +510,7 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     d.def_method(it, proto, "setProperty", 2, set_property)?;
     d.def_method(it, proto, "removeProperty", 1, remove_property)?;
 
-    let mut props: Vec<&'static str> = Property::ALL.iter().map(|p| p.name()).collect();
+    let mut props: Vec<&'static str> = Property::LISTED.iter().map(|p| p.name()).collect();
     props.extend(SHORTHANDS);
     let mut nm = String::new();
     for (i, css) in props.iter().enumerate() {

@@ -84,7 +84,7 @@ use crate::browser::*;
 use crate::browser_platform::{V, arg};
 use crate::browser_style::{current, keys_of};
 use crate::browser_style_block::{self as blk, Fail, Lim, custom};
-use crate::browser_used::{Ctx, calc_text, flow_text, grid_text};
+use crate::browser_used::{Ctx, calc_of, calc_text, flow_text, grid_text};
 use crate::browser_ui::chains;
 use bare_css::cascade::{self, ComputedStyle, Origin, RuleSet, Scopes, Source, Styles, UA_CSS, inherited};
 use bare_css::values::{Keyword, Length, Property, SHORTHANDS, Value as Cv, shorthand_longhands};
@@ -282,7 +282,7 @@ impl Snap {
         if let Some(t) = used.map(|c| c.text(self, p)).transpose()?.flatten() {
             return Ok(t);
         }
-        let v = self.style.get(p);
+        let v = self.style.value(p);
         // A relative box with an `auto` offset moves by the opposite offset, backwards. The layout gives it when that offset is a percent.
         if !self.hidden && v == Cv::Keyword(Keyword::Auto) && self.style.get(Property::Position) == Cv::Keyword(Keyword::Relative) {
             let opposite = match p {
@@ -306,9 +306,11 @@ impl Snap {
             // A number `line-height` is times the font size of the element, in pixels.
             Cv::Number(n) if p == Property::LineHeight => format!("{}px", num(n * self.style.px(Property::FontSize))),
             Cv::Number(n) if p == Property::GridAutoFlow => flow_text(n).to_string(),
+            Cv::Number(n) if matches!(p, Property::BackgroundImage | Property::MaskImage) => bare_css::urls::get(n as u32).map_or("none".to_string(), |u| format!("url(\"{u}\")")),
             Cv::Number(n) => num(n),
             Cv::Length(Length::Px(x)) => format!("{}px", num(x)),
             Cv::Length(Length::Percent(x)) => format!("{}%", num(x)),
+            Cv::Length(Length::Calc(i)) if p.is_picture() => calc_of(bare_css::cascade::picture_calc(i)),
             Cv::Length(Length::Calc(i)) => calc_text(&self.styles, i),
             Cv::Grid(i) => grid_text(&self.styles, self.styles.grid(i)),
             Cv::Color(c) if c.a == 255 => format!("rgb({}, {}, {})", c.r, c.g, c.b),
@@ -941,7 +943,7 @@ fn set_css_text(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
 }
 
 fn names(s: &Snap) -> Vec<&str> {
-    let mut names = Property::ALL.iter().map(|p| p.name()).collect::<Vec<_>>();
+    let mut names = Property::LISTED.iter().map(|p| p.name()).collect::<Vec<_>>();
     names.sort_unstable();
     names.extend(s.styles.custom_properties(&s.style).iter().map(|(name, _)| &**name));
     names
@@ -952,7 +954,7 @@ fn length(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     if d.computed_kind(this) == EMPTY {
         return Ok(Value::Number(0.0));
     }
-    let n = d.snapshot(it, el)?.map_or(0, |s| Property::COUNT + s.styles.custom_properties(&s.style).len());
+    let n = d.snapshot(it, el)?.map_or(0, |s| Property::LISTED.len() + s.styles.custom_properties(&s.style).len());
     Ok(Value::Number(n as f64))
 }
 
@@ -969,7 +971,7 @@ fn item(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
         return d.js_str(it, "");
     }
     let Some(s) = d.snapshot(it, el)? else { return d.js_str(it, "") };
-    it.charge((Property::COUNT + s.styles.custom_properties(&s.style).len()) as u64)?;
+    it.charge((Property::LISTED.len() + s.styles.custom_properties(&s.style).len()) as u64)?;
     d.js_str(it, names(&s).get(i).copied().unwrap_or(""))
 }
 
