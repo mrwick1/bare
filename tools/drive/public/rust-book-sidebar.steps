@@ -1,6 +1,5 @@
 # The Rust book: click a chapter in the sidebar of the title page.
 #   bare-drive --var URL=https://doc.rust-lang.org/book/ rust-book-sidebar.steps
-# known-bug: the sidebar has width 0 and the page covers it: `width: var(--sidebar-width)` with `--sidebar-width: min(300px, 80vw)` (min() in a size is not read)
 timeout 30000
 open ${URL}
 expect css="main h1" text~"The Rust Programming Language"
