@@ -156,6 +156,27 @@ fn failed_resources_never_run_and_get_an_error_event() {
     });
 }
 
+/// A script element that a script gives a `blob:` URL of the Blob URL store runs the Blob text, with `load`, and no download (W3C File API).
+#[test]
+fn a_dynamic_script_reads_a_blob_url_without_the_network() {
+    big(|| {
+        let html = format!(
+            "{PRE}<script>
+              var u = URL.createObjectURL(new Blob(['log.push(\"blob-ran:\" + document.currentScript.src.slice(0, 5))'], {{ type: 'text/javascript' }}));
+              var s = document.createElement('script'); s.src = u;
+              s.onload = function () {{ log.push('onload') }}; document.head.appendChild(s); log.push('after-append');
+              var gone = URL.createObjectURL(new Blob(['log.push(\"must-not-run\")'])); URL.revokeObjectURL(gone);
+              var e = document.createElement('script'); e.src = gone; e.onerror = function () {{ log.push('onerror') }}; document.body.appendChild(e);
+              var m = document.createElement('script'); m.type = 'module'; m.src = URL.createObjectURL(new Blob(['log.push(\"module\")']));
+              m.onerror = function () {{ log.push('module-onerror') }}; document.body.appendChild(m);</script>"
+        );
+        let srv = server(vec![]);
+        let mut b = make(&html, &srv, 5_000_000, true);
+        let _ = load(&mut b, &srv, quick());
+        assert_eq!(eval(&mut b, "log.join('|')"), "after-append|blob-ran:blob:|onload|onerror|module-onerror");
+    });
+}
+
 #[test]
 fn dynamic_scripts_run_once_in_order_with_load_and_error_events() {
     big(|| {

@@ -165,6 +165,43 @@ fn navigator_has_the_fixed_chrome_like_values() {
     });
 }
 
+/// WICG UA Client Hints: `getHighEntropyValues(hints)` and `toJSON()` of `NavigatorUAData`.
+#[test]
+fn user_agent_data_has_high_entropy_values_and_to_json() {
+    run(&[
+        ("var out = []; var u = navigator.userAgentData; var p = u.getHighEntropyValues(['architecture', 'bitness', 'model', 'platformVersion', 'uaFullVersion', 'fullVersionList', 'wow64', 'formFactors']); out.push(p instanceof Promise); p.then(function (v) { out.push(Object.keys(v).join()); out.push([v.architecture, v.bitness, v.model, v.platformVersion, v.uaFullVersion, v.wow64, v.formFactors.join(), v.mobile, v.platform, v.brands.length].join('|')); out.push(v.fullVersionList.map(function (x) { return x.brand + '/' + x.version; }).join()); }); 1", "1"),
+        ("out.join(';')", "true;brands,mobile,platform,architecture,bitness,model,platformVersion,uaFullVersion,fullVersionList,wow64,formFactors;x86|64|||155.0.0.0|false|Desktop|false|Linux|3;Not.A/Brand/8.0.0.0,Chromium/155.0.0.0,Google Chrome/155.0.0.0"),
+        ("out.length = 0; navigator.userAgentData.getHighEntropyValues([]).then(function (v) { out.push(Object.keys(v).join()); }); navigator.userAgentData.getHighEntropyValues(['bitness', 'nope']).then(function (v) { out.push(Object.keys(v).join()); }); 1", "1"),
+        ("out.join(';')", "brands,mobile,platform;brands,mobile,platform,bitness"),
+        ("out.length = 0; navigator.userAgentData.getHighEntropyValues().catch(function (e) { out.push(e.name); }); navigator.userAgentData.getHighEntropyValues(5).catch(function (e) { out.push(e.name); }); 1", "1"),
+        ("out.join()", "TypeError,TypeError"),
+        ("var j = navigator.userAgentData.toJSON(); [Object.keys(j).join(), j.brands.length, j.brands[0].brand, j.mobile, j.platform, JSON.stringify(navigator.userAgentData) === JSON.stringify(j)].join('|')", "brands,mobile,platform|3|Not.A/Brand|false|Linux|true"),
+        ("var d = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(navigator.userAgentData), 'getHighEntropyValues'); [typeof d.value, d.value.length, Object.getPrototypeOf(navigator.userAgentData).toJSON.length].join()", "function,1,0"),
+        ("out.length = 0; try { navigator.userAgentData.getHighEntropyValues.call({}, []).catch(function (e) { out.push('p:' + e.name); }); } catch (e) { out.push('s:' + e.name); } 1", "1"),
+        ("out.join()", "p:TypeError"),
+    ]);
+}
+
+/// W3C File API, Blob URL Store: `URL.createObjectURL` and `URL.revokeObjectURL`, read by `fetch`.
+#[test]
+fn object_urls_are_made_read_by_fetch_and_revoked() {
+    run(&[
+        ("var out = []; var b = new Blob(['hello'], { type: 'text/plain' }); var u = URL.createObjectURL(b); var u2 = URL.createObjectURL(b); out.push(/^blob:null\\/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(u), u !== u2, typeof URL.createObjectURL + URL.createObjectURL.length + URL.revokeObjectURL.length); fetch(u).then(function (r) { out.push(r.status + ',' + r.ok + ',' + r.headers.get('content-type') + ',' + (r.url === u)); return r.text(); }).then(function (t) { out.push(t); }); 1", "1"),
+        ("out.join(';')", "true;true;function11;200,true,text/plain,true;hello"),
+        ("out.length = 0; fetch(new URL(u)).then(function (r) { return r.arrayBuffer(); }).then(function (a) { out.push(a.byteLength); }); fetch(u + '#frag').then(function (r) { out.push(r.status); }); new File(['xy'], 'f.txt').size", "2"),
+        ("out.sort().join()", "200,5"),
+        ("out.length = 0; URL.revokeObjectURL(u); URL.revokeObjectURL(u); URL.revokeObjectURL('blob:null/none'); URL.revokeObjectURL(); 1", "throw:TypeError:Failed to execute 'revokeObjectURL' on 'URL': 1 argument required, but only 0 present."),
+        ("out.length = 0; fetch(u).catch(function (e) { out.push(e.name + ':' + e.message); }); fetch(u2).then(function (r) { out.push('u2:' + r.status); }); 1", "1"),
+        ("out.sort().join()", "TypeError:Failed to fetch,u2:200"),
+        ("[(function () { try { URL.createObjectURL({}); } catch (e) { return e.name; } })(), (function () { try { URL.createObjectURL(); } catch (e) { return e.name; } })(), (function () { try { URL.createObjectURL('blob:x'); } catch (e) { return e.name; } })()].join()", "TypeError,TypeError,TypeError"),
+        ("var f = new File(['abc'], 'a.png', { type: 'image/png' }); var fu = URL.createObjectURL(f); out.length = 0; fetch(fu).then(function (r) { out.push(r.headers.get('content-type')); return r.blob(); }).then(function (x) { out.push(x.size + x.type); }); URL.revokeObjectURL(fu + '#x'); 1", "1"),
+        ("out.join()", "image/png,3image/png"),
+        ("out.length = 0; var e0 = URL.createObjectURL(new Blob()); fetch(e0).then(function (r) { out.push(String(r.headers.get('content-type')) + r.headers.has('content-type')); }); 1", "1"),
+        ("out.join()", "nullfalse"),
+        ("var p = new URL(u2); [p.protocol, p.origin, p.pathname === u2.slice(5)].join()", "blob:,null,true"),
+    ]);
+}
+
 #[test]
 fn the_globals_are_lazy_accessors_that_become_data_properties() {
     big(|| {
