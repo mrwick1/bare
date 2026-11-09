@@ -3424,3 +3424,21 @@ Open items:
 - The parse cache has no module mode, so only classic scripts use it.
 - Branch `t3/engine-b3`: the bytecode VM at 2.49x, not merged.
 - Other sites: bare is measured on one app only.
+
+## Public sites, headless (started 2026-11-09)
+
+Goal: run `bare-drive` on public sites without a login. The first probe used `open URL`, `expect css="body" visible` and `shot` on 6 sites (main `edbd13a`, archMachine). `open` does not fetch: the first `expect` loads the page.
+
+| Site | Result |
+| --- | --- |
+| `example.com` | Loads (85 ms). |
+| `news.ycombinator.com` | Loads (914 ms, 3 requests). |
+| `en.wikipedia.org` | `certificate verification failed: Host(NoMatch)`. The certificate lists only wildcard names (`*.wikipedia.org`). |
+| `react.dev`, `nextjs.org` | `PeerAlert(40)`. The certificates use RSA keys and the server signs with `rsa_pss_rsae_sha256`. bare offers ECDSA only. |
+| `developer.mozilla.org` | `UnexpectedRecord(23)`. It has the same RSA chain. The cause is not confirmed. |
+
+Fix 1, wildcard names (RFC 9525): `*` must be the whole leftmost label and two labels must follow it. `*.example.com` matches `www.example.com`, not `example.com` or `a.b.example.com`. The public suffix list is not checked. `cargo test -p bare-tls hostname`: 10 passed. After the fix, the Wikipedia document and its `load.php` subresources return 200. The page then fails with `render: Limit(Host("geometry-fragments"))` and `Unsupported: computed style needs an external stylesheet`. This is the next blocker for that site.
+
+Next: RSA (modular exponentiation, PKCS#1 v1.5 and PSS verify, RSA keys in the X.509 parser, RSA algorithms in the ClientHello), written in `bare-tls` with no new dependency.
+
+Not tested: the other sites after the fix, `developer.mozilla.org` cause, arjun-e16.
