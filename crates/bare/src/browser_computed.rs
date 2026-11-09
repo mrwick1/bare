@@ -481,11 +481,20 @@ impl Dom {
             it.charge(plan.bytes as u64 / 32)?;
             let mut cache = self.computed.cache.borrow_mut();
             if !cache.as_ref().is_some_and(|b| b.vp == vp && b.key == plan.parts) {
-                *cache = None;
-                let mut rules = RuleSet::new(vp);
-                rules.add(&mut doc, UA_CSS, Origin::UserAgent);
+                // Sheets only added at the end (a script appends a `<link>` or `<style>`): add them to the rules of the last build.
+                // Adding in order gives the same rules as a new build, without parsing the sheets again.
+                let old = cache.take().filter(|b| b.vp == vp && plan.parts.starts_with(&b.key));
+                let from = old.as_ref().map_or(0, |b| b.key.len());
+                let mut rules = match old {
+                    Some(b) => b.rules,
+                    None => {
+                        let mut rules = RuleSet::new(vp);
+                        rules.add(&mut doc, UA_CSS, Origin::UserAgent);
+                        rules
+                    }
+                };
                 let root = doc.root();
-                for (scope, layer, text) in &plan.parts {
+                for (scope, layer, text) in &plan.parts[from..] {
                     if *scope == root {
                         rules.add_in_layer(&mut doc, text, Origin::Author, layer.as_deref());
                     } else {
