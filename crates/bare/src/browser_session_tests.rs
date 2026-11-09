@@ -565,3 +565,81 @@ fn document_navigation_requests_html() {
         assert!(heads[0].contains("user-agent: bare/0.1"));
     });
 }
+
+fn refresh_cfg(url: String) -> SessionConfig {
+    let mut c = cfg(url);
+    // Wider than the refresh delays below: a timer that is inside the window blocks the settle.
+    c.page.quiet = Duration::from_secs(10);
+    c
+}
+
+#[test]
+fn a_meta_refresh_goes_to_its_url_after_its_delay_and_replaces_the_entry() {
+    big(|| {
+        let srv = server(|| {
+            vec![
+                (
+                    "/a/",
+                    html(
+                        "<meta http-equiv=REFRESH content=\" 2 ; URL = 'b?q=1' \"><script>
+                         setTimeout(function () { localStorage.setItem('early', String(performance.now() >= 1500)) }, 1500);
+                         setTimeout(function () { localStorage.setItem('late', '1') }, 2500)</script>",
+                    ),
+                ),
+                ("/a/b?q=1", html("<script>localStorage.setItem('at', location.pathname + location.search); localStorage.setItem('len', String(history.length))</script>")),
+            ]
+        });
+        let mut s = Session::new(refresh_cfg(srv.url("/a/")));
+        let r = s.run();
+        assert_eq!(r.stop, SessionStop::Page(Stop::Settled), "{r:?}");
+        assert_eq!(r.urls, [format!("http://127.0.0.1:{}/a/", srv.port), format!("http://127.0.0.1:{}/a/b", srv.port)]);
+        assert_eq!(get(&s, &srv, "early").as_deref(), Some("true"), "the refresh waits for its delay");
+        assert_eq!(get(&s, &srv, "late"), None, "the old document ends at the refresh");
+        assert_eq!(get(&s, &srv, "at").as_deref(), Some("/a/b?q=1"));
+        assert_eq!(get(&s, &srv, "len").as_deref(), Some("1"), "the refresh replaces the history entry");
+    });
+}
+
+#[test]
+fn a_meta_refresh_without_a_url_reloads_and_the_document_limit_ends_the_loop() {
+    big(|| {
+        let srv = server(|| vec![("/", html("<meta http-equiv=refresh content=0>"))]);
+        let mut c = refresh_cfg(srv.url("/"));
+        c.limits.max_documents = 3;
+        let r = Session::new(c).run();
+        assert_eq!(r.stop, SessionStop::DocumentLimit, "{r:?}");
+        assert_eq!(srv.hits("/"), 3);
+    });
+}
+
+#[test]
+fn a_meta_refresh_that_the_standard_ignores_is_ignored() {
+    big(|| {
+        let srv = server(|| {
+            vec![
+                ("/neg", html("<meta http-equiv=refresh content='-1; url=/x'>")),
+                ("/nan", html("<meta http-equiv=refresh content='soon; url=/x'>")),
+                ("/js", html("<meta http-equiv=refresh content='0; url=javascript:alert(1)'>")),
+                ("/other", html("<meta http-equiv=content-type content='0; url=/x'>")),
+                ("/x", html("")),
+            ]
+        });
+        for p in ["/neg", "/nan", "/js", "/other"] {
+            let r = Session::new(refresh_cfg(srv.url(p))).run();
+            assert_eq!((r.stop, r.pages.len()), (SessionStop::Page(Stop::Settled), 1), "{p}");
+        }
+        assert_eq!(srv.hits("/x"), 0);
+    });
+}
+
+#[test]
+fn a_pending_meta_refresh_is_queued_work() {
+    big(|| {
+        let mut b = bare_browser("<meta http-equiv=refresh content='5; url=/next'>");
+        b.use_virtual_clock();
+        b.set_document_url("http://127.0.0.1:1/").unwrap();
+        assert_eq!(b.next_scheduled_due(), None);
+        b.start_refresh();
+        assert!((5000.0..5010.0).contains(&b.next_scheduled_due().unwrap()));
+    });
+}

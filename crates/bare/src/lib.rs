@@ -82,6 +82,7 @@ pub mod browser_navigation;
 mod browser_navigation_params;
 mod browser_navigation_state;
 mod browser_cookie;
+mod browser_refresh;
 mod browser_navigation_storage;
 mod browser_navigation_url;
 #[cfg(test)]
