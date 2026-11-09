@@ -4,7 +4,7 @@
 // What is bound (everything else is absent, so a call is an ordinary TypeError or ReferenceError):
 // - `JSON.parse(text)`. A reviver function is `Unsupported`. `JSON.stringify` is in `eval_json_stringify.rs`.
 // - `RegExp(pattern, flags)`, `new RegExp(...)`, regexp literals, `exec`, `test`, `toString`, the flag getters,
-//   an own `lastIndex` data property. Engine gates (flags v/d, quantified lookahead)
+//   an own `lastIndex` data property. Engine gates (flags v/d)
 //   are `Unsupported`, never a different match. They do not call a user `exec`: a regexp whose `exec` was replaced is
 //   `Unsupported`.
 // - `@@match`, `@@replace` and `@@split` of the argument are read first and called when defined, as the spec says;

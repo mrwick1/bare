@@ -25,7 +25,8 @@
 //! - Nothing for identifiers: names may have non-ASCII letters (`é`, `日本`) and `\u00e9` or `\u{1F600}`
 //!   escapes. The ID_Start and ID_Continue sets come from `icu_properties` (Unicode data, not
 //!   `char::is_alphabetic`). A non-ASCII character that is not in them is an error ([`ErrorKind::NonAscii`]).
-//! - HTML-like comments (`<!--`, `-->`, Annex B). They scan as operators.
+//! - HTML-like comments (`<!--`, `-->`, Annex B) are comments only when the parser asks for them
+//!   ([`Lexer::set_html_comments`], for a script, not a module). Else they scan as operators.
 //! - Strict-mode rules (legacy octal, reserved words as names). The token reports the facts
 //!   (`Kind::String { legacy_octal }`, `NumberBase::LegacyOctal`, `escapes`); the parser decides.
 //! - BigInt values. `10n` scans as [`Kind::BigInt`]; no value is computed.
@@ -372,6 +373,8 @@ pub struct Lexer<'a> {
     pos: usize,
     /// After an error the lexer returns that error again. It never goes on past a bad token.
     failed: Option<Error>,
+    /// Annex B HTML-like comments are comments (script goal).
+    html: bool,
 }
 
 impl<'a> Lexer<'a> {
@@ -380,7 +383,13 @@ impl<'a> Lexer<'a> {
         if src.len() > MAX_SOURCE_LEN {
             return Err(Error { kind: ErrorKind::SourceTooLarge, offset: MAX_SOURCE_LEN as u32 });
         }
-        Ok(Lexer { src, pos: 0, failed: None })
+        Ok(Lexer { src, pos: 0, failed: None, html: false })
+    }
+
+    /// Annex B (script goal only): `<!--` starts a comment to the end of the line, and so does `-->` at the start of a line
+    /// (after only spaces and comments) or of the source. Off by default.
+    pub fn set_html_comments(&mut self, on: bool) {
+        self.html = on;
     }
 
     pub fn source(&self) -> &'a str {
@@ -438,6 +447,7 @@ impl<'a> Lexer<'a> {
     fn skip_trivia(&mut self) -> Result<bool, Error> {
         let b = self.src.as_bytes();
         let mut nl = false;
+        let first = self.pos == 0;
         if self.pos == 0 && b.starts_with(b"#!") {
             self.pos = line_end(b, 2);
         }
@@ -468,6 +478,8 @@ impl<'a> Lexer<'a> {
                     }
                     _ => break,
                 },
+                b'<' if self.html && b[self.pos..].starts_with(b"<!--") => self.pos = line_end(b, self.pos + 4),
+                b'-' if self.html && (nl || first) && b[self.pos..].starts_with(b"-->") => self.pos = line_end(b, self.pos + 3),
                 0xC2 | 0xE1 | 0xE2 | 0xE3 | 0xEF => match unicode_space(b, self.pos) {
                     Some((n, is_lt)) => {
                         nl |= is_lt;
@@ -1222,6 +1234,30 @@ pub fn regexp_parts<'a>(src: &'a str, tok: &Token) -> Option<(&'a str, &'a str)>
 mod tests {
     use super::*;
     use Kind::{BigInt, Eof, Ident, Number, PrivateName, RegExp, Template};
+
+    #[test]
+    fn html_like_comments_only_when_asked() {
+        // Checked with Node 22: `x = 1 <!-- 2` is `x = 1`; `-->` is a comment only at the start of a line or of the source.
+        let texts = |src: &str, on: bool| {
+            let mut l = Lexer::new(src).unwrap();
+            l.set_html_comments(on);
+            let mut v = Vec::new();
+            loop {
+                let t = l.next(Goal::Div).unwrap();
+                if t.kind == Eof {
+                    return v.join(" ");
+                }
+                v.push(t.text(src).to_string());
+            }
+        };
+        assert_eq!(texts("a <!-- b c\nd", true), "a d");
+        assert_eq!(texts("    <!-- note -->\nif (x) y", true), "if ( x ) y");
+        assert_eq!(texts("a\n  --> b\nc", true), "a c");
+        assert_eq!(texts("--> b\nc", true), "c");
+        assert_eq!(texts("a /*\n*/ --> b\nc", true), "a c");
+        assert_eq!(texts("a --> b", true), "a -- > b");
+        assert_eq!(texts("a <!-- b", false), "a < ! -- b");
+    }
 
     /// All tokens with the `Div` goal, up to and without `Eof`.
     fn lex(src: &str) -> Result<Vec<Token>, Error> {

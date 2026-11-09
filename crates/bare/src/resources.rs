@@ -45,8 +45,8 @@ use std::time::{Duration, Instant};
 pub const MAX_REFERENCES: usize = 4096;
 /// Distinct URLs to download. Public pages can exceed 128. Byte and time caps still bound the load.
 pub const MAX_FETCHES: usize = 1024;
-/// One resource, after decoding. The biggest staging file is 391 KB, so this is 20 times more.
-pub const MAX_RESOURCE_BYTES: usize = 8 * 1024 * 1024;
+/// One resource, after decoding. The biggest staging file is 391 KB. The app bundle of bsky.app is 9.7 MB, so 16 MiB.
+pub const MAX_RESOURCE_BYTES: usize = 16 * 1024 * 1024;
 /// All the text that we keep. The 52 staging files have 1.86 MB.
 pub const MAX_TOTAL_BYTES: usize = 32 * 1024 * 1024;
 /// All downloads together. See the module comment about blocking calls.

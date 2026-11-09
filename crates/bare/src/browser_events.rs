@@ -330,7 +330,7 @@ impl Dom {
     }
 
     /// `name: message` of an error object, or the text of the thrown value. It reads data properties only, so no JS runs.
-    fn error_text(&self, it: &mut Interp<'_>, thrown: Value) -> String {
+    pub(crate) fn error_text(&self, it: &mut Interp<'_>, thrown: Value) -> String {
         let cap = self.lim.max_string_bytes.min(4096);
         let append = |out: &mut String, units: &[u16]| {
             for c in char::decode_utf16(units.iter().copied()) {

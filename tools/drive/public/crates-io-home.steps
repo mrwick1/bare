@@ -1,5 +1,6 @@
 # crates-io-home: load the public home page.
 #   bare-drive --var URL=https://crates.io/ crates-io-home.steps
+# known-bug: the app does not mount: it loads its route chunks but never requests /api/v1/summary, and the noscript sentence shows. No console error since SVGAElement exists (before: Uncaught (in promise) ReferenceError: SVGAElement is not defined).
 timeout 30000
 open ${URL}
 expect css="body" visible

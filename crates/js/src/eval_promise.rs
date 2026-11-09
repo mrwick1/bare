@@ -12,6 +12,13 @@
 // The queue is separate from timers and the network. Nothing runs by itself: the host calls
 // [`Interp::drain_microtasks`] after a script or a task. Jobs run FIFO.
 //
+// Rejection tracking (HTML "HostPromiseRejectionTracker"): `settle` puts a promise that is rejected with no handler on
+// `rejections`, in a cold path. The checkpoint (`drain_jobs`) ends with `notify_rejections` when that list or `reported`
+// is not empty: the host hears the promises that are still unhandled and the reported ones that got a handler since, then
+// the still unhandled ones go to `reported`. One round per checkpoint, as the standard's queued task: a rejection inside
+// a listener waits for the next checkpoint. `rejections` is a root; `reported` is weak (the outstanding weak set).
+// Both lists are bounded; over the bound a rejection is counted, not kept.
+//
 // GC: a promise is an ordinary heap object. Its state, its reactions and the resolver data live here, in
 // `promise.map` and in `Callee::Promise`. `Interp::collect` traces them and drops the entries of unreachable
 // promises. The queue, the intrinsic constructor and the cached keys are roots.
@@ -35,6 +42,11 @@ impl Default for PromiseLimits {
         PromiseLimits { max_queue: 1 << 18, max_promises: 1 << 20, max_reactions: 1 << 20, max_jobs_per_drain: 1 << 20 }
     }
 }
+
+/// Promises rejected with no handler that wait for the next checkpoint. More are counted, not kept.
+pub const MAX_PENDING_REJECTIONS: usize = 1024;
+/// Reported promises that can still fire `rejectionhandled`. Over it, the oldest is forgotten.
+pub const MAX_REPORTED_REJECTIONS: usize = 256;
 
 /// State of a promise, as the host sees it.
 #[derive(Clone, Copy, Debug)]
@@ -144,6 +156,12 @@ struct PromiseState {
     caps: FxMap<ObjId, (Value, Value)>,
     failed_job: Option<Error>,
     agg: AggState,
+    /// Rejected with no handler, oldest first, not yet told to the host (roots).
+    rejections: Vec<ObjId>,
+    /// Rejections over `MAX_PENDING_REJECTIONS` since the last notification.
+    dropped_rejections: u32,
+    /// Told to the host as unhandled; a later handler is told once (weak).
+    reported: std::collections::VecDeque<ObjId>,
 }
 
 /// A thrown value becomes `Ok(value)`. Anything else (a limit, Unsupported, a heap fault) stays an error.
@@ -194,6 +212,11 @@ impl<'p> Interp<'p> {
         v.into_iter().map(|x| Value::Object(x.1)).collect()
     }
 
+    /// Promises rejected with no handler at reject time that the next checkpoint will look at, oldest first.
+    pub fn pending_rejections(&self) -> Vec<Value> {
+        self.promise.rejections.iter().map(|&o| Value::Object(o)).collect()
+    }
+
     /// The microtask checkpoint: run queued jobs, oldest first, including jobs that jobs add, until the queue is
     /// empty. Returns the number of jobs run. At most `max_jobs_per_drain` jobs run: if more are queued the
     /// call ends with `Limit(DrainJobs)` and the rest stay queued. A JavaScript exception inside a job rejects
@@ -211,8 +234,16 @@ impl<'p> Interp<'p> {
 
     /// The loop of `drain_microtasks`, without the depth check and without a new step budget.
     fn drain_jobs(&mut self) -> Result<usize, Error> {
+        let n = self.drain_queue(0)?;
+        if self.promise.rejections.is_empty() && self.promise.reported.is_empty() {
+            return Ok(n);
+        }
+        self.notify_rejections()?;
+        self.drain_queue(n)
+    }
+
+    fn drain_queue(&mut self, mut n: usize) -> Result<usize, Error> {
         if let Some(error) = self.promise.failed_job { return Err(error); }
-        let mut n = 0usize;
         while let Some(job) = self.promise.queue.pop_front() {
             if n >= self.promise.limits.max_jobs_per_drain {
                 self.promise.queue.push_front(job);
@@ -225,6 +256,41 @@ impl<'p> Interp<'p> {
             }
         }
         Ok(n)
+    }
+
+    /// HTML "notify about rejected promises", after the checkpoint. Without a host the lists wait.
+    #[cold]
+    #[inline(never)]
+    fn notify_rejections(&mut self) -> Res<()> {
+        let Some(host) = self.host.clone() else { return Ok(()) };
+        let map = &self.promise.map;
+        let mut handled = Vec::new();
+        self.promise.reported.retain(|o| {
+            let h = map.get(o).is_none_or(|d| d.handled);
+            if h && map.contains_key(o) {
+                handled.push(Value::Object(*o));
+            }
+            !h
+        });
+        let unhandled: Vec<Value> = self.promise.rejections.drain(..).filter(|o| map.get(o).is_some_and(|d| !d.handled)).map(Value::Object).collect();
+        let dropped = std::mem::take(&mut self.promise.dropped_rejections);
+        if unhandled.is_empty() && handled.is_empty() && dropped == 0 {
+            return Ok(());
+        }
+        // The host runs listeners as a host call: one call level, the budget of this checkpoint.
+        self.depth += 1;
+        let r = host.promise_rejections(self, &unhandled, &handled, dropped);
+        self.depth -= 1;
+        for v in unhandled {
+            let Value::Object(o) = v else { continue };
+            if self.promise.map.get(&o).is_some_and(|d| !d.handled) {
+                if self.promise.reported.len() >= MAX_REPORTED_REJECTIONS {
+                    self.promise.reported.pop_front();
+                }
+                self.promise.reported.push_back(o);
+            }
+        }
+        r
     }
 
     /// Forget the sticky error of a failed job (see [`Interp::drain_microtasks`]). The host calls it after it chose to abort only the
@@ -282,6 +348,7 @@ impl<'p> Interp<'p> {
             out.push(Value::String(s));
         }
         self.agg_roots(out);
+        out.extend(self.promise.rejections.iter().map(|&o| Value::Object(o)));
         for j in &self.promise.queue {
             match *j {
                 Job::React { handler, arg, derived, .. } => out.extend([handler, arg, Value::Object(derived)]),
@@ -331,6 +398,7 @@ impl<'p> Interp<'p> {
     fn promise_prune(&mut self, seen: &Seen) {
         self.promise.map.retain(|o, _| seen.contains(o));
         self.promise.caps.retain(|o, _| seen.contains(o));
+        self.promise.reported.retain(|o| seen.contains(o));
         self.promise.reactions = self.promise.map.values().map(|d| d.reactions.len()).sum();
         let agg_pairs = self.agg_prune();
         let mut live: FxSet<u64> = self.funcs.values().filter_map(|c| if let Callee::Promise(PFn::Settle { pair, .. }) = c { Some(*pair) } else { None }).collect();
@@ -646,6 +714,7 @@ impl<'p> Interp<'p> {
         if self.steps > self.step_limit { return Err(Error::Limit(LimitKind::Steps)); }
         let d = self.promise.map.get_mut(&p).expect("checked");
         d.state = if rejected { PState::Rejected(v) } else { PState::Fulfilled(v) };
+        let track = rejected && !d.handled;
         let reactions = std::mem::take(&mut d.reactions);
         self.promise.reactions -= n;
         for r in reactions {
@@ -656,7 +725,25 @@ impl<'p> Interp<'p> {
             let handler = if rejected { r.on_err } else { r.on_ok };
             self.promise.queue.push_back(Job::React { handler, arg: v, derived: r.derived, rejected });
         }
+        if track {
+            self.track_rejection(p);
+        }
         Ok(())
+    }
+
+    /// HostPromiseRejectionTracker "reject": a promise with no handler (so with no reaction) was rejected.
+    #[cold]
+    #[inline(never)]
+    fn track_rejection(&mut self, p: ObjId) {
+        // Without a host nobody hears it: keep nothing alive.
+        if self.host.is_none() {
+            return;
+        }
+        if self.promise.rejections.len() < MAX_PENDING_REJECTIONS {
+            self.promise.rejections.push(p);
+        } else {
+            self.promise.dropped_rejections = self.promise.dropped_rejections.saturating_add(1);
+        }
     }
 
     /// `PerformPromiseThen`: store a reaction on a pending promise, or queue a job at once.

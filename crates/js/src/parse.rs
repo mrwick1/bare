@@ -26,7 +26,7 @@
 //!
 //! Nothing is rejected as unsupported now ([`ErrorKind::Unsupported`] is kept for callers). The tested corpus and observed staging
 //! syntax are covered; this is not a claim of complete ES2022 compatibility.
-//! Not done here: regexp pattern grammar ([`REGEXP_PATTERN_VALIDATED`]), HTML-like comments, scope
+//! Not done here: regexp pattern grammar ([`REGEXP_PATTERN_VALIDATED`]), scope
 //! resolution of names.
 //!
 //! Specification sections used for the subtle rules (ECMA-262, 2022):
@@ -181,6 +181,7 @@ fn parse_counted<'a>(source: &'a str, mut limits: Limits, used: &mut u32, module
         return Err(Error { kind: ErrorKind::Limit(LimitKind::Source), msg: "source too large", start: at, end: at });
     }
     let mut lexer = Lexer::new(source).map_err(lex_err)?;
+    lexer.set_html_comments(!module);
     let tok = lexer.next(Goal::Div).map_err(lex_err)?;
     let mut p = Parser {
         src: source,
