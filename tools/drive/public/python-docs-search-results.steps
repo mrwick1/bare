@@ -1,0 +1,10 @@
+# docs.python.org: search for a word; the results list (built by searchtools.js from searchindex.js) has more than 20 entries.
+# known-bug: searchtools.js stops the page: page: Unsupported("regexp Unicode property escape")
+#   bare-drive --var URL=https://docs.python.org/3/ python-docs-search-results.steps
+timeout 30000
+open ${URL}
+expect css="div.related:nth-of-type(2) input[name=q]" count 1
+type css="div.related:nth-of-type(2) input[name=q]" "asyncio\n"
+expect url~"search.html?q=asyncio"
+expect css="h1" text~"Search"
+expect js "document.querySelectorAll('#search-results ul.search li').length > 20"

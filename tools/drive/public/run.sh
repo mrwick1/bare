@@ -3,7 +3,7 @@
 #   tools/drive/public/run.sh [--repeat N] [--out DIR] [--only TEXT] BARE_DRIVE_BINARY
 # Each journey gives OUT/<name>.json (the last attempt). The URL of a journey is its `--var URL=...` in the comment at the top of the file.
 # A failed journey runs once more (network flake); two failures in a row are a failure. A journey marked `# needs-rsa` is skipped, not failed,
-# when it fails with a TLS error. Exit code 0 only when no journey failed. --repeat N runs the steps N times in one process (leaks: see the RSS).
+# when it fails with a TLS error. A journey marked `# known-bug: TEXT` that fails is `known`, not a failure (the text names the bare bug; docs/progress.md has the details); when it passes, it is a pass. Exit code 0 only when no journey failed. --repeat N runs the steps N times in one process (leaks: see the RSS).
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 repeat=1 out="" only=""
@@ -58,6 +58,8 @@ for steps in sorted(glob.glob(os.path.join(here, "*.steps"))):
         status = "pass"
     elif "# needs-rsa" in text and TLS.search(msg + json.dumps(j.get("console", []))):
         status = "skip"
+    elif "# known-bug:" in text:
+        status = "known"
     else:
         status = "FAIL"
         failed += 1
@@ -68,6 +70,6 @@ print(f"{'journey':28} {'result':6} {'ms':>8} {'peak RSS KiB':>12} {'requests':>
 for n, s, ms, rss, req, fl, msg in rows:
     print(f"{n:28} {s:6} {ms:8.0f} {rss:12} {req:8} {fl:5}" + (f"  {msg[:200]}" if s != "pass" else ""))
 c = lambda s: sum(r[1] == s for r in rows)
-print(f"pass {c('pass')}  fail {c('FAIL')}  skip {c('skip')}  flakes {flakes}  out {out}")
+print(f"pass {c('pass')}  fail {c('FAIL')}  known {c('known')}  skip {c('skip')}  flakes {flakes}  out {out}")
 sys.exit(1 if failed else 0)
 PY

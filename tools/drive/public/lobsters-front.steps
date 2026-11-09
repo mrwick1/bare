@@ -1,0 +1,14 @@
+# Lobsters: the front page lists stories with a comments link each; the recent and active pages list stories too (goto: a click does not navigate here, see lobsters-comments-back).
+#   bare-drive --var URL=https://lobste.rs/ lobsters-front.steps
+timeout 30000
+open ${URL}
+expect title="Lobsters"
+expect js "document.querySelectorAll('li.story').length >= 20"
+expect js "document.querySelectorAll('li.story .comments_label a').length === document.querySelectorAll('li.story').length"
+expect role=link name="Recent" visible
+goto ${URL}recent
+expect url~"/recent"
+expect js "document.querySelectorAll('li.story').length >= 20"
+goto ${URL}active
+expect url~"/active"
+expect js "document.querySelectorAll('li.story').length >= 20"

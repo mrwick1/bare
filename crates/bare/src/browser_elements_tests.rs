@@ -163,6 +163,12 @@ fn a_template_is_still_inert_for_styles_and_scripts() {
 }
 
 #[test]
+fn document_forms_lists_the_forms_in_tree_order() {
+    let mut b = browser("<form id=a></form><div><form id=b></form></div><template><form></form></template>");
+    assert_eq!(js(&mut b, "document.forms.length + ',' + document.forms[1].id + ',' + (document.forms[0] === document.getElementById('a'))"), "2,b,true");
+}
+
+#[test]
 fn only_a_fragment_without_a_host_can_be_inserted() {
     let want = "unsupported:inserting a ShadowRoot or DocumentFragment as a node (fragment insertion)";
     let mut b = browser("<template id=t><p>1</p></template><div id=host></div>");

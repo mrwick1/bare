@@ -1,0 +1,9 @@
+# w3.org: the home page; click "Learn more about web standards", then check the standards page.
+#   bare-drive --var URL=https://www.w3.org/ w3c-home-links.steps
+timeout 30000
+open ${URL}
+expect title="W3C"
+expect js "document.querySelectorAll('a').length > 50"
+click css="a.button.button--alt[href='https://www.w3.org/standards/']"
+expect url~"/standards/"
+expect js "document.querySelector('h1') !== null"

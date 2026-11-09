@@ -93,11 +93,20 @@ fn by_tag(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
 
 /// `document.scripts`: the HTML `script` elements of the document in tree order, as a snapshot array like `getElementsByTagName`.
 pub(crate) fn scripts(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    html_of_tag(d, it, this, "script")
+}
+
+/// `document.forms`: the same for `form` elements.
+pub(crate) fn forms(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    html_of_tag(d, it, this, "form")
+}
+
+fn html_of_tag(d: &Dom, it: &mut Interp<'_>, this: Value, tag: &str) -> V {
     let root = d.nd(it, this)?;
     if !matches!(d.data(root), NodeData::Document) {
         return Err(it.type_error("Illegal invocation"));
     }
-    let atom = d.doc.borrow().find_atom("script");
+    let atom = d.doc.borrow().find_atom(tag);
     let ids = if atom.is_none() { Vec::new() } else { collect(d, it, root, |doc, c| (matches!(doc.data(c), NodeData::Element { name, .. } if Some(*name) == atom) && !doc.is_foreign(c), 0))? };
     wrap_all(d, it, &ids)
 }

@@ -51,3 +51,9 @@ fn a_link_with_display_none_stays_hidden() {
     let (code, json) = drive("gone", "expect css=\"#gone\" hidden");
     assert_eq!(code, 0, "{json}");
 }
+
+#[test]
+fn a_click_in_a_textarea_inside_a_label_does_not_loop() {
+    let (code, json) = drive("label", "click css=\"#notes\"\ntype css=\"#notes\" \"hi\"\nexpect css=\"#notes\" value=\"hi\"");
+    assert_eq!(code, 0, "{json}");
+}

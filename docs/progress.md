@@ -3672,3 +3672,52 @@ The chain builder already worked from any presented certificate in any order, so
 `tools/drive/public/run.sh`: 11 pass, 0 fail, 0 skip, 0 flakes.
 
 Not tested: a real P-384 leaf from a CA other than the one lite.cnn.com uses, Starfield/SECOM/Hellenic chains on the live net, arjun-e16, non-x86, and the full 803-row JS cost matrix (no change in `crates/js`).
+
+## Public sites e2e, round 2 (2026-11-09)
+
+Goal: more public-site journeys that really interact (type, press Enter, click, follow links, fill a form). I checked each journey in Chrome 155 first (page facts: counts, ids, hrefs, headings, and real mouse clicks and key events over CDP for the Wikipedia menu and the Rust book search) and then ran it in `bare-drive`.
+
+`tools/drive/public/run.sh` has a new result, `known`. A journey with a `# known-bug: TEXT` line that fails is `known`, not `FAIL`. When it passes it is a `pass`. `known` does not change the exit code.
+
+New journeys (16; 10 pass, 6 known):
+
+| Journey | Does | Result |
+| --- | --- | --- |
+| duckduckgo-html-search | type a query in the box, Enter, result links | pass |
+| httpbin-form-fill | text, tel, email, radio, checkboxes, textarea; checks the form data | pass |
+| httpbin-form-submit | the same, submit, JSON echo | known (1) |
+| python-org-docs-link | click the Documentation menu link | known (2) |
+| python-org-search | type in the search box, Enter | known (2) |
+| python-docs-tutorial | click the first chapter, next and previous arrows | pass |
+| python-docs-search | type in the top-bar search box, Enter | pass |
+| python-docs-search-results | the same, then the result list | known (3) |
+| rust-book-chapters | next and previous chapter arrows | pass |
+| rust-book-search | open the search box, type, result list | pass |
+| rust-book-sidebar | click a chapter in the sidebar | known (4) |
+| lobsters-front | stories, comments links, goto recent and active | pass |
+| lobsters-comments-back | click the comments link, back | known (5) |
+| wikipedia-main-random | featured article "About" link, main menu, Random article | pass |
+| w3c-home-links | click "Learn more about web standards" | pass |
+| npr-text-story | open the first story of the text front page, back | pass |
+
+Suite, 3 runs one after another (archMachine, `bare-drive` of this branch): 21 pass, 0 fail, 6 known, 0 skip, 0 flakes each time. The step counts are all under 20.
+
+Bare bugs fixed (each with a test):
+- A click on a `<textarea>` or a `<select>` inside a `<label>` overflowed the stack (the process aborted). `activation_target` walked up to the label, the label clicked its control, and the control found the label again. Fix: `textarea` and `select` are activation targets (they do nothing). Test: `a_click_in_a_textarea_inside_a_label_does_not_loop` in `crates/drive/tests/inline_links.rs`. httpbin.org/forms/post has this shape.
+- `document.forms` was missing (reading `.length` threw). Fix: the getter next to `document.scripts`. Test: `document_forms_lists_the_forms_in_tree_order`.
+
+Bare bugs found, not fixed (journey, failing step, error, hypothesis):
+1. httpbin-form-submit, line 19 (the click on "Submit order"): `the document did not load: the content type is not HTML`. The result page is `application/json`. By design (`browser_session.rs`: only HTML documents). Chrome shows the text. The fill steps before it pass. Fix needs a plain-text document.
+2. python-org-docs-link and python-org-search, the click or Enter step: `expected url~"/doc/", the URL is https://www.python.org/`. The page is idle and no request goes out. A click made right after `open` works (2 of 3 runs); after the page is idle it never navigates (6 of 6). `document.readyState` stays `interactive` and never reaches `complete`. Link and form submit events fire and are not canceled. Hypothesis: a page script (jQuery UI, masonry or `main-min.js`) or the failed analytics script (`analytics.python.org` resolves to 127.0.0.1 here) leaves the load open, and navigation is dropped. Not isolated.
+3. python-docs-search-results, the results check: `Unsupported("regexp Unicode property escape")`. `searchtools.js` uses `\p{...}` in a RegExp and the engine does not know it (crates/js). The page stops. Chrome lists 404 results for `asyncio`.
+4. rust-book-sidebar, the click on a chapter link: `a is covered by a.header at (79, 161)`. The sidebar is 0 px wide in bare (300 px in Chrome) and the page covers it. The CSS is `--sidebar-width: min(300px, 80vw)` and `width: var(--sidebar-width)`. `width: min(300px, 400px)`, `min(300px, 50%)`, `max()` and `clamp()` all give `auto` in `getComputedStyle` (only `calc()` is read; `crates/css/src/calc.rs` is linear, so `min`/`max`/`clamp` need a new value type). Not small.
+5. lobsters-comments-back, the click on the comments link: `expected url~"/s/", the URL is https://lobste.rs/`. No link on the page navigates (also "Recent"). The page has `<script type="module" src="/application.js">`. `Fatal::Unsupported("module script")` stops the page, and clicks on links do nothing after it. A local page with only `<script type=module>let x = 1;</script>` and a link shows the same. With the script removed, the click navigates. crates/js has no modules.
+
+Other differences seen, no journey fails on them:
+- Wikipedia `Wikipedia:Featured_articles` (a very long page) ends with `render: Limit(Steps)`; the page shows an empty `h1` text. The journey uses a small page.
+- A click right after `open` on a page that is still loading can be lost (python.org, the Rust book search toggle before `load`). Journeys wait for `document.readyState` first, as a user waits for the page.
+- `form.action` of the python.org search form reads `''` in bare; Chrome gives the resolved URL (`https://www.python.org/search/`). The submit still works with Enter (the failure in 2 is after it).
+- The Rust book search peaks at 150 MB RSS (the `elasticlunr` index). The other journeys peak at 13 to 40 MB.
+- Wikipedia's "Main menu" is a checkbox that covers its label. The step clicks the checkbox, as a real mouse does in Chrome.
+
+Not tested: arjun-e16, the window mode, a repeat past 1, other sites (old.reddit, bare text sites other than text.npr.org), journeys that need a login, and Chrome runs of the whole step files (Chrome was checked fact by fact, not by a step runner). The DuckDuckGo html page may show a bot check on some networks; the journey passed on every run here.
