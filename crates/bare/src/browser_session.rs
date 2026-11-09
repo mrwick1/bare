@@ -311,9 +311,10 @@ fn load_document(client: &mut Client, url: &str, from: Option<&str>, body: Optio
             return Err("the time limit passed".into());
         }
         let cookies = Cookies { on: true, ctx: Ctx::Navigation(from) };
+        let accept = ("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
         let resp = match body {
-            Some(b) => bare_net::trace::blocked(|| client.send_once(&Request { cookies, ..Request::post(&cur, &[("Content-Type", b.content_type.as_str())], &b.bytes) }, lim.max_document_bytes)),
-            None => bare_net::trace::blocked(|| client.send_once(&Request { cookies, ..Request::get(&cur) }, lim.max_document_bytes)),
+            Some(b) => bare_net::trace::blocked(|| client.send_once(&Request { cookies, ..Request::post(&cur, &[accept, ("Content-Type", b.content_type.as_str())], &b.bytes) }, lim.max_document_bytes)),
+            None => bare_net::trace::blocked(|| client.send_once(&Request { cookies, headers: &[accept], ..Request::get(&cur) }, lim.max_document_bytes)),
         }
         .map_err(|_| "network error".to_string())?;
         if matches!(resp.status, 301 | 302 | 303 | 307 | 308) {
