@@ -45,7 +45,7 @@ use std::cell::Cell;
 #[derive(Default)]
 pub(crate) struct Els {
     objs: Cell<Option<[ObjId; 10]>>,
-    tagged: Cell<bool>,
+    pub(crate) tagged: Cell<u8>,
 }
 
 pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
@@ -72,7 +72,8 @@ pub(crate) fn proto(d: &Dom, it: &mut Interp<'_>, tag: &str) -> R<ObjId> {
 /// The `Symbol.toStringTag` of `DocumentFragment` and `ShadowRoot`, set once, by the first fragment that a page makes (`content`, `createDocumentFragment`,
 /// `new DocumentFragment()`): a realm with none pays nothing.
 pub(crate) fn tag_fragments(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    if !d.els.tagged.replace(true) {
+    if d.els.tagged.get() & 1 == 0 {
+        d.els.tagged.set(d.els.tagged.get() | 1);
         crate::browser_lazy::tag(d, it, d.p().fragment, "DocumentFragment")?;
         crate::browser_lazy::tag(d, it, d.p().shadow, "ShadowRoot")?;
     }

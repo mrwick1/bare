@@ -165,6 +165,74 @@ impl<'p> Interp<'p> {
         Ok(id)
     }
 
+    /// Run indirect eval in a fresh lexical environment outside the caller.
+    #[cold]
+    #[inline(never)]
+    pub fn eval_global(&mut self, value: Value) -> Res<Value> {
+        let Value::String(s)=value else { return Ok(value) };
+        let source=h!(self,self.heap.to_string_lossy(s));
+        let id=self.add_script(&source)?;
+        let (old,env,strict,completion)=(self.cur,self.env,self.strict,self.completion);
+        let scope=std::mem::take(&mut self.hs.scope);
+        // Completion tracking uses depth zero. Keep the remaining call budget.
+        let (depth,call_limit)=(self.depth,self.limits.max_call_depth);
+        self.limits.max_call_depth=call_limit.saturating_sub(depth);
+        self.depth=0;
+        self.select(id);
+        self.strict=self.prog.strict;
+        let mut eval_env=None;
+        let r=(|| {
+            self.env=self.new_env(0,self.strict)?;
+            eval_env=Some(self.env);
+            self.completion=Value::Undefined;
+            let prog=self.prog.clone();
+            let top=self.scopes.len()-1;
+            for i in 0..self.scopes[top].vars.len() {
+                let n=self.scopes[top].vars[i];
+                if self.strict { self.env_declare(self.env,n,INIT|MUT,Value::Undefined); }
+                else {
+                    if self.find_in(0,n).is_some() { return Err(self.mk_err(4,"Eval var conflicts with a global lexical binding")); }
+                    let k=self.name_key(n)?;
+                    if !hx!(self,self.heap.has_own_property(self.global,k)) { self.def(self.global,k,Value::Undefined,true,true,true)?; }
+                }
+            }
+            for stmt in prog.list(prog.body) {
+                match prog.stmt(stmt).kind {
+                    StmtKind::Var {kind,decls} if kind != VarKind::Var => {
+                        for decl in prog.list(decls) { self.declare_pat_lexical(prog.decl(decl).target,if kind==VarKind::Let {MUT} else {0}); }
+                    }
+                    StmtKind::Class(c)=>self.declare_class(c),
+                    StmtKind::Function(fid)=>{
+                        let f=self.make_closure(fid,None,false)?;
+                        let n=self.func_name[fid.index()];
+                        if self.strict {self.env_declare(self.env,n,INIT|MUT,f);}
+                        else {
+                            if self.find_in(0,n).is_some() {return Err(self.mk_err(4,"Eval function conflicts with a global lexical binding"));}
+                            let k=self.name_key(n)?;
+                            let own=hx!(self,self.heap.get_own_property(self.global,k));
+                            self.def(self.global,k,f,true,true,own.is_none_or(|p|p.configurable()))?;
+                        }
+                    }
+                    _=>{}
+                }
+            }
+            match self.exec_list(prog.body) {
+                Ok(())=>Ok(self.completion),
+                Err(Ctl::Err(e))=>Err(e),
+                Err(_)=>Err(unsupported("stray eval control flow",Span::default())),
+            }
+        })();
+        if let Some(e)=eval_env { self.release(e); }
+        self.select(old);
+        self.env=env;
+        self.strict=strict;
+        self.completion=completion;
+        self.hs.scope=scope;
+        self.depth=depth;
+        self.limits.max_call_depth=call_limit;
+        r
+    }
+
     /// CreateDynamicFunction: `Function(p1, p2, body)`, and the same for the generator and async kinds. `kind`: 0 normal, 1 generator, 2 async.
     /// The text is a script of one function declaration, which is parsed and walked but not run, so no global changes. The closure
     /// has the global environment. The parameters and the body must parse alone, so a comment or a brace cannot reach across.

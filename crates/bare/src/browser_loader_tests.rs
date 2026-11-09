@@ -674,3 +674,13 @@ fn dynamically_inserted_svg_scripts_are_inert() {
         assert_eq!(eval(&mut b, "executed"), "0");
     });
 }
+
+#[test]
+fn document_write_inserts_after_the_running_script() {
+    big(|| {
+        let html="<body><script id=s>var log=[]; document.write('<span id=a>A</span>'); document.write('<span id=b>B</span>');</script><p id=tail>T</p><script>log.push(document.getElementById('s').nextElementSibling.id);log.push(document.getElementById('a').nextElementSibling.id);log.push(document.getElementById('b').nextElementSibling.id)</script>";
+        let (log,result,_)=page(html,vec![],quick());
+        assert_eq!(result.script_throws,0);
+        assert_eq!(log,"a|b|tail");
+    });
+}

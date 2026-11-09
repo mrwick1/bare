@@ -570,6 +570,18 @@ pub(crate) fn lazy(d: &Dom, it: &mut Interp<'_>, owner: ObjId, all: bool) -> R<(
         };
     };
     if crate::browser::define_window(d,it,&key)? || crate::browser_cssom::define(d,it,&key)? { return Ok(()); }
+    if crate::browser_svg::define(d,it,&key)? { return Ok(()); }
+    match key.as_str() {
+        "write" => {d.def_method(it,d.p().document,"write",1,crate::browser_loader::document_write)?; return Ok(());},
+        "writeln" => {d.def_method(it,d.p().document,"writeln",1,crate::browser_loader::document_writeln)?; return Ok(());},
+        "open" => {d.def_method(it,d.p().document,"open",0,crate::browser_loader::document_open)?; return Ok(());},
+        "close" => {d.def_method(it,d.p().document,"close",0,crate::browser_loader::document_close)?; return Ok(());},
+        _=>{}
+    }
+    if matches!(key.as_str(), "getContext" | "toDataURL") {
+        crate::browser_html::define_global(d, it, "HTMLCanvasElement")?;
+        return Ok(());
+    }
     if key.starts_with("HTML") && crate::browser_html::define_global(d, it, &key)? {
         return Ok(());
     }
@@ -662,3 +674,18 @@ fn ensure_frameset(d: &Dom, it: &mut Interp<'_>) -> R<()> {
 
 crate::browser_lazy::lazy_global!(lazy_body, "HTMLBodyElement", ensure_body, |d| d.hh.body[0].get().expect("made")[1]);
 crate::browser_lazy::lazy_global!(lazy_frameset, "HTMLFrameSetElement", ensure_frameset, |d| d.hh.body[1].get().expect("made")[1]);
+
+
+#[cold]
+#[inline(never)]
+pub(crate) fn tags(d:&Dom,it:&mut Interp<'_>)->R<()> {
+    let p=d.p();
+    let key=it.symbol_to_string_tag();
+    for (proto,name) in [(p.et,"EventTarget"),(p.node,"Node"),(p.element,"Element"),(p.html,"HTMLElement"),(p.svg,"SVGElement"),(p.document,"Document"),(p.text,"Text"),(p.comment,"Comment"),(it.global_object(),"Window")] {
+        if it.heap.peek_own_property(proto,key).map_err(|e|it.heap_error(e))?.is_none() {
+            let value=Value::String(it.heap.intern_str(name).map_err(|e|it.heap_error(e))?);
+            it.define_data(proto,key,value,false,false,true)?;
+        }
+    }
+    Ok(())
+}

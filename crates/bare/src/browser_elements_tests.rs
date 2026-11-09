@@ -305,3 +305,77 @@ fn formdata_from_a_form_charges_the_step_budget() {
     let r = js(&mut b, "for (var i = 0; i < 100000; i++) new FormData(f)");
     assert!(r.starts_with("limit:"), "{r}");
 }
+
+#[test]
+fn canvas_context_surface() {
+    let mut b = browser("");
+    assert_eq!(js(&mut b, "var c=document.createElement('canvas'); var x=c.getContext('2d'); x.fillRect(0,0,2,2); typeof x.measureText('hello').width"), "number");
+    assert_eq!(js(&mut b, "c.getContext('2d') === x"), "true");
+    assert_eq!(js(&mut b, "c.getContext('webgl') === null"), "true");
+    assert_eq!(js(&mut b, "c.toDataURL().slice(0,22)"), "data:image/png;base64,");
+}
+
+#[test]
+fn svg_geometry_surface() {
+    let mut b = browser("<svg id='s' width='20' height='30' viewBox='0 0 20 30'><rect id='r' x='2' y='3' width='10' height='15'/></svg>");
+    assert_eq!(js(&mut b, "var s=document.getElementById('s'); s.width.baseVal.value + ':' + s.viewBox.baseVal.height"), "20:30");
+    assert_eq!(js(&mut b, "var r=document.getElementById('r'); var box=r.getBBox(); box.x+':'+box.y+':'+box.width+':'+box.height"), "2:3:10:15");
+    assert_eq!(js(&mut b, "r.getCTM().a"), "1");
+}
+
+#[test]
+fn document_write_surface() {
+    let mut b = browser("<p>old</p>");
+    assert_eq!(js(&mut b, "document.open(); document.write('<p id=written>hello</p>'); document.close(); document.getElementById('written').textContent"), "hello");
+}
+
+#[test]
+fn svg_path_metrics_surface() {
+    let mut b = browser("<svg><path id='p' d='M 0 0 L 30 40'/></svg>");
+    assert_eq!(js(&mut b,"var p=document.getElementById('p'); p.getTotalLength()"),"50");
+    assert_eq!(js(&mut b,"var q=p.getPointAtLength(25); q.x+':'+q.y"),"15:20");
+}
+
+#[test]
+fn document_write_parser_surface() {
+    let mut b = browser("<p>old</p>");
+    assert_eq!(js(&mut b,"document.write('<p id=a>a</p>'); document.writeln('<p id=b>b</p>'); document.close(); document.body.textContent"),"ab\n");
+}
+
+#[test]
+fn svg_animated_string_surface() {
+    let mut b=browser("<svg id=s class=logo></svg>");
+    assert_eq!(js(&mut b,"var s=document.getElementById('s'); (s.className instanceof SVGAnimatedString) + ':' + s.className.baseVal"),"true:logo");
+}
+
+#[test]
+fn indirect_eval_scope_surface() {
+    let mut b=browser("");
+    assert_eq!(js(&mut b,"var global=5; function f(){var global=9;return (0,eval)('global')} f()"),"5");
+    assert_eq!(js(&mut b,"window.eval('var made=7; let hidden=8; made'); made + ':' + typeof hidden"),"7:undefined");
+    assert_eq!(js(&mut b,"window.eval('\"use strict\"; var privateValue=1'); typeof privateValue"),"undefined");
+    assert_eq!(js(&mut b,"window.eval(42)"),"42");
+    assert_eq!(js(&mut b,"window.eval('this') === window"),"true");
+    assert_eq!(js(&mut b,"window.eval('let retained=3; (function(){return retained})')()"),"3");
+    assert_eq!(js(&mut b,"function scopeRestore(){let local=4;try{window.eval('throw new Error()')}catch(e){}return local} scopeRestore()"),"4");
+    assert_eq!(js(&mut b,"function dynamicScope(){let global=9;return new Function('return global')()} dynamicScope()"),"5");
+}
+
+#[test]
+fn svg_interface_surface() {
+    let mut b=browser("");
+    assert_eq!(js(&mut b,"var p=document.createElementNS('http://www.w3.org/2000/svg','path'); (p instanceof SVGPathElement) + ':' + (p instanceof SVGGeometryElement) + ':' + (p instanceof SVGGraphicsElement)"),"true:true:true");
+}
+
+#[test]
+fn indirect_eval_keeps_the_call_budget_surface() {
+    let mut b=browser("");
+    assert_eq!(js(&mut b,"function recur(){return window.eval('recur()')} recur()"),"limit:CallDepth");
+}
+
+#[test]
+fn observer_target_element_brand_surface() {
+    let mut b=browser("<div id=t></div>");
+    assert_eq!(js(&mut b,"var el=document.getElementById('t'); Object.prototype.toString.call(el)"),"[object HTMLElement]");
+    assert_eq!(js(&mut b,"var ref=Object.prototype.toString.call(el)==='[object Object]'?new Proxy(el,{}):el; new IntersectionObserver(function(){}).observe(ref); 'ok'"),"ok");
+}
