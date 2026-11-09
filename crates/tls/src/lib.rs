@@ -7,6 +7,7 @@
 //! real secrets.
 
 pub mod aes_gcm;
+pub mod bigint;
 pub mod client;
 pub mod ecc;
 pub mod der;
