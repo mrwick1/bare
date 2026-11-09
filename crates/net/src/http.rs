@@ -1072,6 +1072,9 @@ fn h1_only() -> bool {
     *ON.get_or_init(|| std::env::var_os("BARE_NET_H1").is_some())
 }
 
+/// The default `Accept-Language`: the same languages as `navigator.languages` (`en-US`, `en`), with the quality that Chrome sends.
+const ACCEPT_LANGUAGE: &str = "en-US,en;q=0.9";
+
 /// A host that is this machine. A compressed body costs the CPU of both ends and saves no byte on a loopback link, so we do not ask for one
 /// (`Accept-Encoding`). A caller that sets the header gets it sent. A reply that has a coding is decoded in any case.
 fn loopback(host: &str) -> bool {
@@ -1088,6 +1091,9 @@ fn h2_headers<'a>(url: &'a Url, plan: &'a Plan, conditions: &'a str, authority: 
     }
     if !loopback(&url.host) && !plan.headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("accept-encoding")) {
         headers.push(("accept-encoding", "gzip, deflate, br"));
+    }
+    if !loopback(&url.host) && !plan.headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("accept-language")) {
+        headers.push(("accept-language", ACCEPT_LANGUAGE));
     }
     headers.extend(plan.headers.iter().copied());
     if matches!(plan.method, Method::Post | Method::Put) || !plan.body.is_empty() {
@@ -1112,6 +1118,11 @@ fn request_head(url: &Url, plan: &Plan, conditions: &str, extra: usize) -> Vec<u
     if !loopback(&url.host) && !plan.headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("accept-encoding")) {
         // `br` only over https, as Chrome does: some plain proxies break it.
         out.extend_from_slice(if url.scheme == Scheme::Https { b"Accept-Encoding: gzip, deflate, br\r\n" } else { b"Accept-Encoding: gzip, deflate\r\n" });
+    }
+    if !loopback(&url.host) && !plan.headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("accept-language")) {
+        out.extend_from_slice(b"Accept-Language: ");
+        out.extend_from_slice(ACCEPT_LANGUAGE.as_bytes());
+        out.extend_from_slice(b"\r\n");
     }
     for (name, value) in plan.headers.iter() {
         let _ = write!(out, "{name}: {value}\r\n");
@@ -1795,6 +1806,26 @@ mod tests {
     }
 
     #[test]
+    fn asks_for_english_except_on_this_machine_or_when_the_caller_sets_it() {
+        let plan = |headers: &'static [(&'static str, &'static str)]| Plan { method: Method::Get, headers: Cow::Borrowed(headers), body: b"", cookies: Default::default() };
+        let ask = |input, headers: &'static [(&'static str, &'static str)]| String::from_utf8(request_head(&Url::parse(input).unwrap(), &plan(headers), "", 0)).unwrap();
+        for remote in ["https://a.com/", "http://a.com/"] {
+            assert!(ask(remote, &[]).contains("\r\nAccept-Language: en-US,en;q=0.9\r\n"), "{remote}");
+        }
+        assert!(!ask("http://127.0.0.1/", &[]).contains("ccept-Language"));
+        let head = ask("https://a.com/", &[("accept-LANGUAGE", "fr")]);
+        assert_eq!(head.to_ascii_lowercase().matches("accept-language").count(), 1);
+        assert!(head.contains("\r\naccept-LANGUAGE: fr\r\n"));
+        let url = Url::parse("https://a.com/").unwrap();
+        let own = plan(&[]);
+        let h2 = h2_headers(&url, &own, "", "a.com", "0");
+        assert!(h2.contains(&("accept-language", "en-US,en;q=0.9")), "{h2:?}");
+        let theirs = plan(&[("Accept-Language", "fr")]);
+        let h2 = h2_headers(&url, &theirs, "", "a.com", "0");
+        assert_eq!(h2.iter().filter(|(n, _)| n.eq_ignore_ascii_case("accept-language")).count(), 1);
+    }
+
+    #[test]
     fn the_headers_of_an_h2_request_have_the_pseudo_headers_first_and_no_host() {
         let url = Url::parse("https://example.com:8443/a/b?q=1").unwrap();
         let plan = Plan { method: Method::Post, headers: Cow::Owned(vec![("X-Token", "t")]), body: b"abc", cookies: Default::default() };
@@ -1808,6 +1839,7 @@ mod tests {
                 (":path", "/a/b?q=1"),
                 ("user-agent", "bare/0.1"),
                 ("accept-encoding", "gzip, deflate, br"),
+                ("accept-language", "en-US,en;q=0.9"),
                 ("X-Token", "t"),
                 ("content-length", "3"),
                 ("If-None-Match", "\"v1\""),
@@ -3037,10 +3069,11 @@ mod tests {
             let head = request_head(&url, &plan, "", 0);
             let lines = head.split(|&b| b == b'\n').count() - 1;
             // Each line ends with "\n": the pieces are the lines and one empty rest. Request line, Host, User-Agent and
-            // Accept-Encoding (unless the caller sets them), the two headers, Content-Length (POST), and the blank line.
+            // Accept-Encoding and Accept-Language (unless the caller sets them), the two headers, Content-Length (POST), and the blank line.
             let ua = headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("user-agent"));
             let ae = headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("accept-encoding"));
-            assert_eq!(lines, 2 + usize::from(!ua) + usize::from(!ae) + 2 + usize::from(method == Method::Post) + 1, "{:?}", String::from_utf8_lossy(&head));
+            let al = headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("accept-language"));
+            assert_eq!(lines, 2 + usize::from(!ua) + usize::from(!ae) + usize::from(!al) + 2 + usize::from(method == Method::Post) + 1, "{:?}", String::from_utf8_lossy(&head));
             assert!(head.ends_with(b"\r\n\r\n") && !head.windows(2).any(|w| w == b"\n\n" || w == b"\r\r"));
             assert!(head.iter().filter(|&&b| b == b'\r').count() == lines && !head.contains(&0));
         }

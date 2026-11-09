@@ -611,6 +611,7 @@ impl Session {
                         return SessionStop::LoadFailed("the document URL could not be configured".into());
                     }
                     b.cross_document_history(true);
+                    b.start_refresh();
                     if scroll != (0.0, 0.0) {
                         b.set_scroll(bare_paint::Scroll { x: scroll.0, y: scroll.1, ..Default::default() });
                     }

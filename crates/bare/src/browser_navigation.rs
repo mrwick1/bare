@@ -501,6 +501,22 @@ fn doc_url(d: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
     d.js_str(it, &s)
 }
 
+/// `document.domain` (HTML "effective domain"): the host of the origin, `""` for an opaque origin, an IPv6 address in brackets.
+fn doc_domain(d: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
+    let s = d.cur_rec()?.hostname();
+    d.js_str(it, &s)
+}
+
+/// Relaxing the origin is gone from browsers (origin-keyed agent clusters). A value that is the host is a no-op; any other value is refused.
+fn doc_set_domain(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
+    let v = pr::usv(d, it, arg(a, 0))?;
+    let cur = d.cur_rec()?;
+    if v.eq_ignore_ascii_case(&cur.hostname()) {
+        return Ok(Value::Undefined);
+    }
+    Err(d.dom_err(it, "SecurityError", "Failed to set the 'domain' property on 'Document': changing the domain is not supported."))
+}
+
 fn win_origin(d: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
     let s = d.cur_rec()?.origin();
     d.js_str(it, &s)
@@ -718,6 +734,7 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     def_acc(d, it, p.document, "URL", doc_url, None)?;
     def_acc(d, it, p.document, "documentURI", doc_url, None)?;
     def_acc(d, it, p.document, "cookie", crate::browser_cookie::doc_cookie_get, Some(crate::browser_cookie::doc_cookie_set))?;
+    def_acc(d, it, p.document, "domain", doc_domain, Some(doc_set_domain))?;
     def_acc(d, it, p.node, "baseURI", doc_url, None)?;
     def_acc(d, it, p.document, "location", loc_obj, Some(win_set_location))?;
     def_acc(d, it, g, "location", loc_obj, Some(win_set_location))?;

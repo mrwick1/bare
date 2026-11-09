@@ -5178,3 +5178,39 @@ Re-ran all 16 sites on the current-main baseline and merged driver. Both pass 15
 | Script aborted: the CallDepth budget ended the https://code.jquery.com:443/ui/1.14.1/jquery-ui.min.js. The page goes on (1 of 5 aborts used) | 1 | 0 | git-scm |
 | TypeError: Failed to execute 'observe' on 'IntersectionObserver': parameter 1 is not of type 'Element'. | 1 | 0 | vuejs |
 | TypeError: document.write is not a function | 1 | 0 | apache-org |
+
+## Accept-Language, document.domain and meta refresh (2026-11-10)
+
+Problem. bare sent no `Accept-Language`, so https://www.mozilla.org/ served its locale chooser. bare had no `document.domain`, so GitHub's cookie helper threw "Unable to get document domain" on every load. bare ignored `<meta http-equiv=refresh>`, so https://sbi.co.in/ stayed on `/redirect/` and never reached https://sbi.bank.in/.
+
+Change.
+
+- `crates/net/src/http.rs`: every request without `Accept-Language` gets `en-US,en;q=0.9`, over HTTP/1.1 and HTTP/2. It matches `navigator.languages`. Loopback hosts get none, like `Accept-Encoding`. A caller header wins.
+- `crates/bare/src/browser_navigation.rs`: `document.domain` returns the host of the origin (HTML "effective domain"), `""` for an opaque origin, IPv6 in brackets. The setter accepts the current host as a no-op. It throws `SecurityError` for any other value. Browsers no longer relax the origin (origin-keyed agent clusters), so I did not implement the suffix checks.
+- `crates/bare/src/browser_refresh.rs`: the "shared declarative refresh steps" (`N`, `N; url=...`, `URL=`, quotes, `,`, fractions, negative and non-number values ignored). The session calls `start_refresh` once for each document it builds. The first valid `<meta http-equiv=refresh>` outside `<body>` queues a timer that calls `location.replace` (history "replace"). A pending timer is queued work, so `bare-drive` does not report "the page is idle". `SessionLimits::max_documents` (8) bounds a refresh loop. A refresh with no URL reloads the document.
+
+Tests. Each failed on the code before the change, and passes after it.
+
+- `asks_for_english_except_on_this_machine_or_when_the_caller_sets_it` (net): panicked on the missing header.
+- `document_domain_is_the_host_and_a_change_is_refused` (bare): `document.domain` was `undefined`.
+- `a_meta_refresh_goes_to_its_url_after_its_delay_and_replaces_the_entry`, `a_meta_refresh_without_a_url_reloads_and_the_document_limit_ends_the_loop`, `a_meta_refresh_that_the_standard_ignores_is_ignored` (session; the third passes before the change by design) and `a_pending_meta_refresh_is_queued_work`: ran against a stub `start_refresh`. The delay test checks that a timer at 1.5 s ran and a timer at 2.5 s did not, for a 2 s refresh. The idle test checks the queued timer is due at 5 s.
+- `browser_refresh::tests::the_content_follows_the_standard`: 20 inputs from the standard.
+
+Live results (`bare-drive`, `timeout 30000`, `open`, `expect js readyState`, `expect url~`, `shot s`), main `10374591` before, this branch after.
+
+| Page | Before | After |
+| --- | --- | --- |
+| mozilla.org | does not end on `/en-US/` (`Limit("Scripts")`, locale chooser) | ends on `/en-US/`, no console error; 2.63 G to 1.41 G instructions, 81.2 to 60.6 MiB peak RSS |
+| sbi.co.in | stays on `/redirect/`, 58 M instructions, 21.6 MiB | ends on `sbi.bank.in`, no console error, 96.8 M instructions, 22.7 MiB (two documents) |
+| github.com/rust-lang/rust | readyState complete; "Unable to get document domain" repeated | error gone; page stops with `Unsupported("Intl.DateTimeFormat option timeZoneName")`, readyState not complete |
+| github.com/tokio-rs/tokio | same as rust-lang/rust before | same as rust-lang/rust after; 4.48 G to 3.59 G instructions, 142.6 to 136.6 MiB |
+
+The next GitHub error is a fatal one. A script that ran after the cookie helper now reaches `Intl.DateTimeFormat` with `timeZoneName`, which `crates/js/src/eval_intl.rs` does not support. The page stops there. This is a gap in `crates/js`, which this change does not touch. GitHub's readyState was "complete" before only because the earlier throw hid the later call.
+
+Cost. Base is origin/main `2e79fbe0d1` from base-build, taken after the final rebase. All 805 rows ran. Over under both allocators: 0. Over under one: 0. Failed: 0. Mean change: glibc +0.007%, jemalloc +0.000% (jemalloc runs only for rows over the limit under glibc, and none was). Worst row: `fetch_load post 1`, glibc +0.314%.
+
+Checks. `cargo test --release --workspace` before the rebase: 3,290 passed, 0 failed. After the rebase: the `bare` and `bare-net` library suites pass (1,151 and 164). All 33 public journeys pass, with no flake after the rebase.
+
+Limits. The `Refresh` response header is not read (the loader returns no headers). A `<meta>` that a script inserts later, or one inside `<body>`, does not start a refresh. `<base>` is not used to resolve the URL. `Session::run` settles when a timer is more than `PageLimits::quiet` away, so a refresh later than that does not hold a non-live run; a live page waits for it. `Vary: Accept-Language` replies are not cached.
+
+Not tested. Other sites that depend on `Accept-Language`. A server that rejects the header. `Refresh` with a fractional delay on a real site. Pages that assign `document.domain` to a parent domain (they now get `SecurityError`; Chrome ignores the assignment).
