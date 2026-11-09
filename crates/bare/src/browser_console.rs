@@ -152,6 +152,25 @@ fn record(d: &Dom, it: &mut Interp<'_>, level: ConsoleLevel, args: &[Value]) -> 
     Ok(Value::Undefined)
 }
 
+/// Record a console call from the host with one string argument. It charges no step: the host uses it right after a task ended
+/// on the step budget (`Browser::survive`), when a charge would fail.
+pub(crate) fn push_text(d: &Dom, it: &mut Interp<'_>, level: ConsoleLevel, text: &str) {
+    let lim = d.console.lim.get();
+    let Ok(s) = it.heap.intern_str(text) else { return };
+    let mut st = d.console.st.borrow_mut();
+    let seq = st.calls;
+    st.calls += 1;
+    if lim.max_records == 0 {
+        st.dropped += 1;
+        return;
+    }
+    while st.q.len() >= lim.max_records {
+        d.console.drop_oldest(&mut st);
+    }
+    st.values += 1;
+    st.q.push_back(ConsoleRecord { seq, level, args: vec![Value::String(s)] });
+}
+
 fn log(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
     record(d, it, ConsoleLevel::Log, a)
 }

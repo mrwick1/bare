@@ -283,8 +283,8 @@ fn a_fatal_error_in_the_same_task_wins_over_a_navigation_and_nothing_loads_after
     big(|| {
         let srv = server(|| {
             vec![
-                ("/f", html("<script>localStorage.setItem('before', '1'); location.assign('/b'); while (true) {}</script>")),
-                ("/m", html("<script>location.assign('/b'); Promise.resolve().then(function () { while (true) {} })</script>")),
+                ("/f", html("<script>localStorage.setItem('before', '1'); location.assign('/b'); console.log.apply(null, new Array(100))</script>")),
+                ("/m", html("<script>location.assign('/b'); Promise.resolve().then(function () { console.log.apply(null, new Array(100)) })</script>")),
                 ("/b", html("<script>localStorage.setItem('b-ran', '1')</script>")),
             ]
         });

@@ -342,10 +342,10 @@ fn a_module_script_is_an_explicit_fatal_and_nothing_runs_after_it() {
 fn a_limit_or_a_failed_checkpoint_stops_all_js_and_io() {
     big(|| {
         let cases = [
-            // a hard limit inside a script
-            "fetch('/x'); log.push('s1'); for (;;) {}",
+            // a host cap inside a script (a script budget only aborts its task: see browser_survive_tests.rs)
+            "fetch('/x'); log.push('s1'); console.log.apply(null, new Array(100))",
             // a job that hits a limit: the checkpoint after the script fails
-            "fetch('/x'); log.push('s1'); Promise.resolve().then(function () { for (;;) {} })",
+            "fetch('/x'); log.push('s1'); Promise.resolve().then(function () { console.log.apply(null, new Array(100)) })",
         ];
         for body in cases {
             let html = format!("{PRE}<script>setTimeout(function () {{ log.push('timer') }}, 0)</script><script>{body}</script><script src='/later.js'></script><script>log.push('s3')</script>");
@@ -353,7 +353,7 @@ fn a_limit_or_a_failed_checkpoint_stops_all_js_and_io() {
             let srv = server(routes);
             let mut b = make(&html, &srv, 100_000, true);
             let r = load(&mut b, &srv, quick());
-            assert!(matches!(&r.stop, Stop::Fatal(Fatal::Limit(l)) if l == "Steps"), "{r:?}");
+            assert!(matches!(&r.stop, Stop::Fatal(Fatal::Limit(l)) if l.contains("console-args")), "{r:?}");
             // The loader starts the download of /later.js at the start, before any script runs, as a preload scanner does. Nothing is
             // taken or run after the failure: /x is never asked for, and no script of the page runs after the one that failed.
             assert_eq!(srv.hits("/x"), 0, "no I/O after the failure: {body}");
@@ -394,7 +394,7 @@ fn page_entry_checks_failed_empty_checkpoint_before_scripts() {
     big(|| {
         let srv = server(vec![]);
         let mut b = make("<script>var unwanted=1;</script>", &srv, 10_000, true);
-        b.run_script("Promise.resolve().then(function(){while(true){}});").unwrap();
+        b.run_script("Promise.resolve().then(function(){console.log.apply(null, new Array(100))});").unwrap();
         assert!(b.drain().is_err());
         let r = load(&mut b, &srv, quick());
         assert!(matches!(r.stop, Stop::Fatal(Fatal::Limit(_))));

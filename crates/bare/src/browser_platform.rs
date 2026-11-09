@@ -174,6 +174,14 @@ pub(crate) fn prune(d: &Dom, live: &dyn Fn(ObjId) -> bool) {
 }
 
 impl Dom {
+    /// `Browser::survive`: the viewport callbacks stopped on a script budget; let them run again.
+    pub(crate) fn clear_budget_halt_plat(&self) {
+        let mut s = self.plat.s.borrow_mut();
+        if s.halted.as_ref().is_some_and(crate::browser::is_budget) {
+            s.halted = None;
+        }
+    }
+
     /// Is `o` one of this module's objects (so not plain data for structured clone)?
     pub(crate) fn is_platform_object(&self, o: ObjId) -> bool {
         let s = self.plat.s.borrow();

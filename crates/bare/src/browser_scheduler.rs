@@ -284,6 +284,14 @@ fn to_int32(n: f64) -> i32 {
 }
 
 impl Dom {
+    /// `Browser::survive`: the pump stopped on a script budget; let it run again.
+    pub(crate) fn clear_budget_halt_sched(&self) {
+        let mut s = self.sched.borrow_mut();
+        if s.halted.as_ref().is_some_and(crate::browser::is_budget) {
+            s.halted = None;
+        }
+    }
+
     /// Milliseconds since the time origin, on the clock in use.
     pub(crate) fn now_ms(&self) -> f64 {
         let s = self.sched.borrow();

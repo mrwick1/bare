@@ -45,7 +45,10 @@
 //!   when the script throws too. `document.readyState` is `loading`, `interactive` or `complete`.
 //! - A script that throws is reported (`Browser::take_reports`, event type `error`) and loading goes on. `window.onerror` and
 //!   `ErrorEvent` are absent. Diagnostics hold only the error name.
-//! - Fatal: any `Unsupported`, `Limit` or heap fault, a failed microtask checkpoint, a module script. The run stops at once
+//! - A script budget (`Limit` of steps, call depth, nesting depth, statement frames, jobs of one checkpoint) ends only the task that
+//!   hit it (`Browser::survive`): one console error, the DOM as it is, the run goes on. After `BrowserLimits::max_task_aborts` the
+//!   run stops with `Fatal::Aborted`.
+//! - Fatal: any `Unsupported`, any other `Limit` (host caps, heap, memory) or heap fault, a module script. The run stops at once
 //!   and no JS runs and no I/O starts after that (a second `run_page` returns the same stop).
 //!
 //! Dynamic scripts (`document.createElement('script')`)
@@ -69,7 +72,7 @@
 //! Not here: `window.onload`, `DOMContentLoaded` for scripts that were added late, `defer` on dynamic scripts,
 //! `integrity`, `crossorigin`, `nonce`, CSP, `<noscript>`, a service worker.
 
-use crate::browser::{Browser, Dom, IdHash, H, Listener, R, Target as EvTarget, unsupported};
+use crate::browser::{Browser, Dom, IdHash, H, Listener, R, Survive, Target as EvTarget, unsupported};
 use crate::browser_dom as nd;
 use crate::browser_fetch::{FetchConfig, FetchLimits};
 use crate::browser_navigation::NavigationRequest;
@@ -222,6 +225,8 @@ pub enum Fatal {
     Poisoned,
     /// The URL or the page could not be set up.
     Setup(String),
+    /// Too many tasks were aborted by a script budget (`Browser::survive`). The text names the count and the last budget.
+    Aborted(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -255,6 +260,8 @@ pub struct PageResult {
     pub idle_callbacks: usize,
     /// The `Input::Click` steps that did not reach the selected element: another element was on top at the center of it.
     pub intercepted: Vec<Intercept>,
+    /// Tasks in this run that a script budget aborted (`Browser::survive`). The page went on after each.
+    pub aborted: usize,
 }
 
 /// A click that a user would make on another element than the selected one (an overlay, a modal, a `pointer-events: none` page).
@@ -671,7 +678,7 @@ impl Browser {
     /// It never panics on page input and never returns an `Err`: the result says why it stopped.
     pub fn run_page(&mut self, cfg: PageConfig) -> PageResult {
         let dom = self.dom.clone();
-        let mut res = PageResult { stop: Stop::Settled, ready_state: "loading", scripts_run: 0, script_throws: 0, load_errors: 0, tasks: 0, rounds: 0, fetches: 0, bytes: 0, css: CssStats::default(), preload: PreloadStats::default(), diagnostics: Vec::new(), dropped_diagnostics: 0, idle_timers: Vec::new(), idle_frames: false, idle_callbacks: 0, intercepted: Vec::new() };
+        let mut res = PageResult { stop: Stop::Settled, ready_state: "loading", scripts_run: 0, script_throws: 0, load_errors: 0, tasks: 0, rounds: 0, fetches: 0, bytes: 0, css: CssStats::default(), preload: PreloadStats::default(), diagnostics: Vec::new(), dropped_diagnostics: 0, idle_timers: Vec::new(), idle_frames: false, idle_callbacks: 0, intercepted: Vec::new(), aborted: 0 };
         let prior = dom.scripts.fatal.borrow().clone();
         if let Some(f) = prior {
             res.stop = Stop::Fatal(f);
@@ -791,7 +798,7 @@ impl Browser {
         limits.max_rounds = limits.max_rounds.min(caps.1.saturating_sub(spent.1));
         limits.max_time = limits.max_time.min(caps.2.saturating_sub(spent.2));
         let started = Instant::now();
-        let mut res = PageResult { stop: Stop::Settled, ready_state: "loading", scripts_run: 0, script_throws: 0, load_errors: 0, tasks: 0, rounds: 0, fetches, bytes, css: dom.scripts.sheets.borrow().stats, preload: dom.scripts.preloads.borrow().stats, diagnostics: Vec::new(), dropped_diagnostics: 0, idle_timers: Vec::new(), idle_frames: false, idle_callbacks: 0, intercepted: Vec::new() };
+        let mut res = PageResult { stop: Stop::Settled, ready_state: "loading", scripts_run: 0, script_throws: 0, load_errors: 0, tasks: 0, rounds: 0, fetches, bytes, css: dom.scripts.sheets.borrow().stats, preload: dom.scripts.preloads.borrow().stats, diagnostics: Vec::new(), dropped_diagnostics: 0, idle_timers: Vec::new(), idle_frames: false, idle_callbacks: 0, intercepted: Vec::new(), aborted: 0 };
         let prior = dom.scripts.fatal.borrow().clone();
         if let Some(f) = prior {
             res.stop = Stop::Fatal(f);
@@ -1121,6 +1128,31 @@ impl Run<'_> {
         Ok(())
     }
 
+    /// A task of `what` ended with `e`. A script budget aborts only that task (it is logged to the console and the run goes on) up to
+    /// the page budget; any other error is fatal.
+    fn abort(&mut self, e: Error, what: &str) -> Flow {
+        match self.b.survive(e, what) {
+            Survive::Aborted => {
+                self.res.aborted += 1;
+                self.diag(format!("aborted {what}: {e:?}"));
+                Ok(())
+            }
+            Survive::Exhausted(why) => {
+                self.diag(format!("fatal in {what}: {why}"));
+                Err(Stop::Fatal(Fatal::Aborted(why)))
+            }
+            Survive::Fatal => Err(self.fatal(e, what)),
+        }
+    }
+
+    /// `n` tasks ran, or `r` failed and a script budget aborted one: it counts as a task that ran.
+    fn tasks_or_abort(&mut self, r: R<usize>, what: &str) -> Result<usize, Stop> {
+        match r {
+            Ok(n) => Ok(n),
+            Err(e) => self.abort(e, what).map(|_| 1),
+        }
+    }
+
     fn fatal(&mut self, e: Error, what: &str) -> Stop {
         let stop = fatal_of(e);
         self.diag(format!("fatal in {what}: {stop:?}"));
@@ -1154,7 +1186,7 @@ impl Run<'_> {
                 self.diag(format!("script threw {name}: {what}"));
                 Ok(())
             }
-            Err(e) => Err(self.fatal(e, what)),
+            Err(e) => self.abort(e, what),
         }
     }
 
@@ -1168,17 +1200,23 @@ impl Run<'_> {
             pending.set(pending.get().saturating_sub(text.len()));
             self.run_one(node, &text, "dynamic inline script")?;
         }
-        match self.b.drain() {
-            Ok(_) => self.nav_stop(),
-            Err(e) => Err(self.fatal(e, "microtask checkpoint")),
+        self.checkpoint("microtask checkpoint")?;
+        self.nav_stop()
+    }
+
+    /// The microtask checkpoint. A job that ends on a script budget is aborted and the jobs behind it still run.
+    fn checkpoint(&mut self, what: &str) -> Flow {
+        while let Err(e) = self.b.drain() {
+            self.abort(e, what)?;
         }
+        Ok(())
     }
 
     fn fire(&mut self, t: EvTarget, ty: &str, bubbles: bool) -> Flow {
         self.nav_stop()?;
         match self.b.fire(t, ty, bubbles) {
             Ok(()) => Ok(()),
-            Err(e) => Err(self.fatal(e, ty)),
+            Err(e) => self.abort(e, &format!("{ty} event")),
         }
     }
 
@@ -1211,7 +1249,7 @@ impl Run<'_> {
     fn release_elements(&mut self, upto: Option<NodeId>) -> Flow {
         match self.dom.ce_release(&mut self.b.it, upto) {
             Ok(()) => Ok(()),
-            Err(e) => Err(self.fatal(e, "custom element upgrade")),
+            Err(e) => self.abort(e, "custom element upgrade"),
         }
     }
 
@@ -1405,7 +1443,7 @@ impl Run<'_> {
                 _ => unreachable!("only a key has no element"),
             };
             if let Err(e) = r {
-                return Err(self.fatal(e, "input"));
+                self.abort(e, "input")?;
             }
             self.after_js()?;
         }
@@ -1478,7 +1516,7 @@ impl Run<'_> {
         if self.step == 0 {
             self.budget()?;
             self.prefetch();
-            if let Err(e) = self.b.drain() { return Err(self.fatal(e, "initial checkpoint")); }
+            self.checkpoint("initial checkpoint")?;
             self.feed_styles()?;
             // Split: a sheet of the parsed document is on its way. The scripts wait for it, the page does not.
             self.waiting = !self.net.waits.is_empty();
@@ -1586,7 +1624,8 @@ impl Run<'_> {
                     break;
                 }
                 self.budget()?;
-                let n = self.b.run_network_tasks(1).map_err(fatal_of)?;
+                let r = self.b.run_network_tasks(1);
+                let n = self.tasks_or_abort(r, "network task")?;
                 self.res.tasks += n;
                 did += n;
                 self.after_js()?;
@@ -1599,19 +1638,23 @@ impl Run<'_> {
                     break;
                 }
                 self.budget()?;
-                let pump = self.b.run_scheduled_tasks(1).map_err(fatal_of)?;
-                if pump.ran == 0 {
+                let ran = match self.b.run_scheduled_tasks(1) {
+                    Ok(pump) => pump.ran,
+                    Err(e) => self.abort(e, "timer or queued task").map(|_| 1)?,
+                };
+                if ran == 0 {
                     break;
                 }
-                self.res.tasks += pump.ran;
-                did += pump.ran;
+                self.res.tasks += ran;
+                did += ran;
                 self.after_js()?;
             }
             // `popstate` and `hashchange` of same-document traversals.
             for _ in 0..batch {
                 if self.b.navigation_stats().pending_tasks == 0 { break; }
                 self.budget()?;
-                let n = self.b.run_navigation_tasks_up_to(1).map_err(fatal_of)?;
+                let r = self.b.run_navigation_tasks_up_to(1);
+                let n = self.tasks_or_abort(r, "navigation task")?;
                 self.res.tasks += n;
                 did += n;
                 self.after_js()?;
@@ -1646,8 +1689,11 @@ impl Run<'_> {
                 bare_net::trace::mark(|| format!("wait {gap:.0} ms, blocker {b:?} now {now:.0}"), 0);
             }
             if self.b.uses_virtual_clock() {
-                let pump = self.b.advance_to(due, 1).map_err(fatal_of)?;
-                self.res.tasks += pump.ran;
+                let ran = match self.b.advance_to(due, 1) {
+                    Ok(pump) => pump.ran,
+                    Err(e) => self.abort(e, "timer or queued task").map(|_| 1)?,
+                };
+                self.res.tasks += ran;
                 self.after_js()?;
             } else {
                 let wait = Duration::from_secs_f64(gap.max(0.0) / 1000.0);

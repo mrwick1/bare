@@ -43,9 +43,12 @@
 //!   object), `removeEventListener`, `dispatchEvent`, capture / target / bubble phases through the document to `window`,
 //!   `preventDefault`, `stopPropagation`, `stopImmediatePropagation`, `composedPath`, `new EventTarget()`.
 //! - A listener that throws is reported (`Browser::take_reports`) and dispatch goes on. A Limit, an Unsupported or a
-//!   heap fault stops the dispatch and is the result of the call.
+//!   heap fault stops the dispatch and is the result of the call. The embedder then calls `Browser::survive`: a script budget
+//!   (steps and the like) aborts only that task and the page goes on; the other errors stay fatal.
 //!
 //! Gates and deviations (on purpose, none is silently faked)
+//! - `document.images`, `links`, `anchors`, `embeds`, `forms` and `scripts` are snapshot arrays too (`browser_platform_query.rs`).
+//!   `document.title` reads and sets the first `<title>` (`browser_dom.rs`).
 //! - Lists (`childNodes`, `children`, `querySelectorAll`, `getElementsByTagName`, `getElementsByClassName`) are plain
 //!   snapshot arrays, not live `NodeList`/`HTMLCollection`.
 //!   The one live `NodeList` is the result of `document.getElementsByName` (`browser_nodelist.rs`).
@@ -264,6 +267,8 @@ pub struct BrowserLimits {
     pub max_string_bytes: usize,
     /// Kept listener exception reports. The oldest is dropped (and counted) after this.
     pub max_reports: usize,
+    /// Tasks that a script budget may abort (`Browser::survive`). The next one is fatal.
+    pub max_task_aborts: usize,
 }
 
 impl Default for BrowserLimits {
@@ -282,6 +287,7 @@ impl Default for BrowserLimits {
             max_selector_len: 1024,
             max_string_bytes: 16 << 20,
             max_reports: 256,
+            max_task_aborts: 5,
         }
     }
 }
@@ -334,6 +340,22 @@ pub(crate) struct EventState {
     pub ui: Option<Box<crate::browser_ui::Ui>>,
     /// `isTrusted`: set for the events of `browser_ui.rs`.
     pub trusted: bool,
+}
+
+/// Is `e` a script budget, the one class of limit that aborts a task and not the page (see [`Browser::survive`])?
+pub(crate) fn is_budget(e: &Error) -> bool {
+    matches!(e, Error::Limit(LimitKind::Steps | LimitKind::CallDepth | LimitKind::TraversalDepth | LimitKind::StatementFrames | LimitKind::DrainJobs))
+}
+
+/// What [`Browser::survive`] decided about the error of a task.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Survive {
+    /// A script budget ended the task. It is aborted and logged. Go on.
+    Aborted,
+    /// Not a script budget: the error stays fatal.
+    Fatal,
+    /// A script budget, but the page used up its aborts. The text says why. Fatal.
+    Exhausted(String),
 }
 
 /// A listener exception that did not stop dispatch.
@@ -474,6 +496,8 @@ pub struct Dom {
     pub(crate) streams: crate::browser_streams::Streams,
     /// `console` and its bounded record sink (`browser_console.rs`).
     pub(crate) console: crate::browser_console::Console,
+    /// Tasks that a script budget aborted so far (`Browser::survive`).
+    pub(crate) aborted: std::cell::Cell<usize>,
     /// Navigation, history and storage state (`browser_navigation.rs`).
     pub(crate) nav: crate::browser_navigation::Nav,
     pub(crate) scripts: crate::browser_loader::Scripts,
@@ -1265,6 +1289,7 @@ pub(crate) static DEFS: &[Def] = &[
     Def { on: &[Document], name: "documentElement", len: 0, kind: G(nd::document_element) },
     Def { on: &[Document], name: "head", len: 0, kind: G(nd::head) },
     Def { on: &[Document], name: "body", len: 0, kind: G(nd::body) },
+    Def { on: &[Document], name: "title", len: 0, kind: A(nd::document_title, nd::set_document_title) },
     Def { on: &[Document], name: "doctype", len: 0, kind: G(nd::doctype) },
     Def { on: &[Document], name: "defaultView", len: 0, kind: G(nd::default_view) },
     Def { on: &[Input], name: "value", len: 0, kind: A(nd::input_value, nd::set_input_value) },
@@ -1285,6 +1310,10 @@ pub(crate) static DEFS: &[Def] = &[
     Def { on: &[Link], name: "crossOrigin", len: 0, kind: A(nd::link_cross_origin, nd::set_link_cross_origin) },
     Def { on: &[Document], name: "scripts", len: 0, kind: G(crate::browser_platform_query::scripts) },
     Def { on: &[Document], name: "forms", len: 0, kind: G(crate::browser_platform_query::forms) },
+    Def { on: &[Document], name: "images", len: 0, kind: G(crate::browser_platform_query::images) },
+    Def { on: &[Document], name: "embeds", len: 0, kind: G(crate::browser_platform_query::embeds) },
+    Def { on: &[Document], name: "links", len: 0, kind: G(crate::browser_platform_query::links) },
+    Def { on: &[Document], name: "anchors", len: 0, kind: G(crate::browser_platform_query::anchors) },
     Def { on: &[Input], name: "name", len: 0, kind: A(fm::input_name, fm::set_input_name) },
     Def { on: &[Input], name: "disabled", len: 0, kind: A(fm::input_disabled, fm::set_input_disabled) },
     Def { on: &[Input], name: "readOnly", len: 0, kind: A(fm::input_read_only, fm::set_input_read_only) },
@@ -1410,6 +1439,7 @@ impl Browser {
             xhr: Default::default(),
             streams: Default::default(),
             console: Default::default(),
+            aborted: Default::default(),
             nav: Default::default(),
             scripts: Default::default(),
             plat: Default::default(),
@@ -1455,6 +1485,33 @@ impl Browser {
     /// The native document. Do not hold a mutable borrow across a call into the browser.
     pub fn document(&self) -> Rc<RefCell<Document>> {
         self.dom.doc.clone()
+    }
+
+    /// A task ended with `e`. A script budget (steps, call depth, nesting depth, statement frames, jobs of one checkpoint) aborts
+    /// only that task, as Chrome does for a runaway script: the console gets one error, the sticky stop states of the queues are
+    /// cleared, and the page goes on with its DOM as it is. Every other error, and the abort after `max_task_aborts`, is fatal.
+    /// The DOM stays consistent because each native DOM operation completes before a budget is checked, and a budget is only
+    /// charged before the work that it bounds. Host caps (`Limit(Host(..))`), heap and memory caps stay fatal: they can come from
+    /// garbage that stays, or from a refusal that a retry would repeat.
+    pub fn survive(&mut self, e: Error, what: &str) -> Survive {
+        let Error::Limit(k) = e else { return Survive::Fatal };
+        if !is_budget(&e) {
+            return Survive::Fatal;
+        }
+        let n = self.dom.aborted.get() + 1;
+        if n > self.dom.lim.max_task_aborts {
+            return Survive::Exhausted(format!("{} tasks were aborted by script budgets, the next one ({k:?} in {what}) is too many", n - 1));
+        }
+        self.dom.aborted.set(n);
+        self.it.clear_failed_job();
+        self.dom.clear_budget_halt_sched();
+        self.dom.clear_budget_halt_nav();
+        self.dom.clear_budget_halt_plat();
+        self.dom.clear_budget_halt_fetch();
+        // A new budget window: the steps of the aborted task must not make the next host call fail.
+        let _ = self.it.host_scope(|_| Ok(()));
+        crate::browser_console::push_text(&self.dom, &mut self.it, crate::browser_console::ConsoleLevel::Error, &format!("Script aborted: the {k:?} budget ended the {what}. The page goes on ({n} of {} aborts used)", self.dom.lim.max_task_aborts));
+        Survive::Aborted
     }
 
     pub fn run_script(&mut self, source: &str) -> R<Value> {

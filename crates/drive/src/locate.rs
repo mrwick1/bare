@@ -123,10 +123,16 @@ pub fn text(page: &mut Page, h: Handle) -> Option<String> {
     page.inspect(|doc, frame| norm(&Cx { doc, styles: &frame.styles }.text(h.node)))
 }
 
-/// The text of the first `<title>`.
+/// `document.title`: the text of the first `<title>` element, or what a script set. Empty when the page has none.
 pub fn title(page: &mut Page) -> Option<String> {
-    let h = *page.query_all("title").ok()?.first()?;
-    page.inspect(|doc, _| norm(&doc.children(h.node).filter_map(|c| if let NodeData::Text(s) = doc.data(c) { Some(doc.text(*s)) } else { None }).collect::<String>()))
+    let b = page.browser()?;
+    let r = b.run_script("document.title");
+    let title = match r {
+        Ok(v @ bare_js::value::Value::String(_)) => Some(b.it.display(v)),
+        _ => None,
+    };
+    page.touched();
+    title
 }
 
 struct Cx<'a> {

@@ -551,3 +551,14 @@ A geometry read (`getBoundingClientRect`, `getClientRects`, `offsetWidth`, an In
 - Limits fail closed: 32 MiB of file bytes, 16 M pixels (64 MiB decoded) for each picture, 64 MiB decoded for each page, 512 pictures for each page, 4 downloads at a time.
 - The pixel limit is lower than the 64 MP that was first suggested. 64 MP would allow 256 MiB for one picture.
 - Cost: `bare-drive` grows from 12.8 MiB to 13.5 MiB (release, whole feature, not only the decoders). The build time was not measured on its own. The incremental release build of `bare-js` examples and `bare` took 1 m 55 s.
+
+## A script budget ends only its task
+
+A runaway script ends the task, not the page. Chrome does the same: it shows "page unresponsive" and the DOM stays.
+
+- The class is the JS execution budget: `Limit` of `Steps`, `CallDepth`, `TraversalDepth`, `StatementFrames` and `DrainJobs` (`Browser::survive`, `browser.rs`). The step budget was already new for each task (`Interp::begin`), so a task cannot use what the last one left.
+- `survive` logs one console error (level `error`, the budget and the kind of task), clears the sticky stop states that the budget left (the failed job of the microtask queue, and the halts of the scheduler, navigation, viewport and network pumps) and lets the page go on. A timer that ran away is not armed again; the jobs behind a failed job still run.
+- The page has a budget of 5 aborts (`BrowserLimits::max_task_aborts`). The next one is `Fatal::Aborted`: the page stops, `Page::stopped` gives the reason, and `bare-drive` adds "(the page stopped: ...)" to the failure of a step that waits. This bounds a chain of runaway timers (5 tasks of 100 M steps are about 9 s).
+- Everything else stays fatal and sticky: `Limit(Host(..))` (refusals that a retry repeats), heap and memory caps (they can come from garbage that stays), `Unsupported`, a module script. Reason: these are gates or caps of the host, not the time of one script.
+- State after an abort. Each native DOM operation is complete when a budget is checked, so the tree is always valid. A host call that clears and refills children (`textContent=`, `replaceChildren`) charged its steps in the middle of the change, which left half of the children; it now charges first. Other multi-step host calls were not audited one by one (`innerHTML=` parses to a separate fragment first).
+- Not done: `RangeError` for a deep recursion. The engine still ends a deep call with the uncatchable `CallDepth`; it now aborts the task instead of the page.

@@ -508,6 +508,14 @@ fn origin(u: &Url) -> String {
 // ---------------------------------------------------------------------------------------------- Dom side
 
 impl Dom {
+    /// `Browser::survive`: the network tasks stopped on a script budget; let them run again.
+    pub(crate) fn clear_budget_halt_fetch(&self) {
+        let mut s = self.fetch.st.borrow_mut();
+        if s.halted.as_ref().is_some_and(crate::browser::is_budget) {
+            s.halted = None;
+        }
+    }
+
     /// Requests that wait for `run_network_tasks` (`fetch` and XHR).
     pub(crate) fn fetch_queued(&self) -> usize {
         self.fetch.st.borrow().queue.len()

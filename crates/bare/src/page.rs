@@ -21,7 +21,7 @@
 //! and a click maps to the line under the pointer); a long value scrolls to keep the caret in view but a
 //! click is mapped with the same scroll, so a click right after a scroll can be off by a few pixels at the field edge.
 
-use crate::browser::{Browser, Report};
+use crate::browser::{Browser, Report, Survive};
 use crate::browser_dom::input_kind;
 use crate::browser_session::{Session, SessionConfig, SessionStop};
 use crate::browser_ui::{Frame, KeyInput, Mods, Pointer, UiOutcome};
@@ -415,6 +415,20 @@ impl Page {
         }
     }
 
+    /// Why the page stopped for good, if it did: a fatal error of the engine or the host, or too many tasks aborted by script budgets
+    /// (`Fatal::Aborted`). The DOM stays and can be read, but no script, timer or input runs any more. A driver should fail a step
+    /// that waits for a change with this text.
+    pub fn stopped(&self) -> Option<String> {
+        match &self.source {
+            Source::Session(s) => match s.ended() {
+                Some(SessionStop::Page(crate::Stop::Fatal(crate::Fatal::Aborted(why)))) => Some(why.clone()),
+                Some(SessionStop::Page(crate::Stop::Fatal(f))) => Some(format!("{f:?}")),
+                _ => None,
+            },
+            Source::Browser(_) => None,
+        }
+    }
+
     /// Why the page has no document (or no loaded one): the load failed, the document is on its way, or the page stopped.
     pub fn no_document(&self) -> String {
         match &self.source {
@@ -742,7 +756,14 @@ impl Page {
                 SessionStop::LoadFailed(why) => Some(why),
                 _ => None,
             },
-            Source::Browser(b) => b.drain().and_then(|_| b.run_navigation_tasks()).and_then(|_| b.run_scheduled_tasks(1000)).err().map(|e| format!("{e:?}")),
+            Source::Browser(b) => match b.drain().and_then(|_| b.run_navigation_tasks()).and_then(|_| b.run_scheduled_tasks(1000)) {
+                Ok(_) => None,
+                Err(e) => match b.survive(e, "task") {
+                    Survive::Aborted => None,
+                    Survive::Exhausted(why) => Some(why),
+                    Survive::Fatal => Some(format!("{e:?}")),
+                },
+            },
         };
         if let Some(f) = fatal {
             self.note(format!("page: {f}"));
@@ -754,7 +775,12 @@ impl Page {
         let out = match r {
             Ok(o) => o,
             Err(e) => {
-                self.note(format!("input: {e:?}"));
+                // A script budget ends only this task (the console has the error); the page takes the next input.
+                match self.browser().map(|b| b.survive(e, "event handler")) {
+                    Some(Survive::Aborted) => {}
+                    Some(Survive::Exhausted(why)) => self.note(format!("input: {why}")),
+                    _ => self.note(format!("input: {e:?}")),
+                }
                 // The call may have changed the page before it stopped.
                 UiOutcome { reports: Vec::new(), changed: true, intercepted: None }
             }
