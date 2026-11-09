@@ -99,6 +99,8 @@ pub(crate) struct Sheets {
     base: Option<String>,
     /// `tasks` of the run at the last pass: a pass is skipped when no task ran since.
     fed_tasks: usize,
+    /// What a finished pass saw: the stamp that `still` compares. A task that leaves it as it is does not start another pass.
+    fed_stamp: Option<(u64, usize, (u32, u32), String)>,
     /// `(link, url)` pairs that got their `load` or `error`.
     notified: HashSet<(NodeId, String)>,
 }
@@ -135,16 +137,31 @@ fn why(e: &LoadError) -> String {
 impl Run<'_> {
     /// A pass if a task ran since the last one.
     pub(super) fn feed_if_ran(&mut self) -> Flow {
-        if self.res.tasks != self.dom.scripts.sheets.borrow().fed_tasks {
+        if self.res.tasks != self.dom.scripts.sheets.borrow().fed_tasks && !self.still() {
             self.feed_styles()?;
         }
         Ok(())
     }
 
+    /// The tree, the downloads, the viewport and the page URL are the same as at the end of the last finished pass.
+    /// Then a pass would find the same links, the same base and the same sheets: it would only walk the tree again.
+    /// The URL is read last: it costs a string, and most checks end before it.
+    fn still(&self) -> bool {
+        let s = self.dom.scripts.sheets.borrow();
+        let Some((rev, fetched, vp, url)) = &s.fed_stamp else { return false };
+        (*rev, *fetched, *vp) == self.stamp(&s) && self.b.document_url().as_ref() == Some(url)
+    }
+
+    fn stamp(&self, s: &Sheets) -> (u64, usize, (u32, u32)) {
+        let vp = self.dom.plat.s.borrow().viewport;
+        (self.dom.doc.borrow().revision(), s.fetched.len(), (vp.0.to_bits(), vp.1.to_bits()))
+    }
+
     /// One pass: supply every active sheet that the document needs. See the module comment.
     pub(super) fn feed_styles(&mut self) -> Flow {
         self.budget()?;
-        let page = self.b.document_url().and_then(|u| Url::parse(u.split('#').next().unwrap_or("")).ok());
+        let doc_url = self.b.document_url();
+        let page = doc_url.as_deref().and_then(|u| Url::parse(u.split('#').next().unwrap_or("")).ok());
         let Some(page) = page else { return Ok(()) };
         let base = resources::document_base(&self.dom.doc.borrow(), &page).unwrap_or(page);
         // Live: each pass asks again for the downloads that it waits for, so a link that is gone is not waited for.
@@ -153,6 +170,7 @@ impl Run<'_> {
             let mut s = self.dom.scripts.sheets.borrow_mut();
             s.stats.feeds += 1;
             s.fed_tasks = self.res.tasks;
+            s.fed_stamp = None;
             let now = base.to_string();
             if s.base.as_deref() != Some(&now) {
                 // A key whose text now means another URL must be fetched again (from the cache, if the URL is known).
@@ -176,6 +194,9 @@ impl Run<'_> {
                     };
                     for (raw, url, ok) in known { self.tell_links(&raw, &url, ok)?; }
                     if fired || self.dom.scripts.sheets.borrow().notified.len() != before { continue; }
+                    let mut s = self.dom.scripts.sheets.borrow_mut();
+                    let (rev, fetched, vp) = self.stamp(&s);
+                    s.fed_stamp = doc_url.map(|u| (rev, fetched, vp, u));
                     return Ok(());
                 },
                 Ok(StyleAvailability::MissingExternal { hrefs, .. }) => hrefs,

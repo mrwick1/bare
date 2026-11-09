@@ -3721,3 +3721,48 @@ Other differences seen, no journey fails on them:
 - Wikipedia's "Main menu" is a checkbox that covers its label. The step clicks the checkbox, as a real mouse does in Chrome.
 
 Not tested: arjun-e16, the window mode, a repeat past 1, other sites (old.reddit, bare text sites other than text.npr.org), journeys that need a login, and Chrome runs of the whole step files (Chrome was checked fact by fact, not by a step runner). The DuckDuckGo html page may show a bot check on some networks; the journey passed on every run here.
+
+## Wikipedia JavaScript without errors (2026-11-09)
+
+Goal: the JavaScript of `https://en.wikipedia.org/wiki/Rust_(programming_language)` runs without errors in headless `bare-drive`. Three problems were known. All three had a cause in the engine, and none needed a Wikipedia special case. Numbers: archMachine, `perf stat -e instructions:u` (3 runs), main `a092185` against this branch, step file `timeout 20000`, `open`, `expect css="body" visible`, `shot s`.
+
+**1. jQuery (`Exception in module-execute in module jquery`).** Cause: jQuery calls `document.implementation.createHTMLDocument("")` while it loads. `document.implementation` did not exist. Fix: `browser_implementation.rs` adds `DOMImplementation` with `createHTMLDocument` (a detached document with `html`, `head`, `body`, and an optional title) and `hasFeature`. Test: `create_html_document_makes_a_detached_document_with_html_head_and_body`.
+
+Once jQuery and the later modules ran, three more errors showed. All three are fixed: `PerformanceObserver` was missing (`browser_perf_observer.rs`, a lazy global, never delivers entries), `img.src` and the other `HTMLImageElement` members were missing (`browser_elements.rs`), and a render note "external stylesheet" fired while a sheet was still downloading (it is skipped while the page is live and has work).
+
+**2. The spin after load.** Two causes.
+
+- A split document that waits for a dynamic script to download counted as busy (`waits.unwrap_or(true)` in `live_work`). The loop woke on every tick until the download ended. Fix: `browser_loader.rs` keeps `waiting` exact in `rounds()` and `live_work` treats "parked, no wait" as idle. Test: `a_script_added_by_code_does_not_wake_the_loop_while_it_downloads` (fewer than 20 ticks in 1 s).
+- After each task that ran, the loader walked the whole tree again for every known style sheet (`tell_links`, `document_base`, `style_availability`), even when the tree, the downloads, the viewport and the URL were the same. With the page JavaScript running, this was 67% of the instructions after load. Fix: `feed_if_ran` skips the pass when the stamp (document revision, number of fetched sheets, viewport, URL) is the same as at the end of the last finished pass. Test: `tasks_that_leave_the_document_alone_do_not_walk_it_again_for_style_sheets` (200 tasks, `css.feeds` was 197, now under 20).
+
+Numbers, minimum of 3 runs, Wikipedia, whole run (peak RSS in brackets):
+
+| Steps | main | this branch |
+| --- | --- | --- |
+| `w.steps` (load, visible, shot) | 3.06 G (42 MiB) | 2.83 G (58 MiB) |
+| load, then wait to 4 s | 3.20 G (43 MiB) | 2.83 G (57 MiB) |
+| load, then wait to 12 s | 2.37 G to 3.76 G (42 MiB) | 2.72 G (50 to 58 MiB) |
+
+The branch runs more JavaScript (jQuery and the modules now run), so it holds 15 MiB more. Without the second fix the 12 s run took 4.6 G to 11.7 G on this branch. With the fix, 4 s and 12 s cost the same: the page is idle after load. Not reproduced: the 1.8 G of idle work that the earlier note names. On main, the idle part is below 0.4 G and varies with the network. The variation between runs of main is 2.4 G to 3.8 G.
+
+**3. `Limit(Steps)` in page-size loops.** Cause: a loop over `querySelectorAll('*')` that reads `scrollWidth` laid out the page for each read, and the cascade rebuilt its plan for each read. Each was charged the worst case. Policy: charge the work that was done, keep the 100 M step limit as the hard guard.
+
+- A read of geometry on an unchanged page shares one layout (`Geometry.shared`, key: styles pointer, document and text revisions, node count, user state, viewport). A hit charges 1 step.
+- The cascade skips the plan, the charge and the rebuild check when its stamp is unchanged. A hit charges 1 step.
+- `querySelector(All)` charges 1 per node, and the matcher bound only for nodes where the last compound of the selector fits (`bare_css::matching::subject_matches`). The structural selector cap is now 5 combinators (it was 3).
+
+Tests: `a_loop_of_reads_on_an_unchanged_page_lays_it_out_once`, `reads_of_an_unchanged_page_share_one_layout`, `a_query_charges_the_matcher_work_only_where_the_last_compound_fits`. Result: `expect js` loops over `scrollWidth`, `clientWidth`, `offsetWidth` and `getBoundingClientRect` of all elements pass on Wikipedia (7 of 7 steps; main failed step 5 with `Limit(Steps)`). Cost of that step file: 2.42 G to 2.52 G against 9.6 G to 10.2 G on main (main spends it in the layouts and fails anyway).
+
+**Cost gate.** Full matrix (`tools/js/cost_matrix.sh`, 805 rows, 0 failed): mean glibc -0.32%, 0 rows over under both allocators. One row, `examples/fetch_load bytes 1`, is +0.51% under glibc and +0.27% under jemalloc (one allocator only, noise candidate; it was +0.48% before the last change). The first version of the sheet-pass skip put `loader_load dynamic 1` and `10` at +1.6% and +3.3%: it built the URL string for each pass. The stamp now reads the URL last. Typing cost (`keycost.sh`): 282.6 M a key for `#a1` and 287.9 M for `#f0`, the same as main; RSS 32 MiB. `cargo test --release --workspace`: 3032 passed (before the last test), 0 failed, and the loader tests pass after it. The JS test262 gate did not run: `crates/js` is unchanged.
+
+**Gaps found, not changed.**
+
+- `:not(...)` and `:is(...)` with a complex selector (for example `:not(.mw-cite-backlink a, ...)`) throw `SyntaxError` in `querySelector` and `matches`. Wikipedia hover, keyup and click listeners hit this.
+- Geometry of a culled inline box (`offsetWidth` of an `li` under a culled parent) is an `Unsupported` error that a `try` cannot catch.
+- Black squares from CSS `mask-image` and the area strings of `grid-template` stay as noted before.
+- `HTMLImageElement` has no `new Image()`, `crossOrigin` or `decode()`. An image that fails to load stays `complete=false`.
+- A `createHTMLDocument` document has no doctype, `defaultView` or `location`, and its nodes report the main document as `ownerDocument`.
+- `PerformanceObserver` never delivers entries.
+- `Geometry.shared` keeps one layout alive after a geometry read, until the page changes.
+
+Not tested: a Chrome comparison of the console, window mode, arjun-e16, a page past Wikipedia's first screen after a long scroll, and the 12 s idle run on a loaded machine (the network changes the run time).
