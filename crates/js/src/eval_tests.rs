@@ -77,7 +77,6 @@ fn unsupported_is_found_before_anything_runs() {
     let cases = [
         ("async function f(o) { return delete o[await 1]; }", "await inside delete"),
         // A generator has the same preflight as an async function, and its messages name `await` too.
-        ("function* g() { var [a = yield] = []; }", "await in a binding pattern"),
         ("function* g(t) { t`${yield}`; }", "await in a tagged template"),
         ("var o = { m() { return super.x; } };", "super outside a class element"),
         ("class A { x = new.target; }", "new.target in a class field initializer"),

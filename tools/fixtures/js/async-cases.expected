@@ -110,3 +110,15 @@ await_in_pattern_var_and_for_init	 ## 1,4
 await_in_pattern_default_rejects	 ## caught no|TypeError|c inner
 await_in_pattern_default_function_name	 ## g,h,3
 await_in_pattern_default_yield	{"value":"need a","done":false}|{"value":"A,2","done":true} ## {"value":"need a","done":false}|{"value":"A,2","done":true}
+await_in_computed_object_key	 ## {"a":1,"b":2,"cd":3,"e":4}
+await_in_computed_key_order	ka|v1 ## ka|v1|kb|v2|kc|v3|kd|v4|{"a":1,"b":2,"c":3,"d":4}
+await_in_computed_key_kinds	 ## 1|2|7|8|mamfn1|5,g,m,am,fn,__proto__|true|true
+await_in_computed_key_coerces_once	 ## z:1
+await_in_computed_key_rejects_and_throws	 ## cno|hearly|gboom
+await_in_computed_key_nested_and_generator	{"value":"k","done":false}|{"value":"v","done":false}|{"value":"{\\"K\\":\\"V\\",\\"z\\":1}","done":true} ## {"value":"k","done":false}|{"value":"v","done":false}|{"value":"{\\"K\\":\\"V\\",\\"z\\":1}","done":true}|{"a":{"1":{"x":"deep"}},"l":[3]}
+await_in_array_pattern_default	 ## 1,2,3,4,6,7
+await_in_array_pattern_iterator_protocol	n0 ## n0|n1|A,B|n0|n1|ret|C,2|n0|n1|n2|n3|E,2|undefined
+await_in_array_pattern_rejection_closes	ret ## ret|ret|cx|gsync|ret|hlate
+await_in_array_pattern_not_iterable_and_nested	TypeError|TypeError|{"value":1,"done":false}|{"value":2,"done":false}|{"value":"A,B","done":true} ## TypeError|TypeError|{"value":1,"done":false}|{"value":2,"done":false}|{"value":"A,B","done":true}|1,7,3,1,2,8,9
+await_in_array_pattern_generator_return_closes	{"value":1,"done":false}|ret|fin|{"value":"R","done":true} ## {"value":1,"done":false}|ret|fin|{"value":"R","done":true}
+await_in_computed_pattern_key	ka ## ka|get a|kb|get b|kz|1,5,6,{"c":3,"d":4}|2|ebad

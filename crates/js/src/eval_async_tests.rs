@@ -133,15 +133,11 @@ fn limit_of(r: Result<impl std::fmt::Debug, Error>) -> LimitKind {
 fn unsupported_await_positions_are_found_before_any_effect() {
     big(|| {
         for (src, what) in [
-            ("async function f() { for (var k in {}) {} for (var [a = await 1] in {}) {} }", "await in a binding pattern"),
+            ("async function f() { for (var k in {}) {} for (var [a = await 1] in {}) {} }", "await in a for-in binding"),
             ("async function f(o) { return delete o[await 1]; }", "await inside delete"),
             ("async function f(o) { (await o).x++; }", "await inside ++ or --"),
-            ("async function f(k) { return { [await k]: 1 }; }", "await in a computed object key"),
-            ("async function f() { var [{ a = await 1 }] = [{}]; }", "await in a binding pattern"),
-            ("async function f() { var { [await 1]: a } = {}; }", "await in a binding pattern"),
-            ("async function f() { var { a: [b = await 1] } = { a: [] }; }", "await in a binding pattern"),
             ("async function f() { try {} catch ({ a = await 1 }) {} }", "await in a catch binding"),
-            ("async function f() { for (var [a = await 1] of []) {} }", "await in a binding pattern"),
+            ("async function f() { for (var [a = await 1] of []) {} }", "await in a for-of binding"),
             ("async function f(o) { [o.x = await 1] = []; }", "await in an assignment pattern"),
             ("async function f(t) { return t`${await 1}`; }", "await in a tagged template"),
             ("async function f(t) { return (await t)`x`; }", "await in a tagged template"),
@@ -702,4 +698,34 @@ fn for_in_and_optional_chains_with_await_match_node() {
     for (src, want) in cases {
         assert_eq!(run_out(&format!("var out = []; {src}")), want, "{src}");
     }
+}
+
+/// Computed keys of object literals and binding patterns, and array patterns, with an `await` inside. The expected text is from node.
+#[test]
+fn computed_keys_and_array_patterns_with_await_match_node() {
+    let cases: [(&str, &str); 12] = [
+        ("async function f(k){ return { [await k]: 1, b: await 2, [(await 'c')+'d']: 3 }; } f('a').then(o=>out.push(JSON.stringify(o)));", "{\"a\":1,\"b\":2,\"cd\":3}"),
+        ("function K(x){out.push('k'+x);return x} function V(x){out.push('v'+x);return x} async function f(){ return { [K('a')]: await V(1), [await K('b')]: V(2) }; } f();", "ka|v1|kb|v2"),
+        ("async function f(){ return { get [await 'g']() { return 7; }, [await 'm']() { return 8; }, [await 'fn']: function () {} }; } f().then(o=>out.push(o.g+o.m()+o.fn.name));", "15fn"),
+        ("var n=0; var k={toString(){n++;return 'z'}}; async function f(){ return { [await k]: await 1 }; } f().then(o=>out.push(Object.keys(o)+':'+n));", "z:1"),
+        ("async function f(){ try { return { [await Promise.reject('no')]: 1 }; } catch (e) { out.push('c'+e); } } f();", "cno"),
+        ("function* g(){ var o = { [yield 'k']: yield 'v' }; return JSON.stringify(o); } var it=g(); it.next(); it.next('K'); out.push(it.next('V').value);", "{\"K\":\"V\"}"),
+        ("async function f(){ var [a = await 1, b = await 2] = []; var [c, d = await 4] = [3]; out.push([a,b,c,d].join()); } f();", "1,2,3,4"),
+        ("function mk(){ return { [Symbol.iterator]() { return { next(){ return {value:undefined,done:false}; }, 'return'(){ out.push('ret'); return {}; } }; } }; } async function f(){ try { var [a = await Promise.reject('x'), b] = mk(); } catch (e) { out.push('c'+e); } } f();", "ret|cx"),
+        ("function mk(){ return { [Symbol.iterator]() { return { next(){ return {value:undefined,done:false}; }, 'return'(){ out.push('ret'); return {}; } }; } }; } async function f(){ var [a = await 1, b] = mk(); out.push('end'); } f();", "ret|end"),
+        ("async function f(){ var [h, ...[t = await 7, u]] = [1, undefined, 3]; out.push([h,t,u].join()); } f();", "1,7,3"),
+        ("async function f(){ var { [await 'a']: x, [await 'b']: y = await 5, ...rest } = { a: 1, c: 3 }; out.push([x,y,JSON.stringify(rest)].join()); } f();", "1,5,{\"c\":3}"),
+        ("async function f(){ try { var [a = await 1] = null; } catch (e) { out.push(e.name); } try { var { [await 'k']: z } = null; } catch (e) { out.push(e.name); } } f();", "TypeError|TypeError"),
+    ];
+    for (src, want) in cases {
+        assert_eq!(run_out(&format!("var out = []; {src}")), want, "{src}");
+    }
+    // The machine gives back every frame and slot, also when a pattern or a key throws.
+    big(|| {
+        let mut it = realm(lim());
+        out(&mut it, "async function f(){ try { var [a = await 1, b = await Promise.reject(1)] = []; } catch (e) {} try { var { [await 1]: { c = await Promise.reject(2) } } = { 1: {} }; } catch (e) {} try { ({ [await 1]: await Promise.reject(3) }); } catch (e) {} } f(); 0");
+        it.drain_microtasks().unwrap();
+        let st = it.async_stats();
+        assert_eq!((st.activations, st.frames, st.slots), (0, 0, 0));
+    });
 }

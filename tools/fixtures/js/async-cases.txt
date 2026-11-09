@@ -634,3 +634,81 @@ var log = []; function L(x) { log.push(String(x)); }
 function* g() { var { a = yield "need a", b = yield "need b" } = { b: 2 }; return [a, b].join(); }
 var it = g(); L(JSON.stringify(it.next())); L(JSON.stringify(it.next("A")));
 (function () { return log.join("|"); })
+=== await_in_computed_object_key
+var log = []; function L(x) { log.push(String(x)); }
+async function f(k) { return { [await k]: 1, b: await 2, [(await "c") + "d"]: 3, e: 4 }; }
+f("a").then(function (o) { L(JSON.stringify(o)); });
+(function () { return log.join("|"); })
+=== await_in_computed_key_order
+var log = []; function L(x) { log.push(String(x)); }
+function K(x) { L("k" + x); return x; } function V(x) { L("v" + x); return x; }
+async function f() { return { [K("a")]: await V(1), [await K("b")]: V(2), [K("c")]: await V(3), [await K("d")]: await V(4) }; }
+f().then(function (o) { L(JSON.stringify(o)); });
+(function () { return log.join("|"); })
+=== await_in_computed_key_kinds
+var log = []; function L(x) { log.push(String(x)); }
+var s = Symbol("s");
+async function f() { return { [await s]: 1, [await 5]: 2, get [await "g"]() { return 7; }, set [await "g"](v) {}, [await "m"]() { return 8; }, async [await "am"]() { return 9; }, [await "fn"]: function () {}, ["__proto__"]: 1, [await "__proto__"]: 2 }; }
+f().then(function (o) { L(o[s]); L(o[5]); L(o.g); L(o.m()); L(o.m.name + o.am.name + o.fn.name + o[s]); L(Object.keys(o).join()); L(Object.getPrototypeOf(o) === Object.prototype); L(Object.getOwnPropertyDescriptor(o, "g").set !== undefined); });
+(function () { return log.join("|"); })
+=== await_in_computed_key_coerces_once
+var log = []; function L(x) { log.push(String(x)); }
+var n = 0; var k = { toString: function () { n++; return "z"; } };
+async function f() { return { [await k]: await 1 }; }
+f().then(function (o) { L(Object.keys(o) + ":" + n); });
+(function () { return log.join("|"); })
+=== await_in_computed_key_rejects_and_throws
+var log = []; function L(x) { log.push(String(x)); }
+async function f() { try { return { [await Promise.reject("no")]: 1 }; } catch (e) { L("c" + e); } }
+async function g() { return { [await { toString: function () { throw "boom"; } }]: 1 }; }
+async function h() { return { [{ toString: function () { throw "early"; } }]: await 1 }; }
+f(); g().catch(function (e) { L("g" + e); }); h().catch(function (e) { L("h" + e); });
+(function () { return log.join("|"); })
+=== await_in_computed_key_nested_and_generator
+var log = []; function L(x) { log.push(String(x)); }
+async function f() { return { a: { [await 1]: { [await "x"]: await "deep" } }, [await "l"]: [await 3] }; }
+function* g() { var o = { [yield "k"]: yield "v", z: 1 }; return JSON.stringify(o); }
+f().then(function (o) { L(JSON.stringify(o)); });
+var it = g(); L(JSON.stringify(it.next())); L(JSON.stringify(it.next("K"))); L(JSON.stringify(it.next("V")));
+(function () { return log.join("|"); })
+=== await_in_array_pattern_default
+var log = []; function L(x) { log.push(String(x)); }
+async function f() { var [a = await 1, b = await 2] = []; var [c, d = await 4] = [3]; let [e = await 5] = [6]; const [, , g = await 7] = [1, 2]; return [a, b, c, d, e, g].join(); }
+f().then(L);
+(function () { return log.join("|"); })
+=== await_in_array_pattern_iterator_protocol
+var log = []; function L(x) { log.push(String(x)); }
+function mk(n) { var i = 0; return { [Symbol.iterator]: function () { return { next: function () { L("n" + i); return i < n ? { value: i++ % 2 ? i : undefined, done: false } : { done: true }; }, "return": function () { L("ret"); return {}; } }; } }; }
+async function f() { var [a = await "A", b = await "B"] = mk(1); L(a + "," + b); var [c = await "C", d] = mk(5); L(c + "," + d); var [e = await "E", ...r] = mk(3); L(e + "," + r.length); }
+f().then(L);
+(function () { return log.join("|"); })
+=== await_in_array_pattern_rejection_closes
+var log = []; function L(x) { log.push(String(x)); }
+function mk() { return { [Symbol.iterator]: function () { return { next: function () { return { value: undefined, done: false }; }, "return": function () { L("ret"); return {}; } }; } }; }
+async function f() { try { var [a = await Promise.reject("x"), b] = mk(); } catch (e) { L("c" + e); } }
+async function g() { var [a = (function () { throw "sync"; })(), b = await 1] = mk(); }
+async function h() { var [a, b = await 1, c = (function () { throw "late"; })()] = mk(); }
+f(); g().catch(function (e) { L("g" + e); }); h().catch(function (e) { L("h" + e); });
+(function () { return log.join("|"); })
+=== await_in_array_pattern_not_iterable_and_nested
+var log = []; function L(x) { log.push(String(x)); }
+async function f() { try { var [a = await 1] = null; } catch (e) { L(e.name); } try { var [a = await 1] = {}; } catch (e) { L(e.name); } }
+async function g() { var [h, ...[t = await 7, u]] = [1, undefined, 3]; var { p: [q = await 1], r = await 2 } = { p: [] }; var [{ s = await 8 }, [w = await 9]] = [{}, []]; L([h, t, u, q, r, s, w].join()); }
+function* y() { var [a = yield 1, b = yield 2] = []; return a + "," + b; }
+f(); g();
+var it = y(); L(JSON.stringify(it.next())); L(JSON.stringify(it.next("A"))); L(JSON.stringify(it.next("B")));
+(function () { return log.join("|"); })
+=== await_in_array_pattern_generator_return_closes
+var log = []; function L(x) { log.push(String(x)); }
+function mk() { return { [Symbol.iterator]: function () { return { next: function () { return { value: undefined, done: false }; }, "return": function () { L("ret"); return {}; } }; } }; }
+function* y() { try { var [a = yield 1] = mk(); L("no"); } finally { L("fin"); } }
+var it = y(); L(JSON.stringify(it.next())); L(JSON.stringify(it.return("R")));
+(function () { return log.join("|"); })
+=== await_in_computed_pattern_key
+var log = []; function L(x) { log.push(String(x)); }
+function K(x) { L("k" + x); return x; }
+var o = { get a() { L("get a"); return 1; }, get b() { L("get b"); return undefined; }, c: 3, d: 4 };
+async function f() { var { [await K("a")]: x, [K("b")]: y = await 5, [await K("z")]: z = 6, ...rest } = o; L([x, y, z, JSON.stringify(rest)].join()); }
+async function g() { var { [await 1]: { [await "q"]: q = await 2 } } = { 1: { q: undefined } }; L(q); let { [await Promise.reject("bad")]: n } = {}; }
+f().then(function () { return g(); }).catch(function (e) { L("e" + e); });
+(function () { return log.join("|"); })

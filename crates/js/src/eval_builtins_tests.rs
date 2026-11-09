@@ -119,12 +119,29 @@ fn named_groups() {
     assert_eq!(run("new RegExp('(?<=a)b').test('ab')"), "boolean:true");
 }
 
+/// Flag `d`: the `hasIndices` getter and `indices` on the match result. Expected texts are from node.
+#[test]
+fn flag_d_adds_indices_to_match_results() {
+    assert_eq!(run("var r = /a(?<x>b)(?<y>z)?(c)/d.exec('xxabc'); JSON.stringify(r.indices) + JSON.stringify(r.indices.groups) + Object.keys(r).join() + r.indices.groups.y + Object.getPrototypeOf(r.indices.groups)"), "string:[[2,5],[3,4],null,[4,5]]{\"x\":[3,4]}0,1,2,3,index,input,groups,indicesundefinednull");
+    assert_eq!(run("var q = /b/d.exec('abc'); JSON.stringify(q.indices) + q.indices.groups + Object.keys(q).join() + q.indices.length"), "string:[[1,2]]undefined0,index,input,groups,indices1");
+    assert_eq!(run("[/a/d.hasIndices, /a/.hasIndices, /a/dgimsuy.flags, new RegExp('a', 'dg').flags, /a/d.global, RegExp.prototype.hasIndices].join()"), "string:true,false,dgimsuy,dg,false,");
+    assert_eq!(run("'abc'.match(/b/d).indices[0].join() + [...'abab'.matchAll(/b/dg)].map(m => m.indices[0]).join('|') + /(a)|(b)/d.exec('b').indices[1] + 'x'.replace(/x/d, 'y')"), "string:1,21,2|3,4undefinedy");
+    assert_eq!(run("var g = /a/dg; g.exec('aa'); g.lastIndex + '' + /a/.exec('a').indices"), "string:1undefined");
+    assert_eq!(run("Object.keys(/./.exec('a')).join()"), "string:0,index,input,groups");
+}
+
+/// The `flags` getter is generic: it reads the flag properties of any object (ECMA-262 22.2.6.4).
+#[test]
+fn the_flags_getter_reads_any_object() {
+    assert_eq!(run("var g = Object.getOwnPropertyDescriptor(RegExp.prototype, 'flags').get; g.call({ global: 1, hasIndices: true, sticky: 'x', unicodeSets: 1, dotAll: 0 }) + '|' + g.call({}) + '|' + g.call(/a/gi)"), "string:dgvy||gi");
+    assert_eq!(run("var g = Object.getOwnPropertyDescriptor(RegExp.prototype, 'flags').get; var log = []; g.call(new Proxy({}, { get(t, k) { log.push(k); return false; } })); log.join('')"), "string:hasIndicesglobalignoreCasemultilinedotAllunicodestickyunicodeSets");
+}
+
 #[test]
 fn gates_are_explicit_unsupported() {
     // A literal pattern is compiled by `Interp::new`: nothing of the script runs. The parser checks only the flags.
     let literal = [
         ("var x = 1; /(/;", "regexp literal: invalid pattern (early SyntaxError)"),
-        ("var r = /a/d;", "regexp flag d"),
         ("function f() { return /[b-a]/; }", "regexp literal: invalid pattern (early SyntaxError)"),
     ];
     for (src, what) in literal {
