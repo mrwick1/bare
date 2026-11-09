@@ -112,7 +112,7 @@ fn url(n: &Nginx, path: &str) -> Url {
 }
 
 fn gzip_get(c: &mut Client, u: &Url) -> std::sync::Arc<bare_net::http::Response> {
-    c.send(&Request { method: Method::Get, url: u, headers: &[("Accept-Encoding", "gzip")], body: &[] }).unwrap()
+    c.send(&Request { cookies: Default::default(), method: Method::Get, url: u, headers: &[("Accept-Encoding", "gzip")], body: &[] }).unwrap()
 }
 
 #[test]
@@ -138,11 +138,11 @@ fn a_gzip_reply_with_no_content_length_is_decoded() {
 fn head_and_conditional_requests_on_a_gzip_file() {
     let Some((n, mut c)) = start("", "") else { return };
     let u = url(&n, "/text.txt");
-    let r = c.send(&Request { method: Method::Head, url: &u, headers: &[("Accept-Encoding", "gzip")], body: &[] }).unwrap();
+    let r = c.send(&Request { cookies: Default::default(), method: Method::Head, url: &u, headers: &[("Accept-Encoding", "gzip")], body: &[] }).unwrap();
     assert_eq!((r.status, r.body.len(), r.header("content-encoding")), (200, 0, Some("gzip")));
     let etag = r.header("etag").unwrap().to_string();
     // 304: the headers may name the encoding, and there is no body.
-    let r = c.send(&Request { method: Method::Get, url: &u, headers: &[("Accept-Encoding", "gzip"), ("If-None-Match", &etag)], body: &[] }).unwrap();
+    let r = c.send(&Request { cookies: Default::default(), method: Method::Get, url: &u, headers: &[("Accept-Encoding", "gzip"), ("If-None-Match", &etag)], body: &[] }).unwrap();
     assert_eq!((r.status, r.body.len()), (304, 0));
     let r = c.get(&url(&n, "/n204")).unwrap();
     assert_eq!((r.status, r.body.len()), (204, 0));
@@ -192,7 +192,7 @@ trait GetWith {
 
 impl GetWith for Client {
     fn get_with(&mut self, u: &Url, headers: &[(&str, &str)]) -> std::sync::Arc<bare_net::http::Response> {
-        self.send(&Request { method: Method::Get, url: u, headers, body: &[] }).unwrap()
+        self.send(&Request { cookies: Default::default(), method: Method::Get, url: u, headers, body: &[] }).unwrap()
     }
 }
 

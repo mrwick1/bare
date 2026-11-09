@@ -13,6 +13,9 @@
 //! expect url="x" | url~"x"
 //! expect title="x" | title~"x"
 //! expect js "expression"      true in the page (an assertion: do not change the page in it)
+//! expect cookie NAME [absent | value="x" | value~"x"]   the jar has (or lacks) the cookie that a request to the page would send
+//! cookie set NAME VALUE [domain=D] [path=P]   put a cookie in the jar of the session (quote a VALUE that holds `=`); D is a host
+//!                             (default: the host of the page), P defaults to /. A refused cookie (a public suffix) fails the step
 //! wait ...                    the same as expect
 //! shot NAME                   a PNG of the window: OUT/NAME.png
 //! timeout MS                  the time limit of each later step (default 10000)
@@ -45,6 +48,14 @@ pub enum Check {
     Url(Text),
     Title(Text),
     Js(String),
+    Cookie(String, CookieState),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum CookieState {
+    Present,
+    Absent,
+    Value(Text),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -59,6 +70,7 @@ pub enum Action {
     Expect(Check),
     Shot(String),
     Timeout(u64),
+    CookieSet { name: String, value: String, domain: Option<String>, path: Option<String> },
 }
 
 #[derive(Clone, Debug)]
@@ -211,6 +223,20 @@ fn parse_line(line: &str, vars: &HashMap<String, String>) -> Result<Action, Stri
             }
         }
         "expect" | "wait" => Action::Expect(check(rest, vars)?),
+        "cookie" => match rest {
+            [Word::Bare(set), name, value, opts @ ..] if set == "set" => {
+                let (mut domain, mut path) = (None, None);
+                for o in opts {
+                    match o {
+                        Word::Pair(k, false, v) if k == "domain" => domain = Some(expand(v, vars)?),
+                        Word::Pair(k, false, v) if k == "path" => path = Some(expand(v, vars)?),
+                        _ => return Err("cookie set NAME VALUE [domain=D] [path=P]".into()),
+                    }
+                }
+                Action::CookieSet { name: plain(name, vars)?, value: plain(value, vars)?, domain, path }
+            }
+            _ => return Err("cookie set NAME VALUE [domain=D] [path=P]".into()),
+        },
         "shot" => {
             let name = one()?;
             if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
@@ -245,8 +271,25 @@ fn locator(w: &[Word], vars: &HashMap<String, String>) -> Result<(Locator, usize
     })
 }
 
+/// A bare or quoted word, with its variables put in.
+fn plain(w: &Word, vars: &HashMap<String, String>) -> Result<String, String> {
+    match w {
+        Word::Bare(s) | Word::Quoted(s) => expand(s, vars),
+        Word::Pair(k, ..) => Err(format!("quote a text that holds = or ~: {k}")),
+    }
+}
+
 fn check(w: &[Word], vars: &HashMap<String, String>) -> Result<Check, String> {
     match w {
+        [Word::Bare(k), name, rest @ ..] if k == "cookie" => {
+            let state = match rest {
+                [] => CookieState::Present,
+                [Word::Bare(a)] if a == "absent" => CookieState::Absent,
+                [Word::Pair(k, op, v)] if k == "value" => CookieState::Value(text_of(*op, expand(v, vars)?)),
+                _ => return Err("expect cookie NAME [absent | value=\"x\" | value~\"x\"]".into()),
+            };
+            return Ok(Check::Cookie(plain(name, vars)?, state));
+        }
         [Word::Pair(k, op, v)] if k == "url" => return Ok(Check::Url(text_of(*op, expand(v, vars)?))),
         [Word::Pair(k, op, v)] if k == "title" => return Ok(Check::Title(text_of(*op, expand(v, vars)?))),
         [Word::Bare(k), Word::Quoted(js)] if k == "js" => return Ok(Check::Js(expand(js, vars)?)),
@@ -291,10 +334,15 @@ mod tests {
         assert_eq!(p("expect url~\"/agents?q=x\""), Ok(Action::Expect(Check::Url(Text::Has("/agents?q=x".into())))));
         assert_eq!(p("wait js \"1 + 1 == 2\""), Ok(Action::Expect(Check::Js("1 + 1 == 2".into()))));
         assert_eq!(p("scroll page 600"), Ok(Action::Scroll(None, 600.0)));
+        assert_eq!(p("cookie set consent 1"), Ok(Action::CookieSet { name: "consent".into(), value: "1".into(), domain: None, path: None }));
+        assert_eq!(p("cookie set a \"b=c\" domain=x.test path=/p"), Ok(Action::CookieSet { name: "a".into(), value: "b=c".into(), domain: Some("x.test".into()), path: Some("/p".into()) }));
+        assert_eq!(p("expect cookie sid"), Ok(Action::Expect(Check::Cookie("sid".into(), CookieState::Present))));
+        assert_eq!(p("expect cookie sid absent"), Ok(Action::Expect(Check::Cookie("sid".into(), CookieState::Absent))));
+        assert_eq!(p("expect cookie sid value~\"ab\""), Ok(Action::Expect(Check::Cookie("sid".into(), CookieState::Value(Text::Has("ab".into()))))));
         assert_eq!(p("press Shift+Tab"), Ok(Action::Press("Shift+Tab".into())));
         assert_eq!(p("goto http://a.test/x?q=1&r=~2"), Ok(Action::Goto("http://a.test/x?q=1&r=~2".into())));
         assert_eq!(p("expect placeholder~\"search\" value=\"\""), Ok(Action::Expect(Check::El(Locator::Placeholder(Text::Has("search".into())), State::Value(Text::Is("".into()))))));
-        for bad in ["click", "type css=\"a\"", "expect css=\"a\" shiny", "nope", "type css=\"a\" \"${NOPE}\"", "shot ../x", "press Hyper+x", "click role=button\"x\"", "type css=\"a\" \"open"] {
+        for bad in ["cookie", "cookie set a", "cookie set a b secure=1", "expect cookie", "expect cookie a shiny", "click", "type css=\"a\"", "expect css=\"a\" shiny", "nope", "type css=\"a\" \"${NOPE}\"", "shot ../x", "press Hyper+x", "click role=button\"x\"", "type css=\"a\" \"open"] {
             assert!(p(bad).is_err(), "{bad}");
         }
     }

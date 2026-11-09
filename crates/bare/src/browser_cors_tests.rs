@@ -117,7 +117,7 @@ fn credentials_include_needs_the_exact_origin_and_allow_credentials() {
         // Without `include`, the credentials header does not matter and `*` is fine.
         assert_eq!(run(&mut b, "/star", "same-origin"), "200");
         assert_eq!(run(&mut b, "/nocreds", "omit"), "200");
-        // No cookie is ever sent: the engine has no HTTP cookie jar.
+        // The jar of this test is empty, so no cookie goes.
         assert!(other.recs().iter().all(|r| r.header("cookie").is_empty()));
     });
 }

@@ -58,7 +58,7 @@ use crate::browser_navigation::{Body, NavLimits, NavigationKind, WebStorage};
 use bare_html::{encoding, tree};
 use bare_js::eval::EvalLimits;
 use bare_js::heap::HeapLimits;
-use bare_net::http::{Client, Request};
+use bare_net::http::{Client, Cookies, Ctx, Request};
 use bare_net::parallel::Task;
 use bare_url::Url;
 use std::time::{Duration, Instant};
@@ -176,9 +176,17 @@ enum How {
 
 /// A document to load.
 struct Next {
+    /// The site of the page that asked for this load (`cookie::site_of`), or `None`: the user did (the address bar, a reload, history).
+    from: Option<String>,
     url: String,
     body: Option<Body>,
     how: How,
+}
+
+/// The site of the page that started a navigation, for the `SameSite` rules.
+fn initiator(from: &str) -> Option<String> {
+    // A URL that does not parse counts as another site.
+    Some(Url::parse(from.split('#').next().unwrap_or("")).map_or_else(|_| String::new(), |u| bare_net::cookie::site_of(&u)))
 }
 
 pub struct Session {
@@ -286,7 +294,7 @@ pub(crate) fn redirect_allowed(from: &Url, to: &Url) -> bool {
 }
 
 /// Download one document with the caps of `lim`. Gives the final URL (with the fragment) and the decoded text.
-fn load_document(client: &mut Client, url: &str, body: Option<&Body>, lim: &SessionLimits, deadline: Instant) -> Result<(String, String), String> {
+fn load_document(client: &mut Client, url: &str, from: Option<&str>, body: Option<&Body>, lim: &SessionLimits, deadline: Instant) -> Result<(String, String), String> {
     let max_url = NavLimits::default().max_url_bytes;
     if url.len() > max_url { return Err("the document URL is too big".into()); }
     let (bare, fragment) = match url.split_once('#') {
@@ -296,13 +304,16 @@ fn load_document(client: &mut Client, url: &str, body: Option<&Body>, lim: &Sess
     let mut cur = Url::parse(bare).map_err(|_| "the URL is not an http(s) URL".to_string())?;
     let mut fragment = fragment;
     let mut body = body;
+    // Cookies: a navigation that a page of another site started sends `Lax` cookies on a GET, and a chain that leaves that site stays cross-site.
+    let mut from = from;
     for hop in 0..=lim.max_redirects {
         if Instant::now() >= deadline {
             return Err("the time limit passed".into());
         }
+        let cookies = Cookies { on: true, ctx: Ctx::Navigation(from) };
         let resp = match body {
-            Some(b) => bare_net::trace::blocked(|| client.send_once(&Request::post(&cur, &[("Content-Type", b.content_type.as_str())], &b.bytes), lim.max_document_bytes)),
-            None => bare_net::trace::blocked(|| client.send_once(&Request::get(&cur), lim.max_document_bytes)),
+            Some(b) => bare_net::trace::blocked(|| client.send_once(&Request { cookies, ..Request::post(&cur, &[("Content-Type", b.content_type.as_str())], &b.bytes) }, lim.max_document_bytes)),
+            None => bare_net::trace::blocked(|| client.send_once(&Request { cookies, ..Request::get(&cur) }, lim.max_document_bytes)),
         }
         .map_err(|_| "network error".to_string())?;
         if matches!(resp.status, 301 | 302 | 303 | 307 | 308) {
@@ -317,6 +328,9 @@ fn load_document(client: &mut Client, url: &str, body: Option<&Body>, lim: &Sess
             let next = cur.join(loc).map_err(|_| "a redirect leads to a bad URL".to_string())?;
             if !redirect_allowed(&cur, &next) {
                 return Err("a redirect leads from https to http".into());
+            }
+            if from.is_some_and(|f| !f.is_empty() && !bare_net::cookie::same_site(f, &next)) {
+                from = Some("");
             }
             if let Some((_, f)) = loc.split_once('#') {
                 fragment = Some(f.to_string());
@@ -357,8 +371,16 @@ impl Session {
 
     /// A client that shares the connections of the session.
     pub(crate) fn fork(&mut self) -> Client {
-        let make = &mut self.cfg.client;
-        self.client.get_or_insert_with(|| make()).fork()
+        let (make, store) = (&mut self.cfg.client, &self.store);
+        // The client uses the jar of the storage, so `document.cookie` and the network see the same cookies, and a new session of the same
+        // storage keeps them (`Page::open_with`). A session with a new storage starts with no cookie.
+        let mut c = self.client.get_or_insert_with(|| {
+            let mut c = make();
+            c.use_jar(store.jar());
+            c
+        }).fork();
+        c.set_site(self.browser.as_ref().and_then(|b| b.document_url()).and_then(|u| Url::parse(u.split('#').next().unwrap_or("")).ok()).map(|u| bare_net::cookie::site_of(&u)));
+        c
     }
 
     /// The storage of the session: it lives through every document.
@@ -386,7 +408,7 @@ impl Session {
         let first = self.cfg.url.clone();
         self.hist.clear();
         self.at = 0;
-        let next = Next { url: first, body: None, how: How::Push };
+        let next = Next { from: None, url: first, body: None, how: How::Push };
         if self.cfg.live {
             return self.start(next);
         }
@@ -395,9 +417,9 @@ impl Session {
 
     /// Live: download `next` on a worker and return at once. The turns of `resume` parse the document and run it, as after a link.
     fn start(&mut self, next: Next) -> SessionResult {
-        let (url, body, lim) = (next.url.clone(), next.body.clone(), self.cfg.limits.clone());
+        let (url, body, from, lim) = (next.url.clone(), next.body.clone(), next.from.clone(), self.cfg.limits.clone());
         let deadline = deadline_after(lim.max_time.saturating_sub(self.used.time));
-        let task = self.fork().spawn(move |c| load_document(c, &url, body.as_ref(), &lim, deadline));
+        let task = self.fork().spawn(move |c| load_document(c, &url, from.as_deref(), body.as_ref(), &lim, deadline));
         self.loading = Some((next, task));
         SessionResult { stop: SessionStop::Page(Stop::Settled), pages: Vec::new(), urls: Vec::new(), tasks: 0, rounds: 0 }
     }
@@ -431,8 +453,8 @@ impl Session {
             h.scroll = self.browser.as_ref().map_or((0.0, 0.0), |b| (b.scroll().x, b.scroll().y));
         }
         let next = match url {
-            Some(u) => Some(Next { url: u.to_string(), body: None, how: How::Push }),
-            None => self.hist.get(self.at).map(|h| Next { url: h.url.clone(), body: None, how: How::Reload }),
+            Some(u) => Some(Next { from: None, url: u.to_string(), body: None, how: How::Push }),
+            None => self.hist.get(self.at).map(|h| Next { from: None, url: h.url.clone(), body: None, how: How::Reload }),
         };
         let Some(next) = next else {
             return SessionResult { stop: SessionStop::LoadFailed("there is no document to reload".into()), pages: Vec::new(), urls: Vec::new(), tasks: 0, rounds: 0 };
@@ -493,7 +515,11 @@ impl Session {
             let (n, task) = self.loading.take().expect("checked");
             match task.wait().unwrap_or_else(|| Err("network error".into())) {
                 Ok((url, html)) => {
-                    let scan = Url::parse(url.split('#').next().unwrap_or("")).map(|page| Scan::new(self.fork(), page, self.cfg.page.resources.clone(), deadline));
+                    let scan = Url::parse(url.split('#').next().unwrap_or("")).map(|page| {
+                        let mut c = self.fork();
+                        c.set_site(Some(bare_net::cookie::site_of(&page)));
+                        Scan::new(c, page, self.cfg.page.resources.clone(), deadline)
+                    });
                     let Ok(scan) = scan else { return SessionStop::LoadFailed("the URL is not an http(s) URL".into()) };
                     self.parsing = Some(Box::new(Parsing { next: n, url, html, at: 0, parser: tree::Parser::new(), scan }));
                 }
@@ -537,13 +563,13 @@ impl Session {
                     let r = b.resume_page(self.fork(), page, steps);
                     (b, r)
                 }
-                Some(Next { url, body, how }) => {
+                Some(Next { from, url, body, how }) => {
                     // The old document ends here: its realm, timers and callbacks are gone before the next load starts.
                     self.browser = None;
                     let mut base = self.fork();
                     let doc = match fetched.take() {
                         Some(d) => d,
-                        None => load_document(&mut base, &url, body.as_ref(), &lim, deadline).map(|(url, html)| (url, tree::parse(&html))),
+                        None => load_document(&mut base, &url, from.as_deref(), body.as_ref(), &lim, deadline).map(|(url, html)| (url, tree::parse(&html))),
                     };
                     let (url, dom) = match doc {
                         Ok(d) => d,
@@ -624,14 +650,14 @@ impl Session {
                 h.scroll = (s.x, s.y);
             }
             next = match req.kind {
-                NavigationKind::Assign => Some(Next { url: req.url, body: req.body, how: How::Push }),
-                NavigationKind::Replace => Some(Next { url: req.url, body: req.body, how: How::Replace }),
-                NavigationKind::Reload => Some(Next { url: req.url, body: None, how: How::Reload }),
+                NavigationKind::Assign => Some(Next { from: initiator(&req.from), url: req.url, body: req.body, how: How::Push }),
+                NavigationKind::Replace => Some(Next { from: initiator(&req.from), url: req.url, body: req.body, how: How::Replace }),
+                NavigationKind::Reload => Some(Next { from: None, url: req.url, body: None, how: How::Reload }),
                 NavigationKind::Traverse(n) => {
                     let to = self.at as i64 + n as i64;
                     match self.hist.get(usize::try_from(to).unwrap_or(usize::MAX)) {
                         // Past the oldest or the newest document, or a page that a `POST` made: nothing to load. The document goes on.
-                        Some(h) if !h.post => Some(Next { url: h.url.clone(), body: None, how: How::Move(to as usize) }),
+                        Some(h) if !h.post => Some(Next { from: None, url: h.url.clone(), body: None, how: How::Move(to as usize) }),
                         _ => {
                             // The loader only looks at the first request: take it, or the page stops on it again.
                             if let Some(b) = self.browser.as_mut() {
@@ -673,7 +699,7 @@ mod tests {
             let mut lim = crate::resources::Limits::default();
             lim.max_fetches = 0;
             let scan = Scan::new(Client::new(), Url::parse("http://127.0.0.1:1/").unwrap(), lim, Instant::now());
-            let next = Next { url: String::new(), body: None, how: How::Push };
+            let next = Next { from: None, url: String::new(), body: None, how: How::Push };
             let mut p = Parsing { next, url: String::new(), html: html.clone(), at: 0, parser: tree::Parser::new(), scan };
             let mut steps = 1;
             // An end in the past: each step feeds one chunk.

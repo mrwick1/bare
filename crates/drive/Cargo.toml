@@ -12,6 +12,7 @@ bare-html = { path = "../html" }
 bare-js = { path = "../js" }
 bare-net = { path = "../net" }
 bare-paint = { path = "../paint" }
+bare-url = { path = "../url" }
 
 [dev-dependencies]
 png = "0.18"

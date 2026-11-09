@@ -140,7 +140,7 @@ fn a_reply_with_content_encoding_and_no_body_is_not_a_decode_error() {
         assert_eq!((r.status, r.body.len()), (status, 0));
     }
     let head = url(&node, "/gzip?n=5000");
-    let r = client.send(&Request { method: Method::Head, url: &head, headers: &[], body: &[] }).unwrap();
+    let r = client.send(&Request { cookies: Default::default(), method: Method::Head, url: &head, headers: &[], body: &[] }).unwrap();
     assert_eq!((r.status, r.body.len(), r.header("content-encoding")), (200, 0, Some("gzip")));
 }
 

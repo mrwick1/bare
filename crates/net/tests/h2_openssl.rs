@@ -671,7 +671,7 @@ fn a_head_reply_has_no_body_and_the_reply_to_a_post_carries_its_headers() {
     let (_pki, mut peer, client) = setup("h2");
     let c2 = client.fork();
     let (u1, u2) = (url(&peer, "/head"), url(&peer, "/post"));
-    let t1 = spawn(client, move |c| c.send(&Request { method: Method::Head, url: &u1, headers: &[], body: &[] }).map(|r| (r.status, r.header("content-length").map(str::to_string), r.body.len())).map_err(|e| e.to_string()));
+    let t1 = spawn(client, move |c| c.send(&Request { cookies: Default::default(), method: Method::Head, url: &u1, headers: &[], body: &[] }).map(|r| (r.status, r.header("content-length").map(str::to_string), r.body.len())).map_err(|e| e.to_string()));
     peer.open(&[]);
     let r1 = peer.request();
     assert_eq!((r1.get(":method"), r1.end_stream), ("HEAD", true));
