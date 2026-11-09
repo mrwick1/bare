@@ -6083,6 +6083,76 @@ No site got worse in readyState. The ms and RSS change from run to run (one run 
 - Chrome was not run for the table-context `innerHTML` results. The proof is html5lib-tests and the spec text.
 - A page that fills the 32 MiB total, and the peak RSS of such a page.
 - jemalloc cost rows (none was over under glibc).
+
+## Slack in the JS heap tables at the peak (2026-11-10)
+
+Task: PR #330 found that JS tables hold most of the peak RSS of vimeo, redis.io and bsky.app. This task measured how much of the tables is slack, by the rule "fix a table only if its slack is at least 5% of the peak RSS on at least 2 of the 3 sites". No table passed. This change is docs only. The decision and the table are in `docs/decisions.md` ("Slack in the JS heap tables at the peak").
+
+### Method
+
+- A temporary probe (not committed) in `Heap::charge` and at the end of each loader round: at each new high of the accounted heap (in steps of 1 MiB), it read `Heap::footprint()`, counted the holes in each element vector, the bytes that strings would save at one byte for each unit, and the payload capacity of the object slab with no object. It asked `mincore` which whole pages of each slack range were resident. The first version sampled at the end of each loader round only. It missed the peak of one bsky.app run, where the scripts ran outside the loader rounds, so the probe moved into `Heap::charge`.
+- Sites: https://vimeo.com/, https://bsky.app/, https://redis.io/. Step file `timeout 30000`, `open URL`, `expect js "document.readyState === 'complete'"`, `shot s`. 3 runs each with the probe. 3 runs each of the base `bare-drive` with no probe, for the peak RSS.
+- Base: `50e71ca8cc` (origin/main after PR #331). archMachine, other jobs ran at the same time.
+
+### Slack table
+
+MiB at the peak of the accounted heap, median of 3 runs (all 3 runs gave the same numbers on vimeo and bsky.app; redis.io ranges in brackets), and the share of the median peak RSS.
+
+| Table | vimeo | bsky.app | redis.io |
+| --- | ---: | ---: | ---: |
+| Peak RSS, base, no probe (range) | 291.2 (288.5 to 293.0) | 199.4 (198.6 to 199.5) | 280.9 (278.6 to 295.3) |
+| Accounted heap at its peak | 106.9 | 35.2 | 44.9 (44.7 to 50.2) |
+| Elements: used / capacity | 66.3 / 103.9 | 1.09 / 1.84 | 2.28 / 4.12 |
+| Elements: capacity over the length | 37.6 (12.9%) | 0.75 (0.4%) | 1.84 (0.7%) |
+| Elements: resident part of that (estimate) | 25.0 (8.6%) | 0.54 (0.3%) | 1.84 (0.7%) |
+| Elements: holes inside the length | 58.3 (20.0%) | 0 | 0.16 (0.1%) |
+| Property slots: used / capacity over the length | 7.87 / 0.90 (0.3%) | 4.86 / 1.10 (0.6%) | 13.3 / 3.62 (1.3%) |
+| Dictionary entries: used / capacity over the length | 2.12 / 0.87 (0.3%) | 4.39 / 0.77 (0.4%) | 0.45 / 0.08 (0.0%) |
+| Object slab: total / capacity with no object | 46.0 / 17.9 (6.2%) | 11.5 / 0.84 (0.4%) | 46.4 / 18.5 (6.6%) |
+| Object slab: resident part of that | 0 | 0 | 0 |
+| String units (2 bytes each) / saving at one byte for each unit | 3.65 / 0.98 (0.3%) | 10.6 / 5.30 (2.7%) | 4.48 / 1.39 (0.5%) |
+| Index tables, shapes | 1.03, 1.78 | 1.61, 1.83 | 0.11, 1.50 |
+| Elements freed by "capacity over 2 times the length and 64 bytes" | 0.01 | 0 | 0 |
+
+- The resident part of the element slack: slack bytes on pages that also hold used elements count in full, plus the whole slack pages that `mincore` reports resident (vimeo 7.0 of 19.7 MiB of whole pages).
+- vimeo: 4,551 objects of length 64 or more are over half holes. They hold 58.2 MiB of holes and 90.9 MiB of element capacity (31% of the peak). Most are plain objects with no named properties. The common lengths are 951 (1,475 objects, capacity 1,632 or 1,312), 901 (670) and 801 (598, one shape with named properties). In the lengths from 257 to 1,024, 96% of the elements are holes. A write to index `i` goes into the dense vector when `i` is at most `elems.len() + ELEM_GAP` (1,024).
+- The heap of vimeo grows from 4 to 107 MiB in one loader round. No collect runs inside it, so a shrink on collect cannot lower this peak.
+
+### Change
+
+Docs only: `docs/decisions.md` and this section. No table changed, by the rule above. No test was written first, because no code changed.
+
+### Cost
+
+Base `50e71ca8cc`, fresh `base-build` (with `base-build origin/main --release -p bare-stress`); new = this branch on the same commit. All 805 rows of `tools/js/cost_matrix.sh`: 0 over under both allocators, 0 over under one, 0 failed, mean change -0.006% glibc. No row reached the jemalloc rerun. Worst row: `resources_load small 10` +0.131%.
+
+### Keycost
+
+`tools/js/typing/keycost.sh` on base `50e71ca8cc` (its prebuilt `type_load`): `#a1` 282.5 M and `#f0` 287.9 M instructions for each key, load and mount 572.4 M, peak RSS 33.6 MiB at 20 keys and 33.2 MiB at 50 keys. PR #328 did not run keycost. These values are after #328 and #331, and close to the last values (282.2 M and 287.5 M). This branch has no code change, so the branch value is the same binary code.
+
+### Checks
+
+- `cargo test --release --workspace --no-fail-fast` on the final tree: 3366 passed, 0 failed, 13 ignored.
+- `tools/drive/public/run.sh` with the branch `bare-drive`: pass 48, fail 0, known 0, skip 0, flakes 0.
+- JS gates (`test262_check.sh`, `exec_diff.sh`) were not run: no file in `crates/js` changed.
+
+### Limits
+
+- The probe reads the heap at its accounted peak, not at the RSS peak. The RSS at the heap peak was 256, 208 and 252 MiB (probe runs), against peaks of 288 to 295 MiB. Parsed scripts and script slots are not in the heap tables.
+- `mincore` sees whole pages only. The resident estimate for the elements assumes that every slack byte on a page shared with used elements is resident.
+- The residency was read with glibc only.
+- One machine, three sites, three runs each.
+
+### Next candidates
+
+- Sparse plain objects (vimeo only, 31% of its peak): keep the index keys of a mostly empty object in its dictionary. A dictionary entry is 48 bytes and an element 16, so the dictionary is smaller below one third used. To verify first: the V8 and SpiderMonkey rules for sparse elements, and which vimeo script makes the objects.
+- Latin-1 strings: 2.7% of the bsky.app peak. Recorded only.
+
+### Not tested
+
+- Other sites than these three, and `bare --window`.
+- The peak with jemalloc.
+- Which vimeo script makes the sparse objects.
 - arjun-e16 and macOS.
 
 ## Intl locale extensions, the rest of console, and CSS.supports (2026-11-10)

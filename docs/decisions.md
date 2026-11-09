@@ -715,3 +715,37 @@ npmjs.com pushes one state of about 1.48 MB (9,301 objects) on load. The old cap
 - A group indents by 2 spaces. The depth stops at 64.
 
 `CSS` has `supports` and `escape`. `supports` calls `bare_css::at_rules::supports_matches`, so `@supports` and `CSS.supports` use one parser. `CSS.registerProperty` stays undefined: bare has no registered custom properties.
+
+## Slack in the JS heap tables at the peak
+
+Problem: the JS tables hold 68% of the peak RSS of vimeo (see [what holds the memory at the peak of a page load](#what-holds-the-memory-at-the-peak-of-a-page-load)). The question was how much of the tables is slack: capacity that holds no entry, or a representation wider than the content.
+
+Method: a temporary probe (not committed). When the accounted heap passed its last high by 1 MiB, `Heap::charge` read `Heap::footprint()`, counted the holes in the element vectors, and asked `mincore` which whole pages of each slack range were resident. Sites: vimeo, bsky.app and redis.io, 3 runs each, step file `timeout 30000`, `open URL`, `expect js "document.readyState === 'complete'"`, `shot s`. Base `50e71ca8cc`. The peak RSS is from 3 runs of the base `bare-drive` with no probe.
+
+Slack at the peak of the accounted heap, MiB, median of 3 runs, and its share of the median peak RSS:
+
+| Table | vimeo (peak 291) | bsky.app (peak 199) | redis.io (peak 281) |
+| --- | ---: | ---: | ---: |
+| Elements: capacity over the length | 37.6 (12.9%) | 0.75 (0.4%) | 1.84 (0.7%) |
+| Elements: the resident part of that (estimate) | 25.0 (8.6%) | 0.54 (0.3%) | 1.84 (0.7%) |
+| Elements: holes inside the length | 58.3 (20.0%) | 0 | 0.16 (0.1%) |
+| Property slots: capacity over the length | 0.90 (0.3%) | 1.10 (0.6%) | 3.62 (1.3%) |
+| Dictionary entries: capacity over the length | 0.87 (0.3%) | 0.77 (0.4%) | 0.08 (0.0%) |
+| Object slab: payload capacity with no object | 17.9 (6.2%) | 0.84 (0.4%) | 18.5 (6.6%) |
+| Object slab: the resident part of that | 0 | 0 | 0 |
+| Strings: bytes saved at one byte for each unit (strings with all units under 256) | 0.98 (0.3%) | 5.30 (2.7%) | 1.39 (0.5%) |
+| Elements that the shrink rule "capacity over 2 times the length and 64 bytes" frees | 0.01 | 0 | 0 |
+
+- The accounted heap at its peak: 106.9, 35.2 and 44.9 MiB. The RSS at that moment, in the runs with the probe: 256, 208 and 252 MiB.
+- The resident estimate for the elements counts the slack bytes on pages that also hold used elements in full, and the whole slack pages that `mincore` reports resident (vimeo: 7.0 of 19.7 MiB of whole pages).
+- The object slab grows its payload `Vec` by doubling. `mincore` shows that none of the capacity past the last object is resident. Hypothesis: glibc grows a large block with `mremap`, and the new pages stay untouched until an object is put there.
+
+Decision: no table shrinks. The rule: change a table only if its slack is at least 5% of the peak RSS on at least 2 of the 3 sites. Only resident bytes count, because untouched capacity is not in RSS and freeing it does not lower the peak. The object slab passes by capacity on vimeo and redis.io, but none of it is resident. The elements pass on vimeo only.
+
+Why a shrink on collect would not help these pages: on vimeo the heap grows from 4 to 107 MiB in one loader round, and no collect runs inside it. Also, a vector that grew by doubling has less than 2 times its length as capacity, so the rule above finds 0.01 MiB.
+
+What vimeo holds: 4,551 objects with a length of at least 64 that are more than half holes. They hold 58.2 MiB of holes and 90.9 MiB of element capacity (31% of the peak). Most are plain objects with no named properties (not arrays): 1,475 have a length of 951 and a capacity of 1,632, 670 have a length of 901, and 598 (of one shape with named properties) have a length of 801. In the lengths from 257 to 1,024, 3.5 M of the elements are holes (96%). Cause: a write to index `i` goes into the dense vector when `i` is at most `elems.len() + ELEM_GAP` (1,024). So a plain object whose integer keys spread up to 950 gets 951 elements of 16 bytes for a few values.
+
+Next candidate (not done, because it is for vimeo only): keep the index keys of a mostly empty object in its dictionary, not in `elems`. A dictionary entry is 48 bytes and an element is 16, so the dictionary is smaller when under one third of the elements are used. To verify first: the rule of V8 and SpiderMonkey for sparse elements, and which vimeo script makes these objects.
+
+Latin-1 strings: the saving is 2.7% of the peak on bsky.app and under 1% on the other two. It is recorded only. It changes the string paths everywhere.
