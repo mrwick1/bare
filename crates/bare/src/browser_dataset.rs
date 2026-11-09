@@ -177,6 +177,7 @@ fn units(cs: impl Iterator<Item = char>, cap: usize) -> Vec<u16> {
 
 impl NamedSource for Dom {
     fn named_has(&self, owner: ObjId, key: &[u16]) -> Result<bool, HeapError> {
+        if let Some(v) = crate::browser_frames::has(self, owner, key)? { return Ok(v); }
         if let Some(session) = self.storage_area(owner) {
             return self.storage_get(session, key).map(|v| v.is_some());
         }
@@ -187,6 +188,10 @@ impl NamedSource for Dom {
         Ok(doc.attrs(attrs).iter().any(|a| matches(doc.atom_str(a.name), key)))
     }
 
+    fn named_read(&self, owner: ObjId, key: &[u16]) -> Result<Option<bare_js::heap::NamedValue>, HeapError> {
+        if let Some(v) = crate::browser_frames::value(self, owner, key) { return Ok(Some(bare_js::heap::NamedValue::Value(v))); }
+        self.named_get(owner, key).map(|v| v.map(bare_js::heap::NamedValue::Text))
+    }
     fn named_get(&self, owner: ObjId, key: &[u16]) -> Result<Option<Vec<u16>>, HeapError> {
         if let Some(session) = self.storage_area(owner) {
             return self.storage_get(session, key);
@@ -202,6 +207,7 @@ impl NamedSource for Dom {
     }
 
     fn named_len(&self, owner: ObjId) -> Result<usize, HeapError> {
+        if let Some(n) = crate::browser_frames::len(self, owner)? { return Ok(n); }
         if let Some(session) = self.storage_area(owner) {
             return self.storage_len(session);
         }
@@ -214,6 +220,7 @@ impl NamedSource for Dom {
 
     /// No gate here: the heap calls `named_len` first, and that call paid for the scan.
     fn named_keys(&self, owner: ObjId) -> Result<Vec<Vec<u16>>, HeapError> {
+        if let Some(keys) = crate::browser_frames::keys(self, owner) { return Ok(keys); }
         if let Some(session) = self.storage_area(owner) {
             return self.storage_keys(session);
         }

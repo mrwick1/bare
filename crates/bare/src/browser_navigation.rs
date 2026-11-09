@@ -558,7 +558,7 @@ fn push_replace(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], replace:
             Err(UErr::Gate(w)) => return Err(Error::Unsupported(unsupported(w))),
         },
     };
-    if new.origin() != cur.origin() {
+    if new.origin() != cur.origin() || new.userinfo.as_deref().filter(|i| !i.0.is_empty() || !i.1.is_empty()) != cur.userinfo.as_deref().filter(|i| !i.0.is_empty() || !i.1.is_empty()) {
         return Err(sec_err(d, it, name, &new.href(), &cur));
     }
     {
@@ -670,11 +670,9 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     // URL
     parts!(d, it, url, url_get_h, url_set_h, [
         ("href", Part::Href), ("protocol", Part::Protocol), ("host", Part::Host), ("hostname", Part::Hostname),
-        ("port", Part::Port), ("pathname", Part::Pathname), ("search", Part::Search), ("hash", Part::Hash)
+        ("port", Part::Port), ("pathname", Part::Pathname), ("search", Part::Search), ("hash", Part::Hash), ("username", Part::Username), ("password", Part::Password)
     ]);
     def_acc(d, it, url, "origin", pr::url_origin, None)?;
-    def_acc(d, it, url, "username", pr::url_userinfo, Some(pr::url_set_userinfo))?;
-    def_acc(d, it, url, "password", pr::url_userinfo, Some(pr::url_set_userinfo))?;
     def_acc(d, it, url, "searchParams", pr::url_search_params, None)?;
     def_fn(d, it, url, "toString", 0, pr::url_to_string)?;
     def_fn(d, it, url, "toJSON", 0, pr::url_to_string)?;

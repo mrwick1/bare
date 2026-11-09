@@ -217,8 +217,8 @@ fn explicit_gates_are_unsupported_and_nothing_is_ignored() {
         }
         // A size that is not callable is a TypeError (as in the standard), not a gate.
         assert!(js(&mut b, "new ReadableStream({}, { size: 3 })").starts_with("throw:TypeError"));
-        // A stream as the body of a Response is still a gate (see browser_fetch.rs).
-        assert!(js(&mut b, "new Response(new ReadableStream({}))").starts_with("unsupported:"));
+        // Unsupported body buffering throws a catchable exception.
+        assert!(js(&mut b, "new Response(new ReadableStream({}))").starts_with("throw:TypeError"));
         // The controller and the reader cannot be built by script.
         assert_eq!(js(&mut b, "typeof ReadableStreamDefaultController"), "function");
         assert!(js(&mut b, "new ReadableStreamDefaultController()").starts_with("throw:TypeError"));

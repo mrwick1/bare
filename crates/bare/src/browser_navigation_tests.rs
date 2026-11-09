@@ -88,10 +88,12 @@ fn unconfigured_refuses_and_never_invents_an_origin() {
 fn set_document_url_checks_and_resets() {
     big(|| {
         let mut b = mk(None, EvalLimits::default());
-        for bad in ["/relative", "ftp://a.com/", "mailto:a@b.c", "http://u:p@a.com/", "http://", "javascript:1", "http://a.com\\x"] {
+        for bad in ["/relative", "ftp://a.com/", "mailto:a@b.c", "http://", "javascript:1", "http://a.com\\x"] {
             assert!(b.set_document_url(bad).is_err(), "{bad}");
             assert_eq!(b.document_url(), None, "{bad}");
         }
+        b.set_document_url("http://u:p@a.com/").unwrap();
+        assert_eq!(b.document_url().unwrap(), "http://u:p@a.com/");
         b.set_document_url("HTTPS://Staging.Example.test:443/a/./b/../c?x=a b#f g").unwrap();
         assert_eq!(b.document_url().unwrap(), "https://staging.example.test/a/c?x=a%20b#f%20g");
         assert_eq!(b.base_uri(), b.document_url());
@@ -177,7 +179,8 @@ fn replace_is_a_replace_request_and_errors_are_precise() {
         assert_eq!(js(&mut b, "try { location.href = 'http://a b/' } catch (e) { e.name }"), "SyntaxError");
         assert_eq!(js(&mut b, "location.assign('javascript:void(0)')"), "unsupported:URL scheme other than http and https");
         assert_eq!(js(&mut b, "location.assign('mailto:a@b.c')"), "unsupported:URL scheme other than http and https");
-        assert_eq!(js(&mut b, "location.assign('http://u:p@a.com/')"), "unsupported:user info in a URL");
+        assert_eq!(js(&mut b, "location.assign('http://u:p@a.com/')"), "undefined");
+        assert_eq!(drain_requests(&mut b)[0].url, "http://u:p@a.com/");
         assert_eq!(js(&mut b, "location.protocol = 'ftp'"), "unsupported:URL scheme other than http and https");
         assert_eq!(js(&mut b, "location.protocol = 'mailto'; 1"), "1");
         assert_eq!(js(&mut b, "location.port = 'x'; location.hostname = ''; location.host = 'a b'; 1"), "1");
@@ -448,7 +451,7 @@ fn cross_origin_history_updates_fail_before_anything_commits() {
         assert_eq!(js(&mut b, "JSON.stringify(history.state)"), r#"{"keep":1}"#);
         assert!(drain_requests(&mut b).is_empty(), "no navigation request, no network side effect");
         // a gated form that a browser accepts is Unsupported, never a quiet other URL
-        assert_eq!(js(&mut b, "history.pushState(1, '', 'http://u:p@staging.example.test:8443/x')"), "unsupported:user info in a URL");
+        assert_eq!(js(&mut b, "try { history.pushState(1, '', 'http://u:p@staging.example.test:8443/x') } catch(e) { e.name }"), "SecurityError");
         assert_eq!(js(&mut b, "history.pushState(1, '', 'http:\\\\\\\\x')"), "unsupported:backslash in a URL");
         assert_eq!(b.navigation_stats().history_len, before.history_len);
     });
@@ -774,9 +777,9 @@ fn url_components_and_live_search_params() {
         assert_eq!(js(&mut b, "new URL('../c?d', location.href).href + ' ' + new URL(location.href).hash"), "https://staging.example.test:8443/c?d #top");
         assert_eq!(js(&mut b, "new URL('x', 'nonsense')"), "throw:TypeError:Failed to construct 'URL': Invalid URL");
         assert_eq!(js(&mut b, "new URL('mailto:a@b.c').href"), "mailto:a@b.c");
-        assert_eq!(js(&mut b, "new URL('http://u:p@a.com')"), "unsupported:user info in a URL");
-        assert_eq!(js(&mut b, "new URL('http://bücher.de')"), "unsupported:non-ASCII, escaped or punycode host (IDNA is gated)");
-        assert_eq!(js(&mut b, "u.username = 'x'"), "unsupported:user info in a URL");
+        assert_eq!(js(&mut b, "new URL('http://u:p@a.com').username"), "u");
+        assert_eq!(js(&mut b, "new URL('http://bücher.de').hostname"), "xn--bcher-kva.de");
+        assert_eq!(js(&mut b, "u.username = 'x'; u.username"), "x");
         assert_eq!(js(&mut b, "u.username = ''; u.password = ''; u.username + u.password + 'ok'"), "ok");
         assert_eq!(js(&mut b, "u.href = 'bad'"), "throw:TypeError:Failed to set the 'href' property on 'URL': Invalid URL");
         assert_eq!(js(&mut b, "u.href"), "https://new.test:81/n%20m?k=v#h%20h", "a failed set changes nothing");
@@ -1130,5 +1133,14 @@ fn document_domain_is_the_host_and_a_change_is_refused() {
         assert_eq!(js(&mut b, "document.domain"), "staging.example.test");
         assert_eq!(js(&mut at("http://[::1]:8080/"), "document.domain"), "[::1]");
         assert_eq!(js(&mut at("http://127.0.0.1:8080/"), "document.domain"), "127.0.0.1");
+    });
+}
+
+#[test]
+fn credential_urls_keep_components_and_relative_credentials() {
+    big(|| {
+        let mut b = at(URL0);
+        assert_eq!(js(&mut b, "var c = new URL('https://user:p%40ss@EXAMPLE.com/a'); [c.username, c.password, c.host, c.origin, c.href].join('|')"), "user|p%40ss|example.com|https://example.com|https://user:p%40ss@example.com/a");
+        assert_eq!(js(&mut b, "c.username = 'a@b'; c.password = 'p:q'; [c.username, c.password, new URL('../b', c).href].join('|')"), "a%40b|p%3Aq|https://a%40b:p%3Aq@example.com/b");
     });
 }

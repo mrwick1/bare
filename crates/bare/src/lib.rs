@@ -222,3 +222,5 @@ mod browser_survive_tests;
 mod browser_settle_tests;
 
 mod browser_cssom;
+
+mod browser_frames;

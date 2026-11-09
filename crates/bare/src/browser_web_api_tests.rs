@@ -153,3 +153,12 @@ fn legacy_performance_objects_are_stable() {
         assert_eq!(js(&mut b, "[performance.navigation.type, performance.navigation.redirectCount, performance.navigation.TYPE_NAVIGATE, Object.prototype.toString.call(t)].join()"), "0,0,0,[object PerformanceTiming]");
     });
 }
+
+#[test]
+fn document_type_has_a_distinct_node_brand() {
+    big(|| {
+        let mut b = Browser::new(tree::parse("<!doctype html><body>x</body>"), BrowserLimits::default(), EvalLimits::default(), HeapLimits::default()).unwrap();
+        assert_eq!(js(&mut b, "var dt = document.firstChild; [dt instanceof DocumentType, dt instanceof Node, document.body instanceof DocumentType, dt.name, dt.publicId, dt.systemId].join()"), "true,true,false,html,,");
+        assert_eq!(js(&mut b, "try { new DocumentType() } catch(e) { e.name }"), "TypeError");
+    });
+}

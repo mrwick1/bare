@@ -5264,3 +5264,22 @@ Task: add public journeys for sites that passed survey 5 and had no journey. The
 
 - Runs on another network or from a different region.
 - Content drift: a site redesign can break a journey. Assertions use stable text, but no site is fixed.
+### Named iframe windows and request-local failures
+
+Baseline: origin/main at 44ab2f8e37 (#312).
+
+Window named access now finds attached HTML iframes by name, id or numeric index. frames remains the window. Its length reads the current tree. Document named properties return the iframe element. Existing getElementsByName returns its live NodeList. Renames, moves, duplicate names and removals change the result. contentWindow retains one identity per iframe. Detached iframes return null. Child documents remain inert: no child navigation, script execution, document or service worker was added.
+
+The named-property heap hook can now return a rooted object value as well as UTF-16 text. Frame state and the named prototype chains materialize only after an iframe tag is present. Frame scans charge the script budget. A batch prepays eight probes because a VM lookup can probe the same named prototype more than twice. The existing Value, Property and Object size checks remain in force. No field was added to those VM structures.
+
+The BBC stop came from extract_body in browser_fetch.rs. It returned Unsupported for a body with getReader. Unsupported bypassed Axios's feature-test catch block and ended the page. That body now throws TypeError. fetch rejects that request; Request and Response constructors throw a catchable exception. Blob body extraction remains supported. A regression checks that code after a rejected stream-body fetch runs. Streaming upload and stream-to-Response buffering remain unsupported.
+
+HTTP(S) URL records retain percent-encoded username and password. Getters, setters, href and relative resolution preserve them. Host and origin exclude them. Fetch and Request reject URLs with credentials before a request is queued. They send no Authorization header. History rejects a credential change with SecurityError. HTTP host parsing now uses the IDNA support already present in bare_url. The old browser-layer gate was obsolete. The baseline rejected the Unicode-host regression before the gate was removed.
+
+Guardian next reached DocumentType, then eval. DocumentType now has a distinct Node prototype and an illegal constructor. Its name comes from the parsed doctype. publicId and systemId are empty because the HTML tree does not retain them. eval remains excluded from this change.
+
+Bing's captured bare-UA HTML puts /rp/0DkivOHGsxc4qmgnASpvPr2oCS0.js and /rp/B-BmrXq18Vgc-gaDIQdtASFNr_Q.js before /rp/fu2LagmGVc6nttrTnv6Ir6e747E.js. The first calls t(sj_be,n) from BM.wireup's immediate load callback. The second reads _w.BM. The later core file starts with var _w=window,_d=document and defines sj_be. The captured stack is script#8:1:351, called by u at script#5:3:142, then script#9:1:258 for _w. Node reproduces both ReferenceErrors when it executes the saved BM bootstrap and those two scripts in that order. This is a dependency-order error in that response, not a missing window alias. A separate Chrome-UA response has a different script layout and reaches document completion without those two exceptions in the saved-page run. No window globals or network headers were patched to hide the ordering error.
+
+After the frame retry fix, the saved Bing page settles. It next reads navigator.serviceWorker.controller without a guard in /rp/PNP6sUqOLW_M1zug__-AythpfbA.js at script#58:1:29. A later autosuggest error reads length from undefined at script#86:1:65618 in /rp/M9hGw5n2GMxFs23AZS9MZ2P6tLk.js. That later expression remains unverified because the fetched file differs at that offset. Two network script tasks exceed the Steps budget. No service worker container was faked.
+
+NYTimes again returns HTTP 403 with bare/0.1 headers and with a Chrome User-Agent, navigation Accept and en-US Accept-Language. Both bodies contain a captcha-delivery.com challenge. The tested header changes do not remove the bot block. The server's exact classification rule remains unknown. No bypass was attempted.

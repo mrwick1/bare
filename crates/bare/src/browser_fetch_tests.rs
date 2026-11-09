@@ -382,7 +382,7 @@ fn response_constructor_request_and_clone() {
             assert_eq!(r, format!("unsupported:{what}"), "{src}");
         }
         assert_eq!(js(&mut b, "new Request('/x', {signal: {}})"), "throw:TypeError:Failed to construct 'Request': Failed to read the 'signal' property from 'RequestInit': Failed to convert value to 'AbortSignal'.");
-        assert_eq!(js(&mut b, "new Request('/x', {body: {getReader: function () {}}, method: 'POST'})"), "unsupported:a ReadableStream as a body");
+        assert_eq!(js(&mut b, "new Request('/x', {body: {getReader: function () {}}, method: 'POST'})"), "throw:TypeError:ReadableStream request bodies are not supported");
     });
 }
 
@@ -1069,5 +1069,31 @@ fn multipart_parsing_handles_odd_parts() {
           new Response('--q\\r\\nbroken', {headers: {'content-type': 'multipart/form-data; boundary=q'}}).formData().then(function () { out.push('bad'); }, function (e) { out.push(e.name); });
           new Response('--q--', {headers: {'content-type': 'multipart/form-data'}}).formData().then(function () { out.push('bad'); }, function (e) { out.push(e.name); });";
         assert_eq!(go(&mut b, src), "a\"b=v;e:n\n.bin:text/plain:0;c=|TypeError|TypeError");
+    });
+}
+
+#[test]
+fn stream_body_rejects_one_fetch_without_ending_the_script() {
+    big(|| {
+        let mut b = at(1);
+        assert_eq!(js(&mut b, "var caught = ''; fetch('/x', {method: 'POST', body: new ReadableStream()}).catch(function(e) { caught = e.name }); 'continued'"), "continued");
+        b.drain().unwrap();
+        assert_eq!(js(&mut b, "caught"), "TypeError");
+        assert_eq!(js(&mut b, "try { new Request('/x', {method: 'POST', body: new ReadableStream()}) } catch(e) { e.name }"), "TypeError");
+        assert_eq!(js(&mut b, "new Response(new Blob(['abc'])).text().then(function(x) { caught = x }); 'continued'"), "continued");
+        b.drain().unwrap();
+        assert_eq!(js(&mut b, "caught"), "abc");
+    });
+}
+
+#[test]
+fn credential_fetch_rejects_without_sending_a_request() {
+    big(|| {
+        let mut b = at(1);
+        assert_eq!(js(&mut b, "var error = ''; fetch('http://user:pass@127.0.0.1:1/x').catch(function(e) { error = e.name }); 'continued'"), "continued");
+        b.drain().unwrap();
+        assert_eq!(js(&mut b, "error"), "TypeError");
+        assert_eq!(b.dom.fetch_queued(), 0);
+        assert_eq!(js(&mut b, "try { new Request('http://user:pass@127.0.0.1:1/x') } catch(e) { e.name }"), "TypeError");
     });
 }

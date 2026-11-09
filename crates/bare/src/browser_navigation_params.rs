@@ -237,21 +237,6 @@ pub(crate) fn url_origin(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value])
     d.js_str(it, &s)
 }
 
-/// `username` and `password` are always empty (user info is gated at parse time). Setting a non-empty value is gated too.
-pub(crate) fn url_userinfo(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    url_id(d, it, this)?;
-    d.js_str(it, "")
-}
-
-pub(crate) fn url_set_userinfo(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    url_id(d, it, this)?;
-    need(it, a, 1, "set a property on 'URL'")?;
-    if !usv(d, it, a[0])?.is_empty() {
-        return Err(Error::Unsupported(unsupported("user info in a URL")));
-    }
-    Ok(Value::Undefined)
-}
-
 pub(crate) fn url_search_params(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
     let id = url_id(d, it, this)?;
     let (sp, q) = {

@@ -357,6 +357,7 @@ impl Dom {
 
     /// A node went into the tree. Every classic `<script>` of it (it may be a subtree) is prepared.
     pub(crate) fn script_inserted(&self, it: &mut Interp<'_>, node: NodeId) -> R<()> {
+        crate::browser_frames::activate(self, it)?;
         if !self.scripts.enabled.get() || !self.is_element(node) {
             return Ok(());
         }
@@ -1179,6 +1180,8 @@ impl Run<'_> {
     /// Run one script in the realm with `currentScript` set. A throw is reported and ends only this script.
     fn run_one(&mut self, node: NodeId, source: &str, what: &str) -> Flow {
         self.budget()?;
+        let dom = self.dom.clone();
+        if let Err(e) = self.b.it.host_scope(|it| crate::browser_frames::activate(&dom, it)) { return self.abort(e, what); }
         self.dom.scripts.current.set(Some(node));
         let t = bare_net::trace::on().then(Instant::now);
         let r = self.b.run_script(source);

@@ -143,7 +143,7 @@ mod binary;
 pub use binary::{load, sort_elems, store, Decoder, Elem, ExoticKind, IndexedSource, Slot, TYPED};
 #[path = "heap_named.rs"]
 mod named;
-pub use named::{NamedOp, NamedRequest, NamedSource};
+pub use named::{NamedOp, NamedRequest, NamedSource, NamedValue};
 #[path = "heap_prim.rs"]
 mod prim;
 #[path = "heap_proxy.rs"]
