@@ -21,6 +21,12 @@ struct Table {
 
 static TABLE: Mutex<Option<Table>> = Mutex::new(None);
 
+/// Does `before` end with `@import` and white space? Then the `url(` that follows is the address of an import, not of a picture.
+pub fn follows_import(before: &str) -> bool {
+    let b = before.trim_end().as_bytes();
+    b.len() >= 7 && b[b.len() - 7..].eq_ignore_ascii_case(b"@import")
+}
+
 /// The number of `url`: the same text gives the same number. 0 when the text is empty, too long, or the table is full.
 pub fn intern(url: &str) -> u32 {
     if url.is_empty() || url.len() > MAX_LEN {
@@ -58,5 +64,11 @@ mod tests {
         assert_eq!(intern("https://x.test/a.svg"), a);
         assert_eq!(get(a).as_deref(), Some("https://x.test/a.svg"));
         assert_eq!((intern(""), get(0)), (0, None));
+    }
+
+    #[test]
+    fn an_import_address_is_not_a_picture() {
+        assert!(follows_import("@import ") && follows_import("a{}\n@IMPORT\n\t") && follows_import("@import"));
+        assert!(!follows_import("") && !follows_import("@impor") && !follows_import("a{b:") && !follows_import("@import x "));
     }
 }
