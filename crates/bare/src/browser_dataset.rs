@@ -103,10 +103,14 @@ fn prop_of(attr: &str) -> Option<String> {
 
 /// Does the attribute `attr` have the property name `key` (UTF-16)? Same as `prop_of(attr)` equals `key`, with no allocation.
 fn matches(attr: &str, key: &[u16]) -> bool {
-    let Some(tail) = attr.strip_prefix("data-").filter(|t| !t.bytes().any(|b| b.is_ascii_uppercase())) else { return false };
+    let Some(tail) = attr.strip_prefix("data-") else { return false };
     let mut want = char::decode_utf16(key.iter().copied());
     let mut cs = tail.chars().peekable();
     while let Some(c) = cs.next() {
+        // An uppercase letter is not a dataset name: the scan stops at the first one, not before the loop.
+        if c.is_ascii_uppercase() {
+            return false;
+        }
         let e = match cs.peek() {
             Some(&n) if c == '-' && n.is_ascii_lowercase() => {
                 cs.next();
@@ -406,6 +410,10 @@ mod tests {
         for attr in ["id", "data", "dat-a", "Data-x", "data-Up", "data-aB"] {
             assert_eq!(prop_of(attr), None, "{attr}");
             assert!(!is_data(attr));
+        }
+        // `matches` stops at an upper alpha, wherever it is.
+        for (attr, prop) in [("data-Up", "Up"), ("data-aB", "aB"), ("data-a-bC", "aBC"), ("data-ab-C", "abC")] {
+            assert!(!matches(attr, &units(prop)), "{attr}");
         }
         // A property name matches only the attribute that converts back to it.
         assert!(!matches("data-foo-bar", &units("foo-bar")));

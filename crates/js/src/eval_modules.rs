@@ -496,19 +496,16 @@ impl<'p> Interp<'p> {
     /// An import binding in `get_name`: the value of the binding that it names.
     #[cold]
     #[inline(never)]
-    fn get_name_uninit(&mut self, n: u32, site: u32) -> Res<Value> {
-        if let Some((e, i)) = self.find_name(n, site) {
-            let b = self.envs[e as usize].bindings[i];
-            if b.flags & IMPORT != 0
-                && let Value::Number(k) = b.value
-            {
-                let (tm, tn) = self.modules.imports[k as usize];
-                return match self.mod_binding(tm, tn) {
-                    // The error names the importing name, as the name the code wrote.
-                    Err(Error::Throw(_)) => Err(self.tdz(n)),
-                    r => r,
-                };
-            }
+    fn get_name_uninit(&mut self, n: u32, flags: u8, value: Value) -> Res<Value> {
+        if flags & IMPORT != 0
+            && let Value::Number(k) = value
+        {
+            let (tm, tn) = self.modules.imports[k as usize];
+            return match self.mod_binding(tm, tn) {
+                // The error names the importing name, as the name the code wrote.
+                Err(Error::Throw(_)) => Err(self.tdz(n)),
+                r => r,
+            };
         }
         Err(self.tdz(n))
     }
