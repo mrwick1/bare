@@ -4227,7 +4227,7 @@ Not tested: a second run of archive.org after shadow style scoping exists, the p
 
 ## Survey 3 regressions: gnu.org TLS resets and the blank nextjs.org (2026-11-09)
 
-Survey 3 listed two possible regressions. Neither of the two probes below finds a TLS regression. The blank page is a real regression, and it is fixed.
+Survey 3 listed two possible regressions. The TLS probes find no regression in the ClientHello. The blank page is a real regression, and it is fixed.
 
 ### gnu.org: the host blocks, not the ClientHello (no code change)
 
