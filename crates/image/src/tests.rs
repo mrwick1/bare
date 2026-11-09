@@ -92,3 +92,102 @@ fn damaged_data_fails_and_does_not_panic() {
         let _ = decode(&b);
     }
 }
+
+mod peak {
+    use super::*;
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+
+    /// Counts the live bytes and the highest count of the thread that allocates, so tests that run at the same time do not mix.
+    struct Counting;
+    thread_local! {
+        static LIVE: Cell<usize> = const { Cell::new(0) };
+        static PEAK: Cell<usize> = const { Cell::new(0) };
+    }
+    fn add(n: usize) {
+        let live = LIVE.get() + n;
+        LIVE.set(live);
+        PEAK.set(PEAK.get().max(live));
+    }
+    // SAFETY: every call goes to `System` with the same arguments.
+    unsafe impl GlobalAlloc for Counting {
+        unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+            add(l.size());
+            unsafe { System.alloc(l) }
+        }
+        unsafe fn alloc_zeroed(&self, l: Layout) -> *mut u8 {
+            add(l.size());
+            unsafe { System.alloc_zeroed(l) }
+        }
+        unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
+            LIVE.set(LIVE.get().saturating_sub(l.size()));
+            unsafe { System.dealloc(p, l) }
+        }
+        unsafe fn realloc(&self, p: *mut u8, l: Layout, n: usize) -> *mut u8 {
+            LIVE.set(LIVE.get().saturating_sub(l.size()));
+            add(n);
+            unsafe { System.realloc(p, l, n) }
+        }
+    }
+    #[global_allocator]
+    static COUNT: Counting = Counting;
+
+    fn png(w: u32, h: u32, color: png::ColorType) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut e = png::Encoder::new(&mut out, w, h);
+        e.set_color(color);
+        e.set_depth(png::BitDepth::Eight);
+        let channels = color.samples();
+        let mut e = e.write_header().unwrap();
+        let row: Vec<u8> = (0..w as usize * channels).map(|i| (i * 7 % 251) as u8).collect();
+        let mut data = Vec::new();
+        for _ in 0..h {
+            data.extend_from_slice(&row);
+        }
+        e.write_image_data(&data).unwrap();
+        e.finish().unwrap();
+        out
+    }
+
+    /// The bytes held at once while one picture decodes, above what was held before: at most the pixels (4 bytes each) and a small
+    /// working set of the decoder. A staging buffer or a copy of the pixels would add another 4 bytes for each pixel.
+    #[test]
+    fn a_decode_holds_the_pixels_once() {
+        for color in [png::ColorType::Rgba, png::ColorType::Rgb] {
+            let file = png(1500, 1000, color);
+            let before = LIVE.get();
+            PEAK.set(before);
+            let i = decode(&file).unwrap();
+            let used = PEAK.get() - before;
+            let pixels = 1500 * 1000 * 4;
+            assert_eq!((i.width, i.height, i.pixels.len()), (1500, 1000, 1500 * 1000));
+            assert!(used < pixels + pixels / 4, "{color:?}: {used} bytes held at the peak for {pixels} bytes of pixels");
+        }
+    }
+
+    #[test]
+    fn the_in_place_conversion_keeps_every_channel() {
+        for (color, a) in [(png::ColorType::Rgba, None), (png::ColorType::Rgb, Some(255u8))] {
+            let file = png(37, 11, color);
+            let i = decode(&file).unwrap();
+            let n = color.samples();
+            for y in 0..11usize {
+                for x in 0..37usize {
+                    let s = |c: usize| ((x * n + c) * 7 % 251) as u8;
+                    let want = argb(a.unwrap_or(s(3.min(n - 1))), s(0), s(1), s(2));
+                    assert_eq!(i.pixels[y * 37 + x], want, "{color:?} at {x},{y}");
+                }
+            }
+        }
+        for (color, f) in [(png::ColorType::Grayscale, false), (png::ColorType::GrayscaleAlpha, true)] {
+            let file = png(29, 5, color);
+            let i = decode(&file).unwrap();
+            let n = color.samples();
+            for x in 0..29usize {
+                let g = ((x * n) * 7 % 251) as u8;
+                let a = if f { ((x * n + 1) * 7 % 251) as u8 } else { 255 };
+                assert_eq!(i.pixels[x], argb(a, g, g, g), "{color:?} at {x}");
+            }
+        }
+    }
+}

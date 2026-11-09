@@ -187,7 +187,7 @@ fn load(client: &mut Client, url: &str, used: &AtomicUsize) -> Option<Bitmap> {
     let i = bare_image::decode(&bytes);
     drop(bytes);
     match i {
-        Ok(i) => Some((i.width, i.height, i.pixels.into())),
+        Ok(i) => Some((i.width, i.height, i.pixels)),
         Err(_) => {
             used.fetch_sub(need, Ordering::Relaxed);
             None

@@ -6,6 +6,7 @@
 //! animated WebP is decoded and the rest is not read.
 
 use std::io::Cursor;
+use std::sync::Arc;
 use zune_jpeg::zune_core::bytestream::ZCursor;
 
 /// The bytes of one file. The caller reads at most this much from the network.
@@ -35,7 +36,7 @@ pub enum Error {
 pub struct Image {
     pub width: u32,
     pub height: u32,
-    pub pixels: Vec<u32>,
+    pub pixels: Arc<[u32]>,
 }
 
 /// The format of a file, from its first bytes.
@@ -80,52 +81,78 @@ pub fn size(b: &[u8]) -> Result<(u32, u32), Error> {
     }
 }
 
+/// Decode a file. The pixels are made in their final buffer: the decoder writes its output (3 or 4 bytes for each pixel) into the
+/// start of it, and the conversion to `0xAARRGGBB` runs in place, from the last pixel to the first so that a 3 byte pixel is read
+/// before a 4 byte one covers it. A file never holds a staging buffer, a `Vec` of pixels or a copy for the `Arc`: the peak is the
+/// pixels, 4 bytes each, and what the decoder keeps for itself.
 pub fn decode(b: &[u8]) -> Result<Image, Error> {
     let (width, height) = size(b)?;
     let n = width as usize * height as usize;
-    let mut pixels = Vec::with_capacity(n);
-    match kind(b).ok_or(Error::Unsupported)? {
+    let pixels = Arc::<[u32]>::new_zeroed_slice(n);
+    // SAFETY: all bits zero is a valid `u32`.
+    let mut pixels = unsafe { pixels.assume_init() };
+    let words = Arc::get_mut(&mut pixels).ok_or(Error::Corrupt)?;
+    // SAFETY: the same memory as `words`, which is not used while `bytes` lives. `u8` has alignment 1 and takes any bit pattern.
+    let bytes = unsafe { std::slice::from_raw_parts_mut(words.as_mut_ptr().cast::<u8>(), n * 4) };
+    // The bytes that the decoder gave for each pixel.
+    let channels = match kind(b).ok_or(Error::Unsupported)? {
         Kind::Png => {
             let mut d = png::Decoder::new(Cursor::new(b));
             d.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
             let mut r = d.read_info().map_err(|_| Error::Corrupt)?;
-            let mut buf = vec![0u8; r.output_buffer_size().ok_or(Error::Pixels)?];
-            let f = r.next_frame(&mut buf).map_err(|_| Error::Corrupt)?;
-            let data = &buf[..f.buffer_size()];
-            match f.color_type {
-                png::ColorType::Rgba => pixels.extend(data.chunks_exact(4).map(|p| argb(p[3], p[0], p[1], p[2]))),
-                png::ColorType::Rgb => pixels.extend(data.chunks_exact(3).map(|p| argb(255, p[0], p[1], p[2]))),
-                png::ColorType::GrayscaleAlpha => pixels.extend(data.chunks_exact(2).map(|p| argb(p[1], p[0], p[0], p[0]))),
-                png::ColorType::Grayscale => pixels.extend(data.iter().map(|&g| argb(255, g, g, g))),
+            let size = r.output_buffer_size().ok_or(Error::Pixels)?;
+            let out = bytes.get_mut(..size).ok_or(Error::Pixels)?;
+            let f = r.next_frame(out).map_err(|_| Error::Corrupt)?;
+            let channels = match f.color_type {
+                png::ColorType::Rgba => 4,
+                png::ColorType::Rgb => 3,
+                png::ColorType::GrayscaleAlpha => 2,
+                png::ColorType::Grayscale => 1,
                 png::ColorType::Indexed => return Err(Error::Corrupt),
+            };
+            if f.buffer_size() != n * channels {
+                return Err(Error::Corrupt);
             }
+            widen(bytes, n, channels, |p| match *p {
+                [r, g, b, a] => argb(a, r, g, b),
+                [r, g, b] => argb(255, r, g, b),
+                [g, a] => argb(a, g, g, g),
+                _ => argb(255, p[0], p[0], p[0]),
+            });
+            return Ok(Image { width, height, pixels });
         }
         Kind::Jpeg => {
             let opts = zune_jpeg::zune_core::options::DecoderOptions::default().jpeg_set_out_colorspace(zune_jpeg::zune_core::colorspace::ColorSpace::RGBA);
             let mut d = zune_jpeg::JpegDecoder::new_with_options(ZCursor::new(b), opts);
             d.decode_headers().map_err(|_| Error::Corrupt)?;
-            let mut buf = vec![0u8; d.output_buffer_size().ok_or(Error::Pixels)?];
-            d.decode_into(&mut buf).map_err(|_| Error::Corrupt)?;
-            if buf.len() < n * 4 {
+            if d.output_buffer_size() != Some(n * 4) {
                 return Err(Error::Corrupt);
             }
-            pixels.extend(buf.chunks_exact(4).take(n).map(|p| argb(255, p[0], p[1], p[2])));
+            d.decode_into(bytes).map_err(|_| Error::Corrupt)?;
+            widen(bytes, n, 4, |p| argb(255, p[0], p[1], p[2]));
+            return Ok(Image { width, height, pixels });
         }
         Kind::Webp => {
             let mut d = image_webp::WebPDecoder::new(Cursor::new(b)).map_err(|_| Error::Corrupt)?;
-            let mut buf = vec![0u8; d.output_buffer_size().ok_or(Error::Pixels)?];
-            d.read_image(&mut buf).map_err(|_| Error::Corrupt)?;
-            if d.has_alpha() {
-                pixels.extend(buf.chunks_exact(4).map(|p| argb(p[3], p[0], p[1], p[2])));
-            } else {
-                pixels.extend(buf.chunks_exact(3).map(|p| argb(255, p[0], p[1], p[2])));
+            let size = d.output_buffer_size().ok_or(Error::Pixels)?;
+            let channels = if d.has_alpha() { 4 } else { 3 };
+            if size != n * channels {
+                return Err(Error::Corrupt);
             }
+            d.read_image(&mut bytes[..size]).map_err(|_| Error::Corrupt)?;
+            channels
         }
-    }
-    if pixels.len() != n {
-        return Err(Error::Corrupt);
-    }
+    };
+    widen(bytes, n, channels, |p| if channels == 4 { argb(p[3], p[0], p[1], p[2]) } else { argb(255, p[0], p[1], p[2]) });
     Ok(Image { width, height, pixels })
+}
+
+/// Turn `n` pixels of `channels` bytes each, at the start of `bytes`, into `n` words of 4 bytes (`u32` in native order), in place.
+fn widen(bytes: &mut [u8], n: usize, channels: usize, to_word: impl Fn(&[u8]) -> u32) {
+    for i in (0..n).rev() {
+        let word = to_word(&bytes[i * channels..(i + 1) * channels]);
+        bytes[i * 4..i * 4 + 4].copy_from_slice(&word.to_ne_bytes());
+    }
 }
 
 fn argb(a: u8, r: u8, g: u8, b: u8) -> u32 {
