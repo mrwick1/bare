@@ -5562,7 +5562,7 @@ Step file: `timeout 30000`, `open URL`, `expect css="body" visible`, `shot s`. `
 
 ## CSS background-image and mask-image on current main (2026-11-10)
 
-PR #278 is closed. This work replaces it. The old branch (`css-background-mask`, head `e896177e`) was ported by hand onto origin/main `41e68d4a09`. The old branch had 16 cost rows over +0.5% under both allocators.
+PR #278 is closed. PR #325 replaces it. The old branch (`css-background-mask`, head `e896177e`) was ported by hand onto origin/main `41e68d4a09`. The old branch had 16 cost rows over +0.5% under both allocators.
 
 ### Problem
 

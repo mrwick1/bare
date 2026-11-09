@@ -559,7 +559,7 @@ A geometry read (`getBoundingClientRect`, `getClientRects`, `offsetWidth`, an In
 
 ## CSS background-image and mask-image
 
-Changed on 2026-11-10. This replaces PR #278. Wikipedia draws its icons with these two properties, and the black squares are gone.
+Changed on 2026-11-10. This replaces PR #278 (PR #325). Wikipedia draws its icons with these two properties, and the black squares are gone.
 
 - What is drawn: `background-image: url(...)` and `mask-image: url(...)` (and `-webkit-mask-image`), with `background-size`, `background-position`, `background-repeat` and their `mask-*` names. A mask shows the color of the box through the alpha of the picture. Raster pictures and SVG files both work. A picture loads through the same queue and limits as `<img>`.
 - Gaps: gradients and `image-set()` read as `none` and are not drawn. Only the first layer of a list is used. Edge-offset positions, `space` and `round` are not supported. A vector picture is drawn at its natural size and then scaled as a raster, so it is soft when it is made larger. A mask covers the background color only. Rounded corners are ignored. List each gap again in resources.md when a target page needs it.
