@@ -17,7 +17,8 @@ Cases:
   padding is wrong.
 
 Format: `key NAME DER_HEX` (RSAPublicKey), then `case NAME KEY MODE DIGEST_HEX SIG_HEX EXPECT`
-with MODE in pkcs1-sha256, pkcs1-sha384, pss-sha256, pss-sha384.
+with MODE in pkcs1-sha256, pkcs1-sha384, pss-sha256, pss-sha384, and
+`cv KEY SCHEME TRANSCRIPT_HASH_HEX SIG_HEX` for TLS CertificateVerify signatures (all valid).
 """
 import hashlib, math, os, random, subprocess, tempfile
 
@@ -267,6 +268,16 @@ for kname, (n, e, d, path) in keys.items():
         # the same block as PKCS#1 v1.5 and the reverse
         bad("pss-block-as-pkcs1", pk, pss_em(bits, digest, hn))
         bad("pkcs1-block-as-pss", pm, pkcs1_em(k, di, digest))
+
+# TLS 1.3 CertificateVerify (RFC 8446 4.4.3): RSA-PSS over the server context and a transcript hash.
+for kname in ("rsa2048", "rsa4096"):
+    for hn, scheme in (("sha256", "0804"), ("sha384", "0805")):
+        th = hashlib.sha256(f"transcript {kname}".encode()).digest()
+        mf = f"{D}/cv-content"
+        open(mf, "wb").write(b" " * 64 + b"TLS 1.3, server CertificateVerify\x00" + th)
+        sig = run("openssl", "dgst", f"-{hn}", "-sign", keys[kname][3], "-sigopt", "rsa_padding_mode:pss",
+                  "-sigopt", "rsa_pss_saltlen:digest", "-sigopt", f"rsa_mgf1_md:{hn}", mf).stdout
+        lines.append(f"cv {kname} {scheme} {th.hex()} {sig.hex()}")
 
 open(os.path.join(HERE, "vectors.txt"), "w").write("\n".join(lines) + "\n")
 print(len(keys), "keys,", count, "cases")

@@ -228,6 +228,7 @@ mod tests {
                     sig: hex(f[5]),
                     ok: f[6] == "ok",
                 }),
+                "cv" => {}
                 _ => panic!("{line}"),
             }
         }

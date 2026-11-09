@@ -760,6 +760,37 @@ mod tests {
     }
 
     #[test]
+    fn certificate_verify_with_an_rsa_leaf() {
+        const V: &str = include_str!("../../../tools/fixtures/rsa/vectors.txt");
+        let c = case("ok");
+        let leaf = x509::parse(&c.chain[0]).unwrap();
+        let fields = |kind: &str, key: &str, scheme: Option<&str>| -> Vec<&'static str> {
+            V.lines()
+                .map(|l| l.split(' ').collect::<Vec<_>>())
+                .find(|f| f[0] == kind && f[1] == key && scheme.is_none_or(|s| f[2] == s))
+                .unwrap()
+        };
+        for key in ["rsa2048", "rsa4096"] {
+            let der = unhex(fields("key", key, None)[2]);
+            let k = rsa::PublicKey::from_pkcs1(&der).unwrap();
+            let peer = VerifiedPeer { leaf, key: PublicKey::Rsa(k), path_certs: 2 };
+            for (scheme, code) in [("0804", hello::RSA_PSS_RSAE_SHA256), ("0805", hello::RSA_PSS_RSAE_SHA384)] {
+                let f = fields("cv", key, Some(scheme));
+                let (th, sig) = (unhex(f[3]).try_into().unwrap(), unhex(f[4]));
+                assert_eq!(verify_certificate_verify(&peer, code, &th, &sig), Ok(()), "{key} {scheme}");
+                let other = if code == hello::RSA_PSS_RSAE_SHA256 { hello::RSA_PSS_RSAE_SHA384 } else { hello::RSA_PSS_RSAE_SHA256 };
+                assert_eq!(verify_certificate_verify(&peer, other, &th, &sig), Err(Error::BadSignature));
+                let mut bad = sig.clone();
+                bad[7] ^= 1;
+                assert_eq!(verify_certificate_verify(&peer, code, &th, &bad), Err(Error::BadSignature));
+                assert_eq!(verify_certificate_verify(&peer, code, &th, &sig[1..]), Err(Error::BadSignature));
+                assert_eq!(verify_certificate_verify(&peer, SIG_ECDSA_SECP256R1_SHA256, &th, &sig), Err(Error::SchemeKeyMismatch));
+                assert_eq!(verify_certificate_verify(&peer, 0x0401, &th, &sig), Err(Error::UnsupportedScheme));
+            }
+        }
+    }
+
+    #[test]
     fn certificate_verify_key_pairing() {
         // A P-384 leaf chain is valid, but 0x0403 needs P-256.
         let c = case("ok-leaf-p384");
