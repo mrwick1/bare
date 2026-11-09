@@ -1124,7 +1124,10 @@ impl RuleSet {
                 return found.style;
             }
         }
-        let style = self.cascade_as::<0>(matched, inline, hint, &styles.styles[parent as usize], cx);
+        let mut style = self.cascade_as::<0>(matched, inline, hint, &styles.styles[parent as usize], cx);
+        if style.2 != 0 {
+            self.picture_pass(matched, inline, &mut style, &styles.styles[parent as usize], cx);
+        }
         // Two different rule lists may give the same style (`div div` inside `div`). Then they share it, and the children of both
         // have the same parent style, so they find each other in the cache.
         let hash = style_hash(&style);
@@ -1170,30 +1173,7 @@ impl RuleSet {
         let mut swapped = 0u128;
         // The key of a declaration: the one with the bigger key wins. The parts, from the most important: the origin and `!important`,
         // the layer, the specificity, and the place in the page. A `style=""` attribute has no layer (`None`): it beats every layer.
-        let key = |important: bool, origin: Origin, ctx: u8, layer: Option<u32>, specificity: u32, order: u32| {
-            let rank = match (important, origin) {
-                (false, Origin::UserAgent) => 0u128,
-                (false, Origin::Author) => 1,
-                (true, Origin::Author) => 2,
-                (true, Origin::UserAgent) => 3,
-            };
-            // `!important` turns the order of the layers around: the earlier layer wins, and no layer is the last.
-            let layer = match layer {
-                None => u32::MAX,
-                Some(l) if important => u32::MAX - 1 - cx.layer_order[l as usize],
-                Some(l) => cx.layer_order[l as usize],
-            };
-            // The tree context comes after the origin and before the layer: the outer context wins for a normal declaration, the inner one for
-            // an important one. The tree of the element (`OWN`) is between them, and a `style=""` attribute is in it.
-            let outer = match ctx {
-                INNER => 0u128,
-                OWN => 1,
-                OUTER => 2,
-                _ => 3,
-            };
-            let tree = if important { 3 - outer } else { outer };
-            rank << 98 | tree << 96 | u128::from(layer) << 64 | u128::from(specificity) << 32 | u128::from(order)
-        };
+        let key = |important: bool, origin: Origin, ctx: u8, layer: Option<u32>, specificity: u32, order: u32| cascade_key(cx, important, origin, ctx, layer, specificity, order);
         // The presentational hints (`hints.rs`): author declarations that any rule beats. Their key is the least of the author origin.
         if let Some(text) = hint {
             let mut out = Vec::new();
@@ -1325,9 +1305,8 @@ impl RuleSet {
         }
         let mut style = compute(&winners, set, parent, cx);
         style.1 = custom;
-        if pictures != 0 || inline_core < inline_decls.len() {
-            style.2 = self.picture_pass(matched, &inline_decls[inline_core..], &key, &style, parent, custom, cx);
-        }
+        // 1: a rule or the attribute has a picture declaration, and `style_of` asks `picture_pass` for the set. The style is not borrowed here.
+        style.2 = u32::from(pictures != 0 || inline_core < inline_decls.len());
         // A logical property of the inline axis (`margin-inline-start`) is its physical property for `ltr`, so the first pass is the same
         // for every element. An `rtl` element, or a `float` that is `inline-start`, gets `logical_pass`.
         if PASS == 0 && (matches!(style.0[Property::Direction as usize], Value::Keyword(Keyword::Rtl)) || matches!(style.0[Property::Float as usize], Value::Keyword(Keyword::InlineStart | Keyword::InlineEnd))) && (self.logical || inline.is_some()) {
@@ -1336,20 +1315,20 @@ impl RuleSet {
         style
     }
 
-    /// The number of the set of picture values of an element (`ComputedStyle::2`). It does for the picture properties what `cascade_as` and
-    /// `compute` do for the others: the winner of each one by its key, then `inherit`, `initial`, `var()` and the units. It runs only for an
-    /// element that has a rule or a `style=""` declaration of a picture property (`Entry::pics`): for the others the cascade has no more
-    /// work than before.
+    /// The number of the set of picture values of an element (`ComputedStyle::2`), put in `style`. It does for the picture properties what
+    /// `cascade_as` and `compute` do for the others: the winner of each one by its key, then `inherit`, `initial`, `var()` and the units.
+    /// `cascade_as` says that it must run (`style.2` is 1: a rule or a `style=""` declaration has a picture property, `Entry::pics`). For
+    /// the others the cascade has no more work than before, and it does not hold its style for this call.
     #[cold]
     #[inline(never)]
-    #[allow(clippy::too_many_arguments)]
-    fn picture_pass(&self, matched: &[u32], inline: &[Declared], key: &dyn Fn(bool, Origin, u8, Option<u32>, u32, u32) -> u128, style: &ComputedStyle, parent: &ComputedStyle, custom: u32, cx: &Cx<'_>) -> u32 {
+    fn picture_pass(&self, matched: &[u32], inline: Option<&str>, style: &mut ComputedStyle, parent: &ComputedStyle, cx: &Cx<'_>) {
         #[cfg(test)]
         PICTURE_PASSES.with(|n| n.set(n.get() + 1));
+        let custom = style.1;
         let mut winners = [None::<Value>; Property::COUNT - Property::CORE];
         let mut keys = [0u128; Property::COUNT - Property::CORE];
         let mut apply = |d: &Declared, origin: Origin, ctx: u8, layer: Option<u32>, specificity: u32, order: u32| {
-            let (k, key) = (d.property as usize - Property::CORE, key(d.important, origin, ctx, layer, specificity, order));
+            let (k, key) = (d.property as usize - Property::CORE, cascade_key(cx, d.important, origin, ctx, layer, specificity, order));
             if winners[k].is_none() || key >= keys[k] {
                 (winners[k], keys[k]) = (Some(d.value), key);
             }
@@ -1360,8 +1339,24 @@ impl RuleSet {
                 apply(d, e.origin, e.ctx, Some(e.layer), e.selector.specificity, i);
             }
         }
-        for d in inline {
-            apply(d, Origin::Author, OWN, None, 1 << 30, u32::MAX >> 1);
+        // The declarations of the attribute again: `cascade_as` left the side of their values in `cx.inline`, the same for this parse.
+        if let Some(text) = inline {
+            let (mut side, mut decls) = (Side::default(), Vec::new());
+            for d in parse_declarations(text) {
+                if !d.name.starts_with("--") {
+                    parse_declaration(&d.name, d.value, d.important, &mut side, &mut decls);
+                }
+            }
+            let (calc_base, var_base, grid_base) = (cx.declared.calcs.len() as u32, cx.declared.vars.len() as u32, cx.declared.grids.len() as u32);
+            for d in decls.iter_mut().filter(|d| d.property.is_picture()) {
+                match &mut d.value {
+                    Value::Length(Length::Calc(i)) => *i += calc_base,
+                    Value::Var(i) => *i += var_base,
+                    Value::Grid(i) => *i += grid_base,
+                    _ => {}
+                }
+                apply(d, Origin::Author, OWN, None, 1 << 30, u32::MAX >> 1);
+            }
         }
         let fs = style.px(Property::FontSize);
         let mut set = picture_start();
@@ -1389,7 +1384,7 @@ impl RuleSet {
                 v => resolve(p, v, &style.0, parent, fs, cx),
             };
         }
-        keep_pictures(&set)
+        style.2 = keep_pictures(&set);
     }
 
     /// The value of `property` for the declaration `i` that has `var()`. `unset` when it does not work: a custom property that is not set,
@@ -2234,7 +2229,36 @@ fn length_to_px(l: Length, font_size: f32, cx: &Cx<'_>) -> f32 {
     }
 }
 
+/// The key of a declaration: the one with the bigger key wins. The parts, from the most important: the origin and `!important`,
+/// the layer, the specificity, and the place in the page. A `style=""` attribute has no layer (`None`): it beats every layer.
+#[inline(always)]
+fn cascade_key(cx: &Cx<'_>, important: bool, origin: Origin, ctx: u8, layer: Option<u32>, specificity: u32, order: u32) -> u128 {
+        let rank = match (important, origin) {
+            (false, Origin::UserAgent) => 0u128,
+            (false, Origin::Author) => 1,
+            (true, Origin::Author) => 2,
+            (true, Origin::UserAgent) => 3,
+        };
+        // `!important` turns the order of the layers around: the earlier layer wins, and no layer is the last.
+        let layer = match layer {
+            None => u32::MAX,
+            Some(l) if important => u32::MAX - 1 - cx.layer_order[l as usize],
+            Some(l) => cx.layer_order[l as usize],
+        };
+        // The tree context comes after the origin and before the layer: the outer context wins for a normal declaration, the inner one for
+        // an important one. The tree of the element (`OWN`) is between them, and a `style=""` attribute is in it.
+        let outer = match ctx {
+            INNER => 0u128,
+            OWN => 1,
+            OUTER => 2,
+            _ => 3,
+        };
+        let tree = if important { 3 - outer } else { outer };
+        rank << 98 | tree << 96 | u128::from(layer) << 64 | u128::from(specificity) << 32 | u128::from(order)
+}
+
 /// Make the computed style from the winning declarations and the style of the parent.
+#[inline(always)]
 fn compute(winners: &[Option<Value>; Property::CORE], mut set: u128, parent: &ComputedStyle, cx: &Cx<'_>) -> ComputedStyle {
     use Property::*;
     let fs = font_size(winners[FontSize as usize], parent.px(FontSize), cx);
@@ -2316,6 +2340,7 @@ fn resolve_math(p: Property, i: u32, fs: f32, cx: &Cx<'_>) -> Value {
 }
 
 /// Turn a value into its computed form. It does nothing to a value that is computed already (one from the parent).
+#[inline(always)]
 fn resolve(p: Property, v: Value, out: &[Value; Property::CORE], parent: &ComputedStyle, fs: f32, cx: &Cx<'_>) -> Value {
     let px = |x| Value::Length(Length::Px(x));
     match v {

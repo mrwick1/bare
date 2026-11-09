@@ -345,16 +345,18 @@ pub struct Declared {
 /// Gives `false`, and adds nothing, when the name is not known or the value is not good.
 /// A `calc()` that mixes units goes in `side.calcs`, and a value with `var()` goes in `side.vars`: the value points to them.
 /// `name` must be in lowercase (the parser does it).
-pub fn parse_declaration(name: &str, value: &str, important: bool, side: &mut Side, out: &mut Vec<Declared>) -> bool {
-    parse_known(name, value, important, side, out) || webkit_mask(name, value, important, side, out)
-}
-
-/// `-webkit-mask-image` is `mask-image`: the same property with the prefix taken off. It runs after a name or value was not good, so a
-/// good declaration never pays for it.
-#[cold]
-#[inline(never)]
-fn webkit_mask(name: &str, value: &str, important: bool, side: &mut Side, out: &mut Vec<Declared>) -> bool {
-    name.strip_prefix("-webkit-").is_some_and(|n| n.starts_with("mask")) && parse_known(&name[8..], value, important, side, out)
+pub fn parse_declaration(mut name: &str, value: &str, important: bool, side: &mut Side, out: &mut Vec<Declared>) -> bool {
+    // `-webkit-mask-image` is `mask-image`: the same property with the prefix taken off. The second round runs only after a name or a value
+    // was not good, so a good declaration never pays for it. (One call of `parse_known`, so that it is inlined once.)
+    loop {
+        if parse_known(name, value, important, side, out) {
+            return true;
+        }
+        match name.strip_prefix("-webkit-") {
+            Some(n) if n.starts_with("mask") => name = n,
+            _ => return false,
+        }
+    }
 }
 
 #[inline(always)]
@@ -429,6 +431,7 @@ struct Parts {
 
 impl Parts {
     /// `None` when the value has no part, or a part that is a mistake in every property (a `{` block, for example).
+    #[inline(always)]
     fn read(value: &str, calcs: &mut Vec<Linear>) -> Option<Parts> {
         let mut parts = Parts { items: [Part::Other; 8], len: 0, more: false, layer: usize::MAX };
         let mut tokens = tokenize(value);
@@ -625,6 +628,7 @@ pub(crate) fn length(value: f32, unit: &str) -> Option<Length> {
 }
 
 /// Give each longhand of the declaration `name` to `emit`. `false` if the name or the value is not good.
+#[inline(always)]
 fn expand(name: &str, parts: &Parts, mirror: &std::cell::Cell<bool>, emit: &mut dyn FnMut(Property, Value)) -> bool {
     use Property::*;
     let slice = parts.as_slice();
