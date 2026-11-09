@@ -4586,3 +4586,55 @@ Not tested:
 Open:
 
 - `tools/crypto/client_load.rs` does not compile on `origin/main` (`connect_inner` is `cfg(test)`; `connect_with` takes four arguments). It is not changed here. The cost check above used a temporary test instead.
+## Shadow DOM style scoping and slots (2026-11-09)
+
+Before this change a connected shadow tree was a gate: `getComputedStyle` of one of its elements gave `Unsupported("computed style in a shadow tree")`, and a host with a `<slot>`, `<style>` or `<link>` in its tree refused geometry. archive.org builds its custom elements with Lit and stopped there with a blank page.
+
+### What is built
+
+- **Slot assignment** (`crates/html/src/dom/slots.rs`). The first `<slot>` of a name, in tree order, takes the light children of the host by their `slot` attribute. Text goes to the default slot. A slot that takes nothing shows its children. Nested slots pass through. A light child that no slot takes is not rendered. The cache is rebuilt when `Document::revision` moves; a page with no shadow root pays one `is_empty` test.
+- **Two trees.** Layout and paint use the flat tree (`flat_parent`, `flat_children`, `flat_next`): a slot makes no box, and the nodes that it takes sit in its place. The cascade uses a tree in which the slot is a node (`style_parent`), so a slotted node inherits from its slot.
+- **One rule index for each tree.** `add_scoped` puts the rules of a shadow tree in its own index. Document rules do not reach into a shadow tree. Inherited properties and custom properties pass through the host. Shadow rules do not leak out.
+- **Selectors:** `:host`, `:host(<compound>)`, `:host-context(<compound>)` (a compound only), `::slotted(<compound>)`, `::part(a b)` with pseudo-classes after it, and `exportparts` (with `name:alias` and nesting). In `querySelector` and `matches` the same selectors are good and match nothing.
+- **Cascade order between trees** (CSS Scoping): for a normal declaration the outer tree wins, for `!important` the inner tree wins. The rank is in the sort key.
+- **Script API** (`browser_slot.rs`): `HTMLSlotElement` (`name`, `assignedNodes({flatten})`, `assignedElements({flatten})`), `assignedSlot` on elements and text (`null` for a closed root), `getRootNode({composed})` (was there). `attachShadow` now accepts `delegatesFocus`, `clonable` and `serializable` and reads them back. They do nothing else: archive.org and lit.dev pass `delegatesFocus: true`.
+- **Reads:** `getComputedStyle`, `offsetWidth`, `offsetHeight` and `getBoundingClientRect` work in a connected shadow tree and on slotted nodes. The old gates (`check_shadow`, `SLOT`, `SHADOW_SHEET`) are gone.
+
+### Limits
+
+- No `display: contents`. A slot is transparent in layout, so an author rule `slot { display: block }` has no effect, and `getComputedStyle(slot).display` is not `contents`.
+- The text that a slot takes gets its style from its layout parent, not from the slot.
+- `restyle` and `style_hidden` fall back to a full cascade on a page that has scoped rules, parts or slots.
+- `::slotted()` does not match a node that reaches the slot through another slot (flattened assignment).
+- `:host-context()` walks the shadow-including ancestors, and takes one compound.
+- `::part()` cannot have a pseudo-element after it (`::part(a)::before`).
+- No `adoptedStyleSheets` and no constructable `CSSStyleSheet`. The task said that Lit needs them. archive.org and lit.dev did not use them: Lit falls back to a `<style>` element in the shadow root.
+- No `slotchange` event, no manual slot assignment (`slotAssignment: "manual"` is still a gate), no focus in a shadow tree, and `bare-drive` locators and `type` do not enter a shadow root.
+- Every host has its own copy of the rules of its `<style>`: a page with many hosts of one component has as many sources as hosts. The `computed-sources` limit (1024) is then the first stop (see github.com below; main stops there too).
+
+### Live pages (`bare-drive`, `timeout 30000` / `open` / `expect css="body" visible` / `shot s`)
+
+| Page | Result |
+|---|---|
+| archive.org | Renders: top bar, menu, the Wayback Machine search box, the footer. After the rebase on #299 (local time in `Date`) the console is clean at the first check. A later check stops at `Unsupported("Intl.NumberFormat option notation (only standard)")`. The page also shows SVG icons without a size limit (black shapes over the content) and a horizontal scroll bar. |
+| developer.mozilla.org | Renders (header, hero, article cards). Before #299 the console had `Date.prototype.getMinutes (local time)`; after it, no console entry. |
+| angular.dev | Renders (menu, hero, feature list). No console entry. |
+| lit.dev | Body has no box. Console: `ReferenceError: DOMParser is not defined` in an error listener. On main the first stop was `attachShadow with clonable, serializable or delegatesFocus true`; this change passes it. Hypothesis: the splash markup is built with `DOMParser`. |
+| github.com | Blank, `Limit(Host("computed-sources"))`. Main stops the same way, so this change did not cause it. Hypothesis: more than 1024 style sources; not counted. |
+
+No journey was added for archive.org. The task asked for a typed search. A locator cannot reach the search box (it is in a shadow root, three levels down), and `type` needs focus in a shadow tree. A Chrome 155 check could not confirm light-DOM text on the page within 8 s (`document.body.innerText` was empty), so a text-only journey had no Chrome reference.
+
+### Checks
+
+- Tests first: `a_shadow_tree_element_has_a_size_from_its_own_scope` and `a_slotted_node_is_laid_out_in_the_slot_and_the_fallback_shows_when_nothing_is_slotted` failed with the old gates before the change; `slot_api` failed with `HTMLSlotElement is not defined`; `the_three_flags_are_stored_and_read_back` failed with `unsupported`. All pass. New tests: 7 in `slots.rs`, `shadow_tests.rs` (cascade), and the four above.
+- `cargo test --release --workspace` after the rebase on #299: 0 failed.
+- `tools/drive/public/run.sh`: pass 28, fail 0, known 0, flakes 0.
+- Cost matrix against the base build of 32d535e (805 rows, 3 runs each, both allocators): 1 row over the limit under both allocators: `sheets_load dynamic 10`, +0.71% glibc and +0.63% jemalloc (`dynamic 1` is +0.68% and +0.49%). That row rebuilds the whole rule set (browser sheet included) for each of its reads, so it pays for the larger `Selector` and the new routing in `RuleSet::push` once for each rule. Four changes brought it from +1.9% to +0.7%; a fifth did not move it. Other rows: `browser_load lookup` rose by +12% when `compound_matches` was public and used `all`; a private loop in `matching.rs` removed it.
+- A page without a shadow root pays: one `is_empty` test per `flat_parent`, `flat_next` and `style_parent`, and one local `shadowed` flag in the cascade walk. The shadow work is in `#[inline(never)]` functions.
+
+### Not tested
+
+- `::part()` and `exportparts` on a live page; `:host-context()` beyond the unit tests.
+- A shadow tree with a `<link rel=stylesheet>` (the plan code handles it like a document link; no test fetches one).
+- Chrome 155 comparison of the computed values in the new tests (the expectations are from CSS Scoping, read by hand).
+- Events that start in a shadow tree: a composed event is still refused with `Unsupported`.
