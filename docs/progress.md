@@ -3540,7 +3540,7 @@ cargo build --release -p bare-drive
 tools/drive/public/run.sh [--repeat N] [--out DIR] [--only TEXT] target/release/bare-drive
 ```
 
-- Files: `tools/drive/public/*.steps`, 10 journeys, each under 20 steps. The URL is a `--var URL=...` in the comment at the top of the file; the runner reads it.
+- Files: `tools/drive/public/*.steps`, 11 journeys, each under 20 steps. The URL is a `--var URL=...` in the comment at the top of the file; the runner reads it.
 - `run.sh` writes `OUT/<journey>.json`, prints a table (result, ms, peak RSS, requests, flake) and exits 0 only when no journey failed.
 - A failed journey runs once more. Two failures in a row are a failure. A pass on the second run counts as a flake (the table shows it).
 - A journey with `# needs-rsa` is skipped, not failed, when the failure holds a TLS error. Remove the mark when RSA works.
