@@ -480,9 +480,9 @@ pub(crate) fn length(value: f32, unit: &str) -> Option<Length> {
         Some(Length::Em(value))
     } else if is("rem") {
         Some(Length::Rem(value))
-    } else if is("vw") {
+    } else if is("vw") || is("dvw") || is("svw") || is("lvw") {
         Some(Length::Vw(value))
-    } else if is("vh") {
+    } else if is("vh") || is("dvh") || is("svh") || is("lvh") {
         Some(Length::Vh(value))
     } else if is("vmin") {
         Some(Length::Vmin(value))
@@ -1259,6 +1259,9 @@ mod tests {
         assert_eq!(one("width", "2REM"), Some(Value::Length(Length::Rem(2.0))));
         assert_eq!(one("width", "50%"), Some(Value::Length(Length::Percent(50.0))));
         assert_eq!(one("width", "10vw"), Some(Value::Length(Length::Vw(10.0))));
+        for unit in ["dvh", "svh", "lvh"] {
+            assert_eq!(one("height", &format!("10{unit}")), Some(Value::Length(Length::Vh(10.0))));
+        }
         assert_eq!(one("height", "10vh"), Some(Value::Length(Length::Vh(10.0))));
         assert_eq!(one("width", "auto"), Some(Value::Keyword(K::Auto)));
         assert_eq!(one("width", "AUTO"), Some(Value::Keyword(K::Auto)));

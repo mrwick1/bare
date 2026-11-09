@@ -693,6 +693,32 @@ mod tests {
     const CSS: &str = "body { line-height: 20px } .f { display: flex; width: 400px }";
 
     #[test]
+    fn decoded_image_keeps_natural_size_with_auto_css() {
+        use bare_css::cascade::{Origin, RuleSet};
+        use bare_html::dom::Atom;
+        for (css, expected) in [
+            ("width:auto;height:auto", (120.0, 60.0)),
+            ("width:auto;height:30px", (60.0, 30.0)),
+            ("width:auto;height:auto;max-width:60px", (60.0, 30.0)),
+        ] {
+            let mut doc = bare_html::tree::parse("<div style='display:flex;align-items:start'><img id=i></div>");
+            fn find(doc: &bare_html::dom::Document, n: bare_html::dom::NodeId) -> Option<bare_html::dom::NodeId> {
+                if doc.attr(n, Atom::ID) == Some("i") { return Some(n); }
+                doc.children(n).find_map(|c| find(doc, c))
+            }
+            let node = find(&doc, doc.root()).unwrap();
+            doc.set_image(node, Some((120, 60, vec![0; 7200].into())));
+            let mut rules = RuleSet::new((800.0, 600.0));
+            rules.add(&mut doc, bare_css::cascade::UA_CSS, Origin::UserAgent);
+            rules.add(&mut doc, &format!("img{{{css}}}"), Origin::Author);
+            let styles = rules.compute(&doc);
+            let layout = crate::layout(&doc, &styles, (800.0, 600.0));
+            let r = layout.fragments.iter().find(|f| f.node == node).unwrap().rect;
+            assert_eq!((r.w, r.h), expected, "{css}");
+        }
+    }
+
+    #[test]
     fn a_column_item_shrinks_to_its_content_not_to_its_height() {
         // Both are 100 tall in 60: they shrink alike to 30. The automatic minimum is the content (20), not `height`.
         let html = "<div class=f style='flex-direction:column;height:60px'><div id=a style='height:100px'>a</div><div id=b style='height:100px'>b</div></div>";

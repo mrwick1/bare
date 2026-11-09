@@ -24,6 +24,11 @@ pub fn sizes(cx: &mut Cx, node: NodeId) -> (f32, f32) {
     if let Some((w, _)) = crate::controls::of(&cx.tree, node).and_then(|c| crate::controls::size(&cx.tree, node, c)) {
         return (w, w);
     }
+    if let Some(&(w, h, _)) = cx.tree.doc.image(node) {
+        let height = resolve(cx, cx.tree.style(node).get(Property::Height), None);
+        let width = height.filter(|_| h > 0).map_or(w as f32, |height| height * w as f32 / h as f32);
+        return (width, width);
+    }
     if let Some(&known) = cx.sizes.get(&(node.index() as u32)) {
         return known;
     }

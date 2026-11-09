@@ -285,6 +285,10 @@ pub(crate) fn sized_with(cx: &mut Cx, node: NodeId, space: Space, forced: Option
     // A form control that has no size of its own in the style sheet: the size of its content when `auto` (`controls.rs`).
     let control = crate::controls::of(&cx.tree, node);
     let own = control.and_then(|c| crate::controls::size(&cx.tree, node, c));
+    let image = cx.tree.doc.image(node).map(|&(w, h, _)| (w as f32, h as f32));
+    let natural_width = image.map(|(w, h)| {
+        resolve(cx, style.get(Property::Height), space.height).filter(|_| h > 0.0).map_or(w, |height| height * w / h)
+    });
     let plan = (context(cx, node) == Context::Table).then(|| crate::table::Plan::new(cx, node, space.width));
     let (border, padding) = match (&plan, sides) {
         (Some(p), _) => p.sides(),
@@ -299,7 +303,7 @@ pub(crate) fn sized_with(cx: &mut Cx, node: NodeId, space: Space, forced: Option
     };
     let (width, margin_left, margin_right) = match &plan {
         Some(p) => p.widths(cx, forced, space.width, bp.horizontal()),
-        None => forced.unwrap_or_else(|| widths_or(cx, style, space.width, bp.horizontal(), own.map(|s| s.0))),
+        None => forced.unwrap_or_else(|| widths_or(cx, style, space.width, bp.horizontal(), own.map(|s| s.0).or(natural_width))),
     };
     let margin = |p| resolve(cx, style.get(p), Some(space.width)).unwrap_or(0.0);
     let (margin_top, margin_bottom) = (margin(Property::MarginTop), margin(Property::MarginBottom));
@@ -316,7 +320,7 @@ pub(crate) fn sized_with(cx: &mut Cx, node: NodeId, space: Space, forced: Option
         Value::Number(r) if height.is_none() && plan.is_none() && sides.is_none() => Some(content((width + if border_box { bp.horizontal() } else { 0.0 }) / r)),
         _ => None,
     };
-    let height = height.or(by_ratio);
+    let height = height.or(by_ratio).or_else(|| image.filter(|&(w, _)| w > 0.0).map(|(w, h)| width * h / w));
     let min = resolve(cx, style.get(Property::MinHeight), space.height).map_or(0.0, content);
     let max = resolve(cx, style.get(Property::MaxHeight), space.height).map(content);
     let clamp = |h: f32| max.map_or(h, |m| h.min(m)).max(min);
