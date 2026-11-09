@@ -1,0 +1,6 @@
+# craigslist.org: the home page. The server speaks TLS 1.2 only (ECDHE-ECDSA over P-256). Check the title and some links.
+#   bare-drive --var URL=https://www.craigslist.org/ craigslist-home.steps
+timeout 30000
+open ${URL}
+expect title~"craigslist"
+expect js "document.querySelectorAll('a').length > 50"

@@ -1,0 +1,7 @@
+# nginx.org: the home page. The server needs TLS 1.2 from bare (before TLS 1.2 support, the load failed). Check the title, the text and the download link.
+#   bare-drive --var URL=https://nginx.org/ nginx-org-home.steps
+timeout 30000
+open ${URL}
+expect title~"nginx"
+expect css="body" text~"nginx"
+expect role=link name="download" visible

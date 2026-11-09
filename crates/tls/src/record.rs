@@ -67,6 +67,8 @@ pub const MAX_WIRE: usize = HEADER_LEN + MAX_CIPHERTEXT;
 /// floor(2^24.5): the AES-GCM key usage limit of RFC 8446 section 5.5, per direction.
 pub const MAX_RECORDS_PER_KEY: u64 = 23_726_566;
 
+/// The explicit part of a TLS 1.2 AES-GCM nonce (RFC 5288 section 3). It rides in each protected record.
+const EXPLICIT_NONCE_LEN: usize = 8;
 const CCS: u8 = 20;
 const ALERT: u8 = 21;
 const HANDSHAKE: u8 = 22;
@@ -143,6 +145,32 @@ impl std::fmt::Display for Error {
 }
 impl std::error::Error for Error {}
 
+/// The 12-byte IV of a TLS 1.2 key: the 4-byte salt, then 8 bytes that the nonce replaces.
+fn salt12(salt: &[u8; 4]) -> [u8; NONCE_LEN] {
+    let mut iv = [0u8; NONCE_LEN];
+    iv[..4].copy_from_slice(salt);
+    iv
+}
+
+/// RFC 5288 section 3: salt (4 bytes) `||` explicit nonce (8 bytes).
+fn nonce12(iv: &[u8; NONCE_LEN], explicit: &[u8]) -> [u8; NONCE_LEN] {
+    let mut n = *iv;
+    for (n, e) in n[4..].iter_mut().zip(explicit) {
+        *n = *e;
+    }
+    n
+}
+
+/// RFC 5246 section 6.2.3.3: `seq_num || type || version || plaintext length`.
+fn aad12(seq: u64, ty: u8, plain_len: usize) -> [u8; 13] {
+    let mut a = [0u8; 13];
+    a[..8].copy_from_slice(&seq.to_be_bytes());
+    a[8] = ty;
+    a[9..11].copy_from_slice(&VERSION);
+    a[11..].copy_from_slice(&(plain_len as u16).to_be_bytes());
+    a
+}
+
 /// One direction's key, static IV and sequence number. A new key makes a new `Traffic`;
 /// there is no way to reset the sequence of an existing one.
 struct Traffic {
@@ -152,11 +180,13 @@ struct Traffic {
     seq: u64,
     /// `MAX_RECORDS_PER_KEY`. A field so tests can use a small bound.
     limit: u64,
+    /// TLS 1.2 record protection (RFC 5288): `iv[..4]` is the implicit salt and the record carries an 8-byte explicit nonce.
+    v12: bool,
 }
 
 impl Traffic {
     fn new(key: &[u8; KEY_LEN], iv: &[u8; NONCE_LEN]) -> Self {
-        Traffic { aead: Aes128Gcm::new(key), key: *key, iv: *iv, seq: 0, limit: MAX_RECORDS_PER_KEY }
+        Traffic { aead: Aes128Gcm::new(key), key: *key, iv: *iv, seq: 0, limit: MAX_RECORDS_PER_KEY, v12: false }
     }
 }
 
@@ -215,6 +245,8 @@ pub struct RecordLayer<T> {
     /// because the caller still borrows them until then.
     pending: usize,
     ccs_allowed: bool,
+    /// TLS 1.2 read side: the peer's `change_cipher_spec` must come before the first protected record.
+    ccs_expected: bool,
 }
 
 impl<T: Read + Write> RecordLayer<T> {
@@ -224,12 +256,13 @@ impl<T: Read + Write> RecordLayer<T> {
             io,
             tx: Tx::Plain,
             rx: Rx::Plain,
-            wbuf: vec![0; MAX_WIRE].into_boxed_slice(),
+            wbuf: vec![0; MAX_WIRE + EXPLICIT_NONCE_LEN].into_boxed_slice(),
             rbuf: vec![0; 2 * MAX_WIRE].into_boxed_slice(),
             pos: 0,
             end: 0,
             pending: 0,
             ccs_allowed: false,
+            ccs_expected: false,
         }
     }
 
@@ -288,6 +321,35 @@ impl<T: Read + Write> RecordLayer<T> {
             _ => {}
         }
         self.rx = Rx::Keyed(Traffic::new(key, iv));
+        Ok(())
+    }
+
+    /// TLS 1.2: protect what we send with AES-128-GCM (RFC 5288). `salt` is the 4-byte implicit nonce from the key block.
+    /// Records carry their real type and the explicit nonce is the sequence number. Send `change_cipher_spec` first.
+    pub fn install_write_key12(&mut self, key: &[u8; KEY_LEN], salt: &[u8; 4]) -> Result<(), Error> {
+        match &self.tx {
+            Tx::Dead => return Err(Error::Failed),
+            Tx::Closed => return Err(Error::Closed),
+            _ => {}
+        }
+        let mut t = Traffic::new(key, &salt12(salt));
+        t.v12 = true;
+        self.tx = Tx::Keyed(t);
+        Ok(())
+    }
+
+    /// TLS 1.2: unprotect what we read. The next record must be the peer's `change_cipher_spec`. Then every record is
+    /// protected. Nothing may wait in the read-ahead buffer except records that follow that `change_cipher_spec`.
+    pub fn install_read_key12(&mut self, key: &[u8; KEY_LEN], salt: &[u8; 4]) -> Result<(), Error> {
+        match &self.rx {
+            Rx::Dead => return Err(Error::Failed),
+            Rx::Closed => return Err(Error::Closed),
+            _ => {}
+        }
+        let mut t = Traffic::new(key, &salt12(salt));
+        t.v12 = true;
+        self.rx = Rx::Keyed(t);
+        self.ccs_expected = true;
         Ok(())
     }
 
@@ -389,6 +451,32 @@ impl<T: Read + Write> RecordLayer<T> {
                 b[HEADER_LEN..HEADER_LEN + n].copy_from_slice(content);
                 HEADER_LEN + n
             }
+            Tx::Keyed(t) if t.v12 => {
+                // RFC 5246 6.2.3.3 and RFC 5288 3: `explicit_nonce || ciphertext || tag`, AAD `seq || type || version || length`.
+                if t.seq >= t.limit {
+                    return Err(Error::KeyLimit);
+                }
+                let clen = EXPLICIT_NONCE_LEN + n + TAG_LEN;
+                let header = [ty, VERSION[0], VERSION[1], (clen >> 8) as u8, clen as u8];
+                let b = &mut self.wbuf;
+                let seq = t.seq.to_be_bytes();
+                b[..HEADER_LEN].copy_from_slice(&header);
+                b[HEADER_LEN..HEADER_LEN + EXPLICIT_NONCE_LEN].copy_from_slice(&seq);
+                let body = HEADER_LEN + EXPLICIT_NONCE_LEN;
+                b[body..body + n].copy_from_slice(content);
+                let aad = aad12(t.seq, ty, n);
+                let nonce = nonce12(&t.iv, &seq);
+                t.seq += 1;
+                let tag = match t.aead.seal_in_place_detached(&nonce, &aad, &mut b[body..body + n]) {
+                    Ok(tag) => tag,
+                    Err(_) => {
+                        self.tx = Tx::Dead;
+                        return Err(Error::Internal);
+                    }
+                };
+                b[body + n..body + n + TAG_LEN].copy_from_slice(&tag);
+                HEADER_LEN + clen
+            }
             Tx::Keyed(t) => {
                 // seq < limit <= u64::MAX, so `seq + 1` cannot wrap.
                 if t.seq >= t.limit {
@@ -451,7 +539,7 @@ impl<T: Read + Write> RecordLayer<T> {
         unread >= HEADER_LEN && unread >= HEADER_LEN + u16::from_be_bytes([self.rbuf[at + 3], self.rbuf[at + 4]]) as usize
     }
 
-    /// Makes sure `rbuf[pos..end]` has at least `need` bytes (`need <= MAX_WIRE`).
+    /// Makes sure `rbuf[pos..end]` has at least `need` bytes (`need <= MAX_WIRE + EXPLICIT_NONCE_LEN`, far below `rbuf.len()`).
     fn fill(&mut self, need: usize) -> Result<(), Error> {
         if self.end - self.pos >= need {
             return Ok(());
@@ -488,6 +576,9 @@ impl<T: Read + Write> RecordLayer<T> {
         if self.pos == self.end {
             self.pos = 0;
             self.end = 0;
+        }
+        if matches!(&self.rx, Rx::Keyed(t) if t.v12) {
+            return self.next12();
         }
         loop {
             self.fill(HEADER_LEN)?;
@@ -559,6 +650,68 @@ impl<T: Read + Write> RecordLayer<T> {
                 APPDATA => Err(Error::UnexpectedRecord(APPDATA)),
                 t => Err(Error::BadContentType(t)),
             };
+        }
+    }
+
+    /// One record under TLS 1.2 protection. The first one must be the peer's `change_cipher_spec` (1 byte, value 1).
+    /// After that every record is protected and has its real type: handshake, alert or application data.
+    fn next12(&mut self) -> Result<Next, Error> {
+        self.fill(HEADER_LEN)?;
+        let h: [u8; HEADER_LEN] = self.rbuf[self.pos..self.pos + HEADER_LEN].try_into().map_err(|_| Error::Internal)?;
+        let (ty, version, len) = (h[0], u16::from_be_bytes([h[1], h[2]]), u16::from_be_bytes([h[3], h[4]]) as usize);
+        if version >> 8 != 3 {
+            return Err(Error::BadVersion(version));
+        }
+        if self.ccs_expected {
+            if ty == ALERT && len <= MAX_PLAINTEXT {
+                // The peer ended the handshake before its change_cipher_spec. The alert is still plaintext.
+                self.fill(HEADER_LEN + len)?;
+                self.pending = HEADER_LEN + len;
+                return self.alert(self.pos + HEADER_LEN, self.pos + HEADER_LEN + len);
+            }
+            if ty != CCS || len != 1 {
+                return Err(Error::UnexpectedRecord(ty));
+            }
+            self.fill(HEADER_LEN + 1)?;
+            if self.rbuf[self.pos + HEADER_LEN] != 1 {
+                return Err(Error::UnexpectedRecord(ty));
+            }
+            self.pos += HEADER_LEN + 1;
+            self.ccs_expected = false;
+            return self.next12();
+        }
+        if !matches!(ty, ALERT | HANDSHAKE | APPDATA) {
+            return Err(if ty == CCS { Error::UnexpectedRecord(ty) } else { Error::BadContentType(ty) });
+        }
+        if version != 0x0303 {
+            return Err(Error::BadVersion(version));
+        }
+        if len > MAX_PLAINTEXT + EXPLICIT_NONCE_LEN + TAG_LEN {
+            return Err(Error::RecordOverflow);
+        }
+        if len < EXPLICIT_NONCE_LEN + TAG_LEN {
+            return Err(Error::AuthFailed);
+        }
+        if matches!(&self.rx, Rx::Keyed(t) if t.seq >= t.limit) {
+            return Err(Error::KeyLimit);
+        }
+        self.fill(HEADER_LEN + len)?;
+        let start = self.pos + HEADER_LEN;
+        self.pending = HEADER_LEN + len;
+        let Rx::Keyed(t) = &mut self.rx else { return Err(Error::Internal) };
+        let n = len - EXPLICIT_NONCE_LEN - TAG_LEN;
+        let (explicit, rest) = self.rbuf[start..start + len].split_at_mut(EXPLICIT_NONCE_LEN);
+        let (body, tag) = rest.split_at_mut(n);
+        let tag: [u8; TAG_LEN] = (&*tag).try_into().map_err(|_| Error::Internal)?;
+        let nonce = nonce12(&t.iv, explicit);
+        t.aead.open_in_place_detached(&nonce, &aad12(t.seq, ty, n), body, &tag).map_err(|_| Error::AuthFailed)?;
+        t.seq += 1;
+        let (a, b) = (start + EXPLICIT_NONCE_LEN, start + EXPLICIT_NONCE_LEN + n);
+        match ty {
+            HANDSHAKE if a == b => Err(Error::EmptyRecord),
+            HANDSHAKE => Ok(Next::Handshake(a, b)),
+            ALERT => self.alert(a, b),
+            _ => Ok(Next::App(a, b)),
         }
     }
 

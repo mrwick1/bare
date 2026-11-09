@@ -5,6 +5,9 @@
 //! (X25519), CertificateVerify schemes 0x0403 (ecdsa_secp256r1_sha256), 0x0804 and 0x0805 (rsa_pss_rsae_sha256 and sha384)
 //! and ALPN `h2` and `http/1.1` (`h2` only when the caller offers it).
 //!
+//! A server that answers with TLS 1.2 gets the handshake in `tls12.rs` (suites 0xC02B and 0xC02F, X25519). The chain,
+//! host name and trust store checks are the same for both versions.
+//!
 //! Handshake order is fixed. Any other message is an error:
 //! `ClientHello -> ServerHello -> EncryptedExtensions -> Certificate -> CertificateVerify
 //!  -> server Finished -> client Finished`.
@@ -38,6 +41,9 @@ use crate::{ecc, random, rsa, verify, x25519, x509};
 use std::fmt;
 use std::io::{self, ErrorKind, Read, Write};
 use std::time::{Duration, Instant};
+
+#[path = "tls12.rs"]
+mod tls12;
 
 /// Wall-clock limit for the whole handshake.
 pub const HANDSHAKE_DEADLINE: Duration = Duration::from_secs(30);
@@ -230,6 +236,8 @@ pub struct ClientStream<T: Read + Write> {
     state: State,
     http11: bool,
     h2: bool,
+    /// The handshake ran TLS 1.2. Renegotiation is not supported, so no handshake message may follow it.
+    v12: bool,
 }
 
 /// Overwrite with zeros in a way the compiler keeps.
@@ -314,6 +322,7 @@ fn connect_alpn<T: Read + Write, V: ChainVerifier>(
         state: State::Open,
         http11: false,
         h2: false,
+        v12: false,
     };
     match s.handshake(host, verifier, now, rnd, h2) {
         Ok(()) => {
@@ -415,9 +424,10 @@ fn parse_encrypted_extensions(body: &[u8], offer_h2: bool) -> Result<(bool, bool
 }
 
 /// Certificate (section 4.4.2). Fills `chain` with slices of `body`. Returns the count.
-fn parse_certificate<'a>(body: &'a [u8], chain: &mut [&'a [u8]; MAX_CHAIN]) -> Result<usize, Error> {
+/// TLS 1.2 (`tls13` false, RFC 5246 7.4.2) has no request context and no entry extensions.
+fn parse_certificate<'a>(body: &'a [u8], chain: &mut [&'a [u8]; MAX_CHAIN], tls13: bool) -> Result<usize, Error> {
     let mut r = R(body);
-    if !r.vec8()?.is_empty() {
+    if tls13 && !r.vec8()?.is_empty() {
         return Err(Error::Illegal("certificate_request_context is not empty"));
     }
     let n = r.u24()?;
@@ -431,7 +441,7 @@ fn parse_certificate<'a>(body: &'a [u8], chain: &mut [&'a [u8]; MAX_CHAIN]) -> R
         }
         let der = list.take(len)?;
         // Entry extensions: we offered status_request and SCT in none, so any is unsolicited.
-        let mut ext = R(list.vec16()?);
+        let mut ext = R(if tls13 { list.vec16()? } else { &[] });
         if !ext.0.is_empty() {
             let ty = ext.u16()? as u16;
             ext.vec16()?;
@@ -620,13 +630,17 @@ impl<T: Read + Write> ClientStream<T> {
         let mut t = Transcript::new();
         t.update(&ch[..n]);
         self.rl.write_handshake(&ch[..n])?;
-        self.rl.allow_compat_ccs(true);
-        self.rl.write_compat_ccs()?;
         self.rl.get_mut().flush().map_err(|e| Error::Io(e.kind()))?;
 
         // ServerHello. Keys change here, so nothing may follow it in its record.
         let n = self.read_message(hello::SERVER_HELLO, MAX_SERVER_HELLO)?;
         let msg = &self.hs[self.hs_pos..self.hs_pos + n];
+        if hello::is_tls12_server_hello(msg) {
+            return self.handshake12(host, verifier, now, rnd, &public, offer_h2, t, n);
+        }
+        // TLS 1.3. The compatibility CCS goes out before our second flight (appendix D.4): a TLS 1.2 server must not see it.
+        self.rl.allow_compat_ccs(true);
+        self.rl.write_compat_ccs()?;
         let sh = hello::parse_server_hello(msg, session_id)?;
         t.update(msg);
         self.consume(n);
@@ -654,7 +668,7 @@ impl<T: Read + Write> ClientStream<T> {
         let n = self.read_message(hello::CERTIFICATE, MAX_CERTIFICATE)?;
         let msg = &self.hs[self.hs_pos..self.hs_pos + n];
         let mut chain: [&[u8]; MAX_CHAIN] = [&[]; MAX_CHAIN];
-        let count = parse_certificate(&msg[hello::HANDSHAKE_HEADER_LEN..], &mut chain)?;
+        let count = parse_certificate(&msg[hello::HANDSHAKE_HEADER_LEN..], &mut chain, true)?;
         verifier.verify_chain(&chain[..count], host, now).map_err(Error::Certificate)?;
         let key = leaf_key(chain[0])?;
         t.update(msg);
@@ -746,6 +760,9 @@ impl<T: Read + Write> ClientStream<T> {
     /// Handle handshake bytes that arrived after the handshake. Only whole NewSessionTicket
     /// messages are taken. KeyUpdate and everything else fail closed.
     fn post_handshake(&mut self) -> Result<(), Error> {
+        if self.v12 {
+            return Err(Error::Unsupported("renegotiation"));
+        }
         loop {
             let buf = &self.hs[self.hs_pos..];
             if buf.len() < hello::HANDSHAKE_HEADER_LEN {
@@ -1214,6 +1231,7 @@ mod tests {
             state: State::Open,
             http11: false,
             h2: false,
+            v12: false,
         };
         assert!(s.handshake(HOST, &Pin(HOST), NOW, &client_random(), false).is_err());
         let _ = s.fail(Error::Hello(HelloError::HelloRetryRequest));

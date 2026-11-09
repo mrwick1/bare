@@ -4541,3 +4541,48 @@ PR #292 left 16 rows over +0.5% under both allocators, and the author could not 
 - `exec_diff.sh`: 79 runs, 0 differences. `test262_check.sh`: gate ok.
 
 Not tested: a Chrome run of any page; the bytecode engine rows (`BARE_JS_EXEC=byte`) in the matrix; `scripts_load reject` with the default tcache in the matrix (only measured by hand).
+
+## TLS 1.2 client (2026-11-09)
+
+Owner request: load craigslist.org, nginx.org and dev.to. They need TLS 1.2. The client spoke TLS 1.3 only.
+
+What changed:
+
+- The ClientHello offers TLS 1.3 and TLS 1.2. The `supported_versions` list is 1.3, 1.2. A ServerHello with `legacy_version` 0x0303 and no `supported_versions` runs a TLS 1.2 handshake (`crates/tls/src/tls12.rs`). A TLS 1.3 server still gets the TLS 1.3 path.
+- Suites for 1.2: `TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256` (0xC02B) and `TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256` (0xC02F). The crate has no AES-256-GCM and no ChaCha20, so those suites are not offered.
+- Groups: X25519 and secp256r1. OpenSSL servers need the group of an ECDSA certificate in the client's list, and craigslist.org picks P-256 for ECDHE. P-256 ECDH uses the existing variable-time `mul_add`, with one fresh random scalar per handshake. This is an exception to the rule of `ecc.rs`: it is not constant-time (see the doc at the top of `ecc.rs`).
+- The ServerKeyExchange signature is checked with the leaf key: ECDSA P-256/P-384, RSA-PSS and RSA PKCS#1 v1.5 with SHA-256/384. The certificate check, the host name check and the trust store are the same as for TLS 1.3.
+- PRF is P_SHA256. `extended_master_secret` (RFC 7627) is sent. A server that does not answer with it gets the plain master secret: bare has no resumption, no renegotiation and no client certificate, the cases that the triple-handshake attack needs. A renegotiation request is refused. There is no resumption and no compression. SNI and ALPN `http/1.1` are as before.
+- The downgrade marker in `ServerHello.random` (`DOWNGRD\x01`) aborts the handshake.
+- The compatibility ChangeCipherSpec is now sent after a TLS 1.3 ServerHello (RFC 8446 D.4), not before it. A TLS 1.2 server must not see it.
+- `crates/net/src/http.rs`: a redirect whose body has no length and ends with a TLS close without `close_notify` is followed. craigslist.org answers `/` with a bare 302 and closes this way. The body of a redirect is never used. Other close-delimited bodies still need `close_notify` (`a_body_that_ends_at_close_needs_close_notify`).
+
+Tests (all offline, loopback only):
+
+- Fixed vectors: PRF (Python `cryptography` as the source, `tools/fixtures/tls12/gen.py`), ServerKeyExchange signatures for every scheme and curve, AEAD record framing and keys.
+- A full handshake against an independent minimal TLS 1.2 server in the test module, for X25519 and P-256, with and without `extended_master_secret`. Cases that must fail: an unsupported suite (AES-256 and the TLS 1.3 suite), an unsupported group, a bad signature, an RSA suite with an EC leaf, the downgrade marker, a resumption answer, a renegotiation request, a TLS 1.1 ServerHello, compression, an unsolicited extension, a wrong server Finished and a missing ChangeCipherSpec.
+- `crates/tls/tests/tls12_openssl.rs`: a real `openssl s_server -tls1_2` with ECDHE-ECDSA and ECDHE-RSA (all four RSA schemes), X25519 and P-256 groups, ALPN, certificate errors, and a server that offers both versions (it must pick 1.3). They skip when `openssl` is missing.
+- `crates/net/tests/https_openssl.rs`: the redirect close case, for `get` and `send_once`.
+
+Live results (`tools/drive/public/run.sh --repeat 3`, three new journeys):
+
+| Journey | Result |
+| --- | --- |
+| craigslist-home | pass |
+| nginx-org-home | pass |
+| devto-home | pass |
+
+Before the redirect change, craigslist-home failed with `tls record error: UnexpectedEof` after a good TLS 1.2 handshake (packet capture: handshake, request, a 302 of 287 bytes, FIN with no `close_notify`). `openssl s_client` reports the same close. The full public run (31 journeys, one run each) had 31 passes and one flake (duckduckgo-html-search, retried).
+
+TLS 1.3 cost: 3000 replayed TLS 1.3 handshakes (the `connect_inner` replay of `client_fixture.rs`, run through a temporary test) cost 7,641,382,327 to 7,641,382,720 user instructions on `origin/main` and 7,644,576,307 to 7,644,577,383 with this change. The delta is +0.042 % (about 1,065 instructions per handshake). The bigger ClientHello and the P-256 group cause it. The time was too noisy to read: another job shared the machine.
+
+Not tested:
+
+- ECDSA P-384 and RSA leaf keys over a live TLS 1.2 server (only RSA-2048 and P-256 leaf keys against `openssl`; the P-384 verify path has vector tests).
+- A TLS 1.3 server that prefers P-256 and answers with a HelloRetryRequest. The client still refuses HelloRetryRequest. The public run shows no such site among the 31 journeys.
+- AES-256-GCM and ChaCha20 suites (not implemented).
+- Time-side channels of the P-256 ECDH (variable time on purpose).
+
+Open:
+
+- `tools/crypto/client_load.rs` does not compile on `origin/main` (`connect_inner` is `cfg(test)`; `connect_with` takes four arguments). It is not changed here. The cost check above used a temporary test instead.
