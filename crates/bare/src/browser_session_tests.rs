@@ -553,3 +553,15 @@ fn the_documents_and_the_inputs_of_a_session_share_its_connections() {
         assert_eq!((srv.total(), srv.connections()), (4, 1));
     });
 }
+
+#[test]
+fn document_navigation_requests_html() {
+    big(|| {
+        let srv = server(|| vec![("/", html("<body>ok</body>"))]);
+        let mut s = Session::new(cfg(srv.url("/")));
+        s.run();
+        let heads = srv.heads.lock().unwrap();
+        assert!(heads[0].contains("accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"));
+        assert!(heads[0].contains("user-agent: bare/0.1"));
+    });
+}

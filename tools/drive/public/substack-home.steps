@@ -1,0 +1,5 @@
+# substack-home: load the public home page.
+#   bare-drive --var URL=https://substack.com/ substack-home.steps
+timeout 30000
+open ${URL}
+expect css="body" visible

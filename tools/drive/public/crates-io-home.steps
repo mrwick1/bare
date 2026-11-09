@@ -1,0 +1,5 @@
+# crates-io-home: load the public home page.
+#   bare-drive --var URL=https://crates.io/ crates-io-home.steps
+timeout 30000
+open ${URL}
+expect css="body" visible
