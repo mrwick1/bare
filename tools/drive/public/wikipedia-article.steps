@@ -1,0 +1,12 @@
+# Wikipedia: an article, a link in its first paragraph, a new article, then back to the first one by address.
+#   bare-drive --var URL=https://en.wikipedia.org/wiki/Rust_(programming_language) wikipedia-article.steps
+timeout 40000
+open ${URL}
+expect css="h1#firstHeading" text~"Rust"
+expect js "document.querySelectorAll('#toc li, .vector-toc li').length > 5"
+expect css="p a[href$='/wiki/General-purpose_programming_language']" count 1
+click css="p a[href$='/wiki/General-purpose_programming_language']"
+expect url~"General-purpose_programming_language"
+expect css="h1#firstHeading" text~"General-purpose programming language"
+goto ${URL}
+expect css="h1#firstHeading" text~"Rust"

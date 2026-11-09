@@ -309,6 +309,10 @@ impl Page {
             rect = g.client_rect(s, h.node);
             false
         });
+        // A plain inline element has no box fragment, only text fragments: use its first line rectangle (as `getClientRects` does).
+        if rect.is_none() && !hidden {
+            rect = self.browser().and_then(|b| b.inline_rects(h.node).into_iter().find(|r| r.w > 0.0 && r.h > 0.0));
+        }
         match rect {
             _ if hidden => Err(Refusal::Hidden("visibility: hidden")),
             Some(r) if r.w > 0.0 && r.h > 0.0 => Ok(r),
@@ -323,7 +327,15 @@ impl Page {
         if self.disabled(h) {
             return Err(Refusal::Disabled);
         }
-        if self.scroll_with(|g, s| g.reveal(s, h.node, Align::IfNeeded, Align::IfNeeded)) {
+        // An inline element has no box: bring its nearest ancestor with a box into view.
+        let moved = self.scroll_with(|g, s| {
+            let mut n = h.node;
+            while g.client_rect(s, n).is_none() && let Some(p) = g.doc.parent(n) {
+                n = p;
+            }
+            g.reveal(s, n, Align::IfNeeded, Align::IfNeeded)
+        });
+        if moved {
             self.send_scroll_events();
             self.rehover();
         }

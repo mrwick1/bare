@@ -1,0 +1,10 @@
+# Hacker News: open a story's comments, go back to the front page, and the front page still has 30 stories.
+#   bare-drive --var URL=https://news.ycombinator.com/ hn-comments-back.steps
+timeout 30000
+open ${URL}
+expect js "document.querySelectorAll('tr.athing').length === 30"
+click css="tr.athing:first-child + tr .subline > a:last-child"
+expect url~"/item?id="
+goto ${URL}
+expect url="${URL}"
+expect js "document.querySelectorAll('tr.athing').length === 30"

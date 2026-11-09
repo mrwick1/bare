@@ -1,0 +1,8 @@
+# Wikipedia: type in the search box and press Enter; a search or an article for the text loads.
+#   bare-drive --var URL=https://en.wikipedia.org/wiki/Rust_(programming_language) wikipedia-search.steps
+timeout 40000
+open ${URL}
+expect css="h1#firstHeading" text~"Rust"
+type css="input#searchInput" "Alan Turing\n"
+expect url~"Alan_Turing"
+expect css="h1#firstHeading" text~"Alan Turing"

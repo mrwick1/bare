@@ -1,0 +1,12 @@
+# Hacker News: "new" lists 30 newest stories, "past" lists the front pages of a day. Structure only.
+#   bare-drive --var URL=https://news.ycombinator.com/ hn-new-past.steps
+timeout 30000
+open ${URL}
+expect role=link name="new" visible
+click role=link name="new"
+expect url~"/newest"
+expect js "document.querySelectorAll('tr.athing').length === 30"
+click css="span.pagetop a[href=front]"
+expect url~"/front"
+expect js "document.querySelectorAll('tr.athing').length >= 25"
+expect css="span.pagetop b.hnname" visible
