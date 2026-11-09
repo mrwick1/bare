@@ -115,14 +115,14 @@ fn current_script_is_the_element_and_is_cleared_even_when_the_script_throws() {
     big(|| {
         let html = format!(
             "{PRE}<script id=s1>log.push('inline:' + document.currentScript.id)</script>
-             <script id=t>Promise.resolve().then(function () {{ log.push('after-throw:' + document.currentScript) }}); throw new TypeError('secret-xyz')</script>
+             <script id=t>Promise.resolve().then(function () {{ log.push('after-throw:' + document.currentScript.id) }}); throw new TypeError('secret-xyz')</script>
              <script src='/cs.js'></script>
-             <script>setTimeout(function () {{ log.push('timer:' + document.currentScript) }}, 0);
-               Promise.resolve().then(function () {{ log.push('promise:' + document.currentScript) }})</script>"
+             <script id=u>setTimeout(function () {{ log.push('timer:' + document.currentScript) }}, 0);
+               Promise.resolve().then(function () {{ log.push('promise:' + document.currentScript.id) }})</script>"
         );
         let routes = vec![js("/cs.js", "log.push('ext:' + document.currentScript.getAttribute('src'))")];
         let (log, r, _) = page(&html, routes, quick());
-        assert_eq!(log, "inline:s1|after-throw:null|ext:/cs.js|promise:null|timer:null");
+        assert_eq!(log, "inline:s1|after-throw:t|ext:/cs.js|promise:u|timer:null");
         assert_eq!((r.script_throws, r.stop.clone()), (1, Stop::Settled));
         let all = r.diagnostics.join("\n");
         assert!(all.contains("TypeError"), "{all}");

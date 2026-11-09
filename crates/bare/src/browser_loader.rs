@@ -41,8 +41,8 @@
 //!   no `Content-Encoding` that `bare_net` cannot undo (it undoes gzip, deflate and br), size caps. A failed external script is never run. It gets an `error` event, a successful one
 //!   a `load` event (also when the script threw). Inline scripts get no event. Events go through the DOM dispatch: listeners
 //!   and `onload`/`onerror` handlers run as normal listeners.
-//! - `document.currentScript` is the element while its script runs (inline, external, dynamic), else `null`. It is cleared
-//!   when the script throws too. `document.readyState` is `loading`, `interactive` or `complete`.
+//! - `document.currentScript` is the element while its script runs (inline, external, dynamic) and through the microtask checkpoint
+//!   that follows it, else `null`. It is cleared when the script throws too (after the checkpoint). A module script never sets it. `document.readyState` is `loading`, `interactive` or `complete`.
 //! - A script that throws is reported (`Browser::take_reports`, event type `error`) and loading goes on. `window.onerror` and
 //!   `ErrorEvent` are absent. Diagnostics hold only the error name.
 //! - A script budget (`Limit` of steps, call depth, nesting depth, statement frames, jobs of one checkpoint) ends only the task that
@@ -1193,8 +1193,20 @@ impl Run<'_> {
         stop
     }
 
-    /// Run one script in the realm with `currentScript` set. A throw is reported and ends only this script.
+    /// Run one script in the realm with `currentScript` set. A throw is reported and ends only this script. `currentScript` stays
+    /// set through the microtask checkpoint of the script (HTML "clean up after running script"), then it is cleared. The dynamic
+    /// inline scripts that this script queued run first, as before; they leave `currentScript` to this one for the checkpoint.
     fn run_one(&mut self, node: NodeId, source: &str, what: &str) -> Flow {
+        let r = self.exec_one(node, source, what).and_then(|_| self.run_queued_inline()).and_then(|_| {
+            self.dom.scripts.current.set(Some(node));
+            self.checkpoint("microtask checkpoint")
+        });
+        self.dom.scripts.current.set(None);
+        r
+    }
+
+    /// `run_one` without the checkpoint. It leaves `currentScript` set.
+    fn exec_one(&mut self, node: NodeId, source: &str, what: &str) -> Flow {
         self.budget()?;
         let dom = self.dom.clone();
         if let Err(e) = self.b.it.host_scope(|it| crate::browser_frames::activate(&dom, it)) { return self.abort(e, what); }
@@ -1204,7 +1216,6 @@ impl Run<'_> {
         if let Some(t) = t {
             bare_net::trace::mark(|| format!("script {what}"), t.elapsed().as_micros() as u64);
         }
-        self.dom.scripts.current.set(None);
         self.res.scripts_run += 1;
         self.res.tasks += 1;
         match r {
@@ -1231,8 +1242,8 @@ impl Run<'_> {
         self.diag(format!("script threw {name}: {what}"));
     }
 
-    /// After a script or task: dynamic inline scripts that it queued run now, then the microtask checkpoint.
-    fn after_js(&mut self) -> Flow {
+    /// The dynamic inline scripts that a script or task queued run now (no checkpoint between them).
+    fn run_queued_inline(&mut self) -> Flow {
         loop {
             if !self.dom.nav.s.borrow().requests.is_empty() { break; }
             let next = self.dom.scripts.inline.borrow_mut().pop_front();
@@ -1245,8 +1256,16 @@ impl Run<'_> {
                 }
                 continue;
             }
-            self.run_one(node, &text, "dynamic inline script")?;
+            let r = self.exec_one(node, &text, "dynamic inline script");
+            self.dom.scripts.current.set(None);
+            r?;
         }
+        Ok(())
+    }
+
+    /// After a script or task: dynamic inline scripts that it queued run now, then the microtask checkpoint.
+    fn after_js(&mut self) -> Flow {
+        self.run_queued_inline()?;
         // Each pass answers the `import()` calls of the one before, until none is left.
         loop {
             self.checkpoint("microtask checkpoint")?;

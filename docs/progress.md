@@ -5960,3 +5960,67 @@ The page runs further than before and no run stops at `with`. The result changes
 - The debug build was not run again after the rebase on `1bec71ae`.
 - Jemalloc cost rows (none was over the limit under glibc).
 - A real `eval` (the engine has none): 49 test262 tests wait for it.
+
+## #332 `currentScript` through the microtask checkpoint, and `ImageData`
+
+### Problems
+
+1. tailwindcss.com, hashnode.com and nodejs.org logged `Invariant: Expected document.currentScript to be a <script> element. Received null instead.` `Loader::run_one` cleared `currentScript` when the script ended. The microtask checkpoint ran later, in `after_js`. Next.js reads `document.currentScript` in a promise job of a classic script. Cause verified by the new tests: a promise job of an inline script read `null` on main.
+2. openstreetmap.org logged `ReferenceError: ImageData is not defined`.
+
+### Change
+
+- `run_one` (`browser_loader.rs`) runs the script, then the dynamic inline scripts that it queued (`run_queued_inline`, moved out of `after_js`), then the microtask checkpoint with `currentScript` set to the script, then clears it. A script that throws gets the same checkpoint. The order of tasks is the same as before. A module script never sets `currentScript`. A timer and an event task see `null`.
+- A dynamic inline script runs after its parent script, as before. Its promise jobs now run at the checkpoint of the parent, so they see the parent as `currentScript`. A browser does the same, because it runs the inserted script inside `appendChild`.
+- `browser_canvas.rs`: lazy `ImageData` (both constructors and all errors), and on the 2D context `createImageData`, `getImageData`, the three gradients, `createPattern`, `isPointInPath`, `isPointInStroke`. Reads give zero bytes because `bare` draws no canvas pixels. One `ImageData` holds at most 64 MiB. The message of the `RangeError` is ours: `Out of memory at ImageData creation` (not checked against Chrome).
+- Registration: one line in `browser.rs` and one test module line each in `lib.rs`. No change in `crates/js`.
+- `createPattern` gives `null` for an `<img>` that is not complete, else an object with a no-op `setTransform`. The brief said `null`. The spec returns `null` only for an image that is not ready, and a page may call `setTransform` on a real pattern.
+
+### Spec references
+
+HTML Standard, "execute the script element" (sets `currentScript` for a classic script) and "clean up after running script" (microtask checkpoint when the JavaScript execution context stack is empty, before `currentScript` is restored). HTML Standard, canvas: `ImageData`, `createImageData`, `getImageData`, `createPattern`.
+
+### Tests that failed first
+
+- `browser_current_script_tests`: on main the promise job of an inline, external, async and dynamic script read `null` (4 of 5 tests failed; the module and timer test passed, as it must). The old test `current_script_is_the_element_and_is_cleared_even_when_the_script_throws` in `browser_loader_tests.rs` expected `null` in a promise job. I changed it to expect the element.
+- `browser_canvas_tests`: all 4 failed on main (`ImageData is not defined`, `x.getImageData is not a function`).
+
+### Cost
+
+Base `50e71ca8cc` (origin/main after PR #331, the `with` statement; a fresh `base-build`; the branch is rebased on it). All 805 rows of `tools/js/cost_matrix.sh`: over under both allocators 0, over under one allocator 0, failed 0, mean change glibc +0.005%. No row reached the jemalloc rerun. An earlier run on base `1bec71ae9b` (before the last rebase): 805 rows, 0 over under both, `fetch_load bytes 10` +0.537% glibc only (+0.071% jemalloc). `base-build` has no `bare-stress` by default; I built it with `base-build origin/main --release -p bare-stress`.
+
+### Checks (final tree, after the rebase)
+
+- `cargo test --release --workspace --no-fail-fast`: 3375 passed, 0 failed, 13 ignored.
+- `tools/drive/public/run.sh` with the branch `bare-drive`: pass 48, fail 0, known 0, skip 0, flakes 1 (passed on the retry).
+
+### Live (`bare-drive`, step file: `open URL` and `expect js "document.readyState === 'complete'"`, 1 run base, 3 runs branch; the machine ran other jobs)
+
+| Site | Errors main | Errors branch | ms main / branch | Peak MiB main / branch |
+| --- | --- | --- | --- | --- |
+| tailwindcss.com | 1 (`currentScript`) | 1 (`dom-selector` budget abort) | 1489 / 957, 1462, 1670 | 132 / 136 |
+| hashnode.com | 1 (`currentScript`) | 0 | 4279 / 1100 | 120 / 137 |
+| nodejs.org/en | 1 (`currentScript`) | 0 | 769 / 668 | 44 / 55 |
+| nextjs.org | 0 | 0 | 1112 / 831 | 130 / 123 |
+| wise.com | 3 | 5 | 2277 / 1823, 1853, 2586 | 183 / 184 |
+| openstreetmap.org | 1 (`ImageData`) | 0 | 1612 / 1426 | 65 / 65 |
+
+All six reach `readyState` `complete` on both builds.
+
+Two sites show a new error. Both come from the page running further, not from a wrong `currentScript`:
+- wise.com: the branch adds `TypeError: Intl.Locale is not a constructor` (2 times) and 2 warnings. `Intl.Locale` does not exist in the engine (`crates/js/src` has no `Locale` class for `Intl`). On main the code that calls it never ran: the page made 60 requests, the branch makes 64. The 3 errors of main stay.
+- tailwindcss.com: the `currentScript` error is gone. A timer or task now hits the `dom-selector` budget (1 of 5 aborts). Three runs gave the same message. I did not find which selector.
+
+### Limits
+
+- `getImageData` reads no pixels. A page that draws, then reads back, gets zeros.
+- `createPattern` does not validate the repetition text or the type of the image beyond "an object".
+- The `RangeError` text of the 64 MiB bound is not the text of Chrome.
+- `width`, `height`, `data` and `colorSpace` are own data properties, not prototype accessors.
+
+### Not tested
+
+- Chrome behaviour for `ImageData` errors (no comparison run).
+- The `dom-selector` abort on tailwindcss.com: cause not found.
+- `bare --window`, macOS and arjun-e16.
+- `crates/js` gates (`test262_check.sh`, `exec_diff.sh`, `keycost.sh`): no change in `crates/js`.
