@@ -28,7 +28,7 @@
 //! keeps its upload object and its cached response alive. Side tables are pruned at `collect`.
 
 use crate::browser::*;
-use crate::browser_fetch::{Outcome, dequeue_xhr, forbidden_request, queue_xhr};
+use crate::browser_fetch::{Outcome, dequeue_xhr, forbidden_request, queue_xhr, queue_xhr_blob};
 use crate::browser_handlers::{handler_get, handler_set};
 use bare_js::eval::{Error, Interp};
 use bare_js::heap::PropertyDescriptor;
@@ -85,6 +85,8 @@ struct Xhr {
     up_listener: bool,
     method: String,
     url: Option<Url>,
+    /// The `blob:` URL that `open` got. Then `url` is a stand-in (the document URL) and `send` reads the Blob URL store.
+    blob: Option<String>,
     /// Lowercase names, values combined with ", ".
     headers: Vec<(String, String)>,
     timeout: u32,
@@ -301,6 +303,7 @@ fn xhr_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
         up_listener: false,
         method: String::new(),
         url: None,
+        blob: None,
         headers: Vec::new(),
         timeout: 0,
         creds: false,
@@ -400,8 +403,11 @@ fn open(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
         return Err(d.lim("fetch-url"));
     }
     let s = url.trim_matches(|c: char| c <= ' ');
+    let blob = crate::browser_web::is_blob_url(s).then(|| s.to_string());
     let parsed = match d.fetch_base() {
+        Some(b) if blob.is_some() => Ok(b),
         Some(b) => b.join(s),
+        None if blob.is_some() => Url::parse("http://blob.invalid/"),
         None => Url::parse(s),
     };
     let Ok(parsed) = parsed else { return Err(d.xerr(it, "SyntaxError", "open", &format!("Invalid URL '{url}'."))) };
@@ -411,7 +417,7 @@ fn open(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     dequeue_xhr(d, x);
     let was = d.xs(x, |x| {
         let was = x.state;
-        (x.method, x.url, x.send, x.resp, x.cache, x.state) = (method, Some(parsed), false, None, None, OPENED);
+        (x.method, x.url, x.blob, x.send, x.resp, x.cache, x.state) = (method, Some(parsed), blob, false, None, None, OPENED);
         x.headers.clear();
         x.seq += 1;
         was
@@ -470,6 +476,12 @@ fn send(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     }
     let (method, url, mut headers, seq, creds) = d.xs(x, |x| (x.method.clone(), x.url.as_ref().map(|u| Url::parse(&u.to_string()).expect("a parsed URL")), x.headers.clone(), x.seq, x.creds));
     let url = url.expect("opened");
+    if let Some(blob) = d.xs(x, |x| x.blob.clone()) {
+        // A Blob URL is read from the store, with no body and no network. Only GET reads it.
+        let found = (method == "GET").then(|| crate::browser_web::blob_url_read(d, &blob)).flatten();
+        queue_xhr_blob(d, (x, seq), url, found)?;
+        return send_started(d, it, x, seq, 0);
+    }
     let mut body = None;
     if method != "GET" && method != "HEAD" {
         let v = arg(a, 0);
@@ -489,6 +501,11 @@ fn send(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     }
     let body_len = body.as_ref().map_or(0, |b| b.len());
     queue_xhr(d, (x, seq), &method, url, headers, body, creds)?;
+    send_started(d, it, x, seq, body_len)
+}
+
+/// After `send` queued the request: mark it sent and fire `loadstart`.
+fn send_started(d: &Dom, it: &mut Interp<'_>, x: ObjId, seq: u64, body_len: usize) -> V {
     let up = d.upload_of(x);
     let listening = d.st.borrow().listeners.get(&Target::Obj(up)).is_some_and(|v| !v.is_empty());
     let now = d.now_ms();

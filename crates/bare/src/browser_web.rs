@@ -11,13 +11,22 @@
 //! There is no `crypto.subtle`.
 //!
 //! `navigator`: getters on `Navigator.prototype` with fixed values (`USER_AGENT` is the one place of the string).
-//! `userAgentData` has `brands` (a frozen array), `mobile` and `platform`. It has no `getHighEntropyValues` or `toJSON`.
+//! `userAgentData` (WICG UA Client Hints) has `brands` (a frozen array), `mobile` and `platform`, `toJSON()` of these three, and
+//! `getHighEntropyValues(hints)`. That method returns a Promise of an object with the three plus each hint asked for:
+//! `architecture` "x86", `bitness` "64", `model` "", `platformVersion` "", `uaFullVersion` and `fullVersionList` (from `CHROME`),
+//! `wow64` false and `formFactors` ["Desktop"]. It ignores other hints. `userAgent` and `userAgentData` report the same data.
 //! `cookieEnabled` is true, as asked. `document.cookie` and the network share one jar (`bare_net::cookie`, `browser_cookie.rs`). There is no `mediaDevices`.
 //!
 //! `Blob`: `new Blob(parts, {type})` with strings, `ArrayBuffer`s, views and Blobs, `size`, `type`, `text()`,
 //! `arrayBuffer()`, `slice()`. `File extends Blob` adds `name` and `lastModified`. A Blob keeps its bytes in a side table
 //! (a copy), bounded by `MAX_BLOB` for each Blob and `MAX_TOTAL` together. `endings` is ignored (always "transparent").
-//! Absent: `bytes()`, `stream()`, object URLs, structured clone.
+//! Absent: `bytes()`, `stream()`, structured clone.
+//!
+//! Object URLs (W3C File API, "Blob URL Store"): `URL.createObjectURL(blob)` registers the Blob under a new `blob:ORIGIN/UUID` in a
+//! store of this document and returns the URL. `URL.revokeObjectURL(url)` removes it. A URL that is not in the store (never made,
+//! revoked, or made by another document) cannot be read. The store holds its Blobs alive and at most `MAX_URLS` entries. The readers are
+//! `blob_url_read` callers: `fetch` and `XMLHttpRequest` (`browser_fetch.rs`, `browser_xhr.rs`) and a script element made by a script (`browser_loader.rs`).
+//! A bytes copy is made at each read. `MediaSource` is not supported, so `createObjectURL` takes a Blob or a File only.
 //!
 //! `FormData`: `append`, `set`, `get`, `getAll`, `has`, `delete`, `entries`, `keys`, `values`, `forEach` and
 //! `[Symbol.iterator]`. A value is a string or a File. Another Blob becomes a File ("blob", or `filename`). A value that
@@ -43,6 +52,7 @@ const MAX_BLOB: usize = 64 << 20;
 const MAX_TOTAL: usize = 256 << 20;
 const MAX_OBJECTS: usize = 1 << 16;
 const MAX_ENTRIES: usize = 1 << 16;
+const MAX_URLS: usize = 1 << 12;
 const MAX_RANDOM: usize = 65536;
 
 const NAMES: [&str; 5] = ["crypto", "navigator", "Blob", "File", "FormData"];
@@ -92,6 +102,8 @@ struct WState {
     blobs: IdMap<ObjId, BlobData>,
     forms: IdMap<ObjId, Form>,
     iters: IdMap<ObjId, IterObj>,
+    /// The Blob URL store: `blob:` URL to its Blob. The Blobs are roots.
+    urls: std::collections::HashMap<String, ObjId>,
     /// Bytes of all Blobs and of the names and strings of all forms.
     bytes: usize,
 }
@@ -108,7 +120,9 @@ pub(crate) struct WebHost {
 }
 
 pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
-    if let Some(m) = d.web.s.borrow().made {
+    let s = d.web.s.borrow();
+    out.extend(s.urls.values().map(|&o| Value::Object(o)));
+    if let Some(m) = s.made {
         out.extend(m.glob.into_iter().chain([m.langs, m.uad, m.brands, m.blob_p, m.file_p, m.form_p, m.iter_p]).map(Value::Object));
     }
 }
@@ -344,6 +358,8 @@ fn make(d: &Dom, it: &mut Interp<'_>) -> R<Made> {
     d.def_get(it, up, "brands", |d, it, t, _| uad(d, it, t).map(|m| Value::Object(m.brands)), None)?;
     d.def_get(it, up, "mobile", |d, it, t, _| uad(d, it, t).map(|_| Value::Bool(false)), None)?;
     d.def_get(it, up, "platform", |d, it, t, _| uad(d, it, t).and_then(|_| d.js_str(it, "Linux")), None)?;
+    op(d, it, up, "getHighEntropyValues", 1, high_entropy)?;
+    op(d, it, up, "toJSON", 0, |d, it, t, _| uad(d, it, t).and_then(|m| low_entropy(d, it, m)).map(Value::Object))?;
     let uad = d.obj(it, up)?;
     let mut brands = Vec::new();
     for (b, v) in [("Not.A/Brand", "8"), ("Chromium", CHROME), ("Google Chrome", CHROME)] {
@@ -445,12 +461,10 @@ fn get_random_values(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> 
     Ok(a[0])
 }
 
-fn random_uuid(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    crypto_this(d, it, this)?;
+/// A random UUID, RFC 9562 version 4, in lower case. `None` if the OS source fails.
+fn uuid_v4() -> Option<String> {
     let mut b = [0u8; 16];
-    if bare_tls::random::fill(&mut b).is_err() {
-        return Err(random_failed(d, it));
-    }
+    bare_tls::random::fill(&mut b).ok()?;
     b[6] = b[6] & 0x0f | 0x40;
     b[8] = b[8] & 0x3f | 0x80;
     let mut s = String::with_capacity(36);
@@ -460,6 +474,12 @@ fn random_uuid(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
         }
         let _ = write!(s, "{x:02x}");
     }
+    Some(s)
+}
+
+fn random_uuid(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    crypto_this(d, it, this)?;
+    let Some(s) = uuid_v4() else { return Err(random_failed(d, it)) };
     d.js_str(it, &s)
 }
 
@@ -477,6 +497,121 @@ fn uad(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<Made> {
         (Value::Object(o), Some(m)) if o == m.uad => Ok(m),
         _ => Err(illegal(it)),
     }
+}
+
+/// A new object with `brands`, `mobile` and `platform`: the low entropy hints.
+fn low_entropy(d: &Dom, it: &mut Interp<'_>, m: Made) -> R<ObjId> {
+    let o = d.obj(it, it.object_prototype())?;
+    let p = d.js_str(it, "Linux")?;
+    for (k, v) in [("brands", Value::Object(m.brands)), ("mobile", Value::Bool(false)), ("platform", p)] {
+        put(d, it, o, k, v)?;
+    }
+    Ok(o)
+}
+
+fn put(d: &Dom, it: &mut Interp<'_>, o: ObjId, k: &str, v: Value) -> R<()> {
+    let k = d.key(it, k)?;
+    it.define_data(o, k, v, true, true, true)
+}
+
+/// `getHighEntropyValues(hints)`: `hints` is any iterable of strings.
+fn high_entropy(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    let p = it.host_new_promise()?;
+    let r = (|| -> V {
+        let m = uad(d, it, this)?;
+        need(it, a, 1, "NavigatorUAData.getHighEntropyValues")?;
+        let bad = "Failed to execute 'getHighEntropyValues' on 'NavigatorUAData': The provided value cannot be converted to a sequence.";
+        let hints = a[0];
+        let Some(mut iter) = (if matches!(hints, Value::Object(_)) { it.host_iter_open(hints)? } else { None }) else { return Err(it.type_error(bad)) };
+        let out = low_entropy(d, it, m)?;
+        loop {
+            let step = match it.host_iter_next(&mut iter) {
+                Ok(Some(x)) => it.charge(1).and_then(|_| usv(d, it, x)).and_then(|h| hint(d, it, out, &h)).map(|_| true),
+                Ok(None) => Ok(false),
+                Err(e) => Err(e),
+            };
+            match step {
+                Ok(true) => {}
+                Ok(false) => return Ok(Value::Object(out)),
+                Err(e) => return Err(it.host_iter_fail(&mut iter, e)),
+            }
+        }
+    })();
+    crate::browser_fetch::settle(it, p, r)
+}
+
+/// One high entropy hint of `getHighEntropyValues`. Unknown names add nothing.
+fn hint(d: &Dom, it: &mut Interp<'_>, out: ObjId, name: &str) -> R<()> {
+    let v = match name {
+        "architecture" => d.js_str(it, "x86")?,
+        "bitness" => d.js_str(it, "64")?,
+        "model" | "platformVersion" => d.js_str(it, "")?,
+        "uaFullVersion" => d.js_str(it, &format!("{CHROME}.0.0.0"))?,
+        "wow64" => Value::Bool(false),
+        "formFactors" => {
+            let f = d.js_str(it, "Desktop")?;
+            it.array_from(&[f])?
+        }
+        "fullVersionList" => {
+            let mut list = Vec::new();
+            for (b, v) in [("Not.A/Brand", "8.0.0.0".to_string()), ("Chromium", format!("{CHROME}.0.0.0")), ("Google Chrome", format!("{CHROME}.0.0.0"))] {
+                let o = d.obj(it, it.object_prototype())?;
+                let (bv, vv) = (d.js_str(it, b)?, d.js_str(it, &v)?);
+                put(d, it, o, "brand", bv)?;
+                put(d, it, o, "version", vv)?;
+                list.push(Value::Object(o));
+            }
+            it.array_from(&list)?
+        }
+        _ => return Ok(()),
+    };
+    put(d, it, out, name, v)
+}
+
+// ------------------------------------------------------------------------------------------ object URLs
+
+/// `URL.createObjectURL(blob)`.
+#[cold]
+#[inline(never)]
+pub(crate) fn create_object_url(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
+    need(it, a, 1, "createObjectURL' on 'URL")?;
+    let blob = match a[0] {
+        Value::Object(o) if d.web.s.borrow().blobs.contains_key(&o) => o,
+        _ => return Err(it.type_error("Failed to execute 'createObjectURL' on 'URL': Overload resolution failed.")),
+    };
+    if d.web.s.borrow().urls.len() >= MAX_URLS {
+        return Err(d.lim("web-objects"));
+    }
+    let Some(id) = uuid_v4() else { return Err(random_failed(d, it)) };
+    let origin = d.cur_rec().map_or_else(|_| "null".to_string(), |r| r.origin());
+    let url = format!("blob:{origin}/{id}");
+    d.web.s.borrow_mut().urls.insert(url.clone(), blob);
+    d.js_str(it, &url)
+}
+
+/// `URL.revokeObjectURL(url)`. A URL that is not in the store is ignored.
+#[cold]
+#[inline(never)]
+pub(crate) fn revoke_object_url(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
+    need(it, a, 1, "revokeObjectURL' on 'URL")?;
+    let url = d.string_arg(it, a[0])?;
+    d.web.s.borrow_mut().urls.remove(url.trim_matches(|c: char| c <= ' ').split('#').next().unwrap_or(""));
+    Ok(Value::Undefined)
+}
+
+/// Is `s` a `blob:` URL (any case, after leading and trailing control and space characters)?
+pub(crate) fn is_blob_url(s: &str) -> bool {
+    s.trim_start_matches(|c: char| c <= ' ').get(..5).is_some_and(|p| p.eq_ignore_ascii_case("blob:"))
+}
+
+/// The bytes and type of the Blob under the `blob:` URL `url` in the store of this document. `None`: not there (never made, revoked).
+/// The fragment is not part of the key.
+#[cold]
+#[inline(never)]
+pub(crate) fn blob_url_read(d: &Dom, url: &str) -> Option<(Vec<u8>, String)> {
+    let s = d.web.s.borrow();
+    let b = s.blobs.get(s.urls.get(url.trim_matches(|c: char| c <= ' ').split('#').next()?)?)?;
+    Some((b.bytes.clone(), b.ty.clone()))
 }
 
 // ------------------------------------------------------------------------------------------ Blob and File

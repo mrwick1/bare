@@ -756,6 +756,8 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
         it.define_data(g, k, Value::Object(f), true, false, true)?;
         if name == "URL" {
             def_fn(d, it, f, "canParse", 1, pr::url_can_parse)?;
+            def_fn(d, it, f, "createObjectURL", 1, crate::browser_web::create_object_url)?;
+            def_fn(d, it, f, "revokeObjectURL", 1, crate::browser_web::revoke_object_url)?;
         }
         fixed.push(f);
     }

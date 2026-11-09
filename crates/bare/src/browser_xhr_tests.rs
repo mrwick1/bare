@@ -237,3 +237,28 @@ fn each_method_runs_and_the_forbidden_ones_are_a_security_error() {
         }
     });
 }
+
+/// A `blob:` URL of the Blob URL store is read by `XMLHttpRequest` with no network (W3C File API).
+#[test]
+fn an_xhr_reads_a_blob_url_without_the_network() {
+    big(|| {
+        let srv = server();
+        let mut b = browser(srv.port);
+        js(&mut b, "var out = [], finished = false; var u = URL.createObjectURL(new Blob(['h\\u00e9llo'], { type: 'text/plain;charset=utf-8' }));");
+        assert!(js(&mut b, "u").starts_with("blob:"));
+        js(&mut b, "var x = new XMLHttpRequest(); x.open('GET', u); x.onload = function () { out.push(x.status + '|' + x.responseText + '|' + x.getResponseHeader('content-type') + '|' + x.getResponseHeader('content-length')); finished = true; }; x.onerror = function () { out.push('error'); finished = true; }; x.send(); out.push('sent');");
+        settle(&mut b);
+        assert_eq!(js(&mut b, "out.join(',')"), "sent,200|h\u{e9}llo|text/plain;charset=utf-8|6");
+        js(&mut b, "out.length = 0; finished = false; var y = new XMLHttpRequest(); y.open('GET', u); y.responseType = 'blob'; y.onload = function () { out.push(y.response.size + y.response.type); var z = new XMLHttpRequest(); z.open('GET', u); z.responseType = 'arraybuffer'; z.onload = function () { out.push(z.response.byteLength); finished = true; }; z.send(); }; y.send();");
+        settle(&mut b);
+        assert_eq!(js(&mut b, "out.join(',')"), "6text/plain,6");
+        js(&mut b, "out.length = 0; finished = false; URL.revokeObjectURL(u); var w = new XMLHttpRequest(); w.open('GET', u); w.onerror = function () { out.push('error:' + w.status + w.readyState); finished = true; }; w.onload = function () { out.push('load'); finished = true; }; w.send();");
+        settle(&mut b);
+        assert_eq!(js(&mut b, "out.join(',')"), "error:04");
+        // Only GET reads a Blob URL.
+        js(&mut b, "out.length = 0; finished = false; var u3 = URL.createObjectURL(new Blob(['x'])); var q = new XMLHttpRequest(); q.open('POST', u3); q.onerror = function () { out.push('post-error'); finished = true; }; q.send('b');");
+        settle(&mut b);
+        assert_eq!(js(&mut b, "out.join(',')"), "post-error");
+        assert_eq!(srv.recs().len(), 0, "no request reached the server");
+    });
+}

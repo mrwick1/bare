@@ -783,7 +783,7 @@ fn url_components_and_live_search_params() {
         assert_eq!(js(&mut b, "u.username = ''; u.password = ''; u.username + u.password + 'ok'"), "ok");
         assert_eq!(js(&mut b, "u.href = 'bad'"), "throw:TypeError:Failed to set the 'href' property on 'URL': Invalid URL");
         assert_eq!(js(&mut b, "u.href"), "https://new.test:81/n%20m?k=v#h%20h", "a failed set changes nothing");
-        assert_eq!(js(&mut b, "typeof URL.createObjectURL + typeof URL.parse"), "undefinedundefined");
+        assert_eq!(js(&mut b, "typeof URL.createObjectURL + typeof URL.parse"), "functionundefined");
     });
 }
 

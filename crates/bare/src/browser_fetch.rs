@@ -1708,7 +1708,7 @@ fn fetch(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
 /// Validate, apply the policy and queue. A `TypeError` rejects the promise; every other error ends the call.
 fn prepare(d: &Dom, it: &mut Interp<'_>, promise: Value, a: &[Value]) -> R<()> {
     if let Some(url) = data_input(d, it, arg(a, 0))? {
-        let r = data_response(d, it, &url)?;
+        let r = if crate::browser_web::is_blob_url(&url) { blob_response(d, it, &url)? } else { data_response(d, it, &url)? };
         return settle(it, promise, Ok(r)).map(|_| ());
     }
     let lim = d.fl();
@@ -1821,6 +1821,40 @@ pub(crate) fn queue_xhr(d: &Dom, x: (ObjId, u64), method: &str, url: Url, mut he
         return Err(d.lim("fetch-queue"));
     }
     st.queue.push_back(Pending { promise: Value::Undefined, method, url, headers, body, redirect: Redirect::Follow, cors, xhr: Some(x), queued: bare_net::trace::on().then(std::time::Instant::now), started: None });
+    Ok(())
+}
+
+/// Queue the reply of an `XMLHttpRequest` to a `blob:` URL: no I/O. `found` is the bytes and type of the Blob, or `None` for a URL that is not in
+/// the store (a network error). `url` is a stand-in for `responseURL` (the document URL). The reply settles in its turn, as any other.
+#[cold]
+#[inline(never)]
+pub(crate) fn queue_xhr_blob(d: &Dom, x: (ObjId, u64), url: Url, found: Option<(Vec<u8>, String)>) -> R<()> {
+    let lim = d.fl();
+    let mut st = d.fetch.st.borrow_mut();
+    if st.queue.len() >= lim.max_pending {
+        return Err(d.lim("fetch-queue"));
+    }
+    if st.started >= lim.max_started {
+        return Err(d.lim("fetch-requests"));
+    }
+    let out = match found {
+        Some((body, ty)) => {
+            if st.retained.saturating_add(st.queued_bytes).saturating_add(body.len()) > lim.max_retained {
+                return Err(d.lim("fetch-retained"));
+            }
+            let mut headers = vec![("content-length".to_string(), body.len().to_string())];
+            if !ty.is_empty() {
+                headers.push(("content-type".into(), ty));
+            }
+            // The turn of the reply subtracts what a worker added (`run_network_tasks_inner`).
+            st.done.fetch_add(body.len(), Ordering::Relaxed);
+            Outcome::Done { status: 200, url: dup(&url), redirected: false, headers, body, taint: Taint::Basic }
+        }
+        None => Outcome::Failed("blob URL not found"),
+    };
+    st.started += 1;
+    let started = Some(d.fetch.client.borrow().spawn(move |_| Some((out, Vec::new()))));
+    st.queue.push_back(Pending { promise: Value::Undefined, method: Method::Get, url, headers: Vec::new(), body: None, redirect: Redirect::Follow, cors: Cors::same("XMLHttpRequest"), xhr: Some(x), queued: None, started });
     Ok(())
 }
 
@@ -2109,14 +2143,14 @@ fn finish(d: &Dom, it: &mut Interp<'_>, promise: Value, outcome: Outcome) -> R<(
     settle(it, promise, r).map(|_| ())
 }
 
-/// The text of a `fetch` input that is a string or a `URL` object, when it is a `data:` URL.
+/// The text of a `fetch` input that is a string or a `URL` object, when it is a `data:` or a `blob:` URL.
 fn data_input(d: &Dom, it: &mut Interp<'_>, v: Value) -> R<Option<String>> {
     let s = match v {
         // A string that does not start with `data:` costs no copy.
         Value::String(id) => {
             let Ok(u) = it.heap.str_units(id) else { return Ok(None) };
             let u = &u[u.iter().take_while(|&&c| c <= 32).count()..];
-            if !u.get(..5).is_some_and(|p| p.iter().zip(b"data:").all(|(&c, &b)| c < 128 && (c as u8).eq_ignore_ascii_case(&b))) {
+            if !u.get(..5).is_some_and(|p| [b"data:", b"blob:"].iter().any(|t| p.iter().zip(*t).all(|(&c, &b)| c < 128 && (c as u8).eq_ignore_ascii_case(&b)))) {
                 return Ok(None);
             }
             d.string_arg(it, v)?
@@ -2125,7 +2159,7 @@ fn data_input(d: &Dom, it: &mut Interp<'_>, v: Value) -> R<Option<String>> {
         _ => return Ok(None),
     };
     let t = s.trim_matches(|c: char| c <= ' ');
-    Ok(t.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("data:")).then(|| t.to_string()))
+    Ok(t.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("data:") || p.eq_ignore_ascii_case("blob:")).then(|| t.to_string()))
 }
 
 /// The response of `fetch('data:...')`: status 200, the media type of the URL as `content-type`, the decoded body. No network, no CORS.
@@ -2139,9 +2173,25 @@ fn data_response(d: &Dom, it: &mut Interp<'_>, url: &str) -> R<Value> {
         None => head,
     };
     let mime = if head.is_empty() { "text/plain;charset=US-ASCII".to_string() } else if head.starts_with(';') { format!("text/plain{head}") } else { head.to_string() };
+    plain_response(d, it, url, Some(mime), body)
+}
+
+/// The response of `fetch('blob:...')`: status 200, the type of the Blob as `content-type` (none when it is empty), its bytes. No network,
+/// no CORS. A URL that is not in the store (never made, revoked) is a network error (`TypeError`).
+#[cold]
+#[inline(never)]
+fn blob_response(d: &Dom, it: &mut Interp<'_>, url: &str) -> R<Value> {
+    let Some((body, ty)) = crate::browser_web::blob_url_read(d, url) else { return Err(it.type_error("Failed to fetch")) };
+    it.charge((body.len() / 64) as u64)?;
+    plain_response(d, it, url, (!ty.is_empty()).then_some(ty), body)
+}
+
+fn plain_response(d: &Dom, it: &mut Interp<'_>, url: &str, mime: Option<String>, body: Vec<u8>) -> R<Value> {
     let lim = d.fl();
     let mut list = HeaderList::new(Guard::Response);
-    list.append(&lim, "content-type".into(), mime).map_err(|e| d.herr(it, e))?;
+    if let Some(mime) = mime {
+        list.append(&lim, "content-type".into(), mime).map_err(|e| d.herr(it, e))?;
+    }
     list.guard = Guard::Immutable;
     let body = Some(Rc::new(body));
     d.reserve(it, 2, body.as_ref().map_or(0, |b| b.len()))?;

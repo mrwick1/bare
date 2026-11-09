@@ -20,7 +20,7 @@
 //!
 //! Gates (never a silent wrong answer):
 //! - Anything `browser_navigation_url.rs` gates (other schemes, user info, IDNA, backslashes...) is `Unsupported`.
-//! - `URL.createObjectURL`, `URL.parse` and subclassing are absent.
+//! - `URL.parse` and subclassing are absent. `URL.createObjectURL` and `revokeObjectURL` are in `browser_web.rs`.
 
 use crate::browser::*;
 use crate::browser_navigation_url::{self as nu, Part, Rec, UErr, form_parse, form_serialize};

@@ -285,6 +285,8 @@ enum Ext {
     Fetch(NodeId, Url),
     /// `src` is empty or does not resolve: an `error` event.
     Fail(NodeId),
+    /// `src` is a `blob:` URL of the Blob URL store: its text, or the reason it cannot be read. It runs in its turn, with no download.
+    Text(NodeId, Result<String, String>),
 }
 
 /// The state that the DOM host needs: script elements, the lifecycle, the queues of dynamic scripts.
@@ -340,7 +342,7 @@ impl Dom {
         let mut keep = |n: &NodeId| out.extend(st.by_node.get(n).map(|&o| Value::Object(o)));
         s.inline.borrow().iter().for_each(|(n, _)| keep(n));
         s.external.borrow().iter().for_each(|e| match e {
-            Ext::Fetch(n, _) | Ext::Fail(n) => keep(n),
+            Ext::Fetch(n, _) | Ext::Fail(n) | Ext::Text(n, _) => keep(n),
         });
         s.current.get().iter().for_each(keep);
     }
@@ -410,6 +412,17 @@ impl Dom {
         Ok(())
     }
 
+    /// The text of the script at the `blob:` URL `raw`, at most `max` bytes.
+    #[cold]
+    #[inline(never)]
+    fn blob_script(&self, raw: &str, max: usize) -> Result<String, String> {
+        match crate::browser_web::blob_url_read(self, raw) {
+            Some((b, _)) if b.len() <= max => Ok(String::from_utf8_lossy(&b).into_owned()),
+            Some(_) => Err("blob script over the pending byte cap".into()),
+            None => Err("blob URL not found".into()),
+        }
+    }
+
     /// The "prepare the script element" steps for a classic script that is in the document.
     fn prepare_script(&self, _it: &mut Interp<'_>, el: NodeId) -> R<()> {
         let s = &self.scripts;
@@ -445,6 +458,10 @@ impl Dom {
             Some(src) => {
                 s.started.borrow_mut().insert(el);
                 let raw = src.trim_matches(WS);
+                if crate::browser_web::is_blob_url(raw) {
+                    s.external.borrow_mut().push_back(if is_module { Ext::Fail(el) } else { Ext::Text(el, self.blob_script(raw, max_bytes)) });
+                    return Ok(());
+                }
                 let url = s.base.borrow().as_deref().and_then(|b| Url::parse(b).ok()).filter(|_| !raw.is_empty()).and_then(|b| b.join(raw).ok());
                 s.external.borrow_mut().push_back(match url {
                     Some(u) => Ext::Fetch(el, u),
@@ -909,7 +926,7 @@ impl Browser {
         }
         let net = s.net.borrow();
         let script = s.external.borrow().front().map(|e| match e {
-            Ext::Fail(_) => true,
+            Ext::Fail(_) | Ext::Text(..) => true,
             Ext::Fetch(_, u) => net.as_ref().and_then(|n| n.started.get(&Net::key(Expect::Script, u))).is_none_or(|t| t.done()),
         });
         // The sheets, preloads and parsed scripts that a turn did not wait for: is one of them in?
@@ -1364,6 +1381,7 @@ impl Run<'_> {
         self.feed_if_ran()?;
         match next {
             Ext::Fail(node) => self.finish_external(node, "dynamic script", Err("empty or bad src".into()))?,
+            Ext::Text(node, text) => self.finish_external(node, "blob script", text)?,
             Ext::Fetch(node, url) => {
                 let what = label(&url);
                 let target = resources::Target { expect: Expect::Script, url };
