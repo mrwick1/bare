@@ -65,7 +65,7 @@ pub struct Selector {
     /// (ids, classes, tags), 10 bits each: `ids << 20 | classes << 10 | tags`. A count over 1023 stays at 1023.
     pub specificity: u32,
     /// `::slotted(...)` or `::part(...)` at the end. The compounds then say which element the pseudo-element belongs to.
-    pub pseudo: Option<ShadowPseudo>,
+    pub pseudo: Option<Box<ShadowPseudo>>,
 }
 
 /// The two pseudo-elements that reach into a shadow tree (CSS Scoping).
@@ -239,7 +239,7 @@ pub fn parse_selector_list(text: &str, doc: &mut Document) -> Option<Vec<Selecto
 
 /// `parse_selector_list` for a style sheet: `mode` says what `:host`, `::slotted()` and `::part()` are.
 pub fn parse_selector_list_in(text: &str, doc: &mut Document, mode: Mode) -> Option<Vec<Selector>> {
-    let mut parser = Parser { tokens: Peek { tokens: tokenize(text), peeked: None }, doc, mode, pseudo: None };
+    let mut parser = Parser { tokens: Peek { tokens: tokenize(text), peeked: None }, doc, mode, pseudo: None, host: false };
     let mut list = Vec::new();
     loop {
         list.push(parser.selector(0)?);
@@ -268,6 +268,8 @@ struct Parser<'a, 'd> {
     mode: Mode,
     /// The `::slotted()` or `::part()` that the last compound had.
     pseudo: Option<ShadowPseudo>,
+    /// Did the selector have `:host` or `:host-context()`? Only a sheet of a shadow tree can.
+    host: bool,
 }
 
 /// The tokens, and a way to look at the next one without taking it (JS: like an iterator with a `peek()`).
@@ -347,10 +349,10 @@ impl Parser<'_, '_> {
         let specificity = counts[0].min(1023) << 20 | counts[1].min(1023) << 10 | counts[2].min(1023);
         // `:host` is the shadow host: nothing can be to its left.
         let last = compounds.len() - 1;
-        if compounds[..last].iter().any(|c| c.simples.iter().any(is_host)) {
+        if self.host && compounds[..last].iter().any(|c| c.simples.iter().any(is_host)) {
             return None;
         }
-        Some(Selector { compounds, specificity, pseudo: self.pseudo.take() })
+        Some(Selector { compounds, specificity, pseudo: self.pseudo.take().map(Box::new) })
     }
 
     /// A compound selector: `li.item:first-child`. It has at least one simple selector, or `*`.
@@ -410,7 +412,7 @@ impl Parser<'_, '_> {
             *then = simples.split_off(at);
         }
         // The host has no type, id, class or attribute of its own that a rule of the shadow tree may read (CSS Scoping: it is featureless).
-        if simples.iter().any(is_host) && simples.iter().any(|s| matches!(s, Simple::Tag(_) | Simple::Id(_) | Simple::Class(_) | Simple::Attr { .. })) {
+        if self.host && simples.iter().any(is_host) && simples.iter().any(|s| matches!(s, Simple::Tag(_) | Simple::Id(_) | Simple::Class(_) | Simple::Attr { .. })) {
             return None;
         }
         any.then_some(simples)
@@ -550,7 +552,7 @@ impl Parser<'_, '_> {
                     "only-child" => Simple::OnlyChild,
                     "root" => Simple::Root,
                     "empty" => Simple::Empty,
-                    "host" => if self.mode == Mode::Shadow { Simple::Host(Vec::new()) } else { Simple::Never },
+                    "host" => if self.mode == Mode::Shadow { self.host = true; Simple::Host(Vec::new()) } else { Simple::Never },
                     "link" | "any-link" => Simple::Link,
                     "defined" => Simple::Defined,
                     "disabled" => Simple::Form(Form::Disabled),
@@ -619,6 +621,7 @@ impl Parser<'_, '_> {
                 for (total, add) in counts.iter_mut().zip(c) {
                     *total += add;
                 }
+                self.host |= self.mode == Mode::Shadow;
                 Some(match (self.mode == Mode::Shadow, context) {
                     (false, _) => Simple::Never,
                     (true, false) => Simple::Host(vec![arg]),

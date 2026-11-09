@@ -653,8 +653,8 @@ impl RuleSet {
         self.reach.take();
         let index = self.entries.len() as u32;
         // A rule for the host, for a slotted node or for a part is not offered to the elements of its tree: the cascade looks for it where it applies.
-        let host = selector.compounds[0].simples.iter().any(|s| matches!(s, Simple::Host(_) | Simple::HostContext(_)));
-        let mut ctx = match (&selector.pseudo, host) {
+        let host = scope != 0 && selector.compounds[0].simples.iter().any(|s| matches!(s, Simple::Host(_) | Simple::HostContext(_)));
+        let mut ctx = match (selector.pseudo.as_deref(), host) {
             (Some(ShadowPseudo::Part { .. }), _) => OUTER,
             (Some(ShadowPseudo::Slotted(_)), _) | (None, true) => INNER,
             (None, false) => OWN,
@@ -668,7 +668,7 @@ impl RuleSet {
             }
         } else {
             let tree = self.shadows.entry(scope).or_default();
-            match (&selector.pseudo, host) {
+            match (selector.pseudo.as_deref(), host) {
                 (Some(ShadowPseudo::Part { .. }), _) => tree.parts.push(index),
                 (Some(ShadowPseudo::Slotted(_)), _) => tree.slotted.push(index),
                 (None, true) => tree.host.push(index),
@@ -1040,7 +1040,7 @@ impl RuleSet {
         {
             for &i in &tree.slotted {
                 let e = &self.entries[i as usize];
-                if let Some(ShadowPseudo::Slotted(arg)) = &e.selector.pseudo
+                if let Some(ShadowPseudo::Slotted(arg)) = e.selector.pseudo.as_deref()
                     && compound_matches(doc, node, arg)
                     && matches(doc, slot, &e.selector)
                 {
@@ -1068,7 +1068,7 @@ impl RuleSet {
             let rules = if outer == doc.root() { Some(&self.parts) } else { self.shadows.get(&(outer.index() as u32)).map(|t| &t.parts) };
             for &i in rules.into_iter().flatten() {
                 let e = &self.entries[i as usize];
-                if let Some(ShadowPseudo::Part { names: want, then }) = &e.selector.pseudo
+                if let Some(ShadowPseudo::Part { names: want, then }) = e.selector.pseudo.as_deref()
                     && want.iter().all(|w| names.iter().any(|n| n == &**w))
                     && compound_matches(doc, node, then)
                     && matches(doc, host, &e.selector)
@@ -2254,7 +2254,7 @@ pub fn sources_capped(doc: &Document, viewport: (f32, f32), max_sources: usize, 
     let attr = |el, name: Option<Atom>| name.and_then(|n| doc.attr(el, n));
     let mut out = Vec::new();
     let (mut bytes, mut over) = (0usize, false);
-    walk(doc, shadows, &mut |el| {
+    walk(doc, shadows, |el| {
         let NodeData::Element { name, .. } = *doc.data(el) else { return };
         let (is_style, is_link) = (Some(name) == style, Some(name) == link);
         if over || !(is_style || is_link) || !attr(el, media).is_none_or(|m| at_rules::media_matches(m, viewport)) {
@@ -2290,7 +2290,7 @@ pub fn sources_capped(doc: &Document, viewport: (f32, f32), max_sources: usize, 
 
 /// Call `f` for each node of the tree, in the order of the page. A loop with a stack. With `shadows`, the shadow tree of a host comes
 /// right after the host, before its light children.
-fn walk(doc: &Document, shadows: bool, f: &mut dyn FnMut(NodeId)) {
+fn walk(doc: &Document, shadows: bool, mut f: impl FnMut(NodeId)) {
     let mut stack = vec![doc.root()];
     while let Some(node) = stack.pop() {
         f(node);
@@ -2299,7 +2299,7 @@ fn walk(doc: &Document, shadows: bool, f: &mut dyn FnMut(NodeId)) {
             stack.push(c);
             child = doc.prev_sibling(c);
         }
-        if let (true, Some(root)) = (shadows, doc.shadow_root(node)) {
+        if shadows && let Some(root) = doc.shadow_root(node) {
             stack.push(root);
         }
     }
@@ -2328,7 +2328,7 @@ mod tests {
     /// The first element with this `id`.
     fn by_id(doc: &Document, id: &str) -> NodeId {
         let mut found = None;
-        walk(doc, false, &mut |n| {
+        walk(doc, false, |n| {
             if found.is_none() && doc.attr(n, Atom::ID) == Some(id) {
                 found = Some(n);
             }
