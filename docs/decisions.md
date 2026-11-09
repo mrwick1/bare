@@ -637,14 +637,14 @@ What it showed (vimeo, one run, 287 MiB live at the peak, 246 MiB sampled):
 
 | Holder | MiB | Share |
 | --- | ---: | ---: |
-| Page thread (the drive thread): JS object elements (`Vec<Option<Value>>`), the object table, interned strings | 154 | 63% |
-| Parsed scripts (`Program::into_owned`: tree arenas and the owned source) | 62 | 25% |
-| Script slots (`add_script_kind`) | 12 | 5% |
+| Page thread (the drive thread): JS object elements (`Vec<Option<Value>>`), the object table, interned strings | 167 | 68% |
+| Parsed scripts (`Program::into_owned`: tree arenas and the owned source) | 63 | 26% |
+| Script slots (`add_script_kind`) | 16 | 6% |
 | Worker threads (all) | under 1 | 0% |
 
 - The "worker arena" regions are the heap of the thread that runs the page. In `bare-drive` that is a spawned thread, not the main thread, so glibc gives it a non-main arena. The workers share it (`M_ARENA_MAX` 2).
 - The memory is live. One collection ran, at the end of the load: 200 MiB before and 143 MiB after on vimeo. The heap collects only between tasks (see [the heap collects when it has grown by three quarters](#the-heap-collects-when-it-has-grown-by-three-quarters)), so a long script keeps its garbage until it returns. `heap_kib` is read after the page is dropped, which is why it shows 30 MiB.
-- Other pages: redis.io has 33% parsed scripts and 7% client cache bodies (`Client::keep`, 7.5 MiB of the 64 MiB `MAX_CACHE`). bsky.app has 44% parsed scripts (80 of 182 MiB), 11% script slots and 5% cache bodies. Threads other than the page thread hold 6 MiB on redis.io and 18 MiB on bsky.app.
+- Other pages: redis.io has 41% parsed scripts, 38% other JS tables, 11% script slots and 7% client cache bodies (`Client::keep` on a worker, 7.5 MiB of the 64 MiB `MAX_CACHE`). bsky.app has 45% parsed scripts (81 of 182 MiB), 31% other JS tables, 14% script slots and 5% cache bodies. Threads other than the page thread hold 9 MiB on redis.io and 19 MiB on bsky.app.
 - ikea holds 70 of 178 MiB on workers: picture decode. One cause was fixed (below). The rest is the decoded pictures, 4 bytes for each pixel, at the size of the file and not at the size of the box (31% of the peak). `BUDGET` bounds it at 64 MiB.
 - twitch was not attributed. It stopped at `Limit(Scripts)` in 3 runs (51 MiB, 750 ms) and reached 195 to 199 MiB in 9 later runs of the same binary.
 

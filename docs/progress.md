@@ -5835,3 +5835,75 @@ Other checks on the final tree: `cargo test --release --workspace --no-fail-fast
 - `new Worker(..., { type: 'module' })` is accepted and not loaded. A blob URL that was revoked is not checked.
 - `SharedWorker` and `ServiceWorker` are absent. No real worker runs.
 - One machine (archMachine). The live pages are not stable: results vary from run to run.
+
+## Peak RSS: what holds it, and one decode fix (2026-11-10)
+
+Task: some public pages peak at 200 to 300 MiB of RSS and end at 30 MiB of heap. The brief guessed short-lived memory on worker threads. The attribution says no. One cause in the allowed files was fixed. The large causes are in `crates/js/src` and are recorded, not changed.
+
+### Attribution
+
+Method: a temporary counting allocator in `bare-drive` (one sampled allocation for each 64 KiB, with a backtrace, per thread, live samples kept at the highest live byte count; not committed) and `perf record -e page-faults -c 1 --call-graph dwarf`. Sites: step file `timeout 30000`, `open URL`, `expect js "document.readyState === 'complete'"`. The sampled bytes are an estimate.
+
+| Site | Live at peak | Page thread | Parsed scripts | Other JS tables | Workers | Notes |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| vimeo | 287 MiB (246 sampled) | 99% | 63 MiB (26%) | 167 MiB (68%) | under 1 MiB | script slots 16 MiB (6%); elements `Vec<Option<Value>>` 88 MiB, object table 40 MiB; one collect at the end: 200 to 143 MiB |
+| redis.io | 115 MiB (107 sampled) | 91% | 44 MiB (41%) | 41 MiB (38%) | 9 MiB (8%) | script slots 12 MiB (11%); cache bodies (`Client::keep`, on a worker) 7.5 MiB |
+| bsky.app | 199 MiB (182 sampled) | 89% | 81 MiB (45%) | 57 MiB (31%) | 19 MiB (10%) | script slots 26 MiB (14%), cache bodies 9 MiB |
+| ikea | 183 MiB (169 sampled) | 60% | not in the top | not in the top | 70 MiB (39%) | before the fix: picture decode 39 MiB, JPEG coefficients 15 MiB, `Vec` to `Arc` copy 12 MiB; after: decoded pictures 53 MiB (31%) |
+| twitch | not attributed | | | | | stopped at `Limit(Scripts)` in 3 runs, 195 to 199 MiB in 9 later runs |
+
+- Hypothesis (a), response bodies on workers: false. Bodies are under 1 MiB on workers at the peak of vimeo. The cache copy of replies is 5 to 7% on redis.io and bsky.app (on a worker).
+- Hypothesis (b), picture decode on workers: true for ikea only (39% of its peak). Fixed.
+- Hypothesis (c), script work on workers: false. Parse and run happen on the page thread.
+- The "four arena heaps" of vimeo are the arena of the page thread. `bare-drive` runs the page on a spawned thread, so glibc gives it a non-main arena.
+- The memory is live, not garbage left in the arena. `heap_kib` in the run list is read after the page is dropped.
+- No single cause in the allowed files is over 25% of every peak. The largest causes (object elements and tables, parsed scripts) are in `crates/js/src`, which this task did not touch.
+
+### Change
+
+`bare_image::decode` made the `Arc<[u32]>` first. The decoder writes into the start of it and the conversion to `0xAARRGGBB` runs in place, from the last pixel to the first. Before: decoder output, `Vec<u32>` and an `Arc` copy, 8 bytes for each pixel at the peak. After: 4 bytes. `Image::pixels` is now `Arc<[u32]>`. `images.rs` drops the `into()` copy.
+
+Test first: `a_decode_holds_the_pixels_once` (a counting allocator for each thread, a PNG of 1500 by 1000, RGBA and RGB). On main it failed: 12,281,720 bytes held for 6,000,000 bytes of pixels (2.05 times). After the change it passes (limit 1.25 times). `the_in_place_conversion_keeps_every_channel` checks every channel of RGBA, RGB, gray and gray with alpha, and passed before and after.
+
+### Live result
+
+`bare-drive` of main and of the branch, 3 runs each, taken one after the other, peak RSS in MiB (median) and load time in ms (median). The machine ran other jobs.
+
+| Site | Peak main | Peak branch | Time main | Time branch |
+| --- | ---: | ---: | ---: | ---: |
+| vimeo | 262 | 261 | 1508 | 1506 |
+| redis.io | 128 | 126 | 1071 | 1034 |
+| ikea | 163 (158, 163, 227) | 175 (145, 175, 178) | 7988 | 7410 |
+| bsky.app | 198 | 198 | 4726 | 3787 |
+| twitch | 197 | 197 | 4141 | 4143 |
+
+The fix does not cut the median peak of these five pages. Their peaks are JS memory, and the ikea peak varies from 141 to 227 MiB between runs of the same binary (8 more runs of each: medians 178 and 176). On a local page with 16 large pictures (4 of them PNG) the end RSS fell from 163 to 171 MiB to 106 to 110 MiB, the load took 115 ms and not 128 ms, and the peak went from 177 to 190 MiB to 174 to 187 MiB. The peak there is the 64 MiB picture budget, 42 MiB of cached picture files and 23 MiB of file buffers.
+
+### AST size
+
+bsky.app bundle (9,731,470 bytes): 2,927,810 nodes, 940,355 list items, tree 74,813,948 bytes: 7.69 bytes for each source byte. The worst case of `max_script_nodes` is 352 MiB (8 Mi items of 44 bytes) and 154 MiB with the bsky.app mix. A bytes-based bound is proposed in `docs/decisions.md`. The limit is not changed.
+
+### Cost
+
+Base `a3ba452365` (origin/main after PR #329; the branch is rebased on it once, right before the merge). All 805 rows of `tools/js/cost_matrix.sh`: 0 rows over under both allocators, 0 over under one, 0 failed, mean change -0.002% glibc. No row reached the jemalloc rerun. Worst row: `form_load gates 10` +0.336%. An earlier run on base `cdf9bc794e` (before the last rebase): 805 rows, 0 over under both, mean -0.007%, worst `fetch_load bytes 10` +0.574% glibc and -0.189% jemalloc. `base-build` has no `bare-stress` by default; I built it with `base-build origin/main --release -p bare-stress`.
+
+### Checks
+
+- `cargo test --release --workspace --no-fail-fast` on the final tree: 3357 passed, 0 failed, 13 ignored.
+- `tools/drive/public/run.sh` with the branch `bare-drive`: pass 48, fail 0, known 0, skip 0, flakes 0.
+- `cargo test --release -p bare-image --lib`: 11 passed (9 before, plus the 2 new tests).
+
+### Limits
+
+- Only the decode peak changed. The peak RSS of the five sites did not move beyond the noise.
+- The JS heap, the parsed scripts and the script slots are 80% of the peak on vimeo, redis.io and bsky.app. They need work in `crates/js/src`: a collect inside a long script, 8 byte elements, and a shorter life for the tree of a script that has run.
+- A picture is kept at the size of its file. A bitmap at the size of its box needs a layout result first, and changes screenshot pixels.
+- `Client::keep` copies each cached body. It was not changed.
+- JPEG: the output size must be exactly 4 bytes for each pixel, and PNG and WebP must give exactly the bytes that their header says. A file that does not is refused as corrupt (it was accepted before only when it gave more bytes than needed, which no file in the tests does).
+
+### Not tested
+
+- A JPEG or WebP over 16 M pixels in a live run (the limits have unit tests, JPEG and WebP have the fixture tests but no peak test: there is no encoder in the tree).
+- A 16-bit or interlaced PNG for the peak (the decode path is the same, the output size is the same).
+- `bare --window`, macOS and arjun-e16.
+- The peak with `jemalloc` for the live sites.
