@@ -81,6 +81,9 @@ pub struct Page {
     /// The document and the render key that `frame` was made for, and whether the page may have changed since.
     key: (usize, [u64; 8]),
     stale: bool,
+    /// The key at which the last render stopped for a style sheet that is not supplied yet: no frame, and no new try until the key moves
+    /// (a supplied sheet, a changed document or window). A try with the same inputs gives the same answer.
+    waiting_sheet: Option<(usize, [u64; 8])>,
     /// The renders (cascade and layout) of the page so far, and the cascades that kept the layout. `kept`: the renders that
     /// styled and laid out only what changed (`Browser::refresh`); they are in `renders` too.
     pub renders: u64,
@@ -289,6 +292,7 @@ impl Page {
             moved: false,
             key: (0, [0; 8]),
             stale: false,
+            waiting_sheet: None,
             renders: 0,
             restyles: 0,
             kept: 0,
@@ -499,6 +503,9 @@ impl Page {
             }
             let doc = self.doc_id();
             let key = self.browser().map(|b| (doc, b.render_key()));
+            if self.frame.is_none() && key.is_some() && key == self.waiting_sheet {
+                return None;
+            }
             if self.frame.is_none() || key != Some(self.key) {
                 self.epoch += 1;
                 // The same document, window and sheets: the frame is updated for what changed (`Browser::refresh`).
@@ -523,7 +530,7 @@ impl Page {
                     }
                     Err(e) => {
                         self.frame = None;
-                        self.note(format!("render: {e:?}"));
+                        self.render_failed(&e, key);
                     }
                     Ok(None) => self.render_all(doc, key),
                 }
@@ -608,21 +615,28 @@ impl Page {
                         self.renders += 1;
                         self.moved = true;
                     }
-                    Some(Err(e)) => self.note(format!("render: {e:?}")),
+                    Some(Err(e)) => self.render_failed(&e, key),
                     None => {}
                 }
             }
             (Some(Err(e)), _) => {
                 self.frame = None;
-                // A style sheet that is still on its way is no error: the frame waits for it, and a later tick draws it.
-                let waits = matches!(&e, bare_js::eval::Error::Unsupported(u) if u.what.contains("external stylesheet"))
-                    && self.browser().is_some_and(|b| b.live() && b.live_work().is_some());
-                if !waits {
-                    self.note(format!("render: {e:?}"));
-                }
+                self.render_failed(&e, key);
             }
             (None, _) => self.frame = None,
         }
+    }
+
+    /// A render stopped. A style sheet that is not supplied yet is not a failure while the session runs: the page waits for it, quietly,
+    /// and the key says when to try again. It is a line of the console only if the session has ended (the sheet will never come).
+    fn render_failed(&mut self, e: &bare_js::eval::Error, key: Option<(usize, [u64; 8])>) {
+        if crate::browser_computed::is_missing_sheet(e) {
+            self.waiting_sheet = key;
+            if matches!(&self.source, Source::Session(s) if s.ended().is_none()) {
+                return;
+            }
+        }
+        self.note(format!("render: {e:?}"));
     }
 
     fn note(&mut self, text: String) {

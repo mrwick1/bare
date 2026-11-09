@@ -19,7 +19,7 @@
 //!   gone, and a link with a `media` text (it may have just been turned on). A cached or preloaded URL is in the cache of the driver:
 //!   it is supplied before the `<link>` asks. Supply an empty list for a sheet that failed to load, if the page should go on without it. `Browser::style_availability` tells which
 //!   sheets are missing, so the loader knows what to fetch. A `<link>` with a `media` that does not match the viewport, an alternate
-//!   sheet and a link without `href` are not sources (`cascade::sources`).
+//!   sheet, a link with `disabled` and a link without `href` are not sources (`cascade::sources`).
 //! - Not rendered: an element inside `display:none` gets its style on demand. `RuleSet::compute_for(doc, Some(el))` styles the elements
 //!   from the root down to `el` inside a hidden subtree, in the same pass, so a hidden read costs the depth of `el`. Layout and the other
 //!   readers do not ask, so they never see a style there. The content of a `<template>` reads as empty, as in Chrome (it is in another
@@ -71,7 +71,7 @@
 //! `max_names` after the build.
 //!
 //! Not done: `document.styleSheets` does not exist (when it does, a pending sheet must not be in it, as in Chrome), no cache of `Styles` between reads (each read costs one pass over the document), no live `getComputedStyle` of a
-//! pseudo-element, no `@container`, `@import` inside a supplied part (the embedder flattens), `<link disabled>`, `<style disabled>`.
+//! pseudo-element, no `@container`, `@import` inside a supplied part (the embedder flattens), `<style disabled>`.
 
 use crate::browser::*;
 use crate::browser_platform::{V, arg};
@@ -198,6 +198,10 @@ pub(crate) struct Computed {
 }
 
 const MISSING: &str = "computed style needs an external stylesheet that the embedder has not supplied (Browser::style_availability lists them)";
+/// Is `e` the gate for a linked sheet that the embedder has not supplied (yet)?
+pub(crate) fn is_missing_sheet(e: &Error) -> bool {
+    matches!(e, Error::Unsupported(u) if u.what == MISSING)
+}
 const PSEUDO: &str = "getComputedStyle of a pseudo-element (the engine has no pseudo-element styles)";
 const NO_STYLE: &str = "an element that the style walk does not reach has no computed style in the engine (a light child of a shadow host: no slots)";
 const AUTO_DIR: &str = "direction depends on dir=auto or bdi (the text decides it)";

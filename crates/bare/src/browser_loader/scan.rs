@@ -69,7 +69,7 @@ impl Scan {
                 let rel = attr("rel").unwrap_or("");
                 let has = |w: &str| rel.split_ascii_whitespace().any(|r| r.eq_ignore_ascii_case(w));
                 let media = attr("media").is_none_or(|m| m.eq_ignore_ascii_case("all") || m.eq_ignore_ascii_case("screen"));
-                if let Some(href) = attr("href").filter(|h| has("stylesheet") && !has("alternate") && media && !h.is_empty()) {
+                if let Some(href) = attr("href").filter(|h| has("stylesheet") && !has("alternate") && media && attr("disabled").is_none() && !h.is_empty()) {
                     self.fetch(Expect::Style, href);
                 }
             }

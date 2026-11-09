@@ -1957,7 +1957,7 @@ pub fn sources(doc: &Document, viewport: (f32, f32)) -> Vec<Source> {
 /// `max_bytes` bytes of `<style>` text and `href`, are copied.
 pub fn sources_capped(doc: &Document, viewport: (f32, f32), max_sources: usize, max_bytes: usize) -> Option<Vec<(Source, NodeId)>> {
     // A name that no node in the page has cannot be on any element, so `None` is a good answer for a name that is not in the table.
-    let (style, link, media, rel, href) = (doc.find_atom("style"), doc.find_atom("link"), doc.find_atom("media"), doc.find_atom("rel"), doc.find_atom("href"));
+    let (style, link, media, rel, href, disabled) = (doc.find_atom("style"), doc.find_atom("link"), doc.find_atom("media"), doc.find_atom("rel"), doc.find_atom("href"), doc.find_atom("disabled"));
     let attr = |el, name: Option<Atom>| name.and_then(|n| doc.attr(el, n));
     let mut out = Vec::new();
     let (mut bytes, mut over) = (0usize, false);
@@ -1983,7 +1983,7 @@ pub fn sources_capped(doc: &Document, viewport: (f32, f32), max_sources: usize, 
             out.push((Source::Inline(text), el));
         } else if let Some(rel) = attr(el, rel) {
             let has = |word: &str| rel.split_ascii_whitespace().any(|w| w.eq_ignore_ascii_case(word));
-            if let (true, false, Some(h)) = (has("stylesheet"), has("alternate"), attr(el, href)) {
+            if let (true, false, Some(h)) = (has("stylesheet"), has("alternate") || attr(el, disabled).is_some(), attr(el, href)) {
                 bytes = bytes.saturating_add(h.len());
                 over = out.len() >= max_sources || bytes > max_bytes;
                 if !over {
@@ -2459,6 +2459,7 @@ mod tests {
         );
         assert_eq!(sources(&parse("<p>x</p>"), VIEW), []);
         assert_eq!(sources(&parse("<link rel=stylesheet href=a.css>"), VIEW), [Source::Link("a.css".into())]);
+        assert_eq!(sources(&parse("<link rel=stylesheet disabled href=a.css>"), VIEW), []);
     }
 
     #[test]
