@@ -64,8 +64,8 @@
 //! `RuleSet::compute` cannot be interrupted: `computed-objects` (live objects), `computed-nodes` (document nodes at a read: the
 //! engine makes one `u32` per node and up to one style (about 700 bytes) per different style, so this bounds its memory), `computed-sources`
 //! (sheets, and bytes of `<style>` text, `href` and supplied parts that one read uses), `computed-rules` (selectors after the build:
-//! the build is bounded by the bytes), `computed-work` (nodes times rules, a loose upper bound: the real work is far smaller because
-//! rules are indexed), `computed-external` and `computed-external-bytes` (stored external sheets). Steps are charged before the
+//! the build is bounded by the bytes), `computed-work` (nodes times rules, or if that is over the cap the styled elements times rules: a loose upper
+//! bound, the real work is far smaller because rules are indexed; see `styled_work`), `computed-external` and `computed-external-bytes` (stored external sheets). Steps are charged before the
 //! build and before the compute. Names that the sheets add to the document table are bounded by the sheet bytes and checked against
 //! `max_names` after the build.
 //!
@@ -108,7 +108,7 @@ pub struct ComputedLimits {
     pub max_sheet_bytes: usize,
     /// Selectors of the built rule set. `computed-rules`.
     pub max_rules: usize,
-    /// Nodes times (selectors + 1). `computed-work`.
+    /// Nodes times (selectors + 1), or the styled elements times (selectors + 1) when the first is over. `computed-work`.
     pub max_work: u64,
     /// Supplied external sheets. `computed-external`.
     pub max_external: usize,
@@ -201,6 +201,8 @@ pub(crate) struct Computed {
     /// Moves when a supplied sheet is set or removed. `ResizeObserver` reads it to know that styles may have changed.
     pub(crate) sheet_gen: Cell<u64>,
     pub(crate) cache: RefCell<Option<Built>>,
+    /// Styled elements of the last tree that `styled_work` counted, and its key (`revision`, length).
+    elements: Cell<Option<((u64, usize), u64)>>,
     builds: Cell<u64>,
     computes: Cell<u64>,
     restyles: Cell<u64>,
@@ -455,6 +457,32 @@ impl Dom {
         self.cascade_with(it, None, true)
     }
 
+    /// The work bound of a page that the cheap bound (nodes x (rules + 1)) refuses: only an element is styled, so the text and the
+    /// comments do not count. It walks the tree like the cascade does (the shadow tree of a host and its light children, which
+    /// is more than the cascade reaches). The count is kept while the tree does not change.
+    #[cold]
+    fn styled_work(&self, doc: &bare_html::dom::Document, rules: usize) -> u64 {
+        let key = (doc.revision(), doc.len());
+        let elements = match self.computed.elements.get() {
+            Some((k, n)) if k == key => n,
+            _ => {
+                let (mut n, mut stack) = (0u64, vec![doc.root()]);
+                while let Some(node) = stack.pop() {
+                    n += u64::from(matches!(doc.data(node), NodeData::Element { .. }));
+                    stack.extend(doc.shadow_root(node));
+                    let mut child = doc.last_child(node);
+                    while let Some(c) = child {
+                        stack.push(c);
+                        child = doc.prev_sibling(c);
+                    }
+                }
+                self.computed.elements.set(Some((key, n)));
+                n
+            }
+        };
+        elements.saturating_mul(rules as u64 + 1)
+    }
+
     /// The same, and `want` is styled even inside `display:none` (`RuleSet::compute_for`).
     fn cascade_for(&self, it: &mut Interp<'_>, want: Option<NodeId>) -> R<Rc<Styles>> {
         self.cascade_with(it, want, false)
@@ -512,9 +540,12 @@ impl Dom {
         }
         let mut cache = self.computed.cache.borrow_mut();
         let built = cache.as_mut().expect("built");
-        let work = (doc.len() as u64).saturating_mul(built.rules.len() as u64 + 1);
+        let mut work = (doc.len() as u64).saturating_mul(built.rules.len() as u64 + 1);
         if work > l.max_work {
-            return Err(self.lim("computed-work"));
+            work = self.styled_work(&doc, built.rules.len());
+            if work > l.max_work {
+                return Err(self.lim("computed-work"));
+            }
         }
         // The cascade reads only the tree, the attributes, the text, the `set_ui` and `set_states` state (they move
         // `revision`), the hover, active and focus state (`UserState::revision`) and the custom element state. `attach_shadow`

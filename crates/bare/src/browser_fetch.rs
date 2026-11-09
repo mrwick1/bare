@@ -42,7 +42,7 @@
 //! - A failed network request rejects with `TypeError: Failed to fetch`. Errors and diagnostics never hold a header value, a
 //!   body byte, a path or a query. [`Browser::take_fetch_diagnostics`] gives fixed labels and the origin.
 //!
-//! Resource caps (`FetchLimits`) end the call with `Error::Limit(LimitKind::Host(name))`, never a JS exception: queued requests,
+//! Resource caps (`FetchLimits`) end the call with `Error::Limit(LimitKind::Host(name))`, never a JS exception: queued requests (1024, and 8 MiB of URL and header text),
 //! requests started, URL length, request and response body bytes, aggregate retained body bytes, live objects, live readers, header
 //! count and bytes, redirects. Copies and decoding charge the step budget. Objects count until the embedder collects them
 //! (`Browser::collect`): the VM never collects by itself.
@@ -94,11 +94,28 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// A queue shorter than this takes a request without a sum of the bytes of its requests (`FetchLimits::max_pending_bytes`).
+const FREE_PENDING: usize = 64;
+
+/// Bytes of the URL and the headers of a request (`FetchLimits::max_pending_bytes`).
+fn meta_bytes(url: &Url, headers: &[(String, String)]) -> usize {
+    url.host.len() + url.path.len() + headers.iter().map(|(k, v)| k.len() + v.len()).sum::<usize>()
+}
+
+/// Does one more request fit the byte bound of the queue? Only a queue of `FREE_PENDING` requests or more sums its bytes.
+fn pending_fits(st: &FetchState, lim: &FetchLimits, add: usize) -> bool {
+    st.queue.len() < FREE_PENDING || st.queue.iter().map(Pending::meta_bytes).sum::<usize>().saturating_add(add) <= lim.max_pending_bytes
+}
+
 /// Hard bounds of the fetch layer. Each is checked before the thing grows.
 #[derive(Clone, Copy, Debug)]
 pub struct FetchLimits {
-    /// Requests that wait for `run_network_tasks`.
+    /// Requests that wait for `run_network_tasks`. A page that calls `fetch` many times in one task (gitlab: 64) needs all of them queued,
+    /// as in Chrome. The queue is also bounded by `max_pending_bytes`.
     pub max_pending: usize,
+    /// Bytes of the URLs and headers of the queued requests. Their bodies count in `max_retained`. Checked once the queue holds `FREE_PENDING`
+    /// requests (fewer hold at most `FREE_PENDING` x (`max_url_bytes` + `max_header_bytes`)).
+    pub max_pending_bytes: usize,
     /// Requests started in the life of the browser.
     pub max_started: u64,
     pub max_url_bytes: usize,
@@ -122,7 +139,8 @@ pub struct FetchLimits {
 impl Default for FetchLimits {
     fn default() -> Self {
         FetchLimits {
-            max_pending: 64,
+            max_pending: 1024,
+            max_pending_bytes: 8 << 20,
             max_started: 1 << 16,
             max_url_bytes: 8 << 10,
             max_request_body: 8 << 20,
@@ -446,6 +464,11 @@ impl Wire {
 }
 
 impl Pending {
+    /// Bytes of the URL and the headers (the body counts in `FetchState::queued_bytes`).
+    fn meta_bytes(&self) -> usize {
+        meta_bytes(&self.url, &self.headers)
+    }
+
     fn parts(&self) -> Parts<'_> {
         Parts { method: self.method, url: &self.url, headers: &self.headers, body: self.body.as_ref().map(|b| b.as_slice()), redirect: self.redirect, cors: &self.cors }
     }
@@ -1730,6 +1753,9 @@ fn prepare(d: &Dom, it: &mut Interp<'_>, promise: Value, a: &[Value]) -> R<()> {
         if !headers.iter().any(|(k, _)| k == "accept") {
             headers.push(("accept".into(), "*/*".into()));
         }
+        if !pending_fits(&st, &lim, meta_bytes(&core.url, &headers)) {
+            return Err(d.lim("fetch-queue"));
+        }
         st.queue.push_back(Pending { promise, method, url: core.url, headers, body: core.body, redirect: core.redirect, cors, xhr: None, queued: bare_net::trace::on().then(std::time::Instant::now), started: None });
     }
     Ok(())
@@ -1790,6 +1816,9 @@ pub(crate) fn queue_xhr(d: &Dom, x: (ObjId, u64), method: &str, url: Url, mut he
     st.started += 1;
     if !headers.iter().any(|(k, _)| k == "accept") {
         headers.push(("accept".into(), "*/*".into()));
+    }
+    if !pending_fits(&st, &lim, meta_bytes(&url, &headers)) {
+        return Err(d.lim("fetch-queue"));
     }
     st.queue.push_back(Pending { promise: Value::Undefined, method, url, headers, body, redirect: Redirect::Follow, cors, xhr: Some(x), queued: bare_net::trace::on().then(std::time::Instant::now), started: None });
     Ok(())

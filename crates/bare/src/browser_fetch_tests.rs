@@ -611,6 +611,10 @@ fn resource_caps_are_limits_before_growth() {
             b4.run_network_tasks(10).unwrap();
         }
         assert_eq!(js(&mut b4, "fetch('/a')"), lim("fetch-requests"));
+        // The queue is bounded by the text of its URLs and headers once it holds 64 requests (gitlab queues 64 at once).
+        let mut b5 = mk(Some(format!("http://127.0.0.1:{}/", srv.port)), FetchLimits { max_pending_bytes: 2000, ..Default::default() });
+        assert_eq!(js(&mut b5, "for (var i = 0; i < 64; i++) fetch('/a'); 1"), "1");
+        assert_eq!(js(&mut b5, &format!("fetch('/{}')", "x".repeat(3000))), lim("fetch-queue"));
     });
 }
 
@@ -1095,5 +1099,20 @@ fn credential_fetch_rejects_without_sending_a_request() {
         assert_eq!(js(&mut b, "error"), "TypeError");
         assert_eq!(b.dom.fetch_queued(), 0);
         assert_eq!(js(&mut b, "try { new Request('http://user:pass@127.0.0.1:1/x') } catch(e) { e.name }"), "TypeError");
+    });
+}
+
+/// gitlab: a script that calls `fetch` 64 times in one task, before any request can finish, stopped the page with `fetch-queue`. The queue
+/// holds 1024 requests now (Chrome queues too), so a page with 200 `fetch` and 200 `XMLHttpRequest` calls in one task loads and gets every answer.
+#[test]
+fn many_requests_in_one_task_are_queued() {
+    big(|| {
+        let srv = serve(|_| ok("{}"));
+        let mut b = mk(Some(format!("http://127.0.0.1:{}/", srv.port)), FetchLimits::default());
+        js(&mut b, "var done = 0; for (var i = 0; i < 200; i++) { fetch('/f' + i).then(function () { done++; }); var x = new XMLHttpRequest(); x.open('GET', '/x' + i); x.onload = function () { done++; }; x.send(); }");
+        assert_eq!(b.pending_fetches(), 400);
+        b.run_network_tasks(1000).unwrap();
+        assert_eq!(js(&mut b, "done"), "400");
+        assert_eq!(b.pending_fetches(), 0);
     });
 }

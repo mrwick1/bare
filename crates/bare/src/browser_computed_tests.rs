@@ -734,3 +734,20 @@ fn excess_shadow_sources_do_not_abort_page() {
     js(&mut b, "document.getElementById('a').attachShadow({mode:'open'}).innerHTML='<style>:host{color:red}</style>'; document.getElementById('b').attachShadow({mode:'open'}).innerHTML='<style>:host{color:blue}</style>'");
     assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('a')).color"), "rgb(255, 0, 0)");
 }
+
+/// apnews: 30,000 nodes (5,000 elements, the rest text) and 8,000 rules gave `computed-work` (nodes x rules) although the indexed cascade
+/// checks 1.3 million candidates. The bound counts the nodes that are styled, so text does not count. 50,000 `<i>x</i>` are 100,000 nodes and
+/// 50,000 elements, and 1,500 class rules match none of them.
+#[test]
+fn work_bound_counts_styled_elements_not_text_nodes() {
+    big(|| {
+        let css: String = (0..1500).map(|i| format!(".c{i}{{color:red}}")).collect();
+        let page = format!("<style>{css}</style><body>{}</body>", "<i>x</i>".repeat(50_000));
+        let mut b = Browser::new(tree::parse(&page), BrowserLimits::default(), EvalLimits::default(), HeapLimits::default()).expect("browser");
+        assert_eq!(js(&mut b, "getComputedStyle(document.querySelector('i')).display"), "inline");
+        // The cap still stops a page whose styled elements times rules are over it.
+        b.set_computed_limits(ComputedLimits { max_work: 50_000 * 1000, ..Default::default() });
+        js(&mut b, "document.body.className = 'z'; 0");
+        assert_eq!(js(&mut b, "getComputedStyle(document.querySelector('i')).display"), lim("computed-work"));
+    });
+}
