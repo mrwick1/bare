@@ -544,7 +544,7 @@ fn check_visibility(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V
     let odd = {
         let c = d.computed.cache.borrow();
         let b = c.as_ref().expect("built by the snapshot");
-        *b.odd.get_or_init(|| b.key.iter().any(|(_, t)| unmodelled(t)))
+        *b.odd.get_or_init(|| b.key.iter().any(|(_, _, t)| unmodelled(t)))
     };
     if visibility && matches!(snap.style.get(Property::Visibility), Cv::Keyword(Keyword::Hidden | Keyword::Collapse)) {
         return Ok(Value::Bool(false));

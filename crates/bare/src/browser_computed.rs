@@ -51,7 +51,7 @@
 //! - Page-level or per-read? A gate stays a page-level `Unsupported` (fatal), not an empty string or a throw: this module and the other
 //!   host modules say that a gate is never faked, and an empty string or a throw would let a script go on with a value that Chrome
 //!   does not give. `docs/decisions.md` has no rule that says otherwise.
-//! - A light child of a shadow host has no style (the flat tree has no slots, `RuleSet::compute_for` does not reach it).
+//! - A light child of a shadow host that no slot takes has no style (it is not rendered; `RuleSet::compute_for` does not reach it).
 //! - Values that the engine keeps only loosely: `align-*` and `justify-*` lose `safe`/`unsafe`, and `text-decoration` keeps only the line
 //!   (the style, the color and the thickness are dropped, so `underline dotted` reads as `underline`). Those read as the text that the
 //!   engine has, not a fake. A value with no text (an unresolved `var()`) and a shorthand that cannot be built from its longhands
@@ -167,7 +167,7 @@ type LastKey = (u64, u64, usize, [u64; 3], Option<NodeId>);
 
 pub(crate) struct Built {
     vp: (f32, f32),
-    pub(crate) key: Vec<(Option<String>, String)>,
+    pub(crate) key: Vec<(NodeId, Option<String>, String)>,
     rules: RuleSet,
     /// The last cascade of these rules, and its key: `revision`, `text_revision`, length and user state revisions of the
     /// document, and `want`. The flag tells that it keeps what `restyle_frame` needs (`RuleSet::compute_kept`).
@@ -228,14 +228,15 @@ fn pseudo_kind(s: &str) -> u8 {
         || name.strip_prefix("-webkit-").is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'));
     if old || (double && new) { PSEUDO } else { EMPTY }
 }
-const NO_STYLE: &str = "an element that the style walk does not reach has no computed style in the engine (a light child of a shadow host: no slots)";
+const NO_STYLE: &str = "an element that the style walk does not reach has no computed style in the engine (a light child of a shadow host that no slot takes)";
 const AUTO_DIR: &str = "direction depends on dir=auto or bdi (the text decides it)";
 const CSS_TEXT: &str = "computed cssText (CSSOM and browsers differ; not faked)";
 const NO_TEXT: &str = "this computed value has no text (an unresolved value)";
 const NO_SHORT: &str = "this shorthand has no single computed text (sides differ, or it needs more than the engine keeps)";
 
 struct Plan {
-    parts: Vec<(Option<String>, String)>,
+    /// The tree of the sheet (the document node, or a shadow root), its layer and its text.
+    parts: Vec<(NodeId, Option<String>, String)>,
     bytes: usize,
     missing: Vec<String>,
     more: bool,
@@ -324,7 +325,7 @@ impl Dom {
     /// With `record`, each `<link>` is bound to the sheet that it has now (`Computed::bound`).
     fn plan(&self, doc: &mut bare_html::dom::Document, vp: (f32, f32), record: bool) -> R<Plan> {
         let l = self.computed.lim.get();
-        let Some(sources) = cascade::sources_capped(doc, vp, l.max_sources, l.max_sheet_bytes) else {
+        let Some(sources) = cascade::sources_capped(doc, vp, l.max_sources, l.max_sheet_bytes, doc.has_shadow_roots()) else {
             return Err(self.lim("computed-sources"));
         };
         let ext = self.computed.ext.borrow();
@@ -332,13 +333,13 @@ impl Dom {
         let (pending_ok, bound) = (self.computed.pending_ok.get(), self.computed.bound.borrow());
         // With `record`: the links of this plan, and the bindings that change.
         let (mut seen, mut changes) = (Vec::new(), Vec::new());
-        fn add(d: &Dom, p: &mut Plan, layer: Option<String>, text: &str) -> R<()> {
+        fn add(d: &Dom, p: &mut Plan, scope: NodeId, layer: Option<String>, text: &str) -> R<()> {
             let l = d.computed.lim.get();
             p.bytes = p.bytes.saturating_add(text.len());
             if p.bytes > l.max_sheet_bytes || p.parts.len() >= l.max_sources {
                 return Err(d.lim("computed-sources"));
             }
-            p.parts.push((layer, text.to_string()));
+            p.parts.push((scope, layer, text.to_string()));
             Ok(())
         }
         fn miss(p: &mut Plan, href: &str) {
@@ -347,7 +348,9 @@ impl Dom {
             }
             if p.missing.len() < 16 { p.missing.push(href.to_string()) } else { p.more = true }
         }
+        let (shadows, root) = (doc.has_shadow_roots(), doc.root());
         for (s, el) in sources {
+            let scope = if shadows { doc.tree_root(el) } else { root };
             match s {
                 Source::Inline(text) => {
                     if text.contains("@import") {
@@ -355,7 +358,7 @@ impl Dom {
                             match ext.get(&imp.href) {
                                 Some(parts) => {
                                     for part in parts {
-                                        add(self, &mut p, join_layer(imp.layer.as_deref(), part.layer.as_deref()), &part.text)?;
+                                        add(self, &mut p, scope, join_layer(imp.layer.as_deref(), part.layer.as_deref()), &part.text)?;
                                     }
                                 }
                                 None => {
@@ -365,13 +368,13 @@ impl Dom {
                             }
                         }
                     }
-                    add(self, &mut p, None, &text)?;
+                    add(self, &mut p, scope, None, &text)?;
                 }
                 Source::Link(href) if href.trim().is_empty() => {}
                 Source::Link(href) => match ext.get(&href) {
                     Some(parts) => {
                         for part in parts {
-                            add(self, &mut p, part.layer.clone(), &part.text)?;
+                            add(self, &mut p, scope, part.layer.clone(), &part.text)?;
                         }
                         if record {
                             seen.push(el);
@@ -387,7 +390,7 @@ impl Dom {
                         match old.and_then(|k| ext.get(k)) {
                             Some(parts) => {
                                 for part in parts {
-                                    add(self, &mut p, part.layer.clone(), &part.text)?;
+                                    add(self, &mut p, scope, part.layer.clone(), &part.text)?;
                                 }
                             }
                             // The link had a sheet that is gone, or a `media` may have just turned it on (Chrome loaded it before).
@@ -414,7 +417,7 @@ impl Dom {
         Ok(p)
     }
 
-    /// Is `el` in the document tree? `false`: it is not connected (a detached tree, or a shadow tree that is not attached). A connected shadow tree is a gate.
+    /// Is `el` in the document tree? `false`: it is not connected (a detached tree, or a shadow tree that is not attached). A shadow tree of a connected host is connected.
     pub(crate) fn in_document(&self, it: &mut Interp<'_>, el: NodeId) -> R<bool> {
         let doc = self.doc.borrow();
         let mut top = el;
@@ -431,7 +434,7 @@ impl Dom {
                     including = p;
                 }
                 if including == doc.root() {
-                    return Err(Self::gate("computed style in a shadow tree (shadow cascade is not implemented)"));
+                    return Ok(true);
                 }
             }
             return Ok(false);
@@ -481,8 +484,13 @@ impl Dom {
                 *cache = None;
                 let mut rules = RuleSet::new(vp);
                 rules.add(&mut doc, UA_CSS, Origin::UserAgent);
-                for (layer, text) in &plan.parts {
-                    rules.add_in_layer(&mut doc, text, Origin::Author, layer.as_deref());
+                let root = doc.root();
+                for (scope, layer, text) in &plan.parts {
+                    if *scope == root {
+                        rules.add_in_layer(&mut doc, text, Origin::Author, layer.as_deref());
+                    } else {
+                        rules.add_scoped(&mut doc, text, Origin::Author, layer.as_deref(), *scope);
+                    }
                 }
                 self.computed.builds.set(self.computed.builds.get() + 1);
                 if rules.len() > l.max_rules {

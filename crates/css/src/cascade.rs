@@ -693,7 +693,7 @@ impl RuleSet {
     /// computed values of an element that is not rendered). Only the elements from the root down to `want` are styled inside a
     /// hidden subtree, so the cost of a hidden read is the depth of `want`. Layout asks with `None` and pays nothing: the walk
     /// below changes only at a `display:none` element and on the way from it to `want`.
-    /// An element that the walk does not reach (a light child of a shadow host: no slots) still has no style.
+    /// An element that the walk does not reach (a light child of a shadow host that no slot takes) still has no style.
     pub fn compute_for(&self, doc: &Document, want: Option<NodeId>) -> Styles {
         if want.is_some() { self.walk::<true>(doc, want, false) } else { self.walk::<false>(doc, None, false) }
     }
@@ -2242,18 +2242,19 @@ pub enum Source {
 /// is left out, and so is an alternate style sheet (`rel="alternate stylesheet"`): a browser does not use it unless the user asks.
 /// An empty `media` is good.
 pub fn sources(doc: &Document, viewport: (f32, f32)) -> Vec<Source> {
-    sources_capped(doc, viewport, usize::MAX, usize::MAX).unwrap_or_default().into_iter().map(|(s, _)| s).collect()
+    sources_capped(doc, viewport, usize::MAX, usize::MAX, false).unwrap_or_default().into_iter().map(|(s, _)| s).collect()
 }
 
 /// The same, but each source comes with its element, and the result is `None` before more than `max_sources` sources, or more than
-/// `max_bytes` bytes of `<style>` text and `href`, are copied.
-pub fn sources_capped(doc: &Document, viewport: (f32, f32), max_sources: usize, max_bytes: usize) -> Option<Vec<(Source, NodeId)>> {
+/// `max_bytes` bytes of `<style>` text and `href`, are copied. With `shadows`, the sources in shadow trees come too: the tree of an
+/// element is `Document::tree_root`, and the caller adds its sheet with `RuleSet::add_scoped`.
+pub fn sources_capped(doc: &Document, viewport: (f32, f32), max_sources: usize, max_bytes: usize, shadows: bool) -> Option<Vec<(Source, NodeId)>> {
     // A name that no node in the page has cannot be on any element, so `None` is a good answer for a name that is not in the table.
     let (style, link, media, rel, href, disabled) = (doc.find_atom("style"), doc.find_atom("link"), doc.find_atom("media"), doc.find_atom("rel"), doc.find_atom("href"), doc.find_atom("disabled"));
     let attr = |el, name: Option<Atom>| name.and_then(|n| doc.attr(el, n));
     let mut out = Vec::new();
     let (mut bytes, mut over) = (0usize, false);
-    walk(doc, &mut |el| {
+    walk(doc, shadows, &mut |el| {
         let NodeData::Element { name, .. } = *doc.data(el) else { return };
         let (is_style, is_link) = (Some(name) == style, Some(name) == link);
         if over || !(is_style || is_link) || !attr(el, media).is_none_or(|m| at_rules::media_matches(m, viewport)) {
@@ -2287,8 +2288,9 @@ pub fn sources_capped(doc: &Document, viewport: (f32, f32), max_sources: usize, 
     (!over).then_some(out)
 }
 
-/// Call `f` for each node of the tree, in the order of the page. A loop with a stack.
-fn walk(doc: &Document, f: &mut dyn FnMut(NodeId)) {
+/// Call `f` for each node of the tree, in the order of the page. A loop with a stack. With `shadows`, the shadow tree of a host comes
+/// right after the host, before its light children.
+fn walk(doc: &Document, shadows: bool, f: &mut dyn FnMut(NodeId)) {
     let mut stack = vec![doc.root()];
     while let Some(node) = stack.pop() {
         f(node);
@@ -2296,6 +2298,9 @@ fn walk(doc: &Document, f: &mut dyn FnMut(NodeId)) {
         while let Some(c) = child {
             stack.push(c);
             child = doc.prev_sibling(c);
+        }
+        if let (true, Some(root)) = (shadows, doc.shadow_root(node)) {
+            stack.push(root);
         }
     }
 }
@@ -2323,7 +2328,7 @@ mod tests {
     /// The first element with this `id`.
     fn by_id(doc: &Document, id: &str) -> NodeId {
         let mut found = None;
-        walk(doc, &mut |n| {
+        walk(doc, false, &mut |n| {
             if found.is_none() && doc.attr(n, Atom::ID) == Some(id) {
                 found = Some(n);
             }

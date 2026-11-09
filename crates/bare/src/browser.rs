@@ -844,7 +844,7 @@ impl Dom {
                         _ => match doc.atom_str(name) {
                             "iframe" => p.iframe,
                             "link" => p.link,
-                            "a" | "area" | "template" | "img" => crate::browser_elements::proto(self, it, doc.atom_str(name))?,
+                            "a" | "area" | "template" | "img" | "slot" => crate::browser_elements::proto(self, it, doc.atom_str(name))?,
                             t @ ("audio" | "video") => crate::browser_media::proto(self, it, n, t)?,
                             t @ ("input" | "form" | "button" | "label") => crate::browser_controls::proto_for(self, it, t)?,
                             "script" => self.scripts.proto.get().copied().unwrap_or(p.html),
@@ -1234,6 +1234,7 @@ pub(crate) static DEFS: &[Def] = &[
     Def { on: &[Element], name: "namespaceURI", len: 0, kind: G(ns::namespace_uri) },
     Def { on: &[Element], name: "prefix", len: 0, kind: G(ns::prefix) },
     Def { on: &[Element], name: "previousElementSibling", len: 0, kind: G(nd::previous_element_sibling) },
+    Def { on: &[Element, Text], name: "assignedSlot", len: 0, kind: G(crate::browser_slot::assigned_slot) },
     Def { on: &[Element], name: "nextElementSibling", len: 0, kind: G(nd::next_element_sibling) },
     Def { on: &[Element, Shadow], name: "innerHTML", len: 0, kind: A(frag::inner_html, frag::set_inner_html) },
     Def { on: &[Element], name: "outerHTML", len: 0, kind: A(frag::outer_html, frag::set_outer_html) },

@@ -23,12 +23,15 @@
 //! `slotAssignment: "manual"`. Their getters on `ShadowRoot` are fixed at `false`, `false`, `false` and `"named"`. Inserting a root as a node
 //! (`appendChild(root)` and so on) is `Unsupported` after the other insertion checks (the standard moves the children of a fragment).
 //!
-//! What a shadow tree is NOT here (none of this is faked): no slotting (`slot` elements and `assignedNodes` do nothing and are absent),
-//! no `adoptedStyleSheets`, no `innerHTML`, `getHTML`, `activeElement` or `styleSheets` on `ShadowRoot`, no declarative
-//! shadow DOM, no style, layout or paint for a shadow tree (the cascade and layout start at the document and never reach it; `getComputedStyle` of
-//! a connected shadow element is Unsupported), no `:host`, `:host()` or `::slotted()` selectors (they are a `SyntaxError`),
-//! no focus in a shadow tree (its elements are not focusable areas) and no script run from a shadow tree (the loader prepares only scripts
-//! whose light ancestors reach the document). `new ShadowRoot()` is an illegal constructor. Deviation: Chrome inserts a shadow root like a fragment (its children move); here it is `Unsupported`.
+//! Style and layout: a shadow tree has its own style scope (`RuleSet::add_scoped`, `bare_css::cascade`) and its slots are in the flat tree
+//! (`Document::flat_children`, `crates/html/src/dom/slots.rs`). `getComputedStyle` and the geometry reads work in a connected shadow tree and on slotted nodes.
+//! `HTMLSlotElement`, `assignedSlot` and `assignedNodes` are in `browser_slot.rs`. In a script, `:host`, `:host()` and `::slotted()` are good
+//! selectors that match nothing.
+//!
+//! What a shadow tree is NOT here (none of this is faked): no `adoptedStyleSheets` or constructable style sheets, no `getHTML`, `activeElement` or
+//! `styleSheets` on `ShadowRoot`, no declarative shadow DOM, no `slotchange` event, no focus in a shadow tree (its elements are not focusable areas) and no
+//! script run from a shadow tree (the loader prepares only scripts whose light ancestors reach the document). `new ShadowRoot()` is an illegal constructor.
+//! Deviation: Chrome inserts a shadow root like a fragment (its children move); here it is `Unsupported`.
 //!
 //! Events: a path walks the parent links, so an event that is not composed and starts in a shadow tree ends at its root, which is exactly the
 //! standard path. A COMPOSED event whose path would reach a root (the standard continues at the host and retargets `target`) is refused with

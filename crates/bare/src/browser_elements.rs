@@ -1,4 +1,4 @@
-//! `HTMLAnchorElement`, `HTMLAreaElement`, `HTMLTemplateElement` and `HTMLImageElement`.
+//! `HTMLAnchorElement`, `HTMLAreaElement`, `HTMLTemplateElement`, `HTMLImageElement` and `HTMLSlotElement`.
 //!
 //! Lazy: the four globals are accessors until the first read (`browser_lazy.rs`). The four prototypes are made once, by the first read of a
 //! global or by the first wrapper of an `<a>`, `<area>`, `<template>` or `<img>` (`proto`, called by `Dom::wrap`). A realm that has none pays for
@@ -41,10 +41,10 @@ use bare_js::eval::{Error, Interp};
 use bare_js::value::{ObjId, Value};
 use std::cell::Cell;
 
-/// `[prototype of a, area, template; constructor of a, area, template]`, once made. All are roots.
+/// `[prototype of a, area, template, img, slot; constructor of the same]`, once made. All are roots.
 #[derive(Default)]
 pub(crate) struct Els {
-    objs: Cell<Option<[ObjId; 8]>>,
+    objs: Cell<Option<[ObjId; 10]>>,
     tagged: Cell<bool>,
 }
 
@@ -64,6 +64,7 @@ pub(crate) fn proto(d: &Dom, it: &mut Interp<'_>, tag: &str) -> R<ObjId> {
         "a" => 0,
         "area" => 1,
         "img" => 3,
+        "slot" => 4,
         _ => 2,
     }])
 }
@@ -85,33 +86,35 @@ fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     Ok(())
 }
 
-lazy_global!(lazy_a, "HTMLAnchorElement", ensure, |d| d.els.objs.get().expect("made")[4]);
-lazy_global!(lazy_area, "HTMLAreaElement", ensure, |d| d.els.objs.get().expect("made")[5]);
-lazy_global!(lazy_template, "HTMLTemplateElement", ensure, |d| d.els.objs.get().expect("made")[6]);
-lazy_global!(lazy_img, "HTMLImageElement", ensure, |d| d.els.objs.get().expect("made")[7]);
+lazy_global!(lazy_a, "HTMLAnchorElement", ensure, |d| d.els.objs.get().expect("made")[5]);
+lazy_global!(lazy_area, "HTMLAreaElement", ensure, |d| d.els.objs.get().expect("made")[6]);
+lazy_global!(lazy_template, "HTMLTemplateElement", ensure, |d| d.els.objs.get().expect("made")[7]);
+lazy_global!(lazy_img, "HTMLImageElement", ensure, |d| d.els.objs.get().expect("made")[8]);
+lazy_global!(lazy_slot, "HTMLSlotElement", ensure, |d| d.els.objs.get().expect("made")[9]);
 
 pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    crate::browser_lazy::install(d, it, &[("HTMLAnchorElement", lazy_a as H), ("HTMLAreaElement", lazy_area), ("HTMLTemplateElement", lazy_template), ("HTMLImageElement", lazy_img)])
+    crate::browser_lazy::install(d, it, &[("HTMLAnchorElement", lazy_a as H), ("HTMLAreaElement", lazy_area), ("HTMLTemplateElement", lazy_template), ("HTMLImageElement", lazy_img), ("HTMLSlotElement", lazy_slot)])
 }
 
 #[cold]
 #[inline(never)]
-fn make(d: &Dom, it: &mut Interp<'_>) -> R<[ObjId; 8]> {
+fn make(d: &Dom, it: &mut Interp<'_>) -> R<[ObjId; 10]> {
     let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
-    let mut o = [d.p().html; 8];
-    for (i, name) in ["HTMLAnchorElement", "HTMLAreaElement", "HTMLTemplateElement", "HTMLImageElement"].into_iter().enumerate() {
+    let mut o = [d.p().html; 10];
+    for (i, name) in ["HTMLAnchorElement", "HTMLAreaElement", "HTMLTemplateElement", "HTMLImageElement", "HTMLSlotElement"].into_iter().enumerate() {
         let proto = d.obj(it, d.p().html)?;
         let f = crate::browser_custom::interface_ctor(d, it, name, false)?;
         it.define_data(f, kp, Value::Object(proto), false, false, false)?;
         it.define_data(proto, kc, Value::Object(f), true, false, true)?;
         crate::browser_lazy::tag(d, it, proto, name)?;
-        (o[i], o[i + 4]) = (proto, f);
+        (o[i], o[i + 5]) = (proto, f);
     }
     tag_fragments(d, it)?;
     members::<false>(d, it, o[0])?;
     members::<true>(d, it, o[1])?;
     d.def_get(it, o[2], "content", content, None)?;
     image_members(d, it, o[3])?;
+    crate::browser_slot::members(d, it, o[4])?;
     d.els.objs.set(Some(o));
     Ok(o)
 }

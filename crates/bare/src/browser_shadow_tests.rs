@@ -509,7 +509,7 @@ fn light_tree_queries_exclude_shadow_children_and_root_queries_exclude_light_one
 }
 
 #[test]
-fn bad_selectors_in_a_root_are_syntax_errors_and_host_pseudo_classes_are_not_supported_silently() {
+fn bad_selectors_in_a_root_are_syntax_errors_and_host_pseudo_classes_never_match_in_script() {
     let mut b = browser();
     let out = js(
         &mut b,
@@ -517,8 +517,9 @@ fn bad_selectors_in_a_root_are_syntax_errors_and_host_pseudo_classes_are_not_sup
          ['p[', '', ':host', '::slotted(p)', ':host(div)'].forEach(function (s) { try { root.querySelector(s); r.push('ok'); } catch (e) { r.push(e.name); } });
          r.join()",
     );
-    // `:host` and `::slotted` are not selectors of this engine: they are a SyntaxError, never a silent empty answer.
-    assert_eq!(out, "SyntaxError,SyntaxError,SyntaxError,SyntaxError,SyntaxError");
+    // `:host`, `::slotted` and `:host()` are good selectors in a script call; they match nothing (they are for style sheets of a shadow tree).
+    assert_eq!(out, "SyntaxError,SyntaxError,ok,ok,ok");
+    assert_eq!(js(&mut b, "root.querySelector(':host') + ',' + root.host.matches(':host') + ',' + root.host.matches('::slotted(p)')"), "null,false,false");
 }
 
 // ------------------------------------------------------------------------------------------ clone, serialize, parse
@@ -890,8 +891,51 @@ fn shadow_root_creation_counts_live_lists_before_native_mutation() {
 }
 
 #[test]
-fn connected_shadow_computed_style_is_gated_instead_of_faked_empty() {
+fn connected_shadow_computed_style_is_read() {
     let mut b=browser();
     js(&mut b,"var h=document.createElement('div');var r=h.attachShadow({mode:'open'});var x=document.createElement('i');r.appendChild(x);document.body.appendChild(h);");
-    assert_eq!(js(&mut b,"getComputedStyle(x).display"),"unsupported");
+    assert_eq!(js(&mut b,"getComputedStyle(x).display"),"inline");
+}
+
+// ------------------------------------------------------------------------------------------ style scopes and slots
+
+/// A host `x-a` with light children `#l` (default slot) and `#n` (`slot=named`) and a shadow tree that has two slots.
+const SLOTTED: &str = "<!doctype html><html><head><style>p { color: red } x-a { color: blue; display: block }</style></head>\
+    <body><x-a id=h><p id=l>a</p><b id=n slot=named>b</b>text</x-a></body></html>";
+const SHADOW: &str = "var r = h.attachShadow({ mode: 'open' }); r.innerHTML = '<style>p { color: green } :host { width: 77px } ::slotted(p) { color: pink }</style>\
+    <p id=in>x</p><div id=w><slot id=s1></slot><slot id=s2 name=named><i id=fb>f</i></slot></div>'; 0";
+
+#[test]
+fn computed_style_in_a_shadow_tree_uses_its_own_scope() {
+    let mut b = browser_with(SLOTTED, BrowserLimits::default(), 50_000_000);
+    js(&mut b, "var h = document.getElementById('h'); 0");
+    js(&mut b, SHADOW);
+    let g = |b: &mut Browser, e: &str, p: &str| js(b, &format!("getComputedStyle({e}).{p}"));
+    // the shadow rule wins in the shadow tree; the page rule `p { red }` does not reach it
+    assert_eq!(g(&mut b, "r.getElementById('in')", "color"), "rgb(0, 128, 0)");
+    // `:host` gives the host a width, and the page rule for `x-a` (blue) wins over the inherited colour
+    assert_eq!(g(&mut b, "h", "width"), "77px");
+    assert_eq!(g(&mut b, "h", "color"), "rgb(0, 0, 255)");
+    // a slotted node: the shadow `::slotted(p)` rule loses to no page rule, because shadow-tree rules lose for a normal declaration
+    assert_eq!(g(&mut b, "document.getElementById('l')", "color"), "rgb(255, 0, 0)");
+    // the slot is a node of the cascade: the slotted `b` inherits from `#s2`, which inherits from `#w` and the host (blue)
+    assert_eq!(g(&mut b, "document.getElementById('n')", "color"), "rgb(0, 0, 255)");
+}
+
+#[test]
+fn slot_api() {
+    let mut b = browser_with(SLOTTED, BrowserLimits::default(), 50_000_000);
+    js(&mut b, "var h = document.getElementById('h'); 0");
+    js(&mut b, SHADOW);
+    let t = |b: &mut Browser, s: &str| js(b, s);
+    assert_eq!(t(&mut b, "var s1 = r.getElementById('s1'), s2 = r.getElementById('s2'); [s1 instanceof HTMLSlotElement, s1.name, s2.name, Object.prototype.toString.call(s1)].join()"), "true,,named,[object HTMLSlotElement]");
+    assert_eq!(t(&mut b, "s1.assignedNodes().map(n => n.nodeName).join()"), "P,#text");
+    assert_eq!(t(&mut b, "s1.assignedElements().map(n => n.id).join()"), "l");
+    assert_eq!(t(&mut b, "s2.assignedNodes().length + ',' + s2.assignedNodes({ flatten: true }).map(n => n.id).join()"), "1,n");
+    assert_eq!(t(&mut b, "var l = document.getElementById('l'); [l.assignedSlot === s1, document.getElementById('n').assignedSlot === s2, String(h.assignedSlot), l.getRootNode() === document, s1.getRootNode() === r, s1.getRootNode({ composed: true }) === document].join()"), "true,true,null,true,true,true");
+    // nothing is slotted: flatten gives the fallback content
+    assert_eq!(t(&mut b, "document.getElementById('n').remove(); s2.assignedNodes().length + ',' + s2.assignedNodes({ flatten: true }).map(n => n.id).join() + ',' + s2.assignedElements({ flatten: true }).length"), "0,fb,1");
+    assert_eq!(t(&mut b, "s1.assignedNodes({ flatten: true }).length"), "2");
+    // a closed tree: `assignedSlot` is null for the page
+    assert_eq!(t(&mut b, "var h2 = document.createElement('div'); h2.attachShadow({ mode: 'closed' }).innerHTML = '<slot></slot>'; var k = h2.appendChild(document.createElement('u')); document.body.appendChild(h2); k.assignedSlot"), "null");
 }
