@@ -122,6 +122,29 @@ hits"#;
 }
 
 #[test]
+fn an_error_prints_its_stack_or_message_without_running_page_code() {
+    big(|| {
+        let mut b = mk();
+        let setup = r#"
+var hits = 0;
+var e = new TypeError('bad thing');
+var noStack = { message: 'only message' };
+var trap = { get stack() { hits++; return 'x'; }, get message() { hits++; return 'y'; } };
+var numStack = { stack: 5 };
+console.error(e); console.error(noStack); console.warn(trap); console.log(numStack); console.error('%s!', e);
+hits"#;
+        assert_eq!(js(&mut b, setup), "0");
+        let l = lines(&mut b);
+        assert!(l[0].starts_with("E:TypeError: bad thing"), "{}", l[0]);
+        assert_eq!(l[1], "E:only message");
+        assert_eq!(l[2], "W:[object]");
+        assert_eq!(l[3], "L:[object]");
+        assert!(l[4].starts_with("E:TypeError: bad thing") && l[4].ends_with('!'), "{}", l[4]);
+        assert_eq!(js(&mut b, "hits"), "0");
+    });
+}
+
+#[test]
 fn records_keep_raw_arguments_levels_and_sequence() {
     big(|| {
         let mut b = mk();

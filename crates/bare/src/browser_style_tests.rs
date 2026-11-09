@@ -59,7 +59,13 @@ fn same_object_and_brand_checks() {
     assert_eq!(js(&mut b, "d.get.call(document.createTextNode('x'))"), "throw:TypeError:Illegal invocation");
     assert_eq!(js(&mut b, "d.get.call({})"), "throw:TypeError:Illegal invocation");
     assert_eq!(js(&mut b, "d.get.call(document.getElementById('sv'))"), "throw:TypeError:Illegal invocation");
-    assert_eq!(js(&mut b, "document.getElementById('sv').style"), "undefined");
+    // SVGElement has its own `style`; the HTML accessor still refuses an SVG receiver.
+    assert_eq!(js(&mut b, "var sv = document.getElementById('sv'); sv.style === sv.style && sv.style instanceof CSSStyleDeclaration"), "true");
+    assert_eq!(js(&mut b, "sv.style.marginBottom = '4px'; sv.getAttribute('style')"), "margin-bottom: 4px;");
+    assert_eq!(js(&mut b, "sv.style = 'color: red'; sv.style.color + '|' + sv.getAttribute('style')"), "red|color: red;");
+    assert_eq!(js(&mut b, "var sd = Object.getOwnPropertyDescriptor(SVGElement.prototype, 'style'); typeof sd.get + typeof sd.set + ('style' in Element.prototype)"), "functionfunctionfalse");
+    assert_eq!(js(&mut b, "sd.get.call(a)"), "throw:TypeError:Illegal invocation");
+    assert_eq!(js(&mut b, "sd.get.call(document.createElementNS('http://www.w3.org/1998/Math/MathML', 'math'))"), "throw:TypeError:Illegal invocation");
     // The accessor of another interface does not work on the declaration, and the reverse.
     assert_eq!(js(&mut b, "Object.getOwnPropertyDescriptor(CSSStyleDeclaration.prototype, 'cssText').get.call(a)"), "throw:TypeError:Illegal invocation");
     assert_eq!(js(&mut b, "Object.getOwnPropertyDescriptor(CSSStyleDeclaration.prototype, 'color').get.call({})"), "throw:TypeError:Illegal invocation");

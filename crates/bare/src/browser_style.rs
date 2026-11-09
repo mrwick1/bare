@@ -53,7 +53,7 @@ use crate::browser_style_block as blk;
 use bare_css::values::{Property, SHORTHANDS};
 use bare_js::eval::Error;
 use std::borrow::Cow;
-use bare_html::dom::NodeId;
+use bare_html::dom::{NodeId, Ns};
 use bare_js::eval::Interp;
 use bare_js::value::{ObjId, Value};
 use std::cell::{Cell, OnceCell, RefCell};
@@ -310,6 +310,15 @@ impl Dom {
         Ok(n)
     }
 
+    /// An SVG element (`style` is also on `SVGElement`, not on `Element`).
+    fn style_svg_el(&self, it: &mut Interp<'_>, this: Value) -> R<NodeId> {
+        let n = self.el(it, this)?;
+        if self.doc.borrow().element_ns(n) != Ns::Svg {
+            return Err(it.type_error("Illegal invocation"));
+        }
+        Ok(n)
+    }
+
     pub(crate) fn is_style_object(&self, o: ObjId) -> bool {
         self.style.s.borrow().objs.contains_key(&o)
     }
@@ -333,9 +342,18 @@ fn required(it: &mut Interp<'_>, a: &[Value], n: usize, name: &str) -> R<()> {
 
 // ------------------------------------------------------------------------------------------ JS side
 
-/// `HTMLElement.prototype.style`
+/// `HTMLElement.prototype.style` and `SVGElement.prototype.style`
 fn style_attr(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let el = d.style_html_el(it, this)?;
+    style_of(d, it, el)
+}
+
+fn style_attr_svg(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    let el = d.style_svg_el(it, this)?;
+    style_of(d, it, el)
+}
+
+fn style_of(d: &Dom, it: &mut Interp<'_>, el: NodeId) -> V {
     if let Some(&o) = d.style.s.borrow().by_el.get(&el) {
         return Ok(Value::Object(o));
     }
@@ -351,6 +369,12 @@ fn style_attr(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
 
 fn set_style_attr(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     let el = d.style_html_el(it, this)?;
+    d.style_set_text(it, el, arg(a, 0))?;
+    Ok(Value::Undefined)
+}
+
+fn set_style_attr_svg(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    let el = d.style_svg_el(it, this)?;
     d.style_set_text(it, el, arg(a, 0))?;
     Ok(Value::Undefined)
 }
@@ -516,6 +540,7 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     it.define_data(g, k, Value::Object(f), true, false, true)?;
     fixed.push(f);
     d.def_get(it, html, "style", style_attr, Some(set_style_attr))?;
+    d.def_get(it, d.p().svg, "style", style_attr_svg, Some(set_style_attr_svg))?;
     *d.style.fixed.borrow_mut() = fixed;
     Ok(())
 }
