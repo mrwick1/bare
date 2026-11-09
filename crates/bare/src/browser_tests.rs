@@ -544,7 +544,7 @@ fn caps_return_distinct_limit_errors() {
         // events
         assert_eq!(js(&mut b, "var evs = []; for (var i = 0; i < 10; i++) evs.push(new Event('x'));"), lim("dom-events"));
         // depth
-        assert_eq!(js(&mut b, "var d = document.createElement('div'); var top = d; for (var i = 0; i < 20; i++) { var c = document.createElement('div'); c.appendChild(top); top = c; } 0"), lim("dom-depth"));
+        assert_eq!(js(&mut b, "var d = document.createElement('div'); var treeTop = d; for (var i = 0; i < 20; i++) { var c = document.createElement('div'); c.appendChild(treeTop); treeTop = c; } 0"), lim("dom-depth"));
         // results: a flat list longer than the cap
         let mut b2 = browser_with(&format!("<body>{}</body>", "<i></i>".repeat(10)), BrowserLimits { max_results: 6, ..Default::default() });
         assert_eq!(js(&mut b2, "document.querySelectorAll('i')"), lim("dom-results"));
@@ -868,5 +868,90 @@ fn a_query_charges_the_matcher_work_only_where_the_last_compound_fits() {
         assert_eq!(js(&mut b, "document.querySelector('body #file a img').id + document.querySelectorAll('html body #file a img').length"), "pic1");
         // The charge is still made before the match: a subject that fits at each node and a long chain stop at the budget.
         assert_eq!(js(&mut b, "document.querySelectorAll('div ~ div ~ div ~ div ~ div').length"), "limit:Steps");
+    });
+}
+
+#[test]
+fn standalone_window_aliases_and_name() {
+    big(|| {
+        let mut b = browser();
+        assert_eq!(js(&mut b, "[frames === window, parent === window, top === window, length, name].join('|')"), "true|true|true|0|");
+        assert_eq!(js(&mut b, "name = 'probe'; window.name"), "probe");
+    });
+}
+
+#[test]
+fn standalone_window_screen() {
+    big(|| {
+        let mut b = browser();
+        assert_eq!(js(&mut b, "[screen === window.screen, screen.width, screen.height, screen.availWidth, screen.availHeight, screen.colorDepth, screen.pixelDepth, typeof screen.deviceXDPI].join('|')"), "true|1280|800|1280|800|24|24|undefined");
+    });
+}
+
+#[test]
+fn scoped_selector_lists_use_the_query_root() {
+    big(|| {
+        let mut b = browser();
+        assert_eq!(js(&mut b, "var a = document.getElementById('a'); a.querySelectorAll(':scope > p, :scope > span').length"), "2");
+        assert_eq!(js(&mut b, "a.querySelector(':scope') === null"), "true");
+        assert_eq!(js(&mut b, "document.querySelector(':scope') === document.documentElement"), "true");
+        assert_eq!(js(&mut b, "a.matches(':scope')"), "true");
+        assert_eq!(js(&mut b, "a.matches(':SCOPE') && a.matches(':is(:scope)')"), "true");
+        assert_eq!(js(&mut b, "a.closest(':scope') === a"), "true");
+        assert_eq!(js(&mut b, "document.getElementById('s').querySelectorAll(':scope > p').length"), "0");
+    });
+}
+
+#[test]
+fn document_stylesheets_expose_and_edit_style_rules() {
+    big(|| {
+        let mut b = browser_with("<style>p { color: red }</style><p>hello</p>", BrowserLimits::default());
+        assert_eq!(js(&mut b, "document.styleSheets.length"), "1");
+        assert_eq!(js(&mut b, "var sheet = document.styleSheets[0]; [sheet === document.querySelector('style').sheet, sheet.cssRules.length, sheet.cssRules[0].selectorText, sheet.cssRules[0].style.color].join('|')"), "true|1|p|red");
+        assert_eq!(js(&mut b, "sheet.insertRule('div { color: blue }', 0); [sheet.cssRules.length, sheet.cssRules[0].selectorText].join('|')"), "2|div");
+        assert_eq!(js(&mut b, "sheet.deleteRule(0); sheet.cssRules[0].selectorText"), "p");
+    });
+}
+
+#[test]
+fn cssom_lists_and_declarations_stay_live() {
+    big(|| {
+        let mut b = browser_with("<style>p { color: red }</style><p id=p>hello</p>", BrowserLimits::default());
+        assert_eq!(js(&mut b, "var sheets=document.styleSheets, sheet=sheets.item(0), rules=sheet.cssRules, first=rules[0]; [sheets===document.styleSheets,sheets.item(1),sheets[1],sheet.href,sheet.ownerNode===document.querySelector('style'),sheet.disabled].join('|')"), "true||||true|false");
+        assert_eq!(js(&mut b, "first.style.color='green'; first.cssText"), "p { color: green; }");
+        assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('p')).color"), "rgb(0, 128, 0)");
+        assert_eq!(js(&mut b, "first.style.setProperty('color','blue'); first.style.getPropertyValue('color')"), "blue");
+        assert_eq!(js(&mut b, "first.style.cssText='color: red'; first.selectorText='#p'; first.cssText"), "#p { color: red; }");
+        assert_eq!(js(&mut b, "sheet.insertRule('@media screen { p { color: blue } }',1); [rules===sheet.cssRules,rules.length,rules.item(1).type].join('|')"), "true|2|4");
+        assert_eq!(js(&mut b, "sheet.deleteRule(0); first.parentStyleSheet"), "null");
+        assert_eq!(js(&mut b, "var el=document.createElement('style'); el.textContent='div { display: block }'; document.head.appendChild(el); sheets.length"), "2");
+        assert_eq!(js(&mut b, "el.remove(); sheets.length"), "1");
+        assert_eq!(js(&mut b, "sheet.disabled=true; sheet.disabled"), "true");
+        assert_eq!(js(&mut b, "sheet.disabled=false; sheet.disabled"), "false");
+        assert!(js(&mut b,"sheet.insertRule('p{}',99)").starts_with("throw:IndexSizeError:"));
+        assert!(js(&mut b,"sheet.insertRule('p{} q{}',0)").starts_with("throw:SyntaxError:"));
+        b.collect(&[]).unwrap();
+        assert_eq!(js(&mut b, "sheet.ownerNode===sheets[0].ownerNode && rules===sheet.cssRules"), "true");
+    });
+}
+
+#[test]
+fn cssom_style_element_keeps_its_html_interface() {
+    big(|| {
+        let mut b = browser_with("<style>p { color: red }</style>", BrowserLimits::default());
+        assert_eq!(js(&mut b, "var e=document.querySelector('style'); e.sheet; [e instanceof HTMLStyleElement, Object.getPrototypeOf(e)===HTMLStyleElement.prototype, e.constructor===HTMLStyleElement].join()"), "true,true,true");
+    });
+}
+
+#[test]
+fn cssom_does_not_expose_flattened_imports() {
+    big(|| {
+        let mut b = browser_with("<link rel=stylesheet href='/s.css'>", BrowserLimits::default());
+        b.set_document_url("https://same.test/").unwrap();
+        b.set_external_stylesheet("/s.css", vec![
+            crate::browser_computed::SheetPart { text: "p { color: red }".into(), layer: None },
+            crate::browser_computed::SheetPart { text: "div { color: blue }".into(), layer: None },
+        ]).unwrap();
+        assert!(js(&mut b,"document.styleSheets[0].cssRules.length").starts_with("unsupported:CSSOM of flattened imported sheets"));
     });
 }

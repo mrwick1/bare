@@ -795,16 +795,16 @@ fn attach_shadow_depth_cap_is_checked_on_the_host() {
 #[test]
 fn walks_through_roots_charge_steps_and_stop_at_the_step_budget() {
     let mut ok = browser();
-    let src = "var top = document.createElement('div'), cur = top;
+    let src = "var treeTop = document.createElement('div'), cur = treeTop;
          for (var i = 0; i < 100; i++) { var r = cur.attachShadow({mode: 'open'}); cur = r.appendChild(document.createElement('div')); }
-         var s = 0; for (var j = 0; j < 100; j++) { s += cur.getRootNode({composed: true}) === top ? 1 : 0; } s";
+         var s = 0; for (var j = 0; j < 100; j++) { s += cur.getRootNode({composed: true}) === treeTop ? 1 : 0; } s";
     assert_eq!(js(&mut ok, src), "100", "200 hops deep, walked through 100 hosts");
     let mut b = browser_with(PAGE, BrowserLimits::default(), 5_000);
     let out = js(
         &mut b,
-        "var top = document.createElement('div'), cur = top;
+        "var treeTop = document.createElement('div'), cur = treeTop;
          for (var i = 0; i < 100; i++) { var r = cur.attachShadow({mode: 'open'}); cur = r.appendChild(document.createElement('div')); }
-         var s = 0; for (var j = 0; j < 100000; j++) { s += cur.getRootNode({composed: true}) === top ? 1 : 0; } s",
+         var s = 0; for (var j = 0; j < 100000; j++) { s += cur.getRootNode({composed: true}) === treeTop ? 1 : 0; } s",
     );
     assert!(out.starts_with("limit:"), "{out}");
 }

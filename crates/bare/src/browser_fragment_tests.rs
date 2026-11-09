@@ -418,8 +418,8 @@ fn a_very_deep_tree_is_read_and_replaced_without_recursion() {
         .spawn(move || {
             let limits = BrowserLimits { max_tree_depth: 100_000, max_nodes: 1 << 20, ..Default::default() };
             let mut b = browser_with(&page, limits, 50_000_000);
-            let got = js(&mut b, "var top = document.getElementById('top'); top.innerHTML.length");
-            let moved = js(&mut b, "var h = top.innerHTML; top.innerHTML = h; [top.innerHTML === h, top.innerHTML.length].join()");
+            let got = js(&mut b, "var treeTop = document.getElementById('top'); treeTop.innerHTML.length");
+            let moved = js(&mut b, "var h = treeTop.innerHTML; treeTop.innerHTML = h; [treeTop.innerHTML === h, treeTop.innerHTML.length].join()");
             (got, moved)
         })
         .unwrap()
@@ -522,7 +522,7 @@ fn outer_html_of_a_deep_tree_does_not_recurse() {
         .spawn(move || {
             let limits = BrowserLimits { max_tree_depth: 100_000, max_nodes: 1 << 20, ..Default::default() };
             let mut b = browser_with(&page, limits, 50_000_000);
-            js(&mut b, "var top = document.getElementById('top'); var h = top.outerHTML; top.outerHTML = h; [h.length, document.body.innerHTML === h].join()")
+            js(&mut b, "var treeTop = document.getElementById('top'); var h = treeTop.outerHTML; treeTop.outerHTML = h; [h.length, document.body.innerHTML === h].join()")
         })
         .unwrap()
         .join()

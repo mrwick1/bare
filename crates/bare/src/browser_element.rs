@@ -503,9 +503,19 @@ fn set_draggable(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
 }
 
 /// Does a style text use what the engine does not parse: `content-visibility` or `display: contents`?
-fn unmodelled(t: &str) -> bool {
-    let t = t.to_ascii_lowercase();
-    t.contains("content-visibility") || t.match_indices("display").any(|(i, _)| t[i + 7..].trim_start().strip_prefix(':').is_some_and(|r| r.trim_start().starts_with("contents")))
+fn unmodelled(t: &str, auto: bool) -> bool {
+    use bare_css::tokenizer::{Token, tokenize};
+    let mut tokens = tokenize(t).filter(|t| !matches!(t, Token::Whitespace));
+    while let Some(t) = tokens.next() {
+        let Token::Ident(name) = t else { continue };
+        if !name.eq_ignore_ascii_case("content-visibility") && !name.eq_ignore_ascii_case("display") { continue; }
+        if !matches!(tokens.next(), Some(Token::Colon)) { continue; }
+        if let Some(Token::Ident(value)) = tokens.next() {
+            if name.eq_ignore_ascii_case("display") && value.eq_ignore_ascii_case("contents")
+                || name.eq_ignore_ascii_case("content-visibility") && (value.eq_ignore_ascii_case("hidden") || auto && value.eq_ignore_ascii_case("auto")) { return true; }
+        }
+    }
+    false
 }
 
 /// `Element.checkVisibility(options)` (CSSOM View). Options are read in the order of the dictionary (sorted by name). `opacityProperty` and
@@ -544,7 +554,7 @@ fn check_visibility(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V
     let odd = {
         let c = d.computed.cache.borrow();
         let b = c.as_ref().expect("built by the snapshot");
-        *b.odd.get_or_init(|| b.key.iter().any(|(_, _, t)| unmodelled(t)))
+        if opt[2] { b.key.iter().any(|(_, _, t)| unmodelled(t, true)) } else { *b.odd.get_or_init(|| b.key.iter().any(|(_, _, t)| unmodelled(t, false))) }
     };
     if visibility && matches!(snap.style.get(Property::Visibility), Cv::Keyword(Keyword::Hidden | Keyword::Collapse)) {
         return Ok(Value::Bool(false));
@@ -554,7 +564,7 @@ fn check_visibility(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V
     while let Some(e) = cur {
         steps += 1;
         if let NodeData::Element { .. } = doc.data(e) {
-            if attr(&doc, e, "style").is_some_and(unmodelled) {
+            if attr(&doc, e, "style").is_some_and(|t| unmodelled(t, opt[2])) {
                 return Err(Dom::gate("checkVisibility with content-visibility or display: contents in a style attribute (not modelled)"));
             }
             if opacity && snap.styles.style(e).is_some_and(|s| s.get(Property::Opacity) == Cv::Number(0.0)) {

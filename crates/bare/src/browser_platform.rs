@@ -248,9 +248,7 @@ impl Dom {
         let iter_base = self.iterator_prototype(it, sym)?;
         let (mql, list, iter) = (self.obj(it, p.et)?, self.obj(it, op)?, self.obj(it, iter_base)?);
         let _ = self.plat.p.set(PProtos { mql, list, iter });
-        // `CSSStyleSheet` is only an interface object so far: `x instanceof CSSStyleSheet` (Lit) works, and `'replace' in CSSStyleSheet.prototype` is false.
-        let css = self.obj(it, op)?;
-        let mut fixed = vec![mql, list, iter, css];
+        let mut fixed = vec![mql, list, iter];
 
         // MediaQueryList
         self.def_get(it, mql, "media", media_get, None)?;
@@ -266,7 +264,7 @@ impl Dom {
 
         // interface objects and `matchMedia`
         let (kp, kc) = (self.key(it, "prototype")?, self.key(it, "constructor")?);
-        for (name, proto) in [("MediaQueryList", mql), ("DOMTokenList", list), ("CSSStyleSheet", css)] {
+        for (name, proto) in [("MediaQueryList", mql), ("DOMTokenList", list)] {
             let f = self.add_fn(it, illegal_constructor, name, 0, false)?;
             it.define_data(f, kp, Value::Object(proto), false, false, false)?;
             it.define_data(proto, kc, Value::Object(f), true, false, true)?;

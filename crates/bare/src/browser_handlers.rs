@@ -569,6 +569,7 @@ pub(crate) fn lazy(d: &Dom, it: &mut Interp<'_>, owner: ObjId, all: bool) -> R<(
             _ => Ok(()),
         };
     };
+    if crate::browser::define_window(d,it,&key)? || crate::browser_cssom::define(d,it,&key)? { return Ok(()); }
     if key.starts_with("HTML") && crate::browser_html::define_global(d, it, &key)? {
         return Ok(());
     }

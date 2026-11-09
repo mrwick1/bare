@@ -126,6 +126,8 @@ pub enum Simple {
     Nth(Nth),
     /// `:root`: the top element, `html`.
     Root,
+    /// The reference element of a script selector.
+    Scope(Option<std::rc::Rc<std::cell::Cell<Option<bare_html::dom::NodeId>>>>),
     /// `:empty`: no child elements, and no text.
     Empty,
     /// `:link`: an `a` or `area` with an `href`. (We have no history, so every link is "not visited".)
@@ -245,7 +247,12 @@ pub fn parse_selector_list(text: &str, doc: &mut Document) -> Option<Vec<Selecto
 
 /// `parse_selector_list` for a style sheet: `mode` says what `:host`, `::slotted()` and `::part()` are.
 pub fn parse_selector_list_in(text: &str, doc: &mut Document, mode: Mode) -> Option<Vec<Selector>> {
-    let mut parser = Parser { tokens: Peek { tokens: tokenize(text), peeked: None }, doc, mode, pseudo: None, host: false };
+    parse_scoped(text, doc, mode, None)
+}
+
+/// Parse a script selector with its reference element.
+pub fn parse_scoped(text: &str, doc: &mut Document, mode: Mode, scope: Option<std::rc::Rc<std::cell::Cell<Option<bare_html::dom::NodeId>>>>) -> Option<Vec<Selector>> {
+    let mut parser = Parser { tokens: Peek { tokens: tokenize(text), peeked: None }, doc, mode, scope, pseudo: None, host: false };
     let mut list = Vec::new();
     loop {
         list.push(parser.selector(0)?);
@@ -272,6 +279,7 @@ struct Parser<'a, 'd> {
     tokens: Peek<'a>,
     doc: &'d mut Document,
     mode: Mode,
+    scope: Option<std::rc::Rc<std::cell::Cell<Option<bare_html::dom::NodeId>>>>,
     /// The `::slotted()` or `::part()` that the last compound had.
     pseudo: Option<ShadowPseudo>,
     /// Did the selector have `:host` or `:host-context()`? Only a sheet of a shadow tree can.
@@ -557,6 +565,7 @@ impl Parser<'_, '_> {
                     "last-child" => Simple::LastChild,
                     "only-child" => Simple::OnlyChild,
                     "root" => Simple::Root,
+                    "scope" => Simple::Scope(self.scope.clone()),
                     "empty" => Simple::Empty,
                     "host" => if self.mode == Mode::Shadow { self.host = true; Simple::Host(Box::new(Host { context: false, args: Vec::new() })) } else { Simple::Never },
                     "link" | "any-link" => Simple::Link,

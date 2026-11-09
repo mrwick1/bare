@@ -217,3 +217,5 @@ mod browser_resume_tests;
 mod browser_survive_tests;
 #[cfg(test)]
 mod browser_settle_tests;
+
+mod browser_cssom;

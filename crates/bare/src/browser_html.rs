@@ -148,7 +148,7 @@ fn proto_i(d: &Dom, it: &mut Interp<'_>, i: usize) -> R<ObjId> {
 #[inline(never)]
 fn make(d: &Dom, it: &mut Interp<'_>, i: usize) -> R<(ObjId, ObjId)> {
     let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
-    let proto = d.obj(it, d.p().html)?;
+    let proto = if NAMES[i] == "HTMLStyleElement" { crate::browser_cssom::style_proto(d, it)? } else { d.obj(it, d.p().html)? };
     let f = crate::browser_custom::interface_ctor(d, it, NAMES[i], true)?;
     it.define_data(f, kp, Value::Object(proto), false, false, false)?;
     it.define_data(proto, kc, Value::Object(f), true, false, true)?;

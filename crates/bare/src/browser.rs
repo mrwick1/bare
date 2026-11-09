@@ -88,7 +88,7 @@ use crate::browser_selection as sel;
 use crate::browser_shadow as sh;
 use crate::browser_custom as ce;
 pub use crate::browser_scheduler::{Pump, SchedLimits, SchedStats};
-use bare_css::selector::{Selector, parse_selector_list};
+use bare_css::selector::Selector;
 use bare_html::dom::{Document, NodeData, NodeId, Ns};
 use bare_js::eval::{Error, EvalLimits, Host, Interp, LimitKind};
 use bare_js::heap::{Heap, HeapLimits, PropertyDescriptor};
@@ -487,6 +487,7 @@ pub struct Dom {
     pub(crate) lim: BrowserLimits,
     pub(crate) p: OnceCell<Protos>,
     pub(crate) global: OnceCell<ObjId>,
+    selector_scope: Rc<std::cell::Cell<Option<NodeId>>>,
     pub(crate) doc_wrapper: OnceCell<ObjId>,
     /// `(handler, needs new)` for each host function id.
     pub(crate) handlers: RefCell<Vec<(H, bool)>>,
@@ -510,6 +511,7 @@ pub struct Dom {
     pub(crate) style: crate::browser_style::Style,
     /// `getComputedStyle` and its sheet state (`browser_computed.rs`).
     pub(crate) computed: crate::browser_computed::Computed,
+    pub(crate) cssom: crate::browser_cssom::Cssom,
     /// `offsetWidth` and `offsetHeight` (`browser_geometry.rs`).
     pub(crate) geometry: crate::browser_geometry::Geometry,
     /// `document.implementation`, once read (`browser_implementation.rs`). It is also in `fixed`.
@@ -594,6 +596,7 @@ impl Host for Dom {
         self.scripts_roots(out);
         crate::browser_platform::roots(self, out);
         crate::browser_style::roots(self, out);
+        crate::browser_cssom::roots(self, out);
         crate::browser_computed::roots(self, out);
         at::roots(self, out);
         crate::browser_nodelist::roots(self, out);
@@ -711,7 +714,7 @@ impl Host for Dom {
         if (bare_js::heap::LAZY_ALL..u32::MAX).contains(&index) {
             return crate::browser_handlers::lazy(self, it, owner, index == bare_js::heap::LAZY_ALL);
         }
-        if crate::browser_nodelist::fill(self, it, owner, index)? || crate::browser_dataset::fill(self, it, owner)? {
+        if crate::browser_nodelist::fill(self, it, owner, index)? || crate::browser_dataset::fill(self, it, owner)? || crate::browser_cssom::fill(self, it, owner)? {
             return Ok(());
         }
         at::fill(self, it, owner, index)
@@ -744,6 +747,42 @@ fn domexc_codes(name: &str) -> u32 {
         "TimeoutError" => 23,
         _ => 0,
     }
+}
+
+#[cold]
+pub(crate) fn define_window(d: &Dom, it: &mut Interp<'_>, name: &str) -> R<bool> {
+    if !matches!(name,"frames"|"parent"|"top"|"length"|"name"|"screen"){return Ok(false);}
+    let g = it.global_object();
+    let key=d.key(it,name)?;
+    if it.heap.peek_own_property(g,key).map_err(|e|it.heap_error(e))?.is_some(){return Ok(true);}
+    let value = match name {
+        "frames" | "parent" | "top" => Value::Object(g),
+        "length" => Value::Number(0.0),
+        "name" => d.js_str(it, "")?,
+        "screen" => { window_screen(d,it,Value::Undefined,&[])?; return Ok(true); },
+        _ => unreachable!(),
+    };
+    it.define_data(g,key,value,!matches!(name,"top"|"length"),true,name!="top")?;
+    Ok(true)
+}
+
+// The virtual display has the default headless dimensions. Viewport resizing does not resize it.
+#[cold]
+fn window_screen(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
+    let value = if let Some(&v) = a.first() {
+        v
+    } else {
+        let o = d.obj(it, it.object_prototype())?;
+        crate::browser_lazy::tag(d, it, o, "Screen")?;
+        for (name, value) in [("width", 1280.0), ("height", 800.0), ("availWidth", 1280.0), ("availHeight", 800.0), ("availLeft", 0.0), ("availTop", 0.0), ("colorDepth", 24.0), ("pixelDepth", 24.0)] {
+            let k = d.key(it, name)?;
+            it.define_data(o, k, Value::Number(value), false, true, true)?;
+        }
+        Value::Object(o)
+    };
+    let k = d.key(it, "screen")?;
+    it.define_data(it.global_object(), k, value, true, false, true)?;
+    Ok(value)
 }
 
 impl Dom {
@@ -854,6 +893,7 @@ impl Dom {
                         _ => match doc.atom_str(name) {
                             "iframe" => p.iframe,
                             "link" => p.link,
+                            "style" => crate::browser_cssom::wrapper_proto(self,it)?,
                             "a" | "area" | "template" | "img" | "slot" => crate::browser_elements::proto(self, it, doc.atom_str(name))?,
                             t @ ("audio" | "video") => crate::browser_media::proto(self, it, n, t)?,
                             t @ ("input" | "form" | "button" | "label") => crate::browser_controls::proto_for(self, it, t)?,
@@ -935,7 +975,7 @@ impl Dom {
             if doc.name_count() + text.len() > self.lim.max_names {
                 return Err(self.lim("dom-names"));
             }
-            parse_selector_list(text, &mut doc)
+            bare_css::selector::parse_scoped(text, &mut doc, bare_css::selector::Mode::Script, Some(self.selector_scope.clone()))
         };
         let Some(list) = parsed else { return Err(self.dom_err(it, "SyntaxError", &format!("'{text}' is not a valid selector"))) };
         // `a b c d e f g` can backtrack a lot: refuse more than five descendant or later-sibling combinators. A shorter chain is charged
@@ -950,6 +990,11 @@ impl Dom {
         }
         st.sel_cache.insert(text.to_string(), list.clone());
         Ok(list)
+    }
+
+    pub(crate) fn selectors_at(&self, it: &mut Interp<'_>, text: &str, scope: NodeId) -> R<Rc<Vec<Selector>>> {
+        self.selector_scope.set(Some(scope));
+        self.selectors(it, text)
     }
 
     // ------------------------------------------------------------ install
@@ -1444,6 +1489,7 @@ impl Browser {
             lim: limits,
             p: OnceCell::new(),
             global: OnceCell::new(),
+            selector_scope: Default::default(),
             doc_wrapper: OnceCell::new(),
             handlers: RefCell::default(),
             fixed: RefCell::default(),
@@ -1459,6 +1505,7 @@ impl Browser {
             plat: Default::default(),
             style: Default::default(),
             computed: Default::default(),
+            cssom: Default::default(),
             geometry: Default::default(),
             implementation: Default::default(),
             parsing_protos: Default::default(),
