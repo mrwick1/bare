@@ -680,8 +680,9 @@ pub fn bitmap(text: &str) -> Option<(u32, u32, Vec<u32>)> {
     }
     // The XML prolog and the doctype are not HTML: the page starts at the element.
     let svg = &text[text.find("<svg")?..];
+    // One page for both pictures: parse, style, layout and display list are made once. Only the color under the shapes changes.
+    let mut doc = bare_html::tree::parse(&format!("<body style=\"margin:0;font-size:0;line-height:0\">{svg}"));
     let size = {
-        let doc = bare_html::tree::parse(svg);
         let svg = doc.find_atom("svg")?;
         let mut stack = vec![doc.root()];
         let root = loop {
@@ -693,21 +694,23 @@ pub fn bitmap(text: &str) -> Option<(u32, u32, Vec<u32>)> {
         };
         file_size(&doc, root)?
     };
-    let shot = |background: &str| {
-        let mut doc = bare_html::tree::parse(&format!("<body style=\"margin:0;font-size:0;line-height:0;background:{background}\">{svg}"));
-        let viewport = (size.0 as f32, size.1 as f32);
-        let mut rules = RuleSet::new(viewport);
-        rules.add(&mut doc, UA_CSS, Origin::UserAgent);
-        for source in bare_css::cascade::sources(&doc, viewport) {
-            if let Source::Inline(text) = source {
-                rules.add(&mut doc, &text, Origin::Author);
-            }
+    let viewport = (size.0 as f32, size.1 as f32);
+    let mut rules = RuleSet::new(viewport);
+    rules.add(&mut doc, UA_CSS, Origin::UserAgent);
+    for source in bare_css::cascade::sources(&doc, viewport) {
+        if let Source::Inline(text) = source {
+            rules.add(&mut doc, &text, Origin::Author);
         }
-        let styles = rules.compute(&doc);
-        let layout = bare_layout::layout(&doc, &styles, viewport);
-        crate::capture(&doc, &styles, &layout, size.0, size.1)
-    };
-    let (white, black) = (shot("#fff"), shot("#000"));
+    }
+    let styles = rules.compute(&doc);
+    let layout = bare_layout::layout(&doc, &styles, viewport);
+    let mut painter = crate::Painter::new();
+    let mut white = crate::canvas::Canvas::new(size.0, size.1);
+    painter.paint(&doc, &styles, &layout, &mut white);
+    // The page has no background of its own, so the list paints on white; the second pass puts black under the same list.
+    let mut black = crate::canvas::Canvas::new(size.0, size.1);
+    painter.list.background = 0xff00_0000;
+    painter.draw(&mut black);
     let px = white
         .pixels
         .iter()
