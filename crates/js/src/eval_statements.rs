@@ -483,13 +483,7 @@ impl<'p> Interp<'p> {
                 return Err(Ctl::Err(Error::Throw(v)));
             }
             StmtKind::Empty | StmtKind::Debugger => {}
-            // A function after `export default` was made when the module was instantiated.
-            StmtKind::ExportDefault(e) if matches!(self.prog.expr(e).kind, ExprKind::Function(_)) => {}
-            StmtKind::ExportDefault(e) => {
-                let s = h!(self, self.heap.intern_str("default"));
-                let v = self.eval_named(e, Some(s))?;
-                self.set_default_export(v)?;
-            }
+            StmtKind::ExportDefault(e) => self.exec_export_default(e)?,
             StmtKind::With { .. } => return Err(unsupported("with statement", st.span).into()),
             _ => return Err(unsupported("statement in the wrong place", st.span).into()),
         }

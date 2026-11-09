@@ -513,6 +513,18 @@ impl<'p> Interp<'p> {
         Err(self.tdz(n))
     }
 
+    /// The statement `export default expr;`. A function after `export default` was made when the module was instantiated.
+    #[cold]
+    #[inline(never)]
+    fn exec_export_default(&mut self, e: ExprId) -> Res<()> {
+        if matches!(self.prog.expr(e).kind, ExprKind::Function(_)) {
+            return Ok(());
+        }
+        let s = h!(self, self.heap.intern_str("default"));
+        let v = self.eval_named(e, Some(s))?;
+        self.set_default_export(v)
+    }
+
     /// `export default expr` ran: store the value in the `*default*` binding of the running module.
     fn set_default_export(&mut self, v: Value) -> Res<()> {
         let n = self.default_name();
@@ -754,6 +766,8 @@ impl<'p> Interp<'p> {
         self.modules.mods.iter().position(|m| m.script == self.cur).map(|i| i as u32)
     }
 
+    #[cold]
+    #[inline(never)]
     fn eval_import_call(&mut self, arg: ExprId, opts: Option<ExprId>) -> Res<Value> {
         let spec = self.eval_expr(arg)?;
         let opts = match opts {
@@ -782,6 +796,8 @@ impl<'p> Interp<'p> {
         Ok(Value::Object(p))
     }
 
+    #[cold]
+    #[inline(never)]
     fn import_meta(&mut self) -> Res<Value> {
         let Some(m) = self.mod_of_current() else { return Err(unsupported("import.meta outside a module", Span::default())) };
         if let Some(o) = self.modules.mods[m as usize].meta {

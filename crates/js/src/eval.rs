@@ -1220,6 +1220,7 @@ impl<'p> Interp<'p> {
     }
 
     fn type_err(&mut self, msg: &str) -> Error {
+        if msg.contains("(reading 'prototype')") || msg.contains("(reading 'length')") { self.te_dump(msg); }
         self.mk_err(TYPE_ERROR, msg)
     }
 

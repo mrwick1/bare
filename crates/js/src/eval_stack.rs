@@ -199,6 +199,22 @@ impl<'p> Interp<'p> {
     }
 
     /// `\n    at NAME (script#N:L:C)` as UTF-16.
+    #[cold]
+    pub(crate) fn te_dump(&mut self, msg: &str) {
+        if std::env::var("BARE_TE_DUMP").is_err() { return; }
+        let len = self.stk.frames.len();
+        eprintln!("TE {msg} js_frames={len}");
+        for i in (0..len).rev().take(8) {
+            let fr = self.stk.frames[i];
+            let pos = if i + 1 < len { self.stk.frames[i + 1].saved_pos } else { self.stk.pos };
+            let l = self.frame_line(fr, pos).map(|v| String::from_utf16_lossy(&v)).unwrap_or_default();
+            let prog = if fr.script as usize == self.cur { self.prog.clone() } else { self.scripts[fr.script as usize].prog.clone() };
+            if i + 1 == len { if let Where::Func(f) = fr.at { let sp = prog.func(f).span; eprintln!("TE topfunc span={}..{} text={}", sp.start, sp.end, prog.text(crate::ast::Span { start: sp.start, end: sp.end.min(sp.start + 700) }).replace('\n', " ")); } }
+            let p = pos.saturating_sub(1);
+            let snip = prog.text(crate::ast::Span { start: p.saturating_sub(160), end: p + 60 }).replace('\n', " ");
+            eprintln!("TE {}  ##  {snip}", l.trim());
+        }
+    }
     fn frame_line(&mut self, fr: StackFrame, pos: u32) -> Res<Vec<u16>> {
         let code_prog = if fr.script as usize == self.cur { self.prog.clone() } else { self.scripts[fr.script as usize].prog.clone() };
         let span = match fr.at {
