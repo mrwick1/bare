@@ -24,8 +24,8 @@
 //   `setMonth`, `setSeconds`, `setYear`, `toString`, `toDateString`, `toTimeString`. `"" + date` calls `toString`.
 // - A wall-clock time in an overlap (clocks go back) is the first instant. One in a gap (clocks go forward) uses the offset from
 //   before the gap (ECMA-262 `UTC(t)`).
-// - Known deviation: the text in parentheses after `GMT+hhmm` is `Coordinated Universal Time` for the zone `UTC` and `GMT+hh:mm`
-//   for any other zone. V8 writes the long name from ICU (`India Standard Time`); bare has no name table.
+// - Known deviation: the text in parentheses after `GMT+hhmm` is the long English name of the zone for the zones of `tz_names.rs`
+//   (`India Standard Time`) and `GMT+hh:mm` for any other zone. V8 writes the long name from ICU for every zone.
 //
 // Gates (never silent): `Unsupported`, which a script cannot catch.
 // - A string with a digit that is not ISO and not the `toUTCString` form (`Jan 1 2020`, `2020-1-1`, `+0100`) is Unsupported. A string with no
@@ -278,7 +278,7 @@ impl<'p> Interp<'p> {
         }
         let (name, z) = self.intl_default_zone()?;
         let off = z.offset((t / 1000.0).floor() as i64);
-        let zone = if &*name == "UTC" { "Coordinated Universal Time".to_string() } else { format!("GMT{}{:02}:{:02}", if off < 0 { '-' } else { '+' }, off.abs() / 3600, off.abs() / 60 % 60) };
+        let zone = crate::tz_names::name(&name, off, crate::tz_names::LONG, 0);
         self.date_string(date::to_local_string(t, off, &zone, part))
     }
 

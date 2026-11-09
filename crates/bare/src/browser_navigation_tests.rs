@@ -1123,13 +1123,12 @@ fn byte_views_are_refused_before_their_keys_are_listed() {
 }
 
 #[test]
-fn document_domain_is_the_host_and_a_change_is_refused() {
+fn document_domain_is_the_host_and_a_change_is_ignored() {
     big(|| {
         let mut b = at(URL0);
         assert_eq!(js(&mut b, "document.domain"), "staging.example.test");
         assert_eq!(js(&mut b, "document.domain = 'staging.example.test'; document.domain"), "staging.example.test");
-        let refused = js(&mut b, "document.domain = 'example.test'");
-        assert!(refused.starts_with("throw:SecurityError:Failed to set the 'domain' property on 'Document'"), "{refused}");
+        assert_eq!(js(&mut b, "document.domain = 'example.test'; document.domain"), "staging.example.test");
         assert_eq!(js(&mut b, "document.domain"), "staging.example.test");
         assert_eq!(js(&mut at("http://[::1]:8080/"), "document.domain"), "[::1]");
         assert_eq!(js(&mut at("http://127.0.0.1:8080/"), "document.domain"), "127.0.0.1");

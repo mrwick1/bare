@@ -37,6 +37,16 @@ pub struct Request {
     pub date_style: u8,
     pub time_style: u8,
     pub hc: u8,
+    /// A `timeZoneName` option: the name goes after the fields.
+    pub zone: bool,
+}
+
+/// What `format` writes besides the fields: the text of the time zone name (a `timeStyle` full or long, or the option
+/// `timeZoneName`) and `fractionalSecondDigits` (0 for none).
+#[derive(Clone, Copy, Default)]
+pub struct Extras<'a> {
+    pub zone: &'a str,
+    pub fsd: u8,
 }
 
 /// A resolved pattern: one pattern, or a date pattern, a joiner and a time pattern.
@@ -46,6 +56,15 @@ pub struct Pattern {
     second: u16,
     /// 0: `first` only, 1: ", ", 2: " at "
     join: u8,
+    /// What goes before the time zone name that follows the pattern: 0 no name, 1 " ", 2 ", ", 3 " at ".
+    zone: u8,
+}
+
+impl Pattern {
+    /// True when a `timeZoneName` option adds a name after the fields: call `zone_tail` after `format`.
+    pub fn has_zone(self) -> bool {
+        self.zone != 0
+    }
 }
 
 /// The type of a part, in the order of `PART_NAMES`.
@@ -60,14 +79,17 @@ pub enum Part {
     Hour,
     Minute,
     Second,
+    TimeZoneName,
+    FractionalSecond,
 }
 
-pub const PART_NAMES: [&str; 9] = ["literal", "weekday", "year", "month", "day", "dayPeriod", "hour", "minute", "second"];
+pub const PART_NAMES: [&str; 11] =
+    ["literal", "weekday", "year", "month", "day", "dayPeriod", "hour", "minute", "second", "timeZoneName", "fractionalSecond"];
 
 /// What a pattern cannot format yet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Gate {
-    /// A time zone name (`timeStyle` full or long).
+    /// A pattern letter that bare cannot format.
     ZoneName,
     /// A year before 1 (ICU writes an era).
     Era,
@@ -180,19 +202,21 @@ pub fn hour_cycle(loc: u8, hour12: Option<bool>, hc: Option<u8>) -> u8 {
 pub fn resolve(loc: u8, r: &Request) -> Pattern {
     let l = loc as usize;
     if r.date_style != 0 || r.time_style != 0 {
-        return Pattern { first: STYLE[l][r.hc as usize][r.date_style as usize * 5 + r.time_style as usize], second: 0, join: 0 };
+        return Pattern { first: STYLE[l][r.hc as usize][r.date_style as usize * 5 + r.time_style as usize], second: 0, join: 0, zone: 0 };
     }
     let wd = if r.weekday == 0 { 0 } else { r.weekday - NARROW + 1 } as usize;
     let d = wd * 54 + r.year as usize * 18 + r.month as usize * 3 + r.day as usize;
     let t = if r.hour | r.minute | r.second == 0 { 0 } else { r.hc as usize * 27 + r.hour as usize * 9 + r.minute as usize * 3 + r.second as usize };
+    // the name follows the time, or follows a date with the joiner of date and time
+    let zone = |z: u8| if r.zone { z } else { 0 };
     match (d, t) {
-        (_, 0) => Pattern { first: DATE[l][d], second: 0, join: 0 },
-        (0, _) => Pattern { first: TIME[l][t], second: 0, join: 0 },
+        (_, 0) => Pattern { first: DATE[l][d], second: 0, join: 0, zone: zone(JOIN[l][d] + 2) },
+        (0, _) => Pattern { first: TIME[l][t], second: 0, join: 0, zone: zone(1) },
         _ => {
             let key = (l as u32) << 16 | (d as u32) << 7 | t as u32;
             match EXCEPT.binary_search_by_key(&key, |e| e.0) {
-                Ok(i) => Pattern { first: EXCEPT[i].1, second: 0, join: 0 },
-                Err(_) => Pattern { first: DATE[l][d], second: TIME[l][t], join: JOIN[l][d] + 1 },
+                Ok(i) => Pattern { first: EXCEPT[i].1, second: 0, join: 0, zone: zone(1) },
+                Err(_) => Pattern { first: DATE[l][d], second: TIME[l][t], join: JOIN[l][d] + 1, zone: zone(1) },
             }
         }
     }
@@ -265,7 +289,7 @@ pub fn shown(p: Pattern) -> (Vec<(&'static str, &'static str)>, Option<u8>) {
 
 /// Format local fields `t` with pattern `p` of locale `loc` into `out`. `parts` gets the type and the end of each part
 /// (adjacent literals are one part).
-pub fn format(loc: u8, p: Pattern, t: &Fields, out: &mut String, mut parts: Option<&mut Vec<(Part, usize)>>) -> Result<(), Gate> {
+pub fn format(loc: u8, p: Pattern, t: &Fields, ex: &Extras, out: &mut String, mut parts: Option<&mut Vec<(Part, usize)>>) -> Result<(), Gate> {
     let names = &NAMES[LOCALE_NAMES[loc as usize] as usize];
     for x in pieces(p) {
         let kind = match x {
@@ -322,7 +346,16 @@ pub fn format(loc: u8, p: Pattern, t: &Fields, out: &mut String, mut parts: Opti
                     }
                     b's' => {
                         num(out, t.second);
-                        Part::Second
+                        if ex.fsd == 0 {
+                            Part::Second
+                        } else {
+                            fraction(ex.fsd, t.ms, out, parts.as_deref_mut());
+                            Part::FractionalSecond
+                        }
+                    }
+                    b'z' => {
+                        out.push_str(ex.zone);
+                        Part::TimeZoneName
                     }
                     b'a' => {
                         out.push_str(names[57 + (t.hour >= 12) as usize]);
@@ -337,6 +370,34 @@ pub fn format(loc: u8, p: Pattern, t: &Fields, out: &mut String, mut parts: Opti
         }
     }
     Ok(())
+}
+
+/// ".ddd" after the seconds: the part of the seconds, the point, then the digits (the caller pushes their part).
+#[cold]
+#[inline(never)]
+fn fraction(digits: u8, ms: i64, out: &mut String, parts: Option<&mut Vec<(Part, usize)>>) {
+    if let Some(ps) = parts {
+        ps.extend([(Part::Second, out.len()), (Part::Literal, out.len() + 1)]);
+    }
+    out.push('.');
+    out.push_str(&format!("{ms:03}")[..digits as usize]);
+}
+
+/// The name that a `timeZoneName` option adds after the fields.
+/// `format` does not call it: the caller does when `p.zone` is not 0 (`Pattern::has_zone`).
+pub fn zone_tail(p: Pattern, zone: &str, out: &mut String, parts: Option<&mut Vec<(Part, usize)>>) {
+    out.push_str(["", " ", ", ", " at "][p.zone as usize]);
+    let mut parts = parts;
+    if let Some(ps) = parts.as_deref_mut() {
+        match ps.last_mut() {
+            Some((Part::Literal, end)) => *end = out.len(),
+            _ => ps.push((Part::Literal, out.len())),
+        }
+    }
+    out.push_str(zone);
+    if let Some(ps) = parts {
+        ps.push((Part::TimeZoneName, out.len()));
+    }
 }
 
 #[cfg(test)]

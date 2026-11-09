@@ -5477,3 +5477,41 @@ Gates left, with their owners:
 - The `unhandledrejection` event inside a frame or a worker.
 - A page that rejects more than 1024 promises in one checkpoint, on a live site.
 - `-->` after a multi-line comment on the first line of a script.
+
+## Intl timeZoneName and a silent document.domain (2026-11-10)
+
+Problem. After #318 defined `document.domain`, GitHub's scripts ran further and stopped at `Intl.DateTimeFormat` with `timeZoneName`. That option was an `Unsupported` gate, so github.com pages stopped before readyState was complete. #318 also made the `document.domain` setter throw `SecurityError` for any other value. Chrome ignores the assignment.
+
+Change.
+
+- `crates/js/src/tz_names.rs` (new): English time zone names. The six kinds are `short`, `long`, `shortOffset`, `longOffset`, `shortGeneric` and `longGeneric`. A table of 14 zones (UTC, the US zones, London, Kolkata, Sydney, Paris, Berlin, Tokyo, Seoul) holds the long names, the abbreviations and the locales that use them. A zone outside the table gets the offset form: `GMT+5:30` for short kinds, `GMT+05:30` for long kinds. Daylight time is "offset differs from the table's standard offset", so `tz.rs` needs no change.
+- `crates/js/src/intl.rs`, `eval_intl.rs`: `timeZoneName` in the constructor, `format`, `formatToParts` and `resolvedOptions`. The name goes after the time fields with a space, or after a date with the joiner of date and time (`, ` or ` at `, from the ICU table that already exists). `timeStyle` `full` and `long` now print the long and the short name instead of the gate. `fractionalSecondDigits` (1 to 3) works when the pattern has seconds. It is a gate without `second`, because ICU prints odd text for such a pattern.
+- `calendar` other than `gregory` and `numberingSystem` other than `latn` now give `Unsupported` when ICU knows the name (`buddhist`, `arab` and the like). Before, bare ignored them and printed Gregorian digits. An unknown name is still ignored, as V8 does. `era` and `dayPeriod` stay gates: ICU patterns for them are not simple.
+- `eval_date.rs`: `Date.prototype.toString` and `toTimeString` write the long name in parentheses for the zones of the table (`India Standard Time`). Other zones keep `GMT+hh:mm`. Date `toLocale*String` use the same code as the formatter, so `timeZoneName` works there.
+- `crates/bare/src/browser_navigation.rs`: the `document.domain` setter ignores every value. The getter still gives the host.
+
+Tests. All failed before the change (`Unsupported` for the options) and pass after it.
+
+- Five new cases in `tools/fixtures/js/intl-cases.txt`, with the Node 22 result in `intl-cases.expected`: 19 zones × 6 kinds × 2 dates in `en-US`/`en` (`tzname_en_us_zones`); 13 zones × 5 kinds × 2 dates in `en-GB`/`en-IN`/`en-CA` (`tzname_other_locales_zones`); 13 field layouts × 2 kinds × 5 locales with the part types (`tzname_layouts`); the `toLocale*String` methods, the styles, `resolvedOptions` and the TypeError for a style with `timeZoneName` (`tzname_methods_styles_resolved`); `fractional_second_digits`. All 95 corpus cases match Node, matrix cases included.
+- `a_zone_outside_the_table_gets_an_offset_name` (offsets for Asia/Kathmandu, Etc/GMT+5, America/Sao_Paulo) and a changed `gates_refuse_what_bare_cannot_format`.
+- `document_domain_is_the_host_and_a_change_is_ignored` replaces the #318 test. The two `Date` text tests expect the new names.
+
+Known deviations. A zone outside the table gets an offset where ICU writes a name (`Nepal Time`). `shortGeneric` has names for `en` and `en-US` only. A locale other than the five that bare has falls back as before. `resolvedOptions().timeZone` is the name as given (`Asia/Kolkata`; V8 writes `Asia/Calcutta`), so the corpus does not use it with `Asia/Kolkata`.
+
+Live results (`bare-drive`, `timeout 30000`, `open`, `expect css="body" visible`, `shot s`, then `expect js "document.readyState === 'complete'"`), 2026-11-10, this branch.
+
+| Page | Result |
+| --- | --- |
+| https://github.com | readyState complete. No `Intl` error. Four script aborts: `Host("dom-selector")` three times, then `Steps`. |
+| https://github.com/rust-lang/rust | readyState complete. Five aborts (`Host("dom-selector")` four times, `Steps` once); the page is then stopped (`Aborted`), and `render: Limit(Steps)` appears three times. |
+| https://github.com/mrwick1/bare | readyState complete. Four aborts: `Host("dom-selector")` three times, then `Steps`. |
+
+Next stop of GitHub. The `Host("dom-selector")` abort is the 1,024-byte selector cap (`BrowserLimits::max_selector_len`). GitHub's selector observer joins about 100 selectors into one string of 3,387 to 3,987 bytes. I did not change the cap: the previous section keeps it on purpose. To see what comes next, I raised it to 8,192 bytes in a scratch build (not committed): the selector aborts went away, and one `Steps` abort per page stayed (three on github.com/mrwick1/bare). That `Steps` abort is a script that runs too long. It is a cost problem and not a missing API, so I made no further fix on this chain. No bot wall appeared.
+
+Cost. Base is origin/main from `base-build`, taken after the final rebase. A first run found `intl_load format` +3.5%, `locale` +1.5% and `parts` +1.2% under both allocators. Two changes brought them down. The zone name and the fractional digits go through cold functions (`intl_format_extras`, `zone_tail`, `fraction`), and the hot `format` path only tests one `bool` of the formatter (`extras`). The check for a known calendar is a cold function too. Final gates are below.
+
+Final gates, after the last rebase onto `f92cf5415a` (main with #321 and #322). Cost matrix against the `base-build` of that commit: all 805 rows ran, 0 over the limit under both allocators, 0 over under one, 0 failed; mean change glibc +0.019%. The earlier `observer_load raf 10` row (+0.55%) was layout noise from the earlier build and came under the limit after a cold-path edit.
+
+Checks. `cargo test --release --workspace`: 3,321 passed, 0 failed. `exec_diff`: 79 runs, 0 differences. `test262_check`: exit 0. `keycost.sh`: `#a1` 282.6 M for each key, `#f0` 287.9 M, RSS 33.1 MiB at 50 keys (same as the last run on main). `tools/drive/public/run.sh`: 48 pass, 0 fail, 0 known, 0 skip, 0 flakes. `tools/js/intl_check.sh` needs `target/` in the worktree; I ran the same comparison by hand with the example from the shared target dir: no difference.
+
+Not tested. A locale other than `en`, `en-US`, `en-CA`, `en-IN` and `en-GB`. Zones outside the table against ICU names. `timeZoneName` with a historic offset (the table's standard offset is today's). Pages that assign `document.domain` to a parent domain (they now continue; no origin change happens, as in Chrome). GitHub pages with the selector cap raised (scratch build only, one run).
