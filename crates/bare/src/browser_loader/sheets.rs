@@ -457,13 +457,14 @@ pub(crate) fn absolute_urls<'a>(text: &'a str, base: &Url) -> std::borrow::Cow<'
     let b = text.as_bytes();
     let mut out: Option<String> = None;
     let (mut copied, mut i) = (0, 0);
-    while i + 4 <= b.len() {
-        if !(b[i] | 0x20 == b'u' && b[i + 1..i + 4].eq_ignore_ascii_case(b"rl(")) {
-            i += 1;
+    // `find` looks for the bracket with a fast search; a `(` that does not follow `url` is skipped.
+    while let Some(k) = text.get(i..).and_then(|t| t.find('(')) {
+        let open = i + k;
+        i = open + 1;
+        if open < 3 || !b[open - 3..open].eq_ignore_ascii_case(b"url") {
             continue;
         }
-        let start = i;
-        i += 4;
+        let start = open - 3;
         while i < b.len() && b[i].is_ascii_whitespace() {
             i += 1;
         }
