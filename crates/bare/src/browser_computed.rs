@@ -307,7 +307,6 @@ impl Snap {
             Cv::Length(Length::Px(x)) => format!("{}px", num(x)),
             Cv::Length(Length::Percent(x)) => format!("{}%", num(x)),
             Cv::Length(Length::Calc(i)) => calc_text(&self.styles, i),
-            Cv::Length(Length::Math(i)) => self.styles.math_text(i),
             Cv::Grid(i) => grid_text(&self.styles, self.styles.grid(i)),
             Cv::Color(c) if c.a == 255 => format!("rgb({}, {}, {})", c.r, c.g, c.b),
             Cv::Color(c) => format!("rgba({}, {}, {}, {})", c.r, c.g, c.b, num((c.a as f32 / 255.0 * 1000.0).round() / 1000.0)),

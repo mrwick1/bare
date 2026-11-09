@@ -62,7 +62,7 @@ impl Linear {
             Length::Vh(x) => v[VH] = x,
             Length::Vmin(x) => v[VMIN] = x,
             Length::Vmax(x) => v[VMAX] = x,
-            Length::Calc(_) | Length::Math(_) => {}
+            Length::Calc(_) => {}
         }
         Linear(v)
     }

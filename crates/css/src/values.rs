@@ -193,10 +193,9 @@ pub enum Length {
     Vmax(f32),
     /// A `calc()` that mixes units, like `100% - 20px`. The number is the place of its `Linear` in a list. In a declared value
     /// that is the list that `parse_declaration` fills. In a computed value it is the list of the `Styles`: a pair of pixels and percent.
+    /// A `min()`, `max()` or `clamp()` is also a `Calc`: its place holds a tree (`calc::encode`, `calc::flatten`), and the first entry has NaN pixels.
+    /// Then only the cold code reads the tree, and the hot code of the layout has no other case.
     Calc(u32),
-    /// A `min()`, `max()` or `clamp()` with units that are not known yet, or a percent. The number is the place of its tree (`calc::encode`,
-    /// `calc::flatten`) in the same list as for `Calc`. A percent in it is a percent of the same base as for `Calc`.
-    Math(u32),
 }
 
 /// Every word that a value can be, for all the properties. One list makes the enum, the name of each word, and the way back.
@@ -417,7 +416,7 @@ fn read_calc(name: &str, tokens: &mut Tokens<'_>, calcs: &mut Vec<Linear>) -> Pa
         Some(Calc::Math(node)) => {
             let at = calcs.len() as u32;
             calc::encode(&node, calcs);
-            Part::Length(Length::Math(at))
+            Part::Length(Length::Calc(at))
         }
         Some(Calc::Number(value)) => Part::Number { value, int: value.fract() == 0.0 },
         Some(Calc::Length(lin)) => match lin.single() {
@@ -894,7 +893,7 @@ fn longhand(property: Property, part: Part) -> Option<Value> {
     let positive = |part: Part| {
         length(part).filter(|l| match *l {
             Length::Px(v) | Length::Em(v) | Length::Rem(v) | Length::Percent(v) | Length::Vw(v) | Length::Vh(v) | Length::Vmin(v) | Length::Vmax(v) => v >= 0.0,
-            Length::Calc(_) | Length::Math(_) => true,
+            Length::Calc(_) => true,
         })
     };
     let px = |v: f32| Some(Value::Length(Length::Px(v)));

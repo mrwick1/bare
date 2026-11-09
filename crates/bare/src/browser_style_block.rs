@@ -130,7 +130,6 @@ fn same(a: (&Value, &Side), b: (&Value, &Side)) -> bool {
         (Value::Length(Calc(i)), Value::Length(Calc(j))) => a.1.calcs.get(*i as usize) == b.1.calcs.get(*j as usize) && a.1.calcs.get(*i as usize).is_some(),
         (Value::Grid(i), Value::Grid(j)) => a.1.grids.get(*i as usize) == b.1.grids.get(*j as usize) && a.1.grids.get(*i as usize).is_some(),
         (Value::Var(_), _) | (_, Value::Var(_)) => false,
-        (Value::Length(bare_css::values::Length::Math(_)), _) | (_, Value::Length(bare_css::values::Length::Math(_))) => false,
         (x, y) => x == y,
     }
 }
@@ -160,7 +159,7 @@ fn written(property: Property, value: &Value, side: &Side) -> Option<String> {
             Vh(x) => format!("{x}vh"),
             Vmin(x) => format!("{x}vmin"),
             Vmax(x) => format!("{x}vmax"),
-            Calc(_) | Math(_) => return None,
+            Calc(_) => return None,
         },
         Value::Color(c) if c.a == 255 => format!("rgb({}, {}, {})", c.r, c.g, c.b),
         Value::Color(c) => format!("rgba({}, {}, {}, {})", c.r, c.g, c.b, (c.a as f32 / 255.0 * 1000.0).round() / 1000.0),

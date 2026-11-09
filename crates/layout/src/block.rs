@@ -107,6 +107,7 @@ pub struct Pos {
 }
 
 /// A length in pixels. A percent is of `base`. `None` for `auto` and `none`, and for a percent of an unknown base.
+#[inline(always)]
 pub fn resolve(cx: &Cx, v: Value, base: Option<f32>) -> Option<f32> {
     let px = match v {
         Value::Length(Length::Px(x)) => Some(x),
@@ -119,18 +120,13 @@ pub fn resolve(cx: &Cx, v: Value, base: Option<f32>) -> Option<f32> {
         Value::Length(Length::Calc(i)) => {
             let (px, pct) = cx.tree.styles.calc(i);
             match base {
+                // A `min()`, `max()` or `clamp()` has NaN pixels and a non-zero pct (its operator code): the cold code reads its tree.
+                Some(b) if px.is_nan() => {
+                    std::hint::cold_path();
+                    Some(cx.tree.styles.math_at(i, b))
+                }
                 Some(b) => Some(px + b * pct / 100.0),
                 None if pct == 0.0 => Some(px),
-                None => {
-                    cx.unknown.set(cx.unknown.get() + 1);
-                    None
-                }
-            }
-        }
-        Value::Length(Length::Math(i)) => {
-            std::hint::cold_path();
-            match base {
-                Some(b) => Some(cx.tree.styles.math_at(i, b)),
                 None => {
                     cx.unknown.set(cx.unknown.get() + 1);
                     None

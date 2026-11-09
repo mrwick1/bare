@@ -123,10 +123,8 @@ fn inset(style: &ComputedStyle, p: Property, of: f32, tree: &Tree) -> Option<f32
         Value::Length(Length::Px(x)) => Some(x),
         Value::Length(Length::Percent(pc)) => Some(of * pc / 100.0),
         Value::Length(Length::Calc(i)) => {
-            let (px, pc) = tree.styles.calc(i);
-            Some(px + of * pc / 100.0)
+            Some(tree.styles.calc_at(i, of))
         }
-        Value::Length(Length::Math(i)) => Some(tree.styles.math_at(i, of)),
         _ => None,
     }
 }

@@ -68,7 +68,7 @@ fn len_tag(l: Length) -> u8 {
 fn len_value(l: Length) -> f32 {
     match l {
         Length::Px(x) | Length::Percent(x) | Length::Em(x) | Length::Rem(x) | Length::Vw(x) | Length::Vh(x) | Length::Vmin(x) | Length::Vmax(x) => x,
-        Length::Calc(_) | Length::Math(_) => 0.0,
+        Length::Calc(_) => 0.0,
     }
 }
 

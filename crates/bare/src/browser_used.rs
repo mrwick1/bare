@@ -103,9 +103,9 @@ pub(crate) fn needs_layout(style: &bare_css::cascade::ComputedStyle, kind: Kind,
     match p {
         Width | Height => is_box(kind),
         MarginTop | MarginRight | MarginBottom | MarginLeft => is_box(kind) && !fixed,
-        PaddingTop | PaddingRight | PaddingBottom | PaddingLeft => is_box(kind) && matches!(v, Cv::Length(Length::Percent(_) | Length::Calc(_) | Length::Math(_))),
+        PaddingTop | PaddingRight | PaddingBottom | PaddingLeft => is_box(kind) && matches!(v, Cv::Length(Length::Percent(_) | Length::Calc(_))),
         Top | Right | Bottom | Left => {
-            let pct = |v| matches!(v, Cv::Length(Length::Percent(_) | Length::Calc(_) | Length::Math(_)));
+            let pct = |v| matches!(v, Cv::Length(Length::Percent(_) | Length::Calc(_)));
             match style.get(Position) {
                 Cv::Keyword(Keyword::Absolute | Keyword::Fixed) => !fixed,
                 Cv::Keyword(Keyword::Relative) => {
@@ -173,10 +173,8 @@ impl<'a> Ctx<'a> {
             Cv::Length(Length::Px(x)) => Some(x),
             Cv::Length(Length::Percent(p)) => Some(lu(base * p / 100.0)),
             Cv::Length(Length::Calc(i)) => {
-                let (px, pct) = self.styles.calc(i);
-                Some(lu(px + base * pct / 100.0))
+                Some(lu(self.styles.calc_at(i, base)))
             }
-            Cv::Length(Length::Math(i)) => Some(lu(self.styles.math_at(i, base))),
             _ => None,
         }
     }
@@ -235,7 +233,7 @@ impl<'a> Ctx<'a> {
         for (o, v) in out.iter_mut().zip(vals) {
             *o = match v {
                 Cv::Length(Length::Px(x)) => x,
-                Cv::Length(Length::Percent(_) | Length::Calc(_) | Length::Math(_)) => {
+                Cv::Length(Length::Percent(_) | Length::Calc(_)) => {
                     let w = match base {
                         Some(w) => w,
                         None => *base.insert(self.cb_rect(n)?.w),
@@ -265,7 +263,7 @@ impl<'a> Ctx<'a> {
     fn margin_spec(&self, n: NodeId, i: usize) -> G<Option<f32>> {
         let v = self.tree.style(n).get(MARGINS[i]);
         Ok(match v {
-            Cv::Length(Length::Percent(_) | Length::Calc(_) | Length::Math(_)) => self.resolve(v, self.cb_rect(n)?.w),
+            Cv::Length(Length::Percent(_) | Length::Calc(_)) => self.resolve(v, self.cb_rect(n)?.w),
             _ => self.resolve(v, 0.0),
         })
     }
@@ -462,6 +460,9 @@ impl<'a> Ctx<'a> {
 /// `calc(100% - 20px)`: the percent first, as Chrome prints it.
 pub(crate) fn calc_text(styles: &Styles, i: u32) -> String {
     let (px, pct) = styles.calc(i);
+    if px.is_nan() {
+        return styles.math_text(i);
+    }
     let sign = |x: f32| if x < 0.0 { '-' } else { '+' };
     match (px == 0.0, pct == 0.0) {
         (true, _) => format!("calc({}%)", num(pct)),
@@ -475,7 +476,6 @@ fn length_text(styles: &Styles, l: Length) -> String {
         Length::Px(x) => format!("{}px", num(x)),
         Length::Percent(x) => format!("{}%", num(x)),
         Length::Calc(i) => calc_text(styles, i),
-        Length::Math(i) => styles.math_text(i),
         // The cascade made every other unit pixels.
         _ => "0px".into(),
     }
