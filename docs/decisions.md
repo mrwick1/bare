@@ -576,3 +576,18 @@ Two caps stopped pages that Chrome loads. Neither changed class: a cap that a re
 - `computed-work` bounded nodes x (rules + 1). apnews has 30,000 nodes, of which 5,000 are elements, and 8,274 rules: 252 million, over the cap of 134 million. The indexed cascade checks 1.3 million candidates and takes 24 ms. The cap now falls back to styled elements x (rules + 1) when the first bound is over (`styled_work`, cold path). Text nodes are not styled. The cheap bound stays the first test, so small pages pay no new work. The bound is still not the real count of candidates: that count needs the rule index in `bare_css`. It is the next step.
 - The step budget is charged with the same bound (`it.charge(work)`), so the default 100 M steps of one task end a cascade before the 134 M cap does. A page whose styled elements x rules is over 100 M still stops (`Steps`).
 - `fetch-queue` held 64 requests. gitlab calls `fetch` 64 times in one task, before one can finish: no leak and no count bug (finished requests leave the queue in order). Chrome queues them, so the queue holds 1,024 requests and 8 MiB of URL and header text (`max_pending_bytes`; bodies stay under `max_retained`). The text is summed only once the queue holds 64 requests. Over either bound the page stops, as before: this is a bound against a hostile page, not a case that a real page reaches.
+
+## Unhandled promise rejections
+
+A promise that is rejected with no handler is reported after the microtask checkpoint, as the HTML standard says ("HostPromiseRejectionTracker", "notify about rejected promises").
+
+- The tracker works at reject time. `settle` puts a promise that has no handler on a pending list, in a cold path. Nothing scans all promises: that is O(all promises) for each checkpoint.
+- Without a host, nothing is tracked. Nobody can hear it, and the list must not keep promises alive.
+- `drain_jobs` ends with one notification when the pending list or the reported list is not empty. An empty checkpoint pays two length checks.
+- The host hook is `Host::promise_rejections`. The browser fires a cancelable `unhandledrejection` at `window` for each promise that is still unhandled. When it is not canceled, the console gets one error: `Uncaught (in promise) <reason>`. For an error object the reason is `name: message` and the first frame of `stack`.
+- A reported promise that gets a handler later fires `rejectionhandled`. A `then` and an `await` both count. The reported list is checked at each checkpoint, so `eval_async.rs` needs no hook.
+- One round for each checkpoint, as the standard's queued task does. A rejection inside a listener waits for the next checkpoint, so a listener that rejects again cannot loop.
+- Bounds: 1024 pending promises (`MAX_PENDING_REJECTIONS`); more are counted and logged as one line. 256 reported promises (`MAX_REPORTED_REJECTIONS`); over it, the oldest is forgotten and cannot fire `rejectionhandled`.
+- GC: the pending list is a root. The reported list is weak (the standard's "outstanding rejected promises weak set"): `collect` drops the unreachable ones.
+- The listeners run as one host call with the budget of the checkpoint. No new step budget starts.
+- Cost: no new field in `PromiseData`. The full matrix has zero rows over +0.5%.

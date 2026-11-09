@@ -5420,3 +5420,59 @@ Instruction counts include the network wait and the page's own work, so they var
 - More than 64 queued `XMLHttpRequest` calls on a live page (the test has 200 `fetch` and 200 XHR).
 - Memory of a queue at 1,024 requests with 8 MiB of text (the bound is by construction; no run).
 - jemalloc counts of the matrix: no row was over under glibc.
+
+## Unhandled promise rejections and four silent sites
+
+### Problem
+
+Four public apps loaded their scripts and drew nothing, with no console line: bsky.app, crates.io, twitch.tv and dailymotion.com. `Interp::unhandled_rejections()` had no caller in the browser. Nothing fired `unhandledrejection`. A rejected promise in an app start was invisible.
+
+### Change
+
+- Rejection tracking per HTML "HostPromiseRejectionTracker" and "notify about rejected promises". The rule, the bounds and the cost are in `docs/decisions.md`, "Unhandled promise rejections".
+- `PromiseRejectionEvent` (lazy interface), `unhandledrejection`, `rejectionhandled`, `onunhandledrejection`. When the event is not canceled, the console gets `Uncaught (in promise) <reason>` at level `error`.
+- Fixes found through the new line, one for each site:
+  - `SVGAElement` did not exist. crates.io threw `ReferenceError: SVGAElement is not defined` in a promise.
+  - bsky.app: the app bundle is 9.7 MB after decoding. The cap of one resource was 8 MiB, so the script failed silently. The cap is now 16 MiB (`MAX_RESOURCE_BYTES`).
+  - twitch.tv stopped on `Unsupported("quantified lookahead")`. A lookahead now takes a quantifier without `u`, as Annex B "QuantifiableAssertion" says. With `u` it is a `SyntaxError`. Sixteen cases match Node 22.
+  - dailymotion.com: `SyntaxError: unexpected token` came from an inline script of the home page (script 15 of the HTML, line 2): `<!-- console.debug is not defined in IE 10 -->`. The lexer now reads HTML-like comments (Annex B) in scripts, not in modules.
+
+### Spec references
+
+HTML: "HostPromiseRejectionTracker", "notify about rejected promises", `PromiseRejectionEvent`. ECMA-262 Annex B.1.1 (HTML-like comments) and B.1.2 (QuantifiableAssertion).
+
+### Sites before and after
+
+Before: `bare-drive` of main `4f54c017`. After: this branch. Steps: `timeout 30000`, `open URL`, `expect js "document.readyState === 'complete'"`, `shot s`.
+
+| Site | Before: first error | After: first error | Before | After |
+|---|---|---|---|---|
+| bsky.app/profile/bsky.app | none (the index script failed on the size cap) | `Uncaught (in promise) ReferenceError: indexedDB is not defined` | pass, empty page, 31 MiB peak | pass, splash logo, 13.1 s, 208 MiB peak |
+| crates.io | none | none | pass, server page only | pass, server page only |
+| twitch.tv | `ReferenceError: Path2D is not defined` (error listener), then `Unsupported("quantified lookahead")` | `ReferenceError: Path2D is not defined` (error listener) | fail, logo only | pass, top bar and side bar draw, 197 MiB peak |
+| dailymotion.com | `TypeError: Cannot read properties of undefined (reading 'split')`, `SyntaxError: unexpected token` | `TypeError: ... (reading 'split')`, then `Uncaught (in promise) TypeError: t.querySelector("circle")?.animate is not a function` | pass, blank | pass, blank |
+
+Gates left, with their owners:
+
+- bsky.app: `indexedDB` does not exist (a large subsystem).
+- twitch.tv: `Path2D` does not exist (canvas).
+- dailymotion.com: `Element.animate` (Web Animations) does not exist. The `split` error comes from script 421 (`i (script#426:2:150)`); its cause was not found in the time box.
+- crates.io: the app loads its route chunks 0, 1 and 8 but never requests `/api/v1/summary`. No error is logged. The `<noscript>` sentence also shows; with scripting on, Chrome hides it. The journey `crates-io-home.steps` now has a `# known-bug:` line. It still passes, because it checks only that `body` is visible.
+- A script over the resource cap still fails with no console line. The loader keeps the reason in its diagnostics, which `bare-drive` does not print. This is for the owner of `browser_loader.rs`.
+- crates.io sets `window.onunhandledrejection` to replace the body with an error page. Any rejection that bare causes there now shows that page, as in Chrome.
+
+### Checks
+
+- Tests first: the browser tests of the event, `preventDefault()` and the console line failed on main (3 of 3). The JS tests of the pending list need the new API, so they did not compile on main.
+- `cargo test --release --workspace`: 3,317 passed, 0 failed.
+- `tools/js/test262_check.sh`: `gate: ok`. `tools/js/exec_diff.sh`: 79 runs, 0 differences. `tools/js/typing/keycost.sh`: `#a1` 282.6 M and `#f0` 287.9 M for each key, peak RSS 33.3 MiB at 50 keys.
+- Public journeys: 48 pass, 0 fail, 0 flakes. No journey logs `Uncaught (in promise)`. A journey fails only on its steps, never on console lines (checked in `run.sh`).
+- Cost, first run before the rebase: 8 promise rows were +0.6% to +4.6%. Cause: rows with no host kept up to 1024 rejected promises alive as roots. Fix: no tracking without a host. The 52 promise and async rows then had zero rows over the limit.
+- Cost, final: the full matrix of 805 rows against the shared build of `c08c74b1` (main after the rebase). Zero rows over +0.5% under glibc, so no row ran under jemalloc. Zero failed. Mean change +0.010% under glibc.
+
+### Not tested
+
+- Chrome was not run on the four sites. The noscript claim follows the HTML standard, not a Chrome capture.
+- The `unhandledrejection` event inside a frame or a worker.
+- A page that rejects more than 1024 promises in one checkpoint, on a live site.
+- `-->` after a multi-line comment on the first line of a script.
