@@ -357,7 +357,6 @@ impl Dom {
 
     /// A node went into the tree. Every classic `<script>` of it (it may be a subtree) is prepared.
     pub(crate) fn script_inserted(&self, it: &mut Interp<'_>, node: NodeId) -> R<()> {
-        crate::browser_frames::activate(self, it)?;
         if !self.scripts.enabled.get() || !self.is_element(node) {
             return Ok(());
         }

@@ -449,7 +449,6 @@ pub(crate) enum P {
     Element,
     Html,
     Input,
-    Iframe,
     Link,
     Form,
     Button,
@@ -624,7 +623,7 @@ impl Host for Dom {
     }
 
     fn trace(&self, owner: ObjId, out: &mut Vec<Value>) {
-        crate::browser_frames::trace(self, owner, out);
+        if self.frames.active() { crate::browser_frames::trace(self, owner, out); }
         self.sched_trace(owner, out);
         crate::browser_navigation::trace(self, owner, out);
         crate::browser_platform::trace(self, owner, out);
@@ -716,7 +715,7 @@ impl Host for Dom {
 
     fn fill_indexed(&self, it: &mut Interp<'_>, owner: ObjId, index: u32) -> R<()> {
         if index == bare_js::heap::LAZY_TAG { return crate::browser_handlers::tags(self,it); }
-        if crate::browser_frames::fill(self, it, owner, index)? { return Ok(()); }
+        if index == crate::browser_frames::FILL { crate::browser_frames::fill(self, it, owner, index)?; return Ok(()); }
         if (bare_js::heap::LAZY_ALL..u32::MAX).contains(&index) {
             return crate::browser_handlers::lazy(self, it, owner, index == bare_js::heap::LAZY_ALL);
         }
@@ -761,6 +760,7 @@ pub(crate) fn define_window(d: &Dom, it: &mut Interp<'_>, name: &str) -> R<bool>
         d.def_method(it,it.global_object(),"eval",1,|_,it,_,a|it.eval_global(a.first().copied().unwrap_or(Value::Undefined)))?;
         return Ok(true);
     }
+    if name == "DocumentType" { crate::browser_implementation::doctype_global(d, it, Value::Undefined, &[])?; return Ok(true); }
     if !matches!(name,"frames"|"parent"|"top"|"length"|"name"|"screen"){return Ok(false);}
     let g = it.global_object();
     let key=d.key(it,name)?;
@@ -906,7 +906,7 @@ impl Dom {
                         Ns::Svg => crate::browser_svg::wrapper_proto(self,it,doc.atom_str(name))?,
                         Ns::MathMl => p.element,
                         _ => match doc.atom_str(name) {
-                            "iframe" => p.iframe,
+                            "iframe" => { crate::browser_frames::activate(self, it)?; p.iframe },
                             "link" => p.link,
                             "style" => crate::browser_cssom::wrapper_proto(self,it)?,
                             "a" | "area" | "template" | "img" | "slot" => crate::browser_elements::proto(self, it, doc.atom_str(name))?,
@@ -1022,7 +1022,6 @@ impl Dom {
             P::Element => ps.element,
             P::Html => ps.html,
             P::Input => ps.input,
-            P::Iframe => ps.iframe,
             P::Link => ps.link,
             P::Form => ps.form,
             P::Button => ps.button,
@@ -1351,8 +1350,6 @@ pub(crate) static DEFS: &[Def] = &[
     Def { on: &[Document], name: "createElement", len: 1, kind: M(nd::create_element) },
     Def { on: &[Document], name: "createEvent", len: 1, kind: M(ev::create_event) },
     Def { on: &[Document], name: "createElementNS", len: 2, kind: M(ns::create_element_ns) },
-    Def { on: &[P::Iframe], name: "contentWindow", len: 0, kind: Kind::Get(crate::browser_frames::content_window) },
-    Def { on: &[P::Iframe], name: "name", len: 0, kind: Kind::Accessor(crate::browser_frames::name, crate::browser_frames::set_name) },
     Def { on: &[Document], name: "getElementsByName", len: 1, kind: M(crate::browser_nodelist::get_elements_by_name) },
     Def { on: &[Document], name: "createAttribute", len: 1, kind: M(at::create_attribute) },
     Def { on: &[Document], name: "createAttributeNS", len: 2, kind: M(at::create_attribute_ns) },

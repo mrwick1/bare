@@ -38,7 +38,7 @@ use crate::browser::*;
 use crate::browser_dom::attr_set;
 use bare_html::dom::{NodeData, NodeId, Ns};
 use bare_js::eval::Interp;
-use bare_js::heap::{HeapError, NamedOp, NamedRequest, NamedSource};
+use bare_js::heap::{HeapError, NamedOp, NamedRequest, NamedSource, NamedValue};
 use bare_js::value::{ObjId, PropertyKey, Value};
 use std::cell::{Cell, OnceCell, RefCell};
 
@@ -177,41 +177,35 @@ fn units(cs: impl Iterator<Item = char>, cap: usize) -> Vec<u16> {
 
 impl NamedSource for Dom {
     fn named_has(&self, owner: ObjId, key: &[u16]) -> Result<bool, HeapError> {
-        if let Some(v) = crate::browser_frames::has(self, owner, key)? { return Ok(v); }
         if let Some(session) = self.storage_area(owner) {
             return self.storage_get(session, key).map(|v| v.is_some());
         }
-        let Some(el) = self.dataset_el(owner)? else { return Ok(false) };
+        let Some(el) = self.dataset_el(owner)? else { return crate::browser_frames::has(self, owner, key).map(|v| v.unwrap_or(false)); };
         let doc = self.doc.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
         self.dataset_gate(owner, doc.attr_count(el))?;
         let NodeData::Element { attrs, .. } = *doc.data(el) else { return Ok(false) };
         Ok(doc.attrs(attrs).iter().any(|a| matches(doc.atom_str(a.name), key)))
     }
 
-    fn named_read(&self, owner: ObjId, key: &[u16]) -> Result<Option<bare_js::heap::NamedValue>, HeapError> {
-        if let Some(v) = crate::browser_frames::value(self, owner, key) { return Ok(Some(bare_js::heap::NamedValue::Value(v))); }
-        self.named_get(owner, key).map(|v| v.map(bare_js::heap::NamedValue::Text))
-    }
-    fn named_get(&self, owner: ObjId, key: &[u16]) -> Result<Option<Vec<u16>>, HeapError> {
+    fn named_get(&self, owner: ObjId, key: &[u16]) -> Result<Option<NamedValue>, HeapError> {
         if let Some(session) = self.storage_area(owner) {
-            return self.storage_get(session, key);
+            return self.storage_get(session, key).map(|v| v.map(NamedValue::Text));
         }
-        let Some(el) = self.dataset_el(owner)? else { return Ok(None) };
+        let Some(el) = self.dataset_el(owner)? else { return Ok(crate::browser_frames::value(self, owner, key).map(NamedValue::Value)); };
         let doc = self.doc.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
         // No gate: the heap calls this right after `named_has`, and that call paid for the scan.
         let NodeData::Element { attrs, .. } = *doc.data(el) else { return Ok(None) };
         Ok(doc.attrs(attrs).iter().find(|a| matches(doc.atom_str(a.name), key)).map(|a| {
             let t = doc.text(a.value);
-            units(t.chars(), t.len())
+            NamedValue::Text(units(t.chars(), t.len()))
         }))
     }
 
     fn named_len(&self, owner: ObjId) -> Result<usize, HeapError> {
-        if let Some(n) = crate::browser_frames::len(self, owner)? { return Ok(n); }
         if let Some(session) = self.storage_area(owner) {
             return self.storage_len(session);
         }
-        let Some(el) = self.dataset_el(owner)? else { return Ok(0) };
+        let Some(el) = self.dataset_el(owner)? else { return crate::browser_frames::len(self, owner).map(|v| v.unwrap_or(0)); };
         let doc = self.doc.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
         self.dataset_gate(owner, doc.attr_count(el))?;
         let NodeData::Element { attrs, .. } = *doc.data(el) else { return Ok(0) };
@@ -220,11 +214,10 @@ impl NamedSource for Dom {
 
     /// No gate here: the heap calls `named_len` first, and that call paid for the scan.
     fn named_keys(&self, owner: ObjId) -> Result<Vec<Vec<u16>>, HeapError> {
-        if let Some(keys) = crate::browser_frames::keys(self, owner) { return Ok(keys); }
         if let Some(session) = self.storage_area(owner) {
             return self.storage_keys(session);
         }
-        let Some(el) = self.dataset_el(owner)? else { return Ok(Vec::new()) };
+        let Some(el) = self.dataset_el(owner)? else { return Ok(crate::browser_frames::keys(self, owner).unwrap_or_default()); };
         let doc = self.doc.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
         let NodeData::Element { attrs, .. } = *doc.data(el) else { return Ok(Vec::new()) };
         Ok(doc.attrs(attrs).iter().filter_map(|a| {

@@ -64,7 +64,7 @@ fn implementation(d: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Valu
 /// Installed with the late members of `Document` (`browser_dom::install_late`).
 pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     d.def_get(it, d.p().document, "implementation", implementation, None)?;
-    crate::browser_lazy::install(d, it, &[("DOMParser", parser_global), ("XMLSerializer", serializer_global), ("DocumentType", doctype_global)])
+    crate::browser_lazy::install(d, it, &[("DOMParser", parser_global), ("XMLSerializer", serializer_global)])
 }
 
 // XML MIME types use the HTML parser. Case, namespaces, errors and serialization
@@ -179,7 +179,7 @@ pub(crate) fn doctype_proto(d: &Dom, it: &mut Interp<'_>) -> R<ObjId> {
     d.fixed.borrow_mut().push(p);
     Ok(p)
 }
-fn doctype_global(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
+pub(crate) fn doctype_global(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
     let v = if let Some(v) = a.first() { *v } else {
         let p = doctype_proto(d, it)?;
         let k = d.key(it, "constructor")?;

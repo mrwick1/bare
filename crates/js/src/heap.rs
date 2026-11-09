@@ -1419,6 +1419,7 @@ impl Heap {
             Some(115) => named!("screen") || named!("sheet") || named!("styleSheets"),
             Some(67) => named!("CSSStyleSheet") || named!("CSSStyleRule") || named!("CSSRuleList"),
             Some(83) => named!("StyleSheetList") || named!("SVGAnimatedString") || (u.starts_with(&[83,86,71]) && u.ends_with(&[69,108,101,109,101,110,116])),
+            Some(68) => named!("DocumentType"),
             _ => false,
         }
     }

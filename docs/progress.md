@@ -5283,3 +5283,33 @@ Bing's captured bare-UA HTML puts /rp/0DkivOHGsxc4qmgnASpvPr2oCS0.js and /rp/B-B
 After the frame retry fix, the saved Bing page settles. It next reads navigator.serviceWorker.controller without a guard in /rp/PNP6sUqOLW_M1zug__-AythpfbA.js at script#58:1:29. A later autosuggest error reads length from undefined at script#86:1:65618 in /rp/M9hGw5n2GMxFs23AZS9MZ2P6tLk.js. That later expression remains unverified because the fetched file differs at that offset. Two network script tasks exceed the Steps budget. No service worker container was faked.
 
 NYTimes again returns HTTP 403 with bare/0.1 headers and with a Chrome User-Agent, navigation Accept and en-US Accept-Language. Both bodies contain a captcha-delivery.com challenge. The tested header changes do not remove the bot block. The server's exact classification rule remains unknown. No bypass was attempted.
+
+Validation and merge hold: the workspace suite passed before the final cold-path changes. After rebasing onto 29ab4eaa02 (#313 and #314), the bare and bare-js library suites passed (1140 and 840 tests; ignored tests remain ignored). All 33 public journeys passed without retries. Test262 passed its baseline gate. The initial execution differential passed all 79 runs. Its later rerun was interrupted when the shared heavy wrapper was deleted; the exact wrapper was recovered from an open process descriptor and restored. No build-slot limit was bypassed.
+
+The first 805-row matrix found 39 rows over +0.5% under both allocators. Direct perf stat instructions:u for scheduler timers 10 counted 196232438 instructions on the baseline and 197631797 before the structural fixes. nm -S showed a new 0x1e1-byte frame-trace function called on the GC path. Three structural attempts followed: skip frame work on inactive realms and remove the extra named-read dispatch; defer iframe and DocumentType accessor registration; then use a one-pointer OnceCell container for cold frame state. The new container has a compile-time pointer-size assertion. Existing Value, Property and Object size assertions still pass. No field was added to those VM structures.
+
+The final recheck covers 122 affected rows against the fresh 29ab4eaa02 baseline. It includes every row flagged by the initial matrix, the changed API paths and GC/churn rows. Seventeen still exceed +0.5% under both allocators. Three more exceed the limit under one allocator. Timers 10 remains +0.534% glibc and +0.531% jemalloc. Large dataset rows now stay below +0.04%. Hypothesis: the remaining low-workload deltas include code-generation or startup-layout effects; their exact causes are not proved. They are not waived. The three-attempt cap is reached. The PR must remain unmerged. The worktree is retained.
+
+| Row over both allocators | glibc | jemalloc |
+| --- | ---: | ---: |
+| `examples/fetch_load post 1` | +0.650% | +0.704% |
+| `examples/fetch_load bytes 1` | +0.982% | +0.878% |
+| `examples/fragment_load replace 1` | +0.598% | +0.651% |
+| `examples/interact_load churn 1` | +1.066% | +0.877% |
+| `examples/loader_load blocking 1` | +1.177% | +0.928% |
+| `examples/loader_load blocking 10` | +0.698% | +0.650% |
+| `examples/loader_load dynamic 1` | +0.930% | +0.781% |
+| `examples/loader_load mixed 1` | +0.984% | +0.813% |
+| `examples/revive_load gc 1` | +2.553% | +1.384% |
+| `examples/scheduler_load messages 1` | +0.554% | +0.549% |
+| `examples/scheduler_load timers 10` | +0.534% | +0.531% |
+| `examples/streams_load churn 1` | +0.580% | +0.572% |
+| `examples/stringify_load gc 1` | +2.510% | +1.360% |
+| `examples/resources_load small 1` | +1.844% | +1.107% |
+| `examples/dataset_load read 1000 1` | +0.670% | +0.703% |
+| `examples/dataset_load write 1000 1` | +0.544% | +0.557% |
+| `examples/dataset_load keys 1000 1` | +0.642% | +0.583% |
+
+Final functional checks: 1140 bare library tests pass after the last structural change. The restored execution differential passes all 79 runs with zero differences. Typing costs are 282.2 M instructions per textarea key and 287.5 M per React input key. Peak RSS is 33.2 MiB at 20 keys and 33.0 MiB at 50 keys. The final BBC probe reaches document completion and logs no script exception during 30 seconds; network failures remain. Earlier requests reached the Scripts budget. This variation does not prove that image placeholders render correctly. Guardian reaches eval and failed telemetry fetches. Bing retains the captured dependency-order exceptions, then the service-worker and autosuggest errors. NYTimes remains HTTP 403.
+
+Not tested: actual Chrome execution, BBC placeholder pixels, iframe child navigation or scripts, stream upload buffering, and the exact later Bing autosuggest expression. Prototype-only iframe member access before the first iframe activation remains a deviation of the deferred registration. The cost gate remains failed. Do not merge this branch or remove its worktree.
