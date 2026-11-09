@@ -5468,7 +5468,8 @@ Gates left, with their owners:
 - `tools/js/test262_check.sh`: `gate: ok`. `tools/js/exec_diff.sh`: 79 runs, 0 differences. `tools/js/typing/keycost.sh`: `#a1` 282.6 M and `#f0` 287.9 M for each key, peak RSS 33.3 MiB at 50 keys.
 - Public journeys: 48 pass, 0 fail, 0 flakes. No journey logs `Uncaught (in promise)`. A journey fails only on its steps, never on console lines (checked in `run.sh`).
 - Cost, first run before the rebase: 8 promise rows were +0.6% to +4.6%. Cause: rows with no host kept up to 1024 rejected promises alive as roots. Fix: no tracking without a host. The 52 promise and async rows then had zero rows over the limit.
-- Cost, final: the full matrix of 805 rows against the shared build of `c08c74b1` (main after the rebase). Zero rows over +0.5% under glibc, so no row ran under jemalloc. Zero failed. Mean change +0.010% under glibc.
+- Cost, final: the full matrix of 805 rows against the shared build of `ff02f72b` (main after the last rebase). Zero rows over +0.5% under glibc, so no row ran under jemalloc. Zero failed. Mean change +0.017% under glibc. The largest row is `scheduler_load mixed 10`, +0.422%. A run against `c08c74b1` before the last rebase gave the same result (mean +0.010%).
+- After the last rebase: the `bare-js` and `bare` library tests pass (847 and 1,163). `exec_diff.sh`: 79 runs, 0 differences. test262, keycost, the workspace tests and the journeys ran before it, on `c08c74b1`.
 
 ### Not tested
 
