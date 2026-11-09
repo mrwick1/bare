@@ -80,7 +80,7 @@ fn source_of(doc: &Document, img: NodeId) -> Option<String> {
 }
 
 /// The bytes of a `data:` URL (base64 or percent-encoded).
-fn data_url(url: &str) -> Option<Vec<u8>> {
+pub(crate) fn data_url(url: &str) -> Option<Vec<u8>> {
     let (head, body) = url.strip_prefix("data:")?.split_once(',')?;
     if head.rsplit(';').next().is_some_and(|f| f.eq_ignore_ascii_case("base64")) {
         let mut out = Vec::with_capacity(body.len() / 4 * 3);

@@ -7,7 +7,7 @@
 //! - The global is lazy (`browser_lazy.rs`): the prototype, the constructor and the methods are made by the first read.
 //! - `new PerformanceObserver(callback)` needs a function. `observe(options)` needs an object with `type` or `entryTypes` and does nothing else.
 //!   `disconnect()` does nothing and `takeRecords()` gives a new empty array.
-//! - Absent: entries of any type (`performance.getEntries*`, `mark`, `measure`), `PerformanceEntry`, `PerformanceObserverEntryList`.
+//! - Absent: `PerformanceEntry`, `PerformanceObserverEntryList`. The entries of `performance.getEntries*` are in `browser_perf.rs`.
 
 use crate::browser::*;
 use bare_js::eval::Interp;

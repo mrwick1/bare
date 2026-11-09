@@ -176,10 +176,10 @@ pub(crate) fn url_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R
     };
     let msg = "Failed to construct 'URL': Invalid URL";
     let base = match base {
-        Some(b) => Some(nu::parse(&b, None).map_err(|e| uerr(d, it, e, msg, false))?),
+        Some(b) => Some(nu::parse_any(&b, None).map_err(|e| uerr(d, it, e, msg, false))?),
         None => None,
     };
-    let rec = nu::parse(&s, base.as_ref()).map_err(|e| uerr(d, it, e, msg, false))?;
+    let rec = nu::parse_any(&s, base.as_ref()).map_err(|e| uerr(d, it, e, msg, false))?;
     Ok(Value::Object(new_url(d, it, rec, proto)?))
 }
 
@@ -191,14 +191,14 @@ pub(crate) fn url_can_parse(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value])
         b => Some(usv(d, it, b)?),
     };
     let base = match base {
-        Some(b) => match nu::parse(&b, None) {
+        Some(b) => match nu::parse_any(&b, None) {
             Ok(r) => Some(r),
             Err(UErr::Invalid) => return Ok(Value::Bool(false)),
             Err(e) => return Err(uerr(d, it, e, "", false)),
         },
         None => None,
     };
-    match nu::parse(&s, base.as_ref()) {
+    match nu::parse_any(&s, base.as_ref()) {
         Ok(_) => Ok(Value::Bool(true)),
         Err(UErr::Invalid) => Ok(Value::Bool(false)),
         Err(e) => Err(uerr(d, it, e, "", false)),
@@ -217,7 +217,7 @@ pub(crate) fn url_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], pa
     let v = usv(d, it, a[0])?;
     let mut cand = d.nav.s.borrow().urls[&id].rec.clone();
     if part == Part::Href {
-        cand = nu::parse(&v, None).map_err(|e| uerr(d, it, e, "Failed to set the 'href' property on 'URL': Invalid URL", false))?;
+        cand = nu::parse_any(&v, None).map_err(|e| uerr(d, it, e, "Failed to set the 'href' property on 'URL': Invalid URL", false))?;
     } else {
         part.set(&mut cand, &v).map_err(|e| uerr(d, it, e, "Invalid URL", false))?;
     }

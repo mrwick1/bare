@@ -569,6 +569,9 @@ pub(crate) fn lazy(d: &Dom, it: &mut Interp<'_>, owner: ObjId, all: bool) -> R<(
             _ => Ok(()),
         };
     };
+    if key.starts_with("HTML") && crate::browser_html::define_global(d, it, &key)? {
+        return Ok(());
+    }
     let Some(n) = key.strip_prefix("on").and_then(|n| find_in(ELEMENT, n).or_else(|| find_in(DOC_EXTRA, n)).or_else(|| find_in(WIN_EXTRA, n))) else { return Ok(()) };
     if owner != d.p().et {
         return match kind_of(d, owner) {
