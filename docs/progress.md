@@ -5146,3 +5146,35 @@ The first matrix had 16 rows over both limits and 13 over one. SVG wrappers crea
 
 Not tested: direct eval with caller locals; SVG transforms, text or group bounds; live animated-value mutation; canvas pixel output; document.write tokens split across calls; execution of scripts inserted by document.write. Fragment-inserted scripts remain inert. SVG animated values are snapshots. getBBox does not compute path bounds. The excluded selector, lookbehind, named-window and site-specific issues remain outside this change.
 
+
+### Main sync before merge
+
+Main advanced to `1037459139` after the full checks. Merged it into the task branch. Only the appended progress notes conflicted. Kept both sections and left this section at the end. The merged JavaScript, browser and paint library suites pass 2,023 tests with zero failures. Rebuilt the affected examples and driver. All 30 focused rows pass against the shared build of current main under both allocators. No row exceeds +0.5%. Mean changes are +0.003% under glibc and +0.002% under jemalloc. The recheck covers regexp loads, SVG wrappers, startup, forms and text scrolling. No second full matrix was run.
+
+Re-ran all 16 sites on the current-main baseline and merged driver. Both pass 15 body probes. Both receive HTTP 521 from Stack Exchange. The current-main WolframAlpha probe does not log the canvas error on either build. Its earlier before/after result remains above. The focused canvas regression still passes. The lookbehind and selector-task recovery changes came from main and are not counted as fixes here. The latest comparison follows. Evidence: before-merge-base/, after-merge/, merge-tests.log, merge-focus.log and merge-focus.tsv in the task evidence directory.
+
+| Console error | Before sites | After sites | Sites |
+|---|---:|---:|---|
+| Error: Unable to get document domain | 2 | 2 | github-readme, github-repo |
+| Script aborted: the Host("dom-selector") budget ended the microtask checkpoint. The page goes on (1 of 5 aborts used) | 2 | 2 | github-readme, github-repo |
+| Script aborted: the Host("dom-selector") budget ended the timer or queued task. The page goes on (2 of 5 aborts used) | 2 | 2 | github-readme, github-repo |
+| Script aborted: the Steps budget ended the timer or queued task. The page goes on (3 of 5 aborts used) | 2 | 2 | github-readme, github-repo |
+| ReferenceError: _w is not defined | 1 | 1 | bing |
+| ReferenceError: maplibregl is not defined | 1 | 1 | openstreetmap |
+| ReferenceError: sj_be is not defined | 1 | 1 | bing |
+| TypeError: Cannot read properties of undefined (reading 'store') | 1 | 1 | openstreetmap |
+| TypeError: L.OSM.Map is not a constructor | 1 | 1 | openstreetmap |
+| TypeError: data module (STICKY_CANARY) | 1 | 1 | old-reddit |
+| TypeError: data module (navigation polyfill) | 1 | 1 | old-reddit |
+| TypeError: data module (script loader) | 1 | 1 | old-reddit |
+| TypeError: navigator.userAgentData.getHighEntropyValues is not a function | 1 | 1 | git-scm |
+| TypeError: window.URL.createObjectURL is not a function | 1 | 1 | openstreetmap |
+| failed: network error (https://ophan.theguardian.com): connect refused: Connection refused (os error 111) | 1 | 1 | guardian |
+| page: Unsupported("Date string that is not ISO 8601 or toUTCString format") | 1 | 1 | ubuntu-com |
+| page: Unsupported("a ReadableStream as a body") | 1 | 1 | bbc-news |
+| page: Unsupported("user info in a URL") | 1 | 1 | guardian |
+| page: status 521 | 1 | 1 | stackexchange |
+| ReferenceError: SVGAnimatedString is not defined | 1 | 0 | vuejs |
+| Script aborted: the CallDepth budget ended the https://code.jquery.com:443/ui/1.14.1/jquery-ui.min.js. The page goes on (1 of 5 aborts used) | 1 | 0 | git-scm |
+| TypeError: Failed to execute 'observe' on 'IntersectionObserver': parameter 1 is not of type 'Element'. | 1 | 0 | vuejs |
+| TypeError: document.write is not a function | 1 | 0 | apache-org |
