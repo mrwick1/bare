@@ -1645,7 +1645,7 @@ fn initial(p: Property) -> Value {
 }
 
 /// Does a child take the value of the parent when it has no value of its own?
-const fn inherited(p: Property) -> bool {
+pub const fn inherited(p: Property) -> bool {
     use Property::*;
     matches!(p, TextColor | FontSize | FontWeight | FontStyle | LineHeight | LetterSpacing | WordSpacing | TextAlign | TextTransform | WhiteSpace | ListStyleType | Visibility | PointerEvents | Fill | Stroke | BorderCollapse | BorderSpacingH | BorderSpacingV | CaptionSide | Direction)
 }

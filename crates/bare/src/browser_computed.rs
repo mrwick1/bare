@@ -43,7 +43,6 @@
 //!   is a rule of the browser sheet (`ua.css`), so a rule of the page or the `style` attribute beats it (`dir=auto` and `bdi` below).
 //!
 //! Gates (on purpose, none is silently faked; each is `Error::Unsupported`)
-//! - A pseudo-element argument (`::before`, anything that starts with `:`): the engine has no pseudo-element styles.
 //! - Resolved values that are used values (CSSOM "resolved value") come from layout (`browser_used.rs`): `width` and `height` of a box,
 //!   `auto` and percent `margin-*`, percent `padding-*`, the offsets of a positioned box, grid track lists, a numeric `line-height`
 //!   (in px). The read runs the geometry layout, so `GeometryLimits` apply (`geometry-*`, never catchable). A value that needs no
@@ -70,8 +69,16 @@
 //! build and before the compute. Names that the sheets add to the document table are bounded by the sheet bytes and checked against
 //! `max_names` after the build.
 //!
-//! Not done: `document.styleSheets` does not exist (when it does, a pending sheet must not be in it, as in Chrome), no cache of `Styles` between reads (each read costs one pass over the document), no live `getComputedStyle` of a
-//! pseudo-element, no `@container`, `@import` inside a supplied part (the embedder flattens), `<style disabled>`.
+//! Pseudo-elements (`getComputedStyle(el, '::before')`): the engine has no pseudo-element cascade. A rule with a pseudo-element in a selector
+//! is dropped when the sheet is built (`cascade.rs`), and `content` is not a property. So a pseudo-element reads as one that no rule matches:
+//! the inherited properties (`bare_css::cascade::inherited`, and custom properties) are the element's, every other property is initial
+//! (`display` is `inline`, `width` is `auto`), and `content` is `normal`. Wrong in Chrome: a `::before { content: "x"; color: blue }` rule
+//! (Chrome gives `"x"` and `blue`). It throws nothing. Valid names: `::before`, `::after`, `::first-line`, `::first-letter` (and the old one-colon
+//! forms), `::marker`, `::placeholder`, `::selection`, `::backdrop`, `::file-selector-button`, `::-webkit-*`. Another string that starts with
+//! `:` is an empty declaration (CSSOM). The values are read live. No layout runs for a pseudo-element.
+//!
+//! Not done: `document.styleSheets` does not exist (when it does, a pending sheet must not be in it, as in Chrome), no cache of `Styles` between reads (each read costs one pass over the document), no rule-based `getComputedStyle` of a
+//! pseudo-element (see above), no `@container`, `@import` inside a supplied part (the embedder flattens), `<style disabled>`.
 
 use crate::browser::*;
 use crate::browser_platform::{V, arg};
@@ -79,7 +86,7 @@ use crate::browser_style::{current, keys_of};
 use crate::browser_style_block::{self as blk, Fail, Lim, custom};
 use crate::browser_used::{Ctx, calc_text, flow_text, grid_text};
 use crate::browser_ui::chains;
-use bare_css::cascade::{self, ComputedStyle, Origin, RuleSet, Scopes, Source, Styles, UA_CSS};
+use bare_css::cascade::{self, ComputedStyle, Origin, RuleSet, Scopes, Source, Styles, UA_CSS, inherited};
 use bare_css::values::{Keyword, Length, Property, SHORTHANDS, Value as Cv, shorthand_longhands};
 use bare_html::dom::{DAMAGE_STYLE, Mark, NodeData, NodeId};
 use bare_js::eval::{Error, Interp, LimitKind};
@@ -181,6 +188,8 @@ pub(crate) struct Built {
 pub(crate) struct Computed {
     lim: Cell<ComputedLimits>,
     objs: RefCell<IdMap<ObjId, NodeId>>,
+    /// The declarations that are not of the element itself: `PSEUDO` (a pseudo-element) or `EMPTY` (a colon string that is no pseudo-element).
+    kinds: RefCell<IdMap<ObjId, u8>>,
     proto: OnceCell<ObjId>,
     fixed: RefCell<Vec<ObjId>>,
     ext: RefCell<HashMap<String, Vec<SheetPart>>>,
@@ -202,7 +211,23 @@ const MISSING: &str = "computed style needs an external stylesheet that the embe
 pub(crate) fn is_missing_sheet(e: &Error) -> bool {
     matches!(e, Error::Unsupported(u) if u.what == MISSING)
 }
-const PSEUDO: &str = "getComputedStyle of a pseudo-element (the engine has no pseudo-element styles)";
+/// The kind of a computed declaration that is not of the element: a pseudo-element, or an empty declaration (CSSOM: a string that starts
+/// with a colon and is no pseudo-element).
+const PSEUDO: u8 = 1;
+const EMPTY: u8 = 2;
+
+/// Is `s` (`pseudoElt`, starts with `:`) a pseudo-element selector? One colon is for the four old names only.
+fn pseudo_kind(s: &str) -> u8 {
+    let l = s.to_ascii_lowercase();
+    let (name, double) = match l.strip_prefix("::") {
+        Some(n) => (n, true),
+        None => (&l[1..], false),
+    };
+    let old = matches!(name, "before" | "after" | "first-line" | "first-letter");
+    let new = matches!(name, "marker" | "placeholder" | "selection" | "backdrop" | "file-selector-button")
+        || name.strip_prefix("-webkit-").is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'));
+    if old || (double && new) { PSEUDO } else { EMPTY }
+}
 const NO_STYLE: &str = "an element that the style walk does not reach has no computed style in the engine (a light child of a shadow host: no slots)";
 const AUTO_DIR: &str = "direction depends on dir=auto or bdi (the text decides it)";
 const CSS_TEXT: &str = "computed cssText (CSSOM and browsers differ; not faked)";
@@ -655,9 +680,17 @@ impl Dom {
     }
 
     /// `getPropertyValue(name)` of the computed declaration of `el`.
-    fn computed_value(&self, it: &mut Interp<'_>, el: NodeId, name: &str) -> R<String> {
+    /// `kind`: 0 for the element, `PSEUDO` for a pseudo-element (its inherited values are the element's, the rest is initial), `EMPTY` for no style.
+    fn computed_value(&self, it: &mut Interp<'_>, el: NodeId, name: &str, kind: u8) -> R<String> {
+        if kind == EMPTY {
+            return Ok(String::new());
+        }
         let is_custom = custom(name);
         let key = if is_custom { name.to_string() } else { name.to_ascii_lowercase() };
+        // `content` is not a property of this engine. A pseudo-element with no rule has `normal`.
+        if kind == PSEUDO && key == "content" {
+            return Ok("normal".into());
+        }
         let long = Property::from_name(&key);
         if !is_custom && long.is_none() && !SHORTHANDS.contains(&key.as_str()) {
             return Ok(String::new());
@@ -670,22 +703,28 @@ impl Dom {
             return Ok(s.styles.custom_properties(&s.style).iter().find(|(n, _)| **n == *key).map(|(_, t)| t.to_string()).unwrap_or_default());
         }
         let longs = long.as_ref().map(std::slice::from_ref).or_else(|| shorthand_longhands(&key)).expect("a longhand or a shorthand");
-        let used = self.used_for(it, &s, el, longs)?;
+        // A pseudo-element has no box here: no layout, and the computed values stay.
+        let used = if kind == PSEUDO { None } else { self.used_for(it, &s, el, longs)? };
+        let init = (kind == PSEUDO).then(|| Snap { styles: s.styles.clone(), style: ComputedStyle::initial(), hidden: true });
+        let pick = |p: Property| match &init {
+            Some(i) if !inherited(p) => i,
+            _ => &s,
+        };
         let doc = self.doc.borrow();
         let ctx = used.as_ref().map(|u| Ctx::new(&doc, &s.styles, u, el));
         // The engine keeps only the line of `text-decoration`; Chrome writes the shorthand as that line when the style and the color are the defaults.
         if long.is_some() || key == "text-decoration" {
-            return s.text(longs[0], ctx.as_ref()).map_err(Self::gate);
+            return pick(longs[0]).text(longs[0], ctx.as_ref()).map_err(Self::gate);
         }
         if key == "grid-row" || key == "grid-column" {
-            let (a, b) = (s.text(longs[0], ctx.as_ref()).map_err(Self::gate)?, s.text(longs[1], ctx.as_ref()).map_err(Self::gate)?);
+            let (a, b) = (pick(longs[0]).text(longs[0], ctx.as_ref()).map_err(Self::gate)?, pick(longs[1]).text(longs[1], ctx.as_ref()).map_err(Self::gate)?);
             // `start / end`: an `auto` end is left out, and so is an end that repeats a name.
             let name = a.starts_with(|c: char| c.is_alphabetic() || c == '_') && !a.starts_with("span ") && a != "auto";
             return Ok(if b == "auto" || (name && a == b) { a } else { format!("{a} / {b}") });
         }
         let mut text = String::new();
         for &p in longs {
-            text.push_str(&format!("{}:{};", p.name(), s.text(p, ctx.as_ref()).map_err(Self::gate)?));
+            text.push_str(&format!("{}:{};", p.name(), pick(p).text(p, ctx.as_ref()).map_err(Self::gate)?));
         }
         drop(doc);
         let lim = Lim { bytes: 64 << 10, decls: 256 };
@@ -698,6 +737,14 @@ impl Dom {
         match blk::get(&list, &key, lim.bytes, &mut |n| it.charge(n)).map_err(fail)? {
             Some(t) if !t.is_empty() => Ok(t),
             _ => Err(Self::gate(NO_SHORT)),
+        }
+    }
+
+    /// 0 for the element, `PSEUDO` or `EMPTY` (see `computed_value`). Call it after `computed_el` accepted `this`.
+    fn computed_kind(&self, this: Value) -> u8 {
+        match this {
+            Value::Object(o) => self.computed.kinds.borrow().get(&o).copied().unwrap_or(0),
+            _ => 0,
         }
     }
 
@@ -790,15 +837,16 @@ fn get_computed_style(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V 
         Value::Undefined | Value::Null => String::new(),
         v => d.string_arg(it, v)?,
     };
-    if pseudo.starts_with(':') {
-        return Err(Dom::gate(PSEUDO));
-    }
+    let kind = if pseudo.starts_with(':') { pseudo_kind(&pseudo) } else { 0 };
     if d.computed.objs.borrow().len() >= d.computed.lim.get().max_objects {
         return Err(d.lim("computed-objects"));
     }
     d.wrap(it, el)?;
     let o = d.obj(it, *d.computed.proto.get().expect("installed"))?;
     d.computed.objs.borrow_mut().insert(o, el);
+    if kind != 0 {
+        d.computed.kinds.borrow_mut().insert(o, kind);
+    }
     Ok(Value::Object(o))
 }
 
@@ -806,7 +854,7 @@ fn get_property_value(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) ->
     let el = d.computed_el(it, this)?;
     required(it, a, 1, "getPropertyValue")?;
     let name = d.string_arg(it, a[0])?;
-    let v = d.computed_value(it, el, &name)?;
+    let v = d.computed_value(it, el, &name, d.computed_kind(this))?;
     d.js_str(it, &v)
 }
 
@@ -855,6 +903,9 @@ fn names(s: &Snap) -> Vec<&str> {
 
 fn length(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let el = d.computed_el(it, this)?;
+    if d.computed_kind(this) == EMPTY {
+        return Ok(Value::Number(0.0));
+    }
     let n = d.snapshot(it, el)?.map_or(0, |s| Property::COUNT + s.styles.custom_properties(&s.style).len());
     Ok(Value::Number(n as f64))
 }
@@ -868,6 +919,9 @@ fn item(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     let el = d.computed_el(it, this)?;
     required(it, a, 1, "item")?;
     let i = crate::browser_platform_class::to_u32(it, a[0])? as usize;
+    if d.computed_kind(this) == EMPTY {
+        return d.js_str(it, "");
+    }
     let Some(s) = d.snapshot(it, el)? else { return d.js_str(it, "") };
     it.charge((Property::COUNT + s.styles.custom_properties(&s.style).len()) as u64)?;
     d.js_str(it, names(&s).get(i).copied().unwrap_or(""))
@@ -876,7 +930,7 @@ fn item(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
 fn named_get(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let name = current(d, it)?;
     let el = d.computed_el(it, this)?;
-    let v = d.computed_value(it, el, name)?;
+    let v = d.computed_value(it, el, name, d.computed_kind(this))?;
     d.js_str(it, &v)
 }
 
@@ -934,6 +988,7 @@ pub(crate) fn trace(d: &Dom, owner: ObjId, out: &mut Vec<Value>) {
 
 pub(crate) fn prune(d: &Dom, live: &dyn Fn(ObjId) -> bool) {
     d.computed.objs.borrow_mut().retain(|&o, _| live(o));
+    d.computed.kinds.borrow_mut().retain(|&o, _| live(o));
 }
 
 // ------------------------------------------------------------------------------------------ Browser API

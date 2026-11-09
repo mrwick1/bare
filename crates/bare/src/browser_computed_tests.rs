@@ -148,13 +148,38 @@ fn brand_and_conversion_order() {
     assert!(tp(js(&mut b, "new CP.constructor()")));
 }
 
+const PSEUDO_PAGE: &str = "<!doctype html><html><head><style>#e { color: rgb(255, 0, 0); font-size: 20px; margin: 10px; width: 50px; border: 2px solid; display: block; position: relative; --x: 7 } #e::before { content: 'x'; color: blue }</style></head><body><div id=e>t</div></body></html>";
+
 #[test]
-fn pseudo_elements_are_gated() {
-    let mut b = at(PAGE);
-    let gate = "unsupported:getComputedStyle of a pseudo-element (the engine has no pseudo-element styles)";
-    assert_eq!(js(&mut b, "getComputedStyle(document.body, '::before')"), gate);
-    assert_eq!(js(&mut b, "getComputedStyle(document.body, ':after')"), gate);
-    assert_eq!(js(&mut b, "getComputedStyle(document.body, '::nope')"), gate);
+fn a_pseudo_element_has_the_inherited_values_of_its_element_and_the_initial_rest() {
+    let mut b = at(PSEUDO_PAGE);
+    js(&mut b, "var e = document.getElementById('e');");
+    for p in ["::before", "::after", ":before", ":after", "::first-line", ":first-line", "::first-letter", ":first-letter", "::marker", "::placeholder", "::selection", "::BEFORE", "::backdrop", "::-webkit-scrollbar"] {
+        let src = format!("var cs = getComputedStyle(e, '{p}'); [cs.getPropertyValue('content'), cs.display, cs.color, cs.fontSize, cs.marginTop, cs.width, cs.borderTopWidth, cs.position].join('|')");
+        assert_eq!(js(&mut b, &src), "normal|inline|rgb(255, 0, 0)|20px|0px|auto|0px|static", "{p}");
+    }
+    // The object is a computed declaration: shorthands, custom properties (they inherit), `length`, no writes.
+    js(&mut b, "var cs = getComputedStyle(e, '::after');");
+    assert_eq!(js(&mut b, "[cs.getPropertyValue('margin'), cs.getPropertyValue('content'), cs.getPropertyValue('--x'), cs.getPropertyValue('font-size'), cs.length === getComputedStyle(e).length, cs instanceof CSSStyleDeclaration].join('|')"), "0px|normal|7|20px|true|true");
+    assert_eq!(js(&mut b, "try { cs.color = 'red'; 'no' } catch (err) { err.name }"), "NoModificationAllowedError");
+    // Each read is live: no snapshot.
+    assert_eq!(js(&mut b, "e.style.color = 'rgb(0, 128, 0)'; e.style.fontSize = '30px'; cs.color + '|' + cs.fontSize"), "rgb(0, 128, 0)|30px");
+    // An element that is not rendered, or not connected, still gives a style or an empty declaration, and nothing throws.
+    assert_eq!(js(&mut b, "e.style.display = 'none'; getComputedStyle(e, '::before').display"), "inline");
+    assert_eq!(js(&mut b, "var d = document.createElement('div'); var c = getComputedStyle(d, '::before'); c.display + '|' + c.length"), "|0");
+}
+
+#[test]
+fn a_string_that_is_not_a_pseudo_element_gives_an_empty_declaration() {
+    let mut b = at(PSEUDO_PAGE);
+    js(&mut b, "var e = document.getElementById('e');");
+    // CSSOM: a string that starts with a colon and does not parse as a pseudo-element gives an empty read-only declaration.
+    for p in ["::nope", ":hover", "::before(", "::", ":", ":marker", "::before::after", "::before x"] {
+        let src = format!("var cs = getComputedStyle(e, '{p}'); [cs.display, cs.color, cs.length, cs.getPropertyValue('content')].join('|')");
+        assert_eq!(js(&mut b, &src), "||0|", "{p}");
+    }
+    // An argument that does not start with a colon is ignored, as before.
+    assert_eq!(js(&mut b, "getComputedStyle(e, 'before').display"), "block");
 }
 
 #[test]
