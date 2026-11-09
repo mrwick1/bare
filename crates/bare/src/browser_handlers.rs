@@ -152,15 +152,17 @@ pub(crate) struct Hd {
     pub in_error: bool,
 }
 
-/// `HTMLBodyElement` and `HTMLFrameSetElement` (prototype, constructor), and `ErrorEvent` (`browser_error_event.rs`), once made. All are roots.
+/// `HTMLBodyElement` and `HTMLFrameSetElement` (prototype, constructor), `ErrorEvent` (`browser_error_event.rs`) and
+/// `PromiseRejectionEvent` (`browser_rejection.rs`), once made. All are roots.
 #[derive(Default)]
 pub(crate) struct Hh {
     pub body: [Cell<Option<[ObjId; 2]>>; 2],
     pub err: Cell<Option<[ObjId; 2]>>,
+    pub rej: Cell<Option<[ObjId; 2]>>,
 }
 
 pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
-    for c in d.hh.body.iter().chain(std::iter::once(&d.hh.err)) {
+    for c in d.hh.body.iter().chain([&d.hh.err, &d.hh.rej]) {
         if let Some(o) = c.get() {
             out.extend(o.map(Value::Object));
         }

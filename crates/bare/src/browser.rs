@@ -713,6 +713,10 @@ impl Host for Dom {
         self.report(it, thrown, "microtask", Target::Window);
     }
 
+    fn promise_rejections(&self, it: &mut Interp<'_>, unhandled: &[Value], handled: &[Value], dropped: u32) -> R<()> {
+        crate::browser_rejection::notify(self, it, unhandled, handled, dropped)
+    }
+
     fn fill_indexed(&self, it: &mut Interp<'_>, owner: ObjId, index: u32) -> R<()> {
         if index == bare_js::heap::LAZY_TAG { return crate::browser_handlers::tags(self,it); }
         if index == crate::browser_frames::FILL { crate::browser_frames::fill(self, it, owner, index)?; return Ok(()); }
@@ -1224,6 +1228,7 @@ impl Dom {
         crate::browser_range::install(self, it)?;
         crate::browser_handlers::install(self, it)?;
         crate::browser_error_event::install(self, it)?;
+        crate::browser_rejection::install(self, it)?;
         crate::browser_perf_observer::install(self, it)?;
         crate::browser_select::install(self, it)?;
         // Last: a new host function earlier in this list moves the id of every one after it.

@@ -9,6 +9,9 @@ mod browser_fragment;
 mod browser_shadow;
 mod browser_events;
 mod browser_error_event;
+mod browser_rejection;
+#[cfg(test)]
+mod browser_rejection_tests;
 mod browser_handlers;
 #[cfg(test)]
 mod browser_handler_tests;

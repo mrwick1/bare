@@ -38,6 +38,13 @@ pub trait Host {
     /// A `queueMicrotask` callback threw `thrown`. Record it without running JavaScript that can fail
     /// (read data properties only). The queue goes on. The default drops the value.
     fn report_exception(&self, _it: &mut Interp<'_>, _thrown: Value) {}
+    /// The end of a microtask checkpoint (HTML "notify about rejected promises"). `unhandled`: promises rejected with no
+    /// handler that still have none, oldest first. `handled`: promises given here before that got a handler since. `dropped`:
+    /// rejections over the bound since the last call. JavaScript may run, as one host call with the budget of the checkpoint.
+    /// An error ends the checkpoint. The default does nothing.
+    fn promise_rejections(&self, _it: &mut Interp<'_>, _unhandled: &[Value], _handled: &[Value], _dropped: u32) -> Result<(), Error> {
+        Ok(())
+    }
     /// The heap asked for the property at `index` of the host-indexed object `owner` (`Heap::new_indexed`), and its object
     /// does not exist yet. Make it, so that `IndexedSource::indexed_item` answers `Slot::Ready` for it. The evaluator then
     /// repeats the operation. Return `Ok` also when the index is gone: the repeat then finds no property. The default

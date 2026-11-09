@@ -3834,6 +3834,10 @@ mod tests;
 mod promise_tests;
 
 #[cfg(test)]
+#[path = "eval_rejection_tests.rs"]
+mod rejection_tests;
+
+#[cfg(test)]
 #[path = "eval_promise_combinators_tests.rs"]
 mod promise_combinator_tests;
 
