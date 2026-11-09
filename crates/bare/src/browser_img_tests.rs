@@ -1,4 +1,4 @@
-//! Tests of `browser_img.rs` (`HTMLImageElement`, `Image`) and `browser_impl.rs` (`document.implementation`). The page that downloads the
+//! Tests of `browser_img.rs` (`Image`, `decode()`, the events). The page that downloads the
 //! pictures is not here: `crates/drive/tests/images.rs` runs the whole path. These tests call `img_requests` and `img_settled` as the page does.
 
 use crate::browser::*;
@@ -35,14 +35,14 @@ fn image_makes_a_detached_img() {
     assert_eq!(js(&mut b, "var j = new Image(); [j.hasAttribute('width'), j.width].join()"), "false,0");
     // An `<img>` of the page has the same interface.
     assert_eq!(js(&mut b, "var a = document.getElementById('a'); [a instanceof HTMLImageElement, a.width, a.alt, a.complete].join()"), "true,7,x,true");
-    assert!(js(&mut b, "new HTMLImageElement()").starts_with("throw:TypeError:Failed to construct 'HTMLImageElement'"));
+    assert!(js(&mut b, "new HTMLImageElement()").starts_with("throw:TypeError"));
     assert_eq!(js(&mut b, "typeof Image.prototype.decode"), "function");
 }
 
 #[test]
 fn src_is_reflected_and_asks_the_page() {
     let mut b = browser("");
-    assert_eq!(js(&mut b, "var i = new Image(); i.src = 'data:image/png;base64,AA=='; [i.complete, i.getAttribute('src'), i.src, i.currentSrc].join()"), "false,data:image/png;base64,AA==,data:image/png;base64,AA==,data:image/png;base64,AA==");
+    assert_eq!(js(&mut b, "var i = new Image(); i.src = 'http://x.test/a.png'; [i.complete, i.getAttribute('src'), i.src, i.currentSrc].join()"), "false,http://x.test/a.png,http://x.test/a.png,http://x.test/a.png");
     assert_eq!(b.img_requests().len(), 1);
     assert!(b.img_requests().is_empty());
     // `setAttribute` asks too; an empty value does not.
@@ -91,21 +91,4 @@ fn a_page_without_images_does_not_make_the_interface() {
     let mut b = browser("<p>x</p>");
     js(&mut b, "document.querySelector('p').textContent");
     assert!(b.dom.img.made.get().is_none());
-}
-
-#[test]
-fn create_html_document_makes_a_detached_document() {
-    let mut b = browser("<p id=p>page</p>");
-    let r = js(&mut b, "var d2 = document.implementation.createHTMLDocument('T'); [d2 === document, d2.nodeType, d2.head.firstChild.tagName + d2.head.firstChild.textContent, d2.documentElement.tagName, d2.head.tagName, d2.body.tagName, d2.doctype.nodeName, d2.documentElement.isConnected, d2.defaultView, d2.body.ownerDocument === d2, d2.documentElement.ownerDocument === d2].join()");
-    assert_eq!(r, "false,9,TITLET,HTML,HEAD,BODY,html,false,,true,true");
-    let r = js(&mut b, "d2.body.innerHTML = '<ul><li class=a>one</li><li>two</li></ul><script>window.ran = 1<\\/script>'; [d2.querySelectorAll('li').length, d2.querySelector('.a').textContent, d2.body.firstChild.tagName, typeof window.ran, document.getElementById('p') !== null, d2.getElementById('p'), document.querySelectorAll('li').length].join()");
-    assert_eq!(r, "2,one,UL,undefined,true,,0");
-    // No title argument: no `title` element.
-    assert_eq!(js(&mut b, "var d3 = document.implementation.createHTMLDocument(); [d3.head.childNodes.length, document.implementation === d3.implementation, document.implementation.hasFeature()].join()"), "0,true,true");
-    // The page title is not the title of the new document.
-    assert_eq!(js(&mut b, "document.implementation.createHTMLDocument('').head.childNodes.length"), "1");
-    // Nodes move into the page.
-    js(&mut b, "document.body.appendChild(d2.body.firstChild);");
-    assert_eq!(js(&mut b, "[document.querySelectorAll('li').length, document.body.lastChild.ownerDocument === document, document.body.lastChild.isConnected].join()"), "2,true,true");
-    assert!(js(&mut b, "document.implementation.createHTMLDocument.call({})").starts_with("throw:TypeError"));
 }

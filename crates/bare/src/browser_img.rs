@@ -1,7 +1,7 @@
 //! `HTMLImageElement` and the `Image` constructor.
 //!
-//! What is built: `src`, `srcset`, `alt`, `width`, `height` (the content attributes), `naturalWidth`, `naturalHeight`, `complete`, `currentSrc`,
-//! `onload`, `onerror`, `decode()` and `new Image(width, height)`. Every `<img>` wrapper has this prototype.
+//! `HTMLImageElement` itself is in `browser_elements.rs`. This file adds what loads pictures: `new Image(width, height)`, `decode()`, `onload`,
+//! `onerror` and the events.
 //!
 //! Loading is the code of `images.rs`. The page asks the document for the pictures once it has loaded, and a script can ask for more:
 //! the IDL setter `src`, `setAttribute('src', ...)` and `new Image()` + `src` push the element on a list (`requests`). `Page::images_step`
@@ -12,9 +12,7 @@
 //! Deviations from Chrome:
 //! - `complete` is true until a download starts, and true again when it ends (a failed picture too). Chrome says false for an `<img>` whose
 //!   `src` the parser has seen but whose request has not started; the page here starts the requests at `interactive`.
-//! - `width` and `height` give the content attribute (0 when missing or not a number), not the rendered size.
 //! - A picture that this engine cannot decode (GIF, AVIF, a file over the limits) fires `error`.
-//! - No `sizes`, `crossOrigin`, `loading`, `decoding`, `referrerPolicy`, `x`, `y`, `isMap`, `useMap`, `align`, and no `Image.prototype.fetchPriority`.
 //! - Only these attribute changes start a request: the `src` setter and `setAttribute('src')`. A `srcset` change does not.
 
 use crate::browser::*;
@@ -35,102 +33,48 @@ pub(crate) const FAILED: u8 = 201;
 /// Requests that wait for the page. More are dropped.
 const MAX_REQUESTS: usize = 4096;
 
-#[derive(Clone, Copy)]
-pub(crate) struct Made {
-    pub(crate) proto: ObjId,
-    /// `HTMLImageElement` and `Image`.
-    ctors: [ObjId; 2],
-}
-
 #[derive(Default)]
 pub(crate) struct Img {
-    pub(crate) made: Cell<Option<Made>>,
+    /// The `Image` constructor, made by the first read of the global.
+    pub(crate) made: Cell<Option<ObjId>>,
     /// Elements whose `src` was set by a script and that the page has not taken yet.
     requests: RefCell<Vec<NodeId>>,
     /// Elements with a download on the way (asked for, not settled), so `complete` is false.
-    pending: RefCell<std::collections::HashSet<NodeId>>,
+    pub(crate) pending: RefCell<std::collections::HashSet<NodeId>>,
     /// The promises of `decode()` for each element.
     decodes: RefCell<HashMap<NodeId, Vec<Value>>>,
 }
 
 pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
-    if let Some(m) = d.img.made.get() {
-        out.push(Value::Object(m.proto));
-        out.extend(m.ctors.into_iter().map(Value::Object));
-        out.extend(d.img.decodes.borrow().values().flatten());
+    out.extend(d.img.made.get().map(Value::Object));
+    out.extend(d.img.decodes.borrow().values().flatten());
+}
+
+fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+    if d.img.made.get().is_none() {
+        let proto = crate::browser_elements::proto(d, it, "img")?;
+        let f = d.add_fn(it, image_ctor, "Image", 0, true)?;
+        let kp = d.key(it, "prototype")?;
+        it.define_data(f, kp, Value::Object(proto), false, false, false)?;
+        d.img.made.set(Some(f));
     }
+    Ok(())
 }
 
-/// The prototype of the wrapper of an `<img>`.
-pub(crate) fn proto(d: &Dom, it: &mut Interp<'_>) -> R<ObjId> {
-    ensure(d, it).map(|m| m.proto)
-}
-
-fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<Made> {
-    match d.img.made.get() {
-        Some(m) => Ok(m),
-        None => make(d, it),
-    }
-}
-
-fn ens(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    ensure(d, it).map(|_| ())
-}
-
-fn pick_el(d: &Dom) -> ObjId {
-    d.img.made.get().expect("made").ctors[0]
-}
-
-fn pick_image(d: &Dom) -> ObjId {
-    d.img.made.get().expect("made").ctors[1]
-}
-
-lazy_global!(lazy_el, "HTMLImageElement", ens, pick_el);
-lazy_global!(lazy_image, "Image", ens, pick_image);
+lazy_global!(lazy_image, "Image", ensure, |d| d.img.made.get().expect("made"));
 
 pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    crate::browser_lazy::install(d, it, &[("HTMLImageElement", lazy_el as H), ("Image", lazy_image)])
+    crate::browser_lazy::install(d, it, &[("Image", lazy_image as H)])
 }
 
-fn illegal_ctor(_: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
-    Err(it.type_error("Failed to construct 'HTMLImageElement': Illegal constructor"))
-}
-
-#[cold]
-#[inline(never)]
-fn make(d: &Dom, it: &mut Interp<'_>) -> R<Made> {
-    let proto = d.obj(it, d.p().html)?;
-    let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
-    let el = d.add_fn(it, illegal_ctor, "HTMLImageElement", 0, true)?;
-    it.define_data(el, kp, Value::Object(proto), false, false, false)?;
-    crate::browser_lazy::tag(d, it, proto, "HTMLImageElement")?;
-    // `Image` has the prototype of `HTMLImageElement`.
-    let image = d.add_fn(it, image_ctor, "Image", 0, true)?;
-    it.define_data(image, kp, Value::Object(proto), false, false, false)?;
-    for (name, g, s) in [
-        ("src", src_get as H, Some(src_set as H)),
-        ("srcset", attr_get::<0>, Some(attr_set_::<0>)),
-        ("alt", attr_get::<1>, Some(attr_set_::<1>)),
-        ("currentSrc", src_get, None),
-        ("width", size::<0>, Some(set_size::<0>)),
-        ("height", size::<1>, Some(set_size::<1>)),
-        ("naturalWidth", natural::<0>, None),
-        ("naturalHeight", natural::<1>, None),
-        ("complete", complete, None),
-        ("onload", on_get::<0>, Some(on_set::<0>)),
-        ("onerror", on_get::<1>, Some(on_set::<1>)),
-    ] {
-        d.def_get(it, proto, name, g, s)?;
-    }
+/// The members of `HTMLImageElement.prototype` that load pictures (`browser_elements.rs` calls this when it makes the prototype).
+pub(crate) fn members(d: &Dom, it: &mut Interp<'_>, proto: ObjId) -> R<()> {
+    d.def_get(it, proto, "onload", on_get::<0>, Some(on_set::<0>))?;
+    d.def_get(it, proto, "onerror", on_get::<1>, Some(on_set::<1>))?;
     let (key, f) = (d.key(it, "decode")?, d.add_fn(it, decode, "decode", 0, false)?);
-    it.define_data(proto, key, Value::Object(f), true, true, true)?;
-    it.define_data(proto, kc, Value::Object(el), true, false, true)?;
-    let m = Made { proto, ctors: [el, image] };
-    d.img.made.set(Some(m));
-    Ok(m)
+    it.define_data(proto, key, Value::Object(f), true, true, true)
 }
 
-const ATTRS: [&str; 2] = ["srcset", "alt"];
 const EVENTS: [&str; 2] = ["load", "error"];
 
 /// The `<img>` that `this` wraps, else `Illegal invocation`.
@@ -142,60 +86,6 @@ fn img_el(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<NodeId> {
 fn attr_of(d: &Dom, n: NodeId, name: &str) -> Option<String> {
     let doc = d.doc.borrow();
     doc.find_atom(name).and_then(|a| doc.attr(n, a)).map(str::to_string)
-}
-
-fn src_get(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = img_el(d, it, this)?;
-    let s = attr_of(d, n, "src").map_or_else(String::new, |r| crate::browser_media::resolved(d, &r));
-    d.js_str(it, &s)
-}
-
-fn src_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let n = img_el(d, it, this)?;
-    let s = d.string_arg(it, arg(a, 0))?;
-    attr_set(d, it, n, "src", &s)?;
-    request(d, n);
-    Ok(Value::Undefined)
-}
-
-fn attr_get<const I: usize>(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = img_el(d, it, this)?;
-    let s = attr_of(d, n, ATTRS[I]).unwrap_or_default();
-    d.js_str(it, &s)
-}
-
-fn attr_set_<const I: usize>(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let n = img_el(d, it, this)?;
-    let s = d.string_arg(it, arg(a, 0))?;
-    attr_set(d, it, n, ATTRS[I], &s)?;
-    Ok(Value::Undefined)
-}
-
-/// `width` and `height`: the content attribute as an unsigned integer, else 0.
-fn size<const I: usize>(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = img_el(d, it, this)?;
-    let s = attr_of(d, n, ["width", "height"][I]).unwrap_or_default();
-    let t = s.trim_start_matches(|c: char| c.is_ascii_whitespace());
-    let digits = t.bytes().take_while(u8::is_ascii_digit).count();
-    Ok(Value::Number(t[..digits].parse::<u32>().ok().filter(|&v| v <= i32::MAX as u32).unwrap_or(0) as f64))
-}
-
-fn set_size<const I: usize>(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let n = img_el(d, it, this)?;
-    let v = bare_js::value::to_uint32(it.to_js_number(arg(a, 0))?);
-    attr_set(d, it, n, ["width", "height"][I], &(if v > i32::MAX as u32 { 0 } else { v }).to_string())?;
-    Ok(Value::Undefined)
-}
-
-fn natural<const I: usize>(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = img_el(d, it, this)?;
-    let doc = d.doc.borrow();
-    Ok(Value::Number(doc.image(n).map_or(0, |b| if I == 0 { b.0 } else { b.1 }) as f64))
-}
-
-fn complete(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = img_el(d, it, this)?;
-    Ok(Value::Bool(!d.img.pending.borrow().contains(&n)))
 }
 
 fn on_get<const N: usize>(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
@@ -258,7 +148,7 @@ fn image_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
 }
 
 /// A script set the `src` of `n`: the page loads the picture.
-fn request(d: &Dom, n: NodeId) {
+pub(crate) fn request(d: &Dom, n: NodeId) {
     let has = attr_of(d, n, "src").is_some_and(|s| !s.trim().is_empty());
     if !has {
         d.img.pending.borrow_mut().remove(&n);
@@ -273,7 +163,7 @@ fn request(d: &Dom, n: NodeId) {
 
 /// `setAttribute('src', ...)` on any element: an `<img>` loads the new picture.
 pub(crate) fn src_changed(d: &Dom, n: NodeId) {
-    if d.img.made.get().is_some() && d.doc.borrow().element_name(n) == "img" {
+    if d.doc.borrow().element_name(n) == "img" {
         request(d, n);
     }
 }
@@ -314,8 +204,6 @@ impl Browser {
 
     /// The page starts to load the picture of `n`: `complete` is false until `img_settled`.
     pub(crate) fn img_started(&self, n: NodeId) {
-        if self.dom.img.made.get().is_some() {
-            self.dom.img.pending.borrow_mut().insert(n);
-        }
+        self.dom.img.pending.borrow_mut().insert(n);
     }
 }

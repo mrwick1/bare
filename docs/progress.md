@@ -3875,28 +3875,26 @@ Goal: fix the gaps that real pages hit on passing pages of the survey (`/data/ba
 
 Cause: no `Image` constructor and no `HTMLImageElement`. `<img>` wrappers had the plain `HTMLElement` prototype, so `img.src`, `img.complete` and `img.naturalWidth` were all `undefined`.
 
-Change (`browser_img.rs`, `images.rs`):
-- `HTMLImageElement` and `Image` are lazy globals. Every `<img>` wrapper gets the prototype. Members: `src`, `srcset`, `alt`, `currentSrc`, `width`, `height`, `naturalWidth`, `naturalHeight`, `complete`, `onload`, `onerror`, `decode()`. `new Image(w, h)` makes a detached `img`.
+Change (`browser_img.rs`, `images.rs`): while this work ran, `wikipedia-js` merged its own `HTMLImageElement` (`browser_elements.rs`) and `document.implementation` (`browser_implementation.rs`). After the rebase I kept those and dropped my duplicates. This change adds only what they lack:
+- `Image` is a lazy global, and `new Image(w, h)` makes a detached `img`. `onload`, `onerror` and `decode()` go on the `HTMLImageElement` prototype. `complete` is false while a download is on the way.
 - `src` (the IDL setter and `setAttribute('src')`) pushes the element on a list in the document. `Page::images_step` takes the list and uses the loader of the `img` change (same queue, same 4 downloads, same budget, same `bare-image` decode). When the download ends the page calls `Browser::img_settled`. That queues one `Task::Media` task with step 200 or 201. The task settles the promises of `decode()` and fires `load` or `error` at the element. A tree `<img>` found by the scan fires the same events.
 - `Option` and `Audio` already existed. Nothing changed there.
 
-Tests: 7 unit tests (`browser_img_tests.rs`: the interface, `src` and the request list, events in a task, `decode()` for a loaded, failed and empty picture, no interface without an `<img>`). One drive test (`crates/drive/tests/images.rs`, fixture `tools/fixtures/img/ctor.html`): `new Image(5, 6)` loads `red.png` over loopback (`onload`, `naturalWidth` 20, `naturalHeight` 10, `decode()` fulfils) and a missing file fires `onerror` with `complete` true.
+Tests: 6 unit tests (`browser_img_tests.rs`: the interface, `src` and the request list, events in a task, `decode()` for a loaded, failed and empty picture, no `Image` before the first read). One drive test (`crates/drive/tests/images.rs`, fixture `tools/fixtures/img/ctor.html`): `new Image(5, 6)` loads `red.png` over loopback (`onload`, `naturalWidth` 20, `naturalHeight` 10, `decode()` fulfils) and a missing file fires `onerror` with `complete` true.
 
 Live: wiktionary.org and wikipedia.org no longer log `Image is not defined`. Their console has no entry other than the page-level `render:` line.
 
-Known gaps: `complete` is true for a tree `<img>` until the scan at `interactive` starts it. `width` and `height` read the attribute, not the rendered size. A GIF or AVIF fires `error`. A `srcset` change starts no request. `sizes`, `crossOrigin`, `loading` and `decoding` do not exist. An `<img>` that no script has touched and that has no `onload` attribute still gets a task (the task is cheap: one event).
+Known gaps: `complete` is true for a tree `<img>` until the scan at `interactive` starts it. A GIF or AVIF fires `error`. A `srcset` change starts no request. `crossOrigin` does not exist. An `<img>` that no script has touched and that has no `onload` attribute still gets a task (the task is cheap: one event).
 
 ### 2. `document.implementation.createHTMLDocument` (stackexchange, go.dev)
 
 Cause: `document.implementation` did not exist.
 
-Change (`browser_impl.rs`): `document.implementation` returns one `DOMImplementation` object with `createHTMLDocument(title)` and `hasFeature()`. The new document is a `Document` node in the arena of the page with no parent (the template document does the same). It holds a doctype, `html`, `head`, `title` (only when the argument is not `undefined`) and `body`. `body.innerHTML = ...`, `querySelector` and `getElementById` work on it, its nodes are not connected, and its scripts do not run. `ownerDocument` of its nodes gives it (a flag makes the walk cost nothing for a page that never made one). Nodes move into the page with `appendChild`.
+Change: none of mine. `wikipedia-js` merged the same feature first (`browser_implementation.rs`, commit `01c4bc3`). I dropped my copy at the rebase. Their version has no doctype, and `ownerDocument` of a node in the new document gives the page document (mine gave the new one). I measured the stackexchange and go.dev result before the rebase; I did not measure them again after it.
 
-Tests: `create_html_document_makes_a_detached_document` (parse, query, no script run, no title element without an argument, move into the page, `Illegal invocation`).
+Tests: theirs (`create_html_document_makes_a_detached_document_with_html_head_and_body`).
 
-Live: stackexchange.com and go.dev pass the `createHTMLDocument` call. They now stop at other errors (see "Noticed").
-
-Known gaps: `createElement` on the new document is the one of the page. `defaultView` is `null`; `URL` is the page URL. No `createDocument`, no `createDocumentType`, no global `DOMImplementation`.
+Known gaps: no doctype, no `defaultView`, no `createDocument`, no `createDocumentType`, no global `DOMImplementation`.
 
 ### 3. Non-ASCII `SyntaxError` (bbc.com, nextjs.org)
 
