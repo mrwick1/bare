@@ -5515,3 +5515,49 @@ Final gates, after the last rebase onto `f92cf5415a` (main with #321 and #322). 
 Checks. `cargo test --release --workspace`: 3,321 passed, 0 failed. `exec_diff`: 79 runs, 0 differences. `test262_check`: exit 0. `keycost.sh`: `#a1` 282.6 M for each key, `#f0` 287.9 M, RSS 33.1 MiB at 50 keys (same as the last run on main). `tools/drive/public/run.sh`: 48 pass, 0 fail, 0 known, 0 skip, 0 flakes. `tools/js/intl_check.sh` needs `target/` in the worktree; I ran the same comparison by hand with the example from the shared target dir: no difference.
 
 Not tested. A locale other than `en`, `en-US`, `en-CA`, `en-IN` and `en-GB`. Zones outside the table against ICU names. `timeZoneName` with a historic offset (the table's standard offset is today's). Pages that assign `document.domain` to a parent domain (they now continue; no origin change happens, as in Chrome). GitHub pages with the selector cap raised (scratch build only, one run).
+## Blob URLs, client hints and data modules (2026-11-10)
+
+The work started from origin/main 72c74d5fab and was rebased onto ff02f72b56 (#321). The cost baseline is ff02f72b56 from base-build.
+
+Problem: three site chains stopped on missing web APIs. openstreetmap.org: `window.URL.createObjectURL is not a function`. git-scm.com: `navigator.userAgentData.getHighEntropyValues is not a function`. old.reddit.com: three `TypeError: Failed to resolve module specifier "data:text/javascript,..."` errors (STICKY_CANARY, script loader, navigation polyfill).
+
+### Change
+
+- Blob URLs (W3C File API, Blob URL Store). `URL.createObjectURL(blob)` registers a Blob or File under `blob:ORIGIN/UUID` in a store of the document and returns the URL. `URL.revokeObjectURL(url)` removes it. A URL that is not in the store cannot be read. The store holds its Blobs alive and has at most 4,096 entries. The URL has an opaque origin (`blob:null/UUID`) when the document has no URL. The two functions are `#[cold]` and sit on `URL` as static methods.
+- Readers. `fetch` (a string or `URL` input) answers 200 with the Blob bytes and its type as `content-type`, with no network. An unknown or revoked URL rejects with `TypeError: Failed to fetch`. `XMLHttpRequest` reads the store at `send()` (GET only) and delivers the reply through the normal network queue, so the events keep their order and `responseType` works. A script element that a script gives a `blob:` `src` runs the Blob text and fires `load`, or `error` for an unknown URL. A module script with a `blob:` URL fires `error`.
+- Client hints (WICG UA Client Hints). `navigator.userAgentData.getHighEntropyValues(hints)` returns a Promise of an object with `brands`, `mobile` and `platform`, plus each known hint asked for: `architecture` "x86", `bitness` "64", `model` "", `platformVersion` "", `uaFullVersion`, `fullVersionList` (from the major version of the user agent string), `wow64` false and `formFactors` ["Desktop"]. Unknown hints add nothing. A non-iterable argument rejects with `TypeError`. `toJSON()` returns the three low entropy members. The module comment of `browser_web.rs` is updated.
+- Data modules (HTML Standard, resolve a module specifier). A static `import` or `import()` of a `data:` URL takes its text from the URL (percent-encoded or base64). The MIME type must be a JavaScript type. The module is cached by its URL text. Its own relative imports resolve against the document URL, not as a `TypeError` as in a browser. This was the cause of the old.reddit.com errors: the module loader resolved every specifier as an http or https URL.
+
+### Console errors before and after
+
+Step file: `timeout 30000`, `open URL`, `expect css="body" visible`, `shot s`. `bare-drive` of 72c74d5fab (before) and of this branch (after). Both pass the body step.
+
+| Site | Before | After |
+|---|---|---|
+| git-scm.com | 2 entries (`getHighEntropyValues is not a function`) | 0 |
+| old.reddit.com | 3 errors (data modules) | 0 |
+| openstreetmap.org | 5 entries: `createObjectURL is not a function`, `reading 'store'`, `maplibregl is not defined`, `L.OSM.Map is not a constructor` (2 entries) | 4 entries: `Worker is not defined`, `reading 'store'`, `L.OSM.Map is not a constructor` (2 entries) |
+
+### OpenStreetMap chain
+
+`createObjectURL` is called by the MapLibre bundle to make a worker script from a Blob. That call now works, and `maplibregl` is defined. The bundle then runs `new Worker(url)` while `application.js` loads (stack: `new ti`, `u`, `new pi`, `w` in script#2 at 237:31806). `Worker` does not exist, so `application.js` stops there. Everything after that statement never runs. That is the single cause of the three later errors: `OSM.i18n = new I18n.I18n` (at byte 1,499,258) is not reached, so the i18n script fails with `reading 'store'`; `L.OSM.Map = ...` (at byte 1,506,354) is not reached, so `L.OSM.Map is not a constructor`. The `deviceXDPI` error is gone since the `screen` global exists (#311). I did not add a `Worker`. A global `Worker` that throws `Unsupported` would also break pages that test for `Worker` and fall back. The gate stays a `ReferenceError`. OpenStreetMap needs `Worker` (a script from a blob URL, `postMessage`, a second realm) to go on.
+
+### Limits
+
+- `<img src="blob:...">` does not load. Pictures load in `images.rs`, on worker threads with no access to the store. `images.rs` belongs to other running work, so I did not change it.
+- `fetch(new Request(blobUrl))` is not read from the store (only a string or `URL` input is). A non-GET method in `fetch` init is not refused for a blob URL.
+- `responseURL` of an `XMLHttpRequest` to a blob URL is the document URL.
+- A blob script made by the parser (static `<script src="blob:...">`) cannot exist: no URL is made before scripts run.
+- `<script type=module src="data:...">` elements are still skipped when the parser sees them. Reddit also imports the same text, which now runs (`window.STICKY_CANARY` is `false`).
+- `MediaSource` is not supported by `createObjectURL`.
+
+### Checks
+
+- Tests first. Each of the four tests failed without its change (`getHighEntropyValues is not a function`, `URL.createObjectURL is not a function`, no blob read in XHR, the Reddit data modules) and pass with it: `user_agent_data_has_high_entropy_values_and_to_json`, `object_urls_are_made_read_by_fetch_and_revoked`, `an_xhr_reads_a_blob_url_without_the_network`, `a_dynamic_script_reads_a_blob_url_without_the_network` and `a_module_imports_and_dynamically_imports_data_urls`. The data-module test was written after its fix. An existing assertion `typeof URL.createObjectURL` changed from `undefined` to `function`.
+- `cargo test --release --workspace`: 3,315 passed, 0 failed, 13 ignored.
+- Cost matrix (805 rows) against ff02f72b56, after the final rebase. The first run had one row over under both allocators: `examples/fetch_load bytes 10` (+0.747% glibc, +0.520% jemalloc). A direct `instr.sh` A/B (minimum of three runs) shows no change: 33,756,788 instructions on the base and 33,755,572 on this branch. The row varies by up to 0.6% between runs because it reads from a local server on threads. Two further full runs (one with jemalloc on every row) have no row over +0.5% under both allocators. The last run: mean glibc +0.000%, jemalloc +0.003%; 3 rows over under one allocator only (`preload_load dups 1`, `resources_load large 1`, `resources_load small 1`); 0 failed. I made no structural fix, because no row stayed over.
+- `tools/drive/public/run.sh`: 48 pass, 0 fail, 0 known, 0 skip, 0 flakes.
+
+### Not tested
+
+`tools/js/exec_diff.sh` and `tools/js/typing/keycost.sh` (no change in `crates/js` or the DOM hot path). Test262. Live sites other than the three above. Chrome behavior for the same pages. A blob URL made in one document and read in another.
