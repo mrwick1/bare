@@ -255,6 +255,17 @@ impl Certificate<'_> {
 
 /// Parse one DER certificate. `der` must be exactly one certificate with no extra bytes.
 pub fn parse(der: &[u8]) -> Result<Certificate<'_>> {
+    parse_with(der, false)
+}
+
+/// Parse a trust anchor from the system store. Real roots break two DER rules that `parse`
+/// enforces: serial number 0 (Go Daddy, Starfield, SECOM) and a GeneralizedTime before 2050
+/// (Certum). The signature on a self-signed root proves nothing, so the lax rules widen no trust.
+pub fn parse_anchor(der: &[u8]) -> Result<Certificate<'_>> {
+    parse_with(der, true)
+}
+
+fn parse_with(der: &[u8], anchor: bool) -> Result<Certificate<'_>> {
     if der.len() > MAX_CERT_LEN {
         return Err(Error::TooLarge);
     }
@@ -287,7 +298,7 @@ pub fn parse(der: &[u8]) -> Result<Certificate<'_>> {
     };
     let serial_tlv = t.read_tag(der::INTEGER)?;
     let serial = der::unsigned(serial_tlv.content).map_err(|_| Error::Serial)?;
-    if serial == [0] || serial_tlv.content.len() > 20 {
+    if (serial == [0] && !anchor) || serial_tlv.content.len() > 20 {
         return Err(Error::Serial);
     }
     let inner = t.read_tag(der::SEQUENCE)?;
@@ -304,8 +315,8 @@ pub fn parse(der: &[u8]) -> Result<Certificate<'_>> {
         return Err(Error::Name);
     }
     let mut v = Reader::new(t.read_tag(der::SEQUENCE)?.content);
-    let not_before = time(v.read()?)?;
-    let not_after = time(v.read()?)?;
+    let not_before = time(v.read()?, anchor)?;
+    let not_after = time(v.read()?, anchor)?;
     v.finish()?;
     let subject = t.read_tag(der::SEQUENCE)?;
     check_name(subject)?;
@@ -397,7 +408,7 @@ fn check_name(name: Tlv<'_>) -> Result<()> {
 
 /// RFC 5280 4.1.2.5: UTCTime `YYMMDDHHMMSSZ` for 1950-2049, GeneralizedTime
 /// `YYYYMMDDHHMMSSZ` from 2050. No fractions, no offsets, seconds required, no leap second.
-fn time(t: Tlv<'_>) -> Result<Time> {
+fn time(t: Tlv<'_>, lax: bool) -> Result<Time> {
     let c = t.content;
     let (year, rest) = match (t.tag, c.len()) {
         (der::UTC_TIME, 13) => {
@@ -406,7 +417,7 @@ fn time(t: Tlv<'_>) -> Result<Time> {
         }
         (der::GENERALIZED_TIME, 15) => {
             let y = num(&c[0..4])? as i64;
-            if y < 2050 {
+            if y < 2050 && !lax {
                 return Err(Error::Time);
             }
             (y, &c[4..])
@@ -881,7 +892,7 @@ mod tests {
 
     fn tm(tag: u8, s: &str) -> Result<i64> {
         let b = tlv(tag, s.as_bytes());
-        time(Reader::new(&b).read().unwrap()).map(|t| t.0)
+        time(Reader::new(&b).read().unwrap(), false).map(|t| t.0)
     }
 
     #[test]

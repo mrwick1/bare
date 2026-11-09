@@ -5,9 +5,9 @@
 //! - version TLS 1.3 only (`supported_versions` = 0x0304; legacy_version 0x0303);
 //! - cipher suite `TLS_AES_128_GCM_SHA256` (0x1301);
 //! - group X25519 (0x001d) with one key share;
-//! - `signature_algorithms` = `ecdsa_secp256r1_sha256` (0x0403), `rsa_pss_rsae_sha256` (0x0804)
-//!   and `rsa_pss_rsae_sha384` (0x0805). This limits only the server's `CertificateVerify`
-//!   (staging uses P-256; RSA leaf keys of 2048 to 4096 bits use the PSS schemes);
+//! - `signature_algorithms` = `ecdsa_secp256r1_sha256` (0x0403), `ecdsa_secp384r1_sha384` (0x0503),
+//!   `rsa_pss_rsae_sha256` (0x0804) and `rsa_pss_rsae_sha384` (0x0805). This limits only the server's
+//!   `CertificateVerify` (P-256 and P-384 leaf keys use ECDSA; RSA leaf keys of 2048 to 4096 bits use the PSS schemes);
 //! - `signature_algorithms_cert` = 0x0403, `ecdsa_secp384r1_sha384` (0x0503),
 //!   `rsa_pkcs1_sha256` (0x0401) and `rsa_pkcs1_sha384` (0x0501). This limits only signatures
 //!   inside certificates. The staging chain is signed with P-384/SHA-384; public RSA chains are
@@ -47,7 +47,7 @@ pub const RSA_PKCS1_SHA384: u16 = 0x0501;
 pub const MAX_SESSION_ID_LEN: usize = 32;
 pub const MAX_SERVER_NAME_LEN: usize = 253;
 /// Size of the longest ClientHello we can write (32-byte session ID, 253-byte name).
-pub const MAX_CLIENT_HELLO_LEN: usize = 442;
+pub const MAX_CLIENT_HELLO_LEN: usize = 444;
 
 /// SHA-256("HelloRetryRequest"). A ServerHello with this random is a HelloRetryRequest.
 pub const HELLO_RETRY_REQUEST_RANDOM: [u8; 32] = [
@@ -271,8 +271,9 @@ pub fn encode_client_hello(p: &ClientHelloParams, out: &mut [u8]) -> Result<usiz
         w.u16(GROUP_X25519)
     })?;
     w.ext(EXT_SIGNATURE_ALGORITHMS, |w| {
-        w.u16(6)?;
+        w.u16(8)?;
         w.u16(ECDSA_SECP256R1_SHA256)?;
+        w.u16(ECDSA_SECP384R1_SHA384)?;
         w.u16(RSA_PSS_RSAE_SHA256)?;
         w.u16(RSA_PSS_RSAE_SHA384)
     })?;
@@ -431,8 +432,8 @@ mod tests {
     }
 
     // Expected bytes were built by an independent Python script (struct packing, no TLS library).
-    const CH_FULL: &str = "010000c103031111111111111111111111111111111111111111111111111111111111111111202222222222222222222222222222222222222222222222222222222222222222000213010100007600000010000e00000b6578616d706c652e636f6d000a00040002001d000d000800060403080408050032000a00080403050304010501002b0003020304003300260024001d002033333333333333333333333333333333333333333333333333333333333333330010000b000908687474702f312e31";
-    const CH_NOSID: &str = "010000970303444444444444444444444444444444444444444444444444444444444444444400000213010100006c00000006000400000161000a00040002001d000d000800060403080408050032000a00080403050304010501002b0003020304003300260024001d002055555555555555555555555555555555555555555555555555555555555555550010000b000908687474702f312e31";
+    const CH_FULL: &str = "010000c303031111111111111111111111111111111111111111111111111111111111111111202222222222222222222222222222222222222222222222222222222222222222000213010100007800000010000e00000b6578616d706c652e636f6d000a00040002001d000d000a000804030503080408050032000a00080403050304010501002b0003020304003300260024001d002033333333333333333333333333333333333333333333333333333333333333330010000b000908687474702f312e31";
+    const CH_NOSID: &str = "010000990303444444444444444444444444444444444444444444444444444444444444444400000213010100006e00000006000400000161000a00040002001d000d000a000804030503080408050032000a00080403050304010501002b0003020304003300260024001d002055555555555555555555555555555555555555555555555555555555555555550010000b000908687474702f312e31";
     // RFC 8448 §3 ServerHello (empty session ID in that trace).
     const RFC8448_SH: &str = "020000560303a6af06a4121860dc5e6e60249cd34c95930c8ac5cb1434dac155772ed3e2692800130100002e00330024001d0020c9828876112095fe66762bdbf7c672e156d6cc253b833df1dd69b1b04e751f0f002b00020304";
     const RFC8448_SERVER_PUB: &str = "c9828876112095fe66762bdbf7c672e156d6cc253b833df1dd69b1b04e751f0f";
@@ -467,11 +468,11 @@ mod tests {
 
     #[test]
     fn client_hello_signature_algorithms_are_split() {
-        // signature_algorithms (13) holds 0x0403, 0x0804 and 0x0805. The cert list (50) holds
+        // signature_algorithms (13) holds 0x0403, 0x0503, 0x0804 and 0x0805. The cert list (50) holds
         // 0x0403, 0x0503, 0x0401 and 0x0501.
         let m = enc(1, b"", 2, b"x.test").unwrap();
         let h = hex(&m);
-        assert!(h.contains("000d00080006040308040805"));
+        assert!(h.contains("000d000a00080403050308040805"));
         assert!(h.contains("0032000a00080403050304010501"));
     }
 

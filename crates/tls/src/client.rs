@@ -455,6 +455,8 @@ fn parse_certificate<'a>(body: &'a [u8], chain: &mut [&'a [u8]; MAX_CHAIN]) -> R
 enum LeafKey {
     /// `04 || X || Y`.
     P256([u8; 65]),
+    /// `04 || X || Y`.
+    P384([u8; 97]),
     /// Modulus bytes (`n[..len]`, no leading zero) and exponent.
     Rsa { n: [u8; rsa::MAX_BITS / 8], len: usize, e: u32 },
 }
@@ -463,23 +465,24 @@ fn leaf_key(der: &[u8]) -> Result<LeafKey, Error> {
     let cert = x509::parse(der).map_err(|_| Error::Certificate("leaf does not parse".into()))?;
     match cert.public_key {
         x509::PublicKey::Ec { curve: x509::Curve::P256, point } if point.len() == 65 => Ok(LeafKey::P256(point.try_into().unwrap())),
+        x509::PublicKey::Ec { curve: x509::Curve::P384, point } if point.len() == 97 => Ok(LeafKey::P384(point.try_into().unwrap())),
         x509::PublicKey::Rsa(k) => {
             let mut n = [0u8; rsa::MAX_BITS / 8];
             let len = k.modulus().len();
             n[..len].copy_from_slice(k.modulus());
             Ok(LeafKey::Rsa { n, len, e: k.exponent() })
         }
-        _ => Err(Error::Certificate("leaf key is not P-256 or RSA".into())),
+        _ => Err(Error::Certificate("leaf key is not P-256, P-384 or RSA".into())),
     }
 }
 
-/// CertificateVerify (section 4.4.3): scheme 0x0403 (P-256 leaf key) or 0x0804 and 0x0805
+/// CertificateVerify (section 4.4.3): scheme 0x0403 (P-256 leaf key), 0x0503 (P-384 leaf key) or 0x0804 and 0x0805
 /// (RSA leaf key) over the server context and the hash of the transcript up to and including
 /// Certificate.
 fn verify_certificate_verify(body: &[u8], key: &LeafKey, transcript_hash: &[u8; 32]) -> Result<(), Error> {
     let mut r = R(body);
     let scheme = r.u16()? as u16;
-    if !matches!(scheme, hello::ECDSA_SECP256R1_SHA256 | hello::RSA_PSS_RSAE_SHA256 | hello::RSA_PSS_RSAE_SHA384) {
+    if !matches!(scheme, hello::ECDSA_SECP256R1_SHA256 | hello::ECDSA_SECP384R1_SHA384 | hello::RSA_PSS_RSAE_SHA256 | hello::RSA_PSS_RSAE_SHA384) {
         return Err(Error::Illegal("CertificateVerify scheme was not offered"));
     }
     let sig = r.vec16()?;
@@ -496,7 +499,14 @@ fn verify_certificate_verify(body: &[u8], key: &LeafKey, transcript_hash: &[u8; 
             rs[64 - es.s.len()..].copy_from_slice(es.s);
             ecc::verify(ecc::Curve::P256, point, &sha256(&signed), &rs).map_err(|_| Error::BadSignature)
         }
-        LeafKey::Rsa { n, len, e } if scheme != hello::ECDSA_SECP256R1_SHA256 => {
+        LeafKey::P384(point) if scheme == hello::ECDSA_SECP384R1_SHA384 => {
+            let es = x509::EcdsaSig::parse(sig, x509::Curve::P384).map_err(|_| Error::BadSignature)?;
+            let mut rs = [0u8; 96];
+            rs[48 - es.r.len()..48].copy_from_slice(es.r);
+            rs[96 - es.s.len()..].copy_from_slice(es.s);
+            ecc::verify(ecc::Curve::P384, point, &sha384(&signed), &rs).map_err(|_| Error::BadSignature)
+        }
+        LeafKey::Rsa { n, len, e } if matches!(scheme, hello::RSA_PSS_RSAE_SHA256 | hello::RSA_PSS_RSAE_SHA384) => {
             let k = rsa::PublicKey::new(&n[..*len], &e.to_be_bytes()).ok_or(Error::BadSignature)?;
             if scheme == hello::RSA_PSS_RSAE_SHA256 {
                 k.verify_pss(rsa::Hash::Sha256, &sha256(&signed), sig)
@@ -1022,7 +1032,14 @@ mod tests {
                     verify_certificate_verify(&ec, &leaf, &th),
                     Err(Error::Illegal("CertificateVerify scheme does not fit the leaf key"))
                 );
-                for bad in [[4u8, 1], [5, 1], [8, 9], [8, 4 + 4], [5, 3]] {
+            // 0x0503 is offered, but an RSA key does not fit it.
+            let mut m = body.clone();
+            m[..2].copy_from_slice(&[5, 3]);
+            assert_eq!(
+                verify_certificate_verify(&m, &leaf, &th),
+                Err(Error::Illegal("CertificateVerify scheme does not fit the leaf key"))
+            );
+                for bad in [[4u8, 1], [5, 1], [8, 9], [8, 4 + 4]] {
                     let mut m = body.clone();
                     m[..2].copy_from_slice(&bad);
                     assert_eq!(
@@ -1038,6 +1055,42 @@ mod tests {
         assert_eq!(
             verify_certificate_verify(&body, &p256, &th),
             Err(Error::Illegal("CertificateVerify scheme does not fit the leaf key"))
+        );
+    }
+
+    /// A P-384 leaf key with scheme 0x0503 (openssl vectors, tools/fixtures/verify).
+    #[test]
+    fn p384_certificate_verify() {
+        const PACK: &str = include_str!("../../../tools/fixtures/verify/pack.pem");
+        const CV: &str = include_str!("../../../tools/fixtures/verify/cv.txt");
+        let pem = PACK.split("# case: ok-leaf-p384|").nth(1).unwrap();
+        let ts = crate::trust_store::decode_pem(pem.split("\n# ").next().unwrap().split_once('\n').unwrap().1.as_bytes()).unwrap();
+        let leaf = leaf_key(ts.get(0).unwrap()).unwrap();
+        assert!(matches!(leaf, LeafKey::P384(_)));
+        let sig = |v: &str| unhex(CV.lines().find(|l| l.starts_with(&format!("ok-leaf-p384|{v}|"))).unwrap().rsplit('|').next().unwrap());
+        let body = |scheme: [u8; 2], v: &str| {
+            let s = sig(v);
+            let mut b = scheme.to_vec();
+            b.extend_from_slice(&(s.len() as u16).to_be_bytes());
+            b.extend_from_slice(&s);
+            b
+        };
+        let th = sha256(b"bare transcript");
+        assert_eq!(verify_certificate_verify(&body([5, 3], "sha384"), &leaf, &th), Ok(()));
+        // SHA-256 over the content, another transcript, a flipped bit.
+        assert_eq!(verify_certificate_verify(&body([5, 3], "ok"), &leaf, &th), Err(Error::BadSignature));
+        assert_eq!(verify_certificate_verify(&body([5, 3], "sha384"), &leaf, &sha256(b"x")), Err(Error::BadSignature));
+        let mut m = body([5, 3], "sha384");
+        m[12] ^= 1;
+        assert!(verify_certificate_verify(&m, &leaf, &th).is_err());
+        // A P-256 scheme does not fit a P-384 key. 0x0501 is not offered.
+        assert_eq!(
+            verify_certificate_verify(&body([4, 3], "sha384"), &leaf, &th),
+            Err(Error::Illegal("CertificateVerify scheme does not fit the leaf key"))
+        );
+        assert_eq!(
+            verify_certificate_verify(&body([5, 1], "sha384"), &leaf, &th),
+            Err(Error::Illegal("CertificateVerify scheme was not offered"))
         );
     }
 
@@ -1342,7 +1395,8 @@ mod tests {
             (certificate_verify(0x0403, &[]), Error::BadSignature, 51),
             (certificate_verify(0x0804, CV_ALPN), Error::Illegal("CertificateVerify scheme does not fit the leaf key"), 47),
             (certificate_verify(0x0805, CV_ALPN), Error::Illegal("CertificateVerify scheme does not fit the leaf key"), 47),
-            (certificate_verify(0x0503, CV_ALPN), Error::Illegal("CertificateVerify scheme was not offered"), 47),
+            (certificate_verify(0x0501, CV_ALPN), Error::Illegal("CertificateVerify scheme was not offered"), 47),
+            (certificate_verify(0x0503, CV_ALPN), Error::Illegal("CertificateVerify scheme does not fit the leaf key"), 47),
         ];
         for (cv, want, alert) in cases {
             let mut s = Srv::new();

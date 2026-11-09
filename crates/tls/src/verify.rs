@@ -290,7 +290,7 @@ impl<'a> Search<'a, '_> {
             if subject_of(der) != Some(cur.issuer) {
                 continue;
             }
-            if let Ok(a) = x509::parse(der)
+            if let Ok(a) = x509::parse_anchor(der)
                 && self.link(cur, &a, depth)
             {
                 return Some(depth + 2);
@@ -370,8 +370,8 @@ fn certificate_verify_content(transcript_hash: &[u8; 32]) -> [u8; 130] {
 }
 
 /// Check the server's CertificateVerify. `scheme` is the 16-bit SignatureScheme from the
-/// message. Three pass, the ones the ClientHello offers: 0x0403 (ecdsa_secp256r1_sha256, P-256
-/// leaf key, `sig` is a DER ECDSA signature), 0x0804 and 0x0805 (rsa_pss_rsae_sha256 and
+/// message. Four pass, the ones the ClientHello offers: 0x0403 (ecdsa_secp256r1_sha256, P-256
+/// leaf key, `sig` is a DER ECDSA signature), 0x0503 (ecdsa_secp384r1_sha384, P-384 leaf key), 0x0804 and 0x0805 (rsa_pss_rsae_sha256 and
 /// sha384, RSA leaf key, `sig` is the raw RSA signature).
 /// `transcript_hash` is SHA-256 over the handshake up to, not including, CertificateVerify.
 pub fn verify_certificate_verify(
@@ -385,13 +385,16 @@ pub fn verify_certificate_verify(
         (SIG_ECDSA_SECP256R1_SHA256, PublicKey::Ec { curve: x509::Curve::P256, point }) => {
             verify_ecdsa_der(x509::Curve::P256, point, &sha256(&content), sig)
         }
+        (hello::ECDSA_SECP384R1_SHA384, PublicKey::Ec { curve: x509::Curve::P384, point }) => {
+            verify_ecdsa_der(x509::Curve::P384, point, &sha384(&content), sig)
+        }
         (hello::RSA_PSS_RSAE_SHA256, PublicKey::Rsa(k)) => {
             k.verify_pss(rsa::Hash::Sha256, &sha256(&content), sig).map_err(|_| Error::BadSignature)
         }
         (hello::RSA_PSS_RSAE_SHA384, PublicKey::Rsa(k)) => {
             k.verify_pss(rsa::Hash::Sha384, &sha384(&content), sig).map_err(|_| Error::BadSignature)
         }
-        (SIG_ECDSA_SECP256R1_SHA256 | hello::RSA_PSS_RSAE_SHA256 | hello::RSA_PSS_RSAE_SHA384, _) => {
+        (SIG_ECDSA_SECP256R1_SHA256 | hello::ECDSA_SECP384R1_SHA384 | hello::RSA_PSS_RSAE_SHA256 | hello::RSA_PSS_RSAE_SHA384, _) => {
             Err(Error::SchemeKeyMismatch)
         }
         _ => Err(Error::UnsupportedScheme),
@@ -736,11 +739,11 @@ mod tests {
         // Another transcript with the good signature.
         assert!(verify_certificate_verify(&p, s, &th(b"other transcript"), &cv("ok", "ok")).is_err());
         // Unoffered schemes, even with the right signature bytes.
-        for bad in [0x0503, 0x0401, 0x0807, 0x0000, 0x0403 ^ 0x0100] {
+        for bad in [0x0401, 0x0807, 0x0000, 0x0603] {
             assert_eq!(verify_certificate_verify(&p, bad, &h, &cv("ok", "ok")), Err(Error::UnsupportedScheme));
         }
-        // Offered RSA-PSS schemes need an RSA leaf key.
-        for rsa_scheme in [0x0804, 0x0805] {
+        // Offered RSA-PSS schemes and the P-384 scheme need their key type.
+        for rsa_scheme in [0x0804, 0x0805, 0x0503] {
             assert_eq!(verify_certificate_verify(&p, rsa_scheme, &h, &cv("ok", "ok")), Err(Error::SchemeKeyMismatch));
         }
         // Malformed signatures.
@@ -803,9 +806,25 @@ mod tests {
                 Err(Error::SchemeKeyMismatch)
             );
         }
+        // 0x0503 is offered: SHA-384 over the content passes. SHA-256 over it, another
+        // transcript and a flipped bit fail. 0x0503 needs a P-384 key, 0x0401 is not offered.
+        assert_eq!(verify_certificate_verify(&p, 0x0503, &h, &cv("ok-leaf-p384", "sha384")), Ok(()));
+        for v in ["ok", "client-ctx", "no-pad", "no-zero", "other-hash"] {
+            assert_eq!(verify_certificate_verify(&p, 0x0503, &h, &cv("ok-leaf-p384", v)), Err(Error::BadSignature), "{v}");
+        }
         assert_eq!(
-            verify_certificate_verify(&p, 0x0503, &h, &cv("ok-leaf-p384", "sha384")),
-            Err(Error::UnsupportedScheme)
+            verify_certificate_verify(&p, 0x0503, &th(b"other transcript"), &cv("ok-leaf-p384", "sha384")),
+            Err(Error::BadSignature)
+        );
+        let mut flipped = cv("ok-leaf-p384", "sha384");
+        flipped[10] ^= 1;
+        assert!(verify_certificate_verify(&p, 0x0503, &h, &flipped).is_err());
+        assert_eq!(verify_certificate_verify(&p, 0x0401, &h, &cv("ok-leaf-p384", "sha384")), Err(Error::UnsupportedScheme));
+        let ok_case = case("ok");
+        let p256 = run(&ok_case.chain, &store("root"), "test.example", NOW).unwrap();
+        assert_eq!(
+            verify_certificate_verify(&p256, 0x0503, &h, &cv("ok-leaf-p384", "sha384")),
+            Err(Error::SchemeKeyMismatch)
         );
         // A signature made with another leaf key over the same content fails.
         let c2 = case("ok");
@@ -814,6 +833,46 @@ mod tests {
             verify_certificate_verify(&p2, 0x0403, &h, &cv("ok-leaf-p384", "ok")),
             Err(Error::BadSignature)
         );
+    }
+
+    /// Roots as real stores hold them: serial 0 and a GeneralizedTime before 2050 (the strict
+    /// parser rejects both). The server also sends a copy of the root cross-signed by a root
+    /// the store lacks, in the wrong order (the archive.org shape).
+    #[test]
+    fn anchors_with_real_world_quirks() {
+        const A: &str = include_str!("../../../tools/fixtures/anchors/pack.pem");
+        let blocks: Vec<(&str, &str)> = A
+            .split("\n# ")
+            .map(|b| b.trim_start_matches("# "))
+            .map(|b| b.split_once('\n').unwrap())
+            .collect();
+        let get = |kind: &str, name: &str| {
+            let (h, pem) = blocks.iter().find(|(h, _)| h.strip_prefix(kind).is_some_and(|r| r.split('|').next() == Some(name))).unwrap();
+            (h.split('|').collect::<Vec<_>>(), decode_pem(pem.as_bytes()).unwrap())
+        };
+        let verify = |name: &str| {
+            let (h, chain) = get("case: ", name);
+            let (_, st) = get("store: ", h[4]);
+            let refs: Vec<&[u8]> = chain.iter().collect();
+            let r = verify_server_chain(&refs, &st, h[1], h[3].parse().unwrap());
+            (h[2], label(&r), r.ok().map(|p| p.path_certs()))
+        };
+        for name in ["ok-zero", "ok-gentime", "ok-cross"] {
+            assert_eq!(verify(name).1, "ok", "{name}");
+        }
+        // The root is the third path certificate in the cross-signed case: leaf, inter, root.
+        assert_eq!(verify("ok-cross").2, Some(3));
+        for name in ["bad-inter-zero", "bad-untrusted", "bad-untrusted-root"] {
+            let (expect, got, _) = verify(name);
+            assert_eq!(got, expect, "{name}");
+        }
+        // The strict parser still rejects both quirks. Only the anchor parser accepts them.
+        for store in ["zero", "gentime"] {
+            let (_, st) = get("store: ", store);
+            let der = st.get(0).unwrap();
+            assert!(x509::parse(der).is_err(), "{store}");
+            assert!(x509::parse_anchor(der).is_ok(), "{store}");
+        }
     }
 
     #[test]

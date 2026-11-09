@@ -3628,3 +3628,47 @@ After #280 (RSA) the four skipped journeys run. `tools/drive/public/run.sh BINAR
 Result, 3 full runs one after another: 11 pass, 0 fail, 0 skip, 0 flakes each time. Times: example 0.09 s, Hacker News 1.2 to 1.6 s, Wikipedia 0.6 to 1.1 s, MDN 2.6 s (37 requests), nextjs.org 1.0 to 1.4 s (38 requests, 36 MiB peak RSS), react.dev 0.3 s. Peak RSS is 13 to 36 MiB.
 
 Not tested: arjun-e16, the window, a repeat past 3, journeys that need a login, and pages that the journeys do not open.
+
+## TLS: P-384 CertificateVerify and system roots with quirks (2026-11-09)
+
+Two public sites failed in TLS on main `46eab19`. Both are fixed.
+
+### lite.cnn.com: `UnexpectedRecord(23)`
+
+Cause (verified): `openssl s_client -tls1_3` shows `Peer signature type: ecdsa_secp384r1_sha384` and a 384-bit key. The ClientHello offered 0x0403, 0x0804 and 0x0805 in `signature_algorithms`. The server signed with 0x0503 anyway and the connection broke. The client had no P-384 CertificateVerify code.
+
+Fix: offer 0x0503 in `signature_algorithms` (`hello.rs`, the ClientHello grows by 2 bytes, `MAX_CLIENT_HELLO_LEN` 442 to 444). `client.rs` takes a P-384 leaf key (97 bytes) and checks 0x0503 with SHA-384 over the signed content, using the P-384 verifier of `ecc.rs`. `verify.rs` has the same rule for `verify_certificate_verify`. The scheme must be one that was offered and must fit the key: 0x0503 needs P-384, 0x0403 needs P-256, 0x0804 and 0x0805 need RSA. The transcript hash stays SHA-256 (the cipher suite hash). No new dependency.
+
+### archive.org: `NoIssuer`
+
+Cause (verified with a scratch run of `verify_server_chain` on the chain from `openssl s_client -showcerts` and the system store, then a debug print of each link): the chain was fine. The server sends leaf, "Go Daddy Secure Certificate Authority - G2", the G2 root (cross-signed by Go Daddy Class 2) and the Class 2 root. The system store holds the self-signed G2 root. But `x509::parse` failed on that store root, so `find()` skipped it with no error. The path then went through the cross-signed copy to the Class 2 root, which the Arch bundle does not hold, and ended in `NoIssuer`.
+
+Why the parse failed: seven of the 121 roots in `/etc/ssl/certs/ca-certificates.crt` did not parse. Six have serial number 0 (Go Daddy G2, Starfield Root G2, Starfield Services Root G2, SECOM RootCA2, two Hellenic Academic roots). One (Certum Trusted Network CA 2) has a notAfter of 2046 written as GeneralizedTime. The strict parser rejects both (RFC 5280 wants a positive serial and UTCTime before 2050). The root-store parse used the same strict rules. So these seven roots were never usable anchors. Any site that chains to one of them failed.
+
+Fix: `x509::parse_anchor` (used only for the store scan in `verify.rs::find`) accepts serial 0 and GeneralizedTime before 2050. `x509::parse` stays strict for the leaf and every certificate that a server sends. A presented root is still never trusted, and the link checks are unchanged (name, key id, validity, CA bit, pathlen, key usage, signature). The signature on a self-signed root proves nothing, so the lax rules add no trust.
+
+The chain builder already worked from any presented certificate in any order, so it needed no change. The tests cover the order and a cross-signed copy.
+
+### Tests (I wrote the code and the tests in one pass; the old code fails the archive.org case, as the scratch run showed)
+
+- `tools/fixtures/anchors/gen.py` writes `pack.pem` with openssl: a serial-0 root, a root with a GeneralizedTime notAfter of 2046 (the script rewrites the time and signs again), a cross-signed copy of the root by an unknown root, and chains. Test `anchors_with_real_world_quirks`: `ok-zero`, `ok-gentime`, `ok-cross` (order: leaf, cross copy, intermediate, unknown root) pass; `bad-inter-zero` (a serial-0 intermediate in the chain), `bad-untrusted` (store without the root) and `bad-untrusted-root` (a presented root that the store lacks) give `NoIssuer`. The strict parser still rejects both quirks.
+- P-384 CertificateVerify (`verify.rs` and `client.rs` tests, openssl vectors from `tools/fixtures/verify`): 0x0503 with the right SHA-384 signature passes. SHA-256 over the content, a signature of another context, another transcript and a flipped bit fail with `BadSignature`. 0x0503 with a P-256 or RSA key and 0x0403 with a P-384 key give a key mismatch. 0x0401, 0x0501 and 0x0603 are not offered.
+- The scripted-server fixtures of `client.rs` (`tools/fixtures/client`) depend on the ClientHello bytes. They have a new throw-away key, certificate and signatures (see PROVENANCE.md). The ClientHello hex in `hello.rs` tests changed by the 2 bytes.
+- `cargo test --release -p bare-tls`: 213 pass, 4 ignored.
+
+### Numbers
+
+- One P-384 verify: 318.4 microseconds (`tools/crypto/ecc_verify_load.rs`, 20,000 accepted verifications over 200 Wycheproof/OpenSSL cases, 0 allocations in the loop, archMachine, under other load). It is the same code that certificate chains already used. A P-384 server costs one such verify for CertificateVerify, plus any P-384 certificate signatures.
+- Instructions (`tools/js/instr.sh`, minimum of 3, unit test binary with `--exact --test-threads=1`, main `46eab19` against this change): scripted P-256 handshake `handshake_and_application_data` 6,493,532 to 6,496,606 (+0.05%). `rsa_pss_rsae` verify test 34,468,658 to 34,544,712 (+0.22%; the test now also checks 0x0503 against an RSA key, so this is test code, not the RSA path). `tools/crypto/client_load.rs` does not build any more (`connect_inner` is `cfg(test)`), so I did not use it. This is not a new failure.
+
+### Live (`bare-drive`, steps `timeout 20000`, `open URL`, `expect css="body" visible`, `shot s`, build of this branch)
+
+| Site | Result |
+| --- | --- |
+| lite.cnn.com | TLS OK, 200, 33,791 bytes, page drawn (checked the capture), 0.9 s |
+| archive.org | TLS OK, 200 for the page and its assets. The `body visible` step fails: `render: Unsupported` "computed style needs an external stylesheet that the embedder has not supplied". That is a CSS limit, not TLS. |
+| example.com, news.ycombinator.com, react.dev, en.wikipedia.org, developer.mozilla.org, nextjs.org | OK, all 4 steps |
+
+`tools/drive/public/run.sh`: 11 pass, 0 fail, 0 skip, 0 flakes.
+
+Not tested: a real P-384 leaf from a CA other than the one lite.cnn.com uses, Starfield/SECOM/Hellenic chains on the live net, arjun-e16, non-x86, and the full 803-row JS cost matrix (no change in `crates/js`).
