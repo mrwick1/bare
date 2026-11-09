@@ -94,6 +94,8 @@ struct Dtf {
     zn: u8,
     /// `fractionalSecondDigits`, 0 for none.
     fsd: u8,
+    /// `zn` or `fsd` is set: the format goes by the cold path.
+    extras: bool,
     /// The bound `format` function, made by the first `format` read.
     bound: Option<ObjId>,
 }
@@ -170,6 +172,7 @@ impl IntlState {
 }
 
 const MAX_ZONES: usize = 64;
+const NO_EXTRAS: intl::Extras<'static> = intl::Extras { zone: "", fsd: 0 };
 /// The options that the constructors read. Their keys are made once, on the first read of an option.
 const OPTION_NAMES: [&str; 47] = [
     "localeMatcher", "calendar", "numberingSystem", "hour12", "hourCycle", "timeZone", "weekday", "era", "year", "month", "day",
@@ -515,7 +518,16 @@ impl<'p> Interp<'p> {
         }
     }
 
+    /// False for a calendar (`calendar`) or a numbering system that ICU has and bare has not: V8 would use it.
+    #[cold]
+    #[inline(never)]
+    fn intl_supported_name(calendar: bool, s: &str) -> bool {
+        let known: &[&str] = if calendar { &NON_GREGORY } else { &NON_LATN };
+        !known.contains(&s.to_ascii_lowercase().as_str())
+    }
+
     /// GetNumberOption of `fractionalSecondDigits`: 0 when absent, else an integer 1 to 3 (a RangeError otherwise).
+    #[inline(never)]
     fn intl_fsd(&mut self, opts: Option<Value>) -> Res<u8> {
         let Some(o) = opts else { return Ok(0) };
         let k = self.intl_key("fractionalSecondDigits")?;
@@ -604,10 +616,7 @@ impl<'p> Interp<'p> {
                 if !s.split('-').all(|p| (3..=8).contains(&p.len()) && p.bytes().all(|c| c.is_ascii_alphanumeric())) {
                     return Err(self.range_error(&format!("Invalid {name} : {s}")));
                 }
-                // a calendar or a numbering system that ICU has and bare has not: V8 would use it
-                let known: &[&str] = if name == "calendar" { &NON_GREGORY } else { &NON_LATN };
-                let lower = s.to_ascii_lowercase();
-                if known.contains(&lower.as_str()) {
+                if !Self::intl_supported_name(name == "calendar", &s) {
                     return Err(unsupported(if name == "calendar" { "Intl.DateTimeFormat calendar other than gregory" } else { "Intl.DateTimeFormat numberingSystem other than latn" }, Span::default()));
                 }
             }
@@ -691,7 +700,7 @@ impl<'p> Interp<'p> {
             _ => zn,
         };
         let pat = intl::resolve(loc, &r);
-        Ok(Dtf { loc, pat, styles: (r.date_style, r.time_style), zone_name, zone, zn, fsd, bound: None })
+        Ok(Dtf { loc, pat, styles: (r.date_style, r.time_style), zone_name, zone, zn, fsd, extras: zn != 0 || fsd != 0, bound: None })
     }
 
     /// The formatter of `this`, or the TypeError of V8. V8 names `unwrap` (when given) for an object receiver: its legacy
@@ -713,12 +722,25 @@ impl<'p> Interp<'p> {
         let local = t + d.zone.offset(secs) as f64 * 1000.0;
         let f = date::fields(local).ok_or_else(|| self.range_error("Invalid time value"))?;
         let mut out = String::new();
-        let name = if d.zn == 0 { String::new() } else { tz_names::name(&d.zone_name, d.zone.offset(secs), d.zn - 1, d.loc) };
-        match intl::format(d.loc, d.pat, &f, &intl::Extras { zone: &name, fsd: d.fsd }, &mut out, parts) {
+        let r = if !d.extras { intl::format(d.loc, d.pat, &f, &NO_EXTRAS, &mut out, parts) } else { Self::intl_format_extras(d, secs, &f, &mut out, parts) };
+        match r {
             Ok(()) => Ok(out),
             Err(intl::Gate::ZoneName) => Err(unsupported("Intl.DateTimeFormat: a pattern letter that bare cannot format", Span::default())),
             Err(intl::Gate::Era) => Err(unsupported("Intl.DateTimeFormat: a year before 1 (an era)", Span::default())),
         }
+    }
+
+    /// `intl::format` of a formatter with a time zone name or fractional seconds (the cold path of `intl_format`).
+    #[cold]
+    #[inline(never)]
+    fn intl_format_extras(d: &Dtf, secs: i64, f: &date::Fields, out: &mut String, parts: Option<&mut Vec<(intl::Part, usize)>>) -> Result<(), intl::Gate> {
+        let name = if d.zn == 0 { String::new() } else { tz_names::name(&d.zone_name, d.zone.offset(secs), d.zn - 1, d.loc) };
+        let mut parts = parts;
+        intl::format(d.loc, d.pat, f, &intl::Extras { zone: &name, fsd: d.fsd }, out, parts.as_deref_mut())?;
+        if d.pat.has_zone() {
+            intl::zone_tail(d.pat, &name, out, parts);
+        }
+        Ok(())
     }
 
     /// The time value of a `format` argument: now for undefined, else ToNumber and TimeClip; NaN is a RangeError.

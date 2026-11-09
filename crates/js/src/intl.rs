@@ -60,6 +60,13 @@ pub struct Pattern {
     zone: u8,
 }
 
+impl Pattern {
+    /// True when a `timeZoneName` option adds a name after the fields: call `zone_tail` after `format`.
+    pub fn has_zone(self) -> bool {
+        self.zone != 0
+    }
+}
+
 /// The type of a part, in the order of `PART_NAMES`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Part {
@@ -224,8 +231,7 @@ fn pieces(p: Pattern) -> impl Iterator<Item = Result<(u8, u8), &'static str>> {
     let join = [None, Some(", "), Some(" at ")][p.join as usize];
     let first = Tokens(pool(p.first));
     let rest = join.map(|j| std::iter::once(Err(j)).chain(Tokens(pool(p.second)))).into_iter().flatten();
-    let zone = [None, Some(" "), Some(", "), Some(" at ")][p.zone as usize];
-    first.chain(rest).chain(zone.into_iter().flat_map(|j| [Err(j), Ok((b'z', b'1'))]))
+    first.chain(rest)
 }
 
 struct Tokens(&'static str);
@@ -343,11 +349,7 @@ pub fn format(loc: u8, p: Pattern, t: &Fields, ex: &Extras, out: &mut String, mu
                         if ex.fsd == 0 {
                             Part::Second
                         } else {
-                            if let Some(ps) = parts.as_deref_mut() {
-                                ps.extend([(Part::Second, out.len()), (Part::Literal, out.len() + 1)]);
-                            }
-                            out.push('.');
-                            out.push_str(&format!("{:03}", t.ms)[..ex.fsd as usize]);
+                            fraction(ex.fsd, t.ms, out, parts.as_deref_mut());
                             Part::FractionalSecond
                         }
                     }
@@ -368,6 +370,34 @@ pub fn format(loc: u8, p: Pattern, t: &Fields, ex: &Extras, out: &mut String, mu
         }
     }
     Ok(())
+}
+
+/// ".ddd" after the seconds: the part of the seconds, the point, then the digits (the caller pushes their part).
+#[cold]
+#[inline(never)]
+fn fraction(digits: u8, ms: i64, out: &mut String, parts: Option<&mut Vec<(Part, usize)>>) {
+    if let Some(ps) = parts {
+        ps.extend([(Part::Second, out.len()), (Part::Literal, out.len() + 1)]);
+    }
+    out.push('.');
+    out.push_str(&format!("{ms:03}")[..digits as usize]);
+}
+
+/// The name that a `timeZoneName` option adds after the fields.
+/// `format` does not call it: the caller does when `p.zone` is not 0 (`Pattern::has_zone`).
+pub fn zone_tail(p: Pattern, zone: &str, out: &mut String, parts: Option<&mut Vec<(Part, usize)>>) {
+    out.push_str(["", " ", ", ", " at "][p.zone as usize]);
+    let mut parts = parts;
+    if let Some(ps) = parts.as_deref_mut() {
+        match ps.last_mut() {
+            Some((Part::Literal, end)) => *end = out.len(),
+            _ => ps.push((Part::Literal, out.len())),
+        }
+    }
+    out.push_str(zone);
+    if let Some(ps) = parts {
+        ps.push((Part::TimeZoneName, out.len()));
+    }
 }
 
 #[cfg(test)]
