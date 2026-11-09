@@ -19,8 +19,9 @@
 //! element name (lowercase start, a hyphen, only `PCENChar`, not one of the eight reserved names). Names are exact: `DIV` made with
 //! `createElementNS` is not a host. A definition can disable shadow roots (`static disabledFeatures`); this is not built.
 //!
-//! Gates (`Error::Unsupported`, before anything changes): `clonable: true`, `serializable: true`, `delegatesFocus: true`,
-//! `slotAssignment: "manual"`. Their getters on `ShadowRoot` are fixed at `false`, `false`, `false` and `"named"`. Inserting a root as a node
+//! `clonable`, `serializable` and `delegatesFocus` are stored and read back by their getters, and do nothing else: `cloneNode` of a host does not
+//! copy its root, there is no `getHTML`, and a shadow tree has no focus. Gate (`Error::Unsupported`, before anything changes): `slotAssignment: "manual"`;
+//! its getter is fixed at `"named"`. Inserting a root as a node
 //! (`appendChild(root)` and so on) is `Unsupported` after the other insertion checks (the standard moves the children of a fragment).
 //!
 //! Style and layout: a shadow tree has its own style scope (`RuleSet::add_scoped`, `bare_css::cascade`) and its slots are in the flat tree
@@ -122,8 +123,8 @@ pub(crate) fn attach_shadow(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Valu
             return Err(d.dom_err(it, "NotSupportedError", "Shadow root cannot be created on a host which already hosts a shadow tree."));
         }
     }
-    if clonable || delegates_focus || serializable || manual {
-        return Err(Error::Unsupported(unsupported("attachShadow with clonable, serializable or delegatesFocus true, or slotAssignment manual")));
+    if manual {
+        return Err(Error::Unsupported(unsupported("attachShadow with slotAssignment manual")));
     }
     d.room(&d.doc.borrow(), 1, 0)?;
     {
@@ -138,7 +139,12 @@ pub(crate) fn attach_shadow(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Valu
     // Reserve work and allocate the JS wrapper before changing native shadow ownership.
     it.charge(1)?;
     let wrapper = d.obj(it, d.p().shadow)?;
-    let root = d.doc.borrow_mut().attach_shadow(host, mode == "open");
+    let root = {
+        let mut doc = d.doc.borrow_mut();
+        let root = doc.attach_shadow(host, mode == "open");
+        doc.set_shadow_flags(root, u8::from(delegates_focus) | u8::from(clonable) << 1 | u8::from(serializable) << 2);
+        root
+    };
     let mut st = d.st.borrow_mut();
     st.by_node.insert(root, wrapper);
     st.by_obj.insert(wrapper, Target::Node(root));
@@ -166,10 +172,10 @@ pub(crate) fn mode(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V 
     d.js_str(it, if open { "open" } else { "closed" })
 }
 
-/// `delegatesFocus`, `clonable` and `serializable`: only `false` can be made (the other values are gated).
-pub(crate) fn flag_false(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    root_of(d, it, this)?;
-    Ok(Value::Bool(false))
+/// `delegatesFocus` (bit 0), `clonable` (bit 1) and `serializable` (bit 2): the values that `attachShadow` was given. They do nothing else here.
+pub(crate) fn flag_bit<const BIT: u8>(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    let root = root_of(d, it, this)?;
+    Ok(Value::Bool(d.doc.borrow().shadow_flags(root) & BIT != 0))
 }
 
 pub(crate) fn slot_assignment(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {

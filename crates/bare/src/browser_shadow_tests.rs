@@ -245,7 +245,7 @@ fn option_getters_may_change_the_host_and_the_checks_run_after_them() {
 #[test]
 fn unsupported_option_values_are_refused_before_anything_changes() {
     let mut b = browser();
-    for opts in ["{mode: 'open', delegatesFocus: true}", "{mode: 'open', clonable: true}", "{mode: 'closed', serializable: true}", "{mode: 'open', slotAssignment: 'manual'}"] {
+    for opts in ["{mode: 'open', slotAssignment: 'manual'}"] {
         let before = b.stats().nodes;
         let out = js(&mut b, &format!("var h = document.createElement('div'); try {{ h.attachShadow({opts}); 'attached' }} catch (e) {{ 'caught' }}"));
         // `Unsupported` is not a JS exception: `catch` cannot see it, and the run ends with it.
@@ -254,6 +254,17 @@ fn unsupported_option_values_are_refused_before_anything_changes() {
         assert_eq!(js(&mut b, "h.shadowRoot === null && !('x' in h)"), "true", "{opts}");
         assert_eq!(js(&mut b, "try { h.attachShadow({mode: 'open'}).mode } catch (e) { 'dup' }"), "open", "{opts}: a later valid call still works");
     }
+}
+
+#[test]
+fn the_three_flags_are_stored_and_read_back() {
+    let mut b = browser();
+    let out = js(
+        &mut b,
+        "var f = function (o) { var r = document.createElement('div').attachShadow(o); return [r.delegatesFocus, r.clonable, r.serializable].join('') };
+         [f({mode: 'open'}), f({mode: 'open', delegatesFocus: true}), f({mode: 'open', clonable: 1}), f({mode: 'closed', serializable: true}), f({mode: 'open', delegatesFocus: true, clonable: true, serializable: true})].join()",
+    );
+    assert_eq!(out, "falsefalsefalse,truefalsefalse,falsetruefalse,falsefalsetrue,truetruetrue");
 }
 
 // ------------------------------------------------------------------------------------------ host eligibility

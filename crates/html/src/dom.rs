@@ -235,6 +235,8 @@ pub struct Document {
     shadow_of: HashMap<u32, NodeId, BuildHasherDefault<Fnv>>,
     // The shadow root of each shadow host, by `NodeId::index` of the host. The root is not a child of the host: the light links of the host never show it.
     shadow_host: HashMap<u32, (NodeId, bool), BuildHasherDefault<Fnv>>,
+    /// The `delegatesFocus` (1), `clonable` (2) and `serializable` (4) bits of a shadow root that has one of them.
+    shadow_flags: HashMap<u32, u8, BuildHasherDefault<Fnv>>,
     // The way back: the host of each shadow root, and whether its mode is open. A host that is not in `shadow_of` has no root.
     slots: RefCell<Option<slots::Slots>>,
     // The slot assignment, made when it is read (`Document::assigned_nodes`) and dropped when `revision` moves.
@@ -473,6 +475,7 @@ impl Document {
             text_revision: 0,
             shadow_of: HashMap::default(),
             shadow_host: HashMap::default(),
+            shadow_flags: HashMap::default(),
             slots: RefCell::new(None),
             template_content: HashMap::default(),
             watcher: None,
@@ -761,6 +764,17 @@ impl Document {
     /// The host of the shadow root `root`. `None` for any other node.
     pub fn shadow_host(&self, root: NodeId) -> Option<NodeId> {
         self.shadow_host.get(&(root.index() as u32)).map(|&(h, _)| h)
+    }
+
+    /// The `delegatesFocus` (1), `clonable` (2) and `serializable` (4) bits of the shadow root `root`.
+    pub fn shadow_flags(&self, root: NodeId) -> u8 {
+        self.shadow_flags.get(&(root.index() as u32)).copied().unwrap_or(0)
+    }
+
+    pub fn set_shadow_flags(&mut self, root: NodeId, flags: u8) {
+        if flags != 0 {
+            self.shadow_flags.insert(root.index() as u32, flags);
+        }
     }
 
     /// Is the shadow root `root` in open mode? `false` for a closed root and for any other node.
