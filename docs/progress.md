@@ -3766,3 +3766,52 @@ Tests: `a_loop_of_reads_on_an_unchanged_page_lays_it_out_once`, `reads_of_an_unc
 - `Geometry.shared` keeps one layout alive after a geometry read, until the page changes.
 
 Not tested: a Chrome comparison of the console, window mode, arjun-e16, a page past Wikipedia's first screen after a long scroll, and the 12 s idle run on a loaded machine (the network changes the run time).
+
+## Style sheet binding: archive.org, the console flood and sheets that must not be fetched
+
+Task: pages break or log noise because of external style sheets. Checked on `origin/main` b828d18 (after #284). Machine: archMachine.
+
+**1. archive.org.** `expect css="body" visible` fails, and the cause is not a style sheet.
+
+- The page is `<body><app-root></app-root><noscript>…</body>` with one `<script type=module>`. `index.css` (871 bytes) loads and is supplied. Its rule `body { margin: 0; padding: 0 }` leaves an empty body with no size. The engine has no modules (`Fatal::Unsupported("module script")`), so `app-root` never gets content. Chrome with scripts off also gives a zero-size body.
+- Proof: a local mirror of the page fails the same way with no render line. Without `index.css` it passes (the default 8 px body margin gives the box a size). Of the css, only `body { margin: 0; padding: 0; … }` makes it fail; the other rules pass alone.
+- The 70 console lines of the first run were the render attempts that ran while `index.css` was in flight. That is item 2.
+- Not changed: module scripts. A step that checks something the app draws cannot pass on this page.
+
+**2. The flood.** A render with a linked sheet that is not supplied yet gave `Unsupported` and a console line, once per tick, until the sheet came. #284 already hid the line when `live_work()` was `Some`. This change goes further:
+
+- `Page` keeps `waiting_sheet`, the render key of the failed try. The next `frame_now` with the same key does nothing. `sheet_gen` is in the key, so a supplied sheet, a document change or a resize tries again.
+- While the session runs, the missing-sheet error is never a console line. After the session ended (the sheet will never come) it is one line for each key.
+- Test: `tests/sheet_failures.rs::a_sheet_that_is_on_its_way_adds_no_console_line` (`slow.css` after 300 ms) and `a_sheet_that_fails_does_not_stop_the_page_or_fill_the_console` (404, unreachable host, `@import` of a missing sheet, `text/plain` sheet). Before the change, on the tree before #284: 75 lines for `slow.css`, 2 for the missing `@import`. Each page rendered.
+
+**3. Sheets that are not fetched.** The test `a_print_sheet_an_alternate_sheet_and_a_disabled_link_are_not_fetched` failed first: `/print.css` was fetched and `/off.css` was applied.
+
+- `resources::discover` (the list the loader prefetches) skips a link with `disabled`, and a link whose `media` queries all start with `print` or `speech` (`print_only`). The style pass still fetches such a sheet if a script turns its `media` on.
+- `cascade::sources` and `tell_links` skip `<link disabled>`: no rules, no `load` or `error` event. The preload scan skips it too. `<style disabled>` is still not done.
+- A failed sheet (404, network, wrong type, failed `@import`) was already "no rules" with an `error` event; the new tests pin it for live pages.
+
+**4. Numbers.** `perf stat -e instructions:u`, minimum of 3, base b828d18 against this branch.
+
+| Step file | Base | New |
+|---|---|---|
+| `wikipedia-article.steps` | 2116.5 M | 2080.5 M (-1.7%) |
+| archive.org (`a.steps`) | 24.14 M | 23.38 M (-3.1%) |
+| local page with a 300 ms sheet | 10.14 M | 9.82 M (-3.1%) |
+
+Console lines of 10 survey sites (angular, bing, bootstrap, docs-python, gnu, hn, kernel-org, lobsters, mdn, nodejs), one run each:
+
+| Binary | Lines |
+|---|---|
+| Survey binary (`main-verify`, before #284) | 673 (26 to 139 a page) |
+| `origin/main` b828d18 | 8 |
+| This branch | 8 |
+
+The 8 lines left are real: a refused third-party host or a script error. All 10 pages pass on all three binaries. The survey's 29 passing pages with a render line were fixed by #284 for the most part; this change makes the wait cheaper (no retry with the same key) and the end of a session honest.
+
+**5. Third-party hosts.** The 6 refused requests to 5 hosts (`cdn.carbonads.com`, `analytics.python.org`, `www.google-analytics.com`, `id.rlcdn.com`, `cdn.usefathom.com`) are `Connection refused` on this network (`curl` exit 7, from the survey report). Not a bare bug. They are scripts or beacons, not style sheets.
+
+**Gates.** `cargo test --release --workspace`: 3040 passed, 0 failed. `tools/drive/public/run.sh`: 21 pass, 0 fail, 6 known (the same labels as before). Full cost matrix (805 rows, 0 failed): mean glibc -0.000%, 2 rows over under both allocators: `examples/dataset_load keys 10000 50` (+0.55%) and `keys 1000 50` (+0.52%). Hypothesis: code layout. `perf record` puts 43% to 47% of the run in `browser_dataset::matches`, which this change did not touch, and no code of this change runs in the loop. Not fixed.
+
+**Noticed, not changed.** `<style disabled>`. A page whose app needs `type=module` cannot render (archive.org, 1 of the 5 survey failures of this kind). `Page::render_failed` keeps one key; two alternating keys would try twice, which costs nothing here.
+
+Not tested: window mode, arjun-e16, a Chrome comparison of the console, a page whose sheet arrives after a 10 s stall.
