@@ -520,3 +520,26 @@ fn hidden_shadow_hosts_do_not_gate_visible_geometry() {
     assert_eq!(js(&mut b, "var host = document.createElement('div'); document.body.appendChild(host); host.attachShadow({mode:'open'}); 'ok'"), "ok");
     assert_eq!(size(&mut b, "hidden"), "0x0");
 }
+
+/// A loop of reads over a page that does not change lays it out once, and each read after the first charges one step. The step limit
+/// here is far under the cost of 5,000 full reads (a cascade of 600 nodes against 40 rules, and a layout, for each read).
+#[test]
+fn a_loop_of_reads_on_an_unchanged_page_lays_it_out_once() {
+    big(|| {
+        let rules: String = (0..40).map(|i| format!(".c{i} {{ margin-left: {i}px }}")).collect();
+        let body: String = (0..300).map(|i| format!("<div id=d{i} class=c{}><p>text {i}</p></div>", i % 40)).collect();
+        let src = format!("<!doctype html><html><head><style>{rules}</style></head><body>{body}</body></html>");
+        let mut b = Browser::new(tree::parse(&src), BrowserLimits::default(), EvalLimits { max_steps: 5_000_000, ..Default::default() }, HeapLimits::default()).expect("browser");
+        let r = js(&mut b, "var n = 0; for (var i = 0; i < 5000; i++) { var e = document.getElementById('d' + (i % 300)); n += e.scrollWidth + e.offsetWidth + e.getBoundingClientRect().width } n > 0");
+        assert_eq!(r, "true");
+        // One layout, and a second one at the narrower size when the page bar appears (`layout_areas`).
+        let first = b.geometry_stats().layouts;
+        assert!(first <= 2, "{first} layouts");
+        // A change of the page is seen by the next read, and lays it out again. The reads after it use that layout.
+        assert_eq!(js(&mut b, "var e = document.getElementById('d0'); e.style.width = '50px'; e.offsetWidth + ',' + e.scrollWidth + ',' + e.offsetWidth"), "50,50,50");
+        let second = b.geometry_stats().layouts;
+        assert!(second > first && second <= first + 2, "{first} then {second} layouts");
+        assert_eq!(js(&mut b, "document.getElementById('d1').offsetWidth > 50"), "true");
+        assert_eq!(b.geometry_stats().layouts, second);
+    });
+}

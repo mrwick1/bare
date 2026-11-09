@@ -12,6 +12,11 @@ const INDEX: &str = r#"<!doctype html><html><body><p id="out">none</p><script>
 fetch('/hang').then(function (r) { return r.text() }).then(function (t) { document.getElementById('out').textContent = t })
 </script></body></html>"#;
 
+/// A page that adds a script by code. `load` waits for it, and it comes after `hang`.
+const DYNAMIC: &str = r#"<!doctype html><html><body><p id="out">none</p><script>
+var s = document.createElement('script'); s.src = '/hang.js'; document.body.appendChild(s)
+</script></body></html>"#;
+
 fn serve(hang: Duration) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -24,6 +29,11 @@ fn serve(hang: Duration) -> String {
                 let body = if path == "/hang" {
                     std::thread::sleep(hang);
                     "late"
+                } else if path == "/hang.js" {
+                    std::thread::sleep(hang);
+                    "document.getElementById('out').textContent = 'late'"
+                } else if path == "/dynamic" {
+                    DYNAMIC
                 } else {
                     INDEX
                 };
@@ -67,7 +77,11 @@ fn run_loop(p: &mut Page, rx: &mpsc::Receiver<()>, span: Duration) -> (u32, bool
 }
 
 fn open(origin: &str) -> (Page, mpsc::Receiver<()>) {
-    let mut p = Page::open(&format!("{origin}/"), (800, 600)).unwrap();
+    open_at(origin, "/")
+}
+
+fn open_at(origin: &str, path: &str) -> (Page, mpsc::Receiver<()>) {
+    let mut p = Page::open(&format!("{origin}{path}"), (800, 600)).unwrap();
     p.wait_load(std::time::Duration::from_secs(10)).unwrap();
     p.quiet = true;
     let (tx, rx) = mpsc::channel();
@@ -108,5 +122,19 @@ fn a_window_with_a_10_s_request_in_flight_uses_almost_no_cpu() {
         let (used, wall) = (cpu() - c0, t0.elapsed().as_secs_f64());
         eprintln!("idle with a pending fetch: {ticks} ticks, {used:.3} s CPU in {wall:.1} s ({:.2}%)", used / wall * 100.0);
         assert!(used / wall < 0.005, "{used:.3} s CPU in {wall:.1} s");
+    });
+}
+
+#[test]
+fn a_script_added_by_code_does_not_wake_the_loop_while_it_downloads() {
+    let origin = serve(Duration::from_millis(1500));
+    big(move || {
+        let mut p = Page::open(&format!("{origin}/dynamic"), (800, 600)).unwrap();
+        p.quiet = true;
+        let (tx, rx) = mpsc::channel();
+        let tx = std::sync::Mutex::new(tx);
+        p.wake_on_done(move || { let _ = tx.lock().unwrap().send(()); });
+        let (ticks, _) = run_loop(&mut p, &rx, Duration::from_secs(1));
+        assert!(ticks < 20, "{ticks} ticks in 1 s while a script downloads (hundreds when the loop spins)");
     });
 }

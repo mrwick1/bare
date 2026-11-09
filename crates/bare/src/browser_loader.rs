@@ -890,11 +890,12 @@ impl Browser {
         });
         // The sheets, preloads and parsed scripts that a turn did not wait for: is one of them in?
         let waits = net.as_ref().filter(|n| !n.waits.is_empty()).map(|n| n.waits.iter().any(|k| n.started.get(k).is_none_or(|t| t.done())));
-        // A split document goes on at once, unless it stopped for a download.
-        let parse = s.parse.borrow().as_ref().map(|p| !p.waiting || waits.unwrap_or(true));
+        // A split document goes on at once, unless it stopped for a download, or ran every task it had (`rounds`: then a download of a
+        // dynamic script or a timer is what can change it, and the terms above and `next_scheduled_due` tell).
+        let parse = s.parse.borrow().as_ref().map(|p| !p.waiting || waits.unwrap_or(false));
         match (self.fetch_ready(), script, waits, parse) {
             (Some(true), ..) | (_, Some(true), ..) | (.., Some(true), _) | (.., Some(true)) => Some(true),
-            (None, None, None, None) => None,
+            (None, None, None, None | Some(false)) => None,
             _ => Some(false),
         }
     }
@@ -1548,6 +1549,7 @@ impl Run<'_> {
             if self.res.rounds >= self.lim.max_rounds {
                 return Err(Stop::RoundBudget);
             }
+            self.waiting = false;
             if self.sliced() {
                 return Err(Stop::Settled);
             }
@@ -1626,6 +1628,8 @@ impl Run<'_> {
             }
             // Live: never wait. The window loop and the driver call again when a task is due or a reply is in.
             if self.live_now() {
+                // No task ran and the slice is not used up: only a download (a dynamic script) or a timer can change the page.
+                self.waiting = !self.sliced();
                 return Err(Stop::Settled);
             }
             // Idle: wait for the next task if one that blocks the settle is near, else the page is settled. The wait is

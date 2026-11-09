@@ -51,6 +51,7 @@ use bare_js::eval::Interp;
 use bare_js::value::Value;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::rc::Rc;
 
 /// Bounds of the geometry module (see the header). Each is checked before native layout starts.
 #[derive(Clone, Copy, Debug)]
@@ -95,6 +96,18 @@ pub(crate) struct Geometry {
     pub(crate) uncull: Cell<bool>,
     /// The counts of the last window walk.
     sums: RefCell<Sums>,
+    /// The layout of the last read, with the inputs it came from (`Dom::layout_shared`).
+    pub(crate) shared: RefCell<Option<(SharedKey, Rc<Lay>)>>,
+}
+
+/// The inputs of a layout: the styles (by address), `revision`, `text_revision`, length and user state revision of the document, and the window.
+pub(crate) type SharedKey = (usize, u64, u64, usize, [u64; 3], (u32, u32));
+
+/// One layout of the page with its scroll containers and its bars (`Dom::layout_areas`).
+pub(crate) struct Lay {
+    pub(crate) layout: bare_layout::fragment::Layout,
+    pub(crate) areas: bare_layout::scroll::Areas,
+    pub(crate) bars: (bool, bool),
 }
 
 const SLOT: &str = "geometry of a shadow tree with a slot (slot assignment is not built)";
@@ -300,8 +313,8 @@ fn walk<const KEEP: bool>(doc: &Document, styles: &Styles, l: &GeometryLimits, s
 impl Dom {
     /// One bounded native layout of the whole page with these styles: the preflight walk refuses or reserves the work first (see the header).
     /// `offsetWidth`, `offsetHeight` and `ResizeObserver` share it.
-    pub(crate) fn layout_now(&self, it: &mut Interp<'_>, styles: &Styles) -> R<bare_layout::fragment::Layout> {
-        self.layout_areas(it, styles, None).map(|(l, _, _)| l)
+    pub(crate) fn layout_now(&self, it: &mut Interp<'_>, styles: &Rc<Styles>) -> R<Rc<Lay>> {
+        self.layout_shared(it, styles)
     }
 
     /// One bounded native layout at the size `vp` (the window minus the page bars, see `browser_scroll.rs`).
@@ -348,7 +361,7 @@ impl Dom {
             return Ok((0, 0));
         }
         let layout = self.layout_now(it, &styles)?;
-        let Some(r) = border_box(&layout, el) else {
+        let Some(r) = border_box(&layout.layout, el) else {
             // Layout makes no fragment for an inline box with no background and no border (`inline.rs`, "culled"): that is not "no box".
             let doc = self.doc.borrow();
             return match bare_layout::boxes::Tree::new(&doc, &styles).kind(el) {
@@ -400,6 +413,7 @@ impl Browser {
     /// Replace the bounds of this module. Call it before scripts run.
     pub fn set_geometry_limits(&mut self, l: GeometryLimits) {
         self.dom.geometry.lim.set(l);
+        *self.dom.geometry.shared.borrow_mut() = None;
     }
 
     pub fn geometry_stats(&self) -> GeometryStats {
