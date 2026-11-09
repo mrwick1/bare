@@ -4830,7 +4830,7 @@ Not tested: full XML conformance, all Intl option combinations, and site interac
 
 ## CSS logical properties and the real-site visual defects (2026-11-09)
 
-Branch `css-logical`, on the base `93559738`. The task: four visual defects seen in headless runs of real sites.
+Branch `css-logical`, on the base `05bf0e8d`. The task: four visual defects seen in headless runs of real sites.
 
 ### Fixed: logical properties (defect 1)
 
@@ -4865,17 +4865,17 @@ gitlab.com, the "Ship faster" cards: the box is `.one-feature-cards__media` (`#1
 ### Checks
 
 - Tests first: `logical_properties_map_to_physical_by_direction` and `float_inline_start_follows_the_direction_of_the_parent` (css), `text_align_start_and_end_follow_the_direction` (layout). The logical test was run with `logical()` returning `None` first: it failed (`[0, 0, 16, 16]` against `[1, 2, 3, 4]`). The layout test was run with the direction ignored: it failed (`8.0` against `88.8`). The `:host` test was not run against the old code: the page repro was (t5 and t6 of `min2.html` had no padding).
-- Cost matrix against the base build of `93559738` (805 rows, both allocators, `tools/js/cost_matrix.sh`): **0 rows over the limit**. The four rows that were the worst (`bare-stress`, each element has its own `style=""`, so each runs a full `cascade()`; 3 runs each, same numbers):
+- Cost matrix against the base build of `05bf0e8d` (805 rows, both allocators, `tools/js/cost_matrix.sh`): **0 rows over the limit**. The four rows that were the worst (`bare-stress`, each element has its own `style=""`, so each runs a full `cascade()`; 3 runs each, same numbers):
 
 | Row | glibc | jemalloc |
 |---|---|---|
-| `bare-stress run flex-freeze-many 2000` | +0.405% | +0.022% |
-| `bare-stress run flex-freeze-many 20000` | +0.399% | +0.331% |
-| `bare-stress run table-percent-columns 10000` | +0.401% | +0.342% |
-| `bare-stress run table-percent-columns 100000` | +0.401% | +0.365% |
+| `bare-stress run flex-freeze-many 2000` | +0.405% | +0.355% |
+| `bare-stress run flex-freeze-many 20000` | +0.400% | +0.388% |
+| `bare-stress run table-percent-columns 10000` | +0.391% | +0.368% |
+| `bare-stress run table-percent-columns 100000` | +0.398% | +0.372% |
 
   Cause of the first +1.1% on these rows (found by changing one thing at a time and measuring): not the work of the logical names (reverting the branch in `apply` alone gave +0.02%), but a copy. `cascade` returns a `ComputedStyle` of 1 KB. Any code that looks at the returned style and may pass it on (a wrapper, `let style = if .. { f(style) } else { style }`, `&mut style`) makes the compiler build the style in a local and copy it to the result on every call: about 220 instructions for each uncached style. The check is now at the end of `cascade_as`: it only reads two values of `style`, and the cold path (`logical_pass`) starts again from the matched rules and does not take `style`. An `rtl` element with no logical property anywhere pays nothing, because of the flag `RuleSet::logical`; without the flag, `examples/sheets_load dynamic 10` (rtl on every `<p>`) was +9.2%. The cost of an `rtl` page that uses logical properties is a second or third `cascade` for each uncached `rtl` style.
-- `cargo test --release --workspace`: 3261 passed, 0 failed.
+- `cargo test --release --workspace`: 3265 passed, 0 failed.
 - `tools/drive/public/run.sh`: pass 33, fail 0, known 0, flakes 0.
 - Test for the style attribute: `a_logical_property_in_a_style_attribute_follows_the_direction`.
 
