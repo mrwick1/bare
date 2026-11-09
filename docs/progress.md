@@ -4444,8 +4444,6 @@ Base: origin/main `df82df1`. Every item below comes from git, `gh pr list` or th
 - #296: Give SVG elements a style property; print an error's stack or message in the console.
 - #297: Add an HTTP cookie jar shared by the network and document.cookie.
 
-PR #278 (draw CSS background-image and mask-image) is open. It is not merged.
-
 ### Owner decisions
 
 - 2026-11-09: PR #289 merged under a standing cost exception. Approved by Arjun. 45 of 805 rows are over +0.5% under both allocators. Worst row: `block-percent-calc 200000`, +1.275% glibc and +1.363% jemalloc. Mean change: glibc +0.072%. Record: "Standing exception: PR #289 calc cost".
@@ -4464,7 +4462,6 @@ Agent working (to verify: the status of each agent run):
 
 - Craigslist, nginx.org and dev.to need TLS 1.2.
 - Cost check for the 16 rows left over by PR #292.
-- Cost of PR #278 (image drawing).
 - Wikipedia JavaScript.
 - Shadow DOM style scoping.
 
@@ -5562,3 +5559,77 @@ Step file: `timeout 30000`, `open URL`, `expect css="body" visible`, `shot s`. `
 ### Not tested
 
 `tools/js/exec_diff.sh` and `tools/js/typing/keycost.sh` (no change in `crates/js` or the DOM hot path). Test262. Live sites other than the three above. Chrome behavior for the same pages. A blob URL made in one document and read in another.
+
+## CSS background-image and mask-image on current main (2026-11-10)
+
+PR #278 is closed. This work replaces it. The old branch (`css-background-mask`, head `e896177e`) was ported by hand onto origin/main `41e68d4a09`. The old branch had 16 cost rows over +0.5% under both allocators.
+
+### Problem
+
+Wikipedia draws its icons with `mask-image` and `background-image`. The engine ignored both properties. The icons were solid black squares. The cascade also stored one value for every property in every style. A picture property needs more values (size, position, repeat, a list of layers), so a plain port cost every element.
+
+### Change
+
+- Parse: `background-image`, `mask-image`, `-webkit-mask-image`, the size, position and repeat longhands, and the shorthands `background` and `mask`. Picture properties sit after `Property::CORE` in `Property::ALL`. A style holds one `u32`: the number of its set of 12 picture values. Set 0 is "all at the starting value", which is nearly every element. The sets are interned in one table for the process (`ComputedStyle::picture_set`). `ComputedStyle` is 4 bytes larger. `Entry` is still 80 bytes.
+- Cascade: a rule keeps its picture declarations after its other declarations (`Entry::pics`). `cascade_as` only says that a rule or the `style=""` attribute has one. `style_of` then calls the cold `picture_pass`. An element with no picture declaration never runs it (a test counts the passes).
+- Paint: `crates/paint/src/layer.rs` scales a picture to the tile (box filter, cached), repeats it and draws it. A mask shows the color through the alpha of the picture. An SVG file is parsed and laid out once, and drawn on white and on black.
+- Load: the sheet loader makes each `url(...)` of a sheet absolute against the sheet (`absolute_urls`). The page scan finds the pictures that the styles name. They load through the `<img>` queue (same limits: 512 pictures, 64 MiB). A capture waits for them. It makes one frame when there is none and when no picture is on its way.
+- CSSOM: `getComputedStyle(...).getPropertyValue('background-image')` and `style.setProperty('mask-image', ...)` work. The picture properties are not in `LISTED`, so `style.backgroundImage = ...` and the indexed list do not see them.
+- Tests were written first. The drive test `crates/drive/tests/background.rs` fails on main's binary and passes here.
+- Parts, one commit each: parse, paint, load, drive tests, CSSOM, `url(` search, picture wait, then three cost fixes below.
+
+### Cost
+
+Base: origin/main `41e68d4a09` (fresh `base-build` after the last rebase). New: this branch. `tools/js/cost_matrix.sh -a -J`: all 805 rows, jemalloc measured on every row.
+
+| | glibc | jemalloc |
+| --- | ---: | ---: |
+| Rows | 805 | 805 |
+| Mean change | +0.010% | +0.013% |
+| Rows over +0.5% | 0 | 1 |
+| Rows over +0.5% under both | 0 | 0 |
+| Highest row under both | `flex-freeze-many 20000` +0.468% | +0.473% |
+
+The one row over under jemalloc only is `examples/session_load chain 1`: -0.041% glibc, +0.560% jemalloc. Next rows under both: `flex-freeze-many 2000` +0.458% / +0.396%, `grid-explicit-rows 50000` +0.373% / +0.372%, `grid-explicit-rows 5000` +0.356% / +0.341%.
+
+Cost fixes, in the order that I found them:
+
+1. `picture_pass` was called inside `cascade_as`. The call held the style and the key closure, and `resolve` got a second caller, so it was no longer inlined. The `bare-stress` rows `boxes-display-none`, `flex-freeze-many`, `grid-explicit-rows` and `table-percent-columns` were +0.9% to +2.3%. Fix: `cascade_as` sets a flag, `style_of` calls `picture_pass`, `cascade_key` is a free function and `resolve` is `#[inline(always)]`. The rows are now +0.1% to +0.5%.
+2. `sheets_load imports` was +1.9%. The address of an `@import` was joined twice. Fix: `absolute_urls` leaves it as it is.
+3. `dataset_load keys` was +0.56%. `nm` and `objdump` show that `FromFn::next` was no longer inlined in `bare::browser_dataset` (`write`, `named_keys`). Code in `browser_dataset.rs` did not change. A small change in `bare::browser_loader::sheets` caused it. Moving the `@import` check into `bare_css::urls::follows_import` removed it. The cause in LLVM is not proven. It looks like an inlining choice that depends on the code size of the crate. A later change in `bare` may bring it back.
+
+Other cost work: the parser keeps core declarations free of picture checks (`from_core_name` first, then the cold `picture_expand`), and `parse_declaration` has one inlined `parse_known` call.
+
+Measure notes: `cargo build --workspace` does not build `bare-stress`. Some of my first A/B runs used an old `bare-stress` binary. The numbers above come from a binary that I rebuilt and checked by its timestamp. `/data/bare-tmp/bin` disappeared during the task. I made the `heavy` and `base-build` helpers again in a scratch folder.
+
+### Limits
+
+- Gradients (`linear-gradient`, `radial-gradient`, `conic-gradient`) and `image-set()` are read as `none`. They are not drawn.
+- Only the first layer of a list is used. The color of `background` comes from the last layer.
+- Edge-offset positions (`right 10px`) are not read. `background-repeat: space` and `round` are not drawn.
+- `min()`, `max()` and `clamp()` in a picture length give the starting value.
+- A mask applies to the background color of the box only. Rounded corners are ignored.
+- Scaling averages the pixels of a raster. A vector picture is drawn at its natural size and then scaled as a raster. It is soft when it is made larger. It is not drawn again at the new size.
+- The `bare` command line (`main.rs`) does not make `url()` absolute.
+- `style.backgroundImage` and `-webkit-` names set through `setProperty` are not known to the style object.
+
+### Checks
+
+- `cargo test --release --workspace --no-fail-fast` after the last rebase: 3339 passed, 0 failed, 13 ignored. An earlier run failed once on `browser_session_tests::a_pending_meta_refresh_is_queued_work` (a 10 ms window on the real clock, while a matrix ran). It passed three times alone and in the final run.
+- `tools/drive/public/run.sh`: pass 48, fail 0, known 0, skip 0, flakes 0.
+- Live, `bare-drive` with the step file `timeout 30000`, `open URL`, `expect css="body" visible`, `shot s`:
+  - `https://en.wikipedia.org/wiki/Rust_(programming_language)`: main's binary shows black or blue squares at the menu, language, bookmark and more buttons and at five contents bullets. This branch shows the icons. No black square.
+  - `https://ar.wikipedia.org`: the portal icons, the logo and the item icons are drawn. No black square.
+  - Instructions (`perf stat -e instructions:u`, 4 runs each, min to max): en main 3.78 G to 4.36 G, branch 3.78 G to 4.17 G. ar main 2.53 G to 2.85 G, branch 2.42 G to 2.64 G. The same binary varies by about 10% between runs because of the network, so the live counts do not show a cost. In one run of each binary the ar page loaded only part (0.65 G and 0.62 G, 33 MiB); I left those two out. Earlier single runs on older mains gave the branch +1.5% (en) and up to +8% (ar). The branch does more work, because it loads, decodes and draws the pictures.
+  - Peak RSS: en main 58,940 to 59,720 KiB, branch 58,664 to 59,836 KiB. ar main 53,360 to 54,152 KiB, branch 54,872 to 55,188 KiB. The growth is 0 on en and about 1 MiB on ar.
+  - `bare-drive` grows from 15,618,208 to 15,762,176 bytes.
+
+### Not tested
+
+- Pixel comparison with Chrome. The screenshots were only checked for black squares.
+- Gradients, `image-set()`, more than one layer, edge-offset positions, `space` and `round`: not drawn, so not tested.
+- Pages that use a mask with rounded corners.
+- A page with 512 CSS pictures, or with a picture over 4 M pixels, in a live run (the limits have unit tests).
+- HiDPI, macOS and `bare --window`.
+- The `bare` command line path.
+- A run on arjun-e16.
