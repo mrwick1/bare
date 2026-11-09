@@ -121,7 +121,7 @@ fn the_counter_is_back_to_zero_after_each_fault() {
         assert!(matches!(it.run_script("function f(n) { if (n === 0) throw 'x'; return f(n - 1) } f(30)"), Err(Error::Throw(_))));
         assert_eq!(it.run_script(&walk(40)).map(|v| it.display(v)).unwrap(), "walked");
         // an Unsupported construct is found before anything runs
-        assert!(matches!(it.run_script("with (Math) {}"), Err(Error::Unsupported(_))));
+        assert!(matches!(it.run_script("function* g() { with (Math) {} }"), Err(Error::Unsupported(_))));
         assert_eq!(it.run_script(&walk(40)).map(|v| it.display(v)).unwrap(), "walked");
     });
 }

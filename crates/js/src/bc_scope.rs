@@ -486,7 +486,13 @@ impl<'p> Interp<'p> {
                 self.sw_expr(w, test);
                 self.sw_stmt(w, body);
             }
-            StmtKind::Break(_) | StmtKind::Continue(_) | StmtKind::Empty | StmtKind::Debugger | StmtKind::With { .. } => {}
+            StmtKind::Break(_) | StmtKind::Continue(_) | StmtKind::Empty | StmtKind::Debugger => {}
+            StmtKind::With { obj, body } => {
+                self.sw_expr(w, obj);
+                let saved = self.sw_open(w, RKind::Barrier);
+                self.sw_stmt(w, body);
+                w.cur = saved;
+            }
             StmtKind::ExportDefault(e) => self.sw_expr(w, e),
             StmtKind::Try { block, handler, finalizer } => {
                 self.sw_stmt(w, block);

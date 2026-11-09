@@ -80,7 +80,8 @@ fn unsupported_is_found_before_anything_runs() {
         ("function* g(t) { t`${yield}`; }", "await in a tagged template"),
         ("var o = { m() { return super.x; } };", "super outside a class element"),
         ("class A { x = new.target; }", "new.target in a class field initializer"),
-        ("with ({}) {}", "with statement"),
+        ("function* g() { with ({}) {} }", "with statement in a generator or an async function"),
+        ("async function f() { with ({}) {} }", "with statement in a generator or an async function"),
     ];
     for (src, what) in cases {
         let prog = parse_script(src, Limits::default()).unwrap_or_else(|e| panic!("{src}: {e}"));

@@ -5907,3 +5907,56 @@ Base `a3ba452365` (origin/main after PR #329; the branch is rebased on it once, 
 - A 16-bit or interlaced PNG for the peak (the decode path is the same, the output size is the same).
 - `bare --window`, macOS and arjun-e16.
 - The peak with `jemalloc` for the live sites.
+
+## The `with` statement in sloppy code (2026-11-10)
+
+target.com stopped at `Unsupported("with statement")` after 3.4 to 6.5 s in `bare-drive`, with a peak RSS of 117 to 120 MiB (3 runs on main `1bec71ae`).
+
+### Change
+
+- `with (obj) body` runs. The static scope has a `RKind::Barrier` for the body, so a name that leaves the body is a dynamic site. A function that holds a `with` keeps its environment (no frame slots: `FL_NOFR`).
+- At run time `with` is an environment of one binding (`WITHB`, value = the object). The full search of a dynamic site (`lookup_dyn`) asks such an environment with `HasProperty` and then `@@unscopables`. Getters and proxy `has` traps run. A throw during the question waits in `HScope::with_err` and is raised by the cold hook of the hit.
+- Read: `get_name_uninit` (a cold hook that exists already) calls `with_get`. Write: `assign_name_refused` calls `with_set`. Call through a name: `link_name_with` gives the object as `this`. `typeof` and `delete` have their own paths (`typeof_with`, `delete_with`). All of them run only when `Interp::with_any` is true, so the fast paths of a page without `with` are the same code.
+- `with` in a generator or an async function is `Unsupported` (`w_with_gate`). The bytecode engine refuses a function that holds `with`.
+- Code is in `crates/js/src/eval_with.rs`. The rules are in the module doc of `eval_scope.rs` and in `docs/decisions.md` ("The `with` statement").
+
+Spec: ECMA-262 14.11 (`with`), 9.1.1.2 (object environment records: HasBinding, GetBindingValue, SetMutableBinding, WithBaseObject), 9.4.2 (ResolveBinding).
+
+### Cost: the walker group
+
+My first version had a `w_with` function that walked the children. It made the full matrix show `scripts_load few 10` at +0.58% under both allocators. No line of the hot path changed. LLVM inlines the mutually recursive group `w_stmt`, `w_expr`, `w_pat`, `w_func` and `w_class` differently when a function is added to it. The fix (the only attempt): the With arm walks its children inside `w_stmt_inner`, and the only new function, `w_with_gate`, is cold and does not recurse. The row went to +0.04%. Lesson: a new case of the resolver walk must not add a recursive function.
+
+### Checks (final tree: rebased on `1bec71ae`, head `91de6fff`)
+
+- Fixture: `tools/fixtures/js/with-cases.txt` has 108 cases. Node 22 gives `with-cases.expected`. `tools/js/with_check.sh`: 108 match. Debug build with all scope assertions on matched 107 of the cases that existed then.
+- Unit tests (`eval_with_tests.rs`, 156 lines) cover what Node and the spec disagree on (see Deviations). `cargo test --release --workspace`: 3,366 passed, 0 failed, 13 ignored.
+- test262 (`test262_check.sh`): `gate: ok`, 585 directories, 250 s. `language/statements/with`: 19 to 128 passing (181 tests). Of the 53 that fail, 49 need `eval` (the engine has none): 47 end with `eval is not defined`, and 2 (`12.10.1-10-s.js`, `12.10.1-12-s.js`) expect a `SyntaxError` from `eval` and get that `ReferenceError`. The other 4 are in Deviations.
+- `exec_diff.sh`: 79 runs, 0 differences. Public journeys: 48 pass, 0 fail, 0 flakes.
+- Cost: the full matrix of 805 rows against the shared build of `1bec71ae`. Mean +0.014% under glibc. Largest row +0.289% (`reflect_load construct_args 10`). No row over +0.5% under glibc, so no jemalloc runs. Over under one allocator: 0. Over under both: 0. Failed: 0.
+- Typing (`keycost.sh`, `#a1` / `#f0`): 282.2 / 287.5 M for each key on main, 282.5 / 287.9 M here (+0.11% / +0.14%). Peak RSS 32.9 MiB at 50 keys (main 33.2).
+
+### Live: target.com (`open`, `expect js "document.readyState === 'complete'"`, 30 s timeout)
+
+| Build | Result |
+|---|---|
+| main `1bec71ae` (3 runs) | 0 of 3 pass. Stops at `Unsupported("with statement")` after 3.4 to 6.5 s. Peak RSS 117 to 120 MiB. |
+| this change (6 runs, same rebased binary) | 2 of 6 pass, in 12.0 and 15.5 s, peak RSS 368 and 379 MiB. 4 of 6 stop at `Limit(Scripts)` after about 7 s with a peak RSS of 153 to 195 MiB. |
+| this change, earlier build (8 runs) | 2 of 8 pass in 6.8 s each. 5 stop at `Heap`. 1 at `Limit(Scripts)`. |
+
+The page runs further than before and no run stops at `with`. The result changes from run to run. The page loads ads and bot scripts over the network, and their order changes the work. The two stops that appeared after `with` work are not in `with` code. With a temporary `eprintln!` in `Interp::herr` (not committed) a run that stopped at `Heap` gave two causes: `HeapError::NeedsHost { index: LAZY_ON }` from `member_put_ic` to `put_prop` to `set_miss` (a property write on a lazy host object, in an assignment statement), and `HeapError::Stale` from `Dom::wrap` in `create_element` (a stale handle in the wrapper path). Both appear in the `herr` backtrace with no `with` frame at the top. They are open and belong to other work. `Limit(Scripts)` is the script-count cap (Task 14).
+
+### Deviations from the spec
+
+- The name is resolved when it is read, not before the right-hand side of an assignment. `x++` and `x += 1` resolve twice. Two test262 tests fail for this (`unscopables-inc-dec.js`, `set-mutable-binding-idref-compound-assign-with-proxy-env.js`).
+- A call through a name in parentheses `(f)()` and a tagged template tag do not pass the object as `this`.
+- Strict-mode set on a binding that was deleted from a typed-array proto chain gives `TypeError`, not `ReferenceError` (1 test262 test).
+- One more test262 test fails on `result === "value"` (not studied).
+- V8 asks `has` twice in some cases and does not throw on a strict read of a deleted property. The fixture avoids these, and the Rust tests pin the spec result.
+
+### Not tested
+
+- Chrome was not run on target.com. The page was not reached to its end in a stable way (see the table).
+- `with` on a host object that is a lazy DOM node in a loop at scale, and a `with` inside a very deep call stack.
+- The debug build was not run again after the rebase on `1bec71ae`.
+- Jemalloc cost rows (none was over the limit under glibc).
+- A real `eval` (the engine has none): 49 test262 tests wait for it.

@@ -380,6 +380,10 @@ struct HScope {
     scripts: Vec<u32>,
     /// Source text to script id: the same attribute text on many elements parses once.
     cache: HashMap<String, u32>,
+    /// `with` statements (`eval_with.rs`): an error of the search that waits for the read or write that asked, and the object that the last
+    /// read in an object environment came from.
+    with_err: Option<Error>,
+    with_this: Option<ObjId>,
 }
 
 impl<'p> Interp<'p> {

@@ -1,0 +1,218 @@
+# bare-js `with` statement cases. A case starts with `=== name`. Same format and oracle as eval-cases.txt.
+# Tiny authored programs for object environment records (ECMA-262 9.1.1.2, 14.11). Never a bundle.
+=== with_read
+var o = { a: 1, b: 2 }; var r; with (o) { r = a + b; } r
+=== with_write_through_object
+var o = { a: 1 }; with (o) { a = 5; a += 2; } o.a
+=== with_miss_falls_to_var
+var o = { a: 1 }; var z = 10; var r; with (o) { r = a + z; } r
+=== with_miss_falls_to_let
+let z = 10; var o = { a: 1 }; var r; with (o) { r = a + z; z = 11; } r + "," + z
+=== with_miss_falls_to_global
+globalThis.g1 = 7; var o = { a: 1 }; var r; with (o) { r = a + g1; g1 = 8; } r + "," + globalThis.g1
+=== with_write_miss_goes_outward
+var o = {}; var z = 1; with (o) { z = 2; } z + "," + ("z" in o)
+=== with_function_scope_miss
+function f(o) { var z = 3; with (o) { return a + z; } } f({ a: 4 })
+=== with_function_let_miss
+function f(o) { let z = 3; const k = 1; with (o) { z = a + k; } return z; } f({ a: 4 })
+=== with_inherited_property
+var proto = { p: 9 }; var o = Object.create(proto); var r; with (o) { r = p; p = 1; } r + "," + o.p + "," + proto.p + "," + Object.keys(o).join()
+=== with_unscopables_array
+var arr = [1, 2]; var keys = 5; var r; with (arr) { r = typeof keys + "," + typeof values + "," + typeof push + "," + length; } r
+=== with_unscopables_own
+var o = { a: 1, b: 2, [Symbol.unscopables]: { a: true } }; var a = "outer"; var r; with (o) { r = a + "," + b; } r
+=== with_unscopables_false_and_getter
+var o = { a: 1, get [Symbol.unscopables]() { return { a: false }; } }; var r; with (o) { r = a; } r
+=== with_unscopables_not_object
+var o = { a: 1, [Symbol.unscopables]: 5 }; var r; with (o) { r = a; } r
+=== with_call_this_is_object
+var o = { n: "obj", f() { return this.n; } }; var r; with (o) { r = f(); } r
+=== with_call_outer_this_undefined
+function g() { return typeof this; } var o = {}; var r; with (o) { r = g(); } r
+=== with_call_arrow_this
+var o = { f: () => typeof this }; var r; with (o) { r = f(); } r
+=== with_typeof
+var o = { a: 1, f() {} }; var r; with (o) { r = [typeof a, typeof f, typeof nope, typeof o].join(); } r
+=== with_delete_member
+var o = { a: 1, b: 2 }; with (o) { delete a; } Object.keys(o).join()
+=== with_delete_returns
+var o = { a: 1 }; var r; with (o) { r = [delete a, delete a, delete nothere].join(); } r
+=== with_delete_outer_var
+var z = 1; var o = {}; var r; with (o) { r = delete z; } r + "," + z
+=== with_closure_after_with
+var o = { a: 1 }; var f; with (o) { f = function () { return a; }; } o.a = 2; f()
+=== with_closure_set_after_with
+var o = { a: 1 }; var f; with (o) { f = function (v) { a = v; }; } f(9); o.a
+=== with_arrow_closure
+var o = { a: 1 }; var f; with (o) { f = () => a * 2; } o.a = 4; f()
+=== with_closure_sees_removed_prop
+var o = { a: 1 }; var a = "outer"; var f; with (o) { f = function () { return a; }; } delete o.a; f()
+=== with_closure_in_loop
+var rs = []; for (var i = 0; i < 3; i++) { with ({ k: i * 10 }) { rs.push(function () { return k; }); } } rs.map(function (f) { return f(); }).join()
+=== with_nested
+var a = { x: 1, y: 1 }, b = { y: 2, z: 2 }; var r; with (a) { with (b) { r = [x, y, z].join(); y = 9; } } r + "," + a.y + "," + b.y
+=== with_nested_inner_miss_outer_hit
+var a = { x: 1 }, b = {}; var r; with (a) { with (b) { r = x; x = 5; } } r + "," + a.x
+=== with_getter
+var log = []; var o = { get a() { log.push("get"); return 1; }, set a(v) { log.push("set" + v); } }; var r; with (o) { r = a; a = 4; } log.join() + "," + r
+=== with_proxy_has_trap
+var log = []; var p = new Proxy({ a: 1 }, { has(t, k) { log.push("has:" + String(k)); return k in t; }, get(t, k, r) { if (typeof k === "symbol") log.push("sym"); else log.push("get:" + k); return t[k]; } }); var r; with (p) { r = a; } [...new Set(log)].join() + "|" + r
+=== with_proxy_has_trap_miss
+var log = []; var p = new Proxy({}, { has(t, k) { log.push(String(k)); return false; } }); var z = 1; var r; with (p) { r = z; } log.join() + "|" + r
+=== with_var_in_body_hoists
+function f() { var r = typeof v; with ({}) { var v = 3; } return r + "," + v; } f()
+=== with_var_init_through_object
+function f(o) { with (o) { var a = 7; } return o.a + "," + a; } f({ a: 1 })
+=== with_var_init_no_name
+function f(o) { with (o) { var a = 7; } return ("a" in o) + "," + a; } f({})
+=== with_function_decl_in_block
+var o = { f: 1 }; var r; with (o) { function g() { return 5; } r = g(); } r + "," + typeof g
+=== with_function_decl_shadow_object
+var o = { h() { return "obj"; } }; var r; with (o) { function h() { return "own"; } r = h(); } r
+=== with_template_style
+function tpl(obj) { var __p = ""; with (obj || {}) { __p += "Hello " + name + ", you are " + age + "." ; } return __p; } tpl({ name: "Ann", age: 30 })
+=== with_template_loop
+function tpl(data) { var __p = "", __t; with (data) { __p += "<ul>"; for (var i = 0; i < items.length; i++) { __p += "<li>" + items[i] + "</li>"; } __p += "</ul>"; } return __p; } tpl({ items: ["a", "b"] })
+=== with_template_builtin_names
+function tpl(obj) { var __p = ""; with (obj) { __p += String(name) + Math.max(1, 2) + typeof missing; } return __p; } tpl({ name: "x" })
+=== with_primitive_to_object
+var r; with ("abc") { r = length + "," + charAt(1); } r
+=== with_number_primitive
+var r; with (5) { r = toFixed(1); } r
+=== with_null_throws
+var r; try { with (null) { r = 1; } } catch (e) { r = e.name; } r
+=== with_undefined_throws
+var r; try { with (undefined) { r = 1; } } catch (e) { r = e.name; } r
+=== with_missing_name_throws
+var r; try { with ({}) { nowhere; } } catch (e) { r = e.name; } r
+=== with_break_out
+var r = []; for (var i = 0; i < 5; i++) { with ({}) { if (i === 2) break; r.push(i); } } r.join()
+=== with_continue
+var r = []; for (var i = 0; i < 4; i++) { with ({}) { if (i === 1) continue; r.push(i); } } r.join()
+=== with_return_inside
+function f(o) { with (o) { return a; } } f({ a: 3 }) + f({ a: 4 })
+=== with_return_in_loop_in_with
+function f(o) { with (o) { for (var i = 0; i < 5; i++) { if (i == a) return i; } } return -1; } f({ a: 3 })
+=== with_throw_restores_scope
+var z = "outer"; var o = { z: "obj" }; var r; try { with (o) { throw 1; } } catch (e) { r = z; } r
+=== with_scope_after_with
+var z = "outer"; var r; with ({ z: "obj" }) { r = z; } r + "," + z
+=== with_labeled
+var r = []; a: with ({ k: 1 }) { for (;;) { r.push(k); break a; } } r.join()
+=== with_try_finally_inside
+var o = { a: 1 }; var r = []; with (o) { try { r.push(a); throw 1; } catch (e) { r.push(a + 1); } finally { r.push(a + 2); } } r.join()
+=== with_let_inside_body
+var o = { a: 1 }; var r; with (o) { let a = 5; r = a; } r + "," + o.a
+=== with_let_shadows_in_nested_function
+var o = { a: 1 }; var r; with (o) { r = (function () { let a = 7; return a; })(); } r + "," + o.a
+=== with_param_shadows_object
+var o = { a: 1 }; var r; with (o) { r = (function (a) { return a; })(8); } r
+=== with_function_name_inside
+var o = { f: 1 }; var r; with (o) { r = (function f() { return typeof f; })(); } r
+=== with_object_gains_prop_later
+var o = {}; var a = "outer"; var r = []; with (o) { r.push(a); o.a = "obj"; r.push(a); delete o.a; r.push(a); } r.join()
+=== with_object_replaced_prop_value
+var o = { a: 1 }; var r = []; with (o) { o.a = 2; r.push(a); a = 3; r.push(o.a); } r.join()
+=== with_compound_ops
+var o = { n: 1 }; with (o) { n++; ++n; n *= 3; n -= 1; } o.n
+=== with_logical_assign
+var o = { a: null, b: 1 }; with (o) { a ??= 5; b ||= 9; b &&= 4; } o.a + "," + o.b
+=== with_destructuring_assign
+var o = { a: 1, b: 2 }; with (o) { [a, b] = [b, a]; } o.a + "," + o.b
+=== with_for_in_target
+var o = { k: "" }; with (o) { for (k in { x: 1, y: 2 }) {} } o.k
+=== with_update_through_closure_chain
+var o = { c: 0 }; function inc() { with (o) { c++; } } inc(); inc(); o.c
+=== with_in_called_function_sees_own_env
+var o = { a: "obj" }; function g() { return typeof a; } var r; with (o) { r = g() + "," + a; } r
+=== with_in_method_this
+var o = { n: 3 }; var host = { n: 1, m() { with (o) { return this.n + n; } } }; host.m()
+=== with_arguments_inside
+function f(o) { with (o) { return arguments.length + a; } } f({ a: 1 }, 2, 3)
+=== with_arguments_name_on_object
+function f(o) { with (o) { return typeof arguments; } } f({ arguments: 5 })
+=== with_eval_free_names_global
+var r; with ({}) { r = typeof Array + typeof undefinedName; } r
+=== with_generator_outside_ok
+function* g() { yield 1; } var o = { x: 2 }; var r; with (o) { r = x + g().next().value; } r
+=== with_class_inside_with
+var o = { K: 5 }; var r; with (o) { class C { m() { return K; } } r = new C().m(); } r
+=== with_class_extends_obj_name
+var o = { B: class { v() { return "b"; } } }; var r; with (o) { class C extends B {} r = new C().v(); } r
+=== with_sloppy_assign_creates_global
+var o = {}; with (o) { newGlobal1 = 3; } typeof newGlobal1 + "," + ("newGlobal1" in o)
+=== with_template_literal_and_tagged
+var o = { n: "w" }; var r; with (o) { r = `${n}!`; } r
+=== with_shorthand_and_object_literal
+var o = { n: 2 }; var r; with (o) { r = { n, m: n * 2 }; } r.n + "," + r.m
+=== with_callback_in_with
+var o = { k: 10 }; var r; with (o) { r = [1, 2].map(function (x) { return x * k; }); } r.join()
+=== with_recursive_function
+function f(o, n) { with (o) { return n <= 0 ? base : f(o, n - 1) + 1; } } f({ base: 5 }, 3)
+=== with_deep_chain_distinct_hops
+function a() { var x = "a"; return function () { var y = "b"; return function () { with ({ w: "w" }) { return x + y + w; } }; }; } a()()()
+=== with_same_function_without_with_after
+function f(o, useWith) { var x = "local"; if (useWith) { with (o) { return x; } } return x; } f({ x: "obj" }, true) + "," + f({ x: "obj" }, false)
+=== with_repeat_calls_stable
+function f(o) { var s = 0; with (o) { s += a; } return s; } var t = 0; for (var i = 0; i < 5; i++) t += f({ a: i }); t
+=== with_repeat_site_object_changes
+function f(o) { with (o) { return typeof a; } } var rs = []; for (var i = 0; i < 4; i++) rs.push(f(i % 2 ? { a: 1 } : {})); rs.join()
+=== with_strict_function_is_syntax_error
+var r; try { new Function('"use strict"; with ({}) {}'); r = "none"; } catch (e) { r = e.name; } r
+=== with_strict_inherited_is_syntax_error
+var r; try { new Function('"use strict"; function g() { with ({}) {} }'); r = "none"; } catch (e) { r = e.name; } r
+=== with_sloppy_function_ok
+var f = new Function("o", "with (o) { return a; }"); f({ a: 6 })
+=== with_function_made_inside_with_ctor_global
+var o = { a: 1 }; var a = "g"; var r; with (o) { r = new Function("return typeof a")(); } r
+=== with_symbol_key_name_not_matched
+var s = Symbol("a"); var o = { [s]: 1 }; var r; with (o) { r = typeof a; } r
+=== with_numeric_looking_name
+var o = { a1: 1 }; var r; with (o) { r = a1; } r
+=== with_empty_body
+var r = 1; with ({}) ; with ({}) {} r
+=== with_object_expr_side_effect_once
+var n = 0; function mk() { n++; return { a: n }; } var r; with (mk()) { r = a + a + a; } r + "," + n
+=== with_getter_throws
+var o = { get a() { throw new RangeError("x"); } }; var r; try { with (o) { a; } } catch (e) { r = e.name; } r
+=== with_proxy_has_throws
+var p = new Proxy({}, { has() { throw new TypeError("h"); } }); var r; try { with (p) { zz; } } catch (e) { r = e.name; } r
+=== with_proxy_unscopables_get
+var log = []; var p = new Proxy({ a: 1 }, { get(t, k) { log.push(typeof k === "symbol" ? "sym" : k); return t[k]; } }); var r; with (p) { r = a; } log.join() + "|" + r
+=== with_leaf_function_in_body_repeat
+var o = { a: 1 }; var f; with (o) { f = function (x) { var t = x + a; return t; }; } var s = 0; for (var i = 0; i < 6; i++) s += f(i); o.a = 10; s + "," + f(1)
+=== with_leaf_function_own_var_wins_repeat
+var o = { t: 100 }; var f; with (o) { f = function (x) { var t = x * 2; return t + 0; }; } var s = 0; for (var i = 0; i < 6; i++) s += f(i); s
+=== with_arrow_repeat
+var o = { k: 2 }; var f; with (o) { f = (x) => x * k; } var s = 0; for (var i = 0; i < 6; i++) s += f(i); s
+=== with_site_outside_stays_correct_repeat
+function f(o, i) { var x = i; var before = x; with (o) { x = x + 1; } return before + "," + x + "," + o.x; } var r = []; for (var i = 0; i < 5; i++) r.push(f(i % 2 ? { x: 50 } : {}, i)); r.join("|")
+=== with_hops_vary_repeat
+function mk(o) { var up = "u"; return function () { var mid = "m"; with (o) { return function () { return up + mid + typeof w; }; } }; } var rs = []; for (var i = 0; i < 5; i++) rs.push(mk(i % 2 ? { w: 1 } : {})()()); rs.join()
+=== with_block_let_inside_repeat
+function f(o) { with (o) { { let a = 5; var r = a; } { let b = 1; r += b; } } return r; } var s = 0; for (var i = 0; i < 5; i++) s += f({ b: 100 }); s
+=== with_loop_in_function_repeat
+function f(o) { var s = 0; for (var i = 0; i < 4; i++) { with (o) { s += n; n = n + 1; } } return s + "," + o.n; } f({ n: 1 }) + ";" + f({ n: 1 }) + ";" + f({ n: 1 })
+=== with_closure_chain_captures_with_env
+function mk(o) { with (o) { return function () { return function () { return p; }; }; } } var a = mk({ p: 1 }), b = mk({ p: 2 }); [a()(), b()(), a()(), b()()].join()
+=== with_nested_function_decl_hoisted_name
+function f(o) { with (o) { function inner() { return typeof x; } } return inner(); } f({ x: 1 }) + f({})
+=== with_iife_in_with
+var o = { v: 3 }; var r; with (o) { r = (function () { return v * 2; })() + (() => v)(); } r
+=== with_label_continue_nested_loops
+var r = []; outer: for (var i = 0; i < 3; i++) { with ({ k: i }) { for (var j = 0; j < 3; j++) { if (j == 1) continue outer; r.push(k + "" + j); } } } r.join()
+=== with_switch_in_with
+var r; with ({ k: 2 }) { switch (k) { case 1: r = "one"; break; case 2: r = "two"; break; } } r
+=== with_try_finally_return_restores
+var z = "outer"; function f(o) { with (o) { try { return z; } finally { z = "f"; } } } var a = f({ z: "obj" }); a + "," + z
+=== with_getter_this_is_object
+var o = { n: 4, get dbl() { return this.n * 2; } }; var r; with (o) { r = dbl; } r
+=== with_setter_runs
+var o = { _v: 0, set v(x) { this._v = x * 2; } }; with (o) { v = 5; } o._v
+=== with_frozen_object_sloppy_write_ignored
+var o = Object.freeze({ a: 1 }); with (o) { a = 2; } o.a
+=== with_typeof_undeclared_in_body_repeat
+function f(o) { with (o) { return typeof a + typeof zzz_missing; } } var r = []; for (var i = 0; i < 4; i++) r.push(f(i % 2 ? { a: "s" } : {})); r.join()
+=== with_sloppy_inner_read_of_deleted_is_undefined
+var env = { b: 0, get [Symbol.unscopables]() { delete env.b; return null; } }; var r; with (env) { r = typeof b; } r
