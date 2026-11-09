@@ -614,15 +614,26 @@ fn imports_use_the_redirected_stylesheet_url_as_their_base() {
 }
 
 #[test]
-fn stylesheet_discovery_limits_stop_before_scripts() {
+fn stylesheet_discovery_limits_keep_scripts_and_skip_excess_sources() {
     big(|| {
         let srv = site(vec![]);
         let (mut b, url) = browser("<link rel=stylesheet href=a.css><script>globalThis.ran=1</script>", &srv, "/page.html");
         b.set_computed_limits(crate::browser_computed::ComputedLimits { max_sources: 0, ..Default::default() });
         let r=b.run_page(PageConfig {url, client: Client::new(), limits: limits(), fetch: None});
-        assert!(matches!(r.stop, Stop::Fatal(Fatal::Limit(_))));
-        assert_eq!(r.scripts_run,0);
-        assert_eq!(srv.hits("/a.css"),0);
+        assert_eq!(r.stop, Stop::Settled);
+        assert_eq!(r.scripts_run, 1);
+        let value = b.run_script("globalThis.ran").unwrap();
+        assert_eq!(b.it.display(value), "1");
+        assert_eq!(srv.hits("/a.css"), 0);
+
+        let (mut b, url) = browser("<style>p{direction:rtl}</style><link rel=stylesheet href=a.css><p id=p></p><script>globalThis.ran=getComputedStyle(document.getElementById('p')).direction</script>", &srv, "/page.html");
+        b.set_computed_limits(crate::browser_computed::ComputedLimits { max_sources: 1, ..Default::default() });
+        let r = b.run_page(PageConfig { url, client: Client::new(), limits: limits(), fetch: None });
+        assert_eq!(r.stop, Stop::Settled);
+        assert_eq!(r.scripts_run, 1);
+        let value = b.run_script("globalThis.ran").unwrap();
+        assert_eq!(b.it.display(value), "rtl");
+        assert_eq!(srv.hits("/a.css"), 0);
     });
 }
 

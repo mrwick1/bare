@@ -3,7 +3,7 @@
 use super::*;
 
 fn f(loc: u8) -> NumFmt {
-    NumFmt { loc, style: Style::Decimal, currency: *b"USD", display: SYMBOL, accounting: false, min_int: 1, rounding: Rounding::Fraction, fd: (0, 3), sd: (1, 21), grouping: Grouping::Auto, sign: SignDisplay::Auto, mode: HALF_EXPAND, strip_zero: false }
+    NumFmt { loc, style: Style::Decimal, currency: *b"USD", display: SYMBOL, accounting: false, min_int: 1, rounding: Rounding::Fraction, fd: (0, 3), sd: (1, 21), grouping: Grouping::Auto, sign: SignDisplay::Auto, mode: HALF_EXPAND, unit: 255, per_unit: 255, unit_display: 0, notation: 0, compact_long: false, strip_zero: false }
 }
 
 fn fmt(c: &mut Cache, f: &NumFmt, x: f64) -> String {

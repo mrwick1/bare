@@ -513,6 +513,7 @@ pub struct Dom {
     /// `offsetWidth` and `offsetHeight` (`browser_geometry.rs`).
     pub(crate) geometry: crate::browser_geometry::Geometry,
     /// `document.implementation`, once read (`browser_implementation.rs`). It is also in `fixed`.
+    pub(crate) parsing_protos: std::cell::Cell<[Option<ObjId>; 2]>,
     pub(crate) implementation: std::cell::Cell<Option<ObjId>>,
     /// The prototype and the constructor of `PerformanceObserver`, once read (`browser_perf_observer.rs`). Both are also in `fixed`.
     pub(crate) perf_observer: std::cell::Cell<Option<ObjId>>,
@@ -1460,6 +1461,7 @@ impl Browser {
             computed: Default::default(),
             geometry: Default::default(),
             implementation: Default::default(),
+            parsing_protos: Default::default(),
             perf_observer: Default::default(),
             perf_observer_ctor: Default::default(),
             perf_entries: Default::default(),

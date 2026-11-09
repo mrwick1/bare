@@ -573,14 +573,14 @@ fn caps_are_uncatchable_and_checked_before_the_expensive_work() {
     assert_eq!(js(&mut b, "ran"), "0");
     assert_eq!(b.computed_stats().builds, 0);
     assert_eq!(b.style_availability().unwrap(), crate::browser_computed::StyleAvailability::Ready);
-    // computed-sources: sheet count, and bytes (before anything is parsed or built)
+    // Excess page sources are dropped before parsing. Supplied sheets retain their caps.
     let mut b = at("<style>a{}</style><style>b{}</style><div id=a></div>");
     b.set_computed_limits(ComputedLimits { max_sources: 1, ..Default::default() });
-    assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('a')).display"), lim("computed-sources"));
+    assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('a')).display"), "block");
     let mut b = at(&format!("<style>{}</style><div id=a></div>", "a{color:red}".repeat(1000)));
     b.set_computed_limits(ComputedLimits { max_sheet_bytes: 1000, ..Default::default() });
-    assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('a')).display"), lim("computed-sources"));
-    assert_eq!(b.computed_stats().builds, 0);
+    assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('a')).display"), "block");
+    assert_eq!(b.computed_stats().builds, 1);
     // computed-rules: checked after the build (bounded by the bytes), before the cascade runs
     let mut b = at("<style>a{} b{} c{color:red} d{color:red} e{color:red}</style><div id=a></div>");
     b.set_computed_limits(ComputedLimits { max_rules: 3, ..Default::default() });
@@ -725,4 +725,12 @@ fn styles_are_reused_until_the_document_changes() {
     // A custom element that is defined matches `:defined`, and no tree counter moves.
     assert_eq!(n(&mut b, "getComputedStyle(x).color"), ("rgb(0, 0, 0)".into(), 1, 4));
     assert_eq!(n(&mut b, "customElements.define('x-a', class extends HTMLElement {}); getComputedStyle(x).color"), ("rgb(0, 128, 0)".into(), 2, 4));
+}
+
+#[test]
+fn excess_shadow_sources_do_not_abort_page() {
+    let mut b = at("<div id=a></div><div id=b></div>");
+    b.set_computed_limits(ComputedLimits { max_sources: 1, ..Default::default() });
+    js(&mut b, "document.getElementById('a').attachShadow({mode:'open'}).innerHTML='<style>:host{color:red}</style>'; document.getElementById('b').attachShadow({mode:'open'}).innerHTML='<style>:host{color:blue}</style>'");
+    assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('a')).color"), "rgb(255, 0, 0)");
 }

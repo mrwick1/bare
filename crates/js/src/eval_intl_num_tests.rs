@@ -75,15 +75,10 @@ fn gates_refuse_what_bare_cannot_format() {
     big(|| {
         let mut it = realm();
         for (src, what) in [
-            ("new Intl.NumberFormat('en', { style: 'unit', unit: 'meter' })", "Intl.NumberFormat style unit"),
-            ("new Intl.NumberFormat('en', { notation: 'compact' })", "Intl.NumberFormat option notation (only standard)"),
-            ("new Intl.NumberFormat('en', { notation: 'scientific' })", "Intl.NumberFormat option notation (only standard)"),
-            ("new Intl.NumberFormat('en', { style: 'currency', currency: 'USD', currencyDisplay: 'name' })", "Intl.NumberFormat option currencyDisplay name"),
             ("new Intl.NumberFormat('en', { numberingSystem: 'arab' })", "Intl.NumberFormat option numberingSystem"),
             ("new Intl.NumberFormat('en', { roundingIncrement: 5, maximumFractionDigits: 2, minimumFractionDigits: 2 })", "Intl.NumberFormat option roundingIncrement"),
             ("new Intl.NumberFormat('en').formatRange(1, 2)", "Intl.NumberFormat.prototype.formatRange"),
             ("new Intl.NumberFormat('en-u-nu-arab')", "Intl: a locale with an extension (-u-, -t-, -x-)"),
-            ("(1).toLocaleString('en', { notation: 'compact' })", "Intl.NumberFormat option notation (only standard)"),
             ("new Intl.Collator('en', { usage: 'search' })", "Intl.Collator option usage search"),
             ("new Intl.Collator('en', { collation: 'phonebk' })", "Intl.Collator option collation"),
             ("'a'.localeCompare('b', 'en', { collation: 'phonebk' })", "Intl.Collator option collation"),
@@ -157,5 +152,29 @@ fn segmenter_input_is_charged_and_long_strings_work() {
         assert_eq!(out(&mut it, "var s = new Intl.Segmenter('en', { granularity: 'word' }).segment('ab '.repeat(5000)); [...s].length"), "number:10000");
         assert_eq!(out(&mut it, "s.containing(14999).segment"), "string: ");
         assert_eq!(out(&mut it, "s.containing(15000)"), "undefined");
+    });
+}
+
+#[test]
+fn notation_formats_english() {
+    big(|| {
+        let mut it = realm();
+        for (options, expected) in [
+            ("notation:'compact'", "1.2M"),
+            ("notation:'compact',compactDisplay:'long'", "1.2 million"),
+            ("notation:'scientific'", "1.235E6"),
+            ("notation:'engineering'", "1.235E6"),
+        ] {
+            assert_eq!(out(&mut it, &format!("new Intl.NumberFormat('en-US', {{{options}}}).format(1234567)")), format!("string:{expected}"));
+        }
+    });
+}
+
+#[test]
+fn english_unit_and_currency_names() {
+    big(|| {
+        let mut it = realm();
+        assert_eq!(out(&mut it, "new Intl.NumberFormat('en-US', {style:'unit',unit:'meter',unitDisplay:'long'}).format(2)"), "string:2 meters");
+        assert_eq!(out(&mut it, "new Intl.NumberFormat('en-US', {style:'currency',currency:'USD',currencyDisplay:'name'}).format(2)"), "string:2.00 US dollars");
     });
 }

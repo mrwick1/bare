@@ -325,9 +325,7 @@ impl Dom {
     /// With `record`, each `<link>` is bound to the sheet that it has now (`Computed::bound`).
     fn plan(&self, doc: &mut bare_html::dom::Document, vp: (f32, f32), record: bool) -> R<Plan> {
         let l = self.computed.lim.get();
-        let Some(sources) = cascade::sources_capped(doc, vp, l.max_sources, l.max_sheet_bytes, doc.has_shadow_roots()) else {
-            return Err(self.lim("computed-sources"));
-        };
+        let sources = cascade::sources_capped(doc, vp, l.max_sources, l.max_sheet_bytes, doc.has_shadow_roots());
         let ext = self.computed.ext.borrow();
         let mut p = Plan { parts: Vec::new(), bytes: 0, missing: Vec::new(), more: false, strict: false };
         let (pending_ok, bound) = (self.computed.pending_ok.get(), self.computed.bound.borrow());
@@ -335,10 +333,10 @@ impl Dom {
         let (mut seen, mut changes) = (Vec::new(), Vec::new());
         fn add(d: &Dom, p: &mut Plan, scope: NodeId, layer: Option<String>, text: &str) -> R<()> {
             let l = d.computed.lim.get();
-            p.bytes = p.bytes.saturating_add(text.len());
-            if p.bytes > l.max_sheet_bytes || p.parts.len() >= l.max_sources {
-                return Err(d.lim("computed-sources"));
+            if text.len() > l.max_sheet_bytes.saturating_sub(p.bytes) || p.parts.len() >= l.max_sources {
+                return Ok(());
             }
+            p.bytes += text.len();
             p.parts.push((scope, layer, text.to_string()));
             Ok(())
         }
