@@ -4729,3 +4729,22 @@ Not tested: a real external proxy, real Reddit, HTTP/2 through CONNECT, an IPv6 
 Final validation: `RUST_TEST_THREADS=1 cargo test --release --workspace` passes on the combined tree with main `dfa0e09`. The standalone release net suite also passes. One earlier parallel workspace run timed out in both `bare-drive --test chunked` tests; both passed on retry. The full serial run passed before and after the main update. `git diff --check` passes. Existing CSS dead-code and driver unused-variable warnings remain.
 
 Main moved to `1f525025` during PR creation. Only the progress append conflicted. Both sections were retained. `RUST_TEST_THREADS=1 cargo test --release --workspace` passes again on that combined tree. The proxy implementation and net cost workload did not change.
+
+## 2. Reddit direct access check, no proxy (2026-11-09)
+
+Question: does Reddit block bare with no proxy, and on which signal? A research agent sent four requests to public pages, more than 3 seconds apart. It did not retry a blocked URL. It used no login and no cookies.
+
+| Client and headers | URL | Result |
+|---|---|---|
+| `curl`, Chrome UA, Accept, Accept-Language | `www.reddit.com/r/programming/.json` | 403, network-security block page |
+| `curl`, same headers | `old.reddit.com/r/programming/` | 302 to the login page |
+| bare, default (`bare/0.1`) | `www.reddit.com/r/rust/.json` | 403, same block page |
+| bare, same Chrome headers | `old.reddit.com/r/rust/` | 302 to the login page |
+
+Observed: `curl` is blocked the same way as bare. Chrome headers did not give public content. The responses name `server=snooserv` and `via=1.1 varnish`.
+
+Hypothesis, to verify: the block depends on the IP or network reputation, or on a policy for anonymous access. These four requests cannot separate IP, headers and TLS fingerprint. The two clients also fetched different subreddits.
+
+Next check: one request through a real residential or mobile proxy with `BARE_PROXY` (PR #306). A proxy benefit is not proven until then. Fallback: the official Reddit API with a personal OAuth app.
+
+Not tested: the same URL before and after a block, another IP or proxy, a browser TLS hello, login, cookies, challenges. The bare CLI shows no response headers and has no header override. The fourth request used a scratch harness.
