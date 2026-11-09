@@ -4,7 +4,8 @@
 //! We offer one of everything, except signatures:
 //! - version TLS 1.3 only (`supported_versions` = 0x0304; legacy_version 0x0303);
 //! - cipher suite `TLS_AES_128_GCM_SHA256` (0x1301);
-//! - group X25519 (0x001d) with one key share;
+//! - groups X25519 (0x001d) and secp256r1 (0x0017), with one key share, for X25519. secp256r1 serves TLS 1.2 only;
+//!   a TLS 1.3 server that insists on it answers with a HelloRetryRequest, which we reject;
 //! - `signature_algorithms` = `ecdsa_secp256r1_sha256` (0x0403), `ecdsa_secp384r1_sha384` (0x0503),
 //!   `rsa_pss_rsae_sha256` (0x0804) and `rsa_pss_rsae_sha384` (0x0805). This limits only the server's
 //!   `CertificateVerify` (P-256 and P-384 leaf keys use ECDSA; RSA leaf keys of 2048 to 4096 bits use the PSS schemes);
@@ -15,7 +16,13 @@
 //!   `signature_algorithms` does not apply to certificates);
 //! - SNI host name and ALPN `http/1.1`, with `h2` before it when the caller offers it.
 //!
-//! No PSK, no early data, no TLS 1.2 fallback, no compression, no renegotiation.
+//! The same ClientHello also offers TLS 1.2 (RFC 5246): `supported_versions` lists 1.3 and 1.2, the cipher list adds
+//! `TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256` (0xC02B) and `TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256` (0xC02F), and
+//! `signature_algorithms` adds `rsa_pkcs1_sha256` and `rsa_pkcs1_sha384` (TLS 1.2 ServerKeyExchange may use them).
+//! The hello also sends `extended_master_secret` (RFC 7627) and an empty `renegotiation_info` (RFC 5746).
+//! `is_tls12_server_hello` tells the two apart and `parse_server_hello12` reads the 1.2 one.
+//!
+//! No PSK, no early data, no compression, no renegotiation, no session resumption.
 //! `HelloRetryRequest` is detected and rejected with `HelloError::HelloRetryRequest`.
 //! The caller must then abort. Continuing would need a different transcript (RFC 8446 §4.4.1)
 //! and a second ClientHello. This code does neither.
@@ -30,6 +37,9 @@ pub const SERVER_HELLO: u8 = 2;
 pub const ENCRYPTED_EXTENSIONS: u8 = 8;
 pub const CERTIFICATE: u8 = 11;
 pub const CERTIFICATE_VERIFY: u8 = 15;
+pub const SERVER_KEY_EXCHANGE: u8 = 12;
+pub const SERVER_HELLO_DONE: u8 = 14;
+pub const CLIENT_KEY_EXCHANGE: u8 = 16;
 pub const FINISHED: u8 = 20;
 /// The largest body a `uint24` length can describe.
 pub const MAX_BODY_LEN: usize = 0xFF_FFFF;
@@ -37,7 +47,10 @@ pub const MAX_BODY_LEN: usize = 0xFF_FFFF;
 pub const LEGACY_VERSION: u16 = 0x0303;
 pub const TLS13: u16 = 0x0304;
 pub const TLS_AES_128_GCM_SHA256: u16 = 0x1301;
+pub const TLS_ECDHE_ECDSA_AES_128_GCM_SHA256: u16 = 0xC02B;
+pub const TLS_ECDHE_RSA_AES_128_GCM_SHA256: u16 = 0xC02F;
 pub const GROUP_X25519: u16 = 0x001d;
+pub const GROUP_SECP256R1: u16 = 0x0017;
 pub const ECDSA_SECP256R1_SHA256: u16 = 0x0403;
 pub const ECDSA_SECP384R1_SHA384: u16 = 0x0503;
 pub const RSA_PSS_RSAE_SHA256: u16 = 0x0804;
@@ -47,7 +60,7 @@ pub const RSA_PKCS1_SHA384: u16 = 0x0501;
 pub const MAX_SESSION_ID_LEN: usize = 32;
 pub const MAX_SERVER_NAME_LEN: usize = 253;
 /// Size of the longest ClientHello we can write (32-byte session ID, 253-byte name).
-pub const MAX_CLIENT_HELLO_LEN: usize = 444;
+pub const MAX_CLIENT_HELLO_LEN: usize = 465;
 
 /// SHA-256("HelloRetryRequest"). A ServerHello with this random is a HelloRetryRequest.
 pub const HELLO_RETRY_REQUEST_RANDOM: [u8; 32] = [
@@ -55,7 +68,13 @@ pub const HELLO_RETRY_REQUEST_RANDOM: [u8; 32] = [
     0x8C, 0x5E, 0x07, 0x9E, 0x09, 0xE2, 0xC8, 0xA8, 0x33, 0x9C,
 ];
 
+/// The last 8 bytes of a TLS 1.2 ServerHello random from a server that supports 1.3 (RFC 8446 §4.1.3).
+pub const DOWNGRADE_TLS12: [u8; 8] = *b"DOWNGRD\x01";
+
 const EXT_SERVER_NAME: u16 = 0;
+const EXT_EC_POINT_FORMATS: u16 = 11;
+const EXT_EXTENDED_MASTER_SECRET: u16 = 23;
+const EXT_RENEGOTIATION_INFO: u16 = 0xff01;
 const EXT_SUPPORTED_GROUPS: u16 = 10;
 const EXT_ALPN: u16 = 16;
 const EXT_SIGNATURE_ALGORITHMS: u16 = 13;
@@ -95,6 +114,10 @@ pub enum HelloError {
     UnsupportedVersion,
     /// The key share is not X25519 with 32 bytes.
     BadKeyShare,
+    /// A TLS 1.2 ServerHello carries the downgrade marker: a server that supports 1.3 answered a 1.3 offer with 1.2.
+    Downgrade,
+    /// A TLS 1.2 ServerHello echoes our session ID. That means resumption, and we never offer it.
+    Resumption,
 }
 
 impl fmt::Display for HelloError {
@@ -117,6 +140,8 @@ impl fmt::Display for HelloError {
                 HelloError::BadCompression => "compression method is not null",
                 HelloError::UnsupportedVersion => "server did not select TLS 1.3",
                 HelloError::BadKeyShare => "key share is not a 32-byte X25519 share",
+                HelloError::Downgrade => "TLS 1.2 ServerHello carries the downgrade marker",
+                HelloError::Resumption => "TLS 1.2 ServerHello resumes a session we never offered",
                 _ => unreachable!(),
             }),
         }
@@ -255,8 +280,10 @@ pub fn encode_client_hello(p: &ClientHelloParams, out: &mut [u8]) -> Result<usiz
     w.put(p.random)?;
     w.u8(p.session_id.len() as u8)?;
     w.put(p.session_id)?;
-    w.u16(2)?; // one cipher suite
+    w.u16(6)?; // three cipher suites: the TLS 1.3 one, then the two TLS 1.2 ones
     w.u16(TLS_AES_128_GCM_SHA256)?;
+    w.u16(TLS_ECDHE_ECDSA_AES_128_GCM_SHA256)?;
+    w.u16(TLS_ECDHE_RSA_AES_128_GCM_SHA256)?;
     w.put(&[1, 0])?; // one compression method: null
     let exts = w.open(2)?;
     w.ext(EXT_SERVER_NAME, |w| {
@@ -267,15 +294,18 @@ pub fn encode_client_hello(p: &ClientHelloParams, out: &mut [u8]) -> Result<usiz
         w.close(list, 2)
     })?;
     w.ext(EXT_SUPPORTED_GROUPS, |w| {
-        w.u16(2)?;
-        w.u16(GROUP_X25519)
+        w.u16(4)?;
+        w.u16(GROUP_X25519)?;
+        w.u16(GROUP_SECP256R1) // TLS 1.2 only: ECDSA P-256 certificates and ECDHE need it. The key share stays X25519.
     })?;
     w.ext(EXT_SIGNATURE_ALGORITHMS, |w| {
-        w.u16(8)?;
+        w.u16(12)?;
         w.u16(ECDSA_SECP256R1_SHA256)?;
         w.u16(ECDSA_SECP384R1_SHA384)?;
         w.u16(RSA_PSS_RSAE_SHA256)?;
-        w.u16(RSA_PSS_RSAE_SHA384)
+        w.u16(RSA_PSS_RSAE_SHA384)?;
+        w.u16(RSA_PKCS1_SHA256)?; // TLS 1.2 only: a 1.3 CertificateVerify never uses it
+        w.u16(RSA_PKCS1_SHA384)
     })?;
     w.ext(EXT_SIGNATURE_ALGORITHMS_CERT, |w| {
         w.u16(8)?;
@@ -285,8 +315,9 @@ pub fn encode_client_hello(p: &ClientHelloParams, out: &mut [u8]) -> Result<usiz
         w.u16(RSA_PKCS1_SHA384)
     })?;
     w.ext(EXT_SUPPORTED_VERSIONS, |w| {
-        w.u8(2)?;
-        w.u16(TLS13)
+        w.u8(4)?;
+        w.u16(TLS13)?;
+        w.u16(LEGACY_VERSION)
     })?;
     w.ext(EXT_KEY_SHARE, |w| {
         let list = w.open(2)?;
@@ -305,6 +336,8 @@ pub fn encode_client_hello(p: &ClientHelloParams, out: &mut [u8]) -> Result<usiz
         w.put(b"http/1.1")?;
         w.close(list, 2)
     })?;
+    w.ext(EXT_EXTENDED_MASTER_SECRET, |_| Ok(()))?;
+    w.ext(EXT_RENEGOTIATION_INFO, |w| w.u8(0))?;
     w.close(exts, 2)?;
     w.close(msg, 3)?;
     Ok(w.n)
@@ -422,6 +455,140 @@ pub fn parse_server_hello(msg: &[u8], offered_session_id: &[u8]) -> Result<Serve
     Ok(ServerHello { x25519_public: share.ok_or(HelloError::MissingExtension(EXT_KEY_SHARE))? })
 }
 
+/// True when `msg` (a whole ServerHello) answers with TLS 1.2: no `supported_versions` extension and no HelloRetryRequest
+/// random. A message that does not parse gives false. The TLS 1.3 parser then reports the error.
+pub fn is_tls12_server_hello(msg: &[u8]) -> bool {
+    fn scan(body: &[u8]) -> Result<bool, HelloError> {
+        let mut r = Reader(body);
+        r.take(2)?; // legacy_version
+        if r.take(32)? == HELLO_RETRY_REQUEST_RANDOM {
+            return Ok(false);
+        }
+        let sid = r.u8()? as usize;
+        r.take(sid + 3)?; // session ID, cipher suite, compression
+        if r.0.is_empty() {
+            return Ok(true); // a TLS 1.2 ServerHello may have no extensions
+        }
+        let len = r.u16()? as usize;
+        let mut e = Reader(r.take(len)?);
+        while !e.0.is_empty() {
+            let ty = e.u16()?;
+            let l = e.u16()? as usize;
+            e.take(l)?;
+            if ty == EXT_SUPPORTED_VERSIONS {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+    msg.get(HANDSHAKE_HEADER_LEN..).is_some_and(|b| scan(b).unwrap_or(false))
+}
+
+/// What the handshake needs from a valid TLS 1.2 ServerHello.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerHello12<'a> {
+    pub random: [u8; 32],
+    /// 0xC02B or 0xC02F.
+    pub suite: u16,
+    /// The server agreed to `extended_master_secret`.
+    pub ems: bool,
+    /// The ALPN protocol the server chose, if it sent the extension.
+    pub alpn: Option<&'a [u8]>,
+}
+
+/// Validate a TLS 1.2 ServerHello against our offer (RFC 5246 §7.4.1.3, RFC 8446 §4.1.3). `msg` is the whole message.
+///
+/// Accepts only: type 2, version 0x0303, no downgrade marker in the random, a session ID that is not ours, cipher
+/// 0xC02B or 0xC02F, compression 0 and at most one each of `server_name` (empty), `ec_point_formats` (with
+/// uncompressed), `extended_master_secret` (empty), `renegotiation_info` (empty) and ALPN (one name). Any other
+/// extension is an error: we did not offer it.
+pub fn parse_server_hello12<'a>(msg: &'a [u8], offered_session_id: &[u8]) -> Result<ServerHello12<'a>, HelloError> {
+    let h = parse_header(msg)?;
+    if h.msg_type != SERVER_HELLO {
+        return Err(HelloError::BadMessageType);
+    }
+    let body = &msg[HANDSHAKE_HEADER_LEN..];
+    if body.len() != h.body_len {
+        return Err(if body.len() < h.body_len { HelloError::Truncated } else { HelloError::BadLength });
+    }
+    let mut r = Reader(body);
+    if r.u16()? != LEGACY_VERSION {
+        return Err(HelloError::UnsupportedVersion);
+    }
+    let random: [u8; 32] = r.take(32)?.try_into().map_err(|_| HelloError::Truncated)?;
+    if random[24..] == DOWNGRADE_TLS12 {
+        return Err(HelloError::Downgrade);
+    }
+    let sid_len = r.u8()? as usize;
+    if sid_len > MAX_SESSION_ID_LEN {
+        return Err(HelloError::BadLength);
+    }
+    if sid_len > 0 && r.take(sid_len)? == offered_session_id {
+        return Err(HelloError::Resumption);
+    }
+    let suite = r.u16()?;
+    if suite != TLS_ECDHE_ECDSA_AES_128_GCM_SHA256 && suite != TLS_ECDHE_RSA_AES_128_GCM_SHA256 {
+        return Err(HelloError::UnsupportedCipher);
+    }
+    if r.u8()? != 0 {
+        return Err(HelloError::BadCompression);
+    }
+    let (mut ems, mut alpn, mut seen) = (false, None, [false; 5]);
+    if !r.0.is_empty() {
+        let ext_len = r.u16()? as usize;
+        if r.0.len() != ext_len {
+            return Err(if r.0.len() < ext_len { HelloError::Truncated } else { HelloError::BadLength });
+        }
+        while !r.0.is_empty() {
+            let ty = r.u16()?;
+            let len = r.u16()? as usize;
+            let mut d = Reader(r.take(len)?);
+            let slot = match ty {
+                EXT_SERVER_NAME => 0,
+                EXT_EC_POINT_FORMATS => 1,
+                EXT_EXTENDED_MASTER_SECRET => 2,
+                EXT_RENEGOTIATION_INFO => 3,
+                EXT_ALPN => 4,
+                _ => return Err(HelloError::UnsolicitedExtension(ty)),
+            };
+            if std::mem::replace(&mut seen[slot], true) {
+                return Err(HelloError::DuplicateExtension(ty));
+            }
+            match ty {
+                EXT_SERVER_NAME | EXT_EXTENDED_MASTER_SECRET if len != 0 => return Err(HelloError::BadLength),
+                EXT_EXTENDED_MASTER_SECRET => ems = true,
+                EXT_EC_POINT_FORMATS => {
+                    let n = d.u8()? as usize;
+                    if !d.take(n)?.contains(&0) || !d.0.is_empty() {
+                        return Err(HelloError::BadLength); // uncompressed must be listed
+                    }
+                }
+                EXT_RENEGOTIATION_INFO => {
+                    // An empty renegotiated_connection: this is the first handshake (RFC 5746 §3.6).
+                    if d.0 != [0u8] {
+                        return Err(HelloError::BadLength);
+                    }
+                }
+                EXT_ALPN => {
+                    let list = d.u16()? as usize;
+                    let mut names = Reader(d.take(list)?);
+                    if !d.0.is_empty() {
+                        return Err(HelloError::BadLength);
+                    }
+                    let n = names.u8()? as usize;
+                    let name = names.take(n)?;
+                    if !names.0.is_empty() {
+                        return Err(HelloError::BadLength);
+                    }
+                    alpn = Some(name);
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(ServerHello12 { random, suite, ems, alpn })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -432,8 +599,8 @@ mod tests {
     }
 
     // Expected bytes were built by an independent Python script (struct packing, no TLS library).
-    const CH_FULL: &str = "010000c303031111111111111111111111111111111111111111111111111111111111111111202222222222222222222222222222222222222222222222222222222222222222000213010100007800000010000e00000b6578616d706c652e636f6d000a00040002001d000d000a000804030503080408050032000a00080403050304010501002b0003020304003300260024001d002033333333333333333333333333333333333333333333333333333333333333330010000b000908687474702f312e31";
-    const CH_NOSID: &str = "010000990303444444444444444444444444444444444444444444444444444444444444444400000213010100006e00000006000400000161000a00040002001d000d000a000804030503080408050032000a00080403050304010501002b0003020304003300260024001d002055555555555555555555555555555555555555555555555555555555555555550010000b000908687474702f312e31";
+    const CH_FULL: &str = "010000d80303111111111111111111111111111111111111111111111111111111111111111120222222222222222222222222222222222222222222222222222222222222222200061301c02bc02f0100008900000010000e00000b6578616d706c652e636f6d000a00060004001d0017000d000e000c0403050308040805040105010032000a00080403050304010501002b00050403040303003300260024001d002033333333333333333333333333333333333333333333333333333333333333330010000b000908687474702f312e3100170000ff01000100";
+    const CH_NOSID: &str = "010000ae030344444444444444444444444444444444444444444444444444444444444444440000061301c02bc02f0100007f00000006000400000161000a00060004001d0017000d000e000c0403050308040805040105010032000a00080403050304010501002b00050403040303003300260024001d002055555555555555555555555555555555555555555555555555555555555555550010000b000908687474702f312e3100170000ff01000100";
     // RFC 8448 §3 ServerHello (empty session ID in that trace).
     const RFC8448_SH: &str = "020000560303a6af06a4121860dc5e6e60249cd34c95930c8ac5cb1434dac155772ed3e2692800130100002e00330024001d0020c9828876112095fe66762bdbf7c672e156d6cc253b833df1dd69b1b04e751f0f002b00020304";
     const RFC8448_SERVER_PUB: &str = "c9828876112095fe66762bdbf7c672e156d6cc253b833df1dd69b1b04e751f0f";
@@ -460,19 +627,19 @@ mod tests {
     #[test]
     fn client_hello_offers_h2_before_http11() {
         let (plain, h2) = (hex(&enc(1, b"", 2, b"x.test").unwrap()), hex(&enc_alpn(1, b"", 2, b"x.test", true).unwrap()));
-        assert!(plain.ends_with("0010000b000908687474702f312e31"));
-        assert!(h2.ends_with("0010000e000c02683208687474702f312e31"));
+        assert!(plain.contains("0010000b000908687474702f312e31"));
+        assert!(h2.contains("0010000e000c02683208687474702f312e31"));
         // Only the lengths of the ClientHello (3 bytes), its extensions (2 bytes at 0x00..) and the ALPN extension change.
         assert_eq!(h2.len(), plain.len() + 6);
     }
 
     #[test]
     fn client_hello_signature_algorithms_are_split() {
-        // signature_algorithms (13) holds 0x0403, 0x0503, 0x0804 and 0x0805. The cert list (50) holds
-        // 0x0403, 0x0503, 0x0401 and 0x0501.
+        // signature_algorithms (13) holds 0x0403, 0x0503, 0x0804 and 0x0805, then 0x0401 and 0x0501 for TLS 1.2
+        // ServerKeyExchange. The cert list (50) holds 0x0403, 0x0503, 0x0401 and 0x0501.
         let m = enc(1, b"", 2, b"x.test").unwrap();
         let h = hex(&m);
-        assert!(h.contains("000d000a00080403050308040805"));
+        assert!(h.contains("000d000e000c040305030804080504010501"));
         assert!(h.contains("0032000a00080403050304010501"));
     }
 
@@ -664,5 +831,96 @@ mod tests {
         let mut r = HELLO_RETRY_REQUEST_RANDOM;
         r[31] ^= 1;
         assert!(parse_server_hello(&sh(0x0303, &r, &SID, 0x1301, 0, &good_exts()), &SID).is_ok());
+    }
+
+    #[test]
+    fn client_hello_offers_tls12() {
+        let h = hex(&enc(1, b"", 2, b"x.test").unwrap());
+        // supported_versions: 1.3 then 1.2. Suites: 0x1301, 0xC02B, 0xC02F. Then EMS and an empty renegotiation_info.
+        assert!(h.contains("002b00050403040303"));
+        assert!(h.contains("00061301c02bc02f"));
+        assert!(h.ends_with("00170000ff01000100"));
+    }
+
+    // ---- TLS 1.2 ServerHello ----
+
+    const SUITE_ECDSA: u16 = 0xC02B;
+    fn sh12(random: &[u8; 32], sid: &[u8], suite: u16, exts: &[u8]) -> Vec<u8> {
+        sh(0x0303, random, sid, suite, 0, exts)
+    }
+    /// The same message without its (empty) extension block: a TLS 1.2 ServerHello may end after the compression byte.
+    fn no_ext_block(m: &[u8]) -> Vec<u8> {
+        let mut v = m[..m.len() - 2].to_vec();
+        v[3] -= 2;
+        v
+    }
+    fn good12_exts() -> Vec<u8> {
+        [ext(0xff01, &[0]), ext(11, &[1, 0]), ext(23, &[]), ext(16, &[0, 9, 8, b'h', b't', b't', b'p', b'/', b'1', b'.', b'1'])].concat()
+    }
+
+    #[test]
+    fn tells_tls12_from_tls13() {
+        assert!(is_tls12_server_hello(&sh12(&[5; 32], b"", SUITE_ECDSA, &good12_exts())));
+        assert!(!is_tls12_server_hello(&good()));
+        assert!(!is_tls12_server_hello(&sh(0x0303, &HELLO_RETRY_REQUEST_RANDOM, &SID, 0x1301, 0, &good_exts())));
+        // No extension block at all is still TLS 1.2. A cut message is not.
+        let m = sh12(&[5; 32], b"", SUITE_ECDSA, &[]);
+        assert!(is_tls12_server_hello(&no_ext_block(&m)));
+        assert!(!is_tls12_server_hello(&m[..m.len() - 1]));
+        assert!(!is_tls12_server_hello(&[]));
+        for cut in 0..good().len() {
+            let _ = is_tls12_server_hello(&good()[..cut]); // no panic
+        }
+    }
+
+    #[test]
+    fn server_hello12_valid() {
+        let m = sh12(&[5; 32], &[0x77; 32], SUITE_ECDSA, &good12_exts());
+        let h = parse_server_hello12(&m, &SID).unwrap();
+        assert_eq!((h.random, h.suite, h.ems, h.alpn), ([5; 32], 0xC02B, true, Some(&b"http/1.1"[..])));
+        let m = sh12(&[5; 32], b"", 0xC02F, &[]);
+        let h = parse_server_hello12(&m, &SID).unwrap();
+        assert_eq!((h.suite, h.ems, h.alpn), (0xC02F, false, None));
+        assert!(parse_server_hello12(&no_ext_block(&m), &SID).is_ok());
+        // The 1.1 marker is not the 1.3 downgrade marker.
+        let mut r = [5u8; 32];
+        r[24..].copy_from_slice(b"DOWNGRD\x00");
+        assert!(parse_server_hello12(&sh12(&r, b"", 0xC02F, &[]), &SID).is_ok());
+    }
+
+    #[test]
+    fn server_hello12_rejects() {
+        let p = |m: Vec<u8>| parse_server_hello12(&m, &SID).map(|_| ());
+        let g = good12_exts();
+        let mut r = [5u8; 32];
+        r[24..].copy_from_slice(b"DOWNGRD\x01");
+        assert_eq!(p(sh12(&r, b"", 0xC02F, &g)), Err(HelloError::Downgrade));
+        assert_eq!(p(sh12(&[5; 32], &SID, 0xC02F, &g)), Err(HelloError::Resumption));
+        assert_eq!(p(sh12(&[5; 32], &[0x22; 33], 0xC02F, &g)), Err(HelloError::BadLength));
+        for c in [0x1301, 0xC030, 0xC02C, 0xCCA8, 0x009C, 0x0000] {
+            assert_eq!(p(sh12(&[5; 32], b"", c, &g)), Err(HelloError::UnsupportedCipher));
+        }
+        for v in [0x0300, 0x0301, 0x0302, 0x0304] {
+            assert_eq!(p(sh(v, &[5; 32], b"", 0xC02F, 0, &g)), Err(HelloError::UnsupportedVersion));
+        }
+        assert_eq!(p(sh(0x0303, &[5; 32], b"", 0xC02F, 1, &g)), Err(HelloError::BadCompression));
+        assert_eq!(p(sh12(&[5; 32], b"", 0xC02F, &ext(35, &[]))), Err(HelloError::UnsolicitedExtension(35)));
+        assert_eq!(p(sh12(&[5; 32], b"", 0xC02F, &ext(43, &[3, 3]))), Err(HelloError::UnsolicitedExtension(43)));
+        assert_eq!(p(sh12(&[5; 32], b"", 0xC02F, &[ext(23, &[]), ext(23, &[])].concat())), Err(HelloError::DuplicateExtension(23)));
+        assert_eq!(p(sh12(&[5; 32], b"", 0xC02F, &ext(23, &[1]))), Err(HelloError::BadLength));
+        assert_eq!(p(sh12(&[5; 32], b"", 0xC02F, &ext(0xff01, &[1, 2]))), Err(HelloError::BadLength)); // a renegotiation
+        assert_eq!(p(sh12(&[5; 32], b"", 0xC02F, &ext(11, &[1, 1]))), Err(HelloError::BadLength)); // no uncompressed
+        assert_eq!(p(sh12(&[5; 32], b"", 0xC02F, &ext(16, &[0, 4, 1, b'a', 1, b'b']))), Err(HelloError::BadLength)); // two names
+        let mut m = sh12(&[5; 32], b"", 0xC02F, &g);
+        m.push(0);
+        assert_eq!(p(m), Err(HelloError::BadLength));
+        let m = sh12(&[5; 32], b"", 0xC02F, &g);
+        for cut in 0..m.len() {
+            assert!(p(m[..cut].to_vec()).is_err(), "cut {cut}");
+        }
+        assert_eq!(parse_server_hello12(&good_cert_msg(), &SID), Err(HelloError::BadMessageType));
+    }
+    fn good_cert_msg() -> Vec<u8> {
+        vec![11, 0, 0, 0]
     }
 }

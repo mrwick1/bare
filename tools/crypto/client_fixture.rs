@@ -36,7 +36,7 @@ pub fn client_random() -> [u8; 96] {
     r
 }
 
-const SERVER_SCALAR: [u8; 32] = [0x5a; 32];
+pub const SERVER_SCALAR: [u8; 32] = [0x5a; 32];
 
 /// A transport that reads from a script (at most `chunk` bytes per call) and collects writes.
 pub struct Script {
@@ -76,7 +76,7 @@ impl Write for Script {
     }
 }
 
-fn msg(ty: u8, body: &[u8]) -> Vec<u8> {
+pub fn msg(ty: u8, body: &[u8]) -> Vec<u8> {
     let mut m = hello::write_header(ty, body.len()).unwrap().to_vec();
     m.extend_from_slice(body);
     m

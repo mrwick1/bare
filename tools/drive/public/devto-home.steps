@@ -1,0 +1,6 @@
+# dev.to: the home page. The server needs TLS 1.2 (TLS 1.3-only hellos got alert 70). Check the title and that links load.
+#   bare-drive --var URL=https://dev.to/ devto-home.steps
+timeout 30000
+open ${URL}
+expect title~"DEV"
+expect js "document.querySelectorAll('a').length > 20"

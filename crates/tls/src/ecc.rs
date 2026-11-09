@@ -7,9 +7,13 @@
 //!   <https://www.secg.org/sec1-v2.pdf>
 //! - RFC 8446 section 4.2.3 (TLS 1.3 uses ECDSA with P-256/SHA-256 and P-384/SHA-384).
 //!
-//! Only verification exists. There is no signing, no key generation and no secret scalar.
-//! All inputs are public, so the arithmetic runs in VARIABLE time (branches and loop
-//! lengths depend on the data). Never use this code to multiply a secret.
+//! Verification takes only public inputs. The arithmetic runs in VARIABLE time (branches and loop
+//! lengths depend on the data). Never use this code to multiply a secret that lives for long.
+//!
+//! One exception: `p256_public` and `p256_shared` do P-256 ECDH for a TLS 1.2 client. They multiply a SECRET
+//! scalar with the same variable-time code. The scalar is a fresh random value for one handshake and is dropped
+//! after it, so no attacker can measure many runs against one secret. That is the only reason this is acceptable.
+//! There is no signing.
 //!
 //! What `verify` checks, in this order:
 //! 1. The digest is 32 bytes (SHA-256) or 48 bytes (SHA-384). Nothing else is accepted.
@@ -89,6 +93,32 @@ pub fn verify(curve: Curve, public_key: &[u8], digest: &[u8], sig: &[u8]) -> Res
         Curve::P256 => P256.verify(public_key, digest, sig),
         Curve::P384 => P384.verify(public_key, digest, sig),
     }
+}
+
+/// The public key `04 || X || Y` of a P-256 ECDH secret. `scalar` is 32 random bytes. `None` when it is 0 mod n
+/// (probability 2^-256). Variable time: read the module docs before you use it.
+pub fn p256_public(scalar: &[u8; 32]) -> Option<[u8; 65]> {
+    let k = P256.secret(scalar)?;
+    let g = Point { x: P256.p.to_mont(&P256.gx), y: P256.p.to_mont(&P256.gy), z: P256.p.one };
+    let [x, y] = P256.mul_affine(&k, &g)?;
+    let mut out = [4u8; 65];
+    for (i, limb) in x.iter().rev().chain(y.iter().rev()).enumerate() {
+        out[1 + 8 * i..9 + 8 * i].copy_from_slice(&limb.to_be_bytes());
+    }
+    Some(out)
+}
+
+/// The ECDH shared secret (the X coordinate, 32 bytes) of a P-256 secret and the peer's `04 || X || Y`. The peer key
+/// must be on the curve. Variable time: read the module docs before you use it.
+pub fn p256_shared(scalar: &[u8; 32], peer: &[u8]) -> Result<[u8; 32], Error> {
+    let q = P256.parse_point(peer)?;
+    let k = P256.secret(scalar).ok_or(Error::BadSignature)?;
+    let [x, _] = P256.mul_affine(&k, &q).ok_or(Error::BadPublicKey)?;
+    let mut out = [0u8; 32];
+    for (i, limb) in x.iter().rev().enumerate() {
+        out[8 * i..8 * i + 8].copy_from_slice(&limb.to_be_bytes());
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------------------
@@ -530,12 +560,10 @@ impl<const N: usize> Params<N> {
         r
     }
 
-    fn verify(&self, key: &[u8], digest: &[u8], sig: &[u8]) -> Result<(), Error> {
+    /// A public key `04 || X || Y`: both coordinates below p, and Y^2 = X^3 - 3X + b.
+    fn parse_point(&self, key: &[u8]) -> Result<Point<N>, Error> {
         let size = 8 * N;
         let f = &self.p;
-        let n = &self.n;
-
-        // Public key: 04 || X || Y, both below p, and Y^2 = X^3 - 3X + b.
         if key.len() != 1 + 2 * size || key[0] != 4 {
             return Err(Error::BadPublicKey);
         }
@@ -550,7 +578,36 @@ impl<const N: usize> Params<N> {
         if f.sqr(&ym) != rhs {
             return Err(Error::BadPublicKey);
         }
-        let q = Point { x: xm, y: ym, z: f.one };
+        Ok(Point { x: xm, y: ym, z: f.one })
+    }
+
+    /// k*Q as affine coordinates in plain (not Montgomery) form. `None` at infinity. Variable time.
+    fn mul_affine(&self, k: &Limbs<N>, q: &Point<N>) -> Option<[Limbs<N>; 2]> {
+        let f = &self.p;
+        let r = self.mul_add(&[0; N], k, q);
+        if is_zero(&r.z) {
+            return None;
+        }
+        let zi = f.inv(&r.z);
+        let zi2 = f.sqr(&zi);
+        let mut one = [0u64; N];
+        one[0] = 1;
+        Some([f.mul(&f.mul(&r.x, &zi2), &one), f.mul(&f.mul(&r.y, &f.mul(&zi2, &zi)), &one)])
+    }
+
+    /// A secret scalar from 32 big-endian bytes: reduced once mod n (the value is below 2n), not zero.
+    fn secret(&self, scalar: &[u8; 32]) -> Option<Limbs<N>> {
+        let k = from_be::<N>(scalar);
+        let k = if geq(&k, &self.n.m) { sub_raw(&k, &self.n.m).0 } else { k };
+        if is_zero(&k) { None } else { Some(k) }
+    }
+
+    fn verify(&self, key: &[u8], digest: &[u8], sig: &[u8]) -> Result<(), Error> {
+        let size = 8 * N;
+        let f = &self.p;
+        let n = &self.n;
+
+        let q = self.parse_point(key)?;
 
         // Signature: r || s, each in [1, n-1].
         if sig.len() != 2 * size {
@@ -1002,5 +1059,53 @@ mod tests {
             d[i / 8] ^= 1 << (i % 8);
             assert!(verify(Curve::P384, &key, &d, &sig).is_err(), "digest bit {i}");
         }
+    }
+
+    // RFC 5903 section 8.1 (256-bit random ECP group): both private values, both public keys, the shared X.
+    const I: &str = "c88f01f510d9ac3f70a292daa2316de544e9aab8afe84049c62a9c57862d1433";
+    const R: &str = "c6ef9c5d78ae012a011164acb397ce2088685d8f06bf9be0b283ab46476bee53";
+    const GI: &str = "04dad0b65394221cf9b051e1feca5787d098dfe637fc90b9ef945d0c37725811805271a0461cdb8252d61f1c456fa3e59ab1f45b33accf5f58389e0577b8990bb3";
+    const GR: &str = "04d12dfb5289c8d4f81208b70270398c342296970a0bccb74c736fc7554494bf6356fbf3ca366cc23e8157854c13c58d6aac23f046ada30f8353e74f33039872ab";
+    const Z: &str = "d6840f6b42f6edafd13116e0e12565202fef8e9ece7dce03812464d04b9442de";
+
+    #[test]
+    fn p256_ecdh_rfc5903() {
+        let (i, r): ([u8; 32], [u8; 32]) = (unhex(I).try_into().unwrap(), unhex(R).try_into().unwrap());
+        assert_eq!(p256_public(&i).unwrap()[..], unhex(GI)[..]);
+        assert_eq!(p256_public(&r).unwrap()[..], unhex(GR)[..]);
+        assert_eq!(p256_shared(&i, &unhex(GR)).unwrap()[..], unhex(Z)[..]);
+        assert_eq!(p256_shared(&r, &unhex(GI)).unwrap()[..], unhex(Z)[..]);
+    }
+
+    #[test]
+    fn p256_ecdh_refuses_bad_input() {
+        let i: [u8; 32] = unhex(I).try_into().unwrap();
+        let good = unhex(GR);
+        // Wrong prefix or length, a coordinate that is not below p, a point off the curve, and the point at infinity.
+        let mut bad = vec![good.clone(), good[..64].to_vec(), good[..1].to_vec(), vec![]];
+        bad[0][0] = 2;
+        let mut big = good.clone();
+        big[1..33].fill(0xff);
+        bad.push(big);
+        let mut off = good.clone();
+        off[64] ^= 1;
+        bad.push(off);
+        bad.push([&[4u8][..], &[0; 64]].concat());
+        for b in bad {
+            assert!(p256_shared(&i, &b).is_err(), "{}", b.len());
+        }
+        // A zero scalar, and n itself (zero mod n), make no key. n + 1 makes the key of 1.
+        let n = unhex("ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551");
+        assert!(p256_public(&[0; 32]).is_none() && p256_public(&n.clone().try_into().unwrap()).is_none());
+        let mut n1 = n;
+        n1[31] += 1;
+        let g = p256_public(&n1.try_into().unwrap()).unwrap();
+        let mut one = [0u8; 32];
+        one[31] = 1;
+        assert_eq!(g, p256_public(&one).unwrap());
+        assert_eq!(g[1..33], unhex("6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296")[..]);
+        // The shared secret of two fresh pairs agrees.
+        let (a, b) = ([0x31u8; 32], [0x77u8; 32]);
+        assert_eq!(p256_shared(&a, &p256_public(&b).unwrap()), p256_shared(&b, &p256_public(&a).unwrap()));
     }
 }

@@ -1,0 +1,7 @@
+# nginx.org: the home page. The server does not speak TLS 1.3 to bare today; it needs TLS 1.2. Check the title, the text and the download link.
+#   bare-drive --var URL=https://nginx.org/ nginx-org-home.steps
+timeout 30000
+open ${URL}
+expect title~"nginx"
+expect css="body" text~"nginx"
+expect role=link name="download" visible

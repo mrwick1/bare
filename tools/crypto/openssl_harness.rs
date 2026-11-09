@@ -207,7 +207,9 @@ impl Server {
     fn spawn(dir: &PathBuf, leaf: &str, extra: &[String], scripted: bool, port: u16) -> Result<Spawned, String> {
         let mut child = Command::new("openssl")
             .args(["s_server", "-accept", &format!("127.0.0.1:{port}"), "-cert", &format!("{leaf}.pem"), "-key", &format!("{leaf}.key")])
-            .args(["-tls1_3", "-ciphersuites", "TLS_AES_128_GCM_SHA256", "-groups", "X25519", "-sigalgs", "ECDSA+SHA256", "-quiet"])
+            // TLS 1.3 only, unless the caller picks the version itself (`-tls1_2`, `-min_protocol`): s_server takes one protocol flag.
+            .args(if extra.iter().any(|a| a.starts_with("-tls1_") || a == "-min_protocol") { &[][..] } else { &["-tls1_3"][..] })
+            .args(["-ciphersuites", "TLS_AES_128_GCM_SHA256", "-groups", "X25519", "-sigalgs", "ECDSA+SHA256", "-quiet"])
             .args(extra)
             .current_dir(dir)
             .stdin(Stdio::piped())
