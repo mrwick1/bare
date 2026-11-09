@@ -23,7 +23,7 @@
 
 use bare_html::dom::{Atom, Document, NodeData, NodeId};
 
-use crate::selector::{AttrTest, Case, Combinator, Compound, Nth, Selector, Simple, User};
+use crate::selector::{AttrTest, Case, Combinator, Compound, Host, Nth, Selector, Simple, User};
 
 /// Does `selector` match the element `el`? `el` must be an element of `doc`, and the selector must be
 /// parsed for `doc`. For any other node, it gives `false`.
@@ -116,13 +116,24 @@ fn host_above(doc: &Document, top: NodeId, rest: &[Compound]) -> bool {
     }
     let Some(host) = doc.parent(top).and_then(|r| doc.shadow_host(r)) else { return false };
     let [last] = rest else { return false };
-    last.simples.iter().any(|s| matches!(s, Simple::Host(_) | Simple::HostContext(_))) && compound_matches(doc, host, &last.simples)
+    last.simples.iter().any(|s| matches!(s, Simple::Host(_))) && compound_matches(doc, host, &last.simples)
 }
 
-/// Does the element `el` match all the simple selectors of one compound?
-pub fn compound_matches(doc: &Document, el: NodeId, simples: &[Simple]) -> bool {
-    // `all` stops at the first false. The selector parser puts the tag first, and it is the cheapest test.
-    simples.iter().all(|s| simple_matches(doc, el, s))
+fn compound_matches(doc: &Document, el: NodeId, simples: &[Simple]) -> bool {
+    // Stops at the first false. The selector parser puts the tag first, and it is the cheapest test.
+    for s in simples {
+        if !simple_matches(doc, el, s) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Does the element `el` match all the simple selectors of one compound? For the cascade of shadow trees. Out of line: a public `compound_matches` is
+/// not inlined into the hot matcher.
+#[inline(never)]
+pub fn compound_match(doc: &Document, el: NodeId, simples: &[Simple]) -> bool {
+    compound_matches(doc, el, simples)
 }
 
 /// The user action pseudo-classes. Out of line and cold: they are rare, and a hot call here slows every other simple selector.
@@ -164,11 +175,16 @@ fn simple_matches(doc: &Document, el: NodeId, simple: &Simple) -> bool {
         Simple::User(u) => user_matches(doc, el, *u),
         Simple::Never => false,
         // The cascade offers a rule with `:host` to the host of its own tree only, so here the host needs a shadow root.
-        Simple::Host(args) => doc.shadow_root(el).is_some() && args.iter().all(|simples| compound_matches(doc, el, simples)),
-        Simple::HostContext(args) => doc.shadow_root(el).is_some() && host_context(doc, el, args),
+        Simple::Host(h) => host_matches(doc, el, h),
         Simple::Is(args) => args.iter().any(|simples| compound_matches(doc, el, simples)),
         Simple::Not(args) => !args.iter().any(|simples| compound_matches(doc, el, simples)),
     }
+}
+
+#[cold]
+#[inline(never)]
+fn host_matches(doc: &Document, el: NodeId, h: &Host) -> bool {
+    doc.shadow_root(el).is_some() && if h.context { host_context(doc, el, &h.args) } else { h.args.iter().all(|simples| compound_matches(doc, el, simples)) }
 }
 
 /// `:host-context()`: `el` or one of its ancestors (a shadow root goes on to its host) matches the compound.

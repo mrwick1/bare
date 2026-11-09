@@ -144,14 +144,20 @@ pub enum Simple {
     Not(Vec<Vec<Simple>>),
     /// `:is(.a, b)` and `:where(.a, b)`: true when one of the compounds matches. They match the same. Only the specificity differs.
     Is(Vec<Vec<Simple>>),
-    /// `:host` (no compound) and `:host(.a)`: the host of the shadow tree that the sheet belongs to. The cascade offers the rule only to the host.
-    Host(Vec<Vec<Simple>>),
-    /// `:host-context(.a)`: a host that has an ancestor (or is itself) that matches the compound.
-    HostContext(Vec<Vec<Simple>>),
+    /// `:host`, `:host(.a)` and `:host-context(.a)`. One variant: an arm for each in `simple_matches` slows every other test.
+    Host(Box<Host>),
+}
+
+/// `:host` (no compound) and `:host(.a)`: the host of the shadow tree that the sheet belongs to. The cascade offers the rule only to the host.
+/// `:host-context(.a)` (`context`): a host that has an ancestor (or is itself) that matches the compound.
+#[derive(Debug, PartialEq)]
+pub struct Host {
+    pub context: bool,
+    pub args: Vec<Vec<Simple>>,
 }
 
 fn is_host(s: &Simple) -> bool {
-    matches!(s, Simple::Host(_) | Simple::HostContext(_))
+    matches!(s, Simple::Host(_))
 }
 
 /// The bits of `user_flags`: which user action state a selector reads.
@@ -552,7 +558,7 @@ impl Parser<'_, '_> {
                     "only-child" => Simple::OnlyChild,
                     "root" => Simple::Root,
                     "empty" => Simple::Empty,
-                    "host" => if self.mode == Mode::Shadow { self.host = true; Simple::Host(Vec::new()) } else { Simple::Never },
+                    "host" => if self.mode == Mode::Shadow { self.host = true; Simple::Host(Box::new(Host { context: false, args: Vec::new() })) } else { Simple::Never },
                     "link" | "any-link" => Simple::Link,
                     "defined" => Simple::Defined,
                     "disabled" => Simple::Form(Form::Disabled),
@@ -624,8 +630,7 @@ impl Parser<'_, '_> {
                 self.host |= self.mode == Mode::Shadow;
                 Some(match (self.mode == Mode::Shadow, context) {
                     (false, _) => Simple::Never,
-                    (true, false) => Simple::Host(vec![arg]),
-                    (true, true) => Simple::HostContext(vec![arg]),
+                    (true, context) => Simple::Host(Box::new(Host { context, args: vec![arg] })),
                 })
             }
             Token::Function(name) if name.eq_ignore_ascii_case("state") => {

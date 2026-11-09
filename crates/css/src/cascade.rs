@@ -63,7 +63,7 @@ use crate::at_rules;
 use crate::calc::{self, Linear, Node};
 use crate::color::Color;
 use crate::grid::{self, Grid};
-use crate::matching::{compound_matches, matches};
+use crate::matching::{compound_match, matches};
 use crate::parser::{AtBody, Rule, parse_declarations, parse_stylesheet};
 use crate::selector::{Combinator, Mode, Selector, ShadowPseudo, Simple, parse_selector_list_in};
 use crate::values::{Declared, Keyword, Length, Property, Side, Value, parse_declaration};
@@ -123,6 +123,7 @@ struct Index {
 }
 
 impl Index {
+    #[inline]
     fn push(&mut self, index: u32, selector: &Selector) {
         // The bucket: an id is the most specific, then a class, then an attribute, then a tag. An attribute comes before a tag:
         // `input[type=checkbox]` is in the list of `type`, and few elements have a `type`; most elements are a `div`.
@@ -653,7 +654,7 @@ impl RuleSet {
         self.reach.take();
         let index = self.entries.len() as u32;
         // A rule for the host, for a slotted node or for a part is not offered to the elements of its tree: the cascade looks for it where it applies.
-        let host = scope != 0 && selector.compounds[0].simples.iter().any(|s| matches!(s, Simple::Host(_) | Simple::HostContext(_)));
+        let host = scope != 0 && selector.compounds[0].simples.iter().any(|s| matches!(s, Simple::Host(_)));
         let mut ctx = match (selector.pseudo.as_deref(), host) {
             (Some(ShadowPseudo::Part { .. }), _) => OUTER,
             (Some(ShadowPseudo::Slotted(_)), _) | (None, true) => INNER,
@@ -1041,7 +1042,7 @@ impl RuleSet {
             for &i in &tree.slotted {
                 let e = &self.entries[i as usize];
                 if let Some(ShadowPseudo::Slotted(arg)) = e.selector.pseudo.as_deref()
-                    && compound_matches(doc, node, arg)
+                    && compound_match(doc, node, arg)
                     && matches(doc, slot, &e.selector)
                 {
                     matched.push(i);
@@ -1070,7 +1071,7 @@ impl RuleSet {
                 let e = &self.entries[i as usize];
                 if let Some(ShadowPseudo::Part { names: want, then }) = e.selector.pseudo.as_deref()
                     && want.iter().all(|w| names.iter().any(|n| n == &**w))
-                    && compound_matches(doc, node, then)
+                    && compound_match(doc, node, then)
                     && matches(doc, host, &e.selector)
                 {
                     matched.push(i);
