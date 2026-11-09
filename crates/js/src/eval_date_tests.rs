@@ -170,8 +170,9 @@ fn parse_classification() {
     let p = |s: &str| date::parse(&s.encode_utf16().collect::<Vec<_>>());
     let nan = |p: date::Parsed| matches!(p, date::Parsed::Time(t) if t.is_nan());
     assert_eq!(p("2020-01-01T00:00:00Z"), date::Parsed::Time(1_577_836_800_000.0));
-    assert_eq!(p("2020-01-01T00:00:00"), date::Parsed::Local);
-    assert_eq!(p("2020-01-01T00:00"), date::Parsed::Local);
+    assert_eq!(p("2020-01-01T00:00:00"), date::Parsed::Local(1_577_836_800_000.0));
+    assert_eq!(p("2020-01-01T00:00"), date::Parsed::Local(1_577_836_800_000.0));
+    assert!(nan(p("2020-02-30T00:00")));
     assert_eq!(p("2020-01-01"), date::Parsed::Time(1_577_836_800_000.0));
     for s in ["2020-1-1", "2020-01-01 00:00:00Z", "2020-01-01t00:00:00z", "2020-01-01T00:00:00+0100", "2020-01-01T00Z", "20200101", " 2020", "Jan 1 2020", "1/2/2020", "2020-01-01Z", "2020-01-01T00:00:00.Z", "+2020-01-01"] {
         assert_eq!(p(s), date::Parsed::Unrecognized, "{s}");
@@ -261,54 +262,233 @@ fn unsupported_what(it: &mut Interp, src: &str) -> String {
     r.strip_prefix("unsupported:").unwrap_or_else(|| panic!("{src}: {r}")).to_string()
 }
 
+/// What node gave under each `TZ` (the expression, then the result in the format of `show`). Node writes a long zone name in
+/// parentheses after `GMT+hhmm`. bare writes `GMT+hh:mm` there, so the text from ` (` on is not compared.
+fn local_time_cases() -> Vec<(&'static str, &'static [(&'static str, &'static str)])> {
+    vec![
+        ("UTC", &[
+            ("new Date(0).toString()", "string:Thu Jan 01 1970 00:00:00 GMT+0000 (Coordinated Universal Time)"),
+            ("new Date(0).toDateString()", "string:Thu Jan 01 1970"),
+            ("new Date(0).toTimeString()", "string:00:00:00 GMT+0000 (Coordinated Universal Time)"),
+            ("[new Date(1700000000000).getHours(),new Date(1700000000000).getTimezoneOffset(),new Date(1700000000000).getDay(),new Date(1700000000000).getYear(),new Date(1700000000000).getDate(),new Date(1700000000000).getMonth(),new Date(1700000000000).getFullYear(),new Date(1700000000000).getMinutes(),new Date(1700000000000).getSeconds(),new Date(1700000000000).getMilliseconds()].join()", "string:22,0,2,123,14,10,2023,13,20,0"),
+            ("[new Date(2020,0,31,10,20,30,400).getTime(),new Date(2020,6,1).getTime(),new Date(99,0).getFullYear(),new Date(2020,0).getTime()].join()", "string:1580466030400,1593561600000,1999,1577836800000"),
+            ("[new Date('2020-07-01T12:00:00').getTime(),Date.parse('2020-01-01T00:00'),Date.parse('2020-01-01T00:00:00.5'),Date.parse('2020-13-01T00:00')].join()", "string:1593604800000,1577836800000,1577836800500,NaN"),
+            ("[new Date(2020,2,8,2,30).getTime(),new Date(2020,10,1,1,30).getTime(),new Date(2020,2,29,1,30).getTime(),new Date(2020,9,25,1,30).getTime()].join()", "string:1583634600000,1604194200000,1585445400000,1603589400000"),
+            ("new Date(2020,2,8,2,30).toString()", "string:Sun Mar 08 2020 02:30:00 GMT+0000 (Coordinated Universal Time)"),
+            ("var d=new Date(1700000000000);d.setHours(30);d.getTime()", "number:1700028800000"),
+            ("var d=new Date(1700000000000);d.setMonth(5,15);d.getTime()", "number:1686867200000"),
+            ("var d=new Date(1700000000000);d.setFullYear(2000);d.getTime()", "number:974240000000"),
+            ("var d=new Date(1700000000000);d.setYear(99);d.getTime()", "number:942617600000"),
+            ("var d=new Date(NaN);d.setFullYear(2000);d.getTime()", "number:946684800000"),
+            ("var d=new Date(1700000000000);d.setDate(0);d.getTime()", "number:1698790400000"),
+            ("var d=new Date(1700000000000);d.setMinutes(61,1,1);d.getTime()", "number:1700002861001"),
+            ("var d=new Date(1700000000000);d.setSeconds(5);d.getTime()", "number:1699999985000"),
+            ("var d=new Date(1700000000000);d.setMilliseconds(5);d.getTime()", "number:1700000000005"),
+            ("var d=new Date(1700000000000);[d.setHours(1,2,3,4),d.getTime()].join()", "string:1699923723004,1699923723004"),
+            ("var d=new Date(1700000000000);d.setYear(NaN)+','+d.getTime()", "string:NaN,NaN"),
+            ("new Date(1e12).toTimeString()", "string:01:46:40 GMT+0000 (Coordinated Universal Time)"),
+            ("'' + new Date(0)", "string:Thu Jan 01 1970 00:00:00 GMT+0000 (Coordinated Universal Time)"),
+            ("typeof Date()", "string:string"),
+            ("new Date(NaN).setHours(1)", "number:NaN"),
+            ("new Date(NaN).setYear(2000)", "number:946684800000"),
+            ("new Date(1700000000000).toLocaleString('en-US')", "string:11/14/2023, 10:13:20 PM"),
+            ("new Date(1700000000000).toLocaleDateString('en-US')", "string:11/14/2023"),
+            ("new Date(1700000000000).toLocaleTimeString('en-US')", "string:10:13:20 PM"),
+            ("[new Date(2100,6,1).getTimezoneOffset(),new Date(2100,0,1).getTimezoneOffset(),new Date(2030,5,1,12).toString()].join('|')", "string:0|0|Sat Jun 01 2030 12:00:00 GMT+0000 (Coordinated Universal Time)"),
+        ]),
+        ("Asia/Kolkata", &[
+            ("new Date(0).toString()", "string:Thu Jan 01 1970 05:30:00 GMT+0530 (India Standard Time)"),
+            ("new Date(0).toDateString()", "string:Thu Jan 01 1970"),
+            ("new Date(0).toTimeString()", "string:05:30:00 GMT+0530 (India Standard Time)"),
+            ("[new Date(1700000000000).getHours(),new Date(1700000000000).getTimezoneOffset(),new Date(1700000000000).getDay(),new Date(1700000000000).getYear(),new Date(1700000000000).getDate(),new Date(1700000000000).getMonth(),new Date(1700000000000).getFullYear(),new Date(1700000000000).getMinutes(),new Date(1700000000000).getSeconds(),new Date(1700000000000).getMilliseconds()].join()", "string:3,-330,3,123,15,10,2023,43,20,0"),
+            ("[new Date(2020,0,31,10,20,30,400).getTime(),new Date(2020,6,1).getTime(),new Date(99,0).getFullYear(),new Date(2020,0).getTime()].join()", "string:1580446230400,1593541800000,1999,1577817000000"),
+            ("[new Date('2020-07-01T12:00:00').getTime(),Date.parse('2020-01-01T00:00'),Date.parse('2020-01-01T00:00:00.5'),Date.parse('2020-13-01T00:00')].join()", "string:1593585000000,1577817000000,1577817000500,NaN"),
+            ("[new Date(2020,2,8,2,30).getTime(),new Date(2020,10,1,1,30).getTime(),new Date(2020,2,29,1,30).getTime(),new Date(2020,9,25,1,30).getTime()].join()", "string:1583614800000,1604174400000,1585425600000,1603569600000"),
+            ("new Date(2020,2,8,2,30).toString()", "string:Sun Mar 08 2020 02:30:00 GMT+0530 (India Standard Time)"),
+            ("var d=new Date(1700000000000);d.setHours(30);d.getTime()", "number:1700097200000"),
+            ("var d=new Date(1700000000000);d.setMonth(5,15);d.getTime()", "number:1686780800000"),
+            ("var d=new Date(1700000000000);d.setFullYear(2000);d.getTime()", "number:974240000000"),
+            ("var d=new Date(1700000000000);d.setYear(99);d.getTime()", "number:942617600000"),
+            ("var d=new Date(NaN);d.setFullYear(2000);d.getTime()", "number:946665000000"),
+            ("var d=new Date(1700000000000);d.setDate(0);d.getTime()", "number:1698704000000"),
+            ("var d=new Date(1700000000000);d.setMinutes(61,1,1);d.getTime()", "number:1700001061001"),
+            ("var d=new Date(1700000000000);d.setSeconds(5);d.getTime()", "number:1699999985000"),
+            ("var d=new Date(1700000000000);d.setMilliseconds(5);d.getTime()", "number:1700000000005"),
+            ("var d=new Date(1700000000000);[d.setHours(1,2,3,4),d.getTime()].join()", "string:1699990323004,1699990323004"),
+            ("var d=new Date(1700000000000);d.setYear(NaN)+','+d.getTime()", "string:NaN,NaN"),
+            ("new Date(1e12).toTimeString()", "string:07:16:40 GMT+0530 (India Standard Time)"),
+            ("'' + new Date(0)", "string:Thu Jan 01 1970 05:30:00 GMT+0530 (India Standard Time)"),
+            ("typeof Date()", "string:string"),
+            ("new Date(NaN).setHours(1)", "number:NaN"),
+            ("new Date(NaN).setYear(2000)", "number:946665000000"),
+            ("new Date(1700000000000).toLocaleString('en-US')", "string:11/15/2023, 3:43:20 AM"),
+            ("new Date(1700000000000).toLocaleDateString('en-US')", "string:11/15/2023"),
+            ("new Date(1700000000000).toLocaleTimeString('en-US')", "string:3:43:20 AM"),
+            ("[new Date(2100,6,1).getTimezoneOffset(),new Date(2100,0,1).getTimezoneOffset(),new Date(2030,5,1,12).toString()].join('|')", "string:-330|-330|Sat Jun 01 2030 12:00:00 GMT+0530 (India Standard Time)"),
+        ]),
+        ("America/New_York", &[
+            ("new Date(0).toString()", "string:Wed Dec 31 1969 19:00:00 GMT-0500 (Eastern Standard Time)"),
+            ("new Date(0).toDateString()", "string:Wed Dec 31 1969"),
+            ("new Date(0).toTimeString()", "string:19:00:00 GMT-0500 (Eastern Standard Time)"),
+            ("[new Date(1700000000000).getHours(),new Date(1700000000000).getTimezoneOffset(),new Date(1700000000000).getDay(),new Date(1700000000000).getYear(),new Date(1700000000000).getDate(),new Date(1700000000000).getMonth(),new Date(1700000000000).getFullYear(),new Date(1700000000000).getMinutes(),new Date(1700000000000).getSeconds(),new Date(1700000000000).getMilliseconds()].join()", "string:17,300,2,123,14,10,2023,13,20,0"),
+            ("[new Date(2020,0,31,10,20,30,400).getTime(),new Date(2020,6,1).getTime(),new Date(99,0).getFullYear(),new Date(2020,0).getTime()].join()", "string:1580484030400,1593576000000,1999,1577854800000"),
+            ("[new Date('2020-07-01T12:00:00').getTime(),Date.parse('2020-01-01T00:00'),Date.parse('2020-01-01T00:00:00.5'),Date.parse('2020-13-01T00:00')].join()", "string:1593619200000,1577854800000,1577854800500,NaN"),
+            ("[new Date(2020,2,8,2,30).getTime(),new Date(2020,10,1,1,30).getTime(),new Date(2020,2,29,1,30).getTime(),new Date(2020,9,25,1,30).getTime()].join()", "string:1583652600000,1604208600000,1585459800000,1603603800000"),
+            ("new Date(2020,2,8,2,30).toString()", "string:Sun Mar 08 2020 03:30:00 GMT-0400 (Eastern Daylight Time)"),
+            ("var d=new Date(1700000000000);d.setHours(30);d.getTime()", "number:1700046800000"),
+            ("var d=new Date(1700000000000);d.setMonth(5,15);d.getTime()", "number:1686863600000"),
+            ("var d=new Date(1700000000000);d.setFullYear(2000);d.getTime()", "number:974240000000"),
+            ("var d=new Date(1700000000000);d.setYear(99);d.getTime()", "number:942617600000"),
+            ("var d=new Date(NaN);d.setFullYear(2000);d.getTime()", "number:946702800000"),
+            ("var d=new Date(1700000000000);d.setDate(0);d.getTime()", "number:1698786800000"),
+            ("var d=new Date(1700000000000);d.setMinutes(61,1,1);d.getTime()", "number:1700002861001"),
+            ("var d=new Date(1700000000000);d.setSeconds(5);d.getTime()", "number:1699999985000"),
+            ("var d=new Date(1700000000000);d.setMilliseconds(5);d.getTime()", "number:1700000000005"),
+            ("var d=new Date(1700000000000);[d.setHours(1,2,3,4),d.getTime()].join()", "string:1699941723004,1699941723004"),
+            ("var d=new Date(1700000000000);d.setYear(NaN)+','+d.getTime()", "string:NaN,NaN"),
+            ("new Date(1e12).toTimeString()", "string:21:46:40 GMT-0400 (Eastern Daylight Time)"),
+            ("'' + new Date(0)", "string:Wed Dec 31 1969 19:00:00 GMT-0500 (Eastern Standard Time)"),
+            ("typeof Date()", "string:string"),
+            ("new Date(NaN).setHours(1)", "number:NaN"),
+            ("new Date(NaN).setYear(2000)", "number:946702800000"),
+            ("new Date(1700000000000).toLocaleString('en-US')", "string:11/14/2023, 5:13:20 PM"),
+            ("new Date(1700000000000).toLocaleDateString('en-US')", "string:11/14/2023"),
+            ("new Date(1700000000000).toLocaleTimeString('en-US')", "string:5:13:20 PM"),
+            ("[new Date(2100,6,1).getTimezoneOffset(),new Date(2100,0,1).getTimezoneOffset(),new Date(2030,5,1,12).toString()].join('|')", "string:240|300|Sat Jun 01 2030 12:00:00 GMT-0400 (Eastern Daylight Time)"),
+        ]),
+        ("Europe/London", &[
+            ("new Date(0).toString()", "string:Thu Jan 01 1970 01:00:00 GMT+0100 (Greenwich Mean Time)"),
+            ("new Date(0).toDateString()", "string:Thu Jan 01 1970"),
+            ("new Date(0).toTimeString()", "string:01:00:00 GMT+0100 (Greenwich Mean Time)"),
+            ("[new Date(1700000000000).getHours(),new Date(1700000000000).getTimezoneOffset(),new Date(1700000000000).getDay(),new Date(1700000000000).getYear(),new Date(1700000000000).getDate(),new Date(1700000000000).getMonth(),new Date(1700000000000).getFullYear(),new Date(1700000000000).getMinutes(),new Date(1700000000000).getSeconds(),new Date(1700000000000).getMilliseconds()].join()", "string:22,0,2,123,14,10,2023,13,20,0"),
+            ("[new Date(2020,0,31,10,20,30,400).getTime(),new Date(2020,6,1).getTime(),new Date(99,0).getFullYear(),new Date(2020,0).getTime()].join()", "string:1580466030400,1593558000000,1999,1577836800000"),
+            ("[new Date('2020-07-01T12:00:00').getTime(),Date.parse('2020-01-01T00:00'),Date.parse('2020-01-01T00:00:00.5'),Date.parse('2020-13-01T00:00')].join()", "string:1593601200000,1577836800000,1577836800500,NaN"),
+            ("[new Date(2020,2,8,2,30).getTime(),new Date(2020,10,1,1,30).getTime(),new Date(2020,2,29,1,30).getTime(),new Date(2020,9,25,1,30).getTime()].join()", "string:1583634600000,1604194200000,1585445400000,1603585800000"),
+            ("new Date(2020,2,8,2,30).toString()", "string:Sun Mar 08 2020 02:30:00 GMT+0000 (Greenwich Mean Time)"),
+            ("var d=new Date(1700000000000);d.setHours(30);d.getTime()", "number:1700028800000"),
+            ("var d=new Date(1700000000000);d.setMonth(5,15);d.getTime()", "number:1686863600000"),
+            ("var d=new Date(1700000000000);d.setFullYear(2000);d.getTime()", "number:974240000000"),
+            ("var d=new Date(1700000000000);d.setYear(99);d.getTime()", "number:942617600000"),
+            ("var d=new Date(NaN);d.setFullYear(2000);d.getTime()", "number:946684800000"),
+            ("var d=new Date(1700000000000);d.setDate(0);d.getTime()", "number:1698790400000"),
+            ("var d=new Date(1700000000000);d.setMinutes(61,1,1);d.getTime()", "number:1700002861001"),
+            ("var d=new Date(1700000000000);d.setSeconds(5);d.getTime()", "number:1699999985000"),
+            ("var d=new Date(1700000000000);d.setMilliseconds(5);d.getTime()", "number:1700000000005"),
+            ("var d=new Date(1700000000000);[d.setHours(1,2,3,4),d.getTime()].join()", "string:1699923723004,1699923723004"),
+            ("var d=new Date(1700000000000);d.setYear(NaN)+','+d.getTime()", "string:NaN,NaN"),
+            ("new Date(1e12).toTimeString()", "string:02:46:40 GMT+0100 (British Summer Time)"),
+            ("'' + new Date(0)", "string:Thu Jan 01 1970 01:00:00 GMT+0100 (Greenwich Mean Time)"),
+            ("typeof Date()", "string:string"),
+            ("new Date(NaN).setHours(1)", "number:NaN"),
+            ("new Date(NaN).setYear(2000)", "number:946684800000"),
+            ("new Date(1700000000000).toLocaleString('en-US')", "string:11/14/2023, 10:13:20 PM"),
+            ("new Date(1700000000000).toLocaleDateString('en-US')", "string:11/14/2023"),
+            ("new Date(1700000000000).toLocaleTimeString('en-US')", "string:10:13:20 PM"),
+            ("[new Date(2100,6,1).getTimezoneOffset(),new Date(2100,0,1).getTimezoneOffset(),new Date(2030,5,1,12).toString()].join('|')", "string:-60|0|Sat Jun 01 2030 12:00:00 GMT+0100 (British Summer Time)"),
+        ]),
+        ("Australia/Sydney", &[
+            ("new Date(0).toString()", "string:Thu Jan 01 1970 10:00:00 GMT+1000 (Australian Eastern Standard Time)"),
+            ("new Date(0).toDateString()", "string:Thu Jan 01 1970"),
+            ("new Date(0).toTimeString()", "string:10:00:00 GMT+1000 (Australian Eastern Standard Time)"),
+            ("[new Date(1700000000000).getHours(),new Date(1700000000000).getTimezoneOffset(),new Date(1700000000000).getDay(),new Date(1700000000000).getYear(),new Date(1700000000000).getDate(),new Date(1700000000000).getMonth(),new Date(1700000000000).getFullYear(),new Date(1700000000000).getMinutes(),new Date(1700000000000).getSeconds(),new Date(1700000000000).getMilliseconds()].join()", "string:9,-660,3,123,15,10,2023,13,20,0"),
+            ("[new Date(2020,0,31,10,20,30,400).getTime(),new Date(2020,6,1).getTime(),new Date(99,0).getFullYear(),new Date(2020,0).getTime()].join()", "string:1580426430400,1593525600000,1999,1577797200000"),
+            ("[new Date('2020-07-01T12:00:00').getTime(),Date.parse('2020-01-01T00:00'),Date.parse('2020-01-01T00:00:00.5'),Date.parse('2020-13-01T00:00')].join()", "string:1593568800000,1577797200000,1577797200500,NaN"),
+            ("[new Date(2020,2,8,2,30).getTime(),new Date(2020,10,1,1,30).getTime(),new Date(2020,2,29,1,30).getTime(),new Date(2020,9,25,1,30).getTime()].join()", "string:1583595000000,1604154600000,1585405800000,1603549800000"),
+            ("new Date(2020,2,8,2,30).toString()", "string:Sun Mar 08 2020 02:30:00 GMT+1100 (Australian Eastern Daylight Time)"),
+            ("var d=new Date(1700000000000);d.setHours(30);d.getTime()", "number:1700075600000"),
+            ("var d=new Date(1700000000000);d.setMonth(5,15);d.getTime()", "number:1686784400000"),
+            ("var d=new Date(1700000000000);d.setFullYear(2000);d.getTime()", "number:974240000000"),
+            ("var d=new Date(1700000000000);d.setYear(99);d.getTime()", "number:942617600000"),
+            ("var d=new Date(NaN);d.setFullYear(2000);d.getTime()", "number:946645200000"),
+            ("var d=new Date(1700000000000);d.setDate(0);d.getTime()", "number:1698704000000"),
+            ("var d=new Date(1700000000000);d.setMinutes(61,1,1);d.getTime()", "number:1700002861001"),
+            ("var d=new Date(1700000000000);d.setSeconds(5);d.getTime()", "number:1699999985000"),
+            ("var d=new Date(1700000000000);d.setMilliseconds(5);d.getTime()", "number:1700000000005"),
+            ("var d=new Date(1700000000000);[d.setHours(1,2,3,4),d.getTime()].join()", "string:1699970523004,1699970523004"),
+            ("var d=new Date(1700000000000);d.setYear(NaN)+','+d.getTime()", "string:NaN,NaN"),
+            ("new Date(1e12).toTimeString()", "string:11:46:40 GMT+1000 (Australian Eastern Standard Time)"),
+            ("'' + new Date(0)", "string:Thu Jan 01 1970 10:00:00 GMT+1000 (Australian Eastern Standard Time)"),
+            ("typeof Date()", "string:string"),
+            ("new Date(NaN).setHours(1)", "number:NaN"),
+            ("new Date(NaN).setYear(2000)", "number:946645200000"),
+            ("new Date(1700000000000).toLocaleString('en-US')", "string:11/15/2023, 9:13:20 AM"),
+            ("new Date(1700000000000).toLocaleDateString('en-US')", "string:11/15/2023"),
+            ("new Date(1700000000000).toLocaleTimeString('en-US')", "string:9:13:20 AM"),
+            ("[new Date(2100,6,1).getTimezoneOffset(),new Date(2100,0,1).getTimezoneOffset(),new Date(2030,5,1,12).toString()].join('|')", "string:-600|-660|Sat Jun 01 2030 12:00:00 GMT+1000 (Australian Eastern Standard Time)"),
+        ]),
+    ]
+}
+
 #[test]
-fn local_time_forms_are_explicit_unsupported() {
+fn local_time_matches_node_in_each_zone() {
     big(|| {
-        for src in [
-            "new Date(2020, 0)",
-            "new Date(2020, 0, 1, 0, 0, 0, 0)",
-            "new Date(2020, 0, 1, 12)",
-            "Date()",
-            "new Date('2020-01-01T00:00:00')",
-            "Date.parse('2020-01-01T00:00')",
-            "new Date(0).getFullYear()",
-            "new Date(0).getDay()",
-            "new Date(0).getTimezoneOffset()",
-            "new Date(0).getYear()",
-            "new Date(0).setHours(1)",
-            "new Date(0).setFullYear(2000)",
-            "new Date(0).setYear(2000)",
-            "new Date(0).toString()",
-            "new Date(0).toDateString()",
-            "new Date(0).toTimeString()",
-            "'' + new Date(0)",
-            "new Date(0) + 1",
-            "String(new Date(0))",
-            "`${new Date(0)}`",
-        ] {
+        let cut = |s: &str| s.split(" (").next().unwrap().to_string();
+        let mut bad = Vec::new();
+        for (zone, cases) in local_time_cases() {
             let mut it = realm();
-            let w = unsupported_what(&mut it, src);
-            assert!(w.contains("local time") || w.contains("Date()") || w.contains("time zone"), "{src}: {w}");
+            it.set_default_time_zone(zone).unwrap();
+            for (src, want) in cases {
+                let got = out(&mut it, src);
+                if cut(&got) != cut(want) {
+                    bad.push(format!("{zone}: {src}
+node: {want}
+bare: {got}"));
+                }
+            }
         }
-        // what stays usable
-        let mut it = realm();
-        assert_eq!(out(&mut it, "var d = new Date(86400000); [d - 1, +d, d > 5, d.valueOf(), d.getTime()].join()"), "string:86399999,86400000,true,86400000,86400000");
+        assert!(bad.is_empty(), "{} differences:
+{}", bad.len(), bad.join("
+"));
     });
 }
 
 #[test]
-fn local_time_methods_on_an_invalid_date_need_no_zone() {
+fn local_time_zone_names_and_offsets_in_text() {
+    big(|| {
+        let mut it = realm();
+        it.set_default_time_zone("UTC").unwrap();
+        assert_eq!(out(&mut it, "new Date(0).toString()"), "string:Thu Jan 01 1970 00:00:00 GMT+0000 (Coordinated Universal Time)");
+        let mut it = realm();
+        it.set_default_time_zone("Asia/Kolkata").unwrap();
+        assert_eq!(out(&mut it, "new Date(0).toString()"), "string:Thu Jan 01 1970 05:30:00 GMT+0530 (GMT+05:30)");
+        assert_eq!(out(&mut it, "new Date(0).toTimeString()"), "string:05:30:00 GMT+0530 (GMT+05:30)");
+        let mut it = realm();
+        it.set_default_time_zone("America/New_York").unwrap();
+        assert_eq!(out(&mut it, "new Date(1e12).toString()"), "string:Sat Sep 08 2001 21:46:40 GMT-0400 (GMT-04:00)");
+    });
+}
+
+#[test]
+fn local_time_zone_file_is_read_on_the_first_local_call_only() {
+    big(|| {
+        let mut it = realm();
+        // a zone that cannot be read would fail the realm if anything loaded it before the first local call
+        it.run_script("Date.UTC(2020, 0); new Date(5).toISOString(); new Date(5).getUTCHours(); new Date(NaN).getHours(); new Date(NaN).toString();").unwrap();
+        assert!(it.intl.default_zone.is_none());
+        assert_eq!(out(&mut it, "new Date(0).getTimezoneOffset() === new Date(0).getTimezoneOffset()"), "boolean:true");
+        assert!(it.intl.default_zone.is_some());
+    });
+}
+
+#[test]
+fn local_time_methods_on_an_invalid_date() {
     big(|| {
         let mut it = realm();
         assert_eq!(
-            out(&mut it, "var d = new Date(NaN); [d.getFullYear(), d.getDay(), d.getHours(), d.getTimezoneOffset(), d.getYear(), d.toString(), d.toDateString(), d.toTimeString(), d.toLocaleString(), '' + d, String(d)].join('|')"),
-            "string:NaN|NaN|NaN|NaN|NaN|Invalid Date|Invalid Date|Invalid Date|Invalid Date|Invalid Date|Invalid Date"
+            out(&mut it, "var d = new Date(NaN); [d.getFullYear(), d.getDay(), d.getHours(), d.getTimezoneOffset(), d.getYear(), d.toString(), d.toDateString(), d.toTimeString(), d.toLocaleString(), '' + d, String(d), d.setHours(1), d.setDate(1)].join('|')"),
+            "string:NaN|NaN|NaN|NaN|NaN|Invalid Date|Invalid Date|Invalid Date|Invalid Date|Invalid Date|Invalid Date|NaN|NaN"
         );
-        // the setters are gated whole, also on an invalid date
-        assert!(out(&mut it, "d.setHours(1)").starts_with("unsupported:"));
         // the branded receiver is checked first
         assert_eq!(out(&mut it, "try { Date.prototype.getFullYear.call({}); } catch (e) { e.name }"), "string:TypeError");
         assert_eq!(out(&mut it, "typeof Date.prototype.getFullYear + typeof Date.prototype.toString + Date.prototype.setMonth.length + Date.prototype.setHours.length"), "string:functionfunction24");
+    });
+}
+
+#[test]
+fn local_time_arithmetic_stays_usable() {
+    big(|| {
+        let mut it = realm();
+        assert_eq!(out(&mut it, "var d = new Date(86400000); [d - 1, +d, d > 5, d.valueOf(), d.getTime()].join()"), "string:86399999,86400000,true,86400000,86400000");
     });
 }
 

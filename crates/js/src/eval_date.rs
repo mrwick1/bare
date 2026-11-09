@@ -1,9 +1,9 @@
 // Date of the evaluator. Included by `eval.rs` (`include!`). The calendar arithmetic, the parser and the formatter are in
-// `date.rs` (pure functions, UTC only). This file holds the native state, the clock and the builtins.
+// `date.rs` (pure functions, UTC only: the zone is applied here). This file holds the native state, the clock and the builtins.
 //
 // Observed need: the cached app bundle calls `Date.now()` (prefetch, react-query, toaster).
 //
-// Supported (ECMA-262 section 21.4, UTC only)
+// Supported (ECMA-262 section 21.4)
 // - `new Date()`, `new Date(timeValue)`, `new Date(dateObject)`, `new Date(string)`. A value goes through ToPrimitive (default
 //   hint, so `@@toPrimitive`, `valueOf` and `toString` of an object run), a string is parsed, anything else is ToNumber, then
 //   TimeClip (NaN outside +-8.64e15, the integer part, +0 for -0).
@@ -16,15 +16,18 @@
 // - Strings: ISO 8601 as the standard writes it (`YYYY`, `YYYY-MM`, `YYYY-MM-DD`, `THH:mm[:ss[.s+]]`, `Z` or `+HH:mm`, years
 //   `+YYYYYY`/`-YYYYYY`, `24:00`) and the `toUTCString` form. An out-of-range field is NaN (V8 accepts `2021-02-29`).
 //
+// Local time (the zone of `Intl.DateTimeFormat().resolvedOptions().timeZone`: `TZ`, else the `/etc/localtime` link, else UTC; the
+// zone file is read on the first local-time call, never before)
+// - `new Date(y, m, ...)` (2 or more arguments), `Date()` (the local string of now), an ISO date-time with no offset
+//   (`2020-01-01T00:00:00`), `getDate`, `getDay`, `getFullYear`, `getHours`, `getMilliseconds`, `getMinutes`, `getMonth`,
+//   `getSeconds`, `getTimezoneOffset`, `getYear`, `setDate`, `setFullYear`, `setHours`, `setMilliseconds`, `setMinutes`,
+//   `setMonth`, `setSeconds`, `setYear`, `toString`, `toDateString`, `toTimeString`. `"" + date` calls `toString`.
+// - A wall-clock time in an overlap (clocks go back) is the first instant. One in a gap (clocks go forward) uses the offset from
+//   before the gap (ECMA-262 `UTC(t)`).
+// - Known deviation: the text in parentheses after `GMT+hhmm` is `Coordinated Universal Time` for the zone `UTC` and `GMT+hh:mm`
+//   for any other zone. V8 writes the long name from ICU (`India Standard Time`); bare has no name table.
+//
 // Gates (never silent): `Unsupported`, which a script cannot catch.
-// - Local time. bare has no time zone database, so nothing here is local: `new Date(y, m, ...)` (2 or more arguments), a call
-//   `Date()` (a local string), an ISO date-time with no offset (`2020-01-01T00:00:00`), and these methods when the date is valid:
-//   `getDate`, `getDay`, `getFullYear`, `getHours`, `getMilliseconds`, `getMinutes`, `getMonth`, `getSeconds`, `getTimezoneOffset`,
-//   `getYear`, `setDate`, `setFullYear`, `setHours`, `setMilliseconds`, `setMinutes`, `setMonth`, `setSeconds`, `setYear`,
-//   `toString`, `toDateString`, `toTimeString`. On an invalid date the getters give NaN and the string
-//   methods give `Invalid Date`: no zone changes that. They are functions, so `typeof` and feature tests work.
-//   `"" + date` and `date + 1` (hint default) call `toString`, so they are Unsupported for a valid date. `date - 1`, `+date`
-//   and comparisons use `valueOf` and work.
 // - A string with a digit that is not ISO and not the `toUTCString` form (`Jan 1 2020`, `2020-1-1`, `+0100`) is Unsupported. A string with no
 //   digit is NaN.
 // - A subclass (`class extends Date`, `Reflect.construct(Date, [], X)`) is refused with `Unsupported` when constructed: the constructor
@@ -60,45 +63,45 @@ enum DateFn {
     Local(u8),
 }
 
-/// How a local-time method answers for an invalid date.
+/// What a local-time method does.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum LocalKind {
-    /// NaN
-    Number,
-    /// "Invalid Date"
-    Text,
-    /// Unsupported (a setter reads its arguments in an order that depends on the zone only for valid dates, but is gated whole)
-    Setter,
+enum LocalFn {
+    /// The `getUTC*` field with this index, read from local time.
+    Get(u8),
+    /// `getTimezoneOffset`
+    Offset,
+    /// `getYear`
+    GetYear,
+    /// The `setUTC*` method with this index, on local time.
+    Set(u8),
+    /// `setYear`
+    SetYear,
+    /// `toString`, `toDateString`, `toTimeString`
+    Text(date::LocalText),
 }
 
-macro_rules! local {
-    ($n:literal, $len:literal, $k:ident) => {
-        ($n, concat!("Date.prototype.", $n, " (local time: bare has no time zone)"), $len, LocalKind::$k)
-    };
-}
-
-const DATE_LOCAL: [(&str, &str, u32, LocalKind); 21] = [
-    local!("getDate", 0, Number),
-    local!("getDay", 0, Number),
-    local!("getFullYear", 0, Number),
-    local!("getHours", 0, Number),
-    local!("getMilliseconds", 0, Number),
-    local!("getMinutes", 0, Number),
-    local!("getMonth", 0, Number),
-    local!("getSeconds", 0, Number),
-    local!("getTimezoneOffset", 0, Number),
-    local!("getYear", 0, Number),
-    local!("setDate", 1, Setter),
-    local!("setFullYear", 3, Setter),
-    local!("setHours", 4, Setter),
-    local!("setMilliseconds", 1, Setter),
-    local!("setMinutes", 3, Setter),
-    local!("setMonth", 2, Setter),
-    local!("setSeconds", 2, Setter),
-    local!("setYear", 1, Setter),
-    local!("toString", 0, Text),
-    local!("toDateString", 0, Text),
-    local!("toTimeString", 0, Text),
+const DATE_LOCAL: [(&str, u32, LocalFn); 21] = [
+    ("getDate", 0, LocalFn::Get(2)),
+    ("getDay", 0, LocalFn::Get(3)),
+    ("getFullYear", 0, LocalFn::Get(0)),
+    ("getHours", 0, LocalFn::Get(4)),
+    ("getMilliseconds", 0, LocalFn::Get(7)),
+    ("getMinutes", 0, LocalFn::Get(5)),
+    ("getMonth", 0, LocalFn::Get(1)),
+    ("getSeconds", 0, LocalFn::Get(6)),
+    ("getTimezoneOffset", 0, LocalFn::Offset),
+    ("getYear", 0, LocalFn::GetYear),
+    ("setDate", 1, LocalFn::Set(4)),
+    ("setFullYear", 3, LocalFn::Set(6)),
+    ("setHours", 4, LocalFn::Set(3)),
+    ("setMilliseconds", 1, LocalFn::Set(0)),
+    ("setMinutes", 3, LocalFn::Set(2)),
+    ("setMonth", 2, LocalFn::Set(5)),
+    ("setSeconds", 2, LocalFn::Set(1)),
+    ("setYear", 1, LocalFn::SetYear),
+    ("toString", 0, LocalFn::Text(date::LocalText::Full)),
+    ("toDateString", 0, LocalFn::Text(date::LocalText::Date)),
+    ("toTimeString", 0, LocalFn::Text(date::LocalText::Time)),
 ];
 
 const DATE_GETTERS: [&str; 8] = ["getUTCFullYear", "getUTCMonth", "getUTCDate", "getUTCDay", "getUTCHours", "getUTCMinutes", "getUTCSeconds", "getUTCMilliseconds"];
@@ -202,7 +205,7 @@ impl<'p> Interp<'p> {
         for (i, &(n, l)) in DATE_SETTERS.iter().enumerate() {
             self.method(proto, n, Nat::Date(DateFn::Set(i as u8)), l)?;
         }
-        for (i, &(n, _, l, _)) in DATE_LOCAL.iter().enumerate() {
+        for (i, &(n, l, _)) in DATE_LOCAL.iter().enumerate() {
             self.method(proto, n, Nat::Date(DateFn::Local(i as u8)), l)?;
         }
         let tp = self.native(Nat::Date(DateFn::ToPrim), "[Symbol.toPrimitive]", 1)?;
@@ -240,9 +243,56 @@ impl<'p> Interp<'p> {
         self.charge_steps(len as u64)?;
         match date::parse(h!(self, self.heap.str_units(s))) {
             date::Parsed::Time(t) => Ok(t),
-            date::Parsed::Local => Err(unsupported("Date string with a time and no offset (local time: bare has no time zone)", Span::default())),
+            date::Parsed::Local(l) => Ok(date::time_clip(self.date_from_local(l)?)),
             date::Parsed::Unrecognized => Err(unsupported("Date string that is not ISO 8601 or toUTCString format", Span::default())),
         }
+    }
+
+    /// The offset of the default zone (seconds east of UTC) at the valid time value `t`.
+    fn date_offset(&mut self, t: f64) -> Res<i32> {
+        let (_, z) = self.intl_default_zone()?;
+        Ok(z.offset((t / 1000.0).floor() as i64))
+    }
+
+    /// Wall-clock time of the time value `t` (NaN stays NaN).
+    fn date_to_local(&mut self, t: f64) -> Res<f64> {
+        if !t.is_finite() {
+            return Ok(f64::NAN);
+        }
+        Ok(t + self.date_offset(t)? as f64 * 1000.0)
+    }
+
+    /// The time value of wall-clock time `l` (`UTC(t)` of ECMA-262; NaN stays NaN). The caller clips.
+    fn date_from_local(&mut self, l: f64) -> Res<f64> {
+        if !l.is_finite() || l.abs() > date::MAX_TIME + 172_800_000.0 {
+            return Ok(f64::NAN);
+        }
+        let (_, z) = self.intl_default_zone()?;
+        let secs = (l / 1000.0).floor() as i64;
+        Ok(l + (z.to_utc(secs) - secs) as f64 * 1000.0)
+    }
+
+    /// Text of a valid or invalid time value in the default zone.
+    fn date_local_text(&mut self, t: f64, part: date::LocalText) -> Res<Value> {
+        if t.is_nan() {
+            return self.date_string(None);
+        }
+        let (name, z) = self.intl_default_zone()?;
+        let off = z.offset((t / 1000.0).floor() as i64);
+        let zone = if &*name == "UTC" { "Coordinated Universal Time".to_string() } else { format!("GMT{}{:02}:{:02}", if off < 0 { '-' } else { '+' }, off.abs() / 3600, off.abs() / 60 % 60) };
+        self.date_string(date::to_local_string(t, off, &zone, part))
+    }
+
+    /// The 7 arguments of `Date.UTC` and of `new Date(y, m, ...)`: MakeDate of them, coerced in order.
+    fn date_components(&mut self, args: &[Value]) -> Res<f64> {
+        let mut n = [f64::NAN, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0];
+        for (i, slot) in n.iter_mut().enumerate() {
+            if i == 0 || i < args.len() {
+                *slot = self.coerce_number(arg(args, i))?;
+            }
+        }
+        let y = if n[0].is_nan() { n[0] } else if (0.0..=99.0).contains(&n[0].trunc()) { 1900.0 + n[0].trunc() } else { n[0] };
+        Ok(date::make_date(date::make_day(y, n[1], n[2]), date::make_time(n[3], n[4], n[5], n[6])))
     }
 
     fn date_string(&mut self, s: Option<String>) -> Res<Value> {
@@ -256,7 +306,7 @@ impl<'p> Interp<'p> {
         match f {
             DateFn::Ctor => {
                 if !is_new {
-                    return Err(unsupported("Date() called as a function (a local time string)", Span::default()));
+                    return self.date_local_text(date::time_clip(self.wall_now_ms()), date::LocalText::Full);
                 }
                 let nt = self.cls.native_nt.take();
                 let t = match args.len() {
@@ -268,7 +318,10 @@ impl<'p> Interp<'p> {
                             p => date::time_clip(self.coerce_number(p)?),
                         },
                     },
-                    _ => return Err(unsupported("new Date(year, month, ...) is local time (bare has no time zone); use Date.UTC", Span::default())),
+                    _ => {
+                        let l = self.date_components(args)?;
+                        date::time_clip(self.date_from_local(l)?)
+                    }
                 };
                 let proto = self.nt_proto(nt, self.date.proto)?;
                 self.date_new(t, proto)
@@ -279,14 +332,8 @@ impl<'p> Interp<'p> {
                 Ok(Value::Number(self.date_parse_str(s)?))
             }
             DateFn::Utc => {
-                let mut n = [f64::NAN, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0];
-                for (i, slot) in n.iter_mut().enumerate() {
-                    if i == 0 || i < args.len() {
-                        *slot = self.coerce_number(arg(args, i))?;
-                    }
-                }
-                let y = if n[0].is_nan() { n[0] } else if (0.0..=99.0).contains(&n[0].trunc()) { 1900.0 + n[0].trunc() } else { n[0] };
-                Ok(Value::Number(date::time_clip(date::make_date(date::make_day(y, n[1], n[2]), date::make_time(n[3], n[4], n[5], n[6])))))
+                let t = self.date_components(args)?;
+                Ok(Value::Number(date::time_clip(t)))
             }
             DateFn::GetTime => Ok(Value::Number(self.this_date(this)?.1)),
             DateFn::SetTime => {
@@ -351,25 +398,43 @@ impl<'p> Interp<'p> {
                 let Some(f) = date::fields(t) else { return Ok(Value::Number(f64::NAN)) };
                 Ok(Value::Number([f.year, f.month, f.day, f.weekday, f.hour, f.minute, f.second, f.ms][i as usize] as f64))
             }
-            DateFn::Set(i) => self.date_set_utc(i, this, args),
+            DateFn::Set(i) => self.date_set(i, false, this, args),
             DateFn::Local(i) => {
                 let (_, t) = self.this_date(this)?;
-                let (_, what, _, kind) = DATE_LOCAL[i as usize];
-                if t.is_nan() {
-                    match kind {
-                        LocalKind::Number => return Ok(Value::Number(f64::NAN)),
-                        LocalKind::Text => return self.date_string(None),
-                        LocalKind::Setter => {}
+                match DATE_LOCAL[i as usize].2 {
+                    LocalFn::Get(k) => {
+                        let l = self.date_to_local(t)?;
+                        let Some(f) = date::fields(l) else { return Ok(Value::Number(f64::NAN)) };
+                        Ok(Value::Number([f.year, f.month, f.day, f.weekday, f.hour, f.minute, f.second, f.ms][k as usize] as f64))
                     }
+                    LocalFn::GetYear => {
+                        let l = self.date_to_local(t)?;
+                        Ok(Value::Number(date::fields(l).map_or(f64::NAN, |f| (f.year - 1900) as f64)))
+                    }
+                    LocalFn::Offset if t.is_nan() => Ok(Value::Number(f64::NAN)),
+                    // whole minutes, cut toward zero, as V8 does for a zone with seconds in its offset
+                    LocalFn::Offset => Ok(Value::Number(-(self.date_offset(t)? / 60) as f64)),
+                    LocalFn::Set(k) => self.date_set(k, true, this, args),
+                    LocalFn::SetYear => {
+                        let y = self.coerce_number(a0)?;
+                        if y.is_nan() {
+                            let (o, _) = self.this_date(this)?;
+                            self.date.times.insert(o, f64::NAN);
+                            return Ok(Value::Number(f64::NAN));
+                        }
+                        let yi = y.trunc();
+                        self.date_set(6, true, this, &[Value::Number(if (0.0..=99.0).contains(&yi) { 1900.0 + yi } else { y })])
+                    }
+                    LocalFn::Text(part) => self.date_local_text(t, part),
                 }
-                Err(unsupported(what, Span::default()))
             }
         }
     }
 
-    /// `setUTC*` (section 21.4.4.20 and its siblings). The time value is read first, every argument present is coerced in order,
-    /// then an invalid date stays invalid (except `setUTCFullYear`, which starts from +0).
-    fn date_set_utc(&mut self, i: u8, this: Value, args: &[Value]) -> Res<Value> {
+    /// `setUTC*` (section 21.4.4.20 and its siblings), and with `local` the setter of the same field on wall-clock time. The time
+    /// value is read first, every argument present is coerced in order, then an invalid date stays invalid (except
+    /// `setFullYear` and `setUTCFullYear`, which start from +0).
+    fn date_set(&mut self, i: u8, local: bool, this: Value, args: &[Value]) -> Res<Value> {
         let (o, t) = self.this_date(this)?;
         let max = [1, 2, 3, 4, 1, 2, 3][i as usize];
         let mut n = [f64::NAN; 4];
@@ -378,7 +443,7 @@ impl<'p> Interp<'p> {
                 *slot = self.coerce_number(arg(args, k))?;
             }
         }
-        let t = if t.is_nan() && i == 6 { 0.0 } else { t };
+        let t = if t.is_nan() && i == 6 { 0.0 } else if local { self.date_to_local(t)? } else { t };
         let Some(f) = date::fields(t) else { return Ok(Value::Number(f64::NAN)) };
         let given = |k: usize, default: i64| if k < args.len() { n[k] } else { default as f64 };
         let (day, year, month) = (date::day(t), f.year as f64, f.month as f64);
@@ -392,7 +457,7 @@ impl<'p> Interp<'p> {
             5 => date::make_date(date::make_day(year, n[0], given(1, f.day)), date::time_within_day(t)),
             _ => date::make_date(date::make_day(n[0], given(1, f.month), given(2, f.day)), date::time_within_day(t)),
         };
-        let v = date::time_clip(v);
+        let v = date::time_clip(if local { self.date_from_local(v)? } else { v });
         self.date.times.insert(o, v);
         Ok(Value::Number(v))
     }

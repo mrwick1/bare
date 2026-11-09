@@ -107,6 +107,18 @@ impl Zone {
         if n == 0 { self.offs[0] } else { self.offs[self.ty[n - 1] as usize] }
     }
 
+    /// The instant of wall-clock time `l` (seconds, as if local time were UTC). In an overlap (clocks go back) it is the first
+    /// instant. In a gap (clocks go forward) it uses the offset from before the gap, as ECMA-262 says.
+    pub fn to_utc(&self, l: i64) -> i64 {
+        let (a, b) = (self.offset(l - 86_400) as i64, self.offset(l + 86_400) as i64);
+        let ok = |o: i64| self.offset(l - o) as i64 == o;
+        match (ok(a), ok(b)) {
+            (true, true) => (l - a).min(l - b),
+            (false, true) => l - b,
+            _ => l - a,
+        }
+    }
+
     /// Heap bytes held by the zone.
     pub fn bytes(&self) -> usize {
         self.at.capacity() * 8 + self.ty.capacity() + self.offs.capacity() * 4

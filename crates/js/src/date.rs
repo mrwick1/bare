@@ -1,4 +1,4 @@
-//! Date arithmetic, UTC only (ECMA-262 section 21.4.1). No heap, no clock, no time zone.
+//! Date arithmetic, UTC only (ECMA-262 section 21.4.1). No heap, no clock, no time zone: the caller applies the zone.
 //!
 //! A time value is an `f64`: whole milliseconds since 1970-01-01T00:00:00Z, within +-8.64e15, or NaN. Every function
 //! here is total: bad input gives NaN or `None`, never a panic. The day arithmetic uses `i64` and the proleptic
@@ -8,7 +8,7 @@
 //! - `parse` reads the Date Time String Format (section 21.4.1.32): `YYYY`, `YYYY-MM`, `YYYY-MM-DD`, each with an
 //!   optional `THH:mm[:ss[.s+]]` and then `Z` or `+HH:mm` / `-HH:mm`; years `+YYYYYY` and `-YYYYYY` (`-000000` is invalid).
 //!   `24:00:00` is the end of the day. A fraction may have any number of digits: the first three count (as V8 does).
-//!   A form with a time and no offset is local time: it is `Parsed::Local`, never a guessed UTC value.
+//!   A form with a time and no offset is local time: it is `Parsed::Local`; the caller applies the zone.
 //! - `parse` also reads the `toUTCString` form: `Www, DD Mon YYYY HH:mm:ss GMT`.
 //! - A string that has no ASCII digit is NaN. A string with a digit in any other shape is `Parsed::Unrecognized`
 //!   (the legacy formats of V8 are not built; see `docs/resources.md`).
@@ -150,6 +150,33 @@ pub fn to_utc_string(t: f64) -> Option<String> {
     Some(format!("{}, {:02} {} {sign}{:04} {:02}:{:02}:{:02} GMT", DAYS[f.weekday as usize], f.day, MONTHS[f.month as usize], f.year.abs(), f.hour, f.minute, f.second))
 }
 
+/// Which part of the local-time text to write.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum LocalText {
+    /// `Www Mon DD YYYY HH:mm:ss GMT+hhmm (name)`
+    Full,
+    /// `Www Mon DD YYYY`
+    Date,
+    /// `HH:mm:ss GMT+hhmm (name)`
+    Time,
+}
+
+/// `toString`, `toDateString` or `toTimeString` text of time value `t` in a zone `off` seconds east of UTC, named `name` (the
+/// text in parentheses). The year has at least 4 digits and a `-` when negative. A part of an hour in the offset that is
+/// not whole minutes is cut, as V8 does. `None` for an invalid time value.
+pub fn to_local_string(t: f64, off: i32, name: &str, part: LocalText) -> Option<String> {
+    let f = fields(t + off as f64 * 1000.0)?;
+    let sign = if f.year < 0 { "-" } else { "" };
+    let day = format!("{} {} {:02} {sign}{:04}", DAYS[f.weekday as usize], MONTHS[f.month as usize], f.day, f.year.abs());
+    let m = off.abs() / 60;
+    let time = format!("{:02}:{:02}:{:02} GMT{}{:02}{:02} ({name})", f.hour, f.minute, f.second, if off < 0 { '-' } else { '+' }, m / 60, m % 60);
+    Some(match part {
+        LocalText::Full => format!("{day} {time}"),
+        LocalText::Date => day,
+        LocalText::Time => time,
+    })
+}
+
 // ------------------------------------------------------------------------------------------ parse
 
 /// The result of reading a date string.
@@ -157,8 +184,8 @@ pub fn to_utc_string(t: f64) -> Option<String> {
 pub enum Parsed {
     /// A time value (already clipped; NaN when the text is not a valid date).
     Time(f64),
-    /// A valid ISO date-time with no offset: it means local time, and bare has no time zone.
-    Local,
+    /// A valid ISO date-time with no offset: it means local time. The value is the wall-clock time as if it were UTC, not clipped.
+    Local(f64),
     /// Digits in a shape that is not built (a legacy format of V8, `2020-1-1`, a lower-case `t`, `+0100`).
     Unrecognized,
 }
@@ -264,16 +291,16 @@ fn parse_iso(s: &[u16]) -> Option<Parsed> {
     if !c.done() {
         return None;
     }
-    if has_time && offset.is_none() {
-        return Some(Parsed::Local);
-    }
     let end_of_day = h == 24 && mi == 0 && sec == 0 && ms == 0;
     let valid = !neg_zero && (1..=12).contains(&month) && (1..=days_in_month(year, month)).contains(&day) && (h < 24 || end_of_day) && mi < 60 && sec < 60;
     if !valid {
         return Some(Parsed::Time(f64::NAN));
     }
     let t = make_date(make_day(year as f64, (month - 1) as f64, day as f64), make_time(h as f64, mi as f64, sec as f64, ms as f64));
-    Some(Parsed::Time(time_clip(t - offset.unwrap_or(0) as f64 * 60_000.0)))
+    match offset {
+        None if has_time => Some(Parsed::Local(t)),
+        _ => Some(Parsed::Time(time_clip(t - offset.unwrap_or(0) as f64 * 60_000.0))),
+    }
 }
 
 /// `Www, DD Mon YYYY HH:mm:ss GMT`. The weekday name is read and not checked, as V8 does.
