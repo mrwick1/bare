@@ -42,11 +42,16 @@ fn serve() -> String {
 
 /// Run a step file against the page. Gives the pixels of the capture (width, rows of `0xRRGGBB`), and the JSON.
 fn shoot(extra: &str) -> (usize, Vec<u32>, String) {
-    let dir = std::env::temp_dir().join(format!("bare-drive-img-{}-{}", std::process::id(), extra.len()));
+    shoot_page("page.html", "#png", extra)
+}
+
+/// The same for the page `page`, which has the element `wait` once it has loaded.
+fn shoot_page(page: &str, wait: &str, extra: &str) -> (usize, Vec<u32>, String) {
+    let dir = std::env::temp_dir().join(format!("bare-drive-img-{}-{}-{}", std::process::id(), page, extra.len()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let steps = dir.join("steps");
-    std::fs::write(&steps, format!("open {}/page.html\nexpect css=\"#png\" visible\n{extra}\nshot s\n", serve())).unwrap();
+    std::fs::write(&steps, format!("open {}/{page}\nexpect css=\"{wait}\" visible\n{extra}\nshot s\n", serve())).unwrap();
     let out = dir.join("out");
     let run = std::process::Command::new(env!("CARGO_BIN_EXE_bare-drive")).args(["--quiet", "--size", "300x120", "--out", out.to_str().unwrap()]).arg(&steps).output().unwrap();
     let json = String::from_utf8_lossy(&run.stdout).to_string();
@@ -99,4 +104,33 @@ fn the_text_after_the_pictures_is_drawn_and_nothing_waits_for_them() {
     let (w, px, json) = shoot("expect text=\"after\" visible");
     assert!(json.starts_with("{\"ok\":true"), "{json}");
     assert!((100..120).any(|y| (0..40).any(|x| px[y * w + x] != 0xffffff)), "the text is not drawn");
+}
+
+#[test]
+fn a_block_picture_is_drawn_in_a_float_in_a_flex_row() {
+    // The header logo of Wikipedia: `display: block` pictures sized in em, in a float, in a flex item. A block box had no picture in the list.
+    let (w, px, _) = shoot_page("logo.html", "#word", "");
+    let ink = |x0: usize, x1: usize, y0: usize, y1: usize| (y0..y1).flat_map(|y| (x0..x1).map(move |x| (x, y))).filter(|&(x, y)| px[y * w + x] != 0xffffff).count();
+    // The icon (50 by 50, from `width` and `height`), the wordmark (140 by 22) and the tagline (140 by 11) at the right of it.
+    assert!(ink(0, 50, 5, 55) > 100, "no icon");
+    assert!(ink(60, 200, 5, 30) > 200, "no wordmark");
+    assert!(ink(60, 200, 35, 50) > 100, "no tagline");
+}
+
+#[test]
+fn the_grid_template_shorthand_sizes_the_columns() {
+    // `grid-template: rows / columns` (the page of Wikipedia uses it): a 100 px column, a gap of 24 px, and `minmax(0, 1fr)` for the rest of the 250 px.
+    let (w, px, _) = shoot_page("g.html", "#c1", "");
+    let at = |x: usize, y: usize| px[y * w + x];
+    assert!(near(at(50, 10), (0, 170, 0)), "{:06x}", at(50, 10));
+    assert!(near(at(110, 10), (255, 255, 255)) && near(at(130, 15), (0, 0, 170)), "{:06x}", at(130, 15));
+    assert!(near(at(245, 15), (0, 0, 170)) && near(at(260, 15), (255, 255, 255)), "{:06x}", at(260, 15));
+}
+
+#[test]
+fn the_content_of_noscript_is_not_shown() {
+    // This browser runs scripts, so `noscript` holds raw text, and its box is hidden: the green bar is on top, and no text is below it.
+    let (w, px, _) = shoot_page("n.html", "#d", "");
+    assert!(near(px[5 * w + 5], (0, 170, 0)), "{:06x}", px[5 * w + 5]);
+    assert!((10..120).all(|y| (0..300).all(|x| px[y * w + x] == 0xffffff)), "text of the noscript is drawn");
 }

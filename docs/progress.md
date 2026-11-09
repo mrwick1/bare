@@ -3503,3 +3503,28 @@ Noticed, not changed: the page spin on Wikipedia, the black squares (likely CSS 
 Tests: `cargo test --release --workspace` passes. New: 9 `bare-image` tests, 2 `paint::svg` file tests, 1 hints test, 2 `bare-drive` tests over `tools/fixtures/img` (formats, sizes, pixels, text after pictures). The no-image regression is the cost matrix and the no-image fixture above.
 
 Not tested: the window (only the shared paint path), GIF, animated WebP, CMYK or progressive JPEG variants, a hostile server (slow body, lying `content-length`) beyond the unit limits, arjun-e16.
+
+## Wikipedia layout gaps (2026-11-09)
+
+Goal: find the cause of three gaps on `https://en.wikipedia.org/wiki/Rust_(programming_language)` in `bare-drive` (headless, 1280 by 800). Chrome was not run. The checks were the capture, a fixture for each cause, and `expect js` reads of box rectangles.
+
+Gap 2, the header logos. The three SVG files loaded (200) and decoded: `paint::svg::bitmap` gives 100x100, 140x22 and 140x11 for them. The pictures were on the elements, but never painted. The paint pass handled `Layer::Block` boxes with `decor` only, and called `svg_of` and `picture` only for contexts (atomic, float, positioned). The CSS of the logo sets `display: block` on the three `<img>` elements. So a block `<img>` or `<svg>` never gave a picture item. Change: `Layer::Block` calls `svg_of` and `picture` too (`crates/paint/src/display.rs`). Both calls are behind the same guards as before, so a page with no `<img>` and no `<svg>` pays nothing. Test: `a_block_picture_is_drawn_in_a_float_in_a_flex_row` (`tools/fixtures/img/logo.html`). Em units, `viewBox`-only files and the float were not the cause.
+
+Gap 1, the horizontal scrollbar. There were two causes.
+- `grid-template` (the shorthand) was not read. Vector sets `grid-template: min-content 1fr min-content / 12.25rem minmax(0, 1fr)` on `.mw-page-container-inner`. The declaration was dropped, so the columns were `auto`. The main column took its max-content width: `.mw-body` was 1286 px wide in a 1177 px grid. Change: `grid-template` reads `rows / columns` and `none`, and resets the areas to `none` (`crates/css/src/grid.rs`). The form with area strings (`"a b" 1fr / ...`) is still dropped. Unit test: `the_template_shorthand_gives_rows_columns_and_no_areas`. Page test: `the_grid_template_shorthand_sizes_the_columns` (`g.html`). I did not add `grid-template` to `SHORTHANDS`: it cost +0.65% on `style_load shorthand` (one more name in a linear `contains`), and `el.style.gridTemplate` is not needed here. So the JS style object does not know the shorthand.
+- `<noscript>` was visible. This browser runs scripts, so `noscript` holds raw text, but the UA sheet had no `display: none` for it. The page ends with `<noscript><img src="...CentralAutoLogin..."></noscript>`, and its text (one long word) was drawn at the foot of the article. It made the page about 2000 px wide. Change: `noscript` is in the `display: none` list of `ua.css`. Test: `the_content_of_noscript_is_not_shown` (`n.html`).
+
+After both, the capture has the Wikipedia layout (menu column, article, infobox, `Appearance` column) and no scrollbar.
+
+Gap 3, the 13 `render: Unsupported ... external stylesheet` lines. This is not a bug. They come from `Page::render` (`page.rs`) while the document loads. The page has two `<link rel=stylesheet>` (`load.php`). The renderer asks for a frame at each change of the document, and fails with `MISSING` while a sheet has not been supplied (`strict` in the style plan, `browser_computed.rs`). The frame stays `None` and nothing is painted. The sheets arrive after the document (at about 360 ms in the run), and the render then works. So the page never renders with a missing sheet: the first paint waits for the sheets, as in Chrome. The cost is 13 console lines for each load of this page, one for each attempt. I did not check the count against the ticks, and I did not change it. Possible follow-up: do not note this error while the page still loads.
+
+Numbers (archMachine, one run each): Wikipedia `open`, `expect`, `shot` took 1.13 s before and 1.24 s after (more layout: the real grid). Cost matrix, 805 rows: mean +0.016% glibc, 0 rows over, 0 failed. A first version had `grid-template` in `SHORTHANDS` and 3 rows over (`style_load shorthand 1` and `10` +0.6%, `scheduler_load mixed 10` +0.7%). Now `grid::declaration` returns at once for a name that does not start with `grid-`, before the lookup of shorthands. `cargo test --release --workspace` passes.
+
+Noticed, not changed:
+- The black squares (menu, section and tool icons) are CSS `mask-image` (another task).
+- An `expect js` that reads `scrollWidth`, or walks all of `querySelectorAll('*')` (9,789 elements here), stops with `Limit(Steps)`. A loop over about 8 `querySelector` calls also stops. This made the search for the wide box slow. `console.log` inside `wait js` gives values out.
+- The page still spins after load (`live_work`), see the img element section.
+- jQuery throws `Exception in module-execute in module jquery` on this page.
+- Area strings in `grid-template`, and the `grid` shorthand, are not read.
+
+Not tested: Chrome side by side, the window (only the shared paint path), other sites that use `grid-template` or a block `<svg>`, arjun-e16.

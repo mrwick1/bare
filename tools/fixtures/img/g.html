@@ -1,0 +1,10 @@
+<!doctype html>
+<title>grid</title>
+<style>
+body{margin:0}
+.g{display:grid;column-gap:24px;grid-template:min-content 1fr min-content / 100px minmax(0,1fr);grid-template-areas:'a a' 'b c' 'd d';width:250px}
+.b{grid-area:b;background:#0a0;height:20px}
+.c{grid-area:c;background:#00a;height:20px;overflow:hidden}
+.w{white-space:nowrap;width:900px;height:10px;background:red}
+</style>
+<div class=g><div class=b></div><div class=c id=c1><div class=w></div></div></div>
