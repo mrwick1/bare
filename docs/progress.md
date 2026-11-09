@@ -4180,13 +4180,13 @@ Tests: `a_pseudo_element_has_the_inherited_values_of_its_element_and_the_initial
 
 ### 3. python.org
 
-`python-org-search` and `python-org-docs-link` pass without a mark. The stops of the earlier note (`Unsupported` CORS and pseudo-element) are gone. I found no new stop. The page logs one CORS line for the `console.python.org` request (no `Access-Control-Allow-Origin` for `https://www.python.org`), and the ready handler goes on. Lobsters is still `known`: `Unsupported("module script")` (the page integration of ES modules is not in this change).
+`python-org-search` and `python-org-docs-link` pass without a mark. The stops of the earlier note (`Unsupported` CORS and pseudo-element) are gone. I found no new stop. The page logs one CORS line for the `console.python.org` request (no `Access-Control-Allow-Origin` for `https://www.python.org`), and the ready handler goes on. Lobsters passes after the rebase on #293 (module scripts on a page); it was `known` before.
 
 ### Checks
 
 - `cargo test --release --workspace --no-fail-fast` after the rebase on d900383: 3114 passed, 0 failed, 12 ignored. (The first run found `fetch_https::https_to_http_and_cross_origin_redirects_send_nothing_further` testing the old gate; rewritten.)
 - Cost matrix against the base build of d900383, 629 rows that ran: mean +0.002% (glibc), 0 rows over the limit under either allocator. Rows touched: `fetch_load post 1` +0.16%, `post 10` +0.22%, `bytes 10` +0.39%, `xhr_load 100` +0.08%, the others under +0.1%. The 176 `bare-stress` rows did not run (the base build has no `bare-stress`). Layout and paint did not change.
-- `tools/drive/public/run.sh` 3 times: 25 pass, 2 known, 0 fail, 0 flakes each time. The known two: lobsters (module script), rust-book-sidebar (a covered link).
+- `tools/drive/public/run.sh` 3 times before the last rebase: 25 pass, 2 known, 0 fail, 0 flakes each time (known: lobsters with its module script, rust-book-sidebar with a covered link). Once after the rebase on #293: 26 pass, 1 known (rust-book-sidebar), 0 fail, 0 flakes. `cargo test --release -p bare` after that rebase: 1120 passed, 0 failed.
 - Not run: `keycost.sh`, `test262_check.sh` and `exec_diff.sh` (`crates/js` did not change).
 
 ### Not tested
