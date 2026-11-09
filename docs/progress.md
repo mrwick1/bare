@@ -5701,3 +5701,51 @@ All five pass the step file. dev.to has no console line after the change. The fi
 - A restyle charge counts the elements under each root, so it can count elements that `RuleSet::restyle` skips (a `display: none` subtree). It stops at the node count of the page.
 - The window frame path (`restyle_frame`) uses the same charge. It was not measured on its own, and no test covers its charge.
 - Not tested: pages with shadow roots and a restyle charge; `getComputedStyle` loops on a live page; the sites on a second machine.
+
+
+## Await in computed keys and array patterns, regexp flag d, generic flags getter
+
+### Problems
+
+Checked with `bare-drive` of main `72c74d5f` and `f92cf541`.
+
+- wise.com stopped on `Unsupported("await in the value of a computed object key")`.
+- apnews.com stopped on `Unsupported("regexp flag d")`.
+- lemmy.world logged `RegExp.prototype.flags getter called on non-RegExp object`. ECMA-262 22.2.6.4 makes the getter generic.
+
+### Change
+
+- Async machine (`eval_async.rs`): `await` in the key of an object literal, in its value when the key is computed, and in a getter, setter or method key. The key runs before the value. The operand of an object literal is now `2 * property` for a key and `2 * property + 1` for a value. A computed key that waits for its value keeps the key in the slot after the object.
+- Binding patterns of `var`/`let`/`const`: `await` or `yield` in a default or a computed key, in array patterns (new frame `PatArr`, the `Slot::It` holds the iteration, a throw or a generator return closes it) and in computed keys of object patterns (new frame `PatKey`). The function `pat_gap` is gone.
+- `object_prop` (`eval.rs`) takes an optional key, so the machine never evaluates a computed key twice. The plain evaluator passes `None`.
+- Flag `d`: `Flags::has_indices` (`regexp.rs`), the `hasIndices` getter, `d` in `flags`, and `indices` on the result of `exec`, `match` and `matchAll`, with `indices.groups`. The matcher ignores the flag. A regexp with no named groups and no `d` takes the old path.
+- The `flags` getter on an object that is not a regexp reads `hasIndices`, `global`, `ignoreCase`, `multiline`, `dotAll`, `unicode`, `sticky`, `unicodeSets` in the order of V8 and joins the letters as `dgimsuvy`.
+
+### Spec references
+
+ECMA-262: 13.2.5.4 (object initializer, key before value), 8.6.2 (binding initialization, iterator close), 22.2.6.4 (`flags`), 22.2.7.2 (`RegExpBuiltinExec`, `indices`), 22.2.7.8 (`MakeMatchIndicesIndexPairArray`).
+
+### Checks
+
+- Tests first: 6 computed-key cases of `async-cases.txt` failed on main with `setup-error:Unsupported`. The `d` test failed on main with `Unsupported("regexp flag d")`; the `flags` getter test fails on main by the `TypeError` above. Node 22 is the oracle for 12 new `async-cases.txt` cases, for the Rust tests in `eval_async_tests.rs` (12 cases, frames and slots back to 0 after a throw) and for the `d` and `flags` cases in `eval_builtins_tests.rs`.
+- `async_check` (118 cases) matches Node. `cargo test --release --workspace` passes (`bare-js`: 850 passed).
+- `tools/js/test262_check.sh`: `gate: ok`. `tools/js/exec_diff.sh`: 79 runs, 0 differences. `tools/js/typing/keycost.sh`: `#a1` 282.7 M and `#f0` 288.0 M for each key, peak RSS 33.4 MiB at 50 keys.
+- Public journeys: 48 pass, 0 fail, 0 flakes.
+- Cost: the full matrix of 805 rows against the shared build of `f92cf541` (main, no newer commit at the time of the run). Zero rows over +0.5% under glibc, so no jemalloc runs. Zero failed. Mean change -0.008%. Largest rows: `select_load churn 1000` (with `SELECT_LOAD_STACK_MIB=8`) +0.238%, `fetch_load bytes 10` +0.188%.
+
+### Live results (`bare-drive`, `timeout 30000`, `open URL`, `expect js "document.readyState === 'complete'"`, `shot s`)
+
+| Site | Before | After |
+|---|---|---|
+| wise.com | fail at 1.8 s, `Unsupported("await in the value of a computed object key")` | pass, 7.11 G instructions, 183 MiB peak RSS. Next errors: `TypeError: Cannot read properties of undefined (reading 'search')` and `TypeError: Intl.Locale is not a constructor`. |
+
+### Stays gated
+
+`await` in a function parameter, a `catch` parameter, a `for-in` or `for-of` head pattern, `delete`, `++`/`--`, a tagged template, a class heritage or computed key, `super(...)`, `super[await k]`. I did not try the `catch` and `for` heads: the brief asked for two forms after wise, and the web gaps took the time.
+
+### Not tested
+
+- Chrome was not run on wise. The next stop (`Intl.Locale`) belongs to the Intl work.
+- Assignment patterns (`({ [await k]: x } = o)`) stay gated.
+- `indices` on a regexp with the `u` flag and astral characters is not in the cases.
+- `Symbol.matchAll` or `exec` replaced by a user function does not add `indices` (the user result is used as is, as in the spec).
