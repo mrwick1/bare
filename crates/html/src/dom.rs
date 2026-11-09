@@ -255,6 +255,8 @@ pub struct Document {
     // The changes of `ui`, also counted in `revision`. See `ui_revision`.
     images: HashMap<u32, Bitmap, BuildHasherDefault<Fnv>>,
     // The decoded pictures of the `<img>` elements that have one, by `NodeId::index`. See `set_image`.
+    css_images: HashMap<u32, Bitmap, BuildHasherDefault<Fnv>>,
+    // The decoded pictures of `background-image` and `mask-image`, by the number of their address (`bare_css::urls`). See `set_css_image`.
     user: UserState,
     // What the user points at, presses and focuses: the user action pseudo-classes. See `user`.
 }
@@ -484,6 +486,7 @@ impl Document {
             ui: HashMap::default(),
             ui_revision: 0,
             images: HashMap::default(),
+            css_images: HashMap::default(),
             user: UserState::default(),
             on_name: false,
         };
@@ -611,6 +614,20 @@ impl Document {
             return None;
         }
         self.images.get(&(el.index() as u32))
+    }
+
+    /// Give the picture of address number `id` to the styles that name it. Layout does not read it, so the document logs no change: the host
+    /// builds the display list again.
+    pub fn set_css_image(&mut self, id: u32, image: Bitmap) {
+        self.css_images.insert(id, image);
+    }
+
+    /// The picture of address number `id`, see `set_css_image`.
+    pub fn css_image(&self, id: u32) -> Option<&Bitmap> {
+        if self.css_images.is_empty() {
+            return None;
+        }
+        self.css_images.get(&id)
     }
 
     /// Does any element have a picture?

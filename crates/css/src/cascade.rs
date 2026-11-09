@@ -1965,6 +1965,11 @@ impl ComputedStyle {
         picture_value(self.2, property)
     }
 
+    /// The 12 picture values at once, in the order of `Property::ALL[CORE..]`: one lookup, for the code that reads many of them (paint).
+    pub fn pictures(&self) -> Pictures {
+        picture_values(self.2)
+    }
+
     /// The value of any property.
     pub fn value(&self, property: Property) -> Value {
         if property.is_picture() { self.picture(property) } else { self.get(property) }
@@ -2007,7 +2012,7 @@ thread_local! {
 }
 
 /// The values of the picture properties of one element: `Property::ALL[CORE..]`, in that order.
-type Pictures = [Value; Property::COUNT - Property::CORE];
+pub type Pictures = [Value; Property::COUNT - Property::CORE];
 
 /// The sets of picture values, each one once, for the whole process. A style holds the number of its set (`ComputedStyle::2`): the 12
 /// values would make each style 96 bytes larger and each compare slower, for a few elements of a page. Set 0 is the starting values: it is
@@ -2036,6 +2041,16 @@ fn picture_value(id: u32, p: Property) -> Value {
     }
     let guard = PICTURES.lock().unwrap_or_else(|e| e.into_inner());
     guard.as_ref().map_or_else(|| initial(p), |t| t.sets[id as usize - 1][p as usize - Property::CORE])
+}
+
+#[cold]
+#[inline(never)]
+fn picture_values(id: u32) -> Pictures {
+    let guard = PICTURES.lock().unwrap_or_else(|e| e.into_inner());
+    match (id, guard.as_ref()) {
+        (1.., Some(t)) => t.sets[id as usize - 1],
+        _ => picture_start(),
+    }
 }
 
 /// The pixels and the percent of a `Length::Calc` in the picture values of a style.

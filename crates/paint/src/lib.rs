@@ -13,6 +13,7 @@ pub mod canvas;
 pub mod display;
 pub mod glyphs;
 pub mod hit;
+pub mod layer;
 pub mod png;
 pub mod svg;
 
@@ -66,6 +67,8 @@ pub struct Painter {
     saved: Vec<u32>,
     /// The translations that are open: what to go back to at `PopScroll` and `PopFixed`.
     offsets: Vec<(i32, i32)>,
+    /// The pictures of `background-image` and `mask-image` at the size they are drawn (`layer.rs`).
+    pub scaled: layer::Scaled,
 }
 
 impl Painter {
@@ -105,7 +108,7 @@ impl Painter {
 
     /// Draw the display list with the scroll offsets of `view`, and the scrollbars of the page.
     pub fn draw_view(&mut self, canvas: &mut Canvas, view: Option<&View>) {
-        let Painter { glyphs, list, clips, layers, saved, offsets } = self;
+        let Painter { glyphs, list, clips, layers, saved, offsets, scaled } = self;
         canvas.pixels.fill(list.background);
         clips.clear();
         layers.clear();
@@ -134,6 +137,7 @@ impl Painter {
                 }
                 Item::Poly { at: from, n, color } => canvas.fill_poly_at(&list.points[from as usize..(from + n) as usize], off, color, clip),
                 Item::Image { r, at: k } => canvas.draw_image(at(r), clip, &list.images[k as usize]),
+                Item::Layer { r, at: k } => canvas.draw_layer(at(r), clip, off, &list.layers[k as usize], scaled),
                 Item::PushLayer { r, alpha } => {
                     let r = at(r).intersect(clip).intersect(bounds);
                     layers.push((r, alpha, saved.len()));
