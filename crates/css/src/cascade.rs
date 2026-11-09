@@ -1933,6 +1933,7 @@ fn initial(p: Property) -> Value {
         VerticalAlign => Value::Keyword(K::Baseline),
         Direction => Value::Keyword(K::Ltr),
         ZIndex => Value::Keyword(K::Auto),
+        ObjectFit => Value::Keyword(K::Fill),
         Fill => Value::Color(Color::BLACK),
         Stroke => Value::Keyword(K::None),
         Opacity => Value::Number(1.0),

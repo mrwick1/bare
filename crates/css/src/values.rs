@@ -172,6 +172,7 @@ properties! {
     AspectRatio => "aspect-ratio",
     Fill => "fill",
     Stroke => "stroke",
+    ObjectFit => "object-fit",
 }
 
 /// A length or a percent. The fixed units are already `Px`.
@@ -258,6 +259,7 @@ keywords! {
     Textfield => "textfield", Textarea => "textarea", Menulist => "menulist",
     All => "all", Painted => "painted", Fill => "fill", Stroke => "stroke", VisiblePainted => "visiblepainted",
     VisibleFill => "visiblefill", VisibleStroke => "visiblestroke",
+    Contain => "contain", Cover => "cover", ScaleDown => "scale-down",
 }
 
 /// The value of one property. It does not say which property: a `Declared` has that.
@@ -480,9 +482,9 @@ pub(crate) fn length(value: f32, unit: &str) -> Option<Length> {
         Some(Length::Em(value))
     } else if is("rem") {
         Some(Length::Rem(value))
-    } else if is("vw") {
+    } else if is("vw") || is("dvw") || is("svw") || is("lvw") {
         Some(Length::Vw(value))
-    } else if is("vh") {
+    } else if is("vh") || is("dvh") || is("svh") || is("lvh") {
         Some(Length::Vh(value))
     } else if is("vmin") {
         Some(Length::Vmin(value))
@@ -1075,6 +1077,7 @@ fn longhand(property: Property, part: Part) -> Option<Value> {
         AlignSelf => one_of(part, &[K::Auto, K::Normal, K::Stretch, K::FlexStart, K::FlexEnd, K::Center, K::Baseline, K::LastBaseline, K::Start, K::End, K::SelfStart, K::SelfEnd]),
         JustifyItems => one_of(part, &[K::Normal, K::Stretch, K::FlexStart, K::FlexEnd, K::Center, K::Baseline, K::LastBaseline, K::Start, K::End, K::SelfStart, K::SelfEnd, K::Left, K::Right]),
         JustifySelf => one_of(part, &[K::Auto, K::Normal, K::Stretch, K::FlexStart, K::FlexEnd, K::Center, K::Baseline, K::LastBaseline, K::Start, K::End, K::SelfStart, K::SelfEnd, K::Left, K::Right]),
+        ObjectFit => one_of(part, &[K::Fill, K::Contain, K::Cover, K::None, K::ScaleDown]),
         // A ratio has more than one part: `expand` reads it.
         AspectRatio => Option::None,
         // The paint of an SVG shape: a color or `none`. A paint server (`url(#a)`) is not built, so it is not good.
@@ -1192,6 +1195,13 @@ mod tests {
     use Keyword as K;
     use Property::*;
 
+    #[test]
+    fn object_fit_keywords() {
+        for value in ["fill", "contain", "cover", "none", "scale-down"] {
+            assert_eq!(parse("object-fit", value).len(), 1, "{value}");
+        }
+    }
+
     /// `SHORTHANDS` is the list of every shorthand name, and no longhand is in it.
     #[test]
     fn shorthand_list_matches_longhands() {
@@ -1259,6 +1269,9 @@ mod tests {
         assert_eq!(one("width", "2REM"), Some(Value::Length(Length::Rem(2.0))));
         assert_eq!(one("width", "50%"), Some(Value::Length(Length::Percent(50.0))));
         assert_eq!(one("width", "10vw"), Some(Value::Length(Length::Vw(10.0))));
+        for unit in ["dvh", "svh", "lvh"] {
+            assert_eq!(one("height", &format!("10{unit}")), Some(Value::Length(Length::Vh(10.0))));
+        }
         assert_eq!(one("height", "10vh"), Some(Value::Length(Length::Vh(10.0))));
         assert_eq!(one("width", "auto"), Some(Value::Keyword(K::Auto)));
         assert_eq!(one("width", "AUTO"), Some(Value::Keyword(K::Auto)));

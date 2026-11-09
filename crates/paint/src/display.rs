@@ -162,6 +162,23 @@ enum Layer {
 /// (`bare_layout::block::MAX_DEPTH`). It keeps the recursion of `Builder::context` small.
 const MAX_DEPTH: usize = 400;
 
+/// Center the image in its content box. Object position defaults to 50% 50%.
+fn fitted_image(r: IRect, w: u32, h: u32, fit: Value) -> IRect {
+    if w == 0 || h == 0 { return r; }
+    let (bw, bh) = ((r.x1 - r.x0) as f32, (r.y1 - r.y0) as f32);
+    let contain = (bw / w as f32).min(bh / h as f32);
+    let scale = match fit {
+        Value::Keyword(Keyword::Contain) => contain,
+        Value::Keyword(Keyword::Cover) => (bw / w as f32).max(bh / h as f32),
+        Value::Keyword(Keyword::None) => 1.0,
+        Value::Keyword(Keyword::ScaleDown) => contain.min(1.0),
+        _ => return r,
+    };
+    let (w, h) = ((w as f32 * scale).round() as i32, (h as f32 * scale).round() as i32);
+    let (x, y) = (r.x0 + ((bw as i32 - w) / 2), r.y0 + ((bh as i32 - h) / 2));
+    IRect { x0: x, y0: y, x1: x + w, y1: y + h }
+}
+
 impl DisplayList {
     pub fn new() -> DisplayList {
         DisplayList::default()
@@ -873,7 +890,10 @@ impl Builder<'_> {
         }
         let at = self.list.images.len() as u32;
         self.list.images.push(bitmap.clone());
-        self.list.items.push(Item::Image { r, at });
+        let fitted = fitted_image(r, bitmap.0, bitmap.1, style.get(Property::ObjectFit));
+        if fitted != r { self.list.items.push(Item::PushClip(r)); }
+        self.list.items.push(Item::Image { r: fitted, at });
+        if fitted != r { self.list.items.push(Item::PopClip); }
     }
 
     /// The shapes of an `<svg>`, clipped to its box.
@@ -1200,4 +1220,18 @@ fn radii(style: &ComputedStyle, b: IRect) -> Option<Shape> {
         return None;
     }
     Some(Shape::new(b, [c[0].0, c[0].1, c[1].0, c[1].1, c[2].0, c[2].1, c[3].0, c[3].1]))
+}
+
+#[cfg(test)]
+mod image_fit_tests {
+    use super::*;
+
+    #[test]
+    fn a_wide_image_is_centered_and_preserves_its_ratio() {
+        let box_ = IRect { x0: 10, y0: 20, x1: 110, y1: 120 };
+        assert_eq!(fitted_image(box_, 200, 100, Value::Keyword(Keyword::Contain)), IRect { x0: 10, y0: 45, x1: 110, y1: 95 });
+        assert_eq!(fitted_image(box_, 200, 100, Value::Keyword(Keyword::Cover)), IRect { x0: -40, y0: 20, x1: 160, y1: 120 });
+        assert_eq!(fitted_image(box_, 200, 100, Value::Keyword(Keyword::Fill)), box_);
+        assert_eq!(fitted_image(box_, 20, 10, Value::Keyword(Keyword::ScaleDown)), IRect { x0: 50, y0: 65, x1: 70, y1: 75 });
+    }
 }

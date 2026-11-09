@@ -1463,6 +1463,12 @@ mod tests {
     }
 
     #[test]
+    fn capped_center_track_fits_between_fixed_gutters() {
+        let html = "<div style='display:grid;width:760px;grid-template-columns:40px minmax(0,1536px) 40px'><div></div><div id=center>Rapidly build modern websites without ever leaving your HTML.</div></div>";
+        assert_eq!(rect(html, "", "center").w, 680.0);
+    }
+
+    #[test]
     fn fixed_and_fr_columns() {
         let html = boxes(3, "");
         assert_eq!(grid("grid-template-columns: 100px 1fr 2fr", &html, "a"), r(8.0, 8.0, 100.0, 0.0));
