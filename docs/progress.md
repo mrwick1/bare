@@ -3866,3 +3866,106 @@ The two python.org journeys stay `known` with the new text. Next step: a fixture
 - Cost matrix against origin/main: 629 rows ran, 0 rows over the limit (mean glibc -0.004%). The 176 `bare-stress` rows failed to run because the shared base build has no `bare-stress` (known); the change does not touch those paths.
 
 Not tested: arjun-e16, window mode, XML shown as a tree (it shows as text), a PDF viewer, `Content-Disposition: attachment`, and a form POST that answers with an image.
+
+## JS and DOM gaps from the 42-site survey (2026-11-09)
+
+Goal: fix the gaps that real pages hit on passing pages of the survey (`/data/bare-tmp/survey2/report.md`, section 4). Another change (`wikipedia-js`) owns the Wikipedia jQuery exception, the idle spin and `Limit(Steps)`. Base is `0232dca` (origin/main).
+
+### 1. `Image is not defined` (wiktionary, wikipedia portal)
+
+Cause: no `Image` constructor and no `HTMLImageElement`. `<img>` wrappers had the plain `HTMLElement` prototype, so `img.src`, `img.complete` and `img.naturalWidth` were all `undefined`.
+
+Change (`browser_img.rs`, `images.rs`):
+- `HTMLImageElement` and `Image` are lazy globals. Every `<img>` wrapper gets the prototype. Members: `src`, `srcset`, `alt`, `currentSrc`, `width`, `height`, `naturalWidth`, `naturalHeight`, `complete`, `onload`, `onerror`, `decode()`. `new Image(w, h)` makes a detached `img`.
+- `src` (the IDL setter and `setAttribute('src')`) pushes the element on a list in the document. `Page::images_step` takes the list and uses the loader of the `img` change (same queue, same 4 downloads, same budget, same `bare-image` decode). When the download ends the page calls `Browser::img_settled`. That queues one `Task::Media` task with step 200 or 201. The task settles the promises of `decode()` and fires `load` or `error` at the element. A tree `<img>` found by the scan fires the same events.
+- `Option` and `Audio` already existed. Nothing changed there.
+
+Tests: 7 unit tests (`browser_img_tests.rs`: the interface, `src` and the request list, events in a task, `decode()` for a loaded, failed and empty picture, no interface without an `<img>`). One drive test (`crates/drive/tests/images.rs`, fixture `tools/fixtures/img/ctor.html`): `new Image(5, 6)` loads `red.png` over loopback (`onload`, `naturalWidth` 20, `naturalHeight` 10, `decode()` fulfils) and a missing file fires `onerror` with `complete` true.
+
+Live: wiktionary.org and wikipedia.org no longer log `Image is not defined`. Their console has no entry other than the page-level `render:` line.
+
+Known gaps: `complete` is true for a tree `<img>` until the scan at `interactive` starts it. `width` and `height` read the attribute, not the rendered size. A GIF or AVIF fires `error`. A `srcset` change starts no request. `sizes`, `crossOrigin`, `loading` and `decoding` do not exist. An `<img>` that no script has touched and that has no `onload` attribute still gets a task (the task is cheap: one event).
+
+### 2. `document.implementation.createHTMLDocument` (stackexchange, go.dev)
+
+Cause: `document.implementation` did not exist.
+
+Change (`browser_impl.rs`): `document.implementation` returns one `DOMImplementation` object with `createHTMLDocument(title)` and `hasFeature()`. The new document is a `Document` node in the arena of the page with no parent (the template document does the same). It holds a doctype, `html`, `head`, `title` (only when the argument is not `undefined`) and `body`. `body.innerHTML = ...`, `querySelector` and `getElementById` work on it, its nodes are not connected, and its scripts do not run. `ownerDocument` of its nodes gives it (a flag makes the walk cost nothing for a page that never made one). Nodes move into the page with `appendChild`.
+
+Tests: `create_html_document_makes_a_detached_document` (parse, query, no script run, no title element without an argument, move into the page, `Illegal invocation`).
+
+Live: stackexchange.com and go.dev pass the `createHTMLDocument` call. They now stop at other errors (see "Noticed").
+
+Known gaps: `createElement` on the new document is the one of the page. `defaultView` is `null`; `URL` is the page URL. No `createDocument`, no `createDocumentType`, no global `DOMImplementation`.
+
+### 3. Non-ASCII `SyntaxError` (bbc.com, nextjs.org)
+
+Cause (found by parsing the 81 scripts of both pages with `parse_check`): lodash `deburr` has an object literal `{À:"A",Á:"A",...}` (BBC chunk `05el2iwpn3pyx.js`, line 7; nextjs chunk `3rfagg-i47bvd.js`). The lexer rejected every non-ASCII character in a name (`ErrorKind::NonAscii`). It was a parser gap, not a page error.
+
+Change (`lex.rs`, `Cargo.toml`): names accept ID_Start and ID_Continue characters, ZWNJ and ZWJ, and `é` and `\u{...}` escapes. The sets come from `icu_properties` (already in `Cargo.lock` as a dependency of the ICU crates; compiled data; no new download). Latin-1 is decided by a `match` without a lookup. The ASCII path is unchanged. The decision for a non-ASCII character is in one `#[cold]` function: the first version, with the check inline, made `lex_load small` +4.9% and `parse_load chain` +3.7%. `ident_name` decodes non-ASCII names.
+
+test262 (`tools/js/test262_check.sh`): all 8 `language/identifiers` failures and 965 failures of "non-ASCII character outside a string" are gone: `language/identifiers` 135 to 268 passing; `class/elements` 433 to 909 (expressions) and 514 to 990 (statements). Total over the subset: 27,182 passing before, 28,365 now (+1,183), failing 3,703 to 2,520. Baseline updated.
+
+Tests: `non_ascii_names_follow_id_start_and_id_continue` replaces `non_ascii_names_are_rejected_not_guessed`; `lex_load malformed` now uses `U+00B1` (it was `U+00E9`, which is a valid name now).
+
+Live: bbc.com no longer logs the `SyntaxError`. nextjs.org logs one `error` entry with the text `[object]` (see "Noticed").
+
+### 4. Class static blocks (tailwindcss.com, bbc.com)
+
+Change (`parse.rs`, `ast.rs`, `eval_classes.rs`, `bc_scope.rs`): `static { ... }` parses as a class element `ElemKind::StaticBlock(FuncId)`. The function is a method with no parameters; its body is the block. `return`, `arguments` (also in an arrow), `await` (also as a name, except inside an arrow), `yield` and `super()` are early errors; var and let conflicts, labels and duplicate lexical names use the function scope rules. At run time the block is one more static element: it runs in order with the static fields, with `this` the class, `super.x` through the static home object and `new.target` undefined.
+
+test262 numbers (`-g 'class|identifiers|static'`, before static blocks and non-ASCII together with the 965 rows): static-init files passing 0 of 34 before the parser change and 29 of 34 after (`static-init-*` in `language/statements/class` and `expressions/class`; 25 more tests pass in `language/statements/class` 201 to 226 and 2 in `expressions/class` 212 to 214). The 5 that still fail: `arguments` inside a nested function parameter default (a ReferenceError in the evaluator, already so for plain functions), `arguments` as a label (`'arguments' is not allowed` is raised before the parser knows it is a label), `await` as an identifier in an arrow parameter list, an escaped `arguments` in a computed key of a class in the block, and `static-init-invalid-arguments`. Same causes as in the text above; not fixed here.
+
+Tests: `class_static_blocks` (accept and reject cases, parse), 7 cases in `class-cases.txt` compared with Node by `eval_oracle.mjs` (order with fields, scope, private names and `super`, throw, `static` as a method name, arrow and closure, one run for each class evaluation), and the three corpus cases of `parse-cases.txt` that said "unsupported". `parse_check` prints `(staticblock ...)` and the oracle prints the same for Acorn's `StaticBlock`; the tree comparison with Acorn was not run (Acorn is not installed here).
+
+### 5. Module scripts (not implemented)
+
+`<script type=module>` stops the page with `Unsupported("module script")`. The survey report counts it on one page; the 42 survey outputs show 8 passing pages with the entry: angular.dev, getbootstrap.com, github.com (the tokio repo and the rust repo), theguardian.com, lobste.rs, developer.mozilla.org and vuejs.org. Module scripts of each page (HTML fetched 2026-11-09, counts from the page source):
+
+| Page | Module scripts | What they do (from the source) | Without them |
+| --- | --- | --- | --- |
+| angular.dev | 1 (`main-*.js`, 620 KB) | The Angular application (221 dynamic `import()` calls, one `import.meta`) | The server-rendered HTML (100 KB) is drawn; no routing, no search, no interaction |
+| getbootstrap.com | 5 (4 files and one inline) | Navigation, code copy buttons, docs scripts, the "copy for agents" button | Static docs are drawn; the buttons do nothing |
+| github.com (2 pages) | 6 each (`core`, `codespaces`, `repositories`, `code-menu`, `code-view`, `high-contrast-cookie`) | GitHub's web components and menus | The server-rendered repository page is drawn; menus, tabs and the file tree do not work |
+| theguardian.com | 3 (one inline, `frameworks`, `index`) | The client application (3 dynamic imports) | The server-rendered front page is drawn (1.4 MB of HTML); 16 other scripts still run |
+| lobste.rs | 1 (`/application.js`, 2 KB) | Small page behavior | Reading works; forms submit; this is the smallest case |
+| developer.mozilla.org | 5 (`runtime`, 3 chunks, `index`) | The client app (search, theme, code examples) | The article is drawn; search and the theme switch do not work |
+| vuejs.org | 1 (`app.*.js`, 8 KB) | The VitePress client (hydration, navigation) | The static page is drawn; links navigate as plain links |
+
+All 8 pages degrade gracefully for reading: the document passes `expect css="body" visible` and the capture shows the server HTML. Interaction that needs the script does not work. The counts of `import` and `export` statements per file are rough (a line-start regexp).
+
+What a module needs (estimate, not measured; the sizes are lines of Rust):
+- Parser: the module goal (always strict; `import` and `export` forms; `import.meta`; dynamic `import()`; top-level `await`). About 800 lines plus Acorn-compared cases. The lexer needs no change.
+- Module records and linking: one record per URL, a graph walk, cycles, live bindings (a binding is a reference to the exporting scope's slot, not a copy), namespace objects, `export * from`, error caching. About 1,500 lines in the evaluator. This is the largest part, and the slot design of the evaluator (frame slots, ICs) decides the cost of live bindings.
+- Evaluation order and top-level `await`: async module evaluation with the spec's cycle rules. About 500 lines on top of the async code.
+- Page integration: fetch of the graph with CORS (module requests are always CORS), `type=module` is deferred by default, `async` changes the order, `nomodule`, `modulepreload`, import maps, the `integrity` attribute, `import()` from classic scripts. About 600 lines in the loader plus the fetch rules for the `crossorigin` credentials mode.
+- Tests: test262 `language/module-code` and `language/import` (about 600 tests now skipped by the runner), Acorn comparison for module syntax, and a loopback page.
+- Total: roughly 3,500 lines and 2 to 3 weeks of one person's work. Cost to pages that use no module: none, if the module path is only entered for `type=module`.
+- First useful step: a page whose only module is small (lobste.rs, vuejs.org) with static imports only, no top-level `await`, no cycles. About a third of the work.
+
+### Checks
+
+| Check | Result |
+| --- | --- |
+| `cargo test --release --workspace --no-fail-fast` | 62 test results, 0 failed |
+| `tools/js/test262_check.sh` | gate ok; 28,365 passing (was 27,182) |
+| `tools/js/exec_diff.sh` | 79 runs, 0 differences |
+| `tools/js/cost_matrix.sh BASE NEW` (805 rows, base `0232dca`) | mean glibc +0.013%, jemalloc +0.404% (4 rows measured); 0 failed; over under both: `lex_load malformed 1` +0.83% and `10` +0.84% |
+| `tools/js/typing/keycost.sh` (page `w2-typing`) | `#a1` 282.2 M per key (base 282.7 M); `#f0` 287.6 M (base 288.1 M); RSS 32.0 MiB at 20 and 50 keys |
+| `tools/drive/public/run.sh` | pass 21, fail 0, known 6 (the marked known bugs) |
+
+`lex_load malformed` is a row of short bad sources, one of them a non-ASCII character outside a name. That error now asks the Unicode tables whether the character may start a name before it fails. The cost is one cold call for each such error. The row does not measure a normal source. No other row is over. Two rows are over under one allocator only (`preload_load style 10` +0.58%, `resources_load small 1` +0.92% glibc, -0.20% jemalloc): noise candidates.
+
+First matrix (before the cold function): 17 rows over under both, up to `lex_load small` +4.9%. The fix is in the lexer text above.
+
+### Noticed, not changed
+
+- `document.title` does not exist (undefined). `DocumentType.name` does not exist.
+- `window.name` is not defined: stackexchange.com now stops at `ReferenceError: name is not defined` in jQuery code (`jQuery.Deferred exception`).
+- `:scope > ...` selectors throw a `SyntaxError` in `querySelector` (go.dev, `DOMContentLoaded`).
+- `Date.prototype.getSeconds` (local time) is `Unsupported` ("bare has no time zone"): bbc.com logs it.
+- nextjs.org logs one console entry of level `error` with the text `[object]`: the console formatter does not print the object. Not investigated.
+- `parse_check` could not compare static block trees with Acorn (not installed).
+- `docs/resources.md` still says non-ASCII identifiers are unsupported in two places (lines 652 and 770).
+
+Not tested: arjun-e16, the window mode, a page that fires many `load` events (hundreds of `<img>`), `setAttribute('srcset')` on a live image, `fetch` of a module, the Acorn tree comparison for static blocks.

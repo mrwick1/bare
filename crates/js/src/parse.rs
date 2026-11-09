@@ -20,10 +20,10 @@
 //! The parser stops at the first error. It does not recover.
 //!
 //! Not supported, with a precise error ([`ErrorKind::Unsupported`]): generators and `yield`, `import`/
-//! `export`/`import()`/`import.meta`, class static blocks. The tested corpus and observed staging
+//! `export`/`import()`/`import.meta`. The tested corpus and observed staging
 //! syntax are covered; this is not a claim of complete ES2022 compatibility.
-//! Not done here: regexp pattern grammar ([`REGEXP_PATTERN_VALIDATED`]), HTML-like comments, non-ASCII
-//! identifiers (the lexer reports them), scope resolution of names.
+//! Not done here: regexp pattern grammar ([`REGEXP_PATTERN_VALIDATED`]), HTML-like comments, scope
+//! resolution of names.
 //!
 //! Specification sections used for the subtle rules (ECMA-262, 2022):
 //! - 12.9.4 / B.1.2: legacy octal numbers and string escapes are errors in strict code.

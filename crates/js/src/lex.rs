@@ -328,6 +328,10 @@ pub fn utf16_offset(src: &str, byte: usize) -> usize {
 /// Is `cp` (not ASCII) allowed in a name? ID_Start for the first character, ID_Continue after it (plus ZWNJ and ZWJ).
 fn id_char(cp: u32, first: bool) -> bool {
     use icu_properties::{props::{IdContinue, IdStart}, CodePointSetData};
+    // Latin-1 is fixed: the letters, and the middle dot (ID_Continue only).
+    if cp < 0x100 {
+        return matches!(cp, 0xAA | 0xB5 | 0xBA | 0xC0..=0xD6 | 0xD8..=0xF6 | 0xF8..=0xFF) || (cp == 0xB7 && !first);
+    }
     if first {
         CodePointSetData::new::<IdStart>().contains32(cp)
     } else {
@@ -501,7 +505,7 @@ impl<'a> Lexer<'a> {
             b'#' => {
                 let n = self.at(start + 1);
                 if n >= 0x80 {
-                    if !self.src[start + 1..].chars().next().is_some_and(|ch| id_char(ch as u32, true)) {
+                    if self.unicode_id(start + 1, true).is_none() {
                         return Err(self.err(ErrorKind::NonAscii, start + 1));
                     }
                 } else if cls(n) & IDSTART == 0 && n != b'\\' {
@@ -511,10 +515,7 @@ impl<'a> Lexer<'a> {
                 escapes = self.ident()?;
                 Kind::PrivateName
             }
-            _ if cls(c) & IDSTART != 0
-                || c == b'\\'
-                || (c >= 0x80 && self.src[start..].chars().next().is_some_and(|ch| id_char(ch as u32, true))) =>
-            {
+            _ if cls(c) & IDSTART != 0 || c == b'\\' => {
                 escapes = self.ident()?;
                 match if escapes { None } else { Keyword::from_bytes(&self.src.as_bytes()[start..self.pos]) } {
                     Some(k) => Kind::Keyword(k),
@@ -526,7 +527,13 @@ impl<'a> Lexer<'a> {
                     self.pos += n;
                     Kind::Punct(p)
                 }
-                None if c >= 0x80 => return Err(self.err(ErrorKind::NonAscii, start)),
+                None if c >= 0x80 => {
+                    if self.unicode_id(start, true).is_none() {
+                        return Err(self.err(ErrorKind::NonAscii, start));
+                    }
+                    escapes = self.ident()?;
+                    Kind::Ident
+                }
                 None => return Err(self.err(ErrorKind::UnexpectedChar, start)),
             },
         };
@@ -620,6 +627,14 @@ impl<'a> Lexer<'a> {
         })
     }
 
+    /// The length in bytes of the character at `at` (not ASCII) if it belongs in a name.
+    #[cold]
+    #[inline(never)]
+    fn unicode_id(&self, at: usize, first: bool) -> Option<usize> {
+        let ch = self.src[at..].chars().next()?;
+        id_char(ch as u32, first).then(|| ch.len_utf8())
+    }
+
     /// An identifier name from `self.pos`. Returns true if it has `\u` escapes.
     fn ident(&mut self) -> Result<bool, Error> {
         let b = self.src.as_bytes();
@@ -645,9 +660,9 @@ impl<'a> Lexer<'a> {
                 esc = true;
             } else if c >= 0x80 {
                 // A letter continues the name. Anything else ends it; the next token reports it if it is bad.
-                match self.src[self.pos..].chars().next() {
-                    Some(ch) if id_char(ch as u32, first) => self.pos += ch.len_utf8(),
-                    _ => break,
+                match self.unicode_id(self.pos, first) {
+                    Some(n) => self.pos += n,
+                    None => break,
                 }
             } else {
                 break;
@@ -1301,6 +1316,10 @@ mod tests {
             ident_name(src, &t[0]).unwrap().into_owned()
         };
         assert_eq!(name("é"), "é");
+        assert_eq!(name("a\u{b7}"), "a\u{b7}"); // the middle dot continues a name
+        assert_eq!(err("\u{b7}"), ErrorKind::NonAscii);
+        assert_eq!(err("\u{d7}"), ErrorKind::NonAscii); // the multiplication sign is not a letter
+        assert_eq!(err("\u{b1}"), ErrorKind::NonAscii);
         assert_eq!(name("日本"), "日本");
         assert_eq!(name("a\u{3b2}b"), "aβb");
         assert_eq!(name("\\u00e9"), "é");

@@ -237,7 +237,7 @@ fn malformed(scale: usize, runs: usize) {
         ("/a/gg", Goal::RegExp, DuplicateRegExpFlag, 4),
         ("`abc", Goal::Div, UnterminatedTemplate, 0),
         ("@", Goal::Div, UnexpectedChar, 0),
-        ("\u{e9}", Goal::Div, NonAscii, 0),
+        ("\u{b1}", Goal::Div, NonAscii, 0),
         ("#", Goal::Div, InvalidPrivateName, 0),
     ];
     let target = scale * (512 << 10);
