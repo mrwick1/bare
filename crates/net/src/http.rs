@@ -407,7 +407,13 @@ impl Client {
             return Err("the reply is too big".into());
         }
         let mut bytes = Vec::with_capacity(body.size_hint());
-        (&mut body).take((max_body as u64).saturating_add(1)).read_to_end(&mut bytes)?;
+        match (&mut body).take((max_body as u64).saturating_add(1)).read_to_end(&mut bytes) {
+            Err(e) if e.kind() == ErrorKind::UnexpectedEof && redirect_target(&response).is_some() => {}
+            // A cut body of a redirect is no error: see `fetch`.
+            r => {
+                r?;
+            }
+        }
         if bytes.len() > max_body {
             body.note(&io::Error::new(ErrorKind::InvalidData, "the reply is too big"));
             return Err("the reply is too big".into());
@@ -496,7 +502,11 @@ impl Client {
             }
             // The body of a redirect is not wanted. Read it (a redirect has a small one) so that the connection can be used again.
             if let Some(mut body) = body {
-                io::copy(&mut (&mut body).take(MAX_REDIRECT_BODY), &mut io::sink())?;
+                match io::copy(&mut (&mut body).take(MAX_REDIRECT_BODY), &mut io::sink()) {
+                    Err(e) if e.kind() != ErrorKind::UnexpectedEof => return Err(e.into()),
+                    _ => {}
+                    // A cut body of a redirect is no error: see `fetch`.
+                }
             }
             // A chain that leaves the site of the page that started the navigation stays cross-site (6265bis, "same-site" of a redirect chain).
             if let Ctx::Navigation(Some(from)) = plan.cookies.ctx
@@ -566,7 +576,14 @@ impl Client {
         let (mut response, mut body) = self.start(url, plan, conditions)?;
         let mut bytes = Vec::with_capacity(body.size_hint());
         // A reply with a `Content-Length` gets its room at once: a list that grows by doubling holds up to twice the body for a moment.
-        body.read_to_end(&mut bytes)?;
+        match body.read_to_end(&mut bytes) {
+            // A redirect with no length ends at the close. A server may close TLS with no close_notify (craigslist.org does).
+            // Nobody wants the body of a redirect, so a cut body is no error here.
+            Err(e) if e.kind() == ErrorKind::UnexpectedEof && redirect_target(&response).is_some() => {}
+            r => {
+                r?;
+            }
+        }
         if bytes.capacity() - bytes.len() > bytes.len() / 8 {
             bytes.shrink_to_fit();
             // Give the spare room back. For a big list, the system does this without a copy.

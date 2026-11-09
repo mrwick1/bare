@@ -1,4 +1,4 @@
-# nginx.org: the home page. The server does not speak TLS 1.3 to bare today; it needs TLS 1.2. Check the title, the text and the download link.
+# nginx.org: the home page. The server needs TLS 1.2 from bare (before TLS 1.2 support, the load failed). Check the title, the text and the download link.
 #   bare-drive --var URL=https://nginx.org/ nginx-org-home.steps
 timeout 30000
 open ${URL}

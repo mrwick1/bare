@@ -112,6 +112,38 @@ fn a_body_that_ends_at_close_needs_close_notify() {
 }
 
 #[test]
+fn a_redirect_with_no_length_that_closes_without_close_notify_is_followed() {
+    need_openssl!();
+    // craigslist.org answers "/" this way: 302, no length, then a bare close. The body of a redirect is not wanted.
+    // The target is a second server: after a reset, the client could dial before the new `s_server` listens.
+    let (pki, mut srv, client) = setup();
+    let mut target = Server::start(&pki, "good", &[], true);
+    let u = url(&srv, "/");
+    let t = spawn(client, move |c| c.get(&u).map(|r| (r.status, r.body.clone())).map_err(|e| e.to_string()));
+    srv.expect(HEAD_END);
+    srv.send(format!("HTTP/1.1 302 Found\r\nLocation: https://localhost:{}/next\r\n\r\n", target.port).as_bytes());
+    sleep(Duration::from_millis(100));
+    srv.reset();
+    let head = String::from_utf8(target.expect(HEAD_END)).unwrap();
+    assert!(head.starts_with("GET /next HTTP/1.1"), "{head}");
+    target.send(ok("moved").as_bytes());
+    assert_eq!(t.join().unwrap().1, Ok((200, b"moved".to_vec())));
+}
+
+#[test]
+fn send_once_gives_back_a_redirect_with_no_length_that_closes_without_close_notify() {
+    need_openssl!();
+    let (_pki, mut srv, client) = setup();
+    let u = url(&srv, "/");
+    let t = spawn(client, move |c| c.send_once(&Request::get(&u), 1 << 20).map(|r| (r.status, r.header("location").map(str::to_string))).map_err(|e| e.to_string()));
+    srv.expect(HEAD_END);
+    srv.send(b"HTTP/1.1 302 Found\r\nLocation: /next\r\n\r\n");
+    sleep(Duration::from_millis(100));
+    srv.reset();
+    assert_eq!(t.join().unwrap().1, Ok((302, Some("/next".to_string()))));
+}
+
+#[test]
 fn post_sends_the_exact_body_over_tls_for_a_small_and_a_big_body() {
     need_openssl!();
     let (_pki, mut srv, mut client) = setup();
