@@ -16,7 +16,7 @@
 //!
 //! Gates (`Error::Unsupported`, before anything changes): a synchronous request (`async = false`: the pump is the only place where
 //! the host blocks), `user` and `password` arguments, `responseType = "document"`, a `Document` body, and the methods `fetch` gates (a token method and a lower-case `patch`: `bare_net::http::Method` has seven). A request
-//! to another origin is `Unsupported` (the CORS gate of `fetch`). There is no jar for HTTP (`document.cookie` has its own, `browser_cookie.rs`), so `withCredentials` is stored and does nothing.
+//! to another origin follows CORS (see `browser_fetch.rs`): `Origin`, a preflight for a non-simple request, the check of the reply, and only the safelisted and the exposed response headers. A refused request fires `error` (status 0). There is no jar for HTTP (`document.cookie` has its own, `browser_cookie.rs`), so `withCredentials` only changes the CORS check. A request that has an upload listener gets no preflight for that reason (the standard asks for one).
 //! A response text in a charset other than UTF-8 is `Unsupported` unless every byte is ASCII.
 //!
 //! Deviations: `timeout` is checked when the reply arrives (the blocking I/O cannot be stopped): a reply later than the timeout is a
@@ -468,7 +468,7 @@ fn send(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     if d.xs(x, |x| x.state != OPENED || x.send) {
         return Err(d.xerr(it, "InvalidStateError", "send", "The object's state must be OPENED."));
     }
-    let (method, url, mut headers, seq) = d.xs(x, |x| (x.method.clone(), x.url.as_ref().map(|u| Url::parse(&u.to_string()).expect("a parsed URL")), x.headers.clone(), x.seq));
+    let (method, url, mut headers, seq, creds) = d.xs(x, |x| (x.method.clone(), x.url.as_ref().map(|u| Url::parse(&u.to_string()).expect("a parsed URL")), x.headers.clone(), x.seq, x.creds));
     let url = url.expect("opened");
     let mut body = None;
     if method != "GET" && method != "HEAD" {
@@ -488,7 +488,7 @@ fn send(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
         }
     }
     let body_len = body.as_ref().map_or(0, |b| b.len());
-    queue_xhr(d, (x, seq), &method, url, headers, body)?;
+    queue_xhr(d, (x, seq), &method, url, headers, body, creds)?;
     let up = d.upload_of(x);
     let listening = d.st.borrow().listeners.get(&Target::Obj(up)).is_some_and(|v| !v.is_empty());
     let now = d.now_ms();
@@ -734,7 +734,7 @@ impl Browser {
         let (status, url, headers, body) = match outcome {
             Outcome::TooBig => return Err(dom.lim("fetch-response-body")),
             _ if late => return self.step(|it| dom.request_error(it, x, "timeout")),
-            Outcome::Failed(_) | Outcome::Net(_) => return self.step(|it| dom.request_error(it, x, "error")),
+            Outcome::Failed(_) | Outcome::Net(_) | Outcome::Blocked(_) => return self.step(|it| dom.request_error(it, x, "error")),
             Outcome::Done { status, url, headers, body, .. } => (status, url, headers, body),
         };
         {

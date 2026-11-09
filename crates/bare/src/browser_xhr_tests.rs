@@ -159,7 +159,6 @@ fn what_is_not_supported_is_refused_before_anything_changes() {
         assert_eq!(js(&mut b, "x.readyState"), "0");
         assert!(js(&mut b, "x.open('FOO', '/echo'); x.send('a')").starts_with("unsupported:"));
         assert!(js(&mut b, "x = new XMLHttpRequest(); x.open('POST', '/echo'); x.send(document)").starts_with("unsupported:"));
-        assert!(js(&mut b, "x = new XMLHttpRequest(); x.open('GET', 'http://example.com/'); x.send()").starts_with("unsupported:"));
         assert_eq!(b.pending_fetches(), 0);
         assert!(srv.recs().is_empty());
     });
