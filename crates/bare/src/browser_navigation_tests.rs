@@ -773,7 +773,7 @@ fn url_components_and_live_search_params() {
         // relative reference against the document URL
         assert_eq!(js(&mut b, "new URL('../c?d', location.href).href + ' ' + new URL(location.href).hash"), "https://staging.example.test:8443/c?d #top");
         assert_eq!(js(&mut b, "new URL('x', 'nonsense')"), "throw:TypeError:Failed to construct 'URL': Invalid URL");
-        assert_eq!(js(&mut b, "new URL('mailto:a@b.c')"), "unsupported:URL scheme other than http and https");
+        assert_eq!(js(&mut b, "new URL('mailto:a@b.c').href"), "mailto:a@b.c");
         assert_eq!(js(&mut b, "new URL('http://u:p@a.com')"), "unsupported:user info in a URL");
         assert_eq!(js(&mut b, "new URL('http://bücher.de')"), "unsupported:non-ASCII, escaped or punycode host (IDNA is gated)");
         assert_eq!(js(&mut b, "u.username = 'x'"), "unsupported:user info in a URL");

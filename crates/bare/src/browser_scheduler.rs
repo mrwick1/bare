@@ -764,6 +764,7 @@ impl Dom {
             acc(it, event, name, h, None)?;
         }
         method(it, perf, "now", performance_now, 0)?;
+        crate::browser_perf::install(self, it, perf)?;
         let po = self.obj(it, perf)?;
         let k = self.key(it, "performance")?;
         it.define_data(g, k, Value::Object(po), true, true, true)?;

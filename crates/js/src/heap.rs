@@ -1379,8 +1379,13 @@ impl Heap {
         }
     }
 
+    /// A name the host may define on demand: `on<x>`, or `HTML<x>Element` (an interface object that the host makes when it is first named).
     fn on_name(&self, s: StrId) -> bool {
-        self.str(s).is_ok_and(|st| st.units.len() >= 3 && st.units[0] == b'o' as u16 && st.units[1] == b'n' as u16)
+        self.str(s).is_ok_and(|st| {
+            let u = &st.units;
+            u.len() >= 3 && u[0] == b'o' as u16 && u[1] == b'n' as u16
+                || u.len() > 11 && u[0] == b'H' as u16 && u[1] == b'T' as u16 && u[2] == b'M' as u16 && u[3] == b'L' as u16 && u.ends_with(&[b'E', b'l', b'e', b'm', b'e', b'n', b't'].map(u16::from))
+        })
     }
 
     /// Make the prototype object of the lazy function `o`. Call only when `is_lazy` is true.

@@ -4748,3 +4748,31 @@ Hypothesis, to verify: the block depends on the IP or network reputation, or on 
 Next check: one request through a real residential or mobile proxy with `BARE_PROXY` (PR #306). A proxy benefit is not proven until then. Fallback: the official Reddit API with a personal OAuth app.
 
 Not tested: the same URL before and after a block, another IP or proxy, a browser TLS hello, login, cookies, challenges. The bare CLI shows no response headers and has no header override. The fourth request used a scratch harness.
+
+## Web API gaps: performance entries, createEvent, HTML element interfaces, non-http URLs (2026-11-09)
+
+### Problem
+
+After #299, four errors stopped real pages: `performance.getEntriesByType is not a function`, `document.createEvent is not a function`, `HTMLSpanElement is not defined` and `Unsupported("URL scheme other than http and https")`.
+
+### Change
+
+- `browser_perf.rs`: `performance.mark`, `measure`, `getEntries`, `getEntriesByType`, `getEntriesByName`, `clearMarks` and `clearMeasures`. Only `mark` and `measure` entries exist. Resource and navigation lists are empty. `measure` takes mark names or an options object (`start`, `end`, `duration`, `detail`). An unknown mark name gives a `SyntaxError`. The list is capped at 50 000 entries. The methods are made with the other `performance` methods.
+- `browser_events.rs`: `document.createEvent` for `Event`, `Events`, `HTMLEvents`, `SVGEvents`, `UIEvent(s)`, `CustomEvent`, `MouseEvent(s)` and `KeyboardEvent`. It also adds `initEvent` and `initCustomEvent`. Any other name gives a `NotSupportedError`.
+- `browser_html.rs`: 49 `HTML*Element` interfaces for the tags that had `HTMLElement.prototype`. `instanceof`, `el.constructor` and `new HTMLSpanElement()` work. The heap asks the host for a global name that starts with `HTML` and ends with `Element`, so no setup cost is added. The interface prototypes are switched on at the first read of such a global (`html_on`). Until then, an element keeps the `HTMLElement` prototype. An extra prototype hop on every element cost +0.6% in `browser_load` rows.
+- `browser_navigation_url.rs`: the `URL` class takes any scheme (`data:`, `mailto:`, `blob:`, `about:`, `ws:`, `wss:`, `ftp:` and `foo://host`). `Location`, `<a>` and the loader still use the strict http and https parser. A URL with a non-http(s) scheme has `href`, `protocol`, `pathname`, `search`, `hash` and `origin` (`blob:` takes the origin of the inner URL).
+- `browser_fetch.rs`: `fetch('data:...')` gives a 200 response (text or `;base64`). Another scheme rejects that one request with `TypeError: Failed to fetch`. The script goes on.
+
+### Limits
+
+- Resource timing and navigation timing entries are not made. `PerformanceObserver` does not see `mark` and `measure` entries.
+- `performance.timing` and `window.screen` do not exist. Bing needs both, and gitlab needs `screen`.
+- `blob:` fetch and `URL.createObjectURL` do not exist.
+- `XMLHttpRequest.open` with a non-http(s) URL still throws.
+- `<script src="data:...">` and `<link href="data:...">` are not loaded.
+- `createEvent` for other interfaces (`FocusEvent`, `MessageEvent` and others) is refused.
+- Interface prototypes have no members of their own. They inherit from `HTMLElement.prototype`.
+
+### Checks
+
+- Tests first (`browser_web_api_tests.rs`): five tests failed with the errors above before the change. All pass.
