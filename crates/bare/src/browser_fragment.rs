@@ -36,7 +36,7 @@
 //! `noscript`: the scripting flag is on for a context in the page (raw text for `noscript`, as in Chrome), and off for a `template` context and
 //! for any context in the contents of a template (an inert document): there `noscript` is an element. An HTML `template` is written with its
 //! contents as children, and `template.innerHTML` reads the contents.
-//! - `DOMParser` and `document.write` are absent.
+//! - `document.write` is absent.
 //!
 //! Known deviations: nested `table` and `select` are read by the page rules of the tree builder (no table or select insertion modes). A temporary
 //! text buffer that grew by joining texts counts the wasted bytes against the text cap. Cloning preserves the "already started" flag.
@@ -102,7 +102,7 @@ fn attr_name(doc: &Document, name: bare_html::dom::Atom) -> String {
 }
 
 /// The children of `n` as HTML text, or `n` itself when `outer`. Walks with the parent links, so the depth is not a limit.
-fn serialize(d: &Dom, it: &mut Interp<'_>, doc: &Document, n: NodeId, outer: bool) -> R<String> {
+pub(crate) fn serialize(d: &Dom, it: &mut Interp<'_>, doc: &Document, n: NodeId, outer: bool) -> R<String> {
     let mut out = String::new();
     // The children of a `template` are its contents. `tpls` holds the templates that are open, to close them on the way up.
     let mut tpls = Vec::new();

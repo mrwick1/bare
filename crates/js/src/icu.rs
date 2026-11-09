@@ -58,6 +58,9 @@ pub const CODE: u8 = 2;
 /// The resolved options of a number formatter or a plural rules object. Digits: `fd` and `sd` are (minimum, maximum).
 #[derive(Clone, Copy, Debug)]
 pub struct NumFmt {
+    pub unit: u8,
+    pub per_unit: u8,
+    pub unit_display: u8,
     pub loc: u8,
     pub style: Style,
     pub currency: [u8; 3],
@@ -72,6 +75,8 @@ pub struct NumFmt {
     /// Index of `ROUNDING_MODES`.
     pub mode: u8,
     pub strip_zero: bool,
+    pub notation: u8,
+    pub compact_long: bool,
 }
 
 /// The `roundingMode` values, in the order of ECMA-402 (the default `halfExpand` is index 6).
@@ -164,6 +169,8 @@ pub fn num_from_decimal_str(s: &str) -> Option<Num> {
 fn magnitude(d: &Decimal) -> i16 {
     d.absolute.nonzero_magnitude_start()
 }
+
+include!("intl_unit_data.rs");
 
 impl NumFmt {
     /// Round `d` (signed) as ECMA-402 FormatNumericToString does, and pad it.
@@ -315,14 +322,31 @@ impl Cache {
             Num::Fin(ref d) => (d.sign() == Sign::Negative, Some(d)),
         };
         // the digits, rounded
+        let mut exponent = 0i16;
         let rounded = text.map(|d| {
             let mut d = d.clone();
             if f.style == Style::Percent {
                 d.multiply_pow10(2);
             }
+            if f.notation != 0 && !d.absolute.is_zero() {
+                let e = magnitude(&d);
+                exponent = match f.notation {
+                    1 => e,
+                    2 => e.div_euclid(3) * 3,
+                    _ => (e.div_euclid(3) * 3).clamp(0, 12),
+                };
+                d.multiply_pow10(-exponent);
+            }
             f.round(&mut d);
+            let step = if f.notation == 1 { 1 } else { 3 };
+            if f.notation != 0 && magnitude(&d) >= step && (f.notation != 3 || exponent < 12) {
+                d.multiply_pow10(-step);
+                exponent += step;
+                f.round(&mut d);
+            }
             d
         });
+        let singular = (f.notation != 3 || exponent == 0) && rounded.as_ref().is_some_and(|d| d.to_string().trim_start_matches('-') == "1");
         let zero = rounded.as_ref().is_some_and(|d| d.absolute.is_zero());
         let sign = f.sign_char(neg, zero || matches!(n, Num::Nan));
         let paren = f.style == Style::Currency && f.accounting && neg && sign.is_some_and(|s| s.1 == "minusSign");
@@ -332,7 +356,7 @@ impl Cache {
         } else if let Some((t, ty)) = sign {
             out.push(ty, t);
         }
-        if f.style == Style::Currency {
+        if f.style == Style::Currency && f.display != 3 {
             let (sym, space) = currency_text(f.loc, code, f.display);
             out.push("currency", sym);
             // currency spacing applies before a digit only
@@ -355,8 +379,37 @@ impl Cache {
             }
             _ => {}
         }
+        if text.is_some() && f.notation != 0 {
+            if f.notation == 3 {
+                if exponent >= 3 {
+                    let i = (exponent / 3 - 1) as usize;
+                    if f.compact_long { out.push("literal", " "); }
+                    out.push("compact", if f.compact_long { ["thousand", "million", "billion", "trillion"][i] } else { ["K", "M", "B", "T"][i] });
+                }
+            } else {
+                out.push("exponentSeparator", "E");
+                if exponent < 0 { out.push("exponentMinusSign", "-"); }
+                out.push("exponentInteger", &exponent.abs().to_string());
+            }
+        }
         if f.style == Style::Percent {
             out.push("percentSign", "%");
+        }
+        if f.style == Style::Currency && f.display == 3 {
+            let name = CURRENCY_NAMES.iter().find(|r| r.0 == code).map_or(code, |r| if singular { r.1 } else { r.2 });
+            out.push("literal", " ");
+            out.push("currency", name);
+        }
+        if f.unit != 255 {
+            let pair = UNIT_SUFFIXES[f.unit as usize][f.unit_display as usize];
+            let suffix = if singular { pair.0 } else { pair.1 };
+            let unit = if let Some(t) = suffix.strip_prefix(' ') { out.push("literal", " "); t } else { suffix };
+            let mut label = unit.to_string();
+            if f.per_unit != 255 {
+                label.push_str(if f.unit_display == 2 { " per " } else { "/" });
+                label.push_str(UNIT_DENOMINATORS[f.per_unit as usize][f.unit_display as usize]);
+            }
+            out.push("unit", &label);
         }
         if paren {
             out.push("literal", ")");

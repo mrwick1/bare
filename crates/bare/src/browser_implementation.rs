@@ -8,7 +8,7 @@
 //!   getters (`documentElement`, `head`, `body`, `createElement`, ...) work on it. It lives while a script holds its wrapper.
 //! - Deviations: the new document has no doctype, `defaultView` and `location`, and a node made by its `createElement` has `ownerDocument`
 //!   `document`, not this one (the arena has one owner document, as for the contents of a `template`). Scripts in the new document never run.
-//!   `createDocument`, `createDocumentType` and `DOMParser` are absent.
+//!   `createDocument` and `createDocumentType` are absent.
 
 use crate::browser::*;
 use bare_js::eval::Interp;
@@ -62,5 +62,100 @@ fn implementation(d: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Valu
 
 /// Installed with the late members of `Document` (`browser_dom::install_late`).
 pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    d.def_get(it, d.p().document, "implementation", implementation, None)
+    d.def_get(it, d.p().document, "implementation", implementation, None)?;
+    crate::browser_lazy::install(d, it, &[("DOMParser", parser_global), ("XMLSerializer", serializer_global)])
+}
+
+// XML MIME types use the HTML parser. Case, namespaces, errors and serialization
+// follow HTML rules. This host does not implement an XML parser.
+fn parse_from_string(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
+    let text = d.string_arg(it, arg(a, 0))?;
+    let mime = d.string_arg(it, arg(a, 1))?;
+    if !["text/html", "text/xml", "application/xml", "image/svg+xml"].contains(&mime.as_str()) {
+        return Err(it.type_error("Invalid MIME type for DOMParser.parseFromString"));
+    }
+    if text.len() > d.lim.max_string_bytes { return Err(d.lim("dom-string")); }
+    it.charge(text.len() as u64 + 1)?;
+    let parsed = bare_html::tree::parse(&text);
+    {
+        let doc = d.doc.borrow();
+        d.room(&doc, parsed.len(), parsed.text_bytes())?;
+        if parsed.attr_slots() > d.lim.max_attr_slots.saturating_sub(doc.attr_slots()) { return Err(d.lim("dom-attrs")); }
+        if doc.name_count() + parsed.new_names_in(&doc) > d.lim.max_names { return Err(d.lim("dom-names")); }
+    }
+    it.charge(parsed.len() as u64)?;
+    let mut pending = vec![(parsed.root(), 0)];
+    while let Some((root, base)) = pending.pop() {
+        let (mut cur, mut depth) = (root, 0);
+        while let Some((c, cd)) = crate::browser_dom::next_in(&parsed, root, cur, depth) {
+            if base + cd > d.lim.max_tree_depth { return Err(d.lim("dom-depth")); }
+            (cur, depth) = (c, cd);
+            if let Some(t) = parsed.template_content(c) { pending.push((t, base + cd)); }
+        }
+    }
+    let mut doc = d.doc.borrow_mut();
+    let root = doc.create_document();
+    let mut jobs = vec![(parsed.root(), root)];
+    while let Some((src, dst)) = jobs.pop() {
+        let mut path = vec![dst];
+        let (mut cur, mut depth) = (src, 0);
+        while let Some((c, cd)) = crate::browser_dom::next_in(&parsed, src, cur, depth) {
+            (cur, depth) = (c, cd);
+            let n = doc.import_node(&parsed, c).expect("parsed node");
+            doc.move_to(n, path[cd - 1], None);
+            path.truncate(cd);
+            path.push(n);
+            if doc.is_html(n, "script") { d.mark_started(n); }
+            if let Some(t) = parsed.template_content(c) { jobs.push((t, doc.make_template_content(n))); }
+        }
+    }
+    drop(doc);
+    d.wrap(it, root)
+}
+
+fn serialize_to_string(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
+    let n = d.nd(it, arg(a, 0))?;
+    let doc = d.doc.borrow();
+    let text = crate::browser_fragment::serialize(d, it, &doc, n, !matches!(doc.data(n), bare_html::dom::NodeData::Document))?;
+    d.js_str(it, &text)
+}
+
+fn parser_construct(d: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
+    let proto = it.host_proto_from_new_target(d.parsing_protos.get()[0].expect("parser prototype"))?;
+    Ok(Value::Object(d.obj(it, proto)?))
+}
+
+fn serializer_construct(d: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
+    let proto = it.host_proto_from_new_target(d.parsing_protos.get()[1].expect("serializer prototype"))?;
+    Ok(Value::Object(d.obj(it, proto)?))
+}
+
+fn interface(d: &Dom, it: &mut Interp<'_>, name: &str, h: H, a: &[Value]) -> R<Value> {
+    let value = if let Some(v) = a.first() { *v } else {
+        let i = usize::from(name == "XMLSerializer");
+        let p = d.obj(it, it.object_prototype())?;
+        let ctor = d.add_ctor_nt(it, h, name, 0)?;
+        let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
+        it.define_data(ctor, kp, Value::Object(p), false, false, false)?;
+        it.define_data(p, kc, Value::Object(ctor), true, false, true)?;
+        crate::browser_lazy::tag(d, it, p, name)?;
+        if i == 0 { d.def_method(it, p, "parseFromString", 2, parse_from_string)?; }
+        else { d.def_method(it, p, "serializeToString", 1, serialize_to_string)?; }
+        let mut protos = d.parsing_protos.get();
+        protos[i] = Some(p);
+        d.parsing_protos.set(protos);
+        d.fixed.borrow_mut().push(p);
+        Value::Object(ctor)
+    };
+    let k = d.key(it, name)?;
+    it.define_data(it.global_object(), k, value, true, false, true)?;
+    Ok(value)
+}
+
+fn parser_global(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
+    interface(d, it, "DOMParser", parser_construct, a)
+}
+
+fn serializer_global(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
+    interface(d, it, "XMLSerializer", serializer_construct, a)
 }

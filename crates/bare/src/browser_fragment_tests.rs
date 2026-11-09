@@ -538,3 +538,12 @@ fn outer_html_joins_the_text_around_the_result_as_chrome_does() {
     assert_eq!(js(&mut b, "var d = document.createElement('div'); d.innerHTML = 'a<b></b>c'; d.querySelector('b').outerHTML = '<i></i>'; d.childNodes.length"), "3");
     assert_eq!(js(&mut b, "var d = document.createElement('div'); d.innerHTML = 'a<b></b>'; d.querySelector('b').outerHTML = 'X<i></i>Y'; [d.childNodes.length, d.innerHTML].join()"), "3,aX<i></i>Y");
 }
+
+#[test]
+fn parser_returns_inert_document() {
+    big(|| {
+        let mut b = browser();
+        assert_eq!(js(&mut b, "var parsed = new DOMParser().parseFromString('<title>parsed</title><p id=x>hello</p><script>window.bad=1</script>', 'text/html'); [parsed.nodeType, parsed.head.firstChild.textContent, parsed.body.querySelector('#x').textContent, typeof window.bad].join('|')"), "9|parsed|hello|undefined");
+        assert_eq!(js(&mut b, "new XMLSerializer().serializeToString(parsed.querySelector('p'))"), "<p id=\"x\">hello</p>");
+    });
+}

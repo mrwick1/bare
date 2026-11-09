@@ -7,7 +7,7 @@
 // - `Intl.NumberFormat` (with or without `new`; length 0): `supportedLocalesOf`, `format` (a getter that returns one bound
 //   function per formatter), `formatToParts`, `resolvedOptions`. Options in the order of V8 (= ECMA-402 2023): `localeMatcher`,
 //   `numberingSystem`, `style` (decimal, percent, currency), `currency`, `currencyDisplay` (symbol, narrowSymbol, code),
-//   `currencySign`, `unit`, `unitDisplay`, `notation` (standard), the digit options (`minimumIntegerDigits`,
+//   `currencySign`, `unit`, `unitDisplay`, `notation` (standard, scientific, engineering, compact), the digit options (`minimumIntegerDigits`,
 //   `minimumFractionDigits`, `maximumFractionDigits`, `minimumSignificantDigits`, `maximumSignificantDigits`,
 //   `roundingIncrement` (1), `roundingMode`, `roundingPriority`, `trailingZeroDisplay`), `compactDisplay`, `useGrouping`,
 //   `signDisplay`. A string argument keeps its exact decimal digits.
@@ -17,7 +17,7 @@
 // - `Intl.getCanonicalLocales`, `Number.prototype.toLocaleString`, `String.prototype.localeCompare`.
 // - Locales: the 5 of `intl.rs`. A locale with an extension is a gate (see `intl_locales`).
 //
-// Gates (Unsupported): `style: "unit"`; `notation` other than standard; `currencyDisplay: "name"`; `numberingSystem` other than
+// Gates (Unsupported): `numberingSystem` other than
 // `latn`; `roundingIncrement` other than 1; Collator `usage: "search"` and any `collation`; the methods `formatRange`,
 // `formatRangeToParts` and `selectRange`.
 //
@@ -179,6 +179,11 @@ impl<'p> Interp<'p> {
             _ if has_sd => icu::Rounding::Significant,
             _ => icu::Rounding::Fraction,
         };
+        if f.notation == 3 && priority == 0 && !has_fd && !has_sd {
+            f.rounding = icu::Rounding::MorePrecision;
+            f.fd = (0, 0);
+            f.sd = (1, 2);
+        }
         Ok((inc != 1).then_some("Intl.NumberFormat option roundingIncrement"))
     }
 
@@ -208,7 +213,7 @@ impl<'p> Interp<'p> {
             grouping: icu::Grouping::Auto,
             sign: SignDisplay::Auto,
             mode: icu::HALF_EXPAND,
-            strip_zero: false,
+            unit: 255, per_unit: 255, unit_display: 0, notation: 0, compact_long: false, strip_zero: false,
         };
         // SetNumberFormatUnitOptions
         let style = self.intl_opt_for(who, opts, "style", &["decimal", "percent", "currency", "unit"])?.unwrap_or(0);
@@ -228,16 +233,16 @@ impl<'p> Interp<'p> {
             None if style == 3 => return Err(self.type_err("Invalid unit argument for Intl.NumberFormat() ''")),
             _ => {}
         }
-        self.intl_opt_for(who, opts, "unitDisplay", &["short", "narrow", "long"])?;
+        f.unit_display = self.intl_opt_for(who, opts, "unitDisplay", &["short", "narrow", "long"])?.unwrap_or(0) as u8;
         f.style = [icu::Style::Decimal, icu::Style::Percent, icu::Style::Currency, icu::Style::Decimal][style];
         if style == 3 {
-            gate = gate.or(Some("Intl.NumberFormat style unit"));
+            let mut parts = unit.as_deref().unwrap_or("meter").split("-per-");
+            let numerator = parts.next();
+            f.unit = SANCTIONED_UNITS.iter().position(|u| Some(*u) == numerator).unwrap_or(24) as u8;
+            f.per_unit = parts.next().and_then(|p| SANCTIONED_UNITS.iter().position(|u| *u == p)).map_or(255, |i| i as u8);
         }
         if style == 2 {
             f.display = display as u8;
-            if display == 3 {
-                gate = gate.or(Some("Intl.NumberFormat option currencyDisplay name"));
-            }
         }
         let cd = icu::currency_digits(core::str::from_utf8(&f.currency).unwrap_or(""));
         let defaults = match style {
@@ -246,11 +251,9 @@ impl<'p> Interp<'p> {
             _ => (0, 3),
         };
         let notation = self.intl_opt_for(who, opts, "notation", &NOTATIONS)?.unwrap_or(0);
-        if notation != 0 {
-            gate = gate.or(Some("Intl.NumberFormat option notation (only standard)"));
-        }
+        f.notation = notation as u8;
         gate = gate.or(self.intl_digits(who, opts, &mut f, if notation == 3 { (0, 0) } else { defaults })?);
-        self.intl_opt_for(who, opts, "compactDisplay", &["short", "long"])?;
+        f.compact_long = self.intl_opt_for(who, opts, "compactDisplay", &["short", "long"])?.unwrap_or(0) == 1;
         f.grouping = self.intl_grouping(who, opts, notation == 3)?;
         f.sign = match self.intl_opt_for(who, opts, "signDisplay", &SIGN_DISPLAYS)?.unwrap_or(0) {
             1 => SignDisplay::Never,
@@ -540,11 +543,17 @@ impl<'p> Interp<'p> {
                 let n = self.this_intl_nf(this, "Intl.NumberFormat.prototype.resolvedOptions", true)?;
                 let f = n.f;
                 let mut props: Vec<(&str, Value)> = vec![("locale", self.str_value(intl::locale_name(f.loc))?), ("numberingSystem", self.str_value("latn")?)];
-                props.push(("style", self.str_value(["decimal", "percent", "currency"][f.style as usize])?));
+                props.push(("style", self.str_value(if f.unit != 255 { "unit" } else { ["decimal", "percent", "currency"][f.style as usize] })?));
                 if f.style == icu::Style::Currency {
                     props.push(("currency", self.str_value(core::str::from_utf8(&f.currency).unwrap_or("USD"))?));
                     props.push(("currencyDisplay", self.str_value(CURRENCY_DISPLAYS[f.display as usize])?));
                     props.push(("currencySign", self.str_value(if f.accounting { "accounting" } else { "standard" })?));
+                }
+                if f.unit != 255 {
+                    let mut unit = icu::UNIT_NAMES[f.unit as usize].to_string();
+                    if f.per_unit != 255 { unit.push_str("-per-"); unit.push_str(icu::UNIT_NAMES[f.per_unit as usize]); }
+                    props.push(("unit", self.str_value(&unit)?));
+                    props.push(("unitDisplay", self.str_value(["short", "narrow", "long"][f.unit_display as usize])?));
                 }
                 self.intl_resolved_digits(&f, &mut props);
                 props.push((
@@ -554,7 +563,8 @@ impl<'p> Interp<'p> {
                         g => self.str_value(["auto", "always", "min2"][g as usize])?,
                     },
                 ));
-                props.push(("notation", self.str_value("standard")?));
+                props.push(("notation", self.str_value(NOTATIONS[f.notation as usize])?));
+                if f.notation == 3 { props.push(("compactDisplay", self.str_value(if f.compact_long { "long" } else { "short" })?)); }
                 props.push(("signDisplay", self.str_value(SIGN_DISPLAYS[f.sign as usize])?));
                 self.intl_resolved_rounding(&f, &mut props)?;
                 let o = h!(self, self.heap.new_object(Some(self.object_proto)));
@@ -681,7 +691,7 @@ impl<'p> Interp<'p> {
             grouping: icu::Grouping::Auto,
             sign: SignDisplay::Auto,
             mode: icu::HALF_EXPAND,
-            strip_zero: false,
+            unit: 255, per_unit: 255, unit_display: 0, notation: 0, compact_long: false, strip_zero: false,
         };
         if let Some(g) = self.intl_digits(PR, opts, &mut f, (0, 3))? {
             return Err(unsupported(g, Span::default()));

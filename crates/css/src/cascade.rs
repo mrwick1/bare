@@ -2243,13 +2243,13 @@ pub enum Source {
 /// is left out, and so is an alternate style sheet (`rel="alternate stylesheet"`): a browser does not use it unless the user asks.
 /// An empty `media` is good.
 pub fn sources(doc: &Document, viewport: (f32, f32)) -> Vec<Source> {
-    sources_capped(doc, viewport, usize::MAX, usize::MAX, false).unwrap_or_default().into_iter().map(|(s, _)| s).collect()
+    sources_capped(doc, viewport, usize::MAX, usize::MAX, false).into_iter().map(|(s, _)| s).collect()
 }
 
-/// The same, but each source comes with its element, and the result is `None` before more than `max_sources` sources, or more than
-/// `max_bytes` bytes of `<style>` text and `href`, are copied. With `shadows`, the sources in shadow trees come too: the tree of an
+/// Each source comes with its element. Keep the prefix within `max_sources` and `max_bytes`.
+/// Drop later sources before copying their text. With `shadows`, the sources in shadow trees come too: the tree of an
 /// element is `Document::tree_root`, and the caller adds its sheet with `RuleSet::add_scoped`.
-pub fn sources_capped(doc: &Document, viewport: (f32, f32), max_sources: usize, max_bytes: usize, shadows: bool) -> Option<Vec<(Source, NodeId)>> {
+pub fn sources_capped(doc: &Document, viewport: (f32, f32), max_sources: usize, max_bytes: usize, shadows: bool) -> Vec<(Source, NodeId)> {
     // A name that no node in the page has cannot be on any element, so `None` is a good answer for a name that is not in the table.
     let (style, link, media, rel, href, disabled) = (doc.find_atom("style"), doc.find_atom("link"), doc.find_atom("media"), doc.find_atom("rel"), doc.find_atom("href"), doc.find_atom("disabled"));
     let attr = |el, name: Option<Atom>| name.and_then(|n| doc.attr(el, n));
@@ -2286,7 +2286,7 @@ pub fn sources_capped(doc: &Document, viewport: (f32, f32), max_sources: usize, 
             }
         }
     });
-    (!over).then_some(out)
+    out
 }
 
 /// Call `f` for each node of the tree, in the order of the page. A loop with a stack. With `shadows`, the shadow tree of a host comes
