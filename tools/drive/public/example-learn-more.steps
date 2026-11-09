@@ -1,4 +1,3 @@
-# needs-rsa
 # example.com: click "Learn more" and land on iana.org. Today iana.org fails in TLS (certificate verification: BadKey), so this one skips.
 #   bare-drive --var URL=https://example.com/ example-learn-more.steps
 timeout 30000

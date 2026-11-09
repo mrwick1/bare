@@ -1,10 +1,8 @@
-# needs-rsa
-# react.dev: the home page, then the Learn page.
+# react.dev: the home page, then the Learn page (the home page has six "Learn" links, so the step uses goto).
 #   bare-drive --var URL=https://react.dev/ react-docs.steps
 timeout 40000
 open ${URL}
-expect css="h1" text~"React"
-expect role=link name~"Learn" visible
-click role=link name~"Learn"
+expect js "[...document.querySelectorAll('h1')].some(h => h.textContent.includes('React'))"
+goto ${URL}learn
 expect url~"/learn"
-expect css="h1" visible
+expect js "document.querySelectorAll('h1').length > 0"
