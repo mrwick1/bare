@@ -570,6 +570,8 @@ pub struct Dom {
     pub(crate) ce: crate::browser_custom::Ce,
     /// Rectangles, points, quads and matrices (`browser_geom.rs`, `browser_matrix.rs`).
     pub(crate) geom: crate::browser_geom::Geom,
+    /// `Worker` (`browser_worker.rs`).
+    pub(crate) worker: crate::browser_worker::WorkerHost,
 }
 
 impl Host for Dom {
@@ -620,6 +622,7 @@ impl Host for Dom {
         self.range_roots(out);
         self.ce_roots(out);
         crate::browser_geom::roots(self, out);
+        crate::browser_worker::roots(self, out);
     }
 
     fn trace(&self, owner: ObjId, out: &mut Vec<Value>) {
@@ -707,6 +710,7 @@ impl Host for Dom {
         self.streams.prune(live);
         crate::browser_abort::prune(self, live);
         crate::browser_xhr::prune(self, live);
+        crate::browser_worker::prune(self, live);
     }
 
     fn report_exception(&self, it: &mut Interp<'_>, thrown: Value) {
@@ -1209,6 +1213,7 @@ impl Dom {
         crate::browser_nodelist::install(self, it)?;
         crate::browser_dataset::install(self, it)?;
         crate::browser_abort::install(self, it)?;
+        crate::browser_worker::install(self, it)?;
         crate::browser_xhr::install(self, it)?;
         crate::browser_encoding::install(self, it)?;
         crate::browser_web::install(self, it)?;
@@ -1557,6 +1562,7 @@ impl Browser {
             ctl: Default::default(),
             ce: Default::default(),
             geom: Default::default(),
+            worker: Default::default(),
         });
         it.set_host(dom.clone())?;
         it.heap.set_indexed_source(dom.clone());

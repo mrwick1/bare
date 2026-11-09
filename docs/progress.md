@@ -5788,3 +5788,50 @@ Counter cost: a `u64` add in the `walk` loop gave +0.7% to +1.3% on 8 `bare-stre
 - A restyle of a whole subtree with descendant rules was not run on a 60,000-element page; it uses the same post-charge.
 - A page with shadow roots and this charge was not run. `restyle_frame` (window) was not measured.
 - One machine (archMachine). Wall times vary by up to 1.5 s when other jobs run.
+
+## A `Worker` that fails to start (2026-11-10)
+
+### Problem
+
+bare has no `Worker`. `new Worker(...)` threw `ReferenceError` and ended the script that called it. On openstreetmap, `application.js` makes a MapLibre worker from a Blob (`URL.createObjectURL` works since #324). The script ended there, so `L.OSM.Map` (the Leaflet map) was never defined. Later errors were `reading 'store'` and `L.OSM.Map is not a constructor`. svelte.dev logged `Uncaught (in promise) ReferenceError: Worker is not defined`.
+
+### Change
+
+- New `crates/bare/src/browser_worker.rs`. `Worker(scriptURL, options)` parses the URL against the document (`SyntaxError` on failure), takes `data:` and same-origin `blob:` and `http(s):` URLs (`SecurityError` for another origin or scheme), and checks `options.type` (`classic` or `module`, else `TypeError`). It returns an `EventTarget` with `postMessage`, `terminate`, `onmessage`, `onmessageerror` and `onerror`.
+- A new task (`Task::Worker`, `browser_scheduler.rs`) fires one `error` event after the current task, if the worker was not terminated and someone listens. A queued task roots its worker.
+- `postMessage` sends nothing. A function or a symbol throws `DataCloneError`. `terminate()` stops the queued `error`.
+- At most 64 live worker objects for each page. The next throws `NotSupportedError`.
+- One console warning for each page: `Worker scripts do not run in bare (<url>)`.
+- The global is an accessor until the first read, as `AbortController` is. `docs/decisions.md` has the reasons.
+- Registration: 5 lines in `browser.rs`, 1 in `lib.rs`.
+
+### Checks
+
+- Tests first: 10 tests in `browser_worker_tests.rs` failed on main with `ReferenceError: Worker is not defined`. They pass now. They cover the constructor (`SyntaxError`, `TypeError`, `SecurityError`, subclass), the `error` event (once, after the current task, a removed listener, a throwing listener), `postMessage` and `DataCloneError`, `terminate`, the 64-object bound with a collect, a page that catches the error and goes on, and the one console warning. No test ran in Chrome.
+- A lazy global through `define_window` (no install cost) was tried first. It does not work: the heap asks the host only for `on*` names and a short list (`crates/js/src/heap.rs`, `on_name`). That file is out of scope, so the global is an accessor.
+
+### Live results
+
+`bare-drive`, `timeout 30000` / `open URL` / `expect js "document.readyState === 'complete'"` / `shot s`, the 100 sites of `survey5/sites.txt`, 3 at a time under `heavy`. Before: main `3f2ce540`. After: this branch.
+
+- Pass count: 79 before, 79 after.
+- Only three sites call `Worker` (they log the new warning): gitlab, openstreetmap and svelte. gitlab: same result and errors.
+- openstreetmap: the errors `Worker is not defined`, `reading 'store'` and `L.OSM.Map is not a constructor` are gone. A check `typeof L.OSM.Map === 'function'` fails before and passes after. The screenshot before shows an empty grey map. The screenshot after shows the map with tiles and the welcome panel. The next error is `ReferenceError: ImageData is not defined` (a promise rejection, at `script#279`). Console errors 3 before, 1 after.
+- svelte.dev: `Uncaught (in promise) ReferenceError: Worker is not defined` is gone. Errors 3 before, 2 after.
+- Other sites that changed in this live run (network noise, none calls `Worker`): eu-europa and wolframalpha (pass to fail, `Limit(Scripts)`), ubuntu-com (pass to fail, one HTTP 502), android-dev (errors 2 to 3), dailymotion, guardian and react-dev (fail to pass), nextjs, old-reddit, theverge, wise (error counts). Three runs of each of the three pass-to-fail sites on both builds: eu-europa failed 2 of 3 on main and 1 of 3 here; wolframalpha failed 3 of 3 on main and 1 of 3 here; ubuntu-com passed 3 of 3 on both. So these flip on main as well.
+
+### Cost
+
+Full matrix, 805 rows, `tools/js/cost_matrix.sh` against the shared build of `3f2ce54039` (origin/main when this section was written; no rebase was needed, so this is the matrix of the final code). 0 rows over +0.5% under glibc, so no jemalloc runs. 0 failed. Mean change glibc -0.002%. The lazy global costs one key, one function and one property on the global for each realm.
+
+Other checks on the final tree: `cargo test --release --workspace --no-fail-fast`: 3,353 passed, 2 failed under load (`parallel_pays_after_a_slow_reply_and_not_after_a_quick_one` and `a_driver_click_step_returns_and_the_expect_waits_for_the_reply`); each passed when I ran it alone. `tools/drive/public/run.sh`: pass 48, fail 0, flakes 0. The JS gates (`crates/js`) and keycost were not run: no change in `crates/js` or the typing path.
+
+### Limits and not tested
+
+- A page that waits for a worker message waits for ever. A page that has no `error` handler goes on silently (one warning).
+- `postMessage` does not look inside an object: a function in a property passes. A transfer list is not read.
+- A terminated worker fires no `error`. I did not check what Chrome does.
+- `error` is a simple `Event`, as the brief says. Chrome's event class was not checked.
+- `new Worker(..., { type: 'module' })` is accepted and not loaded. A blob URL that was revoked is not checked.
+- `SharedWorker` and `ServiceWorker` are absent. No real worker runs.
+- One machine (archMachine). The live pages are not stable: results vary from run to run.

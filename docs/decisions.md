@@ -615,3 +615,14 @@ The step budget is 100 M steps for each task. A host call must charge about the 
 - Limit: `bare_css` has no count of the candidates that the rule index gives for an element, so this is a model of the work. A page whose rules all match all elements (`*:not(.zN)`, 2,000 elements x 2,000 rules) costs 334 instructions for each element x rule (1.34 G for one cascade, 135 ms). Charged 1 M steps, it is 5 times under the JS rate. The time of one such cascade is bounded by `computed-work` (4.5 s at the cap); one task can run several. A real count of candidates, charged as steps, is the next step. It needs a counter in `crates/css`.
 
 The cascade also charges its real candidates (2026-11-10). The model above is paid before the cascade runs. `RuleSet::tested_candidates` counts the rules that the index gave for each styled element (one add for each element; a counter in the `walk` loop itself cost +1.2% on `bare-stress boxes-display-none`, a `Cell` in `RuleSet::candidates` costs nothing measurable). After a full compute the task pays the candidates over the model, one step each; a restyle pays the larger of the two. Rules that match every element (`*:not(.zN)`, 60,000 elements x 1,500 rules, 2 s for one cascade) ran 4 cascades in one task (8 s) after #326 and run 1 now (before #326: 1). Pages with indexed rules never reach the model, so the charge of dev.to, kubernetes, nasa, redis and hsbc is the same.
+
+## `Worker` fails to start instead of being missing
+
+`new Worker(url)` threw `ReferenceError`, which ended the script that called it. openstreetmap never defined `L.OSM.Map` (MapLibre makes its worker from a Blob) and svelte.dev logged `Worker is not defined`. A real worker needs a second realm and a structured clone between two heaps. bare has neither.
+
+- `Worker` exists, and every worker fails to start. A task after the constructor fires a simple `error` event at the object. This is what a browser does when the worker script cannot load. Pages handle that case: they use their fallback, or they log and go on. A missing global is not a case that pages handle, so the whole script ended.
+- A page that waits for a message from the worker waits for ever. This is the same as for a worker that never answers. The page does not stop.
+- `postMessage` sends nothing. It still throws `DataCloneError` for a function or a symbol, as `MessagePort` does. It does not look inside objects.
+- Bound: 64 live worker objects for each page (`MAX_WORKERS`). The next one throws `NotSupportedError`. A worker that was collected frees its place. The bound is against a page that makes workers in a loop; a map library makes one.
+- One console warning for each page names the first worker URL: `Worker scripts do not run in bare (<url>)`. The failure is visible, and it does not repeat.
+- `SharedWorker` and `ServiceWorker` are unchanged (absent).

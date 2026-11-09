@@ -110,6 +110,7 @@ pub mod browser_platform;
 mod browser_platform_class;
 mod browser_platform_query;
 mod browser_scheduler;
+mod browser_worker;
 mod browser_perf;
 mod browser_html;
 mod browser_selection;
@@ -117,6 +118,8 @@ mod browser_selection;
 mod browser_selection_tests;
 #[cfg(test)]
 mod browser_scheduler_tests;
+#[cfg(test)]
+mod browser_worker_tests;
 #[cfg(test)]
 mod browser_date_tests;
 #[cfg(test)]
