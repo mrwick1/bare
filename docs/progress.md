@@ -4920,3 +4920,59 @@ gitlab.com, the "Ship faster" cards: the box is `.one-feature-cards__media` (`#1
 - A live page that uses `matchAll` with names, or `\k<name>` in a real bundle. Only the six sites below ran.
 - `Symbol.replace` with a user `exec` that returns a `groups` object (the generic path was not changed).
 - Chrome 155 comparison of the error messages of the `SyntaxError` cases (the tests check the name only).
+## Script console triage: cost gate stop (2026-11-09)
+Base: `a1b7a802580b992cceccc861b513bebff9c027e4`. Built a new driver. Re-ran all 16 survey sites before and after the changes. Used the survey timeout, body expectation and screenshot steps. Raw output, full error strings and ranked JSON are in `/data/bare-tmp/script-errors-triage/`. Count each distinct first-line message once per site. Strip the listener prefix. Keep other error text unchanged. The table includes excluded topics for audit.
+Added standalone window aliases, an empty window name and a lazy virtual screen. Added scoped selector matching for querySelector, querySelectorAll, matches and closest. The initial window and selector regressions failed before the fixes and passed after them. Later selector assertions have not run. The CSSOM regression fails. CSSOM has no implementation in this branch.
+The fresh site run removes the missing name, screen, frame lookup and Go selector errors. OpenStreetMap reaches later maplibregl and object URL failures. Guardian stops at unsupported user info in a URL. Its missing eval error is therefore not verified as fixed. Sites are live. A changed error count alone does not prove a fix.
+| Rank | Console error | Before sites | After sites | Before site names |
+|---|---|---:|---:|---|
+| 1 | TypeError: performance.mark is not a function | 4 | 4 | bing, github-readme, github-repo, ubuntu-com |
+| 2 | TypeError: Cannot read properties of undefined (reading 'length') | 3 | 3 | bbc-news, git-scm, wolframalpha |
+| 3 | page: Unsupported("named group") | 3 | 3 | github-readme, github-repo, gitlab |
+| 4 | Next.js client-side exception summary | 2 | 2 | bbc-news, wolframalpha |
+| 5 | ReferenceError: HTMLSpanElement is not defined | 1 | 1 | gitlab |
+| 6 | ReferenceError: L is not defined | 1 | 0 | openstreetmap |
+| 7 | ReferenceError: Modernizr is not defined | 1 | 1 | git-scm |
+| 8 | ReferenceError: SVGAnimatedString is not defined | 1 | 1 | vuejs |
+| 9 | ReferenceError: _w is not defined | 1 | 1 | bing |
+| 10 | ReferenceError: eval is not defined | 1 | 0 | guardian |
+| 11 | ReferenceError: name is not defined | 1 | 0 | stackexchange |
+| 12 | ReferenceError: screen is not defined | 1 | 0 | git-scm |
+| 13 | ReferenceError: sj_be is not defined | 1 | 1 | bing |
+| 14 | Script aborted: the CallDepth budget ended the https://code.jquery.com:443/ui/1.14.1/jquery-ui.min.js. The page goes on (1 of 5 aborts used) | 1 | 1 | git-scm |
+| 15 | SyntaxError: Go navigation selector with :scope | 1 | 0 | go-dev |
+| 16 | TypeError: Cannot read properties of undefined (reading '__tcfapiLocator') | 1 | 0 | guardian |
+| 17 | TypeError: Cannot read properties of undefined (reading 'deviceXDPI') | 1 | 0 | openstreetmap |
+| 18 | TypeError: Cannot read properties of undefined (reading 'navigationStart') | 1 | 1 | bing |
+| 19 | TypeError: Cannot read properties of undefined (reading 'store') | 1 | 1 | openstreetmap |
+| 20 | TypeError: Cannot read properties of undefined (reading 'width') | 1 | 0 | bing |
+| 21 | TypeError: Failed to execute 'observe' on 'IntersectionObserver': parameter 1 is not of type 'Element'. | 1 | 1 | vuejs |
+| 22 | Data module: STICKY_CANARY | 1 | 1 | old-reddit |
+| 23 | Data module: script loader | 1 | 1 | old-reddit |
+| 24 | Data module: navigation polyfill | 1 | 1 | old-reddit |
+| 25 | TypeError: document.createEvent is not a function | 1 | 1 | gitlab |
+| 26 | TypeError: document.write is not a function | 1 | 1 | apache-org |
+| 27 | TypeError: globalThis.performance.getEntriesByType is not a function | 1 | 1 | gitlab |
+| 28 | TypeError: performance.getEntriesByType is not a function | 1 | 1 | hashnode |
+| 29 | TypeError: window.performance.mark is not a function | 1 | 1 | bbc-news |
+| 30 | page: Unsupported("Date string that is not ISO 8601 or toUTCString format") | 1 | 1 | ubuntu-com |
+
+New messages after the fixes:
+
+| Error | Sites |
+|---|---|
+| ReferenceError: maplibregl is not defined | openstreetmap |
+| TypeError: L.OSM.Map is not a constructor | openstreetmap |
+| TypeError: window.URL.createObjectURL is not a function | openstreetmap |
+| page: Unsupported("user info in a URL") | guardian |
+
+The full cost matrix ran 805 rows. Three rows exceed +0.5% under both allocators. Stop work under the owner rule. Do not merge this branch. No exception was requested.
+| Row | glibc | jemalloc |
+|---|---:|---:|
+| loader_load mixed 1 | +1.214% | +0.622% |
+| preload_load style 1 | +1.427% | +0.591% |
+| session_load chain 1 | +1.767% | +0.589% |
+
+The public journeys ran once: 30 pass and 1 fail. nextjs-docs fails at checkVisibility with an unsupported content-visibility or display: contents style. A targeted run with the survey baseline binary passes. Treat this as an unresolved regression.
+
+Not tested: release workspace suite, typing keycost, test262_check, exec_diff, later selector assertions, full CSSOM behavior and the remaining top-six fixes. The cost gate stopped the task before these checks. No PR was opened or merged.

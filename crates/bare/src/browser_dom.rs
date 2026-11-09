@@ -223,7 +223,7 @@ impl Dom {
 
     /// The elements under `scope` (not `scope`) that match, in tree order. `all` false stops at the first.
     pub(crate) fn query(&self, it: &mut Interp<'_>, scope: NodeId, text: &str, all: bool) -> R<Vec<NodeId>> {
-        let sels = self.selectors(it, text)?;
+        let sels = self.selectors_at(it, text, scope)?;
         let base = self.depth_of(it, scope)?;
         let doc = self.doc.borrow();
         if sels.iter().any(needs_places) {
@@ -1569,14 +1569,14 @@ fn match_here(d: &Dom, it: &mut Interp<'_>, n: NodeId, sels: &[Selector]) -> R<b
 pub(crate) fn matches_selector(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     let n = d.el(it, this)?;
     let text = d.string_arg(it, arg(a, 0))?;
-    let sels = d.selectors(it, &text)?;
+    let sels = d.selectors_at(it, &text, n)?;
     Ok(Value::Bool(match_here(d, it, n, &sels)?))
 }
 
 pub(crate) fn closest(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     let n = d.el(it, this)?;
     let text = d.string_arg(it, arg(a, 0))?;
-    let sels = d.selectors(it, &text)?;
+    let sels = d.selectors_at(it, &text, n)?;
     let mut cur = Some(n);
     while let Some(c) = cur {
         if d.is_element(c) && match_here(d, it, c, &sels)? {

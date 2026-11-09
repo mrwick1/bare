@@ -746,6 +746,24 @@ fn domexc_codes(name: &str) -> u32 {
     }
 }
 
+// The virtual display has the default headless dimensions. Viewport resizing does not resize it.
+fn window_screen(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
+    let value = if let Some(&v) = a.first() {
+        v
+    } else {
+        let o = d.obj(it, it.object_prototype())?;
+        crate::browser_lazy::tag(d, it, o, "Screen")?;
+        for (name, value) in [("width", 1280.0), ("height", 800.0), ("availWidth", 1280.0), ("availHeight", 800.0), ("availLeft", 0.0), ("availTop", 0.0), ("colorDepth", 24.0), ("pixelDepth", 24.0)] {
+            let k = d.key(it, name)?;
+            it.define_data(o, k, Value::Number(value), false, true, true)?;
+        }
+        Value::Object(o)
+    };
+    let k = d.key(it, "screen")?;
+    it.define_data(it.global_object(), k, value, true, false, true)?;
+    Ok(value)
+}
+
 impl Dom {
     pub(crate) fn p(&self) -> Protos {
         *self.p.get().expect("installed")
@@ -952,6 +970,20 @@ impl Dom {
         Ok(list)
     }
 
+    pub(crate) fn selectors_at(&self, it: &mut Interp<'_>, text: &str, scope: NodeId) -> R<Rc<Vec<Selector>>> {
+        let parsed = self.selectors(it, text)?;
+        if !parsed.iter().any(bare_css::selector::uses_scope) {
+            return Ok(parsed);
+        }
+        it.charge(text.len() as u64)?;
+        let scope = {
+            let doc = self.doc.borrow();
+            if scope == doc.root() { doc.children(scope).find(|&n| matches!(doc.data(n), NodeData::Element { .. })) } else { Some(scope) }
+        };
+        let parsed = bare_css::selector::parse_scoped(text, &mut self.doc.borrow_mut(), bare_css::selector::Mode::Script, scope);
+        Ok(Rc::new(parsed.expect("validated selector")))
+    }
+
     // ------------------------------------------------------------ install
 
     fn pick(&self, p: P) -> ObjId {
@@ -1133,10 +1165,11 @@ impl Dom {
         let docw = self.wrap(it, self.doc.borrow().root())?;
         let Value::Object(docw) = docw else { unreachable!() };
         let _ = self.doc_wrapper.set(docw);
-        for (name, v) in [("window", Value::Object(g)), ("self", Value::Object(g)), ("document", Value::Object(docw))] {
+        for (name, v) in [("window", Value::Object(g)), ("self", Value::Object(g)), ("frames", Value::Object(g)), ("parent", Value::Object(g)), ("top", Value::Object(g)), ("length", Value::Number(0.0)), ("name", Value::String(it.heap.intern_str("").map_err(|e| it.heap_error(e))?)), ("document", Value::Object(docw))] {
             let k = self.key(it, name)?;
-            it.define_data(g, k, v, true, true, true)?;
+            it.define_data(g, k, v, !matches!(name, "top" | "length"), true, name != "top")?;
         }
+        crate::browser_lazy::install(self, it, &[("screen", window_screen)])?;
         crate::browser_navigation::install(self, it)?;
         crate::browser_fetch::install(self, it)?;
         crate::browser_loader::install(self, it)?;

@@ -870,3 +870,45 @@ fn a_query_charges_the_matcher_work_only_where_the_last_compound_fits() {
         assert_eq!(js(&mut b, "document.querySelectorAll('div ~ div ~ div ~ div ~ div').length"), "limit:Steps");
     });
 }
+
+#[test]
+fn standalone_window_aliases_and_name() {
+    big(|| {
+        let mut b = browser();
+        assert_eq!(js(&mut b, "[frames === window, parent === window, top === window, length, name].join('|')"), "true|true|true|0|");
+        assert_eq!(js(&mut b, "name = 'probe'; window.name"), "probe");
+    });
+}
+
+#[test]
+fn standalone_window_screen() {
+    big(|| {
+        let mut b = browser();
+        assert_eq!(js(&mut b, "[screen === window.screen, screen.width, screen.height, screen.availWidth, screen.availHeight, screen.colorDepth, screen.pixelDepth, typeof screen.deviceXDPI].join('|')"), "true|1280|800|1280|800|24|24|undefined");
+    });
+}
+
+#[test]
+fn scoped_selector_lists_use_the_query_root() {
+    big(|| {
+        let mut b = browser();
+        assert_eq!(js(&mut b, "var a = document.getElementById('a'); a.querySelectorAll(':scope > p, :scope > span').length"), "2");
+        assert_eq!(js(&mut b, "a.querySelector(':scope') === null"), "true");
+        assert_eq!(js(&mut b, "document.querySelector(':scope') === document.documentElement"), "true");
+        assert_eq!(js(&mut b, "a.matches(':scope')"), "true");
+        assert_eq!(js(&mut b, "a.matches(':SCOPE') && a.matches(':is(:scope)')"), "true");
+        assert_eq!(js(&mut b, "a.closest(':scope') === a"), "true");
+        assert_eq!(js(&mut b, "document.getElementById('s').querySelectorAll(':scope > p').length"), "0");
+    });
+}
+
+#[test]
+fn document_stylesheets_expose_and_edit_style_rules() {
+    big(|| {
+        let mut b = browser_with("<style>p { color: red }</style><p>hello</p>", BrowserLimits::default());
+        assert_eq!(js(&mut b, "document.styleSheets.length"), "1");
+        assert_eq!(js(&mut b, "var sheet = document.styleSheets[0]; [sheet === document.querySelector('style').sheet, sheet.cssRules.length, sheet.cssRules[0].selectorText, sheet.cssRules[0].style.color].join('|')"), "true|1|p|red");
+        assert_eq!(js(&mut b, "sheet.insertRule('div { color: blue }', 0); [sheet.cssRules.length, sheet.cssRules[0].selectorText].join('|')"), "2|div");
+        assert_eq!(js(&mut b, "sheet.deleteRule(0); sheet.cssRules[0].selectorText"), "p");
+    });
+}
