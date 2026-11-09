@@ -46,31 +46,48 @@ use crate::tokenizer::{Token, Tokens, tokenize};
 /// Make the `Property` enum, with its list and its names, from one list. JS: like a map from the name to a number,
 /// and back, but made when we build the program, so it costs nothing when it runs.
 macro_rules! properties {
-    ($($variant:ident => $name:literal,)*) => {
+    ($($variant:ident => $name:literal,)* ; $($pic:ident => $pic_name:literal,)*) => {
         /// A property that we know. `repr(u8)`: it is one byte, and `property as usize` is its place in `Property::ALL`.
         /// The cascade can keep the style of an element as an array with one place for each property.
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         #[repr(u8)]
         pub enum Property {
             $($variant,)*
+            $($pic,)*
         }
 
         impl Property {
             /// Every property, in order.
-            pub const ALL: &'static [Property] = &[$(Property::$variant,)*];
+            pub const ALL: &'static [Property] = &[$(Property::$variant,)* $(Property::$pic,)*];
             pub const COUNT: usize = Property::ALL.len();
 
             /// The name in CSS, like `margin-top`.
             pub fn name(self) -> &'static str {
                 match self {
                     $(Property::$variant => $name,)*
+                    $(Property::$pic => $pic_name,)*
                 }
             }
 
             /// The property for a name in lowercase. `None` if we do not know it, or if it is a shorthand.
             pub fn from_name(name: &str) -> Option<Property> {
+                Property::from_core_name(name).or_else(|| Property::from_picture_name(name))
+            }
+
+            /// `from_name` for the properties before `Property::CORE`. The parser asks this first: a name of a picture property costs it nothing.
+            #[inline(always)]
+            pub fn from_core_name(name: &str) -> Option<Property> {
                 match name {
                     $($name => Some(Property::$variant),)*
+                    _ => None,
+                }
+            }
+
+            #[cold]
+            #[inline(never)]
+            fn from_picture_name(name: &str) -> Option<Property> {
+                match name {
+                    $($pic_name => Some(Property::$pic),)*
                     _ => None,
                 }
             }
@@ -173,6 +190,36 @@ properties! {
     Fill => "fill",
     Stroke => "stroke",
     ObjectFit => "object-fit",
+    ;
+    BackgroundImage => "background-image",
+    BackgroundSizeX => "background-size-x",
+    BackgroundSizeY => "background-size-y",
+    BackgroundPositionX => "background-position-x",
+    BackgroundPositionY => "background-position-y",
+    BackgroundRepeat => "background-repeat",
+    MaskImage => "mask-image",
+    MaskSizeX => "mask-size-x",
+    MaskSizeY => "mask-size-y",
+    MaskPositionX => "mask-position-x",
+    MaskPositionY => "mask-position-y",
+    MaskRepeat => "mask-repeat",
+}
+
+impl Property {
+    /// The properties that the CSS object model of a page (`style`, `getComputedStyle`) lists and has an accessor for. The picture
+    /// properties (`CORE..`) come last. The engine makes an accessor for each listed property each time a page starts, and that costs
+    /// instructions for each page. `from_name` still knows them, so `setProperty` and `getPropertyValue` work for them.
+    pub const LISTED: &'static [Property] = Property::ALL.split_at(Property::CORE).0;
+    /// The number of properties before the picture properties (`background-image`, `mask-image` and their size, position and repeat). A
+    /// computed style has one slot for each of these. The others (`COUNT - CORE`) are one set that most elements share: it is one number
+    /// in the style (`cascade::ComputedStyle::picture`). A declaration of one is kept apart from the others (`cascade::Entry::pics`).
+    pub const CORE: usize = Property::BackgroundImage as usize;
+
+    /// Is this a picture property (`CORE..`)?
+    #[inline(always)]
+    pub const fn is_picture(self) -> bool {
+        self as usize >= Property::CORE
+    }
 }
 
 /// A length or a percent. The fixed units are already `Px`.
@@ -259,7 +306,8 @@ keywords! {
     Textfield => "textfield", Textarea => "textarea", Menulist => "menulist",
     All => "all", Painted => "painted", Fill => "fill", Stroke => "stroke", VisiblePainted => "visiblepainted",
     VisibleFill => "visiblefill", VisibleStroke => "visiblestroke",
-    Contain => "contain", Cover => "cover", ScaleDown => "scale-down",
+    Contain => "contain", Cover => "cover", ScaleDown => "scale-down", Repeat => "repeat", NoRepeat => "no-repeat",
+    RepeatX => "repeat-x", RepeatY => "repeat-y",
 }
 
 /// The value of one property. It does not say which property: a `Declared` has that.
@@ -298,6 +346,19 @@ pub struct Declared {
 /// A `calc()` that mixes units goes in `side.calcs`, and a value with `var()` goes in `side.vars`: the value points to them.
 /// `name` must be in lowercase (the parser does it).
 pub fn parse_declaration(name: &str, value: &str, important: bool, side: &mut Side, out: &mut Vec<Declared>) -> bool {
+    parse_known(name, value, important, side, out) || webkit_mask(name, value, important, side, out)
+}
+
+/// `-webkit-mask-image` is `mask-image`: the same property with the prefix taken off. It runs after a name or value was not good, so a
+/// good declaration never pays for it.
+#[cold]
+#[inline(never)]
+fn webkit_mask(name: &str, value: &str, important: bool, side: &mut Side, out: &mut Vec<Declared>) -> bool {
+    name.strip_prefix("-webkit-").is_some_and(|n| n.starts_with("mask")) && parse_known(&name[8..], value, important, side, out)
+}
+
+#[inline(always)]
+fn parse_known(name: &str, value: &str, important: bool, side: &mut Side, out: &mut Vec<Declared>) -> bool {
     if var::has_var(value) {
         // A `var()` that is not written well (`var(--a`, `var(x)`) is not good now. We test it with any value for the names.
         if var::substitute(value, &mut |_| Some(String::new())).is_none() {
@@ -305,7 +366,7 @@ pub fn parse_declaration(name: &str, value: &str, important: bool, side: &mut Si
         }
         // The value is not known until the custom properties are. A shorthand gives all its longhands the same value.
         let single = Property::from_name(name).map(|p| [p]);
-        let Some(list) = shorthand_longhands(name).or_else(|| logical(name)).or(single.as_ref().map(|p| &p[..])) else { return false };
+        let Some(list) = all_longhands(name).or_else(|| logical(name)).or(single.as_ref().map(|p| &p[..])) else { return false };
         let mirror = mirrors(name);
         side.vars.push(VarDecl { name: name.into(), text: value.trim().into() });
         let index = side.vars.len() as u32 - 1;
@@ -346,6 +407,10 @@ enum Part {
     /// `inherit`, `initial` or `unset`.
     Wide(Value),
     Slash,
+    /// `url(...)`: the number of the address (`urls::intern`; 0 when it was not kept).
+    Url(u32),
+    /// An image that we do not draw: `linear-gradient(...)`, `image-set(...)`. It is `none` for the image properties.
+    Gradient,
     /// Something that is wrong in every property: a bad color (`#ff`, `rgb(1,2)`), or a `!` or other mark with no meaning.
     Bad,
     /// Anything else that may be good: a string, a url, a comma, a name that we do not know, a function that we do not know.
@@ -358,12 +423,14 @@ struct Parts {
     len: usize,
     /// There were more than 8. Only `font` takes this (its family list is long).
     more: bool,
+    /// The number of parts before the first comma of the value (all of them if there is none): the first layer of `a, b`.
+    layer: usize,
 }
 
 impl Parts {
     /// `None` when the value has no part, or a part that is a mistake in every property (a `{` block, for example).
     fn read(value: &str, calcs: &mut Vec<Linear>) -> Option<Parts> {
-        let mut parts = Parts { items: [Part::Other; 8], len: 0, more: false };
+        let mut parts = Parts { items: [Part::Other; 8], len: 0, more: false, layer: usize::MAX };
         let mut tokens = tokenize(value);
         while let Some(token) = tokens.next() {
             let part = match token {
@@ -376,7 +443,13 @@ impl Parts {
                 Token::Delim('/') => Part::Slash,
                 Token::Function(name) if color::is_function(&name) => color::parse_function(&name, &mut tokens).map_or(Part::Bad, Part::Color),
                 Token::Function(name) if calc::is_calc(&name) || calc::is_math(&name) => read_calc(&name, &mut tokens, calcs),
-                Token::Function(_) | Token::OpenParen | Token::OpenSquare | Token::OpenCurly => {
+                Token::Function(name) => picture_function(&name, &mut tokens),
+                Token::Url(address) => Part::Url(crate::urls::intern(address.trim())),
+                Token::Comma => {
+                    parts.layer = parts.layer.min(parts.len);
+                    Part::Other
+                }
+                Token::OpenParen | Token::OpenSquare | Token::OpenCurly => {
                     skip_block(&mut tokens);
                     Part::Other
                 }
@@ -396,6 +469,11 @@ impl Parts {
 
     fn as_slice(&self) -> &[Part] {
         &self.items[..self.len]
+    }
+
+    /// The parts of the first layer of a list: up to the first comma.
+    fn first_layer(&self) -> &[Part] {
+        &self.items[..self.layer.min(self.len)]
     }
 }
 
@@ -436,6 +514,40 @@ fn read_calc(name: &str, tokens: &mut Tokens<'_>, calcs: &mut Vec<Linear>) -> Pa
         },
         None => Part::Bad,
     }
+}
+
+/// After `url(`: `"address")`. A function with anything else inside is not an address that we know.
+fn read_url(tokens: &mut Tokens<'_>) -> Part {
+    let mut address = Part::Other;
+    while let Some(token) = tokens.next() {
+        match token {
+            Token::Whitespace => {}
+            Token::String(text) if matches!(address, Part::Other) => address = Part::Url(crate::urls::intern(text.trim())),
+            Token::CloseParen => return address,
+            _ => {
+                skip_block(tokens);
+                return Part::Other;
+            }
+        }
+    }
+    address
+}
+
+/// A function that no other property reads: `url(...)`, a gradient or `image-set(...)` are pictures, the others are skipped.
+#[inline(never)]
+fn picture_function(name: &str, tokens: &mut Tokens<'_>) -> Part {
+    if name.eq_ignore_ascii_case("url") {
+        return read_url(tokens);
+    }
+    skip_block(tokens);
+    if is_gradient(name) { Part::Gradient } else { Part::Other }
+}
+
+/// `linear-gradient`, `radial-gradient`, `conic-gradient`, their `repeating-` forms, and `image-set`.
+fn is_gradient(name: &str) -> bool {
+    let name = name.strip_prefix("repeating-").unwrap_or(name);
+    let b = name.as_bytes();
+    name.eq_ignore_ascii_case("image-set") || b.len() > 8 && b[b.len() - 8..].eq_ignore_ascii_case(b"gradient")
 }
 
 /// Read to the end of the block that was just opened. A stack of depth only: a deep `((((` cannot overflow the call stack.
@@ -518,7 +630,7 @@ fn expand(name: &str, parts: &Parts, mirror: &std::cell::Cell<bool>, emit: &mut 
     let slice = parts.as_slice();
     // `inherit`, `initial` and `unset` are the whole value, for a longhand and for a shorthand.
     if let [Part::Wide(wide)] = slice {
-        return match shorthand_longhands(name) {
+        return match all_longhands(name) {
             Some(list) => {
                 list.iter().for_each(|&p| emit(p, *wide));
                 true
@@ -647,7 +759,6 @@ fn expand(name: &str, parts: &Parts, mirror: &std::cell::Cell<bool>, emit: &mut 
             emit(AspectRatio, if value > 0.0 && value.is_finite() { Value::Number(value) } else { Value::Keyword(Keyword::Auto) });
             true
         }
-        "background" => background(slice, emit),
         "font" => font(slice, emit),
         "list-style" => match slice {
             [one] => longhand(ListStyleType, *one).map(|v| emit(ListStyleType, v)).is_some(),
@@ -667,9 +778,13 @@ fn expand(name: &str, parts: &Parts, mirror: &std::cell::Cell<bool>, emit: &mut 
         },
         _ => {
             // A physical name goes first: it pays nothing for the table of logical names.
-            if let Some(property) = Property::from_name(name) {
+            if let Some(property) = Property::from_core_name(name) {
                 let [one] = slice else { return false };
                 return longhand(property, *one).map(|v| emit(property, v)).is_some();
+            }
+            // The picture names are not core properties: they are looked up after this miss, in a cold function.
+            if let Some(ok) = picture_expand(name, parts, emit) {
+                return ok;
             }
             let Some(list) = logical(name) else { return false };
             mirror.set(mirrors(name));
@@ -750,6 +865,34 @@ fn logical(name: &str) -> Option<&'static [Property]> {
     })
 }
 
+/// `expand` for the picture properties and the shorthands of `background` and `mask`. `None` for any other name. Only a name that is not a
+/// core property comes here (`expand`), so a declaration of the other properties pays for none of this. A value with a comma is a list of
+/// layers: the first layer is read (the color of `background` is the one of the last layer).
+#[cold]
+#[inline(never)]
+fn picture_expand(name: &str, parts: &Parts, emit: &mut dyn FnMut(Property, Value)) -> Option<bool> {
+    use Property::*;
+    if !matches!(name.as_bytes().first(), Some(b'b' | b'm')) {
+        return None;
+    }
+    let slice = parts.first_layer();
+    Some(match name {
+        "background" => layer_shorthand(slice, &parts.as_slice()[slice.len()..], &BACKGROUND, emit),
+        "mask" => layer_shorthand(slice, &[], &MASK, emit),
+        "background-size" => size(slice, [BackgroundSizeX, BackgroundSizeY], emit),
+        "mask-size" => size(slice, [MaskSizeX, MaskSizeY], emit),
+        "background-position" => position(slice, [BackgroundPositionX, BackgroundPositionY], emit),
+        "mask-position" => position(slice, [MaskPositionX, MaskPositionY], emit),
+        "background-repeat" => repeat(slice, BackgroundRepeat, emit),
+        "mask-repeat" => repeat(slice, MaskRepeat, emit),
+        "background-image" | "mask-image" | "background-position-x" | "background-position-y" | "mask-position-x" | "mask-position-y" => {
+            let ([one], Some(p)) = (slice, Property::from_name(name)) else { return Some(false) };
+            return Some(longhand(p, *one).map(|v| emit(p, v)).is_some());
+        }
+        _ => return None,
+    })
+}
+
 /// Does the logical `name` follow the inline axis, so that the cascade swaps its left and right in an `rtl` element? The sizes and the block axis do not.
 fn mirrors(name: &str) -> bool {
     (name.contains("-inline") && !name.ends_with("-size")) || name.starts_with("border-start-") || name.starts_with("border-end-")
@@ -787,6 +930,21 @@ pub const SHORTHANDS: &[&str] = &[
 ];
 
 /// The longhands of a shorthand, for `inherit` and the like. `None` if `name` is not a shorthand.
+/// `shorthand_longhands`, and for the shorthands of the background and mask properties all the longhands that the parser sets. (The object
+/// model lists only `background-color` for `background`: see `Property::LISTED`.)
+pub fn all_longhands(name: &str) -> Option<&'static [Property]> {
+    use Property::*;
+    Some(match name {
+        "background" => &[BackgroundColor, BackgroundImage, BackgroundSizeX, BackgroundSizeY, BackgroundPositionX, BackgroundPositionY, BackgroundRepeat],
+        "mask" => &[MaskImage, MaskSizeX, MaskSizeY, MaskPositionX, MaskPositionY, MaskRepeat],
+        "background-size" => &[BackgroundSizeX, BackgroundSizeY],
+        "mask-size" => &[MaskSizeX, MaskSizeY],
+        "background-position" => &[BackgroundPositionX, BackgroundPositionY],
+        "mask-position" => &[MaskPositionX, MaskPositionY],
+        _ => return shorthand_longhands(name),
+    })
+}
+
 pub fn shorthand_longhands(name: &str) -> Option<&'static [Property]> {
     use Property::*;
     let list: &'static [Property] = match name {
@@ -875,25 +1033,203 @@ fn border(slice: &[Part], which: &[(Property, Property, Property)], emit: &mut d
     true
 }
 
-/// `background: ...`. We use only the color. The other parts (an image, a position, `no-repeat`) are checked a little and
-/// ignored, because we cannot draw them yet. If there is no color, the background color is the starting value, `transparent`.
+/// The longhands of a shorthand with layers: `background` and `mask`.
+struct Layer {
+    image: Property,
+    size: [Property; 2],
+    position: [Property; 2],
+    repeat: Property,
+    /// `background` has a color, and `mask` does not.
+    color: Option<Property>,
+}
+
+const BACKGROUND: Layer = Layer {
+    image: Property::BackgroundImage,
+    size: [Property::BackgroundSizeX, Property::BackgroundSizeY],
+    position: [Property::BackgroundPositionX, Property::BackgroundPositionY],
+    repeat: Property::BackgroundRepeat,
+    color: Some(Property::BackgroundColor),
+};
+
+const MASK: Layer = Layer {
+    image: Property::MaskImage,
+    size: [Property::MaskSizeX, Property::MaskSizeY],
+    position: [Property::MaskPositionX, Property::MaskPositionY],
+    repeat: Property::MaskRepeat,
+    color: None,
+};
+
+/// The image of a layer: a `url()` is its number, `none` and an image that we do not draw (a gradient) are `none`.
+fn image(part: Part) -> Option<Value> {
+    match part {
+        Part::Keyword(Keyword::None) | Part::Gradient | Part::Url(0) => Some(Value::Keyword(Keyword::None)),
+        Part::Url(id) => Some(Value::Number(id as f32)),
+        _ => Option::None,
+    }
+}
+
+/// A length or percent that is not negative (`0` is a length).
+fn non_negative(part: Part) -> Option<Length> {
+    match part {
+        Part::Length(Length::Px(v) | Length::Em(v) | Length::Rem(v) | Length::Vw(v) | Length::Vh(v) | Length::Vmin(v) | Length::Vmax(v)) if v < 0.0 => Option::None,
+        Part::Length(l) => Some(l),
+        Part::Percent(p) if p >= 0.0 => Some(Length::Percent(p)),
+        Part::Number { value: 0.0, .. } => Some(Length::Px(0.0)),
+        _ => Option::None,
+    }
+}
+
+/// `auto`, `cover`, `contain`, or one or two lengths. The values are the width and the height: `cover` and `contain` are in the width.
+fn size_values(slice: &[Part]) -> Option<[Value; 2]> {
+    let one = |p: Part| match p {
+        Part::Keyword(Keyword::Auto) => Some(Value::Keyword(Keyword::Auto)),
+        p => non_negative(p).map(Value::Length),
+    };
+    let auto = Value::Keyword(Keyword::Auto);
+    match *slice {
+        [Part::Keyword(k @ (Keyword::Cover | Keyword::Contain))] => Some([Value::Keyword(k), auto]),
+        [x] => Some([one(x)?, auto]),
+        [x, y] => Some([one(x)?, one(y)?]),
+        _ => Option::None,
+    }
+}
+
+fn size(slice: &[Part], to: [Property; 2], emit: &mut dyn FnMut(Property, Value)) -> bool {
+    let Some([x, y]) = size_values(slice) else { return false };
+    emit(to[0], x);
+    emit(to[1], y);
+    true
+}
+
+/// A position as a percent or a length: `left` is 0%, `center` is 50%, `right` is 100%. Edge offsets (`right 10px`) are not read.
+/// Gives the value, and which side it can be: 1 horizontal only, 2 vertical only, 3 either.
+fn place(part: Part) -> Option<(Value, u8)> {
+    let pct = |p| Value::Length(Length::Percent(p));
+    match part {
+        Part::Keyword(Keyword::Left) => Some((pct(0.0), 1)),
+        Part::Keyword(Keyword::Right) => Some((pct(100.0), 1)),
+        Part::Keyword(Keyword::Top) => Some((pct(0.0), 2)),
+        Part::Keyword(Keyword::Bottom) => Some((pct(100.0), 2)),
+        Part::Keyword(Keyword::Center) => Some((pct(50.0), 3)),
+        Part::Length(l) => Some((Value::Length(l), 3)),
+        Part::Percent(p) => Some((pct(p), 3)),
+        Part::Number { value: 0.0, .. } => Some((Value::Length(Length::Px(0.0)), 3)),
+        _ => Option::None,
+    }
+}
+
+/// One or two places, in any order when they are words (`top left`, `center right`): the horizontal and the vertical one.
+fn position_values(slice: &[Part]) -> Option<[Value; 2]> {
+    let half = Value::Length(Length::Percent(50.0));
+    match *slice {
+        [a] => match place(a)? {
+            (v, 2) => Some([half, v]),
+            (v, _) => Some([v, half]),
+        },
+        [a, b] => {
+            let ((x, xs), (y, ys)) = (place(a)?, place(b)?);
+            match (xs, ys) {
+                (1 | 3, 2 | 3) => Some([x, y]),
+                (2 | 3, 1 | 3) => Some([y, x]),
+                _ => Option::None,
+            }
+        }
+        _ => Option::None,
+    }
+}
+
+fn position(slice: &[Part], to: [Property; 2], emit: &mut dyn FnMut(Property, Value)) -> bool {
+    let Some([x, y]) = position_values(slice) else { return false };
+    emit(to[0], x);
+    emit(to[1], y);
+    true
+}
+
+/// `repeat`, `no-repeat`, `repeat-x`, `repeat-y`, or two of `repeat` and `no-repeat`. (`space` and `round` are not read.)
+fn repeat_value(slice: &[Part]) -> Option<Value> {
+    use Keyword as K;
+    let k = match *slice {
+        [Part::Keyword(k @ (K::Repeat | K::NoRepeat | K::RepeatX | K::RepeatY))] => k,
+        [Part::Keyword(x @ (K::Repeat | K::NoRepeat)), Part::Keyword(y @ (K::Repeat | K::NoRepeat))] => match (x, y) {
+            (K::Repeat, K::NoRepeat) => K::RepeatX,
+            (K::NoRepeat, K::Repeat) => K::RepeatY,
+            (k, _) => k,
+        },
+        _ => return Option::None,
+    };
+    Some(Value::Keyword(k))
+}
+
+fn repeat(slice: &[Part], to: Property, emit: &mut dyn FnMut(Property, Value)) -> bool {
+    repeat_value(slice).map(|v| emit(to, v)).is_some()
+}
+
+/// `background: ...` and `mask: ...`: an image, a position with a size after a `/`, a repeat, and for `background` a color. The words that
+/// we do not use (the attachment, the boxes, the mask mode and compositing) are checked a little and ignored.
 /// The check: no bad part, no word of another property (`bold`), no number with no unit (but `0`).
 /// This is not the whole grammar, and so some wrong values pass. We checked 2,600 values against Chrome: see `docs/progress.md`.
-fn background(slice: &[Part], emit: &mut dyn FnMut(Property, Value)) -> bool {
-    let mut color = Value::Color(Color::TRANSPARENT);
-    let mut slash = false;
+/// All the longhands are set, so that `background: red` takes an image, a size, a position and a repeat away.
+/// `slice` is the first layer. `later` is what follows it (`, ...`): the color of `background` is the one of the last layer.
+fn layer_shorthand(slice: &[Part], later: &[Part], l: &Layer, emit: &mut dyn FnMut(Property, Value)) -> bool {
+    use Keyword as K;
+    let mut color = l.color.map(|_| Value::Color(Color::TRANSPARENT));
+    let (mut img, mut rep, mut rep_len) = (Value::Keyword(K::None), [Part::Other; 2], 0);
+    let (mut at, mut at_len, mut by, mut by_len, mut slash) = ([Part::Other; 4], 0, [Part::Other; 2], 0, false);
     for &part in slice {
         match part {
-            Part::Color(c) => color = Value::Color(c),
-            Part::Keyword(Keyword::CurrentColor) => color = Value::Keyword(Keyword::CurrentColor),
-            Part::Keyword(Keyword::None | Keyword::Center | Keyword::Left | Keyword::Right) | Part::Length(_) | Part::Percent(_) | Part::Other => {}
-            Part::Keyword(Keyword::Auto) if slash => {}
-            Part::Number { value: 0.0, .. } => {}
-            Part::Slash if !slash => slash = true,
+            Part::Color(c) if color.is_some() => color = Some(Value::Color(c)),
+            Part::Keyword(K::CurrentColor) if color.is_some() => color = Some(Value::Keyword(K::CurrentColor)),
+            Part::Keyword(K::None) | Part::Gradient | Part::Url(_) => img = image(part).unwrap_or(img),
+            Part::Keyword(K::Repeat | K::NoRepeat | K::RepeatX | K::RepeatY) => {
+                if rep_len == 2 {
+                    return false;
+                }
+                rep[rep_len] = part;
+                rep_len += 1;
+            }
+            Part::Keyword(K::Scroll | K::Fixed | K::ContentBox | K::BorderBox) | Part::Other => {}
+            Part::Slash if !slash && at_len > 0 => slash = true,
+            Part::Keyword(K::Auto | K::Cover | K::Contain) | Part::Length(_) | Part::Percent(_) | Part::Number { value: 0.0, .. } if slash => {
+                if by_len == 2 {
+                    return false;
+                }
+                by[by_len] = part;
+                by_len += 1;
+            }
+            Part::Keyword(K::Center | K::Left | K::Right | K::Top | K::Bottom) | Part::Length(_) | Part::Percent(_) | Part::Number { value: 0.0, .. } if !slash => {
+                if at_len == 4 {
+                    return false;
+                }
+                at[at_len] = part;
+                at_len += 1;
+            }
             _ => return false,
         }
     }
-    emit(Property::BackgroundColor, color);
+    for &part in later {
+        match part {
+            Part::Color(c) if color.is_some() => color = Some(Value::Color(c)),
+            Part::Keyword(K::CurrentColor) if color.is_some() => color = Some(Value::Keyword(K::CurrentColor)),
+            _ => {}
+        }
+    }
+    let (pos, sz) = (position_values(&at[..at_len]), size_values(&by[..by_len]));
+    if (at_len > 0 && pos.is_none()) || (by_len > 0 && sz.is_none()) || (slash && by_len == 0) || (rep_len > 0 && repeat_value(&rep[..rep_len]).is_none()) {
+        return false;
+    }
+    if let (Some(p), Some(c)) = (l.color, color) {
+        emit(p, c);
+    }
+    emit(l.image, img);
+    {
+        let [px, py] = pos.unwrap_or([Value::Length(Length::Percent(0.0)); 2]);
+        let [sx, sy] = sz.unwrap_or([Value::Keyword(K::Auto); 2]);
+        emit(l.position[0], px);
+        emit(l.position[1], py);
+        emit(l.size[0], sx);
+        emit(l.size[1], sy);
+        emit(l.repeat, repeat_value(&rep[..rep_len]).unwrap_or(Value::Keyword(K::Repeat)));
+    }
     true
 }
 
@@ -1086,6 +1422,15 @@ fn longhand(property: Property, part: Part) -> Option<Value> {
             Part::Keyword(k @ (K::None | K::CurrentColor)) => Some(Value::Keyword(k)),
             _ => Option::None,
         },
+        BackgroundImage | MaskImage => image(part),
+        BackgroundSizeX | MaskSizeX => size_values(&[part]).map(|v| v[0]),
+        BackgroundSizeY | MaskSizeY => match part {
+            Part::Keyword(K::Auto) => Some(Value::Keyword(K::Auto)),
+            _ => non_negative(part).map(Value::Length),
+        },
+        BackgroundPositionX | MaskPositionX => place(part).filter(|p| p.1 & 1 != 0).map(|p| p.0),
+        BackgroundPositionY | MaskPositionY => place(part).filter(|p| p.1 & 2 != 0).map(|p| p.0),
+        BackgroundRepeat | MaskRepeat => one_of(part, &[K::Repeat, K::NoRepeat, K::RepeatX, K::RepeatY]),
         // These are read as text (`grid.rs`), and never come here.
         GridTemplateColumns | GridTemplateRows | GridTemplateAreas | GridAutoColumns | GridAutoRows | GridAutoFlow | GridRowStart | GridRowEnd | GridColumnStart | GridColumnEnd => Option::None,
         RowGap | ColumnGap => match part {
@@ -1590,15 +1935,84 @@ mod tests {
     #[test]
     fn background_shorthand() {
         let red = Value::Color(Color { r: 255, g: 0, b: 0, a: 255 });
-        assert_eq!(parse("background", "red"), [(BackgroundColor, red)]);
-        assert_eq!(parse("background", "url(a.png) no-repeat red center"), [(BackgroundColor, red)]);
-        assert_eq!(parse("background", "#f00 url(a.png)"), [(BackgroundColor, red)]);
-        assert_eq!(parse("background", "none"), [(BackgroundColor, Value::Color(Color::TRANSPARENT))]);
+        let none = Value::Keyword(K::None);
+        assert_eq!(parse("background", "red").len(), 7);
+        assert_eq!(parse("background", "red")[..2], [(BackgroundColor, red), (BackgroundImage, none)]);
+        assert_eq!(parse("background", "#f00 url(a.png)").len(), 7);
+        assert_eq!(parse("background", "none")[..2], [(BackgroundColor, Value::Color(Color::TRANSPARENT)), (BackgroundImage, none)]);
         assert_eq!(parse("background", "bold"), vec![]);
         assert_eq!(parse("background", "#ff"), vec![]);
         assert_eq!(parse("background", "1px solid red"), vec![]);
         assert_eq!(parse("background", "red 10"), vec![]);
-        assert_eq!(parse("background", "linear-gradient(red, blue)"), [(BackgroundColor, Value::Color(Color::TRANSPARENT))]);
+        assert_eq!(parse("background", "linear-gradient(red, blue)")[..2], [(BackgroundColor, Value::Color(Color::TRANSPARENT)), (BackgroundImage, none)]);
+    }
+
+    #[test]
+    fn image_properties() {
+        let (none, auto, pct) = (Value::Keyword(K::None), Value::Keyword(K::Auto), |p| Value::Length(Length::Percent(p)));
+        let px = |v| Value::Length(Length::Px(v));
+        let id = |u: &str| Value::Number(crate::urls::intern(u) as f32);
+        assert_eq!(parse("background-image", "url(a.png)"), [(BackgroundImage, id("a.png"))]);
+        assert_eq!(parse("background-image", "URL( \"b.png\" )"), [(BackgroundImage, id("b.png"))]);
+        assert_eq!(parse("background-image", "url('data:image/svg+xml,<svg a=\"1\"/>')"), [(BackgroundImage, id("data:image/svg+xml,<svg a=\"1\"/>"))]);
+        assert_eq!(parse("background-image", "none"), [(BackgroundImage, none)]);
+        // An image that is not drawn is `none`, and the other declarations stay.
+        assert_eq!(parse("background-image", "linear-gradient(red, blue)"), [(BackgroundImage, none)]);
+        assert_eq!(parse("background-image", "repeating-radial-gradient(red 0, blue 10px), url(a.png)"), [(BackgroundImage, none)]);
+        assert_eq!(parse("background-image", "url(a.png), url(b.png)"), [(BackgroundImage, id("a.png"))]);
+        assert_eq!(parse("background-image", "url(\"a,b.png\"), none"), [(BackgroundImage, id("a,b.png"))]);
+        assert_eq!(parse("background-image", "bold"), vec![]);
+        assert_eq!(parse("background-image", "url(a.png) url(b.png)"), vec![]);
+        assert_eq!(parse("background-size", "cover"), [(BackgroundSizeX, Value::Keyword(K::Cover)), (BackgroundSizeY, auto)]);
+        assert_eq!(parse("background-size", "contain"), [(BackgroundSizeX, Value::Keyword(K::Contain)), (BackgroundSizeY, auto)]);
+        assert_eq!(parse("background-size", "20px"), [(BackgroundSizeX, px(20.0)), (BackgroundSizeY, auto)]);
+        assert_eq!(parse("background-size", "50% auto"), [(BackgroundSizeX, pct(50.0)), (BackgroundSizeY, auto)]);
+        assert_eq!(parse("background-size", "auto 2em"), [(BackgroundSizeX, auto), (BackgroundSizeY, Value::Length(Length::Em(2.0)))]);
+        assert_eq!(parse("background-size", "-1px"), vec![]);
+        assert_eq!(parse("background-size", "cover cover"), vec![]);
+        assert_eq!(parse("background-position", "center"), [(BackgroundPositionX, pct(50.0)), (BackgroundPositionY, pct(50.0))]);
+        assert_eq!(parse("background-position", "right"), [(BackgroundPositionX, pct(100.0)), (BackgroundPositionY, pct(50.0))]);
+        assert_eq!(parse("background-position", "bottom"), [(BackgroundPositionX, pct(50.0)), (BackgroundPositionY, pct(100.0))]);
+        assert_eq!(parse("background-position", "10px 25%"), [(BackgroundPositionX, px(10.0)), (BackgroundPositionY, pct(25.0))]);
+        assert_eq!(parse("background-position", "bottom left"), [(BackgroundPositionX, pct(0.0)), (BackgroundPositionY, pct(100.0))]);
+        assert_eq!(parse("background-position", "right 5px"), [(BackgroundPositionX, pct(100.0)), (BackgroundPositionY, px(5.0))]);
+        assert_eq!(parse("background-position", "left right"), vec![]);
+        assert_eq!(parse("background-position", "right 10px bottom 5px"), vec![]);
+        assert_eq!(parse("background-position-x", "right"), [(BackgroundPositionX, pct(100.0))]);
+        assert_eq!(parse("background-position-y", "right"), vec![]);
+        assert_eq!(parse("background-repeat", "no-repeat"), [(BackgroundRepeat, Value::Keyword(K::NoRepeat))]);
+        assert_eq!(parse("background-repeat", "repeat-x"), [(BackgroundRepeat, Value::Keyword(K::RepeatX))]);
+        assert_eq!(parse("background-repeat", "repeat no-repeat"), [(BackgroundRepeat, Value::Keyword(K::RepeatX))]);
+        assert_eq!(parse("background-repeat", "no-repeat repeat"), [(BackgroundRepeat, Value::Keyword(K::RepeatY))]);
+        assert_eq!(parse("background-repeat", "no-repeat no-repeat"), [(BackgroundRepeat, Value::Keyword(K::NoRepeat))]);
+        assert_eq!(parse("background-repeat", "repeat-x repeat"), vec![]);
+        // The shorthand.
+        let all = parse("background", "#f00 url(a.png) no-repeat 10px 20% / 30px auto");
+        assert_eq!(all.len(), 7);
+        assert!(all.contains(&(BackgroundImage, id("a.png"))));
+        assert!(all.contains(&(BackgroundPositionX, px(10.0))) && all.contains(&(BackgroundPositionY, pct(20.0))));
+        assert!(all.contains(&(BackgroundSizeX, px(30.0))) && all.contains(&(BackgroundSizeY, auto)));
+        assert!(all.contains(&(BackgroundRepeat, Value::Keyword(K::NoRepeat))));
+        assert_eq!(parse("background", "url(a.png) center / cover").len(), 7);
+        assert_eq!(parse("background", "url(a.png) / cover"), vec![]);
+        assert_eq!(parse("background", "center cover"), vec![]);
+        assert_eq!(parse("background", "url(a.png) top left right bottom 1px"), vec![]);
+        // `mask` has the same parts and no color; `-webkit-mask` is the same property.
+        let mask = parse("mask", "url(m.svg) no-repeat center / 20px");
+        assert_eq!(mask.len(), 6);
+        assert!(mask.contains(&(MaskImage, id("m.svg"))) && mask.contains(&(MaskSizeX, px(20.0))) && mask.contains(&(MaskRepeat, Value::Keyword(K::NoRepeat))));
+        assert_eq!(parse("mask", "red url(m.svg)"), vec![]);
+        assert_eq!(parse("-webkit-mask", "url(m.svg) no-repeat"), parse("mask", "url(m.svg) no-repeat"));
+        assert_eq!(parse("-webkit-mask-image", "url(m.svg)"), [(MaskImage, id("m.svg"))]);
+        assert_eq!(parse("-webkit-mask-size", "contain"), parse("mask-size", "contain"));
+        assert_eq!(parse("mask-position", "center"), [(MaskPositionX, pct(50.0)), (MaskPositionY, pct(50.0))]);
+        assert_eq!(parse("mask-repeat", "repeat-y"), [(MaskRepeat, Value::Keyword(K::RepeatY))]);
+        assert_eq!(parse("mask", "none").len(), 6);
+        // A `calc()` that mixes units keeps its place in the list.
+        let mut side = Side::default();
+        let mut out = Vec::new();
+        assert!(parse_declaration("mask-size", "calc(100% - 4px)", false, &mut side, &mut out));
+        assert_eq!(out[0].value, Value::Length(Length::Calc(0)));
     }
 
     #[test]
@@ -1609,7 +2023,8 @@ mod tests {
         assert_eq!(parse("margin", "inherit").len(), 4);
         assert_eq!(parse("border", "initial").len(), 12);
         assert_eq!(parse("font", "inherit").len(), 4);
-        assert_eq!(parse("background", "inherit"), [(BackgroundColor, Value::Inherit)]);
+        assert_eq!(parse("background", "inherit").len(), 7);
+        assert_eq!(parse("mask", "initial").len(), 6);
         assert_eq!(parse("margin", "inherit auto"), vec![]);
         assert_eq!(parse("nope", "inherit"), vec![]);
     }
