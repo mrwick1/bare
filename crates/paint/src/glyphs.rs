@@ -96,7 +96,6 @@ fn arabic_face() -> Option<&'static Face> {
 
 pub struct Glyphs {
     faces: [Face; 3],
-    arabic: Option<&'static Face>,
     entries: HashMap<u64, Entry, BuildHasherDefault<Fx>>,
     /// All masks, one after the other: no allocation for each glyph.
     masks: Vec<u8>,
@@ -104,7 +103,7 @@ pub struct Glyphs {
 
 impl Glyphs {
     pub fn new() -> Glyphs {
-        Glyphs { faces: [Face::new(REGULAR), Face::new(BOLD), Face::new(SYMBOLS)], arabic: arabic_face(), entries: HashMap::default(), masks: Vec::new() }
+        Glyphs { faces: [Face::new(REGULAR), Face::new(BOLD), Face::new(SYMBOLS)], entries: HashMap::default(), masks: Vec::new() }
     }
 
     /// The face and the glyph of a character, in the regular face (`bold` false) or the bold one, or in the fallback when
@@ -115,13 +114,18 @@ impl Glyphs {
             i if i < 128 => face.ascii[i],
             _ => face.font.glyph_id(c).0,
         };
-        if id == 0 && matches!(c as u32, 0x0600..=0x06ff | 0x0750..=0x077f | 0x08a0..=0x08ff | 0xfb50..=0xfdff | 0xfe70..=0xfeff) {
-            if let Some(face) = self.arabic { return (3, face.font.glyph_id(c).0); }
-        }
-        if id == 0 && c as u32 >= 0x2000 {
-            return (2, self.faces[2].font.glyph_id(c).0);
-        }
+        if id == 0 { return self.fallback(bold, c); }
         (bold as FaceId, id)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn fallback(&self, bold: bool, c: char) -> (FaceId, u16) {
+        if matches!(c as u32, 0x0600..=0x06ff | 0x0750..=0x077f | 0x08a0..=0x08ff | 0xfb50..=0xfdff | 0xfe70..=0xfeff) {
+            if let Some(face) = arabic_face() { return (3, face.font.glyph_id(c).0); }
+        }
+        if c as u32 >= 0x2000 { return (2, self.faces[2].font.glyph_id(c).0); }
+        (bold as FaceId, 0)
     }
 
     /// The mask of a glyph at `size` pixels and a place `sub` quarters of a pixel right of a whole pixel. Made on the first call.
@@ -140,7 +144,7 @@ impl Glyphs {
     }
 
     fn fill(&mut self, face: FaceId, id: u16, size: f32, sub: u8) -> Entry {
-        let face = if face == 3 { self.arabic.expect("Arabic face exists") } else { &self.faces[face as usize] };
+        let face = if face == 3 { arabic_face().expect("Arabic face exists") } else { &self.faces[face as usize] };
         let glyph = Glyph { id: GlyphId(id), scale: PxScale::from(size * face.scale), position: point(sub as f32 / SUBPIXELS, 0.0) };
         let at = self.masks.len() as u32;
         let Some(outline) = face.font.outline_glyph(glyph) else {
