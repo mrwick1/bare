@@ -497,6 +497,10 @@ mod tests {
             ("(color: red !important)", true),
             ("selector(a > b)", true),
             ("selector(a >)", false),
+            ("(mask-image: none)", true),
+            ("(-webkit-mask-image:none) or (mask-image:none)", true),
+            ("not ((-webkit-mask-image:none) or (mask-image:none))", false),
+            ("(background-size: cover) and (background-position: center)", true),
             ("", false),
             ("display: grid", false),
         ] {

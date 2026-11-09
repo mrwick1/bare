@@ -1523,7 +1523,9 @@ impl Change {
         use Property::*;
         match p {
             TextColor | BorderTopColor | BorderRightColor | BorderBottomColor | BorderLeftColor | TextDecoration | Opacity | ZIndex | Visibility | PointerEvents | Fill | Stroke
-            | BorderTopLeftRadius | BorderTopRightRadius | BorderBottomRightRadius | BorderBottomLeftRadius => true,
+            | BorderTopLeftRadius | BorderTopRightRadius | BorderBottomRightRadius | BorderBottomLeftRadius
+            | BackgroundImage | BackgroundSizeX | BackgroundSizeY | BackgroundPositionX | BackgroundPositionY | BackgroundRepeat
+            | MaskImage | MaskSizeX | MaskSizeY | MaskPositionX | MaskPositionY | MaskRepeat => true,
             BackgroundColor => display != Value::Keyword(Keyword::Inline) || matches!((a, b), (Value::Color(x), Value::Color(y)) if (x.a == 0) == (y.a == 0)),
             _ => false,
         }
@@ -1611,6 +1613,10 @@ fn initial(p: Property) -> Value {
         BoxSizing => Value::Keyword(K::ContentBox),
         TextColor => Value::Color(Color::BLACK),
         BackgroundColor => Value::Color(Color::TRANSPARENT),
+        BackgroundImage | MaskImage => Value::Keyword(K::None),
+        BackgroundSizeX | BackgroundSizeY | MaskSizeX | MaskSizeY => Value::Keyword(K::Auto),
+        BackgroundPositionX | BackgroundPositionY | MaskPositionX | MaskPositionY => Value::Length(Length::Percent(0.0)),
+        BackgroundRepeat | MaskRepeat => Value::Keyword(K::Repeat),
         FontSize => px(16.0),
         FontWeight => Value::Number(400.0),
         // `min-width: auto` is 0, except on a flex item: there it is the "automatic minimum size" (`flex.rs`).
