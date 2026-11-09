@@ -5,13 +5,13 @@
 //
 // Method: the first walk (`walk_program`) records the static scopes that make a runtime environment: the script
 // (environment 0), a function, a block with lexical declarations, a `for`/`for-in`/`for-of` with `let` or `const`, a
-// `catch` clause and a `switch` with lexical declarations. A class is a `Barrier`. Each identifier site stores the scope
+// `catch` clause and a `switch` with lexical declarations. A class and the body of a `with` are a `Barrier`. Each identifier site stores the scope
 // it is in. The second run of a site resolves it, once (code that runs once pays no resolution), to the number of environments between the site and the
 // environment that declares the name ("hops"). Later runs go up `hops` parents and read the binding at the index that
 // the last run found. A name check guards the index. Nothing else is searched.
 //
 // What each outcome means:
-// - `0`: dynamic. The full search runs. A site behind a barrier, a site named `arguments` and a site that the walk did not
+// - `0`: dynamic. The full search runs (it also asks the object environments of `with`). A site behind a barrier, a site named `arguments` and a site that the walk did not
 //   record are dynamic.
 // - hops + index: the name is declared in the scope at `hops`, and in no nearer scope. The index is learned at the first
 //   hit (`0xFFFF` until then). If the environment at `hops` has no such binding, the full search runs. That happens for a
@@ -26,12 +26,14 @@
 // Ideas taken from engines: V8 resolves a name at parse time to a context slot (depth, index) when no `with` or sloppy
 // `eval` is in the way. QuickJS resolves it to a closure variable reference at compile time. SpiderMonkey keeps a
 // `BindingKind` for each name, and it keeps a binding that no closure captures out of the environment object. This
-// engine has neither `with` nor `eval`, and its environments are an arena (`envs`), so the hop count and the slot index
-// are enough. A function that has no inner function or class keeps its variables in a frame, not in an environment (see
+// engine has no `eval`, and its environments are an arena (`envs`), so the hop count and the slot index are enough, except behind
+// a `with`. A function that has no inner function or class keeps its variables in a frame, not in an environment (see
 // "Frame slots" below). A function with an inner function or class keeps its environment: not done.
 //
-// If `with` or a direct `eval` is ever added, the first walk must open a `Barrier` for the code that it can reach.
-// Today the walk rejects `with` and the engine has no `eval`, so no scope is dynamic.
+// `with` opens a `Barrier` for its body (`eval_with.rs`): a site that must leave the body is dynamic, because an object environment is
+// in the chain and a hop count cannot see it. A site that a scope inside the body declares is resolved. The function that holds the
+// `with` has no frame slots (`FL_NOFR`). A direct `eval` would have to open a `Barrier` for the code that it can reach. The engine has
+// none.
 
 const UNRES: u32 = 1 << 31;
 /// With `UNRES`: the site ran once, with the full search. Its second run resolves it.
@@ -48,7 +50,7 @@ const NOFRAME: u32 = 1 << 26;
 /// The environment that holds the frames (`Interp::new`).
 const FRAME_ENV: u32 = 1;
 /// What the first walk saw in a function (`FScope::fl`). `FL_NOFR`: something that keeps the function out of frame slots: an inner
-/// function or class, `new.target`, `super` or `delete name`. `FL_THIS`: it names `this`. `FL_EAGER`: it has a loop or a call, so
+/// function or class, `new.target`, `super`, `delete name` or a `with` statement. `FL_THIS`: it names `this`. `FL_EAGER`: it has a loop or a call, so
 /// one call can be long or recursive.
 const FL_NOFR: u8 = 1;
 const FL_THIS: u8 = 2;
@@ -291,9 +293,13 @@ impl<'p> Interp<'p> {
     fn find_name(&mut self, n: u32, site: u32) -> Option<(u32, usize)> {
         let r = self.find_name_fast(n, site);
         // A frame slot is in no environment of the chain, so the search cannot show it.
+        // A dynamic site may meet an object environment (`eval_with.rs`): the plain search does not know it.
         #[cfg(debug_assertions)]
-        if r.is_none_or(|(e, _)| e != FRAME_ENV) {
-            assert_eq!(r, self.lookup(n), "static scope resolution of '{}' differs from the search", self.names[n as usize]);
+        {
+            let s = self.slots.sites[site as usize];
+            if r.is_none_or(|(e, _)| e != FRAME_ENV) && !(self.with_any && s & (LOCAL | FRAME) == 0 && s != GLOBAL) {
+                assert_eq!(r, self.lookup(n), "static scope resolution of '{}' differs from the search", self.names[n as usize]);
+            }
         }
         r
     }
@@ -357,13 +363,13 @@ impl<'p> Interp<'p> {
             // function has a frame (`fr_any`), no scope is a frame scope, and the first run of a site is a search, as before.
             if s & SEEN == 0 && !(self.fr_any && self.sc_all[scope as usize].base != NONE) {
                 self.slots.sites[site as usize] = s | SEEN;
-                return self.lookup(n);
+                return self.lookup_dyn(n);
             }
             // The first call of a function that may get its frame (`FR_WAIT`) resolves nothing: a site can run twice in one call
             // (`typeof x` reads its site twice), and a resolution for an environment would not suit the frame.
             let sc = &self.sc_all[scope as usize];
             if sc.base == NONE && self.scopes[sc.func as usize].fr == FR_WAIT {
-                return self.lookup(n);
+                return self.lookup_dyn(n);
             }
             s = self.sc_resolve(n, scope);
         }
@@ -396,7 +402,7 @@ impl<'p> Interp<'p> {
             }
         }
         self.slots.sites[site as usize] = s;
-        found.or_else(|| self.lookup(n))
+        found.or_else(|| self.lookup_dyn(n))
     }
 }
 
@@ -422,7 +428,7 @@ const FR_ON: u8 = 4;
 // class (so no closure can read a variable of it), no `arguments`, no `new.target`, no `super`, no `delete name`, no `this`
 // (an arrow function may use `this`: it reads the one of its closure), and it is a plain synchronous function with simple
 // parameters. Async functions and generators keep their environment because their variables must survive a suspension.
-// This engine has no `eval` and no `with`, so no code can name a local by a string.
+// This engine has no `eval`, and a function that holds a `with` keeps its environment (`FL_NOFR`), so no code can name a local by a string.
 //
 // When: a function with a loop or a call (`FScope::eager`) gets its frame at its first call: one call can be long or recursive.
 // A function with neither gets it at its second call, so a function that runs once pays no layout. Its first call keeps an

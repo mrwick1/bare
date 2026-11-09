@@ -497,6 +497,9 @@ impl<'p> Interp<'p> {
     #[cold]
     #[inline(never)]
     fn get_name_uninit(&mut self, n: u32, flags: u8, value: Value) -> Res<Value> {
+        if flags & WITHB != 0 {
+            return self.with_get(n, value);
+        }
         if flags & IMPORT != 0
             && let Value::Number(k) = value
         {

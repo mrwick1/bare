@@ -484,7 +484,7 @@ impl<'p> Interp<'p> {
             }
             StmtKind::Empty | StmtKind::Debugger => {}
             StmtKind::ExportDefault(e) => self.exec_export_default(e)?,
-            StmtKind::With { .. } => return Err(unsupported("with statement", st.span).into()),
+            StmtKind::With { obj, body } => self.exec_with(obj, body, top)?,
             _ => return Err(unsupported("statement in the wrong place", st.span).into()),
         }
         Ok(())

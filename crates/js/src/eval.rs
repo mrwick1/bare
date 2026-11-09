@@ -584,6 +584,8 @@ pub struct Interp<'p> {
     fp: usize,
     /// Some function has a frame, so a site may be in a frame scope at its first run. See `eval_scope.rs`.
     fr_any: bool,
+    /// Some `with` statement ran, so a name that no scope resolves may be in an object environment. See `eval_with.rs`.
+    with_any: bool,
     /// The `FL_*` flags of the function that the first walk is in.
     fl: u8,
     /// The frame templates of all functions, and the scratch of `fr_layout`.
@@ -775,6 +777,7 @@ impl<'p> Interp<'p> {
             sc_class: 0,
             fp: 0,
             fr_any: false,
+            with_any: false,
             fl: 0,
             fr_pool: Vec::new(),
             fr_names: Vec::new(),
@@ -1523,7 +1526,14 @@ impl<'p> Interp<'p> {
                 self.sc_end(sc);
             }
             StmtKind::Empty | StmtKind::Debugger => {}
-            StmtKind::With { .. } => return Err(unsupported("with statement", st.span)),
+            StmtKind::With { obj, body } => {
+                self.w_with_gate(st.span)?;
+                self.w_expr(obj, fs, ac)?;
+                let sc = self.sc_begin(RKind::Barrier);
+                let r = self.w_stmt(body, fs, ac, true);
+                self.sc_end(sc);
+                r?
+            }
             StmtKind::ExportDefault(e) => self.w_expr(e, fs, ac)?,
         }
         Ok(())
@@ -2683,7 +2693,7 @@ impl<'p> Interp<'p> {
                 b.value = v;
                 return Ok(());
             }
-            return self.assign_name_refused(n, e, i);
+            return self.assign_name_refused(n, e, i, v);
         }
         self.assign_global(n, v)
     }
@@ -2691,8 +2701,11 @@ impl<'p> Interp<'p> {
     /// An assignment to a binding that is in its TDZ or is not mutable.
     #[cold]
     #[inline(never)]
-    fn assign_name_refused(&mut self, n: u32, e: u32, i: usize) -> Res<()> {
+    fn assign_name_refused(&mut self, n: u32, e: u32, i: usize, v: Value) -> Res<()> {
         let flags = self.envs[e as usize].bindings[i].flags;
+        if flags & WITHB != 0 {
+            return self.with_set(n, e, v);
+        }
         if flags & IMPORT != 0 {
             return Err(self.type_err("Assignment to constant variable."));
         }
@@ -2783,6 +2796,9 @@ impl<'p> Interp<'p> {
     fn link_base(&mut self, e: ExprId) -> Res<Option<(Value, Value)>> {
         if matches!(self.prog.expr(e).kind, ExprKind::Ident) {
             self.tick()?;
+            if self.with_any {
+                return self.link_name_with(e);
+            }
             return Ok(Some((self.get_name(self.expr_name[e.index()], e.index() as u32)?, Value::Undefined)));
         }
         self.link(e)
@@ -3215,6 +3231,9 @@ impl<'p> Interp<'p> {
                         a = i;
                     }
                     let n = self.expr_name[a.index()];
+                    if self.with_any {
+                        return self.typeof_with(n, a);
+                    }
                     if self.find_name(n, a.index() as u32).is_none() {
                         let key = self.name_key(n)?;
                         if !hx!(self, self.heap.has_property_lazy(self.global, key)) && (self.hs.scope.is_empty() || self.hscope_find(n)?.is_none()) {
@@ -3283,7 +3302,11 @@ impl<'p> Interp<'p> {
             }
             ExprKind::Ident => {
                 let n = self.expr_name[a.index()];
-                if self.lookup(n).is_some() {
+                if self.with_any {
+                    if let Some(r) = self.delete_with(n)? {
+                        return Ok(Value::Bool(r));
+                    }
+                } else if self.lookup(n).is_some() {
                     return Ok(Value::Bool(false));
                 }
                 let key = self.name_key(n)?;
@@ -3788,6 +3811,7 @@ include!("eval_typed.rs");
 include!("eval_scripts.rs");
 include!("eval_modules.rs");
 include!("eval_scope.rs");
+include!("eval_with.rs");
 include!("eval_stack.rs");
 include!("eval_builtins.rs");
 include!("eval_string_more.rs");
@@ -3898,6 +3922,10 @@ mod typed_tests;
 #[cfg(test)]
 #[path = "eval_array_object_tests.rs"]
 mod array_object_tests;
+
+#[cfg(test)]
+#[path = "eval_with_tests.rs"]
+mod with_tests;
 
 #[cfg(test)]
 #[path = "eval_numeric_tests.rs"]

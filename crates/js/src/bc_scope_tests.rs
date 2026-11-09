@@ -82,6 +82,7 @@ fn every_site_of_the_corpora_matches_the_walker() {
             include_str!("../../../tools/fixtures/js/async-cases.txt"),
             include_str!("../../../tools/fixtures/js/tagged-cases.txt"),
             include_str!("../../../tools/fixtures/js/arrobj-cases.txt"),
+            include_str!("../../../tools/fixtures/js/with-cases.txt"),
         ] {
             corpus(text, &mut total);
         }
