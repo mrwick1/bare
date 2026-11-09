@@ -229,13 +229,12 @@ fn a_bad_status_type_encoding_or_size_ends_the_session_with_a_fixed_label() {
         let srv = server(|| {
             vec![
                 ("/404", Reply::new(404, Some("text/html"), "<script>localStorage.setItem('ran','1')</script>")),
-                ("/json", Reply::new(200, Some("application/json"), "{}")),
-                ("/notype", Reply::new(200, None, "<p>")),
+                                ("/notype", Reply::new(200, None, "<p>")),
                 ("/gz", html("x").header("Content-Encoding", "zstd")),
                 ("/big", html(&"a".repeat(5000))),
             ]
         });
-        for (p, why) in [("/404", "status 404"), ("/json", "the content type is not HTML"), ("/notype", "the content type is not HTML"), ("/gz", "the content encoding is not supported")] {
+        for (p, why) in [("/404", "status 404"), ("/notype", "the content type is not HTML"), ("/gz", "the content encoding is not supported")] {
             let r = Session::new(cfg(srv.url(p))).run();
             assert_eq!(r.stop, SessionStop::LoadFailed(why.into()), "{p}");
             assert!(r.pages.is_empty());
@@ -249,6 +248,33 @@ fn a_bad_status_type_encoding_or_size_ends_the_session_with_a_fixed_label() {
         let mut s = Session::new(cfg(srv.url("/404")));
         s.run();
         assert_eq!(get(&s, &srv, "ran"), None);
+    });
+}
+
+#[test]
+fn a_text_or_image_document_becomes_a_pre_or_an_img_and_other_types_are_downloads() {
+    let doc = |ct: &str, body: &[u8]| non_html_document(Some(ct), "http://h.test/a?x=1&y=2", body);
+    assert_eq!(doc("application/json", b"{\"a\": \"<b>\"}").unwrap(), "<pre style=\"white-space:pre-wrap;word-wrap:break-word\">{\"a\": \"&lt;b&gt;\"}</pre>");
+    for t in ["text/plain; charset=utf-8", "text/xml", "application/xml", "application/ld+json", "text/css", "application/javascript"] {
+        assert!(doc(t, b"x & y").unwrap().contains("x &amp; y"), "{t}");
+    }
+    assert_eq!(doc("image/png", b"\x89PNG").unwrap(), "<img src=\"http://h.test/a?x=1&amp;y=2\">");
+    assert_eq!(doc("image/svg+xml", b"<svg/>").unwrap(), "<img src=\"http://h.test/a?x=1&amp;y=2\">");
+    for t in ["application/pdf", "application/octet-stream", "video/mp4"] {
+        assert_eq!(doc(t, b"%PDF").unwrap_err(), "the content is a download", "{t}");
+    }
+    assert_eq!(non_html_document(None, "http://h.test/", b"<p>").unwrap_err(), "the content type is not HTML");
+}
+
+#[test]
+fn a_json_response_loads_as_a_text_document() {
+    big(|| {
+        let srv = server(|| vec![("/json", Reply::new(200, Some("application/json"), "{}")), ("/pdf", Reply::new(200, Some("application/pdf"), "%PDF"))]);
+        let r = Session::new(cfg(srv.url("/json"))).run();
+        assert_eq!(r.stop, SessionStop::Page(Stop::Settled), "{r:?}");
+        assert_eq!(r.pages.len(), 1);
+        let r = Session::new(cfg(srv.url("/pdf"))).run();
+        assert_eq!(r.stop, SessionStop::LoadFailed("the content is a download".into()));
     });
 }
 
@@ -430,11 +456,11 @@ fn configured_session_viewport_reaches_media_queries() {
 }
 
 #[test]
-fn xhtml_is_not_executed_by_the_html_parser() {
+fn xhtml_is_shown_as_text_and_not_executed() {
     big(|| {
         let srv = server(|| vec![("/",Reply::new(200,Some("application/xhtml+xml"),"<html><body><script>localStorage.setItem('xml','ran')</script></body></html>"))]);
         let mut s = Session::new(cfg(srv.url("/")));
-        assert!(matches!(s.run().stop, SessionStop::LoadFailed(_)));
+        assert_eq!(s.run().stop, SessionStop::Page(Stop::Settled));
         assert_eq!(get(&s, &srv, "xml"), None);
     });
 }

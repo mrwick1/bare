@@ -26,6 +26,7 @@ fn serve() -> String {
                         let kind = match path.rsplit('.').next() {
                             Some("html") => "text/html",
                             Some("svg") => "image/svg+xml",
+                            Some("png") => "image/png",
                             _ => "application/octet-stream",
                         };
                         (200, kind, b)
@@ -96,6 +97,15 @@ fn every_format_is_drawn_at_the_size_that_chrome_gives() {
     // The `<source>` of a type that is supported wins over `src`; the one that is not supported does not.
     assert!(near(at(201, 21), green), "{:06x}", at(201, 21));
     assert!(near(at(201, 51), blue), "{:06x}", at(201, 51));
+}
+
+#[test]
+fn a_picture_opened_as_the_document_is_shown_in_an_img() {
+    // A link to a picture (Content-Type image/png) opens a document with one `<img>`, as in Chrome.
+    let (w, px, json) = shoot_page("red.png", "img", "");
+    assert!(json.starts_with("{\"ok\":true"), "{json}");
+    let first = px.iter().position(|&p| p != 0xffffff).expect("no picture is drawn");
+    assert!(near(px[first + 5], (255, 0, 0)), "{:06x}", px[first + 5]);
 }
 
 #[test]

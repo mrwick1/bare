@@ -251,6 +251,34 @@ fn is_html(content_type: Option<&str>) -> bool {
     m.eq_ignore_ascii_case("text/html")
 }
 
+/// The document for a response that is not HTML, as Chrome shows it: text (plain, JSON, XML, CSS, JS) in a `<pre>`, an
+/// image as a document with one `<img>`. Any other type is a download: no page. A response without a type is refused.
+pub(crate) fn non_html_document(content_type: Option<&str>, url: &str, body: &[u8]) -> Result<String, String> {
+    let Some(ct) = content_type else { return Err("the content type is not HTML".into()) };
+    let mime = ct.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    let esc = |t: &str, quote: bool| {
+        let mut o = String::with_capacity(t.len() + 16);
+        for c in t.chars() {
+            match c {
+                '&' => o.push_str("&amp;"),
+                '<' => o.push_str("&lt;"),
+                '>' => o.push_str("&gt;"),
+                '"' if quote => o.push_str("&quot;"),
+                c => o.push(c),
+            }
+        }
+        o
+    };
+    if mime.starts_with("image/") {
+        return Ok(format!("<img src=\"{}\">", esc(url, true)));
+    }
+    let text = mime.starts_with("text/") || mime.ends_with("+json") || mime.ends_with("+xml") || matches!(mime.as_str(), "application/json" | "application/xml" | "application/javascript" | "application/x-javascript");
+    if !text {
+        return Err("the content is a download".into());
+    }
+    Ok(format!("<pre style=\"white-space:pre-wrap;word-wrap:break-word\">{}</pre>", esc(&encoding::decode(body, Some(ct)), false)))
+}
+
 /// May a redirect (or a navigation) go from `from` to `to`? http(s) only, and https never goes down to http.
 pub(crate) fn redirect_allowed(from: &Url, to: &Url) -> bool {
     use bare_url::Scheme;
@@ -303,13 +331,11 @@ fn load_document(client: &mut Client, url: &str, body: Option<&Body>, lim: &Sess
             return Err(format!("status {}", resp.status));
         }
         let ct = resp.header("content-type");
-        if !is_html(ct) {
-            return Err("the content type is not HTML".into());
-        }
+        let html = is_html(ct);
         if resp.encoded() {
-            return Err("the content encoding is not supported".into());
+            return Err(if html || ct.is_some() { "the content encoding is not supported" } else { "the content type is not HTML" }.into());
         }
-        let text = encoding::decode(&resp.body, ct);
+        let text = if html { encoding::decode(&resp.body, ct) } else { non_html_document(ct, &cur.to_string(), &resp.body)? };
         if text.len() > lim.max_document_bytes {
             return Err("the document is too big".into());
         }

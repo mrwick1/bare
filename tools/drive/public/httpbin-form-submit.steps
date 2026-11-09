@@ -1,6 +1,5 @@
 # httpbin.org: fill the pizza order form and submit it; the result page echoes the values as JSON.
 #   bare-drive --var URL=https://httpbin.org/forms/post httpbin-form-submit.steps
-# known-bug: bare refuses a document that is not HTML ("the content type is not HTML"), and the result page is application/json
 timeout 30000
 open ${URL}
 expect css="form" visible

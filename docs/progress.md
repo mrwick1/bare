@@ -3815,3 +3815,46 @@ The 8 lines left are real: a refused third-party host or a script error. All 10 
 **Noticed, not changed.** `<style disabled>`. A page whose app needs `type=module` cannot render (archive.org, 1 of the 5 survey failures of this kind). `Page::render_failed` keeps one key; two alternating keys would try twice, which costs nothing here.
 
 Not tested: window mode, arjun-e16, a Chrome comparison of the console, a page whose sheet arrives after a 10 s stall.
+
+## Non-HTML documents and python.org clicks (2026-11-09)
+
+Bug 1 is fixed. Bug 2 has a cause that is not navigation; it stays open.
+
+### Non-HTML documents
+
+A form submit or a link can lead to a response that is not HTML. `load_document` (`crates/bare/src/browser_session.rs`) refused all of them. It now builds a small HTML document from the response, as Chrome shows it:
+
+| Content-Type | Document |
+| --- | --- |
+| `text/*`, `application/json`, `application/xml`, `application/javascript`, `+json`, `+xml` | `<pre style="white-space:pre-wrap;word-wrap:break-word">` with the escaped text |
+| `image/*` | one `<img src=URL>` (the image loader of PR #276 fetches and draws it) |
+| any other type (PDF, `application/octet-stream`, video) | no page; the load fails with `the content is a download` |
+| no type | refused as before: `the content type is not HTML` |
+
+The text is decoded with the charset of the header. The cost: one `String` for a non-HTML response; HTML pages take the same path as before. An image document fetches the image a second time (the first response only gives the type).
+
+Tests (each failed before the fix):
+- `a_text_or_image_document_becomes_a_pre_or_an_img_and_other_types_are_downloads` and `a_json_response_loads_as_a_text_document` in `browser_session_tests.rs`.
+- `a_picture_opened_as_the_document_is_shown_in_an_img` in `crates/drive/tests/images.rs`.
+- `xhtml_is_shown_as_text_and_not_executed` replaces the old test that expected a load failure for `application/xhtml+xml`. The script still does not run.
+
+`httpbin-form-submit` passes now, and its `# known-bug:` line is gone. I also checked live: `https://httpbin.org/robots.txt` gives a `<pre>`; `https://httpbin.org/image/png` draws the picture.
+
+### python.org: link clicks stop after the page is idle
+
+Cause found (not navigation): the page stops with `Limit("Steps")` (100 M JS steps) and the session ends. After a stop other than `Settled` the session is ended, so every later click does nothing. A click right after `open` works because the script has not run yet.
+
+Where it stops, narrowed with local copies of the page:
+- `main-min.js` calls `$container.masonry(...)` in its ready handler. With that call removed the page reaches `complete`.
+- Masonry alone (jQuery 1.8.2 + masonry 3.2.2) on a page without the python.org CSS works. With the python.org CSS it hangs. The hang is inside masonry's `getSize(#container)`: markers show that `getSize` reads the 12 box properties, `offsetWidth` and `offsetHeight`, then never returns from the read of `c.width` (`var y = b(c.width)`).
+- The same reads in my own code (`getComputedStyle(c, null)`, the setup `div`, `offsetWidth`, `width`, `height`, a `parseFloat` helper named like the module one) all work. I did not find the trigger in the real sequence. Hypothesis: a layout or style cache state after the setup `div` is added and removed, or the engine on the shadowed names `h`, `b`, `c` in that bundle (crates/js is not in scope).
+- The failed analytics script, the stylesheets, `document.write` and `matchMedia` are not the cause (local fixtures).
+
+The two python.org journeys stay `known` with the new text. Next step: a fixture of 21 `.tier-1` items with that CSS and a step counter, then fix the loop in the layer that owns it.
+
+### Notes, not changed
+
+- `document.images` throws (not defined). `document.querySelectorAll('img')` works.
+- An image document shows the picture at 8 px margin with the line box of an inline image (about 7 px extra at the top). Chrome centers it on a dark background.
+- A page that stops with a fatal error ends the whole session, so a link click does nothing afterwards (python.org, lobsters). Chrome keeps the page alive after a script error. A softer stop for `Limit` and `Unsupported` would help every journey, but it is a design choice.
+- `expect title="x"` reads the `<title>` element, not `document.title` set by a script.
