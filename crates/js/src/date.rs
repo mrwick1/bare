@@ -10,10 +10,13 @@
 //!   `24:00:00` is the end of the day. A fraction may have any number of digits: the first three count (as V8 does).
 //!   A form with a time and no offset is local time: it is `Parsed::Local`; the caller applies the zone.
 //! - `parse` also reads the `toUTCString` form: `Www, DD Mon YYYY HH:mm:ss GMT`.
-//! - A string that has no ASCII digit is NaN. A string with a digit in any other shape is `Parsed::Unrecognized`
-//!   (the legacy formats of V8 are not built; see `docs/resources.md`).
+//! - Any other string with a digit goes to the legacy reader, a port of the V8 loop (`parse_legacy`): month names, `M/D/Y`,
+//!   `Y/M/D`, `AM`/`PM`, `GMT+HHMM`, zone names such as `EST`, and text in brackets. Text that fits no form is NaN.
+//! - A string that has no ASCII digit is NaN.
 //! - A field out of range (month 13, 30 February, 25:00) is NaN: the standard says an illegal value is not a valid
 //!   instance of the format. V8 accepts some of these (`2021-02-29`).
+
+use crate::value::is_js_space;
 
 pub const MS_PER_DAY: f64 = 86_400_000.0;
 /// Largest absolute time value (section 21.4.1.1).
@@ -186,8 +189,6 @@ pub enum Parsed {
     Time(f64),
     /// A valid ISO date-time with no offset: it means local time. The value is the wall-clock time as if it were UTC, not clipped.
     Local(f64),
-    /// Digits in a shape that is not built (a legacy format of V8, `2020-1-1`, a lower-case `t`, `+0100`).
-    Unrecognized,
 }
 
 struct Cur<'a> {
@@ -230,7 +231,7 @@ pub fn parse(s: &[u16]) -> Parsed {
     if !s.iter().any(|&u| (b'0' as u16..=b'9' as u16).contains(&u)) {
         return Parsed::Time(f64::NAN);
     }
-    parse_iso(s).or_else(|| parse_utc_string(s)).unwrap_or(Parsed::Unrecognized)
+    parse_iso(s).or_else(|| parse_utc_string(s)).unwrap_or_else(|| parse_legacy(s))
 }
 
 fn parse_iso(s: &[u16]) -> Option<Parsed> {
@@ -253,7 +254,7 @@ fn parse_iso(s: &[u16]) -> Option<Parsed> {
     let (mut h, mut mi, mut sec, mut ms) = (0, 0, 0, 0);
     let mut has_time = false;
     let mut offset: Option<i64> = None;
-    if c.eat('T') {
+    if c.eat('T') || c.eat('t') {
         has_time = true;
         h = c.num(2)?;
         if !c.eat(':') {
@@ -277,11 +278,11 @@ fn parse_iso(s: &[u16]) -> Option<Parsed> {
                 }
             }
         }
-        if c.eat('Z') {
+        if c.eat('Z') || c.eat('z') {
             offset = Some(0);
         } else if let Some(u) = c.peek().filter(|&u| u == b'+' as u16 || u == b'-' as u16) {
             c.i += 1;
-            let (oh, om) = (c.num(2)?, if c.eat(':') { c.num(2)? } else { return None });
+            let (oh, om) = (c.num(2)?, if c.eat(':') { c.num(2)? } else { c.num(2)? });
             offset = Some(if u == b'-' as u16 { -(oh * 60 + om) } else { oh * 60 + om });
             if oh > 23 || om > 59 {
                 return Some(Parsed::Time(f64::NAN));
@@ -344,4 +345,258 @@ fn parse_utc_string(s: &[u16]) -> Option<Parsed> {
         return Some(Parsed::Time(f64::NAN));
     }
     Some(Parsed::Time(time_clip(make_date(make_day(year as f64, (month - 1) as f64, day as f64), make_time(h as f64, mi as f64, sec as f64, 0.0)))))
+}
+
+// ------------------------------------------------------------------------------------------ legacy forms
+
+#[derive(Clone, Copy, PartialEq)]
+enum Tok {
+    /// A number and the length of its text.
+    Num(i64, usize),
+    Month(i64),
+    AmPm(i64),
+    /// A zone name: the offset in hours and the length of the word.
+    Zone(i64, usize),
+    /// Any other word.
+    Other,
+    /// Text in brackets: no meaning.
+    Skip,
+    Sym(u16),
+    Space,
+    End,
+}
+
+struct Scan<'a> {
+    s: &'a [u16],
+    i: usize,
+    next: Option<Tok>,
+}
+
+/// Zone words of V8: name and offset in hours.
+const ZONES: [(&str, i64); 12] = [("ut", 0), ("utc", 0), ("gmt", 0), ("z", 0), ("cdt", -5), ("cst", -6), ("edt", -4), ("est", -5), ("mdt", -6), ("mst", -7), ("pdt", -7), ("pst", -8)];
+const NONE: i64 = i64::MIN;
+
+impl Scan<'_> {
+    fn at(&self, i: usize) -> u16 {
+        self.s.get(i).copied().unwrap_or(0)
+    }
+    fn lex(&mut self) -> Tok {
+        let Some(&c) = self.s.get(self.i) else { return Tok::End };
+        let start = self.i;
+        let is_digit = |u: u16| (b'0' as u16..=b'9' as u16).contains(&u);
+        if is_js_space(c) {
+            while is_js_space(self.at(self.i)) {
+                self.i += 1;
+            }
+            Tok::Space
+        } else if c == b'(' as u16 {
+            let mut depth = 0;
+            while self.i < self.s.len() {
+                depth += match self.s[self.i] {
+                    0x28 => 1,
+                    0x29 => -1,
+                    _ => 0,
+                };
+                self.i += 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            Tok::Skip
+        } else if is_digit(c) {
+            // The first nine digits after the leading zeros count, as in V8.
+            let (mut n, mut digits) = (0i64, 0);
+            while is_digit(self.at(self.i)) {
+                if digits < 9 && (n != 0 || self.s[self.i] != b'0' as u16) {
+                    n = n * 10 + (self.s[self.i] - b'0' as u16) as i64;
+                    digits += 1;
+                }
+                self.i += 1;
+            }
+            Tok::Num(n, self.i - start)
+        } else if c >= b'A' as u16 {
+            while self.i < self.s.len() && self.s[self.i] >= b'A' as u16 {
+                self.i += 1;
+            }
+            let len = self.i - start;
+            let w: Vec<u8> = self.s[start..self.i].iter().take(3).map(|&u| (u | 0x20) as u8).collect();
+            // Only the first three letters of a month name count (`January`); other words must match whole.
+            if let Some(m) = MONTHS.iter().position(|m| len >= 3 && m.bytes().map(|b| b | 0x20).eq(w.iter().copied())) {
+                Tok::Month(m as i64 + 1)
+            } else if len <= 3 && (w == b"am" || w == b"pm") {
+                Tok::AmPm(if w == b"am" { 0 } else { 12 })
+            } else if let Some(&(_, off)) = ZONES.iter().find(|z| len <= 3 && z.0.as_bytes() == w) {
+                Tok::Zone(off, len)
+            } else {
+                Tok::Other
+            }
+        } else {
+            self.i += 1;
+            Tok::Sym(c)
+        }
+    }
+    fn peek(&mut self) -> Tok {
+        match self.next {
+            Some(t) => t,
+            None => {
+                let t = self.lex();
+                *self.next.insert(t)
+            }
+        }
+    }
+    fn next(&mut self) -> Tok {
+        let t = self.peek();
+        self.next = None;
+        t
+    }
+    fn skip(&mut self, c: char) -> bool {
+        let hit = self.peek() == Tok::Sym(c as u16);
+        if hit {
+            self.next = None;
+        }
+        hit
+    }
+}
+
+/// The legacy reader: a port of the V8 loop, so the same strings give the same time. A string with no zone is local time
+/// (`Parsed::Local`). Known gaps: V8 reads a leading `YYYY-MM-DD` as an ISO date, so it keeps a year such as `0020`
+/// (this reader maps it to 2020) and reads a six-digit year such as `-000001-1-1`. `T` is a word here: it is NaN after a number.
+fn parse_legacy(s: &[u16]) -> Parsed {
+    let nan = Parsed::Time(f64::NAN);
+    let mut sc = Scan { s, i: 0, next: None };
+    let (mut day, mut nd, mut month) = ([1i64; 3], 0, NONE);
+    let (mut time, mut nt, mut pm) = ([0i64; 4], 0, NONE);
+    let (mut sign, mut th, mut tm) = (NONE, NONE, NONE);
+    let mut read_num = false;
+    let time_expects = |nt: usize, n: i64| (nt == 1 && n < 60) || (nt == 2 && n < 60) || (nt == 3 && n < 1000);
+    loop {
+        let tok = sc.next();
+        match tok {
+            Tok::End => break,
+            Tok::Num(n, _) => {
+                read_num = true;
+                if sc.skip(':') {
+                    if sc.skip(':') {
+                        if nt != 0 {
+                            return nan;
+                        }
+                        (time[0], time[1], nt) = (n, 0, 2);
+                    } else {
+                        if nt == 4 {
+                            return nan;
+                        }
+                        time[nt] = n;
+                        nt += 1;
+                        if sc.peek() == Tok::Sym(b'.' as u16) {
+                            sc.next();
+                        }
+                    }
+                } else if sc.skip('.') && time_expects(nt, n) {
+                    let Tok::Num(f, flen) = sc.peek() else { return nan };
+                    sc.next();
+                    // The first three digits of the fraction are the milliseconds.
+                    let ms = match flen {
+                        1 => f * 100,
+                        2 => f * 10,
+                        3 => f,
+                        _ => f / 10i64.pow(flen.min(9) as u32 - 3),
+                    };
+                    time[nt] = n;
+                    if nt == 3 {
+                        return nan;
+                    }
+                    (time[nt + 1], nt) = (ms, 4);
+                } else if th != NONE && tm == NONE && n < 60 {
+                    tm = n;
+                } else if time_expects(nt, n) {
+                    time[nt] = n;
+                    nt = 4;
+                    // A time must end at the end, a space, `Z` or a sign.
+                    if !matches!(sc.peek(), Tok::End | Tok::Space | Tok::Zone(0, 1) | Tok::Sym(0x2B | 0x2D)) {
+                        return nan;
+                    }
+                } else {
+                    if nd == 3 {
+                        return nan;
+                    }
+                    day[nd] = n;
+                    nd += 1;
+                    sc.skip('-');
+                }
+            }
+            Tok::AmPm(v) if nt != 0 => pm = v,
+            Tok::Month(m) => {
+                month = m;
+                sc.skip('-');
+            }
+            Tok::Zone(off, _) if read_num => (sign, th, tm) = (if off < 0 { -1 } else { 1 }, off.abs(), 0),
+            Tok::AmPm(_) | Tok::Zone(..) | Tok::Other => {
+                // A word that has no meaning is allowed only before the first number, and not next to it.
+                if read_num || matches!(sc.peek(), Tok::Num(..)) {
+                    return nan;
+                }
+            }
+            Tok::Sym(c @ (0x2B | 0x2D)) if (th == 0 && tm == 0) || nt != 0 => {
+                sign = if c == 0x2D { -1 } else { 1 };
+                let (n, len) = match sc.peek() {
+                    Tok::Num(n, len) => {
+                        sc.next();
+                        (n, len)
+                    }
+                    _ => (0, 0),
+                };
+                read_num = true;
+                if sc.peek() == Tok::Sym(b':' as u16) {
+                    (th, tm) = (n, NONE);
+                } else if len == 1 || len == 2 {
+                    (th, tm) = (n, 0);
+                } else if len == 3 || len == 4 {
+                    (th, tm) = (n / 100, n % 100);
+                } else {
+                    return nan;
+                }
+            }
+            Tok::Sym(0x2B | 0x2D | 0x29) if read_num => return nan,
+            _ => {}
+        }
+    }
+    // The day: a first number that is not a day (2020/01/02) is the year; else the month comes first, or is named.
+    if nd == 0 {
+        return nan;
+    }
+    let (y, mo, d) = if month == NONE {
+        if (1..=31).contains(&day[0]) { (day[2], day[0], day[1]) } else { (day[0], day[1], day[2]) }
+    } else if (1..=31).contains(&day[0]) {
+        (day[1], month, day[0])
+    } else {
+        (day[0], month, day[1])
+    };
+    let y = match y {
+        0..=49 => y + 2000,
+        50..=99 => y + 1900,
+        _ => y,
+    };
+    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) {
+        return nan;
+    }
+    let mut hour = time[0];
+    if pm != NONE {
+        if hour > 12 {
+            return nan;
+        }
+        hour = hour % 12 + pm;
+    }
+    let end_of_day = hour == 24 && time[1] == 0 && time[2] == 0 && time[3] == 0;
+    if !end_of_day && (hour > 23 || time[1] > 59 || time[2] > 59 || time[3] > 999) {
+        return nan;
+    }
+    let t = make_date(make_day(y as f64, (mo - 1) as f64, d as f64), make_time(hour as f64, time[1] as f64, time[2] as f64, time[3] as f64));
+    if t.is_nan() {
+        return nan;
+    }
+    if sign == NONE {
+        return Parsed::Local(t);
+    }
+    let off = sign * (th.max(0) * 60 + tm.max(0));
+    Parsed::Time(time_clip(t - off as f64 * 60_000.0))
 }

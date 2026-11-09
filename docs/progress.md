@@ -5334,3 +5334,38 @@ All checks ran on the final rebase onto 4f54c0178e.
 Site state from before the rebase: the BBC probe reaches document completion with no script exception during 30 seconds; network failures remain. Guardian reaches eval and failed telemetry fetches. Bing keeps the captured dependency-order exceptions, then the service-worker and autosuggest errors. NYTimes remains HTTP 403. These site probes were not repeated after the rebase.
 
 Not tested: actual Chrome execution, BBC placeholder pixels, iframe child navigation or scripts, stream upload buffering, the exact later Bing autosuggest expression, and the live site probes after the final rebase. Prototype-only iframe member access before the first iframe activation remains a deviation of the deferred registration.
+
+
+## Legacy dates, await in object patterns, and Function.prototype.toString
+
+The baseline is origin/main at 01a1a0d2d3. Three live sites stopped on JavaScript gaps. This change closes the gaps that the page scripts hit.
+
+Problem 1: ubuntu.com stopped with `Unsupported("Date string that is not ISO 8601 or toUTCString format")`. The page string is `6 November 2026`. Change: `date.rs` has a legacy reader that follows the V8 date parser. It reads number, month name, AM/PM, zone word, `+hhmm` offset and bracket tokens. Text with no zone is local time. Invalid text gives NaN, not an error. `Mon DD YYYY HH:MM:SS GMT+HHMM`, `Month DD, YYYY`, `YYYY/MM/DD` and `MM/DD/YYYY` work, with and without time and zone name. The ISO reader now accepts `t`, `z` and a `+hhmm` offset. A fuzz run against Node 22 left 40 differences. Limits: six-digit negative years, ISO day overflow, the `T` separator after a legacy date (V8 gives NaN; bare gives NaN), and a leading ISO date keeps year `0020`.
+
+Problem 2: dev.to stopped with `await in a binding pattern`. The bundle uses `const { a = await f() } = obj`. Change: the async machine binds object patterns with defaults and nested object patterns in `var`, `let` and `const` (also in a `for` init and in generators). Three frames hold the state: `VarP`, `PatDef` and `PatObj`. Keys read for a rest element live in slots. The frames and slots return to zero on a throw or a reject. Limits: array patterns with `await`, computed keys with `await`, catch parameters, `for-of` and `for-in` left sides, and assignment patterns stay gated.
+
+Problem 3: git-scm (jQuery UI) and ar.wikipedia stopped with `Limit("CallDepth")`. Measurement: bare counts native calls in `depth`, and `stk.frames` equals `depth`. Nothing is miscounted. The limit is 10,000 (`MAX_CALL_DEPTH`), as in Chrome. The real cause was a missing `Function.prototype.toString`. jQuery `isPlainObject` compares `Function.prototype.toString.call(Ctor)` with the text for `Object`. Without it, `$.widget.extend` treated `window` as a plain object and recursed until the limit. Change: `toString` gives the source text of a script function or class. It gives `function NAME() { [native code] }` for native functions. It throws a TypeError for a value that is not a function. The text of a method, getter or setter starts at its parameters. This is wider than the brief (fix the count or raise the limit). The limit did not change, so no new stack-overflow test was added. `eval_recursion_tests.rs` still covers 10,000 levels on a real thread and on small stacks.
+
+Live check with `bare-drive` (`open URL`, `expect css="body" visible`, `shot s`). First console error before, then after:
+
+| site | before | after |
+| --- | --- | --- |
+| ubuntu.com | `Unsupported("Date string that is not ISO 8601 …")` | none |
+| dev.to | `Unsupported("await in a binding pattern")` | `Script aborted: the Steps budget ended the network task` (twice) |
+| git-scm.com | `CallDepth budget ended …jquery-ui.min.js` | none |
+| ar.wikipedia.org | `CallDepth budget ended the timer or queued task` | none |
+
+The dev.to abort is a later gap. The page now runs far enough to call `clientHeight` in script 8 (function `Z`). That read runs the style cascade in `browser_computed.rs` (`cascade_with`). One call charges 84,364,392 steps, and the task budget is 100 M. Two such calls end the task. The cause of the large charge (`plan.bytes / 32` or `doc.len() / 4`) is not known. This change does not touch `browser_*` files. The abort needs its own fix.
+
+Checks:
+- `cargo test --release --workspace` passes (bare-js: 840 passed).
+- New tests: Date (Rust and `date-cases`: 5 cases, equal in TZ=UTC, America/New_York and Asia/Kolkata), await in patterns (Rust and `async-cases`: 7 cases, expected output from Node), `toString` (Rust and `builtins-cases`: 4 cases). Each test failed before the fix.
+- `exec_diff.sh`: 79 runs, 0 differences.
+- `test262_check.sh`: gate ok. Newly passing: +40 in `built-ins/Function/prototype/toString` (7 to 47), +12 in `language/module-code/top-level-await/syntax`, +4 in `built-ins/Object/defineProperty`, +2 in `Function/prototype/bind`, and 6 directories with +1. The baseline file is not updated.
+- `keycost.sh`: 282.2 M instructions per textarea key, 287.5 M per React input key. Peak RSS 32.8 MiB at 20 keys and 33.0 MiB at 50 keys.
+- `tools/drive/public/run.sh`: 33 pass, 0 fail, 1 flake (nextjs-docs retry).
+- Cost matrix, 805 rows, base `01a1a0d2d3`: the first run had one row over under both allocators, `async_load fanout 10` (+0.690% glibc, +0.583% jemalloc). The cause was a hash lookup (`aw_pat`) on every `const x = await …` delivery. A check for a plain identifier now skips the lookup, and the pattern start is a `#[cold]` `#[inline(never)]` function. The row is now -0.114% and -0.157%. The next full run had `resources_load small 10` over under both allocators (+0.724%, +0.825%). The row does not run any changed path. Alone it measured -0.160% and -0.302%. The third full run had it at +0.615% (glibc) and -0.070% (jemalloc), so no row was over under both. The row moves with machine load. The owner must judge this row. Mean change over the rows: -0.439% glibc, -0.321% jemalloc.
+- After the last rebase onto `c08c74b1` (main moved once during the merge): bare-js and bare library tests pass (841 and 1157). The date, builtins and async fixtures match their expected files. The full matrix against base `c08c74b13a` has no row over under both allocators. One row, `scripts_load reject 1`, is over under glibc only (+0.626%; jemalloc +0.020%). The mean change is +0.002% glibc and +0.006% jemalloc. The earlier -0.4% means came from the older base.
+- `/data/bare-tmp/bin` was missing for a while during this work. Another job removed it. The directory came back later.
+
+Not tested: Windows or macOS builds; time zones other than the three above for the Date fixture; the year `0020` and six-digit year forms of the legacy Date reader; array patterns or computed keys with `await`; catch, `for-of` and `for-in` patterns with `await`; the text of a bound function or a proxy; Chrome as an oracle (Node 22 was the oracle); the dev.to cascade charge.

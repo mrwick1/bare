@@ -470,9 +470,9 @@ fn builtin_prototypes_are_permanent_roots() {
         assert_eq!(it.display(r), "a[b]c[b]");
         assert_eq!(it.get_str(re, "flags"), "g");
         let ctor = it.get_str(re, "constructor");
-        assert_eq!(ctor, "[object Function]");
+        assert_eq!(ctor, "function RegExp() { [native code] }");
         let sp = it.get_str(abc, "constructor");
-        assert_eq!(sp, "[object Function]");
+        assert_eq!(sp, "function String() { [native code] }");
     });
 }
 

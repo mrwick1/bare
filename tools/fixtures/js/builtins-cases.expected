@@ -91,3 +91,7 @@ str regexp as this	string:abc
 re named groups exec	string:2026|11|undefined|true|y,m,z||2026|4
 re named groups replace	string:11/2026,[][a][$<x],$<n>,aaaa,objectb6
 re named groups backreference and matchAll	string:true,false,true,true,true,1,2
+function_to_string_native_and_bound	string:function Object() { [native code] }|function max() { [native code] }|function push() { [native code] }|function Array() { [native code] }|function () { [native code] }|function Symbol() { [native code] }
+function_to_string_script_source	string:function f(a, b) { return a + b; }|function (x) { return x; }|function named() {}|async function af() {}|function* gf() { yield 1; }|class A { m() {} }|true|function f(a, b) { return a + b; }
+function_to_string_not_a_function	string:TypeError,TypeError,TypeError,TypeError,TypeError,TypeError,TypeError
+function_to_string_tells_object_from_other_constructors	string:true,true,false,false,false,false,false,false,true,false
