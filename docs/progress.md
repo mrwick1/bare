@@ -5822,7 +5822,9 @@ bare has no `Worker`. `new Worker(...)` threw `ReferenceError` and ended the scr
 
 ### Cost
 
-Full matrix, 805 rows, against `base-build` of `3f2ce54039` (see the end of this section for the run after the rebase): see below.
+Full matrix, 805 rows, `tools/js/cost_matrix.sh` against the shared build of `3f2ce54039` (origin/main when this section was written; no rebase was needed, so this is the matrix of the final code). 0 rows over +0.5% under glibc, so no jemalloc runs. 0 failed. Mean change glibc -0.002%. The lazy global costs one key, one function and one property on the global for each realm.
+
+Other checks on the final tree: `cargo test --release --workspace --no-fail-fast`: 3,353 passed, 2 failed under load (`parallel_pays_after_a_slow_reply_and_not_after_a_quick_one` and `a_driver_click_step_returns_and_the_expect_waits_for_the_reply`); each passed when I ran it alone. `tools/drive/public/run.sh`: pass 48, fail 0, flakes 0. The JS gates (`crates/js`) and keycost were not run: no change in `crates/js` or the typing path.
 
 ### Limits and not tested
 
