@@ -133,9 +133,7 @@ fn limit_of(r: Result<impl std::fmt::Debug, Error>) -> LimitKind {
 fn unsupported_await_positions_are_found_before_any_effect() {
     big(|| {
         for (src, what) in [
-            ("async function f() { var o = {}; for (var k in await o) {} }", "await inside for-in"),
-            ("async function f(o) { return (await o)?.x; }", "await inside an optional chain"),
-            ("async function f(o) { return o?.[await 1]; }", "await inside an optional chain"),
+            ("async function f() { for (var k in {}) {} for (var [a = await 1] in {}) {} }", "await in a binding pattern"),
             ("async function f(o) { return delete o[await 1]; }", "await inside delete"),
             ("async function f(o) { (await o).x++; }", "await inside ++ or --"),
             ("async function f(k) { return { [await k]: 1 }; }", "await in a computed object key"),
@@ -160,7 +158,7 @@ fn unsupported_await_positions_are_found_before_any_effect() {
             assert!(matches!(r, Err(Error::Throw(_))), "{src}: {r:?}");
         }
         // the first program of `Interp::new` is checked the same way
-        let prog = parse_script("var effect = 1; async function f() { for (var k in await 1) {} }", Limits::default()).unwrap();
+        let prog = parse_script("var effect = 1; async function f(o) { return delete o[await 1]; }", Limits::default()).unwrap();
         assert!(matches!(Interp::new(&prog, Heap::default(), EvalLimits::default()), Err(Error::Unsupported(_))));
     });
 }
@@ -651,4 +649,39 @@ fn unreachable_suspended_async_generators_are_collected_and_reachable_ones_stay(
         let st = it.async_stats();
         assert_eq!((it.aw.agens.len(), st.activations, st.frames, st.slots), (0, 0, 0, 0));
     });
+}
+
+/// `for-in` and optional chains with an `await` or a `yield` inside. The expected text is from node.
+#[test]
+fn for_in_and_optional_chains_with_await_match_node() {
+    let cases: [(&str, &str); 25] = [
+        ("async function f(){ var o={a:1,b:2,c:3}; for (var k in await o) out.push(k+await o[k]); } f();", "a1|b2|c3"),
+        ("async function f(){ var o={a:1,b:2,c:3}; for (let k in o) { if (k==='b') continue; out.push(k); await 0; } } f();", "a|c"),
+        ("async function f(){ var o={a:1,b:2,c:3}; for (const k in o) { delete o.b; out.push(k); await 0; } } f();", "a|c"),
+        ("async function f(){ var o={a:1,b:2,c:3}; l: for (var k in o) { for (var j in o) { await 0; if (j==='b') continue l; out.push(k+j); } } } f();", "aa|ba|ca"),
+        ("async function f(){ for (var k in 'xy') { await 0; out.push(k); if (k==='0') break; } out.push('end'); } f();", "0|end"),
+        ("async function f(){ for (var k in null) out.push('no'); for (var k in await undefined) out.push('no'); out.push('ok'); } f();", "ok"),
+        ("function* g(o){ for (var k in o) { var x = yield k; out.push(x); } } var it=g({p:1,q:2}); out.push(it.next().value); out.push(it.next('a').value); out.push(it.next('b').done);", "p|a|q|b|true"),
+        ("async function f(){ var o=Object.create({inh:1}); o.own=2; var r=[]; for (var k in o) { r.push(k); await 0; } out.push(r.join()); } f();", "own,inh"),
+        ("async function f(){ var r=[]; try { for (var k in {a:1,b:2}) { await 0; throw k; } } catch (e) { r.push('caught'+e); } finally { r.push('fin'); } out.push(r.join()); } f();", "caughta,fin"),
+        ("async function f(){ var fs=[]; for (let k in {a:1,b:2}) { await 0; fs.push(()=>k); } out.push(fs.map(g=>g()).join()); } f();", "a,b"),
+        ("async function f(){ var t={}; for (t.k in {a:1,b:2}) { await 0; } out.push(t.k); } f();", "b"),
+        ("async function f(o){ return (await o)?.x; } f(null).then(v=>out.push(String(v))); f({x:5}).then(v=>out.push(v));", "undefined|5"),
+        ("async function f(o){ return o?.[await 1]; } f(null).then(v=>out.push(String(v))); f([7,8]).then(v=>out.push(v));", "undefined|8"),
+        ("async function f(o){ return o?.a.b(await 1); } f(null).then(v=>out.push(String(v))); f({a:{b(x){return x+1}}}).then(v=>out.push(v));", "undefined|2"),
+        ("var n=0; function side(){ n++; return 1 } async function f(o){ var r = o?.a.b(await side()); return r; } f(undefined).then(v=>out.push(String(v)+n)); f({a:{b(x){return 'v'+x}}}).then(v=>out.push(v+n));", "undefined1|v11"),
+        ("async function f(o){ return (await o)?.m?.(await 2); } f({}).then(v=>out.push(String(v))); f({m(x){return this.k+x}, k:10}).then(v=>out.push(v)); f(null).then(v=>out.push(String(v)));", "undefined|undefined|12"),
+        ("async function f(o){ return o.a?.[await 'b'].c; } f({a:{b:{c:1}}}).then(v=>out.push(v)); f({a:null}).then(v=>out.push(String(v))); f({a:{}}).then(v=>out.push('x')).catch(e=>out.push(e.constructor.name));", "undefined|1|TypeError"),
+        ("async function f(o){ return [o?.a, (await o)?.b, o?.c?.d]; } f({a:1,b:2}).then(v=>out.push(v.join())); f(null).then(v=>out.push(v.map(String).join()));", "1,2,|undefined,undefined,undefined"),
+        ("async function f(o){ return (o?.a)?.b + await 1; } f(null).then(v=>out.push(String(v))); f({a:{b:1}}).then(v=>out.push(v));", "NaN|2"),
+        ("class A { #x=4; static async m(o){ return (await o)?.#x; } } A.m(null).then(v=>out.push(String(v))); A.m(new A).then(v=>out.push(v));", "undefined|4"),
+        ("async function f(o){ return o?.a(await 1, o?.b); } f({a(x,y){return x+':'+y}, b:3}).then(v=>out.push(v)); f(null).then(v=>out.push(String(v)));", "undefined|1:3"),
+        ("async function f(o){ var r = (await o)?.[await 'k']?.(); return r; } f({k(){return 'called'}}).then(v=>out.push(v)); f({k:null}).then(v=>out.push(String(v))); f(null).then(v=>out.push(String(v)));", "undefined|called|undefined"),
+        ("async function f(o){ return typeof (await o)?.a; } f(null).then(v=>out.push(v)); f({a:1}).then(v=>out.push(v));", "undefined|number"),
+        ("async function f(o){ return o?.a?.b[await 'x']; } f({a:{b:{x:9}}}).then(v=>out.push(v)); f({a:undefined}).then(v=>out.push(String(v)));", "undefined|9"),
+        ("function* g(o){ var r = o?.[yield 1]; out.push(String(r)); } var it=g(null); it.next(); it.next('k'); var it2=g({k:3}); it2.next(); it2.next('k');", "undefined|3"),
+    ];
+    for (src, want) in cases {
+        assert_eq!(run_out(&format!("var out = []; {src}")), want, "{src}");
+    }
 }

@@ -32,7 +32,7 @@
 //   `super` property, `obj.#p` reads and calls, `#p in x`, `super.m(await x)` and `[a, b] = await x`.
 //   Async methods of classes, static ones included, keep `this`, the class scope and `%home` in their environments.
 // - Not supported (Unsupported at preflight): `await` in a parameter, a binding pattern, a computed object key, a
-//   `for-in`, an optional chain, `delete`, `++`/`--`, a tagged template (tag or substitutions), the heritage or a computed key
+//   `delete`, `++`/`--`, a tagged template (tag or substitutions), the heritage or a computed key
 //   of a class, `super(...)` with an await in its arguments, or `super[await k]`. Top-level
 //   await and modules stay unsupported as before. Generators, async generators and `for await` run here too: see
 //   `eval_generator.rs` and `eval_asyncgen.rs`.
@@ -154,6 +154,9 @@ enum Fr {
     Discard,
     /// The value of `export default expr`.
     ExpDef,
+    /// An optional chain `a?.b` that has an `await` inside. Slots from `base` belong to its links. A `?.` that finds `null` or `undefined`
+    /// drops the frames down to this one (`chain_short`).
+    Chain { base: u32 },
     Ret,
     Thr,
     List { l: List<Stmt>, i: u32 },
@@ -526,13 +529,10 @@ impl<'p> Interp<'p> {
                 let b = self.scan_expr(cons)?;
                 self.scan_expr(alt)? | a | b
             }
-            ExprKind::Call { callee, args, optional } => {
+            ExprKind::Call { callee, args, .. } => {
                 let c = self.scan_expr(callee)?;
                 let a = self.scan_list(args)?;
                 if c || a {
-                    if optional {
-                        return no("await inside an optional call");
-                    }
                     let mut x = callee;
                     while let ExprKind::Paren(i) = prog.expr(x).kind {
                         x = i;
@@ -550,39 +550,19 @@ impl<'p> Interp<'p> {
                 let c = self.scan_expr(callee)?;
                 self.scan_list(args)? | c
             }
-            ExprKind::Member { obj, optional, .. } => {
-                let o = self.scan_expr(obj)?;
-                if o && optional {
-                    return no("await inside an optional chain");
-                }
-                o
-            }
-            ExprKind::Index { obj, index, optional } => {
+            ExprKind::Member { obj, .. } => self.scan_expr(obj)?,
+            ExprKind::Index { obj, index, .. } => {
                 let o = self.scan_expr(obj)?;
                 let i = self.scan_expr(index)?;
                 if i && matches!(prog.expr(obj).kind, ExprKind::Super) {
                     return no("await in a super property key");
                 }
-                if (o || i) && optional {
-                    return no("await inside an optional chain");
-                }
                 o | i
             }
-            ExprKind::PrivateMember { obj, optional, .. } => {
-                let o = self.scan_expr(obj)?;
-                if o && optional {
-                    return no("await inside an optional chain");
-                }
-                o
-            }
+            ExprKind::PrivateMember { obj, .. } => self.scan_expr(obj)?,
             ExprKind::PrivateIn { right, .. } => self.scan_expr(right)?,
             ExprKind::Spread(a) | ExprKind::Paren(a) => self.scan_expr(a)?,
-            ExprKind::Chain(a) => {
-                if self.scan_expr(a)? {
-                    return no("await inside an optional chain");
-                }
-                false
-            }
+            ExprKind::Chain(a) => self.scan_expr(a)?,
             // leaves, nested functions (scanned when the walk reaches them) and what the walk rejects
             _ => false,
         };
@@ -646,10 +626,11 @@ impl<'p> Interp<'p> {
                     ForLeft::Var(v) => self.scan_stmt(v)?,
                     ForLeft::Pat(p) => self.scan_pat(p)?,
                 };
-                if l | self.scan_expr(right)? | self.scan_stmt(body)? {
-                    return no("await inside for-in");
+                if l {
+                    return no("await in a for-in binding");
                 }
-                false
+                let r = self.scan_expr(right)?;
+                self.scan_stmt(body)? | r
             }
             StmtKind::ForOf { left, right, body, is_await } => {
                 let l = match left {
@@ -1065,6 +1046,13 @@ impl<'p> Interp<'p> {
 
     fn eval_node(&mut self, run: &mut Run, e: ExprId) -> Res<Step> {
         if !self.aw_expr(e) {
+            // A link of the spine of an optional chain that waits for an `await`: its `?.` short-circuits the whole chain.
+            if matches!(self.prog.expr(e).kind, ExprKind::Member { .. } | ExprKind::Index { .. } | ExprKind::PrivateMember { .. } | ExprKind::Call { .. }) {
+                return match self.descend(|it| it.link(e))? {
+                    Some((v, _)) => val(v),
+                    None => self.chain_short(run),
+                };
+            }
             let v = self.eval_expr(e)?;
             return val(v);
         }
@@ -1073,6 +1061,10 @@ impl<'p> Interp<'p> {
         let base = run.slots.len() as u32;
         match ex.kind {
             ExprKind::Paren(i) => nx(Next::Eval(i)),
+            ExprKind::Chain(inner) => {
+                self.fpush(run, Fr::Chain { base })?;
+                nx(Next::Eval(inner))
+            }
             ExprKind::Await(a) | ExprKind::Unary { arg: a, .. } | ExprKind::Yield { arg: Some(a), .. } => self.ask(run, e, 0, base, a),
             ExprKind::Yield { arg: None, .. } if run.agen => self.ag_yield(run, false, 0, Value::Undefined),
             ExprKind::Yield { arg: None, .. } => Ok(Step::Out(Out::Yield(Value::Undefined, false))),
@@ -1138,6 +1130,25 @@ impl<'p> Interp<'p> {
             },
             _ => Err(unsupported("await in this expression", ex.span)),
         }
+    }
+
+    /// A `?.` link of an optional chain found `null` or `undefined`: the chain gives `undefined`. Drops the frames and slots down to its `Fr::Chain`.
+    fn chain_short(&mut self, run: &mut Run) -> Res<Step> {
+        if !run.stack.iter().any(|f| matches!(f, Fr::Chain { .. })) {
+            return val(Value::Undefined);
+        }
+        while let Some(fr) = self.fpop(run) {
+            if let Fr::Chain { base } = fr {
+                self.strunc(run, base as usize);
+                break;
+            }
+        }
+        val(Value::Undefined)
+    }
+
+    /// Is the link `m` (a member, an index or a private member) written with `?.`?
+    fn link_optional(&self, m: ExprId) -> bool {
+        matches!(self.prog.expr(m).kind, ExprKind::Member { optional: true, .. } | ExprKind::Index { optional: true, .. } | ExprKind::PrivateMember { optional: true, .. })
     }
 
     fn callee_shape(&self, callee: ExprId) -> CShape {
@@ -1389,11 +1400,17 @@ impl<'p> Interp<'p> {
                 self.object_prop(o, pid, Some(v))?;
                 self.obj_next(run, e, base, i + 1)
             }
-            ExprKind::Member { name, .. } => {
+            ExprKind::Member { name, optional, .. } => {
+                if optional && is_nullish(v) {
+                    return self.chain_short(run);
+                }
                 let key = self.expr_key(e, name)?;
                 val(self.get_prop(v, key)?)
             }
-            ExprKind::PrivateMember { .. } => {
+            ExprKind::PrivateMember { optional, .. } => {
+                if optional && is_nullish(v) {
+                    return self.chain_short(run);
+                }
                 let (pn, n, fl) = self.priv_lookup(e)?;
                 val(self.priv_get(v, pn, n, fl)?)
             }
@@ -1406,8 +1423,11 @@ impl<'p> Interp<'p> {
                 };
                 val(Value::Bool(self.priv_slot(o, pn).is_some()))
             }
-            ExprKind::Index { index, .. } => {
+            ExprKind::Index { index, optional, .. } => {
                 if i == 0 {
+                    if optional && is_nullish(v) {
+                        return self.chain_short(run);
+                    }
                     self.spush(run, Slot::V(v))?;
                     self.ask(run, e, 1, base, index)
                 } else {
@@ -1420,31 +1440,49 @@ impl<'p> Interp<'p> {
                     val(self.get_prop(bv, key)?)
                 }
             }
-            ExprKind::Call { callee, args, .. } => {
+            ExprKind::Call { callee, args, optional } => {
                 let shape = self.callee_shape(callee);
                 let np = if matches!(shape, CShape::Index(..)) { 2 } else { 1 };
                 if i < np {
                     match shape {
                         CShape::Plain => {
+                            if optional && is_nullish(v) {
+                                return self.chain_short(run);
+                            }
                             self.spush(run, Slot::V(v))?;
                             self.spush(run, Slot::V(Value::Undefined))?;
                         }
                         CShape::Super(_) => return Err(unsupported("super call state", ex.span)),
                         CShape::Private(m, _) => {
+                            if self.link_optional(m) && is_nullish(v) {
+                                return self.chain_short(run);
+                            }
                             let (pn, n, fl) = self.priv_lookup(m)?;
                             let f = self.priv_get(v, pn, n, fl)?;
+                            if optional && is_nullish(f) {
+                                return self.chain_short(run);
+                            }
                             self.spush(run, Slot::V(f))?;
                             self.spush(run, Slot::V(v))?;
                         }
                         CShape::Member(m, _) => {
                             let ExprKind::Member { name, .. } = prog.expr(m).kind else { return Err(unsupported("call", ex.span)) };
+                            if self.link_optional(m) && is_nullish(v) {
+                                return self.chain_short(run);
+                            }
                             let key = self.expr_key(m, name)?;
                             let f = self.get_prop(v, key)?;
+                            if optional && is_nullish(f) {
+                                return self.chain_short(run);
+                            }
                             self.spush(run, Slot::V(f))?;
                             self.spush(run, Slot::V(v))?;
                         }
                         CShape::Index(_, index) => {
                             if i == 0 {
+                                if self.link_optional(self.strip(callee)) && is_nullish(v) {
+                                    return self.chain_short(run);
+                                }
                                 self.spush(run, Slot::V(v))?;
                                 return self.ask(run, e, 1, base, index);
                             }
@@ -1455,6 +1493,10 @@ impl<'p> Interp<'p> {
                             }
                             let key = self.coerce_key(v)?;
                             let f = self.get_prop(bv, key)?;
+                            if optional && is_nullish(f) {
+                                self.strunc(run, b);
+                                return self.chain_short(run);
+                            }
                             run.slots[b] = Slot::V(f);
                             self.spush(run, Slot::V(bv))?;
                         }
@@ -1581,7 +1623,7 @@ impl<'p> Interp<'p> {
                 }
                 self.list_from(run, l, 0)
             }
-            StmtKind::While { .. } | StmtKind::DoWhile { .. } | StmtKind::For { .. } | StmtKind::ForOf { .. } => self.start_loop(run, s, Lbl::default()),
+            StmtKind::While { .. } | StmtKind::DoWhile { .. } | StmtKind::For { .. } | StmtKind::ForIn { .. } | StmtKind::ForOf { .. } => self.start_loop(run, s, Lbl::default()),
             StmtKind::Labeled { .. } => {
                 let mut lb = Lbl::default();
                 let mut cur = s;
@@ -1593,7 +1635,7 @@ impl<'p> Interp<'p> {
                     lb.n += 1;
                     cur = body;
                 }
-                if matches!(prog.stmt(cur).kind, StmtKind::While { .. } | StmtKind::DoWhile { .. } | StmtKind::For { .. } | StmtKind::ForOf { .. }) {
+                if matches!(prog.stmt(cur).kind, StmtKind::While { .. } | StmtKind::DoWhile { .. } | StmtKind::For { .. } | StmtKind::ForIn { .. } | StmtKind::ForOf { .. }) {
                     return self.start_loop(run, cur, lb);
                 }
                 for k in 0..lb.n as usize {
@@ -1729,7 +1771,7 @@ impl<'p> Interp<'p> {
                     }
                 }
             }
-            StmtKind::ForOf { right, .. } => {
+            StmtKind::ForOf { right, .. } | StmtKind::ForIn { right, .. } => {
                 self.fpush(run, Fr::OfR { s, lb })?;
                 nx(Next::Eval(right))
             }
@@ -1785,7 +1827,7 @@ impl<'p> Interp<'p> {
 
     /// The binding target of a for-of head and its `let`/`const` kind.
     fn of_target(&self, s: StmtId) -> Res<(PatId, Option<VarKind>, ExprId)> {
-        let StmtKind::ForOf { left, right, .. } = self.prog.stmt(s).kind else { return Err(unsupported("for-of", Span::default())) };
+        let (StmtKind::ForOf { left, right, .. } | StmtKind::ForIn { left, right, .. }) = self.prog.stmt(s).kind else { return Err(unsupported("for-of", Span::default())) };
         match left {
             ForLeft::Pat(p) => Ok((p, None, right)),
             ForLeft::Var(v) => {
@@ -1796,7 +1838,43 @@ impl<'p> Interp<'p> {
         }
     }
 
+    /// A for-in starts with the value `rv` of its object: the keys go to slots from `base`, then the iteration is the one of a for-of.
+    /// Layout: `base` the next position, `base + 1` the object, `base + 2` 1 for a proxy, then one key for each slot.
+    fn in_start(&mut self, run: &mut Run, rv: Value) -> Res<()> {
+        let (keys, proxied) = self.for_in_keys(rv)?;
+        self.spush(run, Slot::N(0))?;
+        self.spush(run, Slot::V(rv))?;
+        self.spush(run, Slot::N(u32::from(proxied)))?;
+        for k in keys {
+            self.spush(run, Slot::K(k))?;
+        }
+        Ok(())
+    }
+
+    /// The next key of a for-in that is still a property of the object (a key that was deleted is skipped).
+    fn in_next(&mut self, run: &mut Run, base: u32) -> Res<Option<Value>> {
+        let Slot::N(mut pos) = run.slots[base as usize] else { return Err(unsupported("for-in", Span::default())) };
+        let (Slot::V(rv), Slot::N(proxied)) = (run.slots[base as usize + 1], run.slots[base as usize + 2]) else { return Err(unsupported("for-in", Span::default())) };
+        while base as usize + 3 + (pos as usize) < run.slots.len() {
+            let Slot::K(k) = run.slots[base as usize + 3 + pos as usize] else { return Err(unsupported("for-in", Span::default())) };
+            pos += 1;
+            if let Value::Object(o) = rv
+                && !(if proxied != 0 { self.px_for_in_has(o, k)? } else { self.o_has_property(o, k)? })
+            {
+                continue;
+            }
+            run.slots[base as usize] = Slot::N(pos);
+            return Ok(Some(h!(self, self.heap.key_to_value(k))));
+        }
+        run.slots[base as usize] = Slot::N(pos);
+        Ok(None)
+    }
+
     fn of_iter(&mut self, run: &mut Run, s: StmtId, lb: Lbl, base: u32) -> Res<Step> {
+        if matches!(run.slots[base as usize], Slot::N(_)) {
+            let Some(v) = self.in_next(run, base)? else { return val(Value::Undefined) };
+            return self.of_body(run, s, v, Fr::OfB { s, lb, base }, false);
+        }
         let Slot::It(mut it) = run.slots[base as usize] else { return Err(unsupported("for-of", Span::default())) };
         // `iter_next` marks the iteration done after the end or an error, so a throw from here is never closed.
         let step = self.iter_next(&mut it);
@@ -1808,7 +1886,7 @@ impl<'p> Interp<'p> {
     /// Bind the value `v` of a for-of iteration and run the body under the frame `fr`. `early`: push `fr` before the
     /// binding, so a binding error leaves the loop through it.
     fn of_body(&mut self, run: &mut Run, s: StmtId, v: Value, fr: Fr, early: bool) -> Res<Step> {
-        let StmtKind::ForOf { body, .. } = self.prog.stmt(s).kind else { return Err(unsupported("for-of", Span::default())) };
+        let (StmtKind::ForOf { body, .. } | StmtKind::ForIn { body, .. }) = self.prog.stmt(s).kind else { return Err(unsupported("for-of", Span::default())) };
         let (target, lexical, _) = self.of_target(s)?;
         let Some(&Fr::OfScope { outer, cur, .. }) = run.stack.last() else { return Err(unsupported("for-of", Span::default())) };
         if let Some(kind) = lexical {
@@ -1872,6 +1950,7 @@ impl<'p> Interp<'p> {
                 r => r,
             },
             Fr::Discard => val(Value::Undefined),
+            Fr::Chain { .. } => val(v),
             Fr::ExpDef => {
                 self.set_default_export(v)?;
                 val(Value::Undefined)
@@ -1946,8 +2025,12 @@ impl<'p> Interp<'p> {
                 if matches!(self.prog.stmt(s).kind, StmtKind::ForOf { is_await: true, .. }) {
                     return self.aof_start(run, s, lb, v);
                 }
-                let it = self.iter_start(v, right)?;
-                self.spush(run, Slot::It(it))?;
+                if matches!(self.prog.stmt(s).kind, StmtKind::ForIn { .. }) {
+                    self.in_start(run, v)?;
+                } else {
+                    let it = self.iter_start(v, right)?;
+                    self.spush(run, Slot::It(it))?;
+                }
                 self.fpush(run, Fr::OfScope { outer, cur: NONE, base })?;
                 self.of_iter(run, s, lb, base)
             }
@@ -2065,6 +2148,12 @@ impl<'p> Interp<'p> {
                     if matches!(abr, Abr::Continue(l) if lb.has(l)) {
                         return self.of_iter(run, s, lb, base);
                     }
+                    if matches!(run.slots[base as usize], Slot::N(_)) {
+                        // A for-in has no iterator to close.
+                        if matches!(abr, Abr::Break(l) if lb.has(l)) {
+                            return val(Value::Undefined);
+                        }
+                    } else {
                     // Any other abrupt completion leaves the loop: IteratorClose. An error of `return` replaces a
                     // break, continue or return and loses to a throw. A limit, Unsupported or a heap fault is final.
                     let Slot::It(mut it) = run.slots[base as usize] else { return Err(unsupported("for-of", Span::default())) };
@@ -2079,6 +2168,7 @@ impl<'p> Interp<'p> {
                     }
                     if matches!(abr, Abr::Break(l) if lb.has(l)) {
                         return val(Value::Undefined);
+                    }
                     }
                 }
                 Fr::TryB { s, env } => {
