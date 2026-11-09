@@ -89,7 +89,14 @@ fn feature(inner: &str, (w, h): (f32, f32), depth: usize) -> bool {
             value.trim().to_ascii_lowercase(),
         );
         let (min, max) = (name.starts_with("min-"), name.starts_with("max-"));
-        let base = name.trim_start_matches("min-").trim_start_matches("max-");
+        // `strip_prefix` in a loop, not `trim_start_matches`: the pattern searcher of `trim_start_matches` costs more for each read.
+        let mut base = name.as_str();
+        while let Some(rest) = base.strip_prefix("min-") {
+            base = rest;
+        }
+        while let Some(rest) = base.strip_prefix("max-") {
+            base = rest;
+        }
         let compare = |actual: f32, wanted: Option<f32>| match wanted {
             Some(v) if min => actual >= v,
             Some(v) if max => actual <= v,
