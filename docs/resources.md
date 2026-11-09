@@ -2210,7 +2210,7 @@ S4 topic 3 closed several of these gaps: `z-index`, `opacity`, flex and grid ite
 - An inline box cut over two lines draws all four borders on each piece.
 - Text decoration is read from the parent of the text only, as a line in the color of the text (no thickness or color from CSS). Italic is not drawn (no italic face). Bold is the Bold face for `font-weight` 600 and more.
 - A letter that the font subset lacks (Chinese, Japanese, Korean, most symbols and emoji) is not drawn, and layout still gives it its width. There is no fallback font. A tab or a newline kept by `white-space: pre` is not drawn and has no width in paint.
-- No images, no gradients, and an `<svg>` draws only its basic shapes (see [progress.md](progress.md#aspect-ratio-and-inline-svg)), no shadows, no opacity (not parsed), no form control drawing: layout makes an `<input>` with no text, and paint draws its border and background only.
+- Images (`<img>`, `<picture>`, see [progress.md](progress.md#img-element-2026-11-09)) draw as PNG, JPEG, WebP and SVG. No gradients, and an `<svg>` draws only its basic shapes (see [progress.md](progress.md#aspect-ratio-and-inline-svg)), no shadows, no opacity (not parsed), no form control drawing: layout makes an `<input>` with no text, and paint draws its border and background only.
 - No hit testing and no scroll offset: the canvas is the top of the page.
 
 Problems seen in other crates, not changed:

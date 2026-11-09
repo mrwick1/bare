@@ -247,6 +247,8 @@ pub struct Document {
     // The form state of the controls that a host keeps outside the tree, by `NodeId::index`: `UI_*` bits. See `set_ui`.
     ui_revision: u64,
     // The changes of `ui`, also counted in `revision`. See `ui_revision`.
+    images: HashMap<u32, Bitmap, BuildHasherDefault<Fnv>>,
+    // The decoded pictures of the `<img>` elements that have one, by `NodeId::index`. See `set_image`.
     user: UserState,
     // What the user points at, presses and focuses: the user action pseudo-classes. See `user`.
 }
@@ -297,7 +299,12 @@ pub enum Mark {
     Text { node: NodeId },
     /// The form state of `el` changed (`set_ui`).
     Ui { el: NodeId },
+    /// The picture of the `<img>` `el` came or went (`set_image`).
+    Image { el: NodeId },
 }
+
+/// A decoded picture: its size and its pixels, `0xAARRGGBB` not premultiplied. Shared, so that one download serves many elements.
+pub type Bitmap = (u32, u32, std::sync::Arc<[u32]>);
 
 /// The readers of the log of `Document::track_damage`: the window frame, and the styles of `getComputedStyle` and the geometry reads.
 pub const DAMAGE_FRAME: usize = 0;
@@ -450,6 +457,7 @@ impl Document {
             states: HashMap::default(),
             ui: HashMap::default(),
             ui_revision: 0,
+            images: HashMap::default(),
             user: UserState::default(),
             on_name: false,
         };
@@ -558,6 +566,30 @@ impl Document {
             self.ui_revision += 1;
             self.mark(Mark::Ui { el });
         }
+    }
+
+    /// Give the `<img>` `el` its decoded picture (`None` takes it away). Layout reads its size (the hints of the style) and paint draws it.
+    pub fn set_image(&mut self, el: NodeId, image: Option<Bitmap>) {
+        let key = el.index() as u32;
+        match image {
+            Some(i) => self.images.insert(key, i),
+            None => self.images.remove(&key),
+        };
+        self.revision += 1;
+        self.mark(Mark::Image { el });
+    }
+
+    /// The picture of `el`, see `set_image`. A page with no picture pays one `is_empty` check.
+    pub fn image(&self, el: NodeId) -> Option<&Bitmap> {
+        if self.images.is_empty() {
+            return None;
+        }
+        self.images.get(&(el.index() as u32))
+    }
+
+    /// Does any element have a picture?
+    pub fn has_images(&self) -> bool {
+        !self.images.is_empty()
     }
 
     /// The changes of the form state (`set_ui`). They are in `revision` too: a host that keeps a layout takes them out, because only a

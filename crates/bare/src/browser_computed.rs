@@ -727,7 +727,7 @@ fn restyle_marks(it: &mut Interp<'_>, rules: &RuleSet, doc: &bare_html::dom::Doc
             }
             Mark::Text { node } => doc.parent(node).is_some_and(sheet),
             Mark::Attr { el, .. } => sheet(el),
-            Mark::Ui { .. } => false,
+            Mark::Ui { .. } | Mark::Image { .. } => false,
         };
         if touched || !rules.roots(doc, m, &mut roots) {
             return Ok(None);

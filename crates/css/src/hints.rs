@@ -34,12 +34,12 @@ pub struct Hints {
 }
 
 impl Hints {
-    /// `None` for a page with no `<table>` and no `<svg>`: no element has a hint.
+    /// `None` for a page with no `<table>`, no `<svg>` and no picture: no element has a hint.
     pub fn new(doc: &Document) -> Option<Hints> {
         let a = |n| doc.find_atom(n);
         // The sheet of the browser has a selector `svg`, so its atom is there on every page: look for an element that is not in HTML.
         let (table, svg) = (a("table"), if doc.has_foreign() { a("svg") } else { None });
-        if table.is_none() && svg.is_none() {
+        if table.is_none() && svg.is_none() && !doc.has_images() {
             return None;
         }
         Some(Hints {
@@ -146,6 +146,16 @@ impl Hints {
             // Spacer images size the cells of old pages.
             size(&mut out, "width", attr(self.width, node));
             size(&mut out, "height", attr(self.height, node));
+            // A picture: its ratio sizes the missing side, and with no `width` or `height` its width is its own.
+            if let Some(&(w, h, _)) = doc.image(node) {
+                out.push_str(&format!("aspect-ratio:{w}/{h};"));
+                // Layout finds a height from a width, not a width from a height: with only `height`, the width is made here.
+                match (attr(self.width, node).and_then(dimension), attr(self.height, node).filter(|v| !v.contains('%')).and_then(number)) {
+                    (None, Some(side)) => out.push_str(&format!("width:{}px;", side as f32 * w as f32 / h as f32)),
+                    (None, None) if attr(self.height, node).and_then(dimension).is_none() => out.push_str(&format!("width:{w}px;")),
+                    _ => {}
+                }
+            }
         }
         if hidden {
             out.push_str("display:none;");
@@ -245,6 +255,32 @@ mod tests {
         // A table inside a cell: the cells inside read their own table.
         let html = "<table cellpadding=9><tr><td><table><tr><td id=c>x</table></table>";
         assert_eq!(hint(html, "c"), None);
+    }
+
+    #[test]
+    fn a_picture_gives_its_ratio_and_the_missing_side() {
+        let h = |html: &str, pic: Option<(u32, u32)>| {
+            let mut doc = parse(html);
+            let mut stack = vec![doc.root()];
+            let img = loop {
+                let n = stack.pop().unwrap();
+                if doc.element_name(n) == "img" && matches!(doc.data(n), NodeData::Element { .. }) {
+                    break n;
+                }
+                stack.extend(doc.children(n));
+            };
+            if let Some((w, h)) = pic {
+                doc.set_image(img, Some((w, h, vec![0; (w * h) as usize].into())));
+            }
+            Hints::new(&doc).and_then(|hints| hints.of(&doc, img))
+        };
+        // No picture: only the attributes, and only on a page that has hints (a `<table>`), as before.
+        assert_eq!(h("<table></table><img width=5 height=6>", None), Some("width:5px;height:6px;".into()));
+        assert_eq!(h("<img width=5 height=6>", None), None);
+        assert_eq!(h("<img>", Some((20, 10))), Some("aspect-ratio:20/10;width:20px;".into()));
+        assert_eq!(h("<img width=40>", Some((20, 10))), Some("width:40px;aspect-ratio:20/10;".into()));
+        assert_eq!(h("<img height=30>", Some((20, 10))), Some("height:30px;aspect-ratio:20/10;width:60px;".into()));
+        assert_eq!(h("<img width=5 height=6>", Some((20, 10))), Some("width:5px;height:6px;aspect-ratio:20/10;".into()));
     }
 
     #[test]

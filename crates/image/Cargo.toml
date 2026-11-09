@@ -1,0 +1,11 @@
+# Image decoders: PNG, JPEG and WebP into 0xAARRGGBB pixels, with hard limits. SVG is not here: paint draws it.
+[package]
+name = "bare-image"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+png = "0.18"
+zune-jpeg = "0.5"
+image-webp = "0.2"

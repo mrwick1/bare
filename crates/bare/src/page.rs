@@ -115,10 +115,12 @@ pub struct Page {
     pub quiet: bool,
     /// Does a wake (`wake_on_done`) tell the loop that a job ended?
     woken: bool,
-    started: Instant,
+    pub(crate) started: Instant,
     pub first_frame: Option<Duration>,
     /// The rounds of the window loop that hosts this page for a driver (`control::Remote`), since a job last took them.
     pub ticks: crate::control::Ticks,
+    /// The pictures of the document (`images.rs`).
+    pub(crate) images: crate::images::Images,
 }
 
 fn mods(m: bare_window::Mods) -> Mods {
@@ -306,6 +308,7 @@ impl Page {
             started: Instant::now(),
             first_frame: None,
             ticks: Default::default(),
+            images: Default::default(),
         }
     }
 
@@ -543,12 +546,15 @@ impl Page {
     /// A live page (a session) runs one slice of work in a tick, and a reply or a next document that is on its way is queued work: the
     /// tick asks to be called again in 4 ms (1 s when `wake_on_done` was called).
     pub fn tick(&mut self) -> (bool, Option<Instant>) {
+        // A picture that arrived is a change of the page: the next call (a capture waits for the pictures) sees it.
+        let (arrived, finished) = self.images_step();
+        self.stale |= arrived;
         let ran = self.work().0;
         if ran {
             self.settle();
         }
         let (now, next) = self.work();
-        (ran, if now { Some(Instant::now()) } else { next })
+        (ran || finished, if now || finished { Some(Instant::now()) } else { next })
     }
 
     /// Can a tick do something now, and when is the next task due (or the next look at the network)?
@@ -561,11 +567,12 @@ impl Page {
         if let Some(done) = loading {
             return (done, Some(Instant::now() + poll));
         }
-        let Some(b) = self.browser().filter(|_| !stopped) else { return (false, None) };
+        let images = self.images.pending();
+        let Some(b) = self.browser().filter(|_| !stopped) else { return (false, images.then(|| Instant::now() + poll)) };
         let (due, now) = (b.next_scheduled_due(), b.now());
         let net = if b.live() { b.live_work() } else { (b.pending_fetches() > 0).then_some(true) };
         let at = due.map(|d| Instant::now() + Duration::from_secs_f64((d - now).max(0.0) / 1000.0));
-        let at = if net == Some(false) { Some(at.map_or(Instant::now() + poll, |a| a.min(Instant::now() + poll))) } else { at };
+        let at = if net == Some(false) || images { Some(at.map_or(Instant::now() + poll, |a| a.min(Instant::now() + poll))) } else { at };
         (due.is_some_and(|d| d <= now) || net == Some(true), at)
     }
 

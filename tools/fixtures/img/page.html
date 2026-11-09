@@ -1,0 +1,14 @@
+<!doctype html>
+<title>images</title>
+<body style="margin:0;background:#fff">
+<img id=png src="red.png" style="position:absolute;left:0;top:0">
+<img id=jpg src="blue.jpg" style="position:absolute;left:0;top:20px;width:40px">
+<img id=webp src="green.webp" height=30 style="position:absolute;left:0;top:50px">
+<img id=svg src="yellow.svg" style="position:absolute;left:100px;top:0">
+<img id=data src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABQAAAAKCAYAAAC0VX7mAAAAG0lEQVR4nGP8z8Dwn4GKgImaho0aOGrgYDEQAGvZAhIo7LeFAAAAAElFTkSuQmCC" style="position:absolute;left:100px;top:20px">
+<img id=max src="red.png" style="position:absolute;left:100px;top:50px;width:100px;max-width:30px">
+<img id=bad src="missing.png" width=10 height=10 style="position:absolute;left:200px;top:0;background:#0ff">
+<picture><source srcset="green.webp" type="image/webp"><img id=pic src="red.png" style="position:absolute;left:200px;top:20px"></picture>
+<picture><source srcset="x.avif" type="image/avif"><img id=pic2 src="blue.jpg" style="position:absolute;left:200px;top:50px"></picture>
+<p style="position:absolute;left:0;top:100px;margin:0">after</p>
+</body>

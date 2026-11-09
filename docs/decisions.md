@@ -538,3 +538,16 @@ A geometry read (`getBoundingClientRect`, `getClientRects`, `offsetWidth`, an In
 - The layout is not kept: the cascade was 95% of the geometry time.
 - `Styles` is shared as `Rc`, not cloned: a clone costs on each miss.
 
+
+## Image decoders
+
+`<img>` needs PNG, JPEG and WebP decoders. All three are pure Rust and live in the new crate `bare-image`.
+
+- `png` 0.18. Chosen for the PNG format: it is the reference Rust decoder. It reads the header without the pixel data.
+- `zune-jpeg` 0.5. Chosen over `jpeg-decoder`: it is faster and has no dependency beyond `zune-core`. It decodes to RGBA directly.
+- `image-webp` 0.2. The only maintained pure-Rust WebP decoder. It has two small dependencies.
+- No GIF. A GIF needs frames and timers. It is out of scope until a page needs it.
+- SVG files reuse the inline `<svg>` painter. They are painted on white and on black, and the alpha comes from the difference. No new SVG engine.
+- Limits fail closed: 32 MiB of file bytes, 16 M pixels (64 MiB decoded) for each picture, 64 MiB decoded for each page, 512 pictures for each page, 4 downloads at a time.
+- The pixel limit is lower than the 64 MP that was first suggested. 64 MP would allow 256 MiB for one picture.
+- Cost: `bare-drive` grows from 12.8 MiB to 13.5 MiB (release, whole feature, not only the decoders). The build time was not measured on its own. The incremental release build of `bare-js` examples and `bare` took 1 m 55 s.

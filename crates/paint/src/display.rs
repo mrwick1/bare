@@ -61,6 +61,8 @@ pub enum Item {
     Stroke { at: u32, n: u32, width: f32, color: u32 },
     /// The polygons in `DisplayList::points[at..at + n]` (contours apart by a NaN point), filled: a shape of an `<svg>`.
     Poly { at: u32, n: u32, color: u32 },
+    /// The picture `DisplayList::images[at]`, scaled to fill `r`: an `<img>`.
+    Image { r: IRect, at: u32 },
     /// Draw nothing outside `IRect` (and outside the clips before it) until the matching `PopClip`.
     PushClip(IRect),
     PopClip,
@@ -96,6 +98,8 @@ pub struct DisplayList {
     pub shapes: Vec<Shape>,
     /// The points of `Item::Stroke`.
     pub points: Vec<(f32, f32)>,
+    /// The pictures of `Item::Image`. They are shared with the document: the list holds a count, not a copy.
+    pub images: Vec<bare_html::dom::Bitmap>,
     /// Text fields that the host draws the text of: the field, and whether it has text now. Paint draws only the
     /// placeholder of an empty one, and nothing for the others. The host sets it before `build`.
     pub hosted: Vec<(NodeId, bool)>,
@@ -193,6 +197,7 @@ impl DisplayList {
         self.hoist.clear();
         self.shapes.clear();
         self.points.clear();
+        self.images.clear();
         self.background = 0xffff_ffff;
         let tree = Tree::new(doc, styles);
         let Some(root) = tree.root() else { return };
@@ -220,7 +225,7 @@ impl DisplayList {
             page.stack |= matches!(style.get(Property::Opacity), Value::Number(o) if o < 1.0) || matches!(style.get(Property::ZIndex), Value::Number(_)) || style.get(Property::Position) == Value::Keyword(Keyword::Sticky);
             page.flex |= matches!(style.get(Property::Display), Value::Keyword(Keyword::Flex | Keyword::InlineFlex | Keyword::Grid | Keyword::InlineGrid));
         }
-        let mut b = Builder { tree, doc, frags: &layout.fragments, list: self, view, propagated, depth: 0, page, svg: if doc.has_foreign() { doc.find_atom("svg") } else { None }, clips: Vec::new(), areas, scrolls: Vec::new(), ext };
+        let mut b = Builder { tree, doc, frags: &layout.fragments, list: self, view, propagated, depth: 0, page, svg: if doc.has_foreign() { doc.find_atom("svg") } else { None }, img: if doc.has_images() { doc.find_atom("img") } else { None }, clips: Vec::new(), areas, scrolls: Vec::new(), ext };
         b.context(0);
     }
 }
@@ -299,6 +304,8 @@ struct Builder<'a> {
     page: Page,
     /// The atom of `svg`, if the page has one: the box of that element draws its shapes (`svg.rs`).
     svg: Option<bare_html::dom::Atom>,
+    /// The atom of `img`, if some element has a picture.
+    img: Option<bare_html::dom::Atom>,
     /// The clips that are open now (the same as the ones of `Painter::draw`).
     clips: Vec<IRect>,
     /// The scroll containers of the page, if it scrolls.
@@ -432,6 +439,9 @@ impl Builder<'_> {
         self.decor(&f, style, false);
         if self.svg.is_some() {
             self.svg_of(&f, style, i);
+        }
+        if self.img.is_some() {
+            self.picture(&f, style, i);
         }
         // A box that clips, with its inside outside the canvas, has nothing more to show.
         let outer_view = self.view;
@@ -840,6 +850,23 @@ impl Builder<'_> {
         if i > 0 && matches!(self.doc.data(f.node), NodeData::Element { name, .. } if Some(*name) == self.svg) && style.get(Property::Visibility) == Value::Keyword(Keyword::Visible) {
             self.svg(f);
         }
+    }
+
+    /// The picture of the box, if it is an `<img>` that has one and shows. Not inline: it runs for each box of a page that has a picture.
+    #[inline(never)]
+    fn picture(&mut self, f: &Fragment, style: &ComputedStyle, i: usize) {
+        if i == 0 || !matches!(self.doc.data(f.node), NodeData::Element { name, .. } if Some(*name) == self.img) || style.get(Property::Visibility) != Value::Keyword(Keyword::Visible) {
+            return;
+        }
+        let Some(bitmap) = self.doc.image(f.node) else { return };
+        let (b, w) = (padding_box(f, style), |p| style.px(p).max(0.0).floor() as i32);
+        let r = IRect { x0: b.x0 + w(Property::PaddingLeft), y0: b.y0 + w(Property::PaddingTop), x1: b.x1 - w(Property::PaddingRight), y1: b.y1 - w(Property::PaddingBottom) };
+        if r.is_empty() || r.intersect(self.view).is_empty() {
+            return;
+        }
+        let at = self.list.images.len() as u32;
+        self.list.images.push(bitmap.clone());
+        self.list.items.push(Item::Image { r, at });
     }
 
     /// The shapes of an `<svg>`, clipped to its box.

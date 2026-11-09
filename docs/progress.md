@@ -3452,3 +3452,54 @@ Change: the defaults are now 256 K nodes, 4 MiB of text and 2 M fragments. The d
 The capture shows the article text, links, the contents list and the infobox table. Gaps in the capture: black squares where icons should be (probably SVG or background images), no infobox image, and a horizontal scrollbar. The console holds 13 `Unsupported: computed style needs an external stylesheet` lines. These gaps are not investigated.
 
 Not tested: the full workspace tests, a second run, other long pages, arjun-e16.
+
+## img element (2026-11-09)
+
+Goal: draw `<img>` and `<picture>` in `bare-drive` and in the window. Both use the same paint path.
+
+Change:
+- New crate `bare-image`: `size` reads the header only. `decode` returns ARGB pixels for PNG, JPEG and WebP. Limits: 32 MiB of bytes and 16 M pixels. A bad file returns an error and never panics.
+- SVG files use `paint::svg::bitmap`. It paints the file on white and on black and derives the alpha. The file limit is 512 KiB and the side limit is 4096.
+- `bare/src/images.rs` loads pictures. It starts at ready level 1 and scans again at level 2. It takes `src`, or the first `<source>` of a `<picture>` that has a supported `type` and no `media`, or the first URL of `srcset`. It resolves relative and protocol-relative URLs and reads `data:` URLs. It uses the page client (cache, limits, TLS). 4 downloads run at once. It follows up to 5 redirects.
+- Decoded pictures are kept on `Document` and keyed by node. `Mark::Image` restyles only that element and marks layout dirty from it, so an arrival damages only its box. The budget is 64 MiB decoded for each page and 512 pictures. There is no eviction.
+- Layout: hints give `aspect-ratio` from the picture. They give the missing width from a numeric `height` attribute, and the width of the picture when no size is set. `max-width:100%` works through the normal cascade.
+- Paint: `Item::Image` draws the picture in the content box with nearest sampling, clipped, and skips boxes outside the view.
+- `shot` waits up to 5 s for pictures that are loading (`Try::Again`). `expect` and page load do not wait.
+
+Numbers (archMachine, instructions from `instr.sh`-style `perf stat`, base is `c1c6ecc`):
+
+| Page | Base | New | Note |
+| --- | --- | --- | --- |
+| Cost matrix, 805 rows | - | - | mean +0.001% glibc, 0 rows over, 0 failed |
+| Local fixture, no images, `expect` | 31.842 M | 31.862 M | +0.06% |
+| Local fixture, 8 images | n/a | 36.65 M | about 0.6 M for each image |
+| `example.com`, `expect` | 26.865 M | 26.883 M | |
+| `example.com`, `expect` and `shot` | 52.1 M | 52.1 M | no wait on a page with no `<img>` |
+| `news.ycombinator.com` | about 116 M | about 122 M | +5%, it has images. RSS 20 to 21 MiB |
+| Wikipedia, `shot` | 568 to 582 M, 28 MiB, 0.46 s | 2.70 to 2.81 G, 41 MiB, 1.05 to 1.2 s | |
+| Wikipedia, base with an equal wait | 1.80 to 1.89 G, 28 MiB | - | - |
+
+The Wikipedia growth is mostly not the images. After load the page stays in `live_work() == Some(true)`, so `shot` spins ticks. Each tick runs `settle`, `resume` and the link and source scans, about 0.85 M instructions for each ms. The base with the same wait costs 1.8 to 1.9 G. The images add about 0.9 G and 13 MiB over that.
+
+Live result (`open`, `expect css="body" visible`, `shot s`): the capture shows the Rust logo in the infobox, the green support icon and the pencil icon. The black squares remain.
+
+Decisions:
+- 16 M pixels, not 64 M: 64 M pixels is 256 MiB decoded.
+- `shot` waits and `expect` does not. A capture without its pictures is wrong. A selector check is not about pictures.
+- A page with no `<img>` in the tree takes no wait.
+
+Known gaps:
+- No GIF.
+- No lazy decode and no dropping of off-screen pixels.
+- Nearest-neighbour scaling only.
+- CSS `height` with `width:auto` does not give the width from the ratio. Layout derives only height from width. The `height` attribute works through hints.
+- `srcset` uses only the first URL.
+- Hints for `<img width height>` apply only on a page that has a table, an svg or a loaded picture.
+- Alt text is not drawn (was already so).
+- The three Wikipedia header SVG logos do not show. Cause not investigated.
+
+Noticed, not changed: the page spin on Wikipedia, the black squares (likely CSS `background-image` or `mask-image`), the horizontal scrollbar, CSS gradients.
+
+Tests: `cargo test --release --workspace` passes. New: 9 `bare-image` tests, 2 `paint::svg` file tests, 1 hints test, 2 `bare-drive` tests over `tools/fixtures/img` (formats, sizes, pixels, text after pictures). The no-image regression is the cost matrix and the no-image fixture above.
+
+Not tested: the window (only the shared paint path), GIF, animated WebP, CMYK or progressive JPEG variants, a hostile server (slow body, lying `content-length`) beyond the unit limits, arjun-e16.
