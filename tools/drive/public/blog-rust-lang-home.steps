@@ -1,0 +1,10 @@
+# blog.rust-lang.org: the blog front page, its header links and a list of posts.
+#   bare-drive --var URL=https://blog.rust-lang.org/ blog-rust-lang-home.steps
+timeout 30000
+open ${URL}
+expect title="The Rust Programming Language Blog"
+expect css="a[href='https://blog.rust-lang.org/releases/']" visible
+expect js "document.querySelectorAll('a[href^=\"https://blog.rust-lang.org/20\"]').length > 5"
+goto ${URL}releases/
+expect url~"/releases/"
+expect css="body" text~"Release"

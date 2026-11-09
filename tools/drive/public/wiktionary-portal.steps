@@ -1,0 +1,10 @@
+# Wiktionary portal: the title, the heading, many edition links; a click opens the English edition.
+#   bare-drive --var URL=https://www.wiktionary.org/ wiktionary-portal.steps
+timeout 30000
+open ${URL}
+expect title="Wiktionary"
+expect css="h1" text~"Wiktionary"
+expect js "document.querySelectorAll('a[href*=\".wiktionary.org/\"]').length > 50"
+expect css="a.link-box[href$='//en.wiktionary.org/']" visible
+click css="a.link-box[href$='//en.wiktionary.org/']"
+expect url~"en.wiktionary.org"

@@ -1,0 +1,11 @@
+# docs.rs: the home page, its about pages, and the recent releases list.
+#   bare-drive --var URL=https://docs.rs/ docs-rs-home.steps
+timeout 30000
+open ${URL}
+expect title="Docs.rs"
+expect css="h1" text~"Docs.rs"
+expect js "document.querySelectorAll('a[href^=\"/about\"]').length > 3"
+expect js "document.querySelectorAll('a[href^=\"/releases\"]').length > 1"
+goto ${URL}about
+expect url~"/about"
+expect css="body" text~"docs.rs"

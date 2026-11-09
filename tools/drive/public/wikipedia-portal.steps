@@ -1,0 +1,10 @@
+# wikipedia.org: the portal lists the language editions; a click opens the English edition.
+#   bare-drive --var URL=https://www.wikipedia.org/ wikipedia-portal.steps
+timeout 40000
+open ${URL}
+expect title="Wikipedia"
+expect css="h1" text~"Wikipedia"
+expect js "document.querySelectorAll('a[href*=\".wikipedia.org/\"]').length > 100"
+expect css="a#js-link-box-en" visible
+click css="a#js-link-box-en"
+expect url~"en.wikipedia.org"

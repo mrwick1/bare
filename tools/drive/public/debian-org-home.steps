@@ -1,0 +1,11 @@
+# debian.org: the home page headings and the community links, then one link by click.
+#   bare-drive --var URL=https://www.debian.org/ debian-org-home.steps
+timeout 30000
+open ${URL}
+expect title~"Debian"
+expect js "[...document.querySelectorAll('h1')].some(e => e.textContent.includes('Debian'))"
+expect js "[...document.querySelectorAll('h2')].some(e => e.textContent.includes('Our Philosophy'))"
+expect js "document.querySelectorAll('a[href=\"intro/philosophy\"]').length > 0"
+click css="h2 a[href='intro/philosophy']"
+expect url~"/intro/philosophy"
+expect css="body" text~"Debian"

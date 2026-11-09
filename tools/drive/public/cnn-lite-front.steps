@@ -1,0 +1,7 @@
+# CNN Lite: a text-only front page with a link to every story.
+#   bare-drive --var URL=https://lite.cnn.com/ cnn-lite-front.steps
+timeout 30000
+open ${URL}
+expect title~"CNN"
+expect js "document.querySelectorAll('a[href^=\"/20\"]').length > 20"
+expect css="a[href='/']" visible

@@ -1,0 +1,10 @@
+# paulgraham.com: a tiny table-layout page, then the essay index by address.
+#   bare-drive --var URL=https://paulgraham.com/ paulgraham-home.steps
+timeout 30000
+open ${URL}
+expect title="Paul Graham"
+expect js "document.querySelectorAll('a[href=\"powerful.html\"]').length === 1"
+goto ${URL}articles.html
+expect url~"/articles.html"
+expect title~"Essays"
+expect js "document.querySelectorAll('a[href$=\".html\"]').length > 100"

@@ -1,0 +1,11 @@
+# nodejs.org: the home page heading and header links, then the download and about pages by address.
+#   bare-drive --var URL=https://nodejs.org/en nodejs-org-home.steps
+timeout 40000
+open ${URL}
+expect title~"Node.js"
+expect css="h1" text~"Run JavaScript Everywhere"
+expect js "document.querySelectorAll('a[href=\"/en/download\"]').length > 0"
+expect js "document.querySelectorAll('a[href=\"/en/about\"]').length > 0"
+goto https://nodejs.org/en/about
+expect url~"/en/about"
+expect css="h1" text~"About"
