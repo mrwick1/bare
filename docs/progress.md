@@ -4491,3 +4491,27 @@ Not started:
 - The public suffix list is short: every one-label name and about 80 two-label suffixes.
 - `Partitioned` (CHIPS) is ignored.
 - The per-domain limit is 180.
+
+## Time zones for Date (2026-11-09)
+
+**Problem.** Five sites stopped at `Unsupported("Date.prototype.getSeconds (local time: bare has no time zone)")` and its siblings: bbc-news (`getSeconds`), nytimes (`getHours`), react-dev (`getFullYear`), bing and gitlab (local `Date` forms; survey 3 section 7, cause 4). The message is in `crates/js/src/eval_date.rs` only. `Intl.DateTimeFormat`, its `timeZone` option and `resolvedOptions().timeZone` already worked (`tz.rs`, merged earlier): no `Intl` call site failed with that message.
+
+**Change.** Every local-time `Date` form now uses the default zone of the realm. That zone is `TZ`, else the `/etc/localtime` link target, else UTC (`intl_default_zone`, shared with `Intl`). The zone file is read on the first local-time call, never before (test `local_time_zone_file_is_read_on_the_first_local_call_only`). Covered: `new Date(y, m, ...)`, `Date()`, ISO date-time with no offset in `new Date` and `Date.parse`, the 10 local getters, the 8 local setters (`setYear` included), `toString`, `toDateString`, `toTimeString` and `"" + date`. `Zone::to_utc` (`tz.rs`) turns wall-clock time into an instant: the first instant in an overlap, the offset from before the gap in a gap. A date-time with an invalid field in a string is now NaN (it was `Unsupported`).
+
+**Limits.**
+- The text in parentheses of `toString` is `Coordinated Universal Time` for the zone `UTC` and `GMT+hh:mm` for any other zone. V8 writes the ICU long name (`India Standard Time`). bare has no name table.
+- No zone file (or a regular-file `/etc/localtime` with no `TZ`): local time is UTC.
+- An offset with seconds (before 1900 in some zones) is cut to whole minutes in `getTimezoneOffset` and in the text, as V8 does.
+- `fields` refuses a wall-clock time more than 8.64e15 ms from the epoch, so a local getter on a date at the very edge of the range gives NaN.
+
+**Tests (written first).** `local_time_matches_node_in_each_zone` compares 28 expressions in 5 zones (UTC, Asia/Kolkata, America/New_York, Europe/London, Australia/Sydney) with Node 22 under the same `TZ`, ignoring the zone name in parentheses. It covers getters, setters, the gap and the overlap of the New York and Sydney rules, `new Date(y, m, ...)`, date-time strings and `toLocale*String`. `parse_classification` and `browser_date_tests::local_time_uses_the_zone_of_the_realm_in_the_browser` replace the old gate tests. The new tests did not compile against the old code (`Parsed::Local` had no value), and the old gate tests assert the `Unsupported` text that no longer exists. The new tests were not run against the old behavior.
+
+**Checks** (base `32d535e`, one build of this branch, `CARGO_TARGET_DIR=/data/bare-tmp/tz-target`).
+- `cargo test --release --workspace`: all pass (836 in `bare-js`, 1 ignored).
+- Cost matrix (805 rows, jemalloc only for rows over the limit under glibc): mean glibc -0.014%, 0 rows over +0.5% under one allocator, 0 under both, 0 failed.
+- `keycost.sh`: `#a1` 283.6 M for each key, `#f0` 289.0 M, RSS 32.6 MiB at 50 keys (previous 283.6, 288.9, 32.7).
+- `exec_diff.sh`: 79 runs, 0 differences. `test262_check.sh`: gate ok; newly passing: Object +1, addition +1, typeof +1, class/subclass/builtin-objects/Date +1, Function/prototype/bind +2 (baseline file not updated).
+- `tools/drive/public/run.sh`: 28 pass, 0 fail, 0 known, 0 flakes.
+- Re-run of the five sites (same step file as survey 3, `bare-drive` of this branch): none stops at `no time zone` any more. bbc-news: no `Date` message; the first console entry is now `TypeError: Cannot read properties of undefined (reading 'length')` (script#27, Next.js). nytimes: now `Unsupported("URL scheme other than http and https")`. react-dev: no console entry. bing: now `ReferenceError: sj_be is not defined` and more (missing `performance.mark`, `performance.timing`). gitlab: now `performance.getEntriesByType is not a function`, `document.createEvent is not a function`, `HTMLSpanElement is not defined`, `Unsupported("named group")`. All five bodies loaded (rc 0). Each of these new errors is a separate bug that the `Date` gate hid. They are not fixed here.
+
+**Not tested.** Visual output of the five pages (screenshots were not compared); a zone other than the five above against Node; a system with a regular-file `/etc/localtime`; Windows or macOS zone paths; a `TZ` value with a POSIX rule string that is not a file name; the stress crate under load; the `Date` use of the nytimes, bing and gitlab scripts beyond the removal of the gate message.

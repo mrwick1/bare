@@ -134,11 +134,13 @@ fn a_deleted_date_global_does_not_break_timers_that_hold_the_constructor() {
 }
 
 #[test]
-fn local_time_stays_a_gate_in_the_browser_and_does_not_stick() {
+fn local_time_uses_the_zone_of_the_realm_in_the_browser() {
     big(|| {
         let mut b = browser();
-        assert!(js(&mut b, "new Date(2020, 0, 1)").starts_with("unsupported:"));
-        // Unsupported is the result of that run only. The wall clock and the realm are unchanged.
+        b.it.set_default_time_zone("Asia/Kolkata").unwrap();
+        assert_eq!(js(&mut b, "new Date(2020, 0, 1).toISOString()"), "2019-12-31T18:30:00.000Z");
+        assert_eq!(js(&mut b, "[new Date(Date.now()).getHours(), new Date(Date.now()).getTimezoneOffset()].join()"), "3,-330");
+        // the wall clock and the rest of the realm are unchanged
         assert_eq!(js(&mut b, "Date.now()"), "1700000000000");
         assert_eq!(js(&mut b, "new Date(Date.UTC(2020, 0, 1)).toISOString()"), "2020-01-01T00:00:00.000Z");
     });
