@@ -1744,7 +1744,6 @@ x = 1 }
 class A { static
 *g(){} }
 %%
-//! unsupported
 class A { static
 { } }
 %%
@@ -1882,10 +1881,8 @@ class A { static async *[x](){} }
 %%
 class A { *g(){} }
 %%
-//! unsupported
 class A { static { } }
 %%
-//! unsupported
 class A { static x; static { } }
 %%
 function* g(){}

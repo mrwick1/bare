@@ -397,9 +397,32 @@ fn regexp_pattern_gate() {
 }
 
 #[test]
+fn class_static_blocks() {
+    ok("class A { static { } }");
+    ok("class A { static { var a; let b; this.x = super.y; new.target; (() => this); function f() { return arguments; } } }");
+    ok("class A { static static() {} static async() {} static get() {} static x = 1; static\n{ } }");
+    for s in [
+        "class A { static { return; } }",
+        "class A { static { arguments; } }",
+        "class A { static { (() => arguments); } }",
+        "class A { static { let a; var a; } }",
+        "class A { static { await 1; } }",
+        "class A { static { yield; } }",
+        "class A { static { super(); } }",
+        "class A { static { break x; } }",
+        "x: { class A { static { break x; } } }",
+        "class A { static { var await; } }",
+        "class A { static async { } }",
+        "class A { static { } static { }",
+    ] {
+        assert!(parse_script(s, Limits::default()).is_err(), "{s}");
+    }
+}
+
+#[test]
 fn unsupported_syntax_is_a_precise_error() {
     for (s, what) in [
-        ("class A { static { } }", "static blocks"), ("import a from 'b'", "import"),
+        ("import a from 'b'", "import"),
         ("export default 1", "export"), ("import('x')", "import"), ("import.meta", "import"),
     ] {
         let e = err(s);

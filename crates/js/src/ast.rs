@@ -417,6 +417,8 @@ pub enum ElemKind {
     Setter(FuncId),
     /// A field and its initializer.
     Field(Option<ExprId>),
+    /// `static { ... }`: the body as a method with no parameters. The element is static and has [`Key::None`].
+    StaticBlock(FuncId),
 }
 
 #[derive(Clone, Copy, Debug)]
