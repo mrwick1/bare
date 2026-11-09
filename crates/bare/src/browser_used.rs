@@ -460,7 +460,11 @@ impl<'a> Ctx<'a> {
 
 /// `calc(100% - 20px)`: the percent first, as Chrome prints it.
 pub(crate) fn calc_text(styles: &Styles, i: u32) -> String {
-    let (px, pct) = styles.calc(i);
+    calc_of(styles.calc(i))
+}
+
+/// `calc_text` for the pixels and the percent.
+pub(crate) fn calc_of((px, pct): (f32, f32)) -> String {
     let sign = |x: f32| if x < 0.0 { '-' } else { '+' };
     match (px == 0.0, pct == 0.0) {
         (true, _) => format!("calc({}%)", num(pct)),

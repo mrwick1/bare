@@ -77,7 +77,7 @@ use crate::browser::*;
 use crate::browser_platform::{V, arg};
 use crate::browser_style::{current, keys_of};
 use crate::browser_style_block::{self as blk, Fail, Lim, custom};
-use crate::browser_used::{Ctx, calc_text, flow_text, grid_text};
+use crate::browser_used::{Ctx, calc_of, calc_text, flow_text, grid_text};
 use crate::browser_ui::chains;
 use bare_css::cascade::{self, ComputedStyle, Origin, RuleSet, Scopes, Source, Styles, UA_CSS};
 use bare_css::values::{Keyword, Length, Property, SHORTHANDS, Value as Cv, shorthand_longhands};
@@ -275,6 +275,7 @@ impl Snap {
             Cv::Number(n) => num(n),
             Cv::Length(Length::Px(x)) => format!("{}px", num(x)),
             Cv::Length(Length::Percent(x)) => format!("{}%", num(x)),
+            Cv::Length(Length::Calc(i)) if p as usize >= Property::CORE => calc_of(bare_css::cascade::layer_calc(i)),
             Cv::Length(Length::Calc(i)) => calc_text(&self.styles, i),
             Cv::Grid(i) => grid_text(&self.styles, self.styles.grid(i)),
             Cv::Color(c) if c.a == 255 => format!("rgb({}, {}, {})", c.r, c.g, c.b),

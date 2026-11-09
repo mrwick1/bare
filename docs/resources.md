@@ -4693,6 +4693,6 @@ The first full run had 13 rows over the limit:
 ## Background and mask images
 
 - Picture cache for CSS images: 256 scaled entries, 32 MiB. The decoded pictures share the `<img>` limits (16 M pixels each, 64 MiB for each page, 512 pictures, 4 downloads at a time).
-- `ComputedStyle` is `[Value; 105]`, 840 bytes. It was 744 bytes.
-- Wikipedia `shot`: 2.74 G to 3.77 G instructions, RSS +0.8 MiB. Hacker News +3.2%. example.com 0.
-- Cost matrix: 14 rows over 0.5% under both allocators (up to +2.8%). Cause: 12 more style slots.
+- `ComputedStyle` is `[Value; 93]` and two `u32`, about 760 bytes (744 before the PR). The 12 layer values are one interned set in a global table (at most 65536 sets).
+- Wikipedia `shot`: 2.909 G to 2.949 G instructions (+1.4%), RSS 42.1 to 42.9 MiB. The first PR state was 3.766 G: it made a frame at each picture arrival.
+- Cost matrix: 16 rows over 0.5% under both allocators (up to +1.2%). Cause: more work per element in the cascade.

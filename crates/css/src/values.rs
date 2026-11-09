@@ -191,7 +191,10 @@ impl Property {
     /// mask properties that come last are read by the cascade and by paint only: the engine makes an accessor for each listed property
     /// each time a page starts, and that costs instructions for each page. `from_name` still knows them, so `setProperty` and
     /// `getPropertyValue` work for them.
-    pub const LISTED: &'static [Property] = Property::ALL.split_at(Property::BackgroundImage as usize).0;
+    pub const LISTED: &'static [Property] = Property::ALL.split_at(Property::CORE).0;
+    /// The number of properties before the background and mask properties. A computed style has one slot for each of these. The others
+    /// (`COUNT - CORE`) are one set that most elements share: it is one number in the style (`cascade::ComputedStyle::get`).
+    pub const CORE: usize = Property::BackgroundImage as usize;
 }
 
 /// A length or a percent. The fixed units are already `Px`.
@@ -315,8 +318,13 @@ pub struct Declared {
 /// `name` must be in lowercase (the parser does it).
 pub fn parse_declaration(name: &str, value: &str, important: bool, side: &mut Side, out: &mut Vec<Declared>) -> bool {
     // `-webkit-mask-image` is `mask-image`. The properties with layers (`a, b`) use their first layer.
-    let name = name.strip_prefix("-webkit-").filter(|n| n.starts_with("mask")).unwrap_or(name);
-    let value = if layered(name) { first_layer(value) } else { value };
+    let (name, value) = match name.as_bytes().first() {
+        Some(b'-' | b'b' | b'm') => {
+            let name = name.strip_prefix("-webkit-").filter(|n| n.starts_with("mask")).unwrap_or(name);
+            (name, if layered(name) { first_layer(value) } else { value })
+        }
+        _ => (name, value),
+    };
     if var::has_var(value) {
         // A `var()` that is not written well (`var(--a`, `var(x)`) is not good now. We test it with any value for the names.
         if var::substitute(value, &mut |_| Some(String::new())).is_none() {
@@ -692,14 +700,6 @@ fn expand(name: &str, parts: &Parts, emit: &mut dyn FnMut(Property, Value)) -> b
             emit(AspectRatio, if value > 0.0 && value.is_finite() { Value::Number(value) } else { Value::Keyword(Keyword::Auto) });
             true
         }
-        "background" => layer_shorthand(slice, &BACKGROUND, emit),
-        "mask" => layer_shorthand(slice, &MASK, emit),
-        "background-size" => size(slice, [BackgroundSizeX, BackgroundSizeY], emit),
-        "mask-size" => size(slice, [MaskSizeX, MaskSizeY], emit),
-        "background-position" => position(slice, [BackgroundPositionX, BackgroundPositionY], emit),
-        "mask-position" => position(slice, [MaskPositionX, MaskPositionY], emit),
-        "background-repeat" => repeat(slice, BackgroundRepeat, emit),
-        "mask-repeat" => repeat(slice, MaskRepeat, emit),
         "font" => font(slice, emit),
         "list-style" => match slice {
             [one] => longhand(ListStyleType, *one).map(|v| emit(ListStyleType, v)).is_some(),
@@ -718,11 +718,33 @@ fn expand(name: &str, parts: &Parts, emit: &mut dyn FnMut(Property, Value)) -> b
             _ => false,
         },
         _ => {
+            // The layer shorthands and their parts: only the names that start with `b` or `m` are looked up in the list.
+            if matches!(name.as_bytes().first(), Some(b'b' | b'm'))
+                && let Some(ok) = layer_expand(name, slice, emit)
+            {
+                return ok;
+            }
             let Some(property) = Property::from_name(name) else { return false };
             let [one] = slice else { return false };
             longhand(property, *one).map(|v| emit(property, v)).is_some()
         }
     }
+}
+
+/// `expand` for `background`, `mask` and their `size`, `position` and `repeat`. `None` for any other name.
+fn layer_expand(name: &str, slice: &[Part], emit: &mut dyn FnMut(Property, Value)) -> Option<bool> {
+    use Property::*;
+    Some(match name {
+        "background" => layer_shorthand(slice, &BACKGROUND, emit),
+        "mask" => layer_shorthand(slice, &MASK, emit),
+        "background-size" => size(slice, [BackgroundSizeX, BackgroundSizeY], emit),
+        "mask-size" => size(slice, [MaskSizeX, MaskSizeY], emit),
+        "background-position" => position(slice, [BackgroundPositionX, BackgroundPositionY], emit),
+        "mask-position" => position(slice, [MaskPositionX, MaskPositionY], emit),
+        "background-repeat" => repeat(slice, BackgroundRepeat, emit),
+        "mask-repeat" => repeat(slice, MaskRepeat, emit),
+        _ => return None,
+    })
 }
 
 /// The shorthands that `parse_declaration` splits into longhands: every name for which `shorthand_longhands` answers.

@@ -1153,8 +1153,12 @@ struct Memo {
 
 /// A hash of the values of a style.
 fn style_hash(style: &ComputedStyle) -> u64 {
-    let mut h = 0xcbf2_9ce4_8422_2325_u64 ^ u64::from(style.1);
-    for &v in &style.0 {
+    hash_values((0xcbf2_9ce4_8422_2325_u64 ^ u64::from(style.1)).wrapping_mul(0x0100_0000_01b3) ^ u64::from(style.2), &style.0)
+}
+
+/// `h` mixed with the computed `values`.
+fn hash_values(mut h: u64, values: &[Value]) -> u64 {
+    for &v in values {
         let x = match v {
             Value::Color(c) => 1 << 40 | u64::from(u32::from_be_bytes([c.r, c.g, c.b, c.a])),
             Value::Length(Length::Px(x)) => 2 << 40 | u64::from(x.to_bits()),
@@ -1450,8 +1454,9 @@ impl Styles {
     #[inline(always)]
     fn differ(&self, a: u32, new: &Styles, b: u32) -> Change {
         let (x, y) = (&self.styles[a as usize].0, &new.styles[b as usize].0);
-        let mut out = Change::Same;
-        for (i, &p) in Property::ALL.iter().enumerate() {
+        // The background and mask properties are all paint only, and a set has the same number when its values are equal.
+        let mut out = if self.styles[a as usize].2 == new.styles[b as usize].2 { Change::Same } else { Change::Paint };
+        for (i, &p) in Property::ALL[..Property::CORE].iter().enumerate() {
             let (u, v) = (x[i], y[i]);
             let same = match (u, v) {
                 (Value::Length(Length::Calc(i)), Value::Length(Length::Calc(j))) => self.calcs[i as usize] == new.calcs[j as usize],
@@ -1523,9 +1528,7 @@ impl Change {
         use Property::*;
         match p {
             TextColor | BorderTopColor | BorderRightColor | BorderBottomColor | BorderLeftColor | TextDecoration | Opacity | ZIndex | Visibility | PointerEvents | Fill | Stroke
-            | BorderTopLeftRadius | BorderTopRightRadius | BorderBottomRightRadius | BorderBottomLeftRadius
-            | BackgroundImage | BackgroundSizeX | BackgroundSizeY | BackgroundPositionX | BackgroundPositionY | BackgroundRepeat
-            | MaskImage | MaskSizeX | MaskSizeY | MaskPositionX | MaskPositionY | MaskRepeat => true,
+            | BorderTopLeftRadius | BorderTopRightRadius | BorderBottomRightRadius | BorderBottomLeftRadius => true,
             BackgroundColor => display != Value::Keyword(Keyword::Inline) || matches!((a, b), (Value::Color(x), Value::Color(y)) if (x.a == 0) == (y.a == 0)),
             _ => false,
         }
@@ -1548,15 +1551,16 @@ fn show(v: Value, calcs: &[[f32; 2]], grids: &[Grid]) -> String {
     }
 }
 
-/// The style of one element: one value for each property, in the order of `Property::ALL`.
+/// The style of one element: one value for each property before `Property::CORE`, in the order of `Property::ALL`, the number of its set
+/// of custom properties, and the number of its set of background and mask values (0: all at the starting value, nearly every element).
 #[derive(Debug, Clone, PartialEq)]
-pub struct ComputedStyle([Value; Property::COUNT], u32);
+pub struct ComputedStyle([Value; Property::CORE], u32, u32);
 
 impl ComputedStyle {
     /// The style of an element that has no rule at all, and whose parent has none.
     pub fn initial() -> ComputedStyle {
-        let mut values = [Value::Initial; Property::COUNT];
-        for &p in Property::ALL {
+        let mut values = [Value::Initial; Property::CORE];
+        for &p in &Property::ALL[..Property::CORE] {
             values[p as usize] = match initial(p) {
                 Value::Keyword(Keyword::CurrentColor) => Value::Color(Color::BLACK),
                 v => v,
@@ -1566,19 +1570,25 @@ impl ComputedStyle {
         for side in 0..4 {
             values[Property::BorderTopWidth as usize + side] = Value::Length(Length::Px(0.0));
         }
-        ComputedStyle(values, 0)
+        ComputedStyle(values, 0, 0)
     }
 
+    #[inline(always)]
     pub fn get(&self, property: Property) -> Value {
-        self.0[property as usize]
+        match self.0.get(property as usize) {
+            Some(&v) => v,
+            None => layer_value(self.2, property),
+        }
     }
 
     /// The value of a property that is a length in pixels. 0 if it is not (a percent, or `auto`): ask `get` first for those.
+    #[inline(always)]
     pub fn px(&self, property: Property) -> f32 {
         as_px(self.get(property))
     }
 
     /// The value of a property that is a color. Black if it is not one.
+    #[inline(always)]
     pub fn color(&self, property: Property) -> Color {
         as_color(self.get(property))
     }
@@ -1596,6 +1606,80 @@ fn as_color(v: Value) -> Color {
         Value::Color(c) => c,
         _ => Color::BLACK,
     }
+}
+
+/// The values of the background and mask properties of one element: `Property::ALL[CORE..]`, in that order.
+type Layers = [Value; Property::COUNT - Property::CORE];
+
+/// The sets of background and mask values, each one once, for the whole process. A style holds the number of its set (`ComputedStyle::2`):
+/// the 12 values would make each style 96 bytes larger and each compare slower, for a few elements of a page. Set 0 is the starting
+/// values: it is not in the list. A `Length::Calc` in a set points to `LayerTable::calcs`, not to `Styles::calcs`: a set is shared by pages.
+#[derive(Default)]
+struct LayerTable {
+    sets: Vec<Layers>,
+    by_hash: HashMap<u64, Vec<u32>, BuildHasherDefault<Fnv>>,
+    calcs: Vec<[f32; 2]>,
+}
+
+static LAYERS: std::sync::Mutex<Option<LayerTable>> = std::sync::Mutex::new(None);
+/// The most sets, and the most `calc()` values, that the table keeps. A page that makes more gets the starting values.
+const MAX_LAYERS: usize = 1 << 16;
+
+fn layer_start() -> Layers {
+    std::array::from_fn(|k| initial(Property::ALL[Property::CORE + k]))
+}
+
+/// The value of a background or mask property in the set `id`.
+#[cold]
+#[inline(never)]
+fn layer_value(id: u32, p: Property) -> Value {
+    let k = p as usize - Property::CORE;
+    if id == 0 {
+        return initial(p);
+    }
+    let guard = LAYERS.lock().unwrap_or_else(|e| e.into_inner());
+    guard.as_ref().map_or_else(|| initial(p), |t| t.sets[id as usize - 1][k])
+}
+
+/// The pixels and the percent of a `Length::Calc` in the background and mask values of a style.
+pub fn layer_calc(i: u32) -> (f32, f32) {
+    let guard = LAYERS.lock().unwrap_or_else(|e| e.into_inner());
+    guard.as_ref().and_then(|t| t.calcs.get(i as usize)).map_or((0.0, 0.0), |c| (c[0], c[1]))
+}
+
+/// Keep the value `calc(px + pct%)` for a set. `None` when the table is full.
+fn keep_layer_calc(px: f32, pct: f32) -> Option<u32> {
+    let mut guard = LAYERS.lock().unwrap_or_else(|e| e.into_inner());
+    let t = guard.get_or_insert_with(LayerTable::default);
+    let at = t.calcs.iter().position(|c| c.map(f32::to_bits) == [px.to_bits(), pct.to_bits()]);
+    match at {
+        Some(i) => Some(i as u32),
+        None if t.calcs.len() < MAX_LAYERS => {
+            t.calcs.push([px, pct]);
+            Some(t.calcs.len() as u32 - 1)
+        }
+        None => None,
+    }
+}
+
+/// The number of the set `set`. 0 when it is the starting values, or the table is full.
+fn keep_layers(set: &Layers) -> u32 {
+    if *set == layer_start() {
+        return 0;
+    }
+    let hash = hash_values(0xcbf2_9ce4_8422_2325, set);
+    let mut guard = LAYERS.lock().unwrap_or_else(|e| e.into_inner());
+    let t = guard.get_or_insert_with(LayerTable::default);
+    if let Some(&id) = t.by_hash.get(&hash).and_then(|list| list.iter().find(|&&i| t.sets[i as usize - 1] == *set)) {
+        return id;
+    }
+    if t.sets.len() >= MAX_LAYERS {
+        return 0;
+    }
+    t.sets.push(*set);
+    let id = t.sets.len() as u32;
+    t.by_hash.entry(hash).or_default().push(id);
+    id
 }
 
 /// The starting value of a property. `currentcolor` for the border colors: `resolve` turns it into the color of the element.
@@ -1669,10 +1753,10 @@ const INHERITED: u128 = {
 };
 
 /// The initial value of each property.
-fn start() -> &'static [Value; Property::COUNT] {
-    static START: std::sync::LazyLock<[Value; Property::COUNT]> = std::sync::LazyLock::new(|| {
-        let mut values = [Value::Initial; Property::COUNT];
-        for &p in Property::ALL {
+fn start() -> &'static [Value; Property::CORE] {
+    static START: std::sync::LazyLock<[Value; Property::CORE]> = std::sync::LazyLock::new(|| {
+        let mut values = [Value::Initial; Property::CORE];
+        for &p in &Property::ALL[..Property::CORE] {
             values[p as usize] = initial(p);
         }
         values
@@ -1720,6 +1804,9 @@ fn length_to_px(l: Length, font_size: f32, cx: &Cx<'_>) -> f32 {
 fn compute(winners: &[Option<Value>; Property::COUNT], mut set: u128, parent: &ComputedStyle, cx: &Cx<'_>) -> ComputedStyle {
     use Property::*;
     let fs = font_size(winners[FontSize as usize], parent.px(FontSize), cx);
+    // The background and mask properties are not in the array: they make one set, below.
+    let mut layer_bits = set >> Property::CORE;
+    set &= (1 << Property::CORE) - 1;
     // A property with no winner keeps the initial value, or the one of the parent: only the others need a look.
     let mut out = *start();
     let mut inherit = INHERITED;
@@ -1782,11 +1869,37 @@ fn compute(winners: &[Option<Value>; Property::COUNT], mut set: u128, parent: &C
             };
         }
     }
-    ComputedStyle(out, 0)
+    // None of them is inherited: a property with no winner has the starting value, `inherit` takes the one of the parent.
+    let mut layers = 0;
+    if layer_bits != 0 {
+        let mut set = layer_start();
+        while layer_bits != 0 {
+            let k = layer_bits.trailing_zeros() as usize;
+            layer_bits &= layer_bits - 1;
+            let (p, Some(v)) = (Property::ALL[Property::CORE + k], winners[Property::CORE + k]) else { continue };
+            set[k] = match v {
+                Value::Inherit => parent.get(p),
+                Value::Initial | Value::Unset => initial(p),
+                // A mix of units: kept in the table of the sets, because the set outlives the styles of this page.
+                Value::Length(Length::Calc(i)) => {
+                    let lin = cx.linear(i);
+                    let (x, pct) = (lin.to_px(fs, cx.root_font_size, cx.viewport), lin.pct());
+                    match (x, pct) {
+                        (x, 0.0) => Value::Length(Length::Px(x)),
+                        (0.0, pct) => Value::Length(Length::Percent(pct)),
+                        _ => keep_layer_calc(x, pct).map_or(initial(p), |i| Value::Length(Length::Calc(i))),
+                    }
+                }
+                v => resolve(p, v, &out, parent, fs, cx),
+            };
+        }
+        layers = keep_layers(&set);
+    }
+    ComputedStyle(out, 0, layers)
 }
 
 /// Turn a value into its computed form. It does nothing to a value that is computed already (one from the parent).
-fn resolve(p: Property, v: Value, out: &[Value; Property::COUNT], parent: &ComputedStyle, fs: f32, cx: &Cx<'_>) -> Value {
+fn resolve(p: Property, v: Value, out: &[Value; Property::CORE], parent: &ComputedStyle, fs: f32, cx: &Cx<'_>) -> Value {
     let px = |x| Value::Length(Length::Px(x));
     match v {
         // The color of the element. `color: currentcolor` means the color of the parent (the element has no color yet).
@@ -2052,6 +2165,35 @@ mod tests {
 
     fn px(v: f32) -> Value {
         Value::Length(Length::Px(v))
+    }
+
+    /// The background and mask properties are one shared set in the style, not 12 slots (`ComputedStyle::2`): a longhand, a shorthand,
+    /// `inherit`, `initial` and a `calc()` still work, an element with none has set 0, and equal sets have equal styles.
+    #[test]
+    fn the_layer_properties_are_one_set() {
+        use Property::*;
+        let html = "<div id=a><p id=b>b</p><p id=c>c</p><p id=d>d</p></div><div id=e>e</div>";
+        let sheet = "#a { background-image: url(a.png); mask: url(m.svg) no-repeat center / 20px; background-position-x: calc(100% - 4px) }
+            #b { background-image: inherit; mask-image: inherit; mask-size: inherit }
+            #c { background-image: initial; background: url(c.png) }
+            #d { background-repeat: repeat-x }";
+        let (doc, all) = styles(html, &[sheet]);
+        let of = |id| all.style(by_id(&doc, id)).unwrap();
+        let url = |u: &str| Value::Number(crate::urls::intern(u) as f32);
+        let (a, b, c, d, e) = (of("a"), of("b"), of("c"), of("d"), of("e"));
+        assert_eq!(e.2, 0);
+        assert_eq!([e.get(BackgroundImage), e.get(MaskRepeat), e.get(BackgroundSizeX)], [Value::Keyword(Keyword::None), Value::Keyword(Keyword::Repeat), Value::Keyword(Keyword::Auto)]);
+        assert_eq!([a.get(BackgroundImage), a.get(MaskImage), a.get(MaskRepeat), a.get(MaskSizeX), a.get(MaskPositionX)], [url("a.png"), url("m.svg"), Value::Keyword(Keyword::NoRepeat), px(20.0), Value::Length(Length::Percent(50.0))]);
+        // A mix of units is kept outside the page: the pixels and the percent come from `layer_calc`.
+        let Value::Length(Length::Calc(i)) = a.get(BackgroundPositionX) else { panic!("calc") };
+        assert_eq!(layer_calc(i), (-4.0, 100.0));
+        // `inherit` takes the value of the parent; `initial` and the shorthand reset the others of their kind.
+        assert_eq!([b.get(BackgroundImage), b.get(MaskImage), b.get(MaskSizeX), b.get(MaskRepeat)], [url("a.png"), url("m.svg"), px(20.0), Value::Keyword(Keyword::Repeat)]);
+        assert_eq!([c.get(BackgroundImage), c.get(MaskImage)], [url("c.png"), Value::Keyword(Keyword::None)]);
+        assert_eq!([d.get(BackgroundRepeat), d.get(BackgroundImage)], [Value::Keyword(Keyword::RepeatX), Value::Keyword(Keyword::None)]);
+        // The same values give the same set, so two elements with one rule share one style.
+        let (doc, styles) = styles("<p id=x>x</p><p id=y>y</p>", &["p { mask-image: url(s.svg) }"]);
+        assert_eq!(styles.style(by_id(&doc, "x")), styles.style(by_id(&doc, "y")));
     }
 
     /// `Styles::change` after a hover: no matching rule is `Same`, a color is `Paint`, a size is `Layout`, and the background of a

@@ -648,6 +648,8 @@ fn a_url_in_a_sheet_is_made_absolute_against_the_sheet() {
     for same in ["a{b:url(data:image/svg+xml,%3csvg/%3e)}", "a{b:url(\"DATA:x,y\")}", "a{b:url(#x)}", "a{b:url(https://c.test/d.png)}", "a{b:url(a\\ b)}", "a{b:url(x", "a{b:red}", "url(", ""] {
         assert_eq!(abs(same), same);
     }
+    // An `@import` is resolved by the loader: its address stays as written.
+    assert_eq!(abs("@import url(x.css) layer(a);b{c:url(y.png)}"), "@import url(x.css) layer(a);b{c:url(\"https://a.test/w/y.png\")}");
     // The text is borrowed when nothing changes.
     assert!(matches!(absolute_urls("a{b:url(#x)}", &base), std::borrow::Cow::Borrowed(_)));
 }

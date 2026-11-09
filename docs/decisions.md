@@ -560,4 +560,7 @@ A geometry read (`getBoundingClientRect`, `getClientRects`, `offsetWidth`, an In
 - The sheet loader makes each `url()` absolute. Sheets are joined after loading, so the base would be lost.
 - A gradient is `none`. The cascade is not broken by it.
 - The 12 new properties are not listed in the CSSOM. The listing costs set-up time on every page start.
-- Cost of 12 more slots in `ComputedStyle`: +0.5 to +2.8% on style-heavy rows. Open. See progress.md.
+- The 12 layer values are not in the style array. A style holds one id of an interned set (0 = all initial). 12 more slots cost up to +2.8% on style-heavy rows. The id costs up to +1.2%.
+- A picture arrival does not make a frame when one is pending. This removed most of the Wikipedia cost.
+- `@import url(…)` is not made absolute. The loader resolves it against the sheet.
+- Open: 16 matrix rows stay over 0.5%. See progress.md.

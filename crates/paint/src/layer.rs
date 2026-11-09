@@ -9,7 +9,7 @@
 //! keeps its edges soft. The cache holds at most `MAX_BYTES`; it is emptied when it is full.
 
 use crate::canvas::{Canvas, IRect, blend};
-use bare_css::cascade::{ComputedStyle, Styles};
+use bare_css::cascade::ComputedStyle;
 use bare_css::values::{Keyword, Length, Property, Value};
 use bare_html::dom::Bitmap;
 use std::collections::HashMap;
@@ -119,7 +119,7 @@ pub const MASK: Props = Props {
 
 /// The size of the tile, the start of the first tile and the repeat of a picture of `image` pixels in `area` (the positioning area), from
 /// the style. `None` when the tile is empty or too large to draw.
-pub fn geometry(style: &ComputedStyle, styles: &Styles, p: Props, image: (u32, u32), area: IRect) -> Option<((u32, u32), (i32, i32), (bool, bool))> {
+pub fn geometry(style: &ComputedStyle, p: Props, image: (u32, u32), area: IRect) -> Option<((u32, u32), (i32, i32), (bool, bool))> {
     let (iw, ih) = (image.0 as f32, image.1 as f32);
     let (aw, ah) = ((area.x1 - area.x0) as f32, (area.y1 - area.y0) as f32);
     if iw < 1.0 || ih < 1.0 {
@@ -130,7 +130,7 @@ pub fn geometry(style: &ComputedStyle, styles: &Styles, p: Props, image: (u32, u
         Value::Length(Length::Px(x)) => Some(x),
         Value::Length(Length::Percent(x)) => Some(x * base / 100.0),
         Value::Length(Length::Calc(i)) => {
-            let (px, pct) = styles.calc(i);
+            let (px, pct) = bare_css::cascade::layer_calc(i);
             Some(px + pct * base / 100.0)
         }
         _ => None,

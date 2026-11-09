@@ -3544,29 +3544,47 @@ Goal: the Vector skin icons on the Wikipedia article are CSS `mask-image: url(da
 
 ### Numbers (archMachine, base 454790a, minimum of 3 runs, instructions in user mode)
 
-| Page | Base | New | Change |
-| --- | --- | --- | --- |
-| Wikipedia, `open`, `expect`, `shot` | 2.742 G | 3.766 G | +37% |
-| Hacker News | 121.1 M | 125.0 M | +3.2% |
-| example.com | 52.19 M | 52.17 M | 0 |
+| Page | Base | First PR state | Now | Change (now) |
+| --- | --- | --- | --- | --- |
+| Wikipedia, `open`, `expect`, `shot` | 2.909 G | 3.766 G | 2.949 G | +1.4% |
 
-Peak RSS (one run each, before the last two commits): Wikipedia 42.5 to 43.3 MiB, Hacker News 21.6 to 21.8 MiB, example.com 20.7 to 20.9 MiB.
+Wikipedia peak RSS: 42.1 MiB (base), 42.9 MiB (now). The base was measured again on the same day: the page is live, so counts move by about 3% between runs.
 
-The Wikipedia growth is the icons. About 40 SVG files are rasterised. `svg::bitmap` paints each on white and on black. The picture loads also cause extra relists. hypothesis: a one-pass alpha raster would remove about half of it. Not tried.
+The real cause of the +37% was not the SVG double paint. `images_pending` made a full frame at each arrival of a picture. `shot` made about 30 of them. Now it makes one frame when no frame exists, or when no picture is pending. The SVG icon is also built once and drawn twice (white and black canvas) from one display list.
 
 ### Live result
 
-`bare-drive` on the article (`/data/bare-tmp/bgout/wiki/s.png`): the menu, search, language, bookmark, vertical ellipsis, pencil and green circled icons now draw as icons. No black square remains in the capture. The section-toggle buttons were not in the capture, so they are not verified. The horizontal scrollbar stays (other work).
+`bare-drive` on the article: the menu, search, language, bookmark, vertical ellipsis, pencil and green circled icons draw as icons. No black square remains. The section-toggle buttons were not in the capture, so they are not verified. The horizontal scrollbar stays (other work).
+
+### Style layout
+
+- `ComputedStyle` is `[Value; 93]` and two `u32` (custom-property id, layer-set id). It was 744 bytes before the PR. It is now about 760 bytes. The first PR state had 840.
+- The 12 layer properties (`Property::ALL[CORE..]`, `CORE` = 93) are not in the array. Each element holds one id of an interned set of 12 values. Id 0 is the set of all-initial values, the case of almost every element. The table is global (`LAYERS`, at most 65536 sets and calc values).
+- A `calc()` in a layer property is kept in the same table (`layer_calc`), not in `Styles::calcs`.
+- The cascade keeps the layer winners apart. Longhand, shorthand, `inherit`, `initial` and `unset` are tested (`the_layer_properties_are_one_set`).
+- `@import url(…)` is not rewritten by `absolute_urls`. That removed +2.2% from `sheets_load imports`.
 
 ### Cost matrix: not clean
 
-`tools/js/cost_matrix.sh` after the work: 14 rows over 0.5% under both allocators (the first run had 124). Fixes that worked: the 12 properties are not listed in the CSSOM (accessor set-up cost), and `absolute_urls` uses `str::find` (the `preload_load` rows). Left over:
+Last full run (805 rows): 16 rows over 0.5% under both allocators. The mean change is +0.04% (glibc) and +0.63% (jemalloc). The first run of the PR had 124 rows over, the second 14.
 
-- `boxes-display-none` +2.8%, `flex-freeze-many` +1.7 to 2.1%, `table-percent-columns` +1.4%, `grid-stretch-boxes` +1.0%, `grid-explicit-rows` +0.57%, `sheets_load` +1.0 to 2.2%, `dataset_load` +0.53%.
-- Cause: `ComputedStyle` is `[Value; COUNT]`. COUNT went from 93 to 105. The derived `PartialEq` of the array is the cost: `equal_same_length` went from 17.9% to 29.5% of `boxes-display-none`. Total +2.8%.
-- Not tried: keep the layer longhands outside the array (one interned id for each of background and mask), or compare styles with a cheaper test. Both change the cascade. They need their own change.
+| Row | Change |
+| --- | --- |
+| boxes-display-none 20000 | +0.85% |
+| flex-freeze-many 2000 | +1.23% |
+| grid-explicit-rows 5000 | +0.73% |
+| grid-stretch-boxes 50000 | +0.53% |
+| table-percent-columns 10000 | +0.93% |
+| browser_load lookup 1 and 10 | +0.7% |
+| dataset_load keys 1000 and 10000 | +0.55% |
+| sheets_load dynamic | +0.77% |
+| style_load shorthand 1 and 10 | +0.75 to +0.8% |
 
-This branch is not merged, because the cost rule fails.
+Cause: each element's cascade does more work (one more bit mask and one more id to compare, hash and copy), and the layer-property names add checks to the declaration parser. The rows with a style per element feel it most. These rows also move by about ±1% when only the code layout changes.
+
+Tried, did not help: a separate winners array for the layer properties (flex rows worse, +2%); a bit set of the layer winners with a cold function for the layer set (flex-freeze-many +1.4%, boxes-display-none +0.9%, no gain); unchecked array access for `get` (a measurement only, not kept).
+
+This branch is not merged, because the cost rule fails. The rebase on PR #277 was not done.
 
 ### Known gaps
 
@@ -3580,6 +3598,6 @@ This branch is not merged, because the cost rule fails.
 
 Noticed, not changed: the header SVG logos, gradients, box-shadow, opacity.
 
-Tests: `cargo test --release --workspace` passes (3010 tests). New: CSS parser tests, `urls` test, `layer` paint tests, a sheet test for `absolute_urls`, and 2 `bare-drive` tests over `tools/fixtures/bg`. The no-property regression is the cost matrix: the rows without these properties are the 14 above, so the regression exists and is documented.
+Tests: `cargo test --release --workspace` passes. New: CSS parser tests, `urls` test, `layer` paint tests, a sheet test for `absolute_urls`, and 2 `bare-drive` tests over `tools/fixtures/bg`. The no-property regression is the cost matrix: 16 rows stay over the limit, documented above.
 
-Not tested: the window, `display:none` or sticky elements with masks, arjun-e16, a hostile image server beyond the shared unit limits.
+Not tested: the window, other sites, the rebase on #277, `display:none` or sticky elements with masks, arjun-e16, a hostile image server beyond the shared unit limits.

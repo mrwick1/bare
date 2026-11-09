@@ -673,7 +673,7 @@ impl Builder<'_> {
     /// The layer for the picture number `id` of the style, if it has arrived and has a size to draw.
     fn box_layer(&self, style: &ComputedStyle, props: crate::layer::Props, id: f32, area: IRect, color: u32) -> Option<crate::layer::Layer> {
         let bitmap = self.doc.css_image(id as u32)?.clone();
-        let (tile, origin, repeat) = crate::layer::geometry(style, self.tree.styles, props, (bitmap.0, bitmap.1), area)?;
+        let (tile, origin, repeat) = crate::layer::geometry(style, props, (bitmap.0, bitmap.1), area)?;
         Some(crate::layer::Layer { bitmap, tile, origin, repeat, color })
     }
 
