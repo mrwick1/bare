@@ -3773,8 +3773,8 @@ Task: pages break or log noise because of external style sheets. Checked on `ori
 
 **1. archive.org.** `expect css="body" visible` fails, and the cause is not a style sheet.
 
-- The page is `<body><app-root></app-root><noscript>…</body>` with one `<script type=module>`. `index.css` (871 bytes) loads and is supplied. Its rule `body { margin: 0; padding: 0 }` leaves an empty body with no size. The engine has no modules (`Fatal::Unsupported("module script")`), so `app-root` never gets content. Chrome with scripts off also gives a zero-size body.
-- Proof: a local mirror of the page fails the same way with no render line. Without `index.css` it passes (the default 8 px body margin gives the box a size). Of the css, only `body { margin: 0; padding: 0; … }` makes it fail; the other rules pass alone.
+- The page is `<body><app-root></app-root><noscript>…</body>` with one `<script type=module>`. `index.css` (871 bytes) loads and is supplied. Its rule `body { margin: 0; padding: 0 }` leaves an empty body with no size. The engine has no modules (`Fatal::Unsupported("module script")`), so `app-root` never gets content. To verify: Chrome with scripts off gives the same zero-size body (not run).
+- Proof: a local mirror of the page fails the same way with no render line. Without `index.css` it passes (the default 8 px body margin gives the box a size). Of the css, the rule `body { margin: 0; padding: 0; line-height: … }` alone makes it fail; `html`, `:root`, `style` and the other rules pass alone.
 - The 70 console lines of the first run were the render attempts that ran while `index.css` was in flight. That is item 2.
 - Not changed: module scripts. A step that checks something the app draws cannot pass on this page.
 
