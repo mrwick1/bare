@@ -450,6 +450,8 @@ fn parse_certificate<'a>(body: &'a [u8], chain: &mut [&'a [u8]; MAX_CHAIN]) -> R
 }
 
 /// The key of a leaf that CertificateVerify is checked with. Owned: the handshake buffer moves on.
+/// One value lives on the stack for one handshake, so the size gap between the variants costs nothing.
+#[allow(clippy::large_enum_variant)]
 enum LeafKey {
     /// `04 || X || Y`.
     P256([u8; 65]),

@@ -36,7 +36,7 @@ pub enum Hash {
 }
 
 impl Hash {
-    pub fn len(self) -> usize {
+    pub fn digest_len(self) -> usize {
         match self {
             Hash::Sha256 => 32,
             Hash::Sha384 => 48,
@@ -123,7 +123,7 @@ impl<'a> PublicKey<'a> {
 
     /// RSASSA-PKCS1-v1_5-VERIFY. `digest` is the hash of the message.
     pub fn verify_pkcs1(&self, hash: Hash, digest: &[u8], sig: &[u8]) -> Result<(), Error> {
-        if digest.len() != hash.len() {
+        if digest.len() != hash.digest_len() {
             return Err(Error::BadSignature);
         }
         let mut em = [0u8; MAX_LEN];
@@ -143,7 +143,7 @@ impl<'a> PublicKey<'a> {
 
     /// RSASSA-PSS-VERIFY with MGF1 of the same hash and a salt as long as the hash.
     pub fn verify_pss(&self, hash: Hash, digest: &[u8], sig: &[u8]) -> Result<(), Error> {
-        let h = hash.len();
+        let h = hash.digest_len();
         if digest.len() != h {
             return Err(Error::BadSignature);
         }
@@ -188,7 +188,7 @@ impl<'a> PublicKey<'a> {
 fn mgf1(hash: Hash, seed: &[u8], out: &mut [u8]) {
     let mut block = [0u8; 48 + 4];
     block[..seed.len()].copy_from_slice(seed);
-    for (i, chunk) in out.chunks_mut(hash.len()).enumerate() {
+    for (i, chunk) in out.chunks_mut(hash.digest_len()).enumerate() {
         block[seed.len()..seed.len() + 4].copy_from_slice(&(i as u32).to_be_bytes());
         let d = hash.digest(&block[..seed.len() + 4]);
         chunk.copy_from_slice(&d[..chunk.len()]);
