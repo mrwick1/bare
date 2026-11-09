@@ -203,7 +203,7 @@ fn the_document_budget_counts_navigations_that_resumes_cause() {
 fn a_fatal_stop_is_sticky_and_a_queued_navigation_never_loads() {
     big(|| {
         let srv = server(|| vec![
-            ("/", html("<button id=go></button><input id=q><script>document.getElementById('go').addEventListener('click', function () { location.assign('/b'); while (true) {} });
+            ("/", html("<button id=go></button><input id=q><script>document.getElementById('go').addEventListener('click', function () { location.assign('/b'); console.log.apply(null, new Array(100)) });
                 document.getElementById('q').addEventListener('input', function () { localStorage.setItem('after', '1') })</script>")),
             ("/b", html("<p>b</p>")),
         ]);

@@ -371,3 +371,41 @@ fn frames_in_two_window_buffers_equal_the_headless_canvas() {
         }
     });
 }
+
+#[test]
+fn a_window_click_whose_job_or_listener_runs_away_does_not_stop_later_input_or_timers() {
+    big(|| {
+        let mut b = Browser::new(
+            tree::parse("<button id=b style='position:absolute;left:0;top:0;width:100px;height:40px'>go</button>"),
+            BrowserLimits::default(),
+            EvalLimits { max_steps: 1_000_000, ..Default::default() },
+            HeapLimits::default(),
+        )
+        .expect("browser");
+        b.use_virtual_clock();
+        b.set_viewport(300.0, 200.0).expect("viewport");
+        b.set_document_url("http://localhost/runaway.html").expect("url");
+        let mut p = Page::new(Source::Browser(Box::new(b)), (300, 200));
+        p.whole = 0;
+        p.quiet = true;
+        js(&mut p, "var n = 0, t = 0, runaway = 2;
+            document.getElementById('b').addEventListener('click', function () {
+              n++;
+              setTimeout(function () { t++ }, 10);
+              if (runaway-- == 2) { Promise.resolve().then(function () { while (true) {} }) }
+              else if (runaway == 0) { while (true) {} }
+            }); 0");
+        click(&mut p, 10.0, 10.0);
+        assert_eq!(js(&mut p, "n"), "1");
+        let logs = p.take_logs();
+        assert!(logs.iter().any(|l| l.level == "error" && l.text.contains("Steps")), "{logs:?}");
+        click(&mut p, 10.0, 10.0);
+        assert_eq!(js(&mut p, "n"), "2", "the page takes the next click after a runaway job");
+        click(&mut p, 10.0, 10.0);
+        click(&mut p, 10.0, 10.0);
+        assert_eq!(js(&mut p, "n"), "4", "and after a runaway listener");
+        let b = p.browser().unwrap();
+        b.advance_time(50.0, 100).unwrap();
+        assert_eq!(js(&mut p, "t"), "4", "the timers of all four clicks ran");
+    });
+}

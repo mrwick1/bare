@@ -224,6 +224,12 @@ impl<'p> Interp<'p> {
         Ok(n)
     }
 
+    /// Forget the sticky error of a failed job (see [`Interp::drain_microtasks`]). The host calls it after it chose to abort only the
+    /// task that failed: the job that ran is lost (its promise stays pending), the jobs behind it stay queued.
+    pub fn clear_failed_job(&mut self) {
+        self.promise.failed_job = None;
+    }
+
     // ------------------------------------------------------------ setup
 
     fn install_promise(&mut self) -> Res<()> {

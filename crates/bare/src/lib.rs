@@ -205,4 +205,6 @@ mod browser_style_tests;
 #[cfg(test)]
 mod browser_resume_tests;
 #[cfg(test)]
+mod browser_survive_tests;
+#[cfg(test)]
 mod browser_settle_tests;

@@ -232,6 +232,14 @@ pub(crate) fn prune(d: &Dom, live: &dyn Fn(ObjId) -> bool) {
 }
 
 impl Dom {
+    /// `Browser::survive`: the navigation tasks stopped on a script budget; let them run again.
+    pub(crate) fn clear_budget_halt_nav(&self) {
+        let mut s = self.nav.s.borrow_mut();
+        if s.halted.as_ref().is_some_and(crate::browser::is_budget) {
+            s.halted = None;
+        }
+    }
+
     /// An object that is not plain data: DOM wrappers, events, and this module's objects.
     pub(crate) fn is_host_object(&self, o: ObjId) -> bool {
         let n = self.nav.s.borrow();
