@@ -6283,3 +6283,52 @@ Before the Intl change in main, GitHub stopped at `timeZoneName`. Now both GitHu
 - The jemalloc counts of the three glibc-only rows are under +0.05%, but the cause of the glibc rise is not found.
 - Chrome as an oracle for selector lengths.
 - The other six sites of the plan that stop on `Limit(Scripts)`.
+## Small DOM gaps and lazy web APIs (PR 2 of task 16, 2026-11-10)
+
+Task: close the small platform gaps that stop real sites, and add `Element.animate`, `Path2D` and a minimal `indexedDB` without moving a cost row. PR 1 (#327) did the async machine and the `d` regexp flag.
+
+### Change
+
+- `HTMLCollection.prototype.item` (nasa): `children`, `childNodes`, `getElementsByTagName`, `getElementsByClassName` and `document.scripts`, `forms`, `images`, `embeds`, `links`, `anchors` still give snapshot arrays. They now inherit from one shared prototype (`browser_dom::wrap_coll`) that inherits from `Array.prototype` and has `item`. The prototype is made at the first call. The array is built with that prototype (`Interp::array_from_proto`). First try used `set_prototype_of`: it sends the array to dictionary mode and `nodelist_load live 10` grew +0.53% (glibc) and +0.58% (jemalloc). Building with the prototype gave +0.11%.
+- `HTMLScriptElement.prototype.noModule` (gov-uk): a reflected boolean for `nomodule`, next to `async` and `defer`.
+- `document.hasFocus()` (mastodon): always `true`. Choice: the page always has system focus (`browser_focus.rs` already said so), so the window focus state is "focused". It is made at the first read.
+- `console.assert` (lemmy, redis): nothing when the condition is truthy. Else an error record. The label "Assertion failed" is its own first argument (with a colon when the next argument is a string), so the data-only formatter prints the same text as a browser.
+- `StyleSheetList` and `CSSRuleList` have `[Symbol.iterator]` (the one of `Array.prototype`), as `NodeList` has (redis).
+- `window.event` (nasa, apnews): an accessor that gives the event of the running dispatch, else `undefined`. `Dom::dispatch` sets it and restores the old value (nested dispatch). A write makes a data property (`[Replaceable]`).
+- `Element.prototype.animate` and `Animation` (dailymotion), `Path2D` (twitch), `indexedDB`, `IDBKeyRange` and the other `IDB*` names (bsky) are JavaScript (`crates/bare/src/shims/*.js`). `browser_shims.rs` runs the source as an indirect eval at the first read of one of the names. The heap asks the host for a name only when `Heap::browser_name` lists it (the names `animate`, `Animation`, `Path2D`, `indexedDB`, `event`, `hasFocus` and `IDB*` were added). A realm that never reads them pays for nothing: no script, no object.
+  - `animate` returns an `Animation` that ends after one timer: `finished` resolves, then `onfinish` and `finish` listeners run. `cancel`, `pause`, `play`, `finish` change `playState`. `cancel` rejects `finished` with an `AbortError` that is marked handled. No effect, no timeline.
+  - `Path2D` has the constructor and the 11 path methods as no-ops.
+  - `indexedDB`: `open` (with `upgradeneeded`, `VersionError`), `deleteDatabase`, `cmp`, `databases`; `createObjectStore` (keyPath, autoIncrement), `deleteObjectStore`; transactions (`readonly`, `readwrite`, `versionchange`) that run their requests one by one in microtasks and complete when the queue is empty; `get`, `getKey`, `getAll`, `getAllKeys`, `put`, `add`, `delete`, `clear`, `count`, `openCursor` (with `continue`, `advance`, `update`, `delete`); `IDBKeyRange`. An error aborts the transaction and rolls back its writes. The classes extend `EventTarget`, so `addEventListener` works. Values are copied with `structuredClone`. No persistence and no indexes (`createIndex` is absent).
+  - `new DOMException(...)` is not a constructor in this realm (the interface is illegal), so the shims make errors with `Object.create(DOMException.prototype)` plus `name`, `message` and `code`.
+
+Tests (written first, all failed on main): `crates/bare/src/browser_gaps_tests.rs`, 10 tests. `browser_console_tests` now expects `assert` in `Object.keys(console)`.
+
+### Live sites (bare-drive, `open URL` / `expect js document.readyState === 'complete'`, exceptions in the console, main `3f2ce54039` before and this branch after)
+
+| site | before | after |
+| --- | --- | --- |
+| nasa.gov | `getElementsByTagName(..).item is not a function` | gone; two other errors stay (`setLocaleData`, `expando`) |
+| mastodon.social | `document.hasFocus is not a function` | gone; next stop is `IDBIndex is not defined` (indexes are not built) and `y is not a constructor` |
+| redis.io | 9 exceptions | 2 exceptions (both a failed remote script) |
+| lemmy.ml | `console.assert is not a function` | 0 exceptions |
+| gov.uk | `GOV.UK Frontend is not supported in this browser` | 0 exceptions |
+| dailymotion.com | `circle?.animate is not a function` | gone; `reading 'split'` stays |
+| bsky.app | `indexedDB is not defined` | 0 exceptions |
+| twitch.tv | `Path2D is not defined` | gone; the page still stops at `Limit("Scripts")` (task 14) |
+| apnews.com | `regexp flag d` stop was fixed in #327 | still stops at the `dom-selector` budget (task 14); `Cannot set properties of undefined (setting 'event')` is from the page, not from `window.event` |
+
+### Checks
+
+- Cost: full matrix, 805 rows, after the last rebase (main `3f2ce54039`, fresh `base-build`): 0 rows over under both allocators, 0 over under one, 0 failed. Mean glibc +0.016%. The largest row is `xhr_load 1` at +0.375%. The first run found `nodelist_load live 10` at +0.526% / +0.577% (the `set_prototype_of` call, see above); the fix is in.
+- `cargo test --release --workspace --no-fail-fast`: 0 failed (`bare` lib 1183 passed).
+- `tools/js/exec_diff.sh`: 79 runs, 0 differences.
+- `tools/js/test262_check.sh` on `built-ins/RegExp/(match-indices|named-groups)`, `language/expressions/object` and `built-ins/Array/prototype/(forEach|map)`: gate ok (the object directory passes 3 more tests). The full run waited more than 30 minutes for a slot and was stopped; the change in `crates/js` is a name list in `Heap::browser_name` and one wrapper function.
+- `tools/drive/public/run.sh`: pass 48, fail 0, known 0, skip 0, flakes 0.
+
+### Limits and not tested
+
+- `tools/js/typing/keycost.sh` was not run (no change in the typing path).
+- The shims were not run against the real libraries of the sites beyond the table above. `indexedDB` has no index, no `getAll` options object, no `IDBIndex`, no `onblocked`, no persistence. `Animation` has no timeline: `currentTime` is `0` or `null`.
+- `window.event` is set for the whole dispatch, not for each listener, and is not hidden for listeners in a shadow tree.
+- `getElementsByTagName` and the other collections are still snapshots (not live). `namedItem` is absent. `querySelectorAll` results do not have `item` (it is a `NodeList` in browsers).
+- One machine (archMachine), loaded by other agents.
