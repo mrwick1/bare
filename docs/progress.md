@@ -4776,3 +4776,13 @@ After #299, four errors stopped real pages: `performance.getEntriesByType is not
 ### Checks
 
 - Tests first (`browser_web_api_tests.rs`): five tests failed with the errors above before the change. All pass.
+- `cargo test --release --workspace`: 0 failed.
+- Cost matrix against the build of a1b7a80 (805 rows, 3 runs each, both allocators): 0 rows over the limit. Three rows are over +0.5% under glibc only (`fetch_load bytes 10`, `focus_load focus 10`, `navigation_load route 10`); jemalloc is under the limit for all three. Typing cost: 282.7 M for each key in `#a1` and 288.0 M in `#f0`, equal to the base. test262 gate: ok. `exec_diff`: 79 runs, 0 differences. `tools/drive/public/run.sh`: pass 31, fail 0, known 0, flakes 1.
+- Cost found on the way: a field for the other schemes in `Rec` gave +0.5% in `navigation_load route` and `storage`, because `Location` copies a `Rec` often. A URL of another scheme is now a `Rec` with no host and port 0 (an `http` URL never has both), and its path holds the whole URL (`Alt::into_url`). `Rec` is as small as before. `Rec::origin` for `http` URLs now makes one string and not three.
+- A `fetch` input that is a string is tested for `data:` on the UTF-16 units. It makes no copy, so `fetch_load` stays at its old count. The scheme check of `URL` reads only the scheme part of the input.
+
+### Not tested
+
+- A live page that needs `performance.getEntriesByType` or `createEvent` on `gitlab.com`: the page stops later, on `screen`.
+- `createEvent` of `MouseEvent` and `KeyboardEvent` against Chrome 155 values for the default fields.
+- IPv6 hosts and ports in a URL with another scheme.
