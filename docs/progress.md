@@ -5987,12 +5987,12 @@ HTML Standard, "execute the script element" (sets `currentScript` for a classic 
 
 ### Cost
 
-Base `1bec71ae9b` (origin/main, fresh `base-build`; origin/main did not move, so the rebase was a no-op). All 805 rows of `tools/js/cost_matrix.sh`: over under both allocators 0, failed 0, mean change glibc +0.010%. One row is over under glibc only: `fetch_load bytes 10` +0.537% glibc, +0.071% jemalloc. The same row was +0.574% glibc and -0.189% jemalloc in #330. `base-build` has no `bare-stress` by default; I built it with `base-build origin/main --release -p bare-stress`.
+Base `50e71ca8cc` (origin/main after PR #331, the `with` statement; a fresh `base-build`; the branch is rebased on it). All 805 rows of `tools/js/cost_matrix.sh`: over under both allocators 0, over under one allocator 0, failed 0, mean change glibc +0.005%. No row reached the jemalloc rerun. An earlier run on base `1bec71ae9b` (before the last rebase): 805 rows, 0 over under both, `fetch_load bytes 10` +0.537% glibc only (+0.071% jemalloc). `base-build` has no `bare-stress` by default; I built it with `base-build origin/main --release -p bare-stress`.
 
-### Checks
+### Checks (final tree, after the rebase)
 
-- `cargo test --release --workspace --no-fail-fast`: 3366 passed, 0 failed, 13 ignored.
-- `tools/drive/public/run.sh` with the branch `bare-drive`: pass 48, fail 0, known 0, skip 0, flakes 0.
+- `cargo test --release --workspace --no-fail-fast`: 3375 passed, 0 failed, 13 ignored.
+- `tools/drive/public/run.sh` with the branch `bare-drive`: pass 48, fail 0, known 0, skip 0, flakes 1 (passed on the retry).
 
 ### Live (`bare-drive`, step file: `open URL` and `expect js "document.readyState === 'complete'"`, 1 run base, 3 runs branch; the machine ran other jobs)
 
