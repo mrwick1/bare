@@ -4727,3 +4727,5 @@ Cost check: archMachine, release, base `a1b7a80`, `BARE_PROXY` unset. `tools/js/
 Not tested: a real external proxy, real Reddit, HTTP/2 through CONNECT, an IPv6 proxy socket, percent-encoded credentials, Windows or macOS, wall-time performance, or a long-run statistical cost bound. No rotation, SOCKS5, or ban detection was added. README was not changed.
 
 Final validation: `RUST_TEST_THREADS=1 cargo test --release --workspace` passes on the combined tree with main `dfa0e09`. The standalone release net suite also passes. One earlier parallel workspace run timed out in both `bare-drive --test chunked` tests; both passed on retry. The full serial run passed before and after the main update. `git diff --check` passes. Existing CSS dead-code and driver unused-variable warnings remain.
+
+Main moved to `1f525025` during PR creation. Only the progress append conflicted. Both sections were retained. `RUST_TEST_THREADS=1 cargo test --release --workspace` passes again on that combined tree. The proxy implementation and net cost workload did not change.
