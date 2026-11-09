@@ -8,6 +8,11 @@
 //! first URL of its own `srcset`. A `srcset` gives its first URL (the density and width descriptors are not read). A `data:` URL is
 //! decoded here, and any other URL is resolved against the document and downloaded with the client of the session (cache, TLS, limits).
 //!
+//! CSS images: `background-image` and `mask-image` name a picture by the number of its address (`bare_css::urls`). After each new set of
+//! styles the loader reads the numbers that the unique styles of the frame use, loads the ones it has not seen (the same way, the same limits,
+//! the same client) and gives each to the document (`Document::set_css_image`). The display list is then made again. A `url()` in a linked
+//! style sheet was made absolute against the address of that sheet when the sheet was read (`browser_loader/sheets.rs`).
+//!
 //! Limits (`bare_image`): 32 MiB of file, 16 M pixels. `BUDGET` bounds the decoded pixels of the pictures of one page: a worker reserves
 //! `4 * width * height` bytes from the header size before it allocates, and a picture over the budget fails.
 
@@ -39,6 +44,12 @@ pub(crate) struct Images {
     known: std::collections::HashSet<NodeId>,
     queue: VecDeque<(String, Vec<NodeId>)>,
     jobs: Vec<(Vec<NodeId>, Task<Option<Bitmap>>)>,
+    /// The CSS pictures: the numbers that were asked for, the ones that wait for a worker, and the ones on their way.
+    css_seen: std::collections::HashSet<u32>,
+    css_queue: VecDeque<(u32, String)>,
+    css_jobs: Vec<(u32, Task<Option<Bitmap>>)>,
+    /// The styles that were read last (the address of the `Styles` and its number of styles).
+    css_read: (usize, usize, u64),
     used: Arc<AtomicUsize>,
     /// Pictures given to their elements, and pictures that failed.
     pub(crate) done: usize,
@@ -48,7 +59,7 @@ pub(crate) struct Images {
 impl Images {
     /// Does the page still wait for a picture?
     pub(crate) fn pending(&self) -> bool {
-        !self.queue.is_empty() || !self.jobs.is_empty()
+        !self.queue.is_empty() || !self.jobs.is_empty() || !self.css_queue.is_empty() || !self.css_jobs.is_empty()
     }
 }
 
@@ -221,6 +232,10 @@ impl Page {
     /// Do the pictures still load (or the document, which starts them), for less than `CAPTURE_WAIT`? A driver waits for them before a
     /// capture, and not before an `expect`.
     pub fn images_pending(&mut self) -> bool {
+        // The styles of the frame say which CSS pictures the page needs: a capture has that frame anyway.
+        if self.images_level() > 0 {
+            self.frame_now();
+        }
         // Look now: a loaded page with no picture needs no tick to say so.
         if self.images_step().0 {
             self.touched();
@@ -293,14 +308,21 @@ impl Page {
                 }
             }
         }
-        while self.images.jobs.len() < INFLIGHT {
-            let Some((url, nodes)) = self.images.queue.pop_front() else { break };
+        self.css_scan();
+        while self.images.jobs.len() + self.images.css_jobs.len() < INFLIGHT {
+            // The pictures of the tree first, then the ones of the styles (`id` is 0 for the first kind).
+            let Some((url, nodes, id)) = self.images.queue.pop_front().map(|(u, n)| (u, n, 0)).or_else(|| self.images.css_queue.pop_front().map(|(i, u)| (u, Vec::new(), i))) else { break };
             let used = self.images.used.clone();
             let client = match &mut self.source {
                 Source::Session(s) => s.fork(),
                 Source::Browser(_) => Client::new(),
             };
-            self.images.jobs.push((nodes, client.spawn(move |c| load(c, &url, &used))));
+            let task = client.spawn(move |c| load(c, &url, &used));
+            if id == 0 {
+                self.images.jobs.push((nodes, task));
+            } else {
+                self.images.css_jobs.push((id, task));
+            }
         }
         let (mut arrived, mut finished) = (false, first);
         let mut k = 0;
@@ -334,6 +356,61 @@ impl Page {
                 self.images.failed += 1;
             }
         }
-        (arrived, finished)
+        let mut k = 0;
+        let mut css_arrived = false;
+        while k < self.images.css_jobs.len() {
+            if !self.images.css_jobs[k].1.done() {
+                k += 1;
+                continue;
+            }
+            let (id, task) = self.images.css_jobs.swap_remove(k);
+            finished = true;
+            match (task.wait().flatten(), self.source.browser()) {
+                (Some(bitmap), Some(b)) => {
+                    b.document().borrow_mut().set_css_image(id, bitmap);
+                    self.images.done += 1;
+                    css_arrived = true;
+                }
+                _ => self.images.failed += 1,
+            }
+        }
+        if css_arrived {
+            // Layout does not read a CSS picture: only the display list is made again.
+            self.relist();
+        }
+        (arrived || css_arrived, finished)
+    }
+
+    /// Ask for the CSS pictures that the styles of the frame use and that were not asked for yet. The unique styles are read when the
+    /// styles of the frame are new, so a page with no such picture pays one pass over a few hundred styles for each new frame.
+    fn css_scan(&mut self) {
+        let Some(f) = &self.frame else { return };
+        let read = (std::rc::Rc::as_ptr(&f.styles) as usize, f.styles.unique(), self.epoch);
+        if self.images.css_read == read {
+            return;
+        }
+        self.images.css_read = read;
+        let mut ids = Vec::new();
+        for style in f.styles.each().filter(|s| s.picture_set() != 0) {
+            let set = style.pictures();
+            for p in [bare_css::values::Property::BackgroundImage, bare_css::values::Property::MaskImage] {
+                if let bare_css::values::Value::Number(x) = set[p as usize - bare_css::values::Property::CORE] {
+                    ids.push(x as u32);
+                }
+            }
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        let Some(b) = self.source.browser() else { return };
+        for id in ids {
+            if self.images.css_seen.len() >= MAX_PICTURES || !self.images.css_seen.insert(id) {
+                continue;
+            }
+            let Some(raw) = bare_css::urls::get(id) else { continue };
+            let url = if raw.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("data:")) { Ok(raw.to_string()) } else { b.resolve_url(&raw) };
+            if let Ok(url) = url {
+                self.images.css_queue.push_back((id, url));
+            }
+        }
     }
 }
