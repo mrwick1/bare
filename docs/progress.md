@@ -5369,3 +5369,54 @@ Checks:
 - `/data/bare-tmp/bin` was missing for a while during this work. Another job removed it. The directory came back later.
 
 Not tested: Windows or macOS builds; time zones other than the three above for the Date fixture; the year `0020` and six-digit year forms of the legacy Date reader; array patterns or computed keys with `await`; catch, `for-of` and `for-in` patterns with `await`; the text of a bound function or a proxy; Chrome as an oracle (Node 22 was the oracle); the dev.to cascade charge.
+
+## Host caps that stopped real pages: computed-work and fetch-queue (2026-11-10)
+
+Two host caps stopped pages that Chrome loads. This change fixes both and records the decision for `Host("dom-selector")` (PR #314) in `docs/decisions.md`.
+
+### Problem
+
+- apnews loaded (200, 133 requests) and then `render: Limit(Host("computed-work"))` stopped the page. The cap is nodes x (rules + 1) against 2^27.
+- gitlab.com stopped at `Limit(Host("fetch-queue"))` after 30 requests. The cap is 64 queued requests.
+- `docs/decisions.md` said that every `Limit(Host(..))` is fatal. PR #314 moved `dom-selector` into the task-abort class and did not update the text.
+
+### Measurements (before, release build, archMachine)
+
+- apnews: 30,415 nodes, 5,072 of them elements, 8,274 rules. The old bound is 251.7 M. The indexed cascade checks 1,325,817 candidates (190 times fewer) and one cascade takes 22 to 25 ms. The bound was probed with a temporary counter in `bare_css` that is not in the change.
+- The step budget is charged with the same bound (`it.charge(work)`) and the default budget is 100 M. So raising `max_work` alone does not help: the cascade then ends with `Steps`.
+- gitlab: the page calls `fetch` 64 times in one script task, before any request can finish (queue length 1, 2, 3 ... 64 in one task, none finished). It is not a leak and not a count bug. Finished requests leave the queue in order (`run_network_tasks_inner`). 22 of the 30 requests went to `res.cloudinary.com`. No XHR is involved.
+
+### Change
+
+- `browser_computed.rs`: the cheap bound (nodes x (rules + 1)) stays the first test. When it is over the cap, `styled_work` (`#[cold]`) counts the styled elements and uses elements x (rules + 1) for the check and for the step charge. Text and comment nodes are not styled. The count walks the tree, includes shadow roots, and is kept while the tree revision and length are the same. Small pages run the same code as before.
+- `browser_fetch.rs`: `max_pending` 64 -> 1,024 and a new `max_pending_bytes` of 8 MiB for the URL and header text of the queue. The sum runs only when the queue holds 64 requests or more. Bodies stay under `max_retained`. Over a bound the page stops with `fetch-queue`, as before. I did not make a full queue a `TypeError`: the class stays the same, and a real page does not reach 1,024.
+- Tests, each failed on main first: `work_bound_counts_styled_elements_not_text_nodes` (`computed-work`) and `many_requests_in_one_task_are_queued` (queue stopped at 64). `resource_caps_are_limits_before_growth` keeps the count bound (`max_pending: 2`) and has a new byte-bound case.
+
+### Bounds (worst case on a hostile page)
+
+- computed-work: a page with `*:not(.cN)` rules, which are all candidates of all elements. 60,000 elements x 1,500 rules (90 M candidates): 2.30 s and 21 MB peak RSS. 30,000 x 3,000: 2.26 s and 19 MB. 10,000 x 1,000 (10 M): 0.26 s, so about 26 ns for each candidate. 60,000 x 1,700 is over the step budget (`Steps`) in 3.7 ms. The old bound allowed the same work. Memory does not depend on the work: one `u32` for each node and one style for each different style.
+- fetch-queue: 1,024 requests and 8 MiB of URL and header text, so about 9 MiB for the queue. Before, 64 requests could hold 64 x (8 KiB URL + 64 KiB headers) = 4.6 MiB.
+- Not done: the real candidate count. `bare_css` has no public API for it (`RuleSet::index` is private), and `crates/css` cascade is in another open change (PR #278). With that count the bound would be the work that the cascade does, not an upper bound. The step charge of a script read of a page like apnews is still 42 M (5,072 x 8,275) for each cascade.
+
+### Cost
+
+- Base: `72c74d5fab` (origin/main after PR #320). The branch is rebased on it. All 805 rows of `tools/js/cost_matrix.sh`: 0 rows over +0.5% under glibc, so no jemalloc runs were needed. Mean change +0.005% glibc. Worst rows: `style_load churn 10` +0.350%, `form_load gates 10` +0.322%, `resources_load small 10` +0.320%.
+- Before the rebase, the 36 rows `style_load|sheets_load|browser_load|fetch_load|xhr_load` had `style_load churn 10` at +0.358% and no row over.
+
+### Live results (`bare-drive`, `timeout 30000`, `open URL`, `expect js "document.readyState === 'complete'"`, `shot s`; instructions `perf stat -e instructions:u`; peak RSS from the `runs` of the result)
+
+| URL | before | after |
+| --- | --- | --- |
+| https://apnews.com/ | fail, `Limit("Host(\"computed-work\")")`, 14.44 G instr, 123 MiB peak | fail, `Unsupported("regexp flag d")` (a JS engine gap, `crates/js`), 16.80 G instr, 137 MiB peak. The render now runs. |
+| https://gitlab.com/ | fail, `Limit("Host(\"fetch-queue\")")` after 30 requests, 2.38 G instr, 51 MiB peak | pass, 2.62 G instr, 69 MiB peak. First console line is a log (`Sentry client config loaded successfully`). |
+| https://gitlab.com/gitlab-org/gitlab | pass, 12.67 G instr, 188 MiB peak. First error: `Script aborted: the Steps budget ended the timer or queued task` | pass, 12.94 G instr, 187 MiB peak. Same first error. |
+
+Instruction counts include the network wait and the page's own work, so they vary between runs. `tools/drive/public/run.sh`: 48 pass, 0 fail.
+
+### Not tested
+
+- apnews to `readyState complete`: the next stop is `regexp flag d` in `crates/js`, which this change does not touch. The first console error `listener of error: TypeError: Cannot set properties of undefined (setting 'event')` is the same before and after.
+- A page whose styled elements x rules is between 100 M and 134 M (the step budget ends the cascade first).
+- More than 64 queued `XMLHttpRequest` calls on a live page (the test has 200 `fetch` and 200 XHR).
+- Memory of a queue at 1,024 requests with 8 MiB of text (the bound is by construction; no run).
+- jemalloc counts of the matrix: no row was over under glibc.
