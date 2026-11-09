@@ -5,6 +5,8 @@
 //! NFC picks one way: it joins the letter and the accent into one character, where possible.
 //! After NFC, two texts that look the same are also equal in code.
 
+pub mod property;
+pub mod props;
 pub mod tables;
 // The generated data in `tables.rs`. `pub` lets other crates use it.
 
