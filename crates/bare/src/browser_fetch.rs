@@ -833,6 +833,8 @@ impl Dom {
         match r {
             Ok(u) if u.to_string().len() <= self.fl().max_url_bytes => Ok(u),
             Ok(_) => Err(self.lim("fetch-url")),
+            // Another scheme (`ftp:`, `mailto:`, `blob:`) is a network error for this request: the promise rejects, the script goes on.
+            Err(_) if crate::browser_navigation_url::scheme_of(s).is_some_and(|(sch, _)| !sch.eq_ignore_ascii_case("http") && !sch.eq_ignore_ascii_case("https")) => Err(it.type_error("Failed to fetch")),
             Err(_) => Err(it.type_error("Failed to parse URL")),
         }
     }
@@ -1682,6 +1684,10 @@ fn fetch(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
 
 /// Validate, apply the policy and queue. A `TypeError` rejects the promise; every other error ends the call.
 fn prepare(d: &Dom, it: &mut Interp<'_>, promise: Value, a: &[Value]) -> R<()> {
+    if let Some(url) = data_input(d, it, arg(a, 0))? {
+        let r = data_response(d, it, &url)?;
+        return settle(it, promise, Ok(r)).map(|_| ());
+    }
     let lim = d.fl();
     {
         let st = d.fetch.st.borrow();
@@ -2072,6 +2078,47 @@ fn finish(d: &Dom, it: &mut Interp<'_>, promise: Value, outcome: Outcome) -> R<(
         Outcome::Done { status, url, redirected, headers, body, taint } => build_response(d, it, status, url, redirected, headers, body, taint),
     };
     settle(it, promise, r).map(|_| ())
+}
+
+/// The text of a `fetch` input that is a string or a `URL` object, when it is a `data:` URL.
+fn data_input(d: &Dom, it: &mut Interp<'_>, v: Value) -> R<Option<String>> {
+    let s = match v {
+        // A string that does not start with `data:` costs no copy.
+        Value::String(id) => {
+            let Ok(u) = it.heap.str_units(id) else { return Ok(None) };
+            let u = &u[u.iter().take_while(|&&c| c <= 32).count()..];
+            if !u.get(..5).is_some_and(|p| p.iter().zip(b"data:").all(|(&c, &b)| c < 128 && (c as u8).eq_ignore_ascii_case(&b))) {
+                return Ok(None);
+            }
+            d.string_arg(it, v)?
+        }
+        Value::Object(o) if d.nav.s.borrow().urls.contains_key(&o) => d.string_arg(it, v)?,
+        _ => return Ok(None),
+    };
+    let t = s.trim_matches(|c: char| c <= ' ');
+    Ok(t.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("data:")).then(|| t.to_string()))
+}
+
+/// The response of `fetch('data:...')`: status 200, the media type of the URL as `content-type`, the decoded body. No network, no CORS.
+/// A URL with no comma or bad base64 is a network error (`TypeError`). The fragment is not part of the body.
+fn data_response(d: &Dom, it: &mut Interp<'_>, url: &str) -> R<Value> {
+    let bare = url.split_once('#').map_or(url, |u| u.0);
+    let Some(body) = crate::images::data_url(bare) else { return Err(it.type_error("Failed to fetch")) };
+    let head = bare[5..].split_once(',').map_or("", |h| h.0).trim();
+    let head = match head.len().checked_sub(7).filter(|&i| head.is_char_boundary(i) && head[i..].eq_ignore_ascii_case(";base64")) {
+        Some(i) => &head[..i],
+        None => head,
+    };
+    let mime = if head.is_empty() { "text/plain;charset=US-ASCII".to_string() } else if head.starts_with(';') { format!("text/plain{head}") } else { head.to_string() };
+    let lim = d.fl();
+    let mut list = HeaderList::new(Guard::Response);
+    list.append(&lim, "content-type".into(), mime).map_err(|e| d.herr(it, e))?;
+    list.guard = Guard::Immutable;
+    let body = Some(Rc::new(body));
+    d.reserve(it, 2, body.as_ref().map_or(0, |b| b.len()))?;
+    let h = d.headers_obj(it, list)?;
+    let r = RespData { c: Common { headers: h, body: Body::new(body) }, status: 200, status_text: String::new(), url: url.to_string(), redirected: false, ty: "basic", stream: None };
+    Ok(Value::Object(d.add_obj(it, Pr::Response, F::Response(r))?))
 }
 
 fn build_response(d: &Dom, it: &mut Interp<'_>, status: u16, url: Url, redirected: bool, headers: Vec<(String, String)>, body: Vec<u8>, taint: Taint) -> R<Value> {

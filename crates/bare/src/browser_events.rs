@@ -597,3 +597,53 @@ pub(crate) fn composed_path(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Valu
 pub(crate) fn custom_detail(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     with_event(d, it, this, |e| e.detail)
 }
+
+// ------------------------------------------------------------------------------------------ createEvent
+
+/// `document.createEvent(name)` (DOM Standard, legacy): an event with an empty type that `initEvent` or `initCustomEvent` sets. The name is
+/// not case sensitive. `UIEvent` and `UIEvents` give a plain `Event`, because bare has no `UIEvent` interface. The event is not marked
+/// uninitialized: dispatching it before `initEvent` sends an event of type `""`.
+pub(crate) fn create_event(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
+    if a.is_empty() {
+        return Err(it.type_error("Failed to execute 'createEvent' on 'Document': 1 argument required, but only 0 present."));
+    }
+    let name = d.string_arg(it, a[0])?;
+    let empty = d.js_str(it, "")?;
+    match name.to_ascii_lowercase().as_str() {
+        "event" | "events" | "htmlevents" | "svgevents" | "uievent" | "uievents" => Ok(Value::Object(d.new_event(it, "", false, false, false, None)?)),
+        "customevent" => Ok(Value::Object(d.new_event(it, "", false, false, false, Some(Value::Null))?)),
+        "mouseevent" | "mouseevents" => crate::browser_uievent::ctor::<0>(d, it, Value::Undefined, &[empty]),
+        "keyboardevent" => crate::browser_uievent::ctor::<2>(d, it, Value::Undefined, &[empty]),
+        _ => Err(d.dom_err(it, "NotSupportedError", &format!("Failed to execute 'createEvent' on 'Document': The provided event type ('{name}') is invalid."))),
+    }
+}
+
+/// `event.initEvent(type, bubbles, cancelable)` and, with a fourth argument, `initCustomEvent`. Nothing happens while the event dispatches.
+fn init(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], what: &str, detail: bool) -> V {
+    if a.is_empty() {
+        return Err(it.type_error(&format!("Failed to execute '{what}' on '{}': 1 argument required, but only 0 present.", if detail { "CustomEvent" } else { "Event" })));
+    }
+    let ty = d.string_arg(it, a[0])?;
+    let (bubbles, cancelable) = (it.to_js_bool(arg(a, 1))?, it.to_js_bool(arg(a, 2))?);
+    with_event(d, it, this, |e| {
+        if !e.dispatching {
+            (e.ty, e.bubbles, e.cancelable) = (Rc::from(ty.as_str()), bubbles, cancelable);
+            (e.stop, e.stop_imm, e.canceled, e.trusted, e.target) = (false, false, false, false, Value::Null);
+            if detail {
+                e.detail = match arg(a, 3) {
+                    Value::Undefined => Value::Null,
+                    v => v,
+                };
+            }
+        }
+    })?;
+    Ok(Value::Undefined)
+}
+
+pub(crate) fn init_event(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    init(d, it, this, a, "initEvent", false)
+}
+
+pub(crate) fn init_custom_event(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    init(d, it, this, a, "initCustomEvent", true)
+}

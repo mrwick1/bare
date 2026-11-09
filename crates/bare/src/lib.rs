@@ -106,6 +106,8 @@ pub mod browser_platform;
 mod browser_platform_class;
 mod browser_platform_query;
 mod browser_scheduler;
+mod browser_perf;
+mod browser_html;
 mod browser_selection;
 #[cfg(test)]
 mod browser_selection_tests;
@@ -113,6 +115,8 @@ mod browser_selection_tests;
 mod browser_scheduler_tests;
 #[cfg(test)]
 mod browser_date_tests;
+#[cfg(test)]
+mod browser_web_api_tests;
 pub mod resources;
 mod browser_loader;
 pub use browser_loader::{CssStats, Fatal, Input, Intercept, NavStop, PageConfig, PageLimits, PageResult, Stop};

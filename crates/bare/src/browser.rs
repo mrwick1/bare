@@ -201,6 +201,9 @@ impl<K: SlotKey, V> IdTab<K, V> {
     pub fn contains_key(&self, k: &K) -> bool {
         self.get(k).is_some()
     }
+    pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
+        self.pages.iter().flatten().flat_map(|p| p.iter().flatten().map(|(k, v)| (k, v)))
+    }
     /// The entry of `k` is `v` from now on. The old value comes back if `k` had one.
     pub fn insert(&mut self, k: K, v: V) -> Option<V> {
         let s = k.slot();
@@ -514,6 +517,12 @@ pub struct Dom {
     /// The prototype and the constructor of `PerformanceObserver`, once read (`browser_perf_observer.rs`). Both are also in `fixed`.
     pub(crate) perf_observer: std::cell::Cell<Option<ObjId>>,
     pub(crate) perf_observer_ctor: std::cell::Cell<Option<ObjId>>,
+    /// The `mark` and `measure` entries of `performance` (`browser_perf.rs`).
+    pub(crate) perf_entries: RefCell<Vec<crate::browser_perf::Entry>>,
+    /// The prototype and constructor of each interface of `browser_html.rs`, once made.
+    pub(crate) html_ifaces: RefCell<Vec<Option<(ObjId, ObjId)>>>,
+    /// A global of `browser_html.rs` was read: new wrappers get their interface prototype.
+    pub(crate) html_on: std::cell::Cell<bool>,
     /// Scroll offsets, page bars and `scroll` events (`browser_scroll.rs`).
     pub(crate) scrolling: crate::browser_scroll::Scrolling,
     /// `ResizeObserver` and its rendering step (`browser_resize.rs`).
@@ -851,7 +860,7 @@ impl Dom {
                             t @ ("body" | "frameset") => crate::browser_handlers::body_proto(self, it, usize::from(t == "frameset"))?[0],
                             t @ ("select" | "option" | "optgroup" | "textarea") => crate::browser_select::proto_for(self, it, t)?,
                             n if crate::browser_custom::is_unknown(n) => crate::browser_custom::unknown_proto(self, it)?,
-                            _ => p.html,
+                            t => crate::browser_html::proto(self, it, t)?,
                         },
                     },
                     NodeData::Text(_) => p.text,
@@ -1278,6 +1287,7 @@ pub(crate) static DEFS: &[Def] = &[
     Def { on: &[Text], name: "splitText", len: 1, kind: M(crate::browser_chardata::split_text) },
     Def { on: &[Node], name: "normalize", len: 0, kind: M(crate::browser_chardata::normalize) },
     Def { on: &[Document], name: "createElement", len: 1, kind: M(nd::create_element) },
+    Def { on: &[Document], name: "createEvent", len: 1, kind: M(ev::create_event) },
     Def { on: &[Document], name: "createElementNS", len: 2, kind: M(ns::create_element_ns) },
     Def { on: &[Document], name: "getElementsByName", len: 1, kind: M(crate::browser_nodelist::get_elements_by_name) },
     Def { on: &[Document], name: "createAttribute", len: 1, kind: M(at::create_attribute) },
@@ -1347,6 +1357,8 @@ pub(crate) static DEFS: &[Def] = &[
     Def { on: &[Event], name: "stopPropagation", len: 0, kind: M(ev::stop_propagation) },
     Def { on: &[Event], name: "stopImmediatePropagation", len: 0, kind: M(ev::stop_immediate_propagation) },
     Def { on: &[Event], name: "composedPath", len: 0, kind: M(ev::composed_path) },
+    Def { on: &[Event], name: "initEvent", len: 1, kind: M(ev::init_event) },
+    Def { on: &[Custom], name: "initCustomEvent", len: 1, kind: M(ev::init_custom_event) },
     Def { on: &[Custom], name: "detail", len: 0, kind: G(ev::custom_detail) },
     Def { on: &[Html], name: "focus", len: 0, kind: M(crate::browser_focus::focus) },
     Def { on: &[Html], name: "blur", len: 0, kind: M(crate::browser_focus::blur) },
@@ -1450,6 +1462,9 @@ impl Browser {
             implementation: Default::default(),
             perf_observer: Default::default(),
             perf_observer_ctor: Default::default(),
+            perf_entries: Default::default(),
+            html_ifaces: Default::default(),
+            html_on: Default::default(),
             scrolling: Default::default(),
             resize: Default::default(),
             frame: Default::default(),
