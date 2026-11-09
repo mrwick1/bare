@@ -106,7 +106,10 @@ fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<()> {
         let (kp, kc, k) = (d.key(it, "prototype")?, d.key(it, "constructor")?, d.key(it, name)?);
         it.define_data(f, kp, Value::Object(p), false, false, false)?;
         it.define_data(p, kc, Value::Object(f), true, false, true)?;
-        it.define_data(it.global_object(), k, Value::Object(f), true, false, true)?;
+        let own = it.heap.peek_own_property(it.global_object(), k).map_err(|e| it.heap_error(e))?;
+        if own.is_none() || matches!(own, Some(bare_js::heap::Property::Accessor { .. })) {
+            it.define_data(it.global_object(), k, Value::Object(f), true, false, true)?;
+        }
     }
     d.def_get(it, sp, "cssRules", rules_get, None)?;
     d.def_get(it, sp, "ownerNode", owner_get, None)?;
@@ -125,18 +128,49 @@ fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     }
     Ok(())
 }
-fn global(d: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
-    ensure(d, it)?;
-    let k = d.key(it, "CSSStyleSheet")?;
-    it.get_value(Value::Object(it.global_object()), k)
+// Resolve only through the existing cold host-property miss path.
+#[cold]
+pub(crate) fn define(d: &Dom, it: &mut Interp<'_>, name: &str) -> R<bool> {
+    match name {
+        "CSSStyleSheet" | "CSSStyleRule" | "CSSRuleList" | "StyleSheetList" => {
+            ensure(d, it)?;
+            Ok(true)
+        }
+        "styleSheets" => {
+            let key = d.key(it, name)?;
+            if it.heap.peek_own_property(d.p().document, key).map_err(|e| it.heap_error(e))?.is_none() {
+                d.def_get(it, d.p().document, name, document_list, None)?;
+            }
+            Ok(true)
+        }
+        "sheet" => {
+            let p = style_proto(d, it)?;
+            let key = d.key(it, name)?;
+            if it.heap.peek_own_property(d.p().link, key).map_err(|e| it.heap_error(e))?.is_none() {
+                d.def_get(it, d.p().link, name, sheet_get, None)?;
+            }
+            let nodes: Vec<_> = d.st.borrow().by_node.iter().map(|(&n, &o)| (n, o)).collect();
+            it.charge(nodes.len() as u64)?;
+            for (n, o) in nodes {
+                if d.doc.borrow().is_html(n, "style") {
+                    it.heap.set_prototype_of(o, Some(p)).map_err(|e| it.heap_error(e))?;
+                }
+            }
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
 }
-pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    crate::browser_lazy::install(d, it, &[("CSSStyleSheet", global)])?;
-    d.def_get(it, d.p().document, "styleSheets", document_list, None)?;
-    d.def_get(it, d.p().link, "sheet", sheet_get, None)?;
-    Ok(())
+
+pub(crate) fn wrapper_proto(d: &Dom, it: &mut Interp<'_>) -> R<ObjId> {
+    if d.html_on.get() {
+        crate::browser_html::proto(d, it, "style")
+    } else {
+        Ok(d.cssom.style_p.get().copied().unwrap_or(d.p().html))
+    }
 }
-// Installed when a style or link wrapper is made, so unused realms pay nothing.
+
+// Created only after a sheet or HTMLStyleElement read.
 #[cold]
 pub(crate) fn style_proto(d: &Dom, it: &mut Interp<'_>) -> R<ObjId> {
     if let Some(&p) = d.cssom.style_p.get() {
@@ -292,6 +326,9 @@ fn source(d: &Dom, it: &mut Interp<'_>, o: ObjId) -> R<String> {
     if !same {
         return Err(d.dom_err(it, "SecurityError", "Cannot access rules of a cross-origin stylesheet"));
     }
+    if d.computed.ext.borrow().get(&href).is_some_and(|parts| parts.len() > 1) {
+        return Err(Dom::gate("CSSOM of flattened imported sheets"));
+    }
     let text = d
         .computed
         .ext
@@ -405,12 +442,17 @@ fn insert(d: &Dom, it: &mut Interp<'_>, t: Value, a: &[Value]) -> V {
     if i > state(d).borrow().sheets[&o].rules.len() {
         return Err(d.dom_err(it, "IndexSizeError", "Rule index is out of range"));
     }
-    if bare_css::parser::parse_stylesheet(&text).len() != 1 {
+    let parsed = bare_css::parser::parse_stylesheet(&text);
+    if parsed.len() != 1 {
         return Err(d.dom_err(it, "SyntaxError", "Expected one CSS rule"));
     }
+    if let bare_css::parser::Rule::Style(r) = &parsed[0] {
+        d.selectors(it, r.prelude)?;
+    }
     let rules = parsed_rules(d, it, o, &text)?;
-    state(d).borrow_mut().sheets.get_mut(&o).unwrap().rules.insert(i, rules[0]);
-    publish(d, it, o)?;
+    let mut next = state(d).borrow().sheets[&o].rules.clone();
+    next.insert(i, rules[0]);
+    publish_rules(d, it, o, next)?;
     Ok(Value::Number(i as f64))
 }
 fn delete(d: &Dom, it: &mut Interp<'_>, t: Value, a: &[Value]) -> V {
@@ -423,8 +465,9 @@ fn delete(d: &Dom, it: &mut Interp<'_>, t: Value, a: &[Value]) -> V {
     if i >= state(d).borrow().sheets[&o].rules.len() {
         return Err(d.dom_err(it, "IndexSizeError", "Rule index is out of range"));
     }
-    state(d).borrow_mut().sheets.get_mut(&o).unwrap().rules.remove(i);
-    publish(d, it, o)?;
+    let mut next = state(d).borrow().sheets[&o].rules.clone();
+    next.remove(i);
+    publish_rules(d, it, o, next)?;
     Ok(Value::Undefined)
 }
 fn rule_string(d: &Dom, it: &mut Interp<'_>, o: ObjId) -> R<String> {
@@ -439,7 +482,12 @@ fn rule_string(d: &Dom, it: &mut Interp<'_>, o: ObjId) -> R<String> {
     }
 }
 fn publish(d: &Dom, it: &mut Interp<'_>, o: ObjId) -> R<()> {
-    let sh = state(d).borrow().sheets[&o].clone();
+    let rules = state(d).borrow().sheets[&o].rules.clone();
+    publish_rules(d, it, o, rules)
+}
+fn publish_rules(d: &Dom, it: &mut Interp<'_>, o: ObjId, rules: Vec<ObjId>) -> R<()> {
+    let mut sh = state(d).borrow().sheets[&o].clone();
+    sh.rules = rules;
     let mut text = String::new();
     for &r in &sh.rules {
         let t = rule_string(d, it, r)?;
@@ -458,7 +506,9 @@ fn publish(d: &Dom, it: &mut Interp<'_>, o: ObjId) -> R<()> {
         return Err(Dom::gate("editing an external stylesheet through CSSOM"));
     }
     let mut s = state(d).borrow_mut();
-    s.sheets.get_mut(&o).unwrap().source = text;
+    let sheet = s.sheets.get_mut(&o).unwrap();
+    sheet.source = text;
+    sheet.rules = sh.rules.clone();
     s.lists.get_mut(&sh.list).unwrap().items = sh.rules;
     Ok(())
 }

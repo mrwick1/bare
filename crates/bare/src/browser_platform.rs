@@ -248,8 +248,6 @@ impl Dom {
         let iter_base = self.iterator_prototype(it, sym)?;
         let (mql, list, iter) = (self.obj(it, p.et)?, self.obj(it, op)?, self.obj(it, iter_base)?);
         let _ = self.plat.p.set(PProtos { mql, list, iter });
-        // CSSOM interfaces allocate their prototypes on first use.
-        crate::browser_cssom::install(self, it)?;
         let mut fixed = vec![mql, list, iter];
 
         // MediaQueryList

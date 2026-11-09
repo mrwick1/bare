@@ -88,7 +88,7 @@ use crate::browser_selection as sel;
 use crate::browser_shadow as sh;
 use crate::browser_custom as ce;
 pub use crate::browser_scheduler::{Pump, SchedLimits, SchedStats};
-use bare_css::selector::{Selector, parse_selector_list};
+use bare_css::selector::Selector;
 use bare_html::dom::{Document, NodeData, NodeId, Ns};
 use bare_js::eval::{Error, EvalLimits, Host, Interp, LimitKind};
 use bare_js::heap::{Heap, HeapLimits, PropertyDescriptor};
@@ -487,6 +487,7 @@ pub struct Dom {
     pub(crate) lim: BrowserLimits,
     pub(crate) p: OnceCell<Protos>,
     pub(crate) global: OnceCell<ObjId>,
+    selector_scope: Rc<std::cell::Cell<Option<NodeId>>>,
     pub(crate) doc_wrapper: OnceCell<ObjId>,
     /// `(handler, needs new)` for each host function id.
     pub(crate) handlers: RefCell<Vec<(H, bool)>>,
@@ -749,14 +750,20 @@ fn domexc_codes(name: &str) -> u32 {
 }
 
 #[cold]
-fn install_window(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+pub(crate) fn define_window(d: &Dom, it: &mut Interp<'_>, name: &str) -> R<bool> {
+    if !matches!(name,"frames"|"parent"|"top"|"length"|"name"|"screen"){return Ok(false);}
     let g = it.global_object();
-    let empty = Value::String(it.heap.intern_str("").map_err(|e| it.heap_error(e))?);
-    for (name, value) in [("frames", Value::Object(g)), ("parent", Value::Object(g)), ("top", Value::Object(g)), ("length", Value::Number(0.0)), ("name", empty)] {
-        let key = d.key(it, name)?;
-        it.define_data(g, key, value, !matches!(name, "top" | "length"), true, name != "top")?;
-    }
-    crate::browser_lazy::install(d, it, &[("screen", window_screen)])
+    let key=d.key(it,name)?;
+    if it.heap.peek_own_property(g,key).map_err(|e|it.heap_error(e))?.is_some(){return Ok(true);}
+    let value = match name {
+        "frames" | "parent" | "top" => Value::Object(g),
+        "length" => Value::Number(0.0),
+        "name" => d.js_str(it, "")?,
+        "screen" => { window_screen(d,it,Value::Undefined,&[])?; return Ok(true); },
+        _ => unreachable!(),
+    };
+    it.define_data(g,key,value,!matches!(name,"top"|"length"),true,name!="top")?;
+    Ok(true)
 }
 
 // The virtual display has the default headless dimensions. Viewport resizing does not resize it.
@@ -886,7 +893,7 @@ impl Dom {
                         _ => match doc.atom_str(name) {
                             "iframe" => p.iframe,
                             "link" => p.link,
-                            "style" => crate::browser_cssom::style_proto(self, it)?,
+                            "style" => crate::browser_cssom::wrapper_proto(self,it)?,
                             "a" | "area" | "template" | "img" | "slot" => crate::browser_elements::proto(self, it, doc.atom_str(name))?,
                             t @ ("audio" | "video") => crate::browser_media::proto(self, it, n, t)?,
                             t @ ("input" | "form" | "button" | "label") => crate::browser_controls::proto_for(self, it, t)?,
@@ -968,7 +975,7 @@ impl Dom {
             if doc.name_count() + text.len() > self.lim.max_names {
                 return Err(self.lim("dom-names"));
             }
-            parse_selector_list(text, &mut doc)
+            bare_css::selector::parse_scoped(text, &mut doc, bare_css::selector::Mode::Script, Some(self.selector_scope.clone()))
         };
         let Some(list) = parsed else { return Err(self.dom_err(it, "SyntaxError", &format!("'{text}' is not a valid selector"))) };
         // `a b c d e f g` can backtrack a lot: refuse more than five descendant or later-sibling combinators. A shorter chain is charged
@@ -986,17 +993,8 @@ impl Dom {
     }
 
     pub(crate) fn selectors_at(&self, it: &mut Interp<'_>, text: &str, scope: NodeId) -> R<Rc<Vec<Selector>>> {
-        let parsed = self.selectors(it, text)?;
-        if !parsed.iter().any(bare_css::selector::uses_scope) {
-            return Ok(parsed);
-        }
-        it.charge(text.len() as u64)?;
-        let scope = {
-            let doc = self.doc.borrow();
-            if scope == doc.root() { doc.children(scope).find(|&n| matches!(doc.data(n), NodeData::Element { .. })) } else { Some(scope) }
-        };
-        let parsed = bare_css::selector::parse_scoped(text, &mut self.doc.borrow_mut(), bare_css::selector::Mode::Script, scope);
-        Ok(Rc::new(parsed.expect("validated selector")))
+        self.selector_scope.set(Some(scope));
+        self.selectors(it, text)
     }
 
     // ------------------------------------------------------------ install
@@ -1220,8 +1218,7 @@ impl Dom {
         crate::browser_media::install(self, it)?;
         crate::browser_img::install(self, it)?;
         crate::browser_custom::install(self, it)?;
-        crate::browser_geom::install(self, it)?;
-        install_window(self, it)
+        crate::browser_geom::install(self, it)
     }
 
     pub(crate) fn define_accessor(&self, it: &mut Interp<'_>, o: ObjId, key: PropertyKey, get: ObjId, set: Option<ObjId>) -> R<()> {
@@ -1492,6 +1489,7 @@ impl Browser {
             lim: limits,
             p: OnceCell::new(),
             global: OnceCell::new(),
+            selector_scope: Default::default(),
             doc_wrapper: OnceCell::new(),
             handlers: RefCell::default(),
             fixed: RefCell::default(),

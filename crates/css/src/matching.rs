@@ -162,7 +162,10 @@ fn simple_matches(doc: &Document, el: NodeId, simple: &Simple) -> bool {
         Simple::OnlyChild => prev_element(doc, el).is_none() && next_element(doc, el).is_none(),
         Simple::Nth(nth) => nth_matches(doc, el, *nth),
         Simple::Root => doc.parent(el) == Some(doc.root()),
-        Simple::Scope(scope) => scope.map_or_else(|| doc.parent(el) == Some(doc.root()), |n| el == n),
+        Simple::Scope(scope) => match scope.as_ref().and_then(|s| s.get()) {
+            Some(n) if n != doc.root() => el == n,
+            _ => doc.parent(el) == Some(doc.root()),
+        },
         Simple::Empty => doc.children(el).all(|c| match *doc.data(c) {
             NodeData::Element { .. } => false,
             NodeData::Text(span) => doc.text(span).is_empty(),

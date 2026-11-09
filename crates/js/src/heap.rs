@@ -1385,13 +1385,32 @@ impl Heap {
         }
     }
 
-    /// A name the host may define on demand: `on<x>`, or `HTML<x>Element` (an interface object that the host makes when it is first named).
+    /// A name the host can define on demand. Only the existing lazy host-property paths call this.
     fn on_name(&self, s: StrId) -> bool {
         self.str(s).is_ok_and(|st| {
             let u = &st.units;
             u.len() >= 3 && u[0] == b'o' as u16 && u[1] == b'n' as u16
                 || u.len() > 11 && u[0] == b'H' as u16 && u[1] == b'T' as u16 && u[2] == b'M' as u16 && u[3] == b'L' as u16 && u.ends_with(&[b'E', b'l', b'e', b'm', b'e', b'n', b't'].map(u16::from))
+                || Self::browser_name(u)
         })
+    }
+
+    // Only the existing lazy host miss path calls this. Ordinary property reads do not test these names.
+    #[cold]
+    #[inline(never)]
+    fn browser_name(u: &[u16]) -> bool {
+        macro_rules! named { ($name:literal) => { u.iter().copied().eq($name.bytes().map(u16::from)) }; }
+        match u.first().copied() {
+            Some(102) => named!("frames"),
+            Some(112) => named!("parent"),
+            Some(116) => named!("top"),
+            Some(108) => named!("length"),
+            Some(110) => named!("name"),
+            Some(115) => named!("screen") || named!("sheet") || named!("styleSheets"),
+            Some(67) => named!("CSSStyleSheet") || named!("CSSStyleRule") || named!("CSSRuleList"),
+            Some(83) => named!("StyleSheetList"),
+            _ => false,
+        }
     }
 
     /// Make the prototype object of the lazy function `o`. Call only when `is_lazy` is true.

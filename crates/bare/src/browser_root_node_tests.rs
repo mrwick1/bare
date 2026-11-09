@@ -73,7 +73,7 @@ fn attached_nodes_have_the_document_as_root() {
 fn detached_trees_have_their_top_ancestor_and_detached_leaves_are_their_own_root() {
     let mut b = browser();
     assert_eq!(
-        js(&mut b, "var t = document.createTextNode('x'), c = document.createComment('c'), top = document.createElement('div'), mid = top.appendChild(document.createElement('section')), leaf = mid.appendChild(document.createElement('b')); [leaf.getRootNode() === top, mid.getRootNode() === top, top.getRootNode() === top, t.getRootNode() === t, c.getRootNode() === c, top.getRootNode() !== document].join()"),
+        js(&mut b, "var t = document.createTextNode('x'), c = document.createComment('c'), treeTop = document.createElement('div'), mid = treeTop.appendChild(document.createElement('section')), leaf = mid.appendChild(document.createElement('b')); [leaf.getRootNode() === treeTop, mid.getRootNode() === treeTop, treeTop.getRootNode() === treeTop, t.getRootNode() === t, c.getRootNode() === c, treeTop.getRootNode() !== document].join()"),
         "true,true,true,true,true,true"
     );
 }

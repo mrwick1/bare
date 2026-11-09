@@ -544,7 +544,7 @@ fn caps_return_distinct_limit_errors() {
         // events
         assert_eq!(js(&mut b, "var evs = []; for (var i = 0; i < 10; i++) evs.push(new Event('x'));"), lim("dom-events"));
         // depth
-        assert_eq!(js(&mut b, "var d = document.createElement('div'); var top = d; for (var i = 0; i < 20; i++) { var c = document.createElement('div'); c.appendChild(top); top = c; } 0"), lim("dom-depth"));
+        assert_eq!(js(&mut b, "var d = document.createElement('div'); var treeTop = d; for (var i = 0; i < 20; i++) { var c = document.createElement('div'); c.appendChild(treeTop); treeTop = c; } 0"), lim("dom-depth"));
         // results: a flat list longer than the cap
         let mut b2 = browser_with(&format!("<body>{}</body>", "<i></i>".repeat(10)), BrowserLimits { max_results: 6, ..Default::default() });
         assert_eq!(js(&mut b2, "document.querySelectorAll('i')"), lim("dom-results"));
@@ -932,5 +932,26 @@ fn cssom_lists_and_declarations_stay_live() {
         assert!(js(&mut b,"sheet.insertRule('p{} q{}',0)").starts_with("throw:SyntaxError:"));
         b.collect(&[]).unwrap();
         assert_eq!(js(&mut b, "sheet.ownerNode===sheets[0].ownerNode && rules===sheet.cssRules"), "true");
+    });
+}
+
+#[test]
+fn cssom_style_element_keeps_its_html_interface() {
+    big(|| {
+        let mut b = browser_with("<style>p { color: red }</style>", BrowserLimits::default());
+        assert_eq!(js(&mut b, "var e=document.querySelector('style'); e.sheet; [e instanceof HTMLStyleElement, Object.getPrototypeOf(e)===HTMLStyleElement.prototype, e.constructor===HTMLStyleElement].join()"), "true,true,true");
+    });
+}
+
+#[test]
+fn cssom_does_not_expose_flattened_imports() {
+    big(|| {
+        let mut b = browser_with("<link rel=stylesheet href='/s.css'>", BrowserLimits::default());
+        b.set_document_url("https://same.test/").unwrap();
+        b.set_external_stylesheet("/s.css", vec![
+            crate::browser_computed::SheetPart { text: "p { color: red }".into(), layer: None },
+            crate::browser_computed::SheetPart { text: "div { color: blue }".into(), layer: None },
+        ]).unwrap();
+        assert!(js(&mut b,"document.styleSheets[0].cssRules.length").starts_with("unsupported:CSSOM of flattened imported sheets"));
     });
 }
