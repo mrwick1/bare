@@ -3442,3 +3442,13 @@ Fix 1, wildcard names (RFC 9525): `*` must be the whole leftmost label and two l
 Next: RSA (modular exponentiation, PKCS#1 v1.5 and PSS verify, RSA keys in the X.509 parser, RSA algorithms in the ClientHello), written in `bare-tls` with no new dependency.
 
 Not tested: the other sites after the fix, `developer.mozilla.org` cause, arjun-e16.
+
+### Wikipedia article (2026-11-09)
+
+After #274, `https://en.wikipedia.org/wiki/Rust_(programming_language)` loaded but did not render: `Limit(Host("geometry-fragments"))` and a blank capture. The cause was the default `GeometryLimits`. The nodes, text and fragment limits were 16 K, 64 KiB and 128 K. They are guards for native layout, and no embedder (`bare`, `bare-drive`) raised them. The fragment bound counts one fragment for each byte of text, so a long article reaches it first.
+
+Change: the defaults are now 256 K nodes, 4 MiB of text and 2 M fragments. The depth limit (96) and the work limit are unchanged. The memory bound is `bound * 40` bytes, so at most 80 MB, and only for a page that fills the bound. Before and after on the same step file (`open`, `expect css="body" visible`, `shot`): before, the step failed after 1.7 s with a blank capture. After, it passes in 521 ms with 29 MiB peak RSS (one run, archMachine). `cargo test -p bare --release geometry`: 30 passed.
+
+The capture shows the article text, links, the contents list and the infobox table. Gaps in the capture: black squares where icons should be (probably SVG or background images), no infobox image, and a horizontal scrollbar. The console holds 13 `Unsupported: computed style needs an external stylesheet` lines. These gaps are not investigated.
+
+Not tested: the full workspace tests, a second run, other long pages, arjun-e16.

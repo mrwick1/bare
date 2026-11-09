@@ -69,7 +69,7 @@ pub struct GeometryLimits {
 
 impl Default for GeometryLimits {
     fn default() -> Self {
-        GeometryLimits { max_nodes: 1 << 14, max_depth: 96, max_text: 1 << 16, max_fragments: 1 << 17, max_work: 1 << 20 }
+        GeometryLimits { max_nodes: 1 << 18, max_depth: 96, max_text: 1 << 22, max_fragments: 1 << 21, max_work: 1 << 20 }
     }
 }
 
