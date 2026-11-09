@@ -8,7 +8,7 @@
 //! - URLs are resolved against the first `<base href>` that resolves, else against the page URL. (The HTML standard
 //!   uses the first `<base href>` only, even if it is bad. We skip a bad one, as the task asked.)
 //! - Scripts: `type` absent, empty or a JavaScript MIME type (exact, no parameters) is a classic script. `module` is a
-//!   module script: the facts are kept, nothing runs it. Any other type (`application/json`, `importmap`, a template)
+//!   module script: `browser_loader` runs it. Any other type (`application/json`, `importmap`, a template)
 //!   is data, not code: it is listed as skipped. A classic script with `nomodule` is skipped: `bare` is a browser
 //!   that knows modules, and a browser like that does not run it.
 //! - Timing: a classic external script is `Async` with `async`, else `Defer` with `defer`, else `Blocking`. A classic
@@ -106,7 +106,7 @@ pub enum Skip {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Kind {
-    /// `module` only says what the script is. Nothing runs a module yet.
+    /// `module` says that the script is a module: `browser_loader` runs it as one.
     Script { module: bool, timing: Timing, source: Source },
     /// An index into `Discovery::targets`.
     Stylesheet { target: usize },

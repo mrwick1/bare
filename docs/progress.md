@@ -4115,3 +4115,26 @@ I could not reproduce the masonry `Limit(Steps)` of the earlier note, on `origin
 **Noticed, not changed.** The global `eval` is missing (`eval is not defined`), which fails 537 test262 tests. `with` is unsupported (281 tests).
 
 Not tested: the bytecode engine on module code (`BARE_JS_EXEC=byte` falls back to the tree walker for modules), memory growth with many modules, a Chrome comparison of the evaluation order for async cycles beyond test262.
+
+## Module scripts in the page loader
+
+`<script type=module>` runs on a page. The code is `crates/bare/src/browser_loader/modules.rs`. The engine is the one of the previous section (no change in `crates/js`).
+
+**What works.**
+- A module script is deferred, in document order with the `defer` scripts, before `DOMContentLoaded`. With `async` it runs in the async stage. `nomodule` does nothing on a module. An inline module has `import.meta.url` of the document. A script that a script adds with `type=module` (inline or `src`) runs as a task after the current one.
+- Dependencies load when the script runs. One URL loads once for each document. A module with two or more new imports starts their downloads together. A failed download is not tried again. A text that a `modulepreload` link fetched is used first. A graph that fails to load is dropped whole, so no module with a missing import stays in the cache.
+- Specifiers `/x`, `./x`, `../x` and absolute URLs resolve against the URL of the importing module. A bare specifier throws a `TypeError` unless an import map maps it. `<script type=importmap>` (inline, `imports` and `scopes`, the longest key first, keys that end with `/` map a prefix) is read once, at the first resolution.
+- `import()` works in classic scripts and in modules. The engine queues the call. `after_js`, the one checkpoint of the loader, loads the graph and settles the promise. A failed download rejects with a `TypeError`, a syntax error with a `SyntaxError`.
+- A module that cannot be fetched (a status, a MIME type, a size cap, a dependency) gives an `error` event at its element and a diagnostic. A syntax error, a bad specifier, a link error, an exception, and a rejected top-level `await` go to `window.onerror` (the same path as a classic script). An external module gets `load` once its evaluation has started.
+- A page with a top-level `await` that never settles still ends: its promise is not a task, and `DOMContentLoaded` and `load` do not wait for it (as in Chrome).
+- `<link rel=modulepreload>` that a script adds is fetched, and gets `load` or `error`.
+
+**Gaps (not done).**
+- A `modulepreload` link in the parsed page is only marked, as for `rel=preload` (the module fetches it later when it needs it).
+- `integrity`, `crossorigin`, an import map with `src`, a second import map after the first resolution, JSON and CSS modules, worker modules, `import(x, { with })`.
+- Fetching a module blocks the page thread, as for a classic script. Only a graph of two or more new imports downloads together.
+- A split document (live navigation) loads a whole module graph in one turn: the slice rule for downloads does not apply to modules.
+
+**Gates.** `cargo test --release --workspace`: 0 failed (1095 passed in the `bare` lib). 11 new tests in `browser_loader_tests.rs` replace the test that expected `Unsupported("module script")`.
+
+Not tested: a split document with module scripts, `<base href>` with a module that is imported through an import map, a real browser comparison of the order between an async module and a timer.

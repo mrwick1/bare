@@ -104,7 +104,16 @@ impl Preloads {
 fn probe(doc: &Document, n: NodeId, vp: (f32, f32), at: &[Option<Atom>; 4]) -> Option<(String, Kind)> {
     let [rel, href, as_, media] = *at;
     let a = |x: Option<Atom>| x.and_then(|x| doc.attr(n, x));
-    if !a(rel)?.split_ascii_whitespace().any(|w| w.eq_ignore_ascii_case("preload")) || !a(media).is_none_or(|m| media_matches(m, vp)) {
+    let rel = a(rel)?;
+    let word = |x: &str| rel.split_ascii_whitespace().any(|w| w.eq_ignore_ascii_case(x));
+    if !a(media).is_none_or(|m| media_matches(m, vp)) {
+        return None;
+    }
+    // `modulepreload` fetches a module script: its text waits for the `import` or `<script type=module>` that names it.
+    if word("modulepreload") {
+        return Some((a(href)?.to_string(), Kind::Script));
+    }
+    if !word("preload") {
         return None;
     }
     let as_ = a(as_)?;

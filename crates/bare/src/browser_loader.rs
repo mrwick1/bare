@@ -34,8 +34,8 @@
 //! before or after others) can behave differently here.
 //!
 //! Scripts
-//! - Classic only. A `type=module` script is `Fatal::Unsupported("module script")`: the engine has no modules. A `nomodule`
-//!   script is skipped (`resources::discover`). Other `type` values are data. Every `<script>` element runs separately, even
+//! - A `type=module` script runs as a module (`browser_loader/modules.rs`: deferred, `async`, `import`, import maps, `import()`).
+//!   A `nomodule` classic script is skipped (`resources::discover`). Other `type` values are data. Every `<script>` element runs separately, even
 //!   when two elements name one URL (the bytes are fetched once: they are kept for the repeats and freed after the last).
 //! - A response is used only as `resources::fetch` allows: 2xx, a JavaScript `Content-Type` (a 404 or HTML page never runs),
 //!   no `Content-Encoding` that `bare_net` cannot undo (it undoes gzip, deflate and br), size caps. A failed external script is never run. It gets an `error` event, a successful one
@@ -48,7 +48,7 @@
 //! - A script budget (`Limit` of steps, call depth, nesting depth, statement frames, jobs of one checkpoint) ends only the task that
 //!   hit it (`Browser::survive`): one console error, the DOM as it is, the run goes on. After `BrowserLimits::max_task_aborts` the
 //!   run stops with `Fatal::Aborted`.
-//! - Fatal: any `Unsupported`, any other `Limit` (host caps, heap, memory) or heap fault, a module script. The run stops at once
+//! - Fatal: any `Unsupported`, any other `Limit` (host caps, heap, memory) or heap fault. The run stops at once
 //!   and no JS runs and no I/O starts after that (a second `run_page` returns the same stop).
 //!
 //! Dynamic scripts (`document.createElement('script')`)
@@ -72,7 +72,7 @@
 //! Not here: `window.onload`, `DOMContentLoaded` for scripts that were added late, `defer` on dynamic scripts,
 //! `integrity`, `crossorigin`, `nonce`, CSP, `<noscript>`, a service worker.
 
-use crate::browser::{Browser, Dom, IdHash, H, Listener, R, Survive, Target as EvTarget, unsupported};
+use crate::browser::{Browser, Dom, IdHash, H, Listener, R, Survive, Target as EvTarget};
 use crate::browser_dom as nd;
 use crate::browser_fetch::{FetchConfig, FetchLimits};
 use crate::browser_navigation::NavigationRequest;
@@ -90,6 +90,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+mod modules;
 mod preload;
 #[cfg(test)]
 mod preload_tests;
@@ -313,6 +314,8 @@ pub(crate) struct Scripts {
     sheets: RefCell<sheets::Sheets>,
     /// `<link rel=preload>` results and the preloaded script texts. Lives as long as the document.
     preloads: RefCell<preload::Preloads>,
+    /// Module scripts: the graph cache, the import map and the `import()` state. Lives as long as the document.
+    modules: RefCell<modules::Modules>,
     /// Live: the downloads of the page, kept from one turn to the next (a script that is not in yet waits here).
     net: RefCell<Option<Box<Net>>>,
     /// Live: a document that a page navigation loaded in the background. Its scripts run across turns, and the page takes input between
@@ -411,16 +414,17 @@ impl Dom {
         if s.started.borrow().contains(&el) {
             return Ok(());
         }
+        let mut is_module = false;
         let (src, text) = {
             let doc = self.doc.borrow();
             let attr = |n: &str| doc.find_atom(n).and_then(|a| doc.attr(el, a));
             match attr("type").map(|t| t.trim_matches(WS)) {
                 None | Some("") => {}
-                Some(t) if t.eq_ignore_ascii_case("module") => return Err(Error::Unsupported(unsupported("module script"))),
+                Some(t) if t.eq_ignore_ascii_case("module") => is_module = true,
                 Some(t) if JS_TYPES.iter().any(|j| t.eq_ignore_ascii_case(j)) => {}
                 Some(_) => return Ok(()),
             }
-            if attr("nomodule").is_some() {
+            if !is_module && attr("nomodule").is_some() {
                 return Ok(());
             }
             match attr("src") {
@@ -428,6 +432,9 @@ impl Dom {
                 None => (None, resources::inline_source(&doc, el).into_owned()),
             }
         };
+        if is_module {
+            s.modules.borrow_mut().nodes.insert(el);
+        }
         let (max_scripts, max_bytes) = s.caps.get();
         if s.inline.borrow().len() + s.external.borrow().len() >= max_scripts {
             return Err(self.lim("pending-scripts"));
@@ -1174,20 +1181,25 @@ impl Run<'_> {
         match r {
             Ok(_) => Ok(()),
             Err(Error::Throw(v)) => {
-                self.dom.report(&mut self.b.it, v, "error", EvTarget::Window);
-                self.res.script_throws += 1;
-                let name = if matches!(v, Value::Object(_)) {
-                    let reports = self.dom.st.borrow();
-                    match reports.reports.back().and_then(|r| r.message.split(':').next()) {
-                        Some(n @ ("Error" | "TypeError" | "ReferenceError" | "SyntaxError" | "RangeError" | "URIError" | "EvalError" | "AggregateError" | "SecurityError" | "QuotaExceededError" | "InvalidStateError")) => n.to_string(),
-                        _ => "Error".into(),
-                    }
-                } else { "non-error value".into() };
-                self.diag(format!("script threw {name}: {what}"));
+                self.script_threw(v, what);
                 Ok(())
             }
             Err(e) => self.abort(e, what),
         }
+    }
+
+    /// A script or module threw `v`: report it to `window` and count it.
+    fn script_threw(&mut self, v: Value, what: &str) {
+        self.dom.report(&mut self.b.it, v, "error", EvTarget::Window);
+        self.res.script_throws += 1;
+        let name = if matches!(v, Value::Object(_)) {
+            let reports = self.dom.st.borrow();
+            match reports.reports.back().and_then(|r| r.message.split(':').next()) {
+                Some(n @ ("Error" | "TypeError" | "ReferenceError" | "SyntaxError" | "RangeError" | "URIError" | "EvalError" | "AggregateError" | "SecurityError" | "QuotaExceededError" | "InvalidStateError")) => n.to_string(),
+                _ => "Error".into(),
+            }
+        } else { "non-error value".into() };
+        self.diag(format!("script threw {name}: {what}"));
     }
 
     /// After a script or task: dynamic inline scripts that it queued run now, then the microtask checkpoint.
@@ -1198,9 +1210,22 @@ impl Run<'_> {
             let Some((node, text)) = next else { break };
             let pending = &self.dom.scripts.pending_bytes;
             pending.set(pending.get().saturating_sub(text.len()));
+            if self.dom.scripts.modules.borrow().nodes.contains(&node) {
+                if let Some(base) = self.doc_base() {
+                    self.finish_module(node, "dynamic module script", &base, Ok(text), false)?;
+                }
+                continue;
+            }
             self.run_one(node, &text, "dynamic inline script")?;
         }
-        self.checkpoint("microtask checkpoint")?;
+        // Each pass answers the `import()` calls of the one before, until none is left.
+        loop {
+            self.checkpoint("microtask checkpoint")?;
+            self.settle_evals();
+            if !self.serve_imports()? {
+                break;
+            }
+        }
         self.nav_stop()
     }
 
@@ -1257,13 +1282,14 @@ impl Run<'_> {
     fn run_parsed(&mut self, p: Parsed) -> Flow {
         self.budget()?;
         self.feed_if_ran()?;
-        if p.module {
-            self.diag(format!("module script #{}", p.n));
-            return Err(Stop::Fatal(Fatal::Unsupported("module script")));
-        }
         match p.source {
             Source::Inline => {
                 let text = resources::inline_source(&self.dom.doc.borrow(), p.node).into_owned();
+                if p.module {
+                    let Some(base) = self.doc_base() else { return Ok(()) };
+                    self.finish_module(p.node, &format!("inline module #{}", p.n), &base, Ok(text), false)?;
+                    return self.after_js();
+                }
                 self.run_one(p.node, &text, &format!("inline script #{}", p.n))?;
                 self.after_js()
             }
@@ -1304,6 +1330,11 @@ impl Run<'_> {
                     }
                     self.cache[t] = Some(k);
                 }
+                if p.module {
+                    let url = Url { scheme: self.disc.targets[t].url.scheme, host: self.disc.targets[t].url.host.clone(), port: self.disc.targets[t].url.port, path: self.disc.targets[t].url.path.clone() };
+                    self.finish_module(p.node, &what, &url, text, true)?;
+                    return self.after_js();
+                }
                 self.finish_external(p.node, &what, text)
             }
         }
@@ -1334,7 +1365,12 @@ impl Run<'_> {
                         r
                     }
                 };
-                self.finish_external(node, &what, text)?;
+                if self.dom.scripts.modules.borrow().nodes.contains(&node) {
+                    self.finish_module(node, &what, &target.url, text, true)?;
+                    self.after_js()?;
+                } else {
+                    self.finish_external(node, &what, text)?;
+                }
             }
         }
         Ok(true)
