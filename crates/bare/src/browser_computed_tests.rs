@@ -766,3 +766,39 @@ fn work_bound_counts_styled_elements_not_text_nodes() {
         assert_eq!(js(&mut b, "getComputedStyle(document.querySelector('i')).display"), lim("computed-work"));
     });
 }
+
+/// A read after a change restyles the elements that the change reaches. It charges for those, not for the whole page. 2,000 elements and
+/// 2,000 class rules are 1 M steps for a full cascade (4 M units, `UNITS_PER_STEP`), and the budget here is 6 M. Main charged the whole bound (4 M)
+/// for each of the 3 reads (dev.to: 84 M).
+#[test]
+fn a_read_after_a_change_charges_the_elements_it_restyles() {
+    big(|| {
+        let css: String = (0..2000).map(|i| format!(".c{i}{{color:red}}")).collect::<String>() + ".on{color:blue}";
+        let page = format!("<style>{css}</style><body>{}", (0..2000).map(|i| format!("<div class=c{i} id=d{i}>x</div>")).collect::<String>());
+        let mut b = Browser::new(tree::parse(&page), BrowserLimits::default(), EvalLimits { max_steps: 6_000_000, ..Default::default() }, HeapLimits::default()).unwrap();
+        let script = "var e = document.getElementById('d5'), r = []; r.push(e.clientHeight); e.className = 'c7'; r.push(e.clientHeight); e.className = 'c8'; r.push(e.clientHeight); r.length";
+        assert_eq!(js(&mut b, script), "3");
+        let s = b.computed_stats();
+        assert_eq!((s.computes, s.restyles), (1, 2));
+        // A change that keeps the style of its element costs that one element: 100 reads fit (the whole page would be 1 M each).
+        let same = "var b = document.body, n = 0; for (var i = 0; i < 100; i++) { b.className = 'z' + i; n += b.clientHeight >= 0; } n";
+        assert_eq!(js(&mut b, same), "100");
+        // A change that restyles the whole subtree of the body is charged for it: 20 of them are over the budget.
+        let all = "var b = document.body; for (var i = 0; i < 20; i++) { b.className = i % 2 ? 'on' : 'z'; b.clientHeight; } 1";
+        assert_eq!(js(&mut b, all), "limit:Steps");
+    });
+}
+
+/// A page shaped like dev.to: 6,000 nodes (2,000 elements), 16,000 rules. Three reads after changes in one task end it on main (84 M each).
+#[test]
+fn three_reads_after_changes_on_a_page_like_dev_to_do_not_end_the_task() {
+    big(|| {
+        let css: String = (0..16_000).map(|i| format!(".c{i}{{color:red}}")).collect();
+        let page = format!("<style>{css}</style><body>{}", (0..2000).map(|i| format!("<i class=c{i} id=i{i}>x</i> ")).collect::<String>());
+        let mut b = Browser::new(tree::parse(&page), BrowserLimits::default(), EvalLimits::default(), HeapLimits::default()).unwrap();
+        let script = "var e = document.getElementById('i5'), r = []; r.push(e.clientHeight); e.className = 'c7'; r.push(e.clientHeight); e.className = 'c8'; r.push(e.clientHeight); r.length";
+        assert_eq!(js(&mut b, script), "3");
+        let s = b.computed_stats();
+        assert_eq!((s.computes, s.restyles), (1, 2));
+    });
+}

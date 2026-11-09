@@ -585,7 +585,7 @@ A runaway script ends the task, not the page. Chrome does the same: it shows "pa
 Two caps stopped pages that Chrome loads. Neither changed class: a cap that a real page hits is wrong, and the fix is the measure or the value.
 
 - `computed-work` bounded nodes x (rules + 1). apnews has 30,000 nodes, of which 5,000 are elements, and 8,274 rules: 252 million, over the cap of 134 million. The indexed cascade checks 1.3 million candidates and takes 24 ms. The cap now falls back to styled elements x (rules + 1) when the first bound is over (`styled_work`, cold path). Text nodes are not styled. The cheap bound stays the first test, so small pages pay no new work. The bound is still not the real count of candidates: that count needs the rule index in `bare_css`. It is the next step.
-- The step budget is charged with the same bound (`it.charge(work)`), so the default 100 M steps of one task end a cascade before the 134 M cap does. A page whose styled elements x rules is over 100 M still stops (`Steps`).
+- The step budget was charged with the same bound on every read (`it.charge(work)`), also on a read that only restyles. The next section replaces this.
 - `fetch-queue` held 64 requests. gitlab calls `fetch` 64 times in one task, before one can finish: no leak and no count bug (finished requests leave the queue in order). Chrome queues them, so the queue holds 1,024 requests and 8 MiB of URL and header text (`max_pending_bytes`; bodies stay under `max_retained`). The text is summed only once the queue holds 64 requests. Over either bound the page stops, as before: this is a bound against a hostile page, not a case that a real page reaches.
 
 ## Unhandled promise rejections
@@ -602,3 +602,14 @@ A promise that is rejected with no handler is reported after the microtask check
 - GC: the pending list is a root. The reported list is weak (the standard's "outstanding rejected promises weak set"): `collect` drops the unreachable ones.
 - The listeners run as one host call with the budget of the checkpoint. No new step budget starts.
 - Cost: no new field in `PromiseData`. The full matrix has zero rows over +0.5%.
+
+## The cascade charges steps for the elements it styles
+
+The step budget is 100 M steps for each task. A host call must charge about the work that it does. Five live pages ended tasks with `Steps` because the cascade charged an upper bound on every read: dev.to, kubernetes docs, nasa, redis and hsbc. In all five, `cascade_with` was more than 97% of the charged steps.
+
+- A read that finds the last styles right charges 1 step, as before.
+- A read after changes restyles the elements that the changes reach (`RuleSet::restyle`) and charges for those: each root styled with its subtree, and the subtree of a root whose style changed. A root whose style did not change costs one element. It charges `elements x (rules / 4 + 1)`. Main charged nodes x (rules + 1) first, and then charged the changed elements on top. dev.to: 84 M steps for each read, and a restyle of a few nodes paid for the whole page.
+- A full compute (the first read, new rules, or a restyle that cannot run) charges `styled elements x (rules / 4 + 1)` before it runs. Small pages (bound under 2^20) use nodes. The `computed-work` cap check is unchanged and still comes first. It bounds the time and the memory, and the charge does not replace it.
+- The divisor is a measurement, not a rule of the cascade (`UNITS_PER_STEP`, `browser_computed.rs`). One step of a JS loop costs 273 instructions (`for (let i...) s += i`, 4 steps for each iteration, the loop hit the budget at 27.3 G instructions). A full cascade of dev.to (2,018 elements, 16,198 rules) costs 125 M instructions (`perf stat -e instructions:u`, runs with 40 extra computes minus runs with none, divided by 40, two pairs: 121 M and 128 M). It charges 8.2 M steps now, so 15 instructions for each step: the charge is about 18 times the real work. Typical cost is 2 to 4 instructions for each element x rule. Before it charged 84 M steps, 1.5 instructions for each step.
+- With divisor 1 the same fix still left kubernetes and redis over the budget. 2 and 4 pass all five pages. 4 keeps a margin of 2 or more.
+- Limit: `bare_css` has no count of the candidates that the rule index gives for an element, so this is a model of the work. A page whose rules all match all elements (`*:not(.zN)`, 2,000 elements x 2,000 rules) costs 334 instructions for each element x rule (1.34 G for one cascade, 135 ms). Charged 1 M steps, it is 5 times under the JS rate. The time of one such cascade is bounded by `computed-work` (4.5 s at the cap); one task can run several. A real count of candidates, charged as steps, is the next step. It needs a counter in `crates/css`.
