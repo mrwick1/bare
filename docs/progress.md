@@ -4413,3 +4413,81 @@ A second `open` (a new profile) sent the cookies of the first. A worker thread o
 - A three-label public suffix.
 - Cookies with the window (non-headless) driver.
 - Sites where a cookie is `Partitioned`.
+
+## Status 2026-11-09 (headless e2e push)
+
+Base: origin/main `df82df1`. Every item below comes from git, `gh pr list` or this file. Items marked "to verify" have no record in git or the docs.
+
+### Merged PRs, #274 to #297
+
+- #274: Match wildcard names in server certificates.
+- #275: Raise the default geometry limits for long pages.
+- #276: Draw img and picture elements.
+- #277: Fix three layout gaps on the Wikipedia article.
+- #279: Add public-site e2e journeys; fix visible and click on inline links.
+- #280: Verify RSA signatures in bare-tls.
+- #281: Fix the react.dev journey and remove the needs-rsa marks.
+- #282: TLS: P-384 CertificateVerify and system roots with serial 0.
+- #283: Add 16 public-site e2e journeys; fix label click crash and document.forms.
+- #284: Run the Wikipedia JavaScript without errors.
+- #285: Wait quietly for style sheets in flight; skip print-only and disabled sheets.
+- #286: Show text and image responses as documents.
+- #287: Lex non-ASCII names, add class static blocks and Image.
+- #288: Read `\p{...}` and `\P{...}` in regular expressions.
+- #289: Read min(), max() and clamp() in lengths.
+- #290: Skip the decode for Latin-1 characters in the non-ASCII name check.
+- #291: End only the task when a script budget runs out; add document collections and title.
+- #292: Run ES modules in bare-js.
+- #293: Run module scripts on a page.
+- #294: Add CORS to fetch and XHR; computed style of pseudo-elements.
+- #295: Run await in for-in and optional chains, so module pages go further.
+- #296: Give SVG elements a style property; print an error's stack or message in the console.
+- #297: Add an HTTP cookie jar shared by the network and document.cookie.
+
+PR #278 (draw CSS background-image and mask-image) is open. It is not merged.
+
+### Owner decisions
+
+- 2026-11-09: PR #289 merged under a standing cost exception. Approved by Arjun. 45 of 805 rows are over +0.5% under both allocators. Worst row: `block-percent-calc 200000`, +1.275% glibc and +1.363% jemalloc. Mean change: glibc +0.072%. Record: "Standing exception: PR #289 calc cost".
+- `lex_load malformed`: standing cost exception for PR #287. The row is +0.75% after the Latin-1 fix in PR #290. Approval date: to verify.
+- RSA TLS is written in-house in bare-tls (PR #280). Decision date: to verify.
+- Decoder crates are allowed. Examples: `png`, `zune-jpeg`, `image-webp` (`docs/decisions.md`, image decoders) and `flate2` with `miniz_oxide`. Decision date: to verify.
+
+### Latest e2e results
+
+- `tools/drive/public` suite: 27 pass, 0 fail. Three runs, 0 flakes. Run on the cookie jar branch of PR #297. One known failure is listed in the file, not counted: `rust-book-sidebar`.
+- Survey 3: 38 of 42 old sites pass. 17 of 20 new sites pass. To verify: no record in git or `docs/`. The source is the owner request only.
+
+### Open items
+
+Agent working (to verify: the status of each agent run):
+
+- Craigslist, nginx.org and dev.to need TLS 1.2.
+- Cost check for the 16 rows left over by PR #292.
+- Cost of PR #278 (image drawing).
+- Wikipedia JavaScript.
+- Shadow DOM style scoping.
+
+Blocked:
+
+- gnu.org blocks this client. The host resets connections after a burst of requests (survey 3 regressions section).
+
+Not started:
+
+- Time zone support. `Date.prototype.getSeconds` (local time) is `Unsupported`.
+- Arabic text is missing.
+- Grey image placeholders.
+- Black boxes.
+- Run-together navigation text.
+- Logical CSS properties, such as `margin-inline-start`. Unsupported.
+- RegExp named groups. Unsupported.
+- Range header CORS.
+- Firefox comparison.
+- Fresh survey re-run.
+
+### Cookie jar limits
+
+- Memory only. No profile directory and no disk store. Each drive `open` starts empty.
+- The public suffix list is short: every one-label name and about 80 two-label suffixes.
+- `Partitioned` (CHIPS) is ignored.
+- The per-domain limit is 180.
