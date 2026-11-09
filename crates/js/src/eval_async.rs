@@ -163,6 +163,12 @@ enum Fr {
     Scope { saved: u32, env: u32 },
     IfT { s: StmtId },
     VarD { s: StmtId, d: u32 },
+    /// The pattern of declaration `d` of `var` statement `s` is bound; the next declaration follows.
+    VarP { s: StmtId, d: u32 },
+    /// The default of an assignment pattern is being evaluated; its value is bound to `target`.
+    PatDef { target: PatId, mode: Bind },
+    /// Properties `i..` of object pattern `p` are left. Slot `base` is the source, the slots after it are the keys read.
+    PatObj { p: PatId, i: u32, base: u32, mode: Bind },
     Lab { label: u32 },
     WhileT { s: StmtId, lb: Lbl },
     WhileB { s: StmtId, lb: Lbl },
@@ -330,6 +336,28 @@ impl<'p> Interp<'p> {
         self.aw.marks.contains(&(self.cur as u32, s.index() as u32, 1))
     }
 
+    /// A pattern with an `await` in it (a default or a nested pattern).
+    fn aw_pat(&self, p: PatId) -> bool {
+        self.aw.marks.contains(&(self.cur as u32, p.index() as u32, 3))
+    }
+
+    /// Whether the machine cannot bind pattern `p` across an `await`: array patterns (an iterator to close) and computed keys.
+    fn pat_gap(&self, p: PatId) -> bool {
+        if !self.aw_pat(p) {
+            return false;
+        }
+        match self.prog.pat(p).kind {
+            PatKind::Array(_) => true,
+            PatKind::Object(l) => self.prog.list(l).any(|q| {
+                let pp = *self.prog.pat_prop(q);
+                matches!(pp.key, Key::Computed(e) if self.aw_expr(e)) || self.pat_gap(pp.value)
+            }),
+            PatKind::Assign { target, .. } => self.pat_gap(target),
+            PatKind::Rest(t) => self.pat_gap(t),
+            _ => false,
+        }
+    }
+
     fn aw_func(&self, f: FuncId) -> bool {
         self.aw.marks.contains(&(self.cur as u32, f.index() as u32, 2))
     }
@@ -407,6 +435,9 @@ impl<'p> Interp<'p> {
                 any |= self.scan_expr(default)?;
             }
             PatKind::Rest(t) => any |= self.scan_pat(t)?,
+        }
+        if any {
+            self.mark(p.index(), 3)?;
         }
         Ok(any)
     }
@@ -589,7 +620,10 @@ impl<'p> Interp<'p> {
                 for d in prog.list(decls) {
                     let d = *prog.decl(d);
                     if self.scan_pat(d.target)? {
-                        return no("await in a binding pattern");
+                        if self.pat_gap(d.target) {
+                            return no("await in a binding pattern");
+                        }
+                        any = true;
                     }
                     if let Some(i) = d.init {
                         any |= self.scan_expr(i)?;
@@ -1730,6 +1764,14 @@ impl<'p> Interp<'p> {
                 self.fpush(run, Fr::VarD { s, d: k as u32 })?;
                 return nx(Next::Eval(i));
             }
+            if !matches!(prog.pat(d.target).kind, PatKind::Ident) && self.aw_pat(d.target) {
+                let v = match d.init {
+                    Some(i) => self.eval_expr(i)?,
+                    None => Value::Undefined,
+                };
+                self.fpush(run, Fr::VarP { s, d: k as u32 })?;
+                return self.pat_step(run, d.target, v, if kind == VarKind::Var { Bind::Assign } else { Bind::Init });
+            }
             let name = if let PatKind::Ident = prog.pat(d.target).kind { Some(self.name_str(self.pat_name[d.target.index()])?) } else { None };
             match (kind, d.init) {
                 (VarKind::Var, None) => {}
@@ -1746,6 +1788,82 @@ impl<'p> Interp<'p> {
                 }
             }
         }
+        val(Value::Undefined)
+    }
+
+    /// The value of declaration `d` of `var` statement `s` is ready and its target has an `await` in it.
+    #[cold]
+    #[inline(never)]
+    fn pat_start(&mut self, run: &mut Run, s: StmtId, d: u32, target: PatId, v: Value, mode: Bind) -> Res<Step> {
+        self.fpush(run, Fr::VarP { s, d })?;
+        self.pat_step(run, target, v, mode)
+    }
+
+    /// Bind `v` to pattern `p` in the machine. A pattern with no `await` binds at once; the machine keeps the rest as frames,
+    /// so a default value may wait. Only object patterns, defaults and nested ones reach here (`pat_gap` refuses the others).
+    fn pat_step(&mut self, run: &mut Run, p: PatId, v: Value, mode: Bind) -> Res<Step> {
+        if !self.aw_pat(p) {
+            self.bind_pattern(p, v, mode)?;
+            return val(Value::Undefined);
+        }
+        let prog = self.prog.clone();
+        match prog.pat(p).kind {
+            PatKind::Assign { target, default } if matches!(v, Value::Undefined) => {
+                if self.aw_expr(default) {
+                    self.fpush(run, Fr::PatDef { target, mode })?;
+                    return nx(Next::Eval(default));
+                }
+                let name = if let PatKind::Ident = prog.pat(target).kind { Some(self.pat_name[target.index()]) } else { None };
+                let v = self.eval_named_n(default, name)?;
+                self.pat_step(run, target, v, mode)
+            }
+            PatKind::Assign { target, .. } => self.pat_step(run, target, v, mode),
+            PatKind::Object(_) => {
+                if is_nullish(v) {
+                    let t = self.display(v);
+                    return Err(self.type_err(&format!("Cannot destructure '{t}' as it is {t}.")));
+                }
+                let base = run.slots.len();
+                self.spush(run, Slot::V(v))?;
+                self.pat_obj(run, p, 0, base, mode)
+            }
+            _ => Err(unsupported("await in a binding pattern", prog.pat(p).span)),
+        }
+    }
+
+    /// The properties `from..` of object pattern `p`. Slot `base` holds the source value and the slots after it the keys read.
+    fn pat_obj(&mut self, run: &mut Run, p: PatId, from: usize, base: usize, mode: Bind) -> Res<Step> {
+        let prog = self.prog.clone();
+        let PatKind::Object(l) = prog.pat(p).kind else { return Err(unsupported("pattern", Span::default())) };
+        let v = sval(run, base);
+        for k in from..l.len() {
+            let pp = *prog.pat_prop(self.list_at(l, k));
+            if let PatKind::Rest(t) = prog.pat(pp.value).kind {
+                let used: Vec<PropertyKey> = run.slots[base + 1..].iter().filter_map(|s| if let Slot::K(k) = s { Some(*k) } else { None }).collect();
+                let o = h!(self, self.heap.new_object(Some(self.object_proto)));
+                self.copy_props(o, v, &used)?;
+                self.bind_pattern(t, Value::Object(o), mode)?;
+                continue;
+            }
+            let key = match pp.key {
+                Key::Computed(e) => {
+                    let kv = self.eval_expr(e)?;
+                    self.coerce_key(kv)?
+                }
+                key => {
+                    let s = self.key_string(key, &prog)?;
+                    h!(self, self.heap.key_from_string(s))
+                }
+            };
+            self.spush(run, Slot::K(key))?;
+            let x = self.get_prop(v, key)?;
+            if self.aw_pat(pp.value) {
+                self.fpush(run, Fr::PatObj { p, i: k as u32 + 1, base: base as u32, mode })?;
+                return self.pat_step(run, pp.value, x, mode);
+            }
+            self.bind_pattern(pp.value, x, mode)?;
+        }
+        self.strunc(run, base);
         val(Value::Undefined)
     }
 
@@ -1987,9 +2105,16 @@ impl<'p> Interp<'p> {
             Fr::VarD { s, d } => {
                 let StmtKind::Var { kind, decls } = self.prog.stmt(s).kind else { return Err(unsupported("var", Span::default())) };
                 let decl = *self.prog.decl(self.list_at(decls, d as usize));
-                self.bind_pattern(decl.target, v, if kind == VarKind::Var { Bind::Assign } else { Bind::Init })?;
+                let mode = if kind == VarKind::Var { Bind::Assign } else { Bind::Init };
+                if !matches!(self.prog.pat(decl.target).kind, PatKind::Ident) && self.aw_pat(decl.target) {
+                    return self.pat_start(run, s, d, decl.target, v, mode);
+                }
+                self.bind_pattern(decl.target, v, mode)?;
                 self.var_from(run, s, d as usize + 1)
             }
+            Fr::VarP { s, d } => self.var_from(run, s, d as usize + 1),
+            Fr::PatDef { target, mode } => self.pat_step(run, target, v, mode),
+            Fr::PatObj { p, i, base, mode } => self.pat_obj(run, p, i as usize, base as usize, mode),
             Fr::Lab { .. } => val(Value::Undefined),
             Fr::WhileT { s, lb } => {
                 let StmtKind::While { body, .. } = self.prog.stmt(s).kind else { return Err(unsupported("loop", Span::default())) };
@@ -2111,7 +2236,7 @@ impl<'p> Interp<'p> {
                         _ => Err(unsupported("stray break or continue", Span::default())),
                     };
                 }
-                Fr::Op { base, .. } => self.strunc(run, base as usize),
+                Fr::Op { base, .. } | Fr::PatObj { base, .. } => self.strunc(run, base as usize),
                 Fr::Scope { saved, env } => {
                     self.env = saved;
                     self.release(env);

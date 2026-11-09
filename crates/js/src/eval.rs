@@ -68,7 +68,7 @@
 //!   `Object.prototype.toString` and `instanceof` read `@@toPrimitive`, `@@toStringTag` and `@@hasInstance`.
 //! - The script completion value is the value of the last expression statement that ran (reset to
 //!   `undefined` by `if`, loops, `switch`, `try`). It is not full UpdateEmpty.
-//! - A function's `toString` is absent.
+//! - A function's `toString` gives the source text of a script function or class, and `function NAME() { [native code] }` for the rest. The text of a method, getter or setter starts at its parameters.
 
 use crate::ast::*;
 use crate::date;
@@ -412,6 +412,7 @@ enum Nat {
     FnCall,
     FnApply,
     FnBind,
+    FnToString,
     /// `Function` (0), `GeneratorFunction` (1) and `AsyncFunction` (2).
     FnCtor(u8),
     ArrayCtor,
@@ -1720,6 +1721,7 @@ impl<'p> Interp<'p> {
         self.method(fp, "call", Nat::FnCall, 1)?;
         self.method(fp, "apply", Nat::FnApply, 2)?;
         self.method(fp, "bind", Nat::FnBind, 1)?;
+        self.method(fp, "toString", Nat::FnToString, 0)?;
         self.method(ac, "isArray", Nat::ArrayIsArray, 1)?;
         self.method(ap, "push", Nat::ArrPush, 1)?;
         self.method(ap, "pop", Nat::ArrPop, 0)?;

@@ -244,7 +244,6 @@ impl<'p> Interp<'p> {
         match date::parse(h!(self, self.heap.str_units(s))) {
             date::Parsed::Time(t) => Ok(t),
             date::Parsed::Local(l) => Ok(date::time_clip(self.date_from_local(l)?)),
-            date::Parsed::Unrecognized => Err(unsupported("Date string that is not ISO 8601 or toUTCString format", Span::default())),
         }
     }
 

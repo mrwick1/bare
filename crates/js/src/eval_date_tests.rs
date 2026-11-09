@@ -174,8 +174,11 @@ fn parse_classification() {
     assert_eq!(p("2020-01-01T00:00"), date::Parsed::Local(1_577_836_800_000.0));
     assert!(nan(p("2020-02-30T00:00")));
     assert_eq!(p("2020-01-01"), date::Parsed::Time(1_577_836_800_000.0));
-    for s in ["2020-1-1", "2020-01-01 00:00:00Z", "2020-01-01t00:00:00z", "2020-01-01T00:00:00+0100", "2020-01-01T00Z", "20200101", " 2020", "Jan 1 2020", "1/2/2020", "2020-01-01Z", "2020-01-01T00:00:00.Z", "+2020-01-01"] {
-        assert_eq!(p(s), date::Parsed::Unrecognized, "{s}");
+    // a legacy form is local time without a zone, and UTC-based with one
+    assert_eq!(p("Jan 1 2020"), date::Parsed::Local(1_577_836_800_000.0));
+    assert_eq!(p("1/2/2020 10:00 GMT+0100"), date::Parsed::Time(1_577_955_600_000.0));
+    for s in ["20200101", "2020-01-01T00:00:00.Z", "1/2/2020 xyz", "Jan 1 2020 Mon"] {
+        assert!(nan(p(s)), "{s}");
     }
     for s in ["", " ", "abc", "undefined", "Tue", "T", "Z", "NaN"] {
         assert!(nan(p(s)), "{s}");
@@ -256,11 +259,6 @@ fn an_out_of_range_system_clock_cannot_make_an_invalid_date_object() {
 }
 
 // ------------------------------------------------------------------------------------------ gates
-
-fn unsupported_what(it: &mut Interp, src: &str) -> String {
-    let r = out(it, src);
-    r.strip_prefix("unsupported:").unwrap_or_else(|| panic!("{src}: {r}")).to_string()
-}
 
 /// What node gave under each `TZ` (the expression, then the result in the format of `show`). Node writes a long zone name in
 /// parentheses after `GMT+hhmm`. bare writes `GMT+hh:mm` there, so the text from ` (` on is not compared.
@@ -493,15 +491,37 @@ fn local_time_arithmetic_stays_usable() {
 }
 
 #[test]
-fn legacy_string_formats_are_gated_not_guessed() {
+fn legacy_string_formats_parse_as_in_node_and_bad_text_is_nan() {
     big(|| {
-        for src in ["Date.parse('Jan 1 2020')", "Date.parse('2020-1-1')", "Date.parse('2020-01-01 00:00:00Z')", "new Date('1/2/2020')", "Date.parse('2020-01-01T00:00:00+0100')", "Date.parse('2020-01-01t00:00:00z')"] {
-            let mut it = realm();
-            let w = unsupported_what(&mut it, src);
-            assert!(w.contains("ISO 8601"), "{src}: {w}");
-        }
         let mut it = realm();
-        assert_eq!(out(&mut it, "[Date.parse('Jan'), Date.parse('garbage'), Date.parse('')].join()"), "string:NaN,NaN,NaN");
+        it.set_default_time_zone("UTC").unwrap();
+        // Values below come from Node 22.18 with TZ=UTC.
+        for (src, want) in [
+            // the dates that ubuntu.com reads from /blog/latest-news
+            ("Date.parse('6 November 2026')", "1793923200000"),
+            ("new Date('15 October 2026').getDate()", "15"),
+            ("Date.parse('Jan 1 2020')", "1577836800000"),
+            ("Date.parse('1/2/2020')", "1577923200000"),
+            ("Date.parse('2020/01/02')", "1577923200000"),
+            ("Date.parse('2020-1-1')", "1577836800000"),
+            ("Date.parse('2020-01-01 10:30:15')", "1577874615000"),
+            ("Date.parse('Mon Nov 09 2026 12:00:00 GMT+0530 (India Standard Time)')", "1794205800000"),
+            ("Date.parse('November 9, 2026')", "1794182400000"),
+            ("Date.parse('Nov 9, 2026 3:04 PM')", "1794236640000"),
+            ("Date.parse('2020-01-01T00:00:00+0100')", "1577833200000"),
+            ("Date.parse('Jan 1')", "978307200000"),
+            ("Date.parse('Feb 30 2020')", "1583020800000"),
+            ("Date.parse('Jan 1 2020 Mon')", "NaN"),
+            ("Date.parse('13/1/2020')", "NaN"),
+            ("Date.parse('Jan 1 2020 25:00')", "NaN"),
+            ("Date.parse('1/2/2020 xyz')", "NaN"),
+            ("Date.parse('20200101')", "NaN"),
+            ("Date.parse('Jan')", "NaN"),
+            ("Date.parse('garbage')", "NaN"),
+            ("Date.parse('')", "NaN"),
+        ] {
+            assert_eq!(out(&mut it, src), format!("number:{want}"), "{src}");
+        }
     });
 }
 

@@ -103,3 +103,10 @@ switch_no_match_no_default_and_short_circuit	 ## t1|one|end|t1|t2|end
 switch_nested_and_await_free_switch_in_async	adef|end ## adef|end|in2|mid|plain|end|indef|mid|plain|end
 let_block_across_await_interleaved_calls	a10|a20 ## a10|a20|b10|b20|c11|dundefined|ev1|c21|dundefined|ev2
 let_block_throw_and_return_across_await	 ## in1|caught2undefined|2|3
+await_in_object_pattern_default	 ## ,,POST,given,|h,b,GET,csrf,extra,more
+await_in_pattern_default_order	get a|def a|sync end ## get a|def a|sync end|get b|get c|def c|done 1,2,3
+await_in_nested_pattern_default	 ## 2,,7|5,1,7|5,6,7
+await_in_pattern_var_and_for_init	 ## 1,4
+await_in_pattern_default_rejects	 ## caught no|TypeError|c inner
+await_in_pattern_default_function_name	 ## g,h,3
+await_in_pattern_default_yield	{"value":"need a","done":false}|{"value":"A,2","done":true} ## {"value":"need a","done":false}|{"value":"A,2","done":true}

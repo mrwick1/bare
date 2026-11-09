@@ -137,7 +137,9 @@ fn unsupported_await_positions_are_found_before_any_effect() {
             ("async function f(o) { return delete o[await 1]; }", "await inside delete"),
             ("async function f(o) { (await o).x++; }", "await inside ++ or --"),
             ("async function f(k) { return { [await k]: 1 }; }", "await in a computed object key"),
-            ("async function f() { var { a = await 1 } = {}; }", "await in a binding pattern"),
+            ("async function f() { var [{ a = await 1 }] = [{}]; }", "await in a binding pattern"),
+            ("async function f() { var { [await 1]: a } = {}; }", "await in a binding pattern"),
+            ("async function f() { var { a: [b = await 1] } = { a: [] }; }", "await in a binding pattern"),
             ("async function f() { try {} catch ({ a = await 1 }) {} }", "await in a catch binding"),
             ("async function f() { for (var [a = await 1] of []) {} }", "await in a binding pattern"),
             ("async function f(o) { [o.x = await 1] = []; }", "await in an assignment pattern"),
@@ -188,6 +190,22 @@ fn host_call_returns_a_pending_promise_then_a_fulfilled_one() {
         assert_eq!(it.pending_jobs(), 1);
         it.drain_microtasks().unwrap();
         assert!(matches!(it.promise_status(p), Some(PromiseStatus::Fulfilled(Value::Number(n))) if n == 42.0));
+        let st = it.async_stats();
+        assert_eq!((st.activations, st.frames, st.slots), (0, 0, 0));
+    });
+}
+
+#[test]
+fn a_pattern_that_waits_or_throws_gives_back_its_frames_and_slots() {
+    big(|| {
+        let mut it = realm(lim());
+        let src = "var out = []; async function f(t) { const { a, b = await 1, ...r } = t; return [a, b, Object.keys(r).join()].join(); } \
+            async function g() { try { const { a = await 1, b = await Promise.reject('x'), c } = {}; } catch (e) { return 'caught ' + e; } } \
+            async function h() { const { a = await 1, b = (() => { throw 'late'; })() } = {}; } \
+            f({ a: 1, c: 2 }).then(v => out.push(v)); g().then(v => out.push(v)); h().catch(v => out.push(v));";
+        assert_eq!(out(&mut it, src), "object");
+        it.drain_microtasks().unwrap();
+        assert_eq!(out(&mut it, "out.join('|')"), "1,1,c|late|caught x");
         let st = it.async_stats();
         assert_eq!((st.activations, st.frames, st.slots), (0, 0, 0));
     });

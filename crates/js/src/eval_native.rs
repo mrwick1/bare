@@ -152,6 +152,10 @@ impl<'p> Interp<'p> {
                 let list = self.array_like(arg(args, 1))?;
                 self.call_fn(this, a0, &list)
             }
+            Nat::FnToString => {
+                let text = self.function_text(this)?;
+                Ok(Value::String(h!(self, self.heap.intern_str(&text))))
+            }
             Nat::FnBind => {
                 let Value::Object(t) = this else { return Err(self.type_err("Bind must be called on a function")) };
                 if !self.funcs.contains_key(&t) {
@@ -486,5 +490,43 @@ impl<'p> Interp<'p> {
             return Err(self.type_err("Invalid property descriptor. Cannot both specify accessors and a value or writable attribute"));
         }
         Ok(out)
+    }
+}
+
+impl<'p> Interp<'p> {
+    /// `Function.prototype.toString` (section 20.2.3.5): the source text of a script function or class, and
+    /// `function NAME() { [native code] }` for every other callable. Pages tell `Object` from other constructors with it
+    /// (jQuery `isPlainObject`). A method, getter or setter starts at its parameters in the syntax tree, so its text starts there too (V8 adds the key).
+    #[cold]
+    #[inline(never)]
+    fn function_text(&mut self, f: Value) -> Res<String> {
+        let Value::Object(o) = f else { return Err(self.type_err("Function.prototype.toString requires that 'this' be a Function")) };
+        let source = |it: &Self, script: u32, span: Span| {
+            let prog = if script as usize == it.cur { it.prog.clone() } else { it.scripts[script as usize].prog.clone() };
+            prog.text(span).to_string()
+        };
+        let native = |it: &mut Self, named: bool| {
+            let name = match named {
+                true => match it.heap.get_own_property(o, it.k_name) {
+                    Ok(Some(Property::Data { value: Value::String(s), .. })) => it.heap.to_string_lossy(s).unwrap_or_default(),
+                    _ => String::new(),
+                },
+                false => String::new(),
+            };
+            format!("function {name}() {{ [native code] }}")
+        };
+        Ok(match self.funcs.get(&o) {
+            Some(&Callee::Script { script, fid, .. }) => source(self, script, self.func_of(script, fid).span),
+            Some(Callee::Class) => match self.cls.classes.get(&o).map(|c| (c.script, c.class)) {
+                Some((script, class)) => {
+                    let span = if script as usize == self.cur { self.prog.class(class).span } else { self.scripts[script as usize].prog.class(class).span };
+                    source(self, script, span)
+                }
+                None => native(self, true),
+            },
+            Some(Callee::Native(_) | Callee::Host { .. }) => native(self, true),
+            Some(_) => native(self, false),
+            None => return Err(self.type_err("Function.prototype.toString requires that 'this' be a Function")),
+        })
     }
 }

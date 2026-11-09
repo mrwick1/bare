@@ -596,3 +596,41 @@ var log = []; function L(x) { log.push(String(x)); }
 async function f(k) { try { { let a = k; await a; if (a > 1) throw a; L("in" + a); } } catch (e) { L("caught" + e + typeof a); } { const b = await k; return b + 1; } }
 f(1).then(L); f(2).then(L);
 (function () { return log.join("|"); })
+=== await_in_object_pattern_default
+var log = []; function L(x) { log.push(String(x)); }
+async function Cn() { await 0; return "csrf"; }
+async function f(t) { let { headers: n, body: o, method: r = "GET", csrfToken: i = await Cn(), ...s } = t; return [n, o, r, i, Object.keys(s).join()].join(","); }
+f({ headers: "h", body: "b", extra: 1, more: 2 }).then(L);
+f({ method: "POST", csrfToken: "given" }).then(L);
+(function () { return log.join("|"); })
+=== await_in_pattern_default_order
+var log = []; function L(x) { log.push(String(x)); }
+var src = { get a() { L("get a"); }, get b() { L("get b"); return 2; }, get c() { L("get c"); } };
+async function f() { const { a = await (L("def a"), 1), b = await (L("def b"), 9), c = await (L("def c"), 3) } = src; L("done " + [a, b, c]); }
+f(); L("sync end");
+(function () { return log.join("|"); })
+=== await_in_nested_pattern_default
+var log = []; function L(x) { log.push(String(x)); }
+async function f(o) { const { a: { b = await 5, c } = { c: await 6 }, d = 7 } = o; return [b, c, d].join(); }
+f({}).then(L); f({ a: { c: 1 } }).then(L); f({ a: { b: 2 } }).then(L);
+(function () { return log.join("|"); })
+=== await_in_pattern_var_and_for_init
+var log = []; function L(x) { log.push(String(x)); }
+async function f() { var { a = await 1 } = {}; var n = 0; for (let { b = await 2 } = {}, i = 0; i < 2; i++) { n += b; } return [a, n].join(); }
+f().then(L);
+(function () { return log.join("|"); })
+=== await_in_pattern_default_rejects
+var log = []; function L(x) { log.push(String(x)); }
+async function f() { try { const { a = await Promise.reject("no") } = {}; L("not reached"); } catch (e) { L("caught " + e); } try { const { a = await 1 } = null; } catch (e) { L(e.name); } try { const { a = await 1, b = (() => { throw "inner"; })() } = {}; } catch (e) { L("c " + e); } }
+f();
+(function () { return log.join("|"); })
+=== await_in_pattern_default_function_name
+var log = []; function L(x) { log.push(String(x)); }
+async function f() { const { g = function () {}, h = async () => await 1, i = await 3 } = {}; return [g.name, h.name, i].join(); }
+f().then(L);
+(function () { return log.join("|"); })
+=== await_in_pattern_default_yield
+var log = []; function L(x) { log.push(String(x)); }
+function* g() { var { a = yield "need a", b = yield "need b" } = { b: 2 }; return [a, b].join(); }
+var it = g(); L(JSON.stringify(it.next())); L(JSON.stringify(it.next("A")));
+(function () { return log.join("|"); })

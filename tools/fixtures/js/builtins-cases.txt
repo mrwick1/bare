@@ -184,3 +184,14 @@ var m = /(?<y>\d{4})-(?<m>\d\d)(?<z>x)?/.exec("on 2026-11-09"); [m.groups.y, m.g
 ["2026-11".replace(/(?<y>\d+)-(?<m>\d+)/, "$<m>/$<y>"), "a".replace(/(?<x>a)/, "[$<z>][$<x>][$<x]"), "a".replace(/a/, "$<n>"), "aa".replace(/(?<x>a)/g, "$<x>$<x>"), "a-b".replace(/(?<l>\w)-(?<r>\w)/, function () { var g = arguments[arguments.length - 1]; return typeof g + g.r + arguments.length; })].join();
 === re named groups backreference and matchAll
 [/(?<a>x)\k<a>/.test("xx"), /(?<a>x)\k<a>/.test("xy"), /\k<a>(?<a>x)/.test("x"), /\k<a>/.test("k<a>"), /(?<a>x)\k<a>/u.test("xx"), [..."a1b2".matchAll(/(?<d>\d)/g)].map(function (m) { return m.groups.d; }).join()].join();
+=== function_to_string_native_and_bound
+var t = Function.prototype.toString; [t.call(Object), t.call(Math.max), t.call([].push), t.call(Array), t.call(function () {}.bind(null)), t.call(Symbol)].join("|");
+=== function_to_string_script_source
+var t = Function.prototype.toString; function f(a, b) { return a + b; } var g = function (x) { return x; }; var h = function named() {}; async function af() {} function* gf() { yield 1; } class A { m() {} } [t.call(f), t.call(g), t.call(h), t.call(af), t.call(gf), t.call(A), f.toString === t, String(f)].join("|");
+=== function_to_string_not_a_function
+var t = Function.prototype.toString; var r = []; [{}, 1, "s", null, undefined, [], /x/].forEach(function (v) { try { t.call(v); r.push("no throw"); } catch (e) { r.push(e.name); } }); r.join();
+=== function_to_string_tells_object_from_other_constructors
+var fnToString = Function.prototype.toString, hasOwn = Object.prototype.hasOwnProperty, ObjectFunctionString = fnToString.call(Object), getProto = Object.getPrototypeOf, toString = Object.prototype.toString;
+function isPlainObject(obj) { var proto, Ctor; if (!obj || toString.call(obj) !== "[object Object]") return false; proto = getProto(obj); if (!proto) return true; Ctor = hasOwn.call(proto, "constructor") && proto.constructor; return typeof Ctor === "function" && fnToString.call(Ctor) === ObjectFunctionString; }
+class K {} function F() {}
+[{}, Object.create(null), new K(), new F(), [], new Date(0), new Map(), Object.create({}), { a: { b: 1 } }, function () {}].map(isPlainObject).join();
