@@ -72,7 +72,10 @@ type IdleConnection = (Stream, Instant);
 
 /// A server: the scheme, the host and the port. A connection only works for the server it was opened to, and a
 /// plain connection must never serve an `https` request, so the scheme is part of the key.
-type Server = (Scheme, String, u16);
+// The port and route share one hash input: bit 16 identifies the proxy route.
+// BARE_PROXY is fixed process-wide, so there is only one proxy route. Rotation
+// must key both pools by proxy endpoint AND credentials.
+type Server = (Scheme, String, u32);
 
 /// The idle connections of a client, by server, the last one that went idle at the end. A `Body` that is read to the end gives its
 /// connection back to it. A server keeps at most `MAX_IDLE_PER_SERVER`: the number of connections that one page uses at once.
@@ -332,6 +335,7 @@ fn cache_size(response: &Response) -> usize {
 fn alive(stream: &Stream) -> bool {
     let tcp = match stream {
         Stream::Tcp(tcp) => tcp,
+        Stream::ProxyTcp(proxy) => &proxy.0,
         Stream::Tls(tls) if tls.reusable() => tls.get_ref(),
         _ => return false,
     };
@@ -597,14 +601,14 @@ impl Client {
     /// A new connection, and a session of its own when the server chose `h2`: the session goes in the map for the next request.
     /// The gate lets only `parallel::MAX_CONNECTING` connections open at once. A request that waited at the gate looks again for a session,
     /// because one that was dialed meanwhile serves it: this is why a page of 40 assets opens one connection, not six.
-    fn dial(&self, url: &Url, server: &Server, rec: &mut Option<Box<trace::Rec>>) -> Result<Dialed, Error> {
+    fn dial(&self, url: &Url, server: &Server, proxy: Option<&'static Proxy>, rec: &mut Option<Box<trace::Rec>>) -> Result<Dialed, Error> {
         let _inside = self.workers.connecting.enter();
         if url.scheme == Scheme::Https
             && let Some(conn) = self.sessions.lock().unwrap().get(server).filter(|c| c.usable())
         {
             return Ok(Dialed::H2(conn.clone()));
         }
-        Ok(match open(url, &self.roots, rec)? {
+        Ok(match open(url, &self.roots, proxy, rec)? {
             Stream::Tls(tls) if tls.alpn_h2() => {
                 let conn = h2::Conn::start(*tls)?;
                 let mut sessions = self.sessions.lock().unwrap();
@@ -721,7 +725,9 @@ impl Client {
 
     fn attempt_on(&mut self, url: &Url, plan: &Plan, conditions: &str, rec: &mut Option<Box<trace::Rec>>) -> Result<(Response, Body), Error> {
         // The idle list is keyed by scheme too, so a plain connection never serves https.
-        let server = (url.scheme, url.host.clone(), url.port);
+        let configured = proxy_config()?;
+        let proxy = configured.filter(|_| !loopback(&url.host));
+        let server = (url.scheme, url.host.clone(), u32::from(url.port) | (u32::from(proxy.is_some()) << 16));
         // An empty list stays in the map: the next connection that goes idle needs it, and the map has one key for each server.
         let idle = self.idle.lock().unwrap().get_mut(&server).and_then(Vec::pop);
         let get = plan.method.safe();
@@ -739,7 +745,7 @@ impl Client {
             Some((stream, since)) if since.elapsed() < MAX_IDLE && (get || alive(&stream)) => (stream, true),
             // There is a connection, and it has not been idle for too long. Use it. A POST also needs the
             // server to have kept it: we cannot retry a POST after a write, so we look first.
-            _ => match self.dial(url, &server, rec)? {
+            _ => match self.dial(url, &server, proxy, rec)? {
                 Dialed::H1(stream) => (stream, false),
                 Dialed::H2(conn) => return self.h2_start(&conn, url, plan, conditions, rec, false),
             },
@@ -755,7 +761,7 @@ impl Client {
             // We cannot know that before we try. The error is not the page's fault, so we
             // try once more on a new connection. This is safe because GET only reads.
             // Never for a POST: the server may have got the request and done what it says, and a second one would do it twice.
-            stream = match self.dial(url, &server, rec)? {
+            stream = match self.dial(url, &server, proxy, rec)? {
                 Dialed::H1(stream) => stream,
                 Dialed::H2(conn) => return self.h2_start(&conn, url, plan, conditions, rec, false),
             };
@@ -853,21 +859,25 @@ pub struct Streamed {
 /// Open a new connection to the server of this URL. The only place that makes a `Stream`.
 /// `https`: TCP, then a TLS 1.3 handshake with the host name checked against `roots` (loaded from the OS on first use).
 /// The handshake runs under the read and write time limits that `tcp::connect` sets.
-fn open(url: &Url, roots: &OnceLock<Result<TrustStore, String>>, rec: &mut Option<Box<trace::Rec>>) -> Result<Stream, Error> {
+fn open(url: &Url, roots: &OnceLock<Result<TrustStore, String>>, proxy: Option<&'static Proxy>, rec: &mut Option<Box<trace::Rec>>) -> Result<Stream, Error> {
     let mut clock = trace::Clock::new();
-    let addrs: Vec<SocketAddr> = dns::resolve(&url.host).map_err(|e| cause::Phase("dns", e.into()))?.into_iter().map(|ip| SocketAddr::new(ip, url.port)).collect();
+    let (host, port) = proxy.map_or((url.host.as_str(), url.port), |p| (p.host.as_str(), p.port));
+    let addrs: Vec<SocketAddr> = dns::resolve(host).map_err(|e| cause::Phase("dns", e.into()))?.into_iter().map(|ip| SocketAddr::new(ip, port)).collect();
     if let Some(r) = rec {
         r.dns = clock.lap();
     }
     // Our own DNS lookup (see `dns.rs`) gives IP addresses. Add the port to each one.
     // JS: `ips.map(ip => ({ ip, port }))`.
-    let tcp = tcp::connect(&addrs).map_err(|e| cause::Phase("connect", e.into()))?;
+    let mut tcp = tcp::connect(&addrs).map_err(|e| cause::Phase("connect", e.into()))?;
     // Open a connection, with time limits (see `tcp.rs`).
     if let Some(r) = rec {
         r.tcp = clock.lap();
     }
     if url.scheme == Scheme::Http {
-        return Ok(Stream::Tcp(tcp));
+        return Ok(match proxy { Some(p) => Stream::ProxyTcp(Box::new((tcp, p))), None => Stream::Tcp(tcp) });
+    }
+    if let Some(p) = proxy {
+        p.tunnel(&mut tcp, url).map_err(|e| cause::Phase("proxy", e))?;
     }
     let roots = roots.get_or_init(|| trust_store::load_system().map(|r| r.0).map_err(|e| e.to_string())).as_ref().map_err(|e| e.clone())?;
     let tls = if h1_only() { client::connect(tcp, &url.host, roots)? } else { client::connect_h2(tcp, &url.host, roots)? };
@@ -875,6 +885,185 @@ fn open(url: &Url, roots: &OnceLock<Result<TrustStore, String>>, rec: &mut Optio
         r.tls = clock.lap();
     }
     Ok(Stream::Tls(Box::new(tls)))
+}
+
+/// A single immutable HTTP proxy. Do not derive Debug: credentials must not reach diagnostics.
+struct Proxy {
+    host: String,
+    port: u16,
+    auth: String,
+}
+
+fn proxy_config() -> Result<Option<&'static Proxy>, Error> {
+    static PROXY: OnceLock<Result<Option<Proxy>, &'static str>> = OnceLock::new();
+    PROXY
+        .get_or_init(|| match std::env::var("BARE_PROXY") {
+            Ok(v) => Proxy::parse(&v).map(Some),
+            Err(std::env::VarError::NotPresent) => Ok(None),
+            Err(_) => Err("invalid BARE_PROXY (expected http://[user:pass@]host:port)"),
+        })
+        .as_ref()
+        .map(Option::as_ref)
+        .map_err(|e| cause::Phase("proxy", (*e).into()).into())
+}
+
+impl Proxy {
+    fn parse(value: &str) -> Result<Self, &'static str> {
+        let bad = "invalid BARE_PROXY (expected http://[user:pass@]host:port)";
+        if !value.is_ascii() || value.bytes().any(|b| b <= b' ' || b == 127) {
+            return Err(bad);
+        }
+        let authority = value.strip_prefix("http://").ok_or(bad)?;
+        if authority.contains(['/', '?', '#', '\\']) {
+            return Err(bad);
+        }
+        let (authority, auth) = match authority.rsplit_once('@') {
+            Some((login, host)) => {
+                if login.contains('@') || !login.contains(':') {
+                    return Err(bad);
+                }
+                (host, format!("Proxy-Authorization: Basic {}\r\n", proxy_base64(login.as_bytes())))
+            }
+            None => (authority, String::new()),
+        };
+        let (host, port) = authority.rsplit_once(':').ok_or(bad)?;
+        let port = port.parse::<u16>().ok().filter(|p| *p != 0).ok_or(bad)?;
+        let host = if let Some(v6) = host.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+            v6.parse::<std::net::Ipv6Addr>().map_err(|_| bad)?;
+            v6
+        } else {
+            if host.is_empty() || !host.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-') {
+                return Err(bad);
+            }
+            host
+        };
+        Ok(Self { host: host.into(), port, auth })
+    }
+
+    fn tunnel(&self, tcp: &mut TcpStream, url: &Url) -> Result<(), Error> {
+        let host = if url.host.contains(':') {
+            format!("[{}]", url.host)
+        } else {
+            url.host.clone()
+        };
+        write!(tcp, "CONNECT {host}:{} HTTP/1.1\r\nHost: {host}:{}\r\n{}\r\n", url.port, url.port, self.auth)?;
+        tcp.flush()?;
+        proxy_reply(tcp)
+    }
+
+    /// Change origin form to absolute form, and add credentials only on the proxy hop.
+    fn request(&self, out: &mut Vec<u8>, url: &Url) {
+        let space = out.iter().position(|b| *b == b' ').unwrap() + 1;
+        let prefix = format!("http://{}", host_header(url));
+        out.splice(space..space, prefix.bytes());
+        let end = out.len() - 2;
+        out.splice(end..end, self.auth.bytes());
+    }
+}
+
+fn proxy_base64(input: &[u8]) -> String {
+    const DIGITS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for c in input.chunks(3) {
+        let n = ((c[0] as u32) << 16) | ((c.get(1).copied().unwrap_or(0) as u32) << 8) | c.get(2).copied().unwrap_or(0) as u32;
+        out.push(DIGITS[(n >> 18) as usize] as char);
+        out.push(DIGITS[((n >> 12) & 63) as usize] as char);
+        out.push(if c.len() > 1 { DIGITS[((n >> 6) & 63) as usize] as char } else { '=' });
+        out.push(if c.len() > 2 { DIGITS[(n & 63) as usize] as char } else { '=' });
+    }
+    out
+}
+
+/// Read exactly the head: bytes after the blank line belong to TLS. Socket read
+/// limits still apply, with the same total limit as an origin response head.
+fn proxy_reply(stream: &mut impl Read) -> Result<(), Error> {
+    let mut raw = Vec::new();
+    let start = Instant::now();
+    while !raw.ends_with(b"\r\n\r\n") {
+        if raw.len() == MAX_HEAD {
+            return Err("the headers of the proxy reply are too long".into());
+        }
+        if start.elapsed() > MAX_TIME {
+            return Err("the proxy is too slow".into());
+        }
+        let mut byte = [0];
+        stream.read_exact(&mut byte).map_err(slow)?;
+        raw.push(byte[0]);
+    }
+    // CONNECT framing is independent of Content-Length and Transfer-Encoding.
+    // Do not reflect arbitrary proxy text, which can echo credentials.
+    let line = raw.split(|b| *b == b'\r').next().unwrap_or_default();
+    if !(line.starts_with(b"HTTP/1.1 ") || line.starts_with(b"HTTP/1.0 "))
+        || line.len() < 12
+        || !line[9..12].iter().all(u8::is_ascii_digit)
+        || (line.len() > 12 && line[12] != b' ')
+    {
+        return Err("malformed CONNECT response".into());
+    }
+    let status = std::str::from_utf8(&line[9..12]).unwrap().parse::<u16>().unwrap();
+    if !(200..300).contains(&status) {
+        return Err(format!("{status} CONNECT refused").into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod proxy_tests {
+    use super::*;
+
+    #[test]
+    fn connect_stops_at_the_head_and_ignores_body_framing() {
+        for status in [200, 204, 299] {
+            let head = format!("HTTP/1.1 {status} OK\r\nContent-Length: 999999\r\n\r\n");
+            let mut wire = io::Cursor::new([head.as_bytes(), b"TLS bytes"].concat());
+            proxy_reply(&mut wire).unwrap();
+            assert_eq!(wire.position(), head.len() as u64);
+        }
+        assert!(proxy_reply(&mut io::Cursor::new(b"HTTP/1.1 2000 bad\r\n\r\n")).is_err());
+        assert!(proxy_reply(&mut io::Cursor::new(b"HTTP/1.1 200 OK\r\n")).is_err());
+        let mut cap = io::Cursor::new(vec![b'x'; MAX_HEAD + 20]);
+        assert!(proxy_reply(&mut cap).is_err());
+        assert_eq!(cap.position(), MAX_HEAD as u64);
+        let timeout = io::Error::from(ErrorKind::TimedOut);
+        struct Stalled(Option<io::Error>);
+        impl Read for Stalled {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                Err(self.0.take().unwrap())
+            }
+        }
+        assert!(cause::describe(&*proxy_reply(&mut Stalled(Some(timeout))).unwrap_err()).contains("read timeout"));
+    }
+
+    #[test]
+    fn proxy_credentials_and_ipv6_parse_without_dependencies() {
+        for (raw, encoded) in [("", ""), ("f", "Zg=="), ("fo", "Zm8="), ("foo", "Zm9v"), ("user:pass", "dXNlcjpwYXNz")] {
+            assert_eq!(proxy_base64(raw.as_bytes()), encoded);
+        }
+        let p = Proxy::parse("http://u:p@[::1]:8080").ok().unwrap();
+        assert_eq!((&*p.host, p.port), ("::1", 8080));
+        for bad in [
+            "http://:80",
+            "http://::1:80",
+            "http://[bad]:80",
+            "https://host:80",
+            "http://a@host:80",
+            "http://a:b@c@host:80",
+        ] {
+            assert!(Proxy::parse(bad).is_err());
+        }
+    }
+
+    #[test]
+    fn direct_and_proxy_pool_routes_are_separate() {
+        let direct = (Scheme::Https, "example.test".to_string(), 443u32);
+        let proxy = (Scheme::Https, "example.test".to_string(), 443u32 | (1 << 16));
+        let mut pool = HashMap::new();
+        pool.insert(direct.clone(), 1);
+        pool.insert(proxy.clone(), 2);
+        assert_eq!(pool.len(), 2);
+        assert_eq!(pool[&direct], 1);
+        assert_eq!(pool[&proxy], 2);
+    }
 }
 
 /// `BARE_NET_H1` (any value) offers `http/1.1` only, so a run over HTTP/1.1 and one over HTTP/2 can be compared on one server.
@@ -943,6 +1132,9 @@ fn send(stream: &mut Stream, url: &Url, plan: &Plan, conditions: &str) -> Result
     // `&mut Stream` means we borrow the connection and may change it. The caller keeps it.
     let inline = plan.body.len() <= INLINE_BODY;
     let mut out = request_head(url, plan, conditions, if inline { plan.body.len() } else { 0 });
+    if let Stream::ProxyTcp(proxy) = stream {
+        proxy.1.request(&mut out, url);
+    }
     if inline {
         out.extend_from_slice(plan.body);
         // A small body goes in the same write as the head: one packet, no wait for an acknowledgement between two.
@@ -1247,6 +1439,7 @@ impl Drop for Live {
 /// A connection. In tests it can also be some bytes in memory: a reply that stops, or a reply that ends.
 enum Stream {
     Tcp(TcpStream),
+    ProxyTcp(Box<(TcpStream, &'static Proxy)>),
     /// TCP under verified TLS. Boxed: the record layer holds big buffers. Reads and writes always go through the TLS
     /// layer, so its read-ahead and record sequence numbers stay right.
     Tls(Box<ClientStream<TcpStream>>),
@@ -1260,6 +1453,7 @@ impl Read for Stream {
     fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
         match self {
             Stream::Tcp(stream) => stream.read(out),
+            Stream::ProxyTcp(proxy) => proxy.0.read(out),
             Stream::Tls(stream) => stream.read(out),
             Stream::Closed => Ok(0),
             #[cfg(test)]
@@ -1275,6 +1469,7 @@ impl Write for Stream {
     fn write(&mut self, data: &[u8]) -> io::Result<usize> {
         match self {
             Stream::Tcp(stream) => stream.write(data),
+            Stream::ProxyTcp(proxy) => proxy.0.write(data),
             Stream::Tls(stream) => stream.write(data),
             _ => Err(ErrorKind::NotConnected.into()),
         }
@@ -1282,6 +1477,7 @@ impl Write for Stream {
     fn flush(&mut self) -> io::Result<()> {
         match self {
             Stream::Tcp(stream) => stream.flush(),
+            Stream::ProxyTcp(proxy) => proxy.0.flush(),
             Stream::Tls(stream) => stream.flush(),
             _ => Err(ErrorKind::NotConnected.into()),
         }
@@ -1319,7 +1515,7 @@ impl Live {
         self.done = true;
         // A TLS stream with bytes of its own (the rest of a record, half a handshake message) or a close is not given back.
         let clean = match &self.stream {
-            Stream::Tcp(_) => true,
+            Stream::Tcp(_) | Stream::ProxyTcp(_) => true,
             Stream::Tls(tls) => tls.reusable(),
             _ => false,
         };
@@ -1967,13 +2163,13 @@ mod tests {
         let (port, wire) = untrusted();
         let mut client = Client::new();
         let plain = TcpStream::connect(idle.local_addr().unwrap()).unwrap();
-        client.idle.lock().unwrap().insert((Scheme::Http, "localhost".to_string(), port), vec![(Stream::Tcp(plain), Instant::now())]);
+        client.idle.lock().unwrap().insert((Scheme::Http, "localhost".to_string(), u32::from(port)), vec![(Stream::Tcp(plain), Instant::now())]);
         assert!(client.get(&tls_url(port, "/")).is_err());
         only_a_client_hello(&wire.recv().unwrap());
         let (mut held, _) = idle.accept().unwrap();
         held.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
         assert!(held.read(&mut [0u8; 1]).is_err(), "bytes reached the idle plain connection");
-        assert!(client.idle.lock().unwrap().contains_key(&(Scheme::Http, "localhost".to_string(), port)));
+        assert!(client.idle.lock().unwrap().contains_key(&(Scheme::Http, "localhost".to_string(), u32::from(port))));
     }
 
     #[test]
@@ -2756,8 +2952,8 @@ mod tests {
         assert_eq!(client.cache.lock().unwrap().map[&key(Scheme::Https)].response.body, b"tls");
         assert_eq!(seen(&requests).len(), 1);
         // The plain reply is in the pool under `Http`, and a stream that the https key holds is not touched.
-        assert!(client.idle.lock().unwrap().contains_key(&(Scheme::Http, "127.0.0.1".to_string(), port)));
-        assert!(!client.idle.lock().unwrap().contains_key(&(Scheme::Https, "127.0.0.1".to_string(), port)));
+        assert!(client.idle.lock().unwrap().contains_key(&(Scheme::Http, "127.0.0.1".to_string(), u32::from(port))));
+        assert!(!client.idle.lock().unwrap().contains_key(&(Scheme::Https, "127.0.0.1".to_string(), u32::from(port))));
     }
 
     #[test]
@@ -2766,10 +2962,10 @@ mod tests {
         let (port, requests) = serve(vec![(vec![OK], false)]);
         let mut client = Client::new();
         let stale = TcpStream::connect(dummy.local_addr().unwrap()).unwrap();
-        client.idle.lock().unwrap().insert((Scheme::Https, "127.0.0.1".to_string(), port), vec![(Stream::Tcp(stale), Instant::now())]);
+        client.idle.lock().unwrap().insert((Scheme::Https, "127.0.0.1".to_string(), u32::from(port)), vec![(Stream::Tcp(stale), Instant::now())]);
         assert_eq!(client.get(&url(port)).unwrap().body, b"ok");
         assert_eq!(seen(&requests).len(), 1);
-        assert!(client.idle.lock().unwrap().contains_key(&(Scheme::Https, "127.0.0.1".to_string(), port)));
+        assert!(client.idle.lock().unwrap().contains_key(&(Scheme::Https, "127.0.0.1".to_string(), u32::from(port))));
         // The request opened its own connection. The https entry is still there.
     }
 
