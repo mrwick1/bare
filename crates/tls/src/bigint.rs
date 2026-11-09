@@ -75,14 +75,15 @@ impl Modulus {
         for _ in 0..64 * k - bits + 1 {
             m.double(&mut x);
         }
-        // R^2 = (2 R)^(64 k) in Montgomery form.
-        m.double(&mut x);
+        // x = 2^64 R: the Montgomery form of 2^64. Then R^2 is its k-th power, since R = (2^64)^k.
+        for _ in 0..64 {
+            m.double(&mut x);
+        }
         let mut r2 = x;
-        let e = 64 * k;
-        for i in (0..usize::BITS - 1 - e.leading_zeros()).rev() {
+        for i in (0..usize::BITS - 1 - k.leading_zeros()).rev() {
             let t = r2;
             m.mul(&t, &t, &mut r2);
-            if e >> i & 1 == 1 {
+            if k >> i & 1 == 1 {
                 let t = r2;
                 m.mul(&t, &x, &mut r2);
             }

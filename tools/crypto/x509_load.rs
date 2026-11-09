@@ -15,6 +15,22 @@
 #[path = "../../crates/tls/src/der.rs"]
 mod der;
 #[allow(dead_code)]
+#[path = "../../crates/tls/src/bigint.rs"]
+mod bigint;
+#[allow(dead_code)]
+#[path = "../../crates/tls/src/rsa.rs"]
+mod rsa;
+#[allow(dead_code)]
+#[path = "../../crates/tls/src/sha256.rs"]
+mod sha256;
+#[cfg(all(target_arch = "x86_64", not(feature = "force-portable")))]
+#[allow(dead_code)]
+#[path = "../../crates/tls/src/sha256_x86.rs"]
+mod sha256_x86;
+#[allow(dead_code)]
+#[path = "../../crates/tls/src/sha384.rs"]
+mod sha384;
+#[allow(dead_code)]
 #[path = "../../crates/tls/src/x509.rs"]
 mod x509;
 
