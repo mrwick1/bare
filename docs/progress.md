@@ -6084,3 +6084,52 @@ No site got worse in readyState. The ms and RSS change from run to run (one run 
 - A page that fills the 32 MiB total, and the peak RSS of such a page.
 - jemalloc cost rows (none was over under glibc).
 - arjun-e16 and macOS.
+
+## Intl locale extensions, the rest of console, and CSS.supports (2026-11-10)
+
+Three live pages stopped on a missing piece. craigslist stopped with `Unsupported("Intl: a locale with an extension (-u-, -t-, -x-)")`. youtube logged `console.info is not a function`. old.reddit logged `CSS is not defined`.
+
+### Change
+
+- Intl: `canonical_tag` now gives the full canonical tag (UTS 35: extensions sorted by singleton, `x` last; `-u-` keys sorted, the first duplicate key wins, `true` dropped, `ca-islamicc` is `islamic-civil`; `-t-` fields sorted, a bad field is a `RangeError`). `DateTimeFormat` reads `hc`, `ca`, `nu`; `NumberFormat` reads `nu`; `Collator` reads `kn`, `kf`, `co` (see below). Other keys (`co` for the rest, `kn` for the rest) are ignored. `-t-` and `-x-` leave the resolved locale. An option wins over a keyword. `ca` and `nu`: `gregory` and `latn` work; another value that ICU has gives the same `Unsupported` as the option; an unknown value is ignored. A used keyword goes in `resolvedOptions().locale` through a side table (`IntlState::exts`), as Node 22 does. Spec: ECMA-402 ResolveLocale, UTS 35 section 3.2.
+- Collator: `kn` and `kf` stay in the resolved locale even when an option overrides them (as V8). `co` `emoji` and `eor` are `Unsupported`; the other values are dropped.
+- console: `info`, `debug`, `trace`, `dir`, `dirxml`, `table`, `group`, `groupCollapsed`, `groupEnd`, `time`, `timeLog`, `timeEnd`, `count`, `countReset`, `assert`, `clear` (WHATWG Console). The sink has three levels, so the first six log at `Log` and `assert` at `Error`. A table logs its first argument as `console.log` does; no grid is drawn. Label tables hold 1,024 labels of 256 bytes at most; over the bound one warning is logged and nothing is kept. The group indent stops at 64 levels (`ConsoleRecord::indent`). Task 16 had not merged `console.assert`, so this change adds it (coordinator: keep this one).
+- `console` is now a lazy global (an accessor until the first read or write, as `CSS`, `crypto`, `Intl`). The label tables are made by the first `time` or `count`.
+- `CSS.supports(condition)`, `CSS.supports(property, value)` and `CSS.escape` (`browser_css_ns.rs`). `supports` calls `bare_css::at_rules::supports_matches`; `crates/css` is not changed. `CSS.registerProperty` stays undefined: bare has no registered custom properties.
+- `browser_dataset::matches` compares bytes against UTF-16 units when the attribute tail is ASCII. See Cost.
+
+### Checks
+
+- Tests first. On main (`cdf9bc794e`, `bare-drive`) a local page gives `console.info is not a function`, `CSS is not defined` and, for `new Intl.DateTimeFormat('en-US-u-hc-h23')`, the page stops with the Intl `Unsupported`. On the branch the same page gives `ok`, `true,true,false`, `a\ b\#c` and `en-US-u-hc-h23`. The two gate tests (`eval_intl_tests.rs`, `eval_intl_num_tests.rs`) now expect `Unsupported` only for `ca-buddhist`, `nu-arab` and `co-emoji`.
+- 16 new cases `ext_*` in `tools/fixtures/js/intl-cases.txt`. All match Node 22. Three older cases differ from Node as before (`matrix_en-IN_w3_y1`, two time zone name lines); they are not from this change.
+- New tests: console (5 groups), `CSS` (4), Intl keywords. `cargo test --release --workspace`: 3,352 passed, 0 failed, 13 ignored.
+- `tools/drive/public/run.sh`: 48 pass, 0 fail, 0 known, 0 skip, 0 flakes.
+- `exec_diff.sh`: 79 runs, 0 differences. `test262_check.sh`: exit 0 (10 directories gained passes, none lost). `keycost.sh`: `#a1` 282.2 M for each key, `#f0` 287.5 M, RSS 33.3 MiB at 20 keys and 33.6 MiB at 50 keys (main: 33.1 and 33.0).
+
+### Cost
+
+Matrix of 805 rows, new tree against a fresh `base-build` of main `cdf9bc794e`, after the one rebase. Over +0.5% under both allocators: 0. Over under one allocator: 0. Mean change: glibc -0.041%. Three rounds were needed.
+
+- `intl_load make 10` was +0.644% (glibc) and +0.539% (jemalloc). Fix: the checks for `-u-` moved to cold functions; the extension work runs only when a tag has `-u-`; the options `calendar` and `numberingSystem` are kept as a 1-byte state, not as strings; a flag (`in_ctor`) replaces a store in each constructor. Now +0.4% at most.
+- `console_load format 1` was +0.8% (the 19 host functions were installed at each `Browser`). Fix: `console` is lazy; `format_console_record` skips the padding when the indent is 0. Now +0.495%.
+- `dataset_load keys 1000 50` was +0.58% and `keys 10000 50` +0.61%. I bisected it: the cause is one instruction in each call of `matches` (2,500 calls for each key scan), from the layout of `browser_console.rs`; the console fields in `Dom` were not the cause (boxing them changed nothing). Fix: an ASCII byte loop in `matches`. The rows are now -6.3% and -6.6%, and `dataset_load read 10000 50` is -5.0%.
+
+### Live (bare-drive, `timeout 30000`, `open`, `expect readyState complete`, `shot`)
+
+| Site | Base | New |
+|---|---|---|
+| craigslist `/area/ker` | stops: `Unsupported("Intl: a locale with an extension ...")`, 15.4 s, 54 MiB | passes the step; next error: `Script aborted: the Steps budget ended the load event`, 15.2 s, 490 MiB |
+| youtube | `console.info is not a function` (and `reading 'prototype'`), 1.3 s, 168 MiB | no `console.info` error; next errors: `reading 'prototype'`, `ShadyDOM.patch is not a function`, 1.2 s, 178 MiB |
+| old.reddit | `CSS is not defined` + 4 other errors, 2.1 s, 96 MiB | no `CSS` error; 3 errors left (`reading 'write'` twice, one CallDepth abort), 1.2 s, 95 MiB |
+
+### Limits
+
+- craigslist now runs its scripts to the step budget. It is a new stop, not a regression. The 490 MiB peak belongs to that run and is not from this change; to verify: find what loops.
+- The exact Intl tag of craigslist was not logged; the fixture uses `und-x-private`-style tags and the `-u-` forms of the brief.
+- Time styles in `en-GB` with `-u-hc-h12` or `h11` pad the hour (`03:06 pm`); V8 does not. `fr` is not in bare. Only the alias `ca-islamicc` is canonicalized. `NumberFormat` still gates an unknown `numberingSystem` option (as before).
+- `console.table` and `console.dir` draw nothing and log the first argument. `console.clear` does nothing. `trace` has no stack.
+- `CSS.highlights`, `CSS.px` and friends, `paintWorklet` and `registerProperty` are not defined.
+
+### Not tested
+
+Chrome output for the console calls (only the spec text). `CSS.supports` against Chrome for rare conditions (`selector()` with unusual selectors, `font-tech()`). A second machine. Windows of the live sites other than the three above. The shot files of the live runs were not read.
