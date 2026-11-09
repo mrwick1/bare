@@ -5780,7 +5780,7 @@ Counter cost: a `u64` add in the `walk` loop gave +0.7% to +1.3% on 8 `bare-stre
 - Five sites, `bare-drive` step file `timeout 30000` / `open URL` / `expect css="body" visible`: dev.to, kubernetes.io/docs/home, nasa.gov, redis.io, hsbc.com all pass with 0 `Steps` aborts.
 - `cargo test --release --workspace --no-fail-fast`: 3342 passed, 0 failed.
 - `tools/drive/public/run.sh`: pass 48, fail 0, known 0, skip 0, flakes 1 (a journey that passed on its second attempt; the first full run had 0).
-- Full cost matrix, 805 rows, base `cdf9bc794e` (origin/main, no rebase needed): 0 rows over under both allocators, 0 over under one, 0 failed, mean glibc -0.001%. The first attempt (counter in the loop) had 8 rows over; the second (Cell) has none.
+- Full cost matrix, 805 rows, after the last rebase against a fresh `base-build` of `92e586370c` (main with #327): 0 rows over under both allocators, 0 over under one, 0 failed, mean glibc +0.002%. `cargo test --release --workspace` after the rebase: 3345 passed, 0 failed. The first attempt (counter in the loop) had 8 rows over; the second (Cell) has none.
 
 ### Limits and not tested
 
