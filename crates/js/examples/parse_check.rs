@@ -163,6 +163,12 @@ impl<'a> Dump<'a> {
                     self.key(el.key);
                     self.opt_expr(init);
                 }
+                ElemKind::StaticBlock(f) => {
+                    self.open("staticblock", el.span);
+                    if let Body::Block(l) = self.p.func(f).body {
+                        self.stmts(l);
+                    }
+                }
                 ElemKind::Method(f) | ElemKind::Getter(f) | ElemKind::Setter(f) => {
                     let k = match el.kind {
                         ElemKind::Getter(_) => "get",
