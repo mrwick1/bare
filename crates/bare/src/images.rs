@@ -215,8 +215,9 @@ impl Page {
     /// Do the pictures still load (or the document, which starts them), for less than `CAPTURE_WAIT`? A driver waits for them before a
     /// capture, and not before an `expect`.
     pub fn images_pending(&mut self) -> bool {
-        // The styles of the frame say which CSS pictures the page needs: a capture has that frame anyway.
-        if self.images_level() > 0 {
+        // The styles of the frame say which CSS pictures the page needs. Make the frame when there is none, and when no picture is on its way
+        // (a capture needs it anyway): not at each arrival, that would lay the page out again for each picture.
+        if self.images_level() > 0 && (self.frame.is_none() || !self.images.pending()) {
             self.frame_now();
         }
         // Look now: a loaded page with no picture needs no tick to say so.
