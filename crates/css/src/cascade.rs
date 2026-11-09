@@ -66,7 +66,7 @@ use crate::grid::{self, Grid};
 use crate::matching::{compound_match, matches};
 use crate::parser::{AtBody, Rule, parse_declarations, parse_stylesheet};
 use crate::selector::{Combinator, Mode, Selector, ShadowPseudo, Simple, parse_selector_list_in};
-use crate::values::{Declared, Keyword, Length, Property, Side, Value, parse_declaration};
+use crate::values::{Declared, Keyword, Length, Property, Side, Value, mirror, parse_declaration};
 use crate::var::{self, CustomDecl, VarDecl};
 
 /// The style sheet of the browser itself.
@@ -217,6 +217,8 @@ pub struct RuleSet {
     /// Where the selectors read each class, id and attribute (`Reach`). Made at the first change, so a page that never
     /// changes does not pay for it.
     reach: std::cell::OnceCell<Reach>,
+    /// Does a rule have a logical property of the inline axis, or `float: inline-start | inline-end`? Only then does an `rtl` element need `logical_pass`.
+    logical: bool,
 }
 
 /// The invalidation sets: for each class, id and attribute name that a selector reads, the widest `Scope` where it reads it.
@@ -396,7 +398,7 @@ impl RuleSet {
     }
 
     pub fn new(viewport: (f32, f32)) -> RuleSet {
-        RuleSet { viewport, entries: Vec::new(), decls: Vec::new(), side: Side::default(), layers: vec![Layer { parent: 0 }], layer_by_name: HashMap::new(), customs: Vec::new(), index: Index::default(), shadows: HashMap::default(), parts: Vec::new(), user: 0, scopes: Scopes::default(), reach: std::cell::OnceCell::new() }
+        RuleSet { viewport, entries: Vec::new(), decls: Vec::new(), side: Side::default(), layers: vec![Layer { parent: 0 }], layer_by_name: HashMap::new(), customs: Vec::new(), index: Index::default(), shadows: HashMap::default(), parts: Vec::new(), user: 0, scopes: Scopes::default(), reach: std::cell::OnceCell::new(), logical: false }
     }
 
     /// Which user action state (`:hover`, `:active`, the focus pseudo-classes) some rule reads: the bits `selector::USES_*`.
@@ -633,6 +635,7 @@ impl RuleSet {
                     parse_declaration(&d.name, d.value, d.important, &mut self.side, &mut self.decls);
                 }
             }
+            self.logical |= self.decls[start..].iter().any(|d| d.mirror || matches!(d.value, Value::Keyword(Keyword::InlineStart | Keyword::InlineEnd)));
             if self.decls.len() == start && self.customs.len() == custom_start {
                 continue;
             }
@@ -1111,7 +1114,7 @@ impl RuleSet {
                 return found.style;
             }
         }
-        let style = self.cascade(matched, inline, hint, &styles.styles[parent as usize], cx);
+        let style = self.cascade_as::<0>(matched, inline, hint, &styles.styles[parent as usize], cx);
         // Two different rule lists may give the same style (`div div` inside `div`). Then they share it, and the children of both
         // have the same parent style, so they find each other in the cache.
         let hash = style_hash(&style);
@@ -1129,12 +1132,32 @@ impl RuleSet {
         id
     }
 
-    /// Pick the winning declaration for each property, then compute the values.
-    fn cascade(&self, matched: &[u32], inline: Option<&str>, hint: Option<&str>, parent: &ComputedStyle, cx: &Cx<'_>) -> ComputedStyle {
+    /// The pass for an element that is `rtl`, or whose `float` is `inline-start`. The declarations of the inline axis go to the other side
+    /// (`margin-inline-start` is `margin-right`), and `float: inline-start` goes to the side of the start of the container: the direction
+    /// of the parent. This runs `cascade_as` again from the start: the first pass must not hold its style for a second look, because
+    /// that makes every call copy the style (1 KB).
+    #[cold]
+    #[inline(never)]
+    fn logical_pass(&self, matched: &[u32], inline: Option<&str>, hint: Option<&str>, parent: &ComputedStyle, cx: &Cx<'_>) -> ComputedStyle {
+        let mut style = self.cascade_as::<1>(matched, inline, hint, parent, cx);
+        if matches!(style.0[Property::Direction as usize], Value::Keyword(Keyword::Rtl)) {
+            style = self.cascade_as::<2>(matched, inline, hint, parent, cx);
+        }
+        if let Value::Keyword(side @ (Keyword::InlineStart | Keyword::InlineEnd)) = style.0[Property::Float as usize] {
+            let parent_rtl = parent.get(Property::Direction) == Value::Keyword(Keyword::Rtl);
+            style.0[Property::Float as usize] = Value::Keyword(if (side == Keyword::InlineStart) != parent_rtl { Keyword::Left } else { Keyword::Right });
+        }
+        style
+    }
+
+    /// Pick the winning declaration for each property, then compute the values. `PASS` 0 is the first pass, 1 the same without the check, 2 the one for `rtl` (`logical_pass`).
+    fn cascade_as<const PASS: u8>(&self, matched: &[u32], inline: Option<&str>, hint: Option<&str>, parent: &ComputedStyle, cx: &Cx<'_>) -> ComputedStyle {
         let mut winners = [None::<Value>; Property::COUNT];
         let mut keys = [0u128; Property::COUNT];
         // The properties that have a winner, one bit each: the loops below visit only these.
         let mut set = 0u128;
+        // The properties whose winner is a declaration that pass 2 moved to the other side.
+        let mut swapped = 0u128;
         // The key of a declaration: the one with the bigger key wins. The parts, from the most important: the origin and `!important`,
         // the layer, the specificity, and the place in the page. A `style=""` attribute has no layer (`None`): it beats every layer.
         let key = |important: bool, origin: Origin, ctx: u8, layer: Option<u32>, specificity: u32, order: u32| {
@@ -1174,13 +1197,17 @@ impl RuleSet {
                 set |= 1 << p;
             }
         }
+        // The logical declarations of the inline axis wait here, with their keys, until the direction of the element is known.
         let mut apply = |d: &Declared, origin: Origin, ctx: u8, layer: Option<u32>, specificity: u32, order: u32| {
             let key = key(d.important, origin, ctx, layer, specificity, order);
-            let p = d.property as usize;
+            let p = if PASS == 2 && d.mirror { mirror(d.property) } else { d.property } as usize;
             if winners[p].is_none() || key >= keys[p] {
                 winners[p] = Some(d.value);
                 keys[p] = key;
                 set |= 1 << p;
+                if PASS == 2 {
+                    swapped = swapped & !(1 << p) | u128::from(d.mirror) << p;
+                }
             }
         };
         // The custom properties depend only on the set of the parent and on the rules that have some. Most elements of a page
@@ -1275,11 +1302,18 @@ impl RuleSet {
             let p = rest.trailing_zeros() as usize;
             rest &= rest - 1;
             if let Some(Value::Var(i)) = winners[p] {
-                winners[p] = Some(self.read_var(i, Property::ALL[p], custom, cx));
+                // A swapped declaration reads `var()` as the property that its text names, not the one that it landed on.
+                let named = if PASS == 2 && swapped >> p & 1 == 1 { mirror(Property::ALL[p]) } else { Property::ALL[p] };
+                winners[p] = Some(self.read_var(i, named, custom, cx));
             }
         }
         let mut style = compute(&winners, set, parent, cx);
         style.1 = custom;
+        // A logical property of the inline axis (`margin-inline-start`) is its physical property for `ltr`, so the first pass is the same
+        // for every element. An `rtl` element, or a `float` that is `inline-start`, gets `logical_pass`.
+        if PASS == 0 && (matches!(style.0[Property::Direction as usize], Value::Keyword(Keyword::Rtl)) || matches!(style.0[Property::Float as usize], Value::Keyword(Keyword::InlineStart | Keyword::InlineEnd))) && (self.logical || inline.is_some()) {
+            return self.logical_pass(matched, inline, hint, parent, cx);
+        }
         style
     }
 
@@ -2384,6 +2418,80 @@ mod tests {
         assert_eq!(get(html, &[], "b", Property::PaddingTop), px(5.0));
         assert_eq!(get(html, &[], "c", Property::PaddingLeft), px(1.0));
         assert_eq!(get(html, &["td { padding: 0 }"], "a", Property::PaddingLeft), px(0.0));
+    }
+
+    /// Logical properties map to the physical ones when the style is computed: the inline axis follows `direction`,
+    /// the block axis is top and bottom (horizontal writing mode only).
+    #[test]
+    fn logical_properties_map_to_physical_by_direction() {
+        use Property::*;
+        let html = "<div id=a><p id=p>x</p></div><div id=r dir=rtl><p id=q>y</p></div>";
+        let sheet = "p { margin-inline: 1px 2px; margin-block: 3px 4px; padding-inline-start: 5px; padding-block-end: 6px; inset-inline-end: 7px; \
+            border-inline-start-width: 8px; border-inline-start-style: solid; border-block-start: 9px dotted red; inline-size: 10px; min-block-size: 11px; \
+            max-inline-size: 12px; border-start-start-radius: 13px; border-end-end-radius: 14px }";
+        let g = |id, p| get(html, &[sheet], id, p);
+        assert_eq!([g("p", MarginLeft), g("p", MarginRight), g("p", MarginTop), g("p", MarginBottom)], [px(1.0), px(2.0), px(3.0), px(4.0)]);
+        assert_eq!([g("p", PaddingLeft), g("p", PaddingRight), g("p", PaddingBottom)], [px(5.0), px(0.0), px(6.0)]);
+        assert_eq!([g("p", Right), g("p", Left)], [px(7.0), Value::Keyword(Keyword::Auto)]);
+        assert_eq!([g("p", BorderLeftWidth), g("p", BorderTopWidth), g("p", BorderTopStyle)], [px(8.0), px(9.0), Value::Keyword(Keyword::Dotted)]);
+        assert_eq!([g("p", Width), g("p", MinHeight), g("p", MaxWidth)], [px(10.0), px(11.0), px(12.0)]);
+        assert_eq!([g("p", BorderTopLeftRadius), g("p", BorderBottomRightRadius)], [px(13.0), px(14.0)]);
+        // In an rtl element the inline start is the right side. The block axis does not change.
+        assert_eq!([g("q", MarginLeft), g("q", MarginRight), g("q", MarginTop), g("q", MarginBottom)], [px(2.0), px(1.0), px(3.0), px(4.0)]);
+        assert_eq!([g("q", PaddingLeft), g("q", PaddingRight), g("q", PaddingBottom)], [px(0.0), px(5.0), px(6.0)]);
+        assert_eq!([g("q", Left), g("q", Right)], [px(7.0), Value::Keyword(Keyword::Auto)]);
+        assert_eq!([g("q", BorderLeftWidth), g("q", BorderRightWidth), g("q", BorderTopWidth)], [px(0.0), px(8.0), px(9.0)]);
+        assert_eq!([g("q", Width), g("q", MinHeight)], [px(10.0), px(11.0)]);
+        assert_eq!([g("q", BorderTopRightRadius), g("q", BorderBottomLeftRadius), g("q", BorderTopLeftRadius)], [px(13.0), px(14.0), px(0.0)]);
+        // The direction comes from the same cascade: a rule, `inherit`, `var()`.
+        let (rule, inherit) = ("#a { direction: rtl } p { margin-inline-start: 5px }", "#a { direction: rtl } p { margin-inline-start: inherit }");
+        assert_eq!(get(html, &[rule], "p", MarginRight), px(5.0));
+        assert_eq!(get(html, &[rule], "p", MarginLeft), px(0.0));
+        assert_eq!(get(html, &["#a { margin-right: 6px } #a { direction: rtl } p { margin-inline-start: inherit }"], "p", MarginRight), px(6.0));
+        assert_eq!(get(html, &[inherit], "p", MarginLeft), px(0.0));
+        let var = "p { --s: 5px; margin-inline: var(--s) 2px; direction: rtl }";
+        assert_eq!([get(html, &[var], "p", MarginRight), get(html, &[var], "p", MarginLeft)], [px(5.0), px(2.0)]);
+        // The later declaration of the same strength wins, logical or physical. A bad value drops the declaration.
+        assert_eq!(get(html, &["p { margin-left: 1px } p { margin-inline-start: 2px }"], "p", MarginLeft), px(2.0));
+        assert_eq!(get(html, &["p { margin-inline-start: 2px } p { margin-left: 1px }"], "p", MarginLeft), px(1.0));
+        assert_eq!(get(html, &["p { margin-inline-start: 2px; margin-inline-start: red }"], "p", MarginLeft), px(2.0));
+        assert_eq!(get(html, &["p { margin-inline: 1px 2px 3px }"], "p", MarginLeft), px(0.0));
+        // In one rule the later declaration wins too, in `ltr` and in `rtl`.
+        assert_eq!(get(html, &["p { margin-inline-start: 1px; margin-left: 2px }"], "p", MarginLeft), px(2.0));
+        assert_eq!(get(html, &["p { margin-left: 2px; margin-inline-start: 1px }"], "p", MarginLeft), px(1.0));
+        assert_eq!(get(html, &["p { margin-inline-start: 1px; margin-right: 2px }"], "q", MarginRight), px(2.0));
+        assert_eq!(get(html, &["p { margin-right: 2px; margin-inline-start: 1px }"], "q", MarginRight), px(1.0));
+        // A logical `!important` beats a physical rule with more specificity.
+        assert_eq!(get(html, &["p { margin-inline-start: 2px !important } #p { margin-left: 1px }"], "p", MarginLeft), px(2.0));
+    }
+
+    /// `float: inline-start` follows the direction of the containing block. `text-align: start` stays a keyword for layout.
+    /// Tailwind v4 sets `--spacing` in `:root, :host`. A list with `:host` is not dropped: the `:root` part works, and the spacing utilities get a length.
+    #[test]
+    fn a_rule_with_host_in_its_selector_list_still_matches_the_other_selectors() {
+        let html = "<div id=d>x</div>";
+        let sheet = ":root, :host { --spacing: .25rem } div { padding-left: calc(var(--spacing) * 6); gap: calc(var(--spacing) * 2) }";
+        assert_eq!(get(html, &[sheet], "d", Property::PaddingLeft), px(24.0));
+        assert_eq!(get(html, &[sheet], "d", Property::ColumnGap), px(8.0));
+    }
+
+    /// A `style=""` attribute may hold a logical property in a page whose sheets have none: the `rtl` pass must still run.
+    #[test]
+    fn a_logical_property_in_a_style_attribute_follows_the_direction() {
+        let html = "<p id=a dir=rtl style='margin-inline-start: 7px'>x</p><p id=b style='margin-inline-start: 7px'>y</p>";
+        assert_eq!([get(html, &[""], "a", Property::MarginRight), get(html, &[""], "a", Property::MarginLeft)], [px(7.0), px(0.0)]);
+        assert_eq!([get(html, &[""], "b", Property::MarginLeft), get(html, &[""], "b", Property::MarginRight)], [px(7.0), px(0.0)]);
+    }
+
+    #[test]
+    fn float_inline_start_follows_the_direction_of_the_parent() {
+        use Keyword::{Left, Right};
+        let html = "<div id=a><p id=p>x</p></div><div id=r dir=rtl><p id=q>y</p></div>";
+        let sheet = "p { float: inline-start } #z { float: inline-end }";
+        assert_eq!(get(html, &[sheet], "p", Property::Float), Value::Keyword(Left));
+        assert_eq!(get(html, &[sheet], "q", Property::Float), Value::Keyword(Right));
+        assert_eq!(get(html, &["p { float: inline-end } #a { direction: rtl }"], "p", Property::Float), Value::Keyword(Left));
+        assert_eq!(get(html, &["p { float: inline-end }"], "p", Property::Float), Value::Keyword(Right));
     }
 
     #[test]

@@ -248,6 +248,8 @@ fn spaced_pieces(b: &mut Breaker, node: NodeId, text: &str, (ws, transform, metr
 struct Breaker<'c, 'a> {
     cx: &'c mut Cx<'a>,
     block: NodeId,
+    /// `text-align` of the block, with `start` and `end` turned into `left` and `right` by its direction.
+    align: Keyword,
     width: f32,
     /// The line so far, and where it ends.
     line: Vec<Item>,
@@ -375,9 +377,19 @@ fn inline_box(cx: &Cx, node: NodeId, width: f32) -> Inline {
 pub fn lines(cx: &mut Cx, block: NodeId, first: NodeId, last: NodeId, width: f32, bfc: (f32, f32)) -> Lines {
     let tree = cx.tree;
     let strut = reach(cx, block);
+    let own = tree.style(block);
+    let align = match own.get(Property::TextAlign) {
+        // `start` is the right edge in an `rtl` block, and `end` the left edge.
+        Value::Keyword(side @ (Keyword::Start | Keyword::End)) => {
+            if (side == Keyword::End) != (own.get(Property::Direction) == Value::Keyword(Keyword::Rtl)) { Keyword::Right } else { Keyword::Left }
+        }
+        Value::Keyword(k) => k,
+        _ => Keyword::Left,
+    };
     let mut b = Breaker {
         cx,
         block,
+        align,
         width,
         line: Vec::new(),
         x: 0.0,
@@ -845,11 +857,11 @@ impl Breaker<'_, '_> {
         // `text-align`: move the whole line.
         let free = (self.avail - self.x).max(0.0);
         let dx = self.left
-            + match tree.style(self.block).get(Property::TextAlign) {
-                Value::Keyword(Keyword::Right | Keyword::End) => free,
-                Value::Keyword(Keyword::Center) => free / 2.0,
+            + match self.align {
+                Keyword::Right => free,
+                Keyword::Center => free / 2.0,
                 _ => 0.0,
-                // `left`, `start`, and `justify` (not built: see `docs/progress.md`).
+                // `left` and `justify` (not built: see `docs/progress.md`).
             };
 
         for &i in &self.line_statics {
@@ -1062,6 +1074,19 @@ mod tests {
     fn text_align() {
         assert_eq!(rect("<div style='width:100px;text-align:center'><span id=s style='background:red'>ab</span></div>", "", "s").x, 8.0 + 40.4);
         assert_eq!(rect("<div style='width:100px;text-align:right'><span id=s style='background:red'>ab</span></div>", "", "s").x, 8.0 + 80.8);
+    }
+
+    /// `start` and `end` follow the direction of the block: in `rtl`, the text starts at the right edge.
+    #[test]
+    fn text_align_start_and_end_follow_the_direction() {
+        let x = |style: &str| rect(&format!("<div style='width:100px;{style}'><span id=s style='background:red'>ab</span></div>"), "", "s").x;
+        assert_eq!(x("text-align:start"), 8.0);
+        assert_eq!(x("text-align:end"), 8.0 + 80.8);
+        assert_eq!(x("direction:rtl"), 8.0 + 80.8);
+        assert_eq!(x("direction:rtl;text-align:start"), 8.0 + 80.8);
+        assert_eq!(x("direction:rtl;text-align:end"), 8.0);
+        assert_eq!(x("direction:rtl;text-align:left"), 8.0);
+        assert_eq!(x("direction:rtl;text-align:right"), 8.0 + 80.8);
     }
 
     #[test]

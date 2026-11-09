@@ -4827,3 +4827,60 @@ All three requested sites passed body visible. Archive.org and lit.dev logged no
 Artifacts remain under /data/bare-tmp/intl-*. The final cost table is intl-cost-main.tsv. Direct perf counts and load records are in intl-layout-ab.json. Site results are under intl-sites/.
 
 Not tested: full XML conformance, all Intl option combinations, and site interactions beyond the body-visible checks. Collator search and collation, number range methods, non-Latin numbering systems, and rounding increments other than one remain gated. The audit found no additional English gates in RelativeTimeFormat, ListFormat, or Segmenter.
+
+## CSS logical properties and the real-site visual defects (2026-11-09)
+
+Branch `css-logical`, on the base `93559738`. The task: four visual defects seen in headless runs of real sites.
+
+### Fixed: logical properties (defect 1)
+
+- Names: `margin`, `padding`, `inset` with `-inline`, `-block`, `-inline-start`, `-inline-end`, `-block-start`, `-block-end`; `border-inline`, `border-block` and their `-start`, `-end`, `-width`, `-style`, `-color` forms; `border-start-start-radius`, `-start-end-`, `-end-start-`, `-end-end-`; `inline-size`, `block-size`, `min-` and `max-` of both; `float: inline-start | inline-end`; `text-align: start | end` (already parsed).
+- Where: `values.rs` maps each name to the physical longhands for `ltr` (`logical`). A declaration of the inline axis has `Declared::mirror`. In `ltr` the cascade does nothing more: the physical property is right, and the logical declaration competes with the physical ones by the same key. An `rtl` element (or a `float: inline-start`) gets `RuleSet::logical_pass` after the first pass: it runs the cascade again with `PASS == 2`, which puts each declaration with `mirror` on the other side (`mirror`: left and right swap). The pass runs only when a rule or a `style=""` can hold a logical declaration (`RuleSet::logical`). `layout` is unchanged for margins, padding, borders, insets and sizes. `inline.rs` reads `start` and `end` with the direction of the block (once per `lines()` call).
+- `float: inline-start` uses the direction of the parent (the container). `inherit`, `initial`, `unset` and `var()` work (a `var()` is read with the property that the text names).
+- Out of scope, as asked: vertical writing modes (`writing-mode` is not read; block axis is top to bottom, inline axis is left to right).
+- Known limit: `el.style.marginInlineStart` and `getComputedStyle` do not list logical names: the JS style code keeps them as opaque text, and the cascade reads that text.
+- Rust book (`doc.rust-lang.org/book/`): sidebar 0 to 300 px, content from x=419. Before, it used `margin-inline-start` for the page wrapper and the sidebar covered the text. A screenshot taken before the page script ran still shows the old overlap: the script checks the sidebar box, and the restyle comes after the first paint. A screenshot after `expect js` on the margin is right.
+
+### Fixed: run-together nav text on Tailwind v4 pages (defect 2)
+
+Root cause, found with a minimal page in the Tailwind rule shapes (`:root,:host{--spacing:.25rem}`, `gap:calc(var(--spacing)*6)`, `padding-inline:calc(var(--spacing)*4)`): two faults together.
+1. The rule `:root, :host { --spacing: ... }` was dropped as a whole because `:host` was not a known selector. Without `--spacing` every `calc(var(--spacing) * N)` was invalid, so `gap`, `padding` and `margin` were 0. PR #301 (shadow DOM styles, on main) fixed the `:host` part. This change adds the test `a_rule_with_host_in_its_selector_list_still_matches_the_other_selectors`, which also passes on #301.
+2. Tailwind v4 writes `padding-inline`, `margin-inline` and others with logical names. They are now read.
+
+After the change, tailwindcss.com shows the nav as `Docs  Play  Blog  Showcase  Partners  Plus` with gaps, the version button, the search button and the hero; hashnode.com shows the sidebar with icons, padding and the `Theme` / `More` gap. Before, both pages showed the text with no gaps and no padding. Screenshots: `bare-drive` `shot`, 1280x800.
+
+### Reported only: Arabic text (defect 3)
+
+On ar.wikipedia.org the Arabic text is blank. The banner that looks right is an image (SVG). Cause: the engine draws three fonts built into the program (Noto Sans Mono Regular and Bold subsets, Noto Sans Symbols2 subset). None has Arabic. A glyph that no face has is not drawn (`crates/paint/src/glyphs.rs`). The engine reads no system font on purpose (`docs/decisions.md`, "Fonts": the pixels must not depend on the machine). The machine has Noto Sans Arabic and Noto Naskh Arabic (`fc-list :lang=ar`).
+What a fix needs, in order: (1) a bundled Arabic face (subset, about 50 to 100 KB) as a fourth fallback in `glyphs.rs`; (2) contextual shaping (initial, medial, final and isolated forms, lam-alef, mark positions): without it the letters are drawn apart; (3) bidi (UAX 9) to put runs in visual order: without it a line is in reverse order; (4) advances that are not 0.6 em, in `layout/font.rs`. Drawing isolated letters in logical order would be unreadable, so none of this was built. With this change, `text-align: start` in an `rtl` block is at the right edge.
+
+### Reported only: grey placeholders on BBC (defect 4a)
+
+bbc.com/news: each card is `<img class="... hide-when-no-script" src=".../grey-placeholder.png">` (160x90, absolute) followed by the real `<img>` (a `.jpg.webp`, which bare downloads with status 200 and decodes). The placeholder is absolute, so it paints over the image. The page hides it only without script (`<noscript><style>.hide-when-no-script{visibility:hidden}`) and the React app removes it after hydration. Hydration fails: console `TypeError: Cannot read properties of undefined (reading 'length')` at `script#27` (hypothesis, to verify: the `Buffer` polyfill chunk `0a--~b-snp6to.js` at column 13659), then `A client-side exception has occurred`, and `listener of error: TypeError: window.performance.mark is not a function`. `performance` has only `now` (`browser_scheduler.rs`). Not fixed: the first error is in the JS engine, which this task did not touch.
+
+### Reported only: black boxes on GitLab (defect 4b)
+
+gitlab.com, the "Ship faster" cards: the box is `.one-feature-cards__media` (`#18171d`, `display:flex`, `height:320px`) with `<img class="one-feature-cards__shot" src="....svg">` and the CSS `height:auto; width:auto; max-height:78%; max-width:68%; object-fit:contain`. The SVG downloads (88 KB) and draws when `width` is set. Minimal pages: a flex item `<img>` with `width:auto` has width 0, so nothing is drawn; with only `max-width/max-height` it is drawn. Cause: layout has no natural size for a replaced element. The image size reaches layout only as a presentational hint (`width:Npx; aspect-ratio`, `css/hints.rs`), and an author `width:auto` beats the hint; `intrinsic::sizes` of an `<img>` is (0, 0). In a block the same `<img>` gets the full width of the container. A fix: give `<img>` with a decoded image a natural size, like `controls::size` does for form controls (also for `flex` items and `max-*`). This is not small (SVG natural size, ratio when one side is set, percent `max-*`), so it is left for its own change.
+
+### Checks
+
+- Tests first: `logical_properties_map_to_physical_by_direction` and `float_inline_start_follows_the_direction_of_the_parent` (css), `text_align_start_and_end_follow_the_direction` (layout). The logical test was run with `logical()` returning `None` first: it failed (`[0, 0, 16, 16]` against `[1, 2, 3, 4]`). The layout test was run with the direction ignored: it failed (`8.0` against `88.8`). The `:host` test was not run against the old code: the page repro was (t5 and t6 of `min2.html` had no padding).
+- Cost matrix against the base build of `93559738` (805 rows, both allocators, `tools/js/cost_matrix.sh`): **0 rows over the limit**. The four rows that were the worst (`bare-stress`, each element has its own `style=""`, so each runs a full `cascade()`; 3 runs each, same numbers):
+
+| Row | glibc | jemalloc |
+|---|---|---|
+| `bare-stress run flex-freeze-many 2000` | +0.405% | +0.022% |
+| `bare-stress run flex-freeze-many 20000` | +0.399% | +0.331% |
+| `bare-stress run table-percent-columns 10000` | +0.401% | +0.342% |
+| `bare-stress run table-percent-columns 100000` | +0.401% | +0.365% |
+
+  Cause of the first +1.1% on these rows (found by changing one thing at a time and measuring): not the work of the logical names (reverting the branch in `apply` alone gave +0.02%), but a copy. `cascade` returns a `ComputedStyle` of 1 KB. Any code that looks at the returned style and may pass it on (a wrapper, `let style = if .. { f(style) } else { style }`, `&mut style`) makes the compiler build the style in a local and copy it to the result on every call: about 220 instructions for each uncached style. The check is now at the end of `cascade_as`: it only reads two values of `style`, and the cold path (`logical_pass`) starts again from the matched rules and does not take `style`. An `rtl` element with no logical property anywhere pays nothing, because of the flag `RuleSet::logical`; without the flag, `examples/sheets_load dynamic 10` (rtl on every `<p>`) was +9.2%. The cost of an `rtl` page that uses logical properties is a second or third `cascade` for each uncached `rtl` style.
+- `cargo test --release --workspace`: 3261 passed, 0 failed.
+- `tools/drive/public/run.sh`: pass 33, fail 0, known 0, flakes 0.
+- Test for the style attribute: `a_logical_property_in_a_style_attribute_follows_the_direction`.
+
+### Not tested
+
+- `rtl` layout beyond `text-align` and the cascade mapping: the engine has no bidi and no right-to-left flow of inline content.
+- Chrome comparison of the new unit test expectations (read from CSS Logical 1 by hand).
+- Logical properties in `@media`/`@supports` conditions and in the JS style API by name.
