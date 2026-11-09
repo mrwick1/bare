@@ -607,6 +607,8 @@ pub struct Interp<'p> {
     arg_pool: Vec<Vec<Value>>,
     /// The strings object of each tagged template site, by (script, expression). Kept for the realm's life, as in the spec.
     tpl_objs: FxMap<(u32, u32), ObjId>,
+    /// Module records (see `eval_modules.rs`).
+    modules: ModState,
     // builtin objects
     global: ObjId,
     object_proto: ObjId,
@@ -788,6 +790,7 @@ impl<'p> Interp<'p> {
             pending_labels: Vec::new(),
             arg_pool: Vec::new(),
             tpl_objs: FxMap::default(),
+            modules: ModState::default(),
             global,
             object_proto,
             function_proto,
@@ -898,6 +901,7 @@ impl<'p> Interp<'p> {
         v.extend(self.site_strs.iter().map(|&s| Value::String(s)));
         v.extend(self.prop_str.iter().flatten().map(|&s| Value::String(s)));
         v.extend(self.tpl_objs.values().map(|&o| Value::Object(o)));
+        self.module_values(&mut v, &mut Vec::new());
         self.script_roots(&mut v);
         for e in self.envs.iter().filter(|e| e.live) {
             v.extend(e.bindings.iter().map(|b| b.value));
@@ -975,6 +979,7 @@ impl<'p> Interp<'p> {
         let mut act_seen = vec![false; self.aw.acts.len()];
         self.gen_roots(&mut work);
         work.extend(self.tpl_objs.values().map(|&o| Value::Object(o)));
+        self.module_values(&mut work, &mut env_work);
         self.async_queue_roots(&mut work, &mut env_work, &mut act_seen);
         loop {
             if let Some(e) = env_work.pop() {
@@ -1215,6 +1220,7 @@ impl<'p> Interp<'p> {
     }
 
     fn type_err(&mut self, msg: &str) -> Error {
+        if msg.contains("(reading 'prototype')") || msg.contains("(reading 'length')") { self.te_dump(msg); }
         self.mk_err(TYPE_ERROR, msg)
     }
 
@@ -1266,6 +1272,11 @@ impl<'p> Interp<'p> {
         self.sc_fn = top;
         self.sc_class = 0;
         self.sc_begin(RKind::Root);
+        if let Some(m) = &prog.module {
+            self.w_func(m.func, usize::MAX)?;
+            self.scopes[m.func.index()].fr = FR_ENV;
+            return Ok(());
+        }
         for s in prog.list(prog.body) {
             self.w_stmt(s, top, usize::MAX, false)?;
         }
@@ -1512,6 +1523,7 @@ impl<'p> Interp<'p> {
             }
             StmtKind::Empty | StmtKind::Debugger => {}
             StmtKind::With { .. } => return Err(unsupported("with statement", st.span)),
+            StmtKind::ExportDefault(e) => self.w_expr(e, fs, ac)?,
         }
         Ok(())
     }
@@ -1638,6 +1650,13 @@ impl<'p> Interp<'p> {
                     self.w_expr(a, fs, ac)?;
                 }
             }
+            ExprKind::ImportCall { arg, opts } => {
+                self.w_expr(arg, fs, ac)?;
+                if let Some(o) = opts {
+                    self.w_expr(o, fs, ac)?;
+                }
+            }
+            ExprKind::ImportMeta => {}
         }
         Ok(())
     }
@@ -1921,6 +1940,14 @@ impl<'p> Interp<'p> {
                     }
                 }
                 StmtKind::Class(c) => self.declare_class(c),
+                // `export default function () {}` is hoisted like a declaration, under the name "default".
+                StmtKind::ExportDefault(e) => {
+                    if let ExprKind::Function(fid) = prog.expr(e).kind {
+                        let s = h!(self, self.heap.intern_str("default"));
+                        let f = self.make_closure(fid, Some(s), false)?;
+                        self.set_default_export(f)?;
+                    }
+                }
                 _ => {}
             }
         }
@@ -2604,7 +2631,7 @@ impl<'p> Interp<'p> {
         } else {
             return self.get_global(n);
         }
-        Err(self.tdz(n))
+        self.get_name_uninit(n, site)
     }
 
     /// A name that no environment binds: a property of the global object.
@@ -2661,6 +2688,9 @@ impl<'p> Interp<'p> {
     #[inline(never)]
     fn assign_name_refused(&mut self, n: u32, e: u32, i: usize) -> Res<()> {
         let flags = self.envs[e as usize].bindings[i].flags;
+        if flags & IMPORT != 0 {
+            return Err(self.type_err("Assignment to constant variable."));
+        }
         if flags & INIT == 0 {
             return Err(self.tdz(n));
         }
@@ -2912,6 +2942,8 @@ impl<'p> Interp<'p> {
             ExprKind::NewTarget => self.eval_new_target(),
             ExprKind::Super => Err(self.mk_err(REFERENCE_ERROR, "Unsupported reference to 'super'")),
             ExprKind::Chain(inner) => Ok(self.link(inner)?.map_or(Value::Undefined, |p| p.0)),
+            ExprKind::ImportCall { arg, opts } => self.eval_import_call(arg, opts),
+            ExprKind::ImportMeta => self.import_meta(),
             ExprKind::New { callee, args } => self.eval_new(e, callee, args),
             ExprKind::Seq(l) => self.eval_seq(l),
             ExprKind::Paren(inner) => self.eval_expr(inner),
@@ -3749,6 +3781,7 @@ include!("eval_binary.rs");
 include!("eval_binary_search.rs");
 include!("eval_typed.rs");
 include!("eval_scripts.rs");
+include!("eval_modules.rs");
 include!("eval_scope.rs");
 include!("eval_stack.rs");
 include!("eval_builtins.rs");
@@ -3802,6 +3835,10 @@ mod promise_combinator_tests;
 #[cfg(test)]
 #[path = "eval_scripts_tests.rs"]
 mod script_tests;
+
+#[cfg(test)]
+#[path = "eval_modules_tests.rs"]
+mod module_tests;
 
 #[cfg(test)]
 #[path = "eval_scope_tests.rs"]

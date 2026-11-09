@@ -19,8 +19,12 @@
 //!
 //! The parser stops at the first error. It does not recover.
 //!
-//! Not supported, with a precise error ([`ErrorKind::Unsupported`]): generators and `yield`, `import`/
-//! `export`/`import()`/`import.meta`. The tested corpus and observed staging
+//! Modules: [`parse_module`] reads the module goal. The module code becomes one synthetic function
+//! ([`ModuleInfo::func`], `async` when the code has a top-level `await`). `import` and `export` declarations are not
+//! statements: they fill [`ModuleInfo`]. An exported declaration stays a statement. `export default expr` is
+//! [`StmtKind::ExportDefault`]. `import()` is script syntax too; `import.meta` is module only.
+//!
+//! Nothing is rejected as unsupported now ([`ErrorKind::Unsupported`] is kept for callers). The tested corpus and observed staging
 //! syntax are covered; this is not a claim of complete ES2022 compatibility.
 //! Not done here: regexp pattern grammar ([`REGEXP_PATTERN_VALIDATED`]), HTML-like comments, scope
 //! resolution of names.
@@ -146,19 +150,31 @@ fn lex_err(e: lex::Error) -> Error {
 
 /// Parse `source` as a script (not a module). Borrows `source`; the [`Program`] owns its nodes.
 pub fn parse_script(source: &str, limits: Limits) -> Result<Program<'_>, Error> {
-    parse_counted(source, limits, &mut 0)
+    parse_counted(source, limits, &mut 0, false)
+}
+
+/// Parse `source` as a module: strict code, `await` at the top level, `import` and `export` declarations.
+pub fn parse_module(source: &str, limits: Limits) -> Result<Program<'_>, Error> {
+    parse_counted(source, limits, &mut 0, true)
+}
+
+/// [`parse_module`], and the node count as in [`parse_script_used`].
+pub fn parse_module_used(source: &str, limits: Limits) -> (Result<Program<'_>, Error>, u32) {
+    let mut used = 0;
+    let r = parse_counted(source, limits, &mut used, true);
+    (r, used)
 }
 
 /// [`parse_script`], and the count of nodes plus list entries made before the end or the error. The parse cache uses the count:
 /// the same source with a `max_nodes` of at least that count gives the same result.
 pub fn parse_script_used(source: &str, limits: Limits) -> (Result<Program<'_>, Error>, u32) {
     let mut used = 0;
-    let r = parse_counted(source, limits, &mut used);
+    let r = parse_counted(source, limits, &mut used, false);
     (r, used)
 }
 
 #[inline(always)]
-fn parse_counted<'a>(source: &'a str, mut limits: Limits, used: &mut u32) -> Result<Program<'a>, Error> {
+fn parse_counted<'a>(source: &'a str, mut limits: Limits, used: &mut u32, module: bool) -> Result<Program<'a>, Error> {
     limits.max_depth = limits.max_depth.min(HARD_MAX_DEPTH);
     if source.len() > limits.max_source {
         let at = limits.max_source.min(u32::MAX as usize) as u32;
@@ -191,8 +207,11 @@ fn parse_counted<'a>(source: &'a str, mut limits: Limits, used: &mut u32) -> Res
         spread_commas: Vec::new(),
         for_await_head: false,
         await_pos: 0,
+        module,
+        export_names: Default::default(),
+        local_exports: Vec::new(),
     };
-    let r = p.parse_program();
+    let r = if module { p.parse_module_body() } else { p.parse_program() };
     *used = p.used;
     r?;
     Ok(p.p)
@@ -357,6 +376,12 @@ struct Parser<'a> {
     for_await_head: bool,
     /// Start + 1 of the first `await` expression since the last reset; 0 when none (Acorn: `awaitPos`).
     await_pos: u32,
+    /// The module goal (see [`parse_module`]).
+    module: bool,
+    /// The exported names so far (a duplicate is an early error).
+    export_names: std::collections::HashSet<Box<str>>,
+    /// Local names of `export {a}`: each must be declared at the end of the module.
+    local_exports: Vec<Span>,
 }
 
 /// Add a node to an arena. The caller has already checked the node limit.
@@ -487,9 +512,6 @@ impl<'a> Parser<'a> {
     }
     fn early(&self, msg: &'static str, span: Span) -> Error {
         self.err(ErrorKind::Early, msg, span.start, span.end)
-    }
-    fn unsupported(&self, msg: &'static str, start: u32, end: u32) -> Error {
-        self.err(ErrorKind::Unsupported, msg, start, end)
     }
     fn tspan(&self) -> Span {
         Span { start: self.tok.start, end: self.tok.end }
@@ -685,7 +707,7 @@ impl<'a> Parser<'a> {
     fn check_word(&self, span: Span) -> R<()> {
         let text = self.p.text(span);
         let escaped = text.as_bytes().contains(&b'\\');
-        if !(escaped || self.strict || self.ctx.is_async || self.ctx.is_gen) {
+        if !(escaped || self.strict || self.ctx.is_async || self.ctx.is_gen || self.module) {
             return Ok(());
         }
         let name = self.name_of(span);
@@ -695,8 +717,8 @@ impl<'a> Parser<'a> {
         if self.strict && is_strict_reserved(&name) {
             return Err(self.early("reserved word in strict mode", span));
         }
-        if (self.ctx.is_async || self.ctx.static_block) && name == "await" {
-            return Err(self.early("'await' is not an identifier in an async function", span));
+        if (self.ctx.is_async || self.ctx.static_block || self.module) && name == "await" {
+            return Err(self.early("'await' is not an identifier in an async function or a module", span));
         }
         if self.ctx.is_gen && name == "yield" {
             return Err(self.early("'yield' is not an identifier in a generator", span));
@@ -793,6 +815,428 @@ impl<'a> Parser<'a> {
         self.p.strict = self.strict;
         self.pop_scope();
         Ok(())
+    }
+
+    /// The module goal: strict code, one top scope where functions are lexical, and `await` as an operator.
+    fn parse_module_body(&mut self) -> R<()> {
+        self.strict = true;
+        self.ctx.is_async = true;
+        self.p.module = Some(Box::new(ModuleInfo {
+            func: Id::from_raw_pub(1),
+            requests: Vec::new(),
+            imports: Vec::new(),
+            exports: Vec::new(),
+            stars: Vec::new(),
+            has_tla: false,
+        }));
+        self.push_scope(S_VAR);
+        let base = self.lbegin();
+        let mut prologue = true;
+        let mut octal = None;
+        while self.tok.kind != Kind::Eof {
+            let start = self.tok.start;
+            let kind = self.tok.kind;
+            let st = match kind {
+                Kind::Keyword(K::Export) => {
+                    prologue = false;
+                    self.parse_export_decl()?
+                }
+                Kind::Keyword(K::Import) if !matches!(self.peek()?.kind, Kind::Punct(P::LParen | P::Dot)) => {
+                    prologue = false;
+                    self.parse_import_decl()?;
+                    None
+                }
+                _ => Some(self.parse_item(prologue)?),
+            };
+            let Some(st) = st else { continue };
+            if prologue {
+                match self.p.stmts[st.index()].kind {
+                    StmtKind::Directive(e) => self.on_directive(e, start, &mut octal, None)?,
+                    _ => prologue = false,
+                }
+            }
+            self.lpush(base, st.raw())?;
+        }
+        let body = self.lend(base);
+        self.p.body = body;
+        self.p.strict = true;
+        self.finish_exports()?;
+        self.pop_scope();
+        let has_tla = self.mi().has_tla;
+        let span = Span { start: 0, end: self.src.len() as u32 };
+        let mode = if has_tla { FuncMode::Async } else { FuncMode::Plain };
+        let f = mk!(self, funcs, Func { name: None, params: List::new(0, 0), body: Body::Block(body), kind: FuncKind::Normal, mode, strict: true, simple_params: true, span });
+        self.mi().func = f;
+        Ok(())
+    }
+
+    fn mi(&mut self) -> &mut ModuleInfo {
+        self.p.module.as_mut().expect("module parse")
+    }
+
+    /// An `await` outside every function of a module makes the module code async.
+    fn note_top_level_await(&mut self) {
+        if self.module && !self.ctx.in_func {
+            self.mi().has_tla = true;
+        }
+    }
+
+    /// The index of `spec` in the requests of the module (added at the first use).
+    fn request(&mut self, spec: Box<str>) -> u32 {
+        let m = self.mi();
+        if let Some(i) = m.requests.iter().position(|r| *r == spec) {
+            return i as u32;
+        }
+        m.requests.push(spec);
+        m.requests.len() as u32 - 1
+    }
+
+    /// A string literal as text (an unpaired surrogate becomes U+FFFD).
+    fn string_value(&mut self) -> R<(Box<str>, Span)> {
+        if !matches!(self.tok.kind, Kind::String { .. }) {
+            return Err(self.unexpected());
+        }
+        let span = self.tspan();
+        let mut u = Vec::new();
+        self.p.string(span, &mut u).map_err(lex_err)?;
+        self.advance()?;
+        Ok((String::from_utf16_lossy(&u).into_boxed_str(), span))
+    }
+
+    /// `from 'specifier'` and the optional attributes clause.
+    fn from_clause(&mut self) -> R<Box<str>> {
+        if !self.is_word("from") {
+            return Err(self.unexpected());
+        }
+        self.advance()?;
+        let (spec, _) = self.string_value()?;
+        self.attributes()?;
+        Ok(spec)
+    }
+
+    /// An optional import attributes clause: `with { type: 'json' }` or `assert { ... }`. It is checked and ignored.
+    fn attributes(&mut self) -> R<()> {
+        if !(self.is_kw(K::With) || (self.is_word("assert") && !self.tok.newline_before)) {
+            return Ok(());
+        }
+        self.advance()?;
+        self.expect(P::LBrace)?;
+        let mut keys: Vec<Box<str>> = Vec::new();
+        while !self.is(P::RBrace) {
+            let key: Box<str> = match self.tok.kind {
+                Kind::Ident | Kind::Keyword(_) => {
+                    let n = self.name_of(self.tspan());
+                    self.advance()?;
+                    n.as_ref().into()
+                }
+                Kind::String { .. } => self.string_value()?.0,
+                _ => return Err(self.unexpected()),
+            };
+            if keys.contains(&key) {
+                return Err(self.early("duplicate import attribute", self.tspan()));
+            }
+            keys.push(key);
+            self.expect(P::Colon)?;
+            self.string_value()?;
+            if !self.is(P::RBrace) {
+                self.expect(P::Comma)?;
+            }
+        }
+        self.advance()
+    }
+
+    /// An export name: an identifier name (keywords too) or a string. The bool is true for a string.
+    fn module_export_name(&mut self) -> R<(Box<str>, Span, bool)> {
+        match self.tok.kind {
+            Kind::Ident | Kind::Keyword(_) => {
+                let span = self.tspan();
+                let n: Box<str> = self.name_of(span).as_ref().into();
+                self.advance()?;
+                Ok((n, span, false))
+            }
+            Kind::String { .. } => {
+                let span = self.tspan();
+                let mut u = Vec::new();
+                self.p.string(span, &mut u).map_err(lex_err)?;
+                if String::from_utf16(&u).is_err() {
+                    return Err(self.syntax("a module export name must be well-formed Unicode", span));
+                }
+                self.advance()?;
+                Ok((String::from_utf16_lossy(&u).into_boxed_str(), span, true))
+            }
+            _ => Err(self.unexpected()),
+        }
+    }
+
+    /// The local name of an import: a plain identifier, declared as a lexical binding of the module.
+    fn import_binding(&mut self) -> R<Span> {
+        if self.tok.kind != Kind::Ident {
+            return Err(self.unexpected());
+        }
+        let span = self.tspan();
+        self.check_binding_name(span)?;
+        let n = self.name_of(span);
+        self.declare(n, Bind::Lex, span)?;
+        self.advance()?;
+        Ok(span)
+    }
+
+    fn parse_import_decl(&mut self) -> R<()> {
+        self.advance()?; // `import`
+        let mut entries: Vec<(ImportName, Span)> = Vec::new();
+        if let Kind::String { .. } = self.tok.kind {
+            let (spec, _) = self.string_value()?;
+            self.attributes()?;
+            self.semicolon()?;
+            self.request(spec);
+            return Ok(());
+        }
+        if self.tok.kind == Kind::Ident {
+            let local = self.import_binding()?;
+            entries.push((ImportName::Name("default".into()), local));
+            if self.eat(P::Comma)? {
+                if !(self.is(P::Star) || self.is(P::LBrace)) {
+                    return Err(self.unexpected());
+                }
+            } else if !self.is_word("from") {
+                return Err(self.unexpected());
+            }
+        }
+        if self.eat(P::Star)? {
+            if !self.is_word("as") {
+                return Err(self.unexpected());
+            }
+            self.advance()?;
+            let local = self.import_binding()?;
+            entries.push((ImportName::Namespace, local));
+        } else if self.eat(P::LBrace)? {
+            while !self.is(P::RBrace) {
+                let tok = self.tok;
+                let (name, span, is_str) = self.module_export_name()?;
+                let local = if self.is_word("as") {
+                    self.advance()?;
+                    self.import_binding()?
+                } else {
+                    // Without `as` the name is the binding: it must be a plain identifier.
+                    if is_str || tok.kind != Kind::Ident {
+                        return Err(self.syntax("an imported name needs 'as' here", span));
+                    }
+                    self.check_binding_name(span)?;
+                    let n = self.name_of(span);
+                    self.declare(n, Bind::Lex, span)?;
+                    span
+                };
+                entries.push((ImportName::Name(name), local));
+                if !self.is(P::RBrace) {
+                    self.expect(P::Comma)?;
+                }
+            }
+            self.advance()?;
+        }
+        let spec = self.from_clause()?;
+        self.semicolon()?;
+        let request = self.request(spec);
+        for (name, local) in entries {
+            self.mi().imports.push(ImportEntry { request, name, local });
+        }
+        Ok(())
+    }
+
+    fn add_export(&mut self, name: Box<str>, source: ExportSource, at: Span) -> R<()> {
+        if !self.export_names.insert(name.clone()) {
+            return Err(self.early("duplicate export name", at));
+        }
+        self.mi().exports.push(ExportEntry { name, source });
+        Ok(())
+    }
+
+    fn parse_export_decl(&mut self) -> R<Option<StmtId>> {
+        self.advance()?; // `export`
+        let kind = self.tok.kind;
+        match kind {
+            Kind::Punct(P::Star) => {
+                self.advance()?;
+                let alias = if self.is_word("as") {
+                    self.advance()?;
+                    Some(self.module_export_name()?)
+                } else {
+                    None
+                };
+                let spec = self.from_clause()?;
+                self.semicolon()?;
+                let request = self.request(spec);
+                match alias {
+                    Some((n, span, _)) => self.add_export(n, ExportSource::Indirect { request, name: ImportName::Namespace }, span)?,
+                    None => self.mi().stars.push(request),
+                }
+                Ok(None)
+            }
+            Kind::Punct(P::LBrace) => {
+                self.advance()?;
+                let mut items: Vec<(Box<str>, Span, bool, Box<str>, Span)> = Vec::new();
+                let mut kws = Vec::new();
+                while !self.is(P::RBrace) {
+                    let tok = self.tok;
+                    let (local, lspan, is_str) = self.module_export_name()?;
+                    kws.push(tok.kind != Kind::Ident);
+                    let (name, nspan) = if self.is_word("as") {
+                        self.advance()?;
+                        let (n, sp, _) = self.module_export_name()?;
+                        (n, sp)
+                    } else {
+                        (local.clone(), lspan)
+                    };
+                    items.push((local, lspan, is_str, name, nspan));
+                    if !self.is(P::RBrace) {
+                        self.expect(P::Comma)?;
+                    }
+                }
+                self.advance()?;
+                if self.is_word("from") {
+                    let spec = self.from_clause()?;
+                    self.semicolon()?;
+                    let request = self.request(spec);
+                    for (local, _, _, name, nspan) in items {
+                        self.add_export(name, ExportSource::Indirect { request, name: ImportName::Name(local) }, nspan)?;
+                    }
+                } else {
+                    self.semicolon()?;
+                    for ((_, lspan, is_str, name, nspan), kw) in items.into_iter().zip(kws) {
+                        // Without `from` the local name is a reference: a plain identifier.
+                        if is_str || kw {
+                            return Err(self.syntax("a local export must be an identifier", lspan));
+                        }
+                        self.check_word(lspan)?;
+                        self.local_exports.push(lspan);
+                        self.add_export(name, ExportSource::Local(lspan), nspan)?;
+                    }
+                }
+                Ok(None)
+            }
+            Kind::Keyword(K::Default) => {
+                self.advance()?;
+                let at = self.tspan();
+                let st = if self.is_kw(K::Function) {
+                    self.parse_function_decl_in(self.tok.start, false, false, true)?
+                } else if self.is_word("async") && {
+                    let n = self.peek()?;
+                    n.kind == Kind::Keyword(K::Function) && !n.newline_before
+                } {
+                    let fs = self.tok.start;
+                    self.advance()?;
+                    self.parse_function_decl_in(fs, true, false, true)?
+                } else if self.is_kw(K::Class) {
+                    let cs = self.tok.start;
+                    if self.peek()?.kind == Kind::Ident {
+                        let id = self.parse_class(cs, true)?;
+                        self.mk_stmt(StmtKind::Class(id), cs)?
+                    } else {
+                        let id = self.parse_class(cs, false)?;
+                        let e = self.mk_expr(ExprKind::Class(id), cs)?;
+                        self.mk_stmt(StmtKind::ExportDefault(e), cs)?
+                    }
+                } else {
+                    let es = self.tok.start;
+                    let e = self.parse_assign(false, false)?;
+                    self.semicolon()?;
+                    self.mk_stmt(StmtKind::ExportDefault(e), es)?
+                };
+                let source = match self.p.stmts[st.index()].kind {
+                    StmtKind::Function(f) => ExportSource::Local(self.p.func(f).name.unwrap_or_default()),
+                    StmtKind::Class(c) => ExportSource::Local(self.p.class(c).name.unwrap_or_default()),
+                    _ => ExportSource::Default,
+                };
+                self.add_export("default".into(), source, at)?;
+                Ok(Some(st))
+            }
+            Kind::Keyword(K::Var | K::Const | K::Function | K::Class) => self.export_declaration().map(Some),
+            Kind::Ident if self.is_word("async") || (self.is_word("let") && self.let_is_decl(Sc::Top)?) => {
+                if self.is_word("async") {
+                    let n = self.peek()?;
+                    if !(n.kind == Kind::Keyword(K::Function) && !n.newline_before) {
+                        return Err(self.unexpected());
+                    }
+                }
+                self.export_declaration().map(Some)
+            }
+            _ => Err(self.unexpected()),
+        }
+    }
+
+    /// `export var|let|const|function|class|async function ...`: the declaration is a statement, and each name it binds is exported.
+    fn export_declaration(&mut self) -> R<StmtId> {
+        let st = self.parse_statement(Sc::Top, false)?;
+        let mut names: Vec<Span> = Vec::new();
+        match self.p.stmts[st.index()].kind {
+            StmtKind::Var { decls, .. } => {
+                for i in 0..decls.len {
+                    let d = *self.p.decl(Id::from_raw_pub(self.p.lists[(decls.start + i) as usize]));
+                    self.each_name(d.target, &mut |_, sp| {
+                        names.push(sp);
+                        Ok(())
+                    })?;
+                }
+            }
+            StmtKind::Function(f) => names.extend(self.p.func(f).name),
+            StmtKind::Class(c) => names.extend(self.p.class(c).name),
+            _ => {}
+        }
+        for sp in names {
+            let n: Box<str> = self.name_of(sp).as_ref().into();
+            self.add_export(n, ExportSource::Local(sp), sp)?;
+        }
+        Ok(st)
+    }
+
+    /// At the end of the module: a local export names a declared binding, and an exported import becomes a re-export.
+    fn finish_exports(&mut self) -> R<()> {
+        for i in 0..self.local_exports.len() {
+            let sp = self.local_exports[i];
+            let n = self.name_of(sp);
+            if self.scopes[0].find(&n).is_none() {
+                return Err(self.early("exported name is not declared in the module", sp));
+            }
+        }
+        let m = self.p.module.as_mut().expect("module parse");
+        let src = &*self.p.source;
+        for e in &mut m.exports {
+            if let ExportSource::Local(sp) = e.source {
+                let local = name_in(src, sp);
+                if let Some(imp) = m.imports.iter().find(|i| name_in(src, i.local) == local) {
+                    e.source = ExportSource::Indirect { request: imp.request, name: imp.name.clone() };
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// `import.meta` or `import(specifier, options)`. The current token is `import`.
+    fn parse_import_expr(&mut self, in_new: bool) -> R<ExprId> {
+        let start = self.tok.start;
+        self.advance()?;
+        if self.is(P::Dot) {
+            self.advance()?;
+            if !self.is_word("meta") {
+                return Err(self.unexpected());
+            }
+            if !self.module {
+                return Err(self.early("import.meta is only allowed in a module", Span { start, end: self.tok.end }));
+            }
+            self.advance()?;
+            return self.mk_expr(ExprKind::ImportMeta, start);
+        }
+        if !self.is(P::LParen) || in_new {
+            return Err(self.unexpected());
+        }
+        self.advance()?;
+        let arg = self.parse_assign(false, false)?;
+        let mut opts = None;
+        if self.eat(P::Comma)? && !self.is(P::RParen) {
+            opts = Some(self.parse_assign(false, false)?);
+            self.eat(P::Comma)?;
+        }
+        self.expect(P::RParen)?;
+        self.mk_expr(ExprKind::ImportCall { arg, opts }, start)
     }
 
     /// A directive in a prologue. `"use strict"` makes the rest of the code strict.
@@ -943,10 +1387,10 @@ impl<'a> Parser<'a> {
                     if matches!(n.kind, Kind::Punct(P::LParen) | Kind::Punct(P::Dot)) {
                         self.parse_expr_statement(start, prologue, sc)
                     } else {
-                        Err(self.unsupported("import declarations (modules) are not supported", self.tok.start, self.tok.end))
+                        Err(self.syntax("import declarations are only allowed at the top level of a module", self.tspan()))
                     }
                 }
-                K::Export => Err(self.unsupported("export declarations (modules) are not supported", self.tok.start, self.tok.end)),
+                K::Export => Err(self.syntax("export declarations are only allowed at the top level of a module", self.tspan())),
                 _ => self.parse_expr_statement(start, prologue, sc),
             },
             Kind::Punct(P::LBrace) => {
@@ -1261,6 +1705,7 @@ impl<'a> Parser<'a> {
             if !self.ctx.is_async {
                 return Err(self.unexpected());
             }
+            self.note_top_level_await();
             self.advance()?;
             true
         } else {
@@ -1883,6 +2328,7 @@ impl<'a> Parser<'a> {
             if self.await_pos == 0 {
                 self.await_pos = start + 1;
             }
+            self.note_top_level_await();
             self.advance()?;
             let arg = self.parse_unary()?;
             return self.mk_expr(ExprKind::Await(arg), start);
@@ -2093,7 +2539,7 @@ impl<'a> Parser<'a> {
                 }
                 K::New => self.parse_new(),
                 K::Super => self.parse_super(in_new),
-                K::Import => Err(self.unsupported("import() and import.meta (modules) are not supported", t.start, t.end)),
+                K::Import => self.parse_import_expr(in_new),
                 _ => Err(self.unexpected()),
             },
             Kind::Number(base) => {
@@ -2564,6 +3010,11 @@ impl<'a> Parser<'a> {
     // ------------------------------------------------------------ functions
 
     fn parse_function_decl(&mut self, start: u32, is_async: bool, hanging: bool) -> R<StmtId> {
+        self.parse_function_decl_in(start, is_async, hanging, false)
+    }
+
+    /// `anon`: the name may be missing (`export default function () {}`): the result is a [`StmtKind::ExportDefault`].
+    fn parse_function_decl_in(&mut self, start: u32, is_async: bool, hanging: bool, anon: bool) -> R<StmtId> {
         self.advance()?; // `function`
         let is_gen = self.is(P::Star);
         if is_gen {
@@ -2571,6 +3022,11 @@ impl<'a> Parser<'a> {
                 return Err(self.syntax("generator declaration is not allowed here", self.tspan()));
             }
             self.advance()?;
+        }
+        if anon && self.is(P::LParen) {
+            let f = self.parse_function_rest(start, None, FuncKind::Normal, is_async, is_gen)?;
+            let e = self.mk_expr(ExprKind::Function(f), start)?;
+            return self.mk_stmt(StmtKind::ExportDefault(e), start);
         }
         if self.tok.kind != Kind::Ident {
             return Err(self.unexpected());

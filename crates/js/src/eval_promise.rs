@@ -76,6 +76,8 @@ enum PFn {
     AfsUnwrap { done: bool },
     /// The `closeIterator` reaction of the async-from-sync iterator: close the sync iterator and throw again.
     AfsClose { iter: Value, next: Value },
+    /// A module reaction or namespace getter (`eval_modules.rs`).
+    Mod(ModFn),
 }
 
 impl PFn {
@@ -88,6 +90,7 @@ impl PFn {
             PFn::Thunk { value, .. } => work.push(value),
             PFn::AgRet { g, .. } => work.push(Value::Object(g)),
             PFn::AfsClose { iter, next } => work.extend([iter, next]),
+            PFn::Mod(ModFn::ImportOk { promise, .. } | ModFn::ImportErr { promise }) => work.push(Value::Object(promise)),
             _ => {}
         }
     }
@@ -454,6 +457,7 @@ impl<'p> Interp<'p> {
             PFn::AgRet { g, reject } => self.ag_ret_settled(g, reject, a0),
             PFn::AfsUnwrap { done } => self.sc_iter_result(a0, done),
             PFn::AfsClose { iter, next } => Err(self.iter_close_throw(&mut it_direct(iter, next), Error::Throw(a0))),
+            PFn::Mod(f) => self.mod_fn_call(f, a0),
         }
     }
 

@@ -152,6 +152,8 @@ enum Fr {
     /// Operand `i` of expression `e` is being evaluated. Earlier operands are in the slots from `base`.
     Op { e: ExprId, i: u32, base: u32 },
     Discard,
+    /// The value of `export default expr`.
+    ExpDef,
     Ret,
     Thr,
     List { l: List<Stmt>, i: u32 },
@@ -434,6 +436,12 @@ impl<'p> Interp<'p> {
                 }
                 true
             }
+            ExprKind::ImportCall { arg, opts } => {
+                if self.scan_expr(arg)? | opts.map_or(Ok(false), |o| self.scan_expr(o))? {
+                    return no("await inside import()");
+                }
+                false
+            }
             ExprKind::Template(t) => {
                 let t = *prog.template(t);
                 let mut any = false;
@@ -594,6 +602,7 @@ impl<'p> Interp<'p> {
         let no = |what: &'static str| Err(unsupported(what, st.span));
         let aw = match st.kind {
             StmtKind::Expr(e) | StmtKind::Throw(e) => self.scan_expr(e)?,
+            StmtKind::ExportDefault(e) => self.scan_expr(e)?,
             StmtKind::Return(Some(e)) => self.scan_expr(e)? | self.aw.scan_ag,
             StmtKind::Var { decls, .. } => {
                 let mut any = false;
@@ -1545,6 +1554,10 @@ impl<'p> Interp<'p> {
                 self.fpush(run, Fr::Discard)?;
                 nx(Next::Eval(e))
             }
+            StmtKind::ExportDefault(e) => {
+                self.fpush(run, Fr::ExpDef)?;
+                nx(Next::Eval(e))
+            }
             StmtKind::Return(Some(e)) => {
                 self.fpush(run, Fr::Ret)?;
                 nx(Next::Eval(e))
@@ -1859,6 +1872,10 @@ impl<'p> Interp<'p> {
                 r => r,
             },
             Fr::Discard => val(Value::Undefined),
+            Fr::ExpDef => {
+                self.set_default_export(v)?;
+                val(Value::Undefined)
+            }
             Fr::Deleg { .. } | Fr::Ret if run.agen => self.ag_deliver(run, fr, v),
             Fr::Deleg { base } => self.deleg_step(run, base, GenHow::Next(v)),
             Fr::Ret => nx(Next::Abr(Abr::Return(v))),

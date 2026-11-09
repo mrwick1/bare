@@ -483,6 +483,7 @@ impl<'p> Interp<'p> {
                 return Err(Ctl::Err(Error::Throw(v)));
             }
             StmtKind::Empty | StmtKind::Debugger => {}
+            StmtKind::ExportDefault(e) => self.exec_export_default(e)?,
             StmtKind::With { .. } => return Err(unsupported("with statement", st.span).into()),
             _ => return Err(unsupported("statement in the wrong place", st.span).into()),
         }

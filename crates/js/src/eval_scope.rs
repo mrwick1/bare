@@ -173,6 +173,7 @@ impl<'p> Interp<'p> {
     fn sc_names(&mut self, kind: RKind, out: &mut Vec<u32>) {
         let prog = self.prog.clone();
         match kind {
+            RKind::Root if prog.module.is_some() => {}
             RKind::Root => self.lex_names(prog.body, false, out),
             RKind::Barrier => {}
             RKind::Fn(fid, is_expr) => {
@@ -184,6 +185,11 @@ impl<'p> Interp<'p> {
                     self.pat_idents(p, out);
                 }
                 out.extend_from_slice(&self.scopes[fid.index()].vars);
+                if let Some(m) = prog.module.as_ref().filter(|m| m.func == fid) {
+                    for i in &m.imports {
+                        out.push(self.intern_name(&prog.name(i.local)));
+                    }
+                }
                 if let Body::Block(l) = f.body {
                     self.lex_names(l, true, out);
                 }

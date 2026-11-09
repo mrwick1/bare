@@ -1657,7 +1657,7 @@ The instruction counts repeat to 0.1 M. The RSS changes by 0.5 MiB between runs.
 test262:
 - Checkout: `tc39/test262` at `e4fbf57745c6aae3d1f12f181ecef78b1665d812` (2026-11-06), cloned with `--depth 1` to `/data/bare-tmp/test262`. It is 265 MB: 227 MB of `test`, 25 MB of `.git`. It holds 54,084 test files. It is not in the repository. The pin is in `tools/fixtures/js/test262-subset.txt`, and the script stops when the checkout is at another commit.
 - Runner: `test262_run` reads `flags` (`onlyStrict`, `noStrict`, `raw`, `module`, `async`), `includes`, `features` and `negative` with a small reader (no YAML crate). It loads `assert.js`, `sta.js`, `doneprintHandle.js` for async tests, and the included files. A test with no flag runs sloppy and strict and must pass both. The step budget (20 M) is the timeout, so it does not depend on the machine. `print` and a small `$262` (`global`, `gc`, `agent` empty) are non-enumerable globals. A process that dies or hangs fails only its test, and the script goes on (tested with a fake runner that dies and hangs).
-- Skipped (`tools/fixtures/js/test262-skip.txt`): `module` tests (the runner loads no modules) and the features `cross-realm`, `IsHTMLDDA`, `SharedArrayBuffer`, `Atomics`, `ShadowRealm`, `Temporal`, `tail-call-optimization`, `host-gc-required`, the module-loading features, the harness files `atomicsHelper.js`, `detachArrayBuffer.js` and `tcoHelper.js`, and the sources that use `$262.agent`, `createRealm`, `detachArrayBuffer`, `evalScript` or `IsHTMLDDA`. A feature that bare-js builds only in part (async generators, `for await`, `with`, `eval`) is not skipped: its tests fail, so a later gain shows as newly passing and a later loss is caught.
+- Skipped (`tools/fixtures/js/test262-skip.txt`): the features `cross-realm`, `IsHTMLDDA`, `SharedArrayBuffer`, `Atomics`, `ShadowRealm`, `Temporal`, `tail-call-optimization`, `host-gc-required`, the features `import-attributes`, `import-defer`, `json-modules` and `source-phase-imports`, the harness files `atomicsHelper.js`, `detachArrayBuffer.js` and `tcoHelper.js`, and the sources that use `$262.agent`, `createRealm`, `detachArrayBuffer`, `evalScript` or `IsHTMLDDA`. A feature that bare-js builds only in part (async generators, `for await`, `with`, `eval`) is not skipped: its tests fail, so a later gain shows as newly passing and a later loss is caught.
 - Gate: the script exits with 1 when a directory has fewer passing tests than `tools/fixtures/js/test262-baseline.txt` (574 directories, each with pass, fail and skip), or when a baseline directory is missing. It prints the directories with more passing tests, and with `-p` an earlier `results.txt` it prints the single tests that changed. `-u` writes a new baseline. A test that went from pass to fail while another went from fail to pass in the same directory is not seen by the count; `-p` shows it.
 - Run time: 26 to 63 s for the whole subset with 3 jobs (the machine was busy). Two runs gave identical results.
 
@@ -2849,7 +2849,7 @@ Not tested: the staging journey in a window (no live run); the look of the windo
 Each document parsed its scripts again, also the `/_next/static` chunks from the shared HTTP cache (#251, #257). `bare_js::parse_cache` now keeps the parse result of a script for every realm of one thread. A browser session runs its documents on one thread, so they share it.
 
 Design:
-- Key: a multiply hash of the source bytes, and the kind (`Classic` or `Module`). A hit also compares the bytes, so a hash collision is a miss. The parser has no module goal yet, so only `Classic` has a caller.
+- Key: a multiply hash of the source bytes, and the kind (`Classic` or `Module`). A hit also compares the bytes, so a hash collision is a miss. `Classic` and `Module` both have a caller now (`Interp::module_parse`).
 - Value: the owned `Program` behind an `Rc`, or the first parse error with its span. `Code::new` takes the same `Rc`. The cache does not copy the tree: a document and the cache hold one copy.
 - Errors: `add_script` maps a cached error as before, so a syntax error is a new `SyntaxError` of the realm each time.
 - Node limit: a realm parses with `max_nodes` set to the room it has left. `parse_script_used` also gives `used`, the count of nodes and list entries made before the end or the error. The count only grows and is checked before each step. A parse with `max_nodes >= used` gives the stored result. With less room the result is `Limit(Nodes)`. A stored `Limit(Nodes)` is only valid up to the room it had; more room parses again. Other limits are the defaults or the cache is skipped.
@@ -3421,7 +3421,7 @@ Open items:
 - Window mode: tested only in `cage`. Not tested on a real Hyprland desktop or on HiDPI.
 - arjun-e16: no staging journey runs there (no credentials on that machine).
 - The HTTP cache: a 304 with `Vary`, heuristic freshness, and the main document (documents skip the cache) are not tested (#252).
-- The parse cache has no module mode, so only classic scripts use it.
+- The parse cache has a module mode now (`Kind::Module`, used by `Interp::module_parse`).
 - Branch `t3/engine-b3`: the bytecode VM at 2.49x, not merged.
 - Other sites: bare is measured on one app only.
 
@@ -4087,3 +4087,31 @@ I could not reproduce the masonry `Limit(Steps)` of the earlier note, on `origin
 - `RangeError` for deep recursion (this engine has none).
 - A re-armed runaway timer (it is not re-armed by design).
 - keycost, test262 and exec_diff (not run, see above).
+
+## ES modules in bare-js (engine)
+
+`bare-js` now parses, links and evaluates ES modules. The browser loader does not use them yet (next PR).
+
+**What exists.**
+- `parse_module` reads the module goal: all `import` and `export` forms, `export * as ns`, string export names, `export default` (also anonymous functions and classes), `import.meta`, `import()` in scripts and modules, import attributes (read and ignored), and top-level `await`. Module code is strict. A module is one synthetic function, `async` when it has a top-level `await`.
+- `Interp::module_parse`, `module_requests`, `module_set_requested`, `module_link`, `module_evaluate` and `module_namespace` are the host API (`crates/js/src/eval_modules.rs`). The host loads files and resolves specifiers. The engine links and evaluates in the order of ECMA-262 (cycles, `export *` with ambiguous names, async graphs, errors that every importer sees).
+- `import()` calls go to a queue (`take_dynamic_imports`). The host answers with `finish_dynamic_import`, `reject_dynamic_import` or `fail_dynamic_import`.
+- Bindings are live. An import binding has the flag `IMPORT` and no `INIT`, so a read takes the existing cold path for a binding in its temporal dead zone. The hot path has no new check.
+
+**test262.** The runner (`crates/js/examples/test262_run.rs`) runs `module` tests: harness files run as scripts first, the host loads the imported files from the checkout, and `negative.phase` is checked (`parse`: the test file, `resolution`: a file that it imports or linking, `runtime`: evaluation). It also answers `import()`, so the feature `dynamic-import` is no longer skipped. Passed tests: 28365 on main (`ee8724b`), 29469 here (+1104). Module-flag tests in `language/`: 545 pass, 63 fail, 135 skipped (import attributes, import defer, source phase) of 743; none ran before. `import()` tests: 1092 pass of 1798 module and `import()` tests together.
+
+**Gaps (not fixed).**
+- The namespace object has accessor properties, not data properties. Eight `language/module-code/namespace/internals` tests and the `dynamic-import/namespace` descriptor tests fail on that (a binding in its temporal dead zone must throw from `getOwnPropertyDescriptor`, `hasOwnProperty` and `Object.keys`). A real fix needs an exotic object in the heap.
+- The async machine has older limits that top-level `await` inherits: `await` in a class heritage or computed key, in a binding pattern, in `for-in`, and inside `import(...)`. About 70 `top-level-await/syntax` tests fail on them.
+- `eval` is not defined (5 tests in `eval-code` and `import.meta`). Non-ASCII identifiers fail in the lexer (`own-property-keys-sort`). `using` and `await using` are not parsed.
+- `import(x, options)` evaluates and ignores `options`. A `with { type: 'json' }` clause is ignored.
+
+**Gates.** Base `ee8724b`.
+- `cargo test --release --workspace`: 3087 passed, 0 failed. 20 new engine tests (`eval_modules_tests.rs`) and new module cases in `parse_tests.rs`.
+- Full cost matrix (805 rows, 0 failed): mean glibc +0.12%. 16 rows are over +0.5% under both allocators, all between +0.52% and +1.09%: `bigint_load i64sort`, `binary_load scan`, `eval_load calls`, `intl_load cmp` and `cmp_opts`, `scripts_load many` and `reject`, `tagged_load call` and `plain`. The extra cost grows with the scale of the row (for example +1.8 M at scale 1 and +18 M at scale 10 in `binary_load scan`), so it is a cost for each loop turn. I did not find the cause. The sizes of the hot functions (`get_global`, `call_frame`, `eval_assign` and others) are equal to the base. `exec_simple` and `eval_expr_inner` grew by 51 and 46 bytes. I marked the new cold functions `#[cold]` and `#[inline(never)]` and put the `export default` statement out of `exec_simple`; the rows did not move. A boxed `ModState` did not move them either. Hypothesis: code layout. `perf record` did not give a usable per-function diff.
+- `keycost.sh`: `#a1` 283.2 M for each key (base 282.2 M), `#f0` 288.5 M (287.6 M), RSS 32.6 MiB.
+- `exec_diff.sh`: 79 runs, 0 differences. `test262_check.sh`: gate ok.
+
+**Noticed, not changed.** The global `eval` is missing (`eval is not defined`), which fails 537 test262 tests. `with` is unsupported (281 tests).
+
+Not tested: the bytecode engine on module code (`BARE_JS_EXEC=byte` falls back to the tree walker for modules), memory growth with many modules, a Chrome comparison of the evaluation order for async cycles beyond test262.

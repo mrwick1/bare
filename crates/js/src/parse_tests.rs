@@ -420,18 +420,6 @@ fn class_static_blocks() {
 }
 
 #[test]
-fn unsupported_syntax_is_a_precise_error() {
-    for (s, what) in [
-        ("import a from 'b'", "import"),
-        ("export default 1", "export"), ("import('x')", "import"), ("import.meta", "import"),
-    ] {
-        let e = err(s);
-        assert_eq!(e.kind, ErrorKind::Unsupported, "{s} ({what}) -> {e}");
-        assert!(e.start < e.end, "{s}");
-    }
-}
-
-#[test]
 fn known_acorn_divergences() {
     // Acorn 8.15.0 accepts these. ECMA-262 rejects them, and so does this parser.
     // `() => {} ? 1 : 2`: an ArrowFunction is not a ConditionalExpression operand (15.3).
@@ -616,4 +604,246 @@ fn caller_cannot_remove_the_recursion_cap() {
         let limits = Limits { max_depth: u32::MAX, ..Limits::default() };
         assert!(matches!(parse_script(&source, limits), Err(Error { kind: ErrorKind::Limit(LimitKind::Depth), .. })));
     });
+}
+
+// ---------------------------------------------------------------- modules
+
+fn modok(src: &str) -> Program<'_> {
+    match parse_module(src, Limits::default()) {
+        Ok(p) => p,
+        Err(e) => panic!("{src:?} failed: {e}"),
+    }
+}
+
+fn moderr(src: &str) -> Error {
+    match parse_module(src, Limits::default()) {
+        Ok(_) => panic!("{src:?} was accepted as a module"),
+        Err(e) => e,
+    }
+}
+
+fn exports(src: &str) -> Vec<String> {
+    let p = modok(src);
+    let m = p.module.as_ref().unwrap();
+    m.exports
+        .iter()
+        .map(|e| match &e.source {
+            ExportSource::Local(sp) => format!("{}={}", e.name, p.name(*sp)),
+            ExportSource::Default => format!("{}=*default*", e.name),
+            ExportSource::Indirect { request, name } => match name {
+                ImportName::Name(n) => format!("{}={}.{}", e.name, m.requests[*request as usize], n),
+                ImportName::Namespace => format!("{}={}.*", e.name, m.requests[*request as usize]),
+            },
+        })
+        .collect()
+}
+
+#[test]
+fn a_script_does_not_take_module_syntax() {
+    for s in ["import a from 'b'", "import 'a'", "export const a = 1", "export default 1", "export {}", "import.meta"] {
+        let e = err(s);
+        assert_ne!(e.kind, ErrorKind::Unsupported, "{s}");
+    }
+    // Dynamic import is script syntax.
+    ok("import('x').then(m => m)");
+    ok("import('x', { with: {} })");
+    ok("a = import('x')\nimport('y')");
+    err("new import('x')");
+    err("import()");
+    err("import(...a)");
+    err("import('a', 'b', 'c')");
+}
+
+#[test]
+fn a_module_is_strict_and_has_no_return() {
+    assert!(modok("var a;").strict);
+    moderr("with (a) {}");
+    moderr("return 1");
+    moderr("var public;");
+    moderr("var await;");
+    moderr("function f() { var await; }");
+    moderr("010");
+    modok("this");
+    modok("import.meta.url; import.meta");
+    modok("function f() { return import.meta; }");
+}
+
+#[test]
+fn import_forms() {
+    let p = modok("import 'a'; import d from 'b'; import * as n from 'c'; import {x, y as z, \"s t\" as w} from 'd'; import e, {f} from 'b'; import g, * as h from 'e';");
+    let m = p.module.as_ref().unwrap();
+    assert_eq!(m.requests.iter().map(|r| &**r).collect::<Vec<_>>(), ["a", "b", "c", "d", "e"]);
+    let got: Vec<String> = m
+        .imports
+        .iter()
+        .map(|i| {
+            let n = match &i.name { ImportName::Name(n) => n.to_string(), ImportName::Namespace => "*".into() };
+            format!("{}:{}->{}", i.request, n, p.name(i.local))
+        })
+        .collect();
+    assert_eq!(got, ["1:default->d", "2:*->n", "3:x->x", "3:y->z", "3:s t->w", "1:default->e", "1:f->f", "4:default->g", "4:*->h"]);
+    // The statements of the module body hold no import.
+    assert_eq!(p.list(p.body).len(), 0);
+    // `from`, `as`, `of`, `get` and other context words are names.
+    modok("import from from 'a'; import { as as as, from as from2, default as dd } from 'a';");
+    modok("import { if as iff } from 'a';");
+    modok("import json from './x.json' with { type: 'json' };");
+    modok("import json2 from './x.json' assert { type: 'json' };");
+    modok("import 'a' with { };");
+    moderr("import { if } from 'a';");
+    moderr("import {a} from;");
+    moderr("import a, b from 'x';");
+    moderr("import * from 'x';");
+    moderr("import * as a, b from 'x';");
+    moderr("import {a} 'x';");
+    moderr("import a from x;");
+    moderr("import {\"s\"} from 'x';");
+    moderr("import a from 'x' with { type: 1 };");
+    moderr("import a from 'x' with { type: 'json', type: 'css' };");
+}
+
+#[test]
+fn import_early_errors() {
+    moderr("import a from 'x'; var a;");
+    moderr("import a from 'x'; let a;");
+    moderr("import a from 'x'; function a() {}");
+    moderr("import a from 'x'; import a from 'y';");
+    moderr("import {a, b as a} from 'x';");
+    moderr("import eval from 'x';");
+    moderr("import arguments from 'x';");
+    moderr("import {await} from 'x';");
+    moderr("import {a as await} from 'x';");
+    modok("import {await as a} from 'x';");
+    modok("import a from 'x'; { let a; }");
+    modok("import a from 'x'; function f(a) { var a; }");
+    // Imports and exports only at the top level of a module.
+    moderr("{ import a from 'x'; }");
+    moderr("function f() { import a from 'x'; }");
+    moderr("if (1) import a from 'x';");
+    moderr("{ export var a; }");
+    moderr("function f() { export default 1; }");
+}
+
+#[test]
+fn export_forms() {
+    assert_eq!(exports("export var a = 1, b; export let c; export const d = 2;"), ["a=a", "b=b", "c=c", "d=d"]);
+    assert_eq!(exports("export function f() {} export function* g() {} export async function h() {} export async function* i() {} export class C {}"), ["f=f", "g=g", "h=h", "i=i", "C=C"]);
+    assert_eq!(exports("export const {a, b: [c, ...d], ...e} = o;"), ["a=a", "c=c", "d=d", "e=e"]);
+    assert_eq!(exports("var a, b; export {a, b as c, a as d, a as default, b as \"x y\"};"), ["a=a", "c=b", "d=a", "default=a", "x y=b"]);
+    assert_eq!(exports("export default 1;"), ["default=*default*"]);
+    assert_eq!(exports("export default function () {}"), ["default=*default*"]);
+    assert_eq!(exports("export default function f() {}"), ["default=f"]);
+    assert_eq!(exports("export default async function () {}"), ["default=*default*"]);
+    assert_eq!(exports("export default function* () {}"), ["default=*default*"]);
+    assert_eq!(exports("export default class {}"), ["default=*default*"]);
+    assert_eq!(exports("export default class K {}"), ["default=K"]);
+    assert_eq!(exports("export default (function () {});"), ["default=*default*"]);
+    assert_eq!(exports("export default async () => 1;"), ["default=*default*"]);
+    assert_eq!(exports("export default async\nfunction f() {}"), ["default=*default*"]);
+    assert_eq!(exports("export { a as b, c } from 'm'; export {default} from 'n'; export {default as z, \"q\" as r} from 'n';"), ["b=m.a", "c=m.c", "default=n.default", "z=n.default", "r=n.q"]);
+    assert_eq!(exports("export * as ns from 'm'; export * as \"a b\" from 'm';"), ["ns=m.*", "a b=m.*"]);
+    let p = modok("export * from 'a'; export * from 'b'; export * from 'a';");
+    assert_eq!(p.module.as_ref().unwrap().stars, [0, 1, 0]);
+    // An exported import binding is a re-export, also for a namespace import.
+    assert_eq!(exports("import {a} from 'm'; export {a};"), ["a=m.a"]);
+    assert_eq!(exports("import d from 'm'; export {d as e};"), ["e=m.default"]);
+    assert_eq!(exports("import * as ns from 'm'; export {ns};"), ["ns=m.*"]);
+    // A string export name must be well-formed Unicode.
+    assert!(parse_module("export { a as \"\\uD83D\" }; var a;", Limits::default()).is_err());
+    assert!(parse_module("export { a as \"\\uD83D\\uDE00\" }; var a;", Limits::default()).is_ok());
+    // The export declarations keep their declaration as a statement.
+    assert_eq!(modok("export var a = 1; export function f() {} export class C {}").list(modok("export var a = 1; export function f() {} export class C {}").body).len(), 3);
+}
+
+#[test]
+fn export_early_errors() {
+    moderr("export var a; export var a;");
+    moderr("export var a; export {a};");
+    moderr("var a, b; export {a, b as a};");
+    moderr("export default 1; export default 2;");
+    moderr("export default 1; var d; export {d as default};");
+    moderr("export {a};");
+    moderr("export {a as b}; ");
+    moderr("var a; export {a as default}; export default 1;");
+    moderr("export {if};");
+    moderr("export {\"s\"};");
+    moderr("export {a} from 'x'; export {b as a} from 'y';");
+    moderr("export * as a from 'x'; export * as a from 'y';");
+    moderr("export * from;");
+    moderr("export * as from 'x';");
+    moderr("export default;");
+    moderr("export;");
+    moderr("export let;");
+    moderr("export var a = 1, a;");
+    moderr("export function () {}");
+    moderr("export class {}");
+    moderr("export default var a;");
+    moderr("export default let a = 1;");
+    moderr("export {a,,};");
+    moderr("let a; export {a} from");
+    moderr("export {\"a\" as b};");
+    modok("let a; export {a,};");
+    modok("export {} from 'x'; export {};");
+    modok("export { a as default } from 'x'; export default 1 ;".replace(" export default 1 ;", "").as_str());
+    modok("export function f() {} export {f as g};");
+}
+
+#[test]
+fn top_level_await() {
+    let p = modok("await 1;");
+    assert!(p.module.as_ref().unwrap().has_tla);
+    assert_eq!(p.func(p.module.as_ref().unwrap().func).mode, FuncMode::Async);
+    assert!(modok("for await (const x of y) {}").module.as_ref().unwrap().has_tla);
+    assert!(modok("let x = await f(); export {x};").module.as_ref().unwrap().has_tla);
+    assert!(modok("export default await 1;").module.as_ref().unwrap().has_tla);
+    assert!(modok("{ await 1 }").module.as_ref().unwrap().has_tla);
+    assert!(modok("if (a) await b;").module.as_ref().unwrap().has_tla);
+    // An await inside a function is not top-level.
+    let p = modok("async function f() { await 1; } export {f};");
+    assert!(!p.module.as_ref().unwrap().has_tla);
+    assert_eq!(p.func(p.module.as_ref().unwrap().func).mode, FuncMode::Plain);
+    assert!(!modok("var f = async () => await 1;").module.as_ref().unwrap().has_tla);
+    assert!(!modok("var f = () => 1; var g = function () {};").module.as_ref().unwrap().has_tla);
+    // Not in a plain function, not as a name.
+    moderr("function f() { await 1; }");
+    moderr("var f = () => await 1;");
+    moderr("await;");
+    moderr("var f = (await) => 1;");
+    moderr("class A { m() { await 1; } }");
+    // Allowed: await as an operand of an operator.
+    modok("var x = (await a) + (await b); var y = await await c;");
+    // A class static field or computed key at the top level: await is an operator in a computed key.
+    modok("class A { [await 1]() {} }");
+}
+
+#[test]
+fn module_scoping_rules() {
+    // Top-level functions are lexical in a module.
+    moderr("function f() {} var f;");
+    moderr("var f; function f() {}");
+    moderr("function f() {} function f() {}");
+    moderr("let a; function a() {}");
+    modok("function f() { var a; function a() {} }");
+    // The HTML-like comment forms are not comments in a module (they are operators and a syntax error here).
+    moderr("x = 1; <!-- not a comment");
+    // A module starts with a directive prologue too.
+    modok("'use strict'; var a;");
+    // `new.target` and `super` are not allowed at the top level.
+    moderr("new.target");
+    moderr("super.x");
+    // A label named await is not allowed, nor a name `yield` (strict).
+    moderr("await: 1;");
+    moderr("yield: 1;");
+}
+
+#[test]
+fn a_module_counts_nodes_and_limits() {
+    let big = format!("{}", "export var a = 1;\n".repeat(1).as_str());
+    let lim = Limits { max_nodes: 3, ..Limits::default() };
+    assert!(matches!(parse_module(&big, lim), Err(Error { kind: ErrorKind::Limit(LimitKind::Nodes), .. })));
+    let (r, used) = parse_module_used(&big, Limits::default());
+    assert!(r.is_ok());
+    assert!(used > 3);
+    // The same count is enough to parse the same source.
+    assert!(parse_module(&big, Limits { max_nodes: used, ..Limits::default() }).is_ok());
 }
