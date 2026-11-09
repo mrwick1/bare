@@ -136,6 +136,8 @@ pub(crate) enum Task {
     Scroll,
     /// `AbortSignal.timeout` (`browser_abort.rs`). The task roots its signal.
     AbortTimeout(ObjId),
+    /// The `error` event of a `Worker` that did not start (`browser_worker.rs`). The task roots its worker.
+    Worker(ObjId),
     /// The delivery of `IntersectionObserver` entries (`browser_intersection.rs`). At most one is queued.
     Notify,
     /// An idle period (`browser_idle.rs`). At most one is queued.
@@ -272,6 +274,7 @@ enum Run {
     Render,
     Scroll,
     AbortTimeout(ObjId),
+    Worker(ObjId),
     Notify,
     Idle,
     IdleTimeout(u32),
@@ -316,7 +319,7 @@ impl Dom {
             out.extend_from_slice(&t.args);
         }
         out.extend(s.ports.iter().filter(|(_, p)| !p.keys.is_empty()).map(|(&o, _)| Value::Object(o)));
-        out.extend(s.tasks.values().filter_map(|t| if let Task::AbortTimeout(o) = t { Some(Value::Object(*o)) } else { None }));
+        out.extend(s.tasks.values().filter_map(|t| if let Task::AbortTimeout(o) | Task::Worker(o) = t { Some(Value::Object(*o)) } else { None }));
     }
 
     pub(crate) fn sched_trace(&self, owner: ObjId, out: &mut Vec<Value>) {
@@ -338,7 +341,7 @@ impl Dom {
         let ports = &s.ports;
         s.tasks.retain(|_, t| match t {
             Task::Deliver(o) => ports.contains_key(o),
-            Task::Timer(_) | Task::Select(_) | Task::SelectionChange(_) | Task::DocSelectionChange | Task::Render | Task::Scroll | Task::AbortTimeout(_) | Task::Notify | Task::Idle | Task::IdleTimeout(_) | Task::Media(..) => true,
+            Task::Timer(_) | Task::Select(_) | Task::SelectionChange(_) | Task::DocSelectionChange | Task::Render | Task::Scroll | Task::AbortTimeout(_) | Task::Worker(_) | Task::Notify | Task::Idle | Task::IdleTimeout(_) | Task::Media(..) => true,
         });
         s.queued = s.ports.values().map(|p| p.inbox.len()).sum();
         s.queued_bytes = s.ports.values().flat_map(|p| p.inbox.iter().map(|m| m.1)).sum();
@@ -551,6 +554,7 @@ impl Dom {
             Task::Idle => Run::Idle,
             Task::IdleTimeout(id) => Run::IdleTimeout(id),
             Task::AbortTimeout(o) => Run::AbortTimeout(o),
+            Task::Worker(o) => Run::Worker(o),
             Task::Deliver(port) => match s.ports.get_mut(&port) {
                 Some(p) if p.keys.front() == Some(&key) => {
                     p.keys.pop_front();
@@ -670,6 +674,11 @@ impl Dom {
             Run::AbortTimeout(o) => it.host_scope(|it| {
                 it.charge(1)?;
                 self.abort_timeout_fired(it, o)?;
+                it.host_checkpoint().map(|_| ())
+            }),
+            Run::Worker(o) => it.host_scope(|it| {
+                it.charge(1)?;
+                self.worker_failed(it, o)?;
                 it.host_checkpoint().map(|_| ())
             }),
             Run::Deliver { port, data } => {
