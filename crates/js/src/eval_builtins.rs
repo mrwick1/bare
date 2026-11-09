@@ -211,6 +211,8 @@ impl Ext {
 struct MatchList {
     n: usize,
     v: Vec<(u32, u32)>,
+    /// The regexp, when it has named groups: `$<name>` and the `groups` argument of a replacer need them.
+    names: Option<Rc<rx::Regex>>,
 }
 
 impl MatchList {
@@ -620,7 +622,7 @@ impl<'p> Interp<'p> {
                 let s = self.coerce_string(a0)?;
                 match self.re_exec_raw(r, s)? {
                     None => Ok(Value::Null),
-                    Some(m) => self.match_result(s, &m.spans),
+                    Some((m, named)) => self.match_result(r, s, &m, named),
                 }
             }
             Bi::ReTest => {
@@ -747,7 +749,7 @@ impl<'p> Interp<'p> {
                 let tpl = if func.is_none() { Some(self.coerce_string(rv)?) } else { None };
                 let Some(p) = self.search(s, search, 0)? else { return Ok(Value::String(s)) };
                 let m = h!(self, self.heap.str_len(search));
-                let ml = MatchList { n: 1, v: vec![(p as u32, (p + m) as u32)] };
+                let ml = MatchList { n: 1, v: vec![(p as u32, (p + m) as u32)], names: None };
                 self.build_replacement(&ml, s, func, tpl)
             }
             Bi::ReSymMatch => {
@@ -810,7 +812,7 @@ impl<'p> Interp<'p> {
         if !flags.global {
             return match self.re_exec_raw(r, s)? {
                 None => Ok(Value::Null),
-                Some(m) => self.match_result(s, &m.spans),
+                Some((m, named)) => self.match_result(r, s, &m, named),
             };
         }
         let ml = self.collect_matches(r, s, false)?;
@@ -838,7 +840,10 @@ impl<'p> Interp<'p> {
         } else {
             match self.re_exec_raw(r, s)? {
                 None => return Ok(Value::String(s)),
-                Some(m) => MatchList { n: m.spans.len(), v: m.spans.iter().map(|x| x.map_or(UNSET, |(a, b)| (a as u32, b as u32))).collect() },
+                Some((m, named)) => {
+                    let names = if named { Some(self.ext.regexps[&r].re.clone()) } else { None };
+                    MatchList { n: m.spans.len(), v: m.spans.iter().map(|x| x.map_or(UNSET, |(a, b)| (a as u32, b as u32))).collect(), names }
+                }
             }
         };
         self.build_replacement(&ml, s, func, tpl)
@@ -1062,6 +1067,9 @@ impl<'p> Interp<'p> {
                 }
                 cargs.push(Value::Number(ms as f64));
                 cargs.push(Value::String(s));
+                if let Some(re) = &ml.names {
+                    self.push_groups(&mut cargs, re, s, row)?;
+                }
                 let rv = self.call_fn(f, Value::Undefined, &cargs)?;
                 Some(self.coerce_string(rv)?)
             } else {
@@ -1071,7 +1079,7 @@ impl<'p> Interp<'p> {
                 self.append_string(&mut out, &h!(self, self.heap.str_units(s))[next..ms])?;
                 match (repl, tpl) {
                     (Some(r), _) => self.append_string(&mut out, h!(self, self.heap.str_units(r)))?,
-                    (None, Some(t)) => self.append_subst(&mut out, t, s, row)?,
+                    (None, Some(t)) => self.append_subst(&mut out, t, s, row, ml.names.as_deref())?,
                     (None, None) => {}
                 }
                 next = me;
@@ -1085,8 +1093,27 @@ impl<'p> Interp<'p> {
         self.new_str(out)
     }
 
-    /// `GetSubstitution` without named groups: `$$ $& $` $' $n $nn`.
-    fn append_subst(&self, out: &mut Vec<u16>, tpl: StrId, s: StrId, row: &[(u32, u32)]) -> Res<()> {
+    /// `$<name>` of a template, `t` being the text after `$<`: appends the group and gives how many units to skip (`$<name>` is skipped whole;
+    /// without a `>` only the `$` is written).
+    #[cold]
+    #[inline(never)]
+    fn append_named(&self, out: &mut Vec<u16>, t: &[u16], src: &[u16], row: &[(u32, u32)], names: Option<&rx::Regex>) -> Res<usize> {
+        let Some(end) = t.iter().position(|&x| x == b'>' as u16) else {
+            self.append_string(out, &[b'$' as u16])?;
+            return Ok(1);
+        };
+        let name = &t[..end];
+        let g = names.and_then(|re| re.group_names().iter().find(|(n, _)| n.encode_utf16().eq(name.iter().copied())));
+        if let Some(&(_, g)) = g
+            && row[g as usize] != UNSET
+        {
+            self.append_string(out, &src[row[g as usize].0 as usize..row[g as usize].1 as usize])?;
+        }
+        Ok(end + 3)
+    }
+
+    /// `GetSubstitution`: `$$ $& $` $' $n $nn`, and `$<name>` when the regexp `names` has named groups.
+    fn append_subst(&self, out: &mut Vec<u16>, tpl: StrId, s: StrId, row: &[(u32, u32)], names: Option<&rx::Regex>) -> Res<()> {
         let t = self.heap.str_units(tpl).map_err(Error::Heap)?;
         let src = self.heap.str_units(s).map_err(Error::Heap)?;
         let (ms, me) = (row[0].0 as usize, row[0].1 as usize);
@@ -1119,6 +1146,7 @@ impl<'p> Interp<'p> {
                     self.append_string(out, &src[me.min(src.len())..])?;
                     i += 2;
                 }
+                Some(c) if c == b'<' as u16 && names.is_some() => i += self.append_named(out, &t[i + 2..], src, row, names)?,
                 _ => {
                     let Some(d1) = digit(next) else {
                         self.append_string(out, &[dollar])?;
@@ -1344,7 +1372,8 @@ impl<'p> Interp<'p> {
 
     /// `RegExpBuiltinExec` up to the result array: reads and coerces `lastIndex` (this can run script), matches,
     /// then writes `lastIndex` for `g` and `y`. The regexp data is copied first, so nothing stays borrowed.
-    fn re_exec_raw(&mut self, r: ObjId, s: StrId) -> Res<Option<rx::Match>> {
+    /// The match, and whether the regexp has named groups (`Match` has no room for it: it is the same size as before, 24 bytes).
+    fn re_exec_raw(&mut self, r: ObjId, s: StrId) -> Res<Option<(rx::Match, bool)>> {
         let re = self.ext.regexps[&r].re.clone();
         let lv = self.get_prop(Value::Object(r), self.ext.k_last_index)?;
         let n = self.coerce_number(lv)?;
@@ -1371,7 +1400,7 @@ impl<'p> Interp<'p> {
                     let end = m.spans[0].map_or(0, |x| x.1);
                     self.set_last_index(r, end as f64)?;
                 }
-                Ok(Some(m))
+                Ok(Some((m, re.has_names())))
             }
         }
     }
@@ -1383,7 +1412,7 @@ impl<'p> Interp<'p> {
         self.set_last_index(r, 0.0)?;
         let len = h!(self, self.heap.str_len(s));
         let n = if groups { re.group_count() + 1 } else { 1 };
-        let mut ml = MatchList { n, v: Vec::new() };
+        let mut ml = MatchList { n, v: Vec::new(), names: None };
         let mut pos = 0usize;
         while pos <= len {
             self.tick()?;
@@ -1398,11 +1427,44 @@ impl<'p> Interp<'p> {
             pos = if a == b { self.advance(&re, s, b)? } else { b };
         }
         self.set_last_index(r, 0.0)?;
+        if re.has_names() {
+            ml.names = Some(re);
+        }
         Ok(ml)
     }
 
-    /// The array `exec` returns: captures, then `index`, `input`, `groups`.
-    fn match_result(&mut self, s: StrId, spans: &[Option<(usize, usize)>]) -> Res<Value> {
+    /// The `groups` object of a match: no prototype, one property for each group name, in pattern order. `span(g)` is group `g`.
+    #[cold]
+    #[inline(never)]
+    fn push_groups(&mut self, cargs: &mut Vec<Value>, re: &rx::Regex, s: StrId, row: &[(u32, u32)]) -> Res<()> {
+        let g = self.groups_object(re, s, |g| (row[g] != UNSET).then(|| (row[g].0 as usize, row[g].1 as usize)))?;
+        cargs.push(g);
+        Ok(())
+    }
+
+    fn groups_object(&mut self, re: &rx::Regex, s: StrId, span: impl Fn(usize) -> Option<(usize, usize)>) -> Res<Value> {
+        let o = h!(self, self.heap.new_object(None));
+        for (name, g) in re.group_names() {
+            let k = h!(self, self.heap.key_from_str(name));
+            let v = match span(*g as usize) {
+                Some((x, y)) => Value::String(self.sub(s, x, y)?),
+                None => Value::Undefined,
+            };
+            self.def(o, k, v, true, true, true)?;
+        }
+        Ok(Value::Object(o))
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn match_groups(&mut self, r: ObjId, s: StrId, m: &rx::Match) -> Res<Value> {
+        let re = self.ext.regexps[&r].re.clone();
+        self.groups_object(&re, s, |g| m.spans[g])
+    }
+
+    /// The array `exec` returns: captures, then `index`, `input`, `groups`. `r` is the regexp that made `m`.
+    fn match_result(&mut self, r: ObjId, s: StrId, m: &rx::Match, named: bool) -> Res<Value> {
+        let spans = &m.spans;
         let a = h!(self, self.heap.new_array(Some(self.array_proto)));
         for (i, sp) in spans.iter().enumerate() {
             let v = match *sp {
@@ -1414,7 +1476,8 @@ impl<'p> Interp<'p> {
         let start = spans[0].map_or(0, |x| x.0);
         self.def(a, self.ext.k_index, Value::Number(start as f64), true, true, true)?;
         self.def(a, self.ext.k_input, Value::String(s), true, true, true)?;
-        self.def(a, self.ext.k_groups, Value::Undefined, true, true, true)?;
+        let groups = if named { self.match_groups(r, s, m)? } else { Value::Undefined };
+        self.def(a, self.ext.k_groups, groups, true, true, true)?;
         Ok(Value::Object(a))
     }
 }

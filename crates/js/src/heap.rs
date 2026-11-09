@@ -1038,7 +1038,13 @@ impl Heap {
 
     /// For logs and tests: UTF-8 text, with U+FFFD for each lone surrogate.
     pub fn to_string_lossy(&self, s: StrId) -> R<String> {
-        Ok(String::from_utf16_lossy(&self.str(s)?.units))
+        // An explicit loop: `String::from_utf16_lossy` is a generic `collect` whose inlining depends on the code unit layout of the crate.
+        let units = &self.str(s)?.units;
+        let mut out = String::with_capacity(units.len().max(8));
+        for r in char::decode_utf16(units.iter().copied()) {
+            out.push(r.unwrap_or('\u{FFFD}'));
+        }
+        Ok(out)
     }
 
     // ----- symbols -----

@@ -383,7 +383,7 @@ impl<'p> Interp<'p> {
         if v.is_empty() {
             return Ok(Value::String(s));
         }
-        self.build_replacement(&MatchList { n: 1, v }, s, func, tpl)
+        self.build_replacement(&MatchList { n: 1, v, names: None }, s, func, tpl)
     }
 
     /// The receiver of `RegExp.prototype[@@search]`: a builtin regexp. Another object would run its own `exec` (`Unsupported`)
@@ -422,7 +422,7 @@ impl<'p> Interp<'p> {
             self.strict = saved;
             res?;
         }
-        Ok(Value::Number(m.map_or(-1.0, |m| m.spans[0].map_or(0, |x| x.0) as f64)))
+        Ok(Value::Number(m.map_or(-1.0, |(m, _)| m.spans[0].map_or(0, |x| x.0) as f64)))
     }
 
     /// `String.prototype.matchAll`.
@@ -503,7 +503,7 @@ impl<'p> Interp<'p> {
         if self.regexp_of(Value::Object(re)).is_none() || self.user_exec(re)? {
             return self.re_iter_next_g(o, re, s, global, unicode);
         }
-        let Some(m) = self.re_exec_raw(re, s)? else {
+        let Some((m, named)) = self.re_exec_raw(re, s)? else {
             finish(self);
             return self.sc_iter_result(Value::Undefined, true);
         };
@@ -516,7 +516,7 @@ impl<'p> Interp<'p> {
             let next = self.advance(&rx, s, b)?;
             self.set_last_index(re, next as f64)?;
         }
-        let v = self.match_result(s, &m.spans)?;
+        let v = self.match_result(re, s, &m, named)?;
         self.sc_iter_result(v, false)
     }
 

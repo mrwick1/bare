@@ -178,3 +178,9 @@ var s = "😀"; var a = s.replace("\ud83d", ""), b = s.replace("\ude00", ""); [a
 var s = "x"; for (var i = 0; i < 12; i++) s = s.concat(s); s.length;
 === str regexp as this
 String.prototype.slice.call(/abc/g, 1, 4);
+=== re named groups exec
+var m = /(?<y>\d{4})-(?<m>\d\d)(?<z>x)?/.exec("on 2026-11-09"); [m.groups.y, m.groups.m, String(m.groups.z), "z" in m.groups, Object.keys(m.groups).join(), Object.getPrototypeOf(m.groups), m[1], m.length].join("|");
+=== re named groups replace
+["2026-11".replace(/(?<y>\d+)-(?<m>\d+)/, "$<m>/$<y>"), "a".replace(/(?<x>a)/, "[$<z>][$<x>][$<x]"), "a".replace(/a/, "$<n>"), "aa".replace(/(?<x>a)/g, "$<x>$<x>"), "a-b".replace(/(?<l>\w)-(?<r>\w)/, function () { var g = arguments[arguments.length - 1]; return typeof g + g.r + arguments.length; })].join();
+=== re named groups backreference and matchAll
+[/(?<a>x)\k<a>/.test("xx"), /(?<a>x)\k<a>/.test("xy"), /\k<a>(?<a>x)/.test("x"), /\k<a>/.test("k<a>"), /(?<a>x)\k<a>/u.test("xx"), [..."a1b2".matchAll(/(?<d>\d)/g)].map(function (m) { return m.groups.d; }).join()].join();

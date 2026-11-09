@@ -26,8 +26,7 @@
 //! literal `-`.
 //!
 //! Explicit errors, never a different pattern: flags `v d` ([`CompileError::UnsupportedFlag`]),
-//! lookbehind, named groups, quantified lookahead, and `\k` with `u`
-//! ([`CompileError::Unsupported`]). With `u`, `\p{...}` and `\P{...}` read General_Category, Script, Script_Extensions and the
+//! lookbehind and quantified lookahead ([`CompileError::Unsupported`]). With `u`, `\p{...}` and `\P{...}` read General_Category, Script, Script_Extensions and the
 //! binary properties of ECMA-262 from `bare_unicode::property` (the sets are made when the pattern is compiled); an unknown name
 //! is a `SyntaxError`. Without `u`, `\p{L}` is the literal text `p{L}`, as in ECMA-262.
 //!
@@ -194,6 +193,8 @@ pub struct Regex {
     classes: Vec<ClassSet>,
     flags: Flags,
     groups: usize,
+    /// `(name, group number)` of each named group, in pattern order. `None` when the pattern has none.
+    names: Option<Box<Vec<(String, u32)>>>,
     nregs: usize,
     tmp_base: usize,
     mark_base: usize,
@@ -223,7 +224,8 @@ impl Regex {
         let tmp_base = 2 * (groups + 1);
         let mark_base = tmp_base + groups + 1;
         let nregs = mark_base + e.max_slot as usize;
-        let mut re = Regex { prog: e.prog, classes: e.classes, flags, groups, nregs, tmp_base, mark_base, first: None, anchored: false };
+        let names = (!p.names.is_empty()).then(|| Box::new(std::mem::take(&mut p.names)));
+        let mut re = Regex { prog: e.prog, classes: e.classes, flags, groups, names, nregs, tmp_base, mark_base, first: None, anchored: false };
         re.anchored = matches!(re.prog[0], Inst::Start);
         re.first = re.first_set();
         Ok(re)
@@ -272,6 +274,13 @@ impl Regex {
     /// The number of capture groups, not counting group 0.
     pub fn group_count(&self) -> usize {
         self.groups
+    }
+    /// `(name, group number)` of each named group, in pattern order.
+    pub fn group_names(&self) -> &[(String, u32)] {
+        self.names.as_deref().map_or(&[], |v| v.as_slice())
+    }
+    pub fn has_names(&self) -> bool {
+        self.names.is_some()
     }
     /// The number of instructions.
     pub fn program_len(&self) -> usize {
@@ -905,6 +914,64 @@ struct Parser<'a> {
     /// Capture groups not closed yet: a backreference inside its own group matches empty (V8 parses it as empty, so
     /// the `u` surrogate check of `BackRef` does not apply to it).
     open: Vec<u32>,
+    /// `(name, group number)` of the named groups, read before the parse (`\k<name>` may name a group that comes later).
+    names: Vec<(String, u32)>,
+}
+
+/// A group name at `p[i..]` up to its `>`: the name and the index after the `>`. The name is `$`, `_` or a letter, then those and digits
+/// (and ZWNJ, ZWJ). `\uXXXX` and `\u{X}` escapes are read; a pair of `\u` surrogate escapes is not.
+fn group_name(p: &[u16], mut i: usize) -> Option<(String, usize)> {
+    let mut name = String::new();
+    loop {
+        let c = *p.get(i)?;
+        i += 1;
+        let cp = match c {
+            0x3E => return (!name.is_empty()).then_some((name, i)),
+            0x5C if p.get(i) == Some(&0x75) => {
+                i += 1;
+                let mut v = 0u32;
+                if p.get(i) == Some(&0x7B) {
+                    let st = i + 1;
+                    i = st;
+                    while let Some(h) = p.get(i).and_then(|&h| hex(h)) {
+                        v = v.saturating_mul(16).saturating_add(h);
+                        i += 1;
+                    }
+                    if i == st || p.get(i) != Some(&0x7D) {
+                        return None;
+                    }
+                    i += 1;
+                } else {
+                    for _ in 0..4 {
+                        v = v * 16 + hex(*p.get(i)?)?;
+                        i += 1;
+                    }
+                }
+                v
+            }
+            0xD800..=0xDBFF => {
+                let lo = *p.get(i).filter(|l| (0xDC00..=0xDFFF).contains(*l))?;
+                i += 1;
+                0x10000 + ((c as u32 - 0xD800) << 10) + (lo as u32 - 0xDC00)
+            }
+            c => c as u32,
+        };
+        let ch = char::from_u32(cp)?;
+        let ok = ch == '$' || ch == '_' || if name.is_empty() { ch.is_alphabetic() } else { ch.is_alphanumeric() || ch == '\u{200c}' || ch == '\u{200d}' };
+        if !ok {
+            return None;
+        }
+        name.push(ch);
+    }
+}
+
+/// Pre-scan: record the name of the group `n` whose name starts at `p[i]`, when it is a valid name.
+#[cold]
+#[inline(never)]
+fn scan_name(p: &[u16], i: usize, n: u32, names: &mut Vec<(String, u32)>) {
+    if let Some((name, _)) = group_name(p, i) {
+        names.push((name, n));
+    }
 }
 
 fn syn<T>(msg: &'static str, at: usize) -> Result<T, CompileError> {
@@ -919,6 +986,7 @@ impl<'a> Parser<'a> {
     fn new(p: &'a [u16], flags: Flags) -> Parser<'a> {
         // Count capturing groups first: `\N` is a backreference only if N <= the total.
         let (mut n, mut i, mut in_class) = (0u32, 0, false);
+        let mut names = Vec::new();
         while i < p.len() {
             match p[i] {
                 0x5C => i += 1,
@@ -931,12 +999,15 @@ impl<'a> Parser<'a> {
                     if p.get(i + 1) != Some(&0x3F) || named {
                         n = n.saturating_add(1);
                     }
+                    if named {
+                        scan_name(p, i + 3, n, &mut names);
+                    }
                 }
                 _ => {}
             }
             i += 1;
         }
-        Parser { p, i: 0, flags, total_groups: n, ncap: 0, depth: 0, classes: Vec::new(), class_work: 0, open: Vec::new() }
+        Parser { p, i: 0, flags, total_groups: n, ncap: 0, depth: 0, classes: Vec::new(), class_work: 0, open: Vec::new(), names }
     }
 
     fn peek(&self) -> Option<u16> {
@@ -1030,10 +1101,7 @@ impl<'a> Parser<'a> {
                 } else if self.eat(b'?') {
                     if self.eat(b':') {
                     } else if self.peek() == Some(b'<' as u16) {
-                        return Err(match self.p.get(self.i + 1) {
-                            Some(0x3D) | Some(0x21) => CompileError::Unsupported { what: "lookbehind", at },
-                            _ => CompileError::Unsupported { what: "named group", at },
-                        });
+                        cap = Some(self.named_group(at)?);
                     } else {
                         return syn("Invalid group", at);
                     }
@@ -1275,13 +1343,41 @@ impl<'a> Parser<'a> {
                 let set = self.property_set(at)?;
                 Esc::Set(if ch == 'P' { complement(&set, max) } else { set })
             }
-            'k' if u => return Err(CompileError::Unsupported { what: "named group", at }),
+            // `\k<name>` is a reference when the pattern has a named group; without one (and without `u`) it is the letter `k`.
+            'k' if u || !self.names.is_empty() => self.named_ref(at, in_class)?,
             // `u` identity escapes: only the syntax characters, `/`, and `-` inside a class.
             '^' | '$' | '\\' | '.' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '/' if u => Esc::Char(c as u32),
             '-' if u && in_class => Esc::Char(c as u32),
             _ if u => return syn("Invalid escape", at),
             _ => Esc::Char(c as u32),
         })
+    }
+
+    /// `(?<name>` with `self.i` at the `<`: checks the name, takes the next group number.
+    #[cold]
+    #[inline(never)]
+    fn named_group(&mut self, at: usize) -> Result<u32, CompileError> {
+        if matches!(self.p.get(self.i + 1), Some(0x3D) | Some(0x21)) {
+            return Err(CompileError::Unsupported { what: "lookbehind", at });
+        }
+        let Some((name, end)) = group_name(self.p, self.i + 1) else { return syn("Invalid capture group name", at) };
+        if self.names.iter().filter(|(n, _)| *n == name).count() > 1 {
+            return syn("Duplicate capture group name", at);
+        }
+        self.i = end;
+        self.ncap += 1;
+        Ok(self.ncap)
+    }
+
+    /// `\k<name>` with `self.i` after the `k`.
+    #[cold]
+    #[inline(never)]
+    fn named_ref(&mut self, at: usize, in_class: bool) -> Result<Esc, CompileError> {
+        let named = if self.peek() == Some(b'<' as u16) { group_name(self.p, self.i + 1) } else { None };
+        let Some((name, end)) = named.filter(|_| !in_class) else { return syn("Invalid named reference", at) };
+        let Some(&(_, n)) = self.names.iter().find(|(x, _)| *x == name) else { return syn("Invalid named capture referenced", at) };
+        self.i = end;
+        Ok(Esc::BackRef(n))
     }
 
     /// After `\p` or `\P` in `u` mode: `{Name}` or `{Name=Value}` and the code points of the property.
@@ -1825,7 +1921,11 @@ mod tests {
         }
         assert!(matches!(Regex::from_str("(?<=a)b", ""), Err(CompileError::Unsupported { what: "lookbehind", .. })));
         assert!(matches!(Regex::from_str("(?<!a)b", ""), Err(CompileError::Unsupported { what: "lookbehind", .. })));
-        assert!(matches!(Regex::from_str("(?<n>a)", ""), Err(CompileError::Unsupported { what: "named group", .. })));
+        assert!(Regex::from_str("(?<n>a)", "").is_ok());
+        assert_eq!(std::mem::size_of::<Match>(), 24);
+        let re = Regex::from_str("(a)(?<n>b)\\k<n>(?<m>c)?", "").unwrap();
+        assert_eq!(re.group_names(), &[("n".to_string(), 2), ("m".to_string(), 3)]);
+        assert!(Regex::from_str("(a)", "").unwrap().group_names().is_empty());
         assert!(matches!(Regex::from_str("(?=a)*", ""), Err(CompileError::Unsupported { .. })));
         for f in ["v", "d", "gv"] {
             assert!(matches!(Regex::from_str("a", f), Err(CompileError::UnsupportedFlag(_))), "{f}");

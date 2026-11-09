@@ -29,7 +29,7 @@ impl<'p> Interp<'p> {
         let o = self.this_regexp(rv, "exec")?;
         match self.re_exec_raw(o, s)? {
             None => Ok(Value::Null),
-            Some(m) => self.match_result(s, &m.spans),
+            Some((m, named)) => self.match_result(o, s, &m, named),
         }
     }
 

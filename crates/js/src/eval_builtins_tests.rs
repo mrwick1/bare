@@ -90,12 +90,41 @@ fn corpus_matches_node() {
 }
 
 #[test]
+fn named_groups() {
+    for (src, want) in [
+        ("var m = /(?<y>\\d{4})-(?<m>\\d\\d)/.exec('on 2026-11-09'); m.groups.y + '|' + m.groups.m + '|' + m[1] + '|' + Object.getPrototypeOf(m.groups) + '|' + Object.keys(m.groups).join()", "string:2026|11|2026|null|y,m"),
+        ("/(a)/.exec('a').groups", "undefined"),
+        ("var g = /(?<a>x)|(?<b>y)/.exec('y').groups; String(g.a) + ('a' in g) + g.b", "string:undefinedtruey"),
+        ("'2026-11'.replace(/(?<y>\\d+)-(?<m>\\d+)/, '$<m>/$<y>')", "string:11/2026"),
+        ("'a-b'.replace(/(?<l>\\w)-(?<r>\\w)/, function () { var g = arguments[arguments.length - 1]; return typeof g + g.r + arguments.length; })", "string:objectb6"),
+        ("'a-b'.replace(/(\\w)-(\\w)/, function () { return arguments.length; })", "string:5"),
+        ("'a'.replace(/a/, '$<n>')", "string:$<n>"),
+        ("'a'.replace(/(?<x>a)/, '[$<z>][$<x>][$<x]')", "string:[][a][$<x]"),
+        ("'aa'.replace(/(?<x>a)/g, '$<x>$<x>')", "string:aaaa"),
+        ("'aXb'.replaceAll(/(?<c>X)/g, '<$<c>>')", "string:a<X>b"),
+        ("[...'a1b2'.matchAll(/(?<d>\\d)/g)].map(function (m) { return m.groups.d; }).join()", "string:1,2"),
+        ("'a1'.match(/(?<d>\\d)/).groups.d", "string:1"),
+        ("/(?<a>x)\\k<a>/.test('xx') + ',' + /(?<a>x)\\k<a>/.test('xy') + ',' + /(?<a>x)\\k<a>/u.test('xx')", "string:true,false,true"),
+        ("/\\k<a>(?<a>x)/.test('x')", "boolean:true"),
+        ("/\\k<a>/.test('k<a>')", "boolean:true"),
+        ("/(?<$a_1>x)/.exec('x').groups.$a_1 + /(?<\\u0062c>x)/.exec('x').groups.bc", "string:xx"),
+        ("new RegExp('(?<a>x)(?<b>y)').source", "string:(?<a>x)(?<b>y)"),
+    ] {
+        assert_eq!(run(src), want, "{src}");
+    }
+    for pat in ["(?<a>x)(?<a>y)", "\\\\k<z>(?<a>x)", "(?<1a>x)", "(?<a", "(?<>x)", "(?<a>x)\\\\k<a"] {
+        assert_eq!(run(&format!("try {{ new RegExp('{pat}'); 'no' }} catch (e) {{ e.name }}")), "string:SyntaxError", "{pat}");
+    }
+    assert_eq!(run("try { new RegExp('(?<a>x)\\\\k<b>', 'u'); 'no' } catch (e) { e.name }"), "string:SyntaxError");
+    assert_eq!(unsupported_of("new RegExp('(?<=a)b')"), "lookbehind");
+}
+
+#[test]
 fn gates_are_explicit_unsupported() {
     // A literal pattern is compiled by `Interp::new`: nothing of the script runs. The parser checks only the flags.
     let literal = [
         ("var x = 1; /(/;", "regexp literal: invalid pattern (early SyntaxError)"),
         ("var r = /a(?<=b)/;", "lookbehind"),
-        ("var r = /(?<n>a)/;", "named group"),
         ("var r = /(?=a)*/;", "quantified lookahead"),
         ("var r = /a/d;", "regexp flag d"),
         ("function f() { return /[b-a]/; }", "regexp literal: invalid pattern (early SyntaxError)"),
@@ -113,7 +142,6 @@ fn gates_are_explicit_unsupported() {
     }
     assert_eq!(unsupported_of("new RegExp('(?<=a)b')"), "lookbehind");
     assert_eq!(unsupported_of("new RegExp('a', 'v')"), "regexp flag v");
-    assert_eq!(unsupported_of("RegExp('(?<x>a)')"), "named group");
     // A replaced exec is not a gate: the generic algorithms call it.
     assert_eq!(run("var r = /a/; r.exec = function () { return null; }; r.test('a')"), "boolean:false");
     assert_eq!(run("var r = /a/g; r.exec = function () { return null; }; 'a'.replace(r, 'b')"), "string:a");
