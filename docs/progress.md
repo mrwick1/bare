@@ -4138,3 +4138,59 @@ Not tested: the bytecode engine on module code (`BARE_JS_EXEC=byte` falls back t
 **Gates.** `cargo test --release --workspace`: 0 failed (1095 passed in the `bare` lib). 11 new tests in `browser_loader_tests.rs` replace the test that expected `Unsupported("module script")`.
 
 Not tested: a split document with module scripts, `<base href>` with a module that is imported through an import map, a real browser comparison of the order between an async module and a timer.
+
+## CORS for `fetch` and `XMLHttpRequest`, and `getComputedStyle` of a pseudo-element (2026-11-09)
+
+Before, a request to another origin was `Unsupported` (fatal), and so was `getComputedStyle(el, '::before')`. Both stopped python.org. Both work now. The two python.org journeys pass and lost their `known-bug` marks.
+
+### 1. CORS (`crates/bare/src/browser_fetch.rs`, `browser_xhr.rs`)
+
+Same origin: one origin compare at queue time. No `Origin`, no check, no preflight, `response.type` is `basic`. The cost rows `fetch_load` and `xhr_load` moved by +0.4% at most (see Checks).
+
+Another origin, in `run_one` (on the worker thread):
+- `mode: "cors"` (the default, and all of XHR): sends `Origin`. The reply must have `Access-Control-Allow-Origin` with the exact origin or `*`. With `credentials: "include"` (or `withCredentials`) it needs the exact origin and `Access-Control-Allow-Credentials: true`. The page sees only the safelisted response headers and those in `Access-Control-Expose-Headers` (`*` only without credentials). `response.type` is `cors`.
+- A request that is not simple (a method other than GET, HEAD, POST; a header that is not safelisted; a `Content-Type` other than form, multipart or text; a safelisted value over 128 bytes or with an unsafe byte) sends a preflight `OPTIONS` first with `Origin`, `Access-Control-Request-Method` and `-Headers` (sorted, lower case, only the unsafe names), and no body. The preflight must give 2xx and pass the check. `Access-Control-Allow-Methods` and `-Headers` must list the method and the names (`*` only without credentials, and `*` never covers `Authorization`). A failed preflight sends no request.
+- Preflight cache: key (origin, credentials, URL, method, header names), kept for the process (one list of at most 256 entries, as a browser profile does). `Access-Control-Max-Age`: 5 s when absent or not a number, 600 s at most, 0 means no entry.
+- Redirects: followed in `cors` and `no-cors` mode, also from the document origin to another one. Each reply (also a redirect reply) is checked. Each cross-origin hop gets its own preflight when the request needs one. `Origin` is `null` once a redirect leaves a hop that is not the document origin (cross-origin and back, or through a third origin). `Authorization` is dropped when a redirect changes the origin. https to http is still refused. A 307 of a simple POST forwards the body, as Chrome does (the old gate refused it).
+- `mode: "no-cors"`: only GET, HEAD, POST (`TypeError: 'PUT' is unsupported in no-cors mode.`), only safelisted headers (the others are dropped), no check, no preflight. The response is opaque: `type` `opaque`, status 0, no headers, no body, empty `url`. A POST sends `Origin`.
+- `mode: "same-origin"` to another origin rejects before any socket.
+- A `http:` URL from an `https:` page is blocked (mixed content), except loopback.
+- A failed check rejects with `TypeError: Failed to fetch` (XHR: `error` event, status 0, `readyState` 4). One console error line says why, for example `Access to fetch at 'https://console.python.org' from origin 'https://www.python.org' has been blocked by CORS policy: No 'Access-Control-Allow-Origin' header is present on the requested resource.` The wording is Chrome's. The line has the origin and not the path or query (Chrome prints the whole URL), because the fetch diagnostics never hold a path. Not fatal: the page goes on.
+
+Cookies: there is no HTTP cookie jar in this engine (`document.cookie` has its own). I kept that. No request sends `Cookie` or `Referer`. `credentials: "include"` and `withCredentials` change only the CORS check, so a page that passes here passes in Chrome. A same-origin POST sends no `Origin` (Chrome does). Not changed.
+
+Tests (they failed before the change, 16 of 17 on the first run): `crates/bare/src/browser_cors_tests.rs`, with two loopback servers as two origins (`serve` of `browser_fetch_tests.rs`). They cover each rule above, the console text, XHR, and the cache with a real 1 s expiry. The tests of the old gate (cross-origin is `Unsupported`) were rewritten or removed: `a_refused_cross_origin_request_leaks_no_secret_into_the_diagnostics_or_the_console`, `crates/bare/tests/fetch_https.rs` (a 308 to another https origin now arrives without `Authorization` and fails the CORS check). A check against the live python.org: `$.getJSON('https://console.python.org/...')` gives the console line above and the page goes on.
+
+Not done: a `Range` header is not safelisted here (it needs a preflight; Chrome allows a simple one). An upload listener on XHR does not force a preflight. `redirect: "manual"` is still `Unsupported`. No `Access-Control-Allow-Private-Network`. No credentialed redirect rule for URLs with a user name. The preflight cache is not cleared by anything (only expiry).
+
+### 2. `getComputedStyle(el, '::before')` (`crates/bare/src/browser_computed.rs`)
+
+No pseudo-element cascade: a rule with a pseudo-element in its selector is dropped when the sheet is built, and `content` is not a property of the engine. A real cascade needs a new property and a pseudo target in the selector and the rule index (more than 150 lines in `crates/css`, where another change is in progress). So a pseudo-element reads as one that no rule matches:
+- the inherited properties (and custom properties) are the element's, read live;
+- every other property is initial (`display: inline`, `width: auto`, `margin-top: 0px`, `position: static`);
+- `getPropertyValue('content')` is `normal` for a pseudo-element. (`cs.content` is not on the prototype, as for an element.)
+- Valid names: `::before`, `::after`, `::first-line`, `::first-letter` (and the one-colon forms of these four), `::marker`, `::placeholder`, `::selection`, `::backdrop`, `::file-selector-button`, `::-webkit-*`. Another string that starts with `:` gives an empty declaration (CSSOM): `length` 0, `""` everywhere. Nothing throws.
+- No layout runs for it.
+
+Wrong against Chrome: a page with `#e::before { content: "x"; color: blue }` gets `normal` and the inherited color. python.org reads `getComputedStyle(document.body, ':after').getPropertyValue('content')`; it gets `normal` and goes on.
+
+`bare_css::cascade::inherited` is now `pub` (one word in `crates/css/src/cascade.rs`), so the list is not copied.
+
+Tests: `a_pseudo_element_has_the_inherited_values_of_its_element_and_the_initial_rest` and `a_string_that_is_not_a_pseudo_element_gives_an_empty_declaration` (both failed with the old gate).
+
+### 3. python.org
+
+`python-org-search` and `python-org-docs-link` pass without a mark. The stops of the earlier note (`Unsupported` CORS and pseudo-element) are gone. I found no new stop. The page logs one CORS line for the `console.python.org` request (no `Access-Control-Allow-Origin` for `https://www.python.org`), and the ready handler goes on. Lobsters passes after the rebase on #293 (module scripts on a page); it was `known` before.
+
+### Checks
+
+- `cargo test --release --workspace --no-fail-fast` after the rebase on d900383: 3114 passed, 0 failed, 12 ignored. (The first run found `fetch_https::https_to_http_and_cross_origin_redirects_send_nothing_further` testing the old gate; rewritten.)
+- Cost matrix against the base build of d900383, 629 rows that ran: mean +0.002% (glibc), 0 rows over the limit under either allocator. Rows touched: `fetch_load post 1` +0.16%, `post 10` +0.22%, `bytes 10` +0.39%, `xhr_load 100` +0.08%, the others under +0.1%. The 176 `bare-stress` rows did not run (the base build has no `bare-stress`). Layout and paint did not change.
+- `tools/drive/public/run.sh` 3 times before the last rebase: 25 pass, 2 known, 0 fail, 0 flakes each time (known: lobsters with its module script, rust-book-sidebar with a covered link). Once after the rebase on #293: 26 pass, 1 known (rust-book-sidebar), 0 fail, 0 flakes. `cargo test --release -p bare` after that rebase: 1120 passed, 0 failed.
+- Not run: `keycost.sh`, `test262_check.sh` and `exec_diff.sh` (`crates/js` did not change).
+
+### Not tested
+
+- A real `https` page with a server that sends the full CORS headers (the loopback servers are `http`; the python.org check is a missing-header case).
+- Window mode, arjun-e16, a comparison with Chrome.
+- A preflight with a very large header list, and a redirect chain through three real origins (the tests use two loopback servers and a third for one case).

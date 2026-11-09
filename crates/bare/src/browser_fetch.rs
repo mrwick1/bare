@@ -11,16 +11,32 @@
 //!   `Host::trace` reports the JS objects each one keeps, `Host::prune` drops the entries of dead objects, and the queue roots
 //!   its promises. No `RefCell` borrow is held while JS runs (getters, `toString`, callbacks).
 //!
-//! Policy (strict same-origin milestone)
-//! - A request whose origin is not the document origin is `Unsupported` (CORS is a gate), before DNS or a socket.
-//! - Every redirect is checked against the origin of the request before the next hop opens a socket. A redirect to another
-//!   origin, or from https to http, ends the request with a network error (the promise rejects with `TypeError`), so a
-//!   307/308 can never forward a body or an `Authorization` header elsewhere. `redirect: "error"` is supported,
+//! Policy: same origin, and CORS for another origin
+//! - A request to the document origin (one origin compare at queue time) runs as before: no `Origin`, no check, no preflight.
+//! - A request to another origin follows the CORS protocol of the Fetch Standard in `run_one`, on the worker thread:
+//!   - `mode: "cors"` (the default, and all of XHR): sends `Origin`, then checks `Access-Control-Allow-Origin` (the exact origin or `*`;
+//!     with `credentials: "include"` or `withCredentials` the exact origin and `Access-Control-Allow-Credentials: true`). The page sees
+//!     the safelisted response headers and those of `Access-Control-Expose-Headers`. `response.type` is `"cors"`.
+//!   - A request that is not simple (a method other than GET, HEAD, POST, or a header that is not safelisted, or a `Content-Type`
+//!     other than form, multipart and text) sends a preflight `OPTIONS` first, with `Access-Control-Request-Method` and `-Headers`, and
+//!     no body or credentials. `Access-Control-Allow-Methods`, `-Headers` and `-Max-Age` (5 s by default, 600 s at most) decide. The
+//!     passed preflights are kept for the process, by (origin, credentials, URL, method, header names).
+//!   - `mode: "no-cors"`: only GET, HEAD and POST, only safelisted headers, no check, and an opaque response (`type` `"opaque"`, status 0,
+//!     no header, no body, empty `url`). A POST sends `Origin`.
+//!   - `mode: "same-origin"` rejects before any socket.
+//!   - A failed check rejects with `TypeError: Failed to fetch` (XHR: an `error` event, status 0) and puts one line in the console, as
+//!     Chrome does. The line names the origins and the reason; it has no path or query.
+//!   - A `http:` URL from an `https:` page is blocked (mixed content), except loopback.
+//! - Every redirect is checked before the next hop opens a socket. A redirect from https to http ends the request. A redirect to another
+//!   origin is followed in `cors` and `no-cors` mode, with the CORS check of each reply (also the redirect reply) and a preflight
+//!   for each cross-origin hop that needs one. `Origin` is `null` once a redirect leaves a hop that is not the document origin.
+//!   `Authorization` is dropped when a redirect changes the origin. `redirect: "error"` is supported,
 //!   `"manual"` is `Unsupported`. 301/302 (POST) and 303 (all but GET and HEAD) turn the request into a GET without a body; 307/308 keep both.
 //! - JS cannot set `Host`, `Content-Length`, `Cookie`, `Origin`, `Referer`, `Connection`, `Transfer-Encoding`, `Accept-Encoding`,
 //!   `Sec-*`, `Proxy-*` and the other forbidden names of the Fetch Standard: they are dropped, as a browser does. `Host` and
 //!   `Content-Length` come from the client. `Set-Cookie` of a response is never put in `response.headers`. There is no jar
-//!   for HTTP (`document.cookie` has its own, `browser_cookie.rs`), so `credentials` changes nothing and no `Cookie`, `Origin`, `Referer` is ever sent.
+//!   for HTTP (`document.cookie` has its own, `browser_cookie.rs`), so no `Cookie` or `Referer` is ever sent, and `credentials` changes only the CORS
+//!   check (`include` needs the exact origin and `Allow-Credentials`, as in Chrome). `Origin` is sent only to another origin. A same-origin POST sends none (Chrome does).
 //! - A failed network request rejects with `TypeError: Failed to fetch`. Errors and diagnostics never hold a header value, a
 //!   body byte, a path or a query. [`Browser::take_fetch_diagnostics`] gives fixed labels and the origin.
 //!
@@ -42,7 +58,7 @@
 //! read a body of a `Request` or `Response`.
 //!
 //! Gates (explicit `Unsupported`, nothing is faked): token methods and a lower-case `patch`; stream bodies;
-//! `Request.body` and `mode: "no-cors"`; non-empty `integrity`;
+//! `Request.body`; non-empty `integrity`;
 //! `cache: "only-if-cached"`; non-ASCII header values; compressed
 //! responses (a `Content-Encoding` that `bare_net` cannot undo is a network error; gzip, deflate and br are undone, and the headers stay); subclassing (`class X extends Response`).
 //! Headers iteration: `keys`, `values`, `entries` and `[Symbol.iterator]` (the same function as `entries`) make live iterators. Each
@@ -300,6 +316,49 @@ enum Redirect {
     Error,
 }
 
+/// The request mode of the Fetch Standard.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Cors,
+    NoCors,
+    SameOrigin,
+}
+
+impl Mode {
+    fn of(s: &str) -> Mode {
+        match s {
+            "no-cors" => Mode::NoCors,
+            "same-origin" => Mode::SameOrigin,
+            _ => Mode::Cors,
+        }
+    }
+}
+
+/// What `run_one` needs for CORS. A request to the origin of the document has `doc: None` and costs one origin compare, at queue time.
+struct Cors {
+    mode: Mode,
+    /// `credentials: "include"` or `withCredentials`.
+    include: bool,
+    /// The origin of the document, for a request to another origin. `None`: the first URL is the document origin.
+    doc: Option<Url>,
+    /// The request is not sent: the text for the console.
+    blocked: Option<String>,
+    /// For the console text: `fetch` or `XMLHttpRequest`.
+    api: &'static str,
+}
+
+impl Clone for Cors {
+    fn clone(&self) -> Cors {
+        Cors { mode: self.mode, include: self.include, doc: self.doc.as_ref().map(dup), blocked: self.blocked.clone(), api: self.api }
+    }
+}
+
+impl Cors {
+    fn same(api: &'static str) -> Cors {
+        Cors { mode: Mode::Cors, include: false, doc: None, blocked: None, api }
+    }
+}
+
 struct Common {
     headers: ObjId,
     body: Body,
@@ -345,6 +404,7 @@ struct Pending {
     headers: Vec<(String, String)>,
     body: Option<Rc<Vec<u8>>>,
     redirect: Redirect,
+    cors: Cors,
     /// An `XMLHttpRequest` and its request generation (`browser_xhr.rs`). Then `promise` is `undefined`.
     xhr: Option<(ObjId, u64)>,
     /// When it was queued (only when `BARE_NET_TRACE` is set).
@@ -361,6 +421,7 @@ struct Wire {
     headers: Vec<(String, String)>,
     body: Option<Vec<u8>>,
     redirect: Redirect,
+    cors: Cors,
     queued: Option<std::time::Instant>,
 }
 
@@ -371,21 +432,22 @@ struct Parts<'a> {
     headers: &'a [(String, String)],
     body: Option<&'a [u8]>,
     redirect: Redirect,
+    cors: &'a Cors,
 }
 
 impl Wire {
     fn parts(&self) -> Parts<'_> {
-        Parts { method: self.method, url: &self.url, headers: &self.headers, body: self.body.as_deref(), redirect: self.redirect }
+        Parts { method: self.method, url: &self.url, headers: &self.headers, body: self.body.as_deref(), redirect: self.redirect, cors: &self.cors }
     }
 }
 
 impl Pending {
     fn parts(&self) -> Parts<'_> {
-        Parts { method: self.method, url: &self.url, headers: &self.headers, body: self.body.as_ref().map(|b| b.as_slice()), redirect: self.redirect }
+        Parts { method: self.method, url: &self.url, headers: &self.headers, body: self.body.as_ref().map(|b| b.as_slice()), redirect: self.redirect, cors: &self.cors }
     }
 
     fn wire(&self) -> Wire {
-        Wire { method: self.method, url: dup(&self.url), headers: self.headers.clone(), body: self.body.as_deref().cloned(), redirect: self.redirect, queued: self.queued }
+        Wire { method: self.method, url: dup(&self.url), headers: self.headers.clone(), body: self.body.as_deref().cloned(), redirect: self.redirect, cors: self.cors.clone(), queued: self.queued }
     }
 }
 
@@ -908,7 +970,6 @@ fn make_core(d: &Dom, it: &mut Interp<'_>, input: Value, init: Value) -> R<Core>
         if let Some(m) = d.choice(it, init, "mode", &["same-origin", "cors", "no-cors", "navigate"])? {
             match m {
                 "navigate" => return Err(it.type_error("Request constructor: invalid request mode navigate")),
-                "no-cors" => return Err(Error::Unsupported(unsupported("fetch mode: no-cors (opaque responses)"))),
                 _ => core.mode = m,
             }
         }
@@ -939,6 +1000,13 @@ fn make_core(d: &Dom, it: &mut Interp<'_>, input: Value, init: Value) -> R<Core>
                 core.headers.append(&lim, "content-type".into(), ty.into()).map_err(|e| d.herr(it, e))?;
             }
         }
+    }
+    if core.mode == "no-cors" {
+        if !matches!(core.method.as_str(), "GET" | "HEAD" | "POST") {
+            return Err(it.type_error(&format!("'{}' is unsupported in no-cors mode.", core.method)));
+        }
+        // The headers of a no-cors request: only the safelisted ones stay (the guard "request-no-cors").
+        core.headers.list.retain(|(n, v)| safelisted_request_header(n, v));
     }
     if core.body.is_some() && (core.method == "GET" || core.method == "HEAD") {
         return Err(it.type_error("Request with GET/HEAD method cannot have body."));
@@ -1626,7 +1694,8 @@ fn prepare(d: &Dom, it: &mut Interp<'_>, promise: Value, a: &[Value]) -> R<()> {
     }
     // Policy: no DNS and no socket before this passes.
     let method = wire_method(&core.method)?;
-    policy(d, &lim, &core.url)?;
+    let mut cors = policy(d, &lim, &core.url, Mode::of(core.mode), "fetch")?;
+    cors.include = core.credentials == "include";
     let n = core.body.as_ref().map_or(0, |b| b.len());
     {
         let mut st = d.fetch.st.borrow_mut();
@@ -1650,29 +1719,44 @@ fn prepare(d: &Dom, it: &mut Interp<'_>, promise: Value, a: &[Value]) -> R<()> {
         if !headers.iter().any(|(k, _)| k == "accept") {
             headers.push(("accept".into(), "*/*".into()));
         }
-        st.queue.push_back(Pending { promise, method, url: core.url, headers, body: core.body, redirect: core.redirect, xhr: None, queued: bare_net::trace::on().then(std::time::Instant::now), started: None });
+        st.queue.push_back(Pending { promise, method, url: core.url, headers, body: core.body, redirect: core.redirect, cors, xhr: None, queued: bare_net::trace::on().then(std::time::Instant::now), started: None });
     }
     Ok(())
 }
 
-/// The origin policy: a configured document origin, and the same origin for the request.
-fn policy(d: &Dom, lim: &FetchLimits, url: &Url) -> R<()> {
+/// The origin policy: a configured document origin. A request to the document origin returns at once (`Cors::same`). A request to another
+/// origin keeps the document origin, for the CORS protocol in `run_one`, or a text that blocks it before DNS or a socket.
+fn policy(d: &Dom, lim: &FetchLimits, url: &Url, mode: Mode, api: &'static str) -> R<Cors> {
     let base = d.fetch_base();
     let mut st = d.fetch.st.borrow_mut();
     let Some(base) = base else {
         st.diag(lim, "blocked: no document origin is configured".into());
         return Err(Error::Unsupported(unsupported("fetch without a configured document origin (Browser::configure_fetch)")));
     };
-    if !base.same_origin(url) {
-        let text = format!("blocked: cross-origin request to {} (CORS is a gate)", origin(url));
-        st.diag(lim, text);
-        return Err(Error::Unsupported(unsupported("fetch to another origin (CORS is not implemented)")));
+    let mut cors = Cors { mode, ..Cors::same(api) };
+    if base.same_origin(url) {
+        return Ok(cors);
     }
-    Ok(())
+    let (doc, to) = (origin(&base), origin(url));
+    if mode == Mode::SameOrigin {
+        cors.blocked = Some(format!("Fetch API cannot load {to}. Request mode is \"same-origin\" but the URL's origin is not the same as the request origin {doc}."));
+    } else if base.scheme == Scheme::Https && url.scheme == Scheme::Http && !potentially_trustworthy(url) {
+        cors.blocked = Some(format!("Mixed Content: The page at '{doc}' was loaded over HTTPS, but requested an insecure resource '{to}'. This request has been blocked; the content must be served over HTTPS."));
+    }
+    match &cors.blocked {
+        Some(_) => st.diag(lim, format!("blocked: request to {to} (mode or mixed content)")),
+        None => cors.doc = Some(dup(&base)),
+    }
+    Ok(cors)
+}
+
+/// `http:` to a loopback host is allowed from an `https:` page, as in Chrome.
+fn potentially_trustworthy(u: &Url) -> bool {
+    u.host == "localhost" || u.host.ends_with(".localhost") || u.host == "[::1]" || u.host.starts_with("127.")
 }
 
 /// Queue the request of an `XMLHttpRequest` with the policy, the caps and the queue of `fetch`. `headers` are combined by name.
-pub(crate) fn queue_xhr(d: &Dom, x: (ObjId, u64), method: &str, url: Url, mut headers: Vec<(String, String)>, body: Option<Rc<Vec<u8>>>) -> R<()> {
+pub(crate) fn queue_xhr(d: &Dom, x: (ObjId, u64), method: &str, url: Url, mut headers: Vec<(String, String)>, body: Option<Rc<Vec<u8>>>, with_credentials: bool) -> R<()> {
     let lim = d.fl();
     {
         let st = d.fetch.st.borrow();
@@ -1684,7 +1768,8 @@ pub(crate) fn queue_xhr(d: &Dom, x: (ObjId, u64), method: &str, url: Url, mut he
         }
     }
     let method = wire_method(method)?;
-    policy(d, &lim, &url)?;
+    let mut cors = policy(d, &lim, &url, Mode::Cors, "XMLHttpRequest")?;
+    cors.include = with_credentials;
     let n = body.as_ref().map_or(0, |b| b.len());
     let mut st = d.fetch.st.borrow_mut();
     if st.retained.saturating_add(st.queued_bytes).saturating_add(n) > lim.max_retained {
@@ -1695,7 +1780,7 @@ pub(crate) fn queue_xhr(d: &Dom, x: (ObjId, u64), method: &str, url: Url, mut he
     if !headers.iter().any(|(k, _)| k == "accept") {
         headers.push(("accept".into(), "*/*".into()));
     }
-    st.queue.push_back(Pending { promise: Value::Undefined, method, url, headers, body, redirect: Redirect::Follow, xhr: Some(x), queued: bare_net::trace::on().then(std::time::Instant::now), started: None });
+    st.queue.push_back(Pending { promise: Value::Undefined, method, url, headers, body, redirect: Redirect::Follow, cors, xhr: Some(x), queued: bare_net::trace::on().then(std::time::Instant::now), started: None });
     Ok(())
 }
 
@@ -1710,8 +1795,21 @@ pub(crate) fn dequeue_xhr(d: &Dom, x: ObjId) {
 
 // ---------------------------------------------------------------------------------------------- the network driver
 
+/// What the page may see of a reply (the response tainting of the Fetch Standard).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Taint {
+    /// The document origin, or the same origin all the way: everything.
+    Basic,
+    /// Another origin that passed the CORS check: the safelisted and the exposed headers.
+    Cors,
+    /// `no-cors` to another origin: status 0, no header, no body.
+    Opaque,
+}
+
 pub(crate) enum Outcome {
-    Done { status: u16, url: Url, redirected: bool, headers: Vec<(String, String)>, body: Vec<u8> },
+    Done { status: u16, url: Url, redirected: bool, headers: Vec<(String, String)>, body: Vec<u8>, taint: Taint },
+    /// The CORS check or a policy refused the request (or its reply). The text goes to the console of the page. It holds no path, query or request header value.
+    Blocked(String),
     /// A network error or a policy stop. The label holds no header value, path or query.
     Failed(&'static str),
     /// A network error, with its cause (`bare_net::cause::describe`). The text goes to diagnostics only: the page sees `Failed to fetch`.
@@ -1721,11 +1819,34 @@ pub(crate) enum Outcome {
 }
 
 fn run_one(client: &mut Client, lim: &FetchLimits, first: Parts<'_>, diag: &mut Vec<String>) -> Outcome {
+    let cors = first.cors;
+    if let Some(t) = &cors.blocked {
+        return Outcome::Blocked(t.clone());
+    }
     let first_origin = dup(first.url);
+    // A request to the document origin has `doc: None`: its taint is `Basic` until a redirect leaves the origin.
+    let doc = cors.doc.as_ref().unwrap_or(&first_origin);
+    let mut taint = match (&cors.doc, cors.mode) {
+        (None, _) => Taint::Basic,
+        (_, Mode::NoCors) => Taint::Opaque,
+        _ => Taint::Cors,
+    };
+    // Fetch standard: set when a redirect leaves a hop that is not the origin of the document. The `Origin` header is then `null`.
+    let mut null_origin = false;
     let (mut method, mut url, mut headers, mut body) = (first.method, dup(first.url), first.headers.to_vec(), first.body);
     let mut redirected = false;
     for hop in 0..=lim.max_redirects {
-        let wire: Vec<(&str, &str)> = headers.iter().map(|(n, v)| (n.as_str(), v.as_str())).collect();
+        let origin_s = (taint == Taint::Cors || (taint == Taint::Opaque && !method.safe())).then(|| if null_origin { "null".to_string() } else { origin(doc) });
+        if taint == Taint::Cors && needs_preflight(method, &headers) {
+            let o = origin_s.as_deref().unwrap_or("null");
+            if let Err(out) = preflight(client, lim, &url, method, &headers, o, cors, doc) {
+                return out;
+            }
+        }
+        let mut wire: Vec<(&str, &str)> = headers.iter().map(|(n, v)| (n.as_str(), v.as_str())).collect();
+        if let Some(o) = &origin_s {
+            wire.push(("origin", o));
+        }
         let req = NetRequest { method, url: &url, headers: &wire, body: body.unwrap_or(&[]) };
         let resp = match client.send_once(&req, lim.max_response_body) {
             Ok(r) => r,
@@ -1733,6 +1854,12 @@ fn run_one(client: &mut Client, lim: &FetchLimits, first: Parts<'_>, diag: &mut 
             Err(e) => return Outcome::Net(bare_net::cause::describe(&*e)),
         };
         let resp = unwrap_arc(resp);
+        // Every reply of a CORS request is checked, also a redirect.
+        if taint == Taint::Cors
+            && let Err(reason) = cors_check(&resp.headers, origin_s.as_deref().unwrap_or("null"), cors.include)
+        {
+            return Outcome::Blocked(blocked_text(cors, &url, doc, &reason));
+        }
         if matches!(resp.status, 301 | 302 | 303 | 307 | 308)
             && let Some(location) = resp.headers.iter().find(|(n, _)| n == "location").map(|(_, v)| v.clone())
         {
@@ -1745,9 +1872,20 @@ fn run_one(client: &mut Client, lim: &FetchLimits, first: Parts<'_>, diag: &mut 
                 diag.push(format!("blocked: https to http redirect from {}", origin(&url)));
                 return Outcome::Failed("https to http redirect refused");
             }
-            if !first_origin.same_origin(&target) {
-                diag.push(format!("blocked: cross-origin redirect from {} to {} (CORS is a gate)", origin(&url), origin(&target)));
-                return Outcome::Failed("cross-origin redirect refused");
+            if !doc.same_origin(&target) {
+                if cors.mode == Mode::SameOrigin {
+                    diag.push(format!("blocked: cross-origin redirect from {} to {} (mode same-origin)", origin(&url), origin(&target)));
+                    return Outcome::Failed("cross-origin redirect refused");
+                }
+                if taint == Taint::Basic {
+                    taint = if cors.mode == Mode::NoCors { Taint::Opaque } else { Taint::Cors };
+                }
+            }
+            if taint == Taint::Cors && !target.same_origin(&url) && !doc.same_origin(&url) {
+                null_origin = true;
+            }
+            if !target.same_origin(&url) {
+                headers.retain(|(n, _)| n != "authorization");
             }
             if hop == lim.max_redirects {
                 return Outcome::Failed("too many redirects");
@@ -1766,9 +1904,150 @@ fn run_one(client: &mut Client, lim: &FetchLimits, first: Parts<'_>, diag: &mut 
             diag.push(format!("blocked: compressed response from {} (not supported)", origin(&url)));
             return Outcome::Failed("compressed response");
         }
-        return Outcome::Done { status: resp.status, url, redirected, headers: resp.headers, body: resp.body };
+        return match taint {
+            Taint::Basic => Outcome::Done { status: resp.status, url, redirected, headers: resp.headers, body: resp.body, taint },
+            Taint::Cors => Outcome::Done { status: resp.status, url, redirected, headers: expose(resp.headers, cors.include), body: resp.body, taint },
+            Taint::Opaque => Outcome::Done { status: 0, url, redirected: false, headers: Vec::new(), body: Vec::new(), taint },
+        };
     }
     Outcome::Failed("too many redirects")
+}
+
+// ---------------------------------------------------------------------------------------------- CORS
+
+fn blocked_text(c: &Cors, url: &Url, doc: &Url, reason: &str) -> String {
+    format!("Access to {} at '{}' from origin '{}' has been blocked by CORS policy: {reason}", c.api, origin(url), origin(doc))
+}
+
+/// The value of a response header with the same name given more than once joined with ", " (the Fetch Standard "get").
+fn combined(headers: &[(String, String)], name: &str) -> Option<String> {
+    let mut it = headers.iter().filter(|(n, _)| n == name).map(|(_, v)| v.trim_matches(['\t', ' ']));
+    let mut out = it.next()?.to_string();
+    for v in it {
+        out.push_str(", ");
+        out.push_str(v);
+    }
+    Some(out)
+}
+
+/// The CORS check of the Fetch Standard. `origin` is the serialized request origin (`null` when tainted). The error is the text after
+/// "blocked by CORS policy: " in Chrome.
+fn cors_check(headers: &[(String, String)], origin: &str, include: bool) -> Result<(), String> {
+    let Some(allow) = combined(headers, "access-control-allow-origin") else {
+        return Err("No 'Access-Control-Allow-Origin' header is present on the requested resource.".into());
+    };
+    if allow.contains(',') {
+        return Err(format!("The 'Access-Control-Allow-Origin' header contains multiple values '{allow}', but only one is allowed."));
+    }
+    if allow == "*" {
+        if !include {
+            return Ok(());
+        }
+        return Err("The value of the 'Access-Control-Allow-Origin' header in the response must not be the wildcard '*' when the request's credentials mode is 'include'.".into());
+    }
+    if allow != origin {
+        return Err(format!("The 'Access-Control-Allow-Origin' header has a value '{allow}' that is not equal to the supplied origin."));
+    }
+    if include {
+        let v = combined(headers, "access-control-allow-credentials").unwrap_or_default();
+        if v != "true" {
+            return Err(format!("The value of the 'Access-Control-Allow-Credentials' header in the response is '{v}' which must be 'true' when the request's credentials mode is 'include'."));
+        }
+    }
+    Ok(())
+}
+
+/// The headers a script may read from a CORS reply: the safelisted ones and `Access-Control-Expose-Headers` (`*` only without credentials).
+fn expose(mut headers: Vec<(String, String)>, include: bool) -> Vec<(String, String)> {
+    const SAFE: [&str; 7] = ["cache-control", "content-language", "content-length", "content-type", "expires", "last-modified", "pragma"];
+    let list = combined(&headers, "access-control-expose-headers").unwrap_or_default().to_ascii_lowercase();
+    let names: Vec<&str> = list.split(',').map(str::trim).filter(|n| !n.is_empty()).collect();
+    let all = !include && names.contains(&"*");
+    headers.retain(|(n, _)| all || SAFE.contains(&n.as_str()) || names.contains(&n.as_str()));
+    headers
+}
+
+/// A request header that does not need a preflight: the Fetch Standard "CORS-safelisted request-header".
+fn safelisted_request_header(n: &str, v: &str) -> bool {
+    matches!(n, "accept" | "accept-language" | "content-language" | "content-type")
+        && v.len() <= 128
+        && !v.bytes().any(|b| (b < b' ' && b != b'\t') || b == 0x7f || b"\"():<>?@[\\]{}".contains(&b))
+        && (n != "content-type" || matches!(v.split(';').next().unwrap_or("").trim().to_ascii_lowercase().as_str(), "application/x-www-form-urlencoded" | "multipart/form-data" | "text/plain"))
+}
+
+fn needs_preflight(method: Method, headers: &[(String, String)]) -> bool {
+    !matches!(method, Method::Get | Method::Head | Method::Post) || headers.iter().any(|(n, v)| !safelisted_request_header(n, v))
+}
+
+/// `Access-Control-Max-Age` in seconds: 5 when it is absent or not a number, at most 600 (the cap of Chrome).
+pub(crate) fn preflight_max_age(v: Option<&str>) -> u64 {
+    match v.map(str::trim) {
+        Some(v) if !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()) => v.parse::<u64>().unwrap_or(u64::MAX).min(600),
+        _ => 5,
+    }
+}
+
+/// Preflights that passed: the key (origin, credentials, URL, method, header names) and when the entry ends. One list for the process,
+/// as the cache of a browser profile is for all its pages.
+static PREFLIGHTS: std::sync::Mutex<Vec<(String, std::time::Instant)>> = std::sync::Mutex::new(Vec::new());
+const PREFLIGHT_ENTRIES: usize = 256;
+
+/// The preflight of a request to another origin: an `OPTIONS` with `Access-Control-Request-Method` and `-Headers`, no body and no
+/// credentials. `Err` holds the outcome of the whole request.
+#[allow(clippy::too_many_arguments)]
+fn preflight(client: &mut Client, lim: &FetchLimits, url: &Url, method: Method, headers: &[(String, String)], origin_s: &str, cors: &Cors, doc: &Url) -> Result<(), Outcome> {
+    let mut names: Vec<&str> = headers.iter().filter(|(n, v)| !safelisted_request_header(n, v)).map(|(n, _)| n.as_str()).collect();
+    names.sort_unstable();
+    names.dedup();
+    let names = names.join(",");
+    let key = format!("{origin_s}\n{}\n{url}\n{}\n{names}", u8::from(cors.include), method.as_str());
+    let now = std::time::Instant::now();
+    {
+        let mut c = PREFLIGHTS.lock().unwrap_or_else(|e| e.into_inner());
+        c.retain(|(_, t)| *t > now);
+        if c.iter().any(|(k, _)| *k == key) {
+            return Ok(());
+        }
+    }
+    let mut h: Vec<(&str, &str)> = vec![("origin", origin_s), ("access-control-request-method", method.as_str()), ("accept", "*/*")];
+    if !names.is_empty() {
+        h.push(("access-control-request-headers", &names));
+    }
+    let req = NetRequest { method: Method::Options, url, headers: &h, body: &[] };
+    let resp = match client.send_once(&req, lim.max_response_body) {
+        Ok(r) => unwrap_arc(r),
+        Err(e) => return Err(Outcome::Net(bare_net::cause::describe(&*e))),
+    };
+    let fail = |reason: &str| Err(Outcome::Blocked(blocked_text(cors, url, doc, reason)));
+    const PRE: &str = "Response to preflight request doesn't pass access control check: ";
+    if !(200..300).contains(&resp.status) {
+        return fail(&format!("{PRE}It does not have HTTP ok status."));
+    }
+    if let Err(r) = cors_check(&resp.headers, origin_s, cors.include) {
+        return fail(&format!("{PRE}{r}"));
+    }
+    let list = |name: &str| combined(&resp.headers, name).unwrap_or_default();
+    let (methods, allowed) = (list("access-control-allow-methods"), list("access-control-allow-headers").to_ascii_lowercase());
+    let methods: Vec<&str> = methods.split(',').map(str::trim).collect();
+    let allowed: Vec<&str> = allowed.split(',').map(str::trim).collect();
+    let star = !cors.include;
+    if !(methods.contains(&method.as_str()) || matches!(method, Method::Get | Method::Head | Method::Post) || (star && methods.contains(&"*"))) {
+        return fail(&format!("Method {} is not allowed by Access-Control-Allow-Methods in preflight response.", method.as_str()));
+    }
+    for n in names.split(',').filter(|n| !n.is_empty()) {
+        if !(allowed.contains(&n) || (star && allowed.contains(&"*") && n != "authorization")) {
+            return fail(&format!("Request header field {n} is not allowed by Access-Control-Allow-Headers in preflight response."));
+        }
+    }
+    let secs = preflight_max_age(combined(&resp.headers, "access-control-max-age").as_deref());
+    if secs > 0 {
+        let mut c = PREFLIGHTS.lock().unwrap_or_else(|e| e.into_inner());
+        if c.len() >= PREFLIGHT_ENTRIES {
+            c.remove(0);
+        }
+        c.push((key, now + std::time::Duration::from_secs(secs)));
+    }
+    Ok(())
 }
 
 fn unwrap_arc(a: std::sync::Arc<bare_net::http::Response>) -> bare_net::http::Response {
@@ -1777,17 +2056,17 @@ fn unwrap_arc(a: std::sync::Arc<bare_net::http::Response>) -> bare_net::http::Re
 
 fn finish(d: &Dom, it: &mut Interp<'_>, promise: Value, outcome: Outcome) -> R<()> {
     let r = match outcome {
-        Outcome::Failed(_) | Outcome::Net(_) => {
+        Outcome::Failed(_) | Outcome::Net(_) | Outcome::Blocked(_) => {
             let e = it.type_error("Failed to fetch");
             Err(e)
         }
         Outcome::TooBig => return Err(d.lim("fetch-response-body")),
-        Outcome::Done { status, url, redirected, headers, body } => build_response(d, it, status, url, redirected, headers, body),
+        Outcome::Done { status, url, redirected, headers, body, taint } => build_response(d, it, status, url, redirected, headers, body, taint),
     };
     settle(it, promise, r).map(|_| ())
 }
 
-fn build_response(d: &Dom, it: &mut Interp<'_>, status: u16, url: Url, redirected: bool, headers: Vec<(String, String)>, body: Vec<u8>) -> R<Value> {
+fn build_response(d: &Dom, it: &mut Interp<'_>, status: u16, url: Url, redirected: bool, headers: Vec<(String, String)>, body: Vec<u8>, taint: Taint) -> R<Value> {
     let lim = d.fl();
     let mut list = HeaderList::new(Guard::Response);
     for (n, v) in headers {
@@ -1795,10 +2074,10 @@ fn build_response(d: &Dom, it: &mut Interp<'_>, status: u16, url: Url, redirecte
         list.append(&lim, n.to_ascii_lowercase(), v).map_err(|e| d.herr(it, e))?;
     }
     list.guard = Guard::Immutable;
-    let body = (!status_null_body(status)).then(|| Rc::new(body));
+    let body = (!status_null_body(status) && taint != Taint::Opaque).then(|| Rc::new(body));
     d.reserve(it, 2, body.as_ref().map_or(0, |b| b.len()))?;
     let h = d.headers_obj(it, list)?;
-    let r = RespData { c: Common { headers: h, body: Body::new(body) }, status, status_text: String::new(), url: url.to_string(), redirected, ty: "basic", stream: None };
+    let r = RespData { c: Common { headers: h, body: Body::new(body) }, status, status_text: String::new(), url: if taint == Taint::Opaque { String::new() } else { url.to_string() }, redirected, ty: ["basic", "cors", "opaque"][taint as usize], stream: None };
     Ok(Value::Object(d.add_obj(it, Pr::Response, F::Response(r))?))
 }
 
@@ -1931,11 +2210,15 @@ impl Browser {
                 match &outcome {
                     Outcome::Failed(label) => st.diag(&lim, format!("failed: {label} ({})", origin(&task.url))),
                     Outcome::Net(cause) => st.diag(&lim, format!("failed: network error ({}): {cause}", origin(&task.url))),
+                    Outcome::Blocked(_) => st.diag(&lim, format!("failed: blocked by CORS or the request policy ({})", origin(&task.url))),
                     _ => {}
                 }
                 for t in diag {
                     st.diag(&lim, t);
                 }
+            }
+            if let Outcome::Blocked(text) = &outcome {
+                crate::browser_console::push_text(&dom, &mut self.it, crate::browser_console::ConsoleLevel::Error, text);
             }
             if let Some((x, seq)) = task.xhr {
                 self.xhr_deliver(x, seq, outcome)?;

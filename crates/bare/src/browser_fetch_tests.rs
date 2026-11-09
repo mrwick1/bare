@@ -13,9 +13,8 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-fn big<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+pub(crate) fn big<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
     std::thread::Builder::new().stack_size(64 << 20).spawn(f).unwrap().join().unwrap()
 }
 
@@ -30,7 +29,7 @@ pub struct Rec {
 }
 
 impl Rec {
-    fn header(&self, name: &str) -> Vec<String> {
+    pub fn header(&self, name: &str) -> Vec<String> {
         let p = format!("{name}:");
         self.head.lines().filter_map(|l| l.strip_prefix(&p)).map(|v| v.trim().to_string()).collect()
     }
@@ -130,13 +129,13 @@ fn conn(mut s: TcpStream, h: Arc<dyn Fn(&Rec) -> Reply + Send + Sync>, recs: Arc
     }
 }
 
-fn mk(base: Option<String>, limits: FetchLimits) -> Browser {
+pub(crate) fn mk(base: Option<String>, limits: FetchLimits) -> Browser {
     let mut b = Browser::new(tree::parse("<body></body>"), BrowserLimits::default(), EvalLimits { max_steps: 20_000_000, ..Default::default() }, HeapLimits::default()).expect("browser");
     b.configure_fetch(FetchConfig { base_url: base, client: Client::new(), limits }).unwrap();
     b
 }
 
-fn at(port: u16) -> Browser {
+pub(crate) fn at(port: u16) -> Browser {
     mk(Some(format!("http://127.0.0.1:{port}/app/login")), FetchLimits::default())
 }
 
@@ -151,13 +150,13 @@ fn show(b: &mut Browser, r: Result<Value, Error>) -> String {
     }
 }
 
-fn js(b: &mut Browser, src: &str) -> String {
+pub(crate) fn js(b: &mut Browser, src: &str) -> String {
     let r = b.run_script(src);
     show(b, r)
 }
 
 /// Run a script, run the microtasks, then all network tasks. Gives the value of `out.join('|')`.
-fn go(b: &mut Browser, src: &str) -> String {
+pub(crate) fn go(b: &mut Browser, src: &str) -> String {
     let r = js(b, src);
     assert!(!r.starts_with("throw") && !r.starts_with("limit") && !r.starts_with("unsupported"), "{r}");
     b.drain().unwrap();
@@ -370,7 +369,6 @@ fn response_constructor_request_and_clone() {
         for (src, what) in [
             ("new Request('/x', {method:'FOO'}); fetch(new Request('/x', {method:'FOO'}))", "fetch method other than GET, POST, PUT, PATCH, DELETE, HEAD and OPTIONS"),
             ("fetch('/x', {method:'patch'})", "fetch method other than GET, POST, PUT, PATCH, DELETE, HEAD and OPTIONS"),
-            ("new Request('/x', {mode:'no-cors'})", "fetch mode: no-cors (opaque responses)"),
             ("new Request('/x', {redirect:'manual'})", "fetch redirect: manual (opaque redirect responses)"),
             ("new Request('/x', {integrity:'sha256-x'})", "fetch option integrity"),
             ("new Request('/x').body", "Request.body (a request body stream)"),
@@ -498,45 +496,31 @@ fn failures_are_type_errors_with_fixed_text_and_clean_diagnostics() {
 }
 
 #[test]
-fn cross_origin_requests_are_a_gate_before_any_socket() {
+fn a_refused_cross_origin_request_leaks_no_secret_into_the_diagnostics_or_the_console() {
     big(|| {
         let a = serve(|_| ok("{}"));
         let other = serve(|_| ok("{}"));
         let mut b = at(a.port);
         let r = js(&mut b, &format!("fetch('http://127.0.0.1:{}/x?secret=1', {{method:'POST', body:'pw=hunter2', headers:{{Authorization:'Bearer t'}}}})", other.port));
-        assert_eq!(r, "unsupported:fetch to another origin (CORS is not implemented)");
-        for u in ["https://127.0.0.1/x", "http://localhost:1/x", "//127.0.0.1:1/x"] {
-            assert_eq!(js(&mut b, &format!("fetch('{u}')")), "unsupported:fetch to another origin (CORS is not implemented)", "{u}");
+        assert_eq!(r, "object");
+        b.drain().unwrap();
+        while b.pending_fetches() > 0 {
+            b.run_network_tasks(10).unwrap();
         }
+        // The `Authorization` header needs a preflight, and the preflight has no allow header: the request itself never leaves.
+        assert_eq!(other.recs().iter().map(|r| r.method.as_str()).collect::<Vec<_>>(), ["OPTIONS"]);
+        assert!(other.recs()[0].body.is_empty() && other.recs()[0].header("authorization").is_empty());
+        let recs = b.take_console_records();
+        let mut log = b.take_fetch_diagnostics().join("\n");
+        for r in &recs {
+            log += &b.format_console_record(r).unwrap();
+        }
+        assert!(log.contains("CORS") && !log.contains("secret") && !log.contains("hunter2") && !log.contains("/x"), "{log}");
         assert_eq!(js(&mut b, "fetch('ftp://x/y').then(null, function (e) { out2 = e.name; }); typeof out2"), "undefined");
         b.drain().unwrap();
         assert_eq!(js(&mut b, "out2"), "TypeError");
         assert_eq!(b.pending_fetches(), 0);
-        assert_eq!((a.conns.load(SeqCst), other.conns.load(SeqCst)), (0, 0));
-        let d = b.take_fetch_diagnostics().join("\n");
-        assert!(d.contains("cross-origin") && !d.contains("secret") && !d.contains("hunter2") && !d.contains("/x"), "{d}");
-    });
-}
-
-#[test]
-fn a_cross_origin_307_never_forwards_the_body_or_credentials() {
-    big(|| {
-        let target = TcpListener::bind("127.0.0.1:0").unwrap();
-        target.set_nonblocking(true).unwrap();
-        let tp = target.local_addr().unwrap().port();
-        for code in [307, 308, 302, 303] {
-            let srv = serve(move |_| reply(code, &[("Location", &format!("http://127.0.0.1:{tp}/steal"))], b""));
-            let mut b = at(srv.port);
-            let got = go(&mut b, "var out = []; fetch('/login', {method:'POST', body:'pw=hunter2', headers:{Authorization:'Bearer tok', Cookie:'x'}}).then(function () { out.push('ok'); }, function (e) { out.push(e.name + ':' + e.message); });");
-            assert_eq!(got, "TypeError:Failed to fetch", "{code}");
-            assert_eq!(srv.recs().len(), 1);
-            let d = b.take_fetch_diagnostics().join("\n");
-            assert!(d.contains("cross-origin redirect") && !d.contains("steal") && !d.contains("hunter2"), "{d}");
-        }
-        // Keep this window. A connection that the browser made may reach the accept queue after `connect` returns (to verify).
-        // No other event shows it.
-        std::thread::sleep(Duration::from_millis(50));
-        assert!(target.accept().is_err(), "a socket was opened to the other origin");
+        assert_eq!(a.conns.load(SeqCst), 0);
     });
 }
 
@@ -572,7 +556,6 @@ fn update_fetch_base_url_moves_the_origin_for_new_requests_only() {
         b.update_fetch_base_url(&format!("http://127.0.0.1:{}/other/page", c.port)).unwrap();
         // The queued request keeps the origin it was made for.
         js(&mut b, "fetch('/q', {}).then(function (r) { return r.json(); }).then(function (j) { out.push(j); });");
-        assert_eq!(js(&mut b, &format!("fetch('http://127.0.0.1:{}/old')", a.port)), "unsupported:fetch to another origin (CORS is not implemented)");
         b.drain().unwrap();
         b.run_network_tasks(10).unwrap();
         assert_eq!(js(&mut b, "out.join()"), "a,c");
@@ -976,20 +959,6 @@ fn a_forbidden_method_is_a_type_error_and_nothing_is_sent() {
         assert_eq!(js(&mut b, "new Request('/a', {method:'head', body:'x'})"), "throw:TypeError:Request with GET/HEAD method cannot have body.");
         assert_eq!(b.pending_fetches(), 0);
         assert!(srv.recs().is_empty());
-    });
-}
-
-#[test]
-fn a_non_simple_cross_origin_request_is_refused_before_any_socket() {
-    // There is no CORS (and so no preflight) yet: every cross-origin request is `Unsupported`, whatever the method.
-    big(|| {
-        let (a, other) = (method_server(), method_server());
-        let mut b = at(a.port);
-        for m in ["PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"] {
-            let r = js(&mut b, &format!("fetch('http://127.0.0.1:{}/x', {{method:'{m}'}})", other.port));
-            assert_eq!(r, "unsupported:fetch to another origin (CORS is not implemented)", "{m}");
-        }
-        assert_eq!((other.conns.load(SeqCst), other.recs().len()), (0, 0));
     });
 }
 

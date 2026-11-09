@@ -133,7 +133,12 @@ fn https_to_http_and_cross_origin_redirects_send_nothing_further() {
     a.expect(HEAD_END);
     a.take(10);
     a.send(format!("HTTP/1.1 308 Permanent Redirect\r\nLocation: https://localhost:{}/steal\r\nContent-Length: 0\r\n\r\n", b.port).as_bytes());
+    // CORS: the redirect is followed, as in Chrome (a simple POST). `Authorization` does not leave the origin, and the reply has no
+    // allow header, so the page gets an error.
+    let head = String::from_utf8(b.expect(HEAD_END)).unwrap().to_ascii_lowercase();
+    assert!(head.starts_with("post /steal") && head.contains("origin: https://localhost:") && !head.contains("authorization") && !head.contains("cookie"), "{head}");
+    b.take(10);
+    b.send(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
     let got = t.join().unwrap();
-    assert!(got.starts_with(FAILED) && got.contains("cross-origin redirect"), "{got}");
-    nothing_sent(&mut b);
+    assert!(got.starts_with(FAILED) && got.contains("blocked by CORS") && !got.contains("steal") && !got.contains("hunter2"), "{got}");
 }

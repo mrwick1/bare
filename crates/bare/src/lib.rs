@@ -76,6 +76,8 @@ mod browser_streams_tests;
 mod browser_fetch_tests;
 #[cfg(test)]
 mod browser_xhr_tests;
+#[cfg(test)]
+mod browser_cors_tests;
 pub mod browser_navigation;
 mod browser_navigation_params;
 mod browser_navigation_state;
