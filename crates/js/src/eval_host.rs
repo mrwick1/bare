@@ -321,6 +321,12 @@ impl<'p> Interp<'p> {
         self.new_array_from(items)
     }
 
+    /// `array_from` with the prototype `proto` (no later `set_prototype_of`: that sends the array to dictionary mode).
+    pub fn array_from_proto(&mut self, items: &[Value], proto: ObjId) -> Result<Value, Error> {
+        self.charge(items.len() as u64)?;
+        self.new_array_from_proto(items, proto)
+    }
+
     /// Define a data property with all the flags given.
     pub fn define_data(&mut self, o: ObjId, key: PropertyKey, v: Value, writable: bool, enumerable: bool, configurable: bool) -> Result<(), Error> {
         self.def(o, key, v, writable, enumerable, configurable)

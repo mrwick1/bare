@@ -860,10 +860,12 @@ pub(crate) fn children(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -
 
 /// `wrap_all` for the snapshot arrays that stand for a `NodeList` or an `HTMLCollection`: the array inherits from a prototype that has `item`.
 pub(crate) fn wrap_coll(d: &Dom, it: &mut Interp<'_>, ids: &[NodeId]) -> V {
-    let a = wrap_all(d, it, ids)?;
-    let (Value::Object(o), p) = (a, coll_proto(d, it)?) else { return Ok(a) };
-    it.heap.set_prototype_of(o, Some(p)).map_err(|e| it.heap_error(e))?;
-    Ok(a)
+    let mut vals = Vec::with_capacity(ids.len());
+    for &k in ids {
+        vals.push(d.wrap(it, k)?);
+    }
+    let p = coll_proto(d, it)?;
+    it.array_from_proto(&vals, p)
 }
 
 fn coll_proto(d: &Dom, it: &mut Interp<'_>) -> R<ObjId> {
