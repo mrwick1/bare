@@ -121,6 +121,7 @@ dependencies = [
  "icu_locale_fallback",
  "icu_normalizer",
  "icu_plurals",
+ "icu_properties",
  "icu_provider",
  "icu_segmenter",
  "stacker",
@@ -449,10 +450,17 @@ dependencies = [
  "displaydoc",
  "icu_collections",
  "icu_locale_core",
+ "icu_properties_data",
  "icu_provider",
  "zerotrie",
  "zerovec",
 ]
+
+[[package]]
+name = "icu_properties_data"
+version = "2.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b98f29af82d02b163fe50161388350e743bb3107cc8e8c2f7314cb505faddfcf"
 
 [[package]]
 name = "icu_provider"
