@@ -4681,31 +4681,44 @@ Full cost matrix against 94727a6 (805 rows): 0 rows over the limit under both al
 - A page that appends a sheet in a shadow tree between two reads (the key holds the scope, so it goes through the same prefix test; no test covers it).
 - `tools/js/typing/keycost.sh` (no change in `crates/js` or the DOM hot path).
 - The cost matrix on arjun-e16.
+
 ## English number notation, inert documents, and bounded style sources
 
-Status: blocked by the cost gate. Do not merge this branch.
+NumberFormat accepts compact, scientific, and engineering notation. It supports short and long compact labels, English unit styles, and currency names. A Node script generates the English suffix tables. Singular selection reads decimal digits only for unit and currency-name output. It allocates no string. Ordinary decimal, currency-symbol, and percent formatting skip that selection. Existing signDisplay support remains in place.
 
-NumberFormat accepts compact, scientific, and engineering notation. It supports short and long compact labels. It also accepts English unit styles and currency names. A Node script generates the English suffix tables. Existing signDisplay support remains in place. Collator search and collation, number range methods, non-Latin numbering systems, and rounding increments other than one remain gated. The Intl audit found no additional English gates in RelativeTimeFormat, ListFormat, or Segmenter.
+DOMParser parses a string into a detached Document with documentElement, head, body, and selectors. Parsed scripts never run. XMLSerializer uses the existing HTML serializer. Existing innerHTML, outerHTML, and insertAdjacentHTML setters remain in place. XML MIME types use the HTML parser. They do not provide XML case rules, namespace rules, parser errors, or XML serialization.
 
-DOMParser parses a string into a detached Document. The document exposes documentElement, head, body, and selectors. Parsed scripts are marked as already started. XMLSerializer uses the existing HTML serializer. The existing innerHTML, outerHTML, and insertAdjacentHTML setters remain in place. XML MIME types use the HTML parser. They do not provide XML case rules, namespace rules, parser errors, or XML serialization.
+The style collector retains a prefix within its source and byte caps. It drops excess page sources instead of stopping the page. The style plan also drops excess supplied parts during a read. Explicit external-sheet registration retains its caps. The loader regression test checks that scripts run, an admitted sheet applies, and an excess sheet is not fetched.
 
-The style collector retains a prefix within its source and byte caps. It drops excess page sources instead of stopping the page. The style plan also drops excess supplied parts during a read. Explicit external-sheet registration retains its existing caps. An existing loader test still expects the old fatal page limit and fails. The cost stop prevented further code changes.
+### Validation
 
-Validation on archMachine, against baseline a1b7a80258:
+Checks ran on archMachine after rebasing onto dfa0e09.
 
-- The new notation, DOMParser, and shadow-source tests failed before their fixes.
-- Node v22.18.0 matched 21 cases for formatted text and formatToParts. The cases cover notation, units, compound units, currency names, negative values, infinity, and NaN.
-- The workspace runtime tests passed before the final source-limit change. The first workspace command failed at a doctest with E0463. A separate workspace doctest retry passed.
-- A workspace retry hit a 50 ms timing assertion at 55.14 ms. That test passed in isolation.
-- The final library check passed 1114 browser tests and ignored six. It failed stylesheet_discovery_limits_stop_before_scripts, which still expects a fatal source limit. The command stopped before the remaining library suites.
+- The notation, DOMParser, and shadow-source regression tests failed before their fixes. The old loader-limit assertion failed before its update.
+- The full release workspace tests passed, including doctests.
+- Node v22.18.0 matched 21 cases for formatted text and formatToParts. Cases cover notation, units, compound units, currency names, negative values, infinity, and NaN.
 - Test262 passed its gate: 29489 pass, 2594 fail, and 755 skip against the recorded baseline.
 - Exec-diff passed 79 runs with zero differences.
-- Typing cost was 282.5 M and 287.8 M instructions per key. Peak RSS was 32.8 MiB at 20 and 50 keys.
-- The public journey runner passed 31 journeys. It had zero failures and one retried flake. It ran once before the final source-limit change.
-- The full cost matrix measured 805 rows in 218 seconds. Eleven rows exceeded 0.5% under both allocators. No row failed to execute. The largest Intl regression was nf_format 10: glibc +5.671%, jemalloc +5.141%. The branch must not merge under the cost rule.
+- Typing cost was 282.5 M and 287.8 M instructions per key. Peak RSS was 32.9 MiB at 20 keys and 32.6 MiB at 50 keys.
+- The full public run passed 30 journeys and failed Next.js on the existing checkVisibility gate. The isolated Next.js retry passed. Main also needed a retry for that journey.
+- Three nf_format matrix runs against a1b7a80 passed. The size-one row changed by +0.4848% to +0.4851% under glibc. The size-ten row changed by +0.3880% to +0.3881%. No fallback allocator run was required.
+- The full matrix against the shared dfa0e09 baseline passed all 805 rows in 104 seconds. No row exceeded +0.5% under glibc, so no row exceeded the limit under both allocators. No row failed to execute. Mean glibc change was +0.032%.
 
-All three requested sites passed the body-visible check with the built binary. Archive.org needed a 30-second timeout and logged no errors. Lit.dev logged no errors. GitHub logged Unsupported("named group"), then performance.mark is not a function. Those features are outside this task.
+### Layout cost check
 
-Artifacts remain under /data/bare-tmp/intl-*. The cost table is /data/bare-tmp/intl-cost.tsv. The cost report is /data/bare-tmp/intl-cost.log. Site results are under /data/bare-tmp/intl-sites/.
+Direct perf stat measurements used instructions:u, the same tcache setting, and the minimum of three runs per binary and allocator. Each run recorded uptime. The one-minute load ranged from 12.23 to 12.86. A no-layout startup control also ran. The old glibc-only matrix increase did not reproduce.
 
-Not tested: full XML conformance, all Intl option combinations, and site interactions beyond the body-visible checks. The branch was not rebased onto dfa0e09. No PR was opened or merged. The worktree remains for review.
+| Allocator | Row | a1b7a80 | dfa0e09 | New | New versus dfa0e09 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| glibc | block-deep 400 | 3813892 | 3810329 | 3810902 | +0.0150% |
+| glibc | inline-blocks-nested 400 | 5810733 | 5807254 | 5808258 | +0.0173% |
+| jemalloc | block-deep 400 | 7172537 | 7170259 | 7169730 | -0.0074% |
+| jemalloc | inline-blocks-nested 400 | 9479912 | 9476975 | 9476951 | -0.0003% |
+
+These layout cases call RuleSet::add directly. They do not call sources_capped. The bounded-source hunk remains. The measurements do not identify the cause of the earlier cached-count difference.
+
+All three requested sites passed body visible. Archive.org and lit.dev logged no errors. GitHub logged performance.mark is not a function. An earlier run also logged Unsupported("named group"). Those features are outside this task.
+
+Artifacts remain under /data/bare-tmp/intl-*. The final cost table is intl-cost-main.tsv. Direct perf counts and load records are in intl-layout-ab.json. Site results are under intl-sites/.
+
+Not tested: full XML conformance, all Intl option combinations, and site interactions beyond the body-visible checks. Collator search and collation, number range methods, non-Latin numbering systems, and rounding increments other than one remain gated. The audit found no additional English gates in RelativeTimeFormat, ListFormat, or Segmenter.

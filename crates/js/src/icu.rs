@@ -346,7 +346,9 @@ impl Cache {
             }
             d
         });
-        let singular = (f.notation != 3 || exponent == 0) && rounded.as_ref().is_some_and(|d| d.to_string().trim_start_matches('-') == "1");
+        let singular = (f.unit != 255 || (f.style == Style::Currency && f.display == 3))
+            && (f.notation != 3 || exponent == 0)
+            && rounded.as_ref().is_some_and(|d| *d.absolute.magnitude_range().start() == 0 && magnitude(d) == 0 && d.absolute.digit_at(0) == 1);
         let zero = rounded.as_ref().is_some_and(|d| d.absolute.is_zero());
         let sign = f.sign_char(neg, zero || matches!(n, Num::Nan));
         let paren = f.style == Style::Currency && f.accounting && neg && sign.is_some_and(|s| s.1 == "minusSign");
