@@ -325,12 +325,17 @@ pub fn utf16_offset(src: &str, byte: usize) -> usize {
     src[..end].chars().map(char::len_utf16).sum()
 }
 
+/// Latin-1 is fixed: the letters, and the middle dot (ID_Continue only).
+#[inline]
+fn latin1_id(cp: u32, first: bool) -> bool {
+    matches!(cp, 0xAA | 0xB5 | 0xBA | 0xC0..=0xD6 | 0xD8..=0xF6 | 0xF8..=0xFF) || (cp == 0xB7 && !first)
+}
+
 /// Is `cp` (not ASCII) allowed in a name? ID_Start for the first character, ID_Continue after it (plus ZWNJ and ZWJ).
 fn id_char(cp: u32, first: bool) -> bool {
     use icu_properties::{props::{IdContinue, IdStart}, CodePointSetData};
-    // Latin-1 is fixed: the letters, and the middle dot (ID_Continue only).
     if cp < 0x100 {
-        return matches!(cp, 0xAA | 0xB5 | 0xBA | 0xC0..=0xD6 | 0xD8..=0xF6 | 0xF8..=0xFF) || (cp == 0xB7 && !first);
+        return latin1_id(cp, first);
     }
     if first {
         CodePointSetData::new::<IdStart>().contains32(cp)
@@ -631,6 +636,11 @@ impl<'a> Lexer<'a> {
     #[cold]
     #[inline(never)]
     fn unicode_id(&self, at: usize, first: bool) -> Option<usize> {
+        let b = self.src.as_bytes();
+        if b[at] < 0xC4 {
+            // A two-byte character below U+0100 (the lead byte is 0xC2 or 0xC3): no decoding needed.
+            return latin1_id(u32::from(b[at] & 3) << 6 | u32::from(b[at + 1] & 0x3F), first).then_some(2);
+        }
         let ch = self.src[at..].chars().next()?;
         id_char(ch as u32, first).then(|| ch.len_utf8())
     }
