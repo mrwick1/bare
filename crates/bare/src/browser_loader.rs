@@ -534,13 +534,13 @@ fn set_script_type(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V 
     Ok(Value::Undefined)
 }
 
-fn flag(d: &Dom, it: &mut Interp<'_>, this: Value, name: &str) -> V {
+pub(crate) fn flag(d: &Dom, it: &mut Interp<'_>, this: Value, name: &str) -> V {
     let n = d.el(it, this)?;
     let doc = d.doc.borrow();
     Ok(Value::Bool(doc.find_atom(name).and_then(|a| doc.attr(n, a)).is_some()))
 }
 
-fn set_flag(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], name: &str) -> V {
+pub(crate) fn set_flag(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], name: &str) -> V {
     let n = d.el(it, this)?;
     if it.to_js_bool(arg(a, 0))? {
         nd::attr_set(d, it, n, name, "")?;
@@ -564,14 +564,6 @@ fn script_defer(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
 
 fn set_script_defer(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     set_flag(d, it, this, a, "defer")
-}
-
-fn script_no_module(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    flag(d, it, this, "nomodule")
-}
-
-fn set_script_no_module(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    set_flag(d, it, this, a, "nomodule")
 }
 
 /// The listener of an `on...` handler: one per element and event, kept in the normal listener list.
@@ -673,7 +665,7 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
         ("type", script_type, set_script_type),
         ("async", script_async, set_script_async),
         ("defer", script_defer, set_script_defer),
-        ("noModule", script_no_module, set_script_no_module),
+        ("noModule", crate::browser_gaps::script_no_module, crate::browser_gaps::set_script_no_module),
         ("text", script_text, set_script_text),
         ("onload", script_onload, set_script_onload),
         ("onerror", script_onerror, set_script_onerror),

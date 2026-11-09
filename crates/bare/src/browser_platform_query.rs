@@ -16,7 +16,8 @@
 //!   empty result. More than `max_class_tokens` distinct names is a Limit.
 
 use crate::browser::*;
-use crate::browser_dom::{next_in, wrap_coll};
+use crate::browser_dom::next_in;
+use crate::browser_gaps::wrap_coll;
 use crate::browser_platform::{V, arg};
 use bare_html::dom::NodeData;
 use bare_js::eval::Interp;

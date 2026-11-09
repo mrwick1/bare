@@ -52,11 +52,6 @@ use bare_js::value::Value;
 
 type V = R<Value>;
 
-/// `document.hasFocus()`. The page always has system focus (see the header), so this is `true`. It is made at the first read (`browser_handlers::lazy`).
-pub(crate) fn has_focus(_: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
-    Ok(Value::Bool(true))
-}
-
 /// The deepest nest of focus transitions (a listener that moves focus again, and so on).
 const MAX_DEPTH: u8 = 16;
 

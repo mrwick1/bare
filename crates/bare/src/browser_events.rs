@@ -108,7 +108,7 @@ impl Dom {
             e.dispatching = true;
             e.ty.clone()
         };
-        let prev = self.st.borrow_mut().hd.event.replace(ev);
+        let prev = crate::browser_gaps::swap_event(self, Some(ev));
         let r = self.dispatch_inner(it, target, ev, &ty);
         let mut st = self.st.borrow_mut();
         st.hd.event = prev;
