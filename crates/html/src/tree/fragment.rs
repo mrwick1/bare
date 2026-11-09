@@ -9,11 +9,17 @@
 //! When the context is in a `form`, `in_form` is true: the form element pointer is set, so a nested `<form>` start tag is ignored.
 //! A `template` context starts in the "in template" mode, so `<tr>` and `<td>` keep their tags. The host puts the result in the contents of the template.
 //!
+//! Table contexts: "reset the insertion mode appropriately" gives "in table" (`table`), "in table body" (`tbody`, `thead`, `tfoot`), "in row" (`tr`)
+//! and "in column group" (`colgroup`). The builder has these modes only for a template (see the header of `tree.rs`), so the root of the fragment acts
+//! as a template whose template insertion mode is already set to that mode. The rules are the same: in both cases the stack has no table element,
+//! so text is not foster parented and an end tag like `</table>` finds no table in scope. "In cell" (`td`, `th`) and "in caption" (`caption`) differ
+//! from "in body" only for tags that need a cell or a caption on the stack, and the stack of a fragment has none; so these contexts, and `col`, read as "in body".
+//! The 91 html5lib-tests fragment cases with these contexts give the same tree (`html5lib_tests.rs`).
+//!
 //! The scripting flag (`scripting`) is true when the context is in the document of the page. Then a `noscript` start tag, and the context
 //! `noscript`, have raw text. It is false for a context that is a `template` or in the contents of one (an inert document): `noscript` is an element.
 //!
-//! Gates (`Unsupported`, nothing is parsed): the contexts `table`, `thead`, `tbody`, `tfoot`, `tr`, `td`, `th`, `caption`, `colgroup`, `col`, `select`,
-//! `html`, `frameset`, `frame` (the standard needs table insertion modes, the select mode, and the before-head
+//! Gates (`Unsupported`, nothing is parsed): the contexts `select`, `html`, `frameset`, `frame` (the standard needs the select mode, and the before-head
 //! and frameset modes); and every context that is not in the HTML namespace (SVG and MathML
 //! context elements need the adjusted current node of the foreign rules to be the context element). A start tag `frameset` or
 //! `frame` in the input is gated the same way, because the builder would make a tree that a browser does not make. Nested `table` and `select`
@@ -61,7 +67,6 @@ pub struct Fragment {
 /// The reason why this context element (an HTML element, by its lowercase name) is not supported, if it is not.
 pub fn context_gate(name: &str) -> Option<&'static str> {
     Some(match name {
-        "table" | "thead" | "tbody" | "tfoot" | "tr" | "td" | "th" | "caption" | "colgroup" | "col" => "fragment context: table insertion modes",
         "select" => "fragment context: select insertion mode",
         "html" | "frameset" | "frame" => "fragment context: before-head, after-head and frameset insertion modes",
         _ => return None,
@@ -99,10 +104,19 @@ pub fn parse_fragment(
     let mut b = Builder::new();
     let root = b.insert_element("html", &[], true);
     b.mode = Mode::InBody;
-    if context == "template" {
-        // The context is a template: its insertion mode is on the stack of template insertion modes, and the mode is "in template".
-        b.tmpl.push(Tm::Template);
-        b.mode = Mode::InTemplate;
+    // "Reset the insertion mode appropriately" with the context element. A template context is "in template". The table modes reuse the template
+    // insertion modes: the root of the fragment acts as a template whose mode is already set. `td`, `th`, `caption` and `col` read as "in body".
+    let tm = match context {
+        "template" => Some(Tm::Template),
+        "table" => Some(Tm::Table),
+        "tbody" | "thead" | "tfoot" => Some(Tm::TableBody),
+        "tr" => Some(Tm::Row),
+        "colgroup" => Some(Tm::ColGroup),
+        _ => None,
+    };
+    if let Some(tm) = tm {
+        b.tmpl.push(tm);
+        b.mode = super::mode_for(tm);
     }
     b.scripting = scripting;
     if in_form {
@@ -200,8 +214,24 @@ mod tests {
     }
 
     #[test]
+    fn table_contexts_use_the_table_insertion_modes() {
+        assert_eq!(tree("<td>a</td>", "tr"), "| <td>\n|   \"a\"\n");
+        assert_eq!(tree("<tr><td>a", "tbody"), "| <tr>\n|   <td>\n|     \"a\"\n");
+        assert_eq!(tree("<tr><td>a", "thead"), tree("<tr><td>a", "tfoot"));
+        // text in a table goes to the end of the fragment: there is no table to foster parent it before
+        assert_eq!(tree("x<tr>y", "table"), "| \"x\"\n| <tbody>\n|   <tr>\n| \"y\"\n");
+        assert_eq!(tree("<td>a", "table"), "| <tbody>\n|   <tr>\n|     <td>\n|       \"a\"\n");
+        assert_eq!(tree("<col> <div>x</div><col>", "colgroup"), "| <col>\n| \" \"\n| <col>\n");
+        // cells, captions and `col` read as "in body": table parts are ignored
+        for ctx in ["td", "th", "caption"] {
+            assert_eq!(tree("<div>a</div><td>b<tr>", ctx), "| <div>\n|   \"a\"\n| \"b\"\n", "{ctx}");
+        }
+        assert_eq!(tree("<div>a</div>", "col"), "| <div>\n|   \"a\"\n");
+    }
+
+    #[test]
     fn the_gates_refuse_before_parsing() {
-        for name in ["table", "thead", "tbody", "tfoot", "tr", "td", "th", "caption", "colgroup", "col", "select", "html", "frameset", "frame"] {
+        for name in ["select", "html", "frameset", "frame"] {
             assert!(matches!(parse("x", name), Err(FragmentError::Unsupported(_))), "{name}");
         }
         assert!(matches!(parse_fragment("x", "g", Ns::Svg, false, true, &BIG, &mut |_| true), Err(FragmentError::Unsupported(_))));
