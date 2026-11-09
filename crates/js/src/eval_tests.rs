@@ -98,9 +98,9 @@ fn unsupported_is_found_before_anything_runs() {
             Ok(_) => panic!("{src}: accepted"),
         }
     }
-    // Modules are rejected by the parser as Unsupported: they never reach the evaluator.
+    // Module syntax in a classic script is a syntax error. Modules have their own entry point.
     let e = parse_script("import a from 'b'", Limits::default()).unwrap_err();
-    assert_eq!(e.kind, crate::parse::ErrorKind::Unsupported);
+    assert_eq!(e.kind, crate::parse::ErrorKind::Syntax);
 }
 
 #[test]

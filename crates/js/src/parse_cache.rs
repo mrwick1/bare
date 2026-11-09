@@ -17,7 +17,7 @@
 //!   [`MAX_IDLE`] realms. A realm that still runs such a script keeps its own `Rc` of the tree.
 
 use crate::ast::Program;
-use crate::parse::{parse_script_used, Error, ErrorKind, LimitKind, Limits};
+use crate::parse::{parse_module_used, parse_script_used, Error, ErrorKind, LimitKind, Limits};
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
@@ -33,7 +33,7 @@ pub const MAX_IDLE: u64 = 2;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Kind {
     Classic,
-    /// No caller yet: the parser has no module goal. Until it has one, this kind parses with the script grammar.
+    /// The module goal ([`crate::parse::parse_module`]).
     Module,
 }
 
@@ -95,12 +95,13 @@ fn nodes_err(at: u32) -> Error {
 /// `source.len() <= limits.max_source` must be checked first (the realm does it).
 pub fn parse(kind: Kind, source: &str, limits: Limits) -> Result<Rc<Program<'static>>, Error> {
     let fresh = |limits| {
-        let (r, used) = parse_script_used(source, limits);
+        let (r, used) = if kind == Kind::Module { parse_module_used(source, limits) } else { parse_script_used(source, limits) };
         (r.map(|p| Rc::new(p.into_owned())), used)
     };
     let plain = Limits { max_source: limits.max_source, max_nodes: limits.max_nodes, ..Limits::default() };
     if source.len() < MIN_SOURCE || limits != plain {
-        return crate::parse::parse_script(source, limits).map(|p| Rc::new(p.into_owned()));
+        let r = if kind == Kind::Module { crate::parse::parse_module(source, limits) } else { crate::parse::parse_script(source, limits) };
+        return r.map(|p| Rc::new(p.into_owned()));
     }
     let key = (hash(source.as_bytes()), kind);
     let hit = CACHE.with_borrow_mut(|c| {

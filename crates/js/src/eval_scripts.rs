@@ -111,6 +111,10 @@ impl<'p> Interp<'p> {
 
     /// Parse, check and keep a script. On any error nothing is kept.
     fn add_script(&mut self, source: &str) -> Res<usize> {
+        self.add_script_kind(source, crate::parse_cache::Kind::Classic)
+    }
+
+    fn add_script_kind(&mut self, source: &str, kind: crate::parse_cache::Kind) -> Res<usize> {
         if self.scripts.len() >= self.limits.max_scripts {
             return Err(Error::Limit(LimitKind::Scripts));
         }
@@ -121,7 +125,7 @@ impl<'p> Interp<'p> {
         }
         let node_room = self.limits.max_script_nodes.saturating_sub(self.script_nodes);
         let pl = crate::parse::Limits { max_source: per_script_source, max_nodes: node_room.min(u32::MAX as usize) as u32, ..Default::default() };
-        let parsed = match crate::parse_cache::parse(crate::parse_cache::Kind::Classic, source, pl) {
+        let parsed = match crate::parse_cache::parse(kind, source, pl) {
             Ok(p) => p,
             Err(e) => {
                 use crate::parse::{ErrorKind as K, LimitKind as L};
@@ -312,3 +316,4 @@ impl<'p> Interp<'p> {
         }
     }
 }
+

@@ -18,8 +18,7 @@ text:$262.createRealm
 text:$262.detachArrayBuffer
 text:$262.evalScript
 text:$262.IsHTMLDDA
-# The runner loads no modules, so tests that need the module system are skipped (a `module` flag skips a test too).
-dynamic-import
+# The runner loads modules and answers `import()`. These need import attributes (a checked `with` clause), defer or source phase.
 import-attributes
 source-phase-imports
 import-defer

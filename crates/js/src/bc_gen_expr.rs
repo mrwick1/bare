@@ -174,6 +174,7 @@ impl Gen<'_, '_> {
             ExprKind::PrivateMember { .. } | ExprKind::PrivateIn { .. } => Err("private name"),
             ExprKind::NewTarget => Err("new.target"),
             ExprKind::Await(_) | ExprKind::Yield { .. } => Err("await or yield"),
+            ExprKind::ImportCall { .. } | ExprKind::ImportMeta => Err("module syntax"),
             ExprKind::Spread(_) | ExprKind::Hole => Err("spread"),
         }
     }

@@ -11,9 +11,8 @@
 //!   [`Program::number`], [`Program::quasi`] (UTF-16 code units for strings, as JavaScript needs).
 //! - Every node has a byte span. [`Program::location`] turns an offset into a line and UTF-16 column.
 //!
-//! The tree is executable structure: nothing is skipped or kept as opaque source text. Things that
-//! are valid syntax but not supported yet (generators, modules) are parse
-//! errors with [`crate::parse::ErrorKind::Unsupported`]. They never produce a tree.
+//! The tree is executable structure: nothing is skipped or kept as opaque source text. A module has
+//! [`Program::module`]: its code is one synthetic function, and its `import` and `export` declarations are in [`ModuleInfo`].
 //!
 //! Distinctions an executor needs, kept on purpose:
 //! - [`ExprKind::Paren`]: `(a)` is not `a` (name inference, `(a?.b).c`, directive detection).
@@ -247,6 +246,10 @@ pub enum ExprKind {
     /// The whole optional chain `a?.b.c`. Inside, some links have `optional: true`. If a `?.` link finds
     /// `null`/`undefined`, the value of this whole node is `undefined`.
     Chain(ExprId),
+    /// `import(specifier)` or `import(specifier, options)`.
+    ImportCall { arg: ExprId, opts: Option<ExprId> },
+    /// `import.meta`. Only in a module.
+    ImportMeta,
 }
 
 /// A template literal: `n` expressions and `n + 1` pieces. Read with [`Program::template_quasis`] and
@@ -509,6 +512,60 @@ pub enum StmtKind {
     Empty,
     Debugger,
     With { obj: ExprId, body: StmtId },
+    /// `export default expr;` and the anonymous `export default function () {}` / `class {}`. The value is stored in the
+    /// module binding `*default*` and gets the name `default`. Only in a module.
+    ExportDefault(ExprId),
+}
+
+// ---------------------------------------------------------------- modules
+
+/// What an import or a re-export takes from the requested module.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ImportName {
+    /// A named export (`default` for `import d from`).
+    Name(Box<str>),
+    /// The namespace object: `import * as ns`, `export * as ns from`.
+    Namespace,
+}
+
+/// `import {name as local} from 'request'`. `local` is a span of the local binding name.
+#[derive(Clone, Debug)]
+pub struct ImportEntry {
+    pub request: u32,
+    pub name: ImportName,
+    pub local: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExportSource {
+    /// A binding of this module. The span is the local name.
+    Local(Span),
+    /// The value of `export default expr` (the binding `*default*`).
+    Default,
+    /// A re-export: `export {name as x} from 'request'` or `export * as x from 'request'`.
+    Indirect { request: u32, name: ImportName },
+}
+
+/// `export {local as name}`. `name` is the exported name.
+#[derive(Clone, Debug)]
+pub struct ExportEntry {
+    pub name: Box<str>,
+    pub source: ExportSource,
+}
+
+/// The module facts of a [`Program`] parsed with [`crate::parse::parse_module`]. The module code is one synthetic function
+/// ([`ModuleInfo::func`]) whose body is the statement list; the import and export declarations are not statements.
+#[derive(Clone, Debug)]
+pub struct ModuleInfo {
+    pub func: FuncId,
+    /// The module specifiers, in order of first appearance, once each.
+    pub requests: Vec<Box<str>>,
+    pub imports: Vec<ImportEntry>,
+    pub exports: Vec<ExportEntry>,
+    /// Requests of `export * from 'request'`.
+    pub stars: Vec<u32>,
+    /// The module code has an `await` outside every function (the function is then `async`).
+    pub has_tla: bool,
 }
 
 // ---------------------------------------------------------------- program
@@ -520,6 +577,8 @@ pub struct Program<'a> {
     pub body: List<Stmt>,
     /// The script starts with a `"use strict"` directive.
     pub strict: bool,
+    /// Set when the source was parsed as a module (see [`ModuleInfo`]).
+    pub module: Option<Box<ModuleInfo>>,
     pub(crate) exprs: Vec<Expr>,
     pub(crate) stmts: Vec<Stmt>,
     pub(crate) pats: Vec<Pat>,
@@ -594,6 +653,7 @@ impl<'a> Program<'a> {
             source: Cow::Borrowed(source),
             body: List::new(0, 0),
             strict: false,
+            module: None,
             exprs: Vec::new(),
             stmts: Vec::new(),
             pats: Vec::new(),
@@ -617,7 +677,7 @@ impl<'a> Program<'a> {
     pub fn into_owned(self) -> Program<'static> {
         Program {
             source: Cow::Owned(self.source.into_owned()),
-            body: self.body, strict: self.strict, exprs: tight(self.exprs), stmts: tight(self.stmts), pats: tight(self.pats),
+            body: self.body, strict: self.strict, module: self.module, exprs: tight(self.exprs), stmts: tight(self.stmts), pats: tight(self.pats),
             funcs: tight(self.funcs), classes: tight(self.classes), props: tight(self.props), pat_props: tight(self.pat_props),
             templates: tight(self.templates), quasis: tight(self.quasis), decls: tight(self.decls), cases: tight(self.cases),
             catches: tight(self.catches), elems: tight(self.elems), lists: tight(self.lists), marks: self.marks,

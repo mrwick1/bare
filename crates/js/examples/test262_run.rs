@@ -9,13 +9,16 @@
 //! For each test it prints `START path`, then `PASS path`, `FAIL path<TAB>reason` or `SKIP path<TAB>reason`, and flushes.
 //! A process that dies (stack overflow, abort) or hangs leaves a START with no result: the script marks that test and goes on.
 //! Metadata: `flags` (onlyStrict, noStrict, raw, module, async), `includes`, `features`, `negative`. A test with no flag
-//! runs twice, sloppy and strict (`"use strict";` first), and passes when both pass. `module` tests are skipped.
+//! runs twice, sloppy and strict (`"use strict";` first), and passes when both pass. A `module` test runs once as a module
+//! (the harness files run first as classic scripts); the host loads the imported files from the checkout, and `negative`
+//! `phase` is checked (`parse`: loading, `resolution`: linking, `runtime`: evaluation). `import()` loads files the same way.
 //! The realm gets `print` and a small `$262` (see PRELUDE) as non-enumerable globals. BARE_JS_EXEC is not read yet.
 
 use bare_js::eval::*;
 use bare_js::heap::Heap;
 use std::collections::HashMap;
 use std::io::Write;
+use std::path::{Component, Path, PathBuf};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 /// `print` collects the async protocol lines. `$262` has no agent, realm, detach or evalScript (tests that need them are
@@ -33,6 +36,7 @@ struct Meta {
     flags: Vec<String>,
     features: Vec<String>,
     negative: Option<String>,
+    phase: Option<String>,
 }
 
 fn put(m: &mut Meta, key: &str, item: &str) {
@@ -63,6 +67,8 @@ fn meta(src: &str) -> Meta {
                 put(&mut m, &key, i);
             } else if key == "negative" && let Some(v) = t.strip_prefix("type:") {
                 m.negative = Some(v.trim().to_string());
+            } else if key == "negative" && let Some(v) = t.strip_prefix("phase:") {
+                m.phase = Some(v.trim().to_string());
             }
         } else if let Some((k, v)) = line.split_once(':') {
             key = k.trim().to_string();
@@ -76,6 +82,68 @@ fn meta(src: &str) -> Meta {
         }
     }
     m
+}
+
+/// The modules the host has loaded: file path to module id, and back.
+#[derive(Default)]
+struct Graph {
+    ids: HashMap<PathBuf, u32>,
+    paths: HashMap<u32, PathBuf>,
+}
+
+/// A failure while the host loads a module: the engine threw (a parse error), or a file is missing.
+enum Load {
+    Js(Error),
+    Missing(String),
+}
+
+/// `base`/`spec` without `.` and `..` parts.
+fn join(base: &Path, spec: &str) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in base.parent().unwrap_or(Path::new("")).join(spec).components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => { out.pop(); }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Load the module at `path` and the modules that it imports (the files that exist below the checkout).
+fn load(it: &mut Interp, g: &mut Graph, path: &Path) -> Result<u32, Load> {
+    if let Some(&m) = g.ids.get(path) {
+        return Ok(m);
+    }
+    let src = std::fs::read_to_string(path).map_err(|e| Load::Missing(format!("{}: {e}", path.display())))?;
+    let m = it.module_parse(&src, &path.to_string_lossy()).map_err(Load::Js)?;
+    g.ids.insert(path.to_path_buf(), m);
+    g.paths.insert(m, path.to_path_buf());
+    let mut deps = Vec::new();
+    for r in it.module_requests(m) {
+        deps.push(load(it, g, &join(path, &r))?);
+    }
+    it.module_set_requested(m, &deps);
+    Ok(m)
+}
+
+/// Run the jobs and answer the `import()` calls until nothing is left.
+fn pump(it: &mut Interp, g: &mut Graph, script: &Path) -> Result<(), Error> {
+    loop {
+        it.drain_microtasks()?;
+        let reqs = it.take_dynamic_imports();
+        if reqs.is_empty() {
+            return Ok(());
+        }
+        for r in reqs {
+            let from = r.referrer.and_then(|m| g.paths.get(&m).cloned()).unwrap_or_else(|| script.to_path_buf());
+            match load(it, g, &join(&from, &r.specifier)) {
+                Ok(m) => it.finish_dynamic_import(r.promise, m)?,
+                Err(Load::Js(e)) => it.reject_dynamic_import(r.promise, e)?,
+                Err(Load::Missing(msg)) => it.fail_dynamic_import(r.promise, &msg)?,
+            }
+        }
+    }
 }
 
 struct Ctx {
@@ -96,9 +164,6 @@ impl Ctx {
 
     /// Why this test is not run, if it is not.
     fn skipped(&self, m: &Meta, src: &str) -> Option<String> {
-        if m.flags.iter().any(|f| f == "module") {
-            return Some("module".into());
-        }
         for rule in &self.skip {
             let hit = if let Some(f) = rule.strip_prefix("include:") {
                 m.includes.iter().any(|i| i == f)
@@ -112,11 +177,12 @@ impl Ctx {
         None
     }
 
-    fn exec(&mut self, m: &Meta, src: &str, strict: bool) -> Result<(), String> {
+    fn exec(&mut self, m: &Meta, path: &str, src: &str, strict: bool) -> Result<(), String> {
         let raw = m.flags.iter().any(|f| f == "raw");
         let is_async = m.flags.iter().any(|f| f == "async");
+        let module = m.flags.iter().any(|f| f == "module");
         let mut code = String::new();
-        if strict { code.push_str("\"use strict\";\n"); }
+        if strict && !module { code.push_str("\"use strict\";\n"); }
         if !raw {
             let mut files = vec!["assert.js".to_string(), "sta.js".to_string()];
             if is_async { files.push("doneprintHandle.js".into()); }
@@ -126,13 +192,43 @@ impl Ctx {
                 code.push('\n');
             }
         }
-        code.push_str(src);
         let limits = EvalLimits { max_steps: self.steps, max_call_depth: 1000, max_traversal_depth: 512, max_statement_frames: 4096, ..Default::default() };
         let mut it = Interp::realm(Heap::default(), limits).map_err(|e| format!("realm: {e:?}"))?;
         let ctor_name = it.run_script(PRELUDE).map_err(|e| format!("prelude: {e:?}"))?;
-        let outcome = it.run_script(&code);
+        let script = Path::new(&self.root).join(path);
+        let mut g = Graph::default();
+        // `phase` says where a module test failed; a classic test has one phase.
+        let mut phase = "runtime";
+        let outcome = if module {
+            it.run_script(&code).map_err(|e| format!("harness: {e:?}")).and_then(|_| {
+                phase = "parse";
+                // A syntax error in the test file is `parse`; one in a file that it imports is found while the host resolves it.
+                let r = load(&mut it, &mut g, &script).map_err(|l| match l { Load::Js(e) => Ok(e), Load::Missing(msg) => Err(msg) });
+                let root = match r {
+                    Ok(root) => root,
+                    Err(Ok(e)) => {
+                        if g.ids.contains_key(&script) { phase = "resolution"; }
+                        return Ok(Err(e));
+                    }
+                    Err(Err(msg)) => return Err(msg),
+                };
+                phase = "resolution";
+                if let Err(e) = it.module_link(root) { return Ok(Err(e)); }
+                phase = "runtime";
+                let p = match it.module_evaluate(root) { Ok(p) => p, Err(e) => return Ok(Err(e)) };
+                if let Err(e) = pump(&mut it, &mut g, &script) { return Ok(Err(e)); }
+                Ok(match it.promise_status(bare_js::value::Value::Object(p)) {
+                    Some(PromiseStatus::Rejected(v)) => Err(Error::Throw(v)),
+                    Some(PromiseStatus::Pending) if !is_async => return Err("module evaluation did not finish".into()),
+                    _ => Ok(()),
+                })
+            })?
+        } else {
+            code.push_str(src);
+            it.run_script(&code).map(|_| ()).and_then(|_| pump(&mut it, &mut g, &script))
+        };
         let thrown = match outcome {
-            Ok(_) => None,
+            Ok(()) => None,
             Err(Error::Throw(v)) => {
                 let name = it.call(ctor_name, bare_js::value::Value::Undefined, &[v]).map(|n| it.display(n)).unwrap_or_else(|_| "unknown".into());
                 let msg = if matches!(v, bare_js::value::Value::Object(_)) { it.get_str(v, "message") } else { it.display(v) };
@@ -143,6 +239,7 @@ impl Ctx {
             Err(e) => return Err(format!("internal: {e:?}")),
         };
         match (&m.negative, thrown) {
+            (Some(t), Some((name, msg))) if module && m.phase.as_deref().is_some_and(|p| p != phase) => return Err(format!("expected {t} in phase {}, got {name} in {phase}: {msg}", m.phase.as_deref().unwrap_or(""))),
             (Some(t), Some((name, _))) if *t == name => return Ok(()),
             (Some(t), Some((name, msg))) => return Err(format!("expected {t}, got {name}: {msg}")),
             (Some(t), None) => return Err(format!("expected {t}, nothing thrown")),
@@ -162,9 +259,9 @@ impl Ctx {
         let src = std::fs::read_to_string(format!("{}/{path}", self.root)).map_err(|e| format!("read: {e}"))?;
         let m = meta(&src);
         let has = |f: &str| m.flags.iter().any(|x| x == f);
-        let modes: &[bool] = if has("raw") || has("noStrict") { &[false] } else if has("onlyStrict") { &[true] } else { &[false, true] };
+        let modes: &[bool] = if has("module") || has("raw") || has("noStrict") { &[false] } else if has("onlyStrict") { &[true] } else { &[false, true] };
         for &strict in modes {
-            self.exec(&m, &src, strict).map_err(|e| if modes.len() > 1 { format!("{} {e}", if strict { "strict:" } else { "sloppy:" }) } else { e })?;
+            self.exec(&m, path, &src, strict).map_err(|e| if modes.len() > 1 { format!("{} {e}", if strict { "strict:" } else { "sloppy:" }) } else { e })?;
         }
         Ok(())
     }

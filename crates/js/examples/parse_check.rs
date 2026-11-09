@@ -400,6 +400,11 @@ impl<'a> Dump<'a> {
                 self.open("newtarget", sp);
                 self.close();
             }
+            // The script goal never produces these: module code is not dumped.
+            ExprKind::ImportCall { .. } | ExprKind::ImportMeta => {
+                self.open("import", sp);
+                self.close();
+            }
             ExprKind::Await(a) => {
                 self.open("await", sp);
                 self.sp();
@@ -698,6 +703,12 @@ impl<'a> Dump<'a> {
             }
             StmtKind::Debugger => {
                 self.open("debugger", sp);
+                self.close();
+            }
+            StmtKind::ExportDefault(e) => {
+                self.open("exportdefault", sp);
+                self.sp();
+                self.expr(e);
                 self.close();
             }
             StmtKind::With { obj, body } => {

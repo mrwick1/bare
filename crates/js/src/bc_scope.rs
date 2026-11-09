@@ -487,6 +487,7 @@ impl<'p> Interp<'p> {
                 self.sw_stmt(w, body);
             }
             StmtKind::Break(_) | StmtKind::Continue(_) | StmtKind::Empty | StmtKind::Debugger | StmtKind::With { .. } => {}
+            StmtKind::ExportDefault(e) => self.sw_expr(w, e),
             StmtKind::Try { block, handler, finalizer } => {
                 self.sw_stmt(w, block);
                 if let Some(c) = handler {
@@ -606,6 +607,11 @@ impl<'p> Interp<'p> {
             }
             ExprKind::PrivateIn { right, .. } => self.sw_expr(w, right),
             ExprKind::Yield { arg, .. } => arg.into_iter().for_each(|a| self.sw_expr(w, a)),
+            ExprKind::ImportCall { arg, opts } => {
+                self.sw_expr(w, arg);
+                opts.into_iter().for_each(|a| self.sw_expr(w, a));
+            }
+            ExprKind::ImportMeta => {}
         }
     }
 
