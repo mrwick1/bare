@@ -1133,6 +1133,7 @@ impl Browser {
                     Mark::Attr { el, .. } => seed(el),
                     // Only selectors read the form state.
                     Mark::Ui { .. } => {}
+                    Mark::Image { el } => seed(el),
                 }
             }
             let mut out = Change::Same;

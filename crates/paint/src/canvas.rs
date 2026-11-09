@@ -336,6 +336,33 @@ impl<'a> Canvas<'a> {
         }
     }
 
+    /// Draw the picture scaled to fill `r`, inside `clip`: the nearest pixel of the picture for each pixel of the canvas. Not inline: the loop that
+    /// draws a display list is hot, and a page with no picture never gets here.
+    #[inline(never)]
+    pub fn draw_image(&mut self, r: IRect, clip: IRect, (sw, sh, px): &(u32, u32, std::sync::Arc<[u32]>)) {
+        let vis = r.intersect(clip).intersect(self.bounds());
+        let (dw, dh) = ((r.x1 - r.x0) as u64, (r.y1 - r.y0) as u64);
+        if vis.is_empty() || dw == 0 || dh == 0 || px.len() != *sw as usize * *sh as usize {
+            return;
+        }
+        // The source column of each canvas column, taken at the middle of the pixel.
+        let cols: Vec<u32> = (vis.x0..vis.x1).map(|x| ((((x - r.x0) as u64 * 2 + 1) * u64::from(*sw)) / (dw * 2)) as u32).collect();
+        let w = self.width as usize;
+        for y in vis.y0..vis.y1 {
+            let sy = ((((y - r.y0) as u64 * 2 + 1) * u64::from(*sh)) / (dh * 2)) as usize;
+            let src = &px[sy * *sw as usize..(sy + 1) * *sw as usize];
+            let row = &mut self.pixels[y as usize * w + vis.x0 as usize..y as usize * w + vis.x1 as usize];
+            for (d, &c) in row.iter_mut().zip(&cols) {
+                let p = src[c as usize];
+                *d = match p >> 24 {
+                    255 => p,
+                    0 => *d,
+                    a => blend(p, *d, a),
+                };
+            }
+        }
+    }
+
     /// `fill_poly` of the points moved by `(tx, ty)`. Not inline: the loop that draws a display list is hot, and a page with no `<svg>` never gets here.
     #[inline(never)]
     pub fn fill_poly_at(&mut self, pts: &[(f32, f32)], (tx, ty): (i32, i32), color: u32, clip: IRect) {

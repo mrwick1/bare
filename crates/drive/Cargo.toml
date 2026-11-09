@@ -14,4 +14,5 @@ bare-net = { path = "../net" }
 bare-paint = { path = "../paint" }
 
 [dev-dependencies]
+png = "0.18"
 bare-window = { path = "../window" }

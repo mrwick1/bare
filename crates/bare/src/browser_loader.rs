@@ -866,6 +866,11 @@ impl Browser {
         self.dom.fetch.live.get()
     }
 
+    /// How far the document is: 0 parsing, 1 `interactive` (parsed, the blocking scripts ran), 2 `load` ran.
+    pub(crate) fn ready_level(&self) -> u8 {
+        self.dom.scripts.ready.get()
+    }
+
     /// Has `load` run?
     pub(crate) fn loaded(&self) -> bool {
         self.dom.scripts.ready.get() == 2

@@ -626,3 +626,104 @@ mod tests {
         assert_eq!([c.pixel(2, 4), c.pixel(3, 4), c.pixel(7, 4), c.pixel(8, 4), c.pixel(5, 1), c.pixel(5, 8)], [0xff80_8080, 0xffff_ffff, 0xff80_8080, 0xff00_0000, 0xff00_0000, 0xff00_0000]);
     }
 }
+
+/// The text of an SVG file that `bitmap` reads, at most.
+pub const MAX_FILE: usize = 512 << 10;
+/// The sides of the picture that `bitmap` makes, at most. A larger one is refused.
+const MAX_SIDE: f32 = 4096.0;
+
+/// The size of the picture that an `<svg>` element gives: `width` and `height`, else the `viewBox`, else 300 by 150 (SVG 2, "sizing"). One
+/// side with a `viewBox` gives the other by its ratio.
+fn file_size(doc: &Document, root: NodeId) -> Option<(u32, u32)> {
+    let view = attr(doc, root, "viewBox").and_then(|v| {
+        let mut n = v.split(|c: char| c == ',' || c.is_whitespace()).filter(|t| !t.is_empty()).map(|t| t.parse::<f32>().ok());
+        let (_, _, c, d) = (n.next()??, n.next()??, n.next()??, n.next()??);
+        (n.next().is_none() && c > 0.0 && d > 0.0).then_some((c, d))
+    });
+    let (w, h) = (attr(doc, root, "width").and_then(num), attr(doc, root, "height").and_then(num));
+    let (w, h) = match (w, h, view) {
+        (Some(w), Some(h), _) => (w, h),
+        (Some(w), None, Some((c, d))) => (w, w * d / c),
+        (None, Some(h), Some((c, d))) => (h * c / d, h),
+        (None, None, Some(v)) => v,
+        _ => (w.unwrap_or(300.0), h.unwrap_or(150.0)),
+    };
+    ((1.0..=MAX_SIDE).contains(&w) && (1.0..=MAX_SIDE).contains(&h)).then_some((w.round() as u32, h.round() as u32))
+}
+
+/// An SVG file as the pixels of an `<img>`: its width, its height and `0xAARRGGBB` pixels. The shapes are drawn by the painter of an inline
+/// `<svg>` (see above), at the size of the file. The file is put in a page and painted twice, on white and on black: the difference of
+/// the two gives the alpha of each pixel. `None` for a file that is too long, has no `<svg>` or has a side over `MAX_SIDE`.
+pub fn bitmap(text: &str) -> Option<(u32, u32, Vec<u32>)> {
+    use bare_css::cascade::{Origin, RuleSet, Source, UA_CSS};
+    if text.len() > MAX_FILE {
+        return None;
+    }
+    // The XML prolog and the doctype are not HTML: the page starts at the element.
+    let svg = &text[text.find("<svg")?..];
+    let size = {
+        let doc = bare_html::tree::parse(svg);
+        let svg = doc.find_atom("svg")?;
+        let mut stack = vec![doc.root()];
+        let root = loop {
+            let n = stack.pop()?;
+            if matches!(doc.data(n), NodeData::Element { name, .. } if *name == svg) {
+                break n;
+            }
+            stack.extend(doc.children(n));
+        };
+        file_size(&doc, root)?
+    };
+    let shot = |background: &str| {
+        let mut doc = bare_html::tree::parse(&format!("<body style=\"margin:0;font-size:0;line-height:0;background:{background}\">{svg}"));
+        let viewport = (size.0 as f32, size.1 as f32);
+        let mut rules = RuleSet::new(viewport);
+        rules.add(&mut doc, UA_CSS, Origin::UserAgent);
+        for source in bare_css::cascade::sources(&doc, viewport) {
+            if let Source::Inline(text) = source {
+                rules.add(&mut doc, &text, Origin::Author);
+            }
+        }
+        let styles = rules.compute(&doc);
+        let layout = bare_layout::layout(&doc, &styles, viewport);
+        crate::capture(&doc, &styles, &layout, size.0, size.1)
+    };
+    let (white, black) = (shot("#fff"), shot("#000"));
+    let px = white
+        .pixels
+        .iter()
+        .zip(black.pixels.iter())
+        .map(|(&w, &b)| {
+            let c = |p: u32, s: u32| p >> s & 255;
+            let gap = (c(w, 16).saturating_sub(c(b, 16)) + c(w, 8).saturating_sub(c(b, 8)) + c(w, 0).saturating_sub(c(b, 0))) / 3;
+            match 255 - gap.min(255) {
+                0 => 0,
+                a => (a << 24) | ((c(b, 16) * 255 / a).min(255) << 16) | ((c(b, 8) * 255 / a).min(255) << 8) | (c(b, 0) * 255 / a).min(255),
+            }
+        })
+        .collect();
+    Some((size.0, size.1, px))
+}
+
+#[cfg(test)]
+mod file_tests {
+    use super::bitmap;
+
+    #[test]
+    fn an_svg_file_becomes_pixels_with_alpha() {
+        let svg = "<?xml version=\"1.0\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"12\" viewBox=\"0 0 24 12\"><rect x=\"0\" y=\"0\" width=\"12\" height=\"12\" fill=\"#ff0000\"/></svg>";
+        let (w, h, px) = bitmap(svg).unwrap();
+        assert_eq!((w, h, px.len()), (24, 12, 288));
+        assert_eq!(px[5 * 24 + 3], 0xffff_0000);
+        // Outside the rectangle nothing is painted.
+        assert_eq!(px[5 * 24 + 20] >> 24, 0);
+    }
+
+    #[test]
+    fn the_size_comes_from_the_view_box_and_a_bad_file_gives_none() {
+        assert_eq!(bitmap("<svg viewBox=\"0 0 20 10\"><rect width=\"20\" height=\"10\"/></svg>").map(|b| (b.0, b.1)), Some((20, 10)));
+        assert!(bitmap("<svg width=\"5000\" height=\"5\"></svg>").is_none());
+        assert!(bitmap("<p>no</p>").is_none());
+        assert!(bitmap(&format!("<svg>{}</svg>", " ".repeat(super::MAX_FILE))).is_none());
+    }
+}

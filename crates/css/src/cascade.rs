@@ -405,6 +405,8 @@ impl RuleSet {
                 Scopes::at(sc.form, el, doc, out);
             }
             Mark::Ui { .. } => {}
+            // The size of the picture is in the hints of the element.
+            Mark::Image { el } => Scopes::at(Scope::Own, el, doc, out),
         }
         true
     }

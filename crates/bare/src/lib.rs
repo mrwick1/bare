@@ -22,6 +22,7 @@ mod browser_drive;
 mod browser_point;
 mod browser_uievent;
 pub mod page;
+mod images;
 pub mod control;
 #[cfg(test)]
 mod control_tests;

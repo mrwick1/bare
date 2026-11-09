@@ -469,6 +469,9 @@ fn attempt(p: &mut Page, m: &mut Memo, a: &Action, out: Option<&PathBuf>, red: &
             Action::Expect(c) => check(p, m, c)?,
             Action::Shot(name) => {
                 let Some(dir) = out else { return Ok(Some("no --out: not saved".into())) };
+                if p.images_pending() {
+                    return Err(Try::Again(fail("shot", "pictures are loading")));
+                }
                 if !shown(p, red) {
                     return Ok(Some("withheld: a secret is on the page".into()));
                 }

@@ -330,7 +330,7 @@ impl Session {
     }
 
     /// A client that shares the connections of the session.
-    fn fork(&mut self) -> Client {
+    pub(crate) fn fork(&mut self) -> Client {
         let make = &mut self.cfg.client;
         self.client.get_or_insert_with(|| make()).fork()
     }
