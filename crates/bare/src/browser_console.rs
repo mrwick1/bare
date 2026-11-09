@@ -56,7 +56,7 @@
 
 use crate::browser::*;
 use bare_js::eval::{Error, Interp};
-use bare_js::heap::Property;
+use bare_js::heap::{Property, PropertyDescriptor};
 use bare_js::value::{ObjId, PropertyKey, StrId, Value, is_js_space, number_to_string, string_to_number};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
@@ -129,9 +129,21 @@ struct CState {
     dropped: u64,
     /// Open `console.group` levels.
     depth: u8,
+    /// The label tables, made by the first `time` or `count` (most pages never call them; `Dom` stays small).
+    labels: Option<Box<Labels>>,
+}
+
+#[derive(Default)]
+struct Labels {
     /// Start of each running timer (label, scheduler clock in ms).
     timers: HashMap<String, f64>,
     counts: HashMap<String, u64>,
+}
+
+impl CState {
+    fn lab(&mut self) -> &mut Labels {
+        self.labels.get_or_insert_with(Default::default)
+    }
 }
 
 #[derive(Default)]
@@ -274,15 +286,15 @@ fn time(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
     let Some(l) = label(d, it, a.first(), "time")? else { return Ok(Value::Undefined) };
     let now = d.now_ms();
     let mut st = d.console.st.borrow_mut();
-    if st.timers.contains_key(&l) {
+    if st.lab().timers.contains_key(&l) {
         drop(st);
         return say(d, it, ConsoleLevel::Warn, &format!("Timer '{l}' already exists"), &[]);
     }
-    if st.timers.len() >= MAX_LABELS {
+    if st.lab().timers.len() >= MAX_LABELS {
         drop(st);
         return full(d, it, "time");
     }
-    st.timers.insert(l, now);
+    st.lab().timers.insert(l, now);
     Ok(Value::Undefined)
 }
 
@@ -292,7 +304,7 @@ fn time_log_or_end(d: &Dom, it: &mut Interp<'_>, a: &[Value], end: bool) -> R<Va
     let now = d.now_ms();
     let start = {
         let mut st = d.console.st.borrow_mut();
-        if end { st.timers.remove(&l) } else { st.timers.get(&l).copied() }
+        if end { st.lab().timers.remove(&l) } else { st.lab().timers.get(&l).copied() }
     };
     match start {
         Some(t) => say(d, it, ConsoleLevel::Log, &format!("{l}: {:.3} ms", now - t), if end { &[] } else { a.get(1..).unwrap_or_default() }),
@@ -310,11 +322,11 @@ fn time_end(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
 fn count(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
     let Some(l) = label(d, it, a.first(), "count")? else { return Ok(Value::Undefined) };
     let mut st = d.console.st.borrow_mut();
-    if st.counts.len() >= MAX_LABELS && !st.counts.contains_key(&l) {
+    if st.lab().counts.len() >= MAX_LABELS && !st.lab().counts.contains_key(&l) {
         drop(st);
         return full(d, it, "count");
     }
-    let n = st.counts.entry(l.clone()).or_insert(0);
+    let n = st.lab().counts.entry(l.clone()).or_insert(0);
     *n += 1;
     let n = *n;
     drop(st);
@@ -323,15 +335,32 @@ fn count(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
 
 fn count_reset(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
     let Some(l) = label(d, it, a.first(), "countReset")? else { return Ok(Value::Undefined) };
-    let known = d.console.st.borrow_mut().counts.get_mut(&l).map(|n| *n = 0).is_some();
+    let known = d.console.st.borrow_mut().lab().counts.get_mut(&l).map(|n| *n = 0).is_some();
     if known {
         return Ok(Value::Undefined);
     }
     say(d, it, ConsoleLevel::Warn, &format!("Count for '{l}' does not exist"), &[])
 }
 
+/// The global `console` is an accessor until the first read or write (as `CSS`, `crypto` and `Intl`): a page that never reads
+/// it does not pay for 19 functions. The first read makes the object and replaces the accessor with a data property.
 pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     let g = *d.global.get().expect("installed");
+    let f = d.add_fn(it, lazy, "console", 0, false)?;
+    let k = d.key(it, "console")?;
+    let desc = PropertyDescriptor { get: Some(Some(f)), set: Some(Some(f)), enumerable: Some(false), configurable: Some(true), ..Default::default() };
+    it.heap.define_own_property(g, k, &desc).map_err(|e| it.heap_error(e))?;
+    Ok(())
+}
+
+/// The getter (no argument) and the setter (the new value) of the global.
+fn lazy(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
+    let g = *d.global.get().expect("installed");
+    let k = d.key(it, "console")?;
+    if let Some(&v) = a.first() {
+        it.define_data(g, k, v, true, false, true)?;
+        return Ok(Value::Undefined);
+    }
     let console = d.obj(it, it.object_prototype())?;
     for (name, h) in [
         ("log", log as H),
@@ -365,8 +394,8 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
         let tag = d.js_str(it, "console")?;
         it.define_data(console, PropertyKey::Symbol(s), tag, false, false, true)?;
     }
-    let k = d.key(it, "console")?;
-    it.define_data(g, k, Value::Object(console), true, false, true)
+    it.define_data(g, k, Value::Object(console), true, false, true)?;
+    Ok(Value::Object(console))
 }
 
 // ------------------------------------------------------------------------------------------ driver API
@@ -397,9 +426,12 @@ impl Browser {
     /// The text of a record (see the header for the gates). Runs no JavaScript. Returns the text to the caller only.
     pub fn format_console_record(&mut self, r: &ConsoleRecord) -> R<String> {
         let (dom, max) = (self.dom.clone(), self.dom.console.lim.get().max_format_bytes);
+        if r.indent == 0 {
+            return self.it.host_scope(|it| format(&dom, it, &r.args, max));
+        }
         let pad = " ".repeat(2 * r.indent as usize);
         let text = self.it.host_scope(|it| format(&dom, it, &r.args, max.saturating_sub(pad.len())))?;
-        Ok(if pad.is_empty() { text } else { pad + &text })
+        Ok(pad + &text)
     }
 }
 
