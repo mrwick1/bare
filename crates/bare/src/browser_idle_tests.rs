@@ -119,7 +119,7 @@ fn the_callback_count_is_bounded() {
 #[test]
 fn check_visibility_gates_what_the_engine_does_not_model() {
     let mut b = page("<style>.x { content-visibility: auto }</style><div id=a>a</div><div id=h style='display:none'></div>");
-    assert_eq!(js(&mut b, "document.getElementById('a').checkVisibility()"), "unsupported:checkVisibility on a page with content-visibility or display: contents in a style sheet (not modelled)");
+    assert_eq!(js(&mut b, "document.getElementById('a').checkVisibility()"), "true");
     // A box that is certainly absent is false without a guess.
     assert_eq!(js(&mut b, "document.getElementById('h').checkVisibility()"), "false");
     let mut b = page("<div id=a style='display: contents'>a</div>");
@@ -127,4 +127,11 @@ fn check_visibility_gates_what_the_engine_does_not_model() {
     let mut b = page("<svg id=s></svg><select><option id=o></option></select>");
     assert!(js(&mut b, "document.getElementById('s').checkVisibility()").starts_with("unsupported:"));
     assert!(js(&mut b, "document.getElementById('o').checkVisibility()").starts_with("unsupported:"));
+}
+
+#[test]
+fn check_visibility_ignores_auto_unless_requested() {
+    let mut b = page("<div style='content-visibility: auto'><div id=a>visible</div></div>");
+    assert_eq!(js(&mut b, "document.getElementById('a').checkVisibility()"), "true");
+    assert!(js(&mut b, "document.getElementById('a').checkVisibility({contentVisibilityAuto: true})").starts_with("unsupported:"));
 }

@@ -137,6 +137,7 @@ impl IndexedSource for Dom {
         if let Some(r) = crate::browser_nodelist::len(self, owner) {
             return r;
         }
+        if let Some(r) = crate::browser_cssom::len(self, owner) { return r; }
         let t = self.attr.s.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
         let Some(&el) = t.maps.get(&owner) else { return Ok(0) };
         Ok(self.doc.try_borrow().map_err(|_| HeapError::HostUnavailable)?.attr_count(el))
@@ -146,6 +147,7 @@ impl IndexedSource for Dom {
         if let Some(r) = crate::browser_nodelist::item(self, owner, index) {
             return r;
         }
+        if let Some(r) = crate::browser_cssom::item(self, owner, index) { return r; }
         let t = self.attr.s.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
         let Some(&el) = t.maps.get(&owner) else { return Ok(Slot::Absent) };
         let doc = self.doc.try_borrow().map_err(|_| HeapError::HostUnavailable)?;

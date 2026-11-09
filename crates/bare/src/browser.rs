@@ -510,6 +510,7 @@ pub struct Dom {
     pub(crate) style: crate::browser_style::Style,
     /// `getComputedStyle` and its sheet state (`browser_computed.rs`).
     pub(crate) computed: crate::browser_computed::Computed,
+    pub(crate) cssom: crate::browser_cssom::Cssom,
     /// `offsetWidth` and `offsetHeight` (`browser_geometry.rs`).
     pub(crate) geometry: crate::browser_geometry::Geometry,
     /// `document.implementation`, once read (`browser_implementation.rs`). It is also in `fixed`.
@@ -594,6 +595,7 @@ impl Host for Dom {
         self.scripts_roots(out);
         crate::browser_platform::roots(self, out);
         crate::browser_style::roots(self, out);
+        crate::browser_cssom::roots(self, out);
         crate::browser_computed::roots(self, out);
         at::roots(self, out);
         crate::browser_nodelist::roots(self, out);
@@ -711,7 +713,7 @@ impl Host for Dom {
         if (bare_js::heap::LAZY_ALL..u32::MAX).contains(&index) {
             return crate::browser_handlers::lazy(self, it, owner, index == bare_js::heap::LAZY_ALL);
         }
-        if crate::browser_nodelist::fill(self, it, owner, index)? || crate::browser_dataset::fill(self, it, owner)? {
+        if crate::browser_nodelist::fill(self, it, owner, index)? || crate::browser_dataset::fill(self, it, owner)? || crate::browser_cssom::fill(self, it, owner)? {
             return Ok(());
         }
         at::fill(self, it, owner, index)
@@ -746,7 +748,19 @@ fn domexc_codes(name: &str) -> u32 {
     }
 }
 
+#[cold]
+fn install_window(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+    let g = it.global_object();
+    let empty = Value::String(it.heap.intern_str("").map_err(|e| it.heap_error(e))?);
+    for (name, value) in [("frames", Value::Object(g)), ("parent", Value::Object(g)), ("top", Value::Object(g)), ("length", Value::Number(0.0)), ("name", empty)] {
+        let key = d.key(it, name)?;
+        it.define_data(g, key, value, !matches!(name, "top" | "length"), true, name != "top")?;
+    }
+    crate::browser_lazy::install(d, it, &[("screen", window_screen)])
+}
+
 // The virtual display has the default headless dimensions. Viewport resizing does not resize it.
+#[cold]
 fn window_screen(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
     let value = if let Some(&v) = a.first() {
         v
@@ -872,6 +886,7 @@ impl Dom {
                         _ => match doc.atom_str(name) {
                             "iframe" => p.iframe,
                             "link" => p.link,
+                            "style" => crate::browser_cssom::style_proto(self, it)?,
                             "a" | "area" | "template" | "img" | "slot" => crate::browser_elements::proto(self, it, doc.atom_str(name))?,
                             t @ ("audio" | "video") => crate::browser_media::proto(self, it, n, t)?,
                             t @ ("input" | "form" | "button" | "label") => crate::browser_controls::proto_for(self, it, t)?,
@@ -1165,11 +1180,10 @@ impl Dom {
         let docw = self.wrap(it, self.doc.borrow().root())?;
         let Value::Object(docw) = docw else { unreachable!() };
         let _ = self.doc_wrapper.set(docw);
-        for (name, v) in [("window", Value::Object(g)), ("self", Value::Object(g)), ("frames", Value::Object(g)), ("parent", Value::Object(g)), ("top", Value::Object(g)), ("length", Value::Number(0.0)), ("name", Value::String(it.heap.intern_str("").map_err(|e| it.heap_error(e))?)), ("document", Value::Object(docw))] {
+        for (name, v) in [("window", Value::Object(g)), ("self", Value::Object(g)), ("document", Value::Object(docw))] {
             let k = self.key(it, name)?;
-            it.define_data(g, k, v, !matches!(name, "top" | "length"), true, name != "top")?;
+            it.define_data(g, k, v, true, true, true)?;
         }
-        crate::browser_lazy::install(self, it, &[("screen", window_screen)])?;
         crate::browser_navigation::install(self, it)?;
         crate::browser_fetch::install(self, it)?;
         crate::browser_loader::install(self, it)?;
@@ -1206,7 +1220,8 @@ impl Dom {
         crate::browser_media::install(self, it)?;
         crate::browser_img::install(self, it)?;
         crate::browser_custom::install(self, it)?;
-        crate::browser_geom::install(self, it)
+        crate::browser_geom::install(self, it)?;
+        install_window(self, it)
     }
 
     pub(crate) fn define_accessor(&self, it: &mut Interp<'_>, o: ObjId, key: PropertyKey, get: ObjId, set: Option<ObjId>) -> R<()> {
@@ -1492,6 +1507,7 @@ impl Browser {
             plat: Default::default(),
             style: Default::default(),
             computed: Default::default(),
+            cssom: Default::default(),
             geometry: Default::default(),
             implementation: Default::default(),
             parsing_protos: Default::default(),

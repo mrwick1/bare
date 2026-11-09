@@ -912,3 +912,25 @@ fn document_stylesheets_expose_and_edit_style_rules() {
         assert_eq!(js(&mut b, "sheet.deleteRule(0); sheet.cssRules[0].selectorText"), "p");
     });
 }
+
+#[test]
+fn cssom_lists_and_declarations_stay_live() {
+    big(|| {
+        let mut b = browser_with("<style>p { color: red }</style><p id=p>hello</p>", BrowserLimits::default());
+        assert_eq!(js(&mut b, "var sheets=document.styleSheets, sheet=sheets.item(0), rules=sheet.cssRules, first=rules[0]; [sheets===document.styleSheets,sheets.item(1),sheets[1],sheet.href,sheet.ownerNode===document.querySelector('style'),sheet.disabled].join('|')"), "true||||true|false");
+        assert_eq!(js(&mut b, "first.style.color='green'; first.cssText"), "p { color: green; }");
+        assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('p')).color"), "rgb(0, 128, 0)");
+        assert_eq!(js(&mut b, "first.style.setProperty('color','blue'); first.style.getPropertyValue('color')"), "blue");
+        assert_eq!(js(&mut b, "first.style.cssText='color: red'; first.selectorText='#p'; first.cssText"), "#p { color: red; }");
+        assert_eq!(js(&mut b, "sheet.insertRule('@media screen { p { color: blue } }',1); [rules===sheet.cssRules,rules.length,rules.item(1).type].join('|')"), "true|2|4");
+        assert_eq!(js(&mut b, "sheet.deleteRule(0); first.parentStyleSheet"), "null");
+        assert_eq!(js(&mut b, "var el=document.createElement('style'); el.textContent='div { display: block }'; document.head.appendChild(el); sheets.length"), "2");
+        assert_eq!(js(&mut b, "el.remove(); sheets.length"), "1");
+        assert_eq!(js(&mut b, "sheet.disabled=true; sheet.disabled"), "true");
+        assert_eq!(js(&mut b, "sheet.disabled=false; sheet.disabled"), "false");
+        assert!(js(&mut b,"sheet.insertRule('p{}',99)").starts_with("throw:IndexSizeError:"));
+        assert!(js(&mut b,"sheet.insertRule('p{} q{}',0)").starts_with("throw:SyntaxError:"));
+        b.collect(&[]).unwrap();
+        assert_eq!(js(&mut b, "sheet.ownerNode===sheets[0].ownerNode && rules===sheet.cssRules"), "true");
+    });
+}

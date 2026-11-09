@@ -192,7 +192,7 @@ pub(crate) struct Computed {
     kinds: RefCell<IdMap<ObjId, u8>>,
     proto: OnceCell<ObjId>,
     fixed: RefCell<Vec<ObjId>>,
-    ext: RefCell<HashMap<String, Vec<SheetPart>>>,
+    pub(crate) ext: RefCell<HashMap<String, Vec<SheetPart>>>,
     ext_bytes: Cell<usize>,
     /// The driver loads a sheet that a script adds after the task (`Browser::set_pending_sheets`): until then the sheet adds no rules.
     pending_ok: Cell<bool>,
