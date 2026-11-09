@@ -64,9 +64,9 @@
 //! `RuleSet::compute` cannot be interrupted: `computed-objects` (live objects), `computed-nodes` (document nodes at a read: the
 //! engine makes one `u32` per node and up to one style (about 700 bytes) per different style, so this bounds its memory), `computed-sources`
 //! (sheets, and bytes of `<style>` text, `href` and supplied parts that one read uses), `computed-rules` (selectors after the build:
-//! the build is bounded by the bytes), `computed-work` (nodes times rules, or if that is over the cap the styled elements times rules: a loose upper
+//! the build is bounded by the bytes), `computed-work` (nodes times rules, or if that is over `STYLED_FROM` the styled elements times rules: a loose upper
 //! bound, the real work is far smaller because rules are indexed; see `styled_work`), `computed-external` and `computed-external-bytes` (stored external sheets). Steps are charged before the
-//! build and before the compute. Names that the sheets add to the document table are bounded by the sheet bytes and checked against
+//! build and before a full compute (`work / UNITS_PER_STEP`); a restyle charges the elements that it styles; a read that finds the last styles right charges 1. Names that the sheets add to the document table are bounded by the sheet bytes and checked against
 //! `max_names` after the build.
 //!
 //! Pseudo-elements (`getComputedStyle(el, '::before')`): the engine has no pseudo-element cascade. A rule with a pseudo-element in a selector
@@ -215,6 +215,10 @@ pub(crate) fn is_missing_sheet(e: &Error) -> bool {
 }
 /// The kind of a computed declaration that is not of the element: a pseudo-element, or an empty declaration (CSSOM: a string that starts
 /// with a colon and is no pseudo-element).
+/// Above this bound (nodes x (rules + 1)) a full compute is charged by its styled elements, which costs one walk of the tree.
+const STYLED_FROM: u64 = 1 << 20;
+/// Elements x rules that one step stands for (the cap counts them all). Measured: see `docs/decisions.md`.
+const UNITS_PER_STEP: u64 = 4;
 const PSEUDO: u8 = 1;
 const EMPTY: u8 = 2;
 
@@ -468,16 +472,7 @@ impl Dom {
         let elements = match self.computed.elements.get() {
             Some((k, n)) if k == key => n,
             _ => {
-                let (mut n, mut stack) = (0u64, vec![doc.root()]);
-                while let Some(node) = stack.pop() {
-                    n += u64::from(matches!(doc.data(node), NodeData::Element { .. }));
-                    stack.extend(doc.shadow_root(node));
-                    let mut child = doc.last_child(node);
-                    while let Some(c) = child {
-                        stack.push(c);
-                        child = doc.prev_sibling(c);
-                    }
-                }
+                let n = elements_under(doc, doc.root(), u64::MAX);
                 self.computed.elements.set(Some((key, n)));
                 n
             }
@@ -542,12 +537,14 @@ impl Dom {
         }
         let mut cache = self.computed.cache.borrow_mut();
         let built = cache.as_mut().expect("built");
+        // The bound of a full compute: nodes x (rules + 1), or styled elements x (rules + 1) when that is over `STYLED_FROM`. It is the cap
+        // check, and the steps of the full compute below. A read that only restyles charges for the elements that it restyles.
         let mut work = (doc.len() as u64).saturating_mul(built.rules.len() as u64 + 1);
-        if work > l.max_work {
+        if work > STYLED_FROM {
             work = self.styled_work(&doc, built.rules.len());
-            if work > l.max_work {
-                return Err(self.lim("computed-work"));
-            }
+        }
+        if work > l.max_work {
+            return Err(self.lim("computed-work"));
         }
         // The cascade reads only the tree, the attributes, the text, the `set_ui` and `set_states` state (they move
         // `revision`), the hover, active and focus state (`UserState::revision`) and the custom element state. `attach_shadow`
@@ -564,7 +561,6 @@ impl Dom {
             it.charge(1)?;
             return Ok(styles.clone());
         }
-        it.charge(work)?;
         // A read after changes: restyle the cascade of the last read only where the changes reach, as a window frame does.
         let read = want.is_none() && !keep;
         let old = if slot == 0 { built.read.take() } else { None };
@@ -583,6 +579,7 @@ impl Dom {
                 return Ok(styles.clone());
             }
         }
+        it.charge(work / UNITS_PER_STEP + 1)?;
         self.computed.computes.set(self.computed.computes.get() + 1);
         // The cascade of a read keeps what `restyle` needs: the next read after a change updates it.
         let styles = Rc::new(if keep || read { built.rules.compute_kept(&doc) } else { built.rules.compute_for(&doc, want) });
@@ -849,9 +846,36 @@ fn restyle_marks(it: &mut Interp<'_>, rules: &RuleSet, doc: &bare_html::dom::Doc
     if !rules.restyle(doc, styles, &roots, &mut changed) {
         return Ok(None);
     }
-    // What a full cascade charges for each node, for each node whose style changed.
-    it.charge((changed.len() as u64).saturating_mul(rules.len() as u64 + 1))?;
+    // What a full cascade charges for each element, for each element that `RuleSet::restyle` styled: a root that is styled with its
+    // subtree, and the subtree of a root whose style changed. A root with the same style costs one element.
+    let (mut visited, changed_roots) = (0u64, changed.iter().map(|c| c.0).collect::<std::collections::HashSet<_>>());
+    for &(root, subtree) in &roots {
+        visited += elements_under(doc, root, if subtree || changed_roots.contains(&root) { doc.len() as u64 } else { 1 });
+        if visited >= doc.len() as u64 {
+            break;
+        }
+    }
+    it.charge(visited.saturating_mul(rules.len() as u64 / UNITS_PER_STEP + 1))?;
     Ok(Some(changed))
+}
+
+/// The elements in the tree under `node` (the node too), as the cascade walks it: a shadow tree and the light children of its host.
+/// Stops when the count reaches `max`.
+fn elements_under(doc: &bare_html::dom::Document, node: NodeId, max: u64) -> u64 {
+    let (mut n, mut stack) = (0u64, vec![node]);
+    while let Some(node) = stack.pop() {
+        n += u64::from(matches!(doc.data(node), NodeData::Element { .. }));
+        if n >= max {
+            break;
+        }
+        stack.extend(doc.shadow_root(node));
+        let mut child = doc.last_child(node);
+        while let Some(c) = child {
+            stack.push(c);
+            child = doc.prev_sibling(c);
+        }
+    }
+    n
 }
 
 fn required(it: &mut Interp<'_>, a: &[Value], n: usize, name: &str) -> R<()> {
