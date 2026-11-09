@@ -1,0 +1,7 @@
+/* The pictures are relative to this sheet (css/), not to the page. */
+.a { background: #0f0 url(tile.png) no-repeat; }
+.b { background-image: url("tile.png"); background-repeat: repeat-x; background-size: 8px 4px; }
+.c { background: #ff0 url(tile.png) no-repeat right bottom / 20px 10px; }
+.d { background-color: #f00; -webkit-mask-image: url(icon.svg); mask-image: url(icon.svg); mask-repeat: no-repeat; mask-position: center; }
+.e { background-color: #00f; mask: url("icon.svg") no-repeat 100% 0 / 10px 20px; }
+.f { background-color: #0aa; mask-image: url(missing.svg); }
