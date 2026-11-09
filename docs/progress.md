@@ -5264,9 +5264,9 @@ Task: add public journeys for sites that passed survey 5 and had no journey. The
 
 - Runs on another network or from a different region.
 - Content drift: a site redesign can break a journey. Assertions use stable text, but no site is fixed.
-### Named iframe windows and request-local failures
+## Named iframe windows and request-local failures (2026-11-10)
 
-Baseline: origin/main at 44ab2f8e37 (#312).
+The work started from origin/main 44ab2f8e37 (#312). The final rebase is onto origin/main 4f54c0178e (#319). The final cost baseline is 4f54c0178e from base-build.
 
 Window named access now finds attached HTML iframes by name, id or numeric index. frames remains the window. Its length reads the current tree. Document named properties return the iframe element. Existing getElementsByName returns its live NodeList. Renames, moves, duplicate names and removals change the result. contentWindow retains one identity per iframe. Detached iframes return null. Child documents remain inert: no child navigation, script execution, document or service worker was added.
 
@@ -5284,32 +5284,53 @@ After the frame retry fix, the saved Bing page settles. It next reads navigator.
 
 NYTimes again returns HTTP 403 with bare/0.1 headers and with a Chrome User-Agent, navigation Accept and en-US Accept-Language. Both bodies contain a captcha-delivery.com challenge. The tested header changes do not remove the bot block. The server's exact classification rule remains unknown. No bypass was attempted.
 
-Validation and merge hold: the workspace suite passed before the final cold-path changes. After rebasing onto 29ab4eaa02 (#313 and #314), the bare and bare-js library suites passed (1140 and 840 tests; ignored tests remain ignored). All 33 public journeys passed without retries. Test262 passed its baseline gate. The initial execution differential passed all 79 runs. Its later rerun was interrupted when the shared heavy wrapper was deleted; the exact wrapper was recovered from an open process descriptor and restored. No build-slot limit was bypassed.
+### Cost history
 
-The first 805-row matrix found 39 rows over +0.5% under both allocators. Direct perf stat instructions:u for scheduler timers 10 counted 196232438 instructions on the baseline and 197631797 before the structural fixes. nm -S showed a new 0x1e1-byte frame-trace function called on the GC path. Three structural attempts followed: skip frame work on inactive realms and remove the extra named-read dispatch; defer iframe and DocumentType accessor registration; then use a one-pointer OnceCell container for cold frame state. The new container has a compile-time pointer-size assertion. Existing Value, Property and Object size assertions still pass. No field was added to those VM structures.
+The first 805-row matrix against 29ab4eaa02 found 39 rows over +0.5% under both allocators. Three structural attempts followed: skip frame work on inactive realms and remove the extra named-read dispatch; defer iframe and DocumentType accessor registration; then use a one-pointer OnceCell container for cold frame state. The container has a compile-time pointer-size assertion. Existing Value, Property and Object size assertions still pass. No field was added to those VM structures. After these attempts, a 122-row recheck still had 17 rows over under both allocators and 3 rows over under one. Most of those rows had a near-constant offset: about +122,000 instructions under glibc and +155,000 under jemalloc for each process.
 
-The final recheck covers 122 affected rows against the fresh 29ab4eaa02 baseline. It includes every row flagged by the initial matrix, the changed API paths and GC/churn rows. Seventeen still exceed +0.5% under both allocators. Three more exceed the limit under one allocator. Timers 10 remains +0.534% glibc and +0.531% jemalloc. Large dataset rows now stay below +0.04%. Hypothesis: the remaining low-workload deltas include code-generation or startup-layout effects; their exact causes are not proved. They are not waived. The three-attempt cap is reached. The PR must remain unmerged. The worktree is retained.
+### Final cost check
 
-| Row over both allocators | glibc | jemalloc |
+The branch was rebased twice: onto 2e79fbe0d1 (#315 and #316), then onto 4f54c0178e (#318 and #319). Conflicts were in fill_indexed, define_window, the lazy global name list, the navigation tests and this file. Both sides were kept. No other code changed. For each rebase both trees were built fresh: BASE with base-build into a new directory, so its cost cache was empty; NEW in /data/bare-tmp/site-js-errors-3/target. archMachine load average was 13 to 23 during the runs.
+
+On 2e79fbe0d1, the 20 earlier rows ran 3 times with -J and no row was over +0.5% under either allocator. The full matrix had 0 rows over. On 4f54c0178e, the same 20 rows ran 3 times with -J (both allocators on every row). No row is over +0.5% under either allocator in any run. The table shows the largest change of the three runs on 4f54c0178e.
+
+| Earlier flagged row | glibc max | jemalloc max |
 | --- | ---: | ---: |
-| `examples/fetch_load post 1` | +0.650% | +0.704% |
-| `examples/fetch_load bytes 1` | +0.982% | +0.878% |
-| `examples/fragment_load replace 1` | +0.598% | +0.651% |
-| `examples/interact_load churn 1` | +1.066% | +0.877% |
-| `examples/loader_load blocking 1` | +1.177% | +0.928% |
-| `examples/loader_load blocking 10` | +0.698% | +0.650% |
-| `examples/loader_load dynamic 1` | +0.930% | +0.781% |
-| `examples/loader_load mixed 1` | +0.984% | +0.813% |
-| `examples/revive_load gc 1` | +2.553% | +1.384% |
-| `examples/scheduler_load messages 1` | +0.554% | +0.549% |
-| `examples/scheduler_load timers 10` | +0.534% | +0.531% |
-| `examples/streams_load churn 1` | +0.580% | +0.572% |
-| `examples/stringify_load gc 1` | +2.510% | +1.360% |
-| `examples/resources_load small 1` | +1.844% | +1.107% |
-| `examples/dataset_load read 1000 1` | +0.670% | +0.703% |
-| `examples/dataset_load write 1000 1` | +0.544% | +0.557% |
-| `examples/dataset_load keys 1000 1` | +0.642% | +0.583% |
+| `examples/dataset_load keys 1000 1` | +0.006% | +0.011% |
+| `examples/dataset_load read 1000 1` | +0.053% | +0.050% |
+| `examples/dataset_load write 1000 1` | -0.011% | +0.014% |
+| `examples/fetch_load bytes 1` | +0.101% | +0.043% |
+| `examples/fetch_load post 1` | -0.058% | -0.089% |
+| `examples/fragment_load deep 1` | +0.087% | +0.010% |
+| `examples/fragment_load replace 1` | +0.300% | +0.251% |
+| `examples/interact_load churn 1` | -0.002% | -0.002% |
+| `examples/loader_load blocking 10` | +0.269% | +0.211% |
+| `examples/loader_load blocking 1` | +0.093% | +0.057% |
+| `examples/loader_load dynamic 1` | +0.072% | +0.051% |
+| `examples/loader_load mixed 1` | +0.059% | +0.023% |
+| `examples/navigation_load route 1` | +0.324% | +0.310% |
+| `examples/resources_load small 1` | -0.036% | +0.184% |
+| `examples/revive_load gc 1` | -0.003% | +0.002% |
+| `examples/scheduler_load messages 1` | -0.063% | -0.053% |
+| `examples/scheduler_load timers 10` | -0.156% | -0.142% |
+| `examples/streams_load churn 1` | +0.014% | +0.007% |
+| `examples/stringify_load gc 1` | +0.018% | +0.004% |
+| `examples/style_load churn 1` | -0.183% | -0.160% |
 
-Final functional checks: 1140 bare library tests pass after the last structural change. The restored execution differential passes all 79 runs with zero differences. Typing costs are 282.2 M instructions per textarea key and 287.5 M per React input key. Peak RSS is 33.2 MiB at 20 keys and 33.0 MiB at 50 keys. The final BBC probe reaches document completion and logs no script exception during 30 seconds; network failures remain. Earlier requests reached the Scripts budget. This variation does not prove that image placeholders render correctly. Guardian reaches eval and failed telemetry fetches. Bing retains the captured dependency-order exceptions, then the service-worker and autosuggest errors. NYTimes remains HTTP 403.
+The constant offset is gone. Fresh counts of revive_load gc 1 (glibc, without env) are 4,586,466 on the 29ab4eaa02 base binary, 4,586,242 on the 2e79fbe0d1 base binary and 4,586,314 on NEW after the first rebase. The cached 29ab4eaa02 count (4,801,000, with env) still matches a fresh count of that binary (4,797,026). So the earlier offset was on the NEW binary of 7e25ee22, not on the base. The exact source of that offset is not proven. That binary was overwritten by the rebuild and was not measured again.
 
-Not tested: actual Chrome execution, BBC placeholder pixels, iframe child navigation or scripts, stream upload buffering, and the exact later Bing autosuggest expression. Prototype-only iframe member access before the first iframe activation remains a deviation of the deferred registration. The cost gate remains failed. Do not merge this branch or remove its worktree.
+Full matrix after the final rebase onto 4f54c0178e: 805 rows in 126 s. Over under both allocators: 0. Over under one allocator: 0. Failed: 0. Mean change: glibc -0.001%. No row reached the jemalloc rerun. The largest glibc changes are fragment_load replace 10 (+0.417%), web_apis_load clone 10 (+0.382%), web_apis_load clone 1 (+0.373%) and navigation_load route 10 (+0.371%). No exception was used.
+
+### Final checks
+
+All checks ran on the final rebase onto 4f54c0178e.
+
+- cargo test --release --workspace: 3,307 passed, 0 failed, 13 ignored.
+- test262_check: gate ok. Six directories have newly passing tests.
+- exec_diff: 79 runs in tree, auto and byte modes. Differences: 0.
+- keycost: 282.5 M instructions for each textarea key and 287.9 M for each input key. Peak RSS is 33.2 MiB at 20 keys and at 50 keys.
+- tools/drive/public/run.sh: 48 pass, 0 fail, 0 known, 0 skip, 0 flakes.
+
+Site state from before the rebase: the BBC probe reaches document completion with no script exception during 30 seconds; network failures remain. Guardian reaches eval and failed telemetry fetches. Bing keeps the captured dependency-order exceptions, then the service-worker and autosuggest errors. NYTimes remains HTTP 403. These site probes were not repeated after the rebase.
+
+Not tested: actual Chrome execution, BBC placeholder pixels, iframe child navigation or scripts, stream upload buffering, the exact later Bing autosuggest expression, and the live site probes after the final rebase. Prototype-only iframe member access before the first iframe activation remains a deviation of the deferred registration.
