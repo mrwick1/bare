@@ -7,6 +7,7 @@ pub mod parse_cache;
 pub mod value;
 pub mod date;
 pub mod tz;
+mod tz_names;
 pub mod intl;
 mod intl_data;
 mod intl_num_data;

@@ -14,9 +14,11 @@
 //   ignored, as for a locale that does not have them).
 // - Time zones: IANA names from the system tzdata, offsets (`+05:30`), and the UTC names. With no `timeZone`, the zone of the
 //   system: `TZ`, else the target of `/etc/localtime`, else UTC. `Interp::set_default_time_zone` replaces it (tests).
+// - `timeZoneName` (all six values) and the full and long time styles: the names are in `tz_names.rs` (a table of common zones,
+//   the offset form for the others). `fractionalSecondDigits` (1 to 3) when the pattern has seconds.
 //
-// Gates (Unsupported): the options `era`, `dayPeriod`, `fractionalSecondDigits` and `timeZoneName`; a time zone name in a
-// `full` or `long` time style; a year before 1; a locale with an extension (`-u-`, `-x-`); a subclass of DateTimeFormat;
+// Gates (Unsupported): the options `era` and `dayPeriod`; `fractionalSecondDigits` without `second`; a calendar other than
+// `gregory` and a numbering system other than `latn` that ICU knows; a year before 1; a locale with an extension (`-u-`, `-x-`); a subclass of DateTimeFormat;
 // `formatRange`, the other Intl constructors and the local-time methods of Date stay absent or gated as before.
 //
 // Known deviations: `resolvedOptions().timeZone` is the name as given (the current spec), where V8 gives the old ICU name for
@@ -29,6 +31,7 @@
 use crate::icu;
 use crate::intl;
 use crate::tz::{self, Zone};
+use crate::tz_names;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum IntlFn {
@@ -87,6 +90,10 @@ struct Dtf {
     styles: (u8, u8),
     zone_name: Rc<str>,
     zone: Rc<Zone>,
+    /// The kind of the time zone name plus one (`tz_names`), 0 for none: the option `timeZoneName`, or the style.
+    zn: u8,
+    /// `fractionalSecondDigits`, 0 for none.
+    fsd: u8,
     /// The bound `format` function, made by the first `format` read.
     bound: Option<ObjId>,
 }
@@ -228,6 +235,17 @@ fn option_index(name: &str) -> Option<usize> {
         _ => return None,
     })
 }
+
+/// The calendars and numbering systems of ICU other than `gregory` and `latn`. bare formats only those two and ignores an
+/// unknown name, as V8 does.
+static NON_GREGORY: [&str; 17] = [
+    "buddhist", "chinese", "coptic", "dangi", "ethioaa", "ethiopic", "hebrew", "indian", "islamic", "islamic-civil", "islamic-rgsa",
+    "islamic-tbla", "islamic-umalqura", "iso8601", "japanese", "persian", "roc",
+];
+static NON_LATN: [&str; 20] = [
+    "arab", "arabext", "beng", "deva", "fullwide", "gujr", "guru", "hanidec", "khmr", "knda", "laoo", "mlym", "mong", "mymr", "orya",
+    "tamldec", "telu", "thai", "tibt", "adlm",
+];
 
 /// Steps charged for each zone file read.
 const ZONE_READ_STEPS: u64 = 10_000;
@@ -497,6 +515,21 @@ impl<'p> Interp<'p> {
         }
     }
 
+    /// GetNumberOption of `fractionalSecondDigits`: 0 when absent, else an integer 1 to 3 (a RangeError otherwise).
+    fn intl_fsd(&mut self, opts: Option<Value>) -> Res<u8> {
+        let Some(o) = opts else { return Ok(0) };
+        let k = self.intl_key("fractionalSecondDigits")?;
+        let v = self.get_prop_nat(o, k)?;
+        if matches!(v, Value::Undefined) {
+            return Ok(0);
+        }
+        let n = self.coerce_number(v)?;
+        if !(1.0..=3.0).contains(&n) {
+            return Err(self.range_error("fractionalSecondDigits value is out of range."));
+        }
+        Ok(n.floor() as u8)
+    }
+
     /// GetOption for any string (calendar, numberingSystem, timeZone): `None` when absent.
     fn intl_opt_str(&mut self, opts: Option<Value>, name: &str) -> Res<Option<String>> {
         let Some(o) = opts else { return Ok(None) };
@@ -567,11 +600,16 @@ impl<'p> Interp<'p> {
         };
         self.intl_opt(opts, "localeMatcher", &["lookup", "best fit"])?;
         for name in ["calendar", "numberingSystem"] {
-            if let Some(s) = self.intl_opt_str(opts, name)?
-                && !s.split('-').all(|p| (3..=8).contains(&p.len()) && p.bytes().all(|c| c.is_ascii_alphanumeric()))
-            {
-                let what = if name == "calendar" { "calendar" } else { "numberingSystem" };
-                return Err(self.range_error(&format!("Invalid {what} : {s}")));
+            if let Some(s) = self.intl_opt_str(opts, name)? {
+                if !s.split('-').all(|p| (3..=8).contains(&p.len()) && p.bytes().all(|c| c.is_ascii_alphanumeric())) {
+                    return Err(self.range_error(&format!("Invalid {name} : {s}")));
+                }
+                // a calendar or a numbering system that ICU has and bare has not: V8 would use it
+                let known: &[&str] = if name == "calendar" { &NON_GREGORY } else { &NON_LATN };
+                let lower = s.to_ascii_lowercase();
+                if known.contains(&lower.as_str()) {
+                    return Err(unsupported(if name == "calendar" { "Intl.DateTimeFormat calendar other than gregory" } else { "Intl.DateTimeFormat numberingSystem other than latn" }, Span::default()));
+                }
             }
         }
         let hour12 = match opts {
@@ -607,17 +645,17 @@ impl<'p> Interp<'p> {
         r.hour = num(self.intl_opt(opts, "hour", &WIDTHS_NUM)?);
         r.minute = num(self.intl_opt(opts, "minute", &WIDTHS_NUM)?);
         r.second = num(self.intl_opt(opts, "second", &WIDTHS_NUM)?);
-        if self.intl_opt_str(opts, "fractionalSecondDigits")?.is_some() {
-            return Err(unsupported("Intl.DateTimeFormat option fractionalSecondDigits", Span::default()));
-        }
-        if self.intl_opt(opts, "timeZoneName", &["short", "long", "shortOffset", "longOffset", "shortGeneric", "longGeneric"])?.is_some() {
-            return Err(unsupported("Intl.DateTimeFormat option timeZoneName", Span::default()));
-        }
+        let fsd = self.intl_fsd(opts)?;
+        let zn = self.intl_opt(opts, "timeZoneName", &tz_names::KINDS)?.map_or(0, |i| i as u8 + 1);
+        r.zone = zn != 0;
         self.intl_opt(opts, "formatMatcher", &["basic", "best fit"])?;
         r.date_style = num(self.intl_opt(opts, "dateStyle", &STYLES)?);
         r.time_style = num(self.intl_opt(opts, "timeStyle", &STYLES)?);
+        if fsd != 0 && r.second == 0 && r.date_style == 0 && r.time_style == 0 {
+            return Err(unsupported("Intl.DateTimeFormat: fractionalSecondDigits without second", Span::default()));
+        }
         let mut time_defaulted = false;
-        let explicit = r.weekday | r.year | r.month | r.day | r.hour | r.minute | r.second != 0;
+        let explicit = r.weekday | r.year | r.month | r.day | r.hour | r.minute | r.second | zn | fsd != 0;
         if r.date_style != 0 || r.time_style != 0 {
             if explicit {
                 return Err(self.type_err("Invalid option : option"));
@@ -646,8 +684,14 @@ impl<'p> Interp<'p> {
         if time_defaulted {
             r.hc = [1, 1, 2, 2][r.hc as usize];
         }
+        // a time style of full or long writes the long or the short name
+        let zn = match r.time_style {
+            1 => tz_names::LONG + 1,
+            2 => tz_names::SHORT + 1,
+            _ => zn,
+        };
         let pat = intl::resolve(loc, &r);
-        Ok(Dtf { loc, pat, styles: (r.date_style, r.time_style), zone_name, zone, bound: None })
+        Ok(Dtf { loc, pat, styles: (r.date_style, r.time_style), zone_name, zone, zn, fsd, bound: None })
     }
 
     /// The formatter of `this`, or the TypeError of V8. V8 names `unwrap` (when given) for an object receiver: its legacy
@@ -669,9 +713,10 @@ impl<'p> Interp<'p> {
         let local = t + d.zone.offset(secs) as f64 * 1000.0;
         let f = date::fields(local).ok_or_else(|| self.range_error("Invalid time value"))?;
         let mut out = String::new();
-        match intl::format(d.loc, d.pat, &f, &mut out, parts) {
+        let name = if d.zn == 0 { String::new() } else { tz_names::name(&d.zone_name, d.zone.offset(secs), d.zn - 1, d.loc) };
+        match intl::format(d.loc, d.pat, &f, &intl::Extras { zone: &name, fsd: d.fsd }, &mut out, parts) {
             Ok(()) => Ok(out),
-            Err(intl::Gate::ZoneName) => Err(unsupported("Intl.DateTimeFormat: a time zone name (timeStyle full or long)", Span::default())),
+            Err(intl::Gate::ZoneName) => Err(unsupported("Intl.DateTimeFormat: a pattern letter that bare cannot format", Span::default())),
             Err(intl::Gate::Era) => Err(unsupported("Intl.DateTimeFormat: a year before 1 (an era)", Span::default())),
         }
     }
@@ -781,6 +826,12 @@ impl<'p> Interp<'p> {
                 if d.styles == (0, 0) {
                     for (n, v) in fields {
                         props.push((n, self.str_value(v)?));
+                    }
+                    if d.fsd != 0 {
+                        props.push(("fractionalSecondDigits", Value::Number(d.fsd as f64)));
+                    }
+                    if d.zn != 0 {
+                        props.push(("timeZoneName", self.str_value(tz_names::KINDS[d.zn as usize - 1])?));
                     }
                 } else {
                     if d.styles.0 != 0 {

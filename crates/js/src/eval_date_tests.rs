@@ -448,11 +448,11 @@ fn local_time_zone_names_and_offsets_in_text() {
         assert_eq!(out(&mut it, "new Date(0).toString()"), "string:Thu Jan 01 1970 00:00:00 GMT+0000 (Coordinated Universal Time)");
         let mut it = realm();
         it.set_default_time_zone("Asia/Kolkata").unwrap();
-        assert_eq!(out(&mut it, "new Date(0).toString()"), "string:Thu Jan 01 1970 05:30:00 GMT+0530 (GMT+05:30)");
-        assert_eq!(out(&mut it, "new Date(0).toTimeString()"), "string:05:30:00 GMT+0530 (GMT+05:30)");
+        assert_eq!(out(&mut it, "new Date(0).toString()"), "string:Thu Jan 01 1970 05:30:00 GMT+0530 (India Standard Time)");
+        assert_eq!(out(&mut it, "new Date(0).toTimeString()"), "string:05:30:00 GMT+0530 (India Standard Time)");
         let mut it = realm();
         it.set_default_time_zone("America/New_York").unwrap();
-        assert_eq!(out(&mut it, "new Date(1e12).toString()"), "string:Sat Sep 08 2001 21:46:40 GMT-0400 (GMT-04:00)");
+        assert_eq!(out(&mut it, "new Date(1e12).toString()"), "string:Sat Sep 08 2001 21:46:40 GMT-0400 (Eastern Daylight Time)");
     });
 }
 

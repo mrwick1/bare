@@ -12,7 +12,7 @@ fn req() -> Request {
 
 fn text(loc: u8, r: &Request, t: &Fields) -> Result<String, Gate> {
     let mut s = String::new();
-    format(loc, resolve(loc, r), t, &mut s, None).map(|_| s)
+    format(loc, resolve(loc, r), t, &Extras::default(), &mut s, None).map(|_| s)
 }
 
 #[test]
@@ -79,8 +79,8 @@ fn parts_keep_the_narrow_space_and_strings_do_not() {
     let p = resolve(us, &r);
     let t = fields(2024, 0, 5, 0, 4, 0, 5);
     let (mut a, mut b, mut parts) = (String::new(), String::new(), Vec::new());
-    format(us, p, &t, &mut a, None).unwrap();
-    format(us, p, &t, &mut b, Some(&mut parts)).unwrap();
+    format(us, p, &t, &Extras::default(), &mut a, None).unwrap();
+    format(us, p, &t, &Extras::default(), &mut b, Some(&mut parts)).unwrap();
     assert_eq!(a, "12:04 AM");
     assert_eq!(b, "12:04\u{202f}AM");
     let kinds: Vec<Part> = parts.iter().map(|p| p.0).collect();
@@ -118,7 +118,4 @@ fn gates_stop_what_bare_cannot_print() {
     let mut r = req();
     r.year = NUMERIC;
     assert_eq!(text(us, &r, &fields(0, 0, 1, 0, 0, 0, 6)), Err(Gate::Era));
-    let mut r = req();
-    (r.time_style, r.hc) = (1, 1);
-    assert_eq!(text(us, &r, &fields(2024, 0, 1, 0, 0, 0, 1)), Err(Gate::ZoneName));
 }

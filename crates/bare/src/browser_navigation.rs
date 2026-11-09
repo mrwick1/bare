@@ -507,14 +507,9 @@ fn doc_domain(d: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
     d.js_str(it, &s)
 }
 
-/// Relaxing the origin is gone from browsers (origin-keyed agent clusters). A value that is the host is a no-op; any other value is refused.
-fn doc_set_domain(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
-    let v = pr::usv(d, it, arg(a, 0))?;
-    let cur = d.cur_rec()?;
-    if v.eq_ignore_ascii_case(&cur.hostname()) {
-        return Ok(Value::Undefined);
-    }
-    Err(d.dom_err(it, "SecurityError", "Failed to set the 'domain' property on 'Document': changing the domain is not supported."))
+/// Relaxing the origin is gone from browsers (origin-keyed agent clusters). Like Chrome, the setter ignores any value.
+fn doc_set_domain(_: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
+    Ok(Value::Undefined)
 }
 
 fn win_origin(d: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {

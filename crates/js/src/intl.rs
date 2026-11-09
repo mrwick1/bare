@@ -37,6 +37,16 @@ pub struct Request {
     pub date_style: u8,
     pub time_style: u8,
     pub hc: u8,
+    /// A `timeZoneName` option: the name goes after the fields.
+    pub zone: bool,
+}
+
+/// What `format` writes besides the fields: the text of the time zone name (a `timeStyle` full or long, or the option
+/// `timeZoneName`) and `fractionalSecondDigits` (0 for none).
+#[derive(Clone, Copy, Default)]
+pub struct Extras<'a> {
+    pub zone: &'a str,
+    pub fsd: u8,
 }
 
 /// A resolved pattern: one pattern, or a date pattern, a joiner and a time pattern.
@@ -46,6 +56,8 @@ pub struct Pattern {
     second: u16,
     /// 0: `first` only, 1: ", ", 2: " at "
     join: u8,
+    /// What goes before the time zone name that follows the pattern: 0 no name, 1 " ", 2 ", ", 3 " at ".
+    zone: u8,
 }
 
 /// The type of a part, in the order of `PART_NAMES`.
@@ -60,14 +72,17 @@ pub enum Part {
     Hour,
     Minute,
     Second,
+    TimeZoneName,
+    FractionalSecond,
 }
 
-pub const PART_NAMES: [&str; 9] = ["literal", "weekday", "year", "month", "day", "dayPeriod", "hour", "minute", "second"];
+pub const PART_NAMES: [&str; 11] =
+    ["literal", "weekday", "year", "month", "day", "dayPeriod", "hour", "minute", "second", "timeZoneName", "fractionalSecond"];
 
 /// What a pattern cannot format yet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Gate {
-    /// A time zone name (`timeStyle` full or long).
+    /// A pattern letter that bare cannot format.
     ZoneName,
     /// A year before 1 (ICU writes an era).
     Era,
@@ -180,19 +195,21 @@ pub fn hour_cycle(loc: u8, hour12: Option<bool>, hc: Option<u8>) -> u8 {
 pub fn resolve(loc: u8, r: &Request) -> Pattern {
     let l = loc as usize;
     if r.date_style != 0 || r.time_style != 0 {
-        return Pattern { first: STYLE[l][r.hc as usize][r.date_style as usize * 5 + r.time_style as usize], second: 0, join: 0 };
+        return Pattern { first: STYLE[l][r.hc as usize][r.date_style as usize * 5 + r.time_style as usize], second: 0, join: 0, zone: 0 };
     }
     let wd = if r.weekday == 0 { 0 } else { r.weekday - NARROW + 1 } as usize;
     let d = wd * 54 + r.year as usize * 18 + r.month as usize * 3 + r.day as usize;
     let t = if r.hour | r.minute | r.second == 0 { 0 } else { r.hc as usize * 27 + r.hour as usize * 9 + r.minute as usize * 3 + r.second as usize };
+    // the name follows the time, or follows a date with the joiner of date and time
+    let zone = |z: u8| if r.zone { z } else { 0 };
     match (d, t) {
-        (_, 0) => Pattern { first: DATE[l][d], second: 0, join: 0 },
-        (0, _) => Pattern { first: TIME[l][t], second: 0, join: 0 },
+        (_, 0) => Pattern { first: DATE[l][d], second: 0, join: 0, zone: zone(JOIN[l][d] + 2) },
+        (0, _) => Pattern { first: TIME[l][t], second: 0, join: 0, zone: zone(1) },
         _ => {
             let key = (l as u32) << 16 | (d as u32) << 7 | t as u32;
             match EXCEPT.binary_search_by_key(&key, |e| e.0) {
-                Ok(i) => Pattern { first: EXCEPT[i].1, second: 0, join: 0 },
-                Err(_) => Pattern { first: DATE[l][d], second: TIME[l][t], join: JOIN[l][d] + 1 },
+                Ok(i) => Pattern { first: EXCEPT[i].1, second: 0, join: 0, zone: zone(1) },
+                Err(_) => Pattern { first: DATE[l][d], second: TIME[l][t], join: JOIN[l][d] + 1, zone: zone(1) },
             }
         }
     }
@@ -207,7 +224,8 @@ fn pieces(p: Pattern) -> impl Iterator<Item = Result<(u8, u8), &'static str>> {
     let join = [None, Some(", "), Some(" at ")][p.join as usize];
     let first = Tokens(pool(p.first));
     let rest = join.map(|j| std::iter::once(Err(j)).chain(Tokens(pool(p.second)))).into_iter().flatten();
-    first.chain(rest)
+    let zone = [None, Some(" "), Some(", "), Some(" at ")][p.zone as usize];
+    first.chain(rest).chain(zone.into_iter().flat_map(|j| [Err(j), Ok((b'z', b'1'))]))
 }
 
 struct Tokens(&'static str);
@@ -265,7 +283,7 @@ pub fn shown(p: Pattern) -> (Vec<(&'static str, &'static str)>, Option<u8>) {
 
 /// Format local fields `t` with pattern `p` of locale `loc` into `out`. `parts` gets the type and the end of each part
 /// (adjacent literals are one part).
-pub fn format(loc: u8, p: Pattern, t: &Fields, out: &mut String, mut parts: Option<&mut Vec<(Part, usize)>>) -> Result<(), Gate> {
+pub fn format(loc: u8, p: Pattern, t: &Fields, ex: &Extras, out: &mut String, mut parts: Option<&mut Vec<(Part, usize)>>) -> Result<(), Gate> {
     let names = &NAMES[LOCALE_NAMES[loc as usize] as usize];
     for x in pieces(p) {
         let kind = match x {
@@ -322,7 +340,20 @@ pub fn format(loc: u8, p: Pattern, t: &Fields, out: &mut String, mut parts: Opti
                     }
                     b's' => {
                         num(out, t.second);
-                        Part::Second
+                        if ex.fsd == 0 {
+                            Part::Second
+                        } else {
+                            if let Some(ps) = parts.as_deref_mut() {
+                                ps.extend([(Part::Second, out.len()), (Part::Literal, out.len() + 1)]);
+                            }
+                            out.push('.');
+                            out.push_str(&format!("{:03}", t.ms)[..ex.fsd as usize]);
+                            Part::FractionalSecond
+                        }
+                    }
+                    b'z' => {
+                        out.push_str(ex.zone);
+                        Part::TimeZoneName
                     }
                     b'a' => {
                         out.push_str(names[57 + (t.hour >= 12) as usize]);

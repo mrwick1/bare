@@ -116,14 +116,29 @@ fn formatters_are_capped_before_the_object_is_made() {
 }
 
 #[test]
+fn a_zone_outside_the_table_gets_an_offset_name() {
+    big(|| {
+        let mut it = realm();
+        // ICU writes `Nepal Time`; bare writes the offset (a known deviation)
+        let mut f = |z: &str, n: &str| out(&mut it, &format!("new Intl.DateTimeFormat('en-US', {{ timeZone: '{z}', hour: 'numeric', timeZoneName: '{n}' }}).format(1.7e12)"));
+        assert_eq!(f("Asia/Kathmandu", "short"), "string:3 AM GMT+5:45");
+        assert_eq!(f("Asia/Kathmandu", "long"), "string:3 AM GMT+05:45");
+        assert_eq!(f("Etc/GMT+5", "shortGeneric"), "string:5 PM GMT-5");
+        assert_eq!(f("America/Sao_Paulo", "longOffset"), "string:7 PM GMT-03:00");
+    });
+}
+
+#[test]
 fn gates_refuse_what_bare_cannot_format() {
     big(|| {
         let mut it = realm();
         for (src, what) in [
             ("new Intl.DateTimeFormat('en', { era: 'short' })", "Intl.DateTimeFormat option era"),
-            ("new Intl.DateTimeFormat('en', { timeZoneName: 'short' })", "Intl.DateTimeFormat option timeZoneName"),
+            ("new Intl.DateTimeFormat('en', { dayPeriod: 'long' })", "Intl.DateTimeFormat option dayPeriod"),
+            ("new Intl.DateTimeFormat('en', { fractionalSecondDigits: 2 })", "Intl.DateTimeFormat: fractionalSecondDigits without second"),
+            ("new Intl.DateTimeFormat('en', { calendar: 'Buddhist' })", "Intl.DateTimeFormat calendar other than gregory"),
+            ("new Intl.DateTimeFormat('en', { numberingSystem: 'arab' })", "Intl.DateTimeFormat numberingSystem other than latn"),
             ("new Intl.DateTimeFormat('en-u-hc-h23')", "Intl: a locale with an extension (-u-, -t-, -x-)"),
-            ("new Intl.DateTimeFormat('en', { timeStyle: 'long' }).format(0)", "Intl.DateTimeFormat: a time zone name (timeStyle full or long)"),
             ("new Intl.DateTimeFormat('en', { year: 'numeric' }).format(Date.UTC(-5, 0))", "Intl.DateTimeFormat: a year before 1 (an era)"),
         ] {
             assert_eq!(out(&mut it, src), format!("unsupported:{what}"), "{src}");
