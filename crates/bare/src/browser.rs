@@ -345,9 +345,9 @@ pub(crate) struct EventState {
     pub trusted: bool,
 }
 
-/// Is `e` a script budget, the one class of limit that aborts a task and not the page (see [`Browser::survive`])?
+/// Is `e` a task budget that aborts a task and not the page (see [`Browser::survive`])?
 pub(crate) fn is_budget(e: &Error) -> bool {
-    matches!(e, Error::Limit(LimitKind::Steps | LimitKind::CallDepth | LimitKind::TraversalDepth | LimitKind::StatementFrames | LimitKind::DrainJobs))
+    matches!(e, Error::Limit(LimitKind::Steps | LimitKind::CallDepth | LimitKind::TraversalDepth | LimitKind::StatementFrames | LimitKind::DrainJobs | LimitKind::Host("dom-selector")))
 }
 
 /// What [`Browser::survive`] decided about the error of a task.

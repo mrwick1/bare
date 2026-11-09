@@ -7,9 +7,9 @@
 //! signs with the rupee, arrows, a few math signs and the geometric shapes; 32 KB each), built into the program with
 //! `include_bytes!`. Both have the same advance, so bold text keeps its width. A third face, a subset of Noto Sans Symbols2
 //! (4 KB: check marks, crosses, stars, the menu and warning signs), draws the characters that Noto Sans Mono lacks: it is
-//! the fallback. An installed Noto Sans Arabic face supplies Arabic glyphs when available. The license is
-//! `data/fonts/OFL.txt`. A letter that none of the faces has (Chinese, Japanese, Korean, emoji) is not drawn (a gap in
-//! `docs/resources.md`).
+//! the fallback. A fourth face, a subset of Noto Sans Arabic (86 KB, the Arabic blocks), draws Arabic letters; it is
+//! read on the first Arabic letter. No system font is read. The licenses are `data/fonts/OFL*.txt`.
+//! A letter that none of the faces has (Chinese, Japanese, Korean, emoji) is not drawn (a gap in `docs/resources.md`).
 //!
 //! Why a cache: filling an outline is the costly part of text. A page repeats the same letters at the same size, so
 //! each (glyph, size, quarter pixel) is filled once into a coverage mask, and every use is a blit of the mask.
@@ -22,6 +22,7 @@ use std::hash::{BuildHasherDefault, Hasher};
 static REGULAR: &[u8] = include_bytes!("../../../data/fonts/NotoSansMono-Regular-subset.ttf");
 static BOLD: &[u8] = include_bytes!("../../../data/fonts/NotoSansMono-Bold-subset.ttf");
 static SYMBOLS: &[u8] = include_bytes!("../../../data/fonts/NotoSansSymbols2-subset.ttf");
+static ARABIC: &[u8] = include_bytes!("../../../data/fonts/NotoSansArabic-subset.ttf");
 
 /// The face of a glyph: 0 regular, 1 bold, 2 symbols, 3 Arabic.
 pub type FaceId = u8;
@@ -82,16 +83,10 @@ impl Face {
     }
 }
 
-fn arabic_face() -> Option<&'static Face> {
-    static DATA: std::sync::OnceLock<Option<Vec<u8>>> = std::sync::OnceLock::new();
-    static FACE: std::sync::OnceLock<Option<Face>> = std::sync::OnceLock::new();
-    FACE.get_or_init(|| {
-        let data = DATA.get_or_init(|| {
-            ["/usr/share/fonts/noto/NotoSansArabic-Regular.ttf", "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf"]
-                .iter().find_map(|path| std::fs::read(path).ok().filter(|data| FontRef::try_from_slice(data).is_ok()))
-        }).as_ref()?;
-        Some(Face::new(data))
-    }).as_ref()
+/// The Arabic face, made on the first Arabic letter: a page with no Arabic never pays for it.
+fn arabic_face() -> &'static Face {
+    static FACE: std::sync::OnceLock<Face> = std::sync::OnceLock::new();
+    FACE.get_or_init(|| Face::new(ARABIC))
 }
 
 pub struct Glyphs {
@@ -122,7 +117,7 @@ impl Glyphs {
     #[inline(never)]
     fn fallback(&self, bold: bool, c: char) -> (FaceId, u16) {
         if matches!(c as u32, 0x0600..=0x06ff | 0x0750..=0x077f | 0x08a0..=0x08ff | 0xfb50..=0xfdff | 0xfe70..=0xfeff) {
-            if let Some(face) = arabic_face() { return (3, face.font.glyph_id(c).0); }
+            return (3, arabic_face().font.glyph_id(c).0);
         }
         if c as u32 >= 0x2000 { return (2, self.faces[2].font.glyph_id(c).0); }
         (bold as FaceId, 0)
@@ -144,7 +139,7 @@ impl Glyphs {
     }
 
     fn fill(&mut self, face: FaceId, id: u16, size: f32, sub: u8) -> Entry {
-        let face = if face == 3 { arabic_face().expect("Arabic face exists") } else { &self.faces[face as usize] };
+        let face = if face == 3 { arabic_face() } else { &self.faces[face as usize] };
         let glyph = Glyph { id: GlyphId(id), scale: PxScale::from(size * face.scale), position: point(sub as f32 / SUBPIXELS, 0.0) };
         let at = self.masks.len() as u32;
         let Some(outline) = face.font.outline_glyph(glyph) else {
@@ -184,13 +179,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn installed_arabic_font_supplies_missing_letters() {
-        if !std::path::Path::new("/usr/share/fonts/noto/NotoSansArabic-Regular.ttf").exists() { return; }
+    fn built_in_arabic_face_supplies_missing_letters() {
         let mut g = Glyphs::new();
-        let (face, id) = g.glyph(false, 'ع');
-        assert_ne!(id, 0);
-        let entry = g.get(face, id, 20.0, 0);
-        assert!(g.mask(entry).iter().any(|&v| v != 0));
+        for c in ['ع', 'ب', 'ﻋ', 'ﷲ'] {
+            let (face, id) = g.glyph(false, c);
+            assert_eq!(face, 3, "{c}");
+            assert_ne!(id, 0, "{c}");
+            let entry = g.get(face, id, 20.0, 0);
+            assert!(g.mask(entry).iter().any(|&v| v != 0), "{c}");
+        }
     }
 
     #[test]

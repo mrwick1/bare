@@ -20,13 +20,13 @@
 //! Supported syntax: literals, `\t \n \v \f \r \0 \cX \xHH \uHHHH` and identity escapes, `.`,
 //! `\d \D \s \S \w \W`, classes with ranges and negation, `^ $ \b \B`, alternation, capturing and
 //! `(?:...)` groups, `* + ? {n} {n,} {n,m}` (greedy and lazy), backreferences `\1`, lookahead
-//! `(?=...)` and `(?!...)`, and the flags `g i m s u y`. Annex B (web compatibility) rules for
+//! `(?=...)` and `(?!...)`, lookbehind `(?<=...)` and `(?<!...)`, and the flags `g i m s u y`. Annex B (web compatibility) rules for
 //! non-Unicode patterns are followed: a lone `]` `}` or `{` is a literal, `\8` is `8`, `\1` with
 //! fewer than one group is legacy octal, `\c` without a letter is a backslash, `[\d-x]` has a
 //! literal `-`.
 //!
 //! Explicit errors, never a different pattern: flags `v d` ([`CompileError::UnsupportedFlag`]),
-//! lookbehind and quantified lookahead ([`CompileError::Unsupported`]). With `u`, `\p{...}` and `\P{...}` read General_Category, Script, Script_Extensions and the
+//! quantified lookahead ([`CompileError::Unsupported`]). With `u`, `\p{...}` and `\P{...}` read General_Category, Script, Script_Extensions and the
 //! binary properties of ECMA-262 from `bare_unicode::property` (the sets are made when the pattern is compiled); an unknown name
 //! is a `SyntaxError`. Without `u`, `\p{L}` is the literal text `p{L}`, as in ECMA-262.
 //!
@@ -218,7 +218,7 @@ impl Regex {
         let mut p = Parser::new(pattern, flags);
         let node = p.parse_pattern()?;
         let groups = p.ncap as usize;
-        let mut e = Emitter { prog: Vec::new(), classes: p.classes, flags, work: 0, depth: 0, max_slot: 0 };
+        let mut e = Emitter { prog: Vec::new(), classes: p.classes, flags, work: 0, depth: 0, max_slot: 0, backwards: false };
         e.emit(&node)?;
         e.push(Inst::Match)?;
         let tmp_base = 2 * (groups + 1);
@@ -256,7 +256,7 @@ impl Regex {
                 Inst::Jmp(t) => todo.push(t as usize),
                 Inst::Split(a, b) => todo.extend([a as usize, b as usize]),
                 Inst::Look(_, end) => todo.push(end as usize),
-                Inst::BackRef(_) | Inst::LookEnd | Inst::Match => return None,
+                Inst::BackRef(_) | Inst::LookEnd | Inst::Backward | Inst::ReverseClose(_) | Inst::Match => return None,
             }
         }
         Some(Box::new(FirstSet(set)))
@@ -417,6 +417,52 @@ impl Regex {
             (i, p) = (i + w, p + v);
         }
         (Some(p), work)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn backward(&self, input: &[u16], regs: &[u32], pos: usize, inst: Inst,
+        steps: &mut u64, lim: &Limits, cancel: Option<&AtomicBool>) -> Result<Option<usize>, ExecError> {
+        // Read a complete code point before the assertion position in Unicode mode.
+        let prev = |p: usize| {
+            let mut q = p.checked_sub(1)?;
+            if self.flags.unicode && q > 0 && (0xDC00..=0xDFFF).contains(&input[q])
+                && (0xD800..=0xDBFF).contains(&input[q - 1]) { q -= 1; }
+            Some(q)
+        };
+        if let Inst::BackRef(g) = inst {
+            let (s, e) = (regs[2 * g as usize], regs[2 * g as usize + 1]);
+            if s == UNSET || e == UNSET { return Ok(Some(pos)); }
+            let (mut a, mut b) = (e as usize, pos);
+            while a > s as usize {
+                charge(steps, 1, lim, cancel)?;
+                let Some(x) = prev(a) else { return Ok(None) };
+                let Some(y) = prev(b) else { return Ok(None) };
+                let (c, d) = if self.flags.unicode {
+                    (code_point(input, x).0, code_point(input, y).0)
+                } else { (input[x] as u32, input[y] as u32) };
+                let equal = if self.flags.ignore_case {
+                    if self.flags.unicode { fold(c) == fold(d) } else { canon(c as u16) == canon(d as u16) }
+                } else { c == d };
+                if !equal { return Ok(None); }
+                (a, b) = (x, y);
+            }
+            return Ok(Some(b));
+        }
+        let unicode = matches!(inst, Inst::AnyU | Inst::AnyAllU | Inst::ClassU(_));
+        let p = if unicode { prev(pos) } else { pos.checked_sub(1) };
+        let Some(p) = p else { return Ok(None) };
+        let c = input[p];
+        let ok = match inst {
+            Inst::Char(k) => c == k,
+            Inst::CharI(k) => canon(c) == k,
+            Inst::Any => !is_line_terminator(c),
+            Inst::AnyAll => true,
+            Inst::Class(k) => self.classes[k as usize].matches(c as u32, self.flags.ignore_case && !self.flags.unicode),
+            Inst::AnyU | Inst::AnyAllU | Inst::ClassU(_) => self.read_u(input, p, inst) == Some(pos),
+            _ => unreachable!(),
+        };
+        Ok(ok.then_some(p))
     }
 
     /// `AdvanceStringIndex`: the next index after `i`. With `u`, a surrogate pair at `i` is skipped whole.
@@ -688,6 +734,18 @@ impl Regex {
                         pc = end as usize;
                     }
                 }
+                Inst::Backward => {
+                    match self.backward(input, regs, pos, self.prog[pc + 1], steps, lim, cancel)? {
+                        Some(p) => { pos = p; pc += 2; }
+                        None => failed = true,
+                    }
+                }
+                Inst::ReverseClose(g) => {
+                    let g = g as usize;
+                    set!(2 * g, pos as u32);
+                    set!(2 * g + 1, regs[self.tmp_base + g]);
+                    pc += 1;
+                }
                 Inst::Match => {
                     regs[1] = pos as u32;
                     return Ok(true);
@@ -889,7 +947,7 @@ enum Node {
     WordB(bool),
     BackRef(u32),
     Group(u32, Box<Node>),
-    Look(bool, Box<Node>),
+    Look(bool, bool, Box<Node>),
     Cat(Vec<Node>),
     Alt(Vec<Node>),
     Repeat { node: Box<Node>, min: u32, max: Option<u32>, greedy: bool, cap_lo: u32, cap_hi: u32 },
@@ -1095,8 +1153,12 @@ impl<'a> Parser<'a> {
                 } else {
                     None
                 };
+                let behind = look.is_none() && self.p[self.i..].starts_with(&[63, 60])
+                    && matches!(self.p.get(self.i + 2), Some(61) | Some(33));
+                let look = if behind { Some(self.p[self.i + 2] == 33) } else { look };
                 let mut cap = None;
-                if look.is_some() {
+                if behind { self.i += 3; }
+                else if look.is_some() {
                     self.i += 2;
                 } else if self.eat(b'?') {
                     if self.eat(b':') {
@@ -1124,10 +1186,11 @@ impl<'a> Parser<'a> {
                 }
                 match (look, cap) {
                     (Some(neg), _) => {
+                        if behind && self.quantifier_follows() { return syn("Invalid quantifier", at); }
                         if self.quantifier_follows() {
                             return Err(CompileError::Unsupported { what: "quantified lookahead", at });
                         }
-                        return Ok(Node::Look(neg, Box::new(inner)));
+                        return Ok(Node::Look(neg, behind, Box::new(inner)));
                     }
                     (None, Some(n)) => Node::Group(n, Box::new(inner)),
                     (None, None) => inner,
@@ -1357,9 +1420,6 @@ impl<'a> Parser<'a> {
     #[cold]
     #[inline(never)]
     fn named_group(&mut self, at: usize) -> Result<u32, CompileError> {
-        if matches!(self.p.get(self.i + 1), Some(0x3D) | Some(0x21)) {
-            return Err(CompileError::Unsupported { what: "lookbehind", at });
-        }
         let Some((name, end)) = group_name(self.p, self.i + 1) else { return syn("Invalid capture group name", at) };
         if self.names.iter().filter(|(n, _)| *n == name).count() > 1 {
             return syn("Duplicate capture group name", at);
@@ -1564,6 +1624,9 @@ enum Inst {
     /// Start a lookahead: (negative, index after the body).
     Look(bool, u32),
     LookEnd,
+    /// Execute the next consuming instruction backwards.
+    Backward,
+    ReverseClose(u32),
     Match,
 }
 
@@ -1582,6 +1645,7 @@ struct Emitter {
     depth: usize,
     /// Number of loop-mark registers needed (the deepest loop nesting).
     max_slot: u32,
+    backwards: bool,
 }
 
 impl Emitter {
@@ -1622,7 +1686,18 @@ impl Emitter {
     fn emit_inner(&mut self, n: &Node) -> Result<(), CompileError> {
         match n {
             Node::Empty => {}
-            Node::Char(_) | Node::Any | Node::Class(_) | Node::BackRef(_) | Node::WordB(_) => self.emit_leaf(n)?,
+            Node::Char(_) | Node::Any | Node::Class(_) | Node::BackRef(_) | Node::WordB(_) => {
+                let start = self.prog.len();
+                self.emit_leaf(n)?;
+                if self.backwards && !matches!(n, Node::WordB(_)) {
+                    let code: Vec<_> = self.prog.drain(start..).collect();
+                    for inst in code.into_iter().rev() {
+                        if matches!(inst, Inst::NotInPair) { continue; }
+                        self.push(Inst::Backward)?;
+                        self.push(inst)?;
+                    }
+                }
+            },
             Node::Start => {
                 self.push(if self.flags.multiline { Inst::MStart } else { Inst::Start })?;
             }
@@ -1632,17 +1707,22 @@ impl Emitter {
             Node::Group(g, b) => {
                 self.push(Inst::GroupStart(*g))?;
                 self.emit(b)?;
-                self.push(Inst::Close(*g))?;
+                self.push(if self.backwards { Inst::ReverseClose(*g) } else { Inst::Close(*g) })?;
             }
-            Node::Look(neg, b) => {
+            Node::Look(neg, behind, b) => {
                 let l = self.push(Inst::Look(*neg, 0))?;
+                let old = self.backwards;
+                self.backwards = *behind;
                 self.emit(b)?;
+                self.backwards = old;
                 self.push(Inst::LookEnd)?;
                 self.prog[l] = Inst::Look(*neg, self.pc());
             }
             Node::Cat(v) => {
-                for x in v {
-                    self.emit(x)?;
+                if self.backwards {
+                    for x in v.iter().rev() { self.emit(x)?; }
+                } else {
+                    for x in v { self.emit(x)?; }
                 }
             }
             Node::Alt(v) => {
@@ -1823,6 +1903,21 @@ mod tests {
     // Expected values below were checked with Node 22 (`/p/gd.exec`); see tools/js/regexp_oracle.mjs
     // for the machine-checked set.
     #[test]
+    fn lookbehind() {
+        assert_eq!(run("(?<=a)b", "", "ab"), "1,2");
+        assert_eq!(run("(?<!a)b", "", "cb"), "1,2");
+        assert_eq!(run("(?<!a)b", "", "ab"), "N");
+        assert_eq!(run("(?<=([ab]+)([bc]+))$", "", "abc"), "3,3;0,1;1,3");
+        assert_eq!(run("(?<=([ab])+)c", "", "abc"), "2,3;0,1");
+        assert_eq!(run("(?<=a|ba)c", "", "bac"), "2,3");
+        assert_eq!(run("(?<=a(?=b))b", "", "ab"), "1,2");
+        assert_eq!(run("(?<=\\1(a))b", "", "aab"), "2,3;1,2");
+        assert_eq!(run("(?<=😀)x", "u", "😀x"), "2,3");
+        assert_eq!(run("(?<=k)x", "iu", "Kx"), "1,2");
+        assert_eq!(run("(?<=a)x", "i", "Ax"), "1,2");
+    }
+
+    #[test]
     fn basics() {
         assert_eq!(run("abc", "", "xxabcxx"), "2,5");
         assert_eq!(run("a*?", "", "aaa"), "0,0");
@@ -1919,8 +2014,8 @@ mod tests {
         for p in ["]", "}", "{", "a{", "a{,5}", "\\8", "\\c", "[\\d-x]", "\\p{L}", "\\u{3}"] {
             assert!(Regex::from_str(p, "").is_ok(), "{p}");
         }
-        assert!(matches!(Regex::from_str("(?<=a)b", ""), Err(CompileError::Unsupported { what: "lookbehind", .. })));
-        assert!(matches!(Regex::from_str("(?<!a)b", ""), Err(CompileError::Unsupported { what: "lookbehind", .. })));
+
+
         assert!(Regex::from_str("(?<n>a)", "").is_ok());
         assert_eq!(std::mem::size_of::<Match>(), 24);
         let re = Regex::from_str("(a)(?<n>b)\\k<n>(?<m>c)?", "").unwrap();

@@ -116,7 +116,7 @@ fn named_groups() {
         assert_eq!(run(&format!("try {{ new RegExp('{pat}'); 'no' }} catch (e) {{ e.name }}")), "string:SyntaxError", "{pat}");
     }
     assert_eq!(run("try { new RegExp('(?<a>x)\\\\k<b>', 'u'); 'no' } catch (e) { e.name }"), "string:SyntaxError");
-    assert_eq!(unsupported_of("new RegExp('(?<=a)b')"), "lookbehind");
+    assert_eq!(run("new RegExp('(?<=a)b').test('ab')"), "boolean:true");
 }
 
 #[test]
@@ -124,7 +124,6 @@ fn gates_are_explicit_unsupported() {
     // A literal pattern is compiled by `Interp::new`: nothing of the script runs. The parser checks only the flags.
     let literal = [
         ("var x = 1; /(/;", "regexp literal: invalid pattern (early SyntaxError)"),
-        ("var r = /a(?<=b)/;", "lookbehind"),
         ("var r = /(?=a)*/;", "quantified lookahead"),
         ("var r = /a/d;", "regexp flag d"),
         ("function f() { return /[b-a]/; }", "regexp literal: invalid pattern (early SyntaxError)"),
@@ -140,7 +139,7 @@ fn gates_are_explicit_unsupported() {
             Ok(_) => panic!("{src}: accepted"),
         }
     }
-    assert_eq!(unsupported_of("new RegExp('(?<=a)b')"), "lookbehind");
+    assert_eq!(run("new RegExp('(?<=a)b').test('ab')"), "boolean:true");
     assert_eq!(unsupported_of("new RegExp('a', 'v')"), "regexp flag v");
     // A replaced exec is not a gate: the generic algorithms call it.
     assert_eq!(run("var r = /a/; r.exec = function () { return null; }; r.test('a')"), "boolean:false");

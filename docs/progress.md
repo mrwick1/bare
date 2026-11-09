@@ -5049,6 +5049,45 @@ The 805-row instruction matrix used baseline `f28752bf6d`. The final run had no 
 
 After rebasing onto `44ab2f8e37`, the bare, CSS, layout, and paint library suites passed. The 68-row cost recheck against that current main passed under both allocators. It includes the prior stretch, scroll, and form rows, plus block, CSS, flex, and grid stress cases.
 
+## Backward RegExp assertions and selector task recovery (2026-11-10)
+
+RegExp now accepts positive and negative lookbehind. The compiler reverses concatenation inside the assertion. The VM reads consuming instructions backwards. Alternatives keep their source order. Repeats keep their greedy or lazy order. Captures store forward input spans. Nested lookahead reads forwards. The existing assertion barrier restores the input position and bounds backtracking.
+
+The backward instruction handler is cold. No runtime struct gains a field. The existing test asserts that the match result occupies 24 bytes. Patterns without lookbehind keep their instruction sequence.
+
+The selector limit counts the UTF-8 bytes of an uncached selector string. It rejects more than 1,024 bytes before parsing or interning names. It does not count node traversal. That cap remains in place. A Host("dom-selector") limit now ends only the current task. The existing limit of five task aborts still bounds the page. A regression test checks that later scripts and click handlers run.
+
+Both regression tests failed before the changes. The release workspace tests pass. The Node oracle agrees on 612 added cases, including variable-length captures, backreferences, nested assertions, Unicode input and ignoreCase. The full standalone fixture check has four existing stale unsupported expectations for named groups and Unicode properties. The added lookbehind cases have no mismatches.
+
+The final public journey suite passes all 33 journeys with no retries. The live GitHub home and rust-lang/rust pages reach readyState complete after one selector task abort. Their console reports Error: Unable to get document domain. Before the rebase, GitLab stopped at Limit(Scripts). On the final binaries it stops at Host("fetch-queue").
+
+
+The cost baseline is current main 01a1a0d2d3 from base-build. All 805 rows ran under both allocators. The first pass covered 629 rows. After base-build supplied the missing bare-stress binary, the other 176 rows passed. No row exceeds +0.5% under both allocators. builtins_load zero 10 is +0.504% with glibc and +0.495% with jemalloc. This meets the allocator-only exception.
+
+The counts use perf stat -e instructions:u, with the minimum of three runs per allocator. nm -S shows the largest inlined Regex::exec_in instance grew from 6,837 to 7,697 bytes. Match stays at 24 bytes. No runtime struct gains a field. Three structural alternatives did not improve the zero-width rows. The final code keeps the measured version that passes the cost rule.
+
+The test262 baseline gate passes. exec_diff reports zero differences in 79 runs. Typing costs 282.5 M instructions per textarea key and 287.9 M per input key. Peak RSS at 50 keys is 33.0 MiB. After the final rebase, 1,134 browser library tests and 840 JS library tests pass.
+
+Not tested: the full test262 suite and authenticated GitHub or GitLab flows.
+
+## Built-in Arabic glyph subset (2026-11-10)
+
+Problem. Pull request #313 drew Arabic letters from `/usr/share/fonts/noto/NotoSansArabic-Regular.ttf`, read at run time. This broke the "Fonts" decision in `docs/decisions.md`: no system font is read, and the pixels do not depend on the machine. arjun-e16 has no such file, so Arabic pages drew blank there. The test `installed_arabic_font_supplies_missing_letters` returned early when the file was missing. It passed on e16 and checked nothing.
+
+Change. `data/fonts/NotoSansArabic-subset.ttf` is a subset of Noto Sans Arabic Regular. It covers U+0600-06FF, 0750-077F, 08A0-08FF, FB50-FDFF and FE70-FEFF (644 characters). It is made with `pyftsubset` (fonttools 4.63) with no hinting and no layout tables. It is built in with `include_bytes!` and made on the first Arabic letter, as the symbols face is. The system path read is gone. `fallback` stays `#[cold] #[inline(never)]`. The license is `data/fonts/OFL-Arabic.txt`. `docs/decisions.md` now lists four built-in faces and no system font.
+
+Size. The font is 87,612 bytes. The `bare-drive` release binary grew from 15,308,104 to 15,393,304 bytes (+85,200).
+
+Checks.
+
+- The new test `built_in_arabic_face_supplies_missing_letters` never skips. It checks face 3 and a non-zero mask for four letters: `ع` and `ب` (U+0600 block), `ﻋ` (FE70 block) and `ﷲ` (FB50 block). I ran it on the old code with `/usr/share/fonts` hidden (`bwrap --tmpfs /usr/share/fonts`). It failed (`left: 0, right: 3`). With the fix it passes under the same hidden path.
+- Cost: 805 rows against main `29ab4eaa02`, both allocators. Over under both: 0. Over under one: 0. Failed: 0. Mean change: glibc -0.002%, jemalloc +0.003%. Worst row: glibc +0.208% (`preload_load style 10`), jemalloc +0.119% (`bare-stress run boxes-inline-blocks 20000`). The branch had no rebase to do: main did not move after the branch point, so these are the final-rebase numbers.
+- `cargo test --release --workspace`: 3,283 passed, 0 failed.
+- Public journeys: 33 pass, 0 fail, 0 flakes.
+- Live check on https://ar.wikipedia.org with `bare-drive` (steps: `timeout 30000`, `open`, `expect css="body" visible`, `shot s`) on archMachine and on arjun-e16 (no Arabic font installed). Both captures are 1280 by 800. I compared them pixel by pixel. The page is live, so I compared the top 510 rows, which hold all the Arabic text of the first screen. Only 64 pixels differ, at the scrollbar thumb, because images loaded at different times. The rest of the difference is two news photos that had loaded on archMachine only. I removed my files from e16.
+
+Not tested. Arabic joining and right-to-left order (letters still draw one by one). Other machines. Fonts other than Regular (no bold Arabic). A page that uses Arabic characters outside the five blocks.
+
 ## Script errors: document streams, SVG, canvas and indirect eval (2026-11-10)
 
 Compared against `01a1a0d2d328bf61fe63c5e4abc9533d14d2a56d`. The work started from `f28752bf6d`. Rebased once before the full checks. The evidence directory is `/data/bare-tmp/script-errors-3/`. The task target is `/data/bare-tmp/script-errors-3-target`.
@@ -5106,3 +5145,4 @@ The final full matrix measures all 805 rows under both allocators against the sh
 The first matrix had 16 rows over both limits and 13 over one. SVG wrappers created interface objects too early. Class registration now waits for a class read. The other increase was fixed per process: direct perf stat measured 7,143,171 versus 7,211,726 instructions under glibc, and 10,646,360 versus 10,787,013 under jemalloc for session_load chain 1. nm showed equal Dom::install sizes (0x33ae) and a four-byte Browser::new change. readelf found a new libm.so.6 dependency. nm -D found new acosf, atan2f, hypot, hypotf, sincosf and sinf references. The geometry entry point had pulled native trig into browser-only examples. Shape flattening now accepts a math implementation. Painting keeps its native math. Browser metrics use the existing software math. No dependency was added. readelf confirms that session_load no longer links libm. Eight focused rows then pass under both allocators. The final full matrix also passes.
 
 Not tested: direct eval with caller locals; SVG transforms, text or group bounds; live animated-value mutation; canvas pixel output; document.write tokens split across calls; execution of scripts inserted by document.write. Fragment-inserted scripts remain inert. SVG animated values are snapshots. getBBox does not compute path bounds. The excluded selector, lookbehind, named-window and site-specific issues remain outside this change.
+
