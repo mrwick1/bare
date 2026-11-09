@@ -2623,15 +2623,18 @@ impl<'p> Interp<'p> {
             if b.flags & INIT != 0 {
                 return Ok(b.value);
             }
+            let (f, v) = (b.flags, b.value);
+            self.get_name_uninit(n, f, v)
         } else if let Some((e, i)) = self.find_name(n, site) {
             let b = &self.envs[e as usize].bindings[i];
             if b.flags & INIT != 0 {
                 return Ok(b.value);
             }
+            let (f, v) = (b.flags, b.value);
+            self.get_name_uninit(n, f, v)
         } else {
-            return self.get_global(n);
+            self.get_global(n)
         }
-        self.get_name_uninit(n, site)
     }
 
     /// A name that no environment binds: a property of the global object.

@@ -379,7 +379,7 @@ struct Parser<'a> {
     /// The module goal (see [`parse_module`]).
     module: bool,
     /// The exported names so far (a duplicate is an early error).
-    export_names: std::collections::HashSet<Box<str>>,
+    export_names: std::collections::BTreeSet<Box<str>>,
     /// Local names of `export {a}`: each must be declared at the end of the module.
     local_exports: Vec<Span>,
 }
