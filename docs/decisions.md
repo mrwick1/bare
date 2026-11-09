@@ -626,3 +626,36 @@ The cascade also charges its real candidates (2026-11-10). The model above is pa
 - Bound: 64 live worker objects for each page (`MAX_WORKERS`). The next one throws `NotSupportedError`. A worker that was collected frees its place. The bound is against a page that makes workers in a loop; a map library makes one.
 - One console warning for each page names the first worker URL: `Worker scripts do not run in bare (<url>)`. The failure is visible, and it does not repeat.
 - `SharedWorker` and `ServiceWorker` are unchanged (absent).
+
+## What holds the memory at the peak of a page load
+
+Problem: public pages reach 200 to 300 MiB of peak RSS (vimeo 260, redis.io 125 to 330, bsky.app 198, ikea 145 to 225), while the heap at the end of the run is 10 to 30 MiB. The first guess was memory that worker threads take for a short time (the four 64 MiB glibc arena heaps of vimeo). It was wrong.
+
+Method: a temporary counting allocator in `bare-drive` (not committed). It sampled one allocation for each 64 KiB allocated, with a backtrace, and kept the live samples at the highest live byte count. It also counted live bytes for each thread. Page faults by first touch (`perf record -e page-faults`) gave the same thread split.
+
+What it showed (vimeo, one run, 287 MiB live at the peak, 246 MiB sampled):
+
+| Holder | MiB | Share |
+| --- | ---: | ---: |
+| Page thread (the drive thread): JS object elements (`Vec<Option<Value>>`), the object table, interned strings | 167 | 68% |
+| Parsed scripts (`Program::into_owned`: tree arenas and the owned source) | 63 | 26% |
+| Script slots (`add_script_kind`) | 16 | 6% |
+| Worker threads (all) | under 1 | 0% |
+
+- The "worker arena" regions are the heap of the thread that runs the page. In `bare-drive` that is a spawned thread, not the main thread, so glibc gives it a non-main arena. The workers share it (`M_ARENA_MAX` 2).
+- The memory is live. One collection ran, at the end of the load: 200 MiB before and 143 MiB after on vimeo. The heap collects only between tasks (see [the heap collects when it has grown by three quarters](#the-heap-collects-when-it-has-grown-by-three-quarters)), so a long script keeps its garbage until it returns. `heap_kib` is read after the page is dropped, which is why it shows 30 MiB.
+- Other pages: redis.io has 41% parsed scripts, 38% other JS tables, 11% script slots and 7% client cache bodies (`Client::keep` on a worker, 7.5 MiB of the 64 MiB `MAX_CACHE`). bsky.app has 45% parsed scripts (81 of 182 MiB), 31% other JS tables, 14% script slots and 5% cache bodies. Threads other than the page thread hold 9 MiB on redis.io and 19 MiB on bsky.app.
+- ikea holds 70 of 178 MiB on workers: picture decode. One cause was fixed (below). The rest is the decoded pictures, 4 bytes for each pixel, at the size of the file and not at the size of the box (31% of the peak). `BUDGET` bounds it at 64 MiB.
+- twitch was not attributed. It stopped at `Limit(Scripts)` in 3 runs (51 MiB, 750 ms) and reached 195 to 199 MiB in 9 later runs of the same binary.
+
+Decision (fixed): `bare_image::decode` made three copies of each picture at the peak: the decoder output (3 or 4 bytes for each pixel), a `Vec<u32>` of pixels, and the `Arc<[u32]>` that the document holds (`Vec` to `Arc` copies). That is 8 bytes for each pixel for a moment, 4 at the end. `decode` now makes the `Arc<[u32]>` first, the decoder writes into the start of it, and the conversion to `0xAARRGGBB` runs in place from the last pixel to the first. The peak of one decode is the pixels once. Test: a PNG of 1500 by 1000 held 12.28 MB for 6.00 MB of pixels before (2.05 times) and under 1.25 times after.
+
+Not fixed, and why:
+
+- The JS heap and the parsed scripts are 80% of the peak on the three big pages. The files that change them are in `crates/js/src`, which this task did not touch. Candidates, by size: collect inside a long script at a safe point; hold object elements in 8 bytes, not 16 (`Option<Value>`); keep the tree of a script that ran once and is not a function body only until it has run.
+- Pictures at the size of the box: the box size is known only after layout, and a smaller bitmap changes the pixels of a screenshot. It needs its own design.
+- `Client::keep` copies the body of each cached reply while the caller holds its own. Moving the buffer in would remove the copy for a page that reads each file once; it changes `bare-net` for 5 to 7% of the peak.
+
+AST size (bsky.app bundle, 9,731,470 bytes of source, `parse_check stats`): 2,927,810 nodes and 940,355 list items, tree 74,813,948 bytes. That is 7.69 bytes of tree for each byte of source, 25.6 bytes for each node and 19.3 for each node or list item. The parse takes 391 ms. The node sizes are at most 24 bytes (`Expr`, `Pat`), 32 (`Stmt`) and 44 (`Func`), and a list item is 4 bytes.
+
+Worst case of `EvalLimits::max_script_nodes` (8 Mi nodes and list items): 8,388,608 times 44 bytes is 352 MiB if every item were a `Func`. A tree with the mix of bsky.app has 19.3 bytes for each item, so 154 MiB. The first number is over 256 MiB, and it is a bound for one script. `max_scripts` (4096) and `max_script_source` (64 MiB for each script) put no bound on the sum of the trees of a page. Proposal (not done here): count `Stats::bytes`, which `Program::stats` already computes, and refuse a script past 192 MiB of tree (about 2.5 times the bsky.app bundle), and keep one sum of tree bytes for a page with the same limit. Each parser arena doubles while it grows, so the high-water mark of a parse is up to twice the final size before `into_owned` shrinks it. That is part of the same bound.
