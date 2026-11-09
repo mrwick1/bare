@@ -220,6 +220,8 @@ pub struct RuleSet {
     /// Where the selectors read each class, id and attribute (`Reach`). Made at the first change, so a page that never
     /// changes does not pay for it.
     reach: std::cell::OnceCell<Reach>,
+    /// The rules that the index offered for the elements that `walk` and `restyle` styled, summed over all calls. A caller takes the difference around one call.
+    tested: std::cell::Cell<u64>,
     /// Does a rule have a logical property of the inline axis, or `float: inline-start | inline-end`? Only then does an `rtl` element need `logical_pass`.
     logical: bool,
 }
@@ -401,7 +403,7 @@ impl RuleSet {
     }
 
     pub fn new(viewport: (f32, f32)) -> RuleSet {
-        RuleSet { viewport, entries: Vec::new(), decls: Vec::new(), side: Side::default(), layers: vec![Layer { parent: 0 }], layer_by_name: HashMap::new(), customs: Vec::new(), index: Index::default(), shadows: HashMap::default(), parts: Vec::new(), user: 0, scopes: Scopes::default(), reach: std::cell::OnceCell::new(), logical: false }
+        RuleSet { viewport, entries: Vec::new(), decls: Vec::new(), side: Side::default(), layers: vec![Layer { parent: 0 }], layer_by_name: HashMap::new(), customs: Vec::new(), index: Index::default(), shadows: HashMap::default(), parts: Vec::new(), user: 0, scopes: Scopes::default(), reach: std::cell::OnceCell::new(), tested: std::cell::Cell::new(0), logical: false }
     }
 
     /// Which user action state (`:hover`, `:active`, the focus pseudo-classes) some rule reads: the bits `selector::USES_*`.
@@ -693,6 +695,11 @@ impl RuleSet {
         self.entries.push(Entry { selector, decls, customs, pics, layer, origin, ancestors, ctx });
     }
 
+    /// The candidate rules tested so far: one for each (element, rule) that the index offered. Take the difference around a call to `compute` or `restyle`.
+    pub fn tested_candidates(&self) -> u64 {
+        self.tested.get()
+    }
+
     /// Find the style of every element that is shown. The selectors must come from `add` with this same `doc`.
     pub fn compute(&self, doc: &Document) -> Styles {
         self.walk::<false>(doc, None, false)
@@ -716,7 +723,7 @@ impl RuleSet {
     #[inline(always)]
     fn walk<const WANT: bool>(&self, doc: &Document, want: Option<NodeId>, keep: bool) -> Styles {
         let mut way = Way { want, path: Vec::new(), sorted: Vec::new(), on: false, at: 0 };
-        let mut styles = Styles { styles: vec![ComputedStyle::initial()], of_node: vec![NONE; doc.len()], calcs: Vec::new(), grids: Vec::new(), customs: Vec::new(), spaced: false, kept: None, candidates: 0 };
+        let mut styles = Styles { styles: vec![ComputedStyle::initial()], of_node: vec![NONE; doc.len()], calcs: Vec::new(), grids: Vec::new(), customs: Vec::new(), spaced: false, kept: None };
         // Style 0 is the starting style. It is the parent style of the `html` element.
         let mut cx = Cx { viewport: self.viewport, root_font_size: 16.0, layer_order: self.layer_order(), declared: &self.side, inline: RefCell::default(), computed: RefCell::default(), grids: RefCell::default(), customs: RefCell::default(), merges: RefCell::default() };
         let style_atom = doc.find_atom("style");
@@ -754,7 +761,6 @@ impl RuleSet {
                             }
                         }
                     }
-                    styles.candidates += candidates.len() as u64;
                     matched.sort_unstable();
                     // The order of the rules is their place in the list, so the key of the cache and the result do not depend on the buckets.
                     let inline = style_atom.and_then(|a| doc.attr(node, a));
@@ -881,7 +887,6 @@ impl RuleSet {
                         matched.push(i);
                     }
                 }
-                styles.candidates += candidates.len() as u64;
                 matched.sort_unstable();
                 let inline = style_atom.and_then(|a| doc.attr(node, a));
                 let hint = hints.as_ref().and_then(|h| h.of(doc, node));
@@ -1110,6 +1115,7 @@ impl RuleSet {
     fn candidates(&self, doc: &Document, el: NodeId, out: &mut Vec<u32>) {
         out.clear();
         self.index.collect(doc, el, out);
+        self.tested.set(self.tested.get() + out.len() as u64);
     }
 
     /// The number of the style of an element. It is found in the cache, or it is made.
@@ -1702,8 +1708,6 @@ pub struct Styles {
     spaced: bool,
     /// The cache of the cascade, for `RuleSet::restyle`. Only `RuleSet::compute_kept` keeps it.
     kept: Option<Box<StyleKeep>>,
-    /// The rules that the index gave for the elements that the cascade styled (`walk` and `restyle` add to it). The caller charges it.
-    candidates: u64,
 }
 
 /// What `RuleSet::restyle` needs from the cascade that made the styles: the style cache and the indexes of the value lists, so
@@ -1720,11 +1724,6 @@ struct StyleKeep {
 }
 
 impl Styles {
-    /// The candidate rules that the cascade tested so far: one for each (element, rule) that the index offered.
-    pub fn candidates(&self) -> u64 {
-        self.candidates
-    }
-
     pub fn spaced(&self) -> bool {
         self.spaced
     }

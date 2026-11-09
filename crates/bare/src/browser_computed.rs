@@ -66,7 +66,7 @@
 //! (sheets, and bytes of `<style>` text, `href` and supplied parts that one read uses), `computed-rules` (selectors after the build:
 //! the build is bounded by the bytes), `computed-work` (nodes times rules, or if that is over `STYLED_FROM` the styled elements times rules: a loose upper
 //! bound, the real work is far smaller because rules are indexed; see `styled_work`), `computed-external` and `computed-external-bytes` (stored external sheets). Steps are charged before the
-//! build and before a full compute (`work / UNITS_PER_STEP`, and after it the candidates over that: `Styles::candidates`); a restyle charges the elements that it styles; a read that finds the last styles right charges 1. Names that the sheets add to the document table are bounded by the sheet bytes and checked against
+//! build and before a full compute (`work / UNITS_PER_STEP`, and after it the candidates over that: `RuleSet::tested_candidates`); a restyle charges the elements that it styles; a read that finds the last styles right charges 1. Names that the sheets add to the document table are bounded by the sheet bytes and checked against
 //! `max_names` after the build.
 //!
 //! Pseudo-elements (`getComputedStyle(el, '::before')`): the engine has no pseudo-element cascade. A rule with a pseudo-element in a selector
@@ -583,10 +583,11 @@ impl Dom {
         it.charge(model)?;
         self.computed.computes.set(self.computed.computes.get() + 1);
         // The cascade of a read keeps what `restyle` needs: the next read after a change updates it.
+        let before = built.rules.tested_candidates();
         let styles = Rc::new(if keep || read { built.rules.compute_kept(&doc) } else { built.rules.compute_for(&doc, want) });
         // The model above is paid before the cascade runs. The candidates that the index gave are known only now: pay what they cost over the model,
         // one step each, so that rules that match every element end the task after one cascade, not four.
-        it.charge(styles.candidates().saturating_sub(model))?;
+        it.charge((built.rules.tested_candidates() - before).saturating_sub(model))?;
         built.last[slot] = (!doc.has_custom()).then(|| (key, keep || read, styles.clone()));
         if read && !doc.has_custom() {
             built.read = Some(chains(&doc));
@@ -847,7 +848,7 @@ fn restyle_marks(it: &mut Interp<'_>, rules: &RuleSet, doc: &bare_html::dom::Doc
     Scopes::user_roots(scopes.focus, &old[2], &new[2], doc, &mut roots);
     it.charge(roots.len() as u64 + 1)?;
     let mut changed = Vec::new();
-    let before = styles.candidates();
+    let before = rules.tested_candidates();
     if !rules.restyle(doc, styles, &roots, &mut changed) {
         return Ok(None);
     }
@@ -861,7 +862,7 @@ fn restyle_marks(it: &mut Interp<'_>, rules: &RuleSet, doc: &bare_html::dom::Doc
         }
     }
     let model = visited.saturating_mul(rules.len() as u64 / UNITS_PER_STEP + 1);
-    it.charge(model.max(styles.candidates() - before))?;
+    it.charge(model.max(rules.tested_candidates() - before))?;
     Ok(Some(changed))
 }
 
