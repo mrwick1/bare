@@ -5750,3 +5750,41 @@ ECMA-262: 13.2.5.4 (object initializer, key before value), 8.6.2 (binding initia
 - Assignment patterns (`({ [await k]: x } = o)`) stay gated.
 - `indices` on a regexp with the `u` flag and astral characters is not in the cases.
 - `Symbol.matchAll` or `exec` replaced by a user function does not add `indices` (the user result is used as is, as in the spec).
+## Worst case of the cascade charge after #326 (2026-11-10)
+
+Question: PR #326 charges a full cascade `elements x rules / 4`. Can one task run several cascades of a hostile page inside its 100 M step budget, and how long does that take?
+
+### Page
+
+`tools/drive/cascade_worst.py OUTDIR [ELEMENTS RULES MODE LOOPS]` writes `page.html` and `page.steps`. Default: 60,000 elements (`div` with one `i`), 1,500 rules `*:not(.zK){color:..}` that match every element, and an inline script that runs 100 times: change the page, read `getComputedStyle(x).color`, set `data-n`. Mode `sheet` appends a `<style>` rule each time (a full compute for each read). Mode `class` flips a class of `body` (a restyle). The page is served from `python3 -m http.server` on localhost (the driver opens only http(s)). Run with `bare-drive --var URL=... page.steps`, default budgets, on archMachine, release builds. A last script logs `data-n`.
+
+### Result (sheet mode, 3 runs each, wall time includes the load and parse of the 570 KB page)
+
+| build | cascades in the task | wall time | peak RSS |
+| --- | --- | --- | --- |
+| before #326 (`5d0f306325`) | 1 | 2.0 to 2.1 s | 17.3 to 17.6 MiB |
+| after #326 (`cdf9bc794e`) | 4 | 8.05 to 8.90 s | 17.8 to 18.2 MiB |
+| this branch | 1 | 2.4 to 2.9 s (4.4 s once, under load) | 17.7 MiB |
+
+One cascade takes about 2 s (90 M candidates, 22 ns each). The model of #326 is right in time for this page: 22.5 M steps for one cascade is 0.28 step for each candidate, and a step of a JS loop is about 80 ns. The budget of 100 M steps is also about 8 s of plain JS, so the 8 s are no more than any loop gets. They are over the 4 s that the engine priorities allow for a cascade loop, so I changed the charge. Memory is not the problem: 18 MiB.
+Class mode (a restyle of `body` only; `*:not(.zK)` rules do not reach its children): 100 reads in 2.2 to 2.7 s on all three builds, because each restyle styles one element.
+
+### Change
+
+`RuleSet::tested_candidates` (`crates/css`) sums the rules that the index offered for each styled element in `walk` and `restyle`. `browser_computed.rs` pays the model before the compute, as before, and after it pays the candidates over the model, one step each. A restyle pays the larger of the model and the candidates. Pages with indexed rules have far fewer candidates than the model, so they pay the same as on main. The page above pays 22.5 M + 67.5 M for the first cascade, and the second cascade ends at its pre-charge, before it runs.
+Test (failed on main, passes now): `rules_that_match_every_element_are_charged_by_their_candidates` (2,000 elements, 2,000 `*:not(.zN)` rules, budget 6 M, five new sheets; main completes all five, now two cascades run).
+Counter cost: a `u64` add in the `walk` loop gave +0.7% to +1.3% on 8 `bare-stress` rows (`boxes-display-none`, `flex-freeze-many`, `grid-explicit-rows`, `table-percent-columns`) under both allocators; a `Cell<u64>` in `RuleSet::candidates` gave 0 rows over.
+
+### Checks
+
+- Five sites, `bare-drive` step file `timeout 30000` / `open URL` / `expect css="body" visible`: dev.to, kubernetes.io/docs/home, nasa.gov, redis.io, hsbc.com all pass with 0 `Steps` aborts.
+- `cargo test --release --workspace --no-fail-fast`: 3342 passed, 0 failed.
+- `tools/drive/public/run.sh`: pass 48, fail 0, known 0, skip 0, flakes 1 (a journey that passed on its second attempt; the first full run had 0).
+- Full cost matrix, 805 rows, after the last rebase against a fresh `base-build` of `92e586370c` (main with #327): 0 rows over under both allocators, 0 over under one, 0 failed, mean glibc +0.002%. `cargo test --release --workspace` after the rebase: 3345 passed, 0 failed. The first attempt (counter in the loop) had 8 rows over; the second (Cell) has none.
+
+### Limits and not tested
+
+- The pre-charge is still the model; the real count is paid after the cascade. One cascade can run to the `computed-work` cap (134 M units, about 3 s) before the task ends.
+- A restyle of a whole subtree with descendant rules was not run on a 60,000-element page; it uses the same post-charge.
+- A page with shadow roots and this charge was not run. `restyle_frame` (window) was not measured.
+- One machine (archMachine). Wall times vary by up to 1.5 s when other jobs run.

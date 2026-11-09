@@ -220,6 +220,8 @@ pub struct RuleSet {
     /// Where the selectors read each class, id and attribute (`Reach`). Made at the first change, so a page that never
     /// changes does not pay for it.
     reach: std::cell::OnceCell<Reach>,
+    /// The rules that the index offered for the elements that `walk` and `restyle` styled, summed over all calls. A caller takes the difference around one call.
+    tested: std::cell::Cell<u64>,
     /// Does a rule have a logical property of the inline axis, or `float: inline-start | inline-end`? Only then does an `rtl` element need `logical_pass`.
     logical: bool,
 }
@@ -401,7 +403,7 @@ impl RuleSet {
     }
 
     pub fn new(viewport: (f32, f32)) -> RuleSet {
-        RuleSet { viewport, entries: Vec::new(), decls: Vec::new(), side: Side::default(), layers: vec![Layer { parent: 0 }], layer_by_name: HashMap::new(), customs: Vec::new(), index: Index::default(), shadows: HashMap::default(), parts: Vec::new(), user: 0, scopes: Scopes::default(), reach: std::cell::OnceCell::new(), logical: false }
+        RuleSet { viewport, entries: Vec::new(), decls: Vec::new(), side: Side::default(), layers: vec![Layer { parent: 0 }], layer_by_name: HashMap::new(), customs: Vec::new(), index: Index::default(), shadows: HashMap::default(), parts: Vec::new(), user: 0, scopes: Scopes::default(), reach: std::cell::OnceCell::new(), tested: std::cell::Cell::new(0), logical: false }
     }
 
     /// Which user action state (`:hover`, `:active`, the focus pseudo-classes) some rule reads: the bits `selector::USES_*`.
@@ -691,6 +693,11 @@ impl RuleSet {
         }
         let ancestors = ancestor_hashes(&selector);
         self.entries.push(Entry { selector, decls, customs, pics, layer, origin, ancestors, ctx });
+    }
+
+    /// The candidate rules tested so far: one for each (element, rule) that the index offered. Take the difference around a call to `compute` or `restyle`.
+    pub fn tested_candidates(&self) -> u64 {
+        self.tested.get()
     }
 
     /// Find the style of every element that is shown. The selectors must come from `add` with this same `doc`.
@@ -1108,6 +1115,7 @@ impl RuleSet {
     fn candidates(&self, doc: &Document, el: NodeId, out: &mut Vec<u32>) {
         out.clear();
         self.index.collect(doc, el, out);
+        self.tested.set(self.tested.get() + out.len() as u64);
     }
 
     /// The number of the style of an element. It is found in the cache, or it is made.
