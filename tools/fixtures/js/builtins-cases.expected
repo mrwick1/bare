@@ -88,3 +88,6 @@ str adjacent halves join into one string	boolean:true
 str bundle shaped	string:x|3|true|true|true|a b|x|ab|a-b|opqrstuvwxyz|e8 1)
 str huge repeat via concat in loop is bounded	number:4096
 str regexp as this	string:abc
+re named groups exec	string:2026|11|undefined|true|y,m,z||2026|4
+re named groups replace	string:11/2026,[][a][$<x],$<n>,aaaa,objectb6
+re named groups backreference and matchAll	string:true,false,true,true,true,1,2

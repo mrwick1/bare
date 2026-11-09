@@ -4884,3 +4884,39 @@ gitlab.com, the "Ship faster" cards: the box is `.one-feature-cards__media` (`#1
 - `rtl` layout beyond `text-align` and the cascade mapping: the engine has no bidi and no right-to-left flow of inline content.
 - Chrome comparison of the new unit test expectations (read from CSS Logical 1 by hand).
 - Logical properties in `@media`/`@supports` conditions and in the JS style API by name.
+
+## RegExp named groups (2026-11-09)
+
+### Problem
+
+`/(?<name>x)/` was `Unsupported("named group")`. GitHub, the Guardian and GitLab stopped on it.
+
+### Change
+
+- `regexp.rs`: `(?<name>...)` and `\k<name>` compile. The group names are in the compiled regexp only when the pattern has one (`names: Option<Box<[(String, u32)]>>`, `Regex::group_names`). A group name is `$`, `_` or a letter, then those and digits. `\uXXXX` and `\u{X}` escapes are read.
+- `\k<name>` is a reference when the pattern has a named group or has the `u` flag. A name that no group has is a `SyntaxError`. Without a named group and without `u`, `\k` is the letter `k` (Annex B). A reference to a group that comes later matches empty.
+- A duplicate name, a name that is not an identifier and an unterminated name are a `SyntaxError`.
+- `match.groups` is an object with no prototype, with one property for each name in pattern order (`undefined` for a group that did not take part). It is `undefined` for a pattern without names. `exec`, `match`, `matchAll` and the generic path all use it.
+- `replace` and `replaceAll`: `$<name>` in the template (a missing name or an unset group gives an empty string; no `>` leaves the text as it is), and the `groups` object as the last argument of a replacer function. A pattern without names has the old text for `$<`.
+- `rx::Match` has a `named` flag, so a match of a pattern without names makes no lookup.
+
+### Limits
+
+- Lookbehind (`(?<=a)`, `(?<!a)`) is still `Unsupported("lookbehind")`. GitLab stops on it now.
+- A group name may not repeat, also not in different alternatives (ES2025 allows it).
+- A name with a pair of `\u` surrogate escapes (`😀`) is a `SyntaxError`. A name with the character itself works.
+- The ID_Start and ID_Continue sets are the letter and digit classes of Rust (`char::is_alphabetic`, `is_alphanumeric`), not the Unicode ID tables.
+
+### Checks
+
+- Tests first: `named_groups` in `eval_builtins_tests.rs` failed with the `named group` gate. Three cases in `builtins-cases.txt` have Node 22 outputs in `builtins-cases.expected`. The two gate tests and the `regexp.rs` gate test now expect success. `cargo test --release --workspace`: 0 failed.
+- test262 gate: ok (`language/literals/regexp/named-groups` 0 to 1). `exec_diff`: 79 runs, 0 differences. Typing cost: 282.7 M for each key in `#a1`, 288.0 M in `#f0` (282.6 M and 287.9 M in the last run, equal to #308). `cargo test --release --workspace`: 0 failed. `tools/drive/public/run.sh`: pass 33, fail 0, known 0, flakes 0.
+- Cost matrix against the build of 05bf0e8d (main after #309; 805 rows, both allocators): 0 rows over the limit, mean glibc -0.05%. `builtins_load zero` was over (+0.55%): `rx::Match` had grown from 24 to 32 bytes with a `named` flag, about 8 instructions for each match. The flag is gone from `Match` (a test asserts `size_of::<Match>() == 24`). `re_exec_raw` returns it next to the match, from the compiled regexp. Now `zero 1` and `10` are +0.07% (3 runs, equal counts) and `replaceall` is -0.01%.
+- Before the rebase on #309, 7 `intl_load` rows were over (+0.6% to +0.8%). They run no regexp. They were still over on the new main (same numbers over 3 runs: `cmp` +0.59%, `cmp_opts` +0.80%, `locale` +0.75%, `make 10` +0.76%). Function-level cause (`nm -S`): in the base, `Heap::to_string_lossy` is 246 bytes and holds the UTF-16 decode loop. In this branch it is 129 bytes and calls a separate copy of `<String as FromIterator<char>>::from_iter` (0x107 bytes, new). `intl_compare` calls it twice for each compare, so each call pays a call and a `reserve`. Same source, other inlining: with 16 code generation units, the partition moved when this change added code to the crate. The fix is neutral: `to_string_lossy` is an explicit `push` loop with a start capacity of `max(len, 8)` (the first version with `len` alone made `cmp` +2.6% under glibc and +7.5% under jemalloc, because `é` is one unit and two bytes). All `intl_load` rows are now at or under the base: `cmp_opts` -3.7%, `locale` -3.3%, `make` -1.9% to -2.6%, `nf_locale_opts` -1.8%, `nf_locale` -0.7%; `cmp` is within +-0.5%. Tried before, without effect: the named-group parse code in `#[cold]`, `#[inline(never)]` functions, and the names in a `Box<Vec>`. Worse: `#[inline(never)]` on `to_string_lossy`.
+- `builtins_load zero` and `arrobj_load replaceall` were over (+0.9% and +1.2%) before the named-group code in `append_subst` and `build_replacement` moved into `#[cold]`, `#[inline(never)]` functions. `replaceall` is now under the limit.
+
+### Not tested
+
+- A live page that uses `matchAll` with names, or `\k<name>` in a real bundle. Only the six sites below ran.
+- `Symbol.replace` with a user `exec` that returns a `groups` object (the generic path was not changed).
+- Chrome 155 comparison of the error messages of the `SyntaxError` cases (the tests check the name only).
