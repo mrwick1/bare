@@ -6,8 +6,11 @@
 //!   An IP host never matches a dNSName that spells the same text, and the reverse.
 //! - The subject Common Name is never used. A certificate with no matching SAN fails.
 //! - dNSName comparison is exact and ASCII case-insensitive (RFC 4343).
-//! - Wildcards are NOT supported. A SAN that holds `*` never matches. A host that holds `*`
-//!   is rejected.
+//! - Wildcards (RFC 9525 section 6.3): `*` must be the whole leftmost label of the SAN, and at
+//!   least two labels must follow it. `*.example.com` matches `www.example.com`. It does not
+//!   match `example.com` or `a.b.example.com`. `*.com`, `w*.example.com` and `*.*.example.com`
+//!   never match. The code does not check the public suffix list: that is the CA's job. A host
+//!   that holds `*` is rejected.
 //! - Trailing dot: ONE trailing dot on the reference host is removed (`example.com.` is the
 //!   same name as `example.com`). A presented dNSName with a trailing dot never matches.
 //! - Internationalized hosts: the caller gives the A-label (punycode) form. Non-ASCII input
@@ -83,6 +86,15 @@ fn reference(host: &str) -> Result<Reference<'_>, Error> {
     Ok(Reference::Dns(name))
 }
 
+/// `p` is `*.` plus a name of two or more labels, and `host` is one label plus that name.
+/// `host` passed the LDH check, so it holds no `*`: a second `*` in `p` can never match.
+fn wildcard(host: &[u8], p: &[u8]) -> bool {
+    match (p.strip_prefix(b"*."), host.iter().position(|&b| b == b'.')) {
+        (Some(rest), Some(dot)) => rest.contains(&b'.') && host[dot + 1..].eq_ignore_ascii_case(rest),
+        _ => false,
+    }
+}
+
 /// Succeeds if some SAN matches `host`. Does not look at the subject Common Name.
 pub fn verify<'a>(host: &str, names: impl IntoIterator<Item = SanName<'a>>) -> Result<(), Error> {
     let r = reference(host)?;
@@ -90,7 +102,7 @@ pub fn verify<'a>(host: &str, names: impl IntoIterator<Item = SanName<'a>>) -> R
         let hit = match (&r, n) {
             // The reference passed the LDH check, so equality also rules out NUL, `*`,
             // non-ASCII bytes, empty labels and a trailing dot in the presented name.
-            (Reference::Dns(d), SanName::Dns(p)) => d.eq_ignore_ascii_case(p),
+            (Reference::Dns(d), SanName::Dns(p)) => d.eq_ignore_ascii_case(p) || wildcard(d, p),
             (Reference::Ip4(a), SanName::Ip(p)) => a == p,
             (Reference::Ip6(a), SanName::Ip(p)) => a == p,
             _ => false,
@@ -173,11 +185,24 @@ mod tests {
     }
 
     #[test]
-    fn wildcards_are_unsupported() {
-        for p in [&b"*.example.com"[..], b"*.*.example.com", b"w*.example.com", b"*example.com"] {
+    fn wildcards() {
+        let w = [Dns(b"*.example.com")];
+        assert!(ok("www.example.com", &w));
+        assert!(ok("WWW.Example.COM", &w));
+        assert!(ok("www.example.com.", &w));
+        // The wildcard covers one label, and not the bare domain.
+        for h in ["example.com", "a.b.example.com", "www.example.org", "www.xexample.com"] {
+            assert_eq!(verify(h, w), Err(Error::NoMatch), "{h}");
+        }
+        // Partial, double and too-short wildcards never match.
+        for p in [&b"w*.example.com"[..], b"*w.example.com", b"*.*.example.com", b"*example.com", b"*.com", b"*.", b"*"] {
             assert_eq!(verify("www.example.com", [Dns(p)]), Err(Error::NoMatch), "{p:?}");
             assert_eq!(verify("example.com", [Dns(p)]), Err(Error::NoMatch), "{p:?}");
         }
+        // A wildcard never matches an IP host.
+        assert_eq!(verify("192.0.2.1", [Dns(b"*.0.2.1")]), Err(Error::NoMatch));
+        // A host that holds `*` is still rejected.
+        assert_eq!(verify("*.example.com", w), Err(Error::BadHost));
     }
 
     #[test]
