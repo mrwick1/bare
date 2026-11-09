@@ -321,20 +321,225 @@ fn a_pending_dynamic_script_survives_collections() {
 }
 
 #[test]
-fn a_module_script_is_an_explicit_fatal_and_nothing_runs_after_it() {
+fn module_scripts_are_deferred_in_document_order_with_defer_scripts() {
     big(|| {
-        let html = format!("{PRE}<script>log.push('a')</script><script type=module src='/m.js'></script><script defer src='/after.js'></script>");
-        let routes = vec![js("/m.js", "log.push('m')"), js("/after.js", "log.push('after')")];
-        let srv = server(routes);
-        let mut b = make(&html, &srv, 5_000_000, true);
-        let r = load(&mut b, &srv, quick());
-        assert_eq!(r.stop, Stop::Fatal(Fatal::Unsupported("module script")));
-        assert_eq!(eval(&mut b, "log.join('|')"), "a");
-        assert_eq!(srv.total(), 0);
-        // a second call returns the same stop and does nothing
-        let again = load(&mut b, &srv, quick());
-        assert_eq!(again.stop, r.stop);
-        assert_eq!((again.scripts_run, srv.total()), (0, 0));
+        let html = format!(
+            "{PRE}<script type=module>L('m-inline-1'); log.push(typeof this)</script>
+             <script type=module src='/m.js'></script>
+             <script defer src='/d.js'></script>
+             <script>document.addEventListener('DOMContentLoaded', function () {{ L('dcl') }}); L('classic')</script>
+             <script type=module nomodule>L('m-nomodule')</script>"
+        );
+        let routes = vec![js("/m.js", "L('m-ext')"), js("/d.js", "L('d')")];
+        let (log, r, srv) = page(&html, routes, quick());
+        assert_eq!(log, "classic:loading|m-inline-1:interactive|undefined|m-ext:interactive|d:interactive|m-nomodule:interactive|dcl:interactive");
+        assert_eq!((r.stop, r.script_throws, r.load_errors), (Stop::Settled, 0, 0));
+        assert_eq!(srv.hits("/m.js"), 1);
+    });
+}
+
+#[test]
+fn an_async_module_runs_after_dom_content_loaded() {
+    big(|| {
+        let html = format!(
+            "{PRE}<script type=module async src='/a.js'></script><script type=module async>L('inline-async')</script>
+             <script>document.addEventListener('DOMContentLoaded', function () {{ L('dcl') }})</script>"
+        );
+        let (log, r, _) = page(&html, vec![js("/a.js", "L('a')")], quick());
+        assert_eq!(log, "dcl:interactive|a:interactive|inline-async:interactive");
+        assert_eq!(r.stop, Stop::Settled);
+    });
+}
+
+#[test]
+fn imports_resolve_against_the_module_url_and_load_once_per_page() {
+    big(|| {
+        let html = format!(
+            "{PRE}<script type=module src='/app/main.js'></script><script type=module>import {{ x }} from '/lib/shared.js'; log.push('inline:' + x)</script>"
+        );
+        let routes = vec![
+            js("/app/main.js", "import {x} from '../lib/shared.js'; import {y} from './sub/y.js'; import * as ns from '/lib/shared.js'; log.push('main:' + x + y + ns.x + import.meta.url.split('/').slice(-2).join('/'))"),
+            js("/app/sub/y.js", "import {x} from '../../lib/shared.js'; export const y = 'y' + x"),
+            js("/lib/shared.js", "log.push('shared'); export const x = 1"),
+        ];
+        let (log, r, srv) = page(&html, routes, quick());
+        assert_eq!(log, "shared|main:1y11app/main.js|inline:1");
+        assert_eq!(srv.hits("/lib/shared.js"), 1);
+        assert_eq!((r.stop, r.script_throws, r.load_errors), (Stop::Settled, 0, 0));
+        assert_eq!(r.fetches, 3);
+    });
+}
+
+#[test]
+fn a_cycle_of_modules_loads_and_runs() {
+    big(|| {
+        let html = format!("{PRE}<script type=module src='/a.js'></script>");
+        let routes = vec![
+            js("/a.js", "import {b} from './b.js'; export function a() { return 'a' } log.push('a runs ' + b())"),
+            js("/b.js", "import {a} from './a.js'; export function b() { return 'b' + a() } log.push('b runs')"),
+        ];
+        let (log, r, _) = page(&html, routes, quick());
+        assert_eq!(log, "b runs|a runs ba");
+        assert_eq!(r.stop, Stop::Settled);
+    });
+}
+
+#[test]
+fn a_bare_specifier_is_a_type_error_unless_an_import_map_maps_it() {
+    big(|| {
+        let html = format!(
+            "{PRE}<script>window.onerror = function (m) {{ log.push('onerror:' + m) }}</script>
+             <script type=module>import 'lodash'; log.push('not run')</script>
+             <script type=module>import 'lodash/x.js'; import {{ v }} from 'app'; import './rel.js'; log.push('v=' + v)</script>
+             <script type=importmap>{{ \"imports\": {{ \"app\": \"/pkg/app.js\", \"lodash/\": \"/vendor/lodash/\", \"./rel.js\": \"/pkg/other.js\", \"bad\": 5 }},
+               \"scopes\": {{ \"/pkg/\": {{ \"dep\": \"/pkg/dep.js\" }} }} }}</script>"
+        );
+        let routes = vec![
+            js("/pkg/app.js", "import {d} from 'dep'; export const v = 'app+' + d"),
+            js("/pkg/dep.js", "export const d = 'dep'"),
+            js("/vendor/lodash/x.js", "log.push('lodash x')"),
+            js("/pkg/other.js", "log.push('other')"),
+        ];
+        let (log, r, _) = page(&html, routes, quick());
+        // The first module maps `lodash` to nothing (only `lodash/` is mapped, as a prefix for "lodash/..." names), so it fails.
+        assert_eq!(
+            log,
+            "onerror:Uncaught TypeError: Failed to resolve module specifier \"lodash\". Relative references must start with either \"/\", \"./\", or \"../\".|lodash x|other|v=app+dep"
+        );
+        assert_eq!(r.stop, Stop::Settled);
+    });
+}
+
+#[test]
+fn a_missing_module_gives_an_error_event_and_a_syntax_error_is_reported() {
+    big(|| {
+        let html = format!(
+            "{PRE}<script>window.onerror = function (m) {{ log.push('onerror:' + m) }}</script>
+             <script type=module src='/missing.js' onerror=\"log.push('error-event')\" onload=\"log.push('load-event')\"></script>
+             <script type=module src='/ok.js' onload=\"log.push('ok-load')\"></script>
+             <script type=module src='/dep-missing.js' onerror=\"log.push('dep-error')\"></script>
+             <script type=module src='/syntax.js' onerror=\"log.push('syntax-error-event')\" onload=\"log.push('syntax-load')\"></script>
+             <script type=module src='/throws.js' onload=\"log.push('throws-load')\"></script>"
+        );
+        let routes = vec![
+            js("/ok.js", "log.push('ok')"),
+            js("/dep-missing.js", "import './nope.js'; log.push('not run')"),
+            js("/syntax.js", "let a; let a;"),
+            js("/throws.js", "throw new RangeError('boom')"),
+        ];
+        let (log, r, _) = page(&html, routes, quick());
+        let log: Vec<&str> = log.split('|').collect();
+        assert_eq!(log[0], "error-event");
+        assert_eq!(&log[1..3], ["ok", "ok-load"]);
+        assert_eq!(log[3], "dep-error");
+        assert!(log[4].starts_with("onerror:Uncaught SyntaxError"), "{log:?}");
+        assert_eq!(log[5], "syntax-load");
+        assert_eq!(&log[6..], ["onerror:Uncaught RangeError: boom", "throws-load"]);
+        assert_eq!((r.stop, r.load_errors), (Stop::Settled, 2));
+    });
+}
+
+#[test]
+fn dynamic_import_works_in_classic_scripts_and_modules() {
+    big(|| {
+        let html = format!(
+            "{PRE}<script>
+               import('/m/a.js').then(function (ns) {{ log.push('classic:' + ns.v) }});
+               import('/m/missing.js').catch(function (e) {{ log.push('missing:' + e.name) }});
+               import('bare-name').catch(function (e) {{ log.push('bare:' + e.name) }});
+               import('/m/bad.js').catch(function (e) {{ log.push('bad:' + e.name) }});
+             </script>
+             <script type=module>
+               const ns = await import('./m/a.js'); log.push('module:' + ns.v + ':' + ns.default);
+               const again = await import('/m/a.js'); log.push('same:' + (again === ns));
+               const rel = await import('./b.js'); log.push('rel:' + rel.w + ':' + rel.where);
+             </script>"
+        );
+        let routes = vec![
+            js("/m/a.js", "log.push('a runs'); export const v = 'va'; export default 'dflt'"),
+            js("/m/bad.js", "let a; let a;"),
+            js("/b.js", "export const w = 'w'; export const where = import.meta.url.split('/').pop()"),
+        ];
+        let (log, r, srv) = page(&html, routes, quick());
+        let mut got: Vec<&str> = log.split('|').collect();
+        got.sort();
+        let mut want = vec!["a runs", "classic:va", "missing:TypeError", "bare:TypeError", "bad:SyntaxError", "module:va:dflt", "same:true", "rel:w:b.js"];
+        want.sort();
+        assert_eq!(got, want, "{log}");
+        assert_eq!(srv.hits("/m/a.js"), 1);
+        assert_eq!(r.stop, Stop::Settled, "{r:?}");
+    });
+}
+
+#[test]
+fn an_import_map_scope_overrides_the_imports_for_modules_under_it() {
+    big(|| {
+        let html = format!(
+            "{PRE}<script type=importmap>{{ \"imports\": {{ \"dep\": \"/top/dep.js\" }}, \"scopes\": {{ \"/scoped/\": {{ \"dep\": \"/scoped/dep.js\" }} }} }}</script>
+             <script type=module src='/scoped/main.js'></script><script type=module src='/main.js'></script>"
+        );
+        let routes = vec![
+            js("/scoped/main.js", "import {n} from 'dep'; L('scoped:' + n)"),
+            js("/main.js", "import {n} from 'dep'; L('top:' + n)"),
+            js("/scoped/dep.js", "export const n = 'scoped-dep'"),
+            js("/top/dep.js", "export const n = 'top-dep'"),
+        ];
+        let (log, r, _) = page(&html, routes, quick());
+        assert_eq!(log, "scoped:scoped-dep:interactive|top:top-dep:interactive");
+        assert_eq!(r.stop, Stop::Settled, "{r:?}");
+    });
+}
+
+#[test]
+fn top_level_await_waits_for_a_timer_and_the_page_still_settles() {
+    big(|| {
+        let html = format!(
+            "{PRE}<script type=module>await new Promise(function (r) {{ setTimeout(r, 30) }}); L('after-await')</script>
+             <script type=module>L('second')</script>
+             <script type=module>await new Promise(function () {{}}); L('never')</script>"
+        );
+        let (log, r, _) = page(&html, vec![], quick());
+        assert_eq!(log, "second:interactive|after-await:complete");
+        assert_eq!(r.stop, Stop::Settled, "{r:?}");
+    });
+}
+
+#[test]
+fn a_dynamic_module_script_element_runs_and_gets_load() {
+    big(|| {
+        let html = format!(
+            "{PRE}<script>
+               var s = document.createElement('script'); s.type = 'module'; s.src = '/dyn.js'; s.onload = function () {{ log.push('dyn-load') }};
+               document.head.appendChild(s);
+               var i = document.createElement('script'); i.type = 'module'; i.text = 'log.push(\"dyn-inline\")'; document.head.appendChild(i);
+             </script>"
+        );
+        let (log, r, _) = page(&html, vec![js("/dyn.js", "log.push('dyn')")], quick());
+        let mut got: Vec<&str> = log.split('|').collect();
+        got.sort();
+        assert_eq!(got, ["dyn", "dyn-inline", "dyn-load"], "{log}");
+        assert_eq!(r.stop, Stop::Settled);
+    });
+}
+
+#[test]
+fn modulepreload_fetches_a_script_that_the_page_adds_and_sends_load() {
+    big(|| {
+        let html = format!(
+            "{PRE}<script>
+               var l = document.createElement('link'); l.rel = 'modulepreload'; l.href = '/pre.js';
+               l.onload = function () {{ log.push('preload-load') }}; document.head.appendChild(l);
+               var bad = document.createElement('link'); bad.rel = 'modulepreload'; bad.href = '/nope.js';
+               bad.onerror = function () {{ log.push('preload-error') }}; document.head.appendChild(bad);
+             </script>
+             <script type=module>import '/pre.js'; log.push('main')</script>"
+        );
+        let (log, r, srv) = page(&html, vec![js("/pre.js", "log.push('pre')")], quick());
+        let mut got: Vec<&str> = log.split('|').collect();
+        got.sort();
+        assert_eq!(got, ["main", "pre", "preload-error", "preload-load"], "{log}");
+        assert_eq!(srv.hits("/pre.js"), 1);
+        assert_eq!(r.stop, Stop::Settled);
     });
 }
 
