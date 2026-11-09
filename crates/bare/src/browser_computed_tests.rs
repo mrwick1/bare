@@ -244,6 +244,21 @@ fn the_reads_of_a_floating_popper_do_not_stop() {
     assert_eq!(js(&mut b, "cs.getPropertyValue('width') + ' ' + cs.getPropertyValue('transform') + '|' + cs.getPropertyValue('will-change') + '|' + cs.position"), "135px ||relative");
 }
 
+/// The picture properties are not in the list of `getComputedStyle` (`Property::LISTED`) but `getPropertyValue` and `setProperty` know them:
+/// the picture is written as `url("...")`, and a `calc()` as the others are.
+#[test]
+fn the_picture_properties_are_read_by_name() {
+    let mut b = at("<body><style>#a { background-image: url(a.png); mask: url(m.svg) no-repeat center / calc(100% - 4px) 20px; background-position-x: calc(100% - 4px) }</style><div id=a></div><div id=b></div></body>");
+    js(&mut b, "var cs = getComputedStyle(document.getElementById('a')); var ct = getComputedStyle(document.getElementById('b')); 0");
+    assert_eq!(js(&mut b, "cs.getPropertyValue('background-image') + '|' + cs.getPropertyValue('mask-image')"), "url(\"a.png\")|url(\"m.svg\")");
+    assert_eq!(js(&mut b, "cs.getPropertyValue('mask-repeat') + '|' + cs.getPropertyValue('mask-position-x') + '|' + cs.getPropertyValue('mask-size-x') + '|' + cs.getPropertyValue('mask-size-y')"), "no-repeat|50%|calc(100% - 4px)|20px");
+    assert_eq!(js(&mut b, "cs.getPropertyValue('background-position-x')"), "calc(100% - 4px)");
+    assert_eq!(js(&mut b, "ct.getPropertyValue('background-image') + '|' + ct.getPropertyValue('background-repeat') + '|' + ct.getPropertyValue('mask-size-x')"), "none|repeat|auto");
+    js(&mut b, "var d = document.getElementById('b'); d.style.setProperty('mask-image', 'url(x.svg)'); d.style.setProperty('mask-repeat', 'no-repeat'); 0");
+    assert_eq!(js(&mut b, "d.style.getPropertyValue('mask-image') + '|' + d.style.getPropertyValue('mask-repeat')"), "url(x.svg)|no-repeat");
+    assert_eq!(js(&mut b, "ct.getPropertyValue('mask-image') + '|' + ct.getPropertyValue('mask-repeat')"), "url(\"x.svg\")|no-repeat");
+}
+
 #[test]
 fn supported_names_only_and_gates_for_unavailable_values() {
     let mut b = at(PAGE);
@@ -281,7 +296,7 @@ fn elements_without_a_style_say_so() {
     // Detached: an empty declaration (CSSOM): no values and no length.
     assert_eq!(js(&mut b, "var d = document.createElement('div'); var cs = getComputedStyle(d); cs.display + '|' + cs.direction + '|' + cs.length + '|' + cs.item(0) + '|' + cs.getPropertyValue('--x')"), "||0||");
     // Attached later: the same object now has values.
-    assert_eq!(js(&mut b, "document.body.appendChild(d); cs.display + cs.length"), format!("block{}", bare_css::values::Property::COUNT));
+    assert_eq!(js(&mut b, "document.body.appendChild(d); cs.display + cs.length"), format!("block{}", bare_css::values::Property::LISTED.len()));
     // Inside `display:none`: the computed values, as in Chrome.
     assert_eq!(js(&mut b, "getComputedStyle(document.head).display"), "none");
     assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('t')).display"), "none");
@@ -676,7 +691,7 @@ fn cascade_work_is_reserved_before_the_cascade_runs() {
 #[test]
 fn computed_names_are_sorted_and_include_live_custom_properties() {
     let mut b = at("<body><p id=p style='--z: red; --a: blue'>x</p>");
-    let count = bare_css::values::Property::COUNT;
+    let count = bare_css::values::Property::LISTED.len();
     assert_eq!(js(&mut b, &format!("var cs=getComputedStyle(document.getElementById('p')); var names=[]; for(var i=0;i<{count};i++) names.push(cs.item(i)); [names.join()===names.slice().sort().join(),cs.length==={count}+2,cs.item({count}).slice(0,2)==='--'].join()")), "true,true,true");
 }
 

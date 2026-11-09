@@ -557,6 +557,17 @@ A geometry read (`getBoundingClientRect`, `getClientRects`, `offsetWidth`, an In
 - The pixel limit is lower than the 64 MP that was first suggested. 64 MP would allow 256 MiB for one picture.
 - Cost: `bare-drive` grows from 12.8 MiB to 13.5 MiB (release, whole feature, not only the decoders). The build time was not measured on its own. The incremental release build of `bare-js` examples and `bare` took 1 m 55 s.
 
+## CSS background-image and mask-image
+
+Changed on 2026-11-10. This replaces PR #278 (PR #325). Wikipedia draws its icons with these two properties, and the black squares are gone.
+
+- What is drawn: `background-image: url(...)` and `mask-image: url(...)` (and `-webkit-mask-image`), with `background-size`, `background-position`, `background-repeat` and their `mask-*` names. A mask shows the color of the box through the alpha of the picture. Raster pictures and SVG files both work. A picture loads through the same queue and limits as `<img>`.
+- Gaps: gradients and `image-set()` read as `none` and are not drawn. Only the first layer of a list is used. Edge-offset positions, `space` and `round` are not supported. A vector picture is drawn at its natural size and then scaled as a raster, so it is soft when it is made larger. A mask covers the background color only. Rounded corners are ignored. List each gap again in resources.md when a target page needs it.
+- The picture properties are not in the 94 core slots of `ComputedStyle`. A style holds one `u32`: the number of its set of 12 picture values, from one interned table. Set 0 is the starting values. Reason: the old branch kept 12 more values in every style, and 16 cost rows went over +0.5%. Nearly every element has set 0, so it pays one store.
+- The cascade reads a picture declaration only for an element that has one. `Entry::pics` counts them, and they sit after the other declarations of the rule. `cascade_as` sets a flag, and `style_of` calls the cold `picture_pass`. Reason: a call inside `cascade_as` cost 0.7% on the layout stress rows (the style and the key closure stayed alive, and `resolve` lost its inlining).
+- A sheet gets its `url(...)` addresses made absolute when it is loaded, because the sheets are joined and the base address is lost. The address of an `@import` stays as it was: the loader joins it.
+- The cost rule did not change: no row over +0.5% under both allocators. A flip in the inlining of unrelated code counts as cost and must be fixed in the code that changed (`dataset_load keys`, see progress.md).
+
 ## A script budget ends only its task
 
 A runaway script ends the task, not the page. Chrome does the same: it shows "page unresponsive" and the DOM stays.

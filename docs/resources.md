@@ -4702,3 +4702,33 @@ The first full run had 13 rows over the limit:
 | RSA-4096 | 164.9 | 166.0 | 41.0 |
 
 Reproduce: `cargo run --release -p bare-tls --example rsa_load`. The loops make no heap allocation. A chain of three RSA-2048 verifies costs 122 µs. The ECDSA path is unchanged: a scripted client handshake with the pinned P-256 leaf takes +0.04% instructions (5,627,972 to 5,630,172). `react.dev`, `nextjs.org` and `developer.mozilla.org` complete the TLS handshake. Details and limits: [progress.md](progress.md#rsa-in-bare-tls-2026-11-09).
+
+## CSS background-image and mask-image
+
+2026-11-10, archMachine, release. Base: origin/main `41e68d4a09`. New: this branch. It replaces PR #278.
+
+What is drawn: `background-image` and `mask-image` with `url(...)`, their size, position and repeat, for raster pictures and SVG files. A mask shows the color of the box through the alpha of the picture.
+
+Gaps:
+- Gradients and `image-set()` are read as `none`.
+- Only the first layer of a list is used. Edge-offset positions, `space` and `round` are not supported.
+- A vector picture is scaled as a raster, so it is soft when it is made larger.
+- A mask covers the background color only. Rounded corners are ignored.
+- `min()`, `max()` and `clamp()` in a picture length give the starting value.
+
+Memory:
+- `ComputedStyle` is 4 bytes larger (one `u32`). A page whose elements have no picture property pays that and nothing else. `Entry` is still 80 bytes.
+- The sets of picture values are one table for the process. Each set is 12 values of 8 bytes. A set is made once for each different combination.
+- The cache of scaled pictures holds 32 MiB and 256 entries at most. A tile over 4 M pixels is not drawn. The page limits of `<img>` apply: 512 pictures, 64 MiB decoded.
+- `bare-drive` grows from 15,618,208 to 15,762,176 bytes (+0.92%).
+- Peak RSS of the live Wikipedia journeys: en does not grow (57.6 to 58.3 MiB before, 57.3 to 58.4 MiB after). ar grows by about 1 MiB (52.1 to 52.9 MiB before, 53.6 to 53.9 MiB after).
+
+Cost (`tools/js/cost_matrix.sh -a -J`, 805 rows, both allocators):
+
+| | glibc | jemalloc |
+| --- | ---: | ---: |
+| Mean change | +0.010% | +0.013% |
+| Rows over +0.5% | 0 | 1 (`session_load chain 1`, +0.560%) |
+| Highest row under both | `flex-freeze-many 20000` +0.468% | +0.473% |
+
+No row is over +0.5% under both allocators. Instruction counts on the live pages change by about 10% between runs of one binary, because of the network, so they do not make a cost row. progress.md has the live numbers.

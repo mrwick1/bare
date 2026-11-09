@@ -93,6 +93,9 @@ struct Entry {
     decls: (u32, u32),
     /// The custom properties of the rule: a range of `RuleSet::customs`.
     customs: (u32, u32),
+    /// How many declarations of picture properties (`background-image`, `mask-size-x`, ...) the rule has. They are in `RuleSet::decls` after
+    /// the range `decls`, in their order: the cascade of an element reads them only when one of its rules has some (`picture_pass`).
+    pics: u16,
     /// The layer of the rule: a place in `RuleSet::layers`. 0 is no layer.
     layer: u32,
     origin: Origin,
@@ -635,19 +638,26 @@ impl RuleSet {
                     parse_declaration(&d.name, d.value, d.important, &mut self.side, &mut self.decls);
                 }
             }
-            self.logical |= self.decls[start..].iter().any(|d| d.mirror || matches!(d.value, Value::Keyword(Keyword::InlineStart | Keyword::InlineEnd)));
+            // The picture declarations go after the others (`Entry::pics`). One pass tests each declaration, here, not in the cascade.
+            let (mut logical, mut picture) = (false, false);
+            for d in &self.decls[start..] {
+                logical |= d.mirror || matches!(d.value, Value::Keyword(Keyword::InlineStart | Keyword::InlineEnd));
+                picture |= d.property as usize >= Property::CORE;
+            }
+            self.logical |= logical;
+            let (core_end, pics) = if picture { split_pictures(&mut self.decls, start) } else { (self.decls.len(), 0) };
             if self.decls.len() == start && self.customs.len() == custom_start {
                 continue;
             }
-            let decls = (start as u32, self.decls.len() as u32);
+            let decls = (start as u32, core_end as u32);
             let customs = (custom_start as u32, self.customs.len() as u32);
             for selector in selectors {
-                self.push(selector, decls, customs, layer, origin, scope);
+                self.push(selector, decls, customs, pics, layer, origin, scope);
             }
         }
     }
 
-    fn push(&mut self, selector: Selector, decls: (u32, u32), customs: (u32, u32), layer: u32, origin: Origin, scope: u32) {
+    fn push(&mut self, selector: Selector, decls: (u32, u32), customs: (u32, u32), pics: u16, layer: u32, origin: Origin, scope: u32) {
         if selector.compounds.iter().any(|c| c.simples.contains(&Simple::Never)) {
             return;
             // `a:hover` never matches. Keep it out of the index: it only costs time.
@@ -680,7 +690,7 @@ impl RuleSet {
             }
         }
         let ancestors = ancestor_hashes(&selector);
-        self.entries.push(Entry { selector, decls, customs, layer, origin, ancestors, ctx });
+        self.entries.push(Entry { selector, decls, customs, pics, layer, origin, ancestors, ctx });
     }
 
     /// Find the style of every element that is shown. The selectors must come from `add` with this same `doc`.
@@ -1114,7 +1124,10 @@ impl RuleSet {
                 return found.style;
             }
         }
-        let style = self.cascade_as::<0>(matched, inline, hint, &styles.styles[parent as usize], cx);
+        let mut style = self.cascade_as::<0>(matched, inline, hint, &styles.styles[parent as usize], cx);
+        if style.2 != 0 {
+            self.picture_pass(matched, inline, &mut style, &styles.styles[parent as usize], cx);
+        }
         // Two different rule lists may give the same style (`div div` inside `div`). Then they share it, and the children of both
         // have the same parent style, so they find each other in the cache.
         let hash = style_hash(&style);
@@ -1152,45 +1165,22 @@ impl RuleSet {
 
     /// Pick the winning declaration for each property, then compute the values. `PASS` 0 is the first pass, 1 the same without the check, 2 the one for `rtl` (`logical_pass`).
     fn cascade_as<const PASS: u8>(&self, matched: &[u32], inline: Option<&str>, hint: Option<&str>, parent: &ComputedStyle, cx: &Cx<'_>) -> ComputedStyle {
-        let mut winners = [None::<Value>; Property::COUNT];
-        let mut keys = [0u128; Property::COUNT];
+        let mut winners = [None::<Value>; Property::CORE];
+        let mut keys = [0u128; Property::CORE];
         // The properties that have a winner, one bit each: the loops below visit only these.
         let mut set = 0u128;
         // The properties whose winner is a declaration that pass 2 moved to the other side.
         let mut swapped = 0u128;
         // The key of a declaration: the one with the bigger key wins. The parts, from the most important: the origin and `!important`,
         // the layer, the specificity, and the place in the page. A `style=""` attribute has no layer (`None`): it beats every layer.
-        let key = |important: bool, origin: Origin, ctx: u8, layer: Option<u32>, specificity: u32, order: u32| {
-            let rank = match (important, origin) {
-                (false, Origin::UserAgent) => 0u128,
-                (false, Origin::Author) => 1,
-                (true, Origin::Author) => 2,
-                (true, Origin::UserAgent) => 3,
-            };
-            // `!important` turns the order of the layers around: the earlier layer wins, and no layer is the last.
-            let layer = match layer {
-                None => u32::MAX,
-                Some(l) if important => u32::MAX - 1 - cx.layer_order[l as usize],
-                Some(l) => cx.layer_order[l as usize],
-            };
-            // The tree context comes after the origin and before the layer: the outer context wins for a normal declaration, the inner one for
-            // an important one. The tree of the element (`OWN`) is between them, and a `style=""` attribute is in it.
-            let outer = match ctx {
-                INNER => 0u128,
-                OWN => 1,
-                OUTER => 2,
-                _ => 3,
-            };
-            let tree = if important { 3 - outer } else { outer };
-            rank << 98 | tree << 96 | u128::from(layer) << 64 | u128::from(specificity) << 32 | u128::from(order)
-        };
+        let key = |important: bool, origin: Origin, ctx: u8, layer: Option<u32>, specificity: u32, order: u32| cascade_key(cx, important, origin, ctx, layer, specificity, order);
         // The presentational hints (`hints.rs`): author declarations that any rule beats. Their key is the least of the author origin.
         if let Some(text) = hint {
             let mut out = Vec::new();
             for d in parse_declarations(text) {
                 parse_declaration(&d.name, d.value, false, &mut Side::default(), &mut out);
             }
-            for d in &out {
+            for d in out.iter().filter(|d| !d.property.is_picture()) {
                 let p = d.property as usize;
                 winners[p] = Some(d.value);
                 keys[p] = 1 << 98;
@@ -1231,8 +1221,11 @@ impl RuleSet {
                 }
             }
         }
+        // Does a rule of the element have a picture declaration? Almost never: the others cost nothing more (`picture_pass`).
+        let mut pictures = 0u16;
         for &i in matched {
             let e = &self.entries[i as usize];
+            pictures |= e.pics;
             for d in &self.decls[e.decls.0 as usize..e.decls.1 as usize] {
                 apply(d, e.origin, e.ctx, Some(e.layer), e.selector.specificity, i);
             }
@@ -1245,6 +1238,8 @@ impl RuleSet {
         // What the `style=""` attribute gives.
         let mut inline_side = Side::default();
         let mut inline_decls = Vec::new();
+        // The declarations of the attribute before this one are not for pictures (`split_pictures`); the others follow.
+        let mut inline_core = 0;
         {
             let mut shared = cx.inline.borrow_mut();
             shared.calcs.clear();
@@ -1270,8 +1265,9 @@ impl RuleSet {
                 }
             }
             *cx.inline.borrow_mut() = inline_side;
+            inline_core = if inline_decls.iter().any(|d| d.property.is_picture()) { split_pictures(&mut inline_decls, 0).0 } else { inline_decls.len() };
             // The specificity of a `style=""` attribute is more than the most that a selector can have (1 << 30, and the most is one less).
-            for d in &inline_decls {
+            for d in &inline_decls[..inline_core] {
                 apply(d, Origin::Author, OWN, None, 1 << 30, u32::MAX >> 1);
             }
             for d in &inline_customs {
@@ -1309,12 +1305,86 @@ impl RuleSet {
         }
         let mut style = compute(&winners, set, parent, cx);
         style.1 = custom;
+        // 1: a rule or the attribute has a picture declaration, and `style_of` asks `picture_pass` for the set. The style is not borrowed here.
+        style.2 = u32::from(pictures != 0 || inline_core < inline_decls.len());
         // A logical property of the inline axis (`margin-inline-start`) is its physical property for `ltr`, so the first pass is the same
         // for every element. An `rtl` element, or a `float` that is `inline-start`, gets `logical_pass`.
         if PASS == 0 && (matches!(style.0[Property::Direction as usize], Value::Keyword(Keyword::Rtl)) || matches!(style.0[Property::Float as usize], Value::Keyword(Keyword::InlineStart | Keyword::InlineEnd))) && (self.logical || inline.is_some()) {
             return self.logical_pass(matched, inline, hint, parent, cx);
         }
         style
+    }
+
+    /// The number of the set of picture values of an element (`ComputedStyle::2`), put in `style`. It does for the picture properties what
+    /// `cascade_as` and `compute` do for the others: the winner of each one by its key, then `inherit`, `initial`, `var()` and the units.
+    /// `cascade_as` says that it must run (`style.2` is 1: a rule or a `style=""` declaration has a picture property, `Entry::pics`). For
+    /// the others the cascade has no more work than before, and it does not hold its style for this call.
+    #[cold]
+    #[inline(never)]
+    fn picture_pass(&self, matched: &[u32], inline: Option<&str>, style: &mut ComputedStyle, parent: &ComputedStyle, cx: &Cx<'_>) {
+        #[cfg(test)]
+        PICTURE_PASSES.with(|n| n.set(n.get() + 1));
+        let custom = style.1;
+        let mut winners = [None::<Value>; Property::COUNT - Property::CORE];
+        let mut keys = [0u128; Property::COUNT - Property::CORE];
+        let mut apply = |d: &Declared, origin: Origin, ctx: u8, layer: Option<u32>, specificity: u32, order: u32| {
+            let (k, key) = (d.property as usize - Property::CORE, cascade_key(cx, d.important, origin, ctx, layer, specificity, order));
+            if winners[k].is_none() || key >= keys[k] {
+                (winners[k], keys[k]) = (Some(d.value), key);
+            }
+        };
+        for &i in matched {
+            let e = &self.entries[i as usize];
+            for d in &self.decls[e.decls.1 as usize..e.decls.1 as usize + usize::from(e.pics)] {
+                apply(d, e.origin, e.ctx, Some(e.layer), e.selector.specificity, i);
+            }
+        }
+        // The declarations of the attribute again: `cascade_as` left the side of their values in `cx.inline`, the same for this parse.
+        if let Some(text) = inline {
+            let (mut side, mut decls) = (Side::default(), Vec::new());
+            for d in parse_declarations(text) {
+                if !d.name.starts_with("--") {
+                    parse_declaration(&d.name, d.value, d.important, &mut side, &mut decls);
+                }
+            }
+            let (calc_base, var_base, grid_base) = (cx.declared.calcs.len() as u32, cx.declared.vars.len() as u32, cx.declared.grids.len() as u32);
+            for d in decls.iter_mut().filter(|d| d.property.is_picture()) {
+                match &mut d.value {
+                    Value::Length(Length::Calc(i)) => *i += calc_base,
+                    Value::Var(i) => *i += var_base,
+                    Value::Grid(i) => *i += grid_base,
+                    _ => {}
+                }
+                apply(d, Origin::Author, OWN, None, 1 << 30, u32::MAX >> 1);
+            }
+        }
+        let fs = style.px(Property::FontSize);
+        let mut set = picture_start();
+        for (k, winner) in winners.iter().enumerate() {
+            let Some(mut v) = *winner else { continue };
+            let p = Property::ALL[Property::CORE + k];
+            if let Value::Var(i) = v {
+                v = self.read_var(i, p, custom, cx);
+            }
+            set[k] = match v {
+                Value::Inherit => parent.picture(p),
+                Value::Initial | Value::Unset => initial(p),
+                // A mix of units is kept in the table of the sets, because the set outlives the styles of this page. A `min()`, `max()` or
+                // `clamp()` is not read: the starting value.
+                Value::Length(Length::Calc(i)) => {
+                    let lin = cx.linear(i);
+                    let (x, pct) = (lin.to_px(fs, cx.root_font_size, cx.viewport), lin.pct());
+                    match (calc::is_tree(lin), x, pct) {
+                        (true, ..) => initial(p),
+                        (_, x, 0.0) => Value::Length(Length::Px(x)),
+                        (_, 0.0, pct) => Value::Length(Length::Percent(pct)),
+                        _ => keep_picture_calc(x, pct).map_or(initial(p), |i| Value::Length(Length::Calc(i))),
+                    }
+                }
+                v => resolve(p, v, &style.0, parent, fs, cx),
+            };
+        }
+        style.2 = keep_pictures(&set);
     }
 
     /// The value of `property` for the declaration `i` that has `var()`. `unset` when it does not work: a custom property that is not set,
@@ -1373,8 +1443,13 @@ struct Memo {
 
 /// A hash of the values of a style.
 fn style_hash(style: &ComputedStyle) -> u64 {
-    let mut h = 0xcbf2_9ce4_8422_2325_u64 ^ u64::from(style.1);
-    for &v in &style.0 {
+    hash_values(0xcbf2_9ce4_8422_2325_u64 ^ u64::from(style.1) ^ u64::from(style.2) << 32, &style.0)
+}
+
+/// `h` mixed with the computed `values`.
+#[inline(always)]
+pub(crate) fn hash_values(mut h: u64, values: &[Value]) -> u64 {
+    for &v in values {
         let x = match v {
             Value::Color(c) => 1 << 40 | u64::from(u32::from_be_bytes([c.r, c.g, c.b, c.a])),
             Value::Length(Length::Px(x)) => 2 << 40 | u64::from(x.to_bits()),
@@ -1752,8 +1827,9 @@ impl Styles {
     #[inline(always)]
     fn differ(&self, a: u32, new: &Styles, b: u32) -> Change {
         let (x, y) = (&self.styles[a as usize].0, &new.styles[b as usize].0);
-        let mut out = Change::Same;
-        for (i, &p) in Property::ALL.iter().enumerate() {
+        // The picture properties are all paint only, and a set has the same number when its values are equal.
+        let mut out = if self.styles[a as usize].2 == new.styles[b as usize].2 { Change::Same } else { Change::Paint };
+        for (i, &p) in Property::ALL[..Property::CORE].iter().enumerate() {
             let (u, v) = (x[i], y[i]);
             let same = match (u, v) {
                 (Value::Length(Length::Calc(i)), Value::Length(Length::Calc(j))) => calc::flat_same(&self.calcs, i as usize, &new.calcs, j as usize),
@@ -1786,7 +1862,7 @@ impl Styles {
                     Some(style) => {
                         shown += 1;
                         let mut sep = "  ";
-                        for &p in Property::ALL {
+                        for &p in &Property::ALL[..Property::CORE] {
                             // The color of a border that is not drawn tells nothing.
                             let border_color = (p as usize).checked_sub(Property::BorderTopColor as usize).filter(|&side| side < 4);
                             let hidden = border_color.is_some_and(|side| matches!(style.0[Property::BorderTopStyle as usize + side], Value::Keyword(Keyword::None | Keyword::Hidden)));
@@ -1849,15 +1925,18 @@ fn show(v: Value, calcs: &[[f32; 2]], grids: &[Grid]) -> String {
     }
 }
 
-/// The style of one element: one value for each property, in the order of `Property::ALL`.
+/// The style of one element: one value for each property before `Property::CORE`, in the order of `Property::ALL`, the number of its set
+/// of custom properties, and the number of its set of picture values (0: all at the starting value, nearly every element).
 #[derive(Debug, Clone, PartialEq)]
-pub struct ComputedStyle([Value; Property::COUNT], u32);
+pub struct ComputedStyle([Value; Property::CORE], u32, u32);
+
+const _: () = assert!(std::mem::size_of::<ComputedStyle>() == 8 * Property::CORE + 8, "a style gets one `u32` for the picture set and no more");
 
 impl ComputedStyle {
     /// The style of an element that has no rule at all, and whose parent has none.
     pub fn initial() -> ComputedStyle {
-        let mut values = [Value::Initial; Property::COUNT];
-        for &p in Property::ALL {
+        let mut values = [Value::Initial; Property::CORE];
+        for &p in &Property::ALL[..Property::CORE] {
             values[p as usize] = match initial(p) {
                 Value::Keyword(Keyword::CurrentColor) => Value::Color(Color::BLACK),
                 v => v,
@@ -1867,11 +1946,33 @@ impl ComputedStyle {
         for side in 0..4 {
             values[Property::BorderTopWidth as usize + side] = Value::Length(Length::Px(0.0));
         }
-        ComputedStyle(values, 0)
+        ComputedStyle(values, 0, 0)
     }
 
+    /// The value of a property before `Property::CORE`. A picture property is not here: ask `value` or `picture`.
     pub fn get(&self, property: Property) -> Value {
         self.0[property as usize]
+    }
+
+    /// The value of a picture property (`background-image`, `mask-size-x`, ...), read from the set of the style.
+    #[inline(always)]
+    pub fn picture(&self, property: Property) -> Value {
+        picture_value(self.2, property)
+    }
+
+    /// The 12 picture values at once, in the order of `Property::ALL[CORE..]`: one lookup, for the code that reads many of them (paint).
+    pub fn pictures(&self) -> Pictures {
+        picture_values(self.2)
+    }
+
+    /// The value of any property.
+    pub fn value(&self, property: Property) -> Value {
+        if property.is_picture() { self.picture(property) } else { self.get(property) }
+    }
+
+    /// The number of the set of picture values: 0 for the starting values, and then `picture` has nothing to look up.
+    pub fn picture_set(&self) -> u32 {
+        self.2
     }
 
     /// The value of a property that is a length in pixels. 0 if it is not (a percent, or `auto`): ask `get` first for those.
@@ -1899,6 +2000,107 @@ fn as_color(v: Value) -> Color {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many times `RuleSet::picture_pass` ran on this thread: the tests check that an element with no picture property never runs it.
+    static PICTURE_PASSES: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// The values of the picture properties of one element: `Property::ALL[CORE..]`, in that order.
+pub type Pictures = [Value; Property::COUNT - Property::CORE];
+
+/// The sets of picture values, each one once, for the whole process. A style holds the number of its set (`ComputedStyle::2`): the 12
+/// values would make each style 96 bytes larger and each compare slower, for a few elements of a page. Set 0 is the starting values: it is
+/// not in the list. A `Length::Calc` in a set points to `PictureTable::calcs`, not to `Styles::calcs`: a set is shared by pages.
+#[derive(Default)]
+struct PictureTable {
+    sets: Vec<Pictures>,
+    by_hash: HashMap<u64, Vec<u32>, BuildHasherDefault<Fnv>>,
+    calcs: Vec<[f32; 2]>,
+}
+
+static PICTURES: std::sync::Mutex<Option<PictureTable>> = std::sync::Mutex::new(None);
+/// The most sets, and the most `calc()` values, that the table keeps. A page that makes more gets the starting values.
+const MAX_PICTURES: usize = 1 << 16;
+
+fn picture_start() -> Pictures {
+    std::array::from_fn(|k| initial(Property::ALL[Property::CORE + k]))
+}
+
+/// The value of a picture property in the set `id`.
+#[cold]
+#[inline(never)]
+fn picture_value(id: u32, p: Property) -> Value {
+    if id == 0 {
+        return initial(p);
+    }
+    let guard = PICTURES.lock().unwrap_or_else(|e| e.into_inner());
+    guard.as_ref().map_or_else(|| initial(p), |t| t.sets[id as usize - 1][p as usize - Property::CORE])
+}
+
+#[cold]
+#[inline(never)]
+fn picture_values(id: u32) -> Pictures {
+    let guard = PICTURES.lock().unwrap_or_else(|e| e.into_inner());
+    match (id, guard.as_ref()) {
+        (1.., Some(t)) => t.sets[id as usize - 1],
+        _ => picture_start(),
+    }
+}
+
+/// The pixels and the percent of a `Length::Calc` in the picture values of a style.
+pub fn picture_calc(i: u32) -> (f32, f32) {
+    let guard = PICTURES.lock().unwrap_or_else(|e| e.into_inner());
+    guard.as_ref().and_then(|t| t.calcs.get(i as usize)).map_or((0.0, 0.0), |c| (c[0], c[1]))
+}
+
+/// Keep the value `calc(px + pct%)` for a set. `None` when the table is full.
+fn keep_picture_calc(px: f32, pct: f32) -> Option<u32> {
+    let mut guard = PICTURES.lock().unwrap_or_else(|e| e.into_inner());
+    let t = guard.get_or_insert_with(PictureTable::default);
+    let at = t.calcs.iter().position(|c| c.map(f32::to_bits) == [px.to_bits(), pct.to_bits()]);
+    match at {
+        Some(i) => Some(i as u32),
+        None if t.calcs.len() < MAX_PICTURES => {
+            t.calcs.push([px, pct]);
+            Some(t.calcs.len() as u32 - 1)
+        }
+        None => None,
+    }
+}
+
+/// The number of the set `set`. 0 when it is the starting values, or the table is full.
+fn keep_pictures(set: &Pictures) -> u32 {
+    if *set == picture_start() {
+        return 0;
+    }
+    let hash = hash_values(0xcbf2_9ce4_8422_2325, set);
+    let mut guard = PICTURES.lock().unwrap_or_else(|e| e.into_inner());
+    let t = guard.get_or_insert_with(PictureTable::default);
+    if let Some(&id) = t.by_hash.get(&hash).and_then(|list| list.iter().find(|&&i| t.sets[i as usize - 1] == *set)) {
+        return id;
+    }
+    if t.sets.len() >= MAX_PICTURES {
+        return 0;
+    }
+    t.sets.push(*set);
+    let id = t.sets.len() as u32;
+    t.by_hash.entry(hash).or_default().push(id);
+    id
+}
+
+/// Move the declarations of picture properties in `decls[start..]` to the end, in their order, and say where the others end and how many
+/// they are. A rule that has more than `u16::MAX` of them keeps the first ones.
+#[cold]
+#[inline(never)]
+fn split_pictures(decls: &mut Vec<Declared>, start: usize) -> (usize, u16) {
+    let (core, pics): (Vec<Declared>, Vec<Declared>) = decls.drain(start..).partition(|d| !d.property.is_picture());
+    let end = start + core.len();
+    decls.extend(core);
+    decls.extend(pics.into_iter().take(usize::from(u16::MAX)));
+    (end, (decls.len() - end) as u16)
+}
+
 /// The starting value of a property. `currentcolor` for the border colors: `resolve` turns it into the color of the element.
 fn initial(p: Property) -> Value {
     use Keyword as K;
@@ -1914,6 +2116,10 @@ fn initial(p: Property) -> Value {
         BoxSizing => Value::Keyword(K::ContentBox),
         TextColor => Value::Color(Color::BLACK),
         BackgroundColor => Value::Color(Color::TRANSPARENT),
+        BackgroundImage | MaskImage => Value::Keyword(K::None),
+        BackgroundSizeX | BackgroundSizeY | MaskSizeX | MaskSizeY => Value::Keyword(K::Auto),
+        BackgroundPositionX | BackgroundPositionY | MaskPositionX | MaskPositionY => Value::Length(Length::Percent(0.0)),
+        BackgroundRepeat | MaskRepeat => Value::Keyword(K::Repeat),
         FontSize => px(16.0),
         FontWeight => Value::Number(400.0),
         // `min-width: auto` is 0, except on a flex item: there it is the "automatic minimum size" (`flex.rs`).
@@ -1967,10 +2173,10 @@ const INHERITED: u128 = {
 };
 
 /// The initial value of each property.
-fn start() -> &'static [Value; Property::COUNT] {
-    static START: std::sync::LazyLock<[Value; Property::COUNT]> = std::sync::LazyLock::new(|| {
-        let mut values = [Value::Initial; Property::COUNT];
-        for &p in Property::ALL {
+fn start() -> &'static [Value; Property::CORE] {
+    static START: std::sync::LazyLock<[Value; Property::CORE]> = std::sync::LazyLock::new(|| {
+        let mut values = [Value::Initial; Property::CORE];
+        for &p in &Property::ALL[..Property::CORE] {
             values[p as usize] = initial(p);
         }
         values
@@ -2023,8 +2229,37 @@ fn length_to_px(l: Length, font_size: f32, cx: &Cx<'_>) -> f32 {
     }
 }
 
+/// The key of a declaration: the one with the bigger key wins. The parts, from the most important: the origin and `!important`,
+/// the layer, the specificity, and the place in the page. A `style=""` attribute has no layer (`None`): it beats every layer.
+#[inline(always)]
+fn cascade_key(cx: &Cx<'_>, important: bool, origin: Origin, ctx: u8, layer: Option<u32>, specificity: u32, order: u32) -> u128 {
+        let rank = match (important, origin) {
+            (false, Origin::UserAgent) => 0u128,
+            (false, Origin::Author) => 1,
+            (true, Origin::Author) => 2,
+            (true, Origin::UserAgent) => 3,
+        };
+        // `!important` turns the order of the layers around: the earlier layer wins, and no layer is the last.
+        let layer = match layer {
+            None => u32::MAX,
+            Some(l) if important => u32::MAX - 1 - cx.layer_order[l as usize],
+            Some(l) => cx.layer_order[l as usize],
+        };
+        // The tree context comes after the origin and before the layer: the outer context wins for a normal declaration, the inner one for
+        // an important one. The tree of the element (`OWN`) is between them, and a `style=""` attribute is in it.
+        let outer = match ctx {
+            INNER => 0u128,
+            OWN => 1,
+            OUTER => 2,
+            _ => 3,
+        };
+        let tree = if important { 3 - outer } else { outer };
+        rank << 98 | tree << 96 | u128::from(layer) << 64 | u128::from(specificity) << 32 | u128::from(order)
+}
+
 /// Make the computed style from the winning declarations and the style of the parent.
-fn compute(winners: &[Option<Value>; Property::COUNT], mut set: u128, parent: &ComputedStyle, cx: &Cx<'_>) -> ComputedStyle {
+#[inline(always)]
+fn compute(winners: &[Option<Value>; Property::CORE], mut set: u128, parent: &ComputedStyle, cx: &Cx<'_>) -> ComputedStyle {
     use Property::*;
     let fs = font_size(winners[FontSize as usize], parent.px(FontSize), cx);
     // A property with no winner keeps the initial value, or the one of the parent: only the others need a look.
@@ -2089,7 +2324,7 @@ fn compute(winners: &[Option<Value>; Property::COUNT], mut set: u128, parent: &C
             };
         }
     }
-    ComputedStyle(out, 0)
+    ComputedStyle(out, 0, 0)
 }
 
 /// A `min()`, `max()` or `clamp()`: the units now, the percent at layout time (unless the property takes the percent now).
@@ -2105,7 +2340,8 @@ fn resolve_math(p: Property, i: u32, fs: f32, cx: &Cx<'_>) -> Value {
 }
 
 /// Turn a value into its computed form. It does nothing to a value that is computed already (one from the parent).
-fn resolve(p: Property, v: Value, out: &[Value; Property::COUNT], parent: &ComputedStyle, fs: f32, cx: &Cx<'_>) -> Value {
+#[inline(always)]
+fn resolve(p: Property, v: Value, out: &[Value; Property::CORE], parent: &ComputedStyle, fs: f32, cx: &Cx<'_>) -> Value {
     let px = |x| Value::Length(Length::Px(x));
     match v {
         // The color of the element. `color: currentcolor` means the color of the parent (the element has no color yet).
@@ -2379,6 +2615,82 @@ mod tests {
 
     fn px(v: f32) -> Value {
         Value::Length(Length::Px(v))
+    }
+
+    /// The picture properties are one shared set in the style, not 12 slots (`ComputedStyle::2`): a longhand, a shorthand, `inherit`,
+    /// `initial` and a `calc()` still work, an element with none has set 0, and equal sets have equal styles.
+    #[test]
+    fn the_picture_properties_are_one_set() {
+        use Property::*;
+        let html = "<div id=a><p id=b>b</p><p id=c>c</p><p id=d>d</p></div><div id=e>e</div>";
+        let sheet = "#a { background-image: url(a.png); mask: url(m.svg) no-repeat center / 20px; background-position-x: calc(100% - 4px) }
+            #b { background-image: inherit; mask-image: inherit; mask-size: inherit }
+            #c { background-image: initial; background: url(c.png) }
+            #d { background-repeat: repeat-x }";
+        let (doc, all) = styles(html, &[sheet]);
+        let of = |id| all.style(by_id(&doc, id)).unwrap();
+        let url = |u: &str| Value::Number(crate::urls::intern(u) as f32);
+        let (a, b, c, d, e) = (of("a"), of("b"), of("c"), of("d"), of("e"));
+        assert_eq!(e.picture_set(), 0);
+        assert_eq!([e.picture(BackgroundImage), e.picture(MaskRepeat), e.picture(BackgroundSizeX)], [Value::Keyword(Keyword::None), Value::Keyword(Keyword::Repeat), Value::Keyword(Keyword::Auto)]);
+        assert_eq!([a.picture(BackgroundImage), a.picture(MaskImage), a.picture(MaskRepeat), a.picture(MaskSizeX), a.picture(MaskPositionX)], [url("a.png"), url("m.svg"), Value::Keyword(Keyword::NoRepeat), px(20.0), Value::Length(Length::Percent(50.0))]);
+        // A mix of units is kept outside the page: the pixels and the percent come from `picture_calc`.
+        let Value::Length(Length::Calc(i)) = a.picture(BackgroundPositionX) else { panic!("calc") };
+        assert_eq!(picture_calc(i), (-4.0, 100.0));
+        // `inherit` takes the value of the parent; `initial` and the shorthand reset the others of their kind.
+        assert_eq!([b.picture(BackgroundImage), b.picture(MaskImage), b.picture(MaskSizeX), b.picture(MaskRepeat)], [url("a.png"), url("m.svg"), px(20.0), Value::Keyword(Keyword::Repeat)]);
+        assert_eq!([c.picture(BackgroundImage), c.picture(MaskImage)], [url("c.png"), Value::Keyword(Keyword::None)]);
+        assert_eq!([d.picture(BackgroundRepeat), d.picture(BackgroundImage)], [Value::Keyword(Keyword::RepeatX), Value::Keyword(Keyword::None)]);
+        // The same values give the same set, so two elements with one rule share one style.
+        let (doc, styles) = styles("<p id=x>x</p><p id=y>y</p>", &["p { mask-image: url(s.svg) }"]);
+        assert_eq!(styles.style(by_id(&doc, "x")), styles.style(by_id(&doc, "y")));
+    }
+
+    /// Specificity, order, `!important`, `var()`, the first layer of a list and the `style=""` attribute pick the picture winner as they do for
+    /// the other properties.
+    #[test]
+    fn the_picture_winner_follows_the_cascade() {
+        use Property::*;
+        let html = "<p id=a class=k>a</p><p id=b class=k style='background-image: url(i.png)'>b</p><p id=c class=k style='background-image: url(i.png)'>c</p><p id=d>d</p>";
+        let sheet = ":root { --u: url(v.png) } p { background-image: url(p.png) } .k { background-image: url(k.png) } #a { background-image: url(z.png) } #a { background-image: url(y.png) }
+            #c { background-image: url(imp.png) !important } #d { background: url(first.png) no-repeat, url(second.png) red; mask-image: var(--u) }";
+        let (doc, all) = styles(html, &[sheet]);
+        let url = |u: &str| Value::Number(crate::urls::intern(u) as f32);
+        let get = |id, p| all.style(by_id(&doc, id)).unwrap().picture(p);
+        // The id beats the class and the tag; a later rule of the same weight wins; the attribute beats all but `!important`.
+        assert_eq!([get("a", BackgroundImage), get("b", BackgroundImage), get("c", BackgroundImage)], [url("y.png"), url("i.png"), url("imp.png")]);
+        // The list uses its first layer; the color is the one of the last layer; `var()` is read with the custom properties of the element.
+        assert_eq!([get("d", BackgroundImage), get("d", BackgroundRepeat), get("d", MaskImage)], [url("first.png"), Value::Keyword(Keyword::NoRepeat), url("v.png")]);
+        assert_eq!(all.style(by_id(&doc, "d")).unwrap().get(BackgroundColor), Value::Color(Color { r: 255, g: 0, b: 0, a: 255 }));
+    }
+
+    /// An element with no picture declaration never runs `picture_pass`, and has set 0. A rule or a `style=""` declaration of a picture
+    /// property makes it run for the elements that it matches, and for those only.
+    #[test]
+    fn an_element_with_no_picture_property_pays_no_picture_work() {
+        let passes = || PICTURE_PASSES.with(|n| n.get());
+        let at = passes();
+        let (_, plain) = styles("<div style='color: red'><p>a</p><p>b</p></div>", &["div { background-color: #eee; margin: 1px } p { color: blue; background-color: red }"]);
+        assert_eq!(passes() - at, 0);
+        assert!(plain.styles.iter().all(|s| s.2 == 0));
+        let at = passes();
+        let (doc, rule) = styles("<div><p id=m>a</p><p id=n>b</p></div>", &["#m { mask-image: url(x.svg) } p { color: blue }"]);
+        assert_eq!(passes() - at, 1);
+        assert_ne!(rule.style(by_id(&doc, "m")).unwrap().2, 0);
+        assert_eq!(rule.style(by_id(&doc, "n")).unwrap().2, 0);
+        // `background: #fff` resets the image, so it is a picture declaration too. It runs once, for the one element that has it.
+        let at = passes();
+        let (_, inline) = styles("<div style='background: #fff'><p>a</p></div>", &[]);
+        assert_eq!(passes() - at, 1);
+        assert!(inline.styles.iter().all(|s| s.2 == 0));
+    }
+
+    /// The size of `ComputedStyle` is the values of the other properties and two `u32`; an `Entry` has room for its count of picture
+    /// declarations without growing.
+    #[test]
+    fn the_picture_set_does_not_grow_the_structures() {
+        assert_eq!(std::mem::size_of::<ComputedStyle>(), 8 * Property::CORE + 8);
+        assert_eq!(std::mem::size_of::<Entry>(), 80);
     }
 
     /// `Styles::change` after a hover: no matching rule is `Same`, a color is `Paint`, a size is `Layout`, and the background of a

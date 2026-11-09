@@ -239,7 +239,7 @@ fn every_property_has_its_own_slot() {
     big(|| {
         let mut b = at(PAGE);
         js(&mut b, A);
-        let mut names: Vec<&str> = bare_css::values::Property::ALL.iter().map(|p| p.name()).collect();
+        let mut names: Vec<&str> = bare_css::values::Property::LISTED.iter().map(|p| p.name()).collect();
         names.extend(bare_css::values::SHORTHANDS);
         assert!(names.len() > 100);
         for css in names {

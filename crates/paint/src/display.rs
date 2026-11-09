@@ -63,6 +63,8 @@ pub enum Item {
     Poly { at: u32, n: u32, color: u32 },
     /// The picture `DisplayList::images[at]`, scaled to fill `r`: an `<img>`.
     Image { r: IRect, at: u32 },
+    /// The image `DisplayList::layers[at]` inside `r`: a `background-image`, or a `mask-image` over a background color.
+    Layer { r: IRect, at: u32 },
     /// Draw nothing outside `IRect` (and outside the clips before it) until the matching `PopClip`.
     PushClip(IRect),
     PopClip,
@@ -100,6 +102,8 @@ pub struct DisplayList {
     pub points: Vec<(f32, f32)>,
     /// The pictures of `Item::Image`. They are shared with the document: the list holds a count, not a copy.
     pub images: Vec<bare_html::dom::Bitmap>,
+    /// The layers of `Item::Layer`.
+    pub layers: Vec<crate::layer::Layer>,
     /// Text fields that the host draws the text of: the field, and whether it has text now. Paint draws only the
     /// placeholder of an empty one, and nothing for the others. The host sets it before `build`.
     pub hosted: Vec<(NodeId, bool)>,
@@ -138,6 +142,8 @@ struct Page {
     flex: bool,
     /// The page has an `<input>`, `<select>`, `<textarea>` or `<button>`.
     controls: bool,
+    /// A `background-image` or a `mask-image` is used.
+    layers: bool,
 }
 
 /// `Color` as `0xAARRGGBB`.
@@ -215,6 +221,7 @@ impl DisplayList {
         self.shapes.clear();
         self.points.clear();
         self.images.clear();
+        self.layers.clear();
         self.background = 0xffff_ffff;
         let tree = Tree::new(doc, styles);
         let Some(root) = tree.root() else { return };
@@ -240,6 +247,7 @@ impl DisplayList {
         let mut page = Page { controls: [tree.controls.input, tree.controls.select, tree.controls.textarea, tree.controls.button].iter().any(Option::is_some), ..Page::default() };
         for style in styles.each() {
             page.stack |= matches!(style.get(Property::Opacity), Value::Number(o) if o < 1.0) || matches!(style.get(Property::ZIndex), Value::Number(_)) || style.get(Property::Position) == Value::Keyword(Keyword::Sticky);
+            page.layers |= style.picture_set() != 0;
             page.flex |= matches!(style.get(Property::Display), Value::Keyword(Keyword::Flex | Keyword::InlineFlex | Keyword::Grid | Keyword::InlineGrid));
         }
         let mut b = Builder { tree, doc, frags: &layout.fragments, list: self, view, propagated, depth: 0, page, svg: if doc.has_foreign() { doc.find_atom("svg") } else { None }, img: if doc.has_images() { doc.find_atom("img") } else { None }, clips: Vec::new(), areas, scrolls: Vec::new(), ext };
@@ -661,16 +669,59 @@ impl Builder<'_> {
         } else {
             let round = radii(style, b);
             let bg = argb(style.color(Property::BackgroundColor));
-            if bg >> 24 != 0 && f.node != self.propagated {
+            // A mask draws the color itself, and a mask that is not here (yet) hides it.
+            let set = if self.page.layers && style.picture_set() != 0 { Some(style.pictures()) } else { None };
+            let masked = set.as_ref().is_some_and(|set| self.mask(f, set, line, b, bg));
+            if bg >> 24 != 0 && f.node != self.propagated && !masked {
                 match round {
                     Some(s) => self.fill(line, s, bg),
                     None => self.rect(line, b, bg),
                 }
             }
+            if let Some(set) = &set
+                && !masked
+            {
+                self.background_image(f, set, line, b, padding_box(f, style));
+            }
             self.borders(line, b, style, round);
         }
         if let Some(c) = control {
             self.control(f, style, c);
+        }
+    }
+
+    /// The layer for the picture number `id` of the style, if it has arrived and has a size to draw.
+    fn box_layer(&self, set: &bare_css::cascade::Pictures, props: crate::layer::Props, id: f32, area: IRect, color: u32) -> Option<crate::layer::Layer> {
+        let bitmap = self.doc.css_image(id as u32)?.clone();
+        let (tile, origin, repeat) = crate::layer::geometry(set, props, (bitmap.0, bitmap.1), area)?;
+        Some(crate::layer::Layer { bitmap, tile, origin, repeat, color })
+    }
+
+    /// `mask-image`: the background color of the box, through the alpha of the picture. Gives `true` when the box has a mask: then the plain
+    /// color and the background image are not drawn. A mask whose picture has not arrived hides the color (CSS Masking: it is a transparent
+    /// layer). The border, the text and the children are not masked.
+    #[inline(never)]
+    fn mask(&mut self, f: &Fragment, set: &bare_css::cascade::Pictures, line: bool, b: IRect, bg: u32) -> bool {
+        let Value::Number(id) = set[Property::MaskImage as usize - Property::CORE] else { return false };
+        if bg >> 24 != 0
+            && f.node != self.propagated
+            && let Some(layer) = self.box_layer(set, crate::layer::MASK, id, b, bg)
+        {
+            let at = self.list.layers.len() as u32;
+            self.list.layers.push(layer);
+            self.push(line, Item::Layer { r: b, at });
+        }
+        true
+    }
+
+    /// `background-image`: the picture over the background color, positioned in the padding box and cut by the border box.
+    #[inline(never)]
+    fn background_image(&mut self, _f: &Fragment, set: &bare_css::cascade::Pictures, line: bool, b: IRect, area: IRect) {
+        let Value::Number(id) = set[Property::BackgroundImage as usize - Property::CORE] else { return };
+        if let Some(layer) = self.box_layer(set, crate::layer::BACKGROUND, id, area, 0) {
+            let at = self.list.layers.len() as u32;
+            self.list.layers.push(layer);
+            self.push(line, Item::Layer { r: b, at });
         }
     }
 

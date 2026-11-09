@@ -14,6 +14,7 @@ pub mod selector;
 #[cfg(test)]
 mod shadow_tests;
 pub mod tokenizer;
+pub mod urls;
 pub mod values;
 pub mod var;
 // `pub mod` makes the module visible to other crates: `bare_css::tokenizer`.

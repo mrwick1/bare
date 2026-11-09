@@ -354,7 +354,7 @@ impl Run<'_> {
         if st.bytes > MAX_FLAT {
             return Err(limit("css-flat-bytes"));
         }
-        parts.push(SheetPart { text: text.to_string(), layer });
+        parts.push(SheetPart { text: absolute_urls(text, url).into_owned(), layer });
         Ok(())
     }
 
@@ -448,4 +448,66 @@ struct Flat {
     path: Vec<String>,
     refs: usize,
     bytes: usize,
+}
+
+/// `text` with each `url(...)` that is not absolute made absolute against `base`, the address of the sheet. A picture in a style sheet is
+/// relative to the sheet, and the sheet is joined with others after this, so the base would be lost. A `data:` URL, a fragment (`#a`), an
+/// address that is absolute already and one that cannot be joined stay as they are. The text is not copied when nothing changes.
+pub(crate) fn absolute_urls<'a>(text: &'a str, base: &Url) -> std::borrow::Cow<'a, str> {
+    let b = text.as_bytes();
+    let mut out: Option<String> = None;
+    let (mut copied, mut i) = (0, 0);
+    // `find` looks for the bracket with a fast search; a `(` that does not follow `url` is skipped.
+    while let Some(k) = text.get(i..).and_then(|t| t.find('(')) {
+        let open = i + k;
+        i = open + 1;
+        if open < 3 || !b[open - 3..open].eq_ignore_ascii_case(b"url") {
+            continue;
+        }
+        let start = open - 3;
+        // The address of an `@import` is joined by `flatten`, which reads the text before this call: it stays as it is.
+        if bare_css::urls::follows_import(&text[..start]) {
+            continue;
+        }
+        while i < b.len() && b[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let quote = b.get(i).copied().filter(|q| matches!(q, b'"' | b'\''));
+        let from = i + usize::from(quote.is_some());
+        let mut end = from;
+        while end < b.len() && b[end] != quote.unwrap_or(b')') && b[end] != b'\\' && (quote.is_some() || !b[end].is_ascii_whitespace()) {
+            end += 1;
+        }
+        // The closing quote, white space and the `)` after the address.
+        let mut close = end + usize::from(quote.is_some());
+        while close < b.len() && b[close].is_ascii_whitespace() {
+            close += 1;
+        }
+        if end >= b.len() || b.get(close) != Some(&b')') || b[end] == b'\\' {
+            continue;
+        }
+        let raw = text[from..end].trim();
+        i = close + 1;
+        if raw.is_empty() || raw.starts_with('#') || raw.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("data:")) {
+            continue;
+        }
+        let Ok(joined) = base.join(raw) else { continue };
+        let joined = joined.to_string();
+        if joined == raw || joined.contains(['"', '\\', '\n', '\r']) {
+            continue;
+        }
+        let o = out.get_or_insert_with(|| String::with_capacity(text.len() + 64));
+        o.push_str(&text[copied..start]);
+        o.push_str("url(\"");
+        o.push_str(&joined);
+        o.push_str("\")");
+        copied = i;
+    }
+    match out {
+        Some(mut o) => {
+            o.push_str(&text[copied..]);
+            o.into()
+        }
+        None => text.into(),
+    }
 }

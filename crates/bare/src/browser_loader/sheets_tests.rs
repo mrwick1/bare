@@ -647,3 +647,21 @@ fn cached_sheet_notifies_new_active_links_but_not_inactive_links() {
         assert_eq!(srv.hits("/a.css"),1);
     });
 }
+
+#[test]
+fn a_url_in_a_sheet_is_made_absolute_against_the_sheet() {
+    use super::sheets::absolute_urls;
+    let base = bare_url::Url::parse("https://a.test/w/load.php?x=1").unwrap();
+    let abs = |t: &str| absolute_urls(t, &base).into_owned();
+    assert_eq!(abs("a{background-image:url(/w/i.svg?8)}"), "a{background-image:url(\"https://a.test/w/i.svg?8\")}");
+    assert_eq!(abs("a{mask:URL( 'i/b.png' ) no-repeat}b{x:url(\"../c.png\")}"), "a{mask:url(\"https://a.test/w/i/b.png\") no-repeat}b{x:url(\"https://a.test/c.png\")}");
+    // Left as they are: data, a fragment, an absolute address, an escape, a url( with no end, and text with no url.
+    for same in ["a{b:url(data:image/svg+xml,%3csvg/%3e)}", "a{b:url(\"DATA:x,y\")}", "a{b:url(#x)}", "a{b:url(https://c.test/d.png)}", "a{b:url(a\\ b)}", "a{b:url(x", "a{b:red}", "url(", ""] {
+        assert_eq!(abs(same), same);
+    }
+    // The text is borrowed when nothing changes.
+    assert!(matches!(absolute_urls("a{b:url(#x)}", &base), std::borrow::Cow::Borrowed(_)));
+    // The address of an `@import` is joined by `flatten`: it stays, with any case and white space before `url(`. The next `url(` is made absolute.
+    assert_eq!(abs("@import url(/s.css) layer(x);a{b:url(/i.png)}"), "@import url(/s.css) layer(x);a{b:url(\"https://a.test/i.png\")}");
+    assert_eq!(abs("@IMPORT\n url('s.css');"), "@IMPORT\n url('s.css');");
+}
