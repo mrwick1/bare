@@ -38,7 +38,7 @@
 //!
 //! Comments compare Rust with JavaScript, because you know JS.
 
-use crate::calc::{self, Calc, Linear};
+use crate::calc::{self, Calc, Linear, Node};
 use crate::color::{self, Color};
 use crate::var::{self, VarDecl};
 use crate::tokenizer::{Token, Tokens, tokenize};
@@ -321,7 +321,7 @@ pub fn parse_declaration(name: &str, value: &str, important: bool, side: &mut Si
 /// What a value can point to: the `calc()` that mix units, the declarations that have `var()`, and the grid lists.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Side {
-    pub calcs: Vec<Linear>,
+    pub calcs: Vec<Node<Linear>>,
     pub vars: Vec<VarDecl>,
     pub grids: Vec<crate::grid::Grid>,
 }
@@ -353,7 +353,7 @@ struct Parts {
 
 impl Parts {
     /// `None` when the value has no part, or a part that is a mistake in every property (a `{` block, for example).
-    fn read(value: &str, calcs: &mut Vec<Linear>) -> Option<Parts> {
+    fn read(value: &str, calcs: &mut Vec<Node<Linear>>) -> Option<Parts> {
         let mut parts = Parts { items: [Part::Other; 8], len: 0, more: false };
         let mut tokens = tokenize(value);
         while let Some(token) = tokens.next() {
@@ -366,7 +366,7 @@ impl Parts {
                 Token::Dimension { value, unit, .. } => length(value, &unit).map_or(Part::Bad, Part::Length),
                 Token::Delim('/') => Part::Slash,
                 Token::Function(name) if color::is_function(&name) => color::parse_function(&name, &mut tokens).map_or(Part::Bad, Part::Color),
-                Token::Function(name) if calc::is_calc(&name) => read_calc(&mut tokens, calcs),
+                Token::Function(name) if calc::is_calc(&name) || calc::is_math(&name) => read_calc(&name, &mut tokens, calcs),
                 Token::Function(_) | Token::OpenParen | Token::OpenSquare | Token::OpenCurly => {
                     skip_block(&mut tokens);
                     Part::Other
@@ -391,7 +391,7 @@ impl Parts {
 }
 
 /// After `calc(`: read to the matching `)` and compute. A number is a number. One unit is a plain length. A mix goes in `calcs`.
-fn read_calc(tokens: &mut Tokens<'_>, calcs: &mut Vec<Linear>) -> Part {
+fn read_calc(name: &str, tokens: &mut Tokens<'_>, calcs: &mut Vec<Node<Linear>>) -> Part {
     let mut inner = Vec::new();
     let mut depth = 1u32;
     while let Some(token) = tokens.next() {
@@ -408,13 +408,18 @@ fn read_calc(tokens: &mut Tokens<'_>, calcs: &mut Vec<Linear>) -> Part {
         inner.push(token);
     }
     // A `calc(` that is not closed ends with the value: the standard closes it there.
-    match calc::parse(&inner, length) {
+    let result = if calc::is_calc(name) { calc::parse(&inner, length) } else { calc::parse_fn(name, &inner, length) };
+    match result {
+        Some(Calc::Math(node)) => {
+            calcs.push(node);
+            Part::Length(Length::Calc(calcs.len() as u32 - 1))
+        }
         Some(Calc::Number(value)) => Part::Number { value, int: value.fract() == 0.0 },
         Some(Calc::Length(lin)) => match lin.single() {
             Some(Length::Percent(p)) => Part::Percent(p),
             Some(l) => Part::Length(l),
             None => {
-                calcs.push(lin);
+                calcs.push(Node::Leaf(lin));
                 Part::Length(Length::Calc(calcs.len() as u32 - 1))
             }
         },

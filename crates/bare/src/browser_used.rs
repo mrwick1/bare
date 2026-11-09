@@ -173,8 +173,7 @@ impl<'a> Ctx<'a> {
             Cv::Length(Length::Px(x)) => Some(x),
             Cv::Length(Length::Percent(p)) => Some(lu(base * p / 100.0)),
             Cv::Length(Length::Calc(i)) => {
-                let (px, pct) = self.styles.calc(i);
-                Some(lu(px + base * pct / 100.0))
+                Some(lu(self.styles.calc_at(i, base)))
             }
             _ => None,
         }
@@ -460,6 +459,9 @@ impl<'a> Ctx<'a> {
 
 /// `calc(100% - 20px)`: the percent first, as Chrome prints it.
 pub(crate) fn calc_text(styles: &Styles, i: u32) -> String {
+    if let Some(text) = styles.calc_text(i) {
+        return text;
+    }
     let (px, pct) = styles.calc(i);
     let sign = |x: f32| if x < 0.0 { '-' } else { '+' };
     match (px == 0.0, pct == 0.0) {
