@@ -5048,3 +5048,24 @@ Validation on archMachine: `cargo test --release --workspace` passed. All 33 pub
 The 805-row instruction matrix used baseline `f28752bf6d`. The final run had no row over +0.5% under both allocators. Two form rows grew under glibc only: +0.687% and +0.717%. Their jemalloc changes were +0.034% and +0.020%. Earlier stretch and scroll regressions were confirmed with instruction counts. Lazy image sizing fixed the stretch rows. Moving missing-glyph lookup out of the common path fixed the scroll rows. A separate four-row recheck passed. `ComputedStyle` grew from 748 to 756 bytes for the new property. No returned style value is inspected on a hot path.
 
 After rebasing onto `44ab2f8e37`, the bare, CSS, layout, and paint library suites passed. The 68-row cost recheck against that current main passed under both allocators. It includes the prior stretch, scroll, and form rows, plus block, CSS, flex, and grid stress cases.
+
+## Backward RegExp assertions and selector task recovery (2026-11-10)
+
+RegExp now accepts positive and negative lookbehind. The compiler reverses concatenation inside the assertion. The VM reads consuming instructions backwards. Alternatives keep their source order. Repeats keep their greedy or lazy order. Captures store forward input spans. Nested lookahead reads forwards. The existing assertion barrier restores the input position and bounds backtracking.
+
+The backward instruction handler is cold. No runtime struct gains a field. The existing test asserts that the match result occupies 24 bytes. Patterns without lookbehind keep their instruction sequence.
+
+The selector limit counts the UTF-8 bytes of an uncached selector string. It rejects more than 1,024 bytes before parsing or interning names. It does not count node traversal. That cap remains in place. A Host("dom-selector") limit now ends only the current task. The existing limit of five task aborts still bounds the page. A regression test checks that later scripts and click handlers run.
+
+Both regression tests failed before the changes. The release workspace tests pass. The Node oracle agrees on 612 added cases, including variable-length captures, backreferences, nested assertions, Unicode input and ignoreCase. The full standalone fixture check has four existing stale unsupported expectations for named groups and Unicode properties. The added lookbehind cases have no mismatches.
+
+The final public journey suite passes all 33 journeys with no retries. The live GitHub home and rust-lang/rust pages reach readyState complete after one selector task abort. Their console reports Error: Unable to get document domain. Before the rebase, GitLab stopped at Limit(Scripts). On the final binaries it stops at Host("fetch-queue").
+
+
+The cost baseline is current main 01a1a0d2d3 from base-build. All 805 rows ran under both allocators. The first pass covered 629 rows. After base-build supplied the missing bare-stress binary, the other 176 rows passed. No row exceeds +0.5% under both allocators. builtins_load zero 10 is +0.504% with glibc and +0.495% with jemalloc. This meets the allocator-only exception.
+
+The counts use perf stat -e instructions:u, with the minimum of three runs per allocator. nm -S shows the largest inlined Regex::exec_in instance grew from 6,837 to 7,697 bytes. Match stays at 24 bytes. No runtime struct gains a field. Three structural alternatives did not improve the zero-width rows. The final code keeps the measured version that passes the cost rule.
+
+The test262 baseline gate passes. exec_diff reports zero differences in 79 runs. Typing costs 282.5 M instructions per textarea key and 287.9 M per input key. Peak RSS at 50 keys is 33.0 MiB. After the final rebase, 1,134 browser library tests and 840 JS library tests pass.
+
+Not tested: the full test262 suite and authenticated GitHub or GitLab flows.
