@@ -118,18 +118,17 @@ pub enum TagError {
     Malformed,
     /// Any other tag that is not well formed (a duplicate variant or singleton, an empty extension).
     Invalid,
-    /// An extension or private use (`-u-hc-h23`, `-x-...`): bare does not read them yet.
-    Extension,
 }
 
-/// CanonicalizeUnicodeLocaleId for the tags bare reads: `language[-script][-region](-variant)*`, with the case of each part
-/// made canonical. A tag with an extension is refused (`TagError::Extension`) after its syntax is checked.
+/// CanonicalizeUnicodeLocaleId: `language[-script][-region](-variant)*(-extension)*`, with the case of each part made canonical.
+/// Extensions are checked and put in canonical form by `canonical_ext`.
 pub fn canonical_tag(s: &str) -> Result<String, TagError> {
     let parts: Vec<&str> = s.split('-').collect();
     let alpha = |p: &str| p.bytes().all(|c| c.is_ascii_alphabetic());
     let alnum = |p: &str| !p.is_empty() && p.bytes().all(|c| c.is_ascii_alphanumeric());
     let lang = parts[0];
-    if !(alpha(lang) && matches!(lang.len(), 2 | 3 | 5..=8)) || parts.iter().any(|p| !alnum(p) || p.len() > 8) {
+    // a subtag of more than 8 characters is "malformed" before the extensions; inside one it is just invalid
+    if !(alpha(lang) && matches!(lang.len(), 2 | 3 | 5..=8)) || parts.iter().any(|p| !alnum(p) || p.len() > 8) && malformed(&parts) {
         return Err(TagError::Malformed);
     }
     let mut out = lang.to_ascii_lowercase();
@@ -162,22 +161,41 @@ pub fn canonical_tag(s: &str) -> Result<String, TagError> {
     if i == parts.len() {
         return Ok(out);
     }
-    // the rest must be extensions or private use: a singleton, then subtags of 2 to 8 (1 to 8 after `x`, which takes the rest)
-    let mut j = i;
+    canonical_ext(&parts[i..], out)
+}
+
+/// True for a tag with a subtag of more than 8 characters before its first singleton, or a subtag that is not letters and digits.
+#[cold]
+#[inline(never)]
+fn malformed(parts: &[&str]) -> bool {
+    parts.iter().any(|p| p.is_empty() || !p.bytes().all(|c| c.is_ascii_alphanumeric())) || parts.iter().skip(1).take_while(|p| p.len() != 1).any(|p| p.len() > 8)
+}
+
+/// The extensions of a tag (the parts after the variants), checked and in canonical form (RFC 5646, UTS 35): sorted by singleton
+/// with `x` last; a `-u-` extension has its attributes and keywords sorted by key (the first of a duplicate key wins, the value
+/// `true` is dropped); a `-t-` extension has its fields sorted by key; every part is lower case. `out` is the tag so far.
+#[cold]
+#[inline(never)]
+fn canonical_ext(parts: &[&str], mut out: String) -> Result<String, TagError> {
+    let alnum = |p: &str| !p.is_empty() && p.bytes().all(|c| c.is_ascii_alphanumeric());
+    let mut groups: Vec<(u8, &[&str])> = Vec::new();
     let mut seen = 0u128;
+    let mut j = 0;
     while j < parts.len() {
         let s = parts[j];
         if s.len() != 1 || !alnum(s) {
             return Err(TagError::Malformed);
         }
-        let bit = 1u128 << (s.as_bytes()[0].to_ascii_lowercase() - b'0');
+        let single = s.as_bytes()[0].to_ascii_lowercase();
+        let bit = 1u128 << (single - b'0');
         if seen & bit != 0 {
             return Err(TagError::Invalid);
         }
         seen |= bit;
-        let x = s.eq_ignore_ascii_case("x");
+        let x = single == b'x';
         j += 1;
         let start = j;
+        // the rest must be extensions or private use: a singleton, then subtags of 2 to 8 (1 to 8 after `x`, which takes the rest)
         while j < parts.len() && (x || parts[j].len() != 1) {
             let p = parts[j];
             if !alnum(p) || p.len() > 8 || (!x && p.len() < 2) {
@@ -188,8 +206,141 @@ pub fn canonical_tag(s: &str) -> Result<String, TagError> {
         if j == start {
             return Err(TagError::Invalid);
         }
+        groups.push((single, &parts[start..j]));
     }
-    Err(TagError::Extension)
+    groups.sort_by_key(|g| (g.0 == b'x', g.0));
+    for (single, subtags) in groups {
+        out.push('-');
+        out.push(single as char);
+        match single {
+            b'u' => unicode_ext(subtags, &mut out)?,
+            b't' => transformed_ext(subtags, &mut out)?,
+            _ => {
+                for p in subtags {
+                    out.push('-');
+                    out.push_str(&p.to_ascii_lowercase());
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// A key of `-u-` or `-t-`: two characters, the second a letter (`-u-`) or a digit (`-t-`).
+fn is_key(p: &str, digit: bool) -> bool {
+    let b = p.as_bytes();
+    b.len() == 2 && if digit { b[0].is_ascii_alphabetic() && b[1].is_ascii_digit() } else { b[1].is_ascii_alphabetic() }
+}
+
+/// The subtags of a `-u-` extension: attributes (3 to 8 characters), then keywords (a key and its type subtags).
+fn unicode_ext(subtags: &[&str], out: &mut String) -> Result<(), TagError> {
+    let mut attrs: Vec<String> = Vec::new();
+    let mut keys: Vec<(String, String)> = Vec::new();
+    for p in subtags {
+        let p = p.to_ascii_lowercase();
+        if p.len() == 2 {
+            if !is_key(&p, false) {
+                return Err(TagError::Invalid);
+            }
+            keys.push((p, String::new()));
+        } else if let Some(k) = keys.last_mut() {
+            k.1.push_str(if k.1.is_empty() { "" } else { "-" });
+            k.1.push_str(&p);
+        } else if !attrs.contains(&p) {
+            attrs.push(p);
+        }
+    }
+    attrs.sort();
+    for a in &attrs {
+        out.push('-');
+        out.push_str(a);
+    }
+    let mut done: Vec<&str> = Vec::new();
+    keys.sort_by(|a, b| a.0.cmp(&b.0));
+    for (k, v) in &keys {
+        if done.contains(&k.as_str()) {
+            continue;
+        }
+        done.push(k);
+        out.push('-');
+        out.push_str(k);
+        let v = match (k.as_str(), v.as_str()) {
+            (_, "true") => "",
+            ("ca", "islamicc") => "islamic-civil",
+            (_, v) => v,
+        };
+        if !v.is_empty() {
+            out.push('-');
+            out.push_str(v);
+        }
+    }
+    Ok(())
+}
+
+/// The subtags of a `-t-` extension: an optional language tag, then fields (a key with a digit, and values of 3 to 8 characters).
+fn transformed_ext(subtags: &[&str], out: &mut String) -> Result<(), TagError> {
+    let at = subtags.iter().position(|p| is_key(p, true)).unwrap_or(subtags.len());
+    if at > 0 && !(subtags[0].bytes().all(|c| c.is_ascii_alphabetic()) && matches!(subtags[0].len(), 2 | 3 | 5..=8)) {
+        return Err(TagError::Invalid);
+    }
+    for p in &subtags[..at] {
+        out.push('-');
+        out.push_str(&p.to_ascii_lowercase());
+    }
+    let mut fields: Vec<(String, String)> = Vec::new();
+    for p in &subtags[at..] {
+        let p = p.to_ascii_lowercase();
+        if is_key(&p, true) {
+            if fields.iter().any(|f| f.0 == p) {
+                return Err(TagError::Invalid);
+            }
+            fields.push((p, String::new()));
+        } else if p.len() < 3 {
+            return Err(TagError::Invalid);
+        } else if let Some(f) = fields.last_mut() {
+            f.1.push('-');
+            f.1.push_str(&p);
+        }
+    }
+    if fields.iter().any(|f| f.1.is_empty()) {
+        return Err(TagError::Invalid);
+    }
+    fields.sort_by(|a, b| a.0.cmp(&b.0));
+    for (k, v) in &fields {
+        out.push('-');
+        out.push_str(k);
+        out.push_str(v);
+    }
+    Ok(())
+}
+
+/// True when a canonical tag may have a `-u-` extension (a private use part can fake a match: `unicode_keywords` is exact).
+pub fn has_unicode_ext(tag: &str) -> bool {
+    tag.len() > 5 && tag.contains("-u-")
+}
+
+/// The keywords of the `-u-` extension of a canonical tag, as (key, type); the type is empty for `true`, and `-` joins the
+/// subtags of a type. Attributes are skipped.
+#[cold]
+#[inline(never)]
+pub fn unicode_keywords(tag: &str) -> Vec<(String, String)> {
+    let parts: Vec<&str> = tag.split('-').collect();
+    let mut i = parts.iter().skip(1).position(|p| p.len() == 1).map_or(parts.len(), |p| p + 1);
+    let mut out: Vec<(String, String)> = Vec::new();
+    while i < parts.len() && parts[i] != "x" {
+        let single = parts[i];
+        i += 1;
+        while i < parts.len() && parts[i].len() != 1 {
+            if single == "u" && parts[i].len() == 2 {
+                out.push((parts[i].to_string(), String::new()));
+            } else if single == "u" && let Some(k) = out.last_mut() {
+                k.1.push_str(if k.1.is_empty() { "" } else { "-" });
+                k.1.push_str(parts[i]);
+            }
+            i += 1;
+        }
+    }
+    out
 }
 
 /// The resolved hour cycle for a locale: `hour12` (None, true, false) and `hourCycle` (None or 0..=3).

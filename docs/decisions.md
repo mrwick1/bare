@@ -699,3 +699,19 @@ npmjs.com pushes one state of about 1.48 MB (9,301 objects) on load. The old cap
 - Objects of one state: 2^18 (was 2^14). The bytes cap bounds them too (48 bytes each). Depth stays 64.
 - A state over the bytes, total or objects cap throws a `DataCloneError` `DOMException`. The page can catch it, and nothing is committed. The size is the page's choice, so it must not stop the page. Firefox throws too, but its error is `NS_ERROR_ILLEGAL_VALUE`, not a `DOMException`. bare uses `DataCloneError` because the serialize step of the standard throws that error.
 - The depth cap stays a `Limit`. It guards the native stack of the walk.
+
+## Locale extensions, console and `CSS`
+
+`Intl` reads three `-u-` keys: `hc`, `ca` and `nu`. ECMA-402 lists these for `DateTimeFormat` (`hc`, `ca`, `nu`) and `NumberFormat` (`nu`), and `Collator` reads `co`, `kn` and `kf`. For `en`, ICU has one non-default collation (`emoji`, `eor`); bare gates it as `Unsupported`. Other keys change no output of bare, so it ignores them, as the spec does for a key a constructor does not list.
+
+- The option wins over the keyword. A keyword stays in `resolvedOptions().locale` only when it was used. This matches Node 22.
+- A `ca` or `nu` value that ICU has and bare has not is `Unsupported`, as the option is. An unknown value is ignored.
+- `-t-` and `-x-` are checked for syntax and then dropped from the resolved locale. The canonical tag sorts the extensions and the keys, as UTS 35 says.
+- A kept extension is in a side table (`IntlState::exts`), not in the formatter. A formatter with no extension pays no byte. The create functions set it in cold code, only while a constructor runs.
+
+`console` has the whole WHATWG namespace. The sink has three levels (`Log`, `Warn`, `Error`), so `info`, `debug`, `trace`, `dir`, `dirxml` and `table` use `Log`, and `assert` uses `Error`.
+
+- `time`, `count` and the label maps hold 1,024 labels. A label has 256 bytes at most. Over the bound, one warning is logged and nothing is kept.
+- A group indents by 2 spaces. The depth stops at 64.
+
+`CSS` has `supports` and `escape`. `supports` calls `bare_css::at_rules::supports_matches`, so `@supports` and `CSS.supports` use one parser. `CSS.registerProperty` stays undefined: bare has no registered custom properties.

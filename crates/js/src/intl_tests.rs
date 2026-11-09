@@ -27,9 +27,35 @@ fn tags_are_canonical_or_refused_like_v8() {
     for t in ["en-US-u", "en-a-bc-a-de", "en-US-x", "en-u-a", "en-1abc-1abc", "en-t-a", "en-z-ab-Z-cd"] {
         assert_eq!(canonical_tag(t), Err(TagError::Invalid), "{t}");
     }
-    for t in ["en-u-ca-gregory", "en-x-a-b", "en-a-bc", "en-u-ca", "en-US-x-zz"] {
-        assert_eq!(canonical_tag(t), Err(TagError::Extension), "{t}");
+    // extensions are in canonical form (the same strings as `Intl.getCanonicalLocales` in Node 22)
+    for (t, c) in [
+        ("en-u-ca-gregory", "en-u-ca-gregory"),
+        ("en-X-A-B", "en-x-a-b"),
+        ("en-a-bc", "en-a-bc"),
+        ("en-u-ca", "en-u-ca"),
+        ("en-US-x-zz", "en-US-x-zz"),
+        ("EN-U-HC-H23-CA-GREGORY", "en-u-ca-gregory-hc-h23"),
+        ("en-u-attr-hc-h23-hc-h12", "en-u-attr-hc-h23"),
+        ("en-u-kn-true-ca-islamicc", "en-u-ca-islamic-civil-kn"),
+        ("en-u-hc-h23-t-fr-FR-m0-ungegn-h0-hybrid-x-q", "en-t-fr-fr-h0-hybrid-m0-ungegn-u-hc-h23-x-q"),
+    ] {
+        assert_eq!(canonical_tag(t).as_deref(), Ok(c), "{t}");
     }
+    // a long subtag is malformed before the extensions and invalid inside one
+    assert_eq!(canonical_tag("en-u-ca-gregorian"), Err(TagError::Invalid));
+    for t in ["en-t-m0-xx", "en-t-fr-m0", "en-u-1", "en-t-fr-m0-abc-m0-def"] {
+        assert_eq!(canonical_tag(t), Err(TagError::Invalid), "{t}");
+    }
+}
+
+#[test]
+fn keywords_of_the_unicode_extension() {
+    let kw = |t: &str| unicode_keywords(&canonical_tag(t).unwrap());
+    let pair = |k: &str, v: &str| (k.to_string(), v.to_string());
+    assert_eq!(kw("en-u-ca-islamicc-kn-hc-h23"), [pair("ca", "islamic-civil"), pair("hc", "h23"), pair("kn", "")]);
+    assert_eq!(kw("en-t-fr-u-nu-latn"), [pair("nu", "latn")]);
+    assert!(kw("en-x-u-hc-h23").is_empty());
+    assert!(kw("en-US").is_empty());
 }
 
 #[test]

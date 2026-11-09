@@ -188,18 +188,36 @@ impl<'p> Interp<'p> {
     }
 
     /// InitializeNumberFormat (`who` is the caller named by the TypeError for a null `options`).
+    /// The `-u-` keyword `nu` of the requested locales. `latn` goes in `resolvedOptions().locale` (`pending_ext`); another
+    /// numbering system that ICU has sets the gate, as the option does.
+    #[cold]
+    #[inline(never)]
+    fn intl_nf_keywords(&mut self, requested: &[String], nu: Option<&str>, gate: &mut Option<&'static str>) {
+        let kw = Self::intl_keywords(requested);
+        match Self::intl_keyword_used(&kw, "nu", nu, "latn") {
+            Ok(true) => self.set_ext(Some("-u-nu-latn".into())),
+            Ok(false) => {}
+            Err(_) => *gate = Some("Intl.NumberFormat option numberingSystem"),
+        }
+    }
+
     fn intl_nf_create(&mut self, locales: Value, options: Value, who: &str) -> Res<icu::NumFmt> {
         let requested = self.intl_locales(locales)?;
         let opts = self.intl_options(options, who)?;
         self.intl_opt_for(who, opts, "localeMatcher", &["lookup", "best fit"])?;
         let mut gate = None;
+        let mut nu = None;
         if let Some(s) = self.intl_opt_str(opts, "numberingSystem")? {
             self.intl_type_syntax(&s, "numberingSystem")?;
             if !s.eq_ignore_ascii_case("latn") {
                 gate = Some("Intl.NumberFormat option numberingSystem");
             }
+            nu = Some(s);
         }
         let loc = self.intl_pick(&requested).unwrap_or(0);
+        if requested.iter().any(|t| intl::has_unicode_ext(t)) {
+            self.intl_nf_keywords(&requested, nu.as_deref(), &mut gate);
+        }
         let mut f = icu::NumFmt {
             loc,
             style: icu::Style::Decimal,
@@ -364,6 +382,37 @@ impl<'p> Interp<'p> {
 
     // ------------------------------------------------------------ Collator
 
+    /// The `-u-` keywords `kn`, `kf` and `co` of the requested locales. `kn` and `kf` set `numeric` and `caseFirst` when no option
+    /// did, and stay in `resolvedOptions().locale` (`pending_ext`), as in V8. A collation that bare lacks (`emoji`, `eor`, which
+    /// `en` has) is `Unsupported`, as the option is; the other values of `co` are not used for `en`.
+    #[cold]
+    #[inline(never)]
+    fn intl_coll_keywords(&mut self, requested: &[String], numeric: &mut Option<bool>, case_first: &mut Option<u8>) -> Res<()> {
+        let kw = Self::intl_keywords(requested);
+        if kw.iter().any(|k| k.0 == "co" && (k.1 == "emoji" || k.1 == "eor")) {
+            return Err(unsupported("Intl.Collator option collation", Span::default()));
+        }
+        let mut ext = String::new();
+        for (k, v) in &kw {
+            match (k.as_str(), v.as_str()) {
+                ("kf", "upper" | "lower" | "false") => {
+                    ext.push_str(&format!("-kf-{v}"));
+                    case_first.get_or_insert(match v.as_str() { "upper" => 1, "lower" => 2, _ => 0 });
+                }
+                // V8 reads a `kn` with any type but `false` as true
+                ("kn", v) => {
+                    ext.push_str(if v == "false" { "-kn-false" } else { "-kn" });
+                    numeric.get_or_insert(v != "false");
+                }
+                _ => {}
+            }
+        }
+        if !ext.is_empty() {
+            self.set_ext(Some(format!("-u{ext}").into()));
+        }
+        Ok(())
+    }
+
     fn intl_coll_create(&mut self, locales: Value, options: Value, who: &'static str) -> Res<IntlColl> {
         let requested = self.intl_locales(locales)?;
         let opts = self.intl_options(options, who)?;
@@ -375,12 +424,28 @@ impl<'p> Interp<'p> {
             self.intl_type_syntax(&c, "collation")?;
             return Err(unsupported("Intl.Collator option collation", Span::default()));
         }
-        let numeric = self.intl_opt_bool(opts, "numeric")?.unwrap_or(false);
-        let case_first = self.intl_opt_for(who, opts, "caseFirst", &CASE_FIRST)?.map_or(0, |i| [1, 2, 0][i]);
+        let mut numeric = self.intl_opt_bool(opts, "numeric")?;
+        let mut case_first = self.intl_opt_for(who, opts, "caseFirst", &CASE_FIRST)?.map(|i| [1, 2, 0][i] as u8);
         let loc = self.intl_pick(&requested).unwrap_or(0);
+        if requested.iter().any(|t| intl::has_unicode_ext(t)) {
+            self.intl_coll_keywords(&requested, &mut numeric, &mut case_first)?;
+        }
+        let (numeric, case_first) = (numeric.unwrap_or(false), case_first.unwrap_or(0));
         let sensitivity = self.intl_opt_for(who, opts, "sensitivity", &SENSITIVITY)?.unwrap_or(3) as u8;
         let ignore_punctuation = self.intl_opt_bool(opts, "ignorePunctuation")?.unwrap_or(false);
         Ok(IntlColl { key: icu::CollKey { sensitivity, case_first, numeric, ignore_punctuation }, loc, bound: None })
+    }
+
+    /// The locale of `resolvedOptions` of a collator: `en-US` or `en`, and the kept extension.
+    fn intl_coll_locale(&mut self, this: Value, loc: u8) -> Res<Value> {
+        let base = if loc == 0 { "en-US" } else { "en" };
+        if let Value::Object(o) = this
+            && let Some(e) = self.intl.exts.get(&o)
+        {
+            let s = format!("{base}{e}");
+            return self.str_value(&s);
+        }
+        self.str_value(base)
     }
 
     fn this_intl_coll(&mut self, this: Value, method: &str) -> Res<IntlColl> {
@@ -467,16 +532,20 @@ impl<'p> Interp<'p> {
                 match f {
                     IntlFn::NfCtor => {
                         let proto = self.nt_proto(nt, self.intl.nf_proto)?;
-                        let nf = self.intl_nf_create(a0, a1, "Intl.NumberFormat")?;
+                        self.intl.in_ctor = true;
+                        let nf = self.intl_nf_create(a0, a1, "Intl.NumberFormat").inspect_err(|_| self.intl_ctor_failed())?;
                         let o = h!(self, self.heap.new_object(Some(proto)));
                         self.intl.nfs.insert(o, IntlNf { f: nf, bound: None });
+                        self.intl_keep_ext(o);
                         Ok(Value::Object(o))
                     }
                     IntlFn::CollCtor => {
                         let proto = self.nt_proto(nt, self.intl.coll_proto)?;
-                        let c = self.intl_coll_create(a0, a1, "Intl.Collator")?;
+                        self.intl.in_ctor = true;
+                        let c = self.intl_coll_create(a0, a1, "Intl.Collator").inspect_err(|_| self.intl_ctor_failed())?;
                         let o = h!(self, self.heap.new_object(Some(proto)));
                         self.intl.colls.insert(o, c);
+                        self.intl_keep_ext(o);
                         Ok(Value::Object(o))
                     }
                     _ => {
@@ -542,7 +611,7 @@ impl<'p> Interp<'p> {
             IntlFn::NfResolved => {
                 let n = self.this_intl_nf(this, "Intl.NumberFormat.prototype.resolvedOptions", true)?;
                 let f = n.f;
-                let mut props: Vec<(&str, Value)> = vec![("locale", self.str_value(intl::locale_name(f.loc))?), ("numberingSystem", self.str_value("latn")?)];
+                let mut props: Vec<(&str, Value)> = vec![("locale", self.intl_locale_value(this, f.loc)?), ("numberingSystem", self.str_value("latn")?)];
                 props.push(("style", self.str_value(if f.unit != 255 { "unit" } else { ["decimal", "percent", "currency"][f.style as usize] })?));
                 if f.style == icu::Style::Currency {
                     props.push(("currency", self.str_value(core::str::from_utf8(&f.currency).unwrap_or("USD"))?));
@@ -593,7 +662,7 @@ impl<'p> Interp<'p> {
             IntlFn::CollResolved => {
                 let c = self.this_intl_coll(this, "Intl.Collator.prototype.resolvedOptions")?;
                 let props: Vec<(&str, Value)> = vec![
-                    ("locale", self.str_value(if c.loc == 0 { "en-US" } else { "en" })?),
+                    ("locale", self.intl_coll_locale(this, c.loc)?),
                     ("usage", self.str_value("sort")?),
                     ("sensitivity", self.str_value(SENSITIVITY[c.key.sensitivity as usize])?),
                     ("ignorePunctuation", Value::Bool(c.key.ignore_punctuation)),
