@@ -19,16 +19,20 @@
 //! element name (lowercase start, a hyphen, only `PCENChar`, not one of the eight reserved names). Names are exact: `DIV` made with
 //! `createElementNS` is not a host. A definition can disable shadow roots (`static disabledFeatures`); this is not built.
 //!
-//! Gates (`Error::Unsupported`, before anything changes): `clonable: true`, `serializable: true`, `delegatesFocus: true`,
-//! `slotAssignment: "manual"`. Their getters on `ShadowRoot` are fixed at `false`, `false`, `false` and `"named"`. Inserting a root as a node
+//! `clonable`, `serializable` and `delegatesFocus` are stored and read back by their getters, and do nothing else: `cloneNode` of a host does not
+//! copy its root, there is no `getHTML`, and a shadow tree has no focus. Gate (`Error::Unsupported`, before anything changes): `slotAssignment: "manual"`;
+//! its getter is fixed at `"named"`. Inserting a root as a node
 //! (`appendChild(root)` and so on) is `Unsupported` after the other insertion checks (the standard moves the children of a fragment).
 //!
-//! What a shadow tree is NOT here (none of this is faked): no slotting (`slot` elements and `assignedNodes` do nothing and are absent),
-//! no `adoptedStyleSheets`, no `innerHTML`, `getHTML`, `activeElement` or `styleSheets` on `ShadowRoot`, no declarative
-//! shadow DOM, no style, layout or paint for a shadow tree (the cascade and layout start at the document and never reach it; `getComputedStyle` of
-//! a connected shadow element is Unsupported), no `:host`, `:host()` or `::slotted()` selectors (they are a `SyntaxError`),
-//! no focus in a shadow tree (its elements are not focusable areas) and no script run from a shadow tree (the loader prepares only scripts
-//! whose light ancestors reach the document). `new ShadowRoot()` is an illegal constructor. Deviation: Chrome inserts a shadow root like a fragment (its children move); here it is `Unsupported`.
+//! Style and layout: a shadow tree has its own style scope (`RuleSet::add_scoped`, `bare_css::cascade`) and its slots are in the flat tree
+//! (`Document::flat_children`, `crates/html/src/dom/slots.rs`). `getComputedStyle` and the geometry reads work in a connected shadow tree and on slotted nodes.
+//! `HTMLSlotElement`, `assignedSlot` and `assignedNodes` are in `browser_slot.rs`. In a script, `:host`, `:host()` and `::slotted()` are good
+//! selectors that match nothing.
+//!
+//! What a shadow tree is NOT here (none of this is faked): no `adoptedStyleSheets` or constructable style sheets, no `getHTML`, `activeElement` or
+//! `styleSheets` on `ShadowRoot`, no declarative shadow DOM, no `slotchange` event, no focus in a shadow tree (its elements are not focusable areas) and no
+//! script run from a shadow tree (the loader prepares only scripts whose light ancestors reach the document). `new ShadowRoot()` is an illegal constructor.
+//! Deviation: Chrome inserts a shadow root like a fragment (its children move); here it is `Unsupported`.
 //!
 //! Events: a path walks the parent links, so an event that is not composed and starts in a shadow tree ends at its root, which is exactly the
 //! standard path. A COMPOSED event whose path would reach a root (the standard continues at the host and retargets `target`) is refused with
@@ -119,8 +123,8 @@ pub(crate) fn attach_shadow(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Valu
             return Err(d.dom_err(it, "NotSupportedError", "Shadow root cannot be created on a host which already hosts a shadow tree."));
         }
     }
-    if clonable || delegates_focus || serializable || manual {
-        return Err(Error::Unsupported(unsupported("attachShadow with clonable, serializable or delegatesFocus true, or slotAssignment manual")));
+    if manual {
+        return Err(Error::Unsupported(unsupported("attachShadow with slotAssignment manual")));
     }
     d.room(&d.doc.borrow(), 1, 0)?;
     {
@@ -135,7 +139,12 @@ pub(crate) fn attach_shadow(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Valu
     // Reserve work and allocate the JS wrapper before changing native shadow ownership.
     it.charge(1)?;
     let wrapper = d.obj(it, d.p().shadow)?;
-    let root = d.doc.borrow_mut().attach_shadow(host, mode == "open");
+    let root = {
+        let mut doc = d.doc.borrow_mut();
+        let root = doc.attach_shadow(host, mode == "open");
+        doc.set_shadow_flags(root, u8::from(delegates_focus) | u8::from(clonable) << 1 | u8::from(serializable) << 2);
+        root
+    };
     let mut st = d.st.borrow_mut();
     st.by_node.insert(root, wrapper);
     st.by_obj.insert(wrapper, Target::Node(root));
@@ -163,10 +172,10 @@ pub(crate) fn mode(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V 
     d.js_str(it, if open { "open" } else { "closed" })
 }
 
-/// `delegatesFocus`, `clonable` and `serializable`: only `false` can be made (the other values are gated).
-pub(crate) fn flag_false(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    root_of(d, it, this)?;
-    Ok(Value::Bool(false))
+/// `delegatesFocus` (bit 0), `clonable` (bit 1) and `serializable` (bit 2): the values that `attachShadow` was given. They do nothing else here.
+pub(crate) fn flag_bit<const BIT: u8>(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    let root = root_of(d, it, this)?;
+    Ok(Value::Bool(d.doc.borrow().shadow_flags(root) & BIT != 0))
 }
 
 pub(crate) fn slot_assignment(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {

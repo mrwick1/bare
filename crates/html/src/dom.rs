@@ -41,6 +41,8 @@
 //!
 //! Comments compare Rust with JavaScript, because you know JS.
 
+mod slots;
+
 use std::cell::{OnceCell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasherDefault, Hasher};
@@ -233,7 +235,11 @@ pub struct Document {
     shadow_of: HashMap<u32, NodeId, BuildHasherDefault<Fnv>>,
     // The shadow root of each shadow host, by `NodeId::index` of the host. The root is not a child of the host: the light links of the host never show it.
     shadow_host: HashMap<u32, (NodeId, bool), BuildHasherDefault<Fnv>>,
+    /// The `delegatesFocus` (1), `clonable` (2) and `serializable` (4) bits of a shadow root that has one of them.
+    shadow_flags: HashMap<u32, u8, BuildHasherDefault<Fnv>>,
     // The way back: the host of each shadow root, and whether its mode is open. A host that is not in `shadow_of` has no root.
+    slots: RefCell<Option<slots::Slots>>,
+    // The slot assignment, made when it is read (`Document::assigned_nodes`) and dropped when `revision` moves.
     template_content: HashMap<u32, NodeId, BuildHasherDefault<Fnv>>,
     // The contents of each HTML `template` that has any, by `NodeId::index` of the template: a fragment node that is not a child of the template.
     watcher: Option<Box<Hooks>>,
@@ -431,6 +437,24 @@ impl Iterator for Children<'_> {
     }
 }
 
+/// The children of a node in the flat tree, in order (`Document::flat_children`).
+pub struct FlatChildren<'a> {
+    doc: &'a Document,
+    next: Option<NodeId>,
+    shadow: bool,
+}
+
+impl Iterator for FlatChildren<'_> {
+    type Item = NodeId;
+
+    #[inline]
+    fn next(&mut self) -> Option<NodeId> {
+        let id = self.next?;
+        self.next = if self.shadow { self.doc.shadowed_next(id) } else { self.doc.nodes[id.index()].next };
+        Some(id)
+    }
+}
+
 impl Document {
     /// A new tree with only the top node.
     pub fn new() -> Document {
@@ -451,6 +475,8 @@ impl Document {
             text_revision: 0,
             shadow_of: HashMap::default(),
             shadow_host: HashMap::default(),
+            shadow_flags: HashMap::default(),
+            slots: RefCell::new(None),
             template_content: HashMap::default(),
             watcher: None,
             custom: HashMap::default(),
@@ -740,6 +766,17 @@ impl Document {
         self.shadow_host.get(&(root.index() as u32)).map(|&(h, _)| h)
     }
 
+    /// The `delegatesFocus` (1), `clonable` (2) and `serializable` (4) bits of the shadow root `root`.
+    pub fn shadow_flags(&self, root: NodeId) -> u8 {
+        self.shadow_flags.get(&(root.index() as u32)).copied().unwrap_or(0)
+    }
+
+    pub fn set_shadow_flags(&mut self, root: NodeId, flags: u8) {
+        if flags != 0 {
+            self.shadow_flags.insert(root.index() as u32, flags);
+        }
+    }
+
     /// Is the shadow root `root` in open mode? `false` for a closed root and for any other node.
     pub fn shadow_is_open(&self, root: NodeId) -> bool {
         self.shadow_host.get(&(root.index() as u32)).is_some_and(|&(_, open)| open)
@@ -812,28 +849,25 @@ impl Document {
     }
 
     /// The parent of this node in the flat tree, the tree that is rendered (Blink `FlatTreeTraversal::Parent`). A child of a shadow root has
-    /// the host as its parent. A light child of a host has no parent: slot assignment is not built, so no slot takes it, and it is not
-    /// rendered. A page with no shadow root pays one `is_empty` check.
-    #[inline(never)]
+    /// the host as its parent. A light child of a host has the parent of the slot that takes it (a slot makes no box), or none when no slot
+    /// takes it: it is not rendered. A page with no shadow root pays one `is_empty` check.
+    #[inline]
     pub fn flat_parent(&self, id: NodeId) -> Option<NodeId> {
         let parent = self.parent(id)?;
         if self.shadow_of.is_empty() {
             return Some(parent);
         }
-        if let Some(host) = self.shadow_host(parent) {
-            return Some(host);
-        }
-        if self.shadow_root(parent).is_some() { None } else { Some(parent) }
+        self.shadowed_parent(id, parent, false)
     }
 
-    /// The children of this node in the flat tree: the children of its shadow root if it is a host, else its own children. Siblings are the
-    /// same in both trees, so `next_sibling` walks on from any of them.
+    /// The children of this node in the flat tree: the children of its shadow root if it is a host, else its own children. A slot is replaced by
+    /// the nodes that it takes, or by its fallback children when it takes none (see `flat_next`).
     #[inline]
-    pub fn flat_children(&self, id: NodeId) -> Children<'_> {
+    pub fn flat_children(&self, id: NodeId) -> FlatChildren<'_> {
         if self.shadow_of.is_empty() {
-            return self.children(id);
+            return FlatChildren { doc: self, next: self.nodes[id.index()].first_child, shadow: false };
         }
-        self.children(self.shadow_root(id).unwrap_or(id))
+        FlatChildren { doc: self, next: self.shadowed_first(id), shadow: true }
     }
 
     /// The children of this node, in order.

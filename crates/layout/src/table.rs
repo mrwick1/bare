@@ -290,7 +290,7 @@ impl Builder<'_> {
             if n == last {
                 return true;
             }
-            match tree.doc.next_sibling(n) {
+            match tree.doc.flat_next(n) {
                 Some(next) => n = next,
                 None => return true,
             }
@@ -813,7 +813,7 @@ fn run_sizes(cx: &mut Cx, _parent: NodeId, first: NodeId, last: NodeId) -> (f32,
         } else if kind.is_inline() {
             run = Some((run.map_or(c, |r| r.0), c));
         }
-        n = if c == last { None } else { tree.doc.next_sibling(c) };
+        n = if c == last { None } else { tree.doc.flat_next(c) };
     }
     if let Some((a, b)) = run {
         each(cx, a, b, false);
@@ -856,7 +856,7 @@ fn run_layout(cx: &mut Cx, parent: NodeId, first: NodeId, last: NodeId, width: f
         } else if kind.is_inline() {
             run = Some((run.map_or(c, |r| r.0), c));
         }
-        n = if c == last { None } else { tree.doc.next_sibling(c) };
+        n = if c == last { None } else { tree.doc.flat_next(c) };
     }
     if let Some((a, b)) = run {
         lines(cx, a, b, &mut y, &mut baseline);

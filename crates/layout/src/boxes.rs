@@ -275,7 +275,7 @@ impl Iterator for Children<'_, '_> {
         loop {
             let node = self.next?;
             // `?` on an `Option`: stop with `None` when there is no next child. JS: `if (node == null) return null`.
-            self.next = tree.doc.next_sibling(node);
+            self.next = tree.doc.flat_next(node);
             let kind = tree.kind(node);
             if kind.is_block() {
                 return Some(Child::Block(node));
@@ -291,7 +291,7 @@ impl Iterator for Children<'_, '_> {
                 if k.is_block() {
                     break;
                 }
-                self.next = tree.doc.next_sibling(n);
+                self.next = tree.doc.flat_next(n);
                 if k.is_inline() {
                     last = n;
                     only_space = only_space && k == Kind::Text && tree.is_collapsible_space(n);
@@ -333,7 +333,7 @@ pub fn dump(tree: &Tree) -> String {
                 out += &format!("{indent}(lines)\n");
                 let mut run = vec![first];
                 while *run.last().unwrap() != last {
-                    run.push(tree.doc.next_sibling(*run.last().unwrap()).unwrap());
+                    run.push(tree.doc.flat_next(*run.last().unwrap()).unwrap());
                 }
                 stack.extend(run.into_iter().rev().map(|n| (Item::Inline(n), depth + 1)));
             }

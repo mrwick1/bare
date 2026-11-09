@@ -23,7 +23,7 @@
 
 use bare_html::dom::{Atom, Document, NodeData, NodeId};
 
-use crate::selector::{AttrTest, Case, Combinator, Compound, Nth, Selector, Simple, User};
+use crate::selector::{AttrTest, Case, Combinator, Compound, Host, Nth, Selector, Simple, User};
 
 /// Does `selector` match the element `el`? `el` must be an element of `doc`, and the selector must be
 /// parsed for `doc`. For any other node, it gives `false`.
@@ -78,17 +78,20 @@ fn matches_from(doc: &Document, el: NodeId, compounds: &[Compound]) -> bool {
         return true;
     }
     match first.combinator {
-        Combinator::Child => parent_element(doc, el).is_some_and(|p| matches_from(doc, p, rest)),
+        Combinator::Child => match parent_element(doc, el) {
+            Some(p) => matches_from(doc, p, rest),
+            None => host_above(doc, el, rest),
+        },
         Combinator::Next => prev_element(doc, el).is_some_and(|p| matches_from(doc, p, rest)),
         Combinator::Descendant => {
-            let mut up = parent_element(doc, el);
+            let (mut top, mut up) = (el, parent_element(doc, el));
             while let Some(a) = up {
                 if matches_from(doc, a, rest) {
                     return true;
                 }
-                up = parent_element(doc, a);
+                (top, up) = (a, parent_element(doc, a));
             }
-            false
+            host_above(doc, top, rest)
         }
         Combinator::Later => {
             let mut before = prev_element(doc, el);
@@ -103,9 +106,34 @@ fn matches_from(doc: &Document, el: NodeId, compounds: &[Compound]) -> bool {
     }
 }
 
+/// `top` has no parent element. If its parent is a shadow root, the host is the next ancestor, and the compound `rest` on it must be `:host` (the
+/// host is featureless: no other compound of a shadow tree rule can match it, and `:host` must be the leftmost compound).
+#[cold]
+#[inline(never)]
+fn host_above(doc: &Document, top: NodeId, rest: &[Compound]) -> bool {
+    if !doc.has_shadow_roots() {
+        return false;
+    }
+    let Some(host) = doc.parent(top).and_then(|r| doc.shadow_host(r)) else { return false };
+    let [last] = rest else { return false };
+    last.simples.iter().any(|s| matches!(s, Simple::Host(_))) && compound_matches(doc, host, &last.simples)
+}
+
 fn compound_matches(doc: &Document, el: NodeId, simples: &[Simple]) -> bool {
-    // `all` stops at the first false. The selector parser puts the tag first, and it is the cheapest test.
-    simples.iter().all(|s| simple_matches(doc, el, s))
+    // Stops at the first false. The selector parser puts the tag first, and it is the cheapest test.
+    for s in simples {
+        if !simple_matches(doc, el, s) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Does the element `el` match all the simple selectors of one compound? For the cascade of shadow trees. Out of line: a public `compound_matches` is
+/// not inlined into the hot matcher.
+#[inline(never)]
+pub fn compound_match(doc: &Document, el: NodeId, simples: &[Simple]) -> bool {
+    compound_matches(doc, el, simples)
 }
 
 /// The user action pseudo-classes. Out of line and cold: they are rare, and a hot call here slows every other simple selector.
@@ -146,9 +174,23 @@ fn simple_matches(doc: &Document, el: NodeId, simple: &Simple) -> bool {
         Simple::Form(f) => crate::form::matches(doc, el, *f),
         Simple::User(u) => user_matches(doc, el, *u),
         Simple::Never => false,
+        // The cascade offers a rule with `:host` to the host of its own tree only, so here the host needs a shadow root.
+        Simple::Host(h) => host_matches(doc, el, h),
         Simple::Is(args) => args.iter().any(|simples| compound_matches(doc, el, simples)),
         Simple::Not(args) => !args.iter().any(|simples| compound_matches(doc, el, simples)),
     }
+}
+
+#[cold]
+#[inline(never)]
+fn host_matches(doc: &Document, el: NodeId, h: &Host) -> bool {
+    doc.shadow_root(el).is_some() && if h.context { host_context(doc, el, &h.args) } else { h.args.iter().all(|simples| compound_matches(doc, el, simples)) }
+}
+
+/// `:host-context()`: `el` or one of its ancestors (a shadow root goes on to its host) matches the compound.
+#[cold]
+fn host_context(doc: &Document, el: NodeId, args: &[Vec<Simple>]) -> bool {
+    std::iter::successors(Some(el), |&n| doc.parent_or_host(n)).any(|n| is_element(doc, n) && args.iter().all(|simples| compound_matches(doc, n, simples)))
 }
 
 /// Is the place of `el` among its sibling elements `a*n + b` for some `n >= 0`?

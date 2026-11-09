@@ -173,12 +173,24 @@ fn an_element_with_no_box_is_zero() {
 }
 
 #[test]
-fn a_shadow_tree_is_a_gate_and_not_a_guess() {
-    let mut b = page("", "<div id=h></div>");
-    let gate = "unsupported:computed style in a shadow tree (shadow cascade is not implemented)";
-    assert_eq!(js(&mut b, "var r = document.getElementById('h').attachShadow({ mode: 'open' }); var i = r.appendChild(document.createElement('i')); i.offsetWidth"), gate);
-    // a shadow tree that is not attached to the document has no box
+fn a_shadow_tree_element_has_a_size_from_its_own_scope() {
+    // The page rule `i { width: 5px }` must not reach in; the shadow rule `i { width: 30px }` does. An unattached tree has no box.
+    let mut b = page("i { width: 5px; height: 5px; display: block } #k { width: 50px }", "<div id=h></div><div id=k></div>");
+    let src = "var r = document.getElementById('h').attachShadow({ mode: 'open' }); r.innerHTML = '<style>i { width: 30px; height: 20px; display: block }</style><i id=in></i>'; r.getElementById('in').offsetWidth + 'x' + r.getElementById('in').offsetHeight";
+    assert_eq!(js(&mut b, src), "30x20");
+    assert_eq!(size(&mut b, "k"), "50x0");
     assert_eq!(js(&mut b, "var h2 = document.createElement('div'); var r2 = h2.attachShadow({ mode: 'open' }); r2.appendChild(document.createElement('b')).offsetWidth"), "0");
+}
+
+#[test]
+fn a_slotted_node_is_laid_out_in_the_slot_and_the_fallback_shows_when_nothing_is_slotted() {
+    let mut b = page("#a { width: 40px; height: 10px }", "<div id=h><div id=a></div></div><div id=g></div>");
+    let src = "var r = document.getElementById('h').attachShadow({ mode: 'open' }); r.innerHTML = '<style>#w { padding: 3px }</style><div id=w><slot></slot></div>'; document.getElementById('a').offsetWidth + 'x' + document.getElementById('a').offsetHeight + ' ' + document.getElementById('h').offsetHeight";
+    // `#a` is a light node: the page rule gives its size; the shadow padding of `#w` adds 6px to the host height.
+    assert_eq!(js(&mut b, src), "40x10 16");
+    // the fallback shows while nothing is slotted
+    let src = "var g = document.getElementById('g').attachShadow({ mode: 'open' }); g.innerHTML = '<slot><div id=f style=\\'height:7px\\'></div></slot>'; var f = g.getElementById('f'); var n = f.offsetHeight; document.getElementById('g').appendChild(document.createElement('p')).style.height = '9px'; n + ',' + f.offsetHeight + ',' + document.getElementById('g').offsetHeight";
+    assert_eq!(js(&mut b, src), "7,0,9");
 }
 
 #[test]
@@ -199,14 +211,6 @@ fn the_next_route_announcer_shape_does_not_block_geometry() {
     let mut b = page("#k { width: 50px; height: 50px }", "<div id=k></div>");
     let src = "var e = document.createElement('next-route-announcer'); var t = document.createElement('div'); t.style.cssText = 'position:absolute;border:0;height:1px;margin:-1px;padding:0;width:1px;clip:rect(0 0 0 0);overflow:hidden;white-space:nowrap;word-wrap:normal'; e.attachShadow({ mode: 'open' }).appendChild(t); document.body.appendChild(e); var k = document.getElementById('k'); k.offsetWidth + 'x' + k.offsetHeight";
     assert_eq!(js(&mut b, src), "50x50");
-}
-
-#[test]
-fn slots_and_shadow_style_sheets_stay_gates() {
-    let mut b = page("#k { width: 50px }", "<div id=h></div><div id=k></div>");
-    assert_eq!(js(&mut b, "var r = document.getElementById('h').attachShadow({ mode: 'open' }); var s = r.appendChild(document.createElement('slot')); document.getElementById('k').offsetWidth"), "unsupported:geometry of a shadow tree with a slot (slot assignment is not built)");
-    assert_eq!(js(&mut b, "s.remove(); r.appendChild(document.createElement('style')).textContent = 'div { height: 9px }'; document.getElementById('k').offsetWidth"), "unsupported:geometry of a shadow tree with a style sheet (shadow style scoping is not built)");
-    assert_eq!(js(&mut b, "r.lastChild.remove(); document.getElementById('k').offsetWidth"), "50");
 }
 
 #[test]

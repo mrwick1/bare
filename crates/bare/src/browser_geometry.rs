@@ -19,8 +19,6 @@
 //! - Brand: `this` must be a non-foreign element (`HTMLElement`), else `TypeError: Illegal invocation`. The accessors are read-only.
 //!
 //! Gates (`Error::Unsupported`, none is faked)
-//! - An element in a connected shadow tree (`Dom::in_document`). A visible host is laid out from its flat tree (`Document::flat_children`), but
-//!   only when its shadow tree has no `<slot>` (slot assignment is not built) and no `<style>` or `<link>` (shadow sheets are not scoped).
 //! - A missing external sheet, as in `browser_computed.rs`.
 //! - An inline box (or `<br>`) with no background and no border: native layout "culls" it and makes no fragment, so its size is not known.
 //! - `display: contents`, `writing-mode`, vertical text and `direction` positioning are not in the engine, so they are not modelled.
@@ -44,13 +42,13 @@
 //!   that reaches it (measured in `docs/resources.md`, "Layout work of geometry reads"), not a factor for each level of nesting.
 //!   Only boxes inside a scroll container that needs a scrollbar can still grow by a factor for each level; `max_work` stops those.
 //!
-//! Not done: `getBoundingClientRect`, `offsetParent`, `offsetLeft`, `offsetTop`, `ResizeObserver`, a cache, slots, shadow sheets, transformed geometry.
+//! Not done: `getBoundingClientRect`, `offsetParent`, `offsetLeft`, `offsetTop`, `ResizeObserver`, a cache, transformed geometry.
 
 use crate::browser::*;
 use crate::browser_platform::V;
 use bare_css::cascade::Styles;
 use bare_css::values::{Keyword, Property, Value as Cv};
-use bare_html::dom::{Children, Document, NodeData, NodeId};
+use bare_html::dom::{Document, FlatChildren, NodeData, NodeId};
 use bare_js::eval::Interp;
 use bare_js::value::Value;
 use std::cell::{Cell, RefCell};
@@ -114,8 +112,6 @@ pub(crate) struct Lay {
     pub(crate) bars: (bool, bool),
 }
 
-const SLOT: &str = "geometry of a shadow tree with a slot (slot assignment is not built)";
-const SHADOW_SHEET: &str = "geometry of a shadow tree with a style sheet (shadow style scoping is not built)";
 const CULLED: &str = "geometry of an inline box with no background and no border (native layout makes no fragment for it)";
 const NOT_LONG: &str = "geometry that is not a finite number that fits a long";
 
@@ -128,37 +124,13 @@ struct Bound {
 }
 
 struct Frame<'a> {
-    kids: Children<'a>,
+    kids: FlatChildren<'a>,
     units: u64,
     inline: bool,
 }
 
 enum Refuse {
     Limit(&'static str),
-    Gate(&'static str),
-}
-
-/// A visible host is laid out from its flat tree: the children of its shadow root. Only the shadow trees that need nothing more are
-/// supported: one with a `<slot>` needs slot assignment, and one with a `<style>` or `<link>` needs scoped shadow sheets. Every node of
-/// the shadow tree is looked at, hidden ones too (a hidden `<style>` still applies). The caller charged `doc.len()`, which covers this.
-fn check_shadow(doc: &Document, host: NodeId) -> Result<(), Refuse> {
-    let Some(root) = doc.shadow_root(host) else { return Ok(()) };
-    let names = |n: &str| doc.find_atom(n);
-    let (slot, style, link) = (names("slot"), names("style"), names("link"));
-    let mut stack: Vec<NodeId> = doc.children(root).collect();
-    while let Some(n) = stack.pop() {
-        if let NodeData::Element { name, .. } = *doc.data(n) {
-            if Some(name) == slot {
-                return Err(Refuse::Gate(SLOT));
-            }
-            if Some(name) == style || Some(name) == link {
-                return Err(Refuse::Gate(SHADOW_SHEET));
-            }
-        }
-        // A nested host is checked when the walk reaches it.
-        stack.extend(doc.children(n));
-    }
-    Ok(())
 }
 
 /// What the walk counted in the subtree of one element: what it adds to the totals, the units it gives its parent, and how deep it is.
@@ -272,7 +244,6 @@ fn walk<const KEEP: bool>(doc: &Document, styles: &Styles, l: &GeometryLimits, s
                     }
                     continue;
                 }
-                check_shadow(doc, node)?;
                 nodes += 1;
                 if nodes > l.max_nodes {
                     return Err(Refuse::Limit("geometry-nodes"));
@@ -333,7 +304,6 @@ impl Dom {
         let bound = match walked {
             Ok(b) => b,
             Err(Refuse::Limit(name)) => return Err(self.lim(name)),
-            Err(Refuse::Gate(why)) => return Err(Self::gate(why)),
         };
         // Layout cannot be interrupted, so it counts its own work and stops going deeper at `max_work`.
         it.charge(bound.seen + 1)?;

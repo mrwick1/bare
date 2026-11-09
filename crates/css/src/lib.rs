@@ -11,6 +11,8 @@ pub mod hints;
 pub mod matching;
 pub mod parser;
 pub mod selector;
+#[cfg(test)]
+mod shadow_tests;
 pub mod tokenizer;
 pub mod values;
 pub mod var;

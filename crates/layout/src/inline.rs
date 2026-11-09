@@ -80,7 +80,7 @@ impl<'t, 'a> Events<'t, 'a> {
 
     /// The node after `node`: its next sibling, or nothing at the end of the run or of an inline box.
     fn after(&self, node: NodeId) -> Option<NodeId> {
-        if self.open.is_empty() && node == self.last { None } else { self.tree.doc.next_sibling(node) }
+        if self.open.is_empty() && node == self.last { None } else { self.tree.doc.flat_next(node) }
     }
 }
 
