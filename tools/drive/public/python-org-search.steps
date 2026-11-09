@@ -1,6 +1,5 @@
 # python.org: type in the search box, press Enter; the search page gets the query in its url and keeps it in the box, and lists results.
 #   bare-drive --var URL=https://www.python.org/ python-org-search.steps
-# known-bug: main-min.js calls $.getJSON and $.ajax on other origins (console.python.org, statuspage.io), which is Fatal Unsupported (CORS is a gate) and stops the page, and the load handler reads getComputedStyle(body, ':after'), which is Unsupported; with both made per-task the journey passes; see docs/progress.md, section A script limit ends only its task
 timeout 30000
 open ${URL}
 expect css="input#id-search-field" visible

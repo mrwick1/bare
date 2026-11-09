@@ -1,6 +1,5 @@
 # python.org: the Documentation menu link opens /doc/, which has a title, a heading and links to docs.python.org.
 #   bare-drive --var URL=https://www.python.org/ python-org-docs-link.steps
-# known-bug: main-min.js calls $.getJSON and $.ajax on other origins (console.python.org, statuspage.io), which is Fatal Unsupported (CORS is a gate) and stops the page, and the load handler reads getComputedStyle(body, ':after'), which is Unsupported; with both made per-task the journey passes; see docs/progress.md, section A script limit ends only its task
 timeout 30000
 open ${URL}
 expect css="#mainnav" visible
