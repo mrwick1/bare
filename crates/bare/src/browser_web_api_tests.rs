@@ -131,3 +131,25 @@ fn fetch_reads_data_urls_and_refuses_other_schemes_for_one_request() {
         );
     });
 }
+
+#[test]
+fn performance_measure_validates_options() {
+    big(|| {
+        let mut b = browser();
+        for options in ["{start: 1, end: 2}, 'end'", "{duration: 1}", "{detail: null}", "{start: 1, end: 2, duration: 1}"] {
+            assert_eq!(js(&mut b, &format!("try {{ performance.measure('x', {options}); false }} catch (e) {{ e instanceof TypeError }}")), "true", "{options}");
+        }
+        js(&mut b, "performance.mark('end', {startTime: 20})");
+        assert_eq!(js(&mut b, "performance.measure('x', {}, 'end').duration"), "20");
+    });
+}
+
+#[test]
+fn legacy_performance_objects_are_stable() {
+    big(|| {
+        let mut b = browser();
+        assert_eq!(js(&mut b, "[typeof performance.timing, typeof performance.navigation].join()"), "object,object");
+        assert_eq!(js(&mut b, "var t = performance.timing; t === performance.timing && t.navigationStart > 0 && t.loadEventEnd >= t.navigationStart"), "true");
+        assert_eq!(js(&mut b, "[performance.navigation.type, performance.navigation.redirectCount, performance.navigation.TYPE_NAVIGATE, Object.prototype.toString.call(t)].join()"), "0,0,0,[object PerformanceTiming]");
+    });
+}

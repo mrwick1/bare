@@ -5010,3 +5010,22 @@ Existing warnings remain: the unused rgb helper in crates/css/src/shadow_tests.r
 ### Remaining limits and not tested
 document.write remains missing. The loader uses a pre-parsed DOM. Correct parser insertion needs an insertion point and stream state; fragment insertion would not preserve that behavior. External sheet edits and flattened imported-sheet reads remain gated. Flattened parts lack the origin data that CSSOM needs. Nested group-rule lists are not exposed. The disabled property uses the native disabled attribute behavior. Inline-sheet disabling remains a limitation of the existing cascade.
 Not tested: full CSSOM conformance or visual correctness. The probes check a visible body and capture the first viewport. The excluded survey topics remain outside this change.
+
+
+### Legacy performance data and measure validation
+
+The baseline is origin/main at f28752bf6d, which includes the script-triage changes from #311.
+
+Bing reads performance.timing.navigationStart before it defines its script helpers. PerformanceTiming and PerformanceNavigation data now materialize on their first read. The objects keep their identity. Timing values use a synthesized epoch origin. They do not measure network phases. No field was added to a hot structure.
+
+User Timing requires TypeError for options with neither start nor end, or with start, end and duration together. The regression test failed before the fix. Options with start/end plus an endMark already threw correctly. Empty options plus an endMark now use that mark. Reference: https://www.w3.org/TR/user-timing/#dom-performance-measure.
+
+Current live-site baseline results differ from the reported failures. BBC stops at the explicit ReadableStream request-body gate. In chunk 0a--~b-snp6to.js, Axios probes support with new Request(origin, {body: new ReadableStream, method: "POST", get duplex() { ... }}). The earlier length error is not reached. Guardian stops at the user-info URL gate after document completion. The named-frame failure is not reached. Iframe contexts and named window access remain unimplemented.
+
+NYTimes returns HTTP 403 with bare/0.1 and with Chrome-style User-Agent, Accept and Accept-Language headers. Both responses contain a captcha-delivery.com challenge and ask to enable JavaScript. These tests show that those header changes alone do not remove the block. The server's exact classification rule is unknown. No protection bypass was attempted.
+
+After the timing fix, Bing no longer logs the navigationStart exception. It still logs missing _w and sj_be. Later exceptions read controller and length from undefined. Two network script tasks exceed the Steps budget. Those later expressions have not been located. All 33 public journeys pass, with one retry.
+
+Validation: all 805 cost rows stay below +0.5% under both glibc and jemalloc. Mean changes are +0.005% and +0.002%. The execution differential has zero differences across 79 runs. The workspace run hit the chunked parser tick-time assertion at 53.52202 ms under load. That test passes alone. The remaining drive tests and workspace packages pass in separate runs.
+
+Test262 passes the baseline gate across 585 directories. Typing costs are 282.6 M instructions per textarea key and 287.9 M per React input key. Peak textarea RSS is 32.9 MiB at 20 keys and 32.7 MiB at 50 keys. The original BBC and Guardian exceptions, named iframe access, and the later Bing expressions remain unverified. No Chrome runtime comparison was run; measure validation was checked against the specification.
