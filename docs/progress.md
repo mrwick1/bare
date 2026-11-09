@@ -4074,4 +4074,16 @@ I could not reproduce the masonry `Limit(Steps)` of the earlier note, on `origin
 
 ### Checks
 
-Filled in at the end of this section.
+- `cargo test --release --workspace` after the rebase on ee8724b: 3070 passed, 0 failed, 12 ignored.
+- Cost matrix against the base build of ee8724b, 629 rows that ran: mean +0.022% (glibc), 0 rows over the limit under either allocator. The 176 `bare-stress` rows did not run, because the base build has no `bare-stress`. The JS hot paths did not change (one new method, `clear_failed_job`), so I did not run keycost, test262 or exec_diff.
+- `tools/drive/public/run.sh` 3 times in a row: 23 pass, 4 known, 0 fail, 0 flakes each time. The known four: lobsters (module script), python-org-docs-link and python-org-search (CORS `Unsupported`, see 2), rust-book-sidebar (a covered link). The stale `known-bug` mark of `python-docs-search-results` is removed: that journey passes since the property-escape change (#288).
+- A failing step now names the stop: `(the page stopped: Unsupported("module script"))`.
+
+### Not tested
+
+- Window mode with a real compositor and arjun-e16.
+- A comparison with Chrome.
+- Host calls other than `textContent =`, `replaceChildren` and `innerHTML =` under a budget abort.
+- `RangeError` for deep recursion (this engine has none).
+- A re-armed runaway timer (it is not re-armed by design).
+- keycost, test262 and exec_diff (not run, see above).
