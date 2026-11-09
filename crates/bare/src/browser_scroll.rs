@@ -33,7 +33,7 @@
 //! - `100vh` and `vw` use the window minus the bars; Chrome uses the window.
 
 use crate::browser::*;
-use crate::browser_geometry::border_box;
+use crate::browser_geometry::{Lay, border_box};
 use crate::browser_platform::V;
 use bare_css::cascade::Styles;
 use bare_css::values::{Keyword, Property, Value as Cv};
@@ -45,6 +45,7 @@ use bare_layout::keep::Kept;
 use bare_layout::scroll::{self, Areas};
 use bare_paint::Scroll;
 use std::cell::{Ref, RefCell};
+use std::rc::Rc;
 
 /// The width of a classic scrollbar.
 const BAR: f32 = bare_layout::block::SCROLLBAR;
@@ -370,6 +371,31 @@ impl Dom {
         }
     }
 
+    /// `layout_areas` for a read (`offsetWidth`, `scrollWidth`, `getBoundingClientRect`): the layout of the last read is used again while its
+    /// inputs are the same, so a loop of reads over a page that does not change lays it out once and charges one step for each later read.
+    /// The styles are compared by address: the cascade hands out the same `Rc` while it is valid. Not used with a custom element (the
+    /// cascade is not kept then), a probe or `uncull` (they change what the layout holds).
+    pub(crate) fn layout_shared(&self, it: &mut Interp<'_>, styles: &Rc<Styles>) -> R<Rc<Lay>> {
+        let key = {
+            let doc = self.doc.borrow();
+            let g = &self.geometry;
+            let vp = self.plat.s.borrow().viewport;
+            (g.probe.get().is_none() && !g.uncull.get() && !doc.has_custom())
+                .then(|| (Rc::as_ptr(styles) as usize, doc.revision(), doc.text_revision(), doc.len(), doc.user().revision, (vp.0.to_bits(), vp.1.to_bits())))
+        };
+        if let Some(k) = key
+            && let Some((c, lay)) = self.geometry.shared.borrow().as_ref()
+            && *c == k
+        {
+            it.charge(1)?;
+            return Ok(lay.clone());
+        }
+        let (layout, areas, bars) = self.layout_areas(it, styles, None)?;
+        let lay = Rc::new(Lay { layout, areas, bars });
+        *self.geometry.shared.borrow_mut() = key.map(|k| (k, lay.clone()));
+        Ok(lay)
+    }
+
     /// The page as scrolling sees it now: runs the cascade and the layout, then `f`. `f` may change the offsets: the changes are
     /// stored, and the targets are queued for a `scroll` event.
     pub(crate) fn with_geo<T>(&self, it: &mut Interp<'_>, f: impl FnOnce(&Geo, &mut Scroll) -> T) -> R<T> {
@@ -379,9 +405,9 @@ impl Dom {
     /// `with_geo`, and `f` may run one more layout (`layout_at`).
     pub(crate) fn with_geo_it<T>(&self, it: &mut Interp<'_>, f: impl FnOnce(&Geo, &mut Scroll, &mut Interp<'_>) -> T) -> R<T> {
         let styles = self.cascade_now(it)?;
-        let (layout, areas, bars) = self.layout_areas(it, &styles, None)?;
+        let lay = self.layout_shared(it, &styles)?;
         let doc = self.doc.borrow();
-        let g = Geo { doc: &doc, styles: &styles, layout: &layout, areas: &areas, window: self.plat.s.borrow().viewport, bars };
+        let g = Geo { doc: &doc, styles: &styles, layout: &lay.layout, areas: &lay.areas, window: self.plat.s.borrow().viewport, bars: lay.bars };
         let mut s = self.scrolling.s.borrow().scroll.clone();
         g.clamp(&mut s);
         let out = f(&g, &mut s, it);

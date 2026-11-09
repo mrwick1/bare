@@ -148,7 +148,7 @@ fn selectors_lookups_and_errors() {
         assert_eq!(js(&mut b, "[document.querySelectorAll('div *').length, document.querySelector('p + span') === null, document.querySelector('p ~ span').id, document.getElementById('s').closest('div').id, document.getElementById('s').closest('section'), document.querySelector('#nope'), document.getElementById('')].join()"), "2,false,s,a,,,");
         assert_eq!(js(&mut b, "document.getElementById('a').querySelector('#a')"), "null"); // only descendants
         assert_eq!(js(&mut b, "document.querySelector('p[')"), "throw:SyntaxError:'p[' is not a valid selector");
-        assert_eq!(js(&mut b, "document.querySelector('a b c d')"), lim("dom-selector-complexity"));
+        assert_eq!(js(&mut b, "document.querySelector('a b c d e f g')"), lim("dom-selector-complexity"));
         assert_eq!(js(&mut b, &format!("document.querySelector('{}')", "a".repeat(2000))), lim("dom-selector"));
         // a detached subtree is searched too, and is not found from the document
         assert_eq!(js(&mut b, "var d = document.createElement('div'); d.innerText2 = 1; d.appendChild(document.createElement('b')); [d.querySelector('b').tagName, document.querySelector('b'), d.isConnected].join()"), "B,,false");
@@ -830,5 +830,43 @@ fn promise_all_keeps_a_weak_dom_value_across_scripts_and_collection() {
         assert_eq!(js(&mut b, "document.querySelector('strong').textContent"), "a/b");
         assert_eq!(b.it.weak_tracked(), (1, 0));
         assert_eq!(b.it.agg_stats(), Default::default());
+    });
+}
+
+/// `document.implementation.createHTMLDocument` as jQuery uses it at load and in `parseHTML`.
+#[test]
+fn create_html_document_makes_a_detached_document_with_html_head_and_body() {
+    big(|| {
+        let mut b = browser();
+        assert_eq!(js(&mut b, "document.implementation === document.implementation && Object.prototype.toString.call(document.implementation)"), "[object DOMImplementation]");
+        // jQuery: `support.createHTMLDocument`.
+        assert_eq!(js(&mut b, "var body = document.implementation.createHTMLDocument('').body; body.innerHTML = '<form></form><form></form>'; body.childNodes.length"), "2");
+        // jQuery: `parseHTML` with a base element, and a fragment made by the new document.
+        assert_eq!(
+            js(&mut b, "var c = document.implementation.createHTMLDocument('T'); var base = c.createElement('base'); c.head.appendChild(base); \
+                var f = c.createDocumentFragment(); var d = c.createElement('div'); d.innerHTML = '<b>x</b>y'; f.appendChild(d); \
+                [c.documentElement.localName, c.head.localName, c.body.localName, c.head.firstChild.localName, c.head.lastChild === base, f.textContent, c === document, c.defaultView, c.isConnected].join()"),
+            "html,head,body,title,true,xy,false,,false"
+        );
+        assert_eq!(js(&mut b, "document.implementation.createHTMLDocument('T').head.firstChild.textContent + document.implementation.createHTMLDocument().head.children.length"), "T0");
+        // The page itself is untouched.
+        assert_eq!(js(&mut b, "document.body.children.length + ',' + document.getElementsByTagName('base').length"), "3,0");
+        assert_eq!(js(&mut b, "document.implementation.hasFeature()"), "true");
+    });
+}
+
+/// A query charges the worst case of the matcher only for the nodes that its last compound fits. A selector that ends in a name that
+/// the page does not have costs one step for each node, also with `~` (the worst case of `~` is the node count). Wikipedia's
+/// `#mw-content-text #file a img` has three descendant combinators.
+#[test]
+fn a_query_charges_the_matcher_work_only_where_the_last_compound_fits() {
+    big(|| {
+        let body: String = (0..1000).map(|i| format!("<div id=d{i}><p>t</p></div>")).collect();
+        let mut b = browser_with(&format!("<!doctype html><html><body><div id=file><a><img id=pic></a></div>{body}</body></html>"), BrowserLimits::default());
+        // 40 queries over 3,000 nodes. The old charge was the node count for each node: 9 million for each query, against the 5 million budget.
+        assert_eq!(js(&mut b, "var n = 0; for (var i = 0; i < 40; i++) { if (document.querySelector('div ~ nothing')) n++; if (document.querySelectorAll('div ~ nothing').length) n++ } n"), "0");
+        assert_eq!(js(&mut b, "document.querySelector('body #file a img').id + document.querySelectorAll('html body #file a img').length"), "pic1");
+        // The charge is still made before the match: a subject that fits at each node and a long chain stop at the budget.
+        assert_eq!(js(&mut b, "document.querySelectorAll('div ~ div ~ div ~ div ~ div').length"), "limit:Steps");
     });
 }

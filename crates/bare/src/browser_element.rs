@@ -221,8 +221,9 @@ fn offset(d: &Dom, it: &mut Interp<'_>, el: NodeId) -> R<Option<Offset>> {
         return Ok(Some(Offset { parent: None, top: 0, left: 0 }));
     }
     drop(doc);
-    let (layout, areas, _) = d.layout_areas(it, &styles, None)?;
-    let Some(r) = one_box(&layout, el)? else {
+    let lay = d.layout_shared(it, &styles)?;
+    let (layout, areas) = (&lay.layout, &lay.areas);
+    let Some(r) = one_box(layout, el)? else {
         let doc = d.doc.borrow();
         return match bare_layout::boxes::Tree::new(&doc, &styles).kind(el) {
             bare_layout::boxes::Kind::Inline | bare_layout::boxes::Kind::Break => Err(Dom::gate("offsetTop and offsetLeft of an inline box with no background and no border (layout makes no box for it)")),
@@ -230,14 +231,14 @@ fn offset(d: &Dom, it: &mut Interp<'_>, el: NodeId) -> R<Option<Offset>> {
         };
     };
     // A sticky box is where it sticks now.
-    let (sx, sy) = d.stuck_now(&styles, &areas, el);
+    let (sx, sy) = d.stuck_now(&styles, areas, el);
     let (mut x, mut y) = (r.x + sx, r.y + sy);
     if let Some(p) = parent.filter(|&p| html_name(&d.doc.borrow(), p) != "body") {
-        let Some(pr) = one_box(&layout, p)? else {
+        let Some(pr) = one_box(layout, p)? else {
             return Err(Dom::gate("offsetTop and offsetLeft in an offset parent that has no box of its own"));
         };
         let ps = styles.style(p).expect("a positioned parent has a style");
-        let (px, py) = d.stuck_now(&styles, &areas, p);
+        let (px, py) = d.stuck_now(&styles, areas, p);
         x -= pr.x + px + ps.px(Property::BorderLeftWidth);
         y -= pr.y + py + ps.px(Property::BorderTopWidth);
     }

@@ -485,6 +485,11 @@ pub struct Dom {
     pub(crate) computed: crate::browser_computed::Computed,
     /// `offsetWidth` and `offsetHeight` (`browser_geometry.rs`).
     pub(crate) geometry: crate::browser_geometry::Geometry,
+    /// `document.implementation`, once read (`browser_implementation.rs`). It is also in `fixed`.
+    pub(crate) implementation: std::cell::Cell<Option<ObjId>>,
+    /// The prototype and the constructor of `PerformanceObserver`, once read (`browser_perf_observer.rs`). Both are also in `fixed`.
+    pub(crate) perf_observer: std::cell::Cell<Option<ObjId>>,
+    pub(crate) perf_observer_ctor: std::cell::Cell<Option<ObjId>>,
     /// Scroll offsets, page bars and `scroll` events (`browser_scroll.rs`).
     pub(crate) scrolling: crate::browser_scroll::Scrolling,
     /// `ResizeObserver` and its rendering step (`browser_resize.rs`).
@@ -812,7 +817,7 @@ impl Dom {
                         _ => match doc.atom_str(name) {
                             "iframe" => p.iframe,
                             "link" => p.link,
-                            "a" | "area" | "template" => crate::browser_elements::proto(self, it, doc.atom_str(name))?,
+                            "a" | "area" | "template" | "img" => crate::browser_elements::proto(self, it, doc.atom_str(name))?,
                             t @ ("audio" | "video") => crate::browser_media::proto(self, it, n, t)?,
                             t @ ("input" | "form" | "button" | "label") => crate::browser_controls::proto_for(self, it, t)?,
                             "script" => self.scripts.proto.get().copied().unwrap_or(p.html),
@@ -896,8 +901,9 @@ impl Dom {
             parse_selector_list(text, &mut doc)
         };
         let Some(list) = parsed else { return Err(self.dom_err(it, "SyntaxError", &format!("'{text}' is not a valid selector"))) };
-        // `a b c d` can backtrack a lot: refuse more than two descendant or later-sibling combinators.
-        if list.iter().any(|s| nd::backtracking(s) > 2) {
+        // `a b c d e f g` can backtrack a lot: refuse more than five descendant or later-sibling combinators. A shorter chain is charged
+        // before it runs (`nd::match_work`).
+        if list.iter().any(|s| nd::backtracking(s) > 5) {
             return Err(self.lim("dom-selector-complexity"));
         }
         let list = Rc::new(list);
@@ -1121,6 +1127,7 @@ impl Dom {
         crate::browser_range::install(self, it)?;
         crate::browser_handlers::install(self, it)?;
         crate::browser_error_event::install(self, it)?;
+        crate::browser_perf_observer::install(self, it)?;
         crate::browser_select::install(self, it)?;
         // Last: a new host function earlier in this list moves the id of every one after it.
         crate::browser_elements::install(self, it)?;
@@ -1405,6 +1412,9 @@ impl Browser {
             style: Default::default(),
             computed: Default::default(),
             geometry: Default::default(),
+            implementation: Default::default(),
+            perf_observer: Default::default(),
+            perf_observer_ctor: Default::default(),
             scrolling: Default::default(),
             resize: Default::default(),
             frame: Default::default(),

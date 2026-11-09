@@ -232,6 +232,19 @@ fn the_real_clock_waits_for_a_near_timer_and_stops_at_a_far_one() {
 }
 
 #[test]
+fn tasks_that_leave_the_document_alone_do_not_walk_it_again_for_style_sheets() {
+    big(|| {
+        let html = "<link rel=stylesheet href='/a.css'><script>var n = 0; function f() { if (++n < 200) setTimeout(f, 0) } f()</script>";
+        let routes = vec![("/a.css", 200, Some("text/css"), "p { color: red }".into(), vec![])];
+        let srv = server(routes);
+        let mut b = make(html, &srv, 5_000_000, true);
+        let r = load(&mut b, &srv, quick());
+        assert_eq!(eval(&mut b, "n"), "200");
+        assert!(r.tasks >= 200 && r.css.feeds < 20, "tasks {} feeds {}", r.tasks, r.css.feeds);
+    });
+}
+
+#[test]
 fn budgets_stop_the_run_and_a_timer_loop_cannot_starve_the_network() {
     big(|| {
         let html = format!("{PRE}<script>var done = 0; function f() {{ setTimeout(f, 0) }} f(); fetch('/data').then(function () {{ done = 1 }}); var n = 0</script>");

@@ -5,7 +5,7 @@
 //! - Every walk charges `it.charge` for each node it visits, and every result is capped before it grows.
 
 use crate::browser::*;
-use bare_css::matching::matches;
+use bare_css::matching::{matches, subject_matches};
 use bare_css::selector::{Selector, Simple};
 use bare_html::dom::{Atom, Document, NodeData, NodeId};
 use bare_js::eval::{Error, Interp};
@@ -75,6 +75,8 @@ pub(crate) fn next_composed(doc: &Document, root: NodeId, cur: NodeId, depth: us
     }
 }
 
+/// Descendant and later-sibling combinators of `s`: each is a search with a place to go back to. `Dom::selectors` refuses more than 5. The
+/// step charge of `match_work` is the real guard: it is made before a match and a chain that is too long ends at the budget.
 pub(crate) fn backtracking(s: &Selector) -> u32 {
     let n = s.compounds.len();
     s.compounds
@@ -232,8 +234,17 @@ impl Dom {
         let (mut cur, mut d) = (scope, 0usize);
         while let Some((c, cd)) = next_in(&doc, scope, cur, d) {
             (cur, d) = (c, cd);
-            it.charge(match_work(&doc, base + d, &sels))?;
-            if matches!(doc.data(c), NodeData::Element { .. }) && sels.iter().any(|s| matches(&doc, c, s)) {
+            it.charge(1)?;
+            // The matcher stops at once when the last compound does not fit: only a selector that fits has to search up or back.
+            let mut hit = false;
+            for s in sels.iter().filter(|s| subject_matches(&doc, c, s)) {
+                it.charge(match_work(&doc, base + d, std::slice::from_ref(s)))?;
+                if matches(&doc, c, s) {
+                    hit = true;
+                    break;
+                }
+            }
+            if hit {
                 if out.len() >= self.lim.max_results {
                     return Err(self.lim("dom-results"));
                 }
@@ -1210,7 +1221,7 @@ pub(crate) fn install_late(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     d.def_method(it, d.p().element, "insertAdjacentElement", 2, insert_adjacent_element)?;
     d.def_method(it, d.p().element, "insertAdjacentText", 2, insert_adjacent_text)?;
     d.def_method(it, d.p().element, "insertAdjacentHTML", 2, crate::browser_fragment::insert_adjacent_html)?;
-    Ok(())
+    crate::browser_implementation::install(d, it)
 }
 
 pub(crate) fn clone_node(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {

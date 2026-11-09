@@ -136,6 +136,8 @@ mod browser_range;
 mod browser_rects;
 mod browser_chardata;
 mod browser_lazy;
+mod browser_implementation;
+mod browser_perf_observer;
 mod browser_mutation;
 mod browser_custom;
 mod browser_face;

@@ -306,7 +306,7 @@ impl Dom {
             s.order.iter().flat_map(|o| s.observers[o].obs.iter().map(|x| x.target)).collect()
         };
         let styles = self.cascade_now(it)?;
-        let layout = self.layout_now(it, &styles)?;
+        let layout = &self.layout_now(it, &styles)?.layout;
         // The border box of each target: the union of its box fragments, in one pass over the fragments (CSSOM View).
         let mut boxes: HashMap<NodeId, Option<Rect>> = targets.iter().map(|&t| (t, None)).collect();
         it.charge(layout.fragments.len() as u64)?;

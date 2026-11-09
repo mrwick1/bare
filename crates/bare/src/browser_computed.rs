@@ -172,6 +172,9 @@ pub(crate) struct Built {
     read: Option<[Vec<NodeId>; 3]>,
     /// Does a sheet use what the engine does not model (`content-visibility`, `display: contents`)? Read by `checkVisibility` only.
     pub(crate) odd: OnceCell<bool>,
+    /// The inputs of the plan that `key` came from (`revision`, `text_revision`, length, `sheet_gen`). Equal inputs give the same plan, so the
+    /// read skips the walk over the sources, the copy of the sheet text and the comparison with `key`.
+    stamp: (u64, u64, usize, u64),
 }
 
 #[derive(Default)]
@@ -434,13 +437,16 @@ impl Dom {
             return Err(self.lim("computed-nodes"));
         }
         let mut doc = self.doc.borrow_mut();
-        it.charge(doc.len() as u64 / 4 + 1)?;
-        let plan = self.plan(&mut doc, vp, false)?;
-        if plan.strict {
-            return Err(Self::gate(MISSING));
-        }
-        it.charge(plan.bytes as u64 / 32)?;
-        {
+        let stamp = (doc.revision(), doc.text_revision(), doc.len(), self.computed.sheet_gen.get());
+        // The same inputs as the plan of the rules in the cache: that plan was not strict, and its sheets are the rules' sheets.
+        let same = self.computed.cache.borrow().as_ref().is_some_and(|b| b.vp == vp && b.stamp == stamp);
+        if !same {
+            it.charge(doc.len() as u64 / 4 + 1)?;
+            let plan = self.plan(&mut doc, vp, false)?;
+            if plan.strict {
+                return Err(Self::gate(MISSING));
+            }
+            it.charge(plan.bytes as u64 / 32)?;
             let mut cache = self.computed.cache.borrow_mut();
             if !cache.as_ref().is_some_and(|b| b.vp == vp && b.key == plan.parts) {
                 *cache = None;
@@ -456,8 +462,9 @@ impl Dom {
                 if doc.name_count() > self.lim.max_names {
                     return Err(self.lim("dom-names"));
                 }
-                *cache = Some(Built { vp, key: plan.parts, rules, last: [None, None], read: None, odd: OnceCell::new() });
+                *cache = Some(Built { vp, key: plan.parts, rules, last: [None, None], read: None, odd: OnceCell::new(), stamp });
             }
+            cache.as_mut().expect("built").stamp = stamp;
         }
         let mut cache = self.computed.cache.borrow_mut();
         let built = cache.as_mut().expect("built");
@@ -465,7 +472,6 @@ impl Dom {
         if work > l.max_work {
             return Err(self.lim("computed-work"));
         }
-        it.charge(work)?;
         // The cascade reads only the tree, the attributes, the text, the `set_ui` and `set_states` state (they move
         // `revision`), the hover, active and focus state (`UserState::revision`) and the custom element state. `attach_shadow`
         // adds a node, so the length moves. A custom element state change moves no counter, so the cascade is kept and used
@@ -477,8 +483,11 @@ impl Dom {
             && (*kept || !keep)
             && !doc.has_custom()
         {
+            // The styles of the last read are still right: no cascade runs, so a read charges the check only.
+            it.charge(1)?;
             return Ok(styles.clone());
         }
+        it.charge(work)?;
         // A read after changes: restyle the cascade of the last read only where the changes reach, as a window frame does.
         let read = want.is_none() && !keep;
         let old = if slot == 0 { built.read.take() } else { None };
@@ -974,7 +983,9 @@ impl Browser {
     /// and a read does not stop. Call it when every sheet of the parsed document is supplied. Before it (and for an embedder that
     /// never calls it) a missing sheet is `Unsupported`.
     pub fn set_pending_sheets(&mut self, on: bool) {
-        self.dom.computed.pending_ok.set(on);
+        let c = &self.dom.computed;
+        c.pending_ok.set(on);
+        c.sheet_gen.set(c.sheet_gen.get() + 1);
     }
 
     /// Forget a supplied sheet: a `<link>` to it is missing again. False when there was none.

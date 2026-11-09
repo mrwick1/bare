@@ -1,11 +1,15 @@
 //! `HTMLElement.offsetWidth` and `offsetHeight` over the native cascade (`bare_css::cascade`) and native layout (`bare_layout::layout`).
 //!
 //! How it works
-//! - Every read runs the whole path again: the cascade of `browser_computed.rs` (`Dom::cascade_now`: the same sheets, gates and caps, so a
+//! - Every read runs the whole path: the cascade of `browser_computed.rs` (`Dom::cascade_now`: the same sheets, gates and caps, so a
 //!   linked sheet that is not supplied is `Unsupported`), then `bare_layout::layout` with the current viewport, then the answer from the
-//!   fragments. The layout is not cached. The cascade is used again only while the document counters and the sheets are the same
-//!   (`Dom::cascade_for`). Nothing is stored on the element or in JS data, so a held element sees the current classes, `id`,
-//!   `style` attributes, `<style>` text, supplied sheets, viewport, tree and text.
+//!   fragments. The cascade is used again only while the document counters and the sheets are the same (`Dom::cascade_for`), and the
+//!   layout of the last read is used again while the styles, the document counters and the viewport are the same (`Dom::layout_shared`), so
+//!   a loop of reads over a page that does not change lays it out once and charges one step for each read after the first. Nothing is
+//!   stored on the element or in JS data, so a held element sees the current classes, `id`, `style` attributes, `<style>` text, supplied
+//!   sheets, viewport, tree and text. The step charge follows the work done: a read that finds the cascade or the layout still right
+//!   charges one step, and a read that runs them charges their cost (the loop of 9,789 elements of Wikipedia that read `scrollWidth`
+//!   ended in `Limit(Steps)` when every read charged the full cost).
 //! - CSSOM View (`offsetWidth`, `offsetHeight`): "if the element does not have any associated box return zero", else the width (height) of the
 //!   axis-aligned bounding box of the border boxes of all fragments of the principal box, ignoring transforms. Here: the union of all `Kind::Box`
 //!   fragments of the element. An element with no fragment is zero: a detached or not connected element, `display:none` (and everything below it,
@@ -51,6 +55,7 @@ use bare_js::eval::Interp;
 use bare_js::value::Value;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::rc::Rc;
 
 /// Bounds of the geometry module (see the header). Each is checked before native layout starts.
 #[derive(Clone, Copy, Debug)]
@@ -95,6 +100,18 @@ pub(crate) struct Geometry {
     pub(crate) uncull: Cell<bool>,
     /// The counts of the last window walk.
     sums: RefCell<Sums>,
+    /// The layout of the last read, with the inputs it came from (`Dom::layout_shared`).
+    pub(crate) shared: RefCell<Option<(SharedKey, Rc<Lay>)>>,
+}
+
+/// The inputs of a layout: the styles (by address), `revision`, `text_revision`, length and user state revision of the document, and the window.
+pub(crate) type SharedKey = (usize, u64, u64, usize, [u64; 3], (u32, u32));
+
+/// One layout of the page with its scroll containers and its bars (`Dom::layout_areas`).
+pub(crate) struct Lay {
+    pub(crate) layout: bare_layout::fragment::Layout,
+    pub(crate) areas: bare_layout::scroll::Areas,
+    pub(crate) bars: (bool, bool),
 }
 
 const SLOT: &str = "geometry of a shadow tree with a slot (slot assignment is not built)";
@@ -300,8 +317,8 @@ fn walk<const KEEP: bool>(doc: &Document, styles: &Styles, l: &GeometryLimits, s
 impl Dom {
     /// One bounded native layout of the whole page with these styles: the preflight walk refuses or reserves the work first (see the header).
     /// `offsetWidth`, `offsetHeight` and `ResizeObserver` share it.
-    pub(crate) fn layout_now(&self, it: &mut Interp<'_>, styles: &Styles) -> R<bare_layout::fragment::Layout> {
-        self.layout_areas(it, styles, None).map(|(l, _, _)| l)
+    pub(crate) fn layout_now(&self, it: &mut Interp<'_>, styles: &Rc<Styles>) -> R<Rc<Lay>> {
+        self.layout_shared(it, styles)
     }
 
     /// One bounded native layout at the size `vp` (the window minus the page bars, see `browser_scroll.rs`).
@@ -348,7 +365,7 @@ impl Dom {
             return Ok((0, 0));
         }
         let layout = self.layout_now(it, &styles)?;
-        let Some(r) = border_box(&layout, el) else {
+        let Some(r) = border_box(&layout.layout, el) else {
             // Layout makes no fragment for an inline box with no background and no border (`inline.rs`, "culled"): that is not "no box".
             let doc = self.doc.borrow();
             return match bare_layout::boxes::Tree::new(&doc, &styles).kind(el) {
@@ -400,6 +417,7 @@ impl Browser {
     /// Replace the bounds of this module. Call it before scripts run.
     pub fn set_geometry_limits(&mut self, l: GeometryLimits) {
         self.dom.geometry.lim.set(l);
+        *self.dom.geometry.shared.borrow_mut() = None;
     }
 
     pub fn geometry_stats(&self) -> GeometryStats {

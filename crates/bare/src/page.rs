@@ -614,7 +614,12 @@ impl Page {
             }
             (Some(Err(e)), _) => {
                 self.frame = None;
-                self.note(format!("render: {e:?}"));
+                // A style sheet that is still on its way is no error: the frame waits for it, and a later tick draws it.
+                let waits = matches!(&e, bare_js::eval::Error::Unsupported(u) if u.what.contains("external stylesheet"))
+                    && self.browser().is_some_and(|b| b.live() && b.live_work().is_some());
+                if !waits {
+                    self.note(format!("render: {e:?}"));
+                }
             }
             (None, _) => self.frame = None,
         }
