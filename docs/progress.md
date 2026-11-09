@@ -4224,3 +4224,72 @@ The loader of the previous section runs real module pages. This section records 
 **Gates.** Base `c2637fe`. `cargo test --release --workspace` passes. Full cost matrix (805 rows): mean glibc -0.07%, no row over +0.5% under both allocators. A first version checked every unmarked node of the async machine and put 7 rows (`async_load seq`, `gen_load forof` and `spread`, `binary_load f64from`) over +0.9% to +1.3%. The check moved to the first operand of the marked links (`ask_spine`) and the rows came back. `keycost.sh`: `#a1` 283.6 M for each key, `#f0` 288.9 M, RSS 32.7 MiB (previous 283.2, 288.5, 32.6). `exec_diff.sh`: 79 runs, 0 differences. `test262_check.sh`: gate ok.
 
 Not tested: a second run of archive.org after shadow style scoping exists, the pages above with a real browser side by side, a `for-in` over a proxy in the async machine (the sync code path is reused, `px_for_in_has`).
+
+## Survey 3 regressions: gnu.org TLS resets and the blank nextjs.org (2026-11-09)
+
+Survey 3 listed two possible regressions. Neither of the two probes below finds a TLS regression. The blank page is a real regression, and it is fixed.
+
+### gnu.org: the host blocks, not the ClientHello (no code change)
+
+Method: `bare-drive` built at three commits in `git worktree add --detach` checkouts (`/data/bare-tmp/bisect/`), probe `timeout 20000` / `open https://www.gnu.org/` / `expect css="body" visible` / `shot s`. `46eab19` is main after #280 (RSA). `a092185` is the parent of #282. `51c488f` is #282 (adds `ecdsa_secp384r1_sha384` to the ClientHello). It is the only commit in `crates/tls` between `46eab19` and `ee8724b`, so the other merges cannot change the ClientHello.
+
+| Run | Host state | Binary | Passes |
+|---|---|---|---|
+| this machine, first | up | `ee8724b` (survey 3 binary) | 6 of 10 |
+| this machine, next | blocked | `46eab19` / `a092185` / `51c488f` | 0 of 10 each |
+| this machine, next | blocked | `ee8724b` and `46eab19`, 5 runs each, twice | 0 of 10 and 0 of 10 |
+| arjun-e16 (other IP), interleaved | mostly blocked | `46eab19` / `a092185` / `51c488f` | 0 / 1 / 1 of 10 |
+
+At the same times, `curl https://www.gnu.org/` and `openssl s_client -tls1_3 -connect www.gnu.org:443` also failed (curl `000` in 6 of 6 and 10 of 10 runs; openssl printed no handshake). From arjun-e16, curl got `200` three times before the e16 probes, then `000` in every round. So the host drops or resets connections from an address after a burst of requests, whatever the client. The old binary fails the same way as the new one while the host is blocked, and the new one passed 6 of 10 while it was up. This does not prove that `0x0503` is harmless. It shows that no run separates the three binaries. Do not repeat this probe in a loop: it triggers the block.
+
+Craigslist is a different case. `openssl s_client -tls1_3`, with any cipher, group or signature algorithm list, and `curl --tlsv1.3 --tls-max 1.3` get `Connection reset by peer`. A client that also offers TLS 1.2 gets TLS 1.2 with `ECDHE-ECDSA-AES256-GCM-SHA384`. The server does not speak TLS 1.3 and resets a ClientHello that offers only 1.3. `46eab19`, `a092185` and `ee8724b` all fail it (0 of 5 each). It needs TLS 1.2 (ECDHE with P-256 or P-384, AES-256-GCM, SHA-384 PRF). That is not a cheap change and was not done.
+
+ClientHello of `bare` (the 199-byte test vector in `crates/tls/src/hello.rs`) against `openssl s_client -tls1_3 -msg`:
+
+| Field | bare | openssl 3 |
+|---|---|---|
+| session id | 32 bytes | 32 bytes |
+| cipher suites | `1301` | `1302 1303 1301` |
+| extensions, in order | server_name, supported_groups, signature_algorithms, signature_algorithms_cert, supported_versions, key_share, ALPN | server_name, ec_point_formats, supported_groups, session_ticket, encrypt_then_mac, extended_master_secret, signature_algorithms, supported_versions, psk_key_exchange_modes, key_share |
+| supported_groups | x25519 | X25519MLKEM768, x25519, secp256r1, x448, secp384r1, secp521r1, ffdhe2048, ffdhe3072 |
+| key_share | x25519 | X25519MLKEM768 and x25519 |
+| signature_algorithms | 0403 0503 0804 0805 | 28 values, ecdsa first |
+| `psk_key_exchange_modes` | none | psk_dhe_ke |
+
+Chrome (from its known profile, not captured here) adds GREASE values, `status_request`, `signed_certificate_timestamp`, `application_settings`, `compress_certificate` and a padding extension. The ClientHello cannot add secp256r1 to `supported_groups` without a P-256 key exchange (`crates/tls/src/ecc.rs` only verifies ECDSA), and only `TLS_AES_128_GCM_SHA256` exists. `psk_key_exchange_modes` is sent only with a `pre_shared_key` offer, so RFC 8446 does not require it. No addition was made, because no host failed that these would fix.
+
+### nextjs.org blank: SVG elements had no `style`
+
+Probe: `timeout 20000` / `open https://nextjs.org/` / `expect css="body" visible` / `shot s`, 10 runs each. A capture is blank when the PNG is one flat colour (17365 bytes, against 187017 for the styled page).
+
+| Commit | Blank of 10 |
+|---|---|
+| `46eab19` | 0 |
+| `b828d18` (#284) | 0 |
+| `6857b94` (#285) | 0 |
+| `f6cbc8d` (#286) | 0 |
+| `11117b5` (#287) | 4 |
+| `ee8724b` (survey 3 binary) | 10, then 9 in a second set of 10 |
+| this branch | 0 |
+
+First bad: #287 (class static blocks, non-ASCII identifiers, `Image`, `HTMLImageElement`, `document.implementation`). The stylesheet-wait changes of #285 are not the cause.
+
+Cause: the page scripts now run far enough to hydrate. React sets `element.style.marginBottom` on a Geist element that has no `style`: the property was only on `HTMLElement`, so an SVG element (the page has three) read `undefined`. The script threw `TypeError: Cannot read properties of undefined (reading 'marginBottom')`, React unmounted the root and the page went blank. Before #287 the scripts stopped earlier, on a missing API, and left the server-rendered page in place. The run is flaky because the failure depends on when the hydration step runs against the capture.
+
+Fix: `SVGElement.prototype.style` (getter and setter) shares the `CSSStyleDeclaration` of `HTMLElement`. It refuses an HTML or MathML receiver with `TypeError: Illegal invocation`, as before for the HTML accessor on an SVG receiver. Computed style of SVG elements is still open.
+
+The console printed `[object]` for the thrown `Error`, because the formatter never runs page code. It now prints an own data string `stack`, else `message`, of an object. A getter or a non-string still prints `[object]`. A test checks that no page code runs (a getter counter stays 0).
+
+### Checks
+
+- Tests written first: `an_error_prints_its_stack_or_message_without_running_page_code` (failed with `E:[object]`) and an updated `same_object_and_brand_checks` (failed on the SVG `style`). Both pass.
+- `cargo test --release --workspace`: all pass. After the last rebase on #294, `cargo test --release -p bare --lib browser_`: 1055 passed, 0 failed.
+- Cost matrix against the base build of c2637fe: 805 rows, mean +0.006% (glibc), 0 rows over the limit under both allocators. Two `form_load gates` rows are +0.65% and +0.73% under glibc only (jemalloc -0.000% and +0.03%).
+- `tools/drive/public/run.sh` on this branch: pass 26, fail 0, known 1 (rust-book-sidebar), flakes 0.
+- nextjs.org after the fix: 10 of 10 styled, no console entries.
+
+### Not tested
+
+- gnu.org with a ClientHello change: the host blocked both addresses, so no run could show an effect.
+- A TLS 1.2 client for craigslist.org.
+- Whether other React sites set styles on MathML elements (MathML still has no `style`).
