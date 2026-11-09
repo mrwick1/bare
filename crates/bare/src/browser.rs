@@ -711,6 +711,7 @@ impl Host for Dom {
     }
 
     fn fill_indexed(&self, it: &mut Interp<'_>, owner: ObjId, index: u32) -> R<()> {
+        if index == bare_js::heap::LAZY_TAG { return crate::browser_handlers::tags(self,it); }
         if (bare_js::heap::LAZY_ALL..u32::MAX).contains(&index) {
             return crate::browser_handlers::lazy(self, it, owner, index == bare_js::heap::LAZY_ALL);
         }
@@ -751,6 +752,10 @@ fn domexc_codes(name: &str) -> u32 {
 
 #[cold]
 pub(crate) fn define_window(d: &Dom, it: &mut Interp<'_>, name: &str) -> R<bool> {
+    if name == "eval" {
+        d.def_method(it,it.global_object(),"eval",1,|_,it,_,a|it.eval_global(a.first().copied().unwrap_or(Value::Undefined)))?;
+        return Ok(true);
+    }
     if !matches!(name,"frames"|"parent"|"top"|"length"|"name"|"screen"){return Ok(false);}
     let g = it.global_object();
     let key=d.key(it,name)?;
@@ -888,7 +893,7 @@ impl Dom {
                 let proto = match *doc.data(n) {
                     // The brand follows the namespace of the native node, not its name: an SVG `input` is not an `<input>`.
                     NodeData::Element { name, .. } => match doc.element_ns(n) {
-                        Ns::Svg => p.svg,
+                        Ns::Svg => crate::browser_svg::wrapper_proto(self,it,doc.atom_str(name))?,
                         Ns::MathMl => p.element,
                         _ => match doc.atom_str(name) {
                             "iframe" => p.iframe,

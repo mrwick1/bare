@@ -15,6 +15,25 @@ use bare_css::cascade::{ComputedStyle, Styles};
 use bare_css::values::{Property, Value};
 use bare_html::dom::{Document, NodeData, NodeId};
 
+/// Math used when flattening SVG shapes. The browser can supply its software math.
+pub trait GeometryMath {
+    fn sin(x:f32)->f32;
+    fn cos(x:f32)->f32;
+    fn sin_cos(x:f32)->(f32,f32);
+    fn atan2(y:f32,x:f32)->f32;
+    fn acos(x:f32)->f32;
+    fn hypot(x:f32,y:f32)->f32;
+}
+struct NativeMath;
+impl GeometryMath for NativeMath {
+    fn sin(x:f32)->f32{x.sin()}
+    fn cos(x:f32)->f32{x.cos()}
+    fn sin_cos(x:f32)->(f32,f32){x.sin_cos()}
+    fn atan2(y:f32,x:f32)->f32{y.atan2(x)}
+    fn acos(x:f32)->f32{x.acos()}
+    fn hypot(x:f32,y:f32)->f32{x.hypot(y)}
+}
+
 /// Where the user space of the `<svg>` is in pixels: `x * s + tx`, `y * s + ty`.
 #[derive(Clone, Copy)]
 struct Map {
@@ -86,7 +105,7 @@ fn walk(doc: &Document, styles: &Styles, root: NodeId, node: NodeId, inherited: 
             walk(doc, styles, root, child, paint, map, out, buf);
             continue;
         }
-        let subs = shape(doc, child, name, map.s);
+        let subs = shape::<NativeMath>(doc, child, name, map.s);
         if subs.is_empty() {
             continue;
         }
@@ -129,11 +148,11 @@ fn contour(out: &mut Vec<(f32, f32)>, pts: impl Iterator<Item = (f32, f32)>) {
 }
 
 /// The polylines of a shape, in user units. `s`: pixels for each unit, to choose how many segments a curve needs.
-fn shape(doc: &Document, node: NodeId, name: &str, s: f32) -> Vec<Sub> {
+fn shape<M: GeometryMath>(doc: &Document, node: NodeId, name: &str, s: f32) -> Vec<Sub> {
     let l = |n| len(doc, node, n);
     let pair = |c: &[f32]| (c[0], c[1]);
     match name {
-        "path" => attr(doc, node, "d").map_or_else(Vec::new, |d| path(d, s)),
+        "path" => attr(doc, node, "d").map_or_else(Vec::new, |d| path::<M>(d, s)),
         "line" => vec![Sub { pts: vec![(l("x1"), l("y1")), (l("x2"), l("y2"))], closed: false }],
         "polyline" | "polygon" => {
             let nums: Vec<f32> = attr(doc, node, "points").unwrap_or("").split(|c: char| c == ',' || c.is_whitespace()).filter(|t| !t.is_empty()).map_while(|t| t.parse().ok()).collect();
@@ -152,7 +171,7 @@ fn shape(doc: &Document, node: NodeId, name: &str, s: f32) -> Vec<Sub> {
                 pts = vec![(x + rx, y), (x + w - rx, y)];
                 for (to, next) in [((x + w, y + ry), (x + w, y + h - ry)), ((x + w - rx, y + h), (x + rx, y + h)), ((x, y + h - ry), (x, y + ry)), ((x + rx, y), (x + rx, y))] {
                     let from = pts[pts.len() - 1];
-                    arc(&mut pts, from, (rx, ry, 0.0, false, true), to, s);
+                    arc::<M>(&mut pts, from, (rx, ry, 0.0, false, true), to, s);
                     pts.push(next);
                 }
                 pts.pop();
@@ -168,10 +187,10 @@ fn shape(doc: &Document, node: NodeId, name: &str, s: f32) -> Vec<Sub> {
             let (cx, cy) = (l("cx"), l("cy"));
             let n = ((rx.max(ry) * s * 6.0).ceil() as usize).clamp(16, 360);
             // The corners of a polygon are on the curve, so it holds less than the curve: a larger radius gives the same area.
-            let k = fit(n);
+            let k = fit::<M>(n);
             let pts = (0..n).map(|i| {
                 let t = std::f32::consts::TAU * i as f32 / n as f32;
-                (cx + rx * k * t.cos(), cy + ry * k * t.sin())
+                (cx + rx * k * M::cos(t), cy + ry * k * M::sin(t))
             });
             vec![Sub { pts: pts.collect(), closed: true }]
         }
@@ -252,7 +271,7 @@ impl Scan<'_> {
 }
 
 /// The polylines of a path (`d`). A mistake ends the path: what came before it is drawn (SVG 2, "error handling").
-fn path(d: &str, s: f32) -> Vec<Sub> {
+fn path<M: GeometryMath>(d: &str, s: f32) -> Vec<Sub> {
     let mut sc = Scan { s: d.as_bytes(), i: 0 };
     let mut subs: Vec<Sub> = Vec::new();
     let (mut cur, mut start, mut ctl) = ((0.0f32, 0.0f32), (0.0f32, 0.0f32), (0.0f32, 0.0f32));
@@ -297,20 +316,20 @@ fn path(d: &str, s: f32) -> Vec<Sub> {
                 b'c' | b's' => {
                     let c1 = if kind == b'c' { (sc.num()? + ox, sc.num()? + oy) } else if matches!(prev, b'c' | b's') { (2.0 * cur.0 - ctl.0, 2.0 * cur.1 - ctl.1) } else { cur };
                     let (c2, p) = ((sc.num()? + ox, sc.num()? + oy), (sc.num()? + ox, sc.num()? + oy));
-                    cubic(&mut cur_sub(&mut subs, cur).pts, cur, c1, c2, p, s);
+                    cubic::<M>(&mut cur_sub(&mut subs, cur).pts, cur, c1, c2, p, s);
                     (ctl, cur) = (c2, p);
                 }
                 b'q' | b't' => {
                     let q = if kind == b'q' { (sc.num()? + ox, sc.num()? + oy) } else if matches!(prev, b'q' | b't') { (2.0 * cur.0 - ctl.0, 2.0 * cur.1 - ctl.1) } else { cur };
                     let p = (sc.num()? + ox, sc.num()? + oy);
-                    quad(&mut cur_sub(&mut subs, cur).pts, cur, q, p, s);
+                    quad::<M>(&mut cur_sub(&mut subs, cur).pts, cur, q, p, s);
                     (ctl, cur) = (q, p);
                 }
                 b'a' => {
                     let (rx, ry, rot) = (sc.num()?, sc.num()?, sc.num()?);
                     let (large, sweep) = (sc.flag()?, sc.flag()?);
                     let p = (sc.num()? + ox, sc.num()? + oy);
-                    arc(&mut cur_sub(&mut subs, cur).pts, cur, (rx, ry, rot, large, sweep), p, s);
+                    arc::<M>(&mut cur_sub(&mut subs, cur).pts, cur, (rx, ry, rot, large, sweep), p, s);
                     cur = p;
                 }
                 b'z' => {
@@ -341,8 +360,8 @@ fn cur_sub(subs: &mut Vec<Sub>, cur: (f32, f32)) -> &mut Sub {
     subs.last_mut().expect("one polyline")
 }
 
-fn cubic(out: &mut Vec<(f32, f32)>, p0: (f32, f32), p1: (f32, f32), p2: (f32, f32), p3: (f32, f32), s: f32) {
-    let d = |a: (f32, f32), b: (f32, f32)| (a.0 - b.0).hypot(a.1 - b.1);
+fn cubic<M: GeometryMath>(out: &mut Vec<(f32, f32)>, p0: (f32, f32), p1: (f32, f32), p2: (f32, f32), p3: (f32, f32), s: f32) {
+    let d = |a: (f32, f32), b: (f32, f32)| M::hypot(a.0-b.0,a.1-b.1);
     let n = ((d(p0, p1) + d(p1, p2) + d(p2, p3)) * s / 1.5).ceil().clamp(4.0, 96.0) as usize;
     for i in 1..=n {
         let t = i as f32 / n as f32;
@@ -352,14 +371,14 @@ fn cubic(out: &mut Vec<(f32, f32)>, p0: (f32, f32), p1: (f32, f32), p2: (f32, f3
     }
 }
 
-fn quad(out: &mut Vec<(f32, f32)>, p0: (f32, f32), p1: (f32, f32), p2: (f32, f32), s: f32) {
+fn quad<M: GeometryMath>(out: &mut Vec<(f32, f32)>, p0: (f32, f32), p1: (f32, f32), p2: (f32, f32), s: f32) {
     let c1 = (p0.0 + 2.0 / 3.0 * (p1.0 - p0.0), p0.1 + 2.0 / 3.0 * (p1.1 - p0.1));
     let c2 = (p2.0 + 2.0 / 3.0 * (p1.0 - p2.0), p2.1 + 2.0 / 3.0 * (p1.1 - p2.1));
-    cubic(out, p0, c1, c2, p2, s);
+    cubic::<M>(out, p0, c1, c2, p2, s);
 }
 
 /// An elliptical arc from `from` to `to` (SVG 2, "implementation notes": endpoint to center). `(rx, ry, rotation in degrees, large, sweep)`.
-fn arc(out: &mut Vec<(f32, f32)>, from: (f32, f32), (rx, ry, rot, large, sweep): (f32, f32, f32, bool, bool), to: (f32, f32), s: f32) {
+fn arc<M: GeometryMath>(out: &mut Vec<(f32, f32)>, from: (f32, f32), (rx, ry, rot, large, sweep): (f32, f32, f32, bool, bool), to: (f32, f32), s: f32) {
     let (mut rx, mut ry) = (rx.abs(), ry.abs());
     if from == to {
         return;
@@ -368,7 +387,7 @@ fn arc(out: &mut Vec<(f32, f32)>, from: (f32, f32), (rx, ry, rot, large, sweep):
         out.push(to);
         return;
     }
-    let (sin, cos) = rot.to_radians().sin_cos();
+    let (sin, cos) = M::sin_cos(rot.to_radians());
     let (dx, dy) = ((from.0 - to.0) / 2.0, (from.1 - to.1) / 2.0);
     let (x1, y1) = (cos * dx + sin * dy, -sin * dx + cos * dy);
     let scale = (x1 * x1) / (rx * rx) + (y1 * y1) / (ry * ry);
@@ -381,7 +400,7 @@ fn arc(out: &mut Vec<(f32, f32)>, from: (f32, f32), (rx, ry, rot, large, sweep):
     let coef = (num / (rx2 * y1 * y1 + ry2 * x1 * x1)).sqrt() * if large == sweep { -1.0 } else { 1.0 };
     let (cxp, cyp) = (coef * rx * y1 / ry, -coef * ry * x1 / rx);
     let (cx, cy) = (cos * cxp - sin * cyp + (from.0 + to.0) / 2.0, sin * cxp + cos * cyp + (from.1 + to.1) / 2.0);
-    let angle = |ux: f32, uy: f32, vx: f32, vy: f32| (ux * vy - uy * vx).atan2(ux * vx + uy * vy);
+    let angle = |ux: f32, uy: f32, vx: f32, vy: f32| M::atan2(ux * vy - uy * vx,ux * vx + uy * vy);
     let (ux, uy) = ((x1 - cxp) / rx, (y1 - cyp) / ry);
     let theta = angle(1.0, 0.0, ux, uy);
     let mut delta = angle(ux, uy, (-x1 - cxp) / rx, (-y1 - cyp) / ry);
@@ -392,11 +411,11 @@ fn arc(out: &mut Vec<(f32, f32)>, from: (f32, f32), (rx, ry, rot, large, sweep):
     }
     // A step that keeps a segment within 0.05 px of the curve.
     let r = rx.max(ry) * s;
-    let step = if r > 0.05 { 2.0 * (1.0 - 0.05 / r).acos() } else { 1.0 };
+    let step = if r > 0.05 { 2.0 * M::acos(1.0 - 0.05 / r) } else { 1.0 };
     let n = ((delta.abs() / step.max(0.02)).ceil() as usize).clamp(2, 256);
     for i in 1..n {
         let t = theta + delta * i as f32 / n as f32;
-        let (px, py) = (rx * t.cos(), ry * t.sin());
+        let (px, py) = (rx * M::cos(t), ry * M::sin(t));
         out.push((cos * px - sin * py + cx, sin * px + cos * py + cy));
     }
     out.push(to);
@@ -525,7 +544,7 @@ fn poly(out: &mut Vec<(f32, f32)>, pts: &[(f32, f32)]) {
 
 fn disc(out: &mut Vec<(f32, f32)>, c: (f32, f32), r: f32) {
     let n = ((r * 6.0).ceil() as usize).clamp(12, 96);
-    let r = r * fit(n);
+    let r = r * fit::<NativeMath>(n);
     let pts: Vec<(f32, f32)> = (0..n).map(|i| {
         let t = std::f32::consts::TAU * i as f32 / n as f32;
         (c.0 + r * t.cos(), c.1 + r * t.sin())
@@ -534,9 +553,9 @@ fn disc(out: &mut Vec<(f32, f32)>, c: (f32, f32), r: f32) {
 }
 
 /// The factor for the radius of a regular polygon of `n` corners that gives the area of the circle.
-fn fit(n: usize) -> f32 {
+fn fit<M: GeometryMath>(n: usize) -> f32 {
     let n = n as f32;
-    (std::f32::consts::PI / (n / 2.0 * (std::f32::consts::TAU / n).sin())).sqrt()
+    (std::f32::consts::PI / (n / 2.0 * M::sin(std::f32::consts::TAU / n))).sqrt()
 }
 
 #[cfg(test)]
@@ -544,7 +563,7 @@ mod tests {
     use super::*;
 
     fn pts(d: &str) -> Vec<(Vec<(f32, f32)>, bool)> {
-        path(d, 1.0).into_iter().map(|s| (s.pts, s.closed)).collect()
+        path::<NativeMath>(d, 1.0).into_iter().map(|s| (s.pts, s.closed)).collect()
     }
 
     #[test]
@@ -726,4 +745,12 @@ mod file_tests {
         assert!(bitmap("<p>no</p>").is_none());
         assert!(bitmap(&format!("<svg>{}</svg>", " ".repeat(super::MAX_FILE))).is_none());
     }
+}
+
+/// Flatten a shape with the same curve approximation used by painting.
+pub fn geometry<M: GeometryMath>(doc: &Document, node: NodeId) -> Vec<Vec<(f32,f32)>> {
+    shape::<M>(doc,node,doc.element_name(node),1.0).into_iter().map(|mut sub| {
+        if sub.closed && !sub.pts.is_empty() {sub.pts.push(sub.pts[0]);}
+        sub.pts
+    }).collect()
 }

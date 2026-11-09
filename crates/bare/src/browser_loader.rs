@@ -296,6 +296,8 @@ pub(crate) struct Scripts {
     /// 0 `loading`, 1 `interactive`, 2 `complete`.
     ready: Cell<u8>,
     current: Cell<Option<NodeId>>,
+    write_open: Cell<bool>,
+    write_anchor: Cell<Option<(NodeId, Option<NodeId>)>>,
     pub(crate) base: RefCell<Option<String>>,
     started: RefCell<HashSet<NodeId>>,
     inline: RefCell<VecDeque<(NodeId, String)>>,
@@ -1750,4 +1752,65 @@ impl Run<'_> {
             }
         }
     }
+}
+
+
+#[cold]
+#[inline(never)]
+pub(crate) fn document_open(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    let root=d.nd(it,this)?;
+    if root != d.doc.borrow().root() { return Err(it.type_error("Illegal invocation")); }
+    let html={let doc=d.doc.borrow();doc.children(root).find(|&n|doc.is_html(n,"html"))};
+    if let Some(html)=html {
+        let wrapped=d.wrap(it,html)?;
+        let mut children=Vec::new();
+        for tag in ["head","body"] {
+            let tag=d.js_str(it,tag)?;
+            children.push(crate::browser_dom::create_element(d,it,this,&[tag])?);
+        }
+        let empty=d.js_str(it,"")?;
+        crate::browser_dom::set_text_content(d,it,wrapped,&[empty])?;
+        for child in children { crate::browser_dom::append_child(d,it,wrapped,&[child])?; }
+    }
+    d.scripts.write_open.set(true);
+    Ok(this)
+}
+#[cold]
+#[inline(never)]
+pub(crate) fn document_close(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    let root=d.nd(it,this)?;
+    if root != d.doc.borrow().root() { return Err(it.type_error("Illegal invocation")); }
+    d.scripts.write_open.set(false);
+    Ok(Value::Undefined)
+}
+#[cold]
+#[inline(never)]
+pub(crate) fn document_write(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    write(d,it,this,a,false)
+}
+#[cold]
+#[inline(never)]
+pub(crate) fn document_writeln(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    write(d,it,this,a,true)
+}
+fn write(d: &Dom,it: &mut Interp<'_>,this: Value,a: &[Value],newline: bool)->V {
+    let root=d.nd(it,this)?;
+    if root != d.doc.borrow().root() { return Err(it.type_error("Illegal invocation")); }
+    let mut text=String::new();
+    for &v in a { text.push_str(&d.string_arg(it,v)?); if text.len()>d.lim.max_string_bytes { return Err(d.lim("dom-string")); } }
+    if newline { text.push('\n'); }
+    if let Some(script)=d.scripts.current.get().filter(|_|d.scripts.ready.get()==0)
+        && d.in_document(it,script)? {
+        let before=match d.scripts.write_anchor.get() {
+            Some((s,before)) if s==script=>before,
+            _=>{let before=d.doc.borrow().next_sibling(script);d.scripts.write_anchor.set(Some((script,before)));before}
+        };
+        let parent=d.doc.borrow().parent(script);
+        if let Some(parent)=parent { return crate::browser_fragment::write_at(d,it,&text,parent,before); }
+        return Ok(Value::Undefined);
+    }
+    if !d.scripts.write_open.get() { document_open(d,it,this,&[])?; }
+    let body=crate::browser_dom::body(d,it,this,&[])?;
+    let n=d.el(it,body)?;
+    crate::browser_fragment::write_at(d,it,&text,n,None)
 }

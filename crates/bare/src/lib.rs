@@ -166,6 +166,8 @@ mod browser_idle_tests;
 #[cfg(test)]
 mod browser_element_tests;
 mod browser_elements;
+mod browser_canvas;
+mod browser_svg;
 mod browser_slot;
 mod browser_media;
 mod browser_img;

@@ -5087,3 +5087,94 @@ Checks.
 - Live check on https://ar.wikipedia.org with `bare-drive` (steps: `timeout 30000`, `open`, `expect css="body" visible`, `shot s`) on archMachine and on arjun-e16 (no Arabic font installed). Both captures are 1280 by 800. I compared them pixel by pixel. The page is live, so I compared the top 510 rows, which hold all the Arabic text of the first screen. Only 64 pixels differ, at the scrollbar thumb, because images loaded at different times. The rest of the difference is two news photos that had loaded on archMachine only. I removed my files from e16.
 
 Not tested. Arabic joining and right-to-left order (letters still draw one by one). Other machines. Fonts other than Regular (no bold Arabic). A page that uses Arabic characters outside the five blocks.
+
+## Script errors: document streams, SVG, canvas and indirect eval (2026-11-10)
+
+Compared against `01a1a0d2d328bf61fe63c5e4abc9533d14d2a56d`. The work started from `f28752bf6d`. Rebased once before the full checks. The evidence directory is `/data/bare-tmp/script-errors-3/`. The task target is `/data/bare-tmp/script-errors-3-target`.
+
+The existing observer implementations remain in use. No observer validation changed. Base HTML elements reported `[object Object]`. Vue therefore wrapped DOM refs in reactive proxies. Those proxies failed the observer's Element validation. A failing branding regression now passes. A cold Symbol-miss path installs base DOM tags on first use. It reuses the existing lazy-request cache. Both live Vue probes reach the `__vue_app__` hydration marker. The baseline logs the invalid observer target and missing SVGAnimatedString. The new driver logs neither.
+
+Document methods use the existing lazy host-property path. During a parser script, each complete HTML fragment goes after that script and before its original next sibling. Repeated writes keep their order. After load, the first write opens a replacement head and body. Further writes append until close. The existing fragment parser and DOM mutation methods enforce their bounds.
+
+SVG wrappers use the existing interface cache. Added graphics, geometry, root and common shape classes. The first class read switches existing wrappers once. New wrappers use those classes only after this switch. Animated width, height and viewBox reads expose baseVal and animVal snapshots. SVGAnimatedString permits className reads. Shape lengths and points reuse the painter's path flattening. getCTM returns an identity DOMMatrix. getBBox reads the x, y, width and height attributes.
+
+Canvas methods activate HTMLCanvasElement on first use. A canvas keeps one stub 2D context. Drawing methods do nothing. measureText estimates width at six units per character. Other context types return null. toDataURL returns a valid transparent 1-by-1 PNG. Checked its chunk CRCs.
+
+Indirect eval enters through the existing bounded script parser. It uses a fresh lexical environment under the global environment. Non-strict var and function declarations enter the global object. Strict declarations stay in the eval environment. The caller's environment, completion, strict mode and host scope return on success and failure. Completion tracking keeps the remaining call-depth budget. Function already existed. A regression verifies its global scope. No field was added to Value, Object or Interp. Existing assertions keep Value at 16 bytes or less and Object at 80 bytes.
+
+### Ranked console errors before and after
+
+Re-ran all 16 sites from the previous table on the final shared baseline and the new driver. Each probe uses `timeout 20000`, `open URL`, `expect css="body" visible` and `shot s`. Both runs pass 15 body probes. Stack Exchange returns HTTP 521 in both runs. The initial survey returned HTTP 503 there.
+
+Count each distinct first-line error once per site. Strip listener prefixes. Shorten only the three data-module payloads. Network and live-site changes remain in the table. The invalid observer target, missing SVGAnimatedString, canvas getContext and document.write errors disappear. Git SCM's CallDepth warning disappears without a proved connection to this change. Ubuntu's Date error and Go's toLowerCase error appear in the later run. A matched Go repeat logs neither error on either build. These variations are not counted as fixes or regressions. Stack Exchange fails both body probes. Its later run reaches the time limit, so an empty console there does not prove a fix.
+
+| Console error | Before sites | After sites | Sites |
+|---|---:|---:|---|
+| page: Limit("Host(\"dom-selector\")") | 2 | 2 | github-readme, github-repo |
+| ReferenceError: _w is not defined | 1 | 1 | bing |
+| ReferenceError: maplibregl is not defined | 1 | 1 | openstreetmap |
+| ReferenceError: sj_be is not defined | 1 | 1 | bing |
+| TypeError: Cannot read properties of undefined (reading 'store') | 1 | 1 | openstreetmap |
+| TypeError: L.OSM.Map is not a constructor | 1 | 1 | openstreetmap |
+| TypeError: data module (STICKY_CANARY) | 1 | 1 | old-reddit |
+| TypeError: data module (navigation polyfill) | 1 | 1 | old-reddit |
+| TypeError: data module (script loader) | 1 | 1 | old-reddit |
+| TypeError: navigator.userAgentData.getHighEntropyValues is not a function | 1 | 1 | git-scm |
+| TypeError: window.URL.createObjectURL is not a function | 1 | 1 | openstreetmap |
+| failed: network error (https://ophan.theguardian.com): connect refused: Connection refused (os error 111) | 1 | 1 | guardian |
+| page: Unsupported("a ReadableStream as a body") | 1 | 1 | bbc-news |
+| page: Unsupported("lookbehind") | 1 | 1 | gitlab |
+| page: Unsupported("user info in a URL") | 1 | 1 | guardian |
+| ReferenceError: SVGAnimatedString is not defined | 1 | 0 | vuejs |
+| Script aborted: the CallDepth budget ended the https://code.jquery.com:443/ui/1.14.1/jquery-ui.min.js. The page goes on (1 of 5 aborts used) | 1 | 0 | git-scm |
+| TypeError: Failed to execute 'observe' on 'IntersectionObserver': parameter 1 is not of type 'Element'. | 1 | 0 | vuejs |
+| TypeError: document.createElement("canvas").getContext is not a function | 1 | 0 | wolframalpha |
+| TypeError: document.write is not a function | 1 | 0 | apache-org |
+| page: status 521 | 1 | 0 | stackexchange |
+| TypeError: Cannot read properties of undefined (reading 'toLowerCase') | 0 | 1 | go-dev |
+| page: Unsupported("Date string that is not ISO 8601 or toUTCString format") | 0 | 1 | ubuntu-com |
+
+### Verification and limits
+
+Canvas, document surface, SVG read, path metric, interface and eval regressions failed before their API fixes. The release workspace passes 3,292 tests with zero failures. This includes the parser-script insertion order test. test262_check reports `gate: ok`. exec_diff reports 79 runs and zero differences. Typing cost is 282.6 M instructions per key for #a1 and 288.0 M for #f0. Peak RSS is 33.2 MiB at 50 keys.
+
+The public journeys pass 33 of 33, with no flakes. Existing compiler warnings remain for the unused rgb helper in crates/css/src/shadow_tests.rs and the unused w binding in crates/drive/tests/images.rs.
+
+The final full matrix measures all 805 rows under both allocators against the shared build of 01a1a0d2. Zero rows exceed +0.5% under either allocator. Zero rows fail. Mean changes are +0.001% under each allocator. The limits did not change. Base and task views have equal-length paths and separate count caches.
+
+The first matrix had 16 rows over both limits and 13 over one. SVG wrappers created interface objects too early. Class registration now waits for a class read. The other increase was fixed per process: direct perf stat measured 7,143,171 versus 7,211,726 instructions under glibc, and 10,646,360 versus 10,787,013 under jemalloc for session_load chain 1. nm showed equal Dom::install sizes (0x33ae) and a four-byte Browser::new change. readelf found a new libm.so.6 dependency. nm -D found new acosf, atan2f, hypot, hypotf, sincosf and sinf references. The geometry entry point had pulled native trig into browser-only examples. Shape flattening now accepts a math implementation. Painting keeps its native math. Browser metrics use the existing software math. No dependency was added. readelf confirms that session_load no longer links libm. Eight focused rows then pass under both allocators. The final full matrix also passes.
+
+Not tested: direct eval with caller locals; SVG transforms, text or group bounds; live animated-value mutation; canvas pixel output; document.write tokens split across calls; execution of scripts inserted by document.write. Fragment-inserted scripts remain inert. SVG animated values are snapshots. getBBox does not compute path bounds. The excluded selector, lookbehind, named-window and site-specific issues remain outside this change.
+
+
+### Main sync before merge
+
+Main advanced to `1037459139` after the full checks. Merged it into the task branch. Only the appended progress notes conflicted. Kept both sections and left this section at the end. The merged JavaScript, browser and paint library suites pass 2,023 tests with zero failures. Rebuilt the affected examples and driver. All 30 focused rows pass against the shared build of current main under both allocators. No row exceeds +0.5%. Mean changes are +0.003% under glibc and +0.002% under jemalloc. The recheck covers regexp loads, SVG wrappers, startup, forms and text scrolling. No second full matrix was run.
+
+Re-ran all 16 sites on the current-main baseline and merged driver. Both pass 15 body probes. Both receive HTTP 521 from Stack Exchange. The current-main WolframAlpha probe does not log the canvas error on either build. Its earlier before/after result remains above. The focused canvas regression still passes. The lookbehind and selector-task recovery changes came from main and are not counted as fixes here. The latest comparison follows. Evidence: before-merge-base/, after-merge/, merge-tests.log, merge-focus.log and merge-focus.tsv in the task evidence directory.
+
+| Console error | Before sites | After sites | Sites |
+|---|---:|---:|---|
+| Error: Unable to get document domain | 2 | 2 | github-readme, github-repo |
+| Script aborted: the Host("dom-selector") budget ended the microtask checkpoint. The page goes on (1 of 5 aborts used) | 2 | 2 | github-readme, github-repo |
+| Script aborted: the Host("dom-selector") budget ended the timer or queued task. The page goes on (2 of 5 aborts used) | 2 | 2 | github-readme, github-repo |
+| Script aborted: the Steps budget ended the timer or queued task. The page goes on (3 of 5 aborts used) | 2 | 2 | github-readme, github-repo |
+| ReferenceError: _w is not defined | 1 | 1 | bing |
+| ReferenceError: maplibregl is not defined | 1 | 1 | openstreetmap |
+| ReferenceError: sj_be is not defined | 1 | 1 | bing |
+| TypeError: Cannot read properties of undefined (reading 'store') | 1 | 1 | openstreetmap |
+| TypeError: L.OSM.Map is not a constructor | 1 | 1 | openstreetmap |
+| TypeError: data module (STICKY_CANARY) | 1 | 1 | old-reddit |
+| TypeError: data module (navigation polyfill) | 1 | 1 | old-reddit |
+| TypeError: data module (script loader) | 1 | 1 | old-reddit |
+| TypeError: navigator.userAgentData.getHighEntropyValues is not a function | 1 | 1 | git-scm |
+| TypeError: window.URL.createObjectURL is not a function | 1 | 1 | openstreetmap |
+| failed: network error (https://ophan.theguardian.com): connect refused: Connection refused (os error 111) | 1 | 1 | guardian |
+| page: Unsupported("Date string that is not ISO 8601 or toUTCString format") | 1 | 1 | ubuntu-com |
+| page: Unsupported("a ReadableStream as a body") | 1 | 1 | bbc-news |
+| page: Unsupported("user info in a URL") | 1 | 1 | guardian |
+| page: status 521 | 1 | 1 | stackexchange |
+| ReferenceError: SVGAnimatedString is not defined | 1 | 0 | vuejs |
+| Script aborted: the CallDepth budget ended the https://code.jquery.com:443/ui/1.14.1/jquery-ui.min.js. The page goes on (1 of 5 aborts used) | 1 | 0 | git-scm |
+| TypeError: Failed to execute 'observe' on 'IntersectionObserver': parameter 1 is not of type 'Element'. | 1 | 0 | vuejs |
+| TypeError: document.write is not a function | 1 | 0 | apache-org |

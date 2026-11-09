@@ -321,6 +321,8 @@ impl<'p> Interp<'p> {
 
     /// The realm's own `Symbol.iterator` as a property key. It does not depend on the global `Symbol`, which a
     /// script can delete or replace. The realm roots it.
+    pub fn symbol_to_string_tag(&self) -> PropertyKey { self.sc.k_to_string_tag }
+
     pub fn symbol_iterator(&self) -> PropertyKey {
         self.sc.k_iterator
     }

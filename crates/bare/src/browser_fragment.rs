@@ -481,3 +481,8 @@ pub(crate) fn contextual_fragment(d: &Dom, it: &mut Interp<'_>, start: NodeId, h
     replace(d, it, html, f, ctx.is_none(), Put::At(None), Some(ctx.unwrap_or(f)))?;
     Ok(frag)
 }
+
+
+pub(crate) fn write_at(d: &Dom,it: &mut Interp<'_>,text: &str,parent: NodeId,before: Option<NodeId>)->V {
+    replace(d,it,text,parent,false,Put::At(before),None)
+}

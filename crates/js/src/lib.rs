@@ -23,4 +23,4 @@ mod number;
 mod obj_tab;
 mod bigint;
 mod ieee754;
-pub use ieee754::{atan2, cos, sin, tan};
+pub use ieee754::{acos, atan2, cos, sin, tan};

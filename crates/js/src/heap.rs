@@ -77,6 +77,7 @@ const LAZY_HS: u8 = 8;
 /// `HeapError::NeedsHost::index` of a name of a `set_lazy_on` object, and of all its names.
 pub const LAZY_ON: u32 = u32::MAX - 1;
 pub const LAZY_ALL: u32 = u32::MAX - 2;
+pub const LAZY_TAG: u32 = u32::MAX - 3;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Limit {
@@ -1368,6 +1369,7 @@ impl Heap {
         }
         match key {
             PropertyKey::String(s) if ob.lazy & LAZY_CHAIN != 0 && self.on_name(s) => self.lazy_ask_name(o, s, key),
+            PropertyKey::Symbol(_) if ob.lazy & LAZY_CHAIN != 0 => self.lazy_symbol(o),
             _ => Ok(()),
         }
     }
@@ -1381,6 +1383,7 @@ impl Heap {
         }
         match key {
             PropertyKey::String(s) if ob.lazy & LAZY_ONS != 0 && self.on_name(s) => self.lazy_ask_name(o, s, key),
+            PropertyKey::Symbol(_) if ob.lazy & LAZY_ONS != 0 => self.lazy_symbol(o),
             _ => Ok(()),
         }
     }
@@ -1402,13 +1405,20 @@ impl Heap {
         macro_rules! named { ($name:literal) => { u.iter().copied().eq($name.bytes().map(u16::from)) }; }
         match u.first().copied() {
             Some(102) => named!("frames"),
+            Some(101) => named!("eval"),
             Some(112) => named!("parent"),
-            Some(116) => named!("top"),
+            Some(116) => named!("top") || named!("toDataURL"),
+            Some(103) => named!("getContext") || named!("getBBox") || named!("getCTM") || named!("getScreenCTM") || named!("getTotalLength") || named!("getPointAtLength"),
+            Some(119) => named!("width") || named!("write") || named!("writeln"),
+            Some(104) => named!("height"),
+            Some(118) => named!("viewBox"),
+            Some(111) => named!("open"),
+            Some(99) => named!("close"),
             Some(108) => named!("length"),
             Some(110) => named!("name"),
             Some(115) => named!("screen") || named!("sheet") || named!("styleSheets"),
             Some(67) => named!("CSSStyleSheet") || named!("CSSStyleRule") || named!("CSSRuleList"),
-            Some(83) => named!("StyleSheetList"),
+            Some(83) => named!("StyleSheetList") || named!("SVGAnimatedString") || (u.starts_with(&[83,86,71]) && u.ends_with(&[69,108,101,109,101,110,116])),
             _ => false,
         }
     }
@@ -1488,8 +1498,15 @@ impl Heap {
             if ob.lazy & LAZY_CHAIN != 0 && let PropertyKey::String(s) = key && self.on_name(s) {
                 self.lazy_ask_name(c, s, key)?;
             }
+            if ob.lazy & LAZY_CHAIN != 0 && matches!(key,PropertyKey::Symbol(_)) {self.lazy_symbol(c)?;}
             cur = ob.proto;
         }
+        Ok(())
+    }
+
+    #[cold]
+    fn lazy_symbol(&self,o:ObjId)->R<()> {
+        if self.lazy_asked.borrow_mut().insert((o.index,u32::MAX-1,0)) {return Err(HeapError::NeedsHost {owner:o,index:LAZY_TAG});}
         Ok(())
     }
 

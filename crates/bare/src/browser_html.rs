@@ -72,6 +72,8 @@ const NAMES: [&str; 49] = [
     "HTMLUListElement",
 ];
 
+pub(crate) const INTERFACE_COUNT: usize = NAMES.len();
+
 /// The index in `NAMES` of the interface of the tag `t`.
 #[inline]
 fn index(t: &str) -> Option<usize> {
@@ -153,6 +155,7 @@ fn make(d: &Dom, it: &mut Interp<'_>, i: usize) -> R<(ObjId, ObjId)> {
     it.define_data(f, kp, Value::Object(proto), false, false, false)?;
     it.define_data(proto, kc, Value::Object(f), true, false, true)?;
     crate::browser_lazy::tag(d, it, proto, NAMES[i])?;
+    if i == 3 { crate::browser_canvas::members(d, it, proto)?; }
     // Like every HTML interface, its constructor inherits from `HTMLElement`.
     let g = it.global_object();
     let k = d.key(it, "HTMLElement")?;
