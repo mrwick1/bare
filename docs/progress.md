@@ -5659,7 +5659,7 @@ Host charges are 99% of the counter on four sites and 89% on redis. No site spen
 - A restyle no longer charges `work`. `restyle_marks` charges the elements that `RuleSet::restyle` styles: each root styled with its subtree, and the subtree of a root whose style changed (a root with the same style costs one element), times `rules / 4 + 1`.
 - A full compute charges `work / 4 + 1` before it runs. `work` is nodes x (rules + 1), or styled elements x (rules + 1) when that is over 2^20 (`STYLED_FROM`). The `computed-work` cap check is unchanged and still comes before the compute.
 - `UNITS_PER_STEP = 4` is a measurement: divisor 1 still left kubernetes and redis over the budget; 2 and 4 pass all five pages. 4 keeps a margin of 2 or more.
-- `crates/css` is not touched (Task 7 is not merged). The cascade has no public count of candidates, so the charge is a model, not a count.
+- `crates/css` is not touched (Task 7 was open while I worked; it has merged since). The cascade has no public count of candidates, so the charge is a model, not a count.
 
 ### Calibration
 
@@ -5674,30 +5674,30 @@ Both failed on main with `limit:Steps` and pass now: `a_read_after_a_change_char
 
 ### Live results
 
-`bare-drive`, `timeout 30000`, `open URL`, `expect js "document.readyState === 'complete'"`, `shot s`. Instructions are `perf stat -e instructions:u` and include the network wait and the page work, so they vary between runs (redis: 26.7 G to 47.5 G in my runs). Before is main `ff02f72b56`; after is this branch after the last rebase.
+`bare-drive`, `timeout 30000`, `open URL`, `expect js "document.readyState === 'complete'"`, `shot s`. Instructions are `perf stat -e instructions:u` and include the network wait and the page work, so they vary between runs (redis: 24.6 G to 47.5 G in my runs). Before is main `ff02f72b56`; after is this branch after the last rebase.
 
 | URL | Steps aborts before | after | instructions before / after | peak RSS before / after |
 | --- | --- | --- | --- | --- |
-| https://dev.to/ | 2 | 0 | 3.83 G / 3.75 G | 79.2 / 83.2 MiB |
-| https://kubernetes.io/docs/home/ | 1 | 0 | 1.40 G / 1.75 G | 50.9 / 56.4 MiB |
-| https://www.nasa.gov/ | 1 | 0 | 4.87 G / 5.09 G | 177.5 / 168.0 MiB |
-| https://redis.io/ | 3 | 0 | 30.0 G / 39.1 G | 334.2 / 314.0 MiB |
-| https://www.hsbc.com/ | 1 | 0 | 1.33 G / 2.10 G | 69.9 / 78.7 MiB |
+| https://dev.to/ | 2 | 0 | 3.83 G / 3.75 G | 79.2 / 85.6 MiB |
+| https://kubernetes.io/docs/home/ | 1 | 0 | 1.40 G / 1.92 G | 50.9 / 62.3 MiB |
+| https://www.nasa.gov/ | 1 | 0 | 4.87 G / 5.13 G | 177.5 / 168.8 MiB |
+| https://redis.io/ | 3 | 0 | 30.0 G / 24.6 G | 334.2 / 305.7 MiB |
+| https://www.hsbc.com/ | 1 | 0 | 1.33 G / 3.15 G | 69.9 / 109.6 MiB |
 
 All five pass the step file. dev.to has no console line after the change. The first console lines after: nasa `document.getElementsByTagName("head").item is not a function`; redis `C(()=>e.styleSheets,[]) is not iterable` and `console.assert is not a function`; hsbc `Cannot read properties of null (reading 'addEventListener')`. The pages run further now, so instruction counts rise where tasks no longer stop.
 
 ### Cost and checks
 
-- Base `41e68d4a09`. The branch is rebased on it. All 805 rows of `tools/js/cost_matrix.sh`: 0 rows over under both allocators, mean change -0.007% glibc. Worst rows: `fetch_load bytes 10` +0.360%, `resources_load large 1` +0.279%, `table-many-columns 5000` +0.103%. The first run of this matrix had `fetch_load bytes 10` over under both allocators (+0.579% glibc, +0.502% jemalloc) while another agent's matrix ran. Alone it measured +0.244% and +0.254%, and the next full run +0.360% with no jemalloc rerun. The row does not read styles.
-- Before the last rebase (base `722b5102d0`): 805 rows, 0 over, mean -0.001%, worst `form_load gates 10` +0.337%.
-- `cargo test --release --workspace`: 3,328 passed, 0 failed, 13 ignored.
-- `keycost.sh`: 282.2 M for each textarea key, 287.5 M for each input key, peak RSS 33.2 MiB at 20 keys and 33.0 MiB at 50 keys.
+- Base `5d0f306325` (origin/main after PR #325, Task 7; the branch is rebased on it). All 805 rows of `tools/js/cost_matrix.sh`: 0 rows over under both allocators, 0 over under one, 0 failed, mean change -0.004% glibc, no row reached the jemalloc rerun. Worst rows: `form_load gates 10` +0.337%, `form_load gates 1` +0.316%, `observer_load raf 10` +0.248%. `base-build` has no `bare-stress`; I built it with `base-build origin/main --release -p bare-stress` (the first run had 176 failed `bare-stress` rows for that reason).
+- Earlier full runs on older bases: `722b5102d0` 0 over (worst `form_load gates 10` +0.337%); `41e68d4a09` had one run with `fetch_load bytes 10` over under both allocators (+0.579% glibc, +0.502% jemalloc) while another agent's matrix ran. Alone it measured +0.244% and +0.254%, and the next full run +0.360% with no jemalloc rerun. The row does not read styles.
+- `cargo test --release --workspace`: 3,341 passed, 0 failed, 13 ignored.
+- `keycost.sh`: 282.2 M for each textarea key, 287.5 M for each input key, peak RSS 33.1 MiB at 20 keys and 33.0 MiB at 50 keys.
 - `tools/drive/public/run.sh`: 48 pass, 0 fail, 0 known, 0 skip, 0 flakes.
 - `crates/js` is not changed, so `test262_check.sh` and `exec_diff.sh` did not run.
 
 ### Limits and not tested
 
-- The charge is a model (4 units for each step). A real count of the candidates that the rule index gives needs a counter in `crates/css`, after Task 7. A page whose rules match all elements is charged 5 times under the JS rate.
+- The charge is a model (4 units for each step). A real count of the candidates that the rule index gives needs a counter in `crates/css`, (Task 7 has merged now). A page whose rules match all elements is charged 5 times under the JS rate.
 - A restyle charge counts the elements under each root, so it can count elements that `RuleSet::restyle` skips (a `display: none` subtree). It stops at the node count of the page.
 - The window frame path (`restyle_frame`) uses the same charge. It was not measured on its own, and no test covers its charge.
 - Not tested: pages with shadow roots and a restyle charge; `getComputedStyle` loops on a live page; the sites on a second machine.
