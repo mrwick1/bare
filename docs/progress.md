@@ -4017,3 +4017,11 @@ Three causes keep the number low. The change itself is not one of them.
 - The Unicode data is 18. test262 is 17.
 
 Not tested: arjun-e16, the window mode, the typing cost (the change touches only the regex compile path), a pattern with `\p{...}` in a case-insensitive `u` match against the Unicode 18 folding changes.
+
+## Cost check of PR #287: `lex_load malformed` (2026-11-09)
+
+Base `f6cbc8d`, new `11117b5`. Full matrix (805 rows): two rows over the limit under both allocators, `lex_load malformed 1` +0.833% (jemalloc +0.820%) and `10` +0.835% (+0.833%). All other rows are under +0.5%. `keycost.sh`: `#a1` 282.2 -> 282.3 M per key, `#f0` 287.6 -> 287.6 M (+0.1 M, noise); RSS 32.4 MiB. `exec_diff.sh`: 79 runs, 0 differences. `test262_check.sh`: gate ok.
+
+Cause: real work, not layout. One case of that row is a non-ASCII character outside a name. The lexer now decides that it is not a letter before it fails: +41 instructions per error (`lexcase` test: 183 -> 224 for one `Lexer::new` and `next`). Valid identifiers and the other nine error cases cost the same as before (same instruction counts). Small layout noise (about 0.1%) comes from the changed input of the example (`é` -> `±`).
+
+Fix: `unicode_id` reads the two bytes of a Latin-1 character (lead byte `0xC2` or `0xC3`) without decoding it. The error costs +29 instructions now; the row is +0.75% (3 runs, equal). The check cannot be removed, because `é` is a valid name. Standing exception, like `dataset_load keys`: the row mixes 10% non-ASCII errors in tiny sources, which real pages do not have.
