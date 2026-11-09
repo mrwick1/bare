@@ -26,9 +26,10 @@
 //! literal `-`.
 //!
 //! Explicit errors, never a different pattern: flags `v d` ([`CompileError::UnsupportedFlag`]),
-//! lookbehind, named groups, quantified lookahead, and `\p` `\P` `\k` with `u`
-//! ([`CompileError::Unsupported`]). Without `u`,
-//! `\p{L}` is the literal text `p{L}`, as in ECMA-262.
+//! lookbehind, named groups, quantified lookahead, and `\k` with `u`
+//! ([`CompileError::Unsupported`]). With `u`, `\p{...}` and `\P{...}` read General_Category, Script, Script_Extensions and the
+//! binary properties of ECMA-262 from `bare_unicode::property` (the sets are made when the pattern is compiled); an unknown name
+//! is a `SyntaxError`. Without `u`, `\p{L}` is the literal text `p{L}`, as in ECMA-262.
 //!
 //! Case folding (`i`): `Canonicalize` of ECMA-262 22.2.2.7.3 for non-Unicode mode: the full
 //! Unicode uppercase of a code unit, if that is exactly one code unit, and not a non-ASCII unit
@@ -1270,7 +1271,10 @@ impl<'a> Parser<'a> {
                     Esc::Char(v)
                 }
             }
-            'p' | 'P' if u => return Err(CompileError::Unsupported { what: "regexp Unicode property escape", at }),
+            'p' | 'P' if u => {
+                let set = self.property_set(at)?;
+                Esc::Set(if ch == 'P' { complement(&set, max) } else { set })
+            }
             'k' if u => return Err(CompileError::Unsupported { what: "named group", at }),
             // `u` identity escapes: only the syntax characters, `/`, and `-` inside a class.
             '^' | '$' | '\\' | '.' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '/' if u => Esc::Char(c as u32),
@@ -1278,6 +1282,32 @@ impl<'a> Parser<'a> {
             _ if u => return syn("Invalid escape", at),
             _ => Esc::Char(c as u32),
         })
+    }
+
+    /// After `\p` or `\P` in `u` mode: `{Name}` or `{Name=Value}` and the code points of the property.
+    fn property_set(&mut self, at: usize) -> Result<Vec<(u32, u32)>, CompileError> {
+        if !self.eat(b'{') {
+            return syn("Invalid property name", at);
+        }
+        let start = self.i;
+        while let Some(c) = self.peek() {
+            if !(c < 128 && ((c as u8).is_ascii_alphanumeric() || c == b'_' as u16 || c == b'=' as u16)) {
+                break;
+            }
+            self.i += 1;
+        }
+        let text: String = self.p[start..self.i].iter().map(|&c| c as u8 as char).collect();
+        if !self.eat(b'}') {
+            return syn("Invalid property name", at);
+        }
+        let (name, value) = match text.split_once('=') {
+            Some((n, v)) => (n, Some(v)),
+            None => (text.as_str(), None),
+        };
+        match bare_unicode::property::property_ranges(name, value) {
+            Some(set) => Ok(set),
+            None => syn("Invalid property name", at),
+        }
     }
 
     fn parse_class(&mut self, at: usize) -> Result<Node, CompileError> {
@@ -1800,12 +1830,74 @@ mod tests {
         for f in ["v", "d", "gv"] {
             assert!(matches!(Regex::from_str("a", f), Err(CompileError::UnsupportedFlag(_))), "{f}");
         }
-        assert!(matches!(Regex::from_str("\\p{L}", "u"), Err(CompileError::Unsupported { .. })));
         for f in ["gg", "x", "G", "é", "uv"] {
             assert!(matches!(Regex::from_str("a", f), Err(CompileError::InvalidFlags(_))), "{f}");
         }
         assert_eq!(Flags::parse("gimsy").unwrap(), Flags { global: true, ignore_case: true, multiline: true, dot_all: true, sticky: true, unicode: false });
         assert!(Flags::parse("u").unwrap().unicode);
+    }
+
+    #[test]
+    fn unicode_property_escapes() {
+        // General_Category, short and long names, in the `u` mode.
+        assert_eq!(run("\\p{L}+", "u", "12héllo wörld"), "2,7");
+        assert_eq!(run("\\p{Letter}+", "u", "12héllo wörld"), "2,7");
+        assert_eq!(run("\\p{Lu}", "u", "abcDef"), "3,4");
+        assert_eq!(run("\\p{Uppercase_Letter}", "u", "abcDef"), "3,4");
+        assert_eq!(run("\\p{gc=Lu}", "u", "abcDef"), "3,4");
+        assert_eq!(run("\\p{General_Category=Ll}+", "u", "ABcdE"), "2,4");
+        assert_eq!(run("\\p{N}+", "u", "ab٣4Ⅷ½x"), "2,6");
+        assert_eq!(run("\\p{Nd}+", "u", "ab٣4Ⅷ"), "2,4");
+        assert_eq!(run("\\p{P}+", "u", "ab!?。c"), "2,5");
+        assert_eq!(run("\\p{S}", "u", "ab+c"), "2,3");
+        assert_eq!(run("\\p{Z}", "u", "ab c"), "2,3");
+        assert_eq!(run("\\p{C}", "u", "ab\u{1}c"), "2,3");
+        // Negated, and inside a class.
+        assert_eq!(run("\\P{L}+", "u", "ab12-c"), "2,5");
+        assert_eq!(run("[\\p{Lu}\\d]+", "u", "abD1eF2g"), "2,4");
+        assert_eq!(run("[^\\p{L}]+", "u", "ab12-c"), "2,5");
+        assert_eq!(run("[\\P{L}a]+", "u", "b1a-b"), "1,4");
+        // Scripts.
+        assert_eq!(run("\\p{Script=Greek}+", "u", "abαβγd"), "2,5");
+        assert_eq!(run("\\p{sc=Grek}+", "u", "abαβγd"), "2,5");
+        assert_eq!(run("\\p{Script=Cyrillic}+", "u", "abжиd"), "2,4");
+        assert_eq!(run("\\p{Script=Han}+", "u", "ab字漢d"), "2,4");
+        assert_eq!(run("\\p{Script=Hiragana}+", "u", "abあいd"), "2,4");
+        assert_eq!(run("\\p{sc=Katakana}+", "u", "abカタd"), "2,4");
+        assert_eq!(run("\\p{sc=Arabic}+", "u", "abعربd"), "2,5");
+        assert_eq!(run("\\p{sc=Hebrew}+", "u", "abאבd"), "2,4");
+        assert_eq!(run("\\p{sc=Devanagari}+", "u", "abअबd"), "2,4");
+        assert_eq!(run("\\p{sc=Thai}+", "u", "abกขd"), "2,4");
+        assert_eq!(run("\\p{sc=Hangul}+", "u", "ab한글d"), "2,4");
+        assert_eq!(run("\\p{sc=Latin}+", "u", "12abé3"), "2,5");
+        // Script_Extensions: the prolonged sound mark is Common, and also in Hiragana and Katakana.
+        assert_eq!(run("\\p{sc=Hiragana}+", "u", "あー"), "0,1");
+        assert_eq!(run("\\p{scx=Hiragana}+", "u", "あー"), "0,2");
+        assert_eq!(run("\\p{Script_Extensions=Katakana}+", "u", "カー"), "0,2");
+        // Binary properties.
+        assert_eq!(run("\\p{Alphabetic}+", "u", "12ab字3"), "2,5");
+        assert_eq!(run("\\p{White_Space}", "u", "ab\u{3000}c"), "2,3");
+        assert_eq!(run("\\p{Uppercase}", "u", "abCd"), "2,3");
+        assert_eq!(run("\\p{Lowercase}", "u", "ABcD"), "2,3");
+        assert_eq!(run("\\p{ASCII}+", "u", "éabcé"), "1,4");
+        assert_eq!(run("\\P{ASCII}+", "u", "abéé"), "2,4");
+        assert_eq!(run("^\\p{Any}+$", "u", "a😀\u{10ffff}"), "0,5");
+        assert_eq!(run("\\p{Assigned}", "u", "\u{378}a"), "1,2");
+        assert_eq!(run("\\p{Emoji}", "u", "ab😀"), "2,4");
+        assert_eq!(run("\\p{ID_Start}+", "u", "1ab字_"), "1,4");
+        assert_eq!(run("\\p{ID_Continue}+", "u", "-ab1_-"), "1,5");
+        // An astral code point is one match.
+        assert_eq!(run("^\\p{So}$", "u", "😀"), "0,2");
+        assert_eq!(run("^\\p{L}$", "iu", "A"), "0,1");
+        // Without `u`, `\p` is the letter p.
+        assert_eq!(run("\\p{L}", "", "p{L}"), "0,4");
+        // A name that is not known, or not well made, is a SyntaxError.
+        for bad in [
+            "\\p{Foo}", "\\p{lu}", "\\p{Script}", "\\p{General_Category}", "\\p{Latin}", "\\p{sc=Foo}", "\\p{sc=latin}", "\\p{L", "\\p", "\\p{}", "\\p{ L}", "\\p{L }", "\\p{sc=}",
+            "\\p{=Latin}", "\\p{sc=Latin=x}", "\\P{Foo}", "[\\p{Foo}]", "\\p{Block=Basic_Latin}", "\\p{Alphabetic=Yes}", "\\p{Other_Alphabetic}", "\\p{L-}", "[\\p{L}-z]", "\\pL",
+        ] {
+            assert!(matches!(Regex::from_str(bad, "u"), Err(CompileError::Syntax { .. })), "{bad}");
+        }
     }
 
     #[test]

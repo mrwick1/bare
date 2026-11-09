@@ -3967,3 +3967,53 @@ First matrix (before the cold function): 17 rows over under both, up to `lex_loa
 - `docs/resources.md` still says non-ASCII identifiers are unsupported in two places (lines 652 and 770).
 
 Not tested: arjun-e16, the window mode, a page that fires many `load` events (hundreds of `<img>`), `setAttribute('srcset')` on a live image, `fetch` of a module, the Acorn tree comparison for static blocks.
+
+## RegExp `\p{...}` and `\P{...}` (2026-11-09)
+
+`/\p{L}/u` threw a `SyntaxError`. docs.python.org search needs it. The engine now reads `\p{...}` and `\P{...}` with the `u` flag.
+
+### What it reads
+
+- General_Category: short and long names, and the groups `L`, `LC`, `M`, `N`, `P`, `S`, `Z`, `C`. `gc=Lu` and `General_Category=Lu` also work.
+- Script and Script_Extensions: every script in Unicode, by short or long name. `sc=` and `scx=` also work.
+- Binary properties: all of ECMA-262 table 70 (`Alphabetic`, `White_Space`, `Uppercase`, `Lowercase`, `Emoji`, `ID_Start`, `ID_Continue`, ...), plus `Any`, `ASCII` and `Assigned`.
+- An unknown name, or a wrong form like `\p{Lu=x}`, throws a `SyntaxError`.
+
+### How
+
+- `tools/gen_unicode_props.py` makes `crates/unicode/src/props.rs` from the Unicode 18.0.0 files in `data/unicode/`. The table is committed. Run the script from the repo root.
+- The tables are static and sorted. The names are sorted too. A lookup is a binary search.
+- `crates/unicode/src/property.rs` has `property_ranges`. It builds the range list when the pattern compiles.
+- `crates/js/src/regexp.rs` stores the list in `Esc::Set`. A match does not allocate. A `\P` or a negated class inverts the set when it compiles.
+- No new dependency.
+
+### Checks
+
+- Unit tests in `crates/unicode` (7) and one in `crates/js/src/regexp.rs`.
+- The sets match Node for the sampled properties.
+- The `/\p{L}/u` line is gone from the list of known gaps in `eval_builtins_tests.rs`.
+- `cargo test --release --workspace`, `tools/js/test262_check.sh` (gate ok), `tools/js/exec_diff.sh` (79 runs, 0 differences) and `tools/drive/public/run.sh` (fail 0) pass.
+
+### test262 property-escape tests
+
+The pinned subset does not contain them. I ran the `built-ins/RegExp/property-escapes` directory by hand.
+
+| | passed | total |
+|---|---|---|
+| before | 0 | 441 |
+| after | 1 | 441 |
+
+Three causes keep the number low. The change itself is not one of them.
+
+- The tests build a 1M-char string and match `^\p{...}+$`. The engine returns `Regexp(Stack)` for `+` over such a string.
+- The tests expect Unicode 17. The data in `data/unicode/` is 18. The generated tests list exact code points, so every property that changed in 18 fails.
+- Many tests use the `v` flag. The `v` flag is still `UnsupportedFlag`.
+
+### Noticed, not changed
+
+- The `v` flag, named groups, lookbehind and `\k` are still unsupported.
+- The `Regexp(Stack)` limit on `+` over a long string is the first thing to fix to use the test262 tests.
+- The property-escape tests are not in the pinned test262 subset.
+- The Unicode data is 18. test262 is 17.
+
+Not tested: arjun-e16, the window mode, the typing cost (the change touches only the regex compile path), a pattern with `\p{...}` in a case-insensitive `u` match against the Unicode 18 folding changes.
