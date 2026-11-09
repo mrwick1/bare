@@ -18,7 +18,7 @@ impl fmt::Display for Phase {
 
 impl Error for Phase {}
 
-/// `kind: text`. Kinds: `dns`, `connect refused`, `connect timeout`, `connect failed`, `tls`, `h2 goaway`, `body cap`, `read timeout`,
+/// `kind: text`. Kinds: `dns`, `connect refused`, `connect timeout`, `connect failed`, `proxy`, `tls`, `h2 goaway`, `body cap`, `read timeout`,
 /// `reset`, `closed early`, `protocol`, `io`.
 pub fn describe(e: &(dyn Error + 'static)) -> String {
     let text = e.to_string();
@@ -38,6 +38,7 @@ pub fn describe(e: &(dyn Error + 'static)) -> String {
     } else if let Some(p) = e.downcast_ref::<Phase>() {
         match (p.0, p.1.downcast_ref::<io::Error>().map(io::Error::kind)) {
             ("dns", _) => "dns",
+            ("proxy", _) => "proxy",
             (_, Some(io::ErrorKind::ConnectionRefused)) => "connect refused",
             (_, Some(io::ErrorKind::TimedOut)) => "connect timeout",
             _ => "connect failed",
