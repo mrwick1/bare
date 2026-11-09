@@ -173,14 +173,14 @@ properties! {
     Fill => "fill",
     Stroke => "stroke",
     BackgroundImage => "background-image",
-    BackgroundSizeX => "-bare-background-size-x",
-    BackgroundSizeY => "-bare-background-size-y",
+    BackgroundSizeX => "background-size-x",
+    BackgroundSizeY => "background-size-y",
     BackgroundPositionX => "background-position-x",
     BackgroundPositionY => "background-position-y",
     BackgroundRepeat => "background-repeat",
     MaskImage => "mask-image",
-    MaskSizeX => "-bare-mask-size-x",
-    MaskSizeY => "-bare-mask-size-y",
+    MaskSizeX => "mask-size-x",
+    MaskSizeY => "mask-size-y",
     MaskPositionX => "mask-position-x",
     MaskPositionY => "mask-position-y",
     MaskRepeat => "mask-repeat",
@@ -954,8 +954,7 @@ fn repeat(slice: &[Part], to: Property, emit: &mut dyn FnMut(Property, Value)) -
 /// we do not use (the attachment, the boxes, the mask mode and compositing) are checked a little and ignored.
 /// The check: no bad part, no word of another property (`bold`), no number with no unit (but `0`).
 /// This is not the whole grammar, and so some wrong values pass. We checked 2,600 values against Chrome: see `docs/progress.md`.
-/// The image is always set (`none` if there is none), so that `background: red` takes an image away. The size, the position and the repeat
-/// are set only when the value has an image or one of them.
+/// All the longhands are set, so that `background: red` takes an image, a size, a position and a repeat away.
 fn layer_shorthand(slice: &[Part], l: &Layer, emit: &mut dyn FnMut(Property, Value)) -> bool {
     use Keyword as K;
     let mut color = l.color.map(|_| Value::Color(Color::TRANSPARENT));
@@ -1000,7 +999,7 @@ fn layer_shorthand(slice: &[Part], l: &Layer, emit: &mut dyn FnMut(Property, Val
         emit(p, c);
     }
     emit(l.image, img);
-    if at_len > 0 || by_len > 0 || rep_len > 0 || matches!(img, Value::Number(_)) {
+    {
         let [px, py] = pos.unwrap_or([Value::Length(Length::Percent(0.0)); 2]);
         let [sx, sy] = sz.unwrap_or([Value::Keyword(K::Auto); 2]);
         emit(l.position[0], px);
@@ -1704,14 +1703,15 @@ mod tests {
     fn background_shorthand() {
         let red = Value::Color(Color { r: 255, g: 0, b: 0, a: 255 });
         let none = Value::Keyword(K::None);
-        assert_eq!(parse("background", "red"), [(BackgroundColor, red), (BackgroundImage, none)]);
+        assert_eq!(parse("background", "red").len(), 7);
+        assert_eq!(parse("background", "red")[..2], [(BackgroundColor, red), (BackgroundImage, none)]);
         assert_eq!(parse("background", "#f00 url(a.png)").len(), 7);
-        assert_eq!(parse("background", "none"), [(BackgroundColor, Value::Color(Color::TRANSPARENT)), (BackgroundImage, none)]);
+        assert_eq!(parse("background", "none")[..2], [(BackgroundColor, Value::Color(Color::TRANSPARENT)), (BackgroundImage, none)]);
         assert_eq!(parse("background", "bold"), vec![]);
         assert_eq!(parse("background", "#ff"), vec![]);
         assert_eq!(parse("background", "1px solid red"), vec![]);
         assert_eq!(parse("background", "red 10"), vec![]);
-        assert_eq!(parse("background", "linear-gradient(red, blue)"), [(BackgroundColor, Value::Color(Color::TRANSPARENT)), (BackgroundImage, none)]);
+        assert_eq!(parse("background", "linear-gradient(red, blue)")[..2], [(BackgroundColor, Value::Color(Color::TRANSPARENT)), (BackgroundImage, none)]);
     }
 
     #[test]
@@ -1774,7 +1774,7 @@ mod tests {
         assert_eq!(parse("-webkit-mask-size", "contain"), parse("mask-size", "contain"));
         assert_eq!(parse("mask-position", "center"), [(MaskPositionX, pct(50.0)), (MaskPositionY, pct(50.0))]);
         assert_eq!(parse("mask-repeat", "repeat-y"), [(MaskRepeat, Value::Keyword(K::RepeatY))]);
-        assert_eq!(parse("mask", "none"), [(MaskImage, none)]);
+        assert_eq!(parse("mask", "none").len(), 6);
         // A `calc()` that mixes units keeps its place in the list.
         let mut side = Side::default();
         let mut out = Vec::new();

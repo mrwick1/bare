@@ -271,6 +271,7 @@ impl Snap {
             // A number `line-height` is times the font size of the element, in pixels.
             Cv::Number(n) if p == Property::LineHeight => format!("{}px", num(n * self.style.px(Property::FontSize))),
             Cv::Number(n) if p == Property::GridAutoFlow => flow_text(n).to_string(),
+            Cv::Number(n) if matches!(p, Property::BackgroundImage | Property::MaskImage) => bare_css::urls::get(n as u32).map_or("none".to_string(), |u| format!("url(\"{u}\")")),
             Cv::Number(n) => num(n),
             Cv::Length(Length::Px(x)) => format!("{}px", num(x)),
             Cv::Length(Length::Percent(x)) => format!("{}%", num(x)),
