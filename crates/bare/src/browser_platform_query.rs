@@ -1,7 +1,7 @@
 //! `getElementsByTagName` and `getElementsByClassName` on `Document` and `Element`.
 //!
 //! These return a plain snapshot array of the matching descendants in tree order (not the element itself). They are
-//! NOT live `HTMLCollection`s: no `item`, no `namedItem`, and the array does not change when the tree does. The page
+//! NOT live `HTMLCollection`s: `item` only (from the shared prototype of `wrap_coll`), no `namedItem`, and the array does not change when the tree does. The page
 //! code the staging login needs only reads `length` and indexes the result at once (`webpack-runtime.js`).
 //!
 //! - The walk is iterative over the native tree, charges one step for each node (class lookups also charge for the
@@ -16,7 +16,7 @@
 //!   empty result. More than `max_class_tokens` distinct names is a Limit.
 
 use crate::browser::*;
-use crate::browser_dom::{next_in, wrap_all};
+use crate::browser_dom::{next_in, wrap_coll};
 use crate::browser_platform::{V, arg};
 use bare_html::dom::NodeData;
 use bare_js::eval::Interp;
@@ -88,7 +88,7 @@ fn by_tag(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
             })?
         }
     };
-    wrap_all(d, it, &ids)
+    wrap_coll(d, it, &ids)
 }
 
 /// `document.scripts`: the HTML `script` elements of the document in tree order, as a snapshot array like `getElementsByTagName`.
@@ -143,7 +143,7 @@ fn html_with_attr(d: &Dom, it: &mut Interp<'_>, this: Value, tags: &[&str], attr
             (hit, 0)
         })?
     };
-    wrap_all(d, it, &ids)
+    wrap_coll(d, it, &ids)
 }
 
 fn by_class(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
@@ -165,5 +165,5 @@ fn by_class(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
             (len > 0 && want.iter().all(|w| doc.has_class(c, w)), (want.len() + len / 16) as u64)
         })?
     };
-    wrap_all(d, it, &ids)
+    wrap_coll(d, it, &ids)
 }

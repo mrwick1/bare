@@ -122,9 +122,13 @@ fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     d.def_get(it, rp, "style", style_get, None)?;
     d.def_get(it, rp, "type", type_get, None)?;
     d.def_get(it, rp, "parentStyleSheet", parent_get, None)?;
+    // The lists are array-like: their `[Symbol.iterator]` is the one of `Array.prototype`, as in browsers.
+    let sym = d.plat.sym_iter.get().copied().expect("platform installed first");
+    let values = it.get_value(Value::Object(it.array_prototype()), sym)?;
     for p in [lp, rlp] {
         d.def_get(it, p, "length", list_length, None)?;
         d.def_method(it, p, "item", 1, list_item)?;
+        it.define_data(p, sym, values, true, false, true)?;
     }
     Ok(())
 }

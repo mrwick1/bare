@@ -774,6 +774,14 @@ pub(crate) fn define_window(d: &Dom, it: &mut Interp<'_>, name: &str) -> R<bool>
         d.def_method(it,it.global_object(),"eval",1,|_,it,_,a|it.eval_global(a.first().copied().unwrap_or(Value::Undefined)))?;
         return Ok(true);
     }
+    if name == "event" {
+        let g = it.global_object();
+        let k = d.key(it, name)?;
+        let f = d.add_fn(it, crate::browser_handlers::window_event, "event", 0, false)?;
+        let desc = bare_js::heap::PropertyDescriptor { get: Some(Some(f)), set: Some(Some(f)), enumerable: Some(true), configurable: Some(true), ..Default::default() };
+        it.heap.define_own_property(g, k, &desc).map_err(|e| it.heap_error(e))?;
+        return Ok(true);
+    }
     if name == "DocumentType" { crate::browser_implementation::doctype_global(d, it, Value::Undefined, &[])?; return Ok(true); }
     if !matches!(name,"frames"|"parent"|"top"|"length"|"name"|"screen"){return Ok(false);}
     let g = it.global_object();

@@ -148,6 +148,8 @@ pub(crate) struct Hd {
     pub fns: Vec<(u8, &'static str)>,
     /// The names `n` of `on<n>` that the host defined on every interface (the `EventTarget.prototype` ask), for a `body` prototype made later.
     pub asked: Vec<&'static str>,
+    /// `window.event`: the event of the dispatch that runs (`Dom::dispatch`).
+    pub event: Option<ObjId>,
     /// A window `error` event is running: an exception in it is not reported again.
     pub in_error: bool,
 }
@@ -572,10 +574,11 @@ pub(crate) fn lazy(d: &Dom, it: &mut Interp<'_>, owner: ObjId, all: bool) -> R<(
         };
     };
     if crate::browser::define_window(d,it,&key)? || crate::browser_cssom::define(d,it,&key)? { return Ok(()); }
-    if crate::browser_svg::define(d,it,&key)? { return Ok(()); }
+    if crate::browser_svg::define(d,it,&key)? || crate::browser_shims::define(d,it,&key)? { return Ok(()); }
     match key.as_str() {
         "write" => {d.def_method(it,d.p().document,"write",1,crate::browser_loader::document_write)?; return Ok(());},
         "writeln" => {d.def_method(it,d.p().document,"writeln",1,crate::browser_loader::document_writeln)?; return Ok(());},
+        "hasFocus" => {d.def_method(it,d.p().document,"hasFocus",0,crate::browser_focus::has_focus)?; return Ok(());},
         "open" => {d.def_method(it,d.p().document,"open",0,crate::browser_loader::document_open)?; return Ok(());},
         "close" => {d.def_method(it,d.p().document,"close",0,crate::browser_loader::document_close)?; return Ok(());},
         _=>{}
@@ -624,6 +627,17 @@ fn define(d: &Dom, it: &mut Interp<'_>, owner: ObjId, k: u8, n: &'static str) ->
     st.hd.fns[id as usize..].fill((k, ty));
     drop(st);
     d.define_accessor(it, owner, key, gf, Some(sf))
+}
+
+/// `window.event`: the event that is being dispatched, else `undefined`. A write makes a plain data property (the attribute is `[Replaceable]`).
+pub(crate) fn window_event(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
+    if let Some(&v) = a.first() {
+        let g = it.global_object();
+        let k = d.key(it, "event")?;
+        it.define_data(g, k, v, true, true, true)?;
+        return Ok(Value::Undefined);
+    }
+    Ok(d.st.borrow().hd.event.map_or(Value::Undefined, Value::Object))
 }
 
 /// `onabort` of `AbortSignal.prototype`, made with the lazy `AbortSignal` (`browser_abort.rs`).

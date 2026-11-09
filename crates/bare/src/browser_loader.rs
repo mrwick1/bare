@@ -566,6 +566,14 @@ fn set_script_defer(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V
     set_flag(d, it, this, a, "defer")
 }
 
+fn script_no_module(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    flag(d, it, this, "nomodule")
+}
+
+fn set_script_no_module(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    set_flag(d, it, this, a, "nomodule")
+}
+
 /// The listener of an `on...` handler: one per element and event, kept in the normal listener list.
 fn handler_get(d: &Dom, it: &mut Interp<'_>, this: Value, is_error: bool) -> V {
     let n = d.el(it, this)?;
@@ -665,6 +673,7 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
         ("type", script_type, set_script_type),
         ("async", script_async, set_script_async),
         ("defer", script_defer, set_script_defer),
+        ("noModule", script_no_module, set_script_no_module),
         ("text", script_text, set_script_text),
         ("onload", script_onload, set_script_onload),
         ("onerror", script_onerror, set_script_onerror),

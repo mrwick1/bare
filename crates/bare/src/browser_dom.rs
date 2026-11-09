@@ -841,7 +841,7 @@ pub(crate) fn get_root_node(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Valu
 pub(crate) fn child_nodes(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let n = d.nd(it, this)?;
     let kids = d.kids(it, n, false)?;
-    wrap_all(d, it, &kids)
+    wrap_coll(d, it, &kids)
 }
 
 pub(crate) fn wrap_all(d: &Dom, it: &mut Interp<'_>, ids: &[NodeId]) -> V {
@@ -855,7 +855,38 @@ pub(crate) fn wrap_all(d: &Dom, it: &mut Interp<'_>, ids: &[NodeId]) -> V {
 pub(crate) fn children(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let n = d.nd(it, this)?;
     let kids = d.kids(it, n, true)?;
-    wrap_all(d, it, &kids)
+    wrap_coll(d, it, &kids)
+}
+
+/// `wrap_all` for the snapshot arrays that stand for a `NodeList` or an `HTMLCollection`: the array inherits from a prototype that has `item`.
+pub(crate) fn wrap_coll(d: &Dom, it: &mut Interp<'_>, ids: &[NodeId]) -> V {
+    let a = wrap_all(d, it, ids)?;
+    let (Value::Object(o), p) = (a, coll_proto(d, it)?) else { return Ok(a) };
+    it.heap.set_prototype_of(o, Some(p)).map_err(|e| it.heap_error(e))?;
+    Ok(a)
+}
+
+fn coll_proto(d: &Dom, it: &mut Interp<'_>) -> R<ObjId> {
+    if let Some(&p) = d.plat.coll.get() {
+        return Ok(p);
+    }
+    let p = d.obj(it, it.array_prototype())?;
+    d.def_method(it, p, "item", 1, coll_item)?;
+    d.plat.fixed.borrow_mut().push(p);
+    let _ = d.plat.coll.set(p);
+    Ok(p)
+}
+
+/// `item(index)`: the member at the index, else `null`.
+fn coll_item(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    if a.is_empty() {
+        return Err(it.type_error("Failed to execute 'item': 1 argument required, but only 0 present."));
+    }
+    let n = it.to_js_number(a[0])?;
+    let i = if n.is_finite() { n.trunc().rem_euclid(4294967296.0) } else { 0.0 };
+    let k = d.key(it, &i.to_string())?;
+    let v = it.get_value(this, k)?;
+    Ok(if matches!(v, Value::Undefined) { Value::Null } else { v })
 }
 
 pub(crate) fn first_element_child(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {

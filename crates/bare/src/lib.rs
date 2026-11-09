@@ -129,8 +129,11 @@ mod browser_worker_tests;
 mod browser_date_tests;
 #[cfg(test)]
 mod browser_web_api_tests;
+#[cfg(test)]
+mod browser_gaps_tests;
 pub mod resources;
 mod browser_loader;
+mod browser_shims;
 pub use browser_loader::{CssStats, Fatal, Input, Intercept, NavStop, PageConfig, PageLimits, PageResult, Stop};
 pub mod browser_session;
 #[cfg(test)]

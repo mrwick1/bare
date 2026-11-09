@@ -1,0 +1,189 @@
+//! Tests of the small DOM and web API gaps that stopped real sites in `bare-drive`: `HTMLCollection.item`, `noModule`, `hasFocus`,
+//! `console.assert`, an iterable `styleSheets`, `window.event`, `Element.animate`, `Path2D` and a minimal `indexedDB`.
+
+use crate::browser::*;
+use crate::browser_console::*;
+use bare_html::tree;
+use bare_js::eval::{Error, EvalLimits};
+use bare_js::heap::HeapLimits;
+use bare_js::value::Value;
+
+fn big<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    std::thread::Builder::new().stack_size(64 << 20).spawn(f).unwrap().join().unwrap()
+}
+
+fn browser() -> Browser {
+    let html = "<head><style>p{color:red}</style><style>b{color:blue}</style></head><body><p id=p class=c>x</p><span id=s class=c></span><canvas id=cv></canvas></body>";
+    let mut b = Browser::new(tree::parse(html), BrowserLimits::default(), EvalLimits { max_steps: 5_000_000, ..Default::default() }, HeapLimits::default()).expect("browser");
+    b.use_virtual_clock_at(1000.0).unwrap();
+    b
+}
+
+fn js(b: &mut Browser, src: &str) -> String {
+    match b.run_script(src) {
+        Ok(v) => b.it.display(v),
+        Err(Error::Throw(v)) if matches!(v, Value::Object(_)) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),
+        Err(Error::Unsupported(u)) => format!("unsupported:{}", u.what),
+        Err(e) => format!("other:{e:?}"),
+    }
+}
+
+/// Run the jobs and the timers that are due.
+fn pump(b: &mut Browser) {
+    b.drain().unwrap();
+    b.advance_time(500.0, 10_000).unwrap();
+}
+
+#[test]
+fn collections_have_item() {
+    big(|| {
+        let mut b = browser();
+        assert_eq!(js(&mut b, "var c = document.getElementsByClassName('c'); [c.length, c.item(0).id, c.item(1).id, c.item(2), c.item(-1)].join()"), "2,p,s,,");
+        assert_eq!(js(&mut b, "document.getElementsByTagName('span').item(0).id + ',' + document.body.children.item(1).id + ',' + document.scripts.item(0)"), "s,s,null");
+        assert_eq!(js(&mut b, "document.body.childNodes.item(0).id + ',' + Array.isArray(c) + ',' + c.map(function (e) { return e.id }).join('')"), "p,true,ps");
+        assert_eq!(js(&mut b, "c.item.length + ',' + Object.keys(c).join()"), "1,0,1");
+    });
+}
+
+#[test]
+fn script_has_no_module() {
+    big(|| {
+        let mut b = browser();
+        assert_eq!(js(&mut b, "'noModule' in HTMLScriptElement.prototype"), "true");
+        assert_eq!(js(&mut b, "var s = document.createElement('script'); s.noModule"), "false");
+        assert_eq!(js(&mut b, "s.noModule = true; [s.noModule, s.hasAttribute('nomodule')].join()"), "true,true");
+        assert_eq!(js(&mut b, "s.noModule = false; [s.noModule, s.hasAttribute('nomodule')].join()"), "false,false");
+    });
+}
+
+#[test]
+fn document_has_focus_is_true() {
+    big(|| {
+        let mut b = browser();
+        assert_eq!(js(&mut b, "typeof document.hasFocus + ',' + document.hasFocus()"), "function,true");
+    });
+}
+
+#[test]
+fn console_assert_logs_an_error_when_the_condition_fails() {
+    big(|| {
+        let mut b = browser();
+        assert_eq!(js(&mut b, "console.assert(true, 'no'); console.assert(1 === 1); typeof console.assert"), "function");
+        assert!(b.take_console_records().is_empty());
+        js(&mut b, "console.assert(false, 'a', 2); console.assert(0); console.assert()");
+        let r = b.take_console_records();
+        assert_eq!(r.len(), 3);
+        assert!(r.iter().all(|r| r.level == ConsoleLevel::Error));
+        assert_eq!(b.format_console_record(&r[0]).unwrap(), "Assertion failed: a 2");
+        assert_eq!(b.format_console_record(&r[1]).unwrap(), "Assertion failed");
+    });
+}
+
+#[test]
+fn style_sheets_are_iterable() {
+    big(|| {
+        let mut b = browser();
+        assert_eq!(js(&mut b, "typeof document.styleSheets[Symbol.iterator] + ',' + [...document.styleSheets].length"), "function,2");
+        assert_eq!(js(&mut b, "var n = 0; for (var s of document.styleSheets) { n += s.cssRules.length } n"), "2");
+        assert_eq!(js(&mut b, "Array.from(document.styleSheets).length"), "2");
+    });
+}
+
+#[test]
+fn window_event_is_the_event_in_dispatch() {
+    big(|| {
+        let mut b = browser();
+        assert_eq!(js(&mut b, "typeof window.event + ',' + ('event' in window)"), "undefined,true");
+        js(&mut b, "var seen = []; var p = document.getElementById('p'); p.addEventListener('foo', function (e) { seen.push(window.event === e); document.getElementById('s').dispatchEvent(new Event('bar')); seen.push(window.event === e) }); document.getElementById('s').addEventListener('bar', function (e) { seen.push(event === e && e.type === 'bar') }); p.dispatchEvent(new Event('foo'));");
+        assert_eq!(js(&mut b, "seen.join() + ',' + typeof window.event"), "true,true,true,undefined");
+        assert_eq!(js(&mut b, "window.event = 5; window.event"), "5");
+    });
+}
+
+#[test]
+fn animate_returns_a_minimal_animation() {
+    big(|| {
+        let mut b = browser();
+        assert_eq!(js(&mut b, "var p = document.getElementById('p'); var a = p.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 100 }); [a instanceof Animation, a.playState, typeof a.cancel, typeof a.finish, typeof a.play, typeof a.pause, a.finished instanceof Promise].join()"), "true,running,function,function,function,function,true");
+        js(&mut b, "var log = []; a.onfinish = function (e) { log.push('onfinish') }; a.finished.then(function (x) { log.push(x === a) }); a.play(); a.pause(); a.cancel();");
+        assert_eq!(js(&mut b, "a.playState"), "idle");
+        js(&mut b, "var b2 = p.animate([], 10); b2.onfinish = function () { log.push('b2') }; b2.finished.then(function () { log.push('fin') })");
+        pump(&mut b);
+        assert_eq!(js(&mut b, "log.join()"), "fin,b2");
+        assert_eq!(js(&mut b, "document.getAnimations ? 1 : 0; b2.playState"), "finished");
+    });
+}
+
+#[test]
+fn path2d_is_a_constructor_with_no_op_methods() {
+    big(|| {
+        let mut b = browser();
+        assert_eq!(js(&mut b, "var p = new Path2D(); var q = new Path2D('M0 0 L1 1'); var r = new Path2D(p); [typeof Path2D, p instanceof Path2D].join()"), "function,true");
+        assert_eq!(js(&mut b, "['moveTo', 'lineTo', 'bezierCurveTo', 'quadraticCurveTo', 'arc', 'arcTo', 'ellipse', 'rect', 'roundRect', 'closePath', 'addPath'].map(function (m) { return p[m](new Path2D(), 1, 2, 3, 4, 5, 6) }).join('')"), "");
+        assert_eq!(js(&mut b, "Object.prototype.toString.call(p)"), "[object Path2D]");
+    });
+}
+
+#[test]
+fn indexeddb_stores_values_in_memory() {
+    big(|| {
+        let mut b = browser();
+        assert_eq!(js(&mut b, "[typeof indexedDB, typeof IDBKeyRange, typeof indexedDB.open, 'indexedDB' in window].join()"), "object,function,function,true");
+        js(
+            &mut b,
+            "var out = []; var req = indexedDB.open('db', 1);
+             req.onupgradeneeded = function (e) { out.push('up' + e.oldVersion + e.newVersion); var db = req.result; var s = db.createObjectStore('s', { keyPath: 'id' }); out.push(db.objectStoreNames.contains('s')); db.createObjectStore('k', { autoIncrement: true }); };
+             req.onsuccess = function () {
+               var db = req.result; out.push(db.name + db.version);
+               var tx = db.transaction(['s', 'k'], 'readwrite'); var s = tx.objectStore('s');
+               s.put({ id: 2, v: 'b' }); s.put({ id: 1, v: 'a' }); s.put({ id: 3, v: 'c' });
+               tx.objectStore('k').add('auto').onsuccess = function (e) { out.push('k' + e.target.result) };
+               s.get(1).onsuccess = function (e) { out.push(e.target.result.v) };
+               s.get(9).onsuccess = function (e) { out.push(String(e.target.result)) };
+               s.count().onsuccess = function (e) { out.push('n' + e.target.result) };
+               s.getAll().onsuccess = function (e) { out.push(e.target.result.map(function (x) { return x.id }).join('')) };
+               s.getAll(IDBKeyRange.bound(2, 3)).onsuccess = function (e) { out.push('r' + e.target.result.length) };
+               s.delete(2);
+               s.getAll().onsuccess = function (e) { out.push(e.target.result.map(function (x) { return x.id }).join('')) };
+               var cur = []; s.openCursor().onsuccess = function (e) { var c = e.target.result; if (c) { cur.push(c.key + c.value.v); c.continue() } else { out.push(cur.join('')) } };
+               tx.oncomplete = function () { out.push('done'); };
+             };",
+        );
+        pump(&mut b);
+        assert_eq!(js(&mut b, "out.join()"), "up01,true,db1,k1,a,undefined,n3,123,r2,13,1a3c,done");
+        js(&mut b, "var o2 = []; var r2 = indexedDB.open('db'); r2.onsuccess = function () { var db = r2.result; o2.push(db.version, db.objectStoreNames.length); db.transaction('s').objectStore('s').get(3).onsuccess = function (e) { o2.push(e.target.result.v) }; db.close() };");
+        pump(&mut b);
+        assert_eq!(js(&mut b, "o2.join()"), "1,2,c");
+        js(&mut b, "var r3 = indexedDB.deleteDatabase('db'); r3.onsuccess = function () { o2.push('del'); var r4 = indexedDB.open('db'); r4.onupgradeneeded = function (e) { o2.push('up' + e.oldVersion + r4.result.objectStoreNames.length) } };");
+        pump(&mut b);
+        assert_eq!(js(&mut b, "o2.join()"), "1,2,c,del,up00");
+        assert_eq!(js(&mut b, "var k = IDBKeyRange.only(5); [k.lower, k.upper, IDBKeyRange.lowerBound(2, true).lowerOpen, IDBKeyRange.upperBound(7).includes(7), IDBKeyRange.bound(1, 3, false, true).includes(3)].join()"), "5,5,true,true,false");
+    });
+}
+
+#[test]
+fn indexeddb_errors_roll_back_and_abort() {
+    big(|| {
+        let mut b = browser();
+        js(
+            &mut b,
+            "var out = []; var req = indexedDB.open('e', 2);
+             req.onupgradeneeded = function () { req.result.createObjectStore('s', { keyPath: 'id' }) };
+             req.onsuccess = function () {
+               var db = req.result, tx = db.transaction('s', 'readwrite'), s = tx.objectStore('s');
+               s.put({ id: 1 });
+               s.add({ id: 1 }).onerror = function (e) { out.push(e.target.error.name) };
+               s.put({ id: 2 });
+               tx.onabort = function () { out.push('abort'); var t2 = db.transaction('s'); t2.objectStore('s').count().onsuccess = function (e) { out.push('n' + e.target.result) } };
+               tx.oncomplete = function () { out.push('complete') };
+               try { db.transaction('s').objectStore('s').put({ id: 3 }) } catch (e) { out.push(e.name) }
+               try { db.transaction('nope') } catch (e) { out.push(e.name) }
+             };",
+        );
+        pump(&mut b);
+        assert_eq!(js(&mut b, "out.join()"), "ReadOnlyError,NotFoundError,ConstraintError,abort,n0");
+        js(&mut b, "var o2 = []; var r = indexedDB.open('e', 1); r.onerror = function (e) { o2.push(r.error.name); e.preventDefault() };");
+        pump(&mut b);
+        assert_eq!(js(&mut b, "o2.join()"), "VersionError");
+    });
+}
