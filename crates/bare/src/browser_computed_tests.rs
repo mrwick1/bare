@@ -802,3 +802,18 @@ fn three_reads_after_changes_on_a_page_like_dev_to_do_not_end_the_task() {
         assert_eq!((s.computes, s.restyles), (1, 2));
     });
 }
+
+/// Rules that match every element (`*:not(.zN)`) cost one candidate for each element and rule. 2,000 elements and 2,000 such rules are 4 M candidates
+/// for each full cascade, and the model charges 1 M. The budget here is 6 M: five new sheets (five full cascades) must end the task. Main charged
+/// the model only, so all five fitted (the same page with 60,000 elements and 1,500 rules ran four cascades, 8 s).
+#[test]
+fn rules_that_match_every_element_are_charged_by_their_candidates() {
+    big(|| {
+        let css: String = (0..2000).map(|i| format!("*:not(.z{i}){{color:red}}")).collect();
+        let page = format!("<style>{css}</style><body>{}", (0..2000).map(|i| format!("<div id=d{i}>x</div>")).collect::<String>());
+        let mut b = Browser::new(tree::parse(&page), BrowserLimits::default(), EvalLimits { max_steps: 6_000_000, ..Default::default() }, HeapLimits::default()).unwrap();
+        let script = "var e = document.getElementById('d5'), n = 0; for (var i = 0; i < 5; i++) { document.head.appendChild(document.createElement('style')).textContent = '.q' + i + '{margin:0}'; e.clientHeight; n++; } n";
+        assert_eq!(js(&mut b, script), "limit:Steps");
+        assert_eq!(b.computed_stats().computes, 2);
+    });
+}

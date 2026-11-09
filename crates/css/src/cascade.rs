@@ -716,7 +716,7 @@ impl RuleSet {
     #[inline(always)]
     fn walk<const WANT: bool>(&self, doc: &Document, want: Option<NodeId>, keep: bool) -> Styles {
         let mut way = Way { want, path: Vec::new(), sorted: Vec::new(), on: false, at: 0 };
-        let mut styles = Styles { styles: vec![ComputedStyle::initial()], of_node: vec![NONE; doc.len()], calcs: Vec::new(), grids: Vec::new(), customs: Vec::new(), spaced: false, kept: None };
+        let mut styles = Styles { styles: vec![ComputedStyle::initial()], of_node: vec![NONE; doc.len()], calcs: Vec::new(), grids: Vec::new(), customs: Vec::new(), spaced: false, kept: None, candidates: 0 };
         // Style 0 is the starting style. It is the parent style of the `html` element.
         let mut cx = Cx { viewport: self.viewport, root_font_size: 16.0, layer_order: self.layer_order(), declared: &self.side, inline: RefCell::default(), computed: RefCell::default(), grids: RefCell::default(), customs: RefCell::default(), merges: RefCell::default() };
         let style_atom = doc.find_atom("style");
@@ -754,6 +754,7 @@ impl RuleSet {
                             }
                         }
                     }
+                    styles.candidates += candidates.len() as u64;
                     matched.sort_unstable();
                     // The order of the rules is their place in the list, so the key of the cache and the result do not depend on the buckets.
                     let inline = style_atom.and_then(|a| doc.attr(node, a));
@@ -880,6 +881,7 @@ impl RuleSet {
                         matched.push(i);
                     }
                 }
+                styles.candidates += candidates.len() as u64;
                 matched.sort_unstable();
                 let inline = style_atom.and_then(|a| doc.attr(node, a));
                 let hint = hints.as_ref().and_then(|h| h.of(doc, node));
@@ -1700,6 +1702,8 @@ pub struct Styles {
     spaced: bool,
     /// The cache of the cascade, for `RuleSet::restyle`. Only `RuleSet::compute_kept` keeps it.
     kept: Option<Box<StyleKeep>>,
+    /// The rules that the index gave for the elements that the cascade styled (`walk` and `restyle` add to it). The caller charges it.
+    candidates: u64,
 }
 
 /// What `RuleSet::restyle` needs from the cascade that made the styles: the style cache and the indexes of the value lists, so
@@ -1716,6 +1720,11 @@ struct StyleKeep {
 }
 
 impl Styles {
+    /// The candidate rules that the cascade tested so far: one for each (element, rule) that the index offered.
+    pub fn candidates(&self) -> u64 {
+        self.candidates
+    }
+
     pub fn spaced(&self) -> bool {
         self.spaced
     }
