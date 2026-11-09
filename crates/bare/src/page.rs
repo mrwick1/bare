@@ -99,7 +99,7 @@ pub struct Page {
     /// The `extents` of the fragments of `frame`, made when a band list or a hit test first needs them after a layout (then `ext.0`).
     ext: (bool, Vec<[f32; 4]>),
     /// Moves each time `frame` may have changed. The last hit test (the point, `epoch`, the offsets and the element) is kept for it.
-    epoch: u64,
+    pub(crate) epoch: u64,
     last_hit: Option<(f64, f64, u64, Scroll, Option<NodeId>)>,
     /// Check each frame against a frame made from nothing (`check_frame`), and stop at the first difference. Set by
     /// `BARE_CHECK_FRAMES=1` and by the tests.
@@ -426,6 +426,11 @@ impl Page {
 
     pub fn browser(&mut self) -> Option<&mut Browser> {
         self.source.browser()
+    }
+
+    /// A picture of a style arrived. Layout does not read it: the display list is made again from the same layout.
+    pub(crate) fn relist(&mut self) {
+        (self.listed, self.built, self.stale) = (false, false, true);
     }
 
     /// The page changed outside the window events (a driver ran a script): the next frame checks the render key.
