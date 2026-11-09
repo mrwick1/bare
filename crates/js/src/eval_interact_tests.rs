@@ -187,7 +187,6 @@ fn async_class_methods_run_and_unsupported_positions_are_found_before_any_effect
             ("class A {} class B extends A { async m() { return async () => super[await 1]; } }", "await in a super property key"),
             ("class A { async m() { return class { [await 1]() {} }; } }", "await in this position"),
             ("class A { async m() { return class extends (await Object) {}; } }", "await in this position"),
-            ("class A { #x = 1; async m(o) { return o?.#x + await 1; } async n(o) { return (await o)?.#x; } }", "await inside an optional chain"),
             ("class A { #x = 1; async m() { this.#x++; return await this.#x; } async n() { return (await this).#x++; } }", "await inside ++ or --"),
         ] {
             let mut it = realm(lim());

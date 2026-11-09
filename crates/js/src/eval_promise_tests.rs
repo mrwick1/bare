@@ -116,7 +116,7 @@ fn gates_are_explicit_unsupported_not_silent() {
     let src = "Promise.resolve.call(function () {}, 1)";
     assert_eq!(run_case(src), "throw:TypeError:Promise resolve or reject function is not callable", "{src}");
     // an async shape that is not supported is found before anything runs
-    for src in ["async function f(o) { return (await o)?.x; }", "var f = async () => { for (var k in await 1) {} };"] {
+    for src in ["async function f(o) { return delete o[await 1]; }", "var f = async () => { (await 1).x++; };"] {
         let prog = parse_script(src, Limits::default()).unwrap();
         assert!(matches!(Interp::new(&prog, Heap::default(), EvalLimits::default()), Err(Error::Unsupported(_))), "{src}");
     }

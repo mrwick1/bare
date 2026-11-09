@@ -76,10 +76,7 @@ fn unsupported_is_found_before_anything_runs() {
     // Each script would set `ran = 1` first. `Interp::new` must fail, so nothing can run.
     let cases = [
         ("async function f(o) { return delete o[await 1]; }", "await inside delete"),
-        ("var f = async () => { for (var k in await 1) {} };", "await inside for-in"),
         // A generator has the same preflight as an async function, and its messages name `await` too.
-        ("function* g(o) { for (var k in o) yield k; }", "await inside for-in"),
-        ("function* g(o) { o?.[yield]; }", "await inside an optional chain"),
         ("function* g() { var [a = yield] = []; }", "await in a binding pattern"),
         ("function* g(t) { t`${yield}`; }", "await in a tagged template"),
         ("var r = /a(?<=b)/;", "lookbehind"),

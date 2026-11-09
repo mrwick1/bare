@@ -4194,3 +4194,33 @@ Tests: `a_pseudo_element_has_the_inherited_values_of_its_element_and_the_initial
 - A real `https` page with a server that sends the full CORS headers (the loopback servers are `http`; the python.org check is a missing-header case).
 - Window mode, arjun-e16, a comparison with Chrome.
 - A preflight with a very large header list, and a redirect chain through three real origins (the tests use two loopback servers and a third for one case).
+
+## Module pages on live sites
+
+The loader of the previous section runs real module pages. This section records what the live pages do, and the two engine gaps that they showed.
+
+**Fixed (`crates/js`, async machine).** The preflight refused `await` or `yield` inside a `for-in` and inside an optional chain (`(await x)?.y`, `a?.[await k]`, `a?.b(await x)`, `a?.b?.()`). Angular and GitHub stopped on the first, archive.org on the second. Both now run.
+- `for-in`: the keys go to slots of the activation and the loop reuses the frames of `for-of` (`Fr::OfR`, `OfB`). A key that a later step deleted is skipped. There is no iterator, so nothing closes on `break`.
+- Optional chain: `Fr::Chain` marks the chain. A `?.` link that finds `null` or `undefined` drops the frames and slots down to it and gives `undefined` (`chain_short`). A link without an `await` that sits in the spine of a marked chain runs with `link`, so its `?.` can cut the whole chain. `(a?.b)(await x)` is still refused (`this` of a parenthesized chain).
+- Still refused: `await` in a `for-in` or `for-of` binding, in `delete`, in `++`/`--`, in a computed key, in a pattern, in a tagged template.
+- 26 new cases check against node (`for_in_and_optional_chains_with_await_match_node`). test262: +12 in `language/module-code/top-level-await/syntax` (162 to 174), +2 in `language/expressions/optional-chaining` (35 to 37), no directory lost.
+- `CSSStyleSheet` is an interface object now (no constructor, no `replace`): Lit asks `x instanceof CSSStyleSheet`, and that threw a `ReferenceError` on archive.org.
+
+**Live results** (`bare-drive`, step file `timeout 20000`, `open URL`, `expect css="body" visible`, `shot s`; each screenshot was looked at).
+
+| Page | Result |
+|---|---|
+| lobste.rs | Journey `lobsters-comments-back` passes. Its `known-bug` mark is gone. |
+| archive.org | Fails. The page loads 11 files, runs the module graph and builds its custom elements. Then it stops at `Unsupported("computed style in a shadow tree (shadow cascade is not implemented)")`, the body has no size and the screenshot is blank. Cause: shadow style scoping is not built (a gate of the layout code, not of the loader). |
+| angular.dev | Passes. The screenshot shows the header, the menu and the three headings. No page error. |
+| getbootstrap.com | Passes, no page error. |
+| developer.mozilla.org | Passes. The navigation and the sidebar show. The text column is narrow (one word on a line): a layout gap, not looked at here. |
+| github.com (two repos) | Passes the step. The page stops at `Unsupported("named group")` (a regexp with a named group, not supported by the regexp engine). |
+| theguardian.com | Passes the step. The page stops at `Unsupported("Date.prototype.toString (local time: bare has no time zone)")`. |
+| vuejs.org | Passes the step. The page stops at a cross-origin `fetch` (`Unsupported`, CORS is a gate). |
+
+**Journeys.** `tools/drive/public/run.sh` 3 times in a row: 24 pass, 0 fail, 3 known, 0 flakes each time (before: 23 pass, 4 known). The known three: `python-org-docs-link`, `python-org-search` (CORS), `rust-book-sidebar` (`min()` in a size).
+
+**Gates.** Base `c2637fe`. `cargo test --release --workspace` passes. Full cost matrix (805 rows): mean glibc -0.07%, no row over +0.5% under both allocators. A first version checked every unmarked node of the async machine and put 7 rows (`async_load seq`, `gen_load forof` and `spread`, `binary_load f64from`) over +0.9% to +1.3%. The check moved to the first operand of the marked links (`ask_spine`) and the rows came back. `keycost.sh`: `#a1` 283.6 M for each key, `#f0` 288.9 M, RSS 32.7 MiB (previous 283.2, 288.5, 32.6). `exec_diff.sh`: 79 runs, 0 differences. `test262_check.sh`: gate ok.
+
+Not tested: a second run of archive.org after shadow style scoping exists, the pages above with a real browser side by side, a `for-in` over a proxy in the async machine (the sync code path is reused, `px_for_in_has`).
