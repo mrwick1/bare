@@ -117,15 +117,23 @@ pub fn resolve(cx: &Cx, v: Value, base: Option<f32>) -> Option<f32> {
             base.map(|b| b * p / 100.0)
         }
         Value::Length(Length::Calc(i)) => {
-            let styles = &cx.tree.styles;
+            let (px, pct) = cx.tree.styles.calc(i);
             match base {
-                Some(b) => Some(styles.calc_at(i, b)),
+                Some(b) => Some(px + b * pct / 100.0),
+                None if pct == 0.0 => Some(px),
                 None => {
-                    let fixed = styles.calc_fixed(i);
-                    if fixed.is_none() {
-                        cx.unknown.set(cx.unknown.get() + 1);
-                    }
-                    fixed
+                    cx.unknown.set(cx.unknown.get() + 1);
+                    None
+                }
+            }
+        }
+        Value::Length(Length::Math(i)) => {
+            std::hint::cold_path();
+            match base {
+                Some(b) => Some(cx.tree.styles.math_at(i, b)),
+                None => {
+                    cx.unknown.set(cx.unknown.get() + 1);
+                    None
                 }
             }
         }

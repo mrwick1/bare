@@ -62,7 +62,7 @@ impl Linear {
             Length::Vh(x) => v[VH] = x,
             Length::Vmin(x) => v[VMIN] = x,
             Length::Vmax(x) => v[VMAX] = x,
-            Length::Calc(_) => {}
+            Length::Calc(_) | Length::Math(_) => {}
         }
         Linear(v)
     }
@@ -81,6 +81,83 @@ impl Linear {
             _ => None,
         }
     }
+}
+
+// A `min()`, `max()` or `clamp()` is kept in `Side::calcs` as a list of `Linear` in prefix order, so that the list stays a plain `Vec` of `Copy`
+// values (the style code makes and drops one for each element with a `style=""`). A leaf is its `Linear`. An operation is a `Linear` with
+// NaN in the `px` slot, the operation in the `pct` slot, and a number in `em`: the number of children (`SUM`, `MIN`, `MAX`, `CLAMP`) or
+// the factor (`TERM`, one child follows, and a `SUM` has one `TERM` for each of its terms).
+const SUM: f32 = 1.0;
+const MIN: f32 = 2.0;
+const MAX: f32 = 3.0;
+const CLAMP: f32 = 4.0;
+const TERM: f32 = 5.0;
+
+fn op(code: f32, number: f32) -> Linear {
+    let mut v = [0.0; 8];
+    v[PX] = f32::NAN;
+    v[EM] = number;
+    v[PCT] = code;
+    Linear(v)
+}
+
+/// Is this entry the start of a `min()`, `max()`, `clamp()` or a sum with one of them? (Not a plain sum of units.)
+pub fn is_tree(l: Linear) -> bool {
+    l.0[PX].is_nan()
+}
+
+/// Add the entries of `node` to `out`.
+pub fn encode(node: &Node<Linear>, out: &mut Vec<Linear>) {
+    match node {
+        Node::Leaf(l) => out.push(*l),
+        Node::Sum(v) => {
+            out.push(op(SUM, v.len() as f32));
+            for (k, n) in v {
+                out.push(op(TERM, *k));
+                encode(n, out);
+            }
+        }
+        Node::Min(v) | Node::Max(v) => {
+            out.push(op(if matches!(node, Node::Min(_)) { MIN } else { MAX }, v.len() as f32));
+            v.iter().for_each(|n| encode(n, out));
+        }
+        Node::Clamp(c) => {
+            out.push(op(CLAMP, 3.0));
+            c.iter().for_each(|n| encode(n, out));
+        }
+    }
+}
+
+/// The tree that starts at `at`, and the place after it. `get` gives the entry of a place.
+pub fn decode(get: &impl Fn(usize) -> Linear, at: usize) -> (Node<Linear>, usize) {
+    let head = get(at);
+    if !is_tree(head) {
+        return (Node::Leaf(head), at + 1);
+    }
+    let (code, n) = (head.0[PCT], head.0[EM]);
+    let mut pos = at + 1;
+    if code == SUM {
+        let mut terms = Vec::new();
+        for _ in 0..n as usize {
+            let k = get(pos).0[EM];
+            let (child, next) = decode(get, pos + 1);
+            terms.push((k, child));
+            pos = next;
+        }
+        return (Node::Sum(terms), pos);
+    }
+    let mut kids = Vec::new();
+    for _ in 0..n as usize {
+        let (child, next) = decode(get, pos);
+        kids.push(child);
+        pos = next;
+    }
+    let node = match code {
+        c if c == MIN => Node::Min(kids),
+        c if c == MAX => Node::Max(kids),
+        _ => Node::Clamp(Box::new([kids.remove(0), kids.remove(0), kids.remove(0)])),
+    };
+    (node, pos)
 }
 
 /// What a `calc()` gives.
@@ -138,19 +215,125 @@ impl<L> Node<L> {
     }
 }
 
-impl Node<[f32; 2]> {
-    /// The value as text, with the percent first like Chrome: `min(300px, 50%)`.
-    pub fn text(&self) -> String {
-        match self {
-            Node::Leaf([px, pct]) if *pct == 0.0 => format!("{px}px"),
-            Node::Leaf([px, pct]) if *px == 0.0 => format!("{pct}%"),
-            Node::Leaf([px, pct]) => format!("calc({pct}% {} {}px)", if *px < 0.0 { '-' } else { '+' }, px.abs()),
-            Node::Sum(v) => format!("calc({})", v.iter().map(|(k, n)| format!("{k} * {}", n.text())).collect::<Vec<_>>().join(" + ")),
-            Node::Min(v) => format!("min({})", v.iter().map(Node::text).collect::<Vec<_>>().join(", ")),
-            Node::Max(v) => format!("max({})", v.iter().map(Node::text).collect::<Vec<_>>().join(", ")),
-            Node::Clamp(c) => format!("clamp({}, {}, {})", c[0].text(), c[1].text(), c[2].text()),
+// After the cascade a tree is a list of `[px, pct]` too, again in prefix order. A leaf is its pair. An operation is `[NaN, code + 16 * n]`
+// (`n` children). A `SUM` has a pair `[factor, 0]` before each child. The same as above: a `Vec` of `Copy` values that costs nothing to drop.
+
+/// Add `node` to `out`.
+pub fn flatten(node: &Node<[f32; 2]>, out: &mut Vec<[f32; 2]>) {
+    let head = |code: f32, n: usize| [f32::NAN, code + 16.0 * n as f32];
+    match node {
+        Node::Leaf(l) => out.push(*l),
+        Node::Sum(v) => {
+            out.push(head(SUM, v.len()));
+            for (k, n) in v {
+                out.push([*k, 0.0]);
+                flatten(n, out);
+            }
+        }
+        Node::Min(v) => {
+            out.push(head(MIN, v.len()));
+            v.iter().for_each(|n| flatten(n, out));
+        }
+        Node::Max(v) => {
+            out.push(head(MAX, v.len()));
+            v.iter().for_each(|n| flatten(n, out));
+        }
+        Node::Clamp(c) => {
+            out.push(head(CLAMP, 3));
+            c.iter().for_each(|n| flatten(n, out));
         }
     }
+}
+
+/// Are the trees that start at `a_at` in `a` and at `b_at` in `b` the same? (Bit for bit: NaN is the same as NaN here.)
+pub fn flat_same(a: &[[f32; 2]], a_at: usize, b: &[[f32; 2]], b_at: usize) -> bool {
+    let (x, y) = (&a[a_at..flat_end(a, a_at)], &b[b_at..flat_end(b, b_at)]);
+    x.len() == y.len() && x.iter().zip(y).all(|(p, q)| p[0].to_bits() == q[0].to_bits() && p[1].to_bits() == q[1].to_bits())
+}
+
+/// The place after the tree that starts at `at`.
+pub fn flat_end(list: &[[f32; 2]], at: usize) -> usize {
+    if !list[at][0].is_nan() {
+        return at + 1;
+    }
+    let (code, n) = split(list[at][1]);
+    let mut pos = at + 1;
+    for _ in 0..n {
+        pos = flat_end(list, pos + (code == SUM) as usize);
+    }
+    pos
+}
+
+fn split(x: f32) -> (f32, usize) {
+    let n = (x / 16.0) as usize;
+    (x - 16.0 * n as f32, n)
+}
+
+/// The number of the tree at `at` when `leaf` gives the number of each pair.
+pub fn flat_eval(list: &[[f32; 2]], at: usize, leaf: &impl Fn([f32; 2]) -> f32) -> f32 {
+    flat(list, at, leaf).0
+}
+
+fn flat(list: &[[f32; 2]], at: usize, leaf: &impl Fn([f32; 2]) -> f32) -> (f32, usize) {
+    if !list[at][0].is_nan() {
+        return (leaf(list[at]), at + 1);
+    }
+    let (code, n) = split(list[at][1]);
+    let mut pos = at + 1;
+    let (mut acc, mut vals) = (0.0, [0.0; 3]);
+    for i in 0..n {
+        let k = if code == SUM {
+            pos += 1;
+            list[pos - 1][0]
+        } else {
+            1.0
+        };
+        let (v, next) = flat(list, pos, leaf);
+        pos = next;
+        match code {
+            c if c == SUM => acc += k * v,
+            c if c == MIN => acc = if i == 0 { v } else { acc.min(v) },
+            c if c == MAX => acc = if i == 0 { v } else { acc.max(v) },
+            _ => vals[i.min(2)] = v,
+        }
+    }
+    (if code == CLAMP { vals[1].min(vals[2]).max(vals[0]) } else { acc }, pos)
+}
+
+/// Does any pair of the tree at `at` have a percent?
+pub fn flat_has_pct(list: &[[f32; 2]], at: usize) -> bool {
+    list[at..flat_end(list, at)].iter().any(|l| !l[0].is_nan() && l[1] != 0.0)
+}
+
+/// The tree at `at` as text, with the percent first like Chrome: `min(300px, 50%)`.
+pub fn flat_text(list: &[[f32; 2]], at: usize) -> String {
+    let [px, pct] = list[at];
+    if !px.is_nan() {
+        return match (px == 0.0, pct == 0.0) {
+            (_, true) => format!("{px}px"),
+            (true, _) => format!("{pct}%"),
+            _ => format!("calc({pct}% {} {}px)", if px < 0.0 { '-' } else { '+' }, px.abs()),
+        };
+    }
+    let (code, n) = split(pct);
+    let mut pos = at + 1;
+    let mut parts = Vec::new();
+    for _ in 0..n {
+        let k = (code == SUM).then(|| {
+            pos += 1;
+            list[pos - 1][0]
+        });
+        let t = flat_text(list, pos);
+        pos = flat_end(list, pos);
+        parts.push(k.map_or(t.clone(), |k| format!("{k} * {t}")));
+    }
+    let name = match code {
+        c if c == SUM => return format!("calc({})", parts.join(" + ")),
+        c if c == MIN => "min",
+        c if c == MAX => "max",
+        _ => "clamp",
+    };
+    format!("{name}({})", parts.join(", "))
 }
 
 /// A number or a sum of lengths, while we compute. For a number, the value is in the `px` slot. A `node` is the value when there is one
@@ -476,6 +659,46 @@ mod tests {
         assert_eq!(all(&node("clamp(1em, 50%, 20px)"), 4.0), 10.0);
         assert_eq!(all(&node("min(calc(1px + 2em), 100%) / 2"), 100.0), 10.5);
         assert_eq!(all(&node("calc(min(1em, 2px) + 1em)"), 0.0), 12.0);
+    }
+
+    #[test]
+    fn a_tree_survives_the_list_of_entries() {
+        for text in ["min(300px, 50%)", "clamp(1px, 2vw + 1em, min(9px, 5%))", "calc(min(10px, 50%) * 2 + max(1em, 3px) / 4)", "max(1em, min(1px, 2%), 3vw)"] {
+            let n = node(text);
+            let mut list = vec![Linear([7.0; 8])];
+            encode(&n, &mut list);
+            list.push(Linear([9.0; 8]));
+            let (back, next) = decode(&|i| list[i], 1);
+            assert_eq!((back, next), (n, list.len() - 1), "{text}");
+        }
+        assert!(!is_tree(Linear([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.0])));
+    }
+
+    #[test]
+    fn a_flat_tree_gives_the_same_number_and_text() {
+        let to_pair = |l: &Linear| [l.px() + 10.0 * l.0[1], l.pct()];
+        for (text, base, want, shown) in [
+            ("min(300px, 50%)", 400.0, 200.0, "min(300px, 50%)"),
+            ("clamp(1px, 2vw + 1em, min(9px, 5%))", 100.0, 5.0, "clamp(1px, calc(0.0 * 0px), min(9px, 5%))"),
+            ("calc(min(10px, 50%) * 2 + max(1em, 3px) / 4)", 8.0, 10.5, ""),
+            ("max(1em, min(1px, 2%), 3vw)", 100.0, 10.0, "max(10px, min(1px, 2%), 0px)"),
+        ] {
+            let flat_of = |at: usize| {
+                let mut out = vec![[7.0, 7.0]; at];
+                flatten(&node(text).map(&to_pair), &mut out);
+                out.push([9.0, 9.0]);
+                out
+            };
+            let list = flat_of(3);
+            assert_eq!(flat_end(&list, 3), list.len() - 1, "{text}");
+            assert_eq!(flat_eval(&list, 3, &|l| l[0] + base * l[1] / 100.0), want, "{text}");
+            if !shown.is_empty() && !text.contains("2vw") && !text.contains("3vw") {
+                assert_eq!(flat_text(&list, 3), shown, "{text}");
+            }
+        }
+        let list = [[f32::NAN, 2.0 + 16.0 * 2.0], [1.0, 0.0], [5.0, 0.0]];
+        assert!(!flat_has_pct(&list, 0));
+        assert!(flat_has_pct(&[[f32::NAN, 2.0 + 32.0], [1.0, 0.0], [0.0, 5.0]], 0));
     }
 
     #[test]

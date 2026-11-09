@@ -38,7 +38,7 @@
 //!
 //! Comments compare Rust with JavaScript, because you know JS.
 
-use crate::calc::{self, Calc, Linear, Node};
+use crate::calc::{self, Calc, Linear};
 use crate::color::{self, Color};
 use crate::var::{self, VarDecl};
 use crate::tokenizer::{Token, Tokens, tokenize};
@@ -194,6 +194,9 @@ pub enum Length {
     /// A `calc()` that mixes units, like `100% - 20px`. The number is the place of its `Linear` in a list. In a declared value
     /// that is the list that `parse_declaration` fills. In a computed value it is the list of the `Styles`: a pair of pixels and percent.
     Calc(u32),
+    /// A `min()`, `max()` or `clamp()` with units that are not known yet, or a percent. The number is the place of its tree (`calc::encode`,
+    /// `calc::flatten`) in the same list as for `Calc`. A percent in it is a percent of the same base as for `Calc`.
+    Math(u32),
 }
 
 /// Every word that a value can be, for all the properties. One list makes the enum, the name of each word, and the way back.
@@ -321,7 +324,7 @@ pub fn parse_declaration(name: &str, value: &str, important: bool, side: &mut Si
 /// What a value can point to: the `calc()` that mix units, the declarations that have `var()`, and the grid lists.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Side {
-    pub calcs: Vec<Node<Linear>>,
+    pub calcs: Vec<Linear>,
     pub vars: Vec<VarDecl>,
     pub grids: Vec<crate::grid::Grid>,
 }
@@ -353,7 +356,7 @@ struct Parts {
 
 impl Parts {
     /// `None` when the value has no part, or a part that is a mistake in every property (a `{` block, for example).
-    fn read(value: &str, calcs: &mut Vec<Node<Linear>>) -> Option<Parts> {
+    fn read(value: &str, calcs: &mut Vec<Linear>) -> Option<Parts> {
         let mut parts = Parts { items: [Part::Other; 8], len: 0, more: false };
         let mut tokens = tokenize(value);
         while let Some(token) = tokens.next() {
@@ -391,7 +394,8 @@ impl Parts {
 }
 
 /// After `calc(`: read to the matching `)` and compute. A number is a number. One unit is a plain length. A mix goes in `calcs`.
-fn read_calc(name: &str, tokens: &mut Tokens<'_>, calcs: &mut Vec<Node<Linear>>) -> Part {
+#[inline(never)]
+fn read_calc(name: &str, tokens: &mut Tokens<'_>, calcs: &mut Vec<Linear>) -> Part {
     let mut inner = Vec::new();
     let mut depth = 1u32;
     while let Some(token) = tokens.next() {
@@ -411,15 +415,16 @@ fn read_calc(name: &str, tokens: &mut Tokens<'_>, calcs: &mut Vec<Node<Linear>>)
     let result = if calc::is_calc(name) { calc::parse(&inner, length) } else { calc::parse_fn(name, &inner, length) };
     match result {
         Some(Calc::Math(node)) => {
-            calcs.push(node);
-            Part::Length(Length::Calc(calcs.len() as u32 - 1))
+            let at = calcs.len() as u32;
+            calc::encode(&node, calcs);
+            Part::Length(Length::Math(at))
         }
         Some(Calc::Number(value)) => Part::Number { value, int: value.fract() == 0.0 },
         Some(Calc::Length(lin)) => match lin.single() {
             Some(Length::Percent(p)) => Part::Percent(p),
             Some(l) => Part::Length(l),
             None => {
-                calcs.push(Node::Leaf(lin));
+                calcs.push(lin);
                 Part::Length(Length::Calc(calcs.len() as u32 - 1))
             }
         },
@@ -889,7 +894,7 @@ fn longhand(property: Property, part: Part) -> Option<Value> {
     let positive = |part: Part| {
         length(part).filter(|l| match *l {
             Length::Px(v) | Length::Em(v) | Length::Rem(v) | Length::Percent(v) | Length::Vw(v) | Length::Vh(v) | Length::Vmin(v) | Length::Vmax(v) => v >= 0.0,
-            Length::Calc(_) => true,
+            Length::Calc(_) | Length::Math(_) => true,
         })
     };
     let px = |v: f32| Some(Value::Length(Length::Px(v)));
