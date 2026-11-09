@@ -4344,3 +4344,17 @@ Ideas not tried: (1) make `resolve` generic over a constant, so a page without `
 - The Rust book sidebar chapter list is not painted.
 
 Not tested: arjun-e16, the window mode, the typing cost.
+
+## Standing exception: PR #289 calc cost (approved by owner 2026-11-09)
+
+Arjun approved merging PR #289 with a cost regression. The branch head is 8c70ca4. It is rebased on main 303a85f.
+
+The cost matrix has 805 rows. Four jobs ran, with a limit of +0.5% under both allocators. 45 rows are over the limit under both allocators. 6 more rows are over under one allocator only. No row failed.
+
+- Worst row: `block-percent-calc 200000`, +1.275% glibc and +1.363% jemalloc.
+- `grid-sparse-spans` and `grid-dense` are about +1.0% under both allocators.
+- Mean change: glibc +0.072%. jemalloc +0.693% (51 rows measured).
+
+The cause is not proven. A possible cause is a layout shift in `resolve`. Hypothesis: to verify.
+
+Full row list: `/data/tmp/cm.txt`. Raw data: `/data/tmp/raw.tsv`.
