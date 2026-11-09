@@ -4922,7 +4922,7 @@ gitlab.com, the "Ship faster" cards: the box is `.one-feature-cards__media` (`#1
 - Chrome 155 comparison of the error messages of the `SyntaxError` cases (the tests check the name only).
 
 ## Script console triage: CSSOM, window properties and scoped selectors (2026-11-09)
-Built the initial driver from `a1b7a802580b992cceccc861b513bebff9c027e4`. Re-ran all 16 survey sites. Rebased the final change on `4bd0d0e3d25723ea05f9bbac2976086d9ab93523`. Rebuilt the driver and re-ran the same sites. All 16 body probes pass before and after. Each probe uses `timeout 20000`, `open URL`, `expect css="body" visible` and `shot s`.
+Built the initial driver from `a1b7a802580b992cceccc861b513bebff9c027e4`. Re-ran all 16 survey sites. Rebased the final change on `f51a18c3a48cfcb8ee270f745a8a14bc093ae7f0`. Rebuilt the driver and re-ran the same sites. All 16 body probes pass before and after. Each probe uses `timeout 20000`, `open URL`, `expect css="body" visible` and `shot s`.
 Count each distinct first-line error once per site. Strip the listener prefix. Keep other message text unchanged. The local evidence directory is `/data/bare-tmp/script-errors-triage/`. It holds the full recorded strings, stacks, per-site results and screenshots. `before.json` and `merge.json` hold the ranked messages. The tables shorten the three data-module payloads and the Go selector. Excluded topics remain in the tables for audit. The after snapshot includes the other changes merged into main. Their fixes are not attributed to this change.
 Added a bounded CSSOM surface: live StyleSheetList and CSSRuleList objects; sheet ownerNode, href, disabled, cssRules, insertRule and deleteRule; rule selectorText, style and cssText. Inline rule edits update the style text through the DOM. Declaration writes use wrappers over the existing CSSStyleDeclaration. Ordinary element style writes have no new dispatch check. Group rules retain their text. Objects remain rooted for the realm lifetime. The root table has a 65,536-entry cap.
 Window frames, parent and top refer to the standalone window. Its initial name is empty and its frame count is zero. The virtual screen is 1280 by 800 with 24-bit colour. Iframes remain inert. These properties and CSSOM members use the existing lazy host-property miss path. They allocate only when read. Deviation: property enumeration can omit a deferred member before its first read. The HTMLStyleElement constructor reuses the CSSOM style prototype.
@@ -4968,7 +4968,7 @@ Window, scope, CSSOM list/rule edits, declaration writes, interface identity, vi
 
 | Rank | Console error | Sites | Site names |
 |---|---|---:|---|
-| 1 | page: Unsupported("named group") | 3 | github-readme, github-repo, gitlab |
+| 1 | page: Limit("Host(\"dom-selector\")") | 2 | github-readme, github-repo |
 | 2 | ReferenceError: SVGAnimatedString is not defined | 1 | vuejs |
 | 3 | ReferenceError: _w is not defined | 1 | bing |
 | 4 | ReferenceError: maplibregl is not defined | 1 | openstreetmap |
@@ -4987,24 +4987,25 @@ Window, scope, CSSOM list/rule edits, declaration writes, interface identity, vi
 | 17 | TypeError: window.URL.createObjectURL is not a function | 1 | openstreetmap |
 | 18 | page: Unsupported("Date string that is not ISO 8601 or toUTCString format") | 1 | ubuntu-com |
 | 19 | page: Unsupported("a ReadableStream as a body") | 1 | bbc-news |
-| 20 | page: Unsupported("user info in a URL") | 1 | guardian |
+| 20 | page: Unsupported("lookbehind") | 1 | gitlab |
+| 21 | page: Unsupported("user info in a URL") | 1 | guardian |
 
 ### Cost and verification
 Ran on archMachine. The first matrix stopped on three startup rows. A later matrix also found a cached-selector scan and eager CSSOM setup. The final code defers browser members through the existing cold host path. It removes the selector scan and the eager style prototype.
-The full matrix ran all 805 rows under both allocators against `93559738b15b9479603a058deb82ce86eff0e31a`. Result: zero rows over +0.5% under either allocator, and zero failed rows. Mean change: glibc -0.001%; jemalloc +0.000%. After the final rebase, 17 touched rows pass against `4bd0d0e3d25723ea05f9bbac2976086d9ab93523`, again under both allocators. The limits did not change.
+The full matrix ran all 805 rows under both allocators against `93559738b15b9479603a058deb82ce86eff0e31a`. Result: zero rows over +0.5% under either allocator, and zero failed rows. Mean change: glibc -0.001%; jemalloc +0.000%. After the final rebase, 17 touched rows pass against `f51a18c3a48cfcb8ee270f745a8a14bc093ae7f0`, again under both allocators. The limits did not change.
 The shared cache gave a lower dynamic-1 BASE count than fresh A/B runs of the same binary. Cached jemalloc BASE: 16,276,195 instructions. Fresh BASE: 16,428,826. Fresh NEW: 16,430,353. Used fresh, matched-path views for the full matrix and final focused run. Each view links to the unchanged shared or task binaries. It has its own count cache. No shared baseline binary changed. Direct instr.sh A/B and perf stat -e instructions:u results are retained in the evidence directory. Each instr.sh count is the minimum of three runs.
 Final focused rows, after the last rebase:
 
 | Row | glibc change | jemalloc change |
 |---|---:|---:|
-| examples/loader_load mixed 1 | -0.027% | -0.065% |
-| examples/preload_load style 1 | +0.069% | +0.005% |
-| examples/session_load chain 1 | +0.019% | +0.002% |
-| examples/browser_load lookup 10 | +0.073% | +0.211% |
-| examples/sheets_load dynamic 1 | -0.090% | -0.020% |
-| examples/sheets_load dynamic 10 | -0.002% | -0.002% |
+| examples/loader_load mixed 1 | -0.045% | -0.057% |
+| examples/preload_load style 1 | +0.014% | -0.052% |
+| examples/session_load chain 1 | -0.011% | -0.021% |
+| examples/browser_load lookup 10 | +0.073% | +0.212% |
+| examples/sheets_load dynamic 1 | -0.069% | -0.024% |
+| examples/sheets_load dynamic 10 | -0.017% | -0.039% |
 
-Release workspace: 3273 passed, zero failed, 13 ignored. The post-rebase bare, bare-js and bare-css library suites also pass. Test262: 585 directories, baseline gate passes. Exec-diff: 79 fixture/load runs, zero differences across tree, auto and byte. Typing: 282.5 M instructions per textarea key and 287.9 M per input key. Peak RSS at 50 keys: 33.0 MiB. Public journeys: 33 pass, zero fail, zero flakes. Builds, Rust and JS suites, and instruction measurements used heavy slots.
+Release workspace: 3274 passed, zero failed, 13 ignored. The post-rebase bare, bare-js and bare-css library suites also pass. Test262: 585 directories, baseline gate passes. Exec-diff: 79 fixture/load runs, zero differences across tree, auto and byte. Typing: 282.6 M instructions per textarea key and 287.9 M per input key. Peak RSS at 50 keys: 32.6 MiB. Public journeys: 33 pass, zero fail, zero flakes. Builds, Rust and JS suites, and instruction measurements used heavy slots.
 Existing warnings remain: the unused rgb helper in crates/css/src/shadow_tests.rs and an unused variable in the drive image test. They are outside this change.
 ### Remaining limits and not tested
 document.write remains missing. The loader uses a pre-parsed DOM. Correct parser insertion needs an insertion point and stream state; fragment insertion would not preserve that behavior. External sheet edits and flattened imported-sheet reads remain gated. Flattened parts lack the origin data that CSSOM needs. Nested group-rule lists are not exposed. The disabled property uses the native disabled attribute behavior. Inline-sheet disabling remains a limitation of the existing cascade.
