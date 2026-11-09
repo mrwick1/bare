@@ -194,6 +194,17 @@ struct Atoms {
     nomodule: Option<Atom>,
     rel: Option<Atom>,
     href: Option<Atom>,
+    media: Option<Atom>,
+    disabled: Option<Atom>,
+}
+
+/// A `media` list that never matches a screen: every query starts with `print` or `speech`. The sheet is not fetched with the page
+/// (a later `media` change is the style pass's: `Browser::style_availability`).
+pub(crate) fn print_only(media: &str) -> bool {
+    !media.trim().is_empty() && media.split(',').all(|q| {
+        let q = q.trim_start().to_ascii_lowercase();
+        q.starts_with("print") || q.starts_with("speech")
+    })
 }
 
 /// Find the scripts and style sheets of the page. `page` is the URL of the page.
@@ -212,6 +223,8 @@ pub fn discover(doc: &Document, page: &Url, limits: &Limits) -> Result<Discovery
         nomodule: a("nomodule"),
         rel: a("rel"),
         href: a("href"),
+        media: a("media"),
+        disabled: a("disabled"),
     };
     let attr = |el: NodeId, name: Option<Atom>| name.and_then(|n| doc.attr(el, n));
 
@@ -232,7 +245,7 @@ pub fn discover(doc: &Document, page: &Url, limits: &Limits) -> Result<Discovery
             } else if tag == at.link {
                 if let Some(rel) = attr(node, at.rel) {
                     let has = |word: &str| rel.split_ascii_whitespace().any(|w| w.eq_ignore_ascii_case(word));
-                    if has("stylesheet") && !has("alternate") {
+                    if has("stylesheet") && !has("alternate") && attr(node, at.disabled).is_none() && !attr(node, at.media).is_some_and(print_only) {
                         candidates.push(node);
                     }
                 }
@@ -762,6 +775,14 @@ mod tests {
         };
         assert_eq!((ext(0), ext(1), ext(3)), ((0, Timing::Async), (0, Timing::Defer), (0, Timing::Blocking)));
         assert_eq!(ext(4).0, 2);
+    }
+
+    #[test]
+    fn print_only_and_disabled_sheets_are_not_found() {
+        let p = page(1);
+        let d = found(r#"<link rel=stylesheet media=print href=a.css><link rel=stylesheet media="Print and (min-width:1px), speech" href=b.css><link rel=stylesheet disabled href=c.css><link rel=stylesheet media="screen, print" href=d.css><link rel=stylesheet media="(min-width:1px)" href=e.css>"#, &p);
+        assert_eq!(paths(&d), ["/dir/d.css", "/dir/e.css"]);
+        assert!(print_only("print") && print_only(" PRINT and (color)") && !print_only("") && !print_only("all") && !print_only("not print"));
     }
 
     #[test]

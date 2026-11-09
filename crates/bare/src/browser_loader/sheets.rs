@@ -39,7 +39,7 @@
 //! - Nothing that is a budget is an empty sheet: a time limit is `Stop::TimeBudget`, and a size, fetch, depth, parts or
 //!   references cap is `Fatal::Limit("css-...")`. Both end the run for good: no JS and no I/O after them (the sticky fatal).
 //!
-//! Not done: `<link disabled>` (Chrome loads nothing and adds no rules; bare fetches and applies it), `crossorigin`, `integrity`, `Link:` headers, `@import supports()`, a changed server text is not
+//! Not done: `crossorigin`, `integrity`, `Link:` headers, `@import supports()`, a changed server text is not
 //! fetched again in the same document (the cache is by URL), a sheet that a script reads before the first pass ends `Ready` (it stops the page).
 
 use super::{EvTarget, Fatal, Flow, Run, Stop, WS, fatal_of, label};
@@ -405,7 +405,7 @@ impl Run<'_> {
     fn tell_links(&mut self, raw: &str, url: &str, ok: bool) -> Flow {
         let nodes = {
             let doc = self.dom.doc.borrow();
-            let (link, template, rel, href, media) = (doc.find_atom("link"), doc.find_atom("template"), doc.find_atom("rel"), doc.find_atom("href"), doc.find_atom("media"));
+            let (link, template, rel, href, media, disabled) = (doc.find_atom("link"), doc.find_atom("template"), doc.find_atom("rel"), doc.find_atom("href"), doc.find_atom("media"), doc.find_atom("disabled"));
             let vp = self.dom.plat.s.borrow().viewport;
             let mut out = Vec::new();
             let mut stack = vec![doc.root()];
@@ -419,7 +419,7 @@ impl Run<'_> {
                     let attr = |a: Option<bare_html::dom::Atom>| a.and_then(|a| doc.attr(n, a));
                     if Some(name) == link && attr(href) == Some(raw) {
                         let is = |w: &str| attr(rel).is_some_and(|r| r.split_ascii_whitespace().any(|x| x.eq_ignore_ascii_case(w)));
-                        if is("stylesheet") && !is("alternate") && attr(media).is_none_or(|m| bare_css::at_rules::media_matches(m, vp)) {
+                        if is("stylesheet") && !is("alternate") && attr(disabled).is_none() && attr(media).is_none_or(|m| bare_css::at_rules::media_matches(m, vp)) {
                             out.push(n);
                         }
                     }
