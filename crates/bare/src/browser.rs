@@ -1233,6 +1233,7 @@ impl Dom {
         crate::browser_range::install(self, it)?;
         crate::browser_handlers::install(self, it)?;
         crate::browser_error_event::install(self, it)?;
+        crate::browser_canvas::install(self, it)?;
         crate::browser_rejection::install(self, it)?;
         crate::browser_perf_observer::install(self, it)?;
         crate::browser_select::install(self, it)?;
