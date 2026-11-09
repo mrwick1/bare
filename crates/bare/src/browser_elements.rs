@@ -1,8 +1,14 @@
-//! `HTMLAnchorElement`, `HTMLAreaElement` and `HTMLTemplateElement`.
+//! `HTMLAnchorElement`, `HTMLAreaElement`, `HTMLTemplateElement` and `HTMLImageElement`.
 //!
-//! Lazy: the three globals are accessors until the first read (`browser_lazy.rs`). The three prototypes are made once, by the first read of a
-//! global or by the first wrapper of an `<a>`, `<area>` or `<template>` (`proto`, called by `Dom::wrap`). A realm that has neither pays for three
-//! accessor functions.
+//! Lazy: the four globals are accessors until the first read (`browser_lazy.rs`). The four prototypes are made once, by the first read of a
+//! global or by the first wrapper of an `<a>`, `<area>`, `<template>` or `<img>` (`proto`, called by `Dom::wrap`). A realm that has none pays for
+//! four accessor functions.
+//!
+//! `HTMLImageElement`: `src` (the attribute resolved against the base URL, else the attribute text), `currentSrc` (the same, `""` without `src`),
+//! `alt`, `srcset`, `sizes`, `loading`, `decoding` (reflected strings), `naturalWidth`, `naturalHeight` (the picture that `bare/src/images.rs`
+//! decoded, else 0), `width`, `height` (the attribute as an unsigned number, else the natural size: deviation, Chrome gives the rendered size),
+//! `complete` (no `src`, or the picture is in: deviation, a picture that failed to load stays incomplete). Absent: `new Image()`, `crossOrigin`,
+//! `decode()`, `x`, `y`, `isMap`, `useMap`, `referrerPolicy`.
 //!
 //! Hyperlink members (`HTMLHyperlinkElementUtils`, on `a` and `area`): `href`, `protocol`, `host`, `hostname`, `port`, `pathname`, `search`,
 //! `hash` (all with setters), the read-only `origin`, and `toString` (the `href`). The getter of `href` is the `href` attribute resolved against
@@ -38,7 +44,7 @@ use std::cell::Cell;
 /// `[prototype of a, area, template; constructor of a, area, template]`, once made. All are roots.
 #[derive(Default)]
 pub(crate) struct Els {
-    objs: Cell<Option<[ObjId; 6]>>,
+    objs: Cell<Option<[ObjId; 8]>>,
     tagged: Cell<bool>,
 }
 
@@ -57,6 +63,7 @@ pub(crate) fn proto(d: &Dom, it: &mut Interp<'_>, tag: &str) -> R<ObjId> {
     Ok(o[match tag {
         "a" => 0,
         "area" => 1,
+        "img" => 3,
         _ => 2,
     }])
 }
@@ -78,31 +85,33 @@ fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     Ok(())
 }
 
-lazy_global!(lazy_a, "HTMLAnchorElement", ensure, |d| d.els.objs.get().expect("made")[3]);
-lazy_global!(lazy_area, "HTMLAreaElement", ensure, |d| d.els.objs.get().expect("made")[4]);
-lazy_global!(lazy_template, "HTMLTemplateElement", ensure, |d| d.els.objs.get().expect("made")[5]);
+lazy_global!(lazy_a, "HTMLAnchorElement", ensure, |d| d.els.objs.get().expect("made")[4]);
+lazy_global!(lazy_area, "HTMLAreaElement", ensure, |d| d.els.objs.get().expect("made")[5]);
+lazy_global!(lazy_template, "HTMLTemplateElement", ensure, |d| d.els.objs.get().expect("made")[6]);
+lazy_global!(lazy_img, "HTMLImageElement", ensure, |d| d.els.objs.get().expect("made")[7]);
 
 pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    crate::browser_lazy::install(d, it, &[("HTMLAnchorElement", lazy_a as H), ("HTMLAreaElement", lazy_area), ("HTMLTemplateElement", lazy_template)])
+    crate::browser_lazy::install(d, it, &[("HTMLAnchorElement", lazy_a as H), ("HTMLAreaElement", lazy_area), ("HTMLTemplateElement", lazy_template), ("HTMLImageElement", lazy_img)])
 }
 
 #[cold]
 #[inline(never)]
-fn make(d: &Dom, it: &mut Interp<'_>) -> R<[ObjId; 6]> {
+fn make(d: &Dom, it: &mut Interp<'_>) -> R<[ObjId; 8]> {
     let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
-    let mut o = [d.p().html; 6];
-    for (i, name) in ["HTMLAnchorElement", "HTMLAreaElement", "HTMLTemplateElement"].into_iter().enumerate() {
+    let mut o = [d.p().html; 8];
+    for (i, name) in ["HTMLAnchorElement", "HTMLAreaElement", "HTMLTemplateElement", "HTMLImageElement"].into_iter().enumerate() {
         let proto = d.obj(it, d.p().html)?;
         let f = crate::browser_custom::interface_ctor(d, it, name, false)?;
         it.define_data(f, kp, Value::Object(proto), false, false, false)?;
         it.define_data(proto, kc, Value::Object(f), true, false, true)?;
         crate::browser_lazy::tag(d, it, proto, name)?;
-        (o[i], o[i + 3]) = (proto, f);
+        (o[i], o[i + 4]) = (proto, f);
     }
     tag_fragments(d, it)?;
     members::<false>(d, it, o[0])?;
     members::<true>(d, it, o[1])?;
     d.def_get(it, o[2], "content", content, None)?;
+    image_members(d, it, o[3])?;
     d.els.objs.set(Some(o));
     Ok(o)
 }
@@ -246,4 +255,89 @@ fn content(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
         }
     };
     d.wrap(it, c)
+}
+
+// ---------------------------------------------------------------------------------------------- HTMLImageElement
+
+/// The native `img` element of `this`, else `Illegal invocation`.
+fn image(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<NodeId> {
+    let n = d.el(it, this)?;
+    if d.doc.borrow().is_html(n, "img") { Ok(n) } else { Err(it.type_error("Illegal invocation")) }
+}
+
+fn attr_text(d: &Dom, n: NodeId, name: &str) -> Option<String> {
+    let doc = d.doc.borrow();
+    doc.find_atom(name).and_then(|a| doc.attr(n, a)).map(str::to_string)
+}
+
+fn img_str(d: &Dom, it: &mut Interp<'_>, this: Value, name: &str) -> V {
+    let n = image(d, it, this)?;
+    let s = attr_text(d, n, name).unwrap_or_default();
+    d.js_str(it, &s)
+}
+
+fn img_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], name: &str) -> V {
+    let n = image(d, it, this)?;
+    let s = d.string_arg(it, arg(a, 0))?;
+    nd::attr_set(d, it, n, name, &s)?;
+    Ok(Value::Undefined)
+}
+
+/// The `src` attribute resolved against the base URL; the attribute text when it does not parse; `""` without the attribute.
+fn img_url(d: &Dom, it: &mut Interp<'_>, this: Value, current: bool) -> V {
+    let n = image(d, it, this)?;
+    let Some(raw) = attr_text(d, n, "src") else { return d.js_str(it, "") };
+    it.charge(raw.len() as u64 / 32)?;
+    let s = match parse(&raw, base(d).as_ref()) {
+        Ok(r) => r.href(),
+        Err(_) if current => String::new(),
+        Err(_) => raw,
+    };
+    d.js_str(it, &s)
+}
+
+/// The size of the decoded picture, `(0, 0)` while there is none.
+fn natural(d: &Dom, n: NodeId) -> (u32, u32) {
+    d.doc.borrow().image(n).map_or((0, 0), |i| (i.0, i.1))
+}
+
+/// `width` (`HEIGHT` false) or `height`: the attribute as an unsigned number, else the natural size.
+fn img_size<const HEIGHT: bool>(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    let n = image(d, it, this)?;
+    let attr = attr_text(d, n, if HEIGHT { "height" } else { "width" });
+    let v = attr.and_then(|s| s.trim().parse::<u32>().ok()).unwrap_or_else(|| if HEIGHT { natural(d, n).1 } else { natural(d, n).0 });
+    Ok(Value::Number(v as f64))
+}
+
+fn img_set_size<const HEIGHT: bool>(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    let n = image(d, it, this)?;
+    let v = it.to_js_number(arg(a, 0))?;
+    let v = if v.is_finite() && v >= 0.0 { (v.trunc() % 4294967296.0) as u32 } else { 0 };
+    nd::attr_set(d, it, n, if HEIGHT { "height" } else { "width" }, &v.to_string())?;
+    Ok(Value::Undefined)
+}
+
+/// Getter and setter of a reflected string attribute of `img`.
+macro_rules! img_attr {
+    ($d:expr, $it:expr, $o:expr, $name:literal) => {
+        $d.def_get($it, $o, $name, |d, it, t, _| img_str(d, it, t, $name), Some(|d, it, t, a| img_set(d, it, t, a, $name)))?;
+    };
+}
+
+fn image_members(d: &Dom, it: &mut Interp<'_>, o: ObjId) -> R<()> {
+    d.def_get(it, o, "src", |d, it, t, _| img_url(d, it, t, false), Some(|d, it, t, a| img_set(d, it, t, a, "src")))?;
+    d.def_get(it, o, "currentSrc", |d, it, t, _| img_url(d, it, t, true), None)?;
+    img_attr!(d, it, o, "alt");
+    img_attr!(d, it, o, "srcset");
+    img_attr!(d, it, o, "sizes");
+    img_attr!(d, it, o, "loading");
+    img_attr!(d, it, o, "decoding");
+    d.def_get(it, o, "width", img_size::<false>, Some(img_set_size::<false>))?;
+    d.def_get(it, o, "height", img_size::<true>, Some(img_set_size::<true>))?;
+    d.def_get(it, o, "naturalWidth", |d, it, t, _| Ok(Value::Number(natural(d, image(d, it, t)?).0 as f64)), None)?;
+    d.def_get(it, o, "naturalHeight", |d, it, t, _| Ok(Value::Number(natural(d, image(d, it, t)?).1 as f64)), None)?;
+    d.def_get(it, o, "complete", |d, it, t, _| {
+        let n = image(d, it, t)?;
+        Ok(Value::Bool(attr_text(d, n, "src").is_none_or(|s| s.trim().is_empty()) || d.doc.borrow().image(n).is_some()))
+    }, None)
 }

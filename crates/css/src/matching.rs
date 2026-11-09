@@ -32,6 +32,12 @@ pub fn matches(doc: &Document, el: NodeId, selector: &Selector) -> bool {
     // Without this check, `*` would match a text node, because it has no simple selectors to fail.
 }
 
+/// Does the last compound of `selector` (the one on the right) match the element `el`? `matches` does this first, so when this is false
+/// `matches` is false at once, and when it is true `matches` may search the ancestors or the siblings. For a host that charges the work.
+pub fn subject_matches(doc: &Document, el: NodeId, selector: &Selector) -> bool {
+    is_element(doc, el) && selector.compounds.first().is_none_or(|c| compound_matches(doc, el, &c.simples))
+}
+
 fn is_element(doc: &Document, id: NodeId) -> bool {
     matches!(doc.data(id), NodeData::Element { .. })
 }
