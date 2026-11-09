@@ -14,7 +14,7 @@
 //! Left out:
 //! - `calc()` inside a track size: the declaration is dropped.
 //! - `subgrid` and `masonry`: the declaration is dropped.
-//! - The `grid` and `grid-template` shorthands.
+//! - The `grid` shorthand, and the form of `grid-template` with area names (`rows / columns` and `none` are read).
 //! - `grid-template-areas` also does not read `repeat()`, as nothing does.
 
 use crate::tokenizer::{Token, tokenize};
@@ -188,6 +188,7 @@ pub fn longhands(name: &str) -> Option<&'static [Property]> {
         "grid-row" => &[GridRowStart, GridRowEnd],
         "grid-column" => &[GridColumnStart, GridColumnEnd],
         "grid-area" => &[GridRowStart, GridColumnStart, GridRowEnd, GridColumnEnd],
+        "grid-template" => &[GridTemplateRows, GridTemplateColumns, GridTemplateAreas],
         "place-items" => &[AlignItems, JustifyItems],
         "place-self" => &[AlignSelf, JustifySelf],
         "place-content" => &[AlignContent, JustifyContent],
@@ -217,7 +218,9 @@ pub fn declaration(name: &str, value: &str, important: bool, side: &mut Side, ou
         "grid-row-end" => &[GridRowEnd],
         "grid-column-start" => &[GridColumnStart],
         "grid-column-end" => &[GridColumnEnd],
-        _ => longhands(name).filter(|_| name.starts_with("grid-"))?,
+        // Most declarations are not grid: leave before the lookup of the shorthands.
+        _ if !name.starts_with("grid-") => return Option::None,
+        _ => longhands(name)?,
     };
     if let Some(w) = wide(text) {
         out.extend(list.iter().map(|&property| Declared { property, value: w, important }));
@@ -271,6 +274,24 @@ fn read(name: &str, text: &str, side: &mut Side, emit: &mut dyn FnMut(Property, 
                 _ => GridColumnEnd,
             };
             emit(property, line_value(line, &mut keep));
+            true
+        }
+        // `rows / columns`, or `none`. The form with area names is left out. The areas are `none`, as the shorthand resets them.
+        "grid-template" => {
+            let mut sides = tokens.split(|t| *t == Token::Delim('/'));
+            let (rows, columns) = match (sides.next(), sides.next(), sides.next()) {
+                (Some(r), Some(c), Option::None) => (template(r), template(c)),
+                (Some(n), Option::None, _) => (template(n), template(n)),
+                _ => return false,
+            };
+            let (Some(rows), Some(columns)) = (rows, columns) else { return false };
+            // One side alone must be `none`.
+            if !tokens.contains(&Token::Delim('/')) && rows.is_some() {
+                return false;
+            }
+            emit(GridTemplateRows, rows.map_or(Value::Keyword(Keyword::None), &mut keep));
+            emit(GridTemplateColumns, columns.map_or(Value::Keyword(Keyword::None), &mut keep));
+            emit(GridTemplateAreas, Value::Keyword(Keyword::None));
             true
         }
         // `a / b`, and for `grid-area` up to four.
@@ -697,6 +718,22 @@ mod tests {
         assert_eq!(lines("grid-row", "1 /"), vec![]);
         assert_eq!(read("grid-row", "inherit").0, vec![(GridRowStart, Value::Inherit), (GridRowEnd, Value::Inherit)]);
         assert_eq!(read("grid-area", "initial").0.len(), 4);
+    }
+
+    #[test]
+    fn the_template_shorthand_gives_rows_columns_and_no_areas() {
+        use Property::*;
+        let (out, side) = read("grid-template", "min-content 1fr / 12.25rem minmax(0, 1fr)");
+        let props: Vec<Property> = out.iter().map(|d| d.0).collect();
+        assert_eq!(props, [GridTemplateRows, GridTemplateColumns, GridTemplateAreas]);
+        assert!(matches!(&side.grids[match out[1].1 { Value::Grid(i) => i as usize, _ => panic!() }], Grid::Tracks(t) if t.len() == 2));
+        assert_eq!(out[2].1, Value::Keyword(Keyword::None));
+        // `none`, rows only and a bad side: `none` gives three, the others none (the areas form is left out).
+        assert_eq!(read("grid-template", "none").0.len(), 3);
+        for bad in ["1fr", "1fr / ", "/ 1fr", "1fr / 1fr / 1fr", "'a' 1fr / 1fr", "foo / bar"] {
+            assert!(read("grid-template", bad).0.is_empty(), "{bad}");
+        }
+        assert_eq!(read("grid-template", "inherit").0.len(), 3);
     }
 
     #[test]

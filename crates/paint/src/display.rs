@@ -483,6 +483,13 @@ impl Builder<'_> {
                     match self.layer(&g, style) {
                         Layer::Block => {
                             self.decor(&g, style, false);
+                            // A block box (`display: block` on an `<img>` or an `<svg>`) has its picture too.
+                            if self.svg.is_some() {
+                                self.svg_of(&g, style, j);
+                            }
+                            if self.img.is_some() {
+                                self.picture(&g, style, j);
+                            }
                             j += 1;
                         }
                         Layer::Inline => {
