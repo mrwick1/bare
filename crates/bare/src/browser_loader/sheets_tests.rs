@@ -661,4 +661,7 @@ fn a_url_in_a_sheet_is_made_absolute_against_the_sheet() {
     }
     // The text is borrowed when nothing changes.
     assert!(matches!(absolute_urls("a{b:url(#x)}", &base), std::borrow::Cow::Borrowed(_)));
+    // The address of an `@import` is joined by `flatten`: it stays, with any case and white space before `url(`. The next `url(` is made absolute.
+    assert_eq!(abs("@import url(/s.css) layer(x);a{b:url(/i.png)}"), "@import url(/s.css) layer(x);a{b:url(\"https://a.test/i.png\")}");
+    assert_eq!(abs("@IMPORT\n url('s.css');"), "@IMPORT\n url('s.css');");
 }

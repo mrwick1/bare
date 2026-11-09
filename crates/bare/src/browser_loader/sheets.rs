@@ -465,6 +465,11 @@ pub(crate) fn absolute_urls<'a>(text: &'a str, base: &Url) -> std::borrow::Cow<'
             continue;
         }
         let start = open - 3;
+        // The address of an `@import` is joined by `flatten`, which reads the text before this call: it stays as it is.
+        let before = text[..start].trim_end().as_bytes();
+        if before.len() >= 7 && before[before.len() - 7..].eq_ignore_ascii_case(b"@import") {
+            continue;
+        }
         while i < b.len() && b[i].is_ascii_whitespace() {
             i += 1;
         }
