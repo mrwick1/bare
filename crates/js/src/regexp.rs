@@ -72,11 +72,13 @@ pub struct Flags {
     pub sticky: bool,
     /// `u`: the pattern and the input are code points (see the header).
     pub unicode: bool,
+    /// `d`: the wrapper adds `indices` to match results. The matcher ignores it.
+    pub has_indices: bool,
 }
 
 impl Flags {
-    /// Parse a flags string. Unknown or repeated flags are errors. `v` and `d` are valid
-    /// JS flags that this engine does not support, so they are a different error.
+    /// Parse a flags string. Unknown or repeated flags are errors. `v` is a valid
+    /// JS flag that this engine does not support, so it is a different error.
     pub fn parse(s: &str) -> Result<Flags, CompileError> {
         let mut f = Flags::default();
         let mut seen = [false; 128];
@@ -97,6 +99,7 @@ impl Flags {
                 's' => f.dot_all = true,
                 'y' => f.sticky = true,
                 'u' => f.unicode = true,
+                'd' => f.has_indices = true,
                 _ => unsupported = unsupported.or(Some(c)),
             }
         }
@@ -119,7 +122,7 @@ pub enum CompileError {
     Unsupported { what: &'static str, at: usize },
     /// The flags string has an unknown or repeated flag (a JS `SyntaxError`).
     InvalidFlags(char),
-    /// Valid JS flag that this engine does not implement (`v`, `d`).
+    /// Valid JS flag that this engine does not implement (`v`).
     UnsupportedFlag(char),
     /// A compile bound was exceeded (pattern length, nesting, program size, groups, class work).
     Limit(&'static str),
@@ -2040,13 +2043,14 @@ mod tests {
         assert!(Regex::from_str("(a)", "").unwrap().group_names().is_empty());
         assert!(Regex::from_str("(?=a)*", "").is_ok());
         assert!(matches!(Regex::from_str("(?=a)*", "u"), Err(CompileError::Syntax { .. })));
-        for f in ["v", "d", "gv"] {
+        for f in ["v", "dv", "gv"] {
             assert!(matches!(Regex::from_str("a", f), Err(CompileError::UnsupportedFlag(_))), "{f}");
         }
         for f in ["gg", "x", "G", "é", "uv"] {
             assert!(matches!(Regex::from_str("a", f), Err(CompileError::InvalidFlags(_))), "{f}");
         }
-        assert_eq!(Flags::parse("gimsy").unwrap(), Flags { global: true, ignore_case: true, multiline: true, dot_all: true, sticky: true, unicode: false });
+        assert_eq!(Flags::parse("gimsy").unwrap(), Flags { global: true, ignore_case: true, multiline: true, dot_all: true, sticky: true, unicode: false, has_indices: false });
+        assert!(Flags::parse("dg").unwrap().has_indices);
         assert!(Flags::parse("u").unwrap().unicode);
     }
 

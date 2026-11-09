@@ -339,7 +339,7 @@ fn escape_source(p: &[u16]) -> Vec<u16> {
 
 fn canon_flags(f: rx::Flags) -> String {
     let mut s = String::new();
-    for (on, c) in [(f.global, 'g'), (f.ignore_case, 'i'), (f.multiline, 'm'), (f.dot_all, 's'), (f.unicode, 'u'), (f.sticky, 'y')] {
+    for (on, c) in [(f.has_indices, 'd'), (f.global, 'g'), (f.ignore_case, 'i'), (f.multiline, 'm'), (f.dot_all, 's'), (f.unicode, 'u'), (f.sticky, 'y')] {
         if on {
             s.push(c);
         }
@@ -350,8 +350,7 @@ fn canon_flags(f: rx::Flags) -> String {
 fn flag_gate(c: char) -> &'static str {
     match c {
         'u' => "regexp flag u",
-        'v' => "regexp flag v",
-        _ => "regexp flag d",
+        _ => "regexp flag v",
     }
 }
 
@@ -1306,6 +1305,9 @@ impl<'p> Interp<'p> {
             if o == self.ext.regexp_proto {
                 return if i == 0 { self.str_value("(?:)") } else if i == 1 { self.str_value("") } else { Ok(Value::Undefined) };
             }
+            if i == 1 {
+                return self.flags_of_object(this);
+            }
             let t = RE_GETTERS[i as usize];
             return Err(self.type_err(&format!("RegExp.prototype.{t} getter called on non-RegExp object")));
         };
@@ -1319,8 +1321,22 @@ impl<'p> Interp<'p> {
             5 => Value::Bool(f.dot_all),
             6 => Value::Bool(f.sticky),
             7 => Value::Bool(f.unicode),
-            _ => Value::Bool(false),
+            _ => Value::Bool(f.has_indices),
         })
+    }
+
+    /// The `flags` getter of an object that is not a regexp: read the flag properties (in the order of V8) and join the letters as `dgimsuvy`.
+    #[cold]
+    #[inline(never)]
+    fn flags_of_object(&mut self, this: Value) -> Res<Value> {
+        let mut on = [false; 8];
+        for (n, name) in ["hasIndices", "global", "ignoreCase", "multiline", "dotAll", "unicode", "sticky", "unicodeSets"].into_iter().enumerate() {
+            let k = h!(self, self.heap.key_from_str(name));
+            let v = self.get_prop(this, k)?;
+            on[n] = self.truthy(v)?;
+        }
+        let s: String = [(0, 'd'), (1, 'g'), (2, 'i'), (3, 'm'), (4, 's'), (5, 'u'), (7, 'v'), (6, 'y')].into_iter().filter(|&(n, _)| on[n]).map(|(_, c)| c).collect();
+        self.str_value(&s)
     }
 
     /// `RegExp.prototype[@@split]` on a builtin regexp.
@@ -1400,7 +1416,7 @@ impl<'p> Interp<'p> {
                     let end = m.spans[0].map_or(0, |x| x.1);
                     self.set_last_index(r, end as f64)?;
                 }
-                Ok(Some((m, re.has_names())))
+                Ok(Some((m, re.has_names() || re.flags().has_indices)))
             }
         }
     }
@@ -1455,11 +1471,40 @@ impl<'p> Interp<'p> {
         Ok(Value::Object(o))
     }
 
+    /// `groups`, then `indices` for a regexp with named groups or flag `d`. `r` is the regexp that made `m`.
     #[cold]
     #[inline(never)]
-    fn match_groups(&mut self, r: ObjId, s: StrId, m: &rx::Match) -> Res<Value> {
+    fn match_extras(&mut self, a: ObjId, r: ObjId, s: StrId, m: &rx::Match) -> Res<()> {
         let re = self.ext.regexps[&r].re.clone();
-        self.groups_object(&re, s, |g| m.spans[g])
+        let groups = if re.has_names() { self.groups_object(&re, s, |g| m.spans[g])? } else { Value::Undefined };
+        self.def(a, self.ext.k_groups, groups, true, true, true)?;
+        if !re.flags().has_indices {
+            return Ok(());
+        }
+        let pair = |it: &mut Self, sp: Option<(usize, usize)>| match sp {
+            Some((x, y)) => it.new_array_from(&[Value::Number(x as f64), Value::Number(y as f64)]),
+            None => Ok(Value::Undefined),
+        };
+        let mut pairs = Vec::with_capacity(m.spans.len());
+        for sp in &m.spans {
+            pairs.push(pair(self, *sp)?);
+        }
+        let ia = self.new_array_from(&pairs)?;
+        let Value::Object(io) = ia else { return Ok(()) };
+        let ig = if re.has_names() {
+            let o = h!(self, self.heap.new_object(None));
+            for (name, g) in re.group_names() {
+                let k = h!(self, self.heap.key_from_str(name));
+                let v = pair(self, m.spans[*g as usize])?;
+                self.def(o, k, v, true, true, true)?;
+            }
+            Value::Object(o)
+        } else {
+            Value::Undefined
+        };
+        self.def(io, self.ext.k_groups, ig, true, true, true)?;
+        let ki = h!(self, self.heap.key_from_str("indices"));
+        self.def(a, ki, ia, true, true, true)
     }
 
     /// The array `exec` returns: captures, then `index`, `input`, `groups`. `r` is the regexp that made `m`.
@@ -1476,8 +1521,11 @@ impl<'p> Interp<'p> {
         let start = spans[0].map_or(0, |x| x.0);
         self.def(a, self.ext.k_index, Value::Number(start as f64), true, true, true)?;
         self.def(a, self.ext.k_input, Value::String(s), true, true, true)?;
-        let groups = if named { self.match_groups(r, s, m)? } else { Value::Undefined };
-        self.def(a, self.ext.k_groups, groups, true, true, true)?;
+        if named {
+            self.match_extras(a, r, s, m)?;
+        } else {
+            self.def(a, self.ext.k_groups, Value::Undefined, true, true, true)?;
+        }
         Ok(Value::Object(a))
     }
 }

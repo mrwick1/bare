@@ -26,12 +26,13 @@
 //   `while`/`do`/`for` heads and bodies, `for (x of arr)` (right side and body), blocks, `try`/`catch`/`finally`,
 //   `switch` (discriminant, case tests and bodies),
 //   labeled statements (at most three labels on one loop), and inside these expressions: unary (not `delete`),
-//   binary, logical, conditional, comma, parenthesized, template, array and object literals (the value of a
-//   non-computed key, spread), member and index reads, calls and `new` (callee, member base and arguments, with
-//   spread), simple assignment and compound or logical assignment to a name, a member, a private member or a
+//   binary, logical, conditional, comma, parenthesized, template, array and object literals (a key, a computed one too, the value, spread), member and index
+//   reads, calls and `new` (callee, member base and arguments, with spread), simple assignment and compound or logical assignment to a name, a member, a private member or a
 //   `super` property, `obj.#p` reads and calls, `#p in x`, `super.m(await x)` and `[a, b] = await x`.
+//   Binding patterns of `var`/`let`/`const` declarations with an `await` in a default or a computed key: object and array
+//   patterns, nested ones, rest. An array pattern keeps its iteration in a slot and closes it on a throw or a generator return.
 //   Async methods of classes, static ones included, keep `this`, the class scope and `%home` in their environments.
-// - Not supported (Unsupported at preflight): `await` in a parameter, a binding pattern, a computed object key, a
+// - Not supported (Unsupported at preflight): `await` in a parameter, a catch parameter, a for-in or for-of head pattern, a
 //   `delete`, `++`/`--`, a tagged template (tag or substitutions), the heritage or a computed key
 //   of a class, `super(...)` with an await in its arguments, or `super[await k]`. Top-level
 //   await and modules stay unsupported as before. Generators, async generators and `for await` run here too: see
@@ -169,6 +170,10 @@ enum Fr {
     PatDef { target: PatId, mode: Bind },
     /// Properties `i..` of object pattern `p` are left. Slot `base` is the source, the slots after it are the keys read.
     PatObj { p: PatId, i: u32, base: u32, mode: Bind },
+    /// The computed key of property `i` of object pattern `p` is being evaluated. Slots as in `PatObj`.
+    PatKey { p: PatId, i: u32, base: u32, mode: Bind },
+    /// Elements `i..` of array pattern `p` are left. Slot `base` is the `Slot::It`.
+    PatArr { p: PatId, i: u32, base: u32, mode: Bind },
     Lab { label: u32 },
     WhileT { s: StmtId, lb: Lbl },
     WhileB { s: StmtId, lb: Lbl },
@@ -341,23 +346,6 @@ impl<'p> Interp<'p> {
         self.aw.marks.contains(&(self.cur as u32, p.index() as u32, 3))
     }
 
-    /// Whether the machine cannot bind pattern `p` across an `await`: array patterns (an iterator to close) and computed keys.
-    fn pat_gap(&self, p: PatId) -> bool {
-        if !self.aw_pat(p) {
-            return false;
-        }
-        match self.prog.pat(p).kind {
-            PatKind::Array(_) => true,
-            PatKind::Object(l) => self.prog.list(l).any(|q| {
-                let pp = *self.prog.pat_prop(q);
-                matches!(pp.key, Key::Computed(e) if self.aw_expr(e)) || self.pat_gap(pp.value)
-            }),
-            PatKind::Assign { target, .. } => self.pat_gap(target),
-            PatKind::Rest(t) => self.pat_gap(t),
-            _ => false,
-        }
-    }
-
     fn aw_func(&self, f: FuncId) -> bool {
         self.aw.marks.contains(&(self.cur as u32, f.index() as u32, 2))
     }
@@ -505,14 +493,7 @@ impl<'p> Interp<'p> {
                         here |= self.scan_expr(k)?;
                     }
                     if matches!(pr.kind, PropKind::Init | PropKind::Shorthand | PropKind::Spread) {
-                        let v = self.scan_expr(pr.value)?;
-                        if v && matches!(pr.key, Key::Computed(_)) {
-                            return no("await in the value of a computed object key");
-                        }
-                        here |= v;
-                    }
-                    if here && matches!(pr.key, Key::Computed(_)) {
-                        return no("await in a computed object key");
+                        here |= self.scan_expr(pr.value)?;
                     }
                     any |= here;
                 }
@@ -619,12 +600,7 @@ impl<'p> Interp<'p> {
                 let mut any = false;
                 for d in prog.list(decls) {
                     let d = *prog.decl(d);
-                    if self.scan_pat(d.target)? {
-                        if self.pat_gap(d.target) {
-                            return no("await in a binding pattern");
-                        }
-                        any = true;
-                    }
+                    any |= self.scan_pat(d.target)?;
                     if let Some(i) = d.init {
                         any |= self.scan_expr(i)?;
                     }
@@ -1245,13 +1221,51 @@ impl<'p> Interp<'p> {
         for j in from as usize..l.len() {
             let pid = self.list_at(l, j);
             let p = *self.prog.prop(pid);
-            if matches!(p.kind, PropKind::Init | PropKind::Shorthand | PropKind::Spread) && self.aw_expr(p.value) {
-                return self.ask(run, e, j as u32, base, p.value);
+            if let Key::Computed(k) = p.key {
+                // The key is evaluated first. A key that waits resumes at operand `2 * j`; a value that waits keeps the key in the slot after the object.
+                if self.aw_expr(k) {
+                    return self.ask(run, e, 2 * j as u32, base, k);
+                }
+                if matches!(p.kind, PropKind::Init | PropKind::Shorthand) && self.aw_expr(p.value) {
+                    let v = self.eval_expr(k)?;
+                    let key = self.coerce_key(v)?;
+                    self.spush(run, Slot::K(key))?;
+                    return self.ask(run, e, 2 * j as u32 + 1, base, p.value);
+                }
+            } else if matches!(p.kind, PropKind::Init | PropKind::Shorthand | PropKind::Spread) && self.aw_expr(p.value) {
+                return self.ask(run, e, 2 * j as u32 + 1, base, p.value);
             }
             self.object_prop(o, pid, None)?;
         }
         self.strunc(run, b);
         val(Value::Object(o))
+    }
+
+    /// `object_prop` for a computed key that was already evaluated (`key`). `pre` is the value when it was awaited.
+    #[cold]
+    #[inline(never)]
+    fn object_prop_k(&mut self, o: ObjId, pid: Id<Prop>, pre: Option<Value>, key: PropertyKey) -> Res<()> {
+        let p = *self.prog.prop(pid);
+        if matches!(p.kind, PropKind::Get | PropKind::Set) {
+            let ExprKind::Function(fid) = self.prog.expr(p.value).kind else { return Err(unsupported("accessor", p.span)) };
+            let Value::Object(f) = self.make_closure(fid, None, false)? else { return Err(unsupported("accessor", p.span)) };
+            let d = if p.kind == PropKind::Get {
+                PropertyDescriptor { get: Some(Some(f)), enumerable: Some(true), configurable: Some(true), ..Default::default() }
+            } else {
+                PropertyDescriptor { set: Some(Some(f)), enumerable: Some(true), configurable: Some(true), ..Default::default() }
+            };
+            hxw!(self, self.heap.define_own_property(o, key, &d));
+            return Ok(());
+        }
+        let name = match key {
+            PropertyKey::Symbol(s) => self.symbol_fn_name(s)?,
+            k => self.key_str(k)?,
+        };
+        let v = match pre {
+            Some(v) => v,
+            None => self.eval_named(p.value, Some(name))?,
+        };
+        self.def(o, key, v, true, true, true)
     }
 
     fn args_next(&mut self, run: &mut Run, e: ExprId, base: u32, np: u32, k: u32) -> Res<Step> {
@@ -1438,9 +1452,24 @@ impl<'p> Interp<'p> {
             }
             ExprKind::Object(l) => {
                 let Value::Object(o) = sval(run, b) else { return Err(unsupported("object", ex.span)) };
-                let pid = self.list_at(l, i as usize);
-                self.object_prop(o, pid, Some(v))?;
-                self.obj_next(run, e, base, i + 1)
+                let pid = self.list_at(l, i as usize / 2);
+                if i % 2 == 0 {
+                    // The awaited key. A value that waits too keeps the key in a slot.
+                    let key = self.coerce_key(v)?;
+                    let p = *prog.prop(pid);
+                    if matches!(p.kind, PropKind::Init | PropKind::Shorthand) && self.aw_expr(p.value) {
+                        self.spush(run, Slot::K(key))?;
+                        return self.ask(run, e, i + 1, base, p.value);
+                    }
+                    self.object_prop_k(o, pid, None, key)?;
+                } else if matches!(prog.prop(pid).key, Key::Computed(_)) {
+                    let key = skey(run, b + 1);
+                    self.strunc(run, b + 1);
+                    self.object_prop_k(o, pid, Some(v), key)?;
+                } else {
+                    self.object_prop(o, pid, Some(v))?;
+                }
+                self.obj_next(run, e, base, i / 2 + 1)
             }
             ExprKind::Member { name, optional, .. } => {
                 if optional && is_nullish(v) {
@@ -1800,7 +1829,7 @@ impl<'p> Interp<'p> {
     }
 
     /// Bind `v` to pattern `p` in the machine. A pattern with no `await` binds at once; the machine keeps the rest as frames,
-    /// so a default value may wait. Only object patterns, defaults and nested ones reach here (`pat_gap` refuses the others).
+    /// so a default value may wait. 
     fn pat_step(&mut self, run: &mut Run, p: PatId, v: Value, mode: Bind) -> Res<Step> {
         if !self.aw_pat(p) {
             self.bind_pattern(p, v, mode)?;
@@ -1825,14 +1854,21 @@ impl<'p> Interp<'p> {
                 }
                 let base = run.slots.len();
                 self.spush(run, Slot::V(v))?;
-                self.pat_obj(run, p, 0, base, mode)
+                self.pat_obj(run, p, 0, base, mode, None)
+            }
+            PatKind::Array(_) => {
+                let it = self.iter_start_val(v)?;
+                let base = run.slots.len();
+                self.spush(run, Slot::It(it))?;
+                self.pat_arr(run, p, 0, base, mode)
             }
             _ => Err(unsupported("await in a binding pattern", prog.pat(p).span)),
         }
     }
 
     /// The properties `from..` of object pattern `p`. Slot `base` holds the source value and the slots after it the keys read.
-    fn pat_obj(&mut self, run: &mut Run, p: PatId, from: usize, base: usize, mode: Bind) -> Res<Step> {
+    /// `pre` is the awaited key of property `from`.
+    fn pat_obj(&mut self, run: &mut Run, p: PatId, from: usize, base: usize, mode: Bind, mut pre: Option<PropertyKey>) -> Res<Step> {
         let prog = self.prog.clone();
         let PatKind::Object(l) = prog.pat(p).kind else { return Err(unsupported("pattern", Span::default())) };
         let v = sval(run, base);
@@ -1846,6 +1882,11 @@ impl<'p> Interp<'p> {
                 continue;
             }
             let key = match pp.key {
+                _ if pre.is_some() => pre.take().unwrap_or(PropertyKey::Index(0)),
+                Key::Computed(e) if self.aw_expr(e) => {
+                    self.fpush(run, Fr::PatKey { p, i: k as u32, base: base as u32, mode })?;
+                    return nx(Next::Eval(e));
+                }
                 Key::Computed(e) => {
                     let kv = self.eval_expr(e)?;
                     self.coerce_key(kv)?
@@ -1865,6 +1906,56 @@ impl<'p> Interp<'p> {
         }
         self.strunc(run, base);
         val(Value::Undefined)
+    }
+
+    /// The elements `from..` of array pattern `p`. Slot `base` holds the iteration. A failure closes it as in `bind_array_pattern`.
+    fn pat_arr(&mut self, run: &mut Run, p: PatId, from: usize, base: usize, mode: Bind) -> Res<Step> {
+        let prog = self.prog.clone();
+        let PatKind::Array(l) = prog.pat(p).kind else { return Err(unsupported("pattern", Span::default())) };
+        let Slot::It(mut it) = run.slots[base] else { return Err(unsupported("pattern", Span::default())) };
+        for k in from..l.len() {
+            match self.arr_elem(self.list_at(l, k), &mut it, mode) {
+                Err(e) => {
+                    let e = self.iter_close_throw(&mut it, e);
+                    self.strunc(run, base);
+                    return Err(e);
+                }
+                Ok(None) => {}
+                Ok(Some((t, x))) => {
+                    run.slots[base] = Slot::It(it);
+                    self.fpush(run, Fr::PatArr { p, i: k as u32 + 1, base: base as u32, mode })?;
+                    return self.pat_step(run, t, x, mode);
+                }
+            }
+        }
+        let r = self.iter_close(&mut it);
+        self.strunc(run, base);
+        r?;
+        val(Value::Undefined)
+    }
+
+    /// One element of an array pattern. An element with an `await` in it is not bound: its target and value come back.
+    fn arr_elem(&mut self, q: PatId, it: &mut It, mode: Bind) -> Res<Option<(PatId, Value)>> {
+        let (t, x) = match self.prog.pat(q).kind {
+            PatKind::Hole => {
+                self.iter_next(it)?;
+                return Ok(None);
+            }
+            PatKind::Rest(t) => {
+                let mut rest = Vec::new();
+                while let Some(x) = self.iter_next(it)? {
+                    self.iter_buffer_room(rest.len())?;
+                    rest.push(x);
+                }
+                (t, self.new_array_from(&rest)?)
+            }
+            _ => (q, self.iter_next(it)?.unwrap_or(Value::Undefined)),
+        };
+        if self.aw_pat(t) {
+            return Ok(Some((t, x)));
+        }
+        self.bind_pattern(t, x, mode)?;
+        Ok(None)
     }
 
     fn start_loop(&mut self, run: &mut Run, s: StmtId, lb: Lbl) -> Res<Step> {
@@ -2114,7 +2205,12 @@ impl<'p> Interp<'p> {
             }
             Fr::VarP { s, d } => self.var_from(run, s, d as usize + 1),
             Fr::PatDef { target, mode } => self.pat_step(run, target, v, mode),
-            Fr::PatObj { p, i, base, mode } => self.pat_obj(run, p, i as usize, base as usize, mode),
+            Fr::PatObj { p, i, base, mode } => self.pat_obj(run, p, i as usize, base as usize, mode, None),
+            Fr::PatKey { p, i, base, mode } => {
+                let key = self.coerce_key(v)?;
+                self.pat_obj(run, p, i as usize, base as usize, mode, Some(key))
+            }
+            Fr::PatArr { p, i, base, mode } => self.pat_arr(run, p, i as usize, base as usize, mode),
             Fr::Lab { .. } => val(Value::Undefined),
             Fr::WhileT { s, lb } => {
                 let StmtKind::While { body, .. } = self.prog.stmt(s).kind else { return Err(unsupported("loop", Span::default())) };
@@ -2236,7 +2332,21 @@ impl<'p> Interp<'p> {
                         _ => Err(unsupported("stray break or continue", Span::default())),
                     };
                 }
-                Fr::Op { base, .. } | Fr::PatObj { base, .. } => self.strunc(run, base as usize),
+                Fr::Op { base, .. } | Fr::PatObj { base, .. } | Fr::PatKey { base, .. } => self.strunc(run, base as usize),
+                Fr::PatArr { base, .. } => {
+                    // A throw, or a return from a generator, leaves the pattern: IteratorClose, as in `OfB`.
+                    let Slot::It(mut it) = run.slots[base as usize] else { return Err(unsupported("pattern", Span::default())) };
+                    self.strunc(run, base as usize);
+                    match abr {
+                        Abr::Throw(v) => {
+                            let e = self.iter_close_throw(&mut it, Error::Throw(v));
+                            if !matches!(e, Error::Throw(_)) {
+                                return Err(e);
+                            }
+                        }
+                        _ => self.iter_close(&mut it)?,
+                    }
+                }
                 Fr::Scope { saved, env } => {
                     self.env = saved;
                     self.release(env);
