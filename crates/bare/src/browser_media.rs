@@ -503,7 +503,7 @@ fn set_poster(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
 // ------------------------------------------------------------------------------------------ the URL
 
 /// The URL of an attribute value: parsed against the base; the text as it is when it does not parse; a scheme in lower case for an opaque one.
-fn resolved(d: &Dom, raw: &str) -> String {
+pub(crate) fn resolved(d: &Dom, raw: &str) -> String {
     match parse(raw, crate::browser_elements::base(d).as_ref()) {
         Ok(r) => r.href(),
         Err(UErr::Invalid) => raw.to_string(),
@@ -900,6 +900,9 @@ impl Dom {
 
     /// Run a queued step. A step of an older generation does nothing.
     pub(crate) fn media_task(&self, it: &mut Interp<'_>, n: NodeId, epoch: u32, step: u8) -> R<()> {
+        if step >= crate::browser_img::LOADED {
+            return self.img_task(it, n, step);
+        }
         if self.media.st.borrow().get(&n).map(|m| m.epoch) != Some(epoch) {
             return Ok(());
         }

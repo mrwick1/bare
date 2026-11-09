@@ -523,6 +523,10 @@ pub struct Dom {
     pub(crate) els: crate::browser_elements::Els,
     /// `HTMLMediaElement` and its kin (`browser_media.rs`).
     pub(crate) media: crate::browser_media::Media,
+    /// `HTMLImageElement` and `Image` (`browser_img.rs`).
+    pub(crate) img: crate::browser_img::Img,
+    /// `document.implementation` (`browser_impl.rs`).
+    pub(crate) imp: crate::browser_impl::Impl,
     /// `HTMLBodyElement`, `HTMLFrameSetElement` and `ErrorEvent` (`browser_handlers.rs`).
     pub(crate) hh: crate::browser_handlers::Hh,
     /// Constraint validation, `labels` and `form.reset()` (`browser_controls.rs`).
@@ -568,6 +572,8 @@ impl Host for Dom {
         crate::browser_web::roots(self, out);
         crate::browser_elements::roots(self, out);
         crate::browser_media::roots(self, out);
+        crate::browser_img::roots(self, out);
+        crate::browser_impl::roots(self, out);
         crate::browser_handlers::roots(self, out);
         crate::browser_controls::roots(self, out);
         self.resize_roots(out);
@@ -819,6 +825,7 @@ impl Dom {
                             "link" => p.link,
                             "a" | "area" | "template" | "img" => crate::browser_elements::proto(self, it, doc.atom_str(name))?,
                             t @ ("audio" | "video") => crate::browser_media::proto(self, it, n, t)?,
+                            "img" => crate::browser_img::proto(self, it)?,
                             t @ ("input" | "form" | "button" | "label") => crate::browser_controls::proto_for(self, it, t)?,
                             "script" => self.scripts.proto.get().copied().unwrap_or(p.html),
                             t @ ("body" | "frameset") => crate::browser_handlers::body_proto(self, it, usize::from(t == "frameset"))?[0],
@@ -1134,6 +1141,7 @@ impl Dom {
         nd::install_late(self, it)?;
         crate::browser_controls::install(self, it)?;
         crate::browser_media::install(self, it)?;
+        crate::browser_img::install(self, it)?;
         crate::browser_custom::install(self, it)?;
         crate::browser_geom::install(self, it)
     }
@@ -1248,6 +1256,7 @@ pub(crate) static DEFS: &[Def] = &[
     Def { on: &[CharData], name: "replaceData", len: 3, kind: M(crate::browser_chardata::replace_data) },
     Def { on: &[Text], name: "splitText", len: 1, kind: M(crate::browser_chardata::split_text) },
     Def { on: &[Node], name: "normalize", len: 0, kind: M(crate::browser_chardata::normalize) },
+    Def { on: &[Document], name: "implementation", len: 0, kind: G(crate::browser_impl::implementation) },
     Def { on: &[Document], name: "createElement", len: 1, kind: M(nd::create_element) },
     Def { on: &[Document], name: "createElementNS", len: 2, kind: M(ns::create_element_ns) },
     Def { on: &[Document], name: "getElementsByName", len: 1, kind: M(crate::browser_nodelist::get_elements_by_name) },
@@ -1432,6 +1441,8 @@ impl Browser {
             web: Default::default(),
             els: Default::default(),
             media: Default::default(),
+            img: Default::default(),
+            imp: Default::default(),
             hh: Default::default(),
             ctl: Default::default(),
             ce: Default::default(),

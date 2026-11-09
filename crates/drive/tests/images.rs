@@ -144,3 +144,10 @@ fn the_content_of_noscript_is_not_shown() {
     assert!(near(px[5 * w + 5], (0, 170, 0)), "{:06x}", px[5 * w + 5]);
     assert!((10..120).all(|y| (0..300).all(|x| px[y * w + x] == 0xffffff)), "text of the noscript is drawn");
 }
+
+#[test]
+fn a_script_loads_a_picture_with_the_image_constructor() {
+    // `new Image(5, 6)`, `src`, `onload`, `onerror` and `decode()`; the picture is not in the tree. The log is sorted: the order is the network's.
+    let (_, _, json) = shoot_page("ctor.html", "#r", "expect css=\"#r\" text=\"bad:error:true,decode:ok,ok:20x10:true:5\"");
+    assert!(json.contains("\"ok\":true"), "{json}");
+}

@@ -1,0 +1,17 @@
+<!doctype html>
+<title>Image constructor</title>
+<body style="margin:0;background:#fff">
+<p id=r>wait</p>
+<script>
+var log = [];
+function done(s) { log.push(s); if (log.length == 3) document.getElementById('r').textContent = log.sort().join(','); }
+var ok = new Image(5, 6);
+ok.onload = function () { done('ok:' + ok.naturalWidth + 'x' + ok.naturalHeight + ':' + ok.complete + ':' + ok.width); };
+ok.decode().catch(function () {});
+ok.src = 'red.png';
+ok.decode().then(function () { done('decode:ok'); });
+var bad = new Image();
+bad.onerror = function () { done('bad:error:' + bad.complete); };
+bad.src = 'missing.png';
+</script>
+</body>

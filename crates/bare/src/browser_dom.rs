@@ -787,7 +787,7 @@ pub(crate) fn owner_document(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Val
     if matches!(d.data(n), NodeData::Document) {
         return Ok(Value::Null);
     }
-    let root = if d.in_inert(n) { crate::browser_custom::template_document(d) } else { d.doc.borrow().root() };
+    let root = if d.in_inert(n) { crate::browser_custom::template_document(d) } else { d.detached_document(n).unwrap_or_else(|| d.doc.borrow().root()) };
     d.wrap(it, root)
 }
 
@@ -1467,6 +1467,7 @@ pub(crate) fn set_attribute(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Valu
     if name == "src" {
         d.script_src_changed(it, n)?;
         crate::browser_media::src_changed(d, it, n)?;
+        crate::browser_img::src_changed(d, n);
     }
     Ok(Value::Undefined)
 }

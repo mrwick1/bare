@@ -187,6 +187,23 @@ fn load(client: &mut Client, url: &str, used: &AtomicUsize) -> Option<Bitmap> {
 /// A driver that takes a capture waits this long for the pictures that are still on their way.
 const CAPTURE_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Queue the picture of the `<img>` `n` (`by_url` joins elements with one URL). Gives false if it cannot be queued.
+fn want(images: &mut Images, b: &crate::browser::Browser, doc: &Document, n: NodeId, by_url: &mut HashMap<String, usize>) -> bool {
+    let Some(src) = source_of(doc, n) else { return false };
+    let url = if src.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("data:")) { Ok(src) } else { b.resolve_url(&src) };
+    let Ok(url) = url else { return false };
+    match by_url.get(&url) {
+        Some(&k) => images.queue[k].1.push(n),
+        None if by_url.len() < MAX_PICTURES => {
+            by_url.insert(url.clone(), images.queue.len());
+            images.queue.push_back((url, vec![n]));
+        }
+        None => return false,
+    }
+    b.img_started(n);
+    true
+}
+
 impl Page {
     /// How far the document is (`Browser::ready_level`); 0 while it loads. Pictures start at `interactive` and are looked for again at `load`.
     fn images_level(&mut self) -> u8 {
@@ -255,22 +272,25 @@ impl Page {
             let mut stack = vec![doc.root()];
             while let Some(n) = stack.pop() {
                 if matches!(doc.data(n), NodeData::Element { .. }) && doc.element_name(n) == "img" && self.images.known.insert(n) {
-                    let Some(src) = source_of(&doc, n) else { continue };
-                    let url = if src.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("data:")) { Ok(src) } else { b.resolve_url(&src) };
-                    if let Ok(url) = url {
-                        match by_url.get(&url) {
-                            Some(&k) => self.images.queue[k].1.push(n),
-                            None if by_url.len() < MAX_PICTURES => {
-                                by_url.insert(url.clone(), self.images.queue.len());
-                                self.images.queue.push_back((url, vec![n]));
-                            }
-                            None => {}
-                        }
-                    }
+                    want(&mut self.images, b, &doc, n, &mut by_url);
                 }
                 let at = stack.len();
                 stack.extend(doc.children(n));
                 stack[at..].reverse();
+            }
+        }
+        // The pictures that scripts asked for (`new Image()` and `src`): the same loader, and the elements hear about the end.
+        if self.source.browser().is_some_and(|b| b.img_requested()) {
+            let Some(b) = self.source.browser() else { return (false, false) };
+            let doc = b.document();
+            let doc = doc.borrow();
+            let mut by_url: HashMap<String, usize> = HashMap::new();
+            for n in b.img_requests() {
+                self.images.known.insert(n);
+                // A request that cannot start has ended already.
+                if !want(&mut self.images, b, &doc, n, &mut by_url) {
+                    b.img_settled(n, false);
+                }
             }
         }
         while self.images.jobs.len() < INFLIGHT {
@@ -291,19 +311,27 @@ impl Page {
             }
             let (nodes, task) = self.images.jobs.swap_remove(k);
             finished = true;
-            match task.wait().flatten() {
-                Some(bitmap) => {
-                    if let Some(b) = self.source.browser() {
-                        let doc = b.document();
-                        let mut doc = doc.borrow_mut();
-                        for n in nodes {
-                            doc.set_image(n, Some(bitmap.clone()));
-                        }
+            let bitmap = task.wait().flatten();
+            if let Some(b) = self.source.browser() {
+                let doc = b.document();
+                for &n in &nodes {
+                    let mut doc = doc.borrow_mut();
+                    match &bitmap {
+                        Some(bitmap) => doc.set_image(n, Some(bitmap.clone())),
+                        // The new `src` failed: the old picture goes.
+                        None if doc.image(n).is_some() => doc.set_image(n, None),
+                        None => {}
                     }
-                    self.images.done += 1;
-                    arrived = true;
                 }
-                None => self.images.failed += 1,
+                for n in nodes {
+                    b.img_settled(n, bitmap.is_some());
+                }
+            }
+            if bitmap.is_some() {
+                self.images.done += 1;
+                arrived = true;
+            } else {
+                self.images.failed += 1;
             }
         }
         (arrived, finished)
