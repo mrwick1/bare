@@ -1407,6 +1407,14 @@ pub(crate) fn set_class_name(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Val
     reflect_set(d, it, this, a, "class")
 }
 
+pub(crate) fn lang(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    reflect_get(d, it, this, "lang")
+}
+
+pub(crate) fn set_lang(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    reflect_set(d, it, this, a, "lang")
+}
+
 pub(crate) fn get_attribute(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     let n = d.el(it, this)?;
     let name = d.string_arg(it, arg(a, 0))?;

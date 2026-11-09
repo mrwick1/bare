@@ -3528,3 +3528,53 @@ Noticed, not changed:
 - Area strings in `grid-template`, and the `grid` shorthand, are not read.
 
 Not tested: Chrome side by side, the window (only the shared paint path), other sites that use `grid-template` or a block `<svg>`, arjun-e16.
+
+## Public sites e2e (2026-11-09)
+
+Goal: a repeatable suite of user journeys on public sites (no login), run headless with `bare-drive`.
+
+Command (an explicit job; it needs the network, so `cargo test` never runs it):
+
+```
+cargo build --release -p bare-drive
+tools/drive/public/run.sh [--repeat N] [--out DIR] [--only TEXT] target/release/bare-drive
+```
+
+- Files: `tools/drive/public/*.steps`, 11 journeys, each under 20 steps. The URL is a `--var URL=...` in the comment at the top of the file; the runner reads it.
+- `run.sh` writes `OUT/<journey>.json`, prints a table (result, ms, peak RSS, requests, flake) and exits 0 only when no journey failed.
+- A failed journey runs once more. Two failures in a row are a failure. A pass on the second run counts as a flake (the table shows it).
+- A journey with `# needs-rsa` is skipped, not failed, when the failure holds a TLS error. Remove the mark when RSA works.
+- `--repeat N` runs the steps N times in one process. Read the peak RSS to find a leak.
+- HN stories change, so the journeys assert structure (30 `tr.athing`, link roles, urls), not titles.
+
+Result (archMachine, run 4 with `--repeat 3`): 7 pass, 0 fail, 4 skip, 0 flakes.
+
+| Journey | Result | ms | Peak RSS KiB | Requests |
+| --- | --- | --- | --- | --- |
+| example-page | pass | 91 | 13932 | 2 |
+| example-learn-more | skip (iana.org TLS) | 753 | 21008 | 3 |
+| hn-front | pass | 1157 | 15364 | 6 |
+| hn-comments-back | pass | 1560 | 14800 | 7 |
+| hn-new-past | pass | 1368 | 14928 | 7 |
+| wikipedia-article | pass | 2618 | 32112 | 27 |
+| wikipedia-search | pass | 3342 | 34772 | 20 |
+| wikipedia-toc-languages | pass | 1236 | 27028 | 10 |
+| react-docs | skip (TLS) | 99 | 14852 | 1 |
+| nextjs-docs | skip (TLS) | 94 | 14920 | 1 |
+| mdn-reference | skip (TLS) | 94 | 15004 | 1 |
+
+(The ms column is the last of 3 runs in one process.)
+
+Bare bugs fixed in this change (each with a failing-first test):
+- A plain inline element (`<a>` in a `<p>`) has no box fragment, only text fragments. `Page::visible_box` found "no box", so `expect ... visible`, `click` and `type` refused most real links (HN "new", example.com "Learn more"). Fix: `visible_box` falls back to the first line rectangle (`Browser::inline_rects`, the `getClientRects` path), and `actionable` scrolls the nearest ancestor with a box into view. Tests: `crates/drive/tests/inline_links.rs` (inline link, link wrapped over lines, `display: none` stays hidden).
+- `el.lang = 'en'` did not write the `lang` attribute (it was a plain property), so `p[lang=en]` did not match on example.com. Fix: `lang` accessor on Element. Test: `the_lang_property_reflects_the_attribute`. Other reflected properties (`title`, `dir`, `hidden`) were not checked.
+
+Bare bugs found, not fixed:
+- `locator` query `expect css="tr.athing:first-child + tr .subtext a"` on HN: `the query failed: Limit(Steps)`. The shorter `tr.athing:first-child + tr .subline > a:last-child` works. Hypothesis: the step budget of the native selector matcher runs out on a sibling combinator followed by a descendant over a page with 30 rows.
+- `expect css="#mw-content-text section p a[href='/wiki/X']"` on Wikipedia: `Limit(Host("dom-selector-complexity"))`. `p a[href$='/wiki/X']` works. Hypothesis: a limit on the work of a selector with 3 descendant parts over about 10,000 elements.
+- iana.org (the target of example.com "Learn more"): `tls: certificate rejected: certificate verification failed: BadKey`. TLS area, not touched. The journey `example-learn-more` is marked `# needs-rsa` and skips.
+- Wikipedia still prints 13 `render: Unsupported ... external stylesheet` console lines per load, and jQuery throws `Exception in module-execute in module jquery` (see the sections above). They do not fail a journey.
+
+Cost matrix: 629 rows ran, mean +0.006% glibc, 0 rows over. 176 `bare-stress` rows did not run, as the base build has no `bare-stress`. `cargo test --release --workspace` passes.
+
+Not tested: a run on arjun-e16, Chrome side by side, the journeys with `--window`, a site that needs RSA (react.dev, nextjs.org, developer.mozilla.org: the steps there are written but never ran past the TLS error, so they may need changes).

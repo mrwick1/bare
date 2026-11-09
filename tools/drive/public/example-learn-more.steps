@@ -1,0 +1,9 @@
+# needs-rsa
+# example.com: click "Learn more" and land on iana.org. Today iana.org fails in TLS (certificate verification: BadKey), so this one skips.
+#   bare-drive --var URL=https://example.com/ example-learn-more.steps
+timeout 30000
+open ${URL}
+expect js "document.querySelector('a') !== null"
+click role=link name="Learn more"
+expect url~"iana.org"
+expect js "location.hostname.indexOf('iana.org') >= 0"

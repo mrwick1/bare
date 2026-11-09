@@ -60,6 +60,17 @@ fn ok(b: &mut Browser, src: &str, want: impl AsRef<str>) {
     assert_eq!(js(b, src), want.as_ref(), "{src}");
 }
 
+/// `el.lang = 'en'` writes the `lang` attribute (example.com sets it by script, and a `p[lang=en]` selector must then match).
+#[test]
+fn the_lang_property_reflects_the_attribute() {
+    big(|| {
+        let mut b = browser();
+        ok(&mut b, "var el = document.getElementById('a'); [el.lang, el.getAttribute('lang')].join()", ",");
+        ok(&mut b, "el.lang = 'en'; [el.lang, el.getAttribute('lang'), document.querySelectorAll('#a[lang=en]').length].join()", "en,en,1");
+        ok(&mut b, "el.setAttribute('lang', 'fr'); el.lang", "fr");
+    });
+}
+
 /// The failure that was seen in bare: React clears the attributes of `<html>` with `while (map.length) el.removeAttributeNode(map[0])`.
 #[test]
 fn react_host_singleton_cleanup_loop_empties_the_element() {

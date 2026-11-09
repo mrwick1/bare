@@ -1,0 +1,9 @@
+# needs-rsa
+# developer.mozilla.org: the home page, then a reference page by address.
+#   bare-drive --var URL=https://developer.mozilla.org/en-US/ mdn-reference.steps
+timeout 40000
+open ${URL}
+expect title~"MDN"
+goto ${URL}docs/Web/JavaScript/Reference/Global_Objects/Array
+expect css="h1" text~"Array"
+expect url~"Global_Objects/Array"

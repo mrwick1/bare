@@ -1,0 +1,13 @@
+# Hacker News front page: structure only (the stories change). 30 stories, the nav links, the comments page of the first story.
+#   bare-drive --var URL=https://news.ycombinator.com/ hn-front.steps
+timeout 30000
+open ${URL}
+expect js "document.querySelectorAll('tr.athing').length === 30"
+expect title~"Hacker News"
+expect role=link name="new" visible
+expect css="span.pagetop a[href=front]" visible
+expect js "document.querySelectorAll('.titleline > a').length === 30"
+click css="tr.athing:first-child + tr .subline > a:last-child"
+expect url~"/item?id="
+expect js "document.querySelector('.fatitem .titleline a') !== null"
+expect css="textarea[name=text]" visible

@@ -1204,6 +1204,7 @@ pub(crate) static DEFS: &[Def] = &[
     Def { on: &[Element], name: "outerHTML", len: 0, kind: A(frag::outer_html, frag::set_outer_html) },
     Def { on: &[Element], name: "id", len: 0, kind: A(nd::id, nd::set_id) },
     Def { on: &[Element], name: "className", len: 0, kind: A(nd::class_name, nd::set_class_name) },
+    Def { on: &[Element], name: "lang", len: 0, kind: A(nd::lang, nd::set_lang) },
     Def { on: &[Element], name: "getAttribute", len: 1, kind: M(nd::get_attribute) },
     Def { on: &[Element], name: "setAttribute", len: 2, kind: M(nd::set_attribute) },
     Def { on: &[Element], name: "removeAttribute", len: 1, kind: M(nd::remove_attribute) },

@@ -1,0 +1,10 @@
+# example.com: the page, its title and text, and the "Learn more" link with its target. A script adds the link, so wait for it first.
+#   bare-drive --var URL=https://example.com/ example-page.steps
+timeout 30000
+open ${URL}
+expect js "document.querySelector('a') !== null"
+expect title="Example Domain"
+expect css="p[lang=en]" text~"This domain is"
+expect css="a" count 1
+expect role=link name="Learn more" visible
+expect js "document.querySelector('a').href.indexOf('iana.org') >= 0"

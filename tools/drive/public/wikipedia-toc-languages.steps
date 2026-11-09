@@ -1,0 +1,11 @@
+# Wikipedia: a table of contents entry sets the url hash; the article has a language list.
+#   bare-drive --var URL=https://en.wikipedia.org/wiki/Rust_(programming_language) wikipedia-toc-languages.steps
+timeout 40000
+open ${URL}
+expect css="h1#firstHeading" text~"Rust"
+expect js "document.querySelectorAll('#vector-toc a[href^=\"#\"]').length > 5"
+click css="#vector-toc a[href='#History']"
+expect url~"#History"
+expect js "location.hash === '#History'"
+expect js "document.querySelectorAll('#p-lang-btn, .interlanguage-link').length > 0"
+expect js "document.querySelectorAll('li.interlanguage-link a').length > 10"

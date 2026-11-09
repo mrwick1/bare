@@ -102,6 +102,12 @@ fn parse(spec: &str) -> Option<(Vec<KeyInput>, KeyInput)> {
 }
 
 impl Browser {
+    /// The line rectangles of an element that has no box fragment (a plain inline), in window pixels. Empty for `display: none`.
+    pub fn inline_rects(&mut self, node: NodeId) -> Vec<bare_layout::fragment::Rect> {
+        let dom = self.dom.clone();
+        self.it.host_scope(|it| crate::browser_rects::element_rects(&dom, it, node)).unwrap_or_default()
+    }
+
     /// Where a user clicks on `node`, and the element that is on top there. The page scrolls so that `node` shows (if needed, as Chrome's
     /// `DOM.scrollIntoViewIfNeeded`), and the point is the center of the part of the border box that is in the window. `(0, 0)` and no
     /// element when `node` has no box, or when the page cannot be laid out yet (a style sheet that was not supplied): the click still

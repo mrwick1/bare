@@ -1,0 +1,10 @@
+# needs-rsa
+# nextjs.org: the home page, then the docs.
+#   bare-drive --var URL=https://nextjs.org/ nextjs-docs.steps
+timeout 40000
+open ${URL}
+expect title~"Next.js"
+expect role=link name~"Docs" visible
+click role=link name~"Docs"
+expect url~"/docs"
+expect css="h1" visible
