@@ -4,7 +4,7 @@
 use std::io::{Read, Write};
 use std::net::TcpListener;
 
-const PAGE: &str = r#"<!doctype html><html><body><button id="go">go</button><input id="q"><p id="out">none</p><script>
+const PAGE: &str = r#"<!doctype html><html><head><title>first</title></head><body><button id="go">go</button><input id="q"><p id="out">none</p><script>
 document.getElementById('go').addEventListener('click', function () { document.getElementById('out').textContent = 'clicked' });
 document.getElementById('q').addEventListener('input', function (e) { document.title = 'typed ' + e.target.value });
 setTimeout(function () { document.body.setAttribute('data-timer', 'ran') }, 20);
@@ -46,7 +46,7 @@ fn drive(name: &str, steps: &str) -> (i32, String) {
 
 #[test]
 fn input_and_timers_work_after_a_runaway_script() {
-    let (code, out) = drive("one", "timeout 60000\nopen ORIGIN/\nexpect css=\"hr\" count 1\nexpect css=\"body[data-timer=ran]\" count 1\nclick css=\"#go\"\nexpect css=\"#out\" text=\"clicked\"\ntype css=\"#q\" \"ab\"\nexpect js \"document.title === 'typed ab'\"\n");
+    let (code, out) = drive("one", "timeout 60000\nopen ORIGIN/\nexpect css=\"hr\" count 1\nexpect css=\"body[data-timer=ran]\" count 1\nclick css=\"#go\"\nexpect css=\"#out\" text=\"clicked\"\ntype css=\"#q\" \"ab\"\nexpect title=\"typed ab\"\n");
     assert_eq!(code, 0, "{out}");
     assert!(out.contains("Steps"), "the console error is in the report: {out}");
 }

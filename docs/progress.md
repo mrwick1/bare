@@ -4025,3 +4025,53 @@ Base `f6cbc8d`, new `11117b5`. Full matrix (805 rows): two rows over the limit u
 Cause: real work, not layout. One case of that row is a non-ASCII character outside a name. The lexer now decides that it is not a letter before it fails: +41 instructions per error (`lexcase` test: 183 -> 224 for one `Lexer::new` and `next`). Valid identifiers and the other nine error cases cost the same as before (same instruction counts). Small layout noise (about 0.1%) comes from the changed input of the example (`é` -> `±`).
 
 Fix: `unicode_id` reads the two bytes of a Latin-1 character (lead byte `0xC2` or `0xC3`) without decoding it. The error costs +29 instructions now; the row is +0.75% (3 runs, equal). The check cannot be removed, because `é` is a valid name. Standing exception, like `dataset_load keys`: the row mixes 10% non-ASCII errors in tiny sources, which real pages do not have.
+
+## A script limit ends only its task (2026-11-09)
+
+A task that runs out of its JS budget no longer ends the page. python.org does not show the `Steps` stop any more, so problem 2 stays open (see below).
+
+### 1. A budget aborts the task
+
+Before: any `Limit` was fatal and sticky. The session ended, so later clicks, typing and timers did nothing.
+
+Now (`Browser::survive`, `crates/bare/src/browser.rs`): a `Limit` of `Steps`, `CallDepth`, `TraversalDepth`, `StatementFrames` or `DrainJobs` ends only the task that hit it. The task is a script, a timer, an event handler, a network task, a navigation task or one microtask job. The loader (`Run::abort`), the window path (`Page::after`, `Page::settle`) and the checkpoint loop use it. What it does:
+- Logs one console error: `Script aborted: the Steps budget ended the inline script #1. The page goes on (1 of 5 aborts used)`. The script URL is in the task name for an external script. A line number is not known.
+- Clears the sticky states that the budget left: the failed job of the microtask queue (`Interp::clear_failed_job`) and the `halted` of the scheduler, navigation, viewport and network pumps. The other jobs of the checkpoint still run.
+- Takes a new step window, so the next host call does not fail on the steps of the aborted task.
+
+Bounds:
+- Per task: the step budget is new at each top-level call (it was already so).
+- Per page: 5 aborts (`BrowserLimits::max_task_aborts`). The sixth gives `Fatal::Aborted("5 tasks were aborted by script budgets, the next one (Steps in ...) is too many")`. `Page::stopped` returns it, and `bare-drive` ends a failing step with `(the page stopped: ...)`. Five aborts of 100 M steps took 8.4 s here.
+- Still fatal and sticky: `Limit(Host(..))` (layout, console, fetch caps), heap and memory caps, `Unsupported`, a module script. The decision is in `docs/decisions.md`.
+
+State after an abort:
+- The tree is always valid, because each native DOM operation is complete when a budget is checked.
+- Two host calls charged steps in the middle of the change and left half of the children: `textContent =` and `replaceChildren`. A test showed 1503 of 3000 children left. They charge first now.
+- Not audited one by one: the other multi-step host calls. `innerHTML =` parses into a separate fragment first.
+- A timer that ran away is not armed again. A `setInterval` that aborts once stops.
+- Deep recursion is `Limit(CallDepth)` in this engine (not a catchable `RangeError`). It aborts the task now.
+
+Tests (each failed before the change):
+- `browser_survive_tests.rs`: a runaway script, timer, event handler and job each end only themselves; the same host features work after an abort; an endless chain of runaway timers stops with the reason, sticky.
+- `page_tests.rs`: a window click whose job or listener runs away; the next click and the timers work.
+- `crates/drive/tests/survive_limit.rs`: input, a timer and `expect title=` work after a runaway script; the chain case fails the step with the reason (about 10 s).
+- `browser_elements_tests.rs`: `a_step_limit_never_leaves_a_clear_of_the_children_half_done`.
+- Four tests that used `for (;;) {}` to show a sticky fatal now use `console.log.apply(null, new Array(100))` (`Limit(Host("console-args"))`): `a_limit_or_a_failed_checkpoint_stops_all_js_and_io`, `page_entry_checks_failed_empty_checkpoint_before_scripts`, `a_fatal_stop_is_sticky_and_a_queued_navigation_never_loads`, `a_fatal_error_in_the_same_task_wins_over_a_navigation_and_nothing_loads_after_it`. The pump-level tests (`a_limit_in_a_task_stops_the_pump...`) are unchanged: the pumps stay strict, the embedder calls `survive`.
+
+### 2. python.org: no `Steps` stop on this build
+
+I could not reproduce the masonry `Limit(Steps)` of the earlier note, on `origin/main` f6cbc8d or on this branch:
+- Live `https://www.python.org/` 6 times, and a local copy served from loopback (page, jQuery 1.8.2, jQuery UI, masonry, `main-min.js`, the three python.org style sheets, 349 KB of CSS) at 7 viewport sizes. Masonry finishes: `#container` is 1176 px wide, its items get `position: absolute` and `left`/`top`, and the console has no abort.
+- What stops the live page on main is `Unsupported("fetch to another origin (CORS is not implemented)")` from `$.getJSON('https://console.python.org/...')` in the ready handler, and after it `$.ajax(statuspage.io)`, and then `Unsupported("getComputedStyle of a pseudo-element")` from `getComputedStyle(document.body, ':after')` in the load handler. All three are `Unsupported`, so they stay fatal here.
+- Test: I made `Unsupported` per-task in a throwaway build. Both python.org journeys then passed, with 2 aborts each. Making `Unsupported` per-task is a design choice (a CORS gate and a pseudo-element read are then logged, not fatal). I did not commit it.
+- Hypothesis for the old stop: the earlier local copies differed from the live page (`getJSON` removed, or the style sheets applied at another time). Not verified. I made no fixture, because the hang does not happen.
+- The two journeys stay `known`, with the new cause in the file. Lobsters stays `known` (module script).
+
+### 3. Small items
+
+- `document.images`, `links`, `anchors`, `embeds` exist. `forms` and `scripts` already did. They are snapshot arrays, as the other lists of this engine (not live `HTMLCollection`s). `links` is `a` and `area` with `href`; `anchors` is `a` with `name`. Test: `document_images_links_anchors_and_embeds_list_their_elements_in_tree_order`.
+- `document.title` was not an accessor: a script assignment made a plain property, so `expect title=` never saw it. It reads the first `<title>` (white space stripped and collapsed) and sets it, or makes one in `head`. `expect title=` runs `document.title` now. Test: `document_title_reads_and_sets_the_title_element`. The setter makes the `title` element without a `MutationObserver` record for `head`; the text change has one.
+
+### Checks
+
+Filled in at the end of this section.

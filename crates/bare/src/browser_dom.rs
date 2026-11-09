@@ -936,9 +936,10 @@ pub(crate) fn set_text_content(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[V
             let r = d.mo_group(Some(n), || {
                 let mut doc = d.doc.borrow_mut();
                 d.room(&doc, !s.is_empty() as usize, s.len())?;
+                // Charge before the tree changes: a step limit then leaves the old children, never half of them.
+                it.charge(doc.children(n).count() as u64)?;
                 d.iter_told_all(&doc, n);
                 while let Some(c) = doc.children(n).next() {
-                    it.charge(1)?;
                     doc.detach(c);
                 }
                 if !s.is_empty() {
@@ -1088,6 +1089,9 @@ fn replace_children(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V
     let mut moved = Vec::new();
     let r = d.mo_group(Some(parent), || {
         let mut doc = d.doc.borrow_mut();
+        // Charge before the tree changes: a step limit then leaves the old children, never half of them.
+        let new_kids: usize = nodes.iter().map(|&n| if matches!(doc.data(n), NodeData::ShadowRoot) { doc.children(n).count() } else { 1 }).sum();
+        it.charge((doc.children(parent).count() + new_kids) as u64)?;
         d.iter_told_all(&doc, parent);
         // With more than one node the standard first puts them in a fragment, which takes each out of its parent, in argument order.
         if nodes.len() > 1 {
@@ -1096,13 +1100,11 @@ fn replace_children(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V
             }
         }
         while let Some(c) = doc.children(parent).next() {
-            it.charge(1)?;
             doc.detach(c);
         }
         for &n in &nodes {
             let frag = matches!(doc.data(n), NodeData::ShadowRoot);
             let kids: Vec<NodeId> = if frag { doc.children(n).collect() } else { vec![n] };
-            it.charge(kids.len() as u64)?;
             for k in kids {
                 doc.move_to(k, parent, None);
                 moved.push(k);
@@ -1692,6 +1694,74 @@ pub(crate) fn head(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V 
 
 pub(crate) fn body(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     html_child(d, it, this, &["body", "frameset"])
+}
+
+/// The first HTML `title` element of the document, in tree order.
+fn title_element(d: &Dom, it: &mut Interp<'_>, root: NodeId) -> R<Option<NodeId>> {
+    let doc = d.doc.borrow();
+    let (mut cur, mut depth) = (root, 0);
+    while let Some((c, cd)) = next_in(&doc, root, cur, depth) {
+        it.charge(1)?;
+        (cur, depth) = (c, cd);
+        if is_named(&doc, c, &["title"]) {
+            return Ok(Some(c));
+        }
+    }
+    Ok(None)
+}
+
+/// `document.title`: the text of the first `title` element with ASCII white space stripped and collapsed.
+pub(crate) fn document_title(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    let root = d.nd(it, this)?;
+    let Some(t) = title_element(d, it, root)? else { return d.js_str(it, "") };
+    let text: String = {
+        let doc = d.doc.borrow();
+        doc.children(t).filter_map(|c| if let NodeData::Text(s) = *doc.data(c) { Some(doc.text(s).to_string()) } else { None }).collect()
+    };
+    it.charge((text.len() / 32) as u64)?;
+    let ws = |c: char| matches!(c, ' ' | '\t' | '\n' | '\x0c' | '\r');
+    let s = text.split(ws).filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" ");
+    d.js_str(it, &s)
+}
+
+/// `document.title = v`: set the text of the first `title` element. Without one, a new `title` goes at the end of `head` (no `head`: nothing).
+pub(crate) fn set_document_title(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    let root = d.nd(it, this)?;
+    let s = d.string_arg(it, arg(a, 0))?;
+    let existing = title_element(d, it, root)?;
+    let target = match existing {
+        Some(t) => Some(t),
+        None => {
+            let mut doc = d.doc.borrow_mut();
+            let head = doc.children(root).find(|&c| matches!(doc.data(c), NodeData::Element { .. })).and_then(|html| doc.children(html).find(|&c| is_named(&doc, c, &["head"])));
+            match head {
+                Some(h) => {
+                    d.room(&doc, 2, s.len())?;
+                    let none: &[(&str, &str)] = &[];
+                    Some(doc.insert_element(h, None, "title", none))
+                }
+                None => None,
+            }
+        }
+    };
+    if let Some(t) = target {
+        let r = d.mo_group(Some(t), || {
+            let mut doc = d.doc.borrow_mut();
+            d.room(&doc, !s.is_empty() as usize, s.len())?;
+            d.iter_told_all(&doc, t);
+            while let Some(c) = doc.children(t).next() {
+                doc.detach(c);
+            }
+            if !s.is_empty() {
+                let text = doc.create_text(&s);
+                doc.move_to(text, t, None);
+            }
+            Ok(())
+        });
+        d.iter_told_end();
+        r?;
+    }
+    Ok(Value::Undefined)
 }
 
 pub(crate) fn doctype(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {

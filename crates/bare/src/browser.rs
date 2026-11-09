@@ -43,9 +43,12 @@
 //!   object), `removeEventListener`, `dispatchEvent`, capture / target / bubble phases through the document to `window`,
 //!   `preventDefault`, `stopPropagation`, `stopImmediatePropagation`, `composedPath`, `new EventTarget()`.
 //! - A listener that throws is reported (`Browser::take_reports`) and dispatch goes on. A Limit, an Unsupported or a
-//!   heap fault stops the dispatch and is the result of the call.
+//!   heap fault stops the dispatch and is the result of the call. The embedder then calls `Browser::survive`: a script budget
+//!   (steps and the like) aborts only that task and the page goes on; the other errors stay fatal.
 //!
 //! Gates and deviations (on purpose, none is silently faked)
+//! - `document.images`, `links`, `anchors`, `embeds`, `forms` and `scripts` are snapshot arrays too (`browser_platform_query.rs`).
+//!   `document.title` reads and sets the first `<title>` (`browser_dom.rs`).
 //! - Lists (`childNodes`, `children`, `querySelectorAll`, `getElementsByTagName`, `getElementsByClassName`) are plain
 //!   snapshot arrays, not live `NodeList`/`HTMLCollection`.
 //!   The one live `NodeList` is the result of `document.getElementsByName` (`browser_nodelist.rs`).
@@ -1286,6 +1289,7 @@ pub(crate) static DEFS: &[Def] = &[
     Def { on: &[Document], name: "documentElement", len: 0, kind: G(nd::document_element) },
     Def { on: &[Document], name: "head", len: 0, kind: G(nd::head) },
     Def { on: &[Document], name: "body", len: 0, kind: G(nd::body) },
+    Def { on: &[Document], name: "title", len: 0, kind: A(nd::document_title, nd::set_document_title) },
     Def { on: &[Document], name: "doctype", len: 0, kind: G(nd::doctype) },
     Def { on: &[Document], name: "defaultView", len: 0, kind: G(nd::default_view) },
     Def { on: &[Input], name: "value", len: 0, kind: A(nd::input_value, nd::set_input_value) },
@@ -1306,6 +1310,10 @@ pub(crate) static DEFS: &[Def] = &[
     Def { on: &[Link], name: "crossOrigin", len: 0, kind: A(nd::link_cross_origin, nd::set_link_cross_origin) },
     Def { on: &[Document], name: "scripts", len: 0, kind: G(crate::browser_platform_query::scripts) },
     Def { on: &[Document], name: "forms", len: 0, kind: G(crate::browser_platform_query::forms) },
+    Def { on: &[Document], name: "images", len: 0, kind: G(crate::browser_platform_query::images) },
+    Def { on: &[Document], name: "embeds", len: 0, kind: G(crate::browser_platform_query::embeds) },
+    Def { on: &[Document], name: "links", len: 0, kind: G(crate::browser_platform_query::links) },
+    Def { on: &[Document], name: "anchors", len: 0, kind: G(crate::browser_platform_query::anchors) },
     Def { on: &[Input], name: "name", len: 0, kind: A(fm::input_name, fm::set_input_name) },
     Def { on: &[Input], name: "disabled", len: 0, kind: A(fm::input_disabled, fm::set_input_disabled) },
     Def { on: &[Input], name: "readOnly", len: 0, kind: A(fm::input_read_only, fm::set_input_read_only) },

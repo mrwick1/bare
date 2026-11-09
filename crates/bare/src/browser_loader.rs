@@ -45,7 +45,10 @@
 //!   when the script throws too. `document.readyState` is `loading`, `interactive` or `complete`.
 //! - A script that throws is reported (`Browser::take_reports`, event type `error`) and loading goes on. `window.onerror` and
 //!   `ErrorEvent` are absent. Diagnostics hold only the error name.
-//! - Fatal: any `Unsupported`, `Limit` or heap fault, a failed microtask checkpoint, a module script. The run stops at once
+//! - A script budget (`Limit` of steps, call depth, nesting depth, statement frames, jobs of one checkpoint) ends only the task that
+//!   hit it (`Browser::survive`): one console error, the DOM as it is, the run goes on. After `BrowserLimits::max_task_aborts` the
+//!   run stops with `Fatal::Aborted`.
+//! - Fatal: any `Unsupported`, any other `Limit` (host caps, heap, memory) or heap fault, a module script. The run stops at once
 //!   and no JS runs and no I/O starts after that (a second `run_page` returns the same stop).
 //!
 //! Dynamic scripts (`document.createElement('script')`)
@@ -1213,7 +1216,7 @@ impl Run<'_> {
         self.nav_stop()?;
         match self.b.fire(t, ty, bubbles) {
             Ok(()) => Ok(()),
-            Err(e) => self.abort(e, ty),
+            Err(e) => self.abort(e, &format!("{ty} event")),
         }
     }
 

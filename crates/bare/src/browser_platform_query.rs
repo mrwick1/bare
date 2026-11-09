@@ -101,13 +101,48 @@ pub(crate) fn forms(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V
     html_of_tag(d, it, this, "form")
 }
 
+/// `document.images`, `embeds`: the HTML `img` and `embed` elements, like `scripts`.
+pub(crate) fn images(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    html_of_tag(d, it, this, "img")
+}
+
+pub(crate) fn embeds(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    html_of_tag(d, it, this, "embed")
+}
+
+/// `document.links`: the HTML `a` and `area` elements that have an `href`.
+pub(crate) fn links(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    html_with_attr(d, it, this, &["a", "area"], "href")
+}
+
+/// `document.anchors`: the HTML `a` elements that have a `name`.
+pub(crate) fn anchors(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    html_with_attr(d, it, this, &["a"], "name")
+}
+
 fn html_of_tag(d: &Dom, it: &mut Interp<'_>, this: Value, tag: &str) -> V {
+    html_with_attr(d, it, this, &[tag], "")
+}
+
+/// The HTML elements of the document with one of `tags`, in tree order, that have the attribute `attr` (any, when it is empty).
+/// A snapshot array, as `getElementsByTagName` gives.
+fn html_with_attr(d: &Dom, it: &mut Interp<'_>, this: Value, tags: &[&str], attr: &str) -> V {
     let root = d.nd(it, this)?;
     if !matches!(d.data(root), NodeData::Document) {
         return Err(it.type_error("Illegal invocation"));
     }
-    let atom = d.doc.borrow().find_atom(tag);
-    let ids = if atom.is_none() { Vec::new() } else { collect(d, it, root, |doc, c| (matches!(doc.data(c), NodeData::Element { name, .. } if Some(*name) == atom) && !doc.is_foreign(c), 0))? };
+    let (atoms, want): (Vec<_>, _) = {
+        let doc = d.doc.borrow();
+        (tags.iter().filter_map(|t| doc.find_atom(t)).collect(), if attr.is_empty() { None } else { Some(doc.find_atom(attr)) })
+    };
+    let ids = if atoms.is_empty() || want == Some(None) {
+        Vec::new()
+    } else {
+        collect(d, it, root, |doc, c| {
+            let hit = matches!(doc.data(c), NodeData::Element { name, .. } if atoms.contains(name)) && !doc.is_foreign(c) && want.is_none_or(|a| a.is_some_and(|a| doc.attr(c, a).is_some()));
+            (hit, 0)
+        })?
+    };
     wrap_all(d, it, &ids)
 }
 

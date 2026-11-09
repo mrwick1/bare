@@ -254,9 +254,10 @@ pub fn run(steps: &[Step], opt: &Options, red: &mut Redactor) -> Report {
                         if let (Try::Again(_), Some(why)) = (&tried, p.load_error()) {
                             tried = Try::Stop(fail("page", format!("the document did not load: {why}")));
                         }
-                        // The page stopped for good (a fatal error, or too many tasks aborted by script budgets): nothing can change it.
-                        if let (Try::Again(f), Some(why)) = (&tried, p.stopped()) {
-                            tried = Try::Stop(fail("page", format!("{} (the page stopped: {why})", f.message)));
+                        // The page stopped for good (a fatal error, or too many tasks aborted by script budgets): say so in the failure. The
+                        // step still tries again: the frame of the page that stays can change (a picture, a layout) after the stop.
+                        if let (Try::Again(f), Some(why)) = (&mut tried, p.stopped()) {
+                            f.message = format!("{} (the page stopped: {why})", f.message);
                         }
                         (m, tried, wait, p.take_logs())
                     }) {

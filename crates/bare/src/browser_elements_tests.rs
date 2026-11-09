@@ -169,6 +169,48 @@ fn document_forms_lists_the_forms_in_tree_order() {
 }
 
 #[test]
+fn document_images_links_anchors_and_embeds_list_their_elements_in_tree_order() {
+    let mut b = browser("<img id=i1><a id=l1 href=/x>x</a><a id=n1 name=top>n</a><div><area id=l2 href=/y><img id=i2></div><a id=none>no href</a><embed id=e1><template><img><a href=/z></a></template>");
+    let mut list = |k: &str| js(&mut b, &format!("Array.prototype.map.call(document.{k}, function (e) {{ return e.id }}).join()"));
+    assert_eq!(list("images"), "i1,i2");
+    assert_eq!(list("links"), "l1,l2");
+    assert_eq!(list("anchors"), "n1");
+    assert_eq!(list("embeds"), "e1");
+    drop(list);
+    assert_eq!(js(&mut b, "document.images.length + ',' + (document.images[0] === document.getElementById('i1'))"), "2,true");
+}
+
+#[test]
+fn a_step_limit_never_leaves_a_clear_of_the_children_half_done() {
+    // `textContent = ` and `replaceChildren` charge their work before they change the tree: the tree is the old one or the new one.
+    const BUILD: &str = "var d = document.getElementById('d'); for (var i = 0; i < 3000; i++) d.appendChild(document.createElement('i'));";
+    let mut b = browser("<div id=d></div>");
+    js(&mut b, BUILD);
+    let cost = b.it.stats().steps;
+    for stmt in ["d.textContent = 'x'", "d.replaceChildren(document.createElement('b'))", "d.replaceChildren()"] {
+        // enough for the build, short of the 3000 steps that the clear needs
+        let html = "<!doctype html><html><body><div id=d></div></body></html>";
+        let limits = EvalLimits { max_steps: cost + 1_500, ..Default::default() };
+        let mut b = Browser::new(tree::parse(html), BrowserLimits::default(), limits, HeapLimits::default()).expect("browser");
+        assert_eq!(js(&mut b, &format!("{BUILD} {stmt}")), "limit:Steps", "{stmt}");
+        assert_eq!(js(&mut b, "d.childNodes.length + ',' + d.firstChild.nodeName"), "3000,I", "{stmt}");
+    }
+}
+
+#[test]
+fn document_title_reads_and_sets_the_title_element() {
+    let mut b = Browser::new(tree::parse("<!doctype html><html><head><title>  Hello \n  <b>x</b> world </title><title>second</title></head><body></body></html>"), BrowserLimits::default(), EvalLimits { max_steps: 5_000_000, ..Default::default() }, HeapLimits::default()).expect("browser");
+    // The first title element; its text with ASCII white space stripped and collapsed. A <title> holds text only, so `<b>` is text.
+    assert_eq!(js(&mut b, "document.title"), "Hello <b>x</b> world");
+    assert_eq!(js(&mut b, "document.title = 'A  title'; document.title + '|' + document.querySelector('title').textContent + '|' + document.querySelectorAll('title').length"), "A title|A  title|2");
+    assert_eq!(js(&mut b, "document.title = 7; document.title"), "7");
+    // No title element: the setter makes one in the head, the getter gives "".
+    let mut b = browser("<p>x</p>");
+    assert_eq!(js(&mut b, "document.title"), "");
+    assert_eq!(js(&mut b, "document.title = 'made'; document.head.firstChild.nodeName + ':' + document.title"), "TITLE:made");
+}
+
+#[test]
 fn only_a_fragment_without_a_host_can_be_inserted() {
     let want = "unsupported:inserting a ShadowRoot or DocumentFragment as a node (fragment insertion)";
     let mut b = browser("<template id=t><p>1</p></template><div id=host></div>");
