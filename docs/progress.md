@@ -4682,6 +4682,73 @@ Full cost matrix against 94727a6 (805 rows): 0 rows over the limit under both al
 - `tools/js/typing/keycost.sh` (no change in `crates/js` or the DOM hot path).
 - The cost matrix on arjun-e16.
 
+## Public navigation headers and resource capacity (2026-11-09)
+
+Baseline: `a1b7a802580b992cceccc861b513bebff9c027e4`. Machine: archMachine. Evidence files are in `/data/bare-tmp/site-net-evidence/`.
+
+Document navigation now sends `Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8` on GET and POST, including redirects. The HTTP UA stays `bare/0.1`. Resource and script fetch headers do not change. curl returned 404 from crates.io without Accept and 200 with `Accept: text/html`, under both HTTP/1.1 and h2. The baseline drive probe returned 404. The new public journey passes in 1,189.7 ms.
+
+Resource discovery now allows 1,024 distinct fetches instead of 128. The old comment sized this allowance for staging pages with 18 and 41 URLs. The 4,096-reference, 8 MiB resource, 32 MiB retained-text and 60-second download caps stay in place. The discovery test for 1,024 URLs failed with `TooManyFetches(128)` before the change. The navigation test failed because Accept was absent. Both pass after the change. The existing exact custom-cap test still passes. This raises the default; it does not remove the limit or change failures above the configured cap.
+
+The resource harness loaded 100 and 1,000 scripts of 2 KiB each in three runs per size. At 100 resources, median discovery took 0.14 ms, median load took 3.39 ms, peak load heap was 226 KiB and process peak RSS was 4,652 KiB. At 1,000 resources: Median discovery: 0.76 ms. Median load: 27.96 ms. Peak load heap: 2,217 KiB. Process peak RSS: 7,216 KiB. This approximates the new capacity; the unit test checks exactly 1,024 targets. Substack passes three consecutive runs: 2,261.7, 2,974.2 and 3,500.5 ms. Peak RSS: 77,580, 144,252 and 146,780 KiB. The combined network log has 163 entries. The public journey also passes in 1,493.9 ms. The baseline probe passed once; survey 4 records the intermittent discovery failure.
+
+Stack Overflow is still behind a Cloudflare challenge. The initial path can return 302, then `/questions` returns 403 with `cf-mitigated: challenge` and a `/cdn-cgi/challenge-platform` script. curl variations for the bare UA, HTML Accept, Accept-Language, Sec-Fetch headers and a Chrome UA all returned final 403 responses under HTTP/1.1 and h2. Chrome 157 first showed `Just a moment...`, then loaded `Newest Questions - Stack Overflow` with h2 status 200. The response requires challenge handling; no UA spoof or challenge bypass was added. The source sends Host, UA and Accept-Encoding before caller headers under HTTP/1.1. h2 sends pseudo headers first, then UA and Accept-Encoding. Bare has no default Accept-Language or Sec-Fetch headers. Exact Chrome wire header order was not captured.
+
+GNU is unreachable from archMachine and arjun-e16. curl resolved `209.51.188.116` and timed out connecting to port 443 after eight seconds on both machines. IPv6 `2001:470:142:5::116` has no route on both. No TLS or HTTP exchange occurred. No code change applies to this network failure.
+
+The public runner passed all 33 journeys with zero failures, skips or flakes. The crate tests passed: 1,115 passed, six ignored. The release workspace suite passed: 3,229 tests passed, 13 ignored, zero failures. The corrected full cost gate passed: 805 rows, zero rows over +0.5% under glibc, zero failures. Mean glibc change: -0.002%. The matrix took 146 seconds. No row needed the conditional jemalloc rerun. The 11-row repeats below measured both allocators.
+
+Not tested: exact Chrome wire headers and header-order isolation, GNU rendering or TLS after connectivity returns, Substack content beyond the body-visible assertion, and resource loads above the configured cap.
+
+The first cost run used inconsistent baseline artifacts and stale cached counts. Its results do not establish a regression. The baseline source is exactly `a1b7a802580b992cceccc861b513bebff9c027e4`. The diff contains only the seven task files. NEW received `cargo clean --release -p bare -p bare-stress -p bare-js -p bare-net`. Both builds then used `-j4 --release --workspace --examples --bins`. BASE came from `base-build`. Compiler, release profile, features and Rust flags match. Neither build used an allocator preload.
+
+The shared baseline held completion stamps for a workspace build and a later stress-only build. Its original stress dependency fingerprint differed from NEW. After the matched builds, both stress binaries have SHA-256 `b84a1aafdb3ee9f2401086670c65282c36659e0fa98685e382b488deb3a740b2`. Cached glibc counts still differed by about 122,000 instructions on these identical binaries. A fresh cache outside the shared baseline removed that offset. Its release directory links to the unchanged `base-build` binaries. No shared cache files were removed.
+
+All 11 flagged rows passed three fresh-cache repeats under both allocators. Mean glibc changes: -0.004%, -0.007%, -0.001%. Mean jemalloc changes: -0.028%, -0.019%, -0.021%. Each repeat measured both allocators on all 11 rows. Direct uncached `perf stat -e instructions:u` A/B checks covered all ten layout rows, three runs per side and allocator. Minimum-count changes ranged from -0.028% to +0.033% under glibc and -0.085% to +0.003% under jemalloc. These counts do not reproduce the original layout increases. The full corrected matrix passed with zero flagged rows. Evidence: `recheck/fresh-results/`.
+
+After rebase onto `dfa0e09` (#304), the crate suite passed: 1,116 tests, six ignored, zero failures. Only the progress append conflicted. Both sections were retained. The full matrix above isolates this task against `a1b7a80`; it was not repeated after the unrelated sheets change.
+
+## 1. HTTP proxy with CONNECT (2026-11-09)
+
+`BARE_PROXY=http://[user:pass@]host:port` selects one HTTP proxy. The value is read once with `OnceLock`. A missing value keeps direct routing. Loopback destinations bypass a configured proxy. An invalid value fails the first network request with `proxy: invalid BARE_PROXY`; it does not panic or print the value. Credentials use literal ASCII bytes. Percent escapes are not decoded. The endpoint requires an explicit nonzero port and no path. Bracketed IPv6 endpoints are accepted.
+
+For HTTPS, `open` resolves and connects to the proxy only. CONNECT carries the real destination authority and optional Basic credentials. The reply must have a 2xx status. The head reader consumes one byte at a time, stops at the blank line, and caps the head at 256 KiB. It retains the socket read/write limits and the 120 s total head limit. TLS then uses the same socket and verifies the real host. Refusals report `proxy: 407 CONNECT refused` or the corresponding status. Proxy reply text is not reflected into errors because it can echo credentials.
+
+Plain HTTP uses absolute form and adds Basic credentials on the proxy connection. Credentials from the configuration do not enter requests inside a TLS tunnel or loopback requests. The HTTP/1 idle pool and HTTP/2 session keys include a direct/proxy route flag. Bit 16 stores the flag beside the port in one hash input. A separate boolean hash input cost +0.56% on the isolated request row; packing the flag reduced it to +0.14%. One flag identifies the proxy because the configuration is immutable for the process. Rotation must replace the flag with endpoint and credential identity in both keys. Plain proxy sockets hold their extra metadata in a box. The direct request path reads the configuration lock once per attempt. No dependency was added; the workspace had a base64 decoder but no reusable encoder for this crate.
+
+Checks were defined before implementation. The first CONNECT regression failed against base `a1b7a80`: the client tried local DNS for `no-local-dns.invalid` instead of contacting the proxy. The same regression now passes. Subprocess tests isolate environment values. The local proxy checks CONNECT authority and Basic authentication, returns 407 and 403, enforces the head cap, and relays to a private-CA TLS server. The TLS tests check success and wrong-host refusal. Other checks cover invalid values, absolute-form HTTP, pooled HTTP reuse, direct requests, and loopback bypass. Unit tests check the exact head boundary with trailing TLS bytes, all 2xx status classes, ignored CONNECT body framing, malformed/truncated replies, read timeout propagation, base64 padding, IPv6 parsing, and separate pool keys. Only the initial CONNECT regression was observed failing before implementation.
+
+Cost check: archMachine, release, base `a1b7a80`, `BARE_PROXY` unset. `tools/js/instr.sh` takes the minimum of three `instructions:u` runs and sets `glibc.malloc.tcache_count=65535`. `https_load hs 10` opens 200 TLS connections. `https_load ka 10` sends 2,000 GETs and 1,000 POSTs plus redirects on a reused TLS connection.
+
+- Final command cost: `hs 10`, 1,220,223,438 to 1,226,133,411 instructions (+0.484%); `ka 10`, 1,883,685,672 to 1,880,976,711 (-0.144%). Both are within +0.5%.
+- The final handshake comparison used the same synthetic root and leaf keys and certificates in both binaries. A temporary `openssl` wrapper copied these five fixed outputs (`root.key`, `root.pem`, `good.key`, `good.csr`, `good.pem`) for the harness generation commands and passed other commands to `/usr/bin/openssl`. The TLS handshake randomness remained live. Fresh certificates gave paired `hs 10` results of +0.038% and +0.697%; fixed certificates reduced one source of variation. These short network runs do not establish a sub-0.5% confidence bound.
+- Request diagnostic, three runs each with `perf stat --no-inherit -x, -e instructions:u` and the same glibc setting: `ka 10`, minimum 112,477,942 to 112,637,066 (+0.141%). Repeat: 112,446,690 to 112,628,802 (+0.162%). This counts the main thread and excludes child servers and TCP worker threads. An isolated fixed-certificate handshake batch was still noisy: 774,139,746 to 782,140,158 (+1.033%). The full-command row above is the existing cost check; the diagnostic is not proof of no handshake regression.
+
+Not tested: a real external proxy, real Reddit, HTTP/2 through CONNECT, an IPv6 proxy socket, percent-encoded credentials, Windows or macOS, wall-time performance, or a long-run statistical cost bound. No rotation, SOCKS5, or ban detection was added. README was not changed.
+
+Final validation: `RUST_TEST_THREADS=1 cargo test --release --workspace` passes on the combined tree with main `dfa0e09`. The standalone release net suite also passes. One earlier parallel workspace run timed out in both `bare-drive --test chunked` tests; both passed on retry. The full serial run passed before and after the main update. `git diff --check` passes. Existing CSS dead-code and driver unused-variable warnings remain.
+
+Main moved to `1f525025` during PR creation. Only the progress append conflicted. Both sections were retained. `RUST_TEST_THREADS=1 cargo test --release --workspace` passes again on that combined tree. The proxy implementation and net cost workload did not change.
+
+## 2. Reddit direct access check, no proxy (2026-11-09)
+
+Question: does Reddit block bare with no proxy, and on which signal? A research agent sent four requests to public pages, more than 3 seconds apart. It did not retry a blocked URL. It used no login and no cookies.
+
+| Client and headers | URL | Result |
+|---|---|---|
+| `curl`, Chrome UA, Accept, Accept-Language | `www.reddit.com/r/programming/.json` | 403, network-security block page |
+| `curl`, same headers | `old.reddit.com/r/programming/` | 302 to the login page |
+| bare, default (`bare/0.1`) | `www.reddit.com/r/rust/.json` | 403, same block page |
+| bare, same Chrome headers | `old.reddit.com/r/rust/` | 302 to the login page |
+
+Observed: `curl` is blocked the same way as bare. Chrome headers did not give public content. The responses name `server=snooserv` and `via=1.1 varnish`.
+
+Hypothesis, to verify: the block depends on the IP or network reputation, or on a policy for anonymous access. These four requests cannot separate IP, headers and TLS fingerprint. The two clients also fetched different subreddits.
+
+Next check: one request through a real residential or mobile proxy with `BARE_PROXY` (PR #306). A proxy benefit is not proven until then. Fallback: the official Reddit API with a personal OAuth app.
+
+Not tested: the same URL before and after a block, another IP or proxy, a browser TLS hello, login, cookies, challenges. The bare CLI shows no response headers and has no header override. The fourth request used a scratch harness.
+
 ## English number notation, inert documents, and bounded style sources
 
 NumberFormat accepts compact, scientific, and engineering notation. It supports short and long compact labels, English unit styles, and currency names. A Node script generates the English suffix tables. Singular selection reads decimal digits only for unit and currency-name output. It allocates no string. Ordinary decimal, currency-symbol, and percent formatting skip that selection. Existing signDisplay support remains in place.
