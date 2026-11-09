@@ -11,7 +11,7 @@
 //! - No `PerformanceEntry`, `PerformanceMark` or `PerformanceMeasure` global. An entry inherits from `Object.prototype`.
 //! - A `measure` argument that names a mark uses the last mark of that name. `navigationStart` is 0. An unknown name is a `SyntaxError`.
 //! - After `MAX_ENTRIES` entries, a new one is returned but not kept.
-//! - The methods are installed with the scheduler (seven host functions). The entry list is empty until the first `mark`.
+//! - The methods and legacy navigation accessors are installed with the scheduler. The entry list is empty until the first `mark`.
 
 use crate::browser::*;
 use bare_js::eval::Interp;
@@ -114,11 +114,17 @@ fn measure(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
     let (start, end);
     let (mut dur, mut detail) = (None, Value::Null);
     if let o @ Value::Object(_) = arg(a, 1) {
-        if !matches!(arg(a, 2), Value::Undefined) {
-            return Err(it.type_error("Failed to execute 'measure' on 'Performance': The measureOptions and endMark cannot both be passed."));
-        }
         let (s, e, du, de) = (member(d, it, o, "start")?, member(d, it, o, "end")?, member(d, it, o, "duration")?, member(d, it, o, "detail")?);
-        (start, end) = (time(d, it, s)?, time(d, it, e)?);
+        let present = |v| !matches!(v, Value::Undefined);
+        if [s, e, du, de].into_iter().any(present) {
+            if present(arg(a, 2)) {
+                return Err(it.type_error("Failed to execute 'measure' on 'Performance': The measureOptions and endMark cannot both be passed."));
+            }
+            if (!present(s) && !present(e)) || (present(s) && present(e) && present(du)) {
+                return Err(it.type_error("Failed to execute 'measure' on 'Performance': Invalid measure options."));
+            }
+        }
+        (start, end) = (time(d, it, s)?, time(d, it, if present(arg(a, 2)) { arg(a, 2) } else { e })?);
         if !matches!(du, Value::Undefined) {
             dur = Some(it.to_js_number(du)?);
         }
@@ -217,5 +223,42 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>, perf: ObjId) -> R<()> {
     ] {
         d.def_method(it, perf, name, len, h)?;
     }
+    for (name, h) in [("timing", timing as H), ("navigation", navigation as H)] {
+        let f = d.add_fn(it, h, name, 0, false)?;
+        let k = d.key(it, name)?;
+        let desc = bare_js::heap::PropertyDescriptor { get: Some(Some(f)), enumerable: Some(true), configurable: Some(true), ..Default::default() };
+        it.heap.define_own_property(perf, k, &desc).map_err(|e| it.heap_error(e))?;
+    }
     Ok(())
+}
+
+/// Legacy navigation data is synthesized on first access. It does not add realm state.
+#[cold]
+fn legacy(d: &Dom, it: &mut Interp<'_>, this: Value, timing: bool) -> R<Value> {
+    let o = d.obj(it, it.object_prototype())?;
+    crate::browser_lazy::tag(d, it, o, if timing { "PerformanceTiming" } else { "PerformanceNavigation" })?;
+    if timing {
+        let origin = (it.wall_now_ms() - d.now_ms()).max(1.0).floor();
+        for name in ["navigationStart", "unloadEventStart", "unloadEventEnd", "redirectStart", "redirectEnd", "fetchStart", "domainLookupStart", "domainLookupEnd", "connectStart", "connectEnd", "secureConnectionStart", "requestStart", "responseStart", "responseEnd", "domLoading", "domInteractive", "domContentLoadedEventStart", "domContentLoadedEventEnd", "domComplete", "loadEventStart", "loadEventEnd"] {
+            let zero = matches!(name, "unloadEventStart" | "unloadEventEnd" | "redirectStart" | "redirectEnd" | "secureConnectionStart");
+            let k = d.key(it, name)?;
+            it.define_data(o, k, Value::Number(if zero { 0.0 } else { origin }), false, true, true)?;
+        }
+    } else {
+        for (name, n) in [("type", 0.0), ("redirectCount", 0.0), ("TYPE_NAVIGATE", 0.0), ("TYPE_RELOAD", 1.0), ("TYPE_BACK_FORWARD", 2.0), ("TYPE_RESERVED", 255.0)] {
+            let k = d.key(it, name)?;
+            it.define_data(o, k, Value::Number(n), false, true, true)?;
+        }
+    }
+    if let Value::Object(owner) = this {
+        let k = d.key(it, if timing { "timing" } else { "navigation" })?;
+        it.define_data(owner, k, Value::Object(o), false, true, true)?;
+    }
+    Ok(Value::Object(o))
+}
+fn timing(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
+    legacy(d, it, this, true)
+}
+fn navigation(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
+    legacy(d, it, this, false)
 }
