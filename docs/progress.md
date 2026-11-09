@@ -4800,7 +4800,7 @@ The style collector retains a prefix within its source and byte caps. It drops e
 Checks ran on archMachine after rebasing onto dfa0e09.
 
 - The notation, DOMParser, and shadow-source regression tests failed before their fixes. The old loader-limit assertion failed before its update.
-- The full release workspace tests passed, including doctests. After merging later main changes, all 1118 browser library tests passed. Six tests were ignored.
+- The full release workspace tests passed on the dfa0e09 base, including doctests. After merging the later main changes, 1123 browser library tests and 838 JS library tests passed. Seven tests were ignored.
 - Node v22.18.0 matched 21 cases for formatted text and formatToParts. Cases cover notation, units, compound units, currency names, negative values, infinity, and NaN.
 - Test262 passed its gate: 29489 pass, 2594 fail, and 755 skip against the recorded baseline.
 - Exec-diff passed 79 runs with zero differences.
@@ -4822,7 +4822,7 @@ Direct perf stat measurements used instructions:u, the same tcache setting, and 
 
 These layout cases call RuleSet::add directly. They do not call sources_capped. The bounded-source hunk remains. The measurements do not identify the cause of the earlier cached-count difference.
 
-All three requested sites passed body visible. Archive.org and lit.dev logged no errors. GitHub logged Unsupported("named group") and performance.mark is not a function. Those features are outside this task.
+All three requested sites passed body visible. Archive.org and lit.dev logged no errors. After merging the web API changes, GitHub logged only Unsupported("named group"). Those features are outside this task.
 
 Artifacts remain under /data/bare-tmp/intl-*. The final cost table is intl-cost-main.tsv. Direct perf counts and load records are in intl-layout-ab.json. Site results are under intl-sites/.
 
