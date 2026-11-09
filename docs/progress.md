@@ -4293,3 +4293,44 @@ The console printed `[object]` for the thrown `Error`, because the formatter nev
 - gnu.org with a ClientHello change: the host blocked both addresses, so no run could show an effect.
 - A TLS 1.2 client for craigslist.org.
 - Whether other React sites set styles on MathML elements (MathML still has no `style`).
+
+## `min()`, `max()` and `clamp()` in lengths (2026-11-09)
+
+The Rust book sidebar has `width: min(...)`. The engine did not read it, so the width was 0. Now `min()`, `max()` and `clamp()` work in every length property that reads `calc()`.
+
+### What it reads
+
+- The same operands as `calc()`: numbers, `px`, `em`, `rem`, `%`, `vw`, `vh`, `vmin`, `vmax`, and nested `calc()`, `min()`, `max()` and `clamp()`.
+- A percentage resolves at layout time, when the base is known. `min()` and `max()` are not linear in the percentage, so they cannot use the `calc()` slots.
+
+### How
+
+- `crates/css/src/calc.rs` parses a function into a flat prefix list of `Copy` entries. The declared form is a list of `Linear` entries in `Side::calcs`. NaN in the `px` slot marks an operator. After the cascade the form is `[f32; 2]` entries in `Styles::calcs`, and `[NaN, code + 16n]` marks an operator.
+- `Length::Math(u32)` holds the index of the root entry. A plain `calc()` keeps its old path.
+- `resolve_math` and `font_size_math` in `cascade.rs` are cold functions. The layout `resolve` has one arm for `Math`, behind `cold_path()`.
+- A `Vec<Node>` tree cost drop glue in hot code. The flat lists removed it.
+
+### Checks
+
+- Unit tests in `calc.rs` and `cascade.rs`. A layout test `min_max_clamp_lengths` in `crates/layout/src/block.rs`.
+- Rust book (`https://doc.rust-lang.org/book/`, bare-drive, `shot`): the sidebar was 0 px wide before and is 300 px now. The `rust-book-sidebar` journey passes. The known-bug line is gone from `tools/drive/public/rust-book-sidebar.steps`.
+- The page still looks wrong. See "Noticed".
+- `cargo test --release --workspace`, `tools/drive/public/run.sh` (fail 0).
+
+### Cost gate: not met
+
+The rule is +0.5% under both allocators. Run on the rebased branch against `origin/main` (b6ade1f):
+
+- Rows `style_load|sheets_load|boxes|calc` (36 rows): 4 over. `block-percent-calc` +1.30% to +1.42%, `grid-stretch-boxes` +0.67% to +0.71%. The other rows pass.
+- Full matrix (805 rows): 90 rows over under both allocators. They are layout rows from `bare-stress` and `geometry_load`. Most are +0.5% to +1.0%. The worst is `geometry_load stretch` +2.0%. The mean change is glibc +0.12%.
+
+Cause: the arm for `Length::Math` in `resolve` in `crates/layout/src/block.rs`. This function is hot and inlined into many callers. A new arm changes the inlining and the register use in all of them, even when no page uses `min()`. Moving the work into a cold function and adding `cold_path()` did not remove the cost. I stopped here under the README rule (two real attempts). The branch is not merged.
+
+Idea not tried: store `min()`, `max()` and `clamp()` as a separate field of the box, so `resolve` keeps its old arms. It changes more code.
+
+### Noticed, not changed
+
+- Logical properties like `margin-inline-start` are unsupported. The Rust book uses them.
+- The Rust book sidebar chapter list is not painted.
+
+Not tested: arjun-e16, the window mode, the typing cost.
