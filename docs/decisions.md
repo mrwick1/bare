@@ -551,3 +551,13 @@ A geometry read (`getBoundingClientRect`, `getClientRects`, `offsetWidth`, an In
 - Limits fail closed: 32 MiB of file bytes, 16 M pixels (64 MiB decoded) for each picture, 64 MiB decoded for each page, 512 pictures for each page, 4 downloads at a time.
 - The pixel limit is lower than the 64 MP that was first suggested. 64 MP would allow 256 MiB for one picture.
 - Cost: `bare-drive` grows from 12.8 MiB to 13.5 MiB (release, whole feature, not only the decoders). The build time was not measured on its own. The incremental release build of `bare-js` examples and `bare` took 1 m 55 s.
+
+## Background and mask images
+
+- Reuse the `<img>` loader, cache, limits and SVG painter. No second decoder.
+- A `url()` in CSS is an id in a global table. The property value stays 8 bytes (`Value::Number`).
+- Size and position are two properties each. A pair does not fit in one `Value`.
+- The sheet loader makes each `url()` absolute. Sheets are joined after loading, so the base would be lost.
+- A gradient is `none`. The cascade is not broken by it.
+- The 12 new properties are not listed in the CSSOM. The listing costs set-up time on every page start.
+- Cost of 12 more slots in `ComputedStyle`: +0.5 to +2.8% on style-heavy rows. Open. See progress.md.

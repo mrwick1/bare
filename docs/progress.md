@@ -3528,3 +3528,58 @@ Noticed, not changed:
 - Area strings in `grid-template`, and the `grid` shorthand, are not read.
 
 Not tested: Chrome side by side, the window (only the shared paint path), other sites that use `grid-template` or a block `<svg>`, arjun-e16.
+
+## CSS background and mask images (2026-11-09)
+
+Goal: the Vector skin icons on the Wikipedia article are CSS `mask-image: url(data:svg…)` over `background-color: currentColor`, and `background-image: url(…)`. They drew as black squares.
+
+### What was built
+
+- `bare-css` parses `background-image`, `background-size`, `background-position`, `background-repeat`, the `background` shorthand pieces, the same four `mask-*` properties, the `mask` shorthand and the `-webkit-mask*` aliases. `@supports (mask-image: none)` is true. A gradient is the same as `none`.
+- A `url()` becomes an id in a global table (`bare_css::urls`). The value is `Value::Number(id)`. Size and position are two properties each (`-x`, `-y`).
+- The sheet loader writes each relative `url()` as an absolute address against the sheet, in `flatten` (`absolute_urls`).
+- `bare::images::css_scan` reads the unique styles of the frame, queues new ids and loads them with the `<img>` loader, cache and limits (4 downloads at a time, shared). A result goes to `Document::set_css_image` and `Page::relist`. The page load does not wait.
+- `bare-paint::layer` draws a picture with size, position and repeat. A mask uses the picture alpha with the colour of the background. The scaled picture is cached by (image, size): 256 entries, 32 MiB. A frame does not scale again.
+- The CSSOM does not list the 12 new properties (`Property::LISTED`). They still work in `getComputedStyle().getPropertyValue` and in `style.setProperty`.
+
+### Numbers (archMachine, base 454790a, minimum of 3 runs, instructions in user mode)
+
+| Page | Base | New | Change |
+| --- | --- | --- | --- |
+| Wikipedia, `open`, `expect`, `shot` | 2.742 G | 3.766 G | +37% |
+| Hacker News | 121.1 M | 125.0 M | +3.2% |
+| example.com | 52.19 M | 52.17 M | 0 |
+
+Peak RSS (one run each, before the last two commits): Wikipedia 42.5 to 43.3 MiB, Hacker News 21.6 to 21.8 MiB, example.com 20.7 to 20.9 MiB.
+
+The Wikipedia growth is the icons. About 40 SVG files are rasterised. `svg::bitmap` paints each on white and on black. The picture loads also cause extra relists. hypothesis: a one-pass alpha raster would remove about half of it. Not tried.
+
+### Live result
+
+`bare-drive` on the article (`/data/bare-tmp/bgout/wiki/s.png`): the menu, search, language, bookmark, vertical ellipsis, pencil and green circled icons now draw as icons. No black square remains in the capture. The section-toggle buttons were not in the capture, so they are not verified. The horizontal scrollbar stays (other work).
+
+### Cost matrix: not clean
+
+`tools/js/cost_matrix.sh` after the work: 14 rows over 0.5% under both allocators (the first run had 124). Fixes that worked: the 12 properties are not listed in the CSSOM (accessor set-up cost), and `absolute_urls` uses `str::find` (the `preload_load` rows). Left over:
+
+- `boxes-display-none` +2.8%, `flex-freeze-many` +1.7 to 2.1%, `table-percent-columns` +1.4%, `grid-stretch-boxes` +1.0%, `grid-explicit-rows` +0.57%, `sheets_load` +1.0 to 2.2%, `dataset_load` +0.53%.
+- Cause: `ComputedStyle` is `[Value; COUNT]`. COUNT went from 93 to 105. The derived `PartialEq` of the array is the cost: `equal_same_length` went from 17.9% to 29.5% of `boxes-display-none`. Total +2.8%.
+- Not tried: keep the layer longhands outside the array (one interned id for each of background and mask), or compare styles with a cheaper test. Both change the cascade. They need their own change.
+
+This branch is not merged, because the cost rule fails.
+
+### Known gaps
+
+- Only the first layer of a list is used. The colour of a multi-layer `background` is dropped.
+- Edge-offset positions (3 or 4 values) are rejected. `space` and `round` are not supported. `min()` and `max()` in `mask-size` give `auto`.
+- A mask applies to the background colour only. Borders, text and children are not masked. A mask hides the `background-image` of the same element.
+- Rounded corners are ignored for pictures.
+- Scaling is a box filter over a raster, not a new vector raster at the target size.
+- The command-line `main.rs` path does not make relative `url()` absolute.
+- The CSSOM does not list the new properties.
+
+Noticed, not changed: the header SVG logos, gradients, box-shadow, opacity.
+
+Tests: `cargo test --release --workspace` passes (3010 tests). New: CSS parser tests, `urls` test, `layer` paint tests, a sheet test for `absolute_urls`, and 2 `bare-drive` tests over `tools/fixtures/bg`. The no-property regression is the cost matrix: the rows without these properties are the 14 above, so the regression exists and is documented.
+
+Not tested: the window, `display:none` or sticky elements with masks, arjun-e16, a hostile image server beyond the shared unit limits.

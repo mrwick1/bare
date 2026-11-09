@@ -4689,3 +4689,10 @@ The first full run had 13 rows over the limit:
 - A live `bare --window` run on a hyprcage screen. The page tests drive `Page::handle` and `Page::paint`, as the window does.
 - A page that scrolls sideways past the band.
 - HiDPI, archMachine and macOS.
+
+## Background and mask images
+
+- Picture cache for CSS images: 256 scaled entries, 32 MiB. The decoded pictures share the `<img>` limits (16 M pixels each, 64 MiB for each page, 512 pictures, 4 downloads at a time).
+- `ComputedStyle` is `[Value; 105]`, 840 bytes. It was 744 bytes.
+- Wikipedia `shot`: 2.74 G to 3.77 G instructions, RSS +0.8 MiB. Hacker News +3.2%. example.com 0.
+- Cost matrix: 14 rows over 0.5% under both allocators (up to +2.8%). Cause: 12 more style slots.
