@@ -3858,3 +3858,11 @@ The two python.org journeys stay `known` with the new text. Next step: a fixture
 - An image document shows the picture at 8 px margin with the line box of an inline image (about 7 px extra at the top). Chrome centers it on a dark background.
 - A page that stops with a fatal error ends the whole session, so a link click does nothing afterwards (python.org, lobsters). Chrome keeps the page alive after a script error. A softer stop for `Limit` and `Unsupported` would help every journey, but it is a design choice.
 - `expect title="x"` reads the `<title>` element, not `document.title` set by a script.
+
+### Checks
+
+- `cargo test --release --workspace` after the rebase: 3043 passed, 0 failed.
+- `tools/drive/public/run.sh`, 3 runs one after another: 22 pass, 0 fail, 5 known, 0 skip, 0 flakes each time (was 21 pass, 6 known).
+- Cost matrix against origin/main: 629 rows ran, 0 rows over the limit (mean glibc -0.004%). The 176 `bare-stress` rows failed to run because the shared base build has no `bare-stress` (known); the change does not touch those paths.
+
+Not tested: arjun-e16, window mode, XML shown as a tree (it shows as text), a PDF viewer, `Content-Disposition: attachment`, and a form POST that answers with an image.
