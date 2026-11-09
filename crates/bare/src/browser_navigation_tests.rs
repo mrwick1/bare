@@ -522,17 +522,17 @@ fn history_is_bounded() {
         let mut b = at("https://a.test/");
         b.set_navigation_limits(NavLimits { max_state_bytes: 1000, max_total_state_bytes: 2400, ..Default::default() });
         js(&mut b, "function rep(s, n) { var o = ''; while (n-- > 0) o += s; return o; }");
-        assert_eq!(js(&mut b, "history.pushState(rep('x', 600), '')"), lim("history-state-bytes"));
+        assert_eq!(js(&mut b, "history.pushState(rep('x', 600), '')"), "throw:DataCloneError:A state over the size cap could not be cloned.");
         let mut c = at("https://a.test/");
         c.set_navigation_limits(NavLimits { max_state_depth: 5, max_state_nodes: 20, ..Default::default() });
         assert_eq!(js(&mut c, "var d = {}, c = d; for (var i = 0; i < 6; i++) { c.n = {}; c = c.n; } history.pushState(d, '')"), lim("history-state-depth"));
-        assert_eq!(js(&mut c, "var big = []; for (var i = 0; i < 30; i++) big.push({}); history.pushState(big, '')"), lim("history-state-nodes"));
+        assert_eq!(js(&mut c, "var big = []; for (var i = 0; i < 30; i++) big.push({}); history.pushState(big, '')"), "throw:DataCloneError:A state over the size cap could not be cloned.");
         assert_eq!(c.navigation_stats().history_len, 1);
         assert_eq!(b.navigation_stats().history_len, 1);
         js(&mut b, "history.pushState(rep('y', 400), '')");
         js(&mut b, "history.pushState(rep('y', 400), '')");
         let n = b.navigation_stats();
-        assert_eq!(js(&mut b, "history.pushState(rep('y', 400), '')"), lim("history-state-total"), "{n:?}");
+        assert_eq!(js(&mut b, "history.pushState(rep('y', 400), '')"), "throw:DataCloneError:The states of this document are over their size cap.", "{n:?}");
         // a replace frees the bytes of the entry it replaces
         assert_eq!(js(&mut b, "history.replaceState(rep('z', 400), ''); 1"), "1");
         assert_eq!(b.navigation_stats().history_len, 3);
@@ -1115,8 +1115,8 @@ fn byte_views_are_refused_before_their_keys_are_listed() {
         assert_eq!(js(&mut b, "var u = new Uint8Array(1 << 26); u[Symbol.iterator] = undefined; new URLSearchParams(u)"), lim("url-params"));
         plain_view(&mut b, 1 << 26);
         assert_eq!(js(&mut b, "new URLSearchParams(pv)"), lim("url-params"));
-        assert_eq!(js(&mut b, "history.pushState(pv, '')"), lim("history-state-bytes"));
-        assert_eq!(js(&mut b, "history.pushState({deep: pv}, '')"), lim("history-state-bytes"));
+        assert_eq!(js(&mut b, "try { history.pushState(pv, '') } catch (e) { e.name }"), "DataCloneError");
+        assert_eq!(js(&mut b, "try { history.pushState({deep: pv}, '') } catch (e) { e.name }"), "DataCloneError");
         // a small view is still data, and an enumerable symbol key is a TypeError, not a resource limit
         assert_eq!(js(&mut b, "var s = new Uint8Array(2); s[Symbol.iterator] = undefined; new URLSearchParams(s)"), "throw:TypeError:Cannot convert a Symbol value to a string");
     });
