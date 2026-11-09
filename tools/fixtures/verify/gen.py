@@ -140,12 +140,12 @@ ik = inter_k["P-256"]
 ri = cert("rsa-i", "Bare Test Inter", ik, INTER, issuer=(rsa_root, rsa_k))
 lk = key("rsa-l", "P-256")
 rl = cert("rsa-l", "test.example", lk, LEAF, issuer=(ri, ik))
-cases["rsa-root"] = ([rl, ri], "test.example", "UnsupportedAlgorithm", NOW, "rsaroot")
+cases["rsa-root"] = ([rl, ri], "test.example", "ok", NOW, "rsaroot")
 # An RSA intermediate that signs an EC leaf with sha256WithRSA.
 rik = key("rsai", "rsa")
 rii = cert("rsai-i", "Bare Test Inter", rik, INTER, issuer=R)
 rll = cert("rsai-l", "test.example", key("rsai-l", "P-256"), LEAF, issuer=(rii, rik), md="sha256")
-cases["rsa-inter"] = ([rll, rii], "test.example", "UnsupportedAlgorithm", NOW, "root")
+cases["rsa-inter"] = ([rll, rii], "test.example", "ok", NOW, "root")
 
 # Other stores. `other` has another name. `impostor-*` have the real name and another key.
 stores = {"root": [root], "rsaroot": [rsa_root]}

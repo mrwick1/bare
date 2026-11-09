@@ -38,6 +38,15 @@ mod sha384;
 #[path = "../../crates/tls/src/trust_store.rs"]
 mod trust_store;
 #[allow(dead_code)]
+#[path = "../../crates/tls/src/bigint.rs"]
+mod bigint;
+#[allow(dead_code)]
+#[path = "../../crates/tls/src/hello.rs"]
+mod hello;
+#[allow(dead_code)]
+#[path = "../../crates/tls/src/rsa.rs"]
+mod rsa;
+#[allow(dead_code)]
 #[path = "../../crates/tls/src/verify.rs"]
 mod verify;
 #[allow(dead_code)]

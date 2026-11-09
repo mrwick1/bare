@@ -21,6 +21,12 @@
 #[path = "../../crates/tls/src/aes_gcm.rs"]
 mod aes_gcm;
 #[allow(dead_code)]
+#[path = "../../crates/tls/src/bigint.rs"]
+mod bigint;
+#[allow(dead_code)]
+#[path = "../../crates/tls/src/rsa.rs"]
+mod rsa;
+#[allow(dead_code)]
 #[path = "../../crates/tls/src/client.rs"]
 mod client;
 #[allow(dead_code)]

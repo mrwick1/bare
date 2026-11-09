@@ -21,11 +21,13 @@
 //! - Unknown critical extensions fail. nameConstraints, policyMappings, policyConstraints
 //!   and inhibitAnyPolicy are not implemented, so a certificate that carries one FAILS,
 //!   critical or not. A critical SAN with any name that is not DNS or IP fails.
-//! - Signatures: ecdsa-with-SHA256 or SHA384 only. The curve is the ISSUER key's curve.
-//!   The hash is the one the certificate's own algorithm names.
+//! - Signatures: ecdsa-with-SHA256 or SHA384 (the curve is the ISSUER key's curve), and
+//!   sha256WithRSAEncryption or sha384WithRSAEncryption (RSASSA-PKCS1-v1_5, issuer key 2048
+//!   to 4096 bits, see [`crate::rsa`]). The hash is the one the certificate's own algorithm
+//!   names. An EC issuer cannot sign with an RSA algorithm, and the reverse.
 //!
 //! NOT done: revocation (CRL, OCSP, stapling), certificate transparency, policy
-//! processing, name normalisation, RSA, Ed25519, trust-anchor constraints other than the
+//! processing, name normalisation, RSA-PSS or SHA-512 certificate signatures, Ed25519, trust-anchor constraints other than the
 //! anchor certificate's own extensions, a leaf that is itself an anchor. An unparsable
 //! UNUSED peer certificate is ignored; an unparsable leaf or anchor-store entry is not used.
 //!
@@ -35,7 +37,9 @@
 
 use crate::der::{self, Reader};
 use crate::ecc;
+use crate::hello;
 use crate::hostname::{self, SanName};
+use crate::rsa;
 use crate::sha256::sha256;
 use crate::sha384::sha384;
 use crate::trust_store::TrustStore;
@@ -46,7 +50,8 @@ pub const MAX_CHAIN_BYTES: usize = 64 * 1024;
 pub const MAX_INTERMEDIATES: usize = 4;
 pub const MAX_SIG_CHECKS: usize = 8;
 
-/// ecdsa_secp256r1_sha256, the only CertificateVerify scheme the ClientHello offers.
+/// ecdsa_secp256r1_sha256, a CertificateVerify scheme the ClientHello offers (P-256 leaf).
+/// The others are `hello::RSA_PSS_RSAE_SHA256` and `hello::RSA_PSS_RSAE_SHA384` (RSA leaf).
 pub const SIG_ECDSA_SECP256R1_SHA256: u16 = 0x0403;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,7 +77,7 @@ pub enum Error {
     CaKeyUsage,
     CaEku,
     PathLen,
-    /// Not an EC P-256/P-384 key, or not on the curve.
+    /// Not an EC P-256/P-384 key or an RSA key, or not on the curve.
     BadKey,
     /// The signature algorithm, or the issuer key type, cannot be verified here.
     UnsupportedAlgorithm,
@@ -82,7 +87,7 @@ pub enum Error {
     TooManyChecks,
     /// The CertificateVerify scheme was not offered.
     UnsupportedScheme,
-    /// The scheme needs another curve than the leaf key's.
+    /// The scheme needs another key than the leaf's: another curve, or RSA instead of EC.
     SchemeKeyMismatch,
 }
 
@@ -97,8 +102,8 @@ impl std::error::Error for Error {}
 #[derive(Debug, Clone, Copy)]
 pub struct VerifiedPeer<'a> {
     leaf: Certificate<'a>,
-    curve: x509::Curve,
-    point: &'a [u8],
+    /// `PublicKey::Ec`, checked to be on the curve, or `PublicKey::Rsa`.
+    key: PublicKey<'a>,
     path_certs: usize,
 }
 
@@ -106,9 +111,9 @@ impl<'a> VerifiedPeer<'a> {
     pub fn leaf(&self) -> &Certificate<'a> {
         &self.leaf
     }
-    /// The leaf key: curve and `04 || X || Y`, checked to be on the curve.
-    pub fn leaf_key(&self) -> (x509::Curve, &'a [u8]) {
-        (self.curve, self.point)
+    /// The leaf key: an EC curve and `04 || X || Y` (checked to be on the curve), or RSA.
+    pub fn leaf_key(&self) -> PublicKey<'a> {
+        self.key
     }
     /// Certificates on the path, leaf and anchor included.
     pub fn path_certs(&self) -> usize {
@@ -211,12 +216,14 @@ fn verify_ecdsa_der(curve: x509::Curve, point: &[u8], digest: &[u8], sig_der: &[
 
 /// Is `c`'s signature made by `issuer`'s key, with the hash that `c`'s algorithm names?
 fn check_sig(c: &Certificate<'_>, issuer: &Certificate<'_>) -> Result<(), Error> {
-    let PublicKey::Ec { curve, point } = issuer.public_key else {
-        return Err(Error::UnsupportedAlgorithm);
+    let rsa = |k: rsa::PublicKey<'_>, hash: rsa::Hash, digest: &[u8]| {
+        k.verify_pkcs1(hash, digest, c.signature).map_err(|_| Error::BadSignature)
     };
-    match c.sig_alg {
-        SigAlg::EcdsaSha256 => verify_ecdsa_der(curve, point, &sha256(c.tbs), c.signature),
-        SigAlg::EcdsaSha384 => verify_ecdsa_der(curve, point, &sha384(c.tbs), c.signature),
+    match (issuer.public_key, c.sig_alg) {
+        (PublicKey::Ec { curve, point }, SigAlg::EcdsaSha256) => verify_ecdsa_der(curve, point, &sha256(c.tbs), c.signature),
+        (PublicKey::Ec { curve, point }, SigAlg::EcdsaSha384) => verify_ecdsa_der(curve, point, &sha384(c.tbs), c.signature),
+        (PublicKey::Rsa(k), SigAlg::RsaPkcs1Sha256) => rsa(k, rsa::Hash::Sha256, &sha256(c.tbs)),
+        (PublicKey::Rsa(k), SigAlg::RsaPkcs1Sha384) => rsa(k, rsa::Hash::Sha384, &sha384(c.tbs)),
         _ => Err(Error::UnsupportedAlgorithm),
     }
 }
@@ -331,10 +338,11 @@ pub fn verify_server_chain<'a>(
     hostname::verify(host, names).map_err(Error::Host)?;
     common(&leaf, now)?;
     leaf_checks(&leaf)?;
-    let PublicKey::Ec { curve, point } = leaf.public_key else {
-        return Err(Error::BadKey);
-    };
-    check_key(curve, point)?;
+    match leaf.public_key {
+        PublicKey::Ec { curve, point } => check_key(curve, point)?,
+        PublicKey::Rsa(_) => {}
+        PublicKey::Unsupported { .. } => return Err(Error::BadKey),
+    }
     let mut s = Search {
         chain,
         parsed: [None; MAX_CHAIN_CERTS],
@@ -345,7 +353,7 @@ pub fn verify_server_chain<'a>(
     };
     s.parsed[0] = Some(Some(leaf));
     match s.find(&leaf, 0, 0) {
-        Some(path_certs) => Ok(VerifiedPeer { leaf, curve, point, path_certs }),
+        Some(path_certs) => Ok(VerifiedPeer { leaf, key: leaf.public_key, path_certs }),
         None => Err(s.why),
     }
 }
@@ -362,23 +370,32 @@ fn certificate_verify_content(transcript_hash: &[u8; 32]) -> [u8; 130] {
 }
 
 /// Check the server's CertificateVerify. `scheme` is the 16-bit SignatureScheme from the
-/// message; only 0x0403 (the one offered) passes, and it needs a P-256 leaf key.
+/// message. Three pass, the ones the ClientHello offers: 0x0403 (ecdsa_secp256r1_sha256, P-256
+/// leaf key, `sig` is a DER ECDSA signature), 0x0804 and 0x0805 (rsa_pss_rsae_sha256 and
+/// sha384, RSA leaf key, `sig` is the raw RSA signature).
 /// `transcript_hash` is SHA-256 over the handshake up to, not including, CertificateVerify.
-/// `sig_der` is the DER ECDSA signature from the message.
 pub fn verify_certificate_verify(
     peer: &VerifiedPeer<'_>,
     scheme: u16,
     transcript_hash: &[u8; 32],
-    sig_der: &[u8],
+    sig: &[u8],
 ) -> Result<(), Error> {
-    if scheme != SIG_ECDSA_SECP256R1_SHA256 {
-        return Err(Error::UnsupportedScheme);
+    let content = certificate_verify_content(transcript_hash);
+    match (scheme, peer.key) {
+        (SIG_ECDSA_SECP256R1_SHA256, PublicKey::Ec { curve: x509::Curve::P256, point }) => {
+            verify_ecdsa_der(x509::Curve::P256, point, &sha256(&content), sig)
+        }
+        (hello::RSA_PSS_RSAE_SHA256, PublicKey::Rsa(k)) => {
+            k.verify_pss(rsa::Hash::Sha256, &sha256(&content), sig).map_err(|_| Error::BadSignature)
+        }
+        (hello::RSA_PSS_RSAE_SHA384, PublicKey::Rsa(k)) => {
+            k.verify_pss(rsa::Hash::Sha384, &sha384(&content), sig).map_err(|_| Error::BadSignature)
+        }
+        (SIG_ECDSA_SECP256R1_SHA256 | hello::RSA_PSS_RSAE_SHA256 | hello::RSA_PSS_RSAE_SHA384, _) => {
+            Err(Error::SchemeKeyMismatch)
+        }
+        _ => Err(Error::UnsupportedScheme),
     }
-    if peer.curve != x509::Curve::P256 {
-        return Err(Error::SchemeKeyMismatch);
-    }
-    let digest = sha256(&certificate_verify_content(transcript_hash));
-    verify_ecdsa_der(peer.curve, peer.point, &digest, sig_der)
 }
 
 #[cfg(test)]
@@ -401,7 +418,7 @@ mod tests {
     const HOST: &str = "staging.app.8vox.ai";
 
     /// `openssl verify` accepts these, and this validator rejects them on purpose.
-    const STRICTER: [&str; 12] = [
+    const STRICTER: [&str; 10] = [
         "deep-5",
         "ok-any-eku",
         "leaf-ku-keyenc",
@@ -412,8 +429,6 @@ mod tests {
         "inter-nc-critical",
         "inter-policy-constraints",
         "leaf-nc",
-        "rsa-root",
-        "rsa-inter",
     ];
 
     #[test]
@@ -502,7 +517,7 @@ mod tests {
         let st = store("x2");
         let p = verify_server_chain(&STAGING, &st, HOST, STAGING_NOW).unwrap();
         assert_eq!(p.path_certs(), 4); // leaf, YE2, Root YE, X2 (the RSA cross-sign is unused)
-        assert_eq!(p.leaf_key().0, x509::Curve::P256);
+        assert!(matches!(p.leaf_key(), PublicKey::Ec { curve: x509::Curve::P256, .. }));
         // Also without the unneeded cross-sign.
         assert_eq!(staging(&STAGING[..3], &st, HOST, STAGING_NOW), Ok(4));
         assert_eq!(staging(&STAGING[..2], &st, HOST, STAGING_NOW), Err(Error::NoIssuer));
@@ -642,6 +657,29 @@ mod tests {
         assert_eq!(label(&run(&s.chain, &st, s.host, NOW)), "NoIssuer");
     }
 
+    /// The RSA signature is on the intermediate in `rsa-root` and on the leaf in `rsa-inter`.
+    #[test]
+    fn rsa_certificate_signatures_are_checked() {
+        for (name, signed) in [("rsa-root", 1), ("rsa-inter", 0)] {
+            let c = case(name);
+            let st = store(c.store);
+            assert!(run(&c.chain, &st, c.host, c.now).is_ok(), "{name}");
+            let cert = x509::parse(&c.chain[signed]).unwrap();
+            assert!(matches!(cert.sig_alg, SigAlg::RsaPkcs1Sha256), "{name}");
+            let at = cert.signature.as_ptr() as usize - c.chain[signed].as_ptr() as usize;
+            for off in [0, 1, 100, cert.signature.len() - 1] {
+                let mut chain = c.chain.clone();
+                chain[signed][at + off] ^= 0x04;
+                assert_eq!(run(&chain, &st, c.host, c.now).err(), Some(Error::BadSignature), "{name} {off}");
+            }
+            // The signed bytes: one changed byte in the validity period still parses and fails.
+            let mut chain = c.chain.clone();
+            let tbs = cert.tbs.as_ptr() as usize - c.chain[signed].as_ptr() as usize;
+            chain[signed][tbs + cert.tbs.len() - 1] ^= 1;
+            assert!(run(&chain, &st, c.host, c.now).is_err(), "{name} tbs");
+        }
+    }
+
     #[test]
     fn depth_limit() {
         let st = store("root");
@@ -698,8 +736,12 @@ mod tests {
         // Another transcript with the good signature.
         assert!(verify_certificate_verify(&p, s, &th(b"other transcript"), &cv("ok", "ok")).is_err());
         // Unoffered schemes, even with the right signature bytes.
-        for bad in [0x0503, 0x0804, 0x0401, 0x0807, 0x0000, 0x0403 ^ 0x0100] {
+        for bad in [0x0503, 0x0401, 0x0807, 0x0000, 0x0403 ^ 0x0100] {
             assert_eq!(verify_certificate_verify(&p, bad, &h, &cv("ok", "ok")), Err(Error::UnsupportedScheme));
+        }
+        // Offered RSA-PSS schemes need an RSA leaf key.
+        for rsa_scheme in [0x0804, 0x0805] {
+            assert_eq!(verify_certificate_verify(&p, rsa_scheme, &h, &cv("ok", "ok")), Err(Error::SchemeKeyMismatch));
         }
         // Malformed signatures.
         let good = cv("ok", "ok");
@@ -718,11 +760,42 @@ mod tests {
     }
 
     #[test]
+    fn certificate_verify_with_an_rsa_leaf() {
+        const V: &str = include_str!("../../../tools/fixtures/rsa/vectors.txt");
+        let c = case("ok");
+        let leaf = x509::parse(&c.chain[0]).unwrap();
+        let fields = |kind: &str, key: &str, scheme: Option<&str>| -> Vec<&'static str> {
+            V.lines()
+                .map(|l| l.split(' ').collect::<Vec<_>>())
+                .find(|f| f[0] == kind && f[1] == key && scheme.is_none_or(|s| f[2] == s))
+                .unwrap()
+        };
+        for key in ["rsa2048", "rsa4096"] {
+            let der = unhex(fields("key", key, None)[2]);
+            let k = rsa::PublicKey::from_pkcs1(&der).unwrap();
+            let peer = VerifiedPeer { leaf, key: PublicKey::Rsa(k), path_certs: 2 };
+            for (scheme, code) in [("0804", hello::RSA_PSS_RSAE_SHA256), ("0805", hello::RSA_PSS_RSAE_SHA384)] {
+                let f = fields("cv", key, Some(scheme));
+                let (th, sig) = (unhex(f[3]).try_into().unwrap(), unhex(f[4]));
+                assert_eq!(verify_certificate_verify(&peer, code, &th, &sig), Ok(()), "{key} {scheme}");
+                let other = if code == hello::RSA_PSS_RSAE_SHA256 { hello::RSA_PSS_RSAE_SHA384 } else { hello::RSA_PSS_RSAE_SHA256 };
+                assert_eq!(verify_certificate_verify(&peer, other, &th, &sig), Err(Error::BadSignature));
+                let mut bad = sig.clone();
+                bad[7] ^= 1;
+                assert_eq!(verify_certificate_verify(&peer, code, &th, &bad), Err(Error::BadSignature));
+                assert_eq!(verify_certificate_verify(&peer, code, &th, &sig[1..]), Err(Error::BadSignature));
+                assert_eq!(verify_certificate_verify(&peer, SIG_ECDSA_SECP256R1_SHA256, &th, &sig), Err(Error::SchemeKeyMismatch));
+                assert_eq!(verify_certificate_verify(&peer, 0x0401, &th, &sig), Err(Error::UnsupportedScheme));
+            }
+        }
+    }
+
+    #[test]
     fn certificate_verify_key_pairing() {
         // A P-384 leaf chain is valid, but 0x0403 needs P-256.
         let c = case("ok-leaf-p384");
         let p = run(&c.chain, &store("root"), c.host, NOW).unwrap();
-        assert_eq!(p.leaf_key().0, x509::Curve::P384);
+        assert!(matches!(p.leaf_key(), PublicKey::Ec { curve: x509::Curve::P384, .. }));
         let h = th(b"bare transcript");
         for v in ["ok", "sha384"] {
             assert_eq!(

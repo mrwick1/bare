@@ -3578,3 +3578,45 @@ Bare bugs found, not fixed:
 Cost matrix: 629 rows ran, mean +0.006% glibc, 0 rows over. 176 `bare-stress` rows did not run, as the base build has no `bare-stress`. `cargo test --release --workspace` passes.
 
 Not tested: a run on arjun-e16, Chrome side by side, the journeys with `--window`, a site that needs RSA (react.dev, nextjs.org, developer.mozilla.org: the steps there are written but never ran past the TLS error, so they may need changes).
+
+## RSA in bare-tls (2026-11-09)
+
+Goal: `react.dev`, `nextjs.org` and `developer.mozilla.org` failed with `PeerAlert(40)` or `UnexpectedRecord(23)`. Their servers sign CertificateVerify with `rsa_pss_rsae_sha256` (checked with `openssl s_client`). Their chains are RSA-2048 leaf, RSA-2048 intermediate, RSA-4096 root, all `sha256WithRSAEncryption`. `bare` offered only ECDSA P-256 and P-384. `bare-tls` still has zero dependencies: the big integers and the RSA code are new files.
+
+What is new:
+- `crates/tls/src/bigint.rs`: unsigned integers up to 4096 bits on the stack, Montgomery multiplication (u64 limbs, u128 products) and `base^e mod n` for a public `e`. No allocation. Not constant time. A bad modulus (even, zero, one, over 4096 bits) gives `None`, never a panic.
+- `crates/tls/src/rsa.rs`: PKCS#1 v1.5 verify (strict: the encoded message is rebuilt and compared byte for byte, no BER leniency, no DigestInfo without NULL) and RSA-PSS verify (MGF1 with the same hash, salt length equal to the hash length, trailer 0xbc) for SHA-256 and SHA-384. Key policy: modulus 2048 to 4096 bits and odd, exponent odd from 3 to 2^32 - 1. The signature must have the length of the modulus and be below it.
+- `x509.rs`: `PublicKey::Rsa`, `SigAlg::RsaPkcs1Sha384`. An RSA key that breaks the policy is a parse error. `rsaEncryption` needs NULL parameters. The ECDSA paths are unchanged.
+- `verify.rs`: an issuer with an RSA key verifies `sha256WithRSAEncryption` and `sha384WithRSAEncryption` certificate signatures. An EC issuer cannot use an RSA algorithm, and the reverse. The leaf may be RSA. `verify_certificate_verify` takes 0x0804 and 0x0805 for an RSA leaf. The pinned and limited behaviour (8 certificates, 64 KiB, 4 intermediates, 8 signature checks) is as before.
+- `hello.rs`: `signature_algorithms` is 0x0403, 0x0804, 0x0805. `signature_algorithms_cert` is 0x0403, 0x0503, 0x0401, 0x0501. The ClientHello grows by 8 bytes (`MAX_CLIENT_HELLO_LEN` 434 to 442). `client.rs` checks CertificateVerify for a P-256 or an RSA leaf. A scheme that does not fit the leaf key is `illegal_parameter`. The CertificateVerify limit is now 516 bytes (RSA-4096 signature).
+
+Tests (all pass): 5 bigint tests (independent bit-serial reference, random odd moduli from 1 to 512 bytes, all-ones modulus, hostile moduli, bad arguments); 5 rsa tests over `tools/fixtures/rsa/vectors.txt` (172 cases from `gen.py`: valid openssl signatures for 9 keys, 120 crafted bad paddings signed with the real private key, and per valid signature: bit flips, wrong digest, other hash, other scheme, short, long, empty, signature equal to n, n + 2, 2^k - 1, 0, 1, n - 1); x509 and verify tests for RSA keys, both RSA certificate fixtures that main rejected (`rsa-root`, `rsa-inter`, now accepted, with tampered-signature checks), and RSA-PSS CertificateVerify for RSA-2048 and RSA-4096; 2 new OpenSSL `s_server` tests (RSA leaf of 2048, 3072 and 4096 bits, EC root and RSA root, sha256 and sha384 root signatures, PSS with SHA-256 and SHA-384, wrong root). The ECDSA-only client fixtures (`tools/fixtures/client`) signed the old ClientHello transcript. I made a new key, leaf and signatures (the key is deleted).
+
+Cost (archMachine, release, `cargo run --release -p bare-tls --example rsa_load`, best of 5, no allocation in the loops):
+
+| Key | PKCS#1 verify with SHA-256 of 1.2 KB (µs) | RSA-PSS CertificateVerify (µs) | Modulus set-up alone (µs) |
+| --- | --- | --- | --- |
+| RSA-2048 | 40.6 | 40.9 | 9.2 |
+| RSA-3072 | 92.7 | 93.3 | 23.1 |
+| RSA-4096 | 164.9 | 166.0 | 41.0 |
+
+A chain of three RSA-2048 verifies (leaf by intermediate, intermediate by root, CertificateVerify) costs 122 µs. One ECDSA P-256 verify costs about 95 µs (see "ECDSA verification"), so a full RSA handshake spends less than 1.3 P-256 verifies. The first version took 49.0 µs; computing R^2 from 2^64 R (5 squarings, not 11) cut the set-up from 17.8 to 9.2 µs. Nothing is precomputed or cached.
+
+ECDSA path, instructions (`perf stat -e instructions:u`, a scripted-server replay of one client handshake with the pinned P-256 leaf, which is the unit test binary with `--exact`, three runs, main 7ac2135 against this change): `client::tests::no_alpn_is_accepted` 5,627,972 to 5,630,172 (+0.04%); `client::tests::handshake_and_application_data` 6,491,450 to 6,493,507 (+0.03%). The runs are repeatable to 0.02%. The staging server was reachable, but a live run of `bare` against it is not repeatable to better than about 2%: `https_load hs 10` (loopback `s_server`, main thread only) gave 821.6M to 853.8M on main and 824.9M to 855.5M on this change, eight runs each. I did not build `bare` from main, so no live staging instruction count exists.
+
+Live (`bare-drive`, headless, steps `timeout 20000`, `open https://HOST/`, `expect css="body" visible`, `shot s`, build of this branch):
+
+| Site | TLS | Steps | Time |
+| --- | --- | --- | --- |
+| react.dev | OK | all 4 ok, page drawn | 1.30 s |
+| nextjs.org | OK | all 4 ok | 1.39 s |
+| developer.mozilla.org | OK | all 4 ok, page drawn | 0.63 s |
+| example.com | OK | all 4 ok | 0.15 s |
+| news.ycombinator.com | OK | all 4 ok | 1.36 s |
+| en.wikipedia.org | OK | all 4 ok | 1.29 s |
+
+There was no new error on any site. I did not run staging steps (the owner runs `tools/drive/staging-journey.steps`).
+
+Limits: RSA keys of 2048 to 4096 bits only (a root with a smaller RSA key does not parse and is never an anchor). No RSA-PSS signatures on certificates, no SHA-512 or SHA-1 certificate signatures (the crate has no SHA-512), no `rsassaPss` keys (only `rsaEncryption`), no PKCS#1 v1.5 CertificateVerify (TLS 1.3 forbids it), no client certificates. Variable-time code: public values only. `tools/crypto/client_load.rs` did not build before this change (`connect_inner` is gone); I added the new module lines to it and did not repair it.
+
+Not tested: other RSA chains than the six sites and the OpenSSL ones (for example a 4096-bit leaf or an intermediate with e = 3 from a real CA), a chain with RSA-PSS certificate signatures, non-x86 hardware, the portable SHA-256 path with RSA, `bare` against staging after this change, arjun-e16.

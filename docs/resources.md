@@ -622,7 +622,7 @@ Reproduce: `cargo run --release -p bare-net --example https_load -- hs|ka|big|po
 
 Public staging checks use `bare` itself. `sh tools/staging_https_check.sh` prints `ok /login sha256 0bc6a3d32df8098c47b0de2d683ebcbeb5653d67717c39aa67c2bf2bbc12f773`. `bare --resources` reports 17 successful downloads and 575,754 bytes. Parent separately parsed the fixture's script/stylesheet references, ran `bare --source` for each distinct target and compared SHA-256 after removing only the CLI's final newline. All 17 match `tools/fixtures/staging/manifest-2026-11-04.json`. No live load or authenticated POST was run.
 
-Remaining limits: no HRR, TLS 1.2, resumption, KeyUpdate handling, wildcard SANs or IP-literal HTTPS. Key limits fail closed. Dropping a stream does not send close_notify. Early replies during a failed large TLS upload can surface as an error; POST is still never retried. Blocking application I/O uses socket timeouts. No non-Linux host or long-term leak measurement was tested. Runtime-generated chunks, JavaScript execution and login E2E remain open.
+Remaining limits: no HRR, TLS 1.2, resumption, KeyUpdate handling, wildcard SANs or IP-literal HTTPS. Signatures (2026-11-09): ECDSA P-256 and P-384 certificates; RSA of 2048 to 4096 bits with PKCS#1 v1.5 SHA-256 or SHA-384 in certificates; CertificateVerify with ECDSA P-256 or RSA-PSS (`rsa_pss_rsae_sha256`, `rsa_pss_rsae_sha384`). No Ed25519, RSA-PSS certificate signatures, SHA-512 or SHA-1 certificate signatures, `rsassaPss` keys or RSA keys under 2048 bits. Key limits fail closed. Dropping a stream does not send close_notify. Early replies during a failed large TLS upload can surface as an error; POST is still never retried. Blocking application I/O uses socket timeouts. No non-Linux host or long-term leak measurement was tested. Runtime-generated chunks, JavaScript execution and login E2E remain open.
 
 ## JavaScript lexical foundation
 
@@ -4689,3 +4689,15 @@ The first full run had 13 rows over the limit:
 - A live `bare --window` run on a hyprcage screen. The page tests drive `Page::handle` and `Page::paint`, as the window does.
 - A page that scrolls sideways past the band.
 - HiDPI, archMachine and macOS.
+
+## RSA signature verification
+
+2026-11-09, archMachine, release. `bare-tls` verifies RSA signatures with its own big integers (`bigint.rs`, `rsa.rs`). It has no dependency. Public keys only: 2048 to 4096 bits, odd modulus, odd exponent from 3 to 2^32 - 1. The code is variable-time and must only handle public values.
+
+| Key | PKCS#1 v1.5 verify with SHA-256 of 1.2 KB (µs) | RSA-PSS CertificateVerify (µs) | Modulus set-up alone (µs) |
+| --- | --- | --- | --- |
+| RSA-2048 | 40.6 | 40.9 | 9.2 |
+| RSA-3072 | 92.7 | 93.3 | 23.1 |
+| RSA-4096 | 164.9 | 166.0 | 41.0 |
+
+Reproduce: `cargo run --release -p bare-tls --example rsa_load`. The loops make no heap allocation. A chain of three RSA-2048 verifies costs 122 µs. The ECDSA path is unchanged: a scripted client handshake with the pinned P-256 leaf takes +0.04% instructions (5,627,972 to 5,630,172). `react.dev`, `nextjs.org` and `developer.mozilla.org` complete the TLS handshake. Details and limits: [progress.md](progress.md#rsa-in-bare-tls-2026-11-09).
