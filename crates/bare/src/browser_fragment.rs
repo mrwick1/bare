@@ -454,6 +454,7 @@ fn replace(d: &Dom, it: &mut Interp<'_>, html: &str, n: NodeId, in_frag: bool, p
     }
     Ok(())
     })?;
+    if frag.doc.find_atom("iframe").is_some() { crate::browser_frames::activate(d, it)?; }
     Ok(Value::Undefined)
 }
 

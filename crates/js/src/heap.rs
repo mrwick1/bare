@@ -143,7 +143,7 @@ mod binary;
 pub use binary::{load, sort_elems, store, Decoder, Elem, ExoticKind, IndexedSource, Slot, TYPED};
 #[path = "heap_named.rs"]
 mod named;
-pub use named::{NamedOp, NamedRequest, NamedSource};
+pub use named::{NamedOp, NamedRequest, NamedSource, NamedValue};
 #[path = "heap_prim.rs"]
 mod prim;
 #[path = "heap_proxy.rs"]
@@ -1419,6 +1419,7 @@ impl Heap {
             Some(115) => named!("screen") || named!("sheet") || named!("styleSheets"),
             Some(67) => named!("CSSStyleSheet") || named!("CSSStyleRule") || named!("CSSRuleList"),
             Some(83) => named!("StyleSheetList") || named!("SVGAnimatedString") || (u.starts_with(&[83,86,71]) && u.ends_with(&[69,108,101,109,101,110,116])),
+            Some(68) => named!("DocumentType"),
             _ => false,
         }
     }

@@ -200,7 +200,7 @@ fn opaque(p: Part, scheme: &str, rest: &str) -> String {
         Part::Pathname => path.to_string(),
         Part::Search => with("?", query),
         Part::Hash => with("#", hash),
-        Part::Host | Part::Hostname | Part::Port => String::new(),
+        Part::Host | Part::Hostname | Part::Port | Part::Username | Part::Password => String::new(),
     }
 }
 

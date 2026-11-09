@@ -872,7 +872,7 @@ impl Dom {
                 let kg = self.key(it, "getReader")?;
                 let g = it.get_value(v, kg)?;
                 if it.is_callable_value(g) {
-                    return Err(Error::Unsupported(unsupported("a ReadableStream as a body")));
+                    return Err(it.type_error("ReadableStream request bodies are not supported"));
                 }
                 self.text_body(it, v)?
             }

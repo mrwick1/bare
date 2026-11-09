@@ -5264,3 +5264,73 @@ Task: add public journeys for sites that passed survey 5 and had no journey. The
 
 - Runs on another network or from a different region.
 - Content drift: a site redesign can break a journey. Assertions use stable text, but no site is fixed.
+## Named iframe windows and request-local failures (2026-11-10)
+
+The work started from origin/main 44ab2f8e37 (#312). The final rebase is onto origin/main 4f54c0178e (#319). The final cost baseline is 4f54c0178e from base-build.
+
+Window named access now finds attached HTML iframes by name, id or numeric index. frames remains the window. Its length reads the current tree. Document named properties return the iframe element. Existing getElementsByName returns its live NodeList. Renames, moves, duplicate names and removals change the result. contentWindow retains one identity per iframe. Detached iframes return null. Child documents remain inert: no child navigation, script execution, document or service worker was added.
+
+The named-property heap hook can now return a rooted object value as well as UTF-16 text. Frame state and the named prototype chains materialize only after an iframe tag is present. Frame scans charge the script budget. A batch prepays eight probes because a VM lookup can probe the same named prototype more than twice. The existing Value, Property and Object size checks remain in force. No field was added to those VM structures.
+
+The BBC stop came from extract_body in browser_fetch.rs. It returned Unsupported for a body with getReader. Unsupported bypassed Axios's feature-test catch block and ended the page. That body now throws TypeError. fetch rejects that request; Request and Response constructors throw a catchable exception. Blob body extraction remains supported. A regression checks that code after a rejected stream-body fetch runs. Streaming upload and stream-to-Response buffering remain unsupported.
+
+HTTP(S) URL records retain percent-encoded username and password. Getters, setters, href and relative resolution preserve them. Host and origin exclude them. Fetch and Request reject URLs with credentials before a request is queued. They send no Authorization header. History rejects a credential change with SecurityError. HTTP host parsing now uses the IDNA support already present in bare_url. The old browser-layer gate was obsolete. The baseline rejected the Unicode-host regression before the gate was removed.
+
+Guardian next reached DocumentType, then eval. DocumentType now has a distinct Node prototype and an illegal constructor. Its name comes from the parsed doctype. publicId and systemId are empty because the HTML tree does not retain them. eval remains excluded from this change.
+
+Bing's captured bare-UA HTML puts /rp/0DkivOHGsxc4qmgnASpvPr2oCS0.js and /rp/B-BmrXq18Vgc-gaDIQdtASFNr_Q.js before /rp/fu2LagmGVc6nttrTnv6Ir6e747E.js. The first calls t(sj_be,n) from BM.wireup's immediate load callback. The second reads _w.BM. The later core file starts with var _w=window,_d=document and defines sj_be. The captured stack is script#8:1:351, called by u at script#5:3:142, then script#9:1:258 for _w. Node reproduces both ReferenceErrors when it executes the saved BM bootstrap and those two scripts in that order. This is a dependency-order error in that response, not a missing window alias. A separate Chrome-UA response has a different script layout and reaches document completion without those two exceptions in the saved-page run. No window globals or network headers were patched to hide the ordering error.
+
+After the frame retry fix, the saved Bing page settles. It next reads navigator.serviceWorker.controller without a guard in /rp/PNP6sUqOLW_M1zug__-AythpfbA.js at script#58:1:29. A later autosuggest error reads length from undefined at script#86:1:65618 in /rp/M9hGw5n2GMxFs23AZS9MZ2P6tLk.js. That later expression remains unverified because the fetched file differs at that offset. Two network script tasks exceed the Steps budget. No service worker container was faked.
+
+NYTimes again returns HTTP 403 with bare/0.1 headers and with a Chrome User-Agent, navigation Accept and en-US Accept-Language. Both bodies contain a captcha-delivery.com challenge. The tested header changes do not remove the bot block. The server's exact classification rule remains unknown. No bypass was attempted.
+
+### Cost history
+
+The first 805-row matrix against 29ab4eaa02 found 39 rows over +0.5% under both allocators. Three structural attempts followed: skip frame work on inactive realms and remove the extra named-read dispatch; defer iframe and DocumentType accessor registration; then use a one-pointer OnceCell container for cold frame state. The container has a compile-time pointer-size assertion. Existing Value, Property and Object size assertions still pass. No field was added to those VM structures. After these attempts, a 122-row recheck still had 17 rows over under both allocators and 3 rows over under one. Most of those rows had a near-constant offset: about +122,000 instructions under glibc and +155,000 under jemalloc for each process.
+
+### Final cost check
+
+The branch was rebased twice: onto 2e79fbe0d1 (#315 and #316), then onto 4f54c0178e (#318 and #319). Conflicts were in fill_indexed, define_window, the lazy global name list, the navigation tests and this file. Both sides were kept. No other code changed. For each rebase both trees were built fresh: BASE with base-build into a new directory, so its cost cache was empty; NEW in /data/bare-tmp/site-js-errors-3/target. archMachine load average was 13 to 23 during the runs.
+
+On 2e79fbe0d1, the 20 earlier rows ran 3 times with -J and no row was over +0.5% under either allocator. The full matrix had 0 rows over. On 4f54c0178e, the same 20 rows ran 3 times with -J (both allocators on every row). No row is over +0.5% under either allocator in any run. The table shows the largest change of the three runs on 4f54c0178e.
+
+| Earlier flagged row | glibc max | jemalloc max |
+| --- | ---: | ---: |
+| `examples/dataset_load keys 1000 1` | +0.006% | +0.011% |
+| `examples/dataset_load read 1000 1` | +0.053% | +0.050% |
+| `examples/dataset_load write 1000 1` | -0.011% | +0.014% |
+| `examples/fetch_load bytes 1` | +0.101% | +0.043% |
+| `examples/fetch_load post 1` | -0.058% | -0.089% |
+| `examples/fragment_load deep 1` | +0.087% | +0.010% |
+| `examples/fragment_load replace 1` | +0.300% | +0.251% |
+| `examples/interact_load churn 1` | -0.002% | -0.002% |
+| `examples/loader_load blocking 10` | +0.269% | +0.211% |
+| `examples/loader_load blocking 1` | +0.093% | +0.057% |
+| `examples/loader_load dynamic 1` | +0.072% | +0.051% |
+| `examples/loader_load mixed 1` | +0.059% | +0.023% |
+| `examples/navigation_load route 1` | +0.324% | +0.310% |
+| `examples/resources_load small 1` | -0.036% | +0.184% |
+| `examples/revive_load gc 1` | -0.003% | +0.002% |
+| `examples/scheduler_load messages 1` | -0.063% | -0.053% |
+| `examples/scheduler_load timers 10` | -0.156% | -0.142% |
+| `examples/streams_load churn 1` | +0.014% | +0.007% |
+| `examples/stringify_load gc 1` | +0.018% | +0.004% |
+| `examples/style_load churn 1` | -0.183% | -0.160% |
+
+The constant offset is gone. Fresh counts of revive_load gc 1 (glibc, without env) are 4,586,466 on the 29ab4eaa02 base binary, 4,586,242 on the 2e79fbe0d1 base binary and 4,586,314 on NEW after the first rebase. The cached 29ab4eaa02 count (4,801,000, with env) still matches a fresh count of that binary (4,797,026). So the earlier offset was on the NEW binary of 7e25ee22, not on the base. The exact source of that offset is not proven. That binary was overwritten by the rebuild and was not measured again.
+
+Full matrix after the final rebase onto 4f54c0178e: 805 rows in 126 s. Over under both allocators: 0. Over under one allocator: 0. Failed: 0. Mean change: glibc -0.001%. No row reached the jemalloc rerun. The largest glibc changes are fragment_load replace 10 (+0.417%), web_apis_load clone 10 (+0.382%), web_apis_load clone 1 (+0.373%) and navigation_load route 10 (+0.371%). No exception was used.
+
+### Final checks
+
+All checks ran on the final rebase onto 4f54c0178e.
+
+- cargo test --release --workspace: 3,307 passed, 0 failed, 13 ignored.
+- test262_check: gate ok. Six directories have newly passing tests.
+- exec_diff: 79 runs in tree, auto and byte modes. Differences: 0.
+- keycost: 282.5 M instructions for each textarea key and 287.9 M for each input key. Peak RSS is 33.2 MiB at 20 keys and at 50 keys.
+- tools/drive/public/run.sh: 48 pass, 0 fail, 0 known, 0 skip, 0 flakes.
+
+Site state from before the rebase: the BBC probe reaches document completion with no script exception during 30 seconds; network failures remain. Guardian reaches eval and failed telemetry fetches. Bing keeps the captured dependency-order exceptions, then the service-worker and autosuggest errors. NYTimes remains HTTP 403. These site probes were not repeated after the rebase.
+
+Not tested: actual Chrome execution, BBC placeholder pixels, iframe child navigation or scripts, stream upload buffering, the exact later Bing autosuggest expression, and the live site probes after the final rebase. Prototype-only iframe member access before the first iframe activation remains a deviation of the deferred registration.

@@ -19,7 +19,7 @@
 //!
 //! Supported (tested):
 //! - Globals: `window`, `self`, `globalThis` (the same object), `document`, `Node`, `Element`, `HTMLElement`,
-//!   `HTMLInputElement`, `HTMLIFrameElement` (inert brand only: no `contentWindow`, no nested context, no fetch), `HTMLLinkElement`, `HTMLFormElement`, `HTMLButtonElement`, `CharacterData`, `Text`, `Comment`, `Document`, `DocumentFragment` and `ShadowRoot` (illegal constructors), `EventTarget`, `Event`, `CustomEvent`,
+//!   `HTMLInputElement`, `HTMLIFrameElement` (inert named windows; no child document or fetch), `HTMLLinkElement`, `HTMLFormElement`, `HTMLButtonElement`, `CharacterData`, `Text`, `Comment`, `Document`, `DocumentFragment` and `ShadowRoot` (illegal constructors), `EventTarget`, `Event`, `CustomEvent`,
 //!   `SubmitEvent`, `DOMException`.
 //! - `new DocumentFragment()` and `document.createDocumentFragment()` make an empty fragment. A plain fragment (no host) goes in as its children (`Dom::place`): one change group, the fragment is left empty. A shadow root is still `Unsupported`. `before`, `after` and `replaceWith` are on `Element` and `CharacterData`. `replaceChildren` is on `Element` and `DocumentFragment` (one function object, not on `Document`). `insertAdjacentElement`, `insertAdjacentText` and `insertAdjacentHTML` are on `Element`. Installed after every other global (`install_late`).
 //! - `HTMLAnchorElement`, `HTMLAreaElement` and `HTMLTemplateElement` (lazy, `browser_elements.rs`): `href` and the URL parts, `template.content`. `new FormData(form)` reads the form data set.
@@ -515,12 +515,13 @@ pub struct Dom {
     /// `offsetWidth` and `offsetHeight` (`browser_geometry.rs`).
     pub(crate) geometry: crate::browser_geometry::Geometry,
     /// `document.implementation`, once read (`browser_implementation.rs`). It is also in `fixed`.
-    pub(crate) parsing_protos: std::cell::Cell<[Option<ObjId>; 2]>,
+    pub(crate) parsing_protos: std::cell::Cell<[Option<ObjId>; 3]>,
     pub(crate) implementation: std::cell::Cell<Option<ObjId>>,
     /// The prototype and the constructor of `PerformanceObserver`, once read (`browser_perf_observer.rs`). Both are also in `fixed`.
     pub(crate) perf_observer: std::cell::Cell<Option<ObjId>>,
     pub(crate) perf_observer_ctor: std::cell::Cell<Option<ObjId>>,
     /// The `mark` and `measure` entries of `performance` (`browser_perf.rs`).
+    pub(crate) frames: crate::browser_frames::Frames,
     pub(crate) perf_entries: RefCell<Vec<crate::browser_perf::Entry>>,
     /// The prototype and constructor of each interface of `browser_html.rs`, once made.
     pub(crate) html_ifaces: RefCell<Vec<Option<(ObjId, ObjId)>>>,
@@ -622,6 +623,7 @@ impl Host for Dom {
     }
 
     fn trace(&self, owner: ObjId, out: &mut Vec<Value>) {
+        if self.frames.active() { crate::browser_frames::trace(self, owner, out); }
         self.sched_trace(owner, out);
         crate::browser_navigation::trace(self, owner, out);
         crate::browser_platform::trace(self, owner, out);
@@ -670,6 +672,7 @@ impl Host for Dom {
 
     fn prune(&self, live: &dyn Fn(ObjId) -> bool) {
         crate::browser_navigation::prune(self, live);
+        crate::browser_frames::prune(self, live);
         crate::browser_platform::prune(self, live);
         crate::browser_geom::prune(self, live);
         crate::browser_style::prune(self, live);
@@ -712,6 +715,7 @@ impl Host for Dom {
 
     fn fill_indexed(&self, it: &mut Interp<'_>, owner: ObjId, index: u32) -> R<()> {
         if index == bare_js::heap::LAZY_TAG { return crate::browser_handlers::tags(self,it); }
+        if index == crate::browser_frames::FILL { crate::browser_frames::fill(self, it, owner, index)?; return Ok(()); }
         if (bare_js::heap::LAZY_ALL..u32::MAX).contains(&index) {
             return crate::browser_handlers::lazy(self, it, owner, index == bare_js::heap::LAZY_ALL);
         }
@@ -756,10 +760,16 @@ pub(crate) fn define_window(d: &Dom, it: &mut Interp<'_>, name: &str) -> R<bool>
         d.def_method(it,it.global_object(),"eval",1,|_,it,_,a|it.eval_global(a.first().copied().unwrap_or(Value::Undefined)))?;
         return Ok(true);
     }
+    if name == "DocumentType" { crate::browser_implementation::doctype_global(d, it, Value::Undefined, &[])?; return Ok(true); }
     if !matches!(name,"frames"|"parent"|"top"|"length"|"name"|"screen"){return Ok(false);}
     let g = it.global_object();
     let key=d.key(it,name)?;
     if it.heap.peek_own_property(g,key).map_err(|e|it.heap_error(e))?.is_some(){return Ok(true);}
+    if name == "length" {
+        let f = d.add_fn(it, crate::browser_frames::length, "get length", 0, false)?;
+        d.define_accessor(it, g, key, f, None)?;
+        return Ok(true);
+    }
     let value = match name {
         "frames" | "parent" | "top" => Value::Object(g),
         "length" => Value::Number(0.0),
@@ -896,7 +906,7 @@ impl Dom {
                         Ns::Svg => crate::browser_svg::wrapper_proto(self,it,doc.atom_str(name))?,
                         Ns::MathMl => p.element,
                         _ => match doc.atom_str(name) {
-                            "iframe" => p.iframe,
+                            "iframe" => { crate::browser_frames::activate(self, it)?; p.iframe },
                             "link" => p.link,
                             "style" => crate::browser_cssom::wrapper_proto(self,it)?,
                             "a" | "area" | "template" | "img" | "slot" => crate::browser_elements::proto(self, it, doc.atom_str(name))?,
@@ -914,7 +924,7 @@ impl Dom {
                     NodeData::Document => p.document,
                     NodeData::ShadowRoot if doc.shadow_host(n).is_some() => p.shadow,
                     NodeData::ShadowRoot => p.fragment,
-                    NodeData::Doctype(_) => p.node,
+                    NodeData::Doctype(_) => crate::browser_implementation::doctype_proto(self, it)?,
                 };
                 // A custom element whose wrapper was collected gets the prototype of its definition again.
                 if self.ce.on.get() { self.ce_proto(&doc, n, proto) } else { proto }
@@ -1516,6 +1526,7 @@ impl Browser {
             parsing_protos: Default::default(),
             perf_observer: Default::default(),
             perf_observer_ctor: Default::default(),
+            frames: Default::default(),
             perf_entries: Default::default(),
             html_ifaces: Default::default(),
             html_on: Default::default(),
@@ -1547,7 +1558,8 @@ impl Browser {
         it.heap.set_named_source(dom.clone());
         it.host_scope(|it| {
             dom.install(it)?;
-            dom.install_scheduler(it)
+            dom.install_scheduler(it)?;
+            crate::browser_frames::activate(&dom, it)
         })?;
         Ok(Browser { it, dom })
     }

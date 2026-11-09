@@ -48,12 +48,17 @@ use super::*;
 /// cheap, must not allocate JavaScript objects and must not run JavaScript. `owner` is the object that was asked, which can be
 /// a prototype of the object that the page touched. A key is UTF-16 code units. `Err` means the host cannot answer now (for
 /// example its state is borrowed); the error stops the script and is never an empty answer.
+pub enum NamedValue {
+    Text(Vec<u16>),
+    Value(Value),
+}
+
 pub trait NamedSource {
     /// Is `key` the name of a property of `owner` now? `Ok(false)`: no, or `owner` is not a live object of this host.
     fn named_has(&self, owner: ObjId, key: &[u16]) -> R<bool>;
     /// The value of the property `key` of `owner` now. `Ok(None)`: there is none. The heap calls it only right after `named_has`
     /// answered `true` for the same key, so a host that charges for a long scan has charged already and must not charge again.
-    fn named_get(&self, owner: ObjId, key: &[u16]) -> R<Option<Vec<u16>>>;
+    fn named_get(&self, owner: ObjId, key: &[u16]) -> R<Option<NamedValue>>;
     /// How many names `owner` has now (cheap: no list). The evaluator charges it before `named_keys` runs.
     fn named_len(&self, owner: ObjId) -> R<usize>;
     /// The names of `owner` now, in the host's order.
@@ -159,8 +164,11 @@ impl Heap {
             _ => return Ok(r),
         }
         let Some(units) = self.key_units(key)? else { return Ok(r) };
-        let Some(text) = self.named_source()?.named_get(o, &units)? else { return Ok(r) };
-        let value = Value::String(self.intern_units(&text)?);
+        let Some(value) = self.named_source()?.named_get(o, &units)? else { return Ok(r) };
+        let value = match value {
+            NamedValue::Text(text) => Value::String(self.intern_units(&text)?),
+            NamedValue::Value(value) => value,
+        };
         Ok(Some(Property::Data { value, writable: true, enumerable: true, configurable: true }))
     }
 

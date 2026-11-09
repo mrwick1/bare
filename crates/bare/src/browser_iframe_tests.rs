@@ -106,9 +106,9 @@ fn clones_moves_and_collection_keep_the_brand() {
 fn nested_browsing_contexts_are_inert() {
     big(|| {
         let mut b = browser(PAGE);
-        // nothing of the active context is exposed: no fake window, document or navigation
-        assert_eq!(js(&mut b, "var f = document.getElementById('p'); [typeof f.contentWindow, typeof f.contentDocument, typeof f.src, typeof f.srcdoc, typeof f.sandbox, typeof f.loading, typeof f.getSVGDocument, 'contentWindow' in HTMLIFrameElement.prototype].join()"), "undefined,undefined,undefined,undefined,undefined,undefined,undefined,false");
-        assert_eq!(js(&mut b, "Object.getOwnPropertyNames(HTMLIFrameElement.prototype).join()"), "constructor");
+        // The named window is inert. Child documents and navigation remain absent.
+        assert_eq!(js(&mut b, "var f = document.getElementById('p'); [typeof f.contentWindow, typeof f.contentDocument, typeof f.src, typeof f.srcdoc, typeof f.sandbox, typeof f.loading, typeof f.getSVGDocument, 'contentWindow' in HTMLIFrameElement.prototype].join()"), "object,undefined,undefined,undefined,undefined,undefined,undefined,true");
+        assert_eq!(js(&mut b, "Object.getOwnPropertyNames(HTMLIFrameElement.prototype).join()"), "constructor,contentWindow,name");
         assert_eq!(js(&mut b, "typeof window.frames + ',' + typeof window.parent + ',' + typeof window.frameElement"), "object,object,undefined");
         // attributes stay plain attributes: no reflection, no side effect
         assert_eq!(js(&mut b, "f.setAttribute('src', '/other.html'); f.setAttribute('srcdoc', '<p>x</p>'); [f.getAttribute('src'), f.getAttribute('srcdoc'), f.hasAttribute('name')].join()"), "/other.html,<p>x</p>,false");
@@ -144,10 +144,33 @@ fn reduced_react_su_walks_focus_without_a_nested_context() {
             function su() { for (var e = window, t = e6(); t instanceof e.HTMLIFrameElement;) { try { var n = 'string' == typeof t.contentWindow.location.href } catch (e) { n = !1 } if (n) e = t.contentWindow; else break; t = e6(e.document) } return t }");
         // body focused: the loop does not start (before the fix `window.HTMLIFrameElement` was undefined and this threw)
         assert_eq!(js(&mut b, "su() === document.body"), "true");
-        // an iframe is the active element: contentWindow is undefined, the try/catch ends the loop, the iframe is returned
+        // An iframe is active: its inert window has no location, so the walk ends at the iframe.
         js(&mut b, "var f = document.getElementById('p'); f.setAttribute('tabindex', '0'); f.focus();");
         assert_eq!(js(&mut b, "var r = su(); [r instanceof HTMLIFrameElement, r === document.activeElement].join()"), "true,true");
         // a trivial createRoot-like render in the same realm no longer throws on the instanceof check
         assert_eq!(js(&mut b, "var out; try { out = (document.getElementById('d') instanceof window.HTMLIFrameElement) ? 'y' : 'n' } catch (e) { out = 'throw:' + e.message } out"), "n");
+    });
+}
+
+#[test]
+fn named_iframes_follow_the_document() {
+    big(|| {
+        let mut b = browser("<body><iframe name='__tcfapiLocator' id='locator'></iframe></body>");
+        assert_eq!(js(&mut b, "var f = document.getElementById('locator'); [typeof f.contentWindow === 'object', frames === window, frames.length, window.__tcfapiLocator === f.contentWindow, frames[0] === f.contentWindow, window.locator === f.contentWindow, document.locator === f, document.getElementsByName('__tcfapiLocator')[0] === f].join()"), "true,true,1,true,true,true,true,true");
+        assert_eq!(js(&mut b, "f.name = 'other'; typeof window.__tcfapiLocator + ',' + (frames.other === f.contentWindow)"), "undefined,true");
+        assert_eq!(js(&mut b, "f.remove(); [frames.length, typeof frames.other, typeof window.locator].join()"), "0,undefined,undefined");
+        assert_eq!(js(&mut b, "var g = document.createElement('iframe'); g.name = 'newFrame'; document.body.appendChild(g); frames.newFrame === g.contentWindow && frames[0] === g.contentWindow"), "true");
+        b.collect(&[]).unwrap();
+        assert_eq!(js(&mut b, "frames.newFrame === g.contentWindow && g.contentWindow.frameElement === g"), "true");
+        assert_eq!(js(&mut b, "var h = document.createElement('iframe'); h.name = 'newFrame'; document.body.insertBefore(h, g); frames[0] === h.contentWindow && frames.newFrame === h.contentWindow"), "true");
+        assert_eq!(js(&mut b, "h.remove(); frames.newFrame === g.contentWindow && h.contentWindow === null"), "true");
+    });
+}
+
+#[test]
+fn frame_lookup_in_large_documents_retries_host_reads() {
+    big(|| {
+        let mut b = browser(&format!("<body>{}<iframe name='child' id='f'></iframe></body>", "<div></div>".repeat(50)));
+        assert_eq!(js(&mut b, "var c = frames.child; [c === frames[0], c === document.getElementById('f').contentWindow, typeof window.missing].join()"), "true,true,undefined");
     });
 }

@@ -30,12 +30,12 @@ impl NamedSource for X {
         let k = text(key);
         Ok(self.owner.get() == Some(owner) && self.pairs.try_borrow().map_err(|_| HeapError::HostUnavailable)?.iter().any(|(n, _)| *n == k))
     }
-    fn named_get(&self, owner: ObjId, key: &[u16]) -> Result<Option<Vec<u16>>, HeapError> {
+    fn named_get(&self, owner: ObjId, key: &[u16]) -> Result<Option<crate::heap::NamedValue>, HeapError> {
         let k = text(key);
         if self.owner.get() != Some(owner) {
             return Ok(None);
         }
-        Ok(self.pairs.try_borrow().map_err(|_| HeapError::HostUnavailable)?.iter().find(|(n, _)| *n == k).map(|(_, v)| v.encode_utf16().collect()))
+        Ok(self.pairs.try_borrow().map_err(|_| HeapError::HostUnavailable)?.iter().find(|(n, _)| *n == k).map(|(_, v)| crate::heap::NamedValue::Text(v.encode_utf16().collect())))
     }
     fn named_len(&self, owner: ObjId) -> Result<usize, HeapError> {
         Ok(if self.owner.get() == Some(owner) { self.pairs.try_borrow().map_err(|_| HeapError::HostUnavailable)?.len() } else { 0 })
@@ -317,7 +317,7 @@ fn heap_without_a_source_and_host_without_named_write_fail_loudly() {
         struct Bare;
         impl NamedSource for Bare {
             fn named_has(&self, _: ObjId, _: &[u16]) -> Result<bool, HeapError> { Ok(false) }
-            fn named_get(&self, _: ObjId, _: &[u16]) -> Result<Option<Vec<u16>>, HeapError> { Ok(None) }
+            fn named_get(&self, _: ObjId, _: &[u16]) -> Result<Option<crate::heap::NamedValue>, HeapError> { Ok(None) }
             fn named_len(&self, _: ObjId) -> Result<usize, HeapError> { Ok(0) }
             fn named_keys(&self, _: ObjId) -> Result<Vec<Vec<u16>>, HeapError> { Ok(Vec::new()) }
         }

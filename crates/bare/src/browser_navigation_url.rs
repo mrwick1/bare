@@ -5,8 +5,8 @@
 //! silently turned into another URL (checked against Node's `URL` by `tools/js/navigation_check.sh`):
 //! - it drops the fragment, so `Rec` keeps it (`frag`);
 //! - `parse` does not remove dot segments (`join` does): the path always goes through `join`;
-//! - no user info (`u:p@host`), no `\` as `/`, no `http:host` or `http:///host` forms, no `%2e` dot segments;
-//! - hosts are ASCII only: a non-ASCII, `%`-escaped or `xn--` host is gated (IDNA is not claimed);
+//! - HTTP user info is retained separately; no backslash normalization, shorthand HTTP forms or escaped dot segments;
+//! - HTTP host names use the IDNA conversion of `bare_url`; other schemes keep their host gates;
 //! - `parse` accepts only `http` and `https`. Any other scheme is `UErr::Scheme` (a script may still see it as a cross-origin
 //!   refusal, as `pushState` does). `parse_any` is for the `URL` class: it also reads other schemes into an `Alt` (see there).
 
@@ -25,6 +25,7 @@ pub(crate) enum UErr {
 pub(crate) struct Rec {
     pub u: Url,
     pub frag: Option<String>,
+    pub userinfo: Option<Box<(String, String)>>,
 }
 
 /// A URL of another scheme (`data:`, `mailto:`, `blob:`, `about:`, `ws:`, `sveltekit-internal://`): the parts that `URL` shows. The host is kept as
@@ -53,7 +54,7 @@ fn dup(u: &Url) -> Url {
 
 impl Clone for Rec {
     fn clone(&self) -> Rec {
-        Rec { u: dup(&self.u), frag: self.frag.clone() }
+        Rec { u: dup(&self.u), frag: self.frag.clone(), userinfo: self.userinfo.clone() }
     }
 }
 
@@ -97,14 +98,15 @@ fn absolute(scheme: &str, after: &str) -> Result<Rec, UErr> {
     }
     let end = after.find(['/', '?']).unwrap_or(after.len());
     let (auth, tail) = after.split_at(end);
-    if auth.contains('@') {
-        return Err(UErr::Gate("user info in a URL"));
-    }
+    let (userinfo, auth) = match auth.rsplit_once('@') {
+        Some((info, host)) => {
+            let (user, pass) = info.split_once(':').unwrap_or((info, ""));
+            (Some(Box::new((userinfo_encode(user), userinfo_encode(pass)))), host)
+        }
+        None => (None, auth),
+    };
     if auth.is_empty() {
         return Err(UErr::Invalid);
-    }
-    if !auth.starts_with('[') {
-        host_gate(auth.split(':').next().unwrap_or(""))?;
     }
     let root = Url::parse(&format!("{scheme}://{auth}/")).map_err(|_| UErr::Invalid)?;
     if tail.starts_with("//") {
@@ -114,7 +116,7 @@ fn absolute(scheme: &str, after: &str) -> Result<Rec, UErr> {
         return Err(UErr::Gate("percent-encoded dot segment"));
     }
     let u = if tail.is_empty() { root } else { root.join(tail).map_err(|_| UErr::Invalid)? };
-    Ok(Rec { u, frag: None })
+    Ok(Rec { u, frag: None, userinfo })
 }
 
 /// Parse `input`, relative to `base` when it has no scheme.
@@ -147,7 +149,7 @@ pub(crate) fn parse(input: &str, base: Option<&Rec>) -> Result<Rec, UErr> {
         if dot_escape(rest) {
             return Err(UErr::Gate("percent-encoded dot segment"));
         }
-        Rec { u: b.u.join(rest).map_err(|_| UErr::Invalid)?, frag: None }
+        Rec { u: b.u.join(rest).map_err(|_| UErr::Invalid)?, frag: None, userinfo: b.userinfo.clone() }
     };
     rec.frag = frag;
     Ok(rec)
@@ -163,7 +165,7 @@ fn norm(p: &str) -> Result<String, UErr> {
 }
 
 /// `parse` for the `URL` class: a URL of any scheme. `http` and `https` go to `parse`. Another scheme gives an `Alt` record, and so does a relative
-/// reference against an `Alt` base. Not modelled: user info, IDNA hosts, percent-encoding of an opaque path, `file:` drive letters, `\`.
+/// reference against an `Alt` base. HTTP(S) URLs retain user info. Other-scheme user info, IDNA hosts on other schemes, opaque-path encoding, file drives and backslashes remain gated.
 pub(crate) fn parse_any(input: &str, base: Option<&Rec>) -> Result<Rec, UErr> {
     // Fast path: an `http(s)` or scheme-less input against a base that is not an `Alt` is the strict parser's. It reads only the scheme part, and copies nothing.
     if base.is_none_or(|b| !b.is_alt()) {
@@ -195,7 +197,7 @@ pub(crate) fn parse_any(input: &str, base: Option<&Rec>) -> Result<Rec, UErr> {
             None => return parse(input, base),
         },
     };
-    Ok(Rec { u: alt.into_url(), frag })
+    Ok(Rec { u: alt.into_url(), frag, userinfo: None })
 }
 
 fn alt_absolute(scheme: &str, after: &str) -> Result<Alt, UErr> {
@@ -307,6 +309,12 @@ impl Rec {
     }
     pub fn href(&self) -> String {
         let mut s = if self.is_alt() { self.u.path.clone() } else { self.u.to_string() };
+        if let Some(info) = &self.userinfo {
+            if !info.0.is_empty() || !info.1.is_empty() {
+                let auth = if info.1.is_empty() { info.0.clone() } else { format!("{}:{}", info.0, info.1) };
+                s = s.replacen("://", &format!("://{auth}@"), 1);
+            }
+        }
         if let Some(f) = &self.frag {
             s.push('#');
             s.push_str(f);
@@ -509,11 +517,15 @@ pub(crate) enum Part {
     Pathname,
     Search,
     Hash,
+    Username,
+    Password,
 }
 
 impl Part {
     pub fn get(self, r: &Rec) -> String {
         match self {
+            Part::Username => r.userinfo.as_ref().map_or(String::new(), |i| i.0.clone()),
+            Part::Password => r.userinfo.as_ref().map_or(String::new(), |i| i.1.clone()),
             Part::Href => r.href(),
             Part::Protocol => r.protocol(),
             Part::Host => r.host(),
@@ -528,6 +540,13 @@ impl Part {
     /// Set a component. `Href` is not handled here (it needs a fresh parse).
     pub fn set(self, r: &mut Rec, v: &str) -> Result<(), UErr> {
         match self {
+            Part::Username | Part::Password => {
+                if !r.is_alt() {
+                    let info = r.userinfo.get_or_insert_with(|| Box::new((String::new(), String::new())));
+                    if self == Part::Username { info.0 = userinfo_encode(v); } else { info.1 = userinfo_encode(v); }
+                }
+                Ok(())
+            }
             Part::Href => unreachable!("href is parsed, not set"),
             Part::Protocol => r.set_protocol(v),
             Part::Host => r.set_host(v, true),
@@ -597,6 +616,16 @@ pub(crate) fn form_serialize(list: &[(String, String)]) -> String {
         form_enc(n, &mut out);
         out.push('=');
         form_enc(v, &mut out);
+    }
+    out
+}
+
+fn userinfo_encode(s: &str) -> String {
+    let mut out = String::new();
+    for b in clean(s).bytes() {
+        if b <= b' ' || b >= 0x7f || b"\"#<>?`{}/:;=@[\\]^|".contains(&b) {
+            out.push_str(&format!("%{b:02X}"));
+        } else { out.push(b as char); }
     }
     out
 }
