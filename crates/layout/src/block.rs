@@ -107,6 +107,7 @@ pub struct Pos {
 }
 
 /// A length in pixels. A percent is of `base`. `None` for `auto` and `none`, and for a percent of an unknown base.
+#[inline(always)]
 pub fn resolve(cx: &Cx, v: Value, base: Option<f32>) -> Option<f32> {
     let px = match v {
         Value::Length(Length::Px(x)) => Some(x),
@@ -119,6 +120,11 @@ pub fn resolve(cx: &Cx, v: Value, base: Option<f32>) -> Option<f32> {
         Value::Length(Length::Calc(i)) => {
             let (px, pct) = cx.tree.styles.calc(i);
             match base {
+                // A `min()`, `max()` or `clamp()` has NaN pixels and a non-zero pct (its operator code): the cold code reads its tree.
+                Some(b) if px.is_nan() => {
+                    std::hint::cold_path();
+                    Some(cx.tree.styles.math_at(i, b))
+                }
                 Some(b) => Some(px + b * pct / 100.0),
                 None if pct == 0.0 => Some(px),
                 None => {
@@ -1010,6 +1016,28 @@ pub(crate) mod tests {
         assert_eq!(rect("<div id=d></div>", css, "d"), r(8.0, 8.0, 100.0, 50.0));
         // Percent padding is of the parent's width, also on top.
         assert_eq!(rect("<div id=d style='padding-top:10%'></div>", "", "d").h, 78.4);
+    }
+
+    #[test]
+    fn min_max_clamp_lengths() {
+        let w = |style: &str| rect(&format!("<div id=d style='{style};height:1px'></div>"), "", "d").w;
+        // The window is 800 wide and the body is 784: 50% is 392.
+        assert_eq!(w("width:min(300px, 80vw)"), 300.0);
+        assert_eq!(w("width:min(300px, 50%)"), 300.0);
+        assert_eq!(w("width:min(500px, 50%)"), 392.0);
+        assert_eq!(w("width:max(100px, 10%)"), 100.0);
+        assert_eq!(w("width:max(100px, 20%)"), 156.8);
+        assert_eq!(w("width:clamp(100px, 50%, 300px)"), 300.0);
+        assert_eq!(w("width:clamp(500px, 50%, 600px)"), 500.0);
+        assert_eq!(w("width:calc(min(100px, 50%) + 10px)"), 110.0);
+        assert_eq!(w("width:min(100%, 20em)"), 320.0);
+        assert_eq!(w("width:min(5%, 1rem);margin-left:max(1px, 2px)"), 16.0);
+        assert_eq!(w("width:200px;max-width:min(100px, 50%)"), 100.0);
+        assert_eq!(w("width:50px;min-width:max(100px, 10%)"), 100.0);
+        assert_eq!(rect("<div id=d style='padding-top:min(10px, 50%)'></div>", "", "d").h, 10.0);
+        // A percent height of a parent with `height: auto` is `auto`.
+        assert_eq!(rect("<div id=d style='height:min(10px, 50%)'></div>", "", "d").h, 0.0);
+        assert_eq!(rect("<div style='height:200px'><div id=d style='height:min(150px, 50%)'></div></div>", "", "d").h, 100.0);
     }
 
     #[test]

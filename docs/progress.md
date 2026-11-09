@@ -4293,3 +4293,68 @@ The console printed `[object]` for the thrown `Error`, because the formatter nev
 - gnu.org with a ClientHello change: the host blocked both addresses, so no run could show an effect.
 - A TLS 1.2 client for craigslist.org.
 - Whether other React sites set styles on MathML elements (MathML still has no `style`).
+
+## `min()`, `max()` and `clamp()` in lengths (2026-11-09)
+
+The Rust book sidebar has `width: min(...)`. The engine did not read it, so the width was 0. Now `min()`, `max()` and `clamp()` work in every length property that reads `calc()`.
+
+### What it reads
+
+- The same operands as `calc()`: numbers, `px`, `em`, `rem`, `%`, `vw`, `vh`, `vmin`, `vmax`, and nested `calc()`, `min()`, `max()` and `clamp()`.
+- A percentage resolves at layout time, when the base is known. `min()` and `max()` are not linear in the percentage, so they cannot use the `calc()` slots.
+
+### How
+
+- `crates/css/src/calc.rs` parses a function into a flat prefix list of `Copy` entries. The declared form is a list of `Linear` entries in `Side::calcs`. NaN in the `px` slot marks an operator. After the cascade the form is `[f32; 2]` entries in `Styles::calcs`, and `[NaN, code + 16n]` marks an operator.
+- A `min()`, `max()` or `clamp()` is a `Length::Calc(u32)`. The `Length` enum has no new variant. The first entry of its tree has NaN pixels (an operator). A plain `calc()` has real pixels there.
+- `resolve_math` and `font_size_math` in `cascade.rs` are cold functions. The layout `resolve` has one more guard in its `Calc` arm: `Some(b) if px.is_nan()`, behind `cold_path()`, and `resolve` is `#[inline(always)]`.
+- A `Vec<Node>` tree cost drop glue in hot code. The flat lists removed it.
+
+### Checks
+
+- Unit tests in `calc.rs` and `cascade.rs`. A layout test `min_max_clamp_lengths` in `crates/layout/src/block.rs`.
+- Rust book (`https://doc.rust-lang.org/book/`, bare-drive, `shot`): the sidebar was 0 px wide before and is 300 px now. The `rust-book-sidebar` journey passes. The known-bug line is gone from `tools/drive/public/rust-book-sidebar.steps`.
+- The page still looks wrong. See "Noticed".
+- `cargo test --release --workspace`, `tools/drive/public/run.sh` (fail 0).
+
+### Cost gate: not met (2026-11-09, second attempt)
+
+The rule is +0.5% under both allocators. Base is `b6ade1f` (the base of the branch). Each variant was built and measured on 10 to 24 probe rows.
+
+| Variant | Result |
+|---|---|
+| Old: a `Math` variant and a `Math` arm in `resolve` | 90 rows over. `geometry_load stretch` +2.0%. |
+| No change in `resolve` (the `Math` arm removed, all the other code kept) | 0 rows over. The new css code costs nothing. |
+| No `Math` variant. Math is a `Calc` with NaN pixels. An early `return` in the `Calc` arm | Same as old: stretch +2.0%. |
+| The same as a match guard `Some(b) if px.is_nan()` | Same: stretch +2.1%. |
+| The guard, `resolve` is `#[inline(always)]`, `cold_path()` in the guard | Full matrix: 32 rows over, 3 over under one allocator. Worst `grid-sparse-spans` +0.98%, `grid-dense` +0.94%. `block-percent-calc` +0.52%, `geometry_load stretch` +0.64%. Mean glibc +0.06%. |
+| The whole `Calc` arm in an `#[inline(never)]` function | Worse: `block-percent-calc` +1.27%, stretch +0.9%, grid rows +1.0%. |
+
+Cause. Size of `Length`: the same as `main` now (no new variant), so the enum is not the cause. The cause is any edit of `resolve` in `crates/layout/src/block.rs`. It is inlined in `border_padding`, `widths_or`, `sized_with`, `grid::layout` and others. One more guard and one call make those functions bigger (`border_padding` 830 to 1349 bytes, `widths_or` 1252 to 1860 before `inline(always)`). The rows `grid-dense` and `grid-sparse-spans` have no `calc()`. They still grow by 0.9%, so the cost is code generation in the callers, not work that the new code does. The same happened when the arm was moved out of line. The code that runs for a page without `min()` is the same as before, plus one compare per `calc()`.
+
+The rows over (both allocators) under the best variant, in glibc percent: `block-list-items` +0.56, `block-percent-calc` +0.51, `flex-column-many-items 20000` +0.71, `floats-stack 20000` +0.59, `grid-absolute-children` +0.69 and +0.74, `grid-auto-columns-content` +0.78 and +0.80, `grid-auto-fill` +0.57 and +0.65, `grid-column-flow` +0.75 and +0.77, `grid-dense` +0.91 and +0.94, `grid-equal-columns` +0.70 and +0.73, `grid-inline-grids` +0.57 and +0.58, `grid-many-grids` +0.64 and +0.65, `grid-nested` +0.54 and +0.55, `grid-spanning-items` +0.76 and +0.78, `grid-sparse-spans` +0.95 and +0.98, `inline-deep-spans 20000` +0.69, `position-relative-spans 20000` +0.53, `geometry_load stretch` +0.64 and +0.61.
+
+The instruction counts are exact (`perf stat`, minimum of 3), so these rows are real extra instructions, not noise from the run. I could not prove that they are a compiler artifact (no callgrind here, and `perf record` samples do not add up on short runs). I did not mark them as exceptions. The branch is not merged.
+
+Ideas not tried: (1) make `resolve` generic over a constant, so a page without `min()` uses the old code (touches every caller); (2) resolve a `min()` before layout for nodes whose base is known; (3) accept the rows as documented layout noise (the owner decides).
+
+### Noticed, not changed
+
+- Logical properties like `margin-inline-start` are unsupported. The Rust book uses them.
+- The Rust book sidebar chapter list is not painted.
+
+Not tested: arjun-e16, the window mode, the typing cost.
+
+## Standing exception: PR #289 calc cost (approved by owner 2026-11-09)
+
+Arjun approved merging PR #289 with a cost regression. The branch head is 8c70ca4. It is rebased on main 303a85f.
+
+The cost matrix has 805 rows. Four jobs ran, with a limit of +0.5% under both allocators. 45 rows are over the limit under both allocators. 6 more rows are over under one allocator only. No row failed.
+
+- Worst row: `block-percent-calc 200000`, +1.275% glibc and +1.363% jemalloc.
+- `grid-sparse-spans` and `grid-dense` are about +1.0% under both allocators.
+- Mean change: glibc +0.072%. jemalloc +0.693% (51 rows measured).
+
+The cause is not proven. A possible cause is a layout shift in `resolve`. Hypothesis: to verify.
+
+Full row list: `/data/tmp/cm.txt`. Raw data: `/data/tmp/raw.tsv`.

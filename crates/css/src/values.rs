@@ -193,6 +193,8 @@ pub enum Length {
     Vmax(f32),
     /// A `calc()` that mixes units, like `100% - 20px`. The number is the place of its `Linear` in a list. In a declared value
     /// that is the list that `parse_declaration` fills. In a computed value it is the list of the `Styles`: a pair of pixels and percent.
+    /// A `min()`, `max()` or `clamp()` is also a `Calc`: its place holds a tree (`calc::encode`, `calc::flatten`), and the first entry has NaN pixels.
+    /// Then only the cold code reads the tree, and the hot code of the layout has no other case.
     Calc(u32),
 }
 
@@ -366,7 +368,7 @@ impl Parts {
                 Token::Dimension { value, unit, .. } => length(value, &unit).map_or(Part::Bad, Part::Length),
                 Token::Delim('/') => Part::Slash,
                 Token::Function(name) if color::is_function(&name) => color::parse_function(&name, &mut tokens).map_or(Part::Bad, Part::Color),
-                Token::Function(name) if calc::is_calc(&name) => read_calc(&mut tokens, calcs),
+                Token::Function(name) if calc::is_calc(&name) || calc::is_math(&name) => read_calc(&name, &mut tokens, calcs),
                 Token::Function(_) | Token::OpenParen | Token::OpenSquare | Token::OpenCurly => {
                     skip_block(&mut tokens);
                     Part::Other
@@ -391,7 +393,8 @@ impl Parts {
 }
 
 /// After `calc(`: read to the matching `)` and compute. A number is a number. One unit is a plain length. A mix goes in `calcs`.
-fn read_calc(tokens: &mut Tokens<'_>, calcs: &mut Vec<Linear>) -> Part {
+#[inline(never)]
+fn read_calc(name: &str, tokens: &mut Tokens<'_>, calcs: &mut Vec<Linear>) -> Part {
     let mut inner = Vec::new();
     let mut depth = 1u32;
     while let Some(token) = tokens.next() {
@@ -408,7 +411,13 @@ fn read_calc(tokens: &mut Tokens<'_>, calcs: &mut Vec<Linear>) -> Part {
         inner.push(token);
     }
     // A `calc(` that is not closed ends with the value: the standard closes it there.
-    match calc::parse(&inner, length) {
+    let result = if calc::is_calc(name) { calc::parse(&inner, length) } else { calc::parse_fn(name, &inner, length) };
+    match result {
+        Some(Calc::Math(node)) => {
+            let at = calcs.len() as u32;
+            calc::encode(&node, calcs);
+            Part::Length(Length::Calc(at))
+        }
         Some(Calc::Number(value)) => Part::Number { value, int: value.fract() == 0.0 },
         Some(Calc::Length(lin)) => match lin.single() {
             Some(Length::Percent(p)) => Part::Percent(p),

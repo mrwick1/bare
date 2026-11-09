@@ -60,7 +60,7 @@ use std::hash::BuildHasherDefault;
 use bare_html::dom::{Atom, Document, Fnv, Mark, NodeData, NodeId};
 
 use crate::at_rules;
-use crate::calc::Linear;
+use crate::calc::{self, Linear, Node};
 use crate::color::Color;
 use crate::grid::{self, Grid};
 use crate::matching::matches;
@@ -1233,6 +1233,14 @@ impl Cx<'_> {
         }
     }
 
+    /// The tree of a `min()`, `max()` or `clamp()` that starts at entry `i`, or the sum of units as a leaf.
+    fn expr(&self, i: u32) -> Node<Linear> {
+        let inline = self.inline.borrow();
+        let n = self.declared.calcs.len();
+        let get = |at: usize| if at < n { self.declared.calcs[at] } else { inline.calcs[at - n] };
+        crate::calc::decode(&get, i as usize).0
+    }
+
     /// The grid list `i` of the style sheets or of the `style=""` attribute.
     fn declared_grid(&self, i: u32) -> Grid {
         match self.declared.grids.get(i as usize) {
@@ -1246,6 +1254,25 @@ impl Cx<'_> {
             Some(v) => v.clone(),
             None => self.inline.borrow().vars[i as usize - self.declared.vars.len()].clone(),
         }
+    }
+
+    /// Keep a `min()`, `max()` or `clamp()` with a percent in it, and give its number: the place of its first pair in `Styles::calcs`.
+    fn keep_math(&self, node: Node<[f32; 2]>) -> u32 {
+        let mut c = self.computed.borrow_mut();
+        let mut flat = Vec::new();
+        calc::flatten(&node, &mut flat);
+        // The same tree as one that is there: use it. The list holds sums too, and a tree is many pairs.
+        let mut at = 0;
+        while at < c.list.len() {
+            let end = calc::flat_end(&c.list, at);
+            if c.list[at][0].is_nan() && calc::flat_same(&c.list, at, &flat, 0) {
+                return at as u32;
+            }
+            at = end;
+        }
+        let at = c.list.len() as u32;
+        c.list.extend(flat);
+        at
     }
 
     /// Keep the value `calc(px + pct%)` and give its number.
@@ -1375,6 +1402,27 @@ impl Styles {
         (px, pct)
     }
 
+    /// The pixels of a `Length::Calc` of a computed style when `base` pixels is 100%. A `min()`, `max()` or `clamp()` has NaN pixels in its first entry.
+    pub fn calc_at(&self, i: u32, base: f32) -> f32 {
+        let [px, pct] = self.calcs[i as usize];
+        if px.is_nan() {
+            return self.math_at(i, base);
+        }
+        px + base * pct / 100.0
+    }
+
+    /// The pixels of a `min()`, `max()` or `clamp()` of a computed style (a tree with a percent) when `base` pixels is 100%.
+    #[cold]
+    #[inline(never)]
+    pub fn math_at(&self, i: u32, base: f32) -> f32 {
+        calc::flat_eval(&self.calcs, i as usize, &|l| l[0] + base * l[1] / 100.0)
+    }
+
+    /// The text of a `min()`, `max()` or `clamp()` of a computed style: `min(300px, 50%)`.
+    pub fn math_text(&self, i: u32) -> String {
+        calc::flat_text(&self.calcs, i as usize)
+    }
+
     /// The grid list that a `Value::Grid` of a computed style points to.
     pub fn grid(&self, i: u32) -> &Grid {
         &self.grids[i as usize]
@@ -1454,7 +1502,7 @@ impl Styles {
         for (i, &p) in Property::ALL.iter().enumerate() {
             let (u, v) = (x[i], y[i]);
             let same = match (u, v) {
-                (Value::Length(Length::Calc(i)), Value::Length(Length::Calc(j))) => self.calcs[i as usize] == new.calcs[j as usize],
+                (Value::Length(Length::Calc(i)), Value::Length(Length::Calc(j))) => calc::flat_same(&self.calcs, i as usize, &new.calcs, j as usize),
                 (Value::Grid(i), Value::Grid(j)) => self.grids[i as usize] == new.grids[j as usize],
                 _ => u == v,
             };
@@ -1537,6 +1585,7 @@ fn show(v: Value, calcs: &[[f32; 2]], grids: &[Grid]) -> String {
         Value::Color(c) => format!("#{:02x}{:02x}{:02x}{:02x}", c.r, c.g, c.b, c.a),
         Value::Length(Length::Px(x)) => format!("{x}px"),
         Value::Length(Length::Percent(x)) => format!("{x}%"),
+        Value::Length(Length::Calc(i)) if calcs[i as usize][0].is_nan() => calc::flat_text(calcs, i as usize),
         Value::Length(Length::Calc(i)) => format!("calc({}px + {}%)", calcs[i as usize][0], calcs[i as usize][1]),
         Value::Number(x) => format!("{x}"),
         Value::Keyword(k) => k.name().to_string(),
@@ -1674,6 +1723,12 @@ fn start() -> &'static [Value; Property::COUNT] {
     &START
 }
 
+#[cold]
+#[inline(never)]
+fn font_size_math(i: u32, parent_size: f32, cx: &Cx<'_>) -> f32 {
+    cx.expr(i).eval(&|l: &Linear| l.to_px(parent_size, cx.root_font_size, cx.viewport) + l.pct() * parent_size / 100.0)
+}
+
 /// The font size of the element, in pixels. It is first, because `em` in the other properties needs it.
 fn font_size(winner: Option<Value>, parent_size: f32, cx: &Cx<'_>) -> f32 {
     match winner {
@@ -1686,6 +1741,9 @@ fn font_size(winner: Option<Value>, parent_size: f32, cx: &Cx<'_>) -> f32 {
         Some(Value::Length(Length::Percent(x))) => x * parent_size / 100.0,
         Some(Value::Length(Length::Calc(i))) => {
             let lin = cx.linear(i);
+            if calc::is_tree(lin) {
+                return font_size_math(i, parent_size, cx);
+            }
             lin.to_px(parent_size, cx.root_font_size, cx.viewport) + lin.pct() * parent_size / 100.0
         }
         Some(Value::Length(l)) => length_to_px(l, parent_size, cx),
@@ -1779,6 +1837,18 @@ fn compute(winners: &[Option<Value>; Property::COUNT], mut set: u128, parent: &C
     ComputedStyle(out, 0)
 }
 
+/// A `min()`, `max()` or `clamp()`: the units now, the percent at layout time (unless the property takes the percent now).
+#[cold]
+#[inline(never)]
+fn resolve_math(p: Property, i: u32, fs: f32, cx: &Cx<'_>) -> Value {
+    let m = cx.expr(i).map(&|l: &Linear| [l.to_px(fs, cx.root_font_size, cx.viewport), l.pct()]);
+    if p == Property::LineHeight || !m.any(&|l| l[1] != 0.0) {
+        Value::Length(Length::Px(m.eval(&|l| l[0] + l[1] * fs / 100.0)))
+    } else {
+        Value::Length(Length::Calc(cx.keep_math(m)))
+    }
+}
+
 /// Turn a value into its computed form. It does nothing to a value that is computed already (one from the parent).
 fn resolve(p: Property, v: Value, out: &[Value; Property::COUNT], parent: &ComputedStyle, fs: f32, cx: &Cx<'_>) -> Value {
     let px = |x| Value::Length(Length::Px(x));
@@ -1789,6 +1859,9 @@ fn resolve(p: Property, v: Value, out: &[Value; Property::COUNT], parent: &Compu
         Value::Length(Length::Percent(x)) if p == Property::LineHeight => px(x * fs / 100.0),
         Value::Length(Length::Calc(i)) => {
             let lin = cx.linear(i);
+            if calc::is_tree(lin) {
+                return resolve_math(p, i, fs, cx);
+            }
             let (x, pct) = (lin.to_px(fs, cx.root_font_size, cx.viewport), lin.pct());
             if p == Property::LineHeight {
                 px(x + pct * fs / 100.0)
@@ -2558,6 +2631,49 @@ mod tests {
                 a: 255
             })
         );
+    }
+
+    #[test]
+    fn min_max_clamp_in_the_cascade() {
+        let page = "<div id=a><p id=b>x</p></div>";
+        let sheet = "html { font-size: 20px } div { width: min(300px, 80vw); height: max(2em, 10px); font-size: clamp(10px, 1em + 1vw, 40px) }\
+            p { width: min(300px, 50%); height: clamp(10px, 50%, 2em); padding-left: calc(min(10px, 50%) + 1em); line-height: max(1em, 25%) }";
+        let (doc, styles) = styles(page, &[sheet]);
+        let get = |id: &str, p: Property| styles.style(by_id(&doc, id)).unwrap().get(p);
+        let px = |x| Value::Length(Length::Px(x));
+        // No percent: computed now. VIEW is 1000 wide: 80vw is 800. The font size of `div` is 20px + 1vw.
+        assert_eq!(get("a", Property::Width), px(300.0));
+        assert_eq!(get("a", Property::FontSize), px(30.0));
+        assert_eq!(get("a", Property::Height), px(60.0));
+        // A percent: kept until layout.
+        let Value::Length(Length::Calc(w)) = get("b", Property::Width) else { panic!("{:?}", get("b", Property::Width)) };
+        assert_eq!((styles.math_at(w, 392.0), styles.math_at(w, 1000.0)), (196.0, 300.0));
+        let Value::Length(Length::Calc(h)) = get("b", Property::Height) else { panic!() };
+        // `2em` is 60px here: `p` inherits the font size of `div`.
+        assert_eq!((styles.math_at(h, 10.0), styles.math_at(h, 100.0), styles.math_at(h, 1000.0)), (10.0, 50.0, 60.0));
+        let Value::Length(Length::Calc(l)) = get("b", Property::PaddingLeft) else { panic!() };
+        assert_eq!((styles.math_at(l, 10.0), styles.math_at(l, 100.0)), (35.0, 40.0));
+        assert_eq!(styles.math_text(w), "min(300px, 50%)");
+        // `line-height` takes a percent of the font size now.
+        assert_eq!(get("b", Property::LineHeight), px(30.0));
+    }
+
+    #[test]
+    fn min_max_clamp_in_the_style_attribute_and_in_var() {
+        let page = "<div id=a style='width:min(300px, 50%); height:clamp(1px, 2vw, 9px)'></div><div id=b style='width: var(--w); margin-left: max(5px, 1%)'></div>";
+        let sheet = "#b { --w: min(10px, 20%) } #a { padding-left: min(1em, 50%) }";
+        let (doc, styles) = styles(page, &[sheet]);
+        let get = |id: &str, p: Property| styles.style(by_id(&doc, id)).unwrap().get(p);
+        let at = |v: Value, base: f32| match v {
+            Value::Length(Length::Calc(i)) => styles.math_at(i, base),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(at(get("a", Property::Width), 200.0), 100.0);
+        assert_eq!(get("a", Property::Height), Value::Length(Length::Px(9.0)));
+        assert_eq!(at(get("a", Property::PaddingLeft), 10.0), 5.0);
+        assert_eq!(at(get("b", Property::Width), 20.0), 4.0);
+        assert_eq!(at(get("b", Property::Width), 500.0), 10.0);
+        assert_eq!(at(get("b", Property::MarginLeft), 100.0), 5.0);
     }
 
     #[test]

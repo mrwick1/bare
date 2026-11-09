@@ -9,7 +9,11 @@
 //! The standard says so, because `1 -2` is two numbers. A sum must add the same kind of things: `1 + 2px` is not good.
 //! `x * y` needs a number on one side. `x / y` needs a number that is not 0 on the right.
 //!
-//! Left out: `min()`, `max()`, `clamp()` and the other math functions, and the constants `pi` and `e`.
+//! `min()`, `max()` and `clamp()` take comma lists of the same sums, and nest in any of these. When all the arguments are in one unit
+//! (`min(1px, 2px)`), we pick the answer now. Otherwise the answer depends on `em`, `vw` or a percent that we do not know yet, so
+//! we keep a `Node` tree and compute it with the cascade (units) and at layout time (percent).
+//!
+//! Left out: the other math functions (`round()`, `mod()`, `sin()` ...), and the constants `pi` and `e`.
 //! Two known differences from Chrome. A `calc()` with one unit that is negative (`width: calc(1px - 5px)`) drops the declaration:
 //! Chrome keeps it and makes it 0 later. A mix (`calc(100% - 50px)`) is not made 0 when it is negative. And `x / 0` is not good here:
 //! Chrome accepts it.
@@ -79,23 +83,289 @@ impl Linear {
     }
 }
 
+// A `min()`, `max()` or `clamp()` is kept in `Side::calcs` as a list of `Linear` in prefix order, so that the list stays a plain `Vec` of `Copy`
+// values (the style code makes and drops one for each element with a `style=""`). A leaf is its `Linear`. An operation is a `Linear` with
+// NaN in the `px` slot, the operation in the `pct` slot, and a number in `em`: the number of children (`SUM`, `MIN`, `MAX`, `CLAMP`) or
+// the factor (`TERM`, one child follows, and a `SUM` has one `TERM` for each of its terms).
+const SUM: f32 = 1.0;
+const MIN: f32 = 2.0;
+const MAX: f32 = 3.0;
+const CLAMP: f32 = 4.0;
+const TERM: f32 = 5.0;
+
+fn op(code: f32, number: f32) -> Linear {
+    let mut v = [0.0; 8];
+    v[PX] = f32::NAN;
+    v[EM] = number;
+    v[PCT] = code;
+    Linear(v)
+}
+
+/// Is this entry the start of a `min()`, `max()`, `clamp()` or a sum with one of them? (Not a plain sum of units.)
+pub fn is_tree(l: Linear) -> bool {
+    l.0[PX].is_nan()
+}
+
+/// Add the entries of `node` to `out`.
+pub fn encode(node: &Node<Linear>, out: &mut Vec<Linear>) {
+    match node {
+        Node::Leaf(l) => out.push(*l),
+        Node::Sum(v) => {
+            out.push(op(SUM, v.len() as f32));
+            for (k, n) in v {
+                out.push(op(TERM, *k));
+                encode(n, out);
+            }
+        }
+        Node::Min(v) | Node::Max(v) => {
+            out.push(op(if matches!(node, Node::Min(_)) { MIN } else { MAX }, v.len() as f32));
+            v.iter().for_each(|n| encode(n, out));
+        }
+        Node::Clamp(c) => {
+            out.push(op(CLAMP, 3.0));
+            c.iter().for_each(|n| encode(n, out));
+        }
+    }
+}
+
+/// The tree that starts at `at`, and the place after it. `get` gives the entry of a place.
+pub fn decode(get: &impl Fn(usize) -> Linear, at: usize) -> (Node<Linear>, usize) {
+    let head = get(at);
+    if !is_tree(head) {
+        return (Node::Leaf(head), at + 1);
+    }
+    let (code, n) = (head.0[PCT], head.0[EM]);
+    let mut pos = at + 1;
+    if code == SUM {
+        let mut terms = Vec::new();
+        for _ in 0..n as usize {
+            let k = get(pos).0[EM];
+            let (child, next) = decode(get, pos + 1);
+            terms.push((k, child));
+            pos = next;
+        }
+        return (Node::Sum(terms), pos);
+    }
+    let mut kids = Vec::new();
+    for _ in 0..n as usize {
+        let (child, next) = decode(get, pos);
+        kids.push(child);
+        pos = next;
+    }
+    let node = match code {
+        c if c == MIN => Node::Min(kids),
+        c if c == MAX => Node::Max(kids),
+        _ => Node::Clamp(Box::new([kids.remove(0), kids.remove(0), kids.remove(0)])),
+    };
+    (node, pos)
+}
+
 /// What a `calc()` gives.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Calc {
     Number(f32),
     Length(Linear),
+    /// A `min()`, `max()` or `clamp()` that we cannot compute before layout.
+    Math(Node<Linear>),
 }
 
-/// A number or a sum of lengths, while we compute. For a number, the value is in the `px` slot.
-#[derive(Clone, Copy)]
+/// A length that needs `min`, `max` or `clamp` to be known. `L` is the leaf: a `Linear` when we read the sheet, `[px, pct]` after the cascade.
+/// JS: an expression tree, like `Math.min(a, b + c)` before `a`, `b` and `c` are known.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Node<L> {
+    Leaf(L),
+    /// `k1 * a + k2 * b + ...`
+    Sum(Vec<(f32, Node<L>)>),
+    Min(Vec<Node<L>>),
+    Max(Vec<Node<L>>),
+    /// `clamp(lo, value, hi)`
+    Clamp(Box<[Node<L>; 3]>),
+}
+
+impl<L> Node<L> {
+    /// The number that this is, when `leaf` gives the number of each leaf.
+    pub fn eval(&self, leaf: &impl Fn(&L) -> f32) -> f32 {
+        match self {
+            Node::Leaf(l) => leaf(l),
+            Node::Sum(v) => v.iter().map(|(k, n)| k * n.eval(leaf)).sum(),
+            Node::Min(v) => v.iter().map(|n| n.eval(leaf)).fold(f32::INFINITY, f32::min),
+            Node::Max(v) => v.iter().map(|n| n.eval(leaf)).fold(f32::NEG_INFINITY, f32::max),
+            Node::Clamp(c) => c[1].eval(leaf).min(c[2].eval(leaf)).max(c[0].eval(leaf)),
+        }
+    }
+
+    pub fn map<M>(&self, f: &impl Fn(&L) -> M) -> Node<M> {
+        match self {
+            Node::Leaf(l) => Node::Leaf(f(l)),
+            Node::Sum(v) => Node::Sum(v.iter().map(|(k, n)| (*k, n.map(f))).collect()),
+            Node::Min(v) => Node::Min(v.iter().map(|n| n.map(f)).collect()),
+            Node::Max(v) => Node::Max(v.iter().map(|n| n.map(f)).collect()),
+            Node::Clamp(c) => Node::Clamp(Box::new([c[0].map(f), c[1].map(f), c[2].map(f)])),
+        }
+    }
+
+    /// Is `f` true for any leaf?
+    pub fn any(&self, f: &impl Fn(&L) -> bool) -> bool {
+        match self {
+            Node::Leaf(l) => f(l),
+            Node::Sum(v) => v.iter().any(|(_, n)| n.any(f)),
+            Node::Min(v) | Node::Max(v) => v.iter().any(|n| n.any(f)),
+            Node::Clamp(c) => c.iter().any(|n| n.any(f)),
+        }
+    }
+}
+
+// After the cascade a tree is a list of `[px, pct]` too, again in prefix order. A leaf is its pair. An operation is `[NaN, code + 16 * n]`
+// (`n` children). A `SUM` has a pair `[factor, 0]` before each child. The same as above: a `Vec` of `Copy` values that costs nothing to drop.
+
+/// Add `node` to `out`.
+pub fn flatten(node: &Node<[f32; 2]>, out: &mut Vec<[f32; 2]>) {
+    let head = |code: f32, n: usize| [f32::NAN, code + 16.0 * n as f32];
+    match node {
+        Node::Leaf(l) => out.push(*l),
+        Node::Sum(v) => {
+            out.push(head(SUM, v.len()));
+            for (k, n) in v {
+                out.push([*k, 0.0]);
+                flatten(n, out);
+            }
+        }
+        Node::Min(v) => {
+            out.push(head(MIN, v.len()));
+            v.iter().for_each(|n| flatten(n, out));
+        }
+        Node::Max(v) => {
+            out.push(head(MAX, v.len()));
+            v.iter().for_each(|n| flatten(n, out));
+        }
+        Node::Clamp(c) => {
+            out.push(head(CLAMP, 3));
+            c.iter().for_each(|n| flatten(n, out));
+        }
+    }
+}
+
+/// Are the trees that start at `a_at` in `a` and at `b_at` in `b` the same? (Bit for bit: NaN is the same as NaN here.)
+pub fn flat_same(a: &[[f32; 2]], a_at: usize, b: &[[f32; 2]], b_at: usize) -> bool {
+    let (x, y) = (&a[a_at..flat_end(a, a_at)], &b[b_at..flat_end(b, b_at)]);
+    x.len() == y.len() && x.iter().zip(y).all(|(p, q)| p[0].to_bits() == q[0].to_bits() && p[1].to_bits() == q[1].to_bits())
+}
+
+/// The place after the tree that starts at `at`.
+pub fn flat_end(list: &[[f32; 2]], at: usize) -> usize {
+    if !list[at][0].is_nan() {
+        return at + 1;
+    }
+    let (code, n) = split(list[at][1]);
+    let mut pos = at + 1;
+    for _ in 0..n {
+        pos = flat_end(list, pos + (code == SUM) as usize);
+    }
+    pos
+}
+
+fn split(x: f32) -> (f32, usize) {
+    let n = (x / 16.0) as usize;
+    (x - 16.0 * n as f32, n)
+}
+
+/// The number of the tree at `at` when `leaf` gives the number of each pair.
+pub fn flat_eval(list: &[[f32; 2]], at: usize, leaf: &impl Fn([f32; 2]) -> f32) -> f32 {
+    flat(list, at, leaf).0
+}
+
+fn flat(list: &[[f32; 2]], at: usize, leaf: &impl Fn([f32; 2]) -> f32) -> (f32, usize) {
+    if !list[at][0].is_nan() {
+        return (leaf(list[at]), at + 1);
+    }
+    let (code, n) = split(list[at][1]);
+    let mut pos = at + 1;
+    let (mut acc, mut vals) = (0.0, [0.0; 3]);
+    for i in 0..n {
+        let k = if code == SUM {
+            pos += 1;
+            list[pos - 1][0]
+        } else {
+            1.0
+        };
+        let (v, next) = flat(list, pos, leaf);
+        pos = next;
+        match code {
+            c if c == SUM => acc += k * v,
+            c if c == MIN => acc = if i == 0 { v } else { acc.min(v) },
+            c if c == MAX => acc = if i == 0 { v } else { acc.max(v) },
+            _ => vals[i.min(2)] = v,
+        }
+    }
+    (if code == CLAMP { vals[1].min(vals[2]).max(vals[0]) } else { acc }, pos)
+}
+
+/// Does any pair of the tree at `at` have a percent?
+pub fn flat_has_pct(list: &[[f32; 2]], at: usize) -> bool {
+    list[at..flat_end(list, at)].iter().any(|l| !l[0].is_nan() && l[1] != 0.0)
+}
+
+/// The tree at `at` as text, with the percent first like Chrome: `min(300px, 50%)`.
+pub fn flat_text(list: &[[f32; 2]], at: usize) -> String {
+    let [px, pct] = list[at];
+    if !px.is_nan() {
+        return match (px == 0.0, pct == 0.0) {
+            (_, true) => format!("{px}px"),
+            (true, _) => format!("{pct}%"),
+            _ => format!("calc({pct}% {} {}px)", if px < 0.0 { '-' } else { '+' }, px.abs()),
+        };
+    }
+    let (code, n) = split(pct);
+    let mut pos = at + 1;
+    let mut parts = Vec::new();
+    for _ in 0..n {
+        let k = (code == SUM).then(|| {
+            pos += 1;
+            list[pos - 1][0]
+        });
+        let t = flat_text(list, pos);
+        pos = flat_end(list, pos);
+        parts.push(k.map_or(t.clone(), |k| format!("{k} * {t}")));
+    }
+    let name = match code {
+        c if c == SUM => return format!("calc({})", parts.join(" + ")),
+        c if c == MIN => "min",
+        c if c == MAX => "max",
+        _ => "clamp",
+    };
+    format!("{name}({})", parts.join(", "))
+}
+
+/// A number or a sum of lengths, while we compute. For a number, the value is in the `px` slot. A `node` is the value when there is one
+/// (then `value` is not used).
+#[derive(Clone)]
 struct Term {
     value: Linear,
     number: bool,
+    node: Option<Node<Linear>>,
+}
+
+impl Term {
+    fn into_node(self) -> Node<Linear> {
+        self.node.unwrap_or(Node::Leaf(self.value))
+    }
+
+    fn scale(self, k: f32) -> Term {
+        match self.node {
+            Some(n) => Term { value: self.value, number: false, node: Some(Node::Sum(vec![(k, n)])) },
+            None => Term { value: self.value.map(|x| x * k), number: self.number, node: None },
+        }
+    }
 }
 
 /// Is this the name of `calc`, with or without the old prefix?
 pub fn is_calc(name: &str) -> bool {
     name.eq_ignore_ascii_case("calc") || name.eq_ignore_ascii_case("-webkit-calc") || name.eq_ignore_ascii_case("-moz-calc")
+}
+
+/// Is this the name of `min`, `max` or `clamp`?
+pub fn is_math(name: &str) -> bool {
+    name.eq_ignore_ascii_case("min") || name.eq_ignore_ascii_case("max") || name.eq_ignore_ascii_case("clamp")
 }
 
 /// Parentheses inside parentheses go this deep. Deeper is not good. A loop of `(` cannot fill the call stack.
@@ -109,7 +379,25 @@ pub fn parse(tokens: &[Token<'_>], unit: impl Fn(f32, &str) -> Option<Length> + 
     if p.pos != tokens.len() || !term.value.0.iter().all(|x| x.is_finite()) {
         return None;
     }
-    Some(if term.number { Calc::Number(term.value.px()) } else { Calc::Length(term.value) })
+    finish(term)
+}
+
+fn finish(term: Term) -> Option<Calc> {
+    match term.node {
+        Some(n) => Some(Calc::Math(n)),
+        None if term.number => Some(Calc::Number(term.value.px())),
+        None => Some(Calc::Length(term.value)),
+    }
+}
+
+/// Read the tokens inside `min( ... )`, `max( ... )` or `clamp( ... )`, without the closing `)`. `name` is the function.
+pub fn parse_fn(name: &str, tokens: &[Token<'_>], unit: impl Fn(f32, &str) -> Option<Length> + Copy) -> Option<Calc> {
+    let mut p = P { tokens, pos: 0, unit };
+    let term = p.call(name, 0, false)?;
+    if p.pos != tokens.len() || !term.value.0.iter().all(|x| x.is_finite()) {
+        return None;
+    }
+    finish(term)
 }
 
 struct P<'t, 'a, U> {
@@ -145,6 +433,10 @@ impl<U: Fn(f32, &str) -> Option<Length> + Copy> P<'_, '_, U> {
             if rhs.number != acc.number {
                 return None;
             }
+            if acc.node.is_some() || rhs.node.is_some() {
+                acc = Term { value: Linear::default(), number: false, node: Some(Node::Sum(vec![(1.0, acc.into_node()), (sign, rhs.into_node())])) };
+                continue;
+            }
             for (a, b) in acc.value.0.iter_mut().zip(rhs.value.0) {
                 *a += sign * b;
             }
@@ -169,15 +461,12 @@ impl<U: Fn(f32, &str) -> Option<Length> + Copy> P<'_, '_, U> {
             acc = match (divide, acc.number, rhs.number) {
                 (true, _, true) if rhs.value.px() != 0.0 => {
                     let d = rhs.value.px();
-                    Term { value: acc.value.map(|x| x / d), number: acc.number }
+                    if acc.node.is_some() { acc.scale(1.0 / d) } else { Term { value: acc.value.map(|x| x / d), number: acc.number, node: None } }
                 }
-                (false, _, true) => {
-                    let m = rhs.value.px();
-                    Term { value: acc.value.map(|x| x * m), number: acc.number }
-                }
+                (false, _, true) => acc.scale(rhs.value.px()),
                 (false, true, false) => {
                     let m = acc.value.px();
-                    Term { value: rhs.value.map(|x| x * m), number: false }
+                    rhs.scale(m)
                 }
                 _ => return None,
             };
@@ -188,16 +477,84 @@ impl<U: Fn(f32, &str) -> Option<Length> + Copy> P<'_, '_, U> {
         self.space();
         let token = self.tokens.get(self.pos)?;
         self.pos += 1;
-        let number = |x: f32| Term { value: Linear([x, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]), number: true };
-        let length = |l: Length| Term { value: Linear::from_length(l), number: false };
+        let number = |x: f32| Term { value: Linear([x, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]), number: true, node: None };
+        let length = |l: Length| Term { value: Linear::from_length(l), number: false, node: None };
         match token {
             Token::Number { value, .. } => Some(number(*value)),
             Token::Percentage(x) => Some(length(Length::Percent(*x))),
             Token::Dimension { value, unit, .. } => Some(length((self.unit)(*value, unit)?)),
             Token::OpenParen => self.group(depth),
             Token::Function(name) if is_calc(name) => self.group(depth),
+            Token::Function(name) if is_math(name) => self.call(name, depth, true),
             _ => None,
         }
+    }
+
+    /// The comma list of `min(`, `max(` or `clamp(`, and the `)` when `nested`. Without it the list ends with the tokens.
+    fn call(&mut self, name: &str, depth: usize, nested: bool) -> Option<Term> {
+        if depth >= MAX_DEPTH {
+            return None;
+        }
+        let mut args = Vec::new();
+        loop {
+            args.push(self.sum(depth + 1)?);
+            self.space();
+            match self.tokens.get(self.pos) {
+                Some(Token::Comma) => self.pos += 1,
+                Some(Token::CloseParen) if nested => {
+                    self.pos += 1;
+                    break;
+                }
+                None if !nested => break,
+                _ => return None,
+            }
+        }
+        let clamp = name.eq_ignore_ascii_case("clamp");
+        if args.iter().any(|a| a.number != args[0].number) || (clamp && args.len() != 3) {
+            return None;
+        }
+        // Only one unit in every argument: we know the order now. `0` is in every unit.
+        let slot = |t: &Term| {
+            let mut used = t.value.0.iter().enumerate().filter(|&(_, &x)| x != 0.0).map(|(i, _)| i);
+            match (t.node.is_some(), used.next(), used.next()) {
+                (false, None, _) => Some(None),
+                (false, Some(i), None) => Some(Some(i)),
+                _ => None,
+            }
+        };
+        let units: Option<Vec<_>> = args.iter().map(slot).collect();
+        let one_unit = units.is_some_and(|u| {
+            let first = u.iter().flatten().next();
+            u.iter().flatten().all(|s| Some(s) == first)
+        });
+        if one_unit {
+            let key = |t: &Term| t.value.0.iter().sum::<f32>();
+            let pick = |args: Vec<Term>, max: bool| {
+                args.into_iter().reduce(|a, b| if (key(&b) > key(&a)) == max { b } else { a }).unwrap()
+            };
+            return Some(if clamp {
+                let mut it = args.into_iter();
+                let (lo, v, hi) = (it.next()?, it.next()?, it.next()?);
+                let r = if key(&v) > key(&hi) { hi } else { v };
+                if key(&r) < key(&lo) { lo } else { r }
+            } else {
+                pick(args, name.eq_ignore_ascii_case("max"))
+            });
+        }
+        if args[0].number {
+            return None;
+        }
+        let mut nodes: Vec<_> = args.into_iter().map(Term::into_node).collect();
+        let node = if clamp {
+            let hi = nodes.pop()?;
+            let v = nodes.pop()?;
+            Node::Clamp(Box::new([nodes.pop()?, v, hi]))
+        } else if name.eq_ignore_ascii_case("max") {
+            Node::Max(nodes)
+        } else {
+            Node::Min(nodes)
+        };
+        Some(Term { value: Linear::default(), number: false, node: Some(node) })
     }
 
     /// After a `(`: a sum and the `)`.
@@ -228,6 +585,7 @@ mod tests {
         }
     }
 
+    /// `text` is what is inside `calc( ... )`. It can also be a whole `min(...)`, `max(...)` or `clamp(...)`.
     fn calc(text: &str) -> Option<Calc> {
         let tokens: Vec<_> = tokenize(text).collect();
         parse(&tokens, unit)
@@ -252,11 +610,118 @@ mod tests {
         assert_eq!(calc("-5px + 2px"), lin(-3.0, 0.0, 0.0));
     }
 
+    fn node(text: &str) -> Node<Linear> {
+        match calc(text) {
+            Some(Calc::Math(n)) => n,
+            other => panic!("{text}: {other:?}"),
+        }
+    }
+
+    fn leaf(px: f32, em: f32, pct: f32) -> Node<Linear> {
+        Node::Leaf(Linear([px, em, 0.0, 0.0, 0.0, 0.0, 0.0, pct]))
+    }
+
+    #[test]
+    fn min_max_clamp_in_one_unit_are_computed_now() {
+        assert_eq!(calc("min(1px, 2px)"), lin(1.0, 0.0, 0.0));
+        assert_eq!(calc("max(1px, 2px, 3px)"), lin(3.0, 0.0, 0.0));
+        assert_eq!(calc("clamp(1px, 5px, 3px)"), lin(3.0, 0.0, 0.0));
+        assert_eq!(calc("clamp(4px, 1px, 9px)"), lin(4.0, 0.0, 0.0));
+        assert_eq!(calc("clamp(1px, 2px, 3px)"), lin(2.0, 0.0, 0.0));
+        assert_eq!(calc("MIN(10%, 20%)"), lin(0.0, 0.0, 10.0));
+        assert_eq!(calc("min(1px)"), lin(1.0, 0.0, 0.0));
+        assert_eq!(calc("min(1, 2)"), Some(Calc::Number(1.0)));
+        assert_eq!(calc("max(1 + 1, 3 - 2)"), Some(Calc::Number(2.0)));
+        assert_eq!(calc("min(0px, 5%)"), lin(0.0, 0.0, 0.0));
+        assert_eq!(calc("min(1px + 1px, 3px)"), lin(2.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn min_max_clamp_with_mixed_units_keep_a_tree() {
+        assert_eq!(node("min(300px, 80vw)").map(&|_| ()), Node::Min(vec![Node::Leaf(()), Node::Leaf(())]));
+        assert_eq!(node("max(1px, 2em)"), Node::Max(vec![leaf(1.0, 0.0, 0.0), leaf(0.0, 2.0, 0.0)]));
+        assert_eq!(node("min(300px, 50%)"), Node::Min(vec![leaf(300.0, 0.0, 0.0), leaf(0.0, 0.0, 50.0)]));
+        assert_eq!(
+            node("clamp(1px, 2vw + 1em, 9px)"),
+            Node::Clamp(Box::new([leaf(1.0, 0.0, 0.0), Node::Leaf(Linear([0.0, 1.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0])), leaf(9.0, 0.0, 0.0)]))
+        );
+    }
+
+    #[test]
+    fn math_nests_in_calc_and_in_itself() {
+        let all = |n: &Node<Linear>, base: f32| n.eval(&|l: &Linear| l.to_px(10.0, 16.0, (1000.0, 500.0)) + base * l.pct() / 100.0);
+        assert_eq!(all(&node("min(max(1px, 2em), 50%)"), 100.0), 20.0);
+        assert_eq!(all(&node("min(max(1px, 2em), 50%)"), 30.0), 15.0);
+        assert_eq!(all(&node("min(300px, 80vw)"), 0.0), 300.0);
+        assert_eq!(all(&node("calc(min(10px, 50%) * 2 + 1px)"), 8.0), 9.0);
+        assert_eq!(all(&node("calc(100% - min(10px, 1em))"), 50.0), 40.0);
+        assert_eq!(all(&node("clamp(1em, 50%, 20px)"), 100.0), 20.0);
+        assert_eq!(all(&node("clamp(1em, 50%, 20px)"), 4.0), 10.0);
+        assert_eq!(all(&node("min(calc(1px + 2em), 100%) / 2"), 100.0), 10.5);
+        assert_eq!(all(&node("calc(min(1em, 2px) + 1em)"), 0.0), 12.0);
+    }
+
+    #[test]
+    fn a_tree_survives_the_list_of_entries() {
+        for text in ["min(300px, 50%)", "clamp(1px, 2vw + 1em, min(9px, 5%))", "calc(min(10px, 50%) * 2 + max(1em, 3px) / 4)", "max(1em, min(1px, 2%), 3vw)"] {
+            let n = node(text);
+            let mut list = vec![Linear([7.0; 8])];
+            encode(&n, &mut list);
+            list.push(Linear([9.0; 8]));
+            let (back, next) = decode(&|i| list[i], 1);
+            assert_eq!((back, next), (n, list.len() - 1), "{text}");
+        }
+        assert!(!is_tree(Linear([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.0])));
+    }
+
+    #[test]
+    fn a_flat_tree_gives_the_same_number_and_text() {
+        let to_pair = |l: &Linear| [l.px() + 10.0 * l.0[1], l.pct()];
+        for (text, base, want, shown) in [
+            ("min(300px, 50%)", 400.0, 200.0, "min(300px, 50%)"),
+            ("clamp(1px, 2vw + 1em, min(9px, 5%))", 100.0, 5.0, "clamp(1px, calc(0.0 * 0px), min(9px, 5%))"),
+            ("calc(min(10px, 50%) * 2 + max(1em, 3px) / 4)", 8.0, 10.5, ""),
+            ("max(1em, min(1px, 2%), 3vw)", 100.0, 10.0, "max(10px, min(1px, 2%), 0px)"),
+        ] {
+            let flat_of = |at: usize| {
+                let mut out = vec![[7.0, 7.0]; at];
+                flatten(&node(text).map(&to_pair), &mut out);
+                out.push([9.0, 9.0]);
+                out
+            };
+            let list = flat_of(3);
+            assert_eq!(flat_end(&list, 3), list.len() - 1, "{text}");
+            assert_eq!(flat_eval(&list, 3, &|l| l[0] + base * l[1] / 100.0), want, "{text}");
+            if !shown.is_empty() && !text.contains("2vw") && !text.contains("3vw") {
+                assert_eq!(flat_text(&list, 3), shown, "{text}");
+            }
+        }
+        let list = [[f32::NAN, 2.0 + 16.0 * 2.0], [1.0, 0.0], [5.0, 0.0]];
+        assert!(!flat_has_pct(&list, 0));
+        assert!(flat_has_pct(&[[f32::NAN, 2.0 + 32.0], [1.0, 0.0], [0.0, 5.0]], 0));
+    }
+
+    #[test]
+    fn math_mistakes() {
+        for bad in [
+            "min()", "min(1px,)", "min(,1px)", "min(1px 2px)", "clamp(1px, 2px)", "clamp(1px, 2px, 3px, 4px)", "min(1, 2px)", "min(1em, 2)", "min(1px, foo)", "min(1px, 2px",
+            "min(1em, 2px) * min(1em, 2px)", "max(1em, 2px) + 1",
+        ] {
+            assert_eq!(calc(bad), None, "calc({bad})");
+        }
+    }
+
+    #[test]
+    fn deep_math_stops() {
+        let text = format!("{}1px{}", "min(".repeat(100_000), ")".repeat(100_000));
+        assert_eq!(calc(&text), None);
+    }
+
     #[test]
     fn mistakes() {
         for bad in [
             "", "1 +", "+ 1", "1+2", "1 +2", "1px+2px", "1 + 2px", "1px + 2", "2px * 3px", "2px / 3px", "1 / 0", "1px / 0", "3 / 2px", "(1px", "1px)", "1px 2px", "foo", "1pc + 1px",
-            "min(1px, 2px)", "1px * ", "* 2",
+            "1px * ", "* 2",
         ] {
             assert_eq!(calc(bad), None, "calc({bad})");
         }
