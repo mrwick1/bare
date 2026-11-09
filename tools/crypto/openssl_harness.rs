@@ -92,10 +92,19 @@ impl Drop for Pki {
 
 impl Pki {
     pub fn new() -> Pki {
+        Pki::with_root(&["ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", "root.key"])
+    }
+
+    /// Like `new`, with an RSA-2048 root (certificates signed with sha256WithRSAEncryption).
+    pub fn new_rsa() -> Pki {
+        Pki::with_root(&["genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048", "-out", "root.key"])
+    }
+
+    fn with_root(keygen: &[&str]) -> Pki {
         let dir = PathBuf::from(format!("/dev/shm/bare-https-test-{}-{}", std::process::id(), COUNTER.fetch_add(1, Ordering::SeqCst)));
         std::fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
         let pki = Pki { dir };
-        pki.run(&["ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", "root.key"]);
+        pki.run(keygen);
         pki.run(&[
             "req", "-x509", "-new", "-key", "root.key", "-sha256", "-days", "2", "-subj", "/CN=Bare Test Root", "-addext",
             "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign", "-out", "root.pem",
@@ -116,15 +125,28 @@ impl Pki {
     /// A P-256 leaf `name` (files `name.pem`, `name.key`) for the DNS name `san`. `window` is
     /// `(notBefore, notAfter)` as `YYYYMMDDHHMMSSZ`. The default is valid for a day from now.
     pub fn leaf(&self, name: &str, san: &str, window: Option<(&str, &str)>) {
+        self.leaf_with(name, san, window, &["ecparam", "-name", "prime256v1", "-genkey", "-noout"], "sha256");
+    }
+
+    /// An RSA leaf of `bits` bits, signed by the root with the hash `md` (`sha256` or `sha384`).
+    pub fn rsa_leaf(&self, name: &str, san: &str, bits: u32, md: &str) {
+        let opt = format!("rsa_keygen_bits:{bits}");
+        self.leaf_with(name, san, None, &["genpkey", "-algorithm", "RSA", "-pkeyopt", &opt], md);
+    }
+
+    fn leaf_with(&self, name: &str, san: &str, window: Option<(&str, &str)>, keygen: &[&str], md: &str) {
         let (key, csr, pem, ext) = (format!("{name}.key"), format!("{name}.csr"), format!("{name}.pem"), format!("{name}.ext"));
         std::fs::write(
             self.dir.join(&ext),
             format!("subjectAltName=DNS:{san}\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n"),
         )
         .unwrap();
-        self.run(&["ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", &key]);
+        let mut args = keygen.to_vec();
+        args.extend(["-out", &key]);
+        self.run(&args);
         self.run(&["req", "-new", "-key", &key, "-subj", &format!("/CN={name}"), "-out", &csr]);
-        let mut args = vec!["x509", "-req", "-in", &csr, "-CA", "root.pem", "-CAkey", "root.key", "-CAcreateserial", "-sha256", "-extfile", &ext, "-out", &pem];
+        let md = format!("-{md}");
+        let mut args = vec!["x509", "-req", "-in", &csr, "-CA", "root.pem", "-CAkey", "root.key", "-CAcreateserial", &md, "-extfile", &ext, "-out", &pem];
         match window {
             Some((from, to)) => args.extend(["-not_before", from, "-not_after", to]),
             None => args.extend(["-days", "1"]),

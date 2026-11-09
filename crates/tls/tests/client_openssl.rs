@@ -194,3 +194,38 @@ fn h2_is_negotiated_when_offered_and_the_server_picks_it() {
     let c = client::connect_h2(dial(srv.port), "localhost", &roots(&pki)).unwrap();
     assert!(!c.alpn_http11() && !c.alpn_h2());
 }
+
+/// A server with an RSA leaf that signs CertificateVerify with `sigalg`. Returns the HTTP body.
+fn rsa_server(pki: &Pki, leaf: &str, sigalg: &str) -> Server {
+    std::fs::write(pki.dir.join("hello.txt"), b"hello over verified tls").unwrap();
+    Server::start(pki, leaf, &["-WWW", "-sigalgs", sigalg], false)
+}
+
+#[test]
+fn an_rsa_leaf_connects_with_rsa_pss() {
+    need_openssl!();
+    // (root is RSA, leaf bits, hash the root signs with, CertificateVerify scheme the server uses)
+    for (rsa_root, bits, md, sigalg) in [
+        (false, 2048, "sha256", "rsa_pss_rsae_sha256"),
+        (false, 3072, "sha256", "rsa_pss_rsae_sha384"),
+        (true, 2048, "sha256", "rsa_pss_rsae_sha256"),
+        (true, 2048, "sha384", "rsa_pss_rsae_sha384"),
+        (false, 4096, "sha256", "rsa_pss_rsae_sha256"),
+    ] {
+        let pki = if rsa_root { Pki::new_rsa() } else { Pki::new() };
+        pki.rsa_leaf("rsa", "localhost", bits, md);
+        let srv = rsa_server(&pki, "rsa", sigalg);
+        let body = get(&mut client::connect(dial(srv.port), "localhost", &roots(&pki)).unwrap());
+        assert!(body.ends_with(b"hello over verified tls"), "{rsa_root} {bits} {md} {sigalg}: {:?}", String::from_utf8_lossy(&body));
+    }
+}
+
+#[test]
+fn an_rsa_chain_with_the_wrong_root_is_refused() {
+    need_openssl!();
+    let (pki, other) = (Pki::new_rsa(), Pki::new_rsa());
+    pki.rsa_leaf("rsa", "localhost", 2048, "sha256");
+    let srv = rsa_server(&pki, "rsa", "rsa_pss_rsae_sha256");
+    let why = cert_error(client::connect(dial(srv.port), "localhost", &roots(&other)));
+    assert!(why.contains("NoIssuer"), "{why}");
+}
