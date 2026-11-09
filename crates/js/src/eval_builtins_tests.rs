@@ -124,7 +124,6 @@ fn gates_are_explicit_unsupported() {
     // A literal pattern is compiled by `Interp::new`: nothing of the script runs. The parser checks only the flags.
     let literal = [
         ("var x = 1; /(/;", "regexp literal: invalid pattern (early SyntaxError)"),
-        ("var r = /(?=a)*/;", "quantified lookahead"),
         ("var r = /a/d;", "regexp flag d"),
         ("function f() { return /[b-a]/; }", "regexp literal: invalid pattern (early SyntaxError)"),
     ];

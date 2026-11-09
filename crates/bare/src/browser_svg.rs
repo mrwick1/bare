@@ -242,6 +242,7 @@ const CLASSES: &[(&str, usize)] = &[
     ("SVGPolygonElement", 1),
     ("SVGGElement", 0),
     ("SVGTextElement", 0),
+    ("SVGAElement", 0),
 ];
 #[cold]
 #[inline(never)]
@@ -308,6 +309,7 @@ pub(crate) fn wrapper_proto(d: &Dom, it: &mut Interp<'_>, tag: &str) -> R<ObjId>
         "polygon" => 9,
         "g" => 10,
         "text" => 11,
+        "a" => 12,
         _ => return Ok(d.p().svg),
     };
     interface(d, it, i).map(|v| v.0)

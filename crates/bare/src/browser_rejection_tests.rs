@@ -86,3 +86,13 @@ fn a_listener_that_rejects_again_is_heard_at_the_next_checkpoint() {
         assert!(lines(&mut b).is_empty());
     });
 }
+
+/// crates.io rejected its start promise with `ReferenceError: SVGAElement is not defined`; this line made it visible.
+#[test]
+fn an_svg_link_has_its_interface() {
+    big(|| {
+        let mut b = mk();
+        let src = "var a = document.createElementNS('http://www.w3.org/2000/svg', 'a'); [a instanceof SVGAElement, a instanceof SVGGraphicsElement, Object.prototype.toString.call(a)].join()";
+        assert_eq!(js(&mut b, src), "true,true,[object SVGAElement]");
+    });
+}

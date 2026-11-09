@@ -25,8 +25,8 @@
 //! fewer than one group is legacy octal, `\c` without a letter is a backslash, `[\d-x]` has a
 //! literal `-`.
 //!
-//! Explicit errors, never a different pattern: flags `v d` ([`CompileError::UnsupportedFlag`]),
-//! quantified lookahead ([`CompileError::Unsupported`]). With `u`, `\p{...}` and `\P{...}` read General_Category, Script, Script_Extensions and the
+//! Explicit errors, never a different pattern: flags `v d` ([`CompileError::UnsupportedFlag`]). A quantified lookahead
+//! follows Annex B without `u` and is a `SyntaxError` with `u`. With `u`, `\p{...}` and `\P{...}` read General_Category, Script, Script_Extensions and the
 //! binary properties of ECMA-262 from `bare_unicode::property` (the sets are made when the pattern is compiled); an unknown name
 //! is a `SyntaxError`. Without `u`, `\p{L}` is the literal text `p{L}`, as in ECMA-262.
 //!
@@ -1186,11 +1186,13 @@ impl<'a> Parser<'a> {
                 }
                 match (look, cap) {
                     (Some(neg), _) => {
-                        if behind && self.quantifier_follows() { return syn("Invalid quantifier", at); }
-                        if self.quantifier_follows() {
-                            return Err(CompileError::Unsupported { what: "quantified lookahead", at });
+                        if !self.quantifier_follows() {
+                            return Ok(Node::Look(neg, behind, Box::new(inner)));
                         }
-                        return Ok(Node::Look(neg, behind, Box::new(inner)));
+                        // Annex B QuantifiableAssertion: a lookahead takes a quantifier, only without `u`. The repeat of a
+                        // zero-width node follows RepeatMatcher: with min 0 the empty iteration fails, so it matches nothing.
+                        if behind || self.flags.unicode { return syn("Invalid quantifier", at); }
+                        Node::Look(neg, false, Box::new(inner))
                     }
                     (None, Some(n)) => Node::Group(n, Box::new(inner)),
                     (None, None) => inner,
@@ -1915,6 +1917,21 @@ mod tests {
         assert_eq!(run("(?<=😀)x", "u", "😀x"), "2,3");
         assert_eq!(run("(?<=k)x", "iu", "Kx"), "1,2");
         assert_eq!(run("(?<=a)x", "i", "Ax"), "1,2");
+    }
+
+    #[test]
+    fn quantified_lookahead_follows_annex_b() {
+        // Checked with Node 22.
+        assert_eq!(run("(?=a)*", "", "b"), "0,0");
+        assert_eq!(run("(?=(a))*a", "", "ab"), "0,1;-");
+        assert_eq!(run("(?=(a))+a", "", "ab"), "0,1;0,1");
+        assert_eq!(run("(?=(a)){2}a", "", "ab"), "0,1;0,1");
+        assert_eq!(run("(?=(a))*?a", "", "ab"), "0,1;-");
+        assert_eq!(run("x(?!b)+c", "", "xbc"), "N");
+        assert_eq!(run("x(?!b)+c", "", "xc"), "0,2");
+        assert_eq!(run("(?=a){1,3}", "", "zzz"), "N");
+        assert!(Regex::from_str("(?=a)*", "u").is_err());
+        assert!(Regex::from_str("(?<=a)*", "").is_err());
     }
 
     #[test]
