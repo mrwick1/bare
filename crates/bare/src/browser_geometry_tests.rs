@@ -434,12 +434,16 @@ fn the_bound_is_above_the_fragments_that_layout_made() {
 }
 
 #[test]
-fn nothing_is_kept_between_reads() {
+fn reads_of_an_unchanged_page_share_one_layout() {
     let mut b = page("#t { width: 5px }", "<div id=t></div>");
     assert_eq!(size(&mut b, "t"), "5x0");
     assert_eq!(size(&mut b, "t"), "5x0");
-    // two reads of two numbers: one layout for each
-    assert_eq!(stats(&b).0, 4);
+    // two reads of two numbers: one layout
+    assert_eq!(stats(&b).0, 1);
+    // a change of the page lays it out again, and the next read sees it
+    assert_eq!(js(&mut b, "document.getElementById('t').style.height = '7px'; 1"), "1");
+    assert_eq!(size(&mut b, "t"), "5x7");
+    assert_eq!(stats(&b).0, 2);
 }
 
 /// Load model for the capped runs (`SCALE=1|10|100`, `SHAPE=wide|deep|text|flex`, `--ignored`).

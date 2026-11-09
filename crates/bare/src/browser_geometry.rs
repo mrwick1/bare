@@ -1,11 +1,15 @@
 //! `HTMLElement.offsetWidth` and `offsetHeight` over the native cascade (`bare_css::cascade`) and native layout (`bare_layout::layout`).
 //!
 //! How it works
-//! - Every read runs the whole path again: the cascade of `browser_computed.rs` (`Dom::cascade_now`: the same sheets, gates and caps, so a
+//! - Every read runs the whole path: the cascade of `browser_computed.rs` (`Dom::cascade_now`: the same sheets, gates and caps, so a
 //!   linked sheet that is not supplied is `Unsupported`), then `bare_layout::layout` with the current viewport, then the answer from the
-//!   fragments. The layout is not cached. The cascade is used again only while the document counters and the sheets are the same
-//!   (`Dom::cascade_for`). Nothing is stored on the element or in JS data, so a held element sees the current classes, `id`,
-//!   `style` attributes, `<style>` text, supplied sheets, viewport, tree and text.
+//!   fragments. The cascade is used again only while the document counters and the sheets are the same (`Dom::cascade_for`), and the
+//!   layout of the last read is used again while the styles, the document counters and the viewport are the same (`Dom::layout_shared`), so
+//!   a loop of reads over a page that does not change lays it out once and charges one step for each read after the first. Nothing is
+//!   stored on the element or in JS data, so a held element sees the current classes, `id`, `style` attributes, `<style>` text, supplied
+//!   sheets, viewport, tree and text. The step charge follows the work done: a read that finds the cascade or the layout still right
+//!   charges one step, and a read that runs them charges their cost (the loop of 9,789 elements of Wikipedia that read `scrollWidth`
+//!   ended in `Limit(Steps)` when every read charged the full cost).
 //! - CSSOM View (`offsetWidth`, `offsetHeight`): "if the element does not have any associated box return zero", else the width (height) of the
 //!   axis-aligned bounding box of the border boxes of all fragments of the principal box, ignoring transforms. Here: the union of all `Kind::Box`
 //!   fragments of the element. An element with no fragment is zero: a detached or not connected element, `display:none` (and everything below it,
