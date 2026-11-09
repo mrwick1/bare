@@ -5250,6 +5250,7 @@ Task: add public journeys for sites that passed survey 5 and had no journey. The
 
 - 3 runs of each new journey: 15 of 15 pass 3 of 3. No flake.
 - Full `tools/drive/public/run.sh`: pass 48, fail 0, known 0, skip 0, flakes 0. Total time 60 s.
+- After the rebase on `2e79fbe0`: I built bare-drive from the rebased tree and ran the full suite again. Pass 48, fail 0, known 0, flakes 0. Total time 60 s.
 - Known bugs found: none. No journey needed `# known-bug`.
 - `crates-io-home.steps` only checks `body visible`. It passes while the app does not mount. Task 11 owns that fix.
 
@@ -5263,4 +5264,3 @@ Task: add public journeys for sites that passed survey 5 and had no journey. The
 
 - Runs on another network or from a different region.
 - Content drift: a site redesign can break a journey. Assertions use stable text, but no site is fixed.
-- Rebuild of bare-drive after other merges beyond the rebase check below.
