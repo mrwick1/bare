@@ -5930,7 +5930,7 @@ My first version had a `w_with` function that walked the children. It made the f
 
 - Fixture: `tools/fixtures/js/with-cases.txt` has 108 cases. Node 22 gives `with-cases.expected`. `tools/js/with_check.sh`: 108 match. Debug build with all scope assertions on matched 107 of the cases that existed then.
 - Unit tests (`eval_with_tests.rs`, 156 lines) cover what Node and the spec disagree on (see Deviations). `cargo test --release --workspace`: 3,366 passed, 0 failed, 13 ignored.
-- test262 (`test262_check.sh`): `gate: ok`, 585 directories, 250 s. `language/statements/with`: 19 to 128 passing (181 tests). Of the 53 that fail, 47 need `eval` (the engine has none). The other 6 are in Deviations.
+- test262 (`test262_check.sh`): `gate: ok`, 585 directories, 250 s. `language/statements/with`: 19 to 128 passing (181 tests). Of the 53 that fail, 49 need `eval` (the engine has none): 47 end with `eval is not defined`, and 2 (`12.10.1-10-s.js`, `12.10.1-12-s.js`) expect a `SyntaxError` from `eval` and get that `ReferenceError`. The other 4 are in Deviations.
 - `exec_diff.sh`: 79 runs, 0 differences. Public journeys: 48 pass, 0 fail, 0 flakes.
 - Cost: the full matrix of 805 rows against the shared build of `1bec71ae`. Mean +0.014% under glibc. Largest row +0.289% (`reflect_load construct_args 10`). No row over +0.5% under glibc, so no jemalloc runs. Over under one allocator: 0. Over under both: 0. Failed: 0.
 - Typing (`keycost.sh`, `#a1` / `#f0`): 282.2 / 287.5 M for each key on main, 282.5 / 287.9 M here (+0.11% / +0.14%). Peak RSS 32.9 MiB at 50 keys (main 33.2).
@@ -5950,7 +5950,7 @@ The page runs further than before and no run stops at `with`. The result changes
 - The name is resolved when it is read, not before the right-hand side of an assignment. `x++` and `x += 1` resolve twice. Two test262 tests fail for this (`unscopables-inc-dec.js`, `set-mutable-binding-idref-compound-assign-with-proxy-env.js`).
 - A call through a name in parentheses `(f)()` and a tagged template tag do not pass the object as `this`.
 - Strict-mode set on a binding that was deleted from a typed-array proto chain gives `TypeError`, not `ReferenceError` (1 test262 test).
-- `12.10.1-10-s.js` and `12.10.1-12-s.js` need `eval` to make strict code and fail with a `ReferenceError` for it. One more test fails on `result === "value"`.
+- One more test262 test fails on `result === "value"` (not studied).
 - V8 asks `has` twice in some cases and does not throw on a strict read of a deleted property. The fixture avoids these, and the Rust tests pin the spec result.
 
 ### Not tested
@@ -5959,4 +5959,4 @@ The page runs further than before and no run stops at `with`. The result changes
 - `with` on a host object that is a lazy DOM node in a loop at scale, and a `with` inside a very deep call stack.
 - The debug build was not run again after the rebase on `1bec71ae`.
 - Jemalloc cost rows (none was over the limit under glibc).
-- A real `eval` (the engine has none): 47 test262 tests wait for it.
+- A real `eval` (the engine has none): 49 test262 tests wait for it.
