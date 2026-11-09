@@ -32,7 +32,7 @@
 //! - Formatter handles `%s %d %i %f %o %O %c` and `%%`. `%%` is a local convention beyond the Standard text. A
 //!   specifier with no argument left stays as text. `%c` takes an argument and prints nothing.
 //! - The Standard converts with `String`, `parseInt` and `parseFloat`, which run user code on an object. This module
-//!   never runs user code to log. So an object or function prints as `[object]` or `[function]` for every specifier,
+//!   never runs user code to log. So an object or function prints as `[object]` or `[function]` for every specifier (an object with an own data string `stack`, else `message`, prints that text),
 //!   and `%d %i %f` of an object is `NaN`. Symbols print as `Symbol(desc)` (`%d` gives `NaN`). A BigInt prints with an `n`
 //!   (`1n`) for every specifier but `%f`, which is `parseFloat` of its digits (as in Node). `%o` and `%O` print
 //!   primitives like `%s`, strings in double quotes without escapes. No grouping, indentation, `%c` styling.
@@ -45,7 +45,8 @@
 
 use crate::browser::*;
 use bare_js::eval::{Error, Interp};
-use bare_js::value::{PropertyKey, StrId, Value, is_js_space, number_to_string, string_to_number};
+use bare_js::heap::Property;
+use bare_js::value::{ObjId, PropertyKey, StrId, Value, is_js_space, number_to_string, string_to_number};
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::fmt;
@@ -289,9 +290,24 @@ fn plain(d: &Dom, it: &mut Interp<'_>, v: Value, quote: bool, out: &mut Out) -> 
             out.push(d, &it.display(v))?;
             out.push(d, "n")
         }
-        Value::Object(o) => out.push(d, if it.is_callable_value(Value::Object(o)) { "[function]" } else { "[object]" }),
+        Value::Object(_) if it.is_callable_value(v) => out.push(d, "[function]"),
+        Value::Object(o) => match error_text(d, it, o, out.max.saturating_sub(out.s.len()))? {
+            Some(t) => out.push(d, &t),
+            None => out.push(d, "[object]"),
+        },
         v => out.push(d, &it.display(v)),
     }
+}
+
+/// The own data string `stack`, else `message`, of an object (an error). A getter or a non-string gives `None`: no user code runs.
+fn error_text(d: &Dom, it: &mut Interp<'_>, o: ObjId, room: usize) -> R<Option<String>> {
+    for k in ["stack", "message"] {
+        let key = d.key(it, k)?;
+        if let Some(Property::Data { value: Value::String(s), .. }) = it.heap.peek_own_property(o, key).map_err(Error::Heap)? {
+            return text(d, it, s, room).map(Some);
+        }
+    }
+    Ok(None)
 }
 
 /// The decimal prefix used by parseInt(..., 10) or parseFloat, over borrowed UTF-16.
