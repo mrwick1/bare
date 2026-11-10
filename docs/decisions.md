@@ -873,3 +873,11 @@ Task 32 found a scope boundary. `browser_style::style_set_text` serializes the b
 The browser check retained the right margin after `margin-top: 1px` over `margin: var(--m)`. Its serialized right margin was empty. Changing `--m` changed the computed right margin from `4px` to `8px`. Copying `cssText` to another element lost that margin. Serialization alone is not a lossless state store.
 
 No implementation changes were made. A follow-up needs permission to change the style state and its input to the cascade. It must preserve the source shorthand, surviving longhand mask, priority and declaration order independently of attribute text. It must also invalidate that state for attribute replacement and handle stylesheet publication. Those paths include `browser_style.rs` and computed-style/cascade integration, which Task 32 excludes. Coordinate with their owners before work. Retain bounded storage and budget charges. Measure any hot representation change with the full cost matrix.
+
+## Pending shorthand integration is authorized (2026-11-10)
+
+The owner approved the style-state and computed-style/cascade scope identified by draft #339 on 2026-11-10. This supersedes the earlier permission hold. Keep pending shorthand source, surviving mask, priority and order independently of exposed text. Preserve later variable updates and lossy cssText copying. Handle attribute replacement and stylesheet publication. Bound and charge retained state. Gate new cascade lookups so pages without pending state avoid them.
+
+The owner confirmed that the old background/mask worktree has no active owner. Leave that worktree untouched. Coordinate Task 28's computed-work charge hunks before the final rebase. The implementation requires typing cost checks and case 1: all 805 rows once after the final gated rebase. Reject any row above +0.5% under both allocators. Scope approval grants no cost waiver.
+
+The implementation is incomplete. The fresh tests-first run failed all four retained reductions. Evidence is in `/data/bare-tmp/cvl10/tests-first.txt`. No executable change accompanies this entry. The draft remains unmerged.

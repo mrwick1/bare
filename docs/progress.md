@@ -6951,3 +6951,19 @@ Docs-only final diff: no matrix, zero cost rows. No hot struct changed. Future s
 No final live A/B pairs, comparison-site runs, release workspace suite or 48 journeys were run because there is no implementation to validate. The oracle did not cover importance. The focused priority case fails before its later assertions. Custom-property changes, full value/order coverage and successful round-trip behavior are not proved by the failing unit cases. No video-player claim is made. Steps, Intl, sparse elements, first-error work and fatal diagnostics remain with their existing owners. This branch must remain unmerged pending a separately authorized implementation scope.
 
 The final merge rebase was deferred. `merge-gate acquire cvl` waited behind `sparse-elements 01:09`. The pending request was canceled because this branch is the unmerged scope fallback. It never acquired the gate. The other owner's lock was not released. The branch retains its initial rebase on `origin/main` at `d8550bbba0`.
+
+## Task 33: pending shorthand integration approval (2026-11-10)
+
+The owner approved style-state and computed-style/cascade integration on 2026-11-10. This approval covers the scope identified by draft #339. It supersedes Task 32's permission hold. The owner also confirmed that the old background/mask worktree has no active owner. That worktree was not edited.
+
+The initial rebase uses origin/main at `37212433e0b7512272f2f4418a7c8bf669db3597`. Both documentation conflicts were resolved by retaining main and appending the complete Task 32 entries. No historical entry was replaced.
+
+The smaller serializer approach was inspected. Empty pending longhands cannot retain computation alone. `style_write` retains only exact serialized blocks. `style_read` reparses attribute text after a cache miss. The cascade also parses that text. The implementation must preserve the source shorthand, mask, order and priority outside exposed text. It must cover stylesheet publication and same-value attribute replacement. The latter writes a new attribute text span even when its text is equal. State must remain bounded and charged. The new cascade path must have a flag so pages without this state avoid its lookup.
+
+The four retained reductions were rerun before implementation. Command: `CARGO_TARGET_DIR=/data/bare-tmp/target-cvl10 /data/bare-tmp/bin/heavy cargo test --release -p bare --lib pending_reduction`. All four failed on unmodified implementation code. Source: `/data/bare-tmp/cvl10/reduction-tests.rs`. Output: `/data/bare-tmp/cvl10/tests-first.txt`. The temporary test insertion was removed after the run. No implementation fix or permanent tests were completed.
+
+Task 28's branch diff was checked. It includes `browser_computed.rs` work-charge changes. Final integration must rebase on its merged result. No final rebase or merge gate acquisition occurred. No gate is held by this task.
+
+Cost case for the required implementation is case 1: all 805 rows once on the final gated rebase against fresh BASE. No row may exceed +0.5% under both allocators. Typing cost checks are also required because typing uses `cascade_as`. No cost exception was requested. This interim documentation update changes no executable code and ran zero cost rows.
+
+Incomplete: style-state storage, cascade input, stylesheet publication, permanent regressions, typing checks, final matrix, release workspace tests, 48 journeys and all final live comparisons. No application-success or performance claim is made. Draft #339 remains unmerged. Scope approval stands; the remaining work does not require renewed scope approval.
