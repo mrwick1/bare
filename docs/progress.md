@@ -6124,15 +6124,15 @@ Docs only: `docs/decisions.md` and this section. No table changed, by the rule a
 
 ### Cost
 
-After the one rebase: base `5b32214102` (origin/main after PR #332), a fresh `base-build` (with `base-build origin/main --release -p bare-stress`); new = this branch on that commit. All 805 rows of `tools/js/cost_matrix.sh`: 0 over under both allocators, 0 over under one, 0 failed, mean change -0.005% glibc. No row reached the jemalloc rerun. Worst row: `bare-stress run table-many-columns 5000` +0.103%. Before the rebase (base `50e71ca8cc`): 805 rows, 0 over, mean -0.006%, worst `resources_load small 10` +0.131%.
+After the final rebase: base `81a5f771ab` (origin/main after PR #335), a fresh `base-build` (with `base-build origin/main --release -p bare-stress`); new = this branch on that commit. All 805 rows of `tools/js/cost_matrix.sh`: 0 over under both allocators, 0 over under one, 0 failed, mean change -0.002% glibc. No row reached the jemalloc rerun. Worst row: `resources_load small 1` +0.326%. Main moved twice while the checks ran, and both times the docs conflicted, so the branch was rebased twice. Earlier full runs: base `5b32214102` (after #332), 805 rows, 0 over, mean -0.005%, worst `bare-stress run table-many-columns 5000` +0.103%; base `50e71ca8cc`, 805 rows, 0 over, mean -0.006%, worst `resources_load small 10` +0.131%.
 
 ### Keycost
 
-`tools/js/typing/keycost.sh` with the prebuilt `type_load` of each base: on `5b32214102`, `#a1` 282.7 M and `#f0` 288.0 M instructions for each key, load and mount 572.5 M, peak RSS 33.1 MiB at 20 keys and 33.3 MiB at 50 keys. On `50e71ca8cc`: 282.5 M and 287.9 M, 572.4 M, 33.6 and 33.2 MiB. PR #328 did not run keycost. These values are after #328, #331 and #332, and close to the last values (282.2 M and 287.5 M). This branch has no code change, so the branch value is the same binary code.
+`tools/js/typing/keycost.sh` with the prebuilt `type_load` of each base: on `81a5f771ab`, `#a1` 282.7 M and `#f0` 288.0 M instructions for each key, load and mount 572.5 M, peak RSS 33.2 MiB at 20 keys and 33.4 MiB at 50 keys. On `5b32214102`: 282.7 M and 288.0 M, 33.1 and 33.3 MiB. On `50e71ca8cc`: 282.5 M and 287.9 M, 33.6 and 33.2 MiB. PR #328 did not run keycost. These values are after #328, #331, #332 and #335, and close to the last values (282.2 M and 287.5 M). This branch has no code change, so the branch value is the same binary code.
 
 ### Checks
 
-- `cargo test --release --workspace --no-fail-fast` on the final tree (after the rebase): 3375 passed, 0 failed, 13 ignored.
+- `cargo test --release --workspace --no-fail-fast` on the final tree (after the final rebase): 3381 passed, 0 failed, 13 ignored.
 - `tools/drive/public/run.sh` with the branch `bare-drive` of the final tree: pass 48, fail 0, known 0, skip 0, flakes 0.
 - JS gates (`test262_check.sh`, `exec_diff.sh`) were not run: no file in `crates/js` changed.
 
