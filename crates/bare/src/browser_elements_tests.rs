@@ -122,8 +122,8 @@ fn interface_objects_are_not_constructors() {
         assert!(js(&mut b, &format!("new {n}()")).starts_with("throw:TypeError"), "{n}");
         assert!(js(&mut b, &format!("{n}()")).starts_with("throw:TypeError"), "{n}");
     }
-    assert_eq!(js(&mut b, "Object.getOwnPropertyNames(HTMLAnchorElement.prototype).sort().join()"), "constructor,hash,host,hostname,href,origin,pathname,port,protocol,search,toString");
-    assert_eq!(js(&mut b, "Object.getOwnPropertyNames(HTMLAreaElement.prototype).sort().join()"), "constructor,hash,host,hostname,href,origin,pathname,port,protocol,search,toString");
+    assert_eq!(js(&mut b, "Object.getOwnPropertyNames(HTMLAnchorElement.prototype).sort().join()"), "constructor,hash,host,hostname,href,origin,pathname,port,protocol,relList,search,toString");
+    assert_eq!(js(&mut b, "Object.getOwnPropertyNames(HTMLAreaElement.prototype).sort().join()"), "constructor,hash,host,hostname,href,origin,pathname,port,protocol,relList,search,toString");
     assert_eq!(js(&mut b, "Object.getOwnPropertyNames(HTMLTemplateElement.prototype).sort().join()"), "constructor,content");
     assert_eq!(js(&mut b, "var d = Object.getOwnPropertyDescriptor(HTMLAnchorElement.prototype, 'origin'); typeof d.get + ',' + typeof d.set"), "function,undefined");
 }

@@ -256,3 +256,6 @@ mod browser_steps_tests;
 mod browser_basics_tests;
 
 #[cfg(test)] mod browser_domexception_tests;
+
+#[cfg(test)]
+mod browser_rellist_tests;
