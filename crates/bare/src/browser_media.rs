@@ -1045,13 +1045,7 @@ fn caption_object(d: &Dom, it: &mut Interp<'_>, n: NodeId) -> R<ObjId> {
     d.def_get(it, o, "mode", caption_mode, Some(caption_set_mode))?;
     d.def_get(it, o, "cues", caption_cues, None)?;
     d.def_get(it, o, "activeCues", caption_active, None)?;
-    for (name, attr) in [("kind", "kind"), ("label", "label"), ("language", "srclang")] {
-        let k = d.key(it, name)?;
-        let v = d.js_str(it, &attr_of(d, n, attr).unwrap_or_default())?;
-        it.define_data(o, k, v, false, true, true)?;
-    }
-    let mode = if attr_of(d, n, "default").is_some() { "hidden" } else { "disabled" };
-    d.media.tracks.borrow_mut().insert(n, CaptionTrack { object: o, mode: mode.into(), epoch: 0, ready: 0, cues: None, active: None, entries: Vec::new() });
+    d.media.tracks.borrow_mut().insert(n, CaptionTrack { object: o, mode: "disabled".into(), epoch: 0, ready: 0, cues: None, active: None, entries: Vec::new() });
     caption_start(d, n)?;
     Ok(o)
 }
