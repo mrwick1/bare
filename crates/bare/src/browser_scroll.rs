@@ -749,6 +749,9 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     }
     d.def_get(it, g, "innerWidth", win_inner_width, None)?;
     d.def_get(it, g, "innerHeight", win_inner_height, None)?;
+    // The inner size. The getters take the key as their name, so they add no string to the heap (`browser_basics.rs`).
+    crate::browser_basics::getter(d, it, g, &["outerWidth"], win_inner_width, false)?;
+    crate::browser_basics::getter(d, it, g, &["outerHeight"], win_inner_height, false)?;
     d.def_method(it, g, "scrollTo", 2, win_scroll_to)?;
     d.def_method(it, g, "scroll", 2, win_scroll_to)?;
     d.def_method(it, g, "scrollBy", 2, win_scroll_by)?;

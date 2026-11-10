@@ -597,6 +597,11 @@ fn origin(u: &Url) -> String {
 // ---------------------------------------------------------------------------------------------- Dom side
 
 impl Dom {
+    /// The body bytes of the requests that wait in the queue (`navigator.sendBeacon` checks its quota against them).
+    pub(crate) fn queued_body_bytes(&self) -> usize {
+        self.fetch.st.borrow().queued_bytes
+    }
+
     /// `Browser::survive`: the network tasks stopped on a script budget; let them run again.
     pub(crate) fn clear_budget_halt_fetch(&self) {
         let mut s = self.fetch.st.borrow_mut();
@@ -1697,7 +1702,7 @@ pub(crate) fn gate_reader_closed(_: &Dom, _: &mut Interp<'_>, _: Value, _: &[Val
 
 // ---------------------------------------------------------------------------------------------- fetch
 
-fn fetch(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
+pub(crate) fn fetch(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
     let p = it.host_new_promise()?;
     match prepare(d, it, p, a) {
         Ok(()) => Ok(p),
@@ -1788,7 +1793,7 @@ fn policy(d: &Dom, lim: &FetchLimits, url: &Url, mode: Mode, api: &'static str) 
 }
 
 /// `http:` to a loopback host is allowed from an `https:` page, as in Chrome.
-fn potentially_trustworthy(u: &Url) -> bool {
+pub(crate) fn potentially_trustworthy(u: &Url) -> bool {
     u.host == "localhost" || u.host.ends_with(".localhost") || u.host == "[::1]" || u.host.starts_with("127.")
 }
 

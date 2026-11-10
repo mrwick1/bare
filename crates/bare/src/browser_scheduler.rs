@@ -176,6 +176,8 @@ struct Port {
 struct MsgEvent {
     data: Value,
     ports: Option<Value>,
+    /// A message of `window.postMessage` (`browser_basics.rs`): `origin` is the document origin and `source` is the window.
+    win: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -685,9 +687,11 @@ impl Dom {
                 let mark = self.settle_mark();
                 it.host_scope(|it| {
                     it.charge(1)?;
-                    if self.has_message_listener(port) {
-                        let ev = self.new_msg_event(it, data)?;
-                        self.dispatch(it, Target::Obj(port), ev)?;
+                    let win = self.global.get() == Some(&port);
+                    let target = if win { Target::Window } else { Target::Obj(port) };
+                    if self.has_message_listener(target) {
+                        let ev = self.new_msg_event(it, data, win)?;
+                        self.dispatch(it, target, ev)?;
                     }
                     it.host_checkpoint().map(|_| ())
                 })?;
@@ -697,8 +701,8 @@ impl Dom {
         }
     }
 
-    fn has_message_listener(&self, port: ObjId) -> bool {
-        self.st.borrow().listeners.get(&Target::Obj(port)).is_some_and(|v| v.iter().any(|l| &*l.ty == "message"))
+    fn has_message_listener(&self, target: Target) -> bool {
+        self.st.borrow().listeners.get(&target).is_some_and(|v| v.iter().any(|l| &*l.ty == "message"))
     }
 
     fn requeue_interval(&self, id: u64, nesting: u32) -> R<()> {
@@ -769,7 +773,7 @@ impl Dom {
         method(it, port, "start", port_start, 0)?;
         method(it, port, "close", port_close, 0)?;
         acc(it, port, "onmessage", port_onmessage, Some(set_port_onmessage))?;
-        for (name, h) in [("data", msg_data as H), ("origin", msg_empty), ("lastEventId", msg_empty), ("source", msg_source), ("ports", msg_ports)] {
+        for (name, h) in [("data", msg_data as H), ("origin", msg_origin), ("lastEventId", msg_empty), ("source", msg_source), ("ports", msg_ports)] {
             acc(it, event, name, h, None)?;
         }
         method(it, perf, "now", performance_now, 0)?;
@@ -782,10 +786,33 @@ impl Dom {
 
     // ------------------------------------------------------------ messages
 
-    fn new_msg_event(&self, it: &mut Interp<'_>, data: Value) -> R<ObjId> {
+    /// Queue a `message` event for the window: one delivery task. The window is a port of the table with no peer. `data` is already cloned.
+    pub(crate) fn post_window(&self, data: Value) -> R<()> {
+        let cost = crate::browser_basics::MESSAGE_COST;
+        let g = *self.global.get().expect("installed");
+        {
+            let s = self.sched.borrow();
+            if s.queued >= s.limits.max_queued_messages {
+                return Err(self.lim("messages"));
+            }
+            if s.queued_bytes.saturating_add(cost) > s.limits.max_queued_message_bytes {
+                return Err(self.lim("message-bytes"));
+            }
+        }
+        let key = self.schedule(self.now_ms(), Task::Deliver(g))?;
+        let mut s = self.sched.borrow_mut();
+        s.queued += 1;
+        s.queued_bytes += cost;
+        let p = s.ports.entry(g).or_insert(Port { peer: None, enabled: true, inbox: VecDeque::new(), keys: VecDeque::new(), handler: None });
+        p.inbox.push_back((data, cost));
+        p.keys.push_back(key);
+        Ok(())
+    }
+
+    fn new_msg_event(&self, it: &mut Interp<'_>, data: Value, win: bool) -> R<ObjId> {
         let proto = self.sched.borrow().protos.expect("installed").event;
         let e = self.new_event_proto(it, "message", false, false, false, proto)?;
-        self.sched.borrow_mut().msg_events.insert(e, MsgEvent { data, ports: None });
+        self.sched.borrow_mut().msg_events.insert(e, MsgEvent { data, ports: None, win });
         Ok(e)
     }
 
@@ -835,7 +862,7 @@ impl Dom {
     }
 
     /// A transfer list or `{ transfer }` option must be empty.
-    fn no_transfer(&self, it: &mut Interp<'_>, v: Value) -> R<()> {
+    pub(crate) fn no_transfer(&self, it: &mut Interp<'_>, v: Value) -> R<()> {
         let list = match v {
             Value::Undefined | Value::Null => return Ok(()),
             Value::Object(_) => {
@@ -1107,8 +1134,14 @@ fn msg_empty(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     d.js_str(it, "")
 }
 
+fn msg_origin(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    let win = msg_event(d, it, this, |e| e.win)?;
+    d.js_str(it, &if win { d.window_origin() } else { String::new() })
+}
+
 fn msg_source(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    msg_event(d, it, this, |_| Value::Null)
+    let win = msg_event(d, it, this, |e| e.win)?;
+    Ok(if win { Value::Object(*d.global.get().expect("installed")) } else { Value::Null })
 }
 
 fn msg_ports(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {

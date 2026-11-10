@@ -7152,3 +7152,41 @@ Acquired `merge-gate acquire mct11`, fetched origin and rebased the clean branch
 ### Merge authorization
 
 The owner authorized merge of this evidence-only PR. This replaces the earlier hold on publication above; it does not authorize a runtime change. Acquired `merge-gate acquire mct11` again and rebased on `4471813369be9b1e47b30d81bd25deed6d5ad179`. The rebase added no changes. This section remains at the end of the file; all earlier sections are preserved. No matrix or suite is required for this documentation-only merge. The PR description identifies the proposed constructor handler and its estimated size for a later task after Task 24 merges.
+
+## Page basics (task 24)
+
+### Problem
+
+wise.com stops in Mixpanel: `document.referrer.search(...)` throws, because `document.referrer` is `undefined`. Many other basics were missing from `document`, `window` and `navigator`.
+
+### Change
+
+- New `crates/bare/src/browser_basics.rs` and `browser_basics_tests.rs`. Registration lines only in `browser.rs`, `lib.rs`, `browser_web.rs` and `browser_scroll.rs`. `browser_scheduler.rs` got window `message` delivery. `browser_fetch.rs` got three `pub(crate)` helpers.
+- Document, window and navigator values, `postMessage` and `sendBeacon`: see `docs/decisions.md`, "Page basics".
+- Priority B (extra event classes, element reflections, `reportError`) is not done.
+- Spec references: HTML standard (Document, Window, Navigator, Web messaging, "PDF viewer" lists), Fetch standard (keepalive quota), Secure Contexts, WebDriver.
+
+### Tests that failed first
+
+11 of the 12 tests failed on main before the code. They pass now.
+
+### Cost
+
+- Cost-check case 2 of the owner rule: only `crates/bare` changed. Rows of the module, plus a sample of the other groups (see the PR).
+- Install cost is the main risk. The smallest browser-realm rows have a base of about 37.5M instructions, so +0.5% is about 187k.
+- What cost most: a name on `Document.prototype` or on the document wrapper (the measured steady state is 2.4k to 10k each, depending on the row), a function object (2.4k), an interned string (a power-of-two step of the interner moved `navigation_load storage` by +23k to +30k per collect).
+- What I did: shared no-op functions, string values read through a getter, one function for the charset trio, one shared get/set function for `designMode` and `dir`, data properties on the global (1.9k each) in place of accessors (3.2k each).
+- A new proto object between `Document.prototype` and its parent did not help (`handler_load 1`: 37,667,493 against a base of 37,447,684).
+- Closest row: `handler_load 1` at +0.498% to +0.506% under glibc and +0.427% under jemalloc, on the subset runs before the final rebase. The final numbers are in the PR.
+
+### Limits
+
+- No `Referer`. `lastModified` is the load time. The charset ignores the HTTP header.
+- `window.open` returns `null`. No dialog shows.
+- The new names cannot be lazy: the engine hook takes a fixed name list in `crates/js`, which this task may not change.
+
+### Not tested
+
+- Live Chrome for the plugin and MIME lists.
+- macOS and arjun-e16.
+- Priority B.

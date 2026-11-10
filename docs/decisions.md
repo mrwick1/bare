@@ -903,3 +903,59 @@ Task 24 already owns and defines the empty referrer value in `page-basics`. Task
 The Mastodon polyfill reads the global `DOMException` and calls `new y(1,2)` during module evaluation. Frozen main exposes that name as a function without construction support. The reduced call reproduces the live TypeError. Do not add a constructor merely to silence the probe. A correct change needs Web IDL conversion and exception semantics, plus a failing regression before implementation.
 
 The registration is in `crates/bare/src/browser.rs`. Task 36 excludes that file, and Task 24 owns it. Keep this task documentation-only. No runtime files change and no cost matrix runs. The evidence does not establish that repairing this probe initializes the application. See [Task 36 evidence](progress.md#mastodon-constructor-attribution-task-36) for the source hash, reduction, live results and limits.
+
+## Page basics: document, window and navigator
+
+wise.com crashes in Mixpanel on `document.referrer.search(...)`, because `document.referrer` was `undefined`. Code in `crates/bare/src/browser_basics.rs` adds the missing basics. Values follow the HTML standard. Where the standard leaves a choice, the value is what Chrome 155 on Linux returns.
+
+### Document
+
+- `referrer` is `""`. A page opens in bare from a typed URL or a drive step, not from a link on another page. The standard gives `""` for a document with no referrer. A `Referer` header is not tracked.
+- `visibilityState` is `"visible"` and `hidden` is `false`. The page is always shown to a user.
+- `characterSet`, `charset` and `inputEncoding` read the first `<meta charset>` or `<meta http-equiv="content-type">` in `<head>` (first 64 `meta` elements). `windows-1252` and its aliases map to `windows-1252`. All else gives `UTF-8`. The HTTP `Content-Type` header is not used, because `load_document` does not pass headers to the document.
+- `contentType` is `"text/html"`.
+- `compatMode` is `CSS1Compat` when the document has a doctype, else `BackCompat`. Limited-quirks mode is not told apart from no-quirks mode.
+- `designMode` reads `"off"`. A write is ignored. The page cannot be edited.
+- `dir` reflects the `dir` attribute of `<html>` for `ltr`, `rtl` and `auto`, else `""`. A write sets the attribute.
+- `lastModified` is the load time in UTC, in `MM/DD/YYYY HH:MM:SS` form. The standard gives the `Last-Modified` header, and the current time when there is none. bare has no header here, so it always gives the load time.
+
+### Window
+
+- `devicePixelRatio` 1, `screenX` 0, `screenY` 0. `outerWidth` and `outerHeight` equal `innerWidth` and `innerHeight` (no window chrome).
+- `isSecureContext` is true for an `https:` document or a loopback host, as in Secure Contexts. `crossOriginIsolated` is false.
+- `opener` and `frameElement` are `null`. `closed` is false.
+- `alert`, `print`, `focus` and `blur` do nothing. `confirm` returns false. `prompt` and `open` return `null`. No dialog or popup can show.
+- `postMessage(message, targetOrigin | options, transfer)`:
+  - `targetOrigin` is `"*"`, `"/"` (the origin of this window) or an origin. An unparsable value throws a `SyntaxError` `DOMException`. A parsable origin that differs from the window origin drops the message, with no error (as the standard says).
+  - The message is cloned with the `structuredClone` walk, so its caps and `DataCloneError` apply. Transfer lists are refused as for `structuredClone`.
+  - The event is a task on the scheduler. Its `source` is the window, and its `origin` is the window origin.
+  - Each queued message counts 1024 bytes (`MESSAGE_COST`) in the same queue cap as other messages.
+
+### Navigator
+
+| Property | Value | Source |
+|---|---|---|
+| `vendor` | `Google Inc.` | Chrome |
+| `appName`, `product`, `productSub` | `Netscape`, `Gecko`, `20030107` | HTML standard (fixed legacy values) |
+| `appVersion` | the user agent without `Mozilla/` | HTML standard |
+| `vendorSub` | `""` | HTML standard |
+| `maxTouchPoints` | 0 | Chrome on desktop |
+| `webdriver` | false | WebDriver standard, no automation flag |
+| `pdfViewerEnabled` | true | Chrome |
+| `plugins`, `mimeTypes` | the five PDF plugins and two PDF types of the standard "PDF viewer" list | HTML standard |
+| `javaEnabled()` | false | HTML standard |
+| `doNotTrack` | `null` | Chrome default |
+
+Not checked against a live Chrome: the plugin and MIME lists. They follow the standard text.
+
+### `sendBeacon`
+
+- The URL is parsed against the document base. A bad URL throws `TypeError`. A non-HTTP(S) URL throws `TypeError`.
+- It makes a keepalive `POST` with `credentials: "include"` through the fetch queue. It returns `true` when the fetch queue takes it.
+- Quota: 64 KiB of body bytes in flight for all keepalive requests (Fetch standard, "keepalive" quota). A beacon over the quota returns `false`. The bytes count until the request ends.
+
+### Deviations
+
+- Several functions share one function object (`alert`, `print`, `focus`, `blur` are the same no-op). The page can see this with `===`. The reason is the install cost: each new function costs about 2.4k instructions, and the smallest rows of the cost matrix have a limit of +0.5%.
+- The getters for strings are named by their key (`charset`, not `get charset`). The name string would be one more interned string, and 6 more strings at install moved the intern table over a power-of-two size on `navigation_load storage`.
+- `charset`, `characterSet` and `inputEncoding` share one function.

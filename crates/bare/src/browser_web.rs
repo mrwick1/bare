@@ -45,7 +45,7 @@ use std::cell::{Cell, RefCell};
 use std::fmt::Write;
 
 /// The user agent string, and the major version that `userAgentData.brands` reports. The only place of both.
-const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36";
+pub(crate) const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36";
 const CHROME: &str = "155";
 
 const MAX_BLOB: usize = 64 << 20;
@@ -347,6 +347,7 @@ fn make(d: &Dom, it: &mut Interp<'_>) -> R<Made> {
     for (name, h) in getters {
         d.def_get(it, np, name, h, None)?;
     }
+    crate::browser_basics::navigator(d, it, np)?;
     let navigator = d.obj(it, np)?;
     let en = [d.js_str(it, "en-US")?, d.js_str(it, "en")?];
     let langs = it.array_from(&en)?;
@@ -490,6 +491,10 @@ fn nav(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<Made> {
         (Value::Object(o), Some(m)) if o == m.glob[1] => Ok(m),
         _ => Err(illegal(it)),
     }
+}
+
+pub(crate) fn nav_this(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<()> {
+    nav(d, it, this).map(|_| ())
 }
 
 fn uad(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<Made> {
