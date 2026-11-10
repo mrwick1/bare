@@ -988,3 +988,23 @@ fn cssom_does_not_expose_flattened_imports() {
         assert!(js(&mut b,"document.styleSheets[0].cssRules.length").starts_with("unsupported:CSSOM of flattened imported sheets"));
     });
 }
+
+#[test]
+fn dom_implementation_interface() {
+    big(|| {
+        let mut b = browser();
+        assert!(b.dom.implementation.get().is_none());
+        assert_eq!(js(&mut b, "var C=true,h='prototype',ut={};var {createHTMLDocument:Tm,createDocument:Ep}=C?DOMImplementation[h]:ut; typeof Tm+','+typeof Ep"), "function,undefined");
+        assert_eq!(js(&mut b, "var I=DOMImplementation, mi=document.implementation; [mi instanceof I, Object.getPrototypeOf(mi)===I.prototype, mi.constructor===I, I===DOMImplementation].join()"), "true,true,true,true");
+        assert_eq!(js(&mut b, "var p=Object.getOwnPropertyDescriptor(I,'prototype'),c=Object.getOwnPropertyDescriptor(I.prototype,'constructor'); [p.writable,p.enumerable,p.configurable,c.writable,c.enumerable,c.configurable].join()"), "false,false,false,true,false,true");
+        assert_eq!(js(&mut b, "var errors=[]; for(var f of [()=>I(),()=>new I(),()=>Tm.call({}),()=>I.prototype.hasFeature.call(Object.create(I.prototype))]) {try{f();errors.push('bad')}catch(e){errors.push(e.name)}} errors.join()"), "TypeError,TypeError,TypeError,TypeError");
+        assert_eq!(js(&mut b, "Tm.call(mi,'T').head.firstChild.textContent"), "T");
+        b.collect(&[]).unwrap();
+        assert_eq!(js(&mut b, "mi instanceof I && mi.constructor===DOMImplementation"), "true");
+        let mut c = browser();
+        assert_eq!(js(&mut c, "var p=Object.getPrototypeOf(document.implementation), I=p.constructor; p.constructor=7; DOMImplementation===I"), "true");
+        let mut c = browser();
+        assert_eq!(js(&mut c, "DOMImplementation=7; document.implementation; DOMImplementation"), "7");
+        assert_eq!(js(&mut c, "document.implementation.hasFeature()"), "true");
+    });
+}

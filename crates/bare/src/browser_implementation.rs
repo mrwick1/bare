@@ -20,7 +20,8 @@ fn arg(a: &[Value], i: usize) -> Value {
 }
 
 /// `implementation.createHTMLDocument(title)`.
-fn create_html_document(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
+fn create_html_document(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
+    receiver(d, it, this)?;
     let title = match arg(a, 0) {
         Value::Undefined => None,
         v => Some(d.string_arg(it, v)?),
@@ -42,7 +43,13 @@ fn create_html_document(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> 
     d.wrap(it, n)
 }
 
-fn has_feature(_: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
+fn receiver(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<()> {
+    if matches!(this, Value::Object(o) if d.implementation.get() == Some(o)) { return Ok(()); }
+    Err(it.type_error("Illegal invocation"))
+}
+
+fn has_feature(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
+    receiver(d, it, this)?;
     Ok(Value::Bool(true))
 }
 
@@ -55,16 +62,37 @@ fn implementation(d: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Valu
     d.def_method(it, proto, "createHTMLDocument", 0, create_html_document)?;
     d.def_method(it, proto, "hasFeature", 0, has_feature)?;
     crate::browser_lazy::tag(d, it, proto, "DOMImplementation")?;
+    let ctor = d.add_fn(it, illegal_constructor, "DOMImplementation", 0, true)?;
+    let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
+    it.define_data(ctor, kp, Value::Object(proto), false, false, false)?;
+    it.define_data(proto, kc, Value::Object(ctor), true, false, true)?;
+    let kg = d.key(it, "DOMImplementation")?;
+    let g = it.global_object();
+    if it.heap.peek_own_property(g, kg).map_err(|e| it.heap_error(e))?.is_some_and(|p| matches!(p, bare_js::heap::Property::Accessor { .. })) {
+        it.define_data(g, kg, Value::Object(ctor), true, false, true)?;
+    }
     let o = d.obj(it, proto)?;
     d.implementation.set(Some(o));
     d.fixed.borrow_mut().push(o);
     Ok(Value::Object(o))
 }
 
+fn implementation_global(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
+    let v = if let Some(v) = a.first() { *v } else {
+        let Value::Object(o) = implementation(d, it, Value::Undefined, &[])? else { unreachable!() };
+        let p = it.heap.get_prototype_of(o).map_err(|e| it.heap_error(e))?.expect("implementation prototype");
+        let k = d.key(it, "constructor")?;
+        it.get_value(Value::Object(p), k)?
+    };
+    let k = d.key(it, "DOMImplementation")?;
+    it.define_data(it.global_object(), k, v, true, false, true)?;
+    Ok(v)
+}
+
 /// Installed with the late members of `Document` (`browser_dom::install_late`).
 pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     d.def_get(it, d.p().document, "implementation", implementation, None)?;
-    crate::browser_lazy::install(d, it, &[("DOMParser", parser_global), ("XMLSerializer", serializer_global)])
+    crate::browser_lazy::install(d, it, &[("DOMImplementation", implementation_global), ("DOMParser", parser_global), ("XMLSerializer", serializer_global)])
 }
 
 // XML MIME types use the HTML parser. Case, namespaces, errors and serialization
