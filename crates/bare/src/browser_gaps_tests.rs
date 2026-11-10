@@ -209,6 +209,9 @@ fn indexeddb_unused_names_stay_lazy() {
     });
 }
 
+// Retained from https://github.githubassets.com/assets/app-runtime-18aa0d2ccd44d16d.js.
+// SHA-256: 0eee86f96a5f88840e2976a370ae607ff899247cd5b3fcfaae5eeef077a55645.
+// The open-store and expiration-query functions are unchanged. The caller checks writes and reads.
 #[test]
 fn indexeddb_github_expiration_wrapper() {
     big(|| {
