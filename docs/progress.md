@@ -6671,3 +6671,97 @@ Ownership in the plan-9 sweep: Task 28 retains apnews fatal Steps and craigslist
 Not tested here: workspace tests, public journeys, a new browser oracle, repeated live pages, full API conformance, instruction attribution or other cost rows. Evidence checks cover the nine exact restorations, the two-file scope, source claims, raw count arithmetic, later gate exits and retained sweep outputs. Worktree ownership was checked before edits; `/data/bare-tmp/wga/ownership.txt` retains the result.
 
 Final rebase: acquired `merge-gate acquire wga`, then ran `git fetch origin` and `git rebase origin/main` on `37212433`. Preserve both sides of the append conflict in decisions.md. Append this section after the rebase. Tasks 26 and 27 have since merged as #341 and #340; no fresh sweep was run on those changes. The evidence above stays tied to its frozen trees. `python3 /data/bare-tmp/wga/validate.py` and `git diff --check` pass. The full pre-audit progress file equals current main plus exactly the nine authorized restorations. Validation output: `/data/bare-tmp/wga/validation.txt`.
+
+## Sparse live measurements and allocator drift (Task 34)
+
+Problem: readiness can pass after a main resource fails. A single live RSS pair cannot establish equal application work. This docs-only audit changes no code and accepts no cost exception. Tests-first: N/A. Machine: archMachine, 2026-11-10.
+
+### Retained failures
+
+Raw source: `/data/bare-tmp/se/round2/final/live-final/`. In `bsky-base-1/stdout.json`, the main `index-a9f3c86828254d6e282956da5a02b0f4.js` bundle has status 0, zero bytes and `connect timeout: connection timed out`. NEW fetched status 200 and 2,488,274 bytes. Both readiness checks passed. The 22.3/197.7 MiB pair measures unequal application work. It does not establish a memory regression.
+
+Vimeo pair 4 failed the same idle-page readiness assertion on both versions. Each network list contains 52 status-200 resources and one status-302 redirect. Neither list contains a resource error, status 0 or status >=400. Both console lists are empty. BASE elapsed 19,891.9 ms; NEW 19,496.0 ms. Thus the retained JSON does not identify a failed network resource. A deferred-resource or loader-state failure is a hypothesis. A deterministic loader defect is unverified. Task 30 owns loader diagnostics; Task 29 owns the separate Vimeo API errors. No loader changes were made.
+
+### Frozen live pairs
+
+BASE `7a68b71a91a723f76c12332177ea8e30b823d341`; NEW `37212433e0b7512272f2f4418a7c8bf669db3597`. Three alternating pairs per site, in table order: BASE1, NEW1, BASE2, NEW2, BASE3, NEW3. Site order: bsky, GitHub, The Verge. URLs: `https://bsky.app/profile/bsky.app`, `https://github.com/rust-lang/rust`, `https://www.theverge.com/`. Viewport: 1280x800. Steps: `timeout 30000`, `open URL`, `expect js "document.readyState === 'complete'"`, observational DOM/script counts through console.log, `shot s`. Each run starts a fresh process and profile.
+
+Exact commands, steps, full network status/bytes/errors, console text and JSON: `/data/bare-tmp/sla/{site}-{base,new}-{1,2,3}/`. Launcher: `audit.py`; reducer: `summarize.py`; structured resource failures: `live-summary.json`, all under `/data/bare-tmp/sla/`. Command form: `/data/bare-tmp/bin/heavy timeout 75 TARGET/release/bare-drive --size 1280x800 --out OUT OUT/steps`. `command.json` retains each expanded command. The runner exposes glibc live heap, not JS-only heap. JS heap is unavailable; do not label the heap column JS heap.
+
+| Run | Ready | HTTP status:count; bytes | DOM / scripts | Errors by type | ms | Peak RSS MiB | glibc heap KiB |
+| --- | --- | --- | --- | --- | ---: | ---: | ---: |
+| bsky 1 base | True | {200: 6, 0: 1}; 2503831 | 56 scripts 6 | {} | 3884.6 | 198.1 | 10494 |
+| bsky 1 new | True | {200: 6}; 2503831 | 56 scripts 6 | {} | 3556.1 | 197.9 | 10628 |
+| bsky 2 base | True | {200: 6}; 2503831 | 56 scripts 6 | {} | 3786.4 | 197.7 | 10482 |
+| bsky 2 new | True | {200: 6}; 2503831 | 56 scripts 6 | {} | 3755.8 | 198.0 | 10609 |
+| bsky 3 base | True | {200: 6, 0: 1}; 2503830 | 56 scripts 6 | {} | 3738.3 | 204.5 | 10582 |
+| bsky 3 new | True | {200: 6}; 2503831 | 56 scripts 6 | {} | 3608.7 | 197.8 | 10614 |
+| github 1 base | True | {200: 120}; 2088244 | 2224 scripts 13 | {'createIndex': 1} | 3723.2 | 194.0 | 42225 |
+| github 1 new | True | {200: 122}; 2099018 | 2224 scripts 13 | {'createIndex': 1} | 3369.5 | 195.5 | 42243 |
+| github 2 base | True | {200: 122}; 2099019 | 2224 scripts 13 | {'createIndex': 1} | 3336.5 | 196.8 | 42270 |
+| github 2 new | True | {200: 122}; 2099023 | 2224 scripts 13 | {'createIndex': 1} | 3413.7 | 194.1 | 42288 |
+| github 3 base | True | {200: 116}; 2081545 | 2224 scripts 13 | {'createIndex': 1} | 2373.3 | 152.5 | 42146 |
+| github 3 new | True | {200: 122}; 2099027 | 2224 scripts 13 | {'createIndex': 1} | 3460.0 | 197.3 | 42259 |
+| theverge 1 base | True | {200: 124, 0: 5}; 6451294 | 2748 scripts 64 | {'IDBIndex': 65} | 9126.7 | 247.9 | 80063 |
+| theverge 1 new | True | {200: 134, 0: 5}; 8832993 | 2748 scripts 64 | {'IDBIndex': 71} | 8751.4 | 315.9 | 75878 |
+| theverge 2 base | True | {200: 122, 0: 5}; 6432018 | 2748 scripts 64 | {'IDBIndex': 65} | 9302.0 | 219.5 | 78897 |
+| theverge 2 new | True | {200: 135, 0: 5}; 9227087 | 2748 scripts 64 | {'IDBIndex': 76, 'error': 1} | 8892.9 | 314.8 | 75592 |
+| theverge 3 base | True | {200: 131, 0: 5}; 8535269 | 2748 scripts 64 | {'IDBIndex': 71} | 9331.2 | 312.2 | 75405 |
+| theverge 3 new | True | {200: 132, 0: 5}; 8832516 | 2730 scripts 63 | {'IDBIndex': 65} | 9150.0 | 262.9 | 75302 |
+
+All 18 step runs passed. This does not mean all resources or applications passed. Bsky BASE1 and BASE3 each refused the events feature endpoint; the other bsky runs had no network errors. All bsky runs fetched the same 2,488,274-byte main bundle and reported DOM 56/scripts 6. Strict failure-free equal-work bsky comparison is pair 2 only: 3786.4/3755.8 ms and 197.7/198.0 MiB. The earlier large gap did not repeat. The other two pairs remain in the table.
+
+GitHub always reported DOM 2224/scripts 13 and one createIndex TypeError. Resource counts differ (116–122); these are partial application runs, not proved equal work. The Verge has five refused ad resources on each run, varying resource bytes, IDBIndex callbacks, and DOM counts. Its RSS median gap repeats in the mixed-work sample, but the per-pair direction does not: BASE3 exceeds NEW3. No failure-free equal-work Verge or GitHub subset exists here. No causal conclusion or local reduction follows from these medians. Same-input local reduction was not run; equal-work live repetition remains unestablished. Task 29 owns IDBIndex/createIndex attribution and API behavior.
+
+Medians and ranges, including all partial runs:
+
+- bsky base: ms: 3786.4 (3738.3–3884.6); rss: 198.1 (197.7–204.5)
+- bsky new: ms: 3608.7 (3556.1–3755.8); rss: 197.9 (197.8–198.0)
+- github base: ms: 3336.5 (2373.3–3723.2); rss: 194.0 (152.5–196.8)
+- github new: ms: 3413.7 (3369.5–3460.0); rss: 195.5 (194.1–197.3)
+- theverge base: ms: 9302.0 (9126.7–9331.2); rss: 247.9 (219.5–312.2)
+- theverge new: ms: 8892.9 (8751.4–9150.0); rss: 314.8 (262.9–315.9)
+
+The retained Verge 280.2/311.3 MiB medians use `d8550bbba0`, before the Intl merge #341. They are not the isolated #340 comparison above. Neither median pair attributes memory to sparse storage.
+
+### Four cost rows, both allocators
+
+Only `FORM_LOAD_STACK_MIB=8 examples/form_load gates {1,10}` and `examples/reflect_load keys {1,10}` were audited. No matrix ran. Commits: #341 parent `d8550bbba0d29a64d4a70354d8bd51131bef3025`, merge `7a68b71a91a723f76c12332177ea8e30b823d341`; #340 parent is that merge, merge `37212433e0b7512272f2f4418a7c8bf669db3597`.
+
+`base-build REF --release -p bare-drive` and `base-build REF --release -p bare -p bare-js --example form_load --example reflect_load` supplied frozen binaries. Build log: `build-verified.log`. An initial combined command omitted the example package and reported missing targets. Existing binaries supplied the live runs; their SHA-256 hashes stayed unchanged after the corrected build. Two form binaries changed after that build, so the final counts use the corrected binaries only. Initial counts remain in `counts.jsonl`; final counts are `counts-verified.jsonl`. Binary SHA-256 and paths: `binaries-verified.txt`. Commands and environment: `recount.py`, `audit.py`, and each JSONL record. Each batch runs `heavy tools/js/instr.sh TARGET/release/examples/EXE MODE N`; `instr.sh` takes the minimum of three `instructions:u` counts with `GLIBC_TUNABLES=glibc.malloc.tcache_count=65535`. Jemalloc adds `LD_PRELOAD=/usr/lib/libjemalloc.so.2`. Two independent batches are retained. Percentages below use the smaller batch count per tree.
+
+| Row / allocator | d8550bbba0 (two batches) | 7a68b71a91 (two batches) | 37212433 (two batches) | #341 % | #340 % | Accumulated % |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| form_load 1 / glibc | [133944712, 133944633] | [134834631, 134834989] | [134843256, 134843516] | +0.664 | +0.006 | +0.671 |
+| form_load 1 / jemalloc | [143554363, 143553855] | [143553135, 143551056] | [143560053, 143560592] | -0.002 | +0.006 | +0.004 |
+| form_load 10 / glibc | [1260848052, 1260846550] | [1269700559, 1269701456] | [1269709879, 1269709755] | +0.702 | +0.001 | +0.703 |
+| form_load 10 / jemalloc | [1336515081, 1336502891] | [1336435605, 1336430986] | [1336444265, 1336439758] | -0.005 | +0.001 | -0.005 |
+| reflect_load 1 / glibc | [19258320, 19258700] | [19264188, 19263897] | [19348084, 19347981] | +0.029 | +0.436 | +0.466 |
+| reflect_load 1 / jemalloc | [23096856, 23097324] | [23101655, 23102345] | [23186351, 23186033] | +0.021 | +0.365 | +0.386 |
+| reflect_load 10 / glibc | [155841128, 155841361] | [155844704, 155845075] | [156659363, 156661115] | +0.002 | +0.523 | +0.525 |
+| reflect_load 10 / jemalloc | [165055460, 165055369] | [165060442, 165060495] | [165875247, 165830540] | +0.003 | +0.467 | +0.470 |
+
+The #341 form glibc rise repeats, while jemalloc stays flat. The #340 form rise in retained `se/round2/final/cost-final.tsv` (+0.626/+0.660% glibc, -0.603/-0.667% jemalloc) does not repeat with these freshly built form binaries: +0.006/+0.001% glibc. Build composition matters to the observation; its causal mechanism is unverified. Do not classify this as established allocator noise.
+
+The #340 reflect keys 10 glibc rise repeats (+0.523%); jemalloc is +0.467% in the final smaller-batch comparison. The retained row was +0.521/+0.485%. An initial jemalloc batch gave accumulated +0.524%, but final batches give +0.470%. Thus an accumulated over-both result is not stable across batches. Accumulation covers two changes and must not replace the per-PR comparison. No final audited per-PR row is over +0.5% under both allocators. No waiver is requested or granted. Symbol and disassembly captures for both reflect binaries are retained as `*-reflect-symbols.txt` and `*-reflect-disassembly.txt`. No symbol attribution establishes the cause. Cause remains unverified.
+
+Task 31 merged as [#343](https://github.com/mrwick1/bare/pull/343) during the gate wait. Its final #333 fetch audit reports initial glibc 33,517,881/33,667,300 (+0.446%) and jemalloc 37,777,608/37,904,621 (+0.336%). Its separately retained counts give +0.531/+0.316%. `/data/bare-tmp/wga/counts.txt` confirms the initial values. This is a one-allocator threshold crossing, not an established inlining cause. Consume its [targeted historical fetch audit](#targeted-historical-fetch-audit) without changing its records. This task did not rerun fetch_load or edit those records. Unresolved causes remain with the existing owners in plan-10: Task 29 for first-error/API work, Task 30 for loader diagnostics, and Task 31 for historical fetch evidence. Reference: `/data/bare-tmp/plans/plan-10.md`, Ownership and Tasks 29–34; [#340](https://github.com/mrwick1/bare/pull/340), [#341](https://github.com/mrwick1/bare/pull/341).
+
+Validation: reduce all 18 raw JSON outputs and 48 final count records; retain failures rather than filter them away. Review exact diff and references. Cost case: docs-only, no matrix. No code, dependency, budget or storage change. Not tested: workspace tests, public journeys, test262, execution comparison, typing, browser oracle, broad live sweep, same-input local replay, JS-only heap, or API fixes. Live DOM counts and resource bytes do not prove identical execution. Local evidence paths are machine-local and are not hosted PR attachments.
+
+Sources: `/data/bare-tmp/ilr/cost-final.raw` and `/data/bare-tmp/se/round2/final/cost-final.tsv`. Retained raw counts, before this audit rebuild (glibc BASE/NEW; jemalloc BASE/NEW; dash means not measured in that log):
+
+| PR | Row | glibc BASE | glibc NEW | jemalloc BASE | jemalloc NEW |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 341 | examples/reflect_load keys 1 | 19594730 | 19477383 | - | - |
+| 341 | examples/reflect_load keys 10 | 156176255 | 156058832 | - | - |
+| 341 | FORM_LOAD_STACK_MIB=8 examples/form_load gates 1 | 134162582 | 135052420 | 146739091 | 146737408 |
+| 341 | FORM_LOAD_STACK_MIB=8 examples/form_load gates 10 | 1261065526 | 1269920036 | 1339680465 | 1339615151 |
+| 340 | examples/reflect_load keys 1 | 19600063 | 19683647 | 26424090 | 26512019 |
+| 340 | examples/reflect_load keys 10 | 156182754 | 156996282 | 168383066 | 169200442 |
+| 340 | FORM_LOAD_STACK_MIB=8 examples/form_load gates 1 | 134343452 | 135183899 | 147780851 | 146889225 |
+| 340 | FORM_LOAD_STACK_MIB=8 examples/form_load gates 10 | 1261721674 | 1270049880 | 1348761740 | 1339766546 |
+
+The #341 full log measured jemalloc only for the two over-limit form rows; its separate 50-row subset is not a full both-allocator gate. Retained binary hashes were not supplied with those raw rows. The fresh counts above identify their own binary hashes and do not silently substitute for the retained final-tree results.
+
+Final rebase: acquired `/data/bare-tmp/bin/merge-gate acquire sla` before `git fetch origin` and `git rebase origin/main`. Documentation base: `e383d1b81ba8a06b4772a443c4db655458e790de`. The frozen measurement trees above remain unchanged. Append this section after the final rebase.
