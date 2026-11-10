@@ -5,11 +5,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-[dependencies]
+# Wayland is the Linux backend. On another OS the crate builds without it, and `Window::open` says that there is no backend yet.
+[target.'cfg(target_os = "linux")'.dependencies]
 rustix = { version = "1.1.6", features = ["event"] }
 smithay-client-toolkit = { version = "0.21.1", default-features = false, features = ["xkbcommon"] }
 
-[dev-dependencies]
+[target.'cfg(target_os = "linux")'.dev-dependencies]
 memmap2 = "0.9.12"
 wayland-protocols = { version = "0.32.13", features = ["server"] }
 wayland-server = "0.31.14"

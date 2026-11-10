@@ -322,7 +322,7 @@ Known limits:
 
 ## Platforms
 
-Linux (Wayland) is the priority. Windows and macOS come later.
+Linux (Wayland) was the first target. Since 2026-11-10 the core must also build and run on Windows and macOS (see "Cross-platform core" below).
 
 Design rules, so that a port is small:
 
@@ -334,6 +334,18 @@ Design rules, so that a port is small:
   - macOS: Cocoa through the Objective-C runtime (`objc_msgSend`).
 - Other OS calls (for example memory with `mmap`) also go behind small per-OS functions.
 - Each port is built and tested on its own OS.
+
+### Cross-platform core (owner decision, 2026-11-10)
+
+`bare` is a cross-platform product: Linux, Windows and macOS. The core must not depend on the OS.
+
+- Core crates use only `std` and portable crates. The core is every crate except the OS layer.
+- The OS layer is the only code that calls the OS. It is the window backends in `bare-window`, and later a `bare-os` crate for the other OS services: random bytes, DNS servers, trust roots, the local time zone and time zone data, CPU time and memory counts, and allocator tuning.
+- Trust roots on Windows and macOS come from the OS certificate store (owner choice). The OS store holds the roots that the user and the company trust. A bundled root list was the alternative: the same on each OS, but updated by hand, and blind to roots that the OS adds.
+- Windows tests run in a Windows VM on archMachine (owner choice). No machine of the owner runs Windows. A VM can also run window tests later. A CI runner was the alternative.
+- Headless first: `bare-drive` and `bare-mcp` must build and run on each OS before the window backends.
+- Gate: `tools/portable_check.sh`. It scans the core for OS code and runs `cargo check` for Windows and macOS. A check proves only that the code builds there. Each OS also needs runtime tests on that OS.
+- Until the window backend of an OS exists, `bare-window` builds there without Wayland, and `Window::open` returns an error (`crates/window/src/none.rs`).
 
 ## TLS
 

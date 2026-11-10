@@ -1,6 +1,8 @@
 //! The TLS client against a loopback `openssl s_server -tls1_2`, with the real path validator.
 //! Same harness as client_openssl.rs: a synthetic root in RAM, no network beyond 127.0.0.1.
 //! These tests skip (and say so) when `openssl` is not installed.
+//! The harness keeps its keys in /dev/shm, so these tests run on Linux only.
+#![cfg(target_os = "linux")]
 
 #[path = "../../../tools/crypto/openssl_harness.rs"]
 mod harness;

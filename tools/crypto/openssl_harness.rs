@@ -9,6 +9,7 @@
 use std::cell::RefCell;
 use std::io::{Read, Write};
 use std::net::TcpListener;
+#[cfg(unix)]
 use std::os::unix::fs::DirBuilderExt;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -102,7 +103,11 @@ impl Pki {
 
     fn with_root(keygen: &[&str]) -> Pki {
         let dir = PathBuf::from(format!("/dev/shm/bare-https-test-{}-{}", std::process::id(), COUNTER.fetch_add(1, Ordering::SeqCst)));
-        std::fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+        let mut b = std::fs::DirBuilder::new();
+        // Only Linux has /dev/shm, and the tests that use this harness run on Linux only. The mode keeps this code building elsewhere.
+        #[cfg(unix)]
+        b.mode(0o700);
+        b.create(&dir).unwrap();
         let pki = Pki { dir };
         pki.run(keygen);
         pki.run(&[

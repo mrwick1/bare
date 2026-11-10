@@ -1,6 +1,8 @@
 //! HTTP/2 through `bare_net::http::Client`, against Node's `http2` (nghttp2). It is an independent peer: it checks our HPACK encoder
 //! (nghttp2 decodes it), our HPACK decoder (nghttp2 encodes for it), flow control with real windows, and multiplexing on one connection.
 //! The trust anchor is a synthetic root made for each test. These tests skip (and say so) when `node` or `openssl` is missing.
+//! The harness keeps its keys in /dev/shm, so these tests run on Linux only.
+#![cfg(target_os = "linux")]
 
 #[path = "../../../tools/crypto/openssl_harness.rs"]
 mod harness;

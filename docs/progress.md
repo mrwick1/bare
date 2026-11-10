@@ -8210,3 +8210,41 @@ The owner asked for a check of the progress record and all documents. This docs-
 - This file: the module table, the S4 and S5 summary, the journey status and three HTTP and URL known gaps now match the later records (HTTP/2, parallel downloads, TLS 1.2, wildcard SANs).
 
 Not checked: every entry of "Known gaps" and every section of resources.md. Some older gap entries can still be stale. IP-literal HTTPS end to end is marked "to verify". staging-network.md and staging-js-requirements.md are dated snapshots from 2026-11-04 and are unchanged. No tests, matrix or live runs ran. The only command run against the code was `cargo run` at the workspace root, to confirm that it fails.
+
+## Cross-platform core: plan and topic 1 (2026-11-10)
+
+Owner request: build `bare` as a cross-platform product, with a core that does not depend on the OS. The first use is a headless MCP server for end-to-end tests (branch `mcp-server`, held until this topic merges). The decision and its rules are in [decisions.md](decisions.md#cross-platform-core-owner-decision-2026-11-10).
+
+### Inventory on main (13c6b0bc, after #366)
+
+- Window: `bare` always depended on `bare-window`, and `bare-window` always built Wayland (`smithay-client-toolkit`, `rustix`, `std::os::unix`). A Windows build of `bare-drive` failed there.
+- Random bytes: `tls/random.rs` reads Linux `getrandom` or `/dev/urandom`. Other OSes return `Unsupported`, so TLS fails. `Math.random` seeds from `/dev/urandom` (`js/eval_numeric.rs`).
+- DNS: `net/dns.rs` reads the servers from `/etc/resolv.conf`.
+- Trust roots: `tls/trust_store.rs` reads Linux bundle files under `/etc/ssl` and `/etc/pki`.
+- Time zone: `js/eval_intl.rs` reads `TZ`, then the `/etc/localtime` link, and the zone data under `/usr/share/zoneinfo`. Windows has none of these.
+- Counts: CPU time and memory from `/proc` (`bare/main.rs`, `drive/run.rs`, `drive/main.rs`, `bench/main.rs`). glibc `mallopt` and `mallinfo2` (`net/parallel.rs`, `drive/main.rs`).
+- TCP: `net/tcp.rs` has a Linux-only test with `listen`.
+
+### Topics
+
+| Topic | Work | Check before closing |
+| --- | --- | --- |
+| 1 | Split the window interface from the Wayland backend. Add the portability gate. | `cargo check --workspace --all-targets` passes for Windows and macOS. The Linux tests pass. |
+| 2 | Add `bare-os`: random bytes, DNS servers, trust roots from the OS store, the local time zone with zone data, counts, allocator tuning. Empty the `known` list of the gate. | Each service has a Linux test. The gate passes with an empty `known` list. |
+| 3 | Run on each OS: `bare-drive`, `bare-mcp` and the headless tests on macOS (macbook-pro) and in a Windows VM on archMachine. | The fixture journey and a set of public journeys pass on each OS. |
+| 4 | Window backends: Win32 and Cocoa, as planned in decisions.md ("Platforms"). | Open, resize, input and redraw checks on each OS. |
+
+### Topic 1 result
+
+- `bare-window` builds Wayland on Linux only (target dependencies). On other OSes `none.rs` gives the same `Window` and `Waker`. `Window::open` returns "no window backend on windows yet". `Stats` moved to `lib.rs`, because it does not depend on the OS.
+- The Wayland tests of `bare-window` and the tests that use the OpenSSL harness (keys in `/dev/shm`) run on Linux only (`#![cfg(target_os = "linux")]`). The harness sets the directory mode only on Unix, so the `https_load` example builds elsewhere.
+- `tools/portable_check.sh` scans the core for OS code and runs the two cross checks. The `known` list holds the 11 files of the inventory above. Topic 2 empties it.
+
+Checks:
+
+- `cargo xwin check --target x86_64-pc-windows-msvc --workspace --all-targets`: passes. Before the change, `cargo check -p bare-mcp` for Windows failed in `wayland-sys` and `smithay-client-toolkit`.
+- `cargo check --target aarch64-apple-darwin --workspace --all-targets` with clang for `psm`: passes.
+- The scan fails on a planted `/proc/self/stat` read in `crates/url/src/lib.rs`, and passes on the tree.
+- Linux: `cargo test --release --workspace`: 3,483 passed, 0 failed, 13 ignored.
+
+Not tested: no code ran on Windows or macOS. The cross checks prove that the code builds, not that it runs. The macOS check uses clang without a macOS SDK; a native build on macOS was not run (macbook-pro did not answer SSH). No cost matrix ran: the Linux build has no runtime change. The only Linux source change moves the `Stats` struct from `wayland.rs` to `lib.rs`.
