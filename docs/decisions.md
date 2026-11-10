@@ -1019,3 +1019,17 @@ The frozen Verge wrapper evaluates `[IDBDatabase,IDBObjectStore,IDBIndex,IDBCurs
 Expose IDBIndex through the existing IDB-prefix lazy path and interface table. Its public constructor throws TypeError. Its prototype has stable identity and the same publication descriptors as the other shim interfaces. Keep index methods absent. The wrapper probes `(o?IDBIndex:IDBObjectStore).prototype` before offering convenience methods. An empty interface prototype does not imply index support. No createIndex, index, index get or index cursor implementation is included. Existing object-store methods remain unchanged.
 
 The source is included at build time but evaluated only on the first requested IndexedDB name. Browser install does not evaluate the source or create its database maps, weak maps or interface objects. No registration, heap or evaluator change is required. The unused-name regression checks absence of published IDB names; source-path inspection supplies the allocation argument. This is not an allocation-counter measurement. See the Task 41 progress entry for failing-first checks, replay results and cost limits.
+
+## Lazy document font sets and FontFace (Task 40)
+
+Angular's icon callback awaits `document.fonts.load`. The host returned undefined. Four checked fixtures fail on frozen main `46070ed674d3145b68e31c79e1e99371fde709f6` before implementation. The load fixture retains the missing-receiver TypeError. The same fixtures pass with the font API.
+
+The owner extended the scope to a minimal lazy `FontFace`. Its constructor converts family, source and descriptors to strings. It requires family and source. A face starts unloaded. Its stable loaded promise resolves with the face when load marks it loaded. This model does not fetch, decode or validate font data. It does not prove glyph availability.
+
+The existing missing-name route makes the source only when a font API name is read. Private weak maps validate face and set brands. The existing bounded Set storage supplies membership and live iteration. There is no new host field or install function. A private native callback validates document receivers. A weak map makes one set per native document on first fonts access. Detached documents have separate sets. Its ready promise and identity are stable. A forged prototype is not a valid member. The document getter rejects forged receivers.
+
+Set load resolves with matching members, or an empty array. Check returns true after argument conversion and shorthand validation. Matching supports numeric px, pt, em, rem and percentage sizes with optional line height and a comma-separated family list. It does not implement all CSS shorthand grammar, escaped family names or commas inside quoted family names. Text is converted but has no glyph-selection effect. No events, font requests or CSS changes are added.
+
+Three alternating Angular pairs reduce twelve load rejections to zero. The first eight docs-icon elements change computed font size from 0px to 24px. This shows the visibility signal advanced. It does not establish rendered glyphs or full application function. WebAssembly errors remain separate. The exact live callback receiver mapping remains a hypothesis from Task 38.
+
+The two exact heap whitelist additions require cost case 1. The final 805-row gate passes with zero flagged rows and zero failures. No row requires jemalloc measurement. Final BASE is `c17a163a243918ad57e23420d518b3efb3ba990a`. Raw counts are in `/data/bare-tmp/ff13/cost-final.tsv`.

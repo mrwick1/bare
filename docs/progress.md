@@ -7534,3 +7534,71 @@ The first final cost attempt measured 60 rows with zero over-both, but 13 stress
 
 
 Final gated check: `merge-gate acquire idi14` acquired after Task 42. Rebased without conflict on `6f0503f409aded0b17a09525faf402915dcec8e2`. Used fresh `base-build` outputs for that full SHA, with explicit examples and stress builds. `final-cost-command.json` retains the exact matrix command and regex; the corrected invocation changes only its output path. `final-cost-corrected.log` and `.tsv`: 73 rows, zero failed, zero over one allocator, zero over both; glibc mean +0.004%. Jemalloc measured zero rows because no glibc row was flagged. This establishes the over-both threshold, not a measured jemalloc mean. No escalation or owner exception. `final-build.log` and `final-binaries.log` retain the post-rebase builds. `heavy cargo test --release -p bare --lib browser_gaps_tests` passed all 13 tests (`final-tests.log`). All 48 public journeys passed again on the rebased driver, with zero fail/known/skip/flakes (`public-rebased.log`). The earlier BASE/NEW live pairs were not repeated after rebase. Preserved all preceding docs as byte-identical prefixes. Reviewed exact final diff, prohibited publication text and whitespace before push.
+
+## Lazy document fonts and FontFace (Task 40)
+
+Angular's icon callback received undefined from document.fonts. The owner authorized a minimal FontFace class and a bounded font set. Font loading resolves in memory. It makes no font request and decodes no font data. The source mapping of the live receiver remains a hypothesis from Task 38.
+
+### Scope and implementation
+
+New files: browser_fontface.rs, browser_fonts.rs and browser_fonts_tests.rs. The existing basics dispatcher exposes fonts and FontFace lazily. The heap adds only those two exact names. Module registration changes are local. No host field, new heap hook, eager getter, install function, event surface or CSS change is added. A page that reads no font API creates no font source, method or state. The focused test checks that both lazy properties remain absent after ordinary document reads.
+
+Private weak maps brand faces and sets. Captured collection methods preserve brands after prototype writes. Native Set storage supplies entry limits and live mutation during forEach. A native document check and weak cache isolate sets for each document, including createHTMLDocument results. Repeated document.fonts and ready reads keep their identity. Family, source and descriptors convert to strings. Missing constructor arguments throw TypeError. A face starts unloaded. Its load method marks it loaded and resolves its stable loaded promise with itself. Set load selects stored faces by family and resolves an empty array when none match. Check returns true after conversions and shorthand validation. No glyph availability is established.
+
+### Tests first and retained evidence
+
+Frozen post-Task-24 main: `46070ed674d3145b68e31c79e1e99371fde709f6`. The shared base-build helper built bare-drive. Before runtime code, four checked HTTP fixtures fail: the exact Angular load expression, stable identities, membership and live iteration. The load fixture records `Cannot read properties of undefined (reading 'load')`. Commands and outputs: `/data/bare-tmp/ff13/run-regressions.py`, `regressions.log`, and each fixture's JSON, stderr and exit status. The final binary passes all four unchanged fixtures in `regressions-final/`.
+
+The first candidate also fails a retained prototype-write regression (`brands-before.log`). Five focused release tests pass after capturing the collection methods (`brands-after.log`). A later checked createHTMLDocument fixture fails with Expected document (`crossdocs-before/`). The native document validator and per-document cache make it pass (`crossdocs-after/`, `crossdocs-after-drive.log`). Five focused tests pass in `crossdocs-after.log`; they cover conversions, missing arguments, forged members, invalid callbacks and receivers, duplicate membership, delete, clear, live iteration, stable promises, separate documents, and an entry cap that leaves existing membership intact.
+
+### Final rebase and checks
+
+Foreground gate `merge-gate acquire ff13` waited from about 03:54 UTC and acquired at 04:18 UTC. Gate log: `/data/bare-tmp/ff13/gate.log`. Final rebase BASE: `c17a163a243918ad57e23420d518b3efb3ba990a`. Tested runtime head: `dbf28e16542ae38109e21d7096e010443a43588e`. The basics conflict keeps both DOMException and FontFace in WINDOW and preserves both dispatch arms. The DOMException heap token and test module remain. No browser.rs edit is present. The gate remains held through publication and merge.
+
+All commands use CARGO_TARGET_DIR=/data/bare-tmp/target-ff13. Builds, tests, live drivers and measurements run through /data/bare-tmp/bin/heavy. BASE comes only from base-build. Exact final commands:
+
+```sh
+export CARGO_TARGET_DIR=/data/bare-tmp/target-ff13
+/data/bare-tmp/bin/base-build c17a163a243918ad57e23420d518b3efb3ba990a --release --examples -p bare-js -p bare
+/data/bare-tmp/bin/base-build c17a163a243918ad57e23420d518b3efb3ba990a --release -p bare-drive -p bare-stress
+/data/bare-tmp/bin/heavy cargo build --release --examples -p bare-js -p bare
+/data/bare-tmp/bin/heavy cargo build --release -p bare-drive -p bare-stress
+/data/bare-tmp/bin/heavy cargo test --release --workspace
+/data/bare-tmp/bin/heavy cargo test --release -p bare --lib
+/data/bare-tmp/bin/heavy tools/js/cost_matrix.sh -o /data/bare-tmp/ff13/cost-final.tsv /data/bare-tmp/base/c17a163a24/target /data/bare-tmp/target-ff13
+/data/bare-tmp/bin/heavy tools/js/test262_check.sh -o /data/bare-tmp/ff13/test262-final2
+/data/bare-tmp/bin/heavy tools/js/exec_diff.sh /data/bare-tmp/target-ff13
+/data/bare-tmp/bin/heavy tools/drive/public/run.sh --out /data/bare-tmp/ff13/journeys-final2 /data/bare-tmp/target-ff13/release/bare-drive
+python3 /data/bare-tmp/ff13/live-final.py
+```
+
+Build logs: final-base-examples.log, final-base-binaries.log, final2-build-examples.log and final2-build-binaries.log under ff13. Workspace: 3,462 pass, zero fail, 13 ignored (`final-workspace.log`), before the last per-document correction. After that correction, the complete bare library suite passes 1,261 tests, with zero failures and six ignored (`final2-bare.log`). No workspace rerun followed that correction. All 48 final public journeys pass, with zero failures, known failures, skips or flakes (`journeys-final2.log`).
+
+Cost case 1 applies because the heap whitelist changes. Six initial browser rows pass (`iterate.log`, `iterate.tsv`). The saved noncomment every-13th sample is `every13.rows`; it does not replace the full gate. The full 805-row matrix runs once after the final rebase and last runtime correction: zero flagged rows, zero failed rows, mean glibc change -0.004%. Jemalloc measures zero rows because none exceed the glibc threshold. No waiver or structural retry is used. Raw paired counts: `cost-final.tsv`; summary: `cost-final.log`.
+
+Final test262 gate is ok (`test262-final2/gate.txt`). Execution comparison has 79 runs and zero differences (`exec-diff-final2.log`). BASE/NEW typing uses the same `/data/bare-tmp/pb/typing` page and the built type_load binaries. `keycost-built.sh` retains keycost.sh's measurements, removes its build step, and accepts FONT_TYPING_BIN so it never writes BASE. BASE uses `/data/bare-tmp/base/c17a163a24/target/release/examples/type_load`; NEW uses `/data/bare-tmp/target-ff13/release/examples/type_load`. Both report 282.8 M instructions per key for #a1 and 288.2 M for #f0, with about 572.8 M load instructions. Peak RSS is below 34 MiB in both. Logs: `typing-final-base.log` and `typing-final2-new.log`.
+
+### Final live pairs
+
+Three alternating Angular BASE/NEW pairs and one pair each for react-dev and vuejs use the final binaries. `live-final.py` retains steps, JSON, stderr and exit status in `live-final/`. Each driver runs under heavy with timeout 90 and the same readiness check. All ten runs reach readiness and exit zero. Raw first errors, repetition counts, stops, resources, reported bytes and sentinel text remain in `live-final-summary.json` and each stdout.json.
+
+| Run | Load rejections | WebAssembly errors | ms | Peak RSS KiB | Network records | Reported bytes |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| angular-BASE-1 | 12 | 1 | 1455.3 | 81188 | 40 | 755727 |
+| angular-BASE-2 | 12 | 1 | 1117.8 | 89104 | 40 | 755727 |
+| angular-BASE-3 | 12 | 1 | 1107.2 | 89752 | 40 | 755727 |
+| angular-NEW-1 | 0 | 1 | 1092.9 | 87740 | 41 | 757862 |
+| angular-NEW-2 | 0 | 1 | 1410.1 | 93412 | 41 | 757862 |
+| angular-NEW-3 | 0 | 1 | 1128.5 | 92164 | 41 | 757862 |
+| react-dev-BASE-1 | 0 | 0 | 695.4 | 62880 | 33 | 688613 |
+| react-dev-NEW-1 | 0 | 0 | 637.4 | 60772 | 30 | 673143 |
+| vuejs-BASE-1 | 0 | 0 | 1126.8 | 26716 | 17 | 122472 |
+| vuejs-NEW-1 | 0 | 0 | 543.1 | 26636 | 17 | 122420 |
+
+Each Angular BASE run logs twelve missing-load rejections. Each NEW run logs zero. The separate WebAssembly error remains once per run and belongs to Task 37. No fatal stop, task abort or failed Angular resource is recorded. The explicit sentinel reads the first eight docs-icon texts, inline style and computed fontSize. All eight change from inline font-size 0px and computed 0px on BASE to computed 24px on NEW. This shows the font-loaded visibility signal advanced. It does not prove glyph rendering.
+
+Resource work differs across runs. Both Vue runs have a refused Fathom analytics request. React resource completion differs. Do not attribute timing or RSS changes to this patch or claim application success from readiness. Earlier malformed-sentinel probes remain in `live/`; corrected pre-rebase probes remain in `live-corrected/`. Neither replaces the final pairs. All artifacts are machine-local, not hosted PR attachments.
+
+### Limits and not tested
+
+Matching supports a numeric size in px, pt, em, rem or percent, optional line height and comma-separated family names. Full CSS shorthand parsing, escaped family names, commas inside quoted names and descriptor-based font selection are not implemented or tested. Text converts to a string but does not select glyphs. Font files, decoding, real glyph availability, worker fonts, visual glyph rendering, application interactions, other platforms and live callback receiver identity were not tested. No FontFaceSet event system or font network loader is supplied.
