@@ -1712,7 +1712,21 @@ impl Heap {
         if lazy & LAZY_ONS != 0 && self.lazy_asked.borrow_mut().insert((o.index, u32::MAX, 0)) {
             return Err(HeapError::NeedsHost { owner: o, index: LAZY_ALL });
         }
-        let rest = self.own_keys_with(o, true)?;
+        let mut rest = self.own_keys_with(o, true)?;
+        if ex == EXOTIC {
+            let names = self.indexed_names(o)?;
+            self.charge(names.iter().map(|n| n.len().saturating_mul(2) + std::mem::size_of::<PropertyKey>()).sum())?;
+            let at = rest.iter().position(|k| !matches!(k, PropertyKey::Index(_))).unwrap_or(rest.len());
+            let mut aliases = Vec::new();
+            for name in names {
+                let string = self.intern_units(&name)?;
+                let key = self.key_from_string(string)?;
+                if self.indexed_alias(o, key)?.is_some() {
+                    aliases.push(key);
+                }
+            }
+            rest.splice(at..at, aliases);
+        }
         if ex == EXOTIC_PROXY {
             return Err(HeapError::Proxy(o));
         }

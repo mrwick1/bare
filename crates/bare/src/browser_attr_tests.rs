@@ -228,7 +228,7 @@ fn indexed_access_descriptors_keys_and_length_are_truthful() {
     big(|| {
         let mut b = browser();
         ok(&mut b, "var el = document.getElementById('a'), map = el.attributes; [map.length, 0 in map, 2 in map, 3 in map, map[3], map[-1], map['1'] === map[1], map.hasOwnProperty(0), map.hasOwnProperty(3), map.hasOwnProperty('length'), 'length' in map, 'item' in map].join()", "3,true,true,false,,,true,true,false,false,true,true");
-        ok(&mut b, "Object.keys(map).join() + '|' + Reflect.ownKeys(map).join() + '|' + Object.getOwnPropertyNames(map).join()", "0,1,2|0,1,2|0,1,2");
+        ok(&mut b, "Object.keys(map).join() + '|' + Reflect.ownKeys(map).join() + '|' + Object.getOwnPropertyNames(map).join()", "0,1,2|0,1,2,id,class,data-k|0,1,2,id,class,data-k");
         ok(&mut b, "var d = Object.getOwnPropertyDescriptor(map, 1); [d.writable, d.enumerable, d.configurable, d.value === map[1], Object.getOwnPropertyDescriptor(map, 3), Object.getOwnPropertyDescriptor(map, 'length')].join()", "false,true,true,true,,");
         ok(&mut b, "var out = []; for (var k in map) if (!isNaN(k)) out.push(k); out.join()", "0,1,2");
         ok(&mut b, "map[0] = 1; map[7] = 1; map.x = 5; [map[0] === el.getAttributeNode('id'), 7 in map, map.x, map.length, Object.keys(map).join()].join()", "true,false,5,3,0,1,2,x");
@@ -456,5 +456,38 @@ fn creating_and_dropping_browsers_leaves_no_host_behind() {
             weak.push(std::rc::Rc::downgrade(&b.dom));
         }
         assert!(weak.iter().all(|w| w.upgrade().is_none()));
+    });
+}
+
+#[test]
+fn named_attribute_aliases_are_live_and_preserve_descriptors() {
+    big(|| {
+        let mut b = browser();
+        assert_eq!(js(&mut b, r#"
+            var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+            svg.setAttribute('stroke-width', '3');
+            var map = svg.attributes;
+            var attr = map['stroke-width'];
+            if (!attr || attr !== map[0] || attr !== map.getNamedItem('stroke-width')) throw 'identity';
+            var desc = Object.getOwnPropertyDescriptor(map, 'stroke-width');
+            if (desc.value !== attr || desc.writable || desc.enumerable || !desc.configurable) throw 'descriptor';
+            if (Object.keys(map).join() !== '0') throw 'enumerable';
+            if (!Reflect.ownKeys(map).includes('stroke-width')) throw 'ownKeys';
+            if (Reflect.set(map, 'stroke-width', 4) || Reflect.deleteProperty(map, 'stroke-width')) throw 'write';
+            svg.setAttribute('stroke-width', '7');
+            if (map['stroke-width'].value !== '7') throw 'live value';
+            svg.removeAttribute('stroke-width');
+            if ('stroke-width' in map || attr.value !== '7') throw 'remove';
+            svg.setAttribute('stroke-width', '9');
+            if (map['stroke-width'] === attr || map['stroke-width'].value !== '9') throw 'reinsert';
+            svg.setAttribute('item', 'hidden');
+            if (typeof map.item !== 'function') throw 'prototype visibility';
+            var calls = 0;
+            Object.defineProperty(Object.getPrototypeOf(map), 'probe', {get:function(){calls++; return this;}, configurable:true});
+            svg.setAttribute('probe', 'hidden');
+            if (Object.hasOwn(map, 'probe') || calls || map.probe !== map || calls !== 1) throw 'getter visibility';
+            if (Reflect.defineProperty(map, 'stroke-width', {value:4})) throw 'define';
+            'complete';
+        "#), "complete");
     });
 }

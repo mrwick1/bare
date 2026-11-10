@@ -31,7 +31,7 @@
 //! `InUseAttributeError` for an `Attr` of another element, `NotFoundError` for removal of an attribute that is not there.
 //!
 //! Gates (never silent, never faked):
-//! - Named properties of the map (`map.id`) are absent: use `getNamedItem`. Indices are real.
+//! Named properties alias the live indexed Attrs. They are not enumerable and do not hide prototype properties.
 //! - `setAttributeNode` of an `Attr` that has the namespace and local name of an existing attribute but another prefix is
 //!   `Unsupported`: the native list would move the attribute to the end instead of replacing it in place.
 //! - The other `Node` methods on an `Attr` (`cloneNode`, `appendChild`, events) throw `TypeError: Illegal
@@ -133,6 +133,22 @@ pub(crate) fn prune(d: &Dom, live: &dyn Fn(ObjId) -> bool) {
 }
 
 impl IndexedSource for Dom {
+    fn indexed_name(&self, owner: ObjId, key: &[u16]) -> Result<Option<u32>, HeapError> {
+        let t = self.attr.s.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
+        let Some(&el) = t.maps.get(&owner) else { return Ok(None) };
+        let doc = self.doc.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
+        let NodeData::Element { attrs, .. } = *doc.data(el) else { return Ok(None) };
+        Ok(doc.attrs(attrs).iter().position(|a| doc.atom_str(a.name).encode_utf16().eq(key.iter().copied())).map(|i| i as u32))
+    }
+
+    fn indexed_names(&self, owner: ObjId) -> Result<Vec<Vec<u16>>, HeapError> {
+        let t = self.attr.s.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
+        let Some(&el) = t.maps.get(&owner) else { return Ok(Vec::new()) };
+        let doc = self.doc.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
+        let NodeData::Element { attrs, .. } = *doc.data(el) else { return Ok(Vec::new()) };
+        Ok(doc.attrs(attrs).iter().map(|a| doc.atom_str(a.name).encode_utf16().collect()).collect())
+    }
+
     fn indexed_len(&self, owner: ObjId) -> Result<usize, HeapError> {
         if let Some(r) = crate::browser_nodelist::len(self, owner) {
             return r;
