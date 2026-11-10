@@ -1069,3 +1069,33 @@ Review found duplicate qualified names across namespaces. A focused candidate re
 Charge long named scans through the existing host-fill callback. AttrHost tracks one paid scan in a cold flag. The callback charges attribute_count + 1 steps for a map above 32 attributes. The pre-fix Reflect.get reduction completes work that must exceed its step limit. A native setup/count assertion separates this check from the repeated-read defect.
 
 Do not cache an absent value through an indexed host. Native aliases can change without a heap shape or prototype-epoch change. The existing Heap::ic_make implementation caches nonnumeric indexed-host keys as ordinary keys. Its module header is broader than its implementation. Refuse the absent recipe and preserve ordinary-own and prototype-property recipes. Direct and inherited repeated reads then remain live. This immediate heap_shape.rs dependency is required for the named host repair. The final full cost and language gates include it.
+
+## Svelte caption receiver remains unsupported (2026-11-10)
+
+Task 47 reduced the Svelte caption initialization on frozen main
+`8134cf9946873b04c2d234dc3128120b09bfe760`. The first missing receiver is
+`HTMLTrackElement.track`, not `HTMLMediaElement.textTracks`. The downloaded
+`5.DaozZpQ_.js` action reads `e.track.cues`, installs a one-shot `load` listener,
+and sets each loaded cue's `line` to -2 and `size` to 80. A later effect writes
+`video.textTracks[0].mode`. The source embeds 32 WebVTT cues in a data URL.
+
+Do not substitute an empty track to bypass this error. The checked reduced
+initializer throws the same undefined-cues TypeError on main. A diagnostic
+empty substitute returns normally but processes zero cues. It does not meet
+the caption continuation requirement.
+
+This task publishes evidence only. It does not repair the runtime. A bounded
+property patch is insufficient: the missing implementation includes track/list
+identity, mode and cue state, WebVTT parsing, source replacement, and asynchronous
+load/error handling with bounded retention and GC roots. Existing media state
+tracks only audio/video nodes. Its source-change hook runs the media load
+algorithm. Existing data-URL fetch support can decode the payload bytes, but it
+does not parse WebVTT or connect a track to a media list. The repository search
+found no TextTrack or WebVTT implementation. This is a subsystem estimate, not
+proof that a future bounded implementation is impossible. No partial runtime
+patch was accepted within this task window. The runtime task remains open.
+
+Evidence is retained locally under `/data/bare-tmp/ct16/`: downloaded source,
+`captions.vtt`, `caller-cases.txt`, `caller-base.log`, `sha256.txt`, and
+`verified.txt`. These paths are not published attachments. No matrix ran for
+this documentation change. No successful caption initialization is claimed.

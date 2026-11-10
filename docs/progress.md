@@ -7734,3 +7734,98 @@ The BASE time includes the 30-second failed assertion wait. Requests and bytes d
 The final single npm probe confirms the rebased driver. The three alternating live pairs remain measurements of the first repair build and the frozen initial base. They are not three final-tree pairs. The explicit retained caller is replayed on the final tree in all three execution modes. The two minimal reduction points are not a captured download series. The live page supplies its own real input.
 
 Not tested: the 13 ignored workspace tests, broader npm interactions, chart hover/focus behavior, authenticated pages, an independent browser oracle, other machines or complete legacy-platform-object conformance. Existing unused-import/dead-code warnings remain. Validation of the final prose includes unchanged-prefix checks for both shared documents, exact diff inspection, whitespace and prohibited-publication-text scans. No historical section is rewritten.
+
+## Task 47: Svelte caption receiver reduction (2026-11-10)
+
+Result: documentation only. The caption runtime repair remains open. No runtime,
+heap, registration, scheduler, CSS, or cost-limit code changed.
+
+Frozen BASE: `8134cf9946873b04c2d234dc3128120b09bfe760`. Worktree branch:
+`svelte-caption-tracks`. Reserved target: `/data/bare-tmp/target-ct16`; no NEW
+runtime build was made. Artifacts: `/data/bare-tmp/ct16/`.
+
+### Checked caller and dependency boundary
+
+Retained the downloaded source from
+`https://svelte.dev/_app/immutable/nodes/5.DaozZpQ_.js`. SHA-256:
+`f61d5a3d7e7560ca3189c3c34f6ee9bdb1f3c1d1d47a7dd014d03bab1963e491`.
+The failing action `w(e)` reads `e.track.cues` on the child `<track>` element.
+The retained line 5, column 26407 invokes this action. The action registers a
+one-shot `load` listener while cues are unavailable. On load, it sets every
+cue's `line=-2` and `size=80`. A later effect writes the video's first track
+mode. The source's `Se` data URL decodes to 2,523 bytes with 32 cue separators.
+The decoded payload is retained as `captions.vtt`.
+
+Commands, run from the isolated worktree:
+
+```sh
+/data/bare-tmp/bin/base-build 8134cf9946873b04c2d234dc3128120b09bfe760 --release -p bare-drive
+/data/bare-tmp/bin/heavy /data/bare-tmp/base/8134cf9946/target/release/examples/browser_check /data/bare-tmp/ct16/caller-cases.txt
+```
+
+`base-build.log` records the BASE target. `caller-base.log` records:
+
+```text
+actual-track-initializer  throw:TypeError:Cannot read properties of undefined (reading 'cues')
+actual-receiver  TRACK|undefined|undefined
+fake-empty-track-does-not-style-captions  0
+```
+
+The first case retains the source's action and checks initialization through
+`video.textTracks[0].mode='showing'`. It fails before the continuation reader.
+The second case identifies the actual element and both absent properties.
+The third case is a diagnostic substitute, not a proposed implementation or a
+browser conformance test. It demonstrates why avoiding the exception with an
+empty list does not establish cue styling. `verified.txt` checks these outputs.
+No implementation test was added to the repository; tests-first is N/A for the
+docs diff. The failing runtime reduction is retained outside the repository.
+
+The media module's native state and source hook cover audio/video elements.
+There is no existing TextTrack/WebVTT implementation to connect. Data-URL byte
+decoding already exists in `browser_fetch.rs`; byte decoding is not the missing
+parser. Completing the caller requires track/list identity, source lifecycle,
+bounded cue storage, mode semantics and queued load/error delivery. A patch
+that only supplies properties or permanently leaves valid captions pending
+would not satisfy the checked continuation. No safe complete subsystem was
+completed within this task window. This is the implementation boundary, not an
+ownership veto or a request to exclude a filename.
+
+### Verification limits
+
+An initial data-URL navigation probe was rejected by the driver because it only
+loads HTTP(S) pages. It is retained in `reduction-base/` and is not evidence of
+the caption bug. The in-process `browser_check` reduction above establishes the
+bug independently. Downloaded source and payload checksums are in `sha256.txt`.
+
+No matrix ran. No performance counts or improvement are claimed. No runtime
+workspace, public-journey, language, typing or allocator gates ran for this docs
+change. No BASE/NEW live pairs, Vimeo/Bluesky controls, browser oracle, cue
+mutation/GC/event-order regression suite, or successful live caption interaction
+was tested. Existing planner readiness is not a caption initialization sentinel.
+
+A fresh frozen-BASE live run also reproduces the undefined-cues error, now at
+`script#31:5:26407`. Command:
+
+```sh
+/data/bare-tmp/bin/heavy timeout 65 /data/bare-tmp/base/8134cf9946/target/release/bare-drive --quiet --out /data/bare-tmp/ct16/live-base /data/bare-tmp/ct16/live.steps
+```
+
+`live-base/result.json` retains all reports and resource entries.
+`live-summary.json` records 45 resources, 369,807 bytes, and no resource status
+outside 200–399. Readiness reaches complete. The later selector/property
+assertion throws and times out; it does not establish the live receiver's
+identity independently. The reduced caller establishes that identity. The run
+has one console error and the unsupported Worker warning. Duration is 4,138.8
+ms; reported RSS is 37,672 KiB and peak RSS is 52,960 KiB. These are single-run
+observations, not a benchmark or a whole-site pass.
+
+`initializer.expected` requires `actual-track-initializer` to return
+`continued`. `initializer.actual` is the first raw reduction result.
+`diff -u initializer.expected initializer.actual` exits 1, recorded in
+`initializer-diff.exit`; `initializer-failing.diff` retains the mismatch.
+
+### Final documentation gate
+
+FIFO gate `ct16` acquired at 05:29 UTC. Final rebase base: `d94645712cf240241bb4d8f4c673d888a80a6a20`.
+Both documentation changes append entries and preserve the preceding bytes.
+No runtime repair or cost exception was merged by this task.
