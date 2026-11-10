@@ -86,7 +86,11 @@ pub(crate) struct Block {
     pub(crate) list: Vec<Decl>,
     /// The steps that the parse charged.
     spent: u64,
-    pending: bool,
+
+}
+
+struct Pending {
+    block: Option<Block>,
     span: Option<bare_html::dom::Span>,
 }
 
@@ -107,7 +111,7 @@ struct SState {
     by_el: HashMap<NodeId, ObjId>,
     /// element -> the parse of its `style` attribute at the last call.
     blocks: HashMap<NodeId, Block>,
-    pending: HashMap<NodeId, Block>,
+    pending: Option<Box<HashMap<NodeId, Pending>>>,
 }
 
 #[derive(Default)]
@@ -203,11 +207,16 @@ impl Dom {
     fn style_read(&self, it: &mut Interp<'_>, el: NodeId) -> R<Block> {
         let doc = self.doc.borrow();
         let text = doc.find_atom("style").and_then(|a| doc.attr(el, a)).unwrap_or("");
-        if self.style.has_pending.get()
-            && let Some(b) = self.style.s.borrow_mut().pending.remove(&el)
-            && b.span == doc.find_atom("style").and_then(|a| doc.attr_span(el, a)) {
-            it.charge(b.spent)?;
-            return Ok(b);
+        if self.style.has_pending.get() {
+            let mut s = self.style.s.borrow_mut();
+            if let Some(pending) = &mut s.pending {
+                let span = doc.find_atom("style").and_then(|a| doc.attr_span(el, a));
+                if pending.get(&el).is_some_and(|p| p.span != span) { pending.remove(&el); }
+                if let Some(b) = pending.get_mut(&el).and_then(|p| p.block.take()) {
+                    it.charge(b.spent)?;
+                    return Ok(b);
+                }
+            }
         }
         if let Some(b) = self.style.s.borrow_mut().blocks.remove(&el)
             && b.text == text
@@ -223,16 +232,15 @@ impl Dom {
             it.charge(n)
         })
         .map_err(|f| self.style_fail(f))?;
-        Ok(Block { text: text.to_string(), list, spent, pending: false, span: None })
+        Ok(Block { text: text.to_string(), list, spent })
     }
 
     fn style_keep(&self, el: NodeId, b: Block) {
-        if b.pending {
-            self.style.has_pending.set(true);
-            self.style.s.borrow_mut().pending.insert(el, b);
+        if self.style.has_pending.get()
+            && let Some(p) = self.style.s.borrow_mut().pending.as_mut().and_then(|m| m.get_mut(&el)) {
+            p.block = Some(b);
             return;
         }
-
         if b.text.len() > KEEP_BYTES {
             return;
         }
@@ -243,36 +251,43 @@ impl Dom {
         s.blocks.insert(el, b);
     }
 
-    /// Serialize into the call buffer (taken out: the caller gives it back with `style.buf.replace`). `true`: see `serialize`.
-    fn style_text(&self, it: &mut Interp<'_>, list: &[Decl], buf: &mut String) -> R<bool> {
+    /// Serialize into the call buffer. The caller returns it with `style.buf.replace`.
+    fn style_text(&self, it: &mut Interp<'_>, list: &[Decl], buf: &mut String) -> R<blk::Serialized> {
         serialize(list, self.blim(), buf, &mut |n| it.charge(n)).map_err(|f| self.style_fail(f))
     }
 
-    /// The update steps: write the serialized block back (skipped when the attribute already has exactly that text).
-    fn style_write(&self, it: &mut Interp<'_>, el: NodeId, mut b: Block, replace: bool) -> R<()> {
+    #[cold]
+    fn style_check_pending(&self, it: &mut Interp<'_>, el: NodeId, list: &[Decl]) -> R<()> {
+        let bytes = list.iter().try_fold(0usize, |n, d| n.checked_add(d.name.len() + d.value.len())).ok_or_else(|| self.lim("style-bytes"))?;
+        if bytes > self.style_lim().max_bytes { return Err(self.lim("style-bytes")); }
+        let s = self.style.s.borrow();
+        if let Some(m) = &s.pending
+            && m.len() >= self.style_lim().max_objects && !m.contains_key(&el) { return Err(self.lim("style-objects")); }
+        it.charge(1 + list.len() as u64 + bytes as u64 / 4)
+    }
+
+    #[cold]
+    fn style_keep_pending(&self, el: NodeId, block: Block) {
+        let doc = self.doc.borrow();
+        let span = doc.find_atom("style").and_then(|a| doc.attr_span(el, a));
+        self.style.has_pending.set(true);
+        self.style.s.borrow_mut().pending.get_or_insert_with(Default::default).insert(el, Pending { block: Some(block), span });
+    }
+
+    /// Write exposed text, and retain pending state independently of the parse cache.
+    fn style_write(&self, it: &mut Interp<'_>, el: NodeId, mut b: Block) -> R<()> {
         let mut buf = self.style.buf.take();
-        let exact = self.style_text(it, &b.list, &mut buf)?;
-        b.pending = blk::pending(&b.list);
-        if b.pending {
-            let bytes = b.list.iter().try_fold(0usize, |n, d| n.checked_add(d.name.len() + d.value.len())).ok_or_else(|| self.lim("style-bytes"))?;
-            if bytes > self.style_lim().max_bytes { return Err(self.lim("style-bytes")); }
-            if self.style.s.borrow().pending.len() >= self.style_lim().max_objects && !self.style.s.borrow().pending.contains_key(&el) { return Err(self.lim("style-objects")); }
-            it.charge(1 + b.list.len() as u64 + bytes as u64 / 4)?;
-        }
-        if replace || buf != b.text || b.pending || self.style.has_pending.get() {
+        let serialized = self.style_text(it, &b.list, &mut buf)?;
+        if serialized.pending { self.style_check_pending(it, el, &b.list)?; }
+        if buf != b.text || serialized.pending || self.style.has_pending.get() {
             attr_set(self, it, el, "style", &buf)?;
             b.text.clear();
             b.text.push_str(&buf);
         }
         self.style.buf.replace(buf);
-        if self.style.has_pending.get() { self.style.s.borrow_mut().pending.remove(&el); }
-        if b.pending {
-            let doc = self.doc.borrow();
-            b.span = doc.find_atom("style").and_then(|a| doc.attr_span(el, a));
-        }
-        if exact && !replace || b.pending {
-            self.style_keep(el, b);
-        }
+        if self.style.has_pending.get() { self.style.s.borrow_mut().pending.as_mut().and_then(|m| m.remove(&el)); }
+        if serialized.pending { self.style_keep_pending(el, b); }
+        else if serialized.exact { self.style_keep(el, b); }
         Ok(())
     }
 
@@ -296,7 +311,7 @@ impl Dom {
             self.style_keep(el, b);
             return Ok(());
         }
-        self.style_write(it, el, b, false)
+        self.style_write(it, el, b)
     }
 
     /// `removeProperty`: the old value of the property (`""` if none).
@@ -304,7 +319,7 @@ impl Dom {
         let mut b = self.style_read(it, el)?;
         let (old, changed) = remove(&mut b.list, &key(name), self.style_lim().max_bytes, &mut |n| it.charge(n)).map_err(|f| self.style_fail(f))?;
         if changed {
-            self.style_write(it, el, b, false)?;
+            self.style_write(it, el, b)?;
         } else {
             self.style_keep(el, b);
         }
@@ -321,11 +336,14 @@ impl Dom {
     pub(crate) fn style_inputs(&self, it: &mut Interp<'_>, doc: &bare_html::dom::Document) -> R<HashMap<NodeId, Vec<bare_css::cascade::InputDeclaration>>> {
         let mut s = self.style.s.borrow_mut();
         let atom = doc.find_atom("style");
-        s.pending.retain(|&el, b| b.span == atom.and_then(|a| doc.attr_span(el, a)));
         let mut out = HashMap::new();
-        for (&el, b) in &s.pending {
-            it.charge(1 + b.list.len() as u64 + b.list.iter().map(|d| d.name.len() + d.value.len()).sum::<usize>() as u64 / 4)?;
-            out.insert(el, blk::inputs(&b.list));
+        if let Some(pending) = &mut s.pending {
+            pending.retain(|&el, b| b.span == atom.and_then(|a| doc.attr_span(el, a)));
+            for (&el, p) in pending.iter() {
+                let Some(b) = &p.block else { continue };
+                it.charge(1 + b.list.len() as u64 + b.list.iter().map(|d| d.name.len() + d.value.len()).sum::<usize>() as u64 / 4)?;
+                out.insert(el, blk::inputs(&b.list));
+            }
         }
         Ok(out)
     }
@@ -333,8 +351,9 @@ impl Dom {
     pub(crate) fn style_object_inputs(&self, doc: &bare_html::dom::Document, style: ObjId) -> Option<Vec<bare_css::cascade::InputDeclaration>> {
         let s = self.style.s.borrow();
         let el = s.objs.get(&style)?;
-        let b = s.pending.get(el)?;
-        (b.span == doc.find_atom("style").and_then(|a| doc.attr_span(*el, a))).then(|| blk::inputs(&b.list))
+        let b = s.pending.as_ref()?.get(el)?;
+        if b.span != doc.find_atom("style").and_then(|a| doc.attr_span(*el, a)) { return None; }
+        Some(blk::inputs(&b.block.as_ref()?.list))
     }
 
 /// The element of a `CSSStyleDeclaration` object.
@@ -432,8 +451,15 @@ impl Dom {
     fn style_set_text(&self, it: &mut Interp<'_>, el: NodeId, v: Value) -> R<()> {
         let text = null_empty(self, it, v)?;
         let (list, spent) = self.style_parse(it, &text)?;
-        // cssText always replaces state, even when its exposed text is unchanged.
-        self.style_write(it, el, Block { text, list, spent, pending: false, span: None }, true)?;
+        let mut buf = self.style.buf.take();
+        let serialized = self.style_text(it, &list, &mut buf)?;
+        if serialized.pending { self.style_check_pending(it, el, &list)?; }
+        attr_set(self, it, el, "style", &buf)?;
+        if self.style.has_pending.get() { self.style.s.borrow_mut().pending.as_mut().and_then(|m| m.remove(&el)); }
+        if serialized.pending {
+            self.style_keep_pending(el, Block { text: buf.clone(), list, spent });
+        }
+        self.style.buf.replace(buf);
         Ok(())
     }
 }

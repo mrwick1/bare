@@ -513,11 +513,6 @@ pub(crate) fn remove(list: &mut Vec<Decl>, name: &str, max: usize, charge: Charg
     Ok((old, before != after))
 }
 
-/// Partial pending shorthands need state that exposed text cannot retain.
-pub(crate) fn pending(list: &[Decl]) -> bool {
-    list.iter().any(|d| d.kind == Kind::Short && d.mask != mask_of(&d.name) && has_var(&d.value))
-}
-
 pub(crate) fn inputs(list: &[Decl]) -> Vec<bare_css::cascade::InputDeclaration> {
     list.iter().map(|d| bare_css::cascade::InputDeclaration {
         name: d.name.to_string(), value: d.value.clone(), important: d.important, mask: d.mask,
@@ -586,13 +581,19 @@ fn families(p: Property) -> &'static [(&'static str, Join)] {
     })[p as usize]
 }
 
-/// Serialize the block (CSSOM "serialize a CSS declaration block") into `s`, which is cleared first. `true`: the text
-/// reads back to exactly `list` (see `Out::exact`), so the caller may keep `list` as the parse of `s`.
-pub(crate) fn serialize(list: &[Decl], lim: Lim, s: &mut String, charge: Charge) -> F<bool> {
+/// The exposed text can be exact, or require separate pending state.
+pub(crate) struct Serialized {
+    pub exact: bool,
+    pub pending: bool,
+}
+
+/// Serialize into `s`, which is cleared first. Pending longhands expose empty values.
+pub(crate) fn serialize(list: &[Decl], lim: Lim, s: &mut String, charge: Charge) -> F<Serialized> {
     charge(1 + list.len() as u64)?;
     s.clear();
     let mut out = Out { s, max: lim.bytes, exact: true };
     let mut done = 0u128;
+    let mut pending = false;
     for d in list {
         match d.kind {
             Kind::Custom | Kind::Opaque => out.decl(&d.name, &d.value, d.important)?,
@@ -621,6 +622,7 @@ pub(crate) fn serialize(list: &[Decl], lim: Lim, s: &mut String, charge: Charge)
                     if !wrote {
                         out.exact &= d.kind == Kind::Long;
                         let t = long_text(d, p, charge)?.unwrap_or_default();
+                        pending |= t.is_empty();
                         out.decl(p.name(), &t, d.important)?;
                         done |= bit(p);
                     }
@@ -628,7 +630,7 @@ pub(crate) fn serialize(list: &[Decl], lim: Lim, s: &mut String, charge: Charge)
             }
         }
     }
-    Ok(out.exact)
+    Ok(Serialized { exact: out.exact, pending })
 }
 
 #[cfg(test)]

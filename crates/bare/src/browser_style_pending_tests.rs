@@ -17,9 +17,11 @@ fn check(remove_one: bool, important: bool) {
 }
 #[test] fn page_rule_insertion() {
     use crate::browser::{Browser, BrowserLimits};
-    let mut b = Browser::new(bare_html::tree::parse("<html><head><style></style></head><body></body></html>"), BrowserLimits::default(), Default::default(), Default::default()).unwrap();
+    let mut b = Browser::new(bare_html::tree::parse("<html><head><style></style></head><body><div id=a class=x style='--r:7px'></div></body></html>"), BrowserLimits::default(), Default::default(), Default::default()).unwrap();
     let result = b.run_script("document.styleSheets[0].insertRule('.x { border-radius: var(--r); border-top-left-radius: 0; border-bottom-left-radius: 0 }', 0)");
     assert!(result.is_ok(), "{result:?}");
+    run(&mut b, "var a = document.getElementById('a'); getComputedStyle(a).borderTopLeftRadius + ',' + getComputedStyle(a).borderTopRightRadius + ',' + getComputedStyle(a).borderBottomLeftRadius + ',' + getComputedStyle(a).borderBottomRightRadius", "0px,7px,0px,7px");
+    run(&mut b, "a.style.setProperty('--r', '13px'); getComputedStyle(a).borderTopRightRadius", "13px");
 }
 #[test] fn overwrite_pending_longhand() { check(false, false); }
 #[test] fn remove_pending_longhand() { check(true, false); }
