@@ -49,7 +49,7 @@ use bare_html::dom::{Atom, NodeData, NodeId, RemovedAttr, Span};
 use bare_js::eval::{Error, Interp};
 use bare_js::heap::{HeapError, IndexedSource, Slot};
 use bare_js::value::{ObjId, Value};
-use std::cell::{OnceCell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{HashMap, HashSet};
 
 type V = R<Value>;
@@ -78,6 +78,17 @@ pub(crate) struct AttrHost {
     /// `Attr.prototype`, `NamedNodeMap.prototype`.
     pub protos: OnceCell<(ObjId, ObjId)>,
     pub fixed: RefCell<Vec<ObjId>>,
+    scan_paid: Cell<bool>,
+}
+
+impl AttrHost {
+    fn scan(&self, owner: ObjId, len: usize) -> Result<(), HeapError> {
+        if len <= 32 || self.scan_paid.replace(false) {
+            Ok(())
+        } else {
+            Err(HeapError::NeedsHost { owner, index: u32::MAX })
+        }
+    }
 }
 
 // ------------------------------------------------------------------------------------ GC and heap hooks
@@ -141,6 +152,7 @@ impl IndexedSource for Dom {
         if doc.element_ns(el) == bare_html::dom::Ns::Html && key.iter().any(|u| (65..=90).contains(u)) {
             return Ok(None);
         }
+        self.attr.scan(owner, doc.attr_count(el))?;
         Ok(doc.attrs(attrs).iter().position(|a| doc.atom_str(a.name).encode_utf16().eq(key.iter().copied())).map(|i| i as u32))
     }
 
@@ -149,6 +161,7 @@ impl IndexedSource for Dom {
         let Some(&el) = t.maps.get(&owner) else { return Ok(Vec::new()) };
         let doc = self.doc.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
         let NodeData::Element { attrs, .. } = *doc.data(el) else { return Ok(Vec::new()) };
+        self.attr.scan(owner, doc.attr_count(el))?;
         let html = doc.element_ns(el) == bare_html::dom::Ns::Html;
         let mut seen = HashSet::new();
         Ok(doc.attrs(attrs).iter().filter_map(|a| {
@@ -192,6 +205,11 @@ impl IndexedSource for Dom {
 pub(crate) fn fill(d: &Dom, it: &mut Interp<'_>, owner: ObjId, index: u32) -> R<()> {
     drain(d);
     let Some(&el) = d.attr.s.borrow().maps.get(&owner) else { return Ok(()) };
+    if index == u32::MAX {
+        it.charge(d.doc.borrow().attr_count(el) as u64 + 1)?;
+        d.attr.scan_paid.set(true);
+        return Ok(());
+    }
     let atom = {
         let doc = d.doc.borrow();
         match *doc.data(el) {

@@ -511,3 +511,38 @@ fn named_attribute_keys_do_not_repeat_qualified_names() {
         "#, "0||");
     });
 }
+
+#[test]
+fn named_attribute_reads_charge_long_scans() {
+    big(|| {
+        for max_steps in [1_000, 5_000_000] {
+            let mut doc = tree::parse("<div id=e></div>");
+            let el = by_id(&doc, "e");
+            for i in 0..400 { doc.set_attr(el, &format!("k{i}"), "v"); }
+            assert_eq!(doc.attr_count(el), 401);
+            let mut b = Browser::new(doc, BrowserLimits::default(), EvalLimits { max_steps, ..Default::default() }, HeapLimits::default()).unwrap();
+            if max_steps == 1_000 {
+                let result = js(&mut b, "var m = document.getElementById('e').attributes; for (var i = 0; i < 10; i++) Reflect.get(m, 'k399').value; 'complete'");
+                assert!(result.starts_with("limit:Steps"), "{result}");
+            } else {
+                ok(&mut b, "var m = document.getElementById('e').attributes; [m.k399.value, Reflect.ownKeys(m).length].join()", "v,802");
+            }
+        }
+    });
+}
+
+#[test]
+fn named_attribute_reads_stay_live_at_cached_sites() {
+    big(|| {
+        let mut b = browser();
+        ok(&mut b, r#"
+            var el = document.createElement('div'); el.setAttribute('data-k', 'one');
+            var m = el.attributes, child = Object.create(m);
+            function read(o) { return o['data-k'].value; }
+            var out = [read(m), read(m), read(child), read(child)];
+            el.setAttribute('data-k', 'two'); out.push(read(m), read(child));
+            el.removeAttribute('data-k'); el.setAttribute('data-k', 'three');
+            out.push(read(m), read(child)); out.join();
+        "#, "one,one,one,one,two,two,three,three");
+    });
+}
