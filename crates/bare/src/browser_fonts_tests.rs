@@ -66,3 +66,10 @@ fn font_state_is_absent_until_used_and_obeys_collection_limits() {
         assert_eq!(js(&mut b,"s.has(g)+','+s.size"),"false,1");
     });
 }
+#[test]
+fn fonts_keep_private_brands_when_collection_prototypes_change() {
+    big(|| {
+        let mut b=mk(None,FetchLimits::default());
+        assert_eq!(js(&mut b,"var s=document.fonts,f=new FontFace('One','local(One)');WeakMap.prototype.has=function(){return true};WeakMap.prototype.get=function(){return {members:new Set()}};Set.prototype.add=function(){throw new Error('patched')};var n=0;try{s.add({})}catch(e){if(e instanceof TypeError)n++}n+','+(s.add(f)===s)+','+s.has(f)"),"1,true,true");
+    });
+}

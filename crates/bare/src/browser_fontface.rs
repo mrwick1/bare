@@ -3,12 +3,17 @@
 pub(crate) const SOURCE: &str = r#"
 (function () {
 'use strict';
+const weakHas = Function.prototype.call.bind(WeakMap.prototype.has);
+const weakGet = Function.prototype.call.bind(WeakMap.prototype.get);
+const weakSet = Function.prototype.call.bind(WeakMap.prototype.set);
+const invoke = Reflect.apply;
 const faces = new WeakMap();
 const resolve = Promise.resolve.bind(Promise);
+const reject = Promise.reject.bind(Promise);
 const descriptors = {style:'normal',weight:'normal',stretch:'normal',width:'normal',unicodeRange:'U+0-10FFFF',variant:'normal',featureSettings:'normal',variationSettings:'normal',display:'auto',ascentOverride:'normal',descentOverride:'normal',lineGapOverride:'normal',sizeAdjust:'100%'};
 function face(value) {
-    if (!faces.has(value)) throw new TypeError('Expected a FontFace');
-    return faces.get(value);
+    if (!weakHas(faces,value)) throw new TypeError('Expected a FontFace');
+    return weakGet(faces,value);
 }
 class FontFace {
     constructor(family, source, options) {
@@ -22,7 +27,7 @@ class FontFace {
         }
         let settle;
         const loaded = new Promise(function(resolve) { settle = resolve; });
-        faces.set(this, {status:'unloaded', loaded:loaded, settle:settle});
+        weakSet(faces,this, {status:'unloaded', loaded:loaded, settle:settle});
     }
     get status() { return face(this).status; }
     get loaded() { return face(this).loaded; }

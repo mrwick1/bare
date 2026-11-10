@@ -17,11 +17,17 @@ pub(crate) fn define(d: &Dom, it: &mut Interp<'_>) -> R<()> {
 
 const SOURCE: &str = r#"
 const sets = new WeakMap();
+const add = Function.prototype.call.bind(Set.prototype.add);
+const remove = Function.prototype.call.bind(Set.prototype.delete);
+const has = Function.prototype.call.bind(Set.prototype.has);
+const clear = Function.prototype.call.bind(Set.prototype.clear);
+const each = Function.prototype.call.bind(Set.prototype.forEach);
+const size = Function.prototype.call.bind(Object.getOwnPropertyDescriptor(Set.prototype,'size').get);
 const documentOwner = document;
 let documentSet;
 function set(value) {
-    if (!sets.has(value)) throw new TypeError('Expected a FontFaceSet');
-    return sets.get(value);
+    if (!weakHas(sets,value)) throw new TypeError('Expected a FontFaceSet');
+    return weakGet(sets,value);
 }
 function query(font, text) {
     font = '' + font;
@@ -33,30 +39,30 @@ function query(font, text) {
 class FontFaceSet {
     constructor() {
         const members = new Set();
-        sets.set(this, {members:members,ready:resolve(this)});
+        weakSet(sets,this, {members:members,ready:resolve(this)});
     }
-    get size() { return set(this).members.size; }
+    get size() { return size(set(this).members); }
     get status() { set(this); return 'loaded'; }
     get ready() { return set(this).ready; }
-    add(value) { const s=set(this);face(value);s.members.add(value);return this; }
-    delete(value) { const s=set(this);face(value);return s.members.delete(value); }
-    has(value) { const s=set(this);face(value);return s.members.has(value); }
-    clear() { set(this).members.clear(); }
+    add(value) { const s=set(this);face(value);add(s.members,value);return this; }
+    delete(value) { const s=set(this);face(value);return remove(s.members,value); }
+    has(value) { const s=set(this);face(value);return has(s.members,value); }
+    clear() { clear(set(this).members); }
     forEach(callback, thisArg) {
         const s=set(this), owner=this;
         if (typeof callback !== 'function') throw new TypeError('Expected callback');
-        s.members.forEach(function(value) { callback.call(thisArg,value,value,owner); });
+        each(s.members,function(value) { invoke(callback,thisArg,[value,value,owner]); });
     }
     load(font, text) {
         const s=set(this);
         try {
             if (!arguments.length) throw new TypeError('load requires font');
             const names=query(font,text), result=[];
-            s.members.forEach(function(value) {
+            each(s.members,function(value) {
                 if (names.includes(('' + value.family).replace(/^["']|["']$/g,'').toLowerCase())) { const state=face(value);state.status='loaded';state.settle(value);result.push(value); }
             });
             return resolve(result);
-        } catch (error) { return Promise.reject(error); }
+        } catch (error) { return reject(error); }
     }
     check(font, text) {
         set(this);
