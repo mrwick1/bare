@@ -1,8 +1,8 @@
-// A minimal in-memory `indexedDB` (no persistence, no indexes, no key generators beyond `autoIncrement`). Requests run one after another
+// A minimal in-memory `indexedDB` (no persistence, no key generators beyond `autoIncrement`). Requests run one after another
 // in a microtask; a transaction that has no request left completes. Made at the first read of `indexedDB` or an `IDB*` name (`browser_shims.rs`).
 (function () {
   'use strict';
-  var P = Promise, dbs = {}, H = new WeakMap(), D = new WeakMap(), TS = new WeakMap(), OS = new WeakMap(), CS = new WeakMap();
+  var P = Promise, dbs = {}, H = new WeakMap(), D = new WeakMap(), TS = new WeakMap(), OS = new WeakMap(), CS = new WeakMap(), IX = new WeakMap();
   var clone = typeof structuredClone === 'function' ? structuredClone : function (v) { return v; };
   // `new DOMException(...)` is not a constructor here, so the error inherits from the prototype.
   var codes = { AbortError: 20, NotFoundError: 8, InvalidStateError: 11, InvalidAccessError: 15 };
@@ -133,6 +133,7 @@
     } else {
       key(k);
     }
+    Object.keys(st.indexes).forEach(function (name) { unique(st, st.indexes[name], v, k); });
     if (st.auto && typeof k === 'number' && k >= st.next) st.next = Math.floor(k) + 1;
     var i = at(st.rows, k);
     if (i < st.rows.length && cmp(st.rows[i][0], k) === 0) {
@@ -222,8 +223,9 @@
   }
   function osObj(tx, st) {
     var o = new IDBObjectStore();
-    o.name = st.name; o.keyPath = st.kp; o.autoIncrement = st.auto; o.transaction = tx; o.indexNames = names([]);
-    OS.set(o, { tx: tx, st: st });
+    o.name = st.name; o.keyPath = st.kp; o.autoIncrement = st.auto; o.transaction = tx;
+    Object.defineProperty(o, 'indexNames', { get: function () { return names(Object.keys(osState(this).st.indexes)); }, enumerable: true });
+    OS.set(o, { tx: tx, st: st, indexes: new Map() });
     return o;
   }
   def(IDBTransaction.prototype, 'objectStore', function (name) {
@@ -238,7 +240,7 @@
 
   // ---- object stores
   function op(os, write, f) {
-    var o = OS.get(os), t = live(o.tx);
+    var o = osState(os), t = live(o.tx);
     if (write && o.tx.mode === 'readonly') throw err('The transaction is read-only.', 'ReadOnlyError');
     var r = req(os, o.tx);
     t.q.push([function () { return f(o.st, t); }, r]);
@@ -300,6 +302,116 @@
     return op(CS.get(this).os, true, function (st, t) { touch(t, st); st.rows = st.rows.filter(function (r) { return cmp(r[0], k) !== 0; }); });
   });
 
+  // Index entries are derived from the transaction's current store rows. This keeps
+  // writes, deletes and rollback on the same source of truth.
+  function ixKeys(ix, value) {
+    var k = extract(value, ix.kp), out = [];
+    var ks = ix.multi && Array.isArray(k) ? k : [k];
+    ks.forEach(function (v) {
+      if (valid(v) && !out.some(function (x) { return cmp(x, v) === 0; })) out.push(v);
+    });
+    return out;
+  }
+  function ixRows(st, ix, q) {
+    var rows = [];
+    st.rows.forEach(function (row) {
+      ixKeys(ix, row[1]).forEach(function (k) { if (inr(q, k)) rows.push([k, row[0], row[1]]); });
+    });
+    rows.sort(function (a, b) { return cmp(a[0], b[0]) || cmp(a[1], b[1]); });
+    return rows;
+  }
+  function unique(st, ix, value, primary) {
+    if (!ix.unique) return;
+    var ks = ixKeys(ix, value);
+    st.rows.forEach(function (row) {
+      if (cmp(row[0], primary) === 0) return;
+      ixKeys(ix, row[1]).forEach(function (k) {
+        if (ks.some(function (v) { return cmp(v, k) === 0; })) throw err('An index key already exists.', 'ConstraintError');
+      });
+    });
+  }
+  function osState(os) {
+    var s = OS.get(os);
+    if (!s) throw new TypeError('Illegal invocation');
+    if (TS.get(s.tx).data.stores[s.st.name] !== s.st) throw err('The object store was deleted.', 'InvalidStateError');
+    return s;
+  }
+  function schema(os) {
+    var s = osState(os);
+    if (s.tx.mode !== 'versionchange') throw err('A version change transaction is required.', 'InvalidStateError');
+    live(s.tx);
+    return s;
+  }
+  function ixObj(os, ix) {
+    var cache = OS.get(os).indexes;
+    if (cache.has(ix)) return cache.get(ix);
+    var obj = Object.create(IDBIndex.prototype);
+    cache.set(ix, obj);
+    IX.set(obj, { os: os, ix: ix });
+    return obj;
+  }
+  function ixState(obj) {
+    var s = IX.get(obj);
+    if (!s) throw new TypeError('Illegal invocation');
+    return s;
+  }
+  ['name', 'keyPath', 'unique', 'multiEntry', 'objectStore'].forEach(function (prop) {
+    Object.defineProperty(IDBIndex.prototype, prop, { get: function () {
+      var s = ixState(this);
+      return prop === 'objectStore' ? s.os : prop === 'keyPath' ? clone(s.ix.kp) : s.ix[prop === 'multiEntry' ? 'multi' : prop];
+    }, enumerable: true, configurable: true });
+  });
+  def(proto, 'createIndex', function (name, kp, opts) {
+    var s = schema(this), os = this, t = live(s.tx);
+    name = String(name);
+    if (s.st.indexes[name]) throw err('The index already exists.', 'ConstraintError');
+    if (kp === undefined || kp === null) throw new TypeError('A key path is required');
+    kp = Array.isArray(kp) ? kp.map(String) : String(kp);
+    function path(p) { return p === '' || p.split('.').every(function (x) { return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(x); }); }
+    if (!(Array.isArray(kp) ? kp.every(path) : path(kp))) throw err('Invalid key path.', 'SyntaxError');
+    var ix = { name: name, kp: kp, unique: !!(opts && opts.unique), multi: !!(opts && opts.multiEntry) };
+    if (ix.multi && Array.isArray(kp)) throw err('Compound multiEntry index.', 'InvalidAccessError');
+    s.st.indexes[name] = ix;
+    t.undo.push(function () { delete s.st.indexes[name]; });
+    op(os, false, function (st) { st.rows.forEach(function (row) { unique(st, ix, row[1], row[0]); }); });
+    return ixObj(os, ix);
+  });
+  def(proto, 'deleteIndex', function (name) {
+    var s = schema(this), t = live(s.tx);
+    name = String(name);
+    var ix = s.st.indexes[name];
+    if (!ix) throw err('The index was not found.', 'NotFoundError');
+    delete s.st.indexes[name];
+    t.undo.push(function () { s.st.indexes[name] = ix; });
+  });
+  def(proto, 'index', function (name) {
+    var s = osState(this); live(s.tx);
+    var ix = s.st.indexes[String(name)];
+    if (!ix) throw err('The index was not found.', 'NotFoundError');
+    return ixObj(this, ix);
+  });
+  function ixOp(obj, q, f) {
+    var s = ixState(obj);
+    var st = osState(s.os).st;
+    if (st.indexes[s.ix.name] !== s.ix) throw err('The index was deleted.', 'InvalidStateError');
+    q = rng(q);
+    var r = op(s.os, false, function (st) { return f(ixRows(st, s.ix, q)); });
+    r.source = obj;
+    return r;
+  }
+  def(IDBIndex.prototype, 'get', function (q) { ixState(this); if (q == null) throw err('A key is required.', 'DataError'); return ixOp(this, q, function (rows) { return rows.length ? clone(rows[0][2]) : undefined; }); });
+  def(IDBIndex.prototype, 'getKey', function (q) { ixState(this); if (q == null) throw err('A key is required.', 'DataError'); return ixOp(this, q, function (rows) { return rows.length ? clone(rows[0][1]) : undefined; }); });
+  ['getAll', 'getAllKeys', 'count'].forEach(function (method) {
+    def(IDBIndex.prototype, method, function (q, n) {
+      ixState(this);
+      if (n !== undefined && (!Number.isFinite(Number(n)) || Number(n) < 0 || Number(n) > 4294967295)) throw new TypeError('Invalid count');
+      return ixOp(this, q, function (rows) {
+        if (method === 'count') return rows.length;
+        return rows.slice(0, n ? Math.floor(n) : undefined).map(function (r) { return clone(r[method === 'getAll' ? 2 : 1]); });
+      });
+    });
+  });
+
   // ---- databases
   def(IDBDatabase.prototype, 'close', function () { D.get(this).closed = true; });
   Object.defineProperty(IDBDatabase.prototype, 'objectStoreNames', { get: function () { return names(Object.keys(D.get(this).data.stores)); }, enumerable: true, configurable: true });
@@ -308,7 +420,7 @@
     if (!t || t.dead) throw err('The database is not running a version change transaction.', 'InvalidStateError');
     name = String(name);
     if (d.data.stores[name]) throw err('An object store with the specified name already exists.', 'ConstraintError');
-    var st = { name: name, kp: opts && opts.keyPath != null ? opts.keyPath : null, auto: !!(opts && opts.autoIncrement), next: 1, rows: [] };
+    var st = { name: name, kp: opts && opts.keyPath != null ? opts.keyPath : null, auto: !!(opts && opts.autoIncrement), next: 1, rows: [], indexes: Object.create(null) };
     d.data.stores[name] = st;
     t.undo.push(function () { delete d.data.stores[name]; });
     return t.os[name] = osObj(d.vtx, st);

@@ -6,7 +6,7 @@
 //! function, no script. The source of a shim defines its own sentinel global, so it runs once.
 //!
 //! Gates: none of them has a timeline, a layout or a store on disk. `animate` ends the animation at once (one timer). `Path2D` records
-//! nothing. `indexedDB` keeps its data in the realm only, has no index, and runs the requests of a transaction one after another in
+//! nothing. `indexedDB` keeps its data in the realm only and runs the requests of a transaction one after another in
 //! microtasks. Not compared with a real browser.
 
 use crate::browser::*;
