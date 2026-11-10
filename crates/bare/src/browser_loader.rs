@@ -93,6 +93,9 @@ use std::time::{Duration, Instant};
 mod modules;
 mod preload;
 #[cfg(test)]
+#[path = "browser_loader/diagnostic_tests.rs"]
+mod diagnostic_tests;
+#[cfg(test)]
 mod preload_tests;
 #[cfg(test)]
 mod parallel_tests;
@@ -221,7 +224,8 @@ pub enum Fatal {
     Unsupported(&'static str),
     /// A hard cap of the evaluator or the host. The name of the cap.
     Limit(String),
-    Heap,
+    /// The heap variant name, without its payload.
+    Heap(&'static str),
     /// A microtask job failed in a way that cannot be undone, or a checkpoint threw.
     Poisoned,
     /// The URL or the page could not be set up.
@@ -1100,7 +1104,27 @@ fn fatal_of(e: Error) -> Stop {
     Stop::Fatal(match e {
         Error::Unsupported(u) => Fatal::Unsupported(u.what),
         Error::Limit(l) => Fatal::Limit(format!("{l:?}")),
-        Error::Heap(_) => Fatal::Heap,
+        Error::Heap(e) => {
+            use bare_js::heap::HeapError::*;
+            Fatal::Heap(match e {
+                Stale => "Stale",
+                Limit(_) => "Limit",
+                InvalidKey => "InvalidKey",
+                InvalidDescriptor => "InvalidDescriptor",
+                InvalidArrayLength => "InvalidArrayLength",
+                SymbolConversion => "SymbolConversion",
+                SymbolToNumber => "SymbolToNumber",
+                BigIntToNumber => "BigIntToNumber",
+                NeedsExecution(_) => "NeedsExecution",
+                NeedsBigInt => "NeedsBigInt",
+                BigUnsigned(_) => "BigUnsigned",
+                BigElement => "BigElement",
+                NeedsHost { .. } => "NeedsHost",
+                HostUnavailable => "HostUnavailable",
+                NeedsNamed => "NeedsNamed",
+                Proxy(_) => "Proxy",
+            })
+        },
         Error::Throw(_) => Fatal::Poisoned,
     })
 }
