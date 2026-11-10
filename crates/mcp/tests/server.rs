@@ -14,13 +14,15 @@ struct Server {
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     id: u64,
+    /// Values that no reply may hold, besides the fixture secrets: the values of a saved state file.
+    forbid: Vec<String>,
 }
 
 impl Server {
     fn start() -> Server {
         let mut child = Command::new(env!("CARGO_BIN_EXE_bare-mcp")).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
         let (stdin, stdout) = (child.stdin.take().unwrap(), BufReader::new(child.stdout.take().unwrap()));
-        let mut s = Server { child, stdin, stdout, id: 0 };
+        let mut s = Server { child, stdin, stdout, id: 0, forbid: Vec::new() };
         let init = s.ask("initialize", json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "0"}}));
         assert_eq!(init["result"]["serverInfo"]["name"], "bare-mcp");
         assert!(init["result"]["instructions"].as_str().unwrap().contains("label bare-mcp"));
@@ -35,6 +37,9 @@ impl Server {
         self.stdout.read_line(&mut line).unwrap();
         for s in [EMAIL, PASSWORD, "app-token-"] {
             assert!(!line.contains(s), "a secret leaked: {s} in {line}");
+        }
+        for s in &self.forbid {
+            assert!(!line.contains(s.as_str()), "a saved value leaked in {line}");
         }
         let reply: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(reply["id"], self.id, "{line}");
@@ -69,11 +74,11 @@ fn journey(name: &str) -> (String, Value) {
 }
 
 #[test]
-fn tools_list_names_the_four_tools() {
+fn tools_list_names_the_tools() {
     let mut s = Server::start();
     let r = s.ask("tools/list", json!({}));
     let names: Vec<&str> = r["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(names, ["run_steps", "open", "step", "close"]);
+    assert_eq!(names, ["run_steps", "open", "step", "save_state", "ensure_session", "close"]);
 }
 
 #[test]
@@ -157,4 +162,98 @@ fn a_run_without_pictures_leaves_no_folder() {
     let (rep, error) = s.tool("run_steps", args);
     assert!(!error && rep["ok"] == true, "{rep}");
     assert!(rep.get("out").is_none(), "{rep}");
+}
+
+const LOGIN: &str = "type css=\"input[name=email]\" \"${EMAIL}\"\ntype css=\"input[name=password]\" \"${PASSWORD}\"\nclick css=\"form button[type=submit]\"";
+const CHECK: &str = "expect role=link name=\"Agents\" visible";
+
+fn ensure_args(name: &str, test: &str) -> Value {
+    let (_, mut args) = journey(test);
+    args["url"] = json!(format!("{}/", args["vars"]["BASE"].as_str().unwrap()));
+    args["name"] = json!(name);
+    args["login"] = json!(LOGIN);
+    args["check"] = json!(CHECK);
+    args["timeout_ms"] = json!(2000);
+    args
+}
+
+fn state_file(test: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("bare-mcp-test-{test}-{}", std::process::id())).join("state.json")
+}
+
+#[test]
+fn ensure_session_logs_in_once_and_then_restores_from_memory() {
+    let mut s = Server::start();
+    let args = ensure_args("main", "ensure");
+    let (rep, error) = s.tool("ensure_session", args.clone());
+    assert!(!error && rep["ok"] == true && rep["session"] == "created", "{rep}");
+    // The live page is logged in.
+    let (rep, _) = s.tool("step", json!({"steps": "expect js \"sessionStorage.getItem('token') !== null\""}));
+    assert_eq!(rep["ok"], true, "{rep}");
+    let (rep, error) = s.tool("ensure_session", args);
+    assert!(!error && rep["ok"] == true && rep["session"] == "restored", "{rep}");
+    // Only the check ran: no `type` step.
+    let kinds: Vec<String> = rep["steps"].as_array().unwrap().iter().map(|x| x.to_string()).collect();
+    assert!(kinds.iter().all(|k| !k.contains("type")), "{rep}");
+    let (rep, _) = s.tool("step", json!({"steps": "expect js \"sessionStorage.getItem('token') !== null\""}));
+    assert_eq!(rep["ok"], true, "{rep}");
+}
+
+#[test]
+fn ensure_session_logs_in_again_when_a_saved_session_is_not_valid() {
+    let file = state_file("stale");
+    let mut a = Server::start();
+    let mut args = ensure_args("x", "stale");
+    args["file"] = json!(file.to_str().unwrap());
+    // A session that is not logged in: the login page only.
+    let (rep, _) = a.tool("open", json!({"url": args["url"], "vars": args["vars"]}));
+    assert_eq!(rep["ok"], true, "{rep}");
+    let (rep, error) = a.tool("save_state", json!({"name": "x", "file": file.to_str().unwrap()}));
+    assert!(!error && rep["saved"] == "x", "{rep}");
+    drop(a);
+    let mut s = Server::start();
+    let (rep, error) = s.tool("ensure_session", args.clone());
+    assert!(!error && rep["ok"] == true && rep["session"] == "recreated", "{rep}");
+    // The login is saved in the file now: a new server restores it.
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(text.contains("app-token-"), "the file has the login");
+    drop(s);
+    let mut s = Server::start();
+    let (rep, error) = s.tool("ensure_session", args);
+    assert!(!error && rep["session"] == "restored", "{rep}");
+}
+
+#[test]
+fn ensure_session_with_a_wrong_login_is_an_error_with_the_failing_step() {
+    let mut s = Server::start();
+    let mut args = ensure_args("bad", "wrong");
+    args["login"] = json!("type css=\"input[name=email]\" \"nobody@example.test\"\nclick css=\"form button[type=submit]\"");
+    let (rep, error) = s.tool("ensure_session", args);
+    assert!(error && rep["ok"] == false, "{rep}");
+    // The wrong login saved nothing.
+    let (rep, error) = s.tool("open", json!({"url": "http://127.0.0.1:1/", "state": "bad"}));
+    assert!(error && rep.as_str().unwrap().contains("bad"), "{rep}");
+}
+
+#[test]
+fn save_state_writes_a_private_file_and_open_restores_a_name() {
+    let file = state_file("save");
+    let mut s = Server::start();
+    let args = ensure_args("n", "save");
+    let (rep, _) = s.tool("ensure_session", args.clone());
+    assert_eq!(rep["session"], "created", "{rep}");
+    let (rep, error) = s.tool("save_state", json!({"name": "n2", "file": file.to_str().unwrap()}));
+    assert!(!error && rep["saved"] == "n2" && rep["origins"] == 1, "{rep}");
+    #[cfg(unix)]
+    assert_eq!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&file).unwrap().permissions()) & 0o777, 0o600);
+    // No reply from now on may hold a value of the file.
+    let saved: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    let token = saved.to_string().split("app-token-").nth(1).map(|t| format!("app-token-{}", &t[..1])).expect("a token in the file");
+    s.forbid.push(token);
+    let (rep, error) = s.tool("open", json!({"url": args["url"], "vars": args["vars"], "state": "n2"}));
+    assert!(!error && rep["ok"] == true, "{rep}");
+    let (rep, _) = s.tool("step", json!({"steps": CHECK}));
+    assert_eq!(rep["ok"], true, "{rep}");
+    let (rep, error) = s.tool("open", json!({"url": args["url"], "state": "nope"}));
+    assert!(error && rep.as_str().unwrap().contains("nope"), "{rep}");
 }

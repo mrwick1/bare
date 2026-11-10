@@ -4,6 +4,7 @@
 //! The tools use the test driver (`bare-drive`), so each click and key goes through the same hit testing and input path as a user.
 //!
 //! - `run_steps`: run a whole step file and give its report.
+//! - `ensure_session`, `save_state`: a logged-in live page from a saved session (in memory by default), or a new login when it is no longer valid.
 //! - `open`, `step`, `close`: a live session. `open` loads a page, each `step` call runs more step lines on the same page, and `close`
 //!   ends it. Each call gives the report of its own steps only, so the server keeps no old records.
 //!
@@ -13,7 +14,7 @@
 //! Only JSON goes to stdout: the protocol owns it. Progress and errors go to stderr. JS: like a Node script that reads `readline`
 //! lines from `process.stdin` and writes `JSON.stringify(reply)` lines to `process.stdout`.
 
-use bare_drive::run::{Options, Redactor, Session};
+use bare_drive::run::{Options, Redactor, Session, StorageState};
 use bare_drive::steps;
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -33,6 +34,8 @@ struct Live {
 struct Server {
     workspace: Option<u32>,
     live: Option<Live>,
+    /// Saved sessions by name: cookies and storage, in this process only. A file is written only when a call gives `file`.
+    saved: HashMap<String, StorageState>,
     /// A counter for the capture folders of this process.
     runs: u32,
 }
@@ -50,7 +53,7 @@ fn main() {
         }
     }
     bare_net::parallel::limit_malloc_arenas(false);
-    let mut server = Server { workspace, live: None, runs: 0 };
+    let mut server = Server { workspace, live: None, saved: HashMap::new(), runs: 0 };
     let mut out = std::io::stdout().lock();
     for line in std::io::stdin().lock().lines() {
         let Ok(line) = line else { break };
@@ -80,7 +83,7 @@ impl Server {
                 "protocolVersion": params.get("protocolVersion").cloned().unwrap_or(json!("2025-06-18")),
                 "capabilities": {"tools": {}},
                 "serverInfo": {"name": "bare-mcp", "version": env!("CARGO_PKG_VERSION")},
-                "instructions": "When this server fails or behaves wrong, file an issue: a GitHub issue on mrwick1/bare with the label bare-mcp. Give the tool call, the result and the expected result.",
+                "instructions": "Call ensure_session before a test to get a logged-in live page: it restores a saved session or logs in again. When this server fails or behaves wrong, file an issue: a GitHub issue on mrwick1/bare with the label bare-mcp. Give the tool call, the result and the expected result.",
             })),
             "ping" => Ok(json!({})),
             "tools/list" => Ok(json!({"tools": tools()})),
@@ -100,6 +103,8 @@ impl Server {
             "run_steps" => self.run_steps(&args),
             "open" => self.open(&args),
             "step" => self.step(&args),
+            "save_state" => self.save_state(&args),
+            "ensure_session" => self.ensure_session(&args),
             "close" => self.close(),
             n => Err(format!("unknown tool {n}")),
         };
@@ -120,18 +125,86 @@ impl Server {
 
     fn open(&mut self, args: &Value) -> Result<String, String> {
         let url = args.get("url").and_then(Value::as_str).ok_or("url is required")?;
-        // One live session at a time: a new `open` ends the old one (and closes its window).
+        let state = match args.get("state").and_then(Value::as_str) {
+            Some(n) => Some(self.saved.get(n).cloned().ok_or(format!("no saved session named {n}"))?),
+            None => None,
+        };
+        Ok(self.start(args, url, state)?.0)
+    }
+
+    /// Start a live session on URL, from a saved session or with an empty profile. One live session at a time: this ends the old one
+    /// (and closes its window). Gives the report of the open step and whether it passed.
+    fn start(&mut self, args: &Value, url: &str, state: Option<StorageState>) -> Result<(String, bool), String> {
         let _ = self.close();
         let (opt, red, vars) = self.options(args)?;
         self.place_window(&opt)?;
-        let session = Session::new(&opt);
+        let mut session = Session::new(&opt);
+        if let Some(st) = state {
+            session.preload(st);
+        }
         self.live = Some(Live { session, opt, red, vars, lines: 0 });
         self.run_live(&format!("open {url}"))
     }
 
+    /// Save the live session under a name, and in a file when asked. Gives counts only: the values never leave this process.
+    fn save_state(&mut self, args: &Value) -> Result<String, String> {
+        let name = args.get("name").and_then(Value::as_str).ok_or("name is required")?;
+        self.store(name, args.get("file").and_then(Value::as_str))
+    }
+
+    fn store(&mut self, name: &str, file: Option<&str>) -> Result<String, String> {
+        let live = self.live.as_mut().ok_or("no live session: call open first")?;
+        let st = live.session.export_state().ok_or("the page has no session")?;
+        if let Some(f) = file {
+            bare_drive::state::write(f, &st).map_err(|e| live.red.clean(&e))?;
+        }
+        let origins: std::collections::HashSet<&String> = st.local.iter().chain(&st.session).map(|(o, _)| o).collect();
+        let reply = json!({"saved": name, "cookies": st.cookies.len(), "origins": origins.len()}).to_string();
+        self.saved.insert(name.to_string(), st);
+        Ok(reply)
+    }
+
+    /// Like `cy.session`: restore the saved session and run `check`; when there is none or the check fails, log in again with an empty
+    /// profile, run `check` and save. The live session stays open on the checked page.
+    fn ensure_session(&mut self, args: &Value) -> Result<String, String> {
+        let get = |k: &str| args.get(k).and_then(Value::as_str).ok_or(format!("{k} is required"));
+        let (name, url, login, check) = (get("name")?, get("url")?, get("login")?, get("check")?);
+        let file = args.get("file").and_then(Value::as_str);
+        let found = match self.saved.get(name) {
+            Some(st) => Some(st.clone()),
+            None => match file.filter(|f| std::path::Path::new(f).exists()) {
+                Some(f) => Some(bare_drive::state::read(f)?),
+                None => None,
+            },
+        };
+        let had = found.is_some();
+        if found.is_some() {
+            self.start(args, url, found)?;
+            let (rep, ok) = self.run_live(check)?;
+            if ok {
+                return Ok(with_session(rep, "restored"));
+            }
+        }
+        // The open of a profile with no state, then the login and the check; a failure gives the report of the failing step.
+        let (r, ok) = self.start(args, url, None)?;
+        if !ok {
+            return Err(r);
+        }
+        let mut rep = String::new();
+        for src in [login, check] {
+            let (r, ok) = self.run_live(src)?;
+            if !ok {
+                return Err(r);
+            }
+            rep = r;
+        }
+        self.store(name, file)?;
+        Ok(with_session(rep, if had { "recreated" } else { "created" }))
+    }
+
     fn step(&mut self, args: &Value) -> Result<String, String> {
         let src = args.get("steps").and_then(Value::as_str).ok_or("steps (one or more step lines) is required")?;
-        self.run_live(src)
+        Ok(self.run_live(src)?.0)
     }
 
     fn close(&mut self) -> Result<String, String> {
@@ -140,7 +213,7 @@ impl Server {
     }
 
     /// Run step lines on the live session until one fails, and give the report of these lines.
-    fn run_live(&mut self, src: &str) -> Result<String, String> {
+    fn run_live(&mut self, src: &str) -> Result<(String, bool), String> {
         let live = self.live.as_mut().ok_or("no live session: call open first")?;
         let mut list = steps::parse(src, &live.vars).map_err(|e| live.red.clean(&e))?;
         for s in &mut list {
@@ -152,7 +225,8 @@ impl Server {
                 break;
             }
         }
-        Ok(with_out(live.session.drain().json(&live.red), &live.opt, false))
+        let ok = live.session.rep.failure.is_none();
+        Ok((with_out(live.session.drain().json(&live.red), &live.opt, false), ok))
     }
 
     /// The driver options of a call, its secrets and its variables. Each call gets its own capture folder.
@@ -218,6 +292,12 @@ fn with_out(mut json: String, opt: &Options, end: bool) -> String {
     json
 }
 
+/// Add the way the session was made to a report, as `with_out` adds `out`.
+fn with_session(mut json: String, how: &str) -> String {
+    json.insert_str(json.len() - 1, &format!(",\"session\":\"{how}\""));
+    json
+}
+
 fn tools() -> Value {
     let common = json!({
         "vars": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Values for ${NAME} in the steps."},
@@ -248,12 +328,28 @@ fn tools() -> Value {
         {
             "name": "open",
             "description": "Start a live session: load URL in the bare browser. A new open ends the old session. Returns the report of the open step.",
-            "inputSchema": with(json!({"url": {"type": "string"}}), &["url"]),
+            "inputSchema": with(json!({"url": {"type": "string"}, "state": {"type": "string", "description": "Start from the session that save_state or ensure_session saved under this name, in this server."}}), &["url"]),
         },
         {
             "name": "step",
             "description": format!("Run one or more step lines on the live session page, until one fails. Returns the report of these steps only. The session stays open after a failure. {syntax}"),
             "inputSchema": {"type": "object", "properties": {"steps": {"type": "string"}}, "required": ["steps"]},
+        },
+        {
+            "name": "save_state",
+            "description": "Save the cookies, localStorage and sessionStorage of the live session in memory under a name, and in a file (mode 0600) when file is given. Returns counts only, never values. Open it again with open state=name.",
+            "inputSchema": {"type": "object", "properties": {"name": {"type": "string"}, "file": {"type": "string", "description": "Also write the session to this file. It holds live credentials."}}, "required": ["name"]},
+        },
+        {
+            "name": "ensure_session",
+            "description": "Get a logged-in live page, like cy.session. Restores the session saved under name (from memory, else from file), opens url and runs the check steps. If there is none or the check fails, opens url with an empty profile, runs the login steps, runs the check, and saves the session. The live page stays open: go on with step. Returns the report of the check with session: restored, created or recreated. login and check are step lines (see step); use ${NAME} with secrets_file for the credentials.",
+            "inputSchema": with(json!({
+                "name": {"type": "string"},
+                "url": {"type": "string", "description": "The page to open, where the check and the login steps start."},
+                "login": {"type": "string", "description": "Step lines that log in (without open)."},
+                "check": {"type": "string", "description": "Step lines that pass only when the session is valid, such as expect on a logged-in element."},
+                "file": {"type": "string", "description": "Also read the session from this file when it is not in memory, and write it there when saved. It holds live credentials."},
+            }), &["name", "url", "login", "check"]),
         },
         {
             "name": "close",

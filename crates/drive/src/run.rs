@@ -16,6 +16,7 @@
 use crate::locate::{self, Locator};
 use crate::steps::{Action, Check, CookieState, State, Step};
 use bare::control::{Handle, Log, Refusal, Remote, Ticks};
+pub use bare::page::StorageState;
 use bare::page::Page;
 use bare_paint::canvas::Canvas;
 use std::collections::HashMap;
@@ -100,7 +101,7 @@ enum Host {
 impl Host {
     /// An `open` is a new tab of one browser, in a window too: empty storage, and the connections and the HTTP cache of `net`.
     /// `state`: the saved session to start from (`None`: empty storage).
-    fn open(&mut self, url: &str, size: (u32, u32), window: bool, net: &bare_net::http::Client, state: Option<bare::page::StorageState>) -> Result<(), String> {
+    fn open(&mut self, url: &str, size: (u32, u32), window: bool, net: &bare_net::http::Client, state: Option<StorageState>) -> Result<(), String> {
         match self {
             // The new page takes the size of the window, not `size`: the compositor can have resized the window, and the window loop
             // calls `resize` only when the window size changes.
@@ -230,6 +231,8 @@ pub struct Session {
     // The first network record of the last step that loaded a document: the ticks of later steps load it.
     nav_first: usize,
     start: Instant,
+    // A session for the next `open` that has no state file (see `preload`).
+    preload: Option<StorageState>,
     pub rep: Report,
 }
 
@@ -238,12 +241,22 @@ impl Session {
         bare_net::trace::enable();
         let _ = bare_net::trace::take();
         let rep = Report { ok: true, steps: Vec::new(), failure: None, logs: Vec::new(), net: Vec::new(), ms: 0.0, window: opt.window, ticks: Ticks::default(), cookies: Vec::new() };
-        Session { host: Host::None, net: bare_net::http::Client::new(), memo: Memo::default(), timeout: opt.timeout, window_cpu: 0, nav_first: 0, start: Instant::now(), rep }
+        Session { host: Host::None, net: bare_net::http::Client::new(), memo: Memo::default(), timeout: opt.timeout, window_cpu: 0, nav_first: 0, start: Instant::now(), preload: None, rep }
+    }
+
+    /// Make the next `open` step that has no state file start from `st`.
+    pub fn preload(&mut self, st: StorageState) {
+        self.preload = Some(st);
+    }
+
+    /// A copy of the storage of the open page (it holds live credentials). `None` with no page.
+    pub fn export_state(&mut self) -> Option<StorageState> {
+        self.host.run(|p| p.storage().map(|s| s.export())).ok().flatten()
     }
 
     /// Run one step, and add its result to `rep`. False when it failed (`rep.failure` says why).
     pub fn step(&mut self, step: &Step, opt: &Options, red: &mut Redactor) -> bool {
-        let Session { host, net, memo, timeout, window_cpu, nav_first, rep, .. } = self;
+        let Session { host, net, memo, timeout, window_cpu, nav_first, rep, preload, .. } = self;
     let t0 = Instant::now();
     let deadline = t0 + *timeout;
     let (mut tries, mut busy, mut waited, mut ticks) = (0u32, Duration::ZERO, Duration::ZERO, Ticks::default());
@@ -261,7 +274,8 @@ impl Session {
             }
             Action::Open(url, file) => {
                 memo.seen.clear();
-                let opened = file.as_deref().map(crate::state::read).transpose().and_then(|st| host.open(url, opt.size, opt.window, net, st)).and_then(|_| host.run(|p| p.take_logs()));
+                let from = file.as_deref().map(crate::state::read).transpose().map(|st| st.or_else(|| preload.take()));
+                let opened = from.and_then(|st| host.open(url, opt.size, opt.window, net, st)).and_then(|_| host.run(|p| p.take_logs()));
                 let d = t.elapsed();
                 busy += d;
                 if !opt.window {

@@ -8339,3 +8339,17 @@ Checks:
 - The sed expression in the task text for the row filter fails on GNU sed (`[][.` starts a collating symbol). I used `[].[\*^$()+?{}|]`. The base needed `base-build origin/main --release -p bare-stress`.
 
 Not tested: a real Playwright file made in Chrome. The staging login journey. IndexedDB (not saved). A window run (`--window`) of `open ... state=` (the code path exists and compiles; no test runs it). Windows and macOS runs (they only build).
+
+## MCP session cache and ensure_session (2026-11-10)
+
+`bare-mcp` keeps logged-in sessions in memory. New tools: `save_state` (name, optional file) and `ensure_session` (name, url, login, check, optional file). `open` takes `state` (a saved name). `bare-drive` gets `Session::preload` and `Session::export_state`.
+
+Why: an agent needs one call before each test to get a logged-in live page. Cypress `cy.session` validates a restored session and sets it up again when the check fails. We do the same. Memory is the default, so tokens do not touch disk. A reply gives counts only.
+
+Checks (release, 2026-11-10):
+- `cargo test -p bare-drive`: all pass.
+- `cargo test -p bare-mcp`: 10 passed, 0 failed (4 new: created then restored, recreated from a stale file, wrong login is an error, save_state file mode 0600 and `open state=`). The leak check covers each reply, and the values of the saved file.
+- `cargo test --workspace`: 3502 passed, 0 failed.
+- `tools/portable_check.sh`: exit 0.
+
+Not tested: the staging journey. A real Playwright file. `window: true`. A session with cookies (the fixture app keeps its token in `sessionStorage`). Two live sessions at once (not supported: a new open ends the old one).
