@@ -256,6 +256,13 @@ w(e);v.textTracks[0].mode='showing';'continued'"#), "continued");
     assert_eq!(js(&mut b, "[e.readyState,e.track===v.textTracks[0],e.track.cues.length,e.track.cues[0].endTime,e.track.cues[0].line,e.track.cues[31].size].join('|')"), "2|true|32|1.92|-2|80");
     b.collect(&[]).unwrap();
     assert_eq!(js(&mut b, "e.track.cues[0].line"), "-2");
+    assert_eq!(js(&mut b, "try{e.track.cues[0].size=101}catch(x){x.name}"), "IndexSizeError");
+    assert_eq!(js(&mut b, "e.track.cues[0].size"), "80");
+    assert_eq!(js(&mut b, "try{Object.getOwnPropertyDescriptor(e.track,'mode').get.call({})}catch(x){x.name}"), "TypeError");
+    js(&mut b, "var old=e.track.cues[0];e.src='data:text/vtt,WEBVTT';1");
+    b.advance_time(100.0, 10_000).unwrap();
+    b.collect(&[]).unwrap();
+    assert_eq!(js(&mut b, "[old.line,old.size,e.track.cues.length].join('|')"), "-2|80|0");
 }
 
 #[test]
