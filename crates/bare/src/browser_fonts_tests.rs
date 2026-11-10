@@ -23,10 +23,11 @@ fn faces_and_membership() {
         assert_eq!(js(&mut b,"s.add(f);var a=[];var ctx={};s.forEach(function(v,k,t){a.push(v===k && t===s && this===ctx);if(v===f)s.add(g)},ctx);a.join()"),"true,true");
         assert_eq!(js(&mut b,"var names=[];s.forEach(function(v){names.push(v.family);if(v===f){s.clear();s.add(g)}});names.join()"),"One,Two");
         assert_eq!(js(&mut b,"s.clear()===undefined && s.size===0"),"true");
-        assert_eq!(js(&mut b,"var p=f.loaded;f.load()===p && f.loaded===p && f.status==='loaded'"),"true");
+        assert_eq!(js(&mut b,"var p=f.loaded,loadedFace;p.then(function(v){loadedFace=v});f.load()===p && f.loaded===p && f.status==='loaded'"),"true");
         assert_eq!(js(&mut b,"s.add(f);var result='';s.load('12px One').then(function(a){result=a.length+','+(a[0]===f)});0"),"0");
         b.drain().unwrap();
         assert_eq!(js(&mut b,"result"),"1,true");
+        assert_eq!(js(&mut b,"loadedFace===f && f.load()===p && f.source==='local(One)'"),"true");
     });
 }
 #[test]
