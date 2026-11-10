@@ -91,7 +91,7 @@ pub(super) fn check_corpus(cases: &str, expected: &str) {
 #[test]
 fn unsupported_subset_is_explicit() {
     let g = |src: &str| run(src);
-    assert_eq!(g("new ArrayBuffer(4, {maxByteLength: 8})"), "unsupported:resizable ArrayBuffer");
+    assert_eq!(g("new ArrayBuffer(4, {maxByteLength: 8})"), "throw:TypeError:resizable ArrayBuffer is not supported");
     assert_eq!(g("new ArrayBuffer(4).resize(2)"), "unsupported:ArrayBuffer.prototype.resize");
     // Other encodings: a real label is a gate, a made-up one is a RangeError.
     assert_eq!(g("new TextDecoder('utf-16le')"), "unsupported:TextDecoder encoding other than utf-8");
@@ -784,4 +784,16 @@ fn indexof_survives_global_deletion_and_collection() {
         let r = it.run_script("[f.call(v, 9), f.call(v, 0), f.length, typeof Uint8Array].join('|')");
         assert_eq!(fmt_result(&mut it, r), "string:1|0|1|undefined");
     });
+}
+
+#[test]
+fn resizable_buffer_refusal_is_catchable() {
+    assert_eq!(run("try { new ArrayBuffer(16, {maxByteLength:1024}) } catch(e) { e.name + ': ' + e.message }"), "string:TypeError: resizable ArrayBuffer is not supported");
+}
+
+#[test]
+fn resizable_buffer_probe_selects_fallback() {
+    assert_eq!(run("function probe(){try{new Uint8Array(new ArrayBuffer(16,{maxByteLength:1024})).setFromHex('cafed00d')}catch{return true}return false} probe()"), "boolean:true");
+    assert_eq!(run("try { new ArrayBuffer(0,{get maxByteLength(){throw 42}}) } catch(e) { e }"), "number:42");
+    assert_eq!(run("new ArrayBuffer(4,{maxByteLength:undefined}).byteLength"), "number:4");
 }

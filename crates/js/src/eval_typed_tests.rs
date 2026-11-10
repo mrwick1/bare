@@ -93,7 +93,7 @@ fn gates_are_explicit() {
     assert_eq!(run("new Uint8Array(new BigInt64Array(1).buffer, 0, 3).length + new BigInt64Array(new ArrayBuffer(16), 8).length"), "number:4");
     // DataView: the BigInt pairs work.
     assert_eq!(run("var d = new DataView(new ArrayBuffer(8)); d.setBigUint64(0, 2n ** 64n - 1n); d.getBigInt64(0) + ''"), "string:-1");
-    assert_eq!(run("new ArrayBuffer(4, {maxByteLength: 8})"), "unsupported:resizable ArrayBuffer");
+    assert_eq!(run("new ArrayBuffer(4, {maxByteLength: 8})"), "throw:TypeError:resizable ArrayBuffer is not supported");
     assert_eq!(run("new ArrayBuffer(4).resize(2)"), "unsupported:ArrayBuffer.prototype.resize");
     assert_eq!(run("new Int8Array([1]).toLocaleString()"), "string:1");
     assert_eq!(run("new Float64Array([1234.5, -2]).toLocaleString()"), "string:1,234.5,-2");

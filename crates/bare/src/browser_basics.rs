@@ -57,7 +57,7 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
 
 /// The names of `window` and of `Document.prototype` made here. The heap asks the host for them on the first miss (`Heap::browser_name`),
 /// so a realm that never reads one pays nothing.
-const WINDOW: [&str; 18] = ["devicePixelRatio", "screenX", "screenY", "crossOriginIsolated", "closed", "opener", "frameElement", "postMessage", "alert", "print", "focus", "blur", "confirm", "prompt", "open", "isSecureContext", "outerWidth", "outerHeight"];
+const WINDOW: [&str; 19] = ["DOMException", "devicePixelRatio", "screenX", "screenY", "crossOriginIsolated", "closed", "opener", "frameElement", "postMessage", "alert", "print", "focus", "blur", "confirm", "prompt", "open", "isSecureContext", "outerWidth", "outerHeight"];
 const DOCUMENT: [&str; 11] = ["hidden", "referrer", "visibilityState", "contentType", "compatMode", "characterSet", "charset", "inputEncoding", "lastModified", "designMode", "dir"];
 
 /// The ask of the heap for `key` (`browser_handlers::lazy`): define it when it is one of the names above. The name `open` is also a
@@ -74,6 +74,7 @@ pub(crate) fn define(d: &Dom, it: &mut Interp<'_>, key: &str) -> R<()> {
         it.define_data(g, k, Value::Object(f), true, false, true)
     };
     match key {
+        "DOMException" => crate::browser::define_window(d, it, key).map(|_| ()),
         "devicePixelRatio" => data(it, g, Value::Number(1.0)),
         "screenX" | "screenY" => data(it, g, Value::Number(0.0)),
         "crossOriginIsolated" | "closed" => data(it, g, Value::Bool(false)),

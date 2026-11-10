@@ -7384,3 +7384,60 @@ The owner authorized merge of this documentation-only PR. This replaces the earl
 **Follow-up validation and cost plan.** Freeze post-merge main and run the capability-contract test with `heavy cargo test --release -p bare --lib <test-name>`. Retain the actual Rive factory/classifier reduction, including the caught rejection and continuation sentinel. A caller repair must first fail its regression on the original caller and then pass on the repaired caller. Replay the frozen decoded Rive source; use an application-specific canvas fallback sentinel, since main/h1 alone does not prove hydration. For an authorized production host change, begin with 2–6 relevant module rows. On the final gated rebase, use a fresh shared BASE, the affected module rows and the saved every-13th noncomment sample (about 60 rows). Check flagged rows under both allocators; reject any row above +0.5% under both and escalate to the full matrix under the owner rule. A hot-struct or crates/js/css/html/paint change requires the full 805 rows and separate scope. Run the release workspace once, all 48 public journeys, three alternating BASE/NEW Redis pairs and bsky/go-dev controls for a host implementation. Match loaded resources before RSS comparisons. A test-only negative-capability follow-up has no production cost change; the present docs-only PR runs no suite or matrix. An upstream-only caller repair needs its upstream tests; do not present this repository's cost matrix as coverage of that repair.
 
 Merge rebase: acquired `merge-gate acquire rct12` after the preceding holders released it. Rebased on `b33d5b99b3736ccf887d093cdfb38a5d8b06e4ee`. Retained the complete main progress document and appended Task 37 after it to resolve the append conflict. Preserved all other sections. Checked the exact final diff, prohibited publication text and whitespace. No matrix or suite rerun for this docs-only merge.
+
+## Lazy DOMException and catchable resizable-buffer refusal (Task 39)
+
+Frozen baseline: `46070ed674d3145b68e31c79e1e99371fde709f6`. Implementation commits before final rebase: `650a9b6321d72a1cd4157e745fb1f2e8eeefbb12` and `0e0d2658477dc5d26c5acb05b4b227133fd0f3f5`. PR #354. Artifacts are machine-local under `/data/bare-tmp/dxe13/`; they are not hosted PR attachments. No foreign worktree was edited.
+
+### Implementation and failing-first evidence
+
+`new DOMException(1,2)` returns message `1`, name `2`, code 0. It was an illegal non-constructor before this change. Constructor creation uses the existing lazy-name hook and existing constructor, error and prototype helpers. The DOMException prototype remains available for host-thrown errors. Constants and the prototype tag are created with the constructor. No new hot field, hook or dependency was added. `browser_basics.rs` adds only the global enumeration name and dispatch arm. Exact shared-file changes were published in `shared.diff` and `basics.diff` before Task 40 edited its separate additions.
+
+Tests `domexception_converts_constructor_arguments` and `domexception_retained_polyfill_probe` both fail on unchanged frozen runtime (`failing-first.log`). The expanded initial four tests also all fail (`failing-all.log`). Seven constructor tests pass (`targeted-final.log`), including defaults/undefined, conversion side effects/errors, UTF-16, codes, constants, derived prototypes, missing new, host exception prototypes, identity, collection, enumeration and host string limits. The retained stack probe returns true through the real error helper; no stack text is invented. The final workspace run includes the explicit stack-result assertion added later. Additional identity/limit assertions were not all executed on main before implementation; do not call every assertion failing-first.
+
+The owner authorized the existing descriptor conventions: own writable configurable non-enumerable `name`, `message`, `code`, rather than readonly branded Web IDL accessors. This is a known limit. See the decisions entry.
+
+Constructor-only code exposed a worse live result. The whole frozen polyfill and all three NEW Mastodon runs stopped with `Unsupported("resizable ArrayBuffer")`. The owner held merge and then authorized a cold constructor-path catchable TypeError refusal. The polyfill's `ln` module runs `forced:s()`; `s` tries `new Uint8Array(new ArrayBuffer(16,{maxByteLength:1024})).setFromHex('cafed00d')` inside a catch. The old engine gate bypassed that catch. The approved refusal lets the fallback run. `refusal-first.log` retains both new tests failing; `refusal-pass.log` has both passing. Getter throws and undefined options retain their behavior. Existing gate expectations were updated in the binary/typed tests. No typed-array hot code or resource-limit handling changes. Full resizable buffers remain unsupported; the read-only estimate is in decisions.md.
+
+### Retained live replay
+
+Command: `CARGO_TARGET_DIR=/data/bare-tmp/target-dxe13 python3 /data/bare-tmp/dxe13/live.py`. Each process uses `heavy timeout 75`, complete readiness, and the same `#mastodon .ui` sentinel. Runs alternate BASE/NEW three times. The final source is the constructor plus refusal. BASE is obtained with `base-build 46070ed674d3145b68e31c79e1e99371fde709f6 --release -p bare-drive`. The fixed target for NEW is `/data/bare-tmp/target-dxe13`. Builds, tests and cost scripts use heavy.
+
+The whole frozen 60,721-byte polyfill from Task 36 is embedded unchanged in `polyfill.html`, followed by an explicit completion marker. BASE reaches readiness but not the marker and records the constructor error. Final NEW reaches readiness and the marker without console errors. The fixture transfers 60,824 bytes, including its wrapper. This is a whole-source replay, not only the `(1,2)` reduction. `polyfill-path.txt` retains relevant expressions and decoded offsets.
+
+The first attempted live batch could not execute `/usr/bin/time`; all exit 127 results remain in `live-missing-time/`. The corrected runner uses `wait4` for per-process RSS and monotonic elapsed time. Constructor-only runs remain in `live-constructor-only/`. Final runs are in `live/`; `live2.log` and `live-refusal.log` preserve ordering. Every run keeps stdout JSON, stderr, exit status, steps, metrics and any failure capture. Raw network records retain statuses/bytes; console entries retain ordering and task/page stops.
+
+| Final run | ready + sentinel | driver ms | peak KiB | resource rows | transferred bytes |
+|---|---|---:|---:|---:|---:|
+| mastodon-base-1 | pass | 4522.6 | 62356 | 179 | 999104 |
+| mastodon-new-1 | pass | 2623.9 | 63304 | 178 | 998825 |
+| mastodon-base-2 | pass | 1989.2 | 63224 | 174 | 997039 |
+| mastodon-new-2 | pass | 1974.7 | 62900 | 179 | 999104 |
+| mastodon-base-3 | pass | 1989.9 | 62688 | 174 | 997039 |
+| mastodon-new-3 | pass | 2838.8 | 63008 | 180 | 1055402 |
+| go-dev-base | pass | 2234.9 | 54356 | 22 | 454637 |
+| go-dev-new | pass | 1771.2 | 55028 | 22 | 454021 |
+| react-dev-base | pass | 745.1 | 61484 | 26 | 675902 |
+| react-dev-new | pass | 593.8 | 60152 | 30 | 683630 |
+
+Controls assert readiness only. All final Mastodon NEW runs have zero console errors and no fatal/task stop; BASE records the constructor error first and its listener exception. Both controls have zero error/exception/page console entries in the final batch. The earlier constructor-only go-dev NEW run has an ad fetch refusal and a toLowerCase exception; it remains retained. Resource work differs across live pairs. Earlier fatal NEW runs do much less work. No causal time/RSS improvement, feeds, login, glyph, or initial app-mount repair is claimed. The app already mounted on BASE. The demonstrated improvement is the feature probe and polyfill completion.
+
+### Final gated checks
+
+Acquired `merge-gate acquire dxe13` after the JS and typing gates. Final rebase is on `da17ff4097ae8c4f6183e912d26e24ae8cda2b80`; runtime head is `6281f572c66c46337169b25812270bc73cf6a034` before this documentation commit. Main added only documentation after the frozen baseline. `rebase-runtime.diff` is empty between the successfully replayed implementation and the rebased runtime. Task 29's diff was checked before rebase; its worktree was then removed after #352 merged. Both #352 and #351 are in the final base. No other task's gate was released.
+
+Exact commands and paths are retained in `commands.txt`. Fresh BASE builds: `base-build origin/main` and `base-build da17ff4097ae8c4f6183e912d26e24ae8cda2b80 --release -p bare-drive -p bare-stress`. Final NEW builds: `cargo build --release --workspace --examples` and `cargo build --release -p bare-drive -p bare-stress`. Logs: `final-base-build.log`, `final-base-bins.log`, `final-build.log`. No BASE source or binary was edited by this task.
+
+Before the final rebase, two relevant constructor/browser rows passed (`iterate2.log`). The saved 12 browser-module rows plus every-13th noncomment sample (62 rows, 73 distinct rows) passed (`sample-final.log`, `sample-final-raw.tsv`, `sample-rows.txt`): zero flagged/failed rows, mean glibc -0.005%, zero jemalloc rows measured. The first sample lacked stress binaries and failed 13 rows; `sample.log` is retained. The corrected sample follows explicit BASE/NEW stress builds. This sample does not replace the full 805-row rule for the heap token and the approved JS change.
+
+JS gates before final rebase, on identical runtime source: `tools/js/test262_check.sh -o /data/bare-tmp/dxe13/test262` reports `gate: ok` (29731 pass, 2352 fail, 755 skip; no baseline directory loses passing tests). `tools/js/exec_diff.sh` reports 79 runs and zero differences across tree/auto/byte. Logs: `test262.log`, `test262/gate.txt`, `exec-diff.log`. These are subset/baseline checks, not a claim that every language test passes.
+
+`tools/js/typing/keycost.sh /data/bare-tmp/typing`: NEW `#a1` 282.8 M/key, `#f0` 288.2 M/key, load/mount 572.8 M, RSS 33.4 MiB at 50 keys. Frozen BASE's prebuilt `type_load` on the same page: 283.1 M/key, 288.5 M/key, load/mount about 573.1 M, RSS 33.8 MiB at 50 keys. BASE uses `keycost-existing.sh`, which skips the build and invokes the immutable BASE binary; its header names the script checkout, not the BASE binary revision. Logs: `typing-new.log`, `typing-base.log`. No causal wall-time/RSS improvement is claimed.
+
+`cargo test --release --workspace` after final rebase: 3453 passed, zero failed, 13 ignored (`workspace.log`, exit 0 in `workspace.exit`). This includes all seven constructor regressions and both new catchable-refusal tests. Existing unrelated unused-import/dead-code warnings remain unchanged.
+
+Final owner cost-check case 1 applies because `crates/js` changes. Ran the full 805 rows once after the gated final rebase against the fresh final BASE: `matrix-final.log`, `matrix-final-raw.tsv`, exit 0 in `matrix-final.exit`. Mean glibc change -0.006%; zero rows over +0.5%, zero failed rows. Jemalloc measured zero rows because none required follow-up. This meets the over-both threshold rule; it is not a claim that every row was measured under both allocators.
+
+All 48 public journeys pass after final rebase: zero failed, known, skipped or flaky journeys (`journeys.log`, `journeys.exit`, `journeys/`). `tools/drive/public/run.sh --out /data/bare-tmp/dxe13/journeys /data/bare-tmp/target-dxe13/release/bare-drive` ran under heavy. No suite or matrix rerun was needed after this documentation-only addition. Final diff, document-prefix preservation, whitespace and prohibited-text checks pass.
+
+Not tested: a browser oracle, real resizable-buffer support or length-tracking views, feeds/login, extended Mastodon interactions, macOS or arjun-e16. The initial fatal NEW result is resolved only for the retained replay and the final live runs; no broad capability or application-success claim follows. The read-only estimate does not implement or cost-test full resizable support.
