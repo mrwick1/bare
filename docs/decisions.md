@@ -1099,3 +1099,13 @@ Evidence is retained locally under `/data/bare-tmp/ct16/`: downloaded source,
 `captions.vtt`, `caller-cases.txt`, `caller-base.log`, `sha256.txt`, and
 `verified.txt`. These paths are not published attachments. No matrix ran for
 this documentation change. No successful caption initialization is claimed.
+
+## Vimeo DOMImplementation repair boundary (Task 48)
+
+Vimeo loads Transcend's airgap script. The frozen script captures `createHTMLDocument` and `createDocument` from `DOMImplementation.prototype`. The global interface is absent. The existing implementation object supplies only the first method.
+
+A constructor alias would expose the first method but would leave `createDocument` undefined. The downloaded `Gn` wrapper calls that method for a non-HTML namespace. Keep this dependency visible. Do not replace it with an HTML document or a successful placeholder.
+
+A complete dependency needs XML document semantics. The native document has no XML document mode or per-document MIME type. The namespace model cannot represent a null-namespace element. The existing XML MIME parser uses the HTML parser. These are semantic limits, not a file-name conflict. An empty XML document must also report the correct content type and preserve XML behavior for later element creation. A constructor-only patch cannot establish that behavior.
+
+Retain the failing reduction and native dependency probes before changing runtime code. This task publishes evidence only. It does not expose the interface, repair the wrapper, or establish Vimeo player readiness. The progress entry identifies the frozen source, commands, results and remaining checks.
