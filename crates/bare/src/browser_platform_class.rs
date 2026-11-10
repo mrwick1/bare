@@ -1,6 +1,6 @@
-//! `Element.classList` and `DOMTokenList` over the native `class` attribute (DOM Standard, "DOMTokenList").
+//! `classList`, `relList` and `DOMTokenList` over native attributes (DOM Standard, "DOMTokenList").
 //!
-//! - The list stores nothing but its element. Every call reads the `class` attribute at that moment, splits it on ASCII
+//! - The list stores its element and backing attribute (`class` or `rel`). Every call reads that attribute, splits it on ASCII
 //!   white space into an ordered set (first occurrence wins) and, for a change, writes the serialized set back with the
 //!   normal attribute path (`attr_set`: caps, charge, native cache invalidation). So `setAttribute("class", ...)`,
 //!   `className` and the list always agree, and the native selector matcher sees every change.
@@ -17,14 +17,14 @@
 //!   `[Symbol.iterator]` is this module's `values` (the realm's own `Symbol.iterator`).
 //!
 //! Gates and deviations: there are no indexed properties (`classList[0]` is `undefined`; use `item(0)`), and so
-//! `Array.prototype.values`/`forEach.call(classList)` see an empty list. `supports()` always throws `TypeError`, as
+//! `Array.prototype.values`/`forEach.call(classList)` see an empty list. Class-list `supports()` throws `TypeError`, as
 //! `class` defines no supported tokens. The iterator has no `Symbol.toStringTag`. A bad `classList` call on a wrong
 //! `this` is `TypeError: Illegal invocation`.
 
 use crate::browser::*;
 use crate::browser_dom::attr_set;
 use crate::browser_platform::{TokIter, V, arg};
-use bare_html::dom::{Atom, NodeId};
+use bare_html::dom::{Atom, Document, NodeId};
 use bare_js::eval::Interp;
 use bare_js::value::{ObjId, PropertyKey, Value};
 use std::collections::HashSet;
@@ -54,7 +54,7 @@ fn element(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<NodeId> {
     if d.is_element(n) { Ok(n) } else { Err(it.type_error("Illegal invocation")) }
 }
 
-fn list_of(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<(ObjId, NodeId)> {
+fn list_of(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<(ObjId, (NodeId, &'static str))> {
     if let Value::Object(o) = this
         && let Some(&el) = d.plat.s.borrow().lists.get(&o)
     {
@@ -63,27 +63,32 @@ fn list_of(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<(ObjId, NodeId)> {
     Err(it.type_error("Illegal invocation"))
 }
 
-/// The ordered set of the `class` attribute now.
-fn tokens(d: &Dom, it: &mut Interp<'_>, el: NodeId) -> R<Vec<String>> {
+fn attribute<'a>(doc: &'a Document, el: (NodeId, &str)) -> Option<&'a str> {
+    let atom = if el.1 == "class" { Some(Atom::CLASS) } else { doc.find_atom(el.1) };
+    atom.and_then(|a| doc.attr(el.0, a))
+}
+
+/// The ordered set of the backing attribute now.
+fn tokens(d: &Dom, it: &mut Interp<'_>, el: (NodeId, &str)) -> R<Vec<String>> {
     let doc = d.doc.borrow();
-    let v = doc.attr(el, Atom::CLASS).unwrap_or("");
+    let v = attribute(&doc, el).unwrap_or("");
     it.charge(1 + (v.len() / 8) as u64)?;
     let mut seen = HashSet::new();
     Ok(v.split_ascii_whitespace().filter(|t| seen.insert(*t)).map(String::from).collect())
 }
 
 /// The update steps: write the serialized set back.
-fn write(d: &Dom, it: &mut Interp<'_>, el: NodeId, toks: &[String]) -> R<()> {
+fn write(d: &Dom, it: &mut Interp<'_>, el: (NodeId, &str), toks: &[String]) -> R<()> {
     let new = toks.join(" ");
     {
         let doc = d.doc.borrow();
-        match doc.attr(el, Atom::CLASS) {
+        match attribute(&doc, el) {
             None if toks.is_empty() => return Ok(()),
             Some(c) if c == new => return Ok(()),
             _ => {}
         }
     }
-    attr_set(d, it, el, "class", &new)
+    attr_set(d, it, el.0, el.1, &new)
 }
 
 fn required(it: &mut Interp<'_>, a: &[Value], n: usize, name: &str) -> R<()> {
@@ -122,7 +127,30 @@ fn validate(d: &Dom, it: &mut Interp<'_>, toks: &[String]) -> R<()> {
 }
 
 pub(crate) fn class_list(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    token_list(d, it, this, "class")
+}
+
+pub(crate) fn rel_list<const KIND: usize>(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    rel_element::<KIND>(d, it, this)?;
+    token_list(d, it, this, "rel")
+}
+
+fn rel_element<const KIND: usize>(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<NodeId> {
     let el = element(d, it, this)?;
+    if d.doc.borrow().is_html(el, ["link", "a", "area"][KIND]) {
+        Ok(el)
+    } else { Err(it.type_error("Illegal invocation")) }
+}
+
+pub(crate) fn set_rel_list<const KIND: usize>(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    let el = rel_element::<KIND>(d, it, this)?;
+    let v = d.string_arg(it, arg(a, 0))?;
+    attr_set(d, it, el, "rel", &v)?;
+    Ok(Value::Undefined)
+}
+
+fn token_list(d: &Dom, it: &mut Interp<'_>, this: Value, attr: &'static str) -> V {
+    let el = (element(d, it, this)?, attr);
     if let Some(&o) = d.plat.s.borrow().by_el.get(&el) {
         return Ok(Value::Object(o));
     }
@@ -137,9 +165,9 @@ pub(crate) fn class_list(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value])
 }
 
 pub(crate) fn set_class_list(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let el = element(d, it, this)?;
+    let el = (element(d, it, this)?, "class");
     let v = d.string_arg(it, arg(a, 0))?;
-    attr_set(d, it, el, "class", &v)?;
+    attr_set(d, it, el.0, el.1, &v)?;
     Ok(Value::Undefined)
 }
 
@@ -150,14 +178,17 @@ fn length(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
 
 fn value_get(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let (_, el) = list_of(d, it, this)?;
-    let s = d.doc.borrow().attr(el, Atom::CLASS).unwrap_or("").to_string();
+    let s = {
+        let doc = d.doc.borrow();
+        attribute(&doc, el).unwrap_or("").to_string()
+    };
     d.js_str(it, &s)
 }
 
 fn value_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     let (_, el) = list_of(d, it, this)?;
     let v = d.string_arg(it, arg(a, 0))?;
-    attr_set(d, it, el, "class", &v)?;
+    attr_set(d, it, el.0, el.1, &v)?;
     Ok(Value::Undefined)
 }
 
@@ -182,8 +213,8 @@ fn contains(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     required(it, a, 1, "contains")?;
     let t = d.string_arg(it, a[0])?;
     let doc = d.doc.borrow();
-    it.charge(1 + (doc.attr(el, Atom::CLASS).map_or(0, str::len) / 32) as u64)?;
-    Ok(Value::Bool(doc.has_class(el, &t)))
+    it.charge(1 + (attribute(&doc, el).map_or(0, str::len) / 32) as u64)?;
+    Ok(Value::Bool(if el.1 == "class" { doc.has_class(el.0, &t) } else { attribute(&doc, el).is_some_and(|v| v.split_ascii_whitespace().any(|x| x == t)) }))
 }
 
 fn add(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
@@ -267,8 +298,16 @@ fn replace(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
 }
 
 fn supports(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    list_of(d, it, this)?;
+    let (_, el) = list_of(d, it, this)?;
     required(it, a, 1, "supports")?;
+    let token = d.string_arg(it, a[0])?;
+    if el.1 == "rel" {
+        let token = token.to_ascii_lowercase();
+        // Report only link processing implemented by this browser. Navigation and
+        // the other resource-hint lifecycles are not implemented.
+        let supported = d.doc.borrow().is_html(el.0, "link") && matches!(token.as_str(), "preload" | "stylesheet");
+        return Ok(Value::Bool(supported));
+    }
     Err(it.type_error("Failed to execute 'supports' on 'DOMTokenList': DOMTokenList has no supported tokens."))
 }
 

@@ -23,7 +23,7 @@
 //! - a form that the parser gates (user info, `\`, a scheme other than http and https with `//`, IDNA hosts): `href` is the attribute text, any other
 //!   part is `Unsupported`. A setter on such a URL is `Unsupported` too.
 //!
-//! Absent: `username`, `password`, `target`, `rel`, `download`, `text`, `relList`, `ping` and the other attribute reflections.
+//! Absent: `username`, `password`, `target`, `rel`, `download`, `text`, `ping` and the other attribute reflections.
 //!
 //! `HTMLTemplateElement.content` is a `DocumentFragment` (a node with the data of a shadow root and no host: `Document::create_fragment`). The tree
 //! builder moves the children of each parsed `<template>` into it, so `template.childNodes` is empty, as in Chrome. A `<template>` made by a script gets
@@ -111,6 +111,8 @@ fn make(d: &Dom, it: &mut Interp<'_>) -> R<[ObjId; 10]> {
         (o[i], o[i + 5]) = (proto, f);
     }
     tag_fragments(d, it)?;
+    d.def_get(it, o[0], "relList", crate::browser_platform_class::rel_list::<1>, Some(crate::browser_platform_class::set_rel_list::<1>))?;
+    d.def_get(it, o[1], "relList", crate::browser_platform_class::rel_list::<2>, Some(crate::browser_platform_class::set_rel_list::<2>))?;
     members::<false>(d, it, o[0])?;
     members::<true>(d, it, o[1])?;
     d.def_get(it, o[2], "content", content, None)?;

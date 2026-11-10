@@ -102,10 +102,10 @@ pub(crate) struct PState {
     pub viewport: (f32, f32),
     pub mql: IdMap<ObjId, Mql>,
     pub seq: u64,
-    /// `DOMTokenList` object -> its element.
-    pub lists: IdMap<ObjId, NodeId>,
-    /// element -> its `classList` object (`SameObject`).
-    pub by_el: IdMap<NodeId, ObjId>,
+    /// `DOMTokenList` object -> its element and backing attribute.
+    pub lists: IdMap<ObjId, (NodeId, &'static str)>,
+    /// Element and attribute -> its token list (`SameObject`).
+    pub by_el: IdMap<(NodeId, &'static str), ObjId>,
     pub iters: IdMap<ObjId, TokIter>,
     pub halted: Option<Error>,
 }
@@ -154,14 +154,15 @@ pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
 pub(crate) fn trace(d: &Dom, owner: ObjId, out: &mut Vec<Value>) {
     let s = d.plat.s.borrow();
     if let Some(&el) = s.lists.get(&owner) {
-        out.extend(d.st.borrow().by_node.get(&el).map(|&o| Value::Object(o)));
+        out.extend(d.st.borrow().by_node.get(&el.0).map(|&o| Value::Object(o)));
     } else if let Some(i) = s.iters.get(&owner) {
         out.push(Value::Object(i.list));
     } else if !s.by_el.is_empty()
         && let Some(&Target::Node(n)) = d.st.borrow().by_obj.get(&owner)
-        && let Some(&l) = s.by_el.get(&n)
     {
-        out.push(Value::Object(l));
+        for attr in ["class", "rel"] {
+            if let Some(&l) = s.by_el.get(&(n, attr)) { out.push(Value::Object(l)); }
+        }
     }
 }
 
@@ -262,6 +263,7 @@ impl Dom {
         // DOMTokenList and its iterator, then Element.classList
         crate::browser_platform_class::install(self, it, list, iter, sym)?;
         self.def_get(it, p.element, "classList", crate::browser_platform_class::class_list, Some(crate::browser_platform_class::set_class_list))?;
+        self.def_get(it, p.link, "relList", crate::browser_platform_class::rel_list::<0>, Some(crate::browser_platform_class::set_rel_list::<0>))?;
         crate::browser_platform_query::install(self, it)?;
 
         // interface objects and `matchMedia`
