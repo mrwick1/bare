@@ -482,6 +482,7 @@ fn named_attribute_aliases_are_live_and_preserve_descriptors() {
             if (map['stroke-width'] === attr || map['stroke-width'].value !== '9') throw 'reinsert';
             svg.setAttribute('item', 'hidden');
             if (typeof map.item !== 'function') throw 'prototype visibility';
+            if (Reflect.defineProperty(map, 'item', {value:4})) throw 'hidden name define';
             var calls = 0;
             Object.defineProperty(Object.getPrototypeOf(map), 'probe', {get:function(){calls++; return this;}, configurable:true});
             svg.setAttribute('probe', 'hidden');
@@ -489,5 +490,24 @@ fn named_attribute_aliases_are_live_and_preserve_descriptors() {
             if (Reflect.defineProperty(map, 'stroke-width', {value:4})) throw 'define';
             'complete';
         "#), "complete");
+    });
+}
+
+#[test]
+fn named_attribute_keys_do_not_repeat_qualified_names() {
+    big(|| {
+        let mut b = browser();
+        ok(&mut b, r#"
+            var el = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+            el.setAttribute('x:probe', 'plain');
+            el.setAttributeNS('http://www.w3.org/1999/xlink', 'x:probe', 'namespaced');
+            var map = el.attributes;
+            [Reflect.ownKeys(map).join(), map['x:probe'] === map[0], map[0] !== map[1]].join('|');
+        "#, "0,1,x:probe|true|true");
+        ok(&mut b, r#"
+            var html = document.createElement('div');
+            html.setAttributeNS('http://www.w3.org/1999/xlink', 'x:Upper', 'v');
+            [Reflect.ownKeys(html.attributes).join(), html.attributes['x:Upper'], html.attributes['x:upper']].join('|');
+        "#, "0||");
     });
 }

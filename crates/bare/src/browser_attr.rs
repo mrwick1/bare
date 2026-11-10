@@ -50,7 +50,7 @@ use bare_js::eval::{Error, Interp};
 use bare_js::heap::{HeapError, IndexedSource, Slot};
 use bare_js::value::{ObjId, Value};
 use std::cell::{OnceCell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 type V = R<Value>;
 
@@ -138,6 +138,9 @@ impl IndexedSource for Dom {
         let Some(&el) = t.maps.get(&owner) else { return Ok(None) };
         let doc = self.doc.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
         let NodeData::Element { attrs, .. } = *doc.data(el) else { return Ok(None) };
+        if doc.element_ns(el) == bare_html::dom::Ns::Html && key.iter().any(|u| (65..=90).contains(u)) {
+            return Ok(None);
+        }
         Ok(doc.attrs(attrs).iter().position(|a| doc.atom_str(a.name).encode_utf16().eq(key.iter().copied())).map(|i| i as u32))
     }
 
@@ -146,7 +149,13 @@ impl IndexedSource for Dom {
         let Some(&el) = t.maps.get(&owner) else { return Ok(Vec::new()) };
         let doc = self.doc.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
         let NodeData::Element { attrs, .. } = *doc.data(el) else { return Ok(Vec::new()) };
-        Ok(doc.attrs(attrs).iter().map(|a| doc.atom_str(a.name).encode_utf16().collect()).collect())
+        let html = doc.element_ns(el) == bare_html::dom::Ns::Html;
+        let mut seen = HashSet::new();
+        Ok(doc.attrs(attrs).iter().filter_map(|a| {
+            let name = doc.atom_str(a.name);
+            (!html || !name.bytes().any(|b| b.is_ascii_uppercase())).then_some(name)
+                .filter(|name| seen.insert(*name)).map(|name| name.encode_utf16().collect())
+        }).collect())
     }
 
     fn indexed_len(&self, owner: ObjId) -> Result<usize, HeapError> {

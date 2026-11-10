@@ -927,8 +927,14 @@ impl Heap {
 
     /// `[[DefineOwnProperty]]` of an integer-indexed key on a typed array. `None`: ordinary rules.
     pub(super) fn view_define(&mut self, o: ObjId, key: PropertyKey, d: &PropertyDescriptor) -> R<Option<bool>> {
-        if matches!(self.exotic(o), Some(Exotic::Indexed)) && (matches!(key, PropertyKey::Index(_)) || self.indexed_alias(o, key)?.is_some()) {
-            return Ok(Some(false)); // no indexed setter: an index cannot be defined, in range or not
+        if matches!(self.exotic(o), Some(Exotic::Indexed)) {
+            let named = match key {
+                PropertyKey::String(s) if self.own(self.obj(o)?, key).is_none() => self.source()?.indexed_name(o, self.str_units(s)?)?.is_some(),
+                _ => false,
+            };
+            if matches!(key, PropertyKey::Index(_)) || named {
+                return Ok(Some(false)); // no indexed or named setter
+            }
         }
         let Some(r) = self.view_index(o, key) else { return Ok(None) };
         let Some(i) = r else { return Ok(Some(false)) };
