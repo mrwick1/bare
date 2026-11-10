@@ -265,6 +265,7 @@ pub struct BrowserLimits {
     pub max_results: usize,
     /// Depth of a tree that JS builds, and the longest event path.
     pub max_tree_depth: usize,
+    /// Bytes of one selector text. GitHub sends lists of 3 to 4 KB; Chrome has no cap.
     pub max_selector_len: usize,
     /// Bytes of one string that crosses between JS and the document.
     pub max_string_bytes: usize,
@@ -287,13 +288,16 @@ impl Default for BrowserLimits {
             max_events: 1 << 14,
             max_results: 1 << 16,
             max_tree_depth: 512,
-            max_selector_len: 1024,
+            max_selector_len: 1 << 16,
             max_string_bytes: 16 << 20,
             max_reports: 256,
             max_task_aborts: 5,
         }
     }
 }
+
+/// Bytes of selector text that `Dom::selectors` keeps parsed. A parsed selector is up to about 50 times its text.
+pub(crate) const SEL_CACHE_BYTES: usize = 128 << 10;
 
 /// What a JS event target is on the Rust side.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -403,6 +407,8 @@ pub(crate) struct State {
     pub reports: VecDeque<Report>,
     pub dropped_reports: u64,
     pub sel_cache: HashMap<String, Rc<Vec<Selector>>>,
+    /// Bytes of the selector texts in `sel_cache`.
+    pub sel_cache_bytes: usize,
     /// True while the test driver runs a dispatch from the host (a microtask checkpoint follows each listener).
     pub driver: bool,
     /// The focused element and the transition guards (`browser_focus.rs`).
@@ -993,9 +999,12 @@ impl Dom {
         if text.len() > self.lim.max_selector_len {
             return Err(self.lim("dom-selector"));
         }
+        // A parse costs up to about 1,050 instructions for each byte (a list of one-letter tags) and a step about 370, so 4 steps per byte.
+        it.charge(text.len() as u64 * 4)?;
         let parsed = {
             let mut doc = self.doc.borrow_mut();
-            if doc.name_count() + text.len() > self.lim.max_names {
+            // Only tag and attribute names are new names, and each one needs a byte and a separator.
+            if doc.name_count() + text.len() / 2 + 1 > self.lim.max_names {
                 return Err(self.lim("dom-names"));
             }
             bare_css::selector::parse_scoped(text, &mut doc, bare_css::selector::Mode::Script, Some(self.selector_scope.clone()))
@@ -1008,9 +1017,11 @@ impl Dom {
         }
         let list = Rc::new(list);
         let mut st = self.st.borrow_mut();
-        if st.sel_cache.len() >= 256 {
+        if st.sel_cache.len() >= 256 || st.sel_cache_bytes + text.len() > SEL_CACHE_BYTES {
             st.sel_cache.clear();
+            st.sel_cache_bytes = 0;
         }
+        st.sel_cache_bytes += text.len();
         st.sel_cache.insert(text.to_string(), list.clone());
         Ok(list)
     }
