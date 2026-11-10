@@ -8248,3 +8248,31 @@ Checks:
 - Linux: `cargo test --release --workspace`: 3,483 passed, 0 failed, 13 ignored.
 
 Not tested: no code ran on Windows or macOS. The cross checks prove that the code builds, not that it runs. The macOS check uses clang without a macOS SDK; a native build on macOS was not run (macbook-pro did not answer SSH). No cost matrix ran: the Linux build has no runtime change. The only Linux source change moves the `Stats` struct from `wayland.rs` to `lib.rs`.
+
+## MCP server for end-to-end tests (2026-11-10)
+
+`bare-mcp` is an MCP server over stdio. An agent runs end-to-end tests in `bare` through it. See [decisions.md](decisions.md#mcp-server-for-end-to-end-tests-2026-11-10).
+
+- Tools: `run_steps` (a step file), `open`, `step` and `close` (a live session). The options are `vars`, `secrets_file`, `window`, `width`, `height` and `timeout_ms`. A report is the JSON of `bare-drive`, plus `out`, the folder with the PNGs of `shot` steps and failures. An empty folder is removed at the end of a run.
+- A tool error (a bad step, no session) is a result with `isError`. The server then goes on. Unknown methods give -32601, and bad JSON gives -32700.
+- Register it: `claude mcp add bare -- <path>/bare-mcp --workspace 6`. Without `--workspace`, a window opens where the compositor puts it.
+
+Checks:
+
+- `crates/mcp/tests/server.rs`, offline, on the fixture app of the driver: the staging step file passes through `run_steps` (27 steps, PNGs written). The same journey passes one line at a time through `open`/`step`/`close`, with unique line numbers. A failed step keeps the session. Bad calls return errors and the server goes on. A run without pictures leaves no folder. No reply holds a secret. 6 passed.
+- The `bare-drive` tests pass after the change to `Session`. With `bare-window`: 92 passed, 0 failed.
+- Live, archMachine: `run_steps` on example.com (open, click a link, `shot`) and a session on news.ycombinator.com.
+- Live, arjun-e16 (Hyprland 0.56.2): `open` with `window: true` and `--workspace 6`. `hyprctl clients` listed `bare`, "bare (driven)", workspace 6. The active workspace stayed 1 before and after. `close` removed the window.
+- `tools/portable_check.sh`: scan, Windows and macOS checks pass. `cargo xwin build --release --target x86_64-pc-windows-msvc -p bare-mcp` links a PE32+ console executable (12.6 MB).
+
+Cost (archMachine, release, 3 runs each, example.com open and title check, network included):
+
+| Program | Wall time | Peak RSS |
+| --- | --- | --- |
+| `bare-mcp` `run_steps` | 0.07 to 0.20 s | 13.2 to 13.8 MiB |
+| `bare-drive` | 0.08 s | 12.7 to 13.0 MiB |
+| `bare-mcp` idle (one `ping`) | 1.4 ms | 7.8 MiB |
+
+Binary: `bare-mcp` 16.5 MB and `bare-drive` 16.3 MB, not stripped.
+
+Not tested: the server under a real agent client (Claude Code or Codex); only the JSON-RPC messages were sent by tests and scripts. The Windows executable did not run (no Windows machine or Wine). It also needs topic 2 of the cross-platform plan (random bytes, DNS, trust roots). No window test on archMachine. No long session or memory growth check. MCP `initialize` echoes the client protocol version; versions were not negotiated against a client.
