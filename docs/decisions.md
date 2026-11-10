@@ -277,6 +277,7 @@ Follow-ups of [Parallel downloads](#parallel-downloads). The numbers are in [res
 ## Bytecode
 
 - Plan: [engine-plan.md](engine-plan.md), lane B. The format is in `crates/js/src/bc.rs` (step B0). The code generator is in `bc_gen.rs`, `bc_gen_expr.rs` and `bc_gen_stmt.rs`, and the verifier in `bc_verify.rs` (step B2). The loop (B3) comes later. A bytecode design alone is not faster: Boa has bytecode and lost to this engine on 6 of 8 rows. So `Value` stays `Copy`, there are no reference counts and no clones in the hot path. Stop and re-plan if the `byte` mode is not 3 times faster on `eval_load loop 10` at step B3.
+- Stopped at R1 (2026-11-08, #265). After one round on globals, `byte` reached 2.49x on `eval_load loop 10`. Arjun chose to stop lane B. The B3 loop stays unmerged on branch `t3/engine-b3`. The tree walker is the only executor. Engine work now follows profiles of the tree walker. Evidence: progress.md, "B3: the bytecode VM loop stops at the R1 gate".
 - A register machine with three-address instructions. The registers of a frame are one slice of one `Vec<Value>`. The alternative was a stack machine (QuickJS). A register machine needs fewer instructions for the same code, and each instruction does more work for the same decode cost.
 - One instruction is one 32-bit word `[op:8][a:8][b:8][c:8]`. Four forms: `Abc` (three 8-bit operands), `Abx` (`a` and a 16-bit unsigned operand), `AsBx` (`a` and a 16-bit signed operand, for a conditional jump or a small integer) and `Sj` (a 24-bit signed jump). A property instruction has four operands, so its `AbcX` form has one raw 32-bit word after the instruction (the name constant). A jump offset counts words from the word after the instruction.
 - Wide form: the prefix word `Wide` makes the operands 16 bits (`Abc`: three 16-bit operands; the others: `a` of 16 bits and one 32-bit operand). `bc::encode` uses the narrow form when every operand fits, so the generator never chooses. Reason for words and not bytes: decoding is a shift and a mask, the loop reads `code[pc]` with one bounds check, and the code is safe Rust. Bytes are about 30% smaller but cost more to decode (hypothesis, not measured).
@@ -337,6 +338,8 @@ Design rules, so that a port is small:
 ## TLS
 
 `bare` implements TLS 1.3 and its crypto by hand (SHA-256, HKDF, X25519, AES-GCM, X.509 certificate checks). This is for learning only. Hand-written crypto is not safe against real attackers. Do not use `bare` for sensitive sites.
+
+Since 2026-11-09 (#302), the client also speaks TLS 1.2. The owner asked for craigslist.org, nginx.org and dev.to, which need it. The ClientHello offers 1.3 first. TLS 1.2 uses only the ECDHE suites with AES-128-GCM. P-256 ECDH for TLS 1.2 is not constant-time, an exception to the rule of `ecc.rs`. Details: progress.md, "TLS 1.2 client".
 
 ## Fonts
 

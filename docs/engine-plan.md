@@ -1,6 +1,8 @@
 # Engine plan: shapes with inline caches, and a bytecode interpreter
 
-Status: plan. Step C1 is done (PR #222: -3.0 M for each key, not the -6 to -10 M that the plan estimated). Steps A0 and B0 are the next ones. The numbers in sections 1 and 2 are from main b3052d2 (after PR #216 and #218), 2026-11-07.
+Status (updated 2026-11-10): closed. Lane A is merged: steps A1 to A4 and A6. A7 is not needed, because the miss rate is 3.8%. Lane B stopped at the R1 gate on 2026-11-08 (#265). `byte` reached 2.49x on `eval_load loop 10`, and the gate needed 3x. Arjun chose to stop lane B. The B3 VM loop stays unmerged on branch `t3/engine-b3`. The format, the code generator and the verifier (B0 to B2) are on main, but no executor uses them. The tree walker is the only executor. Engine work now follows profiles of the tree walker. See progress.md, "B3: the bytecode VM loop stops at the R1 gate". The rest of this file is the original plan.
+
+Original status: plan. Step C1 is done (PR #222: -3.0 M for each key, not the -6 to -10 M that the plan estimated). Steps A0 and B0 are the next ones. The numbers in sections 1 and 2 are from main b3052d2 (after PR #216 and #218), 2026-11-07.
 Decisions from Arjun: build both A (shapes and inline caches) and B (bytecode). Keep the tree walker as tier 0 for code that runs once. It is not removed (step B13).
 
 Words used in this file:
