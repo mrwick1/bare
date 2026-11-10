@@ -7672,3 +7672,65 @@ Fresh BASE builds use that full main SHA (`final-base-examples.log`, `final-base
 All 48 public journeys passed again on the final rebased driver, with zero fail/known/skip/flakes (`public-final.log`). The earlier three live Redis pairs and controls were not repeated after rebase. No browser oracle, live widget initialization, Rive animation, EventSource lifecycle, navigation processing, indexed token properties or cross-platform behavior was tested. The full workspace ran once before rebase; the final browser module run covers the rebased browser changes.
 
 Preserved the previous decisions and progress text as byte-identical prefixes. Reviewed the final diff, whitespace and publication text before push. The branch has no merge commits. No unrelated worktree or process was modified.
+
+## Task 45: npm sparkline named-attribute repair
+
+Frozen main: `c17a163a243918ad57e23420d518b3efb3ba990a`. Final gated base: `8134cf9946873b04c2d234dc3128120b09bfe760`. Runtime commit after rebase: `3e27f79692aba998047e210c03b61b155ede28e5`. Evidence root: `/data/bare-tmp/nh15/`. Raw evidence is local and is not accessible to external reviewers.
+
+### Cause and bounded repair
+
+The earlier async-helper attribution was a hypothesis. `helper.js` preserves the retained Babel runtime. Its iterator/result checks pass frozen main (`helper-base.log`). The retained npm stack maps script line 9, columns 82559 and 82819 to componentDidMount and initSparkline (`offsets.json`, `retained-stack.json`). The chart dependency is module 1235. It reads `svg.attributes["stroke-width"].value`, then the width and height attributes. The old NamedNodeMap host supports indices and getNamedItem, but omits named properties.
+
+The frozen bundle is `/data/bare-tmp/nfe/npm-package.js`, SHA-256 `d0217978f653e1b2d629317de20366e39d128cabbee73a106b2c8dfb7e0e09a3`. All six live npm reports fetch package.370e34f58836a397509c.js. A fresh download matches the frozen hash (`live-package.js`). `extract.cjs` retains modules 1234 and 1235. `caller.js` replays the complete chart module and initSparkline with its SVG attributes and two minimal data points. It does not replace an iterator result. The caller completion assertion fails frozen main with the observed value-read error (`caller-base.log`, `caller-runner-base.log`). The independent named-attribute regression fails at identity (`alias-base.log`, `regression.patch`).
+
+Extend IndexedSource with optional name-to-index and name-list queries. Keep lazy Attr creation in Host::fill_indexed and reuse the native wrapper identity table. Add non-enumerable, read-only, configurable aliases. Preserve prototype getters, ordinary own properties, numeric enumeration, mutation and detach/reinsert identity. Refuse definitions of supported names without a setter, including names hidden by a prototype. Omit mixed-case HTML names and repeated qualified names across namespaces. A focused candidate regression first exposes duplicate own keys (`qualified-first.log`); the corrected attribute suite passes 22 tests (`attr-hidden.log`). The original own-key assertion now includes the supported names. The fix preserves heap-object fields, global names, dependencies and runtime limit values.
+
+The immediate dependency paths are browser_attr.rs and heap_binary.rs. These implement the needed host lookup, exotic descriptors and alias definition rules. The existing named-source mode has writable, enumerable descriptors. Reusing the indexed path preserves the existing read-only lazy Attr contract. Heap::own_keys merges aliases before ordinary string and symbol keys. It avoids rescanning the attribute list for every key and skips empty alias lists. Font whitelist and all other task changes remain unchanged after rebase.
+
+### Long scans and property caches
+
+Final review found two required dependencies. A named read must charge for a long native scan, as getNamedItem already does. The saved pre-fix browser_check binary completes 20,000 Reflect.get reads on a 400-attribute map within its 5-million-step limit (`scan-before-reflect.log`). The checked expectation of a Steps limit fails (`scan-reflect-assert.log`). The corrected unit setup populates the native Document and asserts all 401 attributes before running JavaScript. A 1,000-step budget must stop ten Reflect.get reads. A normal budget must allow a named value read and enumeration of all 802 indexed/named keys.
+
+The first low-budget attempts hit a value-read error, not a Steps limit (`scan-first.log`, `scan-fixed.log`, `scan-corrected.log`). These logs do not prove the scan-charge defect. Repeated-read probes isolate a cache defect: the saved candidate reports object once, then undefined nine times at the same named access (`cache-before.log`, `cache-before-assert.log`). The cache implementation treats nonnumeric indexed-host keys as ordinary, despite the module header. It stores a missing-value recipe even when the native named alias exists. These supplemental before-state logs describe the previous candidate, not frozen main, whose named API is absent.
+
+The immediate additional symbol is Heap::ic_make in heap_shape.rs. Refuse an absent-value cache when an indexed host occurs in the receiver/prototype chain. Preserve ordinary-own and prototype-property cache recipes. The regression repeats direct and inherited reads and checks value changes plus removal/reinsertion. AttrHost tracks one paid scan in a cold Cell flag. For maps above 32 attributes, the existing u32::MAX host-fill route charges attribute_count + 1 steps before the scan. Limit values and fatal-limit handling stay unchanged. The complete attribute suite passes 24 tests (`scan-cache-fixed.log`). Earlier fully passing candidate gates remain in `pre-budget/`; all required gates are repeated for this repair.
+
+### Tests and final gated checks
+
+Commands are retained in `commands.txt`. Cargo, driver, scripting-gate and measurement commands use `/data/bare-tmp/bin/heavy`. An initial Node-only helper sanity check ran without that wrapper. Its wrapped repeat is retained in `node-oracle.log`. NEW always uses `CARGO_TARGET_DIR=/data/bare-tmp/target-nh15`. BASE comes from base-build at the recorded SHAs. The first workspace run passes 3,458 tests with 13 ignored (`workspace-resumed.log`). The initial workspace log is empty after the interrupted tool sessions. The resumed workspace/live runs retain their completed outputs. After review refinements, 12 indexed-object tests and 22 attribute tests pass (`indexed-refined.log`, `attr-hidden.log`). Supplemental getter/HTML/hidden-definition checks are coverage additions; they have no separate failing-main claim.
+
+The first targeted attribute run passes the complete chart caller and new alias regression, but fails the old own-key expectation (`attr-new.log`). The updated expectation matches the supported non-enumerable names. The retained full caller and helper pass under tree, auto and byte modes on the final rebase (`caller-final-*.log`, `helper-final-*.log`).
+
+Final rebase occurred under the FIFO merge gate, acquired as nh15 (`gate.log`). `final-build.log` records the release workspace/example build. `final-binaries.log` records the explicit bare-drive/bare-stress build. `final-workspace.log` reports 3,475 passed and 13 ignored, with no failed test. `test262-final.log` passes the full 585-directory gate. `exec-diff-final.log` reports 79 fixture/load runs across tree, auto and byte with zero differences. `public-final2.log` reports all 48 journeys passed, with zero fail/known/skip/flakes. The explicit driver hash remains unchanged through that run (`final-driver.sha256`, `final-driver-check.log`). The final npm chart probe also passes with zero console errors (`npm-final2/stdout.json`).
+
+Cost case J applies because crates/js changes. The six initial attr/call-property rows pass (`iterate.tsv`, `iterate.log`). The final full 805-row run uses fresh BASE at 8134cf9946 and the final rebased NEW target (`matrix-final2.tsv`, `matrix-final2.log`). Its mean glibc change is +0.002%. No row exceeds +0.5% under glibc, so the conditional gate measures zero jemalloc rows. No row fails the over-both rule. No owner exception is used. The earlier attempt misses NEW bare-stress: it measures 629 rows and fails to run 176 (`matrix-final.log`). Build the required binary, then repeat all 805. This is a setup failure, not a cost regression or a passing full gate.
+
+BASE/NEW typing uses the same copied page (`typing-frozen.sha256`, `typing.sh`). Per-key instruction counts are 283,001,604.40 / 283,064,694.74 for #a1 (+0.022293%) and 288,344,611.52 / 288,405,012.54 for #f0 (+0.020948%). Both pass the first-allocator threshold. The log retains raw zero/50-key counts, 20/50-key RSS and elapsed values (`typing-final.log`). The first attempt stops because /usr/bin/time is absent (`typing-first.log`). The completed repeat uses Python resource and subprocess. No speed or memory claim follows from the single RSS samples.
+
+On the earlier candidate, the first final public run also passes all 48 journeys (`public-final.log`). The subsequent explicit binary build changes the driver artifact. Repeat all journeys and the npm probe against that artifact; final2 is the accepted driver result. No source change occurs between the accepted matrix, final driver checks and documentation append. All earlier attempts remain retained.
+
+
+### Live page probes before the final rebase
+
+`python3 /data/bare-tmp/nh15/live.py` runs three alternating npm BASE/NEW pairs and one Bluesky/go.dev control pair each. BASE is frozen c17a163a. NEW is the first repair build, before the later alias-enumeration and namespace refinements. npm asserts readyState complete and a package-content plus sparkline-line/fill sentinel. Each BASE run reproduces the value-read error and fails the chart assertion. Each NEW run passes with zero console errors. Both controls pass on both builds. No task/fatal stop appears in the retained console/failure records. The controls include status-0 resources; these are not successful responses.
+
+The BASE time includes the 30-second failed assertion wait. Requests and bytes differ. These runs do not establish a causal speed or memory change. They establish chart creation, not all npm interactions. Every command, first/next error, network row, failed assertion, elapsed time and RSS remains in the per-run reports and live-summary.json. npm.html retains the separate direct-fetch challenge response. No captured time series is claimed for the two-point reduction; live probes exercise the page's downloaded input.
+
+| Probe | Result | Errors | Resources / bytes | Status | ms | Peak RSS KiB |
+| --- | --- | ---: | --- | --- | ---: | ---: |
+| npm-BASE-1 | FAIL | 1 | 14 / 1311081 | {'200': 14} | 35545.7 | 138948 |
+| npm-NEW-1 | pass | 0 | 11 / 1305288 | {'200': 11} | 3765.4 | 131584 |
+| npm-BASE-2 | FAIL | 1 | 14 / 1310855 | {'200': 14} | 33851.8 | 137748 |
+| npm-NEW-2 | pass | 0 | 11 / 1304863 | {'200': 11} | 3910.7 | 132128 |
+| npm-BASE-3 | FAIL | 1 | 14 / 1310729 | {'200': 14} | 33781.8 | 138088 |
+| npm-NEW-3 | pass | 0 | 11 / 1304852 | {'200': 11} | 3805.6 | 130932 |
+| bluesky-BASE-1 | pass | 0 | 6 / 2500480 | {'200': 5, '0': 1} | 11904.8 | 211916 |
+| bluesky-NEW-1 | pass | 0 | 9 / 2500562 | {'200': 7, '0': 2} | 13091.6 | 203756 |
+| go-dev-BASE-1 | pass | 0 | 32 / 486230 | {'200': 31, '0': 1} | 2324.0 | 56424 |
+| go-dev-NEW-1 | pass | 0 | 22 / 454633 | {'200': 21, '0': 1} | 1935.3 | 55296 |
+
+### Limits and untested work
+
+The final single npm probe confirms the rebased driver. The three alternating live pairs remain measurements of the first repair build and the frozen initial base. They are not three final-tree pairs. The explicit retained caller is replayed on the final tree in all three execution modes. The two minimal reduction points are not a captured download series. The live page supplies its own real input.
+
+Not tested: the 13 ignored workspace tests, broader npm interactions, chart hover/focus behavior, authenticated pages, an independent browser oracle, other machines or complete legacy-platform-object conformance. Existing unused-import/dead-code warnings remain. Validation of the final prose includes unchanged-prefix checks for both shared documents, exact diff inspection, whitespace and prohibited-publication-text scans. No historical section is rewritten.

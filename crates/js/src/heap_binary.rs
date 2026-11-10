@@ -209,6 +209,13 @@ pub trait IndexedSource {
     fn indexed_len(&self, owner: ObjId) -> Result<usize, HeapError>;
     /// The property at `index` of `owner` now. `Err` as for `indexed_len`.
     fn indexed_item(&self, owner: ObjId, index: usize) -> Result<Slot, HeapError>;
+    /// Optional non-enumerable named aliases of the indexed objects.
+    fn indexed_name(&self, _owner: ObjId, _key: &[u16]) -> Result<Option<u32>, HeapError> {
+        Ok(None)
+    }
+    fn indexed_names(&self, _owner: ObjId) -> Result<Vec<Vec<u16>>, HeapError> {
+        Ok(Vec::new())
+    }
 }
 
 /// State of a UTF-8 `TextDecoder`: the options, and the WHATWG decoder registers (a partly read sequence is at most
@@ -813,8 +820,14 @@ impl Heap {
         if let Some(r) = self.view_own(o, key, want_value)? {
             return Ok(Some(r));
         }
+        let mut enumerable = true;
         let i = match (self.exotic(o), key) {
             (Some(Exotic::Indexed), PropertyKey::Index(i)) => i,
+            (Some(Exotic::Indexed), PropertyKey::String(_)) => {
+                let Some(i) = self.indexed_alias(o, key)? else { return Ok(None) };
+                enumerable = false;
+                i
+            },
             (Some(Exotic::Named), _) => return self.named_exists(o, key),
             (Some(Exotic::Prim(Value::String(s))), _) => return self.prim_str_own(*s, key),
             (Some(Exotic::Proxy(_)), _) => return Err(HeapError::Proxy(o)),
@@ -826,7 +839,32 @@ impl Heap {
             Slot::Missing if want_value => return Err(HeapError::NeedsHost { owner: o, index: i }),
             Slot::Missing => Value::Undefined,
         };
-        Ok(Some(Some(Property::Data { value, writable: false, enumerable: true, configurable: true })))
+        Ok(Some(Some(Property::Data { value, writable: false, enumerable, configurable: true })))
+    }
+
+    pub(super) fn indexed_alias(&self, o: ObjId, key: PropertyKey) -> R<Option<u32>> {
+        if !matches!(self.exotic(o), Some(Exotic::Indexed)) {
+            return Ok(None);
+        }
+        let PropertyKey::String(s) = key else { return Ok(None) };
+        if !self.indexed_alias_visible(o, key)? {
+            return Ok(None);
+        }
+        self.source()?.indexed_name(o, self.str_units(s)?)
+    }
+
+    pub(super) fn indexed_alias_visible(&self, o: ObjId, key: PropertyKey) -> R<bool> {
+        let ob = self.obj(o)?;
+        Ok(matches!(key, PropertyKey::String(_)) && self.own(ob, key).is_none()
+            && !ob.proto.map(|p| self.has_property(p, key)).transpose()?.unwrap_or(false))
+    }
+
+    pub(super) fn indexed_names(&self, o: ObjId) -> R<Vec<Vec<u16>>> {
+        if matches!(self.exotic(o), Some(Exotic::Indexed)) {
+            self.source()?.indexed_names(o)
+        } else {
+            Ok(Vec::new())
+        }
     }
 
     /// ToNumber of a primitive for an element write. An object needs the evaluator (`NeedsExecution`). A BigInt type gives
@@ -889,8 +927,14 @@ impl Heap {
 
     /// `[[DefineOwnProperty]]` of an integer-indexed key on a typed array. `None`: ordinary rules.
     pub(super) fn view_define(&mut self, o: ObjId, key: PropertyKey, d: &PropertyDescriptor) -> R<Option<bool>> {
-        if matches!(key, PropertyKey::Index(_)) && matches!(self.exotic(o), Some(Exotic::Indexed)) {
-            return Ok(Some(false)); // no indexed setter: an index cannot be defined, in range or not
+        if matches!(self.exotic(o), Some(Exotic::Indexed)) {
+            let named = match key {
+                PropertyKey::String(s) if self.own(self.obj(o)?, key).is_none() => self.source()?.indexed_name(o, self.str_units(s)?)?.is_some(),
+                _ => false,
+            };
+            if matches!(key, PropertyKey::Index(_)) || named {
+                return Ok(Some(false)); // no indexed or named setter
+            }
         }
         let Some(r) = self.view_index(o, key) else { return Ok(None) };
         let Some(i) = r else { return Ok(Some(false)) };
