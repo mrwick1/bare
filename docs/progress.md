@@ -7981,3 +7981,95 @@ player initialization or interaction, video decoding or playback. The existing
 detached HTML ownership deviation remains. No speed or memory improvement is
 claimed. Both shared documents preserve their previous bytes. Whitespace and
 publication scans pass.
+
+## Task 47: native caption-track runtime repair (2026-11-10)
+
+The retained action reads the child track element's `track.cues`. Frozen main
+`f34ce252eaa5f87e31151d16ee23f5277b0db100` throws the exact undefined-cues
+TypeError in the new regression (`runtime-test-before.log`). Add the regression
+before the runtime change. The earlier documentation-only evidence remains
+unchanged.
+
+Connect track elements to stable native track objects and a live indexed media
+track list. Cache direct track children by document revision. Charge scans and
+check result limits. Tracks start disabled; the retained component explicitly
+sets its first track's mode. Parse in-memory WebVTT in a queued task. Publish
+real cues before dispatching load. Source generations discard obsolete tasks.
+Disabled tracks return null cues. Unsupported or invalid resources dispatch
+error. Cue line and size setters validate receivers and bounds. Retained cue
+references survive collection and source replacement. Old native cue state
+remains rooted until realm disposal and counts toward the result cap.
+
+Final gated base: `5b296c2fc150312ddb6f438f2ede8456ec4cdabb`. Final runtime
+commit: `9df5f08313d0d902770951ef7dd6e6f4e59e0e5a`. Gate name: `ct16-runtime`.
+The final rebase completed without conflicts. The two indexed-source dispatch
+branches in browser_attr.rs are an explicit owner-approved scope extension.
+All other changes stay within the named runtime and test files.
+
+### Checks and cost correction
+
+Local artifacts remain in `/data/bare-tmp/ct16/`. Exact commands are retained in
+`runtime-commands.txt` and `runtime-final-measure.sh`. NEW uses the reserved
+`/data/bare-tmp/target-ct16` throughout. BASE uses the shared build for the exact
+final gated base. These local paths are not published attachments.
+
+The pre-rebase release workspace suite passes 3,479 tests, with zero failures
+and 13 ignored (`runtime-workspace.log`). The first load/source tests exposed a
+missing source-hook call in the IDL setter (`caption-tests.log`). The corrected
+17-test media suite passes before and after rebase (`media-tests2.log`,
+`runtime-final-tests.log`). After the cost correction, the browser suite passes
+1,240 tests, with zero failures and six ignored (`runtime-cost-fix-tests.log`).
+The retained caller returns `continued` under tree, auto and byte execution
+(`runtime-caller-*.log`). The actual receiver reads `TRACK|object|object`.
+The retained 32-cue payload also passes the action's asynchronous load callback,
+cue-bound, source-replacement, live-list and collection assertions.
+
+Cost case 1 applies because the embedded media state enlarges the realm layout.
+The initial two module rows and six final media/attribute rows pass. The one
+full 805-row matrix runs after the gated rebase (`runtime-matrix.log/.tsv`). It
+finds one regression: select/react/1000 is +0.760% under glibc and +0.685% under
+jemalloc. The other 804 rows pass. Do not treat that full run as a passing gate.
+
+Move caption dispatch behind existing collection handlers. The owner selects
+affected rows plus the saved sample for the correction check. Save every 13th
+noncomment row: 62 sample rows. Combine them with 62 affected collection rows:
+119 unique rows (`runtime-cost-sample.txt`, `runtime-cost-affected.txt`). All
+119 pass (`runtime-cost-recheck.log/.tsv`). The flagged select row becomes
++0.071683% under glibc. No corrected row exceeds +0.5% under glibc, so the
+conditional allocator gate requires zero further jemalloc measurements. No
+second full matrix runs. No cost exception is used.
+
+The 585-directory language gate passes (`runtime-test262.log`). All 79
+execution-mode comparisons have zero differences (`runtime-exec-diff.log`).
+Paired typing counts use the same frozen page (`runtime-typing-input.sha256`).
+Per-key BASE/NEW counts are 283,203,253.74 / 283,206,135.98 for #a1 (+0.001018%)
+and 288,546,435.60 / 288,550,241.28 for #f0 (+0.001319%). Both pass the first
+allocator threshold. Raw counts, elapsed values and RSS remain in
+`runtime-typing.log`; no speed or memory improvement is claimed.
+
+All 48 public journeys pass on the corrected executable, with zero failures,
+known failures, skips or flakes (`runtime-public-corrected.log`). The earlier
+candidate also passes all 48 (`runtime-public.log`). The accepted executable
+hash is retained and checked in `runtime-cost-fix-driver.sha256`.
+
+### Live caption continuation and limits
+
+Three alternating Svelte BASE/NEW pairs use the exact gated base and corrected
+executable (`runtime-live/summary.json`). Every BASE run reproduces the
+undefined-cues error and fails the caption sentinel. Every NEW run loads 32
+cues on the real track element and confirms every cue has line -2 and size 80.
+Each NEW run then reports an unsupported-media play rejection. The worker
+warning remains. This establishes caption initialization, not a console-clean
+site or media playback. Both Vimeo and Bluesky controls reach complete/body
+readiness on both builds with zero console errors. All ten runs have no
+resource status outside 200–399. Raw console entries, resource rows, failures,
+readiness, timings and reports remain in each run. Request counts differ and
+BASE includes the failed assertion wait; no causal timing claim follows.
+
+Not tested or implemented: network caption loading, complete WebVTT settings
+and cue identifiers, automatic default-track selection, additional track
+metadata/interfaces, caption rendering, media decoding/playback, other
+platforms or full text-track conformance. The 13 ignored workspace tests did
+not run. The workspace suite ran once before rebase; the corrected browser
+suite covers the final runtime. Final prose checks preserve every preceding
+byte of both shared documents and check whitespace and publication text.

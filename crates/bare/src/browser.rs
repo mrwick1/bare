@@ -734,7 +734,7 @@ impl Host for Dom {
         if (bare_js::heap::LAZY_ALL..u32::MAX).contains(&index) {
             return crate::browser_handlers::lazy(self, it, owner, index == bare_js::heap::LAZY_ALL);
         }
-        if crate::browser_nodelist::fill(self, it, owner, index)? || crate::browser_dataset::fill(self, it, owner)? || crate::browser_cssom::fill(self, it, owner)? {
+        if crate::browser_nodelist::fill(self, it, owner, index)? || crate::browser_dataset::fill(self, it, owner)? || crate::browser_cssom::fill(self, it, owner)? || crate::browser_media::caption_fill(self, it, owner, index)? {
             return Ok(());
         }
         at::fill(self, it, owner, index)
@@ -981,7 +981,7 @@ impl Dom {
                             "link" => p.link,
                             "style" => crate::browser_cssom::wrapper_proto(self,it)?,
                             "a" | "area" | "template" | "img" | "slot" => crate::browser_elements::proto(self, it, doc.atom_str(name))?,
-                            t @ ("audio" | "video") => crate::browser_media::proto(self, it, n, t)?,
+                            t @ ("audio" | "video" | "track") => crate::browser_media::proto(self, it, n, t)?,
                             t @ ("input" | "form" | "button" | "label") => crate::browser_controls::proto_for(self, it, t)?,
                             "script" => self.scripts.proto.get().copied().unwrap_or(p.html),
                             t @ ("body" | "frameset") => crate::browser_handlers::body_proto(self, it, usize::from(t == "frameset"))?[0],

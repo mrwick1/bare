@@ -38,7 +38,7 @@
 //! - A MediaError that the page kept after a second failure reads `message` as `""`. `currentSrc` is set when the selection task runs, not at the
 //!   end of the script.
 //! - The handlers `onerror`, `onplay`... are on `HTMLMediaElement.prototype` (11 of them: the events that this file fires), not on `HTMLElement`.
-//!   No `fastSeek` (Chrome 155 has none either), `textTracks`, `audioTracks`, `captureStream`, `sinkId`, `mediaKeys`, `preservesPitch`,
+//!   No `fastSeek` (Chrome 155 has none either), `audioTracks`, `captureStream`, `sinkId`, `mediaKeys`, `preservesPitch`,
 //!   `controlsList`, `disableRemotePlayback`, `webkit*`, `getVideoPlaybackQuality`, `requestVideoFrameCallback`, picture in picture.
 //!   `srcObject` takes `null` and `undefined` only (there is no `MediaStream`).
 //!
@@ -135,9 +135,21 @@ impl M {
 pub(crate) struct Media {
     made: Cell<Option<Made>>,
     st: RefCell<IdMap<NodeId, M>>,
+    tracks: RefCell<IdMap<NodeId, CaptionTrack>>,
+    lists: RefCell<IdMap<ObjId, CaptionList>>,
+    track_proto: Cell<Option<ObjId>>,
 }
 
 pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
+    out.extend(d.media.track_proto.get().map(Value::Object));
+    out.extend(d.media.lists.borrow().keys().copied().map(Value::Object));
+    for t in d.media.tracks.borrow().values() {
+        out.extend([Value::Object(t.object)]);
+        out.extend(t.cues.map(Value::Object));
+        out.extend(t.active.map(Value::Object));
+        out.extend(t.entries.iter().map(|c| Value::Object(c.object)));
+    }
+
     if let Some(m) = d.media.made.get() {
         out.extend([m.media, m.audio, m.video, m.ranges, m.error].into_iter().chain(m.ctors).map(Value::Object));
         for s in d.media.st.borrow().values() {
@@ -149,6 +161,9 @@ pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
 
 /// The prototype of the wrapper of an HTML `audio` or `video` element `n`. Makes the state of the element.
 pub(crate) fn proto(d: &Dom, it: &mut Interp<'_>, n: NodeId, tag: &str) -> R<ObjId> {
+    if tag == "track" {
+        return caption_proto(d, it);
+    }
     let m = ensure(d, it)?;
     let muted = d.doc.borrow().find_atom("muted").is_some_and(|a| d.doc.borrow().attr(n, a).is_some());
     d.media.st.borrow_mut().entry(n).or_insert_with(|| M::new(muted));
@@ -267,6 +282,7 @@ fn make(d: &Dom, it: &mut Interp<'_>) -> R<Made> {
     ] {
         d.def_get(it, media, name, g, s)?;
     }
+    d.def_get(it, media, "textTracks", text_tracks, None)?;
     method(d, it, media, "load", 0, load)?;
     method(d, it, media, "play", 0, play)?;
     method(d, it, media, "pause", 0, pause)?;
@@ -581,6 +597,18 @@ fn set_src_object(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
 
 /// `setAttribute('src', ...)` on any element: an `audio` or `video` runs the load algorithm.
 pub(crate) fn src_changed(d: &Dom, it: &mut Interp<'_>, n: NodeId) -> R<()> {
+    if d.media.tracks.borrow().contains_key(&n) {
+        {
+            let mut ts = d.media.tracks.borrow_mut();
+            let t = ts.get_mut(&n).expect("checked");
+            t.epoch = t.epoch.wrapping_add(1);
+            t.ready = 0;
+            t.cues = None;
+            t.active = None;
+
+        }
+        return caption_start(d, n);
+    }
     if d.media.made.get().is_some() && d.media.st.borrow().contains_key(&n) {
         load_algorithm(d, it, n)?;
     }
@@ -900,6 +928,7 @@ impl Dom {
 
     /// Run a queued step. A step of an older generation does nothing.
     pub(crate) fn media_task(&self, it: &mut Interp<'_>, n: NodeId, epoch: u32, step: u8) -> R<()> {
+        if step == 104 { return caption_load(self, it, n, epoch); }
         if step >= crate::browser_img::LOADED {
             return self.img_task(it, n, step);
         }
@@ -961,4 +990,304 @@ fn fail(d: &Dom, it: &mut Interp<'_>, n: NodeId) -> R<()> {
     });
     d.media_fire(it, n, 2)?;
     reject(d, it, list, "NotSupportedError", NO_SUPPORTED_SOURCE)
+}
+
+// Text tracks use the native element as their identity. They have no media decoder.
+struct CaptionList {
+    node: NodeId,
+    revision: Option<u64>,
+    ids: Vec<NodeId>,
+}
+
+struct CaptionTrack {
+    object: ObjId,
+    mode: String,
+    epoch: u32,
+    ready: u8,
+    cues: Option<ObjId>,
+    active: Option<ObjId>,
+    entries: Vec<CaptionCue>,
+}
+
+struct CaptionCue {
+    object: ObjId,
+    line: Option<f64>,
+    size: f64,
+}
+
+fn caption_proto(d: &Dom, it: &mut Interp<'_>) -> R<ObjId> {
+    if let Some(p) = d.media.track_proto.get() { return Ok(p); }
+    let p = d.obj(it, d.p().html)?;
+    crate::browser_lazy::tag(d, it, p, "HTMLTrackElement")?;
+    d.def_get(it, p, "track", caption_track, None)?;
+    d.def_get(it, p, "readyState", caption_ready, None)?;
+    d.def_get(it, p, "src", caption_src, Some(caption_set_src))?;
+    d.media.track_proto.set(Some(p));
+    Ok(p)
+}
+
+fn caption_node(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<NodeId> {
+    let n = d.el(it, this)?;
+    if !d.doc.borrow().is_html(n, "track") { return Err(it.type_error("Illegal invocation")); }
+    Ok(n)
+}
+
+fn caption_track(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    let n = caption_node(d, it, this)?;
+    caption_object(d, it, n).map(Value::Object)
+}
+
+fn caption_object(d: &Dom, it: &mut Interp<'_>, n: NodeId) -> R<ObjId> {
+    if let Some(t) = d.media.tracks.borrow().get(&n) { return Ok(t.object); }
+    if d.media.tracks.borrow().len() >= d.lim.max_wrappers { return Err(d.lim("dom-wrappers")); }
+    let o = d.obj(it, it.object_prototype())?;
+    crate::browser_lazy::tag(d, it, o, "TextTrack")?;
+    d.def_get(it, o, "mode", caption_mode, Some(caption_set_mode))?;
+    d.def_get(it, o, "cues", caption_cues, None)?;
+    d.def_get(it, o, "activeCues", caption_active, None)?;
+    d.media.tracks.borrow_mut().insert(n, CaptionTrack { object: o, mode: "disabled".into(), epoch: 0, ready: 0, cues: None, active: None, entries: Vec::new() });
+    caption_start(d, n)?;
+    Ok(o)
+}
+
+fn caption_receiver(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<NodeId> {
+    it.charge(d.media.tracks.borrow().len() as u64 + 1)?;
+    if let Value::Object(o) = this {
+        if let Some((&n, _)) = d.media.tracks.borrow().iter().find(|(_, t)| t.object == o) { return Ok(n); }
+    }
+    Err(it.type_error("Illegal invocation"))
+}
+
+fn caption_mode(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    let n = caption_receiver(d, it, this)?;
+    let mode = d.media.tracks.borrow()[&n].mode.clone();
+    d.js_str(it, &mode)
+}
+
+fn caption_set_mode(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    let n = caption_receiver(d, it, this)?;
+    let mode = d.string_arg(it, arg(a, 0))?;
+    if !["disabled", "hidden", "showing"].contains(&mode.as_str()) { return Ok(Value::Undefined); }
+    d.media.tracks.borrow_mut().get_mut(&n).expect("receiver checked").mode = mode;
+    caption_start(d, n)?;
+    Ok(Value::Undefined)
+}
+
+fn caption_cues(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    let n = caption_receiver(d, it, this)?;
+    let ts = d.media.tracks.borrow();
+    let t = &ts[&n];
+    Ok(if t.mode == "disabled" { Value::Null } else { t.cues.map(Value::Object).unwrap_or(Value::Null) })
+}
+
+fn text_tracks(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    let n = media_el(d, it, this, None)?;
+    it.charge(d.media.lists.borrow().len() as u64 + 1)?;
+    if let Some((&o, _)) = d.media.lists.borrow().iter().find(|(_, l)| l.node == n) { return Ok(Value::Object(o)); }
+    if d.media.lists.borrow().len() >= d.lim.max_wrappers { return Err(d.lim("dom-wrappers")); }
+    let p = d.obj(it, it.object_prototype())?;
+    crate::browser_lazy::tag(d, it, p, "TextTrackList")?;
+    d.def_get(it, p, "length", caption_list_length, None)?;
+    let o = it.heap.new_indexed(Some(p)).map_err(|e| it.heap_error(e))?;
+    d.media.lists.borrow_mut().insert(o, CaptionList { node: n, revision: None, ids: Vec::new() });
+    Ok(Value::Object(o))
+}
+
+fn caption_prepare(d: &Dom, it: &mut Interp<'_>, owner: ObjId) -> R<()> {
+    let (node, old) = { let ls = d.media.lists.borrow(); let l = &ls[&owner]; (l.node, l.revision) };
+    let revision = d.doc.borrow().revision();
+    if old == Some(revision) { return Ok(()); }
+    let mut ids = Vec::new();
+    {
+        let doc = d.doc.borrow();
+        for c in doc.children(node) {
+            it.charge(1)?;
+            if doc.is_html(c, "track") {
+                if ids.len() >= d.lim.max_results { return Err(d.lim("dom-results")); }
+                ids.push(c);
+            }
+        }
+    }
+    let mut ls = d.media.lists.borrow_mut();
+    let l = ls.get_mut(&owner).expect("list");
+    l.ids = ids;
+    l.revision = Some(revision);
+    Ok(())
+}
+
+fn caption_list_length(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    let Value::Object(o) = this else { return Err(it.type_error("Illegal invocation")); };
+    if !d.media.lists.borrow().contains_key(&o) { return Err(it.type_error("Illegal invocation")); }
+    caption_prepare(d, it, o)?;
+    num(d.media.lists.borrow()[&o].ids.len() as f64)
+}
+
+pub(crate) fn caption_len(d: &Dom, owner: ObjId) -> Option<Result<usize, bare_js::heap::HeapError>> {
+    let ls = d.media.lists.borrow();
+    let l = ls.get(&owner)?;
+    Some(if l.revision == Some(d.doc.borrow().revision()) { Ok(l.ids.len()) } else { Err(bare_js::heap::HeapError::NeedsHost { owner, index: 0 }) })
+}
+
+pub(crate) fn caption_item(d: &Dom, owner: ObjId, index: usize) -> Option<Result<bare_js::heap::Slot, bare_js::heap::HeapError>> {
+    use bare_js::heap::{Slot, HeapError};
+    let ls = d.media.lists.borrow();
+    let l = ls.get(&owner)?;
+    if l.revision != Some(d.doc.borrow().revision()) { return Some(Err(HeapError::NeedsHost { owner, index: index.min(u32::MAX as usize) as u32 })); }
+    Some(Ok(match l.ids.get(index) {
+        None => Slot::Absent,
+        Some(n) => match d.media.tracks.borrow().get(n) { Some(t) => Slot::Ready(t.object), None => Slot::Missing },
+    }))
+}
+
+pub(crate) fn caption_fill(d: &Dom, it: &mut Interp<'_>, owner: ObjId, index: u32) -> R<bool> {
+    if !d.media.lists.borrow().contains_key(&owner) { return Ok(false); }
+    caption_prepare(d, it, owner)?;
+    let n = d.media.lists.borrow()[&owner].ids.get(index as usize).copied();
+    if let Some(n) = n { caption_object(d, it, n)?; }
+    Ok(true)
+}
+
+fn caption_ready(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    let n = caption_node(d, it, this)?;
+    num(d.media.tracks.borrow().get(&n).map_or(0, |t| t.ready) as f64)
+}
+
+fn caption_src(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    let n = caption_node(d, it, this)?;
+    d.js_str(it, &attr_of(d, n, "src").unwrap_or_default())
+}
+
+fn caption_set_src(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    let n = caption_node(d, it, this)?;
+    let src = d.string_arg(it, arg(a, 0))?;
+    attr_set(d, it, n, "src", &src)?;
+    src_changed(d, it, n)?;
+    Ok(Value::Undefined)
+}
+
+fn caption_start(d: &Dom, n: NodeId) -> R<()> {
+    let mut ts = d.media.tracks.borrow_mut();
+    let t = ts.get_mut(&n).expect("track made");
+    if t.mode == "disabled" || t.ready != 0 || attr_of(d, n, "src").is_none_or(|s| s.is_empty()) { return Ok(()); }
+    d.queue_media(n, t.epoch, 104, 0.0)?;
+    t.ready = 1;
+    Ok(())
+}
+
+fn caption_load(d: &Dom, it: &mut Interp<'_>, n: NodeId, epoch: u32) -> R<()> {
+    if d.media.tracks.borrow().get(&n).is_none_or(|t| t.epoch != epoch || t.ready != 1) { return Ok(()); }
+    let src = attr_of(d, n, "src").unwrap_or_default();
+    if src.len() > d.lim.max_string_bytes { return Err(d.lim("dom-string")); }
+    it.charge(src.len() as u64 + 1)?;
+    // Only in-memory WebVTT is supported. Other resources fail rather than claim loaded captions.
+    let payload = crate::images::data_url(&src);
+    let parsed = payload.as_deref().and_then(|b| std::str::from_utf8(b).ok()).and_then(parse_captions);
+    let ty = if let Some(cues) = parsed {
+        if cues.len() + d.media.tracks.borrow().values().map(|t| t.entries.len()).sum::<usize>() > d.lim.max_results { return Err(d.lim("dom-results")); }
+        let list = d.obj(it, it.object_prototype())?;
+        let mut entries = Vec::new();
+        for (i, (start, end, text)) in cues.into_iter().enumerate() {
+            let o = d.obj(it, it.object_prototype())?;
+            for (key, value) in [("startTime", Value::Number(start)), ("endTime", Value::Number(end))] {
+                let k = d.key(it, key)?;
+                it.define_data(o, k, value, true, true, true)?;
+            }
+            let k = d.key(it, "text")?;
+            let v = d.js_str(it, &text)?;
+            it.define_data(o, k, v, true, true, true)?;
+            d.def_get(it, o, "line", cue_line, Some(set_cue_line))?;
+            d.def_get(it, o, "size", cue_size, Some(set_cue_size))?;
+            let k = d.key(it, &i.to_string())?;
+            it.define_data(list, k, Value::Object(o), false, true, false)?;
+            entries.push(CaptionCue { object: o, line: None, size: 100.0 });
+        }
+        let k = d.key(it, "length")?;
+        it.define_data(list, k, Value::Number(entries.len() as f64), false, false, false)?;
+        let active = d.obj(it, it.object_prototype())?;
+        let k = d.key(it, "length")?;
+        it.define_data(active, k, Value::Number(0.0), false, false, false)?;
+        let mut ts = d.media.tracks.borrow_mut();
+        let t = ts.get_mut(&n).expect("track");
+        t.active = Some(active);
+        t.cues = Some(list);
+        t.entries.extend(entries);
+        t.ready = 2;
+        "load"
+    } else {
+        d.media.tracks.borrow_mut().get_mut(&n).expect("track").ready = 3;
+        "error"
+    };
+    let e = d.new_event(it, ty, false, false, false, None)?;
+    d.st.borrow_mut().events.get_mut(&e).expect("event").trusted = true;
+    d.dispatch(it, Target::Node(n), e).map(|_| ())
+}
+
+fn parse_captions(text: &str) -> Option<Vec<(f64, f64, String)>> {
+    let normalized = text.trim_start_matches('\u{feff}').replace("\r\n", "\n").replace('\r', "\n");
+    let mut blocks = normalized.split("\n\n");
+    let header = blocks.next()?.lines().next()?;
+    if header != "WEBVTT" && !header.starts_with("WEBVTT ") && !header.starts_with("WEBVTT\t") { return None; }
+    let mut cues = Vec::new();
+    for block in blocks {
+        let mut lines = block.lines();
+        let Some(first) = lines.next() else { continue };
+        if first == "NOTE" || first.starts_with("NOTE ") || first.starts_with("NOTE\t") { continue; }
+        let timing = if first.contains("-->") { first } else { match lines.next() { Some(l) => l, None => continue } };
+        let Some((start, end)) = timing.split_once("-->") else { continue };
+        let (Some(start), Some(end)) = (caption_timestamp(start.trim()), end.split_whitespace().next().and_then(caption_timestamp)) else { continue };
+        if end <= start { continue; }
+        cues.push((start, end, lines.collect::<Vec<_>>().join("\n")));
+    }
+    Some(cues)
+}
+
+fn caption_timestamp(s: &str) -> Option<f64> {
+    let fields: Vec<_> = s.split(':').collect();
+    if !(2..=3).contains(&fields.len()) { return None; }
+    let (seconds, fraction) = fields.last()?.split_once('.')?;
+    if seconds.len() != 2 || fraction.len() != 3 || !fraction.bytes().all(|b| b.is_ascii_digit()) { return None; }
+    let seconds: u32 = seconds.parse().ok()?;
+    let minutes: u32 = fields[fields.len() - 2].parse().ok()?;
+    if seconds >= 60 || minutes >= 60 { return None; }
+    let hours: u32 = if fields.len() == 3 { fields[0].parse().ok()? } else { 0 };
+    Some(hours as f64 * 3600.0 + minutes as f64 * 60.0 + seconds as f64 + fraction.parse::<u32>().ok()? as f64 / 1000.0)
+}
+
+fn with_cue<T>(d: &Dom, it: &mut Interp<'_>, this: Value, f: impl FnOnce(&mut CaptionCue) -> T) -> R<T> {
+    it.charge(d.media.tracks.borrow().len() as u64 + 1)?;
+    it.charge(d.media.tracks.borrow().values().map(|t| t.entries.len() as u64 + 1).sum::<u64>())?;
+    if let Value::Object(o) = this {
+        for t in d.media.tracks.borrow_mut().values_mut() {
+            if let Some(c) = t.entries.iter_mut().find(|c| c.object == o) { return Ok(f(c)); }
+        }
+    }
+    Err(it.type_error("Illegal invocation"))
+}
+
+fn cue_line(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    match with_cue(d, it, this, |c| c.line)? { Some(n) => num(n), None => d.js_str(it, "auto") }
+}
+fn set_cue_line(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    with_cue(d, it, this, |_| ())?;
+    let v = arg(a, 0);
+    let line = if matches!(v, Value::String(_)) && d.string_arg(it, v)? == "auto" { None } else { Some(finite(it, "line", v)?) };
+    with_cue(d, it, this, |c| c.line = line)?;
+    Ok(Value::Undefined)
+}
+fn cue_size(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    num(with_cue(d, it, this, |c| c.size)?)
+}
+fn set_cue_size(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    with_cue(d, it, this, |_| ())?;
+    let size = finite(it, "size", arg(a, 0))?;
+    if !(0.0..=100.0).contains(&size) { return Err(d.dom_err(it, "IndexSizeError", "Size must be between 0 and 100")); }
+    with_cue(d, it, this, |c| c.size = size)?;
+    Ok(Value::Undefined)
+}
+
+fn caption_active(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    let n = caption_receiver(d, it, this)?;
+    let ts = d.media.tracks.borrow();
+    let t = &ts[&n];
+    Ok(if t.mode == "disabled" { Value::Null } else { t.active.map(Value::Object).unwrap_or(Value::Null) })
 }
