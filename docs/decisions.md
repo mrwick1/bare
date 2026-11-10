@@ -855,3 +855,11 @@ The required cost case is the full matrix because Fatal is stored in loader stat
 Final BASE 617cb19f89: all 805 rows passed under both allocators with fresh BASE counts.
 No row exceeded +0.5% under either allocator. Workspace tests and all 48 public journeys passed.
 Target reached complete in all six live runs without a heap fault. Apnews kept the same Steps-abort stop on both builds.
+
+## Full style computations charge their indexed candidates
+
+Changed on 2026-11-10. A full compute pays one step per document node before it runs, then one step per tested rule candidate. The independent `computed-work` cap still checks nodes or styled elements times rules before the compute. It bounds one native operation. A failed charge does not leave a partial DOM write: style computation reads the document.
+
+The old full-compute estimate charged styled elements times all rules divided by four. On apnews, five estimates charged 103.35 M steps while the script used 78,712 interpreter ticks. The rule index excludes most rules. The estimate ended the main bundle and later tasks. Restyle charges keep their existing model. The task budget remains 100 M steps.
+
+CSSOM defines the values returned by [`getComputedStyle`](https://drafts.csswg.org/cssom/#dom-window-getcomputedstyle), not an execution-step formula. The charge measures this implementation's traversal and indexed candidate work. It does not alter resolved values.

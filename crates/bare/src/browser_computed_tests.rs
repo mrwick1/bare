@@ -678,13 +678,13 @@ fn load_model() {
 }
 
 #[test]
-fn cascade_work_is_reserved_before_the_cascade_runs() {
+fn an_indexed_cascade_does_not_reserve_every_rule() {
     big(|| {
         let sheet = (0..100).map(|i| format!(".c{i}{{color:red}}")).collect::<String>();
         let page = format!("<style>{sheet}</style><body>{}<p id=q>x</p>", "<div></div>".repeat(100));
         let mut b = Browser::new(tree::parse(&page), BrowserLimits::default(), EvalLimits {max_steps: 5000, ..Default::default()}, HeapLimits::default()).unwrap();
-        assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('q')).color"), "limit:Steps");
-        assert_eq!(b.computed_stats().computes, 0);
+        assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('q')).color"), "rgb(0, 0, 0)");
+        assert_eq!(b.computed_stats().computes, 1);
     });
 }
 

@@ -66,7 +66,7 @@
 //! (sheets, and bytes of `<style>` text, `href` and supplied parts that one read uses), `computed-rules` (selectors after the build:
 //! the build is bounded by the bytes), `computed-work` (nodes times rules, or if that is over `STYLED_FROM` the styled elements times rules: a loose upper
 //! bound, the real work is far smaller because rules are indexed; see `styled_work`), `computed-external` and `computed-external-bytes` (stored external sheets). Steps are charged before the
-//! build and before a full compute (`work / UNITS_PER_STEP`, and after it the candidates over that: `RuleSet::tested_candidates`); a restyle charges the elements that it styles; a read that finds the last styles right charges 1. Names that the sheets add to the document table are bounded by the sheet bytes and checked against
+//! build. A full compute charges one step per node before the work, then its tested candidates (`RuleSet::tested_candidates`). A restyle charges the elements that it styles; a read that finds the last styles right charges 1. Names that the sheets add to the document table are bounded by the sheet bytes and checked against
 //! `max_names` after the build.
 //!
 //! Pseudo-elements (`getComputedStyle(el, '::before')`): the engine has no pseudo-element cascade. A rule with a pseudo-element in a selector
@@ -215,9 +215,9 @@ pub(crate) fn is_missing_sheet(e: &Error) -> bool {
 }
 /// The kind of a computed declaration that is not of the element: a pseudo-element, or an empty declaration (CSSOM: a string that starts
 /// with a colon and is no pseudo-element).
-/// Above this bound (nodes x (rules + 1)) a full compute is charged by its styled elements, which costs one walk of the tree.
+/// Above this bound (nodes x (rules + 1)) the work cap counts styled elements. This costs one tree walk.
 const STYLED_FROM: u64 = 1 << 20;
-/// Elements x rules that one step stands for (the cap counts them all). Measured: see `docs/decisions.md`.
+/// Elements x rules per step in the restyle model. The cap counts them all. See `docs/decisions.md`.
 const UNITS_PER_STEP: u64 = 4;
 const PSEUDO: u8 = 1;
 const EMPTY: u8 = 2;
@@ -538,7 +538,7 @@ impl Dom {
         let mut cache = self.computed.cache.borrow_mut();
         let built = cache.as_mut().expect("built");
         // The bound of a full compute: nodes x (rules + 1), or styled elements x (rules + 1) when that is over `STYLED_FROM`. It is the cap
-        // check, and the steps of the full compute below. A read that only restyles charges for the elements that it restyles.
+        // check. The full compute charges nodes and tested candidates. A restyle charges the elements that it styles.
         let mut work = (doc.len() as u64).saturating_mul(built.rules.len() as u64 + 1);
         if work > STYLED_FROM {
             work = self.styled_work(&doc, built.rules.len());
@@ -579,15 +579,13 @@ impl Dom {
                 return Ok(styles.clone());
             }
         }
-        let model = work / UNITS_PER_STEP + 1;
-        it.charge(model)?;
+        it.charge(doc.len() as u64 + 1)?;
         self.computed.computes.set(self.computed.computes.get() + 1);
         // The cascade of a read keeps what `restyle` needs: the next read after a change updates it.
         let before = built.rules.tested_candidates();
         let styles = Rc::new(if keep || read { built.rules.compute_kept(&doc) } else { built.rules.compute_for(&doc, want) });
-        // The model above is paid before the cascade runs. The candidates that the index gave are known only now: pay what they cost over the model,
-        // one step each, so that rules that match every element end the task after one cascade, not four.
-        it.charge((built.rules.tested_candidates() - before).saturating_sub(model))?;
+        // The work cap bounds the compute. Charge the candidates the index tested, not nodes times all rules.
+        it.charge(built.rules.tested_candidates() - before)?;
         built.last[slot] = (!doc.has_custom()).then(|| (key, keep || read, styles.clone()));
         if read && !doc.has_custom() {
             built.read = Some(chains(&doc));
