@@ -10,8 +10,6 @@ pub mod tz;
 mod tz_names;
 pub mod intl;
 mod intl_data;
-mod intl_locale;
-mod intl_rtf_data;
 mod intl_num_data;
 mod icu;
 pub mod heap;

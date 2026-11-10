@@ -12,12 +12,12 @@
 // fraction digits (`1.004` is "tomorrow", `1.005` is too, `1.0051` is "in 1.005 days"). The number part has at most 3 fraction
 // digits. A negative value and `-0` are in the past ("0 days ago").
 //
+// `Intl.RelativeTimeFormat` is an accessor on `Intl` until it is first read (see `intl_loc_lazy` in `eval_intl_locale.rs`).
+//
 // Gates (Unsupported): a `numberingSystem` other than `latn`. Known deviation: a locale that ICU has and bare has not (`de`)
 // resolves to its English parent or to `en-US`, so its text is English.
 //
 // Storage: one `IntlRtf` in `intl.loc.rtfs`, capped with the other formatters by `max_formatters` and pruned by `collect`.
-
-use crate::intl_rtf_data as rtf_data;
 
 #[derive(Clone, Copy)]
 struct IntlRtf {
@@ -93,7 +93,7 @@ impl<'p> Interp<'p> {
 
     /// The text of `format(x, unit)` as parts: (type, text, is a part of the number), the number parts have the unit.
     fn rtf_parts(&mut self, r: IntlRtf, x: f64, unit: usize) -> Vec<(&'static str, String)> {
-        let d = &rtf_data::DATA[rtf_data::VARIANT[r.loc as usize] as usize][r.style as usize][unit];
+        let d = &intl::RTF_DATA[intl::RTF_VARIANT[r.loc as usize] as usize][r.style as usize][unit];
         if r.auto {
             // ICU compares the value rounded at two fraction digits
             let k = (x.abs() * 100.0).round();

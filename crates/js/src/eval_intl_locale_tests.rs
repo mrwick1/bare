@@ -41,6 +41,17 @@ fn both_constructors_exist_after_the_first_read_of_intl() {
 }
 
 #[test]
+fn the_two_constructors_are_made_by_their_first_read_not_by_the_read_of_intl() {
+    big(|| {
+        let mut it = realm();
+        assert_eq!(out(&mut it, "var d = Object.getOwnPropertyDescriptor(Intl, 'Locale'); [typeof d.get, 'Locale' in Intl, 'RelativeTimeFormat' in Intl, typeof Intl.DateTimeFormat].join()"), "string:function,true,true,function");
+        assert_eq!(out(&mut it, "var c = Intl.Locale; var e = Object.getOwnPropertyDescriptor(Intl, 'Locale'); [c === Intl.Locale, typeof e.value, e.writable, e.enumerable, e.configurable].join()"), "string:true,function,true,false,true");
+        // an assignment before the first read replaces the accessor, as it does for `Intl` itself
+        assert_eq!(out(&mut it, "Intl.RelativeTimeFormat = 5; Intl.RelativeTimeFormat"), "number:5");
+    });
+}
+
+#[test]
 fn locales_are_collected_when_dead() {
     big(|| {
         let mut it = realm();

@@ -1,4 +1,4 @@
-// `Intl.Locale` (ECMA-402 section 14). Included by `eval_intl.rs`. The tag logic is in `intl_locale.rs`; the canonical form is
+// `Intl.Locale` (ECMA-402 section 14). Included by `eval_intl.rs`. The tag logic is in `intl_locale.rs` (included by `intl.rs`); the canonical form is
 // `intl::canonical_tag`.
 //
 // Observed need: wise.com calls `new Intl.Locale(tag.replace("_", "-")).baseName` and `new Intl.Locale(tag).language`, `.region`.
@@ -8,7 +8,8 @@
 // subtags and the `-u-` keywords of the tag); the getters `baseName`, `language`, `script`, `region`, `calendar`, `caseFirst`,
 // `collation`, `hourCycle`, `numeric` and `numberingSystem`; `toString`, `maximize` and `minimize`.
 //
-// Known deviations: `maximize` and `minimize` use a table of 40 languages (`intl_locale.rs`), so a language that is not in it
+// Known deviations: until a script first reads `Intl.Locale` it is an accessor on `Intl` (`getOwnPropertyDescriptor` shows it);
+// `maximize` and `minimize` use a table of 40 languages (`intl_locale.rs`), so a language that is not in it
 // stays as it is. A tag is canonical by `intl::canonical_tag`: the alias rules of CLDR (`sgn-US` is `ase`, `en-posix` is
 // `en-u-va-posix`) are not applied. `getCalendars`, `getCollations`, `getHourCycles`, `getNumberingSystems`, `getTextInfo`,
 // `getTimeZones` and `getWeekInfo` (and the older getters of the same names) are absent.
@@ -16,7 +17,7 @@
 // Storage: the canonical tag of each object in `intl.loc.locales`, capped with the other formatters by `max_formatters` and
 // pruned by `collect`.
 
-/// The state of `Intl.Locale` and `Intl.RelativeTimeFormat`. The objects are made on the first read of `Intl`.
+/// The state of `Intl.Locale` and `Intl.RelativeTimeFormat`. The objects are made on the first read of `Intl.Locale` or `Intl.RelativeTimeFormat` (see `intl_loc_lazy`).
 struct IntlLoc {
     locales: FxMap<ObjId, Box<str>>,
     rtfs: FxMap<ObjId, IntlRtf>,
@@ -39,12 +40,30 @@ const LOCALE_KEYS: [&str; 6] = ["ca", "kf", "co", "hc", "kn", "nu"];
 const BAD_TAG: &str = "Incorrect locale information provided";
 
 impl<'p> Interp<'p> {
-    /// Make the constructors of `Locale` and `RelativeTimeFormat` on `intl`.
-    fn intl_loc_install(&mut self, intl: ObjId) -> Res<()> {
-        let (rtf_ctor, rtf_proto) = self.intl_ctor(intl, "RelativeTimeFormat", IntlFn::RtfCtor, IntlFn::Supported(4), "Intl.RelativeTimeFormat")?;
-        self.method(rtf_proto, "resolvedOptions", Nat::Intl(IntlFn::RtfResolved), 0)?;
-        self.method(rtf_proto, "format", Nat::Intl(IntlFn::RtfFormat(false)), 2)?;
-        self.method(rtf_proto, "formatToParts", Nat::Intl(IntlFn::RtfFormat(true)), 2)?;
+    /// `Intl.Locale` and `Intl.RelativeTimeFormat` are accessors on `Intl` until a script first reads one (`IntlFn::LazyLoc`):
+    /// a realm that reads `Intl` for another constructor pays for 2 functions, not for the 21 of the two classes. The read
+    /// replaces the accessor with the data property of the spec.
+    fn intl_loc_lazy(&mut self, intl: ObjId) -> Res<()> {
+        for (i, n) in ["Locale", "RelativeTimeFormat"].iter().enumerate() {
+            let k = h!(self, self.heap.key_from_str(n));
+            let g = self.new_func_object(Callee::Native(Nat::Intl(IntlFn::LazyLoc(i as u8 == 1))))?;
+            let d = PropertyDescriptor { get: Some(Some(g)), set: Some(Some(g)), enumerable: Some(false), configurable: Some(true), ..Default::default() };
+            h!(self, self.heap.define_own_property(intl, k, &d));
+        }
+        Ok(())
+    }
+
+    /// Make `Intl.Locale` (`rtf` false) or `Intl.RelativeTimeFormat` and define it on `Intl`.
+    fn intl_loc_make(&mut self, rtf: bool) -> Res<ObjId> {
+        let intl = self.intl.intl;
+        if rtf {
+            let (ctor, proto) = self.intl_ctor(intl, "RelativeTimeFormat", IntlFn::RtfCtor, IntlFn::Supported(4), "Intl.RelativeTimeFormat")?;
+            self.method(proto, "resolvedOptions", Nat::Intl(IntlFn::RtfResolved), 0)?;
+            self.method(proto, "format", Nat::Intl(IntlFn::RtfFormat(false)), 2)?;
+            self.method(proto, "formatToParts", Nat::Intl(IntlFn::RtfFormat(true)), 2)?;
+            (self.intl.loc.rtf_ctor, self.intl.loc.rtf_proto) = (ctor, proto);
+            return Ok(ctor);
+        }
         let proto = h!(self, self.heap.new_object(Some(self.object_proto)));
         let ctor = self.native(Nat::Intl(IntlFn::LocCtor), "Locale", 1)?;
         self.def(ctor, self.k_prototype, Value::Object(proto), false, false, false)?;
@@ -58,8 +77,8 @@ impl<'p> Interp<'p> {
         for (i, n) in LOCALE_GETTERS.iter().enumerate() {
             self.getter(proto, n, Nat::Intl(IntlFn::LocGet(i as u8)))?;
         }
-        self.intl.loc = IntlLoc { locales: FxMap::default(), rtfs: FxMap::default(), loc_proto: proto, rtf_proto, loc_ctor: ctor, rtf_ctor };
-        Ok(())
+        (self.intl.loc.loc_ctor, self.intl.loc.loc_proto) = (ctor, proto);
+        Ok(ctor)
     }
 
     fn this_locale(&mut self, this: Value, method: &str) -> Res<Box<str>> {
@@ -115,7 +134,7 @@ impl<'p> Interp<'p> {
         if let Some(b) = self.intl_opt_bool(opts, "numeric")? {
             kws.push(("kn", if b { String::new() } else { "false".into() }));
         }
-        match intl_locale::apply(&canon, &parts[0], &parts[1], &parts[2], &kws) {
+        match intl::loc_apply(&canon, &parts[0], &parts[1], &parts[2], &kws) {
             Ok(t) => Ok(t),
             Err(_) => Err(self.range_error(BAD_TAG)),
         }
@@ -152,19 +171,19 @@ impl<'p> Interp<'p> {
                 if self.intl_formatters() >= self.sc.limits.max_formatters {
                     return Err(Error::Limit(LimitKind::Sc(ScLimit::Formatters)));
                 }
-                let t = if max { intl_locale::maximize(&t) } else { intl_locale::minimize(&t) };
+                let t = if max { intl::loc_maximize(&t) } else { intl::loc_minimize(&t) };
                 self.intl_locale_object(self.intl.loc.loc_proto, t)
             }
             IntlFn::LocGet(i) => {
                 let t = self.this_locale(this, LOCALE_GETTERS[i as usize])?;
-                let s = intl_locale::split(&t);
+                let s = intl::loc_split(&t);
                 let part = match i {
-                    0 => intl_locale::base_name(&t),
+                    0 => intl::loc_base_name(&t),
                     1 => s.lang,
                     2 => s.script,
                     3 => s.region,
                     _ => {
-                        let kw = intl_locale::keyword(&t, LOCALE_KEYS[i as usize - 4]);
+                        let kw = intl::loc_keyword(&t, LOCALE_KEYS[i as usize - 4]);
                         return match (i, kw) {
                             (8, kw) => Ok(Value::Bool(kw.is_some_and(|v| v.is_empty() || v == "true"))),
                             (_, Some(v)) => self.str_value(&v),
@@ -173,6 +192,15 @@ impl<'p> Interp<'p> {
                     }
                 };
                 if part.is_empty() { Ok(Value::Undefined) } else { self.str_value(part) }
+            }
+            IntlFn::LazyLoc(rtf) => {
+                // the getter has no argument; the setter has the new value
+                if let Some(&v) = args.first() {
+                    let k = h!(self, self.heap.key_from_str(if rtf { "RelativeTimeFormat" } else { "Locale" }));
+                    self.def(self.intl.intl, k, v, true, false, true)?;
+                    return Ok(Value::Undefined);
+                }
+                Ok(Value::Object(self.intl_loc_make(rtf)?))
             }
             _ => self.call_intl_rtf(f, this, args, is_new),
         }

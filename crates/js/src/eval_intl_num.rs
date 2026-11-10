@@ -729,7 +729,7 @@ impl<'p> Interp<'p> {
                 self.intl_compare(key, x, y)
             }
             IntlFn::SegCtor | IntlFn::SegResolved | IntlFn::SegSegment | IntlFn::SegsContaining | IntlFn::SegsIter | IntlFn::SegIterNext => self.call_intl_seg(f, this, args, is_new),
-            IntlFn::LocCtor | IntlFn::LocToString | IntlFn::LocMaximize(_) | IntlFn::LocGet(_) | IntlFn::RtfCtor | IntlFn::RtfFormat(_) | IntlFn::RtfResolved => self.call_intl_locale(f, this, args, is_new),
+            IntlFn::LocCtor | IntlFn::LocToString | IntlFn::LocMaximize(_) | IntlFn::LocGet(_) | IntlFn::RtfCtor | IntlFn::RtfFormat(_) | IntlFn::RtfResolved | IntlFn::LazyLoc(_) => self.call_intl_locale(f, this, args, is_new),
             _ => unreachable!("handled in call_intl"),
         }
     }

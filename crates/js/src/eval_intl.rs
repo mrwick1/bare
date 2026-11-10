@@ -35,7 +35,6 @@
 
 use crate::icu;
 use crate::intl;
-use crate::intl_locale;
 use crate::tz::{self, Zone};
 use crate::tz_names;
 
@@ -88,6 +87,8 @@ enum IntlFn {
     /// `format` (false) and `formatToParts` (true).
     RtfFormat(bool),
     RtfResolved,
+    /// The getter and the setter of `Intl.RelativeTimeFormat` (true) or `Intl.Locale` until it is first read.
+    LazyLoc(bool),
 }
 
 impl IntlFn {
@@ -447,7 +448,7 @@ impl<'p> Interp<'p> {
         self.sc_tag(seg_iter_proto, "Segmenter String Iterator")?;
         let i = &mut self.intl;
         (i.seg_proto, i.seg_ctor, i.segments_proto, i.seg_iter_proto) = (seg_proto, seg_ctor, segments_proto, seg_iter_proto);
-        self.intl_loc_install(intl)?;
+        self.intl_loc_lazy(intl)?;
         let i = &mut self.intl;
         (i.intl, i.proto, i.ctor, i.format_fn) = (intl, proto, ctor, format_fn);
         (i.nf_proto, i.nf_ctor, i.nf_format, i.coll_proto, i.coll_ctor, i.coll_compare, i.pr_proto, i.pr_ctor) =
