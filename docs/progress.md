@@ -7829,3 +7829,38 @@ observations, not a benchmark or a whole-site pass.
 FIFO gate `ct16` acquired at 05:29 UTC. Final rebase base: `d94645712cf240241bb4d8f4c673d888a80a6a20`.
 Both documentation changes append entries and preserve the preceding bytes.
 No runtime repair or cost exception was merged by this task.
+
+## Task 48: Vimeo interface and XML dependency evidence (2026-11-10)
+
+Result: docs-only. No runtime repair is claimed. Frozen main is `8134cf9946873b04c2d234dc3128120b09bfe760`. Evidence is retained under `/data/bare-tmp/di16/` on archMachine.
+
+Vimeo's fresh `live-vimeo/stdout.json` reports `listener of error: ReferenceError: DOMImplementation is not defined` at `script#97:4:34249`, followed by `script#97:4:34012`. Body visibility passes. This does not establish player initialization. The downloaded Transcend script contains the matching interface lookup. Its exact mapping to script#97 is a hypothesis; no source-id map was captured.
+
+Frozen source: `https://transcend-cdn.com/cm/31e97cbf-355c-4f0d-8bad-9cd945121508/airgap.js`. Local `airgap.js` SHA-256 is `a25f551e4c7b72b66faa3ae7c639d0c9af6fdb7829857659d6de83965b2815f7`. `vimeo.html`, `urls.json`, downloaded chunks and `sha256.json` retain the source evidence. `caller-extract.txt` retains the exact prototype destructuring and `Gn` wrapper. The reduced fixture supplies their lexical dependencies. It does not execute the full script.
+
+Commands:
+
+```
+/data/bare-tmp/bin/base-build 8134cf99 --release -p bare-drive -p bare --example browser_check
+/data/bare-tmp/bin/heavy /data/bare-tmp/base/8134cf9946/target/release/examples/browser_check /data/bare-tmp/di16/cases.txt
+/data/bare-tmp/bin/heavy timeout 65 /data/bare-tmp/base/8134cf9946/target/release/bare-drive --quiet --out /data/bare-tmp/di16/live-vimeo /data/bare-tmp/di16/live-vimeo/steps
+```
+
+The base target path is in `base-path.txt`. Build output is in `base-build.log`. Corrected reduction output is in `reduction-base.log`:
+
+- Exact captured lookup: `throw:ReferenceError:DOMImplementation is not defined`.
+- Diagnostic binding to the existing object's prototype: `function,undefined`. `createDocument` remains absent. This binding is a probe, not a proposed interface implementation.
+- Captured HTML operation on the native implementation: `T,BODY`.
+- Downloaded non-HTML `Gn` wrapper with an SVG namespace and no base insertion: `throw:TypeError:Function.prototype.call called on a non-function`.
+- Native null-namespace creation: `unsupported:createElementNS with a null namespace`.
+- Existing XML MIME parser metadata: `text/html,HTML` for `<root/>` and `application/xml`.
+
+Source inspection in `native-boundary.txt` confirms the semantic boundary. `create_document` stores only `NodeData::Document`. The host supplies `text/html` for every document's content type. The XML MIME parser uses the HTML tree builder. The native namespace enum has no null or arbitrary namespace for elements. Existing detached-document element ownership also resolves to the main document. Correct XML document construction and later element behavior need a broader document model. A constructor-only patch or an HTML substitute cannot complete that dependency. No runtime files were changed. This result is not based only on the allowed-file list.
+
+Tests-first: the checked reduction fails on unmodified main. Runtime regression tests are N/A for this docs-only result. No cost matrix was run; there are no cost rows or allocator counts for this change. No new target build was needed. The reserved runtime target was `/data/bare-tmp/target-di16`.
+
+Not tested: a runtime interface implementation, stable realm identity, descriptors, illegal construction, forged receivers, untouched-page allocations, wrapper continuation after a real repair, player interaction, video decoding or playback. No BASE/NEW pairs exist because there is no NEW runtime. The full workspace, 48 public journeys, 805 cost rows, test262, exec_diff and typing gates were not run for this docs-only change. Existing createHTMLDocument behavior was probed as above; font cross-document regressions were not rerun.
+
+Single frozen-BASE controls use the same `timeout`, `open`, body expectation and capture steps. Replace `live-vimeo` with `live-wikipedia` or `live-bluesky` in the command above. All three body expectations pass. Wikipedia has no console entries. Bluesky retains a refused connection to `https://events.bsky.app`. Raw results and steps are in their respective directories; `live-summary.json` retains the summary. These controls do not establish whole-site behavior and are not alternating repair comparisons.
+
+Final gated rebase: `f34ce252eaa5f87e31151d16ee23f5277b0db100`. The interface, namespace, document and basics source files are unchanged from the frozen probe baseline. The diff check records this in `final-base-*.diff`. Documentation references and raw claims were checked. `git diff --check` passes. No matrix was run.
