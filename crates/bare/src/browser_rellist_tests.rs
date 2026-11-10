@@ -43,6 +43,11 @@ assert_eq!(js(&mut b, "[delivered,observed,added.getAttribute('data-observed')].
 assert_eq!(js(&mut b, "var changed=0; var attrs=new MutationObserver(function(rs){for(var r of rs){N(r.target); changed++}}); attrs.observe(added,{attributes:true,attributeFilter:['rel']}); added.rel='preload icon'; 1"), "1");
 b.drain().unwrap();
 assert_eq!(js(&mut b, "[changed,observed,added.relList.contains('icon')].join()"), "1,3,true");
+// Replay the downloaded observer callback with a real MutationObserver too.
+assert_eq!(js(&mut b, "var o=function(e){N(e); continued++}; z.linkRelObserver=new MutationObserver(e=>{for(let t of e)t.target instanceof HTMLLinkElement&&o(t.target)}); N(link); link.relList.add('icon'); 1"), "1");
+b.drain().unwrap();
+assert_eq!(js(&mut b, "[continued,link.rel,link.relList.contains('icon')].join()"), "2,preload icon,true");
+
 
 
 }); }
