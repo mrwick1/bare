@@ -881,3 +881,13 @@ The owner approved the style-state and computed-style/cascade scope identified b
 The owner confirmed that the old background/mask worktree has no active owner. Leave that worktree untouched. Coordinate Task 28's computed-work charge hunks before the final rebase. The implementation requires typing cost checks and case 1: all 805 rows once after the final gated rebase. Reject any row above +0.5% under both allocators. Scope approval grants no cost waiver.
 
 The implementation is incomplete. The fresh tests-first run failed all four retained reductions. Evidence is in `/data/bare-tmp/cvl10/tests-first.txt`. No executable change accompanies this entry. The draft remains unmerged.
+
+## Retain pending shorthand sources outside exposed text (2026-11-10)
+
+The owner approved style-state and computed-style/cascade integration for the scope identified by draft #339. This approval replaces the earlier scope hold. It grants no cost waiver.
+
+A surviving pending longhand exposes an empty value. Its computation still needs the source shorthand. The serializer now reports pending output. Element writes retain the source, surviving mask, priority and order in a separate bounded store. The ordinary parse-cache block keeps its original layout. The store uses the existing style object, byte and declaration caps. Attribute spans invalidate retained state even when replacement text is equal. Retained state survives parse-cache eviction and wrapper collection.
+
+The cascade accepts masked declaration inputs for inline styles and published top-level CSSOM rules. It substitutes variables at computation time. It does not restore removed members. Empty exposed text remains lossy when copied. A flag gates retained inline state; the optional maps are absent on pages without that state. Changed retained inputs invalidate computed results even when exposed text is equal. Style sheet text-node identities invalidate published inputs on text replacement.
+
+The first cost measurement rejected extra work in ordinary style writes. The first correction restored their text path and cache-block layout and boxed pending storage. The wider sample then rejected per-node overhead in ordinary layout. The second correction selects a compile-time retained-input path before the node loop. The ordinary path keeps its original inline text representation. Keep the full case 1 gate strict. Measure all 805 rows after the final gated rebase. Run typing costs because typing uses the same cascade path. No site rule or budget increase is permitted. The final progress entry records the measured result and remaining limits.

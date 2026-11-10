@@ -6967,3 +6967,76 @@ Task 28's branch diff was checked. It includes `browser_computed.rs` work-charge
 Cost case for the required implementation is case 1: all 805 rows once on the final gated rebase against fresh BASE. No row may exceed +0.5% under both allocators. Typing cost checks are also required because typing uses `cascade_as`. No cost exception was requested. This interim documentation update changes no executable code and ran zero cost rows.
 
 Incomplete: style-state storage, cascade input, stylesheet publication, permanent regressions, typing checks, final matrix, release workspace tests, 48 journeys and all final live comparisons. No application-success or performance claim is made. Draft #339 remains unmerged. Scope approval stands; the remaining work does not require renewed scope approval.
+
+## Task 33: pending shorthand state and cascade integration (2026-11-10)
+
+### Approval, problem and change
+
+The owner approved style-state and computed-style/cascade integration on 2026-11-10 for the scope identified by draft #339. This approval supersedes Task 32's scope hold and the earlier interim Task 33 entry. The fix is now implemented. No cost waiver or budget increase was requested.
+
+Twitch inserts a rule with a variable border radius and two left-corner overrides. Serialization previously stopped because the surviving pending corners have no exposed longhand value. Empty text alone cannot preserve their source for computation. Redis intermittently reaches the same guard.
+
+The serializer now reports pending output and exposes empty longhand values. A separate bounded store retains source shorthand, surviving mask, priority and order across element writes. Attribute spans invalidate state on replacement, including equal text. The ordinary parse-cache block keeps its original fields. Pending storage is boxed and remains independent of cache eviction and wrapper lifetime. Existing style object, byte and declaration caps bound it. Retained-source copying and parsing remain charged.
+
+RuleSet accepts masked inline and published CSSOM inputs. It substitutes variables during computation. Removed members remain removed. Copying cssText remains lossy. A compile-time path selects retained-input handling before the node loop. The ordinary loop keeps its text representation and has no retained-state lookup. RuleSet grew from 560 to 568 bytes; the standalone size probes are in `sizes-{base,new}.txt`. Per-sheet text identity is tracked only for sheets with retained state. An unrelated sheet keeps its rule objects when another element creates pending state.
+
+### Baselines, ownership and tests
+
+Initial implementation baseline: `37212433e0b7512272f2f4418a7c8bf669db3597`. The four permanent reductions failed before implementation: `CARGO_TARGET_DIR=/data/bare-tmp/target-cvl10 /data/bare-tmp/bin/heavy cargo test --release -p bare --lib pending_reduction`. Evidence: `permanent-first.txt`. Source is now `crates/bare/src/browser_style_pending_tests.rs`. Nine focused cases cover stylesheet insertion, computed corners, overwrite, removal, priority, order, copying, later variable updates, unaffected siblings, replacement, publication and cache eviction. A later assertion failed first for unrelated sheet-rule identity (`sheet-identity-first.txt`) and passed after the focused correction (`sheet-identity-fixed.txt`, 37 style tests).
+
+The release workspace suite passed with 3,426 tests, zero failures and 13 ignored. `pre-gate-final.txt` records the run after loop specialization and before the later sheet-identity correction. That correction passed the focused suite. The pre-gate public journeys then passed 48/48, with zero skips or flakes, on `c42ded01`. Command: `/data/bare-tmp/bin/heavy tools/drive/public/run.sh --out /data/bare-tmp/cvl10/journeys-pre-gate-retry /data/bare-tmp/target-cvl10/release/bare-drive`.
+
+The preceding journey run had 14 passes and 34 DNS failures against the local stub. It is retained in `journeys-pre-gate.txt` and `journeys-pre-gate/`. Three direct UDP resolver probes then succeeded (`dns-probe.txt`). No resolver settings changed. The cause of the DNS episode was not isolated. The clean retry is separate evidence.
+
+The final gate was acquired as `cvl10` at 03:00 UTC. Acquisition stayed in the foreground behind `indexed-style-charge`; see `gate-acquire.txt`. Task 28's old and narrower worktree diffs were checked before the final rebase. The narrower worktree was removed after its merge. The final rebase uses BASE `f71442740adb11b657b2ce701634488045f7a567`, which includes #347's browser-only indexed-work charge and #342. The failed diagnostic draft #345 was not incorporated. Only append-only documentation conflicts required resolution; main's entries were retained before the complete own appends. No old background/mask worktree was edited.
+
+Measured NEW code SHA: `00221f5ef6780be606b829f0767883928b894d30`. `cargo test --release -p bare -p bare-css` passed 1,482 tests, zero failures and six ignored after the final rebase (`modules-final.txt`). All commands used `CARGO_TARGET_DIR=/data/bare-tmp/target-cvl10` and `/data/bare-tmp/bin/heavy`. Existing unused-helper/import warnings remain unchanged, including `crates/css/src/shadow_tests.rs:52`.
+
+Fresh BASE came from `base-build f71442740adb11b657b2ce701634488045f7a567 --release --examples -p bare-js -p bare` and `base-build f71442740adb11b657b2ce701634488045f7a567 --release -p bare-drive -p bare-stress`. Paths and output: `final-base-path.txt`, `base-final-build.txt`. NEW used `cargo build --release --examples -p bare-js -p bare` and `cargo build --release -p bare-drive -p bare-stress` (`build-final.txt`). `final-binaries.json` records both source identities and SHA-256 values for 62 binaries per target. The prebuilt BASE typing wrapper prints the working-directory revision; the manifest and frozen BASE path identify its executable.
+
+### Cost case 1
+
+All logs in this section are under `/data/bare-tmp/cvl10/`. The initial 16-row module run rejected churn 1 (+1.166% glibc, +0.947% jemalloc), churn 10 (+1.733%, +1.378%) and shorthand 10 (+0.549%, +0.550%). Raw counts: `module-cost.tsv`. The first correction restored the ordinary cssText path and original cache-block layout and boxed pending storage. All eight style rows then passed (`cold-state-cost.tsv`).
+
+The wider 76-row sample rejected three ordinary layout rows: block-collapse-through 20000 (+0.552%, +0.613%), block-list-items 200000 (+0.630%, +0.639%) and boxes-list-items 20000 (+1.044%, +0.959%). Counts: `union-cost.tsv`. The second structural correction selected the retained-input loop outside the ordinary node loop. The 11 focused rows passed (`specialized-cost.tsv`), then all 76 sampled/module rows passed under both allocators (`union-specialized.tsv`). No exception was accepted.
+
+The exact noncomment sample takes every 13th row: 61 rows in `sample-rows.txt`. The module list contains 16 rows (`module-rows.txt`). Their ordered union has 76 rows (`union-rows.txt`). These iteration measurements are separate from the final full gate.
+
+Final command: `/data/bare-tmp/bin/heavy tools/js/cost_matrix.sh -J -o /data/bare-tmp/cvl10/cost-final.tsv /data/bare-tmp/base/f71442740a/target /data/bare-tmp/target-cvl10`. The full 805 rows ran once after the final gated rebase. Both allocators measured all 805 rows. Zero rows exceeded +0.5% under either allocator, zero exceeded it under both, and zero failed. Mean changes: +0.002% glibc and +0.010% jemalloc. Raw counts: `cost-final.tsv`; summary: `cost-final.txt`; exact inputs: `final-rows.txt`. No executable change followed this gate.
+
+Typing used `tools/js/typing/keycost.sh /data/bare-tmp/hts/typing` for NEW. BASE used the same script with its build command removed, because base-build supplied the binary (`keycost-prebuilt.sh`). Both used heavy. Final BASE/NEW costs remain 283.1/283.1 million instructions per key for #a1 and 288.5/288.5 for #f0. BASE peak RSS at 20/50 keys: 33.2/33.6 MiB. NEW: 33.7/33.2 MiB. Logs: `keycost-base-final.txt`, `keycost-new-final.txt`. No script-engine files changed, so the conditional script-engine comparison gates were not required.
+
+### Final live pairs
+
+Command: `/data/bare-tmp/bin/heavy python3 /data/bare-tmp/cvl10/live.py --base /data/bare-tmp/base/f71442740a/target --new /data/bare-tmp/target-cvl10 --out /data/bare-tmp/cvl10/live-final`. The runner copies the retained step files. Both versions use the default 1280 by 800 viewport, a 30-second readiness check and a screenshot. Each process has a 75-second timeout. Raw stdout, stderr, steps and screenshots remain in each run directory. `live-final/metrics.json` preserves run order, first errors, resource status/bytes, heap, network failures and stops. JS-resource counts use URLs whose paths end in .js or .mjs.
+
+| Order | Site | Version/pair | Ready | ms | Peak MiB | Errors | Status-0 resources |
+| --- | --- | --- | --- | ---: | ---: | ---: | ---: |
+| 1 | twitch | base/1 | no | 3184.7 | 256.0 | 0 | 1 |
+| 2 | twitch | new/1 | yes | 3393.6 | 272.4 | 1 | 1 |
+| 3 | twitch | base/2 | no | 2735.9 | 256.3 | 0 | 1 |
+| 4 | twitch | new/2 | yes | 3405.5 | 273.1 | 1 | 1 |
+| 5 | twitch | base/3 | no | 2931.4 | 257.2 | 0 | 1 |
+| 6 | twitch | new/3 | yes | 3311.4 | 272.2 | 1 | 1 |
+| 7 | dailymotion | base/1 | yes | 2249.2 | 32.9 | 1 | 0 |
+| 8 | dailymotion | new/1 | yes | 1801.4 | 32.8 | 1 | 3 |
+| 9 | bsky | base/1 | yes | 3748.7 | 199.0 | 0 | 0 |
+| 10 | bsky | new/1 | yes | 3344.9 | 198.6 | 0 | 0 |
+| 11 | target | base/1 | yes | 11800.7 | 334.6 | 0 | 3 |
+| 12 | target | new/1 | yes | 10634.5 | 335.1 | 0 | 3 |
+| 13 | redis-io | base/1 | yes | 4555.0 | 272.1 | 2 | 5 |
+| 14 | redis-io | new/1 | yes | 4542.2 | 362.7 | 8 | 10 |
+| 15 | redis-io | base/2 | yes | 3950.6 | 278.4 | 2 | 5 |
+| 16 | redis-io | new/2 | yes | 4512.2 | 362.4 | 8 | 10 |
+| 17 | redis-io | base/3 | yes | 4351.3 | 265.4 | 2 | 7 |
+| 18 | redis-io | new/3 | yes | 4273.5 | 365.3 | 8 | 10 |
+| 19 | github-repo | base/1 | yes | 3827.0 | 196.3 | 1 | 0 |
+| 20 | github-repo | new/1 | yes | 3249.5 | 195.0 | 1 | 0 |
+
+All three Twitch BASE runs stopped at the pending-longhand serializer guard. All three NEW runs reached readiness and fetched 116 JS URLs / 1,473,901 bytes, versus BASE's 105 / 1,343,430. NEW logged one queued-task Steps abort per run. Both versions had the refused analytics resource. These runs perform unequal work. They show the serializer stop is removed; they do not establish player operation or equal-work performance.
+
+Redis reached readiness in all six runs. Its intermittent BASE serializer stop did not reproduce in these three pairs. BASE fetched 47/47/48 JS URLs; NEW fetched 49 in each run. NEW additionally fetched a 161,943-byte third-party qualified.js script and reached missing WebAssembly, contains and mutation-observer errors. Both versions first logged an empty error listener and a failed remote analytics script. NEW peak RSS was about 362–365 MiB versus BASE's 265–278 MiB. JS heap was about 45,000 versus 42,000 KiB. The additional resources and errors show unequal application work. The RSS gap was not isolated or attributed to retained style state. Keep that gap and the new third-party failures for follow-up; no memory-regression or application-success claim is made.
+
+Dailymotion logged the same split error on both versions; NEW also had three failed resources. Bsky fetched matching JS bytes with no console errors or failed resources. Target had three failed resources on each version and nearly equal JS bytes. GitHub fetched matching JS bytes; both runs logged the same missing createIndex failure. No NEW run had a fatal page stop. The first-error/API work remains outside this change. Individual failed resources and every console entry remain in the raw run files. No failed run was removed.
+
+Limits: no browser-oracle performance comparison, video playback, full application interaction, isolated Redis memory cause, or repeatability beyond these pairs was tested. Existing engine limitations remain. The final documentation commit follows the measured code without changing executable files. This entry supersedes the earlier incomplete status; the owner approval stands.
