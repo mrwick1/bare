@@ -13,6 +13,7 @@ bare-js = { path = "../js" }
 bare-net = { path = "../net" }
 bare-paint = { path = "../paint" }
 bare-url = { path = "../url" }
+serde_json = "1"
 
 [dev-dependencies]
 png = "0.18"
