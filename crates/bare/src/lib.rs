@@ -245,3 +245,6 @@ mod browser_settle_tests;
 mod browser_cssom;
 
 mod browser_frames;
+
+#[cfg(test)]
+mod browser_steps_tests;
