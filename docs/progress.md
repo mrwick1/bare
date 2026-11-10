@@ -6473,13 +6473,13 @@ The scratch probe found a far write at `script#74:1:130774` (index 2076, old len
 
 The rule checks density only when a plain object's element vector grows by more than 16 slots. At least one quarter of the proposed slots must hold values. Each decision scans at most 4,096 slots; accounting and storage together scan at most 8,192. Arrays, objects with named properties, and existing vectors longer than 4,096 slots keep the old rule. Named reads in a local workload rose by 2.54% without the exemption and 0.08% with it. Array append, forward fill and reverse fill changed by +0.15%, +0.15% and -0.04% in the first measurement. Inputs and counts: `/data/bare-tmp/se/fill-cases.txt`, `fill-bench.log`, `fill-bench-2.log`.
 
-### Final validation and stop
+### First final validation and stop (superseded)
 
-The branch stays unmerged. The final matrix passed, but reverse fill rose by 1.257%. Redis also failed to reach readyState in the NEW live run. These findings remain unresolved. The merge gate was acquired before the final rebase and released after validation. No exception was accepted.
+The branch stayed unmerged after the first validation. That matrix passed, but reverse fill rose by 1.257%. Redis also failed to reach readyState in the NEW live run. These findings remain unresolved. The merge gate was acquired before the final rebase and released after validation. No exception was accepted.
 
 Final base: `d8550bbba0d29a64d4a70354d8bd51131bef3025`. A fresh `base-build origin/main` supplied the base binaries after the rebase. Cost policy case 1 applies. The full matrix ran once after that rebase, with jemalloc enabled for every row: 805 rows, zero failures, zero rows over +0.5% under either allocator. Mean change: glibc +0.014%, jemalloc +0.016%. Runtime: 190 seconds. Logs: `/data/bare-tmp/se/cost-final.log` and `cost-final.tsv`.
 
-The first subset lacked the stress binary: 176 rows could not run. That build omission was corrected. The next two subsets ran 248 rows without execution failures. Both had 25 rows over the limit under both allocators on base `8f6a38e982`. The first revision exempted named objects. The second moved the large-gap check into the cold helper. The cause of the earlier instruction difference was not isolated. Those failures did not recur on the final comparison. Logs: `/data/bare-tmp/se/cost-early.log`, `cost-2.log`, `cost-3.log` and their TSV files. The helper occupies 387 bytes in the final `eval_load` binary (`symbols-final.txt`).
+The first subset lacked the stress binary: 176 rows could not run. That build omission was corrected. The next two subsets ran 248 rows without execution failures. Both had 25 rows over the limit under both allocators on base `8f6a38e982`. The first revision exempted named objects. The second moved the large-gap check into the cold helper. The cause of the earlier instruction difference was not isolated. Those failures did not recur on the final comparison. Logs: `/data/bare-tmp/se/cost-early.log`, `cost-2.log`, `cost-3.log` and their TSV files. The helper occupied 387 bytes in the first final `eval_load` binary (`symbols-final.txt`).
 
 Earlier subset rows still over after both revisions, relative to `8f6a38e982`:
 
@@ -6551,3 +6551,68 @@ First errors: vimeo, missing `DOMImplementation`; bsky and gitlab, none; youtube
 Objects that later gain a named property can already be in dictionary mode. The rule does not restore their shape. Gaps of at most 16 and existing vectors longer than 4,096 slots can still hold many holes. Arrays keep the existing storage policy, but the reverse-fill cost above still rose.
 
 Not tested: repeated live pairs for the six sites other than vimeo; Chrome as a performance oracle; sparse-to-dense migration. The CSS failure and the extra theverge error were not isolated. The reverse-fill regression was not fixed. No hunks owned by other executors were changed.
+
+### Owner follow-up: one more structural attempt
+
+The owner authorized one more structural attempt. The original maximum-gap comparison now rejects distant writes before the cold density helper. The first follow-up measurement is BASE 33,247,469 instructions, NEW 33,233,027 (-0.043%). The prior result was +1.257%. Inputs are unchanged. Log: `/data/bare-tmp/se/round2/bench.log`. Final validation after the next rebase follows below.
+
+The follow-up used BASE `d8550bbba0` and a fixed copy of the prior NEW binary (`bde4e1d8`). Redis ran five alternating BASE/NEW pairs, then five more BASE runs. All ten BASE and five NEW runs reached readyState. The pending-shorthand stop did not recur. Its exact error text has one emitter, the unchanged `browser_style_block::serialize` at `browser_style_block.rs:615`. [PR #339](https://github.com/mrwick1/bare/pull/339) reproduces that pre-existing guard on the same base through CSSOM insertion on twitch. Classify the earlier matching stop as the known pending-shorthand limitation. These Redis repetitions found no NEW-only stop. They do not identify why the earlier run hit that path.
+
+The Verge ran three alternating pairs. NEW's median peak RSS is 31.1 MiB higher. Its median error count is 12 higher. Both versions report the same message types. The difference is mainly the number of missing `IDBIndex` callbacks. The timing difference is 8.6 ms. No cause for the RSS difference was isolated. Logs and each result JSON are under `/data/bare-tmp/se/round2/`; `repeat.log` gives run order.
+
+| Site | Version | Runs | ReadyState passes | Median ms | Median peak MiB | Median errors |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| redis | base | 10 | 10 | 3775.7 | 279.5 | 3.0 |
+| redis | new | 5 | 5 | 3745.1 | 278.1 | 3.0 |
+| theverge | base | 3 | 3 | 8835.5 | 280.2 | 28.0 |
+| theverge | new | 3 | 3 | 8844.1 | 311.3 | 40.0 |
+
+The Verge console messages (first lines; counts in run order):
+
+| Message | BASE | NEW |
+| --- | --- | --- |
+| Error: Minified React error #423; visit https://reactjs.org/docs/error-decoder.html?invariant=423 for the full message or use the non-minified dev environment for full errors and additional helpful warnings. | 1, 1, 0 | 1, 1, 0 |
+| TypeError: Intl.RelativeTimeFormat is not a constructor | 1, 1, 0 | 1, 1, 0 |
+| Uncaught (in promise) TimeoutError: signal timed out | 0, 0, 1 | 1, 0, 0 |
+| listener of success: ReferenceError: IDBIndex is not defined | 25, 25, 75 | 36, 31, 70 |
+| listener of upgradeneeded: ReferenceError: IDBIndex is not defined | 1, 1, 1 | 1, 1, 1 |
+
+The owner-authorized follow-up below supersedes the earlier draft hold.
+
+### Completed follow-up validation
+
+The final base is `7a68b71a91a723f76c12332177ea8e30b823d341`. The merge gate was acquired before this rebase. A fresh base-build supplied all baseline binaries. Cost case 1 ran the full 805-row matrix once after this rebase, with both allocators on every row. No row exceeded +0.5% under both allocators. There were zero execution failures. Mean changes: glibc +0.022%, jemalloc +0.021%. Runtime: 157 seconds. Logs are under `/data/bare-tmp/se/round2/final/`.
+
+Three rows exceeded +0.5% under glibc only:
+
+| Row | glibc BASE | glibc NEW | Change | jemalloc BASE | jemalloc NEW | Change |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `FORM_LOAD_STACK_MIB=8 examples/form_load gates 1` | 134343452 | 135183899 | +0.626% | 147780851 | 146889225 | -0.603% |
+| `FORM_LOAD_STACK_MIB=8 examples/form_load gates 10` | 1261721674 | 1270049880 | +0.660% | 1348761740 | 1339766546 | -0.667% |
+| `examples/reflect_load keys 10` | 156182754 | 156996282 | +0.521% | 168383066 | 169200442 | +0.485% |
+
+Final reverse fill: BASE 33,253,344 instructions, NEW 33,239,528 (-0.042%). Append changed by +0.147%, forward fill by +0.155%, and named reads by +0.078%. The same inputs and minimum of three runs were used. Log: `fill-bench-final.log`. The extra structural attempt clears the reverse-fill hold. No exception is needed.
+
+Final gates: workspace 3,417 passed, zero failed, 13 ignored; public journeys 48 passed with zero failures, skips or flakes; test262 baseline gate passed; execution comparison 79 runs with zero differences. Typing remains 283.1 M instructions per key for `#a1` and 288.5 M for `#f0` on both versions. BASE RSS at 20/50 keys is 33.5/33.2 MiB; NEW is 33.5/33.3 MiB. Logs: `workspace-final.log`, `journeys-final.log`, `test262-final.log`, `exec-diff-final.log`, `keycost-base.log`, `keycost-new.log`, and `cost-final.tsv`.
+
+The final live wrapper initially referenced the wrong scratch helper path. No live comparison ran in that attempt. The corrected launch completed all pairs; `final-status.txt` records both attempts. The code gates were not repeated.
+
+Final live sweep on the rebased binaries, with the same readyState steps. Vimeo has four alternating pairs; the other sites have one pair each. The table includes failed runs.
+
+| Site | BASE ms | NEW ms | BASE peak MiB | NEW peak MiB | BASE / NEW errors |
+| --- | ---: | ---: | ---: | ---: | --- |
+| vimeo | 4466.6 (3847.9–19891.9) | 4092.3 (3783.9–19496.0) | 338.5 (69.7–364.0) | 236.2 (70.0–252.1) | 1.0 (0.0–1.0) / 1.0 (0.0–1.0) |
+| bsky | 21286.1 | 13716.9 | 22.3 | 197.7 | 0.0 / 0.0 |
+| redis-io | 5199.6 | 3659.6 | 284.0 | 271.3 | 3.0 / 1.0 |
+| youtube | 1315.2 | 1098.3 | 177.7 | 177.8 | 3.0 / 3.0 |
+| github-repo | 4063.4 | 2699.0 | 144.2 | 152.6 | 1.0 / 1.0 |
+| theverge | 13173.4 | 8565.4 | 295.1 | 311.6 | 80.0 / 77.0 |
+| gitlab | 2869.5 | 2548.9 | 186.1 | 186.3 | 0.0 / 0.0 |
+
+Vimeo reached readyState in three of four runs on each version. The fourth pair failed the same idle-page readiness check without console errors. For the three successful runs, median time was 4408.4 to 3920.5 ms and median peak RSS was 352.6 to 242.8 MiB. The four-run table retains the failed runs instead of silently dropping them.
+
+Redis BASE completed; NEW stopped only on the same pending-shorthand text as before. This matches the pre-existing CSSOM limitation in #339 and the owner's classification rule. No other NEW-only Redis stop was observed. The earlier ten BASE and five NEW repeats all completed.
+
+The final single The Verge pair had 80/77 errors and 295.1/311.6 MiB peak RSS. The required three-pair medians on `d8550bbba0`, above, remain 28/40 errors and 280.2/311.3 MiB. Both versions showed the same error types. Bsky's final single-pair peak rose from 22.3 to 197.7 MiB. GitHub's rose from 144.2 to 152.6 MiB. These single-pair differences were not isolated. A readyState pass does not prove that both runs completed equal application work. Full console text, failures and run metrics are in `live-final/*/stdout.json` and `live-final-details.txt`.
+
+Only documentation changed after these checks. The owner authorized marking the PR ready and merging after this validation. No cost exception was accepted. Not tested: Chrome performance comparisons or sparse-to-dense migration. The live RSS differences and the shared Vimeo idle-page failure were not isolated.
