@@ -171,6 +171,8 @@ mod browser_custom;
 mod browser_face;
 mod browser_geom;
 mod browser_basics;
+mod browser_fontface; mod browser_fonts;
+#[cfg(test)] mod browser_fonts_tests;
 mod browser_matrix;
 #[cfg(test)]
 mod browser_custom_tests;
