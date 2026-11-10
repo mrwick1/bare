@@ -1158,3 +1158,9 @@ lookup behind existing collection handlers. The owner selects affected rows
 plus the saved sample for the correction check. All 119 unique rows pass; the
 failed row becomes +0.071683% under glibc. Retain the failed 805-row run and the
 passing correction separately. This is not a second passing full-matrix claim.
+
+## PR #352: historical first-error evidence boundary
+
+PR #352 merged evidence only. It selected zero runtime fixes. The five-page sweep and local missing-index probe did not establish complete application behavior. Missing IDBIndex exposure was confirmed on that baseline. Other first-error causes remained incomplete or hypotheses. No cost matrix applied to the documentation change.
+
+This entry backfills the missing record at the 2026-11-10 pause. It does not change the original evidence or claim a runtime repair. Later #356 exposed the index interface. Later #362 added in-memory index reads and constraints. Keep those repairs separate from #352.
