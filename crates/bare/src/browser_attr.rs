@@ -172,22 +172,24 @@ impl IndexedSource for Dom {
     }
 
     fn indexed_len(&self, owner: ObjId) -> Result<usize, HeapError> {
-        if let Some(r) = crate::browser_media::caption_len(self, owner) { return r; }
         if let Some(r) = crate::browser_nodelist::len(self, owner) {
             return r;
         }
         let t = self.attr.s.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
-        let Some(&el) = t.maps.get(&owner) else { return crate::browser_cssom::len(self, owner).unwrap_or(Ok(0)) };
+        let Some(&el) = t.maps.get(&owner) else {
+            return crate::browser_media::caption_len(self, owner).unwrap_or_else(|| crate::browser_cssom::len(self, owner).unwrap_or(Ok(0)));
+        };
         Ok(self.doc.try_borrow().map_err(|_| HeapError::HostUnavailable)?.attr_count(el))
     }
 
     fn indexed_item(&self, owner: ObjId, index: usize) -> Result<Slot, HeapError> {
-        if let Some(r) = crate::browser_media::caption_item(self, owner, index) { return r; }
         if let Some(r) = crate::browser_nodelist::item(self, owner, index) {
             return r;
         }
         let t = self.attr.s.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
-        let Some(&el) = t.maps.get(&owner) else { return crate::browser_cssom::item(self, owner, index).unwrap_or(Ok(Slot::Absent)) };
+        let Some(&el) = t.maps.get(&owner) else {
+            return crate::browser_media::caption_item(self, owner, index).unwrap_or_else(|| crate::browser_cssom::item(self, owner, index).unwrap_or(Ok(Slot::Absent)));
+        };
         let doc = self.doc.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
         let NodeData::Element { attrs, .. } = *doc.data(el) else { return Ok(Slot::Absent) };
         let Some(a) = doc.attrs(attrs).get(index) else { return Ok(Slot::Absent) };
