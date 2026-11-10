@@ -431,6 +431,15 @@ fn dump(j: &bare_net::cookie::Jar) -> Vec<CookieOut> {
         .collect()
 }
 
+/// Make the options create a file that only the owner can read (mode 0600 on Unix; elsewhere the default). It is here because
+/// `tools/portable_check.sh` allows OS code in this file only.
+pub(crate) fn private(o: &mut std::fs::OpenOptions) {
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(o, 0o600);
+    #[cfg(not(unix))]
+    let _ = o;
+}
+
 /// The CPU time of this thread in nanoseconds, from `/proc/thread-self/schedstat` (0 where it cannot be read).
 fn thread_cpu_ns() -> u64 {
     std::fs::read_to_string("/proc/thread-self/schedstat").ok().and_then(|s| s.split(' ').next()?.parse().ok()).unwrap_or(0)

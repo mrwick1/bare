@@ -118,8 +118,7 @@ pub fn write(file: &str, st: &StorageState) -> Result<(), String> {
     let tmp = path.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
     let mut o = std::fs::OpenOptions::new();
     o.write(true).create_new(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+    crate::run::private(&mut o);
     let err = |e: std::io::Error| format!("{file}: cannot write the state file ({})", e.kind());
     let done = o.open(&tmp).and_then(|mut f| f.write_all(to_json(st).as_bytes()).and_then(|_| f.sync_all())).and_then(|_| std::fs::rename(&tmp, path));
     if let Err(e) = done {
