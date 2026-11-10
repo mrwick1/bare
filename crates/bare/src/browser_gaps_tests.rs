@@ -263,9 +263,13 @@ fn indexeddb_index_upgrade_existing_records() {
     big(|| {
         let mut b = browser();
         js(&mut b, r#"
-var out=[],r=indexedDB.open('existing',1);r.onupgradeneeded=function(){var s=r.result.createObjectStore('s');s.put({v:'z'},2);s.put({v:'a'},1);};r.onsuccess=function(){r.result.close();var u=indexedDB.open('existing',2);u.onupgradeneeded=function(){var s=u.transaction.objectStore('s');var ix=s.createIndex('v','v');out.push(ix===s.index('v'),s.indexNames.contains('v'));ix.getAllKeys().onsuccess=function(e){out.push(e.target.result.join());};try{s.createIndex('v','v')}catch(e){out.push(e.name)}try{s.createIndex('bad',['v'],{multiEntry:true})}catch(e){out.push(e.name)};};u.onsuccess=function(){u.result.close();var a=indexedDB.open('existing',3);a.onupgradeneeded=function(){var s=a.transaction.objectStore('s');s.deleteIndex('v');s.createIndex('new','v');a.transaction.abort();};a.onerror=function(e){e.preventDefault();var b=indexedDB.open('existing');b.onsuccess=function(){out.push(b.result.version,b.result.transaction('s').objectStore('s').indexNames.join());};};};};
+var out=[],r=indexedDB.open('existing',1);r.onupgradeneeded=function(){var s=r.result.createObjectStore('s');s.put({v:'z',n:1},2);s.put({v:'a',n:1},1);};r.onsuccess=function(){r.result.close();var u=indexedDB.open('existing',2);u.onupgradeneeded=function(){var s=u.transaction.objectStore('s');var ix=s.createIndex('v','v');out.push(ix===s.index('v'),s.indexNames.contains('v'));ix.getAllKeys().onsuccess=function(e){out.push(e.target.result.join());};try{s.createIndex('v','v')}catch(e){out.push(e.name)}try{s.createIndex('bad',['v'],{multiEntry:true})}catch(e){out.push(e.name)};};u.onsuccess=function(){u.result.close();var a=indexedDB.open('existing',3);a.onupgradeneeded=function(){var s=a.transaction.objectStore('s');s.deleteIndex('v');s.createIndex('new','v');a.transaction.abort();};a.onerror=function(e){e.preventDefault();var b=indexedDB.open('existing');b.onsuccess=function(){out.push(b.result.version,b.result.transaction('s').objectStore('s').indexNames.join());};};};};
 "#);
         pump(&mut b);
         assert_eq!(js(&mut b, "out.join('|')"), "true|true|ConstraintError|InvalidAccessError|1,2|2|v");
+        js(&mut b, r#"var u=indexedDB.open('existing',3);u.onupgradeneeded=function(){u.transaction.objectStore('s').createIndex('n','n',{unique:true});};u.onerror=function(e){e.preventDefault();out.push(u.error.name);var r=indexedDB.open('existing');r.onsuccess=function(){out.push(r.result.version,r.result.transaction('s').objectStore('s').indexNames.join());};};"#);
+        pump(&mut b);
+        assert_eq!(js(&mut b, "out.slice(-3).join()"), "AbortError,2,v");
+        assert_eq!(js(&mut b, "try { Object.getOwnPropertyDescriptor(IDBIndex.prototype, 'keyPath').get.call({}) } catch(e) { e.name }"), "TypeError");
     });
 }
