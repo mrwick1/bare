@@ -8073,3 +8073,128 @@ platforms or full text-track conformance. The 13 ignored workspace tests did
 not run. The workspace suite ran once before rebase; the corrected browser
 suite covers the final runtime. Final prose checks preserve every preceding
 byte of both shared documents and check whitespace and publication text.
+
+## Pause 2026-11-10: where we are
+
+The owner paused the 15-hour run early. Do not resume it without owner instruction.
+No other work is authorized by this record.
+
+### Done
+
+The merged range is #298 through #364, except open draft #345.
+The list includes #298 as the status baseline.
+
+- #298: Recorded the previous status.
+- #299: Support local time in Date.
+- #300: Bring the module engine back under the cost limit.
+- #301: Scope style sheets to shadow trees and assign slots.
+- #302: Added TLS 1.2 client support.
+- #303: Fix HTML navigation negotiation and expand resource capacity.
+- #304: Cut the cost of dynamic style sheet reads and media feature parsing after #301.
+- #305: Added logical CSS properties.
+- #306: Add HTTP proxy routing and CONNECT tunnels.
+- #307: Recorded the direct-access result.
+- #308: Add performance entries, createEvent, HTML element interfaces, non-http URLs.
+- #309: Support English number notation and inert document parsing.
+- #310: Add named capture groups to RegExp.
+- #311: Add lazy CSSOM, window properties and :scope selectors.
+- #312: Add legacy performance data and validate measure options.
+- #313: Preserve intrinsic flex image sizes and add object fitting.
+- #314: Support RegExp lookbehind and recover selector task limits.
+- #315: Added the Arabic glyph subset. Shaping and bidi remain absent.
+- #316: Add lazy DOM compatibility for page scripts.
+- #317: Support named iframe windows and isolate request failures.
+- #318: Send Accept-Language, add document.domain, follow meta refresh.
+- #319: Added 15 public journeys.
+- #320: Parse legacy dates, bind await in object patterns, add Function.prototype.toString.
+- #321: Count styled elements for computed-work and queue 1,024 requests.
+- #322: Report unhandled promise rejections and fix four silent app starts.
+- #323: Support Intl timeZoneName and ignore document.domain assignments.
+- #324: Add blob object URLs, client hints values and data: module imports.
+- #325: Draw CSS background-image and mask-image (replaces #278).
+- #326: Charge the cascade for the elements it styles, not the page bound.
+- #327: Support await in computed keys and array patterns, add regexp flag d.
+- #328: Charge the cascade for the candidates its rule index gives.
+- #329: Add a Worker that fails to start and fires an error event.
+- #330: Decode a picture into its final buffer, and record what holds the peak RSS.
+- #331: Support the with statement in sloppy code.
+- #332: Keep currentScript through the microtask checkpoint, add ImageData.
+- #333: Add small DOM gaps, lazy animate, Path2D and a minimal indexedDB.
+- #334: Add Intl locale extensions, the rest of console, and CSS.supports.
+- #335: Parse table fragment contexts and make history state caps catchable.
+- #336: Keep one script slot for repeated text and allow 64 KiB selectors.
+- #337: Record the slack in the JS heap tables at the peak.
+- #338: Bound host asks and rooted the unknown-element prototype.
+- #339: Preserve pending shorthand state through CSSOM writes.
+- #340: Keep sparse object indices out of dense storage.
+- #341: Add Intl.Locale and Intl.RelativeTimeFormat.
+- #342: Retain heap variant labels in fatal page stops.
+- #343: Repair historical verification records and audit web-gap evidence.
+- #344: Audit sparse live comparisons and allocator drift.
+- #346: Add page basics: document.referrer, window and navigator properties, postMessage, sendBeacon.
+- #347: Charge full style computations by indexed work.
+- #348: Recorded split receiver evidence for two news and media pages.
+- #349: Attributed the constructor failure to a DOMException probe.
+- #350: Recorded the icon font receiver failure.
+- #351: Recorded capability failures and the WebAssembly boundary.
+- #352: Recorded the next first errors after page basics.
+- #353: Added lazy document font sets and FontFace.
+- #354: Construct DOMException lazily and let buffer probes fall back.
+- #355: Document callback stack reporting scope boundary.
+- #356: Expose IDBIndex through the lazy IndexedDB shim.
+- #357: Clone MessagePort object payloads and retain callback frames.
+- #358: Implement live relList tokens for link callbacks.
+- #359: Repaired npm sparkline named-attribute reads.
+- #360: Recorded Task 47 caption receiver evidence only.
+- #361: Recorded Task 48 interface and XML evidence only.
+- #362: Completed Task 46 in-memory expiration index repair.
+- #363: Repaired the Task 48 interface lookup. XML construction remains unfinished. Vimeo reaches a later undefined `set` error.
+- #364: Repaired Task 47 cue initialization. All 32 cues initialize with line -2 and size 80. Network captions and playback remain unsupported.
+
+### Open work and known gaps
+
+- Draft #345 remains open on `steps-aborts`. Frame capture is not merged. The last experiment leaves `gen_load delegate 1` at +0.736%/+0.590% and `delegate 10` at +0.835%/+0.819% under glibc/jemalloc. No exception was taken.
+- Other local branches contain unmerged commits. These include `steps-aborts-before-split`, `cost-attempt3-2f16ffc`, `css-background-mask` and `t3/res-size-proto`. They are retained work, not additional open PRs. The background/mask replacement merged as #325.
+- craigslist and apnews retain Steps budget failures. The frame diagnostic does not fix them.
+- Redis still needs the WebAssembly/Rive dependency and EventSource behavior. Capability evidence does not establish an application repair.
+- Real resizable ArrayBuffer support remains absent. #354 makes the unsupported construction catchable so the caller can fall back.
+- Functional IDB indexes are no longer wholly absent: #362 adds in-memory reads and constraints. Persistence, index cursors, renaming and broader key support remain gaps. Live expiration cleanup invocation is unproved.
+- Mastodon feed and login behavior remain untested. A clean constructor probe is not a full application pass.
+- glibc-only drift remains unexplained. The sparse and web-gap audits retain the allocator comparisons. No causal speed or memory claim follows.
+- #352 had no decision entry. This PR adds the historical evidence boundary to `docs/decisions.md`. It does not add a runtime decision retroactively.
+
+### Skipped work and reasons
+
+- stackoverflow: the challenge blocked access. No challenge bypass was attempted.
+- nytimes: the bot block remained after header changes. No bypass was attempted.
+- gnu.org: connection resets also affected independent clients. No client-only repair was justified.
+- Arabic shaping and bidi: the glyph subset does not implement these features. They remain outside the completed repair.
+- Firefox comparison: the earlier status lists it as not started. No completed comparison is recorded here.
+- Desktop/window mode: this run does not establish real desktop behavior. Earlier isolated window checks do not cover this run.
+- blob:/XHR non-http coverage: #324 added local blob reads. Blob module scripts and blob images remain unsupported. Do not describe all non-http paths as complete.
+- `BARE_TE_DUMP`: hook removal was deferred. The recorded removal experiment increased encodeuri cost by +3.4%/+3.0% under the two allocators.
+- Task 49, the 07:30 UTC verification survey, did not run. The owner paused work early.
+
+The pause order supplies the Task 49 disposition. It also retains the challenge skip above. No new survey was run to recheck either item.
+
+### Standing cost exceptions and rule
+
+#289 remains an owner-approved cost exception from 2026-11-09. Its final record has 45 rows over +0.5% under both allocators and six over one only. The worst row is `block-percent-calc 200000`: +1.275% glibc and +1.363% jemalloc. The cause remains unproved. Earlier failed attempts do not replace this final record.
+
+The rule rejects a row above +0.5% under both allocators unless the owner grants an exception. A glibc flag requires the second allocator check. A glibc-only flag is not an automatic failure or an explained cause. Engine, CSS, HTML, paint or hot-struct changes require the full 805-row final matrix. A bounded bare-only change uses affected rows and the saved approximately 60-row sample; an over-both sample requires escalation. Docs-only changes require no matrix.
+
+#300 repaired the module-engine regressions after #292. Do not carry them as a new standing waiver. #345 remains blocked. #364's first full matrix failed one row; the owner selected affected rows plus the saved sample after correction. All 119 correction rows passed. No second full matrix ran and no cost exception was used.
+
+### Owner decisions still open
+
+- Choose monospace advances or proportional text measurement. Current clipping evidence does not settle that choice.
+- Decide whether glibc-only drift needs further attribution or action.
+- Decide whether to implement real resizable ArrayBuffer support.
+- Retain the pause-order note: `reap-data-tmp` excludes for `bin` and `test262` were not applied. This PR does not change cleanup configuration.
+- To verify: README may lack later edits. This PR does not claim a complete README audit.
+
+### Next steps
+
+Keep the run paused. Preserve draft #345 and the retained evidence. Wait for the owner to select the next scope. On resume, resolve the open decisions, then choose a bounded repair. Reproduce its failure before editing runtime code. Apply the cost rule to the final rebased change. Run the deferred verification survey only after authorization. Audit README against the later merged behavior.
+
+Validation for this record: compare the merged list with commit history and PR state. Check the existing task sections for repair boundaries and costs. Preserve all preceding progress bytes. Check the two-file documentation diff and whitespace. No runtime tests, live pages, cost matrix, desktop checks or deferred survey ran for this docs-only change.
