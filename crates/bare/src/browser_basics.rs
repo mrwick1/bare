@@ -57,8 +57,8 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
 
 /// The names of `window` and of `Document.prototype` made here. The heap asks the host for them on the first miss (`Heap::browser_name`),
 /// so a realm that never reads one pays nothing.
-const WINDOW: [&str; 19] = ["DOMException", "devicePixelRatio", "screenX", "screenY", "crossOriginIsolated", "closed", "opener", "frameElement", "postMessage", "alert", "print", "focus", "blur", "confirm", "prompt", "open", "isSecureContext", "outerWidth", "outerHeight"];
-const DOCUMENT: [&str; 11] = ["hidden", "referrer", "visibilityState", "contentType", "compatMode", "characterSet", "charset", "inputEncoding", "lastModified", "designMode", "dir"];
+const WINDOW: [&str; 20] = ["DOMException", "FontFace", "devicePixelRatio", "screenX", "screenY", "crossOriginIsolated", "closed", "opener", "frameElement", "postMessage", "alert", "print", "focus", "blur", "confirm", "prompt", "open", "isSecureContext", "outerWidth", "outerHeight"];
+const DOCUMENT: [&str; 12] = ["hidden", "referrer", "visibilityState", "contentType", "compatMode", "characterSet", "charset", "inputEncoding", "lastModified", "designMode", "dir", "fonts"];
 
 /// The ask of the heap for `key` (`browser_handlers::lazy`): define it when it is one of the names above. The name `open` is also a
 /// method of `document` (`browser_loader.rs`), so it is defined here and the caller goes on.
@@ -75,6 +75,7 @@ pub(crate) fn define(d: &Dom, it: &mut Interp<'_>, key: &str) -> R<()> {
     };
     match key {
         "DOMException" => crate::browser::define_window(d, it, key).map(|_| ()),
+        "fonts" | "FontFace" => crate::browser_fonts::define(d, it),
         "devicePixelRatio" => data(it, g, Value::Number(1.0)),
         "screenX" | "screenY" => data(it, g, Value::Number(0.0)),
         "crossOriginIsolated" | "closed" => data(it, g, Value::Bool(false)),

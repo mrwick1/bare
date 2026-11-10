@@ -1404,7 +1404,7 @@ impl Heap {
     fn browser_name(u: &[u16]) -> bool {
         macro_rules! named { ($name:literal) => { u.iter().copied().eq($name.bytes().map(u16::from)) }; }
         match u.first().copied() {
-            Some(102) => named!("frames") || named!("frameElement") || named!("focus"),
+            Some(102) => named!("frames") || named!("frameElement") || named!("focus") || named!("fonts"),
             Some(101) => named!("eval") || named!("event"),
             Some(97) => named!("animate") || named!("alert"),
             Some(105) => named!("indexedDB") || named!("isSecureContext") || named!("inputEncoding"),
@@ -1427,6 +1427,7 @@ impl Heap {
             Some(68) => named!("DocumentType") || named!("DOMException"),
             Some(100) => named!("devicePixelRatio") || named!("designMode") || named!("dir"),
             Some(98) => named!("blur"),
+            Some(70) => named!("FontFace"),
             Some(114) => named!("referrer"),
             _ => false,
         }
