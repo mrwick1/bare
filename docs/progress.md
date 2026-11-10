@@ -6406,3 +6406,61 @@ The plan's hypotheses were not the causes. The lazy asks of one `(object, name)`
 - The 8 large app pages of the plan (vimeo, bluesky, gitlab, github-repo, youtube, theverge, ikea, redis-io) on NEW: not run.
 - Chrome on target.com.
 - A page with many iframes and a loop of DOM changes and global misses (the frames fill then rebuilds the list after each change).
+
+## Intl.Locale and Intl.RelativeTimeFormat (2026-11-10)
+
+### Problems
+
+On main `5b322141`, wise.com logged `TypeError: Intl.Locale is not a constructor` twice and theverge.com logged `Intl.RelativeTimeFormat is not a constructor`.
+
+### Change
+
+`Intl.Locale` (tag, options, 10 getters, `toString`, `maximize`, `minimize`) and `Intl.RelativeTimeFormat` (`format`, `formatToParts`, `resolvedOptions`, `supportedLocalesOf`; style long, short, narrow; numeric always, auto; second to year and quarter). Files: `eval_intl_locale.rs`, `eval_intl_rtf.rs`, `intl_locale.rs`, `intl_rtf_data.rs` (made by `tools/js/intl_rtf_gen.mjs`), tests `eval_intl_locale_tests.rs`, fixture `tools/fixtures/js/intl-locale-cases.*` with `tools/js/intl_locale_check.sh`. `eval.rs`, `eval_intl.rs` and `eval_intl_num.rs` have registration lines only. `canonical_tag` sorts variants now (Node 22 does; the old unit test expected the other order). Spec: ECMA-402 section 14 (Locale: constructor, ApplyOptionsToTag, ApplyUnicodeExtensionToTag, the getters, `maximize` and `minimize`) and section 17 (RelativeTimeFormat: constructor, `format`, `formatToParts`, `resolvedOptions`). The ICU rules that the spec leaves open (the auto rounding at two fraction digits, `-0` is past) come from Node 22.
+
+### Tests that failed first
+
+`cargo test --release -p bare-js --lib intl_locale_tests` on the tree before the change: 6 failed, 0 passed (`Intl.Locale is not a constructor`). After: all pass. 869 `bare-js` tests pass. The Node 22 corpus has 26 cases (`intl_locale_check.sh`); all match.
+
+### test262 (`test/intl402`, not in the gate subset; run with `test262_run` on both builds)
+
+| Directory | BASE pass | NEW pass | NEW fail |
+|---|---|---|---|
+| `intl402/Locale` (189 run, 1 skipped) | 0 | 95 | 94 |
+| `intl402/RelativeTimeFormat` (79 run, 1 skipped) | 0 | 68 | 11 |
+
+Left in `Locale`: `getCalendars`, `getCollations`, `getHourCycles`, `getNumberingSystems`, `getTextInfo`, `getTimeZones`, `getWeekInfo` (about 70 tests), `firstDayOfWeek` and `variants`, the CLDR alias rules, 40-row likely subtags. Left in `RelativeTimeFormat`: `numberingSystem` other than `latn` (4 tests), `pl` and `de` text (6 tests), a locale list that resolves to `de` (1). `test262_check.sh` (full): gate ok, rc 0.
+
+### Cost
+
+BASE `d8550bbba0` (fresh `base-build` of main after #338, with `bare-stress`), NEW this branch after the final rebase. Case 1 of the owner rule (`crates/js`): full matrix once. 805 rows: 0 over +0.5% under both allocators. Two rows over under glibc only: `form_load gates 1` +0.663% and `10` +0.702% (jemalloc -0.001% and -0.005%). Mean glibc -0.260%. `-J` on the 50 rows of `intl_load`, `web_apis_load`, `lex_load` and `parse_load`: 0 over, mean glibc -0.346%, jemalloc -0.176%.
+
+Earlier matrices on base `1414387821` (the fixes): first run 16 rows over under both (`lex_load` up to +2.1%, `parse_load chain` +1.3%, `intl_load make 1` +1.0%, `segmenter`). Fix 1: the tag logic and data are `include!`d by `intl.rs`, not new modules (the lexer and parser rows went back to 0). Fix 2: both constructors are accessors on `Intl` until the first read (the `intl_load` and `segmenter` rows went back under the limit).
+
+`keycost.sh`: BASE `#a1` 283.1 M for each key, `#f0` 288.5 M, peak RSS 33.5 MiB at 20 and 50 keys. NEW 283.1 M, 288.5 M, 33.4 / 33.5 MiB. `exec_diff.sh`: 79 runs, 0 differences. `cargo test --release --workspace`: 3,414 passed, 0 failed, 13 ignored. `tools/drive/public/run.sh`: 48 pass, 0 fail, 0 flakes. Logs in `/data/bare-tmp/ilr/`.
+
+### Size
+
+`bare-drive` (release): 15,873,080 bytes (BASE) and 16,037,264 bytes (NEW), +164,184 bytes. The patterns are 72 small entries (the source is 7,585 bytes) and the likely-subtags table is 40 rows. The rest is code. Not split further.
+
+### Live (`bare-drive`, step file as in the brief; BASE `1414387821`, NEW this branch before the last rebase)
+
+| Site | readyState | Errors BASE to NEW | ms BASE / NEW | Peak RSS BASE / NEW (MiB) |
+|---|---|---|---|---|
+| wise | complete | 3 to 3 (`Intl.Locale` x2 gone; `reading 'search'` x2 and the Next.js error stay) | 1,698 / 1,848 | 182 / 181 |
+| theverge | complete | 16 to 6 (`RelativeTimeFormat` x3 gone; `indexedDB is not defined` stays) | 7,463 / 9,766 | 320 / 306 |
+| youtube | complete | 3 to 3 | 1,178 / 1,256 | 178 / 177 |
+| github-repo | complete | 5 to 5 | 3,979 / 3,871 | 193 / 192 |
+| bluesky | complete | 1 to 1 | 11,957 / 13,002 | 201 / 202 |
+| nasa | complete | 4 to 4 | 3,447 / 3,447 | 167 / 163 |
+| mdn | complete | 0 to 0 | 2,346 / 2,285 | 35 / 34 |
+| redis-io | complete | 10 to 4 | 5,319 / 6,031 | 278 / 286 |
+
+The wise screenshot still shows the "Sorry, looks like we lost this page" error page. The remaining error is `Cannot read properties of undefined (reading 'search')` (hypothesis: the `document.referrer` of Task 24). No site got worse in errors. One run each; times are noisy (a matrix ran at the same time on some runs), so the +10% to +30% on theverge and bluesky is not a finding.
+
+### Limits
+
+`maximize` and `minimize` know 40 languages. Text of a language other than English is English. No `numberingSystem` other than `latn`. `Intl.Locale` and `Intl.RelativeTimeFormat` are accessors until the first read. `DisplayNames`, `ListFormat`, `DurationFormat` and `supportedValuesOf` are left.
+
+### Not tested
+
+Chrome on the live sites. A second live run after the last rebase. Memory of a page that makes many `Locale` objects (the cap is `max_formatters`). `formatToParts` for a locale other than English (none exists).
