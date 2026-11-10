@@ -866,7 +866,7 @@ CSSOM defines the values returned by [`getComputedStyle`](https://drafts.csswg.o
 
 ## Execution budget abort frames
 
-A budget abort retains the innermost authored frame before it unwinds. Only a `Limit` error invokes the capture helper. The helper is cold and cannot inline. Generator, binary and hot `?` paths stay unchanged. A new task clears the marker.
+A budget abort retains the innermost authored frame before it unwinds. Only a `Limit` error invokes the capture helper. The helper is cold and cannot inline. Generator and binary source files are not modified. No hot `?` sites are modified. A new task clears the marker.
 
 The browser formats the frame only on the abort path. The existing prefix stays intact: `Script aborted: the Steps budget ended the load event at name (script#N:L:C). The page goes on ...`. A frame without an active call uses its function or class source start; a top-level frame uses the script start. This identifies the authored frame, not the exact loop statement. Script URLs are not stored by the interpreter.
 

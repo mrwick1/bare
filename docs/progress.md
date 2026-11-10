@@ -6916,3 +6916,30 @@ All six Redis runs stop at the same existing pending-shorthand longhand-write ga
 - A forced locale-polyfill run in Chrome, exact allocation creation stacks, or speed across frozen identical network responses.
 
 The separate frame experiment uses a `Limit` guard and a cold function that cannot inline. It still has two generator rows over both allocator limits. It remains draft and is not part of this merge.
+
+## Frame-only budget diagnostics remain draft (2026-11-10)
+
+The style-charge work merged separately as #347, merge `f71442740adb11b657b2ce701634488045f7a567`. Draft #345 now contains only saved abort frames, browser logging, its frame regression and these records. It changes no computed-style charge, generator source, binary source or hot `?` site.
+
+The third cheap idea guards the unwind with `Err(Error::Limit(_))`. Only that variant calls `save_abort_frame`, which is `#[cold] #[inline(never)]`. The earlier general error-result capture and lazy-box attempts left five focused violations. This variant reduces the observed focused failures to two. No fourth idea or cost exception was attempted.
+
+The final pair uses a fresh base-build of the #347 merge and the frame-only tree. Twelve callback, accessor, generator and throw rows ran under both allocators. Mean change: glibc +0.393%, jemalloc +0.368%. Two rows still exceed +0.5% under both:
+
+| row | glibc | jemalloc |
+| --- | ---: | ---: |
+| `gen_load delegate 1` | +0.736% | +0.590% |
+| `gen_load delegate 10` | +0.835% | +0.819% |
+
+The prototype was found and checked within the requested 20-minute search window. Its original-base result is in `/data/bare-tmp/sb/split/frame3.log`. The final split result is in `frame-final-cost.log` and `frame-final-cost.tsv`. Generator and binary source files remain untouched. The remaining common-frame instruction overhead is not fixed, so the PR stays draft.
+
+Both steps regressions pass (`frame-unit.log`). The final JS gates pass: test262 baseline gate, exec-diff 79 runs with zero differences, and BASE/NEW keycost (`frame-test262.log`, `frame-exec.log`, `status-frame.txt`). All paths are under `/data/bare-tmp/sb/split/`.
+
+| keycost | BASE | frame-only NEW |
+| --- | ---: | ---: |
+| `#a1`, M instructions per key | 283.1 | 283.3 |
+| `#f0`, M instructions per key | 288.5 | 288.7 |
+| peak MiB, 50 keys | 33.5 | 33.2 |
+
+The formatter uses script slots and source starts for call-free frames. It does not identify an exact loop statement or a source URL. It retains no heap values in its marker.
+
+Not tested: the full 805 rows, a new full workspace run, the 48 journeys, or live pages on this final frame-only experiment. The known focused cost violations already block a merge. The merged browser-only change has its own completed validation above. No merge gate is held for this draft.
