@@ -7040,3 +7040,61 @@ Redis reached readiness in all six runs. Its intermittent BASE serializer stop d
 Dailymotion logged the same split error on both versions; NEW also had three failed resources. Bsky fetched matching JS bytes with no console errors or failed resources. Target had three failed resources on each version and nearly equal JS bytes. GitHub fetched matching JS bytes; both runs logged the same missing createIndex failure. No NEW run had a fatal page stop. The first-error/API work remains outside this change. Individual failed resources and every console entry remain in the raw run files. No failed run was removed.
 
 Limits: no browser-oracle performance comparison, video playback, full application interaction, isolated Redis memory cause, or repeatability beyond these pairs was tested. Existing engine limitations remain. The final documentation commit follows the measured code without changing executable files. This entry supersedes the earlier incomplete status; the owner approval stands.
+
+## BBC and Dailymotion split attribution (Task 35)
+
+Evidence-only. Frozen main: `617cb19f8984a6781e5e31a4655e3d598f705d17`. Artifacts: `/data/bare-tmp/bst11/`. These paths are local evidence, not hosted PR attachments. Only this section and a decisions entry change. Tests-first is N/A for this documentation change. No matrix ran.
+
+### Independent source attribution
+
+BBC: `https://gn-web-assets.api.bbc.com/ngas/latest/dotcom-bootstrap.js`, downloaded decoded SHA-256 `07ff68d400013493a7f221a0fe9a9bff82ca0fc2f854752c0ad75e9396fc5ef3` (76067 bytes). `dn` checks `window.dotcom.userinfo.notUkIp` and `.ads`, calls `k.checkCookies()`, then `oe()`. `oe` reads `window.location.pathname`, `.hostname`, `.search`, optional `window.SIMORGH_DATA.pageData.metadata.type`, and `window.dotcom.config.adCampaign/topics`. It then evaluates `document.referrer.split("https://www.bbc.com/")`. The receiver is `document.referrer`. Failure there prevents the later assignment to `window.dotcom.data`, including referral targeting keys. The source explains a bootstrap rejection, not a fatal page stop. The live signature is `Uncaught (in promise) TypeError: Cannot read properties of undefined (reading 'split') at script#55`. The console does not map that script number to a URL or provide the receiver. Hypothesis: this source path is the live rejection. No instrumented live stack establishes that mapping.
+
+Dailymotion has two relevant source paths. Its downloaded document `https://www.dailymotion.com/` contains inline script 7 with startup `landing.referer: window.document.referrer.split("?")[0].slice(0,100)||void 0`. Before this read, startup reads runtime configuration, location search and visit data. Failure prevents publication of the initial app-enter event. The same inline bundle has `getLanding()`: `this.referrer=this.referrer||window.document.referrer.split("?")[0].slice(0,100)`. Its receiver is again `window.document.referrer`, after reading the cached `this.referrer`. A failure prevents return of landing tracking data.
+
+The external application bundle repeats `getLanding`: `https://static.neon-ssr.dailymotion.com/neon-user-ssr/static/app.28f908af5c3132ac5a4b.js`, decoded SHA-256 `baa699ab89ece2be1d33dc282b6a9a8c8e520acd70450119df2bca1fc86392a4` (133871 bytes). Module 23190 builds an event with `getAppInfo()`, `getLanding()`, then device/visitor/browser/player reads; it sends the event only after those calls. The live signature is `listener of error: TypeError: Cannot read properties of undefined (reading 'split')`. Hypothesis: the listener reaches this tracking path. The raw console lacks a stack. The initiating error and exact live listener call path remain unverified. Do not equate this listener exception with BBC's promise rejection or with player failure.
+
+Source files, URLs, decoded hashes and sizes are retained in `scripts.json`, `scripts/`, `bbc.html`, `dm.html` and `dm-inline-7.js`. The downloaded Dailymotion document hash is `81bd271c07a35f1d2ff46ccbb070bfaf873a77bf2360c9388e55494fc8472bfb`; inline script 7 is `6b6b39fb93eb3103405ad75f15ab54b0378d970d0b8932bf3ed25b13edaeb497`. These are fresh downloads, not retained response bodies from the older probes. Network byte counts below measure transferred bytes and differ from decoded source sizes.
+
+### Fresh probes
+
+Run order: BBC 1, Dailymotion 1, BBC 2, Dailymotion 2. Each uses the frozen binary, a 30000 ms readiness timeout, the original URL and default viewport, then `shot s`. Commands: `CARGO_TARGET_DIR=/data/bare-tmp/target-bst11 python3 /data/bare-tmp/bst11/live.py`. The script wraps each invocation in `heavy timeout 75`. Raw JSON, stderr, steps, screenshots and exit codes are in the four site-run directories.
+
+| Run | Ready | Resource statuses | Bytes | Elapsed ms | Peak RSS KiB | Reported heap KiB |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| BBC 1 | true | 81 × 200; 1 × 0 | 1328576 | 6430.3 | 167632 | 28128 |
+| Dailymotion 1 | true | 10 × 200; 3 × 0 | 361437 | 2315.4 | 33568 | 2541 |
+| BBC 2 | true | 81 × 200; 1 × 0 | 1328577 | 4070.2 | 165020 | 28251 |
+| Dailymotion 2 | true | 10 × 200; 3 × 0 | 361442 | 1788.4 | 33924 | 2531 |
+
+All four exit codes are zero and report no driver failure or fatal/task stop. Each BBC run repeats the promise signature once. Each Dailymotion run repeats the listener signature once and logs three refused requests to `https://pebed.dm-event.net/` (status 0, zero bytes). BBC's failed resource is `https://uk-script.dotmetrics.net/door.js?d=www.bbc.com&t=newsstudio` (status 0, zero bytes). No application sentinel or interaction was asserted. Readiness does not establish application success, equal work, hydration or playback. Reported heap is not a JS-only heap measurement.
+
+Older `plans/p9chk`, `p10chk` and `p11chk` outputs were read without a sweep. BBC p9 had no console error; p10/p11 have the same promise signature. Dailymotion has the same listener signature in all three. Its p11 probe had no failed resource, while p10 had the three refused event requests. Thus those refusals alone do not establish the split receiver's provenance.
+
+### Local reduction and ownership boundary
+
+The local fixtures extract each site's referrer expression independently. They log the receiver type, catch the failure, then supply `document.referrer = ""` through a fixture descriptor and repeat the expression. Exact runnable files are `bbc-reduction.html`, `dailymotion-reduction.html`, and `local-run.py`. Run `CARGO_TARGET_DIR=/data/bare-tmp/target-bst11 /data/bare-tmp/bin/heavy python3 /data/bare-tmp/bst11/local-run.py`. The runner uses an ephemeral loopback HTTP server and closes it before exit. Initial direct-file attempts failed because the driver requires HTTP(S); `*-reduction.json` retains those harness failures. The HTTP results are `*-http.json` and `*-http.err`.
+
+Task 24's `page-basics` branch was inspected read-only at `288f97c86642c487326f2cc3f0b97b4c180e4d1c`, with dirty changes. `browser_basics.rs` already defines `referrer` as an empty string. Its owned scope includes document basics, navigator and the host integration. No implementation was copied or changed. The work log names only `docs/decisions.md` and `docs/progress.md`; worktree status and branch paths were rechecked before edits in `ownership-final.txt`.
+
+The local reduction proves the missing host value independently of network/app data. It does not prove that Task 24 makes either live application functional. The owner authorized merge of this evidence-only PR after publication. Implementation remains with Task 24. Not tested: Task 24 branch execution, instrumented live stack mapping, application interactions, browser oracle, workspace suite, public journeys, cost matrix, typing, or execution comparison. No code or budget change.
+
+Both HTTP reductions exited zero. Each logged `receiver undefined`, the exact split TypeError, then `empty-string-completed`. BBC took 5.8 ms with peak RSS 12884 KiB; Dailymotion took 5.9 ms with peak RSS 12868 KiB. Each local document returned HTTP 200. A self-contained combined form, served over loopback HTTP, is:
+
+```html
+<!doctype html><script>
+function bbc() { return document.referrer.split("https://www.bbc.com/"); }
+function dailymotion() { return window.document.referrer.split("?")[0].slice(0,100); }
+console.log(typeof document.referrer);
+for (const run of [bbc, dailymotion]) {
+  try { run(); } catch (error) { console.error(error); }
+}
+Object.defineProperty(document, "referrer", {value: "", configurable: true});
+console.log(bbc().length === 1, dailymotion() === "");
+</script>
+```
+
+The actual executed fixtures run each expression in a separate document. Their descriptor supplies only the missing local input. It is not a proposed host implementation or proof of Task 24's integration.
+
+Final gated rebase: acquired `merge-gate acquire bst11`, fetched origin and rebased on `f71442740adb11b657b2ce701634488045f7a567`. Measurement BASE remains frozen at `617cb19f8984a6781e5e31a4655e3d598f705d17`. Reviewed the final diff, verified all retained downloaded script hashes and both HTTP reduction outputs, and ran `git diff --check`. Documentation-only validation: no suite or matrix rerun after rebase.
+
+Merge authorization: the owner requested merge of #348. Final merge rebase uses `59d086ba68e26a68b1f53fa80e304e8c48fdc19f`. Preserve all other sections and append this section at the end. Validation remains documentation-only; no matrix or suite ran.
