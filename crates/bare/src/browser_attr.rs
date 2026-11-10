@@ -172,6 +172,7 @@ impl IndexedSource for Dom {
     }
 
     fn indexed_len(&self, owner: ObjId) -> Result<usize, HeapError> {
+        if let Some(r) = crate::browser_media::caption_len(self, owner) { return r; }
         if let Some(r) = crate::browser_nodelist::len(self, owner) {
             return r;
         }
@@ -181,6 +182,7 @@ impl IndexedSource for Dom {
     }
 
     fn indexed_item(&self, owner: ObjId, index: usize) -> Result<Slot, HeapError> {
+        if let Some(r) = crate::browser_media::caption_item(self, owner, index) { return r; }
         if let Some(r) = crate::browser_nodelist::item(self, owner, index) {
             return r;
         }
