@@ -11,8 +11,14 @@ pub(crate) fn define(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     }
     let source = format!("{}{}", crate::browser_fontface::SOURCE, SOURCE);
     let s = it.heap.intern_str(&source).map_err(|e| it.heap_error(e))?;
-    it.eval_global(Value::String(s))?;
+    let factory = it.eval_global(Value::String(s))?;
+    let validate = d.add_fn(it, is_document, "isDocument", 1, false)?;
+    it.call(factory, Value::Undefined, &[Value::Object(validate)])?;
     Ok(())
+}
+
+fn is_document(d: &Dom, _: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
+    Ok(Value::Bool(d.node_of(a.first().copied().unwrap_or(Value::Undefined)).is_some_and(|n| matches!(d.doc.borrow().data(n), bare_html::dom::NodeData::Document))))
 }
 
 const SOURCE: &str = r#"
@@ -23,8 +29,7 @@ const has = Function.prototype.call.bind(Set.prototype.has);
 const clear = Function.prototype.call.bind(Set.prototype.clear);
 const each = Function.prototype.call.bind(Set.prototype.forEach);
 const size = Function.prototype.call.bind(Object.getOwnPropertyDescriptor(Set.prototype,'size').get);
-const documentOwner = document;
-let documentSet;
+const documents = new WeakMap();
 function set(value) {
     if (!weakHas(sets,value)) throw new TypeError('Expected a FontFaceSet');
     return weakGet(sets,value);
@@ -72,9 +77,9 @@ class FontFaceSet {
     }
 }
 Object.defineProperty(Document.prototype, 'fonts', {configurable:true,enumerable:true,get:function() {
-    if (this !== documentOwner) throw new TypeError('Expected document');
-    if (documentSet === undefined) documentSet = new FontFaceSet();
-    return documentSet;
+    if (!isDocument(this)) throw new TypeError('Expected document');
+    if (!weakHas(documents,this)) weakSet(documents,this,new FontFaceSet());
+    return weakGet(documents,this);
 }});
-})();
+})
 "#;

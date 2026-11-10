@@ -1,7 +1,7 @@
 //! The bounded font model stores descriptors but does not fetch or decode font data.
 //! The source runs only after a font API name is read. Private weak maps provide brands.
 pub(crate) const SOURCE: &str = r#"
-(function () {
+(function (isDocument) {
 'use strict';
 const weakHas = Function.prototype.call.bind(WeakMap.prototype.has);
 const weakGet = Function.prototype.call.bind(WeakMap.prototype.get);

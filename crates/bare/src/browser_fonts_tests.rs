@@ -45,6 +45,8 @@ fn fonts_validate_members_receivers_and_conversions() {
         assert_eq!(js(&mut b,"var n=0;for(var args of [[Symbol(),'local(x)'],['x',Symbol()],['x','local(x)',{weight:Symbol()}]]){try{Reflect.construct(FontFace,args)}catch(e){if(e instanceof TypeError)n++}}n"),"3");
         assert_eq!(js(&mut b,"var n=0;try{Object.getOwnPropertyDescriptor(Document.prototype,'fonts').get.call({})}catch(e){if(e instanceof TypeError)n++}try{Object.getOwnPropertyDescriptor(FontFace.prototype,'loaded').get.call({})}catch(e){if(e instanceof TypeError)n++}n"),"2");
         assert_eq!(js(&mut b,"Object.getOwnPropertyNames(globalThis).includes('FontFace') && Object.getOwnPropertyNames(Document.prototype).includes('fonts')"),"true");
+        assert_eq!(js(&mut b,"var otherDoc=document.implementation.createHTMLDocument('Other');otherDoc.fonts!==s && otherDoc.fonts===otherDoc.fonts && otherDoc.fonts.ready===otherDoc.fonts.ready && otherDoc.fonts.size===0"),"true");
+        assert_eq!(js(&mut b,"var localFace=new FontFace('Local','local(Local)');otherDoc.fonts.add(localFace);otherDoc.fonts.size+','+s.size"),"1,0");
         let mut other=mk(None,FetchLimits::default());
         assert_eq!(js(&mut other,"document.fonts.size"),"0");
     });
