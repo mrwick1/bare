@@ -217,8 +217,9 @@ fn script_count_source_and_node_limits() {
 
         let mut it = realm(EvalLimits { max_script_source: 100, ..limits() });
         let s60 = format!("var a = 1; /*{}*/", "x".repeat(40));
+        let s60b = format!("var a = 2; /*{}*/", "x".repeat(40));
         assert_eq!(out(&mut it, &s60), "undefined");
-        assert_eq!(out(&mut it, &s60), "limit:ScriptSource");
+        assert_eq!(out(&mut it, &s60b), "limit:ScriptSource");
         assert_eq!(it.stats().script_source, s60.len());
         assert_eq!(out(&mut it, "a"), "1");
 
@@ -228,6 +229,44 @@ fn script_count_source_and_node_limits() {
         assert_eq!(out(&mut it, big_src), "limit:ScriptNodes");
         assert!(it.stats().script_nodes <= 30);
         assert_eq!(out(&mut it, "typeof b"), "undefined");
+    });
+}
+
+/// A harness that polls with the same text (`expect js`) must not fill the script table: Chrome has no such count.
+#[test]
+fn the_same_text_keeps_one_script() {
+    big(|| {
+        let mut it = realm(EvalLimits { max_scripts: 9, ..limits() });
+        for i in 1..=5000 {
+            assert_eq!(out(&mut it, "var n = (typeof n === 'number' ? n : 0) + 1; n"), i.to_string());
+        }
+        assert_eq!(it.stats().scripts, 2);
+        // Another text still gets its own slot, and the limit still holds.
+        assert_eq!(out(&mut it, "n + 1"), "5001");
+        assert_eq!(it.stats().scripts, 3);
+        // Each run of a repeated text makes its own functions, and a repeated lexical is still refused.
+        assert_eq!(out(&mut it, "typeof (function () { return 7 })"), "function");
+        assert_eq!(out(&mut it, "globalThis.f1 = (() => { var c = 0; return () => ++c })(); f1()"), "1");
+        assert_eq!(out(&mut it, "globalThis.f2 = (() => { var c = 0; return () => ++c })(); f2()"), "1");
+        assert_eq!(out(&mut it, "globalThis.f1 = (() => { var c = 0; return () => ++c })(); f1()"), "1");
+        assert_eq!(out(&mut it, "f2() + f2()"), "5");
+        assert_eq!(out(&mut it, "let once = 1; once"), "1");
+        assert_eq!(out(&mut it, "let once = 1; once"), "throw:SyntaxError:Identifier 'once' has already been declared");
+        assert_eq!(it.stats().scripts, 8);
+        assert_eq!(out(&mut it, "1 + 8"), "9");
+        // A full realm refuses every new text, a repeated one too.
+        assert_eq!(out(&mut it, "1 + 9"), "limit:Scripts");
+        assert_eq!(out(&mut it, "1 + 8"), "limit:Scripts");
+    });
+}
+
+/// `new Function` with a repeated text shares the parsed code, not the functions.
+#[test]
+fn function_constructor_shares_code_for_the_same_text() {
+    big(|| {
+        let mut it = realm(EvalLimits { max_scripts: 8, ..limits() });
+        assert_eq!(out(&mut it, "var fs = []; for (let i = 0; i < 5000; i++) fs.push(new Function('a', 'return a + 1')); fs[0] !== fs[1] && fs[4999](1) === 2"), "true");
+        assert_eq!(it.stats().scripts, 3);
     });
 }
 

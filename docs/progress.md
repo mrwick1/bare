@@ -6204,3 +6204,82 @@ After the final rebase: base `1414387821` (origin/main after PR #334), a fresh `
 - The peak with jemalloc.
 - Which vimeo script makes the sparse objects.
 - arjun-e16 and macOS.
+
+## Script slots for repeated text and 64 KiB selectors (2026-11-10)
+
+Two limits of `bare` stopped pages that Chrome loads: `Limit("Scripts")` (eu-europa, substack) and `Host("dom-selector")` (two GitHub pages). Chrome has neither. Final base for the cost check: origin/main `1414387821` (#334), from `base-build`. The branch was rebased on it at the end. Main then moved by documentation only (`c6ab5f99`), so the branch was rebased on that without a new run. Earlier measurements (the first full runs, the `reject` table and the live results) used `1bec71ae9b` (#330) or `ff02f72b56` as base, as the text says.
+
+### Cause found: scripts
+
+A temporary counter in `add_script_kind` (not in the change) logged the caller (`#[track_caller]`), the kind and a hash of each text on `bare-drive` runs of both pages.
+
+| page | adds | by caller | different texts | the most repeated text |
+| --- | --- | --- | --- | --- |
+| eu-europa | 9,227 | `Browser::run_script` 9,221 (Classic), `eval_modules` 4 (Module), `Function` constructor 2 | 12 | 9,211 times, 39 bytes |
+| substack | 4,150 | `Browser::run_script` 4,061 (Classic), `eval_modules` 89 (Module) | 96 | 4,055 times, 39 bytes |
+
+The 39 bytes are `!!(document.readyState === 'complete'` + newline + `)`: the poll of the `expect js` step of `bare-drive` (`crates/drive/src/run.rs:592`). It runs one script for each tick, and a realm keeps every script until it ends. The pages themselves add 12 and 96 different texts. A run is stopped by `Limit("Scripts")` only when the page takes long enough for 4,096 ticks, so the result changes from run to run (substack passed once and failed once on the base build).
+
+### Change
+
+- `add_script_kind` (`eval_scripts.rs`): a classic script with the same text as an earlier one gets that slot. `Interp::script_ids` has 4,096 buckets of 4 bytes (16 KiB, allocated at the first script). The bucket comes from a multiply hash of the text, and a hit needs equal bytes. A text that lands on a used bucket takes it over, so a collision costs one extra slot and never a wrong result. A run still instantiates the code again, so each run makes its own functions and checks its own `let` and `const` names. Modules do not share a slot. A realm at `max_scripts` refuses first (a repeated text too), as before.
+- A slot of a small script costs about 1 KB (246 B nodes, 92 B caches, 240 B `Code`, 416 B `Program`, about 10 allocations; measured with 2,000 scripts of 40 bytes). 4,096 slots are about 4 MB.
+- `browser.rs`: `max_selector_len` 1,024 -> 65,536. GitHub sends lists of 3,387, 3,497 and 3,987 bytes (`.js-remove-unless-platform, [data-analytics-visible], html[data-a11y-animated-images="system"] img[...] ...`) to `querySelectorAll`. A selector parse is charged 4 steps for each byte. The new-name bound is `name_count + len / 2 + 1 <= max_names` (it was `len`). `sel_cache` holds at most 256 selectors and now also at most 128 KiB of text (`SEL_CACHE_BYTES`).
+- `docs/decisions.md`: the limits above, and the lines for #316, #317 and #320 that were missing. The brief said "stream request bodies buffered" for #317. The code does not buffer them: a `ReadableStream` body throws `TypeError` (`browser_fetch.rs:898`). The line says what the code does.
+
+### Tests (each failed on main first)
+
+- `the_same_text_keeps_one_script` (JS): 5,000 runs of one text with `max_scripts: 8`. On main: `limit:Scripts` at run 8. It also checks closures per run, a repeated `let` (`SyntaxError`) and the refusal at a full realm.
+- `function_constructor_shares_code_for_the_same_text`: 5,000 `new Function` with one text. On main: `limit:Scripts`.
+- `long_selector_lists_parse_and_the_caches_stay_bounded` (bare): a 3,492-byte list works; a list over the cap gives `dom-selector`; a short name table gives `dom-names`; a 40,000-byte parse needs 160,000 steps (`Steps` at a 100,000 budget); the cache never holds more than `SEL_CACHE_BYTES`. On main: `limit:Host("dom-selector")` for the 3,492-byte list.
+- `selectors_lookups_and_errors`: a 2,000-byte selector now gives `null`; one byte over the cap gives `dom-selector`. On main the 2,000-byte selector gave `dom-selector`.
+- `a_long_selector_ends_only_its_task` uses a 70,000-byte selector now.
+- `script_count_source_and_node_limits` used one text twice to fill `max_script_source`. It uses two texts now, since a repeated text adds no source.
+- Indirect `eval` has no test of its own: `eval` exists only in the browser layer, and it uses the same `add_script` path as `Function`.
+
+### Cost of a selector parse
+
+`perf stat -e instructions:u` of 21 and of 1 parses (distinct texts, a detached element, difference / 20): a list of `.cN,` entries (62 KB) 33.0 M instructions (about 530 for each byte); a list of `a,` of 64,000 bytes 67.5 M (about 1,050 for each byte, the worst); a list of `a[bN="v"] > c,` (60 KB) 22.7 M (about 380 for each byte). One step costs about 370 instructions in a loop that reads `childNodes.length` (4,000,000 steps, 1.48 G instructions). So 4 steps for each byte.
+
+### Cost (full matrix)
+
+- `tools/js/cost_matrix.sh`, 805 rows, base `1414387821`, run after the final rebase. No row is over +0.5% under both allocators. Mean change -0.039% glibc, +0.040% jemalloc. One row is over under glibc only: `reflect_load keys 1` +0.890% (jemalloc +0.040%). The run before the last rebase (base `81a5f771ab`) had three such rows: `reflect_load keys 1` +0.887% (jemalloc +0.039%), `resources_load small 1` +0.556% (jemalloc -0.016%), `resources_load small 10` +1.279% (jemalloc -0.183%). I did not check whether `resources_load small` runs a changed path (to verify). The run on base `1bec71ae9b` had `reflect_load keys 1` +0.887% and `form_load gates 1` and `10` (+0.655%, +0.699%) over under glibc only, and the same mean. The cause of these glibc-only rows is not found (to verify).
+- First attempt, a map of all texts (`FxMap<u64, u32>` with `std` insert): `scripts_load many 10` +0.770% glibc and +0.754% jemalloc, `many 1` +0.522% and +0.340%. That is over under both. Cause: 275 instructions for each distinct add (hash, miss, insert, growth). Structural change: a table of 4,096 buckets, no growth: `many 10` +0.361%.
+- Second: the hash of `parse_cache` copies the remainder with `memcpy`, and a refused add (a realm at `max_scripts`) did the lookup. `scripts_load reject` with the same setup on both sides was +1.05% and +1.31%. An own hash (overlapping read of the last 8 bytes) and the limit check before the lookup: `reject 1` +0.20%, `reject 10` +0.23%, `many 1` +0.203%, `many 10` +0.270%.
+- The `reject` rows of `scripts_load` do another setup now. The old loop filled the table with 63 runs of `var keep = 1;`, which keeps one slot now and never reaches 64. It ran for 63 minutes at 100% CPU in the first full run (that run was stopped). The example fills with `var keep{i} = 1;`. So the counts of the `reject` rows are not comparable with the base rows. All numbers are `tools/js/instr.sh` (minimum of 3, glibc), instructions:
+
+| row | base, old setup | base code, new setup | new code, new setup |
+| --- | ---: | ---: | ---: |
+| `scripts_load reject 1` | 24,305,998 | 23,659,903 | 23,708,070 |
+| `scripts_load reject 10` | 193,469,564 | 185,399,424 | 185,825,555 |
+
+  The matrix, which compares the old setup of the base with the new setup of the new code, gives `reject 1` -0.7% and `reject 10` -1.8% (glibc). That is the setup, not the change. With the same setup on both sides it is +0.20% and +0.23%. The "base code, new setup" binary was built in a separate worktree of origin/main with only the example changed (`/data/bare-tmp/ssl/basepatch`).
+- Other gates on the final code: `cargo test --release --workspace` 3,360 passed, 0 failed, 13 ignored (before the last rebase; after it `bare-js` and `bare` pass 2,080 tests). `test262_check.sh` gate ok. `exec_diff.sh` 79 runs, 0 differences. `keycost.sh`: 282.2 M instructions for each key in `#a1`, 287.5 M in `#f0`, peak RSS 32.9 MiB at 20 keys and 33.3 MiB at 50 keys (same as before). `tools/drive/public/run.sh`: 48 pass, 0 fail, 0 flakes.
+
+### Live results
+
+`bare-drive`, `timeout 30000`, `open URL`, `expect js "document.readyState === 'complete'"`, `shot s`. `perf stat -e instructions:u` includes the network wait. Peak RSS from `runs` of the result. Before: main `1bec71ae9b`. After: this branch. One run each (the page timing changes between runs).
+
+| page | before | after |
+| --- | --- | --- |
+| eu-europa | fail, `Limit("Scripts")`, 3.23 G instr, 42.0 MiB | pass, no console message, 4.69 G instr, 48.5 MiB |
+| substack | fail, `Limit("Scripts")`, 9.44 G instr, 78.5 MiB | pass, first console error `Uncaught (in promise) TypeError: Cannot read properties of undefined (reading 'startsWith') at script#95`, 12.75 G instr, 92.9 MiB |
+| github-repo | pass, first console error `Script aborted: the Host("dom-selector") budget ended the microtask checkpoint` (1 of 5 aborts), 4.72 G instr, 150 MiB | pass, no `dom-selector` message; first error `Uncaught (in promise) ReferenceError: CSS is not defined at J (script#13)`, 11.8 G instr, 193 MiB |
+| github-readme | same as github-repo, 4.72 G instr, 151 MiB | same as github-repo after, 11.5 G instr, 188 MiB |
+
+Before the Intl change in main, GitHub stopped at `timeZoneName`. Now both GitHub pages complete without a stop. The after runs do more work, since the page goes on after the selector (the GitHub scripts run to the end), so the instruction and RSS counts rise. An earlier probe on the base of the first measurement (`ff02f72b56`) gave the same `Limit("Scripts")` failure for eu-europa and a pass for substack.
+
+### Limits
+
+- A realm that holds 4,096 different texts refuses every new text, also a repeated one. The old behavior is the same.
+- Two different texts that land on one bucket and alternate in a loop add a slot for each run. The table is not a map of all texts.
+- A selector at the cap is parsed once for each text, and uncached after 128 KiB of other long selectors. The 50 times estimate of a parsed selector (about 6.5 MB worst case for the cache) is from node sizes, not a measured peak.
+- Eight sites that the plan lists as stopped by `Limit(Scripts)`: only eu-europa and substack were checked here.
+
+### Not tested
+
+- Indirect `eval` with a repeated text (no browser-level test; same path as `Function`).
+- A page that adds more than 4,096 different texts.
+- The jemalloc counts of the three glibc-only rows are under +0.05%, but the cause of the glibc rise is not found.
+- Chrome as an oracle for selector lengths.
+- The other six sites of the plan that stop on `Limit(Scripts)`.

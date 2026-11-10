@@ -12,12 +12,35 @@
 // - Every closure records `script`, the slot of the script that made it. `call_script` selects that script
 //   and puts the caller's script back on every exit, normal, throw or limit.
 // - Names are interned once for the whole realm (`names`), so a binding name means the same in every script.
-// - Retention: a script and its caches stay until the realm is dropped, even if no closure reaches them. The
+// - Retention: a script and its caches stay until the realm is dropped, even if no closure reaches them. A classic
+//   script with the same text as an earlier one reuses that slot (`script_ids`, one bucket for each hash). The
 //   bounds are `EvalLimits::max_scripts`, `max_script_source` and `max_script_nodes`, checked before the
 //   source is parsed and while it is parsed. A script rejected during parse or preflight is not kept and
 //   its interned names are removed again. Runtime failures keep code for already-created closures.
 //
 // GC: `script_roots` gives the parked scripts' cached strings to `roots`. The names are rooted once.
+
+/// Bits of the hash that pick a bucket of `Interp::script_ids` (4,096 buckets, 16 KiB).
+const SCRIPT_IDS_BITS: u32 = 12;
+
+/// A multiply hash of the text for `Interp::script_ids`. The last bytes are read as an overlapping word, so it has no copy of a
+/// remainder (a `memcpy` call cost more than the rest for a text of 10 bytes).
+fn script_hash(b: &[u8]) -> u64 {
+    const K: u64 = 0x517c_c1b7_2722_0a95;
+    let n = b.len();
+    let mut h = n as u64;
+    if n >= 8 {
+        for w in b.chunks_exact(8) {
+            h = (h.rotate_left(5) ^ u64::from_le_bytes(w.try_into().unwrap())).wrapping_mul(K);
+        }
+        h = (h.rotate_left(5) ^ u64::from_le_bytes(b[n - 8..].try_into().unwrap())).wrapping_mul(K);
+    } else if n >= 4 {
+        h ^= (u32::from_le_bytes(b[..4].try_into().unwrap()) as u64) << 32 | u32::from_le_bytes(b[n - 4..].try_into().unwrap()) as u64;
+    } else if n > 0 {
+        h ^= (b[0] as u64) << 16 | (b[n / 2] as u64) << 8 | b[n - 1] as u64;
+    }
+    h.wrapping_mul(K)
+}
 
 /// The per-script code and caches (see the header). The slot of the current script holds an empty placeholder.
 struct Code {
@@ -118,6 +141,19 @@ impl<'p> Interp<'p> {
         if self.scripts.len() >= self.limits.max_scripts {
             return Err(Error::Limit(LimitKind::Scripts));
         }
+        // The same classic text keeps one slot: its code and caches do not depend on how often it runs, and a new run only
+        // instantiates it again. Each run still makes its own functions and checks its own declarations. A harness that
+        // polls with one text (`expect js`) would otherwise fill `max_scripts`. A full realm refuses first, so a refusal costs no lookup.
+        let key = (kind == crate::parse_cache::Kind::Classic).then(|| (script_hash(source.as_bytes()) >> (64 - SCRIPT_IDS_BITS)) as usize);
+        if let Some(k) = key {
+            if let Some(&id) = self.script_ids.get(k).filter(|&&id| id != 0) {
+                let id = id as usize - 1;
+                let prog = if id == self.cur { &self.prog } else { &self.scripts[id].prog };
+                if prog.source == source {
+                    return Ok(id);
+                }
+            }
+        }
         let src_room = self.limits.max_script_source.saturating_sub(self.script_source);
         let per_script_source = src_room.min(crate::lex::MAX_SOURCE_LEN);
         if source.len() > per_script_source {
@@ -162,6 +198,12 @@ impl<'p> Interp<'p> {
         }
         self.script_source += source.len();
         self.script_nodes += nodes;
+        if let Some(k) = key {
+            if self.script_ids.is_empty() {
+                self.script_ids = vec![0; 1 << SCRIPT_IDS_BITS];
+            }
+            self.script_ids[k] = id as u32 + 1;
+        }
         Ok(id)
     }
 

@@ -538,6 +538,9 @@ pub struct Interp<'p> {
     hs: Box<HScope>,
     script_source: usize,
     script_nodes: usize,
+    /// Classic scripts by the hash of their text, so the same text keeps one slot (`add_script_kind`). One slot for each bucket
+    /// (id + 1, 0 is empty); a text that lands on a used bucket takes it over. Allocated at the first script.
+    script_ids: Vec<u32>,
     _p: PhantomData<&'p ()>,
     /// The heap. Public so a host can read results. Do not collect it directly: use [`Interp::collect`].
     pub heap: Heap,
@@ -743,6 +746,7 @@ impl<'p> Interp<'p> {
             hs: Box::default(),
             script_source: prog.source.len(),
             script_nodes: stats.nodes() + stats.list_items,
+            script_ids: Vec::new(),
             _p: PhantomData,
             strict: prog.strict,
             cur_strict: prog.strict,

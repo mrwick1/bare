@@ -141,6 +141,36 @@ fn attributes_and_selector_caches() {
     });
 }
 
+/// GitHub sends selector lists of 3 to 4 KB to `querySelectorAll`. Chrome has no length cap.
+#[test]
+fn long_selector_lists_parse_and_the_caches_stay_bounded() {
+    big(|| {
+        let mut b = browser();
+        let list = |tag: &str, n: usize| (0..n).map(|i| format!(".{tag}{i}")).collect::<Vec<_>>().join(",");
+        let long = format!("{},#s", list("c", 600));
+        assert!(long.len() > 3000 && long.len() < 4500, "{}", long.len());
+        assert_eq!(js(&mut b, &format!("document.querySelectorAll('{long}').length")), "1");
+        // Over the cap, the length check is the first one.
+        let over = "a,".repeat(BrowserLimits::default().max_selector_len / 2 + 1);
+        assert_eq!(js(&mut b, &format!("document.querySelectorAll('{over}')")), lim("dom-selector"));
+        // New names are bounded before the parse: a short table refuses a list of many tags.
+        let mut small = browser_with(PAGE, BrowserLimits { max_names: 100, ..Default::default() });
+        let tags = (0..300).map(|i| format!("x{i}")).collect::<Vec<_>>().join(",");
+        assert_eq!(js(&mut small, &format!("document.querySelectorAll('{tags}')")), lim("dom-names"));
+        // A parse is charged by its bytes (4 steps each): 40,000 bytes need 160,000 steps.
+        let mut tight = Browser::new(tree::parse(PAGE), BrowserLimits::default(), EvalLimits { max_steps: 100_000, ..Default::default() }, HeapLimits::default()).unwrap();
+        assert_eq!(js(&mut tight, &format!("document.createElement('p').querySelectorAll('{}a').length", "a,".repeat(5000))), "0");
+        assert_eq!(js(&mut tight, &format!("document.createElement('p').querySelectorAll('{}b').length", "b,".repeat(20000))), "limit:Steps");
+        // The cache holds at most SEL_CACHE_BYTES of text, whatever the number of long selectors.
+        for i in 0..200 {
+            assert_eq!(js(&mut b, &format!("document.querySelectorAll('{}').length", list(&format!("k{i}_"), 700))), "0");
+            let st = b.dom.st.borrow();
+            let bytes: usize = st.sel_cache.keys().map(|k| k.len()).sum();
+            assert!(bytes <= SEL_CACHE_BYTES && bytes == st.sel_cache_bytes, "{bytes} {}", st.sel_cache_bytes);
+        }
+    });
+}
+
 #[test]
 fn selectors_lookups_and_errors() {
     big(|| {
@@ -149,7 +179,8 @@ fn selectors_lookups_and_errors() {
         assert_eq!(js(&mut b, "document.getElementById('a').querySelector('#a')"), "null"); // only descendants
         assert_eq!(js(&mut b, "document.querySelector('p[')"), "throw:SyntaxError:'p[' is not a valid selector");
         assert_eq!(js(&mut b, "document.querySelector('a b c d e f g')"), lim("dom-selector-complexity"));
-        assert_eq!(js(&mut b, &format!("document.querySelector('{}')", "a".repeat(2000))), lim("dom-selector"));
+        assert_eq!(js(&mut b, &format!("document.querySelector('{}')", "a".repeat(2000))), "null");
+        assert_eq!(js(&mut b, &format!("document.querySelector('{}')", "a".repeat(BrowserLimits::default().max_selector_len + 1))), lim("dom-selector"));
         // a detached subtree is searched too, and is not found from the document
         assert_eq!(js(&mut b, "var d = document.createElement('div'); d.innerText2 = 1; d.appendChild(document.createElement('b')); [d.querySelector('b').tagName, document.querySelector('b'), d.isConnected].join()"), "B,,false");
         // the cause of the error is a DOMException-like object that inherits from Error

@@ -167,8 +167,11 @@ fn exec(name: &str, scale: usize) {
             expect("host", run(&mut it, "c"), want.to_string());
         }
         "reject" => {
+            // The same text keeps one slot, so each filler needs its own text.
+            let mut i = 0;
             while it.stats().scripts < 64 {
-                run(&mut it, "var keep = 1;");
+                run(&mut it, &format!("var keep{i} = 1;"));
+                i += 1;
             }
             let before = it.stats();
             for _ in 0..5000 * scale {
