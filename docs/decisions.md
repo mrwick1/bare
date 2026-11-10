@@ -1199,3 +1199,6 @@ Owner request: a small MCP server, so that an agent can run end-to-end tests in 
 - The file is Playwright's `storageState` JSON plus a `sessionStorage` list in each origin. A file made by Playwright in real Chrome then loads, so a session can pass bot challenges and 2FA outside `bare`. Unknown fields are ignored.
 - The file holds live credentials. It has mode 0600 on Unix and is written by temporary file and rename. No value goes to a report, a log or an error message. A step output gives counts only.
 - IndexedDB is not saved. We add it when a journey needs it.
+- `bare-mcp` keeps saved sessions in memory by default, so tokens never touch disk. It writes a file only when a call gives `file`.
+- `ensure_session` follows Cypress `cy.session`: restore, run a check, and log in again with an empty profile when the check fails. The check is the validation.
+- The live page stays open on the checked page. The agent goes on with `step` and does not log in or open the page a second time.

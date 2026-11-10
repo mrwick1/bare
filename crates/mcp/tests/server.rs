@@ -237,7 +237,6 @@ fn ensure_session_with_a_wrong_login_is_an_error_with_the_failing_step() {
 
 #[test]
 fn save_state_writes_a_private_file_and_open_restores_a_name() {
-    use std::os::unix::fs::PermissionsExt;
     let file = state_file("save");
     let mut s = Server::start();
     let args = ensure_args("n", "save");
@@ -245,7 +244,8 @@ fn save_state_writes_a_private_file_and_open_restores_a_name() {
     assert_eq!(rep["session"], "created", "{rep}");
     let (rep, error) = s.tool("save_state", json!({"name": "n2", "file": file.to_str().unwrap()}));
     assert!(!error && rep["saved"] == "n2" && rep["origins"] == 1, "{rep}");
-    assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
+    #[cfg(unix)]
+    assert_eq!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&file).unwrap().permissions()) & 0o777, 0o600);
     // No reply from now on may hold a value of the file.
     let saved: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
     let token = saved.to_string().split("app-token-").nth(1).map(|t| format!("app-token-{}", &t[..1])).expect("a token in the file");
