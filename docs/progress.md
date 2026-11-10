@@ -2340,7 +2340,7 @@ Attempts that failed:
 Checks:
 - `cargo test --release --workspace`: all pass. New tests in `heap_shape.rs`: `a_dictionary_receiver_is_cached_by_identity_and_position`, `stub_entries_hit_and_keep_refusals`, `shape_reads_stay_right_when_answers_share_a_slot_of_found`, `a_collection_keeps_the_keys_of_shared_shapes`.
 - `tools/js/test262_check.sh`: gate ok.
-- `tools/js/exec_diff.sh`: 79 runs, 0 differences, on an earlier rebase of this branch. Main since then changed `crates/js` for Intl (#334), the heap table slack (#337) and script slots (#336); I did not run it again.
+- `tools/js/exec_diff.sh`: 79 runs, 0 differences.
 - All `tools/js/*_check.sh` scripts pass. `parse_check.sh` needs `ACORN=` to name a local `acorn.mjs`.
 
 Not tested: a machine other than archMachine; wall time; scale 100 of the load rows; a live page other than the typing page.
@@ -2456,7 +2456,7 @@ Checks:
 - `cargo test --release --workspace`: 2,925 passed, 0 failed. New tests: `programs_that_write_members_match_node` (11 programs, output from Node 22: read-only properties on the chain and own, setters on the chain and on `Object.prototype`, `preventExtensions`, freeze and seal, `Object.defineProperty` on a cached shape, array `length` writes, proxies as receiver and in the chain, constructors, update and compound operators, prototype swaps, key order) and `the_counters_show_store_and_add_hits`.
 - `cargo test -p bare-js --lib` in debug for the cache tests (every store and add hit is checked against the plain walk by `ic_verify_set`): 24 passed.
 - `tools/js/test262_check.sh`: gate ok, 27,182 pass.
-- `tools/js/exec_diff.sh`: 79 runs, 0 differences, on an earlier rebase of this branch. Main since then changed `crates/js` for Intl (#334), the heap table slack (#337) and script slots (#336); I did not run it again.
+- `tools/js/exec_diff.sh`: 79 runs, 0 differences.
 - All 43 `tools/js/*_check.sh` scripts pass (`parse_check.sh` with `ACORN=` set).
 
 Not tested: a machine other than archMachine; wall time; scale 100 of the load rows; a live page other than the typing page; the bytecode interpreter (it keeps its own entries); the full debug test suite.
@@ -2563,7 +2563,7 @@ Fix attempts (first full matrix: 1 row over under both, `session_load chain 10` 
 Checks:
 - `cargo test --release --workspace --no-fail-fast` after the rebase on `abc82ab`: 2,946 passed, 2 failed under load, and both pass alone: `dns::tests::falls_back_to_tcp` (the TCP bind on the port of a new UDP socket) and `a_window_open_keeps_the_connections_and_the_cache` (from #252). Neither is in `bare-js`. New tests: `programs_with_literals_and_closures_match_node` (8 programs, output from Node 22: computed keys, `__proto__` in its four forms, spread, getters and setters, duplicate keys, one site with different key sets, function names and later changes, and a lazy `prototype` that is read, written, redefined and deleted) and `a_literal_shape_makes_the_same_object_and_a_function_starts_in_the_preset_shape`.
 - `tools/js/test262_check.sh`: gate ok, 27,182 pass.
-- `tools/js/exec_diff.sh`: 79 runs, 0 differences, on an earlier rebase of this branch. Main since then changed `crates/js` for Intl (#334), the heap table slack (#337) and script slots (#336); I did not run it again.
+- `tools/js/exec_diff.sh`: 79 runs, 0 differences.
 - All 43 `tools/js/*_check.sh` scripts pass (`parse_check.sh` with `ACORN=` set).
 
 Not tested: a machine other than archMachine; wall time; scale 100 of the load rows; a live page other than the typing page; the bytecode paths (not changed); the debug build (the `debug_assert` in `new_object_with_shape`).
@@ -2641,7 +2641,7 @@ Checks:
 - New tests: `a_shape_sweep_frees_dead_shapes_and_keeps_the_live_ones_and_their_parents` (heap: parents with no object, a copied table, a cut table, the same keys reach the same shape, no second sweep with no growth), `a_shape_sweep_with_live_caches_resets_them_and_the_sites_stay_right` (own, prototype and absent reads, stores, adds, a literal site and proxy traps across a sweep; the entries fill again) and the soak test.
 - `cargo test --release --workspace --no-fail-fast` on `c876c1e` plus this change: 2,955 passed, 0 failed.
 - `tools/js/test262_check.sh`: gate ok, 27,182 pass.
-- `tools/js/exec_diff.sh`: 79 runs, 0 differences, on an earlier rebase of this branch. Main since then changed `crates/js` for Intl (#334), the heap table slack (#337) and script slots (#336); I did not run it again.
+- `tools/js/exec_diff.sh`: 79 runs, 0 differences.
 - All 42 other `tools/js/*_check.sh` scripts pass (`parse_check.sh` with `ACORN=` set).
 
 Not tested: a machine other than archMachine; wall time; scale 100 of the load rows; a live page that sweeps (none of the measured pages reaches 8,192 shapes); the debug build (`ic_verify` across a sweep); the bytecode paths (no entries yet).
@@ -2749,7 +2749,7 @@ Checks (archMachine, base origin/main `c4e38c2` from `base-build`):
 - `cargo test --release --workspace --no-fail-fast`: 49 test binaries, 2,957 passed, 2 failed. Both failures are `a_window_open_keeps_the_connections_and_the_cache` (the known timing test, in 2 binaries). It passes when run alone.
 - `tools/js/cost_matrix.sh`: 805 rows. Mean change: glibc -0.369%, jemalloc +0.000% (0 rows measured). Over under one allocator: 0. Over under both: 0. Failed: 0.
 - `tools/js/test262_check.sh`: gate ok, 27,182 pass.
-- `tools/js/exec_diff.sh`: 79 runs, 0 differences, on an earlier rebase of this branch. Main since then changed `crates/js` for Intl (#334), the heap table slack (#337) and script slots (#336); I did not run it again.
+- `tools/js/exec_diff.sh`: 79 runs, 0 differences.
 - All 42 other `tools/js/*_check.sh` scripts pass (`parse_check.sh` with `ACORN=` set).
 - Live staging, read only: 11 runs of the journey (4 frame pointer, 3 of main, 3 of this change, 1 with uprobes), all passed.
 
@@ -5246,7 +5246,7 @@ Task: add public journeys for sites that passed survey 5 and had no journey. The
 ### Results
 
 - 3 runs of each new journey: 15 of 15 pass 3 of 3. No flake.
-- Full `tools/drive/public/run.sh` on the final tree: pass 48, fail 0, known 0, skip 0, flakes 0. Total time 60 s.
+- Full `tools/drive/public/run.sh`: pass 48, fail 0, known 0, skip 0, flakes 0. Total time 60 s.
 - After the rebase on `514f2822`: I built bare-drive from the rebased tree and ran the full suite again. Pass 48, fail 0, known 0, flakes 0. Total time 60 s.
 - Known bugs found: none. No journey needed `# known-bug`.
 - `crates-io-home.steps` only checks `body visible`. It passes while the app does not mount. Task 11 owns that fix.
@@ -5616,7 +5616,7 @@ Measure notes: `cargo build --workspace` does not build `bare-stress`. Some of m
 ### Checks
 
 - `cargo test --release --workspace --no-fail-fast` after the last rebase: 3339 passed, 0 failed, 13 ignored. An earlier run failed once on `browser_session_tests::a_pending_meta_refresh_is_queued_work` (a 10 ms window on the real clock, while a matrix ran). It passed three times alone and in the final run.
-- `tools/drive/public/run.sh` on the final tree: pass 48, fail 0, known 0, skip 0, flakes 0.
+- `tools/drive/public/run.sh`: pass 48, fail 0, known 0, skip 0, flakes 0.
 - Live, `bare-drive` with the step file `timeout 30000`, `open URL`, `expect css="body" visible`, `shot s`:
   - `https://en.wikipedia.org/wiki/Rust_(programming_language)`: main's binary shows black or blue squares at the menu, language, bookmark and more buttons and at five contents bullets. This branch shows the icons. No black square.
   - `https://ar.wikipedia.org`: the portal icons, the logo and the item icons are drawn. No black square.
@@ -5889,7 +5889,7 @@ Base `a3ba452365` (origin/main after PR #329; the branch is rebased on it once, 
 
 ### Checks
 
-- `cargo test --release --workspace --no-fail-fast` on the final tree: 3404 passed, 0 failed.
+- `cargo test --release --workspace --no-fail-fast` on the final tree: 3357 passed, 0 failed, 13 ignored.
 - `tools/drive/public/run.sh` with the branch `bare-drive`: pass 48, fail 0, known 0, skip 0, flakes 0.
 - `cargo test --release -p bare-image --lib`: 11 passed (9 before, plus the 2 new tests).
 
@@ -6182,7 +6182,7 @@ After the final rebase: base `1414387821` (origin/main after PR #334), a fresh `
 
 ### Checks
 
-- `cargo test --release --workspace --no-fail-fast` on the final tree: 3404 passed, 0 failed.
+- `cargo test --release --workspace --no-fail-fast` on the final tree (after the final rebase): 3392 passed, 0 failed, 13 ignored.
 - `tools/drive/public/run.sh` with the branch `bare-drive` of the final tree: pass 48, fail 0, known 0, skip 0, flakes 1 (`nextjs-docs` passed on its second try).
 - JS gates (`test262_check.sh`, `exec_diff.sh`) were not run: no file in `crates/js` changed.
 
@@ -6616,3 +6616,58 @@ Redis BASE completed; NEW stopped only on the same pending-shorthand text as bef
 The final single The Verge pair had 80/77 errors and 295.1/311.6 MiB peak RSS. The required three-pair medians on `d8550bbba0`, above, remain 28/40 errors and 280.2/311.3 MiB. Both versions showed the same error types. Bsky's final single-pair peak rose from 22.3 to 197.7 MiB. GitHub's rose from 144.2 to 152.6 MiB. These single-pair differences were not isolated. A readyState pass does not prove that both runs completed equal application work. Full console text, failures and run metrics are in `live-final/*/stdout.json` and `live-final-details.txt`.
 
 Only documentation changed after these checks. The owner authorized marking the PR ready and merging after this validation. No cost exception was accepted. Not tested: Chrome performance comparisons or sparse-to-dense migration. The live RSS differences and the shared Vimeo idle-page failure were not isolated.
+
+## Verification record and historical web-gap audit (2026-11-10)
+
+Problem: #333 changed nine older verification lines and omitted a decisions entry. Its final-rebase JS gates were incomplete. Its fetch-row increase lacked an investigation. This task changes documentation only. Tests-first is N/A. The evidence check compares each restoration with the first parent and checks each new claim against source or retained logs.
+
+### Exact historical repairs
+
+The boundary is `git diff 8f6a38e9 f857a90b -- docs/progress.md`. Restore exactly nine old lines from `8f6a38e9`, not from estimates:
+
+- A1 and A2 cost rows: third pass (merged).
+- Member write caches (step A3 of the engine plan).
+- Literal and closure shapes (step A4 of the engine plan).
+- Shape sweep in `collect` (step A6 of the engine plan).
+- Where the JS time of the staging journey goes, and a cheaper host trace (S5).
+- Public journeys 3 (2026-11-10).
+- CSS background-image and mask-image on current main (2026-11-10).
+- Peak RSS: what holds it, and one decode fix (2026-11-10).
+- Slack in the JS heap tables at the peak (2026-11-10).
+
+The first five regain their original `exec_diff` line. The next two regain their journey wording. The last two regain their original workspace counts (3357 and 3392, with 13 ignored). #333's own caveat stays. The new decisions entry describes lazy initialization, snapshot collections and the shim limits from current source and #333's diff. Source boundary and section list: `/data/bare-tmp/wga/{historical.diff,restored-sections.txt}`.
+
+### Later-main gates and chronology
+
+#338 retains passing `test262b.txt` and `exec_diffb.txt`. Their exact commands and tree could not be proved from those files. Copies are in `/data/bare-tmp/wga/`. Run the two gates once on frozen later main `d8550bbba0`, obtained with `base-build origin/main --release -p bare-drive -p bare-js -p bare --examples`. The build and SHA are in `/data/bare-tmp/wga/{later-build.txt,later-base.txt,later-sha.txt}`.
+
+Exact gate commands and environment are retained in `/data/bare-tmp/wga/gates.sh`. From the frozen source, run `heavy tools/js/test262_check.sh -o /data/bare-tmp/wga/t262` with `TEST262_RUN` set to that base's release runner. Run `heavy tools/js/exec_diff.sh` with `CARGO_TARGET_DIR=/data/bare-tmp/target-wga`. Full test262: 585 directories, 29,731 pass, 2,352 fail, 755 skip, gate ok, exit 0. These are baseline comparisons, not a claim that all tests pass. Execution differential: 79 runs, zero differences, exit 0. Logs: `/data/bare-tmp/wga/{test262.txt,exec-diff.txt,t262/}`. This is later-main evidence. It does not prove #333 ran either final gate. No gate is rerun for this documentation change.
+
+#336 ran its 805-row matrix on `1414387821`, then rebased on `c6ab5f99` after docs-only #337. That is not literally a final-rebase matrix. Executable inputs did not change in that rebase (`git show c6ab5f99 --stat` changes only two docs). The plan review could not prove final-rebase JS-gate timing from its summary. The later gates above do not establish that chronology either. Review sources: `/data/bare-tmp/wga/p9chk/{pr336.json,pr336.diff,progress336.txt}`.
+
+### Targeted historical fetch audit
+
+Cost case: docs-only, no matrix. This is one historical row, `fetch_load bytes 10`, with no waiver or implementation change. Use `base-build 8f6a38e9 --release -p bare --example fetch_load` and `base-build f857a90b --release -p bare --example fetch_load`. Exact full SHAs: parent `8f6a38e982f47d0ac949bbb99b4c37bc1391ec5f`, merged `f857a90b71afda4d941c427878d16e4d81d3ac35`.
+
+Run `heavy tools/js/instr.sh BASE/release/examples/fetch_load bytes 10` for each tree, then the same with `env LD_PRELOAD=/usr/lib/libjemalloc.so.2`. `instr.sh` takes the minimum of three instruction counts. Commands: `/data/bare-tmp/wga/counts.sh`. Base paths and build logs: `/data/bare-tmp/wga/{parent,merged}-{base,build}.txt`.
+
+| Run | Allocator | Parent instructions | Merged instructions | Change |
+| --- | --- | ---: | ---: | ---: |
+| Initial | glibc | 33,517,881 | 33,667,300 | +0.446% |
+| Initial | jemalloc | 37,777,608 | 37,904,621 | +0.336% |
+| Raw retained | glibc | 33,612,716 | 33,791,064 | +0.531% |
+| Raw retained | jemalloc | 37,839,416 | 37,959,054 | +0.316% |
+
+Logs: `/data/bare-tmp/wga/{counts.txt,counts-raw-run.txt,perf-raw.txt}`. The second run uses a scratch `perf` wrapper to retain all twelve raw instruction counts. The rise repeats, but it is not over +0.5% under both allocators. #333 originally reported +0.518% and +0.429%.
+
+Inspect `nm -SC --size-sort` and `objdump -d -C` on both binaries after the repeated rise. Retain `{parent,merged}-{symbols,disassembly}.txt` and `symbol-changes.txt` under `/data/bare-tmp/wga/`. Examples of size changes: `Heap::browser_name` 2945 to 3547 bytes, `browser_cssom::ensure` 5067 to 5604, `browser_dom::clone_tree` 5849 to 6335. Static size and disassembly inspection do not assign the extra dynamic instructions to a function. Cause unverified. Inlining remains a hypothesis. A separate follow-up would collect instruction attribution for this one row before proposing a structural fix. No such fix is part of this task.
+
+### Live sweep, remaining owners and limits
+
+No new live run. Reuse the plan-9 sweep on frozen `d8550bbba0`: 16 of 18 readyState/shot probes pass, one run per site. No `Limit(Scripts)` remains in the retained console or failure output. Seven of the eight earlier script-limit sites pass; twitch now stops at the unsupported CSSOM write of a longhand from a shorthand with `var()`. eu-europa also passes. Commands, base, sites and raw outputs are copied under `/data/bare-tmp/wga/p9chk/` (`sweep.py`, `base.txt`, `sites.txt`, `out/`). Probe success does not prove an app works.
+
+Ownership in the plan-9 sweep: Task 28 retains apnews fatal Steps and craigslist's load-task Steps. Task 32 owns twitch. Tasks 24/26 then Task 29 retain wise, theverge, npmjs and substack first errors. Task 29 retains vimeo first errors; Task 27 owns sparse keys and memory. No script deduplication, Steps, Intl, sparse-key or first-error implementation changes were made. #338's six alternating target pairs used the pre-#333 base; they are not final-tree live evidence. Its eight other app pages and browser comparison were not run.
+
+Not tested here: workspace tests, public journeys, a new browser oracle, repeated live pages, full API conformance, instruction attribution or other cost rows. Evidence checks cover the nine exact restorations, the two-file scope, source claims, raw count arithmetic, later gate exits and retained sweep outputs. Worktree ownership was checked before edits; `/data/bare-tmp/wga/ownership.txt` retains the result.
+
+Final rebase: acquired `merge-gate acquire wga`, then ran `git fetch origin` and `git rebase origin/main` on `37212433`. Preserve both sides of the append conflict in decisions.md. Append this section after the rebase. Tasks 26 and 27 have since merged as #341 and #340; no fresh sweep was run on those changes. The evidence above stays tied to its frozen trees. `python3 /data/bare-tmp/wga/validate.py` and `git diff --check` pass. The full pre-audit progress file equals current main plus exactly the nine authorized restorations. Validation output: `/data/bare-tmp/wga/validation.txt`.
