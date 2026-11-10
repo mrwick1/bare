@@ -1424,7 +1424,7 @@ impl Heap {
             Some(115) => named!("screen") || named!("sheet") || named!("styleSheets") || named!("screenX") || named!("screenY"),
             Some(67) => named!("CSSStyleSheet") || named!("CSSStyleRule") || named!("CSSRuleList"),
             Some(83) => named!("StyleSheetList") || named!("SVGAnimatedString") || (u.starts_with(&[83,86,71]) && u.ends_with(&[69,108,101,109,101,110,116])),
-            Some(68) => named!("DocumentType"),
+            Some(68) => named!("DocumentType") || named!("DOMException"),
             Some(100) => named!("devicePixelRatio") || named!("designMode") || named!("dir"),
             Some(98) => named!("blur"),
             Some(114) => named!("referrer"),

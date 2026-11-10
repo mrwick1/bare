@@ -752,13 +752,20 @@ fn domexc_codes(name: &str) -> u32 {
     match name {
         "IndexSizeError" => 1,
         "HierarchyRequestError" => 3,
+        "WrongDocumentError" => 4,
         "InvalidCharacterError" => 5,
         "NoModificationAllowedError" => 7,
         "NotFoundError" => 8,
         "NotSupportedError" => 9,
         "InUseAttributeError" => 10,
         "InvalidStateError" => 11,
+        "InvalidModificationError" => 13,
+        "NamespaceError" => 14,
+        "InvalidAccessError" => 15,
         "TypeMismatchError" => 17,
+        "NetworkError" => 19,
+        "URLMismatchError" => 21,
+        "InvalidNodeTypeError" => 24,
         "SyntaxError" => 12,
         "SecurityError" => 18,
         "QuotaExceededError" => 22,
@@ -769,8 +776,56 @@ fn domexc_codes(name: &str) -> u32 {
     }
 }
 
+// Constants are defined only when the public constructor is first requested.
+fn domexception_global(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+    let g = it.global_object();
+    let key = d.key(it, "DOMException")?;
+    if it.heap.peek_own_property(g, key).map_err(|e| it.heap_error(e))?.is_some() { return Ok(()); }
+    let proto = d.p().domexc;
+    let f = d.add_ctor_nt(it, domexception_ctor, "DOMException", 0)?;
+    let kp = d.key(it, "prototype")?;
+    it.define_data(f, kp, Value::Object(proto), false, false, false)?;
+    let kc = d.key(it, "constructor")?;
+    it.define_data(proto, kc, Value::Object(f), true, false, true)?;
+    crate::browser_lazy::tag(d, it, proto, "DOMException")?;
+    for (i, name) in ["INDEX_SIZE_ERR", "DOMSTRING_SIZE_ERR", "HIERARCHY_REQUEST_ERR", "WRONG_DOCUMENT_ERR", "INVALID_CHARACTER_ERR", "NO_DATA_ALLOWED_ERR", "NO_MODIFICATION_ALLOWED_ERR", "NOT_FOUND_ERR", "NOT_SUPPORTED_ERR", "INUSE_ATTRIBUTE_ERR", "INVALID_STATE_ERR", "SYNTAX_ERR", "INVALID_MODIFICATION_ERR", "NAMESPACE_ERR", "INVALID_ACCESS_ERR", "VALIDATION_ERR", "TYPE_MISMATCH_ERR", "SECURITY_ERR", "NETWORK_ERR", "ABORT_ERR", "URL_MISMATCH_ERR", "QUOTA_EXCEEDED_ERR", "TIMEOUT_ERR", "INVALID_NODE_TYPE_ERR", "DATA_CLONE_ERR"].iter().enumerate() {
+        let k = d.key(it, name)?;
+        for o in [f, proto] { it.define_data(o, k, Value::Number((i + 1) as f64), false, true, false)?; }
+    }
+    it.define_data(g, key, Value::Object(f), true, false, true)?;
+    d.fixed.borrow_mut().push(f);
+    Ok(())
+}
+
+fn domexception_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
+    let mut values = [Value::Undefined; 2];
+    for (i, default) in ["", "Error"].iter().enumerate() {
+        let v = a.get(i).copied().unwrap_or(Value::Undefined);
+        values[i] = if matches!(v, Value::Undefined) { d.js_str(it, default)? } else {
+            let s = it.to_js_string(v)?;
+            let n = it.heap.str_len(s).map_err(|e| it.heap_error(e))?;
+            if n > d.lim.max_string_bytes { return Err(d.lim("dom-string")); }
+            it.charge((n / 32) as u64)?;
+            Value::String(s)
+        };
+    }
+    let proto = it.host_proto_from_new_target(d.p().domexc)?;
+    let o = it.new_error(proto, "")?;
+    let Value::String(name) = values[1] else { unreachable!() };
+    let code = if it.heap.str_len(name).map_err(|e| it.heap_error(e))? <= 32 { domexc_codes(&it.display(values[1])) } else { 0 };
+    for (name, v) in [("message", values[0]), ("name", values[1]), ("code", Value::Number(code as f64))] {
+        let k = d.key(it, name)?;
+        it.define_data(o, k, v, true, false, true)?;
+    }
+    Ok(Value::Object(o))
+}
+
 #[cold]
 pub(crate) fn define_window(d: &Dom, it: &mut Interp<'_>, name: &str) -> R<bool> {
+    if name == "DOMException" {
+        domexception_global(d, it)?;
+        return Ok(true);
+    }
     if name == "eval" {
         d.def_method(it,it.global_object(),"eval",1,|_,it,_,a|it.eval_global(a.first().copied().unwrap_or(Value::Undefined)))?;
         return Ok(true);
@@ -1154,7 +1209,7 @@ impl Dom {
         }
 
         // interface objects
-        let ifaces: [(&str, ObjId, Option<H>); 25] = [
+        let ifaces: [(&str, ObjId, Option<H>); 24] = [
             ("EventTarget", et, Some(ev::event_target_ctor as H)),
             ("Node", node, None),
             ("Element", element, None),
@@ -1179,7 +1234,6 @@ impl Dom {
             ("PointerEvent", pointer, Some(crate::browser_uievent::ctor::<1> as H)),
             ("KeyboardEvent", keyboard, Some(crate::browser_uievent::ctor::<2> as H)),
             ("InputEvent", inputev, Some(crate::browser_uievent::ctor::<3> as H)),
-            ("DOMException", domexc, None),
         ];
         let (kp, kc) = (self.key(it, "prototype")?, self.key(it, "constructor")?);
         let mut ctors = Vec::new();
