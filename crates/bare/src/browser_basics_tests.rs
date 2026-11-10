@@ -170,3 +170,17 @@ fn send_beacon_throws_a_type_error_for_a_bad_url_and_needs_an_argument() {
         assert_eq!(js(&mut b, "try { navigator.sendBeacon() } catch (e) { e.name }"), "TypeError");
     });
 }
+
+#[test]
+fn the_lazy_names_show_in_queries_and_key_lists() {
+    big(|| {
+        let mut b = page("<body></body>", "https://example.com/");
+        assert_eq!(js(&mut b, "['referrer' in document, 'visibilityState' in document, 'devicePixelRatio' in window, 'closed' in window].join()"), "true,true,true,true");
+        let mut b = page("<body></body>", "https://example.com/");
+        assert_eq!(js(&mut b, "typeof Object.getOwnPropertyDescriptor(window, 'screenX') + ',' + typeof Object.getOwnPropertyDescriptor(window, 'postMessage').value"), "object,function");
+        let mut b = page("<body></body>", "https://example.com/");
+        assert_eq!(js(&mut b, "var k = Object.keys(window); [k.includes('devicePixelRatio'), k.includes('screenY')].join()"), "true,true");
+        let mut b = page("<body></body>", "https://example.com/");
+        assert_eq!(js(&mut b, "typeof window.open + ',' + typeof document.open + ',' + window.outerWidth"), "function,function,1280");
+    });
+}

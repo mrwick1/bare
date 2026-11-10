@@ -712,11 +712,11 @@ fn win_scroll_y(d: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
     Ok(Value::Number(d.scrolling.s.borrow().scroll.y as f64))
 }
 
-fn win_inner_width(d: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
+pub(crate) fn win_inner_width(d: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
     Ok(Value::Number(d.plat.s.borrow().viewport.0 as f64))
 }
 
-fn win_inner_height(d: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
+pub(crate) fn win_inner_height(d: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
     Ok(Value::Number(d.plat.s.borrow().viewport.1 as f64))
 }
 
@@ -749,9 +749,6 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     }
     d.def_get(it, g, "innerWidth", win_inner_width, None)?;
     d.def_get(it, g, "innerHeight", win_inner_height, None)?;
-    // The inner size. The getters take the key as their name, so they add no string to the heap (`browser_basics.rs`).
-    crate::browser_basics::getter(d, it, g, &["outerWidth"], win_inner_width, false)?;
-    crate::browser_basics::getter(d, it, g, &["outerHeight"], win_inner_height, false)?;
     d.def_method(it, g, "scrollTo", 2, win_scroll_to)?;
     d.def_method(it, g, "scroll", 2, win_scroll_to)?;
     d.def_method(it, g, "scrollBy", 2, win_scroll_by)?;

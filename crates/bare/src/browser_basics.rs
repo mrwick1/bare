@@ -52,37 +52,66 @@ pub(crate) struct Basics {
 
 pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     d.basics.loaded.set(it.wall_now_ms());
+    Ok(())
+}
+
+/// The names of `window` and of `Document.prototype` made here. The heap asks the host for them on the first miss (`Heap::browser_name`),
+/// so a realm that never reads one pays nothing.
+const WINDOW: [&str; 18] = ["devicePixelRatio", "screenX", "screenY", "crossOriginIsolated", "closed", "opener", "frameElement", "postMessage", "alert", "print", "focus", "blur", "confirm", "prompt", "open", "isSecureContext", "outerWidth", "outerHeight"];
+const DOCUMENT: [&str; 11] = ["hidden", "referrer", "visibilityState", "contentType", "compatMode", "characterSet", "charset", "inputEncoding", "lastModified", "designMode", "dir"];
+
+/// The ask of the heap for `key` (`browser_handlers::lazy`): define it when it is one of the names above. The name `open` is also a
+/// method of `document` (`browser_loader.rs`), so it is defined here and the caller goes on.
+pub(crate) fn define(d: &Dom, it: &mut Interp<'_>, key: &str) -> R<()> {
     let (g, doc) = (*d.global.get().expect("installed"), d.p().document);
-    // Cost rule: a constant is a data property, because a host function costs about ten times as much. A string value is a getter,
-    // because an interned string that lives in every realm makes the string table of the heap one step larger (its rebuild at each
-    // collect doubles at 2^k strings), and a function takes its name from its key, so a getter adds no string.
-    for (name, v) in [("devicePixelRatio", Value::Number(1.0)), ("screenX", Value::Number(0.0)), ("screenY", Value::Number(0.0)), ("crossOriginIsolated", Value::Bool(false)), ("closed", Value::Bool(false)), ("opener", Value::Null), ("frameElement", Value::Null)] {
-        let k = d.key(it, name)?;
-        it.define_data(g, k, v, true, true, true)?;
+    let data = |it: &mut Interp<'_>, o, v| -> R<()> {
+        let k = d.key(it, key)?;
+        it.define_data(o, k, v, true, true, true)
+    };
+    let hidden = |it: &mut Interp<'_>, h: H| -> R<()> {
+        let f = d.add_fn(it, h, key, 0, false)?;
+        let k = d.key(it, key)?;
+        it.define_data(g, k, Value::Object(f), true, false, true)
+    };
+    match key {
+        "devicePixelRatio" => data(it, g, Value::Number(1.0)),
+        "screenX" | "screenY" => data(it, g, Value::Number(0.0)),
+        "crossOriginIsolated" | "closed" => data(it, g, Value::Bool(false)),
+        "opener" | "frameElement" => data(it, g, Value::Null),
+        "postMessage" => d.def_method(it, g, "postMessage", 1, post_message).map(|_| ()),
+        "alert" | "print" | "focus" | "blur" => hidden(it, nothing),
+        "confirm" => hidden(it, no),
+        "prompt" | "open" => hidden(it, null),
+        "isSecureContext" => getter(d, it, g, &["isSecureContext"], |d, _, _, _| Ok(Value::Bool(secure(d))), false),
+        "outerWidth" => getter(d, it, g, &["outerWidth"], crate::browser_scroll::win_inner_width, false),
+        "outerHeight" => getter(d, it, g, &["outerHeight"], crate::browser_scroll::win_inner_height, false),
+        "hidden" => data(it, doc, Value::Bool(false)),
+        "referrer" => {
+            let empty = d.js_str(it, "")?;
+            data(it, doc, empty)
+        }
+        "visibilityState" => getter(d, it, doc, &[key], |d, it, _, _| d.js_str(it, "visible"), false),
+        "contentType" => getter(d, it, doc, &[key], |d, it, _, _| d.js_str(it, "text/html"), false),
+        "compatMode" => getter(d, it, doc, &[key], |d, it, _, _| d.js_str(it, if has_doctype(&d.doc.borrow()) { "CSS1Compat" } else { "BackCompat" }), false),
+        "characterSet" | "charset" | "inputEncoding" => getter(d, it, doc, &[key], |d, it, _, _| d.js_str(it, charset(&d.doc.borrow())), false),
+        "lastModified" => getter(d, it, doc, &[key], |d, it, _, _| d.js_str(it, &last_modified(d.basics.loaded.get())), false),
+        // There is no design mode: the setter keeps nothing.
+        "designMode" => getter(d, it, doc, &[key], |d, it, _, a| if a.is_empty() { d.js_str(it, "off") } else { Ok(Value::Undefined) }, true),
+        "dir" => getter(d, it, doc, &[key], dir, true),
+        _ => Ok(()),
     }
-    d.def_method(it, g, "postMessage", 1, post_message)?;
-    // The window functions that do nothing share one function object for each result.
-    for (h, names) in [(nothing as H, &["alert", "print", "focus", "blur"][..]), (no, &["confirm"]), (null, &["prompt", "open"])] {
-        let f = d.add_fn(it, h, names[0], 0, false)?;
-        for name in names {
-            let k = d.key(it, name)?;
-            it.define_data(g, k, Value::Object(f), true, false, true)?;
+}
+
+/// Every name of `owner` (`Object.keys(window)` and the like ask for all names of an owner).
+pub(crate) fn define_all(d: &Dom, it: &mut Interp<'_>, owner: bare_js::value::ObjId) -> R<()> {
+    let names: &[&str] = if owner == *d.global.get().expect("installed") { &WINDOW } else if owner == d.p().document { &DOCUMENT } else { return Ok(()) };
+    for n in names.iter() {
+        let k = d.key(it, n)?;
+        if !it.heap.has_own_property(owner, k).map_err(|e| it.heap_error(e))? {
+            define(d, it, n)?;
         }
     }
-    getter(d, it, g, &["isSecureContext"], |d, _, _, _| Ok(Value::Bool(secure(d))), false)?;
-    let k = d.key(it, "hidden")?;
-    it.define_data(doc, k, Value::Bool(false), true, true, true)?;
-    let k = d.key(it, "referrer")?;
-    let empty = d.js_str(it, "")?;
-    it.define_data(doc, k, empty, true, true, true)?;
-    getter(d, it, doc, &["visibilityState"], |d, it, _, _| d.js_str(it, "visible"), false)?;
-    getter(d, it, doc, &["contentType"], |d, it, _, _| d.js_str(it, "text/html"), false)?;
-    getter(d, it, doc, &["compatMode"], |d, it, _, _| d.js_str(it, if has_doctype(&d.doc.borrow()) { "CSS1Compat" } else { "BackCompat" }), false)?;
-    getter(d, it, doc, &["characterSet", "charset", "inputEncoding"], |d, it, _, _| d.js_str(it, charset(&d.doc.borrow())), false)?;
-    getter(d, it, doc, &["lastModified"], |d, it, _, _| d.js_str(it, &last_modified(d.basics.loaded.get())), false)?;
-    // There is no design mode: the setter keeps nothing.
-    getter(d, it, doc, &["designMode"], |d, it, _, a| if a.is_empty() { d.js_str(it, "off") } else { Ok(Value::Undefined) }, true)?;
-    getter(d, it, doc, &["dir"], dir, true)
+    Ok(())
 }
 
 /// An accessor of `target` for each of `names`, all with one function (named as the first key, which the heap has already). With
