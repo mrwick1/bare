@@ -7622,3 +7622,53 @@ Cost: six iteration rows passed (`iteration.log`, `.tsv`), glibc mean +0.001%. F
 Live results: three alternating AP News BASE/NEW pairs and six Substack pairs, plus one pair each for Bluesky and go-dev. All readiness and content checks passed. The content sentinel checks body text and links; it does not establish a full application interaction. AP News had ten errors in every run. NEW stored callback frames identify script locations; this diagnostic gain does not repair receiver errors. The retained MessagePort stop did not reproduce live. Steps/TraversalDepth aborts and receiver failures remain. Substack error counts varied: BASE 1,1,0,0,0,1; NEW 1,0,0,0,0,0. Both controls had zero errors. `live/summary.jsonl`, `live-summary.json`, per-run stdout, command JSON and stderr retain error ordering, resource statuses/bytes, elapsed time and RSS. `live.py` and `live-extra.py` retain the commands. The extra Substack batch restarted after a session interruption; its partial summary entry was removed before the full batch ran. Live pairs used frozen BASE and the candidate before final rebase; they were not repeated after the font merge.
 
 Limits: no exact retained payload replay was possible because #352 stored the stop and sources, not the payload. No transfer support, full AP News interaction, engine language gates or full 805-row matrix was tested. No font, IDB, token-list, evaluator or CSS changes were made. Prior docs remain byte-identical prefixes. Final whitespace and publication-text scans passed.
+
+## Task 44: live relation tokens for Redis link callbacks (2026-11-10)
+
+### Reduction and change
+
+Frozen baseline: `c17a163a243918ad57e23420d518b3efb3ba990a`. Runtime commit before the final gate: `278e6429079241d14d8a5e14d5def502143e4c3d`. Logs and raw commands: `/data/bare-tmp/rl15/`. Target directory: `/data/bare-tmp/target-rl15` throughout.
+
+Consumed #351 and the rct12 decoded/source manifests. Frozen docking.js is `/data/bare-tmp/rct12/scripts/40-curl.js`, 53,148 bytes, SHA-256 `7a028dd603201bef329db0bd8c39d74e2b3181467a6cd0c4d70569c9a9d74a93`. `callback.js` retains the exact extracted `N=e=>...` callback. The new regression embeds that callback unchanged. It uses native HTMLLinkElement receivers with `rel=preload` and `as=style`. Surrounding observer state records an attribute write and continuation. It also replays added-node and attribute mutation delivery. A further check installs the exact downloaded relation-observer callback in a real MutationObserver, writes the native relation through relList.add, and checks both the resulting relation and callback continuation (`observer-test.log`). It does not substitute a fabricated DOM receiver.
+
+Tests first: `CARGO_TARGET_DIR=/data/bare-tmp/target-rl15 heavy cargo test --release -p bare --lib browser_rellist_tests` failed on the unmodified baseline runtime with `TypeError: Cannot read properties of undefined (reading 'contains')` (`failing-first.log`). The same callback passes with the repair. The three new tests cover the callback, live tokens, write-through methods, SameObject, class-list separation, iteration, validation, supported tokens, wrong receivers, GC and shared limits (`targeted-final.log`). Existing classList tests remain intact. The owner approved the one exact-property-list update in browser_link_tests.rs. Anchor/area exact-property assertions were updated in the permitted elements test module.
+
+The existing token engine now selects `class` or `rel` from its cold list record. The existing cache keys include the attribute. Trace/prune hooks keep each element and both lists consistent across collection. No hot DOM-node field or JS crate changed. The platform installs link accessors during setup. Anchor/area use their existing lazy prototype setup. No relList browser-name hook is needed. `supports()` reports the implemented link resource types, stylesheet and preload; navigation and other resource hints remain unsupported. See the decisions entry for the supported-token rule and remaining token-list limits.
+
+### Checks before the final gate
+
+All cargo and measurement commands use `/data/bare-tmp/bin/heavy`. `heavy cargo test --release --workspace`: 3,460 passed, zero failed, 13 ignored (`workspace.log`). `heavy tools/drive/public/run.sh --out /data/bare-tmp/rl15/public /data/bare-tmp/target-rl15/release/bare-drive`: all 48 pass, zero fail/known/skip/flakes (`public.log`). Existing unused-import, unused-variable and dead-code warnings remain unrelated.
+
+BASE came only from `base-build <frozen SHA> --release -p bare-drive`, `--release --examples -p bare -p bare-js`, and `--release -p bare-stress` (`base-*.log`, `base*-target.txt`). NEW examples and binaries came from `heavy cargo build --release --examples -p bare -p bare-js -p bare-drive -p bare-stress` and `heavy cargo build --release -p bare-drive -p bare-stress` (`build.log`, `binaries.log`).
+
+Case B applies: only crates/bare code and cold token state changed. The final row set is all platform_load and browser_load rows plus every 13th noncomment row: 79 unique rows (`sample.rows`, `final.rows`). Two initial class rows passed the over-both rule (`iterate.log`, `.tsv`). Queued 79-row check: zero failed, zero over both, one over glibc only (`queued-cost-retry.log`, `.tsv`). The class-10 row measured 533,451,708 to 536,154,471 instructions (+0.507%) with glibc and 546,121,252 to 548,839,985 (+0.498%) with jemalloc. No exception was used. Full 805 and JS language/execution/typing gates do not apply to this diff.
+
+The session interruption stopped the first queued cost/live jobs. Their partial logs remain. The first probe command also failed because `/usr/bin/time` is absent. The corrected runner uses a separate Python measurement process for each probe, so RSS comes from that probe's child usage. `live.py`, `measure.py`, per-probe `command.json`, `stdout.json`, `measurement.json` and `runner-exit.json` retain commands and measurements. Driver time excludes the heavy queue; runner time includes it.
+
+### Live results
+
+Three Redis pairs alternate BASE then NEW. Bluesky and go-dev each have one BASE/NEW control pair. Every probe passes readyState complete and a document-element sentinel, with null driver failure and exit zero. Resource statuses and all error text remain in `live-summary.json` and the raw reports. No separate fatal driver stop was reported.
+| Probe | Errors / contains | Resources / bytes | Time ms / RSS KiB |
+| --- | --- | --- | --- |
+| live-redis-BASE-1 | 6 / 1 | 135 / 33110399 | 4800.6 / 342308 |
+| live-redis-NEW-1 | 6 / 0 | 143 / 33110295 | 4190.3 / 374564 |
+| live-redis-BASE-2 | 6 / 1 | 135 / 33110381 | 3995.3 / 368700 |
+| live-redis-NEW-2 | 6 / 0 | 140 / 33109235 | 4147.3 / 371896 |
+| live-redis-BASE-3 | 8 / 2 | 149 / 33113254 | 4534.0 / 344112 |
+| live-redis-NEW-3 | 8 / 0 | 154 / 33114382 | 4551.5 / 372292 |
+| live-bluesky-BASE-1 | 0 / 0 | 6 / 2501975 | 3509.8 / 203828 |
+| live-bluesky-NEW-1 | 0 / 0 | 6 / 2501975 | 4084.7 / 203896 |
+| live-go-dev-BASE-1 | 0 / 0 | 67 / 594246 | 6931.0 / 117484 |
+| live-go-dev-NEW-1 | 0 / 0 | 69 / 600839 | 5796.5 / 121240 |
+
+Redis BASE reports one, one and two undefined-contains errors. NEW reports zero in all three runs. NEW reaches a separate `C(()=>e.styleSheets,[]) is not iterable` error. Both versions retain the Rive WASM abort and WebAssembly ReferenceError. NEW-3 also reports missing EventSource. These remain unsupported paths. Each control has zero console errors. Network work differs between probes; these data do not establish a speed or RSS improvement. The reduced callback completes and mutates the checked link state. No live widget/app initialization sentinel was established. Document readiness does not establish hydration or Rive animation.
+
+### Final gate
+
+FIFO gate `rl15` acquired at 04:45 UTC, after Tasks 40 and 43. Rebased without conflicts on `f9cd19c8f7542f18b9c614716fe1d32d8bb17aa8`. Final runtime head before the docs commit is `3a94a5f184fd621794d1f20561763963809e7168`; both preceding tasks' changes remain present.
+
+Fresh BASE builds use that full main SHA (`final-base-examples.log`, `final-base-binaries.log`). NEW builds use the same release target throughout (`final-build.log`, `final-binaries.log`). `heavy cargo test --release -p bare --lib browser_` passed 1,228 tests, zero failed, six ignored (`final-tests.log`). The final cost command is stored verbatim in `final-cost-command.json`; it runs the saved anchored 79-row union against the fresh BASE target. `final-cost.log` and `.tsv`: zero failed, zero over glibc, zero over both; glibc mean +0.024%. No jemalloc row was measured because none was flagged under glibc. This passes the over-both threshold; it is not a measured jemalloc mean. No escalation or exception was needed.
+
+All 48 public journeys passed again on the final rebased driver, with zero fail/known/skip/flakes (`public-final.log`). The earlier three live Redis pairs and controls were not repeated after rebase. No browser oracle, live widget initialization, Rive animation, EventSource lifecycle, navigation processing, indexed token properties or cross-platform behavior was tested. The full workspace ran once before rebase; the final browser module run covers the rebased browser changes.
+
+Preserved the previous decisions and progress text as byte-identical prefixes. Reviewed the final diff, whitespace and publication text before push. The branch has no merge commits. No unrelated worktree or process was modified.
