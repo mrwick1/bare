@@ -224,7 +224,7 @@
   function osObj(tx, st) {
     var o = new IDBObjectStore();
     o.name = st.name; o.keyPath = st.kp; o.autoIncrement = st.auto; o.transaction = tx;
-    Object.defineProperty(o, 'indexNames', { get: function () { return names(Object.keys(st.indexes)); }, enumerable: true });
+    Object.defineProperty(o, 'indexNames', { get: function () { return names(Object.keys(osState(this).st.indexes)); }, enumerable: true });
     OS.set(o, { tx: tx, st: st, indexes: new Map() });
     return o;
   }

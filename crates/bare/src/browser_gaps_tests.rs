@@ -251,7 +251,7 @@ var tx=db.transaction('s','readwrite'),s=tx.objectStore('s');s.put({v:'same'},1)
 "#);
         pump(&mut b);
         assert_eq!(js(&mut b, "out.slice(-2).join()"), "ConstraintError,0");
-        assert_eq!(js(&mut b, r#"var errors=[];var t=db.transaction('s'),s=t.objectStore('s');for(var f of [function(){s.index('missing')},function(){s.createIndex('x','v')},function(){IDBObjectStore.prototype.index.call({},'v')},function(){IDBIndex.prototype.count.call({})}]){try{f()}catch(e){errors.push(e.name)}}errors.join()"#), "NotFoundError,InvalidStateError,TypeError,TypeError");
+        assert_eq!(js(&mut b, r#"var errors=[];var t=db.transaction('s'),s=t.objectStore('s');for(var f of [function(){s.index('missing')},function(){s.createIndex('x','v')},function(){IDBObjectStore.prototype.index.call({},'v')},function(){IDBIndex.prototype.count.call({})},function(){Object.getOwnPropertyDescriptor(s,'indexNames').get.call({})}]){try{f()}catch(e){errors.push(e.name)}}errors.join()"#), "NotFoundError,InvalidStateError,TypeError,TypeError,TypeError");
         pump(&mut b);
         js(&mut b, r#"
 var upgrade=indexedDB.open('indexes',2);upgrade.onupgradeneeded=function(){var s=upgrade.transaction.objectStore('s');s.put({v:'z'},1);s.put({v:'z'},2);s.createIndex('bad','v',{unique:true});};upgrade.onerror=function(e){e.preventDefault();out.push(upgrade.error.name);};
