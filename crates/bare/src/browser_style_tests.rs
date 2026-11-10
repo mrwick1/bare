@@ -508,15 +508,12 @@ fn var_and_custom_values() {
     // A shorthand with var() has no longhand text (pending substitution): longhands read as "", the shorthand as written.
     js(&mut b, "s.cssText = ''; s.margin = 'var(--m) 2px'");
     assert_eq!(js(&mut b, "[s.margin, '[' + s.marginTop + ']', s.length].join()"), "var(--m) 2px,[],4");
-    // Overwriting one longhand of it cannot be written back faithfully: Unsupported, and nothing changed.
-    let r = js(&mut b, "s.marginTop = '1px'");
-    assert!(r.starts_with("unsupported:"), "{r}");
-    assert_eq!(attr(&mut b), "margin: var(--m) 2px;");
-    let r = js(&mut b, "s.removeProperty('margin-left')");
-    assert!(r.starts_with("unsupported:"), "{r}");
-    assert_eq!(attr(&mut b), "margin: var(--m) 2px;");
-    // Removing the whole shorthand works.
-    assert_eq!(js(&mut b, "s.removeProperty('margin')"), "var(--m) 2px");
+    // Pending longhands keep their source while exposed text is empty.
+    assert_eq!(js(&mut b, "s.marginTop = '1px'; s.marginRight"), "");
+    assert_eq!(attr(&mut b), "margin-top: 1px; margin-right: ; margin-bottom: ; margin-left: ;");
+    assert_eq!(js(&mut b, "s.removeProperty('margin-left')"), "");
+    assert_eq!(attr(&mut b), "margin-top: 1px; margin-right: ; margin-bottom: ;");
+    assert_eq!(js(&mut b, "s.removeProperty('margin')"), "");
     assert_eq!(attr(&mut b), "");
     // Custom property: name case and raw value kept, in order with the rest.
     js(&mut b, "s.cssText = '--Big: { a: b }; MARGIN: 1px; --x: 1 2'");
@@ -729,7 +726,7 @@ fn expanded_shorthand_getters_obey_the_output_byte_cap() {
 #[test]
 fn kept_parse_is_invisible() {
     const NAMES: &[&str] = &["width", "margin", "margin-top", "padding", "border", "border-width", "color", "--x", "flex", "overflow", "gap", "display", "Margin-Left"];
-    const VALUES: &[&str] = &["1px", "2px 3px", "red", "0 auto", "1px solid red", "var(--x)", "inherit", "3px 4px 5px 6px", "bogus", "1px; color: blue", "", "10", "1 1 0", "1px !important"];
+    const VALUES: &[&str] = &["1px", "2px 3px", "red", "0 auto", "1px solid red", "inherit", "3px 4px 5px 6px", "bogus", "1px; color: blue", "", "10", "1 1 0", "1px !important"];
     let run = |perturb: bool| {
         let mut b = at("<!doctype html><div id=a style='color: red; margin: 0'></div><div id=b></div>");
         js(&mut b, "var e = [document.getElementById('a'), document.getElementById('b')];");

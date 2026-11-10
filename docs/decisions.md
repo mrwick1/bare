@@ -863,3 +863,31 @@ Changed on 2026-11-10. A full compute pays one step per document node before it 
 The old full-compute estimate charged styled elements times all rules divided by four. On apnews, five estimates charged 103.35 M steps while the script used 78,712 interpreter ticks. The rule index excludes most rules. The estimate ended the main bundle and later tasks. Restyle charges keep their existing model. The task budget remains 100 M steps.
 
 CSSOM defines the values returned by [`getComputedStyle`](https://drafts.csswg.org/cssom/#dom-window-getcomputedstyle), not an execution-step formula. The charge measures this implementation's traversal and indexed candidate work. It does not alter resolved values.
+
+## Pending shorthand substitutions need state beyond serialized text
+
+A longhand of a shorthand with `var()` retains its original shorthand until computation. Serialize an exposed pending longhand as an empty value. Do not discard its state or substitute the variable at write time. See [CSS Variables 1 section 3.2](https://www.w3.org/TR/2022/CR-css-variables-1-20220616/#variables-in-shorthands) and [CSSOM declaration serialization](https://drafts.csswg.org/cssom/#serialize-a-css-declaration-block).
+
+Task 32 found a scope boundary. `browser_style::style_set_text` serializes the block into the DOM attribute. `style_read` treats the cached block as a parse of that text. The cascade reads the attribute. A partial pending shorthand cannot pass through this path with both standard serialization and preserved computation. Empty serialized values lose their shorthand on a later parse. Writing the whole shorthand restores removed members. Resolving variables at the write loses later custom-property changes.
+
+The browser check retained the right margin after `margin-top: 1px` over `margin: var(--m)`. Its serialized right margin was empty. Changing `--m` changed the computed right margin from `4px` to `8px`. Copying `cssText` to another element lost that margin. Serialization alone is not a lossless state store.
+
+No implementation changes were made. A follow-up needs permission to change the style state and its input to the cascade. It must preserve the source shorthand, surviving longhand mask, priority and declaration order independently of attribute text. It must also invalidate that state for attribute replacement and handle stylesheet publication. Those paths include `browser_style.rs` and computed-style/cascade integration, which Task 32 excludes. Coordinate with their owners before work. Retain bounded storage and budget charges. Measure any hot representation change with the full cost matrix.
+
+## Pending shorthand integration is authorized (2026-11-10)
+
+The owner approved the style-state and computed-style/cascade scope identified by draft #339 on 2026-11-10. This supersedes the earlier permission hold. Keep pending shorthand source, surviving mask, priority and order independently of exposed text. Preserve later variable updates and lossy cssText copying. Handle attribute replacement and stylesheet publication. Bound and charge retained state. Gate new cascade lookups so pages without pending state avoid them.
+
+The owner confirmed that the old background/mask worktree has no active owner. Leave that worktree untouched. Coordinate Task 28's computed-work charge hunks before the final rebase. The implementation requires typing cost checks and case 1: all 805 rows once after the final gated rebase. Reject any row above +0.5% under both allocators. Scope approval grants no cost waiver.
+
+The implementation is incomplete. The fresh tests-first run failed all four retained reductions. Evidence is in `/data/bare-tmp/cvl10/tests-first.txt`. No executable change accompanies this entry. The draft remains unmerged.
+
+## Retain pending shorthand sources outside exposed text (2026-11-10)
+
+The owner approved style-state and computed-style/cascade integration for the scope identified by draft #339. This approval replaces the earlier scope hold. It grants no cost waiver.
+
+A surviving pending longhand exposes an empty value. Its computation still needs the source shorthand. The serializer now reports pending output. Element writes retain the source, surviving mask, priority and order in a separate bounded store. The ordinary parse-cache block keeps its original layout. The store uses the existing style object, byte and declaration caps. Attribute spans invalidate retained state even when replacement text is equal. Retained state survives parse-cache eviction and wrapper collection.
+
+The cascade accepts masked declaration inputs for inline styles and published top-level CSSOM rules. It substitutes variables at computation time. It does not restore removed members. Empty exposed text remains lossy when copied. A flag gates retained inline state; the optional maps are absent on pages without that state. Changed retained inputs invalidate computed results even when exposed text is equal. Style sheet text-node identities invalidate published inputs on text replacement.
+
+The first cost measurement rejected extra work in ordinary style writes. The first correction restored their text path and cache-block layout and boxed pending storage. The wider sample then rejected per-node overhead in ordinary layout. The second correction selects a compile-time retained-input path before the node loop. The ordinary path keeps its original inline text representation. Keep the full case 1 gate strict. Measure all 805 rows after the final gated rebase. Run typing costs because typing uses the same cascade path. No site rule or budget increase is permitted. The final progress entry records the measured result and remaining limits.

@@ -14,9 +14,8 @@
 //! - A custom property (`--x`) is one declaration owned by its exact name. A declaration that the engine does not
 //!   understand (an unknown property, or a value it refuses) is `Opaque`: invisible to the CSSOM reads, never changed,
 //!   and written back as it was. Nothing in the attribute is dropped except text that is not a declaration (`oops;`).
-//! - A shorthand that cannot be split faithfully is `Unsupported`, before anything is written: a shorthand with `var()`
-//!   has no longhand text (the standard gives `""` for each longhand until the variables are known), so writing one of its
-//!   longhands, or removing it, cannot be expressed and is refused. The shorthand as a whole can be replaced or removed.
+//! - Pending shorthands retain their source and surviving mask. Their longhands expose empty values until computation.
+//!   Partial pending blocks need persistent state in the caller because their serialization is lossy.
 //! - Serialization (CSSOM "serialize a CSS declaration block"): an unchanged shorthand declaration is written as it was
 //!   authored. Longhands that together make `margin`, `padding`, `inset`, `border-width|style|color`, `border-top|...`,
 //!   `border`, `flex`, `gap`, `overflow`, `border-spacing` or `place-*` (all present, same priority, no `var()`) are
@@ -514,6 +513,12 @@ pub(crate) fn remove(list: &mut Vec<Decl>, name: &str, max: usize, charge: Charg
     Ok((old, before != after))
 }
 
+pub(crate) fn inputs(list: &[Decl]) -> Vec<bare_css::cascade::InputDeclaration> {
+    list.iter().map(|d| bare_css::cascade::InputDeclaration {
+        name: d.name.to_string(), value: d.value.clone(), important: d.important, mask: d.mask,
+    }).collect()
+}
+
 // ------------------------------------------------------------------------------------------------ output
 
 /// An identifier as CSS text: what is not a name character is written as a hex escape.
@@ -576,13 +581,19 @@ fn families(p: Property) -> &'static [(&'static str, Join)] {
     })[p as usize]
 }
 
-/// Serialize the block (CSSOM "serialize a CSS declaration block") into `s`, which is cleared first. `true`: the text
-/// reads back to exactly `list` (see `Out::exact`), so the caller may keep `list` as the parse of `s`.
-pub(crate) fn serialize(list: &[Decl], lim: Lim, s: &mut String, charge: Charge) -> F<bool> {
+/// The exposed text can be exact, or require separate pending state.
+pub(crate) struct Serialized {
+    pub exact: bool,
+    pub pending: bool,
+}
+
+/// Serialize into `s`, which is cleared first. Pending longhands expose empty values.
+pub(crate) fn serialize(list: &[Decl], lim: Lim, s: &mut String, charge: Charge) -> F<Serialized> {
     charge(1 + list.len() as u64)?;
     s.clear();
     let mut out = Out { s, max: lim.bytes, exact: true };
     let mut done = 0u128;
+    let mut pending = false;
     for d in list {
         match d.kind {
             Kind::Custom | Kind::Opaque => out.decl(&d.name, &d.value, d.important)?,
@@ -611,9 +622,7 @@ pub(crate) fn serialize(list: &[Decl], lim: Lim, s: &mut String, charge: Charge)
                     if !wrote {
                         out.exact &= d.kind == Kind::Long;
                         let t = long_text(d, p, charge)?.unwrap_or_default();
-                        if t.is_empty() {
-                            return Err(Fail::Unsupported("a longhand of a style shorthand with var() cannot be written alone"));
-                        }
+                        pending |= t.is_empty();
                         out.decl(p.name(), &t, d.important)?;
                         done |= bit(p);
                     }
@@ -621,5 +630,9 @@ pub(crate) fn serialize(list: &[Decl], lim: Lim, s: &mut String, charge: Charge)
             }
         }
     }
-    Ok(out.exact)
+    Ok(Serialized { exact: out.exact, pending })
 }
+
+#[cfg(test)]
+#[path = "browser_style_pending_tests.rs"]
+mod pending_reduction;

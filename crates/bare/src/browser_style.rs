@@ -9,7 +9,7 @@
 //!   takes the block, or parses. A write keeps the block when the text it wrote reads back to the same list (`serialize`).
 //!   The step charge of the parse is charged again on a hit, so the budget does not depend on the cache. Blink and WebKit keep
 //!   the parsed set as the state and write the attribute text lazily; Servo does the same with its `PropertyDeclarationBlock`.
-//!   Here the text stays the state, because every other part reads the attribute.
+//!   Partial pending shorthands keep their source and surviving mask separately. Attribute spans invalidate this state.
 //! - `el.style` is one object for each element while the element wrapper lives (`SameObject`): the wrapper traces the
 //!   declaration and the declaration traces the wrapper. The setter forwards to `cssText` (`[PutForwards=cssText]`).
 //! - Supported properties are exactly the ones `bare_css` understands: `values::Property::ALL` and `values::SHORTHANDS`.
@@ -38,8 +38,7 @@
 //!   cascade drops it too. Text that is not a declaration (`oops;`) is not kept.
 //! - `getPropertyValue` of a shorthand the model cannot build from longhands is `""`: `flex-flow`, `background`, `font`,
 //!   `list-style`, `text-decoration`, `grid-row`, `grid-column`, `grid-area` unless one declaration of that name is
-//!   still whole. A shorthand with `var()` has no longhand text (`""`), and writing or removing one of its longhands is
-//!   `Unsupported` before anything changes.
+//!   still whole. Pending longhands expose `""`. Their source shorthand remains available to the cascade.
 //! - Lone surrogates are `Unsupported` at every string entry (the document is UTF-8), never ignored.
 //! - No indexed access (`style[0]`), no iterator, no `getPropertyCSSValue`, `parentRule` is `null`. No SVG `style`, no `innerHTML`/`outerHTML` parse of `style`, no layout reads.
 //! - Computed style is `browser_computed.rs`. It has its own read-only prototype under this one.
@@ -87,6 +86,12 @@ pub(crate) struct Block {
     pub(crate) list: Vec<Decl>,
     /// The steps that the parse charged.
     spent: u64,
+
+}
+
+struct Pending {
+    block: Option<Block>,
+    span: Option<bare_html::dom::Span>,
 }
 
 /// Counters for tests and the load tool.
@@ -106,11 +111,13 @@ struct SState {
     by_el: HashMap<NodeId, ObjId>,
     /// element -> the parse of its `style` attribute at the last call.
     blocks: HashMap<NodeId, Block>,
+    pending: Option<Box<HashMap<NodeId, Pending>>>,
 }
 
 #[derive(Default)]
 pub(crate) struct Style {
     lim: Cell<StyleLimits>,
+    pub(crate) has_pending: Cell<bool>,
     s: RefCell<SState>,
     pub(crate) proto: OnceCell<ObjId>,
     fixed: RefCell<Vec<ObjId>>,
@@ -189,8 +196,10 @@ impl Dom {
     }
 
     /// Parse a block of declarations (an attribute value or `cssText`).
-    fn style_parse(&self, it: &mut Interp<'_>, text: &str) -> R<Vec<Decl>> {
-        parse(text, self.blim(), &mut |n| it.charge(n)).map_err(|f| self.style_fail(f))
+    fn style_parse(&self, it: &mut Interp<'_>, text: &str) -> R<(Vec<Decl>, u64)> {
+        let mut spent = 0;
+        let list = parse(text, self.blim(), &mut |n| { spent += n; it.charge(n) }).map_err(|f| self.style_fail(f))?;
+        Ok((list, spent))
     }
 
     /// The block of the `style` attribute now: the kept one when the text is the same, else a parse. Give it back with
@@ -198,6 +207,17 @@ impl Dom {
     fn style_read(&self, it: &mut Interp<'_>, el: NodeId) -> R<Block> {
         let doc = self.doc.borrow();
         let text = doc.find_atom("style").and_then(|a| doc.attr(el, a)).unwrap_or("");
+        if self.style.has_pending.get() {
+            let mut s = self.style.s.borrow_mut();
+            if let Some(pending) = &mut s.pending {
+                let span = doc.find_atom("style").and_then(|a| doc.attr_span(el, a));
+                if pending.get(&el).is_some_and(|p| p.span != span) { pending.remove(&el); }
+                if let Some(b) = pending.get_mut(&el).and_then(|p| p.block.take()) {
+                    it.charge(b.spent)?;
+                    return Ok(b);
+                }
+            }
+        }
         if let Some(b) = self.style.s.borrow_mut().blocks.remove(&el)
             && b.text == text
         {
@@ -216,6 +236,11 @@ impl Dom {
     }
 
     fn style_keep(&self, el: NodeId, b: Block) {
+        if self.style.has_pending.get()
+            && let Some(p) = self.style.s.borrow_mut().pending.as_mut().and_then(|m| m.get_mut(&el)) {
+            p.block = Some(b);
+            return;
+        }
         if b.text.len() > KEEP_BYTES {
             return;
         }
@@ -226,24 +251,43 @@ impl Dom {
         s.blocks.insert(el, b);
     }
 
-    /// Serialize into the call buffer (taken out: the caller gives it back with `style.buf.replace`). `true`: see `serialize`.
-    fn style_text(&self, it: &mut Interp<'_>, list: &[Decl], buf: &mut String) -> R<bool> {
+    /// Serialize into the call buffer. The caller returns it with `style.buf.replace`.
+    fn style_text(&self, it: &mut Interp<'_>, list: &[Decl], buf: &mut String) -> R<blk::Serialized> {
         serialize(list, self.blim(), buf, &mut |n| it.charge(n)).map_err(|f| self.style_fail(f))
     }
 
-    /// The update steps: write the serialized block back (skipped when the attribute already has exactly that text).
+    #[cold]
+    fn style_check_pending(&self, it: &mut Interp<'_>, el: NodeId, list: &[Decl]) -> R<()> {
+        let bytes = list.iter().try_fold(0usize, |n, d| n.checked_add(d.name.len() + d.value.len())).ok_or_else(|| self.lim("style-bytes"))?;
+        if bytes > self.style_lim().max_bytes { return Err(self.lim("style-bytes")); }
+        let s = self.style.s.borrow();
+        if let Some(m) = &s.pending
+            && m.len() >= self.style_lim().max_objects && !m.contains_key(&el) { return Err(self.lim("style-objects")); }
+        it.charge(1 + list.len() as u64 + bytes as u64 / 4)
+    }
+
+    #[cold]
+    fn style_keep_pending(&self, el: NodeId, block: Block) {
+        let doc = self.doc.borrow();
+        let span = doc.find_atom("style").and_then(|a| doc.attr_span(el, a));
+        self.style.has_pending.set(true);
+        self.style.s.borrow_mut().pending.get_or_insert_with(Default::default).insert(el, Pending { block: Some(block), span });
+    }
+
+    /// Write exposed text, and retain pending state independently of the parse cache.
     fn style_write(&self, it: &mut Interp<'_>, el: NodeId, mut b: Block) -> R<()> {
         let mut buf = self.style.buf.take();
-        let exact = self.style_text(it, &b.list, &mut buf)?;
-        if buf != b.text {
+        let serialized = self.style_text(it, &b.list, &mut buf)?;
+        if serialized.pending { self.style_check_pending(it, el, &b.list)?; }
+        if buf != b.text || serialized.pending || self.style.has_pending.get() {
             attr_set(self, it, el, "style", &buf)?;
             b.text.clear();
             b.text.push_str(&buf);
         }
         self.style.buf.replace(buf);
-        if exact {
-            self.style_keep(el, b);
-        }
+        if self.style.has_pending.get() { self.style.s.borrow_mut().pending.as_mut().and_then(|m| m.remove(&el)); }
+        if serialized.pending { self.style_keep_pending(el, b); }
+        else if serialized.exact { self.style_keep(el, b); }
         Ok(())
     }
 
@@ -287,6 +331,29 @@ impl Dom {
         let v = get(&b.list, &key(name), self.style_lim().max_bytes, &mut |n| it.charge(n)).map_err(|f| self.style_fail(f))?;
         self.style_keep(el, b);
         Ok(v)
+    }
+
+    pub(crate) fn style_inputs(&self, it: &mut Interp<'_>, doc: &bare_html::dom::Document) -> R<HashMap<NodeId, Vec<bare_css::cascade::InputDeclaration>>> {
+        let mut s = self.style.s.borrow_mut();
+        let atom = doc.find_atom("style");
+        let mut out = HashMap::new();
+        if let Some(pending) = &mut s.pending {
+            pending.retain(|&el, b| b.span == atom.and_then(|a| doc.attr_span(el, a)));
+            for (&el, p) in pending.iter() {
+                let Some(b) = &p.block else { continue };
+                it.charge(1 + b.list.len() as u64 + b.list.iter().map(|d| d.name.len() + d.value.len()).sum::<usize>() as u64 / 4)?;
+                out.insert(el, blk::inputs(&b.list));
+            }
+        }
+        Ok(out)
+    }
+
+    pub(crate) fn style_object_inputs(&self, doc: &bare_html::dom::Document, style: ObjId) -> Option<Vec<bare_css::cascade::InputDeclaration>> {
+        let s = self.style.s.borrow();
+        let el = s.objs.get(&style)?;
+        let b = s.pending.as_ref()?.get(el)?;
+        if b.span != doc.find_atom("style").and_then(|a| doc.attr_span(*el, a)) { return None; }
+        Some(blk::inputs(&b.block.as_ref()?.list))
     }
 
 /// The element of a `CSSStyleDeclaration` object.
@@ -383,10 +450,15 @@ impl Dom {
     /// `cssText` setter: the attribute is set even when the block is empty (the standard always sets it).
     fn style_set_text(&self, it: &mut Interp<'_>, el: NodeId, v: Value) -> R<()> {
         let text = null_empty(self, it, v)?;
-        let list = self.style_parse(it, &text)?;
+        let (list, spent) = self.style_parse(it, &text)?;
         let mut buf = self.style.buf.take();
-        self.style_text(it, &list, &mut buf)?;
+        let serialized = self.style_text(it, &list, &mut buf)?;
+        if serialized.pending { self.style_check_pending(it, el, &list)?; }
         attr_set(self, it, el, "style", &buf)?;
+        if self.style.has_pending.get() { self.style.s.borrow_mut().pending.as_mut().and_then(|m| m.remove(&el)); }
+        if serialized.pending {
+            self.style_keep_pending(el, Block { text: buf.clone(), list, spent });
+        }
         self.style.buf.replace(buf);
         Ok(())
     }
