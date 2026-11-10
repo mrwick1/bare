@@ -131,6 +131,8 @@ pub(crate) struct Platform {
     pub fixed: RefCell<Vec<ObjId>>,
     /// `Symbol.iterator` of this realm (the one scripts see).
     pub sym_iter: OnceCell<PropertyKey>,
+    /// The prototype of the snapshot arrays of `children`, `childNodes` and `getElementsBy*` (`browser_dom::wrap_coll`). Also in `fixed`.
+    pub coll: OnceCell<ObjId>,
 }
 
 pub(crate) fn arg(a: &[Value], i: usize) -> Value {

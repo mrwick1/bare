@@ -37,7 +37,7 @@
 //! zero-size boxes): the browser host has no cascade access, so author stylesheets and inline `style` never make an
 //! element unfocusable. Also absent: `iframe`, `area`, `audio`/`video` controls, scroll containers, shadow hosts and
 //! `delegatesFocus`, `<dialog>` modality, `autofocus`, the `change` event of an uncommitted edit on blur, window
-//! `focus`/`blur`, `document.hasFocus()`, `:focus` and `:focus-visible` matching, `FocusEvent.view`, selection and caret
+//! `focus`/`blur`, `:focus` and `:focus-visible` matching, `FocusEvent.view`, selection and caret
 //! effects, Tab navigation, and focus following a click.
 //!
 //! `focus(options)`: `preventScroll` is read and accepted. No scroll state exists, so nothing is scrolled either way.

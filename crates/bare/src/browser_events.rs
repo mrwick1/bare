@@ -108,8 +108,10 @@ impl Dom {
             e.dispatching = true;
             e.ty.clone()
         };
+        let prev = crate::browser_gaps::swap_event(self, Some(ev));
         let r = self.dispatch_inner(it, target, ev, &ty);
         let mut st = self.st.borrow_mut();
+        st.hd.event = prev;
         let e = st.events.get_mut(&ev).expect("event is registered");
         let not_canceled = !e.canceled;
         (e.dispatching, e.stop, e.stop_imm, e.in_passive, e.phase, e.current) = (false, false, false, false, 0, Value::Null);

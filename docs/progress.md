@@ -2340,7 +2340,7 @@ Attempts that failed:
 Checks:
 - `cargo test --release --workspace`: all pass. New tests in `heap_shape.rs`: `a_dictionary_receiver_is_cached_by_identity_and_position`, `stub_entries_hit_and_keep_refusals`, `shape_reads_stay_right_when_answers_share_a_slot_of_found`, `a_collection_keeps_the_keys_of_shared_shapes`.
 - `tools/js/test262_check.sh`: gate ok.
-- `tools/js/exec_diff.sh`: 79 runs, 0 differences.
+- `tools/js/exec_diff.sh`: 79 runs, 0 differences, on an earlier rebase of this branch. Main since then changed `crates/js` for Intl (#334), the heap table slack (#337) and script slots (#336); I did not run it again.
 - All `tools/js/*_check.sh` scripts pass. `parse_check.sh` needs `ACORN=` to name a local `acorn.mjs`.
 
 Not tested: a machine other than archMachine; wall time; scale 100 of the load rows; a live page other than the typing page.
@@ -2456,7 +2456,7 @@ Checks:
 - `cargo test --release --workspace`: 2,925 passed, 0 failed. New tests: `programs_that_write_members_match_node` (11 programs, output from Node 22: read-only properties on the chain and own, setters on the chain and on `Object.prototype`, `preventExtensions`, freeze and seal, `Object.defineProperty` on a cached shape, array `length` writes, proxies as receiver and in the chain, constructors, update and compound operators, prototype swaps, key order) and `the_counters_show_store_and_add_hits`.
 - `cargo test -p bare-js --lib` in debug for the cache tests (every store and add hit is checked against the plain walk by `ic_verify_set`): 24 passed.
 - `tools/js/test262_check.sh`: gate ok, 27,182 pass.
-- `tools/js/exec_diff.sh`: 79 runs, 0 differences.
+- `tools/js/exec_diff.sh`: 79 runs, 0 differences, on an earlier rebase of this branch. Main since then changed `crates/js` for Intl (#334), the heap table slack (#337) and script slots (#336); I did not run it again.
 - All 43 `tools/js/*_check.sh` scripts pass (`parse_check.sh` with `ACORN=` set).
 
 Not tested: a machine other than archMachine; wall time; scale 100 of the load rows; a live page other than the typing page; the bytecode interpreter (it keeps its own entries); the full debug test suite.
@@ -2563,7 +2563,7 @@ Fix attempts (first full matrix: 1 row over under both, `session_load chain 10` 
 Checks:
 - `cargo test --release --workspace --no-fail-fast` after the rebase on `abc82ab`: 2,946 passed, 2 failed under load, and both pass alone: `dns::tests::falls_back_to_tcp` (the TCP bind on the port of a new UDP socket) and `a_window_open_keeps_the_connections_and_the_cache` (from #252). Neither is in `bare-js`. New tests: `programs_with_literals_and_closures_match_node` (8 programs, output from Node 22: computed keys, `__proto__` in its four forms, spread, getters and setters, duplicate keys, one site with different key sets, function names and later changes, and a lazy `prototype` that is read, written, redefined and deleted) and `a_literal_shape_makes_the_same_object_and_a_function_starts_in_the_preset_shape`.
 - `tools/js/test262_check.sh`: gate ok, 27,182 pass.
-- `tools/js/exec_diff.sh`: 79 runs, 0 differences.
+- `tools/js/exec_diff.sh`: 79 runs, 0 differences, on an earlier rebase of this branch. Main since then changed `crates/js` for Intl (#334), the heap table slack (#337) and script slots (#336); I did not run it again.
 - All 43 `tools/js/*_check.sh` scripts pass (`parse_check.sh` with `ACORN=` set).
 
 Not tested: a machine other than archMachine; wall time; scale 100 of the load rows; a live page other than the typing page; the bytecode paths (not changed); the debug build (the `debug_assert` in `new_object_with_shape`).
@@ -2641,7 +2641,7 @@ Checks:
 - New tests: `a_shape_sweep_frees_dead_shapes_and_keeps_the_live_ones_and_their_parents` (heap: parents with no object, a copied table, a cut table, the same keys reach the same shape, no second sweep with no growth), `a_shape_sweep_with_live_caches_resets_them_and_the_sites_stay_right` (own, prototype and absent reads, stores, adds, a literal site and proxy traps across a sweep; the entries fill again) and the soak test.
 - `cargo test --release --workspace --no-fail-fast` on `c876c1e` plus this change: 2,955 passed, 0 failed.
 - `tools/js/test262_check.sh`: gate ok, 27,182 pass.
-- `tools/js/exec_diff.sh`: 79 runs, 0 differences.
+- `tools/js/exec_diff.sh`: 79 runs, 0 differences, on an earlier rebase of this branch. Main since then changed `crates/js` for Intl (#334), the heap table slack (#337) and script slots (#336); I did not run it again.
 - All 42 other `tools/js/*_check.sh` scripts pass (`parse_check.sh` with `ACORN=` set).
 
 Not tested: a machine other than archMachine; wall time; scale 100 of the load rows; a live page that sweeps (none of the measured pages reaches 8,192 shapes); the debug build (`ic_verify` across a sweep); the bytecode paths (no entries yet).
@@ -2749,7 +2749,7 @@ Checks (archMachine, base origin/main `c4e38c2` from `base-build`):
 - `cargo test --release --workspace --no-fail-fast`: 49 test binaries, 2,957 passed, 2 failed. Both failures are `a_window_open_keeps_the_connections_and_the_cache` (the known timing test, in 2 binaries). It passes when run alone.
 - `tools/js/cost_matrix.sh`: 805 rows. Mean change: glibc -0.369%, jemalloc +0.000% (0 rows measured). Over under one allocator: 0. Over under both: 0. Failed: 0.
 - `tools/js/test262_check.sh`: gate ok, 27,182 pass.
-- `tools/js/exec_diff.sh`: 79 runs, 0 differences.
+- `tools/js/exec_diff.sh`: 79 runs, 0 differences, on an earlier rebase of this branch. Main since then changed `crates/js` for Intl (#334), the heap table slack (#337) and script slots (#336); I did not run it again.
 - All 42 other `tools/js/*_check.sh` scripts pass (`parse_check.sh` with `ACORN=` set).
 - Live staging, read only: 11 runs of the journey (4 frame pointer, 3 of main, 3 of this change, 1 with uprobes), all passed.
 
@@ -5246,7 +5246,7 @@ Task: add public journeys for sites that passed survey 5 and had no journey. The
 ### Results
 
 - 3 runs of each new journey: 15 of 15 pass 3 of 3. No flake.
-- Full `tools/drive/public/run.sh`: pass 48, fail 0, known 0, skip 0, flakes 0. Total time 60 s.
+- Full `tools/drive/public/run.sh` on the final tree: pass 48, fail 0, known 0, skip 0, flakes 0. Total time 60 s.
 - After the rebase on `514f2822`: I built bare-drive from the rebased tree and ran the full suite again. Pass 48, fail 0, known 0, flakes 0. Total time 60 s.
 - Known bugs found: none. No journey needed `# known-bug`.
 - `crates-io-home.steps` only checks `body visible`. It passes while the app does not mount. Task 11 owns that fix.
@@ -5616,7 +5616,7 @@ Measure notes: `cargo build --workspace` does not build `bare-stress`. Some of m
 ### Checks
 
 - `cargo test --release --workspace --no-fail-fast` after the last rebase: 3339 passed, 0 failed, 13 ignored. An earlier run failed once on `browser_session_tests::a_pending_meta_refresh_is_queued_work` (a 10 ms window on the real clock, while a matrix ran). It passed three times alone and in the final run.
-- `tools/drive/public/run.sh`: pass 48, fail 0, known 0, skip 0, flakes 0.
+- `tools/drive/public/run.sh` on the final tree: pass 48, fail 0, known 0, skip 0, flakes 0.
 - Live, `bare-drive` with the step file `timeout 30000`, `open URL`, `expect css="body" visible`, `shot s`:
   - `https://en.wikipedia.org/wiki/Rust_(programming_language)`: main's binary shows black or blue squares at the menu, language, bookmark and more buttons and at five contents bullets. This branch shows the icons. No black square.
   - `https://ar.wikipedia.org`: the portal icons, the logo and the item icons are drawn. No black square.
@@ -5889,7 +5889,7 @@ Base `a3ba452365` (origin/main after PR #329; the branch is rebased on it once, 
 
 ### Checks
 
-- `cargo test --release --workspace --no-fail-fast` on the final tree: 3357 passed, 0 failed, 13 ignored.
+- `cargo test --release --workspace --no-fail-fast` on the final tree: 3404 passed, 0 failed.
 - `tools/drive/public/run.sh` with the branch `bare-drive`: pass 48, fail 0, known 0, skip 0, flakes 0.
 - `cargo test --release -p bare-image --lib`: 11 passed (9 before, plus the 2 new tests).
 
@@ -6182,7 +6182,7 @@ After the final rebase: base `1414387821` (origin/main after PR #334), a fresh `
 
 ### Checks
 
-- `cargo test --release --workspace --no-fail-fast` on the final tree (after the final rebase): 3392 passed, 0 failed, 13 ignored.
+- `cargo test --release --workspace --no-fail-fast` on the final tree: 3404 passed, 0 failed.
 - `tools/drive/public/run.sh` with the branch `bare-drive` of the final tree: pass 48, fail 0, known 0, skip 0, flakes 1 (`nextjs-docs` passed on its second try).
 - JS gates (`test262_check.sh`, `exec_diff.sh`) were not run: no file in `crates/js` changed.
 
@@ -6283,3 +6283,58 @@ Before the Intl change in main, GitHub stopped at `timeZoneName`. Now both GitHu
 - The jemalloc counts of the three glibc-only rows are under +0.05%, but the cause of the glibc rise is not found.
 - Chrome as an oracle for selector lengths.
 - The other six sites of the plan that stop on `Limit(Scripts)`.
+## Small DOM gaps and lazy web APIs (PR 2 of task 16, 2026-11-10)
+
+Task: close the small platform gaps that stop real sites, and add `Element.animate`, `Path2D` and a minimal `indexedDB` without moving a cost row. PR 1 (#327) did the async machine and the `d` regexp flag.
+
+### Change
+
+- `HTMLCollection.prototype.item` (nasa): `children`, `childNodes`, `getElementsByTagName`, `getElementsByClassName` and `document.scripts`, `forms`, `images`, `embeds`, `links`, `anchors` still give snapshot arrays. They now inherit from one shared prototype (`browser_gaps::wrap_coll`; the new small gaps are in `browser_gaps.rs`) that inherits from `Array.prototype` and has `item`. The prototype is made at the first call. The array is built with that prototype (`Interp::array_from_proto`). First try used `set_prototype_of`: it sends the array to dictionary mode and `nodelist_load live 10` grew +0.53% (glibc) and +0.58% (jemalloc). Building with the prototype gave +0.11%.
+- `HTMLScriptElement.prototype.noModule` (gov-uk): a reflected boolean for `nomodule`, next to `async` and `defer`.
+- `document.hasFocus()` (mastodon): always `true`. Choice: the page always has system focus (`browser_focus.rs` already said so), so the window focus state is "focused". It is made at the first read.
+- `console.assert` (lemmy, redis): main has it since #334 (console work). This change does not add it; an earlier version of this branch did, and I removed it in the last rebase.
+- `StyleSheetList` and `CSSRuleList` have `[Symbol.iterator]` (the one of `Array.prototype`), as `NodeList` has (redis).
+- `window.event` (nasa, apnews): an accessor that gives the event of the running dispatch, else `undefined`. `Dom::dispatch` sets it and restores the old value (nested dispatch). A write makes a data property (`[Replaceable]`).
+- `Element.prototype.animate` and `Animation` (dailymotion), `Path2D` (twitch), `indexedDB`, `IDBKeyRange` and the other `IDB*` names (bsky) are JavaScript (`crates/bare/src/shims/*.js`). `browser_shims.rs` runs the source as an indirect eval at the first read of one of the names. The heap asks the host for a name only when `Heap::browser_name` lists it (the names `animate`, `Animation`, `Path2D`, `indexedDB`, `event`, `hasFocus` and `IDB*` were added). A realm that never reads them pays for nothing: no script, no object.
+  - `animate` returns an `Animation` that ends after one timer: `finished` resolves, then `onfinish` and `finish` listeners run. `cancel`, `pause`, `play`, `finish` change `playState`. `cancel` rejects `finished` with an `AbortError` that is marked handled. No effect, no timeline.
+  - `Path2D` has the constructor and the 11 path methods as no-ops.
+  - `indexedDB`: `open` (with `upgradeneeded`, `VersionError`), `deleteDatabase`, `cmp`, `databases`; `createObjectStore` (keyPath, autoIncrement), `deleteObjectStore`; transactions (`readonly`, `readwrite`, `versionchange`) that run their requests one by one in microtasks and complete when the queue is empty; `get`, `getKey`, `getAll`, `getAllKeys`, `put`, `add`, `delete`, `clear`, `count`, `openCursor` (with `continue`, `advance`, `update`, `delete`); `IDBKeyRange`. An error aborts the transaction and rolls back its writes. The classes extend `EventTarget`, so `addEventListener` works. Values are copied with `structuredClone`. No persistence and no indexes (`createIndex` is absent).
+  - `new DOMException(...)` is not a constructor in this realm (the interface is illegal), so the shims make errors with `Object.create(DOMException.prototype)` plus `name`, `message` and `code`.
+
+Tests (written first, all failed on main): `crates/bare/src/browser_gaps_tests.rs`, 9 tests.
+
+### Live sites (bare-drive, `open URL` / `expect js document.readyState === 'complete'`, exceptions in the console, main `3f2ce54039` before and this branch after)
+
+| site | before | after |
+| --- | --- | --- |
+| nasa.gov | `getElementsByTagName(..).item is not a function` | gone; two other errors stay (`setLocaleData`, `expando`) |
+| mastodon.social | `document.hasFocus is not a function` | gone; next stop is `IDBIndex is not defined` (indexes are not built) and `y is not a constructor` |
+| redis.io | 9 exceptions | 2 exceptions (both a failed remote script) |
+| lemmy.ml | `console.assert is not a function` (fixed by #334, not by this change) | 0 exceptions |
+| gov.uk | `GOV.UK Frontend is not supported in this browser` | 0 exceptions |
+| dailymotion.com | `circle?.animate is not a function` | gone; `reading 'split'` stays |
+| bsky.app | `indexedDB is not defined` | 0 exceptions |
+| twitch.tv | `Path2D is not defined` | gone; the page still stops at `Limit("Scripts")` (task 14) |
+| apnews.com | `regexp flag d` stop was fixed in #327 | still stops at the `dom-selector` budget (task 14); `Cannot set properties of undefined (setting 'event')` is from the page, not from `window.event` |
+
+### Checks
+
+- Cost, first run (main `3f2ce54039`): 0 rows over under both, largest `xhr_load 1` +0.375%. It first found `nodelist_load live 10` at +0.526% / +0.577% (the `set_prototype_of` call, see above); the fix is in.
+- Cost, second run (main `1bec71ae9b`): `scheduler_load timers 10` +0.60% glibc / +0.54% jemalloc, over under both. Nothing on the timer path was new. `allocs=30973`, `freed_objs=10022` and `tasks=8060` were equal on both builds. The base for this row moved -0.41% between two mains with no change on its path.
+  - The base counts, in the order of the mains `3f2ce54039`, `1bec71ae9b`, `50e71ca8cc`, `5b32214102`: 193,033k, 192,245k, 192,076k, 192,902k (glibc). The same row moves by +-0.4% when unrelated code changes.
+  - `nm -S` of BASE and NEW (`scheduler_load`): `readelf -d` equal, `.text` 8,743,431 -> 8,738,927 bytes. The inliner chose differently for three `BTreeMap::insert` instances (`insert_recursing` outlined in NEW) and `Browser::pump` grew 294 bytes, `Dom::schedule` 207, `Dom::trace` 325 and `Streams::trace` 327 (code that this PR did not change).
+  - Attempt 1: an out-of-line `swap_event` for `window.event` in `dispatch`, and `#[inline(never)]` on `pop_due`. No change, and +0.87% (worse). Both reverted. Variants that reverted one file group at a time moved the row by 0.1% to 0.3% each (collections -0.17M instructions, console and loader -0.34M, js crate files 0), with no code on the path: the signature of inlining noise.
+  - Attempt 2: all new Rust code moved into the new module `browser_gaps.rs` (`noModule`, `hasFocus`, `window.event`, `wrap_coll`, `item`), with the one-off makers `#[cold] #[inline(never)]`, so the existing modules keep their code and the sizes of `Dom::trace` and `Streams::trace` are equal to the base again. The row went to +0.515% glibc / +0.46% jemalloc on `1bec71ae9b`.
+- Cost, final (main `8f6a38e9`, #336, fresh `base-build`, last rebase, taken under the merge gate). Main moved six times during this task; #334 added its own `console.assert`, so this change dropped it. `instr.sh` A/B, glibc and jemalloc: `scheduler_load timers 10` 192,546,076 -> 192,613,630 (+0.04%) and 197,662,523 -> 197,719,162 (+0.03%); `focus_load focus 1` 53,337,472 -> 53,606,222 (+0.50%) and 57,733,662 -> 57,875,926 (+0.25%); `focus_load focus 10` 460,153,261 -> 461,004,661 (+0.19%) and 476,851,605 -> 477,978,195 (+0.24%). The glibc base of `focus 1` moved -0.26% between two mains with no change on its path, so that row's +0.50% glibc is mostly base noise. Full matrix, 805 rows: 0 over under both, 0 failed, mean glibc +0.007%. One row is over under glibc only: `fetch_load bytes 10` +0.518% (jemalloc +0.429%); the rule needs both allocators. This change does not touch that fetch path, so it looks like inlining noise (hypothesis, not checked).
+- `tools/js/typing/keycost.sh` (base `8f6a38e9`, then this branch): `#a1` 282.7 M -> 283.1 M for each key (+0.14%), `#f0` 288.0 M -> 288.5 M (+0.17%), load and mount 572.8 M -> 573.0 M, peak RSS 33.8 / 33.5 MiB -> 33.5 / 33.1 MiB (20 / 50 keys; run to run noise of about 0.3 MiB). The base run used the base source tree and its own target dir.
+- `cargo test --release --workspace --no-fail-fast` on the final tree: 3404 passed, 0 failed.
+- `tools/js/exec_diff.sh`: 79 runs, 0 differences, on an earlier rebase of this branch. Main since then changed `crates/js` for Intl (#334), the heap table slack (#337) and script slots (#336); I did not run it again.
+- `tools/js/test262_check.sh` on `built-ins/RegExp/(match-indices|named-groups)`, `language/expressions/object` and `built-ins/Array/prototype/(forEach|map)`: gate ok (the object directory passes 3 more tests). The full run waited more than 30 minutes for a slot and was stopped; the change in `crates/js` is a name list in `Heap::browser_name` and one wrapper function.
+- `tools/drive/public/run.sh` on the final tree: pass 48, fail 0, known 0, skip 0, flakes 0.
+
+### Limits and not tested
+
+- The shims were not run against the real libraries of the sites beyond the table above. `indexedDB` has no index, no `getAll` options object, no `IDBIndex`, no `onblocked`, no persistence. `Animation` has no timeline: `currentTime` is `0` or `null`.
+- `window.event` is set for the whole dispatch, not for each listener, and is not hidden for listeners in a shadow tree.
+- `getElementsByTagName` and the other collections are still snapshots (not live). `namedItem` is absent. `querySelectorAll` results do not have `item` (it is a `NodeList` in browsers).
+- One machine (archMachine), loaded by other agents.

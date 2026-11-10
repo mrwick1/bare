@@ -841,7 +841,7 @@ pub(crate) fn get_root_node(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Valu
 pub(crate) fn child_nodes(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let n = d.nd(it, this)?;
     let kids = d.kids(it, n, false)?;
-    wrap_all(d, it, &kids)
+    crate::browser_gaps::wrap_coll(d, it, &kids)
 }
 
 pub(crate) fn wrap_all(d: &Dom, it: &mut Interp<'_>, ids: &[NodeId]) -> V {
@@ -855,7 +855,7 @@ pub(crate) fn wrap_all(d: &Dom, it: &mut Interp<'_>, ids: &[NodeId]) -> V {
 pub(crate) fn children(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let n = d.nd(it, this)?;
     let kids = d.kids(it, n, true)?;
-    wrap_all(d, it, &kids)
+    crate::browser_gaps::wrap_coll(d, it, &kids)
 }
 
 pub(crate) fn first_element_child(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
