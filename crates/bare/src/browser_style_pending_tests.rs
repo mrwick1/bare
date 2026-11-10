@@ -39,7 +39,8 @@ fn run(b: &mut crate::browser::Browser, source: &str, expected: &str) {
 #[test]
 fn element_pending_computation_updates_removal_and_copy() {
     let mut b = browser();
-    run(&mut b, "var a = document.getElementById('a'); var c = document.getElementById('b'); a.style.cssText = '--m: 3px 4px; margin: var(--m)'; a.style.marginTop = '1px'; getComputedStyle(a).marginRight", "4px");
+    run(&mut b, "var firstRule = document.styleSheets[0].cssRules.item(0); var a = document.getElementById('a'); var c = document.getElementById('b'); a.style.cssText = '--m: 3px 4px; margin: var(--m)'; a.style.marginTop = '1px'; getComputedStyle(a).marginRight", "4px");
+    run(&mut b, "document.styleSheets[0].cssRules.item(0) === firstRule", "true");
     run(&mut b, "a.style.marginRight + ',' + a.style.item(1) + ',' + a.style.item(2)", ",margin-top,margin-right");
     run(&mut b, "a.style.setProperty('--m','7px 8px'); getComputedStyle(a).marginTop + ',' + getComputedStyle(a).marginRight + ',' + getComputedStyle(a).marginBottom", "1px,8px,7px");
     run(&mut b, "a.style.removeProperty('margin-left'); getComputedStyle(a).marginLeft + ',' + getComputedStyle(a).marginRight", "9px,8px");
