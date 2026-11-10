@@ -7902,3 +7902,82 @@ Final costs pass all 81 rows (`final-cost.log`, `.tsv`): glibc mean +0.001%, zer
 All 48 public journeys pass again on the final rebased driver (`public-final.log`), with zero failed, known, skipped or flakes. No persistence, index cursor, index renaming, binary key, Unicode key-path identifier, blocked-connection protocol, browser oracle, cross-platform behavior or full user-interaction flow was tested. Existing key-type limits remain in force. No engine language, execution or typing gates were run for this bare-only diff.
 
 The prior decisions and progress files remain byte-identical prefixes. Final diff, whitespace and publication-text checks passed. Branch history contains no merge commits. No unrelated worktree or process was changed.
+
+## Task 48: bounded DOMImplementation interface repair (2026-11-10)
+
+The captured interface lookup now resolves to the native implementation prototype.
+This is a partial runtime repair. XML document construction remains absent.
+The non-HTML wrapper still cannot continue. No player readiness or playback is claimed.
+
+The interface uses the existing lazy global accessor installation. The first read
+creates the constructor, prototype, methods and implementation object together.
+An untouched realm retains no implementation object. No runtime struct changed.
+The prototype links back to the nonconstructible interface. Native methods reject
+forged receivers. Existing HTML document creation remains available.
+
+Frozen BASE: `1af2bb9e2c9633a13300cb4ca3bfc6f5b20bc45d`.
+Artifacts: `/data/bare-tmp/di48-repair/`.
+The regression ran before the runtime edit:
+`CARGO_TARGET_DIR=/data/bare-tmp/target-di48-repair /data/bare-tmp/bin/heavy cargo test --release -p bare --lib dom_implementation_interface`.
+`failing.log` records the missing-interface ReferenceError.
+The test retains the captured prototype destructuring. It checks identity,
+descriptors, illegal call/new, forged receivers, HTML creation and collection.
+
+The remaining XML work needs document MIME and XML mode, element namespaces,
+ownership and later element creation semantics. Do not substitute HTML documents.
+The retained non-HTML reduction remains the next required continuation check.
+
+Before the gated rebase, the release workspace suite passes (`workspace.log`,
+exit 0). All 48 public journeys pass with no retry, skip or known failure
+(`public.log`). The six trial browser cost rows pass: mean glibc -0.018%;
+no row requires a second allocator check (`cost-iteration.log/tsv`).
+These observations apply to the pre-rebase candidate.
+
+`reduction-new.log` retains all six original probes. The interface lookup returns
+`function,undefined`; the HTML operation returns `T,BODY`.
+The non-HTML wrapper still throws the non-function call TypeError.
+Null namespaces remain unsupported. The XML MIME probe still returns
+`text/html,HTML`. These latter results are remaining defects, not repaired behavior.
+
+`live.py` records three alternating Vimeo BASE/NEW pairs and one pair each
+for Wikipedia and Bluesky. All ten body expectations pass. Every BASE Vimeo
+run reports the missing-interface ReferenceError. Every NEW run reports
+`Cannot read properties of undefined (reading 'set')` instead. An additional
+`t.close is not a function` occurs in BASE pair 3 and NEW pairs 2 and 3.
+Wikipedia is console-clean in both runs. Bluesky retains a refused events
+connection in both runs. Raw stdout, stderr, resource records and captures
+remain in each run directory. These are pre-rebase comparisons under shared
+machine load. They do not establish speed, memory or player success.
+
+### Final gated checks
+
+FIFO gate `di48-repair` acquired before the final rebase onto
+`2aba60b20f3d319c736b4ec44aa4d20494289d79`. The rebase had no conflict.
+The final crate suite passes: 1,278 passed, six ignored (`final-tests.log`).
+The final examples and executable builds pass (`final-build.log`).
+All 48 public journeys pass again without retries, skips or known failures
+(`public-final.log`). The final reduction retains the same six results
+(`reduction-final.log`). The final Vimeo body expectation passes and retains
+the later undefined-set error (`vimeo-final.json`).
+
+Cost case: bare-only. No JS, CSS, HTML, paint or runtime struct changed.
+The saved set contains all 12 browser rows, six fragment rows, and every
+13th noncomment row, with duplicates removed: 79 rows.
+The first final run measures 66 rows but cannot run 13 stress rows because
+the baseline examples build does not provide that executable.
+`cost-final.log/tsv` retains this incomplete attempt.
+The baseline executable is built with
+`/data/bare-tmp/bin/base-build 2aba60b20f3d319c736b4ec44aa4d20494289d79 --release -p bare-stress -p bare-drive`.
+
+The complete repeat passes all 79 rows in 12 seconds:
+mean glibc -0.006%, zero rows over +0.5%, zero failed rows
+(`cost-final-repeat.log/tsv`). No row requires jemalloc confirmation.
+Command: `/data/bare-tmp/bin/heavy tools/js/cost_matrix.sh -g "$(cat /data/bare-tmp/di48-repair/cost-pattern.txt)" -o /data/bare-tmp/di48-repair/cost-final-repeat.tsv /data/bare-tmp/base/2aba60b20f/target /data/bare-tmp/target-di48-repair`.
+No full matrix or language/typing gates ran for this bare-only change.
+
+Not tested: ignored tests, an independent browser oracle, real XML construction
+or parsing, arbitrary/null namespaces, complete cross-document ownership,
+player initialization or interaction, video decoding or playback. The existing
+detached HTML ownership deviation remains. No speed or memory improvement is
+claimed. Both shared documents preserve their previous bytes. Whitespace and
+publication scans pass.

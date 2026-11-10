@@ -1117,3 +1117,14 @@ This supersedes Task 41's absent-method boundary. GitHub creates an expiresAt in
 Keep index metadata in the existing lazy shim. Derive sorted index entries from current store rows for each read. Sort by index key, then primary key. Reuse key comparison, validation, extraction, ranges and cloning. This avoids a second mutable row table. Put, add, delete, clear and transaction rollback therefore use the same records. Check unique constraints before a write replaces a row. Validate existing records through the request queue when creating a unique index. Undo schema changes with the transaction.
 
 Support get, getKey, getAll, getAllKeys and count. Support compound key paths and multiEntry deduplication. Reject compound multiEntry definitions. Keep the existing key-type limits. Binary keys remain unsupported. Keep index cursors, index renaming, Unicode key-path identifiers, persistence and blocked-connection coordination outside this change. Index creation accepts ASCII identifier paths and the empty path. Do not claim full IndexedDB conformance or whole-page initialization from these operations. See Task 46 in progress.md for the retained caller and checked completion evidence.
+
+## Expose the existing implementation interface before XML support
+
+Task 48 now exposes DOMImplementation through the existing lazy accessor path.
+The interface and document.implementation share one prototype. The constructor
+rejects calls and construction. Methods validate their native receiver.
+This bounded repair removes the missing-interface exception.
+
+Keep createDocument absent until XML documents have real document metadata,
+namespace and ownership semantics. The non-HTML wrapper remains unsupported.
+This step does not establish Vimeo player initialization or playback.
