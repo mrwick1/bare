@@ -8276,3 +8276,27 @@ Cost (archMachine, release, 3 runs each, example.com open and title check, netwo
 Binary: `bare-mcp` 16.5 MB and `bare-drive` 16.3 MB, not stripped.
 
 Not tested: the server under a real agent client (Claude Code or Codex); only the JSON-RPC messages were sent by tests and scripts. The Windows executable did not run (no Windows machine or Wine). It also needs topic 2 of the cross-platform plan (random bytes, DNS, trust roots). No window test on archMachine. No long session or memory growth check. MCP `initialize` echoes the client protocol version; versions were not negotiated against a client.
+
+## MCP server on Linux: real clients, a long session and the install (2026-11-10)
+
+Owner decision: hold Windows and macOS, and finish the Linux path first.
+
+Real client (Codex CLI 0.154.0):
+
+- archMachine, headless: `run_steps` on news.ycombinator.com (30 stories), then `open` example.com, `step` click the link, `step` expect the iana.org URL, and `close`. All five calls returned `ok: true`.
+- arjun-e16, window: Codex starts an MCP server with a reduced environment. Without `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR` and `HYPRLAND_INSTANCE_SIGNATURE`, `open` with `window: true` failed with "HYPRLAND_INSTANCE_SIGNATURE not set". With `env_vars` for those three in `[mcp_servers.bare]` of `~/.codex/config.toml`, `open` passed. `hyprctl clients` showed "bare (driven)" on workspace 6 for each 1 s sample, while the active workspace stayed 1. `close` passed.
+- One run with `gpt-5.6-terra` at reasoning effort none answered that no browser tools existed, and called none. A prompt that names the server and the tools made it call them. This is model behavior, not a server error.
+
+Claude Code: `claude mcp list` shows `bare` as connected on both machines (the server answered its `initialize`). No tool call ran through Claude Code: `claude -p` is refused on both machines ("Your organization has disabled Claude subscription access for Claude Code"). To verify: Claude Code passes the display variables to the server for a window.
+
+Long session (archMachine, release, a local static page with 30 rows): one `open`, then 1,000 `step` calls. 900 calls ran an expect, two scrolls, a link click and a `goto` back; 100 ran `reload` and an expect. 0 failures in 5.8 s. RSS was 13.4 MiB after the first call and 14.9 to 15.2 MiB from call 100 to call 999: no growth.
+
+A first long run against news.ycombinator.com failed 210 of 300 calls after many reloads. A run of 25 calls failed only call 0, a `reload` right after `open`: "there is no document to reload". `open` returns before the document is in, as in `bare-drive`. The cause of the 210 failures was not checked. Hypothesis: the site throttles repeated reloads. The local run above replaces it.
+
+Install:
+
+- archMachine: `~/.local/bin/bare-mcp`, registered with `claude mcp add -s user bare` and `codex mcp add bare`. Headless use. No `--workspace`.
+- arjun-e16: `~/.local/bin/bare-mcp --workspace 6`, registered the same way, plus the Codex `env_vars` above.
+- The installed binaries are copies of the build of #368. Copy them again after a change.
+
+Not tested: a tool call through Claude Code, a window on archMachine, and Codex window runs other than the one above.
