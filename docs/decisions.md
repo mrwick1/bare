@@ -863,3 +863,11 @@ Changed on 2026-11-10. A full compute pays one step per document node before it 
 The old full-compute estimate charged styled elements times all rules divided by four. On apnews, five estimates charged 103.35 M steps while the script used 78,712 interpreter ticks. The rule index excludes most rules. The estimate ended the main bundle and later tasks. Restyle charges keep their existing model. The task budget remains 100 M steps.
 
 CSSOM defines the values returned by [`getComputedStyle`](https://drafts.csswg.org/cssom/#dom-window-getcomputedstyle), not an execution-step formula. The charge measures this implementation's traversal and indexed candidate work. It does not alter resolved values.
+
+## Execution budget abort frames
+
+A budget abort retains the innermost authored frame before it unwinds. Only a `Limit` error invokes the capture helper. The helper is cold and cannot inline. Generator, binary and hot `?` paths stay unchanged. A new task clears the marker.
+
+The browser formats the frame only on the abort path. The existing prefix stays intact: `Script aborted: the Steps budget ended the load event at name (script#N:L:C). The page goes on ...`. A frame without an active call uses its function or class source start; a top-level frame uses the script start. This identifies the authored frame, not the exact loop statement. Script URLs are not stored by the interpreter.
+
+This remains in draft #345. It is separate from the merged indexed-style charge. Focused generator instruction costs still block a merge.

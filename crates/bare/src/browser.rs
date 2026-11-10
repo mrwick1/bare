@@ -1609,6 +1609,7 @@ impl Browser {
         if n > self.dom.lim.max_task_aborts {
             return Survive::Exhausted(format!("{} tasks were aborted by script budgets, the next one ({k:?} in {what}) is too many", n - 1));
         }
+        let location = self.it.take_abort_location().map(|s| format!(" {s}")).unwrap_or_default();
         self.dom.aborted.set(n);
         self.it.clear_failed_job();
         self.dom.clear_budget_halt_sched();
@@ -1617,7 +1618,7 @@ impl Browser {
         self.dom.clear_budget_halt_fetch();
         // A new budget window: the steps of the aborted task must not make the next host call fail.
         let _ = self.it.host_scope(|_| Ok(()));
-        crate::browser_console::push_text(&self.dom, &mut self.it, crate::browser_console::ConsoleLevel::Error, &format!("Script aborted: the {k:?} budget ended the {what}. The page goes on ({n} of {} aborts used)", self.dom.lim.max_task_aborts));
+        crate::browser_console::push_text(&self.dom, &mut self.it, crate::browser_console::ConsoleLevel::Error, &format!("Script aborted: the {k:?} budget ended the {what}{location}. The page goes on ({n} of {} aborts used)", self.dom.lim.max_task_aborts));
         Survive::Aborted
     }
 

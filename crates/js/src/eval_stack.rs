@@ -30,9 +30,9 @@
 // scanned for a line and column, charged BEFORE the scan. The first location in a script scans it once to make
 // marks every 4 KiB (`Program::location`); later ones scan at most 4 KiB, so an error deep in a one-line bundle
 // is cheap; the text is checked before it grows. The result is one
-// ordinary string on the error object. Nothing else is kept, so the GC has nothing to trace or prune and a
-// frame never outlives its call. The frames unwind on every exit (return, throw, limit) by truncating to the
-// length seen at the push.
+// ordinary string on the error object. The GC has no extra values to trace or prune.
+// Active frames unwind on every exit (return, throw, limit) by truncating to the length seen at the push.
+// The abort marker can retain a raw frame copy until read or until the next task. It holds no heap values.
 //
 // The property: an own data property, writable, not enumerable, configurable (as V8 shows it). It is a plain
 // string, not V8's lazy accessor. Frames omit arguments, source bodies and URLs.
@@ -78,18 +78,44 @@ struct StackState {
     pos: u32,
     /// The next `call_script` is a construct call.
     new: bool,
+    aborted: Option<(StackFrame, u32)>,
 }
 
 impl<'p> Interp<'p> {
     /// Run `f` with a frame for `at` of `script` on the list.
-    fn in_frame<T>(&mut self, script: u32, at: Where, new: bool, f: impl FnOnce(&mut Self) -> T) -> T {
+    fn in_frame<T>(&mut self, script: u32, at: Where, new: bool, f: impl FnOnce(&mut Self) -> Res<T>) -> Res<T> {
         let n = self.stk.frames.len();
         let saved_pos = std::mem::replace(&mut self.stk.pos, 0);
         self.stk.frames.push(StackFrame { script, at, new, saved_pos });
         let r = f(self);
+        if let Err(Error::Limit(_)) = &r { self.save_abort_frame(n); }
         self.stk.frames.truncate(n);
         self.stk.pos = saved_pos;
         r
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn save_abort_frame(&mut self, n: usize) {
+        if self.stk.aborted.is_none() {
+            self.stk.aborted = Some((self.stk.frames[n], self.stk.pos));
+        }
+    }
+
+    /// Take the authored frame saved when an execution budget ended. Formatting runs only after the task unwinds.
+    #[cold]
+    pub fn take_abort_location(&mut self) -> Option<String> {
+        let (fr, pos) = self.stk.aborted.take()?;
+        let pos = if pos == 0 {
+            let prog = if fr.script as usize == self.cur { &self.prog } else { &self.scripts[fr.script as usize].prog };
+            match fr.at { Where::Top => 0, Where::Func(f) => prog.func(f).span.start, Where::Class(c) => prog.class(c).span.start }.saturating_add(1)
+        } else { pos };
+        let (steps, limit) = (self.steps, self.step_limit);
+        self.step_limit = u64::MAX;
+        let line = self.frame_line(fr, pos).ok().map(|s| String::from_utf16_lossy(&s).trim().to_owned());
+        self.steps = steps;
+        self.step_limit = limit;
+        line
     }
 
     /// Mark the start of the call or `new` expression `e` of the running frame.

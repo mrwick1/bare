@@ -903,6 +903,7 @@ impl<'p> Interp<'p> {
     }
 
     fn begin(&mut self) {
+        self.stk.aborted = None;
         self.step_limit = self.steps.saturating_add(self.limits.max_steps);
     }
 
