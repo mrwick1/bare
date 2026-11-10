@@ -6024,3 +6024,63 @@ Two sites show a new error. Both come from the page running further, not from a 
 - The `dom-selector` abort on tailwindcss.com: cause not found.
 - `bare --window`, macOS and arjun-e16.
 - `crates/js` gates (`test262_check.sh`, `exec_diff.sh`, `keycost.sh`): no change in `crates/js`.
+
+## Table fragment contexts and the history state caps (2026-11-10)
+
+Two live pages stopped on gates of bare (checked on main `a3ba4523`, and again on `5b322141`):
+
+- https://www.hsbc.com/ stopped at `Unsupported("fragment context: table insertion modes")`. A scratch log (not committed) showed the inputs: video.js sets `innerHTML` on a `thead` (`<tr><th>Name</th>...</tr>`) and on a `tr` (`<td colspan="3">No plugins available.</td>`).
+- https://www.npmjs.com/package/react stopped at `Limit(Host("history-state-bytes"))`. A scratch log showed one `pushState` on load with 1,480,768 bytes (bare's count) and 9,301 objects. The cap was 1 MiB.
+
+### Change
+
+- Fragment parsing: the contexts `table`, `thead`, `tbody`, `tfoot`, `tr` and `colgroup` start in the matching template insertion mode (`Tm::Table`, `Tm::TableBody`, `Tm::Row`, `Tm::ColGroup`). The root of the fragment acts as a template whose mode is already set. `td`, `th`, `caption` and `col` read as "in body". The gate stays for `select`, `html`, `frameset`, `frame` and foreign contexts. The change is in the setup of `parse_fragment` only, outside the page parse loop.
+- History state: one state 16 MiB (was 1 MiB), all states of a document 32 MiB (was 8 MiB), objects of one state 2^18 (was 2^14). A state over the bytes, total or objects cap throws a `DataCloneError` that the page can catch. Before, it stopped the page. The depth cap stays a `Limit`.
+
+Spec (HTML Standard, by section name): "Parsing HTML fragments", "Reset the insertion mode appropriately", the "in table", "in table body", "in row", "in cell", "in caption", "in column group" and "in template" insertion modes; "shared history push/replace state steps" and "StructuredSerializeInternal" (`DataCloneError`). Firefox: `browser.history.maxStateObjectSize` = 16777216 (`StaticPrefList.yaml`), checked in `nsDocShell::UpdateURLAndHistory`; it throws `NS_ERROR_ILLEGAL_VALUE`. Chrome: no size check in `History::StateObjectAdded` (`history.cc`, main, read 2026-11-10).
+
+### Tests that failed first (on main `50e71ca8`)
+
+- `html5lib_table_context_fragments`: 91 of 91 cases failed (each stopped on the gate). They pass now. The cases are the html5lib-tests fragment cases with a table context: 66 from `tests_innerHTML_1.dat`, 9 from `tests6.dat`, 8 from `math.dat`, 8 from `svg.dat` (contexts: 20 `tbody`, 19 `td`, 18 `caption`, 15 `tr`, 12 `table`, 3 `colgroup`, 2 `thead`, 2 `tfoot`; none for `th` and `col`). Source: the copy in the Go module `golang.org/x/net` v0.62.0.
+- `browser_history_state_cap_tests`: 3 of 3 failed (a 1.6 MB state stopped the script with `Limit`, an over-cap state was not catchable, the defaults were 1 MiB / 8 MiB / 2^14).
+- `table_contexts_use_the_table_insertion_modes` (unit tests for `tr` with `<td>a</td>`, `tbody` with `<tr><td>`, `table` with text and `<tr>`, `colgroup` with `<col>`, `td`/`th`/`caption` with a `<div>`) and `table_contexts_parse_with_the_table_insertion_modes` (the same through `innerHTML`) are new and failed on the gate. The gate tests now check `select`, `html` and `frameset`, which stay gated.
+
+### Checks (final tree: rebased on `5b322141`)
+
+- Cost: full matrix of 805 rows against a fresh shared build of `5b322141`. Mean -0.005% under glibc. Largest row +0.177% (`resources_load small 10`). No row over +0.5% under glibc, so no jemalloc runs. Over under one allocator: 0. Over under both: 0. Failed: 0. An early run of the 6 `html|fragment|inner` rows: 0 over.
+- `cargo test --release --workspace`: 3,381 passed, 0 failed, 13 ignored.
+- Public journeys: 48 pass, 0 fail, 0 flakes.
+- No `crates/js` change, so no JS gates and no keycost.
+
+### Live (`open`, `expect js "document.readyState === 'complete'"`, 30 s timeout; one run each; base = main `5b322141`)
+
+| Site | base | this change | Notes |
+|---|---|---|---|
+| hsbc | stop (table gate), 2,748 ms, 105 MiB | pass, 1,307 ms, 107 MiB | 1 console error on both (`theme.ready` listener) |
+| npmjs | stop (`history-state-bytes`), 5,017 ms, 123 MiB | pass, 4,516 ms, 132 MiB | new: 1 `TypeError` (reading 'value') in page code that now runs |
+| github-repo | pass, 3,339 ms, 193 MiB | pass, 2,840 ms, 193 MiB | 6 errors on both |
+| wiki-main | pass, 941 ms, 46 MiB | pass, 966 ms, 47 MiB | |
+| mdn | pass, 631 ms, 26 MiB | pass, 583 ms, 26 MiB | |
+| gitlab | pass, 3,688 ms, 186 MiB | pass, 3,036 ms, 187 MiB | |
+| nasa | pass, 3,487 ms, 166 MiB | pass, 3,520 ms, 165 MiB | |
+| dev-to | pass, 6,365 ms, 84 MiB | pass, 5,641 ms, 81 MiB | |
+| redis-io | pass, 5,404 ms, 275 MiB | pass, 5,153 ms, 287 MiB | 7 and 9 console errors: the same messages, two more empty `listener of error` lines (network order) |
+| youtube | pass, 1,604 ms, 168 MiB | pass, 1,324 ms, 168 MiB | |
+| android-dev | pass, 6,653 ms, 165 MiB | pass, 6,964 ms, 168 MiB | |
+| apache-org | stop (`Limit(Scripts)`), 4,784 ms | pass, 2,561 ms, 97 MiB | flaky: 2 more runs of each build pass |
+
+No site got worse in readyState. The ms and RSS change from run to run (one run each).
+
+### Limits
+
+- `select`, `html`, `frameset`, `frame` and SVG/MathML contexts are still gated.
+- The fragment result for `th` and `col` contexts has unit tests only (html5lib has no case for them).
+- A state over the depth cap (64) still stops the page with a `Limit`.
+- bare's byte count of a state is not Firefox's serialized size (bare counts 2 bytes for each UTF-16 unit), so the 16 MiB caps are close but not equal.
+
+### Not tested
+
+- Chrome was not run for the table-context `innerHTML` results. The proof is html5lib-tests and the spec text.
+- A page that fills the 32 MiB total, and the peak RSS of such a page.
+- jemalloc cost rows (none was over under glibc).
+- arjun-e16 and macOS.

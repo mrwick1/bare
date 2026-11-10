@@ -3,11 +3,16 @@
 //! The html5lib project moved these tests to web-platform-tests in June 2026. The file is the last copy in its own repository
 //! (commit 224991e^, 112 tests). A test is a page or a fragment with a context, and the tree that every browser must make.
 //! `Document::dump_with_contents` writes a tree in the same text format, so the check is a text compare.
+//!
+//! `tools/fixtures/html/table-fragments.dat` holds the 91 fragment tests of html5lib-tests whose context is a table element (`table`, `thead`,
+//! `tbody`, `tfoot`, `tr`, `td`, `caption`, `colgroup`), in file order: 66 from `tests_innerHTML_1.dat`, 8 from `math.dat`, 8 from `svg.dat` and 9 from
+//! `tests6.dat`. The source is the copy in the Go module `golang.org/x/net` v0.62.0 (`html/testdata/html5lib-tests/tree-construction`).
 
 use super::*;
 use crate::dom::Ns;
 
 const TEMPLATE_DAT: &str = include_str!("../../../../tools/fixtures/html/template.dat");
+const TABLE_FRAGMENTS_DAT: &str = include_str!("../../../../tools/fixtures/html/table-fragments.dat");
 
 /// One test of a `.dat` file.
 struct Case {
@@ -103,4 +108,12 @@ fn html5lib_template_dat() {
     assert!(unexpected.is_empty(), "{} of 112 tests fail:\n{}", unexpected.len(), unexpected.join("\n"));
     let numbers: Vec<_> = bad.iter().map(|(n, _)| *n).collect();
     assert_eq!(numbers, FRAMESET, "a frameset test passes now: take it off the list");
+}
+
+#[test]
+fn html5lib_table_context_fragments() {
+    assert_eq!(cases(TABLE_FRAGMENTS_DAT).len(), 91);
+    let bad = failures(TABLE_FRAGMENTS_DAT);
+    let text: Vec<_> = bad.iter().map(|(_, text)| text.as_str()).collect();
+    assert!(bad.is_empty(), "{} of 91 tests fail:\n{}", bad.len(), text.join("\n"));
 }

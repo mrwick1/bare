@@ -62,7 +62,8 @@ pub struct NavLimits {
     pub max_param_bytes: usize,
     /// Entries of the history (the oldest drops).
     pub max_history_entries: usize,
-    /// Bytes of one history state, of all states, and the nesting depth and objects of one state.
+    /// Bytes of one history state, of all states, and the nesting depth and objects of one state. A state over the bytes, total or objects cap is a
+    /// `DataCloneError` that the page can catch. The depth cap guards the native stack of the walk: it stays a `Limit`.
     pub max_state_bytes: usize,
     pub max_total_state_bytes: usize,
     pub max_state_depth: usize,
@@ -82,10 +83,10 @@ impl Default for NavLimits {
             max_params: 1 << 14,
             max_param_bytes: 8 << 20,
             max_history_entries: 50,
-            max_state_bytes: 1 << 20,
-            max_total_state_bytes: 8 << 20,
+            max_state_bytes: 16 << 20,
+            max_total_state_bytes: 32 << 20,
             max_state_depth: 64,
-            max_state_nodes: 1 << 14,
+            max_state_nodes: 1 << 18,
             max_tasks: 64,
             max_requests: 64,
             max_item_units: 1 << 20,
@@ -560,7 +561,7 @@ fn push_replace(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], replace:
         let n = d.nav.s.borrow();
         let old = if replace { n.entries[n.cur].bytes() } else { n.entries[n.cur + 1..].iter().map(Entry::bytes).sum() };
         if n.state_bytes - old + state.bytes > lim.max_total_state_bytes {
-            return Err(d.lim("history-state-total"));
+            return Err(d.dom_err(it, "DataCloneError", "The states of this document are over their size cap."));
         }
     }
     d.commit(new, Some(Rc::new(state)), replace);

@@ -680,3 +680,22 @@ Problem: tailwindcss.com, hashnode.com and nodejs.org log `Invariant: Expected d
 The order of tasks does not change. A dynamic inline script still runs right after the script that inserted it, before the checkpoint. A browser runs it inside `appendChild`, so its promise jobs run at the checkpoint of the outer script. The loader now does the same: those jobs see the outer script, not the inserted one.
 
 `ImageData` (HTML Standard, canvas): the constructor, `createImageData`, `getImageData`. `bare` draws nothing on a canvas (`browser_canvas.rs` is a no-op context), so `getImageData` and `createImageData` give transparent black: a `Uint8ClampedArray` of zero bytes. A page that reads pixels back from a drawing gets zeros. `putImageData` stays a no-op. One `ImageData` holds at most 64 MiB (`width * height * 4`). A larger one throws a `RangeError` with the message `Out of memory at ImageData creation`. Chrome also throws on a failed allocation. We did not check its message; the text is ours. Gradients are objects with a no-op `addColorStop`. `createPattern` gives `null` for an `<img>` that is not complete (the case of the spec) and an object with a no-op `setTransform` for any other image source. `isPointInPath` and `isPointInStroke` give `false`. `width`, `height`, `data` and `colorSpace` are own read-only data properties, not prototype accessors.
+
+## Fragment parsing in a table context
+
+`innerHTML`, `outerHTML`, `insertAdjacentHTML` and `createContextualFragment` parse in a table context now: `table`, `thead`, `tbody`, `tfoot`, `tr`, `td`, `th`, `caption`, `colgroup` and `col`. hsbc.com stopped on the gate: video.js sets `innerHTML` on a `thead` and on a `tr`.
+
+- How: "reset the insertion mode appropriately" gives "in table", "in table body", "in row" or "in column group". The tree builder has these modes only for a `<template>` (the stack of template insertion modes). The root of the fragment acts as a template whose template insertion mode is already set to the mode of the context. In both cases the stack has no table element, so the same rules apply: text is not foster parented, and an end tag like `</table>` finds no table in scope.
+- `td`, `th` and `caption` give "in cell" and "in caption". These differ from "in body" only for tags that need a cell or a caption on the stack. The stack of a fragment has none, so these contexts read as "in body". `col` has no mode in the reset steps: it is "in body".
+- Proof: the 91 fragment tests of html5lib-tests with these contexts give the same tree (`tools/fixtures/html/table-fragments.dat`). There are none for `th` and `col`.
+- Limits: the gate stays for `select`, `html`, `frameset`, `frame` and for SVG and MathML contexts. The change is in the setup of a fragment parse only. The page parse does not run it.
+
+## History state caps
+
+npmjs.com pushes one state of about 1.48 MB (9,301 objects) on load. The old cap of one state was 1 MiB, and a state over a cap stopped the page with a `Limit`.
+
+- One state: 16 MiB. Firefox uses the same number (`browser.history.maxStateObjectSize` = 16777216 in `modules/libpref/init/StaticPrefList.yaml`; checked in `nsDocShell::UpdateURLAndHistory`). Chrome has no size check in `History::StateObjectAdded` (`third_party/blink/renderer/core/frame/history.cc`, checked 2026-11-10). bare counts a string as 2 bytes for each UTF-16 unit, 48 bytes for each object, and 16 bytes for each map entry.
+- All states of one document: 32 MiB. Without this cap a page could hold 50 entries x 16 MiB. 32 MiB leaves room for about 20 states of the npmjs size.
+- Objects of one state: 2^18 (was 2^14). The bytes cap bounds them too (48 bytes each). Depth stays 64.
+- A state over the bytes, total or objects cap throws a `DataCloneError` `DOMException`. The page can catch it, and nothing is committed. The size is the page's choice, so it must not stop the page. Firefox throws too, but its error is `NS_ERROR_ILLEGAL_VALUE`, not a `DOMException`. bare uses `DataCloneError` because the serialize step of the standard throws that error.
+- The depth cap stays a `Limit`. It guards the native stack of the walk.

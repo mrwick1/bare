@@ -168,22 +168,24 @@ fn scripts_of_a_contextual_fragment_run_when_they_go_in_a_page_as_in_chrome() {
 }
 
 #[test]
-fn a_contextual_fragment_in_a_table_select_or_foreign_context_is_a_gate() {
-    // The tree builder has no table or select insertion modes and no foreign adjusted-node rules (`bare_html::tree::fragment`): nothing is faked.
+fn a_contextual_fragment_in_a_table_context_parses_and_a_select_or_foreign_context_is_a_gate() {
+    // Table contexts use the table insertion modes (`bare_html::tree::fragment`). The tree builder has no select insertion mode and no foreign
+    // adjusted-node rules: nothing is faked there.
     let mut b = page("<table id=t><tbody id=tb><tr id=tr><td id=td>a</td></tr></tbody></table><select id=s></select><svg id=v></svg><p id=ok>x</p>");
-    for (id, what) in [
-        ("t", "fragment context: table insertion modes"),
-        ("tb", "fragment context: table insertion modes"),
-        ("tr", "fragment context: table insertion modes"),
-        ("td", "fragment context: table insertion modes"),
-        ("s", "fragment context: select insertion mode"),
-        ("v", "fragment context: an element that is not in the HTML namespace"),
-    ] {
+    let html = |b: &mut Browser, id: &str| {
+        let src = format!("var r = document.createRange(); r.selectNodeContents(document.getElementById('{id}')); var f = r.createContextualFragment('<td>x</td>'); var d = document.createElement('div'); d.appendChild(f); d.innerHTML");
+        js(b, &src)
+    };
+    assert_eq!(html(&mut b, "t"), "<tbody><tr><td>x</td></tr></tbody>");
+    assert_eq!(html(&mut b, "tb"), "<tr><td>x</td></tr>");
+    assert_eq!(html(&mut b, "tr"), "<td>x</td>");
+    assert_eq!(html(&mut b, "td"), "x");
+    for (id, what) in [("s", "fragment context: select insertion mode"), ("v", "fragment context: an element that is not in the HTML namespace")] {
         let src = format!("var r = document.createRange(); r.selectNodeContents(document.getElementById('{id}')); r.createContextualFragment('<td>x</td>')");
         assert_eq!(js(&mut b, &src), format!("unsupported:{what}"), "{id}");
     }
     // A text in a table cell has the cell as context; a document or an `html` start has the body.
-    assert_eq!(js(&mut b, "var r = document.createRange(); r.setStart(document.getElementById('td').firstChild, 0); r.createContextualFragment('x')"), "unsupported:fragment context: table insertion modes");
+    assert_eq!(js(&mut b, "var r = document.createRange(); r.setStart(document.getElementById('td').firstChild, 0); r.createContextualFragment('<td>x</td><i>y</i>').childNodes.length"), "2");
     assert_eq!(js(&mut b, "var r = document.createRange(); r.setStart(document.documentElement, 0); r.createContextualFragment('<td>x</td><i>y</i>').childNodes.length"), "2");
 }
 

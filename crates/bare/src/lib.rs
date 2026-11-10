@@ -91,6 +91,8 @@ mod browser_navigation_url;
 #[cfg(test)]
 mod browser_navigation_tests;
 #[cfg(test)]
+mod browser_history_state_cap_tests;
+#[cfg(test)]
 mod browser_navigation_subclass_tests;
 #[cfg(test)]
 mod browser_namespace_tests;

@@ -11,12 +11,13 @@
 //! `DataCloneError`: a function, a symbol, a DOM wrapper, `URL`, `URLSearchParams`, an `AbortController` or `AbortSignal`, a Proxy, a
 //! Promise, a WeakMap, a WeakSet, a WeakRef, an iterator, a generator, an `Intl` object, a Symbol wrapper, a detached buffer.
 //! There is no internal Error slot in the engine: an object with an `Error.prototype` in its chain is an Error.
-//! Bounds: `history` uses `NavLimits` (depth, nodes and bytes of one state, and the bytes of all states of a document).
+//! Bounds: `history` uses `NavLimits` (depth, nodes and bytes of one state, and the bytes of all states of a document). Over the bytes or nodes
+//! cap, `pushState` throws a `DataCloneError`; over the depth cap it stops with a `Limit`.
 //! `structuredClone` has its own: depth 256, 2^20 nodes, 64 MiB.
 
 use crate::browser::*;
 use crate::browser_navigation::NavLimits;
-use bare_js::eval::{CloneClass, Error, Interp};
+use bare_js::eval::{CloneClass, Error, Interp, LimitKind};
 use bare_js::heap::{Elem, Property};
 use bare_js::value::{ObjId, PropertyKey, Value};
 use std::collections::HashMap;
@@ -98,7 +99,12 @@ fn clone_err(d: &Dom, it: &mut Interp<'_>, what: &str) -> Error {
 /// The state of `pushState`.
 pub(crate) fn serialize(d: &Dom, it: &mut Interp<'_>, v: Value) -> R<State> {
     let l: NavLimits = d.nav.lim.get();
-    walk(d, it, v, Bounds { bytes: l.max_state_bytes, depth: l.max_state_depth.min(128), nodes: l.max_state_nodes, names: ["history-state-bytes", "history-state-depth", "history-state-nodes"] })
+    let b = Bounds { bytes: l.max_state_bytes, depth: l.max_state_depth.min(128), nodes: l.max_state_nodes, names: ["history-state-bytes", "history-state-depth", "history-state-nodes"] };
+    match walk(d, it, v, b) {
+        // The size is the page's choice: a catchable error, as in Firefox. The depth cap stays a limit.
+        Err(Error::Limit(LimitKind::Host("history-state-bytes" | "history-state-nodes"))) => Err(clone_err(d, it, "A state over the size cap")),
+        r => r,
+    }
 }
 
 /// `structuredClone(v)`.
