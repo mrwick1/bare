@@ -69,6 +69,41 @@ use crate::selector::{Combinator, Mode, Selector, ShadowPseudo, Simple, parse_se
 use crate::values::{Declared, Keyword, Length, Property, Side, Value, mirror, parse_declaration};
 use crate::var::{self, CustomDecl, VarDecl};
 
+/// A retained CSSOM declaration. The mask selects surviving longhands after parsing the source shorthand.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InputDeclaration {
+    pub name: String,
+    pub value: String,
+    pub important: bool,
+    pub mask: u128,
+}
+
+/// Retained blocks in top-level stylesheet rule order. At-rules use `None`.
+pub type InputSheet = Vec<Option<Vec<InputDeclaration>>>;
+
+#[cold]
+#[inline(never)]
+fn input_declarations(input: &[InputDeclaration], side: &mut Side, out: &mut Vec<Declared>, customs: &mut Vec<CustomDecl>) {
+    for d in input {
+        if d.name.starts_with("--") {
+            customs.push(CustomDecl { name: d.name.as_str().into(), text: d.value.as_str().into(), important: d.important });
+        } else {
+            let from = out.len();
+            parse_declaration(&d.name, &d.value, d.important, side, out);
+            let mut at = from;
+            while at < out.len() {
+                if d.mask & (1u128 << out[at].property as usize) == 0 { out.remove(at); } else { at += 1; }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Inline<'a> {
+    Text(&'a str),
+    Block(&'a [InputDeclaration]),
+}
+
 /// The style sheet of the browser itself.
 pub const UA_CSS: &str = include_str!("ua.css");
 
@@ -224,6 +259,7 @@ pub struct RuleSet {
     tested: std::cell::Cell<u64>,
     /// Does a rule have a logical property of the inline axis, or `float: inline-start | inline-end`? Only then does an `rtl` element need `logical_pass`.
     logical: bool,
+    pending: Option<Box<HashMap<NodeId, Vec<InputDeclaration>>>>,
 }
 
 /// The invalidation sets: for each class, id and attribute name that a selector reads, the widest `Scope` where it reads it.
@@ -403,7 +439,7 @@ impl RuleSet {
     }
 
     pub fn new(viewport: (f32, f32)) -> RuleSet {
-        RuleSet { viewport, entries: Vec::new(), decls: Vec::new(), side: Side::default(), layers: vec![Layer { parent: 0 }], layer_by_name: HashMap::new(), customs: Vec::new(), index: Index::default(), shadows: HashMap::default(), parts: Vec::new(), user: 0, scopes: Scopes::default(), reach: std::cell::OnceCell::new(), tested: std::cell::Cell::new(0), logical: false }
+        RuleSet { viewport, entries: Vec::new(), decls: Vec::new(), side: Side::default(), layers: vec![Layer { parent: 0 }], layer_by_name: HashMap::new(), customs: Vec::new(), index: Index::default(), shadows: HashMap::default(), parts: Vec::new(), user: 0, scopes: Scopes::default(), reach: std::cell::OnceCell::new(), tested: std::cell::Cell::new(0), logical: false, pending: None }
     }
 
     /// Which user action state (`:hover`, `:active`, the focus pseudo-classes) some rule reads: the bits `selector::USES_*`.
@@ -516,6 +552,30 @@ impl RuleSet {
         self.entries.is_empty()
     }
 
+    /// Replace retained inline CSSOM state. An empty map disables the extra source lookup.
+    pub fn set_inline_inputs(&mut self, inputs: HashMap<NodeId, Vec<InputDeclaration>>) -> bool {
+        let changed = self.pending.as_deref().is_some_and(|old| old != &inputs) || self.pending.is_none() && !inputs.is_empty();
+        self.pending = (!inputs.is_empty()).then(|| Box::new(inputs));
+        changed
+    }
+
+    fn inline_source<'a>(&'a self, node: NodeId, text: Option<&'a str>) -> Option<Inline<'a>> {
+        if let Some(inputs) = &self.pending
+            && let Some(block) = inputs.get(&node) {
+            return Some(Inline::Block(block));
+        }
+        text.map(Inline::Text)
+    }
+
+    /// Add a published CSSOM sheet with retained blocks for its top-level style rules.
+    pub fn add_inputs(&mut self, doc: &mut Document, text: &str, origin: Origin, layer: Option<&str>, scope: NodeId, blocks: &[Option<Vec<InputDeclaration>>]) {
+        let layer = layer.map_or(Some(0), |path| self.layer_path(0, path));
+        if let Some(layer) = layer {
+            let scope = if scope == doc.root() { 0 } else { scope.index() as u32 };
+            self.add_rules(doc, parse_stylesheet(text), origin, layer, scope, 0, Some(blocks));
+        }
+    }
+
     /// Read a style sheet and add its rules. Add the style sheets in the order of the page: a later rule wins a tie.
     /// The names of the selectors go in the name table of `doc`, so call this before `compute`.
     pub fn add(&mut self, doc: &mut Document, text: &str, origin: Origin) {
@@ -526,7 +586,7 @@ impl RuleSet {
     pub fn add_scoped(&mut self, doc: &mut Document, text: &str, origin: Origin, layer: Option<&str>, scope: NodeId) {
         let layer = layer.map_or(Some(0), |path| self.layer_path(0, path));
         if let Some(layer) = layer {
-            self.add_rules(doc, parse_stylesheet(text), origin, layer, scope.index() as u32, 0);
+            self.add_rules(doc, parse_stylesheet(text), origin, layer, scope.index() as u32, 0, None);
         }
     }
 
@@ -535,7 +595,7 @@ impl RuleSet {
     pub fn add_in_layer(&mut self, doc: &mut Document, text: &str, origin: Origin, layer: Option<&str>) {
         let layer = layer.map_or(Some(0), |path| self.layer_path(0, path));
         if let Some(layer) = layer {
-            self.add_rules(doc, parse_stylesheet(text), origin, layer, 0, 0);
+            self.add_rules(doc, parse_stylesheet(text), origin, layer, 0, 0, None);
         }
     }
 
@@ -595,8 +655,8 @@ impl RuleSet {
     /// Add the rules. A `@media` or `@supports` block that says yes adds the rules inside it, and so does a `@layer` block (in its layer). Other at-rules add nothing:
     /// `@import` is for the app (see `imports`), and `@container` waits for layout.
     /// `scope` is the root of the shadow tree that the sheet belongs to, or 0 for the document.
-    fn add_rules(&mut self, doc: &mut Document, rules: Vec<Rule<'_>>, origin: Origin, layer: u32, scope: u32, depth: usize) {
-        for rule in rules {
+    fn add_rules(&mut self, doc: &mut Document, rules: Vec<Rule<'_>>, origin: Origin, layer: u32, scope: u32, depth: usize, blocks: Option<&[Option<Vec<InputDeclaration>>]>) {
+        for (rule_index, rule) in rules.into_iter().enumerate() {
             let rule = match rule {
                 Rule::Style(rule) => rule,
                 Rule::At(at) if &*at.name == "layer" => {
@@ -609,7 +669,7 @@ impl RuleSet {
                         }
                         AtBody::Rules(inner) if depth < 32 => {
                             if let Some(inner_layer) = self.layer_path(layer, at.prelude) {
-                                self.add_rules(doc, inner, origin, inner_layer, scope, depth + 1);
+                                self.add_rules(doc, inner, origin, inner_layer, scope, depth + 1, None);
                             }
                         }
                         _ => {}
@@ -625,7 +685,7 @@ impl RuleSet {
                     };
                     // The parser stops at depth 32, so this is a safety net for the stack.
                     if yes && depth < 32 {
-                        self.add_rules(doc, inner, origin, layer, scope, depth + 1);
+                        self.add_rules(doc, inner, origin, layer, scope, depth + 1, None);
                     }
                     continue;
                 }
@@ -633,12 +693,16 @@ impl RuleSet {
             // A rule with a selector that is not valid is dropped, with all its selectors (the standard says so).
             let Some(selectors) = parse_selector_list_in(rule.prelude, doc, if scope == 0 { Mode::Document } else { Mode::Shadow }) else { continue };
             let (start, custom_start) = (self.decls.len(), self.customs.len());
+            if let Some(Some(input)) = blocks.and_then(|b| b.get(rule_index)) {
+                input_declarations(input, &mut self.side, &mut self.decls, &mut self.customs);
+            } else {
             for d in &rule.declarations {
                 if d.name.starts_with("--") {
                     self.customs.push(CustomDecl { name: (*d.name).into(), text: d.value.into(), important: d.important });
                 } else {
                     parse_declaration(&d.name, d.value, d.important, &mut self.side, &mut self.decls);
                 }
+            }
             }
             // The picture declarations go after the others (`Entry::pics`). One pass tests each declaration, here, not in the cascade.
             let (mut logical, mut picture) = (false, false);
@@ -763,7 +827,7 @@ impl RuleSet {
                     }
                     matched.sort_unstable();
                     // The order of the rules is their place in the list, so the key of the cache and the result do not depend on the buckets.
-                    let inline = style_atom.and_then(|a| doc.attr(node, a));
+                    let inline = self.inline_source(node, style_atom.and_then(|a| doc.attr(node, a)));
                     let hint = hints.as_ref().and_then(|h| h.of(doc, node));
                     let id = self.style_of(&mut styles, &mut memo, parent, &matched, (inline, hint.as_deref()), &cx);
                     styles.of_node[node.index()] = id;
@@ -888,7 +952,7 @@ impl RuleSet {
                     }
                 }
                 matched.sort_unstable();
-                let inline = style_atom.and_then(|a| doc.attr(node, a));
+                let inline = self.inline_source(node, style_atom.and_then(|a| doc.attr(node, a)));
                 let hint = hints.as_ref().and_then(|h| h.of(doc, node));
                 let id = self.style_of(styles, &mut k.memo, parent, &matched, (inline, hint.as_deref()), &cx);
                 if Some(node) == html && styles.styles[id as usize].px(Property::FontSize) != k.rem {
@@ -1018,7 +1082,7 @@ impl RuleSet {
                 }
             }
             matched.sort_unstable();
-            let inline = style_atom.and_then(|a| doc.attr(node, a));
+            let inline = self.inline_source(node, style_atom.and_then(|a| doc.attr(node, a)));
             let hint = hints.as_ref().and_then(|h| h.of(doc, node));
             parent = self.style_of(styles, &mut k.memo, parent, &matched, (inline, hint.as_deref()), &cx);
             element_hashes(doc, node, &mut |h| filter.add(h));
@@ -1120,7 +1184,7 @@ impl RuleSet {
 
     /// The number of the style of an element. It is found in the cache, or it is made.
     #[inline(always)]
-    fn style_of(&self, styles: &mut Styles, memo: &mut Memo, parent: u32, matched: &[u32], (inline, hint): (Option<&str>, Option<&str>), cx: &Cx<'_>) -> u32 {
+    fn style_of(&self, styles: &mut Styles, memo: &mut Memo, parent: u32, matched: &[u32], (inline, hint): (Option<Inline<'_>>, Option<&str>), cx: &Cx<'_>) -> u32 {
         let mut key = matched.iter().fold(u64::from(parent), |h, &i| (h ^ u64::from(i)).wrapping_mul(0x0100_0000_01b3));
         // The hint is part of the key: the cells of one table share their hint, and so their style.
         if let Some(h) = hint {
@@ -1159,7 +1223,7 @@ impl RuleSet {
     /// that makes every call copy the style (1 KB).
     #[cold]
     #[inline(never)]
-    fn logical_pass(&self, matched: &[u32], inline: Option<&str>, hint: Option<&str>, parent: &ComputedStyle, cx: &Cx<'_>) -> ComputedStyle {
+    fn logical_pass(&self, matched: &[u32], inline: Option<Inline<'_>>, hint: Option<&str>, parent: &ComputedStyle, cx: &Cx<'_>) -> ComputedStyle {
         let mut style = self.cascade_as::<1>(matched, inline, hint, parent, cx);
         if matches!(style.0[Property::Direction as usize], Value::Keyword(Keyword::Rtl)) {
             style = self.cascade_as::<2>(matched, inline, hint, parent, cx);
@@ -1172,7 +1236,7 @@ impl RuleSet {
     }
 
     /// Pick the winning declaration for each property, then compute the values. `PASS` 0 is the first pass, 1 the same without the check, 2 the one for `rtl` (`logical_pass`).
-    fn cascade_as<const PASS: u8>(&self, matched: &[u32], inline: Option<&str>, hint: Option<&str>, parent: &ComputedStyle, cx: &Cx<'_>) -> ComputedStyle {
+    fn cascade_as<const PASS: u8>(&self, matched: &[u32], inline: Option<Inline<'_>>, hint: Option<&str>, parent: &ComputedStyle, cx: &Cx<'_>) -> ComputedStyle {
         let mut winners = [None::<Value>; Property::CORE];
         let mut keys = [0u128; Property::CORE];
         // The properties that have a winner, one bit each: the loops below visit only these.
@@ -1254,12 +1318,17 @@ impl RuleSet {
             shared.vars.clear();
             shared.grids.clear();
         }
-        if let Some(text) = inline {
-            for d in parse_declarations(text) {
-                if d.name.starts_with("--") {
-                    inline_customs.push(CustomDecl { name: (*d.name).into(), text: d.value.into(), important: d.important });
-                } else {
-                    parse_declaration(&d.name, d.value, d.important, &mut inline_side, &mut inline_decls);
+        if let Some(input) = inline {
+            match input {
+                Inline::Block(block) => input_declarations(block, &mut inline_side, &mut inline_decls, &mut inline_customs),
+                Inline::Text(text) => {
+                    for d in parse_declarations(text) {
+                        if d.name.starts_with("--") {
+                            inline_customs.push(CustomDecl { name: (*d.name).into(), text: d.value.into(), important: d.important });
+                        } else {
+                            parse_declaration(&d.name, d.value, d.important, &mut inline_side, &mut inline_decls);
+                        }
+                    }
                 }
             }
             // What these values point to comes after the ones of the style sheets (see `Cx::linear` and `Cx::var`).
@@ -1329,7 +1398,7 @@ impl RuleSet {
     /// the others the cascade has no more work than before, and it does not hold its style for this call.
     #[cold]
     #[inline(never)]
-    fn picture_pass(&self, matched: &[u32], inline: Option<&str>, style: &mut ComputedStyle, parent: &ComputedStyle, cx: &Cx<'_>) {
+    fn picture_pass(&self, matched: &[u32], inline: Option<Inline<'_>>, style: &mut ComputedStyle, parent: &ComputedStyle, cx: &Cx<'_>) {
         #[cfg(test)]
         PICTURE_PASSES.with(|n| n.set(n.get() + 1));
         let custom = style.1;
@@ -1348,11 +1417,16 @@ impl RuleSet {
             }
         }
         // The declarations of the attribute again: `cascade_as` left the side of their values in `cx.inline`, the same for this parse.
-        if let Some(text) = inline {
+        if let Some(input) = inline {
             let (mut side, mut decls) = (Side::default(), Vec::new());
-            for d in parse_declarations(text) {
-                if !d.name.starts_with("--") {
-                    parse_declaration(&d.name, d.value, d.important, &mut side, &mut decls);
+            match input {
+                Inline::Block(block) => input_declarations(block, &mut side, &mut decls, &mut Vec::new()),
+                Inline::Text(text) => {
+                    for d in parse_declarations(text) {
+                        if !d.name.starts_with("--") {
+                            parse_declaration(&d.name, d.value, d.important, &mut side, &mut decls);
+                        }
+                    }
                 }
             }
             let (calc_base, var_base, grid_base) = (cx.declared.calcs.len() as u32, cx.declared.vars.len() as u32, cx.declared.grids.len() as u32);

@@ -14,9 +14,8 @@
 //! - A custom property (`--x`) is one declaration owned by its exact name. A declaration that the engine does not
 //!   understand (an unknown property, or a value it refuses) is `Opaque`: invisible to the CSSOM reads, never changed,
 //!   and written back as it was. Nothing in the attribute is dropped except text that is not a declaration (`oops;`).
-//! - A shorthand that cannot be split faithfully is `Unsupported`, before anything is written: a shorthand with `var()`
-//!   has no longhand text (the standard gives `""` for each longhand until the variables are known), so writing one of its
-//!   longhands, or removing it, cannot be expressed and is refused. The shorthand as a whole can be replaced or removed.
+//! - Pending shorthands retain their source and surviving mask. Their longhands expose empty values until computation.
+//!   Partial pending blocks need persistent state in the caller because their serialization is lossy.
 //! - Serialization (CSSOM "serialize a CSS declaration block"): an unchanged shorthand declaration is written as it was
 //!   authored. Longhands that together make `margin`, `padding`, `inset`, `border-width|style|color`, `border-top|...`,
 //!   `border`, `flex`, `gap`, `overflow`, `border-spacing` or `place-*` (all present, same priority, no `var()`) are
@@ -514,6 +513,17 @@ pub(crate) fn remove(list: &mut Vec<Decl>, name: &str, max: usize, charge: Charg
     Ok((old, before != after))
 }
 
+/// Partial pending shorthands need state that exposed text cannot retain.
+pub(crate) fn pending(list: &[Decl]) -> bool {
+    list.iter().any(|d| d.kind == Kind::Short && d.mask != mask_of(&d.name) && has_var(&d.value))
+}
+
+pub(crate) fn inputs(list: &[Decl]) -> Vec<bare_css::cascade::InputDeclaration> {
+    list.iter().map(|d| bare_css::cascade::InputDeclaration {
+        name: d.name.to_string(), value: d.value.clone(), important: d.important, mask: d.mask,
+    }).collect()
+}
+
 // ------------------------------------------------------------------------------------------------ output
 
 /// An identifier as CSS text: what is not a name character is written as a hex escape.
@@ -611,9 +621,6 @@ pub(crate) fn serialize(list: &[Decl], lim: Lim, s: &mut String, charge: Charge)
                     if !wrote {
                         out.exact &= d.kind == Kind::Long;
                         let t = long_text(d, p, charge)?.unwrap_or_default();
-                        if t.is_empty() {
-                            return Err(Fail::Unsupported("a longhand of a style shorthand with var() cannot be written alone"));
-                        }
                         out.decl(p.name(), &t, d.important)?;
                         done |= bit(p);
                     }
@@ -623,3 +630,7 @@ pub(crate) fn serialize(list: &[Decl], lim: Lim, s: &mut String, charge: Charge)
     }
     Ok(out.exact)
 }
+
+#[cfg(test)]
+#[path = "browser_style_pending_tests.rs"]
+mod pending_reduction;

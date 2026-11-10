@@ -168,6 +168,7 @@ type LastKey = (u64, u64, usize, [u64; 3], Option<NodeId>);
 pub(crate) struct Built {
     vp: (f32, f32),
     pub(crate) key: Vec<(NodeId, Option<String>, String)>,
+    inputs: Option<Box<HashMap<usize, bare_css::cascade::InputSheet>>>,
     rules: RuleSet,
     /// The last cascade of these rules, and its key: `revision`, `text_revision`, length and user state revisions of the
     /// document, and `want`. The flag tells that it keeps what `restyle_frame` needs (`RuleSet::compute_kept`).
@@ -243,6 +244,7 @@ const NO_SHORT: &str = "this shorthand has no single computed text (sides differ
 struct Plan {
     /// The tree of the sheet (the document node, or a shadow root), its layer and its text.
     parts: Vec<(NodeId, Option<String>, String)>,
+    inputs: Option<Box<HashMap<usize, bare_css::cascade::InputSheet>>>,
     bytes: usize,
     missing: Vec<String>,
     more: bool,
@@ -335,7 +337,7 @@ impl Dom {
         let l = self.computed.lim.get();
         let sources = cascade::sources_capped(doc, vp, l.max_sources, l.max_sheet_bytes, doc.has_shadow_roots());
         let ext = self.computed.ext.borrow();
-        let mut p = Plan { parts: Vec::new(), bytes: 0, missing: Vec::new(), more: false, strict: false };
+        let mut p = Plan { parts: Vec::new(), inputs: None, bytes: 0, missing: Vec::new(), more: false, strict: false };
         let (pending_ok, bound) = (self.computed.pending_ok.get(), self.computed.bound.borrow());
         // With `record`: the links of this plan, and the bindings that change.
         let (mut seen, mut changes) = (Vec::new(), Vec::new());
@@ -374,7 +376,16 @@ impl Dom {
                             }
                         }
                     }
+                    let before = p.parts.len();
                     add(self, &mut p, scope, None, &text)?;
+                    if p.parts.len() > before {
+                        if let Some(inputs) = crate::browser_cssom::sheet_inputs(self, doc, el, &text) {
+                            let bytes = inputs.iter().flatten().flatten().map(|d| d.name.len() + d.value.len()).sum::<usize>();
+                            if bytes > l.max_sheet_bytes.saturating_sub(p.bytes) { return Err(self.lim("computed-sources")); }
+                            p.bytes += bytes;
+                            p.inputs.get_or_insert_with(Default::default).insert(before, inputs);
+                        }
+                    }
                 }
                 Source::Link(href) if href.trim().is_empty() => {}
                 Source::Link(href) => match ext.get(&href) {
@@ -503,10 +514,10 @@ impl Dom {
             }
             it.charge(plan.bytes as u64 / 32)?;
             let mut cache = self.computed.cache.borrow_mut();
-            if !cache.as_ref().is_some_and(|b| b.vp == vp && b.key == plan.parts) {
+            if !cache.as_ref().is_some_and(|b| b.vp == vp && b.key == plan.parts && b.inputs == plan.inputs) {
                 // Sheets only added at the end (a script appends a `<link>` or `<style>`): add them to the rules of the last build.
                 // Adding in order gives the same rules as a new build, without parsing the sheets again.
-                let old = cache.take().filter(|b| b.vp == vp && plan.parts.starts_with(&b.key));
+                let old = cache.take().filter(|b| b.vp == vp && plan.parts.starts_with(&b.key) && b.inputs.is_none() && plan.inputs.is_none());
                 let from = old.as_ref().map_or(0, |b| b.key.len());
                 let mut rules = match old {
                     Some(b) => b.rules,
@@ -517,7 +528,11 @@ impl Dom {
                     }
                 };
                 let root = doc.root();
-                for (scope, layer, text) in &plan.parts[from..] {
+                for (index, (scope, layer, text)) in plan.parts.iter().enumerate().skip(from) {
+                    if let Some(inputs) = plan.inputs.as_ref().and_then(|all| all.get(&index)) {
+                        rules.add_inputs(&mut doc, text, Origin::Author, layer.as_deref(), *scope, inputs);
+                        continue;
+                    }
                     if *scope == root {
                         rules.add_in_layer(&mut doc, text, Origin::Author, layer.as_deref());
                     } else {
@@ -531,12 +546,16 @@ impl Dom {
                 if doc.name_count() > self.lim.max_names {
                     return Err(self.lim("dom-names"));
                 }
-                *cache = Some(Built { vp, key: plan.parts, rules, last: [None, None], read: None, odd: OnceCell::new(), stamp });
+                *cache = Some(Built { vp, key: plan.parts, inputs: plan.inputs, rules, last: [None, None], read: None, odd: OnceCell::new(), stamp });
             }
             cache.as_mut().expect("built").stamp = stamp;
         }
         let mut cache = self.computed.cache.borrow_mut();
         let built = cache.as_mut().expect("built");
+        if self.style.has_pending.get() && built.rules.set_inline_inputs(self.style_inputs(it, &doc)?) {
+            built.last = [None, None];
+            built.read = None;
+        }
         // The bound of a full compute: nodes x (rules + 1), or styled elements x (rules + 1) when that is over `STYLED_FROM`. It is the cap
         // check. The full compute charges nodes and tested candidates. A restyle charges the elements that it styles.
         let mut work = (doc.len() as u64).saturating_mul(built.rules.len() as u64 + 1);
@@ -622,6 +641,9 @@ impl Dom {
         let doc = self.doc.borrow();
         if doc.len() > self.computed.lim.get().max_nodes {
             return Err(self.lim("computed-nodes"));
+        }
+        if self.style.has_pending.get() && built.rules.set_inline_inputs(self.style_inputs(it, &doc)?) {
+            return Ok(None);
         }
         restyle_marks(it, &built.rules, &doc, styles, marks, old, new)
     }

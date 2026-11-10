@@ -19,6 +19,7 @@ struct Sheet {
     list: ObjId,
     rules: Vec<ObjId>,
     source: String,
+    text_key: Vec<(NodeId, bare_html::dom::Span)>,
 }
 #[derive(Clone)]
 struct Rule {
@@ -238,6 +239,7 @@ fn sheet_of(d: &Dom, it: &mut Interp<'_>, n: NodeId) -> R<ObjId> {
             list,
             rules: vec![],
             source: String::new(),
+            text_key: Vec::new(),
         },
     );
     state(d).borrow_mut().by_node.insert(n, o);
@@ -313,6 +315,26 @@ fn disabled_set(d: &Dom, it: &mut Interp<'_>, t: Value, a: &[Value]) -> V {
     }
     Ok(Value::Undefined)
 }
+fn text_key(doc: &bare_html::dom::Document, node: NodeId) -> Vec<(NodeId, bare_html::dom::Span)> {
+    let mut out = Vec::new();
+    let mut stack = vec![node];
+    while let Some(n) = stack.pop() {
+        if let bare_html::dom::NodeData::Text(span) = *doc.data(n) { out.push((n, span)); }
+        stack.extend(doc.children(n));
+    }
+    out
+}
+
+pub(crate) fn sheet_inputs(d: &Dom, doc: &bare_html::dom::Document, node: NodeId, text: &str) -> Option<bare_css::cascade::InputSheet> {
+    if !d.style.has_pending.get() { return None; }
+    let cell = d.cssom.state.get()?;
+    let s = cell.borrow();
+    let sheet = s.sheets.get(s.by_node.get(&node)?)?;
+    if sheet.source != text || sheet.text_key != text_key(doc, node) { return None; }
+    let blocks: Vec<_> = sheet.rules.iter().map(|r| s.rules[r].style.and_then(|o| d.style_object_inputs(doc, o))).collect();
+    blocks.iter().any(Option::is_some).then_some(blocks)
+}
+
 fn source(d: &Dom, it: &mut Interp<'_>, o: ObjId) -> R<String> {
     let n = node(d, o);
     let (tag, href) = {
@@ -414,7 +436,8 @@ fn parsed_rules(d: &Dom, it: &mut Interp<'_>, sheet: ObjId, text: &str) -> R<Vec
 #[cold]
 fn refresh(d: &Dom, it: &mut Interp<'_>, o: ObjId) -> R<()> {
     let text = source(d, it, o)?;
-    if state(d).borrow().sheets[&o].source == text {
+    let key = if d.style.has_pending.get() { text_key(&d.doc.borrow(), node(d, o)) } else { Vec::new() };
+    if state(d).borrow().sheets[&o].source == text && state(d).borrow().sheets[&o].text_key == key {
         return Ok(());
     }
     let rules = parsed_rules(d, it, o, &text)?;
@@ -422,6 +445,7 @@ fn refresh(d: &Dom, it: &mut Interp<'_>, o: ObjId) -> R<()> {
     let sh = st.sheets.get_mut(&o).unwrap();
     sh.rules = rules.clone();
     sh.source = text;
+    sh.text_key = key;
     let list = sh.list;
     st.lists.get_mut(&list).unwrap().items = rules;
     Ok(())
@@ -512,6 +536,7 @@ fn publish_rules(d: &Dom, it: &mut Interp<'_>, o: ObjId, rules: Vec<ObjId>) -> R
     let mut s = state(d).borrow_mut();
     let sheet = s.sheets.get_mut(&o).unwrap();
     sheet.source = text;
+    sheet.text_key = if d.style.has_pending.get() { text_key(&d.doc.borrow(), sh.node) } else { Vec::new() };
     sheet.rules = sh.rules.clone();
     s.lists.get_mut(&sh.list).unwrap().items = sh.rules;
     Ok(())
