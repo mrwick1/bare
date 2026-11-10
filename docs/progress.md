@@ -7207,3 +7207,41 @@ The ms values vary from run to run (network). apnews keeps its errors (a `Steps`
 - Live Chrome for the plugin and MIME lists.
 - macOS and arjun-e16.
 - Priority B.
+
+## Angular load receiver reduction (Task 38)
+
+Documentation only. Frozen main: `1b9bff1d912bb17852eb3b99b01a80820d7838fb`. Exact changed files: `docs/decisions.md` and `docs/progress.md`, declared before edits in `/data/bare-tmp/alt12/work-log.txt`. Artifacts under `/data/bare-tmp/alt12/` are machine-local, not hosted PR attachments. Ownership snapshot: `/data/bare-tmp/plans/p12chk/worktrees.txt`; fresh full status, working diff and branch diff: `ownership-before-edit.txt`. Task 24 owns browser registration, basics, web, fetch, scheduler, scroll, handlers and its small heap hook. Task 37's redis-capability-trace had no working or branch diff at inspection. No foreign worktree was edited.
+
+### Source, receiver and feature
+
+Downloaded `https://angular.dev/main-47UB4TBV.js`: 621365 decoded bytes, SHA-256 `5b26e63417ebbb7a428898874806e61f1af21e987be15af4c24a2f4facfe2c41`. File `scripts/3.js`; source manifest with all downloaded resource URLs, sizes and hashes: `scripts.json`. Downloads are fresh source captures, not retained bodies from the older probe. Source scan: `source-reads.txt`; command: `python3 /data/bare-tmp/alt12/download.py`.
+
+The constructor for class `et`, selector `docs-icon`, reads `let a=D($t)` and schedules `zu(async()=>{t.whenFontLoad??=a.fonts.load('normal 1px "Material Symbols Outlined"'),await t.whenFontLoad,t.isFontLoaded.set(!0)})`. The receiver of load is `a.fonts`. The assignment starts at decoded character offset 139790, line 503, column 12334. The main imports `D` as export C, `$t` as export a and `zu` as Gi from `chunk-CS9qujL_.js`. That chunk defines D as injector access and zu as the NgAfterNextRender registration. The import token is also used by the bundle's `_document` fields. Hypothesis: `a` is the application document. The fixture below verifies the host document read independently; no live receiver identity was captured.
+
+The component starts `isFontLoaded` false. Its `fontSize` computed value is zero until that signal becomes true, and its host binding writes font-size in px. Thus the concrete source feature is icon-font visibility after rendering. Rejection before assigning the cached promise leaves later constructors able to try again. Hypothesis: this explains the repetition. Twelve errors do not prove twelve constructor instances. Search functionality and whole-page hydration were not exercised or established as broken by this error.
+
+### Fresh runs and reduction
+
+Build command: `CARGO_TARGET_DIR=/data/bare-tmp/target-alt12 /data/bare-tmp/bin/base-build 1b9bff1d912bb17852eb3b99b01a80820d7838fb --release -p bare-drive`. Shared output: `/data/bare-tmp/base/1b9bff1d91/target`. The shared builder chooses its own BASE target directory. Task commands retain the target-alt12 environment. Run command: `CARGO_TARGET_DIR=/data/bare-tmp/target-alt12 python3 /data/bare-tmp/alt12/run.py`. The runner wraps both live probes and the reduction in heavy. Live probes use `timeout 75`, the retained p12 Angular steps, 30000 ms readiness timeout, and `shot s`.
+
+Both p11chk and p12chk retained Angular results contain twelve `Uncaught (in promise) TypeError: Cannot read properties of undefined (reading 'load') at script#6` entries. Both fresh runs repeat that signature twelve times. Run 1: ready true, exit 0, 1344.3 ms, peak RSS 86076 KiB. Run 2: ready true, exit 0, 1537.1 ms, peak RSS 89748 KiB. Neither reports a driver failure, fatal stop, task stop or failed network resource. All transferred resources and console entries remain in `angular-1/stdout.json` and `angular-2/stdout.json`, with steps, stderr, screenshots and exit codes. The main JS transfers 105317 bytes in each run; decoded source size differs from transfer size. No application sentinel or interaction was asserted. Readiness does not establish application success.
+
+The later `Error: WebAssembly is not defined` remains separate at script#7:36:77664, followed by script#7:36:74646 and script#7:3:33683. Run 1 records it once; run 2 twice. Task 37 owns that capability investigation. Matching chronology is not evidence of causality.
+
+Minimal executed fixture (`reduction.html`), served over ephemeral loopback HTTP:
+
+```html
+<!doctype html><docs-icon>search</docs-icon><script>
+let a = document;
+console.log('fonts receiver', typeof a.fonts);
+(async () => { await a.fonts.load('normal 1px "Material Symbols Outlined"'); console.log('font completed'); })();
+</script>
+```
+
+The reduction exits zero with readiness true, logs `fonts receiver undefined`, then the same promise TypeError at script#1. It does not log font completed. Result: `reduction.json`, stderr: `reduction.err`, runner: `run.py`, complete run output: `run.log`. It takes 11.0 ms with peak RSS 13100 KiB. The only resource is the HTTP 200 fixture. The server closes before the runner exits. This isolates a host-value failure without WebAssembly, network app data or a framework dependency. It does not prove the live script-number mapping.
+
+### Scope and remaining measurement
+
+No bounded unowned implementation was justified. No existing font API implementation was found by `rg -n 'fonts|FontFace' crates/bare/src`. Correct document font loading needs excluded document registration/basics and loading integration; no API filler was added. Leave this PR unmerged for owner coordination. The first-error live attribution remains a hypothesis. Next measurement: capture `a === document`, `typeof a.fonts` and the source location at the first failing callback before considering implementation. Do not infer search or hydration repair from fewer errors.
+
+Tests-first N/A. No matrix, module suite, workspace suite, public journeys, browser oracle, control sites or BASE/NEW pairs ran for this documentation-only result. Validation covers retained raw JSON, downloaded source and reduction output, exact diff, prohibited-text scan and whitespace. No final rebase occurred: the gate was held by page-basics; the task's own waiter was stopped after choosing the owned-scope handoff. The foreign gate was not released. No build, live job or gate waiter remains active for this task.
