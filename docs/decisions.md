@@ -965,7 +965,7 @@ Not checked against a live Chrome: the plugin and MIME lists. They follow the st
 
 ## Angular icon font receiver reduction (Task 38)
 
-The Angular main bundle calls `a.fonts.load` in the `docs-icon` constructor's after-next-render callback. Its font-loaded signal starts false and keeps the icon font size at zero until the promise resolves. A local document-only reduction confirms that the host returns undefined for `document.fonts` and reproduces the load TypeError without WebAssembly. Do not substitute a fulfilled promise: font availability and loading need correct semantics.
+The Angular main bundle calls `a.fonts.load` in the `docs-icon` constructor's after-next-render callback. Its font-loaded signal starts false and keeps the icon font size at zero until the promise resolves. A local document-only reduction confirms that the host returns undefined for `document.fonts` and reproduces the load TypeError without WebAssembly. The owner later requested an empty font-loading model: load resolves to an empty array and check returns true. The progress entry records its lazy implementation proposal and its limits; it does not establish actual font availability.
 
 Hypothesis: this callback causes the twelve live script#6 rejections. The console has no source column or callback stack, so source inspection and matching text do not prove the live mapping. Next measurement: capture the callback receiver identity and source location at the first rejected member read. Keep the later script#7 WebAssembly error with Task 37. No causal link between these errors is established.
 
