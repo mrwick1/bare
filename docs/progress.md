@@ -8307,3 +8307,15 @@ Not tested: a tool call through Claude Code, a window on archMachine, and Codex 
 - The README states the rule. The server also sends it in the `instructions` field of `initialize`. A test checks the field.
 - BMCP-1 to BMCP-11 hold the known problems from the Linux checks: the Codex environment, untested Claude Code calls, `reload` after `open`, the Hacker News failures, the install copy, cumulative `ms`, the Hyprland Lua rule, Windows and macOS runtime, deferred tool discovery, screenshot paths and window mode on archMachine.
 - The Plane login had failed because the vault password was stale. The password was reset on the server and the vault item was updated. The API key is in the vault as `bare/plane`.
+
+## Owner decisions: login and E2E scope (2026-11-10)
+
+Goal: `bare` is a minimal browser for logins and end-to-end tests on real sites. It is not shipped as a general browser now.
+
+- Rule: build no feature ahead of need. Fix a gap only when a real login or E2E journey fails on it.
+- Approved: session import and export (cookies and storage), so a journey can start from a session made in another browser. This is the answer to bot challenges and 2FA. No challenge bypass. Check before the plan: no such support exists today. `open` in `bare-drive` always starts with a new, empty profile (`crates/drive/src/steps.rs`).
+- Closed: draft #345 (`steps-aborts`). The frame diagnostic did not fix the craigslist and apnews budget failures, and its cost stayed above the +0.5% limit. The branch is kept.
+- Closed: the glibc-only drift question. No more attribution work.
+- Wait for a failing journey: Workers, IndexedDB persistence and cursors, WebAssembly, resizable ArrayBuffer, EventSource, proportional text widths and the layout gaps of module 4.
+
+Not done in this record: the README and decisions.md still state the learning purpose. The owner did not yet decide on a change to them.
