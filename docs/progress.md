@@ -7168,30 +7168,42 @@ wise.com stops in Mixpanel: `document.referrer.search(...)` throws, because `doc
 
 ### Tests that failed first
 
-11 of the 12 tests failed on main before the code. They pass now.
+13 tests. 11 of the first 12 failed on main before the code. The 13th (queries and key lists of the lazy names) was written with the lazy change and was not run against main. All pass.
 
 ### Cost
 
-- Cost-check case 2 of the owner rule: only `crates/bare` changed. Rows of the module, plus a sample of the other groups (see the PR).
-- Install cost is the main risk. The smallest browser-realm rows have a base of about 37.5M instructions, so +0.5% is about 187k.
-- What cost most: a name on `Document.prototype` or on the document wrapper (the measured steady state is 2.4k to 10k each, depending on the row), a function object (2.4k), an interned string (a power-of-two step of the interner moved `navigation_load storage` by +23k to +30k per collect).
-- What I did: shared no-op functions, string values read through a getter, one function for the charset trio, one shared get/set function for `designMode` and `dir`, data properties on the global (1.9k each) in place of accessors (3.2k each).
-- A new proto object between `Document.prototype` and its parent did not help (`handler_load 1`: 37,667,493 against a base of 37,447,684).
-- Final rebase on 617cb19f89 (#344), base build `/data/bare-tmp/base/617cb19f89`. Case 2 ran first (112 rows: module rows plus every 13th row). Two sampled rows were over under both allocators (`navigation_load history 10`, `nodelist_load churn 1`). A repeat of those rows passed, so the counts move between runs. The rule then asked for the full matrix.
-- Full matrix, 805 rows, log `/data/bare-tmp/pb/matrix-full.log`: mean change glibc +0.054%, jemalloc +0.510%. 12 rows are over +0.5% under both allocators (glibc, jemalloc): `fetch_load bytes 1` (+1.222%, +0.808%), `loader_load blocking 1` (+0.789%, +0.515%), `loader_load mixed 1` (+0.780%, +0.693%), `session_load chain 1` (+1.052%, +0.559%), `session_load chain 10` (+1.178%, +1.003%), `sheets_load dynamic 1` (+0.953%, +0.554%), `sheets_load imports 1` (+1.036%, +0.590%), `sheets_load imports 10` (+0.694%, +0.556%), `sheets_load linked 1` (+1.003%, +0.592%), `xhr_load 1` (+1.077%, +0.693%), `xhr_load 100` (+0.711%, +0.505%), `select_load churn 10` (+0.691%, +0.591%).
-- Cause: each of these rows has a base of 7M to 18M instructions and pays a fixed install cost of about 100k instructions in the browser realm (about +1% of 10M). My earlier subset runs did not include these rows, so I did not see them.
-- Decision: the change is not merged. Under the owner rule there is no exception without the owner. A lower install cost needs the new names to be lazy. The lazy hook in `crates/js` takes a fixed name list, and this task may not edit `crates/js`.
-- Closest row before the final rebase: `handler_load 1` at +0.498% to +0.506% under glibc and +0.427% under jemalloc, on the subset runs before the final rebase. The final numbers are in the PR.
+- First version: every name was defined at install. Full matrix on base 617cb19f89: 12 rows over +0.5% under both allocators (`fetch_load bytes 1` +1.22% / +0.81%, `session_load chain 10` +1.18% / +1.00%, `xhr_load 1`, `sheets_load` x4, `loader_load` x2, `xhr_load 100`, `select_load churn 10`). Cause: a fixed install cost of about 100k instructions in a browser realm. Log: `/data/bare-tmp/pb/matrix-full.log`.
+- Owner decision: the `crates/js` limit is lifted for the lazy-name hook. Change: names added to `Heap::browser_name` (`crates/js/src/heap.rs`, 13 added lines, 10 changed). `browser_basics::define` defines a name on the first ask. The install makes nothing but the load time.
+- Cost-check case 1 applied (`crates/js` changed). Final rebase on 1b9bff1d91 (#349), base build `/data/bare-tmp/base/1b9bff1d91`. Full matrix, 805 rows, log `/data/bare-tmp/pb/matrix-final2.log`: mean change glibc -0.003%, jemalloc +0.000%. Rows over under one allocator: 0. Rows over under both: 0.
+- `tools/js/test262_check.sh`: exit 0 (no directory below its baseline). `tools/js/exec_diff.sh`: 79 runs, 0 differences. `tools/js/typing/keycost.sh`: `#a1` 283.1 M for each key, `#f0` 288.5 M, load and mount 573.1 M, peak RSS 33.9 MiB at 50 keys; the same values on the base build (283.1 M, 288.5 M, 33.8 MiB).
+- `cargo test --release --workspace`: 3444 passed, 0 failed. `tools/drive/public/run.sh`: 48 pass, 0 fail.
+
+### Live check (one run each, same machine, base 1b9bff1d91 against this change)
+
+| Site | base | this change |
+|---|---|---|
+| wise | readyState complete, 3 console errors (`reading 'search'`), error page, 2,223 ms, 181 MiB | complete, 0 errors, home page shows, 2,097 ms, 197 MiB |
+| apnews | complete, 5 errors, 8,417 ms, 149 MiB | complete, 5 errors, 8,070 ms, 148 MiB |
+| theverge | complete, 2 errors, 7,096 ms, 318 MiB | complete, 2 errors, 5,985 ms, 328 MiB |
+| vimeo | complete, 0 errors, 2,465 ms, 244 MiB | complete, 0 errors, 4,349 ms, 238 MiB |
+| mastodon-social | complete, 1 error, 7,362 ms, 68 MiB | complete, 1 error, 4,092 ms, 67 MiB |
+| github-repo | complete, 0 errors, 3,488 ms, 198 MiB | complete, 0 errors, 3,386 ms, 194 MiB |
+| nasa | complete, 0 errors, 3,457 ms, 171 MiB | complete, 0 errors, 3,417 ms, 174 MiB |
+| bluesky | complete, 0 errors, 11,994 ms, 197 MiB | complete, 0 errors, 11,835 ms, 198 MiB |
+| gov-uk | complete, 0 errors, 1,163 ms, 31 MiB | complete, 0 errors, 389 ms, 31 MiB |
+| youtube | complete, 0 errors, 1,197 ms, 178 MiB | complete, 0 errors, 1,761 ms, 176 MiB |
+
+The ms values vary from run to run (network). apnews keeps its errors (a `Steps`/`TraversalDepth` budget and others, not these names). Logs: `/data/bare-tmp/pb/live/`.
 
 ### Limits
 
 - No `Referer`. `lastModified` is the load time. The charset ignores the HTTP header.
 - `window.open` returns `null`. No dialog shows.
-- The new names cannot be lazy: the engine hook takes a fixed name list in `crates/js`, which this task may not change.
+- The lazy names need an entry in the fixed list of `Heap::browser_name`. A new name must be added there too.
+- `hasOwnProperty` does not ask the host for a lazy name (as for `onclick`).
 
 ### Not tested
 
-- `cargo test --release --workspace`, the 48 journeys and the live-site check after the final rebase (not run: the cost rule failed first). Only the 12 new tests were run.
 - Live Chrome for the plugin and MIME lists.
 - macOS and arjun-e16.
 - Priority B.

@@ -109,7 +109,7 @@ fn nested_browsing_contexts_are_inert() {
         // The named window is inert. Child documents and navigation remain absent.
         assert_eq!(js(&mut b, "var f = document.getElementById('p'); [typeof f.contentWindow, typeof f.contentDocument, typeof f.src, typeof f.srcdoc, typeof f.sandbox, typeof f.loading, typeof f.getSVGDocument, 'contentWindow' in HTMLIFrameElement.prototype].join()"), "object,undefined,undefined,undefined,undefined,undefined,undefined,true");
         assert_eq!(js(&mut b, "Object.getOwnPropertyNames(HTMLIFrameElement.prototype).join()"), "constructor,contentWindow,name");
-        assert_eq!(js(&mut b, "typeof window.frames + ',' + typeof window.parent + ',' + typeof window.frameElement"), "object,object,undefined");
+        assert_eq!(js(&mut b, "typeof window.frames + ',' + typeof window.parent + ',' + typeof window.frameElement"), "object,object,object");
         // attributes stay plain attributes: no reflection, no side effect
         assert_eq!(js(&mut b, "f.setAttribute('src', '/other.html'); f.setAttribute('srcdoc', '<p>x</p>'); [f.getAttribute('src'), f.getAttribute('srcdoc'), f.hasAttribute('name')].join()"), "/other.html,<p>x</p>,false");
     });

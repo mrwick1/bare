@@ -954,8 +954,11 @@ Not checked against a live Chrome: the plugin and MIME lists. They follow the st
 - It makes a keepalive `POST` with `credentials: "include"` through the fetch queue. It returns `true` when the fetch queue takes it.
 - Quota: 64 KiB of body bytes in flight for all keepalive requests (Fetch standard, "keepalive" quota). A beacon over the quota returns `false`. The bytes count until the request ends.
 
-### Deviations
+### Lazy names
 
-- Several functions share one function object (`alert`, `print`, `focus`, `blur` are the same no-op). The page can see this with `===`. The reason is the install cost: each new function costs about 2.4k instructions, and the smallest rows of the cost matrix have a limit of +0.5%.
-- The getters for strings are named by their key (`charset`, not `get charset`). The name string would be one more interned string, and 6 more strings at install moved the intern table over a power-of-two size on `navigation_load storage`.
-- `charset`, `characterSet` and `inputEncoding` share one function.
+- The new `window` and `document` names are not defined at install. The heap asks the host on the first miss of a name (`Heap::browser_name` in `crates/js/src/heap.rs` lists them, `browser_basics::define` makes them). A realm that never reads one pays nothing. The first version defined them at install. It cost about 100k instructions in each browser realm. 12 rows of the cost matrix with a base of 7M to 18M instructions went over +0.5% under both allocators. With lazy names the full matrix has no row over, and the mean change is -0.003% (glibc).
+- The names live on `window` (a data property or an accessor) and on `Document.prototype`, as before. `Object.keys(window)` and the like ask for all names of an owner, so they show these names too.
+- `navigator` was already lazy as a whole, so its names are made with it.
+- `hasOwnProperty` does not ask the host for any lazy name (`window.hasOwnProperty('onclick')` is false too). `in` and `Object.getOwnPropertyDescriptor` do ask.
+- The change in `crates/js` adds names to the match of `browser_name`. Existing names keep their result.
+- `window.frameElement` is `null` (HTML standard, top-level window). It was `undefined`, and `browser_iframe_tests.rs` expected that. The test now expects `null`.
