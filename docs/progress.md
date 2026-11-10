@@ -8319,3 +8319,23 @@ Goal: `bare` is a minimal browser for logins and end-to-end tests on real sites.
 - Wait for a failing journey: Workers, IndexedDB persistence and cursors, WebAssembly, resizable ArrayBuffer, EventSource, proportional text widths and the layout gaps of module 4.
 
 Not done in this record: the README and decisions.md still state the learning purpose. The owner did not yet decide on a change to them.
+
+## Session state save and load (2026-11-10)
+
+Built: `bare-drive` can save a session to a file and start a new session from it.
+
+- `bare-net`: `Cookie::new` and `Jar::insert` put a stored cookie in the jar. `insert` skips an expired cookie and a public-suffix domain that is not host-only. It does not apply the cookie count limits.
+- `bare`: `WebStorage::export` and `import` copy cookies, `localStorage` and `sessionStorage` as plain text (`StorageState`). Import goes through `set`, so the limits hold. A lone UTF-16 surrogate becomes U+FFFD.
+- `bare`: `Page::open_in_with`, `Page::reopen_in_with` and `Remote::open_with` start a session from a `StorageState`. The state is plain data, because `WebStorage` is not `Send` and a window runs on its own thread. The old signatures call the new ones with `None`. A restored cookie is sent because the client of a session uses the jar of its storage.
+- `bare-drive`: new steps `open URL state="FILE"` and `save-state "FILE"` (`steps.rs`, `state.rs`). The step output gives counts only.
+- File format: Playwright `storageState` JSON, plus `sessionStorage` in each origin. A domain with a leading dot is a domain cookie. `expires` is Unix seconds, `-1` for a session cookie. Unknown fields are ignored. The file is written to a temporary file with mode 0600, then renamed. Errors name the file and the field, never a value.
+- The 0600 call is in `run.rs` (`private`), because `tools/portable_check.sh` allows OS code only in files on its list.
+
+Checks:
+- `cargo test --release -p bare-net --lib cookie`: 22 passed. `-p bare --lib storage`: 13 passed. `-p bare-drive`: all passed (3 new tests in `tests/state.rs`). `-p bare-mcp`: all passed.
+- `cargo test --release --workspace`: 3497 passed, 0 failed.
+- `tools/portable_check.sh`: passed (scan, Windows, macOS).
+- Cost sample: 61 rows (every 13th), base is main 29b4364f00. Glibc mean -0.002%, jemalloc +0.000%. Over the limit under both allocators: 0. Failed: 0.
+- The sed expression in the task text for the row filter fails on GNU sed (`[][.` starts a collating symbol). I used `[].[\*^$()+?{}|]`. The base needed `base-build origin/main --release -p bare-stress`.
+
+Not tested: a real Playwright file made in Chrome. The staging login journey. IndexedDB (not saved). A window run (`--window`) of `open ... state=` (the code path exists and compiles; no test runs it). Windows and macOS runs (they only build).
