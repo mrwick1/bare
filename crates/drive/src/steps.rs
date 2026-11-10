@@ -3,6 +3,10 @@
 //!
 //! ```text
 //! open URL                    a new session (a new profile: empty storage), as a new window
+//! open URL state="FILE"       the same, but the session starts from a file that `save-state` (or Playwright's `storageState`) made:
+//!                             its cookies, `localStorage` and `sessionStorage`. A missing or bad file fails the step
+//! save-state "FILE"           write the cookies, `localStorage` and `sessionStorage` of the session to FILE (mode 0600; it holds live
+//!                             credentials). The step output gives counts only. IndexedDB is not saved
 //! goto URL                    the address bar of the session
 //! reload
 //! click LOC
@@ -60,7 +64,9 @@ pub enum CookieState {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
-    Open(String),
+    /// The URL, and the session file to start from.
+    Open(String, Option<String>),
+    SaveState(String),
     Goto(String),
     Reload,
     Click(Locator),
@@ -190,10 +196,21 @@ fn parse_line(line: &str, vars: &HashMap<String, String>) -> Result<Action, Stri
         };
         expand(&arg, vars)
     };
-    let w = if matches!(verb, "open" | "goto" | "press" | "shot" | "timeout") { Vec::new() } else { words(raw)? };
+    if verb == "open" {
+        // `open URL state="FILE"`: the URL is the first word; a URL can hold `=` and `~`, so only a last `state=` word is cut.
+        if let Some(i) = raw.rfind(" state=") {
+            let (url, f) = (raw[..i].trim(), raw[i + 7..].trim());
+            let mut it = f.chars().peekable();
+            let file = if f.starts_with('"') { quoted(&mut it).ok().filter(|_| it.next().is_none()) } else { Some(f.to_string()).filter(|f| !f.is_empty() && !f.contains(char::is_whitespace)) };
+            let (Some(file), false) = (file, url.is_empty() || url.contains(char::is_whitespace)) else { return Err("open URL state=\"FILE\"".into()) };
+            return Ok(Action::Open(expand(url, vars)?, Some(expand(&file, vars)?)));
+        }
+    }
+    let w = if matches!(verb, "open" | "goto" | "press" | "shot" | "timeout" | "save-state") { Vec::new() } else { words(raw)? };
     let rest = &w[..];
     Ok(match verb {
-        "open" => Action::Open(one()?),
+        "open" => Action::Open(one()?, None),
+        "save-state" => Action::SaveState(one()?),
         "goto" => Action::Goto(one()?),
         "reload" if raw.is_empty() => Action::Reload,
         "click" => match locator(rest, vars)? {
@@ -339,6 +356,14 @@ mod tests {
         assert_eq!(p("expect cookie sid"), Ok(Action::Expect(Check::Cookie("sid".into(), CookieState::Present))));
         assert_eq!(p("expect cookie sid absent"), Ok(Action::Expect(Check::Cookie("sid".into(), CookieState::Absent))));
         assert_eq!(p("expect cookie sid value~\"ab\""), Ok(Action::Expect(Check::Cookie("sid".into(), CookieState::Value(Text::Has("ab".into()))))));
+        assert_eq!(p("open http://a.test/x?q=1"), Ok(Action::Open("http://a.test/x?q=1".into(), None)));
+        assert_eq!(p("open http://a.test/x?q=1 state=\"s/${PASS}.json\""), Ok(Action::Open("http://a.test/x?q=1".into(), Some("s/p\"w.json".into()))));
+        assert_eq!(p("open http://a.test state=f.json"), Ok(Action::Open("http://a.test".into(), Some("f.json".into()))));
+        assert_eq!(p("save-state \"out/s.json\""), Ok(Action::SaveState("out/s.json".into())));
+        assert_eq!(p("save-state s.json"), Ok(Action::SaveState("s.json".into())));
+        for bad in ["open http://a.test state=", "open http://a.test state=\"f\" x", "save-state", "save-state a b"] {
+            assert!(p(bad).is_err(), "{bad}");
+        }
         assert_eq!(p("press Shift+Tab"), Ok(Action::Press("Shift+Tab".into())));
         assert_eq!(p("goto http://a.test/x?q=1&r=~2"), Ok(Action::Goto("http://a.test/x?q=1&r=~2".into())));
         assert_eq!(p("expect placeholder~\"search\" value=\"\""), Ok(Action::Expect(Check::El(Locator::Placeholder(Text::Has("search".into())), State::Value(Text::Is("".into()))))));

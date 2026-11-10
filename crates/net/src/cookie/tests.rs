@@ -309,3 +309,50 @@ fn lookup_finds_a_cookie_for_a_url_with_no_side_effect() {
     assert_eq!(j.lookup(&at(true, "a.test", "/"), "other", NOW), None);
     assert_eq!(j.lookup(&at(true, "a.test", "/"), "sid", NOW + 1e15).map(|c| c.value.clone()), Some("1".into()), "a session cookie has no end");
 }
+
+#[test]
+fn insert_round_trips_replaces_and_skips_expired() {
+    let mut a = Jar::default();
+    http(&mut a, true, "www.a.test", "/", "x=1; Domain=a.test; Secure; HttpOnly; SameSite=Lax; Max-Age=1000");
+    http(&mut a, true, "www.a.test", "/p", "y=2");
+    let mut b = Jar::default();
+    for c in a.list() {
+        b.insert(c.clone(), NOW);
+    }
+    assert_eq!(b.len(), 2);
+    let (la, lb) = (a.list(), b.list());
+    for (x, y) in la.iter().zip(lb.iter()) {
+        assert_eq!((&x.name, &x.value, &x.domain, x.host_only, &x.path, x.secure, x.http_only, x.same_site, x.expires), (&y.name, &y.value, &y.domain, y.host_only, &y.path, y.secure, y.http_only, y.same_site, y.expires));
+    }
+    let mut r = Cookie::new("x", "9", "a.test", false, "/");
+    b.insert(r.clone(), NOW);
+    assert_eq!(b.len(), 2);
+    assert!(b.list().iter().any(|c| c.name == "x" && c.value == "9"));
+    r.name = "old".into();
+    r.expires = Some(NOW);
+    b.insert(r, NOW);
+    assert_eq!(b.len(), 2);
+    b.insert(Cookie::new("z", "1", "co.uk", false, "/"), NOW);
+    assert_eq!(b.len(), 2);
+    b.insert(Cookie::new("z", "1", "localhost", true, "/"), NOW);
+    assert_eq!(b.len(), 3);
+}
+
+#[test]
+fn insert_refuses_line_breaks_and_keeps_the_limits() {
+    let mut j = Jar::default();
+    j.insert(Cookie::new("a", "1\r\nX-Evil: 1", "a.test", true, "/"), NOW);
+    j.insert(Cookie::new("b\n", "1", "a.test", true, "/"), NOW);
+    j.insert(Cookie::new("c", "1", "a.test", true, "/\r"), NOW);
+    j.insert(Cookie::new("", "", "a.test", true, "/"), NOW);
+    j.insert(Cookie::new("d", &"v".repeat(5000), "a.test", true, "/"), NOW);
+    assert_eq!(j.len(), 0);
+    for i in 0..200 {
+        j.insert(Cookie::new(&format!("n{i}"), "1", "a.test", true, "/"), NOW);
+    }
+    assert_eq!(j.len(), 180, "the domain limit holds");
+    let mut far = Cookie::new("f", "1", "b.test", true, "/");
+    far.expires = Some(NOW + 1e15);
+    j.insert(far, NOW);
+    assert!(j.list().iter().find(|c| c.name == "f").unwrap().expires.unwrap() <= NOW + 400.0 * 86_400_000.0, "the expiry is cut to 400 days");
+}

@@ -194,6 +194,11 @@ fn trim(s: &str) -> &str {
 }
 
 impl Cookie {
+    /// A session cookie with no flags and `SameSite` unset. Set the other public fields after it, then give it to `Jar::insert`.
+    pub fn new(name: &str, value: &str, domain: &str, host_only: bool, path: &str) -> Cookie {
+        Cookie { name: name.into(), value: value.into(), domain: domain.into(), host_only, path: path.into(), secure: false, http_only: false, same_site: SameSite::Unset, expires: None, used: 0 }
+    }
+
     fn matches(&self, host: &str, secure: bool, path: &str) -> bool {
         (!self.secure || secure) && if self.host_only { self.domain == host } else { domain_match(host, &self.domain) } && path_match(path, &self.path)
     }
@@ -234,6 +239,32 @@ impl Jar {
         let mut all: Vec<&Cookie> = self.map.values().flatten().collect();
         all.sort_by(|a, b| (&a.domain, &a.name, &a.path).cmp(&(&b.domain, &b.name, &b.path)));
         all
+    }
+
+    /// Store a cookie that is fully given (from a saved session). It replaces the cookie with the same name, domain, host-only flag and
+    /// path. It is skipped when it is expired (`expires <= now`), when its domain is a public suffix and the cookie is not host-only,
+    /// when a field holds a control character (a line break would add a request header), when the name and value are empty or
+    /// over 4096 bytes, or when the domain already has 180 cookies or the jar 3000. The expiry is cut to 400 days, as in `set`.
+    pub fn insert(&mut self, mut c: Cookie, now: f64) {
+        let ctl = |s: &str| s.bytes().any(|b| b < 0x20 && b != b'\t' || b == 0x7f);
+        if c.expires.is_some_and(|e| e <= now)
+            || !c.host_only && public(&c.domain)
+            || [&c.name, &c.value, &c.domain, &c.path].iter().any(|s| ctl(s))
+            || c.name.is_empty() && c.value.is_empty()
+            || c.name.len() + c.value.len() > MAX_NAME_VALUE
+        {
+            return;
+        }
+        c.expires = c.expires.map(|e| e.min(now + MAX_AGE_MS));
+        let total = self.len();
+        self.tick += 1;
+        c.used = self.tick;
+        let list = self.map.entry(site(&c.domain).to_string()).or_default();
+        list.retain(|o| !o.same_key(&c));
+        if total >= MAX_TOTAL || list.iter().filter(|o| o.domain == c.domain).count() >= MAX_PER_DOMAIN {
+            return;
+        }
+        list.push(c);
     }
 
     /// Store one cookie from `text`, a `Set-Cookie` value or `document.cookie = text`, for a URL `at`. `now` is the wall clock in ms.

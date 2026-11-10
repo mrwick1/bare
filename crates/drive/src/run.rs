@@ -99,22 +99,23 @@ enum Host {
 
 impl Host {
     /// An `open` is a new tab of one browser, in a window too: empty storage, and the connections and the HTTP cache of `net`.
-    fn open(&mut self, url: &str, size: (u32, u32), window: bool, net: &bare_net::http::Client) -> Result<(), String> {
+    /// `state`: the saved session to start from (`None`: empty storage).
+    fn open(&mut self, url: &str, size: (u32, u32), window: bool, net: &bare_net::http::Client, state: Option<bare::page::StorageState>) -> Result<(), String> {
         match self {
             // The new page takes the size of the window, not `size`: the compositor can have resized the window, and the window loop
             // calls `resize` only when the window size changes.
             Host::Window(r) => {
                 let (url, net) = (url.to_string(), net.fork());
-                r.call(move |p| p.reopen_in(&url, &net))?
+                r.call(move |p| p.reopen_in_with(&url, &net, state.as_ref()))?
             }
             _ if window => {
-                *self = Host::Window(Remote::open(url, size, net)?);
+                *self = Host::Window(Remote::open_with(url, size, net, state)?);
                 Ok(())
             }
             _ => {
                 // The old page ends first, so the two pages do not share the peak of memory. A failed open leaves no page.
                 *self = Host::None;
-                let mut p = Page::open_in(url, size, net)?;
+                let mut p = Page::open_in_with(url, size, net, state.as_ref())?;
                 p.quiet = true;
                 *self = Host::Local(Box::new(p));
                 Ok(())
@@ -247,7 +248,7 @@ impl Session {
     let deadline = t0 + *timeout;
     let (mut tries, mut busy, mut waited, mut ticks) = (0u32, Duration::ZERO, Duration::ZERO, Ticks::default());
     let (cpu0, net0) = (thread_cpu_ns(), bare_net::trace::blocked_us());
-    if matches!(step.action, Action::Open(_) | Action::Goto(_) | Action::Reload) {
+    if matches!(step.action, Action::Open(..) | Action::Goto(_) | Action::Reload) {
         *nav_first = rep.net.len();
     }
     let result: Result<Option<String>, Fail> = loop {
@@ -258,9 +259,9 @@ impl Session {
                 *timeout = Duration::from_millis(*ms);
                 break Ok(None);
             }
-            Action::Open(url) => {
+            Action::Open(url, file) => {
                 memo.seen.clear();
-                let opened = host.open(url, opt.size, opt.window, net).and_then(|_| host.run(|p| p.take_logs()));
+                let opened = file.as_deref().map(crate::state::read).transpose().and_then(|st| host.open(url, opt.size, opt.window, net, st)).and_then(|_| host.run(|p| p.take_logs()));
                 let d = t.elapsed();
                 busy += d;
                 if !opt.window {
@@ -430,6 +431,15 @@ fn dump(j: &bare_net::cookie::Jar) -> Vec<CookieOut> {
         .collect()
 }
 
+/// Make the options create a file that only the owner can read (mode 0600 on Unix; elsewhere the default). It is here because
+/// `tools/portable_check.sh` allows OS code in this file only.
+pub(crate) fn private(o: &mut std::fs::OpenOptions) {
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(o, 0o600);
+    #[cfg(not(unix))]
+    let _ = o;
+}
+
 /// The CPU time of this thread in nanoseconds, from `/proc/thread-self/schedstat` (0 where it cannot be read).
 fn thread_cpu_ns() -> u64 {
     std::fs::read_to_string("/proc/thread-self/schedstat").ok().and_then(|s| s.split(' ').next()?.parse().ok()).unwrap_or(0)
@@ -563,7 +573,13 @@ fn attempt(p: &mut Page, m: &mut Memo, a: &Action, out: Option<&PathBuf>, red: &
                 }
                 return Ok(Some(save(&p.capture(), dir, name)));
             }
-            Action::Open(_) | Action::Timeout(_) => unreachable!("the driver runs these"),
+            Action::SaveState(file) => {
+                let st = p.storage().ok_or_else(|| Try::Stop(fail("page", "the page has no session")))?.export();
+                crate::state::write(file, &st).map_err(|e| Try::Stop(fail("state", e)))?;
+                let origins: std::collections::HashSet<&String> = st.local.iter().chain(&st.session).map(|(o, _)| o).collect();
+                return Ok(Some(format!("saved {} cookies, {} origins", st.cookies.len(), origins.len())));
+            }
+            Action::Open(..) | Action::Timeout(_) => unreachable!("the driver runs these"),
         }
         Ok(None)
     })();

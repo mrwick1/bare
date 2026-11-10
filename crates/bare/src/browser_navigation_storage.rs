@@ -76,6 +76,18 @@ pub enum StoreError {
     Limit(&'static str),
 }
 
+/// The items of one origin as text: `(origin, [(key, value)])`.
+pub type OriginItems = Vec<(String, Vec<(String, String)>)>;
+
+/// A copy of a whole session as plain text: cookies, `localStorage` and `sessionStorage`. It holds live credentials.
+/// The text is lossy: a lone UTF-16 surrogate becomes U+FFFD.
+#[derive(Clone, Debug, Default)]
+pub struct StorageState {
+    pub cookies: Vec<bare_net::cookie::Cookie>,
+    pub local: OriginItems,
+    pub session: OriginItems,
+}
+
 /// The `localStorage` and `sessionStorage` data of all origins. Clones share the data.
 #[derive(Clone)]
 pub struct WebStorage {
@@ -194,6 +206,43 @@ impl WebStorage {
     }
 
     // ----- for tests and drivers -----
+
+    /// A copy of the cookies (an expired one is skipped) and of both storage areas. Origins are sorted.
+    pub fn export(&self) -> StorageState {
+        let jar = self.cookies.lock().unwrap_or_else(|e| e.into_inner());
+        let now = jar.now();
+        let cookies = jar.list().into_iter().filter(|c| c.expires.is_none_or(|e| e > now)).cloned().collect();
+        let area = |session: bool| -> OriginItems {
+            let a = self.areas(session).borrow();
+            let mut out: OriginItems = a
+                .by_origin
+                .iter()
+                .map(|(o, a)| (o.clone(), a.items.iter().map(|(k, v)| (String::from_utf16_lossy(k), String::from_utf16_lossy(v))).collect()))
+                .collect();
+            out.sort_by(|x, y| x.0.cmp(&y.0));
+            out
+        };
+        StorageState { cookies, local: area(false), session: area(true) }
+    }
+
+    /// Add a saved state to this storage. Items go through `set`, so the limits hold; the first error stops the import (what was added stays).
+    pub fn import(&self, st: &StorageState) -> Result<(), StoreError> {
+        {
+            let mut jar = self.cookies.lock().unwrap_or_else(|e| e.into_inner());
+            let now = jar.now();
+            for c in &st.cookies {
+                jar.insert(c.clone(), now);
+            }
+        }
+        for (session, list) in [(false, &st.local), (true, &st.session)] {
+            for (origin, items) in list {
+                for (k, v) in items {
+                    self.set_item(session, origin, k, v)?;
+                }
+            }
+        }
+        Ok(())
+    }
 
     /// `getItem` as text (lone surrogates become U+FFFD).
     pub fn get_item(&self, session: bool, origin: &str, key: &str) -> Option<String> {
@@ -431,4 +480,41 @@ pub(crate) fn length(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> 
     let (session, origin) = target(d, it, this)?;
     let n = d.nav.s.borrow().store.len(session, &origin);
     Ok(Value::Number(n as f64))
+}
+
+#[cfg(test)]
+mod state_tests {
+    use super::*;
+    use bare_net::cookie::Cookie;
+
+    fn filled() -> WebStorage {
+        let s = WebStorage::default();
+        s.set_item(false, "https://a.test", "k", "v\u{e9}").unwrap();
+        s.set_item(true, "http://b.test:8080", "t", "x").unwrap();
+        let mut c = Cookie::new("sid", "1", "a.test", true, "/");
+        c.http_only = true;
+        s.jar().lock().unwrap().insert(c, 0.0);
+        s
+    }
+
+    #[test]
+    fn storage_state_round_trips_all_three_parts() {
+        let st = filled().export();
+        let t = WebStorage::default();
+        t.import(&st).unwrap();
+        let u = t.export();
+        assert_eq!(u.local, vec![("https://a.test".to_string(), vec![("k".to_string(), "v\u{e9}".to_string())])]);
+        assert_eq!(u.session, vec![("http://b.test:8080".to_string(), vec![("t".to_string(), "x".to_string())])]);
+        assert_eq!(u.cookies.len(), 1);
+        assert!(u.cookies[0].http_only && u.cookies[0].name == "sid");
+    }
+
+    #[test]
+    fn storage_state_import_over_the_limit_is_an_error() {
+        let t = WebStorage::new(StorageLimits { max_origins: 1, ..StorageLimits::default() });
+        let f = filled();
+        f.set_item(false, "https://c.test", "k", "v").unwrap();
+        let st = f.export();
+        assert_eq!(t.import(&st), Err(StoreError::Limit("storage-origins")));
+    }
 }

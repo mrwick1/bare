@@ -1192,3 +1192,10 @@ Owner request: a small MCP server, so that an agent can run end-to-end tests in 
 - Secrets come only from a `secrets_file`, as in `bare-drive --secrets`. Values never go in the tool arguments, which an agent client logs.
 - Workspace: `--workspace N` sets a named Hyprland window rule before each window opens: `hyprctl eval` with `hl.window_rule`, `workspace = "N silent"`. Hyprland 0.56 with a Lua config refuses `hyprctl keyword`. `silent` keeps the user's focus and view. The rule matches the class `bare` and the title `bare (driven)`, so a `bare --window` of the user is not moved.
 - Optimization of the server comes later (owner decision). This version measures the same as `bare-drive` (see progress.md).
+
+## Session state (2026-11-10)
+
+- `bare-drive` saves cookies, `localStorage` and `sessionStorage`. Playwright's `storageState` omits `sessionStorage`, and our staging login keeps its token there. Cypress `cy.session` saves all three, but only in memory.
+- The file is Playwright's `storageState` JSON plus a `sessionStorage` list in each origin. A file made by Playwright in real Chrome then loads, so a session can pass bot challenges and 2FA outside `bare`. Unknown fields are ignored.
+- The file holds live credentials. It has mode 0600 on Unix and is written by temporary file and rename. No value goes to a report, a log or an error message. A step output gives counts only.
+- IndexedDB is not saved. We add it when a journey needs it.
