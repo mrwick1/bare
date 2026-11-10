@@ -8300,3 +8300,10 @@ Install:
 - The installed binaries are copies of the build of #368. Copy them again after a change.
 
 Not tested: a tool call through Claude Code, a window on archMachine, and Codex window runs other than the one above.
+
+## MCP issue tracking (2026-11-10)
+
+- Agents file bare-mcp problems as GitHub issues with the label `bare-mcp`. The owner's agents can use the private Plane project "bare MCP" (`BMCP`) instead.
+- The README states the rule. The server also sends it in the `instructions` field of `initialize`. A test checks the field.
+- BMCP-1 to BMCP-11 hold the known problems from the Linux checks: the Codex environment, untested Claude Code calls, `reload` after `open`, the Hacker News failures, the install copy, cumulative `ms`, the Hyprland Lua rule, Windows and macOS runtime, deferred tool discovery, screenshot paths and window mode on archMachine.
+- The Plane login had failed because the vault password was stale. The password was reset on the server and the vault item was updated. The API key is in the vault as `bare/plane`.
