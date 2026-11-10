@@ -970,3 +970,9 @@ The Angular main bundle calls `a.fonts.load` in the `docs-icon` constructor's af
 Hypothesis: this callback causes the twelve live script#6 rejections. The console has no source column or callback stack, so source inspection and matching text do not prove the live mapping. Next measurement: capture the callback receiver identity and source location at the first rejected member read. Keep the later script#7 WebAssembly error with Task 37. No causal link between these errors is established.
 
 Document registration, basics and loading paths are excluded from Task 38. Task 24 owns the document integration files. Publish evidence only and leave implementation for coordinated scope. See the Task 38 progress entry. No runtime change or cost matrix.
+
+## WebAssembly absence and Redis attribution
+
+Keep `WebAssembly` absent until a real runtime exists. Source search found no runtime in the inspected application or interpreter modules. Do not add an object whose validate, compile or instantiate methods report false success. A diagnostic must preserve catch and fallback behavior.
+
+Task 37 traced Redis's Rive factory to an explicit absent-global abort. Its abort helper then reads `WebAssembly.RuntimeError` and throws a ReferenceError. The later fallback URL is another WASM binary, not a JavaScript runtime. A separate widget source contains an unconditional EventSource constructor; the stackless live timeout cannot be mapped conclusively to it. The contains callbacks remain unattributed. Existing Node.contains is not evidence of a missing receiver's identity. Do not change a host API without the original callback, receiver and a failing reduction. See the appended Task 37 evidence in progress.md for decoded URLs, hashes, fresh runs and limits. No host implementation or matrix is part of this decision.
