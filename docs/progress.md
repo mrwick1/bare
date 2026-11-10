@@ -6916,3 +6916,38 @@ All six Redis runs stop at the same existing pending-shorthand longhand-write ga
 - A forced locale-polyfill run in Chrome, exact allocation creation stacks, or speed across frozen identical network responses.
 
 The separate frame experiment uses a `Limit` guard and a cold function that cannot inline. It still has two generator rows over both allocator limits. It remains draft and is not part of this merge.
+
+## Task 32: pending shorthand scope investigation (2026-11-10)
+
+The twitch stop remains unfixed. This section records the reviewable fallback required by the task. No implementation change or scope expansion was made.
+
+### Trigger and source
+
+BASE: `d8550bbba0`. The initial rebase was up to date. Live ownership diffs were checked before edits. Scratch diagnostics changed only `browser_style_block.rs` and were removed from the branch.
+
+Two diagnostic runs stopped at the same `Unsupported` error. The second backtrace shows `browser_cssom::insert`, `parsed_rules`, `new_rule`, the internal `cssText` setter, then `serialize`. The page operation is `CSSStyleSheet.insertRule`. It is not a separate page assignment to a corner longhand. The internal declaration text includes `border-radius:var(--button-border-radius-large);border-top-left-radius:0;border-bottom-left-radius:0;`. Both surviving right corners still belong to the pending shorthand. The complete input and backtrace are in `/data/bare-tmp/cvl/twitch2-stderr.txt`.
+
+Fetched scripts were data only. The button template is in `https://assets.twitch.tv/assets/39247-947dcb7a9cc679940650.js`, zero-based character offset 3499 for the template area (the variable token occurs at 4185). It emits the radius followed by four conditional corner declarations. The stylesheet adapter calls `this.sheet.insertRule(t,e)` in `https://assets.twitch.tv/assets/34609-36d2f7024ebdf95896ac.js`, at offset 620930 for `.insertRule(`. The live backtrace proves the native operation. These fetched positions identify matching source, not a captured JavaScript stack position.
+
+### Rule and scope boundary
+
+CSS Variables 1 section 3.2 requires pending longhands to retain their source shorthand until computation and serialize as empty values. CSSOM defines declaration order and serialization. Sources are linked in the decisions entry. The browser oracle used a fresh blank preview tab, which was closed after the check. Its observations are retained in `/data/bare-tmp/cvl/oracle.json`.
+
+With `--m: 3px 4px; margin: var(--m)`, writing `marginTop = '1px'` produced `margin-top: 1px; margin-right: ; margin-bottom: ; margin-left: ;`. Order stayed top, right, bottom, left. The right computed margin stayed `4px`, then became `8px` after `--m: 7px 8px`. Removing the left margin made its computed value `0px`. Copying the serialized text lost the pending right and bottom margins. This is an observed lossy round-trip, not a proposed invariant.
+
+`browser_style.rs` writes serialized text to the attribute and caches only a parse-equivalent block. `crates/css/src/cascade.rs` computes inline styles from attribute text. A correct fix needs persistent pending state and a route from that state into computation. The allowed serializer and a tiny CSSOM caller change cannot supply that route for element writes and removal. No empty-value drop, whole-shorthand resurrection or early substitution was implemented. The decisions entry describes the precise follow-up requirement. These files remain owned or off limits.
+
+### Checks and retained evidence
+
+- Diagnostic build: `CARGO_TARGET_DIR=/data/bare-tmp/target-cvl /data/bare-tmp/bin/heavy cargo build --release -p bare-drive`. Logs: `diagnostic-build.txt`, `diagnostic-build2.txt` under `/data/bare-tmp/cvl/`.
+- Live probe: `/data/bare-tmp/bin/heavy timeout 75 /data/bare-tmp/target-cvl/release/bare-drive --out /data/bare-tmp/cvl/twitch2 /data/bare-tmp/plans/p9chk/out/twitch/steps`. Readiness failed with the original stop. Logs: `twitch2-stdout.json`, `twitch2-stderr.txt`. The first run took 4840.6 ms with peak RSS 266724 KiB. The second took 2963.1 ms with peak RSS 268924 KiB. Both logged the fatal page error; the second also reported a refused analytics connection. These diagnostic runs are not a performance comparison.
+- Tests-first: `CARGO_TARGET_DIR=/data/bare-tmp/target-cvl /data/bare-tmp/bin/heavy cargo test --release -p bare --lib pending_reduction`. Three scratch unit cases for overwrite, removal and priority failed at serialization before any fix. `tests-first.txt` retains output. All four cases failed in a second run on the unmodified implementation, including the reduced stylesheet insertion. Source: `reduction-tests.rs`; output: `tests-unmodified.txt`. Scratch tests are not committed as a permanently failing suite.
+- `base-build origin/main --release -p bare-drive` returned `/data/bare-tmp/base/d8550bbba0/target`. Log: `base-build.txt`. A scratch local-file drive probe was invalid because drive accepts HTTP(S) document URLs. It is not page evidence; the reduced browser unit test replaces it.
+
+### Cost case and limits
+
+Docs-only final diff: no matrix, zero cost rows. No hot struct changed. Future style-only work must use the `examples/style_load` rows plus every 13th noncomment row. A hot state change requires all 805 rows. No cost waiver is requested.
+
+No final live A/B pairs, comparison-site runs, release workspace suite or 48 journeys were run because there is no implementation to validate. The oracle did not cover importance. The focused priority case fails before its later assertions. Custom-property changes, full value/order coverage and successful round-trip behavior are not proved by the failing unit cases. No video-player claim is made. Steps, Intl, sparse elements, first-error work and fatal diagnostics remain with their existing owners. This branch must remain unmerged pending a separately authorized implementation scope.
+
+The final merge rebase was deferred. `merge-gate acquire cvl` waited behind `sparse-elements 01:09`. The pending request was canceled because this branch is the unmerged scope fallback. It never acquired the gate. The other owner's lock was not released. The branch retains its initial rebase on `origin/main` at `d8550bbba0`.

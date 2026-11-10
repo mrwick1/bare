@@ -863,3 +863,13 @@ Changed on 2026-11-10. A full compute pays one step per document node before it 
 The old full-compute estimate charged styled elements times all rules divided by four. On apnews, five estimates charged 103.35 M steps while the script used 78,712 interpreter ticks. The rule index excludes most rules. The estimate ended the main bundle and later tasks. Restyle charges keep their existing model. The task budget remains 100 M steps.
 
 CSSOM defines the values returned by [`getComputedStyle`](https://drafts.csswg.org/cssom/#dom-window-getcomputedstyle), not an execution-step formula. The charge measures this implementation's traversal and indexed candidate work. It does not alter resolved values.
+
+## Pending shorthand substitutions need state beyond serialized text
+
+A longhand of a shorthand with `var()` retains its original shorthand until computation. Serialize an exposed pending longhand as an empty value. Do not discard its state or substitute the variable at write time. See [CSS Variables 1 section 3.2](https://www.w3.org/TR/2022/CR-css-variables-1-20220616/#variables-in-shorthands) and [CSSOM declaration serialization](https://drafts.csswg.org/cssom/#serialize-a-css-declaration-block).
+
+Task 32 found a scope boundary. `browser_style::style_set_text` serializes the block into the DOM attribute. `style_read` treats the cached block as a parse of that text. The cascade reads the attribute. A partial pending shorthand cannot pass through this path with both standard serialization and preserved computation. Empty serialized values lose their shorthand on a later parse. Writing the whole shorthand restores removed members. Resolving variables at the write loses later custom-property changes.
+
+The browser check retained the right margin after `margin-top: 1px` over `margin: var(--m)`. Its serialized right margin was empty. Changing `--m` changed the computed right margin from `4px` to `8px`. Copying `cssText` to another element lost that margin. Serialization alone is not a lossless state store.
+
+No implementation changes were made. A follow-up needs permission to change the style state and its input to the cascade. It must preserve the source shorthand, surviving longhand mask, priority and declaration order independently of attribute text. It must also invalidate that state for attribute replacement and handle stylesheet publication. Those paths include `browser_style.rs` and computed-style/cascade integration, which Task 32 excludes. Coordinate with their owners before work. Retain bounded storage and budget charges. Measure any hot representation change with the full cost matrix.
