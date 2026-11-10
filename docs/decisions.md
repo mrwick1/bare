@@ -1109,3 +1109,11 @@ A constructor alias would expose the first method but would leave `createDocumen
 A complete dependency needs XML document semantics. The native document has no XML document mode or per-document MIME type. The namespace model cannot represent a null-namespace element. The existing XML MIME parser uses the HTML parser. These are semantic limits, not a file-name conflict. An empty XML document must also report the correct content type and preserve XML behavior for later element creation. A constructor-only patch cannot establish that behavior.
 
 Retain the failing reduction and native dependency probes before changing runtime code. This task publishes evidence only. It does not expose the interface, repair the wrapper, or establish Vimeo player readiness. The progress entry identifies the frozen source, commands, results and remaining checks.
+
+## In-memory indexes for expiration cleanup (Task 46)
+
+This supersedes Task 41's absent-method boundary. GitHub creates an expiresAt index on state.expiresAt. Its cleanup reads primary keys through getAllKeys with an upper-bound range and a count of 250.
+
+Keep index metadata in the existing lazy shim. Derive sorted index entries from current store rows for each read. Sort by index key, then primary key. Reuse key comparison, validation, extraction, ranges and cloning. This avoids a second mutable row table. Put, add, delete, clear and transaction rollback therefore use the same records. Check unique constraints before a write replaces a row. Validate existing records through the request queue when creating a unique index. Undo schema changes with the transaction.
+
+Support get, getKey, getAll, getAllKeys and count. Support compound key paths and multiEntry deduplication. Reject compound multiEntry definitions. Keep the existing key-type limits. Binary keys remain unsupported. Keep index cursors, index renaming, Unicode key-path identifiers, persistence and blocked-connection coordination outside this change. Index creation accepts ASCII identifier paths and the empty path. Do not claim full IndexedDB conformance or whole-page initialization from these operations. See Task 46 in progress.md for the retained caller and checked completion evidence.

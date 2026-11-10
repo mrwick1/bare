@@ -7864,3 +7864,41 @@ Not tested: a runtime interface implementation, stable realm identity, descripto
 Single frozen-BASE controls use the same `timeout`, `open`, body expectation and capture steps. Replace `live-vimeo` with `live-wikipedia` or `live-bluesky` in the command above. All three body expectations pass. Wikipedia has no console entries. Bluesky retains a refused connection to `https://events.bsky.app`. Raw results and steps are in their respective directories; `live-summary.json` retains the summary. These controls do not establish whole-site behavior and are not alternating repair comparisons.
 
 Final gated rebase: `f34ce252eaa5f87e31151d16ee23f5277b0db100`. The interface, namespace, document and basics source files are unchanged from the frozen probe baseline. The diff check records this in `final-base-*.diff`. Documentation references and raw claims were checked. `git diff --check` passes. No matrix was run.
+
+## Task 46: GitHub expiration indexes (2026-11-10)
+
+### Reduction and repair
+
+Frozen main: `8134cf9946873b04c2d234dc3128120b09bfe760`. Logs, reductions, source manifests and raw reports: `/data/bare-tmp/gi16/`. Target directory: `/data/bare-tmp/target-gi16` throughout. Builds, tests, driver runs and measurements use `/data/bare-tmp/bin/heavy`. BASE comes only from `base-build`. `commands.txt` and per-probe `command.json` files retain the commands. These paths are local evidence, not public attachments.
+
+Consumed #352/#356, the idi14 wrapper and GitHub logs, both fresh p16chk GitHub reports, ownership snapshots and exact Task 44/45 diffs. Both fresh reports show the missing-createIndex error. The retained source is `https://github.githubassets.com/assets/app-runtime-18aa0d2ccd44d16d.js`, SHA-256 `0eee86f96a5f88840e2976a370ae607ff899247cd5b3fcfaae5eeef077a55645`. The full asset and source manifest remain outside the repository. The regression copies the open-store wrapper and expiration-query functions unchanged. `source-match.log` checks both exact source matches. Its caller writes expired and live records, then checks expired primary keys and total records.
+
+Tests first: `CARGO_TARGET_DIR=/data/bare-tmp/target-gi16 heavy cargo test --release -p bare --lib indexeddb_github_expiration_wrapper` fails on the unmodified frozen runtime (`failing-first.log`): `falseTypeError:e.index is not a function`. The upgrade callback also lacks createIndex; event delivery permits the later index access to fail. The same checked completion sentinel passes with the repair. No failure is suppressed by the implementation.
+
+The shim stores index metadata and derives sorted entries from current store rows. Index reads use the existing request queue. Unique writes validate before replacing records. Schema undo shares the transaction engine. Put, add, delete, clear and abort therefore use one record source. The existing lazy integration comment now matches the code. No engine, hot structure, CSS, persistence or registration change is included. The Task 44 registration and Task 45 attribute/binary hunks remain intact.
+
+Nine focused IndexedDB tests pass (`targeted-final.log`, `targeted-constraints.log`, `receiver.log`). They cover nested paths, existing records, ordering, compound paths, multiEntry deduplication, updates, deletion, clear, unique conflicts, duplicate existing keys during unique-index creation, transaction/schema rollback, missing/duplicate names, versionchange restrictions, identity and forged receivers. The first targeted run failed the old assertion that methods must be absent; its expected interface shape now matches the repair. A later review added the indexNames getter brand check.
+
+### Checks and live evidence before the final gate
+
+The release workspace suite passes: 3,474 passed, zero failed, 13 ignored (`workspace.log`). All 48 public journeys pass, with zero failed, known, skipped or flakes (`public.log`). The workspace and live batches precede the final getter-only adjustment. Final gated browser tests cover that adjustment. Existing compiler warnings remain unrelated.
+
+Four iteration cost rows pass (`iterate.log`, `.tsv`). The queued selection combines all browser_load and platform_load rows, navigation storage rows and every 13th noncomment row. It contains 81 unique rows (`module.rows`, `sample.rows`, `final.rows`). All pass (`queued-cost.log`, `.tsv`): glibc mean +0.020%, zero failed and zero over both allocators. date_load longstr 1 is +0.579% under glibc and +0.001% under jemalloc. Only that flagged row ran jemalloc. This is not a cost waiver or a measured all-row jemalloc mean.
+
+Three alternating BASE/NEW pairs run on each required URL: `https://github.com/rust-lang/rust` and `https://github.com/tokio-rs/tokio`. Each BASE has one createIndex exception. Each NEW has zero console errors, with no replacement error in the observation window. All DOM checks pass. Three further pairs per URL check `window.__TANSTACK_QUERY_CLIENT__.getQueryCache().getAll().length > 0`; all pass on both versions. This establishes a populated application query cache. The retained regression establishes real expiration read/write completion. Neither proves live cleanup invocation or full user interactions.
+
+The first github-readme probe assumed the Rust README anchor. The fresh sweep instead names the Tokio repository. The Rust-anchor reports remain as `extra-rust-*`; corrected Tokio batches are in `tokio-live.log` and `tokio-app.log`. The initial launch before the driver existed returned exit 127 for NEW. Those invalid reports remain in `invalid-live/` and establish no runtime result.
+
+The Verge pair passes its DOM checks but retains 12 console errors on each tree, including React hydration errors. Bluesky has zero console errors on both. `live-summary.json` and raw reports retain error text, driver time, resource counts, bytes and failures. Resource work differs between runs. No speed or memory improvement is claimed. Peak RSS was not measured.
+
+### Final gate
+
+FIFO gate gi16 acquired at 05:32 UTC. Rebased without conflicts onto `1af2bb9e2c9633a13300cb4ca3bfc6f5b20bc45d`, after #359, #360 and #361. Runtime head before the documentation commit: `d6b4df5e15f771d4d8750a8bc80955ceed26f50b`. The protected owner-file comparison is empty (`preserved-owner-hunks.diff`). Final release browser tests pass: 1,235 passed, zero failed, six ignored (`final-tests.log`).
+
+Fresh BASE uses the final main SHA (`final-base-examples.log`, `final-base-binaries.log`). NEW builds use the same target throughout (`final-build.log`, `final-binaries.log`). The final cost argv is retained verbatim in `final-cost-command.json`. Live pairs use the frozen original BASE and candidate before the final rebase; they were not repeated after the preceding merges.
+
+Final costs pass all 81 rows (`final-cost.log`, `.tsv`): glibc mean +0.001%, zero flagged rows, zero over both and zero failed. No jemalloc row was needed under the owner rule; no all-row jemalloc mean was measured. Case B applies to this bare-only diff. No full 805-row matrix, escalation or exception was used. GNU grep emitted warnings for escaped spaces and hyphens in the saved exact-row regex; the checked output still contains exactly the 81 selected rows.
+
+All 48 public journeys pass again on the final rebased driver (`public-final.log`), with zero failed, known, skipped or flakes. No persistence, index cursor, index renaming, binary key, Unicode key-path identifier, blocked-connection protocol, browser oracle, cross-platform behavior or full user-interaction flow was tested. Existing key-type limits remain in force. No engine language, execution or typing gates were run for this bare-only diff.
+
+The prior decisions and progress files remain byte-identical prefixes. Final diff, whitespace and publication-text checks passed. Branch history contains no merge commits. No unrelated worktree or process was changed.
