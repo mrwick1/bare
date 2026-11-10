@@ -98,12 +98,6 @@ fn input_declarations(input: &[InputDeclaration], side: &mut Side, out: &mut Vec
     }
 }
 
-#[derive(Clone, Copy)]
-enum Inline<'a> {
-    Text(&'a str),
-    Block(&'a [InputDeclaration]),
-}
-
 /// The style sheet of the browser itself.
 pub const UA_CSS: &str = include_str!("ua.css");
 
@@ -559,14 +553,6 @@ impl RuleSet {
         changed
     }
 
-    fn inline_source<'a>(&'a self, node: NodeId, text: Option<&'a str>) -> Option<Inline<'a>> {
-        if let Some(inputs) = &self.pending
-            && let Some(block) = inputs.get(&node) {
-            return Some(Inline::Block(block));
-        }
-        text.map(Inline::Text)
-    }
-
     /// Add a published CSSOM sheet with retained blocks for its top-level style rules.
     pub fn add_inputs(&mut self, doc: &mut Document, text: &str, origin: Origin, layer: Option<&str>, scope: NodeId, blocks: &[Option<Vec<InputDeclaration>>]) {
         let layer = layer.map_or(Some(0), |path| self.layer_path(0, path));
@@ -766,12 +752,12 @@ impl RuleSet {
 
     /// Find the style of every element that is shown. The selectors must come from `add` with this same `doc`.
     pub fn compute(&self, doc: &Document) -> Styles {
-        self.walk::<false>(doc, None, false)
+        if self.pending.is_some() { self.walk::<false, true>(doc, None, false) } else { self.walk::<false, false>(doc, None, false) }
     }
 
     /// `compute`, and the styles keep the cache of the cascade, so that `restyle` can update a part of them later.
     pub fn compute_kept(&self, doc: &Document) -> Styles {
-        self.walk::<false>(doc, None, true)
+        if self.pending.is_some() { self.walk::<false, true>(doc, None, true) } else { self.walk::<false, false>(doc, None, true) }
     }
 
     /// The same, and the element `want` gets its style too, even inside `display:none` (for `getComputedStyle`: CSSOM gives the
@@ -780,12 +766,16 @@ impl RuleSet {
     /// below changes only at a `display:none` element and on the way from it to `want`.
     /// An element that the walk does not reach (a light child of a shadow host that no slot takes) still has no style.
     pub fn compute_for(&self, doc: &Document, want: Option<NodeId>) -> Styles {
-        if want.is_some() { self.walk::<true>(doc, want, false) } else { self.walk::<false>(doc, None, false) }
+        if want.is_some() {
+            if self.pending.is_some() { self.walk::<true, true>(doc, want, false) } else { self.walk::<true, false>(doc, want, false) }
+        } else {
+            if self.pending.is_some() { self.walk::<false, true>(doc, None, false) } else { self.walk::<false, false>(doc, None, false) }
+        }
     }
 
-    /// `WANT` is a const so that the walk for layout (`false`) has none of the code for `want`: it is the same machine code as before.
+    /// Const flags omit hidden-node and retained-input work from the ordinary layout loop.
     #[inline(always)]
-    fn walk<const WANT: bool>(&self, doc: &Document, want: Option<NodeId>, keep: bool) -> Styles {
+    fn walk<const WANT: bool, const PENDING: bool>(&self, doc: &Document, want: Option<NodeId>, keep: bool) -> Styles {
         let mut way = Way { want, path: Vec::new(), sorted: Vec::new(), on: false, at: 0 };
         let mut styles = Styles { styles: vec![ComputedStyle::initial()], of_node: vec![NONE; doc.len()], calcs: Vec::new(), grids: Vec::new(), customs: Vec::new(), spaced: false, kept: None };
         // Style 0 is the starting style. It is the parent style of the `html` element.
@@ -827,9 +817,10 @@ impl RuleSet {
                     }
                     matched.sort_unstable();
                     // The order of the rules is their place in the list, so the key of the cache and the result do not depend on the buckets.
-                    let inline = self.inline_source(node, style_atom.and_then(|a| doc.attr(node, a)));
+                    let inline = style_atom.and_then(|a| doc.attr(node, a));
+                    let input = if PENDING { self.pending.as_ref().and_then(|all| all.get(&node)).map(Vec::as_slice) } else { None };
                     let hint = hints.as_ref().and_then(|h| h.of(doc, node));
-                    let id = self.style_of(&mut styles, &mut memo, parent, &matched, (inline, hint.as_deref()), &cx);
+                    let id = self.style_of::<PENDING>(&mut styles, &mut memo, parent, &matched, (inline, hint.as_deref()), &cx, input);
                     styles.of_node[node.index()] = id;
                     let hidden = styles.styles[id as usize].get(Property::Display) == Value::Keyword(Keyword::None);
                     if hidden {
@@ -881,6 +872,10 @@ impl RuleSet {
     /// cache, the font size of the root element changes, or the styles grew too much): then the caller runs
     /// `compute_kept`; no node has a new style then. Equal style numbers mean equal values, so a style that did not change keeps its number.
     pub fn restyle(&self, doc: &Document, styles: &mut Styles, roots: &[(NodeId, bool)], changed: &mut Vec<(NodeId, u32)>) -> bool {
+        if self.pending.is_some() { self.restyle_with::<true>(doc, styles, roots, changed) } else { self.restyle_with::<false>(doc, styles, roots, changed) }
+    }
+
+    fn restyle_with<const PENDING: bool>(&self, doc: &Document, styles: &mut Styles, roots: &[(NodeId, bool)], changed: &mut Vec<(NodeId, u32)>) -> bool {
         if self.scoped(doc) {
             return false;
         }
@@ -952,9 +947,10 @@ impl RuleSet {
                     }
                 }
                 matched.sort_unstable();
-                let inline = self.inline_source(node, style_atom.and_then(|a| doc.attr(node, a)));
+                let inline = style_atom.and_then(|a| doc.attr(node, a));
+                let input = if PENDING { self.pending.as_ref().and_then(|all| all.get(&node)).map(Vec::as_slice) } else { None };
                 let hint = hints.as_ref().and_then(|h| h.of(doc, node));
-                let id = self.style_of(styles, &mut k.memo, parent, &matched, (inline, hint.as_deref()), &cx);
+                let id = self.style_of::<PENDING>(styles, &mut k.memo, parent, &matched, (inline, hint.as_deref()), &cx, input);
                 if Some(node) == html && styles.styles[id as usize].px(Property::FontSize) != k.rem {
                     // `rem` changes: the cache of the cascade does not see it. The root element is the first root, so no node has a new style yet.
                     ok = false;
@@ -1036,6 +1032,10 @@ impl RuleSet {
     /// of `want`, not the size of the page. `None` when it cannot: the styles keep no cache or grew too much, the root element
     /// is hidden (`rem`), or `want` is not on a way that the walk takes (a light child of a shadow host). Then use `compute_for`.
     pub fn style_hidden(&self, doc: &Document, styles: &mut Styles, want: NodeId) -> Option<ComputedStyle> {
+        if self.pending.is_some() { self.hidden_with::<true>(doc, styles, want) } else { self.hidden_with::<false>(doc, styles, want) }
+    }
+
+    fn hidden_with<const PENDING: bool>(&self, doc: &Document, styles: &mut Styles, want: NodeId) -> Option<ComputedStyle> {
         if self.scoped(doc) {
             return None;
         }
@@ -1082,9 +1082,10 @@ impl RuleSet {
                 }
             }
             matched.sort_unstable();
-            let inline = self.inline_source(node, style_atom.and_then(|a| doc.attr(node, a)));
+            let inline = style_atom.and_then(|a| doc.attr(node, a));
+            let input = if PENDING { self.pending.as_ref().and_then(|all| all.get(&node)).map(Vec::as_slice) } else { None };
             let hint = hints.as_ref().and_then(|h| h.of(doc, node));
-            parent = self.style_of(styles, &mut k.memo, parent, &matched, (inline, hint.as_deref()), &cx);
+            parent = self.style_of::<PENDING>(styles, &mut k.memo, parent, &matched, (inline, hint.as_deref()), &cx, input);
             element_hashes(doc, node, &mut |h| filter.add(h));
         }
         Self::put_back(cx, styles, k);
@@ -1184,7 +1185,7 @@ impl RuleSet {
 
     /// The number of the style of an element. It is found in the cache, or it is made.
     #[inline(always)]
-    fn style_of(&self, styles: &mut Styles, memo: &mut Memo, parent: u32, matched: &[u32], (inline, hint): (Option<Inline<'_>>, Option<&str>), cx: &Cx<'_>) -> u32 {
+    fn style_of<const PENDING: bool>(&self, styles: &mut Styles, memo: &mut Memo, parent: u32, matched: &[u32], (inline, hint): (Option<&str>, Option<&str>), cx: &Cx<'_>, input: Option<&[InputDeclaration]>) -> u32 {
         let mut key = matched.iter().fold(u64::from(parent), |h, &i| (h ^ u64::from(i)).wrapping_mul(0x0100_0000_01b3));
         // The hint is part of the key: the cells of one table share their hint, and so their style.
         if let Some(h) = hint {
@@ -1196,9 +1197,9 @@ impl RuleSet {
                 return found.style;
             }
         }
-        let mut style = self.cascade_as::<0>(matched, inline, hint, &styles.styles[parent as usize], cx);
+        let mut style = self.cascade_as::<0, PENDING>(matched, inline, hint, &styles.styles[parent as usize], cx, input);
         if style.2 != 0 {
-            self.picture_pass(matched, inline, &mut style, &styles.styles[parent as usize], cx);
+            self.picture_pass::<PENDING>(matched, inline, &mut style, &styles.styles[parent as usize], cx, input);
         }
         // Two different rule lists may give the same style (`div div` inside `div`). Then they share it, and the children of both
         // have the same parent style, so they find each other in the cache.
@@ -1223,10 +1224,10 @@ impl RuleSet {
     /// that makes every call copy the style (1 KB).
     #[cold]
     #[inline(never)]
-    fn logical_pass(&self, matched: &[u32], inline: Option<Inline<'_>>, hint: Option<&str>, parent: &ComputedStyle, cx: &Cx<'_>) -> ComputedStyle {
-        let mut style = self.cascade_as::<1>(matched, inline, hint, parent, cx);
+    fn logical_pass<const PENDING: bool>(&self, matched: &[u32], inline: Option<&str>, hint: Option<&str>, parent: &ComputedStyle, cx: &Cx<'_>, input: Option<&[InputDeclaration]>) -> ComputedStyle {
+        let mut style = self.cascade_as::<1, PENDING>(matched, inline, hint, parent, cx, input);
         if matches!(style.0[Property::Direction as usize], Value::Keyword(Keyword::Rtl)) {
-            style = self.cascade_as::<2>(matched, inline, hint, parent, cx);
+            style = self.cascade_as::<2, PENDING>(matched, inline, hint, parent, cx, input);
         }
         if let Value::Keyword(side @ (Keyword::InlineStart | Keyword::InlineEnd)) = style.0[Property::Float as usize] {
             let parent_rtl = parent.get(Property::Direction) == Value::Keyword(Keyword::Rtl);
@@ -1236,7 +1237,7 @@ impl RuleSet {
     }
 
     /// Pick the winning declaration for each property, then compute the values. `PASS` 0 is the first pass, 1 the same without the check, 2 the one for `rtl` (`logical_pass`).
-    fn cascade_as<const PASS: u8>(&self, matched: &[u32], inline: Option<Inline<'_>>, hint: Option<&str>, parent: &ComputedStyle, cx: &Cx<'_>) -> ComputedStyle {
+    fn cascade_as<const PASS: u8, const PENDING: bool>(&self, matched: &[u32], inline: Option<&str>, hint: Option<&str>, parent: &ComputedStyle, cx: &Cx<'_>, input: Option<&[InputDeclaration]>) -> ComputedStyle {
         let mut winners = [None::<Value>; Property::CORE];
         let mut keys = [0u128; Property::CORE];
         // The properties that have a winner, one bit each: the loops below visit only these.
@@ -1318,16 +1319,15 @@ impl RuleSet {
             shared.vars.clear();
             shared.grids.clear();
         }
-        if let Some(input) = inline {
-            match input {
-                Inline::Block(block) => input_declarations(block, &mut inline_side, &mut inline_decls, &mut inline_customs),
-                Inline::Text(text) => {
-                    for d in parse_declarations(text) {
-                        if d.name.starts_with("--") {
-                            inline_customs.push(CustomDecl { name: (*d.name).into(), text: d.value.into(), important: d.important });
-                        } else {
-                            parse_declaration(&d.name, d.value, d.important, &mut inline_side, &mut inline_decls);
-                        }
+        if let Some(text) = inline {
+            if PENDING && let Some(input) = input {
+                input_declarations(input, &mut inline_side, &mut inline_decls, &mut inline_customs);
+            } else {
+                for d in parse_declarations(text) {
+                    if d.name.starts_with("--") {
+                        inline_customs.push(CustomDecl { name: (*d.name).into(), text: d.value.into(), important: d.important });
+                    } else {
+                        parse_declaration(&d.name, d.value, d.important, &mut inline_side, &mut inline_decls);
                     }
                 }
             }
@@ -1387,7 +1387,7 @@ impl RuleSet {
         // A logical property of the inline axis (`margin-inline-start`) is its physical property for `ltr`, so the first pass is the same
         // for every element. An `rtl` element, or a `float` that is `inline-start`, gets `logical_pass`.
         if PASS == 0 && (matches!(style.0[Property::Direction as usize], Value::Keyword(Keyword::Rtl)) || matches!(style.0[Property::Float as usize], Value::Keyword(Keyword::InlineStart | Keyword::InlineEnd))) && (self.logical || inline.is_some()) {
-            return self.logical_pass(matched, inline, hint, parent, cx);
+            return self.logical_pass::<PENDING>(matched, inline, hint, parent, cx, input);
         }
         style
     }
@@ -1398,7 +1398,7 @@ impl RuleSet {
     /// the others the cascade has no more work than before, and it does not hold its style for this call.
     #[cold]
     #[inline(never)]
-    fn picture_pass(&self, matched: &[u32], inline: Option<Inline<'_>>, style: &mut ComputedStyle, parent: &ComputedStyle, cx: &Cx<'_>) {
+    fn picture_pass<const PENDING: bool>(&self, matched: &[u32], inline: Option<&str>, style: &mut ComputedStyle, parent: &ComputedStyle, cx: &Cx<'_>, input: Option<&[InputDeclaration]>) {
         #[cfg(test)]
         PICTURE_PASSES.with(|n| n.set(n.get() + 1));
         let custom = style.1;
@@ -1417,15 +1417,14 @@ impl RuleSet {
             }
         }
         // The declarations of the attribute again: `cascade_as` left the side of their values in `cx.inline`, the same for this parse.
-        if let Some(input) = inline {
+        if let Some(text) = inline {
             let (mut side, mut decls) = (Side::default(), Vec::new());
-            match input {
-                Inline::Block(block) => input_declarations(block, &mut side, &mut decls, &mut Vec::new()),
-                Inline::Text(text) => {
-                    for d in parse_declarations(text) {
-                        if !d.name.starts_with("--") {
-                            parse_declaration(&d.name, d.value, d.important, &mut side, &mut decls);
-                        }
+            if PENDING && let Some(input) = input {
+                input_declarations(input, &mut side, &mut decls, &mut Vec::new());
+            } else {
+                for d in parse_declarations(text) {
+                    if !d.name.starts_with("--") {
+                        parse_declaration(&d.name, d.value, d.important, &mut side, &mut decls);
                     }
                 }
             }
