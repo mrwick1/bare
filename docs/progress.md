@@ -6377,18 +6377,19 @@ The plan's hypotheses were not the causes. The lazy asks of one `(object, name)`
 
 ### Cost
 
-- `tools/js/cost_matrix.sh -J`, 805 rows, BASE `8f6a38e982` (fresh `base-build`), NEW `0f51d344` (this branch after the rebase), both allocators on every row. 0 rows over +0.5% under both. Mean change -0.001% glibc, +0.008% jemalloc. Over under jemalloc only: `form_load gates 1` +0.407% glibc, +0.633% jemalloc; `form_load gates 10` +0.432%, +0.701%. Logs: `/data/bare-tmp/hs/matrix-final.txt`, `.raw`.
-- `keycost.sh`: BASE 282.7 M for each key in `#a1`, 288.0 M in `#f0`, peak RSS 33.6 / 33.2 MiB at 20 / 50 keys. NEW 282.7 M, 288.0 M, 33.5 / 33.5 MiB.
+- Final: `tools/js/cost_matrix.sh -J`, 805 rows, BASE `f857a90b71` (fresh `base-build` of main after #333), NEW this branch after the final rebase, both allocators on every row. 0 rows over +0.5% under both, 0 over under one. Mean change -0.011% glibc, +0.006% jemalloc. Logs: `/data/bare-tmp/hs/matrix-final2.txt`, `.raw`. The merge queue (`merge-gate`) held main during the final checks.
+- An earlier full run on base `8f6a38e982` (before #333 merged): 0 over under both, mean -0.001% glibc, +0.008% jemalloc. Over under jemalloc only: `form_load gates 1` and `10` (+0.633%, +0.701%; glibc +0.407%, +0.432%).
+- `keycost.sh` (final): BASE `f857a90b` 283.1 M for each key in `#a1`, 288.5 M in `#f0`, peak RSS 33.5 / 33.5 MiB at 20 / 50 keys. NEW 283.1 M, 288.5 M, 33.4 / 33.3 MiB.
 
 ### Other checks (final tree, after the rebase)
 
-- `cargo test --release --workspace`: 3,398 passed, 0 failed, 13 ignored.
+- `cargo test --release --workspace`: 3,407 passed, 0 failed, 13 ignored.
 - `tools/drive/public/run.sh`: 48 pass, 0 fail, 0 flakes.
 - `test262_check.sh`: gate ok, no directory below the baseline. `exec_diff.sh`: 79 runs, 0 differences.
 
 ### Live: target.com
 
-`bare-drive`, `timeout 30000`, `open`, `expect js "document.readyState === 'complete'"`, `shot s`. BASE `8f6a38e982`, NEW this branch. Runs alternate BASE and NEW. A cost matrix ran at the same time, so the times are under load. Logs: `/data/bare-tmp/hs/live/`.
+`bare-drive`, `timeout 30000`, `open`, `expect js "document.readyState === 'complete'"`, `shot s`. BASE `8f6a38e982`, NEW this branch on that base (before the rebase on #333). Runs alternate BASE and NEW. A cost matrix ran at the same time, so the times are under load. Logs: `/data/bare-tmp/hs/live/`.
 
 | Build | Pass | `Heap` stops | Other stops | ms | Peak RSS |
 |---|---|---|---|---|---|
