@@ -7486,3 +7486,51 @@ A follow-up needs approval to update the six excluded test files. Compare old he
 Next live measurement remains three alternating AP News BASE/NEW pairs, at least three Substack pairs (up to six for intermittency), and Bluesky/go-dev controls after an authorized implementation. Preserve every non-reproduction. Record readiness, error order/count, source/stack availability, stops, resources/bytes, elapsed and RSS. Map frames to downloaded URL/hash only with evidence. If an original thrown error has no usable stored stack, retain name/message and document that limit; do not change the owned evaluator frame code. No receiver-specific repair, postMessage, contains, capability or budget change is proposed.
 
 Not tested for this documentation-only result: fresh live pairs, public journeys, browser oracle, final runtime cost matrix, scripting gates, typing, or other machines. The earlier candidate workspace run failed as recorded. No live diagnostic improvement, application repair, reduced error count, speed or memory claim is made. Validation of this result is retained-log inspection, exact final diff, append-only preservation, publication-text scan and whitespace checks.
+
+## Task 41: lazy IDBIndex interface exposure
+
+Frozen main: `da17ff4097ae8c4f6183e912d26e24ae8cda2b80`. Final gated base: `6f0503f409aded0b17a09525faf402915dcec8e2`. Runtime commit after rebase: `759a1b7c2fa7cdb5bca7c991f8f0d99f8bbbb890`. Evidence root: `/data/bare-tmp/idi14/`. Raw files are local and are not accessible to external reviewers.
+
+The retained Verge chunk is `/data/bare-tmp/nfe/sources/theverge-5924e46e31d12ede.js`. `wrapper-context.js` retains its decoded wrapper and prototype probes. `wrapper.js` replays the full wrapper with its enclosing cache bindings and an ordinary input. The interface array lookup fails even for that input. Index convenience helpers test method presence on the selected prototype. No functional index implementation is needed for this lookup. PR #352 has a missing decisions entry; the new bounded decision is appended without changing its historical progress.
+
+Changes: define an illegal IDBIndex constructor inside the lazy shim and add it to the existing interface table. Do not change store methods or add index methods. The existing heap prefix and host dispatch already reach the shim. No registration, heap, evaluator or install change. Source-path inspection confirms no shim evaluation or IDB state allocation at install. The unused-name test checks absent published IDB names; no allocation-counter instrumentation ran.
+
+Tests first: `CARGO_TARGET_DIR=/data/bare-tmp/target-idi14 /data/bare-tmp/bin/heavy cargo test --release -p bare --lib indexeddb_index` failed all three new tests on frozen main before the runtime edit (`failing-first.log`, `regression.patch`). Wrapper lookup threw ReferenceError, typeof returned undefined, and constructor refusal received ReferenceError instead of TypeError. After implementation, `cargo test --release -p bare --lib indexeddb` passed six tests (`targeted.log`): wrapper lookup, stable interface/prototype identity, global and tag descriptors, call/new refusal, absent operations, unused-name laziness and existing storage/rollback behavior. All cargo commands use the same target directory and heavy wrapper.
+
+The full HTTP wrapper replay failed BASE with missing IDBIndex and passed NEW with the explicit wrapper and document sentinel (`replay-http.log`, `wrapper-http-{BASE,NEW}/stdout.json`). An earlier file-path replay failed because the driver requires HTTP(S); retain it in `wrapper-{BASE,NEW}`. An early public-journey launch lacked the driver binary; retain `public.log`. The successful rerun is `public-final.log`: 48 pass, zero fail/known/skip/flakes. Build commands are `heavy cargo build --release --workspace --examples` and `heavy cargo build --release -p bare-drive -p bare-stress` (`build.log`, `build-binaries.log`).
+
+`heavy cargo test --release --workspace` stopped at the HTTP/2 `a_post_after_a_graceful_idle_close_runs_on_a_new_connection` test with GOAWAY (`workspace.log`). It passed when rerun alone (`workspace-retry.log`). Completed the remaining net integration targets with `cargo test --release -p bare-net --test h2_openssl --test https_openssl --test proxy`; completed the remaining packages with `cargo test --release -p bare-paint -p bare-stress -p bare-tls -p bare-unicode -p bare-url -p bare-window` (`workspace-net-remaining.log`, `workspace-remaining.log`). Both passed. This is not a second clean complete workspace run.
+
+### Live measurements before the final rebase
+
+`python3 /data/bare-tmp/idi14/live.py` ran three alternating BASE/NEW pairs each for theverge and github-repo, and one pair each for bluesky and go-dev. BASE came from `base-build da17ff4097ae8c4f6183e912d26e24ae8cda2b80 --release -p bare-drive`. NEW contains only this task's shim change on that frozen base. Each probe asserts readiness and a body/main document sentinel. These can pass on server-rendered content and do not prove hydration. Commands, raw reports, console order, stops, status counts and bytes remain in each run directory; `live-summary.json` retains the first three errors and all totals. No failed live attempt was discarded.
+
+| Run | Errors | Resources / bytes | Status counts | Elapsed ms | Peak RSS KiB |
+| --- | ---: | --- | --- | ---: | ---: |
+| bluesky-BASE-1 | 0 | 11 / 2571991 | {'200': 10, '0': 1} | 4875.7 | 218864 |
+| bluesky-NEW-1 | 0 | 13 / 2572443 | {'200': 11, '0': 1, '204': 1} | 4266.1 | 218876 |
+| github-repo-BASE-1 | 1 | 114 / 2063558 | {'200': 114} | 2893.3 | 135524 |
+| github-repo-BASE-2 | 1 | 115 / 2065160 | {'200': 115} | 2144.7 | 135772 |
+| github-repo-BASE-3 | 1 | 115 / 2065160 | {'200': 115} | 2086.5 | 136752 |
+| github-repo-NEW-1 | 1 | 115 / 2065161 | {'200': 115} | 2121.4 | 136052 |
+| github-repo-NEW-2 | 1 | 115 / 2065161 | {'200': 115} | 2048.0 | 136584 |
+| github-repo-NEW-3 | 1 | 115 / 2065161 | {'200': 115} | 2063.3 | 138616 |
+| go-dev-BASE-1 | 0 | 25 / 454767 | {'200': 23, '0': 2} | 2443.3 | 54892 |
+| go-dev-NEW-1 | 0 | 21 / 448743 | {'200': 20, '0': 1} | 2185.3 | 54532 |
+| theverge-BASE-1 | 65 | 131 / 8425828 | {'200': 126, '0': 5} | 10392.9 | 255852 |
+| theverge-BASE-2 | 65 | 127 / 6431926 | {'200': 122, '0': 5} | 7455.5 | 225268 |
+| theverge-BASE-3 | 65 | 127 / 6431927 | {'200': 122, '0': 5} | 7221.5 | 226652 |
+| theverge-NEW-1 | 0 | 127 / 6431926 | {'200': 122, '0': 5} | 7164.4 | 222112 |
+| theverge-NEW-2 | 0 | 129 / 6452880 | {'200': 124, '0': 5} | 7540.4 | 228900 |
+| theverge-NEW-3 | 0 | 127 / 6431921 | {'200': 122, '0': 5} | 7105.5 | 229772 |
+
+All 16 live probes pass readiness and document sentinels with null driver failure. Verge BASE first reports missing IDBIndex during upgradeneeded, then missing IDBIndex during success; later errors remain in raw reports. Each Verge NEW probe has zero console errors in this observation window. GitHub retains the missing createIndex TypeError in both versions, once per probe. Bluesky and go-dev have zero console errors in both versions. These results do not establish functional indexes, application initialization, comments, feeds or authentication. Resource work differs; no causal speed or RSS claim is made. No separate fatal driver stop is reported. A completed document sentinel does not mean every task completed.
+
+### Cost and final gate
+
+Iteration: four browser lookup/event rows, zero over-both and zero failed (`iterate.log`, `iterate.tsv`). While queued: 73 rows, zero over-both, zero failed (`queued-cost.log`, `queued-cost.tsv`). Case B applies: only crates/bare changes. The final set is all 14 browser_load rows plus 62 every-13th noncomment rows, 73 unique rows after overlap (`sample.rows`, `final.rows`). These existing browser rows measure the surrounding browser module; there is no dedicated IndexedDB cost row. They do not measure functional index operations. No new cost-row file is authorized.
+
+The first final cost attempt measured 60 rows with zero over-both, but 13 stress rows could not run because the fresh BASE examples build lacked the stress binary (`final-cost.log`). Built that binary through `base-build 6f0503f409aded0b17a09525faf402915dcec8e2 --release -p bare-stress` before the corrected final check. No full 805, test262, execution comparison or typing gate is required for this diff. No browser oracle, persistence, functional index operations, cross-platform behavior or application interactions were tested.
+
+
+Final gated check: `merge-gate acquire idi14` acquired after Task 42. Rebased without conflict on `6f0503f409aded0b17a09525faf402915dcec8e2`. Used fresh `base-build` outputs for that full SHA, with explicit examples and stress builds. `final-cost-command.json` retains the exact matrix command and regex; the corrected invocation changes only its output path. `final-cost-corrected.log` and `.tsv`: 73 rows, zero failed, zero over one allocator, zero over both; glibc mean +0.004%. Jemalloc measured zero rows because no glibc row was flagged. This establishes the over-both threshold, not a measured jemalloc mean. No escalation or owner exception. `final-build.log` and `final-binaries.log` retain the post-rebase builds. `heavy cargo test --release -p bare --lib browser_gaps_tests` passed all 13 tests (`final-tests.log`). All 48 public journeys passed again on the rebased driver, with zero fail/known/skip/flakes (`public-rebased.log`). The earlier BASE/NEW live pairs were not repeated after rebase. Preserved all preceding docs as byte-identical prefixes. Reviewed exact final diff, prohibited publication text and whitespace before push.
