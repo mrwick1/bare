@@ -7257,3 +7257,70 @@ Proposed semantics: `document.fonts` has stable identity; `load(font, text)` ret
 Follow-up checks: first retain the smallest failing regression on frozen post-Task-24 main for the Angular expression, promise result, stable identities and set operations. Implement and run focused release tests, including invalid receivers and mutation during forEach. Add a lazy-cost check: pages that never read fonts must allocate no font state and incur no font installation work. Start with 2–6 relevant existing document/lazy-name cost rows; final gated rebase runs the module rows plus the saved every-13th noncomment sample (about 60 rows). Measure flagged rows under glibc and jemalloc; reject any row above +0.5% under both and escalate to the full matrix when required by the owner rule. Any hot-state or crates/js change requires separate scope and the full 805-row gate. Run the release workspace once and all 48 public journeys for the implementation. Compare three alternating Angular BASE/NEW pairs and one control each on react-dev/vuejs, recording readiness, an explicit icon/app sentinel, first errors and repeat counts, stops, transferred JS, time and RSS. Keep WebAssembly failures separate. This proposal has not been implemented or cost-tested. No matrix runs for the present documentation-only PR.
 
 Final gated rebase: acquired `merge-gate acquire alt12` and rebased on `e3ac1b75adacd08771862982b782b0d75cf9734a`. Resolved append conflicts by retaining the complete main versions of both shared documents and appending Task 38 after them. Preserved all other sections. Reviewed the complete final diff and ran whitespace and prohibited-text checks. No matrix or suite rerun for this documentation-only merge.
+
+## Next first errors after page basics (Task 29)
+
+Measured main `e3ac1b75ad` on archMachine. This baseline includes #346 and #341. The scope excludes wise, which has a verified clean load in Task 24. Tasks 37 (Redis capability failures) and 38 (Angular fonts evidence) remain separate. No runtime files changed. No new global names were added.
+
+### Method and results
+
+Ran each requested site twice with the shared release `bare-drive`. Steps: `timeout 30000`, `open URL`, `expect js "document.readyState === 'complete'"`, `shot s`. Each attempt used a separate process. Logs and captures: `/data/bare-tmp/nfe/<site>-<attempt>/`. The JSON records readiness, console messages, network requests and peak RSS. Error counts below include only levels `error` and `exception`; fetch diagnostics are separate. These are fresh baseline runs, not before/after comparisons. A readiness pass does not prove application health.
+
+| Site | Attempt | Ready check | First console error | Errors | ms | Peak RSS KiB |
+|---|---:|---|---|---:|---:|---:|
+| theverge | 1 | pass | `listener of upgradeneeded: ReferenceError: IDBIndex is not defined` | 79 | 6152.7 | 323024 |
+| theverge | 2 | pass | `listener of upgradeneeded: ReferenceError: IDBIndex is not defined` | 79 | 6309.4 | 325708 |
+| substack | 1 | pass | `none` | 0 | 3254.2 | 202020 |
+| substack | 2 | pass | `listener of timeout: TypeError: Cannot read properties of undefined (reading 'match')` | 1 | 3400.4 | 235436 |
+| npmjs | 1 | pass | `TypeError: Cannot read properties of undefined (reading 'value')` | 1 | 4769.1 | 135084 |
+| npmjs | 2 | pass | `TypeError: Cannot read properties of undefined (reading 'value')` | 1 | 4676.2 | 135264 |
+| apnews | 1 | fail | `listener of error: TypeError: Cannot set properties of undefined (setting 'event')` | 9 | 9841.0 | 185952 |
+| apnews | 2 | pass | `listener of error: TypeError: Cannot set properties of undefined (setting 'event')` | 10 | 7364.7 | 144080 |
+| bluesky | 1 | pass | `none` | 0 | 3609.9 | 211020 |
+| bluesky | 2 | pass | `none` | 0 | 3341.4 | 204068 |
+
+### Trace and ownership
+
+| Site | Cause and evidence | Owner | Size estimate / disposition |
+|---|---|---|---|
+| theverge | Missing `IDBIndex`. A fetched chunk uses `[IDBDatabase,IDBObjectStore,IDBIndex,IDBCursor,IDBTransaction]` in its IndexedDB proxy wrapper. | Nobody in the active worktrees at start | Constructor exposure alone is small; functional indexes require key extraction, queries, updates and transaction semantics. Defer the larger feature. |
+| npmjs | `l` reads `s.value` after `s=e[i](o)` in a bundled generator helper. Hypothesis: the bundled generator returns an invalid iterator result. The underlying engine cause is not reduced. | No specific owner established; do not touch the active step-budget evaluator files | Unknown. Defer until a standalone replay establishes the cause. |
+| substack | No error in attempt 1. Attempt 2 throws while reading `match` in a timeout listener. The old `startsWith` error did not recur. | Nobody established | Unknown. Intermittent and not reduced; defer. |
+| apnews | Error listener writes `event` through an undefined value. Later errors still include `t.postMessage` and `indexOf`. The receiver is not identified. | First listener error unassigned; step-budget failures belong to the active steps-aborts task | Unknown for the listener; defer. Do not duplicate budget work. |
+| bluesky | No console error in either attempt | None needed | No fix selected. |
+
+The active worktree scan also found background CSS work. Its files were not edited. Tasks 37 and 38 were not duplicated.
+
+Verge source: `https://www.theverge.com/_next/static/chunks/2s_1es1mbqy36.js`. The matching expression is in `/data/bare-tmp/nfe/source-hits.log`. The listener reports `upgradeneeded` first and `success` later. The retained console contains no listener stack or column. Source matching supports this attribution but does not prove a specific call frame. The shim in `crates/bare/src/shims/idb.js` defines neither `IDBIndex` nor `createIndex`; its module docs explicitly state that indexes are absent. A local HTTP page checks both `typeof IDBIndex` and `typeof IDBObjectStore.prototype.createIndex`. Both are `undefined` on the baseline. Evidence: `idb.html`, `idb.steps`, `idb.json`. An initial `file:` probe failed because the driver accepts only HTTP(S); the HTTP probe passes. The temporary HTTP listener was closed.
+
+npmjs source: `https://static-production.npmjs.com/package/package.370e34f58836a397509c.js`, retained as `npm-package.js`. In line 9 the helper contains `var s=e[i](o),l=s.value`. Both live stacks report `at l (script#6)`, then `script#6:9:82819`, `script#6:9:82559`, `ds (script#4:318:85612)`, `xu (script#4:318:102672)`, and React frames. Column 82819 is a caller near `initSparkline`, not the `.value` expression. Script numbers alone do not prove URL identity. This is a candidate source attribution, not a verified engine defect.
+
+Substack's timeout and apnews's first listener error have no retained stack, column or script identifier. A source scan did not isolate their receivers. Do not treat a similar `.match` or `.event` expression as proof. The source manifest `/data/bare-tmp/nfe/sources.json` records fetched URLs and curl status. Sources were treated as data. This evidence remains incomplete for those causes.
+
+apnews attempt 1 fails its ready check; attempt 2 passes. Both report TraversalDepth and Steps aborts. No regression is attributed to this documentation change. Network and timing variation remain uncontrolled.
+
+### Checks and limits
+
+Selected zero fixes. No cause has both a confirmed reduction and a small complete implementation. No behavior or design decision changed, so `docs/decisions.md` is unchanged. No regression test was added. The live runs and the local missing-index probe are evidence checks. No cost matrix ran: the owner rule excludes docs-only changes. No workspace, public journey, test262, execution comparison or typing suite ran. No implementation build used `/data/bare-tmp/target-nfe`; only the shared baseline build was needed.
+
+Not tested: target and vimeo, which were outside the updated five-site sweep; post-change live runs; functional feeds, login or interactions; Chrome comparison; macOS or another machine. No claim is made about listener stacks that the driver did not expose. Raw artifacts are local and are not available to external PR readers.
+
+Evidence SHA-256 `npm-package.js`: `d0217978f653e1b2d629317de20366e39d128cabbee73a106b2c8dfb7e0e09a3`.
+
+Evidence SHA-256 `idb.html`: `96c46c4ddab9c1116ef818e5ff9d56d2883b345e63e4aa92b46ddabbbc07520c`.
+
+### Ranked follow-up candidates
+
+Rank uses reproducibility, confidence and the estimated size of the next useful patch. It does not rank site importance. All sizes below are estimates of changed lines, not measured implementation sizes. No candidate was implemented or approved by this evidence PR.
+
+| Rank | Site and real first error | Smallest candidate and files | Size estimate | Cost plan |
+|---:|---|---|---|---|
+| 1 | theverge: `IDBIndex is not defined`, twice | Expose an `IDBIndex` interface with a non-constructible entry and prototype through the existing lazy IndexedDB shim in `crates/bare/src/shims/idb.js`; add tests in `crates/bare/src/browser_gaps_tests.rs`. The `IDB` prefix already reaches the lazy shim. This removes the missing-name failure only. It does not implement indexes or prove that the page loads. Check the frozen wrapper for required prototype methods before setting the final scope. | 10–30 runtime lines plus 30–60 test lines for exposure only; functional indexes remain a separate, unbounded feature | B below; use IndexedDB/shim rows. No heap change is expected for exposure. If `crates/js` must change, use J. |
+| 2 | npmjs: reading `value`, twice | First replay the frozen helper and its caller in a new `crates/js/src/eval_npm_runtime_tests.rs` test module. The observed helper uses ordinary functions and properties; it does not prove a native generator fault. Hypothesis: a call or property-definition path returns the wrong value. Candidate runtime files to inspect are `crates/js/src/eval.rs` and `crates/js/src/eval_array_object.rs`; choose neither for edits until the replay fails. Coordinate with the step-budget owner before touching `eval.rs`. | 50–120 lines for the replay; runtime fix size unknown, with no bounded fix established | J below for any patch in `crates/js`; include the frozen helper and call/property workloads. |
+| 3 | apnews: setting `event` on undefined in an error listener, twice | First retain a bounded thrown-error stack in the cold reporting path `Dom::report` in `crates/bare/src/browser_events.rs`; add a regression in a new `crates/bare/src/browser_events_tests.rs`. `report` currently uses `error_text`, which copies only name and message. A diagnostic patch can identify the receiver; it is not a site fix. The runtime fix file and size remain unknown. Do not fold in the separately owned budget failures or assume that a later `postMessage` error is the first cause. | 20–50 diagnostic runtime lines plus 30–60 test lines; functional fix unknown | B below; event/listener and scheduler rows. Avoid a hot struct change; if one is required, use J's full matrix. |
+| 4 | substack: reading `match` in a timeout listener in one of two runs | Reuse the bounded reporting change above in `crates/bare/src/browser_events.rs`; exercise the timer path from `crates/bare/src/browser_scheduler.rs` with a new regression in `crates/bare/src/browser_scheduler_tests.rs`. The scheduler already forwards thrown timer values to `Dom::report`. Repeat the site until the failing receiver is captured. No receiver-specific fix can be named yet. | Shared diagnostic runtime patch from rank 3, plus 20–40 timer test lines; functional fix unknown | B below; scheduler/timer and event rows. Use J's full matrix if a hot struct changes. |
+| 5 | bluesky: no error in either run | No runtime candidate. Retain the zero-error baseline and repeat it after another selected fix. No source file needs an edit. | 0 runtime lines | No independent matrix. Include the site in the selected fix's live replay. |
+
+Cost plan B: for a `crates/bare`-only patch, run the affected module rows and an approximately 60-row sample (every approximately 13th row). Run the full matrix if a sampled row exceeds +0.5% under both allocators. Cost plan J: if `crates/js`, css, html, paint or a hot struct changes, run all 805 rows once on the final rebase against a fresh base build. For `crates/js`, also run test262, execution comparison and base/new typing checks. Both plans reject any row above +0.5% under both allocators; only the owner can grant an exception. Define each new window/document/navigator name lazily. Write and fail the regression on main before implementing a fix. This docs-only PR runs no matrix.
+
+Final merge preparation: acquired `merge-gate acquire next-first-errors` in the foreground and rebased on `46070ed674d3145b68e31c79e1e99371fde709f6`. Resolved the append conflict by preserving the complete main file as an unchanged prefix and placing this section last. Checked the final diff and whitespace. No matrix or test suite ran for this docs-only change.
