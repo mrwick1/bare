@@ -171,3 +171,40 @@ fn indexeddb_errors_roll_back_and_abort() {
         assert_eq!(js(&mut b, "o2.join()"), "VersionError");
     });
 }
+
+#[test]
+fn indexeddb_index_wrapper_lookup() {
+    big(|| {
+        let mut b = browser();
+        assert_eq!(js(&mut b, "[IDBDatabase,IDBObjectStore,IDBIndex,IDBCursor,IDBTransaction].every(function (C) { return typeof C === 'function' && typeof C.prototype === 'object' })"), "true");
+    });
+}
+
+#[test]
+fn indexeddb_index_interface() {
+    big(|| {
+        let mut b = browser();
+        assert_eq!(js(&mut b, "typeof IDBIndex"), "function");
+        assert_eq!(js(&mut b, "var C = IDBIndex, p = C.prototype; [C === IDBIndex, p === IDBIndex.prototype, p.constructor === C, Object.prototype.toString.call(p)].join()"), "true,true,true,[object IDBIndex]");
+        assert_eq!(js(&mut b, "var d = Object.getOwnPropertyDescriptor(globalThis, 'IDBIndex'); [d.value === C, d.writable, d.enumerable, d.configurable].join()"), "true,true,false,true");
+        assert_eq!(js(&mut b, "var d = Object.getOwnPropertyDescriptor(p, Symbol.toStringTag); [d.value, d.writable, d.enumerable, d.configurable].join()"), "IDBIndex,false,false,true");
+        assert_eq!(js(&mut b, "[typeof p.get, typeof p.openCursor, typeof IDBObjectStore.prototype.createIndex, typeof IDBObjectStore.prototype.index].join()"), "undefined,undefined,undefined,undefined");
+    });
+}
+
+#[test]
+fn indexeddb_index_constructor_is_illegal() {
+    big(|| {
+        let mut b = browser();
+        assert_eq!(js(&mut b, "new IDBIndex()"), "throw:TypeError:Illegal constructor");
+        assert_eq!(js(&mut b, "IDBIndex()"), "throw:TypeError:Illegal constructor");
+    });
+}
+
+#[test]
+fn indexeddb_unused_names_stay_lazy() {
+    big(|| {
+        let mut b = browser();
+        assert_eq!(js(&mut b, "document.body.id = 'sentinel'; Object.getOwnPropertyNames(globalThis).filter(function (n) { return n === 'indexedDB' || n.startsWith('IDB') }).join()"), "");
+    });
+}
