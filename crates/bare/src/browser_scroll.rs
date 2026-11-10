@@ -712,11 +712,11 @@ fn win_scroll_y(d: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
     Ok(Value::Number(d.scrolling.s.borrow().scroll.y as f64))
 }
 
-fn win_inner_width(d: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
+pub(crate) fn win_inner_width(d: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
     Ok(Value::Number(d.plat.s.borrow().viewport.0 as f64))
 }
 
-fn win_inner_height(d: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
+pub(crate) fn win_inner_height(d: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
     Ok(Value::Number(d.plat.s.borrow().viewport.1 as f64))
 }
 

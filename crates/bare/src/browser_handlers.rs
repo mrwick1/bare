@@ -564,6 +564,7 @@ pub(crate) fn lazy(d: &Dom, it: &mut Interp<'_>, owner: ObjId, all: bool) -> R<(
     let Some(key) = (!all).then(|| it.heap.lazy_on_key()).flatten() else {
         return match kind_of(d, owner) {
             Some(k) if all => {
+                crate::browser_basics::define_all(d, it, owner)?;
                 it.heap.clear_lazy_on(owner);
                 for n in names(k) {
                     define(d, it, owner, k, n)?;
@@ -573,6 +574,7 @@ pub(crate) fn lazy(d: &Dom, it: &mut Interp<'_>, owner: ObjId, all: bool) -> R<(
             _ => Ok(()),
         };
     };
+    crate::browser_basics::define(d, it, &key)?;
     if crate::browser::define_window(d,it,&key)? || crate::browser_cssom::define(d,it,&key)? { return Ok(()); }
     if crate::browser_svg::define(d,it,&key)? || crate::browser_shims::define(d,it,&key)? { return Ok(()); }
     match key.as_str() {

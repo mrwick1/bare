@@ -170,6 +170,7 @@ mod browser_mutation;
 mod browser_custom;
 mod browser_face;
 mod browser_geom;
+mod browser_basics;
 mod browser_matrix;
 #[cfg(test)]
 mod browser_custom_tests;
@@ -248,3 +249,6 @@ mod browser_frames;
 
 #[cfg(test)]
 mod browser_steps_tests;
+
+#[cfg(test)]
+mod browser_basics_tests;

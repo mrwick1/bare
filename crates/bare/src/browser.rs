@@ -541,6 +541,7 @@ pub struct Dom {
     pub(crate) frame: crate::browser_frame::Frame,
     /// `requestIdleCallback` (`browser_idle.rs`).
     pub(crate) idle: crate::browser_idle::Idle,
+    pub(crate) basics: crate::browser_basics::Basics,
     /// `MutationObserver` (`browser_mutation.rs`).
     pub(crate) mo: crate::browser_mutation::Mo,
     pub(crate) io: crate::browser_intersection::Io,
@@ -1257,7 +1258,8 @@ impl Dom {
         crate::browser_media::install(self, it)?;
         crate::browser_img::install(self, it)?;
         crate::browser_custom::install(self, it)?;
-        crate::browser_geom::install(self, it)
+        crate::browser_geom::install(self, it)?;
+        crate::browser_basics::install(self, it)
     }
 
     pub(crate) fn define_accessor(&self, it: &mut Interp<'_>, o: ObjId, key: PropertyKey, get: ObjId, set: Option<ObjId>) -> R<()> {
@@ -1558,6 +1560,7 @@ impl Browser {
             resize: Default::default(),
             frame: Default::default(),
             idle: Default::default(),
+            basics: Default::default(),
             mo: Default::default(),
             io: Default::default(),
             walk: Default::default(),

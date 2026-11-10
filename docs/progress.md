@@ -7152,3 +7152,58 @@ Acquired `merge-gate acquire mct11`, fetched origin and rebased the clean branch
 ### Merge authorization
 
 The owner authorized merge of this evidence-only PR. This replaces the earlier hold on publication above; it does not authorize a runtime change. Acquired `merge-gate acquire mct11` again and rebased on `4471813369be9b1e47b30d81bd25deed6d5ad179`. The rebase added no changes. This section remains at the end of the file; all earlier sections are preserved. No matrix or suite is required for this documentation-only merge. The PR description identifies the proposed constructor handler and its estimated size for a later task after Task 24 merges.
+
+## Page basics (task 24)
+
+### Problem
+
+wise.com stops in Mixpanel: `document.referrer.search(...)` throws, because `document.referrer` is `undefined`. Many other basics were missing from `document`, `window` and `navigator`.
+
+### Change
+
+- New `crates/bare/src/browser_basics.rs` and `browser_basics_tests.rs`. Registration lines only in `browser.rs`, `lib.rs`, `browser_web.rs` and `browser_scroll.rs`. `browser_scheduler.rs` got window `message` delivery. `browser_fetch.rs` got three `pub(crate)` helpers.
+- Document, window and navigator values, `postMessage` and `sendBeacon`: see `docs/decisions.md`, "Page basics".
+- Priority B (extra event classes, element reflections, `reportError`) is not done.
+- Spec references: HTML standard (Document, Window, Navigator, Web messaging, "PDF viewer" lists), Fetch standard (keepalive quota), Secure Contexts, WebDriver.
+
+### Tests that failed first
+
+13 tests. 11 of the first 12 failed on main before the code. The 13th (queries and key lists of the lazy names) was written with the lazy change and was not run against main. All pass.
+
+### Cost
+
+- First version: every name was defined at install. Full matrix on base 617cb19f89: 12 rows over +0.5% under both allocators (`fetch_load bytes 1` +1.22% / +0.81%, `session_load chain 10` +1.18% / +1.00%, `xhr_load 1`, `sheets_load` x4, `loader_load` x2, `xhr_load 100`, `select_load churn 10`). Cause: a fixed install cost of about 100k instructions in a browser realm. Log: `/data/bare-tmp/pb/matrix-full.log`.
+- Owner decision: the `crates/js` limit is lifted for the lazy-name hook. Change: names added to `Heap::browser_name` (`crates/js/src/heap.rs`, 13 added lines, 10 changed). `browser_basics::define` defines a name on the first ask. The install makes nothing but the load time.
+- Cost-check case 1 applied (`crates/js` changed). Final rebase on 1b9bff1d91 (#349), base build `/data/bare-tmp/base/1b9bff1d91`. Full matrix, 805 rows, log `/data/bare-tmp/pb/matrix-final2.log`: mean change glibc -0.003%, jemalloc +0.000%. Rows over under one allocator: 0. Rows over under both: 0.
+- `tools/js/test262_check.sh`: exit 0 (no directory below its baseline). `tools/js/exec_diff.sh`: 79 runs, 0 differences. `tools/js/typing/keycost.sh`: `#a1` 283.1 M for each key, `#f0` 288.5 M, load and mount 573.1 M, peak RSS 33.9 MiB at 50 keys; the same values on the base build (283.1 M, 288.5 M, 33.8 MiB).
+- `cargo test --release --workspace`: 3444 passed, 0 failed. `tools/drive/public/run.sh`: 48 pass, 0 fail.
+
+### Live check (one run each, same machine, base 1b9bff1d91 against this change)
+
+| Site | base | this change |
+|---|---|---|
+| wise | readyState complete, 3 console errors (`reading 'search'`), error page, 2,223 ms, 181 MiB | complete, 0 errors, home page shows, 2,097 ms, 197 MiB |
+| apnews | complete, 5 errors, 8,417 ms, 149 MiB | complete, 5 errors, 8,070 ms, 148 MiB |
+| theverge | complete, 2 errors, 7,096 ms, 318 MiB | complete, 2 errors, 5,985 ms, 328 MiB |
+| vimeo | complete, 0 errors, 2,465 ms, 244 MiB | complete, 0 errors, 4,349 ms, 238 MiB |
+| mastodon-social | complete, 1 error, 7,362 ms, 68 MiB | complete, 1 error, 4,092 ms, 67 MiB |
+| github-repo | complete, 0 errors, 3,488 ms, 198 MiB | complete, 0 errors, 3,386 ms, 194 MiB |
+| nasa | complete, 0 errors, 3,457 ms, 171 MiB | complete, 0 errors, 3,417 ms, 174 MiB |
+| bluesky | complete, 0 errors, 11,994 ms, 197 MiB | complete, 0 errors, 11,835 ms, 198 MiB |
+| gov-uk | complete, 0 errors, 1,163 ms, 31 MiB | complete, 0 errors, 389 ms, 31 MiB |
+| youtube | complete, 0 errors, 1,197 ms, 178 MiB | complete, 0 errors, 1,761 ms, 176 MiB |
+
+The ms values vary from run to run (network). apnews keeps its errors (a `Steps`/`TraversalDepth` budget and others, not these names). Logs: `/data/bare-tmp/pb/live/`.
+
+### Limits
+
+- No `Referer`. `lastModified` is the load time. The charset ignores the HTTP header.
+- `window.open` returns `null`. No dialog shows.
+- The lazy names need an entry in the fixed list of `Heap::browser_name`. A new name must be added there too.
+- `hasOwnProperty` does not ask the host for a lazy name (as for `onclick`).
+
+### Not tested
+
+- Live Chrome for the plugin and MIME lists.
+- macOS and arjun-e16.
+- Priority B.
