@@ -6765,3 +6765,61 @@ Sources: `/data/bare-tmp/ilr/cost-final.raw` and `/data/bare-tmp/se/round2/final
 The #341 full log measured jemalloc only for the two over-limit form rows; its separate 50-row subset is not a full both-allocator gate. Retained binary hashes were not supplied with those raw rows. The fresh counts above identify their own binary hashes and do not silently substitute for the retained final-tree results.
 
 Final rebase: acquired `/data/bare-tmp/bin/merge-gate acquire sla` before `git fetch origin` and `git rebase origin/main`. Documentation base: `e383d1b81ba8a06b4772a443c4db655458e790de`. The frozen measurement trees above remain unchanged. Append this section after the final rebase.
+
+## Heap variant labels in fatal stops (2026-11-10, pending final validation)
+
+Problem: surveys reported only `page stopped: Heap`. They could not distinguish the next heap fault after the target.com fixes.
+Cause: `fatal_of` discarded every heap error payload and variant.
+Change: `Fatal::Heap` carries a static variant label. An exhaustive match selects the label on the error path.
+The match discards handles, indices, values and execution text. It changes no recovery, budgets, fill limits or heap layout.
+
+### Failing-first proof and checks
+
+Initial `git fetch origin && git rebase origin/main` left the branch on main `d8550bbba0`.
+The new tests ran before the implementation on that base.
+Three failed because the old stop was only `Heap`. The size probe passed.
+The fixed diagnostic suite passes all four tests. The loader suite passes all 104 tests.
+The variant table covers all 16 current variants.
+The public page test checks `Page::stopped()`.
+The constructed sticky stop checks three later loader runs: no page script, task or I/O starts.
+
+Commands, run from the task worktree:
+
+- `CARGO_TARGET_DIR=/data/bare-tmp/target-hsl /data/bare-tmp/bin/heavy cargo test --release -p bare --lib diagnostic_tests -- --nocapture`.
+  Failing log: `/data/bare-tmp/hsl/tests-main.log`. Passing log: `/data/bare-tmp/hsl/tests-new.log`.
+- `CARGO_TARGET_DIR=/data/bare-tmp/target-hsl /data/bare-tmp/bin/heavy cargo test --release -p bare --lib browser_loader`.
+  Log: `/data/bare-tmp/hsl/loader-iteration.log`.
+- `CARGO_TARGET_DIR=/data/bare-tmp/target-hsl /data/bare-tmp/bin/heavy cargo build --release --examples -p bare-js -p bare -p bare-stress -p bare-drive`.
+  Log: `/data/bare-tmp/hsl/build.log`.
+
+### Cost case and blocked final checks
+
+Required case: full 805 rows under glibc and jemalloc.
+Fatal is stored in Scripts and Stop. Treat its representation change conservatively as hot.
+Measured sizes before and after are identical: Fatal 32, Stop 104, Scripts 1,200 and PageResult 368 bytes.
+This size evidence does not replace the matrix.
+
+`/data/bare-tmp/bin/merge-gate acquire hsl` waited while other tasks held the gate.
+The holders changed from sparse-elements to intl-locale-rtf, sparse-elements and steps-aborts.
+The wait consumed most of the 45-minute task time box.
+The acquisition process and its sleep were stopped. This task never held the gate.
+The current holder's gate was left intact.
+No final rebase, matrix, row counts or final BASE/NEW cost evidence is claimed.
+The branch must stay unmerged until those checks pass.
+Prepared commands are in `/data/bare-tmp/hsl/final-checks.sh`.
+They use `base-build`, save all rows and raw counts, then run the journeys and live pairs.
+
+### Live results, ownership and limits
+
+Final BASE and NEW target.com runs (three each) and apnews runs (one each) were not run.
+Stop text, console aborts, readiness, time and RSS remain unmeasured for those live pairs.
+Deterministic tests prove the diagnostic, not live fault frequency.
+The scratch runner is `/data/bare-tmp/hsl/live.py`.
+
+Other owners retain page-basics, locale formatting, sparse heap writes, Steps aborts and background styling.
+This task changes only the loader diagnostic, its new test file and append-only documentation.
+It does not change the abort-location text.
+
+Not tested: final-rebase workspace tests, all 48 public journeys, the full cost matrix and live pairs.
+No JS files changed. The JS-specific conformance, differential and typing gates were not run.
+The draft PR records this incomplete validation. It must not merge on the local loader results alone.
