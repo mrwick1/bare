@@ -150,6 +150,7 @@
   class IDBDatabase extends EventTarget {}
   class IDBTransaction extends EventTarget {}
   class IDBObjectStore {}
+  function IDBIndex() { throw new TypeError('Illegal constructor'); }
   class IDBCursor {}
   class IDBFactory {}
   handlers(IDBRequest, ['success', 'error']);
@@ -391,7 +392,7 @@
   def(IDBFactory.prototype, 'deleteDatabase', deleteDatabase);
   def(IDBFactory.prototype, 'cmp', function (a, b) { return cmp(key(a), key(b)); });
   def(IDBFactory.prototype, 'databases', function () { return P.resolve(Object.keys(dbs).map(function (n) { return { name: n, version: dbs[n].version }; })); });
-  var all = { IDBRequest: IDBRequest, IDBOpenDBRequest: IDBOpenDBRequest, IDBDatabase: IDBDatabase, IDBTransaction: IDBTransaction, IDBObjectStore: IDBObjectStore, IDBCursor: IDBCursor, IDBFactory: IDBFactory, IDBKeyRange: IDBKeyRange };
+  var all = { IDBRequest: IDBRequest, IDBOpenDBRequest: IDBOpenDBRequest, IDBDatabase: IDBDatabase, IDBTransaction: IDBTransaction, IDBObjectStore: IDBObjectStore, IDBIndex: IDBIndex, IDBCursor: IDBCursor, IDBFactory: IDBFactory, IDBKeyRange: IDBKeyRange };
   Object.keys(all).forEach(function (n) {
     Object.defineProperty(all[n].prototype, Symbol.toStringTag, { value: n, configurable: true });
     def(globalThis, n, all[n]);
