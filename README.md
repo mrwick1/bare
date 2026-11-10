@@ -29,7 +29,7 @@ cargo run -p bare-drive -- STEPS           # run a step file (a user journey); -
 cargo test --workspace
 ```
 
-Linux is the first target. Windows and macOS come later.
+Linux is the first target. The core must also build and run on Windows and macOS (see "Cross-platform core" in [docs/decisions.md](docs/decisions.md)). Today the code builds for both, and only Linux has a window. `tools/portable_check.sh` checks this.
 
 ## Layout
 

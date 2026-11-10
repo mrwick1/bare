@@ -1,6 +1,7 @@
 //! The window on a real compositor. It opens a real window, so it runs only when asked: set `BARE_WINDOW_LIVE=1` and
 //! point `WAYLAND_DISPLAY` at a compositor that is not a person's screen (a hyprcage screen, for example). With either
 //! one missing, the test prints why and passes. `lifecycle.rs` checks the same rules against a compositor of our own.
+#![cfg(target_os = "linux")]
 
 use bare_window::{App, Config, Control, Window};
 

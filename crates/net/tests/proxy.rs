@@ -1,4 +1,6 @@
 //! Each route runs in a fresh process: BARE_PROXY is immutable after first use.
+//! The harness keeps its keys in /dev/shm, so these tests run on Linux only.
+#![cfg(target_os = "linux")]
 #[path = "../../../tools/crypto/openssl_harness.rs"]
 mod harness;
 use bare_net::{cause, http::Client};

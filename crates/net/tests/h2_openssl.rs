@@ -2,6 +2,8 @@
 //! The trust anchor is a synthetic root made for each test (see tools/crypto/openssl_harness.rs). `s_server` serves one connection at a
 //! time, so a client that opens a second connection while it holds the first would hang: that is how the tests see "one connection".
 //! These tests skip (and say so) when `openssl` is not installed.
+//! The harness keeps its keys in /dev/shm, so these tests run on Linux only.
+#![cfg(target_os = "linux")]
 
 #[path = "../../../tools/crypto/openssl_harness.rs"]
 mod harness;

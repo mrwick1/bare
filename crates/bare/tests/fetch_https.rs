@@ -1,6 +1,8 @@
 //! `fetch` over TLS through the real `bare_net` client, against a loopback `openssl s_server` with a synthetic root made
 //! for each test in RAM (see tools/crypto/openssl_harness.rs). These tests skip (and say so) when `openssl` is not installed.
 //! The trust anchor is a private root passed to the client. There is no way to turn certificate checks off.
+//! The harness keeps its keys in /dev/shm, so these tests run on Linux only.
+#![cfg(target_os = "linux")]
 
 #[path = "../../../tools/crypto/openssl_harness.rs"]
 mod harness;

@@ -5,6 +5,7 @@
 //! that the program never attaches a held buffer and never writes into one (it hashes each held buffer at each turn).
 //!
 //! One test runs all the scenarios in turn, because it counts the open file descriptors of the process at the end.
+#![cfg(target_os = "linux")]
 
 use bare_window::{App, Config, Control, Stats, Waker, Window};
 use std::collections::HashMap;

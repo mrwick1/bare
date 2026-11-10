@@ -1,6 +1,8 @@
 //! The TLS client with the real path validator against a loopback `openssl s_server`.
 //! The trust anchor is a synthetic root made for each test, in RAM. See tools/crypto/openssl_harness.rs.
 //! These tests skip (and say so) when `openssl` is not installed.
+//! The harness keeps its keys in /dev/shm, so these tests run on Linux only.
+#![cfg(target_os = "linux")]
 
 #[path = "../../../tools/crypto/openssl_harness.rs"]
 mod harness;

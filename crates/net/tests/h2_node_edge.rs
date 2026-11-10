@@ -2,6 +2,8 @@
 //! replies, trailers, compressed bodies, CONTINUATION, a low `SETTINGS_MAX_CONCURRENT_STREAMS`, SETTINGS in the middle of a connection,
 //! GOAWAY with a last stream id, and a server that closes idle sessions. The trust anchor is a synthetic root made for each test. These
 //! tests skip (and say so) when `node` or `openssl` is missing.
+//! The harness keeps its keys in /dev/shm, so these tests run on Linux only.
+#![cfg(target_os = "linux")]
 
 #[path = "../../../tools/crypto/openssl_harness.rs"]
 mod harness;

@@ -2,6 +2,8 @@
 //! `h2_openssl.rs`: padded frames, PRIORITY, interim replies, trailers, CONTINUATION, WINDOW_UPDATE and SETTINGS edge cases, GOAWAY with a
 //! last stream id, PUSH_PROMISE, and the error code of each protocol fault. The trust anchor is a synthetic root made for each test.
 //! These tests skip (and say so) when `openssl` is not installed.
+//! The harness keeps its keys in /dev/shm, so these tests run on Linux only.
+#![cfg(target_os = "linux")]
 
 #[path = "../../../tools/crypto/openssl_harness.rs"]
 mod harness;

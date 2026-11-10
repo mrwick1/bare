@@ -5,8 +5,9 @@
 //! size, once after each new size, and once after each `Control::redraw` or `Waker::wake`. It never asks twice for the
 //! same change, and it asks at most once for each frame that the compositor shows.
 //!
-//! The only backend is Wayland (`wayland.rs`, with `wl_shm` buffers). A port to another OS adds a module with the same
-//! `Window`, `Waker` and `Stats`, and nothing else changes. `redraw.rs` and `slots.rs` hold the rules that do not touch
+//! The only backend is Wayland (`wayland.rs`, with `wl_shm` buffers), built on Linux only. On another OS `none.rs` gives the
+//! same `Window` and `Waker`, and `Window::open` fails, so a headless program builds and runs there. A port to another OS adds a
+//! module with the same `Window` and `Waker`, and nothing else changes. `redraw.rs` and `slots.rs` hold the rules that do not touch
 //! the OS (when to draw, which buffer to use), so a port keeps them.
 //!
 //! Input (S4 topic 4): `App::event` gets the pointer and keyboard events (`input.rs`). The pointer position is in window
@@ -23,10 +24,29 @@
 pub mod input;
 pub mod redraw;
 pub mod slots;
+#[cfg(not(target_os = "linux"))]
+mod none;
+#[cfg(target_os = "linux")]
 mod wayland;
 
 pub use input::{Cursor, Event, Mods};
-pub use wayland::{Stats, Waker, Window};
+#[cfg(not(target_os = "linux"))]
+pub use none::{Waker, Window};
+#[cfg(target_os = "linux")]
+pub use wayland::{Waker, Window};
+
+/// Counts for a test or a measurement. Nothing here costs time in the loop.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Stats {
+    /// Frames committed.
+    pub frames: u64,
+    /// Buffers made (shared-memory pool and `wl_buffer`). Two for a window that never changes size.
+    pub buffers_made: u64,
+    /// Times the loop woke up: a Wayland event or a wake. An idle window adds none.
+    pub wakeups: u64,
+    /// `xdg_toplevel.configure` events.
+    pub configures: u64,
+}
 
 /// What the program asks of the window for the frame in progress.
 #[derive(Debug, Default)]

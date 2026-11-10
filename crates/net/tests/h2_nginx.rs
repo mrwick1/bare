@@ -2,6 +2,8 @@
 //! with a synthetic root made for each test. It checks the server behavior that a CDN has too: gzip on the fly (no content-length), a
 //! limit of 1 or 2 concurrent streams, a header over 16 KiB, a small DATA frame size, an idle close, trailers, conditional requests, and
 //! uploads. nginx and its `echo` module must be installed; the tests skip (and say so) when they are not.
+//! The harness keeps its keys in /dev/shm, so these tests run on Linux only.
+#![cfg(target_os = "linux")]
 
 #[path = "../../../tools/crypto/openssl_harness.rs"]
 mod harness;

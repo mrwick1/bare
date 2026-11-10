@@ -20,7 +20,7 @@
 use crate::input::{self, Cursor, Event, Mods, Repeat};
 use crate::redraw::{Redraw, next_size};
 use crate::slots::{Pick, Slots};
-use crate::{App, Config, Control, Error};
+use crate::{App, Config, Control, Error, Stats};
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use smithay_client_toolkit::reexports::client::{
     Connection, EventQueue, QueueHandle,
@@ -56,19 +56,6 @@ use std::time::{Duration, Instant};
 
 /// An idle window drops its free buffer after this time with no frame. The compositor holds the other one, the frame on screen.
 const IDLE: Duration = Duration::from_secs(1);
-
-/// Counts for a test or a measurement. Nothing here costs time in the loop.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct Stats {
-    /// Frames committed.
-    pub frames: u64,
-    /// Buffers made (shared-memory pool and `wl_buffer`). Two for a window that never changes size.
-    pub buffers_made: u64,
-    /// Times the loop woke up: a Wayland event or a wake. An idle window adds none.
-    pub wakeups: u64,
-    /// `xdg_toplevel.configure` events.
-    pub configures: u64,
-}
 
 /// A handle that wakes the loop from another thread and asks for a new frame.
 #[derive(Clone)]
