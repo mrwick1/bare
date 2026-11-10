@@ -836,3 +836,22 @@ Readiness alone is insufficient when a main application resource fails. Retain e
 Task 34 evidence: the retained #340 bsky BASE bundle failed at status 0/zero bytes; NEW fetched status 200/2,488,274 bytes. Both readiness checks passed. The 22.3/197.7 MiB pair is unequal work, not evidence of a memory regression. Three frozen pairs on the #340 parent/merge did not repeat that large gap. The Verge mixed-work median gap remains unisolated; the older d8550bbba0 comparison predates Intl. Vimeo pair 4 has no recorded network resource failure on either tree, but both fail the same idle-page readiness check. A deferred-resource or deterministic loader cause is unverified.
 
 Four targeted instruction rows distinguish per-PR changes from accumulated drift. Repeated allocator-specific changes do not establish allocator noise. No cost waiver follows from this audit. Evidence and limits: [Task 34 in progress.md](progress.md#sparse-live-measurements-and-allocator-drift-task-34), `/data/bare-tmp/sla/`, and `/data/bare-tmp/se/round2/final/`. Existing Tasks 29, 30 and 31 retain API, loader and historical-fetch ownership.
+
+## Fatal heap stops retain only the variant name
+
+A fatal heap error reports a static variant name, such as `Heap("NeedsHost")`.
+The loader maps every current heap error variant in `fatal_of`.
+The match is exhaustive. A new variant requires a label.
+The mapping runs only on the error path.
+It discards object handles, indices, values and execution text.
+Public stop text keeps `page stopped` and `Heap` for survey matching.
+Recovery, budgets, evaluator fill limits and heap layout do not change.
+
+The diagnostic tests failed first on main: all public heap stops were only `Heap`.
+The fixed tests cover all 16 variants and the public page stop reason.
+A constructed sticky stop blocks page scripts and I/O on three later loader runs.
+Measured sizes stay at 32 bytes for Fatal, 104 for Stop, 1,200 for Scripts and 368 for PageResult.
+The required cost case is the full matrix because Fatal is stored in loader state.
+Final BASE 617cb19f89: all 805 rows passed under both allocators with fresh BASE counts.
+No row exceeded +0.5% under either allocator. Workspace tests and all 48 public journeys passed.
+Target reached complete in all six live runs without a heap fault. Apnews kept the same Steps-abort stop on both builds.
