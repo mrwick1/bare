@@ -1,0 +1,11 @@
+# An MCP server over stdio: it lets an agent run end-to-end tests in `bare` through the test driver (`bare-drive`).
+[package]
+name = "bare-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bare-drive = { path = "../drive" }
+bare-net = { path = "../net" }
+serde_json = "1"
