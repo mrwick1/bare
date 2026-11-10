@@ -1721,7 +1721,7 @@ impl Heap {
             for name in names {
                 let string = self.intern_units(&name)?;
                 let key = self.key_from_string(string)?;
-                if self.indexed_alias(o, key)?.is_some() {
+                if self.indexed_alias_visible(o, key)? {
                     aliases.push(key);
                 }
             }

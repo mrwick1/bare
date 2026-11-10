@@ -847,11 +847,16 @@ impl Heap {
             return Ok(None);
         }
         let PropertyKey::String(s) = key else { return Ok(None) };
-        let ob = self.obj(o)?;
-        if self.own(ob, key).is_some() || ob.proto.map(|p| self.has_property(p, key)).transpose()?.unwrap_or(false) {
+        if !self.indexed_alias_visible(o, key)? {
             return Ok(None);
         }
         self.source()?.indexed_name(o, self.str_units(s)?)
+    }
+
+    pub(super) fn indexed_alias_visible(&self, o: ObjId, key: PropertyKey) -> R<bool> {
+        let ob = self.obj(o)?;
+        Ok(matches!(key, PropertyKey::String(_)) && self.own(ob, key).is_none()
+            && !ob.proto.map(|p| self.has_property(p, key)).transpose()?.unwrap_or(false))
     }
 
     pub(super) fn indexed_names(&self, o: ObjId) -> R<Vec<Vec<u16>>> {
