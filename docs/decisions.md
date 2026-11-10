@@ -1128,3 +1128,33 @@ This bounded repair removes the missing-interface exception.
 Keep createDocument absent until XML documents have real document metadata,
 namespace and ownership semantics. The non-HTML wrapper remains unsupported.
 This step does not establish Vimeo player initialization or playback.
+
+## 2026-11-10: connect caption elements to native track state
+
+The caption action reads `HTMLTrackElement.track.cues`. Use the native track
+node as the identity key. A media element's stable indexed list follows direct
+track children and invalidates its cache on the document revision. Charge the
+native scan before it runs. The two indexed-source dispatch branches are an
+explicit scope extension approved for this repair.
+
+Use the existing data-URL byte reader for in-memory WebVTT. Queue resource
+completion after script execution. Publish parsed cues before dispatching load.
+A source generation rejects obsolete completions. Keep disabled tracks' cues
+null. Unsupported resources dispatch error. This does not add a media decoder,
+network caption fetching, caption rendering or complete WebVTT conformance.
+Native state has explicit roots and result/wrapper caps. Retain old cue objects
+when replacing a resource so references held by script remain valid.
+
+The enlarged media state changes the containing realm layout. Apply cost case 1:
+the full 805-row matrix once after the final gated rebase. Do not infer a cost
+pass from a passing caption action.
+
+Tracks start disabled. The retained component explicitly enables its first
+track. Automatic default-track selection and additional track metadata APIs
+remain outside this bounded repair.
+
+The first full gate fails one select row under both allocators. Move caption
+lookup behind existing collection handlers. The owner selects affected rows
+plus the saved sample for the correction check. All 119 unique rows pass; the
+failed row becomes +0.071683% under glibc. Retain the failed 805-row run and the
+passing correction separately. This is not a second passing full-matrix claim.
