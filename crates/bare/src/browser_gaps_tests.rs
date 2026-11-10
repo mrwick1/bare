@@ -188,7 +188,7 @@ fn indexeddb_index_interface() {
         assert_eq!(js(&mut b, "var C = IDBIndex, p = C.prototype; [C === IDBIndex, p === IDBIndex.prototype, p.constructor === C, Object.prototype.toString.call(p)].join()"), "true,true,true,[object IDBIndex]");
         assert_eq!(js(&mut b, "var d = Object.getOwnPropertyDescriptor(globalThis, 'IDBIndex'); [d.value === C, d.writable, d.enumerable, d.configurable].join()"), "true,true,false,true");
         assert_eq!(js(&mut b, "var d = Object.getOwnPropertyDescriptor(p, Symbol.toStringTag); [d.value, d.writable, d.enumerable, d.configurable].join()"), "IDBIndex,false,false,true");
-        assert_eq!(js(&mut b, "[typeof p.get, typeof p.openCursor, typeof IDBObjectStore.prototype.createIndex, typeof IDBObjectStore.prototype.index].join()"), "undefined,undefined,undefined,undefined");
+        assert_eq!(js(&mut b, "[typeof p.get, typeof p.openCursor, typeof IDBObjectStore.prototype.createIndex, typeof IDBObjectStore.prototype.index].join()"), "function,undefined,function,function");
     });
 }
 
@@ -206,5 +206,66 @@ fn indexeddb_unused_names_stay_lazy() {
     big(|| {
         let mut b = browser();
         assert_eq!(js(&mut b, "document.body.id = 'sentinel'; Object.getOwnPropertyNames(globalThis).filter(function (n) { return n === 'indexedDB' || n.startsWith('IDB') }).join()"), "");
+    });
+}
+
+#[test]
+fn indexeddb_github_expiration_wrapper() {
+    big(|| {
+        let mut b = browser();
+        js(&mut b, r###"function r(e){return new Promise((t,a)=>{e.onsuccess=()=>t(e.result),e.onerror=()=>a(e.error)})}
+let o="expiresAt",c=(e,t)=>`${e}::${t}`;
+function s(e,t){let a,n=c(e,t),i=async(e,i)=>i((await function(){if(a)return a;let e=globalThis.indexedDB.open(n);e.onupgradeneeded=()=>e.result.createObjectStore(t).createIndex(o,"state.expiresAt");let i=r(e);return a=i,(async()=>{try{let e=await i,t=()=>{a===i&&(a=void 0)};e.onclose=t,e.onversionchange=()=>{e.close(),t()}}catch{}})(),a}()).transaction(t,e).objectStore(t));return i.batchKey=n,i}
+async function M(e){let t=e.index(o).getAllKeys(IDBKeyRange.upperBound(Date.now(),!0),250),a=e.count(),[n,i]=await Promise.all([r(t),r(a)]);return{expiredKeys:n,totalEntries:i}}
+var wrapperSentinel = false; var failure = ''; var access=s('regression','queries');
+access('readwrite', async function(st){await r(st.put({state:{expiresAt:1}},'expired')); await r(st.put({state:{expiresAt:9007199254740991}},'live'));}).then(function(){return access('readonly',M)}).then(function(x){wrapperSentinel=x.expiredKeys.join()==='expired' && x.totalEntries===2;}).catch(function(e){failure=e.name+':'+e.message});
+"###);
+        pump(&mut b);
+        assert_eq!(js(&mut b, "String(wrapperSentinel) + failure"), "true");
+    });
+}
+
+#[test]
+fn indexeddb_indexes_follow_rows_and_rollback() {
+    big(|| {
+        let mut b = browser();
+        js(&mut b, r#"
+var out=[], db, saved; var req=indexedDB.open('indexes',1);
+req.onupgradeneeded=function(){var s=req.result.createObjectStore('s'); saved=s.createIndex('v','v',{unique:true}); s.createIndex('tags','tags',{multiEntry:true});s.createIndex('pair',['v','n']);
+s.put({v:'b',n:1,tags:['x','x','y']},2);s.put({v:'a',n:2,tags:['x']},1);};
+req.onsuccess=function(){db=req.result;var tx=db.transaction('s','readwrite'),s=tx.objectStore('s');
+out.push(s.indexNames.join(),s.index('v') instanceof IDBIndex,s.index('v').objectStore===s);
+function read(r){r.onsuccess=function(){out.push(JSON.stringify(r.result));};}
+read(s.index('v').getAllKeys());read(s.index('tags').getAllKeys('x'));read(s.index('pair').getKey(['b',1]));
+s.put({v:'c',n:3},1);read(s.index('v').getKey('a'));read(s.index('v').get('c'));
+s.delete(2);read(s.index('tags').count());s.clear();read(s.index('v').count());
+tx.oncomplete=function(){out.push('done');};};
+"#);
+        pump(&mut b);
+        assert_eq!(js(&mut b, "out.join('|')"), "pair,tags,v|true|true|[1,2]|[1,2]|2||{\"v\":\"c\",\"n\":3}|0|0|done");
+        js(&mut b, r#"
+var tx=db.transaction('s','readwrite'),s=tx.objectStore('s');s.put({v:'same'},1);s.put({v:'same'},2);tx.onabort=function(){out.push(tx.error.name);var t=db.transaction('s');t.objectStore('s').index('v').count().onsuccess=function(e){out.push(e.target.result);};};
+"#);
+        pump(&mut b);
+        assert_eq!(js(&mut b, "out.slice(-2).join()"), "ConstraintError,0");
+        assert_eq!(js(&mut b, r#"var errors=[];var t=db.transaction('s'),s=t.objectStore('s');for(var f of [function(){s.index('missing')},function(){s.createIndex('x','v')},function(){IDBObjectStore.prototype.index.call({},'v')},function(){IDBIndex.prototype.count.call({})}]){try{f()}catch(e){errors.push(e.name)}}errors.join()"#), "NotFoundError,InvalidStateError,TypeError,TypeError");
+        pump(&mut b);
+        js(&mut b, r#"
+var upgrade=indexedDB.open('indexes',2);upgrade.onupgradeneeded=function(){var s=upgrade.transaction.objectStore('s');s.put({v:'z'},1);s.put({v:'z'},2);s.createIndex('bad','v',{unique:true});};upgrade.onerror=function(e){e.preventDefault();out.push(upgrade.error.name);};
+"#);
+        pump(&mut b);
+        assert_eq!(js(&mut b, "out[out.length-1]"), "AbortError");
+    });
+}
+
+#[test]
+fn indexeddb_index_upgrade_existing_records() {
+    big(|| {
+        let mut b = browser();
+        js(&mut b, r#"
+var out=[],r=indexedDB.open('existing',1);r.onupgradeneeded=function(){var s=r.result.createObjectStore('s');s.put({v:'z'},2);s.put({v:'a'},1);};r.onsuccess=function(){r.result.close();var u=indexedDB.open('existing',2);u.onupgradeneeded=function(){var s=u.transaction.objectStore('s');var ix=s.createIndex('v','v');out.push(ix===s.index('v'),s.indexNames.contains('v'));ix.getAllKeys().onsuccess=function(e){out.push(e.target.result.join());};try{s.createIndex('v','v')}catch(e){out.push(e.name)}try{s.createIndex('bad',['v'],{multiEntry:true})}catch(e){out.push(e.name)};};u.onsuccess=function(){u.result.close();var a=indexedDB.open('existing',3);a.onupgradeneeded=function(){var s=a.transaction.objectStore('s');s.deleteIndex('v');s.createIndex('new','v');a.transaction.abort();};a.onerror=function(e){e.preventDefault();var b=indexedDB.open('existing');b.onsuccess=function(){out.push(b.result.version,b.result.transaction('s').objectStore('s').indexNames.join());};};};};
+"#);
+        pump(&mut b);
+        assert_eq!(js(&mut b, "out.join('|')"), "true|true|ConstraintError|InvalidAccessError|1,2|2|v");
     });
 }
