@@ -154,6 +154,7 @@ pub fn canonical_tag(s: &str) -> Result<String, TagError> {
         variants.push(v);
         i += 1;
     }
+    variants.sort();
     for v in &variants {
         out.push('-');
         out.push_str(v);
@@ -554,3 +555,8 @@ pub fn zone_tail(p: Pattern, zone: &str, out: &mut String, parts: Option<&mut Ve
 #[cfg(test)]
 #[path = "intl_tests.rs"]
 mod tests;
+
+// Included, not modules: a new module moves the other modules to other codegen units and changes their inlining (the lexer and
+// the parser rows of the cost matrix moved by 2%).
+include!("intl_locale.rs");
+include!("intl_rtf_data.rs");

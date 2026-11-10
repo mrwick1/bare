@@ -20,7 +20,7 @@ fn tags_are_canonical_or_refused_like_v8() {
     assert_eq!(canonical_tag("EN-us").unwrap(), "en-US");
     assert_eq!(canonical_tag("en-latn-us").unwrap(), "en-Latn-US");
     assert_eq!(canonical_tag("en-419").unwrap(), "en-419");
-    assert_eq!(canonical_tag("en-US-POSIX-1abc").unwrap(), "en-US-posix-1abc");
+    assert_eq!(canonical_tag("en-US-POSIX-1abc").unwrap(), "en-US-1abc-posix");
     for t in ["", "e", "12", "en_US", "en--US", "toolonglanguage", "en-US-abcdefghi", "en-"] {
         assert_eq!(canonical_tag(t), Err(TagError::Malformed), "{t}");
     }
