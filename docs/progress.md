@@ -6102,13 +6102,13 @@ Three live pages stopped on a missing piece. craigslist stopped with `Unsupporte
 
 - Tests first. On main (`cdf9bc794e`, `bare-drive`; the tests were not rerun on the later main) a local page gives `console.info is not a function`, `CSS is not defined` and, for `new Intl.DateTimeFormat('en-US-u-hc-h23')`, the page stops with the Intl `Unsupported`. On the branch the same page gives `ok`, `true,true,false`, `a\ b\#c` and `en-US-u-hc-h23`. The two gate tests (`eval_intl_tests.rs`, `eval_intl_num_tests.rs`) now expect `Unsupported` only for `ca-buddhist`, `nu-arab` and `co-emoji`.
 - 16 new cases `ext_*` in `tools/fixtures/js/intl-cases.txt`. All match Node 22. Three older cases differ from Node as before (`matrix_en-IN_w3_y1`, two time zone name lines); they are not from this change.
-- New tests: console (5 groups), `CSS` (4), Intl keywords. `cargo test --release --workspace`: 3,386 passed, 0 failed, 13 ignored.
+- New tests: console (5 groups), `CSS` (4), Intl keywords. `cargo test --release --workspace`: 3,392 passed, 0 failed, 13 ignored.
 - `tools/drive/public/run.sh`: 48 pass, 0 fail, 0 known, 0 skip, 0 flakes.
-- `exec_diff.sh`: 79 runs, 0 differences. `test262_check.sh`: exit 0 (10 directories gained passes, none lost). `keycost.sh`: `#a1` 282.1 M for each key, `#f0` 287.5 M, RSS 33.1 MiB at 20 keys and 33.0 MiB at 50 keys (same as main).
+- `exec_diff.sh`: 79 runs, 0 differences. After the last rebase (main `81a5f771ab`, which changed no file in `crates/js`) only the matrix, the workspace tests and the 48 journeys were run again; `exec_diff`, `test262_check` and `keycost` ran on the tree before it (main `5b32214102`). `test262_check.sh`: exit 0 (10 directories gained passes, none lost). `keycost.sh`: `#a1` 282.1 M for each key, `#f0` 287.5 M, RSS 33.1 MiB at 20 keys and 33.0 MiB at 50 keys (same as main).
 
 ### Cost
 
-Matrix of 805 rows, new tree against a fresh `base-build` of main `5b32214102`, after the final rebase. Over +0.5% under both allocators: 0. Over under one allocator only: 0. Mean change: glibc -0.032%. (The run against `1bec71ae9b` had one row over under glibc only: `console_load format 1`, +0.502%, jemalloc +0.323%.) Three rounds were needed.
+Matrix of 805 rows, new tree against a fresh `base-build` of main `81a5f771ab`, after the final rebase. Over +0.5% under both allocators: 0. Over under one allocator only: 2 (`form_load gates 1` and `gates 10`: +0.93% and +0.98% glibc, -0.02% jemalloc; the code of these rows is not in this change). Mean change: glibc -0.027%, jemalloc -0.024%. An earlier run against `1bec71ae9b` had one row over under glibc only: `console_load format 1`, +0.502%, jemalloc +0.323%. Three rounds were needed.
 
 - `intl_load make 10` was +0.644% (glibc) and +0.539% (jemalloc). Fix: the checks for `-u-` moved to cold functions; the extension work runs only when a tag has `-u-`; the options `calendar` and `numberingSystem` are kept as a 1-byte state, not as strings; a flag (`in_ctor`) replaces a store in each constructor. Now +0.4% at most.
 - `console_load format 1` was +0.8% (the 19 host functions were installed at each `Browser`). Fix: `console` is lazy; `format_console_record` skips the padding when the indent is 0. Now +0.495%.
