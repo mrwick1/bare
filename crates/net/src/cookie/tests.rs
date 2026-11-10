@@ -337,3 +337,22 @@ fn insert_round_trips_replaces_and_skips_expired() {
     b.insert(Cookie::new("z", "1", "localhost", true, "/"), NOW);
     assert_eq!(b.len(), 3);
 }
+
+#[test]
+fn insert_refuses_line_breaks_and_keeps_the_limits() {
+    let mut j = Jar::default();
+    j.insert(Cookie::new("a", "1\r\nX-Evil: 1", "a.test", true, "/"), NOW);
+    j.insert(Cookie::new("b\n", "1", "a.test", true, "/"), NOW);
+    j.insert(Cookie::new("c", "1", "a.test", true, "/\r"), NOW);
+    j.insert(Cookie::new("", "", "a.test", true, "/"), NOW);
+    j.insert(Cookie::new("d", &"v".repeat(5000), "a.test", true, "/"), NOW);
+    assert_eq!(j.len(), 0);
+    for i in 0..200 {
+        j.insert(Cookie::new(&format!("n{i}"), "1", "a.test", true, "/"), NOW);
+    }
+    assert_eq!(j.len(), 180, "the domain limit holds");
+    let mut far = Cookie::new("f", "1", "b.test", true, "/");
+    far.expires = Some(NOW + 1e15);
+    j.insert(far, NOW);
+    assert!(j.list().iter().find(|c| c.name == "f").unwrap().expires.unwrap() <= NOW + 400.0 * 86_400_000.0, "the expiry is cut to 400 days");
+}
