@@ -2330,7 +2330,15 @@ impl Marker<'_> {
 impl Object {
     /// Can this index property live in `elems`? Plain data, and not too far past the end.
     fn dense_ok(&self, i: u32, p: &Property) -> bool {
-        matches!(p, Property::Data { writable: true, enumerable: true, configurable: true, .. }) && i as usize <= self.elems.len() + ELEM_GAP
+        matches!(p, Property::Data { writable: true, enumerable: true, configurable: true, .. }) && (i as usize <= self.elems.len() + 16 || self.sparse_grow_ok(i as usize))
+    }
+
+    /// Arrays keep their fill behavior. Count at most 4096 slots on a far object write.
+    #[cold]
+    #[inline(never)]
+    fn sparse_grow_ok(&self, i: usize) -> bool {
+        i <= self.elems.len() + ELEM_GAP && (self.is_array || !self.slots.is_empty() || self.dict.as_ref().is_some_and(|d| d.live > d.index_keys) || self.elems.len() > 4096 ||
+            (self.elems.iter().filter(|e| e.is_some()).count() + 1) * 4 >= i + 1)
     }
 
     /// The bytes that one more named property may cost (an upper bound is enough: `edit` keeps the count exact).
@@ -3523,3 +3531,7 @@ mod tests {
         assert!(h.stats().object_payload_capacity <= 4);
     }
 }
+
+#[cfg(test)]
+#[path = "heap_sparse_tests.rs"]
+mod sparse_tests;
