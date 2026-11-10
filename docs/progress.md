@@ -7177,7 +7177,11 @@ wise.com stops in Mixpanel: `document.referrer.search(...)` throws, because `doc
 - What cost most: a name on `Document.prototype` or on the document wrapper (the measured steady state is 2.4k to 10k each, depending on the row), a function object (2.4k), an interned string (a power-of-two step of the interner moved `navigation_load storage` by +23k to +30k per collect).
 - What I did: shared no-op functions, string values read through a getter, one function for the charset trio, one shared get/set function for `designMode` and `dir`, data properties on the global (1.9k each) in place of accessors (3.2k each).
 - A new proto object between `Document.prototype` and its parent did not help (`handler_load 1`: 37,667,493 against a base of 37,447,684).
-- Closest row: `handler_load 1` at +0.498% to +0.506% under glibc and +0.427% under jemalloc, on the subset runs before the final rebase. The final numbers are in the PR.
+- Final rebase on 617cb19f89 (#344), base build `/data/bare-tmp/base/617cb19f89`. Case 2 ran first (112 rows: module rows plus every 13th row). Two sampled rows were over under both allocators (`navigation_load history 10`, `nodelist_load churn 1`). A repeat of those rows passed, so the counts move between runs. The rule then asked for the full matrix.
+- Full matrix, 805 rows, log `/data/bare-tmp/pb/matrix-full.log`: mean change glibc +0.054%, jemalloc +0.510%. 12 rows are over +0.5% under both allocators (glibc, jemalloc): `fetch_load bytes 1` (+1.222%, +0.808%), `loader_load blocking 1` (+0.789%, +0.515%), `loader_load mixed 1` (+0.780%, +0.693%), `session_load chain 1` (+1.052%, +0.559%), `session_load chain 10` (+1.178%, +1.003%), `sheets_load dynamic 1` (+0.953%, +0.554%), `sheets_load imports 1` (+1.036%, +0.590%), `sheets_load imports 10` (+0.694%, +0.556%), `sheets_load linked 1` (+1.003%, +0.592%), `xhr_load 1` (+1.077%, +0.693%), `xhr_load 100` (+0.711%, +0.505%), `select_load churn 10` (+0.691%, +0.591%).
+- Cause: each of these rows has a base of 7M to 18M instructions and pays a fixed install cost of about 100k instructions in the browser realm (about +1% of 10M). My earlier subset runs did not include these rows, so I did not see them.
+- Decision: the change is not merged. Under the owner rule there is no exception without the owner. A lower install cost needs the new names to be lazy. The lazy hook in `crates/js` takes a fixed name list, and this task may not edit `crates/js`.
+- Closest row before the final rebase: `handler_load 1` at +0.498% to +0.506% under glibc and +0.427% under jemalloc, on the subset runs before the final rebase. The final numbers are in the PR.
 
 ### Limits
 
@@ -7187,6 +7191,7 @@ wise.com stops in Mixpanel: `document.referrer.search(...)` throws, because `doc
 
 ### Not tested
 
+- `cargo test --release --workspace`, the 48 journeys and the live-site check after the final rebase (not run: the cost rule failed first). Only the 12 new tests were run.
 - Live Chrome for the plugin and MIME lists.
 - macOS and arjun-e16.
 - Priority B.
