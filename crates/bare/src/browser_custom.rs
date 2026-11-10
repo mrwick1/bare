@@ -812,6 +812,9 @@ impl Dom {
     }
 
     pub(crate) fn ce_roots(&self, out: &mut Vec<Value>) {
+        // A page that never uses the registry still makes these (an unknown element, a lazy global): they are roots without it.
+        out.extend(self.ce.unk.get().into_iter().flatten().copied().map(Value::Object));
+        out.extend(self.ce.int.get().into_iter().flatten().copied().map(Value::Object));
         let Some(st) = self.ce.st.get() else { return };
         let s = st.borrow();
         for d in &s.defs {
@@ -821,8 +824,6 @@ impl Dom {
         out.extend(s.when.values().copied());
         out.extend(s.flush.map(Value::Object));
         out.extend(s.reg.iter().flatten().copied().map(Value::Object));
-        out.extend(self.ce.unk.get().into_iter().flatten().copied().map(Value::Object));
-        out.extend(self.ce.int.get().into_iter().flatten().copied().map(Value::Object));
         out.extend(s.ints.keys().copied().map(Value::Object));
         for f in s.face.values() {
             f.roots(out);

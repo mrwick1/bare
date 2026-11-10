@@ -257,7 +257,7 @@ impl<'p> Interp<'p> {
         }
     }
 
-    /// The slow side of an `o_*` read: a host fill (at most 2 repeats, as `hx!`), a proxy, or an error. `e` is the answer of the first
+    /// The slow side of an `o_*` read: a host fill (at most `MAX_FILLS` repeats, as `hx!`), a proxy, or an error. `e` is the answer of the first
     /// call, `again` repeats the heap call and `px` runs the internal method of the proxy. It is out of line so that the fast side
     /// of every `o_*` method is one heap call and a test, and the compiler can inline it into the callers.
     #[cold]
@@ -266,7 +266,7 @@ impl<'p> Interp<'p> {
         let mut fills = 0u8;
         loop {
             match e {
-                HeapError::NeedsHost { owner, index } if fills < 2 => {
+                HeapError::NeedsHost { owner, index } if fills < crate::eval::MAX_FILLS => {
                     fills += 1;
                     self.host_fill(owner, index)?;
                 }
@@ -287,7 +287,7 @@ impl<'p> Interp<'p> {
         let mut fills = 0u8;
         loop {
             match e {
-                HeapError::NeedsHost { .. } | HeapError::NeedsNamed if fills < 2 => {
+                HeapError::NeedsHost { .. } | HeapError::NeedsNamed if fills < crate::eval::MAX_FILLS => {
                     fills += 1;
                     self.host_ask(e)?;
                 }
