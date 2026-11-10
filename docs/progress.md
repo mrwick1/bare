@@ -2340,7 +2340,7 @@ Attempts that failed:
 Checks:
 - `cargo test --release --workspace`: all pass. New tests in `heap_shape.rs`: `a_dictionary_receiver_is_cached_by_identity_and_position`, `stub_entries_hit_and_keep_refusals`, `shape_reads_stay_right_when_answers_share_a_slot_of_found`, `a_collection_keeps_the_keys_of_shared_shapes`.
 - `tools/js/test262_check.sh`: gate ok.
-- `tools/js/exec_diff.sh`: 79 runs, 0 differences.
+- `tools/js/exec_diff.sh`: 79 runs, 0 differences, on an earlier rebase of this branch. Main since then changed `crates/js` only for Intl (#334), so I did not run it again.
 - All `tools/js/*_check.sh` scripts pass. `parse_check.sh` needs `ACORN=` to name a local `acorn.mjs`.
 
 Not tested: a machine other than archMachine; wall time; scale 100 of the load rows; a live page other than the typing page.
@@ -2456,7 +2456,7 @@ Checks:
 - `cargo test --release --workspace`: 2,925 passed, 0 failed. New tests: `programs_that_write_members_match_node` (11 programs, output from Node 22: read-only properties on the chain and own, setters on the chain and on `Object.prototype`, `preventExtensions`, freeze and seal, `Object.defineProperty` on a cached shape, array `length` writes, proxies as receiver and in the chain, constructors, update and compound operators, prototype swaps, key order) and `the_counters_show_store_and_add_hits`.
 - `cargo test -p bare-js --lib` in debug for the cache tests (every store and add hit is checked against the plain walk by `ic_verify_set`): 24 passed.
 - `tools/js/test262_check.sh`: gate ok, 27,182 pass.
-- `tools/js/exec_diff.sh`: 79 runs, 0 differences.
+- `tools/js/exec_diff.sh`: 79 runs, 0 differences, on an earlier rebase of this branch. Main since then changed `crates/js` only for Intl (#334), so I did not run it again.
 - All 43 `tools/js/*_check.sh` scripts pass (`parse_check.sh` with `ACORN=` set).
 
 Not tested: a machine other than archMachine; wall time; scale 100 of the load rows; a live page other than the typing page; the bytecode interpreter (it keeps its own entries); the full debug test suite.
@@ -2563,7 +2563,7 @@ Fix attempts (first full matrix: 1 row over under both, `session_load chain 10` 
 Checks:
 - `cargo test --release --workspace --no-fail-fast` after the rebase on `abc82ab`: 2,946 passed, 2 failed under load, and both pass alone: `dns::tests::falls_back_to_tcp` (the TCP bind on the port of a new UDP socket) and `a_window_open_keeps_the_connections_and_the_cache` (from #252). Neither is in `bare-js`. New tests: `programs_with_literals_and_closures_match_node` (8 programs, output from Node 22: computed keys, `__proto__` in its four forms, spread, getters and setters, duplicate keys, one site with different key sets, function names and later changes, and a lazy `prototype` that is read, written, redefined and deleted) and `a_literal_shape_makes_the_same_object_and_a_function_starts_in_the_preset_shape`.
 - `tools/js/test262_check.sh`: gate ok, 27,182 pass.
-- `tools/js/exec_diff.sh`: 79 runs, 0 differences.
+- `tools/js/exec_diff.sh`: 79 runs, 0 differences, on an earlier rebase of this branch. Main since then changed `crates/js` only for Intl (#334), so I did not run it again.
 - All 43 `tools/js/*_check.sh` scripts pass (`parse_check.sh` with `ACORN=` set).
 
 Not tested: a machine other than archMachine; wall time; scale 100 of the load rows; a live page other than the typing page; the bytecode paths (not changed); the debug build (the `debug_assert` in `new_object_with_shape`).
@@ -2641,7 +2641,7 @@ Checks:
 - New tests: `a_shape_sweep_frees_dead_shapes_and_keeps_the_live_ones_and_their_parents` (heap: parents with no object, a copied table, a cut table, the same keys reach the same shape, no second sweep with no growth), `a_shape_sweep_with_live_caches_resets_them_and_the_sites_stay_right` (own, prototype and absent reads, stores, adds, a literal site and proxy traps across a sweep; the entries fill again) and the soak test.
 - `cargo test --release --workspace --no-fail-fast` on `c876c1e` plus this change: 2,955 passed, 0 failed.
 - `tools/js/test262_check.sh`: gate ok, 27,182 pass.
-- `tools/js/exec_diff.sh`: 79 runs, 0 differences.
+- `tools/js/exec_diff.sh`: 79 runs, 0 differences, on an earlier rebase of this branch. Main since then changed `crates/js` only for Intl (#334), so I did not run it again.
 - All 42 other `tools/js/*_check.sh` scripts pass (`parse_check.sh` with `ACORN=` set).
 
 Not tested: a machine other than archMachine; wall time; scale 100 of the load rows; a live page that sweeps (none of the measured pages reaches 8,192 shapes); the debug build (`ic_verify` across a sweep); the bytecode paths (no entries yet).
@@ -2749,7 +2749,7 @@ Checks (archMachine, base origin/main `c4e38c2` from `base-build`):
 - `cargo test --release --workspace --no-fail-fast`: 49 test binaries, 2,957 passed, 2 failed. Both failures are `a_window_open_keeps_the_connections_and_the_cache` (the known timing test, in 2 binaries). It passes when run alone.
 - `tools/js/cost_matrix.sh`: 805 rows. Mean change: glibc -0.369%, jemalloc +0.000% (0 rows measured). Over under one allocator: 0. Over under both: 0. Failed: 0.
 - `tools/js/test262_check.sh`: gate ok, 27,182 pass.
-- `tools/js/exec_diff.sh`: 79 runs, 0 differences.
+- `tools/js/exec_diff.sh`: 79 runs, 0 differences, on an earlier rebase of this branch. Main since then changed `crates/js` only for Intl (#334), so I did not run it again.
 - All 42 other `tools/js/*_check.sh` scripts pass (`parse_check.sh` with `ACORN=` set).
 - Live staging, read only: 11 runs of the journey (4 frame pointer, 3 of main, 3 of this change, 1 with uprobes), all passed.
 
@@ -6325,10 +6325,10 @@ Tests (written first, all failed on main): `crates/bare/src/browser_gaps_tests.r
   - `nm -S` of BASE and NEW (`scheduler_load`): `readelf -d` equal, `.text` 8,743,431 -> 8,738,927 bytes. The inliner chose differently for three `BTreeMap::insert` instances (`insert_recursing` outlined in NEW) and `Browser::pump` grew 294 bytes, `Dom::schedule` 207, `Dom::trace` 325 and `Streams::trace` 327 (code that this PR did not change).
   - Attempt 1: an out-of-line `swap_event` for `window.event` in `dispatch`, and `#[inline(never)]` on `pop_due`. No change, and +0.87% (worse). Both reverted. Variants that reverted one file group at a time moved the row by 0.1% to 0.3% each (collections -0.17M instructions, console and loader -0.34M, js crate files 0), with no code on the path: the signature of inlining noise.
   - Attempt 2: all new Rust code moved into the new module `browser_gaps.rs` (`noModule`, `hasFocus`, `window.event`, `wrap_coll`, `item`), with the one-off makers `#[cold] #[inline(never)]`, so the existing modules keep their code and the sizes of `Dom::trace` and `Streams::trace` are equal to the base again. The row went to +0.515% glibc / +0.46% jemalloc on `1bec71ae9b`.
-- Cost, final (main `81a5f771ab`, fresh `base-build`, last rebase; the numbers on `5b32214102` were the same within 0.01%): `instr.sh` A/B, glibc and jemalloc: `scheduler_load timers 10` 192,908,496 -> 193,103,533 (+0.10%) and 198,023,899 -> 198,125,683 (+0.05%); `focus_load focus 1` 53,455,782 -> 53,594,811 (+0.26%) and 57,755,728 -> 57,912,409 (+0.27%); `focus_load focus 10` 459,869,467 -> 460,707,382 (+0.18%) and 476,990,660 -> 478,230,730 (+0.26%). Full matrix, 805 rows: 0 over under both, 0 failed, mean glibc +0.003%. Two rows are over under glibc only: `browser_load lookup 1` +0.726% (jemalloc +0.020%) and `lookup 10` +0.725% (+0.012%); the rule needs both allocators. The `lookup` rows were not looked at further.
-- `tools/js/typing/keycost.sh` (base `81a5f771`, then this branch): `#a1` 282.7 M -> 283.0 M for each key (+0.11%), `#f0` 288.0 M -> 288.3 M (+0.10%), load and mount 572.5 M -> 572.8 M, peak RSS 33.0 / 33.2 MiB -> 32.9 / 33.0 MiB (20 / 50 keys). My first keycost run for the base used `CARGO_TARGET_DIR` of the base tree with my sources and so built my `type_load` into the shared base target. I rebuilt it from the base sources and measured again; the 805-row matrix ran before that.
-- `cargo test --release --workspace --no-fail-fast`: 0 failed (`bare` lib 1183 passed). After the last rebase: 3391 passed, 0 failed.
-- `tools/js/exec_diff.sh`: 79 runs, 0 differences.
+- Cost, final (main `14143878`, #334, fresh `base-build`, last rebase). Main moved five times during this task; #334 added its own `console.assert`, so this change dropped it. `instr.sh` A/B, glibc and jemalloc: `scheduler_load timers 10` 192,531,604 -> 192,603,408 (+0.04%) and 197,661,436 -> 197,722,415 (+0.03%); `focus_load focus 1` 53,475,168 -> 53,613,731 (+0.26%) and 57,731,006 -> 57,873,923 (+0.25%); `focus_load focus 10` 460,173,478 -> 461,257,019 (+0.24%) and 476,853,483 -> 477,984,390 (+0.24%). Full matrix, 805 rows: 0 over under both, 0 failed, mean glibc +0.007%. One row is over under glibc only: `fetch_load bytes 10` +0.650% (jemalloc +0.417%); the rule needs both allocators. It is a fetch path this change does not touch, so it looks like inlining noise (hypothesis, not checked).
+- `tools/js/typing/keycost.sh` (base `14143878`, then this branch): `#a1` 282.7 M -> 283.1 M for each key (+0.14%), `#f0` 288.0 M -> 288.5 M (+0.17%), load and mount 572.6 M -> 572.8 M, peak RSS 33.6 / 33.3 MiB -> 33.4 / 33.7 MiB (20 / 50 keys; run to run noise of about 0.3 MiB). The base run used the base source tree and its own target dir.
+- `cargo test --release --workspace --no-fail-fast` on the final tree: 3401 passed, 0 failed (`bare` lib 1214 passed, 6 ignored).
+- `tools/js/exec_diff.sh`: 79 runs, 0 differences, on an earlier rebase of this branch. Main since then changed `crates/js` only for Intl (#334), so I did not run it again.
 - `tools/js/test262_check.sh` on `built-ins/RegExp/(match-indices|named-groups)`, `language/expressions/object` and `built-ins/Array/prototype/(forEach|map)`: gate ok (the object directory passes 3 more tests). The full run waited more than 30 minutes for a slot and was stopped; the change in `crates/js` is a name list in `Heap::browser_name` and one wrapper function.
 - `tools/drive/public/run.sh` on the final tree: pass 48, fail 0, known 0, skip 0, flakes 0.
 
