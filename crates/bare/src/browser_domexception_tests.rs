@@ -13,6 +13,7 @@ fn domexception_retained_polyfill_probe() {
     big(|| {
         let mut b = mk(None, Default::default());
         assert_eq!(js(&mut b, "var y = globalThis.DOMException; var C = 'stack' in new y(1,2); typeof C"), "boolean");
+        assert_eq!(js(&mut b, "C"), "true");
     });
 }
 

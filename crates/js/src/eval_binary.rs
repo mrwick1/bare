@@ -485,7 +485,8 @@ impl<'p> Interp<'p> {
                 if let Value::Object(_) = a1 {
                     let k = h!(self, self.heap.key_from_str("maxByteLength"));
                     if !matches!(self.get_prop(a1, k)?, Value::Undefined) {
-                        return Err(unsupported("resizable ArrayBuffer", Span::default()));
+                        // A feature probe may catch this refusal; it must not stop the page.
+                        return Err(self.type_err("resizable ArrayBuffer is not supported"));
                     }
                 }
                 let proto = self.nt_proto(nt, self.bp().ab)?;
