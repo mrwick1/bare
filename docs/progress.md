@@ -7441,3 +7441,48 @@ Final owner cost-check case 1 applies because `crates/js` changes. Ran the full 
 All 48 public journeys pass after final rebase: zero failed, known, skipped or flaky journeys (`journeys.log`, `journeys.exit`, `journeys/`). `tools/drive/public/run.sh --out /data/bare-tmp/dxe13/journeys /data/bare-tmp/target-dxe13/release/bare-drive` ran under heavy. No suite or matrix rerun was needed after this documentation-only addition. Final diff, document-prefix preservation, whitespace and prohibited-text checks pass.
 
 Not tested: a browser oracle, real resizable-buffer support or length-tracking views, feeds/login, extended Mastodon interactions, macOS or arjun-e16. The initial fatal NEW result is resolved only for the retained replay and the final live runs; no broad capability or application-success claim follows. The read-only estimate does not implement or cost-test full resizable support.
+
+## Callback stack reporting boundary (Task 42, 2026-11-10)
+
+### Problem and retained evidence
+
+Task 42 permits `browser_events.rs`, `browser_handler_tests.rs`, `browser_scheduler_tests.rs` and append-only documentation. It excludes other production and test files. The bounded outcome is documentation only because the shared reporter changes existing assertions outside this list. No runtime or test change is included in this PR.
+
+Frozen test main: `da17ff4097ae8c4f6183e912d26e24ae8cda2b80`. Artifacts: `/data/bare-tmp/csr14/`. `ownership-start.txt` records all accessible worktree statuses, working/staged diffs, branch file lists and relevant committed hunks. Existing stale branches contain historical event changes; the active constructor, font and index tasks do not own the reporter hunks. `ownership-before-docs.txt` repeats ownership checks before the documentation edits. No foreign worktree or process changed.
+
+Consumed #352's raw `/data/bare-tmp/nfe/{apnews,substack}-{1,2}/stdout.json`. `consumed-352.json` retains the extracted failures, error order, resource totals and run metrics. `consumed-hashes.json` hashes the original JSON files. AP News attempt 1 fails readiness after an unsupported object postMessage stop; attempt 2 passes. Both first report an error listener writing `event` through an undefined receiver. Later reports include `t.postMessage`, promise `indexOf`, and TraversalDepth/Steps aborts. Substack passes both readiness checks; only attempt 2 reports the timeout reading `match`. The original receivers remain unknown. These old listener/timer reports have no stack or source column. No exact downloaded URL/hash mapping follows from matching property names.
+
+### Checked local candidate, not included
+
+Read `eval_stack.rs` and `Heap::get` before implementation. The former stores `Error.stack` as an own data string at construction. It contains actual function names, script slots and available line/column positions. It omits URLs and unavailable positions. The latter returns `Get::Accessor` without invoking user code. `Dom::error_text` already reads data properties and truncates decoded UTF-16 at `min(max_string_bytes,4096)` UTF-8 bytes.
+
+The candidate reuses that bounded machinery. A nonempty data-string stack replaces the diagnostic header; it does not duplicate it. Missing, empty, accessor and nonstring stacks fall back to name/message. The window ErrorEvent still receives the existing message and thrown value. No frame capture, new field, lazy-name token, scheduler production edit or interpreter edit is required. The candidate reads diagnostic text before window error handlers run. It retains report accounting and recursion protection.
+
+Tests-first: `CARGO_TARGET_DIR=/data/bare-tmp/target-csr14 /data/bare-tmp/bin/heavy cargo test --release -p bare --lib callback_report` fails all three initial regressions on frozen main (`failing-first.log`). The named listener and timer reports lack their real stored frame. The Unicode report retains only `Error: unicode`. The same command after the candidate passes four tests (`targeted.log`); the fourth adds an empty-stack and zero-report-cap guard and was not run failing-first. Checks cover real named frames, unchanged ErrorEvent text, later listener/timer execution, plain string throws, missing/nonstring/accessor stacks without getter execution, empty stacks, Unicode truncation to 128 bytes, bounded report retention, drop counts and recursive error-handler refusal. The saved candidate also changes four old assertions in the allowed handler/scheduler files to compare the unchanged first line.
+
+Candidate patch: `/data/bare-tmp/csr14/candidate.patch`. It is evidence for a follow-up, not shipped code. `commands.txt` retains commands and frozen identity. The one target directory throughout was `/data/bare-tmp/target-csr14`. Builds and tests used `heavy`. `build.log` covers the example build; `base-build.log` records the shared frozen BASE. The redundant direct test and binary-build requests were stopped while waiting for slots after selecting documentation only; neither produced a result. Their empty logs are not passing checks.
+
+### Verified scope conflict
+
+`heavy cargo test --release --workspace` reaches the bare suite and fails (`workspace.log`): 1240 passed, nine failed, six ignored. The nine failures compare the entire message to the old header. The new stored frames account for the differing text. The focused candidate tests pass in this run. The workspace command stops at this failing package; it does not prove all workspace suites passed.
+
+The excluded files and failing tests are:
+
+- `browser_custom_tests.rs`: `a_constructor_that_throws_fails_the_upgrade_and_is_reported`, `a_throwing_callback_is_reported_and_the_next_one_runs`, `create_element_with_a_bad_constructor_reports_and_still_makes_an_element`.
+- `browser_focus_tests.rs`: `listener_errors_cross_script_callbacks_and_reports`.
+- `browser_form_tests.rs`: `listener_throws_are_reported_in_both_stages_and_dispatch_goes_on`.
+- `browser_platform_tests.rs`: `media_change_events_and_listener_semantics`.
+- `browser_resize_tests.rs`: `a_throwing_callback_is_reported_and_others_still_run`.
+- `browser_tests.rs`: `listener_exceptions_are_reported_and_dispatch_continues`, `listener_options_removal_and_mutation_during_dispatch`.
+
+For example, the resize report becomes `Error: boom\n    at script#1:1:92`; its assertion requires exactly `Error: boom`. Ordinary focus/form/media events pass through the same listener reporter, so restricting the change to listener/timer call sites does not avoid all excluded assertions. Restricting by event name would create inconsistent diagnostics. No such workaround was added.
+
+### Final bounded result and next measurement
+
+The brief requires omission of unapproved code and executor merge of documentation-only evidence. Removed the local candidate from this branch after retaining its patch and logs. Acquired `merge-gate acquire csr14` before fetching and rebasing on `ca56078cf49bf328a82224724a3143a8373949b1` (#354). Appended this section after all preceding history. Final cost case: docs only, no matrix. Saved module/sample row lists are preparation, not measurements. No owner cost exception is requested. No suite or matrix rerun applies to this documentation-only final rebase.
+
+A follow-up needs approval to update the six excluded test files. Compare old headers separately from stored frames; retain continuation and original-value assertions. Then replay the candidate's failing-first regressions, run the complete release workspace and 48 public journeys, and apply cost case B after the final gated rebase: affected module rows plus the saved every-13th noncomment sample, both allocators for flagged rows, and full escalation for any over-both sample. The prepared lists contain nine module rows, 61 sample rows and 70 distinct union rows. No counts were measured for this PR.
+
+Next live measurement remains three alternating AP News BASE/NEW pairs, at least three Substack pairs (up to six for intermittency), and Bluesky/go-dev controls after an authorized implementation. Preserve every non-reproduction. Record readiness, error order/count, source/stack availability, stops, resources/bytes, elapsed and RSS. Map frames to downloaded URL/hash only with evidence. If an original thrown error has no usable stored stack, retain name/message and document that limit; do not change the owned evaluator frame code. No receiver-specific repair, postMessage, contains, capability or budget change is proposed.
+
+Not tested for this documentation-only result: fresh live pairs, public journeys, browser oracle, final runtime cost matrix, scripting gates, typing, or other machines. The earlier candidate workspace run failed as recorded. No live diagnostic improvement, application repair, reduced error count, speed or memory claim is made. Validation of this result is retained-log inspection, exact final diff, append-only preservation, publication-text scan and whitespace checks.
