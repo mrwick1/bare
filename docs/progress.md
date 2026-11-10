@@ -14,15 +14,15 @@ The module numbers below remain stable for existing code and benchmark reference
 | 2   | HTML tokenizer and DOM tree                            | done        |
 | 3   | CSS parser and style cascade                           | done        |
 | 4   | Layout (box model, text flow)                          | in progress |
-| 5   | Window (Wayland) and paint, bitmap font                | mostly built |
-| 6   | Input and navigation (links, scroll)                   | mostly built |
-| 7   | HTTPS (TLS 1.3 and crypto, by hand)                    | staging ready |
+| 5   | Window (Wayland) and paint, bitmap font                | built (S4)  |
+| 6   | Input and navigation (links, scroll)                   | built (S4)  |
+| 7   | HTTPS (TLS 1.3 and 1.2, crypto by hand)                | staging ready |
 | 8   | Tabs and event loop (one engine, a task queue per tab) | planned     |
 | 9   | JavaScript (interpreter, no JIT)                       | in progress |
 | 10  | Tab isolation and memory accounting (heap per tab)     | planned     |
 | 11  | Resource guard (watchdog, freeze, discard, reload)     | planned     |
 
-Modules 5 and 6 are built through S4 topics 1 to 5: paint, the Wayland window, drawing, hit testing and input, and scrolling and navigation. What remains is S4 topic 6 (redraw after changes, and the staging journey by visible input) and S5 (test automation).
+Modules 5 and 6 are built through S4 topics 1 to 6: paint, the Wayland window, drawing, hit testing and input, scrolling and navigation, and redraw after changes. S5 topics 1 to 6 (test automation) are also built. On 2026-11-07 the staging journey passed by visible input in the `bare` window. See [Staging journey through `bare-drive`](#staging-journey-through-bare-drive-s4-exit-s5-topic-5-first-run) and [S5 topics 4 and 6](#s5-topics-4-and-6-local-fixture-journey-live-reliability-and-retention).
 
 ## Voicebot staging plan
 
@@ -51,7 +51,7 @@ Use a dedicated staging account. Read credentials from the vault at run time. Do
 
 ### Journey status
 
-Status on 2026-11-07, main 5dd8c70. All runs are headless, through the session driver, against live staging. S4 topics 1 to 5 are built. S4 topic 6 and S5 remain.
+Status on 2026-11-07, main 5dd8c70. All runs are headless, through the session driver, against live staging. This table is the S3 run. Later the same day, `bare-drive` ran the journey through visible input, headless and in a window (see "Work that remains" below).
 
 | Step | Status |
 | --- | --- |
@@ -73,11 +73,12 @@ The run showed two gaps that no step needed:
 
 Both are fixed in [Storage named properties and `document.cookie`](#storage-named-properties-and-documentcookie). The live site was not run again after the fix.
 
-Work that remains before the planned E2E:
+Work that remains before the planned E2E (updated 2026-11-10 from the records below):
 
 - S3 exit: met. Steps 1 to 8 pass at the DOM level (table above).
-- S4: software paint, a Wayland window, hit testing and pointer and keyboard input. A user completes the journey in the `bare` window.
-- S5: the selector-based driver from S3 is a start. S5 actions must use real hit testing and input dispatch, so S5 needs S4. S5 also needs a local fixture app and an unattended staging run.
+- S4 exit: met on 2026-11-07, main 3d80147. `bare-drive` ran the 8 steps through real hit testing and input, headless and in a Wayland window. See [Staging journey through `bare-drive`](#staging-journey-through-bare-drive-s4-exit-s5-topic-5-first-run).
+- S5: topics 1 to 6 are done (2026-11-07). See [S5 topics 4 and 6](#s5-topics-4-and-6-local-fixture-journey-live-reliability-and-retention).
+- Not verified: a live staging run on the current main. The latest runs in this file use 48 public journeys, not staging.
 
 The headless run of steps 1 to 8 through the current driver is done (table above). The plan does not count it as the E2E.
 
@@ -398,12 +399,12 @@ Known gaps of module 4:
 ## Known gaps
 
 - HTTP: `Transfer-Encoding` codes other than `chunked` (for example `gzip`) are not supported. Compression is done: see "Compressed bodies and the connect backup".
-- HTTP: HTTP/2 and HTTP/3 are not built. They move to after module 7, because browsers use them only over TLS. HTTP/3 also needs QUIC.
-- HTTP: one idle connection for each server. No pool of several at once, no parallel requests.
+- HTTP: HTTP/3 is not built. It needs QUIC. HTTP/2 is built: see "HTTP/2".
+- HTTP: parallel downloads are built: up to 6 idle connections for each server and a worker pool. See "Parallel downloads" in resources.md.
 - HTTP cache: no `Expires`, no heuristic freshness (both need HTTP date parsing), and no 301 caching.
 - HTTP cache: a reply with a `Vary` header is not stored. No disk cache. No size limit. Module 10 needs a limit for memory accounting.
 - HTTP: GET and POST redirects work. The cache is not split by top-level site. Other request methods are unsupported.
-- URL: HTTP and HTTPS work. HTTPS supports the implemented TLS 1.3 suite and exact DNS SANs. IP-literal HTTPS and wildcard SANs are unsupported.
+- URL: HTTP and HTTPS work. HTTPS supports the implemented TLS 1.3 suite, TLS 1.2 (#302, "TLS 1.2 client"), exact DNS SANs and wildcard SANs (#274). To verify: IP-literal HTTPS end to end. `crates/tls/src/verify.rs` matches IP SANs.
 - DNS: no short names from the `search` line of `/etc/resolv.conf`.
 - DNS: no DNS-over-HTTPS. It needs module 7.
 - Encoding: no UTF-16 and no other encodings. The meta scan is simple: it does not skip comments. The guess is not a real detector.
@@ -8198,3 +8199,14 @@ The rule rejects a row above +0.5% under both allocators unless the owner grants
 Keep the run paused. Preserve draft #345 and the retained evidence. Wait for the owner to select the next scope. On resume, resolve the open decisions, then choose a bounded repair. Reproduce its failure before editing runtime code. Apply the cost rule to the final rebased change. Run the deferred verification survey only after authorization. Audit README against the later merged behavior.
 
 Validation for this record: compare the merged list with commit history and PR state. Check the existing task sections for repair boundaries and costs. Preserve all preceding progress bytes. Check the two-file documentation diff and whitespace. No runtime tests, live pages, cost matrix, desktop checks or deferred survey ran for this docs-only change.
+
+## Documentation refresh after the pause (2026-11-10)
+
+The owner asked for a check of the progress record and all documents. This docs-only change fixes stale statements. The pause stays in force.
+
+- README: the status now describes the current browser. The run commands use `cargo run -p bare`, because the workspace has four binaries and plain `cargo run` fails. The command list adds `--resources`, `--run`, `--paint` and `bare-drive`. The folder table adds the missing crates, data folders and docs, and the license list adds the data licenses.
+- engine-plan.md: the status line records that lane A merged, lane B stopped at R1 (#265), and the tree walker is the only executor.
+- decisions.md: adds the R1 stop under "Bytecode" and the TLS 1.2 client (#302) under "TLS".
+- This file: the module table, the S4 and S5 summary, the journey status and three HTTP and URL known gaps now match the later records (HTTP/2, parallel downloads, TLS 1.2, wildcard SANs).
+
+Not checked: every entry of "Known gaps" and every section of resources.md. Some older gap entries can still be stale. IP-literal HTTPS end to end is marked "to verify". staging-network.md and staging-js-requirements.md are dated snapshots from 2026-11-04 and are unchanged. No tests, matrix or live runs ran. The only command run against the code was `cargo run` at the workspace root, to confirm that it fails.
