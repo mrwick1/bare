@@ -309,3 +309,31 @@ fn lookup_finds_a_cookie_for_a_url_with_no_side_effect() {
     assert_eq!(j.lookup(&at(true, "a.test", "/"), "other", NOW), None);
     assert_eq!(j.lookup(&at(true, "a.test", "/"), "sid", NOW + 1e15).map(|c| c.value.clone()), Some("1".into()), "a session cookie has no end");
 }
+
+#[test]
+fn insert_round_trips_replaces_and_skips_expired() {
+    let mut a = Jar::default();
+    http(&mut a, true, "www.a.test", "/", "x=1; Domain=a.test; Secure; HttpOnly; SameSite=Lax; Max-Age=1000");
+    http(&mut a, true, "www.a.test", "/p", "y=2");
+    let mut b = Jar::default();
+    for c in a.list() {
+        b.insert(c.clone(), NOW);
+    }
+    assert_eq!(b.len(), 2);
+    let (la, lb) = (a.list(), b.list());
+    for (x, y) in la.iter().zip(lb.iter()) {
+        assert_eq!((&x.name, &x.value, &x.domain, x.host_only, &x.path, x.secure, x.http_only, x.same_site, x.expires), (&y.name, &y.value, &y.domain, y.host_only, &y.path, y.secure, y.http_only, y.same_site, y.expires));
+    }
+    let mut r = Cookie::new("x", "9", "a.test", false, "/");
+    b.insert(r.clone(), NOW);
+    assert_eq!(b.len(), 2);
+    assert!(b.list().iter().any(|c| c.name == "x" && c.value == "9"));
+    r.name = "old".into();
+    r.expires = Some(NOW);
+    b.insert(r, NOW);
+    assert_eq!(b.len(), 2);
+    b.insert(Cookie::new("z", "1", "co.uk", false, "/"), NOW);
+    assert_eq!(b.len(), 2);
+    b.insert(Cookie::new("z", "1", "localhost", true, "/"), NOW);
+    assert_eq!(b.len(), 3);
+}
