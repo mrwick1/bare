@@ -1179,3 +1179,16 @@ passing correction separately. This is not a second passing full-matrix claim.
 PR #352 merged evidence only. It selected zero runtime fixes. The five-page sweep and local missing-index probe did not establish complete application behavior. Missing IDBIndex exposure was confirmed on that baseline. Other first-error causes remained incomplete or hypotheses. No cost matrix applied to the documentation change.
 
 This entry backfills the missing record at the 2026-11-10 pause. It does not change the original evidence or claim a runtime repair. Later #356 exposed the index interface. Later #362 added in-memory index reads and constraints. Keep those repairs separate from #352.
+
+## MCP server for end-to-end tests (2026-11-10)
+
+Owner request: a small MCP server, so that an agent can run end-to-end tests in `bare`. The first use is headless. A window can show the run on Hyprland workspace 6 of the ThinkPad.
+
+- A new crate `bare-mcp` (owner choice over a wrapper in another language). It calls the driver library (`bare_drive::run`) directly. Every action keeps the hit test and input path of `bare-drive`.
+- Transport: stdio, one JSON-RPC message on each line. This is the MCP transport that Claude Code and Codex start as a child process. No port, no daemon.
+- Tools (owner choice: both kinds): `run_steps` runs a whole step file. `open`, `step` and `close` keep one live page between calls, so an agent can explore a site step by step. Both kinds use the same step syntax.
+- The driver keeps its loop. `run` became `Session` (`new`, `step`, `drain`, `finish`), and `run` loops over `step`. `drain` moves the records of a call out, so each `step` call reports only its own steps, and a long session does not grow.
+- JSON input uses `serde_json`. The driver already writes its report by hand, and the server embeds that text. The parser is the only new dependency.
+- Secrets come only from a `secrets_file`, as in `bare-drive --secrets`. Values never go in the tool arguments, which an agent client logs.
+- Workspace: `--workspace N` sets a named Hyprland window rule before each window opens: `hyprctl eval` with `hl.window_rule`, `workspace = "N silent"`. Hyprland 0.56 with a Lua config refuses `hyprctl keyword`. `silent` keeps the user's focus and view. The rule matches the class `bare` and the title `bare (driven)`, so a `bare --window` of the user is not moved.
+- Optimization of the server comes later (owner decision). This version measures the same as `bare-drive` (see progress.md).

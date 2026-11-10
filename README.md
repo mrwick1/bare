@@ -26,6 +26,7 @@ cargo run -p bare -- http://example.com --run      # load the page, run its scri
 cargo run -p bare -- --paint=out.png page.html     # paint a local file into a PNG, with no network
 cargo run -p bare -- --window page.html            # open a Wayland window that shows the painted page (a local file or an http(s) URL)
 cargo run -p bare-drive -- STEPS           # run a step file (a user journey); --window shows it
+cargo run -p bare-mcp -- --workspace 6     # an MCP server over stdio: agents run journeys (headless, or a window on Hyprland workspace 6)
 cargo test --workspace
 ```
 
@@ -48,6 +49,7 @@ Linux is the first target. The core must also build and run on Windows and macOS
 | `crates/window/`    | Wayland window and input                            |
 | `crates/unicode/`   | NFC and Unicode data tables                         |
 | `crates/drive/`     | `bare-drive`, the test driver for user journeys     |
+| `crates/mcp/`       | `bare-mcp`, an MCP server for end-to-end tests      |
 | `crates/bench/`     | Time and memory benchmarks for each module          |
 | `crates/stress/`    | `bare-stress`, load tests in separate processes     |
 | `data/unicode/`     | Unicode data files and their license                |
