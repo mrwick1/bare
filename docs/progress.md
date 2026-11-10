@@ -6869,3 +6869,50 @@ No object contents, script source or identifiers enter the new stop label.
 
 Not tested: a live heap crash, other large sites, desktop interaction or other platforms.
 No JS files changed. JS-specific conformance, differential and typing gates were not run.
+
+## Indexed style charges split from abort-frame capture (2026-11-10)
+
+This change contains no `crates/js` or frame-capture change. A full cascade charges document nodes before computing, then the rule candidates the index actually tested. The independent work cap and 100 M step budget stay unchanged. Restyle charges stay unchanged. Frame capture remains separate in draft #345.
+
+The original apnews trace on `8f6a38e9` attributed 103,350,835 steps to five full-compute estimates, 104,955 to sheet bytes and 21,246 to plan traversal. The bundle used only 78,712 interpreter ticks. The original logs remain in `/data/bare-tmp/sb/trace-apnews/`. Craigslist instead used 99,082,733 ticks in the FormatJS locale matcher. Its peak holders included 184 MiB of object slabs, 129.8 MiB of element capacity and 44.3 MiB of shape slots (`/data/bare-tmp/sb/peak/`). This style change does not fix that matcher.
+
+The new regression uses 200 elements, 1,000 irrelevant class rules and ten appended sheets. It fails with `Limit(Steps)` before the fix and passes afterward (`split/style-before.log`, `split/style-after.log`). The prior test that reserved all rules now checks the indexed charge instead.
+
+### Case 2 validation
+
+Final rebase and fresh base-build: `8a30c6bcc2681682b7987f2d4a61664002df74de`. The merge gate covered the rebase and final checks. Case 2 applies: only browser modules change; no hot structure or JS code changes. The selected set contains all 18 geometry, sheets and style rows, plus 61 rows selected at every thirteenth row of the other groups. The raw result set was checked against the saved selection. All 79 rows pass under both allocators. Mean change: glibc -0.002%, jemalloc +0.005%. No row is over +0.5% under either allocator. No sampled row triggers a full matrix. No cost exception was taken. Logs and row lists: `/data/bare-tmp/sb/split/case2.log`, `case2.tsv`, `module-rows.txt`, `sample-rows.txt`.
+
+The initial workspace run failed once in `bare-net`'s `a_post_after_a_graceful_idle_close_runs_on_a_new_connection` with GOAWAY. Its one isolated retry passed. All suites that the failure prevented from running then passed. The workspace was not rerun wholesale. Logs: `workspace-a.log`, `h2-isolated.log`, `net-remaining.log`, `packages-remaining.log`, `docs-remaining.log` under `/data/bare-tmp/sb/split/`.
+
+All 48 public journeys pass, with no failures, skips, known failures or flakes (`journeys-a.log`). BASE/NEW keycost is 283.1/283.1 M instructions per key for `#a1`, and 288.5/288.5 M for `#f0`. Peak RSS at 50 keys is 33.5/33.3 MiB (`keycost-base.log`, `keycost-a.log`). No JS gates were needed for this browser-only split.
+
+### Alternating live runs
+
+Each site ran BASE, NEW three times in alternation. All use the same 30 s complete-ready-state step file. `complete` reports that predicate, not the exact incomplete readyState value. Logs: `/data/bare-tmp/sb/split/live/`.
+
+| site | tree | run | complete | aborts | ms | peak MiB |
+| --- | --- | ---: | --- | ---: | ---: | ---: |
+| apnews | base | 1 | no | 5 | 4293.4 | 148.7 |
+| apnews | new | 1 | no | 2 | 8381.8 | 198.6 |
+| apnews | base | 2 | no | 5 | 3445.1 | 149.6 |
+| apnews | new | 2 | yes | 2 | 8096.1 | 152.2 |
+| apnews | base | 3 | no | 5 | 3255.2 | 148.8 |
+| apnews | new | 3 | yes | 2 | 7971.1 | 148.0 |
+| redis | base | 1 | no | 0 | 4366.4 | 268.7 |
+| redis | new | 1 | no | 0 | 3554.6 | 264.5 |
+| redis | base | 2 | no | 0 | 3491.5 | 265.6 |
+| redis | new | 2 | no | 0 | 3651.3 | 271.9 |
+| redis | base | 3 | no | 0 | 3773.0 | 267.5 |
+| redis | new | 3 | no | 0 | 3806.6 | 272.2 |
+
+BASE apnews exhausts the five-abort allowance in all three runs. NEW has two later aborts and completes in two of three runs. The other NEW run stops on unsupported MessagePort object cloning. NEW executes later code and can take longer or use more memory. This does not establish a speed improvement.
+
+All six Redis runs stop at the same existing pending-shorthand longhand-write gate. Both BASE and NEW also fail the isolated `margin = 'var(--m) 2px'; marginTop = '1px'` reduction with the same unsupported message (`var-base.log`, `var-new.log`, `var-gate.txt`). Task 33's fix is absent from this base and owns that path. NEW does not stop at an earlier gate in these runs. Earlier mixed-branch runs that showed a BASE completion did not establish a new style-write defect.
+
+### Not tested
+
+- A full matrix: no sampled row triggered it under case 2.
+- The pending-shorthand fix from Task 33, which is not in this base.
+- A forced locale-polyfill run in Chrome, exact allocation creation stacks, or speed across frozen identical network responses.
+
+The separate frame experiment uses a `Limit` guard and a cold function that cannot inline. It still has two generator rows over both allocator limits. It remains draft and is not part of this merge.
