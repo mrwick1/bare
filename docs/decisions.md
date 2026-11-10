@@ -852,4 +852,6 @@ The fixed tests cover all 16 variants and the public page stop reason.
 A constructed sticky stop blocks page scripts and I/O on three later loader runs.
 Measured sizes stay at 32 bytes for Fatal, 104 for Stop, 1,200 for Scripts and 368 for PageResult.
 The required cost case is the full matrix because Fatal is stored in loader state.
-Final cost validation remains pending. The merge gate was not acquired within the task time box.
+Final BASE 617cb19f89: all 805 rows passed under both allocators with fresh BASE counts.
+No row exceeded +0.5% under either allocator. Workspace tests and all 48 public journeys passed.
+Target reached complete in all six live runs without a heap fault. Apnews kept the same Steps-abort stop on both builds.

@@ -6766,60 +6766,106 @@ The #341 full log measured jemalloc only for the two over-limit form rows; its s
 
 Final rebase: acquired `/data/bare-tmp/bin/merge-gate acquire sla` before `git fetch origin` and `git rebase origin/main`. Documentation base: `e383d1b81ba8a06b4772a443c4db655458e790de`. The frozen measurement trees above remain unchanged. Append this section after the final rebase.
 
-## Heap variant labels in fatal stops (2026-11-10, pending final validation)
+## Heap variant labels in fatal stops (2026-11-10)
 
-Problem: surveys reported only `page stopped: Heap`. They could not distinguish the next heap fault after the target.com fixes.
-Cause: `fatal_of` discarded every heap error payload and variant.
-Change: `Fatal::Heap` carries a static variant label. An exhaustive match selects the label on the error path.
-The match discards handles, indices, values and execution text. It changes no recovery, budgets, fill limits or heap layout.
+Problem: surveys reported only `page stopped: Heap`. They could not identify the next heap fault after the target.com fixes.
+Cause: `fatal_of` discarded the heap error variant.
+Change: `Fatal::Heap` carries a static variant label. An exhaustive match selects it on the cold error path.
+The mapping discards handles, indices, values and execution text.
+Recovery, budgets, evaluator fill limits and heap layout do not change.
 
-### Failing-first proof and checks
+### Failing-first proof
 
-Initial `git fetch origin && git rebase origin/main` left the branch on main `d8550bbba0`.
-The new tests ran before the implementation on that base.
-Three failed because the old stop was only `Heap`. The size probe passed.
-The fixed diagnostic suite passes all four tests. The loader suite passes all 104 tests.
-The variant table covers all 16 current variants.
+Initial base: main `d8550bbba0`.
+The diagnostic tests ran before the implementation. Three failed because the old stop was only `Heap`.
+The fixed suite passed all four tests. The loader suite passed all 104 tests.
+The table covers all 16 current variants.
 The public page test checks `Page::stopped()`.
-The constructed sticky stop checks three later loader runs: no page script, task or I/O starts.
+A constructed sticky stop checks three later loader runs: no page script, task or I/O starts.
+The initial size probe gave the same sizes before and after: Fatal 32, Stop 104, Scripts 1,200 and PageResult 368 bytes.
 
-Commands, run from the task worktree:
+Commands used `CARGO_TARGET_DIR=/data/bare-tmp/target-hsl` and `/data/bare-tmp/bin/heavy`:
 
-- `CARGO_TARGET_DIR=/data/bare-tmp/target-hsl /data/bare-tmp/bin/heavy cargo test --release -p bare --lib diagnostic_tests -- --nocapture`.
+- `cargo test --release -p bare --lib diagnostic_tests -- --nocapture`.
   Failing log: `/data/bare-tmp/hsl/tests-main.log`. Passing log: `/data/bare-tmp/hsl/tests-new.log`.
-- `CARGO_TARGET_DIR=/data/bare-tmp/target-hsl /data/bare-tmp/bin/heavy cargo test --release -p bare --lib browser_loader`.
+- `cargo test --release -p bare --lib browser_loader`.
   Log: `/data/bare-tmp/hsl/loader-iteration.log`.
-- `CARGO_TARGET_DIR=/data/bare-tmp/target-hsl /data/bare-tmp/bin/heavy cargo build --release --examples -p bare-js -p bare -p bare-stress -p bare-drive`.
-  Log: `/data/bare-tmp/hsl/build.log`.
 
-### Cost case and blocked final checks
+### Final base and checks
 
-Required case: full 805 rows under glibc and jemalloc.
-Fatal is stored in Scripts and Stop. Treat its representation change conservatively as hot.
-Measured sizes before and after are identical: Fatal 32, Stop 104, Scripts 1,200 and PageResult 368 bytes.
-This size evidence does not replace the matrix.
+The merge gate was acquired before the final rebase and held during final checks.
+Final BASE: `617cb19f8984a6781e5e31a4655e3d598f705d17`.
+The code rebased without a conflict. Documentation conflicts kept both tasks' appends.
+This section is at the end of progress.md.
 
-`/data/bare-tmp/bin/merge-gate acquire hsl` waited while other tasks held the gate.
-The holders changed from sparse-elements to intl-locale-rtf, sparse-elements and steps-aborts.
-The wait consumed most of the 45-minute task time box.
-The acquisition process and its sleep were stopped. This task never held the gate.
-The current holder's gate was left intact.
-No final rebase, matrix, row counts or final BASE/NEW cost evidence is claimed.
-The branch must stay unmerged until those checks pass.
-Prepared commands are in `/data/bare-tmp/hsl/final-checks.sh`.
-They use `base-build`, save all rows and raw counts, then run the journeys and live pairs.
+- `/data/bare-tmp/bin/base-build origin/main --release --workspace --examples` supplied `/data/bare-tmp/base/617cb19f89/target`.
+- `cargo build --release --examples -p bare-js -p bare -p bare-stress -p bare-drive`.
+  Log: `/data/bare-tmp/hsl/build-final.log`.
+- `cargo build --release -p bare-stress -p bare-drive` built the binaries explicitly.
+  Log: `/data/bare-tmp/hsl/build-bins.log`.
+- `cargo test --release --workspace`: 3,421 passed, zero failed, 13 ignored.
+  This includes the new diagnostic tests and the loader module tests.
+  Log: `/data/bare-tmp/hsl/workspace-final.log`.
+- `/data/bare-tmp/bin/heavy tools/drive/public/run.sh --out /data/bare-tmp/hsl/journeys-final /data/bare-tmp/target-hsl/release/bare-drive`:
+  48 passed, zero failures, zero flakes.
+  Log: `/data/bare-tmp/hsl/journeys-final.log`.
 
-### Live results, ownership and limits
+### Cost case
 
-Final BASE and NEW target.com runs (three each) and apnews runs (one each) were not run.
-Stop text, console aborts, readiness, time and RSS remain unmeasured for those live pairs.
-Deterministic tests prove the diagnostic, not live fault frequency.
-The scratch runner is `/data/bare-tmp/hsl/live.py`.
+Conservative hot representation case: Fatal is stored in Scripts and Stop.
+The unchanged sizes do not waive the full matrix.
+The final run measured all 805 rows under glibc and jemalloc.
+Zero rows exceeded +0.5% under either allocator. Zero rows failed.
+Mean change: -0.002% under each allocator. No cost exception.
 
-Other owners retain page-basics, locale formatting, sparse heap writes, Steps aborts and background styling.
-This task changes only the loader diagnostic, its new test file and append-only documentation.
-It does not change the abort-location text.
+The first attempt omitted the stress binary and reused noncomparable BASE counts.
+It had 176 failed rows and 17 rows flagged under both allocators.
+That result is retained in `/data/bare-tmp/hsl/cost-invalid-cache.log` and `.tsv`.
+A fresh paired `loader_load blocking 1` check through the exact `instr.sh env` invocation gave glibc 11,360,874 to 11,360,963 and jemalloc 17,906,560 to 17,910,485.
+The cached BASE counts for that row were 11,240,664 and 17,753,779.
+The cause of the cache mismatch was not established.
+Fresh-check log: `/data/bare-tmp/hsl/fresh-loader-env-counts.log`.
 
-Not tested: final-rebase workspace tests, all 48 public journeys, the full cost matrix and live pairs.
-No JS files changed. The JS-specific conformance, differential and typing gates were not run.
-The draft PR records this incomplete validation. It must not merge on the local loader results alone.
+The final run used a local empty cache and the same shared BASE binaries.
+`/data/bare-tmp/hsl/fresh-base/release` is a symlink to the shared BASE release directory.
+No shared baseline files were changed.
+Command: `/data/bare-tmp/bin/heavy tools/js/cost_matrix.sh -J -o /data/bare-tmp/hsl/cost-final.tsv /data/bare-tmp/hsl/fresh-base /data/bare-tmp/target-hsl`.
+The exact 805 noncomment rows are in `/data/bare-tmp/hsl/cost-rows.txt`.
+Final log and both allocator counts: `/data/bare-tmp/hsl/cost-final.log` and `.tsv`.
+
+### Live pairs
+
+BASE and NEW alternate. The steps open the site, require `document.readyState === 'complete'`, then capture the page.
+Each run uses the heavy wrapper. The driver reports elapsed milliseconds.
+A Python `wait4` wrapper records peak RSS in KiB for each process tree.
+The original measurement wrapper failed because `/usr/bin/time` is absent. No page ran in that attempt.
+The corrected runner completed all required pairs.
+Commands and raw reports: `python3 /data/bare-tmp/hsl/live.py`, `/data/bare-tmp/hsl/timed.py`, `/data/bare-tmp/hsl/live/` and `/data/bare-tmp/hsl/live-summary.json`.
+
+| Site | Run | Build | Readiness | Console aborts | Time ms | Peak RSS KiB |
+| --- | --- | --- | --- | --- | --- | --- |
+| target | 1 | BASE | complete | 0 | 11763.3 | 348512 |
+| target | 1 | NEW | complete | 0 | 9166.5 | 334372 |
+| target | 2 | BASE | complete | 0 | 8013.1 | 331892 |
+| target | 2 | NEW | complete | 0 | 9224.4 | 340228 |
+| target | 3 | BASE | complete | 0 | 12828.5 | 336540 |
+| target | 3 | NEW | complete | 0 | 8118.5 | 348728 |
+| apnews | 1 | BASE | did not reach complete | 5 | 6697.2 | 152516 |
+| apnews | 1 | NEW | did not reach complete | 5 | 3775.3 | 150840 |
+
+Target had no page stop or heap fault in any run. Its console had one third-party fetch TLS failure in each run.
+The deterministic tests establish the new diagnostic. These live runs do not establish heap fault frequency.
+Apnews stopped in both builds with the same text:
+`5 tasks were aborted by script budgets, the next one (Steps in error event) is too many`.
+Both runs also had third-party connection refusals.
+The Steps stop belongs to the abort-budget owner. This task does not change its text or behavior.
+The live sample ran on a shared machine. It does not establish a time or RSS improvement.
+
+### Remaining owners and limits
+
+Other tasks retain page basics, locale formatting, sparse element writes, Steps analysis and background styling.
+Only the loader diagnostic, its test file and this task's documentation changed.
+No object contents, script source or identifiers enter the new stop label.
+
+Not tested: a live heap crash, other large sites, desktop interaction or other platforms.
+No JS files changed. JS-specific conformance, differential and typing gates were not run.
