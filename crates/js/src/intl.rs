@@ -154,6 +154,7 @@ pub fn canonical_tag(s: &str) -> Result<String, TagError> {
         variants.push(v);
         i += 1;
     }
+    variants.sort();
     for v in &variants {
         out.push('-');
         out.push_str(v);

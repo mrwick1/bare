@@ -35,6 +35,7 @@
 
 use crate::icu;
 use crate::intl;
+use crate::intl_locale;
 use crate::tz::{self, Zone};
 use crate::tz_names;
 
@@ -77,12 +78,22 @@ enum IntlFn {
     SegsContaining,
     SegsIter,
     SegIterNext,
+    LocCtor,
+    LocToString,
+    /// `maximize` (true) and `minimize` (false).
+    LocMaximize(bool),
+    /// The getter of `LOCALE_GETTERS[i]`.
+    LocGet(u8),
+    RtfCtor,
+    /// `format` (false) and `formatToParts` (true).
+    RtfFormat(bool),
+    RtfResolved,
 }
 
 impl IntlFn {
     /// A constructor that `new` can call.
     fn is_ctor(self) -> bool {
-        matches!(self, IntlFn::DtfCtor | IntlFn::NfCtor | IntlFn::CollCtor | IntlFn::PrCtor | IntlFn::SegCtor)
+        matches!(self, IntlFn::DtfCtor | IntlFn::NfCtor | IntlFn::CollCtor | IntlFn::PrCtor | IntlFn::SegCtor | IntlFn::LocCtor | IntlFn::RtfCtor)
     }
 }
 
@@ -147,6 +158,8 @@ struct IntlState {
     seg_ctor: ObjId,
     segments_proto: ObjId,
     seg_iter_proto: ObjId,
+    /// `Intl.Locale` and `Intl.RelativeTimeFormat`.
+    loc: IntlLoc,
     zones: FxMap<Rc<str>, Rc<Zone>>,
     default_zone: Option<(Rc<str>, Rc<Zone>)>,
     /// The keys of `OPTION_NAMES`, made once (rooted).
@@ -185,6 +198,7 @@ impl IntlState {
             seg_ctor: o,
             segments_proto: o,
             seg_iter_proto: o,
+            loc: IntlLoc::new(o),
             zones: FxMap::default(),
             default_zone: None,
             keys: Vec::new(),
@@ -304,7 +318,7 @@ impl<'p> Interp<'p> {
 
     fn intl_roots(&self, out: &mut Vec<Value>) {
         let i = &self.intl;
-        out.extend([i.intl, i.proto, i.ctor, i.format_fn, i.nf_proto, i.nf_ctor, i.nf_format, i.coll_proto, i.coll_ctor, i.coll_compare, i.pr_proto, i.pr_ctor, i.seg_proto, i.seg_ctor, i.segments_proto, i.seg_iter_proto].map(Value::Object));
+        out.extend([i.intl, i.proto, i.ctor, i.format_fn, i.nf_proto, i.nf_ctor, i.nf_format, i.coll_proto, i.coll_ctor, i.coll_compare, i.pr_proto, i.pr_ctor, i.seg_proto, i.seg_ctor, i.segments_proto, i.seg_iter_proto, i.loc.loc_proto, i.loc.loc_ctor, i.loc.rtf_proto, i.loc.rtf_ctor].map(Value::Object));
         out.extend(self.intl.keys.iter().filter_map(|k| if let PropertyKey::String(s) = k { Some(Value::String(*s)) } else { None }));
     }
 
@@ -329,6 +343,7 @@ impl<'p> Interp<'p> {
         for (&o, d) in &self.intl.seg_iters {
             out.extend([Value::Object(o), Value::String(d.s)]);
         }
+        out.extend(self.intl.loc.locales.keys().chain(self.intl.loc.rtfs.keys()).map(|&o| Value::Object(o)));
     }
 
     fn intl_trace(&self, o: ObjId, out: &mut Vec<Value>) {
@@ -353,6 +368,8 @@ impl<'p> Interp<'p> {
         self.intl.exts.retain(|o, _| seen.contains(o));
         self.intl.segments.retain(|o, _| seen.contains(o));
         self.intl.seg_iters.retain(|o, _| seen.contains(o));
+        self.intl.loc.locales.retain(|o, _| seen.contains(o));
+        self.intl.loc.rtfs.retain(|o, _| seen.contains(o));
         if self.intl.dtfs.capacity() > 64 && self.intl.dtfs.len() * 4 < self.intl.dtfs.capacity() {
             self.intl.dtfs.shrink_to_fit();
         }
@@ -430,6 +447,7 @@ impl<'p> Interp<'p> {
         self.sc_tag(seg_iter_proto, "Segmenter String Iterator")?;
         let i = &mut self.intl;
         (i.seg_proto, i.seg_ctor, i.segments_proto, i.seg_iter_proto) = (seg_proto, seg_ctor, segments_proto, seg_iter_proto);
+        self.intl_loc_install(intl)?;
         let i = &mut self.intl;
         (i.intl, i.proto, i.ctor, i.format_fn) = (intl, proto, ctor, format_fn);
         (i.nf_proto, i.nf_ctor, i.nf_format, i.coll_proto, i.coll_ctor, i.coll_compare, i.pr_proto, i.pr_ctor) =
@@ -1019,3 +1037,5 @@ impl<'p> Interp<'p> {
 
 include!("eval_intl_num.rs");
 include!("eval_intl_segmenter.rs");
+include!("eval_intl_locale.rs");
+include!("eval_intl_rtf.rs");
