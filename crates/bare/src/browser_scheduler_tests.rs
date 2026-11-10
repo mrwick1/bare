@@ -149,7 +149,7 @@ fn a_callback_runs_as_its_own_task_with_a_checkpoint_and_a_throw_is_reported() {
         assert_eq!(p.ran, 4);
         assert_eq!(js(&mut b, "log.join()"), "t1,m1,m2,t3");
         let r = b.take_reports();
-        assert_eq!(r.iter().map(|r| (r.event_type.as_str(), r.target.as_str(), r.message.as_str())).collect::<Vec<_>>(), vec![("timeout", "window", "Error: boom"), ("interval", "window", "7")]);
+        assert_eq!(r.iter().map(|r| (r.event_type.as_str(), r.target.as_str(), r.message.lines().next().unwrap())).collect::<Vec<_>>(), vec![("timeout", "window", "Error: boom"), ("interval", "window", "7")]);
         // the interval that threw is queued again
         assert_eq!(b.sched_stats().timers, 1);
         assert!(p.next_due.is_some());
@@ -175,7 +175,7 @@ fn a_limit_in_a_task_stops_the_pump_and_no_more_js_runs() {
         assert_eq!(js(&mut b, "log.length"), "0");
         // Unsupported inside a task also stops the pump
         let mut b = browser();
-        js(&mut b, "var log = []; setTimeout(function () { new MessageChannel().port1.postMessage({}) }, 0); setTimeout(function () { log.push('after') }, 1)");
+        js(&mut b, "var log = []; setTimeout(function () { new MessageChannel().port1.postMessage({}, [1]) }, 0); setTimeout(function () { log.push('after') }, 1)");
         assert!(matches!(b.advance_time(5.0, 10), Err(Error::Unsupported(_))));
         assert!(matches!(b.advance_time(5.0, 10), Err(Error::Unsupported(_))));
         assert_eq!(js(&mut b, "log.length"), "0");
@@ -267,7 +267,7 @@ fn queue_microtask_throw_is_reported_and_later_jobs_run_but_a_limit_poisons() {
         assert_eq!(js(&mut b, "log.join()"), "next");
         let r = b.take_reports();
         assert_eq!(r.len(), 1);
-        assert_eq!((r[0].event_type.as_str(), r[0].message.as_str()), ("microtask", "RangeError: r"));
+        assert_eq!((r[0].event_type.as_str(), r[0].message.lines().next().unwrap()), ("microtask", "RangeError: r"));
         js(&mut b, "queueMicrotask(function () { for (;;) {} }); queueMicrotask(function () { log.push('never') })");
         assert!(matches!(b.drain(), Err(Error::Limit(LimitKind::Steps))));
         assert!(matches!(b.drain(), Err(Error::Limit(LimitKind::Steps))));
@@ -381,8 +381,8 @@ fn payload_and_misuse_gates_are_explicit() {
     big(|| {
         let mut b = browser();
         js(&mut b, "var c = new MessageChannel(); var p = c.port1");
-        assert_eq!(js(&mut b, "p.postMessage({})"), "unsupported:MessagePort.postMessage of an object (structured clone)");
-        assert_eq!(js(&mut b, "p.postMessage([1])"), "unsupported:MessagePort.postMessage of an object (structured clone)");
+        assert_eq!(js(&mut b, "p.postMessage({})"), "undefined");
+        assert_eq!(js(&mut b, "p.postMessage([1])"), "undefined");
         assert_eq!(js(&mut b, "try { p.postMessage(function () {}) } catch (e) { [e.name, e.code, e instanceof Error].join() }"), "DataCloneError,25,true");
         assert_eq!(js(&mut b, "p.postMessage('a', [1])"), "unsupported:MessagePort.postMessage transfer list");
         assert_eq!(js(&mut b, "p.postMessage('a', { transfer: [1] })"), "unsupported:MessagePort.postMessage transfer list");
@@ -395,7 +395,7 @@ fn payload_and_misuse_gates_are_explicit() {
         assert_eq!(js(&mut b, "MessagePort.prototype.postMessage.call({}, 1)"), "throw:TypeError:Illegal invocation");
         assert_eq!(js(&mut b, "Object.getOwnPropertyDescriptor(MessagePort.prototype, 'onmessage').get.call(document)"), "throw:TypeError:Illegal invocation");
         // nothing from the failed posts was queued
-        assert_eq!(b.sched_stats().queued_messages, 4);
+        assert_eq!(b.sched_stats().queued_messages, 6);
     });
 }
 
@@ -530,7 +530,7 @@ fn a_throwing_message_listener_is_reported_and_later_messages_still_arrive() {
         assert_eq!(adv(&mut b, 0.0).ran, 3);
         assert_eq!(js(&mut b, "log.join()"), "0,2");
         let r = b.take_reports();
-        assert_eq!(r.iter().map(|r| (r.event_type.as_str(), r.target.as_str(), r.message.as_str())).collect::<Vec<_>>(), vec![("message", "object", "TypeError: bad")]);
+        assert_eq!(r.iter().map(|r| (r.event_type.as_str(), r.target.as_str(), r.message.lines().next().unwrap())).collect::<Vec<_>>(), vec![("message", "object", "TypeError: bad")]);
         // a message listener that makes a microtask: it runs before the next message
         js(&mut b, "var o = []; c.port1.onmessage = function (e) { o.push('m' + e.data); queueMicrotask(function () { o.push('q' + e.data) }) }; c.port2.postMessage(1); c.port2.postMessage(2)");
         adv(&mut b, 0.0);
@@ -619,9 +619,54 @@ fn a_limit_in_a_resumed_class_method_is_sticky_and_replays_no_effect() {
 fn an_async_callback_that_hits_a_gate_stops_the_pump_with_unsupported() {
     big(|| {
         let mut b = browser();
-        js(&mut b, "var log = []; setTimeout(async function () { await null; log.push('a'); new MessageChannel().port1.postMessage({}); log.push('never'); }, 0); setTimeout(function () { log.push('later'); }, 1); 0");
+        js(&mut b, "var log = []; setTimeout(async function () { await null; log.push('a'); new MessageChannel().port1.postMessage({}, [1]); log.push('never'); }, 0); setTimeout(function () { log.push('later'); }, 1); 0");
         assert!(matches!(b.advance_time(5.0, 10), Err(Error::Unsupported(_))));
         assert!(matches!(b.advance_time(5.0, 10), Err(Error::Unsupported(_))));
         assert_eq!(js(&mut b, "log.join()"), "a");
+    });
+}
+
+#[test]
+fn callback_report_retains_timer_stack() {
+    big(|| {
+        let mut b = browser();
+        js(&mut b, "var continued = false; setTimeout(function namedTimer() { throw new Error('timer'); }, 0); setTimeout(function() { continued = true; }, 0)");
+        adv(&mut b, 0.0);
+        let reports = b.take_reports();
+        assert!(reports[0].message.contains("at namedTimer (script#"), "{}", reports[0].message);
+        assert_eq!(js(&mut b, "continued"), "true");
+    });
+}
+
+#[test]
+fn message_port_clones_object_snapshot() {
+    big(|| {
+        let mut b = browser();
+        js(&mut b, "var c = new MessageChannel(); var x = {a: [1, 2]}; x.self = x; x.other = x.a; var received; c.port1.onmessage = function(e) { received = e.data; }; c.port2.postMessage(x); x.a[0] = 9;");
+        assert_eq!(js(&mut b, "typeof received"), "undefined");
+        b.collect(&[]).unwrap();
+        adv(&mut b, 0.0);
+        assert_eq!(b.sched_stats().queued_message_bytes, 0);
+        assert_eq!(js(&mut b, "received !== x && received.a !== x.a && received.a[0] === 1 && received.self === received && received.other === received.a"), "true");
+    });
+}
+
+#[test]
+fn object_messages_keep_clone_errors_and_byte_limits() {
+    big(|| {
+        let mut b = browser();
+        assert_eq!(js(&mut b, "var c = new MessageChannel(); var gets = 0; var original = {}; var caught; try { c.port1.postMessage({get x() { gets++; throw original; }}); } catch(e) { caught = e; } gets === 1 && caught === original"), "true");
+        assert_eq!(js(&mut b, "try { c.port1.postMessage({x: function(){}}); } catch(e) { e.name }"), "DataCloneError");
+        assert_eq!(b.sched_stats().queued_messages, 0);
+        js(&mut b, "c.port1.postMessage({x: 'snapshot'});");
+        let bytes = b.sched_stats().queued_message_bytes;
+        assert!(bytes > 16);
+        js(&mut b, "c.port2.close(); c.port2.start();");
+        adv(&mut b, 0.0);
+        assert_eq!(b.sched_stats().queued_message_bytes, 0);
+        let mut b = browser();
+        b.set_sched_limits(SchedLimits { max_queued_message_bytes: 100, ..Default::default() });
+        assert_eq!(js(&mut b, "var c = new MessageChannel(); try { c.port1.postMessage({x:'a'.repeat(100)}); } catch(e) { 'caught'; }"), host_limit("message-bytes"));
+        assert_eq!(b.sched_stats().queued_messages, 0);
     });
 }

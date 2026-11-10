@@ -190,7 +190,7 @@ fn a_handler_that_throws_is_reported_and_the_other_listeners_run() {
         assert_eq!(r, "1,h,3");
         let reports = b.take_reports();
         assert_eq!(reports.len(), 1);
-        assert_eq!((reports[0].event_type.as_str(), reports[0].target.as_str(), reports[0].message.as_str()), ("change", "input", "Error: boom"));
+        assert_eq!((reports[0].event_type.as_str(), reports[0].target.as_str(), reports[0].message.lines().next().unwrap()), ("change", "input", "Error: boom"));
     });
 }
 
@@ -399,4 +399,48 @@ fn handler_scope_only_reaches_the_handler_code() {
     let mut b = page("<!doctype html><body><form id=f><input name=n value=1><button id=b type=button onclick=\"outside()\">x</button></form></body>");
     let r = run(&mut b, "var log = []; function outside() { try { log.push(typeof n) } catch (e) { log.push('x') } } document.getElementById('b').click(); log.join()");
     assert_eq!(r, "undefined");
+}
+
+#[test]
+fn callback_report_retains_listener_stack() {
+    big(|| {
+        let mut b = browser();
+        assert_eq!(js(&mut b, "var seen; var original; var continued = false; window.onerror = function(m,s,l,c,e) { seen = m; original = e; }; function namedListener() { throw new Error('boom'); } window.addEventListener('probe', namedListener); window.addEventListener('probe', function() { continued = true; }); window.dispatchEvent(new Event('probe')); continued"), "true");
+        let reports = b.take_reports();
+        assert!(reports[0].message.contains("at namedListener (script#"), "{}", reports[0].message);
+        assert_eq!(js(&mut b, "seen + '|' + original.message"), "Uncaught Error: boom|boom");
+    });
+}
+
+#[test]
+fn callback_report_stack_fallback_bounds_and_caps() {
+    big(|| {
+        let mut b = make(2_000_000, BrowserLimits { max_reports: 3, ..Default::default() });
+        assert_eq!(js(&mut b, "var gets = 0; var values = ['plain', {name:'Error',message:'missing'}, {name:'Error',message:'number',stack:7}, {name:'Error',message:'accessor',get stack() { gets++; throw 9; }}]; window.addEventListener('probe', function() { throw values.shift(); }); for (var i=0;i<4;i++) window.dispatchEvent(new Event('probe')); gets"), "0");
+        assert_eq!(b.stats().dropped_reports, 1);
+        let reports = b.take_reports();
+        assert_eq!(reports.iter().map(|r| r.message.lines().next().unwrap()).collect::<Vec<_>>(), vec!["Error: missing", "Error: number", "Error: accessor"]);
+        assert_eq!(js(&mut b, "window.dispatchEvent(new Event('probe')); 1"), "1");
+        let mut b = make(2_000_000, BrowserLimits { max_string_bytes: 128, ..Default::default() });
+        js(&mut b, "window.addEventListener('probe', function() { throw {name:'Error',message:'unicode',stack:'😀'.repeat(100)}; }); window.dispatchEvent(new Event('probe'))");
+        let reports = b.take_reports();
+        assert_eq!(reports[0].message, "😀".repeat(32));
+        let mut b = browser();
+        js(&mut b, "window.addEventListener('probe', function() { throw 'plain'; }); window.dispatchEvent(new Event('probe'))");
+        assert_eq!(b.take_reports()[0].message, "plain");
+    });
+}
+
+#[test]
+fn callback_report_empty_stack_and_zero_report_cap() {
+    big(|| {
+        let mut b = browser();
+        js(&mut b, "var n = 0; window.addEventListener('probe', function() { throw {name:'Error', message:'empty', stack:''}; }); window.dispatchEvent(new Event('probe'))");
+        assert_eq!(b.take_reports()[0].message, "Error: empty");
+        let mut b = make(2_000_000, BrowserLimits { max_reports: 0, ..Default::default() });
+        js(&mut b, "var n = 0; window.onerror = function() { n++; throw 'nested'; }; window.addEventListener('probe', function() { throw new Error('original'); }); window.dispatchEvent(new Event('probe'))");
+        assert!(b.take_reports().is_empty());
+        assert_eq!(b.stats().dropped_reports, 2);
+        assert_eq!(js(&mut b, "n"), "1");
+    });
 }

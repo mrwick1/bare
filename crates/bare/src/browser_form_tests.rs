@@ -469,8 +469,9 @@ fn listener_throws_are_reported_in_both_stages_and_dispatch_goes_on() {
         let r = click(&mut b, "#go").unwrap();
         assert!(r.not_canceled, "the click was not canceled");
         assert_eq!(js(&mut b, "log.join()"), "click1,click2,submit1,submit2");
-        let seen: Vec<_> = r.reports.iter().map(|x| (x.event_type.as_str(), x.target.as_str(), x.message.as_str())).collect();
+        let seen: Vec<_> = r.reports.iter().map(|x| (x.event_type.as_str(), x.target.as_str(), x.message.lines().next().unwrap())).collect();
         assert_eq!(seen, [("click", "button", "Error: c1"), ("submit", "form", "TypeError: s1")]);
+        assert!(r.reports.iter().all(|r| r.message.contains("\n    at ")));
         assert_eq!(b.take_reports().len(), 2);
     });
 }

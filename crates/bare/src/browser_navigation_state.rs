@@ -109,8 +109,13 @@ pub(crate) fn serialize(d: &Dom, it: &mut Interp<'_>, v: Value) -> R<State> {
 
 /// `structuredClone(v)`.
 pub(crate) fn clone(d: &Dom, it: &mut Interp<'_>, v: Value) -> R<Value> {
-    let st = walk(d, it, v, Bounds { bytes: 64 << 20, depth: 256, nodes: 1 << 20, names: ["clone-bytes", "clone-depth", "clone-nodes"] })?;
+    let st = clone_state(d, it, v)?;
     materialize(d, it, &st)
+}
+
+/// A snapshot with structured-clone limits. Resource limits remain uncatchable.
+pub(crate) fn clone_state(d: &Dom, it: &mut Interp<'_>, v: Value) -> R<State> {
+    walk(d, it, v, Bounds { bytes: 64 << 20, depth: 256, nodes: 1 << 20, names: ["clone-bytes", "clone-depth", "clone-nodes"] })
 }
 
 fn walk(d: &Dom, it: &mut Interp<'_>, v: Value, b: Bounds) -> R<State> {

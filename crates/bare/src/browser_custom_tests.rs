@@ -87,7 +87,8 @@ fn a_throwing_callback_is_reported_and_the_next_one_runs() {
     assert_eq!(js(&mut b, "var p = document.getElementById('p'); p.innerHTML = '<x-a id=a></x-a><x-a id=b></x-a>'; log.join()"), "c a,c b");
     let r = b.take_reports();
     assert_eq!(r.len(), 2, "{r:?}");
-    assert_eq!(r[0].message, "TypeError: boom");
+    assert_eq!(r[0].message.lines().next().unwrap(), "TypeError: boom");
+    assert!(r[0].message.contains("\n    at "), "{r:?}");
     assert_eq!(js(&mut b, "p.innerHTML = ''; log.join()"), "c a,c b,d a,d b");
 }
 
@@ -97,7 +98,8 @@ fn a_constructor_that_throws_fails_the_upgrade_and_is_reported() {
     assert_eq!(js(&mut b, "var n = 0; customElements.define('x-a', class K extends HTMLElement { constructor() { super(); if (n++ == 0) throw new Error('first') } }); var a = document.getElementById('a'), c = document.getElementById('b'); [a.constructor.name, c.constructor.name, a.matches(':defined'), c.matches(':defined')].join()"), "K,K,false,true");
     let r = b.take_reports();
     assert_eq!(r.len(), 1, "{r:?}");
-    assert_eq!(r[0].message, "Error: first");
+    assert_eq!(r[0].message.lines().next().unwrap(), "Error: first");
+    assert!(r[0].message.contains("\n    at "), "{r:?}");
     // A failed element stays as it is: a second upgrade does nothing.
     assert_eq!(js(&mut b, "customElements.upgrade(document.body); n"), "2");
 }
@@ -110,6 +112,7 @@ fn create_element_with_a_bad_constructor_reports_and_still_makes_an_element() {
     let r = b.take_reports();
     assert_eq!(r.len(), 1, "{r:?}");
     assert!(r[0].message.starts_with("NotSupportedError"), "{r:?}");
+    assert!(r[0].message.contains("\n    at "), "{r:?}");
     js(&mut b, "customElements.define('x-b', class extends HTMLElement { constructor() { return document.createElement('div') } })");
     assert_eq!(js(&mut b, "document.createElement('x-b').localName"), "x-b");
     // An element of another name is a NotSupportedError, as the standard says (Chrome reports it with an empty message).

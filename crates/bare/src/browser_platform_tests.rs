@@ -200,7 +200,8 @@ fn media_change_events_and_listener_semantics() {
         assert_eq!(reports.len(), 1);
         assert_eq!(reports[0].event_type, "change");
         assert_eq!(reports[0].target, "object");
-        assert_eq!(reports[0].message, "Error: boom");
+        assert_eq!(reports[0].message.lines().next().unwrap(), "Error: boom");
+        assert!(reports[0].message.contains("\n    at "), "{reports:?}");
         js(&mut b, "log.length = 0");
         assert_eq!(b.set_viewport(600.0, 900.0).unwrap(), 0, "same matches: no event");
         // Back: `once` is gone, the others fire; `other` flipped to false at width 50.

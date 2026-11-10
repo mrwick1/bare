@@ -46,9 +46,8 @@
 //!   `close()` disentangles the pair: later posts from either port are dropped (no error). Messages that were
 //!   queued before the close are still delivered, to both ports (the HTML Standard queues no check on the closed
 //!   state, and Node behaves the same; not checked in a browser).
-//! - Payloads: undefined, null, booleans, numbers and strings. A function or symbol throws `DataCloneError`. Any
-//!   object (plain data, array, Map, buffers, ports) is `Unsupported`: it needs a real structured clone. A non-empty
-//!   transfer list is `Unsupported`.
+//! - Payloads use structured clone, including object graphs and arrays. Functions, symbols and host objects
+//!   throw `DataCloneError`. A non-empty transfer list is `Unsupported`.
 //! - `MessageEvent` has `data`, `origin` (empty), `lastEventId` (empty), `source` (null) and `ports` (an empty array).
 //!   It is not constructible. `isTrusted` is false (the Event getter), which differs from a browser.
 //! - Deviations: `ports` is not frozen. `port1` and `port2` are own read-only properties of the channel, not
@@ -857,7 +856,12 @@ impl Dom {
             Value::Symbol(_) => Err(self.dom_err(it, "DataCloneError", "Symbol could not be cloned.")),
             Value::BigInt(_) | Value::BigHeap(_) => Ok((v, 16usize.saturating_add(it.heap.bigint_limbs(v).saturating_mul(8)))),
             Value::Object(_) if it.is_callable_value(v) => Err(self.dom_err(it, "DataCloneError", "function could not be cloned.")),
-            Value::Object(_) => Err(Error::Unsupported(unsupported("MessagePort.postMessage of an object (structured clone)"))),
+            Value::Object(_) => {
+                let snapshot = crate::browser_navigation_state::clone_state(self, it, v)?;
+                let bytes = 16usize.saturating_add(snapshot.bytes);
+                let data = crate::browser_navigation_state::materialize(self, it, &snapshot)?;
+                Ok((data, bytes))
+            },
         }
     }
 
