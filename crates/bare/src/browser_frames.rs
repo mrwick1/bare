@@ -5,6 +5,7 @@ use bare_js::eval::Interp;
 use bare_js::heap::HeapError;
 use bare_js::value::{ObjId, Value};
 use std::cell::{Cell, OnceCell, Ref, RefCell, RefMut};
+use std::collections::HashMap;
 
 pub(crate) const FILL: u32 = u32::MAX - 8;
 #[derive(Default)]
@@ -27,8 +28,22 @@ struct State {
     document_owner: ObjId,
     contexts: IdMap<NodeId, ObjId>,
     pending: Cell<Option<NodeId>>,
-    // Prepay a batch: one VM property operation can probe the same prototype more than twice.
-    paid: Cell<u8>,
+    /// The iframes and their names, built by a fill for the document revision `rev` (`u64::MAX` before the first fill). A
+    /// named query reads only this list, so it costs no walk of the tree.
+    list: List,
+    rev: u64,
+    /// The name of the query that found the list out of date: its fill builds the list and makes the context of that name, so
+    /// one property operation asks at most once here (see `hx!` in `bare_js::eval`).
+    want: RefCell<Vec<u16>>,
+}
+#[derive(Default)]
+struct List {
+    nodes: Vec<NodeId>,
+    /// The own keys of the window owner (indices, then names) and of the document owner (names), in `keys` order.
+    win_keys: Vec<Vec<u16>>,
+    doc_keys: Vec<Vec<u16>>,
+    /// The first iframe in tree order with a `name` or `id` of this value.
+    names: HashMap<Vec<u16>, NodeId>,
 }
 
 fn nodes(d: &Dom) -> Vec<NodeId> {
@@ -47,24 +62,39 @@ fn nodes(d: &Dom) -> Vec<NodeId> {
     }
     out
 }
-fn find(d: &Dom, key: &[u16], document: bool) -> Option<NodeId> {
-    let name = String::from_utf16(key).ok()?;
-    if name.is_empty() {
-        return None;
-    }
-    let list = nodes(d);
-    if !document
-        && let Ok(i) = name.parse::<usize>()
-        && i.to_string() == name
-    {
-        return list.get(i).copied();
-    }
+fn build(d: &Dom) -> List {
+    let nodes = nodes(d);
     let doc = d.doc.borrow();
-    list.into_iter().find(|&n| {
-        ["name", "id"]
-            .into_iter()
-            .any(|a| doc.find_attr_qname(n, a).and_then(|a| doc.attr(n, a)) == Some(&name))
-    })
+    let mut l = List::default();
+    for (i, &n) in nodes.iter().enumerate() {
+        l.win_keys.push(i.to_string().encode_utf16().collect());
+        for a in ["name", "id"] {
+            if let Some(v) = doc.find_attr_qname(n, a).and_then(|a| doc.attr(n, a)).filter(|v| !v.is_empty()) {
+                let k: Vec<u16> = v.encode_utf16().collect();
+                l.names.entry(k.clone()).or_insert(n);
+                if !l.doc_keys.contains(&k) {
+                    l.doc_keys.push(k.clone());
+                }
+                if !l.win_keys.contains(&k) {
+                    l.win_keys.push(k);
+                }
+            }
+        }
+    }
+    l.nodes = nodes;
+    l
+}
+impl List {
+    fn find(&self, key: &[u16], document: bool) -> Option<NodeId> {
+        if !document
+            && let Ok(name) = String::from_utf16(key)
+            && let Ok(i) = name.parse::<usize>()
+            && i.to_string() == name
+        {
+            return self.nodes.get(i).copied();
+        }
+        self.names.get(key).copied()
+    }
 }
 
 /// Activate only after the document has seen an iframe. Ordinary realms keep their prototype chains.
@@ -106,7 +136,9 @@ pub(crate) fn activate(d: &Dom, it: &mut Interp<'_>) -> R<()> {
             document_owner,
             contexts: IdMap::default(),
             pending: Cell::new(None),
-            paid: Cell::new(0),
+            list: List::default(),
+            rev: u64::MAX,
+            want: RefCell::default(),
         })))
         .map_err(|_| d.lim("dom-frames"))?;
     Ok(())
@@ -120,14 +152,11 @@ pub(crate) fn has(d: &Dom, owner: ObjId, key: &[u16]) -> Result<Option<bool>, He
     else {
         return Ok(None);
     };
-    if d.doc.borrow().len() > 32 {
-        let paid = s.paid.get();
-        if paid == 0 {
-            return Err(HeapError::NeedsHost { owner, index: FILL });
-        }
-        s.paid.set(paid - 1);
+    if s.rev != d.doc.borrow().revision() {
+        *s.want.borrow_mut() = key.to_vec();
+        return Err(HeapError::NeedsHost { owner, index: FILL });
     }
-    let Some(n) = find(d, key, owner == s.document_owner) else {
+    let Some(n) = s.list.find(key, owner == s.document_owner) else {
         return Ok(Some(false));
     };
     if !s.contexts.contains_key(&n) {
@@ -141,7 +170,7 @@ pub(crate) fn value(d: &Dom, owner: ObjId, key: &[u16]) -> Option<Value> {
     let s = state
         .as_ref()
         .filter(|s| owner == s.owner || owner == s.document_owner)?;
-    let n = find(d, key, owner == s.document_owner)?;
+    let n = s.list.find(key, owner == s.document_owner)?;
     if owner == s.document_owner {
         d.st.borrow().by_node.get(&n).copied().map(Value::Object)
     } else {
@@ -156,58 +185,44 @@ pub(crate) fn len(d: &Dom, owner: ObjId) -> Result<Option<usize>, HeapError> {
     else {
         return Ok(None);
     };
-    if d.doc.borrow().len() > 32 {
-        let paid = s.paid.get();
-        if paid == 0 {
-            return Err(HeapError::NeedsHost { owner, index: FILL });
-        }
-        s.paid.set(paid - 1);
+    if s.rev != d.doc.borrow().revision() {
+        s.want.borrow_mut().clear();
+        return Err(HeapError::NeedsHost { owner, index: FILL });
     }
-    Ok(keys(d, owner).map(|k| k.len()))
+    Ok(Some(if owner == s.owner { s.list.win_keys.len() } else { s.list.doc_keys.len() }))
 }
 pub(crate) fn keys(d: &Dom, owner: ObjId) -> Option<Vec<Vec<u16>>> {
     let state = d.frames.state();
     let s = state
         .as_ref()
         .filter(|s| owner == s.owner || owner == s.document_owner)?;
-    let list = nodes(d);
-    let doc = d.doc.borrow();
-    let mut out = Vec::new();
-    for (i, n) in list.into_iter().enumerate() {
-        if owner == s.owner {
-            out.push(i.to_string().encode_utf16().collect());
-        }
-        for a in ["name", "id"] {
-            if let Some(v) = doc
-                .find_attr_qname(n, a)
-                .and_then(|a| doc.attr(n, a))
-                .filter(|v| !v.is_empty())
-            {
-                let k = v.encode_utf16().collect();
-                if !out.contains(&k) {
-                    out.push(k);
-                }
-            }
-        }
-    }
-    Some(out)
+    let built;
+    let l = if s.rev == d.doc.borrow().revision() {
+        &s.list
+    } else {
+        built = build(d);
+        &built
+    };
+    Some(if owner == s.owner { l.win_keys.clone() } else { l.doc_keys.clone() })
 }
 pub(crate) fn fill(d: &Dom, it: &mut Interp<'_>, owner: ObjId, index: u32) -> R<bool> {
     if index != FILL {
         return Ok(false);
     }
-    let n = d.frames.state().as_ref().and_then(|s| s.pending.take());
-    it.charge(d.doc.borrow().len() as u64 * 8)?;
+    let rev = d.doc.borrow().revision();
+    if d.frames.state().is_some_and(|s| s.rev != rev) {
+        it.charge(d.doc.borrow().len() as u64)?;
+        let list = build(d);
+        if let Some(s) = d.frames.state_mut().as_mut() {
+            (s.list, s.rev) = (list, rev);
+        }
+    }
+    let n = d.frames.state().and_then(|s| {
+        let want = std::mem::take(&mut *s.want.borrow_mut());
+        s.pending.take().or_else(|| s.list.find(&want, owner == s.document_owner).filter(|n| !s.contexts.contains_key(n)))
+    });
     if let Some(n) = n {
         context(d, it, n)?;
-    }
-    if let Some(s) = d
-        .frames
-        .state()
-        .as_ref()
-        .filter(|s| owner == s.owner || owner == s.document_owner)
-    {
-        s.paid.set(8);
     }
     Ok(true)
 }

@@ -6338,3 +6338,71 @@ Tests (written first, all failed on main): `crates/bare/src/browser_gaps_tests.r
 - `window.event` is set for the whole dispatch, not for each listener, and is not hidden for listeners in a shadow tree.
 - `getElementsByTagName` and the other collections are still snapshots (not live). `namedItem` is absent. `querySelectorAll` results do not have `item` (it is a `NodeList` in browsers).
 - One machine (archMachine), loaded by other agents.
+
+
+## Host asks and cached prototypes: the target.com `Heap` stops (2026-11-10)
+
+### Problems
+
+https://www.target.com/ stopped with `page stopped: Heap` in 2 of 4 runs of main `5b322141` (plan 7). A heap error that stops a page is an engine bug.
+
+### Backtraces
+
+A scratch build (not committed; `/data/bare-tmp/hs/instrumentation.patch`) logged each host fill and the backtrace of `Interp::herr`. It also lifted the script-count cap, because 6 of 6 runs of `81a5f771` stopped at `Limit(Scripts)` first. 19 runs, logs in `/data/bare-tmp/hs/dbg*/`. 5 stopped at `Heap(NeedsHost)`, 2 at `Heap(Stale)`.
+
+1. `NeedsHost { owner: window, index: LAZY_ON }` (or `owner: <frames object>, index: u32::MAX - 8`): `herr` <- `set_miss` <- `put_prop` <- `member_put_ic` <- `ref_put` <- `eval_assign`. The write is `window.onDvtagReady = ...`. The fills before the error: the frames object (`browser_frames::FILL`), `EventTarget.prototype` (`LAZY_ON`), `window` (`LAZY_ON`). That is 3 asks, and the evaluator allowed 2.
+2. `Stale`: `herr` <- `heap_error` <- `Dom::wrap` <- `make_element` <- `create_element`. The element is `walrus` (an unknown HTML name). Its prototype (`HTMLUnknownElement.prototype`, a high object index) was dead.
+
+### Causes
+
+1. The frames object on the chain of `window` (`browser_frames.rs`, named iframe access) walked the tree for each named query. It charged the walk in prepaid groups of 8 and asked the host again each time the 8 ran out. So its ask was not once for each name, and it could come in any repeat of an operation. A write of an `on<x>` name to `window` also asks `EventTarget.prototype` and `window`. With an iframe in the page and a balance under 3 at the start of the write, the write needed 3 asks.
+2. `Dom::ce_roots` (`browser_custom.rs`) returned before it added `ce.unk` (`HTMLUnknownElement` prototype and constructor) and `ce.int` when the page had not used the custom element registry. A collect freed them while `ce.unk` still held them. The next unknown element got the dead prototype.
+
+The plan's hypotheses were not the causes. The lazy asks of one `(object, name)` pair stay once each. `Dom::wrap` cannot meet a collect between making a wrapper and its insert (a collect runs only when no call is active). The `by_node` maps of `browser_cssom.rs` and `browser_shadow.rs` hold permanent roots and pruned wrappers.
+
+### Tests that failed first
+
+`crates/bare/src/browser_heap_stop_tests.rs` (log: `/data/bare-tmp/hs/tests-on-main.txt`):
+- `writes_of_on_names_to_window_with_an_iframe_never_stop_at_the_heap`: 40 writes `window['onzz' + i] = i` on a page with an iframe and 40 divs. On main: `other:Heap(NeedsHost { owner: ObjId { index: 3, gn: 0 }, index: 4294967294 })`.
+- `cached_wrapper_prototypes_survive_a_collect`: one element for each cached prototype of `Dom::wrap` (30 kinds), a collect, then the same again. On main: `other:Heap(Stale)`.
+- `named_iframe_access_follows_the_tree` (new iframe, renamed iframe, removed iframe, `window.length`, `Object.keys`) passed on main and passes now. It guards the new frames list.
+
+### Change
+
+- `browser_frames.rs`: the frames object keeps its iframe list, its keys and a map from name to iframe for one document revision (`Document::revision`). A query reads only the list. When the list is out of date, the query asks once. The fill builds the list, charges one step for each node of the document, and makes the context of the asked name. The prepaid count (`paid`) is gone.
+- `eval.rs`: `MAX_FILLS = 3` replaces the bound 2 in `hx!`, `hxw!`, `get_miss`, `set_miss` and in `heap_miss` and `heap_miss_w` (`eval_proxy.rs`). Its comment lists the sources of asks and why one operation asks at most 3 times. The code of the fast path is the same.
+- `browser_custom.rs`: `ce_roots` adds `ce.unk` and `ce.int` before the early return.
+- `lib.rs`: one test module line.
+- `docs/decisions.md`: "One property operation asks the host at most three times" and "Every prototype that the host caches is a root".
+
+### Cost
+
+- Final: `tools/js/cost_matrix.sh -J`, 805 rows, BASE `f857a90b71` (fresh `base-build` of main after #333), NEW this branch after the final rebase, both allocators on every row. 0 rows over +0.5% under both, 0 over under one. Mean change -0.011% glibc, +0.006% jemalloc. Logs: `/data/bare-tmp/hs/matrix-final2.txt`, `.raw`. The merge queue (`merge-gate`) held main during the final checks.
+- An earlier full run on base `8f6a38e982` (before #333 merged): 0 over under both, mean -0.001% glibc, +0.008% jemalloc. Over under jemalloc only: `form_load gates 1` and `10` (+0.633%, +0.701%; glibc +0.407%, +0.432%).
+- `keycost.sh` (final): BASE `f857a90b` 283.1 M for each key in `#a1`, 288.5 M in `#f0`, peak RSS 33.5 / 33.5 MiB at 20 / 50 keys. NEW 283.1 M, 288.5 M, 33.4 / 33.3 MiB.
+
+### Other checks (final tree, after the rebase)
+
+- `cargo test --release --workspace`: 3,407 passed, 0 failed, 13 ignored.
+- `tools/drive/public/run.sh`: 48 pass, 0 fail, 0 flakes.
+- `test262_check.sh`: gate ok, no directory below the baseline. `exec_diff.sh`: 79 runs, 0 differences.
+
+### Live: target.com
+
+`bare-drive`, `timeout 30000`, `open`, `expect js "document.readyState === 'complete'"`, `shot s`. BASE `8f6a38e982`, NEW this branch on that base (before the rebase on #333). Runs alternate BASE and NEW. A cost matrix ran at the same time, so the times are under load. Logs: `/data/bare-tmp/hs/live/`.
+
+| Build | Pass | `Heap` stops | Other stops | ms | Peak RSS |
+|---|---|---|---|---|---|
+| BASE (6 runs) | 4 | 2 | 0 | 6,550 to 12,096 | 336 to 357 MiB |
+| NEW (6 runs) | 6 | 0 | 0 | 8,314 to 12,677 | 348 to 375 MiB |
+
+### Limits
+
+- `page stopped: Heap` still does not name the variant. `Fatal` and `fatal_of` are in `browser_loader.rs`, which another task owned during this work. Follow-up: `Fatal::Heap(&'static str)` with the variant name, built only on the stop path.
+- The bound of 3 rests on the list of ask sources in the `MAX_FILLS` comment. A new host object that asks more than once in one operation breaks it. The result is then an error, not a loop.
+
+### Not tested
+
+- The 8 large app pages of the plan (vimeo, bluesky, gitlab, github-repo, youtube, theverge, ikea, redis-io) on NEW: not run.
+- Chrome on target.com.
+- A page with many iframes and a loop of DOM changes and global misses (the frames fill then rebuilds the list after each change).

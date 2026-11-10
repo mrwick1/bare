@@ -290,18 +290,31 @@ macro_rules! h {
 
 // `h!` for a heap property operation that can reach a host-indexed object. `NeedsHost` (a property of such an object has no
 // JS object yet) is not an error: the host makes the object (`Host::fill_indexed`) and the operation runs again. The heap
-// changed nothing when it asked, so a repeat is safe. At most 2 repeats: the host must have made the object by then, or the
-// result is an error, never a loop. Only for expressions that move nothing, because they run again.
+// changed nothing when it asked, so a repeat is safe. At most `MAX_FILLS` repeats: more is a host bug, and the result is an
+// error, never a loop. Only for expressions that move nothing, because they run again.
 // `hx!(s, e, p)` and `hxw!(s, e, p)`: `p` is what to do when the operation met a `Proxy` (`HeapError::Proxy`). It is an expression
 // of the same type as the answer. It runs the internal method of the proxy (`eval_proxy.rs`), which can call script. Without `p`, a
 // proxy is `Unsupported` (`herr`): the path has no trap dispatch yet.
+/// The repeats of one property operation after a host ask (`hx!`, `hxw!`, `get_miss`, `set_miss`, `heap_miss`). The asks of one
+/// operation come from these objects, and none of them asks twice in one operation:
+/// - the receiver, when it is a host object (`new_indexed`, `new_named`): a fill brings its list up to date, and a write can ask
+///   `NeedsNamed`;
+/// - the frames object on the chain of `window` and `document` (`browser_frames.rs`): one fill builds its list for the document
+///   revision and makes the context of the name, and a fill never changes the tree;
+/// - `EventTarget.prototype` (`Heap::set_lazy_chain`): once per name;
+/// - the own lazy names of the receiver (`Heap::set_lazy_on`): once per name. These receivers (`window`, the interface
+///   prototypes) are not host objects.
+/// So one operation asks at most 3 times. A write of an `on<x>` name to `window` does: the frames object, then
+/// `EventTarget.prototype`, then `window` (target.com stopped here at `Heap` with a limit of 2).
+pub(crate) const MAX_FILLS: u8 = 3;
+
 macro_rules! hx {
     ($s:expr, $e:expr, $px:expr) => {{
         let mut fills = 0u8;
         loop {
             match $e {
                 Ok(v) => break v,
-                Err(HeapError::NeedsHost { owner, index }) if fills < 2 => {
+                Err(HeapError::NeedsHost { owner, index }) if fills < MAX_FILLS => {
                     fills += 1;
                     if let Err(e) = $s.host_fill(owner, index) {
                         return Err(e.into());
@@ -322,7 +335,7 @@ macro_rules! hx {
         loop {
             match $e {
                 Ok(v) => break v,
-                Err(HeapError::NeedsHost { owner, index }) if fills < 2 => {
+                Err(HeapError::NeedsHost { owner, index }) if fills < MAX_FILLS => {
                     fills += 1;
                     if let Err(e) = $s.host_fill(owner, index) {
                         return Err(e.into());
@@ -343,7 +356,7 @@ macro_rules! hxw {
         loop {
             match $e {
                 Ok(v) => break v,
-                Err(ask @ (HeapError::NeedsHost { .. } | HeapError::NeedsNamed)) if fills < 2 => {
+                Err(ask @ (HeapError::NeedsHost { .. } | HeapError::NeedsNamed)) if fills < MAX_FILLS => {
                     fills += 1;
                     if let Err(e) = $s.host_ask(ask) {
                         return Err(e.into());
@@ -364,7 +377,7 @@ macro_rules! hxw {
         loop {
             match $e {
                 Ok(v) => break v,
-                Err(ask @ (HeapError::NeedsHost { .. } | HeapError::NeedsNamed)) if fills < 2 => {
+                Err(ask @ (HeapError::NeedsHost { .. } | HeapError::NeedsNamed)) if fills < MAX_FILLS => {
                     fills += 1;
                     if let Err(e) = $s.host_ask(ask) {
                         return Err(e.into());
@@ -2486,7 +2499,7 @@ impl<'p> Interp<'p> {
         let mut fills = 0u8;
         loop {
             match e {
-                HeapError::NeedsHost { owner, index } if fills < 2 => {
+                HeapError::NeedsHost { owner, index } if fills < MAX_FILLS => {
                     fills += 1;
                     self.host_fill(owner, index)?;
                 }
@@ -2556,7 +2569,7 @@ impl<'p> Interp<'p> {
         let mut fills = 0u8;
         loop {
             match e {
-                HeapError::NeedsHost { .. } | HeapError::NeedsNamed if fills < 2 => {
+                HeapError::NeedsHost { .. } | HeapError::NeedsNamed if fills < MAX_FILLS => {
                     fills += 1;
                     self.host_ask(e)?;
                 }
