@@ -5246,7 +5246,7 @@ Task: add public journeys for sites that passed survey 5 and had no journey. The
 ### Results
 
 - 3 runs of each new journey: 15 of 15 pass 3 of 3. No flake.
-- Full `tools/drive/public/run.sh`: pass 48, fail 0, known 0, skip 0, flakes 0. Total time 60 s.
+- Full `tools/drive/public/run.sh` on the final tree: pass 48, fail 0, known 0, skip 0, flakes 0. Total time 60 s.
 - After the rebase on `514f2822`: I built bare-drive from the rebased tree and ran the full suite again. Pass 48, fail 0, known 0, flakes 0. Total time 60 s.
 - Known bugs found: none. No journey needed `# known-bug`.
 - `crates-io-home.steps` only checks `body visible`. It passes while the app does not mount. Task 11 owns that fix.
@@ -5616,7 +5616,7 @@ Measure notes: `cargo build --workspace` does not build `bare-stress`. Some of m
 ### Checks
 
 - `cargo test --release --workspace --no-fail-fast` after the last rebase: 3339 passed, 0 failed, 13 ignored. An earlier run failed once on `browser_session_tests::a_pending_meta_refresh_is_queued_work` (a 10 ms window on the real clock, while a matrix ran). It passed three times alone and in the final run.
-- `tools/drive/public/run.sh`: pass 48, fail 0, known 0, skip 0, flakes 0.
+- `tools/drive/public/run.sh` on the final tree: pass 48, fail 0, known 0, skip 0, flakes 0.
 - Live, `bare-drive` with the step file `timeout 30000`, `open URL`, `expect css="body" visible`, `shot s`:
   - `https://en.wikipedia.org/wiki/Rust_(programming_language)`: main's binary shows black or blue squares at the menu, language, bookmark and more buttons and at five contents bullets. This branch shows the icons. No black square.
   - `https://ar.wikipedia.org`: the portal icons, the logo and the item icons are drawn. No black square.
@@ -6289,7 +6289,7 @@ Task: close the small platform gaps that stop real sites, and add `Element.anima
 
 ### Change
 
-- `HTMLCollection.prototype.item` (nasa): `children`, `childNodes`, `getElementsByTagName`, `getElementsByClassName` and `document.scripts`, `forms`, `images`, `embeds`, `links`, `anchors` still give snapshot arrays. They now inherit from one shared prototype (`browser_dom::wrap_coll`) that inherits from `Array.prototype` and has `item`. The prototype is made at the first call. The array is built with that prototype (`Interp::array_from_proto`). First try used `set_prototype_of`: it sends the array to dictionary mode and `nodelist_load live 10` grew +0.53% (glibc) and +0.58% (jemalloc). Building with the prototype gave +0.11%.
+- `HTMLCollection.prototype.item` (nasa): `children`, `childNodes`, `getElementsByTagName`, `getElementsByClassName` and `document.scripts`, `forms`, `images`, `embeds`, `links`, `anchors` still give snapshot arrays. They now inherit from one shared prototype (`browser_gaps::wrap_coll`; the new small gaps are in `browser_gaps.rs`) that inherits from `Array.prototype` and has `item`. The prototype is made at the first call. The array is built with that prototype (`Interp::array_from_proto`). First try used `set_prototype_of`: it sends the array to dictionary mode and `nodelist_load live 10` grew +0.53% (glibc) and +0.58% (jemalloc). Building with the prototype gave +0.11%.
 - `HTMLScriptElement.prototype.noModule` (gov-uk): a reflected boolean for `nomodule`, next to `async` and `defer`.
 - `document.hasFocus()` (mastodon): always `true`. Choice: the page always has system focus (`browser_focus.rs` already said so), so the window focus state is "focused". It is made at the first read.
 - `console.assert` (lemmy, redis): nothing when the condition is truthy. Else an error record. The label "Assertion failed" is its own first argument (with a colon when the next argument is a string), so the data-only formatter prints the same text as a browser.
@@ -6319,20 +6319,21 @@ Tests (written first, all failed on main): `crates/bare/src/browser_gaps_tests.r
 
 ### Checks
 
-- Cost: full matrix, 805 rows, before the last rebase (main `3f2ce54039`): 0 over under both, 0 over under one, mean glibc +0.016%, largest row `xhr_load 1` +0.375%. The first run found `nodelist_load live 10` at +0.526% / +0.577% (the `set_prototype_of` call, see above); the fix is in.
-- Cost: full matrix, 805 rows, after the last rebase (main `1bec71ae9b`, fresh `base-build`): 1 row over under both allocators, 2 over under glibc only (`focus_load focus 1` +0.63% / +0.22%, `focus_load focus 10` +0.56% / +0.27%), 0 failed. Mean glibc +0.023%. The row over under both is `scheduler_load timers 10`: 192,244,805 -> 193,392,555 (+0.60%) under glibc and 200,314,068 -> 201,374,733 (+0.53%) under jemalloc. I think it is layout, not logic (hypothesis, not proven):
-  - The row does not run any new code. `allocs=30973`, `freed_objs=10022` and `tasks=8060` are equal on both builds.
-  - This branch gave 193,331,020 before the rebase and 193,392,555 after (+0.03%). The base gave 193,032,915 on `3f2ce54039` and 192,244,805 on `1bec71ae9b` (-0.41%). The commits between them (images, `Worker`, peak RSS) do not touch the timer path. The same row against the older base is +0.15%.
-  - A build without the only eager additions (`console.assert`, the `noModule` accessor) gave 193,063,156 (+0.43% against the new base). So the eager objects explain at most 0.17%, and the rest stays with no code on the path.
-  - Same pattern as `form_load gates` in the section of PR 1 (#327). `perf record` at this size gave too few samples to name a function.
-- `cargo test --release --workspace --no-fail-fast`: 0 failed (`bare` lib 1183 passed). After the last rebase: 3367 passed, 0 failed.
+- Cost, first run (main `3f2ce54039`): 0 rows over under both, largest `xhr_load 1` +0.375%. It first found `nodelist_load live 10` at +0.526% / +0.577% (the `set_prototype_of` call, see above); the fix is in.
+- Cost, second run (main `1bec71ae9b`): `scheduler_load timers 10` +0.60% glibc / +0.54% jemalloc, over under both. Nothing on the timer path was new. `allocs=30973`, `freed_objs=10022` and `tasks=8060` were equal on both builds. The base for this row moved -0.41% between two mains with no change on its path.
+  - The base counts, in the order of the mains `3f2ce54039`, `1bec71ae9b`, `50e71ca8cc`, `5b32214102`: 193,033k, 192,245k, 192,076k, 192,902k (glibc). The same row moves by +-0.4% when unrelated code changes.
+  - `nm -S` of BASE and NEW (`scheduler_load`): `readelf -d` equal, `.text` 8,743,431 -> 8,738,927 bytes. The inliner chose differently for three `BTreeMap::insert` instances (`insert_recursing` outlined in NEW) and `Browser::pump` grew 294 bytes, `Dom::schedule` 207, `Dom::trace` 325 and `Streams::trace` 327 (code that this PR did not change).
+  - Attempt 1: an out-of-line `swap_event` for `window.event` in `dispatch`, and `#[inline(never)]` on `pop_due`. No change, and +0.87% (worse). Both reverted. Variants that reverted one file group at a time moved the row by 0.1% to 0.3% each (collections -0.17M instructions, console and loader -0.34M, js crate files 0), with no code on the path: the signature of inlining noise.
+  - Attempt 2: all new Rust code moved into the new module `browser_gaps.rs` (`console.assert`, `noModule`, `hasFocus`, `window.event`, `wrap_coll`, `item`), with the one-off makers `#[cold] #[inline(never)]`, so the existing modules keep their code and the sizes of `Dom::trace` and `Streams::trace` are equal to the base again. The row went to +0.515% glibc / +0.46% jemalloc on `1bec71ae9b`.
+- Cost, final (main `5b32214102`, fresh `base-build`, rebased once more): `instr.sh` A/B, glibc and jemalloc: `scheduler_load timers 10` 192,902,287 -> 193,088,434 (+0.10%) and 198,023,330 -> 198,137,202 (+0.06%); `focus_load focus 1` 53,455,902 -> 53,594,941 (+0.26%) and 57,756,923 -> 57,913,412 (+0.27%); `focus_load focus 10` 459,870,190 -> 460,707,327 (+0.18%) and 476,998,639 -> 478,231,823 (+0.26%). Full matrix, 805 rows: 0 over under both, 0 failed, mean glibc +0.003%. Two rows are over under glibc only: `browser_load lookup 1` +0.726% (jemalloc +0.020%) and `lookup 10` +0.725% (+0.012%); the rule needs both allocators. The `lookup` rows were not looked at further.
+- `tools/js/typing/keycost.sh` (base `5b322141`, then this branch): `#a1` 282.7 M -> 283.0 M for each key, `#f0` 288.0 M -> 288.3 M, load and mount 572.5 M -> 572.8 M, peak RSS 33.2 / 33.4 MiB -> 33.2 / 33.4 MiB (20 / 50 keys). My first keycost run for the base used `CARGO_TARGET_DIR` of the base tree with my sources and so built my `type_load` into the shared base target. I rebuilt it from the base sources and measured again; the 805-row matrix ran before that.
+- `cargo test --release --workspace --no-fail-fast`: 0 failed (`bare` lib 1183 passed). After the last rebase: 3385 passed, 0 failed.
 - `tools/js/exec_diff.sh`: 79 runs, 0 differences.
 - `tools/js/test262_check.sh` on `built-ins/RegExp/(match-indices|named-groups)`, `language/expressions/object` and `built-ins/Array/prototype/(forEach|map)`: gate ok (the object directory passes 3 more tests). The full run waited more than 30 minutes for a slot and was stopped; the change in `crates/js` is a name list in `Heap::browser_name` and one wrapper function.
-- `tools/drive/public/run.sh`: pass 48, fail 0, known 0, skip 0, flakes 0.
+- `tools/drive/public/run.sh` on the final tree: pass 48, fail 0, known 0, skip 0, flakes 0.
 
 ### Limits and not tested
 
-- `tools/js/typing/keycost.sh` was not run (no change in the typing path).
 - The shims were not run against the real libraries of the sites beyond the table above. `indexedDB` has no index, no `getAll` options object, no `IDBIndex`, no `onblocked`, no persistence. `Animation` has no timeline: `currentTime` is `0` or `null`.
 - `window.event` is set for the whole dispatch, not for each listener, and is not hidden for listeners in a shadow tree.
 - `getElementsByTagName` and the other collections are still snapshots (not live). `namedItem` is absent. `querySelectorAll` results do not have `item` (it is a `NodeList` in browsers).
