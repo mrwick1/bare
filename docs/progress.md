@@ -7098,3 +7098,57 @@ The actual executed fixtures run each expression in a separate document. Their d
 Final gated rebase: acquired `merge-gate acquire bst11`, fetched origin and rebased on `f71442740adb11b657b2ce701634488045f7a567`. Measurement BASE remains frozen at `617cb19f8984a6781e5e31a4655e3d598f705d17`. Reviewed the final diff, verified all retained downloaded script hashes and both HTTP reduction outputs, and ran `git diff --check`. Documentation-only validation: no suite or matrix rerun after rebase.
 
 Merge authorization: the owner requested merge of #348. Final merge rebase uses `59d086ba68e26a68b1f53fa80e304e8c48fdc19f`. Preserve all other sections and append this section at the end. Validation remains documentation-only; no matrix or suite ran.
+
+## Mastodon constructor attribution (Task 36)
+
+Documentation only. Frozen main is `617cb19f8984a6781e5e31a4655e3d598f705d17`. Artifacts are in `/data/bare-tmp/mct11/`. They are machine-local, not hosted attachments. Exact edited files: `docs/decisions.md` and `docs/progress.md`. Read every worktree's status and branch diff before work and before edits; retained the latter in `owners-before-edit.txt`. Task 35's `bbc-split-trace` worktree had no changes at that check. The required runtime registration is in excluded, Task 24-owned `browser.rs`. No implementation is attempted.
+
+### Source and value attribution
+
+The retained p9chk, p10chk and p11chk Mastodon results all contain `Uncaught (in promise) TypeError: y is not a constructor at script#3:2:11455`. Two fresh readiness probes reproduce that exact text on frozen main. Preserve the separate `listener of error: TypeError: y is not a constructor` and worker-script warning; neither is a new constructor failure.
+
+Downloaded source: `https://mastodon.social/packs/polyfills-DNX-ejKw.js`, 60,721 decoded bytes, SHA-256 `0bda73b061cef806d2f11d395d8a54ee0bd7cc0655de2a1c4ca9e472ba8261e1`. Column 11455 on line 2 begins `new y(1,2)`. The enclosing module is `At`; its declarations include `_ = 'DOMException'`, `i = g()`, `y = i(_)`, and `C = 'stack' in new y(1,2)`. The `g` helper reads `r[e]` from the global object and returns it if callable. The global helper selects `globalThis`, then window/self fallbacks. Thus `y` is the host's global `DOMException`, not a guessed minified binding. The earlier `new y(t, ...)` occurs inside an uncalled wrapper; the top-level stack probe is the failing expression.
+
+At frozen main, `browser.rs` registers `("DOMException", domexc, None)`. The `None` interface path uses `add_fn(... illegal_constructor, ..., false)` rather than `add_ctor_nt`. A callable interface exists, but it lacks construction support. `Dom::dom_err` separately creates exception-like objects; its presence does not implement the public constructor.
+
+Minimal reduction (`repro.html`, served over loopback by `reduce.py`):
+
+```js
+var y = globalThis.DOMException;
+console.log('source', typeof y, y === window.DOMException);
+try { var C = 'stack' in new y(1, 2); console.log('constructed', C); }
+catch (e) { console.error(e.name + ': ' + e.message); }
+```
+
+Frozen main prints `source function true` then `TypeError: y is not a constructor`. The HTTP reduction exits 0 because it catches the exception; this is diagnostic evidence, not a passing constructor regression. The initial local-path probe failed because bare-drive requires HTTP(S); retain `repro/` and the corrected `repro-http/` outputs. The loopback server is stopped by the reduction script.
+
+[Web IDL DOMException](https://webidl.spec.whatwg.org/#idl-DOMException) defines a constructor with optional DOMString message and name, defaulting to empty message and `Error`. For `(1,2)`, conversion gives message `"1"`, name `"2"`, code 0. The call must construct an exception; the standard does not require a `stack` property. A Node check returns `{"name":"2","message":"1","code":0}` (`node-oracle.txt`). Retain `webidl.html` as the consulted source. No browser oracle was run.
+
+### Fresh live evidence and limits
+
+Commands are in `commands.txt`; step inputs and raw stdout/stderr are in each run directory. BASE came from `heavy base-build 617cb19f --release -p bare-drive`. The task used `CARGO_TARGET_DIR=/data/bare-tmp/target-mct11`; the shared base helper manages its own immutable target. No task build modified BASE.
+
+| Run | Ready | Resource records / bytes | ms | Peak RSS KiB |
+| --- | --- | --- | ---: | ---: |
+| live1 | pass | 180 / 1,054,995 | 4976.9 | 71176 |
+| live2 | pass | 179 / 998,697 | 2258.5 | 71096 |
+| sentinel1 | pass | 179 / 999,141 | 12336.0 | 62540 |
+| sentinel2 | pass | 178 / 998,866 | 2094.1 | 62852 |
+
+Every resource record has status 200. The two readiness runs record the same polyfill URL at 20,786 transferred bytes; the separately downloaded decoded body is 60,721 bytes. Resource totals differ, so these are not equal-work timing comparisons. Both runs contain the same two constructor reports and one worker warning. Both have null failure and no reported fatal/task stop. These readiness probes do not establish app success.
+
+The page includes the polyfill as its own module script. `At()` throws before the remaining polyfill initialization calls. The application is a separate module script; its source does not import this polyfill. Its startup chain is `vt().then(ae).then(ea)`, and `ea` eventually calls `createRoot(e).render(...)`. The main component emits `.ui` under `#mastodon`. Source inspection establishes loss of the remaining polyfill setup, but does not establish that this exception blocks the separate application script. Constructor availability alone would not prove application initialization.
+
+Two additional fresh probes (`sentinel1`, `sentinel2`; `sentinel.py`) check `document.querySelector('#mastodon .ui') !== null` after readiness. Both pass while retaining the same constructor exception. Thus the exception does not prevent the main component from mounting in these runs. It stops a polyfill feature probe and its later setup, not the observed initial app mount. This is not proof of functional feeds, login, worker support or all optional features. No causal claim follows about later missing polyfills. The next measurement for a separately authorized constructor fix is a failing Web IDL regression and replay of the entire frozen polyfill, followed by the same live sentinel and interactions.
+
+Tests-first: N/A for documentation-only work. No implementation regression test, workspace suite, public journey suite, cost matrix, test262, execution comparison or typing gate ran. No matrix is required for this docs-only change. The local reduction and four live probes are evidence checks only. No API, dependency, budget or runtime change. Review the final diff, source location, hashes, raw run claims, prohibited text and whitespace before publication.
+
+### Resumed evidence review
+
+The earlier executor stopped before a repository edit. Its worktree was clean at frozen main; no task commits existed. This continuation reuses its retained four live probes and HTTP reduction. It independently checked the decoded hash, source expression, host registration and raw result totals. These are fresh probes from the earlier task attempt, not new runs by this continuation. The script number alone does not map a URL; the matching source column, constructor binding and reduction support the attribution without an instrumented live stack.
+
+Acquired `merge-gate acquire mct11`, fetched origin and rebased the clean branch on `4471813369be9b1e47b30d81bd25deed6d5ad179` before appending these entries. Rechecked all remaining worktree statuses and branch paths immediately before edits. Task 35 has merged as #348 and its worktree is gone. Only `docs/decisions.md` and `docs/progress.md` change. The measurement baseline remains `617cb19f8984a6781e5e31a4655e3d598f705d17`; no claim is made about live execution on the newer main. Checked the final diff and whitespace. No matrix or suite ran after rebase because this change contains only documentation. Leave the evidence PR unmerged because the required implementation crosses the explicit Task 24 ownership boundary. Release the gate after publication; retain the worktree for review.
+
+### Merge authorization
+
+The owner authorized merge of this evidence-only PR. This replaces the earlier hold on publication above; it does not authorize a runtime change. Acquired `merge-gate acquire mct11` again and rebased on `4471813369be9b1e47b30d81bd25deed6d5ad179`. The rebase added no changes. This section remains at the end of the file; all earlier sections are preserved. No matrix or suite is required for this documentation-only merge. The PR description identifies the proposed constructor handler and its estimated size for a later task after Task 24 merges.
