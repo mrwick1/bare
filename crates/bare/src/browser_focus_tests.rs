@@ -167,7 +167,8 @@ fn listener_errors_cross_script_callbacks_and_reports() {
         assert_eq!(js(&mut b, "$('a').addEventListener('blur', function () { throw new Error('boom'); }); $('b').addEventListener('focus', function () { log.push('b-focus'); }); $('a').focus(); $('b').focus(); log.join() + '|' + active()"), "b-focus|b");
         let r = b.take_reports();
         assert_eq!(r.len(), 1);
-        assert_eq!((r[0].event_type.as_str(), r[0].target.as_str(), r[0].message.as_str()), ("blur", "button", "Error: boom"));
+        assert_eq!((r[0].event_type.as_str(), r[0].target.as_str(), r[0].message.lines().next().unwrap()), ("blur", "button", "Error: boom"));
+        assert!(r[0].message.contains("\n    at "), "{r:?}");
         // A function defined by an earlier script and a handleEvent object both run.
         assert_eq!(js(&mut b, "var h = { handleEvent: function (e) { log.push('he:' + e.type); } }; $('p').addEventListener('focusin', h); 0"), "0");
         assert_eq!(js(&mut b, "log.length = 0; $('p').focus(); log.join()"), "he:focusin");

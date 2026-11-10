@@ -293,7 +293,8 @@ fn listener_options_removal_and_mutation_during_dispatch() {
         assert_eq!(js(&mut b, "t.addEventListener('bad', {}); t.dispatchEvent(new Event('bad'))"), "true");
         let r = b.take_reports();
         assert_eq!(r.len(), 1);
-        assert_eq!(r[0].message, "TypeError: The event listener's handleEvent is not a function");
+        assert_eq!(r[0].message.lines().next().unwrap(), "TypeError: The event listener's handleEvent is not a function");
+        assert!(r[0].message.contains("\n    at "), "{r:?}");
         assert_eq!(js(&mut b, "t.addEventListener('x', 5)"), "throw:TypeError:Failed to execute 'addEventListener': parameter 2 is not of type 'Object'.");
         assert_eq!(js(&mut b, "t.addEventListener('x', null)"), "undefined");
         assert_eq!(js(&mut b, "t.addEventListener('x', f1, { signal: {} })"), "throw:TypeError:Failed to execute 'addEventListener' on 'EventTarget': Failed to read the 'signal' property from 'AddEventListenerOptions': Failed to convert value to 'AbortSignal'.");
@@ -347,7 +348,8 @@ fn listener_exceptions_are_reported_and_dispatch_continues() {
         js(&mut b, "var s = document.getElementById('s'); s.addEventListener('t', function () { throw new TypeError('boom') }); s.addEventListener('t', function () { throw 'plain' }); s.addEventListener('t', L('after')); document.addEventListener('t', L('doc'));");
         assert_eq!(js(&mut b, "s.dispatchEvent(new Event('t', { bubbles: true })); log.join()"), "after:2:SPAN,doc:3:#document");
         let r = b.take_reports();
-        assert_eq!(r.iter().map(|r| format!("{}|{}|{}", r.event_type, r.target, r.message)).collect::<Vec<_>>(), ["t|span|TypeError: boom", "t|span|plain"]);
+        assert_eq!(r.iter().map(|r| format!("{}|{}|{}", r.event_type, r.target, r.message.lines().next().unwrap())).collect::<Vec<_>>(), ["t|span|TypeError: boom", "t|span|plain"]);
+        assert!(r[0].message.contains("\n    at "), "{r:?}");
         assert!(b.take_reports().is_empty());
         // a Limit stops dispatch: later listeners do not run, and the error is the result
         js(&mut b, "log = []; s.addEventListener('lim', function () { for (;;) {} }); s.addEventListener('lim', L('never'));");

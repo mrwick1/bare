@@ -306,13 +306,21 @@ impl Dom {
     /// Keep the text of a listener exception. It reads data properties only, so no JS runs.
     pub(crate) fn report(&self, it: &mut Interp<'_>, thrown: Value, ty: &str, t: Target) {
         let message = self.error_text(it, thrown);
+        let mut diagnostic = self.error_text_inner(it, thrown, true);
+        if let Some(frames) = diagnostic.find("\n    at ") {
+            diagnostic = format!("{message}{}", &diagnostic[frames..]);
+            let cap = self.lim.max_string_bytes.min(4096);
+            let mut end = diagnostic.len().min(cap);
+            while !diagnostic.is_char_boundary(end) { end -= 1; }
+            diagnostic.truncate(end);
+        }
         self.window_error(it, thrown, &message);
         if self.lim.max_reports == 0 {
             let mut st = self.st.borrow_mut();
             st.dropped_reports = st.dropped_reports.saturating_add(1);
             return;
         }
-        self.record_report(t, ty, message);
+        self.record_report(t, ty, diagnostic);
     }
 
     /// An uncaught exception: the `error` event of `window` (HTML "report an exception"), when something listens. An exception in it is not reported again.
@@ -333,6 +341,11 @@ impl Dom {
 
     /// `name: message` of an error object, or the text of the thrown value. It reads data properties only, so no JS runs.
     pub(crate) fn error_text(&self, it: &mut Interp<'_>, thrown: Value) -> String {
+        self.error_text_inner(it, thrown, false)
+    }
+
+    #[cold]
+    fn error_text_inner(&self, it: &mut Interp<'_>, thrown: Value, stack: bool) -> String {
         let cap = self.lim.max_string_bytes.min(4096);
         let append = |out: &mut String, units: &[u16]| {
             for c in char::decode_utf16(units.iter().copied()) {
@@ -352,6 +365,10 @@ impl Dom {
         let mut message = String::new();
         match thrown {
             Value::Object(o) => {
+                if stack {
+                    text(it, &mut message, o, "stack");
+                    if !message.is_empty() { return message; }
+                }
                 text(it, &mut message, o, "name");
                 append(&mut message, &[58, 32]);
                 text(it, &mut message, o, "message");

@@ -118,7 +118,8 @@ fn a_throwing_callback_is_reported_and_others_still_run() {
     assert_eq!(frame(&mut b), "ran");
     let r = b.take_reports();
     assert_eq!(r.len(), 1);
-    assert_eq!(r[0].message, "Error: boom");
+    assert_eq!(r[0].message.lines().next().unwrap(), "Error: boom");
+    assert!(r[0].message.contains("\n    at "), "{r:?}");
 }
 
 #[test]
