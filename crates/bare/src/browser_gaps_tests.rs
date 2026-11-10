@@ -1,8 +1,7 @@
 //! Tests of the small DOM and web API gaps that stopped real sites in `bare-drive`: `HTMLCollection.item`, `noModule`, `hasFocus`,
-//! `console.assert`, an iterable `styleSheets`, `window.event`, `Element.animate`, `Path2D` and a minimal `indexedDB`.
+//! an iterable `styleSheets`, `window.event`, `Element.animate`, `Path2D` and a minimal `indexedDB`.
 
 use crate::browser::*;
-use crate::browser_console::*;
 use bare_html::tree;
 use bare_js::eval::{Error, EvalLimits};
 use bare_js::heap::HeapLimits;
@@ -61,21 +60,6 @@ fn document_has_focus_is_true() {
     big(|| {
         let mut b = browser();
         assert_eq!(js(&mut b, "typeof document.hasFocus + ',' + document.hasFocus()"), "function,true");
-    });
-}
-
-#[test]
-fn console_assert_logs_an_error_when_the_condition_fails() {
-    big(|| {
-        let mut b = browser();
-        assert_eq!(js(&mut b, "console.assert(true, 'no'); console.assert(1 === 1); typeof console.assert"), "function");
-        assert!(b.take_console_records().is_empty());
-        js(&mut b, "console.assert(false, 'a', 2); console.assert(0); console.assert()");
-        let r = b.take_console_records();
-        assert_eq!(r.len(), 3);
-        assert!(r.iter().all(|r| r.level == ConsoleLevel::Error));
-        assert_eq!(b.format_console_record(&r[0]).unwrap(), "Assertion failed: a 2");
-        assert_eq!(b.format_console_record(&r[1]).unwrap(), "Assertion failed");
     });
 }
 

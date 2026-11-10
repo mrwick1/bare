@@ -1,8 +1,6 @@
 //! Small DOM and web API gaps that stopped real sites in `bare-drive`. They live in their own module so that the hot modules keep their
 //! code, and so their inlining, unchanged (the cost rows move with the inlining of unrelated code: see `docs/progress.md`).
 //!
-//! - `console.assert`: nothing when the condition is truthy, else an error record that starts with "Assertion failed". The label is its own
-//!   argument (the Standard joins it to a string first argument); the formatter prints the same text.
 //! - `HTMLScriptElement.prototype.noModule`: a reflected boolean for `nomodule`.
 //! - `document.hasFocus()`: always `true`. The page always has system focus (`browser_focus.rs`).
 //! - `window.event`: the event of the dispatch that runs (`Dom::dispatch`), else `undefined`. A write makes a data property (`[Replaceable]`).
@@ -12,21 +10,11 @@
 //! Not here: `namedItem`, live collections, `IDBIndex` (see `browser_shims.rs` for `animate`, `Path2D` and `indexedDB`).
 
 use crate::browser::*;
-use crate::browser_console::{ConsoleLevel, record};
 use bare_html::dom::NodeId;
 use bare_js::eval::Interp;
 use bare_js::value::{ObjId, Value};
 
 type V = R<Value>;
-
-pub(crate) fn console_assert(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
-    if it.to_js_bool(a.first().copied().unwrap_or(Value::Undefined))? {
-        return Ok(Value::Undefined);
-    }
-    let mut args = vec![d.js_str(it, if a.get(1).is_some_and(|v| matches!(v, Value::String(_))) { "Assertion failed:" } else { "Assertion failed" })?];
-    args.extend(a.iter().skip(1));
-    record(d, it, ConsoleLevel::Error, &args)
-}
 
 pub(crate) fn script_no_module(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     crate::browser_loader::flag(d, it, this, "nomodule")
