@@ -138,11 +138,25 @@ fn gates_refuse_what_bare_cannot_format() {
             ("new Intl.DateTimeFormat('en', { fractionalSecondDigits: 2 })", "Intl.DateTimeFormat: fractionalSecondDigits without second"),
             ("new Intl.DateTimeFormat('en', { calendar: 'Buddhist' })", "Intl.DateTimeFormat calendar other than gregory"),
             ("new Intl.DateTimeFormat('en', { numberingSystem: 'arab' })", "Intl.DateTimeFormat numberingSystem other than latn"),
-            ("new Intl.DateTimeFormat('en-u-hc-h23')", "Intl: a locale with an extension (-u-, -t-, -x-)"),
+            ("new Intl.DateTimeFormat('en-u-ca-buddhist')", "Intl.DateTimeFormat calendar other than gregory"),
+            ("new Intl.DateTimeFormat('en-US-u-nu-arab-hc-h23')", "Intl.DateTimeFormat numberingSystem other than latn"),
             ("new Intl.DateTimeFormat('en', { year: 'numeric' }).format(Date.UTC(-5, 0))", "Intl.DateTimeFormat: a year before 1 (an era)"),
         ] {
             assert_eq!(out(&mut it, src), format!("unsupported:{what}"), "{src}");
         }
+    });
+}
+
+#[test]
+fn an_option_wins_over_a_keyword_that_bare_cannot_format() {
+    big(|| {
+        let mut it = realm();
+        let f = |it: &mut Interp, l: &str, o: &str| out(it, &format!("new Intl.DateTimeFormat('{l}', {o}).resolvedOptions().locale"));
+        assert_eq!(f(&mut it, "en-u-ca-buddhist", "{ calendar: 'gregory' }"), "string:en");
+        assert_eq!(f(&mut it, "en-u-nu-arab", "{ numberingSystem: 'latn' }"), "string:en");
+        // an unknown value is ignored, a known one that bare lacks stops
+        assert_eq!(f(&mut it, "en-u-ca-zzzz-nu-zzzz", "{}"), "string:en");
+        assert_eq!(out(&mut it, "new Intl.NumberFormat('en-u-nu-deva', { numberingSystem: 'latn' }).resolvedOptions().locale"), "string:en");
     });
 }
 

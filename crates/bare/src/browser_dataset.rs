@@ -104,6 +104,27 @@ fn prop_of(attr: &str) -> Option<String> {
 /// Does the attribute `attr` have the property name `key` (UTF-16)? Same as `prop_of(attr)` equals `key`, with no allocation.
 fn matches(attr: &str, key: &[u16]) -> bool {
     let Some(tail) = attr.strip_prefix("data-") else { return false };
+    if tail.is_ascii() {
+        // The common case: bytes against UTF-16 units. A lone surrogate in `key` never equals an ASCII unit.
+        let (b, mut k) = (tail.as_bytes(), 0);
+        let mut i = 0;
+        while i < b.len() {
+            let mut c = b[i];
+            if c.is_ascii_uppercase() {
+                return false;
+            }
+            if c == b'-' && i + 1 < b.len() && b[i + 1].is_ascii_lowercase() {
+                i += 1;
+                c = b[i].to_ascii_uppercase();
+            }
+            i += 1;
+            if key.get(k) != Some(&u16::from(c)) {
+                return false;
+            }
+            k += 1;
+        }
+        return k == key.len();
+    }
     let mut want = char::decode_utf16(key.iter().copied());
     let mut cs = tail.chars().peekable();
     while let Some(c) = cs.next() {

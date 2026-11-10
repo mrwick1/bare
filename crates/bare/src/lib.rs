@@ -72,6 +72,9 @@ pub mod browser_fetch;
 pub mod browser_console;
 #[cfg(test)]
 mod browser_console_tests;
+mod browser_css_ns;
+#[cfg(test)]
+mod browser_css_ns_tests;
 pub mod browser_streams;
 #[cfg(test)]
 mod browser_streams_tests;

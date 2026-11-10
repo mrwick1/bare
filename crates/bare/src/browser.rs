@@ -1218,6 +1218,7 @@ impl Dom {
         crate::browser_encoding::install(self, it)?;
         crate::browser_web::install(self, it)?;
         crate::browser_console::install(self, it)?;
+        crate::browser_css_ns::install(self, it)?;
         crate::browser_style::install(self, it)?;
         crate::browser_computed::install(self, it)?;
         crate::browser_geometry::install(self, it)?;

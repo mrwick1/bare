@@ -52,7 +52,87 @@ fn console_exists_with_the_observed_methods_and_descriptors() {
         assert_eq!(js(&mut b, "Object.prototype.toString.call(console)"), "[object console]");
         assert_eq!(js(&mut b, "console.log(1) === undefined && console.warn() === undefined && console.error('a', 'b') === undefined"), "true");
         assert_eq!(js(&mut b, "try { new console.log(); 'constructed' } catch (e) { e.name }"), "TypeError");
-        assert_eq!(js(&mut b, "typeof console.info + typeof console.debug + typeof console.trace"), "undefinedundefinedundefined");
+    });
+}
+
+const NAMESPACE: [&str; 19] = [
+    "log", "warn", "error", "info", "debug", "trace", "dirxml", "dir", "table", "assert", "group", "groupCollapsed", "groupEnd", "time", "timeLog",
+    "timeEnd", "count", "countReset", "clear",
+];
+
+#[test]
+fn console_has_the_whole_namespace_and_the_levels() {
+    big(|| {
+        let mut b = mk();
+        let names = NAMESPACE.map(|n| format!("'{n}'")).join(",");
+        assert_eq!(js(&mut b, &format!("[{names}].filter(function (k) {{ var d = Object.getOwnPropertyDescriptor(console, k); return typeof console[k] !== 'function' || console[k].name !== k || !d.writable || !d.enumerable || !d.configurable; }}).join()")), "");
+        assert_eq!(js(&mut b, &format!("[{names}].map(function (k) {{ return String(console[k]()); }}).filter(function (v) {{ return v !== 'undefined'; }}).join()")), "");
+        js(&mut b, "console.groupEnd()");
+        b.take_console_records();
+        js(&mut b, "console.info('i', 1); console.debug('d'); console.trace('t'); console.dir({a: 1}, 'ignored'); console.dirxml('x', 'y'); console.table('tab', 'cols'); console.clear(); console.log('after clear')");
+        assert_eq!(lines(&mut b), ["L:i 1", "L:d", "L:t", "L:[object]", "L:x y", "L:tab", "L:after clear"]);
+    });
+}
+
+#[test]
+fn assert_logs_an_error_when_the_first_argument_is_falsy() {
+    big(|| {
+        let mut b = mk();
+        js(&mut b, "console.assert(true, 'no'); console.assert(1, 'no'); console.assert(false, 'x', 2); console.assert(); console.assert(0); console.assert('', 'm'); console.assert({}, 'no'); console.assert(null, '%s!', 'f')");
+        assert_eq!(lines(&mut b), ["E:Assertion failed x 2", "E:Assertion failed", "E:Assertion failed", "E:Assertion failed m", "E:Assertion failed %s! f"]);
+    });
+}
+
+#[test]
+fn groups_indent_the_records_and_stop_at_the_bound() {
+    big(|| {
+        let mut b = mk();
+        js(&mut b, "console.log('a'); console.group('g1'); console.log('b'); console.groupCollapsed('g2'); console.warn('c'); console.group(); console.log('d'); console.groupEnd(); console.groupEnd(); console.error('e'); console.groupEnd(); console.groupEnd(); console.log('f')");
+        assert_eq!(lines(&mut b), ["L:a", "L:g1", "L:  b", "L:  g2", "W:    c", "L:      d", "E:  e", "L:f"]);
+        // a deep nesting stops at 64 levels, and the ends unwind it
+        js(&mut b, "for (var i = 0; i < 100; i++) console.group(); console.log('deep'); for (var i = 0; i < 100; i++) console.groupEnd(); console.log('flat')");
+        let l = lines(&mut b);
+        assert_eq!(l, [format!("L:{}deep", " ".repeat(128)), "L:flat".to_string()]);
+    });
+}
+
+#[test]
+fn timers_and_counters_use_labels_and_warn_on_misuse() {
+    big(|| {
+        let mut b = mk();
+        b.use_virtual_clock_at(1000.0).unwrap();
+        js(&mut b, "console.time('t'); console.time(); console.time('t');");
+        b.advance_time(12.5, 100).unwrap();
+        js(&mut b, "console.timeLog('t', 'more', 7); console.timeLog(); console.timeEnd('t'); console.timeEnd('t'); console.timeLog('zz'); console.timeEnd()");
+        assert_eq!(
+            lines(&mut b),
+            ["W:Timer 't' already exists", "L:t: 12.500 ms more 7", "L:default: 12.500 ms", "L:t: 12.500 ms", "W:Timer 't' does not exist", "W:Timer 'zz' does not exist", "L:default: 12.500 ms"]
+        );
+        js(&mut b, "console.count(); console.count('x'); console.count(); console.countReset(); console.count(); console.countReset('nope'); console.count(5); console.count({})");
+        assert_eq!(lines(&mut b), ["L:default: 1", "L:x: 1", "L:default: 2", "L:default: 1", "W:Count for 'nope' does not exist", "L:5: 1", "L:[object]: 1"]);
+    });
+}
+
+#[test]
+fn label_tables_have_bounds() {
+    big(|| {
+        let mut b = mk();
+        // a label of 257 bytes is not kept: one warning, and no entry
+        js(&mut b, "var long = 'x'.repeat(257); console.time(long); console.count(long); console.timeEnd(long); console.countReset(long); console.time('x'.repeat(256)); console.timeEnd('x'.repeat(256))");
+        let l = lines(&mut b);
+        assert_eq!(l.len(), 5);
+        assert!(l[..4].iter().all(|t| t.starts_with("W:console.") && t.ends_with("is longer than 256 bytes and is not kept")), "{l:?}");
+        assert!(l[4].starts_with(&format!("L:{}: ", "x".repeat(256))), "{}", &l[4][..20]);
+        // the 1,025th label of each table is not kept; one warning for each call
+        js(&mut b, "for (var i = 0; i < 1024; i++) { console.time('t' + i); console.count('c' + i); } console.time('over'); console.count('over'); console.timeEnd('over'); console.count('c0'); console.timeEnd('t0');");
+        let l = lines(&mut b);
+        let w: Vec<&String> = l.iter().filter(|t| t.starts_with("W:")).collect();
+        assert_eq!(w.len(), 3, "{w:?}");
+        assert!(w[0].contains("1024 labels") && w[1].contains("1024 labels") && w[2].contains("Timer 'over' does not exist"), "{w:?}");
+        assert!(l.iter().any(|t| t == "L:c0: 2"));
+        // the keys of a table are freed by timeEnd
+        assert_eq!(js(&mut b, "console.time('over'); 'ok'"), "ok");
+        assert_eq!(lines(&mut b), Vec::<String>::new());
     });
 }
 
@@ -366,7 +446,7 @@ fn formatted_output_is_bounded_before_it_grows() {
 fn console_does_not_leak_into_other_globals() {
     big(|| {
         let mut b = mk();
-        assert_eq!(js(&mut b, "Object.keys(console).join()"), "log,warn,error");
+        assert_eq!(js(&mut b, "Object.keys(console).join()"), NAMESPACE.join(","));
         assert_eq!(js(&mut b, "Object.keys(window).indexOf('console') < 0"), "true");
         assert_eq!(js(&mut b, "console === window.console && console === self.console && console === globalThis.console"), "true");
         assert_eq!(js(&mut b, "typeof window.chrome + typeof window.opera"), "undefinedundefined");
@@ -380,14 +460,14 @@ fn numeric_format_inputs_are_bounded_and_scans_consume_steps() {
         b.set_console_limits(ConsoleLimits { max_format_bytes: 16, ..Default::default() });
         let fmt = Value::String(b.it.heap.intern_str("%d").unwrap());
         let text = Value::String(b.it.heap.intern_str(&"0".repeat(64)).unwrap());
-        let r = ConsoleRecord { seq: 0, level: ConsoleLevel::Log, args: vec![fmt, text] };
+        let r = ConsoleRecord { seq: 0, level: ConsoleLevel::Log, indent: 0, args: vec![fmt, text] };
         assert!(matches!(b.format_console_record(&r), Err(Error::Limit(LimitKind::Host("console-format")))));
     });
     big(|| {
         let mut b = Browser::new(tree::parse("<body></body>"), BrowserLimits::default(), EvalLimits { max_steps: 10, ..Default::default() }, HeapLimits::default()).unwrap();
         let fmt = Value::String(b.it.heap.intern_str("%d").unwrap());
         let text = Value::String(b.it.heap.intern_str(&"0".repeat(8192)).unwrap());
-        let r = ConsoleRecord { seq: 0, level: ConsoleLevel::Log, args: vec![fmt, text] };
+        let r = ConsoleRecord { seq: 0, level: ConsoleLevel::Log, indent: 0, args: vec![fmt, text] };
         assert!(matches!(b.format_console_record(&r), Err(Error::Limit(LimitKind::Steps))));
     });
 }
@@ -398,7 +478,7 @@ fn formatting_symbol_descriptions_consumes_steps_before_copying() {
         let mut b = Browser::new(tree::parse("<body></body>"), BrowserLimits::default(), EvalLimits { max_steps: 10, ..Default::default() }, HeapLimits::default()).unwrap();
         let text = b.it.heap.intern_str(&"x".repeat(8192)).unwrap();
         let sym = Value::Symbol(b.it.heap.new_symbol(Some(text)).unwrap());
-        let r = ConsoleRecord { seq: 0, level: ConsoleLevel::Log, args: vec![sym] };
+        let r = ConsoleRecord { seq: 0, level: ConsoleLevel::Log, indent: 0, args: vec![sym] };
         assert!(matches!(b.format_console_record(&r), Err(Error::Limit(LimitKind::Steps))));
     });
 }

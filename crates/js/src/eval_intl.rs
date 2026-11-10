@@ -18,12 +18,17 @@
 //   the offset form for the others). `fractionalSecondDigits` (1 to 3) when the pattern has seconds.
 //
 // Gates (Unsupported): the options `era` and `dayPeriod`; `fractionalSecondDigits` without `second`; a calendar other than
-// `gregory` and a numbering system other than `latn` that ICU knows; a year before 1; a locale with an extension (`-u-`, `-x-`); a subclass of DateTimeFormat;
+// `gregory` and a numbering system other than `latn` that ICU knows; a year before 1; a subclass of DateTimeFormat;
 // `formatRange`, the other Intl constructors and the local-time methods of Date stay absent or gated as before.
+//
+// Locale extensions: `-u-` keywords `hc`, `ca` and `nu` are read (ECMA-402 ResolveLocale; an option wins over a keyword; the
+// first requested tag that bare has decides). Other keys (`co`, `kn`, `kf`, ...) are ignored. `-t-` and `-x-` are checked and
+// then dropped from the resolved locale. A kept keyword goes in `resolvedOptions().locale` (`exts`).
 //
 // Known deviations: `resolvedOptions().timeZone` is the name as given (the current spec), where V8 gives the old ICU name for
 // some links (`Asia/Kolkata` is `Asia/Calcutta` in V8). A zone name must have the case of its file (`asia/kolkata` is a
-// RangeError; V8 accepts it). A locale that ICU has and bare has not resolves to its English parent or to `en-US`.
+// RangeError; V8 accepts it). A locale that ICU has and bare has not resolves to its English parent or to `en-US`. With `-u-hc-h12` or `h11` in `en-GB`, a time style
+// pads the hour (`03:06 pm`); V8 does not.
 //
 // Storage: one `Dtf` per formatter object in `intl.dtfs`, capped by `max_formatters`, pruned by `collect`. Zones are read once
 // and kept (up to 64) by name. A zone file read is charged as steps.
@@ -81,6 +86,14 @@ impl IntlFn {
     }
 }
 
+/// The `-u-` keywords that a `DateTimeFormat` uses: `ca` and `nu` (true when bare's own value is asked) and `hc` (an index of `CYCLES`).
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+struct DtfKw {
+    ca: bool,
+    nu: bool,
+    hc: Option<u8>,
+}
+
 /// A formatter: what `resolvedOptions` reports and what `format` needs.
 #[derive(Clone)]
 struct Dtf {
@@ -106,6 +119,12 @@ struct IntlState {
     colls: FxMap<ObjId, IntlColl>,
     prs: FxMap<ObjId, IntlPr>,
     segs: FxMap<ObjId, IntlSeg>,
+    /// The `-u-` extension that `resolvedOptions().locale` adds to the locale of a formatter (`-u-hc-h23`): only the keywords
+    /// that were used. Most formatters have none. `pending_ext` carries one from a create function to its constructor.
+    exts: FxMap<ObjId, Box<str>>,
+    pending_ext: Option<Box<str>>,
+    /// True while a constructor runs. Only then does a create function leave a `pending_ext`.
+    in_ctor: bool,
     segments: FxMap<ObjId, SegData>,
     seg_iters: FxMap<ObjId, SegIter>,
     /// The ICU4X formatters and collators, made on first use.
@@ -144,6 +163,9 @@ impl IntlState {
             colls: FxMap::default(),
             prs: FxMap::default(),
             segs: FxMap::default(),
+            exts: FxMap::default(),
+            pending_ext: None,
+            in_ctor: false,
             segments: FxMap::default(),
             seg_iters: FxMap::default(),
             icu: icu::Cache::default(),
@@ -328,6 +350,7 @@ impl<'p> Interp<'p> {
         self.intl.colls.retain(|o, _| seen.contains(o));
         self.intl.prs.retain(|o, _| seen.contains(o));
         self.intl.segs.retain(|o, _| seen.contains(o));
+        self.intl.exts.retain(|o, _| seen.contains(o));
         self.intl.segments.retain(|o, _| seen.contains(o));
         self.intl.seg_iters.retain(|o, _| seen.contains(o));
         if self.intl.dtfs.capacity() > 64 && self.intl.dtfs.len() * 4 < self.intl.dtfs.capacity() {
@@ -477,10 +500,69 @@ impl<'p> Interp<'p> {
                 }
                 Err(intl::TagError::Malformed) => return Err(self.range_error("Incorrect locale information provided")),
                 Err(intl::TagError::Invalid) => return Err(self.range_error(&format!("Invalid language tag: {}", s.to_ascii_lowercase()))),
-                Err(intl::TagError::Extension) => return Err(unsupported("Intl: a locale with an extension (-u-, -t-, -x-)", Span::default())),
             }
         }
         Ok(out)
+    }
+
+    /// Keep the extension of the formatter just made (`pending_ext`) for its `resolvedOptions`. At most `max_formatters` entries.
+    #[inline]
+    fn intl_keep_ext(&mut self, o: ObjId) {
+        self.intl.in_ctor = false;
+        if let Some(e) = self.intl.pending_ext.take() {
+            self.intl.exts.insert(o, e);
+        }
+    }
+
+    /// A constructor failed: drop what its create function left.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn intl_ctor_failed(&mut self) {
+        self.intl.in_ctor = false;
+        self.intl.pending_ext = None;
+    }
+
+    /// Set `pending_ext`, if a constructor runs (a `toLocaleString` call keeps no extension).
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn set_ext(&mut self, e: Option<Box<str>>) {
+        if self.intl.in_ctor {
+            self.intl.pending_ext = e;
+        }
+    }
+
+    /// The locale that `resolvedOptions` reports: the name of `loc` and the kept extension of `this`.
+    fn intl_locale_value(&mut self, this: Value, loc: u8) -> Res<Value> {
+        if let Value::Object(o) = this
+            && let Some(e) = self.intl.exts.get(&o)
+        {
+            let s = format!("{}{}", intl::locale_name(loc), e);
+            return self.str_value(&s);
+        }
+        self.str_value(intl::locale_name(loc))
+    }
+
+    /// The `-u-` keywords of the first requested locale that bare has (the one the formatter uses): (key, type).
+    #[cold]
+    #[inline(never)]
+    fn intl_keywords(requested: &[String]) -> Vec<(String, String)> {
+        requested.iter().find(|t| intl::lookup(t).is_some()).map_or_else(Vec::new, |t| intl::unicode_keywords(t))
+    }
+
+    /// ResolveLocale for `calendar` (`ca`) or `numberingSystem` (`nu`), with the option `opt`: true when the keyword is used and
+    /// goes in the resolved locale. The option wins over the keyword. A keyword for a calendar or numbering system that ICU has
+    /// and bare has not is `Unsupported`, as the option is; an unknown value is ignored.
+    #[cold]
+    #[inline(never)]
+    fn intl_keyword_used(kw: &[(String, String)], key: &str, opt: Option<&str>, supported: &str) -> Result<bool, &'static str> {
+        let Some((_, v)) = kw.iter().find(|k| k.0 == key) else { return Ok(false) };
+        if let Some(o) = opt {
+            return Ok(o.eq_ignore_ascii_case(v) && v == supported);
+        }
+        if v == supported {
+            return Ok(true);
+        }
+        if Self::intl_supported_name(key == "ca", v) { Ok(false) } else { Err(if key == "ca" { "calendar" } else { "numberingSystem" }) }
     }
 
     /// The key of option `name`: made once for `OPTION_NAMES`, on the first option read.
@@ -611,13 +693,19 @@ impl<'p> Interp<'p> {
             v => Some(v),
         };
         self.intl_opt(opts, "localeMatcher", &["lookup", "best fit"])?;
-        for name in ["calendar", "numberingSystem"] {
+        let has_ext = requested.iter().any(|t| intl::has_unicode_ext(t));
+        let mut cal_nu = [0u8; 2];
+        for (n, name) in ["calendar", "numberingSystem"].into_iter().enumerate() {
             if let Some(s) = self.intl_opt_str(opts, name)? {
                 if !s.split('-').all(|p| (3..=8).contains(&p.len()) && p.bytes().all(|c| c.is_ascii_alphanumeric())) {
                     return Err(self.range_error(&format!("Invalid {name} : {s}")));
                 }
                 if !Self::intl_supported_name(name == "calendar", &s) {
                     return Err(unsupported(if name == "calendar" { "Intl.DateTimeFormat calendar other than gregory" } else { "Intl.DateTimeFormat numberingSystem other than latn" }, Span::default()));
+                }
+                if has_ext {
+                    // 1: the value bare has; 2: another value that bare accepts
+                    cal_nu[n] = if s.eq_ignore_ascii_case(["gregory", "latn"][n]) { 1 } else { 2 };
                 }
             }
         }
@@ -631,6 +719,7 @@ impl<'p> Interp<'p> {
         };
         let hc_opt = self.intl_opt(opts, "hourCycle", &CYCLES)?.map(|i| i as u8);
         let loc = requested.iter().find_map(|t| intl::lookup(t)).unwrap_or(0);
+        let kw = if has_ext { self.intl_dtf_keywords(&requested, &cal_nu)? } else { DtfKw::default() };
         let (zone_name, zone) = match self.intl_opt_str(opts, "timeZone")? {
             None => self.intl_default_zone()?,
             Some(n) => match self.intl_zone(&n)? {
@@ -690,7 +779,10 @@ impl<'p> Interp<'p> {
         }
         // hour12 replaces hourCycle
         r.hc = intl::hour_cycle(loc, hour12, if hour12.is_some() { None } else { hc_opt });
-        if time_defaulted {
+        if has_ext && kw.hc.is_some() && hour12.is_none() && hc_opt.is_none() {
+            // the keyword `hc` is the last choice, and the default time fields do not change it
+            r.hc = intl::hour_cycle(loc, None, kw.hc);
+        } else if time_defaulted {
             r.hc = [1, 1, 2, 2][r.hc as usize];
         }
         // a time style of full or long writes the long or the short name
@@ -700,7 +792,46 @@ impl<'p> Interp<'p> {
             _ => zn,
         };
         let pat = intl::resolve(loc, &r);
+        if has_ext {
+            self.intl_dtf_extension(kw, hour12.is_some() || hc_opt.is_some(), pat);
+        }
         Ok(Dtf { loc, pat, styles: (r.date_style, r.time_style), zone_name, zone, zn, fsd, extras: zn != 0 || fsd != 0, bound: None })
+    }
+
+    /// The `-u-` keywords that `DateTimeFormat` reads from the requested locales (`ca`, `hc`, `nu`), after the options `calendar`
+    /// and `numberingSystem` (`cal_nu`: 0 none, 1 the value of bare, 2 another). A calendar or numbering system that bare lacks and ICU has is `Unsupported`.
+    #[cold]
+    #[inline(never)]
+    fn intl_dtf_keywords(&mut self, requested: &[String], cal_nu: &[u8; 2]) -> Res<DtfKw> {
+        let kw = Self::intl_keywords(requested);
+        let mut out = DtfKw::default();
+        for (i, (key, supported)) in [("ca", "gregory"), ("nu", "latn")].into_iter().enumerate() {
+            match Self::intl_keyword_used(&kw, key, [None, Some(supported), Some("")][cal_nu[i] as usize], supported) {
+                Ok(used) => if i == 0 { out.ca = used } else { out.nu = used },
+                Err(_) => return Err(unsupported(if i == 0 { "Intl.DateTimeFormat calendar other than gregory" } else { "Intl.DateTimeFormat numberingSystem other than latn" }, Span::default())),
+            }
+        }
+        out.hc = kw.iter().find(|k| k.0 == "hc").and_then(|k| CYCLES.iter().position(|c| *c == k.1)).map(|i| i as u8);
+        Ok(out)
+    }
+
+    /// The extension for `resolvedOptions().locale` of a new formatter with keywords `kw`. A keyword `hc` stays when no option
+    /// chose the cycle, or when the pattern has an hour that has the cycle of the keyword.
+    #[cold]
+    #[inline(never)]
+    fn intl_dtf_extension(&mut self, kw: DtfKw, hc_option: bool, pat: intl::Pattern) {
+        let mut s = String::new();
+        if kw.ca {
+            s.push_str("-ca-gregory");
+        }
+        if let Some(h) = kw.hc.filter(|h| !hc_option || intl::shown(pat).1 == Some(*h)) {
+            s.push_str("-hc-");
+            s.push_str(CYCLES[h as usize]);
+        }
+        if kw.nu {
+            s.push_str("-nu-latn");
+        }
+        self.set_ext(if s.is_empty() { None } else { Some(format!("-u{s}").into()) });
     }
 
     /// The formatter of `this`, or the TypeError of V8. V8 names `unwrap` (when given) for an object receiver: its legacy
@@ -774,9 +905,11 @@ impl<'p> Interp<'p> {
                     return Err(Error::Limit(LimitKind::Sc(ScLimit::Formatters)));
                 }
                 let proto = self.nt_proto(nt, self.intl.proto)?;
-                let d = self.intl_create(a0, a1, 0, 1)?;
+                self.intl.in_ctor = true;
+                let d = self.intl_create(a0, a1, 0, 1).inspect_err(|_| self.intl_ctor_failed())?;
                 let o = h!(self, self.heap.new_object(Some(proto)));
                 self.intl.dtfs.insert(o, d);
+                self.intl_keep_ext(o);
                 Ok(Value::Object(o))
             }
             IntlFn::DtfSupported => {
@@ -835,7 +968,7 @@ impl<'p> Interp<'p> {
                 let d = self.this_dtf(this, "Intl.DateTimeFormat.prototype.resolvedOptions", true)?;
                 let o = h!(self, self.heap.new_object(Some(self.object_proto)));
                 let mut props: Vec<(&str, Value)> = vec![
-                    ("locale", self.str_value(intl::locale_name(d.loc))?),
+                    ("locale", self.intl_locale_value(this, d.loc)?),
                     ("calendar", self.str_value("gregory")?),
                     ("numberingSystem", self.str_value("latn")?),
                     ("timeZone", self.str_value(&d.zone_name)?),
