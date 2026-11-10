@@ -1033,3 +1033,10 @@ Set load resolves with matching members, or an empty array. Check returns true a
 Three alternating Angular pairs reduce twelve load rejections to zero. The first eight docs-icon elements change computed font size from 0px to 24px. This shows the visibility signal advanced. It does not establish rendered glyphs or full application function. WebAssembly errors remain separate. The exact live callback receiver mapping remains a hypothesis from Task 38.
 
 The two exact heap whitelist additions require cost case 1. The final 805-row gate passes with zero flagged rows and zero failures. No row requires jemalloc measurement. Final BASE is `c17a163a243918ad57e23420d518b3efb3ba990a`. Raw counts are in `/data/bare-tmp/ff13/cost-final.tsv`.
+
+
+## MessagePort object snapshots and callback frames (2026-11-10)
+
+MessagePort uses the existing structured-clone serializer and materializer for object payloads. The inbox roots the cloned graph and charges its serialized bytes. Close retains queued messages. Transfers remain unsupported. Clone errors remain catchable; resource limits do not.
+
+Callback reports include bounded stored frames without running getters. Error events retain the original message and thrown value. Reports preserve the original header when the stored stack has a different error name. No frames are synthesized. The AP News live stop did not reproduce in three pairs. The repair has a failing-first independent MessagePort regression. Full app repair is not established. See the matching progress entry for checks and limits.
