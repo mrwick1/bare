@@ -1226,3 +1226,6 @@ An agent such as `deck` must read a page and act on it in few model calls. Scree
 - `find`, `read` (paged text), `links`, `screenshot` (the page or one element, a path, and the image when asked), `eval` and `sessions` complete the set. Every reply goes through the redactor.
 - Each tool takes `session`. Sessions run side by side, one page each. `open` ends only the session of its name.
 - Step lines accept `ref=e7`, so a journey can mix refs and user locators.
+
+## Console, network and diagnose tools in bare-mcp (2026-11-12)
+Each session keeps the last 500 console entries and the last 500 network records. The step reports still hand out their entries once. Reads such as `snapshot` and the tools `console`, `network` and `diagnose` also feed the history, so entries that arrive between calls are not lost. `console` and `network` show only what is new since their last call, unless `since_last` is false. `diagnose` gives one line for each finding and ends with a verdict: `site problem`, `bare gap`, `network` or `unclear`. The verdict is a heuristic: text such as `is not a function` counts as a bare gap. The kind of a failed request (script, stylesheet, image, fetch) comes from its URL, because a network record does not keep its caller. A failed `act` step with `not_found`, `hidden` or `page` adds the first uncaught script error as a hint.
