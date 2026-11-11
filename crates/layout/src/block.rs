@@ -1179,6 +1179,27 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn translate_moves_a_box_and_what_is_inside() {
+        let inner = "<p id=p style='margin:0'>x</p>";
+        let at = |style: &str, id: &str| rect(&format!("<div id=d style='width:200px;height:50px;{style}'>{inner}</div>"), "", id);
+        assert_eq!(at("", "d"), r(8.0, 8.0, 200.0, 50.0));
+        assert_eq!(at("transform:translateX(-100%)", "d"), r(-192.0, 8.0, 200.0, 50.0));
+        assert_eq!(at("transform:translateX(-100%)", "p"), r(-192.0, 8.0, 200.0, 22.0), "the inside moves with the box");
+        assert_eq!(at("transform:translateY(10px)", "d"), r(8.0, 18.0, 200.0, 50.0));
+        assert_eq!(at("transform:translate(10px, 50%)", "d"), r(18.0, 33.0, 200.0, 50.0), "y is a percent of the height");
+        assert_eq!(at("translate:-25% 2px", "d"), r(-42.0, 10.0, 200.0, 50.0));
+        assert_eq!(at("transform:none", "d"), r(8.0, 8.0, 200.0, 50.0));
+        // The later rule wins: the drawer is shown with `none`.
+        assert_eq!(at("transform:translateX(-100%);transform:none", "d"), r(8.0, 8.0, 200.0, 50.0));
+        // Other functions are good values that do nothing.
+        assert_eq!(at("transform:translateX(10px) rotate(45deg)", "d"), r(18.0, 8.0, 200.0, 50.0));
+        // The box of a fixed box moves too, and the layout of the next box does not change.
+        let html = "<div id=f style='position:fixed;left:0;top:0;width:200px;height:200px;transform:translateX(-100%)'></div><div id=n style='height:10px'></div>";
+        assert_eq!(rect(html, "", "f"), r(-200.0, 0.0, 200.0, 200.0));
+        assert_eq!(rect(html, "", "n"), r(8.0, 8.0, 784.0, 10.0));
+    }
+
+    #[test]
     fn relative_moves_an_inline_box_and_its_text() {
         let html = "<p>ab <span id=s style='position:relative;top:-4px;left:3px'>cd</span></p>";
         let (_, layout) = run(html, "");

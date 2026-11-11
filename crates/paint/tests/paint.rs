@@ -602,3 +602,20 @@ fn the_round_borders_fixture() {
     // dashes followed the curve: 8,042 and 5,752.
     assert_eq!(c.hash(), 0x84b5_d476_67ed_0167);
 }
+
+#[test]
+fn translate_moves_what_is_painted() {
+    // The page of issue 376: a fixed red box with `translateX(-100%)` is off the screen.
+    let red = rgb(255, 0, 0);
+    let c = bare("<div style='position:fixed;left:0;top:0;width:200px;height:200px;background:#f00;transform:translateX(-100%)'></div>");
+    assert_eq!(ink(&c, 0, 0, W, H, WHITE), None, "nothing is painted");
+    // `none` shows the box, and a move to the right shows it there.
+    let c = bare("<div style='position:fixed;left:0;top:0;width:200px;height:200px;background:#f00;transform:none'></div>");
+    assert_eq!(c.pixel(10, 10), red);
+    let c = bare("<div style='width:100px;height:100px;background:#f00;transform:translate(50px,20px)'><p style='margin:0'>x</p></div>");
+    assert_eq!(ink(&c, 0, 0, W, H, WHITE).map(|b| (b.0, b.1)), Some((50, 20)));
+    assert_eq!(c.pixel(10, 10), WHITE);
+    assert_eq!(c.pixel(60, 30), red);
+    let c = bare("<div style='width:100px;height:100px;background:#f00;translate:-50% 10px'></div>");
+    assert_eq!(ink(&c, 0, 0, W, H, WHITE), Some((0, 10, 50, 110)), "the part left of the page is cut");
+}
