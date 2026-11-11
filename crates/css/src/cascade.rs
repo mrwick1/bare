@@ -2228,6 +2228,7 @@ fn initial(p: Property) -> Value {
         PointerEvents => Value::Keyword(K::Auto),
         BorderTopLeftRadius | BorderTopRightRadius | BorderBottomRightRadius | BorderBottomLeftRadius => px(0.0),
         BorderSpacingH | BorderSpacingV => px(0.0),
+        TranslateX | TranslateY => px(0.0),
         MarginTop | MarginRight | MarginBottom | MarginLeft | PaddingTop | PaddingRight | PaddingBottom | PaddingLeft => px(0.0),
         BorderTopWidth | BorderRightWidth | BorderBottomWidth | BorderLeftWidth => px(3.0),
         // `medium`. With the style `none` it is 0: `compute` does that.

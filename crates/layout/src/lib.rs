@@ -167,6 +167,29 @@ fn layout_with<'a>(doc: &'a Document, styles: &'a Styles, viewport: (f32, f32), 
             }
         }
     }
+    // `transform: translate(...)` moves a box, and all that is inside it, in the same way. The layout of the others does not change. A
+    // percent is of the border box of the box itself. An inline box that is not atomic has no transform.
+    {
+        use bare_css::values::{Property, Value};
+        let zero = Value::Length(bare_css::values::Length::Px(0.0));
+        let moves = |s: &bare_css::cascade::ComputedStyle| s.get(Property::TranslateX) != zero || s.get(Property::TranslateY) != zero;
+        if cx.tree.styles.each().any(moves) {
+            for i in 0..cx.out.len() {
+                let f = cx.out[i];
+                if f.kind != fragment::Kind::Box || matches!(cx.tree.kind(f.node), boxes::Kind::Inline) {
+                    continue;
+                }
+                let style = cx.tree.style(f.node);
+                if !moves(style) {
+                    continue;
+                }
+                let dx = block::resolve(&cx, style.get(Property::TranslateX), Some(f.rect.w)).unwrap_or(0.0);
+                let dy = block::resolve(&cx, style.get(Property::TranslateY), Some(f.rect.h)).unwrap_or(0.0);
+                cx.out[i].rect.x += dx;
+                cx.out[i].rect.y += dy;
+            }
+        }
+    }
     fragment::absolute(&mut cx.out);
     Layout { fragments: cx.out, width: viewport.0, height, view: viewport, bars: cx.bars, work: cx.work, tracks: cx.tracks, kept }
 }
