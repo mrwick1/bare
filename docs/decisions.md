@@ -1202,3 +1202,13 @@ Owner request: a small MCP server, so that an agent can run end-to-end tests in 
 - `bare-mcp` keeps saved sessions in memory by default, so tokens never touch disk. It writes a file only when a call gives `file`.
 - `ensure_session` follows Cypress `cy.session`: restore, run a check, and log in again with an empty profile when the check fails. The check is the validation.
 - The live page stays open on the checked page. The agent goes on with `step` and does not log in or open the page a second time.
+
+## Event streams outside the fetch queue (2026-11-11, #375)
+
+`EventSource` must deliver each event while the server keeps the stream open. A reply in the queue of `fetch` arrives whole, and the queue settles in order. A stream that never ends then gave no event, and it held back every later request of the page. The app `deck` showed both: no live update, and no POST after a chat opened.
+
+- An `XMLHttpRequest` GET whose `Accept` is `text/event-stream` is an event stream (`queue_xhr_stream` in `browser_fetch.rs`). `EventSource` sends this header. It is not in the queue, so the order rules of the queue do not change.
+- Each stream has its own thread. The thread uses the request path of `fetch` (`run_hops`: policy, CORS, cookies, redirects), then reads the body with `Client::send_stream_once` and sends each chunk over a channel. A pool worker is not used: a stream would hold it for good.
+- The page takes the chunks in the loader loop (`Browser::run_streams`), and `live_work` counts a waiting chunk as work. The XHR fires `readystatechange` and `progress` in state 3 for each chunk, as Chrome does. The shim parses only the new text.
+- Caps: 6 open streams on a page, and 1 MiB of body on a stream. A stream past the byte cap ends with a network error, and `EventSource` connects again with `Last-Event-ID`.
+- An open stream does not hold the settle of a headless page.

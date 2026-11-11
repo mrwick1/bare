@@ -939,7 +939,13 @@ impl Browser {
         // A split document goes on at once, unless it stopped for a download, or ran every task it had (`rounds`: then a download of a
         // dynamic script or a timer is what can change it, and the terms above and `next_scheduled_due` tell).
         let parse = s.parse.borrow().as_ref().map(|p| !p.waiting || waits.unwrap_or(false));
-        match (self.fetch_ready(), script, waits, parse) {
+        // A queued request, or an open event stream: is a reply or a chunk in?
+        let net = match (self.fetch_ready(), self.streams_ready()) {
+            (Some(true), _) | (_, Some(true)) => Some(true),
+            (None, None) => None,
+            _ => Some(false),
+        };
+        match (net, script, waits, parse) {
             (Some(true), ..) | (_, Some(true), ..) | (.., Some(true), _) | (.., Some(true)) => Some(true),
             (None, None, None, None | Some(false)) => None,
             _ => Some(false),
@@ -1741,6 +1747,16 @@ impl Run<'_> {
                 self.after_js()?;
                 if n == 0 {
                     break;
+                }
+            }
+            // The chunks that the open event streams received (they are not in the queue of `fetch`).
+            if !self.sliced() {
+                let r = self.b.run_streams();
+                let n = self.tasks_or_abort(r, "event stream")?;
+                self.res.tasks += n;
+                did += n;
+                if n > 0 {
+                    self.after_js()?;
                 }
             }
             for _ in 0..batch {

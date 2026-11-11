@@ -1427,6 +1427,7 @@ impl Heap {
             Some(68) => named!("DocumentType") || named!("DOMException"),
             Some(100) => named!("devicePixelRatio") || named!("designMode") || named!("dir"),
             Some(98) => named!("blur"),
+            Some(69) => named!("EventSource"),
             Some(70) => named!("FontFace"),
             Some(114) => named!("referrer"),
             _ => false,

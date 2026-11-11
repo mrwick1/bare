@@ -8375,3 +8375,21 @@ Gaps: no rotate, scale, skew or matrix. `transform` and `translate` together: th
 Checks (release): `cargo test --workspace`: 3506 passed, 0 failed. New tests: `values::tests::transform_translate`, `block::tests::translate_moves_a_box_and_what_is_inside`, `hit::tests::a_translated_box_is_hit_where_it_is_drawn`, `paint::translate_moves_what_is_painted`. `tools/portable_check.sh`: ok. The page of the issue, painted with `bare --paint`, shows no red.
 
 Not tested: `bare-mcp` and a window on the page of the issue. Animation of `transform`. A real drawer site.
+
+## EventSource (#375, 2026-11-11)
+
+`EventSource` now exists, and it delivers each event as it arrives. It is a JavaScript shim (`crates/bare/src/shims/eventsource.js`) on top of `XMLHttpRequest`, made at the first read of the name like `Path2D` (`browser_shims.rs`). `Heap::browser_name` in `crates/js/src/heap.rs` lists the name.
+
+What it does: a GET with `Accept: text/event-stream` and `Last-Event-ID`; `open`, `message` and named events; `lastEventId`, `retry`, comments, a BOM, `\r\n`, `\n` and `\r` line ends (also split over two chunks); an unended last event is dropped; `close()`; `withCredentials`; `readyState` and its constants. When the stream ends, it fires `error` with state 0 and connects again after the retry time (3000 ms by default). A status other than 200, or a type other than `text/event-stream`, fires `error` and closes (a 502, 503 or 504 reconnects, as does a network error).
+
+Live streaming (see "Event streams outside the fetch queue" in decisions.md): an XHR GET that asks for `text/event-stream` is not in the queue of `fetch`. Its own thread reads the body and sends each chunk to the page. The loader loop delivers the chunks (`Browser::run_streams`), and the XHR fires `readystatechange` and `progress` in state 3 for each one. A later `fetch` or XHR does not wait for the stream. Caps: 6 open streams on a page, 1 MiB of body on a stream (then a network error and a reconnect).
+
+Gaps:
+- Events are `Event` objects with `data`, `origin`, `lastEventId`, `source` and `ports`. `MessageEvent` is not a constructor here, so `e instanceof MessageEvent` is false.
+- A closed stream ends its thread at the next chunk or at the read timeout of the connection (30 s), not at once.
+- A server that sends nothing for 30 s ends the stream with a read timeout. `EventSource` then connects again.
+- Only an XHR that asks for `text/event-stream` streams. Other XHR replies and all `fetch` bodies still arrive whole.
+
+Checks: `cargo test -p bare --lib eventsource`: 9 passed. New tests: `events_arrive_while_the_stream_is_open`, `an_event_split_over_chunks_fires_once`, `close_stops_the_events`, `a_post_completes_while_a_stream_is_open`, and in `crates/mcp/tests/server.rs` `an_open_event_stream_delivers_events_and_does_not_block_a_fetch`. All failed before the change; the MCP test failed with `no element matches text="fetch done"`. `cargo test -p bare`: 1291 passed, 2 failed (`browser_canvas_tests::one_image_data_holds_at_most_64_mib` fails on main too; `browser_session_tests::a_pending_meta_refresh_is_queued_work` is flaky and passed alone). `cargo test -p bare-mcp -p bare-drive`: all pass except `chunked` (2 tests), which fails on main too. `cargo clippy`: no warning on a changed line. `tools/portable_check.sh`: ok. The app `deck` in `bare-mcp`: a new chat sends its message, the run streams, and the screenshot shows in the chat.
+
+Not tested: `withCredentials` with cookies. A cross-origin stream (CORS). HTTP/2 streams. Chrome comparison of the event order.

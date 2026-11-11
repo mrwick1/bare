@@ -67,7 +67,7 @@ pub fn browser(port: u16) -> Browser {
     b
 }
 
-fn js(b: &mut Browser, src: &str) -> String {
+pub fn js(b: &mut Browser, src: &str) -> String {
     match b.run_script(src) {
         Ok(v) => b.it.display(v),
         Err(Error::Throw(v)) if matches!(v, Value::Object(_)) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),
@@ -79,11 +79,17 @@ fn js(b: &mut Browser, src: &str) -> String {
 
 /// Pump timers and the network until the script sets `finished`.
 pub fn settle(b: &mut Browser) {
-    let end = Instant::now() + Duration::from_secs(5);
+    settle_for(b, Duration::from_secs(5));
+}
+
+/// `settle`, with a time limit.
+pub fn settle_for(b: &mut Browser, limit: Duration) {
+    let end = Instant::now() + limit;
     b.drain().unwrap();
     while Instant::now() < end && js(b, "finished") != "true" {
         b.run_scheduled_tasks(100).unwrap();
         b.run_network_tasks(100).unwrap();
+        b.run_streams().unwrap();
         b.run_scheduled_tasks(100).unwrap();
         std::thread::sleep(Duration::from_millis(2));
     }

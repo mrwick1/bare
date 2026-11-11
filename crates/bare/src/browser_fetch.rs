@@ -49,7 +49,7 @@
 //!
 //! Streams: `response.body` is a facade over a response that is fully buffered in memory. `getReader().read()` hands out real
 //! bytes of that response in `Uint8Array` chunks of `chunk_bytes`, then `{done: true}`. There is no live socket streaming and no
-//! backpressure. `cancel`, `releaseLock`, `locked`, `bodyUsed` and the one-consumer rules work. `tee`, `pipeTo`, `pipeThrough`,
+//! backpressure. The one exception is an XHR event stream (`queue_xhr_stream`): it is not queued, and its own thread reads the body as it comes. `cancel`, `releaseLock`, `locked`, `bodyUsed` and the one-consumer rules work. `tee`, `pipeTo`, `pipeThrough`,
 //! BYOB readers, `reader.closed` and transfer are `Unsupported`. `new ReadableStream(...)` with a script source is in
 //! `browser_streams.rs`; the stream and reader methods there dispatch on which kind of object `this` is.
 //!
@@ -492,7 +492,34 @@ struct FetchState {
     halted: Option<Error>,
     /// Body bytes of the replies that workers read and that wait for their turn. `usize::MAX` once the page is gone.
     done: Arc<AtomicUsize>,
+    /// Open event streams (`queue_xhr_stream`). They are not in `queue`.
+    streams: Vec<OpenStream>,
 }
+
+/// What the thread of an event stream (`run_stream`) sends to the page.
+pub(crate) enum StreamMsg {
+    /// The status and the headers (an `Outcome::Done` with an empty body), or why the request failed.
+    Head(Outcome),
+    /// Body bytes, as they came.
+    Chunk(Vec<u8>),
+    /// The end of the body: `None` when the server ended it, else the cause.
+    End(Option<String>),
+}
+
+/// An event stream: an `XMLHttpRequest` whose body is read on its own thread and given to the page as it comes. Dropping it drops
+/// the receiver, so the thread ends at its next chunk (or at the read timeout of the connection).
+struct OpenStream {
+    x: (ObjId, u64),
+    url: Url,
+    rx: std::sync::mpsc::Receiver<StreamMsg>,
+    /// Messages taken from `rx` and not delivered yet.
+    got: VecDeque<StreamMsg>,
+}
+
+/// Open event streams on a page, as the 6 connections of Chrome to one HTTP/1.1 host. One more fails with a network error.
+const MAX_STREAMS: usize = 6;
+/// Body bytes of one event stream. A stream that passes it ends with a network error (an `EventSource` then connects again).
+const STREAM_BYTES: usize = 1 << 20;
 
 #[derive(Clone, Copy)]
 enum Pr {
@@ -538,6 +565,7 @@ impl Fetch {
         out.extend(self.fixed.borrow().iter().map(|&o| Value::Object(o)));
         out.extend(self.json_parse.get());
         out.extend(self.st.borrow().queue.iter().flat_map(|p| [p.promise].into_iter().chain(p.xhr.map(|x| Value::Object(x.0)))));
+        out.extend(self.st.borrow().streams.iter().map(|s| Value::Object(s.x.0)));
     }
 
     pub(crate) fn trace(&self, owner: ObjId, out: &mut Vec<Value>) {
@@ -1863,9 +1891,69 @@ pub(crate) fn queue_xhr_blob(d: &Dom, x: (ObjId, u64), url: Url, found: Option<(
     Ok(())
 }
 
+/// Start an `XMLHttpRequest` GET as an event stream: its own thread reads the body and the page gets each chunk as it comes
+/// (`Browser::run_streams`). The request is not in the queue, so a stream that never ends does not hold back the requests after it.
+/// The same policy, CORS and cookies as `queue_xhr`.
+pub(crate) fn queue_xhr_stream(d: &Dom, x: (ObjId, u64), url: Url, headers: Vec<(String, String)>, with_credentials: bool) -> R<()> {
+    let lim = d.fl();
+    let mut cors = policy(d, &lim, &url, Mode::Cors, "XMLHttpRequest")?;
+    cors.include = with_credentials;
+    let mut st = d.fetch.st.borrow_mut();
+    if st.started >= lim.max_started {
+        return Err(d.lim("fetch-requests"));
+    }
+    st.started += 1;
+    let (tx, rx) = std::sync::mpsc::channel();
+    if st.streams.len() >= MAX_STREAMS {
+        let _ = tx.send(StreamMsg::Head(Outcome::Failed("too many event streams")));
+    } else {
+        let mut client = d.fetch.client.borrow().fork();
+        let wire = Wire { method: Method::Get, url: dup(&url), headers, body: None, redirect: Redirect::Follow, cors, queued: None };
+        let fail = tx.clone();
+        if std::thread::Builder::new().name("bare-event-stream".into()).spawn(move || run_stream(&mut client, &lim, &wire, &tx)).is_err() {
+            let _ = fail.send(StreamMsg::Head(Outcome::Failed("no thread for the event stream")));
+        }
+    }
+    st.streams.push(OpenStream { x, url, rx, got: VecDeque::new() });
+    Ok(())
+}
+
+/// The thread of an event stream: send the request, then each chunk of the body as it is read.
+fn run_stream(client: &mut Client, lim: &FetchLimits, wire: &Wire, tx: &std::sync::mpsc::Sender<StreamMsg>) {
+    use std::io::Read;
+    let mut body = None;
+    let head = run_hops(client, lim, wire.parts(), &mut Vec::new(), Some(&mut body));
+    let ok = matches!(head, Outcome::Done { .. });
+    if tx.send(StreamMsg::Head(head)).is_err() || !ok {
+        return;
+    }
+    let Some(mut body) = body else {
+        let _ = tx.send(StreamMsg::End(None));
+        return;
+    };
+    let (mut buf, mut total) = (vec![0u8; 16 << 10], 0usize);
+    loop {
+        let msg = match body.read(&mut buf) {
+            Ok(0) => StreamMsg::End(None),
+            Ok(n) if total + n > STREAM_BYTES => StreamMsg::End(Some("the event stream passed its byte cap".into())),
+            Ok(n) => {
+                total += n;
+                StreamMsg::Chunk(buf[..n].to_vec())
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => StreamMsg::End(Some(bare_net::cause::describe(&e))),
+        };
+        let end = matches!(msg, StreamMsg::End(_));
+        if tx.send(msg).is_err() || end {
+            return;
+        }
+    }
+}
+
 /// Take the request of an `XMLHttpRequest` out of the queue, if it is still there.
 pub(crate) fn dequeue_xhr(d: &Dom, x: ObjId) {
     let mut st = d.fetch.st.borrow_mut();
+    st.streams.retain(|s| s.x.0 != x);
     if let Some(i) = st.queue.iter().position(|t| t.xhr.is_some_and(|(o, _)| o == x)) {
         let t = st.queue.remove(i).expect("position");
         st.queued_bytes -= t.body.as_ref().map_or(0, |b| b.len());
@@ -1898,6 +1986,12 @@ pub(crate) enum Outcome {
 }
 
 fn run_one(client: &mut Client, lim: &FetchLimits, first: Parts<'_>, diag: &mut Vec<String>) -> Outcome {
+    run_hops(client, lim, first, diag, None)
+}
+
+/// `run_one`. With `stream`, the last reply is not read: its `Outcome::Done` has an empty body, and `stream` gets the body that reads
+/// from the connection (`run_stream`).
+fn run_hops(client: &mut Client, lim: &FetchLimits, first: Parts<'_>, diag: &mut Vec<String>, mut stream: Option<&mut Option<bare_net::http::Body>>) -> Outcome {
     let cors = first.cors;
     if let Some(t) = &cors.blocked {
         return Outcome::Blocked(t.clone());
@@ -1930,7 +2024,14 @@ fn run_one(client: &mut Client, lim: &FetchLimits, first: Parts<'_>, diag: &mut 
         // document, `omit` never. The same rule decides if the reply may set one.
         let cookies = Cookies { on: cors.include || !cors.omit && doc.same_origin(&url), ctx: Ctx::Embedded };
         let req = NetRequest { cookies, method, url: &url, headers: &wire, body: body.unwrap_or(&[]) };
-        let resp = match client.send_once(&req, lim.max_response_body) {
+        let sent = match stream.as_deref_mut() {
+            None => client.send_once(&req, lim.max_response_body),
+            Some(out) => client.send_stream_once(&req).map(|s| {
+                *out = Some(s.body);
+                s.response
+            }),
+        };
+        let resp = match sent {
             Ok(r) => r,
             Err(e) if e.to_string() == "the reply is too big" => return Outcome::TooBig,
             Err(e) => return Outcome::Net(bare_net::cause::describe(&*e)),
@@ -2253,6 +2354,69 @@ impl Browser {
     pub(crate) fn fetch_ready(&self) -> Option<bool> {
         let st = self.dom.fetch.st.borrow();
         st.queue.front().map(|p| p.started.as_ref().is_none_or(|t| t.done()))
+    }
+
+    /// Event streams: `Some(true)` when one has a message for the page, `Some(false)` when streams are open and none has, `None` when
+    /// none is open.
+    pub(crate) fn streams_ready(&self) -> Option<bool> {
+        let mut st = self.dom.fetch.st.borrow_mut();
+        if st.streams.is_empty() {
+            return None;
+        }
+        let mut any = false;
+        for s in &mut st.streams {
+            while let Ok(m) = s.rx.try_recv() {
+                s.got.push_back(m);
+            }
+            any |= !s.got.is_empty();
+        }
+        Some(any)
+    }
+
+    /// Give the page what the event streams received (`Browser::xhr_stream_deliver`). A stream that ended is dropped. Gives how many
+    /// messages were delivered.
+    pub fn run_streams(&mut self) -> R<usize> {
+        if self.streams_ready() != Some(true) {
+            return Ok(0);
+        }
+        let dom = self.dom.clone();
+        let lim = dom.fl();
+        let msgs: Vec<((ObjId, u64), StreamMsg)> = {
+            let mut st = dom.fetch.st.borrow_mut();
+            let st = &mut *st;
+            let (mut msgs, mut diag) = (Vec::new(), Vec::new());
+            st.streams.retain_mut(|s| {
+                let mut open = true;
+                for m in s.got.drain(..) {
+                    match &m {
+                        StreamMsg::Head(Outcome::Done { .. }) | StreamMsg::Chunk(_) => {}
+                        StreamMsg::Head(Outcome::Net(cause)) | StreamMsg::End(Some(cause)) => {
+                            diag.push(format!("failed: network error ({}): {cause}", origin(&s.url)));
+                            open = false;
+                        }
+                        StreamMsg::Head(Outcome::Blocked(_)) => {
+                            diag.push(format!("failed: blocked by CORS or the request policy ({})", origin(&s.url)));
+                            open = false;
+                        }
+                        _ => open = false,
+                    }
+                    msgs.push((s.x, m));
+                }
+                open
+            });
+            for t in diag {
+                st.diag(&lim, t);
+            }
+            msgs
+        };
+        let n = msgs.len();
+        for ((x, seq), m) in msgs {
+            if let StreamMsg::Head(Outcome::Blocked(text)) = &m {
+                crate::browser_console::push_text(&dom, &mut self.it, crate::browser_console::ConsoleLevel::Error, text);
+            }
+            self.xhr_stream_deliver(x, seq, m)?;
+        }
+        Ok(n)
     }
 
     /// Run up to `max` queued requests, oldest first. Each one does its blocking I/O, settles its promise and runs a microtask
