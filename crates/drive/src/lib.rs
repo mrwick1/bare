@@ -5,5 +5,6 @@
 
 pub mod locate;
 pub mod run;
+pub mod snap;
 pub mod state;
 pub mod steps;

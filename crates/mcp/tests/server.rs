@@ -78,7 +78,7 @@ fn tools_list_names_the_tools() {
     let mut s = Server::start();
     let r = s.ask("tools/list", json!({}));
     let names: Vec<&str> = r["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(names, ["run_steps", "open", "step", "save_state", "ensure_session", "close"]);
+    assert_eq!(names, ["run_steps", "open", "step", "save_state", "ensure_session", "close", "snapshot", "act", "find", "read", "links", "screenshot", "eval", "sessions"]);
 }
 
 #[test]
@@ -322,4 +322,46 @@ fn an_open_event_stream_delivers_events_and_does_not_block_a_fetch() {
     let steps = format!("open {base}/\ntimeout 10000\nexpect text=\"fetch done\" visible\nwait js \"document.getElementById('a').textContent.startsWith('start msg msg')\"");
     let (rep, error) = s.tool("run_steps", json!({"steps": steps, "timeout_ms": 30000}));
     assert!(!error && rep["ok"] == true, "{rep}");
+}
+
+/// The ref of the first snapshot line that holds `what`.
+fn ref_of(snap: &str, what: &str) -> String {
+    let line = snap.lines().find(|l| l.contains(what)).unwrap_or_else(|| panic!("no {what} in {snap}"));
+    line[line.find("[e").unwrap() + 1..line.find(']').unwrap()].to_string()
+}
+
+#[test]
+fn an_agent_logs_in_with_snapshot_refs_and_no_step_lines() {
+    let mut s = Server::start();
+    let (_, mut args) = journey("agent");
+    args["url"] = json!(format!("{}/", args["vars"]["BASE"].as_str().unwrap()));
+    args["timeout_ms"] = json!(30000);
+    args["snapshot"] = json!(true);
+    let (snap, error) = s.tool("open", args);
+    let snap = snap.as_str().unwrap().to_string();
+    assert!(!error && snap.starts_with("ok"), "{snap}");
+    // The secrets go in as ${NAME}: the agent never sees them, and the password field shows a mask.
+    let (r, error) = s.tool("act", json!({"op": "type", "ref": ref_of(&snap, "textbox \"Email"), "text": "${EMAIL}", "snapshot": false}));
+    assert!(!error && r.as_str().unwrap().starts_with("ok"), "{r}");
+    let (r, error) = s.tool("act", json!({"op": "type", "ref": ref_of(&snap, "(password"), "text": "${PASSWORD}"}));
+    let r = r.as_str().unwrap().to_string();
+    assert!(!error && r.contains("= \"••••\""), "{r}");
+    let (r, error) = s.tool("act", json!({"op": "click", "ref": ref_of(&r, "button")}));
+    let r = r.as_str().unwrap().to_string();
+    assert!(!error && r.contains("navigated:") && r.contains("link \"Agents\""), "{r}");
+    // The login button of the old snapshot left the document (the app changed its route without a new document).
+    let (r, error) = s.tool("act", json!({"op": "click", "ref": ref_of(&snap, "button")}));
+    assert!(error && r.as_str().unwrap().contains("FAILED detached"), "{r}");
+    let (r, _) = s.tool("find", json!({"role": "link", "name": "agents"}));
+    assert!(r.as_str().unwrap().starts_with("1 match"), "{r}");
+    let (r, _) = s.tool("read", json!({"max_chars": 20}));
+    assert!(r.as_str().unwrap().contains("read again with offset=20"), "{r}");
+    let (r, _) = s.tool("eval", json!({"js": "1 + 1"}));
+    assert_eq!(r, json!(2));
+    // A second session runs beside the first.
+    let base = journey("agent-two").1["vars"]["BASE"].as_str().unwrap().to_string();
+    let (r, error) = s.tool("open", json!({"url": format!("{base}/"), "session": "two", "snapshot": true}));
+    assert!(!error, "{r}");
+    let (r, _) = s.tool("sessions", json!({}));
+    assert!(r.as_str().unwrap().contains("main: ") && r.as_str().unwrap().contains("two: "), "{r}");
 }

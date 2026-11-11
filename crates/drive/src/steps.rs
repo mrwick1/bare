@@ -272,7 +272,7 @@ fn text_of(op: bool, v: String) -> Text {
 
 /// A locator at the start of `w`, and how many words it used.
 fn locator(w: &[Word], vars: &HashMap<String, String>) -> Result<(Locator, usize), String> {
-    let Some(Word::Pair(k, op, v)) = w.first() else { return Err("a locator is missing (css=, role=, label=, text=, placeholder=)".into()) };
+    let Some(Word::Pair(k, op, v)) = w.first() else { return Err("a locator is missing (ref=, css=, role=, label=, text=, placeholder=)".into()) };
     let v = expand(v, vars)?;
     let t = text_of(*op, v.clone());
     Ok(match k.as_str() {
@@ -284,6 +284,7 @@ fn locator(w: &[Word], vars: &HashMap<String, String>) -> Result<(Locator, usize
         "label" => (Locator::Label(t), 1),
         "text" => (Locator::Text(t), 1),
         "placeholder" => (Locator::Placeholder(t), 1),
+        "ref" if !op => (Locator::Ref(v.trim_start_matches('e').parse().map_err(|_| format!("not a ref: {v} (use ref=e7)"))?), 1),
         _ => return Err(format!("not a locator: {k}")),
     })
 }

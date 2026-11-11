@@ -56,6 +56,8 @@ pub enum Locator {
     Label(Text),
     Text(Text),
     Placeholder(Text),
+    /// A ref from a snapshot (`ref=e7`): the run resolves it, not `find`.
+    Ref(u32),
 }
 
 impl std::fmt::Display for Locator {
@@ -67,6 +69,7 @@ impl std::fmt::Display for Locator {
             Locator::Label(t) => write!(f, "label{t}"),
             Locator::Text(t) => write!(f, "text{t}"),
             Locator::Placeholder(t) => write!(f, "placeholder{t}"),
+            Locator::Ref(r) => write!(f, "ref=e{r}"),
         }
     }
 }
@@ -86,6 +89,9 @@ pub fn norm(s: &str) -> String {
 pub fn find(page: &mut Page, loc: &Locator) -> Result<Found, String> {
     if let Locator::Css(sel) = loc {
         return Ok(Found { shown: page.query_all(sel)?, hidden: 0 });
+    }
+    if let Locator::Ref(r) = loc {
+        return Err(format!("ref=e{r} needs a live session with a snapshot"));
     }
     let all = page.query_all("*")?;
     let list = page
@@ -135,9 +141,9 @@ pub fn title(page: &mut Page) -> Option<String> {
     title
 }
 
-struct Cx<'a> {
-    doc: &'a Document,
-    styles: &'a Styles,
+pub(crate) struct Cx<'a> {
+    pub(crate) doc: &'a Document,
+    pub(crate) styles: &'a Styles,
 }
 
 /// The roles that take their name from the content (accname 1.2, "name from: contents").
@@ -147,21 +153,21 @@ const FROM_CONTENT: &[&str] = &[
 ];
 
 impl<'a> Cx<'a> {
-    fn attr(&self, n: NodeId, name: &str) -> Option<&'a str> {
+    pub(crate) fn attr(&self, n: NodeId, name: &str) -> Option<&'a str> {
         self.doc.find_atom(name).and_then(|a| self.doc.attr(n, a))
     }
 
-    fn tag(&self, n: NodeId) -> &'a str {
+    pub(crate) fn tag(&self, n: NodeId) -> &'a str {
         if self.doc.is_foreign(n) { "" } else { self.doc.element_name(n) }
     }
 
     /// The `type` of an `<input>`, in lowercase (`text` when absent).
-    fn input_type(&self, n: NodeId) -> String {
+    pub(crate) fn input_type(&self, n: NodeId) -> String {
         self.attr(n, "type").map_or_else(|| "text".into(), |t| t.trim().to_ascii_lowercase())
     }
 
     /// Does the element have a box, not `visibility: hidden`, and no `aria-hidden="true"` on it or above it?
-    fn rendered(&self, n: NodeId) -> bool {
+    pub(crate) fn rendered(&self, n: NodeId) -> bool {
         let Some(st) = self.styles.style(n) else { return false };
         if matches!(st.get(Property::Visibility), Css::Keyword(Keyword::Hidden | Keyword::Collapse)) {
             return false;
@@ -178,7 +184,7 @@ impl<'a> Cx<'a> {
 
     /// Can this node have a box: not an element, or an element with a style that is not `display: none`? (The cascade can keep a
     /// style for an element under `display: none`, for `getComputedStyle`.)
-    fn boxed(&self, n: NodeId) -> bool {
+    pub(crate) fn boxed(&self, n: NodeId) -> bool {
         !matches!(self.doc.data(n), NodeData::Element { .. }) || self.styles.style(n).is_some_and(|s| !matches!(s.get(Property::Display), Css::Keyword(Keyword::None)))
     }
 
@@ -189,10 +195,11 @@ impl<'a> Cx<'a> {
             Locator::Label(t) => self.label(n).is_some_and(|l| t.matches(&l)),
             Locator::Placeholder(t) => matches!(self.tag(n), "input" | "textarea") && self.attr(n, "placeholder").is_some_and(|p| t.matches(p)),
             Locator::Text(t) => !self.in_head(n) && t.matches(&self.text(n)),
+            Locator::Ref(_) => false,
         }
     }
 
-    fn in_head(&self, n: NodeId) -> bool {
+    pub(crate) fn in_head(&self, n: NodeId) -> bool {
         let mut cur = Some(n);
         while let Some(c) = cur {
             if matches!(self.tag(c), "head" | "script" | "style" | "template" | "noscript") {
@@ -204,7 +211,7 @@ impl<'a> Cx<'a> {
     }
 
     /// The role of the element: its `role` attribute (the first word), else its implicit role.
-    fn role(&self, n: NodeId) -> Option<&'a str> {
+    pub(crate) fn role(&self, n: NodeId) -> Option<&'a str> {
         if let Some(r) = self.attr(n, "role").and_then(|r| r.split_whitespace().next()) {
             return Some(r);
         }
@@ -252,7 +259,7 @@ impl<'a> Cx<'a> {
     }
 
     /// The accessible name of the element.
-    fn name(&self, n: NodeId) -> String {
+    pub(crate) fn name(&self, n: NodeId) -> String {
         norm(&self.alt(n, false, 0))
     }
 
@@ -319,7 +326,7 @@ impl<'a> Cx<'a> {
     }
 
     /// The rendered text of an element (`innerText` without its line rules), or the value of a button `<input>`.
-    fn text(&self, n: NodeId) -> String {
+    pub(crate) fn text(&self, n: NodeId) -> String {
         if self.tag(n) == "input" {
             return match self.input_type(n).as_str() {
                 "button" | "submit" | "reset" => self.attr(n, "value").unwrap_or("").to_string(),
@@ -346,7 +353,7 @@ impl<'a> Cx<'a> {
     }
 
     /// The label text of a control: `aria-labelledby`, `aria-label`, or its `<label>` elements.
-    fn label(&self, n: NodeId) -> Option<String> {
+    pub(crate) fn label(&self, n: NodeId) -> Option<String> {
         if let Some(ids) = self.attr(n, "aria-labelledby") {
             return Some(ids.split_whitespace().filter_map(|id| self.by_id(id)).map(|r| self.alt(r, true, 0)).collect::<Vec<_>>().join(" "));
         }
