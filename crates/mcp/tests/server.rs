@@ -274,3 +274,52 @@ fn a_shot_right_after_open_shows_the_loaded_page() {
     let got = std::fs::read(format!("{}/got.png", rep["out"].as_str().unwrap())).unwrap();
     assert!(got == want, "the picture after open is not the picture of the loaded page ({} and {} bytes)", got.len(), want.len());
 }
+
+/// A page that opens an `EventSource` that the server never ends, then sends a POST. Gives the base URL.
+fn event_stream_app() -> String {
+    use std::io::Read;
+    const PAGE: &str = "<!doctype html><body><p id=a>start</p><script>
+const es = new EventSource('/sse');
+es.onmessage = () => document.getElementById('a').textContent += ' msg';
+(async () => { await new Promise(r => setTimeout(r, 200)); const t = await (await fetch('/x', {method: 'POST', body: '{}'})).text();
+  const p = document.createElement('p'); p.textContent = 'fetch ' + t; document.body.append(p); })();
+</script></body>";
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for mut c in listener.incoming().flatten() {
+            std::thread::spawn(move || {
+                let (mut head, mut b) = (Vec::new(), [0u8; 1]);
+                while !head.ends_with(b"\r\n\r\n") && c.read(&mut b).unwrap_or(0) == 1 {
+                    head.push(b[0]);
+                }
+                let head = String::from_utf8_lossy(&head).to_string();
+                let len = head.lines().find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap_or(0))).unwrap_or(0);
+                let _ = c.read_exact(&mut vec![0; len]);
+                if head.starts_with("GET /sse ") {
+                    let _ = c.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n");
+                    for _ in 0..300 {
+                        if c.write_all(b"9\r\ndata: x\n\n\r\n").and_then(|_| c.flush()).is_err() {
+                            return;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                    return;
+                }
+                let (ty, body) = if head.starts_with("POST /x ") { ("text/plain", "done") } else { ("text/html", PAGE) };
+                let _ = write!(c, "HTTP/1.1 200 OK\r\nContent-Type: {ty}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            });
+        }
+    });
+    format!("http://127.0.0.1:{port}")
+}
+
+/// An open `EventSource` stream delivers its events while it stays open, and a later request does not wait for its end (bare#375).
+#[test]
+fn an_open_event_stream_delivers_events_and_does_not_block_a_fetch() {
+    let base = event_stream_app();
+    let mut s = Server::start();
+    let steps = format!("open {base}/\ntimeout 10000\nexpect text=\"fetch done\" visible\nwait js \"document.getElementById('a').textContent.startsWith('start msg msg')\"");
+    let (rep, error) = s.tool("run_steps", json!({"steps": steps, "timeout_ms": 30000}));
+    assert!(!error && rep["ok"] == true, "{rep}");
+}

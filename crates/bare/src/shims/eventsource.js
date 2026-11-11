@@ -1,6 +1,7 @@
 // `EventSource` (HTML Standard, "Server-sent events"), on top of `XMLHttpRequest`. Made at the first read of `EventSource` (`browser_shims.rs`).
-// A reply arrives whole (see `browser_xhr.rs`), so its events fire together when the server ends the stream, then the connection is made again
-// after the retry time. A stream that the server never ends gives no event. A last event with no blank line after it is dropped, as the standard says.
+// The request asks for `text/event-stream`, so the host reads its body as it comes (`queue_xhr_stream` in `browser_fetch.rs`): each chunk
+// is a `readystatechange` in state 3, and the events in it fire then. When the stream ends, the connection is made again after the retry
+// time. A last event with no blank line after it is dropped, as the standard says.
 (function () {
   'use strict';
   var S = new WeakMap();
@@ -31,25 +32,29 @@
     if (s.rt === 2) return;
     s.timer = setTimeout(function () { s.timer = 0; connect(o, s); }, s.retry);
   }
-  function parse(o, s, text, origin) {
-    var data = null, type = '', lines = text.split(/\r\n|\n|\r/);
-    // The last element is what follows the last line break: an event that was not ended is dropped.
-    lines.pop();
-    for (var i = 0; i < lines.length && s.rt !== 2; i++) {
-      var l = lines[i];
-      if (l === '') {
-        if (s.pendingId !== null) { s.id = s.pendingId; s.pendingId = null; }
-        message(o, s, data === null ? null : data.replace(/\n$/, ''), type || 'message', origin);
-        data = null;
-        type = '';
-      } else if (l.charAt(0) !== ':') {
-        var c = l.indexOf(':'), f = c < 0 ? l : l.slice(0, c), v = c < 0 ? '' : l.slice(c + 1);
-        if (v.charAt(0) === ' ') v = v.slice(1);
-        if (f === 'data') data = (data === null ? '' : data) + v + '\n';
-        else if (f === 'event') type = v;
-        else if (f === 'id') { if (v.indexOf('\0') < 0) s.pendingId = v; }
-        else if (f === 'retry' && /^[0-9]+$/.test(v)) s.retry = parseInt(v, 10);
-      }
+  // Parse the complete lines of `s.buf`; keep the rest for the next chunk. The data and the type of the event that is being read stay in
+  // `s` across chunks. A `\r` at the end waits: a `\n` may follow in the next chunk.
+  function parse(o, s) {
+    var re = /\r\n|\n|\r(?!$)/g, at = 0, m;
+    while (s.rt !== 2 && (m = re.exec(s.buf))) {
+      line(o, s, s.buf.slice(at, m.index));
+      at = re.lastIndex;
+    }
+    s.buf = s.buf.slice(at);
+  }
+  function line(o, s, l) {
+    if (l === '') {
+      if (s.pendingId !== null) { s.id = s.pendingId; s.pendingId = null; }
+      message(o, s, s.data === null ? null : s.data.replace(/\n$/, ''), s.type || 'message', s.origin);
+      s.data = null;
+      s.type = '';
+    } else if (l.charAt(0) !== ':') {
+      var c = l.indexOf(':'), f = c < 0 ? l : l.slice(0, c), v = c < 0 ? '' : l.slice(c + 1);
+      if (v.charAt(0) === ' ') v = v.slice(1);
+      if (f === 'data') s.data = (s.data === null ? '' : s.data) + v + '\n';
+      else if (f === 'event') s.type = v;
+      else if (f === 'id') { if (v.indexOf('\0') < 0) s.pendingId = v; }
+      else if (f === 'retry' && /^[0-9]+$/.test(v)) s.retry = parseInt(v, 10);
     }
   }
   function connect(o, s) {
@@ -60,23 +65,30 @@
     x.setRequestHeader('Accept', 'text/event-stream');
     x.setRequestHeader('Cache-Control', 'no-cache');
     if (s.id !== '') x.setRequestHeader('Last-Event-ID', s.id);
+    s.seen = 0; s.buf = ''; s.data = null; s.type = ''; s.pendingId = null;
     x.onerror = function () { if (s.x === x) reconnect(o, s); };
-    x.onload = function () {
+    x.onreadystatechange = function () {
       if (s.x !== x || s.rt === 2) return;
-      var ct = (x.getResponseHeader('content-type') || '').split(';')[0].trim().toLowerCase();
-      if (x.status === 200 && ct === 'text/event-stream') {
-        s.rt = 1;
-        fire(o, 'open');
+      if (x.readyState === 2) {
+        var ct = (x.getResponseHeader('content-type') || '').split(';')[0].trim().toLowerCase(), st = x.status;
+        if (st === 200 && ct === 'text/event-stream') {
+          s.rt = 1;
+          fire(o, 'open');
+        } else {
+          s.x = null;
+          x.abort();
+          if (st === 200 || st === 204 || (st >= 300 && st < 600 && st !== 502 && st !== 503 && st !== 504)) fail(o, s);
+          else reconnect(o, s);
+        }
+      } else if (x.readyState >= 3 && s.rt === 1) {
         var text = x.responseText;
-        if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
-        parse(o, s, text, s.origin);
-        if (s.rt !== 2) reconnect(o, s);
-      } else if (x.status === 200 || x.status === 204 || (x.status >= 300 && x.status < 600 && x.status !== 502 && x.status !== 503 && x.status !== 504)) {
-        fail(o, s);
-      } else {
-        reconnect(o, s);
+        if (s.seen === 0 && text.charCodeAt(0) === 0xFEFF) s.seen = 1;
+        s.buf += text.slice(s.seen);
+        s.seen = text.length;
+        parse(o, s);
       }
     };
+    x.onload = function () { if (s.x === x && s.rt !== 2) reconnect(o, s); };
     x.send();
   }
   class EventSource extends EventTarget {

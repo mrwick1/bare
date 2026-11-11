@@ -4,8 +4,8 @@
 //! same client and the same redirect rules. The driver then calls `Browser::xhr_deliver`, which fires the events.
 //!
 //! Events (the order was recorded in headless Chrome: `tools/ui/chrome_xhr.mjs`, `tools/fixtures/ui/xhr-cases.txt`). `send()` fires
-//! `loadstart` and, for a body with an upload listener, the upload `loadstart`, and returns. The reply arrives whole, so the driver
-//! runs three steps, each in its own scope with a microtask checkpoint after each listener (as after a task):
+//! `loadstart` and, for a body with an upload listener, the upload `loadstart`, and returns. The reply arrives whole (except a GET
+//! that asks for `text/event-stream`: see `Browser::xhr_stream_deliver`), so the driver runs three steps, each in its own scope with a microtask checkpoint after each listener (as after a task):
 //! 1. the upload `progress`, `load`, `loadend` (if the request had a body and an upload listener), then `readystatechange` at state 2;
 //! 2. for a body that is not empty: state 3, `readystatechange`, `progress` (loaded, total from `Content-Length`);
 //! 3. state 4, `readystatechange`, `load`, `loadend`.
@@ -28,7 +28,7 @@
 //! keeps its upload object and its cached response alive. Side tables are pruned at `collect`.
 
 use crate::browser::*;
-use crate::browser_fetch::{Outcome, dequeue_xhr, forbidden_request, queue_xhr, queue_xhr_blob};
+use crate::browser_fetch::{Outcome, StreamMsg, dequeue_xhr, forbidden_request, queue_xhr, queue_xhr_blob, queue_xhr_stream};
 use crate::browser_handlers::{handler_get, handler_set};
 use bare_js::eval::{Error, Interp};
 use bare_js::heap::PropertyDescriptor;
@@ -482,6 +482,11 @@ fn send(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
         queue_xhr_blob(d, (x, seq), url, found)?;
         return send_started(d, it, x, seq, 0);
     }
+    // A GET that asks for `text/event-stream` (as `EventSource` does) is read as it comes: see `queue_xhr_stream`.
+    if method == "GET" && headers.iter().any(|(n, v)| n == "accept" && v.trim().eq_ignore_ascii_case("text/event-stream")) {
+        queue_xhr_stream(d, (x, seq), url, headers, creds)?;
+        return send_started(d, it, x, seq, 0);
+    }
     let mut body = None;
     if method != "GET" && method != "HEAD" {
         let v = arg(a, 0);
@@ -761,31 +766,9 @@ impl Browser {
                 return Err(dom.lim("xhr-retained"));
             }
         }
-        let total = headers.iter().find(|(n, _)| n == "content-length").and_then(|(_, v)| v.trim().parse::<u64>().ok()).unwrap_or(0) as f64;
-        let headers: Vec<(String, String)> = headers
-            .into_iter()
-            .filter(|(n, _)| n != "set-cookie" && n != "set-cookie2")
-            .map(|(n, v)| (n.to_ascii_lowercase(), v.trim_matches(['\t', ' ']).to_string()))
-            .collect();
-        let loaded = body.len() as f64;
-        let resp = Resp { status, url: url.to_string(), headers, body: Rc::new(body) };
-        // Step 1: the end of the upload, then the headers.
-        self.step(|it| {
-            let (pending, listening, len, up) = dom.xs(x, |x| (!x.upload_done, x.up_listener, x.body_len as f64, x.upload));
-            if pending {
-                dom.xs(x, |x| x.upload_done = true);
-                if listening {
-                    for ty in ["progress", "load", "loadend"] {
-                        dom.xfire(it, up, ty, Some((len, len)))?;
-                    }
-                }
-            }
-            if !dom.xcurrent(x, seq) {
-                return Ok(());
-            }
-            dom.xs(x, |x| (x.resp, x.state) = (Some(resp), HEADERS));
-            dom.xfire(it, x, "readystatechange", None)
-        })?;
+        let (resp, total) = resp_of(status, &url, headers, body);
+        let loaded = resp.body.len() as f64;
+        self.xhr_headers(dom, x, seq, resp)?;
         // Step 2: the body.
         if loaded != 0.0 {
             self.step(|it| {
@@ -810,6 +793,80 @@ impl Browser {
             Ok(())
         })
     }
+
+    /// Step 1 of a delivery: the end of the upload, then the headers.
+    fn xhr_headers(&mut self, dom: &Rc<Dom>, x: ObjId, seq: u64, resp: Resp) -> R<()> {
+        self.step(|it| {
+            let (pending, listening, len, up) = dom.xs(x, |x| (!x.upload_done, x.up_listener, x.body_len as f64, x.upload));
+            if pending {
+                dom.xs(x, |x| x.upload_done = true);
+                if listening {
+                    for ty in ["progress", "load", "loadend"] {
+                        dom.xfire(it, up, ty, Some((len, len)))?;
+                    }
+                }
+            }
+            if !dom.xcurrent(x, seq) {
+                return Ok(());
+            }
+            dom.xs(x, |x| (x.resp, x.state) = (Some(resp), HEADERS));
+            dom.xfire(it, x, "readystatechange", None)
+        })
+    }
+
+    /// A message of an event stream (`queue_xhr_stream`): the headers, a chunk of the body (state 3, `readystatechange` and
+    /// `progress` with the bytes so far, as in Chrome), the end (state 4, `load`, `loadend`) or a network error.
+    pub(crate) fn xhr_stream_deliver(&mut self, x: ObjId, seq: u64, msg: StreamMsg) -> R<()> {
+        let dom = self.dom.clone();
+        if !dom.xcurrent(x, seq) {
+            return Ok(());
+        }
+        dom.st.borrow_mut().driver = true;
+        let r = match msg {
+            StreamMsg::Head(Outcome::Done { status, url, headers, body, .. }) => self.xhr_headers(&dom, x, seq, resp_of(status, &url, headers, body).0),
+            StreamMsg::Head(_) | StreamMsg::End(Some(_)) => self.step(|it| dom.request_error(it, x, "error")),
+            StreamMsg::Chunk(bytes) => self.step(|it| {
+                let Some(loaded) = dom.xs(x, |x| {
+                    let r = x.resp.as_mut()?;
+                    Rc::make_mut(&mut r.body).extend_from_slice(&bytes);
+                    x.state = LOADING;
+                    Some(r.body.len() as f64)
+                }) else {
+                    return Ok(());
+                };
+                dom.xfire(it, x, "readystatechange", None)?;
+                if dom.xcurrent(x, seq) && dom.xs(x, |x| x.state) == LOADING {
+                    dom.xfire(it, x, "progress", Some((loaded, 0.0)))?;
+                }
+                Ok(())
+            }),
+            StreamMsg::End(None) => self.step(|it| {
+                if dom.xcurrent(x, seq) {
+                    let loaded = dom.xs(x, |x| {
+                        (x.state, x.send) = (DONE, false);
+                        x.resp.as_ref().map_or(0.0, |r| r.body.len() as f64)
+                    });
+                    dom.xfire(it, x, "readystatechange", None)?;
+                    dom.xfire(it, x, "load", Some((loaded, 0.0)))?;
+                    dom.xfire(it, x, "loadend", Some((loaded, 0.0)))?;
+                }
+                Ok(())
+            }),
+        };
+        dom.st.borrow_mut().driver = false;
+        r
+    }
+}
+
+/// The response of a reply, as the page sees it, and its `Content-Length` (0 when absent).
+fn resp_of(status: u16, url: &Url, headers: Vec<(String, String)>, body: Vec<u8>) -> (Resp, f64) {
+    let total = headers.iter().find(|(n, _)| n == "content-length").and_then(|(_, v)| v.trim().parse::<u64>().ok()).unwrap_or(0) as f64;
+    let headers: Vec<(String, String)> = headers
+        .into_iter()
+        .filter(|(n, _)| n != "set-cookie" && n != "set-cookie2")
+        .map(|(n, v)| (n.to_ascii_lowercase(), v.trim_matches(['\t', ' ']).to_string()))
+        .collect();
+    (Resp { status, url: url.to_string(), headers, body: Rc::new(body) }, total)
 }
 
 // ------------------------------------------------------------------------------------ install
