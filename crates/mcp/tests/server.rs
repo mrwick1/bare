@@ -365,3 +365,76 @@ fn an_agent_logs_in_with_snapshot_refs_and_no_step_lines() {
     let (r, _) = s.tool("sessions", json!({}));
     assert!(r.as_str().unwrap().contains("main: ") && r.as_str().unwrap().contains("two: "), "{r}");
 }
+
+#[test]
+fn an_agent_fills_a_form_with_select_check_hover_dblclick_and_upload() {
+    let mut s = Server::start();
+    let base = common::serve();
+    let (r, error) = s.tool("open", json!({"url": format!("{base}/forms"), "snapshot": true}));
+    let snap = r.as_str().unwrap().to_string();
+    assert!(!error && snap.contains("combobox \"Country\" = \"Kenya\"") && snap.contains("listbox \"Fruit\""), "{snap}");
+    let act = |s: &mut Server, args: Value| {
+        let (r, error) = s.tool("act", args);
+        (r.as_str().unwrap().to_string(), error)
+    };
+    // select: by label, then by value; input and change fire once for each change, none for the same pick again.
+    let (r, error) = act(&mut s, json!({"op": "select", "ref": ref_of(&snap, "combobox"), "text": "Tanzania", "mode": "all"}));
+    assert!(!error && r.contains("= \"Tanzania\"") && r.contains("events: country:input country:change"), "{r}");
+    let (r, error) = act(&mut s, json!({"op": "select", "loc": "css=\"#country\"", "text": "tz", "mode": "all"}));
+    assert!(!error && r.contains("events: country:input country:change\""), "{r}");
+    let (r, error) = act(&mut s, json!({"op": "select", "loc": "css=\"#country\"", "text": "Narnia"}));
+    assert!(error && r.contains("FAILED no_option") && r.contains("Kenya"), "{r}");
+    // A multiple select takes several options.
+    let (r, error) = act(&mut s, json!({"op": "select", "loc": "css=\"#fruit\"", "options": ["Apple", "c"]}));
+    assert!(!error && r.contains("= \"Apple, Cherry\""), "{r}");
+    let (r, error) = act(&mut s, json!({"op": "select", "loc": "css=\"#country\"", "options": ["Kenya", "Tanzania"]}));
+    assert!(error && r.contains("one option"), "{r}");
+    // check and uncheck click only when the state differs.
+    let (r, error) = act(&mut s, json!({"op": "check", "loc": "label=\"Agree\""}));
+    assert!(!error && r.contains("checkbox \"Agree\" (checked"), "{r}");
+    let (r, _) = act(&mut s, json!({"op": "check", "loc": "label=\"Agree\""}));
+    assert!(r.contains("(checked"), "{r}");
+    let (r, error) = act(&mut s, json!({"op": "uncheck", "loc": "label=\"Agree\""}));
+    assert!(!error && r.contains("checkbox \"Agree\"") && !r.contains("checkbox \"Agree\" (checked"), "{r}");
+    let (r, error) = act(&mut s, json!({"op": "check", "loc": "css=\"#dbl\""}));
+    assert!(error && r.contains("FAILED not_checkable"), "{r}");
+    // hover: the :hover rule shows the menu, and mouseenter fires.
+    let r = s.tool("read", json!({})).0.as_str().unwrap().to_string();
+    assert!(!r.contains("Menu is open") && r.contains("cold"), "{r}");
+    let (r, error) = act(&mut s, json!({"op": "hover", "loc": "text=\"Hover target\"", "mode": "all"}));
+    assert!(!error && r.contains("Menu is open") && r.contains("hot"), "{r}");
+    // dblclick fires dblclick, and a click alone does not.
+    let (_, _) = act(&mut s, json!({"op": "click", "loc": "css=\"#dbl\""}));
+    assert_eq!(s.tool("eval", json!({"js": "document.getElementById('dbls').textContent"})).0, json!("single"));
+    let (r, error) = act(&mut s, json!({"op": "dblclick", "loc": "css=\"#dbl\"", "mode": "all"}));
+    assert!(!error && r.contains("double"), "{r}");
+    // upload: a plain form posts it as multipart, and a fetch with FormData sends the same file.
+    let dir = std::env::temp_dir().join(format!("bare-mcp-test-upload-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("notes.txt");
+    std::fs::write(&file, "twelve bytes").unwrap();
+    let file = file.to_str().unwrap().to_string();
+    let (r, error) = act(&mut s, json!({"op": "upload", "loc": "css=\"input[type=file]\"", "files": [file.clone(), file.clone()]}));
+    assert!(error && r.contains("FAILED one_file"), "{r}");
+    let (r, error) = act(&mut s, json!({"op": "upload", "loc": "css=\"input[type=file]\"", "files": [dir.join("missing.txt").to_str().unwrap()]}));
+    assert!(error && r.contains("FAILED bad_file"), "{r}");
+    // A file over 100 MiB is refused with a clear error (a sparse file: no disk is used).
+    let big = dir.join("big.bin");
+    std::fs::File::create(&big).unwrap().set_len((100 << 20) + 1).unwrap();
+    let (r, error) = act(&mut s, json!({"op": "upload", "loc": "css=\"input[type=file]\"", "files": [big.to_str().unwrap()]}));
+    assert!(error && r.contains("FAILED bad_file") && r.contains("over the 100 MiB limit"), "{r}");
+    let (r, error) = act(&mut s, json!({"op": "upload", "loc": "css=\"input[type=file]\"", "files": [file.clone()], "snapshot": false}));
+    assert!(!error && r.starts_with("ok"), "{r}");
+    assert_eq!(s.tool("eval", json!({"js": "var f = document.querySelector('input[type=file]').files; f.length + ' ' + f[0].name + ' ' + f[0].size + ' ' + f[0].type"})).0, json!("1 notes.txt 12 text/plain"));
+    let (r, error) = act(&mut s, json!({"op": "click", "loc": "css=\"#go\""}));
+    assert!(!error, "{r}");
+    let (r, _) = act(&mut s, json!({"op": "wait", "loc": "text~\"fetched uploaded\"", "snapshot": false}));
+    assert!(r.starts_with("ok"), "{r}");
+    assert_eq!(s.tool("eval", json!({"js": "document.getElementById('fetched').textContent"})).0, json!("fetched uploaded: notes.txt 12"));
+    let (r, error) = act(&mut s, json!({"op": "click", "loc": "role=button name=\"Send file\"", "mode": "all"}));
+    assert!(!error && r.contains("navigated:") && r.contains("uploaded: notes.txt 12"), "{r}");
+    // The same actions are step lines.
+    let (r, error) = s.tool("run_steps", json!({"steps": format!("open {base}/forms\nselect css=\"#country\" \"Tanzania\"\ncheck label=\"Agree\"\nexpect label=\"Agree\" checked\nuncheck label=\"Agree\"\nhover text=\"Hover target\"\ndblclick css=\"#dbl\"\nexpect css=\"#dbls\" text=\"double\"\nupload css=\"input[type=file]\" \"{file}\"\n"), "compact": true}));
+    assert!(!error && r["ok"] == true, "{r}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

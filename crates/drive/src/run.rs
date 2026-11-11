@@ -641,6 +641,7 @@ fn refused(p: &mut Page, h: Handle, r: Refusal) -> Try {
         Refusal::NotEditable => Try::Stop(fail("not_editable", format!("{what} is not a text field"))),
         Refusal::NoFocus => Try::Stop(fail("no_focus", format!("{what} did not take the focus after the click"))),
         Refusal::NoPage(e) => Try::Again(fail("page", e)),
+        Refusal::Wrong(kind, why) => Try::Stop(fail(kind, why)),
     }
 }
 
@@ -672,6 +673,26 @@ fn attempt(p: &mut Page, m: &mut Memo, a: &Action, out: Option<&PathBuf>, red: &
                 }
                 m.keys = None;
                 p.after_action();
+            }
+            Action::Select(loc, wanted) => {
+                let h = one(p, m, loc)?;
+                p.select(h, wanted).map_err(|r| refused(p, h, r))?;
+            }
+            Action::Check(loc, on) => {
+                let h = one(p, m, loc)?;
+                p.set_checked(h, *on).map_err(|r| refused(p, h, r))?;
+            }
+            Action::Hover(loc) => {
+                let h = one(p, m, loc)?;
+                p.hover(h).map_err(|r| refused(p, h, r))?;
+            }
+            Action::DblClick(loc) => {
+                let h = one(p, m, loc)?;
+                p.dblclick(h).map_err(|r| refused(p, h, r))?;
+            }
+            Action::Upload(loc, paths) => {
+                let h = one(p, m, loc)?;
+                p.upload(h, paths).map_err(|r| refused(p, h, r))?;
             }
             Action::Press(key) => p.press(key).map_err(|e| Try::Stop(fail("not_found", e)))?,
             Action::Scroll(loc, dy) => {

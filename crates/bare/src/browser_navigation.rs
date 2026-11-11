@@ -383,7 +383,7 @@ impl Dom {
 
     /// A form submission: load `action` (an empty one is the document URL) with `query` in the URL (`GET`) or as the body (`POST`).
     /// An action that is not an http(s) URL does nothing.
-    pub(crate) fn submit_navigation(&self, it: &mut Interp<'_>, action: &str, post: bool, query: &str) -> R<()> {
+    pub(crate) fn submit_navigation(&self, it: &mut Interp<'_>, action: &str, post: bool, query: &str, body: Option<Body>) -> R<()> {
         let cur = self.cur_rec()?;
         let rec = if action.is_empty() {
             cur.clone()
@@ -400,7 +400,7 @@ impl Dom {
             if self.nav.s.borrow().requests.len() >= self.nav.lim.get().max_requests {
                 return Err(self.lim("nav-requests"));
             }
-            let body = Body { content_type: "application/x-www-form-urlencoded".into(), bytes: query.as_bytes().to_vec() };
+            let body = body.unwrap_or_else(|| Body { content_type: "application/x-www-form-urlencoded".into(), bytes: query.as_bytes().to_vec() });
             self.nav.s.borrow_mut().requests.push_back(NavigationRequest { kind: NavigationKind::Assign, url: href, from: cur.href(), body: Some(body) });
             return Ok(());
         }

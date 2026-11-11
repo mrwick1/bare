@@ -1226,3 +1226,15 @@ An agent such as `deck` must read a page and act on it in few model calls. Scree
 - `find`, `read` (paged text), `links`, `screenshot` (the page or one element, a path, and the image when asked), `eval` and `sessions` complete the set. Every reply goes through the redactor.
 - Each tool takes `session`. Sessions run side by side, one page each. `open` ends only the session of its name.
 - Step lines accept `ref=e7`, so a journey can mix refs and user locators.
+
+## Form actions in `act` and the step language (2026-11-12)
+
+An agent must fill real forms. `act` and the step language now have `select`, `check`, `uncheck`, `hover`, `dblclick` and `upload`.
+
+- `hover` and `dblclick` use the pointer events of `click` (`Page::hover`, `Page::dblclick`). `hover` moves the pointer to the point of `actionable`, so `:hover` rules and the enter and over events work. `dblclick` sends two presses and releases at one point, so `detail` is 2 and `dblclick` fires.
+- `check` and `uncheck` click only when the state differs, then read the state again. A radio cannot be unchecked: the step fails with `not_checked`.
+- `select` matches an option by label first, then by value. A disabled option never matches. A native list is not drawn, so no pointer moves: the engine sets the selectedness, then fires `input` and `change` (as `Page::select`). They fire only when the selection changed, as for a user. A multiple select takes several values.
+- The snapshot shows the selected label of a `<select>` as its value: `combobox "Country" = "Kenya"`. A multiple select shows the labels, joined with a comma.
+- `upload` sets the files of an `<input type=file>` from local paths and fires `input` and `change`. The engine keeps only the paths, with the name and the time. It reads the bytes when a script reads `input.files` or a form submits. A file over 100 MiB is refused when set and when read. A hidden input needs a `css=` locator, because the other locators skip hidden elements.
+- Script cannot set files, as in other browsers. `input.files` is an array of `File` objects, not a `FileList`. `new FormData(form)` and a form with `enctype="multipart/form-data"` send the real files. A `POST` with that enctype is no longer `Unsupported`; `text/plain` still is.
+- A file is read into memory as a `Blob`. A big upload costs its size in memory while it is sent. Streaming from disk needs a body type in `bare-net` that is not a byte vector, so it is not built.

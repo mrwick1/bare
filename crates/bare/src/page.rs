@@ -799,7 +799,7 @@ impl Page {
         self.stale = true;
     }
 
-    fn after(&mut self, r: Result<UiOutcome, bare_js::eval::Error>) -> bool {
+    pub(crate) fn after(&mut self, r: Result<UiOutcome, bare_js::eval::Error>) -> bool {
         let out = match r {
             Ok(o) => o,
             Err(e) => {

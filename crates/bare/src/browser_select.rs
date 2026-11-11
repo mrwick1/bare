@@ -414,6 +414,56 @@ impl Dom {
         self.sel_commit(select);
     }
 
+    /// Pick the options of `select` that match `wanted` (each by label, else by value; a disabled option never matches), as a user
+    /// does. Gives whether the selection changed, or why no option was picked.
+    pub(crate) fn sel_pick(&self, it: &mut Interp<'_>, select: NodeId, wanted: &[String]) -> R<Result<bool, String>> {
+        self.sel_sync(Some(&mut *it), select)?;
+        let (opts, multiple, before) = {
+            let st = self.sel.st.borrow();
+            let c = &st.cache[&select];
+            (c.opts.clone(), c.multiple, c.sel.clone())
+        };
+        if wanted.len() > 1 && !multiple {
+            return Ok(Err("this select takes one option".into()));
+        }
+        let mut idx = Vec::new();
+        {
+            let doc = self.doc.borrow();
+            let live: Vec<usize> = (0..opts.len()).filter(|&i| !is_disabled(&doc, opts[i])).collect();
+            for w in wanted {
+                let by = |f: &dyn Fn(NodeId) -> String| live.iter().copied().find(|&i| f(opts[i]) == *w);
+                let label = |o: NodeId| get(&doc, o, "label").map_or_else(|| text_of(&doc, o), str::to_string);
+                match by(&label).or_else(|| by(&|o| value_of(&doc, o))) {
+                    Some(i) => idx.push(i),
+                    None => {
+                        let have: Vec<String> = live.iter().take(8).map(|&i| format!("{:?}", label(opts[i]))).collect();
+                        return Ok(Err(format!("no option {w:?} (options: {}{})", have.join(", "), if live.len() > 8 { ", …" } else { "" })));
+                    }
+                }
+            }
+        }
+        if multiple {
+            for i in 0..opts.len() {
+                self.sel_set(select, i, idx.contains(&i));
+            }
+        } else if let Some(&i) = idx.first() {
+            self.sel_set(select, i, true);
+        }
+        let after = self.sel.st.borrow().cache[&select].sel.clone();
+        Ok(Ok(after != before))
+    }
+
+    /// The labels of the selected options of `select`, in tree order. `None` when `select` is not a `<select>`.
+    pub(crate) fn sel_labels(&self, select: NodeId) -> Option<Vec<String>> {
+        if !self.doc.borrow().is_html(select, "select") || self.sel_sync(None, select).is_err() {
+            return None;
+        }
+        let st = self.sel.st.borrow();
+        let c = st.cache.get(&select)?;
+        let doc = self.doc.borrow();
+        Some(c.sel.iter().map(|&i| c.opts[i as usize]).map(|o| get(&doc, o, "label").map_or_else(|| text_of(&doc, o), str::to_string)).collect())
+    }
+
     /// The option that a closed select shows: the selected one. The painter reads it.
     pub(crate) fn selected_option(&self, select: NodeId) -> Option<NodeId> {
         if !self.doc.borrow().is_html(select, "select") || self.sel_sync(None, select).is_err() {
@@ -1097,6 +1147,11 @@ pub(crate) fn prune(d: &Dom, live: &dyn Fn(ObjId) -> bool) {
 }
 
 impl Browser {
+    /// The labels of the selected options of a `<select>`.
+    pub fn selected_labels(&self, select: NodeId) -> Option<Vec<String>> {
+        self.dom.sel_labels(select)
+    }
+
     /// The option that a closed `<select>` shows (its first selected option), or `None`.
     pub fn selected_option(&self, select: NodeId) -> Option<NodeId> {
         self.dom.selected_option(select)

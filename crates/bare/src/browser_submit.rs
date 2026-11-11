@@ -24,8 +24,8 @@
 //!
 //! Gates and differences (recorded, none is faked)
 //! - No message bubble is drawn for an invalid field. The window focuses the first invalid field and scrolls to it.
-//! - `enctype="multipart/form-data"` and `text/plain` with `POST` are `Unsupported`; `GET` ignores `enctype`. `target` is ignored (the
-//!   document is replaced). `<input type=file>` sends nothing. `form.elements`, `form.action` and `form.method` are absent. `new FormData(form)` (`browser_web.rs`) uses the same entry list, and keeps a file input as an empty File.
+//! - `enctype="text/plain"` with `POST` is `Unsupported`; `multipart/form-data` with `POST` sends the files of a file input (a driver sets them: `Page::upload`; script cannot). `GET` ignores `enctype` and sends the file name. `target` is ignored (the
+//!   document is replaced). `form.elements`, `form.action` and `form.method` are absent. `new FormData(form)` (`browser_web.rs`) uses the same entry list, and keeps a file input as an empty File.
 //! - A form with a `javascript:` or other non-http(s) action does nothing.
 
 use crate::browser::*;
@@ -190,7 +190,16 @@ impl Dom {
                         out.push((format!("{p}y"), Some(Ent::S("0".into()))));
                     }
                 }
-                ("input", "file") => out.push((name, None)),
+                ("input", "file") => {
+                    let files = self.st.borrow().inputs.get(&n).map(|i| i.files.clone()).unwrap_or_default();
+                    if files.is_empty() {
+                        out.push((name.clone(), None));
+                    }
+                    for f in &files {
+                        let Value::Object(o) = crate::browser_web::file_from_ref(self, it, f)? else { unreachable!() };
+                        out.push((name.clone(), Some(Ent::B(o))));
+                    }
+                }
                 ("input", "reset" | "button") => {}
                 ("input", "checkbox" | "radio") => {
                     if self.input_checked(n) {
@@ -290,8 +299,16 @@ impl Dom {
             return Ok(());
         }
         let post = method == "post";
-        if post && !(enc.is_empty() || enc == "application/x-www-form-urlencoded") {
-            return Err(Error::Unsupported(unsupported("form POST with an enctype other than application/x-www-form-urlencoded")));
+        let multipart = post && enc == "multipart/form-data";
+        if post && !(multipart || enc.is_empty() || enc == "application/x-www-form-urlencoded") {
+            return Err(Error::Unsupported(unsupported("form POST with an enctype other than application/x-www-form-urlencoded and multipart/form-data")));
+        }
+        if multipart {
+            let list = self.entry_list(it, form, submitter)?;
+            let fd = crate::browser_web::form_from_entries(self, it, list)?;
+            let (bytes, ct) = self.web_body(it, fd, 256 << 20)?;
+            let body = crate::browser_navigation::Body { content_type: ct.expect("multipart has a type"), bytes };
+            return self.submit_navigation(it, action.trim(), post, "", Some(body));
         }
         let entries: Vec<(String, String)> = self
             .entry_list(it, form, submitter)?
@@ -303,7 +320,7 @@ impl Dom {
             })
             .collect();
         it.charge(entries.len() as u64 + 1)?;
-        self.submit_navigation(it, action.trim(), post, &encode_entries(&entries))
+        self.submit_navigation(it, action.trim(), post, &encode_entries(&entries), None)
     }
 
     /// Is `n` a submit button (the kind that `requestSubmit` accepts)?

@@ -25,7 +25,7 @@
 //! each call is a job that the window loop runs in `App::tick`, between input events. `docs/decisions.md` ("S5 control interface")
 //! has the reasons.
 //!
-//! Gaps: no drag, no double click, no right button, no modifier keys on a click; `type_text` sends one key for each character (no IME, no
+//! Gaps: no drag, no right button, no modifier keys on a click; `type_text` sends one key for each character (no IME, no
 //! paste); the viewport of a new document is the one of `open_with` (a resize of a real window is not given to the next document).
 
 use crate::browser::Browser;
@@ -64,6 +64,8 @@ pub enum Refusal {
     NoFocus,
     /// The page has no document, or it cannot be laid out (the error of the render).
     NoPage(String),
+    /// The element is not the kind that the action needs, or the action did not give the state: a fixed label for the kind, and why.
+    Wrong(&'static str, String),
 }
 
 /// One line of the diagnostics of a page: `level` is `log`, `warn` or `error` (the console), `exception` (a listener threw), `page` (a
@@ -278,6 +280,11 @@ impl Page {
         self.browser().and_then(|b| b.input_value(h.node))
     }
 
+    /// The labels of the selected options of a `<select>`, or `None` for another element.
+    pub fn selected_labels(&mut self, h: Handle) -> Option<Vec<String>> {
+        self.browser().and_then(|b| b.selected_labels(h.node))
+    }
+
     pub fn checked(&mut self, h: Handle) -> bool {
         self.browser().is_some_and(|b| b.input_checked(h.node))
     }
@@ -386,6 +393,117 @@ impl Page {
         self.handle(Event::PointerButton { x, y, button: 0, buttons: 0, pressed: false, mods });
         self.after_action();
         Ok((x, y))
+    }
+
+    /// A double click: the pointer moves to the point of `actionable`, the left button goes down and up twice at once (`dblclick` fires).
+    pub fn dblclick(&mut self, h: Handle) -> Result<(f64, f64), Refusal> {
+        let (x, y) = self.actionable(h)?;
+        if let Some(b) = self.browser() {
+            b.dom.st.borrow_mut().ui.last = None;
+        }
+        let mods = Mods::default();
+        self.handle(Event::PointerMove { x, y, buttons: 0, mods });
+        for _ in 0..2 {
+            self.handle(Event::PointerButton { x, y, button: 0, buttons: 1, pressed: true, mods });
+            self.handle(Event::PointerButton { x, y, button: 0, buttons: 0, pressed: false, mods });
+        }
+        self.after_action();
+        Ok((x, y))
+    }
+
+    /// Move the pointer over the element (the point of `actionable`): `:hover` rules apply and `pointerover`, `mouseover`, `pointerenter`
+    /// and `mouseenter` fire. No button goes down.
+    pub fn hover(&mut self, h: Handle) -> Result<(f64, f64), Refusal> {
+        let (x, y) = self.actionable(h)?;
+        self.handle(Event::PointerMove { x, y, buttons: 0, mods: Mods::default() });
+        self.after_action();
+        Ok((x, y))
+    }
+
+    /// Put a checkbox or a radio in the state `on`: a click only when the state differs, then a check of the state.
+    pub fn set_checked(&mut self, h: Handle, on: bool) -> Result<(), Refusal> {
+        let kind = self.browser().and_then(|b| {
+            let doc = b.document();
+            let doc = doc.borrow();
+            doc.is_html(h.node, "input").then(|| crate::browser_dom::input_kind(&doc, h.node))
+        });
+        if !matches!(kind, Some("checkbox" | "radio")) {
+            return Err(Refusal::Wrong("not_checkable", format!("{} is not a checkbox or a radio", self.describe(h))));
+        }
+        if self.checked(h) != on {
+            self.click(h)?;
+            if self.checked(h) != on {
+                return Err(Refusal::Wrong("not_checked", format!("{} did not become {}checked after the click", self.describe(h), if on { "" } else { "un" })));
+            }
+        }
+        Ok(())
+    }
+
+    /// Pick the options of a `<select>` by label, else value, and fire `input` and `change` (when the selection changed). The select
+    /// must be rendered and enabled; no pointer moves, as a native list is not drawn by the page.
+    pub fn select(&mut self, h: Handle, wanted: &[String]) -> Result<(), Refusal> {
+        self.visible_box(h)?;
+        if self.disabled(h) {
+            return Err(Refusal::Disabled);
+        }
+        let is_select = self.browser().is_some_and(|b| b.document().borrow().is_html(h.node, "select"));
+        if !is_select {
+            return Err(Refusal::Wrong("not_select", format!("{} is not a select", self.describe(h))));
+        }
+        let r = self.browser().map(|b| b.drive_select(h.node, wanted));
+        let Some(r) = r else { return Err(Refusal::NoPage("no document".into())) };
+        let r = match r {
+            Ok(Ok(out)) => Ok(out),
+            Ok(Err(why)) => return Err(Refusal::Wrong("no_option", why)),
+            Err(e) => Err(e),
+        };
+        self.after(r);
+        self.after_action();
+        Ok(())
+    }
+
+    /// Set the files of an `<input type=file>` from local paths and fire `input` and `change`. The input may be hidden (a page often hides
+    /// it behind a button). A file over 100 MiB, or one that is not a regular file, is refused. The bytes are read when the page or a
+    /// submit asks for them.
+    pub fn upload(&mut self, h: Handle, paths: &[String]) -> Result<(), Refusal> {
+        if !self.connected(h) {
+            return Err(Refusal::Detached);
+        }
+        if self.disabled(h) {
+            return Err(Refusal::Disabled);
+        }
+        let (kind, multiple) = self.browser().map_or((None, false), |b| {
+            let doc = b.document();
+            let doc = doc.borrow();
+            let k = doc.is_html(h.node, "input").then(|| crate::browser_dom::input_kind(&doc, h.node));
+            (k, doc.find_atom("multiple").is_some_and(|a| doc.attr(h.node, a).is_some()))
+        });
+        if kind != Some("file") {
+            return Err(Refusal::Wrong("not_file_input", format!("{} is not a file input", self.describe(h))));
+        }
+        if paths.is_empty() || (paths.len() > 1 && !multiple) {
+            return Err(Refusal::Wrong("one_file", format!("{} takes {}", self.describe(h), if paths.is_empty() { "at least one file" } else { "one file (it has no multiple attribute)" })));
+        }
+        let mut files = Vec::new();
+        for p in paths {
+            let bad = |why: String| Refusal::Wrong("bad_file", format!("{p}: {why}"));
+            let meta = std::fs::metadata(p).map_err(|e| bad(e.to_string()))?;
+            if !meta.is_file() {
+                return Err(bad("not a regular file".into()));
+            }
+            if meta.len() > crate::browser_web::MAX_UPLOAD {
+                return Err(bad(format!("{} bytes is over the {} MiB limit", meta.len(), crate::browser_web::MAX_UPLOAD >> 20)));
+            }
+            let path = std::path::PathBuf::from(p);
+            let name = path.file_name().map_or_else(|| p.clone(), |n| n.to_string_lossy().into_owned());
+            let modified_ms = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0.0, |d| d.as_millis() as f64);
+            files.push(crate::browser::FileRef { path, name, modified_ms });
+        }
+        let r = self.browser().map(|b| b.drive_files(h.node, files));
+        let Some(r) = r else { return Err(Refusal::NoPage("no document".into())) };
+        self.after(r);
+        self.after_action();
+        Ok(())
     }
 
     /// Type `text` into a field as a user does: click it, select its text with Control+A (so the new text replaces it), then press one key
