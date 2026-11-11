@@ -67,7 +67,7 @@ pub fn browser(port: u16) -> Browser {
     b
 }
 
-fn js(b: &mut Browser, src: &str) -> String {
+pub fn js(b: &mut Browser, src: &str) -> String {
     match b.run_script(src) {
         Ok(v) => b.it.display(v),
         Err(Error::Throw(v)) if matches!(v, Value::Object(_)) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),

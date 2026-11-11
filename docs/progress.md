@@ -8353,3 +8353,17 @@ Checks (release, 2026-11-10):
 - `tools/portable_check.sh`: exit 0.
 
 Not tested: the staging journey. A real Playwright file. `window: true`. A session with cookies (the fixture app keeps its token in `sessionStorage`). Two live sessions at once (not supported: a new open ends the old one).
+
+## EventSource (#375, 2026-11-11)
+
+`EventSource` now exists. It is a JavaScript shim (`crates/bare/src/shims/eventsource.js`) on top of `XMLHttpRequest`, made at the first read of the name like `Path2D` (`browser_shims.rs`). `Heap::browser_name` in `crates/js/src/heap.rs` lists the name.
+
+What it does: a GET with `Accept: text/event-stream` and `Last-Event-ID`; `open`, `message` and named events; `lastEventId`, `retry`, comments, a BOM, `\r\n`, `\n` and `\r` line ends; an unended last event is dropped; `close()`; `withCredentials`; `readyState` and its constants. When the stream ends, it fires `error` with state 0 and connects again after the retry time (3000 ms by default). A status other than 200, or a type other than `text/event-stream`, fires `error` and closes (a 502, 503 or 504 reconnects, as does a network error).
+
+Gaps:
+- A reply arrives whole (see `browser_xhr.rs`). Events fire together when the server ends the stream. A stream that the server never ends gives no event, until a cap or a network timeout stops it. True live streaming needs a streaming client in `bare-net`.
+- Events are `Event` objects with `data`, `origin`, `lastEventId`, `source` and `ports`. `MessageEvent` is not a constructor here, so `e instanceof MessageEvent` is false.
+
+Checks: `cargo test -p bare --lib eventsource`: 5 passed (a loopback server streams `text/event-stream`: message, named event, `lastEventId`, reconnect with `Last-Event-ID`, wrong type, bad URL). `cargo test -p bare -p bare-js`: 1287 passed, 2 failed. `browser_canvas_tests::one_image_data_holds_at_most_64_mib` fails on main too. `browser_session_tests::a_pending_meta_refresh_is_queued_work` is flaky (a 10 ms window) and passed on rerun. `cargo clippy -p bare -p bare-js --all-targets -- -D warnings` reports errors in `bare-net` and `bare-html` only (files not touched).
+
+Not tested: a real SSE app (deck). A stream that stays open. `withCredentials` with cookies. A cross-origin stream (CORS). Chrome comparison.

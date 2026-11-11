@@ -1,5 +1,5 @@
 //! Web APIs that are written in JavaScript and made at the first read of one of their names: `Element.prototype.animate` and `Animation`
-//! (`shims/animation.js`), `Path2D` (`shims/path2d.js`), `indexedDB` and the `IDB*` interfaces (`shims/idb.js`).
+//! (`shims/animation.js`), `Path2D` (`shims/path2d.js`), `indexedDB` and the `IDB*` interfaces (`shims/idb.js`), `EventSource` (`shims/eventsource.js`).
 //!
 //! A read of the name finds nothing, so the heap asks the host once (`Heap::browser_name`, `browser_handlers::lazy`). The host runs the
 //! source as an indirect eval; the source defines the globals itself. A realm that never reads the names pays nothing: no object, no
@@ -14,9 +14,10 @@ use bare_js::eval::Interp;
 use bare_js::value::Value;
 
 /// `(names that ask for it, the global that the source defines first, source)`.
-const SHIMS: [(&[&str], &str, &str); 3] = [
+const SHIMS: [(&[&str], &str, &str); 4] = [
     (&["animate", "Animation"], "Animation", include_str!("shims/animation.js")),
     (&["Path2D"], "Path2D", include_str!("shims/path2d.js")),
+    (&["EventSource"], "EventSource", include_str!("shims/eventsource.js")),
     (&["indexedDB"], "indexedDB", include_str!("shims/idb.js")),
 ];
 
