@@ -365,3 +365,93 @@ fn an_agent_logs_in_with_snapshot_refs_and_no_step_lines() {
     let (r, _) = s.tool("sessions", json!({}));
     assert!(r.as_str().unwrap().contains("main: ") && r.as_str().unwrap().contains("two: "), "{r}");
 }
+
+/// Serves one page at every path. Gives the base URL.
+fn one_page(html: String) -> String {
+    use std::io::Read;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for mut c in listener.incoming().flatten() {
+            let html = html.clone();
+            std::thread::spawn(move || {
+                let (mut head, mut b) = (Vec::new(), [0u8; 1]);
+                while !head.ends_with(b"\r\n\r\n") && c.read(&mut b).unwrap_or(0) == 1 {
+                    head.push(b[0]);
+                }
+                let _ = write!(c, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{html}", html.len());
+            });
+        }
+    });
+    format!("http://127.0.0.1:{port}/")
+}
+
+fn snap_of(html: &str, args: Value) -> String {
+    let mut s = Server::start();
+    let mut a = json!({"url": one_page(html.to_string()), "snapshot": true, "timeout_ms": 30000});
+    a.as_object_mut().unwrap().extend(args.as_object().unwrap().clone());
+    let (r, error) = s.tool("open", a);
+    assert!(!error, "{r}");
+    r.as_str().unwrap().to_string()
+}
+
+/// A slotted light child shows once, where its `<slot>` is, in the order of the flat tree.
+#[test]
+fn a_slotted_child_shows_once_at_its_slot() {
+    let snap = snap_of(
+        "<body><div id=h><button>Middle</button></div><script>\
+         document.getElementById('h').attachShadow({mode:'open'}).innerHTML='<button>First</button><slot></slot><button>Last</button>';</script>",
+        json!({}),
+    );
+    let names: Vec<&str> = snap.lines().filter(|l| l.contains("button")).collect();
+    assert_eq!(names.len(), 3, "{snap}");
+    assert!(names[0].contains("First") && names[1].contains("Middle") && names[2].contains("Last"), "{snap}");
+}
+
+/// A pointer subtree becomes one `clickable`, named by its text; its children are not clickable on their own.
+#[test]
+fn a_pointer_subtree_is_one_clickable() {
+    let snap = snap_of(
+        "<style>.p{cursor:pointer}.q{cursor:default}</style><body><div class=p><span>Open menu</span><b>now</b></div><div>plain</div>\
+         <div class=p><div class=q>inner</div></div>",
+        json!({}),
+    );
+    let c: Vec<&str> = snap.lines().filter(|l| l.contains("clickable")).collect();
+    assert_eq!(c.len(), 2, "{snap}");
+    assert!(c[0].contains("Open menu now"), "{snap}");
+}
+
+/// A control below the fold says so; one in view does not.
+#[test]
+fn a_control_outside_the_viewport_is_marked_offscreen() {
+    let snap = snap_of("<body><button>Near</button><div style='height:3000px'></div><button>Far</button>", json!({}));
+    let near = snap.lines().find(|l| l.contains("Near")).unwrap();
+    let far = snap.lines().find(|l| l.contains("Far")).unwrap();
+    assert!(!near.contains("offscreen") && far.contains("(offscreen)"), "{snap}");
+}
+
+/// An iframe shows as a line with its title or source. Its content is not in the snapshot: bare does not load child documents.
+#[test]
+fn an_iframe_shows_as_a_line() {
+    let snap = snap_of("<body><iframe title=\"Card form\" src=\"/inner\" width=300 height=100></iframe>", json!({}));
+    assert!(snap.lines().any(|l| l.contains("iframe \"Card form\"")), "{snap}");
+}
+
+/// A page of about 5,000 elements: the snapshot (with the flat tree, `cursor` and offscreen work) stays under 30 ms once laid out. Best of 5.
+#[test]
+fn a_snapshot_of_5000_elements_takes_under_30_ms() {
+    let rows: String = (0..830)
+        .map(|i| format!("<div><span>Item {i}</span><a href=\"/x{i}\">link {i}</a><button>Go {i}</button><div class=p><b>pick {i}</b></div></div>"))
+        .collect();
+    let mut s = Server::start();
+    let (r, error) = s.tool("open", json!({"url": one_page(format!("<style>.p{{cursor:pointer}}</style><body>{rows}")), "timeout_ms": 30000}));
+    assert!(!error, "{r}");
+    let mut best = u128::MAX;
+    for _ in 0..5 {
+        let t = std::time::Instant::now();
+        let (r, error) = s.tool("snapshot", json!({"max_chars": 2000000}));
+        best = best.min(t.elapsed().as_millis());
+        assert!(!error && r.as_str().unwrap().contains("clickable \"pick 829\""), "{r}");
+    }
+    assert!(best < 30, "best snapshot time {best} ms");
+}

@@ -321,6 +321,26 @@ impl Page {
         }
     }
 
+    /// The nodes among `nodes` whose box lies outside the window (a box with no layout is not listed). One pass, no scroll.
+    pub fn offscreen(&mut self, nodes: &[NodeId]) -> std::collections::HashSet<NodeId> {
+        let mut out = std::collections::HashSet::new();
+        if nodes.is_empty() {
+            return out;
+        }
+        self.scroll_with(|g, s| {
+            let (w, h) = g.window;
+            for &n in nodes {
+                if let Some(r) = g.client_rect(s, n).filter(|r| r.w > 0.0 && r.h > 0.0)
+                    && (r.x + r.w <= 0.0 || r.y + r.h <= 0.0 || r.x >= w || r.y >= h)
+                {
+                    out.insert(n);
+                }
+            }
+            false
+        });
+        out
+    }
+
     /// The point where a user clicks the element, after the checks of the header; scrolls it into view if needed.
     pub fn actionable(&mut self, h: Handle) -> Result<(f64, f64), Refusal> {
         self.visible_box(h)?;

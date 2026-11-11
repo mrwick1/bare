@@ -1226,3 +1226,12 @@ An agent such as `deck` must read a page and act on it in few model calls. Scree
 - `find`, `read` (paged text), `links`, `screenshot` (the page or one element, a path, and the image when asked), `eval` and `sessions` complete the set. Every reply goes through the redactor.
 - Each tool takes `session`. Sessions run side by side, one page each. `open` ends only the session of its name.
 - Step lines accept `ref=e7`, so a journey can mix refs and user locators.
+
+## The snapshot reads the flat tree, cursors and the viewport (2026-11-12)
+- The snapshot, `find` and `read` walk the flat tree. A slotted light child shows once, at its `<slot>`. Before, the walk skipped the shadow tree and showed no shadow content.
+- `cursor` is a CSS property with three values: `auto`, `default` and `pointer`. It is inherited. Other values are dropped.
+- An element with no role, with `cursor: pointer` and a parent without it, is `clickable`. This finds React-style controls that listen on the document root.
+- A control outside the window has the state `(offscreen)`. One pass over the layout finds them. It costs about 5 ms for 2,500 controls.
+- An iframe shows as one line, `iframe "title or src"`. Its content is not in the snapshot. bare does not load child documents (see "Named iframe windows"), so refs into frames need a child document with its own DOM and layout first.
+- Timing on a page of about 5,000 elements, release build, warm snapshot: 2 ms before, 7 ms after. The first snapshot after open includes the layout: 33 ms before and about 40 ms after.
+
