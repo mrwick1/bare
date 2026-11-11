@@ -8353,3 +8353,19 @@ Checks (release, 2026-11-10):
 - `tools/portable_check.sh`: exit 0.
 
 Not tested: the staging journey. A real Playwright file. `window: true`. A session with cookies (the fixture app keeps its token in `sessionStorage`). Two live sessions at once (not supported: a new open ends the old one).
+
+## CSS translate transform (2026-11-11, issue #376)
+
+Problem: `transform: translateX(-100%)` did nothing. A closed drawer painted over the page.
+
+Built: `transform` and `translate` move a box and all that is inside it. They affect paint, hit tests and all geometry (one move of the fragments, before `fragment::absolute`, next to `position: relative`).
+
+- `bare-css`: two internal properties, `TranslateX` and `TranslateY` (`-bare-translate-x`, `-bare-translate-y`), not in `Property::LISTED`. `transform_declaration` in `values.rs` reads `none`, `translate()`, `translateX()`, `translateY()`, `translate3d()` (z is dropped) and the `translate` property. Values: `px` and the other lengths, `%`, `calc()`, `0`. `inherit`, `initial` and `unset` work. Several translations add up when the units agree; a mix is not good (the declaration is dropped).
+- `bare-layout` (`lib.rs`): each box that is not a non-atomic inline box moves by the values. A percent is of the border box of the box. Other boxes are not laid out again.
+- Other transform functions (`rotate`, `scale`, `skew`, `matrix`, `perspective`) are good values that do nothing.
+
+Gaps: no rotate, scale, skew or matrix. `transform` and `translate` together: the later declaration wins (the spec combines them). A transform does not make a stacking context or a containing block for `fixed` and `absolute` boxes. `transform-origin` is not read. The scrollable area does not count the moved box. `getComputedStyle(el).transform` is still `undefined`. An inline box that is not atomic does not move. `translate: calc(1px + 2px) 3px` (spaces inside `calc`) is not good. No `var()` check beyond the shared path.
+
+Checks (release): `cargo test --workspace`: 3506 passed, 0 failed. New tests: `values::tests::transform_translate`, `block::tests::translate_moves_a_box_and_what_is_inside`, `hit::tests::a_translated_box_is_hit_where_it_is_drawn`, `paint::translate_moves_what_is_painted`. `tools/portable_check.sh`: ok. The page of the issue, painted with `bare --paint`, shows no red.
+
+Not tested: `bare-mcp` and a window on the page of the issue. Animation of `transform`. A real drawer site.

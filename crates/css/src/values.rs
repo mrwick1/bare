@@ -190,6 +190,8 @@ properties! {
     Fill => "fill",
     Stroke => "stroke",
     ObjectFit => "object-fit",
+    TranslateX => "-bare-translate-x",
+    TranslateY => "-bare-translate-y",
     ;
     BackgroundImage => "background-image",
     BackgroundSizeX => "background-size-x",
@@ -208,8 +210,9 @@ properties! {
 impl Property {
     /// The properties that the CSS object model of a page (`style`, `getComputedStyle`) lists and has an accessor for. The picture
     /// properties (`CORE..`) come last. The engine makes an accessor for each listed property each time a page starts, and that costs
-    /// instructions for each page. `from_name` still knows them, so `setProperty` and `getPropertyValue` work for them.
-    pub const LISTED: &'static [Property] = Property::ALL.split_at(Property::CORE).0;
+    /// instructions for each page. The two last core properties (`TranslateX`, `TranslateY`, the parts of `transform` and `translate`) are not listed:
+    /// the page has no accessor for them. `from_name` still knows them, so `setProperty` and `getPropertyValue` work for them.
+    pub const LISTED: &'static [Property] = Property::ALL.split_at(Property::CORE - 2).0;
     /// The number of properties before the picture properties (`background-image`, `mask-image` and their size, position and repeat). A
     /// computed style has one slot for each of these. The others (`COUNT - CORE`) are one set that most elements share: it is one number
     /// in the style (`cascade::ComputedStyle::picture`). A declaration of one is kept apart from the others (`cascade::Entry::pics`).
@@ -359,6 +362,134 @@ pub fn parse_declaration(mut name: &str, value: &str, important: bool, side: &mu
     }
 }
 
+/// `transform` and `translate`: the move of the box, as `TranslateX` and `TranslateY`. `Some(false)`: the value is not good.
+/// Only the translation counts: `translate()`, `translateX()`, `translateY()` and `translate3d()` (its z is read and dropped), and the
+/// `translate` property. The other functions (`rotate`, `scale`, `skew`, `matrix`, `perspective`) are good values and do nothing. Several
+/// translations add up when their units agree (two `px`, two `%`); a mix of units is not good (it needs `calc()`).
+fn transform_declaration(name: &str, value: &str, important: bool, side: &mut Side, out: &mut Vec<Declared>) -> Option<bool> {
+    let text = value.trim();
+    let zero = Value::Length(Length::Px(0.0));
+    let mut emit = |x: Value, y: Value| {
+        out.push(Declared { property: Property::TranslateX, value: x, important, mirror: false });
+        out.push(Declared { property: Property::TranslateY, value: y, important, mirror: false });
+    };
+    if text.eq_ignore_ascii_case("none") {
+        emit(zero, zero);
+        return Some(true);
+    }
+    // One argument: a length, a percent or `0`.
+    fn arg(t: &str, calcs: &mut Vec<Linear>) -> Option<Length> {
+        match *Parts::read(t, calcs)?.as_slice() {
+            [Part::Length(l)] => Some(l),
+            [Part::Percent(p)] => Some(Length::Percent(p)),
+            [Part::Number { value: 0.0, .. }] => Some(Length::Px(0.0)),
+            _ => Option::None,
+        }
+    }
+    let (mut x, mut y) = (Length::Px(0.0), Length::Px(0.0));
+    if name == "translate" {
+        // `translate: x y z`: one to three parts.
+        let parts: Vec<&str> = text.split_whitespace().collect();
+        if parts.is_empty() || parts.len() > 3 || parts.iter().any(|p| p.contains('(')) && parts.len() > 1 {
+            return Some(false);
+        }
+        let Some(a) = arg(parts[0], &mut side.calcs) else {
+            // `inherit`, `initial` and `unset`.
+            return Some(match Parts::read(text, &mut side.calcs).as_ref().map(Parts::as_slice) {
+                Some([Part::Wide(w)]) => {
+                    emit(*w, *w);
+                    true
+                }
+                _ => false,
+            });
+        };
+        x = a;
+        for (i, p) in parts.iter().enumerate().skip(1) {
+            match (arg(p, &mut side.calcs), i) {
+                (Some(l), 1) => y = l,
+                (Some(_), _) => {}
+                _ => return Some(false),
+            }
+        }
+        emit(Value::Length(x), Value::Length(y));
+        return Some(true);
+    }
+    if let Some(Part::Wide(w)) = Parts::read(text, &mut side.calcs).as_ref().and_then(|p| p.as_slice().first().copied().filter(|_| p.len == 1)) {
+        emit(w, w);
+        return Some(true);
+    }
+    let mut rest = text;
+    while !rest.is_empty() {
+        let Some(open) = rest.find('(') else { return Some(false) };
+        let func = rest[..open].trim().to_ascii_lowercase();
+        // The matching `)`.
+        let mut depth = 0;
+        let mut close = None;
+        for (i, c) in rest[open..].char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(open + i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(close) = close else { return Some(false) };
+        let inner = &rest[open + 1..close];
+        rest = rest[close + 1..].trim_start();
+        // The arguments, cut at the commas that are not inside a function.
+        let mut args = Vec::new();
+        let (mut depth, mut from) = (0, 0);
+        for (i, c) in inner.char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                ',' if depth == 0 => {
+                    args.push(&inner[from..i]);
+                    from = i + 1;
+                }
+                _ => {}
+            }
+        }
+        args.push(&inner[from..]);
+        let (dx, dy) = match (func.as_str(), args.len()) {
+            ("translatex", 1) => (arg(args[0], &mut side.calcs), Some(Length::Px(0.0))),
+            ("translatey", 1) => (Some(Length::Px(0.0)), arg(args[0], &mut side.calcs)),
+            ("translate", 1) => (arg(args[0], &mut side.calcs), Some(Length::Px(0.0))),
+            ("translate", 2) => (arg(args[0], &mut side.calcs), arg(args[1], &mut side.calcs)),
+            // The z of `translate3d` must be a length and counts for nothing.
+            ("translate3d", 3) if arg(args[2], &mut side.calcs).is_some_and(|z| !matches!(z, Length::Percent(_))) => (arg(args[0], &mut side.calcs), arg(args[1], &mut side.calcs)),
+            ("matrix" | "matrix3d" | "rotate" | "rotatex" | "rotatey" | "rotatez" | "rotate3d" | "scale" | "scalex" | "scaley" | "scalez" | "scale3d" | "skew" | "skewx"
+            | "skewy" | "perspective", _) => (Some(Length::Px(0.0)), Some(Length::Px(0.0))),
+            _ => return Some(false),
+        };
+        let (Some(dx), Some(dy)) = (dx, dy) else { return Some(false) };
+        let (Some(nx), Some(ny)) = (add(x, dx), add(y, dy)) else { return Some(false) };
+        (x, y) = (nx, ny);
+    }
+    emit(Value::Length(x), Value::Length(y));
+    Some(true)
+}
+
+/// Add two lengths of the same unit. A zero `px` goes with any unit. `None` for a mix.
+fn add(a: Length, b: Length) -> Option<Length> {
+    use Length::*;
+    match (a, b) {
+        (Px(x), l) | (l, Px(x)) if x == 0.0 => Some(l),
+        (Px(x), Px(y)) => Some(Px(x + y)),
+        (Percent(x), Percent(y)) => Some(Percent(x + y)),
+        (Em(x), Em(y)) => Some(Em(x + y)),
+        (Rem(x), Rem(y)) => Some(Rem(x + y)),
+        (Vw(x), Vw(y)) => Some(Vw(x + y)),
+        (Vh(x), Vh(y)) => Some(Vh(x + y)),
+        _ => Option::None,
+    }
+}
+
 #[inline(always)]
 fn parse_known(name: &str, value: &str, important: bool, side: &mut Side, out: &mut Vec<Declared>) -> bool {
     if var::has_var(value) {
@@ -374,6 +505,9 @@ fn parse_known(name: &str, value: &str, important: bool, side: &mut Side, out: &
         let index = side.vars.len() as u32 - 1;
         out.extend(list.iter().map(|&property| Declared { property, value: Value::Var(index), important, mirror }));
         return true;
+    }
+    if (name == "transform" || name == "translate") && let Some(ok) = transform_declaration(name, value, important, side, out) {
+        return ok;
     }
     if let Some(ok) = crate::grid::declaration(name, value, important, side, out) {
         return ok;
@@ -945,6 +1079,7 @@ pub fn all_longhands(name: &str) -> Option<&'static [Property]> {
         "mask-size" => &[MaskSizeX, MaskSizeY],
         "background-position" => &[BackgroundPositionX, BackgroundPositionY],
         "mask-position" => &[MaskPositionX, MaskPositionY],
+        "transform" | "translate" => &[TranslateX, TranslateY],
         _ => return shorthand_longhands(name),
     })
 }
@@ -1465,6 +1600,8 @@ fn longhand(property: Property, part: Part) -> Option<Value> {
             Part::Percent(p) => Some(Value::Number((p / 100.0).clamp(0.0, 1.0))),
             _ => Option::None,
         },
+        // Set by `transform_declaration`; a plain value is a length or a percent.
+        TranslateX | TranslateY => length(part).map(Value::Length),
         BorderTopLeftRadius | BorderTopRightRadius | BorderBottomRightRadius | BorderBottomLeftRadius => positive(part).map(Value::Length),
         Appearance => one_of(part, &[K::None, K::Auto, K::Button, K::Checkbox, K::Radio, K::Textfield, K::Textarea, K::Menulist]),
         PointerEvents => one_of(part, &[K::Auto, K::None, K::Visible, K::VisiblePainted, K::VisibleFill, K::VisibleStroke, K::Painted, K::Fill, K::Stroke, K::All]),
@@ -1571,6 +1708,27 @@ mod tests {
             assert!(out.is_empty(), "{name}: {value} added items and still failed");
             vec![]
         }
+    }
+
+    #[test]
+    fn transform_translate() {
+        let px = |x| Value::Length(Length::Px(x));
+        let pct = |x| Value::Length(Length::Percent(x));
+        assert_eq!(parse("transform", "translateX(-100%)"), vec![(TranslateX, pct(-100.0)), (TranslateY, px(0.0))]);
+        assert_eq!(parse("transform", "translateY(12px)"), vec![(TranslateX, px(0.0)), (TranslateY, px(12.0))]);
+        assert_eq!(parse("transform", "translate(10px, 50%)"), vec![(TranslateX, px(10.0)), (TranslateY, pct(50.0))]);
+        assert_eq!(parse("transform", "translate3d(-50%, 2px, 9px) scale(2)"), vec![(TranslateX, pct(-50.0)), (TranslateY, px(2.0))]);
+        assert_eq!(parse("transform", "translateX(5px) translateX(7px)"), vec![(TranslateX, px(12.0)), (TranslateY, px(0.0))]);
+        assert_eq!(parse("transform", "none"), vec![(TranslateX, px(0.0)), (TranslateY, px(0.0))]);
+        assert_eq!(parse("transform", "inherit"), vec![(TranslateX, Value::Inherit), (TranslateY, Value::Inherit)]);
+        assert_eq!(parse("translate", "10px 20px"), vec![(TranslateX, px(10.0)), (TranslateY, px(20.0))]);
+        assert_eq!(parse("translate", "-100%"), vec![(TranslateX, pct(-100.0)), (TranslateY, px(0.0))]);
+        assert_eq!(parse("translate", "none"), vec![(TranslateX, px(0.0)), (TranslateY, px(0.0))]);
+        // Not good: a mix of units, a name that is not a transform, a bare number.
+        assert!(parse("transform", "translateX(5px) translateX(7%)").is_empty());
+        assert!(parse("transform", "wobble(1px)").is_empty());
+        assert!(parse("transform", "translateX(5)").is_empty());
+        assert!(parse("translate", "5").is_empty());
     }
 
     fn one(name: &str, value: &str) -> Option<Value> {

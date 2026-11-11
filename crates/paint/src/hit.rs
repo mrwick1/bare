@@ -451,6 +451,16 @@ mod tests {
     }
 
     #[test]
+    fn a_translated_box_is_hit_where_it_is_drawn() {
+        let p = page("<style>body{margin:0} div{position:absolute;top:0;width:100px;height:100px} #a{left:0;transform:translateX(150px)} #b{left:0;transform:translateX(-100%)} #c{left:0;top:200px;translate:0 10px} #d{left:150px;top:300px;transform:translateY(-50%) translateX(10px) scale(2)}</style><div id=a></div><div id=b></div><div id=c></div><div id=d></div>");
+        assert_eq!(p.at(10.0, 10.0), "html", "a and b (at -100..0) are not at their old place");
+        assert_eq!(p.at(160.0, 10.0), "a");
+        assert_eq!(p.at(10.0, 205.0), "html", "c moved down 10px");
+        assert_eq!(p.at(10.0, 215.0), "c");
+        assert_eq!(p.at(170.0, 260.0), "d");
+    }
+
+    #[test]
     fn blocks_and_the_root() {
         let p = page("<style>body{margin:0} #a{height:50px;background:red} #b{height:30px;margin-top:20px}</style><div id=a></div><div id=b></div>");
         assert_eq!(p.at(10.0, 10.0), "a");
