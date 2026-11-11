@@ -14,6 +14,7 @@
 //! Only JSON goes to stdout: the protocol owns it. Progress and errors go to stderr. JS: like a Node script that reads `readline`
 //! lines from `process.stdin` and writes `JSON.stringify(reply)` lines to `process.stdout`.
 
+use bare_drive::{DownloadState, Downloads};
 use bare_drive::locate::{Locator, Text};
 use bare_drive::run::{Options, Redactor, Report, Session, StorageState};
 use bare_drive::snap::{self, Mode};
@@ -31,6 +32,10 @@ struct Live {
     vars: HashMap<String, String>,
     /// Step lines run so far: each new call numbers its lines after them, so the line numbers in reports stay unique.
     lines: usize,
+    /// The files that the session saved from downloads (see `bare::downloads`).
+    dl: Downloads,
+    /// The downloads that an `act` receipt already named.
+    told: std::collections::HashSet<usize>,
 }
 
 struct Server {
@@ -114,6 +119,7 @@ impl Server {
             "read" => self.read(&args),
             "links" => self.links(&args),
             "act" => self.act(&args),
+            "downloads" => self.downloads(&args),
             "eval" => self.eval(&args),
             "sessions" => Ok(self.sessions()),
             "screenshot" => return self.screenshot(&args).unwrap_or_else(|e| json!({"content": [{"type": "text", "text": e}], "isError": true})),
@@ -157,10 +163,13 @@ impl Server {
         let (opt, red, vars) = self.options(args)?;
         self.place_window(&opt)?;
         let mut session = Session::new(&opt);
+        let dir = args.get("downloads_dir").and_then(Value::as_str).map_or_else(|| std::env::temp_dir().join(format!("bare-mcp-{}-downloads", std::process::id())), std::path::PathBuf::from);
+        let dl = Downloads::new(dir);
+        session.set_downloads(dl.clone());
         if let Some(st) = state {
             session.preload(st);
         }
-        self.live.insert(name, Live { session, opt, red, vars, lines: 0 });
+        self.live.insert(name, Live { session, opt, red, vars, lines: 0, dl, told: Default::default() });
         self.run_live(args, &format!("open {url}"))
     }
 
@@ -358,6 +367,8 @@ impl Server {
         let (receipt, ok) = self.run_live(&a, &line)?;
         let mut out = receipt;
         let snap = if ok && args.get("snapshot").and_then(Value::as_bool) != Some(false) { Some(self.snapshot(args)?) } else { None };
+        // A download that started in the action ends first. The page needs ticks for that: a link starts its worker in a tick.
+        out.push_str(&self.finish_downloads(args)?);
         // After the snapshot, which waits for the page: a click starts a navigation that ends later.
         let after = self.live_mut(args)?.session.url();
         if after != before {
@@ -368,6 +379,56 @@ impl Server {
             out.push_str(&s);
         }
         if ok { Ok(out) } else { Err(out) }
+    }
+
+    /// Wait up to the step time limit for the downloads that run, and for a page load that may be one. Then say what finished since the last
+    /// call: `downloaded: PATH (BYTES bytes, MIME)`, or the failure.
+    fn finish_downloads(&mut self, args: &Value) -> Result<String, String> {
+        let live = self.live_mut(args)?;
+        let end = std::time::Instant::now() + live.opt.timeout;
+        while std::time::Instant::now() < end {
+            let loading = live.session.with_refs(|p, _| {
+                p.tick();
+                p.loading()
+            })?;
+            if !loading && live.dl.running() == 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let mut out = String::new();
+        for (i, d) in live.dl.list().into_iter().enumerate() {
+            if d.state == DownloadState::Running || !live.told.insert(i) {
+                continue;
+            }
+            out.push('\n');
+            out.push_str(&match &d.state {
+                DownloadState::Failed(why) => format!("download failed: {}: {why}", bare_drive::run::safe_url(&d.url)),
+                _ => format!("downloaded: {} ({} bytes, {})", d.path.display(), d.bytes, d.mime),
+            });
+        }
+        Ok(live.red.clean(&out))
+    }
+
+    /// The files that the session saved.
+    fn downloads(&mut self, args: &Value) -> Result<String, String> {
+        let live = self.live_mut(args)?;
+        let list = live.dl.list();
+        if list.is_empty() {
+            return Ok(format!("no downloads (folder: {})", live.dl.dir().display()));
+        }
+        let lines: Vec<String> = list
+            .iter()
+            .map(|d| {
+                let url = bare_drive::run::safe_url(&d.url);
+                match &d.state {
+                    DownloadState::Running => format!("running: {url}"),
+                    DownloadState::Failed(why) => format!("failed: {url}: {why}"),
+                    DownloadState::Done => format!("{} ({} bytes, {}) from {url}", d.path.display(), d.bytes, d.mime),
+                }
+            })
+            .collect();
+        Ok(live.red.clean(&lines.join("\n")))
     }
 
     /// A PNG of the page or of one element: its path, and the picture itself when `inline` is true.
@@ -526,6 +587,7 @@ fn tools() -> Value {
         "height": {"type": "integer", "description": "Page height in pixels. Default 800."},
         "timeout_ms": {"type": "integer", "description": "Time limit of each step. Default 10000."},
         "session": {"type": "string", "description": "Live session name. Default main. Sessions run side by side."},
+        "downloads_dir": {"type": "string", "description": "open: the folder for files that the page downloads. Default: a temp folder of this server."},
     });
     let with = |extra: Value, required: &[&str]| {
         let mut p = common.clone();
@@ -612,6 +674,11 @@ fn tools() -> Value {
             "name": "eval",
             "description": "Run JavaScript in the live page and return its value as text. JSON.stringify an object.",
             "inputSchema": {"type": "object", "properties": {"session": S, "js": {"type": "string"}}, "required": ["js"]},
+        },
+        {
+            "name": "downloads",
+            "description": "The files that the live session saved from downloads (a response with Content-Disposition: attachment or a type the page cannot show, or a link with a download attribute, also a blob: or data: URL made by a script): path, size, type and source URL, or running or failed. A download does not replace the page; act names each one that ends in its receipt.",
+            "inputSchema": {"type": "object", "properties": {"session": S}},
         },
         {
             "name": "sessions",

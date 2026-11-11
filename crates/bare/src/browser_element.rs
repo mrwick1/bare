@@ -153,10 +153,19 @@ fn click(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     if d.is_disabled_control(it, n)? || d.clicking.borrow().contains(&n) {
         return Ok(Value::Undefined);
     }
+    // A link with `download`: the click saves the target (the session starts it).
+    let mut save = None;
     if let Some(t) = d.activation_target(it, n)? {
         let doc = d.doc.borrow();
         let kind = match html_name(&doc, t) {
-            "a" | "area" => attr(&doc, t, "href").map(|_| "a link"),
+            "a" => match (attr(&doc, t, "href"), attr(&doc, t, "download")) {
+                (Some(h), Some(_)) if d.nav.s.borrow().downloads_on => {
+                    save = Some((t, h.to_string()));
+                    None
+                }
+                (h, _) => h.map(|_| "a link"),
+            },
+            "area" => attr(&doc, t, "href").map(|_| "a link"),
             "label" => Some("a label"),
             "summary" => Some("a summary"),
             "input" if matches!(nd::input_kind(&doc, t), "checkbox" | "radio") => Some("a checkbox or a radio"),
@@ -169,6 +178,9 @@ fn click(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     d.clicking.borrow_mut().push(n);
     let r = d.user_click(it, n, None);
     d.clicking.borrow_mut().retain(|&c| c != n);
+    if let (Some((t, href)), Ok(true)) = (save, &r) {
+        d.queue_download(it, t, &href)?;
+    }
     r.map(|_| Value::Undefined)
 }
 

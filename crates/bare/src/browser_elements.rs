@@ -114,6 +114,7 @@ fn make(d: &Dom, it: &mut Interp<'_>) -> R<[ObjId; 10]> {
     d.def_get(it, o[0], "relList", crate::browser_platform_class::rel_list::<1>, Some(crate::browser_platform_class::set_rel_list::<1>))?;
     d.def_get(it, o[1], "relList", crate::browser_platform_class::rel_list::<2>, Some(crate::browser_platform_class::set_rel_list::<2>))?;
     members::<false>(d, it, o[0])?;
+    d.def_get(it, o[0], "download", download, Some(set_download))?;
     members::<true>(d, it, o[1])?;
     d.def_get(it, o[2], "content", content, None)?;
     image_members(d, it, o[3])?;
@@ -218,6 +219,20 @@ fn get(d: &Dom, it: &mut Interp<'_>, this: Value, area: bool, p: Option<Part>) -
         Some((_, Url::Gate(w))) => return Err(Error::Unsupported(unsupported(w))),
     };
     d.js_str(it, &s)
+}
+
+/// `a.download`: the `download` attribute (the suggested file name), an empty string without it.
+fn download(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    let n = element(d, it, this, false)?;
+    let v = { let doc = d.doc.borrow(); doc.find_atom("download").and_then(|a| doc.attr(n, a)).unwrap_or("").to_string() };
+    d.js_str(it, &v)
+}
+
+fn set_download(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    let n = element(d, it, this, false)?;
+    let s = d.string_arg(it, arg(a, 0))?;
+    nd::attr_set(d, it, n, "download", &s)?;
+    Ok(Value::Undefined)
 }
 
 fn set_href<const AREA: bool>(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {

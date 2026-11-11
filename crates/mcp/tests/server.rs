@@ -78,7 +78,7 @@ fn tools_list_names_the_tools() {
     let mut s = Server::start();
     let r = s.ask("tools/list", json!({}));
     let names: Vec<&str> = r["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(names, ["run_steps", "open", "step", "save_state", "ensure_session", "close", "snapshot", "act", "find", "read", "links", "screenshot", "eval", "sessions"]);
+    assert_eq!(names, ["run_steps", "open", "step", "save_state", "ensure_session", "close", "snapshot", "act", "find", "read", "links", "screenshot", "eval", "downloads", "sessions"]);
 }
 
 #[test]
@@ -364,4 +364,49 @@ fn an_agent_logs_in_with_snapshot_refs_and_no_step_lines() {
     assert!(!error, "{r}");
     let (r, _) = s.tool("sessions", json!({}));
     assert!(r.as_str().unwrap().contains("main: ") && r.as_str().unwrap().contains("two: "), "{r}");
+}
+
+/// Click each link or button of the downloads page and check the file that the receipt names: its bytes, and that the page did not change.
+#[test]
+fn a_download_goes_to_a_file_and_the_page_stays() {
+    let mut s = Server::start();
+    let base = common::serve();
+    let dir = std::env::temp_dir().join(format!("bare-mcp-test-downloads-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let url = format!("{base}/downloads");
+    let (snap, error) = s.tool("open", json!({"url": url, "snapshot": true, "downloads_dir": dir.to_str().unwrap(), "timeout_ms": 20000}));
+    let snap = snap.as_str().unwrap().to_string();
+    assert!(!error && snap.starts_with("ok"), "{snap}");
+    let bytes = |name: &str| std::fs::read(dir.join(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
+    let click = |s: &mut Server, what: &str| {
+        let (r, error) = s.tool("act", json!({"op": "click", "ref": ref_of(&snap, what), "snapshot": false}));
+        let r = r.as_str().unwrap().to_string();
+        assert!(!error && !r.contains("navigated:"), "{r}");
+        r
+    };
+    let r = click(&mut s, "\"Report\"");
+    assert!(r.contains(&format!("downloaded: {}/report.csv ({} bytes, text/csv)", dir.display(), common::PAYLOAD_CSV.len())), "{r}");
+    assert_eq!(bytes("report.csv"), common::PAYLOAD_CSV);
+    let r = click(&mut s, "\"Invoice\"");
+    assert!(r.contains("invoice.pdf (") && r.contains("application/pdf)"), "{r}");
+    assert_eq!(bytes("invoice.pdf"), common::PAYLOAD_PDF);
+    let r = click(&mut s, "\"Notes\"");
+    assert!(r.contains("my notes.txt (11 bytes, text/plain)"), "{r}");
+    assert_eq!(bytes("my notes.txt"), b"plain notes");
+    // A script makes a Blob and clicks a link: the name loses its path; a second download of a name never replaces the first.
+    let r = click(&mut s, "\"Export\"");
+    assert!(r.contains("export.csv (8 bytes, text/csv)"), "{r}");
+    assert_eq!(bytes("export.csv"), b"x,y\n1,2\n");
+    let r = click(&mut s, "\"Report\"");
+    assert!(r.contains("report (1).csv"), "{r}");
+    assert_eq!(bytes("report (1).csv"), common::PAYLOAD_CSV);
+    // A download that fails is named, and leaves no file.
+    let r = click(&mut s, "\"Missing\"");
+    assert!(r.contains("download failed: ") && r.contains("/files/missing.zip: status 404"), "{r}");
+    assert!(!dir.join("missing.zip").exists());
+    let (r, _) = s.tool("eval", json!({"js": "location.href"}));
+    assert_eq!(r, json!(url));
+    let (list, error) = s.tool("downloads", json!({}));
+    let list = list.as_str().unwrap();
+    assert!(!error && list.lines().count() == 6 && list.contains("failed: ") && list.contains("invoice.pdf (") && list.contains("from blob:"), "{list}");
 }

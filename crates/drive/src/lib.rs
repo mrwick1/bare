@@ -8,3 +8,4 @@ pub mod run;
 pub mod snap;
 pub mod state;
 pub mod steps;
+pub use bare::{DownloadState, Downloads};
