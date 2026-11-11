@@ -8353,3 +8353,9 @@ Checks (release, 2026-11-10):
 - `tools/portable_check.sh`: exit 0.
 
 Not tested: the staging journey. A real Playwright file. `window: true`. A session with cookies (the fixture app keeps its token in `sessionStorage`). Two live sessions at once (not supported: a new open ends the old one).
+
+## Shot waits for the page to load (2026-11-11, issue #374)
+
+The `open` step only starts the load of the document. The ticks of the next steps finish it. A `shot` right after a live `open` (the `open` and `step` tools) had no tick to wait for, so it saved a blank page. The `shot` step now tries again while `Page::loading()` is true, as it does while pictures load.
+
+Checks: `a_shot_right_after_open_shows_the_loaded_page` in `crates/mcp/tests/server.rs` failed before the fix (17365 bytes, blank) and passes after it. `cargo test -p bare-mcp` passes. `cargo test -p bare-drive` passes except `chunked` (2 tests), which also fails without this change. `survive_limit` is slow (about 45 s) and failed once while other test runs used the CPU. It passes alone.

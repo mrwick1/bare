@@ -422,6 +422,11 @@ impl Page {
         }
     }
 
+    /// Is a document on its way, or in but not shown yet? A live session loads it in the ticks after `open` and `navigate`.
+    pub fn loading(&self) -> bool {
+        matches!(&self.source, Source::Session(s) if s.loading().is_some())
+    }
+
     /// Why the last document did not load, if it did not. The ticks of a live session load it after `open` and `navigate`.
     pub fn load_error(&self) -> Option<&str> {
         match &self.source {
