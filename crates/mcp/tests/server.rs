@@ -257,3 +257,20 @@ fn save_state_writes_a_private_file_and_open_restores_a_name() {
     let (rep, error) = s.tool("open", json!({"url": args["url"], "state": "nope"}));
     assert!(error && rep.as_str().unwrap().contains("nope"), "{rep}");
 }
+
+/// A picture of the page right after `open` must show the page: the same picture as a run that waits for the page with `expect`.
+#[test]
+fn a_shot_right_after_open_shows_the_loaded_page() {
+    let mut s = Server::start();
+    let base = common::serve_app();
+    let url = format!("{base}/");
+    let (rep, error) = s.tool("run_steps", json!({"steps": format!("open {url}\nexpect url~\"/login\"\nshot want"), "timeout_ms": 30000}));
+    assert!(!error && rep["ok"] == true, "{rep}");
+    let want = std::fs::read(format!("{}/want.png", rep["out"].as_str().unwrap())).unwrap();
+    let (rep, error) = s.tool("open", json!({"url": url, "timeout_ms": 30000}));
+    assert!(!error && rep["ok"] == true, "{rep}");
+    let (rep, error) = s.tool("step", json!({"steps": "shot got"}));
+    assert!(!error && rep["ok"] == true, "{rep}");
+    let got = std::fs::read(format!("{}/got.png", rep["out"].as_str().unwrap())).unwrap();
+    assert!(got == want, "the picture after open is not the picture of the loaded page ({} and {} bytes)", got.len(), want.len());
+}
