@@ -579,6 +579,9 @@ fn attempt(p: &mut Page, m: &mut Memo, a: &Action, out: Option<&PathBuf>, red: &
             Action::CookieSet { name, value, domain, path } => cookie_set(p, name, value, domain.as_deref(), path.as_deref())?,
             Action::Shot(name) => {
                 let Some(dir) = out else { return Ok(Some("no --out: not saved".into())) };
+                if p.loading() {
+                    return Err(Try::Again(fail("shot", "the page is loading")));
+                }
                 if p.images_pending() {
                     return Err(Try::Again(fail("shot", "pictures are loading")));
                 }
