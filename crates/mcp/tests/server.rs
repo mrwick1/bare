@@ -2007,3 +2007,85 @@ fn eval_runs_the_microtasks_of_its_script_at_once() {
     assert!(error && r.as_str().unwrap().contains("rejected") && r.as_str().unwrap().contains("boom"), "{r}");
     assert!(t.elapsed().as_millis() < 1000);
 }
+
+/// A list page with a client-side router, as GitHub has it: a click on a title hands the navigation to the router with a hidden link
+/// and `click()`. The router cancels that click, calls `checkVisibility` (the sheet has `display: contents`), fetches the data and
+/// moves with `pushState`.
+fn router_pages(_: &str, target: &str, _: &str, _: Option<&str>) -> (u16, &'static str, Vec<u8>) {
+    const LIST: &str = "<!doctype html><title>Issues</title><style>.wrap { display: contents }</style>\
+<div class=wrap><h3><a href='/issues/7' tabindex='-1'><span>Issue seven</span></a></h3></div><div id=bar></div><script>\
+document.addEventListener('click', function (e) {\
+  var a = e.target.closest('a'); if (!a || a.hidden) return; e.preventDefault();\
+  var h = document.createElement('a'); h.href = a.getAttribute('href'); h.hidden = true; document.body.appendChild(h); h.click(); h.remove();\
+});\
+document.addEventListener('click', function (e) {\
+  var a = e.target.closest('a'); if (!a || !a.hidden) return; e.preventDefault();\
+  document.getElementById('bar').checkVisibility();\
+  var to = a.getAttribute('href');\
+  fetch(to + '.json').then(function (r) { return r.json() }).then(function (d) {\
+    history.pushState({}, '', to); document.title = d.title; document.body.innerHTML = '<h1>' + d.title + '</h1>';\
+  });\
+});</script>";
+    match target {
+        "/" => (200, "text/html", LIST.as_bytes().to_vec()),
+        "/issues/7.json" => (200, "application/json", br#"{"title":"Issue seven is open"}"#.to_vec()),
+        _ => (404, "text/plain", b"no".to_vec()),
+    }
+}
+
+#[test]
+fn a_click_that_a_router_hands_to_a_hidden_link_moves_with_push_state() {
+    let base = common::serve_route(router_pages);
+    let mut s = Server::start();
+    let (r, error) = s.tool("open", json!({"url": format!("{base}/"), "snapshot": false, "timeout_ms": 20000}));
+    assert!(!error, "{r}");
+    let (r, _) = s.tool("find", json!({"role": "link", "name": "Issue seven"}));
+    let r = r.as_str().unwrap();
+    let rf = r.split("[").nth(1).and_then(|x| x.split(']').next()).unwrap_or_else(|| panic!("no ref in {r}")).to_string();
+    let (r, error) = s.tool("act", json!({"op": "click", "ref": rf}));
+    let r = r.as_str().unwrap();
+    assert!(!error && r.contains(&format!("{base}/issues/7")) && r.contains("heading \"Issue seven is open\""), "{r}");
+    let (u, _) = s.tool("eval", json!({"js": "location.pathname"}));
+    assert_eq!(u, json!("/issues/7"));
+}
+
+#[test]
+fn eval_takes_expressions_statements_return_and_await_alike() {
+    let base = common::serve_route(eval_pages);
+    let mut s = Server::start();
+    let (r, error) = s.tool("open", json!({"url": format!("{base}/"), "timeout_ms": 1500}));
+    assert!(!error, "{r}");
+    let cases = [
+        // An expression gives its value.
+        ("document.title", json!("eval")),
+        // Statements with a return, with or without await.
+        ("const a = 1; return a + 1", json!(2)),
+        ("return document.title", json!("eval")),
+        ("const r = await fetch('/report.csv'); return r.status", json!(200)),
+        // An expression with await.
+        ("await (await fetch('/report.csv')).text()", json!("a,b\n1,2\n")),
+        // Statements without a return give the value of the last one, like a console.
+        ("let x = 1; x++; x", json!(2)),
+        ("let y = 1; y++", json!(1)),
+        // A return inside a function is not a top-level return.
+        ("let z = [1, 2].map(function (i) { return i * 2 }); z.join()", json!("2,4")),
+        // A comment at the end does not hide the end of the wrapper.
+        ("1 + 1 // two", json!(2)),
+        ("const c = 3; return c // three", json!(3)),
+    ];
+    for (js, want) in cases {
+        assert_eq!(s.tool("eval", json!({"js": js})), (want, false), "{js}");
+    }
+    // let and const last one call: the same declaration runs again; window keeps a value.
+    for _ in 0..2 {
+        assert_eq!(s.tool("eval", json!({"js": "const k = 5; window.kept = k; k"})), (json!(5), false));
+        assert_eq!(s.tool("eval", json!({"js": "const k = 6; return k"})), (json!(6), false));
+    }
+    assert_eq!(s.tool("eval", json!({"js": "typeof k + ' ' + kept"})), (json!("undefined 5"), false));
+    // A real syntax error names the error and its line, in each form.
+    for js in ["let a = 1;\nlet = = 2", "let a = 1;\nreturn = = 2", "await 1;\nlet = = 2"] {
+        let (r, error) = s.tool("eval", json!({"js": js}));
+        let r = r.as_str().unwrap().to_string();
+        assert!(error && r.contains("SyntaxError") && r.contains("line 2"), "{js}: {r}");
+    }
+}

@@ -135,3 +135,21 @@ fn check_visibility_ignores_auto_unless_requested() {
     assert_eq!(js(&mut b, "document.getElementById('a').checkVisibility()"), "true");
     assert!(js(&mut b, "document.getElementById('a').checkVisibility({contentVisibilityAuto: true})").starts_with("unsupported:"));
 }
+
+#[test]
+fn check_visibility_gates_only_elements_that_an_unmodelled_rule_matches() {
+    // A sheet with `display: contents` for one class does not stop a check of other elements.
+    let css = "<style>.c { display: contents } .h > .k { content-visibility: hidden } @media screen { .m { display:contents } }</style>";
+    let mut b = page(&format!("{css}<div id=a>a</div><div class=c id=c>c</div><div class=c><p id=in>in</p></div><div class=h><p id=hk class=k><i id=under>u</i></p></div><p id=m class=m>m</p>"));
+    assert_eq!(js(&mut b, "document.getElementById('a').checkVisibility()"), "true");
+    // The child of a `display: contents` box has a box.
+    assert_eq!(js(&mut b, "document.getElementById('in').checkVisibility()"), "true");
+    // `content-visibility: hidden` hides the content, not the element itself.
+    assert_eq!(js(&mut b, "document.getElementById('hk').checkVisibility()"), "true");
+    assert!(js(&mut b, "document.getElementById('c').checkVisibility()").starts_with("unsupported:"));
+    assert!(js(&mut b, "document.getElementById('under').checkVisibility()").starts_with("unsupported:"));
+    assert!(js(&mut b, "document.getElementById('m').checkVisibility()").starts_with("unsupported:"));
+    // A selector the engine cannot parse may match anything.
+    let mut b = page("<style>:unknown-thing { display: contents }</style><div id=a>a</div>");
+    assert!(js(&mut b, "document.getElementById('a').checkVisibility()").starts_with("unsupported:"));
+}

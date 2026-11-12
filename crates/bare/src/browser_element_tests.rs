@@ -22,7 +22,7 @@ fn unsupported(body: &str, src: &str) -> bool {
 
 #[test]
 fn click_gates_default_actions_that_are_not_built() {
-    for html in ["<input id=x type=checkbox>", "<input id=x type=radio>", "<a id=x href=y></a>", "<label id=x></label>", "<details><summary id=x>s</summary></details>", "<a href=y><b id=x></b></a>"] {
+    for html in ["<input id=x type=checkbox>", "<input id=x type=radio>", "<map><area id=x href=y></map>", "<label id=x></label>", "<details><summary id=x>s</summary></details>"] {
         assert!(unsupported(html, "document.getElementById('x').click()"), "{html}");
     }
     // A link with no href has no default action; a plain element has none.
@@ -98,4 +98,19 @@ fn offset_of_an_inline_box_with_nothing_to_paint_is_its_first_line() {
     b.run_script("scrollTo(0, 100)").unwrap();
     assert_eq!(off(&mut b, "w"), "24,24,BODY");
     assert_eq!(off(&mut b, "q"), "12,0,SPAN");
+}
+
+#[test]
+fn click_on_a_link_follows_it_unless_canceled() {
+    // A script hands a navigation to a router with a hidden link and `click()` (GitHub does this). The router may cancel it.
+    let mut b = page("<a id=x href=/next hidden></a><a href=/b><b id=c>in</b></a>");
+    b.set_document_url("http://127.0.0.1/list").unwrap();
+    assert_eq!(b.run_script("var n = 0; document.addEventListener('click', function (e) { n++ }); document.getElementById('x').click(); n").map(|v| b.it.display(v)).unwrap(), "1");
+    assert_eq!(b.take_navigation_request().expect("a navigation").url, "http://127.0.0.1/next");
+    // A click on an element inside a link follows the link.
+    b.run_script("document.getElementById('c').click()").unwrap();
+    assert_eq!(b.take_navigation_request().expect("a navigation").url, "http://127.0.0.1/b");
+    // A canceled click stays on the page.
+    b.run_script("document.addEventListener('click', function (e) { e.preventDefault() }); document.getElementById('x').click()").unwrap();
+    assert!(b.take_navigation_request().is_none());
 }

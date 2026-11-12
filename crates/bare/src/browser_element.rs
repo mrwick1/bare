@@ -153,33 +153,30 @@ fn click(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     if d.is_disabled_control(it, n)? || d.clicking.borrow().contains(&n) {
         return Ok(Value::Undefined);
     }
-    // A link with `download`: the click saves the target (the session starts it).
-    let mut save = None;
+    // A link (`a` with `href`): after a click that no listener canceled, follow it as the window does.
+    let mut link = None;
     if let Some(t) = d.activation_target(it, n)? {
         let doc = d.doc.borrow();
         let kind = match html_name(&doc, t) {
-            "a" => match (attr(&doc, t, "href"), attr(&doc, t, "download")) {
-                (Some(h), Some(_)) if d.nav.s.borrow().downloads_on => {
-                    save = Some((t, h.to_string()));
-                    None
-                }
-                (h, _) => h.map(|_| "a link"),
-            },
-            "area" => attr(&doc, t, "href").map(|_| "a link"),
+            "a" => {
+                link = attr(&doc, t, "href").is_some().then_some(t);
+                None
+            }
+            "area" => attr(&doc, t, "href").map(|_| "an area link"),
             "label" => Some("a label"),
             "summary" => Some("a summary"),
             "input" if matches!(nd::input_kind(&doc, t), "checkbox" | "radio") => Some("a checkbox or a radio"),
             _ => None,
         };
         if kind.is_some() {
-            return Err(Dom::gate("HTMLElement.click() on a link, a label, a summary, a checkbox or a radio (the default action is built for the window only)"));
+            return Err(Dom::gate("HTMLElement.click() on an area link, a label, a summary, a checkbox or a radio (the default action is built for the window only)"));
         }
     }
     d.clicking.borrow_mut().push(n);
     let r = d.user_click(it, n, None);
     d.clicking.borrow_mut().retain(|&c| c != n);
-    if let (Some((t, href)), Ok(true)) = (save, &r) {
-        d.queue_download(it, t, &href)?;
+    if let (Some(t), Ok(true)) = (link, &r) {
+        d.follow_link(it, t)?;
     }
     r.map(|_| Value::Undefined)
 }
@@ -537,20 +534,88 @@ fn set_draggable(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     Ok(Value::Undefined)
 }
 
-/// Does a style text use what the engine does not parse: `content-visibility` or `display: contents`?
-fn unmodelled(t: &str, auto: bool) -> bool {
+/// How many times a style text uses what the engine does not parse: `content-visibility` (`auto` only with `auto`) or `display: contents`.
+fn unmodelled(t: &str, auto: bool) -> usize {
     use bare_css::tokenizer::{Token, tokenize};
     let mut tokens = tokenize(t).filter(|t| !matches!(t, Token::Whitespace));
+    let mut n = 0;
     while let Some(t) = tokens.next() {
         let Token::Ident(name) = t else { continue };
         if !name.eq_ignore_ascii_case("content-visibility") && !name.eq_ignore_ascii_case("display") { continue; }
         if !matches!(tokens.next(), Some(Token::Colon)) { continue; }
         if let Some(Token::Ident(value)) = tokens.next() {
             if name.eq_ignore_ascii_case("display") && value.eq_ignore_ascii_case("contents")
-                || name.eq_ignore_ascii_case("content-visibility") && (value.eq_ignore_ascii_case("hidden") || auto && value.eq_ignore_ascii_case("auto")) { return true; }
+                || name.eq_ignore_ascii_case("content-visibility") && (value.eq_ignore_ascii_case("hidden") || auto && value.eq_ignore_ascii_case("auto")) { n += 1; }
         }
     }
-    false
+    n
+}
+
+/// A style rule with `display: contents` or `content-visibility` (the engine parses neither). `sels`: `None` when the engine cannot
+/// parse the selector, so it may match any element.
+pub(crate) struct OddRule {
+    sels: Option<Vec<bare_css::selector::Selector>>,
+    /// `display: contents`: the element itself has no box. Its children keep theirs.
+    contents: bool,
+    /// `content-visibility: hidden`: the content is hidden, the element is not.
+    hidden: bool,
+    /// `content-visibility: auto`: the content may be hidden. Counts only with the `contentVisibilityAuto` option.
+    auto: bool,
+}
+
+/// The `OddRule`s of the sheets of one rule set. `None` when a use is where the rules cannot show it: in a sheet of a shadow tree,
+/// in a nested rule, in an unknown at-rule. The media of `@media` are not read: a rule may count where it does not apply.
+fn odd_rules(doc: &mut Document, key: &[(NodeId, Option<String>, String)]) -> Option<Vec<OddRule>> {
+    use bare_css::parser::{AtBody, Rule, parse_stylesheet};
+    // JS: an inner function that calls itself for each block of rules (`@media { ... }`), like a recursive closure.
+    fn walk(doc: &mut Document, rules: &[Rule<'_>], out: &mut Vec<OddRule>, found: &mut usize) {
+        for r in rules {
+            match r {
+                Rule::Style(s) => {
+                    let (mut contents, mut hidden, mut auto) = (false, false, false);
+                    for d in &s.declarations {
+                        let v = d.value.trim();
+                        if d.name == "display" && v.eq_ignore_ascii_case("contents") {
+                            contents = true;
+                        } else if d.name == "content-visibility" && v.eq_ignore_ascii_case("hidden") {
+                            hidden = true;
+                        } else if d.name == "content-visibility" && v.eq_ignore_ascii_case("auto") {
+                            auto = true;
+                        } else {
+                            continue;
+                        }
+                        *found += 1;
+                    }
+                    if contents || hidden || auto {
+                        let sels = bare_css::selector::parse_selector_list_in(s.prelude, doc, bare_css::selector::Mode::Document);
+                        out.push(OddRule { sels, contents, hidden, auto });
+                    }
+                }
+                Rule::At(a) => {
+                    if let AtBody::Rules(inner) = &a.body {
+                        walk(doc, inner, out, found);
+                    }
+                }
+            }
+        }
+    }
+    let root = doc.root();
+    let mut out = Vec::new();
+    for (scope, _, text) in key {
+        let uses = unmodelled(text, true);
+        if uses == 0 {
+            continue;
+        }
+        if *scope != root {
+            return None;
+        }
+        let mut found = 0;
+        walk(doc, &parse_stylesheet(text), &mut out, &mut found);
+        if found != uses {
+            return None;
+        }
+    }
+    Some(out)
 }
 
 /// `Element.checkVisibility(options)` (CSSOM View). Options are read in the order of the dictionary (sorted by name). `opacityProperty` and
@@ -586,22 +651,36 @@ fn check_visibility(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V
     if snap.hidden {
         return Ok(Value::Bool(false));
     }
-    let odd = {
+    // The rules are found once for each rule set that is built: the sheet text is parsed again only then.
+    {
         let c = d.computed.cache.borrow();
         let b = c.as_ref().expect("built by the snapshot");
-        if opt[2] { b.key.iter().any(|(_, _, t)| unmodelled(t, true)) } else { *b.odd.get_or_init(|| b.key.iter().any(|(_, _, t)| unmodelled(t, false))) }
-    };
+        if b.odd.get().is_none() {
+            it.charge(b.key.iter().map(|(_, _, t)| t.len() as u64 / 64).sum::<u64>() + 1)?;
+            let rules = odd_rules(&mut d.doc.borrow_mut(), &b.key);
+            let _ = b.odd.set(rules);
+        }
+    }
+    let cache = d.computed.cache.borrow();
+    let odd = cache.as_ref().and_then(|b| b.odd.get()).expect("set above");
     if visibility && matches!(snap.style.get(Property::Visibility), Cv::Keyword(Keyword::Hidden | Keyword::Collapse)) {
         return Ok(Value::Bool(false));
     }
     let doc = d.doc.borrow();
-    let (mut cur, mut child, mut steps) = (Some(n), n, 0u64);
+    let (mut cur, mut child, mut steps, mut reach) = (Some(n), n, 0u64, false);
+    let per_step = 1 + odd.as_ref().map_or(0, |r| r.len() as u64);
     while let Some(e) = cur {
         steps += 1;
         if let NodeData::Element { .. } = doc.data(e) {
-            if attr(&doc, e, "style").is_some_and(|t| unmodelled(t, opt[2])) {
+            if attr(&doc, e, "style").is_some_and(|t| unmodelled(t, opt[2]) > 0) {
                 return Err(Dom::gate("checkVisibility with content-visibility or display: contents in a style attribute (not modelled)"));
             }
+            // A rule that the engine cannot model may apply here: `display: contents` on the element, `content-visibility` above it.
+            let may = |r: &OddRule| if e == n { r.contents } else { r.hidden || r.auto && opt[2] };
+            reach |= match odd {
+                None => true,
+                Some(rules) => rules.iter().filter(|r| may(r)).any(|r| r.sels.as_ref().is_none_or(|l| l.iter().any(|s| bare_css::matching::matches(&doc, e, s)))),
+            };
             if opacity && snap.styles.style(e).is_some_and(|s| s.get(Property::Opacity) == Cv::Number(0.0)) {
                 return Ok(Value::Bool(false));
             }
@@ -617,9 +696,11 @@ fn check_visibility(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V
         cur = doc.flat_parent(e);
     }
     drop(doc);
-    it.charge(steps / 8 + 1)?;
-    if odd {
-        return Err(Dom::gate("checkVisibility on a page with content-visibility or display: contents in a style sheet (not modelled)"));
+    drop(cache);
+    it.charge(steps * per_step / 8 + 1)?;
+    // A call that is false for another reason (opacity, a closed `details`) is answered above.
+    if reach {
+        return Err(Dom::gate("checkVisibility of an element that a style sheet rule with content-visibility or display: contents may reach (not modelled)"));
     }
     Ok(Value::Bool(true))
 }
