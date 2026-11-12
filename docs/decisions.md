@@ -1323,3 +1323,6 @@ Lit and other web-component libraries style a shadow root with `new CSSStyleShee
 
 ## eval awaits promises and shows thrown errors (2026-11-12)
 `eval` ticks the page until a returned Promise settles, up to the step time limit. It gives the fulfilled value, or `rejected: Name: message`. Code with `await` runs as an async function. It first runs as `return (code)`. When that does not parse, it runs as a function body, and the code must `return` its value. A thrown value shows as `Name: message` for an error, else as its string form. Step `expect js` failures use the same text.
+
+## A document request starts a page mark (2026-11-12)
+Issue #388 showed a 9.6 s first phase for an `open` of a plain file that took milliseconds. No request waited. The `wait` phase counts from the start of the last page when a request has no queue time. A plain file starts no page, so it counted from an earlier page. Now `load_document` marks a page start for each document it loads.
