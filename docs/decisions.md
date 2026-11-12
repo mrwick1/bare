@@ -1397,3 +1397,15 @@ A sweep of real sites (issue #397) found locator faults that cost an agent turns
 - A `not_found` miss on an idle page no longer says "nothing can change it". The text was about the page, and the fault was in the locator. Other failure kinds keep the idle note.
 - A ref before any snapshot or find of the document says so. Before, it said that the page had navigated.
 - `find` with no match on an idle page already returned in a few ms at 992a26b0. It waits only while requests are pending, up to 2 s, as before.
+## Text changes in act, a short open and max_chars limits (2026-11-12)
+Issue #398 found three replies that cost too many tokens or hid a change.
+- A snapshot keeps a hash of each line of the rendered text, as `read` gives it. One more walk of the DOM does this.
+- An interactive `act` diff adds the text lines that the last snapshot did not show, as `text: "..."`. A click that changed `You clicked: Cancel` to `You clicked: Ok` gave `no change` before.
+- The text lines come in page order, once each. A line that a changed element line already shows as its name is left out.
+- The cap is 5 lines of at most 200 characters. A last line says how many more changed, and points to `read`. A removed text line does not show.
+- A diff in `all` mode already has text lines, so it adds none.
+- `open` gives the compact receipt of `act` by default: ok or the failure, the time, a redirect, not ready, script errors and failed requests. On github.com the reply went from 30076 to 12 characters.
+- `open` with `report: true` gives the full JSON step report, as before. `snapshot: true` still adds the snapshot.
+- `deck` passes a text reply through, so it needs no change.
+- `read` and `links` count the header, the count line and the cut line in `max_chars`. The snapshot cut line counts in its budget too. The snapshot header is still outside the limit.
+- A `max_chars` that the header fills is a tool error that names a limit that works. Before, `read` gave no text and the same offset again.

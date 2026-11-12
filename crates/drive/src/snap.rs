@@ -22,12 +22,18 @@ fn hash<T: Hash + ?Sized>(t: &T) -> u64 {
     h.finish()
 }
 
-/// What a snapshot showed: each element with a hash of its line, and the hashes of the text lines.
+/// What a snapshot showed: each element with a hash of its line, and the hashes of the text lines. `read` holds a hash of each line
+/// of the rendered text, so an interactive diff can name the text that changed.
 #[derive(Default)]
 struct Seen {
     els: HashMap<NodeId, u64>,
     text: HashSet<u64>,
+    read: HashSet<u64>,
 }
+
+/// The most text lines, and the most characters of each, that a diff adds.
+const TEXT_LINES: usize = 5;
+const TEXT_CHARS: usize = 200;
 
 /// A parameter that only tracks the visitor: it never changes the page that the URL names.
 fn tracking(k: &str) -> bool {
@@ -360,7 +366,13 @@ fn budget(lines: Vec<String>, max: usize, page: Option<usize>) -> String {
     if total <= max {
         return lines.join("\n");
     }
-    let keep = if off > 0 { max } else { max * 4 / 5 };
+    // The cut line counts too: room for its longest form (all lines cut, the widest refs) comes off `max`.
+    let how = |next: usize| match page {
+        Some(_) => format!("find or read an element, snapshot with root=REF, or snapshot with offset={next}"),
+        None => "pass a larger max_chars".into(),
+    };
+    let room = max.saturating_sub(format!("\n… {} lines cut{}; use {} …", lines.len(), ref_span(lines), how(off + lines.len())).len());
+    let keep = if off > 0 { room } else { room * 4 / 5 };
     let (mut head, mut used) = (Vec::new(), 0);
     for l in lines {
         if used + l.len() + 1 > keep {
@@ -372,7 +384,7 @@ fn budget(lines: Vec<String>, max: usize, page: Option<usize>) -> String {
     let (mut tail, mut used_t) = (Vec::new(), 0);
     if off == 0 {
         for l in lines[head.len()..].iter().rev() {
-            if used_t + l.len() + 1 > max / 5 {
+            if used_t + l.len() + 1 > room / 5 {
                 break;
             }
             used_t += l.len() + 1;
@@ -382,11 +394,7 @@ fn budget(lines: Vec<String>, max: usize, page: Option<usize>) -> String {
     }
     let cut = lines.len() - head.len() - tail.len();
     let span = ref_span(&lines[head.len()..lines.len() - tail.len()]);
-    let how = match page {
-        Some(_) => format!("find or read an element, snapshot with root=REF, or snapshot with offset={}", off + head.len()),
-        None => "pass a larger max_chars".into(),
-    };
-    let mut out = format!("{}\n… {cut} lines cut{span}; use {how} …", head.join("\n"));
+    let mut out = format!("{}\n… {cut} lines cut{span}; use {} …", head.join("\n"), how(off + head.len()));
     if !tail.is_empty() {
         out.push('\n');
         out.push_str(&tail.join("\n"));
@@ -505,16 +513,28 @@ pub fn snapshot(p: &mut Page, refs: &mut Refs, mode: Mode, root: Option<u32>, of
     let start = root.map(|r| refs.get(r, doc)).transpose()?;
     let clicks = p.browser().map(|b| b.listened(CLICKS)).unwrap_or_default();
     let mut items = Vec::new();
+    let mut text = Vec::new();
     p.inspect(|d, frame| {
         let cx = Cx { doc: d, styles: &frame.styles };
         walk(&cx, start.map_or(d.root(), |h| h.node), mode, &clicks, &mut items);
+        // The rendered text of the whole page, for the text lines of the next diff. One more walk, without names or roles.
+        if root.is_none() {
+            walk_text(&cx, d.root(), &mut text);
+        }
     })
     .ok_or_else(|| p.errors.last().cloned().unwrap_or_else(|| "the page has no document or no layout yet".into()))?;
     let prev = if root.is_none() { refs.last.take() } else { None };
     let refs_had_prev = prev.is_some();
     let rows = format(p, refs, items, prev.as_ref());
+    // The text lines that the last snapshot did not show, in page order, once each. An interactive outline has no text lines, so
+    // without these a changed message ("You clicked: Ok") gave `no change`.
+    let mut new_text: Vec<&String> = Vec::new();
+    if let Some(prev) = prev.as_ref().filter(|_| mode == Mode::Interactive) {
+        let mut once = HashSet::new();
+        new_text = text.iter().filter(|t| !prev.read.contains(&hash(t.as_str())) && once.insert(hash(t.as_str()))).collect();
+    }
     if root.is_none() {
-        let mut seen = Seen::default();
+        let mut seen = Seen { read: text.iter().map(|t| hash(t.as_str())).collect(), ..Seen::default() };
         for r in &rows {
             match r.node {
                 Some(n) => {
@@ -529,11 +549,20 @@ pub fn snapshot(p: &mut Page, refs: &mut Refs, mode: Mode, root: Option<u32>, of
     }
     if diff_only && root.is_none() && refs_had_prev {
         let changed = rows.iter().filter(|r| r.changed).count();
-        if changed == 0 {
+        let lines = diff(&rows);
+        // A text that a changed line already shows as its name adds nothing.
+        new_text.retain(|t| !lines.iter().any(|l| l.contains(&format!("{t:?}"))));
+        if changed == 0 && new_text.is_empty() {
             return Ok(format!("no change ({} lines)", rows.len()));
         }
-        let out = budget(diff(&rows), max, None);
-        return Ok(format!("{out}\n({changed} of {} lines changed)", rows.len()));
+        let mut out = if changed == 0 { String::new() } else { format!("{}\n({changed} of {} lines changed)", budget(lines, max, None), rows.len()) };
+        for t in new_text.iter().take(TEXT_LINES) {
+            let _ = write!(out, "\ntext: {:?}", short(t, TEXT_CHARS));
+        }
+        if new_text.len() > TEXT_LINES {
+            let _ = write!(out, "\n… {} more changed text lines: use read", new_text.len() - TEXT_LINES);
+        }
+        return Ok(out.trim_start_matches('\n').to_string());
     }
     let lines: Vec<String> = rows.iter().map(|r| r.render(refs_had_prev)).collect();
     let body = if lines.is_empty() { "(no elements: the page is empty, or it has not rendered yet)".into() } else { budget(lines, max, Some(offset)) };
@@ -593,10 +622,18 @@ pub fn read(p: &mut Page, refs: &mut Refs, root: Option<u32>, offset: usize, max
     .ok_or_else(|| p.errors.last().cloned().unwrap_or_else(|| "the page has no document or no layout yet".into()))?;
     let text = items.join("\n");
     let total = text.chars().count();
-    let page: String = text.chars().skip(offset).take(max).collect();
+    // The whole reply fits in `max`: the header, the count line and the more line (each with the widest numbers) come off it.
+    let head = header(p);
+    let room = max.saturating_sub(head.chars().count() + format!("chars {offset}-{total} of {total}\n").chars().count());
+    let room = if total.saturating_sub(offset) <= room { room } else { room.saturating_sub(format!("\n… {total} more characters: read again with offset={total}").chars().count()) };
+    let page: String = text.chars().skip(offset).take(room).collect();
+    // A limit that the header fills gives no text, and the next offset would be the same: say what limit works.
+    if page.is_empty() && offset < total {
+        return Err(format!("max_chars {max} leaves no room for text after the header: pass at least {}", max - room + 100));
+    }
     let end = offset + page.chars().count();
     let more = if end < total { format!("\n… {} more characters: read again with offset={end}", total - end) } else { String::new() };
-    Ok(format!("{}chars {offset}-{end} of {total}\n{page}{more}", header(p)))
+    Ok(format!("{head}chars {offset}-{end} of {total}\n{page}{more}"))
 }
 
 /// Text only: a line for each run of text between block boundaries.
@@ -688,7 +725,14 @@ pub fn links(p: &mut Page, refs: &mut Refs, max: usize) -> Result<String, String
         let name = if name.is_empty() { String::new() } else { format!(" {name:?}") };
         lines.push(format!("[e{}]{name} -> {shown}", refs.mint(n)));
     }
-    Ok(format!("{}{} link(s)\n{}", header(p), lines.len(), budget(lines, max, None)))
+    // The header and the count line count in `max` too.
+    let head = format!("{}{} link(s)\n", header(p), lines.len());
+    let room = max.saturating_sub(head.len());
+    let out = head + &budget(lines, room, None);
+    if out.chars().count() > max {
+        return Err(format!("max_chars {max} is too small for the header and the cut line: pass at least {}", out.chars().count() + 100));
+    }
+    Ok(out)
 }
 
 /// How big the page is: its DOM nodes, and the snapshot lines of a walk that shows text (none: the page shows no text and no control).
