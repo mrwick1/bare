@@ -1815,6 +1815,7 @@ A focused element inside an editing host now takes key input. Text, Enter, Backs
 - A real web mail app ships its main CSS as one inline `<style>` of about 5 MB (bare issue #432). The old 4 MiB caps dropped that sheet and every later one, without an error.
 - Raised to 32 MiB: `ComputedLimits::max_sheet_bytes` (one read), `max_external_bytes` raised to 64 MiB (supplied external sheets), the CSSOM `MAX_TEXT` and the loader `MAX_BODY` (one fetched sheet body).
 - Chrome has no such cap for a sheet. The cap stays, so a sheet over 32 MiB still stops with a limit error.
+
 ## A restyle charges its elements and candidates, not elements times rules
 
 Issue #433: one restyle of a page with 3,400 elements and a 5 MB stylesheet took 11 ms and charged 50 M steps. Two in one task ended it with `Limit(Steps)`. Date: 2026-11-12.
@@ -1826,6 +1827,7 @@ Issue #433: one restyle of a page with 3,400 elements and a 5 MB stylesheet took
 - Result: ten restyles and `getBoundingClientRect` in one task charged about 270 M steps before (the task ended at the fourth) and charge about 2.3 M after. The test is `ten_restyles_of_a_large_page_fit_the_step_budget`.
 - `a_read_after_a_change_charges_the_elements_it_restyles` ran 20 whole-subtree restyles of 2,000 elements over its 6 M budget. It runs 60 now: 2,000 x 64 is 128 K for each.
 - Not done: a full compute charges one step for each node and its candidates, with no per-element term. It is not measured against wall time here.
+
 ## A fixed box paints and hits in tree order with its positioned siblings (2026-11-12)
 
 A `position: fixed` box with `z-index: auto` is a positioned box of CSS 2.1 Appendix E, step 8. It paints and hits in tree order with the other positioned boxes of its stacking context.
@@ -1833,6 +1835,7 @@ A `position: fixed` box with `z-index: auto` is a positioned box of CSS 2.1 Appe
 Layout puts its fragment under the root, so it painted after the whole of its parent. The parent now adopts the fixed boxes that it holds in the tree. The order follows Ladybird (`Libraries/LibWeb/Painting/StackingContext.cpp`, BSD-2). A fixed box with a `z-index` other than 0 keeps its place in the `z-index` order.
 
 Reason: a later relative box under an earlier fixed layer could not be clicked (bare#434).
+
 ## The default computed-work cap is 1 << 30 (2026-11-12)
 
 - A large web mail compose view has about 22,000 nodes and 30,000 selectors. Its work (nodes times selectors) is 138 M to 144 M. The old default, 1 << 27, refused it (bare issue #435).
