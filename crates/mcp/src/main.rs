@@ -276,9 +276,10 @@ impl Server {
             _ => Mode::Interactive,
         };
         let root = ref_arg(args, "root")?;
+        let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
         let max = Self::max(args, 12_000);
         let live = self.live_mut(args)?;
-        let out = live.session.with_refs(move |p, refs| snap::snapshot(p, refs, mode, root, max))??;
+        let out = live.session.with_refs(move |p, refs| snap::snapshot(p, refs, mode, root, offset, max))??;
         Ok(live.red.clean(&out))
     }
 
@@ -581,7 +582,7 @@ fn tools() -> Value {
         {
             "name": "snapshot",
             "description": "Read the live page as text: the accessibility outline, one element per line, indented by nesting: [e7] role \"name\" = \"value\" (states). Act on an element with its ref (act ref=e7, or ref=e7 in step lines). * marks an element new since the last snapshot. Refs stay valid until the page navigates. Use this instead of a screenshot.",
-            "inputSchema": {"type": "object", "properties": {"session": S, "mode": {"type": "string", "enum": ["interactive", "all"], "description": "interactive (default): controls, headings, landmarks, dialogs, alerts. all: also the text between them."}, "root": {"type": "string", "description": "A ref: the outline of that element only."}, "max_chars": {"type": "integer", "description": "Default 12000. A longer outline keeps 80% from the top and 20% from the end."}}},
+            "inputSchema": {"type": "object", "properties": {"session": S, "mode": {"type": "string", "enum": ["interactive", "all"], "description": "interactive (default): controls, headings, landmarks, dialogs, alerts. all: also the text between them."}, "root": {"type": "string", "description": "A ref: the outline of that element only."}, "offset": {"type": "integer", "description": "Skip this many outline lines (the cut line gives the next offset)."}, "max_chars": {"type": "integer", "description": "Default 12000. A longer outline keeps 80% from the top and 20% from the end, and a line says which refs were cut."}}},
         },
         {
             "name": "act",

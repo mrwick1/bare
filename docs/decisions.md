@@ -1226,3 +1226,7 @@ An agent such as `deck` must read a page and act on it in few model calls. Scree
 - `find`, `read` (paged text), `links`, `screenshot` (the page or one element, a path, and the image when asked), `eval` and `sessions` complete the set. Every reply goes through the redactor.
 - Each tool takes `session`. Sessions run side by side, one page each. `open` ends only the session of its name.
 - Step lines accept `ref=e7`, so a journey can mix refs and user locators.
+
+## Snapshot cut line and quiet settle (2026-11-12)
+A snapshot over its budget now says what it cut: the line count and the first and last ref of the cut lines, for example `… 412 lines cut (e158–e2096); use … offset=57 …`. Refs of cut lines stay valid, so `find`, `read ref` and `snapshot root=` reach them. `snapshot` takes an `offset` (in outline lines) to page forward through the cut part.
+`settle` before `snapshot`, `find`, `read` and `links` returned only when a 4 ms network or picture poll was over, so a page with a picture on its way cost the 300 ms cap on each call. It now returns when no task ran, no timer is due within 20 ms and no `fetch` is open. A picture on its way is not work for a read.

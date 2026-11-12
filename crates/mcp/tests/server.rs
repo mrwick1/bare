@@ -365,3 +365,63 @@ fn an_agent_logs_in_with_snapshot_refs_and_no_step_lines() {
     let (r, _) = s.tool("sessions", json!({}));
     assert!(r.as_str().unwrap().contains("main: ") && r.as_str().unwrap().contains("two: "), "{r}");
 }
+
+/// A server of one page. `/slow.png` never answers for 5 s, so a picture stays on its way. Gives the base URL.
+fn page_server(page: String) -> String {
+    use std::io::Read;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for mut c in listener.incoming().flatten() {
+            let page = page.clone();
+            std::thread::spawn(move || {
+                let (mut head, mut b) = (Vec::new(), [0u8; 1]);
+                while !head.ends_with(b"\r\n\r\n") && c.read(&mut b).unwrap_or(0) == 1 {
+                    head.push(b[0]);
+                }
+                if String::from_utf8_lossy(&head).starts_with("GET /slow.png") {
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                    return;
+                }
+                let _ = write!(c, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{page}", page.len());
+            });
+        }
+    });
+    format!("http://127.0.0.1:{port}")
+}
+
+/// A snapshot over budget says what it cut, with the counts and the refs, and `offset` reaches the cut part.
+#[test]
+fn a_cut_snapshot_says_what_was_cut_and_offset_reaches_it() {
+    let rows: String = (0..400).map(|i| format!("<li><a href='/p{i}'>link number {i}</a></li>")).collect();
+    let base = page_server(format!("<!doctype html><title>big</title><h1>Big</h1><ul>{rows}</ul>"));
+    let mut s = Server::start();
+    let (r, error) = s.tool("open", json!({"url": format!("{base}/"), "snapshot": false, "timeout_ms": 30000}));
+    assert!(!error, "{r}");
+    let (r, _) = s.tool("snapshot", json!({"max_chars": 2000}));
+    let r = r.as_str().unwrap().to_string();
+    let cut = r.lines().find(|l| l.contains("lines cut")).unwrap_or_else(|| panic!("no cut line in {r}"));
+    assert!(cut.contains("lines cut (e") && cut.contains("–e") && cut.contains("offset="), "{cut}");
+    let offset: usize = cut.split("offset=").nth(1).unwrap().split(' ').next().unwrap().parse().unwrap();
+    // The first cut ref is valid and the page after the offset starts with it.
+    let first = cut.split("(e").nth(1).unwrap().split('–').next().unwrap();
+    let (p2, error) = s.tool("snapshot", json!({"max_chars": 2000, "offset": offset}));
+    let p2 = p2.as_str().unwrap();
+    assert!(!error && p2.contains(&format!("[e{first}]")), "{first} not in {p2}");
+}
+
+/// A read on a settled page does not wait for a picture that is on its way (it waited the 300 ms of the cap).
+#[test]
+fn a_read_does_not_wait_for_a_stalled_picture() {
+    let base = page_server("<!doctype html><title>t</title><h1>Hi</h1><p>static</p><img src='/slow.png' width=10 height=10>".into());
+    let mut s = Server::start();
+    let (r, error) = s.tool("open", json!({"url": format!("{base}/"), "snapshot": false, "timeout_ms": 30000}));
+    assert!(!error, "{r}");
+    s.tool("read", json!({}));
+    for tool in ["read", "links", "snapshot"] {
+        let t = std::time::Instant::now();
+        let (r, error) = s.tool(tool, json!({}));
+        let ms = t.elapsed().as_millis();
+        assert!(!error && ms < 100, "{tool} took {ms} ms: {r}");
+    }
+}
