@@ -369,9 +369,17 @@ pub(crate) fn write(d: &Dom, it: &mut Interp<'_>, req: NamedRequest) -> R<bool> 
             return Ok(true);
         }
     };
-    let v = units(d, it, value, &named)?;
+    let Some(v) = units(d, it, value, &named)? else { return Err(over(d, it, &key, &named, "storage-item")) };
     let origin = origin_of(d)?;
     store_set(d, it, session, &origin, &key, &v, &named).map(|()| true)
+}
+
+/// The `QuotaExceededError` of a write that does not fit. A sandbox bound of bare (`bound`) fails the one call in the same way: a browser
+/// throws this error from a full store and never stops the page. The message names the bound, so an agent sees which one it was.
+fn over(d: &Dom, it: &mut Interp<'_>, k: &[u16], who: &str, bound: &str) -> Error {
+    let k = lossy(k);
+    let why = if bound.is_empty() { String::new() } else { format!(" (bare bound {bound})") };
+    d.dom_err(it, "QuotaExceededError", &format!("{who}: Setting the value of '{k}' exceeded the quota{why}."))
 }
 
 /// The write of `setItem` and of the named setter. `who` starts the quota message.
@@ -380,11 +388,8 @@ fn store_set(d: &Dom, it: &mut Interp<'_>, session: bool, origin: &str, k: &[u16
     it.charge(1 + store.len(session, origin) as u64 / 16)?;
     match store.set(session, origin, k, v) {
         Ok(()) => Ok(()),
-        Err(StoreError::Quota) => {
-            let k = lossy(k);
-            Err(d.dom_err(it, "QuotaExceededError", &format!("{who}: Setting the value of '{k}' exceeded the quota.")))
-        }
-        Err(StoreError::Limit(w)) => Err(d.lim(w)),
+        Err(StoreError::Quota) => Err(over(d, it, k, who, "")),
+        Err(StoreError::Limit(w)) => Err(over(d, it, k, who, w)),
     }
 }
 
@@ -395,19 +400,20 @@ fn need(it: &mut Interp<'_>, a: &[Value], n: usize, name: &str) -> R<()> {
     Ok(())
 }
 
-/// `ToString(v)` as UTF-16 units (lone surrogates are kept).
-fn units(d: &Dom, it: &mut Interp<'_>, v: Value, who: &str) -> R<Vec<u16>> {
+/// `ToString(v)` as UTF-16 units (lone surrogates are kept). `None` when the text is longer than one item may be: no store holds it.
+/// (`Option` is a value or nothing, as `T | undefined` in TypeScript.)
+fn units(d: &Dom, it: &mut Interp<'_>, v: Value, who: &str) -> R<Option<Vec<u16>>> {
     if matches!(v, Value::Symbol(_)) {
         return Err(it.type_error(&format!("{who}: Cannot convert a Symbol value to a string")));
     }
     let s = it.to_js_string(v)?;
     let len = it.heap.str_len(s).map_err(Error::Heap)?;
     if len > d.nav.lim.get().max_item_units {
-        return Err(d.lim("storage-item"));
+        return Ok(None);
     }
     it.charge((len / 32) as u64 + 1)?;
     match it.heap.str_units(s) {
-        Ok(u) => Ok(u.to_vec()),
+        Ok(u) => Ok(Some(u.to_vec())),
         Err(e) => Err(it.heap_error(e)),
     }
 }
@@ -422,7 +428,7 @@ fn str_value(it: &mut Interp<'_>, u: &[u16]) -> R<Value> {
 pub(crate) fn get_item(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
     let session = area(d, it, this)?;
     need(it, a, 1, "getItem")?;
-    let k = units(d, it, a[0], "Failed to execute 'getItem' on 'Storage'")?;
+    let Some(k) = units(d, it, a[0], "Failed to execute 'getItem' on 'Storage'")? else { return Ok(Value::Null) };
     let (_, origin) = target(d, it, this)?;
     let store = d.nav.s.borrow().store.clone();
     it.charge(1 + store.len(session, &origin) as u64 / 16)?;
@@ -436,8 +442,8 @@ pub(crate) fn set_item(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -
     let session = area(d, it, this)?;
     need(it, a, 2, "setItem")?;
     let who = "Failed to execute 'setItem' on 'Storage'";
-    let k = units(d, it, a[0], who)?;
-    let v = units(d, it, a[1], who)?;
+    let Some(k) = units(d, it, a[0], who)? else { return Err(over(d, it, &[0x2026], who, "storage-item")) };
+    let Some(v) = units(d, it, a[1], who)? else { return Err(over(d, it, &k, who, "storage-item")) };
     // A script may have changed the document URL while it coerced the arguments: read the origin now.
     let (_, origin) = target(d, it, this)?;
     store_set(d, it, session, &origin, &k, &v, "Failed to execute 'setItem' on 'Storage'")?;
@@ -447,7 +453,7 @@ pub(crate) fn set_item(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -
 pub(crate) fn remove_item(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
     let session = area(d, it, this)?;
     need(it, a, 1, "removeItem")?;
-    let k = units(d, it, a[0], "Failed to execute 'removeItem' on 'Storage'")?;
+    let Some(k) = units(d, it, a[0], "Failed to execute 'removeItem' on 'Storage'")? else { return Ok(Value::Undefined) };
     let (_, origin) = target(d, it, this)?;
     let store = d.nav.s.borrow().store.clone();
     it.charge(1 + store.len(session, &origin) as u64 / 16)?;
