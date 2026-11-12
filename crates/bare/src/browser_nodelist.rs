@@ -27,6 +27,7 @@
 //! all (`dom-nodelist-names`). Every list costs a table entry until the collector prunes it.
 //!
 //! `Src::Labels` is the list behind `control.labels` (`browser_controls.rs`): the `label` elements of the tree of the control that name it.
+//! `Src::Of` is a collection of one element (`table.rows`, `tr.cells`, `form.elements`, see `browser_table.rs`); `of` keeps one list for each.
 //!
 //! Gates: the lookup is on `Document` only (no `Element.getElementsByName` exists). `getElementsByTagName` and
 //! `getElementsByClassName` are still snapshot arrays. `NodeList` is not returned by `childNodes` or `querySelectorAll`.
@@ -55,6 +56,8 @@ pub(crate) enum Src {
     Selected(NodeId),
     /// `control.labels` (`browser_controls.rs`).
     Labels(NodeId),
+    /// A collection of one element and one kind: `table.rows`, `tbody.rows`, `tr.cells` (`browser_table.rs`) or `form.elements`.
+    Of(NodeId, u8),
 }
 
 pub(crate) struct List {
@@ -67,6 +70,8 @@ pub(crate) struct List {
 #[derive(Default)]
 pub(crate) struct Tables {
     pub(crate) lists: IdMap<ObjId, List>,
+    /// The one list of each `Src::Of`, so `table.rows === table.rows`.
+    of: std::collections::HashMap<(NodeId, u8), ObjId>,
     name_bytes: usize,
     cached_ids: usize,
 }
@@ -108,6 +113,8 @@ pub(crate) fn prune(d: &Dom, live: &dyn Fn(ObjId) -> bool) {
         keep
     });
     (t.name_bytes, t.cached_ids) = (names, ids);
+    let lists = &t.lists;
+    t.of.retain(|_, o| lists.contains_key(o));
 }
 
 /// `IndexedSource::indexed_len` for a list. `None`: `owner` is not a list.
@@ -174,6 +181,7 @@ fn prepare(d: &Dom, it: &mut Interp<'_>, owner: ObjId) -> R<()> {
             Src::Options(s) => Err((*s, 0)),
             Src::Selected(s) => Err((*s, 1)),
             Src::Labels(c) => Err((*c, 2)),
+            Src::Of(n, k) => Err((*n, 3 + *k)),
         }, l.rev, t.cached_ids - l.ids.len())
     };
     let name = match src {
@@ -182,7 +190,11 @@ fn prepare(d: &Dom, it: &mut Interp<'_>, owner: ObjId) -> R<()> {
             if cached == Some(d.doc.borrow().revision()) {
                 return Ok(());
             }
-            let ids = if mode == 2 { crate::browser_controls::label_ids(d, it, owner_node)? } else { crate::browser_select::list_ids(d, it, owner_node, mode == 1)? };
+            let ids = match mode {
+                0 | 1 => crate::browser_select::list_ids(d, it, owner_node, mode == 1)?,
+                2 => crate::browser_controls::label_ids(d, it, owner_node)?,
+                m => crate::browser_table::ids(d, it, owner_node, m - 3)?,
+            };
             if ids.len() > d.lim.max_results {
                 return Err(d.lim("dom-results"));
             }
@@ -308,6 +320,19 @@ pub(crate) fn make_list(d: &Dom, it: &mut Interp<'_>, proto: ObjId, src: Src) ->
     Ok(Value::Object(o))
 }
 
+/// The one live `HTMLCollection` of `n` and `kind` (`Src::Of`), made on the first call.
+pub(crate) fn of(d: &Dom, it: &mut Interp<'_>, n: NodeId, kind: u8) -> V {
+    if let Some(&o) = d.nl.s.borrow().of.get(&(n, kind)) {
+        return Ok(Value::Object(o));
+    }
+    let proto = crate::browser_select::collection_proto(d, it)?;
+    let v = make_list(d, it, proto, Src::Of(n, kind))?;
+    if let Value::Object(o) = v {
+        d.nl.s.borrow_mut().of.insert((n, kind), o);
+    }
+    Ok(v)
+}
+
 /// The members of the list `this`, fresh. `None`: `this` is not a list.
 pub(crate) fn members(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<Option<Vec<NodeId>>> {
     let Value::Object(o) = this else { return Ok(None) };
@@ -323,7 +348,7 @@ pub(crate) fn select_of(d: &Dom, this: Value) -> Option<NodeId> {
     let Value::Object(o) = this else { return None };
     match d.nl.s.borrow().lists.get(&o)?.src {
         Src::Options(s) | Src::Selected(s) => Some(s),
-        Src::Name(_) | Src::Labels(_) => None,
+        Src::Name(_) | Src::Labels(_) | Src::Of(..) => None,
     }
 }
 

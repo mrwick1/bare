@@ -2135,3 +2135,21 @@ fn a_hash_change_from_eval_loads_nothing() {
     assert_eq!(s.tool("eval", json!({"js": "location.hash = 'x'; 1"})), (json!(1), false));
     assert_eq!(s.tool("eval", json!({"js": "location.hash + ' ' + document.title + ' ' + window.mark"})).0, json!("#x one 1"));
 }
+
+/// A page script that reads `table.rows`, `tr.cells` and `form.elements` without naming any `HTML*Element` global.
+const TABLE_PAGE: &str = "<!doctype html><title>t</title><body><table id=t><tr><td>a</td><td>b</td></tr><tr><td>c</td></tr></table><form id=f><input name=q placeholder=Find></form><script>
+let t = document.getElementById('t');
+let r = t.insertRow(-1); r.insertCell().textContent = 'd';
+let f = document.getElementById('f');
+document.body.insertAdjacentHTML('beforeend', '<h1>rows ' + t.rows.length + ' cells ' + t.rows[0].cells.length + ' fields ' + f.elements.length + ' ' + f.elements[0].placeholder + '</h1>');
+</script></body>";
+
+/// The page renders its heading: the members are there before the page names their interface.
+#[test]
+fn a_page_that_reads_table_rows_renders() {
+    let base = pages(&[("/", TABLE_PAGE)]);
+    let mut s = Server::start();
+    let (r, e) = s.tool("open", json!({"url": format!("{base}/")}));
+    assert!(!e, "{r}");
+    assert_eq!(s.tool("eval", json!({"js": "document.querySelector('h1').textContent"})).0, json!("rows 3 cells 2 fields 1 Find"));
+}

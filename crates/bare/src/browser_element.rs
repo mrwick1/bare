@@ -118,7 +118,7 @@ fn default_tab(doc: &Document, n: NodeId) -> i32 {
 }
 
 /// "Rules for parsing integers" (HTML Standard): `None` when there is no number or it does not fit `i32`.
-fn parse_int(s: &str) -> Option<i32> {
+pub(crate) fn parse_int(s: &str) -> Option<i32> {
     let t = s.trim_start_matches([' ', '\t', '\n', '\x0c', '\r']);
     let (neg, t) = match t.as_bytes().first()? {
         b'-' => (true, &t[1..]),

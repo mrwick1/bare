@@ -547,6 +547,11 @@ pub(crate) fn list_ids(d: &Dom, it: &mut Interp<'_>, select: NodeId, chosen: boo
     Ok(if chosen { c.sel.iter().map(|&i| c.opts[i as usize]).collect() } else { c.opts.clone() })
 }
 
+/// `HTMLCollection.prototype`, for the collections of other modules (`browser_nodelist::of`).
+pub(crate) fn collection_proto(d: &Dom, it: &mut Interp<'_>) -> R<ObjId> {
+    Ok(ensure(d, it)?.collection)
+}
+
 /// The prototype of a new wrapper of an HTML `select`, `option` or `optgroup`.
 pub(crate) fn proto_for(d: &Dom, it: &mut Interp<'_>, tag: &str) -> R<ObjId> {
     let m = ensure(d, it)?;

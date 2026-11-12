@@ -1946,6 +1946,18 @@ pub(crate) const LINK_AS: [&str; 23] = [
     "report", "script", "serviceworker", "sharedworker", "style", "track", "video", "webidentity", "worker", "xslt",
 ];
 
+/// The prototype of a new `<link>` wrapper. The first one adds the reflected members that the start-up table (`DEFS`) does not hold, so a
+/// page without a `<link>` does not pay for them.
+pub(crate) fn link_proto(d: &Dom, it: &mut Interp<'_>) -> R<ObjId> {
+    let p = d.p().link;
+    if !d.link_done.replace(true) {
+        crate::browser_reflect::reflect!(d, it, p, &["link"], {
+            "media" => "media": Str, "type" => "type": Str, "integrity" => "integrity": Str, "hreflang" => "hreflang": Str, "disabled" => "disabled": Bool,
+        });
+    }
+    Ok(p)
+}
+
 /// A known `as` value is given in lower case. An unknown one is the empty string (an enumerated attribute with no default).
 pub(crate) fn link_as(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let n = link_el(d, it, this)?;

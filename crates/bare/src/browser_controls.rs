@@ -31,9 +31,10 @@
 //!
 //! Deviations (on purpose)
 //! - `badInput` is only for number text. The date kinds, `range`, `color` and `file` have no value checks. `tooLong` and `tooShort` texts are
-//!   written from memory of Chrome; no case checks them. No `input.valueAsNumber`, `min`, `max`, `step`, `pattern`, `minLength`, `maxLength`,
-//!   `readOnly`, `placeholder` or `multiple` property on an input (script uses the attributes; each is a function that every page with an
-//!   input would pay for). `fieldset`, `output` and `object` have no validity members.
+//!   written from memory of Chrome; no case checks them. No `input.valueAsNumber`, `valueAsDate`, `stepUp`, `stepDown`, `list` or `showPicker`.
+//!   `placeholder`, `min`, `max`, `step`, `pattern`, `autocomplete`, `multiple`, `maxLength`, `minLength`, `size`, `button.value` and the
+//!   `form` reflections are made with the first wrapper of their tag (`browser_reflect.rs`), so a page without one does not pay for them.
+//!   `form.elements` and `form.length` are the live list of `Dom::form_elements`. `fieldset`, `output` and `object` have no validity members.
 //! - A radio group is read when asked (no group state), so two `checked` radios of one group in the markup both read as checked until a
 //!   script or a reset checks one. A `checked` write unchecks the other radios of the group.
 
@@ -644,6 +645,12 @@ pub(crate) fn decorate(d: &Dom, it: &mut Interp<'_>, proto: ObjId, check: bool) 
 
 reflect!("input", "required", input_required, set_input_required, bool);
 
+/// `form.elements`: one live `HTMLCollection` of the form (`browser_table::FORM`).
+fn form_elements(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    let f = d.html_el(it, this, "form")?;
+    crate::browser_nodelist::of(d, it, f, crate::browser_table::FORM)
+}
+
 /// The prototype of a new wrapper of an HTML `input`, `button`, `form` or `label`. The first `input`, the first `button` and the first `form`
 /// give their prototype the members of this file.
 pub(crate) fn proto_for(d: &Dom, it: &mut Interp<'_>, tag: &str) -> R<ObjId> {
@@ -655,6 +662,20 @@ pub(crate) fn proto_for(d: &Dom, it: &mut Interp<'_>, tag: &str) -> R<ObjId> {
         let done = d.ctl.done.get();
         if done & 4 == 0 {
             d.def_method(it, p.form, "reset", 0, form_reset)?;
+            crate::browser_reflect::reflect!(d, it, p.form, &["form"], {
+                "action" => "action": UrlOrDoc,
+                "method" => "method": Enum(&["get", "post", "dialog"], "get"),
+                "enctype" => "enctype": Enum(&["application/x-www-form-urlencoded", "multipart/form-data", "text/plain"], "application/x-www-form-urlencoded"),
+                "target" => "target": Str,
+                "name" => "name": Str,
+                "acceptCharset" => "accept-charset": Str,
+                "autocomplete" => "autocomplete": Enum(&["on", "off"], "on"),
+            });
+            d.def_get(it, p.form, "elements", form_elements, None)?;
+            d.def_get(it, p.form, "length", |d, it, t, _| {
+                let f = d.html_el(it, t, "form")?;
+                Ok(Value::Number(d.form_elements(it, f)?.len() as f64))
+            }, None)?;
             d.ctl.done.set(done | 4);
         }
         return Ok(p.form);
@@ -665,13 +686,21 @@ pub(crate) fn proto_for(d: &Dom, it: &mut Interp<'_>, tag: &str) -> R<ObjId> {
         match tag {
             "input" => {
                 decorate(d, it, proto, false)?;
+                crate::browser_reflect::reflect!(d, it, proto, &["input"], {
+                    "placeholder" => "placeholder": Str, "min" => "min": Str, "max" => "max": Str, "step" => "step": Str,
+                    "pattern" => "pattern": Str, "autocomplete" => "autocomplete": Str, "multiple" => "multiple": Bool,
+                    "maxLength" => "maxlength": Long(-1, 0), "minLength" => "minlength": Long(-1, 0), "size" => "size": Long(20, 1),
+                });
                 let k = d.key(it, "required")?;
                 let g = d.add_fn(it, input_required, "get required", 0, false)?;
                 let s = d.add_fn(it, set_input_required, "set required", 1, false)?;
                 let _ = d.ctl.required.set([g, s]);
                 d.define_accessor(it, proto, k, g, Some(s))?;
             }
-            _ => decorate(d, it, proto, false)?,
+            _ => {
+                decorate(d, it, proto, false)?;
+                crate::browser_reflect::reflect!(d, it, proto, &["button"], { "value" => "value": Str });
+            }
         }
         d.ctl.done.set(done | bit);
     }

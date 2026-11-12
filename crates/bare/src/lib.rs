@@ -127,6 +127,9 @@ mod browser_scheduler;
 mod browser_worker;
 mod browser_perf;
 mod browser_html;
+mod browser_html_members;
+mod browser_reflect;
+mod browser_table;
 mod browser_selection;
 #[cfg(test)]
 mod browser_selection_tests;

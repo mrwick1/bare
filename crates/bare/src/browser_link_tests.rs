@@ -43,7 +43,7 @@ fn interface_and_prototype_shape() {
     assert_eq!(js(&mut b, "Object.getPrototypeOf(HTMLLinkElement.prototype) === HTMLElement.prototype && HTMLLinkElement.prototype.constructor === HTMLLinkElement"), "true");
     assert_eq!(js(&mut b, "Object.getPrototypeOf(document.getElementById('a')) === HTMLLinkElement.prototype"), "true");
     js(&mut b, "document.getElementById('a').sheet"); // The member is defined on its first read.
-    assert_eq!(js(&mut b, "Object.getOwnPropertyNames(HTMLLinkElement.prototype).sort().join()"), "as,constructor,crossOrigin,href,rel,relList,sheet");
+    assert_eq!(js(&mut b, "Object.getOwnPropertyNames(HTMLLinkElement.prototype).sort().join()"), "as,constructor,crossOrigin,disabled,href,hreflang,integrity,media,rel,relList,sheet,type");
     // like every host interface object here: not a constructor, and no instance can be made
     assert!(js(&mut b, "new HTMLLinkElement()").starts_with("throw:TypeError"));
     assert!(js(&mut b, "HTMLLinkElement()").starts_with("throw:TypeError"));
@@ -145,7 +145,7 @@ fn wrong_receivers_and_foreign_namespaces_are_illegal() {
     }
     // the refused writes changed nothing
     assert_eq!(js(&mut b, "k.getAttribute('rel') + ',' + d.getAttribute('rel') + ',' + sv.getAttribute('rel')"), "y,x,z");
-    assert_eq!(js(&mut b, "[typeof k.rel, typeof d.rel, typeof sv.rel].join()"), "undefined,undefined,undefined");
+    assert_eq!(js(&mut b, "[typeof k.rel, typeof d.rel, typeof sv.rel].join()"), "string,undefined,undefined");
     assert_eq!(js(&mut b, "HTMLLinkElement.prototype.rel"), "throw:TypeError:Illegal invocation");
     // an SVG `link` is an ordinary wrapper: a JS property, not the attribute
     assert_eq!(js(&mut b, &format!("var sl = document.createElementNS('{SVG}', 'link'); sl.rel = 'x'; sl.hasAttribute('rel') + ',' + sl.rel")), "false,x");
