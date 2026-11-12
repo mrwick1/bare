@@ -11,6 +11,8 @@ use bare_js::eval::*;
 use bare_js::heap::Heap;
 use bare_js::value::Value;
 use std::time::Instant;
+#[path = "common/exec.rs"]
+mod exec;
 
 fn die(msg: String) -> ! {
     eprintln!("FAIL: {msg}");
@@ -58,6 +60,7 @@ fn run_case(case: String, scale: usize) {
     let n = 1000 * scale;
     let (stages, want, want_entries) = program(&case, n);
     let mut it = Interp::realm(Heap::default(), EvalLimits { max_steps: 2_000_000_000, ..Default::default() }).unwrap_or_else(|e| die(format!("setup {e:?}")));
+    exec::set(&mut it);
     let (mut t_run, mut t_collect, mut got, mut tracked, mut freed) = (0.0, 0.0, Value::Undefined, (0, 0), 0);
     let last = stages.len() - 1;
     for (i, src) in stages.iter().enumerate() {

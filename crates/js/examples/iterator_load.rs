@@ -15,6 +15,8 @@ use bare_js::eval::*;
 use bare_js::heap::Heap;
 use bare_js::value::Value;
 use std::time::Instant;
+#[path = "common/exec.rs"]
+mod exec;
 
 fn die(msg: String) -> ! {
     eprintln!("FAIL: {msg}");
@@ -60,6 +62,7 @@ fn run_case(case: String, scale: usize) {
     let n = 10_000 * scale;
     let (setup, op, want) = program(&case, n);
     let mut it = Interp::realm(Heap::default(), EvalLimits { max_steps: 2_000_000_000, ..Default::default() }).unwrap_or_else(|e| die(format!("setup {e:?}")));
+    exec::set(&mut it);
     let t = Instant::now();
     if let Err(e) = it.run_script(&setup) {
         die(format!("setup script {e:?}"));

@@ -434,3 +434,44 @@ run() + run() + run()"#;
         assert!(c.heap.add_hits > before.heap.add_hits && c.heap.chain_hits > before.heap.chain_hits);
     });
 }
+
+/// Step B3: a collect that sweeps the shapes while the entries and the global cells of bytecode code are filled. They are empty after
+/// it, and the code gives the same results and fills them again.
+#[test]
+fn a_shape_sweep_resets_the_caches_of_bytecode_code() {
+    big(|| {
+        let mut it = Interp::realm(Heap::default(), EvalLimits::default()).unwrap();
+        it.set_exec(Exec::Byte);
+        // The entries that are not empty, and the cells that hold a position.
+        let filled = |it: &Interp| {
+            let empty = format!("{:?}", Ic::EMPTY);
+            let (mut ics, mut cells) = (0, 0);
+            for c in it.bc.codes.iter().flat_map(|s| s.iter()) {
+                if let BcSlot::Byte(c) = c {
+                    ics += c.code.ics.iter().filter(|ic| format!("{:?}", ic.get()) != empty).count();
+                    cells += c.cells.iter().filter(|cell| cell.1.get() != u32::MAX).count();
+                }
+            }
+            (ics, cells)
+        };
+        let src = r#"function Pt(v) { this.v = v; }
+var total = 0;
+function rd(o) { return o.v + (o.none === undefined ? 0 : 100); }
+function wr(o, x) { o.v = x; return o.v; }
+function run() { var s = 0; for (var i = 0; i < 5; i++) { var o = new Pt(i); s += rd(o) + wr(o, i * 2); total = total + 1; } return s + total; }
+var n = 0; function churn(m) { for (var i = 0; i < m; i++) { var o = {}; o['c' + (n++)] = i; } }
+run() + run()"#;
+        assert_eq!(run(&mut it, src), "75");
+        let (ics, cells) = filled(&it);
+        assert!(ics > 0 && cells > 0, "the code fills its entries ({ics}) and cells ({cells})");
+        assert_eq!(run(&mut it, "churn(10000)"), "undefined");
+        let sweeps = it.heap.shape_sweeps();
+        it.collect(&[]).unwrap();
+        assert_eq!(it.heap.shape_sweeps(), sweeps + 1, "the collect sweeps the shapes");
+        assert_eq!(filled(&it), (0, 0), "the sweep empties the entries and the cells");
+        assert_eq!(run(&mut it, "run()"), "45");
+        let (ics, cells) = filled(&it);
+        assert!(ics > 0 && cells > 0, "the entries and cells fill again");
+        assert!(it.bc_stats().runs > 0 && it.bc_stats().compiled > 0);
+    });
+}

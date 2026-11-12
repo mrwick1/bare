@@ -1,12 +1,15 @@
 //! Bounded Error.stack load. Run one fresh process per scale.
 use bare_js::{eval::{EvalLimits, Interp}, heap::Heap};
 use std::time::Instant;
+#[path = "common/exec.rs"]
+mod exec;
 
 fn main() {
     let n: usize = std::env::args().nth(1).expect("count").parse().unwrap();
     let stack = if cfg!(debug_assertions) { 64 << 20 } else { 8 << 20 };
     std::thread::Builder::new().stack_size(stack).spawn(move || {
         let mut it = Interp::realm(Heap::default(), EvalLimits { max_steps: 100_000_000, ..Default::default() }).unwrap();
+        exec::set(&mut it);
         let base = it.heap.stats().live_objects;
         let started = Instant::now();
         let src = format!("function make(){{return new Error('load')}} var count=0; for(var i=0;i<{n};i++){{var e=make();var lines=e.stack.split('\\n');if(lines.length!==3||lines[0]!=='Error: load'||e.stack.length>2048)throw 1;count++}} e=null;count");

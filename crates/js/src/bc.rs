@@ -292,11 +292,14 @@ pub struct Code {
     pub lines: Vec<(u32, u32)>,
     /// The number of registers of a frame.
     pub nregs: u16,
+    /// Pairs `(word, expression)` for each `Call` and `New`, sorted by word: the call or `new` node, for the position of
+    /// `Error.stack` and for the text of a callee in an error.
+    pub calls: Vec<(u32, u32)>,
 }
 
 impl Code {
     pub fn new(nregs: u16) -> Code {
-        Code { ops: Vec::new(), consts: Vec::new(), ics: Box::new([]), handlers: Vec::new(), lines: Vec::new(), nregs }
+        Code { ops: Vec::new(), consts: Vec::new(), ics: Box::new([]), handlers: Vec::new(), lines: Vec::new(), nregs, calls: Vec::new() }
     }
 
     /// The handler for an exception thrown at word `pc`.

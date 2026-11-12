@@ -20,6 +20,8 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::panic::{AssertUnwindSafe, catch_unwind};
+#[path = "common/exec.rs"]
+mod exec;
 
 /// `print` collects the async protocol lines. `$262` has no agent, realm, detach or evalScript (tests that need them are
 /// listed in the skip file). The last expression is a function that names the constructor of a thrown value.
@@ -194,6 +196,7 @@ impl Ctx {
         }
         let limits = EvalLimits { max_steps: self.steps, max_call_depth: 1000, max_traversal_depth: 512, max_statement_frames: 4096, ..Default::default() };
         let mut it = Interp::realm(Heap::default(), limits).map_err(|e| format!("realm: {e:?}"))?;
+        exec::set(&mut it);
         let ctor_name = it.run_script(PRELUDE).map_err(|e| format!("prelude: {e:?}"))?;
         let script = Path::new(&self.root).join(path);
         let mut g = Graph::default();

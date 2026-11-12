@@ -1,6 +1,6 @@
 //! Load test for the evaluator. One case at one scale per process, so that the peak memory belongs to that run.
 //!
-//!   eval_load CASE SCALE      CASE: loop | calls | fib | closures | objects | webpack | throws | concat    SCALE: 1, 10, 100
+//!   eval_load CASE SCALE      CASE: loop | loopfn | calls | fib | closures | objects | webpack | throws | concat    SCALE: 1, 10, 100
 //!
 //! Each case builds a small program, runs it, and checks the result against the same computation done in Rust
 //! (the checksum). A wrong checksum exits with status 1 and prints no timing. It prints parse, setup and run
@@ -14,6 +14,8 @@ use bare_js::value::Value;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use std::time::Instant;
+#[path = "common/exec.rs"]
+mod exec;
 
 struct Counting;
 static ALLOCS: AtomicUsize = AtomicUsize::new(0);
@@ -90,6 +92,15 @@ fn case(name: &str, scale: usize) -> Case {
                 s = (s + i * 3) % 1000003;
             }
             Case { src: format!("var s = 0; for (var i = 0; i < {n}; i++) {{ s = (s + i * 3) % 1000003; }} s"), expect: s.to_string(), after_gc: None }
+        }
+        // `loop` with function locals instead of globals.
+        "loopfn" => {
+            let n = 200_000 * scale as u64;
+            let mut s = 0u64;
+            for i in 0..n {
+                s = (s + i * 3) % 1000003;
+            }
+            Case { src: format!("function f() {{ var s = 0; for (var i = 0; i < {n}; i++) {{ s = (s + i * 3) % 1000003; }} return s; }} f()"), expect: s.to_string(), after_gc: None }
         }
         "calls" => {
             let n = 100_000 * scale as u64;
@@ -210,6 +221,7 @@ fn run_case(name: String, scale: usize) {
     let t1 = Instant::now();
     let limits = EvalLimits { max_steps: u64::MAX / 2, max_call_depth: 100, max_envs: 1 << 22, max_functions: 1 << 22, ..Default::default() };
     let mut it = Interp::new(&prog, Heap::default(), limits).unwrap_or_else(|e| die(format!("setup: {e:?}")));
+    exec::set(&mut it);
     let setup_ms = t1.elapsed().as_secs_f64() * 1e3;
     let (a0, b0, cpu0) = (ALLOCS.load(Relaxed), BYTES.load(Relaxed), cpu_ms());
     PEAK.store(LIVE.load(Relaxed), Relaxed);
