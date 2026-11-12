@@ -90,10 +90,17 @@ fn corpus_matches_node() {
 }
 
 #[test]
+fn normalize_nfkc_and_nfkd() {
+    assert_eq!(
+        run("['ﬁ'.normalize('NFKC'), '①'.normalize('NFKD'), 'Å'.normalize('NFKC') === 'Å', 'ﬁ'.normalize('NFKD'), \
+             '\\u1100\\u1161'.normalize('NFKC') === '\\uAC00', '\\uAC00'.normalize('NFKD') === '\\u1100\\u1161', '\\u00b2\\ud800'.normalize('NFKD').length].join('|')"),
+        "string:fi|1|true|fi|true|true|2"
+    );
+}
+
+#[test]
 fn gates_are_explicit_unsupported() {
     for (src, what) in [
-        ("'a'.normalize('NFKC')", "String.prototype.normalize with NFKC or NFKD"),
-        ("'a'.normalize('NFKD')", "String.prototype.normalize with NFKC or NFKD"),
         ("'a'.toLocaleUpperCase('tr')", "toLocaleLowerCase and toLocaleUpperCase for tr, az and lt"),
         ("'A'.toLocaleLowerCase(['az-Latn'])", "toLocaleLowerCase and toLocaleUpperCase for tr, az and lt"),
         ("Reflect.set(new Uint8Array(2), 0, 1, {})", "Reflect.set on an integer index of a byte view with another receiver"),

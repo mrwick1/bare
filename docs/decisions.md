@@ -1769,3 +1769,12 @@ A focused element inside an editing host now takes key input. Text, Enter, Backs
 - The token strings need a value slot in the heap. `Slot::Str` (`crates/js/src/heap_binary.rs`) answers with a string. The list traces its strings, so the collector keeps them.
 - `item` follows Ladybird `DOMTokenList::item` (BSD-2). We wrote our own code and copied no file.
 - Gap: `CSSStyleDeclaration` has no indexed access (`style[0]` is `undefined`; Chrome gives the first property name). `DOMStringList` does not exist in bare. `sandbox` has no `DOMTokenList`.
+
+## `normalize` with NFKC and NFKD through `icu_normalizer` (2026-11-12)
+
+- A web mail app calls `normalize('NFKC')` when it opens a message. bare threw `Unsupported`, so the page stopped (bare issue #428).
+- NFKC and NFKD use `icu_normalizer` (`ComposingNormalizer::try_new_nfkc_unstable`, `DecomposingNormalizer::try_new_nfkd_unstable`) with the baked data in `crates/js/src/icu_data`. The data comes from `tools/js/icu_data_gen.sh` (icu4x-datagen 2.4.0, CLDR 49), which now adds the markers `NormalizerNfkdDataV1`, `NormalizerNfkdTablesV1` and `NormalizerNfcV1`.
+- The compiled data of `icu_normalizer` is not used. bare-js builds its ICU4X crates with `default-features = false` and bakes its own data (`docs/resources.md`, data choice). The size of the compiled normalizer data was not measured.
+- NFC and NFD stay on `bare-unicode`. The issue said they used `icu_normalizer`; they do not. Two normalizers now run in one `normalize` call, so their Unicode versions can differ. To verify: compare the two outputs on a full Unicode test file.
+- Cost: the release `bare-mcp` binary grows by 104,992 B (+0.57%). The new data is 160 KB of source.
+- Checks: 'ﬁ'.normalize('NFKC') is 'fi', '①'.normalize('NFKD') is '1', a Hangul pair composes to U+AC00, and a lone surrogate stays. Node 22 gives the same results.

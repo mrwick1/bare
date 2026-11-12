@@ -93,13 +93,13 @@ fn throw_and_limits_restore_the_caller_code() {
         let mut it = realm(limits());
         out(&mut it, "function boom() { throw new Error('a-fail') } function okA() { return 'A-ok' }
                       function spin() { while (true) {} } function rec() { return rec() }
-                      function bad() { return 'a'.normalize('NFKC') }");
+                      function bad() { return 'a'.toLocaleUpperCase('tr') }");
         assert_eq!(out(&mut it, "function okB() { return 'B-ok' } var r; try { boom() } catch (e) { r = e.message } r + okB() + okA()"), "a-failB-okA-ok");
         assert_eq!(out(&mut it, "function k() { return 'k' } var s = k(); spin()"), "limit:Steps");
         assert_eq!(out(&mut it, "k() + okB() + okA() + s"), "kB-okA-okk");
         assert_eq!(out(&mut it, "function z() { return rec() } z()"), "limit:CallDepth");
         assert_eq!(out(&mut it, "z.name + k() + okA()"), "zkA-ok");
-        assert_eq!(out(&mut it, "bad()"), "unsupported:String.prototype.normalize with NFKC or NFKD");
+        assert_eq!(out(&mut it, "bad()"), "unsupported:toLocaleLowerCase and toLocaleUpperCase for tr, az and lt");
         assert_eq!(out(&mut it, "okB() + k()"), "B-okk");
         assert_eq!(out(&mut it, "try { boom() } catch (e) { e.message } "), "a-fail");
         // a host call that throws, then a script
