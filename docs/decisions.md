@@ -1648,3 +1648,12 @@ Layout puts the fragment of an absolute box after the other fragments of its con
 - `FileReader` is `shims/filereader.js`. It runs on `Blob.prototype.arrayBuffer` and `TextDecoder`, and it is made at the first read of its name.
 - `abort` on an idle reader clears `result`. The File API requires this, so the shim follows it.
 - Only UTF-8 works in `readAsText`. The host `TextDecoder` stops other labels with `Unsupported`, which a shim cannot catch.
+## execCommand core, ported from Ladybird (2026-11-12)
+
+- `document.execCommand` and the `queryCommand*` methods now exist in `browser_editing.rs`. So do `isContentEditable` and `contentEditable`.
+- The commands are `insertText`, `delete`, `forwardDelete`, `insertParagraph`, `insertLineBreak` and `selectAll`. Each one acts on the first range of `getSelection()` inside an editing host.
+- The code follows Ladybird's `Libraries/LibWeb/Editing/` (BSD-2-Clause), simplified. The notice is `crates/bare/LICENSE-LADYBIRD`.
+- The edits use the DOM methods a page can call. The live ranges and the mutation records stay the ones of the DOM code.
+- Each successful command fires `input` at the host. `beforeinput` is not fired for a script call, as in Chrome.
+- The functions `insert_text`, `delete_back`, `delete_forward`, `insert_paragraph`, `insert_line_break` and `select_all` are `pub(crate)` on `Dom`. Key input and the format commands call them.
+- Gaps: no block merge on Backspace at a block start, no `&nbsp;` rules, `designMode` stays "off".

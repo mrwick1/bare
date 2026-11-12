@@ -1296,6 +1296,7 @@ impl Dom {
         crate::browser_nodelist::install(self, it)?;
         crate::browser_dataset::install(self, it)?;
         crate::browser_abort::install(self, it)?;
+        crate::browser_editing::install(self, it)?;
         crate::browser_worker::install(self, it)?;
         crate::browser_xhr::install(self, it)?;
         crate::browser_encoding::install(self, it)?;

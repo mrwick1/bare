@@ -48,6 +48,7 @@ Boa is MIT or Unlicense. We read its source and wrote our own code in the shape 
 | Our file | Boa path (Unlicense OR MIT) | What we took |
 | --- | --- | --- |
 | `crates/bare/src/browser_abort.rs` | `core/runtime/src/abort` | The shape of `AbortController` and `AbortSignal`. The DOM Standard adds what Boa leaves out: the `abort` event, `any`, `timeout`, `{signal}` for listeners and `fetch`, and `onabort`. |
+| `crates/bare/src/browser_editing.rs` | Ladybird `Libraries/LibWeb/Editing/` (BSD-2-Clause, commit 2e2af354): `ExecCommand.cpp`, `CommandNames.cpp`, `Commands.cpp`, `Internal/Algorithms.cpp` | The entry points `execCommand` and `queryCommand*`, and the actions of `insertText`, `delete`, `forwardDelete`, `insertParagraph`, `insertLineBreak` and `selectAll`, simplified. The notice is `crates/bare/LICENSE-LADYBIRD`. |
 | `crates/bare/src/browser_encoding.rs` | `core/wintertc/src/base64` | The shape of `btoa` and `atob`. The HTML forgiving-base64 rules decide the errors. |
 | `crates/js/src/eval_intl_segmenter.rs` | `core/engine/src/builtins/intl/segmenter` | The shape of `Intl.Segmenter`, `%Segments%` and `%SegmentIterator%`. The break rules are ICU4X (`icu_segmenter`, Unicode-3.0), not Boa's. |
 

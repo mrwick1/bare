@@ -56,6 +56,7 @@ mod browser_controls_tests;
 mod browser_idtab_tests;
 mod browser_dataset;
 mod browser_abort;
+mod browser_editing;
 mod browser_xhr;
 mod browser_encoding;
 mod browser_web;
@@ -69,6 +70,8 @@ mod browser_nodelist_tests;
 mod browser_dataset_tests;
 #[cfg(test)]
 mod browser_abort_tests;
+#[cfg(test)]
+mod browser_editing_tests;
 pub mod browser_fetch;
 pub mod browser_console;
 #[cfg(test)]
