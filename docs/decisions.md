@@ -1833,3 +1833,9 @@ A `position: fixed` box with `z-index: auto` is a positioned box of CSS 2.1 Appe
 Layout puts its fragment under the root, so it painted after the whole of its parent. The parent now adopts the fixed boxes that it holds in the tree. The order follows Ladybird (`Libraries/LibWeb/Painting/StackingContext.cpp`, BSD-2). A fixed box with a `z-index` other than 0 keeps its place in the `z-index` order.
 
 Reason: a later relative box under an earlier fixed layer could not be clicked (bare#434).
+## The default computed-work cap is 1 << 30 (2026-11-12)
+
+- A large web mail compose view has about 22,000 nodes and 30,000 selectors. Its work (nodes times selectors) is 138 M to 144 M. The old default, 1 << 27, refused it (bare issue #435).
+- Chrome has no such cap. The cap now only stops pages that are far larger than that.
+- The cascade charges the real work as steps (one per node, then one per tested candidate). The step budget is the real guard, so the cap can be raised.
+- The bound and its check stay. A test sets a lower `max_work` to prove the refusal.

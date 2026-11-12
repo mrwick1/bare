@@ -656,8 +656,9 @@ fn load_model() {
         let mut b = Browser::new(tree::parse(&page), BrowserLimits::default(), EvalLimits { max_steps: 2_000_000_000, ..Default::default() }, HeapLimits::default()).unwrap();
         let held = if scale >= 100 { 4 } else { 40 };
         let read = format!("var held = [], n = 0; for (var i = 0; i < {held}; i++) {{ var e = document.getElementById('p' + (i * 5)); held.push(getComputedStyle(e)); n += held[i].direction.length + held[i].fontSize.length; }} n");
-        // The default `computed-work` bound (nodes x rules) refuses the largest model before the cascade runs, by design.
+        // A bound of 1 << 27 (nodes x rules) refuses the largest model before the cascade runs, by design.
         if scale >= 100 {
+            b.set_computed_limits(ComputedLimits { max_work: 1 << 27, ..Default::default() });
             assert_eq!(js(&mut b, &read), lim("computed-work"));
             if std::env::var("REFUSE_ONLY").is_ok() {
                 assert_eq!(b.computed_stats().computes, 0);
@@ -782,7 +783,20 @@ fn work_bound_counts_styled_elements_not_text_nodes() {
     });
 }
 
-/// 2,000 class rules. Each restyled element charges 64 steps and its candidate rules, and the budget here is 6 M. Main charged the whole bound (4 M
+/// A large web mail compose view: about 22,000 nodes and 30,000 selectors are 138 M to 144 M work (nodes x selectors). Chrome has no such
+/// cap, so the default bound reads this page.
+#[test]
+fn a_large_page_reads_with_the_default_limits() {
+    big(|| {
+        let css: String = (0..30_000).map(|i| format!(".c{i}{{color:red}}")).collect();
+        let page = format!("<style>{css}</style><body>{}", "<i class=c1></i>".repeat(22_000));
+        let mut b = Browser::new(tree::parse(&page), BrowserLimits::default(), EvalLimits::default(), HeapLimits::default()).expect("browser");
+        assert_eq!(js(&mut b, "getComputedStyle(document.querySelector('i')).color"), "rgb(255, 0, 0)");
+        assert_eq!(b.computed_stats().computes, 1);
+    });
+}
+
+/// A read after a change restyles the elements that the change reaches. It charges for those, not for the whole page. 2,000 elements and
 /// 2,000 class rules are 1 M steps for a full cascade (each element charges 64 steps and its one candidate rule since 2026-11-12: 128 K), and the budget here is 6 M. Main charged the whole bound (4 M)
 /// for each of the 3 reads (dev.to: 84 M).
 #[test]
