@@ -52,7 +52,7 @@ fn named_iframe_access_follows_the_tree() {
         js(&mut b, "var g = document.createElement('iframe'); g.name = 'late'; document.body.appendChild(g);");
         assert_eq!(js(&mut b, "[window.late === g.contentWindow, window[1] === window.late, window.length].join()"), "true,true,2");
         js(&mut b, "g.name = 'later';");
-        assert_eq!(js(&mut b, "[typeof window.late, window.later === g.contentWindow, Object.keys(Object.getPrototypeOf(window)).join(' ')].join()"), "undefined,true,0 fr fi 1 later");
+        assert_eq!(js(&mut b, "[typeof window.late, window.later === g.contentWindow, Object.keys(Object.getPrototypeOf(Window.prototype)).join(' ')].join()"), "undefined,true,0 fr fi 1 later");
         js(&mut b, "g.remove();");
         assert_eq!(js(&mut b, "[typeof window.later, window.length, 'later' in window].join()"), "undefined,1,false");
     });
