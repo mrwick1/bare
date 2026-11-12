@@ -1351,3 +1351,14 @@ An agent clicked a ref under a spinner and got `covered`. A cookie banner over t
 - The failure names the cover, not the element under the pointer. Of the ancestors of that element that do not hold the target, it names the outermost with a role and a name. It falls back to the outermost one. It gives `tag#id.class` and `(role "name")`.
 - bare has no CSS transitions. A backdrop that fades with `transition` and removes itself on `transitionend` never goes, so the click fails after 1 s. A fade by script works.
 - Window mode routes each tool through `Remote::call` on the window thread. The dialog and tab policy is per thread and is set there, so it works. The test `the_agent_tools_work_in_a_window` checks the tools in a window. It is ignored because it needs a Wayland display. Run it on a nested compositor, not on a desktop in use.
+## Complex selectors in :not(), :is() and :where() (2026-11-12)
+
+Wikipedia calls `querySelectorAll` with `:not(.extiw, .mw-cite-backlink a, ...)`. bare threw `SyntaxError`, so the link preview script stopped.
+
+- `:not()`, `:is()` and `:where()` now take complex selectors, as Selectors 4 says. An argument may have combinators: `:not(.a > .b, .c ~ .d)`.
+- A list of compounds only keeps `Simple::Not` and `Simple::Is`. A list with a combinator becomes `Simple::Complex`. It is boxed and matched out of line, like `:host`, so the hot match arms stay small.
+- A complex argument tests the element with its first compound. Then it walks up or back from the element, like a selector. It allocates nothing.
+- The specificity of an argument counts all its compounds. `:not()` and `:is()` count like their most specific argument. `:where()` counts zero.
+- The invalidation sets (`Reach`, `Scopes`) read the compounds of an argument at the scope of their combinators. `:not(.x p)` reads `.x` on an ancestor, so a change of `.x` restyles the subtree.
+- The script limits count the searches of an argument. `backtracking` adds the most that one argument adds. `match_work` multiplies by the work of the arguments.
+- `:has()` stays out. A rule with it is still thrown away.
