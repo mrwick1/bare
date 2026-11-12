@@ -1888,7 +1888,8 @@ impl Run<'_> {
 #[inline(never)]
 pub(crate) fn document_open(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let root=d.nd(it,this)?;
-    if root != d.doc.borrow().root() { return Err(it.type_error("Illegal invocation")); }
+    if !matches!(d.doc.borrow().data(root), bare_html::dom::NodeData::Document) { return Err(it.type_error("Illegal invocation")); }
+    let main=root == d.doc.borrow().root();
     let html={let doc=d.doc.borrow();doc.children(root).find(|&n|doc.is_html(n,"html"))};
     if let Some(html)=html {
         let wrapped=d.wrap(it,html)?;
@@ -1901,15 +1902,16 @@ pub(crate) fn document_open(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Valu
         crate::browser_dom::set_text_content(d,it,wrapped,&[empty])?;
         for child in children { crate::browser_dom::append_child(d,it,wrapped,&[child])?; }
     }
-    d.scripts.write_open.set(true);
+    if main { d.scripts.write_open.set(true); }
     Ok(this)
 }
 #[cold]
 #[inline(never)]
 pub(crate) fn document_close(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let root=d.nd(it,this)?;
-    if root != d.doc.borrow().root() { return Err(it.type_error("Illegal invocation")); }
-    d.scripts.write_open.set(false);
+    if !matches!(d.doc.borrow().data(root), bare_html::dom::NodeData::Document) { return Err(it.type_error("Illegal invocation")); }
+    let main=root == d.doc.borrow().root();
+    if main { d.scripts.write_open.set(false); }
     Ok(Value::Undefined)
 }
 #[cold]
@@ -1924,11 +1926,12 @@ pub(crate) fn document_writeln(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[V
 }
 fn write(d: &Dom,it: &mut Interp<'_>,this: Value,a: &[Value],newline: bool)->V {
     let root=d.nd(it,this)?;
-    if root != d.doc.borrow().root() { return Err(it.type_error("Illegal invocation")); }
+    if !matches!(d.doc.borrow().data(root), bare_html::dom::NodeData::Document) { return Err(it.type_error("Illegal invocation")); }
+    let main=root == d.doc.borrow().root();
     let mut text=String::new();
     for &v in a { text.push_str(&d.string_arg(it,v)?); if text.len()>d.lim.max_string_bytes { return Err(d.lim("dom-string")); } }
     if newline { text.push('\n'); }
-    if let Some(script)=d.scripts.current.get().filter(|_|d.scripts.ready.get()==0)
+    if let Some(script)=d.scripts.current.get().filter(|_|main && d.scripts.ready.get()==0)
         && d.in_document(it,script)? {
         let before=match d.scripts.write_anchor.get() {
             Some((s,before)) if s==script=>before,
@@ -1938,7 +1941,7 @@ fn write(d: &Dom,it: &mut Interp<'_>,this: Value,a: &[Value],newline: bool)->V {
         if let Some(parent)=parent { return crate::browser_fragment::write_at(d,it,&text,parent,before); }
         return Ok(Value::Undefined);
     }
-    if !d.scripts.write_open.get() { document_open(d,it,this,&[])?; }
+    if main && !d.scripts.write_open.get() { document_open(d,it,this,&[])?; }
     let body=crate::browser_dom::body(d,it,this,&[])?;
     let n=d.el(it,body)?;
     crate::browser_fragment::write_at(d,it,&text,n,None)
