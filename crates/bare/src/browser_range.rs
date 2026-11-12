@@ -10,12 +10,16 @@
 //!   the end (or in another tree) moves the end, and the other way round.
 //! - `Selection` (one per realm): `rangeCount`, `addRange`, `removeAllRanges`, `empty`, `removeRange`, `getRangeAt`, `collapse`,
 //!   `setPosition`, `collapseToStart`, `collapseToEnd`, `selectAllChildren`, `isCollapsed`, `anchorNode`, `anchorOffset`, `focusNode`,
-//!   `focusOffset`, `type`, `direction` and `toString`. The selection holds the range object that was added, as Chrome does, so a change of
+//!   `focusOffset`, `type`, `direction`, `setBaseAndExtent`, `extend`, `containsNode` and `toString`. The selection holds the range object that was added, as Chrome does, so a change of
 //!   that object is a change of the selection. `collapse`, `setPosition` and `selectAllChildren` make a new range object.
 //!   A range whose root is not the document is not added, and `collapse` of such a node does nothing (the standard).
 //!
+//! - `Selection.setBaseAndExtent`, `extend` and `containsNode` follow the Selection API, ported from Ladybird `Selection.cpp`. The selection
+//!   keeps a direction: `anchorNode` and `focusNode` swap with it, and `direction` is `forward`, `backward` or `none`. A method that makes a
+//!   new range (`collapse`, `selectAllChildren`, `addRange` and the others) sets the direction to forward.
+//!
 //! Gates (`Error::Unsupported`, none is faked)
-//! - The selection methods `extend`, `setBaseAndExtent`, `containsNode`, `modify` and `deleteFromDocument`.
+//! - The selection methods `modify` and `deleteFromDocument`.
 //!
 //! Live ranges (DOM Standard, "live range")
 //! - A range follows the tree. The document watcher (see `Dom::sync_watcher`) tells the ranges of each node linked or unlinked: the "insert" and
@@ -66,6 +70,8 @@ pub(crate) struct State {
     ranges: HashMap<ObjId, Rng>,
     /// The selection object and its range.
     sel: Option<(ObjId, Option<ObjId>)>,
+    /// The focus of the selection is before its anchor (Selection API "direction" is backwards).
+    back: bool,
     /// A `Task::DocSelectionChange` is queued (Selection API "has scheduled selectionchange event").
     sc_pending: bool,
 }
@@ -257,7 +263,7 @@ impl Rng {
 // ------------------------------------------------------------ errors and arguments
 
 fn few(it: &mut Interp<'_>, what: &str, need: usize, got: usize) -> Error {
-    const SEL: [&str; 7] = ["addRange", "removeRange", "getRangeAt", "collapse", "setPosition", "selectAllChildren", "extend"];
+    const SEL: [&str; 9] = ["addRange", "removeRange", "getRangeAt", "collapse", "setPosition", "selectAllChildren", "extend", "setBaseAndExtent", "containsNode"];
     let iface = if SEL.contains(&what) { "Selection" } else { "Range" };
     it.type_error(&format!("Failed to execute '{what}' on '{iface}': {need} argument{} required, but only {got} present.", if need == 1 { "" } else { "s" }))
 }
@@ -937,6 +943,7 @@ fn set_sel(d: &Dom, r: Option<ObjId>) {
         Some(s) => std::mem::replace(&mut s.1, r),
         None => return,
     };
+    state(d).borrow_mut().back = false;
     if old != r && (old.is_none() || r.is_none() || sel_range(d, old) != sel_range(d, r)) {
         d.schedule_doc_selectionchange();
     }
@@ -1092,6 +1099,8 @@ fn is_collapsed(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
 
 fn sel_point(d: &Dom, it: &mut Interp<'_>, this: Value, f: impl Fn(Rng) -> (NodeId, u32), node: bool) -> V {
     let cur = sel_of(d, it, this)?;
+    let back = state(d).borrow().back;
+    let f = |r: Rng| if back { f(Rng { sc: r.ec, so: r.eo, ec: r.sc, eo: r.so }) } else { f(r) };
     match sel_range(d, cur).map(f) {
         None if node => Ok(Value::Null),
         None => Ok(Value::Number(0.0)),
@@ -1125,7 +1134,7 @@ fn sel_type(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
 fn sel_direction(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let cur = sel_of(d, it, this)?;
     d.js_str(it, match sel_range(d, cur) {
-        Some(r) if r.start() != r.end() => "forward",
+        Some(r) if r.start() != r.end() => if state(d).borrow().back { "backward" } else { "forward" },
         _ => "none",
     })
 }
@@ -1139,6 +1148,100 @@ fn sel_to_string(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     d.js_str(it, &s)
 }
 
+/// Make a new range for the selection, with the direction (Selection API "set the selection range"). The anchor is the start unless `back`.
+fn set_new(d: &Dom, it: &mut Interp<'_>, r: Rng, back: bool) -> R<()> {
+    let v = new_range(d, it, r)?;
+    let Value::Object(o) = v else { unreachable!() };
+    set_sel(d, Some(o));
+    state(d).borrow_mut().back = back && r.start() != r.end();
+    Ok(())
+}
+
+fn in_doc(d: &Dom, n: NodeId) -> bool {
+    let doc = d.doc.borrow();
+    root_of(&doc, n) == doc.root()
+}
+
+/// The node and offset arguments `i` and `i + 1` of a selection method, checked as `setStart` does.
+fn sel_point_arg(d: &Dom, it: &mut Interp<'_>, who: &str, a: &[Value], i: usize) -> R<(NodeId, u32)> {
+    let n = match a.get(i).and_then(|&v| d.node_of(v)) {
+        Some(n) => n,
+        None => return Err(it.type_error(&format!("Failed to execute '{who}' on 'Selection': parameter {} is not of type 'Node'.", i + 1))),
+    };
+    let off = match a.get(i + 1) {
+        Some(&v) => offset_arg(it, v)?,
+        None => 0,
+    };
+    check(d, it, &format!("{who}' on 'Selection"), n, off)?;
+    Ok((n, off))
+}
+
+/// `setBaseAndExtent`. Port of Ladybird `Selection::set_base_and_extent` (BSD-2-Clause, `LICENSE-LADYBIRD`).
+fn base_extent(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    sel_of(d, it, this)?;
+    if a.len() < 4 {
+        return Err(few(it, "setBaseAndExtent", 4, a.len()));
+    }
+    let anchor = sel_point_arg(d, it, "setBaseAndExtent", a, 0)?;
+    let focus = sel_point_arg(d, it, "setBaseAndExtent", a, 2)?;
+    if !in_doc(d, anchor.0) || !in_doc(d, focus.0) {
+        return Ok(Value::Undefined);
+    }
+    let back = position(&d.doc.borrow(), anchor, focus) == Ordering::Greater;
+    let (s, e) = if back { (focus, anchor) } else { (anchor, focus) };
+    set_new(d, it, Rng { sc: s.0, so: s.1, ec: e.0, eo: e.1 }, back)?;
+    Ok(Value::Undefined)
+}
+
+/// `extend`. Port of Ladybird `Selection::extend` (BSD-2-Clause, `LICENSE-LADYBIRD`).
+fn extend(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    let cur = sel_of(d, it, this)?;
+    if a.is_empty() {
+        return Err(few(it, "extend", 1, 0));
+    }
+    let (n, off) = sel_point_arg(d, it, "extend", a, 0)?;
+    if !in_doc(d, n) {
+        return Ok(Value::Undefined);
+    }
+    let Some(r) = sel_range(d, cur) else {
+        return Err(d.dom_err(it, "InvalidStateError", "Failed to execute 'extend' on 'Selection': This Selection object doesn't have any Ranges."));
+    };
+    let back = state(d).borrow().back;
+    let anchor = if back { r.end() } else { r.start() };
+    let focus = (n, off);
+    let after = position(&d.doc.borrow(), focus, anchor) != Ordering::Less;
+    let (s, e) = if after { (anchor, focus) } else { (focus, anchor) };
+    set_new(d, it, Rng { sc: s.0, so: s.1, ec: e.0, eo: e.1 }, !after)?;
+    Ok(Value::Undefined)
+}
+
+/// `containsNode`. Port of Ladybird `Selection::contains_node` (BSD-2-Clause, `LICENSE-LADYBIRD`).
+fn contains_node(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    let cur = sel_of(d, it, this)?;
+    if a.is_empty() {
+        return Err(few(it, "containsNode", 1, 0));
+    }
+    let Some(n) = d.node_of(a[0]) else {
+        return Err(it.type_error("Failed to execute 'containsNode' on 'Selection': parameter 1 is not of type 'Node'."));
+    };
+    let partial = match a.get(1) {
+        Some(&v) => it.heap.to_boolean(v).map_err(|e| it.heap_error(e))?,
+        None => false,
+    };
+    let Some(r) = sel_range(d, cur) else { return Ok(Value::Bool(false)) };
+    let doc = d.doc.borrow();
+    if root_of(&doc, n) != root_of(&doc, r.sc) {
+        return Ok(Value::Bool(false));
+    }
+    let (first, last) = ((n, 0), (n, length(&doc, n)));
+    let hit = if partial {
+        position(&doc, first, r.end()) == Ordering::Less && position(&doc, last, r.start()) == Ordering::Greater
+    } else {
+        position(&doc, first, r.start()) != Ordering::Less && position(&doc, last, r.end()) != Ordering::Greater
+    };
+    Ok(Value::Bool(hit))
+}
+
 macro_rules! sel_gated {
     ($($f:ident => $what:literal),* $(,)?) => {$(
         fn $f(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
@@ -1148,9 +1251,6 @@ macro_rules! sel_gated {
     )*};
 }
 sel_gated! {
-    extend => "Selection.extend",
-    base_extent => "Selection.setBaseAndExtent",
-    contains_node => "Selection.containsNode",
     modify => "Selection.modify",
     delete_from_document => "Selection.deleteFromDocument",
 }
