@@ -14,8 +14,9 @@
 //! Only JSON goes to stdout: the protocol owns it. Progress and errors go to stderr. JS: like a Node script that reads `readline`
 //! lines from `process.stdin` and writes `JSON.stringify(reply)` lines to `process.stdout`.
 
+use bare_drive::{DownloadState, Downloads};
 use bare_drive::locate::{Locator, Text};
-use bare_drive::run::{Options, Redactor, Report, Session, StorageState};
+use bare_drive::run::{Event, Options, Redactor, Report, Session, StorageState};
 use bare_drive::snap::{self, Mode};
 use bare_drive::steps;
 use serde_json::{Value, json};
@@ -31,6 +32,10 @@ struct Live {
     vars: HashMap<String, String>,
     /// Step lines run so far: each new call numbers its lines after them, so the line numbers in reports stay unique.
     lines: usize,
+    /// The files that the session saved from downloads (see `bare::downloads`).
+    dl: Downloads,
+    /// The downloads that an `act` receipt already named.
+    told: std::collections::HashSet<usize>,
 }
 
 struct Server {
@@ -114,8 +119,13 @@ impl Server {
             "read" => self.read(&args),
             "links" => self.links(&args),
             "act" => self.act(&args),
+            "downloads" => self.downloads(&args),
             "eval" => self.eval(&args),
+            "console" => self.console(&args),
+            "network" => self.network(&args),
+            "diagnose" => self.diagnose(&args),
             "sessions" => Ok(self.sessions()),
+            "storage" => self.storage(&args),
             "screenshot" => return self.screenshot(&args).unwrap_or_else(|e| json!({"content": [{"type": "text", "text": e}], "isError": true})),
             n => Err(format!("unknown tool {n}")),
         };
@@ -146,7 +156,8 @@ impl Server {
             let (rep, ok) = self.start(&a, url, state)?;
             return if ok { Ok(rep + "\n" + &self.snapshot(args)?) } else { Err(rep) };
         }
-        Ok(self.start(args, url, state)?.0)
+        let (rep, ok) = self.start(args, url, state)?;
+        if ok { Ok(rep) } else { Err(rep) }
     }
 
     /// Start a live session on URL, from a saved session or with an empty profile. One live session at a time: this ends the old one
@@ -157,11 +168,27 @@ impl Server {
         let (opt, red, vars) = self.options(args)?;
         self.place_window(&opt)?;
         let mut session = Session::new(&opt);
+        session.ready_wait = true;
+        let dir = args.get("downloads_dir").and_then(Value::as_str).map_or_else(|| std::env::temp_dir().join(format!("bare-mcp-{}-downloads", std::process::id())), std::path::PathBuf::from);
+        let dl = Downloads::new(dir);
+        session.set_downloads(dl.clone());
         if let Some(st) = state {
             session.preload(st);
         }
-        self.live.insert(name, Live { session, opt, red, vars, lines: 0 });
-        self.run_live(args, &format!("open {url}"))
+        self.live.insert(name, Live { session, opt, red, vars, lines: 0, dl, told: Default::default() });
+        let (mut rep, ok) = self.run_live(args, &format!("open {url}"))?;
+        // A redirect to another address: the agent must see where the page really is.
+        let end = self.live_mut(args)?.session.url().unwrap_or_default();
+        let bare = |u: &str| u.split('#').next().unwrap_or("").trim_end_matches('/').to_string();
+        if ok && bare(&end) != bare(url) {
+            let to = self.live_mut(args)?.red.clean(&bare_drive::run::safe_url(&end));
+            if args.get("compact").and_then(Value::as_bool) == Some(true) {
+                rep.push_str(&format!("\nredirected: {to}"));
+            } else {
+                rep.insert_str(rep.len() - 1, &format!(",\"redirected\":{}", json!(to)));
+            }
+        }
+        Ok((rep, ok))
     }
 
     /// Save the live session under a name, and in a file when asked. Gives counts only: the values never leave this process.
@@ -271,14 +298,20 @@ impl Server {
     }
 
     fn snapshot(&mut self, args: &Value) -> Result<String, String> {
+        self.snapshot_diff(args, false)
+    }
+
+    /// With `diff`: only what changed since the last snapshot, and its parents.
+    fn snapshot_diff(&mut self, args: &Value, diff: bool) -> Result<String, String> {
         let mode = match args.get("mode").and_then(Value::as_str) {
             Some("all") => Mode::All,
             _ => Mode::Interactive,
         };
         let root = ref_arg(args, "root")?;
+        let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
         let max = Self::max(args, 12_000);
         let live = self.live_mut(args)?;
-        let out = live.session.with_refs(move |p, refs| snap::snapshot(p, refs, mode, root, max))??;
+        let out = live.session.with_refs(move |p, refs| snap::snapshot(p, refs, mode, root, offset, max, diff))??;
         Ok(live.red.clean(&out))
     }
 
@@ -328,6 +361,37 @@ impl Server {
         out.map(|o| live.red.clean(&o)).map_err(|e| live.red.clean(&e))
     }
 
+    /// The console entries of the live page: since the last call of this tool unless `since_last` is false.
+    fn console(&mut self, args: &Value) -> Result<String, String> {
+        let level = args.get("level").and_then(Value::as_str).unwrap_or("error");
+        if !matches!(level, "error" | "warn" | "all") {
+            return Err(format!("level: {level} is not error, warn or all"));
+        }
+        let (since, max) = (args.get("since_last").and_then(Value::as_bool).unwrap_or(true), args.get("max").and_then(Value::as_u64).unwrap_or(50) as usize);
+        let live = self.live_mut(args)?;
+        live.session.collect()?;
+        let v = live.session.hist.console(level, since, max);
+        Ok(live.red.clean(&if v.is_empty() { "no console entries".to_string() } else { v.join("\n") }))
+    }
+
+    /// The network records of the live page: the failed ones, since the last call of this tool, unless the arguments say otherwise.
+    fn network(&mut self, args: &Value) -> Result<String, String> {
+        let flag = |k: &str| args.get(k).and_then(Value::as_bool).unwrap_or(true);
+        let max = args.get("max").and_then(Value::as_u64).unwrap_or(50) as usize;
+        let contains = args.get("url_contains").and_then(Value::as_str).map(str::to_string);
+        let live = self.live_mut(args)?;
+        live.session.collect()?;
+        let v = live.session.hist.network(flag("failed_only"), contains.as_deref(), flag("since_last"), max);
+        Ok(live.red.clean(&if v.is_empty() { "no requests".to_string() } else { v.join("\n") }))
+    }
+
+    /// A report of what is wrong with the page, to paste into a bare issue.
+    fn diagnose(&mut self, args: &Value) -> Result<String, String> {
+        let live = self.live_mut(args)?;
+        let red = live.red.clone();
+        live.session.diagnose(&red)
+    }
+
     /// One action on an element or the page, as a step line; gives a short receipt and, unless `snapshot` is false, the new snapshot.
     fn act(&mut self, args: &Value) -> Result<String, String> {
         let op = args.get("op").and_then(Value::as_str).unwrap_or("click");
@@ -342,38 +406,206 @@ impl Server {
         let line = match op {
             "click" => need("click").map(|_| format!("click {target}"))?,
             "type" | "fill" => need("type").map(|_| format!("type {target} {}", q(text)))?,
-            "press" => format!("press {}", args.get("key").and_then(Value::as_str).unwrap_or(if text.is_empty() { "Enter" } else { text })),
+            "select" => need("select").and_then(|_| {
+                let opts: Vec<&str> = args.get("options").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+                let opts = if opts.is_empty() && !text.is_empty() { vec![text] } else { opts };
+                if opts.is_empty() { return Err("op select needs text (the option label or value) or options".to_string()) }
+                Ok(format!("select {target} {}", opts.iter().map(|o| q(o)).collect::<Vec<_>>().join(" ")))
+            })?,
+            "check" | "uncheck" | "hover" | "dblclick" => need(op).map(|_| format!("{op} {target}"))?,
+            "upload" => need("upload").and_then(|_| {
+                let files: Vec<&str> = args.get("files").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+                if files.is_empty() { return Err("op upload needs files (an array of local paths)".to_string()) }
+                Ok(format!("upload {target} {}", files.iter().map(|f| q(f)).collect::<Vec<_>>().join(" ")))
+            })?,
+            "press" => format!("press {}{}", if target.is_empty() { String::new() } else { format!("{target} ") }, args.get("key").and_then(Value::as_str).unwrap_or(if text.is_empty() { "Enter" } else { text })),
             "scroll" => {
                 let dy = args.get("dy").and_then(Value::as_f64).unwrap_or(600.0);
                 if target.is_empty() { format!("scroll page {dy}") } else { format!("scroll {target} {dy}") }
             }
             "goto" => format!("goto {}", args.get("url").and_then(Value::as_str).ok_or("op goto needs url")?),
             "reload" => "reload".into(),
+            "back" => "back".into(),
+            "forward" => "forward".into(),
             "wait" => need("wait").map(|_| format!("wait {target} {}", if text.is_empty() { "visible" } else { text }))?,
-            o => return Err(format!("unknown op {o}: click, type, press, scroll, goto, reload, wait")),
+            o => return Err(format!("unknown op {o}: click, type, select, check, uncheck, hover, dblclick, upload, press, scroll, goto, reload, back, forward, wait")),
+        };
+        let accept = match args.get("dialog").and_then(Value::as_str) {
+            None | Some("accept") => true,
+            Some("dismiss") => false,
+            Some(_) => return Err("dialog must be accept or dismiss".into()),
         };
         let mut a = args.clone();
         a["compact"] = json!(true);
-        let before = self.live_mut(args)?.session.url();
+        let live = self.live_mut(args)?;
+        live.session.set_dialog(accept, args.get("prompt_text").and_then(Value::as_str).map(str::to_string));
+        let before = live.session.url();
         let (receipt, ok) = self.run_live(&a, &line)?;
         let mut out = receipt;
         let snap = if ok && args.get("snapshot").and_then(Value::as_bool) != Some(false) {
-            Some(self.snapshot(args)?)
+            Some(self.snapshot_diff(args, args.get("diff").and_then(Value::as_bool) != Some(false))?)
         } else {
             // No snapshot waits for the page, so let a started navigation finish before the URL check (#382).
             self.live_mut(args)?.session.with_refs(|p, _| snap::settle(p))?;
             None
         };
+        // A download that started in the action ends first. The page needs ticks for that: a link starts its worker in a tick.
+        out.push_str(&self.finish_downloads(args)?);
         // After the snapshot, which waits for the page: a click starts a navigation that ends later.
         let after = self.live_mut(args)?.session.url();
-        if after != before {
+        if before.is_some() && after != before {
             out.push_str(&format!("\nnavigated: {}", bare_drive::run::safe_url(&after.unwrap_or_default())));
         }
+        for e in self.live_mut(args)?.session.events() {
+            match e {
+                Event::Dialog { kind, message, accepted, text } => {
+                    let answer = if accepted { "accepted" } else { "dismissed" };
+                    out.push_str(&format!("\ndialog: {kind} {message:?} -> {answer}{}", text.map(|t| format!(" {t:?}")).unwrap_or_default()));
+                }
+                Event::Tab(url) => match self.open_tab(&session_name(args), &url) {
+                    Ok(name) => out.push_str(&format!("\nopened tab: {name} {}", bare_drive::run::safe_url(&url))),
+                    Err(e) => out.push_str(&format!("\ntab not opened: {e}")),
+                },
+            }
+        }
+        let out = self.live_mut(args)?.red.clean(&out);
+        let mut out = out;
         if let Some(s) = snap {
             out.push('\n');
             out.push_str(&s);
         }
         if ok { Ok(out) } else { Err(out) }
+    }
+
+    /// Wait up to the step time limit for the downloads that run, and for a page load that may be one. Then say what finished since the last
+    /// call: `downloaded: PATH (BYTES bytes, MIME)`, or the failure.
+    fn finish_downloads(&mut self, args: &Value) -> Result<String, String> {
+        let live = self.live_mut(args)?;
+        let end = std::time::Instant::now() + live.opt.timeout;
+        while std::time::Instant::now() < end {
+            let loading = live.session.with_refs(|p, _| {
+                p.tick();
+                p.loading()
+            })?;
+            if !loading && live.dl.running() == 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let mut out = String::new();
+        for (i, d) in live.dl.list().into_iter().enumerate() {
+            if d.state == DownloadState::Running || !live.told.insert(i) {
+                continue;
+            }
+            out.push('\n');
+            out.push_str(&match &d.state {
+                DownloadState::Failed(why) => format!("download failed: {}: {why}", bare_drive::run::safe_url(&d.url)),
+                _ => format!("downloaded: {} ({} bytes, {})", d.path.display(), d.bytes, d.mime),
+            });
+        }
+        Ok(live.red.clean(&out))
+    }
+
+    /// The files that the session saved.
+    fn downloads(&mut self, args: &Value) -> Result<String, String> {
+        let live = self.live_mut(args)?;
+        let list = live.dl.list();
+        if list.is_empty() {
+            return Ok(format!("no downloads (folder: {})", live.dl.dir().display()));
+        }
+        let lines: Vec<String> = list
+            .iter()
+            .map(|d| {
+                let url = bare_drive::run::safe_url(&d.url);
+                match &d.state {
+                    DownloadState::Running => format!("running: {url}"),
+                    DownloadState::Failed(why) => format!("failed: {url}: {why}"),
+                    DownloadState::Done => format!("{} ({} bytes, {}) from {url}", d.path.display(), d.bytes, d.mime),
+                }
+            })
+            .collect();
+        Ok(live.red.clean(&lines.join("\n")))
+    }
+
+    /// A new live session `BASE~N` for a tab that the page of session `from` opened: the same size, secrets and variables, and a copy of
+    /// its cookies and storage. The load starts at once. Gives the name.
+    fn open_tab(&mut self, from: &str, url: &str) -> Result<String, String> {
+        let base = from.split('~').next().unwrap_or(from);
+        let name = (2..).map(|n| format!("{base}~{n}")).find(|n| !self.live.contains_key(n)).expect("a free name");
+        let l = self.live.get_mut(from).ok_or("the opener is gone")?;
+        let (size, timeout, window, red, vars, state) = (l.opt.size, l.opt.timeout, l.opt.window, l.red.clone(), l.vars.clone(), l.session.export_state());
+        let (mut opt, _, _) = self.options(&json!({"width": size.0, "height": size.1, "timeout_ms": timeout.as_millis() as u64, "window": window}))?;
+        opt.progress = false;
+        self.place_window(&opt)?;
+        let mut session = Session::new(&opt);
+        if let Some(st) = state {
+            session.preload(st);
+        }
+        session.ready_wait = true;
+        let dl = Downloads::new(std::env::temp_dir().join(format!("bare-mcp-{}-downloads", std::process::id())));
+        session.set_downloads(dl.clone());
+        self.live.insert(name.clone(), Live { session, opt, red, vars, lines: 0, dl, told: Default::default() });
+        match self.run_live(&json!({"session": name, "compact": true}), &format!("open {url}")) {
+            Ok((_, true)) => Ok(name),
+            Ok((r, false)) | Err(r) => {
+                self.live.remove(&name);
+                Err(r)
+            }
+        }
+    }
+
+    /// Read, set or clear the cookies, `localStorage` or `sessionStorage` of a session. Values go through the redactor.
+    fn storage(&mut self, args: &Value) -> Result<String, String> {
+        let get = |k: &str| args.get(k).and_then(Value::as_str);
+        let (area, key, action) = (get("area").unwrap_or("local"), get("key"), get("action").unwrap_or("get"));
+        if !["local", "session", "cookies"].contains(&area) {
+            return Err("area must be local, session or cookies".into());
+        }
+        if !["get", "set", "clear"].contains(&action) {
+            return Err("action must be get, set or clear".into());
+        }
+        let cap = |v: &str| if v.chars().count() > 300 { format!("{}...", v.chars().take(300).collect::<String>()) } else { v.to_string() };
+        let live = self.live_mut(args)?;
+        let out = match (area, action) {
+            ("cookies", "get") => {
+                let st = live.session.export_state().ok_or("the page has no session")?;
+                let list: Vec<String> = st.cookies.iter().filter(|c| key.is_none_or(|k| k == c.name)).map(|c| format!("{}={}  {}{}{}{}", c.name, cap(&c.value), c.domain, c.path, if c.http_only { "; httponly" } else { "" }, if c.secure { "; secure" } else { "" })).collect();
+                if list.is_empty() { "no cookies".into() } else { list.join("\n") }
+            }
+            ("cookies", "set") => {
+                let (k, v) = (key.ok_or("set needs key")?, get("value").ok_or("set needs value")?);
+                if k.is_empty() || k.contains(|c: char| c.is_whitespace() || c == '=' || c == '"') {
+                    return Err("cookie key must be a name without spaces, = or quotes".into());
+                }
+                let (rep, ok) = self.run_live(&json!({"session": session_name(args), "compact": true}), &format!("cookie set {k} {v:?}"))?;
+                if !ok {
+                    return Err(rep);
+                }
+                format!("cookie {k} set")
+            }
+            ("cookies", _) => format!("removed {} cookies", live.session.clear_cookies(key.map(str::to_string))?),
+            (_, "get") => {
+                let js = format!("(() => {{ const s = window.{area}Storage, o = []; for (let i = 0; i < s.length; i++) {{ const k = s.key(i); o.push([k, s.getItem(k)]); }} return JSON.stringify(o); }})()");
+                let raw = live.session.eval(js)?;
+                let raw = serde_json::from_str::<String>(&raw).unwrap_or(raw);
+                let pairs: Vec<(String, String)> = serde_json::from_str(&raw).map_err(|e| format!("storage read: {e}"))?;
+                let list: Vec<String> = pairs.iter().filter(|(k, _)| key.is_none_or(|w| w == k)).map(|(k, v)| format!("{k}={}", cap(v))).collect();
+                if list.is_empty() { "empty".into() } else { list.join("\n") }
+            }
+            (_, "set") => {
+                let (k, v) = (key.ok_or("set needs key")?, get("value").ok_or("set needs value")?);
+                live.session.eval(format!("window.{area}Storage.setItem({}, {})", json!(k), json!(v)))?;
+                format!("{area} {k} set")
+            }
+            (_, _) => {
+                live.session.eval(match key {
+                    Some(k) => format!("window.{area}Storage.removeItem({})", json!(k)),
+                    None => format!("window.{area}Storage.clear()"),
+                })?;
+                format!("{area} cleared")
+            }
+        };
+        Ok(self.live_mut(args)?.red.clean(&out))
     }
 
     /// A PNG of the page or of one element: its path, and the picture itself when `inline` is true.
@@ -492,7 +724,13 @@ fn compact(rep: &Report, red: &Redactor) -> String {
                 "duplicate" => "use a ref from snapshot or find",
                 _ => "",
             };
-            format!("FAILED {}: {}{}", f.kind, f.message, if hint.is_empty() { String::new() } else { format!("\nhint: {hint}") })
+            let script = rep.logs.iter().find(|(_, l)| bare_drive::diag::uncaught(l)).filter(|_| matches!(f.kind, "not_found" | "hidden" | "page"));
+            let hint = match script {
+                Some((_, l)) => format!("\nhint: the page script failed: {}", l.text.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(200).collect::<String>()),
+                None if hint.is_empty() => String::new(),
+                None => format!("\nhint: {hint}"),
+            };
+            format!("FAILED {}: {}{hint}", f.kind, f.message)
         }
     };
     let errs: Vec<String> = rep.logs.iter().filter(|(_, l)| matches!(l.level, "error" | "warn")).take(5).map(|(_, l)| format!("console {}: {}", l.level, l.text.chars().take(200).collect::<String>())).collect();
@@ -532,6 +770,7 @@ fn tools() -> Value {
         "height": {"type": "integer", "description": "Page height in pixels. Default 800."},
         "timeout_ms": {"type": "integer", "description": "Time limit of each step. Default 10000."},
         "session": {"type": "string", "description": "Live session name. Default main. Sessions run side by side."},
+        "downloads_dir": {"type": "string", "description": "open: the folder for files that the page downloads. Default: a temp folder of this server."},
     });
     let with = |extra: Value, required: &[&str]| {
         let mut p = common.clone();
@@ -541,7 +780,8 @@ fn tools() -> Value {
     #[allow(non_snake_case)]
     let S = json!({"type": "string", "description": "Live session name. Default main."});
     let syntax = "Step lines (# starts a comment): open URL, goto URL, reload, click LOC, type LOC \"text\" (\"\" clears), \
-        press KEY (Enter, Tab, Shift+Tab, Control+a), scroll LOC|page DY, \
+        select LOC \"label or value\" [\"more\" ...], check LOC, uncheck LOC, hover LOC, dblclick LOC, upload LOC \"path\" [\"path2\" ...], \
+        press [LOC] KEY (Enter, Tab, Shift+Tab, Control+a), scroll LOC|page DY, \
         expect LOC visible|hidden|enabled|disabled|checked|unchecked|focused|count N|text=\"x\"|value~\"x\", \
         expect url=\"x\"|url~\"x\", expect title=\"x\"|title~\"x\", expect js \"expression\", expect cookie NAME [absent|value=\"x\"], \
         cookie set NAME VALUE, shot NAME (a PNG in the out folder), timeout MS. \
@@ -586,13 +826,13 @@ fn tools() -> Value {
         },
         {
             "name": "snapshot",
-            "description": "Read the live page as text: the accessibility outline, one element per line, indented by nesting: [e7] role \"name\" = \"value\" (states). Act on an element with its ref (act ref=e7, or ref=e7 in step lines). * marks an element new since the last snapshot. Refs stay valid until the page navigates. Use this instead of a screenshot.",
-            "inputSchema": {"type": "object", "properties": {"session": S, "mode": {"type": "string", "enum": ["interactive", "all"], "description": "interactive (default): controls, headings, landmarks, dialogs, alerts. all: also the text between them."}, "root": {"type": "string", "description": "A ref: the outline of that element only."}, "max_chars": {"type": "integer", "description": "Default 12000. A longer outline keeps 80% from the top and 20% from the end."}}},
+            "description": "Read the live page as text: the accessibility outline, one element per line, indented by nesting: [e7] role \"name\" = \"value\" (states). Act on an element with its ref (act ref=e7, or ref=e7 in step lines). * marks an element new or changed since the last snapshot. A link line shows its href only when it has no name: links lists them all. Refs stay valid until the page navigates. (offscreen) marks a control outside the window: act click scrolls it into view. An iframe shows as one line: its content is not loaded, so it is not in the snapshot. Use this instead of a screenshot.",
+            "inputSchema": {"type": "object", "properties": {"session": S, "mode": {"type": "string", "enum": ["interactive", "all"], "description": "interactive (default): controls, headings, landmarks, dialogs, alerts. all: also the text between them."}, "root": {"type": "string", "description": "A ref: the outline of that element only."}, "offset": {"type": "integer", "description": "Skip this many outline lines (the cut line gives the next offset)."}, "max_chars": {"type": "integer", "description": "Default 12000. A longer outline keeps 80% from the top and 20% from the end, and a line says which refs were cut."}}},
         },
         {
             "name": "act",
-            "description": "Act on the live page like a user and get a short receipt (ok, or the failure with a hint, new console errors and failed requests, navigation), then the new snapshot. Ops: click, type (clears the field, then types text; \\n is Enter), press (key: Enter, Escape, Tab, Control+a), scroll (dy pixels, over ref or the page), goto (url), reload, wait (ref until text state: visible, hidden, enabled, checked, text~\"x\"). The action waits for the element up to timeout_ms.",
-            "inputSchema": {"type": "object", "properties": {"session": S, "op": {"type": "string", "enum": ["click", "type", "press", "scroll", "goto", "reload", "wait"]}, "ref": {"type": "string", "description": "e7 from snapshot or find."}, "loc": {"type": "string", "description": "A step locator instead of ref: role=button name=\"Save\", label=\"Email\", text=\"x\", css=\"...\"."}, "text": {"type": "string"}, "key": {"type": "string"}, "dy": {"type": "number"}, "url": {"type": "string"}, "snapshot": {"type": "boolean", "description": "Default true: add the snapshot after the action."}, "mode": {"type": "string", "enum": ["interactive", "all"]}, "max_chars": {"type": "integer"}}, "required": ["op"]},
+            "description": "Act on the live page like a user and get a short receipt (ok, or the failure with a hint, new console errors and failed requests, navigation, dialogs and the answer given, tabs the page opened: \"opened tab: main~2 URL\" is a new session that you read with session=main~2 and end with close), then what changed on the page (only the lines marked *, with the lines that hold them; the whole outline after a navigation or with diff false). Ops: click, type (clears the field, then types text; \\n is Enter), press (key: Enter, Escape, Tab, Control+a; with ref it acts on that element, and Enter in a form field submits the form), scroll (dy pixels, over ref or the page), goto (url), reload, back, forward (the history), wait (ref until text state: visible, hidden, enabled, checked, text~\"x\"), select (text = the option label or value; options = several for a multiple select; fires input and change), check and uncheck (a checkbox or radio; clicks only when the state differs), hover (pointer over the element: :hover and mouseenter), dblclick, upload (files = local paths for an <input type=file>, at most 100 MiB each; a hidden input needs loc css=\"input[type=file]\"). The action waits for the element up to timeout_ms.",
+            "inputSchema": {"type": "object", "properties": {"session": S, "op": {"type": "string", "enum": ["click", "type", "select", "check", "uncheck", "hover", "dblclick", "upload", "press", "scroll", "goto", "reload", "back", "forward", "wait"]}, "options": {"type": "array", "items": {"type": "string"}, "description": "For select: several options of a multiple select."}, "files": {"type": "array", "items": {"type": "string"}, "description": "For upload: local file paths."}, "dialog": {"type": "string", "enum": ["accept", "dismiss"], "description": "How to answer alert, confirm and prompt dialogs that the action opens. Default accept. The receipt lists each one."}, "prompt_text": {"type": "string", "description": "The answer of an accepted prompt. Default: the default value of the prompt."}, "ref": {"type": "string", "description": "e7 from snapshot or find."}, "loc": {"type": "string", "description": "A step locator instead of ref: role=button name=\"Save\", label=\"Email\", text=\"x\", css=\"...\"."}, "text": {"type": "string"}, "key": {"type": "string"}, "dy": {"type": "number"}, "url": {"type": "string"}, "snapshot": {"type": "boolean", "description": "Default true: add the changes of the page after the action."}, "diff": {"type": "boolean", "description": "Default true. False: add the whole outline instead of the changes."}, "mode": {"type": "string", "enum": ["interactive", "all"]}, "max_chars": {"type": "integer"}}, "required": ["op"]},
         },
         {
             "name": "find",
@@ -606,7 +846,7 @@ fn tools() -> Value {
         },
         {
             "name": "links",
-            "description": "The links of the page: ref, text and absolute URL.",
+            "description": "The links of the page: ref, text and URL (a path for a link on the origin of the page, with tracking parameters cut).",
             "inputSchema": {"type": "object", "properties": {"session": S, "max_chars": {"type": "integer"}}},
         },
         {
@@ -620,9 +860,34 @@ fn tools() -> Value {
             "inputSchema": {"type": "object", "properties": {"session": S, "js": {"type": "string"}}, "required": ["js"]},
         },
         {
+            "name": "console",
+            "description": "The console of the live page, one short line per entry: level and text. Defaults: errors only, entries since the last console call. level: error (errors and uncaught exceptions), warn (and warnings) or all. since_last false: the last 500 entries. max: the newest entries to show, default 50.",
+            "inputSchema": {"type": "object", "properties": {"session": S, "level": {"type": "string", "enum": ["error", "warn", "all"]}, "since_last": {"type": "boolean"}, "max": {"type": "integer"}}},
+        },
+        {
+            "name": "network",
+            "description": "The requests of the live page, one line per request: failure or status, kind (by URL), URL, size, time. Defaults: failed requests only (an error or HTTP 400 and over), since the last network call. failed_only false: all requests. url_contains: keep URLs with this text. since_last false: the last 500 records. max: the newest records to show, default 50.",
+            "inputSchema": {"type": "object", "properties": {"session": S, "failed_only": {"type": "boolean"}, "url_contains": {"type": "string"}, "since_last": {"type": "boolean"}, "max": {"type": "integer"}}},
+        },
+        {
+            "name": "diagnose",
+            "description": "A report of what is wrong with the live page, to paste into a bare issue: the document load, uncaught exceptions, missing engine features, failed requests by kind, an empty-render check, the page size, and a verdict: site problem, bare gap, network or unclear, with the reason. Call it after a step failed.",
+            "inputSchema": {"type": "object", "properties": {"session": S}},
+        },
+        {
+            "name": "downloads",
+            "description": "The files that the live session saved from downloads (a response with Content-Disposition: attachment or a type the page cannot show, or a link with a download attribute, also a blob: or data: URL made by a script): path, size, type and source URL, or running or failed. A download does not replace the page; act names each one that ends in its receipt.",
+            "inputSchema": {"type": "object", "properties": {"session": S}},
+        },
+        {
             "name": "sessions",
             "description": "The live sessions and their URLs.",
             "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "storage",
+            "description": "Read, set or clear the cookies, localStorage or sessionStorage of a session (area: local, session, cookies; action: get, set, clear; key; value). Without key, get lists all and clear removes all. Known secrets show as [secret].",
+            "inputSchema": {"type": "object", "properties": {"session": S, "area": {"type": "string", "enum": ["local", "session", "cookies"], "description": "Default local."}, "action": {"type": "string", "enum": ["get", "set", "clear"], "description": "Default get."}, "key": {"type": "string"}, "value": {"type": "string"}}},
         },
     ])
 }

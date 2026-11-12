@@ -78,7 +78,7 @@ fn tools_list_names_the_tools() {
     let mut s = Server::start();
     let r = s.ask("tools/list", json!({}));
     let names: Vec<&str> = r["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(names, ["run_steps", "open", "step", "save_state", "ensure_session", "close", "snapshot", "act", "find", "read", "links", "screenshot", "eval", "sessions"]);
+    assert_eq!(names, ["run_steps", "open", "step", "save_state", "ensure_session", "close", "snapshot", "act", "find", "read", "links", "screenshot", "eval", "console", "network", "diagnose", "downloads", "sessions", "storage"]);
 }
 
 #[test]
@@ -347,7 +347,7 @@ fn an_agent_logs_in_with_snapshot_refs_and_no_step_lines() {
     let r = r.as_str().unwrap().to_string();
     assert!(!error && r.contains("= \"••••\""), "{r}");
     // Without a snapshot, the receipt still reports the navigation (#382).
-    let (r, error) = s.tool("act", json!({"op": "click", "ref": ref_of(&r, "button"), "snapshot": false}));
+    let (r, error) = s.tool("act", json!({"op": "click", "ref": ref_of(&snap, "button"), "snapshot": false}));
     let r = r.as_str().unwrap().to_string();
     assert!(!error && r.contains("navigated:"), "{r}");
     let (r, _) = s.tool("snapshot", json!({}));
@@ -368,4 +368,870 @@ fn an_agent_logs_in_with_snapshot_refs_and_no_step_lines() {
     assert!(!error, "{r}");
     let (r, _) = s.tool("sessions", json!({}));
     assert!(r.as_str().unwrap().contains("main: ") && r.as_str().unwrap().contains("two: "), "{r}");
+}
+
+/// A site with two pages that fail: `/site` throws, fetches a 404 and a port that nobody listens on, and loads a missing script and
+/// stylesheet; `/gap` calls an API that the engine does not have. Gives the base URL.
+fn broken_site() -> String {
+    use std::io::Read;
+    let dead = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let site = format!(
+        "<!doctype html><link rel=stylesheet href=/missing.css><script src=/missing.js></script><body><button id=b>Break</button><p>Hello</p><script>
+document.getElementById('b').onclick = () => {{ throw new Error('click failed'); }};
+fetch('/nope').catch(() => {{}});
+fetch('http://127.0.0.1:{dead}/x').catch(() => {{}});
+console.warn('careful');
+null.boom;
+</script></body>"
+    );
+    let gap = "<!doctype html><body><p>Hello</p><script>navigator.noSuchEngineApi();</script></body>".to_string();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for mut c in listener.incoming().flatten() {
+            let (site, gap) = (site.clone(), gap.clone());
+            std::thread::spawn(move || {
+                let (mut head, mut b) = (Vec::new(), [0u8; 1]);
+                while !head.ends_with(b"\r\n\r\n") && c.read(&mut b).unwrap_or(0) == 1 {
+                    head.push(b[0]);
+                }
+                let head = String::from_utf8_lossy(&head).to_string();
+                let (status, ty, body) = if head.starts_with("GET /site ") {
+                    (200, "text/html", site)
+                } else if head.starts_with("GET /gap ") {
+                    (200, "text/html", gap)
+                } else {
+                    (404, "text/plain", "not found".to_string())
+                };
+                let _ = write!(c, "HTTP/1.1 {status} X\r\nContent-Type: {ty}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            });
+        }
+    });
+    format!("http://127.0.0.1:{port}")
+}
+
+#[test]
+fn console_and_network_report_what_failed_and_forget_what_they_gave() {
+    let base = broken_site();
+    let mut s = Server::start();
+    let (r, error) = s.tool("open", json!({"url": format!("{base}/site"), "timeout_ms": 20000}));
+    assert!(!error, "{r}");
+    s.tool("read", json!({}));
+    let (r, _) = s.tool("console", json!({}));
+    let r = r.as_str().unwrap().to_string();
+    assert!(r.contains("boom") && !r.contains("careful"), "{r}");
+    // Nothing is new now.
+    let (r, _) = s.tool("console", json!({}));
+    assert_eq!(r, json!("no console entries"));
+    let (r, _) = s.tool("console", json!({"level": "all", "since_last": false}));
+    assert!(r.as_str().unwrap().contains("careful") && r.as_str().unwrap().contains("boom"), "{r}");
+    let (r, _) = s.tool("network", json!({}));
+    let r = r.as_str().unwrap().to_string();
+    assert!(r.contains("404 fetch") && r.contains("/nope"), "{r}");
+    assert!(r.contains("script") && r.contains("/missing.js") && r.contains("stylesheet") && r.contains("/missing.css"), "{r}");
+    assert!(r.lines().count() >= 4, "the unreachable port is a line too: {r}");
+    assert!(!r.contains("/site"), "the document passed, so it is not a failed request: {r}");
+    let (r, _) = s.tool("network", json!({}));
+    assert_eq!(r, json!("no requests"));
+    let (r, _) = s.tool("network", json!({"failed_only": false, "since_last": false, "url_contains": "/site"}));
+    assert!(r.as_str().unwrap().starts_with("200 fetch"), "{r}");
+    // An entry that arrives between two calls shows in the next one.
+    s.tool("act", json!({"op": "click", "loc": "css=\"#b\"", "snapshot": false}));
+    let (r, _) = s.tool("console", json!({}));
+    assert!(r.as_str().unwrap().contains("click failed"), "{r}");
+}
+
+#[test]
+fn diagnose_tells_a_site_problem_from_a_bare_gap() {
+    let base = broken_site();
+    let mut s = Server::start();
+    s.tool("open", json!({"url": format!("{base}/site"), "timeout_ms": 20000}));
+    let (r, error) = s.tool("diagnose", json!({}));
+    let r = r.as_str().unwrap().to_string();
+    assert!(!error && r.starts_with("document: ") && r.contains("HTTP 200"), "{r}");
+    assert!(r.contains("uncaught:") && r.contains("failed script:") && r.contains("failed stylesheet:") && r.contains("failed fetch:"), "{r}");
+    assert!(r.contains("DOM nodes"), "{r}");
+    assert!(r.lines().last().unwrap().starts_with("verdict: site problem"), "{r}");
+    s.tool("open", json!({"url": format!("{base}/gap"), "timeout_ms": 20000}));
+    let (r, _) = s.tool("diagnose", json!({}));
+    let r = r.as_str().unwrap().to_string();
+    assert!(r.contains("missing feature:") && r.lines().last().unwrap().starts_with("verdict: bare gap"), "{r}");
+    // A page that does not exist: the document answered 404. The live session keeps the error page, so the verdict names the status.
+    s.tool("open", json!({"url": format!("{base}/none"), "timeout_ms": 20000}));
+    let (r, _) = s.tool("diagnose", json!({}));
+    assert!(r.as_str().unwrap().contains("HTTP 404") && r.as_str().unwrap().contains("verdict: site problem"), "{r}");
+}
+
+#[test]
+fn a_failed_step_names_the_script_error_that_may_explain_it() {
+    let base = broken_site();
+    let mut s = Server::start();
+    s.tool("open", json!({"url": format!("{base}/site"), "timeout_ms": 20000}));
+    // The load logs go to the history of this read, not to the report of the step.
+    s.tool("read", json!({}));
+    let (r, _) = s.tool("step", json!({"steps": "timeout 300\nclick css=\"#b\"\nclick text=\"Missing\"", "compact": true}));
+    let r = r.as_str().unwrap().to_string();
+    assert!(r.contains("FAILED not_found") && r.contains("hint: the page script failed: ") && r.contains("click failed"), "{r}");
+    // With no exception in the call, the usual hint stays.
+    let (r, _) = s.tool("step", json!({"steps": "click text=\"Missing\"", "compact": true}));
+    assert!(r.as_str().unwrap().contains("hint: take a snapshot"), "{r}");
+}
+
+/// Serves one page at every path. Gives the base URL.
+fn one_page(html: String) -> String {
+    use std::io::Read;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for mut c in listener.incoming().flatten() {
+            let html = html.clone();
+            std::thread::spawn(move || {
+                let (mut head, mut b) = (Vec::new(), [0u8; 1]);
+                while !head.ends_with(b"\r\n\r\n") && c.read(&mut b).unwrap_or(0) == 1 {
+                    head.push(b[0]);
+                }
+                let _ = write!(c, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{html}", html.len());
+            });
+        }
+    });
+    format!("http://127.0.0.1:{port}/")
+}
+
+fn snap_of(html: &str, args: Value) -> String {
+    let mut s = Server::start();
+    let mut a = json!({"url": one_page(html.to_string()), "snapshot": true, "timeout_ms": 30000});
+    a.as_object_mut().unwrap().extend(args.as_object().unwrap().clone());
+    let (r, error) = s.tool("open", a);
+    assert!(!error, "{r}");
+    r.as_str().unwrap().to_string()
+}
+
+/// A slotted light child shows once, where its `<slot>` is, in the order of the flat tree.
+#[test]
+fn a_slotted_child_shows_once_at_its_slot() {
+    let snap = snap_of(
+        "<body><div id=h><button>Middle</button></div><script>\
+         document.getElementById('h').attachShadow({mode:'open'}).innerHTML='<button>First</button><slot></slot><button>Last</button>';</script>",
+        json!({}),
+    );
+    let names: Vec<&str> = snap.lines().filter(|l| l.contains("button")).collect();
+    assert_eq!(names.len(), 3, "{snap}");
+    assert!(names[0].contains("First") && names[1].contains("Middle") && names[2].contains("Last"), "{snap}");
+}
+
+/// A pointer subtree becomes one `clickable`, named by its text; its children are not clickable on their own.
+#[test]
+fn a_pointer_subtree_is_one_clickable() {
+    let snap = snap_of(
+        "<style>.p{cursor:pointer}.q{cursor:default}</style><body><div class=p><span>Open menu</span><b>now</b></div><div>plain</div>\
+         <div class=p><div class=q>inner</div></div>",
+        json!({}),
+    );
+    let c: Vec<&str> = snap.lines().filter(|l| l.contains("clickable")).collect();
+    assert_eq!(c.len(), 2, "{snap}");
+    assert!(c[0].contains("Open menu now"), "{snap}");
+}
+
+/// A control below the fold says so; one in view does not.
+#[test]
+fn a_control_outside_the_viewport_is_marked_offscreen() {
+    let snap = snap_of("<body><button>Near</button><div style='height:3000px'></div><button>Far</button>", json!({}));
+    let near = snap.lines().find(|l| l.contains("Near")).unwrap();
+    let far = snap.lines().find(|l| l.contains("Far")).unwrap();
+    assert!(!near.contains("offscreen") && far.contains("(offscreen)"), "{snap}");
+}
+
+/// An iframe shows as a line with its title or source. Its content is not in the snapshot: bare does not load child documents.
+#[test]
+fn an_iframe_shows_as_a_line() {
+    let snap = snap_of("<body><iframe title=\"Card form\" src=\"/inner\" width=300 height=100></iframe>", json!({}));
+    assert!(snap.lines().any(|l| l.contains("iframe \"Card form\"")), "{snap}");
+}
+
+/// A page of about 5,000 elements: the snapshot (with the flat tree, `cursor` and offscreen work) stays under 30 ms once laid out. Best of 5.
+#[test]
+fn a_snapshot_of_5000_elements_takes_under_30_ms() {
+    let rows: String = (0..830)
+        .map(|i| format!("<div><span>Item {i}</span><a href=\"/x{i}\">link {i}</a><button>Go {i}</button><div class=p><b>pick {i}</b></div></div>"))
+        .collect();
+    let mut s = Server::start();
+    let (r, error) = s.tool("open", json!({"url": one_page(format!("<style>.p{{cursor:pointer}}</style><body>{rows}")), "timeout_ms": 30000}));
+    assert!(!error, "{r}");
+    let mut best = u128::MAX;
+    for _ in 0..5 {
+        let t = std::time::Instant::now();
+        let (r, error) = s.tool("snapshot", json!({"max_chars": 2000000}));
+        best = best.min(t.elapsed().as_millis());
+        assert!(!error && r.as_str().unwrap().contains("clickable \"pick 829\""), "{r}");
+    }
+    assert!(best < 30, "best snapshot time {best} ms");
+}
+
+#[test]
+fn an_agent_fills_a_form_with_select_check_hover_dblclick_and_upload() {
+    let mut s = Server::start();
+    let base = common::serve();
+    let (r, error) = s.tool("open", json!({"url": format!("{base}/forms"), "snapshot": true}));
+    let snap = r.as_str().unwrap().to_string();
+    assert!(!error && snap.contains("combobox \"Country\" = \"Kenya\"") && snap.contains("listbox \"Fruit\""), "{snap}");
+    // This test reads the whole outline after each action, not the changes.
+    let act = |s: &mut Server, mut args: Value| {
+        args["diff"] = json!(false);
+        let (r, error) = s.tool("act", args);
+        (r.as_str().unwrap().to_string(), error)
+    };
+    // select: by label, then by value; input and change fire once for each change, none for the same pick again.
+    let (r, error) = act(&mut s, json!({"op": "select", "ref": ref_of(&snap, "combobox"), "text": "Tanzania", "mode": "all"}));
+    assert!(!error && r.contains("= \"Tanzania\"") && r.contains("events: country:input country:change"), "{r}");
+    let (r, error) = act(&mut s, json!({"op": "select", "loc": "css=\"#country\"", "text": "tz", "mode": "all"}));
+    assert!(!error && r.contains("events: country:input country:change\""), "{r}");
+    let (r, error) = act(&mut s, json!({"op": "select", "loc": "css=\"#country\"", "text": "Narnia"}));
+    assert!(error && r.contains("FAILED no_option") && r.contains("Kenya"), "{r}");
+    // A multiple select takes several options.
+    let (r, error) = act(&mut s, json!({"op": "select", "loc": "css=\"#fruit\"", "options": ["Apple", "c"]}));
+    assert!(!error && r.contains("= \"Apple, Cherry\""), "{r}");
+    let (r, error) = act(&mut s, json!({"op": "select", "loc": "css=\"#country\"", "options": ["Kenya", "Tanzania"]}));
+    assert!(error && r.contains("one option"), "{r}");
+    // check and uncheck click only when the state differs.
+    let (r, error) = act(&mut s, json!({"op": "check", "loc": "label=\"Agree\""}));
+    assert!(!error && r.contains("checkbox \"Agree\" (checked"), "{r}");
+    let (r, _) = act(&mut s, json!({"op": "check", "loc": "label=\"Agree\""}));
+    assert!(r.contains("(checked"), "{r}");
+    let (r, error) = act(&mut s, json!({"op": "uncheck", "loc": "label=\"Agree\""}));
+    assert!(!error && r.contains("checkbox \"Agree\"") && !r.contains("checkbox \"Agree\" (checked"), "{r}");
+    let (r, error) = act(&mut s, json!({"op": "check", "loc": "css=\"#dbl\""}));
+    assert!(error && r.contains("FAILED not_checkable"), "{r}");
+    // hover: the :hover rule shows the menu, and mouseenter fires.
+    let r = s.tool("read", json!({})).0.as_str().unwrap().to_string();
+    assert!(!r.contains("Menu is open") && r.contains("cold"), "{r}");
+    let (r, error) = act(&mut s, json!({"op": "hover", "loc": "text=\"Hover target\"", "mode": "all"}));
+    assert!(!error && r.contains("Menu is open") && r.contains("hot"), "{r}");
+    // dblclick fires dblclick, and a click alone does not.
+    let (_, _) = act(&mut s, json!({"op": "click", "loc": "css=\"#dbl\""}));
+    assert_eq!(s.tool("eval", json!({"js": "document.getElementById('dbls').textContent"})).0, json!("single"));
+    let (r, error) = act(&mut s, json!({"op": "dblclick", "loc": "css=\"#dbl\"", "mode": "all"}));
+    assert!(!error && r.contains("double"), "{r}");
+    // upload: a plain form posts it as multipart, and a fetch with FormData sends the same file.
+    let dir = std::env::temp_dir().join(format!("bare-mcp-test-upload-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("notes.txt");
+    std::fs::write(&file, "twelve bytes").unwrap();
+    let file = file.to_str().unwrap().to_string();
+    let (r, error) = act(&mut s, json!({"op": "upload", "loc": "css=\"input[type=file]\"", "files": [file.clone(), file.clone()]}));
+    assert!(error && r.contains("FAILED one_file"), "{r}");
+    let (r, error) = act(&mut s, json!({"op": "upload", "loc": "css=\"input[type=file]\"", "files": [dir.join("missing.txt").to_str().unwrap()]}));
+    assert!(error && r.contains("FAILED bad_file"), "{r}");
+    // A file over 100 MiB is refused with a clear error (a sparse file: no disk is used).
+    let big = dir.join("big.bin");
+    std::fs::File::create(&big).unwrap().set_len((100 << 20) + 1).unwrap();
+    let (r, error) = act(&mut s, json!({"op": "upload", "loc": "css=\"input[type=file]\"", "files": [big.to_str().unwrap()]}));
+    assert!(error && r.contains("FAILED bad_file") && r.contains("over the 100 MiB limit"), "{r}");
+    let (r, error) = act(&mut s, json!({"op": "upload", "loc": "css=\"input[type=file]\"", "files": [file.clone()], "snapshot": false}));
+    assert!(!error && r.starts_with("ok"), "{r}");
+    assert_eq!(s.tool("eval", json!({"js": "var f = document.querySelector('input[type=file]').files; f.length + ' ' + f[0].name + ' ' + f[0].size + ' ' + f[0].type"})).0, json!("1 notes.txt 12 text/plain"));
+    let (r, error) = act(&mut s, json!({"op": "click", "loc": "css=\"#go\""}));
+    assert!(!error, "{r}");
+    let (r, _) = act(&mut s, json!({"op": "wait", "loc": "text~\"fetched uploaded\"", "snapshot": false}));
+    assert!(r.starts_with("ok"), "{r}");
+    assert_eq!(s.tool("eval", json!({"js": "document.getElementById('fetched').textContent"})).0, json!("fetched uploaded: notes.txt 12"));
+    let (r, error) = act(&mut s, json!({"op": "click", "loc": "role=button name=\"Send file\"", "mode": "all"}));
+    assert!(!error && r.contains("navigated:") && r.contains("uploaded: notes.txt 12"), "{r}");
+    // The same actions are step lines.
+    let (r, error) = s.tool("run_steps", json!({"steps": format!("open {base}/forms\nselect css=\"#country\" \"Tanzania\"\ncheck label=\"Agree\"\nexpect label=\"Agree\" checked\nuncheck label=\"Agree\"\nhover text=\"Hover target\"\ndblclick css=\"#dbl\"\nexpect css=\"#dbls\" text=\"double\"\nupload css=\"input[type=file]\" \"{file}\"\n"), "compact": true}));
+    assert!(!error && r["ok"] == true, "{r}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Click each link or button of the downloads page and check the file that the receipt names: its bytes, and that the page did not change.
+#[test]
+fn a_download_goes_to_a_file_and_the_page_stays() {
+    let mut s = Server::start();
+    let base = common::serve();
+    let dir = std::env::temp_dir().join(format!("bare-mcp-test-downloads-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let url = format!("{base}/downloads");
+    let (snap, error) = s.tool("open", json!({"url": url, "snapshot": true, "downloads_dir": dir.to_str().unwrap(), "timeout_ms": 20000}));
+    let snap = snap.as_str().unwrap().to_string();
+    assert!(!error && snap.starts_with("ok"), "{snap}");
+    let bytes = |name: &str| std::fs::read(dir.join(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
+    let click = |s: &mut Server, what: &str| {
+        let (r, error) = s.tool("act", json!({"op": "click", "ref": ref_of(&snap, what), "snapshot": false}));
+        let r = r.as_str().unwrap().to_string();
+        assert!(!error && !r.contains("navigated:"), "{r}");
+        r
+    };
+    let r = click(&mut s, "\"Report\"");
+    assert!(r.contains(&format!("downloaded: {}/report.csv ({} bytes, text/csv)", dir.display(), common::PAYLOAD_CSV.len())), "{r}");
+    assert_eq!(bytes("report.csv"), common::PAYLOAD_CSV);
+    let r = click(&mut s, "\"Invoice\"");
+    assert!(r.contains("invoice.pdf (") && r.contains("application/pdf)"), "{r}");
+    assert_eq!(bytes("invoice.pdf"), common::PAYLOAD_PDF);
+    let r = click(&mut s, "\"Notes\"");
+    assert!(r.contains("my notes.txt (11 bytes, text/plain)"), "{r}");
+    assert_eq!(bytes("my notes.txt"), b"plain notes");
+    // A script makes a Blob and clicks a link: the name loses its path; a second download of a name never replaces the first.
+    let r = click(&mut s, "\"Export\"");
+    assert!(r.contains("export.csv (8 bytes, text/csv)"), "{r}");
+    assert_eq!(bytes("export.csv"), b"x,y\n1,2\n");
+    let r = click(&mut s, "\"Report\"");
+    assert!(r.contains("report (1).csv"), "{r}");
+    assert_eq!(bytes("report (1).csv"), common::PAYLOAD_CSV);
+    // A download that fails is named, and leaves no file.
+    let r = click(&mut s, "\"Missing\"");
+    assert!(r.contains("download failed: ") && r.contains("/files/missing.zip: status 404"), "{r}");
+    assert!(!dir.join("missing.zip").exists());
+    let (r, _) = s.tool("eval", json!({"js": "location.href"}));
+    assert_eq!(r, json!(url));
+    let (list, error) = s.tool("downloads", json!({}));
+    let list = list.as_str().unwrap();
+    assert!(!error && list.lines().count() == 6 && list.contains("failed: ") && list.contains("invoice.pdf (") && list.contains("from blob:"), "{list}");
+}
+
+/// A server of one page. `/slow.png` never answers for 5 s, so a picture stays on its way. Gives the base URL.
+fn page_server(page: String) -> String {
+    use std::io::Read;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for mut c in listener.incoming().flatten() {
+            let page = page.clone();
+            std::thread::spawn(move || {
+                let (mut head, mut b) = (Vec::new(), [0u8; 1]);
+                while !head.ends_with(b"\r\n\r\n") && c.read(&mut b).unwrap_or(0) == 1 {
+                    head.push(b[0]);
+                }
+                if String::from_utf8_lossy(&head).starts_with("GET /slow.png") {
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                    return;
+                }
+                let _ = write!(c, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{page}", page.len());
+            });
+        }
+    });
+    format!("http://127.0.0.1:{port}")
+}
+
+/// A snapshot over budget says what it cut, with the counts and the refs, and `offset` reaches the cut part.
+#[test]
+fn a_cut_snapshot_says_what_was_cut_and_offset_reaches_it() {
+    let rows: String = (0..400).map(|i| format!("<li><a href='/p{i}'>link number {i}</a></li>")).collect();
+    let base = page_server(format!("<!doctype html><title>big</title><h1>Big</h1><ul>{rows}</ul>"));
+    let mut s = Server::start();
+    let (r, error) = s.tool("open", json!({"url": format!("{base}/"), "snapshot": false, "timeout_ms": 30000}));
+    assert!(!error, "{r}");
+    let (r, _) = s.tool("snapshot", json!({"max_chars": 2000}));
+    let r = r.as_str().unwrap().to_string();
+    let cut = r.lines().find(|l| l.contains("lines cut")).unwrap_or_else(|| panic!("no cut line in {r}"));
+    assert!(cut.contains("lines cut (e") && cut.contains("–e") && cut.contains("offset="), "{cut}");
+    let offset: usize = cut.split("offset=").nth(1).unwrap().split(' ').next().unwrap().parse().unwrap();
+    // The first cut ref is valid and the page after the offset starts with it.
+    let first = cut.split("(e").nth(1).unwrap().split('–').next().unwrap();
+    let (p2, error) = s.tool("snapshot", json!({"max_chars": 2000, "offset": offset}));
+    let p2 = p2.as_str().unwrap();
+    assert!(!error && p2.contains(&format!("[e{first}]")), "{first} not in {p2}");
+}
+
+/// A read on a settled page does not wait for a picture that is on its way (it waited the 300 ms of the cap).
+#[test]
+fn a_read_does_not_wait_for_a_stalled_picture() {
+    let base = page_server("<!doctype html><title>t</title><h1>Hi</h1><p>static</p><img src='/slow.png' width=10 height=10>".into());
+    let mut s = Server::start();
+    let (r, error) = s.tool("open", json!({"url": format!("{base}/"), "snapshot": false, "timeout_ms": 30000}));
+    assert!(!error, "{r}");
+    s.tool("read", json!({}));
+    for tool in ["read", "links", "snapshot"] {
+        let t = std::time::Instant::now();
+        let (r, error) = s.tool(tool, json!({}));
+        let ms = t.elapsed().as_millis();
+        assert!(!error && ms < 100, "{tool} took {ms} ms: {r}");
+    }
+}
+
+/// A page server with a slow route: `/slow` answers after 700 ms.
+fn naming_app() -> String {
+    use std::io::Read;
+    const PAGES: &[(&str, &str)] = &[
+        // A search box with no size comes first in the tree, and the visible one second.
+        ("/rank", "<!doctype html><body><input type=search aria-label=Zero style='width:0;height:0;padding:0;border:0'><input type=search aria-label=Main>"),
+        // A script gives the box the role `combobox` after a reply, as a typeahead widget does.
+        ("/flip", "<!doctype html><body><input type=search id=m aria-label=Flip><script>fetch('/slow').then(() => document.getElementById('m').setAttribute('role', 'combobox'))</script>"),
+        // The login page of a news site: the labels sit in the cell before the field.
+        ("/login", "<!doctype html><body><form><table><tr><td>username:</td><td><input type=text name=acct></td></tr><tr><td>password:</td><td><input type=password name=pw></td></tr></table>\
+            <p>Nickname <input name=nick></p><p><b>Age</b> <input name=age></p><div><input name=bare_name></div><input name=holder placeholder=Holder><input name=named aria-label=Named></form>"),
+    ];
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for mut c in listener.incoming().flatten() {
+            std::thread::spawn(move || {
+                let (mut head, mut b) = (Vec::new(), [0u8; 1]);
+                while !head.ends_with(b"\r\n\r\n") && c.read(&mut b).unwrap_or(0) == 1 {
+                    head.push(b[0]);
+                }
+                let head = String::from_utf8_lossy(&head).to_string();
+                let path = head.split_whitespace().nth(1).unwrap_or("/").to_string();
+                if path == "/slow" {
+                    std::thread::sleep(std::time::Duration::from_millis(700));
+                }
+                let body = PAGES.iter().find(|(p, _)| *p == path).map_or("ok", |(_, b)| b);
+                let _ = write!(c, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            });
+        }
+    });
+    format!("http://127.0.0.1:{port}")
+}
+
+#[test]
+fn find_lists_the_visible_match_first() {
+    let base = naming_app();
+    let mut s = Server::start();
+    s.tool("open", json!({"url": format!("{base}/rank"), "snapshot": false}));
+    let (r, _) = s.tool("find", json!({"role": "searchbox"}));
+    let lines: Vec<&str> = r.as_str().unwrap().lines().collect();
+    assert!(lines[0].starts_with("2 match"), "{r}");
+    assert!(lines[1].contains("\"Main\""), "the visible box is first: {r}");
+}
+
+#[test]
+fn a_role_that_a_script_sets_after_a_reply_is_the_same_in_every_call() {
+    let base = naming_app();
+    let mut s = Server::start();
+    s.tool("open", json!({"url": format!("{base}/flip"), "snapshot": false}));
+    // The first call must not see the role from before the script ran.
+    let (r, _) = s.tool("find", json!({"role": "searchbox"}));
+    assert!(r.as_str().unwrap().starts_with("0 match"), "{r}");
+    let (r, _) = s.tool("find", json!({"role": "combobox"}));
+    assert!(r.as_str().unwrap().contains("combobox \"Flip\""), "{r}");
+}
+
+#[test]
+fn unnamed_form_fields_take_a_name_from_what_sits_before_them() {
+    let base = naming_app();
+    let mut s = Server::start();
+    let (r, _) = s.tool("open", json!({"url": format!("{base}/login"), "snapshot": true}));
+    let r = r.as_str().unwrap();
+    for want in ["textbox \"username:\"", "textbox \"password:\" (password)", "textbox \"Nickname\"", "textbox \"Age\"", "textbox \"bare_name\"", "textbox \"Holder\"", "textbox \"Named\""] {
+        assert!(r.contains(want), "missing {want} in {r}");
+    }
+    // The fallback names a locator too.
+    let (r, _) = s.tool("find", json!({"role": "textbox", "name": "username"}));
+    assert!(r.as_str().unwrap().starts_with("1 match"), "{r}");
+}
+
+/// A page server for one fixture page: `/` gives `page`, every other path (a form submission) gives a page that says `results`.
+fn focus_page_server(page: &'static str) -> String {
+    use std::io::Read;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for mut c in listener.incoming().flatten() {
+            std::thread::spawn(move || {
+                let (mut head, mut b) = (Vec::new(), [0u8; 1]);
+                while !head.ends_with(b"\r\n\r\n") && c.read(&mut b).unwrap_or(0) == 1 {
+                    head.push(b[0]);
+                }
+                let root = String::from_utf8_lossy(&head).starts_with("GET / ");
+                let body = if root { page } else { "<!doctype html><title>r</title><p>results page</p>" };
+                let _ = write!(c, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            });
+        }
+    });
+    format!("http://127.0.0.1:{port}/")
+}
+
+/// Two search forms, as Wikipedia has: the header input `a` and the page input `b`. The script of `a` moves the focus to `b` at the first
+/// key, and puts the page of `b` before it.
+const TWO_SEARCH: &str = "<!doctype html><body>
+<form id=fa action=/s><input id=a name=q type=search aria-label=\"Header search\"></form>
+<form id=fb action=/s><input id=b name=q type=search aria-label=\"Page search\"></form>
+<form id=fc action=/s><input id=c name=q type=search aria-label=\"Quiet search\"></form>
+<input id=d aria-label=\"Not a form\">
+<div style=\"display:none\"><input id=h aria-label=\"Hidden search\"></div>
+<script>
+document.getElementById('a').addEventListener('keydown', () => document.getElementById('b').focus());
+
+</script></body>";
+
+#[test]
+fn typing_into_an_input_that_hands_the_focus_away_fails_and_never_drops_the_first_key() {
+    let mut s = Server::start();
+    let (snap, _) = s.tool("open", json!({"url": focus_page_server(TWO_SEARCH), "snapshot": true, "timeout_ms": 20000}));
+    let snap = snap.as_str().unwrap().to_string();
+    let (r, error) = s.tool("act", json!({"op": "type", "ref": ref_of(&snap, "Header search"), "text": "bare browser", "snapshot": false}));
+    let r = r.as_str().unwrap().to_string();
+    let (v, _) = s.tool("eval", json!({"js": "['a', 'b'].map(i => document.getElementById(i).value).join('|')"}));
+    // Either all the text is in `a`, or the receipt says that the type failed. The text is never cut or in another box without a failure.
+    assert!(v == json!("bare browser|") || (error && r.contains("FAILED") && r.contains("focus")), "{r} {v}");
+    assert!(!(v == json!("|are browser") && !error), "{r} {v}");
+}
+
+#[test]
+fn typing_into_a_quiet_input_puts_all_the_text_in_it() {
+    let mut s = Server::start();
+    let (snap, _) = s.tool("open", json!({"url": focus_page_server(TWO_SEARCH), "snapshot": true, "timeout_ms": 20000}));
+    let snap = snap.as_str().unwrap().to_string();
+    let (r, error) = s.tool("act", json!({"op": "type", "ref": ref_of(&snap, "Quiet search"), "text": "bare browser", "snapshot": false}));
+    assert!(!error, "{r}");
+    let (v, _) = s.tool("eval", json!({"js": "document.getElementById('c').value"}));
+    assert_eq!(v, json!("bare browser"));
+}
+
+#[test]
+fn press_enter_on_a_ref_submits_the_form_of_that_element() {
+    let mut s = Server::start();
+    let (snap, _) = s.tool("open", json!({"url": focus_page_server(TWO_SEARCH), "snapshot": true, "timeout_ms": 20000}));
+    let snap = snap.as_str().unwrap().to_string();
+    let (_, error) = s.tool("act", json!({"op": "type", "ref": ref_of(&snap, "Quiet search"), "text": "x", "snapshot": false}));
+    assert!(!error);
+    // The focus is on `c`; press on `b` must act on `b`, not on the focused element: `b` is empty but its form still submits.
+    let (r, error) = s.tool("act", json!({"op": "press", "ref": ref_of(&snap, "Page search"), "key": "Enter"}));
+    let r = r.as_str().unwrap().to_string();
+    assert!(!error && r.contains("navigated:") && r.contains("/s?q="), "{r}");
+}
+
+#[test]
+fn press_that_changes_nothing_says_so() {
+    let mut s = Server::start();
+    let (snap, _) = s.tool("open", json!({"url": focus_page_server(TWO_SEARCH), "snapshot": true, "timeout_ms": 20000}));
+    let snap = snap.as_str().unwrap().to_string();
+    let (r, error) = s.tool("act", json!({"op": "press", "ref": ref_of(&snap, "Not a form"), "key": "Enter", "snapshot": false}));
+    let r = r.as_str().unwrap().to_string();
+    assert!(!error && r.contains("no effect"), "{r}");
+}
+
+#[test]
+fn acting_on_a_hidden_element_says_it_is_hidden() {
+    let mut s = Server::start();
+    let (snap, _) = s.tool("open", json!({"url": focus_page_server(TWO_SEARCH), "snapshot": true, "timeout_ms": 20000}));
+    let r = ref_of(snap.as_str().unwrap(), "Not a form");
+    let (_, _) = s.tool("eval", json!({"js": "document.getElementById('d').style.display = 'none'"}));
+    for args in [json!({"op": "press", "key": "Enter"}), json!({"op": "type", "text": "x"}), json!({"op": "click"})] {
+        let mut args = args;
+        args["ref"] = json!(r);
+        args["snapshot"] = json!(false);
+        args["timeout_ms"] = json!(500);
+        let (out, error) = s.tool("act", args.clone());
+        assert!(error && out.as_str().unwrap().contains("hidden"), "{args} {out}");
+    }
+}
+
+/// Pages for the open tests: a page that fills its body after a slow request, one whose request never ends, an error page, a redirect.
+fn open_pages(_: &str, target: &str, _: &str, _: Option<&str>) -> (u16, &'static str, Vec<u8>) {
+    let path = target.split('?').next().unwrap_or("/");
+    let page = |script: &str| (200, "text/html", format!("<!doctype html><title>Slow</title><body><script>{script}</script></body>").into_bytes());
+    match path {
+        "/slow" => page("fetch('/data?delay=400').then(r => r.text()).then(t => { document.body.textContent = t; })"),
+        "/never" => page("fetch('/data?delay=5000').then(r => r.text()).then(t => { document.body.textContent = t; })"),
+        "/data" => {
+            let ms = target.split("delay=").nth(1).and_then(|d| d.parse().ok()).unwrap_or(0);
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+            (200, "text/plain", b"rendered late".to_vec())
+        }
+        "/blocked" => (403, "text/html", b"<!doctype html><title>Access denied</title><body><h1>Blocked</h1><p>Try later</p></body>".to_vec()),
+        "/old" => (302, "text/plain", b"/login?reason=guest&token=abc123&dest=/r/rust".to_vec()),
+        "/login" => (200, "text/html", b"<!doctype html><title>Login</title><body><p>Sign in please</p></body>".to_vec()),
+        "/empty" => (200, "text/html", b"<!doctype html><title>Empty</title><body></body>".to_vec()),
+        _ => (404, "text/plain", b"no".to_vec()),
+    }
+}
+
+#[test]
+fn open_waits_for_a_page_that_fills_its_body_after_a_request() {
+    let base = common::serve_route(open_pages);
+    let mut s = Server::start();
+    let (rep, error) = s.tool("open", json!({"url": format!("{base}/slow")}));
+    assert!(!error, "{rep}");
+    assert!(!rep.to_string().contains("not ready"), "{rep}");
+    let (text, _) = s.tool("eval", json!({"js": "document.body.textContent"}));
+    assert!(text.to_string().contains("rendered late"), "open returned before the page rendered: {text}");
+}
+
+#[test]
+fn open_says_not_ready_when_the_time_limit_passes_on_an_empty_page() {
+    let base = common::serve_route(open_pages);
+    let mut s = Server::start();
+    let (rep, _) = s.tool("open", json!({"url": format!("{base}/never"), "timeout_ms": 600, "snapshot": true}));
+    let r = rep.as_str().unwrap();
+    assert!(r.contains("not ready: body empty after") && r.contains("1 request pending"), "{r}");
+}
+
+#[test]
+fn open_does_not_wait_for_a_page_that_is_empty_and_idle() {
+    let base = common::serve_route(open_pages);
+    let mut s = Server::start();
+    let t = std::time::Instant::now();
+    let (rep, _) = s.tool("open", json!({"url": format!("{base}/empty"), "snapshot": true}));
+    assert!(t.elapsed().as_millis() < 3000, "{rep}");
+    assert!(rep.as_str().unwrap().contains("not ready: body empty"), "{rep}");
+}
+
+#[test]
+fn open_of_an_error_page_gives_the_status_and_keeps_the_page() {
+    let base = common::serve_route(open_pages);
+    let mut s = Server::start();
+    let (rep, _) = s.tool("open", json!({"url": format!("{base}/blocked"), "snapshot": true}));
+    let r = rep.as_str().unwrap();
+    assert!(r.contains("status 403") && r.contains(&format!("{base}/blocked")) && r.contains("Access denied") && r.contains("Try later"), "{r}");
+    let (rep, error) = s.tool("snapshot", json!({}));
+    assert!(!error && rep.as_str().unwrap().contains("Blocked"), "{rep}");
+}
+
+#[test]
+fn open_shows_the_redirect_and_full_urls_with_secret_values_hidden() {
+    let base = common::serve_route(open_pages);
+    let mut s = Server::start();
+    let (rep, _) = s.tool("open", json!({"url": format!("{base}/old"), "snapshot": true}));
+    let r = rep.as_str().unwrap();
+    assert!(r.contains(&format!("redirected: {base}/login?reason=guest&token=…&dest=/r/rust")), "{r}");
+    // `act` shows the full URL of a navigation too, with the secret values hidden.
+    let (rep, _) = s.tool("act", json!({"op": "goto", "url": format!("{base}/login?a=1&session=zz9"), "snapshot": false}));
+    let r = rep.as_str().unwrap();
+    assert!(r.contains(&format!("navigated: {base}/login?a=1&session=…")) && !r.contains("zz9"), "{r}");
+}
+
+#[test]
+fn open_of_a_file_url_fails_at_once_with_the_reason() {
+    let mut s = Server::start();
+    let (rep, error) = s.tool("open", json!({"url": "file:///etc/hostname", "snapshot": true}));
+    assert!(error && rep.as_str().unwrap().contains("not an http(s) URL"), "{rep}");
+}
+
+/// A server of fixed pages: `(path, html)`. Gives its origin.
+fn pages(list: &'static [(&str, &str)]) -> String {
+    use std::io::Read;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for mut c in listener.incoming().flatten() {
+            std::thread::spawn(move || {
+                let (mut head, mut b) = (Vec::new(), [0u8; 1]);
+                while !head.ends_with(b"\r\n\r\n") && c.read(&mut b).unwrap_or(0) == 1 {
+                    head.push(b[0]);
+                }
+                let head = String::from_utf8_lossy(&head).to_string();
+                let path = head.split(' ').nth(1).unwrap_or("/").to_string();
+                let (code, body) = match list.iter().find(|(p, _)| *p == path) {
+                    Some((_, h)) => (200, *h),
+                    None => (404, "not found"),
+                };
+                let _ = write!(c, "HTTP/1.1 {code} X\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            });
+        }
+    });
+    format!("http://127.0.0.1:{port}")
+}
+
+const DIALOGS: &str = "<!doctype html><body><p id=out>none</p>
+<button onclick=\"alert('Hi'); document.getElementById('out').textContent='alerted'\">Alert</button>
+<button onclick=\"document.getElementById('out').textContent='confirm=' + confirm('Delete item?')\">Confirm</button>
+<button onclick=\"document.getElementById('out').textContent='prompt=' + prompt('Name?', 'dflt')\">Prompt</button></body>";
+
+/// `alert`, `confirm` and `prompt` never hang: the act receipt names each dialog and its answer, and `dialog` and `prompt_text` choose it.
+#[test]
+fn dialogs_show_in_the_receipt_and_the_agent_chooses_the_answer() {
+    let base = pages(&[("/", DIALOGS)]);
+    let mut s = Server::start();
+    s.tool("open", json!({"url": format!("{base}/")}));
+    let act = |s: &mut Server, name: &str, extra: Value| {
+        let mut a = json!({"op": "click", "loc": format!("role=button name=\"{name}\"")});
+        a.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        let (r, e) = s.tool("act", a);
+        assert!(!e, "{r}");
+        let (page, _) = s.tool("read", json!({}));
+        format!("{}\n{}", r.as_str().unwrap(), page.as_str().unwrap())
+    };
+    let r = act(&mut s, "Alert", json!({}));
+    assert!(r.contains("dialog: alert \"Hi\" -> accepted") && r.contains("alerted"), "{r}");
+    let r = act(&mut s, "Confirm", json!({"dialog": "dismiss"}));
+    assert!(r.contains("dialog: confirm \"Delete item?\" -> dismissed") && r.contains("confirm=false"), "{r}");
+    let r = act(&mut s, "Confirm", json!({"dialog": "accept"}));
+    assert!(r.contains("dialog: confirm \"Delete item?\" -> accepted") && r.contains("confirm=true"), "{r}");
+    let r = act(&mut s, "Prompt", json!({"prompt_text": "bob"}));
+    assert!(r.contains("dialog: prompt \"Name?\" -> accepted \"bob\"") && r.contains("prompt=bob"), "{r}");
+    let r = act(&mut s, "Prompt", json!({}));
+    assert!(r.contains("prompt=dflt"), "{r}");
+    let r = act(&mut s, "Prompt", json!({"dialog": "dismiss"}));
+    assert!(r.contains("-> dismissed") && r.contains("prompt=null"), "{r}");
+    let (r, _) = s.tool("act", json!({"op": "click", "loc": "role=button name=\"Alert\"", "dialog": "later"}));
+    assert!(r.as_str().unwrap().contains("dialog must be accept or dismiss"), "{r}");
+}
+
+const TABS: &str = "<!doctype html><body><a href=/b target=_blank>Blank link</a>
+<button onclick=\"window.open('/b')\">Open window</button><p>first page</p></body>";
+
+/// `target=_blank` and `window.open` open a new named session; the receipt names it, `sessions` lists it, `close` ends it.
+#[test]
+fn new_tabs_are_named_sessions() {
+    let base = pages(&[("/", TABS), ("/b", "<!doctype html><body><p>second page</p></body>")]);
+    let mut s = Server::start();
+    s.tool("open", json!({"url": format!("{base}/")}));
+    let (r, e) = s.tool("act", json!({"op": "click", "loc": "text=\"Blank link\"", "snapshot": false}));
+    assert!(!e, "{r}");
+    assert!(r.as_str().unwrap().contains(&format!("opened tab: main~2 {base}/b")), "{r}");
+    assert!(!r.as_str().unwrap().contains("navigated"), "the opener stays: {r}");
+    let (r, _) = s.tool("act", json!({"op": "click", "loc": "role=button name=\"Open window\"", "snapshot": false}));
+    assert!(r.as_str().unwrap().contains(&format!("opened tab: main~3 {base}/b")), "{r}");
+    let (r, _) = s.tool("sessions", json!({}));
+    assert!(r.as_str().unwrap().contains("main~2:") && r.as_str().unwrap().contains("main~3:") && r.as_str().unwrap().contains("main: "), "{r}");
+    let (r, e) = s.tool("act", json!({"op": "wait", "loc": "text=\"second page\"", "session": "main~2", "snapshot": false}));
+    assert!(!e, "{r}");
+    let (r, _) = s.tool("read", json!({"session": "main~2"}));
+    assert!(r.as_str().unwrap().contains("second page"), "{r}");
+    let (r, _) = s.tool("read", json!({}));
+    assert!(r.as_str().unwrap().contains("first page"), "{r}");
+    let (_, e) = s.tool("close", json!({"session": "main~2"}));
+    assert!(!e);
+    let (r, _) = s.tool("sessions", json!({}));
+    assert!(!r.as_str().unwrap().contains("main~2:"), "{r}");
+}
+
+/// `storage` reads, writes and clears cookies, `localStorage` and `sessionStorage`; a secret value shows as `[secret]`.
+#[test]
+fn storage_gets_sets_and_clears_with_secrets_redacted() {
+    let base = pages(&[("/", "<!doctype html><body>x</body>")]);
+    let dir = std::env::temp_dir().join(format!("bare-mcp-test-storage-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let secrets = dir.join("secrets");
+    std::fs::write(&secrets, "TOKEN=tok-9f8e7d6c\n").unwrap();
+    let mut s = Server::start();
+    s.tool("open", json!({"url": format!("{base}/"), "secrets_file": secrets.to_str().unwrap()}));
+    let call = |s: &mut Server, a: Value| {
+        let (r, e) = s.tool("storage", a);
+        assert!(!e, "{r}");
+        r.as_str().unwrap().to_string()
+    };
+    for area in ["local", "session", "cookies"] {
+        call(&mut s, json!({"area": area, "action": "set", "key": "k", "value": "v1"}));
+        call(&mut s, json!({"area": area, "action": "set", "key": "auth", "value": "tok-9f8e7d6c"}));
+        let r = call(&mut s, json!({"area": area}));
+        assert!(r.contains("k=v1") && r.contains("auth=[secret]") && !r.contains("tok-9f8e"), "{area}: {r}");
+        let r = call(&mut s, json!({"area": area, "key": "k"}));
+        assert!(r.lines().next().unwrap().starts_with("k=v1") && r.lines().count() == 1, "{area}: {r}");
+        call(&mut s, json!({"area": area, "action": "clear", "key": "k"}));
+        let r = call(&mut s, json!({"area": area}));
+        assert!(!r.contains("k=v1") && r.contains("auth="), "{area}: {r}");
+        call(&mut s, json!({"area": area, "action": "clear"}));
+        assert!(!call(&mut s, json!({"area": area})).contains("auth="), "{area}");
+    }
+    let (r, e) = s.tool("storage", json!({"area": "disk"}));
+    assert!(e && r.as_str().unwrap().contains("area must be"), "{r}");
+}
+
+/// `back` and `forward` walk the history of the session.
+#[test]
+fn back_and_forward_walk_the_history() {
+    let base = pages(&[("/", "<!doctype html><body><a href=/b>Next</a><p>page one</p></body>"), ("/b", "<!doctype html><body><p>page two</p></body>")]);
+    let mut s = Server::start();
+    s.tool("open", json!({"url": format!("{base}/")}));
+    let (r, e) = s.tool("act", json!({"op": "click", "loc": "text=\"Next\""}));
+    assert!(!e, "{r}");
+    let (r, e) = s.tool("act", json!({"op": "wait", "loc": "text=\"page two\""}));
+    assert!(!e, "{r}");
+    let (r, e) = s.tool("act", json!({"op": "back"}));
+    assert!(!e, "{r}");
+    let (r, e) = s.tool("act", json!({"op": "wait", "loc": "text=\"page one\""}));
+    assert!(!e, "{r}");
+    let (r, e) = s.tool("act", json!({"op": "forward"}));
+    assert!(!e, "{r}");
+    let (r, e) = s.tool("act", json!({"op": "wait", "loc": "text=\"page two\""}));
+    assert!(!e, "{r}");
+}
+
+/// Serve one HTML page on 127.0.0.1 for every path. Gives the base URL.
+fn html_app(page: &'static str) -> String {
+    use std::io::Read;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for mut c in listener.incoming().flatten() {
+            std::thread::spawn(move || {
+                let (mut head, mut b) = (Vec::new(), [0u8; 1]);
+                while !head.ends_with(b"\r\n\r\n") && c.read(&mut b).unwrap_or(0) == 1 {
+                    head.push(b[0]);
+                }
+                let _ = write!(c, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{page}", page.len());
+            });
+        }
+    });
+    format!("http://127.0.0.1:{port}")
+}
+
+/// Thirty named links, a wrapper with a click handler, a nameless link and a button that adds a new button.
+const TOKENS_PAGE: &str = "<!doctype html><body><h1>Tokens</h1>
+<div id=wrap onclick='1'><span>Wrapper text that repeats what its children say</span><a href='/w?utm_source=x&id=7'>Inside</a></div>
+<a href='/blank'><img src='data:,' width=1 height=1></a>
+<ul id=list></ul><div id=out><button id=add onclick=\"var b=document.createElement('button');b.textContent='Added';document.getElementById('out').append(b)\">Add</button></div>
+<script>for(let i=0;i<30;i++){const li=document.createElement('li'),a=document.createElement('a');a.href='/p/'+i+'?utm_medium=m&keep='+i+'&fbclid=zz';a.textContent='Link '+i;li.append(a);document.getElementById('list').append(li)}</script></body>";
+
+fn opened(s: &mut Server, base: &str) -> String {
+    let (snap, error) = s.tool("open", json!({"url": format!("{base}/"), "snapshot": true, "timeout_ms": 30000}));
+    assert!(!error, "{snap}");
+    snap.as_str().unwrap().to_string()
+}
+
+#[test]
+fn act_gives_only_what_changed_and_its_parents() {
+    let mut s = Server::start();
+    let snap = opened(&mut s, &html_app(TOKENS_PAGE));
+    assert!(snap.contains("link \"Link 29\""), "{snap}");
+    let (r, error) = s.tool("act", json!({"op": "click", "ref": ref_of(&snap, "button \"Add\"")}));
+    let r = r.as_str().unwrap().to_string();
+    assert!(!error && r.starts_with("ok"), "{r}");
+    assert!(r.contains("*") && r.contains("button \"Added\""), "{r}");
+    // The parent of the new button is there for context; the unchanged links are not.
+    assert!(r.contains("button \"Add\""), "{r}");
+    assert!(!r.contains("Link 5") && !r.contains("Tokens"), "{r}");
+    assert!(r.len() * 3 < snap.len(), "{} chars of diff for {} of snapshot", r.len(), snap.len());
+    // A ref of the full snapshot still works on the diff's page, and the new button has a ref of its own.
+    let (r2, error) = s.tool("act", json!({"op": "click", "ref": ref_of(&r, "button \"Added\"")}));
+    assert!(!error, "{r2}");
+    // `diff: false` asks for the whole outline.
+    let (r, _) = s.tool("act", json!({"op": "scroll", "diff": false}));
+    assert!(r.as_str().unwrap().contains("link \"Link 29\""), "{r}");
+    // Nothing changed: say so, in a few characters.
+    let (r, _) = s.tool("act", json!({"op": "scroll"}));
+    let r = r.as_str().unwrap();
+    assert!(r.contains("no change") && r.len() < 80, "{r}");
+}
+
+#[test]
+fn a_snapshot_marks_changed_lines_too() {
+    let mut s = Server::start();
+    let snap = opened(&mut s, &html_app(TOKENS_PAGE));
+    s.tool("act", json!({"op": "click", "ref": ref_of(&snap, "button \"Add\""), "snapshot": false}));
+    let (r, _) = s.tool("snapshot", json!({}));
+    let r = r.as_str().unwrap();
+    assert!(r.lines().any(|l| l.trim_start().starts_with("*[e") && l.contains("\"Added\"")), "{r}");
+    assert!(r.lines().any(|l| l.trim_start().starts_with("*[e") && l.contains("\"Add\"") && l.contains("focused")), "{r}");
+    assert!(!r.lines().any(|l| l.contains("\"Link 3\"") && l.contains('*')), "{r}");
+}
+
+#[test]
+fn a_snapshot_keeps_each_control_without_the_href_the_links_tool_has() {
+    let mut s = Server::start();
+    let snap = opened(&mut s, &html_app(TOKENS_PAGE));
+    for i in 0..30 {
+        assert!(snap.contains(&format!("link \"Link {i}\"")), "link {i} missing: {snap}");
+    }
+    assert!(!snap.contains("utm_") && !snap.contains("/p/3"), "{snap}");
+    // A link with no name shows where it goes, so it can be told apart.
+    assert!(snap.lines().any(|l| l.contains("link") && l.contains("href=/blank")), "{snap}");
+    // The wrapper keeps its ref but not a copy of the text of its children.
+    let wrap = snap.lines().find(|l| l.contains("clickable")).unwrap();
+    assert!(!wrap.contains("Wrapper text"), "{wrap}");
+    assert!(snap.contains("link \"Inside\""), "{snap}");
+}
+
+#[test]
+fn links_drop_tracking_params_and_the_origin_of_the_page() {
+    let mut s = Server::start();
+    let base = html_app(TOKENS_PAGE);
+    opened(&mut s, &base);
+    let (r, _) = s.tool("links", json!({}));
+    let r = r.as_str().unwrap();
+    assert!(r.contains("\"Link 3\" -> /p/3?keep=3"), "{r}");
+    let lines = r.split_once("link(s)\n").unwrap().1;
+    assert!(!lines.contains("utm_") && !lines.contains("fbclid") && !lines.contains(&base), "{r}");
+    assert!(r.contains("\"Inside\" -> /w?id=7"), "{r}");
+    assert!(r.contains("-> /blank"), "{r}");
 }

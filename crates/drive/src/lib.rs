@@ -3,8 +3,10 @@
 //! (`locate.rs`), waits for conditions with a time limit, and gives a JSON result with the console, the network requests and captures,
 //! with the secrets hidden (`run.rs`). The binary is `bare-drive`.
 
+pub mod diag;
 pub mod locate;
 pub mod run;
 pub mod snap;
 pub mod state;
 pub mod steps;
+pub use bare::{DownloadState, Downloads};

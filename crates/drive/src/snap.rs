@@ -3,7 +3,9 @@
 //! query per element, so a snapshot of a large page costs a few milliseconds.
 //!
 //! A ref (`e7`) names an element of the document of now. It stays the same for the same element across snapshots of one document, and
-//! fails as stale after a navigation. `*` marks an element that the last snapshot of this document did not show.
+//! fails as stale after a navigation. `*` marks an element that the last snapshot of this document did not show, or showed with another
+//! name, value or state. Replies are small on purpose (an agent pays for each character): a link line shows its `href` only when it has
+//! no name (`links` has them all), a `diff` snapshot shows only the marked lines and their parents, and tracking parameters are cut from URLs.
 
 use crate::locate::{Cx, norm};
 use bare::control::Handle;
@@ -12,6 +14,42 @@ use bare_css::values::{Keyword, Property, Value as Css};
 use bare_html::dom::{NodeData, NodeId};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
+use std::hash::{DefaultHasher, Hash, Hasher};
+
+fn hash<T: Hash + ?Sized>(t: &T) -> u64 {
+    let mut h = DefaultHasher::new();
+    t.hash(&mut h);
+    h.finish()
+}
+
+/// What a snapshot showed: each element with a hash of its line, and the hashes of the text lines.
+#[derive(Default)]
+struct Seen {
+    els: HashMap<NodeId, u64>,
+    text: HashSet<u64>,
+}
+
+/// A parameter that only tracks the visitor: it never changes the page that the URL names.
+fn tracking(k: &str) -> bool {
+    k.starts_with("utm_") || k.starts_with("wmf_") || matches!(k, "fbclid" | "gclid" | "dclid" | "msclkid" | "mc_cid" | "mc_eid" | "_ga" | "_gl" | "igshid" | "yclid" | "ref_src" | "ref_url")
+}
+
+/// `url` without tracking parameters.
+fn clean_url(url: &str) -> String {
+    let (rest, frag) = url.split_once('#').map_or((url, ""), |(a, b)| (a, b));
+    let Some((path, query)) = rest.split_once('?') else { return url.to_string() };
+    let kept: Vec<&str> = query.split('&').filter(|kv| !tracking(kv.split('=').next().unwrap_or(""))).collect();
+    let mut out = path.to_string();
+    if !kept.is_empty() {
+        out.push('?');
+        out.push_str(&kept.join("&"));
+    }
+    if url.contains('#') {
+        out.push('#');
+        out.push_str(frag);
+    }
+    out
+}
 
 /// The refs of one document.
 #[derive(Default)]
@@ -20,7 +58,7 @@ pub struct Refs {
     nodes: Vec<NodeId>,
     ids: HashMap<NodeId, u32>,
     /// What the last snapshot showed, for the `*` marks. `None` before the first snapshot of this document.
-    last: Option<HashSet<NodeId>>,
+    last: Option<Seen>,
     /// The most refs of an older document, so a ref from it fails as stale, not as unknown.
     old: u32,
 }
@@ -68,12 +106,12 @@ const CONTROLS: &[&str] = &[
 /// Roles that give a control its context.
 const MARKS: &[&str] = &[
     "heading", "dialog", "alertdialog", "alert", "status", "navigation", "main", "form", "search", "banner", "contentinfo", "complementary",
-    "region", "tablist", "menu", "menubar", "tree", "grid", "table", "list", "img", "progressbar", "tabpanel", "log",
+    "region", "tablist", "menu", "menubar", "tree", "grid", "table", "list", "img", "progressbar", "tabpanel", "log", "iframe",
 ];
 /// Roles whose subtree adds nothing once the line shows their name.
 const LEAVES: &[&str] = &[
     "button", "link", "textbox", "searchbox", "checkbox", "radio", "option", "slider", "spinbutton", "switch", "tab", "menuitem",
-    "menuitemcheckbox", "menuitemradio", "heading", "img", "progressbar",
+    "menuitemcheckbox", "menuitemradio", "heading", "img", "progressbar", "iframe",
 ];
 
 struct Line {
@@ -103,6 +141,7 @@ fn role_of(cx: &Cx, n: NodeId, clicks: &HashSet<NodeId>) -> Option<&'static str>
         return Some(intern(r));
     }
     match cx.tag(n) {
+        "iframe" => Some("iframe"),
         "summary" => Some("button"),
         "section" if cx.attr(n, "aria-label").is_some() || cx.attr(n, "aria-labelledby").is_some() => Some("region"),
         "search" => Some("search"),
@@ -111,8 +150,14 @@ fn role_of(cx: &Cx, n: NodeId, clicks: &HashSet<NodeId>) -> Option<&'static str>
         _ if cx.attr(n, "tabindex").and_then(|t| t.trim().parse::<i32>().ok()).is_some_and(|t| t >= 0) => Some("clickable"),
         // A script listens for clicks on it: what a user clicks, though the page gave it no role.
         _ if clicks.contains(&n) || cx.attr(n, "onclick").is_some() => Some("clickable"),
+        // The top of a subtree with a pointer cursor: React and others listen on the document root, so the element has no listener of its own.
+        _ if pointer(cx, n) && !cx.doc.parent_or_host(n).is_some_and(|p| pointer(cx, p)) => Some("clickable"),
         _ => None,
     }
+}
+
+fn pointer(cx: &Cx, n: NodeId) -> bool {
+    cx.styles.style(n).is_some_and(|s| matches!(s.get(Property::Cursor), Css::Keyword(Keyword::Pointer)))
 }
 
 fn inline(cx: &Cx, n: NodeId) -> bool {
@@ -120,7 +165,7 @@ fn inline(cx: &Cx, n: NodeId) -> bool {
 }
 
 /// The attribute states of a line: what `aria-*` and HTML attributes say. The live states (value, checked, focus) come later.
-fn flags(cx: &Cx, n: NodeId, role: &str) -> Vec<String> {
+fn flags(cx: &Cx, n: NodeId, role: &str, href: bool) -> Vec<String> {
     let mut f = Vec::new();
     let a = |k| cx.attr(n, k);
     if role == "heading" {
@@ -147,9 +192,10 @@ fn flags(cx: &Cx, n: NodeId, role: &str) -> Vec<String> {
         f.push("invalid".into());
     }
     if role == "link"
+        && href
         && let Some(h) = a("href")
     {
-        f.push(format!("href={}", short(h, 80)));
+        f.push(format!("href={}", short(&clean_url(h), 80)));
     }
     if cx.tag(n) == "input" && matches!(cx.input_type(n).as_str(), "email" | "password" | "tel" | "url" | "number" | "date" | "search") {
         f.push(cx.input_type(n));
@@ -213,13 +259,17 @@ fn walk(cx: &Cx, root: NodeId, mode: Mode, clicks: &HashSet<NodeId>, out: &mut V
                 name = short(&norm(&cx.text(n)), 80);
             }
             // A live region says its message: the agent must see an error or a toast without a second read.
+            if name.is_empty() && r == "iframe" {
+                name = cx.attr(n, "title").or_else(|| cx.attr(n, "src")).map(norm).unwrap_or_default();
+            }
             if name.is_empty() && matches!(r, "alert" | "status" | "log") {
                 name = short(&norm(&cx.text(n)), 200);
             }
             // A plain block with no name is noise: its text follows as text lines.
             let skip = matches!(r, "paragraph" | "listitem" | "cell" | "row" | "group" | "article") && name.is_empty();
             if !skip {
-                out.push(Item::El(Line { depth, node: n, role: r, name: short(&name, 200), flags: flags(cx, n, r) }));
+                // `links` has the href of each link: a line shows it only when the name cannot tell the link apart.
+                out.push(Item::El(Line { depth, node: n, role: r, name: short(&name, 200), flags: flags(cx, n, r, name.is_empty()) }));
                 inner = depth + 1;
             }
             if LEAVES.contains(&r) {
@@ -229,7 +279,8 @@ fn walk(cx: &Cx, root: NodeId, mode: Mode, clicks: &HashSet<NodeId>, out: &mut V
         if block {
             stack.push((n, inner, true));
         }
-        let mut kids: Vec<NodeId> = cx.doc.shadow_root(n).into_iter().chain(cx.doc.children(n)).collect();
+        // The flat tree: a shadow host shows its shadow tree, and a `<slot>` shows the light children that it takes.
+        let mut kids: Vec<NodeId> = cx.doc.flat_children(n).collect();
         // A closed `<details>` shows its summary only.
         if el && cx.tag(n) == "details" && cx.attr(n, "open").is_none() {
             kids.retain(|&c| cx.tag(c) == "summary");
@@ -239,6 +290,19 @@ fn walk(cx: &Cx, root: NodeId, mode: Mode, clicks: &HashSet<NodeId>, out: &mut V
         }
     }
     flush(&mut text, 0, out);
+    // A custom control that holds other lines says what it holds in them: its own copy of their text only costs tokens.
+    for i in 0..out.len().saturating_sub(1) {
+        let d = match &out[i + 1] {
+            Item::El(l) => l.depth,
+            Item::Text(d, _) => *d,
+        };
+        if let Item::El(l) = &mut out[i]
+            && l.role == "clickable"
+            && d > l.depth
+        {
+            l.name.clear();
+        }
+    }
     // A text run that only repeats the name of the element next to it (the text of a `<label>`) adds nothing.
     let names: Vec<Option<String>> = out.iter().map(|i| if let Item::El(l) = i { Some(l.name.clone()) } else { None }).collect();
     let mut i = 0;
@@ -250,16 +314,22 @@ fn walk(cx: &Cx, root: NodeId, mode: Mode, clicks: &HashSet<NodeId>, out: &mut V
     });
 }
 
-/// Settle the page before a read: the document loaded, and the tasks that are due now run (bounded, so a busy page still answers).
-/// Wait for the load, then run the tasks that are due now (at most 300 ms).
+/// Settle the page before a read: the document loaded, and the tasks that are due now run. It returns as soon as the page is quiet: no
+/// task ran, no timer is due within 20 ms and no `fetch` is open. A picture on its way is not work for a read (the 4 ms poll that it
+/// asks for is not a reason to wait). A page that waits for a reply (a script that sets a role or fills a list after a `fetch`) gets
+/// up to 2 s; otherwise the bound is 300 ms, so a busy page still answers.
 pub fn settle(p: &mut Page) {
     let _ = p.wait_load(std::time::Duration::from_secs(10));
-    let end = std::time::Instant::now() + std::time::Duration::from_millis(300);
-    while std::time::Instant::now() < end {
+    let start = std::time::Instant::now();
+    loop {
         let (more, next) = p.tick();
-        let soon = next.is_some_and(|t| t <= std::time::Instant::now() + std::time::Duration::from_millis(20));
-        if !more && !soon {
+        let now = std::time::Instant::now();
+        let (fetching, due) = p.browser().map_or((false, false), |b| (b.pending_fetches() > 0, b.next_scheduled_due().is_some_and(|d| d - b.now() <= 20.0)));
+        if (!more && !fetching && !due) || now.duration_since(start) > std::time::Duration::from_millis(if fetching { 2000 } else { 300 }) {
             break;
+        }
+        if !more && let Some(t) = next {
+            std::thread::sleep(t.saturating_duration_since(now).min(std::time::Duration::from_millis(20)));
         }
     }
 }
@@ -270,31 +340,57 @@ fn header(p: &mut Page) -> String {
     format!("url: {}\ntitle: {}\n", crate::run::safe_url(&url), norm(&title))
 }
 
-/// Keep `max` characters: 80 % from the top and 20 % from the end, cut at line ends.
-fn budget(lines: Vec<String>, max: usize) -> String {
+/// The first and the last ref of `lines`, as `eA–eB`, or `""` when none has a ref.
+fn ref_span(lines: &[String]) -> String {
+    let num = |l: &String| l.find("[e").and_then(|i| l[i + 2..].split(']').next()).map(str::to_string);
+    match (lines.iter().find_map(num), lines.iter().rev().find_map(num)) {
+        (Some(a), Some(b)) => format!(" (e{a}–e{b})"),
+        _ => String::new(),
+    }
+}
+
+/// Keep `max` characters: 80 % from the top and 20 % from the end, cut at line ends. A line says what was cut, with the refs that the
+/// cut lines hold (they stay valid). With `page` (snapshot), the lines before `offset` are skipped and the end is not kept: the call
+/// pages forward, and the cut line gives the `offset` of the next page.
+fn budget(lines: Vec<String>, max: usize, page: Option<usize>) -> String {
+    let off = page.unwrap_or(0).min(lines.len());
+    let lines = &lines[off..];
     let total: usize = lines.iter().map(|l| l.len() + 1).sum();
     if total <= max {
         return lines.join("\n");
     }
+    let keep = if off > 0 { max } else { max * 4 / 5 };
     let (mut head, mut used) = (Vec::new(), 0);
-    for l in &lines {
-        if used + l.len() + 1 > max * 4 / 5 {
+    for l in lines {
+        if used + l.len() + 1 > keep {
             break;
         }
         used += l.len() + 1;
         head.push(l.as_str());
     }
     let (mut tail, mut used_t) = (Vec::new(), 0);
-    for l in lines[head.len()..].iter().rev() {
-        if used_t + l.len() + 1 > max / 5 {
-            break;
+    if off == 0 {
+        for l in lines[head.len()..].iter().rev() {
+            if used_t + l.len() + 1 > max / 5 {
+                break;
+            }
+            used_t += l.len() + 1;
+            tail.push(l.as_str());
         }
-        used_t += l.len() + 1;
-        tail.push(l.as_str());
+        tail.reverse();
     }
-    tail.reverse();
     let cut = lines.len() - head.len() - tail.len();
-    format!("{}\n… {cut} lines cut (pass a larger max_chars, or root=REF for one part) …\n{}", head.join("\n"), tail.join("\n"))
+    let span = ref_span(&lines[head.len()..lines.len() - tail.len()]);
+    let how = match page {
+        Some(_) => format!("find or read an element, snapshot with root=REF, or snapshot with offset={}", off + head.len()),
+        None => "pass a larger max_chars".into(),
+    };
+    let mut out = format!("{}\n… {cut} lines cut{span}; use {how} …", head.join("\n"));
+    if !tail.is_empty() {
+        out.push('\n');
+        out.push_str(&tail.join("\n"));
+    }
+    out
 }
 
 /// The value, checked and focus states, which live in the page, not in attributes.
@@ -311,6 +407,9 @@ fn live(p: &mut Page, h: Handle, role: &str, flags: &mut Vec<String>) -> Option<
     if !matches!(role, "textbox" | "searchbox" | "combobox" | "spinbutton" | "slider" | "listbox") {
         return None;
     }
+    if let Some(labels) = p.selected_labels(h) {
+        return Some(short(&labels.join(", "), 200));
+    }
     let v = p.value(h)?;
     if p.is_password(h) {
         return Some(if v.is_empty() { String::new() } else { "••••".into() });
@@ -318,18 +417,48 @@ fn live(p: &mut Page, h: Handle, role: &str, flags: &mut Vec<String>) -> Option<
     Some(short(&v, 200))
 }
 
-fn format(p: &mut Page, refs: &mut Refs, items: Vec<Item>, prev: Option<&HashSet<NodeId>>) -> Vec<String> {
+/// One output line, before the marks: its depth, its text (with no indent) and whether the last snapshot did not show it as it is.
+struct Row {
+    depth: usize,
+    text: String,
+    changed: bool,
+    /// The element of the row; `None` for a text run.
+    node: Option<NodeId>,
+}
+
+fn indent(d: usize) -> &'static str {
+    &"                                                                "[..d.min(64)]
+}
+
+impl Row {
+    fn render(&self, mark: bool) -> String {
+        let m = if mark && self.changed && self.node.is_some() { "*" } else { "" };
+        format!("{}{m}{}", indent(self.depth), self.text)
+    }
+}
+
+/// `seen`: what the last snapshot showed. Text runs are never marked; `diff` keeps them if they are new.
+fn format(p: &mut Page, refs: &mut Refs, items: Vec<Item>, seen: Option<&Seen>) -> Vec<Row> {
     let doc = p.generation();
-    let mut lines = Vec::with_capacity(items.len());
+    let controls: Vec<NodeId> = items.iter().filter_map(|i| if let Item::El(l) = i { Some(l).filter(|l| CONTROLS.contains(&l.role)).map(|l| l.node) } else { None }).collect();
+    let off = p.offscreen(&controls);
+    let mut rows = Vec::with_capacity(items.len());
     for it in items {
         match it {
-            Item::Text(d, t) => lines.push(format!("{}{t:?}", "  ".repeat(d))),
+            Item::Text(depth, t) => {
+                let text = format!("{t:?}");
+                let changed = seen.is_some_and(|s| !s.text.contains(&hash(&text)));
+                rows.push(Row { depth, text, changed, node: None });
+            }
             Item::El(mut l) => {
                 let r = refs.mint(l.node);
                 let h = Handle { doc, node: l.node };
                 let value = live(p, h, l.role, &mut l.flags);
+                if off.contains(&l.node) {
+                    l.flags.push("offscreen".into());
+                }
                 let mut s = String::with_capacity(48);
-                let _ = write!(s, "{}{}[e{r}] {}", "  ".repeat(l.depth), if prev.is_some_and(|p| !p.contains(&l.node)) { "*" } else { "" }, l.role);
+                let _ = write!(s, "[e{r}] {}", l.role);
                 if !l.name.is_empty() {
                     let _ = write!(s, " {:?}", l.name);
                 }
@@ -339,15 +468,36 @@ fn format(p: &mut Page, refs: &mut Refs, items: Vec<Item>, prev: Option<&HashSet
                 if !l.flags.is_empty() {
                     let _ = write!(s, " ({})", l.flags.join(", "));
                 }
-                lines.push(s);
+                let changed = seen.is_some_and(|p| p.els.get(&l.node) != Some(&hash(&s)));
+                rows.push(Row { depth: l.depth, text: s, changed, node: Some(l.node) });
             }
         }
     }
-    lines
+    rows
 }
 
-/// The outline of the page, or of the element `root`, in at most `max` characters.
-pub fn snapshot(p: &mut Page, refs: &mut Refs, mode: Mode, root: Option<u32>, max: usize) -> Result<String, String> {
+/// Only the changed rows, each after the rows that hold it (the nearest row of each lower depth before it).
+fn diff(rows: &[Row]) -> Vec<String> {
+    let mut keep = vec![false; rows.len()];
+    for i in (0..rows.len()).filter(|&i| rows[i].changed) {
+        keep[i] = true;
+        let mut d = rows[i].depth;
+        for j in (0..i).rev() {
+            if d == 0 {
+                break;
+            }
+            if rows[j].depth < d {
+                keep[j] = true;
+                d = rows[j].depth;
+            }
+        }
+    }
+    rows.iter().zip(keep).filter(|(_, k)| *k).map(|(r, _)| r.render(true)).collect()
+}
+
+/// The outline of the page, or of the element `root`, in at most `max` characters. With `diff`, and a snapshot of this document before,
+/// only the lines that changed since then (marked `*`) and the lines that hold them.
+pub fn snapshot(p: &mut Page, refs: &mut Refs, mode: Mode, root: Option<u32>, offset: usize, max: usize, diff_only: bool) -> Result<String, String> {
     settle(p);
     let doc = p.generation();
     refs.sync(doc);
@@ -359,15 +509,33 @@ pub fn snapshot(p: &mut Page, refs: &mut Refs, mode: Mode, root: Option<u32>, ma
         walk(&cx, start.map_or(d.root(), |h| h.node), mode, &clicks, &mut items);
     })
     .ok_or_else(|| p.errors.last().cloned().unwrap_or_else(|| "the page has no document or no layout yet".into()))?;
-    let shown: HashSet<NodeId> = items.iter().filter_map(|i| if let Item::El(l) = i { Some(l.node) } else { None }).collect();
     let prev = if root.is_none() { refs.last.take() } else { None };
-    let lines = format(p, refs, items, prev.as_ref());
+    let refs_had_prev = prev.is_some();
+    let rows = format(p, refs, items, prev.as_ref());
     if root.is_none() {
-        refs.last = Some(shown);
-    } else {
-        refs.last = prev.or(refs.last.take());
+        let mut seen = Seen::default();
+        for r in &rows {
+            match r.node {
+                Some(n) => {
+                    seen.els.insert(n, hash(&r.text));
+                }
+                None => {
+                    seen.text.insert(hash(&r.text));
+                }
+            }
+        }
+        refs.last = Some(seen);
     }
-    let body = if lines.is_empty() { "(no elements: the page is empty, or it has not rendered yet)".into() } else { budget(lines, max) };
+    if diff_only && root.is_none() && refs_had_prev {
+        let changed = rows.iter().filter(|r| r.changed).count();
+        if changed == 0 {
+            return Ok(format!("no change ({} lines)", rows.len()));
+        }
+        let out = budget(diff(&rows), max, None);
+        return Ok(format!("{out}\n({changed} of {} lines changed)", rows.len()));
+    }
+    let lines: Vec<String> = rows.iter().map(|r| r.render(refs_had_prev)).collect();
+    let body = if lines.is_empty() { "(no elements: the page is empty, or it has not rendered yet)".into() } else { budget(lines, max, Some(offset)) };
     Ok(header(p) + &body)
 }
 
@@ -376,7 +544,10 @@ pub fn find(p: &mut Page, refs: &mut Refs, loc: &crate::locate::Locator, max: us
     settle(p);
     let doc = p.generation();
     refs.sync(doc);
-    let found = crate::locate::find(p, loc)?;
+    let mut found = crate::locate::find(p, loc)?;
+    // The matches with a box of a size first: a field that is in the tree but has no size is not what an agent looks for.
+    let (seen, flat): (Vec<Handle>, Vec<Handle>) = found.shown.iter().partition(|&&h| p.visible_box(h).is_ok());
+    found.shown = seen.into_iter().chain(flat).collect();
     let clicks = p.browser().map(|b| b.listened(CLICKS)).unwrap_or_default();
     let mut items = Vec::new();
     p.inspect(|d, frame| {
@@ -387,7 +558,7 @@ pub fn find(p: &mut Page, refs: &mut Refs, loc: &crate::locate::Locator, max: us
                 n if n.is_empty() => norm(&cx.text(h.node)),
                 n => n,
             };
-            items.push(Item::El(Line { depth: 0, node: h.node, role, name: short(&name, 200), flags: flags(&cx, h.node, role) }));
+            items.push(Item::El(Line { depth: 0, node: h.node, role, name: short(&name, 200), flags: flags(&cx, h.node, role, true) }));
         }
     });
     let n = items.len();
@@ -395,10 +566,10 @@ pub fn find(p: &mut Page, refs: &mut Refs, loc: &crate::locate::Locator, max: us
     if found.hidden > 0 {
         let _ = write!(out, ", {} more not rendered", found.hidden);
     }
-    let lines = format(p, refs, items, None);
+    let lines: Vec<String> = format(p, refs, items, None).iter().map(|r| r.render(false)).collect();
     if !lines.is_empty() {
         out.push('\n');
-        out.push_str(&budget(lines, max));
+        out.push_str(&budget(lines, max, None));
     }
     Ok(out)
 }
@@ -474,7 +645,7 @@ fn walk_text(cx: &Cx, root: NodeId, out: &mut Vec<String>) {
             NodeData::Document => {}
             _ => continue,
         }
-        let kids: Vec<NodeId> = cx.doc.shadow_root(n).into_iter().chain(cx.doc.children(n)).collect();
+        let kids: Vec<NodeId> = cx.doc.flat_children(n).collect();
         for &c in kids.iter().rev() {
             stack.push((c, false));
         }
@@ -488,6 +659,7 @@ pub fn links(p: &mut Page, refs: &mut Refs, max: usize) -> Result<String, String
     let doc = p.generation();
     refs.sync(doc);
     let base = p.url().and_then(|u| bare_url::Url::parse(&u).ok());
+    let origin = base.as_ref().map(|b| b.to_string()).and_then(|u| u.find("://").map(|i| u[..u[i + 3..].find('/').map_or(u.len(), |j| i + 3 + j)].to_string())).unwrap_or_default();
     let mut found = Vec::new();
     p.inspect(|d, frame| {
         let cx = Cx { doc: d, styles: &frame.styles };
@@ -506,7 +678,20 @@ pub fn links(p: &mut Page, refs: &mut Refs, max: usize) -> Result<String, String
     let mut lines = Vec::with_capacity(found.len());
     for (n, name, href) in found {
         let abs = base.as_ref().and_then(|b| b.join(&href).ok()).map_or(href, |u| u.to_string());
-        lines.push(format!("[e{}] {name:?} -> {abs}", refs.mint(n)));
+        // A link of this origin gives its path: the origin is in the header, and it costs tokens in each line.
+        let shown = clean_url(abs.strip_prefix(&origin).filter(|r| r.starts_with('/')).unwrap_or(&abs));
+        let name = if name.is_empty() { String::new() } else { format!(" {name:?}") };
+        lines.push(format!("[e{}]{name} -> {shown}", refs.mint(n)));
     }
-    Ok(format!("{}{} link(s)\n{}", header(p), lines.len(), budget(lines, max)))
+    Ok(format!("{}{} link(s)\n{}", header(p), lines.len(), budget(lines, max, None)))
+}
+
+/// How big the page is: its DOM nodes, and the snapshot lines of a walk that shows text (none: the page shows no text and no control).
+pub fn size(p: &mut Page) -> Option<(usize, usize)> {
+    p.inspect(|d, frame| {
+        let cx = Cx { doc: d, styles: &frame.styles };
+        let mut items = Vec::new();
+        walk(&cx, d.root(), Mode::All, &HashSet::new(), &mut items);
+        (d.len(), items.len())
+    })
 }

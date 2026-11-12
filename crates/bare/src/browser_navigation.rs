@@ -168,6 +168,10 @@ pub(crate) struct NavState {
     pub generation: u64,
     pub tasks: VecDeque<Task>,
     pub requests: VecDeque<NavigationRequest>,
+    /// Links with a `download` attribute that were activated: the session saves them (`downloads.rs`).
+    pub downloads: VecDeque<crate::downloads::DownloadRequest>,
+    /// The session saves downloads (`Browser::enable_downloads`). Off: a `download` link navigates as any link.
+    pub downloads_on: bool,
     pub urls: IdMap<ObjId, pr::UrlObj>,
     pub params: IdMap<ObjId, pr::ParamsObj>,
     pub iters: IdMap<ObjId, pr::IterObj>,
@@ -372,6 +376,45 @@ impl Dom {
         Ok(())
     }
 
+    /// The activation of a link that has a `download` attribute: ask the session to save the target instead of navigating. A `blob:` or `data:`
+    /// URL is read now (the Blob store is in this document). False when `a` has no `download`, or no valid URL: the caller navigates.
+    pub(crate) fn queue_download(&self, it: &mut Interp<'_>, a: bare_html::dom::NodeId, href: &str) -> R<bool> {
+        if !self.nav.s.borrow().downloads_on {
+            return Ok(false);
+        }
+        let name = match { let doc = self.doc.borrow(); doc.find_atom("download").and_then(|k| doc.attr(a, k)).map(str::to_string) } {
+            Some(n) => n,
+            None => return Ok(false),
+        };
+        let from = self.cur_rec()?.href();
+        let h = href.trim_matches(|c: char| c <= ' ');
+        let (url, data) = if crate::browser_web::is_blob_url(h) {
+            let Some((bytes, ty)) = crate::browser_web::blob_url_read(self, h) else { return Ok(true) };
+            (h.to_string(), Some((bytes, ty)))
+        } else if h.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("data:")) {
+            let Some(bytes) = crate::images::data_url(h) else { return Ok(true) };
+            let head = h[5..].split_once(',').map_or("", |x| x.0).split(';').next().unwrap_or("");
+            (h.to_string(), Some((bytes, if head.is_empty() { "text/plain".to_string() } else { head.to_string() })))
+        } else {
+            match nu::parse(h, Some(&self.cur_rec()?)) {
+                Ok(r) => (r.href(), None),
+                Err(_) => return Ok(false),
+            }
+        };
+        if self.nav.s.borrow().downloads.len() >= self.nav.lim.get().max_requests {
+            return Err(self.lim("nav-requests"));
+        }
+        it.charge(1 + data.as_ref().map_or(0, |d| d.0.len() / 64) as u64)?;
+        self.nav.s.borrow_mut().downloads.push_back(crate::downloads::DownloadRequest { url, name: Some(name), from, data });
+        Ok(true)
+    }
+
+    /// `href` resolved against the document URL, when the result is an http(s) URL.
+    pub(crate) fn resolve_http(&self, href: &str) -> Option<String> {
+        let u = nu::parse(href, Some(&self.cur_rec().ok()?)).ok()?.href();
+        (u.starts_with("http://") || u.starts_with("https://")).then_some(u)
+    }
+
     /// A click on a link: navigate to `href`, resolved against the document URL. An `href` that is not a valid URL does nothing.
     pub(crate) fn navigate_href(&self, it: &mut Interp<'_>, href: &str) -> R<()> {
         match nu::parse(href, Some(&self.cur_rec()?)) {
@@ -383,7 +426,7 @@ impl Dom {
 
     /// A form submission: load `action` (an empty one is the document URL) with `query` in the URL (`GET`) or as the body (`POST`).
     /// An action that is not an http(s) URL does nothing.
-    pub(crate) fn submit_navigation(&self, it: &mut Interp<'_>, action: &str, post: bool, query: &str) -> R<()> {
+    pub(crate) fn submit_navigation(&self, it: &mut Interp<'_>, action: &str, post: bool, query: &str, body: Option<Body>) -> R<()> {
         let cur = self.cur_rec()?;
         let rec = if action.is_empty() {
             cur.clone()
@@ -400,7 +443,7 @@ impl Dom {
             if self.nav.s.borrow().requests.len() >= self.nav.lim.get().max_requests {
                 return Err(self.lim("nav-requests"));
             }
-            let body = Body { content_type: "application/x-www-form-urlencoded".into(), bytes: query.as_bytes().to_vec() };
+            let body = body.unwrap_or_else(|| Body { content_type: "application/x-www-form-urlencoded".into(), bytes: query.as_bytes().to_vec() });
             self.nav.s.borrow_mut().requests.push_back(NavigationRequest { kind: NavigationKind::Assign, url: href, from: cur.href(), body: Some(body) });
             return Ok(());
         }
@@ -899,6 +942,20 @@ impl Browser {
 
     pub fn take_navigation_request(&mut self) -> Option<NavigationRequest> {
         self.dom.nav.s.borrow_mut().requests.pop_front()
+    }
+
+    /// The session saves the targets of links with a `download` attribute.
+    pub fn enable_downloads(&mut self) {
+        self.dom.nav.s.borrow_mut().downloads_on = true;
+    }
+
+    /// A link asked for a download that the session has not started.
+    pub fn has_download_request(&self) -> bool {
+        !self.dom.nav.s.borrow().downloads.is_empty()
+    }
+
+    pub fn take_download_request(&mut self) -> Option<crate::downloads::DownloadRequest> {
+        self.dom.nav.s.borrow_mut().downloads.pop_front()
     }
 
     pub fn navigation_stats(&self) -> NavigationStats {

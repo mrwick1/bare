@@ -9,9 +9,10 @@
 //!                             credentials). The step output gives counts only. IndexedDB is not saved
 //! goto URL                    the address bar of the session
 //! reload
+//! back, forward           the history of the session, as the mouse buttons of the window do
 //! click LOC
 //! type LOC "text"             click the field, select its text, type one key in each tick (a line feed is Enter); "" clears it
-//! press KEY                   at the focused element: Enter, Tab, Escape, a, Shift+Tab, Control+a
+//! press [LOC] KEY              at the element (it takes the focus first) or the focused element: Enter, Tab, Escape, a, Shift+Tab, Control+a
 //! scroll LOC|page DY          the wheel over the element (or the middle of the window), DY CSS pixels down
 //! expect LOC STATE            visible hidden enabled disabled checked unchecked focused | count N | text="x" | value~"x"
 //! expect url="x" | url~"x"
@@ -69,9 +70,19 @@ pub enum Action {
     SaveState(String),
     Goto(String),
     Reload,
+    Back,
+    Forward,
     Click(Locator),
     Type(Locator, String),
-    Press(String),
+    /// Pick options of a `<select>` by label or value.
+    Select(Locator, Vec<String>),
+    Check(Locator, bool),
+    Hover(Locator),
+    DblClick(Locator),
+    /// Set the files of an `<input type=file>` from local paths.
+    Upload(Locator, Vec<String>),
+    /// A key at the focused element, or at the element of the locator (focused first).
+    Press(Option<Locator>, String),
     Scroll(Option<Locator>, f64),
     Expect(Check),
     Shot(String),
@@ -213,6 +224,8 @@ fn parse_line(line: &str, vars: &HashMap<String, String>) -> Result<Action, Stri
         "save-state" => Action::SaveState(one()?),
         "goto" => Action::Goto(one()?),
         "reload" if raw.is_empty() => Action::Reload,
+        "back" if raw.is_empty() => Action::Back,
+        "forward" if raw.is_empty() => Action::Forward,
         "click" => match locator(rest, vars)? {
             (loc, n) if n == rest.len() => Action::Click(loc),
             _ => return Err("click LOC".into()),
@@ -224,10 +237,43 @@ fn parse_line(line: &str, vars: &HashMap<String, String>) -> Result<Action, Stri
                 _ => return Err("type LOC \"text\"".into()),
             }
         }
+        "check" | "uncheck" | "hover" | "dblclick" => match locator(rest, vars)? {
+            (loc, n) if n == rest.len() => match verb {
+                "check" => Action::Check(loc, true),
+                "uncheck" => Action::Check(loc, false),
+                "hover" => Action::Hover(loc),
+                _ => Action::DblClick(loc),
+            },
+            _ => return Err(format!("{verb} LOC")),
+        },
+        "select" | "upload" => {
+            let (loc, used) = locator(rest, vars)?;
+            let vals = rest[used..].iter().map(|w| match w {
+                Word::Quoted(t) => expand(t, vars),
+                _ => Err(String::new()),
+            }).collect::<Result<Vec<_>, _>>();
+            match vals {
+                Ok(v) if !v.is_empty() => if verb == "select" { Action::Select(loc, v) } else { Action::Upload(loc, v) },
+                _ => return Err(format!("{verb} LOC \"{}\" [\"{}\" ...]", if verb == "select" { "option" } else { "path" }, if verb == "select" { "option2" } else { "path2" })),
+            }
+        }
         "press" => {
-            let key = one()?;
+            // `press KEY`, or `press LOC KEY`: a key is one word, and a locator has `=` or `~` in its first word.
+            let (loc, key) = match raw.split_once(char::is_whitespace) {
+                Some((first, _)) if first.len() > 1 && first.contains(['=', '~']) => {
+                    let w = words(raw)?;
+                    match locator(&w, vars)? {
+                        (loc, n) if n + 1 == w.len() => match &w[n] {
+                            Word::Bare(k) => (Some(loc), expand(k, vars)?),
+                            _ => return Err("press [LOC] KEY".into()),
+                        },
+                        _ => return Err("press [LOC] KEY".into()),
+                    }
+                }
+                _ => (None, one()?),
+            };
             bare::control::key_events(&key).ok_or_else(|| format!("not a key: {key}"))?;
-            Action::Press(key)
+            Action::Press(loc, key)
         }
         "scroll" => {
             let (loc, used) = match rest.first() {
@@ -348,6 +394,14 @@ mod tests {
         assert_eq!(p("click role=menuitem name~\"sign out\""), Ok(Action::Click(Locator::Role("menuitem".into(), Some(Text::Has("sign out".into()))))));
         assert_eq!(p("type label=\"Password\" \"${PASS}\""), Ok(Action::Type(Locator::Label(Text::Is("Password".into())), "p\"w".into())));
         assert_eq!(p("type css=\"input[name=q]\" \"a\\\"b\\n\""), Ok(Action::Type(Locator::Css("input[name=q]".into()), "a\"b\n".into())));
+        assert_eq!(p("select label=\"Country\" \"Kenya\""), Ok(Action::Select(Locator::Label(Text::Is("Country".into())), vec!["Kenya".into()])));
+        assert_eq!(p("select css=\"#f\" \"a\" \"b c\""), Ok(Action::Select(Locator::Css("#f".into()), vec!["a".into(), "b c".into()])));
+        assert_eq!(p("check ref=e3"), Ok(Action::Check(Locator::Ref(3), true)));
+        assert_eq!(p("uncheck ref=e3"), Ok(Action::Check(Locator::Ref(3), false)));
+        assert_eq!(p("hover text=\"Menu\""), Ok(Action::Hover(Locator::Text(Text::Is("Menu".into())))));
+        assert_eq!(p("dblclick ref=e1"), Ok(Action::DblClick(Locator::Ref(1))));
+        assert_eq!(p("upload css=\"input\" \"/a b/c.txt\" \"d.txt\""), Ok(Action::Upload(Locator::Css("input".into()), vec!["/a b/c.txt".into(), "d.txt".into()])));
+        assert!(p("select ref=e1").is_err() && p("upload ref=e1 bare").is_err() && p("check ref=e1 \"x\"").is_err());
         assert_eq!(p("expect css=\"li\" count 3"), Ok(Action::Expect(Check::El(Locator::Css("li".into()), State::Count(3)))));
         assert_eq!(p("expect url~\"/agents?q=x\""), Ok(Action::Expect(Check::Url(Text::Has("/agents?q=x".into())))));
         assert_eq!(p("wait js \"1 + 1 == 2\""), Ok(Action::Expect(Check::Js("1 + 1 == 2".into()))));
@@ -365,7 +419,11 @@ mod tests {
         for bad in ["open http://a.test state=", "open http://a.test state=\"f\" x", "save-state", "save-state a b"] {
             assert!(p(bad).is_err(), "{bad}");
         }
-        assert_eq!(p("press Shift+Tab"), Ok(Action::Press("Shift+Tab".into())));
+        assert_eq!(p("press Shift+Tab"), Ok(Action::Press(None, "Shift+Tab".into())));
+        assert_eq!(p("press ref=e9 Enter"), Ok(Action::Press(Some(Locator::Ref(9)), "Enter".into())));
+        assert_eq!(p("press css=\"#a\" Enter"), Ok(Action::Press(Some(Locator::Css("#a".into())), "Enter".into())));
+        assert_eq!((p("back"), p("forward")), (Ok(Action::Back), Ok(Action::Forward)));
+        assert!(p("back now").is_err());
         assert_eq!(p("goto http://a.test/x?q=1&r=~2"), Ok(Action::Goto("http://a.test/x?q=1&r=~2".into())));
         assert_eq!(p("expect placeholder~\"search\" value=\"\""), Ok(Action::Expect(Check::El(Locator::Placeholder(Text::Has("search".into())), State::Value(Text::Is("".into()))))));
         for bad in ["cookie", "cookie set a", "cookie set a b secure=1", "expect cookie", "expect cookie a shiny", "click", "type css=\"a\"", "expect css=\"a\" shiny", "nope", "type css=\"a\" \"${NOPE}\"", "shot ../x", "press Hyper+x", "click role=button\"x\"", "type css=\"a\" \"open"] {

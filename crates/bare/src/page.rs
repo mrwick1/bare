@@ -334,16 +334,17 @@ impl Page {
     /// `open` in a new session with empty storage that shares the connections and the HTTP cache of `net`, as a new tab of one browser
     /// does. A driver that opens many pages pays no new TLS handshake and no new download of the immutable scripts of an app.
     pub fn open_in(url: &str, viewport: (u32, u32), net: &bare_net::http::Client) -> Result<Page, String> {
-        Page::open_in_with(url, viewport, net, None)
+        Page::open_in_with(url, viewport, net, None, None)
     }
 
     /// `open_in` that starts from a saved state (`None`: empty storage). The state is plain data, so it can go to a window thread.
-    pub fn open_in_with(url: &str, viewport: (u32, u32), net: &bare_net::http::Client, state: Option<&StorageState>) -> Result<Page, String> {
-        Page::open_cfg(Page::config_in(url, net, state)?, viewport)
+    pub fn open_in_with(url: &str, viewport: (u32, u32), net: &bare_net::http::Client, state: Option<&StorageState>, downloads: Option<crate::Downloads>) -> Result<Page, String> {
+        Page::open_cfg(Page::config_in(url, net, state, downloads)?, viewport)
     }
 
-    fn config_in(url: &str, net: &bare_net::http::Client, state: Option<&StorageState>) -> Result<SessionConfig, String> {
+    fn config_in(url: &str, net: &bare_net::http::Client, state: Option<&StorageState>, downloads: Option<crate::Downloads>) -> Result<SessionConfig, String> {
         let mut cfg = SessionConfig::new(url);
+        cfg.downloads = downloads;
         if let Some(st) = state {
             let store = crate::browser_navigation::WebStorage::default();
             store.import(st).map_err(|e| format!("session state: {e:?}"))?;
@@ -358,12 +359,12 @@ impl Page {
     /// canvas of a headless page) keeps the pixels of the old page until the first frame of the new one. If the new session
     /// cannot start, no document is left.
     pub fn reopen_in(&mut self, url: &str, net: &bare_net::http::Client) -> Result<(), String> {
-        self.reopen_in_with(url, net, None)
+        self.reopen_in_with(url, net, None, None)
     }
 
     /// `reopen_in` that starts from a saved state (`None`: empty storage).
-    pub fn reopen_in_with(&mut self, url: &str, net: &bare_net::http::Client, state: Option<&StorageState>) -> Result<(), String> {
-        let cfg = Page::config_in(url, net, state)?;
+    pub fn reopen_in_with(&mut self, url: &str, net: &bare_net::http::Client, state: Option<&StorageState>, downloads: Option<crate::Downloads>) -> Result<(), String> {
+        let cfg = Page::config_in(url, net, state, downloads)?;
         self.release_frame();
         if let Source::Session(s) = &mut self.source {
             s.end_document();
@@ -382,6 +383,10 @@ impl Page {
 
     fn live_session(mut cfg: SessionConfig, viewport: (u32, u32)) -> Result<Session, String> {
         let url = cfg.url.clone();
+        // The download starts on a worker, so a URL that no load can use fails here, at once, and not later in a tick.
+        if bare_url::Url::parse(url.split('#').next().unwrap_or("")).is_err() {
+            return Err(format!("{url}: the URL is not an http(s) URL"));
+        }
         cfg.viewport = Some((viewport.0 as f32, viewport.1 as f32));
         // A window runs for hours, not for one load: an input event adds a little time and a few tasks each.
         cfg.limits.max_time = Duration::from_secs(7 * 24 * 3600);
@@ -425,6 +430,25 @@ impl Page {
     /// Is a document on its way, or in but not shown yet? A live session loads it in the ticks after `open` and `navigate`.
     pub fn loading(&self) -> bool {
         matches!(&self.source, Source::Session(s) if s.loading().is_some())
+    }
+
+    /// Live: is the document in and `load` run, with no request, script or task waiting? `Err`: the number of requests that wait (0 while the
+    /// document itself is on its way). Timers that are not due, and open event streams, do not count.
+    pub fn idle(&mut self) -> Result<(), usize> {
+        if self.loading() {
+            return Err(0);
+        }
+        let Some(b) = self.browser() else { return Err(0) };
+        let pending = b.pending_fetches();
+        if pending == 0 && b.loaded() && b.live_work_of(false).is_none() { Ok(()) } else { Err(pending) }
+    }
+
+    /// The HTTP status of the last document of a live session (0: none yet, or not live).
+    pub fn http_status(&self) -> u16 {
+        match &self.source {
+            Source::Session(s) => s.status(),
+            Source::Browser(_) => 0,
+        }
     }
 
     /// Why the last document did not load, if it did not. The ticks of a live session load it after `open` and `navigate`.
@@ -618,6 +642,9 @@ impl Page {
         }
         let images = self.images.pending();
         let Some(b) = self.browser().filter(|_| !stopped) else { return (false, images.then(|| Instant::now() + poll)) };
+        if b.has_download_request() {
+            return (true, Some(Instant::now()));
+        }
         let (due, now) = (b.next_scheduled_due(), b.now());
         let net = if b.live() { b.live_work() } else { (b.pending_fetches() > 0).then_some(true) };
         let at = due.map(|d| Instant::now() + Duration::from_secs_f64((d - now).max(0.0) / 1000.0));
@@ -799,7 +826,7 @@ impl Page {
         self.stale = true;
     }
 
-    fn after(&mut self, r: Result<UiOutcome, bare_js::eval::Error>) -> bool {
+    pub(crate) fn after(&mut self, r: Result<UiOutcome, bare_js::eval::Error>) -> bool {
         let out = match r {
             Ok(o) => o,
             Err(e) => {
@@ -1020,7 +1047,7 @@ impl Page {
     }
 
     /// Go back (`-1`) or forward (`1`) in the history: inside the document, or to the neighbor document of the session.
-    fn history_go(&mut self, delta: i32) -> bool {
+    pub(crate) fn history_go(&mut self, delta: i32) -> bool {
         let r = self.browser().map(|b| b.history_go(delta));
         if let Some(Err(e)) = r {
             self.note(format!("history: {e:?}"));

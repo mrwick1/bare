@@ -1226,3 +1226,80 @@ An agent such as `deck` must read a page and act on it in few model calls. Scree
 - `find`, `read` (paged text), `links`, `screenshot` (the page or one element, a path, and the image when asked), `eval` and `sessions` complete the set. Every reply goes through the redactor.
 - Each tool takes `session`. Sessions run side by side, one page each. `open` ends only the session of its name.
 - Step lines accept `ref=e7`, so a journey can mix refs and user locators.
+
+## Console, network and diagnose tools in bare-mcp (2026-11-12)
+Each session keeps the last 500 console entries and the last 500 network records. The step reports still hand out their entries once. Reads such as `snapshot` and the tools `console`, `network` and `diagnose` also feed the history, so entries that arrive between calls are not lost. `console` and `network` show only what is new since their last call, unless `since_last` is false. `diagnose` gives one line for each finding and ends with a verdict: `site problem`, `bare gap`, `network` or `unclear`. The verdict is a heuristic: text such as `is not a function` counts as a bare gap. The kind of a failed request (script, stylesheet, image, fetch) comes from its URL, because a network record does not keep its caller. A failed `act` step with `not_found`, `hidden` or `page` adds the first uncaught script error as a hint.
+## The snapshot reads the flat tree, cursors and the viewport (2026-11-12)
+- The snapshot, `find` and `read` walk the flat tree. A slotted light child shows once, at its `<slot>`. Before, the walk skipped the shadow tree and showed no shadow content.
+- `cursor` is a CSS property with three values: `auto`, `default` and `pointer`. It is inherited. Other values are dropped.
+- An element with no role, with `cursor: pointer` and a parent without it, is `clickable`. This finds React-style controls that listen on the document root.
+- A control outside the window has the state `(offscreen)`. One pass over the layout finds them. It costs about 5 ms for 2,500 controls.
+- An iframe shows as one line, `iframe "title or src"`. Its content is not in the snapshot. bare does not load child documents (see "Named iframe windows"), so refs into frames need a child document with its own DOM and layout first.
+- Timing on a page of about 5,000 elements, release build, warm snapshot: 2 ms before, 7 ms after. The first snapshot after open includes the layout: 33 ms before and about 40 ms after.
+
+## Form actions in `act` and the step language (2026-11-12)
+
+An agent must fill real forms. `act` and the step language now have `select`, `check`, `uncheck`, `hover`, `dblclick` and `upload`.
+
+- `hover` and `dblclick` use the pointer events of `click` (`Page::hover`, `Page::dblclick`). `hover` moves the pointer to the point of `actionable`, so `:hover` rules and the enter and over events work. `dblclick` sends two presses and releases at one point, so `detail` is 2 and `dblclick` fires.
+- `check` and `uncheck` click only when the state differs, then read the state again. A radio cannot be unchecked: the step fails with `not_checked`.
+- `select` matches an option by label first, then by value. A disabled option never matches. A native list is not drawn, so no pointer moves: the engine sets the selectedness, then fires `input` and `change` (as `Page::select`). They fire only when the selection changed, as for a user. A multiple select takes several values.
+- The snapshot shows the selected label of a `<select>` as its value: `combobox "Country" = "Kenya"`. A multiple select shows the labels, joined with a comma.
+- `upload` sets the files of an `<input type=file>` from local paths and fires `input` and `change`. The engine keeps only the paths, with the name and the time. It reads the bytes when a script reads `input.files` or a form submits. A file over 100 MiB is refused when set and when read. A hidden input needs a `css=` locator, because the other locators skip hidden elements.
+- Script cannot set files, as in other browsers. `input.files` is an array of `File` objects, not a `FileList`. `new FormData(form)` and a form with `enctype="multipart/form-data"` send the real files. A `POST` with that enctype is no longer `Unsupported`; `text/plain` still is.
+- A file is read into memory as a `Blob`. A big upload costs its size in memory while it is sent. Streaming from disk needs a body type in `bare-net` that is not a byte vector, so it is not built.
+## Downloads go to disk in bare-mcp sessions (2026-11-12)
+
+An agent must fetch files for a user: a CSV export, a PDF invoice, a ZIP. A browser saves these. bare showed them as a failed load.
+
+- A response is a download when it has `Content-Disposition: attachment`, or a type that bare does not show. bare shows HTML, text, JSON, XML, JavaScript and images. A link with a `download` attribute is always a download, also for a `blob:` or `data:` URL that a script made.
+- A download does not replace the page. The session saves the body in the downloads folder (`downloads_dir` of `open`, default `<temp>/bare-mcp-<pid>-downloads/`).
+- The body streams in 64 KiB pieces, so the memory stays flat. A download over 1 GiB fails and its file is removed.
+- The name comes from `Content-Disposition` (`filename*` first), then the `download` attribute, then the last path segment. It has no path separator and no leading dot. A name that exists gets ` (1)`, ` (2)`, and so on. A file is never replaced.
+- Only a session that has a `Downloads` list saves. Any other session keeps the old behavior, so `bare` and `bare-drive` do not change.
+- `act` adds `downloaded: PATH (BYTES bytes, MIME)` for each download that ended, and waits for a download that started in the action, up to the step time limit. A failure shows as `download failed: URL: reason`. The tool `downloads` lists the session's downloads.
+- `a.download` now reflects the attribute, and `a.click()` on a link with `download` saves the target. Before, `a.click()` on any link was refused. That refusal stays for links without `download`.
+- `blob:` and `data:` bytes are read in the document that made them, because the Blob store lives there. The save runs in the session.
+## Snapshot cut line and quiet settle (2026-11-12)
+A snapshot over its budget now says what it cut: the line count and the first and last ref of the cut lines, for example `… 412 lines cut (e158–e2096); use … offset=57 …`. Refs of cut lines stay valid, so `find`, `read ref` and `snapshot root=` reach them. `snapshot` takes an `offset` (in outline lines) to page forward through the cut part.
+`settle` before `snapshot`, `find`, `read` and `links` returned only when a 4 ms network or picture poll was over, so a page with a picture on its way cost the 300 ms cap on each call. It now returns when no task ran, no timer is due within 20 ms and no `fetch` is open. A picture on its way is not work for a read.
+## Stable roles and names for `find` and `snapshot` (2026-11-12)
+
+A script can set a role after a reply, as a typeahead widget does. A read taken before the reply showed the old role. A read now waits up to 2 s while a request is pending, and 300 ms otherwise. It stops at once when the page is quiet.
+
+`find` lists the matches that have a box of a size first. A field with no size stays in the list after them.
+
+A form control with no name takes one from what sits before it, after the standard sources. The order is the text of the table cell before its cell, the text or inline element just before it, then its `name` attribute. The code reads siblings only, so it scans no tree.
+## Act checks the focus and press takes a ref (2026-11-12)
+A page script can move the focus while the driver types. The keys then went to another field, and the receipt said ok. Now `type` checks the focus before and after each key. It fails with `focus_lost` and names the field that has the focus. A text with a line feed is not checked, because Enter can remove the field.
+`press` ignored its ref and sent the key to the focused element. Now `press LOC KEY` gives the element the focus first. It fails with `hidden`, `disabled` or `no_focus` when it cannot. Enter in a form field then submits the form.
+A key that changes nothing now says `no effect`. The driver compares the document, the URL and the revision of the tree before and after the key.
+## `open` waits until the page is ready (2026-11-12)
+
+- The MCP server sets `Session::ready_wait`. Then `open`, `goto` and `reload` end when the document has loaded and no request, script or due task waits, or at `timeout_ms`. A step file keeps the old rule: these steps return at once, and the next step waits.
+- Open event streams and timers that are not due do not count as work. A page with a stream must not wait for the whole limit.
+- The page is ready only when it also shows content: text, a control or a picture, in the page or in a shadow tree. An empty page that nothing can change ends the wait at once. Otherwise the wait runs to the limit.
+- At the limit the receipt says so: `not ready: body empty after 8000 ms, 3 requests pending`. A page that stopped for good (a fatal script error) ends the wait with a note too.
+- A live session keeps the document of an HTTP error status. The `open` step fails with `status 403: URL (title "T"): text excerpt`, and the session stays open, so the agent can snapshot it. A batch session (`live` off) still fails the load.
+- `open` reports `redirected: URL` when the final address differs from the requested one. It is a tool error when the step fails.
+- Receipts show full URLs. Only the value of a query parameter whose name has `token`, `key`, `code`, `password`, `secret`, `auth`, `session` or `sig` is hidden. The fragment is still dropped.
+- `file://` is not supported: a live `open` of a URL that is not http(s) fails at once with `the URL is not an http(s) URL` (bare#381). A `file` scheme in `bare-url` touches every `match` on `Scheme` in 13 files, and sub-resources would need a loader too.
+## Dialogs, tabs, storage and history for agents (2026-11-12)
+The agent answers dialogs up front. `act` takes `dialog` (accept or dismiss, default accept) and `prompt_text`. The engine answers `alert`, `confirm` and `prompt` at once and never blocks. The receipt lists each one: `dialog: confirm "Delete item?" -> dismissed`.
+The dialog code lives in `crates/bare/src/agent.rs`, as a per-thread policy and event queue. Without a driver the old results stay: `alert` does nothing, `confirm` gives false, `prompt` gives null.
+`beforeunload` needs no entry. No navigation of the engine dispatches it, so it cannot block.
+A click on a `target=_blank` link, and `window.open(url)`, open a new session named `main~2`, `main~3` and so on. It copies the cookies and storage of the opener. The receipt says `opened tab: main~2 URL`. The opener stays on its page. `window.open` still gives `null`: the page gets no window object.
+The `storage` tool reads, sets and clears cookies, `localStorage` and `sessionStorage`. Known secrets show as `[secret]`.
+`back` and `forward` are step lines and `act` ops. `close` and `sessions` already handled named sessions.
+`act` no longer reports `navigated` when the page had no document before the action.
+## Small replies for agents (2026-11-12)
+
+Each character of a `bare-mcp` reply costs model tokens. A reply must give what the agent needs and no more.
+
+- `act` gives the lines that changed since the last snapshot (marked `*`) and the lines that hold them, not the whole outline. After a navigation, or with `diff: false`, it gives the whole outline. With no change it says `no change`.
+- `*` now also marks an element whose name, value or state changed.
+- A link line in `snapshot` shows its `href` only when the link has no name. `links` lists all URLs. This halves the size of link-heavy pages.
+- A `clickable` that holds other lines drops its own copy of their text. It keeps its ref.
+- `links` and the `href` in a line cut tracking parameters (`utm_*`, `fbclid`, `gclid` and similar). `links` gives a path for a link on the origin of the page.
+- Each interactive element keeps its line and ref. The set of interactive lines of each test page is the same before and after.
+- Nothing collapses a long list. A list of links is a list of controls, and each control must stay reachable. The `max_chars` cut still applies.

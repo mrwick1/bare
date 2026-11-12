@@ -16,6 +16,7 @@
 use crate::locate::{self, Locator};
 use crate::steps::{Action, Check, CookieState, State, Step};
 use bare::control::{Handle, Log, Refusal, Remote, Ticks};
+pub use bare::agent::Event;
 pub use bare::page::StorageState;
 use bare::page::Page;
 use bare_paint::canvas::Canvas;
@@ -101,22 +102,22 @@ enum Host {
 impl Host {
     /// An `open` is a new tab of one browser, in a window too: empty storage, and the connections and the HTTP cache of `net`.
     /// `state`: the saved session to start from (`None`: empty storage).
-    fn open(&mut self, url: &str, size: (u32, u32), window: bool, net: &bare_net::http::Client, state: Option<StorageState>) -> Result<(), String> {
+    fn open(&mut self, url: &str, size: (u32, u32), window: bool, net: &bare_net::http::Client, state: Option<StorageState>, downloads: Option<bare::Downloads>) -> Result<(), String> {
         match self {
             // The new page takes the size of the window, not `size`: the compositor can have resized the window, and the window loop
             // calls `resize` only when the window size changes.
             Host::Window(r) => {
                 let (url, net) = (url.to_string(), net.fork());
-                r.call(move |p| p.reopen_in_with(&url, &net, state.as_ref()))?
+                r.call(move |p| p.reopen_in_with(&url, &net, state.as_ref(), downloads))?
             }
             _ if window => {
-                *self = Host::Window(Remote::open_with(url, size, net, state)?);
+                *self = Host::Window(Remote::open_with(url, size, net, state, downloads)?);
                 Ok(())
             }
             _ => {
                 // The old page ends first, so the two pages do not share the peak of memory. A failed open leaves no page.
                 *self = Host::None;
-                let mut p = Page::open_in_with(url, size, net, state.as_ref())?;
+                let mut p = Page::open_in_with(url, size, net, state.as_ref(), downloads)?;
                 p.quiet = true;
                 *self = Host::Local(Box::new(p));
                 Ok(())
@@ -173,7 +174,7 @@ struct Memo {
     typed: Vec<String>,
     /// The keys of the `type` step of now that are not sent yet, the last first. One goes in each try, so the tasks of the page run
     /// between two keys.
-    keys: Option<Vec<char>>,
+    keys: Option<(Handle, Vec<char>)>,
     /// The refs that snapshots minted for the document of now.
     refs: crate::snap::Refs,
 }
@@ -235,6 +236,12 @@ pub struct Session {
     start: Instant,
     // A session for the next `open` that has no state file (see `preload`).
     preload: Option<StorageState>,
+    /// The last console entries and network records, kept after `drain` (the `console`, `network` and `diagnose` tools read it).
+    pub hist: crate::diag::History,
+    /// Where this session saves downloads (`set_downloads`).
+    downloads: Option<bare::Downloads>,
+    /// An `open`, `goto` or `reload` ends when the page is ready (or at the time limit), not at once. Off for a step file: its next step waits.
+    pub ready_wait: bool,
     pub rep: Report,
 }
 
@@ -243,7 +250,12 @@ impl Session {
         bare_net::trace::enable();
         let _ = bare_net::trace::take();
         let rep = Report { ok: true, steps: Vec::new(), failure: None, logs: Vec::new(), net: Vec::new(), ms: 0.0, window: opt.window, ticks: Ticks::default(), cookies: Vec::new() };
-        Session { host: Host::None, net: bare_net::http::Client::new(), memo: Memo::default(), timeout: opt.timeout, window_cpu: 0, nav_first: 0, start: Instant::now(), preload: None, rep }
+        Session { host: Host::None, net: bare_net::http::Client::new(), memo: Memo::default(), timeout: opt.timeout, window_cpu: 0, nav_first: 0, start: Instant::now(), preload: None, hist: Default::default(), downloads: None, ready_wait: false, rep }
+    }
+
+    /// Save the downloads of the pages that later `open` steps make in `d`.
+    pub fn set_downloads(&mut self, d: bare::Downloads) {
+        self.downloads = Some(d);
     }
 
     /// Make the next `open` step that has no state file start from `st`.
@@ -256,11 +268,13 @@ impl Session {
         let mut m = std::mem::take(&mut self.memo);
         let r = self.host.run(move |p| {
             let r = f(p, &mut m.refs);
-            (m, r)
+            (m, r, p.take_logs())
         });
         match r {
-            Ok((m, r)) => {
+            Ok((m, r, logs)) => {
                 self.memo = m;
+                // What the read made the page log, and the requests since the last step, belong to the history and not to a step report.
+                self.hist.feed(logs, bare_net::trace::take());
                 Ok(r)
             }
             Err(e) => Err(e),
@@ -316,6 +330,54 @@ impl Session {
         })?
     }
 
+    /// The page facts for `diag::report`, after a tick that collects what arrived.
+    pub fn diagnose(&mut self, red: &Redactor) -> Result<String, String> {
+        let f = self.with_refs(|p, _| {
+            crate::snap::settle(p);
+            let cpu = thread_cpu_ns();
+            let (nodes, shown) = crate::snap::size(p).unwrap_or((0, 0));
+            crate::diag::Facts { url: p.url().unwrap_or_default(), load_error: p.load_error().map(str::to_string), stopped: p.stopped(), nodes, shown, cpu_ms: cpu as f64 / 1e6 }
+        })?;
+        // The logs that the tick made are in the history after `with_refs`: read the report from it now.
+        Ok(crate::diag::report(&self.hist, &f, &|s| red.clean(s)))
+    }
+
+    /// Collect what the page logged and requested since the last call (a tick), into the history.
+    pub fn collect(&mut self) -> Result<(), String> {
+        self.with_refs(|p, _| {
+            let _ = p.tick();
+        })
+    }
+
+    /// Answer the dialogs of the next actions (`bare::agent`). `events` ends it.
+    pub fn set_dialog(&mut self, accept: bool, text: Option<String>) {
+        let _ = self.host.run(move |_| bare::agent::set_policy(accept, text));
+    }
+
+    /// The dialogs and the tab requests since `set_dialog`, and no dialog policy after it.
+    pub fn events(&mut self) -> Vec<bare::agent::Event> {
+        self.host.run(|_| bare::agent::take()).unwrap_or_default()
+    }
+
+    /// Remove the cookie `name` (all its domains and paths), or every cookie of the jar. Gives how many cookies it removed.
+    pub fn clear_cookies(&mut self, name: Option<String>) -> Result<usize, String> {
+        self.host.run(move |p| {
+            let jar = p.storage().ok_or("the page has no session")?.jar();
+            let mut j = jar.lock().unwrap_or_else(|e| e.into_inner());
+            let hit: Vec<_> = j.list().into_iter().filter(|c| name.as_ref().is_none_or(|n| *n == c.name)).map(|c| (c.name.clone(), c.domain.clone(), c.host_only, c.path.clone())).collect();
+            if name.is_none() {
+                j.clear();
+            }
+            for (n, d, host_only, path) in &hit {
+                let text = format!("{n}=; Path={path}; Max-Age=0{}", if *host_only { String::new() } else { format!("; Domain={d}") });
+                let at = bare_net::cookie::At { secure: true, host: d, path };
+                let now = j.now();
+                j.set(&at, &text, bare_net::cookie::Via::Http { third: false }, now);
+            }
+            Ok(hit.len())
+        })?
+    }
+
     /// The URL of the page of now.
     pub fn url(&mut self) -> Option<String> {
         self.host.run(|p| p.url()).ok().flatten()
@@ -328,12 +390,15 @@ impl Session {
 
     /// Run one step, and add its result to `rep`. False when it failed (`rep.failure` says why).
     pub fn step(&mut self, step: &Step, opt: &Options, red: &mut Redactor) -> bool {
-        let Session { host, net, memo, timeout, window_cpu, nav_first, rep, preload, .. } = self;
+        let Session { host, net, memo, timeout, window_cpu, nav_first, rep, preload, hist, downloads, ready_wait, .. } = self;
     let t0 = Instant::now();
     let deadline = t0 + *timeout;
     let (mut tries, mut busy, mut waited, mut ticks) = (0u32, Duration::ZERO, Duration::ZERO, Ticks::default());
+    // With `ready_wait`, an `open`, `goto` or `reload` waits until the page is ready (`ready`); `calm` counts the looks that found it so.
+    let (mut navigating, mut calm) = (false, 0u8);
     let (cpu0, net0) = (thread_cpu_ns(), bare_net::trace::blocked_us());
-    if matches!(step.action, Action::Open(..) | Action::Goto(_) | Action::Reload) {
+    let (log0, net_at) = (rep.logs.len(), rep.net.len());
+    if matches!(step.action, Action::Open(..) | Action::Goto(_) | Action::Reload | Action::Back | Action::Forward) {
         *nav_first = rep.net.len();
     }
     let result: Result<Option<String>, Fail> = loop {
@@ -344,16 +409,66 @@ impl Session {
                 *timeout = Duration::from_millis(*ms);
                 break Ok(None);
             }
+            _ if navigating => {
+                let at_end = Instant::now() >= deadline;
+                match host.run(move |p| ready(p, at_end)) {
+                    Ok(r) => {
+                        let ms = t0.elapsed().as_millis();
+                        let now = Instant::now();
+                        let soon = now + Duration::from_millis(5);
+                        let pending = |n: usize| format!("{n} request{} pending", if n == 1 { "" } else { "s" });
+                        let state = match (r.fail, r.idle) {
+                            (Some(f), _) => Err(f),
+                            (None, Ok(())) if r.status >= 400 => Err(fail("page", format!("status {}: {} (title {:?}): {}", r.status, r.url, r.title, r.text))),
+                            (None, idle) => Ok(idle),
+                        };
+                        let done = match state {
+                            Err(f) => Some(Err(f)),
+                            Ok(_) if r.stopped.is_some() => Some(Ok(Some(format!("not ready: the page stopped after {ms} ms ({}), body {}", r.stopped.as_deref().unwrap_or(""), if r.text.is_empty() { "empty" } else { "has content" })))),
+                            Ok(Ok(())) if !r.text.is_empty() => {
+                                calm = if r.ran { 0 } else { calm + 1 };
+                                (calm >= 2).then_some(Ok(None))
+                            }
+                            // Empty and nothing can change it: no task, no request, no timer.
+                            Ok(Ok(())) if !r.ran && r.next.is_none() => Some(Ok(Some(format!("not ready: body empty after {ms} ms, {}", pending(0))))),
+                            Ok(idle) => {
+                                calm = 0;
+                                let n = idle.err().unwrap_or(0);
+                                at_end.then(|| Ok(Some(format!("not ready: {} after {ms} ms, {}", if r.text.is_empty() { "body empty" } else { "still loading" }, pending(n)))))
+                            }
+                        };
+                        match done {
+                            Some(Ok(note)) => break Ok(note),
+                            Some(Err(f)) => break Err(f),
+                            None => {
+                                rep.logs.extend(r.logs.into_iter().map(|l| (step.line, l)));
+                                (Try::Again(fail("page", "not ready")), (r.ran, Some(r.next.filter(|n| *n < soon).unwrap_or(soon))))
+                            }
+                        }
+                    }
+                    Err(e) => break Err(fail("page", e)),
+                }
+            }
             Action::Open(url, file) => {
                 memo.seen.clear();
                 let from = file.as_deref().map(crate::state::read).transpose().map(|st| st.or_else(|| preload.take()));
-                let opened = from.and_then(|st| host.open(url, opt.size, opt.window, net, st)).and_then(|_| host.run(|p| p.take_logs()));
+                let opened = from.and_then(|st| host.open(url, opt.size, opt.window, net, st, downloads.clone())).and_then(|_| host.run(|p| p.take_logs()));
                 let d = t.elapsed();
                 busy += d;
                 if !opt.window {
                     ticks.add(d);
                 }
-                break opened.map(|logs| rep.logs.extend(logs.into_iter().map(|l| (step.line, l)))).map(|_| None).map_err(|e| fail("page", e));
+                match opened {
+                    Ok(logs) => {
+                        rep.logs.extend(logs.into_iter().map(|l| (step.line, l)));
+                        if !*ready_wait {
+                            break Ok(None);
+                        }
+                        navigating = true;
+                        continue;
+                    }
+                    Err(e) => break Err(fail("page", e)),
+                }
             }
             a => {
                 let (a, mut m) = (a.clone(), std::mem::take(memo));
@@ -390,6 +505,7 @@ impl Session {
             ticks.add(d);
         }
         match tried {
+            Try::Done(_) if *ready_wait && matches!(step.action, Action::Goto(_) | Action::Reload) => navigating = true,
             Try::Done(note) => break Ok(note),
             Try::More => {}
             Try::Stop(f) => break Err(f),
@@ -402,7 +518,8 @@ impl Session {
                         break Err(Fail { message: format!("{} (the page is idle: no task is queued, so nothing can change it)", f.message), ..f });
                     }
                 };
-                if now >= deadline {
+                // A navigation ends its wait by itself at the limit, with a note and not a failure.
+                if now >= deadline && !navigating {
                     break Err(Fail { message: format!("{} (time limit {} ms)", f.message, timeout.as_millis()), ..f });
                 }
                 host.sleep(seen, next.min(deadline));
@@ -421,6 +538,7 @@ impl Session {
     rep.ticks.merge(ticks);
     let first = rep.net.len();
     rep.net.extend(bare_net::trace::take().into_iter().map(|r| (step.line, r)));
+    hist.feed(rep.logs[log0..].iter().map(|(_, l)| l.clone()), rep.net[net_at..].iter().map(|(_, r)| r.clone()));
     // A failed step names the network failures of this step, and of the document that loads since the last `open`, `goto` or
     // `reload`: the page only sees `Failed to fetch`.
     let result = result.map_err(|f| {
@@ -579,13 +697,19 @@ fn shown(p: &mut Page, red: &Redactor) -> bool {
     .unwrap_or(true)
 }
 
-/// The URL for a message: no fragment, and the values of the query hidden (a query can hold a token).
+/// The URL for a message: no fragment (it can hold a token), and the value of a query parameter hidden when its name looks secret.
 pub fn safe_url(u: &str) -> String {
     let u = u.split('#').next().unwrap_or("");
-    match u.split_once('?') {
-        Some((path, q)) => format!("{path}?{}", q.split('&').map(|kv| kv.split('=').next().unwrap_or("").to_string() + "=…").collect::<Vec<_>>().join("&")),
-        None => u.to_string(),
-    }
+    let Some((path, q)) = u.split_once('?') else { return u.to_string() };
+    let secret = |k: &str| {
+        let k = k.to_ascii_lowercase();
+        ["token", "key", "code", "password", "secret", "auth", "session", "sig"].iter().any(|w| k.contains(w))
+    };
+    let pairs: Vec<String> = q.split('&').map(|kv| match kv.split_once('=') {
+        Some((k, _)) if secret(k) => format!("{k}=…"),
+        _ => kv.to_string(),
+    }).collect();
+    format!("{path}?{}", pairs.join("&"))
 }
 
 fn short(s: &str) -> String {
@@ -641,7 +765,49 @@ fn refused(p: &mut Page, h: Handle, r: Refusal) -> Try {
         Refusal::NotEditable => Try::Stop(fail("not_editable", format!("{what} is not a text field"))),
         Refusal::NoFocus => Try::Stop(fail("no_focus", format!("{what} did not take the focus after the click"))),
         Refusal::NoPage(e) => Try::Again(fail("page", e)),
+        Refusal::Wrong(kind, why) => Try::Stop(fail(kind, why)),
     }
+}
+
+/// What one look at a page that a navigation started tells.
+struct Look {
+    /// A task ran in this look; when the next one is due.
+    ran: bool,
+    next: Option<Instant>,
+    /// `Ok`: loaded, and nothing waits. `Err`: the requests that wait.
+    idle: Result<(), usize>,
+    /// The document did not load, or the page stopped.
+    fail: Option<Fail>,
+    /// Why the page stopped for good (a script made a fatal error), if it did: it cannot get ready any more.
+    stopped: Option<String>,
+    status: u16,
+    url: String,
+    title: String,
+    /// The text of the body (a mark for a control or a picture), up to about 200 characters. Only read when the page is idle or `at_end`.
+    text: String,
+    logs: Vec<Log>,
+}
+
+/// The text of the page for a person: no script, no style, and the shadow trees of components. A control or a picture counts as content.
+const BODY_TEXT: &str = "(function(){var o=[],n=0;(function f(e){for(var c=e.firstChild;c&&n<200;c=c.nextSibling){if(c.nodeType==3){var t=c.data.replace(/\\s+/g,' ').trim();if(t){o.push(t);n+=t.length}}else if(c.nodeType==1){var g=c.localName;if(g=='script'||g=='style'||g=='noscript'||g=='template')continue;if(/^(img|input|textarea|select|button|canvas|svg|video|iframe)$/.test(g)){o.push('['+g+']');n+=5}f(c);if(c.shadowRoot)f(c.shadowRoot)}}})(document.body||document.documentElement);return o.join(' ')})()";
+
+/// One look: run the tasks that are due, then ask if the page is ready.
+fn ready(p: &mut Page, at_end: bool) -> Look {
+    let (ran, next) = p.tick();
+    let idle = p.idle();
+    let fail = p.load_error().map(|why| fail("page", format!("the document did not load: {why}")));
+    let stopped = p.stopped();
+    let (status, url) = (p.http_status(), p.url().unwrap_or_default());
+    let (mut title, mut text) = (String::new(), String::new());
+    if idle.is_ok() || at_end || stopped.is_some() {
+        title = locate::title(p).unwrap_or_default();
+        text = match p.browser().map(|b| b.run_script(BODY_TEXT).map(|v| b.it.display(v))) {
+            Some(Ok(t)) => locate::norm(&t),
+            _ => String::new(),
+        };
+        p.touched();
+    }
+    Look { ran, next, idle, fail, stopped, status, url: safe_url(&url), title: locate::norm(&title), text, logs: p.take_logs() }
 }
 
 /// One try of a step, on the page thread.
@@ -650,6 +816,8 @@ fn attempt(p: &mut Page, m: &mut Memo, a: &Action, out: Option<&PathBuf>, red: &
         match a {
             Action::Goto(url) => p.navigate(Some(url)).map_err(|e| Try::Stop(fail("page", e)))?,
             Action::Reload => p.navigate(None).map_err(|e| Try::Stop(fail("page", e)))?,
+            Action::Back => p.go(-1).map_err(|e| Try::Stop(fail("page", e)))?,
+            Action::Forward => p.go(1).map_err(|e| Try::Stop(fail("page", e)))?,
             Action::Click(loc) => {
                 let h = one(p, m, loc)?;
                 p.click(h).map_err(|r| refused(p, h, r))?;
@@ -661,11 +829,27 @@ fn attempt(p: &mut Page, m: &mut Memo, a: &Action, out: Option<&PathBuf>, red: &
                         m.typed.push(text.clone());
                     }
                     p.type_start(h, text.is_empty()).map_err(|r| refused(p, h, r))?;
-                    m.keys = Some(text.chars().rev().collect());
+                    m.keys = Some((h, text.chars().rev().collect()));
                 }
-                let keys = m.keys.as_mut().expect("set");
+                let (h, keys) = m.keys.as_mut().expect("set");
+                let h = *h;
+                // A page script can hand the focus to another field: the keys would go there. Stop, and say where the text went.
+                let lost = |p: &mut Page, done: bool| {
+                    let now = p.active().map_or_else(|| "nothing".to_string(), |a| p.describe(a));
+                    Try::Stop(fail("focus_lost", format!("{} lost the focus to {now} {}: the text is not all in it", p.describe(h), if done { "while it was typed" } else { "before the next key" })))
+                };
+                // A line feed is Enter: it can submit the form and take the field away, so a text with one is not checked.
+                let watch = !text.contains('\n');
+                if watch && !p.focused(h) {
+                    m.keys = None;
+                    return Err(lost(p, false));
+                }
                 if let Some(c) = keys.pop() {
                     p.type_char(c);
+                }
+                if watch && !p.focused(h) {
+                    m.keys = None;
+                    return Err(lost(p, true));
                 }
                 if !keys.is_empty() {
                     return Err(Try::More);
@@ -673,7 +857,38 @@ fn attempt(p: &mut Page, m: &mut Memo, a: &Action, out: Option<&PathBuf>, red: &
                 m.keys = None;
                 p.after_action();
             }
-            Action::Press(key) => p.press(key).map_err(|e| Try::Stop(fail("not_found", e)))?,
+            Action::Select(loc, wanted) => {
+                let h = one(p, m, loc)?;
+                p.select(h, wanted).map_err(|r| refused(p, h, r))?;
+            }
+            Action::Check(loc, on) => {
+                let h = one(p, m, loc)?;
+                p.set_checked(h, *on).map_err(|r| refused(p, h, r))?;
+            }
+            Action::Hover(loc) => {
+                let h = one(p, m, loc)?;
+                p.hover(h).map_err(|r| refused(p, h, r))?;
+            }
+            Action::DblClick(loc) => {
+                let h = one(p, m, loc)?;
+                p.dblclick(h).map_err(|r| refused(p, h, r))?;
+            }
+            Action::Upload(loc, paths) => {
+                let h = one(p, m, loc)?;
+                p.upload(h, paths).map_err(|r| refused(p, h, r))?;
+            }
+            Action::Press(loc, key) => {
+                let h = loc.as_ref().map(|l| one(p, m, l)).transpose()?;
+                if let Some(h) = h {
+                    p.focus(h).map_err(|r| refused(p, h, r))?;
+                }
+                let before = (p.generation(), p.url(), p.revision());
+                p.press(key).map_err(|e| Try::Stop(fail("not_found", e)))?;
+                // A page that took the key changed (its tree, a field, the focus) or began to load another one.
+                if (p.generation(), p.url(), p.revision()) == before && !p.loading() {
+                    return Ok(Some(format!("no effect: {key} changed nothing{}", h.map_or_else(String::new, |h| format!(" at {}", p.describe(h))))));
+                }
+            }
             Action::Scroll(loc, dy) => {
                 let h = loc.as_ref().map(|l| one(p, m, l)).transpose()?;
                 if !p.wheel(h, 0.0, *dy).map_err(|r| refused(p, h.expect("a refusal is about an element"), r))? {
@@ -958,6 +1173,6 @@ mod tests {
         r.add("Ünï");
         assert_eq!(r.clean("x Ünï y ünï"), "x [secret] y ünï");
         assert_eq!(Redactor::default().clean("a"), "a");
-        assert_eq!(safe_url("http://a.test/x?q=s3cr3t&b=2#t"), "http://a.test/x?q=…&b=…");
+        assert_eq!(safe_url("http://a.test/x?token=s3cr3t&b=2&Auth_Key=z#t"), "http://a.test/x?token=…&b=2&Auth_Key=…");
     }
 }

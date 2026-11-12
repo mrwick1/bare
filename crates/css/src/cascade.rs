@@ -1981,7 +1981,7 @@ impl Change {
     pub fn paint_only(p: Property, a: Value, b: Value, display: Value) -> bool {
         use Property::*;
         match p {
-            TextColor | BorderTopColor | BorderRightColor | BorderBottomColor | BorderLeftColor | TextDecoration | Opacity | ZIndex | Visibility | PointerEvents | Fill | Stroke
+            TextColor | BorderTopColor | BorderRightColor | BorderBottomColor | BorderLeftColor | TextDecoration | Opacity | ZIndex | Visibility | PointerEvents | Cursor | Fill | Stroke
             | BorderTopLeftRadius | BorderTopRightRadius | BorderBottomRightRadius | BorderBottomLeftRadius => true,
             BackgroundColor => display != Value::Keyword(Keyword::Inline) || matches!((a, b), (Value::Color(x), Value::Color(y)) if (x.a == 0) == (y.a == 0)),
             _ => false,
@@ -2225,7 +2225,7 @@ fn initial(p: Property) -> Value {
         Stroke => Value::Keyword(K::None),
         Opacity => Value::Number(1.0),
         Appearance => Value::Keyword(K::None),
-        PointerEvents => Value::Keyword(K::Auto),
+        PointerEvents | Cursor => Value::Keyword(K::Auto),
         BorderTopLeftRadius | BorderTopRightRadius | BorderBottomRightRadius | BorderBottomLeftRadius => px(0.0),
         BorderSpacingH | BorderSpacingV => px(0.0),
         TranslateX | TranslateY => px(0.0),
@@ -2239,7 +2239,7 @@ fn initial(p: Property) -> Value {
 /// Does a child take the value of the parent when it has no value of its own?
 pub const fn inherited(p: Property) -> bool {
     use Property::*;
-    matches!(p, TextColor | FontSize | FontWeight | FontStyle | LineHeight | LetterSpacing | WordSpacing | TextAlign | TextTransform | WhiteSpace | ListStyleType | Visibility | PointerEvents | Fill | Stroke | BorderCollapse | BorderSpacingH | BorderSpacingV | CaptionSide | Direction)
+    matches!(p, TextColor | FontSize | FontWeight | FontStyle | LineHeight | LetterSpacing | WordSpacing | TextAlign | TextTransform | WhiteSpace | ListStyleType | Visibility | PointerEvents | Cursor | Fill | Stroke | BorderCollapse | BorderSpacingH | BorderSpacingV | CaptionSide | Direction)
 }
 
 /// The properties that `inherited` names, as bits.

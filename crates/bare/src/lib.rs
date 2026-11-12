@@ -24,6 +24,7 @@ pub mod browser_ui;
 mod browser_drive;
 mod browser_point;
 mod browser_uievent;
+pub mod agent;
 pub mod page;
 mod images;
 pub mod control;
@@ -141,6 +142,8 @@ mod browser_shims;
 mod browser_gaps;
 pub use browser_loader::{CssStats, Fatal, Input, Intercept, NavStop, PageConfig, PageLimits, PageResult, Stop};
 pub mod browser_session;
+pub mod downloads;
+pub use downloads::{Download, DownloadState, Downloads};
 #[cfg(test)]
 mod browser_session_tests;
 #[cfg(test)]

@@ -26,6 +26,11 @@ pub fn serve_app() -> String {
     serve_with(app)
 }
 
+/// Start a server with the routes of a test. A status 301 to 308 sends the body as the `Location` header.
+pub fn serve_route(route: Route) -> String {
+    serve_with(route)
+}
+
 fn serve_with(route: Route) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -65,7 +70,8 @@ fn connection(mut s: TcpStream, route: Route) {
         let mut words = head.split_whitespace();
         let (method, target) = (words.next().unwrap_or(""), words.next().unwrap_or("/"));
         let (status, kind, out) = route(method, target, &body, header("authorization").as_deref());
-        let head = format!("HTTP/1.1 {status} X\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nCache-Control: no-store\r\n\r\n", out.len());
+        let location = if (301..=308).contains(&status) { format!("Location: {}\r\n", String::from_utf8_lossy(&out)) } else { String::new() };
+        let head = format!("HTTP/1.1 {status} X\r\nContent-Type: {kind}\r\nContent-Length: {}\r\n{location}Cache-Control: no-store\r\n\r\n", out.len());
         if s.write_all(head.as_bytes()).and_then(|_| s.write_all(&out)).is_err() {
             return;
         }
@@ -76,9 +82,62 @@ fn pages(method: &str, target: &str, body: &str, auth: Option<&str>) -> (u16, &'
     let path = target.split('?').next().unwrap_or("/");
     match (path, target.split_once("?n=")) {
         ("/buttons", Some((_, n))) => (200, "text/html", buttons(n.parse().unwrap_or(1))),
+        ("/forms", _) => (200, "text/html", FORMS.as_bytes().to_vec()),
+        ("/upload", _) if method == "POST" => (200, "text/plain", upload_echo(body).into_bytes()),
+        ("/downloads", _) => (200, "text/html", DOWNLOADS_PAGE.as_bytes().to_vec()),
+        // The content type may carry one more header: the server writes it as it is.
+        ("/files/report.csv", _) => (200, "text/csv\r\nContent-Disposition: attachment; filename=\"report.csv\"", PAYLOAD_CSV.to_vec()),
+        ("/files/invoice.pdf", _) => (200, "application/pdf", PAYLOAD_PDF.to_vec()),
+        ("/files/notes.txt", _) => (200, "text/plain", b"plain notes".to_vec()),
         _ => reply(method, path, body, auth),
     }
 }
+
+/// A page of form controls for the form actions: two selects, a checkbox, a hover menu, a double click, and a file input with a
+/// submitted form and a `fetch` with `FormData`.
+const FORMS: &str = "<!DOCTYPE html><title>Forms</title>\
+<style>#menu { display: none; position: absolute } #hv:hover #menu { display: block }</style>\
+<select id=country name=country aria-label=Country><option value=ke>Kenya</option><option value=tz>Tanzania</option></select>\
+<select id=fruit name=fruit multiple aria-label=Fruit><option value=a>Apple</option><option value=b>Banana</option><option value=c>Cherry</option></select>\
+<p id=events>events:</p>\
+<label><input type=checkbox id=agree> Agree</label>\
+<div id=hv>Hover target<span id=menu> Menu is open</span></div><p id=entered>cold</p>\
+<button id=dbl>Double target</button><p id=dbls>single</p>\
+<form method=post action=/upload enctype=multipart/form-data><input type=file name=doc aria-label=Document><button>Send file</button></form>\
+<button id=go>Fetch file</button><p id=fetched></p>\
+<script>\
+var ev = function (e) { document.getElementById('events').textContent += ' ' + e.target.id + ':' + e.type };\
+['country', 'fruit'].forEach(function (id) { ['input', 'change'].forEach(function (t) { document.getElementById(id).addEventListener(t, ev) }) });\
+document.getElementById('hv').addEventListener('mouseenter', function () { document.getElementById('entered').textContent = 'hot' });\
+document.getElementById('dbl').addEventListener('dblclick', function () { document.getElementById('dbls').textContent = 'double' });\
+document.getElementById('go').addEventListener('click', function () {\
+  var f = document.querySelector('input[type=file]').files[0], fd = new FormData();\
+  fd.append('doc', f); fd.append('note', 'hi');\
+  fetch('/upload', { method: 'POST', body: fd }).then(function (r) { return r.text() }).then(function (t) { document.getElementById('fetched').textContent = 'fetched ' + t });\
+});\
+</script>";
+
+/// The reply of `/upload`: the name and the size of each file part of a multipart body.
+fn upload_echo(body: &str) -> String {
+    let parts: Vec<String> = body
+        .split("\r\n--")
+        .filter_map(|p| {
+            let (head, content) = p.split_once("\r\n\r\n")?;
+            let name = head.split("filename=\"").nth(1)?.split('"').next()?;
+            Some(format!("{name} {}", content.len()))
+        })
+        .collect();
+    format!("uploaded: {}", parts.join("; "))
+}
+pub const PAYLOAD_CSV: &[u8] = b"id,name\n1,Alpha\n2,Beta\n";
+pub const PAYLOAD_PDF: &[u8] = b"%PDF-1.4\n\x00\xff\xfe binary body\n%%EOF\n";
+/// Links to an attachment, a PDF, a `download` link to a plain text file, and a button whose script downloads a Blob.
+const DOWNLOADS_PAGE: &str = "<!DOCTYPE html><title>Downloads</title>\
+<a href=\"/files/report.csv\">Report</a> <a href=\"/files/invoice.pdf\">Invoice</a> <a href=\"/files/notes.txt\" download=\"my notes.txt\">Notes</a>\
+<a href=\"/files/missing.zip\" download>Missing</a> <button id=b>Export</button>\
+<script>document.getElementById('b').addEventListener('click', function () {\
+var u = URL.createObjectURL(new Blob(['x,y\\n1,2\\n'], {type: 'text/csv'}));\
+var a = document.createElement('a'); a.href = u; a.download = '../export.csv'; a.click(); });</script>";
 
 /// A page of `n` buttons (`#b0`..), each named "Button K", and a text that a timer adds after 2 s (`#late`). For the cost example.
 fn buttons(n: usize) -> Vec<u8> {
