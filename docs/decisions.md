@@ -1488,3 +1488,11 @@ A `press` with a locator on the Wikipedia search failed as `detached`, and the p
 - `network` shows the pending requests at each call, marked `pending`. When one ends, its record shows once.
 - `diagnose` reports each item pending for 5 s or more.
 - A queued request shows `not sent` before its network turn, and `reply in` when its reply waits for its turn. Both say that the page thread is busy, not the network. GitHub showed this: its request waited 5.8 s to be sent and then took 302 ms.
+
+## `type` with the locator of a replaced field (2026-11-12)
+
+- A second `type` with the old locator of a swapped field failed as `detached` or `not_found`. Wikipedia swaps its search input for one with no `id`.
+- `type` now resolves its target with the rule of `press`. The old field left the document, and a text field has the focus. Then the keys go to that field.
+- Only `type` and `press` use the rule. They send keys, and a browser sends keys to the focused element.
+- `click`, `select`, `check`, `upload`, `hover` and `dblclick` keep the strict rule. A field that is gone makes them fail.
+- `type` still selects the old text and replaces it. So `type " programming"` after `type "Rust"` leaves " programming" in the field.

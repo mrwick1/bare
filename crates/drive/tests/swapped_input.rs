@@ -3,7 +3,7 @@
 //! `#later` swaps in a timer after the first key, as Wikipedia does when its widget has loaded, so the swap comes while the text is typed. In a browser the keys
 //! go to the focused field: typed text ends in the new input, and Enter submits it. `#ready` swaps on focus and holds a value, so a `press` with
 //! its locator focuses it and the page swaps it. `#bare` swaps after the first key into an input with no id, as the second swap of
-//! Wikipedia does, so the locator of the old field matches nothing. The server is on loopback.
+//! Wikipedia does, so the locator of the old field matches nothing: a `type` or `press` with it goes to the focused field. The server is on loopback.
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -83,4 +83,11 @@ fn press_with_the_locator_of_a_replaced_field_goes_to_the_new_focused_field() {
     // Swapped while typed, into a field that the locator no longer matches: the key goes to the focused field.
     let (code, out) = drive("bare", "timeout 30000\nopen ORIGIN/\ntype css=\"#bare\" \"rust\"\nexpect css=\"svg path\" count 1\npress css=\"#bare\" Enter\nexpect title=\"result rust\"\n");
     assert_eq!(code, 0, "bare: {out}");
+}
+
+#[test]
+fn type_with_the_locator_of_a_replaced_field_goes_to_the_new_focused_field() {
+    // `#bare` is swapped after the first key into an input with no id: the second `type` with the old locator types into the focused field.
+    let (code, out) = drive("bare-type", "timeout 30000\nopen ORIGIN/\ntype css=\"#bare\" \"rust\"\nexpect css=\"svg path\" count 1\ntype css=\"#bare\" \"go\"\npress Enter\nexpect title=\"result go\"\n");
+    assert_eq!(code, 0, "bare-type: {out}");
 }

@@ -874,7 +874,8 @@ fn one(p: &mut Page, m: &mut Memo, loc: &Locator) -> Result<Handle, Try> {
 }
 
 /// `one`, or the text field that has the focus when the element that `loc` named before left the document (`Page::replaced`). A page that
-/// swaps its search field (Wikipedia) leaves the old locator with no match; a person's keys go to the new field.
+/// swaps its search field (Wikipedia) leaves the old locator with no match; a person's keys go to the new field. Only for the steps that
+/// send keys (`type`, `press`): a click, a select, a check or an upload on a field that is gone must fail.
 fn one_or_replaced(p: &mut Page, m: &mut Memo, loc: &Locator) -> Result<Handle, Try> {
     let err = match one(p, m, loc) {
         Ok(h) => return Ok(h),
@@ -982,7 +983,8 @@ fn attempt(p: &mut Page, m: &mut Memo, a: &Action, out: Option<&PathBuf>, red: &
             }
             Action::Type(loc, text) => {
                 if m.keys.is_none() {
-                    let h = one(p, m, loc)?;
+                    // The page may have replaced the field after an earlier `type`: the keys go to the new focused field.
+                    let h = one_or_replaced(p, m, loc)?;
                     if p.is_password(h) {
                         m.typed.push(text.clone());
                     }
