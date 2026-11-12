@@ -346,9 +346,13 @@ fn an_agent_logs_in_with_snapshot_refs_and_no_step_lines() {
     let (r, error) = s.tool("act", json!({"op": "type", "ref": ref_of(&snap, "(password"), "text": "${PASSWORD}"}));
     let r = r.as_str().unwrap().to_string();
     assert!(!error && r.contains("= \"••••\""), "{r}");
-    let (r, error) = s.tool("act", json!({"op": "click", "ref": ref_of(&r, "button")}));
+    // Without a snapshot, the receipt still reports the navigation (#382).
+    let (r, error) = s.tool("act", json!({"op": "click", "ref": ref_of(&r, "button"), "snapshot": false}));
     let r = r.as_str().unwrap().to_string();
-    assert!(!error && r.contains("navigated:") && r.contains("link \"Agents\""), "{r}");
+    assert!(!error && r.contains("navigated:"), "{r}");
+    let (r, _) = s.tool("snapshot", json!({}));
+    let r = r.as_str().unwrap().to_string();
+    assert!(r.contains("link \"Agents\""), "{r}");
     // The login button of the old snapshot left the document (the app changed its route without a new document).
     let (r, error) = s.tool("act", json!({"op": "click", "ref": ref_of(&snap, "button")}));
     assert!(error && r.as_str().unwrap().contains("FAILED detached"), "{r}");

@@ -357,7 +357,13 @@ impl Server {
         let before = self.live_mut(args)?.session.url();
         let (receipt, ok) = self.run_live(&a, &line)?;
         let mut out = receipt;
-        let snap = if ok && args.get("snapshot").and_then(Value::as_bool) != Some(false) { Some(self.snapshot(args)?) } else { None };
+        let snap = if ok && args.get("snapshot").and_then(Value::as_bool) != Some(false) {
+            Some(self.snapshot(args)?)
+        } else {
+            // No snapshot waits for the page, so let a started navigation finish before the URL check (#382).
+            self.live_mut(args)?.session.with_refs(|p, _| snap::settle(p))?;
+            None
+        };
         // After the snapshot, which waits for the page: a click starts a navigation that ends later.
         let after = self.live_mut(args)?.session.url();
         if after != before {
