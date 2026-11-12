@@ -1226,3 +1226,11 @@ An agent such as `deck` must read a page and act on it in few model calls. Scree
 - `find`, `read` (paged text), `links`, `screenshot` (the page or one element, a path, and the image when asked), `eval` and `sessions` complete the set. Every reply goes through the redactor.
 - Each tool takes `session`. Sessions run side by side, one page each. `open` ends only the session of its name.
 - Step lines accept `ref=e7`, so a journey can mix refs and user locators.
+
+## Stable roles and names for `find` and `snapshot` (2026-11-12)
+
+A script can set a role after a reply, as a typeahead widget does. A read taken before the reply showed the old role. A read now waits up to 2 s while a request is pending, and 300 ms otherwise. It stops at once when the page is quiet.
+
+`find` lists the matches that have a box of a size first. A field with no size stays in the list after them.
+
+A form control with no name takes one from what sits before it, after the standard sources. The order is the text of the table cell before its cell, the text or inline element just before it, then its `name` attribute. The code reads siblings only, so it scans no tree.

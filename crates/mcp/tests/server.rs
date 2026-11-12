@@ -365,3 +365,74 @@ fn an_agent_logs_in_with_snapshot_refs_and_no_step_lines() {
     let (r, _) = s.tool("sessions", json!({}));
     assert!(r.as_str().unwrap().contains("main: ") && r.as_str().unwrap().contains("two: "), "{r}");
 }
+
+/// A page server with a slow route: `/slow` answers after 700 ms.
+fn naming_app() -> String {
+    use std::io::Read;
+    const PAGES: &[(&str, &str)] = &[
+        // A search box with no size comes first in the tree, and the visible one second.
+        ("/rank", "<!doctype html><body><input type=search aria-label=Zero style='width:0;height:0;padding:0;border:0'><input type=search aria-label=Main>"),
+        // A script gives the box the role `combobox` after a reply, as a typeahead widget does.
+        ("/flip", "<!doctype html><body><input type=search id=m aria-label=Flip><script>fetch('/slow').then(() => document.getElementById('m').setAttribute('role', 'combobox'))</script>"),
+        // The login page of a news site: the labels sit in the cell before the field.
+        ("/login", "<!doctype html><body><form><table><tr><td>username:</td><td><input type=text name=acct></td></tr><tr><td>password:</td><td><input type=password name=pw></td></tr></table>\
+            <p>Nickname <input name=nick></p><p><b>Age</b> <input name=age></p><div><input name=bare_name></div><input name=holder placeholder=Holder><input name=named aria-label=Named></form>"),
+    ];
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for mut c in listener.incoming().flatten() {
+            std::thread::spawn(move || {
+                let (mut head, mut b) = (Vec::new(), [0u8; 1]);
+                while !head.ends_with(b"\r\n\r\n") && c.read(&mut b).unwrap_or(0) == 1 {
+                    head.push(b[0]);
+                }
+                let head = String::from_utf8_lossy(&head).to_string();
+                let path = head.split_whitespace().nth(1).unwrap_or("/").to_string();
+                if path == "/slow" {
+                    std::thread::sleep(std::time::Duration::from_millis(700));
+                }
+                let body = PAGES.iter().find(|(p, _)| *p == path).map_or("ok", |(_, b)| b);
+                let _ = write!(c, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            });
+        }
+    });
+    format!("http://127.0.0.1:{port}")
+}
+
+#[test]
+fn find_lists_the_visible_match_first() {
+    let base = naming_app();
+    let mut s = Server::start();
+    s.tool("open", json!({"url": format!("{base}/rank"), "snapshot": false}));
+    let (r, _) = s.tool("find", json!({"role": "searchbox"}));
+    let lines: Vec<&str> = r.as_str().unwrap().lines().collect();
+    assert!(lines[0].starts_with("2 match"), "{r}");
+    assert!(lines[1].contains("\"Main\""), "the visible box is first: {r}");
+}
+
+#[test]
+fn a_role_that_a_script_sets_after_a_reply_is_the_same_in_every_call() {
+    let base = naming_app();
+    let mut s = Server::start();
+    s.tool("open", json!({"url": format!("{base}/flip"), "snapshot": false}));
+    // The first call must not see the role from before the script ran.
+    let (r, _) = s.tool("find", json!({"role": "searchbox"}));
+    assert!(r.as_str().unwrap().starts_with("0 match"), "{r}");
+    let (r, _) = s.tool("find", json!({"role": "combobox"}));
+    assert!(r.as_str().unwrap().contains("combobox \"Flip\""), "{r}");
+}
+
+#[test]
+fn unnamed_form_fields_take_a_name_from_what_sits_before_them() {
+    let base = naming_app();
+    let mut s = Server::start();
+    let (r, _) = s.tool("open", json!({"url": format!("{base}/login"), "snapshot": true}));
+    let r = r.as_str().unwrap();
+    for want in ["textbox \"username:\"", "textbox \"password:\" (password)", "textbox \"Nickname\"", "textbox \"Age\"", "textbox \"bare_name\"", "textbox \"Holder\"", "textbox \"Named\""] {
+        assert!(r.contains(want), "missing {want} in {r}");
+    }
+    // The fallback names a locator too.
+    let (r, _) = s.tool("find", json!({"role": "textbox", "name": "username"}));
+    assert!(r.as_str().unwrap().starts_with("1 match"), "{r}");
+}
