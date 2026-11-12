@@ -2177,3 +2177,20 @@ fn a_page_that_reads_meta_content_renders_after_a_click() {
     assert!(r.contains("heading \"Item title\""), "{r}");
     assert_eq!(s.tool("eval", json!({"js": "document.querySelector('p').textContent"})).0, json!("list"));
 }
+
+/// `act type` edits a `contenteditable` element and replaces the text on a second call.
+#[test]
+fn act_type_edits_a_contenteditable() {
+    let base = page_server("<!doctype html><title>mail</title><div contenteditable=true id=body role=textbox aria-label=Body style='min-height:100px'></div>".to_string());
+    let mut s = Server::start();
+    let (r, error) = s.tool("open", json!({"url": format!("{base}/"), "snapshot": false}));
+    assert!(!error, "{r}");
+    let (r, error) = s.tool("act", json!({"op": "type", "loc": "css=\"#body\"", "text": "Hello world"}));
+    assert!(!error, "{r}");
+    let (r, _) = s.tool("eval", json!({"js": "document.getElementById('body').textContent"}));
+    assert_eq!(r, json!("Hello world"));
+    let (r, error) = s.tool("act", json!({"op": "type", "loc": "css=\"#body\"", "text": "Bye"}));
+    assert!(!error, "{r}");
+    let (r, _) = s.tool("eval", json!({"js": "document.getElementById('body').textContent"}));
+    assert_eq!(r, json!("Bye"));
+}

@@ -551,12 +551,15 @@ impl Page {
         if self.disabled(h) {
             return Err(Refusal::Disabled);
         }
-        if !self.browser().is_some_and(|b| b.is_text_input(h.node)) {
+        let host = self.browser().is_some_and(|b| b.is_editing_host(h.node));
+        if !host && !self.browser().is_some_and(|b| b.is_text_input(h.node)) {
             return Err(Refusal::NotEditable);
         }
         self.click(h)?;
         let h = if self.focused(h) { h } else { self.replaced(h).ok_or(Refusal::NoFocus)? };
-        if self.value(h).is_some_and(|v| !v.is_empty()) {
+        // An editing host has no value: it has content when it has a child.
+        let filled = if host { self.browser().is_some_and(|b| b.has_children(h.node)) } else { self.value(h).is_some_and(|v| !v.is_empty()) };
+        if filled {
             self.press("Control+a").expect("a known key");
             if clear {
                 self.press("Backspace").expect("a known key");

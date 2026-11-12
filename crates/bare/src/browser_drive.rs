@@ -20,7 +20,7 @@
 //!   its `keyup` last. The default actions are the ones of `browser_ui.rs`.
 //! - `drive_type(node, text)`: focus the field, select its text (so the new text replaces it, as `Input::Type` always did), then press each
 //!   character as a key: `keydown`, `keypress`, `beforeinput`, the change of the value, `input`, `keyup`. A line feed is the Enter key.
-//!   Empty text clears a field with Backspace. Works for a text `<input>` and for a `<textarea>`. A `contenteditable` element is not built.
+//!   Empty text clears a field with Backspace. Works for a text `<input>` and for a `<textarea>`. A `contenteditable` element is edited through its key path (caret to the end, old content selected, deleted for an empty text).
 //!
 //! Gaps: the hover settle after a click only; no modifier keys on a click; the left button only.
 
@@ -314,13 +314,30 @@ impl Browser {
 
     /// Typed text in a text `<input>` or a `<textarea>`. See the header.
     pub fn drive_type(&mut self, node: NodeId, text: &str) -> R<UiOutcome> {
-        if !self.is_text_input(node) {
-            return Err(unsupported_input("test driver: type needs an editable <input> or <textarea>"));
+        let host = self.is_editing_host(node);
+        if !host && !self.is_text_input(node) {
+            return Err(unsupported_input("test driver: type needs an editable <input>, <textarea> or contenteditable element"));
         }
         let mut out = UiOutcome::default();
         self.drive_focus(node, &mut out)?;
         if self.active_element()? != Some(node) {
             return Err(unsupported_input("test driver: the field cannot take focus"));
+        }
+        if host {
+            // The caret goes to the end; old content is selected, and deleted for an empty text. A line feed is Enter.
+            self.driven(|d, it| d.caret_into_host(it, node))?;
+            if self.has_children(node) {
+                out.add(self.drive_key(None, "Control+a")?);
+                if text.is_empty() {
+                    out.add(self.drive_key(None, "Backspace")?);
+                }
+            }
+            for c in text.chars() {
+                let k = char_key(c);
+                out.add(self.ui_key(k.clone(), true)?);
+                out.add(self.ui_key(k, false)?);
+            }
+            return Ok(out);
         }
         let had_text = self.input_value(node).is_some_and(|v| !v.is_empty());
         if had_text {
