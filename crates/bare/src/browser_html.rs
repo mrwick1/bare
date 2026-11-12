@@ -10,7 +10,12 @@
 //!   each wrapper made every member read of every element one step longer (+0.6% on the `mutation` cost row), and only a page that names the
 //!   interface can tell. At the switch, each existing wrapper of these tags gets its prototype, and each new one has it from the start. Deviation:
 //!   before the first read of such a global, `el.constructor` is `HTMLElement` and `Object.prototype.toString.call(el)` is `[object HTMLElement]`.
-//! - The prototype inherits from `HTMLElement.prototype` and has no members of its own (no `HTMLTableElement.rows`, no `HTMLMetaElement.content`).
+//! - The prototype inherits from `HTMLElement.prototype`. The interfaces of `has_members` have members of their own (`browser_table.rs`,
+//!   `browser_html_members.rs`, `canvas`, `meta`); these tags (except `li`) get their prototype from the first wrapper, also before the switch, because a
+//!   page reads `table.rows` without naming the interface. The others (`div`, `span`, `p`, `ul`, ...) have no members of their own and keep the
+//!   switch. Deviation: `li.value` is `undefined` until a page reads an `HTML*Element` global.
+//! - `meta` reflects `name`, `content`, `httpEquiv` (`http-equiv`) and `media`. Pages read `meta.content` without naming the interface
+//!   (GitHub reads a base64 payload from it after a soft navigation).
 //!   The constructor is illegal and inherits from `HTMLElement`.
 //! - The tags whose interface is `HTMLElement` itself (`section`, `nav`, `b`, ...) keep `HTMLElement.prototype`. A tag with a module of its own
 //!   (`a`, `img`, `input`, `select`, ...) is not handled here.
@@ -131,11 +136,22 @@ fn index(t: &str) -> Option<usize> {
     })
 }
 
+/// Does the interface `NAMES[i]` have members of its own (`browser_html_members.rs`, `browser_table.rs`, `canvas`)? Such a tag gets its
+/// prototype from its first wrapper, so a page that reads `table.rows` without naming `HTMLTableElement` finds it.
+/// The list: base, canvas, data, details, dialog, fieldset, html, meta, meter, ol, output, progress, source, table, thead/tbody/tfoot, td/th,
+/// time, tr. A test checks it against the prototypes (`browser_web_api_tests.rs`). `li` has a member (`value`) but keeps the switch: an `li`
+/// prototype from the first wrapper cost +0.24% on the `mutation` cost row (it makes `li` elements), and pages rarely read `li.value`.
+/// Without `li`, the rule costs +0.08% on `mutation` and `event` (the tag lookup for each new wrapper).
+#[inline]
+fn has_members(i: usize) -> bool {
+    matches!(i, 0 | 3 | 6 | 9 | 10 | 15 | 21 | 27 | 28 | 30 | 31 | 36 | 38 | 41 | 42 | 43 | 44 | 46)
+}
+
 /// The prototype of the HTML element `tag` that no other module handles: its interface, made now if it is the first use.
 pub(crate) fn proto(d: &Dom, it: &mut Interp<'_>, tag: &str) -> R<ObjId> {
-    match d.html_on.get().then(|| index(tag)).flatten() {
-        Some(i) => proto_i(d, it, i),
-        None => Ok(d.p().html),
+    match index(tag) {
+        Some(i) if d.html_on.get() || has_members(i) => proto_i(d, it, i),
+        _ => Ok(d.p().html),
     }
 }
 
@@ -156,6 +172,9 @@ fn make(d: &Dom, it: &mut Interp<'_>, i: usize) -> R<(ObjId, ObjId)> {
     it.define_data(proto, kc, Value::Object(f), true, false, true)?;
     crate::browser_lazy::tag(d, it, proto, NAMES[i])?;
     if i == 3 { crate::browser_canvas::members(d, it, proto)?; }
+    if i == 27 { meta_members(d, it, proto)?; }
+    let own = crate::browser_html_members::members(d, it, proto, NAMES[i])?;
+    debug_assert!((own || i == 3 || i == 27) == has_members(i) || NAMES[i] == "HTMLLIElement", "{}", NAMES[i]);
     // Like every HTML interface, its constructor inherits from `HTMLElement`.
     let g = it.global_object();
     let k = d.key(it, "HTMLElement")?;
@@ -169,6 +188,41 @@ fn make(d: &Dom, it: &mut Interp<'_>, i: usize) -> R<(ObjId, ObjId)> {
     }
     l[i] = Some((proto, f));
     Ok((proto, f))
+}
+
+/// Getter and setter of the string attribute `$attr` of `meta`, as the property `$name`. A closure that captures nothing is a plain function
+/// pointer in Rust (like a JS function that uses no outer variable), so it fits the `H` type of the handlers.
+macro_rules! meta_attr {
+    ($d:expr, $it:expr, $o:expr, $name:literal, $attr:literal) => {
+        $d.def_get($it, $o, $name, |d, it, t, _| meta_get(d, it, t, $attr), Some(|d, it, t, a| meta_set(d, it, t, a, $attr)))?;
+    };
+}
+
+fn meta_members(d: &Dom, it: &mut Interp<'_>, o: ObjId) -> R<()> {
+    meta_attr!(d, it, o, "name", "name");
+    meta_attr!(d, it, o, "content", "content");
+    meta_attr!(d, it, o, "httpEquiv", "http-equiv");
+    meta_attr!(d, it, o, "media", "media");
+    Ok(())
+}
+
+/// The `meta` element of `this`, or `TypeError: Illegal invocation`.
+fn meta_el(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<NodeId> {
+    let n = d.el(it, this)?;
+    if d.doc.borrow().is_html(n, "meta") { Ok(n) } else { Err(it.type_error("Illegal invocation")) }
+}
+
+fn meta_get(d: &Dom, it: &mut Interp<'_>, this: Value, name: &str) -> R<Value> {
+    let n = meta_el(d, it, this)?;
+    let v = { let doc = d.doc.borrow(); doc.find_atom(name).and_then(|k| doc.attr(n, k)).unwrap_or("").to_string() };
+    d.js_str(it, &v)
+}
+
+fn meta_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], name: &str) -> R<Value> {
+    let n = meta_el(d, it, this)?;
+    let v = d.string_arg(it, crate::browser_platform::arg(a, 0))?;
+    crate::browser_dom::attr_set(d, it, n, name, &v)?;
+    Ok(Value::Undefined)
 }
 
 /// The ask of the heap for the global `name` (`Heap::set_lazy_chain`, see `browser_handlers.rs`): define it on the window when it is one of the

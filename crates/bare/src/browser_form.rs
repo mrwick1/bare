@@ -164,6 +164,38 @@ impl Dom {
         Ok(None)
     }
 
+    /// `form.elements`: the listed elements (not `input type=image`) whose form owner is `form`, in tree order of the tree of `form`.
+    pub(crate) fn form_elements(&self, it: &mut Interp<'_>, form: NodeId) -> R<Vec<NodeId>> {
+        let found = {
+            let doc = self.doc.borrow();
+            let mut top = form;
+            while let Some(p) = doc.parent(top) {
+                it.charge(1)?;
+                top = p;
+            }
+            let mut found = Vec::new();
+            let (mut cur, mut depth) = (top, 0);
+            while let Some((c, d)) = nd::next_in(&doc, top, cur, depth) {
+                it.charge(1)?;
+                (cur, depth) = (c, d);
+                if tag_is(&doc, c, &["button", "fieldset", "input", "object", "output", "select", "textarea"]) && !(tag_is(&doc, c, &["input"]) && nd::input_kind(&doc, c) == "image") {
+                    found.push(c);
+                }
+            }
+            found
+        };
+        let mut out = Vec::new();
+        for c in found {
+            if self.form_owner(it, c)? == Some(form) {
+                if out.len() >= self.lim.max_results {
+                    return Err(self.lim("dom-results"));
+                }
+                out.push(c);
+            }
+        }
+        Ok(out)
+    }
+
     /// Is the form control `n` disabled (HTML "disabled")? Not a form control: false.
     pub(crate) fn is_disabled_control(&self, it: &mut Interp<'_>, n: NodeId) -> R<bool> {
         let doc = self.doc.borrow();

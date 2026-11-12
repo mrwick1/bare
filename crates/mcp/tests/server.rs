@@ -863,7 +863,6 @@ const TWO_SEARCH: &str = "<!doctype html><body>
 <div style=\"display:none\"><input id=h aria-label=\"Hidden search\"></div>
 <script>
 document.getElementById('a').addEventListener('keydown', () => document.getElementById('b').focus());
-
 </script></body>";
 
 #[test]
@@ -2134,4 +2133,47 @@ fn a_hash_change_from_eval_loads_nothing() {
     nav_open(&mut s, &base);
     assert_eq!(s.tool("eval", json!({"js": "location.hash = 'x'; 1"})), (json!(1), false));
     assert_eq!(s.tool("eval", json!({"js": "location.hash + ' ' + document.title + ' ' + window.mark"})).0, json!("#x one 1"));
+}
+
+/// A page script that reads `table.rows`, `tr.cells` and `form.elements` without naming any `HTML*Element` global.
+const TABLE_PAGE: &str = "<!doctype html><title>t</title><body><table id=t><tr><td>a</td><td>b</td></tr><tr><td>c</td></tr></table><form id=f><input name=q placeholder=Find></form><script>
+let t = document.getElementById('t');
+let r = t.insertRow(-1); r.insertCell().textContent = 'd';
+let f = document.getElementById('f');
+document.body.insertAdjacentHTML('beforeend', '<h1>rows ' + t.rows.length + ' cells ' + t.rows[0].cells.length + ' fields ' + f.elements.length + ' ' + f.elements[0].placeholder + '</h1>');
+</script></body>";
+
+/// The page renders its heading: the members are there before the page names their interface.
+#[test]
+fn a_page_that_reads_table_rows_renders() {
+    let base = pages(&[("/", TABLE_PAGE)]);
+    let mut s = Server::start();
+    let (r, e) = s.tool("open", json!({"url": format!("{base}/")}));
+    assert!(!e, "{r}");
+    assert_eq!(s.tool("eval", json!({"js": "document.querySelector('h1').textContent"})).0, json!("rows 3 cells 2 fields 1 Find"));
+}
+
+const META_LIST: &str = "<!doctype html><title>list</title><body><a href=/item>First item</a></body>";
+
+/// Like GitHub after a soft navigation: read a base64 JSON payload from a `<meta>`, change it, write it back, then render.
+const META_ITEM: &str = "<!doctype html><title>item</title><meta name=visitor-payload content=eyJyZWZlcnJlciI6IiJ9><body><script>
+let m = document.querySelector('meta[name=visitor-payload]');
+let t = JSON.parse(atob(m.content));
+t.referrer = 'list';
+m.content = btoa(JSON.stringify(t));
+document.body.innerHTML = '<h1>Item title</h1><p>' + JSON.parse(atob(m.content)).referrer + '</p>';
+</script></body>";
+
+/// A page that reads `meta.content` renders after a click on its link.
+#[test]
+fn a_page_that_reads_meta_content_renders_after_a_click() {
+    let base = pages(&[("/", META_LIST), ("/item", META_ITEM)]);
+    let mut s = Server::start();
+    let (r, e) = s.tool("open", json!({"url": format!("{base}/")}));
+    assert!(!e, "{r}");
+    let (r, e) = s.tool("act", json!({"op": "click", "loc": "role=link name=\"First item\""}));
+    let r = r.as_str().unwrap().to_string();
+    assert!(!e && r.contains(&format!("navigated: {base}/item")) && !r.contains("atob"), "{r}");
+    assert!(r.contains("heading \"Item title\""), "{r}");
+    assert_eq!(s.tool("eval", json!({"js": "document.querySelector('p').textContent"})).0, json!("list"));
 }
