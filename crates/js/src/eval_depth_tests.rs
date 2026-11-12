@@ -82,8 +82,8 @@ fn lower_configured_caps_refuse_before_they_grow() {
 #[test]
 fn requests_above_the_hard_ceilings_are_clamped() {
     real_stack(|| {
-        // a left-deep chain of 2000 terms is walked as 2000 levels: the clamp to 768 refuses it, no crash
-        let chain = format!("{}1", "1+".repeat(2000));
+        // a left-deep chain of 5000 terms is walked as 5000 levels: the clamp to 2048 refuses it, no crash
+        let chain = format!("{}1", "1+".repeat(5000));
         assert_eq!(outcome(&chain, caps(u32::MAX, 128)), format!("setup limit:{:?}", LimitKind::TraversalDepth));
         // the call ceiling is 10,000, however large the request: 10,000 nested calls run, the 10,001st is refused as a CallDepth
         let bound = |n: u32| format!("var g = function () {{ return 'done' }}; for (var i = 0; i < {n}; i++) g = g.bind(null); g()");
@@ -173,5 +173,13 @@ fn a_react_shaped_walk_of_seventy_five_levels_completes_under_a_call_cap_of_256(
         // 151 JS calls. The saved login page needs 158 calls and 608 native frames (measured): 128 calls refused it.
         assert_eq!(outcome(&walk(75), EvalLimits { max_statement_frames: 768, ..caps(768, 128) }), format!("limit:{:?}", LimitKind::CallDepth));
         assert_eq!(outcome(&walk(75), EvalLimits { max_statement_frames: 768, ..caps(768, 256) }), "walked");
+    });
+}
+
+#[test]
+fn a_thousand_nested_calls_run() {
+    real_stack(|| {
+        let src = format!("function f(v){{return v}} f({}1{})", "f(".repeat(999), ")".repeat(999));
+        assert_eq!(outcome(&src, EvalLimits { max_steps: 5_000_000, ..EvalLimits::session() }), "1");
     });
 }

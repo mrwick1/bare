@@ -97,7 +97,7 @@ pub struct SessionConfig {
     pub fetch: FetchLimits,
     pub limits: SessionLimits,
     pub browser: BrowserLimits,
-    /// The evaluator limits of each document. `new` raises the depth caps to their ceilings (768 frames, 256 calls).
+    /// The evaluator limits of each document. `new` raises the depth caps to their ceilings (2048 frames, 256 calls).
     pub eval: EvalLimits,
     pub heap: HeapLimits,
     /// Override the browser's default media-query viewport, in CSS pixels.
