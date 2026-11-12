@@ -813,7 +813,7 @@ impl RuleSet {
     #[inline(always)]
     fn walk<const WANT: bool, const PENDING: bool>(&self, doc: &Document, want: Option<NodeId>, keep: bool) -> Styles {
         let mut way = Way { want, path: Vec::new(), sorted: Vec::new(), on: false, at: 0 };
-        let mut styles = Styles { styles: vec![ComputedStyle::initial()], of_node: vec![NONE; doc.len()], calcs: Vec::new(), grids: Vec::new(), customs: Vec::new(), spaced: false, kept: None };
+        let mut styles = Styles { styles: vec![ComputedStyle::initial()], of_node: vec![NONE; doc.len()], calcs: Vec::new(), grids: Vec::new(), customs: var::Sets::default(), spaced: false, kept: None };
         // Style 0 is the starting style. It is the parent style of the `html` element.
         let mut cx = Cx { viewport: self.viewport, root_font_size: 16.0, layer_order: self.layer_order(), declared: &self.side, inline: RefCell::default(), computed: RefCell::default(), grids: RefCell::default(), customs: RefCell::default(), merges: RefCell::default() };
         let style_atom = doc.find_atom("style");
@@ -894,9 +894,9 @@ impl RuleSet {
         let (computed, mut grids, customs) = (cx.computed.take(), cx.grids.take(), cx.customs.take());
         styles.calcs = computed.list;
         styles.grids = std::mem::take(&mut grids.list);
-        styles.customs = customs.list;
+        styles.customs = customs;
         if keep {
-            styles.kept = Some(Box::new(StyleKeep { memo, calcs: computed.index, grids, customs: customs.index, rem: cx.root_font_size, base: styles.styles.len() }));
+            styles.kept = Some(Box::new(StyleKeep { memo, calcs: computed.index, grids, rem: cx.root_font_size, base: styles.styles.len() }));
         }
         styles
     }
@@ -1045,7 +1045,7 @@ impl RuleSet {
                 g.list = std::mem::take(&mut styles.grids);
                 g
             }),
-            customs: RefCell::new(Customs { list: std::mem::take(&mut styles.customs), index: std::mem::take(&mut k.customs) }),
+            customs: RefCell::new(std::mem::take(&mut styles.customs)),
             merges: RefCell::default(),
         }
     }
@@ -1057,8 +1057,7 @@ impl RuleSet {
         let mut g = cx.grids.take();
         styles.grids = std::mem::take(&mut g.list);
         k.grids = g;
-        let c = cx.customs.take();
-        (styles.customs, k.customs) = (c.list, c.index);
+        styles.customs = cx.customs.take();
         styles.kept = Some(k);
     }
 
@@ -1393,12 +1392,9 @@ impl RuleSet {
         } else if own.is_empty() {
             parent.1
         } else {
-            let merged = {
-                let sets = cx.customs.borrow();
-                let own: Vec<(&str, &str)> = own.iter().map(|o| (o.0, o.2)).collect();
-                var::merge(&sets.list[parent.1 as usize], &own)
-            };
-            cx.customs.borrow_mut().keep(merged)
+            let mut sets = cx.customs.borrow_mut();
+            let own: Vec<(u32, &str)> = own.iter().map(|o| (sets.name(o.0), o.2)).collect();
+            sets.merge(parent.1, &own)
         };
         if let Some(k) = merge_key
             && merged.is_none()
@@ -1509,8 +1505,7 @@ impl RuleSet {
     fn read_var(&self, i: u32, property: Property, custom: u32, cx: &Cx<'_>) -> Value {
         let decl = cx.var(i);
         let sets = cx.customs.borrow();
-        let set = &sets.list[custom as usize];
-        let text = var::substitute(&decl.text, &mut |name| set.binary_search_by(|(n, _)| (**n).cmp(name)).ok().map(|i| set[i].1.to_string()));
+        let text = var::substitute(&decl.text, &mut |name| sets.get(custom, name).map(str::to_string));
         drop(sets);
         let (mut side, mut out) = (Side::default(), Vec::new());
         let Some(text) = text else { return Value::Unset };
@@ -1600,34 +1595,9 @@ struct Cx<'a> {
     /// The grid lists that are done, and are kept in `Styles::grids`.
     grids: RefCell<grid::Kept>,
     /// The sets of custom properties, each one once.
-    customs: RefCell<Customs>,
+    customs: RefCell<var::Sets>,
     /// The set of custom properties for a parent set and the rules with custom properties that an element matched.
     merges: RefCell<HashMap<(u32, Vec<u32>), u32, BuildHasherDefault<Fnv>>>,
-}
-
-/// The sets of custom properties. Set 0 is the empty one. Elements with the same set have the same number, so that their styles can be shared.
-struct Customs {
-    list: Vec<var::Set>,
-    index: HashMap<var::Set, u32, BuildHasherDefault<Fnv>>,
-}
-
-impl Default for Customs {
-    fn default() -> Customs {
-        let mut index = HashMap::default();
-        index.insert(Vec::new(), 0);
-        Customs { list: vec![Vec::new()], index }
-    }
-}
-
-impl Customs {
-    fn keep(&mut self, set: var::Set) -> u32 {
-        if let Some(&i) = self.index.get(&set) {
-            return i;
-        }
-        self.list.push(set.clone());
-        self.index.insert(set, self.list.len() as u32 - 1);
-        self.list.len() as u32 - 1
-    }
 }
 
 /// The computed `calc()` values, each one once. Two elements with the same value get the same number, so that their styles can be shared.
@@ -1811,8 +1781,8 @@ pub struct Styles {
     calcs: Vec<[f32; 2]>,
     /// The grid lists (`grid.rs`), after the cascade. A `Value::Grid` in a style points here.
     grids: Vec<Grid>,
-    /// The sets of custom properties. `ComputedStyle::1` is a place in this list. Set 0 is empty.
-    customs: Vec<var::Set>,
+    /// The sets of custom properties (`var::Sets`). `ComputedStyle::1` is the number of a set. Set 0 is empty.
+    customs: var::Sets,
     /// Does any style have a `letter-spacing` or a `word-spacing` that is not 0? Layout and paint read the two only then.
     spaced: bool,
     /// The cache of the cascade, for `RuleSet::restyle`. Only `RuleSet::compute_kept` keeps it.
@@ -1825,7 +1795,6 @@ struct StyleKeep {
     memo: Memo,
     calcs: HashMap<[u32; 2], u32, BuildHasherDefault<Fnv>>,
     grids: grid::Kept,
-    customs: HashMap<var::Set, u32, BuildHasherDefault<Fnv>>,
     /// The font size of the root element, for `rem`.
     rem: f32,
     /// How many styles the full cascade made.
@@ -1838,8 +1807,8 @@ impl Styles {
     }
 
     /// The custom properties of a style, sorted by name, with their text: `--gap`, `8px`.
-    pub fn custom_properties(&self, style: &ComputedStyle) -> &[(Box<str>, Box<str>)] {
-        &self.customs[style.1 as usize]
+    pub fn custom_properties(&self, style: &ComputedStyle) -> Vec<(&str, &str)> {
+        self.customs.pairs(style.1)
     }
 
     /// The pixels and the percent of a `Length::Calc` of a computed style: `calc(px + percent of something)`.
@@ -3531,6 +3500,57 @@ mod tests {
         let set = |id: &str| styles.custom_properties(styles.style(by_id(&doc, id)).unwrap()).to_vec();
         assert_eq!(set("a"), set("b"));
         assert_eq!(set("c").iter().map(|(n, v)| (&**n, &**v)).collect::<Vec<_>>(), [("--gap", "10px"), ("--main", "blue")]);
+    }
+
+    /// Pins how custom properties inherit, so that a change of how the sets are kept cannot change what they hold.
+    #[test]
+    fn custom_property_sets_inherit_and_are_shared() {
+        let page = "<div id=a class=t><section id=b class=t><p id=c class=t>x</p><p id=d class='t o'>y</p></section>\
+            <p id=e class=k>z</p><p id=f class=k>z</p><p id=g style='--i: 9px; width: var(--i)'>w</p><p id=h class=bad>v</p></div>";
+        let sheet = ":root { --a: 1px; --b: 2px; --c: var(--a) var(--b) } .t { --t: 0 } .o { --a: 5px; --c: var(--a) }\
+            .k { --a: initial; --b: inherit; --n: var(--nope, 3px); --l1: var(--l2); --l2: var(--l1); --u: var(--l1, 4px) }\
+            .bad { --w: red; width: var(--w); height: var(--w, 6px) }";
+        let mut doc = parse(page);
+        let mut rules = RuleSet::new(VIEW);
+        rules.add(&mut doc, UA_CSS, Origin::UserAgent);
+        rules.add(&mut doc, sheet, Origin::Author);
+        let styles = rules.compute(&doc);
+        let style = |id: &str| styles.style(by_id(&doc, id)).unwrap();
+        let set = |id: &str| styles.custom_properties(style(id)).iter().map(|(n, v)| format!("{n}={v}")).collect::<Vec<_>>().join(" ");
+        // Inherited from the root, `var()` is replaced once, at the root. A rule that sets the same value again gives the same set.
+        assert_eq!(set("a"), "--a=1px --b=2px --c=1px 2px --t=0");
+        assert_eq!(style("a").1, style("b").1);
+        assert_eq!(style("b").1, style("c").1);
+        // An override, and a `var()` that reads the new value of the element.
+        assert_eq!(set("d"), "--a=5px --b=2px --c=5px --t=0");
+        // `initial` removes, `inherit` takes the parent value, a fallback works, a circle goes, and a `var()` of a circle takes its fallback.
+        assert_eq!(set("e"), "--b=2px --c=1px 2px --n=3px --t=0 --u=4px");
+        assert_eq!(style("e").1, style("f").1);
+        // A `style=""` attribute adds a name that no sheet has.
+        assert_eq!(set("g"), "--a=1px --b=2px --c=1px 2px --i=9px --t=0");
+        assert_eq!(style("g").get(Property::Width), Value::Length(Length::Px(9.0)));
+        // A value that is not good for the property is invalid at computed-value time: `unset`, and the fallback is not used.
+        assert_eq!(style("h").get(Property::Width), ComputedStyle::initial().get(Property::Width));
+        assert_eq!(style("h").get(Property::Height), ComputedStyle::initial().get(Property::Height));
+        // The sets are kept once: the elements share a few.
+        let mut numbers: Vec<u32> = ["a", "b", "c", "d", "e", "f", "g", "h"].iter().map(|id| style(id).1).collect();
+        numbers.sort_unstable();
+        numbers.dedup();
+        assert_eq!(numbers.len(), 5);
+        // A restyle gives the same sets as a full cascade, and the same numbers for the same sets.
+        let mut kept = rules.compute_kept(&doc);
+        doc.track_damage(DAMAGE_FRAME);
+        let (c, e) = (by_id(&doc, "c"), by_id(&doc, "e"));
+        doc.set_attr(c, "class", "k");
+        doc.set_attr(e, "class", "t o");
+        assert!(rules.restyle(&doc, &mut kept, &[(c, false), (e, false)], &mut Vec::new()));
+        let full = rules.compute(&doc);
+        for id in ["c", "e"] {
+            let pairs = |s: &Styles| s.custom_properties(s.style(by_id(&doc, id)).unwrap()).iter().map(|(n, v)| format!("{n}={v}")).collect::<Vec<_>>();
+            assert_eq!(pairs(&kept), pairs(&full), "{id}");
+        }
+        assert_eq!(kept.style(c).unwrap().1, kept.style(by_id(&doc, "f")).unwrap().1);
+        assert_eq!(kept.style(e).unwrap().1, kept.style(by_id(&doc, "d")).unwrap().1);
     }
 
     #[test]

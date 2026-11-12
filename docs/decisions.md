@@ -1537,3 +1537,16 @@ An agent gets the URL of a named link in one small call, not with `eval`.
 - `pipeTo` reads an error of the source only when it reads, because the host reader has no `closed` promise.
 - An abort of the writable side of a `TransformStream` errors its readable side at once. This is the older text of the standard. `transformer.cancel` runs.
 - `tee` and async iteration stay gated.
+
+## Custom property sets as numbers (2026-11-12)
+
+GitHub sets about 2,500 custom properties on the root. Each new set copied all names and texts of the parent set and hashed them again. That took about 40% of each cascade.
+
+- `var::Sets` keeps each custom property name and each text once, with a number.
+- A set is a list of text numbers, one for each name number. 0 means "not set".
+- A new set copies plain numbers. Equal sets have equal numbers, so the check is a compare of memory.
+- A set has no 0 at its end. A set made before a new name came is then equal to the same set made after.
+- An element that sets the values of its parent keeps the number of the parent set.
+- The sets are found by a hash that reads 8 bytes at a step.
+- `var()` resolution, fallbacks, circles, `initial`, `inherit` and `unset` do not change. A dump of every style of a saved GitHub page is the same before and after.
+- The names are not numbered in the rule set. A name is hashed only when the cascade makes a new set, about 200 times for a GitHub page.
