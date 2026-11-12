@@ -1335,3 +1335,10 @@ These tools do not wait for timers. A timer that is not due yet shows in a later
 `open` (with `snapshot`) and `act` add up to 3 `script error: MESSAGE (SOURCE:LINE)` lines. They come from the console history, so no new store exists. Each line has about 200 characters at most.
 The compact receipt shows an uncaught error as a script error line, not as a `console error` line. A page without errors or late events gives the same reply as before.
 The source of a script is `script#N`, because the engine has no script URL in its stack frames.
+## crates.io: focus options, noscript and grid-template areas (2026-11-12)
+
+crates.io calls `focus({ focusVisible })`. bare stopped the page there, so the app never rendered its content.
+
+- `focus()` reads `focusVisible` and ignores it. No `:focus-visible` state exists. An unknown option is ignored, as the standard says.
+- The UA sheet now has `noscript { display: none !important }`, as in Firefox. bare runs scripts, so a page style such as `noscript { display: grid }` must not show the box.
+- `grid-template` now reads the form with area strings: line names, one string per row, an optional row size, and an optional `/ columns`. The crates.io header uses it. Before, bare dropped the declaration and placed the header items wrong.

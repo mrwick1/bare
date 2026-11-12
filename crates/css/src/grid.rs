@@ -14,7 +14,7 @@
 //! Left out:
 //! - `calc()` inside a track size: the declaration is dropped.
 //! - `subgrid` and `masonry`: the declaration is dropped.
-//! - The `grid` shorthand, and the form of `grid-template` with area names (`rows / columns` and `none` are read).
+//! - The `grid` shorthand. (`grid-template` reads `rows / columns`, `none` and the form with area strings.)
 //! - `grid-template-areas` also does not read `repeat()`, as nothing does.
 
 use crate::tokenizer::{Token, tokenize};
@@ -276,7 +276,24 @@ fn read(name: &str, text: &str, side: &mut Side, emit: &mut dyn FnMut(Property, 
             emit(property, line_value(line, &mut keep));
             true
         }
-        // `rows / columns`, or `none`. The form with area names is left out. The areas are `none`, as the shorthand resets them.
+        // `rows / columns`, or `none`. The areas are `none`, as the shorthand resets them.
+        // Or area strings, each with an optional row size and line names, then an optional `/ columns`.
+        "grid-template" if tokens.iter().any(|t| matches!(t, Token::String(_))) => {
+            let mut sides = tokens.split(|t| *t == Token::Delim('/'));
+            let (Some(left), right, Option::None) = (sides.next(), sides.next(), sides.next()) else { return false };
+            let Some((rows, strings)) = area_rows(left) else { return false };
+            let Some(Some(areas)) = areas(&strings) else { return false };
+            let columns = match right.map(template) {
+                Option::None => Option::None,
+                // The columns take no auto repeat.
+                Some(Some(Some(Grid::Tracks(t)))) if !t.iter().any(|p| matches!(p, Part::Repeat(Count::Fill | Count::Fit, _))) => Some(Grid::Tracks(t)),
+                _ => return false,
+            };
+            emit(GridTemplateRows, keep(Grid::Tracks(rows)));
+            emit(GridTemplateColumns, columns.map_or(Value::Keyword(Keyword::None), &mut keep));
+            emit(GridTemplateAreas, keep(Grid::Areas(areas)));
+            true
+        }
         "grid-template" => {
             let mut sides = tokens.split(|t| *t == Token::Delim('/'));
             let (rows, columns) = match (sides.next(), sides.next(), sides.next()) {
@@ -352,6 +369,40 @@ fn template(tokens: &[Token]) -> Option<Option<Grid>> {
         return None;
     }
     (at == tokens.len() && parts.iter().any(|p| !matches!(p, Part::Names(_)))).then_some(Some(Grid::Tracks(parts)))
+}
+
+/// The rows of the areas form of `grid-template`: `[names]? "string" size? [names]?`, again and again. Gives the row tracks
+/// (`auto` where a string has no size) and the strings.
+fn area_rows<'a>(tokens: &[Token<'a>]) -> Option<(Vec<Part>, Vec<Token<'a>>)> {
+    let (mut parts, mut strings, mut at) = (Vec::new(), Vec::new(), 0);
+    while at < tokens.len() {
+        let mut names = Vec::new();
+        if tokens[at] == Token::OpenSquare {
+            let end = tokens[at..].iter().position(|t| *t == Token::CloseSquare)? + at;
+            names = track_list(&tokens[at..=end], &mut 0, false)?.0;
+            at = end + 1;
+        }
+        // Names after the last row and before the next are one list.
+        if let ([Part::Names(n)], Some(Part::Names(prev))) = (names.as_slice(), parts.last_mut()) {
+            *prev = prev.iter().chain(n.iter()).cloned().collect();
+        } else {
+            parts.extend(names);
+        }
+        let Token::String(_) = tokens.get(at)? else { return None };
+        strings.push(tokens[at].clone());
+        at += 1;
+        let size = match tokens.get(at) {
+            Some(Token::String(_) | Token::OpenSquare) | Option::None => Track { min: Bound::Auto, max: Bound::Auto },
+            _ => track_size(tokens, &mut at)?,
+        };
+        parts.push(Part::Track(size));
+        if tokens.get(at) == Some(&Token::OpenSquare) {
+            let end = tokens[at..].iter().position(|t| *t == Token::CloseSquare)? + at;
+            parts.extend(track_list(&tokens[at..=end], &mut 0, false)?.0);
+            at = end + 1;
+        }
+    }
+    Some((parts, strings))
 }
 
 fn auto_tracks(tokens: &[Token]) -> Option<Vec<Part>> {
@@ -730,10 +781,33 @@ mod tests {
         assert_eq!(out[2].1, Value::Keyword(Keyword::None));
         // `none`, rows only and a bad side: `none` gives three, the others none (the areas form is left out).
         assert_eq!(read("grid-template", "none").0.len(), 3);
-        for bad in ["1fr", "1fr / ", "/ 1fr", "1fr / 1fr / 1fr", "'a' 1fr / 1fr", "foo / bar"] {
+        for bad in ["1fr", "1fr / ", "/ 1fr", "1fr / 1fr / 1fr", "foo / bar", "'a b' 'c' / 1fr", "'a' 1fr 1fr / 1fr", "'a' / repeat(auto-fill, 10px)", "1fr 'a'"] {
             assert!(read("grid-template", bad).0.is_empty(), "{bad}");
         }
         assert_eq!(read("grid-template", "inherit").0.len(), 3);
+    }
+
+    #[test]
+    fn the_template_shorthand_reads_area_strings() {
+        use Property::*;
+        let grid = |side: &Side, v: &Value| match v {
+            Value::Grid(i) => side.grids[*i as usize].clone(),
+            _ => panic!("{v:?}"),
+        };
+        // crates.io: one row of names, and the columns after the slash.
+        let (out, side) = read("grid-template", "'logo search nav' / 1fr minmax(0, 600px) 1fr");
+        assert_eq!(out.iter().map(|d| d.0).collect::<Vec<_>>(), [GridTemplateRows, GridTemplateColumns, GridTemplateAreas]);
+        let auto = Part::Track(Track { min: Bound::Auto, max: Bound::Auto });
+        assert_eq!(grid(&side, &out[0].1), Grid::Tracks(vec![auto.clone()]));
+        assert!(matches!(grid(&side, &out[1].1), Grid::Tracks(t) if t.len() == 3));
+        assert!(matches!(grid(&side, &out[2].1), Grid::Areas(a) if a.rows == 1 && a.columns == 3 && a.names.len() == 3));
+        // A size after a string sizes its row, names go to the lines, and no slash gives no columns.
+        let (out, side) = read("grid-template", "[top] 'a a' 40px [mid] 'b c' [end]");
+        let names = |n: &[&str]| Part::Names(n.iter().map(|x| Box::from(*x)).collect());
+        let px40 = Part::Track(Track { min: Bound::Len(Length::Px(40.0)), max: Bound::Len(Length::Px(40.0)) });
+        assert_eq!(grid(&side, &out[0].1), Grid::Tracks(vec![names(&["top"]), px40, names(&["mid"]), auto, names(&["end"])]));
+        assert_eq!(out[1].1, Value::Keyword(Keyword::None));
+        assert!(matches!(grid(&side, &out[2].1), Grid::Areas(a) if a.rows == 2 && a.columns == 2));
     }
 
     #[test]

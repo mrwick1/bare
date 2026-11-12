@@ -41,7 +41,8 @@
 //! effects, Tab navigation, and focus following a click.
 //!
 //! `focus(options)`: `preventScroll` is read and accepted. No scroll state exists, so nothing is scrolled either way.
-//! `focusVisible` is `Unsupported` (nothing reads `:focus-visible`). A non-object, non-null option is a `TypeError`.
+//! `focusVisible` is read and ignored: nothing matches `:focus-visible`. Other members are ignored, as in the standard.
+//! A non-object, non-null option is a `TypeError`.
 
 use crate::browser::*;
 use crate::browser_dom as nd;
@@ -261,11 +262,8 @@ pub(crate) fn focus(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V
     match arg(a, 0) {
         Value::Undefined | Value::Null => {}
         o @ Value::Object(_) => {
+            init_flag(d, it, o, "focusVisible")?;
             init_flag(d, it, o, "preventScroll")?;
-            let k = d.key(it, "focusVisible")?;
-            if !matches!(it.get_value(o, k)?, Value::Undefined) {
-                return Err(Error::Unsupported(unsupported("focus option focusVisible (no :focus-visible state)")));
-            }
         }
         _ => return Err(it.type_error("Failed to execute 'focus' on 'HTMLElement': parameter 1 is not of type 'FocusOptions'.")),
     }
