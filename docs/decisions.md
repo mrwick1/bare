@@ -810,7 +810,7 @@ Each line says what the code does now. Detail and limits are in the progress sec
 
 ## `Intl.Locale` and `Intl.RelativeTimeFormat`
 
-`Intl.Locale` and `Intl.RelativeTimeFormat` exist. wise.com needs `Intl.Locale` and theverge.com needs `Intl.RelativeTimeFormat`. `DisplayNames`, `ListFormat`, `DurationFormat` and `supportedValuesOf` stay absent.
+`Intl.Locale` and `Intl.RelativeTimeFormat` exist. wise.com needs `Intl.Locale` and theverge.com needs `Intl.RelativeTimeFormat`. `DurationFormat` and `supportedValuesOf` stay absent (`DisplayNames` and `ListFormat`: see below).
 
 - `Locale`: the tag goes through `canonical_tag` (the code of `getCanonicalLocales`). Options replace `language`, `script`, `region` and the `-u-` keywords. The getters are `baseName`, `language`, `script`, `region`, `calendar`, `caseFirst`, `collation`, `hourCycle`, `numeric` and `numberingSystem`. `getCalendars` and the other `get*` methods are absent. `new Intl.Locale("und").language` is `"und"` (ECMA-402 `GetLocaleLanguage`); Node 22 gives `undefined`.
 - Likely subtags: a table of 40 languages in `intl_locale.rs` (about 1 KB). The full CLDR table has about 1,900 rows. bare has data for English only, and a page asks `maximize` about a common locale. A language that is not in the table stays as it is. `und-Latn` and `und-US` use the first row of the table that has the script or the region.
@@ -1351,3 +1351,12 @@ An agent clicked a ref under a spinner and got `covered`. A cookie banner over t
 - The failure names the cover, not the element under the pointer. Of the ancestors of that element that do not hold the target, it names the outermost with a role and a name. It falls back to the outermost one. It gives `tag#id.class` and `(role "name")`.
 - bare has no CSS transitions. A backdrop that fades with `transition` and removes itself on `transitionend` never goes, so the click fails after 1 s. A fade by script works.
 - Window mode routes each tool through `Remote::call` on the window thread. The dialog and tab policy is per thread and is set there, so it works. The test `the_agent_tools_work_in_a_window` checks the tools in a window. It is ignored because it needs a Wayland display. Run it on a nested compositor, not on a desktop in use.
+## `Intl.ListFormat` and `Intl.DisplayNames` (2026-11-12)
+
+GitHub's issues page calls `new Intl.ListFormat(...)` when it loads. Without it the page showed "Unable to load page." (bare#394). Both constructors now exist.
+
+- They are accessors on `Intl` until their first read, as `Intl.Locale` is. A realm that does not read them pays for two functions.
+- `ListFormat` keeps its separators in code: three types, three styles and the five locales of `intl.rs`. The tests check them against Node.
+- `DisplayNames` reads `intl_names_data.rs` (made by `tools/js/intl_names_gen.mjs` from Node's ICU, 11 KB of source). It holds a short list of common languages, dialects, regions, scripts, currencies, calendars and date fields. It does not hold all of CLDR.
+- An unknown code gives the code itself (`fallback: "code"`) or undefined (`fallback: "none"`), as Chrome does.
+- Every locale uses the names of en-US. Another locale resolves to English, as the other `Intl` objects of bare do.

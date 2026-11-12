@@ -3981,6 +3981,10 @@ mod intl_num_tests;
 mod intl_locale_tests;
 
 #[cfg(test)]
+#[path = "eval_intl_list_tests.rs"]
+mod intl_list_tests;
+
+#[cfg(test)]
 #[path = "eval_number_tests.rs"]
 mod number_tests;
 
