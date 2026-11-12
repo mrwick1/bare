@@ -18,9 +18,9 @@
 //! `cookieEnabled` is true, as asked. `document.cookie` and the network share one jar (`bare_net::cookie`, `browser_cookie.rs`). There is no `mediaDevices`.
 //!
 //! `Blob`: `new Blob(parts, {type})` with strings, `ArrayBuffer`s, views and Blobs, `size`, `type`, `text()`,
-//! `arrayBuffer()`, `slice()`. `File extends Blob` adds `name` and `lastModified`. A Blob keeps its bytes in a side table
+//! `arrayBuffer()`, `slice()`, `stream()` (the `body` of a hidden byte response, `browser_fetch::bytes_stream`). `File extends Blob` adds `name` and `lastModified`. A Blob keeps its bytes in a side table
 //! (a copy), bounded by `MAX_BLOB` for each Blob and `MAX_TOTAL` together. `endings` is ignored (always "transparent").
-//! Absent: `bytes()`, `stream()`, structured clone.
+//! Absent: `bytes()`, structured clone.
 //!
 //! Object URLs (W3C File API, "Blob URL Store"): `URL.createObjectURL(blob)` registers the Blob under a new `blob:ORIGIN/UUID` in a
 //! store of this document and returns the URL. `URL.revokeObjectURL(url)` removes it. A URL that is not in the store (never made,
@@ -382,6 +382,7 @@ fn make(d: &Dom, it: &mut Interp<'_>) -> R<Made> {
     op(d, it, bp, "slice", 2, blob_slice)?;
     op(d, it, bp, "text", 0, blob_text)?;
     op(d, it, bp, "arrayBuffer", 0, blob_array_buffer)?;
+    op(d, it, bp, "stream", 0, blob_stream)?;
     let fp = proto(it, bp, "File")?;
     let file = iface(d, it, "File", 2, file_ctor, fp)?;
     it.heap.set_prototype_of(file, Some(blob)).map_err(|e| it.heap_error(e))?;
@@ -886,6 +887,12 @@ fn blob_array_buffer(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> 
         it.new_array_buffer(bytes)
     })();
     crate::browser_fetch::settle(it, p, r)
+}
+
+fn blob_stream(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    let o = blob_of(d, it, this)?;
+    let bytes = d.web.s.borrow().blobs[&o].bytes.clone();
+    crate::browser_fetch::bytes_stream(d, it, bytes)
 }
 
 // ------------------------------------------------------------------------------------------ FormData

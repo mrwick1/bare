@@ -163,6 +163,22 @@ fn role_of(cx: &Cx, n: NodeId, clicks: &HashSet<NodeId>) -> Option<&'static str>
     }
 }
 
+/// Does an element below `n` (in the flat tree) have the role of a control and a name?
+/// A control with no name (the `#` anchor icon of a docs heading) does not count: its line would cost tokens and tell nothing.
+fn holds_control(cx: &Cx, n: NodeId) -> bool {
+    let mut stack: Vec<NodeId> = cx.doc.flat_children(n).collect();
+    while let Some(c) = stack.pop() {
+        if !matches!(cx.doc.data(c), NodeData::Element { .. }) || !cx.boxed(c) {
+            continue;
+        }
+        if cx.role(c).is_some_and(|r| CONTROLS.contains(&intern(r))) && !cx.name(c).is_empty() {
+            return true;
+        }
+        stack.extend(cx.doc.flat_children(c));
+    }
+    false
+}
+
 fn pointer(cx: &Cx, n: NodeId) -> bool {
     cx.styles.style(n).is_some_and(|s| matches!(s.get(Property::Cursor), Css::Keyword(Keyword::Pointer)))
 }
@@ -279,7 +295,8 @@ fn walk(cx: &Cx, root: NodeId, mode: Mode, clicks: &HashSet<NodeId>, out: &mut V
                 out.push(Item::El(Line { depth, node: n, role: r, name: short(&name, 200), flags: flags(cx, n, r, name.is_empty()) }));
                 inner = depth + 1;
             }
-            if LEAVES.contains(&r) {
+            // A heading that holds a link (an issue title on GitHub) shows the link: the agent clicks it or takes its URL.
+            if LEAVES.contains(&r) && !(r == "heading" && holds_control(cx, n)) {
                 continue;
             }
         }
@@ -303,9 +320,13 @@ fn walk(cx: &Cx, root: NodeId, mode: Mode, clicks: &HashSet<NodeId>, out: &mut V
             Item::El(l) => l.depth,
             Item::Text(d, _) => *d,
         };
+        let inner = match &out[i + 1] {
+            Item::El(l) => l.name.clone(),
+            Item::Text(..) => String::new(),
+        };
         if let Item::El(l) = &mut out[i]
-            && l.role == "clickable"
             && d > l.depth
+            && (l.role == "clickable" || (l.role == "heading" && l.name == inner))
         {
             l.name.clear();
         }

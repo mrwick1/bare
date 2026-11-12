@@ -76,3 +76,14 @@ fn fonts_keep_private_brands_when_collection_prototypes_change() {
         assert_eq!(js(&mut b,"var s=document.fonts,f=new FontFace('One','local(One)');WeakMap.prototype.has=function(){return true};WeakMap.prototype.get=function(){return {members:new Set()}};Set.prototype.add=function(){throw new Error('patched')};var n=0;try{s.add({})}catch(e){if(e instanceof TypeError)n++}n+','+(s.add(f)===s)+','+s.has(f)"),"1,true,true");
     });
 }
+#[test]
+fn font_set_is_event_target() {
+    big(|| {
+        let mut b=mk(None,FetchLimits::default());
+        // react-textarea-autosize listens for 'loadingdone' on document.fonts.
+        assert_eq!(js(&mut b,"var s=document.fonts,n=[];s instanceof EventTarget && typeof s.addEventListener==='function'"),"true");
+        assert_eq!(js(&mut b,"var f=function(e){n.push(e.type+(this===s))};s.addEventListener('loadingdone',f);s.dispatchEvent(new Event('loadingdone'));s.removeEventListener('loadingdone',f);s.dispatchEvent(new Event('loadingdone'));n.join()"),"loadingdonetrue");
+        assert_eq!(js(&mut b,"var m=[];s.onloadingdone===null && (s.onloadingdone=function(e){m.push(e.type)}, s.dispatchEvent(new Event('loadingdone')), s.onloadingdone=null, s.dispatchEvent(new Event('loadingdone')), m.join()+','+s.onloading+','+s.onloadingerror)"),"loadingdone,null,null");
+        assert_eq!(js(&mut b,"var f=new FontFace('One','local(One)');s.add(f);[...s].length+','+([...s.values()][0]===f)+','+([...s.keys()][0]===f)+','+([...s.entries()][0][1]===f)"),"1,true,true,true");
+    });
+}

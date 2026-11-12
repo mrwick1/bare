@@ -1537,3 +1537,52 @@ An agent gets the URL of a named link in one small call, not with `eval`.
 - `pipeTo` reads an error of the source only when it reads, because the host reader has no `closed` promise.
 - An abort of the writable side of a `TransformStream` errors its readable side at once. This is the older text of the standard. `transformer.cancel` runs.
 - `tee` and async iteration stay gated.
+
+## FontFaceSet is an EventTarget (2026-11-12)
+
+- `FontFaceSet` extends `EventTarget`. Pages such as `react-textarea-autosize` call `document.fonts.addEventListener('loadingdone', ...)` and threw a `TypeError` before.
+- `onloading`, `onloadingdone` and `onloadingerror` follow the handler pattern of the `indexedDB` shim.
+- bare loads no web fonts, so the set never fires these events on its own. A page can still dispatch them.
+- `values`, `keys`, `entries` and `Symbol.iterator` return iterators of the private member `Set`.
+- The set stays lazy. A page that never reads `document.fonts` or `FontFace` pays nothing.
+
+## A link inside a heading shows in the snapshot (2026-11-12)
+
+GitHub puts each issue title in a link inside an `<h3>`. The snapshot walk treated a heading as a leaf, so it skipped the link. `links` uses the same walk, so it missed the link too.
+
+- A heading stays a leaf only when it holds no control.
+- A heading that holds a control shows its children, so the link gets a line and a ref.
+- When the first line under the heading has the same name, the heading line drops its name. The title then shows once.
+
+## Custom property sets as numbers (2026-11-12)
+
+GitHub sets about 2,500 custom properties on the root. Each new set copied all names and texts of the parent set and hashed them again. That took about 40% of each cascade.
+
+- `var::Sets` keeps each custom property name and each text once, with a number.
+- A set is a list of text numbers, one for each name number. 0 means "not set".
+- A new set copies plain numbers. Equal sets have equal numbers, so the check is a compare of memory.
+- A set has no 0 at its end. A set made before a new name came is then equal to the same set made after.
+- An element that sets the values of its parent keeps the number of the parent set.
+- The sets are found by a hash that reads 8 bytes at a step.
+- `var()` resolution, fallbacks, circles, `initial`, `inherit` and `unset` do not change. A dump of every style of a saved GitHub page is the same before and after.
+- The names are not numbered in the rule set. A name is hashed only when the cascade makes a new set, about 200 times for a GitHub page.
+
+## A ReadableStream as the body of a Response (2026-11-12)
+
+Pages build a Response from a stream, e.g. `new Response(stream.pipeThrough(new TextEncoderStream())).text()`. bare threw "ReadableStream request bodies are not supported", with the word "request" for a Response.
+
+- `new Response(stream)` keeps the stream. `body` gives the same stream back. A locked or disturbed stream is a `TypeError`, as in the standard.
+- `text()`, `json()`, `arrayBuffer()`, `blob()` and `formData()` read the stream to the end in `shims/drain.js`. The bytes then go into a byte Response, so decoding and limits are the ones of a byte body.
+- The total is checked at each chunk. Over `max_request_body` (the bound of every body that script makes), the promise rejects with a `TypeError` that names the limit. A chunk that is not a `Uint8Array` rejects too.
+- `bodyUsed` is the `disturbed` flag of the stream. Host streams now keep that flag.
+- `clone()` of a stream body is `Unsupported`: it needs `tee`.
+- A request body stream stays a `TypeError`. `bare_net` sends a request body as one byte slice (`http::Request::body`), on a worker thread. A streamed upload needs a chunked upload there and a body that the worker reads from the page. That is not cheap. The text now names the call (`Request` or `XMLHttpRequest`) and the reason.
+- `Blob.stream()` is new: it is the `body` of a hidden byte Response. The check of this change needs it.
+
+## A tick runs queued promise jobs (2026-11-12)
+
+- An agent `eval` runs its script outside a task. Its promise jobs stayed queued until a timer or a reply came due.
+- `Promise.resolve(1).then(...)` then timed out after 10 s on a quiet page.
+- `Page::work` now counts queued promise jobs as work for now.
+- The next tick runs the microtask checkpoint, so such an eval gives its value in under 1 ms.
+- The eval loop needs no timer for this.
