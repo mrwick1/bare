@@ -339,6 +339,7 @@ impl Session {
         let limit = self.timeout;
         self.with_refs(move |p, _| {
             let _ = p.wait_load(Duration::from_secs(10));
+            let before = p.url();
             let b = p.browser().ok_or("no document")?;
             // The forms to try in order. A form that does not parse runs nothing, so the next form runs the code once.
             // The `\n` before each closing brace ends a `//` comment on the last line.
@@ -371,10 +372,10 @@ impl Session {
             };
             let end = Instant::now() + limit;
             let mut v = v;
-            loop {
+            let out = loop {
                 let b = p.browser().ok_or("no document")?;
                 match b.it.promise_status(v) {
-                    None => return Ok(b.inspect(v, EVAL_MAX)),
+                    None => break b.inspect(v, EVAL_MAX),
                     Some(bare_js::eval::PromiseStatus::Fulfilled(x)) => v = x,
                     Some(bare_js::eval::PromiseStatus::Rejected(x)) => return Err(format!("rejected: {}", thrown_value(b, x))),
                     Some(bare_js::eval::PromiseStatus::Pending) => {
@@ -387,7 +388,20 @@ impl Session {
                         }
                     }
                 }
+            };
+            // The code started a navigation (a new address, a link `click()`, `form.submit()`, `history.back()`): the ticks follow it
+            // until the next document has loaded, as after an `act`. A `#hash` change loads nothing.
+            let started = |p: &mut Page| p.loading() || p.browser().map(|b| b.navigation_stats()).is_some_and(|n| n.pending_requests + n.pending_tasks > 0);
+            while started(p) && Instant::now() < end {
+                let (more, next) = p.tick();
+                if !more {
+                    std::thread::sleep(next.map_or(Duration::from_millis(5), |t| t.saturating_duration_since(Instant::now()).min(Duration::from_millis(20))));
+                }
             }
+            let _ = p.wait_load(end.saturating_duration_since(Instant::now()));
+            // The line names the URL without its fragment (`safe_url`), so a `#hash` change gives no line.
+            let (before, after) = (safe_url(&before.unwrap_or_default()), safe_url(&p.url().unwrap_or_default()));
+            Ok(if after != before { format!("{out}\nnavigated: {after}") } else { out })
         })?
     }
 

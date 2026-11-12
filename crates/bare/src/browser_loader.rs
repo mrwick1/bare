@@ -931,7 +931,9 @@ impl Browser {
     /// `live_work`; with `streams` false an open event stream is not work: it can stay open for as long as the page lives.
     pub(crate) fn live_work_of(&self, streams: bool) -> Option<bool> {
         let s = &self.dom.scripts;
-        if !s.inline.borrow().is_empty() || self.navigation_stats().pending_tasks > 0 {
+        // A navigation request is work too: a script outside a task (an agent `eval`) can leave one, and only a turn follows it.
+        let nav = self.navigation_stats();
+        if !s.inline.borrow().is_empty() || nav.pending_tasks > 0 || nav.pending_requests > 0 {
             return Some(true);
         }
         let net = s.net.borrow();

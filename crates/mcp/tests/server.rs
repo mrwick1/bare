@@ -2089,3 +2089,49 @@ fn eval_takes_expressions_statements_return_and_await_alike() {
         assert!(error && r.contains("SyntaxError") && r.contains("line 2"), "{js}: {r}");
     }
 }
+
+const NAV_ONE: &str = "<!doctype html><title>one</title><body><p>page one</p><a id=next href=/b>Next</a>
+<form id=f action=/b><input name=q value=x></form></body>";
+const NAV_TWO: &str = "<!doctype html><title>two</title><body><p>page two</p></body>";
+
+/// Open the first page and mark its document, so that a later check tells a new document from the same one.
+fn nav_open(s: &mut Server, base: &str) {
+    let (r, e) = s.tool("open", json!({"url": format!("{base}/"), "timeout_ms": 5000}));
+    assert!(!e, "{r}");
+    s.tool("eval", json!({"js": "window.mark = 1"}));
+}
+
+/// A navigation that code run by `eval` starts is followed, as one that an `act` click starts, and the reply says where it went.
+#[test]
+fn a_navigation_that_eval_starts_is_followed() {
+    let base = pages(&[("/", NAV_ONE), ("/b", NAV_TWO), ("/b?q=x", NAV_TWO)]);
+    let mut s = Server::start();
+    for (js, to) in [
+        ("location.href = '/b'; 1", "/b"),
+        ("location.assign('/b'); 1", "/b"),
+        ("location.replace('/b'); 1", "/b"),
+        ("document.getElementById('next').click(); 1", "/b"),
+        ("document.getElementById('f').submit(); 1", "/b?q=x"),
+    ] {
+        nav_open(&mut s, &base);
+        let (r, e) = s.tool("eval", json!({"js": js}));
+        assert!(!e, "{js}: {r}");
+        assert_eq!(r, json!(format!("1\nnavigated: {base}{to}")), "{js}");
+        assert_eq!(s.tool("eval", json!({"js": "location.pathname + location.search + ' ' + document.title + ' ' + window.mark"})).0, json!(format!("{to} two undefined")), "{js}");
+    }
+    // `history.back()` goes back to the first page.
+    let (r, e) = s.tool("eval", json!({"js": "history.back(); 1"}));
+    assert!(!e, "{r}");
+    assert_eq!(r, json!(format!("1\nnavigated: {base}/")));
+    assert_eq!(s.tool("eval", json!({"js": "document.title"})).0, json!("one"));
+}
+
+/// A `#hash` change stays in the same document: no load, and no `navigated` line (the line never shows a fragment).
+#[test]
+fn a_hash_change_from_eval_loads_nothing() {
+    let base = pages(&[("/", NAV_ONE), ("/b", NAV_TWO)]);
+    let mut s = Server::start();
+    nav_open(&mut s, &base);
+    assert_eq!(s.tool("eval", json!({"js": "location.hash = 'x'; 1"})), (json!(1), false));
+    assert_eq!(s.tool("eval", json!({"js": "location.hash + ' ' + document.title + ' ' + window.mark"})).0, json!("#x one 1"));
+}
