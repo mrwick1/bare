@@ -20,12 +20,13 @@
 //! Supported syntax: literals, `\t \n \v \f \r \0 \cX \xHH \uHHHH` and identity escapes, `.`,
 //! `\d \D \s \S \w \W`, classes with ranges and negation, `^ $ \b \B`, alternation, capturing and
 //! `(?:...)` groups, `* + ? {n} {n,} {n,m}` (greedy and lazy), backreferences `\1`, lookahead
-//! `(?=...)` and `(?!...)`, lookbehind `(?<=...)` and `(?<!...)`, and the flags `g i m s u y`. Annex B (web compatibility) rules for
+//! `(?=...)` and `(?!...)`, lookbehind `(?<=...)` and `(?<!...)`, and the flags `d g i m s u v y`. Annex B (web compatibility) rules for
 //! non-Unicode patterns are followed: a lone `]` `}` or `{` is a literal, `\8` is `8`, `\1` with
 //! fewer than one group is legacy octal, `\c` without a letter is a backslash, `[\d-x]` has a
 //! literal `-`.
 //!
-//! Explicit errors, never a different pattern: flags `v d` ([`CompileError::UnsupportedFlag`]). A quantified lookahead
+//! With `v`, classes take set notation: nested classes, `--`, `&&` and `\q{a|bc}` strings (a class that holds strings is an
+//! alternation, longest string first). Properties of strings (`\p{RGI_Emoji}`) are a `SyntaxError`. A quantified lookahead
 //! follows Annex B without `u` and is a `SyntaxError` with `u`. With `u`, `\p{...}` and `\P{...}` read General_Category, Script, Script_Extensions and the
 //! binary properties of ECMA-262 from `bare_unicode::property` (the sets are made when the pattern is compiled); an unknown name
 //! is a `SyntaxError`. Without `u`, `\p{L}` is the literal text `p{L}`, as in ECMA-262.
@@ -70,19 +71,19 @@ pub struct Flags {
     pub multiline: bool,
     pub dot_all: bool,
     pub sticky: bool,
-    /// `u`: the pattern and the input are code points (see the header).
+    /// `u` or `v`: the pattern and the input are code points (see the header).
     pub unicode: bool,
+    /// `v`: also set notation in classes. `unicode` is true too.
+    pub unicode_sets: bool,
     /// `d`: the wrapper adds `indices` to match results. The matcher ignores it.
     pub has_indices: bool,
 }
 
 impl Flags {
-    /// Parse a flags string. Unknown or repeated flags are errors. `v` is a valid
-    /// JS flag that this engine does not support, so it is a different error.
+    /// Parse a flags string. Unknown or repeated flags are errors, and so is `u` with `v`.
     pub fn parse(s: &str) -> Result<Flags, CompileError> {
         let mut f = Flags::default();
         let mut seen = [false; 128];
-        let mut unsupported = None;
         for c in s.chars() {
             let i = c as usize;
             if i >= 128 || !b"dgimsuvy".contains(&(c as u8)) {
@@ -100,16 +101,16 @@ impl Flags {
                 'y' => f.sticky = true,
                 'u' => f.unicode = true,
                 'd' => f.has_indices = true,
-                _ => unsupported = unsupported.or(Some(c)),
+                _ => {
+                    f.unicode = true;
+                    f.unicode_sets = true;
+                }
             }
         }
         if seen[b'u' as usize] && seen[b'v' as usize] {
             return Err(CompileError::InvalidFlags('v'));
         }
-        match unsupported {
-            Some(c) => Err(CompileError::UnsupportedFlag(c)),
-            None => Ok(f),
-        }
+        Ok(f)
     }
 }
 
@@ -122,8 +123,6 @@ pub enum CompileError {
     Unsupported { what: &'static str, at: usize },
     /// The flags string has an unknown or repeated flag (a JS `SyntaxError`).
     InvalidFlags(char),
-    /// Valid JS flag that this engine does not implement (`v`).
-    UnsupportedFlag(char),
     /// A compile bound was exceeded (pattern length, nesting, program size, groups, class work).
     Limit(&'static str),
 }
@@ -919,6 +918,63 @@ fn contains(r: &[(u32, u32)], c: u32) -> bool {
     .is_ok()
 }
 
+/// The value of a `v` class expression: code points, and strings of 0 or 2+ code points (a one code point string is a
+/// member of `ranges`).
+#[derive(Default)]
+struct CSet {
+    ranges: Vec<(u32, u32)>,
+    strs: Vec<Vec<u32>>,
+}
+
+impl CSet {
+    fn add_str(&mut self, s: Vec<u32>) {
+        if let [c] = s[..] {
+            self.ranges.push((c, c));
+        } else {
+            self.strs.push(s);
+        }
+    }
+
+    /// Sort and merge the ranges. Sort the strings longest first and drop the repeats.
+    fn norm(&mut self) {
+        normalize(&mut self.ranges);
+        self.strs.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+        self.strs.dedup();
+    }
+
+    fn union(&mut self, o: CSet) {
+        self.ranges.extend(o.ranges);
+        self.strs.extend(o.strs);
+    }
+
+    fn intersect(&mut self, mut o: CSet) {
+        self.norm();
+        o.norm();
+        self.ranges = intersect_ranges(&self.ranges, &o.ranges);
+        self.strs.retain(|s| o.strs.contains(s));
+    }
+
+    fn subtract(&mut self, mut o: CSet) {
+        self.norm();
+        o.norm();
+        self.ranges = intersect_ranges(&self.ranges, &complement(&o.ranges, 0x10FFFF));
+        self.strs.retain(|s| !o.strs.contains(s));
+    }
+}
+
+/// The intersection of two normalized range lists.
+fn intersect_ranges(a: &[(u32, u32)], b: &[(u32, u32)]) -> Vec<(u32, u32)> {
+    let (mut i, mut j, mut out) = (0, 0, Vec::new());
+    while i < a.len() && j < b.len() {
+        let (lo, hi) = (a[i].0.max(b[j].0), a[i].1.min(b[j].1));
+        if lo <= hi {
+            out.push((lo, hi));
+        }
+        if a[i].1 < b[j].1 { i += 1 } else { j += 1 }
+    }
+    out
+}
+
 #[derive(Debug)]
 struct ClassSet {
     /// Members. With `i`, this is the set of canonical forms of the members.
@@ -1046,14 +1102,15 @@ fn hex(c: u16) -> Option<u32> {
 impl<'a> Parser<'a> {
     fn new(p: &'a [u16], flags: Flags) -> Parser<'a> {
         // Count capturing groups first: `\N` is a backreference only if N <= the total.
-        let (mut n, mut i, mut in_class) = (0u32, 0, false);
+        let (mut n, mut i, mut in_class) = (0u32, 0, 0u32);
         let mut names = Vec::new();
         while i < p.len() {
             match p[i] {
                 0x5C => i += 1,
-                0x5B => in_class = true,
-                0x5D => in_class = false,
-                0x28 if !in_class => {
+                // With `v` classes nest. Without it the first `]` closes the class.
+                0x5B => in_class = if flags.unicode_sets { in_class + 1 } else { 1 },
+                0x5D => in_class = if flags.unicode_sets { in_class.saturating_sub(1) } else { 0 },
+                0x28 if in_class == 0 => {
                     let named = p.get(i + 1) == Some(&0x3F)
                         && p.get(i + 2) == Some(&0x3C)
                         && !matches!(p.get(i + 3), Some(0x3D) | Some(0x21));
@@ -1472,6 +1529,10 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_class(&mut self, at: usize) -> Result<Node, CompileError> {
+        if self.flags.unicode_sets {
+            let (set, neg) = self.class_set_v(at)?;
+            return self.class_node(set, neg);
+        }
         let neg = self.eat(b'^');
         let mut set: Vec<(u32, u32)> = Vec::new();
         loop {
@@ -1517,6 +1578,170 @@ impl<'a> Parser<'a> {
             }
         }
         self.add_class(set, neg)
+    }
+
+    /// A `v` class after its `[`: the members and whether it is negated. Parses `ClassUnion`, `ClassIntersection` and
+    /// `ClassSubtraction` (ECMA-262 22.2.1). A negated class that holds strings is a `SyntaxError`.
+    fn class_set_v(&mut self, at: usize) -> Result<(CSet, bool), CompileError> {
+        let neg = self.eat(b'^');
+        let (mut acc, mut count, mut op) = (CSet::default(), 0u32, 0u8);
+        loop {
+            let Some(c) = self.peek() else { return syn("Unterminated character class", at) };
+            if c == b']' as u16 {
+                self.i += 1;
+                break;
+            }
+            if op != 0 || count == 1 {
+                let dbl = |ch: u16| c == ch && self.p.get(self.i + 1) == Some(&ch);
+                let want = if dbl(b'&' as u16) { b'&' } else if dbl(b'-' as u16) { b'-' } else { 0 };
+                if want == 0 && op != 0 || want != 0 && op != 0 && op != want {
+                    return syn("Invalid set operation in character class", self.i);
+                }
+                if want != 0 {
+                    self.i += 2;
+                    if want == b'&' && self.peek() == Some(b'&' as u16) {
+                        return syn("Invalid set operation in character class", self.i);
+                    }
+                    op = want;
+                    let (o, _) = self.class_operand(at)?;
+                    if op == b'&' { acc.intersect(o) } else { acc.subtract(o) }
+                    count += 1;
+                    continue;
+                }
+            }
+            let (set, single) = self.class_operand(at)?;
+            match single {
+                Some(x) if self.peek() == Some(b'-' as u16) && self.p.get(self.i + 1) != Some(&(b'-' as u16)) => {
+                    self.i += 1;
+                    let at_b = self.i;
+                    match self.class_operand(at)?.1 {
+                        Some(y) if x <= y => acc.ranges.push((x, y)),
+                        Some(_) => return syn("Range out of order in character class", at_b),
+                        None => return syn("Invalid character class", at_b),
+                    }
+                    count += 2;
+                }
+                _ => {
+                    acc.union(set);
+                    count += 1;
+                }
+            }
+            if acc.ranges.len() > MAX_PROGRAM {
+                return Err(CompileError::Limit("class too large"));
+            }
+        }
+        acc.norm();
+        if neg && !acc.strs.is_empty() {
+            return syn("Negated character class may contain strings", at);
+        }
+        Ok((acc, neg))
+    }
+
+    /// One operand of a `v` class: a nested class, `\q{...}`, a class escape, or a character (then also its code point,
+    /// for ranges).
+    fn class_operand(&mut self, at: usize) -> Result<(CSet, Option<u32>), CompileError> {
+        match (self.peek(), self.p.get(self.i + 1).map(|&c| if c < 128 { c as u8 } else { 0 })) {
+            (Some(0x5B), _) => {
+                self.i += 1;
+                self.depth += 1;
+                if self.depth > MAX_DEPTH {
+                    return Err(CompileError::Limit("classes nested too deeply"));
+                }
+                let (mut set, neg) = self.class_set_v(at)?;
+                self.depth -= 1;
+                if neg {
+                    set.ranges = complement(&set.ranges, 0x10FFFF);
+                }
+                Ok((set, None))
+            }
+            (Some(0x5C), Some(b'q')) => {
+                self.i += 2;
+                if !self.eat(b'{') {
+                    return syn("Invalid escape", self.i);
+                }
+                let (mut set, mut cur) = (CSet::default(), Vec::new());
+                loop {
+                    match self.peek() {
+                        None => return syn("Unterminated character class", at),
+                        Some(0x7D) => {
+                            self.i += 1;
+                            set.add_str(cur);
+                            break;
+                        }
+                        Some(0x7C) => {
+                            self.i += 1;
+                            set.add_str(std::mem::take(&mut cur));
+                        }
+                        Some(_) => cur.push(self.class_set_char()?),
+                    }
+                }
+                Ok((set, None))
+            }
+            (Some(0x5C), Some(b'd' | b'D' | b's' | b'S' | b'w' | b'W' | b'p' | b'P')) => {
+                self.i += 1;
+                match self.parse_escape(true)? {
+                    Esc::Set(ranges) => Ok((CSet { ranges, strs: Vec::new() }, None)),
+                    _ => syn("Invalid character class", self.i),
+                }
+            }
+            _ => {
+                let c = self.class_set_char()?;
+                Ok((CSet { ranges: vec![(c, c)], strs: Vec::new() }, Some(c)))
+            }
+        }
+    }
+
+    /// A `ClassSetCharacter`: not a syntax character (`( ) [ ] { } / - \ |`) and not the first of a reserved double
+    /// punctuator (`&&`, `!!`, ...), or an escape.
+    fn class_set_char(&mut self) -> Result<u32, CompileError> {
+        let Some(c) = self.peek() else { return syn("Unterminated character class", self.i) };
+        let at = self.i;
+        self.i += 1;
+        if c == b'\\' as u16 {
+            return match self.peek() {
+                Some(n) if n < 128 && b"&-!#%,:;<=>@`~".contains(&(n as u8)) => {
+                    self.i += 1;
+                    Ok(n as u32)
+                }
+                _ => match self.parse_escape(true)? {
+                    Esc::Char(x) => Ok(x),
+                    _ => syn("Invalid character class", at),
+                },
+            };
+        }
+        if c < 128 {
+            if b"()[]{}/-|".contains(&(c as u8)) {
+                return syn("Invalid character in character class", at);
+            }
+            if b"&!#$%*+,.:;<=>?@^`~".contains(&(c as u8)) && self.peek() == Some(c) {
+                return syn("Invalid set operation in character class", at);
+            }
+        }
+        Ok(self.literal(c))
+    }
+
+    /// The node of a `v` class: a class of code points, or an alternation of its strings (longest first, as the spec
+    /// orders them), then the class, then the empty string.
+    fn class_node(&mut self, set: CSet, neg: bool) -> Result<Node, CompileError> {
+        if set.strs.is_empty() {
+            return self.add_class(set.ranges, neg);
+        }
+        let mut alts = Vec::with_capacity(set.strs.len() + 1);
+        let mut empty = false;
+        for s in &set.strs {
+            if s.is_empty() {
+                empty = true;
+            } else {
+                alts.push(Node::Cat(s.iter().map(|&c| Node::Char(c)).collect()));
+            }
+        }
+        if !set.ranges.is_empty() {
+            alts.push(self.add_class(set.ranges, false)?);
+        }
+        if empty {
+            alts.push(Node::Empty);
+        }
+        Ok(if alts.len() == 1 { alts.pop().unwrap() } else { Node::Alt(alts) })
     }
 
     fn class_atom(&mut self) -> Result<Esc, CompileError> {
@@ -2044,14 +2269,106 @@ mod tests {
         assert!(Regex::from_str("(?=a)*", "").is_ok());
         assert!(matches!(Regex::from_str("(?=a)*", "u"), Err(CompileError::Syntax { .. })));
         for f in ["v", "dv", "gv"] {
-            assert!(matches!(Regex::from_str("a", f), Err(CompileError::UnsupportedFlag(_))), "{f}");
+            assert!(Regex::from_str("a", f).is_ok(), "{f}");
         }
         for f in ["gg", "x", "G", "é", "uv"] {
             assert!(matches!(Regex::from_str("a", f), Err(CompileError::InvalidFlags(_))), "{f}");
         }
-        assert_eq!(Flags::parse("gimsy").unwrap(), Flags { global: true, ignore_case: true, multiline: true, dot_all: true, sticky: true, unicode: false, has_indices: false });
+        assert_eq!(Flags::parse("gimsy").unwrap(), Flags { global: true, ignore_case: true, multiline: true, dot_all: true, sticky: true, unicode: false, unicode_sets: false, has_indices: false });
         assert!(Flags::parse("dg").unwrap().has_indices);
         assert!(Flags::parse("u").unwrap().unicode);
+    }
+
+    /// Whole-string match of `p` (flag `v` plus `extra`) against `s`.
+    fn vfull(p: &str, extra: &str, s: &str) -> bool {
+        let re = Regex::from_str(&format!("^(?:{p})$"), &format!("v{extra}")).unwrap();
+        re.exec(&u(s), 0, &Limits::default(), None, &mut Scratch::new()).unwrap().is_some()
+    }
+
+    #[test]
+    fn unicode_sets_flag() {
+        let f = Flags::parse("v").unwrap();
+        assert!(f.unicode_sets && f.unicode);
+        assert!(!Flags::parse("u").unwrap().unicode_sets);
+        assert!(matches!(Flags::parse("uv"), Err(CompileError::InvalidFlags(_))));
+        // Code point semantics, as with `u`.
+        assert!(vfull(".", "", "\u{1F600}"));
+    }
+
+    #[test]
+    fn unicode_sets_classes() {
+        // A plain class and ranges.
+        assert!(vfull("[a-c]+", "", "abcba") && !vfull("[a-c]+", "", "abd"));
+        assert!(vfull("[^a-c]", "", "d") && !vfull("[^a-c]", "", "b"));
+        assert!(vfull("[\\u{1F600}-\\u{1F64F}]", "", "\u{1F610}"));
+        // Subtraction.
+        assert!(vfull("[\\w--\\d]+", "", "ab_") && !vfull("[\\w--\\d]", "", "5"));
+        assert!(vfull("[[a-z]--[aeiou]]+", "", "xyz") && !vfull("[[a-z]--[aeiou]]", "", "e"));
+        assert!(vfull("[[a-z]--b--c]+", "", "adz") && !vfull("[[a-z]--b--c]", "", "c"));
+        // Intersection.
+        assert!(vfull("[\\w&&\\d]+", "", "123") && !vfull("[\\w&&\\d]", "", "a"));
+        assert!(vfull("[[a-f]&&[d-z]&&[^e]]+", "", "df") && !vfull("[[a-f]&&[d-z]&&[^e]]", "", "e"));
+        // Nested classes and union.
+        assert!(vfull("[a[0-9][x-z]]+", "", "a1y") && !vfull("[a[0-9][x-z]]", "", "b"));
+        assert!(vfull("[[a-z]--[^a-c]]+", "", "abc") && !vfull("[[a-z]--[^a-c]]", "", "d"));
+        assert!(vfull("[^[a-c][x-z]]", "", "m") && !vfull("[^[a-c][x-z]]", "", "y"));
+        // Escapes: reserved punctuators and syntax characters.
+        assert!(vfull("[\\&\\-\\!\\#\\%\\,\\:\\;\\<\\=\\>\\@\\`\\~]+", "", "&-!#%,:;<=>@`~"));
+        assert!(vfull("[\\(\\)\\[\\]\\{\\}\\/\\|]+", "", "()[]{}/|"));
+        assert!(vfull("[a\\-z]+", "", "a-z") && !vfull("[a\\-z]", "", "b"));
+        // Properties.
+        assert!(vfull("[\\p{L}--[a-z]]+", "", "ABé") && !vfull("[\\p{L}--[a-z]]", "", "a"));
+        assert!(vfull("[\\p{L}&&\\p{ASCII}]+", "", "az") && !vfull("[\\p{L}&&\\p{ASCII}]", "", "é"));
+        // Ignore case.
+        assert!(vfull("[a-c]+", "i", "ABC"));
+        assert!(vfull("[\\q{ab}x]+", "i", "ABX"));
+        // Quantified.
+        assert!(vfull("[[a-c]--b]{3}", "", "aca"));
+    }
+
+    #[test]
+    fn unicode_sets_string_literals() {
+        assert!(vfull("[\\q{abc}]", "", "abc") && !vfull("[\\q{abc}]", "", "ab"));
+        assert!(vfull("[\\q{abc|d|}x]", "", "abc") && vfull("[\\q{abc|d|}x]", "", "d") && vfull("[\\q{abc|d|}x]", "", "x") && vfull("[\\q{abc|d|}x]", "", ""));
+        // The longest string wins over a prefix that is also a member.
+        let re = Regex::from_str("[\\q{ab|a}]", "v").unwrap();
+        assert_eq!(fmt(re.exec(&u("abc"), 0, &Limits::default(), None, &mut Scratch::new()).unwrap()), "0,2");
+        assert_eq!(run("[\\q{ab|a}]", "v", "abc"), "0,2");
+        // Strings in operations.
+        assert!(vfull("[\\q{ab|cd|e}--\\q{cd}]", "", "ab") && !vfull("[\\q{ab|cd|e}--\\q{cd}]", "", "cd"));
+        assert!(vfull("[\\q{ab|cd|e}--\\q{cd}]", "", "e"));
+        assert!(vfull("[\\q{ab|cd|e}&&\\q{cd|e|f}]", "", "cd") && !vfull("[\\q{ab|cd|e}&&\\q{cd|e|f}]", "", "ab"));
+        assert!(vfull("[\\q{ab|cd|e}&&\\q{cd|e|f}]", "", "e"));
+        // A one code point string is a class member (also in a subtraction from a range).
+        assert!(vfull("[[a-c]--\\q{b}]+", "", "ac") && !vfull("[[a-c]--\\q{b}]", "", "b"));
+        assert!(vfull("[\\q{\\u{1F600}}]", "", "\u{1F600}"));
+        // Escapes inside \q.
+        assert!(vfull("[\\q{a\\|b|c\\}}]", "", "a|b") && vfull("[\\q{a\\|b|c\\}}]", "", "c}"));
+        assert!(vfull("[\\q{\\n\\x41}]", "", "\nA"));
+    }
+
+    #[test]
+    fn unicode_sets_syntax_errors() {
+        for p in [
+            "[a&&&b]", "[a&&b--c]", "[a--b&&c]", "[ab&&c]", "[a&&bc]", "[a-z&&b]", "[a-z--b]", "[a--]", "[--a]", "[&&a]",
+            "[(]", "[)]", "[{]", "[}]", "[/]", "[|]", "[-]", "[a-]", "[[a]", "[a]]", "[!!]", "[##]", "[a^^]",
+            "[^\\q{ab}]", "[^\\q{}]", "[\\q{a]", "[\\q{a}", "[\\q]", "[z-a]", "[\\d-z]", "[a-\\d]", "[\\p{RGI_Emoji}]", "[\\k<a>]",
+        ] {
+            assert!(matches!(Regex::from_str(p, "v"), Err(CompileError::Syntax { .. })), "{p}");
+        }
+        // Valid in `v`.
+        for p in ["[a&b]", "[a!b]", "[^\\q{a|b}]", "[\\q{}]", "[]", "[^]", "[a-z]", "[a\\-b]"] {
+            assert!(Regex::from_str(p, "v").is_ok(), "{p}");
+        }
+        // Without `v` the old syntax stays: `&&` and `--` are plain members.
+        for p in ["[a&&b]", "[(]", "[!--b]", "[\\q]"] {
+            assert!(Regex::from_str(p, "").is_ok(), "{p}");
+        }
+        for p in ["[a&&b]", "[(]", "[!--b]"] {
+            assert!(Regex::from_str(p, "u").is_ok(), "{p}");
+        }
+        // A group count scan is not fooled by a `(` inside a nested class.
+        assert_eq!(Regex::from_str("[[a]\\(](b)", "v").map(|r| r.group_count()), Ok(1));
     }
 
     #[test]

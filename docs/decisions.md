@@ -1305,3 +1305,8 @@ Each character of a `bare-mcp` reply costs model tokens. A reply must give what 
 - Nothing collapses a long list. A list of links is a list of controls, and each control must stay reachable. The `max_chars` cut still applies.
 ## Screenshots paint the whole box (2026-11-12)
 A screenshot of an element taller than the window was cut at the window. The engine has the layout of the whole page. So `screenshot` now paints a canvas as tall as the element box, or as the page with `full_page`, with no scroll. A picture is at most 8000 px tall. The reply says when that cut it. An element above the window is painted from the top of the page.
+## RegExp `v` flag (2026-11-12)
+
+The regexp engine accepts the `v` flag (`unicodeSets`). `v` turns on code point mode, as `u` does, and adds set notation to classes. The parser reads nested classes, `--`, `&&` and `\q{a|bc}`. It follows the grammar of ECMA-262: no mixing of operators, no ranges inside an operation, and no negated class that holds strings.
+A class that holds strings compiles to an alternation: the strings longest first, then the class, then the empty string. A class without strings stays one class instruction, so classes without `v` do not slow down. The `unicode` getter is false for `v`, and `flags` prints `v`.
+Properties of strings (`\p{RGI_Emoji}`) are a `SyntaxError`. Case folding closes the final set only: `--` and `&&` do not fold their operands first.
