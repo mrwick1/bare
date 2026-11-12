@@ -314,19 +314,51 @@ impl Session {
         })?
     }
 
-    /// Run a script in the page and give its value as text (`JSON.stringify` it for an object).
+    /// Run a script in the page and give its value as text (`JSON.stringify` it for an object). A Promise is awaited up to the time limit.
+    /// Code with a top-level `await` runs as an async function: an expression gives its value, statements need a `return`.
     pub fn eval(&mut self, code: String) -> Result<String, String> {
+        let limit = self.timeout;
         self.with_refs(move |p, _| {
             let _ = p.wait_load(Duration::from_secs(10));
             let b = p.browser().ok_or("no document")?;
-            let r = b.run_script(&code);
-            let out = match r {
-                Ok(v) => Ok(b.it.display(v)),
-                Err(e) => Err(format!("the script threw: {}", short(&format!("{e:?}")))),
-            };
+            let mut r = None;
+            if has_await(&code) {
+                // The expression form first: a parse error leaves the code unrun.
+                for src in [format!("(async () => {{ return (\n{code}\n) }})()"), format!("(async () => {{\n{code}\n}})()")] {
+                    r = Some(b.run_script(&src));
+                    if r.as_ref().is_some_and(|r| r.is_ok()) {
+                        break;
+                    }
+                }
+            }
+            let r = r.unwrap_or_else(|| b.run_script(&code));
             p.touched();
-            let _ = p.tick();
-            out
+            let v = match r {
+                Ok(v) => v,
+                Err(e) => {
+                    let m = thrown(p.browser().expect("checked"), &e);
+                    return Err(format!("the script threw: {m}"));
+                }
+            };
+            let end = Instant::now() + limit;
+            let mut v = v;
+            loop {
+                let b = p.browser().ok_or("no document")?;
+                match b.it.promise_status(v) {
+                    None => return Ok(b.it.display(v)),
+                    Some(bare_js::eval::PromiseStatus::Fulfilled(x)) => v = x,
+                    Some(bare_js::eval::PromiseStatus::Rejected(x)) => return Err(format!("rejected: {}", thrown_value(b, x))),
+                    Some(bare_js::eval::PromiseStatus::Pending) => {
+                        if Instant::now() >= end {
+                            return Err(format!("the promise is still pending after {} ms", limit.as_millis()));
+                        }
+                        let (more, next) = p.tick();
+                        if !more {
+                            std::thread::sleep(next.map_or(Duration::from_millis(5), |t| t.saturating_duration_since(Instant::now()).min(Duration::from_millis(20))));
+                        }
+                    }
+                }
+            }
         })?
     }
 
@@ -712,6 +744,31 @@ pub fn safe_url(u: &str) -> String {
     format!("{path}?{}", pairs.join("&"))
 }
 
+/// A thrown value as text: `Name: message` for an error object, else its string form.
+fn thrown_value(b: &mut bare::browser::Browser, v: bare_js::value::Value) -> String {
+    if matches!(v, bare_js::value::Value::Object(_)) {
+        let (n, m) = (b.it.get_str(v, "name"), b.it.get_str(v, "message"));
+        if n != "?" && !(n == "undefined" && m == "undefined") {
+            return if m.is_empty() || m == "undefined" { n } else { format!("{n}: {m}") };
+        }
+    }
+    b.it.display(v)
+}
+
+/// A script error as text: a thrown value by `thrown_value`, else the engine's own text.
+fn thrown(b: &mut bare::browser::Browser, e: &bare_js::eval::Error) -> String {
+    match e {
+        bare_js::eval::Error::Throw(v) => thrown_value(b, *v),
+        e => format!("{e:?}"),
+    }
+}
+
+/// True when `code` holds the word `await`.
+fn has_await(code: &str) -> bool {
+    let id = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+    code.match_indices("await").any(|(i, w)| !code[..i].chars().next_back().is_some_and(id) && !code[i + w.len()..].chars().next().is_some_and(id))
+}
+
 fn short(s: &str) -> String {
     let s = locate::norm(s);
     if s.chars().count() > 120 { s.chars().take(120).collect::<String>() + "…" } else { s }
@@ -990,7 +1047,10 @@ fn check(p: &mut Page, m: &mut Memo, c: &Check) -> Result<(), Try> {
             match r {
                 Ok(bare_js::value::Value::Bool(true)) => {}
                 Ok(_) => return no(format!("the script gave false: {code}")),
-                Err(e) => return no(format!("the script threw: {}", short(&format!("{e:?}")))),
+                Err(e) => {
+                    let m = thrown(p.browser().expect("checked"), &e);
+                    return no(format!("the script threw: {}", short(&m)));
+                }
             }
         }
         Check::El(loc, State::Hidden) => {

@@ -1303,3 +1303,6 @@ Each character of a `bare-mcp` reply costs model tokens. A reply must give what 
 - `links` and the `href` in a line cut tracking parameters (`utm_*`, `fbclid`, `gclid` and similar). `links` gives a path for a link on the origin of the page.
 - Each interactive element keeps its line and ref. The set of interactive lines of each test page is the same before and after.
 - Nothing collapses a long list. A list of links is a list of controls, and each control must stay reachable. The `max_chars` cut still applies.
+
+## eval awaits promises and shows thrown errors (2026-11-12)
+`eval` ticks the page until a returned Promise settles, up to the step time limit. It gives the fulfilled value, or `rejected: Name: message`. Code with `await` runs as an async function. It first runs as `return (code)`. When that does not parse, it runs as a function body, and the code must `return` its value. A thrown value shows as `Name: message` for an error, else as its string form. Step `expect js` failures use the same text.
