@@ -286,6 +286,34 @@ impl Browser {
         Ok(out)
     }
 
+    /// A pick in a `<select>`: the options that match `wanted` (label, else value) are selected, then `input` and `change` fire, as for a
+    /// user pick. They fire only when the selection changed. `Err(why)` when no option matches.
+    pub fn drive_select(&mut self, node: NodeId, wanted: &[String]) -> R<Result<UiOutcome, String>> {
+        let mut bad = None;
+        let out = self.ui_call(true, |d, it| {
+            match d.sel_pick(it, node, wanted)? {
+                Ok(true) => {
+                    d.fire_plain(it, node, "input")?;
+                    d.fire_plain(it, node, "change")?;
+                }
+                Ok(false) => {}
+                Err(e) => bad = Some(e),
+            }
+            Ok(())
+        })?;
+        Ok(bad.map_or(Ok(out), Err))
+    }
+
+    /// The files of an `<input type=file>`: they are set, then `input` and `change` fire, as for a pick in the file dialog.
+    pub(crate) fn drive_files(&mut self, node: NodeId, files: Vec<FileRef>) -> R<UiOutcome> {
+        self.dom.st.borrow_mut().inputs.entry(node).or_default().files = files;
+        self.ui_call(true, |d, it| {
+            d.fire_plain(it, node, "input")?;
+            d.fire_plain(it, node, "change")?;
+            Ok(())
+        })
+    }
+
     /// Typed text in a text `<input>` or a `<textarea>`. See the header.
     pub fn drive_type(&mut self, node: NodeId, text: &str) -> R<UiOutcome> {
         if !self.is_text_input(node) {

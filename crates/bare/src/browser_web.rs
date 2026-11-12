@@ -910,6 +910,16 @@ fn form_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
         Some(f) => d.entry_list(it, f, None)?,
         None => Vec::new(),
     };
+    fill_form(d, it, proto, list)
+}
+
+/// A new FormData with these entries; `None` (a file input with no file) is an empty File with no name.
+pub(crate) fn form_from_entries(d: &Dom, it: &mut Interp<'_>, list: Vec<(String, Option<Ent>)>) -> V {
+    let m = made(d, it)?;
+    fill_form(d, it, m.form_p, list)
+}
+
+fn fill_form(d: &Dom, it: &mut Interp<'_>, proto: ObjId, list: Vec<(String, Option<Ent>)>) -> V {
     let o = d.obj(it, proto)?;
     d.web.s.borrow_mut().forms.insert(o, Form::default());
     d.web.active.set(true);
@@ -917,7 +927,6 @@ fn form_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
         let e = match v {
             Some(e) => e,
             None => {
-                // A file input with no file: an empty File with no name.
                 let fp = d.web.s.borrow().made.expect("made").file_p;
                 let Value::Object(f) = new_blob(d, it, fp, BlobData { bytes: Vec::new(), ty: "application/octet-stream".into(), file: Some((String::new(), it.wall_now_ms())) })? else { unreachable!() };
                 Ent::B(f)
@@ -926,6 +935,40 @@ fn form_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
         push(d, o, n, e)?;
     }
     Ok(Value::Object(o))
+}
+
+/// The most that one uploaded file may hold.
+pub(crate) const MAX_UPLOAD: u64 = 100 << 20;
+
+/// The content type of a file name, from its extension (a short list; else `application/octet-stream`).
+fn mime_of(name: &str) -> &'static str {
+    match name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).as_deref() {
+        Some("txt" | "log") => "text/plain",
+        Some("html" | "htm") => "text/html",
+        Some("css") => "text/css",
+        Some("csv") => "text/csv",
+        Some("json") => "application/json",
+        Some("pdf") => "application/pdf",
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("svg") => "image/svg+xml",
+        Some("zip") => "application/zip",
+        _ => "application/octet-stream",
+    }
+}
+
+/// A File with the bytes of a file on disk, read now.
+pub(crate) fn file_from_ref(d: &Dom, it: &mut Interp<'_>, f: &crate::browser::FileRef) -> V {
+    let bad = |d: &Dom, it: &mut Interp<'_>, e: String| d.dom_err(it, "NotReadableError", &format!("The file {:?} cannot be read: {e}", f.name));
+    let m = made(d, it)?;
+    let len = std::fs::metadata(&f.path).map_err(|e| bad(d, it, e.to_string()))?.len();
+    if len > MAX_UPLOAD {
+        return Err(bad(d, it, format!("{len} bytes is over the {} MiB limit", MAX_UPLOAD >> 20)));
+    }
+    let bytes = std::fs::read(&f.path).map_err(|e| bad(d, it, e.to_string()))?;
+    new_blob(d, it, m.file_p, BlobData { bytes, ty: mime_of(&f.name).into(), file: Some((f.name.clone(), f.modified_ms)) })
 }
 
 /// The entries of the FormData object `v`, a copy. `None` when `v` is not a FormData.

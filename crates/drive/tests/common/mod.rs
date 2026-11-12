@@ -76,8 +76,47 @@ fn pages(method: &str, target: &str, body: &str, auth: Option<&str>) -> (u16, &'
     let path = target.split('?').next().unwrap_or("/");
     match (path, target.split_once("?n=")) {
         ("/buttons", Some((_, n))) => (200, "text/html", buttons(n.parse().unwrap_or(1))),
+        ("/forms", _) => (200, "text/html", FORMS.as_bytes().to_vec()),
+        ("/upload", _) if method == "POST" => (200, "text/plain", upload_echo(body).into_bytes()),
         _ => reply(method, path, body, auth),
     }
+}
+
+/// A page of form controls for the form actions: two selects, a checkbox, a hover menu, a double click, and a file input with a
+/// submitted form and a `fetch` with `FormData`.
+const FORMS: &str = "<!DOCTYPE html><title>Forms</title>\
+<style>#menu { display: none; position: absolute } #hv:hover #menu { display: block }</style>\
+<select id=country name=country aria-label=Country><option value=ke>Kenya</option><option value=tz>Tanzania</option></select>\
+<select id=fruit name=fruit multiple aria-label=Fruit><option value=a>Apple</option><option value=b>Banana</option><option value=c>Cherry</option></select>\
+<p id=events>events:</p>\
+<label><input type=checkbox id=agree> Agree</label>\
+<div id=hv>Hover target<span id=menu> Menu is open</span></div><p id=entered>cold</p>\
+<button id=dbl>Double target</button><p id=dbls>single</p>\
+<form method=post action=/upload enctype=multipart/form-data><input type=file name=doc aria-label=Document><button>Send file</button></form>\
+<button id=go>Fetch file</button><p id=fetched></p>\
+<script>\
+var ev = function (e) { document.getElementById('events').textContent += ' ' + e.target.id + ':' + e.type };\
+['country', 'fruit'].forEach(function (id) { ['input', 'change'].forEach(function (t) { document.getElementById(id).addEventListener(t, ev) }) });\
+document.getElementById('hv').addEventListener('mouseenter', function () { document.getElementById('entered').textContent = 'hot' });\
+document.getElementById('dbl').addEventListener('dblclick', function () { document.getElementById('dbls').textContent = 'double' });\
+document.getElementById('go').addEventListener('click', function () {\
+  var f = document.querySelector('input[type=file]').files[0], fd = new FormData();\
+  fd.append('doc', f); fd.append('note', 'hi');\
+  fetch('/upload', { method: 'POST', body: fd }).then(function (r) { return r.text() }).then(function (t) { document.getElementById('fetched').textContent = 'fetched ' + t });\
+});\
+</script>";
+
+/// The reply of `/upload`: the name and the size of each file part of a multipart body.
+fn upload_echo(body: &str) -> String {
+    let parts: Vec<String> = body
+        .split("\r\n--")
+        .filter_map(|p| {
+            let (head, content) = p.split_once("\r\n\r\n")?;
+            let name = head.split("filename=\"").nth(1)?.split('"').next()?;
+            Some(format!("{name} {}", content.len()))
+        })
+        .collect();
+    format!("uploaded: {}", parts.join("; "))
 }
 
 /// A page of `n` buttons (`#b0`..), each named "Button K", and a text that a timer adds after 2 s (`#late`). For the cost example.

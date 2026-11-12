@@ -376,6 +376,18 @@ impl Server {
         let line = match op {
             "click" => need("click").map(|_| format!("click {target}"))?,
             "type" | "fill" => need("type").map(|_| format!("type {target} {}", q(text)))?,
+            "select" => need("select").and_then(|_| {
+                let opts: Vec<&str> = args.get("options").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+                let opts = if opts.is_empty() && !text.is_empty() { vec![text] } else { opts };
+                if opts.is_empty() { return Err("op select needs text (the option label or value) or options".to_string()) }
+                Ok(format!("select {target} {}", opts.iter().map(|o| q(o)).collect::<Vec<_>>().join(" ")))
+            })?,
+            "check" | "uncheck" | "hover" | "dblclick" => need(op).map(|_| format!("{op} {target}"))?,
+            "upload" => need("upload").and_then(|_| {
+                let files: Vec<&str> = args.get("files").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+                if files.is_empty() { return Err("op upload needs files (an array of local paths)".to_string()) }
+                Ok(format!("upload {target} {}", files.iter().map(|f| q(f)).collect::<Vec<_>>().join(" ")))
+            })?,
             "press" => format!("press {}", args.get("key").and_then(Value::as_str).unwrap_or(if text.is_empty() { "Enter" } else { text })),
             "scroll" => {
                 let dy = args.get("dy").and_then(Value::as_f64).unwrap_or(600.0);
@@ -384,7 +396,7 @@ impl Server {
             "goto" => format!("goto {}", args.get("url").and_then(Value::as_str).ok_or("op goto needs url")?),
             "reload" => "reload".into(),
             "wait" => need("wait").map(|_| format!("wait {target} {}", if text.is_empty() { "visible" } else { text }))?,
-            o => return Err(format!("unknown op {o}: click, type, press, scroll, goto, reload, wait")),
+            o => return Err(format!("unknown op {o}: click, type, select, check, uncheck, hover, dblclick, upload, press, scroll, goto, reload, wait")),
         };
         let mut a = args.clone();
         a["compact"] = json!(true);
@@ -581,6 +593,7 @@ fn tools() -> Value {
     #[allow(non_snake_case)]
     let S = json!({"type": "string", "description": "Live session name. Default main."});
     let syntax = "Step lines (# starts a comment): open URL, goto URL, reload, click LOC, type LOC \"text\" (\"\" clears), \
+        select LOC \"label or value\" [\"more\" ...], check LOC, uncheck LOC, hover LOC, dblclick LOC, upload LOC \"path\" [\"path2\" ...], \
         press KEY (Enter, Tab, Shift+Tab, Control+a), scroll LOC|page DY, \
         expect LOC visible|hidden|enabled|disabled|checked|unchecked|focused|count N|text=\"x\"|value~\"x\", \
         expect url=\"x\"|url~\"x\", expect title=\"x\"|title~\"x\", expect js \"expression\", expect cookie NAME [absent|value=\"x\"], \
@@ -631,8 +644,8 @@ fn tools() -> Value {
         },
         {
             "name": "act",
-            "description": "Act on the live page like a user and get a short receipt (ok, or the failure with a hint, new console errors and failed requests, navigation), then the new snapshot. Ops: click, type (clears the field, then types text; \\n is Enter), press (key: Enter, Escape, Tab, Control+a), scroll (dy pixels, over ref or the page), goto (url), reload, wait (ref until text state: visible, hidden, enabled, checked, text~\"x\"). The action waits for the element up to timeout_ms.",
-            "inputSchema": {"type": "object", "properties": {"session": S, "op": {"type": "string", "enum": ["click", "type", "press", "scroll", "goto", "reload", "wait"]}, "ref": {"type": "string", "description": "e7 from snapshot or find."}, "loc": {"type": "string", "description": "A step locator instead of ref: role=button name=\"Save\", label=\"Email\", text=\"x\", css=\"...\"."}, "text": {"type": "string"}, "key": {"type": "string"}, "dy": {"type": "number"}, "url": {"type": "string"}, "snapshot": {"type": "boolean", "description": "Default true: add the snapshot after the action."}, "mode": {"type": "string", "enum": ["interactive", "all"]}, "max_chars": {"type": "integer"}}, "required": ["op"]},
+            "description": "Act on the live page like a user and get a short receipt (ok, or the failure with a hint, new console errors and failed requests, navigation), then the new snapshot. Ops: click, type (clears the field, then types text; \\n is Enter), press (key: Enter, Escape, Tab, Control+a), scroll (dy pixels, over ref or the page), goto (url), reload, wait (ref until text state: visible, hidden, enabled, checked, text~\"x\"), select (text = the option label or value; options = several for a multiple select; fires input and change), check and uncheck (a checkbox or radio; clicks only when the state differs), hover (pointer over the element: :hover and mouseenter), dblclick, upload (files = local paths for an <input type=file>, at most 100 MiB each; a hidden input needs loc css=\"input[type=file]\"). The action waits for the element up to timeout_ms.",
+            "inputSchema": {"type": "object", "properties": {"session": S, "op": {"type": "string", "enum": ["click", "type", "select", "check", "uncheck", "hover", "dblclick", "upload", "press", "scroll", "goto", "reload", "wait"]}, "ref": {"type": "string", "description": "e7 from snapshot or find."}, "loc": {"type": "string", "description": "A step locator instead of ref: role=button name=\"Save\", label=\"Email\", text=\"x\", css=\"...\"."}, "text": {"type": "string"}, "options": {"type": "array", "items": {"type": "string"}, "description": "For select: several options of a multiple select."}, "files": {"type": "array", "items": {"type": "string"}, "description": "For upload: local file paths."}, "key": {"type": "string"}, "dy": {"type": "number"}, "url": {"type": "string"}, "snapshot": {"type": "boolean", "description": "Default true: add the snapshot after the action."}, "mode": {"type": "string", "enum": ["interactive", "all"]}, "max_chars": {"type": "integer"}}, "required": ["op"]},
         },
         {
             "name": "find",

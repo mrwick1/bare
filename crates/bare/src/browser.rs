@@ -391,6 +391,16 @@ pub(crate) struct Input {
     pub typed: bool,
     /// The `indeterminate` property of a checkbox.
     pub indeterminate: bool,
+    /// The files of an `<input type=file>` that a driver set. The bytes are read when a script or a submit asks for them.
+    pub files: Vec<FileRef>,
+}
+
+/// A file of a file input: where it is on disk, and what `File` reports.
+#[derive(Clone, Debug)]
+pub(crate) struct FileRef {
+    pub path: std::path::PathBuf,
+    pub name: String,
+    pub modified_ms: f64,
 }
 
 #[derive(Default)]
@@ -1445,6 +1455,7 @@ pub(crate) static DEFS: &[Def] = &[
     Def { on: &[Document], name: "doctype", len: 0, kind: G(nd::doctype) },
     Def { on: &[Document], name: "defaultView", len: 0, kind: G(nd::default_view) },
     Def { on: &[Input], name: "value", len: 0, kind: A(nd::input_value, nd::set_input_value) },
+    Def { on: &[Input], name: "files", len: 0, kind: G(nd::input_files) },
     Def { on: &[Input], name: "checked", len: 0, kind: A(nd::input_checked, nd::set_input_checked) },
     Def { on: &[Input], name: "indeterminate", len: 0, kind: A(nd::input_indeterminate, nd::set_input_indeterminate) },
     Def { on: &[Input], name: "selectionStart", len: 0, kind: A(sel::selection_start, sel::set_selection_start) },

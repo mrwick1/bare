@@ -644,7 +644,7 @@ impl Dom {
     }
 
     /// A trusted plain `Event` that bubbles (`input` of a checkbox, `change`).
-    fn fire_plain(&self, it: &mut Interp<'_>, n: NodeId, ty: &str) -> R<bool> {
+    pub(crate) fn fire_plain(&self, it: &mut Interp<'_>, n: NodeId, ty: &str) -> R<bool> {
         let ev = self.new_event(it, ty, true, false, true, None)?;
         self.st.borrow_mut().events.get_mut(&ev).expect("just made").trusted = true;
         self.dispatch(it, Target::Node(n), ev)

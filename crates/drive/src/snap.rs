@@ -321,6 +321,9 @@ fn live(p: &mut Page, h: Handle, role: &str, flags: &mut Vec<String>) -> Option<
     if !matches!(role, "textbox" | "searchbox" | "combobox" | "spinbutton" | "slider" | "listbox") {
         return None;
     }
+    if let Some(labels) = p.selected_labels(h) {
+        return Some(short(&labels.join(", "), 200));
+    }
     let v = p.value(h)?;
     if p.is_password(h) {
         return Some(if v.is_empty() { String::new() } else { "••••".into() });

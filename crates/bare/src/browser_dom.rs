@@ -1813,6 +1813,20 @@ pub(crate) fn set_input_value(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Va
     Ok(Value::Undefined)
 }
 
+/// `input.files`: an array of the Files (read from disk now), `null` for another kind of input. It is an array, not a FileList.
+pub(crate) fn input_files(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    let n = input_el(d, it, this)?;
+    if input_kind(&d.doc.borrow(), n) != "file" {
+        return Ok(Value::Null);
+    }
+    let refs = d.st.borrow().inputs.get(&n).map(|i| i.files.clone()).unwrap_or_default();
+    let mut files = Vec::new();
+    for f in &refs {
+        files.push(crate::browser_web::file_from_ref(d, it, f)?);
+    }
+    it.array_from(&files)
+}
+
 pub(crate) fn input_checked(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let n = input_el(d, it, this)?;
     if let Some(c) = d.st.borrow().inputs.get(&n).and_then(|i| i.checked) {

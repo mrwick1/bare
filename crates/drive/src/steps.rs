@@ -71,6 +71,13 @@ pub enum Action {
     Reload,
     Click(Locator),
     Type(Locator, String),
+    /// Pick options of a `<select>` by label or value.
+    Select(Locator, Vec<String>),
+    Check(Locator, bool),
+    Hover(Locator),
+    DblClick(Locator),
+    /// Set the files of an `<input type=file>` from local paths.
+    Upload(Locator, Vec<String>),
     Press(String),
     Scroll(Option<Locator>, f64),
     Expect(Check),
@@ -224,6 +231,26 @@ fn parse_line(line: &str, vars: &HashMap<String, String>) -> Result<Action, Stri
                 _ => return Err("type LOC \"text\"".into()),
             }
         }
+        "check" | "uncheck" | "hover" | "dblclick" => match locator(rest, vars)? {
+            (loc, n) if n == rest.len() => match verb {
+                "check" => Action::Check(loc, true),
+                "uncheck" => Action::Check(loc, false),
+                "hover" => Action::Hover(loc),
+                _ => Action::DblClick(loc),
+            },
+            _ => return Err(format!("{verb} LOC")),
+        },
+        "select" | "upload" => {
+            let (loc, used) = locator(rest, vars)?;
+            let vals = rest[used..].iter().map(|w| match w {
+                Word::Quoted(t) => expand(t, vars),
+                _ => Err(String::new()),
+            }).collect::<Result<Vec<_>, _>>();
+            match vals {
+                Ok(v) if !v.is_empty() => if verb == "select" { Action::Select(loc, v) } else { Action::Upload(loc, v) },
+                _ => return Err(format!("{verb} LOC \"{}\" [\"{}\" ...]", if verb == "select" { "option" } else { "path" }, if verb == "select" { "option2" } else { "path2" })),
+            }
+        }
         "press" => {
             let key = one()?;
             bare::control::key_events(&key).ok_or_else(|| format!("not a key: {key}"))?;
@@ -348,6 +375,14 @@ mod tests {
         assert_eq!(p("click role=menuitem name~\"sign out\""), Ok(Action::Click(Locator::Role("menuitem".into(), Some(Text::Has("sign out".into()))))));
         assert_eq!(p("type label=\"Password\" \"${PASS}\""), Ok(Action::Type(Locator::Label(Text::Is("Password".into())), "p\"w".into())));
         assert_eq!(p("type css=\"input[name=q]\" \"a\\\"b\\n\""), Ok(Action::Type(Locator::Css("input[name=q]".into()), "a\"b\n".into())));
+        assert_eq!(p("select label=\"Country\" \"Kenya\""), Ok(Action::Select(Locator::Label(Text::Is("Country".into())), vec!["Kenya".into()])));
+        assert_eq!(p("select css=\"#f\" \"a\" \"b c\""), Ok(Action::Select(Locator::Css("#f".into()), vec!["a".into(), "b c".into()])));
+        assert_eq!(p("check ref=e3"), Ok(Action::Check(Locator::Ref(3), true)));
+        assert_eq!(p("uncheck ref=e3"), Ok(Action::Check(Locator::Ref(3), false)));
+        assert_eq!(p("hover text=\"Menu\""), Ok(Action::Hover(Locator::Text(Text::Is("Menu".into())))));
+        assert_eq!(p("dblclick ref=e1"), Ok(Action::DblClick(Locator::Ref(1))));
+        assert_eq!(p("upload css=\"input\" \"/a b/c.txt\" \"d.txt\""), Ok(Action::Upload(Locator::Css("input".into()), vec!["/a b/c.txt".into(), "d.txt".into()])));
+        assert!(p("select ref=e1").is_err() && p("upload ref=e1 bare").is_err() && p("check ref=e1 \"x\"").is_err());
         assert_eq!(p("expect css=\"li\" count 3"), Ok(Action::Expect(Check::El(Locator::Css("li".into()), State::Count(3)))));
         assert_eq!(p("expect url~\"/agents?q=x\""), Ok(Action::Expect(Check::Url(Text::Has("/agents?q=x".into())))));
         assert_eq!(p("wait js \"1 + 1 == 2\""), Ok(Action::Expect(Check::Js("1 + 1 == 2".into()))));
