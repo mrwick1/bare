@@ -1642,3 +1642,14 @@ A click on a GitHub issue title did not navigate. GitHub cancels the click and c
 
 ## A relative box paints over an earlier absolute sibling (2026-11-12)
 Layout puts the fragment of an absolute box after the other fragments of its containing block, and drops its static position. So the fragment order is not the tree order. The painter and the hit test put an earlier absolute veil over a later relative card (bare issue #414). Now both sort the positioned boxes of a context with `z-index` 0 by the path of child numbers in the tree, as CSS 2.1 Appendix E asks. The sort runs only when one of the boxes is out of flow. Boxes with a non-zero `z-index` still sort by `(z, fragment order)`: an absolute and a relative box with the same non-zero `z-index` can still be in the wrong order.
+
+## `PerformanceEntry` and `Screen` are interfaces (2026-11-12)
+
+- A web mail app ran `performance.getEntries().find(e => e instanceof PerformanceResourceTiming)`. It threw, because `PerformanceResourceTiming` was not defined. Its telemetry read `Screen` the same way (bare issue #421).
+- `PerformanceEntry`, `PerformanceResourceTiming`, `PerformanceNavigationTiming`, `PerformanceMark` and `PerformanceMeasure` are lazy globals (`browser_perf.rs`). Each is an illegal constructor, as in Chrome. The subclass prototypes chain to `PerformanceEntry.prototype`.
+- A mark or a measure is an instance of `PerformanceMark` or `PerformanceMeasure`. Its own fields do not change. Its `toJSON` gives a plain copy. A mark or measure keeps `detail` in the copy. An entry keeps only the four common members.
+- `Screen` is a lazy global (`browser.rs`). `window.screen` is its instance. `new Screen()` throws.
+- Gap: `new PerformanceMark(name)` and `new PerformanceMeasure(name)` throw. They are not constructible yet. Entries have no getters on the prototype. Their fields stay own data properties.
+- Gap: `PerformanceResourceTiming` and `PerformanceNavigationTiming` have no entries. The page gets no resource or navigation entry from `getEntries*`, as before.
+- Gap: `toJSON` does not check its receiver. A call on a non-object throws `Illegal invocation`. A call on another object does not.
+- Shape from Ladybird's IDL (`LibWeb/PerformanceTimeline/PerformanceEntry.idl`, `LibWeb/ResourceTiming/PerformanceResourceTiming.idl`, `LibWeb/CSS/Screen.idl`, BSD-2-Clause). We wrote our own code. No file was copied. Ladybird's `Screen` has its members on the interface. Ours keep them as own data properties of `screen`, as before.
