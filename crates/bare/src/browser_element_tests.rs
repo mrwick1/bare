@@ -44,10 +44,25 @@ fn inner_text_gates_select_and_textarea() {
 }
 
 #[test]
-fn offset_gates_a_box_that_wraps() {
-    // An inline box with a border over two lines has two fragments: "the first box" is not known.
-    let html = "<div style='width:30px'><span id=x style='border:1px solid'>aaa bbb ccc ddd</span></div>";
-    assert!(unsupported(html, "document.getElementById('x').offsetTop"));
+fn offset_of_a_box_that_wraps_is_its_first_box() {
+    // An inline box with a border over two lines has two fragments, one for each line. CSSOM View: the offsets come from the border
+    // edge of the first box. A 10px font: a letter is 6px wide.
+    let css = "<style>body { margin: 0; font-size: 10px }</style>";
+    let body = "<div style='width: 50px'>xxx <span id=x style='border: 1px solid'>aaaa bbbbb</span></div>\
+                <div style='width: 50px'>xx<span id=p style='position: relative; border: 2px solid'>aa <b id=c>bbbbb</b></span></div>";
+    let mut b = page(&format!("{css}{body}"));
+    let mut js = |src: &str| match b.run_script(src) {
+        Ok(v) => b.it.display(v),
+        Err(e) => format!("{e:?}"),
+    };
+    let src = "var x = document.getElementById('x'), r = x.getClientRects();\
+               [r.length, r[0].top < r[1].top, x.offsetLeft, x.offsetTop, Math.round(r[0].left), Math.round(r[0].top), x.offsetParent.tagName].join()";
+    // two rects; the offsets are the first rect (after "xxx ", 24px; the border sits 1px above the line), not the union of both lines
+    assert_eq!(js(src), "2,true,24,-1,24,-1,BODY");
+    // an offset parent over two lines: from the padding edge of its first box (after "xx" and its 2px border)
+    let src = "var c = document.getElementById('c'), p = document.getElementById('p'), r = p.getClientRects(), k = c.getBoundingClientRect();\
+               [r.length, c.offsetParent.id, c.offsetLeft == Math.round(k.left - r[0].left - 2), c.offsetTop == Math.round(k.top - r[0].top - 2)].join()";
+    assert_eq!(js(src), "2,p,true,true");
 }
 
 #[test]

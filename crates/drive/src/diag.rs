@@ -116,6 +116,15 @@ fn kind(url: &str) -> &'static str {
     }
 }
 
+/// One thing that the page waits for: `fetch GET https://x/api (19.4 s)`, or the kind of work that is not a request. Then its state
+/// (`Waiting::state`): `not sent` or `reply in` say that it waits for the page thread, not for the network.
+pub fn waiting(w: &bare::page::Waiting) -> String {
+    if w.url.is_empty() {
+        return w.kind.to_string();
+    }
+    format!("{} {} {} ({:.1} s{})", w.kind, w.method, crate::run::safe_url(&w.url), w.age.as_secs_f64(), if w.state.is_empty() { String::new() } else { format!(", {}", w.state) })
+}
+
 /// What `Session::diagnose` read from the page.
 pub struct Facts {
     pub url: String,
@@ -125,6 +134,8 @@ pub struct Facts {
     /// Snapshot lines of a walk that shows text. 0: nothing shows.
     pub shown: usize,
     pub cpu_ms: f64,
+    /// What the page waits for (`Page::pending`).
+    pub pending: Vec<bare::page::Waiting>,
 }
 
 fn base(u: &str) -> &str {
@@ -173,6 +184,10 @@ pub fn report(h: &History, f: &Facts, clean: &dyn Fn(&str) -> String) -> String 
             let first = of[0];
             out.push(format!("failed {k}: {} ({} in all, first {})", crate::run::safe_url(&first.url), of.len(), first.error.clone().unwrap_or_else(|| first.status.to_string())));
         }
+    }
+    // A request that has not ended after 5 s: it can hold the page for good (a long poll, a reply that never comes).
+    for w in f.pending.iter().filter(|w| w.age.as_secs() >= 5).take(3) {
+        out.push(format!("pending {}{}", waiting(w), if w.holds { ", holds the page" } else { "" }));
     }
     let empty = f.shown == 0;
     if empty {

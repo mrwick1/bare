@@ -743,6 +743,21 @@ fn styles_are_reused_until_the_document_changes() {
 }
 
 #[test]
+fn styles_are_reused_and_restyled_on_a_page_with_custom_elements() {
+    // Pages such as GitHub define many custom elements. A custom element state change moves `revision`, so the kept cascade stays right.
+    let mut b = at("<!doctype html><html><head><style>.w { width: 50px } x-a:defined { color: green } x-a:state(on) { color: blue }</style></head>\
+        <body><div id=a>t</div><x-a id=x></x-a></body></html>");
+    let n = |b: &mut Browser, s: &str| (js(b, s), b.computed_stats().computes, b.computed_stats().restyles);
+    js(&mut b, "var a = document.getElementById('a'), x = document.getElementById('x'), int; customElements.define('x-a', class extends HTMLElement { constructor() { super(); int = this.attachInternals() } }); 0");
+    assert_eq!(n(&mut b, "getComputedStyle(x).color + getComputedStyle(a).width + a.offsetWidth"), ("rgb(0, 128, 0)1264px1264".into(), 1, 0));
+    assert_eq!(n(&mut b, "getComputedStyle(x).color + a.offsetWidth"), ("rgb(0, 128, 0)1264".into(), 1, 0));
+    assert_eq!(n(&mut b, "a.className = 'w'; a.offsetWidth"), ("50".into(), 1, 1));
+    // A custom state and a new custom element give right values.
+    assert_eq!(n(&mut b, "int.states.add('on'); getComputedStyle(x).color"), ("rgb(0, 0, 255)".into(), 2, 1));
+    assert_eq!(n(&mut b, "var y = document.createElement('x-a'); document.body.appendChild(y); getComputedStyle(y).color"), ("rgb(0, 128, 0)".into(), 3, 1));
+}
+
+#[test]
 fn excess_shadow_sources_do_not_abort_page() {
     let mut b = at("<div id=a></div><div id=b></div>");
     b.set_computed_limits(ComputedLimits { max_sources: 1, ..Default::default() });

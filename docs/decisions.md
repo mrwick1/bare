@@ -1475,3 +1475,44 @@ A `press` with a locator on the Wikipedia search failed as `detached`, and the p
 - The counts were right: a write of the same key replaces its size, and the same value again is a no-op.
 - `press` follows a field that the page replaced, with the rule of `type`. The old field left the document, and a text field has the focus. Then the key goes to that field. This holds when the locator matches nothing now, and when the focus of the press makes the page swap the field.
 - The second swap of Wikipedia gives an input with no `id`. So `css="#searchInput"` matches nothing after `type`.
+## Name what holds a page that is not ready (2026-11-12)
+
+`open` said `1 request pending` and gave no way to see which request it was (issue #406).
+
+- `Page::pending` lists what the live page waits for: each queued fetch and XHR, each open event stream, each script, style sheet and preload download that runs, and each picture on its way.
+- Each item has its kind, method, URL and age. A fetch now always keeps the time it was queued. The cost is one clock read per request.
+- `holds` marks the items that keep the page from being ready. A stream and a picture never hold it.
+- Work that holds the page and is not a request is named by its kind: `inline script`, `navigation task` or `parser`. Timers and workers do not hold a page, so they are not listed.
+- The list is built only when a wait ends at its limit, and on `network` and `diagnose`. A look of the ready wait does not build it.
+- The `not ready` note names up to 2 items that hold the page, the oldest first. The request count counts every request that holds it, not only fetches.
+- `network` shows the pending requests at each call, marked `pending`. When one ends, its record shows once.
+- `diagnose` reports each item pending for 5 s or more.
+- A queued request shows `not sent` before its network turn, and `reply in` when its reply waits for its turn. Both say that the page thread is busy, not the network. GitHub showed this: its request waited 5.8 s to be sent and then took 302 ms.
+
+## `type` with the locator of a replaced field (2026-11-12)
+
+- A second `type` with the old locator of a swapped field failed as `detached` or `not_found`. Wikipedia swaps its search input for one with no `id`.
+- `type` now resolves its target with the rule of `press`. The old field left the document, and a text field has the focus. Then the keys go to that field.
+- Only `type` and `press` use the rule. They send keys, and a browser sends keys to the focused element.
+- `click`, `select`, `check`, `upload`, `hover` and `dblclick` keep the strict rule. A field that is gone makes them fail.
+- `type` still selects the old text and replaces it. So `type " programming"` after `type "Rust"` leaves " programming" in the field.
+
+## Live requests start at once, and custom elements keep the cascade (2026-11-12)
+
+A live page now starts a queued `fetch` or XHR on a worker as the script queues it. Before, it started at the next network turn.
+GitHub issues kept the page thread busy, and a fetch waited 5 to 9 s to be sent.
+The reply still settles at a network turn, in the order of the queue.
+A request that is not a GET or a HEAD still starts only when it is first in the queue.
+The cascade cache and the partial restyle no longer skip pages with custom elements.
+`set_custom_state` and `set_states` move `revision` and mark the tree, so the kept cascade stays correct.
+On GitHub issues, full cascades for each layout or style read took 83 % of the CPU.
+The shared layout of reads drops the same check.
+
+## offsetTop of an inline box over more than one line, and no spin in settle (2026-11-12)
+
+GitHub read `offsetTop` of an inline box with a border over two lines, and the read stopped the issues page.
+
+- The gate said that "the first box" of such an element is not known. That reason does not hold. Inline layout writes the fragments of a box line by line, in order. `getClientRects` already gives them in that order.
+- `offsetTop` and `offsetLeft` now use the first fragment of the element. CSSOM View asks for the border edge of the first box. An offset parent over more than one line uses its first fragment too.
+- This replaces the last line of "offsetTop of an inline box with nothing to paint": that gate is gone.
+- `snap::settle` waited up to 2 s for an open `fetch` on a stopped page. `tick` gives no next time then, so the loop spun at full CPU. It now sleeps 5 ms between ticks. The wait limit stays 2 s. A test measured 1.996 s of CPU in 2.000 s before and almost none after.
