@@ -1856,3 +1856,4 @@ Reason: a later relative box under an earlier fixed layer could not be clicked (
 - The landmark roles come from `role_of` in `crates/drive/src/snap.rs`. That is the same table the snapshot uses.
 - A `header` or `footer` inside an article, aside, main, nav or section is not a landmark. A `form` needs a name.
 - Reason: a model could not tell a top navigation link from the others without eval. The deck eval task `link-url` asks for the "Release notes" link in the top navigation. It failed 3 of 3 runs. The model then called `eval`, which the task forbids (bare#438).
+- A `text` or `root` filter keeps few lines, so `links` gives the full URL then. With only the landmark, the model still called `eval` to turn the path into a full URL. The tool description now says that only ad tracking parameters are cut. deck task `link-url` went from 0 of 3 to 4 of 4.

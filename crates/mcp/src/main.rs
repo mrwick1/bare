@@ -1003,7 +1003,7 @@ fn tools() -> Value {
         },
         {
             "name": "links",
-            "description": "The links of the page: ref, text, URL (a path for a link on the origin of the page, with tracking parameters cut) and the nearest landmark, such as (navigation \"Top\") or (contentinfo), when a link is in one. To get the URL of one named link, filter: links {text: \"Repository\"}. Filters combine.",
+            "description": "The links of the page: ref, text, URL (the full URL with a text or root filter, else a path for a link on the origin of the page; only ad tracking parameters such as utm_* and fbclid are cut, every other part is exact) and the nearest landmark, such as (navigation \"Top\") or (contentinfo), when a link is in one. To get the URL of one named link, filter: links {text: \"Repository\"}. Filters combine.",
             "inputSchema": {"type": "object", "properties": {"session": S, "text": {"type": "string", "description": "Only links whose text or URL holds this text (any case)."}, "root": {"type": "string", "description": "A ref: only the links inside that element, or the link itself."}, "external": {"type": "boolean", "description": "True: only links to another origin."}, "max_chars": {"type": "integer"}}},
         },
         {

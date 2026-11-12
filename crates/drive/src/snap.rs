@@ -788,8 +788,10 @@ pub fn links(p: &mut Page, refs: &mut Refs, max: usize, text: Option<&str>, root
         {
             continue;
         }
-        // A link of this origin gives its path: the origin is in the header, and it costs tokens in each line.
-        let shown = clean_url(abs.strip_prefix(&origin).filter(|r| r.starts_with('/')).unwrap_or(&abs));
+        // A link of this origin gives its path: the origin is in the header, and it costs tokens in each line. A `text` or `root`
+        // filter keeps few lines, so they give the full URL: a model asked for a URL copies it as it is.
+        let filtered = needle.is_some() || start.is_some();
+        let shown = clean_url(if filtered { &abs } else { abs.strip_prefix(&origin).filter(|r| r.starts_with('/')).unwrap_or(&abs) });
         let name = if name.is_empty() { String::new() } else { format!(" {name:?}") };
         // The nearest landmark, with its name when it has one.
         let lm = lm.map_or(String::new(), |(r, ln)| if ln.is_empty() { format!(" ({r})") } else { format!(" ({r} {:?})", short(&ln, 80)) });

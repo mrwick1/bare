@@ -1928,7 +1928,7 @@ fn links_filter_by_text_root_and_origin() {
     let (r, error) = s.tool("links", json!({"text": "GITHUB.com/tokio"}));
     assert!(!error && count(&r) == 1 && r.as_str().unwrap().contains("\"Repository\" -> https://github.com/tokio-rs/tokio"), "{r}");
     let (r, _) = s.tool("links", json!({"text": "github"}));
-    assert!(count(&r) == 2 && r.as_str().unwrap().contains("\"About GitHub\" -> /about"), "{r}");
+    assert!(count(&r) == 2 && r.as_str().unwrap().contains(&format!("\"About GitHub\" -> {base}/about")), "{r}");
     // `root` keeps the links inside an element, or the link itself.
     let nav = ref_of(&snap, "navigation \"Top\"");
     let (r, error) = s.tool("links", json!({"root": nav}));
@@ -1970,7 +1970,7 @@ fn a_link_inside_a_heading_shows_in_snapshot_and_links() {
     assert!(snap.contains("heading \"Install\"") && !snap.contains("href=#install"), "{snap}");
     let (r, _) = s.tool("links", json!({"text": "/issues/"}));
     let r = r.as_str().unwrap();
-    assert!(r.contains("\"First issue\" -> /issues/101") && r.contains("\"Second issue\" -> /issues/102"), "{r}");
+    assert!(r.contains("\"First issue\" -> http") && r.contains("/issues/101\n") && r.contains("\"Second issue\" -> http") && r.contains("/issues/102"), "{r}");
 }
 
 /// A top navigation, a paragraph link, a footer link, and a header in an article (not a banner).
