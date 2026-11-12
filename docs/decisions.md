@@ -1409,3 +1409,13 @@ Issue #398 found three replies that cost too many tokens or hid a change.
 - `deck` passes a text reply through, so it needs no change.
 - `read` and `links` count the header, the count line and the cut line in `max_chars`. The snapshot cut line counts in its budget too. The snapshot header is still outside the limit.
 - A `max_chars` that the header fills is a tool error that names a limit that works. Before, `read` gave no text and the same offset again.
+## Foreign fragment contexts and replaced text fields (2026-11-12)
+
+The Wikipedia search box lost typed text (issue #395). On focus, Wikipedia mounts a Vue search widget in the place of its plain input. The Codex icons of that widget set `innerHTML` on an SVG `g`. The fragment parser refused every context outside the HTML namespace. So the mount threw, the container stayed empty, and the focus went to `body`.
+
+- The fragment parser now takes an SVG or MathML context element. The context is the adjusted current node while only the root of the fragment is open. So the foreign rules read the tokens, as the standard says.
+- An SVG or MathML context gets no tokenizer state of an HTML element: an SVG `style` holds markup. CDATA is text in it.
+- The attributes of the context are not passed. So a MathML `annotation-xml` context is never an HTML integration point. This is a known gap.
+- 62 of the 63 html5lib foreign-context fragment tests pass. The one left is `<frameset>` in a fragment, which the parser refuses on purpose.
+- `type` follows a field that the page replaced. The rule: the old field left the document, and a text field has the focus. Then the keys go to that field. A browser sends keys to the focused element, so a person sees the same.
+- The rule holds at the click and between keys. Wikipedia loads its widget over the network, so its swap comes while the text is typed. A field that only loses the focus, and stays in the document, still fails with `focus_lost` or `no_focus`.

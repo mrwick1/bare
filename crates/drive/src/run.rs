@@ -946,10 +946,17 @@ fn attempt(p: &mut Page, m: &mut Memo, a: &Action, out: Option<&PathBuf>, red: &
                     if p.is_password(h) {
                         m.typed.push(text.clone());
                     }
-                    p.type_start(h, text.is_empty()).map_err(|r| refused(p, h, r))?;
+                    // The page can put a new field in the place of `h` on the click: the keys go to that one.
+                    let h = p.type_start(h, text.is_empty()).map_err(|r| refused(p, h, r))?;
                     m.keys = Some((h, text.chars().rev().collect()));
                 }
                 let (h, keys) = m.keys.as_mut().expect("set");
+                // A field that the page replaced while it was typed (it loads its widget on focus): the keys go on in the new one.
+                if !p.focused(*h)
+                    && let Some(new) = p.replaced(*h)
+                {
+                    *h = new;
+                }
                 let h = *h;
                 // A page script can hand the focus to another field: the keys would go there. Stop, and say where the text went.
                 let lost = |p: &mut Page, done: bool| {
@@ -965,7 +972,7 @@ fn attempt(p: &mut Page, m: &mut Memo, a: &Action, out: Option<&PathBuf>, red: &
                 if let Some(c) = keys.pop() {
                     p.type_char(c);
                 }
-                if watch && !p.focused(h) {
+                if watch && !p.focused(h) && p.replaced(h).is_none() {
                     m.keys = None;
                     return Err(lost(p, true));
                 }
