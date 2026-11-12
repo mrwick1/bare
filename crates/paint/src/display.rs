@@ -119,6 +119,9 @@ pub struct DisplayList {
     positioned: Vec<u32>,
     /// Fixed boxes that the context about to open holds in the tree: it paints them in its own list of positioned boxes.
     adopted: Vec<u32>,
+    /// The fixed boxes (with `z-index: auto`) that the root holds, and the ones that a box that clips has taken. See `fixed_under`.
+    fixed_root: Vec<u32>,
+    taken: Vec<u32>,
     hoist: Vec<Hoisted>,
     /// The scroll containers around the boxes that wait in `hoist`: (box, padding box). One run for each box.
     chain: Vec<(NodeId, IRect)>,
@@ -220,6 +223,8 @@ impl DisplayList {
         self.floats.clear();
         self.positioned.clear();
         self.adopted.clear();
+        self.fixed_root.clear();
+        self.taken.clear();
         self.hoist.clear();
         self.shapes.clear();
         self.points.clear();
@@ -306,7 +311,7 @@ pub fn each_in_band(styles: &Styles, layout: &Layout, ext: &[[f32; 4]], band: IR
             j = g.end as usize;
             continue;
         }
-        if j >= all_to && g.kind == FragmentKind::Box && let Some(s) = styles.style(g.node) && (clips(s) || matches!(s.get(Property::Position), Value::Keyword(Keyword::Fixed | Keyword::Sticky))) {
+        if j >= all_to && g.kind == FragmentKind::Box && let Some(s) = styles.style(g.node) && (!matches!((s.get(Property::OverflowX), s.get(Property::OverflowY)), (Value::Keyword(Keyword::Visible), Value::Keyword(Keyword::Visible))) || matches!(s.get(Property::Position), Value::Keyword(Keyword::Fixed | Keyword::Sticky))) {
             all_to = g.end as usize;
         }
         f(j, g);
@@ -393,6 +398,28 @@ pub(crate) fn adopted<T>(doc: &Document, tree: &Tree, frags: &[Fragment], v: &[T
         .count()
 }
 
+/// The fixed boxes of `root` that are inside the box `owner` in the tree and that nobody holds yet, now held (in `taken`). Layout puts
+/// the fragment of a fixed box under the root, so a box that clips (`overflow` not `visible`, not positioned) would paint all its inside
+/// before it, over the fixed boxes that come before a positioned box in it. The box that clips holds them and paints them in tree
+/// order with its positioned boxes, as `adopted` does: a fixed box still escapes its clip, as `PushFixed` takes the clip off.
+pub(crate) fn fixed_under(doc: &Document, frags: &[Fragment], root: &[u32], taken: &mut Vec<u32>, owner: NodeId) -> Vec<u32> {
+    let found: Vec<u32> = root.iter().copied().filter(|j| !taken.contains(j) && within(doc, frags[*j as usize].node, owner)).collect();
+    taken.extend(&found);
+    found
+}
+
+/// Is the node `n` inside the node `owner`, in the tree?
+pub(crate) fn within(doc: &Document, n: NodeId, owner: NodeId) -> bool {
+    let mut up = doc.parent_or_host(n);
+    while let Some(a) = up {
+        if a == owner {
+            return true;
+        }
+        up = doc.parent_or_host(a);
+    }
+    false
+}
+
 impl Builder<'_> {
     fn push(&mut self, line: bool, item: Item) {
         if line {
@@ -443,7 +470,7 @@ impl Builder<'_> {
             Kind::Inline => Layer::Inline,
             Kind::Atomic => Layer::Atomic,
             _ if self.item(f.node) => Layer::Atomic,
-            _ if clips(style) => Layer::Clipped,
+            _ if clips(&self.tree, f.node) => Layer::Clipped,
             _ => Layer::Block,
         }
     }
@@ -486,10 +513,27 @@ impl Builder<'_> {
         }
     }
 
+    /// A context that ends early gives back the fixed boxes that it held: the root paints them.
+    fn release(&mut self, mine: &[u32]) {
+        self.list.taken.retain(|t| !mine.contains(t));
+    }
+
     fn context_in(&mut self, i: usize) {
         let mine = std::mem::take(&mut self.list.adopted);
         if self.depth >= MAX_DEPTH {
+            self.release(&mine);
             return;
+        }
+        if i == 0 {
+            // The fixed boxes of the page: a box that clips takes the ones it holds in the tree (see `fixed_under`).
+            let mut j = 1;
+            while j < self.frags[0].end as usize {
+                let g = self.frags[j];
+                if g.kind == FragmentKind::Box && self.tree.kind(g.node) == Kind::OutOfFlow && self.tree.position(g.node) == Keyword::Fixed && self.stack(&g, self.tree.style(g.node)).is_none() {
+                    self.list.fixed_root.push(j as u32);
+                }
+                j = g.end as usize;
+            }
         }
         let f = self.frags[i];
         let style = self.tree.style(f.node);
@@ -501,18 +545,20 @@ impl Builder<'_> {
                 _ => 255,
             };
             if alpha == 0 {
+                self.release(&mine);
                 return;
             }
             if alpha < 255 {
                 let r = self.extent(i).intersect(self.view);
                 if r.is_empty() {
+                    self.release(&mine);
                     return;
                 }
                 self.list.items.push(Item::PushLayer { r, alpha });
                 layer = true;
             }
         }
-        let clip = if i > 0 && clips(style) { Some(padding_box(&f, style)) } else { None };
+        let clip = if i > 0 && clips(&self.tree, f.node) { Some(padding_box(&f, style)) } else { None };
         self.decor(&f, style, false);
         if self.svg.is_some() {
             self.svg_of(&f, style, i);
@@ -527,6 +573,7 @@ impl Builder<'_> {
                 if layer {
                     self.list.items.push(Item::PopLayer);
                 }
+                self.release(&mine);
                 return;
             }
             self.list.items.push(Item::PushClip(c));
@@ -589,10 +636,13 @@ impl Builder<'_> {
                             j = g.end as usize;
                         }
                         Layer::Positioned(_) => {
-                            self.list.positioned.push(j as u32);
+                            if !self.list.taken.contains(&(j as u32)) {
+                                self.list.positioned.push(j as u32);
+                            }
                             j = g.end as usize;
                         }
                         Layer::Clipped => {
+                            self.list.adopted = fixed_under(self.doc, self.frags, &self.list.fixed_root, &mut self.list.taken, g.node);
                             self.context(j);
                             j = g.end as usize;
                         }
@@ -1238,9 +1288,12 @@ fn needs_collapse(s: &str) -> bool {
     b.iter().any(|&c| c == b'\t' || c == b'\n') || b.windows(2).any(|w| w == b"  ")
 }
 
-fn clips(style: &ComputedStyle) -> bool {
-    let hidden = |p| !matches!(style.get(p), Value::Keyword(Keyword::Visible));
-    hidden(Property::OverflowX) || hidden(Property::OverflowY)
+/// Does the box clip its inside? The root element and the first `body` give their `overflow` to the window and do not clip
+/// themselves (CSS Overflow 3, 3.3; `Tree::overflow`), as in Ladybird (Libraries/LibWeb/Layout/TreeBuilder.cpp, BSD-2). A `body` that
+/// clipped would paint as one context, over the fixed boxes that come before it in the tree.
+fn clips(tree: &Tree, node: NodeId) -> bool {
+    let (x, y) = tree.overflow(node);
+    x != Keyword::Visible || y != Keyword::Visible
 }
 
 /// The outline of a rounded rectangle `[x0, y0, x1, y1]` with the corner radii `q` (as `Shape::rad`), clockwise from the left end of the top

@@ -1849,3 +1849,11 @@ Reason: a later relative box under an earlier fixed layer could not be clicked (
 - `anchorNode` and `focusNode` swap with the flag. `direction` reads `backward`, `forward` or `none`.
 - `containsNode` follows the standard text and Ladybird: it compares the points `(node, 0)` and `(node, length)` with the range. An element whose contents are all selected counts as contained. Chrome may answer false for it. We did not check this against Chrome.
 - `modify` and `deleteFromDocument` stay gates.
+
+## A body that clips does not hide fixed boxes from tree order (2026-11-12)
+
+- Paint and hit testing use `Tree::overflow`, as layout does. The root element and the first `body` give their `overflow` to the window (CSS Overflow 3, 3.3) and do not clip themselves. Ladybird does the same (`Libraries/LibWeb/Layout/TreeBuilder.cpp`, BSD-2). Before, `body { overflow: hidden }` made the body a clipping context that painted over the fixed boxes before it.
+- A box that clips and is not positioned (a `body` when the root also has `overflow`, or any `div`) now holds the fixed boxes that it has in the tree. It paints and hits them in tree order with its own positioned boxes, as in the entry for bare#434. A fixed box is still not cut by that clip.
+- Not done: a fixed box and a positioned box inside two nested clipping boxes. The outer one holds the fixed box, so it paints after the inner box.
+
+Reason: a later relative box under an earlier fixed layer could not be clicked when the body had `overflow: hidden` (bare#439).
