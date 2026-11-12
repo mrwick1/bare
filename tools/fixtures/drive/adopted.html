@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<title>Adopted</title>
+<x-card></x-card>
+<script>
+  class XCard extends HTMLElement {
+    constructor() {
+      super();
+      const root = this.attachShadow({ mode: 'open' });
+      root.innerHTML = '<button id="gone">Hidden button</button><button id="seen">Shown button</button>';
+      const sheet = new CSSStyleSheet();
+      sheet.replaceSync('#gone { display: none } #seen { color: rgb(0, 0, 255) }');
+      root.adoptedStyleSheets = [sheet];
+    }
+  }
+  customElements.define('x-card', XCard);
+</script>

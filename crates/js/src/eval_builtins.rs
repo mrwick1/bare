@@ -136,7 +136,7 @@ enum Bi {
     ReSymMatchAll,
 }
 
-const RE_GETTERS: [&str; 9] = ["source", "flags", "global", "ignoreCase", "multiline", "dotAll", "sticky", "unicode", "hasIndices"];
+const RE_GETTERS: [&str; 10] = ["source", "flags", "global", "ignoreCase", "multiline", "dotAll", "sticky", "unicode", "hasIndices", "unicodeSets"];
 
 /// What `str_hook` found for a String method argument.
 enum Hook {
@@ -339,19 +339,12 @@ fn escape_source(p: &[u16]) -> Vec<u16> {
 
 fn canon_flags(f: rx::Flags) -> String {
     let mut s = String::new();
-    for (on, c) in [(f.has_indices, 'd'), (f.global, 'g'), (f.ignore_case, 'i'), (f.multiline, 'm'), (f.dot_all, 's'), (f.unicode, 'u'), (f.sticky, 'y')] {
+    for (on, c) in [(f.has_indices, 'd'), (f.global, 'g'), (f.ignore_case, 'i'), (f.multiline, 'm'), (f.dot_all, 's'), (f.unicode && !f.unicode_sets, 'u'), (f.unicode_sets, 'v'), (f.sticky, 'y')] {
         if on {
             s.push(c);
         }
     }
     s
-}
-
-fn flag_gate(c: char) -> &'static str {
-    match c {
-        'u' => "regexp flag u",
-        _ => "regexp flag v",
-    }
 }
 
 impl<'p> Interp<'p> {
@@ -406,7 +399,6 @@ impl<'p> Interp<'p> {
             Err(rx::CompileError::Syntax { .. }) => return Err(unsupported("regexp literal: invalid pattern (early SyntaxError)", span)),
             Err(rx::CompileError::Unsupported { what, .. }) => return Err(unsupported(what, span)),
             Err(rx::CompileError::InvalidFlags(_)) => return Err(unsupported("regexp literal: invalid flags (early SyntaxError)", span)),
-            Err(rx::CompileError::UnsupportedFlag(c)) => return Err(unsupported(flag_gate(c), span)),
             Err(rx::CompileError::Limit(_)) => return Err(unsupported("regexp literal: compile limit", span)),
         };
         let flags = canon_flags(re.flags());
@@ -1227,7 +1219,6 @@ impl<'p> Interp<'p> {
             }
             rx::CompileError::Unsupported { what, .. } => unsupported(what, Span::default()),
             rx::CompileError::InvalidFlags(c) => self.mk_err(SYNTAX_ERROR, &format!("Invalid flags supplied to RegExp constructor '{c}'")),
-            rx::CompileError::UnsupportedFlag(c) => unsupported(flag_gate(c), Span::default()),
             rx::CompileError::Limit(_) => Error::Limit(LimitKind::Regexp(RegexpLimit::Compile)),
         }
     }
@@ -1320,8 +1311,9 @@ impl<'p> Interp<'p> {
             4 => Value::Bool(f.multiline),
             5 => Value::Bool(f.dot_all),
             6 => Value::Bool(f.sticky),
-            7 => Value::Bool(f.unicode),
-            _ => Value::Bool(f.has_indices),
+            7 => Value::Bool(f.unicode && !f.unicode_sets),
+            8 => Value::Bool(f.has_indices),
+            _ => Value::Bool(f.unicode_sets),
         })
     }
 

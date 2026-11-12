@@ -53,13 +53,6 @@ fn limit(src: &str, el: EvalLimits, bl: BuiltinLimits, heap: HeapLimits) -> Limi
     }
 }
 
-fn unsupported_of(src: &str) -> &'static str {
-    match eval_with(src, EvalLimits::default(), BuiltinLimits::default(), HeapLimits::default()) {
-        Err(Error::Unsupported(u)) => u.what,
-        other => panic!("{src}: {other:?}"),
-    }
-}
-
 #[test]
 fn corpus_matches_node() {
     let (cases, expected) = (include_str!("../../../tools/fixtures/js/builtins-cases.txt"), include_str!("../../../tools/fixtures/js/builtins-cases.expected"));
@@ -156,7 +149,6 @@ fn gates_are_explicit_unsupported() {
         }
     }
     assert_eq!(run("new RegExp('(?<=a)b').test('ab')"), "boolean:true");
-    assert_eq!(unsupported_of("new RegExp('a', 'v')"), "regexp flag v");
     // A replaced exec is not a gate: the generic algorithms call it.
     assert_eq!(run("var r = /a/; r.exec = function () { return null; }; r.test('a')"), "boolean:false");
     assert_eq!(run("var r = /a/g; r.exec = function () { return null; }; 'a'.replace(r, 'b')"), "string:a");
@@ -557,6 +549,26 @@ fn unicode_flag_through_the_string_methods() {
         ("'fooBar'.replace(/[A-Z]/u, function (m) { return '-' + m.toLowerCase() })", "string:foo-bar"),
         ("try { new RegExp('\\\\a', 'u') } catch (e) { e.name + ': ' + e.message }", "string:SyntaxError: Invalid regular expression: /\\\\a/: Invalid escape"),
         ("try { new RegExp(']', 'u') } catch (e) { e.message }", "string:Invalid regular expression: /]/: Lone quantifier brackets"),
+    ];
+    for (src, want) in cases {
+        assert_eq!(run(src), want, "{src}");
+    }
+}
+
+/// Flag `v` (unicodeSets): the property, `flags`, `u` exclusion, and the set notation through the String methods.
+#[test]
+fn flag_v_unicode_sets() {
+    let cases = [
+        ("/a/v.unicodeSets + ',' + /a/u.unicodeSets + ',' + /a/.unicodeSets", "string:true,false,false"),
+        ("/a/v.unicode + ',' + /a/u.unicode", "string:false,true"),
+        ("/a/v.flags + ',' + /a/dgimsvy.flags + ',' + new RegExp('a', 'gv').flags", "string:v,dgimsvy,gv"),
+        ("RegExp.prototype.unicodeSets + ''", "string:undefined"),
+        ("try { new RegExp('a', 'uv'); 'no' } catch (e) { e.name }", "string:SyntaxError"),
+        ("/[\\p{L}--[a-z]]/v.test('a') + ',' + /[\\p{L}--[a-z]]/v.test('B')", "string:false,true"),
+        ("'xabcx'.match(/[\\q{abc|a}]/v)[0]", "string:abc"),
+        ("'a-b'.replace(/[\\w&&[^b]]/gv, '_')", "string:_-b"),
+        ("'\u{1F600}'.replace(/./gv, '-')", "string:-"),
+        ("try { new RegExp('[^\\\\q{ab}]', 'v'); 'no' } catch (e) { e.name }", "string:SyntaxError"),
     ];
     for (src, want) in cases {
         assert_eq!(run(src), want, "{src}");

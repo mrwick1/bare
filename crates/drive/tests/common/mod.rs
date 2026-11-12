@@ -157,6 +157,7 @@ fn reply(method: &str, path: &str, body: &str, auth: Option<&str>) -> (u16, &'st
         ("GET", "/" | "/login") => (200, HTML, page("login")),
         ("GET", "/overview") => (200, HTML, page("overview")),
         ("GET", "/agents") => (200, HTML, page("agents")),
+        ("GET", "/adopted") => (200, HTML, page("adopted")),
         ("GET", "/kinds") => (200, HTML, page("kinds")),
         ("POST", "/api/login") => {
             let want = format!("{{\"email\":\"{EMAIL}\",\"password\":\"{PASSWORD}\"}}");

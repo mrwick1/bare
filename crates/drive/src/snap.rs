@@ -232,7 +232,7 @@ fn walk(cx: &Cx, root: NodeId, mode: Mode, clicks: &HashSet<NodeId>, out: &mut V
                 }
                 continue;
             }
-            NodeData::Element { .. } | NodeData::Document => {}
+            NodeData::Element { .. } | NodeData::Document | NodeData::ShadowRoot => {}
             _ => continue,
         }
         let el = matches!(cx.doc.data(n), NodeData::Element { .. });
@@ -642,7 +642,7 @@ fn walk_text(cx: &Cx, root: NodeId, out: &mut Vec<String>) {
                     continue;
                 }
             }
-            NodeData::Document => {}
+            NodeData::Document | NodeData::ShadowRoot => {}
             _ => continue,
         }
         let kids: Vec<NodeId> = cx.doc.flat_children(n).collect();

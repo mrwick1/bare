@@ -145,8 +145,8 @@ fn match_media_object() {
         assert_eq!(js(&mut b, "matchMedia()"), "throw:TypeError:Failed to execute 'matchMedia' on 'Window': 1 argument required, but only 0 present.");
         assert_eq!(js(&mut b, "MediaQueryList.prototype.matches"), "throw:TypeError:Illegal invocation");
         assert_eq!(js(&mut b, "new MediaQueryList()"), "throw:TypeError:MediaQueryList is not a constructor");
-        // `CSSStyleSheet` is an interface object only: Lit asks `x instanceof CSSStyleSheet` and `'replace' in CSSStyleSheet.prototype`.
-        assert_eq!(js(&mut b, "[typeof CSSStyleSheet, ({}) instanceof CSSStyleSheet, 'replace' in CSSStyleSheet.prototype].join()"), "function,false,false");
+        // Lit asks `x instanceof CSSStyleSheet` and `'replace' in CSSStyleSheet.prototype` (constructable sheets).
+        assert_eq!(js(&mut b, "[typeof CSSStyleSheet, ({}) instanceof CSSStyleSheet, 'replace' in CSSStyleSheet.prototype].join()"), "function,false,true");
         assert_eq!(js(&mut b, "Object.getOwnPropertyDescriptor(MediaQueryList.prototype,'matches').get.call({})"), "throw:TypeError:Illegal invocation");
         // The query is coerced with ToString.
         assert_eq!(js(&mut b, "matchMedia({toString(){return '(min-width: 1px)'}}).matches"), "true");

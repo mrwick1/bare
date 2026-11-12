@@ -1303,3 +1303,20 @@ Each character of a `bare-mcp` reply costs model tokens. A reply must give what 
 - `links` and the `href` in a line cut tracking parameters (`utm_*`, `fbclid`, `gclid` and similar). `links` gives a path for a link on the origin of the page.
 - Each interactive element keeps its line and ref. The set of interactive lines of each test page is the same before and after.
 - Nothing collapses a long list. A list of links is a list of controls, and each control must stay reachable. The `max_chars` cut still applies.
+## Screenshots paint the whole box (2026-11-12)
+A screenshot of an element taller than the window was cut at the window. The engine has the layout of the whole page. So `screenshot` now paints a canvas as tall as the element box, or as the page with `full_page`, with no scroll. A picture is at most 8000 px tall. The reply says when that cut it. An element above the window is painted from the top of the page.
+## RegExp `v` flag (2026-11-12)
+
+The regexp engine accepts the `v` flag (`unicodeSets`). `v` turns on code point mode, as `u` does, and adds set notation to classes. The parser reads nested classes, `--`, `&&` and `\q{a|bc}`. It follows the grammar of ECMA-262: no mixing of operators, no ranges inside an operation, and no negated class that holds strings.
+A class that holds strings compiles to an alternation: the strings longest first, then the class, then the empty string. A class without strings stays one class instruction, so classes without `v` do not slow down. The `unicode` getter is false for `v`, and `flags` prints `v`.
+Properties of strings (`\p{RGI_Emoji}`) are a `SyntaxError`. Case folding closes the final set only: `--` and `&&` do not fold their operands first.
+## Constructable style sheets (2026-11-12)
+
+Lit and other web-component libraries style a shadow root with `new CSSStyleSheet()` and `adoptedStyleSheets`. bare had neither, so such a page lost its styles.
+
+- A constructed sheet keeps its text. `replaceSync` and `replace` store the text and parse no rules. The rule objects of `cssRules`, `insertRule` and `deleteRule` are made only when a script asks for them.
+- The cascade plan appends the text of each adopted sheet to the rules of the tree that adopted it, after the `<style>` and `<link>` sources of that tree. The existing parse and scoped cascade do the rest. No second style path exists.
+- `replace` applies its text at once. The spec applies it in a later task. A page that awaits the promise sees no difference.
+- The `adoptedStyleSheets` getter returns a copy. `push` on it has no effect. A page assigns a new array, as Lit does.
+- A sheet adopted by many shadow roots adds its rules once per root. A page with many instances pays for each. Sharing the parsed rules is a later step.
+- `snapshot` and `read` now enter a shadow root. They skipped it before, so a page built from web components showed no elements.

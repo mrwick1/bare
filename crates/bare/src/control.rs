@@ -643,6 +643,22 @@ impl Page {
         Canvas::from_vec(w, h, pixels)
     }
 
+    /// A picture as wide as the window and `height` pixels tall, painted from layout without a scroll: from the top of the page
+    /// (`top`), or from where the window is scrolled to (then a window box lies at the same place in the picture). `None`: no frame.
+    pub fn capture_tall(&mut self, height: u32, top: bool) -> Option<Canvas<'static>> {
+        self.frame_now()?;
+        let mut canvas = Canvas::new(self.size().0, height.max(1));
+        self.paint_at(&mut canvas, top).then_some(canvas)
+    }
+
+    /// The height of the whole page in pixels (at least the window), and how far it is scrolled down.
+    pub fn page_height(&mut self) -> (u32, f32) {
+        let win = self.size().1;
+        let y = self.browser().map_or(0.0, |b| b.scroll().y);
+        let page = self.frame_now().map_or(0.0, |f| f.areas.page.1);
+        (win.max(page.ceil() as u32), y)
+    }
+
     /// The console calls, listener errors, page errors and failed requests since the last call. The engine prints none of them.
     pub fn take_logs(&mut self) -> Vec<Log> {
         let mut out: Vec<Log> = self.errors.drain(..).map(|text| Log { level: if text.starts_with("listener") { "exception" } else { "page" }, text }).collect();

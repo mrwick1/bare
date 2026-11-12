@@ -950,3 +950,46 @@ fn slot_api() {
     // a closed tree: `assignedSlot` is null for the page
     assert_eq!(t(&mut b, "var h2 = document.createElement('div'); h2.attachShadow({ mode: 'closed' }).innerHTML = '<slot></slot>'; var k = h2.appendChild(document.createElement('u')); document.body.appendChild(h2); k.assignedSlot"), "null");
 }
+
+// ------------------------------------------------------------------------------------------ constructable style sheets
+
+const ADOPT: &str = "<!doctype html><html><head><style>p { color: red }</style></head><body><x-a id=h></x-a><p id=lp>light</p></body></html>";
+
+#[test]
+fn adopted_sheets_join_the_cascade_of_their_tree() {
+    let mut b = browser_with(ADOPT, BrowserLimits::default(), 50_000_000);
+    js(&mut b, "var h = document.getElementById('h'); var r = h.attachShadow({ mode: 'open' }); r.innerHTML = '<p id=hid>a</p><p id=col>b</p>'; var s = new CSSStyleSheet(); s.replaceSync('#hid { display: none } #col { color: blue }'); r.adoptedStyleSheets = [s]; 0");
+    let g = |b: &mut Browser, e: &str, p: &str| js(b, &format!("getComputedStyle({e}).{p}"));
+    assert_eq!(g(&mut b, "r.getElementById('hid')", "display"), "none");
+    assert_eq!(g(&mut b, "r.getElementById('col')", "color"), "rgb(0, 0, 255)");
+    // the page rule `p { red }` stays out of the shadow tree, and the adopted sheet stays out of the page
+    assert_eq!(g(&mut b, "document.getElementById('lp')", "display"), "block");
+    assert_eq!(g(&mut b, "document.getElementById('lp')", "color"), "rgb(255, 0, 0)");
+    // a later replaceSync changes the cascade
+    js(&mut b, "s.replaceSync('#hid { display: block }')");
+    assert_eq!(g(&mut b, "r.getElementById('hid')", "display"), "block");
+    assert_eq!(g(&mut b, "r.getElementById('col')", "color"), "rgb(0, 0, 0)", "no rule left, the colour is inherited");
+    // dropping the sheet from the list removes its rules
+    js(&mut b, "s.replaceSync('#hid { display: none }'); r.adoptedStyleSheets = []");
+    assert_eq!(g(&mut b, "r.getElementById('hid')", "display"), "block");
+}
+
+#[test]
+fn adopted_sheets_of_the_document_and_the_sheet_api() {
+    let mut b = browser_with(ADOPT, BrowserLimits::default(), 50_000_000);
+    let t = |b: &mut Browser, s: &str| js(b, s);
+    assert_eq!(t(&mut b, "var s = new CSSStyleSheet(); [s instanceof CSSStyleSheet, typeof s.replace, typeof s.replaceSync, s.cssRules.length, s.ownerNode, s.href, document.adoptedStyleSheets.length].join()"), "true,function,function,0,,,0");
+    assert_eq!(t(&mut b, "s.replaceSync('p { color: green } @media print { p { color: pink } }'); s.cssRules.length + ',' + s.cssRules[0].selectorText"), "2,p");
+    assert_eq!(t(&mut b, "document.adoptedStyleSheets = [s]; document.adoptedStyleSheets[0] === s"), "true");
+    // an adopted sheet comes after the `<style>` elements of the document, so it wins at equal specificity
+    assert_eq!(t(&mut b, "getComputedStyle(document.getElementById('lp')).color"), "rgb(0, 128, 0)");
+    assert_eq!(t(&mut b, "s.insertRule('p { color: navy }', 1); getComputedStyle(document.getElementById('lp')).color"), "rgb(0, 0, 128)");
+    // `replace` gives a promise of the sheet, and the rules are in place when it settles
+    assert_eq!(t(&mut b, "var q = s.replace('p { color: teal }'); [q instanceof Promise, getComputedStyle(document.getElementById('lp')).color].join()"), "true,rgb(0, 128, 128)");
+    assert_eq!(t(&mut b, "q.then(function (v) { window.__same = v === s }); 0"), "0");
+    assert_eq!(t(&mut b, "document.adoptedStyleSheets = []; getComputedStyle(document.getElementById('lp')).color"), "rgb(255, 0, 0)");
+    // a sheet from `document.styleSheets` cannot be adopted, and a non-sheet is refused
+    assert_eq!(t(&mut b, "document.adoptedStyleSheets = [{}]"), "throw:TypeError:Failed to set the 'adoptedStyleSheets' property: Failed to convert value to 'CSSStyleSheet'.");
+    assert_eq!(t(&mut b, "document.adoptedStyleSheets = [document.styleSheets[0]]"), "throw:NotAllowedError:Failed to set the 'adoptedStyleSheets' property: Can't adopt non-constructed stylesheets.");
+    assert_eq!(t(&mut b, "CSSStyleSheet()"), "throw:TypeError:Failed to construct: please use the 'new' operator");
+}

@@ -1406,7 +1406,7 @@ impl Heap {
         match u.first().copied() {
             Some(102) => named!("frames") || named!("frameElement") || named!("focus") || named!("fonts"),
             Some(101) => named!("eval") || named!("event"),
-            Some(97) => named!("animate") || named!("alert"),
+            Some(97) => named!("animate") || named!("alert") || named!("adoptedStyleSheets"),
             Some(105) => named!("indexedDB") || named!("isSecureContext") || named!("inputEncoding"),
             Some(65) => named!("Animation"),
             Some(73) => u.starts_with(&[73, 68, 66]),
