@@ -1874,3 +1874,12 @@ Issue #440: Control+B did nothing in a `contenteditable`, `execCommand('bold')` 
 - Source: Ladybird `Libraries/LibWeb/Editing/Commands.cpp` and `Internal/Algorithms.cpp` (BSD-2-Clause, notice in `crates/bare/LICENSE-LADYBIRD`). The port is simplified to the tree that Chrome makes with `styleWithCSS` off. The value override (`foreColor` and the others) is not built.
 - Control+B, +I and +U (Meta also, for macOS) in an editing host run the command as the default action of the key, after `keydown` and a `beforeinput` of `formatBold`, `formatItalic` or `formatUnderline`. `preventDefault` on either cancels it.
 - The `press` receipt compares the document `text_revision` too, so a key that changed text is not "no effect".
+
+## `user-select` and its `-webkit-` alias are one property (2026-11-12)
+
+Issue #442: `el.style.WebkitUserSelect` was `undefined`, so `el.style.WebkitUserSelect.toLowerCase()` threw. A webmail link dialog did not open.
+
+- `user-select` is a longhand of `bare_css`. Its keywords are `auto`, `text`, `none`, `contain` and `all` (CSS UI 4). Its initial value is `auto`. It is not inherited. The engine stores and serializes it. It has no selection behavior yet.
+- `-webkit-user-select` is the same property. `Property::from_name` and `parse_declaration` map it to `user-select`, so `WebkitUserSelect = "none"` reads back as `userSelect`, and `cssText` says `user-select: none;`.
+- `el.style` has five names: `userSelect`, `user-select`, `webkitUserSelect`, `WebkitUserSelect` and `-webkit-user-select`. Each reads `""` when unset.
+- The keyword list and the initial value are from the CSS UI 4 spec. No code is copied from another engine.
