@@ -195,6 +195,8 @@ pub enum Slot {
     Absent,
     /// A property whose value is this object.
     Ready(ObjId),
+    /// A property whose value is this string (a `DOMTokenList` token).
+    Str(StrId),
     /// A property whose JavaScript object does not exist yet. The heap answers `NeedsHost`; the host makes the object.
     Missing,
 }
@@ -836,6 +838,7 @@ impl Heap {
         let value = match self.source()?.indexed_item(o, i as usize)? {
             Slot::Absent => return Ok(None),
             Slot::Ready(v) => Value::Object(v),
+            Slot::Str(v) => Value::String(v),
             Slot::Missing if want_value => return Err(HeapError::NeedsHost { owner: o, index: i }),
             Slot::Missing => Value::Undefined,
         };

@@ -36,7 +36,7 @@
 
 use crate::browser::*;
 use bare_js::eval::{Error, Interp};
-use bare_js::value::{ObjId, PropertyKey, Value};
+use bare_js::value::{ObjId, PropertyKey, StrId, Value};
 use bare_html::dom::NodeId;
 use std::cell::{Cell, OnceCell, RefCell};
 use std::rc::Rc;
@@ -106,13 +106,15 @@ pub(crate) struct PState {
     pub lists: IdMap<ObjId, (NodeId, &'static str)>,
     /// Element and attribute -> its token list (`SameObject`).
     pub by_el: IdMap<(NodeId, &'static str), ObjId>,
+    /// Token list -> its tokens as strings, valid for one `Document::revision` (the indexed getter; `browser_platform_class::fill`).
+    pub toks: IdMap<ObjId, (u64, Vec<StrId>)>,
     pub iters: IdMap<ObjId, TokIter>,
     pub halted: Option<Error>,
 }
 
 impl Default for PState {
     fn default() -> Self {
-        PState { viewport: (1280.0, 800.0), mql: IdMap::default(), seq: 0, lists: IdMap::default(), by_el: IdMap::default(), iters: IdMap::default(), halted: None }
+        PState { viewport: (1280.0, 800.0), mql: IdMap::default(), seq: 0, lists: IdMap::default(), by_el: IdMap::default(), toks: IdMap::default(), iters: IdMap::default(), halted: None }
     }
 }
 
@@ -155,6 +157,9 @@ pub(crate) fn trace(d: &Dom, owner: ObjId, out: &mut Vec<Value>) {
     let s = d.plat.s.borrow();
     if let Some(&el) = s.lists.get(&owner) {
         out.extend(d.st.borrow().by_node.get(&el.0).map(|&o| Value::Object(o)));
+        if let Some((_, t)) = s.toks.get(&owner) {
+            out.extend(t.iter().map(|&x| Value::String(x)));
+        }
     } else if let Some(i) = s.iters.get(&owner) {
         out.push(Value::Object(i.list));
     } else if !s.by_el.is_empty()
@@ -171,6 +176,7 @@ pub(crate) fn prune(d: &Dom, live: &dyn Fn(ObjId) -> bool) {
     let s = &mut *s;
     s.mql.retain(|&o, _| live(o));
     s.lists.retain(|&o, _| live(o));
+    s.toks.retain(|&o, _| live(o));
     s.iters.retain(|&o, _| live(o));
     let lists = &s.lists;
     s.by_el.retain(|_, o| lists.contains_key(o));

@@ -734,7 +734,7 @@ impl Host for Dom {
         if (bare_js::heap::LAZY_ALL..u32::MAX).contains(&index) {
             return crate::browser_handlers::lazy(self, it, owner, index == bare_js::heap::LAZY_ALL);
         }
-        if crate::browser_nodelist::fill(self, it, owner, index)? || crate::browser_dataset::fill(self, it, owner)? || crate::browser_cssom::fill(self, it, owner)? || crate::browser_media::caption_fill(self, it, owner, index)? {
+        if crate::browser_platform_class::fill(self, it, owner)? || crate::browser_nodelist::fill(self, it, owner, index)? || crate::browser_dataset::fill(self, it, owner)? || crate::browser_cssom::fill(self, it, owner)? || crate::browser_media::caption_fill(self, it, owner, index)? {
             return Ok(());
         }
         at::fill(self, it, owner, index)

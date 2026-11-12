@@ -16,8 +16,11 @@
 //!   host objects with `next()` that inherit `%IteratorPrototype%`, so `for..of`, spread and `Array.from` accept them.
 //!   `[Symbol.iterator]` is this module's `values` (the realm's own `Symbol.iterator`).
 //!
-//! Gates and deviations: there are no indexed properties (`classList[0]` is `undefined`; use `item(0)`), and so
-//! `Array.prototype.values`/`forEach.call(classList)` see an empty list. Class-list `supports()` throws `TypeError`, as
+//! - A list is a host-indexed heap object (`Heap::new_indexed`): `list[i]`, `i in list` and `Object.keys(list)` read the live
+//!   tokens (WebIDL `getter DOMString? item(unsigned long)`). A token string is interned the first time an index is read
+//!   after a change (`fill`, cached in `PState::toks` for one `Document::revision`, traced by the list).
+//!
+//! Gates and deviations: Class-list `supports()` throws `TypeError`, as
 //! `class` defines no supported tokens. The iterator has no `Symbol.toStringTag`. A bad `classList` call on a wrong
 //! `this` is `TypeError: Illegal invocation`.
 
@@ -26,6 +29,7 @@ use crate::browser_dom::attr_set;
 use crate::browser_platform::{TokIter, V, arg};
 use bare_html::dom::{Atom, Document, NodeId};
 use bare_js::eval::Interp;
+use bare_js::heap::{HeapError, Slot};
 use bare_js::value::{ObjId, PropertyKey, Value};
 use std::collections::HashSet;
 
@@ -73,8 +77,51 @@ fn tokens(d: &Dom, it: &mut Interp<'_>, el: (NodeId, &str)) -> R<Vec<String>> {
     let doc = d.doc.borrow();
     let v = attribute(&doc, el).unwrap_or("");
     it.charge(1 + (v.len() / 8) as u64)?;
+    Ok(token_set(v))
+}
+
+fn token_set(v: &str) -> Vec<String> {
     let mut seen = HashSet::new();
-    Ok(v.split_ascii_whitespace().filter(|t| seen.insert(*t)).map(String::from).collect())
+    v.split_ascii_whitespace().filter(|t| seen.insert(*t)).map(String::from).collect()
+}
+
+/// `IndexedSource::indexed_len` for a token list. `None`: `owner` is not one.
+pub(crate) fn len(d: &Dom, owner: ObjId) -> Option<Result<usize, HeapError>> {
+    let el = *d.plat.s.try_borrow().ok()?.lists.get(&owner)?;
+    Some(d.doc.try_borrow().map(|doc| token_set(attribute(&doc, el).unwrap_or("")).len()).map_err(|_| HeapError::HostUnavailable))
+}
+
+/// `IndexedSource::indexed_item` for a token list. `None`: `owner` is not one.
+pub(crate) fn item_at(d: &Dom, owner: ObjId, index: usize) -> Option<Result<Slot, HeapError>> {
+    let s = d.plat.s.try_borrow().ok()?;
+    let el = *s.lists.get(&owner)?;
+    let doc = match d.doc.try_borrow() {
+        Ok(doc) => doc,
+        Err(_) => return Some(Err(HeapError::HostUnavailable)),
+    };
+    if index >= token_set(attribute(&doc, el).unwrap_or("")).len() {
+        return Some(Ok(Slot::Absent));
+    }
+    Some(Ok(match s.toks.get(&owner) {
+        Some((rev, t)) if *rev == doc.revision() => t.get(index).map_or(Slot::Missing, |&x| Slot::Str(x)),
+        _ => Slot::Missing,
+    }))
+}
+
+/// `Host::fill_indexed`: intern the tokens of the list `owner` for the current revision. `Ok(false)`: not a token list.
+pub(crate) fn fill(d: &Dom, it: &mut Interp<'_>, owner: ObjId) -> R<bool> {
+    let Some(&el) = d.plat.s.borrow().lists.get(&owner) else { return Ok(false) };
+    let rev = d.doc.borrow().revision();
+    let toks = tokens(d, it, el)?;
+    let mut ids = Vec::with_capacity(toks.len());
+    for t in &toks {
+        match d.js_str(it, t)? {
+            Value::String(x) => ids.push(x),
+            _ => unreachable!(),
+        }
+    }
+    d.plat.s.borrow_mut().toks.insert(owner, (rev, ids));
+    Ok(true)
 }
 
 /// The update steps: write the serialized set back.
@@ -157,7 +204,7 @@ fn token_list(d: &Dom, it: &mut Interp<'_>, this: Value, attr: &'static str) -> 
     if d.plat.s.borrow().lists.len() >= d.pl_limits().max_token_lists {
         return Err(d.lim("token-lists"));
     }
-    let o = d.obj(it, d.plat.p.get().expect("installed").list)?;
+    let o = it.heap.new_indexed(Some(d.plat.p.get().expect("installed").list)).map_err(|e| it.heap_error(e))?;
     let mut s = d.plat.s.borrow_mut();
     s.lists.insert(o, el);
     s.by_el.insert(el, o);

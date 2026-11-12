@@ -8353,3 +8353,11 @@ Checks (release, 2026-11-10):
 - `tools/portable_check.sh`: exit 0.
 
 Not tested: the staging journey. A real Playwright file. `window: true`. A session with cookies (the fixture app keeps its token in `sessionStorage`). Two live sessions at once (not supported: a new open ends the old one).
+
+## DOMTokenList indexed getter (2026-11-13, issue #427)
+
+`classList[i]`, `i in list` and `Object.keys(list)` now work for every `DOMTokenList` (`classList`, `relList`). A list is a host-indexed heap object (`new_indexed`). `bare-js` has a new `Slot::Str(StrId)`, so a host can answer an index with a string. The host interns the tokens in `fill_indexed` and keeps them in `PState::toks` for one `Document::revision`. The list traces them.
+
+Checked on the other list types: `NodeList`, `HTMLCollection`, `NamedNodeMap` and `options` already have indexed access. Gaps found, not fixed: `CSSStyleDeclaration` has no indexed getter (`style[0]` is `undefined`). `iframe.sandbox` and `DOMStringList` do not exist. `a.rel = "x"` does not set the `rel` attribute.
+
+Checks: `cargo test --release -p bare --lib class_list` 7 passed (1 new). Not tested: a window run, the web mail journey.

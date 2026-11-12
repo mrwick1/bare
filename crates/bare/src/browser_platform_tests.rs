@@ -316,6 +316,24 @@ fn platform_objects_are_not_plain_data_for_clone() {
 // ---------------------------------------------------------------------------------------------- classList
 
 #[test]
+fn class_list_indexed_getter() {
+    big(|| {
+        let mut b = at(PAGE);
+        js(&mut b, "var d=document.createElement('div'); d.className='a b'; var cl=d.classList;");
+        assert_eq!(js(&mut b, "[cl[0], cl[1], cl[2], 0 in cl, 2 in cl, Array.prototype.slice.call(cl).join(','), Object.keys(cl).join(',')].join('|')"), "a|b||true|false|a,b|0,1");
+        // Live after a change, and a token that was removed does not stay.
+        js(&mut b, "cl.add('c'); cl.remove('a');");
+        assert_eq!(js(&mut b, "[cl[0], cl[1], cl[2], cl.length].join('|')"), "b|c||2");
+        js(&mut b, "d.removeAttribute('class')");
+        assert_eq!(js(&mut b, "[cl[0], 0 in cl, Object.keys(cl).length].join('|')"), "|false|0");
+        // The list is read-only at an index; rel lists work too.
+        js(&mut b, "d.className='x y'; cl[0]='z';");
+        assert_eq!(js(&mut b, "cl[0] + d.className"), "xx y");
+        assert_eq!(js(&mut b, "var a=document.createElement('link'); a.rel='noopener nofollow'; a.relList[1] + Array.from(a.relList)"), "nofollownoopener,nofollow");
+    });
+}
+
+#[test]
 fn class_list_basics_and_live_attribute() {
     big(|| {
         let mut b = at(PAGE);
