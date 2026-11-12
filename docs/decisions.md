@@ -1754,6 +1754,7 @@ A focused element inside an editing host now takes key input. Text, Enter, Backs
 - The hashes are one-shot functions. Only `digest` needs them, and it has the whole message at once. A streaming API waits for a caller that needs one.
 - `SubtleCrypto` is the sixth lazy global of `browser_web.rs`. The first read of any of the six globals builds all their objects, as before.
 - Not built: a detached buffer hashes as empty. The standard rejects it with `TypeError`.
+
 ## "In select" mode for a select fragment (2026-11-12)
 
 - Gmail sets `innerHTML` on a `select`. The parse returned `Unsupported` and the script stopped (bare issue #424).
