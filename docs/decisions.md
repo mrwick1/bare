@@ -1642,3 +1642,15 @@ A click on a GitHub issue title did not navigate. GitHub cancels the click and c
 
 ## A relative box paints over an earlier absolute sibling (2026-11-12)
 Layout puts the fragment of an absolute box after the other fragments of its containing block, and drops its static position. So the fragment order is not the tree order. The painter and the hit test put an earlier absolute veil over a later relative card (bare issue #414). Now both sort the positioned boxes of a context with `z-index` 0 by the path of child numbers in the tree, as CSS 2.1 Appendix E asks. The sort runs only when one of the boxes is out of flow. Boxes with a non-zero `z-index` still sort by `(z, fragment order)`: an absolute and a relative box with the same non-zero `z-index` can still be in the wrong order.
+
+## `crypto.subtle.digest` with SHA-1, SHA-256, SHA-384 and SHA-512 (2026-11-12)
+
+- A web mail app calls `crypto.subtle.digest('SHA-256', bytes)` at startup. bare had no `crypto.subtle`, so the app failed twice (bare issue #423).
+- `crypto.subtle` is a `SubtleCrypto` in a secure context: https, or a loopback host. It is `undefined` otherwise, as the Web Crypto standard says.
+- `digest` hashes with SHA-1, SHA-256, SHA-384 or SHA-512. The name is a string or `{name}`, and ASCII case-insensitive. The bytes are copied when the call is made.
+- `digest` takes an ArrayBuffer, a typed array or a DataView. Bad data or a missing name rejects with `TypeError`. An unknown name rejects with `NotSupportedError`.
+- The other ten methods exist and reject with `NotSupportedError`. A page that feature-tests them gets an answer, not a missing property.
+- SHA-1 and SHA-512 live in `crates/tls` (`sha1.rs`, `sha512.rs`). They follow FIPS 180-4. No code was copied, so no notice is needed. SHA-512 uses the block function of `sha384.rs`, which is now `pub(crate)`. We added no crate dependency.
+- The hashes are one-shot functions. Only `digest` needs them, and it has the whole message at once. A streaming API waits for a caller that needs one.
+- `SubtleCrypto` is the sixth lazy global of `browser_web.rs`. The first read of any of the six globals builds all their objects, as before.
+- Not built: a detached buffer hashes as empty. The standard rejects it with `TypeError`.
