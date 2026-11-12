@@ -1695,3 +1695,14 @@ A focused element inside an editing host now takes key input. Text, Enter, Backs
 - An iframe with another `src`, or with `srcdoc`, keeps its inert window. Its `contentDocument` is `null`: bare never loads a child, so it has no document to give. A detached iframe gives `null` for both.
 - Not built: a `resize` event on the frame window, a document for `srcdoc`, a document for a `src` that fails to parse, and a change of document when `src` changes after the first `contentWindow`.
 - Source: Ladybird `LibWeb/HTML/NavigableContainer.cpp` (BSD-2): `shared_attribute_processing_steps_for_iframe_and_frame` (no `src`, or an empty one, means `about:blank`) and `content_document` (null without a content navigable). `HTMLIFrameElement.cpp` (BSD-2) for `contentDocument` and `contentWindow`. Read for semantics only; no code was copied.
+
+## `PerformanceEntry` and `Screen` are interfaces (2026-11-12)
+
+- A web mail app ran `performance.getEntries().find(e => e instanceof PerformanceResourceTiming)`. It threw, because `PerformanceResourceTiming` was not defined. Its telemetry read `Screen` the same way (bare issue #421).
+- `PerformanceEntry`, `PerformanceResourceTiming`, `PerformanceNavigationTiming`, `PerformanceMark` and `PerformanceMeasure` are lazy globals (`browser_perf.rs`). Each is an illegal constructor, as in Chrome. The subclass prototypes chain to `PerformanceEntry.prototype`.
+- A mark or a measure is an instance of `PerformanceMark` or `PerformanceMeasure`. Its own fields do not change. Its `toJSON` gives a plain copy. A mark or measure keeps `detail` in the copy. An entry keeps only the four common members.
+- `Screen` is a lazy global (`browser.rs`). `window.screen` is its instance. `new Screen()` throws.
+- Gap: `new PerformanceMark(name)` and `new PerformanceMeasure(name)` throw. They are not constructible yet. Entries have no getters on the prototype. Their fields stay own data properties.
+- Gap: `PerformanceResourceTiming` and `PerformanceNavigationTiming` have no entries. The page gets no resource or navigation entry from `getEntries*`, as before.
+- Gap: `toJSON` does not check its receiver. A call on a non-object throws `Illegal invocation`. A call on another object does not.
+- Shape from Ladybird's IDL (`LibWeb/PerformanceTimeline/PerformanceEntry.idl`, `LibWeb/ResourceTiming/PerformanceResourceTiming.idl`, `LibWeb/CSS/Screen.idl`, BSD-2-Clause). We wrote our own code. No file was copied. Ladybird's `Screen` has its members on the interface. Ours keep them as own data properties of `screen`, as before.
