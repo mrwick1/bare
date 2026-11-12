@@ -1857,6 +1857,7 @@ Reason: a later relative box under an earlier fixed layer could not be clicked (
 - A `header` or `footer` inside an article, aside, main, nav or section is not a landmark. A `form` needs a name.
 - Reason: a model could not tell a top navigation link from the others without eval. The deck eval task `link-url` asks for the "Release notes" link in the top navigation. It failed 3 of 3 runs. The model then called `eval`, which the task forbids (bare#438).
 - A `text` or `root` filter keeps few lines, so `links` gives the full URL then. With only the landmark, the model still called `eval` to turn the path into a full URL. The tool description now says that only ad tracking parameters are cut. deck task `link-url` went from 0 of 3 to 4 of 4.
+
 ## A body that clips does not hide fixed boxes from tree order (2026-11-12)
 
 - Paint and hit testing use `Tree::overflow`, as layout does. The root element and the first `body` give their `overflow` to the window (CSS Overflow 3, 3.3) and do not clip themselves. Ladybird does the same (`Libraries/LibWeb/Layout/TreeBuilder.cpp`, BSD-2). Before, `body { overflow: hidden }` made the body a clipping context that painted over the fixed boxes before it.
@@ -1864,6 +1865,7 @@ Reason: a later relative box under an earlier fixed layer could not be clicked (
 - Not done: a fixed box and a positioned box inside two nested clipping boxes. The outer one holds the fixed box, so it paints after the inner box.
 
 Reason: a later relative box under an earlier fixed layer could not be clicked when the body had `overflow: hidden` (bare#439).
+
 ## A caret keeps a state override for bold, italic and underline (2026-11-12)
 
 Issue #440: Control+B did nothing in a `contenteditable`, `execCommand('bold')` with a caret did not style the next text, and the act receipt said "no effect" for a key that typed.
