@@ -1226,3 +1226,14 @@ An agent such as `deck` must read a page and act on it in few model calls. Scree
 - `find`, `read` (paged text), `links`, `screenshot` (the page or one element, a path, and the image when asked), `eval` and `sessions` complete the set. Every reply goes through the redactor.
 - Each tool takes `session`. Sessions run side by side, one page each. `open` ends only the session of its name.
 - Step lines accept `ref=e7`, so a journey can mix refs and user locators.
+
+## Constructable style sheets (2026-11-12)
+
+Lit and other web-component libraries style a shadow root with `new CSSStyleSheet()` and `adoptedStyleSheets`. bare had neither, so such a page lost its styles.
+
+- A constructed sheet keeps its text. `replaceSync` and `replace` store the text and parse no rules. The rule objects of `cssRules`, `insertRule` and `deleteRule` are made only when a script asks for them.
+- The cascade plan appends the text of each adopted sheet to the rules of the tree that adopted it, after the `<style>` and `<link>` sources of that tree. The existing parse and scoped cascade do the rest. No second style path exists.
+- `replace` applies its text at once. The spec applies it in a later task. A page that awaits the promise sees no difference.
+- The `adoptedStyleSheets` getter returns a copy. `push` on it has no effect. A page assigns a new array, as Lit does.
+- A sheet adopted by many shadow roots adds its rules once per root. A page with many instances pays for each. Sharing the parsed rules is a later step.
+- `snapshot` and `read` now enter a shadow root. They skipped it before, so a page built from web components showed no elements.

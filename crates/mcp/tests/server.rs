@@ -369,3 +369,14 @@ fn an_agent_logs_in_with_snapshot_refs_and_no_step_lines() {
     let (r, _) = s.tool("sessions", json!({}));
     assert!(r.as_str().unwrap().contains("main: ") && r.as_str().unwrap().contains("two: "), "{r}");
 }
+
+#[test]
+fn a_snapshot_leaves_out_what_an_adopted_sheet_hides() {
+    let mut s = Server::start();
+    let (snap, error) = s.tool("open", json!({"url": format!("{}/adopted", common::serve()), "timeout_ms": 30000, "snapshot": true}));
+    let snap = snap.as_str().unwrap().to_string();
+    assert!(!error && snap.contains("Shown button"), "{snap}");
+    assert!(!snap.contains("Hidden button"), "{snap}");
+    let (r, error) = s.tool("eval", json!({"js": "var r = document.querySelector('x-card').shadowRoot; getComputedStyle(r.getElementById('seen')).color + ' ' + getComputedStyle(r.getElementById('gone')).display"}));
+    assert!(!error && r.to_string().contains("rgb(0, 0, 255) none"), "{r}");
+}
