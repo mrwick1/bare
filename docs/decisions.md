@@ -1475,3 +1475,12 @@ A `press` with a locator on the Wikipedia search failed as `detached`, and the p
 - The counts were right: a write of the same key replaces its size, and the same value again is a no-op.
 - `press` follows a field that the page replaced, with the rule of `type`. The old field left the document, and a text field has the focus. Then the key goes to that field. This holds when the locator matches nothing now, and when the focus of the press makes the page swap the field.
 - The second swap of Wikipedia gives an input with no `id`. So `css="#searchInput"` matches nothing after `type`.
+
+## offsetTop of an inline box over more than one line, and no spin in settle (2026-11-12)
+
+GitHub read `offsetTop` of an inline box with a border over two lines, and the read stopped the issues page.
+
+- The gate said that "the first box" of such an element is not known. That reason does not hold. Inline layout writes the fragments of a box line by line, in order. `getClientRects` already gives them in that order.
+- `offsetTop` and `offsetLeft` now use the first fragment of the element. CSSOM View asks for the border edge of the first box. An offset parent over more than one line uses its first fragment too.
+- This replaces the last line of "offsetTop of an inline box with nothing to paint": that gate is gone.
+- `snap::settle` waited up to 2 s for an open `fetch` on a stopped page. `tick` gives no next time then, so the loop spun at full CPU. It now sleeps 5 ms between ticks. The wait limit stays 2 s. A test measured 1.996 s of CPU in 2.000 s before and almost none after.

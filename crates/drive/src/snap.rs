@@ -335,8 +335,10 @@ pub fn settle(p: &mut Page) {
         if (!more && !fetching && !due) || now.duration_since(start) > std::time::Duration::from_millis(if fetching { 2000 } else { 300 }) {
             break;
         }
-        if !more && let Some(t) = next {
-            std::thread::sleep(t.saturating_duration_since(now).min(std::time::Duration::from_millis(20)));
+        // No next time: the page stopped, but a `fetch` is still open (or a timer is due). Wait 5 ms, so the loop does not spin.
+        if !more {
+            let wait = next.map_or(std::time::Duration::from_millis(5), |t| t.saturating_duration_since(now));
+            std::thread::sleep(wait.min(std::time::Duration::from_millis(20)));
         }
     }
 }
