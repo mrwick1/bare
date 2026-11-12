@@ -349,7 +349,7 @@ impl<'p> Interp<'p> {
             return Ok(());
         }
         let n = b.name;
-        self.assign_name_refused(n, e, i)
+        self.assign_name_refused(n, e, i, v)
     }
 
     /// `GetName`: the full search, then the global object.
