@@ -179,6 +179,10 @@ fn selectors_lookups_and_errors() {
         assert_eq!(js(&mut b, "document.getElementById('a').querySelector('#a')"), "null"); // only descendants
         assert_eq!(js(&mut b, "document.querySelector('p[')"), "throw:SyntaxError:'p[' is not a valid selector");
         assert_eq!(js(&mut b, "document.querySelector('a b c d e f g')"), lim("dom-selector-complexity"));
+        // Complex selectors in `:not()` and `:is()` (Selectors 4). Their searches count for the limit too.
+        assert_eq!(js(&mut b, "[document.querySelectorAll('body :not(div > *, head *, html, head)').length, document.querySelector(':is(.x > p) + span').id, document.querySelectorAll('[id]:not(.y *)').length].join()"), "3,s,3");
+        assert_eq!(js(&mut b, "document.querySelector(':not(a b c d e f g)')"), lim("dom-selector-complexity"));
+        assert_eq!(js(&mut b, "document.querySelector('a b :not(c d :is(e f g))')"), lim("dom-selector-complexity"));
         assert_eq!(js(&mut b, &format!("document.querySelector('{}')", "a".repeat(2000))), "null");
         assert_eq!(js(&mut b, &format!("document.querySelector('{}')", "a".repeat(BrowserLimits::default().max_selector_len + 1))), lim("dom-selector"));
         // a detached subtree is searched too, and is not found from the document

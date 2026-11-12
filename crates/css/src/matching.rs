@@ -23,12 +23,12 @@
 
 use bare_html::dom::{Atom, Document, NodeData, NodeId};
 
-use crate::selector::{AttrTest, Case, Combinator, Compound, Host, Nth, Selector, Simple, User};
+use crate::selector::{AttrTest, Case, Combinator, Complex, Compound, Host, Nth, Selector, Simple, User};
 
 /// Does `selector` match the element `el`? `el` must be an element of `doc`, and the selector must be
 /// parsed for `doc`. For any other node, it gives `false`.
 pub fn matches(doc: &Document, el: NodeId, selector: &Selector) -> bool {
-    is_element(doc, el) && matches_from(doc, el, &selector.compounds)
+    is_element(doc, el) && matches_from::<false>(doc, el, &selector.compounds)
     // Without this check, `*` would match a text node, because it has no simple selectors to fail.
 }
 
@@ -69,7 +69,11 @@ fn next_element(doc: &Document, mut id: NodeId) -> Option<NodeId> {
 }
 
 /// `compounds[0]` must match `el`, and the rest must match the elements it points to.
-fn matches_from(doc: &Document, el: NodeId, compounds: &[Compound]) -> bool {
+///
+/// `ARG` is a const generic (JS has none: think of two copies of the function, made by the compiler). `true` is the copy for the arguments
+/// of `:not()` and `:is()` (`complex_matches`). That copy calls itself back through `simple_matches`. The `false` copy stays out of that
+/// loop, so the compiler still inlines the compound tests into it: one shared copy made every `:not()` about 6% slower.
+fn matches_from<const ARG: bool>(doc: &Document, el: NodeId, compounds: &[Compound]) -> bool {
     let Some((first, rest)) = compounds.split_first() else { return true };
     if !compound_matches(doc, el, &first.simples) {
         return false;
@@ -79,14 +83,14 @@ fn matches_from(doc: &Document, el: NodeId, compounds: &[Compound]) -> bool {
     }
     match first.combinator {
         Combinator::Child => match parent_element(doc, el) {
-            Some(p) => matches_from(doc, p, rest),
+            Some(p) => matches_from::<ARG>(doc, p, rest),
             None => host_above(doc, el, rest),
         },
-        Combinator::Next => prev_element(doc, el).is_some_and(|p| matches_from(doc, p, rest)),
+        Combinator::Next => prev_element(doc, el).is_some_and(|p| matches_from::<ARG>(doc, p, rest)),
         Combinator::Descendant => {
             let (mut top, mut up) = (el, parent_element(doc, el));
             while let Some(a) = up {
-                if matches_from(doc, a, rest) {
+                if matches_from::<ARG>(doc, a, rest) {
                     return true;
                 }
                 (top, up) = (a, parent_element(doc, a));
@@ -96,7 +100,7 @@ fn matches_from(doc: &Document, el: NodeId, compounds: &[Compound]) -> bool {
         Combinator::Later => {
             let mut before = prev_element(doc, el);
             while let Some(s) = before {
-                if matches_from(doc, s, rest) {
+                if matches_from::<ARG>(doc, s, rest) {
                     return true;
                 }
                 before = prev_element(doc, s);
@@ -182,7 +186,16 @@ fn simple_matches(doc: &Document, el: NodeId, simple: &Simple) -> bool {
         Simple::Host(h) => host_matches(doc, el, h),
         Simple::Is(args) => args.iter().any(|simples| compound_matches(doc, el, simples)),
         Simple::Not(args) => !args.iter().any(|simples| compound_matches(doc, el, simples)),
+        Simple::Complex(c) => complex_matches(doc, el, c),
     }
+}
+
+/// `:not()` or `:is()` with complex arguments. Each argument tests `el` with its first compound, then walks up or back from it, as in `matches`.
+/// Out of line and cold, like `host_matches`: the hot arms stay small.
+#[cold]
+#[inline(never)]
+fn complex_matches(doc: &Document, el: NodeId, c: &Complex) -> bool {
+    c.args.iter().any(|compounds| matches_from::<true>(doc, el, compounds)) != c.not
 }
 
 #[cold]
@@ -421,6 +434,27 @@ mod tests {
         assert_eq!(find(PAGE, "li:not(:not(.on))"), ["l2"]);
         assert_eq!(find(PAGE, "p:not(*)"), Vec::<String>::new());
         assert_eq!(find(PAGE, "li:not(a)"), ["l1", "l2", "l3"]);
+    }
+
+    #[test]
+    fn complex_arguments() {
+        // The argument matches the element, then walks up or back from it.
+        assert_eq!(find(PAGE, "a:not(.box a)"), Vec::<String>::new());
+        assert_eq!(find(PAGE, "a:not(#d1 a)"), ["a1"]);
+        assert_eq!(find(PAGE, "p:not(div > p)"), ["p3"]);
+        assert_eq!(find(PAGE, "p:not(.intro + p, .box > .intro)"), ["p3"]);
+        assert_eq!(find(PAGE, "li:not(#u1 > .on)"), ["l1", "l3"]);
+        assert_eq!(find(PAGE, "li:not(.on ~ li)"), ["l1", "l2"]);
+        assert_eq!(find(PAGE, "li:not(.big li)"), ["l1", "l2", "l3"]);
+        assert_eq!(find(PAGE, "li:is(.on ~ li, :first-child)"), ["l1", "l3"]);
+        assert_eq!(find(PAGE, "li:where(#d2 > ul > li)"), ["l1", "l2", "l3"]);
+        assert_eq!(find(PAGE, "*:is(.box .intro)"), ["p1"]);
+        // The argument does not reach past the element: `#d1 p` is not `p` inside `#d1` inside the subject.
+        assert_eq!(find(PAGE, "div:is(#d1 p)"), Vec::<String>::new());
+        assert_eq!(find(PAGE, ":not(:is(.box *) *)").iter().filter(|i| i.starts_with('l')).count(), 0);
+        let wiki = r##"<div id=c><p id=x><a id=w1 href="/a" title=A>a</a><a id=w2 class=extiw href="/b" title=B>b</a>
+            <a id=w3 href="/c">c</a><a id=w4 href="#n" title=N>n</a></p><span class=mw-cite-backlink><a id=w5 href="/d" title=D>d</a></span></div>"##;
+        assert_eq!(find(wiki, r##"#c a[href][title]:not(.extiw, .mw-cite-backlink a, [href^="#"])"##), ["w1"]);
     }
 
     #[test]

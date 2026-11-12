@@ -1431,3 +1431,14 @@ Old and small sites use `id` globals: a handler writes `out.textContent` for `<d
 - The list of names is built by one walk on the first ask after a change. `Document::name_revision` moves only for changes that can touch named elements. A text edit or a bare new element costs no walk.
 - The heap cache passes over an open named object for a hit behind it. Without this, every `document.body` read lost its cache.
 - Cost: a global miss costs about 50 to 80 ns more on a page with 2000 ids. A hit on an own global costs the same.
+## Complex selectors in :not(), :is() and :where() (2026-11-12)
+
+Wikipedia calls `querySelectorAll` with `:not(.extiw, .mw-cite-backlink a, ...)`. bare threw `SyntaxError`, so the link preview script stopped.
+
+- `:not()`, `:is()` and `:where()` now take complex selectors, as Selectors 4 says. An argument may have combinators: `:not(.a > .b, .c ~ .d)`.
+- A list of compounds only keeps `Simple::Not` and `Simple::Is`. A list with a combinator becomes `Simple::Complex`. It is boxed and matched out of line, like `:host`, so the hot match arms stay small.
+- A complex argument tests the element with its first compound. Then it walks up or back from the element, like a selector. It allocates nothing.
+- The specificity of an argument counts all its compounds. `:not()` and `:is()` count like their most specific argument. `:where()` counts zero.
+- The invalidation sets (`Reach`, `Scopes`) read the compounds of an argument at the scope of their combinators. `:not(.x p)` reads `.x` on an ancestor, so a change of `.x` restyles the subtree.
+- The script limits count the searches of an argument. `backtracking` adds the most that one argument adds. `match_work` multiplies by the work of the arguments.
+- `:has()` stays out. A rule with it is still thrown away.

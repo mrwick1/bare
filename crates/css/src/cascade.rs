@@ -283,6 +283,22 @@ impl Reach {
                         }
                         continue;
                     }
+                    Simple::Complex(cx) => {
+                        // A compound of the argument left of a combinator is read on an ancestor or an earlier sibling, like one of the selector.
+                        for a in &cx.args {
+                            let mut at = at;
+                            for (i, c) in a.iter().enumerate() {
+                                if i > 0 {
+                                    at = at.max(match a[i - 1].combinator {
+                                        Combinator::Next | Combinator::Later => Scope::Siblings,
+                                        _ => Scope::Subtree,
+                                    });
+                                }
+                                simples(me, &c.simples, at);
+                            }
+                        }
+                        continue;
+                    }
                     _ => continue,
                 };
                 *slot = (*slot).max(at);
@@ -401,6 +417,26 @@ impl Scopes {
                     Simple::Not(args) | Simple::Is(args) => {
                         for a in args {
                             simples(me, a, at);
+                        }
+                        continue;
+                    }
+                    Simple::Complex(cx) => {
+                        // As in `Reach::add`. A `+` or `~` in the argument also makes the place of a sibling count.
+                        for a in &cx.args {
+                            let mut at = at;
+                            for (i, c) in a.iter().enumerate() {
+                                if i > 0 {
+                                    let way = match a[i - 1].combinator {
+                                        Combinator::Next | Combinator::Later => Scope::Siblings,
+                                        _ => Scope::Subtree,
+                                    };
+                                    at = at.max(way);
+                                    if way == Scope::Siblings {
+                                        me.structure = Scope::Siblings;
+                                    }
+                                }
+                                simples(me, &c.simples, at);
+                            }
                         }
                         continue;
                     }
@@ -3626,7 +3662,8 @@ mod tests {
             li:first-child{color:#111}li:nth-child(2n){color:#222}li:last-child{margin-left:4px}:empty{padding-top:1px}.q:empty + div{color:#333}\
             [data-x]{color:#444}[data-x=y] .c{color:#555}.m{display:none}.n{font-size:2em}\
             #i1 .c{color:#666}#i2{color:#777}#i1 ~ .h{margin-top:7px}[data-state=open] + .f{margin-left:9px}\
-            .e:not([data-state]) .c{padding-top:5px}.p .q.r{color:#888}";
+            .e:not([data-state]) .c{padding-top:5px}.p .q.r{color:#888}.d:not(.b .d){padding-right:6px}li:is(.g ~ li, .k > *){margin-right:8px}\
+            .f:not(.e + .f, :hover > .f){border-left-color:#999}span:where([data-x] span, :focus-within ~ span){margin-bottom:3px}";
         const CLASSES: [&str; 14] = ["a", "b", "c", "d", "e", "f", "g", "h", "k", "q", "m", "n", "p", "r"];
         const TAGS: [&str; 4] = ["div", "span", "li", "ul"];
         let mut seed = 0x2545_F491_4F6C_DD1Du64;
@@ -3779,6 +3816,27 @@ mod tests {
         assert_eq!(step(&mut doc, &mut st, &|d| d.set_attr(t, "class", "b only c")), (vec![], vec![]));
         // An attribute that no selector reads: nothing.
         assert_eq!(step(&mut doc, &mut st, &|d| d.set_attr(t, "aria-expanded", "true")), (vec![], vec![]));
+    }
+
+    /// A class in a complex argument of `:not()` or `:is()` is read on an ancestor or an earlier sibling of the subject.
+    #[test]
+    fn a_class_in_a_complex_argument_restyles_what_it_reaches() {
+        let mut doc = parse("<div id=d><p id=p>x</p></div><i id=s></i><b id=b>y</b>");
+        let mut rules = RuleSet::new(VIEW);
+        rules.add(&mut doc, "p:not(.x p) { color: red } b:is(.y ~ b) { color: blue }", Origin::Author);
+        let mut st = rules.compute_kept(&doc);
+        doc.track_damage(DAMAGE_FRAME);
+        let (d, p, s, b) = (by_id(&doc, "d"), by_id(&doc, "p"), by_id(&doc, "s"), by_id(&doc, "b"));
+        for (el, class, want) in [(d, "x", vec![(d, true)]), (s, "y", vec![(s, true), (b, true)])] {
+            doc.set_attr(el, "class", class);
+            let mut roots = Vec::new();
+            assert!(doc.take_damage(DAMAGE_FRAME).unwrap().into_iter().all(|m| rules.roots(&doc, m, &mut roots)));
+            assert_eq!(roots, want, "class {class}");
+            assert!(rules.restyle(&doc, &mut st, &roots, &mut Vec::new()));
+            let full = rules.compute(&doc);
+            assert_eq!(st.style(p), full.style(p));
+            assert_eq!(st.style(b), full.style(b));
+        }
     }
 
     /// Random changes of the attributes and the state that the form pseudo-classes read, each followed by a restyle of the roots

@@ -26,14 +26,13 @@
 //!   So a selector is parsed for one `Document`, and it works only with that document.
 //!
 //! Specificity is counted here, once: (ids, classes, tags) packed in one `u32`, so the cascade compares one number.
-//! `:not(x)` counts like its most specific argument. Pseudo-classes and attributes count like classes.
+//! `:not(x)` counts like its most specific argument. `:not()`, `:is()` and `:where()` take complex selectors (`:not(.a > b)`), as in Selectors 4. Pseudo-classes and attributes count like classes.
 //!
 //! Error rule (CSS Selectors 4): if one selector in a list is wrong, the whole rule is thrown away.
 //! `parse_selector_list` gives `None` for that.
 //!
 //! Left out for now:
-//! - `:is()` and `:where()` take compounds only, like `:not()`: `:is(h1, .a)` is good, `:is(.a .b)` is not. One bad argument
-//!   throws the whole rule away (Chrome drops only that argument).
+//! - One bad argument of `:is()` or `:where()` throws the whole rule away (Chrome drops only that argument).
 //! - `:has()`, the `of S` part of `:nth-child()`, and `:only-of-type`. A rule that
 //!   uses them is thrown away, like an unknown pseudo-class. (Chrome also throws away `:-moz-placeholder` and
 //!   the other prefixed ones that it does not know. So do we.)
@@ -146,6 +145,9 @@ pub enum Simple {
     Not(Vec<Vec<Simple>>),
     /// `:is(.a, b)` and `:where(.a, b)`: true when one of the compounds matches. They match the same. Only the specificity differs.
     Is(Vec<Vec<Simple>>),
+    /// `:not()`, `:is()` or `:where()` with an argument that has a combinator: `:not(.a > b, c)`. One boxed variant, like `Host`: most lists
+    /// are compounds only, and they keep the cheaper `Not` and `Is`.
+    Complex(Box<Complex>),
     /// `:host`, `:host(.a)` and `:host-context(.a)`. One variant: an arm for each in `simple_matches` slows every other test.
     Host(Box<Host>),
 }
@@ -156,6 +158,15 @@ pub enum Simple {
 pub struct Host {
     pub context: bool,
     pub args: Vec<Vec<Simple>>,
+}
+
+/// The arguments of `Simple::Complex`. Each one is a complex selector: its compounds from the right to the left, like `Selector::compounds`.
+/// The first compound tests the element itself, and the others walk up or back from it.
+#[derive(Debug, PartialEq)]
+pub struct Complex {
+    /// `:not()`: true when no argument matches. Else `:is()` or `:where()`: true when one matches.
+    pub not: bool,
+    pub args: Vec<Vec<Compound>>,
 }
 
 fn is_host(s: &Simple) -> bool {
@@ -194,6 +205,7 @@ pub fn user_flags(selector: &Selector) -> u8 {
                 Simple::User(_) => USES_FOCUS,
                 Simple::Form(_) => USES_FORM,
                 Simple::Not(args) | Simple::Is(args) => args.iter().fold(0, |f, a| f | of(a)),
+                Simple::Complex(c) => c.args.iter().flatten().fold(0, |f, c| f | of(&c.simples)),
                 _ => 0,
             }
         })
@@ -321,12 +333,20 @@ impl Parser<'_, '_> {
 
     /// One selector. Stops before a `,`, a `)` or the end (it does not take them).
     fn selector(&mut self, depth: u32) -> Option<Selector> {
+        let mut counts = [0u32; 3];
+        let compounds = self.complex(depth, &mut counts)?;
+        let specificity = counts[0].min(1023) << 20 | counts[1].min(1023) << 10 | counts[2].min(1023);
+        Some(Selector { compounds, specificity, pseudo: self.pseudo.take().map(Box::new) })
+    }
+
+    /// The compounds of one selector, from the right to the left. Adds their specificity to `counts`. Stops like `selector`.
+    /// The argument of `:not()` and `:is()` is one of these too.
+    fn complex(&mut self, depth: u32, counts: &mut [u32; 3]) -> Option<Vec<Compound>> {
         let mut compounds = Vec::new();
         // From left to right here. We turn it around at the end.
-        let mut counts = [0u32; 3];
         self.skip_space();
         loop {
-            let simples = self.compound(depth, &mut counts)?;
+            let simples = self.compound(depth, counts)?;
             let spaced = self.skip_space();
             let combinator = match self.tokens.peek() {
                 None | Some(Token::Comma | Token::CloseParen) => {
@@ -360,13 +380,12 @@ impl Parser<'_, '_> {
         compounds.reverse();
         // Check: `a > b c`. Left to right: [a(>), b(descendant), c(-)]. After the shift: [a(-), b(>), c(descendant)].
         // After the reverse: [c(descendant), b(>), a(-)]. `c` is joined to `b` by a space, `b` to `a` by `>`. Right.
-        let specificity = counts[0].min(1023) << 20 | counts[1].min(1023) << 10 | counts[2].min(1023);
         // `:host` is the shadow host: nothing can be to its left.
         let last = compounds.len() - 1;
         if self.host && compounds[..last].iter().any(|c| c.simples.iter().any(is_host)) {
             return None;
         }
-        Some(Selector { compounds, specificity, pseudo: self.pseudo.take().map(Box::new) })
+        Some(compounds)
     }
 
     /// A compound selector: `li.item:first-child`. It has at least one simple selector, or `*`.
@@ -602,8 +621,7 @@ impl Parser<'_, '_> {
                 loop {
                     let mut c = [0u32; 3];
                     self.skip_space();
-                    args.push(self.compound(depth + 1, &mut c)?);
-                    self.skip_space();
+                    args.push(self.complex(depth + 1, &mut c)?);
                     best = best.max(c);
                     match self.tokens.next()? {
                         Token::Comma => {}
@@ -617,7 +635,13 @@ impl Parser<'_, '_> {
                         *total += add;
                     }
                 }
-                Some(if kind == "not" { Simple::Not(args) } else { Simple::Is(args) })
+                let not = kind == "not";
+                if args.iter().any(|a| a.len() > 1) {
+                    return Some(Simple::Complex(Box::new(Complex { not, args })));
+                }
+                // Compounds only. (JS: `args.map(a => a.pop().simples)`; `into_iter` takes the vectors, so nothing is copied.)
+                let args = args.into_iter().filter_map(|mut a| a.pop()).map(|c| c.simples).collect();
+                Some(if not { Simple::Not(args) } else { Simple::Is(args) })
             }
             Token::Function(name) if name.eq_ignore_ascii_case("host") || name.eq_ignore_ascii_case("host-context") => {
                 // The argument is one compound. It counts like the argument of `:is()`, and the pseudo-class like a class.
@@ -800,6 +824,32 @@ mod tests {
         assert_eq!(spec(":where(#a, .b, c)"), (0, 0, 0));
         assert_eq!(spec("p:where(#a)"), (0, 0, 1));
         assert_eq!(spec(":is(:where(#a), .b)"), (0, 1, 0));
+        // A complex argument counts all its compounds.
+        assert_eq!(spec("a:not(.x a)"), (0, 1, 2));
+        assert_eq!(spec(":not(.a > .b, #c)"), (1, 0, 0));
+        assert_eq!(spec(":not(.a > .b .c, #c)"), (1, 0, 0));
+        assert_eq!(spec(":not(.a > .b .c, .d)"), (0, 3, 0));
+        assert_eq!(spec(":is(#a .b, c)"), (1, 1, 0));
+        assert_eq!(spec(":where(#a .b, c)"), (0, 0, 0));
+    }
+
+    #[test]
+    fn complex_arguments() {
+        // Selectors 4: `:not()`, `:is()` and `:where()` take a list of complex selectors.
+        for text in ["a:not(.x a)", ":not(.a > .b, .c ~ .d)", ":not(.a + .b)", ":is(a b)", ":where(a > b)", ":not(:is(.a .b) .c)", "#mw-content-text a[href][title]:not(.extiw, .mw-cite-backlink a, [href^=\"#\"])"] {
+            assert!(parse(text).is_some(), "{text:?} should parse");
+        }
+        let simple = |t: &str| parse(t).unwrap().remove(0).compounds.remove(0).simples.remove(0);
+        let Simple::Complex(c) = simple(":not(.a > .b, .c)") else { panic!("not complex") };
+        let (not, args) = (c.not, c.args);
+        assert!(not);
+        assert_eq!(args.len(), 2);
+        // From the right to the left, like a selector.
+        assert_eq!(args[0].iter().map(|c| (c.simples.len(), c.combinator)).collect::<Vec<_>>(), [(1, Combinator::Child), (1, Combinator::Descendant)]);
+        assert_eq!(args[0][0].simples, [Simple::Class("b".into())]);
+        assert_eq!(args[1].len(), 1);
+        let Simple::Complex(c) = simple(":where(a b)") else { panic!("not complex") };
+        assert!(!c.not);
     }
 
     #[test]
@@ -907,7 +957,7 @@ mod tests {
         for text in [
             "", " ", ",", "a,", ",a", "a,,b", ">", "a >", "a > > b", ".", ". a", "#", "#1", "a#1",
             "[", "[a", "[a=", "[a=]", "[=a]", "[a=b c]", "[a=b i j]", "[a=b x]", "[a!=b]", "[a ~ = b]", "[1]",
-            ":", "a:", ":unknown", "::x", ":x::before", "a::before b", "a::before.c", "a::before > b", ":not(::before)", ":is(a::after)", "::", "::before(", ":nth-child()", ":nth-child(2 n)", ":nth-child(n 1)", ":nth-child(1.5)", ":nth-child(a)", ":nth-child(2n+)", ":nth-child(2n+1", ":is()", ":is(a b)", ":where(a > b)", ":not()", ":not(a b)", ":not(a > b)",
+            ":", "a:", ":unknown", "::x", ":x::before", "a::before b", "a::before.c", "a::before > b", ":not(::before)", ":is(a::after)", "::", "::before(", ":nth-child()", ":nth-child(2 n)", ":nth-child(n 1)", ":nth-child(1.5)", ":nth-child(a)", ":nth-child(2n+)", ":nth-child(2n+1", ":is()", ":not()", ":not(a >)", ":not(> a)", ":not(a > > b)", ":is(a b,)", ":not(a ::before)", ":where(a::after b)",
             ":not(a", ":not(a,)", "a)", "a b)", "a(", "a\"b\"", "svg|a", "|a", "a{", "a;b", "!", "a!b",
         ] {
             assert!(parse(text).is_none(), "{text:?} should not parse");

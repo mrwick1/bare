@@ -6,7 +6,7 @@
 
 use crate::browser::*;
 use bare_css::matching::{matches, subject_matches};
-use bare_css::selector::{Selector, Simple};
+use bare_css::selector::{Combinator, Compound, Selector, Simple};
 use bare_html::dom::{Atom, Document, NodeData, NodeId};
 use bare_js::eval::{Error, Interp};
 use bare_js::value::{ObjId, Value};
@@ -77,29 +77,47 @@ pub(crate) fn next_composed(doc: &Document, root: NodeId, cur: NodeId, depth: us
 
 /// Descendant and later-sibling combinators of `s`: each is a search with a place to go back to. `Dom::selectors` refuses more than 5. The
 /// step charge of `match_work` is the real guard: it is made before a match and a chain that is too long ends at the budget.
+/// A complex argument of `:not()` or `:is()` (`Simple::Complex`) runs inside the search, so its count adds: the most that one argument adds.
 pub(crate) fn backtracking(s: &Selector) -> u32 {
-    let n = s.compounds.len();
-    s.compounds
-        .iter()
-        .take(n.saturating_sub(1))
-        .filter(|c| matches!(c.combinator, bare_css::selector::Combinator::Descendant | bare_css::selector::Combinator::Later))
-        .count() as u32
+    chain_backtracking(&s.compounds)
+}
+
+fn chain_backtracking(compounds: &[Compound]) -> u32 {
+    let n = compounds.len();
+    let own = compounds.iter().take(n.saturating_sub(1)).filter(|c| matches!(c.combinator, Combinator::Descendant | Combinator::Later)).count() as u32;
+    let inner = compounds.iter().flat_map(|c| &c.simples).map(|x| match x {
+        Simple::Complex(c) => c.args.iter().map(|a| chain_backtracking(a)).max().unwrap_or(0),
+        _ => 0,
+    });
+    own + inner.max().unwrap_or(0)
 }
 
 /// Conservative bound for each combinator search, including skipped non-element siblings.
 fn match_work(doc: &Document, depth: usize, sels: &[Selector]) -> u64 {
-    sels.iter().fold(0u64, |total, s| {
-        let mut cost = 1u64;
-        for c in s.compounds.iter().take(s.compounds.len().saturating_sub(1)) {
-            let factor = match c.combinator {
-                bare_css::selector::Combinator::Later | bare_css::selector::Combinator::Next => doc.len() as u64 + 1,
-                bare_css::selector::Combinator::Descendant => depth as u64 + 1,
-                _ => 1,
-            };
-            cost = cost.saturating_mul(factor);
+    sels.iter().fold(0u64, |total, s| total.saturating_add(chain_work(doc, depth, &s.compounds)))
+}
+
+/// The bound for one chain of compounds: the product of its searches, times the work of the complex arguments of `:not()` and `:is()`,
+/// which run again on each element that the searches visit. (`Simple::Not` and `Simple::Is` have compounds only: no search.)
+fn chain_work(doc: &Document, depth: usize, compounds: &[Compound]) -> u64 {
+    let mut cost = 1u64;
+    for c in compounds.iter().take(compounds.len().saturating_sub(1)) {
+        let factor = match c.combinator {
+            Combinator::Later | Combinator::Next => doc.len() as u64 + 1,
+            Combinator::Descendant => depth as u64 + 1,
+            _ => 1,
+        };
+        cost = cost.saturating_mul(factor);
+    }
+    let mut inner = 1u64;
+    for x in compounds.iter().flat_map(|c| &c.simples) {
+        if let Simple::Complex(c) = x {
+            for a in &c.args {
+                inner = inner.saturating_add(chain_work(doc, depth, a));
+            }
         }
-        total.saturating_add(cost)
-    })
+    }
+    cost.saturating_mul(inner)
 }
 
 fn needs_places(s: &Selector) -> bool {
@@ -107,6 +125,7 @@ fn needs_places(s: &Selector) -> bool {
         match x {
             Simple::Nth(_) => true,
             Simple::Not(v) | Simple::Is(v) => v.iter().flatten().any(simple),
+            Simple::Complex(c) => c.args.iter().flatten().flat_map(|c| &c.simples).any(simple),
             _ => false,
         }
     }
