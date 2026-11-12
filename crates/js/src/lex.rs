@@ -897,7 +897,7 @@ impl<'a> Lexer<'a> {
             if cls(c) & IDPART == 0 {
                 break; // Non-ASCII here is a space or the start of an unsupported name; the next token decides.
             }
-            let Some(bit) = b"dgimsuy".iter().position(|&f| f == c) else {
+            let Some(bit) = b"dgimsuvy".iter().position(|&f| f == c) else {
                 return Err(self.err(ErrorKind::InvalidRegExpFlag, i));
             };
             if seen & (1 << bit) != 0 {
@@ -1655,7 +1655,7 @@ mod tests {
         }
         assert_eq!(rl("/a/gg"), ErrorKind::DuplicateRegExpFlag);
         assert_eq!(rl("/a/gig"), ErrorKind::DuplicateRegExpFlag);
-        assert_eq!(rl("/a/v"), ErrorKind::InvalidRegExpFlag); // ES2022 has no v flag
+        assert_eq!(rl("/a/vv"), ErrorKind::DuplicateRegExpFlag);
         assert_eq!(rl("/a/x"), ErrorKind::InvalidRegExpFlag);
         assert_eq!(rl("/a/g1"), ErrorKind::InvalidRegExpFlag);
         assert_eq!(rl("/a/\\u0067"), ErrorKind::InvalidRegExpFlag);

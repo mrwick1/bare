@@ -1226,3 +1226,9 @@ An agent such as `deck` must read a page and act on it in few model calls. Scree
 - `find`, `read` (paged text), `links`, `screenshot` (the page or one element, a path, and the image when asked), `eval` and `sessions` complete the set. Every reply goes through the redactor.
 - Each tool takes `session`. Sessions run side by side, one page each. `open` ends only the session of its name.
 - Step lines accept `ref=e7`, so a journey can mix refs and user locators.
+
+## RegExp `v` flag (2026-11-12)
+
+The regexp engine accepts the `v` flag (`unicodeSets`). `v` turns on code point mode, as `u` does, and adds set notation to classes. The parser reads nested classes, `--`, `&&` and `\q{a|bc}`. It follows the grammar of ECMA-262: no mixing of operators, no ranges inside an operation, and no negated class that holds strings.
+A class that holds strings compiles to an alternation: the strings longest first, then the class, then the empty string. A class without strings stays one class instruction, so classes without `v` do not slow down. The `unicode` getter is false for `v`, and `flags` prints `v`.
+Properties of strings (`\p{RGI_Emoji}`) are a `SyntaxError`. Case folding closes the final set only: `--` and `&&` do not fold their operands first.
