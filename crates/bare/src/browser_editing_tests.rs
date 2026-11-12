@@ -131,3 +131,46 @@ fn outside_an_editing_host_nothing_changes() {
         assert_eq!(js(&mut b, "getSelection().removeAllRanges(); document.execCommand('insertText', false, 'X')"), "false");
     });
 }
+
+/// Key input at a focused editing host: `beforeinput` then `input`, and a canceled `beforeinput` stops the change.
+#[test]
+fn keys_edit_a_contenteditable() {
+    big(|| {
+        let mut b = browser();
+        js(&mut b, "document.body.innerHTML = '<div contenteditable id=e></div>'; var e = document.getElementById('e'); window.log = []; \
+            ['beforeinput', 'input'].forEach(function (t) { e.addEventListener(t, function (ev) { log.push(t + ':' + ev.inputType + ':' + ev.data + ':' + ev.cancelable); }); });");
+        let e = b.query("#e").unwrap().unwrap();
+        b.focus(e).unwrap();
+        for (i, k) in ["H", "i", "Enter", "x", "Backspace"].iter().enumerate() {
+            b.drive_key(if i == 0 { Some(e) } else { None }, k).unwrap();
+        }
+        assert_eq!(js(&mut b, "e.textContent + '|' + e.children.length"), "Hi|2");
+        assert_eq!(
+            js(&mut b, "log.join(' ')"),
+            "beforeinput:insertText:H:true input:insertText:H:false beforeinput:insertText:i:true input:insertText:i:false \
+             beforeinput:insertParagraph:null:true input:insertParagraph:null:false beforeinput:insertText:x:true input:insertText:x:false \
+             beforeinput:deleteContentBackward:null:true input:deleteContentBackward:null:false"
+        );
+        // A canceled beforeinput stops the edit.
+        js(&mut b, "e.addEventListener('beforeinput', function (ev) { ev.preventDefault(); });");
+        b.drive_key(None, "z").unwrap();
+        assert_eq!(js(&mut b, "e.textContent"), "Hi");
+    });
+}
+
+/// `drive_type` accepts an editing host, clears it first, and `\n` is Enter.
+#[test]
+fn drive_type_edits_a_contenteditable() {
+    big(|| {
+        let mut b = browser();
+        js(&mut b, "document.body.innerHTML = '<div contenteditable id=e></div>';");
+        let e = b.query("#e").unwrap().unwrap();
+        assert!(b.is_editing_host(e));
+        b.drive_type(e, "Hello world").unwrap();
+        assert_eq!(js(&mut b, "e.textContent"), "Hello world");
+        b.drive_type(e, "Bye").unwrap();
+        assert_eq!(js(&mut b, "e.textContent"), "Bye");
+        b.drive_type(e, "a\nb").unwrap();
+        assert_eq!(js(&mut b, "e.textContent + '|' + e.children.length"), "ab|2");
+    });
+}

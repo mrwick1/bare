@@ -31,14 +31,16 @@
 //!   canceled; otherwise `input` and `change` follow. A radio does the same and clears the others of its group (same `name`
 //!   and form owner). A click on a label focuses and clicks its control. A click on `a[href]` starts a navigation
 //!   (`navigate_href`). A submit button submits its form (`browser_form.rs`, `browser_submit.rs`: validation, then native navigation).
+//! - A focused editing host (`contenteditable`) is edited through `browser_editing.rs`: text, Enter (`insertParagraph`; Shift+Enter
+//!   `insertLineBreak`), Backspace, Delete and Ctrl+A. `beforeinput` (cancelable) fires at the host, then the edit fires `input`. A press in
+//!   a host puts the caret at its end when the selection is not in it already.
 //! - Editing: text, Backspace, Delete, Left, Right, Home, End (Shift extends the selection), Ctrl+A. Offsets are UTF-16
 //!   units, as for `selectionStart`. The value changes through `put_input_value`, the same state that `input.value` reads.
 //!
 //! A `<textarea>` is edited like a field (typing, Enter, Backspace, Delete, `maxlength`). Gaps there: Up and Down and Home and End do not
 //! move by line (Home and End go to the start and the end of the value), and the box does not wrap or scroll (`page.rs`).
 //!
-//! Gaps (none is faked): `contenteditable`;
-//! clipboard keys; Ctrl+Left/Right word moves; IME and `compositionstart`; `readonly` is honored but
+//! Gaps (none is faked): in a `contenteditable` host, arrows, Home and End do not move the caret; clipboard keys; Ctrl+Left/Right word moves; IME and `compositionstart`; `readonly` is honored but
 //! `type=number` does not filter text; `contextmenu`; `:hover`/`:focus` styling; radio groups in the Tab order (every
 //! radio is a stop); `<summary>` toggling; `<label>` click coordinates of the second click; `UIEvent` and `WheelEvent`.
 //!
@@ -612,6 +614,10 @@ impl Dom {
                 self.set_user_selection(it, f, Some(a), Some(b), Dir::Forward)?;
             }
         }
+        // A press in an editing host puts the caret at the end of it, unless the selection is in it already.
+        if let Some(f) = to {
+            self.caret_into_host(it, f)?;
+        }
         Ok(())
     }
 
@@ -812,6 +818,11 @@ impl Dom {
         let t = self.focus_target(it)?;
         let edit = focus.filter(|&f| self.editable(f));
         let m = k.mods;
+        if let Some(f) = focus.filter(|&f| self.editing_host(f).is_some())
+            && self.host_key(it, f, k)?
+        {
+            return Ok(());
+        }
         match k.key.as_str() {
             "Tab" if !m.ctrl && !m.alt && !m.meta => return self.tab(it, focus, m.shift),
             "Enter" => {
@@ -885,6 +896,47 @@ impl Dom {
             }
         }
         Ok(())
+    }
+
+    /// A key at the focused element `f` inside an editing host (`contenteditable`): text, Enter, Backspace, Delete and Ctrl+A edit the
+    /// tree at the selection (`browser_editing.rs`). `beforeinput` fires at the host first and can cancel; the edit fires `input`.
+    /// False when the key is not an editing key, so that the other rules run.
+    fn host_key(&self, it: &mut Interp<'_>, f: NodeId, k: &KeyInput) -> R<bool> {
+        let m = k.mods;
+        if m.alt || m.meta {
+            return Ok(false);
+        }
+        let host = self.editing_host(f).expect("checked");
+        let (kind, text) = match k.key.as_str() {
+            "Enter" => (if m.shift { "insertLineBreak" } else { "insertParagraph" }, None),
+            "Backspace" => ("deleteContentBackward", None),
+            "Delete" => ("deleteContentForward", None),
+            "a" | "A" if m.ctrl => {
+                self.caret_into_host(it, f)?;
+                self.select_all(it)?;
+                return Ok(true);
+            }
+            "Tab" => return Ok(false),
+            _ => match k.text.as_deref().filter(|s| !s.is_empty() && !m.ctrl) {
+                Some(t) => ("insertText", Some(t)),
+                None => return Ok(false),
+            },
+        };
+        if (kind.starts_with("insert")) && !self.key_ev(it, f, "keypress", k)? {
+            return Ok(true);
+        }
+        self.caret_into_host(it, f)?;
+        if !self.input_ev(it, host, "beforeinput", kind, text)? {
+            return Ok(true);
+        }
+        match kind {
+            "insertText" => self.insert_text(it, text.unwrap_or(""))?,
+            "insertParagraph" => self.insert_paragraph(it)?,
+            "insertLineBreak" => self.insert_line_break(it)?,
+            "deleteContentBackward" => self.delete_back(it)?,
+            _ => self.delete_forward(it)?,
+        };
+        Ok(true)
     }
 
     /// Change the value of field `n` as `kind` says, with the events of Chrome.
@@ -1268,6 +1320,16 @@ impl Browser {
     /// Is `node` an `<input>` that takes text and that the user can edit?
     pub fn is_text_input(&self, node: NodeId) -> bool {
         self.dom.editable(node)
+    }
+
+    /// Does `node` have a child node?
+    pub fn has_children(&self, node: NodeId) -> bool {
+        self.dom.doc.borrow().children(node).next().is_some()
+    }
+
+    /// Is `node` an editing host, or inside one (`contenteditable`)?
+    pub fn is_editing_host(&self, node: NodeId) -> bool {
+        self.dom.editing_host(node).is_some()
     }
 
     /// The tab order now, for tests and for a caller that draws a focus ring.

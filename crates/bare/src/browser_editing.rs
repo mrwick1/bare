@@ -214,6 +214,22 @@ fn doc_value(d: &Dom) -> Value {
 }
 
 impl Dom {
+    /// The editing host that `n` is in, if any.
+    pub(crate) fn editing_host(&self, n: NodeId) -> Option<NodeId> {
+        host_of(&self.doc.borrow(), n)
+    }
+
+    /// Put a collapsed caret at the end of the host of `n`, unless the selection is already in that host.
+    pub(crate) fn caret_into_host(&self, it: &mut Interp<'_>, n: NodeId) -> R<()> {
+        let Some(host) = self.editing_host(n) else { return Ok(()) };
+        if self.editing(it)?.is_some_and(|(_, h)| h == host) {
+            return Ok(());
+        }
+        let sel = call(self, it, doc_value(self), "getSelection", &[])?;
+        let end = self.doc.borrow().children(host).count() as u32;
+        caret(self, it, sel, host, end)
+    }
+
     /// The active range, when it is in an editing host.
     fn editing(&self, it: &mut Interp<'_>) -> R<Option<(Act, NodeId)>> {
         Ok(active(self, it, doc_value(self))?.and_then(|a| a.host.map(|h| (a, h))))

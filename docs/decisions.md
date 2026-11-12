@@ -1649,3 +1649,6 @@ A click on a GitHub issue title did not navigate. GitHub cancels the click and c
 - Each successful command fires `input` at the host. `beforeinput` is not fired for a script call, as in Chrome.
 - The functions `insert_text`, `delete_back`, `delete_forward`, `insert_paragraph`, `insert_line_break` and `select_all` are `pub(crate)` on `Dom`. Key input and the format commands call them.
 - Gaps: no block merge on Backspace at a block start, no `&nbsp;` rules, `designMode` stays "off".
+
+## Key input in contenteditable (2026-11-12)
+A focused element inside an editing host now takes key input. Text, Enter, Backspace, Delete and Ctrl+A call the editing core of `browser_editing.rs`. `beforeinput` fires at the host first and can cancel the edit. The edit fires `input` once. A press in a host puts the caret at its end when the selection is not in it. `act type` accepts a host: it selects the old content, types over it, and deletes it for an empty text. A line feed is Enter. Arrow keys, Home and End do not move the caret in a host yet.
