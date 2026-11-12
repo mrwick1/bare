@@ -1545,3 +1545,12 @@ GitHub puts each issue title in a link inside an `<h3>`. The snapshot walk treat
 - A heading stays a leaf only when it holds no control.
 - A heading that holds a control shows its children, so the link gets a line and a ref.
 - When the first line under the heading has the same name, the heading line drops its name. The title then shows once.
+
+## HTMLElement.click() follows a link, and checkVisibility reads the rules (2026-11-12)
+
+A click on a GitHub issue title did not navigate. GitHub cancels the click and calls `click()` on a hidden link, so its router can take the visit. Turbo then calls `checkVisibility()` on its progress bar.
+
+- `click()` on a link sent the gate "the default action is built for the window only". The gate stopped the page script, so nothing navigated.
+- `click()` on an `a` with `href` now follows the link after a click that no listener canceled. It uses the same code as a window click (`follow_link`). `area` stays gated.
+- `checkVisibility()` was a gate on any page with `display: contents` in a sheet. GitHub has such rules, so every call failed.
+- Now the gate holds only when a rule can reach the element: `display: contents` on the element, or `content-visibility` on an ancestor. The rules and their selectors are found once for each rule set.

@@ -718,26 +718,35 @@ impl Dom {
         if canceled {
             return Ok(());
         }
-        let (is_label, href, blank) = {
-            let doc = self.doc.borrow();
-            let a = is_tag(&doc, t, "a");
-            (is_tag(&doc, t, "label"), if a { attr(&doc, t, "href").map(str::to_string) } else { None }, a && attr(&doc, t, "target").is_some_and(|v| v.eq_ignore_ascii_case("_blank")))
-        };
-        if let Some(h) = href {
-            if self.queue_download(it, t, &h)? {
-                return Ok(());
-            }
-            // A driver that wants tabs (`agent.rs`) gets the URL; the page stays.
-            if blank && self.resolve_http(&h).is_some_and(|u| crate::agent::tab(&u)) {
-                return Ok(());
-            }
-            return self.navigate_href(it, &h);
+        if self.follow_link(it, t)? {
+            return Ok(());
         }
+        let is_label = is_tag(&self.doc.borrow(), t, "label");
         if is_label && let Some(c) = self.label_control(it, t)? {
             self.focus_node(it, c)?;
             return self.user_click(it, c, Some(ui.clone())).map(|_| ());
         }
         self.activate(it, t)
+    }
+
+    /// The activation behavior of a link `a` with `href`: save the target (`download`), hand a new tab to the driver, or navigate.
+    /// False when `t` is not such a link.
+    pub(crate) fn follow_link(&self, it: &mut Interp<'_>, t: NodeId) -> R<bool> {
+        let (href, blank) = {
+            let doc = self.doc.borrow();
+            let a = is_tag(&doc, t, "a");
+            (if a { attr(&doc, t, "href").map(str::to_string) } else { None }, a && attr(&doc, t, "target").is_some_and(|v| v.eq_ignore_ascii_case("_blank")))
+        };
+        let Some(h) = href else { return Ok(false) };
+        if self.queue_download(it, t, &h)? {
+            return Ok(true);
+        }
+        // A driver that wants tabs (`agent.rs`) gets the URL; the page stays.
+        if blank && self.resolve_http(&h).is_some_and(|u| crate::agent::tab(&u)) {
+            return Ok(true);
+        }
+        self.navigate_href(it, &h)?;
+        Ok(true)
     }
 
     pub(crate) fn input_checked(&self, n: NodeId) -> bool {

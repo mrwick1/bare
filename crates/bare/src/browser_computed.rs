@@ -178,8 +178,9 @@ pub(crate) struct Built {
     /// `Some` when `last[0]` is the cascade of the reads: the document logs its changes for it (`DAMAGE_STYLE`), and the next read
     /// restyles only what they reach. The user state chains (`chains`) of that cascade.
     read: Option<[Vec<NodeId>; 3]>,
-    /// Does a sheet use what the engine does not model (`content-visibility`, `display: contents`)? Read by `checkVisibility` only.
-    pub(crate) odd: OnceCell<bool>,
+    /// The style rules that use what the engine does not model (`content-visibility`, `display: contents`). `None`: such a value is
+    /// where these rules cannot show it (a shadow tree sheet, a nested rule), so it may apply to any element. Read by `checkVisibility` only.
+    pub(crate) odd: OnceCell<Option<Vec<crate::browser_element::OddRule>>>,
     /// The inputs of the plan that `key` came from (`revision`, `text_revision`, length, `sheet_gen`). Equal inputs give the same plan, so the
     /// read skips the walk over the sources, the copy of the sheet text and the comparison with `key`.
     stamp: (u64, u64, usize, u64),

@@ -3483,9 +3483,9 @@ Checks: 52 cases in `mutation-cases.txt` match Chrome. 5 Rust tests run besides 
 
 ## HTMLElement members
 
-What runs: `hidden` (boolean, or `until-found`), `inert`, `tabIndex` (also on `SVGElement`), `click()`, `offsetParent`, `offsetTop`, `offsetLeft` and `innerText`. `offsetWidth` and `offsetHeight` already existed. `innerText` follows the rendered text collection steps over the native cascade: `display:none`, `visibility`, `white-space`, `text-transform`, `br`, block breaks, `p` double breaks, table cell tabs and row line feeds. The setter splits at line breaks into text nodes with `<br>`. `offsetParent` is `null` for `html`, `body` and `position:fixed`, else the nearest positioned ancestor, or `td th table` for a static element, or `body`. `click()` sends one `click` event (not trusted, bubbles, cancelable, composed) and a submit button submits its form.
+What runs: `hidden` (boolean, or `until-found`), `inert`, `tabIndex` (also on `SVGElement`), `click()`, `offsetParent`, `offsetTop`, `offsetLeft` and `innerText`. `offsetWidth` and `offsetHeight` already existed. `innerText` follows the rendered text collection steps over the native cascade: `display:none`, `visibility`, `white-space`, `text-transform`, `br`, block breaks, `p` double breaks, table cell tabs and row line feeds. The setter splits at line breaks into text nodes with `<br>`. `offsetParent` is `null` for `html`, `body` and `position:fixed`, else the nearest positioned ancestor, or `td th table` for a static element, or `body`. `click()` sends one `click` event (not trusted, bubbles, cancelable, composed) and a submit button submits its form. On a link (`a` with `href`, or an element inside one), a click that no listener canceled follows the link as a window click does: a `download` save, a new tab for the driver, or a navigation.
 
-Gates: `click()` on a link, a `label`, a `summary`, a checkbox or a radio (their default action is built only for the window). `innerText` over a shown `select` or `textarea`. `offsetTop` and `offsetLeft` when the element or its offset parent has no fragment or more than one. A connected shadow tree.
+Gates: `click()` on an `area` link, a `label`, a `summary`, a checkbox or a radio (their default action is built only for the window). `innerText` over a shown `select` or `textarea`. `offsetTop` and `offsetLeft` when the element or its offset parent has no fragment or more than one. A connected shadow tree.
 
 Deviations: `click()` sends a plain `Event` (there is no `MouseEvent`). `innerText` does not know soft line wraps, `capitalize` looks at one text node at a time, and `display:contents` is not modelled.
 
@@ -3947,7 +3947,9 @@ What runs (CSSOM View): `false` when the element is not connected, has no box (i
 
 Gates (`Unsupported`, none is guessed):
 
-- A style sheet or a `style` attribute (of the element or an ancestor) that has `content-visibility`, or `display: contents` (the engine parses neither): a call that would answer `true` is a gate. A call that is `false` for another reason (not connected, `display: none`, opacity, visibility) is still answered. The sheet text is scanned once for each rule set that is built (`Built::odd`), the `style` attributes at each call.
+- A `style` attribute (of the element or an ancestor) that has `content-visibility`, or `display: contents` (the engine parses neither): a call that would answer `true` is a gate.
+- A style sheet rule with `display: contents` whose selector matches the element, or a rule with `content-visibility: hidden` (or `auto` with `contentVisibilityAuto`) whose selector matches a flat-tree ancestor: a call that would answer `true` is a gate. The media of `@media` are not read, so a rule counts where it may not apply. A selector the engine cannot parse counts for every element. A use in a shadow tree sheet, a nested rule or an unknown at-rule makes every call that would answer `true` a gate. The rules are found once for each rule set that is built (`Built::odd`), the `style` attributes at each call.
+- A call that is `false` for another reason (not connected, `display: none`, opacity, visibility) is still answered.
 - An SVG or MathML element. Chrome answers `true` for a `display: none` SVG `g` in a test page, and that answer is not modelled.
 - An `option` or `optgroup`. Chrome answers `false` for an option of a drop-down `select`, and `true` in a list box. The engine does not know which one is drawn.
 
