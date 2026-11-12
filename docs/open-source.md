@@ -52,6 +52,12 @@ Boa is MIT or Unlicense. We read its source and wrote our own code in the shape 
 | `crates/bare/src/browser_encoding.rs` | `core/wintertc/src/base64` | The shape of `btoa` and `atob`. The HTML forgiving-base64 rules decide the errors. |
 | `crates/js/src/eval_intl_segmenter.rs` | `core/engine/src/builtins/intl/segmenter` | The shape of `Intl.Segmenter`, `%Segments%` and `%SegmentIterator%`. The break rules are ICU4X (`icu_segmenter`, Unicode-3.0), not Boa's. |
 
+### Ported for the Selection methods (2026-11-12)
+
+| Our file | Source (license) | What we took |
+| --- | --- | --- |
+| `crates/bare/src/browser_range.rs` | Ladybird `Libraries/LibWeb/Selection/Selection.cpp` (BSD-2-Clause) | The steps of `setBaseAndExtent`, `extend` and `containsNode`, with the direction. We wrote our own code in the shape of our selection. We copied no file. The notice is `crates/bare/LICENSE-LADYBIRD`. |
+
 ### Ported for the "in select" tree builder mode (2026-11-12)
 
 | Our file | Source (license) | What we took |

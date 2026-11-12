@@ -1809,3 +1809,43 @@ A focused element inside an editing host now takes key input. Text, Enter, Backs
 - `w.postMessage` drops the message. The frame has no listener that runs, and the parent must not receive it.
 - Only blank frames inherit the parent global. A frame with another `src` keeps the inert window, so the parent's `document` and globals do not leak through it.
 - Not built: a separate `Object.prototype` per frame, so `w.Array !== Array` checks and `instanceof` across frames are the same as in the parent. Other `create*` methods (`createElementNS`, `createDocumentFragment`, `importNode`) of a frame document still give `ownerDocument` the main document.
+
+## Sheet text caps are 32 MiB (2026-11-12)
+
+- A real web mail app ships its main CSS as one inline `<style>` of about 5 MB (bare issue #432). The old 4 MiB caps dropped that sheet and every later one, without an error.
+- Raised to 32 MiB: `ComputedLimits::max_sheet_bytes` (one read), `max_external_bytes` raised to 64 MiB (supplied external sheets), the CSSOM `MAX_TEXT` and the loader `MAX_BODY` (one fetched sheet body).
+- Chrome has no such cap for a sheet. The cap stays, so a sheet over 32 MiB still stops with a limit error.
+
+## A restyle charges its elements and candidates, not elements times rules
+
+Issue #433: one restyle of a page with 3,400 elements and a 5 MB stylesheet took 11 ms and charged 50 M steps. Two in one task ended it with `Limit(Steps)`. Date: 2026-11-12.
+
+- Cause, measured: the rule index is fine. A page of 3,000 elements with six classes each and 36,000 class and descendant rules gives 12 candidates for each element, 36,000 for a restyle. The charge was the model `visited x (rules / 4 + 1)`, which is 27 M steps for that page, 750 times the candidates. The model was a stop-gap from before `RuleSet::tested_candidates` existed.
+- The index already buckets by id, class, attribute and tag, and the cascade already has an ancestor filter (Bloom). Nothing to port from Blink or Servo.
+- Charge now: `64` steps for each element that the restyle styles (`STEPS_PER_RESTYLED_ELEMENT`) plus one step for each tested candidate. The model and `UNITS_PER_STEP` are gone. `ComputedLimits::max_work` still caps each cascade, and a full compute still charges nodes and candidates.
+- Measured on the repro (release build): a script step takes 26 ns (20 M steps of a `for` loop in 522 ms). A restyle of 3,000 elements with 12 candidates each takes 6 to 8 ms (200 restyles in 1.25 to 1.74 s), so about 80 steps for each element. 64 plus 12 candidates is 76.
+- Result: ten restyles and `getBoundingClientRect` in one task charged about 270 M steps before (the task ended at the fourth) and charge about 2.3 M after. The test is `ten_restyles_of_a_large_page_fit_the_step_budget`.
+- `a_read_after_a_change_charges_the_elements_it_restyles` ran 20 whole-subtree restyles of 2,000 elements over its 6 M budget. It runs 60 now: 2,000 x 64 is 128 K for each.
+- Not done: a full compute charges one step for each node and its candidates, with no per-element term. It is not measured against wall time here.
+
+## A fixed box paints and hits in tree order with its positioned siblings (2026-11-12)
+
+A `position: fixed` box with `z-index: auto` is a positioned box of CSS 2.1 Appendix E, step 8. It paints and hits in tree order with the other positioned boxes of its stacking context.
+
+Layout puts its fragment under the root, so it painted after the whole of its parent. The parent now adopts the fixed boxes that it holds in the tree. The order follows Ladybird (`Libraries/LibWeb/Painting/StackingContext.cpp`, BSD-2). A fixed box with a `z-index` other than 0 keeps its place in the `z-index` order.
+
+Reason: a later relative box under an earlier fixed layer could not be clicked (bare#434).
+
+## The default computed-work cap is 1 << 30 (2026-11-12)
+
+- A large web mail compose view has about 22,000 nodes and 30,000 selectors. Its work (nodes times selectors) is 138 M to 144 M. The old default, 1 << 27, refused it (bare issue #435).
+- Chrome has no such cap. The cap now only stops pages that are far larger than that.
+- The cascade charges the real work as steps (one per node, then one per tested candidate). The step budget is the real guard, so the cap can be raised.
+- The bound and its check stay. A test sets a lower `max_work` to prove the refusal.
+
+## Selection direction and containsNode (2026-11-12)
+
+- The selection keeps one flag for its direction. `setBaseAndExtent` and `extend` set it. Every other call that makes a new selection range sets it to forward.
+- `anchorNode` and `focusNode` swap with the flag. `direction` reads `backward`, `forward` or `none`.
+- `containsNode` follows the standard text and Ladybird: it compares the points `(node, 0)` and `(node, length)` with the range. An element whose contents are all selected counts as contained. Chrome may answer false for it. We did not check this against Chrome.
+- `modify` and `deleteFromDocument` stay gates.

@@ -13,7 +13,7 @@ use std::collections::HashMap;
 
 type V = R<Value>;
 const MAX_OBJECTS: usize = 65536;
-const MAX_TEXT: usize = 4 << 20;
+const MAX_TEXT: usize = 32 << 20;
 #[derive(Clone)]
 struct Sheet {
     node: NodeId,

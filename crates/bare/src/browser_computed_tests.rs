@@ -656,8 +656,9 @@ fn load_model() {
         let mut b = Browser::new(tree::parse(&page), BrowserLimits::default(), EvalLimits { max_steps: 2_000_000_000, ..Default::default() }, HeapLimits::default()).unwrap();
         let held = if scale >= 100 { 4 } else { 40 };
         let read = format!("var held = [], n = 0; for (var i = 0; i < {held}; i++) {{ var e = document.getElementById('p' + (i * 5)); held.push(getComputedStyle(e)); n += held[i].direction.length + held[i].fontSize.length; }} n");
-        // The default `computed-work` bound (nodes x rules) refuses the largest model before the cascade runs, by design.
+        // A bound of 1 << 27 (nodes x rules) refuses the largest model before the cascade runs, by design.
         if scale >= 100 {
+            b.set_computed_limits(ComputedLimits { max_work: 1 << 27, ..Default::default() });
             assert_eq!(js(&mut b, &read), lim("computed-work"));
             if std::env::var("REFUSE_ONLY").is_ok() {
                 assert_eq!(b.computed_stats().computes, 0);
@@ -782,8 +783,21 @@ fn work_bound_counts_styled_elements_not_text_nodes() {
     });
 }
 
+/// A large web mail compose view: about 22,000 nodes and 30,000 selectors are 138 M to 144 M work (nodes x selectors). Chrome has no such
+/// cap, so the default bound reads this page.
+#[test]
+fn a_large_page_reads_with_the_default_limits() {
+    big(|| {
+        let css: String = (0..30_000).map(|i| format!(".c{i}{{color:red}}")).collect();
+        let page = format!("<style>{css}</style><body>{}", "<i class=c1></i>".repeat(22_000));
+        let mut b = Browser::new(tree::parse(&page), BrowserLimits::default(), EvalLimits::default(), HeapLimits::default()).expect("browser");
+        assert_eq!(js(&mut b, "getComputedStyle(document.querySelector('i')).color"), "rgb(255, 0, 0)");
+        assert_eq!(b.computed_stats().computes, 1);
+    });
+}
+
 /// A read after a change restyles the elements that the change reaches. It charges for those, not for the whole page. 2,000 elements and
-/// 2,000 class rules are 1 M steps for a full cascade (4 M units, `UNITS_PER_STEP`), and the budget here is 6 M. Main charged the whole bound (4 M)
+/// 2,000 class rules are 1 M steps for a full cascade (each element charges 64 steps and its one candidate rule since 2026-11-12: 128 K), and the budget here is 6 M. Main charged the whole bound (4 M)
 /// for each of the 3 reads (dev.to: 84 M).
 #[test]
 fn a_read_after_a_change_charges_the_elements_it_restyles() {
@@ -798,8 +812,8 @@ fn a_read_after_a_change_charges_the_elements_it_restyles() {
         // A change that keeps the style of its element costs that one element: 100 reads fit (the whole page would be 1 M each).
         let same = "var b = document.body, n = 0; for (var i = 0; i < 100; i++) { b.className = 'z' + i; n += b.clientHeight >= 0; } n";
         assert_eq!(js(&mut b, same), "100");
-        // A change that restyles the whole subtree of the body is charged for it: 20 of them are over the budget.
-        let all = "var b = document.body; for (var i = 0; i < 20; i++) { b.className = i % 2 ? 'on' : 'z'; b.clientHeight; } 1";
+        // A change that restyles the whole subtree of the body is charged for it (64 steps for each element): 60 of them are over the budget.
+        let all = "var b = document.body; for (var i = 0; i < 60; i++) { b.className = i % 2 ? 'on' : 'z'; b.clientHeight; } 1";
         assert_eq!(js(&mut b, all), "limit:Steps");
     });
 }
@@ -830,5 +844,32 @@ fn rules_that_match_every_element_are_charged_by_their_candidates() {
         let script = "var e = document.getElementById('d5'), n = 0; for (var i = 0; i < 5; i++) { document.head.appendChild(document.createElement('style')).textContent = '.q' + i + '{margin:0}'; e.clientHeight; n++; } n";
         assert_eq!(js(&mut b, script), "limit:Steps");
         assert_eq!(b.computed_stats().computes, 2);
+    });
+}
+
+/// A web mail app ships a 5 MB inline `<style>` (bare issue #432). Chrome applies it. The last rule must apply, and the
+/// CSSOM must read the sheet.
+#[test]
+fn style_over_4_mib_still_applies() {
+    big(|| {
+        let css = format!("/*{}*/#t{{position:absolute;height:100%}}", "x".repeat(5 << 20));
+        let mut b = at(&format!("<style>{css}</style><div id=t></div>"));
+        assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('t')).position"), "absolute");
+        assert_eq!(js(&mut b, "String(document.styleSheets[0].cssRules.length)"), "1");
+    });
+}
+
+/// #433: a large page (3,000 elements with six classes each, 36,000 class and descendant rules) restyled ten times in one task. The index
+/// offers 12 rules for each element (36,000 candidates), but the old model charged 27 M steps for each restyle: the third one ended the task.
+#[test]
+fn ten_restyles_of_a_large_page_fit_the_step_budget() {
+    big(|| {
+        let mut css: String = (0..18_000).map(|i| format!(".k{i}{{color:red}}")).collect::<String>() + ".x{color:blue}";
+        css.extend((0..18_000).map(|i| format!(".w .k{i}{{margin:0}}")));
+        let body: String = (0..3000).map(|i| format!("<div class='w k{} k{} k{} k{} k{} k{}'>x</div>", i, i + 1, i + 2, i * 7, i * 7 + 1, i * 7 + 2)).collect();
+        let page = format!("<style>{css}</style><body class=w>{body}");
+        let mut b = Browser::new(tree::parse(&page), BrowserLimits::default(), EvalLimits::default(), HeapLimits::default()).unwrap();
+        let script = "for (var i = 0; i < 10; i++) { document.body.classList.toggle('x'); document.body.getBoundingClientRect(); } 1";
+        assert_eq!(js(&mut b, script), "1");
     });
 }
