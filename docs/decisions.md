@@ -1475,3 +1475,14 @@ A `press` with a locator on the Wikipedia search failed as `detached`, and the p
 - The counts were right: a write of the same key replaces its size, and the same value again is a no-op.
 - `press` follows a field that the page replaced, with the rule of `type`. The old field left the document, and a text field has the focus. Then the key goes to that field. This holds when the locator matches nothing now, and when the focus of the press makes the page swap the field.
 - The second swap of Wikipedia gives an input with no `id`. So `css="#searchInput"` matches nothing after `type`.
+
+## Live requests start at once, and custom elements keep the cascade (2026-11-12)
+
+A live page now starts a queued `fetch` or XHR on a worker as the script queues it. Before, it started at the next network turn.
+GitHub issues kept the page thread busy, and a fetch waited 5 to 9 s to be sent.
+The reply still settles at a network turn, in the order of the queue.
+A request that is not a GET or a HEAD still starts only when it is first in the queue.
+The cascade cache and the partial restyle no longer skip pages with custom elements.
+`set_custom_state` and `set_states` move `revision` and mark the tree, so the kept cascade stays correct.
+On GitHub issues, full cascades for each layout or style read took 83 % of the CPU.
+The shared layout of reads drops the same check.

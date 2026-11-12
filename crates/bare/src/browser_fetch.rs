@@ -643,6 +643,59 @@ impl Dom {
         self.fetch.st.borrow().queue.len()
     }
 
+    /// Start the I/O of the first queued requests on worker threads, so that they run together. They settle in the order of the queue,
+    /// as before: only the waiting is shared. Up to `AHEAD` are started, and `MAX_WORKERS` of them run at once: a slow reply holds one
+    /// worker, and the others go on with the requests after it. A job does not send its request while the bodies that wait for their
+    /// turn hold `max_retained` bytes; the page thread sends it at its turn. So the result does not change, only the time.
+    /// A request that is not a GET or a HEAD may change the server. It runs when all before it are done, on the thread that settles
+    /// it (a worker gains nothing: nothing after it starts before it is done), so the server sees these requests in the order of the script.
+    /// Live: every queued request starts at once, also one alone; a request that is not a GET or a HEAD starts when it is first.
+    /// A live page calls this as it queues a request (`queue_now`), so a busy script thread does not hold the request back.
+    pub(crate) fn start_queued(&self) {
+        let live = self.fetch.live.get();
+        if !live && self.fetch.st.borrow().queue.len() < 2 {
+            // One request alone gains nothing from a worker thread: this thread makes it.
+            return;
+        }
+        let (lim, client) = (self.fl(), self.fetch.client.borrow());
+        if !live && !client.parallel_pays() {
+            return;
+        }
+        let mut st = self.fetch.st.borrow_mut();
+        let st = &mut *st;
+        for (i, p) in st.queue.iter_mut().take(AHEAD).enumerate() {
+            if !p.method.safe() && !(live && i == 0) {
+                break;
+            }
+            if p.started.is_none() {
+                let (wire, done) = (p.wire(), st.done.clone());
+                p.started = Some(client.spawn(move |client| {
+                    if done.load(Ordering::Relaxed) >= lim.max_retained {
+                        return None;
+                    }
+                    if let Some(t) = wire.queued {
+                        bare_net::trace::wanted(t);
+                    }
+                    let mut diag = Vec::new();
+                    let out = run_one(client, &lim, wire.parts(), &mut diag);
+                    if let Outcome::Done { body, .. } = &out {
+                        // Saturating: `usize::MAX` marks a page that is gone (`Drop for Fetch`).
+                        let _ = done.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |d| Some(d.saturating_add(body.len())));
+                    }
+                    Some((out, diag))
+                }));
+            }
+        }
+    }
+
+    /// A live page sends a request as soon as it is queued, not at its next network turn: scripts may keep the thread busy for
+    /// seconds. The reply still settles at a turn, in the order of the queue.
+    fn queue_now(&self) {
+        if self.fetch.live.get() {
+            self.start_queued();
+        }
+    }
+
     pub(crate) fn fl(&self) -> FetchLimits {
         self.fetch.lim.get()
     }
@@ -1791,6 +1844,7 @@ fn prepare(d: &Dom, it: &mut Interp<'_>, promise: Value, a: &[Value]) -> R<()> {
         }
         st.queue.push_back(Pending { promise, method, url: core.url, headers, body: core.body, redirect: core.redirect, cors, xhr: None, queued: bare_net::trace::on().then(std::time::Instant::now), started: None });
     }
+    d.queue_now();
     Ok(())
 }
 
@@ -1854,6 +1908,8 @@ pub(crate) fn queue_xhr(d: &Dom, x: (ObjId, u64), method: &str, url: Url, mut he
         return Err(d.lim("fetch-queue"));
     }
     st.queue.push_back(Pending { promise: Value::Undefined, method, url, headers, body, redirect: Redirect::Follow, cors, xhr: Some(x), queued: bare_net::trace::on().then(std::time::Instant::now), started: None });
+    drop(st);
+    d.queue_now();
     Ok(())
 }
 
@@ -2430,57 +2486,13 @@ impl Browser {
         result
     }
 
-    /// Start the I/O of the first queued requests on worker threads, so that they run together. They settle in the order of the queue,
-    /// as before: only the waiting is shared. Up to `AHEAD` are started, and `MAX_WORKERS` of them run at once: a slow reply holds one
-    /// worker, and the others go on with the requests after it. A job does not send its request while the bodies that wait for their
-    /// turn hold `max_retained` bytes; the page thread sends it at its turn. So the result does not change, only the time.
-    /// A request that is not a GET or a HEAD may change the server. It runs when all before it are done, on the thread that settles
-    /// it (a worker gains nothing: nothing after it starts before it is done), so the server sees these requests in the order of the script.
-    /// Live: every queued request starts at once, also one alone; a request that is not a GET or a HEAD starts when it is first.
-    fn start_queued(&self) {
-        let live = self.dom.fetch.live.get();
-        if !live && self.dom.fetch.st.borrow().queue.len() < 2 {
-            // One request alone gains nothing from a worker thread: this thread makes it.
-            return;
-        }
-        let (lim, client) = (self.dom.fl(), self.dom.fetch.client.borrow());
-        if !live && !client.parallel_pays() {
-            return;
-        }
-        let mut st = self.dom.fetch.st.borrow_mut();
-        let st = &mut *st;
-        for (i, p) in st.queue.iter_mut().take(AHEAD).enumerate() {
-            if !p.method.safe() && !(live && i == 0) {
-                break;
-            }
-            if p.started.is_none() {
-                let (wire, done) = (p.wire(), st.done.clone());
-                p.started = Some(client.spawn(move |client| {
-                    if done.load(Ordering::Relaxed) >= lim.max_retained {
-                        return None;
-                    }
-                    if let Some(t) = wire.queued {
-                        bare_net::trace::wanted(t);
-                    }
-                    let mut diag = Vec::new();
-                    let out = run_one(client, &lim, wire.parts(), &mut diag);
-                    if let Outcome::Done { body, .. } = &out {
-                        // Saturating: `usize::MAX` marks a page that is gone (`Drop for Fetch`).
-                        let _ = done.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |d| Some(d.saturating_add(body.len())));
-                    }
-                    Some((out, diag))
-                }));
-            }
-        }
-    }
-
     fn run_network_tasks_inner(&mut self, max: usize) -> R<usize> {
         let dom = self.dom.clone();
         self.it.host_scope(|it| it.host_checkpoint().map(|_| ()))?;
         let mut n = 0;
         while n < max {
             let lim = dom.fl();
-            self.start_queued();
+            dom.start_queued();
             if dom.fetch.live.get() && self.fetch_ready() == Some(false) {
                 break;
             }

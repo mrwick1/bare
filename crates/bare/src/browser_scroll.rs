@@ -373,14 +373,14 @@ impl Dom {
 
     /// `layout_areas` for a read (`offsetWidth`, `scrollWidth`, `getBoundingClientRect`): the layout of the last read is used again while its
     /// inputs are the same, so a loop of reads over a page that does not change lays it out once and charges one step for each later read.
-    /// The styles are compared by address: the cascade hands out the same `Rc` while it is valid. Not used with a custom element (the
-    /// cascade is not kept then), a probe or `uncull` (they change what the layout holds).
+    /// The styles are compared by address: the cascade hands out the same `Rc` while it is valid. Not used with a probe or `uncull`
+    /// (they change what the layout holds).
     pub(crate) fn layout_shared(&self, it: &mut Interp<'_>, styles: &Rc<Styles>) -> R<Rc<Lay>> {
         let key = {
             let doc = self.doc.borrow();
             let g = &self.geometry;
             let vp = self.plat.s.borrow().viewport;
-            (g.probe.get().is_none() && !g.uncull.get() && !doc.has_custom())
+            (g.probe.get().is_none() && !g.uncull.get())
                 .then(|| (Rc::as_ptr(styles) as usize, doc.revision(), doc.text_revision(), doc.len(), doc.user().revision, (vp.0.to_bits(), vp.1.to_bits())))
         };
         if let Some(k) = key
