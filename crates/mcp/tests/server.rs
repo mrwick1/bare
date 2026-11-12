@@ -1281,3 +1281,14 @@ fn a_shot_of_a_tall_element_is_not_cut_at_the_window() {
     let path = said.as_str().unwrap().split(" (").next().unwrap().to_string();
     assert_eq!(png_size(&path), (1280, 3900), "{said}");
 }
+
+#[test]
+fn a_snapshot_leaves_out_what_an_adopted_sheet_hides() {
+    let mut s = Server::start();
+    let (snap, error) = s.tool("open", json!({"url": format!("{}/adopted", common::serve()), "timeout_ms": 30000, "snapshot": true}));
+    let snap = snap.as_str().unwrap().to_string();
+    assert!(!error && snap.contains("Shown button"), "{snap}");
+    assert!(!snap.contains("Hidden button"), "{snap}");
+    let (r, error) = s.tool("eval", json!({"js": "var r = document.querySelector('x-card').shadowRoot; getComputedStyle(r.getElementById('seen')).color + ' ' + getComputedStyle(r.getElementById('gone')).display"}));
+    assert!(!error && r.to_string().contains("rgb(0, 0, 255) none"), "{r}");
+}

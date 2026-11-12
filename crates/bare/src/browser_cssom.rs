@@ -20,6 +20,9 @@ struct Sheet {
     rules: Vec<ObjId>,
     source: String,
     text_key: Option<Vec<(NodeId, bare_html::dom::Span)>>,
+    // `new CSSStyleSheet()`: no owner node (`node` is the document root, unused), the text is in `source`. `stale`: the rules are not parsed yet.
+    ctor: bool,
+    stale: bool,
 }
 #[derive(Clone)]
 struct Rule {
@@ -49,6 +52,8 @@ pub(crate) struct State {
     wrappers: HashMap<u32, ObjId>,
     wrapped: IdMap<ObjId, ObjId>,
     style_rules: IdMap<ObjId, ObjId>,
+    // The constructed sheets adopted by the document (key: its root) or a shadow root, in order.
+    adopted: HashMap<NodeId, Vec<ObjId>>,
 }
 #[derive(Default)]
 pub(crate) struct Cssom {
@@ -98,11 +103,12 @@ fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<()> {
             wrappers: HashMap::new(),
             wrapped: IdMap::default(),
             style_rules: IdMap::default(),
+            adopted: HashMap::new(),
         }))
         .ok();
     for (name, p) in [("CSSStyleSheet", sp), ("CSSStyleRule", rp), ("StyleSheetList", lp), ("CSSRuleList", rlp)] {
         crate::browser_lazy::tag(d, it, p, name)?;
-        let f = d.add_fn(it, illegal, name, 0, false)?;
+        let f = if name == "CSSStyleSheet" { d.add_ctor_nt(it, sheet_ctor, name, 0)? } else { d.add_fn(it, illegal, name, 0, false)? };
         keep(d, f)?;
         let (kp, kc, k) = (d.key(it, "prototype")?, d.key(it, "constructor")?, d.key(it, name)?);
         it.define_data(f, kp, Value::Object(p), false, false, false)?;
@@ -118,6 +124,8 @@ fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     d.def_get(it, sp, "disabled", disabled_get, Some(disabled_set))?;
     d.def_method(it, sp, "insertRule", 1, insert)?;
     d.def_method(it, sp, "deleteRule", 1, delete)?;
+    d.def_method(it, sp, "replaceSync", 1, replace_sync)?;
+    d.def_method(it, sp, "replace", 1, replace)?;
     d.def_get(it, rp, "selectorText", selector_get, Some(selector_set))?;
     d.def_get(it, rp, "cssText", rule_text, None)?;
     d.def_get(it, rp, "style", style_get, None)?;
@@ -138,6 +146,16 @@ fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<()> {
 pub(crate) fn define(d: &Dom, it: &mut Interp<'_>, name: &str) -> R<bool> {
     match name {
         "CSSStyleSheet" | "CSSStyleRule" | "CSSRuleList" | "StyleSheetList" => {
+            ensure(d, it)?;
+            Ok(true)
+        }
+        "adoptedStyleSheets" => {
+            for p in [d.p().document, d.p().shadow] {
+                let key = d.key(it, name)?;
+                if it.heap.peek_own_property(p, key).map_err(|e| it.heap_error(e))?.is_none() {
+                    d.def_get(it, p, name, adopted_get, Some(adopted_set))?;
+                }
+            }
             ensure(d, it)?;
             Ok(true)
         }
@@ -240,6 +258,8 @@ fn sheet_of(d: &Dom, it: &mut Interp<'_>, n: NodeId) -> R<ObjId> {
             rules: vec![],
             source: String::new(),
             text_key: None,
+            ctor: false,
+            stale: false,
         },
     );
     state(d).borrow_mut().by_node.insert(n, o);
@@ -275,12 +295,21 @@ fn rule(d: &Dom, it: &mut Interp<'_>, v: Value) -> R<ObjId> {
 fn node(d: &Dom, o: ObjId) -> NodeId {
     state(d).borrow().sheets[&o].node
 }
+fn is_ctor(d: &Dom, o: ObjId) -> bool {
+    state(d).borrow().sheets[&o].ctor
+}
 fn owner_get(d: &Dom, it: &mut Interp<'_>, t: Value, _: &[Value]) -> V {
     let o = sheet(d, it, t)?;
+    if is_ctor(d, o) {
+        return Ok(Value::Null);
+    }
     d.wrap(it, node(d, o))
 }
 fn href_get(d: &Dom, it: &mut Interp<'_>, t: Value, _: &[Value]) -> V {
     let o = sheet(d, it, t)?;
+    if is_ctor(d, o) {
+        return Ok(Value::Null);
+    }
     let n = node(d, o);
     let h = {
         let doc = d.doc.borrow();
@@ -300,10 +329,13 @@ fn href_get(d: &Dom, it: &mut Interp<'_>, t: Value, _: &[Value]) -> V {
 }
 fn disabled_get(d: &Dom, it: &mut Interp<'_>, t: Value, _: &[Value]) -> V {
     let o = sheet(d, it, t)?;
-    Ok(Value::Bool(attr(&d.doc.borrow(), node(d, o), "disabled").is_some()))
+    Ok(Value::Bool(!is_ctor(d, o) && attr(&d.doc.borrow(), node(d, o), "disabled").is_some()))
 }
 fn disabled_set(d: &Dom, it: &mut Interp<'_>, t: Value, a: &[Value]) -> V {
     let o = sheet(d, it, t)?;
+    if is_ctor(d, o) {
+        return Ok(Value::Undefined);
+    }
     let n = node(d, o);
     let on = it.to_js_bool(arg(a, 0))?;
     if on {
@@ -441,6 +473,21 @@ fn parsed_rules(d: &Dom, it: &mut Interp<'_>, sheet: ObjId, text: &str) -> R<Vec
 }
 #[cold]
 fn refresh(d: &Dom, it: &mut Interp<'_>, o: ObjId) -> R<()> {
+    if is_ctor(d, o) {
+        // The text is the source of truth. Parse it once after each `replaceSync`.
+        if !state(d).borrow().sheets[&o].stale {
+            return Ok(());
+        }
+        let text = state(d).borrow().sheets[&o].source.clone();
+        let rules = parsed_rules(d, it, o, &text)?;
+        let mut st = state(d).borrow_mut();
+        let sh = st.sheets.get_mut(&o).unwrap();
+        sh.rules = rules.clone();
+        sh.stale = false;
+        let list = sh.list;
+        st.lists.get_mut(&list).unwrap().items = rules;
+        return Ok(());
+    }
     let text = source(d, it, o)?;
     let unchanged = {
         let doc = d.doc.borrow();
@@ -535,15 +582,17 @@ fn publish_rules(d: &Dom, it: &mut Interp<'_>, o: ObjId, rules: Vec<ObjId>) -> R
         text.push_str(&t);
         text.push('\n');
     }
-    let tag = name_of(&d.doc.borrow(), sh.node);
-    if tag == "style" {
+    let tag = if sh.ctor { String::new() } else { name_of(&d.doc.borrow(), sh.node) };
+    if sh.ctor {
+        d.computed.sheet_gen.set(d.computed.sheet_gen.get() + 1);
+    } else if tag == "style" {
         let v = d.wrap(it, sh.node)?;
         let s = d.js_str(it, &text)?;
         set_text_content(d, it, v, &[s])?;
     } else {
         return Err(Dom::gate("editing an external stylesheet through CSSOM"));
     }
-    let key = pending_key(d, &d.doc.borrow(), sh.node, &sh.rules);
+    let key = if sh.ctor { None } else { pending_key(d, &d.doc.borrow(), sh.node, &sh.rules) };
     let mut s = state(d).borrow_mut();
     let sheet = s.sheets.get_mut(&o).unwrap();
     sheet.source = text;
@@ -664,6 +713,132 @@ fn declaration_write(d: &Dom, it: &mut Interp<'_>, t: Value, a: &[Value]) -> V {
     let sh = state(d).borrow().rules[&rule].sheet;
     publish(d, it, sh)?;
     Ok(v)
+}
+// ---------------------------------------------------------------------------------------- constructable style sheets
+// `new CSSStyleSheet()`, `replaceSync`, `replace` and `adoptedStyleSheets` of the document and of a shadow root. The sheet keeps its text.
+// The cascade reads that text (`adopted`, called by `Dom::plan`) and adds it to the rules of the tree that adopted it, after the
+// `<style>` elements of that tree. The rules (JS objects) are parsed only when `cssRules`, `insertRule` or `deleteRule` ask for them.
+// Not built: the `media`, `disabled` and `baseURL` options, `@import` in the text (the spec ignores it too), a sheet shared between
+// documents, and a live `adoptedStyleSheets` array (the getter returns a copy: `push` on it is lost; assign a new array).
+fn sheet_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
+    let sp = state(d).borrow().sheet_p;
+    let proto = it.host_proto_from_new_target(sp)?;
+    let o = d.obj(it, proto)?;
+    keep(d, o)?;
+    let list = new_list(d, it, Some(o))?;
+    let node = d.doc.borrow().root();
+    state(d).borrow_mut().sheets.insert(o, Sheet { node, list, rules: vec![], source: String::new(), text_key: None, ctor: true, stale: false });
+    Ok(Value::Object(o))
+}
+fn constructed(d: &Dom, it: &mut Interp<'_>, t: Value, what: &str) -> R<ObjId> {
+    let o = sheet(d, it, t)?;
+    if !is_ctor(d, o) {
+        return Err(d.dom_err(it, "NotAllowedError", &format!("Can't call {what} on a non-constructed CSSStyleSheet.")));
+    }
+    Ok(o)
+}
+fn set_text(d: &Dom, it: &mut Interp<'_>, o: ObjId, text: String) -> R<()> {
+    if text.len() > MAX_TEXT {
+        return Err(d.lim("cssom-text"));
+    }
+    it.charge(text.len() as u64 / 32)?;
+    let mut st = state(d).borrow_mut();
+    let sh = st.sheets.get_mut(&o).unwrap();
+    sh.source = text;
+    sh.rules.clear();
+    sh.stale = true;
+    let list = sh.list;
+    st.lists.get_mut(&list).unwrap().items.clear();
+    d.computed.sheet_gen.set(d.computed.sheet_gen.get() + 1);
+    Ok(())
+}
+fn replace_sync(d: &Dom, it: &mut Interp<'_>, t: Value, a: &[Value]) -> V {
+    let o = constructed(d, it, t, "replaceSync")?;
+    if a.is_empty() {
+        return Err(it.type_error("Failed to execute 'replaceSync' on 'CSSStyleSheet': 1 argument required, but only 0 present."));
+    }
+    let text = d.string_arg(it, arg(a, 0))?;
+    set_text(d, it, o, text)?;
+    Ok(Value::Undefined)
+}
+// Deviation: the text applies at once, not in a later task.
+fn replace(d: &Dom, it: &mut Interp<'_>, t: Value, a: &[Value]) -> V {
+    let p = it.host_new_promise()?;
+    match constructed(d, it, t, "replace").and_then(|o| Ok((o, d.string_arg(it, arg(a, 0))?))) {
+        Ok((o, text)) => {
+            set_text(d, it, o, text)?;
+            it.host_resolve_promise(p, Value::Object(o))?;
+        }
+        Err(Error::Throw(v)) => it.host_reject_promise(p, v)?,
+        Err(e) => return Err(e),
+    }
+    Ok(p)
+}
+// The tree that owns the list: the document (its root) or a shadow root.
+fn adopter(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<NodeId> {
+    let n = d.nd(it, this)?;
+    let doc = d.doc.borrow();
+    if n == doc.root() || matches!(doc.data(n), bare_html::dom::NodeData::ShadowRoot) {
+        Ok(n)
+    } else {
+        Err(it.type_error("Illegal invocation"))
+    }
+}
+fn adopted_get(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    let n = adopter(d, it, this)?;
+    ensure(d, it)?;
+    let items: Vec<Value> = state(d).borrow().adopted.get(&n).into_iter().flatten().map(|&o| Value::Object(o)).collect();
+    it.array_from(&items)
+}
+fn adopted_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    let n = adopter(d, it, this)?;
+    ensure(d, it)?;
+    let list = arg(a, 0);
+    if !matches!(list, Value::Object(_)) {
+        return Err(it.type_error("Failed to set the 'adoptedStyleSheets' property: The provided value is not an object."));
+    }
+    let k = d.key(it, "length")?;
+    let len = it.get_value(list, k)?;
+    let len = it.to_js_number(len)?;
+    let len = if len.is_finite() { len.max(0.0) as usize } else { 0 };
+    if len > MAX_OBJECTS {
+        return Err(d.lim("cssom-objects"));
+    }
+    it.charge(len as u64)?;
+    let mut next = Vec::with_capacity(len);
+    for i in 0..len {
+        let k = d.key(it, &i.to_string())?;
+        let v = it.get_value(list, k)?;
+        match v {
+            Value::Object(o) if state(d).borrow().sheets.contains_key(&o) => {
+                if !is_ctor(d, o) {
+                    return Err(d.dom_err(it, "NotAllowedError", "Failed to set the 'adoptedStyleSheets' property: Can't adopt non-constructed stylesheets."));
+                }
+                next.push(o);
+            }
+            _ => return Err(it.type_error("Failed to set the 'adoptedStyleSheets' property: Failed to convert value to 'CSSStyleSheet'.")),
+        }
+    }
+    {
+        let mut st = state(d).borrow_mut();
+        if next.is_empty() {
+            st.adopted.remove(&n);
+        } else {
+            st.adopted.insert(n, next);
+        }
+    }
+    d.computed.sheet_gen.set(d.computed.sheet_gen.get() + 1);
+    Ok(Value::Undefined)
+}
+/// The adopted sheets for the cascade: the tree (the document root or a shadow root) and the text, trees in node order.
+pub(crate) fn adopted(d: &Dom, out: &mut Vec<(NodeId, String)>) {
+    let Some(cell) = d.cssom.state.get() else { return };
+    let s = cell.borrow();
+    let mut roots: Vec<_> = s.adopted.keys().copied().collect();
+    roots.sort_by_key(|n| n.index());
+    for r in roots {
+        out.extend(s.adopted[&r].iter().map(|o| (r, s.sheets[o].source.clone())));
+    }
 }
 fn stamp(d: &Dom) -> (u64, u64, u64) {
     let doc = d.doc.borrow();

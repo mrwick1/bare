@@ -1310,3 +1310,13 @@ A screenshot of an element taller than the window was cut at the window. The eng
 The regexp engine accepts the `v` flag (`unicodeSets`). `v` turns on code point mode, as `u` does, and adds set notation to classes. The parser reads nested classes, `--`, `&&` and `\q{a|bc}`. It follows the grammar of ECMA-262: no mixing of operators, no ranges inside an operation, and no negated class that holds strings.
 A class that holds strings compiles to an alternation: the strings longest first, then the class, then the empty string. A class without strings stays one class instruction, so classes without `v` do not slow down. The `unicode` getter is false for `v`, and `flags` prints `v`.
 Properties of strings (`\p{RGI_Emoji}`) are a `SyntaxError`. Case folding closes the final set only: `--` and `&&` do not fold their operands first.
+## Constructable style sheets (2026-11-12)
+
+Lit and other web-component libraries style a shadow root with `new CSSStyleSheet()` and `adoptedStyleSheets`. bare had neither, so such a page lost its styles.
+
+- A constructed sheet keeps its text. `replaceSync` and `replace` store the text and parse no rules. The rule objects of `cssRules`, `insertRule` and `deleteRule` are made only when a script asks for them.
+- The cascade plan appends the text of each adopted sheet to the rules of the tree that adopted it, after the `<style>` and `<link>` sources of that tree. The existing parse and scoped cascade do the rest. No second style path exists.
+- `replace` applies its text at once. The spec applies it in a later task. A page that awaits the promise sees no difference.
+- The `adoptedStyleSheets` getter returns a copy. `push` on it has no effect. A page assigns a new array, as Lit does.
+- A sheet adopted by many shadow roots adds its rules once per root. A page with many instances pays for each. Sharing the parsed rules is a later step.
+- `snapshot` and `read` now enter a shadow root. They skipped it before, so a page built from web components showed no elements.

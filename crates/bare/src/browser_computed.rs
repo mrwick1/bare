@@ -421,6 +421,12 @@ impl Dom {
                 },
             }
         }
+        // Constructed sheets come after the `<style>` and `<link>` sources of their tree.
+        let mut adopted = Vec::new();
+        crate::browser_cssom::adopted(self, &mut adopted);
+        for (scope, text) in adopted {
+            add(self, &mut p, scope, None, &text)?;
+        }
         drop(bound);
         if record {
             let mut bound = self.computed.bound.borrow_mut();
