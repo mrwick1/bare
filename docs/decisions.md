@@ -1475,3 +1475,11 @@ A `press` with a locator on the Wikipedia search failed as `detached`, and the p
 - The counts were right: a write of the same key replaces its size, and the same value again is a no-op.
 - `press` follows a field that the page replaced, with the rule of `type`. The old field left the document, and a text field has the focus. Then the key goes to that field. This holds when the locator matches nothing now, and when the focus of the press makes the page swap the field.
 - The second swap of Wikipedia gives an input with no `id`. So `css="#searchInput"` matches nothing after `type`.
+
+## `type` with the locator of a replaced field (2026-11-12)
+
+- A second `type` with the old locator of a swapped field failed as `detached` or `not_found`. Wikipedia swaps its search input for one with no `id`.
+- `type` now resolves its target with the rule of `press`. The old field left the document, and a text field has the focus. Then the keys go to that field.
+- Only `type` and `press` use the rule. They send keys, and a browser sends keys to the focused element.
+- `click`, `select`, `check`, `upload`, `hover` and `dblclick` keep the strict rule. A field that is gone makes them fail.
+- `type` still selects the old text and replaces it. So `type " programming"` after `type "Rust"` leaves " programming" in the field.
