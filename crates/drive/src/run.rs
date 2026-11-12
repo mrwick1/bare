@@ -16,6 +16,7 @@
 use crate::locate::{self, Locator};
 use crate::steps::{Action, Check, CookieState, State, Step};
 use bare::control::{Handle, Log, Refusal, Remote, Ticks};
+pub use bare::agent::Event;
 pub use bare::page::StorageState;
 use bare::page::Page;
 use bare_paint::canvas::Canvas;
@@ -316,6 +317,35 @@ impl Session {
         })?
     }
 
+    /// Answer the dialogs of the next actions (`bare::agent`). `events` ends it.
+    pub fn set_dialog(&mut self, accept: bool, text: Option<String>) {
+        let _ = self.host.run(move |_| bare::agent::set_policy(accept, text));
+    }
+
+    /// The dialogs and the tab requests since `set_dialog`, and no dialog policy after it.
+    pub fn events(&mut self) -> Vec<bare::agent::Event> {
+        self.host.run(|_| bare::agent::take()).unwrap_or_default()
+    }
+
+    /// Remove the cookie `name` (all its domains and paths), or every cookie of the jar. Gives how many cookies it removed.
+    pub fn clear_cookies(&mut self, name: Option<String>) -> Result<usize, String> {
+        self.host.run(move |p| {
+            let jar = p.storage().ok_or("the page has no session")?.jar();
+            let mut j = jar.lock().unwrap_or_else(|e| e.into_inner());
+            let hit: Vec<_> = j.list().into_iter().filter(|c| name.as_ref().is_none_or(|n| *n == c.name)).map(|c| (c.name.clone(), c.domain.clone(), c.host_only, c.path.clone())).collect();
+            if name.is_none() {
+                j.clear();
+            }
+            for (n, d, host_only, path) in &hit {
+                let text = format!("{n}=; Path={path}; Max-Age=0{}", if *host_only { String::new() } else { format!("; Domain={d}") });
+                let at = bare_net::cookie::At { secure: true, host: d, path };
+                let now = j.now();
+                j.set(&at, &text, bare_net::cookie::Via::Http { third: false }, now);
+            }
+            Ok(hit.len())
+        })?
+    }
+
     /// The URL of the page of now.
     pub fn url(&mut self) -> Option<String> {
         self.host.run(|p| p.url()).ok().flatten()
@@ -333,7 +363,7 @@ impl Session {
     let deadline = t0 + *timeout;
     let (mut tries, mut busy, mut waited, mut ticks) = (0u32, Duration::ZERO, Duration::ZERO, Ticks::default());
     let (cpu0, net0) = (thread_cpu_ns(), bare_net::trace::blocked_us());
-    if matches!(step.action, Action::Open(..) | Action::Goto(_) | Action::Reload) {
+    if matches!(step.action, Action::Open(..) | Action::Goto(_) | Action::Reload | Action::Back | Action::Forward) {
         *nav_first = rep.net.len();
     }
     let result: Result<Option<String>, Fail> = loop {
@@ -650,6 +680,8 @@ fn attempt(p: &mut Page, m: &mut Memo, a: &Action, out: Option<&PathBuf>, red: &
         match a {
             Action::Goto(url) => p.navigate(Some(url)).map_err(|e| Try::Stop(fail("page", e)))?,
             Action::Reload => p.navigate(None).map_err(|e| Try::Stop(fail("page", e)))?,
+            Action::Back => p.go(-1).map_err(|e| Try::Stop(fail("page", e)))?,
+            Action::Forward => p.go(1).map_err(|e| Try::Stop(fail("page", e)))?,
             Action::Click(loc) => {
                 let h = one(p, m, loc)?;
                 p.click(h).map_err(|r| refused(p, h, r))?;

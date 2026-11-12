@@ -1020,7 +1020,7 @@ impl Page {
     }
 
     /// Go back (`-1`) or forward (`1`) in the history: inside the document, or to the neighbor document of the session.
-    fn history_go(&mut self, delta: i32) -> bool {
+    pub(crate) fn history_go(&mut self, delta: i32) -> bool {
         let r = self.browser().map(|b| b.history_go(delta));
         if let Some(Err(e)) = r {
             self.note(format!("history: {e:?}"));

@@ -15,7 +15,7 @@
 //! lines from `process.stdin` and writes `JSON.stringify(reply)` lines to `process.stdout`.
 
 use bare_drive::locate::{Locator, Text};
-use bare_drive::run::{Options, Redactor, Report, Session, StorageState};
+use bare_drive::run::{Event, Options, Redactor, Report, Session, StorageState};
 use bare_drive::snap::{self, Mode};
 use bare_drive::steps;
 use serde_json::{Value, json};
@@ -116,6 +116,7 @@ impl Server {
             "act" => self.act(&args),
             "eval" => self.eval(&args),
             "sessions" => Ok(self.sessions()),
+            "storage" => self.storage(&args),
             "screenshot" => return self.screenshot(&args).unwrap_or_else(|e| json!({"content": [{"type": "text", "text": e}], "isError": true})),
             n => Err(format!("unknown tool {n}")),
         };
@@ -349,25 +350,126 @@ impl Server {
             }
             "goto" => format!("goto {}", args.get("url").and_then(Value::as_str).ok_or("op goto needs url")?),
             "reload" => "reload".into(),
+            "back" => "back".into(),
+            "forward" => "forward".into(),
             "wait" => need("wait").map(|_| format!("wait {target} {}", if text.is_empty() { "visible" } else { text }))?,
-            o => return Err(format!("unknown op {o}: click, type, press, scroll, goto, reload, wait")),
+            o => return Err(format!("unknown op {o}: click, type, press, scroll, goto, reload, back, forward, wait")),
+        };
+        let accept = match args.get("dialog").and_then(Value::as_str) {
+            None | Some("accept") => true,
+            Some("dismiss") => false,
+            Some(_) => return Err("dialog must be accept or dismiss".into()),
         };
         let mut a = args.clone();
         a["compact"] = json!(true);
-        let before = self.live_mut(args)?.session.url();
+        let live = self.live_mut(args)?;
+        live.session.set_dialog(accept, args.get("prompt_text").and_then(Value::as_str).map(str::to_string));
+        let before = live.session.url();
         let (receipt, ok) = self.run_live(&a, &line)?;
         let mut out = receipt;
         let snap = if ok && args.get("snapshot").and_then(Value::as_bool) != Some(false) { Some(self.snapshot(args)?) } else { None };
         // After the snapshot, which waits for the page: a click starts a navigation that ends later.
         let after = self.live_mut(args)?.session.url();
-        if after != before {
+        if before.is_some() && after != before {
             out.push_str(&format!("\nnavigated: {}", bare_drive::run::safe_url(&after.unwrap_or_default())));
         }
+        for e in self.live_mut(args)?.session.events() {
+            match e {
+                Event::Dialog { kind, message, accepted, text } => {
+                    let answer = if accepted { "accepted" } else { "dismissed" };
+                    out.push_str(&format!("\ndialog: {kind} {message:?} -> {answer}{}", text.map(|t| format!(" {t:?}")).unwrap_or_default()));
+                }
+                Event::Tab(url) => match self.open_tab(&session_name(args), &url) {
+                    Ok(name) => out.push_str(&format!("\nopened tab: {name} {}", bare_drive::run::safe_url(&url))),
+                    Err(e) => out.push_str(&format!("\ntab not opened: {e}")),
+                },
+            }
+        }
+        let out = self.live_mut(args)?.red.clean(&out);
+        let mut out = out;
         if let Some(s) = snap {
             out.push('\n');
             out.push_str(&s);
         }
         if ok { Ok(out) } else { Err(out) }
+    }
+
+    /// A new live session `BASE~N` for a tab that the page of session `from` opened: the same size, secrets and variables, and a copy of
+    /// its cookies and storage. The load starts at once. Gives the name.
+    fn open_tab(&mut self, from: &str, url: &str) -> Result<String, String> {
+        let base = from.split('~').next().unwrap_or(from);
+        let name = (2..).map(|n| format!("{base}~{n}")).find(|n| !self.live.contains_key(n)).expect("a free name");
+        let l = self.live.get_mut(from).ok_or("the opener is gone")?;
+        let (size, timeout, window, red, vars, state) = (l.opt.size, l.opt.timeout, l.opt.window, l.red.clone(), l.vars.clone(), l.session.export_state());
+        let (mut opt, _, _) = self.options(&json!({"width": size.0, "height": size.1, "timeout_ms": timeout.as_millis() as u64, "window": window}))?;
+        opt.progress = false;
+        self.place_window(&opt)?;
+        let mut session = Session::new(&opt);
+        if let Some(st) = state {
+            session.preload(st);
+        }
+        self.live.insert(name.clone(), Live { session, opt, red, vars, lines: 0 });
+        match self.run_live(&json!({"session": name, "compact": true}), &format!("open {url}")) {
+            Ok((_, true)) => Ok(name),
+            Ok((r, false)) | Err(r) => {
+                self.live.remove(&name);
+                Err(r)
+            }
+        }
+    }
+
+    /// Read, set or clear the cookies, `localStorage` or `sessionStorage` of a session. Values go through the redactor.
+    fn storage(&mut self, args: &Value) -> Result<String, String> {
+        let get = |k: &str| args.get(k).and_then(Value::as_str);
+        let (area, key, action) = (get("area").unwrap_or("local"), get("key"), get("action").unwrap_or("get"));
+        if !["local", "session", "cookies"].contains(&area) {
+            return Err("area must be local, session or cookies".into());
+        }
+        if !["get", "set", "clear"].contains(&action) {
+            return Err("action must be get, set or clear".into());
+        }
+        let cap = |v: &str| if v.chars().count() > 300 { format!("{}...", v.chars().take(300).collect::<String>()) } else { v.to_string() };
+        let live = self.live_mut(args)?;
+        let out = match (area, action) {
+            ("cookies", "get") => {
+                let st = live.session.export_state().ok_or("the page has no session")?;
+                let list: Vec<String> = st.cookies.iter().filter(|c| key.is_none_or(|k| k == c.name)).map(|c| format!("{}={}  {}{}{}{}", c.name, cap(&c.value), c.domain, c.path, if c.http_only { "; httponly" } else { "" }, if c.secure { "; secure" } else { "" })).collect();
+                if list.is_empty() { "no cookies".into() } else { list.join("\n") }
+            }
+            ("cookies", "set") => {
+                let (k, v) = (key.ok_or("set needs key")?, get("value").ok_or("set needs value")?);
+                if k.is_empty() || k.contains(|c: char| c.is_whitespace() || c == '=' || c == '"') {
+                    return Err("cookie key must be a name without spaces, = or quotes".into());
+                }
+                let (rep, ok) = self.run_live(&json!({"session": session_name(args), "compact": true}), &format!("cookie set {k} {v:?}"))?;
+                if !ok {
+                    return Err(rep);
+                }
+                format!("cookie {k} set")
+            }
+            ("cookies", _) => format!("removed {} cookies", live.session.clear_cookies(key.map(str::to_string))?),
+            (_, "get") => {
+                let js = format!("(() => {{ const s = window.{area}Storage, o = []; for (let i = 0; i < s.length; i++) {{ const k = s.key(i); o.push([k, s.getItem(k)]); }} return JSON.stringify(o); }})()");
+                let raw = live.session.eval(js)?;
+                let raw = serde_json::from_str::<String>(&raw).unwrap_or(raw);
+                let pairs: Vec<(String, String)> = serde_json::from_str(&raw).map_err(|e| format!("storage read: {e}"))?;
+                let list: Vec<String> = pairs.iter().filter(|(k, _)| key.is_none_or(|w| w == k)).map(|(k, v)| format!("{k}={}", cap(v))).collect();
+                if list.is_empty() { "empty".into() } else { list.join("\n") }
+            }
+            (_, "set") => {
+                let (k, v) = (key.ok_or("set needs key")?, get("value").ok_or("set needs value")?);
+                live.session.eval(format!("window.{area}Storage.setItem({}, {})", json!(k), json!(v)))?;
+                format!("{area} {k} set")
+            }
+            (_, _) => {
+                live.session.eval(match key {
+                    Some(k) => format!("window.{area}Storage.removeItem({})", json!(k)),
+                    None => format!("window.{area}Storage.clear()"),
+                })?;
+                format!("{area} cleared")
+            }
+        };
+        Ok(self.live_mut(args)?.red.clean(&out))
     }
 
     /// A PNG of the page or of one element: its path, and the picture itself when `inline` is true.
@@ -585,8 +687,8 @@ fn tools() -> Value {
         },
         {
             "name": "act",
-            "description": "Act on the live page like a user and get a short receipt (ok, or the failure with a hint, new console errors and failed requests, navigation), then the new snapshot. Ops: click, type (clears the field, then types text; \\n is Enter), press (key: Enter, Escape, Tab, Control+a), scroll (dy pixels, over ref or the page), goto (url), reload, wait (ref until text state: visible, hidden, enabled, checked, text~\"x\"). The action waits for the element up to timeout_ms.",
-            "inputSchema": {"type": "object", "properties": {"session": S, "op": {"type": "string", "enum": ["click", "type", "press", "scroll", "goto", "reload", "wait"]}, "ref": {"type": "string", "description": "e7 from snapshot or find."}, "loc": {"type": "string", "description": "A step locator instead of ref: role=button name=\"Save\", label=\"Email\", text=\"x\", css=\"...\"."}, "text": {"type": "string"}, "key": {"type": "string"}, "dy": {"type": "number"}, "url": {"type": "string"}, "snapshot": {"type": "boolean", "description": "Default true: add the snapshot after the action."}, "mode": {"type": "string", "enum": ["interactive", "all"]}, "max_chars": {"type": "integer"}}, "required": ["op"]},
+            "description": "Act on the live page like a user and get a short receipt (ok, or the failure with a hint, new console errors and failed requests, navigation, dialogs and the answer given, tabs the page opened: \"opened tab: main~2 URL\" is a new session that you read with session=main~2 and end with close), then the new snapshot. Ops: click, type (clears the field, then types text; \\n is Enter), press (key: Enter, Escape, Tab, Control+a), scroll (dy pixels, over ref or the page), goto (url), reload, back, forward (the history), wait (ref until text state: visible, hidden, enabled, checked, text~\"x\"). The action waits for the element up to timeout_ms.",
+            "inputSchema": {"type": "object", "properties": {"session": S, "op": {"type": "string", "enum": ["click", "type", "press", "scroll", "goto", "reload", "back", "forward", "wait"]}, "dialog": {"type": "string", "enum": ["accept", "dismiss"], "description": "How to answer alert, confirm and prompt dialogs that the action opens. Default accept. The receipt lists each one."}, "prompt_text": {"type": "string", "description": "The answer of an accepted prompt. Default: the default value of the prompt."}, "ref": {"type": "string", "description": "e7 from snapshot or find."}, "loc": {"type": "string", "description": "A step locator instead of ref: role=button name=\"Save\", label=\"Email\", text=\"x\", css=\"...\"."}, "text": {"type": "string"}, "key": {"type": "string"}, "dy": {"type": "number"}, "url": {"type": "string"}, "snapshot": {"type": "boolean", "description": "Default true: add the snapshot after the action."}, "mode": {"type": "string", "enum": ["interactive", "all"]}, "max_chars": {"type": "integer"}}, "required": ["op"]},
         },
         {
             "name": "find",
@@ -617,6 +719,11 @@ fn tools() -> Value {
             "name": "sessions",
             "description": "The live sessions and their URLs.",
             "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "storage",
+            "description": "Read, set or clear the cookies, localStorage or sessionStorage of a session (area: local, session, cookies; action: get, set, clear; key; value). Without key, get lists all and clear removes all. Known secrets show as [secret].",
+            "inputSchema": {"type": "object", "properties": {"session": S, "area": {"type": "string", "enum": ["local", "session", "cookies"], "description": "Default local."}, "action": {"type": "string", "enum": ["get", "set", "clear"], "description": "Default get."}, "key": {"type": "string"}, "value": {"type": "string"}}},
         },
     ])
 }

@@ -1226,3 +1226,12 @@ An agent such as `deck` must read a page and act on it in few model calls. Scree
 - `find`, `read` (paged text), `links`, `screenshot` (the page or one element, a path, and the image when asked), `eval` and `sessions` complete the set. Every reply goes through the redactor.
 - Each tool takes `session`. Sessions run side by side, one page each. `open` ends only the session of its name.
 - Step lines accept `ref=e7`, so a journey can mix refs and user locators.
+
+## Dialogs, tabs, storage and history for agents (2026-11-12)
+The agent answers dialogs up front. `act` takes `dialog` (accept or dismiss, default accept) and `prompt_text`. The engine answers `alert`, `confirm` and `prompt` at once and never blocks. The receipt lists each one: `dialog: confirm "Delete item?" -> dismissed`.
+The dialog code lives in `crates/bare/src/agent.rs`, as a per-thread policy and event queue. Without a driver the old results stay: `alert` does nothing, `confirm` gives false, `prompt` gives null.
+`beforeunload` needs no entry. No navigation of the engine dispatches it, so it cannot block.
+A click on a `target=_blank` link, and `window.open(url)`, open a new session named `main~2`, `main~3` and so on. It copies the cookies and storage of the opener. The receipt says `opened tab: main~2 URL`. The opener stays on its page. `window.open` still gives `null`: the page gets no window object.
+The `storage` tool reads, sets and clears cookies, `localStorage` and `sessionStorage`. Known secrets show as `[secret]`.
+`back` and `forward` are step lines and `act` ops. `close` and `sessions` already handled named sessions.
+`act` no longer reports `navigated` when the page had no document before the action.

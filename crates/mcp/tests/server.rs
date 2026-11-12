@@ -78,7 +78,7 @@ fn tools_list_names_the_tools() {
     let mut s = Server::start();
     let r = s.ask("tools/list", json!({}));
     let names: Vec<&str> = r["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(names, ["run_steps", "open", "step", "save_state", "ensure_session", "close", "snapshot", "act", "find", "read", "links", "screenshot", "eval", "sessions"]);
+    assert_eq!(names, ["run_steps", "open", "step", "save_state", "ensure_session", "close", "snapshot", "act", "find", "read", "links", "screenshot", "eval", "sessions", "storage"]);
 }
 
 #[test]
@@ -364,4 +364,145 @@ fn an_agent_logs_in_with_snapshot_refs_and_no_step_lines() {
     assert!(!error, "{r}");
     let (r, _) = s.tool("sessions", json!({}));
     assert!(r.as_str().unwrap().contains("main: ") && r.as_str().unwrap().contains("two: "), "{r}");
+}
+
+/// A server of fixed pages: `(path, html)`. Gives its origin.
+fn pages(list: &'static [(&str, &str)]) -> String {
+    use std::io::Read;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for mut c in listener.incoming().flatten() {
+            std::thread::spawn(move || {
+                let (mut head, mut b) = (Vec::new(), [0u8; 1]);
+                while !head.ends_with(b"\r\n\r\n") && c.read(&mut b).unwrap_or(0) == 1 {
+                    head.push(b[0]);
+                }
+                let head = String::from_utf8_lossy(&head).to_string();
+                let path = head.split(' ').nth(1).unwrap_or("/").to_string();
+                let (code, body) = match list.iter().find(|(p, _)| *p == path) {
+                    Some((_, h)) => (200, *h),
+                    None => (404, "not found"),
+                };
+                let _ = write!(c, "HTTP/1.1 {code} X\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            });
+        }
+    });
+    format!("http://127.0.0.1:{port}")
+}
+
+const DIALOGS: &str = "<!doctype html><body><p id=out>none</p>
+<button onclick=\"alert('Hi'); document.getElementById('out').textContent='alerted'\">Alert</button>
+<button onclick=\"document.getElementById('out').textContent='confirm=' + confirm('Delete item?')\">Confirm</button>
+<button onclick=\"document.getElementById('out').textContent='prompt=' + prompt('Name?', 'dflt')\">Prompt</button></body>";
+
+/// `alert`, `confirm` and `prompt` never hang: the act receipt names each dialog and its answer, and `dialog` and `prompt_text` choose it.
+#[test]
+fn dialogs_show_in_the_receipt_and_the_agent_chooses_the_answer() {
+    let base = pages(&[("/", DIALOGS)]);
+    let mut s = Server::start();
+    s.tool("open", json!({"url": format!("{base}/")}));
+    let act = |s: &mut Server, name: &str, extra: Value| {
+        let mut a = json!({"op": "click", "loc": format!("role=button name=\"{name}\"")});
+        a.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        let (r, e) = s.tool("act", a);
+        assert!(!e, "{r}");
+        let (page, _) = s.tool("read", json!({}));
+        format!("{}\n{}", r.as_str().unwrap(), page.as_str().unwrap())
+    };
+    let r = act(&mut s, "Alert", json!({}));
+    assert!(r.contains("dialog: alert \"Hi\" -> accepted") && r.contains("alerted"), "{r}");
+    let r = act(&mut s, "Confirm", json!({"dialog": "dismiss"}));
+    assert!(r.contains("dialog: confirm \"Delete item?\" -> dismissed") && r.contains("confirm=false"), "{r}");
+    let r = act(&mut s, "Confirm", json!({"dialog": "accept"}));
+    assert!(r.contains("dialog: confirm \"Delete item?\" -> accepted") && r.contains("confirm=true"), "{r}");
+    let r = act(&mut s, "Prompt", json!({"prompt_text": "bob"}));
+    assert!(r.contains("dialog: prompt \"Name?\" -> accepted \"bob\"") && r.contains("prompt=bob"), "{r}");
+    let r = act(&mut s, "Prompt", json!({}));
+    assert!(r.contains("prompt=dflt"), "{r}");
+    let r = act(&mut s, "Prompt", json!({"dialog": "dismiss"}));
+    assert!(r.contains("-> dismissed") && r.contains("prompt=null"), "{r}");
+    let (r, _) = s.tool("act", json!({"op": "click", "loc": "role=button name=\"Alert\"", "dialog": "later"}));
+    assert!(r.as_str().unwrap().contains("dialog must be accept or dismiss"), "{r}");
+}
+
+const TABS: &str = "<!doctype html><body><a href=/b target=_blank>Blank link</a>
+<button onclick=\"window.open('/b')\">Open window</button><p>first page</p></body>";
+
+/// `target=_blank` and `window.open` open a new named session; the receipt names it, `sessions` lists it, `close` ends it.
+#[test]
+fn new_tabs_are_named_sessions() {
+    let base = pages(&[("/", TABS), ("/b", "<!doctype html><body><p>second page</p></body>")]);
+    let mut s = Server::start();
+    s.tool("open", json!({"url": format!("{base}/")}));
+    let (r, e) = s.tool("act", json!({"op": "click", "loc": "text=\"Blank link\"", "snapshot": false}));
+    assert!(!e, "{r}");
+    assert!(r.as_str().unwrap().contains(&format!("opened tab: main~2 {base}/b")), "{r}");
+    assert!(!r.as_str().unwrap().contains("navigated"), "the opener stays: {r}");
+    let (r, _) = s.tool("act", json!({"op": "click", "loc": "role=button name=\"Open window\"", "snapshot": false}));
+    assert!(r.as_str().unwrap().contains(&format!("opened tab: main~3 {base}/b")), "{r}");
+    let (r, _) = s.tool("sessions", json!({}));
+    assert!(r.as_str().unwrap().contains("main~2:") && r.as_str().unwrap().contains("main~3:") && r.as_str().unwrap().contains("main: "), "{r}");
+    let (r, e) = s.tool("act", json!({"op": "wait", "loc": "text=\"second page\"", "session": "main~2", "snapshot": false}));
+    assert!(!e, "{r}");
+    let (r, _) = s.tool("read", json!({"session": "main~2"}));
+    assert!(r.as_str().unwrap().contains("second page"), "{r}");
+    let (r, _) = s.tool("read", json!({}));
+    assert!(r.as_str().unwrap().contains("first page"), "{r}");
+    let (_, e) = s.tool("close", json!({"session": "main~2"}));
+    assert!(!e);
+    let (r, _) = s.tool("sessions", json!({}));
+    assert!(!r.as_str().unwrap().contains("main~2:"), "{r}");
+}
+
+/// `storage` reads, writes and clears cookies, `localStorage` and `sessionStorage`; a secret value shows as `[secret]`.
+#[test]
+fn storage_gets_sets_and_clears_with_secrets_redacted() {
+    let base = pages(&[("/", "<!doctype html><body>x</body>")]);
+    let dir = std::env::temp_dir().join(format!("bare-mcp-test-storage-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let secrets = dir.join("secrets");
+    std::fs::write(&secrets, "TOKEN=tok-9f8e7d6c\n").unwrap();
+    let mut s = Server::start();
+    s.tool("open", json!({"url": format!("{base}/"), "secrets_file": secrets.to_str().unwrap()}));
+    let call = |s: &mut Server, a: Value| {
+        let (r, e) = s.tool("storage", a);
+        assert!(!e, "{r}");
+        r.as_str().unwrap().to_string()
+    };
+    for area in ["local", "session", "cookies"] {
+        call(&mut s, json!({"area": area, "action": "set", "key": "k", "value": "v1"}));
+        call(&mut s, json!({"area": area, "action": "set", "key": "auth", "value": "tok-9f8e7d6c"}));
+        let r = call(&mut s, json!({"area": area}));
+        assert!(r.contains("k=v1") && r.contains("auth=[secret]") && !r.contains("tok-9f8e"), "{area}: {r}");
+        let r = call(&mut s, json!({"area": area, "key": "k"}));
+        assert!(r.lines().next().unwrap().starts_with("k=v1") && r.lines().count() == 1, "{area}: {r}");
+        call(&mut s, json!({"area": area, "action": "clear", "key": "k"}));
+        let r = call(&mut s, json!({"area": area}));
+        assert!(!r.contains("k=v1") && r.contains("auth="), "{area}: {r}");
+        call(&mut s, json!({"area": area, "action": "clear"}));
+        assert!(!call(&mut s, json!({"area": area})).contains("auth="), "{area}");
+    }
+    let (r, e) = s.tool("storage", json!({"area": "disk"}));
+    assert!(e && r.as_str().unwrap().contains("area must be"), "{r}");
+}
+
+/// `back` and `forward` walk the history of the session.
+#[test]
+fn back_and_forward_walk_the_history() {
+    let base = pages(&[("/", "<!doctype html><body><a href=/b>Next</a><p>page one</p></body>"), ("/b", "<!doctype html><body><p>page two</p></body>")]);
+    let mut s = Server::start();
+    s.tool("open", json!({"url": format!("{base}/")}));
+    let (r, e) = s.tool("act", json!({"op": "click", "loc": "text=\"Next\""}));
+    assert!(!e, "{r}");
+    let (r, e) = s.tool("act", json!({"op": "wait", "loc": "text=\"page two\""}));
+    assert!(!e, "{r}");
+    let (r, e) = s.tool("act", json!({"op": "back"}));
+    assert!(!e, "{r}");
+    let (r, e) = s.tool("act", json!({"op": "wait", "loc": "text=\"page one\""}));
+    assert!(!e, "{r}");
+    let (r, e) = s.tool("act", json!({"op": "forward"}));
+    assert!(!e, "{r}");
+    let (r, e) = s.tool("act", json!({"op": "wait", "loc": "text=\"page two\""}));
+    assert!(!e, "{r}");
 }

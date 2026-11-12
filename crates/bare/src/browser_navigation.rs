@@ -372,6 +372,12 @@ impl Dom {
         Ok(())
     }
 
+    /// `href` resolved against the document URL, when the result is an http(s) URL.
+    pub(crate) fn resolve_http(&self, href: &str) -> Option<String> {
+        let u = nu::parse(href, Some(&self.cur_rec().ok()?)).ok()?.href();
+        (u.starts_with("http://") || u.starts_with("https://")).then_some(u)
+    }
+
     /// A click on a link: navigate to `href`, resolved against the document URL. An `href` that is not a valid URL does nothing.
     pub(crate) fn navigate_href(&self, it: &mut Interp<'_>, href: &str) -> R<()> {
         match nu::parse(href, Some(&self.cur_rec()?)) {
