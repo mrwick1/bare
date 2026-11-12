@@ -1537,3 +1537,11 @@ An agent gets the URL of a named link in one small call, not with `eval`.
 - `pipeTo` reads an error of the source only when it reads, because the host reader has no `closed` promise.
 - An abort of the writable side of a `TransformStream` errors its readable side at once. This is the older text of the standard. `transformer.cancel` runs.
 - `tee` and async iteration stay gated.
+
+## A link inside a heading shows in the snapshot (2026-11-12)
+
+GitHub puts each issue title in a link inside an `<h3>`. The snapshot walk treated a heading as a leaf, so it skipped the link. `links` uses the same walk, so it missed the link too.
+
+- A heading stays a leaf only when it holds no control.
+- A heading that holds a control shows its children, so the link gets a line and a ref.
+- When the first line under the heading has the same name, the heading line drops its name. The title then shows once.
