@@ -1754,3 +1754,12 @@ A focused element inside an editing host now takes key input. Text, Enter, Backs
 - The hashes are one-shot functions. Only `digest` needs them, and it has the whole message at once. A streaming API waits for a caller that needs one.
 - `SubtleCrypto` is the sixth lazy global of `browser_web.rs`. The first read of any of the six globals builds all their objects, as before.
 - Not built: a detached buffer hashes as empty. The standard rejects it with `TypeError`.
+
+## `DOMTokenList` has indexed access (2026-11-12)
+
+- Closure Library reads `classList[i]` to find a decorator. A web mail app's tab bar was empty, because `classList[0]` was `undefined` (bare issue #427).
+- `classList` and `relList` are host-indexed objects (`Heap::new_indexed`), as `NodeList` and `NamedNodeMap` are. `list[i]` is `item(i)`. `i` at or past `length` is absent. `in`, `Object.keys`, `slice` and `for..in` see the tokens.
+- The indexes are live. Every read compares the attribute text with the text the cache was made from. A change makes the host refill the cache before the read.
+- The token strings need a value slot in the heap. `Slot::Str` (`crates/js/src/heap_binary.rs`) answers with a string. The list traces its strings, so the collector keeps them.
+- `item` follows Ladybird `DOMTokenList::item` (BSD-2). We wrote our own code and copied no file.
+- Gap: `CSSStyleDeclaration` has no indexed access (`style[0]` is `undefined`; Chrome gives the first property name). `DOMStringList` does not exist in bare. `sandbox` has no `DOMTokenList`.

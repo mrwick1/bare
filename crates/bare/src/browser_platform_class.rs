@@ -15,19 +15,31 @@
 //! - `forEach` and the iterators read the live list at each step. An exhausted iterator stays done. The iterators are
 //!   host objects with `next()` that inherit `%IteratorPrototype%`, so `for..of`, spread and `Array.from` accept them.
 //!   `[Symbol.iterator]` is this module's `values` (the realm's own `Symbol.iterator`).
+//! - Indexes: the list is a host-indexed object (`Heap::new_indexed`, like `NodeList` and `NamedNodeMap`). `list[i]` is `item(i)`,
+//!   and `i` past the end is absent, so `in`, `Object.keys`, `slice` and `for..in` see the tokens, as Chrome does (the WebIDL
+//!   indexed getter of `DOMTokenList`). The count and the strings are a cache of the attribute text (`Toks`). A stale cache
+//!   asks the host first (`indexed_fill`, the `Host::fill_indexed` of this module), so no read is ever stale. The list traces
+//!   the strings.
+//!   Port: `item` follows Ladybird `DOMTokenList::item` (`Libraries/LibWeb/DOM/DOMTokenList.cpp`, BSD-2): an index at or past the
+//!   size is null. The index rule is the WebIDL one: `list[i]` exists when `i` is less than `length`.
 //!
-//! Gates and deviations: there are no indexed properties (`classList[0]` is `undefined`; use `item(0)`), and so
-//! `Array.prototype.values`/`forEach.call(classList)` see an empty list. Class-list `supports()` throws `TypeError`, as
-//! `class` defines no supported tokens. The iterator has no `Symbol.toStringTag`. A bad `classList` call on a wrong
-//! `this` is `TypeError: Illegal invocation`.
+//! Gates and deviations: class-list `supports()` throws `TypeError`, as `class` defines no supported tokens. The iterator has
+//! no `Symbol.toStringTag`. A bad `classList` call on a wrong `this` is `TypeError: Illegal invocation`.
 
 use crate::browser::*;
 use crate::browser_dom::attr_set;
 use crate::browser_platform::{TokIter, V, arg};
 use bare_html::dom::{Atom, Document, NodeId};
 use bare_js::eval::Interp;
-use bare_js::value::{ObjId, PropertyKey, Value};
+use bare_js::heap::{HeapError, Slot};
+use bare_js::value::{ObjId, PropertyKey, StrId, Value};
 use std::collections::HashSet;
+
+/// The indexes of one token list: the attribute text they were made from, and the token strings (the ordered set).
+pub(crate) struct Toks {
+    pub attr: String,
+    pub vals: Vec<StrId>,
+}
 
 pub(crate) fn install(d: &Dom, it: &mut Interp<'_>, list: ObjId, iter: ObjId, sym: PropertyKey) -> R<()> {
     d.def_method(it, list, "item", 1, item)?;
@@ -68,13 +80,18 @@ fn attribute<'a>(doc: &'a Document, el: (NodeId, &str)) -> Option<&'a str> {
     atom.and_then(|a| doc.attr(el.0, a))
 }
 
+/// The ordered set of an attribute text (the first occurrence of a token wins).
+fn set(v: &str) -> Vec<String> {
+    let mut seen = HashSet::new();
+    v.split_ascii_whitespace().filter(|t| seen.insert(*t)).map(String::from).collect()
+}
+
 /// The ordered set of the backing attribute now.
 fn tokens(d: &Dom, it: &mut Interp<'_>, el: (NodeId, &str)) -> R<Vec<String>> {
     let doc = d.doc.borrow();
     let v = attribute(&doc, el).unwrap_or("");
     it.charge(1 + (v.len() / 8) as u64)?;
-    let mut seen = HashSet::new();
-    Ok(v.split_ascii_whitespace().filter(|t| seen.insert(*t)).map(String::from).collect())
+    Ok(set(v))
 }
 
 /// The update steps: write the serialized set back.
@@ -157,7 +174,8 @@ fn token_list(d: &Dom, it: &mut Interp<'_>, this: Value, attr: &'static str) -> 
     if d.plat.s.borrow().lists.len() >= d.pl_limits().max_token_lists {
         return Err(d.lim("token-lists"));
     }
-    let o = d.obj(it, d.plat.p.get().expect("installed").list)?;
+    let proto = d.plat.p.get().expect("installed").list;
+    let o = it.heap.new_indexed(Some(proto)).map_err(|e| it.heap_error(e))?;
     let mut s = d.plat.s.borrow_mut();
     s.lists.insert(o, el);
     s.by_el.insert(el, o);
@@ -169,6 +187,55 @@ pub(crate) fn set_class_list(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Val
     let v = d.string_arg(it, arg(a, 0))?;
     attr_set(d, it, el.0, el.1, &v)?;
     Ok(Value::Undefined)
+}
+
+/// The cache of token list `owner`, read by `f`, when it is fresh. `None`: `owner` is not a token list. A stale cache answers
+/// `NeedsHost` (index 0: `indexed_fill` makes the whole cache), so the evaluator fills it and repeats the read.
+fn fresh<T>(d: &Dom, owner: ObjId, f: impl FnOnce(&Toks) -> T) -> Option<Result<T, HeapError>> {
+    let s = match d.plat.s.try_borrow() {
+        Ok(s) => s,
+        Err(_) => return Some(Err(HeapError::HostUnavailable)),
+    };
+    let el = *s.lists.get(&owner)?;
+    let doc = match d.doc.try_borrow() {
+        Ok(doc) => doc,
+        Err(_) => return Some(Err(HeapError::HostUnavailable)),
+    };
+    let now = attribute(&doc, el).unwrap_or("");
+    Some(match s.toks.get(&owner) {
+        Some(t) if t.attr == now => Ok(f(t)),
+        _ => Err(HeapError::NeedsHost { owner, index: 0 }),
+    })
+}
+
+/// `IndexedSource::indexed_len` for a token list. `None`: `owner` is not a token list.
+pub(crate) fn indexed_len(d: &Dom, owner: ObjId) -> Option<Result<usize, HeapError>> {
+    fresh(d, owner, |t| t.vals.len())
+}
+
+/// `IndexedSource::indexed_item` for a token list. `None`: `owner` is not a token list.
+pub(crate) fn indexed_item(d: &Dom, owner: ObjId, index: usize) -> Option<Result<Slot, HeapError>> {
+    fresh(d, owner, |t| t.vals.get(index).map_or(Slot::Absent, |&v| Slot::Str(v)))
+}
+
+/// `Host::fill_indexed` for a token list: make the cache of `owner` fresh. `Ok(false)`: `owner` is not a token list.
+pub(crate) fn indexed_fill(d: &Dom, it: &mut Interp<'_>, owner: ObjId) -> R<bool> {
+    let el = d.plat.s.borrow().lists.get(&owner).copied();
+    let Some(el) = el else { return Ok(false) };
+    let attr = {
+        let doc = d.doc.borrow();
+        attribute(&doc, el).unwrap_or("").to_string()
+    };
+    it.charge(1 + (attr.len() / 8) as u64)?;
+    let mut vals = Vec::new();
+    for t in set(&attr) {
+        match d.js_str(it, &t)? {
+            Value::String(s) => vals.push(s),
+            _ => unreachable!("js_str makes a string"),
+        }
+    }
+    d.plat.s.borrow_mut().toks.insert(owner, Toks { attr, vals });
+    Ok(true)
 }
 
 fn length(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
