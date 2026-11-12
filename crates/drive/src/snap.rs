@@ -718,6 +718,37 @@ fn walk_text(cx: &Cx, root: NodeId, out: &mut Vec<String>) {
     flush(&mut text, out);
 }
 
+/// The landmark roles that `links` names.
+const LANDMARKS: &[&str] = &["navigation", "banner", "contentinfo", "main", "complementary", "search", "region", "form"];
+
+/// Does `n` sit in an article, aside, main, nav or section? A `header` or `footer` there is no banner or contentinfo.
+fn sectioned(cx: &Cx, n: NodeId) -> bool {
+    let mut up = cx.doc.parent_or_host(n);
+    while let Some(a) = up {
+        if matches!(cx.tag(a), "article" | "aside" | "main" | "nav" | "section") {
+            return true;
+        }
+        up = cx.doc.parent_or_host(a);
+    }
+    false
+}
+
+/// The nearest landmark above `n`: its role and its name (empty when it has none). A `form` needs a name to be a landmark.
+fn landmark(cx: &Cx, n: NodeId) -> Option<(&'static str, String)> {
+    let mut up = cx.doc.parent_or_host(n);
+    while let Some(a) = up {
+        up = cx.doc.parent_or_host(a);
+        let Some(r) = role_of(cx, a, &HashSet::new()).filter(|r| LANDMARKS.contains(r)) else { continue };
+        let name = cx.name(a);
+        let scoped = matches!(cx.tag(a), "header" | "footer") && cx.attr(a, "role").is_none() && sectioned(cx, a);
+        if scoped || (r == "form" && name.is_empty()) {
+            continue;
+        }
+        return Some((r, name));
+    }
+    None
+}
+
 /// The rendered links: ref, text and absolute URL.
 /// Filters: `text` (in the text or the URL, any case), `root` (a ref: the links inside it, or the link itself) and `external` (only links to another origin).
 pub fn links(p: &mut Page, refs: &mut Refs, max: usize, text: Option<&str>, root: Option<u32>, external: bool) -> Result<String, String> {
@@ -738,13 +769,13 @@ pub fn links(p: &mut Page, refs: &mut Refs, max: usize, text: Option<&str>, root
                 && l.role == "link"
                 && let Some(h) = cx.attr(l.node, "href")
             {
-                found.push((l.node, l.name, h.to_string()));
+                found.push((l.node, l.name, h.to_string(), landmark(&cx, l.node)));
             }
         }
     })
     .ok_or_else(|| p.errors.last().cloned().unwrap_or_else(|| "the page has no document or no layout yet".into()))?;
     let mut lines = Vec::with_capacity(found.len());
-    for (n, name, href) in found {
+    for (n, name, href, lm) in found {
         let abs = base.as_ref().and_then(|b| b.join(&href).ok()).map_or(href, |u| u.to_string());
         // A URL of this origin is the origin, then nothing or a path, a query or a fragment.
         let own = abs.strip_prefix(&origin).is_some_and(|r| r.is_empty() || r.starts_with(['/', '?', '#']));
@@ -760,7 +791,9 @@ pub fn links(p: &mut Page, refs: &mut Refs, max: usize, text: Option<&str>, root
         // A link of this origin gives its path: the origin is in the header, and it costs tokens in each line.
         let shown = clean_url(abs.strip_prefix(&origin).filter(|r| r.starts_with('/')).unwrap_or(&abs));
         let name = if name.is_empty() { String::new() } else { format!(" {name:?}") };
-        lines.push(format!("[e{}]{name} -> {shown}", refs.mint(n)));
+        // The nearest landmark, with its name when it has one.
+        let lm = lm.map_or(String::new(), |(r, ln)| if ln.is_empty() { format!(" ({r})") } else { format!(" ({r} {:?})", short(&ln, 80)) });
+        lines.push(format!("[e{}]{name} -> {shown}{lm}", refs.mint(n)));
     }
     if lines.is_empty() && (text.is_some() || root.is_some() || external) {
         return Ok(format!("{}no link matches the filters", header(p)));

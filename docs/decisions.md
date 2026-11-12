@@ -1849,3 +1849,10 @@ Reason: a later relative box under an earlier fixed layer could not be clicked (
 - `anchorNode` and `focusNode` swap with the flag. `direction` reads `backward`, `forward` or `none`.
 - `containsNode` follows the standard text and Ladybird: it compares the points `(node, 0)` and `(node, length)` with the range. An element whose contents are all selected counts as contained. Chrome may answer false for it. We did not check this against Chrome.
 - `modify` and `deleteFromDocument` stay gates.
+
+## The links tool names the nearest landmark (2026-11-12)
+
+- `links` adds the nearest landmark to each link line: `(navigation "Top")`, `(contentinfo)`, `(main)` and so on. A link outside every landmark gets no suffix.
+- The landmark roles come from `role_of` in `crates/drive/src/snap.rs`. That is the same table the snapshot uses.
+- A `header` or `footer` inside an article, aside, main, nav or section is not a landmark. A `form` needs a name.
+- Reason: a model could not tell a top navigation link from the others without eval. The deck eval task `link-url` asks for the "Release notes" link in the top navigation. It failed 3 of 3 runs. The model then called `eval`, which the task forbids (bare#438).

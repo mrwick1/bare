@@ -1973,6 +1973,25 @@ fn a_link_inside_a_heading_shows_in_snapshot_and_links() {
     assert!(r.contains("\"First issue\" -> /issues/101") && r.contains("\"Second issue\" -> /issues/102"), "{r}");
 }
 
+/// A top navigation, a paragraph link, a footer link, and a header in an article (not a banner).
+const LANDMARK_LINKS_PAGE: &str = "<!doctype html><body><nav aria-label=Top><a href='/docs/release-notes.html'>Release notes</a></nav>\
+<p><a href='/about'>Plain link</a></p><footer><a href='/legal'>Legal</a></footer>\
+<article><header><a href='/inside'>Inside article</a></header></article></body>";
+
+#[test]
+fn links_name_the_nearest_landmark_of_each_link() {
+    let mut s = Server::start();
+    opened(&mut s, &html_app(LANDMARK_LINKS_PAGE));
+    let (r, error) = s.tool("links", json!({}));
+    let r = r.as_str().unwrap();
+    assert!(!error, "{r}");
+    let line = |t: &str| r.lines().find(|l| l.contains(t)).unwrap_or_else(|| panic!("no line for {t}: {r}")).to_string();
+    assert!(line("Release notes").ends_with("-> /docs/release-notes.html (navigation \"Top\")"), "{r}");
+    assert!(line("Legal").ends_with("-> /legal (contentinfo)"), "{r}");
+    assert!(line("Plain link").ends_with("-> /about") && !line("Plain link").contains('('), "{r}");
+    assert!(line("Inside article").ends_with("-> /inside"), "{r}");
+}
+
 /// A plain page with no timer and a text file to fetch.
 fn quiet_page(_: &str, target: &str, _: &str, _: Option<&str>) -> (u16, &'static str, Vec<u8>) {
     match target {
