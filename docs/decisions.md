@@ -1642,3 +1642,14 @@ A click on a GitHub issue title did not navigate. GitHub cancels the click and c
 
 ## A relative box paints over an earlier absolute sibling (2026-11-12)
 Layout puts the fragment of an absolute box after the other fragments of its containing block, and drops its static position. So the fragment order is not the tree order. The painter and the hit test put an earlier absolute veil over a later relative card (bare issue #414). Now both sort the positioned boxes of a context with `z-index` 0 by the path of child numbers in the tree, as CSS 2.1 Appendix E asks. The sort runs only when one of the boxes is out of flow. Boxes with a non-zero `z-index` still sort by `(z, fragment order)`: an absolute and a relative box with the same non-zero `z-index` can still be in the wrong order.
+
+## Inert iframe window is an EventTarget with an initial about:blank document (2026-11-12)
+
+- A mail app listens for `resize` on `iframe.contentWindow` and calls `contentWindow.document.open()`. The window had no `addEventListener` and no `document`, so the app failed at start (bare issue #420).
+- The inert window now has `EventTarget.prototype` in its chain. It is a `Target::Obj` of the event engine, as a worker or an abort signal is.
+- An iframe with no `src` (or an empty one, or `about:blank`) and no `srcdoc` gets an initial `about:blank` document on its first `contentWindow`. The document is same-origin with the parent. `contentWindow.document` and `iframe.contentDocument` give the same object while the iframe stays connected. The window holds it as `document`, so it lives as long as the window.
+- The document is made as `document.implementation.createHTMLDocument('')` makes one: `html`, `head`, `body`. It has the known deviations of that function (no `defaultView` and no `location`).
+- `document.open`, `write`, `writeln` and `close` accept any document node. On a non-main document `open` clears `html` and builds a new `head` and `body`, and `write` appends parsed markup to `body`. They leave the write state of the main document alone, and they never run a parser-blocking script write.
+- An iframe with another `src`, or with `srcdoc`, keeps its inert window. Its `contentDocument` is `null`: bare never loads a child, so it has no document to give. A detached iframe gives `null` for both.
+- Not built: a `resize` event on the frame window, a document for `srcdoc`, a document for a `src` that fails to parse, and a change of document when `src` changes after the first `contentWindow`.
+- Source: Ladybird `LibWeb/HTML/NavigableContainer.cpp` (BSD-2): `shared_attribute_processing_steps_for_iframe_and_frame` (no `src`, or an empty one, means `about:blank`) and `content_document` (null without a content navigable). `HTMLIFrameElement.cpp` (BSD-2) for `contentDocument` and `contentWindow`. Read for semantics only; no code was copied.
