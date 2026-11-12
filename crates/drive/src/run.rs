@@ -567,6 +567,8 @@ impl Session {
                 let next = match wait {
                     (true, _) => now,
                     (false, Some(at)) => at,
+                    // A miss says what is near in its message: that is what the agent can act on, not the idle page.
+                    (false, None) if f.kind == "not_found" => break Err(f),
                     (false, None) => {
                         break Err(Fail { message: format!("{} (the page is idle: no task is queued, so nothing can change it)", f.message), ..f });
                     }
@@ -828,11 +830,16 @@ fn one(p: &mut Page, m: &mut Memo, loc: &Locator) -> Result<Handle, Try> {
             m.seen.insert(key, *h);
             Ok(*h)
         }
-        [] => Err(Try::Again(match m.seen.get(&key) {
-            Some(&old) if old.doc == p.generation() && !p.connected(old) => fail("detached", format!("{loc} matched {} before; it left the document", p.describe(old))),
-            _ if found.hidden > 0 => fail("hidden", format!("{loc}: {} element(s) match, none is rendered (display: none, visibility: hidden or aria-hidden)", found.hidden)),
-            _ => fail("not_found", format!("no element matches {loc}")),
-        })),
+        [] => Err(match m.seen.get(&key) {
+            Some(&old) if old.doc == p.generation() && !p.connected(old) => Try::Again(fail("detached", format!("{loc} matched {} before; it left the document", p.describe(old)))),
+            _ if found.hidden > 0 => Try::Again(fail("hidden", format!("{loc}: {} element(s) match, none is rendered (display: none, visibility: hidden or aria-hidden)", found.hidden))),
+            // A rendered element with a near name: the locator is wrong, so waiting would not help.
+            _ => match locate::near(p, loc) {
+                Some((near, true)) => Try::Stop(fail("not_found", format!("no element matches {loc}; {near}"))),
+                Some((near, false)) => Try::Again(fail("not_found", format!("no element matches {loc}; {near}"))),
+                None => Try::Again(fail("not_found", format!("no element matches {loc}"))),
+            },
+        }),
         many => {
             let list: Vec<String> = many.iter().take(5).map(|&h| p.describe(h)).collect();
             Err(Try::Stop(fail("duplicate", format!("{loc} matches {} elements: {}{}", many.len(), list.join(", "), if many.len() > 5 { ", …" } else { "" }))))
