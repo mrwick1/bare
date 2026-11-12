@@ -124,7 +124,7 @@ impl Default for ComputedLimits {
             max_sources: 1024,
             max_sheet_bytes: 4 << 20,
             max_rules: 1 << 18,
-            max_work: 1 << 27,
+            max_work: 1 << 30,
             max_external: 256,
             max_external_bytes: 8 << 20,
         }

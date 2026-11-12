@@ -1809,3 +1809,10 @@ A focused element inside an editing host now takes key input. Text, Enter, Backs
 - `w.postMessage` drops the message. The frame has no listener that runs, and the parent must not receive it.
 - Only blank frames inherit the parent global. A frame with another `src` keeps the inert window, so the parent's `document` and globals do not leak through it.
 - Not built: a separate `Object.prototype` per frame, so `w.Array !== Array` checks and `instanceof` across frames are the same as in the parent. Other `create*` methods (`createElementNS`, `createDocumentFragment`, `importNode`) of a frame document still give `ownerDocument` the main document.
+
+## The default computed-work cap is 1 << 30 (2026-11-12)
+
+- A large web mail compose view has about 22,000 nodes and 30,000 selectors. Its work (nodes times selectors) is 138 M to 144 M. The old default, 1 << 27, refused it (bare issue #435).
+- Chrome has no such cap. The cap now only stops pages that are far larger than that.
+- The cascade charges the real work as steps (one per node, then one per tested candidate). The step budget is the real guard, so the cap can be raised.
+- The bound and its check stay. A test sets a lower `max_work` to prove the refusal.
