@@ -543,6 +543,10 @@ pub struct Dom {
     pub(crate) html_ifaces: RefCell<Vec<Option<(ObjId, ObjId)>>>,
     /// A global of `browser_html.rs` was read: new wrappers get their interface prototype.
     pub(crate) html_on: std::cell::Cell<bool>,
+    /// The `returnValue` and the modal flag of each `<dialog>` that has one (`browser_html_members.rs`).
+    pub(crate) dialogs: RefCell<std::collections::HashMap<NodeId, (String, bool)>>,
+    /// The first `<link>` wrapper gave `HTMLLinkElement.prototype` its reflected members (`browser_dom::link_proto`).
+    pub(crate) link_done: std::cell::Cell<bool>,
     /// Scroll offsets, page bars and `scroll` events (`browser_scroll.rs`).
     pub(crate) scrolling: crate::browser_scroll::Scrolling,
     /// `ResizeObserver` and its rendering step (`browser_resize.rs`).
@@ -988,7 +992,7 @@ impl Dom {
                         Ns::MathMl => p.element,
                         _ => match doc.atom_str(name) {
                             "iframe" => { crate::browser_frames::activate(self, it)?; p.iframe },
-                            "link" => p.link,
+                            "link" => crate::browser_dom::link_proto(self, it)?,
                             "style" => crate::browser_cssom::wrapper_proto(self,it)?,
                             "a" | "area" | "template" | "img" | "slot" => crate::browser_elements::proto(self, it, doc.atom_str(name))?,
                             t @ ("audio" | "video" | "track") => crate::browser_media::proto(self, it, n, t)?,
@@ -1623,6 +1627,8 @@ impl Browser {
             perf_entries: Default::default(),
             html_ifaces: Default::default(),
             html_on: Default::default(),
+            dialogs: Default::default(),
+            link_done: Default::default(),
             scrolling: Default::default(),
             resize: Default::default(),
             frame: Default::default(),

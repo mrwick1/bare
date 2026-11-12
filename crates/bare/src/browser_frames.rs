@@ -194,6 +194,10 @@ pub(crate) fn activate(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     }
     d.def_get(it, d.p().iframe, "contentWindow", content_window, None)?;
     d.def_get(it, d.p().iframe, "name", name, Some(set_name))?;
+    crate::browser_reflect::reflect!(d, it, d.p().iframe, &["iframe"], {
+        "src" => "src": Url, "srcdoc" => "srcdoc": Str, "allow" => "allow": Str, "width" => "width": Str, "height" => "height": Str,
+        "loading" => "loading": Enum(&["lazy", "eager"], "eager"), "referrerPolicy" => "referrerpolicy": Str,
+    });
     for name in ["frames", "parent", "top", "length", "name", "screen"] {
         crate::browser::define_window(d, it, name)?;
     }

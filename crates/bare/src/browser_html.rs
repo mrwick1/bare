@@ -10,7 +10,10 @@
 //!   each wrapper made every member read of every element one step longer (+0.6% on the `mutation` cost row), and only a page that names the
 //!   interface can tell. At the switch, each existing wrapper of these tags gets its prototype, and each new one has it from the start. Deviation:
 //!   before the first read of such a global, `el.constructor` is `HTMLElement` and `Object.prototype.toString.call(el)` is `[object HTMLElement]`.
-//! - The prototype inherits from `HTMLElement.prototype` and has no members of its own (no `HTMLTableElement.rows`, no `HTMLMetaElement.content`).
+//! - The prototype inherits from `HTMLElement.prototype`. The interfaces of `has_members` have members of their own (`browser_table.rs`,
+//!   `browser_html_members.rs`, `canvas`); these tags (except `li`) get their prototype from the first wrapper, also before the switch, because a
+//!   page reads `table.rows` without naming the interface. The others (`div`, `span`, `p`, `ul`, ...) have no members of their own and keep the
+//!   switch. Deviation: `li.value` is `undefined` until a page reads an `HTML*Element` global.
 //!   The constructor is illegal and inherits from `HTMLElement`.
 //! - The tags whose interface is `HTMLElement` itself (`section`, `nav`, `b`, ...) keep `HTMLElement.prototype`. A tag with a module of its own
 //!   (`a`, `img`, `input`, `select`, ...) is not handled here.
@@ -131,11 +134,22 @@ fn index(t: &str) -> Option<usize> {
     })
 }
 
+/// Does the interface `NAMES[i]` have members of its own (`browser_html_members.rs`, `browser_table.rs`, `canvas`)? Such a tag gets its
+/// prototype from its first wrapper, so a page that reads `table.rows` without naming `HTMLTableElement` finds it.
+/// The list: base, canvas, data, details, dialog, fieldset, html, meter, ol, output, progress, source, table, thead/tbody/tfoot, td/th,
+/// time, tr. A test checks it against the prototypes (`browser_web_api_tests.rs`). `li` has a member (`value`) but keeps the switch: an `li`
+/// prototype from the first wrapper cost +0.24% on the `mutation` cost row (it makes `li` elements), and pages rarely read `li.value`.
+/// Without `li`, the rule costs +0.08% on `mutation` and `event` (the tag lookup for each new wrapper).
+#[inline]
+fn has_members(i: usize) -> bool {
+    matches!(i, 0 | 3 | 6 | 9 | 10 | 15 | 21 | 28 | 30 | 31 | 36 | 38 | 41 | 42 | 43 | 44 | 46)
+}
+
 /// The prototype of the HTML element `tag` that no other module handles: its interface, made now if it is the first use.
 pub(crate) fn proto(d: &Dom, it: &mut Interp<'_>, tag: &str) -> R<ObjId> {
-    match d.html_on.get().then(|| index(tag)).flatten() {
-        Some(i) => proto_i(d, it, i),
-        None => Ok(d.p().html),
+    match index(tag) {
+        Some(i) if d.html_on.get() || has_members(i) => proto_i(d, it, i),
+        _ => Ok(d.p().html),
     }
 }
 
@@ -156,6 +170,8 @@ fn make(d: &Dom, it: &mut Interp<'_>, i: usize) -> R<(ObjId, ObjId)> {
     it.define_data(proto, kc, Value::Object(f), true, false, true)?;
     crate::browser_lazy::tag(d, it, proto, NAMES[i])?;
     if i == 3 { crate::browser_canvas::members(d, it, proto)?; }
+    let own = crate::browser_html_members::members(d, it, proto, NAMES[i])?;
+    debug_assert!((own || i == 3) == has_members(i) || NAMES[i] == "HTMLLIElement", "{}", NAMES[i]);
     // Like every HTML interface, its constructor inherits from `HTMLElement`.
     let g = it.global_object();
     let k = d.key(it, "HTMLElement")?;

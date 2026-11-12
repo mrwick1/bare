@@ -8,7 +8,7 @@
 //! `alt`, `srcset`, `sizes`, `loading`, `decoding` (reflected strings), `naturalWidth`, `naturalHeight` (the picture that `bare/src/images.rs`
 //! decoded, else 0), `width`, `height` (the attribute as an unsigned number, else the natural size: deviation, Chrome gives the rendered size),
 //! `complete` (false while a download is on the way, see `browser_img.rs`). `new Image()`, `decode()`, `onload` and `onerror` are in
-//! `browser_img.rs`. Absent: `crossOrigin`, `x`, `y`, `isMap`, `useMap`, `referrerPolicy`.
+//! `browser_img.rs`. `crossOrigin`, `useMap`, `isMap` and `referrerPolicy` are reflected (`browser_reflect.rs`). Absent: `x`, `y`.
 //!
 //! Hyperlink members (`HTMLHyperlinkElementUtils`, on `a` and `area`): `href`, `protocol`, `host`, `hostname`, `port`, `pathname`, `search`,
 //! `hash` (all with setters), the read-only `origin`, and `toString` (the `href`). The getter of `href` is the `href` attribute resolved against
@@ -23,7 +23,8 @@
 //! - a form that the parser gates (user info, `\`, a scheme other than http and https with `//`, IDNA hosts): `href` is the attribute text, any other
 //!   part is `Unsupported`. A setter on such a URL is `Unsupported` too.
 //!
-//! Absent: `username`, `password`, `target`, `rel`, `download`, `text`, `ping` and the other attribute reflections.
+//! Reflected (`browser_reflect.rs`): `rel`, `target`, `referrerPolicy`, `ping` (on `a` and `area`), `hreflang`, `type` (on `a`). `a.text` is the
+//! text content. Absent: `username`, `password` (the parser gates user info), `area.download`.
 //!
 //! `HTMLTemplateElement.content` is a `DocumentFragment` (a node with the data of a shadow root and no host: `Document::create_fragment`). The tree
 //! builder moves the children of each parsed `<template>` into it, so `template.childNodes` is empty, as in Chrome. A `<template>` made by a script gets
@@ -36,6 +37,7 @@ use crate::browser_dom as nd;
 use crate::browser_lazy::lazy_global;
 use crate::browser_navigation_url::{Part, Rec, UErr, clean, parse, scheme_of};
 use crate::browser_platform::{V, arg};
+use crate::browser_reflect::{reflect, this_of};
 use bare_html::dom::NodeId;
 use bare_js::eval::{Error, Interp};
 use bare_js::value::{ObjId, Value};
@@ -116,6 +118,14 @@ fn make(d: &Dom, it: &mut Interp<'_>) -> R<[ObjId; 10]> {
     members::<false>(d, it, o[0])?;
     d.def_get(it, o[0], "download", download, Some(set_download))?;
     members::<true>(d, it, o[1])?;
+    for p in [o[0], o[1]] {
+        reflect!(d, it, p, &["a", "area"], {
+            "rel" => "rel": Str, "target" => "target": Str, "referrerPolicy" => "referrerpolicy": Str, "ping" => "ping": Str,
+        });
+    }
+    reflect!(d, it, o[0], &["a"], { "hreflang" => "hreflang": Str, "type" => "type": Str });
+    d.def_get(it, o[0], "text", |d, it, t, a| { this_of(d, it, t, &["a"])?; nd::text_content(d, it, t, a) },
+        Some(|d, it, t, a| { this_of(d, it, t, &["a"])?; nd::set_text_content(d, it, t, a) }))?;
     d.def_get(it, o[2], "content", content, None)?;
     image_members(d, it, o[3])?;
     crate::browser_slot::members(d, it, o[4])?;
@@ -357,6 +367,9 @@ fn image_members(d: &Dom, it: &mut Interp<'_>, o: ObjId) -> R<()> {
     img_attr!(d, it, o, "sizes");
     img_attr!(d, it, o, "loading");
     img_attr!(d, it, o, "decoding");
+    reflect!(d, it, o, &["img"], {
+        "crossOrigin" => "crossorigin": Cors, "useMap" => "usemap": Str, "isMap" => "ismap": Bool, "referrerPolicy" => "referrerpolicy": Str,
+    });
     d.def_get(it, o, "width", img_size::<false>, Some(img_set_size::<false>))?;
     d.def_get(it, o, "height", img_size::<true>, Some(img_set_size::<true>))?;
     d.def_get(it, o, "naturalWidth", |d, it, t, _| Ok(Value::Number(natural(d, image(d, it, t)?).0 as f64)), None)?;
