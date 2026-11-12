@@ -202,7 +202,9 @@ pub struct Session {
     /// sockets of a browser outlive a navigation.
     client: Option<Client>,
     /// Live: the next document, while a worker downloads it. The old document stays until it is in.
-    loading: Option<(Next, Task<Result<(String, String), String>>)>,
+    loading: Option<(Next, Task<Result<(String, String, u16), String>>)>,
+    /// The HTTP status of the last document that a live session loaded (0: none yet).
+    status: u16,
     /// Live: the next document after its download, while turns parse it. The old document stays until the parse is done.
     parsing: Option<Box<Parsing>>,
 }
@@ -294,7 +296,9 @@ pub(crate) fn redirect_allowed(from: &Url, to: &Url) -> bool {
 }
 
 /// Download one document with the caps of `lim`. Gives the final URL (with the fragment) and the decoded text.
-fn load_document(client: &mut Client, url: &str, from: Option<&str>, body: Option<&Body>, lim: &SessionLimits, deadline: Instant) -> Result<(String, String), String> {
+///
+/// `keep_errors`: a status outside 200 to 299 still gives the document (a live page shows it), with that status as the last value.
+fn load_document(client: &mut Client, url: &str, from: Option<&str>, body: Option<&Body>, lim: &SessionLimits, deadline: Instant, keep_errors: bool) -> Result<(String, String, u16), String> {
     let max_url = NavLimits::default().max_url_bytes;
     if url.len() > max_url { return Err("the document URL is too big".into()); }
     let (bare, fragment) = match url.split_once('#') {
@@ -342,7 +346,7 @@ fn load_document(client: &mut Client, url: &str, from: Option<&str>, body: Optio
             cur = next;
             continue;
         }
-        if !(200..300).contains(&resp.status) {
+        if !(200..300).contains(&resp.status) && !keep_errors {
             return Err(format!("status {}", resp.status));
         }
         let ct = resp.header("content-type");
@@ -359,7 +363,7 @@ fn load_document(client: &mut Client, url: &str, from: Option<&str>, body: Optio
             final_url.push('#');
             final_url.push_str(&f);
         }
-        return Ok((final_url, text));
+        return Ok((final_url, text, resp.status));
     }
     Err("too many redirects".into())
 }
@@ -367,7 +371,7 @@ fn load_document(client: &mut Client, url: &str, from: Option<&str>, body: Optio
 impl Session {
     pub fn new(mut cfg: SessionConfig) -> Session {
         let store = cfg.storage.take().unwrap_or_default();
-        Session { cfg, store, browser: None, used: Used::default(), hist: Vec::new(), at: 0, client: None, loading: None, parsing: None }
+        Session { cfg, store, browser: None, used: Used::default(), hist: Vec::new(), at: 0, client: None, loading: None, parsing: None, status: 0 }
     }
 
     /// A client that shares the connections of the session.
@@ -420,7 +424,7 @@ impl Session {
     fn start(&mut self, next: Next) -> SessionResult {
         let (url, body, from, lim) = (next.url.clone(), next.body.clone(), next.from.clone(), self.cfg.limits.clone());
         let deadline = deadline_after(lim.max_time.saturating_sub(self.used.time));
-        let task = self.fork().spawn(move |c| load_document(c, &url, from.as_deref(), body.as_ref(), &lim, deadline));
+        let task = self.fork().spawn(move |c| load_document(c, &url, from.as_deref(), body.as_ref(), &lim, deadline, true));
         self.loading = Some((next, task));
         SessionResult { stop: SessionStop::Page(Stop::Settled), pages: Vec::new(), urls: Vec::new(), tasks: 0, rounds: 0 }
     }
@@ -486,6 +490,11 @@ impl Session {
         self.loading.as_ref().map(|l| l.1.done())
     }
 
+    /// The HTTP status of the last document that a live session loaded (0: none yet).
+    pub fn status(&self) -> u16 {
+        self.status
+    }
+
     /// Why the session cannot go on (`run` and `resume` give this stop and run nothing), or `None`.
     pub fn ended(&self) -> Option<&SessionStop> {
         self.used.ended.as_ref()
@@ -515,7 +524,8 @@ impl Session {
             }
             let (n, task) = self.loading.take().expect("checked");
             match task.wait().unwrap_or_else(|| Err("network error".into())) {
-                Ok((url, html)) => {
+                Ok((url, html, status)) => {
+                    self.status = status;
                     let scan = Url::parse(url.split('#').next().unwrap_or("")).map(|page| {
                         let mut c = self.fork();
                         c.set_site(Some(bare_net::cookie::site_of(&page)));
@@ -570,7 +580,7 @@ impl Session {
                     let mut base = self.fork();
                     let doc = match fetched.take() {
                         Some(d) => d,
-                        None => load_document(&mut base, &url, from.as_deref(), body.as_ref(), &lim, deadline).map(|(url, html)| (url, tree::parse(&html))),
+                        None => load_document(&mut base, &url, from.as_deref(), body.as_ref(), &lim, deadline, false).map(|(url, html, _)| (url, tree::parse(&html))),
                     };
                     let (url, dom) = match doc {
                         Ok(d) => d,

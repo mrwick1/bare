@@ -235,6 +235,8 @@ pub struct Session {
     start: Instant,
     // A session for the next `open` that has no state file (see `preload`).
     preload: Option<StorageState>,
+    /// An `open`, `goto` or `reload` ends when the page is ready (or at the time limit), not at once. Off for a step file: its next step waits.
+    pub ready_wait: bool,
     pub rep: Report,
 }
 
@@ -243,7 +245,7 @@ impl Session {
         bare_net::trace::enable();
         let _ = bare_net::trace::take();
         let rep = Report { ok: true, steps: Vec::new(), failure: None, logs: Vec::new(), net: Vec::new(), ms: 0.0, window: opt.window, ticks: Ticks::default(), cookies: Vec::new() };
-        Session { host: Host::None, net: bare_net::http::Client::new(), memo: Memo::default(), timeout: opt.timeout, window_cpu: 0, nav_first: 0, start: Instant::now(), preload: None, rep }
+        Session { host: Host::None, net: bare_net::http::Client::new(), memo: Memo::default(), timeout: opt.timeout, window_cpu: 0, nav_first: 0, start: Instant::now(), preload: None, ready_wait: false, rep }
     }
 
     /// Make the next `open` step that has no state file start from `st`.
@@ -328,10 +330,12 @@ impl Session {
 
     /// Run one step, and add its result to `rep`. False when it failed (`rep.failure` says why).
     pub fn step(&mut self, step: &Step, opt: &Options, red: &mut Redactor) -> bool {
-        let Session { host, net, memo, timeout, window_cpu, nav_first, rep, preload, .. } = self;
+        let Session { host, net, memo, timeout, window_cpu, nav_first, rep, preload, ready_wait, .. } = self;
     let t0 = Instant::now();
     let deadline = t0 + *timeout;
     let (mut tries, mut busy, mut waited, mut ticks) = (0u32, Duration::ZERO, Duration::ZERO, Ticks::default());
+    // With `ready_wait`, an `open`, `goto` or `reload` waits until the page is ready (`ready`); `calm` counts the looks that found it so.
+    let (mut navigating, mut calm) = (false, 0u8);
     let (cpu0, net0) = (thread_cpu_ns(), bare_net::trace::blocked_us());
     if matches!(step.action, Action::Open(..) | Action::Goto(_) | Action::Reload) {
         *nav_first = rep.net.len();
@@ -344,6 +348,46 @@ impl Session {
                 *timeout = Duration::from_millis(*ms);
                 break Ok(None);
             }
+            _ if navigating => {
+                let at_end = Instant::now() >= deadline;
+                match host.run(move |p| ready(p, at_end)) {
+                    Ok(r) => {
+                        let ms = t0.elapsed().as_millis();
+                        let now = Instant::now();
+                        let soon = now + Duration::from_millis(5);
+                        let pending = |n: usize| format!("{n} request{} pending", if n == 1 { "" } else { "s" });
+                        let state = match (r.fail, r.idle) {
+                            (Some(f), _) => Err(f),
+                            (None, Ok(())) if r.status >= 400 => Err(fail("page", format!("status {}: {} (title {:?}): {}", r.status, r.url, r.title, r.text))),
+                            (None, idle) => Ok(idle),
+                        };
+                        let done = match state {
+                            Err(f) => Some(Err(f)),
+                            Ok(_) if r.stopped.is_some() => Some(Ok(Some(format!("not ready: the page stopped after {ms} ms ({}), body {}", r.stopped.as_deref().unwrap_or(""), if r.text.is_empty() { "empty" } else { "has content" })))),
+                            Ok(Ok(())) if !r.text.is_empty() => {
+                                calm = if r.ran { 0 } else { calm + 1 };
+                                (calm >= 2).then_some(Ok(None))
+                            }
+                            // Empty and nothing can change it: no task, no request, no timer.
+                            Ok(Ok(())) if !r.ran && r.next.is_none() => Some(Ok(Some(format!("not ready: body empty after {ms} ms, {}", pending(0))))),
+                            Ok(idle) => {
+                                calm = 0;
+                                let n = idle.err().unwrap_or(0);
+                                at_end.then(|| Ok(Some(format!("not ready: {} after {ms} ms, {}", if r.text.is_empty() { "body empty" } else { "still loading" }, pending(n)))))
+                            }
+                        };
+                        match done {
+                            Some(Ok(note)) => break Ok(note),
+                            Some(Err(f)) => break Err(f),
+                            None => {
+                                rep.logs.extend(r.logs.into_iter().map(|l| (step.line, l)));
+                                (Try::Again(fail("page", "not ready")), (r.ran, Some(r.next.filter(|n| *n < soon).unwrap_or(soon))))
+                            }
+                        }
+                    }
+                    Err(e) => break Err(fail("page", e)),
+                }
+            }
             Action::Open(url, file) => {
                 memo.seen.clear();
                 let from = file.as_deref().map(crate::state::read).transpose().map(|st| st.or_else(|| preload.take()));
@@ -353,7 +397,17 @@ impl Session {
                 if !opt.window {
                     ticks.add(d);
                 }
-                break opened.map(|logs| rep.logs.extend(logs.into_iter().map(|l| (step.line, l)))).map(|_| None).map_err(|e| fail("page", e));
+                match opened {
+                    Ok(logs) => {
+                        rep.logs.extend(logs.into_iter().map(|l| (step.line, l)));
+                        if !*ready_wait {
+                            break Ok(None);
+                        }
+                        navigating = true;
+                        continue;
+                    }
+                    Err(e) => break Err(fail("page", e)),
+                }
             }
             a => {
                 let (a, mut m) = (a.clone(), std::mem::take(memo));
@@ -390,6 +444,7 @@ impl Session {
             ticks.add(d);
         }
         match tried {
+            Try::Done(_) if *ready_wait && matches!(step.action, Action::Goto(_) | Action::Reload) => navigating = true,
             Try::Done(note) => break Ok(note),
             Try::More => {}
             Try::Stop(f) => break Err(f),
@@ -402,7 +457,8 @@ impl Session {
                         break Err(Fail { message: format!("{} (the page is idle: no task is queued, so nothing can change it)", f.message), ..f });
                     }
                 };
-                if now >= deadline {
+                // A navigation ends its wait by itself at the limit, with a note and not a failure.
+                if now >= deadline && !navigating {
                     break Err(Fail { message: format!("{} (time limit {} ms)", f.message, timeout.as_millis()), ..f });
                 }
                 host.sleep(seen, next.min(deadline));
@@ -579,13 +635,19 @@ fn shown(p: &mut Page, red: &Redactor) -> bool {
     .unwrap_or(true)
 }
 
-/// The URL for a message: no fragment, and the values of the query hidden (a query can hold a token).
+/// The URL for a message: no fragment (it can hold a token), and the value of a query parameter hidden when its name looks secret.
 pub fn safe_url(u: &str) -> String {
     let u = u.split('#').next().unwrap_or("");
-    match u.split_once('?') {
-        Some((path, q)) => format!("{path}?{}", q.split('&').map(|kv| kv.split('=').next().unwrap_or("").to_string() + "=…").collect::<Vec<_>>().join("&")),
-        None => u.to_string(),
-    }
+    let Some((path, q)) = u.split_once('?') else { return u.to_string() };
+    let secret = |k: &str| {
+        let k = k.to_ascii_lowercase();
+        ["token", "key", "code", "password", "secret", "auth", "session", "sig"].iter().any(|w| k.contains(w))
+    };
+    let pairs: Vec<String> = q.split('&').map(|kv| match kv.split_once('=') {
+        Some((k, _)) if secret(k) => format!("{k}=…"),
+        _ => kv.to_string(),
+    }).collect();
+    format!("{path}?{}", pairs.join("&"))
 }
 
 fn short(s: &str) -> String {
@@ -642,6 +704,47 @@ fn refused(p: &mut Page, h: Handle, r: Refusal) -> Try {
         Refusal::NoFocus => Try::Stop(fail("no_focus", format!("{what} did not take the focus after the click"))),
         Refusal::NoPage(e) => Try::Again(fail("page", e)),
     }
+}
+
+/// What one look at a page that a navigation started tells.
+struct Look {
+    /// A task ran in this look; when the next one is due.
+    ran: bool,
+    next: Option<Instant>,
+    /// `Ok`: loaded, and nothing waits. `Err`: the requests that wait.
+    idle: Result<(), usize>,
+    /// The document did not load, or the page stopped.
+    fail: Option<Fail>,
+    /// Why the page stopped for good (a script made a fatal error), if it did: it cannot get ready any more.
+    stopped: Option<String>,
+    status: u16,
+    url: String,
+    title: String,
+    /// The text of the body (a mark for a control or a picture), up to about 200 characters. Only read when the page is idle or `at_end`.
+    text: String,
+    logs: Vec<Log>,
+}
+
+/// The text of the page for a person: no script, no style, and the shadow trees of components. A control or a picture counts as content.
+const BODY_TEXT: &str = "(function(){var o=[],n=0;(function f(e){for(var c=e.firstChild;c&&n<200;c=c.nextSibling){if(c.nodeType==3){var t=c.data.replace(/\\s+/g,' ').trim();if(t){o.push(t);n+=t.length}}else if(c.nodeType==1){var g=c.localName;if(g=='script'||g=='style'||g=='noscript'||g=='template')continue;if(/^(img|input|textarea|select|button|canvas|svg|video|iframe)$/.test(g)){o.push('['+g+']');n+=5}f(c);if(c.shadowRoot)f(c.shadowRoot)}}})(document.body||document.documentElement);return o.join(' ')})()";
+
+/// One look: run the tasks that are due, then ask if the page is ready.
+fn ready(p: &mut Page, at_end: bool) -> Look {
+    let (ran, next) = p.tick();
+    let idle = p.idle();
+    let fail = p.load_error().map(|why| fail("page", format!("the document did not load: {why}")));
+    let stopped = p.stopped();
+    let (status, url) = (p.http_status(), p.url().unwrap_or_default());
+    let (mut title, mut text) = (String::new(), String::new());
+    if idle.is_ok() || at_end || stopped.is_some() {
+        title = locate::title(p).unwrap_or_default();
+        text = match p.browser().map(|b| b.run_script(BODY_TEXT).map(|v| b.it.display(v))) {
+            Some(Ok(t)) => locate::norm(&t),
+            _ => String::new(),
+        };
+        p.touched();
+    }
+    Look { ran, next, idle, fail, stopped, status, url: safe_url(&url), title: locate::norm(&title), text, logs: p.take_logs() }
 }
 
 /// One try of a step, on the page thread.
@@ -958,6 +1061,6 @@ mod tests {
         r.add("Ünï");
         assert_eq!(r.clean("x Ünï y ünï"), "x [secret] y ünï");
         assert_eq!(Redactor::default().clean("a"), "a");
-        assert_eq!(safe_url("http://a.test/x?q=s3cr3t&b=2#t"), "http://a.test/x?q=…&b=…");
+        assert_eq!(safe_url("http://a.test/x?token=s3cr3t&b=2&Auth_Key=z#t"), "http://a.test/x?token=…&b=2&Auth_Key=…");
     }
 }

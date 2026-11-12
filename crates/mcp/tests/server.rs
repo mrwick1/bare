@@ -365,3 +365,84 @@ fn an_agent_logs_in_with_snapshot_refs_and_no_step_lines() {
     let (r, _) = s.tool("sessions", json!({}));
     assert!(r.as_str().unwrap().contains("main: ") && r.as_str().unwrap().contains("two: "), "{r}");
 }
+
+/// Pages for the open tests: a page that fills its body after a slow request, one whose request never ends, an error page, a redirect.
+fn open_pages(_: &str, target: &str, _: &str, _: Option<&str>) -> (u16, &'static str, Vec<u8>) {
+    let path = target.split('?').next().unwrap_or("/");
+    let page = |script: &str| (200, "text/html", format!("<!doctype html><title>Slow</title><body><script>{script}</script></body>").into_bytes());
+    match path {
+        "/slow" => page("fetch('/data?delay=400').then(r => r.text()).then(t => { document.body.textContent = t; })"),
+        "/never" => page("fetch('/data?delay=5000').then(r => r.text()).then(t => { document.body.textContent = t; })"),
+        "/data" => {
+            let ms = target.split("delay=").nth(1).and_then(|d| d.parse().ok()).unwrap_or(0);
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+            (200, "text/plain", b"rendered late".to_vec())
+        }
+        "/blocked" => (403, "text/html", b"<!doctype html><title>Access denied</title><body><h1>Blocked</h1><p>Try later</p></body>".to_vec()),
+        "/old" => (302, "text/plain", b"/login?reason=guest&token=abc123&dest=/r/rust".to_vec()),
+        "/login" => (200, "text/html", b"<!doctype html><title>Login</title><body><p>Sign in please</p></body>".to_vec()),
+        "/empty" => (200, "text/html", b"<!doctype html><title>Empty</title><body></body>".to_vec()),
+        _ => (404, "text/plain", b"no".to_vec()),
+    }
+}
+
+#[test]
+fn open_waits_for_a_page_that_fills_its_body_after_a_request() {
+    let base = common::serve_route(open_pages);
+    let mut s = Server::start();
+    let (rep, error) = s.tool("open", json!({"url": format!("{base}/slow")}));
+    assert!(!error, "{rep}");
+    assert!(!rep.to_string().contains("not ready"), "{rep}");
+    let (text, _) = s.tool("eval", json!({"js": "document.body.textContent"}));
+    assert!(text.to_string().contains("rendered late"), "open returned before the page rendered: {text}");
+}
+
+#[test]
+fn open_says_not_ready_when_the_time_limit_passes_on_an_empty_page() {
+    let base = common::serve_route(open_pages);
+    let mut s = Server::start();
+    let (rep, _) = s.tool("open", json!({"url": format!("{base}/never"), "timeout_ms": 600, "snapshot": true}));
+    let r = rep.as_str().unwrap();
+    assert!(r.contains("not ready: body empty after") && r.contains("1 request pending"), "{r}");
+}
+
+#[test]
+fn open_does_not_wait_for_a_page_that_is_empty_and_idle() {
+    let base = common::serve_route(open_pages);
+    let mut s = Server::start();
+    let t = std::time::Instant::now();
+    let (rep, _) = s.tool("open", json!({"url": format!("{base}/empty"), "snapshot": true}));
+    assert!(t.elapsed().as_millis() < 3000, "{rep}");
+    assert!(rep.as_str().unwrap().contains("not ready: body empty"), "{rep}");
+}
+
+#[test]
+fn open_of_an_error_page_gives_the_status_and_keeps_the_page() {
+    let base = common::serve_route(open_pages);
+    let mut s = Server::start();
+    let (rep, _) = s.tool("open", json!({"url": format!("{base}/blocked"), "snapshot": true}));
+    let r = rep.as_str().unwrap();
+    assert!(r.contains("status 403") && r.contains(&format!("{base}/blocked")) && r.contains("Access denied") && r.contains("Try later"), "{r}");
+    let (rep, error) = s.tool("snapshot", json!({}));
+    assert!(!error && rep.as_str().unwrap().contains("Blocked"), "{rep}");
+}
+
+#[test]
+fn open_shows_the_redirect_and_full_urls_with_secret_values_hidden() {
+    let base = common::serve_route(open_pages);
+    let mut s = Server::start();
+    let (rep, _) = s.tool("open", json!({"url": format!("{base}/old"), "snapshot": true}));
+    let r = rep.as_str().unwrap();
+    assert!(r.contains(&format!("redirected: {base}/login?reason=guest&token=…&dest=/r/rust")), "{r}");
+    // `act` shows the full URL of a navigation too, with the secret values hidden.
+    let (rep, _) = s.tool("act", json!({"op": "goto", "url": format!("{base}/login?a=1&session=zz9"), "snapshot": false}));
+    let r = rep.as_str().unwrap();
+    assert!(r.contains(&format!("navigated: {base}/login?a=1&session=…")) && !r.contains("zz9"), "{r}");
+}
+
+#[test]
+fn open_of_a_file_url_fails_at_once_with_the_reason() {
+    let mut s = Server::start();
+    let (rep, error) = s.tool("open", json!({"url": "file:///etc/hostname", "snapshot": true}));
+    assert!(error && rep.as_str().unwrap().contains("not an http(s) URL"), "{rep}");
+}
