@@ -1951,3 +1951,25 @@ fn links_filter_by_text_root_and_origin() {
     let (r, error) = s.tool("links", json!({"root": nav}));
     assert!(error && r.as_str().unwrap().contains("older page"), "{r}");
 }
+
+/// A list of issues as GitHub renders it: each title is a link inside a heading.
+const HEADING_LINKS_PAGE: &str = "<!doctype html><body><ul>\
+<li><h3><a href='/issues/101' tabindex='-1'><span><span>First issue</span></span></a></h3><span>opened today</span></li>\
+<li><h3><a href='/issues/102' tabindex='-1'><span><span>Second <code>issue</code></span></span></a></h3></li>\
+<li><h3>Plain heading</h3></li>\
+<li><h2><a href='#install'><svg></svg></a>Install</h2></li></ul></body>";
+
+#[test]
+fn a_link_inside_a_heading_shows_in_snapshot_and_links() {
+    let mut s = Server::start();
+    let snap = opened(&mut s, &html_app(HEADING_LINKS_PAGE));
+    for t in ["First issue", "Second issue"] {
+        assert!(snap.lines().any(|l| l.contains(&format!("link \"{t}\"")) && l.contains("[e")), "{t}: {snap}");
+    }
+    assert!(snap.contains("heading \"Plain heading\""), "{snap}");
+    // An anchor with no name (a `#` icon of a docs page) keeps the heading a leaf.
+    assert!(snap.contains("heading \"Install\"") && !snap.contains("href=#install"), "{snap}");
+    let (r, _) = s.tool("links", json!({"text": "/issues/"}));
+    let r = r.as_str().unwrap();
+    assert!(r.contains("\"First issue\" -> /issues/101") && r.contains("\"Second issue\" -> /issues/102"), "{r}");
+}
