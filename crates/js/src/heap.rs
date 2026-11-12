@@ -1431,7 +1431,7 @@ impl Heap {
             Some(100) => named!("devicePixelRatio") || named!("designMode") || named!("dir"),
             Some(98) => named!("blur"),
             Some(69) => named!("EventSource"),
-            Some(70) => named!("FontFace"),
+            Some(70) => named!("FontFace") || named!("FileReader"),
             Some(84) => named!("TransformStream") || named!("TransformStreamDefaultController") || named!("TextDecoderStream") || named!("TextEncoderStream"),
             Some(87) => named!("WritableStream") || named!("WritableStreamDefaultWriter") || named!("WritableStreamDefaultController"),
             Some(114) => named!("referrer"),

@@ -1642,3 +1642,9 @@ A click on a GitHub issue title did not navigate. GitHub cancels the click and c
 
 ## A relative box paints over an earlier absolute sibling (2026-11-12)
 Layout puts the fragment of an absolute box after the other fragments of its containing block, and drops its static position. So the fragment order is not the tree order. The painter and the hit test put an earlier absolute veil over a later relative card (bare issue #414). Now both sort the positioned boxes of a context with `z-index` 0 by the path of child numbers in the tree, as CSS 2.1 Appendix E asks. The sort runs only when one of the boxes is out of flow. Boxes with a non-zero `z-index` still sort by `(z, fragment order)`: an absolute and a relative box with the same non-zero `z-index` can still be in the wrong order.
+## FileReader as a shim (2026-11-12)
+
+- A page that reads a file with `FileReader` stopped with `ReferenceError`. The upload then did nothing.
+- `FileReader` is `shims/filereader.js`. It runs on `Blob.prototype.arrayBuffer` and `TextDecoder`, and it is made at the first read of its name.
+- `abort` on an idle reader clears `result`. The File API requires this, so the shim follows it.
+- Only UTF-8 works in `readAsText`. The host `TextDecoder` stops other labels with `Unsupported`, which a shim cannot catch.

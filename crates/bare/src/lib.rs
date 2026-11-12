@@ -88,6 +88,8 @@ mod browser_xhr_tests;
 #[cfg(test)]
 mod browser_eventsource_tests;
 #[cfg(test)]
+mod browser_filereader_tests;
+#[cfg(test)]
 mod browser_cors_tests;
 pub mod browser_navigation;
 mod browser_navigation_params;
