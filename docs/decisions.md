@@ -1320,3 +1320,13 @@ Lit and other web-component libraries style a shadow root with `new CSSStyleShee
 - The `adoptedStyleSheets` getter returns a copy. `push` on it has no effect. A page assigns a new array, as Lit does.
 - A sheet adopted by many shadow roots adds its rules once per root. A page with many instances pays for each. Sharing the parsed rules is a later step.
 - `snapshot` and `read` now enter a shadow root. They skipped it before, so a page built from web components showed no elements.
+## Foreign fragment contexts and replaced text fields (2026-11-12)
+
+The Wikipedia search box lost typed text (issue #395). On focus, Wikipedia mounts a Vue search widget in the place of its plain input. The Codex icons of that widget set `innerHTML` on an SVG `g`. The fragment parser refused every context outside the HTML namespace. So the mount threw, the container stayed empty, and the focus went to `body`.
+
+- The fragment parser now takes an SVG or MathML context element. The context is the adjusted current node while only the root of the fragment is open. So the foreign rules read the tokens, as the standard says.
+- An SVG or MathML context gets no tokenizer state of an HTML element: an SVG `style` holds markup. CDATA is text in it.
+- The attributes of the context are not passed. So a MathML `annotation-xml` context is never an HTML integration point. This is a known gap.
+- 62 of the 63 html5lib foreign-context fragment tests pass. The one left is `<frameset>` in a fragment, which the parser refuses on purpose.
+- `type` follows a field that the page replaced. The rule: the old field left the document, and a text field has the focus. Then the keys go to that field. A browser sends keys to the focused element, so a person sees the same.
+- The rule holds at the click and between keys. Wikipedia loads its widget over the network, so its swap comes while the text is typed. A field that only loses the focus, and stays in the document, still fails with `focus_lost` or `no_focus`.

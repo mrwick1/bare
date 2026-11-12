@@ -19,9 +19,11 @@
 //! The scripting flag (`scripting`) is true when the context is in the document of the page. Then a `noscript` start tag, and the context
 //! `noscript`, have raw text. It is false for a context that is a `template` or in the contents of one (an inert document): `noscript` is an element.
 //!
-//! Gates (`Unsupported`, nothing is parsed): the contexts `select`, `html`, `frameset`, `frame` (the standard needs the select mode, and the before-head
-//! and frameset modes); and every context that is not in the HTML namespace (SVG and MathML
-//! context elements need the adjusted current node of the foreign rules to be the context element). A start tag `frameset` or
+//! Foreign contexts: an SVG or MathML context element (`g.innerHTML = '<path/>'`) is the adjusted current node while only the root is open.
+//! So the foreign rules read the tokens: `<path>` is an SVG element, and an HTML tag like `<div>` breaks out to HTML. The mode is "in body".
+//!
+//! Gates (`Unsupported`, nothing is parsed): the HTML contexts `select`, `html`, `frameset`, `frame` (the standard needs the select mode, and the
+//! before-head and frameset modes). A start tag `frameset` or
 //! `frame` in the input is gated the same way, because the builder would make a tree that a browser does not make. Nested `table` and `select`
 //! are read by the page rules (see the known gaps of the tree builder): the same tree as for a page.
 //!
@@ -92,10 +94,8 @@ pub fn parse_fragment(
     lim: &FragmentLimits,
     tick: &mut dyn FnMut(u64) -> bool,
 ) -> Result<Fragment, FragmentError> {
-    if ns != Ns::Html {
-        return Err(FragmentError::Unsupported("fragment context: an element that is not in the HTML namespace"));
-    }
-    if let Some(why) = context_gate(context) {
+    let html = ns == Ns::Html;
+    if html && let Some(why) = context_gate(context) {
         return Err(FragmentError::Unsupported(why));
     }
     if input.len() > lim.max_source {
@@ -107,6 +107,7 @@ pub fn parse_fragment(
     // "Reset the insertion mode appropriately" with the context element. A template context is "in template". The table modes reuse the template
     // insertion modes: the root of the fragment acts as a template whose mode is already set. `td`, `th`, `caption` and `col` read as "in body".
     let tm = match context {
+        _ if !html => None,
         "template" => Some(Tm::Template),
         "table" => Some(Tm::Table),
         "tbody" | "thead" | "tfoot" => Some(Tm::TableBody),
@@ -122,12 +123,20 @@ pub fn parse_fragment(
     if in_form {
         b.form = Some(root);
     }
+    // A foreign context (SVG `g`, MathML `mi`) is a copy with no parent: the foreign rules read it as the adjusted current node.
+    // Its name keeps its case (`foreignObject`). Its attributes are not copied, so an `annotation-xml` context is never an HTML integration point.
+    if !html {
+        b.context = Some(b.doc.create_element_ns(ns, None, context));
+    }
     let mut tokens = Tokens::for_tree(input, Mark::default(), false);
-    if scripting || context != "noscript" {
+    // The tokenizer states of the standard are for HTML context elements only: an SVG `style` or `script` holds markup.
+    if html && (scripting || context != "noscript") {
         tokens.enter_fragment_raw(context);
     }
-    tokens.set_foreign(false);
-    let mut seen = b.doc.len();
+    tokens.set_foreign(b.cdata_allowed());
+    // The top node, the root `html` and a foreign context are not part of the fragment.
+    let base = b.doc.len();
+    let mut seen = base;
     while let Some(token) = tokens.next() {
         if let Token::StartTag { name, .. } = &token
             && let Some(why) = tag_gate(name)
@@ -144,8 +153,8 @@ pub fn parse_fragment(
         if !tick(1 + made as u64) {
             return Err(FragmentError::Stopped);
         }
-        // The top node and the root `html` are not part of the fragment: 2 nodes, and the root on the stack.
-        let over = if len > lim.max_nodes + 2 {
+        // The root `html` is on the stack.
+        let over = if len > lim.max_nodes + base {
             Some("dom-nodes")
         } else if b.doc.text_bytes() > lim.max_text_bytes {
             Some("dom-text")
@@ -230,12 +239,27 @@ mod tests {
     }
 
     #[test]
+    fn a_foreign_context_reads_tokens_by_the_foreign_rules() {
+        let run = |input: &str, ctx: &str, ns: Ns| {
+            let f = parse_fragment(input, ctx, ns, false, true, &BIG, &mut |_| true).expect("parsed");
+            f.doc.dump().lines().skip(1).map(|l| format!("| {}\n", &l[4..])).collect::<String>()
+        };
+        // the innerHTML of a Codex icon: SVG paths in an SVG `g`
+        assert_eq!(run("<path d=\"M0\"/><title>t</title>", "g", Ns::Svg), "| <svg path>\n|   d=\"M0\"\n| <svg title>\n|   \"t\"\n");
+        // an end tag never closes the root; an HTML tag breaks out to HTML
+        assert_eq!(run("</g><lineargradient/><div>x</div>", "g", Ns::Svg), "| <svg linearGradient>\n| <div>\n|   \"x\"\n");
+        // an SVG `style` is not raw text, and CDATA is text
+        assert_eq!(run("<b>x</b><![CDATA[<y>]]>", "style", Ns::Svg), "| <b>\n|   \"x\"\n| \"<y>\"\n");
+        // a MathML text integration point reads HTML; `mi` holds MathML
+        assert_eq!(run("<i>x</i>", "mi", Ns::MathMl), "| <i>\n|   \"x\"\n");
+        assert_eq!(run("<mi>x</mi>", "math", Ns::MathMl), "| <math mi>\n|   \"x\"\n");
+    }
+
+    #[test]
     fn the_gates_refuse_before_parsing() {
         for name in ["select", "html", "frameset", "frame"] {
             assert!(matches!(parse("x", name), Err(FragmentError::Unsupported(_))), "{name}");
         }
-        assert!(matches!(parse_fragment("x", "g", Ns::Svg, false, true, &BIG, &mut |_| true), Err(FragmentError::Unsupported(_))));
-        assert!(matches!(parse_fragment("x", "mi", Ns::MathMl, false, true, &BIG, &mut |_| true), Err(FragmentError::Unsupported(_))));
         for html in ["<frameset>", "<frame>"] {
             assert!(matches!(parse(html, "div"), Err(FragmentError::Unsupported(_))), "{html}");
         }

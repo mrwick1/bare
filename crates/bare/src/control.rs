@@ -543,8 +543,9 @@ impl Page {
     }
 
     /// The start of `type_text`: the checks, the click and the select all. `clear` also deletes the old text. A driver then sends one
-    /// `type_char` in each tick, as a person types.
-    pub fn type_start(&mut self, h: Handle, clear: bool) -> Result<(), Refusal> {
+    /// `type_char` in each tick, as a person types. Gives the field that has the focus: `h`, or the text field that a page script put in its
+    /// place on the click (the Vue search of Wikipedia removes its input on focus and focuses a new one). The keys of a person go there too.
+    pub fn type_start(&mut self, h: Handle, clear: bool) -> Result<Handle, Refusal> {
         self.visible_box(h)?;
         if self.disabled(h) {
             return Err(Refusal::Disabled);
@@ -553,16 +554,24 @@ impl Page {
             return Err(Refusal::NotEditable);
         }
         self.click(h)?;
-        if !self.focused(h) {
-            return Err(Refusal::NoFocus);
-        }
+        let h = if self.focused(h) { h } else { self.replaced(h).ok_or(Refusal::NoFocus)? };
         if self.value(h).is_some_and(|v| !v.is_empty()) {
             self.press("Control+a").expect("a known key");
             if clear {
                 self.press("Backspace").expect("a known key");
             }
         }
-        Ok(())
+        Ok(h)
+    }
+
+    /// The text field that has the focus when `h` left the document: a page script put it in the place of `h` (the Vue search of Wikipedia
+    /// does this on focus). The keys of a person go to it, so a driver types on there. `None` while `h` is connected.
+    pub fn replaced(&mut self, h: Handle) -> Option<Handle> {
+        if self.connected(h) {
+            return None;
+        }
+        let a = self.active()?;
+        self.browser().is_some_and(|b| b.is_text_input(a.node)).then_some(a)
     }
 
     /// Give the element the focus, as `el.focus()` does, so that a key goes to it. Fails when it is hidden or disabled, or when it takes no focus.

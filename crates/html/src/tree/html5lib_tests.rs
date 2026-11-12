@@ -7,12 +7,16 @@
 //! `tools/fixtures/html/table-fragments.dat` holds the 91 fragment tests of html5lib-tests whose context is a table element (`table`, `thead`,
 //! `tbody`, `tfoot`, `tr`, `td`, `caption`, `colgroup`), in file order: 66 from `tests_innerHTML_1.dat`, 8 from `math.dat`, 8 from `svg.dat` and 9 from
 //! `tests6.dat`. The source is the copy in the Go module `golang.org/x/net` v0.62.0 (`html/testdata/html5lib-tests/tree-construction`).
+//!
+//! `tools/fixtures/html/foreign-fragments.dat` holds the 63 fragment tests of html5lib-tests whose context is an SVG or MathML element (`svg path`,
+//! `math mi`), all from `foreign-fragment.dat`, in file order. The source is the same Go module.
 
 use super::*;
 use crate::dom::Ns;
 
 const TEMPLATE_DAT: &str = include_str!("../../../../tools/fixtures/html/template.dat");
 const TABLE_FRAGMENTS_DAT: &str = include_str!("../../../../tools/fixtures/html/table-fragments.dat");
+const FOREIGN_FRAGMENTS_DAT: &str = include_str!("../../../../tools/fixtures/html/foreign-fragments.dat");
 
 /// One test of a `.dat` file.
 struct Case {
@@ -67,7 +71,13 @@ fn tree_of(case: &Case) -> String {
         None => parse(&case.data).dump_with_contents(),
         Some(context) => {
             let lim = FragmentLimits { max_source: 1 << 20, max_nodes: 1 << 16, max_text_bytes: 1 << 20, max_attr_slots: 1 << 16, max_names: 1 << 12, max_depth: 512 };
-            match parse_fragment(&case.data, context, Ns::Html, false, case.scripting, &lim, &mut |_| true) {
+            // A foreign context is written `svg path` or `math mi`.
+            let (ns, context) = match context.split_once(' ') {
+                Some(("svg", name)) => (Ns::Svg, name),
+                Some(("math", name)) => (Ns::MathMl, name),
+                _ => (Ns::Html, context.as_str()),
+            };
+            match parse_fragment(&case.data, context, ns, false, case.scripting, &lim, &mut |_| true) {
                 // The root `html` line goes, and the children move one level up.
                 Ok(f) => f.doc.dump_with_contents().lines().skip(1).map(|l| format!("| {}\n", &l[4..])).collect(),
                 Err(e) => format!("{e:?}"),
@@ -116,4 +126,14 @@ fn html5lib_table_context_fragments() {
     let bad = failures(TABLE_FRAGMENTS_DAT);
     let text: Vec<_> = bad.iter().map(|(_, text)| text.as_str()).collect();
     assert!(bad.is_empty(), "{} of 91 tests fail:\n{}", bad.len(), text.join("\n"));
+}
+
+#[test]
+fn html5lib_foreign_context_fragments() {
+    // 52 is `<frameset>` in a fragment: the fragment parser refuses that start tag on purpose (see the header of `fragment.rs`).
+    assert_eq!(cases(FOREIGN_FRAGMENTS_DAT).len(), 63);
+    let bad = failures(FOREIGN_FRAGMENTS_DAT);
+    let unexpected: Vec<_> = bad.iter().filter(|(n, _)| *n != 52).map(|(_, text)| text.as_str()).collect();
+    assert!(unexpected.is_empty(), "{} of 63 tests fail:\n{}", unexpected.len(), unexpected.join("\n"));
+    assert_eq!(bad.iter().map(|(n, _)| *n).collect::<Vec<_>>(), [52], "the frameset test passes now: take it off");
 }
