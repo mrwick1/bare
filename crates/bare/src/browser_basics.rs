@@ -241,7 +241,7 @@ fn last_modified(ms: f64) -> String {
 // ---------------------------------------------------------------------------------------------- window
 
 /// Is the document a secure context? https, or a loopback host (Secure Contexts, "potentially trustworthy origin").
-fn secure(d: &Dom) -> bool {
+pub(crate) fn secure(d: &Dom) -> bool {
     d.fetch_base().is_some_and(|u| u.scheme == bare_url::Scheme::Https || crate::browser_fetch::potentially_trustworthy(&u))
 }
 

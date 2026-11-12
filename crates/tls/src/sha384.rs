@@ -126,7 +126,7 @@ pub fn sha384(data: &[u8]) -> [u8; DIGEST_LEN] {
 }
 
 // Run whole 128-byte blocks through the state. `data.len()` is a multiple of 128.
-fn compress_blocks(state: &mut [u64; 8], data: &[u8]) {
+pub(crate) fn compress_blocks(state: &mut [u64; 8], data: &[u8]) {
     for block in data.chunks_exact(BLOCK_LEN) {
         compress(state, block.try_into().unwrap());
     }

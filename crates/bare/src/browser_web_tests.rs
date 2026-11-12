@@ -4,6 +4,8 @@
 //! specifications (WebIDL, File API, XHR `FormData`, RFC 9562), not from a Chrome run.
 
 use crate::browser::*;
+use crate::browser_fetch::FetchLimits;
+use crate::browser_fetch_tests::{go, mk};
 use bare_html::tree;
 use bare_js::eval::{Error, EvalLimits};
 use bare_js::heap::HeapLimits;
@@ -147,6 +149,71 @@ fn formdata_matches_node() {
     run(NODE_FORM);
 }
 
+/// `crypto.subtle` exists in a secure context only: https, and a loopback host (`browser_basics::secure`).
+#[test]
+fn subtle_exists_only_in_a_secure_context() {
+    big(|| {
+        for (base, want) in [("https://example.com/", "object"), ("http://127.0.0.1:8080/", "object"), ("http://localhost/", "object"), ("http://example.com/", "undefined")] {
+            let mut b = mk(Some(base.into()), FetchLimits::default());
+            assert_eq!(js(&mut b, "typeof crypto.subtle"), want, "{base}");
+        }
+    });
+}
+
+/// `digest` with the four SHA names, a `{name}` object, mixed case, and the FIPS 180-4 two-block message. Expected from NIST and hashlib.
+#[test]
+fn subtle_digest_hashes_with_the_sha_names() {
+    big(|| {
+        let mut b = mk(Some("https://example.com/".into()), FetchLimits::default());
+        let got = go(&mut b, "var out = []; var hex = function (b) { return Array.from(new Uint8Array(b)).map(function (x) { return x.toString(16).padStart(2, '0'); }).join(''); }; var abc = new Uint8Array([97, 98, 99]); var sha = function (alg, data) { return crypto.subtle.digest(alg, data).then(function (h) { out.push(hex(h)); }); }; sha('SHA-1', abc); sha('sha-256', abc); sha('SHA-384', abc); sha('Sha-512', abc); sha({ name: 'SHA-1' }, abc); sha({ name: 'sha-512' }, abc); sha('SHA-256', new Uint8Array(0)); sha('SHA-256', new Uint8Array(Array.from('abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq', function (c) { return c.charCodeAt(0); }))); 1");
+        assert_eq!(
+            got,
+            [
+                "a9993e364706816aba3e25717850c26c9cd0d89d",
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+                "cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7",
+                "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f",
+                "a9993e364706816aba3e25717850c26c9cd0d89d",
+                "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1",
+            ]
+            .join("|")
+        );
+    });
+}
+
+/// The data forms, and that the bytes are copied when `digest` is called.
+#[test]
+fn subtle_digest_copies_the_bytes_of_any_buffer_source() {
+    big(|| {
+        let mut b = mk(Some("https://example.com/".into()), FetchLimits::default());
+        let got = go(&mut b, "var out = []; var hex = function (b) { return Array.from(new Uint8Array(b)).map(function (x) { return x.toString(16).padStart(2, '0'); }).join(''); }; var sha = function (data) { return crypto.subtle.digest('SHA-256', data).then(function (h) { out.push(hex(h)); }); }; var u = new Uint8Array([0, 97, 98, 99, 0]); sha(u.subarray(1, 4)); sha(new DataView(u.buffer, 1, 3)); var ab = new ArrayBuffer(3); new Uint8Array(ab).set([97, 98, 99]); sha(ab); var m = new Uint8Array([97]); var p = crypto.subtle.digest('SHA-256', m); m[0] = 98; p.then(function (h) { out.push(hex(h)); }); 1");
+        let abc = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        assert_eq!(got, [abc, abc, abc, "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb"].join("|"));
+    });
+}
+
+/// The promise, the result type, and the rejections: `NotSupportedError` for an unknown name, `TypeError` for bad arguments.
+#[test]
+fn subtle_digest_rejects_with_the_web_crypto_errors() {
+    big(|| {
+        let mut b = mk(Some("https://example.com/".into()), FetchLimits::default());
+        let got = go(&mut b, "var out = []; var p = crypto.subtle.digest('SHA-256', new ArrayBuffer(0)); out.push(p instanceof Promise); p.then(function (h) { out.push(h instanceof ArrayBuffer, h.byteLength); }); crypto.subtle.digest('MD5', new ArrayBuffer(0)).catch(function (e) { out.push(e.name + ':' + e.code + ':' + (e instanceof DOMException)); }); crypto.subtle.digest('SHA-256', 'abc').catch(function (e) { out.push('string:' + e.name); }); crypto.subtle.digest('SHA-256', 5).catch(function (e) { out.push('number:' + e.name); }); crypto.subtle.digest('SHA-256').catch(function (e) { out.push('args:' + e.name); }); crypto.subtle.digest({}, new ArrayBuffer(0)).catch(function (e) { out.push('noname:' + e.name); }); 1");
+        assert_eq!(got, "true|true|32|NotSupportedError:9:true|string:TypeError|number:TypeError|args:TypeError|noname:TypeError");
+    });
+}
+
+/// The other methods exist and reject with `NotSupportedError`. `SubtleCrypto` has an illegal constructor.
+#[test]
+fn subtle_has_every_method_and_an_illegal_constructor() {
+    big(|| {
+        let mut b = mk(Some("https://example.com/".into()), FetchLimits::default());
+        let got = go(&mut b, "var out = []; var s = crypto.subtle; out.push(Object.prototype.toString.call(s), Object.getPrototypeOf(s) === SubtleCrypto.prototype, [s.digest.length, s.encrypt.length, s.sign.length, s.verify.length, s.generateKey.length, s.importKey.length, s.exportKey.length, s.deriveKey.length, s.deriveBits.length, s.wrapKey.length, s.unwrapKey.length].join()); ['encrypt', 'decrypt', 'sign', 'verify', 'generateKey', 'importKey', 'exportKey', 'deriveKey', 'deriveBits', 'wrapKey', 'unwrapKey'].forEach(function (k) { s[k]().catch(function (e) { out.push(k + ':' + e.name); }); }); try { new SubtleCrypto(); } catch (e) { out.push(e.name + ':' + e.message); } 1");
+        assert_eq!(got, "[object SubtleCrypto]|true|2,3,3,4,3,5,2,5,2,4,7|TypeError:Illegal constructor|encrypt:NotSupportedError|decrypt:NotSupportedError|sign:NotSupportedError|verify:NotSupportedError|generateKey:NotSupportedError|importKey:NotSupportedError|exportKey:NotSupportedError|deriveKey:NotSupportedError|deriveBits:NotSupportedError|wrapKey:NotSupportedError|unwrapKey:NotSupportedError");
+    });
+}
+
 #[test]
 fn wire_client_hints_match_user_agent_data() {
     big(|| {
@@ -173,7 +240,7 @@ fn navigator_has_the_fixed_chrome_like_values() {
         // The values are getters on the prototype, not own properties of the object.
         assert_eq!(js(&mut b, "var p = Object.getPrototypeOf(navigator); [Object.keys(navigator).length, typeof Object.getOwnPropertyDescriptor(p, 'userAgent').get, String(Object.getOwnPropertyDescriptor(p, 'userAgent').set), 'mediaDevices' in navigator].join()"), "0,function,undefined,false");
         assert_eq!(js(&mut b, "try { Object.getOwnPropertyDescriptor(p, 'userAgent').get.call({}); } catch (e) { e.name }"), "TypeError");
-        // No `crypto.subtle`.
+        // No secure context here (no URL), so no `crypto.subtle`.
         assert_eq!(js(&mut b, "typeof crypto.subtle"), "undefined");
     });
 }
