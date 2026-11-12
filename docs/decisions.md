@@ -1594,3 +1594,10 @@ A click on a GitHub issue title did not navigate. GitHub cancels the click and c
 - `click()` on an `a` with `href` now follows the link after a click that no listener canceled. It uses the same code as a window click (`follow_link`). `area` stays gated.
 - `checkVisibility()` was a gate on any page with `display: contents` in a sheet. GitHub has such rules, so every call failed.
 - Now the gate holds only when a rule can reach the element: `display: contents` on the element, or `content-visibility` on an ancestor. The rules and their selectors are found once for each rule set.
+## eval takes return and await without a retry (2026-11-12)
+
+- Code without the word `await` runs as a script inside a block: `{code\n}`. It gives the value of its last statement, like a console.
+- The block makes `let` and `const` last one call. The same declaration runs again in a later call. A value for later goes in `window.x`.
+- A top-level `return` fails the parse of the block. Only then does the code run as an async function body. A failed parse runs nothing, so the code runs once.
+- Code with `await` runs as an async function, as before: first as an expression, then as statements. It never runs as a script, because `await (x)` is a call there.
+- Each wrapper starts on the first line of the code. A syntax error parses the code once more and names its line. Plain code and an expression with `await` parse once. A top-level `return` or statements with `await` first fail one parse.
