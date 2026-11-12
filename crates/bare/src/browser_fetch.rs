@@ -495,6 +495,9 @@ struct FetchState {
     done: Arc<AtomicUsize>,
     /// Open event streams (`queue_xhr_stream`). They are not in `queue`.
     streams: Vec<OpenStream>,
+    /// Live: started GETs that waited for their reply longer than `DETACH_AFTER` (a long-poll). They left `queue` so that they do not
+    /// hold the requests behind them or the settle (`sync_detached`). A reply that came goes back to the front of `queue`.
+    detached: Vec<Pending>,
 }
 
 /// What the thread of an event stream (`run_stream`) sends to the page.
@@ -521,6 +524,8 @@ struct OpenStream {
 
 /// Open event streams on a page, as the 6 connections of Chrome to one HTTP/1.1 host. One more fails with a network error.
 const MAX_STREAMS: usize = 6;
+/// Live: a started GET that has no reply after this long is a long-poll and leaves the ordered queue (`Dom::sync_detached`).
+const DETACH_AFTER: std::time::Duration = std::time::Duration::from_secs(3);
 /// Body bytes of one event stream. A stream that passes it ends with a network error (an `EventSource` then connects again).
 const STREAM_BYTES: usize = 1 << 20;
 
@@ -690,6 +695,36 @@ impl Dom {
                     }
                     Some((out, diag))
                 }));
+            }
+        }
+    }
+
+    /// Live: move the long-polls (XHR only: a slow `fetch` still holds the page) out of the queue and the replies that came back into it. A started XHR GET with no body and no reply
+    /// after `DETACH_AFTER` is detached: the requests behind it no longer wait for it, and the page can settle with it open. At most
+    /// `MAX_WORKERS - 1` are detached, so a worker stays free. Its I/O is not restarted: the body is never sent twice.
+    pub(crate) fn sync_detached(&self) {
+        if !self.fetch.live.get() {
+            return;
+        }
+        let mut st = self.fetch.st.borrow_mut();
+        let st = &mut *st;
+        let mut i = 0;
+        while i < st.detached.len() {
+            if st.detached[i].started.as_ref().is_none_or(|t| t.done()) {
+                let p = st.detached.remove(i);
+                st.queue.push_front(p);
+            } else {
+                i += 1;
+            }
+        }
+        let mut i = 0;
+        while i < st.queue.len() && st.detached.len() < bare_net::parallel::MAX_WORKERS - 1 {
+            let p = &st.queue[i];
+            if p.xhr.is_some() && matches!(p.method, Method::Get) && p.body.is_none() && p.started.as_ref().is_some_and(|t| !t.done()) && p.queued.is_some_and(|q| q.elapsed() >= DETACH_AFTER) {
+                let p = st.queue.remove(i).expect("position");
+                st.detached.push(p);
+            } else {
+                i += 1;
             }
         }
     }
@@ -2110,6 +2145,7 @@ fn run_stream(client: &mut Client, lim: &FetchLimits, wire: &Wire, tx: &std::syn
 pub(crate) fn dequeue_xhr(d: &Dom, x: ObjId) {
     let mut st = d.fetch.st.borrow_mut();
     st.streams.retain(|s| s.x.0 != x);
+    st.detached.retain(|t| t.xhr.is_none_or(|(o, _)| o != x));
     if let Some(i) = st.queue.iter().position(|t| t.xhr.is_some_and(|(o, _)| o == x)) {
         let t = st.queue.remove(i).expect("position");
         st.queued_bytes -= t.body.as_ref().map_or(0, |b| b.len());
@@ -2502,6 +2538,7 @@ impl Browser {
 
     /// Requests that wait for [`Browser::run_network_tasks`].
     pub fn pending_fetches(&self) -> usize {
+        self.dom.sync_detached();
         self.dom.fetch.st.borrow().queue.len()
     }
 
@@ -2517,6 +2554,9 @@ impl Browser {
                 Some(_) => "",
             } });
         }
+        for p in &st.detached {
+            out.push(crate::page::Waiting { kind: if p.xhr.is_some() { "xhr" } else { "fetch" }, method: "GET", url: p.url.to_string(), age: p.queued.map_or(std::time::Duration::ZERO, |t| t.elapsed()), holds: false, state: "" });
+        }
         for s in &st.streams {
             out.push(crate::page::Waiting { kind: "stream", method: "GET", url: s.url.to_string(), age: s.since.elapsed(), holds: false, state: "" });
         }
@@ -2525,6 +2565,7 @@ impl Browser {
     /// Can the first queued request settle now without a wait? `None`: none is queued. `Some(false)`: its reply is not in yet.
     /// A request that has not started counts as ready: its turn starts it.
     pub(crate) fn fetch_ready(&self) -> Option<bool> {
+        self.dom.sync_detached();
         let st = self.dom.fetch.st.borrow();
         st.queue.front().map(|p| p.started.as_ref().is_none_or(|t| t.done()))
     }
@@ -2534,7 +2575,8 @@ impl Browser {
     pub(crate) fn streams_ready(&self) -> Option<bool> {
         let mut st = self.dom.fetch.st.borrow_mut();
         if st.streams.is_empty() {
-            return None;
+            // A detached long-poll is open and its reply is not in (one that came is back in `queue`).
+            return (!st.detached.is_empty()).then_some(false);
         }
         let mut any = false;
         for s in &mut st.streams {
@@ -2682,7 +2724,8 @@ impl Browser {
         let dom = self.dom.clone();
         let tasks: Vec<Pending> = {
             let mut st = dom.fetch.st.borrow_mut();
-            let t: Vec<Pending> = st.queue.drain(..).collect();
+            let mut t: Vec<Pending> = st.queue.drain(..).collect();
+            t.append(&mut st.detached);
             st.queued_bytes = 0;
             t
         };

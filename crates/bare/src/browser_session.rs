@@ -35,7 +35,8 @@
 //! none of the tasks that are due within the quiet window (`page.quiet`) blocks. Work is a script, a network task (`fetch`,
 //! XHR, script, style sheet, preload), a timer, a message, a frame or a traversal that ran in the round. All network I/O
 //! happens inside the rounds, one request at a time, so "no request in flight" holds by construction: a settled page has no
-//! request queued or running. A queued task blocks, with two exceptions:
+//! request queued or running. One exception: a live page moves an XHR GET that has had no reply for 3 s off the ordered queue
+//! (a long-poll, `Dom::sync_detached`). It stays open and does not hold the settle; its reply is work when it arrives. A queued task blocks, with two exceptions:
 //! - A recurring timer whose last run was quiet. A timer is recurring if it is a `setInterval`, or a `setTimeout` whose own
 //!   callback (the same function object) armed it again, and its delay is at least 16 ms (one frame; a faster timer is a
 //!   work loop and always blocks). A run is quiet if it changed the DOM at most 8 times (node added or removed, attribute or
