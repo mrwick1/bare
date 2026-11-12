@@ -1351,3 +1351,13 @@ An agent clicked a ref under a spinner and got `covered`. A cookie banner over t
 - The failure names the cover, not the element under the pointer. Of the ancestors of that element that do not hold the target, it names the outermost with a role and a name. It falls back to the outermost one. It gives `tag#id.class` and `(role "name")`.
 - bare has no CSS transitions. A backdrop that fades with `transition` and removes itself on `transitionend` never goes, so the click fails after 1 s. A fade by script works.
 - Window mode routes each tool through `Remote::call` on the window thread. The dialog and tab policy is per thread and is set there, so it works. The test `the_agent_tools_work_in_a_window` checks the tools in a window. It is ignored because it needs a Wayland display. Run it on a nested compositor, not on a desktop in use.
+
+## offsetWidth of an inline box with nothing to paint (2026-11-12)
+
+GitHub read `offsetWidth` of a plain `span`, and the read stopped the page (issue #402).
+
+- Native layout makes no fragment for an inline box with no background and no border. This saves a fragment for each line.
+- `offsetWidth` and `offsetHeight` of such a box now give the size of the rectangle of `getBoundingClientRect`. That rectangle is the union of its lines.
+- An empty inline box gives the height of its font and no width. It uses the layout that keeps every inline box, as `getClientRects` does.
+- A `br` gives 0. Chrome gives 0 too, because a `br` is not a box there.
+- No record was added to layout. The rectangles come from the fragments of the text and the atomic boxes.

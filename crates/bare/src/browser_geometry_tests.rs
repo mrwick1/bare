@@ -220,10 +220,31 @@ fn an_inline_box_on_two_lines_is_the_union_of_its_fragments() {
     let mut b = page(css, "<div style='width: 200px'><span id=s>aaaa<br>bbbbbb</span></div><span id=p>x</span><br id=br>");
     // the line box is as high as the strut of the 16px div (11 + 3 at 10px, but 17 + 5 = 22 at 16px): the box of line 1 sits at 6..20 and the box of line 2 at 28..42
     assert_eq!(size(&mut b, "s"), "36x36");
-    // native layout makes no fragment for an inline box with nothing to paint: a gate, not a zero
-    let gate = "unsupported:geometry of an inline box with no background and no border (native layout makes no fragment for it)";
-    assert_eq!(size(&mut b, "p"), gate);
-    assert_eq!(size(&mut b, "br"), gate);
+    // native layout makes no fragment for an inline box with nothing to paint: its size is that of its text (one 16px letter: 9.6 x 17 + 5)
+    assert_eq!(size(&mut b, "p"), "10x22");
+    // a `br` is not a box (Chrome: `LayoutBR` is a text, not a `LayoutBoxModelObject`), so zero
+    assert_eq!(size(&mut b, "br"), "0x0");
+}
+
+#[test]
+fn an_inline_box_with_nothing_to_paint_has_the_size_of_its_lines() {
+    // A 10px font: a letter is 6px wide and a line is 14px high. `#w` wraps: "aaaa" (24) and "bbbbb" (30) on two lines of 14px.
+    let css = "body { font-size: 10px } .box { width: 50px }";
+    let body = "<div><span id=a>aaaa</span></div><div class=box><span id=w>aaaa bbbbb</span></div><div>x<span id=e></span></div><br id=br>";
+    let mut b = page(css, body);
+    assert_eq!(size(&mut b, "a"), "24x14");
+    assert_eq!(size(&mut b, "w"), "30x28");
+    // an empty inline: no width, the height of its font
+    assert_eq!(size(&mut b, "e"), "0x14");
+    assert_eq!(size(&mut b, "br"), "0x0");
+    // the same boxes as `getClientRects` (one for each line) and `getBoundingClientRect` (their union)
+    let rects = "var w = document.getElementById('w'); var r = w.getClientRects(); var u = w.getBoundingClientRect(); \
+                 [r.length, r[0].width, r[0].height, r[1].width, r[1].top - r[0].top, u.width, u.height].join()";
+    assert_eq!(js(&mut b, rects), "2,24,14,30,14,30,28");
+    let one = "var a = document.getElementById('a'); var r = a.getClientRects(); [r.length, r[0].width, r[0].height].join()";
+    assert_eq!(js(&mut b, one), "1,24,14");
+    let empty = "var e = document.getElementById('e'); var r = e.getClientRects(); var u = e.getBoundingClientRect(); [r.length, r[0].width, r[0].height, u.width, u.height].join()";
+    assert_eq!(js(&mut b, empty), "1,0,14,0,14");
 }
 
 #[test]
