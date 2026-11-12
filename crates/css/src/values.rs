@@ -190,6 +190,7 @@ properties! {
     Fill => "fill",
     Stroke => "stroke",
     ObjectFit => "object-fit",
+    Cursor => "cursor",
     TranslateX => "-bare-translate-x",
     TranslateY => "-bare-translate-y",
     ;
@@ -310,7 +311,7 @@ keywords! {
     All => "all", Painted => "painted", Fill => "fill", Stroke => "stroke", VisiblePainted => "visiblepainted",
     VisibleFill => "visiblefill", VisibleStroke => "visiblestroke",
     Contain => "contain", Cover => "cover", ScaleDown => "scale-down", Repeat => "repeat", NoRepeat => "no-repeat",
-    RepeatX => "repeat-x", RepeatY => "repeat-y",
+    RepeatX => "repeat-x", RepeatY => "repeat-y", Default => "default", Pointer => "pointer",
 }
 
 /// The value of one property. It does not say which property: a `Declared` has that.
@@ -1604,6 +1605,7 @@ fn longhand(property: Property, part: Part) -> Option<Value> {
         TranslateX | TranslateY => length(part).map(Value::Length),
         BorderTopLeftRadius | BorderTopRightRadius | BorderBottomRightRadius | BorderBottomLeftRadius => positive(part).map(Value::Length),
         Appearance => one_of(part, &[K::None, K::Auto, K::Button, K::Checkbox, K::Radio, K::Textfield, K::Textarea, K::Menulist]),
+        Cursor => one_of(part, &[K::Auto, K::Default, K::Pointer]),
         PointerEvents => one_of(part, &[K::Auto, K::None, K::Visible, K::VisiblePainted, K::VisibleFill, K::VisibleStroke, K::Painted, K::Fill, K::Stroke, K::All]),
         Top | Right | Bottom | Left => match part {
             Part::Keyword(K::Auto) => Some(Value::Keyword(K::Auto)),

@@ -68,12 +68,12 @@ const CONTROLS: &[&str] = &[
 /// Roles that give a control its context.
 const MARKS: &[&str] = &[
     "heading", "dialog", "alertdialog", "alert", "status", "navigation", "main", "form", "search", "banner", "contentinfo", "complementary",
-    "region", "tablist", "menu", "menubar", "tree", "grid", "table", "list", "img", "progressbar", "tabpanel", "log",
+    "region", "tablist", "menu", "menubar", "tree", "grid", "table", "list", "img", "progressbar", "tabpanel", "log", "iframe",
 ];
 /// Roles whose subtree adds nothing once the line shows their name.
 const LEAVES: &[&str] = &[
     "button", "link", "textbox", "searchbox", "checkbox", "radio", "option", "slider", "spinbutton", "switch", "tab", "menuitem",
-    "menuitemcheckbox", "menuitemradio", "heading", "img", "progressbar",
+    "menuitemcheckbox", "menuitemradio", "heading", "img", "progressbar", "iframe",
 ];
 
 struct Line {
@@ -103,6 +103,7 @@ fn role_of(cx: &Cx, n: NodeId, clicks: &HashSet<NodeId>) -> Option<&'static str>
         return Some(intern(r));
     }
     match cx.tag(n) {
+        "iframe" => Some("iframe"),
         "summary" => Some("button"),
         "section" if cx.attr(n, "aria-label").is_some() || cx.attr(n, "aria-labelledby").is_some() => Some("region"),
         "search" => Some("search"),
@@ -111,8 +112,14 @@ fn role_of(cx: &Cx, n: NodeId, clicks: &HashSet<NodeId>) -> Option<&'static str>
         _ if cx.attr(n, "tabindex").and_then(|t| t.trim().parse::<i32>().ok()).is_some_and(|t| t >= 0) => Some("clickable"),
         // A script listens for clicks on it: what a user clicks, though the page gave it no role.
         _ if clicks.contains(&n) || cx.attr(n, "onclick").is_some() => Some("clickable"),
+        // The top of a subtree with a pointer cursor: React and others listen on the document root, so the element has no listener of its own.
+        _ if pointer(cx, n) && !cx.doc.parent_or_host(n).is_some_and(|p| pointer(cx, p)) => Some("clickable"),
         _ => None,
     }
+}
+
+fn pointer(cx: &Cx, n: NodeId) -> bool {
+    cx.styles.style(n).is_some_and(|s| matches!(s.get(Property::Cursor), Css::Keyword(Keyword::Pointer)))
 }
 
 fn inline(cx: &Cx, n: NodeId) -> bool {
@@ -213,6 +220,9 @@ fn walk(cx: &Cx, root: NodeId, mode: Mode, clicks: &HashSet<NodeId>, out: &mut V
                 name = short(&norm(&cx.text(n)), 80);
             }
             // A live region says its message: the agent must see an error or a toast without a second read.
+            if name.is_empty() && r == "iframe" {
+                name = cx.attr(n, "title").or_else(|| cx.attr(n, "src")).map(norm).unwrap_or_default();
+            }
             if name.is_empty() && matches!(r, "alert" | "status" | "log") {
                 name = short(&norm(&cx.text(n)), 200);
             }
@@ -229,7 +239,8 @@ fn walk(cx: &Cx, root: NodeId, mode: Mode, clicks: &HashSet<NodeId>, out: &mut V
         if block {
             stack.push((n, inner, true));
         }
-        let mut kids: Vec<NodeId> = cx.doc.shadow_root(n).into_iter().chain(cx.doc.children(n)).collect();
+        // The flat tree: a shadow host shows its shadow tree, and a `<slot>` shows the light children that it takes.
+        let mut kids: Vec<NodeId> = cx.doc.flat_children(n).collect();
         // A closed `<details>` shows its summary only.
         if el && cx.tag(n) == "details" && cx.attr(n, "open").is_none() {
             kids.retain(|&c| cx.tag(c) == "summary");
@@ -319,6 +330,8 @@ fn live(p: &mut Page, h: Handle, role: &str, flags: &mut Vec<String>) -> Option<
 
 fn format(p: &mut Page, refs: &mut Refs, items: Vec<Item>, prev: Option<&HashSet<NodeId>>) -> Vec<String> {
     let doc = p.generation();
+    let controls: Vec<NodeId> = items.iter().filter_map(|i| if let Item::El(l) = i { Some(l).filter(|l| CONTROLS.contains(&l.role)).map(|l| l.node) } else { None }).collect();
+    let off = p.offscreen(&controls);
     let mut lines = Vec::with_capacity(items.len());
     for it in items {
         match it {
@@ -327,6 +340,9 @@ fn format(p: &mut Page, refs: &mut Refs, items: Vec<Item>, prev: Option<&HashSet
                 let r = refs.mint(l.node);
                 let h = Handle { doc, node: l.node };
                 let value = live(p, h, l.role, &mut l.flags);
+                if off.contains(&l.node) {
+                    l.flags.push("offscreen".into());
+                }
                 let mut s = String::with_capacity(48);
                 let _ = write!(s, "{}{}[e{r}] {}", "  ".repeat(l.depth), if prev.is_some_and(|p| !p.contains(&l.node)) { "*" } else { "" }, l.role);
                 if !l.name.is_empty() {
@@ -473,7 +489,7 @@ fn walk_text(cx: &Cx, root: NodeId, out: &mut Vec<String>) {
             NodeData::Document => {}
             _ => continue,
         }
-        let kids: Vec<NodeId> = cx.doc.shadow_root(n).into_iter().chain(cx.doc.children(n)).collect();
+        let kids: Vec<NodeId> = cx.doc.flat_children(n).collect();
         for &c in kids.iter().rev() {
             stack.push((c, false));
         }

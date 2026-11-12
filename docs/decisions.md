@@ -1229,3 +1229,11 @@ An agent such as `deck` must read a page and act on it in few model calls. Scree
 
 ## Console, network and diagnose tools in bare-mcp (2026-11-12)
 Each session keeps the last 500 console entries and the last 500 network records. The step reports still hand out their entries once. Reads such as `snapshot` and the tools `console`, `network` and `diagnose` also feed the history, so entries that arrive between calls are not lost. `console` and `network` show only what is new since their last call, unless `since_last` is false. `diagnose` gives one line for each finding and ends with a verdict: `site problem`, `bare gap`, `network` or `unclear`. The verdict is a heuristic: text such as `is not a function` counts as a bare gap. The kind of a failed request (script, stylesheet, image, fetch) comes from its URL, because a network record does not keep its caller. A failed `act` step with `not_found`, `hidden` or `page` adds the first uncaught script error as a hint.
+## The snapshot reads the flat tree, cursors and the viewport (2026-11-12)
+- The snapshot, `find` and `read` walk the flat tree. A slotted light child shows once, at its `<slot>`. Before, the walk skipped the shadow tree and showed no shadow content.
+- `cursor` is a CSS property with three values: `auto`, `default` and `pointer`. It is inherited. Other values are dropped.
+- An element with no role, with `cursor: pointer` and a parent without it, is `clickable`. This finds React-style controls that listen on the document root.
+- A control outside the window has the state `(offscreen)`. One pass over the layout finds them. It costs about 5 ms for 2,500 controls.
+- An iframe shows as one line, `iframe "title or src"`. Its content is not in the snapshot. bare does not load child documents (see "Named iframe windows"), so refs into frames need a child document with its own DOM and layout first.
+- Timing on a page of about 5,000 elements, release build, warm snapshot: 2 ms before, 7 ms after. The first snapshot after open includes the layout: 33 ms before and about 40 ms after.
+
