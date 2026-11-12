@@ -1520,3 +1520,113 @@ fn agent_tools(window: bool) {
     let r = r.as_str().unwrap().to_string();
     assert!(e && r.contains("dialog \"Cookie consent\"") && t.elapsed().as_millis() < 1500, "{} ms: {r}", t.elapsed().as_millis());
 }
+
+/// The pages of a site that navigates in four ways: a plain link to a slow page, Turbo-like links that fetch the next page and replace
+/// the body (the address changes before or after the fetch), and a button that changes the address, then fetches and renders. The
+/// fetch takes longer than the 2 s that a read waits for a reply, as GitHub's does.
+fn nav_pages(_: &str, target: &str, _: &str, _: Option<&str>) -> (u16, &'static str, Vec<u8>) {
+    let path = target.split('?').next().unwrap_or("/");
+    let wait = |ms| std::thread::sleep(std::time::Duration::from_millis(ms));
+    let html = |s: &str| (200, "text/html", s.as_bytes().to_vec());
+    match path {
+        "/" => html("<!doctype html><title>Home</title><body><h1>Home page</h1>
+<a href=/plain>Plain</a> <a href=/turbo id=t>Turbo</a> <a href=/late id=l>Late</a> <button id=r>Route</button>
+<a href=/styled>Styled</a> <a href=/stuck>Stuck</a>
+<script>
+function load(after) { return fetch('/frag').then(r => r.text()).then(t => { after(); document.body.innerHTML = t; }); }
+document.getElementById('t').onclick = e => { e.preventDefault(); history.pushState({}, '', '/turbo'); load(() => {}); };
+document.getElementById('l').onclick = e => { e.preventDefault(); load(() => history.pushState({}, '', '/late')); };
+document.getElementById('r').onclick = () => { history.pushState({}, '', '/route'); fetch('/frag').then(r => r.text()).then(() => { document.body.innerHTML = '<h1>Route page</h1>'; }); };
+</script></body>"),
+        "/frag" => {
+            wait(2300);
+            html("<h1>Issues page</h1><a href=/>Home</a>")
+        }
+        "/plain" => {
+            wait(200);
+            html("<!doctype html><title>Plain</title><body><h1>Plain page</h1><a href=/>Home</a></body>")
+        }
+        "/styled" => html("<!doctype html><title>Styled</title><link rel=stylesheet href=/slow.css?ms=800><body><h1>Styled page</h1><a href=/plain>Plain</a></body>"),
+        "/stuck" => html("<!doctype html><title>Stuck</title><link rel=stylesheet href=/slow.css?ms=13000><body><h1>Stuck page</h1></body>"),
+        "/slow.css" => {
+            wait(target.split("ms=").nth(1).and_then(|m| m.parse().ok()).unwrap_or(800));
+            (200, "text/css", b"h1 { color: red }".to_vec())
+        }
+        _ => (404, "text/plain", b"no".to_vec()),
+    }
+}
+
+/// Each act that starts a navigation names the new URL, and the outline after it is of the new page, with or without a snapshot.
+#[test]
+fn an_act_that_navigates_says_where_and_shows_the_new_page() {
+    let base = common::serve_route(nav_pages);
+    let mut s = Server::start();
+    for (what, path, heading) in [("link name=\"Plain\"", "/plain", "Plain page"), ("link name=\"Turbo\"", "/turbo", "Issues page"), ("link name=\"Late\"", "/late", "Issues page"), ("button name=\"Route\"", "/route", "Route page")] {
+        for snapshot in [true, false] {
+            let (r, e) = s.tool("open", json!({"url": format!("{base}/"), "snapshot": true}));
+            assert!(!e, "{r}");
+            let (r, e) = s.tool("act", json!({"op": "click", "loc": format!("role={what}"), "snapshot": snapshot}));
+            let r = r.as_str().unwrap().to_string();
+            assert!(!e && r.contains(&format!("navigated: {base}{path}")), "{what} snapshot={snapshot}: {r}");
+            assert!(!r.contains("not ready"), "{what} snapshot={snapshot}: {r}");
+            if snapshot {
+                assert!(r.contains(heading) && !r.contains("Home page"), "{what}: the outline is not of the new page: {r}");
+            }
+            let (r, _) = s.tool("eval", json!({"js": "location.pathname + ' ' + document.querySelector('h1').textContent"}));
+            assert!(r.as_str().unwrap().contains(&format!("{path} {heading}")), "{what} snapshot={snapshot}: {r}");
+        }
+    }
+}
+/// `back` and `forward` over two documents name the URL they reach, and show that page.
+#[test]
+fn back_and_forward_say_where_they_went() {
+    let base = common::serve_route(nav_pages);
+    let mut s = Server::start();
+    for snapshot in [true, false] {
+        s.tool("open", json!({"url": format!("{base}/"), "snapshot": true}));
+        let (r, e) = s.tool("act", json!({"op": "click", "loc": "role=link name=\"Plain\"", "snapshot": snapshot}));
+        assert!(!e && r.as_str().unwrap().contains(&format!("navigated: {base}/plain")), "{r}");
+        let (r, e) = s.tool("act", json!({"op": "back", "snapshot": snapshot}));
+        let r = r.as_str().unwrap().to_string();
+        assert!(!e && r.contains(&format!("navigated: {base}/")) && !r.contains("/plain"), "back snapshot={snapshot}: {r}");
+        if snapshot {
+            assert!(r.contains("Home page"), "{r}");
+        }
+        let (r, e) = s.tool("act", json!({"op": "forward", "snapshot": snapshot}));
+        let r = r.as_str().unwrap().to_string();
+        assert!(!e && r.contains(&format!("navigated: {base}/plain")), "forward snapshot={snapshot}: {r}");
+        if snapshot {
+            assert!(r.contains("Plain page") && !r.contains("Home page"), "{r}");
+        }
+    }
+}
+
+/// The snapshot after a navigation waits for the first layout (a slow style sheet). A layout that does not come in time does not make
+/// the act a failure: the click ran, and the receipt says so.
+#[test]
+fn an_act_waits_for_the_first_layout() {
+    let base = common::serve_route(nav_pages);
+    let mut s = Server::start();
+    let (r, e) = s.tool("open", json!({"url": format!("{base}/"), "snapshot": true}));
+    assert!(!e, "{r}");
+    let (r, e) = s.tool("act", json!({"op": "click", "loc": "role=link name=\"Styled\""}));
+    let r = r.as_str().unwrap().to_string();
+    assert!(!e && r.contains("Styled page"), "{r}");
+    let (r, e) = s.tool("open", json!({"url": format!("{base}/"), "snapshot": true, "timeout_ms": 1000}));
+    assert!(!e, "{r}");
+    let (r, e) = s.tool("act", json!({"op": "click", "loc": "role=link name=\"Stuck\""}));
+    let r = r.as_str().unwrap().to_string();
+    assert!(!e && r.contains(&format!("navigated: {base}/stuck")) && r.contains("no snapshot: ") && r.contains("no layout yet"), "{r}");
+}
+
+/// A tab that the last action opened is a session in `sessions`, also when no reply has named it yet (a `step` call).
+#[test]
+fn sessions_lists_a_tab_that_the_last_action_opened() {
+    let base = pages(&[("/", TABS), ("/b", "<!doctype html><body><p>second page</p></body>")]);
+    let mut s = Server::start();
+    s.tool("open", json!({"url": format!("{base}/")}));
+    let (r, e) = s.tool("step", json!({"steps": "click text=\"Blank link\"", "compact": true}));
+    assert!(!e, "{r}");
+    let (r, _) = s.tool("sessions", json!({}));
+    assert!(r.as_str().unwrap().contains(&format!("main~2: {base}/b")), "{r}");
+}
