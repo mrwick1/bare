@@ -43,6 +43,7 @@ use crate::browser_navigation_state::{self as st, State};
 use crate::browser_navigation_storage as sto;
 pub use crate::browser_navigation_storage::{StorageLimits, StoreError, WebStorage};
 use crate::browser_navigation_url::{self as nu, Part, Rec, UErr};
+use bare_html::dom::NodeData;
 use bare_js::eval::{Error, Interp};
 use bare_js::value::{ObjId, Value};
 use std::cell::{Cell, OnceCell, RefCell};
@@ -471,16 +472,40 @@ impl Dom {
 
 // ------------------------------------------------------------------------------------------ Location
 
+/// The `Location` of a frame window: it reads `about:blank` and does not navigate.
+pub(crate) fn frame_location(d: &Dom, it: &mut Interp<'_>) -> R<ObjId> {
+    let loc = d.nav.p.get().expect("installed").location;
+    let proto = it.heap.get_prototype_of(loc).map_err(|e| it.heap_error(e))?;
+    d.obj(it, proto.expect("Location.prototype"))
+}
+
 fn loc_check(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<()> {
     match (this, d.nav.p.get()) {
         (Value::Object(o), Some(p)) if o == p.location => Ok(()),
+        (Value::Object(o), _) if crate::browser_frames::is_location(d, o) => Ok(()),
         _ => Err(it.type_error("Illegal invocation")),
     }
 }
 
+/// Is `this` the `Location` of a frame window?
+fn loc_is_frame(d: &Dom, this: Value) -> bool {
+    matches!(this, Value::Object(o) if crate::browser_frames::is_location(d, o))
+}
+
 fn loc_get(d: &Dom, it: &mut Interp<'_>, this: Value, part: Part) -> R<Value> {
     loc_check(d, it, this)?;
-    let s = part.get(&d.cur_rec()?);
+    let s = if loc_is_frame(d, this) {
+        // `about:blank`: the URL parser here takes http and https only, so the parts are fixed.
+        match part {
+            Part::Href => "about:blank",
+            Part::Protocol => "about:",
+            Part::Pathname => "blank",
+            _ => "",
+        }
+        .to_string()
+    } else {
+        part.get(&d.cur_rec()?)
+    };
     d.js_str(it, &s)
 }
 
@@ -491,6 +516,9 @@ fn resolve(d: &Dom, it: &mut Interp<'_>, s: &str) -> R<Rec> {
 
 fn loc_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], part: Part) -> R<Value> {
     loc_check(d, it, this)?;
+    if loc_is_frame(d, this) {
+        return Err(it.type_error("Navigating the location of a frame window is not supported"));
+    }
     d.cur_rec()?;
     let v = pr::usv(d, it, arg(a, 0))?;
     let new = if part == Part::Href {
@@ -515,6 +543,9 @@ fn loc_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], part: Part) -
 
 fn loc_go(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], replace: bool) -> R<Value> {
     loc_check(d, it, this)?;
+    if loc_is_frame(d, this) {
+        return Err(it.type_error("Navigating the location of a frame window is not supported"));
+    }
     d.cur_rec()?;
     if a.is_empty() {
         let name = if replace { "replace" } else { "assign" };
@@ -528,6 +559,9 @@ fn loc_go(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], replace: bool)
 
 fn loc_reload(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
     loc_check(d, it, this)?;
+    if loc_is_frame(d, this) {
+        return Err(it.type_error("Navigating the location of a frame window is not supported"));
+    }
     d.reload_request()?;
     Ok(Value::Undefined)
 }
@@ -541,7 +575,11 @@ fn loc_obj(d: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
     Ok(Value::Object(d.nav.p.get().expect("installed").location))
 }
 
-fn doc_url(d: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
+fn doc_url(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
+    // A document made outside the tree (`createHTMLDocument`, a blank frame) is `about:blank`.
+    if d.nd(it, this).is_ok_and(|n| matches!(d.data(n), NodeData::Document) && n != d.doc.borrow().root()) {
+        return d.js_str(it, "about:blank");
+    }
     let s = d.cur_rec()?.href();
     d.js_str(it, &s)
 }
@@ -741,7 +779,7 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
         ("href", Part::Href), ("protocol", Part::Protocol), ("host", Part::Host), ("hostname", Part::Hostname),
         ("port", Part::Port), ("pathname", Part::Pathname), ("search", Part::Search), ("hash", Part::Hash)
     ]);
-    def_acc(d, it, loc_proto, "origin", |d, it, t, _| loc_check(d, it, t).and_then(|_| win_origin(d, it, t, &[])), None)?;
+    def_acc(d, it, loc_proto, "origin", |d, it, t, _| loc_check(d, it, t).and_then(|_| if loc_is_frame(d, t) { d.js_str(it, "null") } else { win_origin(d, it, t, &[]) }), None)?;
     def_fn(d, it, loc_proto, "assign", 1, |d, it, t, a| loc_go(d, it, t, a, false))?;
     def_fn(d, it, loc_proto, "replace", 1, |d, it, t, a| loc_go(d, it, t, a, true))?;
     def_fn(d, it, loc_proto, "reload", 0, loc_reload)?;

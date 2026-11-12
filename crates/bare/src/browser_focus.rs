@@ -280,8 +280,16 @@ pub(crate) fn blur(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V 
 }
 
 pub(crate) fn active_element(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    if d.nd(it, this)? != d.doc.borrow().root() {
-        return Err(it.type_error("Illegal invocation"));
+    let n = d.nd(it, this)?;
+    if n != d.doc.borrow().root() {
+        // A frame document has no focus of its own: its body is the active element.
+        if !matches!(d.data(n), bare_html::dom::NodeData::Document) {
+            return Err(it.type_error("Illegal invocation"));
+        }
+        return match nd::body(d, it, this, &[])? {
+            Value::Null => nd::document_element(d, it, this, &[]),
+            body => Ok(body),
+        };
     }
     if let Some(n) = d.current_focus(it)? {
         return d.wrap(it, n);

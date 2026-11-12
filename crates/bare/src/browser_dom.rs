@@ -806,6 +806,9 @@ pub(crate) fn owner_document(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Val
     if matches!(d.data(n), NodeData::Document) {
         return Ok(Value::Null);
     }
+    if let Some(o) = crate::browser_frames::owner_of(d, n) {
+        return d.wrap(it, o);
+    }
     let root = if d.in_inert(n) { crate::browser_custom::template_document(d) } else { d.doc.borrow().root() };
     d.wrap(it, root)
 }
@@ -1631,10 +1634,13 @@ pub(crate) fn make_element(d: &Dom, it: &mut Interp<'_>, name: &str) -> V {
 pub(crate) fn create_element(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     d.nd(it, this)?;
     let name = new_name(d, it, arg(a, 0))?;
-    if d.ce.on.get() || a.len() > 1 {
-        return crate::browser_custom::create(d, it, &name, arg(a, 1));
-    }
-    make_element(d, it, &name)
+    let v = if d.ce.on.get() || a.len() > 1 {
+        crate::browser_custom::create(d, it, &name, arg(a, 1))?
+    } else {
+        make_element(d, it, &name)?
+    };
+    crate::browser_frames::note_owner(d, it, this, v);
+    Ok(v)
 }
 
 pub(crate) fn create_text_node(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
@@ -1645,7 +1651,9 @@ pub(crate) fn create_text_node(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[V
         d.room(&doc, 1, s.len())?;
         doc.create_text(&s)
     };
-    d.wrap(it, n)
+    let v = d.wrap(it, n)?;
+    crate::browser_frames::note_owner(d, it, this, v);
+    Ok(v)
 }
 
 pub(crate) fn create_comment(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
@@ -1656,7 +1664,9 @@ pub(crate) fn create_comment(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Val
         d.room(&doc, 1, s.len())?;
         doc.create_comment(&s)
     };
-    d.wrap(it, n)
+    let v = d.wrap(it, n)?;
+    crate::browser_frames::note_owner(d, it, this, v);
+    Ok(v)
 }
 
 pub(crate) fn get_element_by_id(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
@@ -1790,7 +1800,7 @@ pub(crate) fn doctype(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) ->
 pub(crate) fn default_view(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let n = d.nd(it, this)?;
     if n != d.doc.borrow().root() {
-        return Ok(Value::Null);
+        return Ok(crate::browser_frames::window_of(d, n).map_or(Value::Null, Value::Object));
     }
     Ok(Value::Object(*d.global.get().expect("installed")))
 }

@@ -50,7 +50,7 @@ pub(crate) struct Frame {
 pub(crate) fn window_this(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<()> {
     match this {
         Value::Undefined | Value::Null => Ok(()),
-        Value::Object(o) if Some(&o) == d.global.get() => Ok(()),
+        Value::Object(o) if Some(&o) == d.global.get() || crate::browser_frames::is_blank_window(d, o) => Ok(()),
         _ => Err(it.type_error("Illegal invocation")),
     }
 }
