@@ -150,3 +150,78 @@ fn the_readable_side_keeps_the_host_limits() {
         assert_eq!(r, format!("limit:{:?}", LimitKind::Host("stream-queue")));
     });
 }
+
+/// A stream of the UTF-8 bytes of each part, then close.
+const CHUNKS: &str = "function chunks(parts) { var e = new TextEncoder(); return new ReadableStream({ start(c) { parts.forEach(function (p) { c.enqueue(e.encode(p)); }); c.close(); } }); }\n";
+
+#[test]
+fn a_response_reads_a_readable_stream_body_to_the_end() {
+    big(|| {
+        let mut b = mk();
+        let r = go(&mut b, &format!(r#"var out = []; {CHUNKS}
+new Response(chunks(['ab', 'c', 'd'])).text().then(function (s) {{ out.push('text:' + s); }});
+new Response(chunks(['{{"a":', '[1,2]', '}}'])).json().then(function (j) {{ out.push('json:' + j.a.join('+')); }});
+new Response(chunks(['xyz'])).arrayBuffer().then(function (a) {{ out.push('buf:' + a.byteLength); }});
+new Response(chunks(['hi']), {{ headers: {{ 'content-type': 'text/x-a' }} }}).blob().then(function (x) {{ out.push('blob:' + x.size + ':' + x.type); }});
+var s = chunks(['q']); var r = new Response(s);
+out.push(r.body === s, r.bodyUsed, r.headers.get('content-type'));
+new Response(chunks(['p']).pipeThrough(new TextDecoderStream()).pipeThrough(new TextEncoderStream())).text().then(function (t) {{ out.push('pipe:' + t); }});
+"#));
+        assert_eq!(r, "true|false||buf:3|blob:2:text/x-a|text:abcd|json:1+2|pipe:p");
+    });
+}
+
+#[test]
+fn a_stream_body_is_used_once_and_its_errors_reject() {
+    big(|| {
+        let mut b = mk();
+        let r = go(&mut b, &format!(r#"var out = []; {CHUNKS}
+var r = new Response(chunks(['a']));
+var p1 = r.text(); out.push(r.bodyUsed);
+r.text().catch(function (e) {{ out.push('again:' + e.name); }});
+p1.then(function (s) {{ out.push('first:' + s + ':' + r.bodyUsed); }});
+new Response(new ReadableStream({{ pull(c) {{ c.error(new Error('boom')); }} }})).text().catch(function (e) {{ out.push('err:' + e.message); }});
+new Response(new ReadableStream({{ start(c) {{ c.enqueue('str'); c.close(); }} }})).text().catch(function (e) {{ out.push('chunk:' + e.name); }});
+var locked = chunks(['z']); locked.getReader();
+try {{ new Response(locked); }} catch (e) {{ out.push('locked:' + e.name); }}
+"#));
+        assert_eq!(r, "true|locked:TypeError|again:TypeError|chunk:TypeError|err:boom|first:a:true");
+    });
+}
+
+#[test]
+fn a_stream_body_over_the_limit_fails_with_a_clear_error() {
+    big(|| {
+        let mut b = mk();
+        b.configure_fetch(crate::browser_fetch::FetchConfig { base_url: None, client: bare_net::http::Client::new(), limits: crate::browser_fetch::FetchLimits { max_request_body: 10, ..Default::default() } }).unwrap();
+        let r = go(&mut b, &format!(r#"var out = []; {CHUNKS}
+new Response(chunks(['12345', '67890', 'x'])).text().catch(function (e) {{ out.push(e.name + ':' + e.message); }});
+new Response(chunks(['12345', '67890'])).text().then(function (s) {{ out.push('ok:' + s); }});
+"#));
+        assert_eq!(r, "TypeError:Response body stream is over the limit of 10 bytes|ok:1234567890");
+    });
+}
+
+#[test]
+fn a_request_refuses_a_stream_body_and_says_why() {
+    big(|| {
+        let mut b = mk();
+        b.configure_fetch(crate::browser_fetch::FetchConfig { base_url: Some("http://127.0.0.1:9/".into()), client: bare_net::http::Client::new(), limits: Default::default() }).unwrap();
+        let r = js(&mut b, "new Request('/x', { method: 'POST', body: new ReadableStream({}), duplex: 'half' })");
+        assert_eq!(r, "throw:TypeError:Failed to construct 'Request': a ReadableStream body is not supported. bare sends a request body in one piece: pass a string, Blob, ArrayBuffer or FormData.");
+    });
+}
+
+#[test]
+fn a_blob_stream_reads_its_bytes() {
+    big(|| {
+        let mut b = mk();
+        let r = go(&mut b, r#"var out = [];
+var s = new Blob(['a', 'b']).stream(); out.push(s instanceof ReadableStream, s.locked);
+new Response(s).text().then(function (t) { out.push('text:' + t); });
+var rd = new Blob([new Uint8Array([1, 2, 3])]).stream().getReader();
+rd.read().then(function (x) { out.push('read:' + x.value.length + ':' + x.done); });
+"#);
+        assert_eq!(r, "true|false|read:3:false|text:ab");
+    });
+}

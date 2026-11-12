@@ -1564,3 +1564,14 @@ GitHub sets about 2,500 custom properties on the root. Each new set copied all n
 - The sets are found by a hash that reads 8 bytes at a step.
 - `var()` resolution, fallbacks, circles, `initial`, `inherit` and `unset` do not change. A dump of every style of a saved GitHub page is the same before and after.
 - The names are not numbered in the rule set. A name is hashed only when the cascade makes a new set, about 200 times for a GitHub page.
+## A ReadableStream as the body of a Response (2026-11-12)
+
+Pages build a Response from a stream, e.g. `new Response(stream.pipeThrough(new TextEncoderStream())).text()`. bare threw "ReadableStream request bodies are not supported", with the word "request" for a Response.
+
+- `new Response(stream)` keeps the stream. `body` gives the same stream back. A locked or disturbed stream is a `TypeError`, as in the standard.
+- `text()`, `json()`, `arrayBuffer()`, `blob()` and `formData()` read the stream to the end in `shims/drain.js`. The bytes then go into a byte Response, so decoding and limits are the ones of a byte body.
+- The total is checked at each chunk. Over `max_request_body` (the bound of every body that script makes), the promise rejects with a `TypeError` that names the limit. A chunk that is not a `Uint8Array` rejects too.
+- `bodyUsed` is the `disturbed` flag of the stream. Host streams now keep that flag.
+- `clone()` of a stream body is `Unsupported`: it needs `tee`.
+- A request body stream stays a `TypeError`. `bare_net` sends a request body as one byte slice (`http::Request::body`), on a worker thread. A streamed upload needs a chunked upload there and a body that the worker reads from the page. That is not cheap. The text now names the call (`Request` or `XMLHttpRequest`) and the reason.
+- `Blob.stream()` is new: it is the `body` of a hidden byte Response. The check of this change needs it.

@@ -495,7 +495,7 @@ fn send(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
         {
             return Err(Error::Unsupported(unsupported("a Document as an XMLHttpRequest body")));
         }
-        if let Some((bytes, ty)) = d.extract_body(it, v)? {
+        if let Some((bytes, ty)) = d.extract_body(it, v, "execute 'send' on 'XMLHttpRequest'")? {
             if let Some(ty) = ty
                 && !headers.iter().any(|(n, _)| n == "content-type")
             {

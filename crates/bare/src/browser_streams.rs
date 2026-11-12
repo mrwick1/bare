@@ -84,6 +84,8 @@ struct Stream {
     st: St,
     ctl: ObjId,
     reader: Option<ObjId>,
+    /// A read or a cancel happened (the `[[disturbed]]` flag of the standard). `new Response(stream).bodyUsed` reads it.
+    disturbed: bool,
 }
 
 struct Ctl {
@@ -391,6 +393,9 @@ fn cancel_stream(d: &Dom, it: &mut Interp<'_>, stream: ObjId, reason: Value) -> 
     }
     let c = {
         let mut st = d.streams.st.borrow_mut();
+        if let Some(s) = st.streams.get_mut(&stream) {
+            s.disturbed = true;
+        }
         match st.streams.get(&stream).map(|s| (&s.st, s.ctl)) {
             None => C::Closed,
             Some((St::Closed, _)) => C::Closed,
@@ -556,7 +561,7 @@ fn construct(d: &Dom, it: &mut Interp<'_>, a: &[Value]) -> R<Value> {
     let (ok, err) = (it.host_bind(f.start_ok, Value::Object(c))?, it.host_bind(f.start_err, Value::Object(c))?);
     {
         let mut st = d.streams.st.borrow_mut();
-        st.streams.insert(s, Stream { st: St::Readable, ctl: c, reader: None });
+        st.streams.insert(s, Stream { st: St::Readable, ctl: c, reader: None, disturbed: false });
         st.ctls.insert(c, Ctl { stream: s, source: src, start, pull, cancel, queue: VecDeque::new(), qbytes: 0, hwm, started: false, pulling: false, pull_again: false, close_requested: false, pull_fns: None });
     }
     let started = if matches!(start, Value::Undefined) { Ok(Value::Undefined) } else { invoke(d, it, start, src, &[Value::Object(c)])? };
@@ -582,6 +587,11 @@ fn is_stream(d: &Dom, this: Value) -> Option<ObjId> {
 
 fn is_reader(d: &Dom, this: Value) -> Option<ObjId> {
     this_obj(this).filter(|o| d.streams.st.borrow().readers.contains_key(o))
+}
+
+/// `(locked, disturbed)` of a stream made by script, or `None` if `o` is not one.
+pub(crate) fn lock_state(d: &Dom, o: ObjId) -> Option<(bool, bool)> {
+    d.streams.st.borrow().streams.get(&o).map(|s| (s.reader.is_some(), s.disturbed))
 }
 
 pub(crate) fn locked(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
@@ -669,7 +679,7 @@ pub(crate) fn read(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<
             let st = &mut *st;
             match st.readers.get(&rdr).and_then(|r| r.stream) {
                 None => Out::Released,
-                Some(s) => match st.streams.get(&s) {
+                Some(s) => match st.streams.get_mut(&s).map(|x| { x.disturbed = true; &*x }) {
                     None => Out::Released,
                     Some(Stream { st: St::Closed, .. }) => Out::Done,
                     Some(Stream { st: St::Errored(e), .. }) => Out::Err(*e),

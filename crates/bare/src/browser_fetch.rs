@@ -57,9 +57,10 @@
 //! an `ArrayBuffer` or a view has no type; a `Blob` or `File` is its bytes with its `type` (none if empty); a `FormData` is
 //! `multipart/form-data` with a new random boundary (`Dom::web_body` in `browser_web.rs`). The type is set only when the caller set
 //! no `Content-Type`. `blob()` and `formData()` (`application/x-www-form-urlencoded` and `multipart/form-data` only, else `TypeError`)
-//! read a body of a `Request` or `Response`.
+//! read a body of a `Request` or `Response`. `new Response(stream)` keeps a `ReadableStream` as it is: `body` gives it back, and
+//! the body methods read it to the end in `shims/drain.js`, at most `max_request_body` bytes. A request body stream is a `TypeError`.
 //!
-//! Gates (explicit `Unsupported`, nothing is faked): token methods and a lower-case `patch`; stream bodies;
+//! Gates (explicit `Unsupported`, nothing is faked): token methods and a lower-case `patch`; `clone()` of a stream body (tee);
 //! `Request.body`; non-empty `integrity`;
 //! `cache: "only-if-cached"`; non-ASCII header values; compressed
 //! responses (a `Content-Encoding` that `bare_net` cannot undo is a network error; gzip, deflate and br are undone, and the headers stay); subclassing (`class X extends Response`).
@@ -541,6 +542,8 @@ pub(crate) struct Fetch {
     protos: OnceCell<[ObjId; 6]>,
     fixed: RefCell<Vec<ObjId>>,
     pub(crate) json_parse: Cell<Option<Value>>,
+    /// The function of `shims/drain.js`, made at the first read of a stream body.
+    drain: Cell<Option<Value>>,
     /// Live (the window and the control interface): each request starts on a worker at once, and `run_network_tasks` takes only the
     /// replies that are in. Off: a request that is not in is waited for (a test or a headless run settles the page).
     pub(crate) live: Cell<bool>,
@@ -548,7 +551,7 @@ pub(crate) struct Fetch {
 
 impl Default for Fetch {
     fn default() -> Fetch {
-        Fetch { st: RefCell::default(), lim: Cell::new(FetchLimits::default()), client: RefCell::new(Client::new()), protos: OnceCell::new(), fixed: RefCell::default(), json_parse: Cell::new(None), live: Cell::new(false) }
+        Fetch { st: RefCell::default(), lim: Cell::new(FetchLimits::default()), client: RefCell::new(Client::new()), protos: OnceCell::new(), fixed: RefCell::default(), json_parse: Cell::new(None), drain: Cell::new(None), live: Cell::new(false) }
     }
 }
 
@@ -566,6 +569,7 @@ impl Fetch {
     pub(crate) fn roots(&self, out: &mut Vec<Value>) {
         out.extend(self.fixed.borrow().iter().map(|&o| Value::Object(o)));
         out.extend(self.json_parse.get());
+        out.extend(self.drain.get());
         out.extend(self.st.borrow().queue.iter().flat_map(|p| [p.promise].into_iter().chain(p.xhr.map(|x| Value::Object(x.0)))));
         out.extend(self.st.borrow().streams.iter().map(|s| Value::Object(s.x.0)));
     }
@@ -951,7 +955,8 @@ impl Dom {
     }
 
     /// The bytes of a body init, and its default content type. A copy is charged and bounded before it is made.
-    pub(crate) fn extract_body(&self, it: &mut Interp<'_>, v: Value) -> R<Option<BodyInit>> {
+    /// `who` names the call in the error text, e.g. "construct 'Request'".
+    pub(crate) fn extract_body(&self, it: &mut Interp<'_>, v: Value, who: &str) -> R<Option<BodyInit>> {
         let lim = self.fl();
         let (bytes, ty): (Vec<u8>, Option<Cow<'static, str>>) = match v {
             Value::Undefined | Value::Null => return Ok(None),
@@ -983,7 +988,13 @@ impl Dom {
                 let kg = self.key(it, "getReader")?;
                 let g = it.get_value(v, kg)?;
                 if it.is_callable_value(g) {
-                    return Err(it.type_error("ReadableStream request bodies are not supported"));
+                    // `new Response(stream)` takes the streams of this page before it gets here (`response_ctor`).
+                    let why = if who.contains("Response") {
+                        "the body has a getReader method but is not a ReadableStream of this page"
+                    } else {
+                        "a ReadableStream body is not supported. bare sends a request body in one piece: pass a string, Blob, ArrayBuffer or FormData"
+                    };
+                    return Err(it.type_error(&format!("Failed to {who}: {why}.")));
                 }
                 self.text_body(it, v)?
             }
@@ -1110,7 +1121,7 @@ fn make_core(d: &Dom, it: &mut Interp<'_>, input: Value, init: Value) -> R<Core>
             core.headers = list;
         }
         let b = d.prop(it, init, "body")?;
-        if let Some((bytes, ty)) = d.extract_body(it, b)? {
+        if let Some((bytes, ty)) = d.extract_body(it, b, "construct 'Request'")? {
             core.body = Some(bytes);
             transfer = None;
             if let Some(ty) = ty && core.headers.get("content-type").is_none() {
@@ -1376,7 +1387,21 @@ fn response_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value
         let h = d.prop(it, init, "headers")?;
         d.fill(it, &mut list, h)?;
     }
-    let body = match d.extract_body(it, arg(a, 0))? {
+    // A ReadableStream body stays a stream: the body methods read it to the end (`consume`), and `body` gives it back.
+    let src = match arg(a, 0) {
+        Value::Object(o) => lock_state(d, o).map(|ld| (o, ld)),
+        _ => None,
+    };
+    if let Some((_, (locked, disturbed))) = src {
+        if locked || disturbed {
+            return Err(it.type_error("Failed to construct 'Response': Response body object should not be disturbed or locked"));
+        }
+        if status_null_body(status) {
+            return Err(it.type_error("Response with null body status cannot have body"));
+        }
+    }
+    let init_body = if src.is_some() { None } else { d.extract_body(it, arg(a, 0), "construct 'Response'")? };
+    let body = match init_body {
         Some((bytes, ty)) => {
             if status_null_body(status) {
                 return Err(it.type_error("Response with null body status cannot have body"));
@@ -1390,8 +1415,66 @@ fn response_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value
     };
     d.reserve(it, 2, body.as_ref().map_or(0, |b| b.len()))?;
     let h = d.headers_obj(it, list)?;
-    let r = RespData { c: Common { headers: h, body: Body::new(body) }, status, status_text: text, url: String::new(), redirected: false, ty: "default", stream: None };
+    let r = RespData { c: Common { headers: h, body: Body::new(body) }, status, status_text: text, url: String::new(), redirected: false, ty: "default", stream: src.map(|s| s.0) };
     Ok(Value::Object(d.add_obj_in(it, proto, F::Response(r))?))
+}
+
+/// A ReadableStream of `bytes` (`Blob.stream()`): the `body` of a response that script cannot reach. The stream holds it.
+pub(crate) fn bytes_stream(d: &Dom, it: &mut Interp<'_>, bytes: Vec<u8>) -> R<Value> {
+    d.reserve(it, 2, bytes.len())?;
+    let h = d.headers_obj(it, HeaderList::new(Guard::Immutable))?;
+    let r = RespData { c: Common { headers: h, body: Body::new(Some(Rc::new(bytes))) }, status: 200, status_text: String::new(), url: String::new(), redirected: false, ty: "default", stream: None };
+    let o = d.add_obj(it, Pr::Response, F::Response(r))?;
+    resp_body(d, it, Value::Object(o), &[])
+}
+
+/// `(locked, disturbed)` of a ReadableStream: one made by script, or the `body` of a response. `None` if `o` is not a stream.
+fn lock_state(d: &Dom, o: ObjId) -> Option<(bool, bool)> {
+    if let Some(ld) = streams::lock_state(d, o) {
+        return Some(ld);
+    }
+    let st = d.fetch.st.borrow();
+    match st.objs.get(&o) {
+        Some(F::Stream(r)) => match st.objs.get(r) {
+            Some(F::Response(r)) => Some((r.c.body.locked, r.c.body.used)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The ReadableStream that `new Response(stream)` got, if `o` is such a response. Its own `body` stream holds `o`; this one does not.
+fn stream_src(d: &Dom, o: ObjId) -> Option<ObjId> {
+    let st = d.fetch.st.borrow();
+    match st.objs.get(&o) {
+        Some(F::Response(r)) => r.stream.filter(|s| !matches!(st.objs.get(s), Some(F::Stream(owner)) if *owner == o)),
+        _ => None,
+    }
+}
+
+/// `text()` and the other body methods of a stream body: `shims/drain.js` reads it to the end. Gives its promise.
+fn drain_stream(d: &Dom, it: &mut Interp<'_>, this: ObjId, src: ObjId, kind: &str) -> R<Value> {
+    let (locked, disturbed) = lock_state(d, src).unwrap_or((false, false));
+    if locked || disturbed {
+        let p = it.host_new_promise()?;
+        let msg = if disturbed { "Body has already been consumed." } else { "Body is locked." };
+        let e = it.type_error(msg);
+        return settle(it, p, Err(e));
+    }
+    let f = match d.fetch.drain.get() {
+        Some(f) => f,
+        None => {
+            // Not `js_str`: the source is part of the host, not script data.
+            let s = it.heap.intern_str(include_str!("shims/drain.js")).map_err(|e| it.heap_error(e))?;
+            let f = it.eval_global(Value::String(s))?;
+            d.fetch.drain.set(Some(f));
+            f
+        }
+    };
+    let h = common(&mut d.fetch.st.borrow_mut(), this).map(|c| c.headers);
+    let ct = h.and_then(|h| d.list_of(h).get("content-type")).unwrap_or_default();
+    let (kind, ct) = (d.js_str(it, kind)?, d.js_str(it, &ct)?);
+    it.call(f, Value::Undefined, &[Value::Object(src), Value::Number(d.fl().max_request_body as f64), kind, ct])
 }
 
 fn with_req<T>(d: &Dom, it: &mut Interp<'_>, this: Value, f: impl FnOnce(&ReqData) -> T) -> R<T> {
@@ -1489,11 +1572,16 @@ fn resp_headers(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Val
     Ok(Value::Object(with_resp(d, it, this, |r| r.c.headers)?))
 }
 fn resp_body_used(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    Ok(Value::Bool(with_resp(d, it, this, |r| r.c.body.used)?))
+    let used = with_resp(d, it, this, |r| r.c.body.used)?;
+    let src = d.brand(it, this).ok().and_then(|o| stream_src(d, o));
+    Ok(Value::Bool(used || src.and_then(|s| lock_state(d, s)).is_some_and(|ld| ld.1)))
 }
 fn resp_clone(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
     let (c_hdr, body, used, status, text, url, redirected, ty) =
         with_resp(d, it, this, |r| (r.c.headers, r.c.body.bytes.clone(), r.c.body.used || r.c.body.locked, r.status, r.status_text.clone(), r.url.clone(), r.redirected, r.ty))?;
+    if d.brand(it, this).ok().and_then(|o| stream_src(d, o)).is_some() {
+        return Err(Error::Unsupported(unsupported("Response.clone with a ReadableStream body (it needs tee)")));
+    }
     if used {
         return Err(it.type_error("Failed to execute 'clone' on 'Response': Response body is already used"));
     }
@@ -1531,6 +1619,16 @@ fn take_body(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<Option<Rc<Vec<u8>>>
 }
 
 fn consume(d: &Dom, it: &mut Interp<'_>, this: Value, how: As) -> R<Value> {
+    if let Value::Object(o) = this && let Some(src) = stream_src(d, o) {
+        let kind = match how {
+            As::Blob => "blob",
+            As::Form => "formData",
+            As::Text => "text",
+            As::Json => "json",
+            As::Buffer => "arrayBuffer",
+        };
+        return drain_stream(d, it, o, src, kind);
+    }
     let p = it.host_new_promise()?;
     let r = (|| -> R<Value> {
         let ct = match how {

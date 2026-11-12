@@ -382,7 +382,7 @@ fn response_constructor_request_and_clone() {
             assert_eq!(r, format!("unsupported:{what}"), "{src}");
         }
         assert_eq!(js(&mut b, "new Request('/x', {signal: {}})"), "throw:TypeError:Failed to construct 'Request': Failed to read the 'signal' property from 'RequestInit': Failed to convert value to 'AbortSignal'.");
-        assert_eq!(js(&mut b, "new Request('/x', {body: {getReader: function () {}}, method: 'POST'})"), "throw:TypeError:ReadableStream request bodies are not supported");
+        assert_eq!(js(&mut b, "new Request('/x', {body: {getReader: function () {}}, method: 'POST'})"), "throw:TypeError:Failed to construct 'Request': a ReadableStream body is not supported. bare sends a request body in one piece: pass a string, Blob, ArrayBuffer or FormData.");
     });
 }
 
