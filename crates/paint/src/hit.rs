@@ -346,6 +346,7 @@ impl Hit<'_> {
                 Line::Context(j, at, live) => self.context(j, depth + 1, at, live, out, hoist),
             }
         }
+        crate::display::tree_order(self.doc, &self.tree, self.frags, &mut positioned, |p| p.0);
         for (j, at, live) in positioned {
             self.context(j, depth + 1, at, live, out, hoist);
         }
@@ -499,6 +500,31 @@ mod tests {
         assert_eq!(p.at(20.0, 20.0), "a");
         assert_eq!(p.at(80.0, 80.0), "b", "b is later in tree order: on top where they overlap");
         assert_eq!(p.at(105.0, 105.0), "b");
+    }
+
+    /// CSS 2.1 Appendix E: positioned boxes with `z-index` auto or 0 paint in tree order, whether they are absolute or relative.
+    /// A relative card after an absolute veil is on top of it (the Google sign-in page).
+    const VEIL: &str = "<style>body{margin:0}</style><div style='position:relative'>\
+        <div id=veil style='position:absolute;top:0;left:0;right:0;bottom:0;background:#fff'></div>\
+        <div id=card style='position:relative;width:300px;border:2px solid red;CARD'>\
+        <h1 id=h>Sign in</h1><input id=email><button id=next>Next</button></div></div>";
+
+    #[test]
+    fn a_relative_box_is_over_an_earlier_absolute_sibling() {
+        for card in ["", "top:0", "z-index:0"] {
+            let p = page(&VEIL.replace("CARD", card));
+            assert_eq!(p.at(30.0, 25.0), "h", "card style {card:?}");
+            let (x, y) = (p.layout.fragments.iter().find(|f| f.node == p.id("next")).map(|f| (f.rect.x + 2.0, f.rect.y + 2.0))).expect("button");
+            assert_eq!(p.at(x, y), "next", "card style {card:?}");
+        }
+    }
+
+    #[test]
+    fn a_relative_box_shows_over_an_earlier_absolute_sibling() {
+        let p = page(&VEIL.replace("CARD", ""));
+        let canvas = crate::capture(&p.doc, &p.styles, &p.layout, W, H);
+        // The left border of the card is red, not covered by the white veil.
+        assert_eq!(canvas.pixel(0, 5) & 0x00ff_ffff, 0xff0000);
     }
 
     #[test]
