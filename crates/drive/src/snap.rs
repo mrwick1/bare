@@ -654,17 +654,20 @@ fn walk_text(cx: &Cx, root: NodeId, out: &mut Vec<String>) {
 }
 
 /// The rendered links: ref, text and absolute URL.
-pub fn links(p: &mut Page, refs: &mut Refs, max: usize) -> Result<String, String> {
+/// Filters: `text` (in the text or the URL, any case), `root` (a ref: the links inside it, or the link itself) and `external` (only links to another origin).
+pub fn links(p: &mut Page, refs: &mut Refs, max: usize, text: Option<&str>, root: Option<u32>, external: bool) -> Result<String, String> {
     settle(p);
     let doc = p.generation();
     refs.sync(doc);
+    let start = root.map(|r| refs.get(r, doc)).transpose()?;
+    let needle = text.map(str::to_lowercase);
     let base = p.url().and_then(|u| bare_url::Url::parse(&u).ok());
     let origin = base.as_ref().map(|b| b.to_string()).and_then(|u| u.find("://").map(|i| u[..u[i + 3..].find('/').map_or(u.len(), |j| i + 3 + j)].to_string())).unwrap_or_default();
     let mut found = Vec::new();
     p.inspect(|d, frame| {
         let cx = Cx { doc: d, styles: &frame.styles };
         let mut items = Vec::new();
-        walk(&cx, d.root(), Mode::Interactive, &HashSet::new(), &mut items);
+        walk(&cx, start.map_or(d.root(), |h| h.node), Mode::Interactive, &HashSet::new(), &mut items);
         for it in items {
             if let Item::El(l) = it
                 && l.role == "link"
@@ -678,10 +681,24 @@ pub fn links(p: &mut Page, refs: &mut Refs, max: usize) -> Result<String, String
     let mut lines = Vec::with_capacity(found.len());
     for (n, name, href) in found {
         let abs = base.as_ref().and_then(|b| b.join(&href).ok()).map_or(href, |u| u.to_string());
+        // A URL of this origin is the origin, then nothing or a path, a query or a fragment.
+        let own = abs.strip_prefix(&origin).is_some_and(|r| r.is_empty() || r.starts_with(['/', '?', '#']));
+        if external && (own || !abs.contains("://")) {
+            continue;
+        }
+        if let Some(t) = &needle
+            && !name.to_lowercase().contains(t.as_str())
+            && !abs.to_lowercase().contains(t.as_str())
+        {
+            continue;
+        }
         // A link of this origin gives its path: the origin is in the header, and it costs tokens in each line.
         let shown = clean_url(abs.strip_prefix(&origin).filter(|r| r.starts_with('/')).unwrap_or(&abs));
         let name = if name.is_empty() { String::new() } else { format!(" {name:?}") };
         lines.push(format!("[e{}]{name} -> {shown}", refs.mint(n)));
+    }
+    if lines.is_empty() && (text.is_some() || root.is_some() || external) {
+        return Ok(format!("{}no link matches the filters", header(p)));
     }
     Ok(format!("{}{} link(s)\n{}", header(p), lines.len(), budget(lines, max, None)))
 }

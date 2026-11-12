@@ -1351,3 +1351,13 @@ An agent clicked a ref under a spinner and got `covered`. A cookie banner over t
 - The failure names the cover, not the element under the pointer. Of the ancestors of that element that do not hold the target, it names the outermost with a role and a name. It falls back to the outermost one. It gives `tag#id.class` and `(role "name")`.
 - bare has no CSS transitions. A backdrop that fades with `transition` and removes itself on `transitionend` never goes, so the click fails after 1 s. A fade by script works.
 - Window mode routes each tool through `Remote::call` on the window thread. The dialog and tab policy is per thread and is set there, so it works. The test `the_agent_tools_work_in_a_window` checks the tools in a window. It is ignored because it needs a Wayland display. Run it on a nested compositor, not on a desktop in use.
+
+## Filters for the links tool (2026-11-12)
+
+`links` takes three filters: `text`, `root` and `external`.
+`text` keeps the links whose text or URL holds the text, in any case.
+`root` keeps the links inside one element, or the link itself.
+`external` keeps the links to another origin.
+The filters combine, and the reply keeps its format.
+A filter with no match gives one line.
+An agent gets the URL of a named link in one small call, not with `eval`.

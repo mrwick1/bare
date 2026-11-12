@@ -1520,3 +1520,39 @@ fn agent_tools(window: bool) {
     let r = r.as_str().unwrap().to_string();
     assert!(e && r.contains("dialog \"Cookie consent\"") && t.elapsed().as_millis() < 1500, "{} ms: {r}", t.elapsed().as_millis());
 }
+
+const FILTER_PAGE: &str = "<!doctype html><body><nav aria-label=Top><a href='/home'>Home</a><a href='https://example.org/docs'>Docs</a></nav>
+<main><a href='https://github.com/tokio-rs/tokio'>Repository</a><a href='/about'>About GitHub</a><a href='https://example.org/blog'>Blog</a></main></body>";
+
+#[test]
+fn links_filter_by_text_root_and_origin() {
+    let mut s = Server::start();
+    let base = html_app(FILTER_PAGE);
+    let snap = opened(&mut s, &base);
+    let count = |r: &Value| r.as_str().unwrap().lines().filter(|l| l.starts_with("[e")).count();
+    // `text` matches the text or the URL, in any case.
+    let (r, error) = s.tool("links", json!({"text": "GITHUB.com/tokio"}));
+    assert!(!error && count(&r) == 1 && r.as_str().unwrap().contains("\"Repository\" -> https://github.com/tokio-rs/tokio"), "{r}");
+    let (r, _) = s.tool("links", json!({"text": "github"}));
+    assert!(count(&r) == 2 && r.as_str().unwrap().contains("\"About GitHub\" -> /about"), "{r}");
+    // `root` keeps the links inside an element, or the link itself.
+    let nav = ref_of(&snap, "navigation \"Top\"");
+    let (r, error) = s.tool("links", json!({"root": nav}));
+    assert!(!error && count(&r) == 2 && r.as_str().unwrap().contains("\"Home\""), "{r}");
+    let blog = ref_of(&snap, "link \"Blog\"");
+    let (r, _) = s.tool("links", json!({"root": blog}));
+    assert!(count(&r) == 1 && r.as_str().unwrap().contains("\"Blog\""), "{r}");
+    // `external` keeps the links to another origin; the filters combine.
+    let (r, _) = s.tool("links", json!({"external": true}));
+    assert_eq!(count(&r), 3, "{r}");
+    let main = ref_of(&snap, "main");
+    let (r, _) = s.tool("links", json!({"external": true, "root": main, "text": "example"}));
+    assert!(count(&r) == 1 && r.as_str().unwrap().contains("\"Blog\""), "{r}");
+    // No match: one short line says so.
+    let (r, error) = s.tool("links", json!({"text": "nothing here"}));
+    assert!(!error && r.as_str().unwrap().ends_with("no link matches the filters"), "{r}");
+    // A ref of an older page fails as in the other tools.
+    s.tool("act", json!({"op": "goto", "url": format!("{base}/again"), "snapshot": false}));
+    let (r, error) = s.tool("links", json!({"root": nav}));
+    assert!(error && r.as_str().unwrap().contains("older page"), "{r}");
+}
