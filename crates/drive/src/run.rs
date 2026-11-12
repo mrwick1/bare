@@ -866,6 +866,20 @@ fn one(p: &mut Page, m: &mut Memo, loc: &Locator) -> Result<Handle, Try> {
     }
 }
 
+/// `one`, or the text field that has the focus when the element that `loc` named before left the document (`Page::replaced`). A page that
+/// swaps its search field (Wikipedia) leaves the old locator with no match; a person's keys go to the new field.
+fn one_or_replaced(p: &mut Page, m: &mut Memo, loc: &Locator) -> Result<Handle, Try> {
+    let err = match one(p, m, loc) {
+        Ok(h) => return Ok(h),
+        Err(e) => e,
+    };
+    let old = match loc {
+        Locator::Ref(r) => m.refs.get(*r, p.generation()).ok(),
+        _ => m.seen.get(&loc.to_string()).copied().filter(|h| h.doc == p.generation()),
+    };
+    old.and_then(|h| p.replaced(h)).ok_or(err)
+}
+
 fn refused(p: &mut Page, h: Handle, r: Refusal) -> Try {
     let what = p.describe(h);
     match r {
@@ -1003,10 +1017,19 @@ fn attempt(p: &mut Page, m: &mut Memo, a: &Action, out: Option<&PathBuf>, red: &
                 p.upload(h, paths).map_err(|r| refused(p, h, r))?;
             }
             Action::Press(loc, key) => {
-                let h = loc.as_ref().map(|l| one(p, m, l)).transpose()?;
-                if let Some(h) = h {
-                    p.focus(h).map_err(|r| refused(p, h, r))?;
-                }
+                // The rule of `type`: when the page put a new text field in the place of the target, the key goes to that field.
+                let h = match loc {
+                    Some(l) => Some(one_or_replaced(p, m, l)?),
+                    None => None,
+                };
+                let h = match h {
+                    Some(h) => match p.focus(h) {
+                        Ok(()) => Some(h),
+                        // The focus itself made the page swap the field (it loads its widget on focus).
+                        Err(r) => Some(p.replaced(h).ok_or_else(|| refused(p, h, r))?),
+                    },
+                    None => None,
+                };
                 let before = (p.generation(), p.url(), p.revision());
                 p.press(key).map_err(|e| Try::Stop(fail("not_found", e)))?;
                 // A page that took the key changed (its tree, a field, the focus) or began to load another one.

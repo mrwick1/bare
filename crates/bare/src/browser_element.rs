@@ -202,6 +202,34 @@ fn one_box(layout: &bare_layout::fragment::Layout, n: NodeId) -> R<Option<bare_l
     Ok(first)
 }
 
+/// What `offsetTop` and `offsetLeft` measure from: the first box of an element.
+enum First {
+    Box(bare_layout::fragment::Rect),
+    /// A `br`: not a box.
+    Break,
+    None,
+}
+
+/// The first box of `n`, in layout coordinates.
+fn first_box(d: &Dom, it: &mut Interp<'_>, styles: &bare_css::cascade::Styles, layout: &bare_layout::fragment::Layout, n: NodeId) -> R<First> {
+    if let Some(r) = one_box(layout, n)? {
+        return Ok(First::Box(r));
+    }
+    // Layout makes no fragment for an inline box with no background and no border ("culled"): that is not "no box". Its first rectangle
+    // of `getClientRects` (`browser_rects.rs`) is its first line, or its place on the line when it is empty. That rectangle is in window
+    // coordinates, so take the scroll offsets and the sticky offset back out of it.
+    let kind = bare_layout::boxes::Tree::new(&d.doc.borrow(), styles).kind(n);
+    match kind {
+        bare_layout::boxes::Kind::Inline => {
+            let Some(&w) = crate::browser_rects::element_rects(d, it, n)?.first() else { return Ok(First::None) };
+            let (dx, dy) = d.with_geo_it(it, |g, s, _| g.shift(s, n))?;
+            Ok(First::Box(bare_layout::fragment::Rect { x: w.x - dx, y: w.y - dy, ..w }))
+        }
+        bare_layout::boxes::Kind::Break => Ok(First::Break),
+        _ => Ok(First::None),
+    }
+}
+
 /// `None`: the element has no box. Else its offset parent and offsets.
 fn offset(d: &Dom, it: &mut Interp<'_>, el: NodeId) -> R<Option<Offset>> {
     if !d.in_document(it, el)? {
@@ -235,18 +263,17 @@ fn offset(d: &Dom, it: &mut Interp<'_>, el: NodeId) -> R<Option<Offset>> {
     drop(doc);
     let lay = d.layout_shared(it, &styles)?;
     let (layout, areas) = (&lay.layout, &lay.areas);
-    let Some(r) = one_box(layout, el)? else {
-        let doc = d.doc.borrow();
-        return match bare_layout::boxes::Tree::new(&doc, &styles).kind(el) {
-            bare_layout::boxes::Kind::Inline | bare_layout::boxes::Kind::Break => Err(Dom::gate("offsetTop and offsetLeft of an inline box with no background and no border (layout makes no box for it)")),
-            _ => Ok(None),
-        };
+    let r = match first_box(d, it, &styles, layout, el)? {
+        First::Box(r) => r,
+        // A `br` is not a box (Chrome: `LayoutBR` is a text), so its offsets are 0. It still has an offset parent.
+        First::Break => return Ok(Some(Offset { parent, top: 0, left: 0 })),
+        First::None => return Ok(None),
     };
     // A sticky box is where it sticks now.
     let (sx, sy) = d.stuck_now(&styles, areas, el);
     let (mut x, mut y) = (r.x + sx, r.y + sy);
     if let Some(p) = parent.filter(|&p| html_name(&d.doc.borrow(), p) != "body") {
-        let Some(pr) = one_box(layout, p)? else {
+        let First::Box(pr) = first_box(d, it, &styles, layout, p)? else {
             return Err(Dom::gate("offsetTop and offsetLeft in an offset parent that has no box of its own"));
         };
         let ps = styles.style(p).expect("a positioned parent has a style");

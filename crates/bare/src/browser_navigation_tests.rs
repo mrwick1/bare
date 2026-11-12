@@ -688,8 +688,9 @@ fn storage_quota_and_bounds() {
         assert_eq!(js(&mut b, "try { localStorage.setItem('c', rep('c', 30)) } catch (e) { e.name }"), "QuotaExceededError");
         // the same value again is a no-op even at the edge
         assert_eq!(js(&mut b, "localStorage.setItem('a', rep('a', 20)); localStorage.length"), "2");
-        // entries: a sandbox Limit
-        assert_eq!(js(&mut b, "localStorage.setItem('c', '1'); localStorage.setItem('d', '2')"), lim("storage-entries"));
+        // entries: a sandbox bound fails the one write with a QuotaExceededError, as a full browser store does; the page runs on
+        assert_eq!(js(&mut b, "localStorage.setItem('c', '1'); try { localStorage.setItem('d', '2') } catch (e) { e.name + ':' + e.message }"), "QuotaExceededError:Failed to execute 'setItem' on 'Storage': Setting the value of 'd' exceeded the quota (bare bound storage-entries).");
+        assert_eq!(js(&mut b, "try { localStorage.d = '2' } catch (e) { e.name }"), "QuotaExceededError");
         assert_eq!(js(&mut b, "localStorage.length"), "3");
         // origins: a second origin is fine, a third is a Limit
         let mut c = at("https://b.test/");
@@ -697,13 +698,13 @@ fn storage_quota_and_bounds() {
         assert_eq!(js(&mut c, "sessionStorage.setItem('s', '1'); localStorage.setItem('l', '1'); 1"), "1");
         let mut d = at("https://c.test/");
         d.attach_storage(store.clone());
-        assert_eq!(js(&mut d, "localStorage.setItem('l', '1')"), lim("storage-origins"));
+        assert_eq!(js(&mut d, "try { localStorage.setItem('l', '1') } catch (e) { e.name }"), "QuotaExceededError");
         assert_eq!(store.origin_count(false), 2);
         // total across origins
         js(&mut c, "function rep(s, n) { var o = ''; while (n-- > 0) o += s; return o; }");
         let before = store.total_units(false);
         assert!(before <= 70);
-        assert_eq!(js(&mut c, "localStorage.setItem('big', rep('z', 45))"), lim("storage-total"));
+        assert_eq!(js(&mut c, "try { localStorage.setItem('big', rep('z', 45)) } catch (e) { e.name }"), "QuotaExceededError");
         assert_eq!(store.total_units(false), before, "nothing was written");
         // removing the last item of an origin frees the origin slot
         js(&mut c, "localStorage.clear()");
@@ -712,7 +713,14 @@ fn storage_quota_and_bounds() {
         // one item cap
         let mut e = at("https://a.test/");
         e.set_navigation_limits(NavLimits { max_item_units: 10, ..Default::default() });
-        assert_eq!(js(&mut e, "function rep(s, n) { var o = ''; while (n-- > 0) o += s; return o; } localStorage.setItem('k', rep('x', 11))"), lim("storage-item"));
+        js(&mut e, "function rep(s, n) { var o = ''; while (n-- > 0) o += s; return o; }");
+        assert_eq!(js(&mut e, "try { localStorage.setItem('k', rep('x', 11)) } catch (e) { e.name }"), "QuotaExceededError");
+        assert_eq!(js(&mut e, "try { localStorage.k = rep('x', 11) } catch (e) { e.name }"), "QuotaExceededError");
+        // a key over the cap cannot be stored: getItem gives null and removeItem does nothing
+        assert_eq!(js(&mut e, "localStorage.setItem('k', 'v'); localStorage.removeItem(rep('k', 11)); [localStorage.getItem(rep('k', 11)), localStorage.length].join()"), ",1");
+        // the default cap is the origin quota: a module cache over 1M units (Wikipedia stores 1.17M) fits
+        let mut f = at("https://a.test/");
+        assert_eq!(js(&mut f, "localStorage.setItem('m', new Array(1200001).join('x')); localStorage.getItem('m').length"), "1200000");
     });
 }
 
