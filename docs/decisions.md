@@ -1649,3 +1649,11 @@ A click on a GitHub issue title did not navigate. GitHub cancels the click and c
 - Each successful command fires `input` at the host. `beforeinput` is not fired for a script call, as in Chrome.
 - The functions `insert_text`, `delete_back`, `delete_forward`, `insert_paragraph`, `insert_line_break` and `select_all` are `pub(crate)` on `Dom`. Key input and the format commands call them.
 - Gaps: no block merge on Backspace at a block start, no `&nbsp;` rules, `designMode` stays "off".
+
+## execCommand formatting commands (2026-11-12)
+
+`document.execCommand` now runs `bold`, `italic`, `underline`, `insertUnorderedList`, `insertOrderedList`, `createLink`, `unlink`, `insertHTML` and `removeFormat`. This is part b of issue 415.
+The code is a simplified port of Ladybird `Libraries/LibWeb/Editing/Commands.cpp`. It builds the tree that Chrome makes with `styleWithCSS` off.
+`queryCommandState` is true for bold, italic, underline and the two lists. It looks at the ancestors of the start of the active range.
+Each command that changes the tree fires one `input` event with the `inputType` of Chrome. `insertHTML` uses the fragment parser of `createContextualFragment`.
+Gaps. A caret (collapsed selection) changes nothing, so a later `insertText` ignores the pending format. Unwrapping removes the whole element, not only the selected part. Lists handle the direct children of the host only. `queryCommandValue` stays empty. Other formatting commands are not built.
