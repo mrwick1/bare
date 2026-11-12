@@ -1292,3 +1292,65 @@ fn a_snapshot_leaves_out_what_an_adopted_sheet_hides() {
     let (r, error) = s.tool("eval", json!({"js": "var r = document.querySelector('x-card').shadowRoot; getComputedStyle(r.getElementById('seen')).color + ' ' + getComputedStyle(r.getElementById('gone')).display"}));
     assert!(!error && r.to_string().contains("rgb(0, 0, 255) none"), "{r}");
 }
+
+const LATE: &str = "<!doctype html><body><p id=out>none</p>
+<button onclick=\"setTimeout(function(){document.getElementById('out').textContent='confirm=' + confirm('Sure?')}, 50)\">Later</button>
+<button onclick=\"setTimeout(function(){window.open('/b')}, 50)\">Tab later</button>
+<button onclick=\"throw new Error('boom')\">Throw</button>
+<button onclick=\"Promise.reject(new Error('nope'))\">Reject</button>
+<button onclick=\"document.getElementById('out').textContent='quiet'\">Quiet</button></body>";
+
+/// Lets the 50 ms timers of `LATE` fire while no call runs.
+fn idle() {
+    std::thread::sleep(std::time::Duration::from_millis(200));
+}
+
+/// A dialog that a timer opens after `act` returned shows in the next reply, once, with the answer it got (dismiss).
+#[test]
+fn a_late_dialog_shows_in_the_next_reply() {
+    let base = pages(&[("/", LATE)]);
+    let mut s = Server::start();
+    s.tool("open", json!({"url": format!("{base}/")}));
+    let (r, e) = s.tool("act", json!({"op": "click", "loc": "role=button name=\"Later\"", "snapshot": false}));
+    assert!(!e && !r.as_str().unwrap().contains("dialog:"), "the timer has not fired yet: {r}");
+    idle();
+    let (r, _) = s.tool("snapshot", json!({}));
+    assert!(r.as_str().unwrap().contains("dialog: confirm \"Sure?\" -> dismissed"), "{r}");
+    let (r, _) = s.tool("read", json!({}));
+    assert!(r.as_str().unwrap().contains("confirm=false") && !r.as_str().unwrap().contains("dialog:"), "told once: {r}");
+}
+
+/// A tab that a timer opens after `act` returned becomes a session, named in the next reply.
+#[test]
+fn a_late_tab_shows_in_the_next_reply() {
+    let base = pages(&[("/", LATE), ("/b", "<!doctype html><body><p>second page</p></body>")]);
+    let mut s = Server::start();
+    s.tool("open", json!({"url": format!("{base}/")}));
+    let (r, _) = s.tool("act", json!({"op": "click", "loc": "role=button name=\"Tab later\"", "snapshot": false}));
+    assert!(!r.as_str().unwrap().contains("tab"), "{r}");
+    idle();
+    let (r, _) = s.tool("find", json!({"role": "button", "name": "Quiet"}));
+    assert!(r.as_str().unwrap().contains(&format!("opened tab: main~2 {base}/b")), "{r}");
+    let (r, _) = s.tool("read", json!({"session": "main~2"}));
+    assert!(r.as_str().unwrap().contains("second page"), "{r}");
+}
+
+/// An uncaught error or rejection in an action shows as a short script error line; a quiet action gives no extra line.
+#[test]
+fn script_errors_show_in_the_act_and_open_replies() {
+    let base = pages(&[("/", LATE), ("/bad", "<!doctype html><body><p>bad</p><script>null.f()</script></body>")]);
+    let mut s = Server::start();
+    s.tool("open", json!({"url": format!("{base}/")}));
+    let (r, _) = s.tool("act", json!({"op": "click", "loc": "role=button name=\"Throw\""}));
+    let r = r.as_str().unwrap();
+    assert!(r.lines().any(|l| l.starts_with("script error: ") && l.contains("boom") && l.len() <= 230), "{r}");
+    let (r, _) = s.tool("act", json!({"op": "click", "loc": "role=button name=\"Reject\""}));
+    let r = r.as_str().unwrap();
+    assert!(r.lines().any(|l| l.starts_with("script error: ") && l.contains("nope")), "{r}");
+    assert_eq!(r.matches("nope").count(), 1, "one line for one error: {r}");
+    let (r, _) = s.tool("act", json!({"op": "click", "loc": "role=button name=\"Quiet\""}));
+    let r = r.as_str().unwrap();
+    assert!(r.starts_with("ok (") && !r.contains("script error") && !r.contains("dialog") && !r.contains("tab"), "{r}");
+    let (r, _) = s.tool("open", json!({"url": format!("{base}/bad"), "snapshot": true}));
+    assert!(r.as_str().unwrap().lines().any(|l| l.starts_with("script error: ")), "{r}");
+}

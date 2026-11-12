@@ -154,9 +154,16 @@ impl Server {
             let mut a = args.clone();
             a["compact"] = json!(true);
             let (rep, ok) = self.start(&a, url, state)?;
-            return if ok { Ok(rep + "\n" + &self.snapshot(args)?) } else { Err(rep) };
+            if !ok {
+                return Err(rep);
+            }
+            let mark = self.arm(args)?;
+            let snap = self.snapshot(args)?;
+            let errs = self.script_errors(args, mark, &rep)?;
+            return Ok(rep + &errs + "\n" + &snap);
         }
         let (rep, ok) = self.start(args, url, state)?;
+        self.arm(args)?;
         if ok { Ok(rep) } else { Err(rep) }
     }
 
@@ -298,7 +305,61 @@ impl Server {
     }
 
     fn snapshot(&mut self, args: &Value) -> Result<String, String> {
-        self.snapshot_diff(args, false)
+        let out = self.snapshot_diff(args, false)?;
+        self.with_late(args, out)
+    }
+
+    /// Put the lines of `late` before the reply of a read tool.
+    fn with_late(&mut self, args: &Value, out: String) -> Result<String, String> {
+        let late = self.late(args)?;
+        Ok(if late.is_empty() { out } else { format!("{}\n{out}", &late[1..]) })
+    }
+
+    /// Answer the dialogs that come between tool calls with dismiss, and record them and the tabs (`late` reports them). Gives the
+    /// mark of the console history of the session.
+    fn arm(&mut self, args: &Value) -> Result<u64, String> {
+        let live = self.live_mut(args)?;
+        live.session.set_dialog(false, None);
+        Ok(live.session.hist.mark())
+    }
+
+    /// The dialogs and the tabs since the last reply, one line each, each after a newline. A tab becomes a session. Arms again.
+    fn late(&mut self, args: &Value) -> Result<String, String> {
+        let events = self.live_mut(args)?.session.events();
+        self.arm(args)?;
+        let mut out = String::new();
+        for e in events {
+            match e {
+                Event::Dialog { kind, message, accepted, text } => {
+                    let answer = if accepted { "accepted" } else { "dismissed" };
+                    out.push_str(&format!("\ndialog: {kind} {message:?} -> {answer}{}", text.map(|t| format!(" {t:?}")).unwrap_or_default()));
+                }
+                Event::Tab(url) => match self.open_tab(&session_name(args), &url) {
+                    Ok(name) => out.push_str(&format!("\nopened tab: {name} {}", bare_drive::run::safe_url(&url))),
+                    Err(e) => out.push_str(&format!("\ntab not opened: {e}")),
+                },
+            }
+        }
+        Ok(self.live_mut(args)?.red.clean(&out))
+    }
+
+    /// Lines `script error: ...` for the uncaught errors that the console history got after `mark`, each after a newline. Leaves out
+    /// the lines that `have` holds, and stops at 3 script error lines in all.
+    fn script_errors(&mut self, args: &Value, mark: u64, have: &str) -> Result<String, String> {
+        let live = self.live_mut(args)?;
+        let mut room = 3usize.saturating_sub(have.matches("\nscript error: ").count() + usize::from(have.starts_with("script error: ")));
+        let mut out = String::new();
+        for line in live.session.hist.logs_since(mark).filter_map(script_error) {
+            if room == 0 {
+                break;
+            }
+            if !have.lines().chain(out.lines()).any(|l| l == line) {
+                out.push('\n');
+                out.push_str(&line);
+                room -= 1;
+            }
+        }
+        Ok(live.red.clean(&out))
     }
 
     /// With `diff`: only what changed since the last snapshot, and its parents.
@@ -335,7 +396,8 @@ impl Server {
         let max = Self::max(args, 6_000);
         let live = self.live_mut(args)?;
         let out = live.session.with_refs(move |p, refs| snap::find(p, refs, &loc, max))??;
-        Ok(live.red.clean(&out))
+        let out = live.red.clean(&out);
+        self.with_late(args, out)
     }
 
     fn read(&mut self, args: &Value) -> Result<String, String> {
@@ -344,14 +406,16 @@ impl Server {
         let max = Self::max(args, 8_000);
         let live = self.live_mut(args)?;
         let out = live.session.with_refs(move |p, refs| snap::read(p, refs, root, offset, max))??;
-        Ok(live.red.clean(&out))
+        let out = live.red.clean(&out);
+        self.with_late(args, out)
     }
 
     fn links(&mut self, args: &Value) -> Result<String, String> {
         let max = Self::max(args, 8_000);
         let live = self.live_mut(args)?;
         let out = live.session.with_refs(move |p, refs| snap::links(p, refs, max))??;
-        Ok(live.red.clean(&out))
+        let out = live.red.clean(&out);
+        self.with_late(args, out)
     }
 
     fn eval(&mut self, args: &Value) -> Result<String, String> {
@@ -441,6 +505,7 @@ impl Server {
         live.session.set_dialog(accept, args.get("prompt_text").and_then(Value::as_str).map(str::to_string));
         let before = live.session.url();
         let (receipt, ok) = self.run_live(&a, &line)?;
+        let mark = self.live_mut(args)?.session.hist.mark();
         let mut out = receipt;
         let snap = if ok && args.get("snapshot").and_then(Value::as_bool) != Some(false) {
             Some(self.snapshot_diff(args, args.get("diff").and_then(Value::as_bool) != Some(false))?)
@@ -456,18 +521,9 @@ impl Server {
         if before.is_some() && after != before {
             out.push_str(&format!("\nnavigated: {}", bare_drive::run::safe_url(&after.unwrap_or_default())));
         }
-        for e in self.live_mut(args)?.session.events() {
-            match e {
-                Event::Dialog { kind, message, accepted, text } => {
-                    let answer = if accepted { "accepted" } else { "dismissed" };
-                    out.push_str(&format!("\ndialog: {kind} {message:?} -> {answer}{}", text.map(|t| format!(" {t:?}")).unwrap_or_default()));
-                }
-                Event::Tab(url) => match self.open_tab(&session_name(args), &url) {
-                    Ok(name) => out.push_str(&format!("\nopened tab: {name} {}", bare_drive::run::safe_url(&url))),
-                    Err(e) => out.push_str(&format!("\ntab not opened: {e}")),
-                },
-            }
-        }
+        // The errors of the snapshot and the download wait; the receipt has those of the step.
+        out.push_str(&self.script_errors(args, mark, &out)?);
+        out.push_str(&self.late(args)?);
         let out = self.live_mut(args)?.red.clean(&out);
         let mut out = out;
         if let Some(s) = snap {
@@ -546,7 +602,10 @@ impl Server {
         session.set_downloads(dl.clone());
         self.live.insert(name.clone(), Live { session, opt, red, vars, lines: 0, dl, told: Default::default() });
         match self.run_live(&json!({"session": name, "compact": true}), &format!("open {url}")) {
-            Ok((_, true)) => Ok(name),
+            Ok((_, true)) => {
+                self.arm(&json!({"session": name}))?;
+                Ok(name)
+            }
             Ok((r, false)) | Err(r) => {
                 self.live.remove(&name);
                 Err(r)
@@ -623,6 +682,7 @@ impl Server {
         let live = self.live_mut(args)?;
         let red = live.red.clone();
         let said = live.session.screenshot(path.clone(), r, full, &red)?;
+        let said = self.with_late(args, said)?;
         let mut content = vec![json!({"type": "text", "text": said})];
         if inline {
             let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -734,13 +794,42 @@ fn compact(rep: &Report, red: &Redactor) -> String {
             format!("FAILED {}: {}{hint}", f.kind, f.message)
         }
     };
-    let errs: Vec<String> = rep.logs.iter().filter(|(_, l)| matches!(l.level, "error" | "warn")).take(5).map(|(_, l)| format!("console {}: {}", l.level, l.text.chars().take(200).collect::<String>())).collect();
+    let mut scripts: Vec<String> = Vec::new();
+    for s in rep.logs.iter().filter_map(|(_, l)| script_error(l)) {
+        if scripts.len() < 3 && !scripts.contains(&s) {
+            scripts.push(s);
+        }
+    }
+    let errs: Vec<String> = rep.logs.iter().filter(|(_, l)| matches!(l.level, "error" | "warn") && script_error(l).is_none()).take(5).map(|(_, l)| format!("console {}: {}", l.level, l.text.chars().take(200).collect::<String>())).collect();
     let bad: Vec<String> = rep.net.iter().filter(|(_, r)| r.error.is_some() || r.status >= 400).take(5).map(|(_, r)| format!("request {}: {}", r.error.clone().unwrap_or_else(|| r.status.to_string()), bare_drive::run::safe_url(&r.url))).collect();
-    for l in errs.iter().chain(&bad) {
+    for l in scripts.iter().chain(&errs).chain(&bad) {
         out.push('\n');
         out.push_str(l);
     }
     red.clean(&out)
+}
+
+/// An uncaught exception or unhandled rejection of a page script as one line of at most about 200 characters:
+/// `script error: MESSAGE (SOURCE:LINE)` when the text names its first stack frame. Other entries give `None`.
+fn script_error(l: &bare_drive::diag::Log) -> Option<String> {
+    let t = match l.level {
+        "exception" => l.text.strip_prefix("listener of ").and_then(|t| t.split_once(": ")).map_or(l.text.as_str(), |(_, m)| m),
+        "error" => l.text.strip_prefix("Uncaught ")?,
+        _ => return None,
+    };
+    let t = t.split_whitespace().collect::<Vec<_>>().join(" ");
+    // The first stack frame with a line, `at f (src:line:col)` or `at src:line:col`, becomes `(src:line)`; else the first frame.
+    let (msg, at) = match t.split_once(" at ") {
+        Some((m, frames)) => {
+            let places: Vec<&str> = frames.split(" at ").map(|f| f.rsplit_once('(').map_or(f, |(_, p)| p).trim_end_matches(')')).collect();
+            let place = places.iter().find_map(|p| p.rsplit_once(':').filter(|(a, c)| c.parse::<u32>().is_ok() && a.rsplit_once(':').is_some_and(|(_, n)| n.parse::<u32>().is_ok())).map(|(a, _)| a)).unwrap_or(places[0]);
+            (m.to_string(), format!(" ({place})"))
+        }
+        None => (t, String::new()),
+    };
+    let msg: String = msg.chars().take(200usize.saturating_sub(at.chars().count().min(100))).collect();
+    let at: String = at.chars().take(100).collect();
+    Some(format!("script error: {msg}{at}"))
 }
 
 /// Standard base64, for an image in a tool result.
@@ -827,12 +916,12 @@ fn tools() -> Value {
         },
         {
             "name": "snapshot",
-            "description": "Read the live page as text: the accessibility outline, one element per line, indented by nesting: [e7] role \"name\" = \"value\" (states). Act on an element with its ref (act ref=e7, or ref=e7 in step lines). * marks an element new or changed since the last snapshot. A link line shows its href only when it has no name: links lists them all. Refs stay valid until the page navigates. (offscreen) marks a control outside the window: act click scrolls it into view. An iframe shows as one line: its content is not loaded, so it is not in the snapshot. Use this instead of a screenshot.",
+            "description": "Dialogs and tabs that the page opened after the last reply (from a timer, say) show first, one line each: dialog: confirm \"...\" -> dismissed (such a dialog is always dismissed), or opened tab: main~2 URL. This holds for snapshot, act, find, read, links and screenshot. Read the live page as text: the accessibility outline, one element per line, indented by nesting: [e7] role \"name\" = \"value\" (states). Act on an element with its ref (act ref=e7, or ref=e7 in step lines). * marks an element new or changed since the last snapshot. A link line shows its href only when it has no name: links lists them all. Refs stay valid until the page navigates. (offscreen) marks a control outside the window: act click scrolls it into view. An iframe shows as one line: its content is not loaded, so it is not in the snapshot. Use this instead of a screenshot.",
             "inputSchema": {"type": "object", "properties": {"session": S, "mode": {"type": "string", "enum": ["interactive", "all"], "description": "interactive (default): controls, headings, landmarks, dialogs, alerts. all: also the text between them."}, "root": {"type": "string", "description": "A ref: the outline of that element only."}, "offset": {"type": "integer", "description": "Skip this many outline lines (the cut line gives the next offset)."}, "max_chars": {"type": "integer", "description": "Default 12000. A longer outline keeps 80% from the top and 20% from the end, and a line says which refs were cut."}}},
         },
         {
             "name": "act",
-            "description": "Act on the live page like a user and get a short receipt (ok, or the failure with a hint, new console errors and failed requests, navigation, dialogs and the answer given, tabs the page opened: \"opened tab: main~2 URL\" is a new session that you read with session=main~2 and end with close), then what changed on the page (only the lines marked *, with the lines that hold them; the whole outline after a navigation or with diff false). Ops: click, type (clears the field, then types text; \\n is Enter), press (key: Enter, Escape, Tab, Control+a; with ref it acts on that element, and Enter in a form field submits the form), scroll (dy pixels, over ref or the page), goto (url), reload, back, forward (the history), wait (ref until text state: visible, hidden, enabled, checked, text~\"x\"), select (text = the option label or value; options = several for a multiple select; fires input and change), check and uncheck (a checkbox or radio; clicks only when the state differs), hover (pointer over the element: :hover and mouseenter), dblclick, upload (files = local paths for an <input type=file>, at most 100 MiB each; a hidden input needs loc css=\"input[type=file]\"). The action waits for the element up to timeout_ms.",
+            "description": "Act on the live page like a user and get a short receipt (ok, or the failure with a hint, up to 3 script error lines for uncaught errors, new console errors and failed requests, navigation, dialogs and the answer given, tabs the page opened: \"opened tab: main~2 URL\" is a new session that you read with session=main~2 and end with close), then what changed on the page (only the lines marked *, with the lines that hold them; the whole outline after a navigation or with diff false). Ops: click, type (clears the field, then types text; \\n is Enter), press (key: Enter, Escape, Tab, Control+a; with ref it acts on that element, and Enter in a form field submits the form), scroll (dy pixels, over ref or the page), goto (url), reload, back, forward (the history), wait (ref until text state: visible, hidden, enabled, checked, text~\"x\"), select (text = the option label or value; options = several for a multiple select; fires input and change), check and uncheck (a checkbox or radio; clicks only when the state differs), hover (pointer over the element: :hover and mouseenter), dblclick, upload (files = local paths for an <input type=file>, at most 100 MiB each; a hidden input needs loc css=\"input[type=file]\"). The action waits for the element up to timeout_ms.",
             "inputSchema": {"type": "object", "properties": {"session": S, "op": {"type": "string", "enum": ["click", "type", "select", "check", "uncheck", "hover", "dblclick", "upload", "press", "scroll", "goto", "reload", "back", "forward", "wait"]}, "options": {"type": "array", "items": {"type": "string"}, "description": "For select: several options of a multiple select."}, "files": {"type": "array", "items": {"type": "string"}, "description": "For upload: local file paths."}, "dialog": {"type": "string", "enum": ["accept", "dismiss"], "description": "How to answer alert, confirm and prompt dialogs that the action opens. Default accept. The receipt lists each one."}, "prompt_text": {"type": "string", "description": "The answer of an accepted prompt. Default: the default value of the prompt."}, "ref": {"type": "string", "description": "e7 from snapshot or find."}, "loc": {"type": "string", "description": "A step locator instead of ref: role=button name=\"Save\", label=\"Email\", text=\"x\", css=\"...\"."}, "text": {"type": "string"}, "key": {"type": "string"}, "dy": {"type": "number"}, "url": {"type": "string"}, "snapshot": {"type": "boolean", "description": "Default true: add the changes of the page after the action."}, "diff": {"type": "boolean", "description": "Default true. False: add the whole outline instead of the changes."}, "mode": {"type": "string", "enum": ["interactive", "all"]}, "max_chars": {"type": "integer"}}, "required": ["op"]},
         },
         {
