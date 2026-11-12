@@ -1786,3 +1786,13 @@ A focused element inside an editing host now takes key input. Text, Enter, Backs
 - The cascade of the page reads only the elements of the page tree. A rule in another document does not change the page style.
 - `document.styleSheets` of the page does not list a sheet of another document.
 - Not built: `styleSheets` on a document other than the page throws `Illegal invocation`. `SVGStyleElement.sheet` is absent.
+
+## CSSOM at-rules are real rule objects (2026-11-12)
+
+- A web mail app copies the CSS of a message. For a `MEDIA_RULE` it reads `Array.from(rule.cssRules)`. An at-rule was a plain object with `type` and `cssText`, and `CSSRule` did not exist, so the app failed (bare issue #430).
+- `CSSRule` is a global with an illegal constructor. The type constants are on the constructor and on the prototype. Every rule object inherits from `CSSRule.prototype`.
+- `CSSMediaRule` and `CSSSupportsRule` inherit from `CSSConditionRule`, which inherits from `CSSGroupingRule`. They have a live `cssRules` list of real rule objects, `conditionText`, `insertRule`, `deleteRule`, `parentRule` and `parentStyleSheet`. `CSSMediaRule.media` is a `MediaList` with `mediaText`.
+- `CSSKeyframesRule` has `name` and `cssRules` of `CSSKeyframeRule` (`keyText`, `style`). `CSSFontFaceRule` has `style`. `CSSImportRule` has `href`, `media` and `styleSheet`.
+- The interface shape follows Ladybird `LibWeb/CSS` (BSD-2). No code was copied.
+- A group rule makes its sheet text from its nested rules. An edit to a nested rule or a call of `insertRule` or `deleteRule` reaches the `<style>` text. The text of an unedited `@media` rule is now normalized.
+- Not built: `CSSImportRule.styleSheet` is `null` (the loader flattens imports). `MediaList` has only `mediaText`, and it is read-only. `CSSKeyframesRule` has no `appendRule`, `deleteRule` or `findRule`. `conditionText` is read-only. `CSSStyleRule` is not a grouping rule (no nested style rules). `@page`, `@namespace`, `@layer` and `@container` stay plain `CSSRule` objects.
