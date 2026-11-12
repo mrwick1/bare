@@ -1516,3 +1516,13 @@ GitHub read `offsetTop` of an inline box with a border over two lines, and the r
 - `offsetTop` and `offsetLeft` now use the first fragment of the element. CSSOM View asks for the border edge of the first box. An offset parent over more than one line uses its first fragment too.
 - This replaces the last line of "offsetTop of an inline box with nothing to paint": that gate is gone.
 - `snap::settle` waited up to 2 s for an open `fetch` on a stopped page. `tick` gives no next time then, so the loop spun at full CPU. It now sleeps 5 ms between ticks. The wait limit stays 2 s. A test measured 1.996 s of CPU in 2.000 s before and almost none after.
+
+## Filters for the links tool (2026-11-12)
+
+`links` takes three filters: `text`, `root` and `external`.
+`text` keeps the links whose text or URL holds the text, in any case.
+`root` keeps the links inside one element, or the link itself.
+`external` keeps the links to another origin.
+The filters combine, and the reply keeps its format.
+A filter with no match gives one line.
+An agent gets the URL of a named link in one small call, not with `eval`.
