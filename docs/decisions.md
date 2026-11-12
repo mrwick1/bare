@@ -1303,3 +1303,5 @@ Each character of a `bare-mcp` reply costs model tokens. A reply must give what 
 - `links` and the `href` in a line cut tracking parameters (`utm_*`, `fbclid`, `gclid` and similar). `links` gives a path for a link on the origin of the page.
 - Each interactive element keeps its line and ref. The set of interactive lines of each test page is the same before and after.
 - Nothing collapses a long list. A list of links is a list of controls, and each control must stay reachable. The `max_chars` cut still applies.
+## Screenshots paint the whole box (2026-11-12)
+A screenshot of an element taller than the window was cut at the window. The engine has the layout of the whole page. So `screenshot` now paints a canvas as tall as the element box, or as the page with `full_page`, with no scroll. A picture is at most 8000 px tall. The reply says when that cut it. An element above the window is painted from the top of the page.
