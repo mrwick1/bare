@@ -1372,3 +1372,15 @@ GitHub's issues page calls `new Intl.ListFormat(...)` when it loads. Without it 
 - An object that is already open is `"[Circular]"`. A getter that throws gives `"[threw]"`. `toJSON` is not called.
 - The text stops at 4000 characters. A marker gives the full length.
 - The walk visits at most 100000 values and 64 levels. Then the marker says "more than".
+## An action that navigates waits for the next page (2026-11-12)
+
+On GitHub, an `act` receipt and the outline after it showed the old page after a click on a link (#396). Turbo fetches the next page, then changes the address and the body. That fetch took longer than the 2 s that a read waits for a reply.
+
+- In a live session, an action that starts a navigation now waits as `goto` waits: until the page is idle twice, at most the step time limit. At the limit the receipt says `not ready`.
+- A navigation is a document on its way, a new document, a new address (`pushState`), `back`, `forward`, or a click on a link to another address of this tab. A link with `target`, `download` or `javascript:`, or one that only changes the fragment, does not count.
+- The link counts before the page reacts, because a script can take the click and change the address only after its fetch.
+- The HTTP status check of `goto` applies only to a new document. An address that `pushState` changed keeps the status of its document.
+- A step file (`run_steps`, `bare-drive`) does not wait: its next step waits.
+- When the snapshot after an action fails (no layout yet, as when a style sheet is still on its way), the action still succeeds. The receipt gives `no snapshot: REASON`. Before, the act was an error, and the agent could act twice.
+- `sessions` first collects the tabs that the pages opened and no reply named yet (a `step` call takes no events), and lists them.
+- A route that renders after a timer of more than 20 ms after `pushState`, with no fetch, is not waited for.

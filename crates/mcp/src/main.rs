@@ -294,10 +294,21 @@ impl Server {
         if self.live.is_empty() {
             return "no live sessions".into();
         }
+        // A tab that an action opened and no reply named yet (a `step` call takes no events) becomes a session first.
+        let mut names: Vec<String> = self.live.keys().cloned().collect();
+        names.sort();
+        let mut late = String::new();
+        for n in names {
+            let args = json!({"session": n});
+            if self.live.contains_key(&n) && self.live_mut(&args).and_then(|l| l.session.collect()).is_ok() {
+                late.push_str(&self.late(&args).unwrap_or_default());
+            }
+        }
         let mut names: Vec<&String> = self.live.keys().collect();
         names.sort();
         let names: Vec<String> = names.into_iter().cloned().collect();
-        names.into_iter().map(|n| { let u = self.live.get_mut(&n).and_then(|l| l.session.url()).unwrap_or_default(); format!("{n}: {}", bare_drive::run::safe_url(&u)) }).collect::<Vec<_>>().join("\n")
+        let list = names.into_iter().map(|n| { let u = self.live.get_mut(&n).and_then(|l| l.session.url()).unwrap_or_default(); format!("{n}: {}", bare_drive::run::safe_url(&u)) }).collect::<Vec<_>>().join("\n");
+        if late.is_empty() { list } else { format!("{}\n{list}", &late[1..]) }
     }
 
     fn max(args: &Value, d: usize) -> usize {
@@ -508,7 +519,8 @@ impl Server {
         let mark = self.live_mut(args)?.session.hist.mark();
         let mut out = receipt;
         let snap = if ok && args.get("snapshot").and_then(Value::as_bool) != Some(false) {
-            Some(self.snapshot_diff(args, args.get("diff").and_then(Value::as_bool) != Some(false))?)
+            // The action ran: a page with no layout yet (a style sheet still on its way) does not make it a failure, or the agent acts twice.
+            Some(self.snapshot_diff(args, args.get("diff").and_then(Value::as_bool) != Some(false)).unwrap_or_else(|e| format!("no snapshot: {e}: take one later")))
         } else {
             // No snapshot waits for the page, so let a started navigation finish before the URL check (#382).
             self.live_mut(args)?.session.with_refs(|p, _| snap::settle(p))?;
@@ -971,7 +983,7 @@ fn tools() -> Value {
         },
         {
             "name": "sessions",
-            "description": "The live sessions and their URLs.",
+            "description": "The live sessions and their URLs. A tab that a page opened is listed, also when no reply named it yet.",
             "inputSchema": {"type": "object", "properties": {}},
         },
         {

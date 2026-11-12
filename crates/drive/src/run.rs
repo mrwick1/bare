@@ -178,6 +178,9 @@ struct Memo {
     keys: Option<(Handle, Vec<char>)>,
     /// The refs that snapshots minted for the document of now.
     refs: crate::snap::Refs,
+    /// The step of now clicked a link to another address (`link_target`). A page script can take that click and load the next page
+    /// itself (a fetch, then `pushState`), so the step waits for the page as after a `goto`.
+    link: bool,
 }
 
 pub struct StepOut {
@@ -441,7 +444,11 @@ impl Session {
     let deadline = t0 + *timeout;
     let (mut tries, mut busy, mut waited, mut ticks) = (0u32, Duration::ZERO, Duration::ZERO, Ticks::default());
     // With `ready_wait`, an `open`, `goto` or `reload` waits until the page is ready (`ready`); `calm` counts the looks that found it so.
+    // So does an action that started a navigation: a link click, `back`, `forward`, or a script that changed the address.
     let (mut navigating, mut calm) = (false, 0u8);
+    // For an action that navigated: the document before it. A page that stays the same document keeps its old HTTP status, so the
+    // status is checked only for a new document.
+    let mut doc0: Option<usize> = None;
     // When the tries began to fail as `covered` without a break.
     let mut covered: Option<Instant> = None;
     let (cpu0, net0) = (thread_cpu_ns(), bare_net::trace::blocked_us());
@@ -467,7 +474,7 @@ impl Session {
                         let pending = |n: usize| format!("{n} request{} pending", if n == 1 { "" } else { "s" });
                         let state = match (r.fail, r.idle) {
                             (Some(f), _) => Err(f),
-                            (None, Ok(())) if r.status >= 400 => Err(fail("page", format!("status {}: {} (title {:?}): {}", r.status, r.url, r.title, r.text))),
+                            (None, Ok(())) if r.status >= 400 && doc0 != Some(r.doc) => Err(fail("page", format!("status {}: {} (title {:?}): {}", r.status, r.url, r.title, r.text))),
                             (None, idle) => Ok(idle),
                         };
                         let done = match state {
@@ -522,7 +529,10 @@ impl Session {
                 let (a, mut m) = (a.clone(), std::mem::take(memo));
                 let (out, ws) = (opt.out.clone(), red.clone());
                 match host.run(move |p| {
+                    let before = (p.generation(), p.url());
                     let mut tried = attempt(p, &mut m, &a, out.as_ref(), &ws);
+                    // Did the action start a navigation? A document on its way, a new document, a new address (`pushState`), or a link.
+                    let moved = matches!(tried, Try::Done(_)) && (std::mem::take(&mut m.link) || matches!(a, Action::Back | Action::Forward) || p.loading() || (p.generation(), p.url()) != before);
                     let wait = p.tick();
                     // The document of the last `open`, `goto` or `reload` did not load: no later try can pass.
                     if let (Try::Again(_), Some(why)) = (&tried, p.load_error()) {
@@ -533,14 +543,17 @@ impl Session {
                     if let (Try::Again(f), Some(why)) = (&mut tried, p.stopped()) {
                         f.message = format!("{} (the page stopped: {why})", f.message);
                     }
-                    (m, tried, wait, p.take_logs())
+                    (m, (tried, moved, before.0), wait, p.take_logs())
                 }) {
-                    Ok((m, tried, wait, logs)) => {
+                    Ok((m, (tried, moved, doc), wait, logs)) => {
                         *memo = m;
                         for s in memo.typed.drain(..) {
                             red.add(&s);
                         }
                         rep.logs.extend(logs.into_iter().map(|l| (step.line, l)));
+                        if moved {
+                            doc0 = Some(doc);
+                        }
                         (tried, wait)
                     }
                     Err(e) => break Err(fail("page", e)),
@@ -553,7 +566,10 @@ impl Session {
             ticks.add(d);
         }
         match tried {
-            Try::Done(_) if *ready_wait && matches!(step.action, Action::Goto(_) | Action::Reload) => navigating = true,
+            Try::Done(_) if *ready_wait && matches!(step.action, Action::Goto(_) | Action::Reload) => {
+                (navigating, doc0) = (true, None);
+            }
+            Try::Done(_) if *ready_wait && doc0.is_some() => navigating = true,
             Try::Done(note) => break Ok(note),
             Try::More => {}
             Try::Stop(f) => break Err(f),
@@ -871,6 +887,8 @@ struct Look {
     fail: Option<Fail>,
     /// Why the page stopped for good (a script made a fatal error), if it did: it cannot get ready any more.
     stopped: Option<String>,
+    /// The number of the document (`Page::generation`).
+    doc: usize,
     status: u16,
     url: String,
     title: String,
@@ -898,7 +916,7 @@ fn ready(p: &mut Page, at_end: bool) -> Look {
         };
         p.touched();
     }
-    Look { ran, next, idle, fail, stopped, status, url: safe_url(&url), title: locate::norm(&title), text, logs: p.take_logs() }
+    Look { ran, next, idle, fail, stopped, doc: p.generation(), status, url: safe_url(&url), title: locate::norm(&title), text, logs: p.take_logs() }
 }
 
 /// One try of a step, on the page thread.
@@ -911,7 +929,9 @@ fn attempt(p: &mut Page, m: &mut Memo, a: &Action, out: Option<&PathBuf>, red: &
             Action::Forward => p.go(1).map_err(|e| Try::Stop(fail("page", e)))?,
             Action::Click(loc) => {
                 let h = one(p, m, loc)?;
+                let link = link_target(p, h);
                 p.click(h).map_err(|r| refused(p, h, r))?;
+                m.link = link;
             }
             Action::Type(loc, text) => {
                 if m.keys.is_none() {
@@ -1015,6 +1035,30 @@ fn attempt(p: &mut Page, m: &mut Memo, a: &Action, out: Option<&PathBuf>, red: &
         Ok(note) => Try::Done(note),
         Err(t) => t,
     }
+}
+
+/// Is `h` in a link (`<a>` or `<area>` with `href`) that leads to another address of this tab? Not for a new tab (`target`), a
+/// download, a `javascript:` URL, or the same address with another fragment.
+fn link_target(p: &mut Page, h: Handle) -> bool {
+    let Some(here) = p.url() else { return false };
+    let Some(b) = p.browser() else { return false };
+    let doc = b.document();
+    let d = doc.borrow();
+    let attr = |n, name: &str| d.find_atom(name).and_then(|a| d.attr(n, a)).map(str::to_string);
+    let mut cur = Some(h.node);
+    while let Some(n) = cur {
+        if !d.is_foreign(n) && matches!(d.element_name(n), "a" | "area") && let Some(href) = attr(n, "href") {
+            let other_tab = attr(n, "target").is_some_and(|t| !matches!(t.trim().to_ascii_lowercase().as_str(), "" | "_self" | "_top" | "_parent"));
+            if other_tab || attr(n, "download").is_some() || href.trim_start().to_ascii_lowercase().starts_with("javascript:") {
+                return false;
+            }
+            let base = |u: &str| u.split('#').next().unwrap_or("").to_string();
+            // `Url::join` resolves the href against the page, as `new URL(href, location)` does in JS.
+            return bare_url::Url::parse(&here).ok().and_then(|u| u.join(&href).ok()).is_some_and(|to| base(&to.to_string()) != base(&here));
+        }
+        cur = d.parent(n);
+    }
+    false
 }
 
 /// The host and the path of the page, for the jar.
