@@ -1642,3 +1642,10 @@ A click on a GitHub issue title did not navigate. GitHub cancels the click and c
 
 ## A relative box paints over an earlier absolute sibling (2026-11-12)
 Layout puts the fragment of an absolute box after the other fragments of its containing block, and drops its static position. So the fragment order is not the tree order. The painter and the hit test put an earlier absolute veil over a later relative card (bare issue #414). Now both sort the positioned boxes of a context with `z-index` 0 by the path of child numbers in the tree, as CSS 2.1 Appendix E asks. The sort runs only when one of the boxes is out of flow. Boxes with a non-zero `z-index` still sort by `(z, fragment order)`: an absolute and a relative box with the same non-zero `z-index` can still be in the wrong order.
+
+## "In select" mode for a select fragment (2026-11-12)
+
+- Gmail sets `innerHTML` on a `select`. The parse returned `Unsupported` and the script stopped (bare issue #424).
+- The tree builder now has the "in select" mode (classic rules, HTML 13.2.6.4.16). A fragment with a `select` context starts in it.
+- The rules follow html5ever (`tree_builder/rules.rs`, MIT OR Apache-2.0) and Ladybird (`HTMLParser::handle_in_select`, BSD-2-Clause). `option`, `optgroup`, `hr`, text, comments, `script` and `template` stay. Other tags, such as `div` and `td`, are dropped. Their text stays.
+- A page still reads a `select` element as "in body". The page mode needs a `select` in scope and the reset of the mode, so it is not built.

@@ -168,9 +168,8 @@ fn scripts_of_a_contextual_fragment_run_when_they_go_in_a_page_as_in_chrome() {
 }
 
 #[test]
-fn a_contextual_fragment_in_a_table_or_foreign_context_parses_and_a_select_context_is_a_gate() {
-    // Table contexts use the table insertion modes, and a foreign context the foreign rules (`bare_html::tree::fragment`). The tree builder has
-    // no select insertion mode: nothing is faked there.
+fn a_contextual_fragment_in_a_table_or_foreign_context_parses_and_a_select_context_has_the_select_mode() {
+    // Table contexts use the table insertion modes, a foreign context the foreign rules, and a select context the "in select" mode (`bare_html::tree::fragment`).
     let mut b = page("<table id=t><tbody id=tb><tr id=tr><td id=td>a</td></tr></tbody></table><select id=s></select><svg id=v></svg><p id=ok>x</p>");
     let html = |b: &mut Browser, id: &str| {
         let src = format!("var r = document.createRange(); r.selectNodeContents(document.getElementById('{id}')); var f = r.createContextualFragment('<td>x</td>'); var d = document.createElement('div'); d.appendChild(f); d.innerHTML");
@@ -181,12 +180,23 @@ fn a_contextual_fragment_in_a_table_or_foreign_context_parses_and_a_select_conte
     assert_eq!(html(&mut b, "tr"), "<td>x</td>");
     assert_eq!(html(&mut b, "td"), "x");
     let src = "var r = document.createRange(); r.selectNodeContents(document.getElementById('s')); r.createContextualFragment('<td>x</td>')";
-    assert_eq!(js(&mut b, src), "unsupported:fragment context: select insertion mode");
+    assert_eq!(js(&mut b, &format!("{src}.firstChild.data")), "x");
     // In an SVG context, `<path>` is an SVG element and `<td>` is ignored (the "in body" rules).
     assert_eq!(js(&mut b, "var r = document.createRange(); r.selectNodeContents(document.getElementById('v')); var f = r.createContextualFragment('<path/><td>x</td>'); f.firstChild.namespaceURI + ' ' + f.childNodes.length"), "http://www.w3.org/2000/svg 2");
     // A text in a table cell has the cell as context; a document or an `html` start has the body.
     assert_eq!(js(&mut b, "var r = document.createRange(); r.setStart(document.getElementById('td').firstChild, 0); r.createContextualFragment('<td>x</td><i>y</i>').childNodes.length"), "2");
     assert_eq!(js(&mut b, "var r = document.createRange(); r.setStart(document.documentElement, 0); r.createContextualFragment('<td>x</td><i>y</i>').childNodes.length"), "2");
+}
+
+#[test]
+fn select_inner_html_uses_the_select_mode() {
+    let mut b = page("<select id=s></select>");
+    js(&mut b, "var s = document.getElementById('s'); s.innerHTML = '<option>1</option><optgroup><option>2</option></optgroup>';");
+    assert_eq!(js(&mut b, "s.options.length"), "2");
+    assert_eq!(js(&mut b, "s.innerHTML"), "<option>1</option><optgroup><option>2</option></optgroup>");
+    // The standard drops `div` and `td` in a select and keeps their text.
+    js(&mut b, "s.innerHTML = '<div>a<option>b</option></div><td>c</td>';");
+    assert_eq!(js(&mut b, "s.innerHTML"), "a<option>b</option>c");
 }
 
 #[test]
