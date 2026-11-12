@@ -1545,6 +1545,7 @@ An agent gets the URL of a named link in one small call, not with `eval`.
 - bare loads no web fonts, so the set never fires these events on its own. A page can still dispatch them.
 - `values`, `keys`, `entries` and `Symbol.iterator` return iterators of the private member `Set`.
 - The set stays lazy. A page that never reads `document.fonts` or `FontFace` pays nothing.
+
 ## A link inside a heading shows in the snapshot (2026-11-12)
 
 GitHub puts each issue title in a link inside an `<h3>`. The snapshot walk treated a heading as a leaf, so it skipped the link. `links` uses the same walk, so it missed the link too.
@@ -1552,6 +1553,7 @@ GitHub puts each issue title in a link inside an `<h3>`. The snapshot walk treat
 - A heading stays a leaf only when it holds no control.
 - A heading that holds a control shows its children, so the link gets a line and a ref.
 - When the first line under the heading has the same name, the heading line drops its name. The title then shows once.
+
 ## Custom property sets as numbers (2026-11-12)
 
 GitHub sets about 2,500 custom properties on the root. Each new set copied all names and texts of the parent set and hashed them again. That took about 40% of each cascade.
@@ -1564,6 +1566,7 @@ GitHub sets about 2,500 custom properties on the root. Each new set copied all n
 - The sets are found by a hash that reads 8 bytes at a step.
 - `var()` resolution, fallbacks, circles, `initial`, `inherit` and `unset` do not change. A dump of every style of a saved GitHub page is the same before and after.
 - The names are not numbered in the rule set. A name is hashed only when the cascade makes a new set, about 200 times for a GitHub page.
+
 ## A ReadableStream as the body of a Response (2026-11-12)
 
 Pages build a Response from a stream, e.g. `new Response(stream.pipeThrough(new TextEncoderStream())).text()`. bare threw "ReadableStream request bodies are not supported", with the word "request" for a Response.
@@ -1575,6 +1578,7 @@ Pages build a Response from a stream, e.g. `new Response(stream.pipeThrough(new 
 - `clone()` of a stream body is `Unsupported`: it needs `tee`.
 - A request body stream stays a `TypeError`. `bare_net` sends a request body as one byte slice (`http::Request::body`), on a worker thread. A streamed upload needs a chunked upload there and a body that the worker reads from the page. That is not cheap. The text now names the call (`Request` or `XMLHttpRequest`) and the reason.
 - `Blob.stream()` is new: it is the `body` of a hidden byte Response. The check of this change needs it.
+
 ## A tick runs queued promise jobs (2026-11-12)
 
 - An agent `eval` runs its script outside a task. Its promise jobs stayed queued until a timer or a reply came due.
