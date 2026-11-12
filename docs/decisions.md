@@ -1754,3 +1754,11 @@ A focused element inside an editing host now takes key input. Text, Enter, Backs
 - The hashes are one-shot functions. Only `digest` needs them, and it has the whole message at once. A streaming API waits for a caller that needs one.
 - `SubtleCrypto` is the sixth lazy global of `browser_web.rs`. The first read of any of the six globals builds all their objects, as before.
 - Not built: a detached buffer hashes as empty. The standard rejects it with `TypeError`.
+
+## A `<style>` in any document has a sheet (2026-11-12)
+
+- Closure's CSS sanitizer parses CSS in a `createHTMLDocument` document and reads `sheet.cssRules`. `sheet` was `null` there, so a web mail message view failed (bare issue #429).
+- A `style` element gets a `CSSStyleSheet` when its root is any document or a shadow root. This follows "update a style block" in the CSSOM standard and Ladybird `StyleElementUtils.cpp`. A removed element has `sheet` `null`.
+- The cascade of the page reads only the elements of the page tree. A rule in another document does not change the page style.
+- `document.styleSheets` of the page does not list a sheet of another document.
+- Not built: `styleSheets` on a document other than the page throws `Illegal invocation`. `SVGStyleElement.sheet` is absent.
