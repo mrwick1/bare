@@ -1639,3 +1639,10 @@ A click on a GitHub issue title did not navigate. GitHub cancels the click and c
 - After a soft navigation, GitHub reads `meta[name=visitor-payload].content` and decodes it with `atob`. bare had no `HTMLMetaElement.content`.
 - `meta` now reflects `name`, `content`, `httpEquiv` and `media`.
 - `meta` gets `HTMLMetaElement.prototype` from its first wrapper. Pages read `meta.content` without naming the interface, so the lazy switch of `browser_html.rs` does not apply to it.
+
+## FileReader as a shim (2026-11-12)
+
+- A page that reads a file with `FileReader` stopped with `ReferenceError`. The upload then did nothing.
+- `FileReader` is `shims/filereader.js`. It runs on `Blob.prototype.arrayBuffer` and `TextDecoder`, and it is made at the first read of its name.
+- `abort` on an idle reader clears `result`. The File API requires this, so the shim follows it.
+- Only UTF-8 works in `readAsText`. The host `TextDecoder` stops other labels with `Unsupported`, which a shim cannot catch.
