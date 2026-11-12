@@ -30,8 +30,9 @@
 //!   `insertLink`, `formatRemove` and `insertHTML`.
 //!
 //! Gaps (on purpose, listed)
-//! - A format command with a caret (collapsed selection) changes nothing and returns true. A later `insertText` ignores the pending
-//!   state.
+//! - A format command with a caret (collapsed selection) sets the "state override" of the spec for `bold`, `italic` and `underline`
+//!   (Ladybird `Commands.cpp` and `Internal/Algorithms.cpp`). The next `insertText` or typed text gets the style, or leaves the
+//!   element that has it. Moving the caret drops the override. The other styles have no override. `value override` is not built.
 //! - Unwrapping takes the whole element away, also the part outside the selection (Chrome splits the element). Wrapping does not
 //!   merge with a neighbour or split block elements; the selection is cut with `extractContents`.
 //! - The lists look at the children of the host only: a block nested deeper is not turned into an item. A list inside a list is not made.
@@ -311,6 +312,8 @@ impl Dom {
         if text.is_empty() {
             return Ok(false);
         }
+        // The override of a caret that has not moved is used once; any other insert drops it.
+        let over = self.st.borrow_mut().style_override.take().filter(|&(p, _)| p == a.start && a.start == a.end).map(|(_, o)| o);
         let (c, o) = self.cut_selection(it, &a)?;
         let add = self.js_str(it, text)?;
         let len = text.encode_utf16().count() as u32;
@@ -345,9 +348,80 @@ impl Dom {
                 (self.nd(it, t)?, 0)
             }
         };
-        caret(self, it, a.sel, node, at + len)?;
+        let (node, end) = match over {
+            Some(o) => self.apply_override(it, host, node, at, len, o)?,
+            None => (node, at + len),
+        };
+        caret(self, it, a.sel, node, end)?;
         self.input_event(it, host, "insertText", Some(text))?;
         Ok(true)
+    }
+
+    /// Give the text `at..at + len` of `node` the state override `ov` (`b`, `i`, `u`): wrap it in the element that it lacks, or
+    /// move it out of the one that it has, splitting that element. Gives the caret after the text.
+    fn apply_override(&self, it: &mut Interp<'_>, host: NodeId, node: NodeId, at: u32, len: u32, ov: [Option<bool>; 3]) -> R<(NodeId, u32)> {
+        const TAGS: [&[&str]; 3] = [&["b", "strong"], &["i", "em"], &["u"]];
+        const NAMES: [&str; 3] = ["b", "i", "u"];
+        let (todo, total) = {
+            let doc = self.doc.borrow();
+            let todo: Vec<(usize, bool)> =
+                (0..3).filter_map(|i| ov[i].filter(|&v| v != ancestor_with(&doc, host, node, TAGS[i]).is_some()).map(|v| (i, v))).collect();
+            (todo, units(&doc, node).map_or(0, |u| u.len() as u32))
+        };
+        if todo.is_empty() {
+            return Ok((node, at + len));
+        }
+        // Make the new text a Text of its own.
+        let mut t = node;
+        if at + len < total {
+            let w = self.wrap(it, t)?;
+            call(self, it, w, "splitText", &[num(at + len)])?;
+        }
+        if at > 0 {
+            let w = self.wrap(it, t)?;
+            let r = call(self, it, w, "splitText", &[num(at)])?;
+            t = self.nd(it, r)?;
+        }
+        for (i, on) in todo {
+            let tw = self.wrap(it, t)?;
+            if on {
+                let el = self.make(it, NAMES[i])?;
+                let pw = self.wrap(it, self.doc.borrow().parent(t).expect("in the host"))?;
+                call(self, it, pw, "insertBefore", &[el, tw])?;
+                call(self, it, el, "appendChild", &[tw])?;
+                continue;
+            }
+            // Climb out of the element, one level at a time. What follows the text at a level goes to a copy of that level.
+            loop {
+                let (p, after, pp, next) = {
+                    let doc = self.doc.borrow();
+                    let p = doc.parent(t).expect("in the host");
+                    let after: Vec<NodeId> = doc.children(p).skip(index(&doc, t) as usize + 1).collect();
+                    let pp = doc.parent(p).expect("in the host");
+                    (p, after, pp, doc.children(pp).nth(index(&doc, p) as usize + 1))
+                };
+                let (pw, ppw) = (self.wrap(it, p)?, self.wrap(it, pp)?);
+                if !after.is_empty() {
+                    let copy = call(self, it, pw, "cloneNode", &[Value::Bool(false)])?;
+                    for f in after {
+                        let fw = self.wrap(it, f)?;
+                        call(self, it, copy, "appendChild", &[fw])?;
+                    }
+                    let nw = self.wrap_opt(it, next)?;
+                    call(self, it, ppw, "insertBefore", &[copy, nw])?;
+                }
+                let nw = self.wrap_opt(it, self.doc.borrow().children(pp).nth(index(&self.doc.borrow(), p) as usize + 1))?;
+                call(self, it, ppw, "insertBefore", &[tw, nw])?;
+                if self.doc.borrow().children(p).next().is_none() {
+                    self.remove(it, p)?;
+                }
+                let doc = self.doc.borrow();
+                if ancestor_with(&doc, host, t, TAGS[i]).is_none() {
+                    break;
+                }
+            }
+        }
+        Ok((t, len))
     }
 
     fn delete_step(&self, it: &mut Interp<'_>, back: bool) -> R<bool> {
@@ -615,12 +689,19 @@ impl Dom {
     }
 
     /// `bold`, `italic` and `underline`.
-    fn format_inline(&self, it: &mut Interp<'_>, tags: &[&str], name: &str, kind: &str) -> R<bool> {
+    pub(crate) fn format_inline(&self, it: &mut Interp<'_>, tags: &[&str], name: &str, kind: &str) -> R<bool> {
         let Some((a, host)) = self.editing(it)? else { return Ok(false) };
+        let on = ancestor_with(&self.doc.borrow(), host, a.start.0, tags).is_some();
         if a.start == a.end {
+            // A caret: the state override of the spec. A second toggle that matches the tree drops it.
+            let i = ["b", "i", "u"].iter().position(|&n| n == name).expect("a style");
+            let mut st = self.st.borrow_mut();
+            let mut ov = st.style_override.take().filter(|&(p, _)| p == a.start).map_or([None; 3], |(_, o)| o);
+            let want = !ov[i].unwrap_or(on);
+            ov[i] = (want != on).then_some(want);
+            st.style_override = Some((a.start, ov));
             return Ok(true);
         }
-        let on = ancestor_with(&self.doc.borrow(), host, a.start.0, tags).is_some();
         if on {
             self.unwrap_in(it, &a, host, tags)?;
         } else {
@@ -635,10 +716,11 @@ impl Dom {
         let Some((a, host)) = self.editing(it)? else { return Ok(false) };
         let doc = self.doc.borrow();
         let inside = |tags: &[&str]| ancestor_with(&doc, host, a.start.0, tags);
+        let over = self.st.borrow().style_override.filter(|&(p, _)| p == a.start && a.start == a.end).map_or([None; 3], |(_, o)| o);
         Ok(match name {
-            "bold" => inside(&["b", "strong"]).is_some(),
-            "italic" => inside(&["i", "em"]).is_some(),
-            "underline" => inside(&["u"]).is_some(),
+            "bold" => over[0].unwrap_or_else(|| inside(&["b", "strong"]).is_some()),
+            "italic" => over[1].unwrap_or_else(|| inside(&["i", "em"]).is_some()),
+            "underline" => over[2].unwrap_or_else(|| inside(&["u"]).is_some()),
             "insertunorderedlist" => inside(&["ul", "ol"]).is_some_and(|l| tag(&doc, l) == "ul"),
             "insertorderedlist" => inside(&["ul", "ol"]).is_some_and(|l| tag(&doc, l) == "ol"),
             _ => false,

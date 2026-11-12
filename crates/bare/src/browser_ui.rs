@@ -903,10 +903,24 @@ impl Dom {
     /// False when the key is not an editing key, so that the other rules run.
     fn host_key(&self, it: &mut Interp<'_>, f: NodeId, k: &KeyInput) -> R<bool> {
         let m = k.mods;
+        let host = self.editing_host(f).expect("checked");
+        // Control+B, +I and +U (Meta on macOS) run the format command as the default action of the key.
+        let style: Option<(&[&str], &str, &str)> = match k.key.to_ascii_lowercase().as_str() {
+            "b" => Some((&["b", "strong"], "b", "formatBold")),
+            "i" => Some((&["i", "em"], "i", "formatItalic")),
+            "u" => Some((&["u"], "u", "formatUnderline")),
+            _ => None,
+        };
+        if let Some((tags, name, kind)) = style.filter(|_| (m.ctrl || m.meta) && !m.alt && !m.shift) {
+            self.caret_into_host(it, f)?;
+            if self.input_ev(it, host, "beforeinput", kind, None)? {
+                self.format_inline(it, tags, name, kind)?;
+            }
+            return Ok(true);
+        }
         if m.alt || m.meta {
             return Ok(false);
         }
-        let host = self.editing_host(f).expect("checked");
         let (kind, text) = match k.key.as_str() {
             "Enter" => (if m.shift { "insertLineBreak" } else { "insertParagraph" }, None),
             "Backspace" => ("deleteContentBackward", None),

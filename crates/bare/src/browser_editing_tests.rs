@@ -238,3 +238,60 @@ fn drive_type_edits_a_contenteditable() {
         assert_eq!(js(&mut b, "e.textContent + '|' + e.children.length"), "ab|2");
     });
 }
+
+/// Press Control+b: bold with a caret sets a state override; the next typed text gets it, a second press clears it (Editing spec,
+/// "state override"; Ladybird `Editing/Commands.cpp`).
+#[test]
+fn control_b_styles_the_next_typed_text() {
+    big(|| {
+        let mut b = browser();
+        js(&mut b, "document.body.innerHTML = '<div contenteditable id=e></div>';");
+        let e = b.query("#e").unwrap().unwrap();
+        b.focus(e).unwrap();
+        for (i, k) in ["a", "Space", "Control+b", "x", "Control+b", "y"].iter().enumerate() {
+            b.drive_key(if i == 0 { Some(e) } else { None }, k).unwrap();
+        }
+        assert_eq!(js(&mut b, "e.innerHTML"), "a <b>x</b>y");
+        for (k, tag) in [("Control+i", "i"), ("Control+u", "u")] {
+            js(&mut b, "e.innerHTML = ''; getSelection().collapse(e, 0);");
+            for k in [k, "x", k, "y"] {
+                b.drive_key(None, k).unwrap();
+            }
+            assert_eq!(js(&mut b, "e.innerHTML"), format!("<{tag}>x</{tag}>y"));
+        }
+    });
+}
+
+#[test]
+fn a_canceled_keydown_stops_control_b() {
+    big(|| {
+        let mut b = browser();
+        js(&mut b, "document.body.innerHTML = '<div contenteditable id=e></div>'; e.addEventListener('keydown', function (ev) { if (ev.ctrlKey) ev.preventDefault(); });");
+        let e = b.query("#e").unwrap().unwrap();
+        b.focus(e).unwrap();
+        js(&mut b, "getSelection().collapse(e, 0);");
+        b.drive_key(None, "Control+b").unwrap();
+        b.drive_key(None, "x").unwrap();
+        assert_eq!(js(&mut b, "e.innerHTML"), "x");
+    });
+}
+
+#[test]
+fn bold_button_on_a_caret_styles_the_next_text() {
+    big(|| {
+        let mut b = browser();
+        js(&mut b, &format!("{SETUP} document.execCommand('insertText', false, 'a');"));
+        assert_eq!(js(&mut b, "document.execCommand('bold')"), "true");
+        assert_eq!(js(&mut b, "document.queryCommandState('bold')"), "true");
+        js(&mut b, "document.execCommand('insertText', false, 'x')");
+        assert_eq!(js(&mut b, "e.innerHTML + '|' + document.queryCommandState('bold')"), "a<b>x</b>|true");
+        // A caret that moved drops the override.
+        js(&mut b, "document.execCommand('bold'); s.collapse(e.firstChild, 0); document.execCommand('insertText', false, 'z')");
+        assert_eq!(js(&mut b, "e.innerHTML"), "za<b>x</b>");
+        // Italic and underline, and a style off in the middle of bold text.
+        js(&mut b, "e.innerHTML = ''; s.collapse(e, 0); document.execCommand('italic'); document.execCommand('insertText', false, 'i');");
+        assert_eq!(js(&mut b, "e.innerHTML"), "<i>i</i>");
+        js(&mut b, "e.innerHTML = '<b>abcd</b>'; s.collapse(e.firstChild.firstChild, 2); document.execCommand('bold'); document.execCommand('insertText', false, 'X');");
+        assert_eq!(js(&mut b, "e.innerHTML"), "<b>ab</b>X<b>cd</b>");
+    });
+}

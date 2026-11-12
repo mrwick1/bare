@@ -1084,10 +1084,10 @@ fn attempt(p: &mut Page, m: &mut Memo, a: &Action, out: Option<&PathBuf>, red: &
                     },
                     None => None,
                 };
-                let before = (p.generation(), p.url(), p.revision());
+                let before = (p.generation(), p.url(), p.revision(), p.text_revision());
                 p.press(key).map_err(|e| Try::Stop(fail("not_found", e)))?;
                 // A page that took the key changed (its tree, a field, the focus) or began to load another one.
-                if (p.generation(), p.url(), p.revision()) == before && !p.loading() {
+                if (p.generation(), p.url(), p.revision(), p.text_revision()) == before && !p.loading() {
                     return Ok(Some(format!("no effect: {key} changed nothing{}", h.map_or_else(String::new, |h| format!(" at {}", p.describe(h))))));
                 }
             }

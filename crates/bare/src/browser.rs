@@ -405,6 +405,8 @@ pub(crate) struct FileRef {
 
 #[derive(Default)]
 pub(crate) struct State {
+    /// The state override of a caret (`browser_editing.rs`): where the caret was and what bold, italic and underline are to be.
+    pub style_override: Option<((NodeId, u32), [Option<bool>; 3])>,
     pub by_node: IdTab<NodeId, ObjId>,
     pub by_obj: IdTab<ObjId, Target>,
     pub listeners: IdMap<Target, Vec<Listener>>,

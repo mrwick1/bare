@@ -913,6 +913,26 @@ fn press_that_changes_nothing_says_so() {
 }
 
 #[test]
+fn press_that_types_in_a_contenteditable_does_not_say_no_effect() {
+    let mut s = Server::start();
+    let page = "<!doctype html><body><div id=e contenteditable=true aria-label=\"Editor\">a </div></body>";
+    let (snap, _) = s.tool("open", json!({"url": focus_page_server(page), "snapshot": true, "timeout_ms": 20000}));
+    let snap = snap.as_str().unwrap().to_string();
+    let r = ref_of(&snap, "Editor");
+    for key in ["Control+b", "x", "Control+b", "y"] {
+        let (out, error) = s.tool("act", json!({"op": "press", "ref": r, "key": key, "snapshot": false}));
+        let out = out.as_str().unwrap().to_string();
+        assert!(!error, "{out}");
+        // Control+b alone changes no document node: only the typed keys must not say it.
+        if key.len() == 1 {
+            assert!(!out.contains("no effect"), "{key}: {out}");
+        }
+    }
+    let (v, _) = s.tool("eval", json!({"js": "document.getElementById('e').innerHTML"}));
+    assert_eq!(v, json!("a <b>x</b>y"));
+}
+
+#[test]
 fn acting_on_a_hidden_element_says_it_is_hidden() {
     let mut s = Server::start();
     let (snap, _) = s.tool("open", json!({"url": focus_page_server(TWO_SEARCH), "snapshot": true, "timeout_ms": 20000}));
@@ -1928,7 +1948,7 @@ fn links_filter_by_text_root_and_origin() {
     let (r, error) = s.tool("links", json!({"text": "GITHUB.com/tokio"}));
     assert!(!error && count(&r) == 1 && r.as_str().unwrap().contains("\"Repository\" -> https://github.com/tokio-rs/tokio"), "{r}");
     let (r, _) = s.tool("links", json!({"text": "github"}));
-    assert!(count(&r) == 2 && r.as_str().unwrap().contains("\"About GitHub\" -> /about"), "{r}");
+    assert!(count(&r) == 2 && r.as_str().unwrap().contains(&format!("\"About GitHub\" -> {base}/about")), "{r}");
     // `root` keeps the links inside an element, or the link itself.
     let nav = ref_of(&snap, "navigation \"Top\"");
     let (r, error) = s.tool("links", json!({"root": nav}));
@@ -1970,7 +1990,26 @@ fn a_link_inside_a_heading_shows_in_snapshot_and_links() {
     assert!(snap.contains("heading \"Install\"") && !snap.contains("href=#install"), "{snap}");
     let (r, _) = s.tool("links", json!({"text": "/issues/"}));
     let r = r.as_str().unwrap();
-    assert!(r.contains("\"First issue\" -> /issues/101") && r.contains("\"Second issue\" -> /issues/102"), "{r}");
+    assert!(r.contains("\"First issue\" -> http") && r.contains("/issues/101\n") && r.contains("\"Second issue\" -> http") && r.contains("/issues/102"), "{r}");
+}
+
+/// A top navigation, a paragraph link, a footer link, and a header in an article (not a banner).
+const LANDMARK_LINKS_PAGE: &str = "<!doctype html><body><nav aria-label=Top><a href='/docs/release-notes.html'>Release notes</a></nav>\
+<p><a href='/about'>Plain link</a></p><footer><a href='/legal'>Legal</a></footer>\
+<article><header><a href='/inside'>Inside article</a></header></article></body>";
+
+#[test]
+fn links_name_the_nearest_landmark_of_each_link() {
+    let mut s = Server::start();
+    opened(&mut s, &html_app(LANDMARK_LINKS_PAGE));
+    let (r, error) = s.tool("links", json!({}));
+    let r = r.as_str().unwrap();
+    assert!(!error, "{r}");
+    let line = |t: &str| r.lines().find(|l| l.contains(t)).unwrap_or_else(|| panic!("no line for {t}: {r}")).to_string();
+    assert!(line("Release notes").ends_with("-> /docs/release-notes.html (navigation \"Top\")"), "{r}");
+    assert!(line("Legal").ends_with("-> /legal (contentinfo)"), "{r}");
+    assert!(line("Plain link").ends_with("-> /about") && !line("Plain link").contains('('), "{r}");
+    assert!(line("Inside article").ends_with("-> /inside"), "{r}");
 }
 
 /// A plain page with no timer and a text file to fetch.
