@@ -433,8 +433,11 @@ impl Server {
 
     fn links(&mut self, args: &Value) -> Result<String, String> {
         let max = Self::max(args, 8_000);
+        let text = args.get("text").and_then(Value::as_str).filter(|t| !t.is_empty()).map(str::to_string);
+        let root = ref_arg(args, "root")?;
+        let external = args.get("external").and_then(Value::as_bool).unwrap_or(false);
         let live = self.live_mut(args)?;
-        let out = live.session.with_refs(move |p, refs| snap::links(p, refs, max))??;
+        let out = live.session.with_refs(move |p, refs| snap::links(p, refs, max, text.as_deref(), root, external))??;
         let out = live.red.clean(&out);
         self.with_late(args, out)
     }
@@ -1000,8 +1003,8 @@ fn tools() -> Value {
         },
         {
             "name": "links",
-            "description": "The links of the page: ref, text and URL (a path for a link on the origin of the page, with tracking parameters cut).",
-            "inputSchema": {"type": "object", "properties": {"session": S, "max_chars": {"type": "integer"}}},
+            "description": "The links of the page: ref, text and URL (a path for a link on the origin of the page, with tracking parameters cut). To get the URL of one named link, filter: links {text: \"Repository\"}. Filters combine.",
+            "inputSchema": {"type": "object", "properties": {"session": S, "text": {"type": "string", "description": "Only links whose text or URL holds this text (any case)."}, "root": {"type": "string", "description": "A ref: only the links inside that element, or the link itself."}, "external": {"type": "boolean", "description": "True: only links to another origin."}, "max_chars": {"type": "integer"}}},
         },
         {
             "name": "screenshot",

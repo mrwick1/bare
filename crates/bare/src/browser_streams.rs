@@ -23,7 +23,8 @@
 //! callback runs. Objects count until the embedder collects them (`Browser::collect`): the VM never collects by itself.
 //!
 //! Gates (explicit `Unsupported`, nothing is faked): `type: "bytes"`, `autoAllocateChunkSize`, a `size` strategy function,
-//! BYOB readers, `tee`, `pipeTo`, `pipeThrough`, `reader.closed` and subclassing. `new ReadableStreamDefaultReader(stream)` is an
+//! BYOB readers, `tee`, async iteration, `reader.closed` and subclassing. `pipeTo` and `pipeThrough` are in `shims/streams.js`, with
+//! `WritableStream` and `TransformStream`. `new ReadableStreamDefaultReader(stream)` is an
 //! illegal constructor (use `getReader()`). A stream whose `highWaterMark` is not 1 works (any number from 0 up to `Infinity`).
 //! Deviation: a stream made without `pull` never starts a pull cycle (nothing could observe it).
 //! `response.body` is a different object (see `browser_fetch.rs`): the methods on the prototypes dispatch on which one `this` is.
@@ -866,7 +867,28 @@ pub(crate) fn reader_closed(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Valu
 }
 
 pub(crate) fn gate(d: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
-    enter(d, || Err(Error::Unsupported(unsupported("ReadableStream tee, pipeTo, pipeThrough and async iteration"))))
+    enter(d, || Err(Error::Unsupported(unsupported("ReadableStream tee and async iteration"))))
+}
+
+/// `pipeTo` and `pipeThrough` are JavaScript (`shims/streams.js`), as `WritableStream` and `TransformStream` are. The first call makes
+/// the shim, which replaces both methods on the prototype. This method then calls the method that the prototype now has.
+fn pipe(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], name: &str) -> R<Value> {
+    enter(d, || {
+        crate::browser_shims::define(d, it, "WritableStream")?;
+        let f = prop(d, it, Value::Object(fns(d).stream_proto), name)?;
+        if !it.is_callable_value(f) {
+            return Err(it.type_error(&format!("ReadableStream.prototype.{name} is not a function")));
+        }
+        it.call(f, this, a)
+    })
+}
+
+pub(crate) fn pipe_to(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
+    pipe(d, it, this, a, "pipeTo")
+}
+
+pub(crate) fn pipe_through(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
+    pipe(d, it, this, a, "pipeThrough")
 }
 
 // ---------------------------------------------------------------------------------------------- install

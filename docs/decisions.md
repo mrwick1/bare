@@ -1516,3 +1516,24 @@ GitHub read `offsetTop` of an inline box with a border over two lines, and the r
 - `offsetTop` and `offsetLeft` now use the first fragment of the element. CSSOM View asks for the border edge of the first box. An offset parent over more than one line uses its first fragment too.
 - This replaces the last line of "offsetTop of an inline box with nothing to paint": that gate is gone.
 - `snap::settle` waited up to 2 s for an open `fetch` on a stopped page. `tick` gives no next time then, so the loop spun at full CPU. It now sleeps 5 ms between ticks. The wait limit stays 2 s. A test measured 1.996 s of CPU in 2.000 s before and almost none after.
+
+## Filters for the links tool (2026-11-12)
+
+`links` takes three filters: `text`, `root` and `external`.
+`text` keeps the links whose text or URL holds the text, in any case.
+`root` keeps the links inside one element, or the link itself.
+`external` keeps the links to another origin.
+The filters combine, and the reply keeps its format.
+A filter with no match gives one line.
+An agent gets the URL of a named link in one small call, not with `eval`.
+## WritableStream, TransformStream and pipes as a script shim (2026-11-12)
+
+`@assistant-ui/react` extends `TransformStream` at the top level of a module. bare had no such global, so the module failed to load (issue #389).
+
+- `shims/streams.js` defines `WritableStream`, `TransformStream`, their writer and controllers, `TextDecoderStream` and `TextEncoderStream`. It also replaces `ReadableStream.prototype.pipeTo` and `pipeThrough`.
+- The shim is JavaScript, as `EventSource` and `indexedDB` are. These algorithms are promise plumbing. Script expresses them in a third of the size of the Rust code, and a class can extend each constructor.
+- The first read of one of the seven names makes the shim (`browser_name` in `crates/js/src/heap.rs`). The first call of `pipeTo` or `pipeThrough` also makes it. A page that uses none of them pays nothing.
+- The readable side of each pair is the host `ReadableStream`. Its limits hold. The writable queue lives in the realm heap, so the heap limits bound it.
+- `pipeTo` reads an error of the source only when it reads, because the host reader has no `closed` promise.
+- An abort of the writable side of a `TransformStream` errors its readable side at once. This is the older text of the standard. `transformer.cancel` runs.
+- `tee` and async iteration stay gated.
