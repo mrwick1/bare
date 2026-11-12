@@ -1226,3 +1226,15 @@ An agent such as `deck` must read a page and act on it in few model calls. Scree
 - `find`, `read` (paged text), `links`, `screenshot` (the page or one element, a path, and the image when asked), `eval` and `sessions` complete the set. Every reply goes through the redactor.
 - Each tool takes `session`. Sessions run side by side, one page each. `open` ends only the session of its name.
 - Step lines accept `ref=e7`, so a journey can mix refs and user locators.
+
+## Small replies for agents (2026-11-12)
+
+Each character of a `bare-mcp` reply costs model tokens. A reply must give what the agent needs and no more.
+
+- `act` gives the lines that changed since the last snapshot (marked `*`) and the lines that hold them, not the whole outline. After a navigation, or with `diff: false`, it gives the whole outline. With no change it says `no change`.
+- `*` now also marks an element whose name, value or state changed.
+- A link line in `snapshot` shows its `href` only when the link has no name. `links` lists all URLs. This halves the size of link-heavy pages.
+- A `clickable` that holds other lines drops its own copy of their text. It keeps its ref.
+- `links` and the `href` in a line cut tracking parameters (`utm_*`, `fbclid`, `gclid` and similar). `links` gives a path for a link on the origin of the page.
+- Each interactive element keeps its line and ref. The set of interactive lines of each test page is the same before and after.
+- Nothing collapses a long list. A list of links is a list of controls, and each control must stay reachable. The `max_chars` cut still applies.

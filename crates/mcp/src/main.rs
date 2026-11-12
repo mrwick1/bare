@@ -271,6 +271,11 @@ impl Server {
     }
 
     fn snapshot(&mut self, args: &Value) -> Result<String, String> {
+        self.snapshot_diff(args, false)
+    }
+
+    /// With `diff`: only what changed since the last snapshot, and its parents.
+    fn snapshot_diff(&mut self, args: &Value, diff: bool) -> Result<String, String> {
         let mode = match args.get("mode").and_then(Value::as_str) {
             Some("all") => Mode::All,
             _ => Mode::Interactive,
@@ -278,7 +283,7 @@ impl Server {
         let root = ref_arg(args, "root")?;
         let max = Self::max(args, 12_000);
         let live = self.live_mut(args)?;
-        let out = live.session.with_refs(move |p, refs| snap::snapshot(p, refs, mode, root, max))??;
+        let out = live.session.with_refs(move |p, refs| snap::snapshot(p, refs, mode, root, max, diff))??;
         Ok(live.red.clean(&out))
     }
 
@@ -357,7 +362,7 @@ impl Server {
         let before = self.live_mut(args)?.session.url();
         let (receipt, ok) = self.run_live(&a, &line)?;
         let mut out = receipt;
-        let snap = if ok && args.get("snapshot").and_then(Value::as_bool) != Some(false) { Some(self.snapshot(args)?) } else { None };
+        let snap = if ok && args.get("snapshot").and_then(Value::as_bool) != Some(false) { Some(self.snapshot_diff(args, args.get("diff").and_then(Value::as_bool) != Some(false))?) } else { None };
         // After the snapshot, which waits for the page: a click starts a navigation that ends later.
         let after = self.live_mut(args)?.session.url();
         if after != before {
@@ -580,13 +585,13 @@ fn tools() -> Value {
         },
         {
             "name": "snapshot",
-            "description": "Read the live page as text: the accessibility outline, one element per line, indented by nesting: [e7] role \"name\" = \"value\" (states). Act on an element with its ref (act ref=e7, or ref=e7 in step lines). * marks an element new since the last snapshot. Refs stay valid until the page navigates. Use this instead of a screenshot.",
+            "description": "Read the live page as text: the accessibility outline, one element per line, indented by nesting: [e7] role \"name\" = \"value\" (states). Act on an element with its ref (act ref=e7, or ref=e7 in step lines). * marks an element new or changed since the last snapshot. A link line shows its href only when it has no name: links lists them all. Refs stay valid until the page navigates. Use this instead of a screenshot.",
             "inputSchema": {"type": "object", "properties": {"session": S, "mode": {"type": "string", "enum": ["interactive", "all"], "description": "interactive (default): controls, headings, landmarks, dialogs, alerts. all: also the text between them."}, "root": {"type": "string", "description": "A ref: the outline of that element only."}, "max_chars": {"type": "integer", "description": "Default 12000. A longer outline keeps 80% from the top and 20% from the end."}}},
         },
         {
             "name": "act",
-            "description": "Act on the live page like a user and get a short receipt (ok, or the failure with a hint, new console errors and failed requests, navigation), then the new snapshot. Ops: click, type (clears the field, then types text; \\n is Enter), press (key: Enter, Escape, Tab, Control+a), scroll (dy pixels, over ref or the page), goto (url), reload, wait (ref until text state: visible, hidden, enabled, checked, text~\"x\"). The action waits for the element up to timeout_ms.",
-            "inputSchema": {"type": "object", "properties": {"session": S, "op": {"type": "string", "enum": ["click", "type", "press", "scroll", "goto", "reload", "wait"]}, "ref": {"type": "string", "description": "e7 from snapshot or find."}, "loc": {"type": "string", "description": "A step locator instead of ref: role=button name=\"Save\", label=\"Email\", text=\"x\", css=\"...\"."}, "text": {"type": "string"}, "key": {"type": "string"}, "dy": {"type": "number"}, "url": {"type": "string"}, "snapshot": {"type": "boolean", "description": "Default true: add the snapshot after the action."}, "mode": {"type": "string", "enum": ["interactive", "all"]}, "max_chars": {"type": "integer"}}, "required": ["op"]},
+            "description": "Act on the live page like a user and get a short receipt (ok, or the failure with a hint, new console errors and failed requests, navigation), then what changed on the page (only the lines marked *, with the lines that hold them; the whole outline after a navigation or with diff false). Ops: click, type (clears the field, then types text; \\n is Enter), press (key: Enter, Escape, Tab, Control+a), scroll (dy pixels, over ref or the page), goto (url), reload, wait (ref until text state: visible, hidden, enabled, checked, text~\"x\"). The action waits for the element up to timeout_ms.",
+            "inputSchema": {"type": "object", "properties": {"session": S, "op": {"type": "string", "enum": ["click", "type", "press", "scroll", "goto", "reload", "wait"]}, "ref": {"type": "string", "description": "e7 from snapshot or find."}, "loc": {"type": "string", "description": "A step locator instead of ref: role=button name=\"Save\", label=\"Email\", text=\"x\", css=\"...\"."}, "text": {"type": "string"}, "key": {"type": "string"}, "dy": {"type": "number"}, "url": {"type": "string"}, "snapshot": {"type": "boolean", "description": "Default true: add the changes of the page after the action."}, "diff": {"type": "boolean", "description": "Default true. False: add the whole outline instead of the changes."}, "mode": {"type": "string", "enum": ["interactive", "all"]}, "max_chars": {"type": "integer"}}, "required": ["op"]},
         },
         {
             "name": "find",
@@ -600,7 +605,7 @@ fn tools() -> Value {
         },
         {
             "name": "links",
-            "description": "The links of the page: ref, text and absolute URL.",
+            "description": "The links of the page: ref, text and URL (a path for a link on the origin of the page, with tracking parameters cut).",
             "inputSchema": {"type": "object", "properties": {"session": S, "max_chars": {"type": "integer"}}},
         },
         {

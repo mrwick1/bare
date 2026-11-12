@@ -3,7 +3,9 @@
 //! query per element, so a snapshot of a large page costs a few milliseconds.
 //!
 //! A ref (`e7`) names an element of the document of now. It stays the same for the same element across snapshots of one document, and
-//! fails as stale after a navigation. `*` marks an element that the last snapshot of this document did not show.
+//! fails as stale after a navigation. `*` marks an element that the last snapshot of this document did not show, or showed with another
+//! name, value or state. Replies are small on purpose (an agent pays for each character): a link line shows its `href` only when it has
+//! no name (`links` has them all), a `diff` snapshot shows only the marked lines and their parents, and tracking parameters are cut from URLs.
 
 use crate::locate::{Cx, norm};
 use bare::control::Handle;
@@ -12,6 +14,42 @@ use bare_css::values::{Keyword, Property, Value as Css};
 use bare_html::dom::{NodeData, NodeId};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
+use std::hash::{DefaultHasher, Hash, Hasher};
+
+fn hash<T: Hash + ?Sized>(t: &T) -> u64 {
+    let mut h = DefaultHasher::new();
+    t.hash(&mut h);
+    h.finish()
+}
+
+/// What a snapshot showed: each element with a hash of its line, and the hashes of the text lines.
+#[derive(Default)]
+struct Seen {
+    els: HashMap<NodeId, u64>,
+    text: HashSet<u64>,
+}
+
+/// A parameter that only tracks the visitor: it never changes the page that the URL names.
+fn tracking(k: &str) -> bool {
+    k.starts_with("utm_") || k.starts_with("wmf_") || matches!(k, "fbclid" | "gclid" | "dclid" | "msclkid" | "mc_cid" | "mc_eid" | "_ga" | "_gl" | "igshid" | "yclid" | "ref_src" | "ref_url")
+}
+
+/// `url` without tracking parameters.
+fn clean_url(url: &str) -> String {
+    let (rest, frag) = url.split_once('#').map_or((url, ""), |(a, b)| (a, b));
+    let Some((path, query)) = rest.split_once('?') else { return url.to_string() };
+    let kept: Vec<&str> = query.split('&').filter(|kv| !tracking(kv.split('=').next().unwrap_or(""))).collect();
+    let mut out = path.to_string();
+    if !kept.is_empty() {
+        out.push('?');
+        out.push_str(&kept.join("&"));
+    }
+    if url.contains('#') {
+        out.push('#');
+        out.push_str(frag);
+    }
+    out
+}
 
 /// The refs of one document.
 #[derive(Default)]
@@ -20,7 +58,7 @@ pub struct Refs {
     nodes: Vec<NodeId>,
     ids: HashMap<NodeId, u32>,
     /// What the last snapshot showed, for the `*` marks. `None` before the first snapshot of this document.
-    last: Option<HashSet<NodeId>>,
+    last: Option<Seen>,
     /// The most refs of an older document, so a ref from it fails as stale, not as unknown.
     old: u32,
 }
@@ -120,7 +158,7 @@ fn inline(cx: &Cx, n: NodeId) -> bool {
 }
 
 /// The attribute states of a line: what `aria-*` and HTML attributes say. The live states (value, checked, focus) come later.
-fn flags(cx: &Cx, n: NodeId, role: &str) -> Vec<String> {
+fn flags(cx: &Cx, n: NodeId, role: &str, href: bool) -> Vec<String> {
     let mut f = Vec::new();
     let a = |k| cx.attr(n, k);
     if role == "heading" {
@@ -147,9 +185,10 @@ fn flags(cx: &Cx, n: NodeId, role: &str) -> Vec<String> {
         f.push("invalid".into());
     }
     if role == "link"
+        && href
         && let Some(h) = a("href")
     {
-        f.push(format!("href={}", short(h, 80)));
+        f.push(format!("href={}", short(&clean_url(h), 80)));
     }
     if cx.tag(n) == "input" && matches!(cx.input_type(n).as_str(), "email" | "password" | "tel" | "url" | "number" | "date" | "search") {
         f.push(cx.input_type(n));
@@ -219,7 +258,8 @@ fn walk(cx: &Cx, root: NodeId, mode: Mode, clicks: &HashSet<NodeId>, out: &mut V
             // A plain block with no name is noise: its text follows as text lines.
             let skip = matches!(r, "paragraph" | "listitem" | "cell" | "row" | "group" | "article") && name.is_empty();
             if !skip {
-                out.push(Item::El(Line { depth, node: n, role: r, name: short(&name, 200), flags: flags(cx, n, r) }));
+                // `links` has the href of each link: a line shows it only when the name cannot tell the link apart.
+                out.push(Item::El(Line { depth, node: n, role: r, name: short(&name, 200), flags: flags(cx, n, r, name.is_empty()) }));
                 inner = depth + 1;
             }
             if LEAVES.contains(&r) {
@@ -239,6 +279,19 @@ fn walk(cx: &Cx, root: NodeId, mode: Mode, clicks: &HashSet<NodeId>, out: &mut V
         }
     }
     flush(&mut text, 0, out);
+    // A custom control that holds other lines says what it holds in them: its own copy of their text only costs tokens.
+    for i in 0..out.len().saturating_sub(1) {
+        let d = match &out[i + 1] {
+            Item::El(l) => l.depth,
+            Item::Text(d, _) => *d,
+        };
+        if let Item::El(l) = &mut out[i]
+            && l.role == "clickable"
+            && d > l.depth
+        {
+            l.name.clear();
+        }
+    }
     // A text run that only repeats the name of the element next to it (the text of a `<label>`) adds nothing.
     let names: Vec<Option<String>> = out.iter().map(|i| if let Item::El(l) = i { Some(l.name.clone()) } else { None }).collect();
     let mut i = 0;
@@ -317,18 +370,43 @@ fn live(p: &mut Page, h: Handle, role: &str, flags: &mut Vec<String>) -> Option<
     Some(short(&v, 200))
 }
 
-fn format(p: &mut Page, refs: &mut Refs, items: Vec<Item>, prev: Option<&HashSet<NodeId>>) -> Vec<String> {
+/// One output line, before the marks: its depth, its text (with no indent) and whether the last snapshot did not show it as it is.
+struct Row {
+    depth: usize,
+    text: String,
+    changed: bool,
+    /// The element of the row; `None` for a text run.
+    node: Option<NodeId>,
+}
+
+fn indent(d: usize) -> &'static str {
+    &"                                                                "[..d.min(64)]
+}
+
+impl Row {
+    fn render(&self, mark: bool) -> String {
+        let m = if mark && self.changed && self.node.is_some() { "*" } else { "" };
+        format!("{}{m}{}", indent(self.depth), self.text)
+    }
+}
+
+/// `seen`: what the last snapshot showed. Text runs are never marked; `diff` keeps them if they are new.
+fn format(p: &mut Page, refs: &mut Refs, items: Vec<Item>, seen: Option<&Seen>) -> Vec<Row> {
     let doc = p.generation();
-    let mut lines = Vec::with_capacity(items.len());
+    let mut rows = Vec::with_capacity(items.len());
     for it in items {
         match it {
-            Item::Text(d, t) => lines.push(format!("{}{t:?}", "  ".repeat(d))),
+            Item::Text(depth, t) => {
+                let text = format!("{t:?}");
+                let changed = seen.is_some_and(|s| !s.text.contains(&hash(&text)));
+                rows.push(Row { depth, text, changed, node: None });
+            }
             Item::El(mut l) => {
                 let r = refs.mint(l.node);
                 let h = Handle { doc, node: l.node };
                 let value = live(p, h, l.role, &mut l.flags);
                 let mut s = String::with_capacity(48);
-                let _ = write!(s, "{}{}[e{r}] {}", "  ".repeat(l.depth), if prev.is_some_and(|p| !p.contains(&l.node)) { "*" } else { "" }, l.role);
+                let _ = write!(s, "[e{r}] {}", l.role);
                 if !l.name.is_empty() {
                     let _ = write!(s, " {:?}", l.name);
                 }
@@ -338,15 +416,36 @@ fn format(p: &mut Page, refs: &mut Refs, items: Vec<Item>, prev: Option<&HashSet
                 if !l.flags.is_empty() {
                     let _ = write!(s, " ({})", l.flags.join(", "));
                 }
-                lines.push(s);
+                let changed = seen.is_some_and(|p| p.els.get(&l.node) != Some(&hash(&s)));
+                rows.push(Row { depth: l.depth, text: s, changed, node: Some(l.node) });
             }
         }
     }
-    lines
+    rows
 }
 
-/// The outline of the page, or of the element `root`, in at most `max` characters.
-pub fn snapshot(p: &mut Page, refs: &mut Refs, mode: Mode, root: Option<u32>, max: usize) -> Result<String, String> {
+/// Only the changed rows, each after the rows that hold it (the nearest row of each lower depth before it).
+fn diff(rows: &[Row]) -> Vec<String> {
+    let mut keep = vec![false; rows.len()];
+    for i in (0..rows.len()).filter(|&i| rows[i].changed) {
+        keep[i] = true;
+        let mut d = rows[i].depth;
+        for j in (0..i).rev() {
+            if d == 0 {
+                break;
+            }
+            if rows[j].depth < d {
+                keep[j] = true;
+                d = rows[j].depth;
+            }
+        }
+    }
+    rows.iter().zip(keep).filter(|(_, k)| *k).map(|(r, _)| r.render(true)).collect()
+}
+
+/// The outline of the page, or of the element `root`, in at most `max` characters. With `diff`, and a snapshot of this document before,
+/// only the lines that changed since then (marked `*`) and the lines that hold them.
+pub fn snapshot(p: &mut Page, refs: &mut Refs, mode: Mode, root: Option<u32>, max: usize, diff_only: bool) -> Result<String, String> {
     settle(p);
     let doc = p.generation();
     refs.sync(doc);
@@ -358,14 +457,32 @@ pub fn snapshot(p: &mut Page, refs: &mut Refs, mode: Mode, root: Option<u32>, ma
         walk(&cx, start.map_or(d.root(), |h| h.node), mode, &clicks, &mut items);
     })
     .ok_or_else(|| p.errors.last().cloned().unwrap_or_else(|| "the page has no document or no layout yet".into()))?;
-    let shown: HashSet<NodeId> = items.iter().filter_map(|i| if let Item::El(l) = i { Some(l.node) } else { None }).collect();
     let prev = if root.is_none() { refs.last.take() } else { None };
-    let lines = format(p, refs, items, prev.as_ref());
+    let refs_had_prev = prev.is_some();
+    let rows = format(p, refs, items, prev.as_ref());
     if root.is_none() {
-        refs.last = Some(shown);
-    } else {
-        refs.last = prev.or(refs.last.take());
+        let mut seen = Seen::default();
+        for r in &rows {
+            match r.node {
+                Some(n) => {
+                    seen.els.insert(n, hash(&r.text));
+                }
+                None => {
+                    seen.text.insert(hash(&r.text));
+                }
+            }
+        }
+        refs.last = Some(seen);
     }
+    if diff_only && root.is_none() && refs_had_prev {
+        let changed = rows.iter().filter(|r| r.changed).count();
+        if changed == 0 {
+            return Ok(format!("no change ({} lines)", rows.len()));
+        }
+        let out = budget(diff(&rows), max);
+        return Ok(format!("{out}\n({changed} of {} lines changed)", rows.len()));
+    }
+    let lines: Vec<String> = rows.iter().map(|r| r.render(refs_had_prev)).collect();
     let body = if lines.is_empty() { "(no elements: the page is empty, or it has not rendered yet)".into() } else { budget(lines, max) };
     Ok(header(p) + &body)
 }
@@ -386,7 +503,7 @@ pub fn find(p: &mut Page, refs: &mut Refs, loc: &crate::locate::Locator, max: us
                 n if n.is_empty() => norm(&cx.text(h.node)),
                 n => n,
             };
-            items.push(Item::El(Line { depth: 0, node: h.node, role, name: short(&name, 200), flags: flags(&cx, h.node, role) }));
+            items.push(Item::El(Line { depth: 0, node: h.node, role, name: short(&name, 200), flags: flags(&cx, h.node, role, true) }));
         }
     });
     let n = items.len();
@@ -394,7 +511,7 @@ pub fn find(p: &mut Page, refs: &mut Refs, loc: &crate::locate::Locator, max: us
     if found.hidden > 0 {
         let _ = write!(out, ", {} more not rendered", found.hidden);
     }
-    let lines = format(p, refs, items, None);
+    let lines: Vec<String> = format(p, refs, items, None).iter().map(|r| r.render(false)).collect();
     if !lines.is_empty() {
         out.push('\n');
         out.push_str(&budget(lines, max));
@@ -487,6 +604,7 @@ pub fn links(p: &mut Page, refs: &mut Refs, max: usize) -> Result<String, String
     let doc = p.generation();
     refs.sync(doc);
     let base = p.url().and_then(|u| bare_url::Url::parse(&u).ok());
+    let origin = base.as_ref().map(|b| b.to_string()).and_then(|u| u.find("://").map(|i| u[..u[i + 3..].find('/').map_or(u.len(), |j| i + 3 + j)].to_string())).unwrap_or_default();
     let mut found = Vec::new();
     p.inspect(|d, frame| {
         let cx = Cx { doc: d, styles: &frame.styles };
@@ -505,7 +623,10 @@ pub fn links(p: &mut Page, refs: &mut Refs, max: usize) -> Result<String, String
     let mut lines = Vec::with_capacity(found.len());
     for (n, name, href) in found {
         let abs = base.as_ref().and_then(|b| b.join(&href).ok()).map_or(href, |u| u.to_string());
-        lines.push(format!("[e{}] {name:?} -> {abs}", refs.mint(n)));
+        // A link of this origin gives its path: the origin is in the header, and it costs tokens in each line.
+        let shown = clean_url(abs.strip_prefix(&origin).filter(|r| r.starts_with('/')).unwrap_or(&abs));
+        let name = if name.is_empty() { String::new() } else { format!(" {name:?}") };
+        lines.push(format!("[e{}]{name} -> {shown}", refs.mint(n)));
     }
     Ok(format!("{}{} link(s)\n{}", header(p), lines.len(), budget(lines, max)))
 }
