@@ -604,6 +604,11 @@ impl Page {
         self.browser().map_or(0, |b| b.document().borrow().revision())
     }
 
+    /// The count of the edits of the text of the document (its `text_revision`). A key that types in an editing host moves it and not `revision`.
+    pub fn text_revision(&mut self) -> u64 {
+        self.browser().map_or(0, |b| b.document().borrow().text_revision())
+    }
+
     /// The key events of one character at the focused element (a line feed is Enter).
     pub fn type_char(&mut self, c: char) {
         let mut buf = [0u8; 4];

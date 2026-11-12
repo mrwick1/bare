@@ -1864,3 +1864,11 @@ Reason: a later relative box under an earlier fixed layer could not be clicked (
 - Not done: a fixed box and a positioned box inside two nested clipping boxes. The outer one holds the fixed box, so it paints after the inner box.
 
 Reason: a later relative box under an earlier fixed layer could not be clicked when the body had `overflow: hidden` (bare#439).
+## A caret keeps a state override for bold, italic and underline (2026-11-12)
+
+Issue #440: Control+B did nothing in a `contenteditable`, `execCommand('bold')` with a caret did not style the next text, and the act receipt said "no effect" for a key that typed.
+
+- `bold`, `italic` and `underline` with a collapsed selection set the "state override" of the Editing spec. It lives in `State::style_override`, with the position of the caret. The next `insertText` (also typed keys) uses it once. It wraps the text in `b`, `i` or `u`, or moves the text out of the element and splits it. A caret that moved drops the override. `queryCommandState` reads it.
+- Source: Ladybird `Libraries/LibWeb/Editing/Commands.cpp` and `Internal/Algorithms.cpp` (BSD-2-Clause, notice in `crates/bare/LICENSE-LADYBIRD`). The port is simplified to the tree that Chrome makes with `styleWithCSS` off. The value override (`foreColor` and the others) is not built.
+- Control+B, +I and +U (Meta also, for macOS) in an editing host run the command as the default action of the key, after `keydown` and a `beforeinput` of `formatBold`, `formatItalic` or `formatUnderline`. `preventDefault` on either cancels it.
+- The `press` receipt compares the document `text_revision` too, so a key that changed text is not "no effect".

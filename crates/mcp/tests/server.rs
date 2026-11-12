@@ -913,6 +913,26 @@ fn press_that_changes_nothing_says_so() {
 }
 
 #[test]
+fn press_that_types_in_a_contenteditable_does_not_say_no_effect() {
+    let mut s = Server::start();
+    let page = "<!doctype html><body><div id=e contenteditable=true aria-label=\"Editor\">a </div></body>";
+    let (snap, _) = s.tool("open", json!({"url": focus_page_server(page), "snapshot": true, "timeout_ms": 20000}));
+    let snap = snap.as_str().unwrap().to_string();
+    let r = ref_of(&snap, "Editor");
+    for key in ["Control+b", "x", "Control+b", "y"] {
+        let (out, error) = s.tool("act", json!({"op": "press", "ref": r, "key": key, "snapshot": false}));
+        let out = out.as_str().unwrap().to_string();
+        assert!(!error, "{out}");
+        // Control+b alone changes no document node: only the typed keys must not say it.
+        if key.len() == 1 {
+            assert!(!out.contains("no effect"), "{key}: {out}");
+        }
+    }
+    let (v, _) = s.tool("eval", json!({"js": "document.getElementById('e').innerHTML"}));
+    assert_eq!(v, json!("a <b>x</b>y"));
+}
+
+#[test]
 fn acting_on_a_hidden_element_says_it_is_hidden() {
     let mut s = Server::start();
     let (snap, _) = s.tool("open", json!({"url": focus_page_server(TWO_SEARCH), "snapshot": true, "timeout_ms": 20000}));
