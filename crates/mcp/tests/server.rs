@@ -1292,3 +1292,116 @@ fn a_snapshot_leaves_out_what_an_adopted_sheet_hides() {
     let (r, error) = s.tool("eval", json!({"js": "var r = document.querySelector('x-card').shadowRoot; getComputedStyle(r.getElementById('seen')).color + ' ' + getComputedStyle(r.getElementById('gone')).display"}));
     assert!(!error && r.to_string().contains("rgb(0, 0, 255) none"), "{r}");
 }
+
+/// A button under a full-page cover. `script` decides when the cover goes.
+fn covered_page(script: &str) -> String {
+    one_page(format!(
+        "<!doctype html><title>Cover</title><body>\
+         <button id=go onclick=\"this.textContent='Clicked'\">Go</button>\
+         <div id=cover class=\"cookie banner\" role=dialog aria-label=\"Cookie consent\" style=\"position:fixed;inset:0;background:rgba(0,0,0,.4)\"><p>We use cookies</p><button>Accept all</button></div>\
+         <script>{script}</script></body>"
+    ))
+}
+
+#[test]
+fn a_click_waits_for_a_spinner_that_goes_away() {
+    // A timer removes the spinner; a script fades a backdrop out frame by frame and then removes it. (bare has no CSS transitions, so a
+    // fade by `transition` and `transitionend` never ends.)
+    let fade = "var c = document.getElementById('cover'), t0 = performance.now(); \
+                requestAnimationFrame(function f(t) { var o = 1 - (t - t0) / 300; if (o > 0) { c.style.opacity = o; requestAnimationFrame(f) } else c.remove() })";
+    for script in ["setTimeout(() => document.getElementById('cover').remove(), 300)", fade] {
+        let mut s = Server::start();
+        let (snap, _) = s.tool("open", json!({"url": covered_page(script), "snapshot": true, "timeout_ms": 20000}));
+        let go = ref_of(snap.as_str().unwrap(), "\"Go\"");
+        let (r, error) = s.tool("act", json!({"op": "click", "ref": go}));
+        let r = r.as_str().unwrap().to_string();
+        assert!(!error && r.contains("Clicked"), "{script}: {r}");
+    }
+}
+
+/// A cover that stays fails within the cover wait (not the step time limit), also on a page whose timers never stop, and names the cover
+/// (not the text under the pointer) by its role and name and by its tag, id and classes.
+#[test]
+fn a_click_under_a_cookie_banner_fails_fast_and_names_the_banner() {
+    for script in ["", "setInterval(() => {}, 50)"] {
+        let mut s = Server::start();
+        let (snap, _) = s.tool("open", json!({"url": covered_page(script), "snapshot": true, "timeout_ms": 20000}));
+        let go = ref_of(snap.as_str().unwrap(), "\"Go\"");
+        let t = std::time::Instant::now();
+        let (r, error) = s.tool("act", json!({"op": "click", "ref": go}));
+        let ms = t.elapsed().as_millis();
+        let r = r.as_str().unwrap().to_string();
+        assert!(error && r.contains("FAILED covered"), "{r}");
+        assert!(r.contains("div#cover.cookie.banner") && r.contains("dialog \"Cookie consent\""), "{r}");
+        assert!(ms < 1500, "{script:?}: {ms} ms: {r}");
+    }
+}
+
+const WINDOW_PAGE: &str = "<!doctype html><title>Window</title><body><h2 id=out>none</h2>
+<button onclick=\"document.getElementById('out').textContent='changed'\">Change</button>
+<button onclick=\"document.getElementById('out').textContent='confirm=' + confirm('Delete item?')\">Confirm</button>
+<a href=/b target=_blank>Blank link</a></body>";
+
+/// The agent tools on a page in a real window (`window: true`): the page runs on the window thread, so each tool goes through
+/// `Remote::call`. Run it on a display of its own (a nested compositor), not on a desktop in use.
+#[test]
+#[ignore = "needs a Wayland display: it opens real windows"]
+fn the_agent_tools_work_in_a_window() {
+    agent_tools(true);
+}
+
+/// The checks of `the_agent_tools_work_in_a_window`, headless.
+#[test]
+fn the_agent_tools_work_headless() {
+    agent_tools(false);
+}
+
+fn agent_tools(window: bool) {
+    let base = pages(&[("/", WINDOW_PAGE), ("/b", "<!doctype html><body><p>second page</p></body>")]);
+    let mut s = Server::start();
+    let (snap, e) = s.tool("open", json!({"url": format!("{base}/"), "window": window, "snapshot": true, "timeout_ms": 20000}));
+    let snap = snap.as_str().unwrap().to_string();
+    assert!(!e && snap.contains("\"Change\""), "{snap}");
+    // act gives the diff: only the changed line, marked *.
+    let (r, e) = s.tool("act", json!({"op": "click", "ref": ref_of(&snap, "\"Change\"")}));
+    let r = r.as_str().unwrap().to_string();
+    assert!(!e && r.lines().any(|l| l.contains('*') && l.contains("changed")) && !r.contains("\"Confirm\""), "{r}");
+    let (r, e) = s.tool("find", json!({"text": "Confirm"}));
+    assert!(!e && r.as_str().unwrap().contains("Confirm"), "{r}");
+    let (r, e) = s.tool("read", json!({}));
+    assert!(!e && r.as_str().unwrap().contains("changed"), "{r}");
+    let (r, e) = s.tool("screenshot", json!({}));
+    let shot = r.as_str().unwrap();
+    assert!(!e && shot.contains(".png ("), "{shot}");
+    let path = shot.split(" (").next().unwrap();
+    assert!(std::fs::metadata(path).unwrap().len() > 100, "{path}");
+    // Dialogs: the policy is per thread, so it must be set on the window thread.
+    let (r, e) = s.tool("act", json!({"op": "click", "ref": ref_of(&snap, "\"Confirm\""), "dialog": "dismiss"}));
+    let r = r.as_str().unwrap().to_string();
+    assert!(!e && r.contains("dialog: confirm \"Delete item?\" -> dismissed") && r.contains("confirm=false"), "{r}");
+    // A tab is a new session in a window of its own.
+    let (r, e) = s.tool("act", json!({"op": "click", "ref": ref_of(&snap, "Blank link"), "snapshot": false}));
+    assert!(!e && r.as_str().unwrap().contains(&format!("opened tab: main~2 {base}/b")), "{r}");
+    let (r, e) = s.tool("act", json!({"op": "wait", "loc": "text=\"second page\"", "session": "main~2", "snapshot": false}));
+    assert!(!e, "{r}");
+    let (r, e) = s.tool("close", json!({"session": "main~2"}));
+    assert!(!e, "{r}");
+    // Downloads.
+    let dir = std::env::temp_dir().join(format!("bare-mcp-test-window-downloads-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (snap, e) = s.tool("open", json!({"url": format!("{}/downloads", common::serve()), "session": "dl", "window": window, "snapshot": true, "downloads_dir": dir.to_str().unwrap(), "timeout_ms": 20000}));
+    let snap = snap.as_str().unwrap().to_string();
+    assert!(!e, "{snap}");
+    let (r, e) = s.tool("act", json!({"op": "click", "ref": ref_of(&snap, "\"Report\""), "session": "dl", "snapshot": false}));
+    assert!(!e && r.as_str().unwrap().contains("report.csv ("), "{r}");
+    assert_eq!(std::fs::read(dir.join("report.csv")).unwrap(), common::PAYLOAD_CSV);
+    // A spinner that a timer removes, and a banner that stays.
+    let (snap, _) = s.tool("open", json!({"url": covered_page("setTimeout(() => document.getElementById('cover').remove(), 300)"), "session": "cover", "window": window, "snapshot": true, "timeout_ms": 20000}));
+    let (r, e) = s.tool("act", json!({"op": "click", "ref": ref_of(snap.as_str().unwrap(), "\"Go\""), "session": "cover"}));
+    assert!(!e && r.as_str().unwrap().contains("Clicked"), "{r}");
+    let (snap, _) = s.tool("open", json!({"url": covered_page("setInterval(() => {}, 50)"), "session": "cover", "window": window, "snapshot": true, "timeout_ms": 20000}));
+    let t = std::time::Instant::now();
+    let (r, e) = s.tool("act", json!({"op": "click", "ref": ref_of(snap.as_str().unwrap(), "\"Go\""), "session": "cover"}));
+    let r = r.as_str().unwrap().to_string();
+    assert!(e && r.contains("dialog \"Cookie consent\"") && t.elapsed().as_millis() < 1500, "{} ms: {r}", t.elapsed().as_millis());
+}

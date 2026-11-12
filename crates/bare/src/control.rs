@@ -56,8 +56,9 @@ pub enum Refusal {
     /// No box with a size (`display: none`, an empty box), `visibility: hidden`, or none of it is in the window after the scroll.
     Hidden(&'static str),
     Disabled,
-    /// Another element is on top at the point: its `tag#id.class`, and the point in window pixels.
-    Covered { by: String, at: (i32, i32) },
+    /// Another element is on top at the point: its `tag#id.class`, the element (`None`: nothing takes the pointer there), and the point in
+    /// window pixels.
+    Covered { by: String, top: Option<Handle>, at: (i32, i32) },
     /// `type_text` needs an editable text `<input>` or `<textarea>`.
     NotEditable,
     /// The field did not have the focus after the click (a listener canceled it).
@@ -394,7 +395,7 @@ impl Page {
         };
         if !inside {
             let by = top.map_or_else(|| "nothing (pointer-events: none)".to_string(), |t| self.describe(Handle { doc: h.doc, node: t }));
-            return Err(Refusal::Covered { by, at: (x.round() as i32, y.round() as i32) });
+            return Err(Refusal::Covered { by, top: top.map(|node| Handle { doc: h.doc, node }), at: (x.round() as i32, y.round() as i32) });
         }
         Ok((x, y))
     }

@@ -1320,3 +1320,13 @@ Lit and other web-component libraries style a shadow root with `new CSSStyleShee
 - The `adoptedStyleSheets` getter returns a copy. `push` on it has no effect. A page assigns a new array, as Lit does.
 - A sheet adopted by many shadow roots adds its rules once per root. A page with many instances pays for each. Sharing the parsed rules is a later step.
 - `snapshot` and `read` now enter a shadow root. They skipped it before, so a page built from web components showed no elements.
+
+## A click waits a short time for a cover (2026-11-12)
+
+An agent clicked a ref under a spinner and got `covered`. A cookie banner over the target must still fail fast.
+
+- An action that fails as `covered` tries again for at most 1 s (`COVER_WAIT`), on each tick. Then it fails, also when the step time limit is longer.
+- A page with no queued task still fails at once: nothing can remove the cover.
+- The failure names the cover, not the element under the pointer. Of the ancestors of that element that do not hold the target, it names the outermost with a role and a name. It falls back to the outermost one. It gives `tag#id.class` and `(role "name")`.
+- bare has no CSS transitions. A backdrop that fades with `transition` and removes itself on `transitionend` never goes, so the click fails after 1 s. A fade by script works.
+- Window mode routes each tool through `Remote::call` on the window thread. The dialog and tab policy is per thread and is set there, so it works. The test `the_agent_tools_work_in_a_window` checks the tools in a window. It is ignored because it needs a Wayland display. Run it on a nested compositor, not on a desktop in use.

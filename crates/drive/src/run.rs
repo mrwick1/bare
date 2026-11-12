@@ -7,7 +7,8 @@
 //!
 //! Failure kinds: `not_found`, `duplicate` (a locator must match one element), `hidden`, `disabled`, `covered`, `detached` (it matched,
 //! then left the document), `not_editable`, `no_focus`, `expect` (a check was false), `page` (a load failed, the page stopped or has no
-//! layout). `duplicate`, `not_editable`, `no_focus` and a failed load fail at once; the others wait.
+//! layout). `duplicate`, `not_editable`, `no_focus` and a failed load fail at once; the others wait. `covered` waits at most `COVER_WAIT`, and
+//! names the cover by its role and name.
 //!
 //! Secrets: the values of `--secrets` and each text typed into a password field are replaced by `[secret]` in all the output (also in
 //! lower case and URL-encoded). A capture is withheld when a secret is in the text or in a field of the page (a password field shows
@@ -409,6 +410,8 @@ impl Session {
     let (mut tries, mut busy, mut waited, mut ticks) = (0u32, Duration::ZERO, Duration::ZERO, Ticks::default());
     // With `ready_wait`, an `open`, `goto` or `reload` waits until the page is ready (`ready`); `calm` counts the looks that found it so.
     let (mut navigating, mut calm) = (false, 0u8);
+    // When the tries began to fail as `covered` without a break.
+    let mut covered: Option<Instant> = None;
     let (cpu0, net0) = (thread_cpu_ns(), bare_net::trace::blocked_us());
     let (log0, net_at) = (rep.logs.len(), rep.net.len());
     if matches!(step.action, Action::Open(..) | Action::Goto(_) | Action::Reload | Action::Back | Action::Forward) {
@@ -524,6 +527,11 @@ impl Session {
             Try::Stop(f) => break Err(f),
             Try::Again(f) => {
                 let now = Instant::now();
+                if f.kind != "covered" {
+                    covered = None;
+                } else if now >= *covered.get_or_insert(now) + COVER_WAIT {
+                    break Err(Fail { message: format!("{} (still covered after {} ms)", f.message, COVER_WAIT.as_millis()), ..f });
+                }
                 let next = match wait {
                     (true, _) => now,
                     (false, Some(at)) => at,
@@ -535,7 +543,7 @@ impl Session {
                 if now >= deadline && !navigating {
                     break Err(Fail { message: format!("{} (time limit {} ms)", f.message, timeout.as_millis()), ..f });
                 }
-                host.sleep(seen, next.min(deadline));
+                host.sleep(seen, next.min(deadline).min(covered.map_or(deadline, |c| c + COVER_WAIT)));
                 waited += now.elapsed();
             }
         }
@@ -662,6 +670,10 @@ fn thread_cpu_ns() -> u64 {
     std::fs::read_to_string("/proc/thread-self/schedstat").ok().and_then(|s| s.split(' ').next()?.parse().ok()).unwrap_or(0)
 }
 
+/// How long an action waits for a cover to go (a spinner, a backdrop that fades) before it fails as `covered`. A cover that stays (a cookie
+/// banner) is for the caller to close, so it must not cost the whole time limit.
+const COVER_WAIT: Duration = Duration::from_secs(1);
+
 /// The most pixels tall that a screenshot is.
 const SHOT_MAX: u32 = 8000;
 
@@ -777,7 +789,10 @@ fn refused(p: &mut Page, h: Handle, r: Refusal) -> Try {
         Refusal::Detached => Try::Again(fail("detached", format!("{what} left the document"))),
         Refusal::Hidden(why) => Try::Again(fail("hidden", format!("{what} is hidden: {why}"))),
         Refusal::Disabled => Try::Again(fail("disabled", format!("{what} is disabled"))),
-        Refusal::Covered { by, at } => Try::Again(fail("covered", format!("{what} is covered by {by} at ({}, {})", at.0, at.1))),
+        Refusal::Covered { by, top, at } => {
+            let by = top.and_then(|t| locate::cover(p, h, t)).unwrap_or(by);
+            Try::Again(fail("covered", format!("{what} is covered by {by} at ({}, {})", at.0, at.1)))
+        }
         Refusal::NotEditable => Try::Stop(fail("not_editable", format!("{what} is not a text field"))),
         Refusal::NoFocus => Try::Stop(fail("no_focus", format!("{what} did not take the focus after the click"))),
         Refusal::NoPage(e) => Try::Again(fail("page", e)),

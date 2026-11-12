@@ -124,6 +124,35 @@ pub fn role_and_name(page: &mut Page, h: Handle) -> Option<(String, String)> {
     })
 }
 
+/// The element that covers `h` at a point where `top` takes the pointer, for a failure message: of the ancestors of `top` that do not hold
+/// `h`, the outermost with a role and a name (a cookie dialog, not the paragraph in it), else the outermost. Gives `tag#id.class`, and
+/// `(role "name")` when it has them.
+pub fn cover(page: &mut Page, h: Handle, top: Handle) -> Option<String> {
+    let found = page.inspect(|doc, frame| {
+        let cx = Cx { doc, styles: &frame.styles };
+        let holds = |n: NodeId| {
+            let mut c = Some(h.node);
+            while let Some(x) = c.filter(|&x| x != n) {
+                c = doc.parent_or_host(x);
+            }
+            c.is_some()
+        };
+        let (mut outer, mut named) = (top.node, None);
+        let mut cur = Some(top.node);
+        while let Some(n) = cur.filter(|&n| matches!(doc.data(n), NodeData::Element { .. }) && !holds(n)) {
+            let (role, name) = (cx.role(n).unwrap_or(""), norm(&cx.name(n)));
+            if !role.is_empty() && !name.is_empty() {
+                named = Some((n, format!(" ({role} {name:?})")));
+            }
+            outer = n;
+            cur = doc.parent_or_host(n);
+        }
+        named.unwrap_or((outer, String::new()))
+    })?;
+    let (n, said) = found;
+    Some(format!("{}{said}", page.describe(Handle { doc: top.doc, node: n })))
+}
+
 /// The rendered text of an element (`text=` and `expect LOC text=` read it).
 pub fn text(page: &mut Page, h: Handle) -> Option<String> {
     page.inspect(|doc, frame| norm(&Cx { doc, styles: &frame.styles }.text(h.node)))
