@@ -5,7 +5,7 @@
 //!   and `HTMLBodyElement.prototype` / `HTMLFrameSetElement.prototype` (the window handlers, which read and write the handler of
 //!   `window`). The names are Chrome 155's (102 for an element, 117 for a document, 125 for the window, 24 for a body). `onabort` is
 //!   also on `AbortSignal.prototype` (`install_onabort`). Gaps: no `MathMLElement` (`browser_namespace.rs`), the 8 names of
-//!   `Element.prototype` (`onsearch`, `onfullscreenchange`, ...), and no `FileReader`, `WebSocket`, `Animation`, `HTMLMediaElement`
+//!   `Element.prototype` (`onsearch`, `onfullscreenchange`, ...), and no `WebSocket`, `Animation`, `HTMLMediaElement`
 //!   handlers (those interfaces do not exist here). `MediaQueryList.onchange` and `MessagePort.onmessage` keep their own code.
 //! - Lazy accessors: a page that never reads a handler pays nothing for the ~430 accessors. A lookup, `in` or write of an `on<name>`
 //!   string key that finds nothing reaches `EventTarget.prototype` (`Heap::set_lazy_chain`) and asks the host once per name (`lazy`).

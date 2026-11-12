@@ -35,7 +35,7 @@
 //! too), live environments, function slots. A limit ends the run with [`Error::Limit`], never a JS value, and
 //! cannot be caught by `try`. A heap limit is [`LimitKind::Heap`].
 //! Defaults: `max_call_depth` 100, `max_traversal_depth` 512 and `max_statement_frames` 512 (`EvalLimits::default`). Hard ceilings:
-//! `max_call_depth` is clamped to 10,000 (`MAX_CALL_DEPTH`, about the depth of Chrome), `max_traversal_depth` to 768 and
+//! `max_call_depth` is clamped to 10,000 (`MAX_CALL_DEPTH`, about the depth of Chrome), `max_traversal_depth` to 2048 and
 //! `max_statement_frames` to 65,536. `EvalLimits::session()` is the browser page: all three at the ceiling. Three different things
 //! are counted:
 //! - `max_call_depth`: nested calls, native and bound too. It bounds the memory of the native stack (below).
@@ -50,7 +50,7 @@
 //! (`low_stack`, 4 instructions). A native callee does not: it reaches script code only through a call that does. When less than `STACK_RED` is left (4 MiB, 16 MiB in a debug build),
 //! the call continues on a new segment (`stacker::grow`: `STACK_SEG` of mapped memory, 64 MiB, 256 MiB in a debug build, committed
 //! only where the stack touches it, unmapped when the call returns). `STACK_RED` covers one call at `max_traversal_depth`
-//! frames (measured 0.51 MB release and 2.9 MB debug, the worst of 20 shapes) and the native code that a call reaches. Measured
+//! frames (measured 0.51 MB release and 2.9 MB debug at 768, the worst of 20 shapes; at 2048 the worst of 12 shapes measured 1.1 MiB in release) and the native code that a call reaches. Measured
 //! on the React commit shape: 2.8 KB of native stack for each JS call in release and 15 KB in debug (4.9 KB and 26 KB before).
 //! At the ceiling of 10,000 calls a run used 31 to 58 MB of peak memory in release (recursion through `map`, `sort`, getters,
 //! `toJSON`, `Reflect.apply`, `new`). Known gaps: `super()` and the host do not start a call through `in_call` in every path (the 768
@@ -83,7 +83,7 @@ use std::rc::Rc;
 
 /// Hard ceilings of the three depth limits (see the header). `EvalLimits::session` uses all three.
 pub const MAX_CALL_DEPTH: u32 = 10_000;
-pub const MAX_TRAVERSAL_DEPTH: u32 = 768;
+pub const MAX_TRAVERSAL_DEPTH: u32 = 2048;
 pub const MAX_STATEMENT_FRAMES: u32 = 1 << 16;
 /// Stack that must remain below the start of a call (see `Interp::in_call`). One activation at `MAX_TRAVERSAL_DEPTH` frames
 /// measured 0.51 MB in release and 2.9 MB in debug (a chain of 760 member reads, the worst of 20 shapes); the rest is for the
@@ -100,7 +100,7 @@ pub struct EvalLimits {
     pub max_steps: u64,
     /// Nested calls. Clamped to 10,000. The stack grows by itself (see the header), so this bounds the memory of the native stack. The default is 100.
     pub max_call_depth: u32,
-    /// Native recursion of ONE call: expressions, patterns, constructors, setup walks and `exec`. Counted from the start of each call. Clamped to 768. The default is 512.
+    /// Native recursion of ONE call: expressions, patterns, constructors, setup walks and `exec`. Counted from the start of each call. Clamped to 2048. The default is 512.
     pub max_traversal_depth: u32,
     /// Pending statement control frames (blocks, loops, `switch`, `try`, labels) of all synchronous calls together. Heap, not
     /// native stack. Clamped to 65,536. The default is 512. Zero refuses the first body.

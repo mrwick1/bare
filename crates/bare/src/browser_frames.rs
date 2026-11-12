@@ -1,6 +1,11 @@
 //! Named access on `Window` (the `WindowProperties` object) and named properties of `Document`, and live named access to inert
 //! iframe windows. No child document is fetched or executed.
 //!
+//! - The inert window of an iframe is an `EventTarget` (a `Target::Obj`: `addEventListener`, `removeEventListener`, `dispatchEvent`).
+//!   An iframe with no `src` (or an empty one, or `about:blank`) and no `srcdoc` gets an initial `about:blank` document at the first
+//!   `contentWindow`: `contentWindow.document` and `contentDocument` are that one object while the iframe is connected. It is made
+//!   as `document.implementation.createHTMLDocument('')` is. Any other iframe has `contentDocument` `null` (the child is never
+//!   loaded, so it has no document), as for a cross-origin frame. The frame window gets no `resize` event.
 //! - Two host named objects sit in the chains: `window -> Window.prototype -> owner -> EventTarget.prototype` and `document -> document_owner ->
 //!   Document.prototype`. Own properties of `window` (declared `var` and `function`, the window API) and the global lexical names
 //!   (`let`, `const`) come first, so the names are only a fallback after a miss.
@@ -193,6 +198,7 @@ pub(crate) fn activate(d: &Dom, it: &mut Interp<'_>) -> R<()> {
         return Ok(());
     }
     d.def_get(it, d.p().iframe, "contentWindow", content_window, None)?;
+    d.def_get(it, d.p().iframe, "contentDocument", content_document, None)?;
     d.def_get(it, d.p().iframe, "name", name, Some(set_name))?;
     crate::browser_reflect::reflect!(d, it, d.p().iframe, &["iframe"], {
         "src" => "src": Url, "srcdoc" => "srcdoc": Str, "allow" => "allow": Str, "width" => "width": Str, "height" => "height": Str,
@@ -373,8 +379,13 @@ fn context(d: &Dom, it: &mut Interp<'_>, n: NodeId) -> R<Value> {
     if d.frames.state().as_ref().map_or(0, |s| s.contexts.len()) >= d.lim.max_wrappers {
         return Err(d.lim("dom-wrappers"));
     }
+    if d.st.borrow().by_obj.len() >= d.lim.max_wrappers {
+        return Err(d.lim("dom-wrappers"));
+    }
     let element = d.wrap(it, n)?;
-    let o = d.obj(it, it.object_prototype())?;
+    // The frame window is an `EventTarget` (`Target::Obj`, as a worker or an abort signal is).
+    let o = d.obj(it, d.p().et)?;
+    d.st.borrow_mut().by_obj.insert(o, Target::Obj(o));
     let g = Value::Object(it.global_object());
     for (name, v) in [
         ("window", Value::Object(o)),
@@ -387,6 +398,11 @@ fn context(d: &Dom, it: &mut Interp<'_>, n: NodeId) -> R<Value> {
     ] {
         let k = d.key(it, name)?;
         it.define_data(o, k, v, false, true, true)?;
+    }
+    if initial_blank(d, n) {
+        let doc = d.new_blank_document(it)?;
+        let k = d.key(it, "document")?;
+        it.define_data(o, k, doc, false, true, true)?;
     }
     d.frames
         .state_mut()
@@ -405,6 +421,22 @@ pub(crate) fn content_window(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Val
         return Ok(Value::Null);
     }
     context(d, it, n)
+}
+/// Has the iframe `n` an initial `about:blank` document: no `src` (or an empty one) or `src="about:blank"`, and no `srcdoc`?
+fn initial_blank(d: &Dom, n: NodeId) -> bool {
+    let doc = d.doc.borrow();
+    let attr = |name: &str| doc.find_atom(name).and_then(|a| doc.attr(n, a));
+    attr("srcdoc").is_none() && attr("src").is_none_or(|v| v.trim().is_empty() || v.trim().eq_ignore_ascii_case("about:blank"))
+}
+/// `iframe.contentDocument`: the initial `about:blank` document of `contentWindow`, else `null` (see the header).
+pub(crate) fn content_document(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
+    let w = content_window(d, it, this, a)?;
+    if matches!(w, Value::Null) {
+        return Ok(w);
+    }
+    let k = d.key(it, "document")?;
+    let v = it.get_value(w, k)?;
+    Ok(if matches!(v, Value::Object(_)) { v } else { Value::Null })
 }
 pub(crate) fn length(d: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
     it.charge(d.doc.borrow().len() as u64)?;

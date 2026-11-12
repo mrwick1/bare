@@ -107,8 +107,8 @@ fn nested_browsing_contexts_are_inert() {
     big(|| {
         let mut b = browser(PAGE);
         // The named window is inert. Child documents and navigation remain absent.
-        assert_eq!(js(&mut b, "var f = document.getElementById('p'); [typeof f.contentWindow, typeof f.contentDocument, typeof f.src, typeof f.srcdoc, typeof f.sandbox, typeof f.loading, typeof f.getSVGDocument, 'contentWindow' in HTMLIFrameElement.prototype].join()"), "object,undefined,string,string,undefined,string,undefined,true");
-        assert_eq!(js(&mut b, "Object.getOwnPropertyNames(HTMLIFrameElement.prototype).join()"), "constructor,contentWindow,name,src,srcdoc,allow,width,height,loading,referrerPolicy");
+        assert_eq!(js(&mut b, "var f = document.getElementById('p'); [typeof f.contentWindow, typeof f.contentDocument, typeof f.src, typeof f.srcdoc, typeof f.sandbox, typeof f.loading, typeof f.getSVGDocument, 'contentWindow' in HTMLIFrameElement.prototype].join()"), "object,object,string,string,undefined,string,undefined,true");
+        assert_eq!(js(&mut b, "Object.getOwnPropertyNames(HTMLIFrameElement.prototype).join()"), "constructor,contentWindow,contentDocument,name,src,srcdoc,allow,width,height,loading,referrerPolicy");
         assert_eq!(js(&mut b, "typeof window.frames + ',' + typeof window.parent + ',' + typeof window.frameElement"), "object,object,object");
         // attributes stay plain attributes: no reflection, no side effect
         assert_eq!(js(&mut b, "f.setAttribute('src', '/other.html'); f.setAttribute('srcdoc', '<p>x</p>'); [f.getAttribute('src'), f.getAttribute('srcdoc'), f.hasAttribute('name')].join()"), "/other.html,<p>x</p>,false");
@@ -172,5 +172,44 @@ fn frame_lookup_in_large_documents_retries_host_reads() {
     big(|| {
         let mut b = browser(&format!("<body>{}<iframe name='child' id='f'></iframe></body>", "<div></div>".repeat(50)));
         assert_eq!(js(&mut b, "var c = frames.child; [c === frames[0], c === document.getElementById('f').contentWindow, typeof window.missing].join()"), "true,true,undefined");
+    });
+}
+
+#[test]
+fn blank_frame_window_is_an_event_target_with_a_document() {
+    big(|| {
+        let mut b = browser("<!doctype html><body><p>x</p></body>");
+        let r = js(&mut b, "var f = document.createElement('iframe'); f.style.cssText = 'position:absolute;width:9em;height:9em;top:-99em';
+            document.body.insertBefore(f, document.body.firstChild);
+            var w = f.contentWindow; w.document.open(); w.document.close();
+            var hits = 0, fn = function (e) { hits += 1; };
+            w.addEventListener('resize', fn, false);
+            w.dispatchEvent(new CustomEvent('resize'));
+            var once = hits;
+            w.removeEventListener('resize', fn, false);
+            w.dispatchEvent(new CustomEvent('resize'));
+            [once, hits, typeof w.addEventListener, f.contentDocument === w.document, f.contentDocument === f.contentDocument,
+             !!f.contentDocument.body, !!f.contentDocument.head, !!f.contentDocument.documentElement, f.contentDocument !== document,
+             w.document.write('<b id=q>hi</b>') === undefined, f.contentDocument.getElementById('q').textContent, document.getElementById('q')].join()");
+        assert_eq!(r, "1,1,function,true,true,true,true,true,true,true,hi,");
+    });
+}
+
+#[test]
+fn frame_with_another_src_has_a_window_but_no_document() {
+    big(|| {
+        let mut b = browser("<!doctype html><body><iframe id=a src='/x.html'></iframe><iframe id=c src='about:blank'></iframe><iframe id=d srcdoc='<p>'></iframe></body>");
+        assert_eq!(js(&mut b, "var e = (id) => document.getElementById(id); typeof e('a').contentWindow.addEventListener + ',' + e('a').contentDocument + ',' + (e('c').contentDocument !== null) + ',' + e('d').contentDocument"), "function,null,true,null");
+        assert_eq!(js(&mut b, "var g = document.createElement('iframe'); g.contentDocument + ',' + g.contentWindow"), "null,null");
+    });
+}
+
+#[test]
+fn blank_frame_document_survives_a_collection() {
+    big(|| {
+        let mut b = browser("<!doctype html><body></body>");
+        js(&mut b, "var f = document.body.appendChild(document.createElement('iframe')); f.contentDocument.x = 7; f.contentWindow.y = 8; f = null;");
+        b.collect(&[]).unwrap();
+        assert_eq!(js(&mut b, "var g = document.body.lastChild; g.contentDocument.x + ',' + g.contentWindow.y + ',' + (g.contentDocument === g.contentWindow.document)"), "7,8,true");
     });
 }

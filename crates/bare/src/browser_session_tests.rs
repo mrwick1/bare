@@ -562,7 +562,36 @@ fn document_navigation_requests_html() {
         s.run();
         let heads = srv.heads.lock().unwrap();
         assert!(heads[0].contains("accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"));
-        assert!(heads[0].contains("user-agent: bare/0.1"));
+        assert!(heads[0].contains(&format!("user-agent: {}", crate::browser_web::USER_AGENT.to_ascii_lowercase())));
+    });
+}
+
+#[test]
+fn every_request_of_a_page_sends_the_browser_user_agent_unless_the_script_sets_one() {
+    big(|| {
+        let srv = server(|| {
+            vec![
+                ("/", html("<link rel=stylesheet href=/s.css><script>fetch('/f').then(function (r) { return r.text() }).then(function (t) { localStorage.setItem('f', t) });
+                    fetch('/u', { headers: { 'User-Agent': 'mine' } }).then(function (r) { return r.text() }).then(function (t) { localStorage.setItem('u', t) });
+                    var x = new XMLHttpRequest(); x.open('GET', '/x'); x.onload = function () { localStorage.setItem('x', x.responseText) }; x.send()</script>")),
+                ("/s.css", Reply::css("p {}")),
+                ("/f", Reply::new(200, Some("text/plain"), "F")),
+                ("/u", Reply::new(200, Some("text/plain"), "U")),
+                ("/x", Reply::new(200, Some("text/plain"), "X")),
+            ]
+        });
+        let mut s = Session::new(cfg(srv.url("/")));
+        s.run();
+        assert_eq!([get(&s, &srv, "f"), get(&s, &srv, "u"), get(&s, &srv, "x")], [Some("F".into()), Some("U".into()), Some("X".into())]);
+        // The server keeps the head in lower case, so the comparison is too.
+        let ua = format!("user-agent: {}", crate::browser_web::USER_AGENT.to_ascii_lowercase());
+        let heads = srv.heads.lock().unwrap();
+        for path in ["get / ", "get /s.css ", "get /f ", "get /x "] {
+            let head = heads.iter().find(|h| h.starts_with(path)).unwrap_or_else(|| panic!("no request for {path}"));
+            assert!(head.contains(&ua), "{head}");
+        }
+        let head = heads.iter().find(|h| h.starts_with("get /u ")).expect("no request for /u");
+        assert!(head.contains("user-agent: mine") && !head.contains(&ua), "{head}");
     });
 }
 

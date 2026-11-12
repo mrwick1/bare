@@ -26,6 +26,16 @@ fn create_html_document(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) 
         Value::Undefined => None,
         v => Some(d.string_arg(it, v)?),
     };
+    d.html_document(it, title)
+}
+
+impl Dom {
+    /// A document with `html`, `head` and `body` outside the tree. An iframe with an initial `about:blank` document gets one too.
+    pub(crate) fn new_blank_document(&self, it: &mut Interp<'_>) -> R<Value> {
+        self.html_document(it, None)
+    }
+    fn html_document(&self, it: &mut Interp<'_>, title: Option<String>) -> R<Value> {
+    let d = self;
     let n = {
         let mut doc = d.doc.borrow_mut();
         d.room(&doc, 5, title.as_ref().map_or(0, |t| t.len()))?;
@@ -41,6 +51,7 @@ fn create_html_document(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) 
         n
     };
     d.wrap(it, n)
+    }
 }
 
 fn receiver(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<()> {

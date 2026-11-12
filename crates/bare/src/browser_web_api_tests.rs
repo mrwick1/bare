@@ -302,3 +302,21 @@ fn tags_with_members_get_their_prototype_from_the_first_wrapper() {
         assert_eq!(r, "");
     });
 }
+
+#[test]
+fn timeline_and_screen_interfaces_exist_and_entries_are_instances() {
+    big(|| {
+        let mut b = browser();
+        assert_eq!(js(&mut b, "['PerformanceEntry','PerformanceResourceTiming','PerformanceNavigationTiming','PerformanceMark','PerformanceMeasure','Screen'].map(function (n) { return typeof globalThis[n] }).join()"), "function,function,function,function,function,function");
+        assert_eq!(js(&mut b, "try { new PerformanceEntry(); 'no' } catch (e) { e.name + ':' + e.message }"), "TypeError:Illegal constructor");
+        assert_eq!(js(&mut b, "try { new Screen(); 'no' } catch (e) { e.name + ':' + e.message }"), "TypeError:Illegal constructor");
+        assert_eq!(js(&mut b, "Object.getPrototypeOf(PerformanceResourceTiming.prototype) === PerformanceEntry.prototype && Object.getPrototypeOf(PerformanceMark.prototype) === PerformanceEntry.prototype"), "true");
+        assert_eq!(js(&mut b, "performance.mark('m'); String(performance.getEntries().find(function (e) { return e instanceof PerformanceResourceTiming && e.initiatorType === 'xmlhttprequest'; }))"), "undefined");
+        assert_eq!(js(&mut b, "var k = performance.mark('k'); [k instanceof PerformanceMark, k instanceof PerformanceEntry, k instanceof PerformanceMeasure, Object.prototype.toString.call(k)].join()"), "true,true,false,[object PerformanceMark]");
+        assert_eq!(js(&mut b, "var m = performance.measure('km', 'k'); [m instanceof PerformanceMeasure, m instanceof PerformanceEntry, m instanceof PerformanceMark].join()"), "true,true,false");
+        assert_eq!(js(&mut b, "performance.getEntriesByName('k')[0] instanceof PerformanceMark"), "true");
+        assert_eq!(js(&mut b, "Object.keys(k.toJSON()).join() + ' ' + Object.keys(m.toJSON()).join()"), "name,entryType,startTime,duration,detail name,entryType,startTime,duration,detail");
+        assert_eq!(js(&mut b, "screen instanceof Screen"), "true");
+        assert_eq!(js(&mut b, "[Object.getPrototypeOf(screen) === Screen.prototype, screen.width].join()"), "true,1280");
+    });
+}

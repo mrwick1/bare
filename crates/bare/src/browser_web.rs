@@ -1,20 +1,25 @@
-//! `crypto`, `navigator`, `Blob`, `File` and `FormData`.
+//! `crypto`, `navigator`, `Blob`, `File`, `FormData` and `SubtleCrypto`.
 //!
-//! Lazy: the five globals are accessors until a script first reads or writes one (the way `Intl` and `BigInt` work in the
-//! engine). A page that uses none of them pays for five functions. The first read makes every object of this file
+//! Lazy: the six globals are accessors until a script first reads or writes one (the way `Intl` and `BigInt` work in the
+//! engine). A page that uses none of them pays for six functions. The first read makes every object of this file
 //! once (`made`) and replaces its own accessor with a data property. A write replaces the accessor with the written value.
 //!
 //! `crypto` (Web Crypto): `getRandomValues(array)` and `randomUUID()`. The bytes come from `bare_tls::random::fill`, the
 //! OS source, with no fallback: if it fails, the call throws an `OperationError`. `getRandomValues` takes an integer typed
 //! array (not `Float32Array`, `Float64Array`, `DataView` or `ArrayBuffer`: `TypeMismatchError`), at most 65,536 bytes
 //! (`QuotaExceededError`), fills it in place and returns it. `randomUUID` is RFC 9562 version 4, in lower case.
-//! There is no `crypto.subtle`.
+//! `crypto.subtle` is a `SubtleCrypto` in a secure context (`browser_basics::secure`) and `undefined` otherwise. Its
+//! `digest(algorithm, data)` hashes with SHA-1, SHA-256, SHA-384 or SHA-512 (`bare_tls`), a name or `{name}`, ASCII
+//! case-insensitive. It copies the bytes of an ArrayBuffer, a typed array or a DataView when it is called, and resolves
+//! with a new ArrayBuffer. An unknown name rejects with `NotSupportedError`; bad data rejects with `TypeError`. The other
+//! methods reject with `NotSupportedError` until they are built.
 //!
 //! `navigator`: getters on `Navigator.prototype` with fixed values (`USER_AGENT` is the one place of the string).
 //! `userAgentData` (WICG UA Client Hints) has `brands` (a frozen array), `mobile` and `platform`, `toJSON()` of these three, and
 //! `getHighEntropyValues(hints)`. That method returns a Promise of an object with the three plus each hint asked for:
 //! `architecture` "x86", `bitness` "64", `model` "", `platformVersion` "", `uaFullVersion` and `fullVersionList` (from `CHROME`),
 //! `wow64` false and `formFactors` ["Desktop"]. It ignores other hints. `userAgent` and `userAgentData` report the same data.
+//! The requests of the page send the same `User-Agent` and the low-entropy hints (`wire_identity`).
 //! `cookieEnabled` is true, as asked. `document.cookie` and the network share one jar (`bare_net::cookie`, `browser_cookie.rs`). There is no `mediaDevices`.
 //!
 //! `Blob`: `new Blob(parts, {type})` with strings, `ArrayBuffer`s, views and Blobs, `size`, `type`, `text()`,
@@ -47,6 +52,18 @@ use std::fmt::Write;
 /// The user agent string, and the major version that `userAgentData.brands` reports. The only place of both.
 pub(crate) const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36";
 const CHROME: &str = "155";
+/// The brands of `userAgentData.brands` and of `sec-ch-ua`, in this order. The only place of them.
+const BRANDS: [(&str, &str); 3] = [("Not.A/Brand", "8"), ("Chromium", CHROME), ("Google Chrome", CHROME)];
+/// The platform of `userAgentData.platform`, and of `sec-ch-ua-platform` (quoted there). The only place of it.
+const PLATFORM: &str = "Linux";
+
+/// What the browser sends on the wire (`Client::set_identity`): `USER_AGENT`, and the low-entropy client hints of `userAgentData`
+/// (`sec-ch-ua`, `sec-ch-ua-mobile`, `sec-ch-ua-platform`), made from the same constants as `navigator`.
+pub(crate) fn wire_identity() -> bare_net::http::Identity {
+    let brands: Vec<String> = BRANDS.iter().map(|(b, v)| format!("\"{b}\";v=\"{v}\"")).collect();
+    let hints = vec![("sec-ch-ua", brands.join(", ")), ("sec-ch-ua-mobile", "?0".to_string()), ("sec-ch-ua-platform", format!("\"{PLATFORM}\""))];
+    bare_net::http::Identity { user_agent: USER_AGENT, hints }
+}
 
 const MAX_BLOB: usize = 64 << 20;
 const MAX_TOTAL: usize = 256 << 20;
@@ -55,7 +72,7 @@ const MAX_ENTRIES: usize = 1 << 16;
 const MAX_URLS: usize = 1 << 12;
 const MAX_RANDOM: usize = 65536;
 
-const NAMES: [&str; 5] = ["crypto", "navigator", "Blob", "File", "FormData"];
+const NAMES: [&str; 6] = ["crypto", "navigator", "Blob", "File", "FormData", "SubtleCrypto"];
 
 struct BlobData {
     bytes: Vec<u8>,
@@ -85,8 +102,10 @@ struct IterObj {
 /// Every object made on the first use. All are roots.
 #[derive(Clone, Copy)]
 struct Made {
-    /// `crypto`, `navigator`, `Blob`, `File`, `FormData` (the order of `NAMES`).
-    glob: [ObjId; 5],
+    /// `crypto`, `navigator`, `Blob`, `File`, `FormData`, `SubtleCrypto` (the order of `NAMES`).
+    glob: [ObjId; 6],
+    /// The one `crypto.subtle` object.
+    subtle: ObjId,
     langs: ObjId,
     uad: ObjId,
     brands: ObjId,
@@ -123,7 +142,7 @@ pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
     let s = d.web.s.borrow();
     out.extend(s.urls.values().map(|&o| Value::Object(o)));
     if let Some(m) = s.made {
-        out.extend(m.glob.into_iter().chain([m.langs, m.uad, m.brands, m.blob_p, m.file_p, m.form_p, m.iter_p]).map(Value::Object));
+        out.extend(m.glob.into_iter().chain([m.subtle, m.langs, m.uad, m.brands, m.blob_p, m.file_p, m.form_p, m.iter_p]).map(Value::Object));
     }
 }
 
@@ -250,11 +269,11 @@ fn text(out: &mut Vec<u8>, s: &str, norm: bool, esc: bool) {
 macro_rules! lazy {
     ($($f:ident $i:literal),*) => { $(fn $f(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V { lazy(d, it, $i, a) })* };
 }
-lazy!(lazy0 0, lazy1 1, lazy2 2, lazy3 3, lazy4 4);
+lazy!(lazy0 0, lazy1 1, lazy2 2, lazy3 3, lazy4 4, lazy5 5);
 
 pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     let g = it.global_object();
-    for (i, h) in [lazy0 as H, lazy1, lazy2, lazy3, lazy4].into_iter().enumerate() {
+    for (i, h) in [lazy0 as H, lazy1, lazy2, lazy3, lazy4, lazy5].into_iter().enumerate() {
         let f = d.add_fn(it, h, NAMES[i], 0, false)?;
         let k = d.key(it, NAMES[i])?;
         let desc = PropertyDescriptor { get: Some(Some(f)), set: Some(Some(f)), enumerable: Some(i < 2), configurable: Some(true), ..Default::default() };
@@ -330,7 +349,17 @@ fn make(d: &Dom, it: &mut Interp<'_>) -> R<Made> {
     let cp = proto(it, op_, "Crypto")?;
     op(d, it, cp, "getRandomValues", 1, get_random_values)?;
     op(d, it, cp, "randomUUID", 0, random_uuid)?;
+    d.def_get(it, cp, "subtle", subtle_attr, None)?;
     let crypto = d.obj(it, cp)?;
+
+    // SubtleCrypto: `digest` hashes; the other methods reject until they are built.
+    let sp = proto(it, op_, "SubtleCrypto")?;
+    op(d, it, sp, "digest", 2, subtle_digest)?;
+    for (name, len) in [("encrypt", 3), ("decrypt", 3), ("sign", 3), ("verify", 4), ("generateKey", 3), ("importKey", 5), ("exportKey", 2), ("deriveKey", 5), ("deriveBits", 2), ("wrapKey", 4), ("unwrapKey", 7)] {
+        op(d, it, sp, name, len, subtle_unsupported)?;
+    }
+    let subtle = d.obj(it, sp)?;
+    let subtle_ctor = iface(d, it, "SubtleCrypto", 0, subtle_illegal, sp)?;
 
     // navigator
     let np = proto(it, op_, "Navigator")?;
@@ -358,12 +387,12 @@ fn make(d: &Dom, it: &mut Interp<'_>) -> R<Made> {
     let up = proto(it, op_, "NavigatorUAData")?;
     d.def_get(it, up, "brands", |d, it, t, _| uad(d, it, t).map(|m| Value::Object(m.brands)), None)?;
     d.def_get(it, up, "mobile", |d, it, t, _| uad(d, it, t).map(|_| Value::Bool(false)), None)?;
-    d.def_get(it, up, "platform", |d, it, t, _| uad(d, it, t).and_then(|_| d.js_str(it, "Linux")), None)?;
+    d.def_get(it, up, "platform", |d, it, t, _| uad(d, it, t).and_then(|_| d.js_str(it, PLATFORM)), None)?;
     op(d, it, up, "getHighEntropyValues", 1, high_entropy)?;
     op(d, it, up, "toJSON", 0, |d, it, t, _| uad(d, it, t).and_then(|m| low_entropy(d, it, m)).map(Value::Object))?;
     let uad = d.obj(it, up)?;
     let mut brands = Vec::new();
-    for (b, v) in [("Not.A/Brand", "8"), ("Chromium", CHROME), ("Google Chrome", CHROME)] {
+    for (b, v) in BRANDS {
         let o = d.obj(it, op_)?;
         for (k, s) in [("brand", b), ("version", v)] {
             let (k, s) = (d.key(it, k)?, d.js_str(it, s)?);
@@ -400,7 +429,7 @@ fn make(d: &Dom, it: &mut Interp<'_>) -> R<Made> {
     let ip = d.obj(it, it.iterator_prototype())?;
     op(d, it, ip, "next", 0, iter_next)?;
 
-    Ok(Made { glob: [crypto, navigator, blob, file, form], langs, uad, brands, blob_p: bp, file_p: fp, form_p: fo, iter_p: ip })
+    Ok(Made { glob: [crypto, navigator, blob, file, form, subtle_ctor], subtle, langs, uad, brands, blob_p: bp, file_p: fp, form_p: fo, iter_p: ip })
 }
 
 fn freeze(it: &mut Interp<'_>, o: ObjId) -> R<()> {
@@ -485,6 +514,79 @@ fn random_uuid(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     d.js_str(it, &s)
 }
 
+/// `crypto.subtle`: a `SubtleCrypto` in a secure context, `undefined` otherwise.
+fn subtle_attr(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    crypto_this(d, it, this)?;
+    if !crate::browser_basics::secure(d) {
+        return Ok(Value::Undefined);
+    }
+    Ok(Value::Object(d.web.s.borrow().made.expect("made").subtle))
+}
+
+// ------------------------------------------------------------------------------------------ SubtleCrypto
+
+fn subtle_this(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<()> {
+    match (this, d.web.s.borrow().made) {
+        (Value::Object(o), Some(m)) if o == m.subtle => Ok(()),
+        _ => Err(illegal(it)),
+    }
+}
+
+fn subtle_illegal(_: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
+    Err(it.type_error("Illegal constructor"))
+}
+
+/// The digest of `data` for an algorithm name. The name is ASCII case-insensitive. `None` for a name we do not hash.
+fn digest_bytes(name: &str, data: &[u8]) -> Option<Vec<u8>> {
+    Some(match name.to_ascii_uppercase().as_str() {
+        "SHA-1" => bare_tls::sha1::sha1(data).to_vec(),
+        "SHA-256" => bare_tls::sha256::sha256(data).to_vec(),
+        "SHA-384" => bare_tls::sha384::sha384(data).to_vec(),
+        "SHA-512" => bare_tls::sha512::sha512(data).to_vec(),
+        _ => return None,
+    })
+}
+
+/// `digest(algorithm, data)`: converts both arguments first (a TypeError rejects), then looks up the name (`NotSupportedError`).
+fn subtle_digest(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    let p = it.host_new_promise()?;
+    let r = (|| -> V {
+        subtle_this(d, it, this)?;
+        need(it, a, 2, "SubtleCrypto.digest")?;
+        let name = match a[0] {
+            Value::Object(_) => {
+                let k = d.key(it, "name")?;
+                match it.get_value(a[0], k)? {
+                    Value::Undefined => return Err(it.type_error("Failed to execute 'digest' on 'SubtleCrypto': Algorithm: Missing 'name'.")),
+                    n => usv(d, it, n)?,
+                }
+            }
+            v => usv(d, it, v)?,
+        };
+        let copied = match a[1] {
+            Value::Object(o) => it.heap.bytes(o).map(<[u8]>::to_vec),
+            _ => None,
+        };
+        let Some(data) = copied else { return Err(it.type_error("Failed to execute 'digest' on 'SubtleCrypto': The provided value is not of type '(ArrayBuffer or ArrayBufferView)'.")) };
+        it.charge((data.len() / 64) as u64)?;
+        match digest_bytes(&name, &data) {
+            Some(h) => it.new_array_buffer(h),
+            None => Err(d.dom_err(it, "NotSupportedError", "Unrecognized algorithm name.")),
+        }
+    })();
+    crate::browser_fetch::settle(it, p, r)
+}
+
+/// The methods that are not built yet. Each returns a Promise rejected with `NotSupportedError`.
+fn subtle_unsupported(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    let p = it.host_new_promise()?;
+    let r = (|| -> V {
+        subtle_this(d, it, this)?;
+        Err(d.dom_err(it, "NotSupportedError", "This SubtleCrypto method is not supported yet."))
+    })();
+    crate::browser_fetch::settle(it, p, r)
+}
+
 // ------------------------------------------------------------------------------------------ navigator
 
 fn nav(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<Made> {
@@ -508,7 +610,7 @@ fn uad(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<Made> {
 /// A new object with `brands`, `mobile` and `platform`: the low entropy hints.
 fn low_entropy(d: &Dom, it: &mut Interp<'_>, m: Made) -> R<ObjId> {
     let o = d.obj(it, it.object_prototype())?;
-    let p = d.js_str(it, "Linux")?;
+    let p = d.js_str(it, PLATFORM)?;
     for (k, v) in [("brands", Value::Object(m.brands)), ("mobile", Value::Bool(false)), ("platform", p)] {
         put(d, it, o, k, v)?;
     }

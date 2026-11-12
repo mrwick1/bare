@@ -237,10 +237,10 @@ fn a_deep_derived_chain_is_a_limit_not_a_native_stack_overflow() {
 #[test]
 fn nested_classes_are_bounded_by_the_parser_and_the_walk() {
     big(|| {
-        // The parser's depth bound (256) comes before the evaluator's 512 preflight frames, so a class nest that
+        // The parser's depth bound (2048) comes before the evaluator's preflight frames, so a class nest that
         // parses is also walked. `descend` in `w_class` is the second guard.
         let nest = |n: usize| "class A { m() { return ".repeat(n) + "1" + &"; } }".repeat(n);
-        let e = parse_script(&nest(200), Limits::default()).unwrap_err();
+        let e = parse_script(&nest(2000), Limits::default()).unwrap_err();
         assert!(matches!(e.kind, crate::parse::ErrorKind::Limit(_)), "{e}");
         assert_eq!(run_case(&(nest(60) + " 7")), "number:7");
         let heritage = "class A extends (".repeat(100) + "Object" + &") {}".repeat(100) + " 8";

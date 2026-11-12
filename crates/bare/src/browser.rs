@@ -536,6 +536,10 @@ pub struct Dom {
     /// The prototype and the constructor of `PerformanceObserver`, once read (`browser_perf_observer.rs`). Both are also in `fixed`.
     pub(crate) perf_observer: std::cell::Cell<Option<ObjId>>,
     pub(crate) perf_observer_ctor: std::cell::Cell<Option<ObjId>>,
+    /// The timeline interfaces, once read (`browser_perf.rs`).
+    pub(crate) perf_ifaces: std::cell::Cell<Option<crate::browser_perf::Ifaces>>,
+    /// The interface `Screen`, once read or once `window.screen` is made (`screen_iface`).
+    pub(crate) screen_iface: std::cell::Cell<Option<crate::browser_geom::Iface>>,
     /// The `mark` and `measure` entries of `performance` (`browser_perf.rs`).
     pub(crate) frames: crate::browser_frames::Frames,
     pub(crate) perf_entries: RefCell<Vec<crate::browser_perf::Entry>>,
@@ -866,13 +870,31 @@ pub(crate) fn define_window(d: &Dom, it: &mut Interp<'_>, name: &str) -> R<bool>
     Ok(true)
 }
 
+/// The interface `Screen`: no constructor, no members of its own. `window.screen` is its instance.
+fn screen_iface(d: &Dom, it: &mut Interp<'_>) -> R<crate::browser_geom::Iface> {
+    if let Some(i) = d.screen_iface.get() {
+        return Ok(i);
+    }
+    let i = crate::browser_geom::make(d, it, it.object_prototype(), "Screen", illegal_constructor, false)?;
+    crate::browser_geom::finish(d, it, i, "Screen", &[])?;
+    d.screen_iface.set(Some(i));
+    Ok(i)
+}
+
+fn ensure_screen(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+    screen_iface(d, it).map(|_| ())
+}
+
+crate::browser_lazy::lazy_global!(lazy_screen, "Screen", ensure_screen, |d| d.screen_iface.get().expect("made").ctor);
+
 // The virtual display has the default headless dimensions. Viewport resizing does not resize it.
 #[cold]
 fn window_screen(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
     let value = if let Some(&v) = a.first() {
         v
     } else {
-        let o = d.obj(it, it.object_prototype())?;
+        let proto = screen_iface(d, it)?.proto;
+        let o = d.obj(it, proto)?;
         crate::browser_lazy::tag(d, it, o, "Screen")?;
         for (name, value) in [("width", 1280.0), ("height", 800.0), ("availWidth", 1280.0), ("availHeight", 800.0), ("availLeft", 0.0), ("availTop", 0.0), ("colorDepth", 24.0), ("pixelDepth", 24.0)] {
             let k = d.key(it, name)?;
@@ -1296,6 +1318,7 @@ impl Dom {
         crate::browser_nodelist::install(self, it)?;
         crate::browser_dataset::install(self, it)?;
         crate::browser_abort::install(self, it)?;
+        crate::browser_editing::install(self, it)?;
         crate::browser_worker::install(self, it)?;
         crate::browser_xhr::install(self, it)?;
         crate::browser_encoding::install(self, it)?;
@@ -1320,6 +1343,8 @@ impl Dom {
         crate::browser_canvas::install(self, it)?;
         crate::browser_rejection::install(self, it)?;
         crate::browser_perf_observer::install(self, it)?;
+        crate::browser_perf::install_interfaces(self, it)?;
+        crate::browser_lazy::install(self, it, &[("Screen", lazy_screen as H)])?;
         crate::browser_select::install(self, it)?;
         // Last: a new host function earlier in this list moves the id of every one after it.
         crate::browser_elements::install(self, it)?;
@@ -1623,6 +1648,8 @@ impl Browser {
             parsing_protos: Default::default(),
             perf_observer: Default::default(),
             perf_observer_ctor: Default::default(),
+            perf_ifaces: Default::default(),
+            screen_iface: Default::default(),
             frames: Default::default(),
             perf_entries: Default::default(),
             html_ifaces: Default::default(),

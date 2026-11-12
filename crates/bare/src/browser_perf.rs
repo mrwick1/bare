@@ -8,16 +8,84 @@
 //! - An entry is plain Rust data. Each read makes new plain objects with `name`, `entryType`, `startTime`, `duration` and `detail`, so
 //!   two reads of one entry are not `===`, and there is nothing to root. The object that `mark` or `measure` returns carries the `detail`
 //!   of its options; a later read has `detail: null`.
-//! - No `PerformanceEntry`, `PerformanceMark` or `PerformanceMeasure` global. An entry inherits from `Object.prototype`.
+//! - The interfaces `PerformanceEntry`, `PerformanceResourceTiming`, `PerformanceNavigationTiming`, `PerformanceMark` and `PerformanceMeasure`
+//!   are lazy globals (`install_interfaces`). Each is an illegal constructor. A mark or a measure is an instance of its interface, and
+//!   `toJSON` gives the plain copy. A resource or navigation entry is never made. Gap: `new PerformanceMark(name)` throws.
 //! - A `measure` argument that names a mark uses the last mark of that name. `navigationStart` is 0. An unknown name is a `SyntaxError`.
 //! - After `MAX_ENTRIES` entries, a new one is returned but not kept.
 //! - The methods and legacy navigation accessors are installed with the scheduler. The entry list is empty until the first `mark`.
 
 use crate::browser::*;
+use crate::browser_geom::Iface;
 use bare_js::eval::Interp;
 use bare_js::value::{ObjId, Value};
 
 const MAX_ENTRIES: usize = 50_000;
+
+/// The interfaces of the timeline. Made once by `ensure`. Their prototypes and constructors are in `Dom::fixed` (`browser_geom::make`).
+#[derive(Clone, Copy)]
+pub(crate) struct Ifaces {
+    entry: Iface,
+    resource: Iface,
+    navigation: Iface,
+    mark: Iface,
+    measure: Iface,
+}
+
+fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<Ifaces> {
+    if let Some(i) = d.perf_ifaces.get() {
+        return Ok(i);
+    }
+    let entry = crate::browser_geom::make(d, it, it.object_prototype(), "PerformanceEntry", crate::browser::illegal_constructor, false)?;
+    let sub = |it: &mut Interp<'_>, name: &str| crate::browser_geom::make(d, it, entry.proto, name, crate::browser::illegal_constructor, false);
+    let (resource, navigation, mark, measure) = (sub(it, "PerformanceResourceTiming")?, sub(it, "PerformanceNavigationTiming")?, sub(it, "PerformanceMark")?, sub(it, "PerformanceMeasure")?);
+    crate::browser_geom::finish(d, it, entry, "PerformanceEntry", &[("toJSON", 0, entry_json as H)])?;
+    crate::browser_geom::finish(d, it, resource, "PerformanceResourceTiming", &[])?;
+    crate::browser_geom::finish(d, it, navigation, "PerformanceNavigationTiming", &[])?;
+    crate::browser_geom::finish(d, it, mark, "PerformanceMark", &[("toJSON", 0, detail_json as H)])?;
+    crate::browser_geom::finish(d, it, measure, "PerformanceMeasure", &[("toJSON", 0, detail_json as H)])?;
+    let i = Ifaces { entry, resource, navigation, mark, measure };
+    d.perf_ifaces.set(Some(i));
+    Ok(i)
+}
+
+crate::browser_lazy::lazy_global!(lazy_entry, "PerformanceEntry", ensure_unit, |d| d.perf_ifaces.get().expect("made").entry.ctor);
+crate::browser_lazy::lazy_global!(lazy_resource, "PerformanceResourceTiming", ensure_unit, |d| d.perf_ifaces.get().expect("made").resource.ctor);
+crate::browser_lazy::lazy_global!(lazy_navigation, "PerformanceNavigationTiming", ensure_unit, |d| d.perf_ifaces.get().expect("made").navigation.ctor);
+crate::browser_lazy::lazy_global!(lazy_mark, "PerformanceMark", ensure_unit, |d| d.perf_ifaces.get().expect("made").mark.ctor);
+crate::browser_lazy::lazy_global!(lazy_measure, "PerformanceMeasure", ensure_unit, |d| d.perf_ifaces.get().expect("made").measure.ctor);
+
+fn ensure_unit(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+    ensure(d, it).map(|_| ())
+}
+
+pub(crate) fn install_interfaces(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+    crate::browser_lazy::install(d, it, &[("PerformanceEntry", lazy_entry as H), ("PerformanceResourceTiming", lazy_resource), ("PerformanceNavigationTiming", lazy_navigation), ("PerformanceMark", lazy_mark), ("PerformanceMeasure", lazy_measure)])
+}
+
+/// `PerformanceEntry.prototype.toJSON`: the four members of an entry.
+fn entry_json(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
+    json(d, it, this, false)
+}
+
+/// `toJSON` of a mark and a measure: the four members and `detail`.
+fn detail_json(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
+    json(d, it, this, true)
+}
+
+fn json(d: &Dom, it: &mut Interp<'_>, this: Value, detail: bool) -> R<Value> {
+    if !matches!(this, Value::Object(_)) {
+        return Err(crate::browser_geom::illegal(it));
+    }
+    let o = d.obj(it, it.object_prototype())?;
+    let names: &[&str] = if detail { &["name", "entryType", "startTime", "duration", "detail"] } else { &["name", "entryType", "startTime", "duration"] };
+    for &name in names {
+        let v = member(d, it, this, name)?;
+        let k = d.key(it, name)?;
+        it.define_data(o, k, v, true, true, true)?;
+    }
+    Ok(Value::Object(o))
+}
 
 pub(crate) struct Entry {
     name: String,
@@ -42,9 +110,10 @@ fn member(d: &Dom, it: &mut Interp<'_>, o: Value, name: &str) -> R<Value> {
     it.get_value(o, k)
 }
 
-/// The plain object of an entry.
+/// The object of an entry: an instance of `PerformanceMark` or `PerformanceMeasure`.
 fn make(d: &Dom, it: &mut Interp<'_>, e: &Entry, detail: Value) -> R<Value> {
-    let o = d.obj(it, it.object_prototype())?;
+    let i = ensure(d, it)?;
+    let o = d.obj(it, if e.measure { i.measure.proto } else { i.mark.proto })?;
     for (k, v) in [
         ("name", d.js_str(it, &e.name)?),
         ("entryType", d.js_str(it, if e.measure { "measure" } else { "mark" })?),
