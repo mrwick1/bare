@@ -815,3 +815,100 @@ fn unnamed_form_fields_take_a_name_from_what_sits_before_them() {
     let (r, _) = s.tool("find", json!({"role": "textbox", "name": "username"}));
     assert!(r.as_str().unwrap().starts_with("1 match"), "{r}");
 }
+
+/// A page server for one fixture page: `/` gives `page`, every other path (a form submission) gives a page that says `results`.
+fn focus_page_server(page: &'static str) -> String {
+    use std::io::Read;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for mut c in listener.incoming().flatten() {
+            std::thread::spawn(move || {
+                let (mut head, mut b) = (Vec::new(), [0u8; 1]);
+                while !head.ends_with(b"\r\n\r\n") && c.read(&mut b).unwrap_or(0) == 1 {
+                    head.push(b[0]);
+                }
+                let root = String::from_utf8_lossy(&head).starts_with("GET / ");
+                let body = if root { page } else { "<!doctype html><title>r</title><p>results page</p>" };
+                let _ = write!(c, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            });
+        }
+    });
+    format!("http://127.0.0.1:{port}/")
+}
+
+/// Two search forms, as Wikipedia has: the header input `a` and the page input `b`. The script of `a` moves the focus to `b` at the first
+/// key, and puts the page of `b` before it.
+const TWO_SEARCH: &str = "<!doctype html><body>
+<form id=fa action=/s><input id=a name=q type=search aria-label=\"Header search\"></form>
+<form id=fb action=/s><input id=b name=q type=search aria-label=\"Page search\"></form>
+<form id=fc action=/s><input id=c name=q type=search aria-label=\"Quiet search\"></form>
+<input id=d aria-label=\"Not a form\">
+<div style=\"display:none\"><input id=h aria-label=\"Hidden search\"></div>
+<script>
+document.getElementById('a').addEventListener('keydown', () => document.getElementById('b').focus());
+
+</script></body>";
+
+#[test]
+fn typing_into_an_input_that_hands_the_focus_away_fails_and_never_drops_the_first_key() {
+    let mut s = Server::start();
+    let (snap, _) = s.tool("open", json!({"url": focus_page_server(TWO_SEARCH), "snapshot": true, "timeout_ms": 20000}));
+    let snap = snap.as_str().unwrap().to_string();
+    let (r, error) = s.tool("act", json!({"op": "type", "ref": ref_of(&snap, "Header search"), "text": "bare browser", "snapshot": false}));
+    let r = r.as_str().unwrap().to_string();
+    let (v, _) = s.tool("eval", json!({"js": "['a', 'b'].map(i => document.getElementById(i).value).join('|')"}));
+    // Either all the text is in `a`, or the receipt says that the type failed. The text is never cut or in another box without a failure.
+    assert!(v == json!("bare browser|") || (error && r.contains("FAILED") && r.contains("focus")), "{r} {v}");
+    assert!(!(v == json!("|are browser") && !error), "{r} {v}");
+}
+
+#[test]
+fn typing_into_a_quiet_input_puts_all_the_text_in_it() {
+    let mut s = Server::start();
+    let (snap, _) = s.tool("open", json!({"url": focus_page_server(TWO_SEARCH), "snapshot": true, "timeout_ms": 20000}));
+    let snap = snap.as_str().unwrap().to_string();
+    let (r, error) = s.tool("act", json!({"op": "type", "ref": ref_of(&snap, "Quiet search"), "text": "bare browser", "snapshot": false}));
+    assert!(!error, "{r}");
+    let (v, _) = s.tool("eval", json!({"js": "document.getElementById('c').value"}));
+    assert_eq!(v, json!("bare browser"));
+}
+
+#[test]
+fn press_enter_on_a_ref_submits_the_form_of_that_element() {
+    let mut s = Server::start();
+    let (snap, _) = s.tool("open", json!({"url": focus_page_server(TWO_SEARCH), "snapshot": true, "timeout_ms": 20000}));
+    let snap = snap.as_str().unwrap().to_string();
+    let (_, error) = s.tool("act", json!({"op": "type", "ref": ref_of(&snap, "Quiet search"), "text": "x", "snapshot": false}));
+    assert!(!error);
+    // The focus is on `c`; press on `b` must act on `b`, not on the focused element: `b` is empty but its form still submits.
+    let (r, error) = s.tool("act", json!({"op": "press", "ref": ref_of(&snap, "Page search"), "key": "Enter"}));
+    let r = r.as_str().unwrap().to_string();
+    assert!(!error && r.contains("navigated:") && r.contains("/s?q="), "{r}");
+}
+
+#[test]
+fn press_that_changes_nothing_says_so() {
+    let mut s = Server::start();
+    let (snap, _) = s.tool("open", json!({"url": focus_page_server(TWO_SEARCH), "snapshot": true, "timeout_ms": 20000}));
+    let snap = snap.as_str().unwrap().to_string();
+    let (r, error) = s.tool("act", json!({"op": "press", "ref": ref_of(&snap, "Not a form"), "key": "Enter", "snapshot": false}));
+    let r = r.as_str().unwrap().to_string();
+    assert!(!error && r.contains("no effect"), "{r}");
+}
+
+#[test]
+fn acting_on_a_hidden_element_says_it_is_hidden() {
+    let mut s = Server::start();
+    let (snap, _) = s.tool("open", json!({"url": focus_page_server(TWO_SEARCH), "snapshot": true, "timeout_ms": 20000}));
+    let r = ref_of(snap.as_str().unwrap(), "Not a form");
+    let (_, _) = s.tool("eval", json!({"js": "document.getElementById('d').style.display = 'none'"}));
+    for args in [json!({"op": "press", "key": "Enter"}), json!({"op": "type", "text": "x"}), json!({"op": "click"})] {
+        let mut args = args;
+        args["ref"] = json!(r);
+        args["snapshot"] = json!(false);
+        args["timeout_ms"] = json!(500);
+        let (out, error) = s.tool("act", args.clone());
+        assert!(error && out.as_str().unwrap().contains("hidden"), "{args} {out}");
+    }
+}

@@ -1270,3 +1270,7 @@ A script can set a role after a reply, as a typeahead widget does. A read taken 
 `find` lists the matches that have a box of a size first. A field with no size stays in the list after them.
 
 A form control with no name takes one from what sits before it, after the standard sources. The order is the text of the table cell before its cell, the text or inline element just before it, then its `name` attribute. The code reads siblings only, so it scans no tree.
+## Act checks the focus and press takes a ref (2026-11-12)
+A page script can move the focus while the driver types. The keys then went to another field, and the receipt said ok. Now `type` checks the focus before and after each key. It fails with `focus_lost` and names the field that has the focus. A text with a line feed is not checked, because Enter can remove the field.
+`press` ignored its ref and sent the key to the focused element. Now `press LOC KEY` gives the element the focus first. It fails with `hidden`, `disabled` or `no_focus` when it cannot. Enter in a form field then submits the form.
+A key that changes nothing now says `no effect`. The driver compares the document, the URL and the revision of the tree before and after the key.

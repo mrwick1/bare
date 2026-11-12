@@ -173,7 +173,7 @@ struct Memo {
     typed: Vec<String>,
     /// The keys of the `type` step of now that are not sent yet, the last first. One goes in each try, so the tasks of the page run
     /// between two keys.
-    keys: Option<Vec<char>>,
+    keys: Option<(Handle, Vec<char>)>,
     /// The refs that snapshots minted for the document of now.
     refs: crate::snap::Refs,
 }
@@ -694,11 +694,27 @@ fn attempt(p: &mut Page, m: &mut Memo, a: &Action, out: Option<&PathBuf>, red: &
                         m.typed.push(text.clone());
                     }
                     p.type_start(h, text.is_empty()).map_err(|r| refused(p, h, r))?;
-                    m.keys = Some(text.chars().rev().collect());
+                    m.keys = Some((h, text.chars().rev().collect()));
                 }
-                let keys = m.keys.as_mut().expect("set");
+                let (h, keys) = m.keys.as_mut().expect("set");
+                let h = *h;
+                // A page script can hand the focus to another field: the keys would go there. Stop, and say where the text went.
+                let lost = |p: &mut Page, done: bool| {
+                    let now = p.active().map_or_else(|| "nothing".to_string(), |a| p.describe(a));
+                    Try::Stop(fail("focus_lost", format!("{} lost the focus to {now} {}: the text is not all in it", p.describe(h), if done { "while it was typed" } else { "before the next key" })))
+                };
+                // A line feed is Enter: it can submit the form and take the field away, so a text with one is not checked.
+                let watch = !text.contains('\n');
+                if watch && !p.focused(h) {
+                    m.keys = None;
+                    return Err(lost(p, false));
+                }
                 if let Some(c) = keys.pop() {
                     p.type_char(c);
+                }
+                if watch && !p.focused(h) {
+                    m.keys = None;
+                    return Err(lost(p, true));
                 }
                 if !keys.is_empty() {
                     return Err(Try::More);
@@ -726,7 +742,18 @@ fn attempt(p: &mut Page, m: &mut Memo, a: &Action, out: Option<&PathBuf>, red: &
                 let h = one(p, m, loc)?;
                 p.upload(h, paths).map_err(|r| refused(p, h, r))?;
             }
-            Action::Press(key) => p.press(key).map_err(|e| Try::Stop(fail("not_found", e)))?,
+            Action::Press(loc, key) => {
+                let h = loc.as_ref().map(|l| one(p, m, l)).transpose()?;
+                if let Some(h) = h {
+                    p.focus(h).map_err(|r| refused(p, h, r))?;
+                }
+                let before = (p.generation(), p.url(), p.revision());
+                p.press(key).map_err(|e| Try::Stop(fail("not_found", e)))?;
+                // A page that took the key changed (its tree, a field, the focus) or began to load another one.
+                if (p.generation(), p.url(), p.revision()) == before && !p.loading() {
+                    return Ok(Some(format!("no effect: {key} changed nothing{}", h.map_or_else(String::new, |h| format!(" at {}", p.describe(h))))));
+                }
+            }
             Action::Scroll(loc, dy) => {
                 let h = loc.as_ref().map(|l| one(p, m, l)).transpose()?;
                 if !p.wheel(h, 0.0, *dy).map_err(|r| refused(p, h.expect("a refusal is about an element"), r))? {
