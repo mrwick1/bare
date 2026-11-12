@@ -1263,3 +1263,10 @@ An agent must fetch files for a user: a CSV export, a PDF invoice, a ZIP. A brow
 ## Snapshot cut line and quiet settle (2026-11-12)
 A snapshot over its budget now says what it cut: the line count and the first and last ref of the cut lines, for example `… 412 lines cut (e158–e2096); use … offset=57 …`. Refs of cut lines stay valid, so `find`, `read ref` and `snapshot root=` reach them. `snapshot` takes an `offset` (in outline lines) to page forward through the cut part.
 `settle` before `snapshot`, `find`, `read` and `links` returned only when a 4 ms network or picture poll was over, so a page with a picture on its way cost the 300 ms cap on each call. It now returns when no task ran, no timer is due within 20 ms and no `fetch` is open. A picture on its way is not work for a read.
+## Stable roles and names for `find` and `snapshot` (2026-11-12)
+
+A script can set a role after a reply, as a typeahead widget does. A read taken before the reply showed the old role. A read now waits up to 2 s while a request is pending, and 300 ms otherwise. It stops at once when the page is quiet.
+
+`find` lists the matches that have a box of a size first. A field with no size stays in the list after them.
+
+A form control with no name takes one from what sits before it, after the standard sources. The order is the text of the table cell before its cell, the text or inline element just before it, then its `name` attribute. The code reads siblings only, so it scans no tree.

@@ -260,7 +260,48 @@ impl<'a> Cx<'a> {
 
     /// The accessible name of the element.
     pub(crate) fn name(&self, n: NodeId) -> String {
-        norm(&self.alt(n, false, 0))
+        let name = norm(&self.alt(n, false, 0));
+        if name.is_empty() { self.field_name(n) } else { name }
+    }
+
+    /// A name for a form control that has none: the text of the table cell before its own, else the text just before it in the same
+    /// block (a text node or an inline element), else its `name` attribute. Only the siblings are read: no scan of the tree.
+    fn field_name(&self, n: NodeId) -> String {
+        let field = match self.tag(n) {
+            "input" => !matches!(self.input_type(n).as_str(), "hidden" | "button" | "submit" | "reset" | "image"),
+            "textarea" | "select" => true,
+            _ => false,
+        };
+        if !field {
+            return String::new();
+        }
+        let cell = |c: NodeId| matches!(self.tag(c), "td" | "th");
+        let mut up = self.doc.parent(n);
+        for _ in 0..3 {
+            let Some(c) = up.filter(|&c| !matches!(self.tag(c), "tr" | "table" | "form" | "body")) else { break };
+            if cell(c) {
+                let before = std::iter::successors(self.doc.prev_sibling(c), |&s| self.doc.prev_sibling(s)).find(|&s| cell(s));
+                let text = before.map(|b| norm(&self.text(b))).unwrap_or_default();
+                if !text.is_empty() {
+                    return text;
+                }
+                break;
+            }
+            up = self.doc.parent(c);
+        }
+        let mut prev = self.doc.prev_sibling(n);
+        while let Some(s) = prev {
+            let text = match self.doc.data(s) {
+                NodeData::Text(span) => norm(self.doc.text(*span)),
+                NodeData::Element { .. } if self.boxed(s) && self.styles.style(s).is_some_and(|st| matches!(st.get(Property::Display), Css::Keyword(Keyword::Inline))) && self.role(s).is_none_or(|r| r == "link") => norm(&self.text(s)),
+                _ => break,
+            };
+            if !text.is_empty() {
+                return text;
+            }
+            prev = self.doc.prev_sibling(s);
+        }
+        self.attr(n, "name").map(norm).unwrap_or_default()
     }
 
     /// The text alternative of a node (accname 1.2, step 2), without the parts that the controls here do not use.

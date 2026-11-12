@@ -263,15 +263,20 @@ fn walk(cx: &Cx, root: NodeId, mode: Mode, clicks: &HashSet<NodeId>, out: &mut V
 
 /// Settle the page before a read: the document loaded, and the tasks that are due now run. It returns as soon as the page is quiet: no
 /// task ran, no timer is due within 20 ms and no `fetch` is open. A picture on its way is not work for a read (the 4 ms poll that it
-/// asks for is not a reason to wait). Bounded by 300 ms, so a busy page still answers.
+/// asks for is not a reason to wait). A page that waits for a reply (a script that sets a role or fills a list after a `fetch`) gets
+/// up to 2 s; otherwise the bound is 300 ms, so a busy page still answers.
 pub fn settle(p: &mut Page) {
     let _ = p.wait_load(std::time::Duration::from_secs(10));
-    let end = std::time::Instant::now() + std::time::Duration::from_millis(300);
-    while std::time::Instant::now() < end {
-        let (more, _) = p.tick();
-        let busy = p.browser().is_some_and(|b| b.pending_fetches() > 0 || b.next_scheduled_due().is_some_and(|d| d - b.now() <= 20.0));
-        if !more && !busy {
+    let start = std::time::Instant::now();
+    loop {
+        let (more, next) = p.tick();
+        let now = std::time::Instant::now();
+        let (fetching, due) = p.browser().map_or((false, false), |b| (b.pending_fetches() > 0, b.next_scheduled_due().is_some_and(|d| d - b.now() <= 20.0)));
+        if (!more && !fetching && !due) || now.duration_since(start) > std::time::Duration::from_millis(if fetching { 2000 } else { 300 }) {
             break;
+        }
+        if !more && let Some(t) = next {
+            std::thread::sleep(t.saturating_duration_since(now).min(std::time::Duration::from_millis(20)));
         }
     }
 }
@@ -422,7 +427,10 @@ pub fn find(p: &mut Page, refs: &mut Refs, loc: &crate::locate::Locator, max: us
     settle(p);
     let doc = p.generation();
     refs.sync(doc);
-    let found = crate::locate::find(p, loc)?;
+    let mut found = crate::locate::find(p, loc)?;
+    // The matches with a box of a size first: a field that is in the tree but has no size is not what an agent looks for.
+    let (seen, flat): (Vec<Handle>, Vec<Handle>) = found.shown.iter().partition(|&&h| p.visible_box(h).is_ok());
+    found.shown = seen.into_iter().chain(flat).collect();
     let clicks = p.browser().map(|b| b.listened(CLICKS)).unwrap_or_default();
     let mut items = Vec::new();
     p.inspect(|d, frame| {
