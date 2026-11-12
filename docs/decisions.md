@@ -1303,3 +1303,6 @@ Each character of a `bare-mcp` reply costs model tokens. A reply must give what 
 - `links` and the `href` in a line cut tracking parameters (`utm_*`, `fbclid`, `gclid` and similar). `links` gives a path for a link on the origin of the page.
 - Each interactive element keeps its line and ref. The set of interactive lines of each test page is the same before and after.
 - Nothing collapses a long list. A list of links is a list of controls, and each control must stay reachable. The `max_chars` cut still applies.
+
+## A document request starts a page mark (2026-11-12)
+Issue #388 showed a 9.6 s first phase for an `open` of a plain file that took milliseconds. No request waited. The `wait` phase counts from the start of the last page when a request has no queue time. A plain file starts no page, so it counted from an earlier page. Now `load_document` marks a page start for each document it loads.
