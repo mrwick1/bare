@@ -1226,3 +1226,8 @@ An agent such as `deck` must read a page and act on it in few model calls. Scree
 - `find`, `read` (paged text), `links`, `screenshot` (the page or one element, a path, and the image when asked), `eval` and `sessions` complete the set. Every reply goes through the redactor.
 - Each tool takes `session`. Sessions run side by side, one page each. `open` ends only the session of its name.
 - Step lines accept `ref=e7`, so a journey can mix refs and user locators.
+
+## Act checks the focus and press takes a ref (2026-11-12)
+A page script can move the focus while the driver types. The keys then went to another field, and the receipt said ok. Now `type` checks the focus before and after each key. It fails with `focus_lost` and names the field that has the focus. A text with a line feed is not checked, because Enter can remove the field.
+`press` ignored its ref and sent the key to the focused element. Now `press LOC KEY` gives the element the focus first. It fails with `hidden`, `disabled` or `no_focus` when it cannot. Enter in a form field then submits the form.
+A key that changes nothing now says `no effect`. The driver compares the document, the URL and the revision of the tree before and after the key.

@@ -11,7 +11,7 @@
 //! reload
 //! click LOC
 //! type LOC "text"             click the field, select its text, type one key in each tick (a line feed is Enter); "" clears it
-//! press KEY                   at the focused element: Enter, Tab, Escape, a, Shift+Tab, Control+a
+//! press [LOC] KEY              at the element (it takes the focus first) or the focused element: Enter, Tab, Escape, a, Shift+Tab, Control+a
 //! scroll LOC|page DY          the wheel over the element (or the middle of the window), DY CSS pixels down
 //! expect LOC STATE            visible hidden enabled disabled checked unchecked focused | count N | text="x" | value~"x"
 //! expect url="x" | url~"x"
@@ -71,7 +71,8 @@ pub enum Action {
     Reload,
     Click(Locator),
     Type(Locator, String),
-    Press(String),
+    /// A key at the focused element, or at the element of the locator (focused first).
+    Press(Option<Locator>, String),
     Scroll(Option<Locator>, f64),
     Expect(Check),
     Shot(String),
@@ -225,9 +226,22 @@ fn parse_line(line: &str, vars: &HashMap<String, String>) -> Result<Action, Stri
             }
         }
         "press" => {
-            let key = one()?;
+            // `press KEY`, or `press LOC KEY`: a key is one word, and a locator has `=` or `~` in its first word.
+            let (loc, key) = match raw.split_once(char::is_whitespace) {
+                Some((first, _)) if first.len() > 1 && first.contains(['=', '~']) => {
+                    let w = words(raw)?;
+                    match locator(&w, vars)? {
+                        (loc, n) if n + 1 == w.len() => match &w[n] {
+                            Word::Bare(k) => (Some(loc), expand(k, vars)?),
+                            _ => return Err("press [LOC] KEY".into()),
+                        },
+                        _ => return Err("press [LOC] KEY".into()),
+                    }
+                }
+                _ => (None, one()?),
+            };
             bare::control::key_events(&key).ok_or_else(|| format!("not a key: {key}"))?;
-            Action::Press(key)
+            Action::Press(loc, key)
         }
         "scroll" => {
             let (loc, used) = match rest.first() {
@@ -365,7 +379,9 @@ mod tests {
         for bad in ["open http://a.test state=", "open http://a.test state=\"f\" x", "save-state", "save-state a b"] {
             assert!(p(bad).is_err(), "{bad}");
         }
-        assert_eq!(p("press Shift+Tab"), Ok(Action::Press("Shift+Tab".into())));
+        assert_eq!(p("press Shift+Tab"), Ok(Action::Press(None, "Shift+Tab".into())));
+        assert_eq!(p("press ref=e9 Enter"), Ok(Action::Press(Some(Locator::Ref(9)), "Enter".into())));
+        assert_eq!(p("press css=\"#a\" Enter"), Ok(Action::Press(Some(Locator::Css("#a".into())), "Enter".into())));
         assert_eq!(p("goto http://a.test/x?q=1&r=~2"), Ok(Action::Goto("http://a.test/x?q=1&r=~2".into())));
         assert_eq!(p("expect placeholder~\"search\" value=\"\""), Ok(Action::Expect(Check::El(Locator::Placeholder(Text::Has("search".into())), State::Value(Text::Is("".into()))))));
         for bad in ["cookie", "cookie set a", "cookie set a b secure=1", "expect cookie", "expect cookie a shiny", "click", "type css=\"a\"", "expect css=\"a\" shiny", "nope", "type css=\"a\" \"${NOPE}\"", "shot ../x", "press Hyper+x", "click role=button\"x\"", "type css=\"a\" \"open"] {

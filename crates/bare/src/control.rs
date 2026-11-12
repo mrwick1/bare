@@ -422,6 +422,32 @@ impl Page {
         Ok(())
     }
 
+    /// Give the element the focus, as `el.focus()` does, so that a key goes to it. Fails when it is hidden or disabled, or when it takes no focus.
+    pub fn focus(&mut self, h: Handle) -> Result<(), Refusal> {
+        self.visible_box(h)?;
+        if self.disabled(h) {
+            return Err(Refusal::Disabled);
+        }
+        if !self.focused(h) {
+            if let Some(b) = self.browser() {
+                let _ = b.focus(h.node);
+            }
+            self.after_action();
+        }
+        if self.focused(h) { Ok(()) } else { Err(Refusal::NoFocus) }
+    }
+
+    /// The focused element, if any.
+    pub fn active(&mut self) -> Option<Handle> {
+        let doc = self.doc_id();
+        self.browser().and_then(|b| b.active_element().ok().flatten()).map(|node| Handle { doc, node })
+    }
+
+    /// The count of the changes of the document (its `revision`): a driver compares two to tell that a key did something.
+    pub fn revision(&mut self) -> u64 {
+        self.browser().map_or(0, |b| b.document().borrow().revision())
+    }
+
     /// The key events of one character at the focused element (a line feed is Enter).
     pub fn type_char(&mut self, c: char) {
         let mut buf = [0u8; 4];
