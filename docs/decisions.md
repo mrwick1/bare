@@ -1734,6 +1734,7 @@ A focused element inside an editing host now takes key input. Text, Enter, Backs
 - Gap: `PerformanceResourceTiming` and `PerformanceNavigationTiming` have no entries. The page gets no resource or navigation entry from `getEntries*`, as before.
 - Gap: `toJSON` does not check its receiver. A call on a non-object throws `Illegal invocation`. A call on another object does not.
 - Shape from Ladybird's IDL (`LibWeb/PerformanceTimeline/PerformanceEntry.idl`, `LibWeb/ResourceTiming/PerformanceResourceTiming.idl`, `LibWeb/CSS/Screen.idl`, BSD-2-Clause). We wrote our own code. No file was copied. Ladybird's `Screen` has its members on the interface. Ours keep them as own data properties of `screen`, as before.
+
 ## One User-Agent on the wire and in the page (2026-11-12)
 
 - A web mail app served its legacy unsupported-browser path. The server chose that path from the request headers. The HTTP `User-Agent` was `bare/0.1`, and `navigator.userAgent` said Chrome 155.
@@ -1741,6 +1742,7 @@ A focused element inside an editing host now takes key input. Text, Enter, Backs
 - An https request also sends the default low-entropy client hints: `sec-ch-ua`, `sec-ch-ua-mobile` and `sec-ch-ua-platform`. The brands come from the constants that `navigator.userAgentData` reads.
 - We send no other client hints.
 - A client with no identity, used outside a browser, keeps `bare/0.1`.
+
 ## `crypto.subtle.digest` with SHA-1, SHA-256, SHA-384 and SHA-512 (2026-11-12)
 
 - A web mail app calls `crypto.subtle.digest('SHA-256', bytes)` at startup. bare had no `crypto.subtle`, so the app failed twice (bare issue #423).
