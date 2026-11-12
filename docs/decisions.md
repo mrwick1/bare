@@ -1537,3 +1537,15 @@ An agent gets the URL of a named link in one small call, not with `eval`.
 - `pipeTo` reads an error of the source only when it reads, because the host reader has no `closed` promise.
 - An abort of the writable side of a `TransformStream` errors its readable side at once. This is the older text of the standard. `transformer.cancel` runs.
 - `tee` and async iteration stay gated.
+
+## A ReadableStream as the body of a Response (2026-11-12)
+
+Pages build a Response from a stream, e.g. `new Response(stream.pipeThrough(new TextEncoderStream())).text()`. bare threw "ReadableStream request bodies are not supported", with the word "request" for a Response.
+
+- `new Response(stream)` keeps the stream. `body` gives the same stream back. A locked or disturbed stream is a `TypeError`, as in the standard.
+- `text()`, `json()`, `arrayBuffer()`, `blob()` and `formData()` read the stream to the end in `shims/drain.js`. The bytes then go into a byte Response, so decoding and limits are the ones of a byte body.
+- The total is checked at each chunk. Over `max_request_body` (the bound of every body that script makes), the promise rejects with a `TypeError` that names the limit. A chunk that is not a `Uint8Array` rejects too.
+- `bodyUsed` is the `disturbed` flag of the stream. Host streams now keep that flag.
+- `clone()` of a stream body is `Unsupported`: it needs `tee`.
+- A request body stream stays a `TypeError`. `bare_net` sends a request body as one byte slice (`http::Request::body`), on a worker thread. A streamed upload needs a chunked upload there and a body that the worker reads from the page. That is not cheap. The text now names the call (`Request` or `XMLHttpRequest`) and the reason.
+- `Blob.stream()` is new: it is the `body` of a hidden byte Response. The check of this change needs it.
