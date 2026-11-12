@@ -1384,3 +1384,16 @@ On GitHub, an `act` receipt and the outline after it showed the old page after a
 - When the snapshot after an action fails (no layout yet, as when a style sheet is still on its way), the action still succeeds. The receipt gives `no snapshot: REASON`. Before, the act was an error, and the agent could act twice.
 - `sessions` first collects the tabs that the pages opened and no reply named yet (a `step` call takes no events), and lists them.
 - A route that renders after a timer of more than 20 ms after `pushState`, with no fetch, is not waited for.
+## find and locator misses (2026-11-12)
+
+A sweep of real sites (issue #397) found locator faults that cost an agent turns or 20 s waits.
+
+- `find` with `css` and another locator uses `css` as a scope. It keeps only the matches inside an element of the selector, or the element itself.
+- Each tool checks its argument keys against the properties of its own `inputSchema`. An unknown key fails and names the closest valid key by edit distance. One list drives both the schema and the check, so they cannot drift apart.
+- `act` refuses `text` on an op that does not type or pick. On such an op it is most likely a prompt answer, so the error names `prompt_text`.
+- A locator with an exact name (`=`) that matches nothing looks for near names: names that hold the text in any case. When one of them is rendered, the step fails at once and lists up to 3 of them. Waiting would not help, because the locator is wrong.
+- `name="Issues"` does not match `Issues (5k+)`. Exact stays exact: a count in brackets is part of the name, and some pages have both `Issues` and `Issues (3)`. The fast failure with the near names gives the agent the fix in one turn.
+- A miss of a role with a name and no near name says how many elements have the role.
+- A `not_found` miss on an idle page no longer says "nothing can change it". The text was about the page, and the fault was in the locator. Other failure kinds keep the idle note.
+- A ref before any snapshot or find of the document says so. Before, it said that the page had navigated.
+- `find` with no match on an idle page already returned in a few ms at 992a26b0. It waits only while requests are pending, up to 2 s, as before.

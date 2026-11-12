@@ -107,7 +107,11 @@ impl Server {
     /// Run a tool. A tool error is a result with `isError`, not a protocol error, so the agent sees the message.
     fn call(&mut self, params: &Value) -> Value {
         let args = params.get("arguments").cloned().unwrap_or(json!({}));
-        let done = match params.get("name").and_then(Value::as_str).unwrap_or("") {
+        let name = params.get("name").and_then(Value::as_str).unwrap_or("");
+        if let Err(e) = known_args(name, &args) {
+            return json!({"content": [{"type": "text", "text": e}], "isError": true});
+        }
+        let done = match name {
             "run_steps" => self.run_steps(&args),
             "open" => self.open(&args),
             "step" => self.step(&args),
@@ -404,9 +408,11 @@ impl Server {
         } else {
             return Err("give one of role (with name), label, text, placeholder or css".into());
         };
+        // With another locator, css is the part of the page to look in.
+        let scope = get("css").filter(|_| !matches!(loc, Locator::Css(_)));
         let max = Self::max(args, 6_000);
         let live = self.live_mut(args)?;
-        let out = live.session.with_refs(move |p, refs| snap::find(p, refs, &loc, max))??;
+        let out = live.session.with_refs(move |p, refs| snap::find(p, refs, &loc, scope.as_deref(), max))??;
         let out = live.red.clean(&out);
         self.with_late(args, out)
     }
@@ -476,6 +482,10 @@ impl Server {
             (None, None) => String::new(),
         };
         let text = args.get("text").and_then(Value::as_str).unwrap_or("");
+        // `text` is for the ops that type or pick; on another op it is most likely the answer to a prompt, which is `prompt_text`.
+        if args.get("text").is_some() && !matches!(op, "type" | "fill" | "select" | "press" | "wait") {
+            return Err(format!("argument \"text\" is not used by op {op}: did you mean \"prompt_text\"?"));
+        }
         let q = |t: &str| format!("{t:?}");
         let need = |what: &str| if target.is_empty() { Err(format!("op {what} needs ref (or loc)")) } else { Ok(()) };
         let line = match op {
@@ -766,6 +776,40 @@ fn with_out(mut json: String, opt: &Options, end: bool) -> String {
     json
 }
 
+/// Refuse an argument that the input schema of tool `name` does not list, and name the closest valid key: a key with a typo would
+/// else be dropped without a word. An unknown tool passes: `call` says so.
+fn known_args(name: &str, args: &Value) -> Result<(), String> {
+    // `OnceLock` builds the tool list once, on the first call, and keeps it: like a module-level `const` that is computed lazily in JS.
+    static TOOLS: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+    let tools = TOOLS.get_or_init(tools);
+    let Some(tool) = tools.as_array().and_then(|t| t.iter().find(|t| t["name"] == name)) else { return Ok(()) };
+    let valid: Vec<&String> = tool["inputSchema"]["properties"].as_object().map(|p| p.keys().collect()).unwrap_or_default();
+    let Some(key) = args.as_object().and_then(|a| a.keys().find(|k| !valid.contains(k))) else { return Ok(()) };
+    let close = valid.iter().map(|v| (edits(key, v), *v)).min();
+    Err(match close {
+        Some((d, v)) if d <= 2.max(key.chars().count() / 3) => format!("unknown argument {key:?}: did you mean {v:?}?"),
+        Some(_) => format!("unknown argument {key:?}: {name} takes {}", valid.iter().map(|v| v.as_str()).collect::<Vec<_>>().join(", ")),
+        None => format!("unknown argument {key:?}: {name} takes no arguments"),
+    })
+}
+
+/// The edit distance of two texts: how many characters to insert, delete or change to turn `a` into `b`.
+fn edits(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    // One row of the table at a time: `row[j]` is the distance of the part of `a` so far and the first `j` characters of `b`.
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut prev = row[0];
+        row[0] = i + 1;
+        for j in 0..b.len() {
+            let here = (prev + usize::from(ca != b[j])).min(row[j] + 1).min(row[j + 1] + 1);
+            prev = row[j + 1];
+            row[j + 1] = here;
+        }
+    }
+    row[b.len()]
+}
+
 /// The session name of a call: `session`, default `main`.
 fn session_name(args: &Value) -> String {
     args.get("session").and_then(Value::as_str).unwrap_or("main").to_string()
@@ -800,6 +844,7 @@ fn compact(rep: &Report, red: &Redactor) -> String {
             let script = rep.logs.iter().find(|(_, l)| bare_drive::diag::uncaught(l)).filter(|_| matches!(f.kind, "not_found" | "hidden" | "page"));
             let hint = match script {
                 Some((_, l)) => format!("\nhint: the page script failed: {}", l.text.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(200).collect::<String>()),
+                None if f.message.contains("; near: ") => "\nhint: use a near name: name~ matches a part, in any case".into(),
                 None if hint.is_empty() => String::new(),
                 None => format!("\nhint: {hint}"),
             };
@@ -938,7 +983,7 @@ fn tools() -> Value {
         },
         {
             "name": "find",
-            "description": "Elements that match, as snapshot lines with refs, without a full snapshot. Give role (with name), label, text, placeholder or css. Text matches a part, in any case, unless exact.",
+            "description": "Elements that match, as snapshot lines with refs, without a full snapshot. Give role (with name), label, text, placeholder or css. Text matches a part, in any case, unless exact. css with one of the others: only the matches inside it.",
             "inputSchema": {"type": "object", "properties": {"session": S, "role": {"type": "string"}, "name": {"type": "string"}, "label": {"type": "string"}, "text": {"type": "string"}, "placeholder": {"type": "string"}, "css": {"type": "string"}, "exact": {"type": "boolean"}, "max_chars": {"type": "integer"}}},
         },
         {

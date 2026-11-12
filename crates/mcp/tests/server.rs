@@ -637,7 +637,7 @@ fn an_agent_fills_a_form_with_select_check_hover_dblclick_and_upload() {
     let (r, error) = act(&mut s, json!({"op": "click", "loc": "role=button name=\"Send file\"", "mode": "all"}));
     assert!(!error && r.contains("navigated:") && r.contains("uploaded: notes.txt 12"), "{r}");
     // The same actions are step lines.
-    let (r, error) = s.tool("run_steps", json!({"steps": format!("open {base}/forms\nselect css=\"#country\" \"Tanzania\"\ncheck label=\"Agree\"\nexpect label=\"Agree\" checked\nuncheck label=\"Agree\"\nhover text=\"Hover target\"\ndblclick css=\"#dbl\"\nexpect css=\"#dbls\" text=\"double\"\nupload css=\"input[type=file]\" \"{file}\"\n"), "compact": true}));
+    let (r, error) = s.tool("run_steps", json!({"steps": format!("open {base}/forms\nselect css=\"#country\" \"Tanzania\"\ncheck label=\"Agree\"\nexpect label=\"Agree\" checked\nuncheck label=\"Agree\"\nhover text=\"Hover target\"\ndblclick css=\"#dbl\"\nexpect css=\"#dbls\" text=\"double\"\nupload css=\"input[type=file]\" \"{file}\"\n")}));
     assert!(!error && r["ok"] == true, "{r}");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -758,6 +758,13 @@ fn naming_app() -> String {
         // The login page of a news site: the labels sit in the cell before the field.
         ("/login", "<!doctype html><body><form><table><tr><td>username:</td><td><input type=text name=acct></td></tr><tr><td>password:</td><td><input type=password name=pw></td></tr></table>\
             <p>Nickname <input name=nick></p><p><b>Age</b> <input name=age></p><div><input name=bare_name></div><input name=holder placeholder=Holder><input name=named aria-label=Named></form>"),
+        // An info box: the word "Developer" is in a header cell, in a paragraph and in a link.
+        ("/scope", "<!doctype html><body><table class=info><tr><th>Developer</th><td>A team</td></tr><tr><th>Typing</th><td>Static</td></tr></table>\
+            <p>Developer Ann wrote it.</p><a href=/scope>Developers</a>"),
+        // Links whose names hold a count, and a timer that never ends, as a big site has.
+        ("/near", "<!doctype html><body><a href=/near>Issues (5k+)</a> <a href=/near>Issues closed</a> <a href=/near>Pull requests</a><script>setInterval(() => {}, 50)</script>"),
+        // A to-do list with one item, and nothing that runs.
+        ("/todo", "<!doctype html><body><ul><li><input type=checkbox aria-label=\"Toggle Buy milk\"> Buy milk</li></ul><input type=checkbox aria-label=\"Toggle all\">"),
     ];
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -909,7 +916,6 @@ fn acting_on_a_hidden_element_says_it_is_hidden() {
         let mut args = args;
         args["ref"] = json!(r);
         args["snapshot"] = json!(false);
-        args["timeout_ms"] = json!(500);
         let (out, error) = s.tool("act", args.clone());
         assert!(error && out.as_str().unwrap().contains("hidden"), "{args} {out}");
     }
@@ -1672,4 +1678,87 @@ fn sessions_lists_a_tab_that_the_last_action_opened() {
     assert!(!e, "{r}");
     let (r, _) = s.tool("sessions", json!({}));
     assert!(r.as_str().unwrap().contains(&format!("main~2: {base}/b")), "{r}");
+}
+
+#[test]
+fn find_with_css_and_text_keeps_the_matches_inside_the_css_scope() {
+    let base = naming_app();
+    let mut s = Server::start();
+    s.tool("open", json!({"url": format!("{base}/scope"), "snapshot": false}));
+    let (r, error) = s.tool("find", json!({"css": "table.info th", "text": "Developer"}));
+    let r = r.as_str().unwrap();
+    assert!(!error && r.starts_with("1 match"), "{r}");
+    assert!(r.contains("\"Developer\"") && !r.contains("Ann") && !r.contains("Developers"), "{r}");
+}
+
+#[test]
+fn an_unknown_argument_names_the_closest_valid_key() {
+    let base = naming_app();
+    let mut s = Server::start();
+    s.tool("open", json!({"url": format!("{base}/near"), "snapshot": false}));
+    let (r, error) = s.tool("find", json!({"role": "link", "name~": "Issues"}));
+    assert!(error, "{r}");
+    assert_eq!(r.as_str().unwrap(), "unknown argument \"name~\": did you mean \"name\"?");
+    // A key that one op does not use: a prompt answer is prompt_text, not text.
+    let (r, error) = s.tool("act", json!({"op": "click", "loc": "text=\"Pull requests\"", "dialog": "accept", "text": "yes"}));
+    assert!(error, "{r}");
+    assert!(r.as_str().unwrap().contains("did you mean \"prompt_text\"?"), "{r}");
+    // A tool without a session checks its keys too.
+    let (r, error) = s.tool("sessions", json!({"verbose": true}));
+    assert!(error && r.as_str().unwrap().starts_with("unknown argument \"verbose\""), "{r}");
+}
+
+#[test]
+fn an_exact_name_with_near_names_fails_at_once_and_lists_them() {
+    let base = naming_app();
+    let mut s = Server::start();
+    s.tool("open", json!({"url": format!("{base}/near"), "snapshot": false, "timeout_ms": 20000}));
+    let t = std::time::Instant::now();
+    let (r, error) = s.tool("act", json!({"op": "click", "loc": "role=link name=\"Issues\"", "snapshot": false}));
+    let ms = t.elapsed().as_millis();
+    let r = r.as_str().unwrap();
+    assert!(error && r.starts_with("FAILED not_found"), "{r}");
+    assert!(ms < 2000, "took {ms} ms: {r}");
+    assert!(r.contains("\"Issues (5k+)\"") && r.contains("\"Issues closed\"") && !r.contains("Pull requests"), "{r}");
+}
+
+#[test]
+fn a_miss_on_an_idle_page_speaks_of_the_locator() {
+    let base = naming_app();
+    let mut s = Server::start();
+    s.tool("open", json!({"url": format!("{base}/todo"), "snapshot": false}));
+    let (r, error) = s.tool("act", json!({"op": "click", "loc": "role=checkbox name~\"Walk the dog\"", "snapshot": false}));
+    let r = r.as_str().unwrap();
+    assert!(error && r.starts_with("FAILED not_found"), "{r}");
+    assert!(!r.contains("nothing can change it"), "{r}");
+    assert!(r.contains("2 element(s) with role=checkbox"), "the miss says what has the role: {r}");
+    // An exact name with no near name says the same.
+    let (r, _) = s.tool("act", json!({"op": "click", "loc": "role=checkbox name=\"Toggle every\"", "snapshot": false}));
+    assert!(r.as_str().unwrap().contains("2 element(s) with role=checkbox, none with that name"), "{r}");
+}
+
+#[test]
+fn refs_from_find_work_without_a_snapshot() {
+    let base = naming_app();
+    let mut s = Server::start();
+    s.tool("open", json!({"url": format!("{base}/scope"), "snapshot": false}));
+    // A ref before any snapshot or find: the error says so, and not that the page navigated.
+    let (r, error) = s.tool("act", json!({"op": "click", "ref": "e3", "snapshot": false}));
+    assert!(error && r.as_str().unwrap().contains("no snapshot or find gave refs on this page"), "{r}");
+    let (r, _) = s.tool("find", json!({"role": "link", "name": "Developers"}));
+    let r = r.as_str().unwrap().to_string();
+    let (a, error) = s.tool("act", json!({"op": "click", "ref": ref_of(r.split_once('\n').unwrap().1, "Developers"), "snapshot": false}));
+    assert!(!error, "{a}");
+}
+
+#[test]
+fn find_with_no_match_on_an_idle_page_returns_at_once() {
+    let base = naming_app();
+    let mut s = Server::start();
+    s.tool("open", json!({"url": format!("{base}/near"), "snapshot": false}));
+    s.tool("find", json!({"css": "a"}));
+    let t = std::time::Instant::now();
+    let (r, _) = s.tool("find", json!({"css": "table.none"}));
+    let ms = t.elapsed().as_millis();
+    assert!(r.as_str().unwrap().starts_with("0 match") && ms < 100, "took {ms} ms: {r}");
 }

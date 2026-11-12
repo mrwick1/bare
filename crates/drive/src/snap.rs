@@ -80,13 +80,14 @@ impl Refs {
 
     /// The element of ref `r` (1-based), or why there is none.
     pub fn get(&self, r: u32, doc: usize) -> Result<Handle, String> {
-        let Some(&node) = self.nodes.get((r as usize).wrapping_sub(1)) else {
-            return Err(if r <= self.old || self.doc != doc { format!("e{r} is from an older page (it navigated since): take a new snapshot") } else { format!("e{r} is not a ref of this page: take a snapshot") });
-        };
-        if self.doc != doc {
-            return Err(format!("e{r} is from an older page (it navigated since): take a new snapshot"));
+        let here = self.doc == doc;
+        match self.nodes.get((r as usize).wrapping_sub(1)) {
+            Some(&node) if here => Ok(Handle { doc, node }),
+            _ if r <= self.old || (!here && r as usize <= self.nodes.len()) => Err(format!("e{r} is from an older page (it navigated since): take a new snapshot")),
+            _ if here && !self.nodes.is_empty() => Err(format!("e{r} is not a ref of this page: take a snapshot")),
+            // No ref was ever minted for this document: refs come from snapshot, find, links and read.
+            _ => Err(format!("e{r}: no snapshot or find gave refs on this page yet: take a snapshot")),
         }
-        Ok(Handle { doc, node })
     }
 }
 
@@ -540,11 +541,12 @@ pub fn snapshot(p: &mut Page, refs: &mut Refs, mode: Mode, root: Option<u32>, of
 }
 
 /// The elements that `loc` matches, as snapshot lines with refs.
-pub fn find(p: &mut Page, refs: &mut Refs, loc: &crate::locate::Locator, max: usize) -> Result<String, String> {
+/// With `scope`, only the matches inside an element of that CSS selector.
+pub fn find(p: &mut Page, refs: &mut Refs, loc: &crate::locate::Locator, scope: Option<&str>, max: usize) -> Result<String, String> {
     settle(p);
     let doc = p.generation();
     refs.sync(doc);
-    let mut found = crate::locate::find(p, loc)?;
+    let mut found = crate::locate::find_in(p, loc, scope)?;
     // The matches with a box of a size first: a field that is in the tree but has no size is not what an agent looks for.
     let (seen, flat): (Vec<Handle>, Vec<Handle>) = found.shown.iter().partition(|&&h| p.visible_box(h).is_ok());
     found.shown = seen.into_iter().chain(flat).collect();
@@ -563,6 +565,9 @@ pub fn find(p: &mut Page, refs: &mut Refs, loc: &crate::locate::Locator, max: us
     });
     let n = items.len();
     let mut out = format!("{n} match(es) for {loc}");
+    if let Some(sel) = scope {
+        let _ = write!(out, " in css={sel:?}");
+    }
     if found.hidden > 0 {
         let _ = write!(out, ", {} more not rendered", found.hidden);
     }
