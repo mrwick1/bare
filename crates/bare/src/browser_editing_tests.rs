@@ -131,3 +131,67 @@ fn outside_an_editing_host_nothing_changes() {
         assert_eq!(js(&mut b, "getSelection().removeAllRanges(); document.execCommand('insertText', false, 'X')"), "false");
     });
 }
+
+/// A host with `hello world` and `world` selected, and a log of the `input` events.
+const FMT: &str = "document.body.innerHTML = '<div contenteditable id=e>hello world</div>'; \
+    var e = document.getElementById('e'); window.log = []; \
+    e.addEventListener('input', function (ev) { log.push(ev.inputType); }); \
+    var s = getSelection(); window.pick = function (a, b, c, d) { var r = document.createRange(); r.setStart(a, b); r.setEnd(c, d); s.removeAllRanges(); s.addRange(r); }; pick(e.firstChild, 6, e.firstChild, 11);";
+
+#[test]
+fn bold_italic_underline_toggle() {
+    big(|| {
+        let mut b = browser();
+        for (cmd, tag, kind) in [("bold", "b", "formatBold"), ("italic", "i", "formatItalic"), ("underline", "u", "formatUnderline")] {
+            assert_eq!(js(&mut b, &format!("{FMT} [document.queryCommandState('{cmd}'), document.execCommand('{cmd}'), document.queryCommandState('{cmd}'), e.innerHTML].join()")), format!("false,true,true,hello <{tag}>world</{tag}>"));
+            assert_eq!(js(&mut b, "s.toString()"), "world");
+            assert_eq!(js(&mut b, &format!("[document.execCommand('{cmd}'), document.queryCommandState('{cmd}'), e.innerHTML, s.toString()].join()")), "true,false,hello world,world");
+            assert_eq!(js(&mut b, "log.join()"), format!("{kind},{kind}"));
+        }
+        assert_eq!(js(&mut b, &format!("{FMT} document.execCommand('bold'); document.execCommand('italic'); e.innerHTML")), "hello <b><i>world</i></b>");
+        assert_eq!(js(&mut b, &format!("{FMT} e.innerHTML = 'a <strong>bc</strong>'; s.collapse(e.lastChild.firstChild, 1); document.queryCommandState('bold')")), "true");
+        // A collapsed selection changes nothing.
+        assert_eq!(js(&mut b, &format!("{FMT} s.collapse(e.firstChild, 3); [document.execCommand('bold'), e.innerHTML, log.length].join()")), "true,hello world,0");
+        // Outside an editing host there is nothing to do.
+        assert_eq!(js(&mut b, "document.body.innerHTML = '<p id=p>text</p>'; getSelection().selectAllChildren(document.getElementById('p')); document.execCommand('bold')"), "false");
+    });
+}
+
+#[test]
+fn lists_on_and_off() {
+    big(|| {
+        let mut b = browser();
+        let src = format!("{FMT} [document.queryCommandState('insertUnorderedList'), document.execCommand('insertUnorderedList'), document.queryCommandState('insertUnorderedList'), e.innerHTML].join()");
+        assert_eq!(js(&mut b, &src), "false,true,true,<ul><li>hello world</li></ul>");
+        assert_eq!(js(&mut b, "[document.execCommand('insertUnorderedList'), document.queryCommandState('insertUnorderedList'), e.innerHTML].join()"), "true,false,<div>hello world</div>");
+        assert_eq!(js(&mut b, "[document.execCommand('insertOrderedList'), document.queryCommandState('insertOrderedList'), document.queryCommandState('insertUnorderedList'), e.innerHTML].join()"), "true,true,false,<ol><li>hello world</li></ol>");
+        assert_eq!(js(&mut b, "log.join()"), "insertUnorderedList,insertUnorderedList,insertOrderedList");
+        // Two blocks become two items of one list.
+        assert_eq!(js(&mut b, &format!("{FMT} e.innerHTML = '<div>a</div><div>b</div><div>c</div>'; pick(e.firstChild.firstChild, 0, e.children[1].firstChild, 1); document.execCommand('insertUnorderedList'); e.innerHTML")), "<ul><li>a</li><li>b</li></ul><div>c</div>");
+    });
+}
+
+#[test]
+fn links() {
+    big(|| {
+        let mut b = browser();
+        assert_eq!(js(&mut b, &format!("{FMT} document.execCommand('createLink', false, '')")), "false");
+        assert_eq!(js(&mut b, "[document.execCommand('createLink', false, 'http://x.test/'), e.innerHTML, s.toString()].join()"), "true,hello <a href=\"http://x.test/\">world</a>,world");
+        assert_eq!(js(&mut b, "[document.execCommand('unlink'), e.innerHTML].join()"), "true,hello world");
+        assert_eq!(js(&mut b, "log.join()"), "insertLink,formatRemove");
+        assert_eq!(js(&mut b, &format!("{FMT} s.collapse(e.firstChild, 5); [document.execCommand('createLink', false, 'u'), e.innerHTML].join()")), "true,hello<a href=\"u\">u</a> world");
+    });
+}
+
+#[test]
+fn insert_html_and_remove_format() {
+    big(|| {
+        let mut b = browser();
+        assert_eq!(js(&mut b, &format!("{FMT} [document.execCommand('insertHTML', false, '<b>x</b>y'), e.innerHTML, s.isCollapsed, log.join()].join()")), "true,hello <b>x</b>y,true,insertHTML");
+        assert_eq!(js(&mut b, "document.execCommand('insertText', false, 'Z'); e.innerHTML"), "hello <b>x</b>yZ");
+        assert_eq!(js(&mut b, &format!("{FMT} e.innerHTML = '<b>a</b> <i>b</i><u>c</u><span>d</span><a href=\"h\">e</a>'; s.selectAllChildren(e); [document.execCommand('removeFormat'), e.innerHTML, log.join()].join()")), "true,a bcd<a href=\"h\">e</a>,formatRemove");
+        for c in ["bold", "italic", "underline", "insertUnorderedList", "insertOrderedList", "createLink", "unlink", "insertHTML", "removeFormat"] {
+            assert_eq!(js(&mut b, &format!("document.queryCommandSupported('{c}')")), "true", "{c}");
+        }
+    });
+}

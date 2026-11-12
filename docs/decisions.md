@@ -1664,3 +1664,10 @@ Gmail's main script has a chain of 220 nested calls, `this.ha=_.LG(_.LG(...))`. 
 `HARD_MAX_DEPTH` and the default `max_depth` are now 2048. The measured release stack at 2048 units, for the worst shapes: nested classes 2.3 MiB, functions 1.1 MiB, arrows and templates 1.0 MiB, parens, arrays and objects 0.8 MiB, calls 0.75 MiB. The parse test thread is 4 MiB in release and 24 MiB in debug. The page thread is 8 MiB, and a call keeps at least `STACK_RED` (4 MiB) free, so a parse inside a call fits.
 The evaluator then stopped the script: the setup walk of a 1000-deep call needs more than 768 traversal frames. `MAX_TRAVERSAL_DEPTH` is now 2048. The measured release stack of one call at that cap, for 12 deep shapes (calls, members, parens, arrays, objects, templates, `new`, function and arrow expressions): at most 1.1 MiB, under `STACK_RED`. A shape far over either cap still ends with a clean `Limit` error.
 Five old tests asserted the old values (256, 768); they now use inputs sized for the new caps.
+## execCommand formatting commands (2026-11-12)
+
+`document.execCommand` now runs `bold`, `italic`, `underline`, `insertUnorderedList`, `insertOrderedList`, `createLink`, `unlink`, `insertHTML` and `removeFormat`. This is part b of issue 415.
+The code is a simplified port of Ladybird `Libraries/LibWeb/Editing/Commands.cpp`. It builds the tree that Chrome makes with `styleWithCSS` off.
+`queryCommandState` is true for bold, italic, underline and the two lists. It looks at the ancestors of the start of the active range.
+Each command that changes the tree fires one `input` event with the `inputType` of Chrome. `insertHTML` uses the fragment parser of `createContextualFragment`.
+Gaps. A caret (collapsed selection) changes nothing, so a later `insertText` ignores the pending format. Unwrapping removes the whole element, not only the selected part. Lists handle the direct children of the host only. `queryCommandValue` stays empty. Other formatting commands are not built.
