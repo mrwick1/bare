@@ -1973,3 +1973,37 @@ fn a_link_inside_a_heading_shows_in_snapshot_and_links() {
     let r = r.as_str().unwrap();
     assert!(r.contains("\"First issue\" -> /issues/101") && r.contains("\"Second issue\" -> /issues/102"), "{r}");
 }
+
+/// A plain page with no timer and a text file to fetch.
+fn quiet_page(_: &str, target: &str, _: &str, _: Option<&str>) -> (u16, &'static str, Vec<u8>) {
+    match target {
+        "/data.txt" => (200, "text/plain", b"fixture text".to_vec()),
+        _ => (200, "text/html", b"<!DOCTYPE html><title>Quiet</title><p>quiet</p>".to_vec()),
+    }
+}
+
+#[test]
+fn eval_runs_the_microtasks_of_its_script_at_once() {
+    let base = common::serve_route(quiet_page);
+    let mut s = Server::start();
+    let (r, error) = s.tool("open", json!({"url": format!("{base}/")}));
+    assert!(!error, "{r}");
+    // Each case gives its value; a promise that only microtasks settle comes back in far less than the time limit.
+    for (js, want, quick) in [
+        ("Promise.resolve(1).then(x => x + 1)", json!(2), true),
+        ("(async () => { await null; return 5 })()", json!(5), true),
+        ("Promise.resolve(1).then(x => x + 1).then(x => x * 10).then(x => 'n' + x)", json!("n20"), true),
+        ("new Promise(r => setTimeout(() => r(7), 50))", json!(7), true),
+        ("(async () => { const r = await fetch('/data.txt'); return await r.text() })()", json!("fixture text"), false),
+    ] {
+        let t = std::time::Instant::now();
+        let (r, error) = s.tool("eval", json!({"js": js}));
+        let ms = t.elapsed().as_millis();
+        assert!(!error && r == want, "{js}: {r}");
+        assert!(!quick || ms < 1000, "{js}: {ms} ms");
+    }
+    let t = std::time::Instant::now();
+    let (r, error) = s.tool("eval", json!({"js": "Promise.resolve().then(() => { throw new Error('boom') })"}));
+    assert!(error && r.as_str().unwrap().contains("rejected") && r.as_str().unwrap().contains("boom"), "{r}");
+    assert!(t.elapsed().as_millis() < 1000);
+}

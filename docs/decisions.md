@@ -1575,3 +1575,10 @@ Pages build a Response from a stream, e.g. `new Response(stream.pipeThrough(new 
 - `clone()` of a stream body is `Unsupported`: it needs `tee`.
 - A request body stream stays a `TypeError`. `bare_net` sends a request body as one byte slice (`http::Request::body`), on a worker thread. A streamed upload needs a chunked upload there and a body that the worker reads from the page. That is not cheap. The text now names the call (`Request` or `XMLHttpRequest`) and the reason.
 - `Blob.stream()` is new: it is the `body` of a hidden byte Response. The check of this change needs it.
+## A tick runs queued promise jobs (2026-11-12)
+
+- An agent `eval` runs its script outside a task. Its promise jobs stayed queued until a timer or a reply came due.
+- `Promise.resolve(1).then(...)` then timed out after 10 s on a quiet page.
+- `Page::work` now counts queued promise jobs as work for now.
+- The next tick runs the microtask checkpoint, so such an eval gives its value in under 1 ms.
+- The eval loop needs no timer for this.

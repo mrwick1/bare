@@ -670,7 +670,8 @@ impl Page {
         }
         let images = self.images.pending();
         let Some(b) = self.browser().filter(|_| !stopped) else { return (false, images.then(|| Instant::now() + poll)) };
-        if b.has_download_request() {
+        // A script that ran outside a task (an agent `eval`) can leave promise jobs queued: they are work for now.
+        if b.has_download_request() || b.it.pending_jobs() > 0 {
             return (true, Some(Instant::now()));
         }
         let (due, now) = (b.next_scheduled_due(), b.now());
