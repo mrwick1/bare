@@ -1217,11 +1217,11 @@ Owner request: a small MCP server, so that an agent can run end-to-end tests in 
 
 A page can keep an XHR open for 20 s (`x.onload = poll`). The reply of the queue settles in order, so the poll held the settle (`open` waited its full timeout) and every request behind it.
 
-- A live page moves a started XHR GET with no body to `FetchState::detached` when it has had no reply for 1 s (`Dom::sync_detached`). Its worker keeps running. No request is sent again, so a body is never sent twice. CORS, cookies and redirects are those of the request, because the I/O is the same job.
+- A live page moves a started XHR GET with no body to `FetchState::detached` when it has had no reply for 3 s (`Dom::sync_detached`). Its worker keeps running. No request is sent again, so a body is never sent twice. CORS, cookies and redirects are those of the request, because the I/O is the same job.
 - A detached poll is not work: `Page::idle` and `live_work_of(false)` ignore it, and `Page::pending` lists it with `holds: false`. The requests behind it no longer wait for it.
 - A reply that comes goes back to the front of the queue and settles there as before, so the normal `load` events run and the reply counts as work. The next `poll()` starts a new request.
 - At most 5 polls are detached (`MAX_WORKERS - 1`), so one worker stays free for the other requests.
-- Only XHR is detached, not `fetch`. A slow `fetch` GET is usually the data that the page waits for, and a settle before it would show an empty page. An XHR that takes more than 1 s is treated the same way (hypothesis: rare for page data; the bound is `DETACH_AFTER`).
+- Only XHR is detached, not `fetch`. A slow `fetch` GET is usually the data that the page waits for, and a settle before it would show an empty page. An XHR that takes more than 3 s is treated the same way. The bound is 3 s and not 1 s: some apps load their data over XHR, and a reply can take more than 1 s. A long-poll holds for 20 to 60 s, so 3 s still ends the wait early (`DETACH_AFTER`).
 - A page that is not live (a headless run on the page thread) is not changed.
 
 ## Agent tools in the MCP server (2026-11-12)

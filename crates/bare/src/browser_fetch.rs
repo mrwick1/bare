@@ -525,7 +525,7 @@ struct OpenStream {
 /// Open event streams on a page, as the 6 connections of Chrome to one HTTP/1.1 host. One more fails with a network error.
 const MAX_STREAMS: usize = 6;
 /// Live: a started GET that has no reply after this long is a long-poll and leaves the ordered queue (`Dom::sync_detached`).
-const DETACH_AFTER: std::time::Duration = std::time::Duration::from_secs(1);
+const DETACH_AFTER: std::time::Duration = std::time::Duration::from_secs(3);
 /// Body bytes of one event stream. A stream that passes it ends with a network error (an `EventSource` then connects again).
 const STREAM_BYTES: usize = 1 << 20;
 

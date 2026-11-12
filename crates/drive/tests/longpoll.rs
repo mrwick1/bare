@@ -1,5 +1,5 @@
 //! A page that keeps an XHR long-poll open (the server holds `/poll` for 20 s) must settle, take a click, and send a later `fetch`
-//! without waiting for the poll. The poll leaves the ordered queue after 1 s (`Dom::sync_detached`).
+//! without waiting for the poll. The poll leaves the ordered queue after 3 s (`Dom::sync_detached`).
 
 mod common;
 
