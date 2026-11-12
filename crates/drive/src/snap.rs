@@ -261,14 +261,16 @@ fn walk(cx: &Cx, root: NodeId, mode: Mode, clicks: &HashSet<NodeId>, out: &mut V
     });
 }
 
-/// Settle the page before a read: the document loaded, and the tasks that are due now run (bounded, so a busy page still answers).
+/// Settle the page before a read: the document loaded, and the tasks that are due now run. It returns as soon as the page is quiet: no
+/// task ran, no timer is due within 20 ms and no `fetch` is open. A picture on its way is not work for a read (the 4 ms poll that it
+/// asks for is not a reason to wait). Bounded by 300 ms, so a busy page still answers.
 pub fn settle(p: &mut Page) {
     let _ = p.wait_load(std::time::Duration::from_secs(10));
     let end = std::time::Instant::now() + std::time::Duration::from_millis(300);
     while std::time::Instant::now() < end {
-        let (more, next) = p.tick();
-        let soon = next.is_some_and(|t| t <= std::time::Instant::now() + std::time::Duration::from_millis(20));
-        if !more && !soon {
+        let (more, _) = p.tick();
+        let busy = p.browser().is_some_and(|b| b.pending_fetches() > 0 || b.next_scheduled_due().is_some_and(|d| d - b.now() <= 20.0));
+        if !more && !busy {
             break;
         }
     }
@@ -280,31 +282,57 @@ fn header(p: &mut Page) -> String {
     format!("url: {}\ntitle: {}\n", crate::run::safe_url(&url), norm(&title))
 }
 
-/// Keep `max` characters: 80 % from the top and 20 % from the end, cut at line ends.
-fn budget(lines: Vec<String>, max: usize) -> String {
+/// The first and the last ref of `lines`, as `eA–eB`, or `""` when none has a ref.
+fn ref_span(lines: &[String]) -> String {
+    let num = |l: &String| l.find("[e").and_then(|i| l[i + 2..].split(']').next()).map(str::to_string);
+    match (lines.iter().find_map(num), lines.iter().rev().find_map(num)) {
+        (Some(a), Some(b)) => format!(" (e{a}–e{b})"),
+        _ => String::new(),
+    }
+}
+
+/// Keep `max` characters: 80 % from the top and 20 % from the end, cut at line ends. A line says what was cut, with the refs that the
+/// cut lines hold (they stay valid). With `page` (snapshot), the lines before `offset` are skipped and the end is not kept: the call
+/// pages forward, and the cut line gives the `offset` of the next page.
+fn budget(lines: Vec<String>, max: usize, page: Option<usize>) -> String {
+    let off = page.unwrap_or(0).min(lines.len());
+    let lines = &lines[off..];
     let total: usize = lines.iter().map(|l| l.len() + 1).sum();
     if total <= max {
         return lines.join("\n");
     }
+    let keep = if off > 0 { max } else { max * 4 / 5 };
     let (mut head, mut used) = (Vec::new(), 0);
-    for l in &lines {
-        if used + l.len() + 1 > max * 4 / 5 {
+    for l in lines {
+        if used + l.len() + 1 > keep {
             break;
         }
         used += l.len() + 1;
         head.push(l.as_str());
     }
     let (mut tail, mut used_t) = (Vec::new(), 0);
-    for l in lines[head.len()..].iter().rev() {
-        if used_t + l.len() + 1 > max / 5 {
-            break;
+    if off == 0 {
+        for l in lines[head.len()..].iter().rev() {
+            if used_t + l.len() + 1 > max / 5 {
+                break;
+            }
+            used_t += l.len() + 1;
+            tail.push(l.as_str());
         }
-        used_t += l.len() + 1;
-        tail.push(l.as_str());
+        tail.reverse();
     }
-    tail.reverse();
     let cut = lines.len() - head.len() - tail.len();
-    format!("{}\n… {cut} lines cut (pass a larger max_chars, or root=REF for one part) …\n{}", head.join("\n"), tail.join("\n"))
+    let span = ref_span(&lines[head.len()..lines.len() - tail.len()]);
+    let how = match page {
+        Some(_) => format!("find or read an element, snapshot with root=REF, or snapshot with offset={}", off + head.len()),
+        None => "pass a larger max_chars".into(),
+    };
+    let mut out = format!("{}\n… {cut} lines cut{span}; use {how} …", head.join("\n"));
+    if !tail.is_empty() {
+        out.push('\n');
+        out.push_str(&tail.join("\n"));
+    }
+    out
 }
 
 /// The value, checked and focus states, which live in the page, not in attributes.
@@ -365,7 +393,7 @@ fn format(p: &mut Page, refs: &mut Refs, items: Vec<Item>, prev: Option<&HashSet
 }
 
 /// The outline of the page, or of the element `root`, in at most `max` characters.
-pub fn snapshot(p: &mut Page, refs: &mut Refs, mode: Mode, root: Option<u32>, max: usize) -> Result<String, String> {
+pub fn snapshot(p: &mut Page, refs: &mut Refs, mode: Mode, root: Option<u32>, offset: usize, max: usize) -> Result<String, String> {
     settle(p);
     let doc = p.generation();
     refs.sync(doc);
@@ -385,7 +413,7 @@ pub fn snapshot(p: &mut Page, refs: &mut Refs, mode: Mode, root: Option<u32>, ma
     } else {
         refs.last = prev.or(refs.last.take());
     }
-    let body = if lines.is_empty() { "(no elements: the page is empty, or it has not rendered yet)".into() } else { budget(lines, max) };
+    let body = if lines.is_empty() { "(no elements: the page is empty, or it has not rendered yet)".into() } else { budget(lines, max, Some(offset)) };
     Ok(header(p) + &body)
 }
 
@@ -416,7 +444,7 @@ pub fn find(p: &mut Page, refs: &mut Refs, loc: &crate::locate::Locator, max: us
     let lines = format(p, refs, items, None);
     if !lines.is_empty() {
         out.push('\n');
-        out.push_str(&budget(lines, max));
+        out.push_str(&budget(lines, max, None));
     }
     Ok(out)
 }
@@ -526,7 +554,7 @@ pub fn links(p: &mut Page, refs: &mut Refs, max: usize) -> Result<String, String
         let abs = base.as_ref().and_then(|b| b.join(&href).ok()).map_or(href, |u| u.to_string());
         lines.push(format!("[e{}] {name:?} -> {abs}", refs.mint(n)));
     }
-    Ok(format!("{}{} link(s)\n{}", header(p), lines.len(), budget(lines, max)))
+    Ok(format!("{}{} link(s)\n{}", header(p), lines.len(), budget(lines, max, None)))
 }
 
 /// How big the page is: its DOM nodes, and the snapshot lines of a walk that shows text (none: the page shows no text and no control).
