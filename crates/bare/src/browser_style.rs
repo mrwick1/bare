@@ -152,7 +152,7 @@ fn camel(css: &str) -> String {
 /// The IDL attribute names of one property.
 pub(crate) fn keys_of(css: &str) -> Vec<String> {
     // At most 3 names, so that no push grows the list: this runs for every property when a page starts.
-    let mut keys = Vec::with_capacity(3);
+    let mut keys = Vec::with_capacity(5);
     let camel = camel(css);
     let webkit = css.starts_with("-webkit-").then(|| format!("w{}", &camel[1..]));
     keys.push(camel);
@@ -163,6 +163,10 @@ pub(crate) fn keys_of(css: &str) -> Vec<String> {
     if css == "float" {
         keys.push("cssFloat".to_string());
     }
+    // The legacy alias `-webkit-user-select` has the same four names as a `-webkit-` property.
+    if css == "user-select" {
+        keys.extend(["WebkitUserSelect", "webkitUserSelect", "-webkit-user-select"].map(String::from));
+    }
     keys
 }
 
@@ -172,6 +176,9 @@ fn eq_important(s: &str) -> bool {
 
 /// The name as the block keeps it: a custom property as written, anything else in lowercase.
 fn key(name: &str) -> Cow<'_, str> {
+    if name.eq_ignore_ascii_case("-webkit-user-select") {
+        return Cow::Borrowed("user-select");
+    }
     if custom(name) || !name.bytes().any(|b| b.is_ascii_uppercase()) { Cow::Borrowed(name) } else { Cow::Owned(name.to_ascii_lowercase()) }
 }
 

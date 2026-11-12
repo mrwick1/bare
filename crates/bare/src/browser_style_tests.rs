@@ -233,6 +233,24 @@ fn named_properties_and_feature_detection() {
     assert_eq!(js(&mut b, "p.style.color = 'blue'; s.color + '|' + p.style.color"), "|blue");
 }
 
+/// `user-select` and its legacy alias `-webkit-user-select` (issue #442): five names, one value, `""` when unset.
+#[test]
+fn user_select_and_its_webkit_alias() {
+    let mut b = at(PAGE);
+    js(&mut b, A);
+    assert_eq!(js(&mut b, "['userSelect','user-select','webkitUserSelect','WebkitUserSelect','-webkit-user-select'].map(function(k){return (k in s) + ':' + JSON.stringify(s[k])}).join()"), "true:\"\",true:\"\",true:\"\",true:\"\",true:\"\"");
+    assert_eq!(js(&mut b, "s.WebkitUserSelect.toLowerCase() == 'none'"), "false");
+    for set in ["s.userSelect = 'none'", "s['user-select'] = 'none'", "s.webkitUserSelect = 'none'", "s.WebkitUserSelect = 'none'", "s['-webkit-user-select'] = 'none'", "s.setProperty('-webkit-user-select', 'none')"] {
+        js(&mut b, "s.cssText = ''");
+        js(&mut b, set);
+        assert_eq!(js(&mut b, "['userSelect','user-select','webkitUserSelect','WebkitUserSelect','-webkit-user-select'].map(function(k){return s[k]}).join() + '|' + s.getPropertyValue('-webkit-user-select') + '|' + s.length + '|' + s.cssText"), "none,none,none,none,none|none|1|user-select: none;", "{set}");
+    }
+    js(&mut b, "s.cssText = ''; s.userSelect = 'bogus'");
+    assert_eq!(js(&mut b, "s.userSelect + '|' + s.length"), "|0");
+    js(&mut b, "s.userSelect = 'all'");
+    assert_eq!(js(&mut b, "s.removeProperty('-webkit-user-select') + '|' + s.userSelect"), "all|");
+}
+
 /// Every supported property has its own accessor pair: set through one name, read back through the css name, and nothing else changes.
 #[test]
 fn every_property_has_its_own_slot() {

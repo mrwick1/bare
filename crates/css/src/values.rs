@@ -186,6 +186,7 @@ properties! {
     BorderBottomLeftRadius => "border-bottom-left-radius",
     Appearance => "appearance",
     PointerEvents => "pointer-events",
+    UserSelect => "user-select",
     AspectRatio => "aspect-ratio",
     Fill => "fill",
     Stroke => "stroke",
@@ -307,7 +308,7 @@ keywords! {
     All => "all", Painted => "painted", Fill => "fill", Stroke => "stroke", VisiblePainted => "visiblepainted",
     VisibleFill => "visiblefill", VisibleStroke => "visiblestroke",
     Contain => "contain", Cover => "cover", ScaleDown => "scale-down", Repeat => "repeat", NoRepeat => "no-repeat",
-    RepeatX => "repeat-x", RepeatY => "repeat-y",
+    RepeatX => "repeat-x", RepeatY => "repeat-y", Text => "text",
 }
 
 /// The value of one property. It does not say which property: a `Declared` has that.
@@ -348,6 +349,10 @@ pub struct Declared {
 pub fn parse_declaration(mut name: &str, value: &str, important: bool, side: &mut Side, out: &mut Vec<Declared>) -> bool {
     // `-webkit-mask-image` is `mask-image`: the same property with the prefix taken off. The second round runs only after a name or a value
     // was not good, so a good declaration never pays for it. (One call of `parse_known`, so that it is inlined once.)
+    // `-webkit-user-select` is the legacy alias of `user-select` (Ladybird `legacy-alias-for`).
+    if name == "-webkit-user-select" {
+        name = "user-select";
+    }
     loop {
         if parse_known(name, value, important, side, out) {
             return true;
@@ -1467,6 +1472,8 @@ fn longhand(property: Property, part: Part) -> Option<Value> {
         },
         BorderTopLeftRadius | BorderTopRightRadius | BorderBottomRightRadius | BorderBottomLeftRadius => positive(part).map(Value::Length),
         Appearance => one_of(part, &[K::None, K::Auto, K::Button, K::Checkbox, K::Radio, K::Textfield, K::Textarea, K::Menulist]),
+        // CSS UI 4. Ladybird `Properties.json`: not inherited, initial `auto`.
+        UserSelect => one_of(part, &[K::Auto, K::Text, K::None, K::Contain, K::All]),
         PointerEvents => one_of(part, &[K::Auto, K::None, K::Visible, K::VisiblePainted, K::VisibleFill, K::VisibleStroke, K::Painted, K::Fill, K::Stroke, K::All]),
         Top | Right | Bottom | Left => match part {
             Part::Keyword(K::Auto) => Some(Value::Keyword(K::Auto)),

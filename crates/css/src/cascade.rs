@@ -2226,6 +2226,7 @@ fn initial(p: Property) -> Value {
         Opacity => Value::Number(1.0),
         Appearance => Value::Keyword(K::None),
         PointerEvents => Value::Keyword(K::Auto),
+        UserSelect => Value::Keyword(K::Auto),
         BorderTopLeftRadius | BorderTopRightRadius | BorderBottomRightRadius | BorderBottomLeftRadius => px(0.0),
         BorderSpacingH | BorderSpacingV => px(0.0),
         MarginTop | MarginRight | MarginBottom | MarginLeft | PaddingTop | PaddingRight | PaddingBottom | PaddingLeft => px(0.0),
@@ -2983,6 +2984,17 @@ mod tests {
         assert_eq!(get(html, &["div { overflow: clip scroll }"], "d", Property::OverflowX), k(Keyword::Hidden));
         assert_eq!(get(html, &["div { overflow: clip visible }"], "d", Property::OverflowX), k(Keyword::Clip));
         assert_eq!(get(html, &["div { overflow: clip visible }"], "d", Property::OverflowY), k(Keyword::Visible));
+    }
+
+    #[test]
+    fn user_select_and_its_alias() {
+        let html = "<p id=p></p>";
+        let k = Value::Keyword;
+        assert_eq!(get(html, &[], "p", Property::UserSelect), k(Keyword::Auto));
+        for (decl, want) in [("user-select: none", Keyword::None), ("-webkit-user-select: text", Keyword::Text), ("user-select: contain", Keyword::Contain), ("user-select: all", Keyword::All)] {
+            assert_eq!(get(html, &[&format!("#p {{ {decl} }}")], "p", Property::UserSelect), k(want), "{decl}");
+        }
+        assert_eq!(get(html, &["#p { user-select: none; user-select: bogus }"], "p", Property::UserSelect), k(Keyword::None), "a bad value is dropped");
     }
 
     #[test]
