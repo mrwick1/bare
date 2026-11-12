@@ -1610,6 +1610,7 @@ A click on a GitHub issue title did not navigate. GitHub cancels the click and c
 - A tick ran a turn only when it saw work. A navigation request was not work (`live_work_of`), so an idle page kept the old document for good.
 - Now a navigation request is work. After the value, `eval` ticks until the next document has loaded, within the time limit.
 - The reply then adds one line: `navigated: URL`, as an `act` receipt does. The URL has no fragment, so a `#hash` change gives no line. It loads nothing.
+
 ## The `Window` interface (2026-11-12)
 
 - GitHub issue pages failed with `ReferenceError: Window is not defined`. Pages test `x instanceof Window` and read `Window.prototype`.
