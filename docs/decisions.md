@@ -1226,3 +1226,6 @@ An agent such as `deck` must read a page and act on it in few model calls. Scree
 - `find`, `read` (paged text), `links`, `screenshot` (the page or one element, a path, and the image when asked), `eval` and `sessions` complete the set. Every reply goes through the redactor.
 - Each tool takes `session`. Sessions run side by side, one page each. `open` ends only the session of its name.
 - Step lines accept `ref=e7`, so a journey can mix refs and user locators.
+
+## Screenshots paint the whole box (2026-11-12)
+A screenshot of an element taller than the window was cut at the window. The engine has the layout of the whole page. So `screenshot` now paints a canvas as tall as the element box, or as the page with `full_page`, with no scroll. A picture is at most 8000 px tall. The reply says when that cut it. An element above the window is painted from the top of the page.

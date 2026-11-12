@@ -379,6 +379,7 @@ impl Server {
     /// A PNG of the page or of one element: its path, and the picture itself when `inline` is true.
     fn screenshot(&mut self, args: &Value) -> Result<Value, String> {
         let r = ref_arg(args, "ref")?;
+        let full = args.get("full_page").and_then(Value::as_bool) == Some(true);
         let inline = args.get("inline").and_then(Value::as_bool) == Some(true);
         self.runs += 1;
         let dir = std::env::temp_dir().join(format!("bare-mcp-{}-shots", std::process::id()));
@@ -389,7 +390,7 @@ impl Server {
         };
         let live = self.live_mut(args)?;
         let red = live.red.clone();
-        let said = live.session.screenshot(path.clone(), r, &red)?;
+        let said = live.session.screenshot(path.clone(), r, full, &red)?;
         let mut content = vec![json!({"type": "text", "text": said})];
         if inline {
             let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -611,8 +612,8 @@ fn tools() -> Value {
         },
         {
             "name": "screenshot",
-            "description": "A PNG of the live page, or of one element (ref). Returns its path; with inline true also the image. Waits for pictures to load. Refused when a secret shows on the page. Prefer snapshot to read a page.",
-            "inputSchema": {"type": "object", "properties": {"session": S, "ref": {"type": "string"}, "path": {"type": "string", "description": "Where to write the PNG. Default: a temp folder."}, "inline": {"type": "boolean"}}},
+            "description": "A PNG of the live page window, of the whole page (full_page true), or of the whole box of one element (ref), however tall: up to 8000 px, and the reply says when that cut it. Returns its path; with inline true also the image. Waits for pictures to load. Refused when a secret shows on the page. Prefer snapshot to read a page.",
+            "inputSchema": {"type": "object", "properties": {"session": S, "ref": {"type": "string"}, "path": {"type": "string", "description": "Where to write the PNG. Default: a temp folder."}, "inline": {"type": "boolean"}, "full_page": {"type": "boolean", "description": "Paint the whole page, not only the window. Ignored with ref."}}},
         },
         {
             "name": "eval",

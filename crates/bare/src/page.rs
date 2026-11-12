@@ -922,6 +922,11 @@ impl Page {
     /// Paint the page into `canvas` (of the size of the page), then the fields. The display list is built once for a frame; a scroll
     /// draws it again. All of the canvas is drawn. `false`: a next document is on its way, and nothing was drawn (the last frame stays).
     pub(crate) fn paint_into(&mut self, canvas: &mut Canvas) -> bool {
+        self.paint_at(canvas, false)
+    }
+
+    /// `paint_into`, with the page at its top (`top`: the offsets as if nothing were scrolled) or where it is scrolled to.
+    pub(crate) fn paint_at(&mut self, canvas: &mut Canvas, top: bool) -> bool {
         self.rehover();
         self.frame_now();
         let mut drew = true;
@@ -929,7 +934,7 @@ impl Page {
         let b = source.browser();
         if let (Some(b), Some(f)) = (b, frame.as_ref()) {
             let focus = b.active_element().ok().flatten();
-            let scroll = b.scroll().clone();
+            let scroll = if top { Scroll::default() } else { b.scroll().clone() };
             let doc = b.document();
             let doc = doc.borrow();
             // What the window shows, in page pixels. The list holds a band around it: a scroll that leaves the band builds it again.

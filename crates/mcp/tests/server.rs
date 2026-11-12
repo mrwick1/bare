@@ -275,6 +275,52 @@ fn a_shot_right_after_open_shows_the_loaded_page() {
     assert!(got == want, "the picture after open is not the picture of the loaded page ({} and {} bytes)", got.len(), want.len());
 }
 
+/// The height of a PNG, from its header.
+fn png_size(path: &str) -> (u32, u32) {
+    let b = std::fs::read(path).unwrap();
+    (u32::from_be_bytes(b[16..20].try_into().unwrap()), u32::from_be_bytes(b[20..24].try_into().unwrap()))
+}
+
+/// A page with a 3000 px tall element below the fold. Gives the base URL.
+fn tall_page() -> String {
+    use std::io::Read;
+    const PAGE: &str = "<!doctype html><body style='margin:0'><div style='height:900px'>top</div>\
+<main aria-label='tall' style='height:3000px;width:200px;background:#0a0'>tall</main></body>";
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for mut c in listener.incoming().flatten() {
+            std::thread::spawn(move || {
+                let (mut head, mut b) = (Vec::new(), [0u8; 1]);
+                while !head.ends_with(b"\r\n\r\n") && c.read(&mut b).unwrap_or(0) == 1 {
+                    head.push(b[0]);
+                }
+                let _ = write!(c, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{PAGE}", PAGE.len());
+            });
+        }
+    });
+    format!("http://127.0.0.1:{port}/")
+}
+
+/// An element taller than the window gives a picture of its whole box, and `full_page` one of the whole page.
+#[test]
+fn a_shot_of_a_tall_element_is_not_cut_at_the_window() {
+    let mut s = Server::start();
+    let (rep, error) = s.tool("open", json!({"url": tall_page(), "timeout_ms": 30000}));
+    assert!(!error && rep["ok"] == true, "{rep}");
+    let (snap, _) = s.tool("snapshot", json!({}));
+    let line = snap.as_str().unwrap().lines().find(|l| l.contains("\"tall\"")).unwrap_or_else(|| panic!("{snap}"));
+    let r = line.split(['[', ']']).nth(1).unwrap().to_string();
+    let (said, error) = s.tool("screenshot", json!({"ref": r}));
+    assert!(!error, "{said}");
+    let path = said.as_str().unwrap().split(" (").next().unwrap().to_string();
+    assert_eq!(png_size(&path), (200, 3000), "{said}");
+    let (said, error) = s.tool("screenshot", json!({"full_page": true}));
+    assert!(!error, "{said}");
+    let path = said.as_str().unwrap().split(" (").next().unwrap().to_string();
+    assert_eq!(png_size(&path), (1280, 3900), "{said}");
+}
+
 /// A page that opens an `EventSource` that the server never ends, then sends a POST. Gives the base URL.
 fn event_stream_app() -> String {
     use std::io::Read;

@@ -267,9 +267,10 @@ impl Session {
         }
     }
 
-    /// A PNG of the page, or of the element of ref `r` (its box, clipped to the window), at `path`. Waits up to the step time limit for
-    /// the document and its pictures. Refused when a secret shows on the page.
-    pub fn screenshot(&mut self, path: PathBuf, r: Option<u32>, red: &Redactor) -> Result<String, String> {
+    /// A PNG at `path` of the page window, of the whole page (`full`), or of the whole box of the element of ref `r`, whatever its
+    /// height: the page is painted from its layout, without a scroll. A picture is at most `SHOT_MAX` pixels tall; the reply says when
+    /// that cut it. Waits up to the step time limit for the document and its pictures. Refused when a secret shows on the page.
+    pub fn screenshot(&mut self, path: PathBuf, r: Option<u32>, full: bool, red: &Redactor) -> Result<String, String> {
         let (red, limit) = (red.clone(), self.timeout);
         self.with_refs(move |p, refs| {
             let end = Instant::now() + limit;
@@ -283,20 +284,32 @@ impl Session {
             if !shown(p, &red) {
                 return Err("withheld: a secret shows on the page".to_string());
             }
-            let clip = match r {
-                Some(r) => {
-                    let h = refs.get(r, p.generation())?;
-                    Some(p.visible_box(h).map(|b| (b.x, b.y, b.w, b.h)).map_err(|e| format!("e{r} has no visible box: {e:?}"))?)
-                }
-                None => None,
+            let (page, scrolled) = p.page_height();
+            let (mut c, mut cut, mut clip) = (None, false, None);
+            if let Some(r) = r {
+                let h = refs.get(r, p.generation())?;
+                let b = p.visible_box(h).map_err(|e| format!("e{r} has no visible box: {e:?}"))?;
+                // A box above the window is painted from the top of the page, so that its place moves down by the scroll.
+                let (top, dy) = if b.y < 0.0 { (true, scrolled) } else { (false, 0.0) };
+                let bottom = (b.y + dy + b.h).ceil().max(1.0) as u32;
+                cut = bottom > SHOT_MAX;
+                c = p.capture_tall(bottom.max(p.size().1).min(SHOT_MAX), top);
+                clip = Some((b.x, b.y + dy, b.w, b.h));
+            } else if full {
+                cut = page > SHOT_MAX;
+                c = p.capture_tall(page.min(SHOT_MAX), true);
+            }
+            let c = match (c, clip) {
+                (Some(c), Some(b)) => crop(c, b),
+                (Some(c), None) => c,
+                (None, _) => p.capture(),
             };
-            let c = p.capture();
-            let c = match clip {
-                Some(b) => crop(c, b),
-                None => c,
-            };
+            if c.height == 0 || c.width == 0 {
+                return Err("nothing to paint: the box is empty or below the size limit".to_string());
+            }
             bare_paint::png::write_file(&c, &path).map_err(|e| format!("{}: {e}", path.display()))?;
-            Ok(format!("{} ({}x{})", path.display(), c.width, c.height))
+            let note = if cut { format!(", cut at the limit of {SHOT_MAX} px") } else { String::new() };
+            Ok(format!("{} ({}x{}{note})", path.display(), c.width, c.height))
         })?
     }
 
@@ -530,6 +543,9 @@ pub(crate) fn private(o: &mut std::fs::OpenOptions) {
 fn thread_cpu_ns() -> u64 {
     std::fs::read_to_string("/proc/thread-self/schedstat").ok().and_then(|s| s.split(' ').next()?.parse().ok()).unwrap_or(0)
 }
+
+/// The most pixels tall that a screenshot is.
+const SHOT_MAX: u32 = 8000;
 
 /// The part of `c` under `b`, clipped to the canvas.
 fn crop(c: Canvas<'static>, b: (f32, f32, f32, f32)) -> Canvas<'static> {
