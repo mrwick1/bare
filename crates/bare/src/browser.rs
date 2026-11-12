@@ -1172,12 +1172,13 @@ impl Dom {
         let inputev = mk(it, event)?;
         let domexc = mk(it, ep)?;
         let _ = self.p.set(Protos { et, node, element, html, svg, input, iframe, link, form, button, submit, chardata, text, comment, document, fragment, shadow, event, custom, focus, mouse, pointer, keyboard, inputev, domexc });
-        // The global object is `window`: it is an EventTarget.
-        if let Err(e) = it.heap.set_prototype_of(g, Some(et)) {
+        // The global object is `window`: its prototype is `Window.prototype`, an EventTarget.
+        let win = mk(it, et)?;
+        if let Err(e) = it.heap.set_prototype_of(g, Some(win)) {
             return Err(it.heap_error(e));
         }
         self.st.borrow_mut().by_obj.insert(g, Target::Window);
-        let mut fixed = vec![et, node, element, html, svg, input, iframe, link, form, button, submit, chardata, text, comment, document, fragment, shadow, event, custom, focus, mouse, pointer, keyboard, inputev, domexc];
+        let mut fixed = vec![win, et, node, element, html, svg, input, iframe, link, form, button, submit, chardata, text, comment, document, fragment, shadow, event, custom, focus, mouse, pointer, keyboard, inputev, domexc];
 
         // methods and accessors
         // One buffer for the names "get x" and "set x" (a `format!` for each of the 130 accessors cost 1.5% of the start).
@@ -1219,8 +1220,9 @@ impl Dom {
         }
 
         // interface objects
-        let ifaces: [(&str, ObjId, Option<H>); 24] = [
+        let ifaces: [(&str, ObjId, Option<H>); 25] = [
             ("EventTarget", et, Some(ev::event_target_ctor as H)),
+            ("Window", win, None),
             ("Node", node, None),
             ("Element", element, None),
             ("HTMLElement", html, Some(ce::HANDLERS[0])),

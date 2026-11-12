@@ -1586,3 +1586,11 @@ Pages build a Response from a stream, e.g. `new Response(stream.pipeThrough(new 
 - `Page::work` now counts queued promise jobs as work for now.
 - The next tick runs the microtask checkpoint, so such an eval gives its value in under 1 ms.
 - The eval loop needs no timer for this.
+
+## The `Window` interface (2026-11-12)
+
+- GitHub issue pages failed with `ReferenceError: Window is not defined`. Pages test `x instanceof Window` and read `Window.prototype`.
+- `Window` is now a global interface object, as `Document` is.
+- `new Window()` throws a `TypeError`.
+- The chain of `window` is `window -> Window.prototype -> WindowProperties -> EventTarget.prototype`, as in the standard.
+- `Window.prototype` has no own methods. The window API stays on `window` itself.

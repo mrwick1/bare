@@ -1,7 +1,7 @@
 //! Named access on `Window` (the `WindowProperties` object) and named properties of `Document`, and live named access to inert
 //! iframe windows. No child document is fetched or executed.
 //!
-//! - Two host named objects sit in the chains: `window -> owner -> EventTarget.prototype` and `document -> document_owner ->
+//! - Two host named objects sit in the chains: `window -> Window.prototype -> owner -> EventTarget.prototype` and `document -> document_owner ->
 //!   Document.prototype`. Own properties of `window` (declared `var` and `function`, the window API) and the global lexical names
 //!   (`let`, `const`) come first, so the names are only a fallback after a miss.
 //! - Window names: an iframe by index, `name` or `id` (its inert window), then the first element in tree order with that `id`, or with
@@ -211,9 +211,11 @@ fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
         .heap
         .new_named_open(Some(d.p().document))
         .map_err(|e| it.heap_error(e))?;
+    // The chain is `window -> Window.prototype -> owner -> EventTarget.prototype`, as in the standard.
     let g = it.global_object();
+    let win = it.heap.get_prototype_of(g).map_err(|e| it.heap_error(e))?.expect("Window.prototype");
     it.heap
-        .set_prototype_of(g, Some(owner))
+        .set_prototype_of(win, Some(owner))
         .map_err(|e| it.heap_error(e))?;
     let doc = *d.doc_wrapper.get().expect("installed");
     it.heap

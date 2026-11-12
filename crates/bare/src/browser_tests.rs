@@ -47,6 +47,17 @@ fn lim(name: &'static str) -> String {
     format!("limit:{:?}", LimitKind::Host(name))
 }
 
+/// `Window`: pages test `x instanceof Window` and read `Window.prototype`. `new Window()` throws a `TypeError`, as `new Document()` does.
+#[test]
+fn window_interface() {
+    big(|| {
+        let mut b = browser();
+        assert_eq!(js(&mut b, "[typeof Window, window instanceof Window, Object.getPrototypeOf(window) === Window.prototype, Window.prototype.constructor === Window, Window.prototype instanceof EventTarget, document instanceof Window, Window.name].join()"), "function,true,true,true,true,false,Window");
+        assert_eq!(js(&mut b, "try { new Window(); 'no' } catch (e) { e.name }"), "TypeError");
+        assert_eq!(js(&mut b, "Object.prototype.toString.call(window)"), "[object Window]");
+    })
+}
+
 #[test]
 fn globals_and_identity() {
     big(|| {
