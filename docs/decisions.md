@@ -1642,3 +1642,11 @@ A click on a GitHub issue title did not navigate. GitHub cancels the click and c
 
 ## A relative box paints over an earlier absolute sibling (2026-11-12)
 Layout puts the fragment of an absolute box after the other fragments of its containing block, and drops its static position. So the fragment order is not the tree order. The painter and the hit test put an earlier absolute veil over a later relative card (bare issue #414). Now both sort the positioned boxes of a context with `z-index` 0 by the path of child numbers in the tree, as CSS 2.1 Appendix E asks. The sort runs only when one of the boxes is out of flow. Boxes with a non-zero `z-index` still sort by `(z, fragment order)`: an absolute and a relative box with the same non-zero `z-index` can still be in the wrong order.
+
+## One User-Agent on the wire and in the page (2026-11-12)
+
+- A web mail app served its legacy unsupported-browser path. The server chose that path from the request headers. The HTTP `User-Agent` was `bare/0.1`, and `navigator.userAgent` said Chrome 155.
+- Every request of a page now sends `browser_web::USER_AGENT`. A caller that sets its own `User-Agent` keeps it. The browser sets the value on each client it makes (`Client::set_identity`), so one string serves both the wire and the page.
+- An https request also sends the default low-entropy client hints: `sec-ch-ua`, `sec-ch-ua-mobile` and `sec-ch-ua-platform`. The brands come from the constants that `navigator.userAgentData` reads.
+- We send no other client hints.
+- A client with no identity, used outside a browser, keeps `bare/0.1`.
