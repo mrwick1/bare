@@ -193,6 +193,8 @@ fn insert_html_and_remove_format() {
         for c in ["bold", "italic", "underline", "insertUnorderedList", "insertOrderedList", "createLink", "unlink", "insertHTML", "removeFormat"] {
             assert_eq!(js(&mut b, &format!("document.queryCommandSupported('{c}')")), "true", "{c}");
         }
+    });
+}
 
 /// Key input at a focused editing host: `beforeinput` then `input`, and a canceled `beforeinput` stops the change.
 #[test]
