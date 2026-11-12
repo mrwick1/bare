@@ -946,7 +946,7 @@ fn tools() -> Value {
         },
         {
             "name": "eval",
-            "description": "Run JavaScript in the live page and return its value as text. JSON.stringify an object. A Promise is awaited up to the time limit. Top-level await works: an expression gives its value; statements need a return. A thrown error shows as Name: message.",
+            "description": "Run JavaScript in the live page and return its value as text. A string shows as is. An array or object shows as compact JSON, cut at 4000 chars (a cycle is \"[Circular]\"). A DOM node shows as <tag#id.class>, a NodeList as a list of those, a function as function name(), a Map or Set as a list, a Date as its ISO string. A Promise is awaited up to the time limit. Top-level await works: an expression gives its value; statements need a return. A thrown error shows as Name: message.",
             "inputSchema": {"type": "object", "properties": {"session": S, "js": {"type": "string"}}, "required": ["js"]},
         },
         {

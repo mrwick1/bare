@@ -1360,3 +1360,15 @@ GitHub's issues page calls `new Intl.ListFormat(...)` when it loads. Without it 
 - `DisplayNames` reads `intl_names_data.rs` (made by `tools/js/intl_names_gen.mjs` from Node's ICU, 11 KB of source). It holds a short list of common languages, dialects, regions, scripts, currencies, calendars and date fields. It does not hold all of CLDR.
 - An unknown code gives the code itself (`fallback: "code"`) or undefined (`fallback: "none"`), as Chrome does.
 - Every locale uses the names of en-US. Another locale resolves to English, as the other `Intl` objects of bare do.
+
+## eval prints objects as compact JSON (2026-11-12)
+
+`eval` printed `object` for an array or an object (#393). An agent needs the value, not its type.
+
+- `Interp::inspect` walks the engine values in Rust. It does not run `JSON.stringify`, so a cycle, a node or a Map does not throw.
+- A string shows as is. An array or an object shows as compact JSON.
+- A DOM node shows as `<tag#id.class>`. A NodeList or an HTMLCollection is a list of those.
+- A function is `function name()`. A Date is its ISO string. A Map is a list of pairs. A Set is a list.
+- An object that is already open is `"[Circular]"`. A getter that throws gives `"[threw]"`. `toJSON` is not called.
+- The text stops at 4000 characters. A marker gives the full length.
+- The walk visits at most 100000 values and 64 levels. Then the marker says "more than".
