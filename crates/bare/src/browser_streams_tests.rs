@@ -208,9 +208,7 @@ fn explicit_gates_are_unsupported_and_nothing_is_ignored() {
             ("new ReadableStream({}, { size: function () { return 1; } })", "ReadableStream strategy.size (custom queuing strategy)"),
             ("new ReadableStream({}).getReader({ mode: 'byob' })", "ReadableStream BYOB reader"),
             ("new ReadableStream({}).getReader().closed", "ReadableStreamDefaultReader.closed"),
-            ("new ReadableStream({}).tee()", "ReadableStream tee, pipeTo, pipeThrough and async iteration"),
-            ("new ReadableStream({}).pipeTo({})", "ReadableStream tee, pipeTo, pipeThrough and async iteration"),
-            ("new ReadableStream({}).pipeThrough({})", "ReadableStream tee, pipeTo, pipeThrough and async iteration"),
+            ("new ReadableStream({}).tee()", "ReadableStream tee and async iteration"),
         ] {
             let mut b2 = mk();
             assert_eq!(js(&mut b2, src), format!("unsupported:{what}"), "{src}");

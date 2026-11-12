@@ -1526,3 +1526,14 @@ GitHub read `offsetTop` of an inline box with a border over two lines, and the r
 The filters combine, and the reply keeps its format.
 A filter with no match gives one line.
 An agent gets the URL of a named link in one small call, not with `eval`.
+## WritableStream, TransformStream and pipes as a script shim (2026-11-12)
+
+`@assistant-ui/react` extends `TransformStream` at the top level of a module. bare had no such global, so the module failed to load (issue #389).
+
+- `shims/streams.js` defines `WritableStream`, `TransformStream`, their writer and controllers, `TextDecoderStream` and `TextEncoderStream`. It also replaces `ReadableStream.prototype.pipeTo` and `pipeThrough`.
+- The shim is JavaScript, as `EventSource` and `indexedDB` are. These algorithms are promise plumbing. Script expresses them in a third of the size of the Rust code, and a class can extend each constructor.
+- The first read of one of the seven names makes the shim (`browser_name` in `crates/js/src/heap.rs`). The first call of `pipeTo` or `pipeThrough` also makes it. A page that uses none of them pays nothing.
+- The readable side of each pair is the host `ReadableStream`. Its limits hold. The writable queue lives in the realm heap, so the heap limits bound it.
+- `pipeTo` reads an error of the source only when it reads, because the host reader has no `closed` promise.
+- An abort of the writable side of a `TransformStream` errors its readable side at once. This is the older text of the standard. `transformer.cancel` runs.
+- `tee` and async iteration stay gated.

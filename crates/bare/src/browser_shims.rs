@@ -1,5 +1,7 @@
 //! Web APIs that are written in JavaScript and made at the first read of one of their names: `Element.prototype.animate` and `Animation`
-//! (`shims/animation.js`), `Path2D` (`shims/path2d.js`), `indexedDB` and the `IDB*` interfaces (`shims/idb.js`), `EventSource` (`shims/eventsource.js`).
+//! (`shims/animation.js`), `Path2D` (`shims/path2d.js`), `indexedDB` and the `IDB*` interfaces (`shims/idb.js`), `EventSource` (`shims/eventsource.js`),
+//! `WritableStream`, `TransformStream`, `TextDecoderStream`, `TextEncoderStream` and `ReadableStream.prototype.pipeTo` and `pipeThrough`
+//! (`shims/streams.js`).
 //!
 //! A read of the name finds nothing, so the heap asks the host once (`Heap::browser_name`, `browser_handlers::lazy`). The host runs the
 //! source as an indirect eval; the source defines the globals itself. A realm that never reads the names pays nothing: no object, no
@@ -14,12 +16,16 @@ use bare_js::eval::Interp;
 use bare_js::value::Value;
 
 /// `(names that ask for it, the global that the source defines first, source)`.
-const SHIMS: [(&[&str], &str, &str); 4] = [
+const SHIMS: [(&[&str], &str, &str); 5] = [
     (&["animate", "Animation"], "Animation", include_str!("shims/animation.js")),
     (&["Path2D"], "Path2D", include_str!("shims/path2d.js")),
     (&["EventSource"], "EventSource", include_str!("shims/eventsource.js")),
     (&["indexedDB"], "indexedDB", include_str!("shims/idb.js")),
+    (&STREAM_NAMES, "WritableStream", include_str!("shims/streams.js")),
 ];
+
+/// The globals of `shims/streams.js`. `crates/js/src/heap.rs` (`browser_name`) lists the same names.
+const STREAM_NAMES: [&str; 7] = ["WritableStream", "WritableStreamDefaultWriter", "WritableStreamDefaultController", "TransformStream", "TransformStreamDefaultController", "TextDecoderStream", "TextEncoderStream"];
 
 /// Make the shim that `name` asks for. Gives whether `name` is one of them.
 #[cold]
