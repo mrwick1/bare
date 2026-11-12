@@ -1172,9 +1172,12 @@ impl Heap {
                 self.make_fast(c);
             }
             let ob = self.obj(c)?;
-            if depth == u8::MAX || ob.exotic != 0 && !(ob.exotic == EXOTIC && plain) || on && ob.lazy & LAZY_CHAIN != 0 {
+            // An open host named object never hides a property of its chain (`named_hidden`), so a hit behind it stays valid.
+            let open = ob.exotic == EXOTIC_NAMED && matches!(key, PropertyKey::String(_)) && self.named_open(c);
+            if depth == u8::MAX || ob.exotic != 0 && !(ob.exotic == EXOTIC && plain) && !open || on && ob.lazy & LAZY_CHAIN != 0 {
                 return Ok(None);
             }
+            indexed |= open;
             indexed |= ob.exotic == EXOTIC && matches!(self.exotic(c), Some(super::binary::Exotic::Indexed));
             depth += 1;
             if let Some(p) = self.own(ob, key) {
@@ -1189,7 +1192,7 @@ impl Heap {
             }
             cur = ob.proto;
         }
-        // Indexed hosts can expose live named aliases without changing a heap shape or prototype epoch.
+        // Indexed hosts and open named objects can expose live names without changing a heap shape or prototype epoch.
         if found.is_none() && indexed {
             return Ok(None);
         }

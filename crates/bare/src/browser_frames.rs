@@ -1,11 +1,28 @@
-//! Live named access to inert iframe windows. No child document is fetched or executed.
+//! Named access on `Window` (the `WindowProperties` object) and named properties of `Document`, and live named access to inert
+//! iframe windows. No child document is fetched or executed.
+//!
+//! - Two host named objects sit in the chains: `window -> owner -> EventTarget.prototype` and `document -> document_owner ->
+//!   Document.prototype`. Own properties of `window` (declared `var` and `function`, the window API) and the global lexical names
+//!   (`let`, `const`) come first, so the names are only a fallback after a miss.
+//! - Window names: an iframe by index, `name` or `id` (its inert window), then the first element in tree order with that `id`, or with
+//!   that `name` on a, embed, form, iframe, img or object. Several matches give the first one, not an `HTMLCollection`.
+//! - Document names: embed, form, iframe, img and object by `name`, iframe and object by `id`, and img by `id` when it has a `name`.
+//! - The lists are built by one walk on the first ask after a change. An ask costs one hash look-up.
+//! - Both objects are open (`Heap::new_named_open`): a property of the chain behind them wins over a name, and the heap finds it
+//!   without asking the host. So `document.createElement` and `window.addEventListener` never wait for a list. This differs from the
+//!   standard (`[LegacyOverrideBuiltIns]` on `Document`, `WindowProperties` before `EventTarget.prototype`): a page cannot hide the
+//!   DOM API with an element name.
+//! - A name that the host defines lazily on a miss (`Heap::lazy_chain_name`: `name`, `top`, `open`, `on*`) wins too: the host
+//!   defines it before the element can answer.
+//! - The list follows `Document::name_revision`, which moves only for changes of named elements. A miss after other changes (a
+//!   text edit, a bare element added) costs no walk.
 use crate::browser::*;
-use bare_html::dom::{NodeData, NodeId};
+use bare_html::dom::{Atom, NodeData, NodeId};
 use bare_js::eval::Interp;
-use bare_js::heap::HeapError;
+use bare_js::heap::{Heap, HeapError};
 use bare_js::value::{ObjId, Value};
 use std::cell::{Cell, OnceCell, Ref, RefCell, RefMut};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub(crate) const FILL: u32 = u32::MAX - 8;
 #[derive(Default)]
@@ -27,23 +44,34 @@ struct State {
     owner: ObjId,
     document_owner: ObjId,
     contexts: IdMap<NodeId, ObjId>,
-    pending: Cell<Option<NodeId>>,
-    /// The iframes and their names, built by a fill for the document revision `rev` (`u64::MAX` before the first fill). A
-    /// named query reads only this list, so it costs no walk of the tree.
+    /// The node whose wrapper (`false`) or inert window (`true`) the next fill makes.
+    pending: Cell<Option<(NodeId, bool)>>,
+    /// The names, built by a fill for the document name revision `rev` and revision `full` (`u64::MAX` before the first fill). A
+    /// named query reads only this list, so it costs no walk of the tree. An index key needs `full` too: a bare iframe moves no
+    /// name revision.
     list: List,
     rev: u64,
-    /// The name of the query that found the list out of date: its fill builds the list and makes the context of that name, so
+    full: u64,
+    /// The name of the query that found the list out of date: its fill builds the list and makes the wrapper of that name, so
     /// one property operation asks at most once here (see `hx!` in `bare_js::eval`).
     want: RefCell<Vec<u16>>,
+    /// The next fill gives the lazy window name `want` its chance first (`lazy_tried` then holds it).
+    lazy: Cell<bool>,
+    lazy_tried: RefCell<HashSet<Vec<u16>>>,
+    /// The iframe getters and window names are defined.
+    iframes: bool,
 }
 #[derive(Default)]
 struct List {
     nodes: Vec<NodeId>,
-    /// The own keys of the window owner (indices, then names) and of the document owner (names), in `keys` order.
+    /// The own keys of the window owner (indices, iframe names, element names) and of the document owner, in `keys` order.
     win_keys: Vec<Vec<u16>>,
     doc_keys: Vec<Vec<u16>>,
-    /// The first iframe in tree order with a `name` or `id` of this value.
-    names: HashMap<Vec<u16>, NodeId>,
+    /// The window name: the first iframe in tree order with a `name` or `id` of this value (`true`: its inert window), else the
+    /// first element in tree order with that `id` or `name`. One map, so a miss hashes once.
+    win: HashMap<Vec<u16>, (NodeId, bool)>,
+    /// The first element in tree order with a document name of this value.
+    docs: HashMap<Vec<u16>, NodeId>,
 }
 
 fn nodes(d: &Dom) -> Vec<NodeId> {
@@ -62,44 +90,100 @@ fn nodes(d: &Dom) -> Vec<NodeId> {
     }
     out
 }
+fn add(map: &mut HashMap<Vec<u16>, NodeId>, keys: &mut Vec<Vec<u16>>, v: &str, n: NodeId) {
+    let k: Vec<u16> = v.encode_utf16().collect();
+    if !map.contains_key(&k) {
+        keys.push(k.clone());
+        map.insert(k, n);
+    }
+}
 fn build(d: &Dom) -> List {
-    let nodes = nodes(d);
     let doc = d.doc.borrow();
+    let name_atom = doc.find_atom("name");
     let mut l = List::default();
-    for (i, &n) in nodes.iter().enumerate() {
-        l.win_keys.push(i.to_string().encode_utf16().collect());
-        for a in ["name", "id"] {
-            if let Some(v) = doc.find_attr_qname(n, a).and_then(|a| doc.attr(n, a)).filter(|v| !v.is_empty()) {
+    let (mut el_keys, mut frame_keys) = (Vec::new(), HashSet::new());
+    let root = doc.root();
+    let (mut cur, mut depth) = (root, 0);
+    while let Some((n, dep)) = crate::browser_dom::next_in(&doc, root, cur, depth) {
+        (cur, depth) = (n, dep);
+        if !matches!(doc.data(n), NodeData::Element { .. }) {
+            continue;
+        }
+        let id = doc.attr(n, Atom::ID).filter(|v| !v.is_empty());
+        let name = name_atom.and_then(|a| doc.attr(n, a)).filter(|v| !v.is_empty());
+        if id.is_none() && name.is_none() && doc.is_foreign(n) {
+            continue;
+        }
+        let tag = if doc.is_foreign(n) { "" } else { doc.element_name(n) };
+        if tag == "iframe" {
+            l.win_keys.push(l.nodes.len().to_string().encode_utf16().collect());
+            l.nodes.push(n);
+            for v in [name, id].into_iter().flatten() {
                 let k: Vec<u16> = v.encode_utf16().collect();
-                l.names.entry(k.clone()).or_insert(n);
-                if !l.doc_keys.contains(&k) {
-                    l.doc_keys.push(k.clone());
+                // An iframe wins over an element that came first; an earlier iframe stays.
+                if !matches!(l.win.get(&k), Some((_, true))) {
+                    if !frame_keys.contains(&k) {
+                        l.win_keys.push(k.clone());
+                        frame_keys.insert(k.clone());
+                    }
+                    l.win.insert(k, (n, true));
                 }
-                if !l.win_keys.contains(&k) {
-                    l.win_keys.push(k);
+            }
+        } else {
+            for v in [id, name.filter(|_| matches!(tag, "a" | "embed" | "form" | "img" | "object"))].into_iter().flatten() {
+                let k: Vec<u16> = v.encode_utf16().collect();
+                if !l.win.contains_key(&k) {
+                    el_keys.push(k.clone());
+                    l.win.insert(k, (n, false));
                 }
             }
         }
+        if let Some(v) = name.filter(|_| matches!(tag, "embed" | "form" | "iframe" | "img" | "object")) {
+            add(&mut l.docs, &mut l.doc_keys, v, n);
+        }
+        // An iframe by `id` too: the earlier frames code did it, and its tests keep it. The standard has `name` only.
+        if let Some(v) = id.filter(|_| tag == "object" || tag == "iframe" || tag == "img" && name.is_some()) {
+            add(&mut l.docs, &mut l.doc_keys, v, n);
+        }
     }
-    l.nodes = nodes;
+    l.win_keys.extend(el_keys.into_iter().filter(|k| !frame_keys.contains(k)));
     l
 }
+/// The array index of a key (`"0"`, not `"00"`).
+fn index_key(key: &[u16]) -> Option<usize> {
+    if key.is_empty() || key.len() > 1 && key[0] == u16::from(b'0') {
+        return None;
+    }
+    key.iter().try_fold(0usize, |n, &u| {
+        let d = u.checked_sub(u16::from(b'0')).filter(|&d| d < 10)?;
+        n.checked_mul(10)?.checked_add(usize::from(d))
+    })
+}
+impl State {
+    /// Is the list out of date? `index`: the query reads iframe indices.
+    fn stale(&self, doc: &bare_html::dom::Document, index: bool) -> bool {
+        self.rev != doc.name_revision() || index && self.full != doc.revision()
+    }
+}
 impl List {
-    fn find(&self, key: &[u16], document: bool) -> Option<NodeId> {
-        if !document
-            && let Ok(name) = String::from_utf16(key)
-            && let Ok(i) = name.parse::<usize>()
-            && i.to_string() == name
-        {
-            return self.nodes.get(i).copied();
+    /// The node of the name `key`, and whether its value is the inert window of an iframe.
+    fn find(&self, key: &[u16], document: bool) -> Option<(NodeId, bool)> {
+        if document {
+            return self.docs.get(key).map(|&n| (n, false));
         }
-        self.names.get(key).copied()
+        if let Some(i) = index_key(key) {
+            return self.nodes.get(i).map(|&n| (n, true));
+        }
+        self.win.get(key).copied()
     }
 }
 
-/// Activate only after the document has seen an iframe. Ordinary realms keep their prototype chains.
+/// Make the two named objects once per realm. Define the iframe getters only after the document has seen an iframe.
 pub(crate) fn activate(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    if d.frames.active()
+    if !d.frames.active() {
+        install(d, it)?;
+    }
+    if d.frames.state().is_some_and(|s| s.iframes)
         || d.doc
             .try_borrow()
             .map_err(|_| it.heap_error(HeapError::HostUnavailable))?
@@ -113,13 +197,19 @@ pub(crate) fn activate(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     for name in ["frames", "parent", "top", "length", "name", "screen"] {
         crate::browser::define_window(d, it, name)?;
     }
+    if let Some(s) = d.frames.state_mut().as_mut() {
+        s.iframes = true;
+    }
+    Ok(())
+}
+fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     let owner = it
         .heap
-        .new_named(Some(d.p().et))
+        .new_named_open(Some(d.p().et))
         .map_err(|e| it.heap_error(e))?;
     let document_owner = it
         .heap
-        .new_named(Some(d.p().document))
+        .new_named_open(Some(d.p().document))
         .map_err(|e| it.heap_error(e))?;
     let g = it.global_object();
     it.heap
@@ -138,12 +228,20 @@ pub(crate) fn activate(d: &Dom, it: &mut Interp<'_>) -> R<()> {
             pending: Cell::new(None),
             list: List::default(),
             rev: u64::MAX,
+            full: u64::MAX,
             want: RefCell::default(),
+            lazy: Cell::new(false),
+            lazy_tried: RefCell::default(),
+            iframes: false,
         })))
         .map_err(|_| d.lim("dom-frames"))?;
     Ok(())
 }
 
+/// Is `owner` one of the two named objects? Their names do not hide the properties of their chains.
+pub(crate) fn is_owner(d: &Dom, owner: ObjId) -> bool {
+    d.frames.state().is_some_and(|s| owner == s.owner || owner == s.document_owner)
+}
 pub(crate) fn has(d: &Dom, owner: ObjId, key: &[u16]) -> Result<Option<bool>, HeapError> {
     let state = d.frames.state();
     let Some(s) = state
@@ -152,15 +250,26 @@ pub(crate) fn has(d: &Dom, owner: ObjId, key: &[u16]) -> Result<Option<bool>, He
     else {
         return Ok(None);
     };
-    if s.rev != d.doc.borrow().revision() {
+    let document = owner == s.document_owner;
+    if s.stale(&*d.doc.try_borrow().map_err(|_| HeapError::HostUnavailable)?, !document && index_key(key).is_some()) {
         *s.want.borrow_mut() = key.to_vec();
         return Err(HeapError::NeedsHost { owner, index: FILL });
     }
-    let Some(n) = s.list.find(key, owner == s.document_owner) else {
+    let Some((n, window)) = s.list.find(key, document) else {
         return Ok(Some(false));
     };
-    if !s.contexts.contains_key(&n) {
-        s.pending.set(Some(n));
+    if !window && Heap::lazy_chain_name(key) && !s.lazy_tried.borrow().contains(key) {
+        *s.want.borrow_mut() = key.to_vec();
+        s.lazy.set(true);
+        return Err(HeapError::NeedsHost { owner, index: FILL });
+    }
+    let ready = if window {
+        s.contexts.contains_key(&n)
+    } else {
+        d.st.try_borrow().map_err(|_| HeapError::HostUnavailable)?.by_node.contains_key(&n)
+    };
+    if !ready {
+        s.pending.set(Some((n, window)));
         return Err(HeapError::NeedsHost { owner, index: FILL });
     }
     Ok(Some(true))
@@ -170,11 +279,11 @@ pub(crate) fn value(d: &Dom, owner: ObjId, key: &[u16]) -> Option<Value> {
     let s = state
         .as_ref()
         .filter(|s| owner == s.owner || owner == s.document_owner)?;
-    let n = s.list.find(key, owner == s.document_owner)?;
-    if owner == s.document_owner {
-        d.st.borrow().by_node.get(&n).copied().map(Value::Object)
-    } else {
+    let (n, window) = s.list.find(key, owner == s.document_owner)?;
+    if window {
         s.contexts.get(&n).copied().map(Value::Object)
+    } else {
+        d.st.borrow().by_node.get(&n).copied().map(Value::Object)
     }
 }
 pub(crate) fn len(d: &Dom, owner: ObjId) -> Result<Option<usize>, HeapError> {
@@ -185,7 +294,7 @@ pub(crate) fn len(d: &Dom, owner: ObjId) -> Result<Option<usize>, HeapError> {
     else {
         return Ok(None);
     };
-    if s.rev != d.doc.borrow().revision() {
+    if s.stale(&d.doc.borrow(), owner == s.owner) {
         s.want.borrow_mut().clear();
         return Err(HeapError::NeedsHost { owner, index: FILL });
     }
@@ -197,7 +306,7 @@ pub(crate) fn keys(d: &Dom, owner: ObjId) -> Option<Vec<Vec<u16>>> {
         .as_ref()
         .filter(|s| owner == s.owner || owner == s.document_owner)?;
     let built;
-    let l = if s.rev == d.doc.borrow().revision() {
+    let l = if !s.stale(&d.doc.borrow(), owner == s.owner) {
         &s.list
     } else {
         built = build(d);
@@ -209,20 +318,38 @@ pub(crate) fn fill(d: &Dom, it: &mut Interp<'_>, owner: ObjId, index: u32) -> R<
     if index != FILL {
         return Ok(false);
     }
-    let rev = d.doc.borrow().revision();
-    if d.frames.state().is_some_and(|s| s.rev != rev) {
+    let (rev, full) = {
+        let doc = d.doc.borrow();
+        (doc.name_revision(), doc.revision())
+    };
+    if d.frames.state().is_some_and(|s| s.stale(&d.doc.borrow(), true)) {
         it.charge(d.doc.borrow().len() as u64)?;
         let list = build(d);
         if let Some(s) = d.frames.state_mut().as_mut() {
-            (s.list, s.rev) = (list, rev);
+            (s.list, s.rev, s.full) = (list, rev, full);
         }
+    }
+    let lazy = d.frames.state().filter(|s| s.lazy.take()).map(|s| {
+        let want = std::mem::take(&mut *s.want.borrow_mut());
+        s.lazy_tried.borrow_mut().insert(want.clone());
+        want
+    });
+    if let Some(key) = lazy {
+        crate::browser_handlers::lazy_key(d, it, d.p().et, String::from_utf16_lossy(&key))?;
+        return Ok(true);
     }
     let n = d.frames.state().and_then(|s| {
         let want = std::mem::take(&mut *s.want.borrow_mut());
-        s.pending.take().or_else(|| s.list.find(&want, owner == s.document_owner).filter(|n| !s.contexts.contains_key(n)))
+        s.pending.take().or_else(|| s.list.find(&want, owner == s.document_owner))
     });
-    if let Some(n) = n {
-        context(d, it, n)?;
+    match n {
+        Some((n, true)) => {
+            context(d, it, n)?;
+        }
+        Some((n, false)) => {
+            d.wrap(it, n)?;
+        }
+        None => {}
     }
     Ok(true)
 }

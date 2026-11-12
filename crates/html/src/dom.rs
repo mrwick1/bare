@@ -232,6 +232,8 @@ pub struct Document {
     // element gets a namespace. See `revision`.
     text_revision: u64,
     // Moves at every edit of the text of an existing node. See `text_revision`.
+    name_revision: u64,
+    // Moves at every change that can alter the `id` or `name` of an element in the tree. See `name_revision`.
     shadow_of: HashMap<u32, NodeId, BuildHasherDefault<Fnv>>,
     // The shadow root of each shadow host, by `NodeId::index` of the host. The root is not a child of the host: the light links of the host never show it.
     shadow_host: HashMap<u32, (NodeId, bool), BuildHasherDefault<Fnv>>,
@@ -475,6 +477,7 @@ impl Document {
             removed: Vec::new(),
             revision: 0,
             text_revision: 0,
+            name_revision: 0,
             shadow_of: HashMap::default(),
             shadow_host: HashMap::default(),
             shadow_flags: HashMap::default(),
@@ -503,6 +506,25 @@ impl Document {
     /// alone: a new node with no parent, a text edit, a new name, a new span. It only grows, and it is not a count of changes.
     pub fn revision(&self) -> u64 {
         self.revision
+    }
+
+    /// A number that moves at every change that can alter which elements of the tree have an `id` or a `name`, or their tag or
+    /// namespace: a node that has attributes or children joins or leaves the tree, an `id` or `name` attribute is set or removed,
+    /// an element gets a namespace, the parser cuts or mends the tree. A node with neither attributes nor children joins and
+    /// leaves the tree without moving it. A host that caches named elements builds them again when the number is not the same.
+    pub fn name_revision(&self) -> u64 {
+        self.name_revision
+    }
+
+    /// Is `name` the `id` or the `name` attribute?
+    fn names_attr(&self, name: Atom) -> bool {
+        name == Atom::ID || self.atom_str(name) == "name"
+    }
+
+    /// Can `node` (with its subtree) change the named elements when it joins or leaves the tree?
+    fn may_name(&self, node: NodeId) -> bool {
+        let n = &self.nodes[node.index()];
+        n.first_child.is_some() || matches!(n.data, NodeData::Element { attrs, .. } if attrs.len > 0)
     }
 
     /// Move `revision` for a change that the host keeps outside the tree, so a host cache of a query that reads it (the selected
@@ -1043,6 +1065,7 @@ impl Document {
     fn link(&mut self, node: NodeId, parent: NodeId, before: Option<NodeId>) {
         self.places = Default::default();
         self.revision += 1;
+        self.name_revision += u64::from(self.may_name(node));
         let before = before.filter(|&b| b != node && self.parent(b) == Some(parent));
         let prev = self.child_before(parent, before);
         let n = &mut self.nodes[node.index()];
@@ -1071,6 +1094,7 @@ impl Document {
         }
         self.places = Default::default();
         self.revision += 1;
+        self.name_revision += u64::from(self.may_name(node));
         match prev {
             Some(p) => self.nodes[p.index()].next = next,
             None => self.nodes[parent.index()].first_child = next,
@@ -1118,6 +1142,7 @@ impl Document {
         }
         self.places = Default::default();
         self.revision += 1;
+        self.name_revision += 1;
         self.mark_full();
         cut
     }
@@ -1142,6 +1167,7 @@ impl Document {
         }
         self.places = Default::default();
         self.revision += 1;
+        self.name_revision += 1;
         self.mark_full();
     }
 
@@ -1158,6 +1184,7 @@ impl Document {
         }
         self.places = Default::default();
         self.revision += 1;
+        self.name_revision += 1;
         self.mark_full();
     }
 
@@ -1238,6 +1265,7 @@ impl Document {
         debug_assert!(matches!(ns, Ns::Html | Ns::Svg | Ns::MathMl));
         if ns != Ns::Html {
             self.revision += 1;
+            self.name_revision += 1;
             let prefix = prefix.map(|p| self.intern(p));
             self.foreign.insert(id.index() as u32, Foreign { ns, prefix });
         }
@@ -1436,6 +1464,7 @@ impl Document {
         let NodeData::Element { name: tag, attrs } = self.nodes[el.index()].data else { return };
         let span = self.push_text(value);
         self.revision += 1;
+        self.name_revision += u64::from(self.names_attr(name));
         self.class_sets.get_mut().remove(&el.index());
         // An empty list can start after the end (see `attrs`): it begins again at the end.
         let (start, len) = if attrs.len == 0 { (self.attrs.len(), 0) } else { (attrs.start as usize, attrs.len as usize) };
@@ -1475,6 +1504,7 @@ impl Document {
         }
         let Some(at) = self.attrs[start..start + len].iter().position(|a| a.name == name) else { return false };
         self.revision += 1;
+        self.name_revision += u64::from(self.names_attr(name));
         self.class_sets.get_mut().remove(&el.index());
         let value = self.attrs[start + at].value;
         if self.watcher.is_some() {
@@ -2310,6 +2340,38 @@ mod tests {
         assert!(!doc.remove_attr(a, "absent"));
         let _ = c;
         assert_eq!(doc.revision(), r);
+    }
+
+    #[test]
+    fn name_revision_moves_only_for_named_changes() {
+        let mut doc = crate::tree::parse("<!doctype html><body><p></p></body>");
+        let body = doc.children(doc.children(doc.root()).last().unwrap()).last().unwrap();
+        let p = doc.children(body).next().unwrap();
+        let r = doc.name_revision();
+        // A bare element or text joins and leaves, a class changes: no move.
+        let i = doc.create_element("i");
+        doc.move_to(i, body, None);
+        doc.detach(i);
+        doc.set_attr(p, "class", "x");
+        doc.remove_attr(p, "class");
+        assert_eq!(doc.name_revision(), r);
+        doc.set_attr(p, "id", "a");
+        let r1 = doc.name_revision();
+        assert!(r1 > r);
+        doc.set_attr(i, "name", "n");
+        let r2 = doc.name_revision();
+        assert!(r2 > r1);
+        // A node with attributes or with children joins or leaves: a move.
+        doc.move_to(i, body, None);
+        assert!(doc.name_revision() > r2);
+        let r3 = doc.name_revision();
+        let (b, c) = (doc.create_element("b"), doc.create_element("u"));
+        doc.move_to(c, b, None);
+        doc.move_to(b, body, None);
+        assert!(doc.name_revision() > r3);
+        let r4 = doc.name_revision();
+        doc.remove_attr(p, "id");
+        assert!(doc.name_revision() > r4);
     }
 
     #[test]

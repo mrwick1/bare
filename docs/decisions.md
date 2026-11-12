@@ -1419,3 +1419,15 @@ The Wikipedia search box lost typed text (issue #395). On focus, Wikipedia mount
 - 62 of the 63 html5lib foreign-context fragment tests pass. The one left is `<frameset>` in a fragment, which the parser refuses on purpose.
 - `type` follows a field that the page replaced. The rule: the old field left the document, and a text field has the focus. Then the keys go to that field. A browser sends keys to the focused element, so a person sees the same.
 - The rule holds at the click and between keys. Wikipedia loads its widget over the network, so its swap comes while the text is typed. A field that only loses the focus, and stays in the document, still fails with `focus_lost` or `no_focus`.
+## Named access on window and document (2026-11-12)
+
+Old and small sites use `id` globals: a handler writes `out.textContent` for `<div id=out>`. bare had no named access, so such handlers threw.
+
+- The frames code already put a host named object behind `window` and behind `document`. It is now made for every page, not only for pages with an iframe.
+- `window` names are the iframes first, then the first element in tree order with that `id`, or with that `name` on a, embed, form, iframe, img or object. Several matches give the first element, not an `HTMLCollection`.
+- `document` names are embed, form, iframe, img and object by `name`, iframe and object by `id`, and img by `id` when it has a `name`. The iframe by `id` keeps the old frames behavior. The standard does not list it.
+- Both objects are open: a property of the chain wins over a name. Own globals, `let` and `const` come first anyway. So a page cannot hide `document.createElement` or `window.addEventListener` with an element name. The standard lets it do so. bare accepts this difference for speed and safety.
+- A window property that the host defines lazily (`name`, `top`, `open`, `on*`) also wins. The host defines it before the element answers.
+- The list of names is built by one walk on the first ask after a change. `Document::name_revision` moves only for changes that can touch named elements. A text edit or a bare new element costs no walk.
+- The heap cache passes over an open named object for a hit behind it. Without this, every `document.body` read lost its cache.
+- Cost: a global miss costs about 50 to 80 ns more on a page with 2000 ids. A hit on an own global costs the same.

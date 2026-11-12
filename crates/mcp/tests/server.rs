@@ -1829,3 +1829,19 @@ fn read_and_links_stay_within_max_chars() {
     let (r, _) = s.tool("read", json!({"max_chars": 300, "offset": next}));
     assert!(r.as_str().unwrap().contains(&format!("chars {next}-")), "{r}");
 }
+
+/// A form whose submit handler writes through `id` globals (bare#392).
+const NAMED_PAGE: &str = "<!doctype html><body><form id=f name=login onsubmit=\"event.preventDefault(); out.textContent = 'sent ' + q.value\">
+<input id=q aria-label=Query value=hi><button>Go</button></form><div id=out>none</div></body>";
+
+#[test]
+fn id_globals_and_document_names_resolve_in_handlers_and_eval() {
+    let mut s = Server::start();
+    let snap = opened(&mut s, &html_app(NAMED_PAGE));
+    let (r, error) = s.tool("eval", json!({"js": "JSON.stringify([typeof window.out, typeof f, 'out' in window, typeof document.login])"}));
+    assert!(!error && r == json!(["object", "object", true, "object"]), "{r}");
+    let (r, error) = s.tool("act", json!({"op": "click", "ref": ref_of(&snap, "button \"Go\"")}));
+    assert!(!error, "{r}");
+    let (r, error) = s.tool("eval", json!({"js": "out.textContent"}));
+    assert!(!error && r == json!("sent hi"), "{r}");
+}

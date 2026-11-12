@@ -1390,12 +1390,15 @@ impl Heap {
 
     /// A name the host can define on demand. Only the existing lazy host-property paths call this.
     fn on_name(&self, s: StrId) -> bool {
-        self.str(s).is_ok_and(|st| {
-            let u = &st.units;
-            u.len() >= 3 && u[0] == b'o' as u16 && u[1] == b'n' as u16
-                || u.len() > 11 && u[0] == b'H' as u16 && u[1] == b'T' as u16 && u[2] == b'M' as u16 && u[3] == b'L' as u16 && u.ends_with(&[b'E', b'l', b'e', b'm', b'e', b'n', b't'].map(u16::from))
-                || Self::browser_name(u)
-        })
+        self.str(s).is_ok_and(|st| Self::lazy_chain_name(&st.units))
+    }
+
+    /// Does a miss of the string key `u` that reaches a `set_lazy_chain` object ask the host? A host named object in front of
+    /// that object uses it to let the lazy names win over its own names.
+    pub fn lazy_chain_name(u: &[u16]) -> bool {
+        u.len() >= 3 && u[0] == b'o' as u16 && u[1] == b'n' as u16
+            || u.len() > 11 && u[0] == b'H' as u16 && u[1] == b'T' as u16 && u[2] == b'M' as u16 && u[3] == b'L' as u16 && u.ends_with(&[b'E', b'l', b'e', b'm', b'e', b'n', b't'].map(u16::from))
+            || Self::browser_name(u)
     }
 
     // Only the existing lazy host miss path calls this. Ordinary property reads do not test these names.
