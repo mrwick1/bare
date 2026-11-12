@@ -1,7 +1,7 @@
 //! What went wrong on a page, for an agent: a bounded history of the console and the network, and a report that names the likely cause.
 //! The history lives as long as the session. The step reports (`Session::drain`) hand out the same entries once and forget them.
 
-use bare::control::Log;
+pub use bare::control::Log;
 use bare_net::trace::Rec;
 use std::collections::VecDeque;
 
@@ -52,6 +52,16 @@ impl History {
         let mut out: Vec<String> = self.net.iter().filter(|(i, r)| *i > from && (!failed_only || failed(r)) && contains.is_none_or(|c| r.url.contains(c))).map(|(_, r)| line(r)).collect();
         cut(&mut out, max);
         out
+    }
+
+    /// The number of the newest entry. `logs_since` gives the entries after it.
+    pub fn mark(&self) -> u64 {
+        self.n
+    }
+
+    /// The console entries after `mark`.
+    pub fn logs_since(&self, mark: u64) -> impl Iterator<Item = &Log> {
+        self.logs.iter().filter(move |(i, _)| *i > mark).map(|(_, l)| l)
     }
 
     pub fn logs(&self) -> impl Iterator<Item = &Log> {
