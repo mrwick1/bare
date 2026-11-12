@@ -22,8 +22,9 @@
 //! Foreign contexts: an SVG or MathML context element (`g.innerHTML = '<path/>'`) is the adjusted current node while only the root is open.
 //! So the foreign rules read the tokens: `<path>` is an SVG element, and an HTML tag like `<div>` breaks out to HTML. The mode is "in body".
 //!
-//! Gates (`Unsupported`, nothing is parsed): the HTML contexts `select`, `html`, `frameset`, `frame` (the standard needs the select mode, and the
-//! before-head and frameset modes). A start tag `frameset` or
+//! Select context: the "in select" mode (classic rules). `option`, `optgroup`, `hr`, text, comments, `script` and `template` stay. Other tags (`div`, `td`) are dropped, and their text stays.
+//!
+//! Gates (`Unsupported`, nothing is parsed): the HTML contexts `html`, `frameset`, `frame` (the standard needs the before-head and frameset modes). A start tag `frameset` or
 //! `frame` in the input is gated the same way, because the builder would make a tree that a browser does not make. Nested `table` and `select`
 //! are read by the page rules (see the known gaps of the tree builder): the same tree as for a page.
 //!
@@ -69,7 +70,6 @@ pub struct Fragment {
 /// The reason why this context element (an HTML element, by its lowercase name) is not supported, if it is not.
 pub fn context_gate(name: &str) -> Option<&'static str> {
     Some(match name {
-        "select" => "fragment context: select insertion mode",
         "html" | "frameset" | "frame" => "fragment context: before-head, after-head and frameset insertion modes",
         _ => return None,
     })
@@ -118,6 +118,9 @@ pub fn parse_fragment(
     if let Some(tm) = tm {
         b.tmpl.push(tm);
         b.mode = super::mode_for(tm);
+    } else if html && context == "select" {
+        b.select_fragment = true;
+        b.mode = Mode::InSelect;
     }
     b.scripting = scripting;
     if in_form {
@@ -256,8 +259,14 @@ mod tests {
     }
 
     #[test]
+    fn a_select_context_reads_the_select_mode() {
+        assert_eq!(tree("<option>1<option>2<optgroup><option>3<optgroup>4", "select"), "| <option>\n|   \"1\"\n| <option>\n|   \"2\"\n| <optgroup>\n|   <option>\n|     \"3\"\n| <optgroup>\n|   \"4\"\n");
+        assert_eq!(tree("<div>a</div><td>b</td><select><input><hr>c", "select"), "| \"ab\"\n| <hr>\n| \"c\"\n");
+    }
+
+    #[test]
     fn the_gates_refuse_before_parsing() {
-        for name in ["select", "html", "frameset", "frame"] {
+        for name in ["html", "frameset", "frame"] {
             assert!(matches!(parse("x", name), Err(FragmentError::Unsupported(_))), "{name}");
         }
         for html in ["<frameset>", "<frame>"] {

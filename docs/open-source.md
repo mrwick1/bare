@@ -52,6 +52,12 @@ Boa is MIT or Unlicense. We read its source and wrote our own code in the shape 
 | `crates/bare/src/browser_encoding.rs` | `core/wintertc/src/base64` | The shape of `btoa` and `atob`. The HTML forgiving-base64 rules decide the errors. |
 | `crates/js/src/eval_intl_segmenter.rs` | `core/engine/src/builtins/intl/segmenter` | The shape of `Intl.Segmenter`, `%Segments%` and `%SegmentIterator%`. The break rules are ICU4X (`icu_segmenter`, Unicode-3.0), not Boa's. |
 
+### Ported for the "in select" tree builder mode (2026-11-12)
+
+| Our file | Source (license) | What we took |
+| --- | --- | --- |
+| `crates/html/src/tree.rs` (`in_select`) | html5ever `tree_builder/rules.rs`, InSelect (MIT OR Apache-2.0); Ladybird `HTMLParser::handle_in_select` (BSD-2-Clause) | The rules of HTML 13.2.6.4.16, classic. We wrote our own code in the shape of our builder. We copied no file. |
+
 `String.prototype.matchAll` and `structuredClone` copy nothing from Boa. `matchAll` follows ECMA-262. `structuredClone` extends the clone that `history.pushState` already used.
 
 ## HTML, CSS and layout

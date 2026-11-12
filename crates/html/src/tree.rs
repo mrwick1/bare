@@ -24,7 +24,7 @@
 //! The standard says that every page, however broken, gives a tree. No error stops the builder.
 //!
 //! Left out (known gaps):
-//! - `<select>` modes, framesets (and so the frameset-ok flag), and the "in head noscript" mode (fragment parsing for `innerHTML` is in `tree/fragment.rs` and gates these). The scripting flag is on: `<noscript>` has raw text. Foreign content (SVG and MathML) is cut down: see `foreign.rs`.
+//! - `<select>` modes for a page (a fragment with a `select` context has "in select"), framesets (and so the frameset-ok flag), and the "in head noscript" mode (fragment parsing for `innerHTML` is in `tree/fragment.rs` and gates these). The scripting flag is on: `<noscript>` has raw text. Foreign content (SVG and MathML) is cut down: see `foreign.rs`.
 //! - Quirks mode, and merging the attributes of a second `<html>` or `<body>` tag.
 //!
 //! Comments compare Rust with JavaScript, because you know JS.
@@ -132,6 +132,8 @@ enum Mode {
     InTemplate,
     /// The current node is a template whose insertion mode is "in column group" (`<template><col>`). Only `col` can follow.
     InTemplateColGroup,
+    /// The context of a fragment is a `select` ("in select", classic rules). A page keeps the `select` element in the stack and reads it as "in body".
+    InSelect,
 }
 
 /// An entry of the stack of template insertion modes. The standard keeps the mode that a template was switched to by its first content tag.
@@ -336,6 +338,7 @@ struct Builder {
     tmpl: Vec<Tm>,
     // The stack of template insertion modes: one entry for each open `template`, and one at the bottom for the context of a fragment that is a `template`.
     context: Option<NodeId>,
+    select_fragment: bool,
     // The context element of a fragment that is in the SVG or MathML namespace (a copy with no parent). See `adjusted`.
 }
 
@@ -356,6 +359,7 @@ impl Builder {
             scripting: true,
             tmpl: Vec::new(),
             context: None,
+            select_fragment: false,
         }
     }
 
@@ -781,6 +785,58 @@ impl Builder {
             Mode::AfterBody => self.after_body(token),
             Mode::AfterAfterBody => self.after_after_body(token),
             Mode::InTemplate | Mode::InTemplateColGroup => self.in_template_modes(token),
+            Mode::InSelect => self.in_select(token),
+        }
+    }
+
+    /// The "in select" mode of the standard (13.2.6.4.16, classic rules), for a fragment whose context is a `select`. Rules follow html5ever
+    /// (`tree_builder/rules.rs`, MIT OR Apache-2.0) and Ladybird (`HTMLParser::handle_in_select`, BSD-2-Clause). Only text, `option`, `optgroup`, `hr`,
+    /// comments, `script` and `template` make nodes. No `select` is open in a fragment, so `select`, `input`, `keygen` and `textarea` are ignored.
+    fn in_select(&mut self, token: Token) {
+        match token {
+            Token::Text(text) => {
+                let text = text.replace('\0', "");
+                if !text.is_empty() {
+                    self.insert_text(&text);
+                }
+            }
+            Token::Comment(text) => self.insert_comment(&text),
+            Token::Doctype(_) => {}
+            Token::StartTag { name, attrs, .. } => match &*name {
+                "html" => self.in_body(Token::StartTag { name, attrs, self_closing: false }),
+                "option" | "optgroup" | "hr" => {
+                    if self.is(self.current(), &["option"]) {
+                        self.open.pop();
+                    }
+                    if name != "option" && self.is(self.current(), &["optgroup"]) {
+                        self.open.pop();
+                    }
+                    self.insert_element(&name, &attrs, name != "hr");
+                }
+                "script" | "template" => {
+                    // The raw text mode returns to this mode; the end of a template does too (`select_fragment`).
+                    self.head_tag(&name, &attrs);
+                }
+                _ => {}
+            },
+            Token::EndTag { name } => match &*name {
+                "optgroup" => {
+                    let cur = self.current();
+                    if self.is(cur, &["option"]) && self.open.len() >= 2 && self.is(self.open[self.open.len() - 2], &["optgroup"]) {
+                        self.open.pop();
+                    }
+                    if self.is(self.current(), &["optgroup"]) {
+                        self.open.pop();
+                    }
+                }
+                "option" => {
+                    if self.is(self.current(), &["option"]) {
+                        self.open.pop();
+                    }
+                }
+                "template" => self.template_end(),
+                _ => {}
+            },
         }
     }
 
@@ -909,7 +965,15 @@ impl Builder {
                 self.mode = Mode::InHead;
             } else if self.is(n, &["html"]) {
                 // The root of a page has a head by now. The root of a fragment has none: it takes the mode of a template context.
-                self.mode = if self.head.is_some() { Mode::AfterHead } else { self.tmpl.last().map_or(Mode::InBody, |&t| mode_for(t)) };
+                self.mode = if self.head.is_some() {
+                    Mode::AfterHead
+                } else if let Some(&t) = self.tmpl.last() {
+                    mode_for(t)
+                } else if self.select_fragment {
+                    Mode::InSelect
+                } else {
+                    Mode::InBody
+                };
             } else if self.is(n, &["select", "td", "th", "tr", "tbody", "thead", "tfoot", "caption", "colgroup", "table", "body"]) {
                 self.mode = Mode::InBody;
             } else {

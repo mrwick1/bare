@@ -1754,3 +1754,9 @@ A focused element inside an editing host now takes key input. Text, Enter, Backs
 - The hashes are one-shot functions. Only `digest` needs them, and it has the whole message at once. A streaming API waits for a caller that needs one.
 - `SubtleCrypto` is the sixth lazy global of `browser_web.rs`. The first read of any of the six globals builds all their objects, as before.
 - Not built: a detached buffer hashes as empty. The standard rejects it with `TypeError`.
+## "In select" mode for a select fragment (2026-11-12)
+
+- Gmail sets `innerHTML` on a `select`. The parse returned `Unsupported` and the script stopped (bare issue #424).
+- The tree builder now has the "in select" mode (classic rules, HTML 13.2.6.4.16). A fragment with a `select` context starts in it.
+- The rules follow html5ever (`tree_builder/rules.rs`, MIT OR Apache-2.0) and Ladybird (`HTMLParser::handle_in_select`, BSD-2-Clause). `option`, `optgroup`, `hr`, text, comments, `script` and `template` stay. Other tags, such as `div` and `td`, are dropped. Their text stays.
+- A page still reads a `select` element as "in body". The page mode needs a `select` in scope and the reset of the mode, so it is not built.
