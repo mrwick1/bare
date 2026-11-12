@@ -13,14 +13,15 @@
 //! - CSSOM View (`offsetWidth`, `offsetHeight`): "if the element does not have any associated box return zero", else the width (height) of the
 //!   axis-aligned bounding box of the border boxes of all fragments of the principal box, ignoring transforms. Here: the union of all `Kind::Box`
 //!   fragments of the element. An element with no fragment is zero: a detached or not connected element, `display:none` (and everything below it,
-//!   where the engine has no style at all), and a box that layout does not make. Native layout has no transforms, so nothing is ignored by hand.
+//!   where the engine has no style at all), a `br` (Chrome: not a box), and a box that layout does not make. Native layout has no transforms, so nothing is ignored by hand.
+//! - An inline box with no background and no border: native layout "culls" it and makes no fragment. Its size is that of the union of its
+//!   lines, the rectangle of `getBoundingClientRect` (`browser_rects.rs`): the text runs and atomic inlines of each line, and the font box of an empty one.
 //! - The spec gives no integer rule. The value is a `long`; like Chrome and Firefox it is the nearest integer, halves up. A value that is not
 //!   finite or does not fit a `long` is `Unsupported` (layout clamps lengths to 33554431px, so this does not happen for sane pages).
 //! - Brand: `this` must be a non-foreign element (`HTMLElement`), else `TypeError: Illegal invocation`. The accessors are read-only.
 //!
 //! Gates (`Error::Unsupported`, none is faked)
 //! - A missing external sheet, as in `browser_computed.rs`.
-//! - An inline box (or `<br>`) with no background and no border: native layout "culls" it and makes no fragment, so its size is not known.
 //! - `display: contents`, `writing-mode`, vertical text and `direction` positioning are not in the engine, so they are not modelled.
 //!
 //! Bound (`GeometryLimits`, `Limit(Host(name))`, never catchable). Native layout recurses and cannot be interrupted. So `Dom::preflight` walks the
@@ -112,7 +113,6 @@ pub(crate) struct Lay {
     pub(crate) bars: (bool, bool),
 }
 
-const CULLED: &str = "geometry of an inline box with no background and no border (native layout makes no fragment for it)";
 const NOT_LONG: &str = "geometry that is not a finite number that fits a long";
 
 /// What the walk found.
@@ -335,13 +335,17 @@ impl Dom {
             return Ok((0, 0));
         }
         let layout = self.layout_now(it, &styles)?;
-        let Some(r) = border_box(&layout.layout, el) else {
-            // Layout makes no fragment for an inline box with no background and no border (`inline.rs`, "culled"): that is not "no box".
-            let doc = self.doc.borrow();
-            return match bare_layout::boxes::Tree::new(&doc, &styles).kind(el) {
-                bare_layout::boxes::Kind::Inline | bare_layout::boxes::Kind::Break => Err(Self::gate(CULLED)),
-                _ => Ok((0, 0)),
-            };
+        let r = match border_box(&layout.layout, el) {
+            Some(r) => r,
+            None => {
+                // Layout makes no fragment for an inline box with no background and no border (`inline.rs`, "culled"): that is not "no box".
+                // Its box is the union of its lines, as `getBoundingClientRect` gives it (`browser_rects.rs`). A `br` is not a box (Chrome: 0).
+                let kind = bare_layout::boxes::Tree::new(&self.doc.borrow(), &styles).kind(el);
+                match kind {
+                    bare_layout::boxes::Kind::Inline => crate::browser_rects::element_bounding(self, it, el)?,
+                    _ => return Ok((0, 0)),
+                }
+            }
         };
         let long = |v: f32| {
             let r = (v as f64 + 0.5).floor();

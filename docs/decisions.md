@@ -1442,3 +1442,13 @@ Wikipedia calls `querySelectorAll` with `:not(.extiw, .mw-cite-backlink a, ...)`
 - The invalidation sets (`Reach`, `Scopes`) read the compounds of an argument at the scope of their combinators. `:not(.x p)` reads `.x` on an ancestor, so a change of `.x` restyles the subtree.
 - The script limits count the searches of an argument. `backtracking` adds the most that one argument adds. `match_work` multiplies by the work of the arguments.
 - `:has()` stays out. A rule with it is still thrown away.
+
+## offsetWidth of an inline box with nothing to paint (2026-11-12)
+
+GitHub read `offsetWidth` of a plain `span`, and the read stopped the page (issue #402).
+
+- Native layout makes no fragment for an inline box with no background and no border. This saves a fragment for each line.
+- `offsetWidth` and `offsetHeight` of such a box now give the size of the rectangle of `getBoundingClientRect`. That rectangle is the union of its lines.
+- An empty inline box gives the height of its font and no width. It uses the layout that keeps every inline box, as `getClientRects` does.
+- A `br` gives 0. Chrome gives 0 too, because a `br` is not a box there.
+- No record was added to layout. The rectangles come from the fragments of the text and the atomic boxes.
