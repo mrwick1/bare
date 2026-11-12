@@ -328,7 +328,7 @@ impl Session {
         })?
     }
 
-    /// Run a script in the page and give its value as text (`JSON.stringify` it for an object). A Promise is awaited up to the time limit.
+    /// Run a script in the page and give its value as text: an object as compact JSON of at most `EVAL_MAX` characters (`Browser::inspect`). A Promise is awaited up to the time limit.
     /// Code with a top-level `await` runs as an async function: an expression gives its value, statements need a `return`.
     pub fn eval(&mut self, code: String) -> Result<String, String> {
         let limit = self.timeout;
@@ -359,7 +359,7 @@ impl Session {
             loop {
                 let b = p.browser().ok_or("no document")?;
                 match b.it.promise_status(v) {
-                    None => return Ok(b.it.display(v)),
+                    None => return Ok(b.inspect(v, EVAL_MAX)),
                     Some(bare_js::eval::PromiseStatus::Fulfilled(x)) => v = x,
                     Some(bare_js::eval::PromiseStatus::Rejected(x)) => return Err(format!("rejected: {}", thrown_value(b, x))),
                     Some(bare_js::eval::PromiseStatus::Pending) => {
@@ -771,6 +771,9 @@ pub fn safe_url(u: &str) -> String {
     }).collect();
     format!("{path}?{}", pairs.join("&"))
 }
+
+/// The most characters of an `eval` value; a longer value is cut, with its full length.
+const EVAL_MAX: usize = 4000;
 
 /// A thrown value as text: `Name: message` for an error object, else its string form.
 fn thrown_value(b: &mut bare::browser::Browser, v: bare_js::value::Value) -> String {

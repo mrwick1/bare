@@ -1323,6 +1323,48 @@ fn eval_waits_for_a_promise_and_runs_top_level_await() {
     assert!(error && r.as_str().unwrap().contains("pending"), "{r}");
 }
 
+fn eval_json_pages(_: &str, _: &str, _: &str, _: Option<&str>) -> (u16, &'static str, Vec<u8>) {
+    (200, "text/html", b"<!doctype html><title>eval</title><div id=out class='a b'>x</div><p>one</p><p>two</p>".to_vec())
+}
+
+#[test]
+fn eval_prints_values_as_compact_json() {
+    let base = common::serve_route(eval_json_pages);
+    let mut s = Server::start();
+    let (r, error) = s.tool("open", json!({"url": format!("{base}/"), "timeout_ms": 1500}));
+    assert!(!error, "{r}");
+    let text = |s: &mut Server, js: &str| {
+        let (r, error) = s.tool("eval", json!({"js": js}));
+        assert!(!error, "{js}: {r}");
+        match r {
+            Value::String(t) => t,
+            v => v.to_string(),
+        }
+    };
+    // Arrays and plain objects are compact JSON; strings, numbers, booleans and null stay as before.
+    assert_eq!(text(&mut s, "[typeof window, 1, \"a\"]"), r#"["object",1,"a"]"#);
+    assert_eq!(text(&mut s, "({a: 1, b: [true, null], c: {d: 'x'}, u: undefined})"), r#"{"a":1,"b":[true,null],"c":{"d":"x"}}"#);
+    assert_eq!(text(&mut s, "'plain text'"), "plain text");
+    assert_eq!(text(&mut s, "undefined"), "undefined");
+    assert_eq!(text(&mut s, "null"), "null");
+    // Functions, DOM nodes, node lists, Map, Set and Date.
+    assert_eq!(text(&mut s, "function hello(a) {}; hello"), "function hello()");
+    assert_eq!(text(&mut s, "document.getElementById('out')"), "<div#out.a.b>");
+    assert_eq!(text(&mut s, "document.querySelectorAll('p')"), r#"["<p>","<p>"]"#);
+    assert_eq!(text(&mut s, "document.getElementsByTagName('p')"), r#"["<p>","<p>"]"#);
+    assert_eq!(text(&mut s, "[...document.querySelectorAll('div,p')].slice(0, 2)"), r#"["<div#out.a.b>","<p>"]"#);
+    assert_eq!(text(&mut s, "new Map([['k', 1], [2, [3]]])"), r#"[["k",1],[2,[3]]]"#);
+    assert_eq!(text(&mut s, "new Set(['a', 'a', 'b'])"), r#"["a","b"]"#);
+    assert_eq!(text(&mut s, "new Date(0)"), "1970-01-01T00:00:00.000Z");
+    assert_eq!(text(&mut s, "({f: function g() {}, when: new Date(0)})"), r#"{"f":"function g()","when":"1970-01-01T00:00:00.000Z"}"#);
+    // A cycle does not hang.
+    assert_eq!(text(&mut s, "var o = {name: 'o'}; o.self = o; o"), r#"{"name":"o","self":"[Circular]"}"#);
+    // A long value is cut, with its full length.
+    let long = text(&mut s, "Array.from({length: 2000}, (_, i) => i)");
+    assert!(long.starts_with("[0,1,2,") && long.ends_with("… (cut: 4000 of 8891 chars)"), "{}", &long[long.len() - 60..]);
+    assert_eq!(long.chars().count(), 4000 + "… (cut: 4000 of 8891 chars)".chars().count());
+}
+
 const LATE: &str = "<!doctype html><body><p id=out>none</p>
 <button onclick=\"setTimeout(function(){document.getElementById('out').textContent='confirm=' + confirm('Sure?')}, 50)\">Later</button>
 <button onclick=\"setTimeout(function(){window.open('/b')}, 50)\">Tab later</button>
