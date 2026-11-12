@@ -1618,3 +1618,10 @@ A click on a GitHub issue title did not navigate. GitHub cancels the click and c
 - `new Window()` throws a `TypeError`.
 - The chain of `window` is `window -> Window.prototype -> WindowProperties -> EventTarget.prototype`, as in the standard.
 - `Window.prototype` has no own methods. The window API stays on `window` itself.
+
+## `<meta>` reflects its attributes (2026-11-12)
+
+- A click on a GitHub issue title showed "Unable to load page". The cause was `atob(undefined)`.
+- After a soft navigation, GitHub reads `meta[name=visitor-payload].content` and decodes it with `atob`. bare had no `HTMLMetaElement.content`.
+- `meta` now reflects `name`, `content`, `httpEquiv` and `media`.
+- `meta` gets `HTMLMetaElement.prototype` from its first wrapper. Pages read `meta.content` without naming the interface, so the lazy switch of `browser_html.rs` does not apply to it.

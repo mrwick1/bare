@@ -81,6 +81,20 @@ fn html_element_constructors_exist_for_the_tags_bare_makes() {
     });
 }
 
+/// `<meta>` reflects `name`, `content`, `httpEquiv` and `media`, also before a page names `HTMLMetaElement`. Cause: GitHub reads
+/// `meta[name=visitor-payload].content` after a soft navigation and passed `undefined` to `atob`, so the issue page did not render.
+#[test]
+fn meta_reflects_its_attributes() {
+    big(|| {
+        let mut b = browser();
+        let r = js(&mut b, "var m = document.createElement('meta'); m.setAttribute('name', 'v'); m.setAttribute('content', 'eyJhIjoxfQ=='); m.setAttribute('http-equiv', 'refresh'); [m.name, m.content, m.httpEquiv, m.media === '', JSON.parse(atob(m.content)).a].join()");
+        assert_eq!(r, "v,eyJhIjoxfQ==,refresh,true,1");
+        let r = js(&mut b, "m.content = 'x'; m.name = 'n'; m.httpEquiv = 'h'; m.media = 'print'; [m.getAttribute('content'), m.getAttribute('name'), m.getAttribute('http-equiv'), m.getAttribute('media')].join()");
+        assert_eq!(r, "x,n,h,print");
+        assert_eq!(js(&mut b, "[m instanceof HTMLMetaElement, m.constructor === HTMLMetaElement, 'content' in document.createElement('div')].join()"), "true,true,false");
+    });
+}
+
 /// Each expected string is what Node 22 prints for the same expression.
 #[test]
 fn url_class_reads_schemes_other_than_http_and_https() {

@@ -2135,3 +2135,27 @@ fn a_hash_change_from_eval_loads_nothing() {
     assert_eq!(s.tool("eval", json!({"js": "location.hash = 'x'; 1"})), (json!(1), false));
     assert_eq!(s.tool("eval", json!({"js": "location.hash + ' ' + document.title + ' ' + window.mark"})).0, json!("#x one 1"));
 }
+
+const META_LIST: &str = "<!doctype html><title>list</title><body><a href=/item>First item</a></body>";
+/// Like GitHub after a soft navigation: read a base64 JSON payload from a `<meta>`, change it, write it back, then render.
+const META_ITEM: &str = "<!doctype html><title>item</title><meta name=visitor-payload content=eyJyZWZlcnJlciI6IiJ9><body><script>
+let m = document.querySelector('meta[name=visitor-payload]');
+let t = JSON.parse(atob(m.content));
+t.referrer = 'list';
+m.content = btoa(JSON.stringify(t));
+document.body.innerHTML = '<h1>Item title</h1><p>' + JSON.parse(atob(m.content)).referrer + '</p>';
+</script></body>";
+
+/// A page that reads `meta.content` renders after a click on its link.
+#[test]
+fn a_page_that_reads_meta_content_renders_after_a_click() {
+    let base = pages(&[("/", META_LIST), ("/item", META_ITEM)]);
+    let mut s = Server::start();
+    let (r, e) = s.tool("open", json!({"url": format!("{base}/")}));
+    assert!(!e, "{r}");
+    let (r, e) = s.tool("act", json!({"op": "click", "loc": "role=link name=\"First item\""}));
+    let r = r.as_str().unwrap().to_string();
+    assert!(!e && r.contains(&format!("navigated: {base}/item")) && !r.contains("atob"), "{r}");
+    assert!(r.contains("heading \"Item title\""), "{r}");
+    assert_eq!(s.tool("eval", json!({"js": "document.querySelector('p').textContent"})).0, json!("list"));
+}
