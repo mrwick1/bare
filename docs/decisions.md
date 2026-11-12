@@ -1240,6 +1240,7 @@ An agent such as `deck` must read a page and act on it in few model calls. Scree
 
 ## Console, network and diagnose tools in bare-mcp (2026-11-12)
 Each session keeps the last 500 console entries and the last 500 network records. The step reports still hand out their entries once. Reads such as `snapshot` and the tools `console`, `network` and `diagnose` also feed the history, so entries that arrive between calls are not lost. `console` and `network` show only what is new since their last call, unless `since_last` is false. `diagnose` gives one line for each finding and ends with a verdict: `site problem`, `bare gap`, `network` or `unclear`. The verdict is a heuristic: text such as `is not a function` counts as a bare gap. The kind of a failed request (script, stylesheet, image, fetch) comes from its URL, because a network record does not keep its caller. A failed `act` step with `not_found`, `hidden` or `page` adds the first uncaught script error as a hint.
+
 ## The snapshot reads the flat tree, cursors and the viewport (2026-11-12)
 - The snapshot, `find` and `read` walk the flat tree. A slotted light child shows once, at its `<slot>`. Before, the walk skipped the shadow tree and showed no shadow content.
 - `cursor` is a CSS property with three values: `auto`, `default` and `pointer`. It is inherited. Other values are dropped.
@@ -1259,6 +1260,7 @@ An agent must fill real forms. `act` and the step language now have `select`, `c
 - `upload` sets the files of an `<input type=file>` from local paths and fires `input` and `change`. The engine keeps only the paths, with the name and the time. It reads the bytes when a script reads `input.files` or a form submits. A file over 100 MiB is refused when set and when read. A hidden input needs a `css=` locator, because the other locators skip hidden elements.
 - Script cannot set files, as in other browsers. `input.files` is an array of `File` objects, not a `FileList`. `new FormData(form)` and a form with `enctype="multipart/form-data"` send the real files. A `POST` with that enctype is no longer `Unsupported`; `text/plain` still is.
 - A file is read into memory as a `Blob`. A big upload costs its size in memory while it is sent. Streaming from disk needs a body type in `bare-net` that is not a byte vector, so it is not built.
+
 ## Downloads go to disk in bare-mcp sessions (2026-11-12)
 
 An agent must fetch files for a user: a CSV export, a PDF invoice, a ZIP. A browser saves these. bare showed them as a failed load.
@@ -1271,9 +1273,11 @@ An agent must fetch files for a user: a CSV export, a PDF invoice, a ZIP. A brow
 - `act` adds `downloaded: PATH (BYTES bytes, MIME)` for each download that ended, and waits for a download that started in the action, up to the step time limit. A failure shows as `download failed: URL: reason`. The tool `downloads` lists the session's downloads.
 - `a.download` now reflects the attribute, and `a.click()` on a link with `download` saves the target. Before, `a.click()` on any link was refused. That refusal stays for links without `download`.
 - `blob:` and `data:` bytes are read in the document that made them, because the Blob store lives there. The save runs in the session.
+
 ## Snapshot cut line and quiet settle (2026-11-12)
 A snapshot over its budget now says what it cut: the line count and the first and last ref of the cut lines, for example `… 412 lines cut (e158–e2096); use … offset=57 …`. Refs of cut lines stay valid, so `find`, `read ref` and `snapshot root=` reach them. `snapshot` takes an `offset` (in outline lines) to page forward through the cut part.
 `settle` before `snapshot`, `find`, `read` and `links` returned only when a 4 ms network or picture poll was over, so a page with a picture on its way cost the 300 ms cap on each call. It now returns when no task ran, no timer is due within 20 ms and no `fetch` is open. A picture on its way is not work for a read.
+
 ## Stable roles and names for `find` and `snapshot` (2026-11-12)
 
 A script can set a role after a reply, as a typeahead widget does. A read taken before the reply showed the old role. A read now waits up to 2 s while a request is pending, and 300 ms otherwise. It stops at once when the page is quiet.
@@ -1281,10 +1285,12 @@ A script can set a role after a reply, as a typeahead widget does. A read taken 
 `find` lists the matches that have a box of a size first. A field with no size stays in the list after them.
 
 A form control with no name takes one from what sits before it, after the standard sources. The order is the text of the table cell before its cell, the text or inline element just before it, then its `name` attribute. The code reads siblings only, so it scans no tree.
+
 ## Act checks the focus and press takes a ref (2026-11-12)
 A page script can move the focus while the driver types. The keys then went to another field, and the receipt said ok. Now `type` checks the focus before and after each key. It fails with `focus_lost` and names the field that has the focus. A text with a line feed is not checked, because Enter can remove the field.
 `press` ignored its ref and sent the key to the focused element. Now `press LOC KEY` gives the element the focus first. It fails with `hidden`, `disabled` or `no_focus` when it cannot. Enter in a form field then submits the form.
 A key that changes nothing now says `no effect`. The driver compares the document, the URL and the revision of the tree before and after the key.
+
 ## `open` waits until the page is ready (2026-11-12)
 
 - The MCP server sets `Session::ready_wait`. Then `open`, `goto` and `reload` end when the document has loaded and no request, script or due task waits, or at `timeout_ms`. A step file keeps the old rule: these steps return at once, and the next step waits.
@@ -1295,6 +1301,7 @@ A key that changes nothing now says `no effect`. The driver compares the documen
 - `open` reports `redirected: URL` when the final address differs from the requested one. It is a tool error when the step fails.
 - Receipts show full URLs. Only the value of a query parameter whose name has `token`, `key`, `code`, `password`, `secret`, `auth`, `session` or `sig` is hidden. The fragment is still dropped.
 - `file://` is not supported: a live `open` of a URL that is not http(s) fails at once with `the URL is not an http(s) URL` (bare#381). A `file` scheme in `bare-url` touches every `match` on `Scheme` in 13 files, and sub-resources would need a loader too.
+
 ## Dialogs, tabs, storage and history for agents (2026-11-12)
 The agent answers dialogs up front. `act` takes `dialog` (accept or dismiss, default accept) and `prompt_text`. The engine answers `alert`, `confirm` and `prompt` at once and never blocks. The receipt lists each one: `dialog: confirm "Delete item?" -> dismissed`.
 The dialog code lives in `crates/bare/src/agent.rs`, as a per-thread policy and event queue. Without a driver the old results stay: `alert` does nothing, `confirm` gives false, `prompt` gives null.
@@ -1303,6 +1310,7 @@ A click on a `target=_blank` link, and `window.open(url)`, open a new session na
 The `storage` tool reads, sets and clears cookies, `localStorage` and `sessionStorage`. Known secrets show as `[secret]`.
 `back` and `forward` are step lines and `act` ops. `close` and `sessions` already handled named sessions.
 `act` no longer reports `navigated` when the page had no document before the action.
+
 ## Small replies for agents (2026-11-12)
 
 Each character of a `bare-mcp` reply costs model tokens. A reply must give what the agent needs and no more.
@@ -1314,13 +1322,16 @@ Each character of a `bare-mcp` reply costs model tokens. A reply must give what 
 - `links` and the `href` in a line cut tracking parameters (`utm_*`, `fbclid`, `gclid` and similar). `links` gives a path for a link on the origin of the page.
 - Each interactive element keeps its line and ref. The set of interactive lines of each test page is the same before and after.
 - Nothing collapses a long list. A list of links is a list of controls, and each control must stay reachable. The `max_chars` cut still applies.
+
 ## Screenshots paint the whole box (2026-11-12)
 A screenshot of an element taller than the window was cut at the window. The engine has the layout of the whole page. So `screenshot` now paints a canvas as tall as the element box, or as the page with `full_page`, with no scroll. A picture is at most 8000 px tall. The reply says when that cut it. An element above the window is painted from the top of the page.
+
 ## RegExp `v` flag (2026-11-12)
 
 The regexp engine accepts the `v` flag (`unicodeSets`). `v` turns on code point mode, as `u` does, and adds set notation to classes. The parser reads nested classes, `--`, `&&` and `\q{a|bc}`. It follows the grammar of ECMA-262: no mixing of operators, no ranges inside an operation, and no negated class that holds strings.
 A class that holds strings compiles to an alternation: the strings longest first, then the class, then the empty string. A class without strings stays one class instruction, so classes without `v` do not slow down. The `unicode` getter is false for `v`, and `flags` prints `v`.
 Properties of strings (`\p{RGI_Emoji}`) are a `SyntaxError`. Case folding closes the final set only: `--` and `&&` do not fold their operands first.
+
 ## Constructable style sheets (2026-11-12)
 
 Lit and other web-component libraries style a shadow root with `new CSSStyleSheet()` and `adoptedStyleSheets`. bare had neither, so such a page lost its styles.
@@ -1337,6 +1348,7 @@ Lit and other web-component libraries style a shadow root with `new CSSStyleShee
 
 ## A document request starts a page mark (2026-11-12)
 Issue #388 showed a 9.6 s first phase for an `open` of a plain file that took milliseconds. No request waited. The `wait` phase counts from the start of the last page when a request has no queue time. A plain file starts no page, so it counted from an earlier page. Now `load_document` marks a page start for each document it loads.
+
 ## Late dialogs, late tabs and script errors in bare-mcp replies (2026-11-12)
 
 A page can open a dialog or a tab from a timer after `act` returns. `act` missed these events.
@@ -1346,6 +1358,7 @@ These tools do not wait for timers. A timer that is not due yet shows in a later
 `open` (with `snapshot`) and `act` add up to 3 `script error: MESSAGE (SOURCE:LINE)` lines. They come from the console history, so no new store exists. Each line has about 200 characters at most.
 The compact receipt shows an uncaught error as a script error line, not as a `console error` line. A page without errors or late events gives the same reply as before.
 The source of a script is `script#N`, because the engine has no script URL in its stack frames.
+
 ## crates.io: focus options, noscript and grid-template areas (2026-11-12)
 
 crates.io calls `focus({ focusVisible })`. bare stopped the page there, so the app never rendered its content.
@@ -1353,6 +1366,7 @@ crates.io calls `focus({ focusVisible })`. bare stopped the page there, so the a
 - `focus()` reads `focusVisible` and ignores it. No `:focus-visible` state exists. An unknown option is ignored, as the standard says.
 - The UA sheet now has `noscript { display: none !important }`, as in Firefox. bare runs scripts, so a page style such as `noscript { display: grid }` must not show the box.
 - `grid-template` now reads the form with area strings: line names, one string per row, an optional row size, and an optional `/ columns`. The crates.io header uses it. Before, bare dropped the declaration and placed the header items wrong.
+
 ## A click waits a short time for a cover (2026-11-12)
 
 An agent clicked a ref under a spinner and got `covered`. A cookie banner over the target must still fail fast.
@@ -1362,6 +1376,7 @@ An agent clicked a ref under a spinner and got `covered`. A cookie banner over t
 - The failure names the cover, not the element under the pointer. Of the ancestors of that element that do not hold the target, it names the outermost with a role and a name. It falls back to the outermost one. It gives `tag#id.class` and `(role "name")`.
 - bare has no CSS transitions. A backdrop that fades with `transition` and removes itself on `transitionend` never goes, so the click fails after 1 s. A fade by script works.
 - Window mode routes each tool through `Remote::call` on the window thread. The dialog and tab policy is per thread and is set there, so it works. The test `the_agent_tools_work_in_a_window` checks the tools in a window. It is ignored because it needs a Wayland display. Run it on a nested compositor, not on a desktop in use.
+
 ## `Intl.ListFormat` and `Intl.DisplayNames` (2026-11-12)
 
 GitHub's issues page calls `new Intl.ListFormat(...)` when it loads. Without it the page showed "Unable to load page." (bare#394). Both constructors now exist.
@@ -1383,6 +1398,7 @@ GitHub's issues page calls `new Intl.ListFormat(...)` when it loads. Without it 
 - An object that is already open is `"[Circular]"`. A getter that throws gives `"[threw]"`. `toJSON` is not called.
 - The text stops at 4000 characters. A marker gives the full length.
 - The walk visits at most 100000 values and 64 levels. Then the marker says "more than".
+
 ## An action that navigates waits for the next page (2026-11-12)
 
 On GitHub, an `act` receipt and the outline after it showed the old page after a click on a link (#396). Turbo fetches the next page, then changes the address and the body. That fetch took longer than the 2 s that a read waits for a reply.
@@ -1395,6 +1411,7 @@ On GitHub, an `act` receipt and the outline after it showed the old page after a
 - When the snapshot after an action fails (no layout yet, as when a style sheet is still on its way), the action still succeeds. The receipt gives `no snapshot: REASON`. Before, the act was an error, and the agent could act twice.
 - `sessions` first collects the tabs that the pages opened and no reply named yet (a `step` call takes no events), and lists them.
 - A route that renders after a timer of more than 20 ms after `pushState`, with no fetch, is not waited for.
+
 ## find and locator misses (2026-11-12)
 
 A sweep of real sites (issue #397) found locator faults that cost an agent turns or 20 s waits.
@@ -1408,6 +1425,7 @@ A sweep of real sites (issue #397) found locator faults that cost an agent turns
 - A `not_found` miss on an idle page no longer says "nothing can change it". The text was about the page, and the fault was in the locator. Other failure kinds keep the idle note.
 - A ref before any snapshot or find of the document says so. Before, it said that the page had navigated.
 - `find` with no match on an idle page already returned in a few ms at 992a26b0. It waits only while requests are pending, up to 2 s, as before.
+
 ## Text changes in act, a short open and max_chars limits (2026-11-12)
 Issue #398 found three replies that cost too many tokens or hid a change.
 - A snapshot keeps a hash of each line of the rendered text, as `read` gives it. One more walk of the DOM does this.
@@ -1420,6 +1438,7 @@ Issue #398 found three replies that cost too many tokens or hid a change.
 - `deck` passes a text reply through, so it needs no change.
 - `read` and `links` count the header, the count line and the cut line in `max_chars`. The snapshot cut line counts in its budget too. The snapshot header is still outside the limit.
 - A `max_chars` that the header fills is a tool error that names a limit that works. Before, `read` gave no text and the same offset again.
+
 ## Foreign fragment contexts and replaced text fields (2026-11-12)
 
 The Wikipedia search box lost typed text (issue #395). On focus, Wikipedia mounts a Vue search widget in the place of its plain input. The Codex icons of that widget set `innerHTML` on an SVG `g`. The fragment parser refused every context outside the HTML namespace. So the mount threw, the container stayed empty, and the focus went to `body`.
@@ -1430,6 +1449,7 @@ The Wikipedia search box lost typed text (issue #395). On focus, Wikipedia mount
 - 62 of the 63 html5lib foreign-context fragment tests pass. The one left is `<frameset>` in a fragment, which the parser refuses on purpose.
 - `type` follows a field that the page replaced. The rule: the old field left the document, and a text field has the focus. Then the keys go to that field. A browser sends keys to the focused element, so a person sees the same.
 - The rule holds at the click and between keys. Wikipedia loads its widget over the network, so its swap comes while the text is typed. A field that only loses the focus, and stays in the document, still fails with `focus_lost` or `no_focus`.
+
 ## Named access on window and document (2026-11-12)
 
 Old and small sites use `id` globals: a handler writes `out.textContent` for `<div id=out>`. bare had no named access, so such handlers threw.
@@ -1442,6 +1462,7 @@ Old and small sites use `id` globals: a handler writes `out.textContent` for `<d
 - The list of names is built by one walk on the first ask after a change. `Document::name_revision` moves only for changes that can touch named elements. A text edit or a bare new element costs no walk.
 - The heap cache passes over an open named object for a hit behind it. Without this, every `document.body` read lost its cache.
 - Cost: a global miss costs about 50 to 80 ns more on a page with 2000 ids. A hit on an own global costs the same.
+
 ## Complex selectors in :not(), :is() and :where() (2026-11-12)
 
 Wikipedia calls `querySelectorAll` with `:not(.extiw, .mw-cite-backlink a, ...)`. bare threw `SyntaxError`, so the link preview script stopped.
@@ -1474,6 +1495,7 @@ GitHub read `offsetTop` of a plain `span`, and the read stopped the issues page 
 - An offset parent with nothing to paint (a `span` with `position: relative`) uses the same first line. Before, it was a gate.
 - A `br` gives 0 and keeps its offset parent. Chrome does the same, because a `br` is not a box there.
 - An inline box with a border over more than one line is still a gate.
+
 ## Storage bounds throw QuotaExceededError, and press follows a replaced field (2026-11-12)
 
 A `press` with a locator on the Wikipedia search failed as `detached`, and the page stopped on the `storage-item` bound (issue #405).
@@ -1486,6 +1508,7 @@ A `press` with a locator on the Wikipedia search failed as `detached`, and the p
 - The counts were right: a write of the same key replaces its size, and the same value again is a no-op.
 - `press` follows a field that the page replaced, with the rule of `type`. The old field left the document, and a text field has the focus. Then the key goes to that field. This holds when the locator matches nothing now, and when the focus of the press makes the page swap the field.
 - The second swap of Wikipedia gives an input with no `id`. So `css="#searchInput"` matches nothing after `type`.
+
 ## Name what holds a page that is not ready (2026-11-12)
 
 `open` said `1 request pending` and gave no way to see which request it was (issue #406).
@@ -1537,6 +1560,7 @@ GitHub read `offsetTop` of an inline box with a border over two lines, and the r
 The filters combine, and the reply keeps its format.
 A filter with no match gives one line.
 An agent gets the URL of a named link in one small call, not with `eval`.
+
 ## WritableStream, TransformStream and pipes as a script shim (2026-11-12)
 
 `@assistant-ui/react` extends `TransformStream` at the top level of a module. bare had no such global, so the module failed to load (issue #389).
@@ -1653,12 +1677,14 @@ A click on a GitHub issue title did not navigate. GitHub cancels the click and c
 
 ## A relative box paints over an earlier absolute sibling (2026-11-12)
 Layout puts the fragment of an absolute box after the other fragments of its containing block, and drops its static position. So the fragment order is not the tree order. The painter and the hit test put an earlier absolute veil over a later relative card (bare issue #414). Now both sort the positioned boxes of a context with `z-index` 0 by the path of child numbers in the tree, as CSS 2.1 Appendix E asks. The sort runs only when one of the boxes is out of flow. Boxes with a non-zero `z-index` still sort by `(z, fragment order)`: an absolute and a relative box with the same non-zero `z-index` can still be in the wrong order.
+
 ## FileReader as a shim (2026-11-12)
 
 - A page that reads a file with `FileReader` stopped with `ReferenceError`. The upload then did nothing.
 - `FileReader` is `shims/filereader.js`. It runs on `Blob.prototype.arrayBuffer` and `TextDecoder`, and it is made at the first read of its name.
 - `abort` on an idle reader clears `result`. The File API requires this, so the shim follows it.
 - Only UTF-8 works in `readAsText`. The host `TextDecoder` stops other labels with `Unsupported`, which a shim cannot catch.
+
 ## execCommand core, ported from Ladybird (2026-11-12)
 
 - `document.execCommand` and the `queryCommand*` methods now exist in `browser_editing.rs`. So do `isContentEditable` and `contentEditable`.
@@ -1675,6 +1701,7 @@ Gmail's main script has a chain of 220 nested calls, `this.ha=_.LG(_.LG(...))`. 
 `HARD_MAX_DEPTH` and the default `max_depth` are now 2048. The measured release stack at 2048 units, for the worst shapes: nested classes 2.3 MiB, functions 1.1 MiB, arrows and templates 1.0 MiB, parens, arrays and objects 0.8 MiB, calls 0.75 MiB. The parse test thread is 4 MiB in release and 24 MiB in debug. The page thread is 8 MiB, and a call keeps at least `STACK_RED` (4 MiB) free, so a parse inside a call fits.
 The evaluator then stopped the script: the setup walk of a 1000-deep call needs more than 768 traversal frames. `MAX_TRAVERSAL_DEPTH` is now 2048. The measured release stack of one call at that cap, for 12 deep shapes (calls, members, parens, arrays, objects, templates, `new`, function and arrow expressions): at most 1.1 MiB, under `STACK_RED`. A shape far over either cap still ends with a clean `Limit` error.
 Four old tests asserted the old values (256, 768); they now use inputs sized for the new caps.
+
 ## execCommand formatting commands (2026-11-12)
 
 `document.execCommand` now runs `bold`, `italic`, `underline`, `insertUnorderedList`, `insertOrderedList`, `createLink`, `unlink`, `insertHTML` and `removeFormat`. This is part b of issue 415.
@@ -1682,6 +1709,7 @@ The code is a simplified port of Ladybird `Libraries/LibWeb/Editing/Commands.cpp
 `queryCommandState` is true for bold, italic, underline and the two lists. It looks at the ancestors of the start of the active range.
 Each command that changes the tree fires one `input` event with the `inputType` of Chrome. `insertHTML` uses the fragment parser of `createContextualFragment`.
 Gaps. A caret (collapsed selection) changes nothing, so a later `insertText` ignores the pending format. Unwrapping removes the whole element, not only the selected part. Lists handle the direct children of the host only. `queryCommandValue` stays empty. Other formatting commands are not built.
+
 ## Key input in contenteditable (2026-11-12)
 A focused element inside an editing host now takes key input. Text, Enter, Backspace, Delete and Ctrl+A call the editing core of `browser_editing.rs`. `beforeinput` fires at the host first and can cancel the edit. The edit fires `input` once. A press in a host puts the caret at its end when the selection is not in it. `act type` accepts a host: it selects the old content, types over it, and deletes it for an empty text. A line feed is Enter. Arrow keys, Home and End do not move the caret in a host yet.
 
