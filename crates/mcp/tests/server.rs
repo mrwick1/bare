@@ -863,7 +863,6 @@ const TWO_SEARCH: &str = "<!doctype html><body>
 <div style=\"display:none\"><input id=h aria-label=\"Hidden search\"></div>
 <script>
 document.getElementById('a').addEventListener('keydown', () => document.getElementById('b').focus());
-
 </script></body>";
 
 #[test]
@@ -2159,14 +2158,11 @@ const META_LIST: &str = "<!doctype html><title>list</title><body><a href=/item>F
 /// Like GitHub after a soft navigation: read a base64 JSON payload from a `<meta>`, change it, write it back, then render.
 const META_ITEM: &str = "<!doctype html><title>item</title><meta name=visitor-payload content=eyJyZWZlcnJlciI6IiJ9><body><script>
 let m = document.querySelector('meta[name=visitor-payload]');
-
 let t = JSON.parse(atob(m.content));
-
 t.referrer = 'list';
-
 m.content = btoa(JSON.stringify(t));
-
 document.body.innerHTML = '<h1>Item title</h1><p>' + JSON.parse(atob(m.content)).referrer + '</p>';
+</script></body>";
 
 /// A page that reads `meta.content` renders after a click on its link.
 #[test]
