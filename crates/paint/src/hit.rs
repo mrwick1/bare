@@ -100,7 +100,16 @@ fn hit(doc: &Document, styles: &Styles, layout: &Layout, scrolled: Option<(&Area
             break;
         }
     }
-    let h = Hit { tree, doc, frags, scrolled, window, stacks, flex, ext };
+    let mut h = Hit { tree, doc, frags, scrolled, window, stacks, flex, ext, fixed_root: Vec::new(), taken: Default::default() };
+    let mut j = 1;
+    while j < frags[0].end as usize {
+        let g = frags[j];
+        let style = h.tree.style(g.node);
+        if g.kind == FragmentKind::Box && h.tree.kind(g.node) == Kind::OutOfFlow && h.tree.position(g.node) == Keyword::Fixed && h.stack(&g, style, Kind::OutOfFlow, Value::Keyword(Keyword::Fixed)).is_none() {
+            h.fixed_root.push(j as u32);
+        }
+        j = g.end as usize;
+    }
     // From the bottom to the top, as painted.
     let mut painted = Vec::with_capacity(8);
     h.context(0, 0, page, true, &mut painted, &mut Vec::new());
@@ -130,6 +139,9 @@ struct Hit<'a> {
     flex: bool,
     /// The `extents` of the fragments, if the caller has them: a box whose bounds do not hold the point is skipped with what it holds.
     ext: Option<&'a [[f32; 4]]>,
+    /// The fixed boxes (with `z-index: auto`) under the root, and the ones that a box that clips has taken. See `display::fixed_under`.
+    fixed_root: Vec<u32>,
+    taken: std::cell::RefCell<Vec<u32>>,
 }
 
 /// A box of a stacking context with a `z-index` other than 0, on its way up to the context: where it is, and its point.
@@ -199,7 +211,7 @@ impl Hit<'_> {
             Kind::Inline => Layer::Inline,
             Kind::Atomic => Layer::Atomic,
             _ if self.item(f.node, kind) => Layer::Atomic,
-            _ if clips(style) => Layer::Clipped,
+            _ if clips(&self.tree, f.node) => Layer::Clipped,
             _ => Layer::Block,
         }
     }
@@ -235,7 +247,7 @@ impl Hit<'_> {
         if live && self.inside(p, f.rect) && self.hittable(style) {
             out.push(f.node);
         }
-        if i > 0 && clips(style) {
+        if i > 0 && clips(&self.tree, f.node) {
             // The inside of a box that clips is reached only through its padding box.
             if live && !self.inside(p, padding_box(&f, style)) {
                 live = false;
@@ -247,7 +259,7 @@ impl Hit<'_> {
                     return;
                 }
             }
-            if !live && !self.fixed_inside(i, f.end as usize) {
+            if !live && adopted.is_empty() && !self.fixed_inside(i, f.end as usize) {
                 return;
             }
             // Inside a scroll container the point moves with its offset.
@@ -313,15 +325,20 @@ impl Hit<'_> {
                             if live || self.fixed_inside(j, g.end as usize) {
                                 if z != 0 {
                                     hoist.push(Waiting { z, frag: j, at, live });
-                                } else {
+                                } else if !self.taken.borrow().contains(&(j as u32)) {
                                     positioned.push((j, at, live));
                                 }
                             }
                             j = g.end as usize;
                         }
                         Layer::Clipped => {
-                            if live || self.fixed_inside(j, g.end as usize) {
-                                self.context(j, depth + 1, p, live, out, hoist);
+                            // The fixed boxes that it holds in the tree (see `display::fixed_under`), with their point.
+                            let mine: Vec<(usize, Point, bool)> = {
+                                let mut taken = self.taken.borrow_mut();
+                                crate::display::fixed_under(self.doc, self.frags, &self.fixed_root, &mut taken, g.node).into_iter().map(|j| (j as usize, self.window, true)).collect()
+                            };
+                            if live || !mine.is_empty() || self.fixed_inside(j, g.end as usize) {
+                                self.context_with(j, depth + 1, p, live, out, hoist, mine);
                             }
                             j = g.end as usize;
                         }
@@ -374,9 +391,10 @@ impl Hit<'_> {
     }
 }
 
-fn clips(style: &ComputedStyle) -> bool {
-    let hidden = |p| !matches!(style.get(p), Value::Keyword(Keyword::Visible));
-    hidden(Property::OverflowX) || hidden(Property::OverflowY)
+/// See `display::clips`.
+fn clips(tree: &Tree, node: NodeId) -> bool {
+    let (x, y) = tree.overflow(node);
+    x != Keyword::Visible || y != Keyword::Visible
 }
 
 fn padding_box(f: &Fragment, style: &ComputedStyle) -> Rect {
@@ -739,8 +757,37 @@ mod tests {
     }
 
     #[test]
+    fn a_later_relative_box_is_over_an_earlier_fixed_box_with_overflow_hidden() {
+        let inner = "<div style='position:relative'><div><div id=f style='position:fixed;top:0;left:0;width:100%;height:100%'></div></div><div style='position:relative'><button id=b style='margin:50px'>x</button></div></div>";
+        for css in ["body{overflow:hidden}", "html,body{overflow:hidden}", "html{overflow:hidden}"] {
+            let p = page(&format!("<style>body{{margin:0}} {css}</style>{inner}"));
+            assert_eq!(p.at(60.0, 60.0), "b", "{css}");
+            assert_eq!(p.at_scrolled(&Scroll::default(), 60.0, 60.0), "b", "{css}");
+        }
+        let p = page("<style>body{margin:0}</style><div style='position:relative'><div style='overflow:hidden'><div id=f style='position:fixed;top:0;left:0;width:100%;height:100%'></div></div><div style='position:relative'><button id=b style='margin:50px'>x</button></div></div>");
+        assert_eq!(p.at(60.0, 60.0), "b", "overflow element between");
+        assert_eq!(p.at_scrolled(&Scroll::default(), 60.0, 60.0), "b", "overflow element between");
+    }
+
+    #[test]
     fn a_later_relative_box_paints_over_an_earlier_fixed_box() {
         let p = page("<style>body{margin:0}</style><div style='position:relative'><div><div style='position:fixed;top:0;left:0;width:100px;height:100px;background:#010000'></div></div><div style='position:relative;width:50px;height:50px;background:#020000'></div></div>");
+        let canvas = crate::capture(&p.doc, &p.styles, &p.layout, W, H);
+        assert_eq!(canvas.pixel(10, 10) & 0x00ff_ffff, 0x020000, "the later relative box is on top");
+        assert_eq!(canvas.pixel(70, 70) & 0x00ff_ffff, 0x010000, "the fixed box shows where it is not covered");
+    }
+
+    #[test]
+    fn a_later_relative_box_paints_over_an_earlier_fixed_box_with_overflow_hidden() {
+        let p = page("<style>body{margin:0;overflow:hidden}</style><div style='position:relative'><div><div style='position:fixed;top:0;left:0;width:100px;height:100px;background:#010000'></div></div><div style='position:relative;width:50px;height:50px;background:#020000'></div></div>");
+        let canvas = crate::capture(&p.doc, &p.styles, &p.layout, W, H);
+        assert_eq!(canvas.pixel(10, 10) & 0x00ff_ffff, 0x020000, "the later relative box is on top");
+        assert_eq!(canvas.pixel(70, 70) & 0x00ff_ffff, 0x010000, "the fixed box shows where it is not covered");
+    }
+
+    #[test]
+    fn a_later_relative_box_paints_over_an_earlier_fixed_box_in_a_body_that_clips() {
+        let p = page("<style>html,body{margin:0;overflow:hidden} body{height:200px}</style><div style='position:relative'><div><div style='position:fixed;top:0;left:0;width:100px;height:100px;background:#010000'></div></div><div style='position:relative;width:50px;height:50px;background:#020000'></div></div>");
         let canvas = crate::capture(&p.doc, &p.styles, &p.layout, W, H);
         assert_eq!(canvas.pixel(10, 10) & 0x00ff_ffff, 0x020000, "the later relative box is on top");
         assert_eq!(canvas.pixel(70, 70) & 0x00ff_ffff, 0x010000, "the fixed box shows where it is not covered");
