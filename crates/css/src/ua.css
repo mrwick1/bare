@@ -6,7 +6,9 @@ html, body, div, p, h1, h2, h3, h4, h5, h6, ul, ol, dl, dt, dd, blockquote, pre,
 address, article, aside, section, nav, header, footer, main, figure, figcaption, details, summary,
 center, menu, dir, listing, xmp, hgroup, search { display: block }
 
-head, link, meta, script, style, noscript, title, base, template, area, datalist, param, source, track, [hidden] { display: none }
+head, link, meta, script, style, title, base, template, area, datalist, param, source, track, [hidden] { display: none }
+/* Scripts run, so a page style must not show `noscript` (as in Firefox). */
+noscript { display: none !important }
 
 li { display: list-item }
 table { display: table; box-sizing: border-box; border-spacing: 2px; border-color: gray }

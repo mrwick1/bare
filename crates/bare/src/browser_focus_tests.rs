@@ -117,7 +117,7 @@ fn focus_options_are_handled_deliberately() {
         assert_eq!(js(&mut b, "$('b').focus({preventScroll: false}); active()"), "b");
         assert_eq!(js(&mut b, "$('a').focus(undefined); $('b').focus(null); $('a').focus({}); active()"), "a");
         assert_eq!(js(&mut b, "$('b').focus(5)"), "throw:TypeError:Failed to execute 'focus' on 'HTMLElement': parameter 1 is not of type 'FocusOptions'.");
-        assert_eq!(js(&mut b, "$('b').focus({focusVisible: true})"), "unsupported:focus option focusVisible (no :focus-visible state)");
+        assert_eq!(js(&mut b, "$('b').focus({focusVisible: true}); var x = active(); $('a').focus({focusVisible: false, other: 1}); x + ',' + active()"), "b,a");
         assert_eq!(js(&mut b, "active()"), "a");
         assert_eq!(js(&mut b, "HTMLElement.prototype.focus.call({})"), "throw:TypeError:Illegal invocation");
         assert_eq!(js(&mut b, "document.activeElement = 3; active()"), "a");

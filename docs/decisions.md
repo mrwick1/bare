@@ -1320,3 +1320,34 @@ Lit and other web-component libraries style a shadow root with `new CSSStyleShee
 - The `adoptedStyleSheets` getter returns a copy. `push` on it has no effect. A page assigns a new array, as Lit does.
 - A sheet adopted by many shadow roots adds its rules once per root. A page with many instances pays for each. Sharing the parsed rules is a later step.
 - `snapshot` and `read` now enter a shadow root. They skipped it before, so a page built from web components showed no elements.
+
+## eval awaits promises and shows thrown errors (2026-11-12)
+`eval` ticks the page until a returned Promise settles, up to the step time limit. It gives the fulfilled value, or `rejected: Name: message`. Code with `await` runs as an async function. It first runs as `return (code)`. When that does not parse, it runs as a function body, and the code must `return` its value. A thrown value shows as `Name: message` for an error, else as its string form. Step `expect js` failures use the same text.
+
+## A document request starts a page mark (2026-11-12)
+Issue #388 showed a 9.6 s first phase for an `open` of a plain file that took milliseconds. No request waited. The `wait` phase counts from the start of the last page when a request has no queue time. A plain file starts no page, so it counted from an earlier page. Now `load_document` marks a page start for each document it loads.
+## Late dialogs, late tabs and script errors in bare-mcp replies (2026-11-12)
+
+A page can open a dialog or a tab from a timer after `act` returns. `act` missed these events.
+After `open` and after each `act`, bare-mcp keeps a dismiss policy on the page. A late dialog gets dismiss, and the page records it.
+`snapshot`, `act`, `find`, `read`, `links` and `screenshot` report the queued dialogs and tabs once, as `dialog: ...` and `opened tab: ...` lines. A late tab becomes a session, as in `act`.
+These tools do not wait for timers. A timer that is not due yet shows in a later reply.
+`open` (with `snapshot`) and `act` add up to 3 `script error: MESSAGE (SOURCE:LINE)` lines. They come from the console history, so no new store exists. Each line has about 200 characters at most.
+The compact receipt shows an uncaught error as a script error line, not as a `console error` line. A page without errors or late events gives the same reply as before.
+The source of a script is `script#N`, because the engine has no script URL in its stack frames.
+## crates.io: focus options, noscript and grid-template areas (2026-11-12)
+
+crates.io calls `focus({ focusVisible })`. bare stopped the page there, so the app never rendered its content.
+
+- `focus()` reads `focusVisible` and ignores it. No `:focus-visible` state exists. An unknown option is ignored, as the standard says.
+- The UA sheet now has `noscript { display: none !important }`, as in Firefox. bare runs scripts, so a page style such as `noscript { display: grid }` must not show the box.
+- `grid-template` now reads the form with area strings: line names, one string per row, an optional row size, and an optional `/ columns`. The crates.io header uses it. Before, bare dropped the declaration and placed the header items wrong.
+## A click waits a short time for a cover (2026-11-12)
+
+An agent clicked a ref under a spinner and got `covered`. A cookie banner over the target must still fail fast.
+
+- An action that fails as `covered` tries again for at most 1 s (`COVER_WAIT`), on each tick. Then it fails, also when the step time limit is longer.
+- A page with no queued task still fails at once: nothing can remove the cover.
+- The failure names the cover, not the element under the pointer. Of the ancestors of that element that do not hold the target, it names the outermost with a role and a name. It falls back to the outermost one. It gives `tag#id.class` and `(role "name")`.
+- bare has no CSS transitions. A backdrop that fades with `transition` and removes itself on `transitionend` never goes, so the click fails after 1 s. A fade by script works.
+- Window mode routes each tool through `Remote::call` on the window thread. The dialog and tab policy is per thread and is set there, so it works. The test `the_agent_tools_work_in_a_window` checks the tools in a window. It is ignored because it needs a Wayland display. Run it on a nested compositor, not on a desktop in use.

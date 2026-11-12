@@ -344,6 +344,8 @@ fn load_document(client: &mut Client, url: &str, from: Option<&str>, body: Optio
         None => (url, None),
     };
     let mut cur = Url::parse(bare).map_err(|_| "the URL is not an http(s) URL".to_string())?;
+    // A new document starts a new page: its request counts its wait from here, not from the start of an earlier page (#388).
+    bare_net::trace::page_start();
     let mut fragment = fragment;
     let mut body = body;
     // Cookies: a navigation that a page of another site started sends `Lax` cookies on a GET, and a chain that leaves that site stays cross-site.

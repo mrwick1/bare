@@ -1292,3 +1292,231 @@ fn a_snapshot_leaves_out_what_an_adopted_sheet_hides() {
     let (r, error) = s.tool("eval", json!({"js": "var r = document.querySelector('x-card').shadowRoot; getComputedStyle(r.getElementById('seen')).color + ' ' + getComputedStyle(r.getElementById('gone')).display"}));
     assert!(!error && r.to_string().contains("rgb(0, 0, 255) none"), "{r}");
 }
+
+fn eval_pages(_: &str, target: &str, _: &str, _: Option<&str>) -> (u16, &'static str, Vec<u8>) {
+    match target {
+        "/report.csv" => (200, "text/csv", b"a,b\n1,2\n".to_vec()),
+        _ => (200, "text/html", b"<!doctype html><title>eval</title><p>page</p>".to_vec()),
+    }
+}
+
+#[test]
+fn eval_waits_for_a_promise_and_runs_top_level_await() {
+    let base = common::serve_route(eval_pages);
+    let mut s = Server::start();
+    let (r, error) = s.tool("open", json!({"url": format!("{base}/"), "timeout_ms": 1500}));
+    assert!(!error, "{r}");
+    // A promise: eval waits for it and gives the fulfilled value.
+    assert_eq!(s.tool("eval", json!({"js": "fetch('/report.csv').then(r => r.text())"})), (json!("a,b\n1,2\n"), false));
+    // Top-level await, as an expression and as statements with a return.
+    assert_eq!(s.tool("eval", json!({"js": "await (await fetch('/report.csv')).text()"})), (json!("a,b\n1,2\n"), false));
+    assert_eq!(s.tool("eval", json!({"js": "const t = await (await fetch('/report.csv')).text(); return t.length"})), (json!(8), false));
+    // A rejected promise and a thrown error show the name and the message.
+    let (r, error) = s.tool("eval", json!({"js": "Promise.reject(new TypeError('nope'))"}));
+    assert!(error && r.as_str().unwrap().contains("rejected: TypeError: nope"), "{r}");
+    let (r, error) = s.tool("eval", json!({"js": "throw new RangeError('bad')"}));
+    assert!(error && r.as_str().unwrap().contains("RangeError: bad") && !r.as_str().unwrap().contains("ObjId"), "{r}");
+    let (r, error) = s.tool("eval", json!({"js": "throw 'plain'"}));
+    assert!(error && r.as_str().unwrap().contains("plain") && !r.as_str().unwrap().contains("ObjId"), "{r}");
+    // A promise that never settles ends at the time limit.
+    let (r, error) = s.tool("eval", json!({"js": "new Promise(() => {})"}));
+    assert!(error && r.as_str().unwrap().contains("pending"), "{r}");
+}
+
+const LATE: &str = "<!doctype html><body><p id=out>none</p>
+<button onclick=\"setTimeout(function(){document.getElementById('out').textContent='confirm=' + confirm('Sure?')}, 50)\">Later</button>
+<button onclick=\"setTimeout(function(){window.open('/b')}, 50)\">Tab later</button>
+<button onclick=\"throw new Error('boom')\">Throw</button>
+<button onclick=\"Promise.reject(new Error('nope'))\">Reject</button>
+<button onclick=\"document.getElementById('out').textContent='quiet'\">Quiet</button></body>";
+
+/// Lets the 50 ms timers of `LATE` fire while no call runs.
+fn idle() {
+    std::thread::sleep(std::time::Duration::from_millis(200));
+}
+
+/// A dialog that a timer opens after `act` returned shows in the next reply, once, with the answer it got (dismiss).
+#[test]
+fn a_late_dialog_shows_in_the_next_reply() {
+    let base = pages(&[("/", LATE)]);
+    let mut s = Server::start();
+    s.tool("open", json!({"url": format!("{base}/")}));
+    let (r, e) = s.tool("act", json!({"op": "click", "loc": "role=button name=\"Later\"", "snapshot": false}));
+    assert!(!e && !r.as_str().unwrap().contains("dialog:"), "the timer has not fired yet: {r}");
+    idle();
+    let (r, _) = s.tool("snapshot", json!({}));
+    assert!(r.as_str().unwrap().contains("dialog: confirm \"Sure?\" -> dismissed"), "{r}");
+    let (r, _) = s.tool("read", json!({}));
+    assert!(r.as_str().unwrap().contains("confirm=false") && !r.as_str().unwrap().contains("dialog:"), "told once: {r}");
+}
+
+/// A tab that a timer opens after `act` returned becomes a session, named in the next reply.
+#[test]
+fn a_late_tab_shows_in_the_next_reply() {
+    let base = pages(&[("/", LATE), ("/b", "<!doctype html><body><p>second page</p></body>")]);
+    let mut s = Server::start();
+    s.tool("open", json!({"url": format!("{base}/")}));
+    let (r, _) = s.tool("act", json!({"op": "click", "loc": "role=button name=\"Tab later\"", "snapshot": false}));
+    assert!(!r.as_str().unwrap().contains("tab"), "{r}");
+    idle();
+    let (r, _) = s.tool("find", json!({"role": "button", "name": "Quiet"}));
+    assert!(r.as_str().unwrap().contains(&format!("opened tab: main~2 {base}/b")), "{r}");
+    let (r, _) = s.tool("read", json!({"session": "main~2"}));
+    assert!(r.as_str().unwrap().contains("second page"), "{r}");
+}
+
+/// An uncaught error or rejection in an action shows as a short script error line; a quiet action gives no extra line.
+#[test]
+fn script_errors_show_in_the_act_and_open_replies() {
+    let base = pages(&[("/", LATE), ("/bad", "<!doctype html><body><p>bad</p><script>null.f()</script></body>")]);
+    let mut s = Server::start();
+    s.tool("open", json!({"url": format!("{base}/")}));
+    let (r, _) = s.tool("act", json!({"op": "click", "loc": "role=button name=\"Throw\""}));
+    let r = r.as_str().unwrap();
+    assert!(r.lines().any(|l| l.starts_with("script error: ") && l.contains("boom") && l.len() <= 230), "{r}");
+    let (r, _) = s.tool("act", json!({"op": "click", "loc": "role=button name=\"Reject\""}));
+    let r = r.as_str().unwrap();
+    assert!(r.lines().any(|l| l.starts_with("script error: ") && l.contains("nope")), "{r}");
+    assert_eq!(r.matches("nope").count(), 1, "one line for one error: {r}");
+    let (r, _) = s.tool("act", json!({"op": "click", "loc": "role=button name=\"Quiet\""}));
+    let r = r.as_str().unwrap();
+    assert!(r.starts_with("ok (") && !r.contains("script error") && !r.contains("dialog") && !r.contains("tab"), "{r}");
+    let (r, _) = s.tool("open", json!({"url": format!("{base}/bad"), "snapshot": true}));
+    assert!(r.as_str().unwrap().lines().any(|l| l.starts_with("script error: ")), "{r}");
+}
+
+/// A styled `noscript` (crates.io sets `display: grid`) stays out of the snapshot and of `read`: scripts run.
+#[test]
+fn a_styled_noscript_is_not_in_the_snapshot_or_the_read() {
+    let html = "<!doctype html><style>noscript{display:grid}</style><body><noscript>Enable JavaScript please</noscript><h1>Crate</h1><button>Copy</button>";
+    let mut s = Server::start();
+    let (snap, error) = s.tool("open", json!({"url": one_page(html.to_string()), "snapshot": true, "timeout_ms": 30000}));
+    let snap = snap.as_str().unwrap().to_string();
+    assert!(!error && snap.contains("Copy") && !snap.contains("Enable JavaScript"), "{snap}");
+    let (r, error) = s.tool("read", json!({}));
+    let r = r.to_string();
+    assert!(!error && r.contains("Crate") && !r.contains("Enable JavaScript"), "{r}");
+}
+
+/// `focus({ focusVisible })` and an unknown option do not stop the page: the app goes on and renders after it.
+#[test]
+fn focus_with_focus_visible_does_not_stop_the_page() {
+    let html = "<!doctype html><body><input id=i><script>\
+        var i = document.getElementById('i'); i.focus({focusVisible: true}); i.focus({focusVisible: false, preventScroll: true, other: 1});\
+        var b = document.createElement('button'); b.textContent = 'After focus'; document.body.appendChild(b);</script>";
+    let snap = snap_of(html, json!({}));
+    assert!(snap.contains("After focus") && !snap.contains("stopped"), "{snap}");
+}
+
+/// A button under a full-page cover. `script` decides when the cover goes.
+fn covered_page(script: &str) -> String {
+    one_page(format!(
+        "<!doctype html><title>Cover</title><body>\
+         <button id=go onclick=\"this.textContent='Clicked'\">Go</button>\
+         <div id=cover class=\"cookie banner\" role=dialog aria-label=\"Cookie consent\" style=\"position:fixed;inset:0;background:rgba(0,0,0,.4)\"><p>We use cookies</p><button>Accept all</button></div>\
+         <script>{script}</script></body>"
+    ))
+}
+
+#[test]
+fn a_click_waits_for_a_spinner_that_goes_away() {
+    // A timer removes the spinner; a script fades a backdrop out frame by frame and then removes it. (bare has no CSS transitions, so a
+    // fade by `transition` and `transitionend` never ends.)
+    let fade = "var c = document.getElementById('cover'), t0 = performance.now(); \
+                requestAnimationFrame(function f(t) { var o = 1 - (t - t0) / 300; if (o > 0) { c.style.opacity = o; requestAnimationFrame(f) } else c.remove() })";
+    for script in ["setTimeout(() => document.getElementById('cover').remove(), 300)", fade] {
+        let mut s = Server::start();
+        let (snap, _) = s.tool("open", json!({"url": covered_page(script), "snapshot": true, "timeout_ms": 20000}));
+        let go = ref_of(snap.as_str().unwrap(), "\"Go\"");
+        let (r, error) = s.tool("act", json!({"op": "click", "ref": go}));
+        let r = r.as_str().unwrap().to_string();
+        assert!(!error && r.contains("Clicked"), "{script}: {r}");
+    }
+}
+
+/// A cover that stays fails within the cover wait (not the step time limit), also on a page whose timers never stop, and names the cover
+/// (not the text under the pointer) by its role and name and by its tag, id and classes.
+#[test]
+fn a_click_under_a_cookie_banner_fails_fast_and_names_the_banner() {
+    for script in ["", "setInterval(() => {}, 50)"] {
+        let mut s = Server::start();
+        let (snap, _) = s.tool("open", json!({"url": covered_page(script), "snapshot": true, "timeout_ms": 20000}));
+        let go = ref_of(snap.as_str().unwrap(), "\"Go\"");
+        let t = std::time::Instant::now();
+        let (r, error) = s.tool("act", json!({"op": "click", "ref": go}));
+        let ms = t.elapsed().as_millis();
+        let r = r.as_str().unwrap().to_string();
+        assert!(error && r.contains("FAILED covered"), "{r}");
+        assert!(r.contains("div#cover.cookie.banner") && r.contains("dialog \"Cookie consent\""), "{r}");
+        assert!(ms < 1500, "{script:?}: {ms} ms: {r}");
+    }
+}
+
+const WINDOW_PAGE: &str = "<!doctype html><title>Window</title><body><h2 id=out>none</h2>
+<button onclick=\"document.getElementById('out').textContent='changed'\">Change</button>
+<button onclick=\"document.getElementById('out').textContent='confirm=' + confirm('Delete item?')\">Confirm</button>
+<a href=/b target=_blank>Blank link</a></body>";
+
+/// The agent tools on a page in a real window (`window: true`): the page runs on the window thread, so each tool goes through
+/// `Remote::call`. Run it on a display of its own (a nested compositor), not on a desktop in use.
+#[test]
+#[ignore = "needs a Wayland display: it opens real windows"]
+fn the_agent_tools_work_in_a_window() {
+    agent_tools(true);
+}
+
+/// The checks of `the_agent_tools_work_in_a_window`, headless.
+#[test]
+fn the_agent_tools_work_headless() {
+    agent_tools(false);
+}
+
+fn agent_tools(window: bool) {
+    let base = pages(&[("/", WINDOW_PAGE), ("/b", "<!doctype html><body><p>second page</p></body>")]);
+    let mut s = Server::start();
+    let (snap, e) = s.tool("open", json!({"url": format!("{base}/"), "window": window, "snapshot": true, "timeout_ms": 20000}));
+    let snap = snap.as_str().unwrap().to_string();
+    assert!(!e && snap.contains("\"Change\""), "{snap}");
+    // act gives the diff: only the changed line, marked *.
+    let (r, e) = s.tool("act", json!({"op": "click", "ref": ref_of(&snap, "\"Change\"")}));
+    let r = r.as_str().unwrap().to_string();
+    assert!(!e && r.lines().any(|l| l.contains('*') && l.contains("changed")) && !r.contains("\"Confirm\""), "{r}");
+    let (r, e) = s.tool("find", json!({"text": "Confirm"}));
+    assert!(!e && r.as_str().unwrap().contains("Confirm"), "{r}");
+    let (r, e) = s.tool("read", json!({}));
+    assert!(!e && r.as_str().unwrap().contains("changed"), "{r}");
+    let (r, e) = s.tool("screenshot", json!({}));
+    let shot = r.as_str().unwrap();
+    assert!(!e && shot.contains(".png ("), "{shot}");
+    let path = shot.split(" (").next().unwrap();
+    assert!(std::fs::metadata(path).unwrap().len() > 100, "{path}");
+    // Dialogs: the policy is per thread, so it must be set on the window thread.
+    let (r, e) = s.tool("act", json!({"op": "click", "ref": ref_of(&snap, "\"Confirm\""), "dialog": "dismiss"}));
+    let r = r.as_str().unwrap().to_string();
+    assert!(!e && r.contains("dialog: confirm \"Delete item?\" -> dismissed") && r.contains("confirm=false"), "{r}");
+    // A tab is a new session in a window of its own.
+    let (r, e) = s.tool("act", json!({"op": "click", "ref": ref_of(&snap, "Blank link"), "snapshot": false}));
+    assert!(!e && r.as_str().unwrap().contains(&format!("opened tab: main~2 {base}/b")), "{r}");
+    let (r, e) = s.tool("act", json!({"op": "wait", "loc": "text=\"second page\"", "session": "main~2", "snapshot": false}));
+    assert!(!e, "{r}");
+    let (r, e) = s.tool("close", json!({"session": "main~2"}));
+    assert!(!e, "{r}");
+    // Downloads.
+    let dir = std::env::temp_dir().join(format!("bare-mcp-test-window-downloads-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (snap, e) = s.tool("open", json!({"url": format!("{}/downloads", common::serve()), "session": "dl", "window": window, "snapshot": true, "downloads_dir": dir.to_str().unwrap(), "timeout_ms": 20000}));
+    let snap = snap.as_str().unwrap().to_string();
+    assert!(!e, "{snap}");
+    let (r, e) = s.tool("act", json!({"op": "click", "ref": ref_of(&snap, "\"Report\""), "session": "dl", "snapshot": false}));
+    assert!(!e && r.as_str().unwrap().contains("report.csv ("), "{r}");
+    assert_eq!(std::fs::read(dir.join("report.csv")).unwrap(), common::PAYLOAD_CSV);
+    // A spinner that a timer removes, and a banner that stays.
+    let (snap, _) = s.tool("open", json!({"url": covered_page("setTimeout(() => document.getElementById('cover').remove(), 300)"), "session": "cover", "window": window, "snapshot": true, "timeout_ms": 20000}));
+    let (r, e) = s.tool("act", json!({"op": "click", "ref": ref_of(snap.as_str().unwrap(), "\"Go\""), "session": "cover"}));
+    assert!(!e && r.as_str().unwrap().contains("Clicked"), "{r}");
+    let (snap, _) = s.tool("open", json!({"url": covered_page("setInterval(() => {}, 50)"), "session": "cover", "window": window, "snapshot": true, "timeout_ms": 20000}));
+    let t = std::time::Instant::now();
+    let (r, e) = s.tool("act", json!({"op": "click", "ref": ref_of(snap.as_str().unwrap(), "\"Go\""), "session": "cover"}));
+    let r = r.as_str().unwrap().to_string();
+    assert!(e && r.contains("dialog \"Cookie consent\"") && t.elapsed().as_millis() < 1500, "{} ms: {r}", t.elapsed().as_millis());
+}
