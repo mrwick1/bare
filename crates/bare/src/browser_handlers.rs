@@ -574,6 +574,11 @@ pub(crate) fn lazy(d: &Dom, it: &mut Interp<'_>, owner: ObjId, all: bool) -> R<(
             _ => Ok(()),
         };
     };
+    lazy_key(d, it, owner, key)
+}
+
+/// `lazy` for the name `key` that a chain through `owner` missed.
+pub(crate) fn lazy_key(d: &Dom, it: &mut Interp<'_>, owner: ObjId, key: String) -> R<()> {
     crate::browser_basics::define(d, it, &key)?;
     if crate::browser::define_window(d,it,&key)? || crate::browser_cssom::define(d,it,&key)? { return Ok(()); }
     if crate::browser_svg::define(d,it,&key)? || crate::browser_shims::define(d,it,&key)? { return Ok(()); }

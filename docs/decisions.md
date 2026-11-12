@@ -1320,3 +1320,16 @@ Lit and other web-component libraries style a shadow root with `new CSSStyleShee
 - The `adoptedStyleSheets` getter returns a copy. `push` on it has no effect. A page assigns a new array, as Lit does.
 - A sheet adopted by many shadow roots adds its rules once per root. A page with many instances pays for each. Sharing the parsed rules is a later step.
 - `snapshot` and `read` now enter a shadow root. They skipped it before, so a page built from web components showed no elements.
+
+## Named access on window and document (2026-11-12)
+
+Old and small sites use `id` globals: a handler writes `out.textContent` for `<div id=out>`. bare had no named access, so such handlers threw.
+
+- The frames code already put a host named object behind `window` and behind `document`. It is now made for every page, not only for pages with an iframe.
+- `window` names are the iframes first, then the first element in tree order with that `id`, or with that `name` on a, embed, form, iframe, img or object. Several matches give the first element, not an `HTMLCollection`.
+- `document` names are embed, form, iframe, img and object by `name`, iframe and object by `id`, and img by `id` when it has a `name`. The iframe by `id` keeps the old frames behavior. The standard does not list it.
+- Both objects are open: a property of the chain wins over a name. Own globals, `let` and `const` come first anyway. So a page cannot hide `document.createElement` or `window.addEventListener` with an element name. The standard lets it do so. bare accepts this difference for speed and safety.
+- A window property that the host defines lazily (`name`, `top`, `open`, `on*`) also wins. The host defines it before the element answers.
+- The list of names is built by one walk on the first ask after a change. `Document::name_revision` moves only for changes that can touch named elements. A text edit or a bare new element costs no walk.
+- The heap cache passes over an open named object for a hit behind it. Without this, every `document.body` read lost its cache.
+- Cost: a global miss costs about 50 to 80 ns more on a page with 2000 ids. A hit on an own global costs the same.
