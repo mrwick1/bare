@@ -9,15 +9,15 @@
 // - `replaceAll` and `search` use the hook of `str_hook`, like `replace`: a user method of the argument runs, a builtin regexp
 //   takes the builtin path, anything else is a string. `replaceAll` of a regexp without `g` is a TypeError, checked before the
 //   hook, as in the specification. All matches of a string pattern are found before one callback runs.
-// - `normalize`: NFC and NFD, through `bare-unicode`. A string of units that no form changes (below U+0300 for NFC, below U+00C0
-//   for NFD) is returned as it is, without a copy. A lone surrogate stays where it is.
+// - `normalize`: NFC and NFD, through `bare-unicode`; NFKC and NFKD, through `icu_normalizer` (`icu.rs`). A string of units
+//   that no form changes (below U+0300 for NFC, below U+00C0 for NFD, below U+00A0 for NFKC and NFKD) is returned as it is,
+//   without a copy. A lone surrogate stays where it is.
 // - `trimStart` and `trimEnd` name `trimLeft` and `trimRight` in a TypeError for a null `this`, as V8 does.
 // - `toLocale*Case` take the root locale. The locale list is validated by `intl_locales`.
 // - A result that is longer than the string limits is a limit error, as for every other string builder; it is checked
 //   before the units are made, so `"a".repeat(2 ** 30)` allocates nothing.
 //
 // Gates (never silent)
-// - `normalize("NFKC")` and `normalize("NFKD")`: the compatibility tables are not in `bare-unicode`.
 // - `toLocaleLowerCase` and `toLocaleUpperCase` with a locale whose language is `tr`, `az` or `lt`: these have their own
 //   case rules.
 //
@@ -520,7 +520,7 @@ impl<'p> Interp<'p> {
         self.sc_iter_result(v, false)
     }
 
-    /// `String.prototype.normalize`. NFC and NFD only.
+    /// `String.prototype.normalize`. NFC and NFD use `bare-unicode`; NFKC and NFKD use `icu_normalizer`.
     fn str_normalize(&mut self, this: Value, form: Value) -> Res<Value> {
         let s = self.this_str(this, "normalize")?;
         let name = if matches!(form, Value::Undefined) {
@@ -529,15 +529,17 @@ impl<'p> Interp<'p> {
             let f = self.coerce_string(form)?;
             h!(self, self.heap.to_string_lossy(f))
         };
-        let nfc = match name.as_str() {
-            "NFC" => true,
-            "NFD" => false,
-            "NFKC" | "NFKD" => return Err(unsupported("String.prototype.normalize with NFKC or NFKD", Span::default())),
+        let (nfc, compat) = match name.as_str() {
+            "NFC" => (true, false),
+            "NFD" => (false, false),
+            "NFKC" => (true, true),
+            "NFKD" => (false, true),
             _ => return Err(self.range_error("The normalization form should be one of NFC, NFD, NFKC, NFKD.")),
         };
         let len = h!(self, self.heap.str_len(s));
         self.spend_units(len.saturating_mul(4))?;
-        let stable = if nfc { 0x300 } else { 0xC0 };
+        // Below U+00A0 no form changes a unit (U+00A0 is the first compatibility decomposition).
+        let stable = if compat { 0xA0 } else if nfc { 0x300 } else { 0xC0 };
         if h!(self, self.heap.str_units(s)).iter().all(|&c| c < stable) {
             return Ok(Value::String(s));
         }
@@ -549,7 +551,11 @@ impl<'p> Interp<'p> {
             if seg.is_empty() {
                 return Ok(());
             }
-            let m = if nfc { bare_unicode::nfc(seg) } else { bare_unicode::nfd(seg) };
+            let m = match (nfc, compat) {
+                (_, true) => crate::icu::normalize_compat(seg, nfc),
+                (true, false) => bare_unicode::nfc(seg),
+                (false, false) => bare_unicode::nfd(seg),
+            };
             if m.encode_utf16().count() > cap.saturating_sub(out.len()) {
                 return Err(Error::Limit(LimitKind::Heap(Limit::StringLength)));
             }
