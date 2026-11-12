@@ -475,3 +475,23 @@ run() + run()"#;
         assert!(it.bc_stats().runs > 0 && it.bc_stats().compiled > 0);
     });
 }
+
+/// Step B3: a function made in a `with` body reads names through the object, so it runs on the tree walker. Byte mode gives the
+/// result of tree mode.
+#[test]
+fn a_function_inside_with_gives_the_same_result_in_byte_mode() {
+    big(|| {
+        let src = r#"var o = { prop: 'before' }; var f; var g;
+with (o) { f = function () { return prop; }; g = function () { return function () { return prop; }; }; }
+o.prop = 'after'; var a = f(); delete o.prop; var h = g(); var b; try { b = h(); } catch (e) { b = e.name; }
+a + ' ' + b"#;
+        let mut out = Vec::new();
+        for mode in [Exec::Tree, Exec::Byte] {
+            let mut it = Interp::realm(Heap::default(), EvalLimits::default()).unwrap();
+            it.set_exec(mode);
+            out.push(run(&mut it, src));
+        }
+        assert_eq!(out[0], "after ReferenceError");
+        assert_eq!(out[0], out[1]);
+    });
+}
