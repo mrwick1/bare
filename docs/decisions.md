@@ -1632,3 +1632,9 @@ A click on a GitHub issue title did not navigate. GitHub cancels the click and c
 - `li` keeps the old switch. Its prototype from the first wrapper cost +0.24% on the `mutation` cost row. The rule without `li` costs +0.08% on `mutation` and `event`.
 - New members of `input`, `button`, `form`, `link` and `iframe` are made with the first wrapper of their tag. A page without that tag pays nothing.
 - Not built: the validity members of `fieldset` and `output`, `labels` of `progress` and `meter`, `iframe.contentDocument`, `iframe.sandbox`, `link.sizes`, `input.valueAsNumber`, `valueAsDate`, `stepUp`, `stepDown`, `list` and `showPicker`, `button.formAction`, `a.username` and `a.password`, the `style` and `script` reflections.
+## `<meta>` reflects its attributes (2026-11-12)
+
+- A click on a GitHub issue title showed "Unable to load page". The cause was `atob(undefined)`.
+- After a soft navigation, GitHub reads `meta[name=visitor-payload].content` and decodes it with `atob`. bare had no `HTMLMetaElement.content`.
+- `meta` now reflects `name`, `content`, `httpEquiv` and `media`.
+- `meta` gets `HTMLMetaElement.prototype` from its first wrapper. Pages read `meta.content` without naming the interface, so the lazy switch of `browser_html.rs` does not apply to it.
