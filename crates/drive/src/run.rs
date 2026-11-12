@@ -385,10 +385,18 @@ impl Session {
             crate::snap::settle(p);
             let cpu = thread_cpu_ns();
             let (nodes, shown) = crate::snap::size(p).unwrap_or((0, 0));
-            crate::diag::Facts { url: p.url().unwrap_or_default(), load_error: p.load_error().map(str::to_string), stopped: p.stopped(), nodes, shown, cpu_ms: cpu as f64 / 1e6 }
+            crate::diag::Facts { url: p.url().unwrap_or_default(), load_error: p.load_error().map(str::to_string), stopped: p.stopped(), nodes, shown, cpu_ms: cpu as f64 / 1e6, pending: p.pending() }
         })?;
         // The logs that the tick made are in the history after `with_refs`: read the report from it now.
         Ok(crate::diag::report(&self.hist, &f, &|s| red.clean(s)))
+    }
+
+    /// What the live page waits for (`Page::pending`), after a tick that collects what arrived.
+    pub fn pending(&mut self) -> Result<Vec<bare::page::Waiting>, String> {
+        self.with_refs(|p, _| {
+            p.tick();
+            p.pending()
+        })
     }
 
     /// Collect what the page logged and requested since the last call (a tick), into the history.
@@ -486,10 +494,9 @@ impl Session {
                             }
                             // Empty and nothing can change it: no task, no request, no timer.
                             Ok(Ok(())) if !r.ran && r.next.is_none() => Some(Ok(Some(format!("not ready: body empty after {ms} ms, {}", pending(0))))),
-                            Ok(idle) => {
+                            Ok(_) => {
                                 calm = 0;
-                                let n = idle.err().unwrap_or(0);
-                                at_end.then(|| Ok(Some(format!("not ready: {} after {ms} ms, {}", if r.text.is_empty() { "body empty" } else { "still loading" }, pending(n)))))
+                                at_end.then(|| Ok(Some(format!("not ready: {} after {ms} ms, {}", if r.text.is_empty() { "body empty" } else { "still loading" }, r.waits))))
                             }
                         };
                         match done {
@@ -915,6 +922,8 @@ struct Look {
     title: String,
     /// The text of the body (a mark for a control or a picture), up to about 200 characters. Only read when the page is idle or `at_end`.
     text: String,
+    /// What holds the page, as `waits` says it. Only read when the page is not idle at `at_end`.
+    waits: String,
     logs: Vec<Log>,
 }
 
@@ -937,7 +946,24 @@ fn ready(p: &mut Page, at_end: bool) -> Look {
         };
         p.touched();
     }
-    Look { ran, next, idle, fail, stopped, doc: p.generation(), status, url: safe_url(&url), title: locate::norm(&title), text, logs: p.take_logs() }
+    let waits = if at_end && idle.is_err() { waits(&p.pending()) } else { String::new() };
+    Look { ran, next, idle, fail, stopped, doc: p.generation(), status, url: safe_url(&url), title: locate::norm(&title), text, waits, logs: p.take_logs() }
+}
+
+/// What holds a page that is not ready, for the `not ready` note: the number of requests, then up to 2 of the things that hold it,
+/// the oldest first. For example `1 request pending: fetch GET https://x/api (19.4 s)`.
+fn waits(all: &[bare::page::Waiting]) -> String {
+    let held: Vec<&bare::page::Waiting> = all.iter().filter(|w| w.holds).collect();
+    let n = held.iter().filter(|w| !w.url.is_empty()).count();
+    let mut out = format!("{n} request{} pending", if n == 1 { "" } else { "s" });
+    if !held.is_empty() {
+        let named: Vec<String> = held.iter().take(2).map(|w| crate::diag::waiting(w)).collect();
+        out += &format!(": {}", named.join(", "));
+        if held.len() > 2 {
+            out += &format!(", {} more", held.len() - 2);
+        }
+    }
+    out
 }
 
 /// One try of a step, on the page thread.
@@ -1349,5 +1375,20 @@ mod tests {
         assert_eq!(r.clean("x Ünï y ünï"), "x [secret] y ünï");
         assert_eq!(Redactor::default().clean("a"), "a");
         assert_eq!(safe_url("http://a.test/x?token=s3cr3t&b=2&Auth_Key=z#t"), "http://a.test/x?token=…&b=2&Auth_Key=…");
+    }
+
+    #[test]
+    fn not_ready_names_what_holds_the_page() {
+        let w = |kind, url: &str, ms, holds| bare::page::Waiting { kind, method: if url.is_empty() { "" } else { "GET" }, url: url.into(), age: Duration::from_millis(ms), holds, state: "" };
+        assert_eq!(waits(&[]), "0 requests pending");
+        // A picture never holds the page: it is not named.
+        assert_eq!(waits(&[w("image", "http://a.test/p.png", 9000, false)]), "0 requests pending");
+        assert_eq!(waits(&[w("fetch", "http://a.test/api?token=s", 19400, true)]), "1 request pending: fetch GET http://a.test/api?token=… (19.4 s)");
+        let three = [w("xhr", "http://a.test/a", 3000, true), w("script", "http://a.test/b.js", 2000, true), w("inline script", "", 0, true)];
+        assert_eq!(waits(&three), "2 requests pending: xhr GET http://a.test/a (3.0 s), script GET http://a.test/b.js (2.0 s), 1 more");
+        assert_eq!(waits(&three[2..]), "0 requests pending: inline script");
+        let mut done = w("fetch", "http://a.test/api", 5800, true);
+        done.state = "reply in";
+        assert_eq!(waits(&[done]), "1 request pending: fetch GET http://a.test/api (5.8 s, reply in)");
     }
 }

@@ -65,6 +65,20 @@ pub struct Handled {
     pub cursor: Option<Cursor>,
 }
 
+/// Something that the live page waits for (`Page::pending`): a request, or work that is not one (then `method` and `url` are empty).
+pub struct Waiting {
+    /// `fetch`, `xhr`, `stream`, `script`, `stylesheet`, `preload` or `image`; or `inline script`, `navigation task` or `parser`.
+    pub kind: &'static str,
+    pub method: &'static str,
+    pub url: String,
+    pub age: Duration,
+    /// It keeps `Page::idle` from being `Ok`.
+    pub holds: bool,
+    /// Empty while it is on the network. `not sent`: a queued request waits for the next network turn of the page thread to start.
+    /// `reply in`: the reply waits for its turn. Both mean that the page thread is busy, or that a request before it is not done.
+    pub state: &'static str,
+}
+
 pub struct Page {
     pub(crate) source: Source,
     pub(crate) frame: Option<Frame>,
@@ -441,6 +455,20 @@ impl Page {
         let Some(b) = self.browser() else { return Err(0) };
         let pending = b.pending_fetches();
         if pending == 0 && b.loaded() && b.live_work_of(false).is_none() { Ok(()) } else { Err(pending) }
+    }
+
+    /// What the live page waits for: the requests on their way and the work that holds it (`Waiting`). Those that hold it come first,
+    /// then the oldest first. It walks the queues only when called: a driver calls it when a wait ends, not at each look.
+    pub fn pending(&mut self) -> Vec<Waiting> {
+        let mut out = Vec::new();
+        if let Some(b) = self.browser() {
+            b.waiting_requests(&mut out);
+            b.waiting_loads(&mut out);
+        }
+        self.images.waiting(&mut out);
+        // `sort_by` takes a compare function, like `arr.sort((a, b) => ...)` in JavaScript; `then` breaks ties.
+        out.sort_by(|a, b| b.holds.cmp(&a.holds).then(b.age.cmp(&a.age)));
+        out
     }
 
     /// The HTTP status of the last document of a live session (0: none yet, or not live).

@@ -466,7 +466,10 @@ impl Server {
         let contains = args.get("url_contains").and_then(Value::as_str).map(str::to_string);
         let live = self.live_mut(args)?;
         live.session.collect()?;
-        let v = live.session.hist.network(flag("failed_only"), contains.as_deref(), flag("since_last"), max);
+        let mut v = live.session.hist.network(flag("failed_only"), contains.as_deref(), flag("since_last"), max);
+        // The requests on their way: each call shows them again until they end, then their record shows once.
+        let pending = live.session.pending()?;
+        v.extend(pending.iter().filter(|w| !w.url.is_empty() && contains.as_deref().is_none_or(|c| w.url.contains(c))).take(max).map(|w| format!("pending {}", bare_drive::diag::waiting(w))));
         Ok(live.red.clean(&if v.is_empty() { "no requests".to_string() } else { v.join("\n") }))
     }
 
@@ -1017,12 +1020,12 @@ fn tools() -> Value {
         },
         {
             "name": "network",
-            "description": "The requests of the live page, one line per request: failure or status, kind (by URL), URL, size, time. Defaults: failed requests only (an error or HTTP 400 and over), since the last network call. failed_only false: all requests. url_contains: keep URLs with this text. since_last false: the last 500 records. max: the newest records to show, default 50.",
+            "description": "The requests of the live page, one line per request: failure or status, kind (by URL), URL, size, time. Then the requests still on their way, at each call until they end: pending, kind (fetch, xhr, stream, script, stylesheet, preload, image), method, URL, age. Defaults: failed requests only (an error or HTTP 400 and over), since the last network call. failed_only false: all requests. url_contains: keep URLs with this text. since_last false: the last 500 records. max: the newest records to show, default 50.",
             "inputSchema": {"type": "object", "properties": {"session": S, "failed_only": {"type": "boolean"}, "url_contains": {"type": "string"}, "since_last": {"type": "boolean"}, "max": {"type": "integer"}}},
         },
         {
             "name": "diagnose",
-            "description": "A report of what is wrong with the live page, to paste into a bare issue: the document load, uncaught exceptions, missing engine features, failed requests by kind, an empty-render check, the page size, and a verdict: site problem, bare gap, network or unclear, with the reason. Call it after a step failed.",
+            "description": "A report of what is wrong with the live page, to paste into a bare issue: the document load, uncaught exceptions, missing engine features, failed requests by kind, requests pending over 5 s, an empty-render check, the page size, and a verdict: site problem, bare gap, network or unclear, with the reason. Call it after a step failed.",
             "inputSchema": {"type": "object", "properties": {"session": S}},
         },
         {

@@ -43,11 +43,12 @@ pub(crate) struct Images {
     /// The elements that were asked for already.
     known: std::collections::HashSet<NodeId>,
     queue: VecDeque<(String, Vec<NodeId>)>,
-    jobs: Vec<(Vec<NodeId>, Task<Option<Bitmap>>)>,
+    /// The pictures on their way: the elements, the job, and the URL and the start (for `Page::pending`).
+    jobs: Vec<(Vec<NodeId>, Task<Option<Bitmap>>, String, std::time::Instant)>,
     /// The CSS pictures: the numbers that were asked for, the ones that wait for a worker, and the ones on their way.
     css_seen: std::collections::HashSet<u32>,
     css_queue: VecDeque<(u32, String)>,
-    css_jobs: Vec<(u32, Task<Option<Bitmap>>)>,
+    css_jobs: Vec<(u32, Task<Option<Bitmap>>, String, std::time::Instant)>,
     /// The styles that were read last (the address of the `Styles` and its number of styles).
     css_read: (usize, usize, u64),
     used: Arc<AtomicUsize>,
@@ -57,6 +58,13 @@ pub(crate) struct Images {
 }
 
 impl Images {
+    /// Add the pictures on their way to `out` (`Page::pending`). A picture never holds the page (`Page::idle`).
+    pub(crate) fn waiting(&self, out: &mut Vec<crate::page::Waiting>) {
+        for (url, t) in self.jobs.iter().map(|j| (&j.2, j.3)).chain(self.css_jobs.iter().map(|j| (&j.2, j.3))) {
+            out.push(crate::page::Waiting { kind: "image", method: "GET", url: url.clone(), age: t.elapsed(), holds: false, state: "" });
+        }
+    }
+
     /// Does the page still wait for a picture?
     pub(crate) fn pending(&self) -> bool {
         !self.queue.is_empty() || !self.jobs.is_empty() || !self.css_queue.is_empty() || !self.css_jobs.is_empty()
@@ -318,11 +326,12 @@ impl Page {
                 Source::Session(s) => s.fork(),
                 Source::Browser(_) => Client::new(),
             };
+            let (shown, now) = (url.clone(), std::time::Instant::now());
             let task = client.spawn(move |c| load(c, &url, &used));
             if id == 0 {
-                self.images.jobs.push((nodes, task));
+                self.images.jobs.push((nodes, task, shown, now));
             } else {
-                self.images.css_jobs.push((id, task));
+                self.images.css_jobs.push((id, task, shown, now));
             }
         }
         let (mut arrived, mut finished) = (false, first);
@@ -332,7 +341,7 @@ impl Page {
                 k += 1;
                 continue;
             }
-            let (nodes, task) = self.images.jobs.swap_remove(k);
+            let (nodes, task, ..) = self.images.jobs.swap_remove(k);
             finished = true;
             let bitmap = task.wait().flatten();
             if let Some(b) = self.source.browser() {
@@ -364,7 +373,7 @@ impl Page {
                 k += 1;
                 continue;
             }
-            let (id, task) = self.images.css_jobs.swap_remove(k);
+            let (id, task, ..) = self.images.css_jobs.swap_remove(k);
             finished = true;
             match (task.wait().flatten(), self.source.browser()) {
                 (Some(bitmap), Some(b)) => {

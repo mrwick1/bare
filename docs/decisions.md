@@ -1475,3 +1475,16 @@ A `press` with a locator on the Wikipedia search failed as `detached`, and the p
 - The counts were right: a write of the same key replaces its size, and the same value again is a no-op.
 - `press` follows a field that the page replaced, with the rule of `type`. The old field left the document, and a text field has the focus. Then the key goes to that field. This holds when the locator matches nothing now, and when the focus of the press makes the page swap the field.
 - The second swap of Wikipedia gives an input with no `id`. So `css="#searchInput"` matches nothing after `type`.
+## Name what holds a page that is not ready (2026-11-12)
+
+`open` said `1 request pending` and gave no way to see which request it was (issue #406).
+
+- `Page::pending` lists what the live page waits for: each queued fetch and XHR, each open event stream, each script, style sheet and preload download that runs, and each picture on its way.
+- Each item has its kind, method, URL and age. A fetch now always keeps the time it was queued. The cost is one clock read per request.
+- `holds` marks the items that keep the page from being ready. A stream and a picture never hold it.
+- Work that holds the page and is not a request is named by its kind: `inline script`, `navigation task` or `parser`. Timers and workers do not hold a page, so they are not listed.
+- The list is built only when a wait ends at its limit, and on `network` and `diagnose`. A look of the ready wait does not build it.
+- The `not ready` note names up to 2 items that hold the page, the oldest first. The request count counts every request that holds it, not only fetches.
+- `network` shows the pending requests at each call, marked `pending`. When one ends, its record shows once.
+- `diagnose` reports each item pending for 5 s or more.
+- A queued request shows `not sent` before its network turn, and `reply in` when its reply waits for its turn. Both say that the page thread is busy, not the network. GitHub showed this: its request waited 5.8 s to be sent and then took 302 ms.
