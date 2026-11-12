@@ -216,6 +216,12 @@ impl Hit<'_> {
     /// `live` is false while the point is outside a clipping box around: then only a fixed box can be hit. `hoist` is the list of
     /// the stacking context around: the boxes with a `z-index` wait there.
     fn context(&self, i: usize, depth: usize, p: Point, live: bool, out: &mut Vec<NodeId>, hoist: &mut Vec<Waiting>) {
+        self.context_with(i, depth, p, live, out, hoist, Vec::new());
+    }
+
+    /// `adopted`: fixed boxes that the box holds in the tree, with their points. See `display::adopted`.
+    #[allow(clippy::too_many_arguments)]
+    fn context_with(&self, i: usize, depth: usize, p: Point, live: bool, out: &mut Vec<NodeId>, hoist: &mut Vec<Waiting>, adopted: Vec<(usize, Point, bool)>) {
         if depth >= MAX_DEPTH {
             return;
         }
@@ -346,9 +352,14 @@ impl Hit<'_> {
                 Line::Context(j, at, live) => self.context(j, depth + 1, at, live, out, hoist),
             }
         }
+        positioned.extend(adopted);
         crate::display::tree_order(self.doc, &self.tree, self.frags, &mut positioned, |p| p.0);
-        for (j, at, live) in positioned {
-            self.context(j, depth + 1, at, live, out, hoist);
+        let mut k = 0;
+        while k < positioned.len() {
+            let n = crate::display::adopted(self.doc, &self.tree, self.frags, &positioned, k, |p| p.0);
+            let (j, at, live) = positioned[k];
+            self.context_with(j, depth + 1, at, live, out, hoist, positioned[k + 1..k + 1 + n].to_vec());
+            k += 1 + n;
         }
         if sc && !own.is_empty() {
             // The negative ones go behind the blocks of the context, the others over everything it painted.
@@ -715,6 +726,24 @@ mod tests {
         let s = Scroll { y: 960.0, ..Scroll::default() };
         assert_eq!(p.at_scrolled(&s, 50.0, 60.0), "in");
         assert_eq!(p.at_scrolled(&s, 90.0, 60.0), "s", "on the scrollbar: the container");
+    }
+
+    #[test]
+    fn a_later_relative_box_is_over_an_earlier_fixed_box() {
+        let p = page("<style>body{margin:0}</style><div style='position:relative'><div><div id=f style='position:fixed;top:0;left:0;width:100%;height:100%'></div></div><div style='position:relative'><button id=b style='margin:50px'>x</button></div></div>");
+        assert_eq!(p.at(60.0, 60.0), "b");
+        assert_eq!(p.at_scrolled(&Scroll::default(), 60.0, 60.0), "b");
+        let p = page("<style>body{margin:0}</style><div style='position:relative'><div style='position:relative'><button id=b style='margin:50px'>x</button></div><div><div id=f style='position:fixed;top:0;left:0;width:100%;height:100%'></div></div></div>");
+        assert_eq!(p.at(60.0, 60.0), "f", "a later fixed box is over an earlier relative one");
+        assert_eq!(p.at_scrolled(&Scroll::default(), 60.0, 60.0), "f");
+    }
+
+    #[test]
+    fn a_later_relative_box_paints_over_an_earlier_fixed_box() {
+        let p = page("<style>body{margin:0}</style><div style='position:relative'><div><div style='position:fixed;top:0;left:0;width:100px;height:100px;background:#010000'></div></div><div style='position:relative;width:50px;height:50px;background:#020000'></div></div>");
+        let canvas = crate::capture(&p.doc, &p.styles, &p.layout, W, H);
+        assert_eq!(canvas.pixel(10, 10) & 0x00ff_ffff, 0x020000, "the later relative box is on top");
+        assert_eq!(canvas.pixel(70, 70) & 0x00ff_ffff, 0x010000, "the fixed box shows where it is not covered");
     }
 
     #[test]

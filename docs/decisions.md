@@ -1809,3 +1809,11 @@ A focused element inside an editing host now takes key input. Text, Enter, Backs
 - `w.postMessage` drops the message. The frame has no listener that runs, and the parent must not receive it.
 - Only blank frames inherit the parent global. A frame with another `src` keeps the inert window, so the parent's `document` and globals do not leak through it.
 - Not built: a separate `Object.prototype` per frame, so `w.Array !== Array` checks and `instanceof` across frames are the same as in the parent. Other `create*` methods (`createElementNS`, `createDocumentFragment`, `importNode`) of a frame document still give `ownerDocument` the main document.
+
+## A fixed box paints and hits in tree order with its positioned siblings (2026-11-12)
+
+A `position: fixed` box with `z-index: auto` is a positioned box of CSS 2.1 Appendix E, step 8. It paints and hits in tree order with the other positioned boxes of its stacking context.
+
+Layout puts its fragment under the root, so it painted after the whole of its parent. The parent now adopts the fixed boxes that it holds in the tree. The order follows Ladybird (`Libraries/LibWeb/Painting/StackingContext.cpp`, BSD-2). A fixed box with a `z-index` other than 0 keeps its place in the `z-index` order.
+
+Reason: a later relative box under an earlier fixed layer could not be clicked (bare#434).

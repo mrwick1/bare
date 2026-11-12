@@ -117,6 +117,8 @@ pub struct DisplayList {
     lines: Vec<Item>,
     floats: Vec<u32>,
     positioned: Vec<u32>,
+    /// Fixed boxes that the context about to open holds in the tree: it paints them in its own list of positioned boxes.
+    adopted: Vec<u32>,
     hoist: Vec<Hoisted>,
     /// The scroll containers around the boxes that wait in `hoist`: (box, padding box). One run for each box.
     chain: Vec<(NodeId, IRect)>,
@@ -217,6 +219,7 @@ impl DisplayList {
         self.lines.clear();
         self.floats.clear();
         self.positioned.clear();
+        self.adopted.clear();
         self.hoist.clear();
         self.shapes.clear();
         self.points.clear();
@@ -368,6 +371,28 @@ pub(crate) fn tree_order<T>(doc: &Document, tree: &Tree, frags: &[Fragment], v: 
     });
 }
 
+/// After `tree_order`: how many boxes right after `v[k]` are fixed boxes inside the tree of `v[k]`. Layout puts the fragment of a
+/// fixed box under the root, not under its parent, so its context would paint after the whole of that parent, over a later
+/// positioned box inside it. The parent adopts these boxes and paints them in tree order with its own, as Ladybird does
+/// (Libraries/LibWeb/Painting/StackingContext.cpp, BSD-2): a fixed box with `z-index: auto` is a positioned box of step 8.
+pub(crate) fn adopted<T>(doc: &Document, tree: &Tree, frags: &[Fragment], v: &[T], k: usize, frag: impl Fn(&T) -> usize) -> usize {
+    let owner = frags[frag(&v[k])].node;
+    v[k + 1..]
+        .iter()
+        .take_while(|t| {
+            let n = frags[frag(t)].node;
+            let mut up = doc.parent_or_host(n);
+            while let Some(a) = up {
+                if a == owner {
+                    return tree.kind(n) == Kind::OutOfFlow && tree.position(n) == Keyword::Fixed;
+                }
+                up = doc.parent_or_host(a);
+            }
+            false
+        })
+        .count()
+}
+
 impl Builder<'_> {
     fn push(&mut self, line: bool, item: Item) {
         if line {
@@ -462,6 +487,7 @@ impl Builder<'_> {
     }
 
     fn context_in(&mut self, i: usize) {
+        let mine = std::mem::take(&mut self.list.adopted);
         if self.depth >= MAX_DEPTH {
             return;
         }
@@ -600,10 +626,15 @@ impl Builder<'_> {
             }
         }
         self.list.lines.truncate(lines);
+        self.list.positioned.extend(mine);
         let end = self.list.positioned.len();
         tree_order(self.doc, &self.tree, self.frags, &mut self.list.positioned[positioned..end], |&j| j as usize);
-        for k in positioned..end {
+        let mut k = positioned;
+        while k < end {
+            let n = adopted(self.doc, &self.tree, self.frags, &self.list.positioned[positioned..end], k - positioned, |&j| j as usize);
+            self.list.adopted = self.list.positioned[k + 1..k + 1 + n].to_vec();
             self.context(self.list.positioned[k] as usize);
+            k += 1 + n;
         }
         self.list.positioned.truncate(positioned);
         if sc {
