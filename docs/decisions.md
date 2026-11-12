@@ -1754,3 +1754,15 @@ A focused element inside an editing host now takes key input. Text, Enter, Backs
 - The hashes are one-shot functions. Only `digest` needs them, and it has the whole message at once. A streaming API waits for a caller that needs one.
 - `SubtleCrypto` is the sixth lazy global of `browser_web.rs`. The first read of any of the six globals builds all their objects, as before.
 - Not built: a detached buffer hashes as empty. The standard rejects it with `TypeError`.
+
+## A blank iframe window shares the parent realm (2026-11-12)
+
+- A web mail app uses blank iframes as scratch windows. It reads `doc.defaultView`, `node.ownerDocument` and `win.setTimeout` on them (bare issue #426).
+- bare has one realm: one global object, one set of constructors. A real second realm needs a second heap global and a second copy of every host wrapper. That is large, so we did not build it.
+- We use the same-origin approximation. The window of a blank frame inherits the parent global. A global it does not own resolves to the parent value, so `w.Array === Array` and `w.setTimeout` is the parent timer. The window keeps its own `window`, `self`, `frames`, `parent`, `top`, `length`, `frameElement`, `document` and `location`.
+- The model follows Ladybird `BrowsingContext` and `Navigable` (BSD-2): a nested context has a window, and an initial `about:blank` document that the window and the iframe share. We copied no code.
+- The blank document knows its window (`defaultView`), reports `URL` `about:blank`, has its body as `activeElement`, and owns the nodes of its `createElement`, `createTextNode` and `createComment`. The record lives in `browser_frames.rs`.
+- The frame `Location` is read only. It reads `about:blank`. A write or `assign` throws.
+- `w.postMessage` drops the message. The frame has no listener that runs, and the parent must not receive it.
+- Only blank frames inherit the parent global. A frame with another `src` keeps the inert window, so the parent's `document` and globals do not leak through it.
+- Not built: a separate `Object.prototype` per frame, so `w.Array !== Array` checks and `instanceof` across frames are the same as in the parent. Other `create*` methods (`createElementNS`, `createDocumentFragment`, `importNode`) of a frame document still give `ownerDocument` the main document.

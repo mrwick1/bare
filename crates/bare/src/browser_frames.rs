@@ -6,6 +6,10 @@
 //!   `contentWindow`: `contentWindow.document` and `contentDocument` are that one object while the iframe is connected. It is made
 //!   as `document.implementation.createHTMLDocument('')` is. Any other iframe has `contentDocument` `null` (the child is never
 //!   loaded, so it has no document), as for a cross-origin frame. The frame window gets no `resize` event.
+//! - The blank document has `defaultView` (its window), `URL` `about:blank`, `activeElement` (its body), and owns the nodes made by its
+//!   `createElement`, `createTextNode` and `createComment` (`ownerDocument`). Other `create*` methods still give the main document.
+//! - The window of a blank frame has an own `Location` for `about:blank` (read only), and inherits the parent global: bare has one
+//!   realm, so `w.Array === Array` and `w.setTimeout` is the parent's. `w.postMessage` drops the message. Other frames keep `et`.
 //! - Two host named objects sit in the chains: `window -> Window.prototype -> owner -> EventTarget.prototype` and `document -> document_owner ->
 //!   Document.prototype`. Own properties of `window` (declared `var` and `function`, the window API) and the global lexical names
 //!   (`let`, `const`) come first, so the names are only a fallback after a miss.
@@ -49,6 +53,12 @@ struct State {
     owner: ObjId,
     document_owner: ObjId,
     contexts: IdMap<NodeId, ObjId>,
+    /// The initial `about:blank` document node of a frame, and its window (`defaultView`).
+    docs: IdMap<NodeId, ObjId>,
+    /// A node made by the `createX` method of a frame document, and that document.
+    owned: IdMap<NodeId, NodeId>,
+    /// The `Location` objects of frame windows.
+    locs: HashSet<ObjId>,
     /// The node whose wrapper (`false`) or inert window (`true`) the next fill makes.
     pending: Cell<Option<(NodeId, bool)>>,
     /// The names, built by a fill for the document name revision `rev` and revision `full` (`u64::MAX` before the first fill). A
@@ -237,6 +247,9 @@ fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
             owner,
             document_owner,
             contexts: IdMap::default(),
+            docs: IdMap::default(),
+            owned: IdMap::default(),
+            locs: HashSet::new(),
             pending: Cell::new(None),
             list: List::default(),
             rev: u64::MAX,
@@ -399,10 +412,23 @@ fn context(d: &Dom, it: &mut Interp<'_>, n: NodeId) -> R<Value> {
         let k = d.key(it, name)?;
         it.define_data(o, k, v, false, true, true)?;
     }
-    if initial_blank(d, n) {
+    let blank = initial_blank(d, n);
+    let k = d.key(it, "document")?;
+    if blank {
         let doc = d.new_blank_document(it)?;
-        let k = d.key(it, "document")?;
         it.define_data(o, k, doc, false, true, true)?;
+        let dn = d.nd(it, doc)?;
+        let loc = crate::browser_navigation::frame_location(d, it)?;
+        let k = d.key(it, "location")?;
+        it.define_data(o, k, Value::Object(loc), false, true, true)?;
+        // Same-origin approximation: bare has one realm, so a global the frame window does not own is the parent's (`w.Array === Array`).
+        it.heap.set_prototype_of(o, Some(it.global_object())).map_err(|e| it.heap_error(e))?;
+        let mut s = d.frames.state_mut().expect("activated");
+        s.docs.insert(dn, o);
+        s.locs.insert(loc);
+    } else {
+        // The parent global must not answer for a frame with a child document that is never loaded.
+        it.define_data(o, k, Value::Undefined, false, true, true)?;
     }
     d.frames
         .state_mut()
@@ -455,10 +481,51 @@ pub(crate) fn set_name(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -
     crate::browser_dom::attr_set(d, it, n, "name", &s)?;
     Ok(Value::Undefined)
 }
+/// The window of the initial `about:blank` document `n` of a frame.
+pub(crate) fn window_of(d: &Dom, n: NodeId) -> Option<ObjId> {
+    d.frames.state()?.docs.get(&n).copied()
+}
+/// Is `o` the window of a blank frame (it inherits the parent's globals)?
+pub(crate) fn is_blank_window(d: &Dom, o: ObjId) -> bool {
+    d.frames.state().is_some_and(|s| s.docs.values().any(|&w| w == o))
+}
+/// Is `o` the `Location` of a frame window?
+pub(crate) fn is_location(d: &Dom, o: ObjId) -> bool {
+    d.frames.state().is_some_and(|s| s.locs.contains(&o))
+}
+/// The frame document that owns `n`, if any: the root of its tree, or the document whose method made it.
+pub(crate) fn owner_of(d: &Dom, n: NodeId) -> Option<NodeId> {
+    let s = d.frames.state()?;
+    if let Some(&o) = s.owned.get(&n) {
+        return Some(o);
+    }
+    let doc = d.doc.borrow();
+    let mut cur = n;
+    while let Some(p) = doc.parent(cur) {
+        cur = p;
+    }
+    if s.docs.contains_key(&cur) { Some(cur) } else { s.owned.get(&cur).copied() }
+}
+/// Record that `made` came from the method of the document `this`, when that is a frame document.
+pub(crate) fn note_owner(d: &Dom, it: &mut Interp<'_>, this: Value, made: Value) {
+    if !d.frames.active() {
+        return;
+    }
+    if let (Ok(t), Ok(m)) = (d.nd(it, this), d.nd(it, made)) {
+        if let Some(s) = d.frames.state_mut().as_mut().filter(|s| s.docs.contains_key(&t)) {
+            s.owned.insert(m, t);
+        }
+    }
+}
 #[cold]
 pub(crate) fn trace(d: &Dom, owner: ObjId, out: &mut Vec<Value>) {
     if let Some(s) = d.frames.state().as_ref() {
         for (&n, &o) in &s.contexts {
+            if d.st.borrow().by_node.get(&n) == Some(&owner) {
+                out.push(Value::Object(o));
+            }
+        }
+        for (&n, &o) in &s.docs {
             if d.st.borrow().by_node.get(&n) == Some(&owner) {
                 out.push(Value::Object(o));
             }
@@ -468,5 +535,8 @@ pub(crate) fn trace(d: &Dom, owner: ObjId, out: &mut Vec<Value>) {
 pub(crate) fn prune(d: &Dom, live: &dyn Fn(ObjId) -> bool) {
     if let Some(s) = d.frames.state_mut().as_mut() {
         s.contexts.retain(|_, o| live(*o));
+        s.docs.retain(|_, o| live(*o));
+        let locs = std::mem::take(&mut s.locs);
+        s.locs = locs.into_iter().filter(|o| live(*o)).collect();
     }
 }

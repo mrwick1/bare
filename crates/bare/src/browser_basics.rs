@@ -263,6 +263,10 @@ impl Dom {
 }
 
 fn post_message(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
+    // The window of a blank frame has no message listeners that run here, so a message to it is dropped.
+    if matches!(this, Value::Object(o) if crate::browser_frames::is_blank_window(d, o)) {
+        return Ok(Value::Undefined);
+    }
     if !matches!(this, Value::Undefined | Value::Null) && !matches!(this, Value::Object(o) if Some(&o) == d.global.get()) {
         return Err(it.type_error("Illegal invocation"));
     }

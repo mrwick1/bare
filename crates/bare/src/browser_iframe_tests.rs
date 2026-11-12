@@ -213,3 +213,24 @@ fn blank_frame_document_survives_a_collection() {
         assert_eq!(js(&mut b, "var g = document.body.lastChild; g.contentDocument.x + ',' + g.contentWindow.y + ',' + (g.contentDocument === g.contentWindow.document)"), "7,8,true");
     });
 }
+
+#[test]
+fn blank_frame_document_knows_its_window_and_owns_its_nodes() {
+    big(|| {
+        let mut b = browser("<!doctype html><body><p>x</p></body>");
+        b.set_document_url("https://example.test/mail").expect("url");
+        js(&mut b, "var f = document.createElement('iframe'); document.body.appendChild(f); var d = f.contentDocument, w = f.contentWindow;");
+        // defaultView
+        assert_eq!(js(&mut b, "[d.defaultView === w, document.defaultView === window, document.implementation.createHTMLDocument('').defaultView].join()"), "true,true,");
+        // ownerDocument
+        assert_eq!(js(&mut b, "[d.createElement('div').ownerDocument === d, d.body.ownerDocument === d, d.createTextNode('t').ownerDocument === d, d.createComment('c').ownerDocument === d, document.createElement('p').ownerDocument === document, d.ownerDocument].join()"), "true,true,true,true,true,");
+        assert_eq!(js(&mut b, "var e = d.createElement('div'); d.body.appendChild(e); e.ownerDocument === d && d.body.firstChild === e"), "true");
+        // activeElement
+        assert_eq!(js(&mut b, "d.activeElement === d.body"), "true");
+        // URL and location
+        assert_eq!(js(&mut b, "[d.URL, d.documentURI, typeof w.location, w.location.href, w.location.protocol, w.location.toString(), w.location instanceof Location, document.URL !== 'about:blank'].join()"), "about:blank,about:blank,object,about:blank,about:,about:blank,true,true");
+        // globals
+        assert_eq!(js(&mut b, "[w.Object === Object, w.Array === Array, w.Function === Function, w.Element === Element, typeof w.setTimeout, typeof w.clearTimeout, typeof w.getComputedStyle, typeof w.postMessage, typeof w.focus, typeof w.navigator, typeof w.history, typeof w.localStorage, typeof w.innerWidth, typeof w.getSelection].join()"), "true,true,true,true,function,function,function,function,function,object,object,object,number,function");
+        assert_eq!(js(&mut b, "var t = 0; w.setTimeout(function () { t = 1; }, 0); typeof w.getComputedStyle(d.body) + ',' + (w.document === d) + ',' + (w.window === w) + ',' + (w.parent === window)"), "object,true,true,true");
+    });
+}
