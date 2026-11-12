@@ -115,6 +115,9 @@ impl Server {
             "links" => self.links(&args),
             "act" => self.act(&args),
             "eval" => self.eval(&args),
+            "console" => self.console(&args),
+            "network" => self.network(&args),
+            "diagnose" => self.diagnose(&args),
             "sessions" => Ok(self.sessions()),
             "screenshot" => return self.screenshot(&args).unwrap_or_else(|e| json!({"content": [{"type": "text", "text": e}], "isError": true})),
             n => Err(format!("unknown tool {n}")),
@@ -328,6 +331,37 @@ impl Server {
         out.map(|o| live.red.clean(&o)).map_err(|e| live.red.clean(&e))
     }
 
+    /// The console entries of the live page: since the last call of this tool unless `since_last` is false.
+    fn console(&mut self, args: &Value) -> Result<String, String> {
+        let level = args.get("level").and_then(Value::as_str).unwrap_or("error");
+        if !matches!(level, "error" | "warn" | "all") {
+            return Err(format!("level: {level} is not error, warn or all"));
+        }
+        let (since, max) = (args.get("since_last").and_then(Value::as_bool).unwrap_or(true), args.get("max").and_then(Value::as_u64).unwrap_or(50) as usize);
+        let live = self.live_mut(args)?;
+        live.session.collect()?;
+        let v = live.session.hist.console(level, since, max);
+        Ok(live.red.clean(&if v.is_empty() { "no console entries".to_string() } else { v.join("\n") }))
+    }
+
+    /// The network records of the live page: the failed ones, since the last call of this tool, unless the arguments say otherwise.
+    fn network(&mut self, args: &Value) -> Result<String, String> {
+        let flag = |k: &str| args.get(k).and_then(Value::as_bool).unwrap_or(true);
+        let max = args.get("max").and_then(Value::as_u64).unwrap_or(50) as usize;
+        let contains = args.get("url_contains").and_then(Value::as_str).map(str::to_string);
+        let live = self.live_mut(args)?;
+        live.session.collect()?;
+        let v = live.session.hist.network(flag("failed_only"), contains.as_deref(), flag("since_last"), max);
+        Ok(live.red.clean(&if v.is_empty() { "no requests".to_string() } else { v.join("\n") }))
+    }
+
+    /// A report of what is wrong with the page, to paste into a bare issue.
+    fn diagnose(&mut self, args: &Value) -> Result<String, String> {
+        let live = self.live_mut(args)?;
+        let red = live.red.clone();
+        live.session.diagnose(&red)
+    }
+
     /// One action on an element or the page, as a step line; gives a short receipt and, unless `snapshot` is false, the new snapshot.
     fn act(&mut self, args: &Value) -> Result<String, String> {
         let op = args.get("op").and_then(Value::as_str).unwrap_or("click");
@@ -492,7 +526,13 @@ fn compact(rep: &Report, red: &Redactor) -> String {
                 "duplicate" => "use a ref from snapshot or find",
                 _ => "",
             };
-            format!("FAILED {}: {}{}", f.kind, f.message, if hint.is_empty() { String::new() } else { format!("\nhint: {hint}") })
+            let script = rep.logs.iter().find(|(_, l)| bare_drive::diag::uncaught(l)).filter(|_| matches!(f.kind, "not_found" | "hidden" | "page"));
+            let hint = match script {
+                Some((_, l)) => format!("\nhint: the page script failed: {}", l.text.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(200).collect::<String>()),
+                None if hint.is_empty() => String::new(),
+                None => format!("\nhint: {hint}"),
+            };
+            format!("FAILED {}: {}{hint}", f.kind, f.message)
         }
     };
     let errs: Vec<String> = rep.logs.iter().filter(|(_, l)| matches!(l.level, "error" | "warn")).take(5).map(|(_, l)| format!("console {}: {}", l.level, l.text.chars().take(200).collect::<String>())).collect();
@@ -618,6 +658,21 @@ fn tools() -> Value {
             "name": "eval",
             "description": "Run JavaScript in the live page and return its value as text. JSON.stringify an object.",
             "inputSchema": {"type": "object", "properties": {"session": S, "js": {"type": "string"}}, "required": ["js"]},
+        },
+        {
+            "name": "console",
+            "description": "The console of the live page, one short line per entry: level and text. Defaults: errors only, entries since the last console call. level: error (errors and uncaught exceptions), warn (and warnings) or all. since_last false: the last 500 entries. max: the newest entries to show, default 50.",
+            "inputSchema": {"type": "object", "properties": {"session": S, "level": {"type": "string", "enum": ["error", "warn", "all"]}, "since_last": {"type": "boolean"}, "max": {"type": "integer"}}},
+        },
+        {
+            "name": "network",
+            "description": "The requests of the live page, one line per request: failure or status, kind (by URL), URL, size, time. Defaults: failed requests only (an error or HTTP 400 and over), since the last network call. failed_only false: all requests. url_contains: keep URLs with this text. since_last false: the last 500 records. max: the newest records to show, default 50.",
+            "inputSchema": {"type": "object", "properties": {"session": S, "failed_only": {"type": "boolean"}, "url_contains": {"type": "string"}, "since_last": {"type": "boolean"}, "max": {"type": "integer"}}},
+        },
+        {
+            "name": "diagnose",
+            "description": "A report of what is wrong with the live page, to paste into a bare issue: the document load, uncaught exceptions, missing engine features, failed requests by kind, an empty-render check, the page size, and a verdict: site problem, bare gap, network or unclear, with the reason. Call it after a step failed.",
+            "inputSchema": {"type": "object", "properties": {"session": S}},
         },
         {
             "name": "sessions",

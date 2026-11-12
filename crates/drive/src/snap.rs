@@ -251,7 +251,6 @@ fn walk(cx: &Cx, root: NodeId, mode: Mode, clicks: &HashSet<NodeId>, out: &mut V
 }
 
 /// Settle the page before a read: the document loaded, and the tasks that are due now run (bounded, so a busy page still answers).
-/// Wait for the load, then run the tasks that are due now (at most 300 ms).
 pub fn settle(p: &mut Page) {
     let _ = p.wait_load(std::time::Duration::from_secs(10));
     let end = std::time::Instant::now() + std::time::Duration::from_millis(300);
@@ -509,4 +508,14 @@ pub fn links(p: &mut Page, refs: &mut Refs, max: usize) -> Result<String, String
         lines.push(format!("[e{}] {name:?} -> {abs}", refs.mint(n)));
     }
     Ok(format!("{}{} link(s)\n{}", header(p), lines.len(), budget(lines, max)))
+}
+
+/// How big the page is: its DOM nodes, and the snapshot lines of a walk that shows text (none: the page shows no text and no control).
+pub fn size(p: &mut Page) -> Option<(usize, usize)> {
+    p.inspect(|d, frame| {
+        let cx = Cx { doc: d, styles: &frame.styles };
+        let mut items = Vec::new();
+        walk(&cx, d.root(), Mode::All, &HashSet::new(), &mut items);
+        (d.len(), items.len())
+    })
 }

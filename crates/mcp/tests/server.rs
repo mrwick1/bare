@@ -78,7 +78,7 @@ fn tools_list_names_the_tools() {
     let mut s = Server::start();
     let r = s.ask("tools/list", json!({}));
     let names: Vec<&str> = r["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(names, ["run_steps", "open", "step", "save_state", "ensure_session", "close", "snapshot", "act", "find", "read", "links", "screenshot", "eval", "sessions"]);
+    assert_eq!(names, ["run_steps", "open", "step", "save_state", "ensure_session", "close", "snapshot", "act", "find", "read", "links", "screenshot", "eval", "console", "network", "diagnose", "sessions"]);
 }
 
 #[test]
@@ -368,4 +368,111 @@ fn an_agent_logs_in_with_snapshot_refs_and_no_step_lines() {
     assert!(!error, "{r}");
     let (r, _) = s.tool("sessions", json!({}));
     assert!(r.as_str().unwrap().contains("main: ") && r.as_str().unwrap().contains("two: "), "{r}");
+}
+
+/// A site with two pages that fail: `/site` throws, fetches a 404 and a port that nobody listens on, and loads a missing script and
+/// stylesheet; `/gap` calls an API that the engine does not have. Gives the base URL.
+fn broken_site() -> String {
+    use std::io::Read;
+    let dead = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let site = format!(
+        "<!doctype html><link rel=stylesheet href=/missing.css><script src=/missing.js></script><body><button id=b>Break</button><p>Hello</p><script>
+document.getElementById('b').onclick = () => {{ throw new Error('click failed'); }};
+fetch('/nope').catch(() => {{}});
+fetch('http://127.0.0.1:{dead}/x').catch(() => {{}});
+console.warn('careful');
+null.boom;
+</script></body>"
+    );
+    let gap = "<!doctype html><body><p>Hello</p><script>navigator.noSuchEngineApi();</script></body>".to_string();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for mut c in listener.incoming().flatten() {
+            let (site, gap) = (site.clone(), gap.clone());
+            std::thread::spawn(move || {
+                let (mut head, mut b) = (Vec::new(), [0u8; 1]);
+                while !head.ends_with(b"\r\n\r\n") && c.read(&mut b).unwrap_or(0) == 1 {
+                    head.push(b[0]);
+                }
+                let head = String::from_utf8_lossy(&head).to_string();
+                let (status, ty, body) = if head.starts_with("GET /site ") {
+                    (200, "text/html", site)
+                } else if head.starts_with("GET /gap ") {
+                    (200, "text/html", gap)
+                } else {
+                    (404, "text/plain", "not found".to_string())
+                };
+                let _ = write!(c, "HTTP/1.1 {status} X\r\nContent-Type: {ty}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            });
+        }
+    });
+    format!("http://127.0.0.1:{port}")
+}
+
+#[test]
+fn console_and_network_report_what_failed_and_forget_what_they_gave() {
+    let base = broken_site();
+    let mut s = Server::start();
+    let (r, error) = s.tool("open", json!({"url": format!("{base}/site"), "timeout_ms": 20000}));
+    assert!(!error, "{r}");
+    s.tool("read", json!({}));
+    let (r, _) = s.tool("console", json!({}));
+    let r = r.as_str().unwrap().to_string();
+    assert!(r.contains("boom") && !r.contains("careful"), "{r}");
+    // Nothing is new now.
+    let (r, _) = s.tool("console", json!({}));
+    assert_eq!(r, json!("no console entries"));
+    let (r, _) = s.tool("console", json!({"level": "all", "since_last": false}));
+    assert!(r.as_str().unwrap().contains("careful") && r.as_str().unwrap().contains("boom"), "{r}");
+    let (r, _) = s.tool("network", json!({}));
+    let r = r.as_str().unwrap().to_string();
+    assert!(r.contains("404 fetch") && r.contains("/nope"), "{r}");
+    assert!(r.contains("script") && r.contains("/missing.js") && r.contains("stylesheet") && r.contains("/missing.css"), "{r}");
+    assert!(r.lines().count() >= 4, "the unreachable port is a line too: {r}");
+    assert!(!r.contains("/site"), "the document passed, so it is not a failed request: {r}");
+    let (r, _) = s.tool("network", json!({}));
+    assert_eq!(r, json!("no requests"));
+    let (r, _) = s.tool("network", json!({"failed_only": false, "since_last": false, "url_contains": "/site"}));
+    assert!(r.as_str().unwrap().starts_with("200 fetch"), "{r}");
+    // An entry that arrives between two calls shows in the next one.
+    s.tool("act", json!({"op": "click", "loc": "css=\"#b\"", "snapshot": false}));
+    let (r, _) = s.tool("console", json!({}));
+    assert!(r.as_str().unwrap().contains("click failed"), "{r}");
+}
+
+#[test]
+fn diagnose_tells_a_site_problem_from_a_bare_gap() {
+    let base = broken_site();
+    let mut s = Server::start();
+    s.tool("open", json!({"url": format!("{base}/site"), "timeout_ms": 20000}));
+    let (r, error) = s.tool("diagnose", json!({}));
+    let r = r.as_str().unwrap().to_string();
+    assert!(!error && r.starts_with("document: ") && r.contains("HTTP 200"), "{r}");
+    assert!(r.contains("uncaught:") && r.contains("failed script:") && r.contains("failed stylesheet:") && r.contains("failed fetch:"), "{r}");
+    assert!(r.contains("DOM nodes"), "{r}");
+    assert!(r.lines().last().unwrap().starts_with("verdict: site problem"), "{r}");
+    s.tool("open", json!({"url": format!("{base}/gap"), "timeout_ms": 20000}));
+    let (r, _) = s.tool("diagnose", json!({}));
+    let r = r.as_str().unwrap().to_string();
+    assert!(r.contains("missing feature:") && r.lines().last().unwrap().starts_with("verdict: bare gap"), "{r}");
+    // A page that does not exist: the document answered 404.
+    s.tool("open", json!({"url": format!("{base}/none"), "timeout_ms": 20000}));
+    let (r, _) = s.tool("diagnose", json!({}));
+    assert!(r.as_str().unwrap().contains("HTTP 404") && r.as_str().unwrap().contains("render: no visible"), "{r}");
+}
+
+#[test]
+fn a_failed_step_names_the_script_error_that_may_explain_it() {
+    let base = broken_site();
+    let mut s = Server::start();
+    s.tool("open", json!({"url": format!("{base}/site"), "timeout_ms": 20000}));
+    // The load logs go to the history of this read, not to the report of the step.
+    s.tool("read", json!({}));
+    let (r, _) = s.tool("step", json!({"steps": "timeout 300\nclick css=\"#b\"\nclick text=\"Missing\"", "compact": true}));
+    let r = r.as_str().unwrap().to_string();
+    assert!(r.contains("FAILED not_found") && r.contains("hint: the page script failed: ") && r.contains("click failed"), "{r}");
+    // With no exception in the call, the usual hint stays.
+    let (r, _) = s.tool("step", json!({"steps": "click text=\"Missing\"", "compact": true}));
+    assert!(r.as_str().unwrap().contains("hint: take a snapshot"), "{r}");
 }

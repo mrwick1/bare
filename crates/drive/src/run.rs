@@ -235,6 +235,8 @@ pub struct Session {
     start: Instant,
     // A session for the next `open` that has no state file (see `preload`).
     preload: Option<StorageState>,
+    /// The last console entries and network records, kept after `drain` (the `console`, `network` and `diagnose` tools read it).
+    pub hist: crate::diag::History,
     pub rep: Report,
 }
 
@@ -243,7 +245,7 @@ impl Session {
         bare_net::trace::enable();
         let _ = bare_net::trace::take();
         let rep = Report { ok: true, steps: Vec::new(), failure: None, logs: Vec::new(), net: Vec::new(), ms: 0.0, window: opt.window, ticks: Ticks::default(), cookies: Vec::new() };
-        Session { host: Host::None, net: bare_net::http::Client::new(), memo: Memo::default(), timeout: opt.timeout, window_cpu: 0, nav_first: 0, start: Instant::now(), preload: None, rep }
+        Session { host: Host::None, net: bare_net::http::Client::new(), memo: Memo::default(), timeout: opt.timeout, window_cpu: 0, nav_first: 0, start: Instant::now(), preload: None, hist: Default::default(), rep }
     }
 
     /// Make the next `open` step that has no state file start from `st`.
@@ -256,11 +258,13 @@ impl Session {
         let mut m = std::mem::take(&mut self.memo);
         let r = self.host.run(move |p| {
             let r = f(p, &mut m.refs);
-            (m, r)
+            (m, r, p.take_logs())
         });
         match r {
-            Ok((m, r)) => {
+            Ok((m, r, logs)) => {
                 self.memo = m;
+                // What the read made the page log, and the requests since the last step, belong to the history and not to a step report.
+                self.hist.feed(logs, bare_net::trace::take());
                 Ok(r)
             }
             Err(e) => Err(e),
@@ -316,6 +320,25 @@ impl Session {
         })?
     }
 
+    /// The page facts for `diag::report`, after a tick that collects what arrived.
+    pub fn diagnose(&mut self, red: &Redactor) -> Result<String, String> {
+        let f = self.with_refs(|p, _| {
+            crate::snap::settle(p);
+            let cpu = thread_cpu_ns();
+            let (nodes, shown) = crate::snap::size(p).unwrap_or((0, 0));
+            crate::diag::Facts { url: p.url().unwrap_or_default(), load_error: p.load_error().map(str::to_string), stopped: p.stopped(), nodes, shown, cpu_ms: cpu as f64 / 1e6 }
+        })?;
+        // The logs that the tick made are in the history after `with_refs`: read the report from it now.
+        Ok(crate::diag::report(&self.hist, &f, &|s| red.clean(s)))
+    }
+
+    /// Collect what the page logged and requested since the last call (a tick), into the history.
+    pub fn collect(&mut self) -> Result<(), String> {
+        self.with_refs(|p, _| {
+            let _ = p.tick();
+        })
+    }
+
     /// The URL of the page of now.
     pub fn url(&mut self) -> Option<String> {
         self.host.run(|p| p.url()).ok().flatten()
@@ -328,11 +351,12 @@ impl Session {
 
     /// Run one step, and add its result to `rep`. False when it failed (`rep.failure` says why).
     pub fn step(&mut self, step: &Step, opt: &Options, red: &mut Redactor) -> bool {
-        let Session { host, net, memo, timeout, window_cpu, nav_first, rep, preload, .. } = self;
+        let Session { host, net, memo, timeout, window_cpu, nav_first, rep, preload, hist, .. } = self;
     let t0 = Instant::now();
     let deadline = t0 + *timeout;
     let (mut tries, mut busy, mut waited, mut ticks) = (0u32, Duration::ZERO, Duration::ZERO, Ticks::default());
     let (cpu0, net0) = (thread_cpu_ns(), bare_net::trace::blocked_us());
+    let (log0, net_at) = (rep.logs.len(), rep.net.len());
     if matches!(step.action, Action::Open(..) | Action::Goto(_) | Action::Reload) {
         *nav_first = rep.net.len();
     }
@@ -421,6 +445,7 @@ impl Session {
     rep.ticks.merge(ticks);
     let first = rep.net.len();
     rep.net.extend(bare_net::trace::take().into_iter().map(|r| (step.line, r)));
+    hist.feed(rep.logs[log0..].iter().map(|(_, l)| l.clone()), rep.net[net_at..].iter().map(|(_, r)| r.clone()));
     // A failed step names the network failures of this step, and of the document that loads since the last `open`, `goto` or
     // `reload`: the page only sees `Failed to fetch`.
     let result = result.map_err(|f| {
