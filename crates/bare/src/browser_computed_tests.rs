@@ -782,8 +782,8 @@ fn work_bound_counts_styled_elements_not_text_nodes() {
     });
 }
 
-/// A read after a change restyles the elements that the change reaches. It charges for those, not for the whole page. 2,000 elements and
-/// 2,000 class rules are 1 M steps for a full cascade (4 M units, `UNITS_PER_STEP`), and the budget here is 6 M. Main charged the whole bound (4 M)
+/// 2,000 class rules. Each restyled element charges 64 steps and its candidate rules, and the budget here is 6 M. Main charged the whole bound (4 M
+/// 2,000 class rules are 1 M steps for a full cascade (each element charges 64 steps and its one candidate rule since 2026-11-12: 128 K), and the budget here is 6 M. Main charged the whole bound (4 M)
 /// for each of the 3 reads (dev.to: 84 M).
 #[test]
 fn a_read_after_a_change_charges_the_elements_it_restyles() {
@@ -798,8 +798,8 @@ fn a_read_after_a_change_charges_the_elements_it_restyles() {
         // A change that keeps the style of its element costs that one element: 100 reads fit (the whole page would be 1 M each).
         let same = "var b = document.body, n = 0; for (var i = 0; i < 100; i++) { b.className = 'z' + i; n += b.clientHeight >= 0; } n";
         assert_eq!(js(&mut b, same), "100");
-        // A change that restyles the whole subtree of the body is charged for it: 20 of them are over the budget.
-        let all = "var b = document.body; for (var i = 0; i < 20; i++) { b.className = i % 2 ? 'on' : 'z'; b.clientHeight; } 1";
+        // A change that restyles the whole subtree of the body is charged for it (64 steps for each element): 60 of them are over the budget.
+        let all = "var b = document.body; for (var i = 0; i < 60; i++) { b.className = i % 2 ? 'on' : 'z'; b.clientHeight; } 1";
         assert_eq!(js(&mut b, all), "limit:Steps");
     });
 }
@@ -842,5 +842,20 @@ fn style_over_4_mib_still_applies() {
         let mut b = at(&format!("<style>{css}</style><div id=t></div>"));
         assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('t')).position"), "absolute");
         assert_eq!(js(&mut b, "String(document.styleSheets[0].cssRules.length)"), "1");
+    });
+}
+
+/// #433: a large page (3,000 elements with six classes each, 36,000 class and descendant rules) restyled ten times in one task. The index
+/// offers 12 rules for each element (36,000 candidates), but the old model charged 27 M steps for each restyle: the third one ended the task.
+#[test]
+fn ten_restyles_of_a_large_page_fit_the_step_budget() {
+    big(|| {
+        let mut css: String = (0..18_000).map(|i| format!(".k{i}{{color:red}}")).collect::<String>() + ".x{color:blue}";
+        css.extend((0..18_000).map(|i| format!(".w .k{i}{{margin:0}}")));
+        let body: String = (0..3000).map(|i| format!("<div class='w k{} k{} k{} k{} k{} k{}'>x</div>", i, i + 1, i + 2, i * 7, i * 7 + 1, i * 7 + 2)).collect();
+        let page = format!("<style>{css}</style><body class=w>{body}");
+        let mut b = Browser::new(tree::parse(&page), BrowserLimits::default(), EvalLimits::default(), HeapLimits::default()).unwrap();
+        let script = "for (var i = 0; i < 10; i++) { document.body.classList.toggle('x'); document.body.getBoundingClientRect(); } 1";
+        assert_eq!(js(&mut b, script), "1");
     });
 }
