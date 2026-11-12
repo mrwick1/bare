@@ -1320,3 +1320,11 @@ Lit and other web-component libraries style a shadow root with `new CSSStyleShee
 - The `adoptedStyleSheets` getter returns a copy. `push` on it has no effect. A page assigns a new array, as Lit does.
 - A sheet adopted by many shadow roots adds its rules once per root. A page with many instances pays for each. Sharing the parsed rules is a later step.
 - `snapshot` and `read` now enter a shadow root. They skipped it before, so a page built from web components showed no elements.
+
+## crates.io: focus options, noscript and grid-template areas (2026-11-12)
+
+crates.io calls `focus({ focusVisible })`. bare stopped the page there, so the app never rendered its content.
+
+- `focus()` reads `focusVisible` and ignores it. No `:focus-visible` state exists. An unknown option is ignored, as the standard says.
+- The UA sheet now has `noscript { display: none !important }`, as in Firefox. bare runs scripts, so a page style such as `noscript { display: grid }` must not show the box.
+- `grid-template` now reads the form with area strings: line names, one string per row, an optional row size, and an optional `/ columns`. The crates.io header uses it. Before, bare dropped the declaration and placed the header items wrong.

@@ -146,6 +146,14 @@ fn the_content_of_noscript_is_not_shown() {
 }
 
 #[test]
+fn a_page_style_does_not_show_noscript() {
+    // crates.io sets `noscript { display: grid }`. Scripts run, so the box stays hidden: the green bar is on top, and nothing is below it.
+    let (w, px, _) = shoot_page("n2.html", "#d", "");
+    assert!(near(px[5 * w + 5], (0, 170, 0)), "{:06x}", px[5 * w + 5]);
+    assert!((10..120).all(|y| (0..300).all(|x| px[y * w + x] == 0xffffff)), "the noscript box is drawn");
+}
+
+#[test]
 fn a_script_loads_a_picture_with_the_image_constructor() {
     // `new Image(5, 6)`, `src`, `onload`, `onerror` and `decode()`; the picture is not in the tree. The log is sorted: the order is the network's.
     let (_, _, json) = shoot_page("ctor.html", "#r", "expect css=\"#r\" text=\"bad:error:true,decode:ok,ok:20x10:true:5\"");

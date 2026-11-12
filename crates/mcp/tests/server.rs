@@ -1292,3 +1292,26 @@ fn a_snapshot_leaves_out_what_an_adopted_sheet_hides() {
     let (r, error) = s.tool("eval", json!({"js": "var r = document.querySelector('x-card').shadowRoot; getComputedStyle(r.getElementById('seen')).color + ' ' + getComputedStyle(r.getElementById('gone')).display"}));
     assert!(!error && r.to_string().contains("rgb(0, 0, 255) none"), "{r}");
 }
+
+/// A styled `noscript` (crates.io sets `display: grid`) stays out of the snapshot and of `read`: scripts run.
+#[test]
+fn a_styled_noscript_is_not_in_the_snapshot_or_the_read() {
+    let html = "<!doctype html><style>noscript{display:grid}</style><body><noscript>Enable JavaScript please</noscript><h1>Crate</h1><button>Copy</button>";
+    let mut s = Server::start();
+    let (snap, error) = s.tool("open", json!({"url": one_page(html.to_string()), "snapshot": true, "timeout_ms": 30000}));
+    let snap = snap.as_str().unwrap().to_string();
+    assert!(!error && snap.contains("Copy") && !snap.contains("Enable JavaScript"), "{snap}");
+    let (r, error) = s.tool("read", json!({}));
+    let r = r.to_string();
+    assert!(!error && r.contains("Crate") && !r.contains("Enable JavaScript"), "{r}");
+}
+
+/// `focus({ focusVisible })` and an unknown option do not stop the page: the app goes on and renders after it.
+#[test]
+fn focus_with_focus_visible_does_not_stop_the_page() {
+    let html = "<!doctype html><body><input id=i><script>\
+        var i = document.getElementById('i'); i.focus({focusVisible: true}); i.focus({focusVisible: false, preventScroll: true, other: 1});\
+        var b = document.createElement('button'); b.textContent = 'After focus'; document.body.appendChild(b);</script>";
+    let snap = snap_of(html, json!({}));
+    assert!(snap.contains("After focus") && !snap.contains("stopped"), "{snap}");
+}
