@@ -174,6 +174,8 @@ struct Memo {
     /// The keys of the `type` step of now that are not sent yet, the last first. One goes in each try, so the tasks of the page run
     /// between two keys.
     keys: Option<Vec<char>>,
+    /// The refs that snapshots minted for the document of now.
+    refs: crate::snap::Refs,
 }
 
 pub struct StepOut {
@@ -247,6 +249,76 @@ impl Session {
     /// Make the next `open` step that has no state file start from `st`.
     pub fn preload(&mut self, st: StorageState) {
         self.preload = Some(st);
+    }
+
+    /// Run `f` on the page with the refs of the session (`snap`): a read between steps.
+    pub fn with_refs<R: Send + 'static>(&mut self, f: impl FnOnce(&mut Page, &mut crate::snap::Refs) -> R + Send + 'static) -> Result<R, String> {
+        let mut m = std::mem::take(&mut self.memo);
+        let r = self.host.run(move |p| {
+            let r = f(p, &mut m.refs);
+            (m, r)
+        });
+        match r {
+            Ok((m, r)) => {
+                self.memo = m;
+                Ok(r)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// A PNG of the page, or of the element of ref `r` (its box, clipped to the window), at `path`. Waits up to the step time limit for
+    /// the document and its pictures. Refused when a secret shows on the page.
+    pub fn screenshot(&mut self, path: PathBuf, r: Option<u32>, red: &Redactor) -> Result<String, String> {
+        let (red, limit) = (red.clone(), self.timeout);
+        self.with_refs(move |p, refs| {
+            let end = Instant::now() + limit;
+            let _ = p.wait_load(limit);
+            while (p.loading() || p.images_pending()) && Instant::now() < end {
+                let (more, next) = p.tick();
+                if !more {
+                    std::thread::sleep(next.map_or(Duration::from_millis(5), |t| t.saturating_duration_since(Instant::now()).min(Duration::from_millis(20))));
+                }
+            }
+            if !shown(p, &red) {
+                return Err("withheld: a secret shows on the page".to_string());
+            }
+            let clip = match r {
+                Some(r) => {
+                    let h = refs.get(r, p.generation())?;
+                    Some(p.visible_box(h).map(|b| (b.x, b.y, b.w, b.h)).map_err(|e| format!("e{r} has no visible box: {e:?}"))?)
+                }
+                None => None,
+            };
+            let c = p.capture();
+            let c = match clip {
+                Some(b) => crop(c, b),
+                None => c,
+            };
+            bare_paint::png::write_file(&c, &path).map_err(|e| format!("{}: {e}", path.display()))?;
+            Ok(format!("{} ({}x{})", path.display(), c.width, c.height))
+        })?
+    }
+
+    /// Run a script in the page and give its value as text (`JSON.stringify` it for an object).
+    pub fn eval(&mut self, code: String) -> Result<String, String> {
+        self.with_refs(move |p, _| {
+            let _ = p.wait_load(Duration::from_secs(10));
+            let b = p.browser().ok_or("no document")?;
+            let r = b.run_script(&code);
+            let out = match r {
+                Ok(v) => Ok(b.it.display(v)),
+                Err(e) => Err(format!("the script threw: {}", short(&format!("{e:?}")))),
+            };
+            p.touched();
+            let _ = p.tick();
+            out
+        })?
+    }
+
+    /// The URL of the page of now.
+    pub fn url(&mut self) -> Option<String> {
+        self.host.run(|p| p.url()).ok().flatten()
     }
 
     /// A copy of the storage of the open page (it holds live credentials). `None` with no page.
@@ -459,6 +531,22 @@ fn thread_cpu_ns() -> u64 {
     std::fs::read_to_string("/proc/thread-self/schedstat").ok().and_then(|s| s.split(' ').next()?.parse().ok()).unwrap_or(0)
 }
 
+/// The part of `c` under `b`, clipped to the canvas.
+fn crop(c: Canvas<'static>, b: (f32, f32, f32, f32)) -> Canvas<'static> {
+    let (bx, by, bw, bh) = b;
+    let (w, h) = (c.width as i64, c.height as i64);
+    let x0 = (bx.floor() as i64).clamp(0, w);
+    let y0 = (by.floor() as i64).clamp(0, h);
+    let x1 = ((bx + bw).ceil() as i64).clamp(x0, w);
+    let y1 = ((by + bh).ceil() as i64).clamp(y0, h);
+    let src = c.pixels.into_vec();
+    let mut out = Vec::with_capacity(((x1 - x0) * (y1 - y0)) as usize);
+    for y in y0..y1 {
+        out.extend_from_slice(&src[(y * w + x0) as usize..(y * w + x1) as usize]);
+    }
+    Canvas { width: (x1 - x0) as u32, height: (y1 - y0) as u32, pixels: bare_paint::canvas::Pixels::Own(out) }
+}
+
 fn save(c: &Canvas, dir: &std::path::Path, name: &str) -> String {
     let path = dir.join(format!("{name}.png"));
     match bare_paint::png::write_file(c, &path) {
@@ -505,8 +593,25 @@ fn short(s: &str) -> String {
     if s.chars().count() > 120 { s.chars().take(120).collect::<String>() + "…" } else { s }
 }
 
+/// The elements of `loc`, with a ref resolved from the memo.
+fn found_in(p: &mut Page, m: &Memo, loc: &Locator) -> Result<locate::Found, Try> {
+    if let Locator::Ref(r) = loc {
+        let h = m.refs.get(*r, p.generation()).map_err(|e| Try::Stop(fail("stale_ref", e)))?;
+        let shown = if p.connected(h) && p.visible_box(h).is_ok() { vec![h] } else { vec![] };
+        return Ok(locate::Found { hidden: usize::from(shown.is_empty()), shown });
+    }
+    locate::find(p, loc).map_err(|e| Try::Again(fail("page", e)))
+}
+
 /// The one element that `loc` names now.
 fn one(p: &mut Page, m: &mut Memo, loc: &Locator) -> Result<Handle, Try> {
+    if let Locator::Ref(r) = loc {
+        let h = m.refs.get(*r, p.generation()).map_err(|e| Try::Stop(fail("stale_ref", e)))?;
+        if !p.connected(h) {
+            return Err(Try::Stop(fail("detached", format!("{loc} ({}) left the document: take a new snapshot", p.describe(h)))));
+        }
+        return Ok(h);
+    }
     let found = locate::find(p, loc).map_err(|e| if e.contains("not valid") { Try::Stop(fail("not_found", e)) } else { Try::Again(fail("page", e)) })?;
     let key = loc.to_string();
     match found.shown.as_slice() {
@@ -674,14 +779,14 @@ fn check(p: &mut Page, m: &mut Memo, c: &Check) -> Result<(), Try> {
             }
         }
         Check::El(loc, State::Hidden) => {
-            let found = locate::find(p, loc).map_err(|e| Try::Again(fail("page", e)))?;
+            let found = found_in(p, m, loc)?;
             let shown: Vec<Handle> = found.shown.into_iter().filter(|&h| p.visible_box(h).is_ok()).collect();
             if let Some(&h) = shown.first() {
                 return no(format!("expected {loc} hidden, {} is rendered", p.describe(h)));
             }
         }
         Check::El(loc, State::Count(n)) => {
-            let found = locate::find(p, loc).map_err(|e| Try::Again(fail("page", e)))?;
+            let found = found_in(p, m, loc)?;
             if found.shown.len() != *n {
                 return no(format!("expected {n} of {loc}, found {}", found.shown.len()));
             }

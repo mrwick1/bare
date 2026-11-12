@@ -360,6 +360,15 @@ impl Dom {
         self.fire_ui(it, target, ty, proto, !enter_leave, !enter_leave, ui, related)
     }
 
+    /// The nodes with a listener of one of `types` added by a script (`addEventListener` or an `on*` property). An agent snapshot shows
+    /// them as clickable even without a role.
+    pub fn listened(&self, types: &[&str]) -> std::collections::HashSet<NodeId> {
+        self.st.borrow().listeners.iter().filter_map(|(t, v)| match t {
+            Target::Node(n) if v.iter().any(|l| types.contains(&&*l.ty)) => Some(*n),
+            _ => None,
+        }).collect()
+    }
+
     fn has_listener(&self, n: NodeId, ty: &str) -> bool {
         crate::browser_handlers::sync(self, Target::Node(n), ty);
         self.st.borrow().listeners.get(&Target::Node(n)).is_some_and(|v| v.iter().any(|l| *l.ty == *ty))
@@ -1050,6 +1059,11 @@ pub(crate) fn chains(doc: &Document) -> [Vec<NodeId>; 3] {
 }
 
 impl Browser {
+    /// See `Dom::listened`.
+    pub fn listened(&self, types: &[&str]) -> std::collections::HashSet<NodeId> {
+        self.dom.listened(types)
+    }
+
     /// Cascade and lay out the page now, with the caps of `getComputedStyle` and `offsetWidth` (a linked style sheet that
     /// was not supplied is `Unsupported`, as there).
     pub fn render(&mut self) -> R<Frame> {

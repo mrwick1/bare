@@ -1212,3 +1212,17 @@ Owner request: a small MCP server, so that an agent can run end-to-end tests in 
 - The page takes the chunks in the loader loop (`Browser::run_streams`), and `live_work` counts a waiting chunk as work. The XHR fires `readystatechange` and `progress` in state 3 for each chunk, as Chrome does. The shim parses only the new text.
 - Caps: 6 open streams on a page, and 1 MiB of body on a stream. A stream past the byte cap ends with a network error, and `EventSource` connects again with `Last-Event-ID`.
 - An open stream does not hold the settle of a headless page.
+
+## Agent tools in the MCP server (2026-11-12)
+
+An agent such as `deck` must read a page and act on it in few model calls. Screenshots cost many tokens and a vision call. Step lines need a locator that the agent must guess.
+
+- `snapshot` reads the accessibility tree as text: one line per element, `[e7] role "name" = "value" (states)`. One walk of the DOM uses the cascade of the last frame, with no layout query per element. A page answers in under 15 ms.
+- A ref names an element of one document. A ref keeps its number across snapshots of the same document. A ref of an older document fails as `stale_ref`, and a ref whose element left the document fails as `detached`.
+- `*` marks an element that the last snapshot did not show. An agent then sees a new toast, dialog or error without a diff.
+- bare knows the listeners of the page. An element with a click listener and no role shows as `clickable`. Chrome tools guess this from `cursor: pointer`. bare has no `cursor` property, so a page that delegates its events to the root (React) still shows no `clickable`.
+- A live region (`alert`, `status`, `log`) shows its text as its name. A closed `<details>` shows only its summary. A text run that repeats the name of the element next to it is dropped.
+- `act` runs one step and gives a short receipt: ok, or the failure kind with a hint, new console errors, failed requests and a navigation. Then it gives the new snapshot, so one call does the action and the read. A failed `act` is a tool error.
+- `find`, `read` (paged text), `links`, `screenshot` (the page or one element, a path, and the image when asked), `eval` and `sessions` complete the set. Every reply goes through the redactor.
+- Each tool takes `session`. Sessions run side by side, one page each. `open` ends only the session of its name.
+- Step lines accept `ref=e7`, so a journey can mix refs and user locators.
