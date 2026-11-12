@@ -104,6 +104,7 @@ fn a_live_session_runs_the_journey_one_line_at_a_time() {
     assert_eq!(lines.next(), Some("open ${BASE}/"));
     args["url"] = json!(format!("{}/", args["vars"]["BASE"].as_str().unwrap()));
     args["timeout_ms"] = json!(30000);
+    args["report"] = json!(true);
     let (rep, error) = s.tool("open", args);
     assert!(!error && rep["ok"] == true, "{rep}");
     let mut last = 1;
@@ -206,7 +207,7 @@ fn ensure_session_logs_in_again_when_a_saved_session_is_not_valid() {
     let mut args = ensure_args("x", "stale");
     args["file"] = json!(file.to_str().unwrap());
     // A session that is not logged in: the login page only.
-    let (rep, _) = a.tool("open", json!({"url": args["url"], "vars": args["vars"]}));
+    let (rep, _) = a.tool("open", json!({"url": args["url"], "vars": args["vars"], "report": true}));
     assert_eq!(rep["ok"], true, "{rep}");
     let (rep, error) = a.tool("save_state", json!({"name": "x", "file": file.to_str().unwrap()}));
     assert!(!error && rep["saved"] == "x", "{rep}");
@@ -250,7 +251,7 @@ fn save_state_writes_a_private_file_and_open_restores_a_name() {
     let saved: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
     let token = saved.to_string().split("app-token-").nth(1).map(|t| format!("app-token-{}", &t[..1])).expect("a token in the file");
     s.forbid.push(token);
-    let (rep, error) = s.tool("open", json!({"url": args["url"], "vars": args["vars"], "state": "n2"}));
+    let (rep, error) = s.tool("open", json!({"url": args["url"], "vars": args["vars"], "state": "n2", "report": true}));
     assert!(!error && rep["ok"] == true, "{rep}");
     let (rep, _) = s.tool("step", json!({"steps": CHECK}));
     assert_eq!(rep["ok"], true, "{rep}");
@@ -267,7 +268,7 @@ fn a_shot_right_after_open_shows_the_loaded_page() {
     let (rep, error) = s.tool("run_steps", json!({"steps": format!("open {url}\nexpect url~\"/login\"\nshot want"), "timeout_ms": 30000}));
     assert!(!error && rep["ok"] == true, "{rep}");
     let want = std::fs::read(format!("{}/want.png", rep["out"].as_str().unwrap())).unwrap();
-    let (rep, error) = s.tool("open", json!({"url": url, "timeout_ms": 30000}));
+    let (rep, error) = s.tool("open", json!({"url": url, "timeout_ms": 30000, "report": true}));
     assert!(!error && rep["ok"] == true, "{rep}");
     let (rep, error) = s.tool("step", json!({"steps": "shot got"}));
     assert!(!error && rep["ok"] == true, "{rep}");
@@ -358,8 +359,9 @@ fn an_agent_logs_in_with_snapshot_refs_and_no_step_lines() {
     assert!(error && r.as_str().unwrap().contains("FAILED detached"), "{r}");
     let (r, _) = s.tool("find", json!({"role": "link", "name": "agents"}));
     assert!(r.as_str().unwrap().starts_with("1 match"), "{r}");
-    let (r, _) = s.tool("read", json!({"max_chars": 20}));
-    assert!(r.as_str().unwrap().contains("read again with offset=20"), "{r}");
+    // A limit that the header fills is an error that names a limit that works (#398).
+    let (r, error) = s.tool("read", json!({"max_chars": 20}));
+    assert!(error && r.as_str().unwrap().contains("pass at least"), "{r}");
     let (r, _) = s.tool("eval", json!({"js": "1 + 1"}));
     assert_eq!(r, json!(2));
     // A second session runs beside the first.
@@ -637,7 +639,7 @@ fn an_agent_fills_a_form_with_select_check_hover_dblclick_and_upload() {
     let (r, error) = act(&mut s, json!({"op": "click", "loc": "role=button name=\"Send file\"", "mode": "all"}));
     assert!(!error && r.contains("navigated:") && r.contains("uploaded: notes.txt 12"), "{r}");
     // The same actions are step lines.
-    let (r, error) = s.tool("run_steps", json!({"steps": format!("open {base}/forms\nselect css=\"#country\" \"Tanzania\"\ncheck label=\"Agree\"\nexpect label=\"Agree\" checked\nuncheck label=\"Agree\"\nhover text=\"Hover target\"\ndblclick css=\"#dbl\"\nexpect css=\"#dbls\" text=\"double\"\nupload css=\"input[type=file]\" \"{file}\"\n"), "compact": true}));
+    let (r, error) = s.tool("run_steps", json!({"steps": format!("open {base}/forms\nselect css=\"#country\" \"Tanzania\"\ncheck label=\"Agree\"\nexpect label=\"Agree\" checked\nuncheck label=\"Agree\"\nhover text=\"Hover target\"\ndblclick css=\"#dbl\"\nexpect css=\"#dbls\" text=\"double\"\nupload css=\"input[type=file]\" \"{file}\"\n")}));
     assert!(!error && r["ok"] == true, "{r}");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -758,6 +760,13 @@ fn naming_app() -> String {
         // The login page of a news site: the labels sit in the cell before the field.
         ("/login", "<!doctype html><body><form><table><tr><td>username:</td><td><input type=text name=acct></td></tr><tr><td>password:</td><td><input type=password name=pw></td></tr></table>\
             <p>Nickname <input name=nick></p><p><b>Age</b> <input name=age></p><div><input name=bare_name></div><input name=holder placeholder=Holder><input name=named aria-label=Named></form>"),
+        // An info box: the word "Developer" is in a header cell, in a paragraph and in a link.
+        ("/scope", "<!doctype html><body><table class=info><tr><th>Developer</th><td>A team</td></tr><tr><th>Typing</th><td>Static</td></tr></table>\
+            <p>Developer Ann wrote it.</p><a href=/scope>Developers</a>"),
+        // Links whose names hold a count, and a timer that never ends, as a big site has.
+        ("/near", "<!doctype html><body><a href=/near>Issues (5k+)</a> <a href=/near>Issues closed</a> <a href=/near>Pull requests</a><script>setInterval(() => {}, 50)</script>"),
+        // A to-do list with one item, and nothing that runs.
+        ("/todo", "<!doctype html><body><ul><li><input type=checkbox aria-label=\"Toggle Buy milk\"> Buy milk</li></ul><input type=checkbox aria-label=\"Toggle all\">"),
     ];
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -909,7 +918,6 @@ fn acting_on_a_hidden_element_says_it_is_hidden() {
         let mut args = args;
         args["ref"] = json!(r);
         args["snapshot"] = json!(false);
-        args["timeout_ms"] = json!(500);
         let (out, error) = s.tool("act", args.clone());
         assert!(error && out.as_str().unwrap().contains("hidden"), "{args} {out}");
     }
@@ -1267,7 +1275,7 @@ fn tall_page() -> String {
 #[test]
 fn a_shot_of_a_tall_element_is_not_cut_at_the_window() {
     let mut s = Server::start();
-    let (rep, error) = s.tool("open", json!({"url": tall_page(), "timeout_ms": 30000}));
+    let (rep, error) = s.tool("open", json!({"url": tall_page(), "timeout_ms": 30000, "report": true}));
     assert!(!error && rep["ok"] == true, "{rep}");
     let (snap, _) = s.tool("snapshot", json!({}));
     let line = snap.as_str().unwrap().lines().find(|l| l.contains("\"tall\"")).unwrap_or_else(|| panic!("{snap}"));
@@ -1321,6 +1329,48 @@ fn eval_waits_for_a_promise_and_runs_top_level_await() {
     // A promise that never settles ends at the time limit.
     let (r, error) = s.tool("eval", json!({"js": "new Promise(() => {})"}));
     assert!(error && r.as_str().unwrap().contains("pending"), "{r}");
+}
+
+fn eval_json_pages(_: &str, _: &str, _: &str, _: Option<&str>) -> (u16, &'static str, Vec<u8>) {
+    (200, "text/html", b"<!doctype html><title>eval</title><div id=out class='a b'>x</div><p>one</p><p>two</p>".to_vec())
+}
+
+#[test]
+fn eval_prints_values_as_compact_json() {
+    let base = common::serve_route(eval_json_pages);
+    let mut s = Server::start();
+    let (r, error) = s.tool("open", json!({"url": format!("{base}/"), "timeout_ms": 1500}));
+    assert!(!error, "{r}");
+    let text = |s: &mut Server, js: &str| {
+        let (r, error) = s.tool("eval", json!({"js": js}));
+        assert!(!error, "{js}: {r}");
+        match r {
+            Value::String(t) => t,
+            v => v.to_string(),
+        }
+    };
+    // Arrays and plain objects are compact JSON; strings, numbers, booleans and null stay as before.
+    assert_eq!(text(&mut s, "[typeof window, 1, \"a\"]"), r#"["object",1,"a"]"#);
+    assert_eq!(text(&mut s, "({a: 1, b: [true, null], c: {d: 'x'}, u: undefined})"), r#"{"a":1,"b":[true,null],"c":{"d":"x"}}"#);
+    assert_eq!(text(&mut s, "'plain text'"), "plain text");
+    assert_eq!(text(&mut s, "undefined"), "undefined");
+    assert_eq!(text(&mut s, "null"), "null");
+    // Functions, DOM nodes, node lists, Map, Set and Date.
+    assert_eq!(text(&mut s, "function hello(a) {}; hello"), "function hello()");
+    assert_eq!(text(&mut s, "document.getElementById('out')"), "<div#out.a.b>");
+    assert_eq!(text(&mut s, "document.querySelectorAll('p')"), r#"["<p>","<p>"]"#);
+    assert_eq!(text(&mut s, "document.getElementsByTagName('p')"), r#"["<p>","<p>"]"#);
+    assert_eq!(text(&mut s, "[...document.querySelectorAll('div,p')].slice(0, 2)"), r#"["<div#out.a.b>","<p>"]"#);
+    assert_eq!(text(&mut s, "new Map([['k', 1], [2, [3]]])"), r#"[["k",1],[2,[3]]]"#);
+    assert_eq!(text(&mut s, "new Set(['a', 'a', 'b'])"), r#"["a","b"]"#);
+    assert_eq!(text(&mut s, "new Date(0)"), "1970-01-01T00:00:00.000Z");
+    assert_eq!(text(&mut s, "({f: function g() {}, when: new Date(0)})"), r#"{"f":"function g()","when":"1970-01-01T00:00:00.000Z"}"#);
+    // A cycle does not hang.
+    assert_eq!(text(&mut s, "var o = {name: 'o'}; o.self = o; o"), r#"{"name":"o","self":"[Circular]"}"#);
+    // A long value is cut, with its full length.
+    let long = text(&mut s, "Array.from({length: 2000}, (_, i) => i)");
+    assert!(long.starts_with("[0,1,2,") && long.ends_with("… (cut: 4000 of 8891 chars)"), "{}", &long[long.len() - 60..]);
+    assert_eq!(long.chars().count(), 4000 + "… (cut: 4000 of 8891 chars)".chars().count());
 }
 
 const LATE: &str = "<!doctype html><body><p id=out>none</p>
@@ -1519,4 +1569,279 @@ fn agent_tools(window: bool) {
     let (r, e) = s.tool("act", json!({"op": "click", "ref": ref_of(snap.as_str().unwrap(), "\"Go\""), "session": "cover"}));
     let r = r.as_str().unwrap().to_string();
     assert!(e && r.contains("dialog \"Cookie consent\"") && t.elapsed().as_millis() < 1500, "{} ms: {r}", t.elapsed().as_millis());
+}
+
+/// The pages of a site that navigates in four ways: a plain link to a slow page, Turbo-like links that fetch the next page and replace
+/// the body (the address changes before or after the fetch), and a button that changes the address, then fetches and renders. The
+/// fetch takes longer than the 2 s that a read waits for a reply, as GitHub's does.
+fn nav_pages(_: &str, target: &str, _: &str, _: Option<&str>) -> (u16, &'static str, Vec<u8>) {
+    let path = target.split('?').next().unwrap_or("/");
+    let wait = |ms| std::thread::sleep(std::time::Duration::from_millis(ms));
+    let html = |s: &str| (200, "text/html", s.as_bytes().to_vec());
+    match path {
+        "/" => html("<!doctype html><title>Home</title><body><h1>Home page</h1>
+<a href=/plain>Plain</a> <a href=/turbo id=t>Turbo</a> <a href=/late id=l>Late</a> <button id=r>Route</button>
+<a href=/styled>Styled</a> <a href=/stuck>Stuck</a>
+<script>
+function load(after) { return fetch('/frag').then(r => r.text()).then(t => { after(); document.body.innerHTML = t; }); }
+document.getElementById('t').onclick = e => { e.preventDefault(); history.pushState({}, '', '/turbo'); load(() => {}); };
+document.getElementById('l').onclick = e => { e.preventDefault(); load(() => history.pushState({}, '', '/late')); };
+document.getElementById('r').onclick = () => { history.pushState({}, '', '/route'); fetch('/frag').then(r => r.text()).then(() => { document.body.innerHTML = '<h1>Route page</h1>'; }); };
+</script></body>"),
+        "/frag" => {
+            wait(2300);
+            html("<h1>Issues page</h1><a href=/>Home</a>")
+        }
+        "/plain" => {
+            wait(200);
+            html("<!doctype html><title>Plain</title><body><h1>Plain page</h1><a href=/>Home</a></body>")
+        }
+        "/styled" => html("<!doctype html><title>Styled</title><link rel=stylesheet href=/slow.css?ms=800><body><h1>Styled page</h1><a href=/plain>Plain</a></body>"),
+        "/stuck" => html("<!doctype html><title>Stuck</title><link rel=stylesheet href=/slow.css?ms=13000><body><h1>Stuck page</h1></body>"),
+        "/slow.css" => {
+            wait(target.split("ms=").nth(1).and_then(|m| m.parse().ok()).unwrap_or(800));
+            (200, "text/css", b"h1 { color: red }".to_vec())
+        }
+        _ => (404, "text/plain", b"no".to_vec()),
+    }
+}
+
+/// Each act that starts a navigation names the new URL, and the outline after it is of the new page, with or without a snapshot.
+#[test]
+fn an_act_that_navigates_says_where_and_shows_the_new_page() {
+    let base = common::serve_route(nav_pages);
+    let mut s = Server::start();
+    for (what, path, heading) in [("link name=\"Plain\"", "/plain", "Plain page"), ("link name=\"Turbo\"", "/turbo", "Issues page"), ("link name=\"Late\"", "/late", "Issues page"), ("button name=\"Route\"", "/route", "Route page")] {
+        for snapshot in [true, false] {
+            let (r, e) = s.tool("open", json!({"url": format!("{base}/"), "snapshot": true}));
+            assert!(!e, "{r}");
+            let (r, e) = s.tool("act", json!({"op": "click", "loc": format!("role={what}"), "snapshot": snapshot}));
+            let r = r.as_str().unwrap().to_string();
+            assert!(!e && r.contains(&format!("navigated: {base}{path}")), "{what} snapshot={snapshot}: {r}");
+            assert!(!r.contains("not ready"), "{what} snapshot={snapshot}: {r}");
+            if snapshot {
+                assert!(r.contains(heading) && !r.contains("Home page"), "{what}: the outline is not of the new page: {r}");
+            }
+            let (r, _) = s.tool("eval", json!({"js": "location.pathname + ' ' + document.querySelector('h1').textContent"}));
+            assert!(r.as_str().unwrap().contains(&format!("{path} {heading}")), "{what} snapshot={snapshot}: {r}");
+        }
+    }
+}
+
+/// `back` and `forward` over two documents name the URL they reach, and show that page.
+#[test]
+fn back_and_forward_say_where_they_went() {
+    let base = common::serve_route(nav_pages);
+    let mut s = Server::start();
+    for snapshot in [true, false] {
+        s.tool("open", json!({"url": format!("{base}/"), "snapshot": true}));
+        let (r, e) = s.tool("act", json!({"op": "click", "loc": "role=link name=\"Plain\"", "snapshot": snapshot}));
+        assert!(!e && r.as_str().unwrap().contains(&format!("navigated: {base}/plain")), "{r}");
+        let (r, e) = s.tool("act", json!({"op": "back", "snapshot": snapshot}));
+        let r = r.as_str().unwrap().to_string();
+        assert!(!e && r.contains(&format!("navigated: {base}/")) && !r.contains("/plain"), "back snapshot={snapshot}: {r}");
+        if snapshot {
+            assert!(r.contains("Home page"), "{r}");
+        }
+        let (r, e) = s.tool("act", json!({"op": "forward", "snapshot": snapshot}));
+        let r = r.as_str().unwrap().to_string();
+        assert!(!e && r.contains(&format!("navigated: {base}/plain")), "forward snapshot={snapshot}: {r}");
+        if snapshot {
+            assert!(r.contains("Plain page") && !r.contains("Home page"), "{r}");
+        }
+    }
+}
+
+/// The snapshot after a navigation waits for the first layout (a slow style sheet). A layout that does not come in time does not make
+/// the act a failure: the click ran, and the receipt says so.
+#[test]
+fn an_act_waits_for_the_first_layout() {
+    let base = common::serve_route(nav_pages);
+    let mut s = Server::start();
+    let (r, e) = s.tool("open", json!({"url": format!("{base}/"), "snapshot": true}));
+    assert!(!e, "{r}");
+    let (r, e) = s.tool("act", json!({"op": "click", "loc": "role=link name=\"Styled\""}));
+    let r = r.as_str().unwrap().to_string();
+    assert!(!e && r.contains("Styled page"), "{r}");
+    let (r, e) = s.tool("open", json!({"url": format!("{base}/"), "snapshot": true, "timeout_ms": 1000}));
+    assert!(!e, "{r}");
+    let (r, e) = s.tool("act", json!({"op": "click", "loc": "role=link name=\"Stuck\""}));
+    let r = r.as_str().unwrap().to_string();
+    assert!(!e && r.contains(&format!("navigated: {base}/stuck")) && r.contains("no snapshot: ") && r.contains("no layout yet"), "{r}");
+}
+
+/// A tab that the last action opened is a session in `sessions`, also when no reply has named it yet (a `step` call).
+#[test]
+fn sessions_lists_a_tab_that_the_last_action_opened() {
+    let base = pages(&[("/", TABS), ("/b", "<!doctype html><body><p>second page</p></body>")]);
+    let mut s = Server::start();
+    s.tool("open", json!({"url": format!("{base}/")}));
+    let (r, e) = s.tool("step", json!({"steps": "click text=\"Blank link\"", "compact": true}));
+    assert!(!e, "{r}");
+    let (r, _) = s.tool("sessions", json!({}));
+    assert!(r.as_str().unwrap().contains(&format!("main~2: {base}/b")), "{r}");
+}
+
+#[test]
+fn find_with_css_and_text_keeps_the_matches_inside_the_css_scope() {
+    let base = naming_app();
+    let mut s = Server::start();
+    s.tool("open", json!({"url": format!("{base}/scope"), "snapshot": false}));
+    let (r, error) = s.tool("find", json!({"css": "table.info th", "text": "Developer"}));
+    let r = r.as_str().unwrap();
+    assert!(!error && r.starts_with("1 match"), "{r}");
+    assert!(r.contains("\"Developer\"") && !r.contains("Ann") && !r.contains("Developers"), "{r}");
+}
+
+#[test]
+fn an_unknown_argument_names_the_closest_valid_key() {
+    let base = naming_app();
+    let mut s = Server::start();
+    s.tool("open", json!({"url": format!("{base}/near"), "snapshot": false}));
+    let (r, error) = s.tool("find", json!({"role": "link", "name~": "Issues"}));
+    assert!(error, "{r}");
+    assert_eq!(r.as_str().unwrap(), "unknown argument \"name~\": did you mean \"name\"?");
+    // A key that one op does not use: a prompt answer is prompt_text, not text.
+    let (r, error) = s.tool("act", json!({"op": "click", "loc": "text=\"Pull requests\"", "dialog": "accept", "text": "yes"}));
+    assert!(error, "{r}");
+    assert!(r.as_str().unwrap().contains("did you mean \"prompt_text\"?"), "{r}");
+    // A tool without a session checks its keys too.
+    let (r, error) = s.tool("sessions", json!({"verbose": true}));
+    assert!(error && r.as_str().unwrap().starts_with("unknown argument \"verbose\""), "{r}");
+}
+
+#[test]
+fn an_exact_name_with_near_names_fails_at_once_and_lists_them() {
+    let base = naming_app();
+    let mut s = Server::start();
+    s.tool("open", json!({"url": format!("{base}/near"), "snapshot": false, "timeout_ms": 20000}));
+    let t = std::time::Instant::now();
+    let (r, error) = s.tool("act", json!({"op": "click", "loc": "role=link name=\"Issues\"", "snapshot": false}));
+    let ms = t.elapsed().as_millis();
+    let r = r.as_str().unwrap();
+    assert!(error && r.starts_with("FAILED not_found"), "{r}");
+    assert!(ms < 2000, "took {ms} ms: {r}");
+    assert!(r.contains("\"Issues (5k+)\"") && r.contains("\"Issues closed\"") && !r.contains("Pull requests"), "{r}");
+}
+
+#[test]
+fn a_miss_on_an_idle_page_speaks_of_the_locator() {
+    let base = naming_app();
+    let mut s = Server::start();
+    s.tool("open", json!({"url": format!("{base}/todo"), "snapshot": false}));
+    let (r, error) = s.tool("act", json!({"op": "click", "loc": "role=checkbox name~\"Walk the dog\"", "snapshot": false}));
+    let r = r.as_str().unwrap();
+    assert!(error && r.starts_with("FAILED not_found"), "{r}");
+    assert!(!r.contains("nothing can change it"), "{r}");
+    assert!(r.contains("2 element(s) with role=checkbox"), "the miss says what has the role: {r}");
+    // An exact name with no near name says the same.
+    let (r, _) = s.tool("act", json!({"op": "click", "loc": "role=checkbox name=\"Toggle every\"", "snapshot": false}));
+    assert!(r.as_str().unwrap().contains("2 element(s) with role=checkbox, none with that name"), "{r}");
+}
+
+#[test]
+fn refs_from_find_work_without_a_snapshot() {
+    let base = naming_app();
+    let mut s = Server::start();
+    s.tool("open", json!({"url": format!("{base}/scope"), "snapshot": false}));
+    // A ref before any snapshot or find: the error says so, and not that the page navigated.
+    let (r, error) = s.tool("act", json!({"op": "click", "ref": "e3", "snapshot": false}));
+    assert!(error && r.as_str().unwrap().contains("no snapshot or find gave refs on this page"), "{r}");
+    let (r, _) = s.tool("find", json!({"role": "link", "name": "Developers"}));
+    let r = r.as_str().unwrap().to_string();
+    let (a, error) = s.tool("act", json!({"op": "click", "ref": ref_of(r.split_once('\n').unwrap().1, "Developers"), "snapshot": false}));
+    assert!(!error, "{a}");
+}
+
+#[test]
+fn find_with_no_match_on_an_idle_page_returns_at_once() {
+    let base = naming_app();
+    let mut s = Server::start();
+    s.tool("open", json!({"url": format!("{base}/near"), "snapshot": false}));
+    s.tool("find", json!({"css": "a"}));
+    let t = std::time::Instant::now();
+    let (r, _) = s.tool("find", json!({"css": "table.none"}));
+    let ms = t.elapsed().as_millis();
+    assert!(r.as_str().unwrap().starts_with("0 match") && ms < 100, "took {ms} ms: {r}");
+}
+
+/// A paragraph that a click changes, and a button that changes 20 long paragraphs.
+const TEXT_CHANGES: &str = "<!doctype html><body><h1>Text</h1><p id=out>You clicked: Cancel</p>
+<button onclick=\"document.getElementById('out').textContent = confirm('Sure?') ? 'You clicked: Ok' : 'You clicked: Cancel'\">Confirm</button>
+<button onclick=\"for (const p of document.querySelectorAll('.many')) p.textContent = 'changed ' + p.id + ' ' + 'x'.repeat(400)\">Many</button>
+<script>for (let i = 0; i < 20; i++) { const p = document.createElement('p'); p.className = 'many'; p.id = 'p' + i; p.textContent = 'old ' + i; document.body.append(p) }</script></body>";
+
+/// #398: a text change that the user sees is in the act diff, in a few short lines.
+#[test]
+fn act_shows_text_that_changed() {
+    let mut s = Server::start();
+    let snap = opened(&mut s, &pages(&[("/", TEXT_CHANGES)]));
+    assert!(!snap.contains("You clicked"), "interactive snapshot has no plain text: {snap}");
+    let (r, error) = s.tool("act", json!({"op": "click", "loc": "role=button name=\"Confirm\"", "dialog": "accept"}));
+    let r = r.as_str().unwrap().to_string();
+    assert!(!error && r.contains("text: \"You clicked: Ok\""), "{r}");
+    assert!(!r.contains("no change") && !r.contains("Cancel\""), "{r}");
+    // The same click again changes nothing.
+    let (r, _) = s.tool("act", json!({"op": "click", "loc": "role=button name=\"Confirm\"", "dialog": "accept"}));
+    assert!(r.as_str().unwrap().contains("no change"), "{r}");
+    // Many changed lines: 5 at most, each cut at 200 characters, and a line that says how many more.
+    let (r, _) = s.tool("act", json!({"op": "click", "loc": "role=button name=\"Many\""}));
+    let r = r.as_str().unwrap().to_string();
+    let text: Vec<&str> = r.lines().filter(|l| l.starts_with("text: ")).collect();
+    assert_eq!(text.len(), 5, "{r}");
+    assert!(text.iter().all(|l| l.chars().count() <= 212), "{r}");
+    assert!(r.contains("15 more changed text lines"), "{r}");
+    assert!(r.len() < 1500, "{} chars: {r}", r.len());
+}
+
+/// #398: `open` gives a short receipt by default, and the JSON step report only with `report: true`.
+#[test]
+fn open_gives_a_short_receipt_unless_the_report_is_asked() {
+    let base = pages(&[("/", TEXT_CHANGES)]);
+    let mut s = Server::start();
+    let (r, error) = s.tool("open", json!({"url": format!("{base}/")}));
+    let r = r.as_str().unwrap_or_else(|| panic!("not text: {r}")).to_string();
+    assert!(!error && r.starts_with("ok (") && r.len() < 100, "{r}");
+    let (r, error) = s.tool("open", json!({"url": format!("{base}/"), "report": true}));
+    assert!(!error && r["ok"] == true && r["steps"].is_array(), "{r}");
+    let (r, error) = s.tool("open", json!({"url": format!("{base}/missing")}));
+    assert!(error && r.as_str().unwrap().starts_with("FAILED"), "{r}");
+}
+
+/// #398: `read` and `links` stay within `max_chars`, header included.
+#[test]
+fn read_and_links_stay_within_max_chars() {
+    let rows: String = (0..200).map(|i| format!("<p>Paragraph {i} with some words in it.</p><a href='/page/{i}'>link number {i}</a>")).collect();
+    let base = page_server(format!("<!doctype html><title>A long title for the page</title><body>{rows}"));
+    let mut s = Server::start();
+    s.tool("open", json!({"url": format!("{base}/")}));
+    for max in [300, 1500] {
+        let (r, error) = s.tool("read", json!({"max_chars": max}));
+        let r = r.as_str().unwrap();
+        assert!(!error && r.chars().count() <= max && r.contains("read again with offset="), "{} chars: {r}", r.chars().count());
+        let (r, error) = s.tool("links", json!({"max_chars": max}));
+        let r = r.as_str().unwrap();
+        assert!(!error && r.chars().count() <= max && r.contains("lines cut"), "{} chars: {r}", r.chars().count());
+    }
+    // The next page of read starts where the cut line says.
+    let (r, _) = s.tool("read", json!({"max_chars": 300}));
+    let next: usize = r.as_str().unwrap().split("offset=").nth(1).unwrap().trim().parse().unwrap();
+    let (r, _) = s.tool("read", json!({"max_chars": 300, "offset": next}));
+    assert!(r.as_str().unwrap().contains(&format!("chars {next}-")), "{r}");
+}
+
+/// A form whose submit handler writes through `id` globals (bare#392).
+const NAMED_PAGE: &str = "<!doctype html><body><form id=f name=login onsubmit=\"event.preventDefault(); out.textContent = 'sent ' + q.value\">
+<input id=q aria-label=Query value=hi><button>Go</button></form><div id=out>none</div></body>";
+
+#[test]
+fn id_globals_and_document_names_resolve_in_handlers_and_eval() {
+    let mut s = Server::start();
+    let snap = opened(&mut s, &html_app(NAMED_PAGE));
+    let (r, error) = s.tool("eval", json!({"js": "JSON.stringify([typeof window.out, typeof f, 'out' in window, typeof document.login])"}));
+    assert!(!error && r == json!(["object", "object", true, "object"]), "{r}");
+    let (r, error) = s.tool("act", json!({"op": "click", "ref": ref_of(&snap, "button \"Go\"")}));
+    assert!(!error, "{r}");
+    let (r, error) = s.tool("eval", json!({"js": "out.textContent"}));
+    assert!(!error && r == json!("sent hi"), "{r}");
 }

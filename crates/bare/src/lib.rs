@@ -105,6 +105,8 @@ mod browser_namespace_tests;
 #[cfg(test)]
 mod browser_iframe_tests;
 #[cfg(test)]
+mod browser_named_tests;
+#[cfg(test)]
 mod browser_heap_stop_tests;
 #[cfg(test)]
 mod browser_link_tests;

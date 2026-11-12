@@ -810,7 +810,7 @@ Each line says what the code does now. Detail and limits are in the progress sec
 
 ## `Intl.Locale` and `Intl.RelativeTimeFormat`
 
-`Intl.Locale` and `Intl.RelativeTimeFormat` exist. wise.com needs `Intl.Locale` and theverge.com needs `Intl.RelativeTimeFormat`. `DisplayNames`, `ListFormat`, `DurationFormat` and `supportedValuesOf` stay absent.
+`Intl.Locale` and `Intl.RelativeTimeFormat` exist. wise.com needs `Intl.Locale` and theverge.com needs `Intl.RelativeTimeFormat`. `DurationFormat` and `supportedValuesOf` stay absent (`DisplayNames` and `ListFormat`: see below).
 
 - `Locale`: the tag goes through `canonical_tag` (the code of `getCanonicalLocales`). Options replace `language`, `script`, `region` and the `-u-` keywords. The getters are `baseName`, `language`, `script`, `region`, `calendar`, `caseFirst`, `collation`, `hourCycle`, `numeric` and `numberingSystem`. `getCalendars` and the other `get*` methods are absent. `new Intl.Locale("und").language` is `"und"` (ECMA-402 `GetLocaleLanguage`); Node 22 gives `undefined`.
 - Likely subtags: a table of 40 languages in `intl_locale.rs` (about 1 KB). The full CLDR table has about 1,900 rows. bare has data for English only, and a page asks `maximize` about a common locale. A language that is not in the table stays as it is. `und-Latn` and `und-US` use the first row of the table that has the script or the region.
@@ -1351,3 +1351,104 @@ An agent clicked a ref under a spinner and got `covered`. A cookie banner over t
 - The failure names the cover, not the element under the pointer. Of the ancestors of that element that do not hold the target, it names the outermost with a role and a name. It falls back to the outermost one. It gives `tag#id.class` and `(role "name")`.
 - bare has no CSS transitions. A backdrop that fades with `transition` and removes itself on `transitionend` never goes, so the click fails after 1 s. A fade by script works.
 - Window mode routes each tool through `Remote::call` on the window thread. The dialog and tab policy is per thread and is set there, so it works. The test `the_agent_tools_work_in_a_window` checks the tools in a window. It is ignored because it needs a Wayland display. Run it on a nested compositor, not on a desktop in use.
+## `Intl.ListFormat` and `Intl.DisplayNames` (2026-11-12)
+
+GitHub's issues page calls `new Intl.ListFormat(...)` when it loads. Without it the page showed "Unable to load page." (bare#394). Both constructors now exist.
+
+- They are accessors on `Intl` until their first read, as `Intl.Locale` is. A realm that does not read them pays for two functions.
+- `ListFormat` keeps its separators in code: three types, three styles and the five locales of `intl.rs`. The tests check them against Node.
+- `DisplayNames` reads `intl_names_data.rs` (made by `tools/js/intl_names_gen.mjs` from Node's ICU, 11 KB of source). It holds a short list of common languages, dialects, regions, scripts, currencies, calendars and date fields. It does not hold all of CLDR.
+- An unknown code gives the code itself (`fallback: "code"`) or undefined (`fallback: "none"`), as Chrome does.
+- Every locale uses the names of en-US. Another locale resolves to English, as the other `Intl` objects of bare do.
+
+## eval prints objects as compact JSON (2026-11-12)
+
+`eval` printed `object` for an array or an object (#393). An agent needs the value, not its type.
+
+- `Interp::inspect` walks the engine values in Rust. It does not run `JSON.stringify`, so a cycle, a node or a Map does not throw.
+- A string shows as is. An array or an object shows as compact JSON.
+- A DOM node shows as `<tag#id.class>`. A NodeList or an HTMLCollection is a list of those.
+- A function is `function name()`. A Date is its ISO string. A Map is a list of pairs. A Set is a list.
+- An object that is already open is `"[Circular]"`. A getter that throws gives `"[threw]"`. `toJSON` is not called.
+- The text stops at 4000 characters. A marker gives the full length.
+- The walk visits at most 100000 values and 64 levels. Then the marker says "more than".
+## An action that navigates waits for the next page (2026-11-12)
+
+On GitHub, an `act` receipt and the outline after it showed the old page after a click on a link (#396). Turbo fetches the next page, then changes the address and the body. That fetch took longer than the 2 s that a read waits for a reply.
+
+- In a live session, an action that starts a navigation now waits as `goto` waits: until the page is idle twice, at most the step time limit. At the limit the receipt says `not ready`.
+- A navigation is a document on its way, a new document, a new address (`pushState`), `back`, `forward`, or a click on a link to another address of this tab. A link with `target`, `download` or `javascript:`, or one that only changes the fragment, does not count.
+- The link counts before the page reacts, because a script can take the click and change the address only after its fetch.
+- The HTTP status check of `goto` applies only to a new document. An address that `pushState` changed keeps the status of its document.
+- A step file (`run_steps`, `bare-drive`) does not wait: its next step waits.
+- When the snapshot after an action fails (no layout yet, as when a style sheet is still on its way), the action still succeeds. The receipt gives `no snapshot: REASON`. Before, the act was an error, and the agent could act twice.
+- `sessions` first collects the tabs that the pages opened and no reply named yet (a `step` call takes no events), and lists them.
+- A route that renders after a timer of more than 20 ms after `pushState`, with no fetch, is not waited for.
+## find and locator misses (2026-11-12)
+
+A sweep of real sites (issue #397) found locator faults that cost an agent turns or 20 s waits.
+
+- `find` with `css` and another locator uses `css` as a scope. It keeps only the matches inside an element of the selector, or the element itself.
+- Each tool checks its argument keys against the properties of its own `inputSchema`. An unknown key fails and names the closest valid key by edit distance. One list drives both the schema and the check, so they cannot drift apart.
+- `act` refuses `text` on an op that does not type or pick. On such an op it is most likely a prompt answer, so the error names `prompt_text`.
+- A locator with an exact name (`=`) that matches nothing looks for near names: names that hold the text in any case. When one of them is rendered, the step fails at once and lists up to 3 of them. Waiting would not help, because the locator is wrong.
+- `name="Issues"` does not match `Issues (5k+)`. Exact stays exact: a count in brackets is part of the name, and some pages have both `Issues` and `Issues (3)`. The fast failure with the near names gives the agent the fix in one turn.
+- A miss of a role with a name and no near name says how many elements have the role.
+- A `not_found` miss on an idle page no longer says "nothing can change it". The text was about the page, and the fault was in the locator. Other failure kinds keep the idle note.
+- A ref before any snapshot or find of the document says so. Before, it said that the page had navigated.
+- `find` with no match on an idle page already returned in a few ms at 992a26b0. It waits only while requests are pending, up to 2 s, as before.
+## Text changes in act, a short open and max_chars limits (2026-11-12)
+Issue #398 found three replies that cost too many tokens or hid a change.
+- A snapshot keeps a hash of each line of the rendered text, as `read` gives it. One more walk of the DOM does this.
+- An interactive `act` diff adds the text lines that the last snapshot did not show, as `text: "..."`. A click that changed `You clicked: Cancel` to `You clicked: Ok` gave `no change` before.
+- The text lines come in page order, once each. A line that a changed element line already shows as its name is left out.
+- The cap is 5 lines of at most 200 characters. A last line says how many more changed, and points to `read`. A removed text line does not show.
+- A diff in `all` mode already has text lines, so it adds none.
+- `open` gives the compact receipt of `act` by default: ok or the failure, the time, a redirect, not ready, script errors and failed requests. On github.com the reply went from 30076 to 12 characters.
+- `open` with `report: true` gives the full JSON step report, as before. `snapshot: true` still adds the snapshot.
+- `deck` passes a text reply through, so it needs no change.
+- `read` and `links` count the header, the count line and the cut line in `max_chars`. The snapshot cut line counts in its budget too. The snapshot header is still outside the limit.
+- A `max_chars` that the header fills is a tool error that names a limit that works. Before, `read` gave no text and the same offset again.
+## Foreign fragment contexts and replaced text fields (2026-11-12)
+
+The Wikipedia search box lost typed text (issue #395). On focus, Wikipedia mounts a Vue search widget in the place of its plain input. The Codex icons of that widget set `innerHTML` on an SVG `g`. The fragment parser refused every context outside the HTML namespace. So the mount threw, the container stayed empty, and the focus went to `body`.
+
+- The fragment parser now takes an SVG or MathML context element. The context is the adjusted current node while only the root of the fragment is open. So the foreign rules read the tokens, as the standard says.
+- An SVG or MathML context gets no tokenizer state of an HTML element: an SVG `style` holds markup. CDATA is text in it.
+- The attributes of the context are not passed. So a MathML `annotation-xml` context is never an HTML integration point. This is a known gap.
+- 62 of the 63 html5lib foreign-context fragment tests pass. The one left is `<frameset>` in a fragment, which the parser refuses on purpose.
+- `type` follows a field that the page replaced. The rule: the old field left the document, and a text field has the focus. Then the keys go to that field. A browser sends keys to the focused element, so a person sees the same.
+- The rule holds at the click and between keys. Wikipedia loads its widget over the network, so its swap comes while the text is typed. A field that only loses the focus, and stays in the document, still fails with `focus_lost` or `no_focus`.
+## Named access on window and document (2026-11-12)
+
+Old and small sites use `id` globals: a handler writes `out.textContent` for `<div id=out>`. bare had no named access, so such handlers threw.
+
+- The frames code already put a host named object behind `window` and behind `document`. It is now made for every page, not only for pages with an iframe.
+- `window` names are the iframes first, then the first element in tree order with that `id`, or with that `name` on a, embed, form, iframe, img or object. Several matches give the first element, not an `HTMLCollection`.
+- `document` names are embed, form, iframe, img and object by `name`, iframe and object by `id`, and img by `id` when it has a `name`. The iframe by `id` keeps the old frames behavior. The standard does not list it.
+- Both objects are open: a property of the chain wins over a name. Own globals, `let` and `const` come first anyway. So a page cannot hide `document.createElement` or `window.addEventListener` with an element name. The standard lets it do so. bare accepts this difference for speed and safety.
+- A window property that the host defines lazily (`name`, `top`, `open`, `on*`) also wins. The host defines it before the element answers.
+- The list of names is built by one walk on the first ask after a change. `Document::name_revision` moves only for changes that can touch named elements. A text edit or a bare new element costs no walk.
+- The heap cache passes over an open named object for a hit behind it. Without this, every `document.body` read lost its cache.
+- Cost: a global miss costs about 50 to 80 ns more on a page with 2000 ids. A hit on an own global costs the same.
+## Complex selectors in :not(), :is() and :where() (2026-11-12)
+
+Wikipedia calls `querySelectorAll` with `:not(.extiw, .mw-cite-backlink a, ...)`. bare threw `SyntaxError`, so the link preview script stopped.
+
+- `:not()`, `:is()` and `:where()` now take complex selectors, as Selectors 4 says. An argument may have combinators: `:not(.a > .b, .c ~ .d)`.
+- A list of compounds only keeps `Simple::Not` and `Simple::Is`. A list with a combinator becomes `Simple::Complex`. It is boxed and matched out of line, like `:host`, so the hot match arms stay small.
+- A complex argument tests the element with its first compound. Then it walks up or back from the element, like a selector. It allocates nothing.
+- The specificity of an argument counts all its compounds. `:not()` and `:is()` count like their most specific argument. `:where()` counts zero.
+- The invalidation sets (`Reach`, `Scopes`) read the compounds of an argument at the scope of their combinators. `:not(.x p)` reads `.x` on an ancestor, so a change of `.x` restyles the subtree.
+- The script limits count the searches of an argument. `backtracking` adds the most that one argument adds. `match_work` multiplies by the work of the arguments.
+- `:has()` stays out. A rule with it is still thrown away.
+
+## offsetWidth of an inline box with nothing to paint (2026-11-12)
+
+GitHub read `offsetWidth` of a plain `span`, and the read stopped the page (issue #402).
+
+- Native layout makes no fragment for an inline box with no background and no border. This saves a fragment for each line.
+- `offsetWidth` and `offsetHeight` of such a box now give the size of the rectangle of `getBoundingClientRect`. That rectangle is the union of its lines.
+- An empty inline box gives the height of its font and no width. It uses the layout that keeps every inline box, as `getClientRects` does.
+- A `br` gives 0. Chrome gives 0 too, because a `br` is not a box there.
+- No record was added to layout. The rectangles come from the fragments of the text and the atomic boxes.

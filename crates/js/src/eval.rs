@@ -3857,6 +3857,7 @@ include!("eval_asyncgen.rs");
 include!("eval_clone.rs");
 include!("eval_ic.rs");
 include!("eval_bc.rs");
+include!("eval_inspect.rs");
 
 #[cfg(test)]
 #[path = "eval_class_tests.rs"]
@@ -3981,6 +3982,10 @@ mod intl_num_tests;
 mod intl_locale_tests;
 
 #[cfg(test)]
+#[path = "eval_intl_list_tests.rs"]
+mod intl_list_tests;
+
+#[cfg(test)]
 #[path = "eval_number_tests.rs"]
 mod number_tests;
 
@@ -4026,3 +4031,7 @@ mod statements_tests;
 #[cfg(test)]
 #[path = "eval_ic_tests.rs"]
 mod ic_tests;
+
+#[cfg(test)]
+#[path = "eval_inspect_tests.rs"]
+mod inspect_tests;

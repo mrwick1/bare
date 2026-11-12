@@ -29,6 +29,7 @@ use crate::browser_scroll::Align;
 use crate::browser_ui::{KeyInput, Mods, Pointer, UiOutcome};
 use bare_html::dom::NodeId;
 use bare_js::eval::Error;
+use bare_js::value::Value;
 
 impl UiOutcome {
     fn add(&mut self, o: UiOutcome) {
@@ -190,18 +191,15 @@ impl Browser {
 
     /// `tag#id.class.class` of an element, at most 80 characters.
     pub(crate) fn describe(&self, n: NodeId) -> String {
-        let doc = self.document();
-        let doc = doc.borrow();
-        let mut out = doc.element_name(n).to_ascii_lowercase();
-        if let Some(id) = doc.attr(n, bare_html::dom::Atom::ID).filter(|i| !i.is_empty()) {
-            out.push('#');
-            out.push_str(id);
-        }
-        for c in doc.find_atom("class").and_then(|a| doc.attr(n, a)).unwrap_or("").split_ascii_whitespace() {
-            out.push('.');
-            out.push_str(c);
-        }
-        out.chars().take(80).collect()
+        describe_in(&self.document().borrow(), n)
+    }
+
+    /// Text of a script value for tools (`Interp::inspect`): a node is `<tag#id.class>`, an object is compact JSON of at most `cap` characters.
+    pub fn inspect(&mut self, v: Value, cap: usize) -> String {
+        // `Rc::clone` copies the pointer, not the DOM, so the closure can read the DOM while `self.it` walks the value.
+        let dom = self.dom.clone();
+        let node = |o| dom.node_of(Value::Object(o)).map(|n| format!("<{}>", describe_in(&dom.doc.borrow(), n)));
+        self.it.inspect(v, cap, &node)
     }
 
     /// A user click on `node`. See the header.
@@ -341,4 +339,18 @@ impl Browser {
         }
         Ok(out)
     }
+}
+
+/// `tag#id.class.class` of an element of `doc`, at most 80 characters.
+fn describe_in(doc: &bare_html::dom::Document, n: NodeId) -> String {
+    let mut out = doc.element_name(n).to_ascii_lowercase();
+    if let Some(id) = doc.attr(n, bare_html::dom::Atom::ID).filter(|i| !i.is_empty()) {
+        out.push('#');
+        out.push_str(id);
+    }
+    for c in doc.find_atom("class").and_then(|a| doc.attr(n, a)).unwrap_or("").split_ascii_whitespace() {
+        out.push('.');
+        out.push_str(c);
+    }
+    out.chars().take(80).collect()
 }

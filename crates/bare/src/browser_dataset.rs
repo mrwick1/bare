@@ -247,9 +247,9 @@ impl NamedSource for Dom {
         }).collect())
     }
 
-    /// `Storage` names do not hide the prototype chain: its methods win.
+    /// `Storage` names and window and document names do not hide the prototype chain: its methods win.
     fn named_masking(&self, owner: ObjId) -> bool {
-        self.storage_area(owner).is_none()
+        self.storage_area(owner).is_none() && !crate::browser_frames::is_owner(self, owner)
     }
 }
 

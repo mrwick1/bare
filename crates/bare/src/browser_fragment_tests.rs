@@ -186,11 +186,22 @@ fn unsupported_contexts_fail_before_any_change() {
         assert!(r.starts_with("other:Unsupported"), "{name}: {r}");
         assert_eq!(js(&mut b, "fin + ',' + caught"), "0,0", "{name}");
     }
-    // A foreign context element is refused too, also an SVG `title` or a MathML element.
-    for src in ["document.createElementNS('http://www.w3.org/2000/svg', 'g')", "document.createElementNS('http://www.w3.org/1998/Math/MathML', 'mi')", "document.createElementNS('http://www.w3.org/2000/svg', 'foreignObject')"] {
+}
+
+#[test]
+fn a_foreign_context_element_parses_by_the_foreign_rules() {
+    // The Codex icons of Wikipedia set the paths of an SVG `g` with innerHTML.
+    let (svg, math) = ("http://www.w3.org/2000/svg", "http://www.w3.org/1998/Math/MathML");
+    let cases = [
+        ("g", svg, "<path d=\"M0\"/><lineargradient/>", "path linearGradient http://www.w3.org/2000/svg"),
+        ("foreignObject", svg, "<div>x</div>", "DIV http://www.w3.org/1999/xhtml"),
+        ("mi", math, "<i>x</i>", "I http://www.w3.org/1999/xhtml"),
+        ("math", math, "<mi>x</mi>", "mi http://www.w3.org/1998/Math/MathML"),
+    ];
+    for (name, ns, html, want) in cases {
         let mut b = browser();
-        assert!(js(&mut b, &format!("var e = {src}; e.appendChild(document.createElement('i')); e.innerHTML = 'x'")).starts_with("other:Unsupported"), "{src}");
-        assert_eq!(js(&mut b, "e.childNodes.length + e.firstChild.tagName"), "1I", "{src}");
+        let src = format!("var e = document.createElementNS('{ns}', '{name}'); e.appendChild(document.createElement('b')); e.innerHTML = '{html}'; Array.prototype.map.call(e.childNodes, function (c) {{ return c.tagName }}).join(' ') + ' ' + e.firstChild.namespaceURI");
+        assert_eq!(js(&mut b, &src), want, "{name}");
     }
 }
 

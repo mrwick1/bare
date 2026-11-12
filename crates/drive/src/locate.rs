@@ -87,17 +87,37 @@ pub fn norm(s: &str) -> String {
 
 /// The elements that `loc` names in the document of now.
 pub fn find(page: &mut Page, loc: &Locator) -> Result<Found, String> {
+    find_in(page, loc, None)
+}
+
+/// The elements that `loc` names, and with `scope` only those that are inside an element of that CSS selector (or are one).
+pub fn find_in(page: &mut Page, loc: &Locator, scope: Option<&str>) -> Result<Found, String> {
     if let Locator::Css(sel) = loc {
         return Ok(Found { shown: page.query_all(sel)?, hidden: 0 });
     }
     if let Locator::Ref(r) = loc {
         return Err(format!("ref=e{r} needs a live session with a snapshot"));
     }
+    let roots: Option<HashSet<NodeId>> = match scope {
+        Some(sel) => Some(page.query_all(sel)?.into_iter().map(|h| h.node).collect()),
+        None => None,
+    };
     let all = page.query_all("*")?;
     let list = page
         .inspect(|doc, frame| {
             let cx = Cx { doc, styles: &frame.styles };
-            let hits: Vec<(Handle, bool)> = all.iter().filter(|h| cx.wanted(h.node, loc)).map(|&h| (h, cx.rendered(h.node))).collect();
+            let inside = |n: NodeId| {
+                let Some(roots) = &roots else { return true };
+                let mut up = Some(n);
+                while let Some(x) = up {
+                    if roots.contains(&x) {
+                        return true;
+                    }
+                    up = doc.parent_or_host(x);
+                }
+                false
+            };
+            let hits: Vec<(Handle, bool)> = all.iter().filter(|h| inside(h.node) && cx.wanted(h.node, loc)).map(|&h| (h, cx.rendered(h.node))).collect();
             if !matches!(loc, Locator::Text(_)) {
                 return hits;
             }
@@ -114,6 +134,50 @@ pub fn find(page: &mut Page, loc: &Locator) -> Result<Found, String> {
         .ok_or_else(|| page.errors.last().cloned().unwrap_or_else(|| "the page has no document or no layout".into()))?;
     let hidden = list.iter().filter(|(_, shown)| !shown).count();
     Ok(Found { shown: list.into_iter().filter(|(_, shown)| *shown).map(|(h, _)| h).collect(), hidden })
+}
+
+/// What nearly matches `loc` when it matches nothing, for a `not_found` message. An exact text (`=`) gives up to 3 names that hold the
+/// text in any case, as `near: "Issues (5k+)", "Issues closed"`, and true when one of them is rendered: then `loc` is most likely wrong,
+/// not early. A role name with no near name gives how many elements have the role, and false. `None` when nothing is near.
+pub fn near(page: &mut Page, loc: &Locator) -> Option<(String, bool)> {
+    let some = near_names(page, loc);
+    match loc {
+        Locator::Role(r, Some(_)) if some.is_none() => {
+            let n = find(page, &Locator::Role(r.clone(), None)).ok()?.shown.len();
+            (n > 0).then(|| (format!("{n} element(s) with role={r}, none with that name"), false))
+        }
+        _ => some,
+    }
+}
+
+/// The names that hold the exact text of `loc` in any case: see `near`.
+fn near_names(page: &mut Page, loc: &Locator) -> Option<(String, bool)> {
+    let loose = match loc {
+        Locator::Role(r, Some(Text::Is(t))) => Locator::Role(r.clone(), Some(Text::Has(t.clone()))),
+        Locator::Label(Text::Is(t)) => Locator::Label(Text::Has(t.clone())),
+        Locator::Text(Text::Is(t)) => Locator::Text(Text::Has(t.clone())),
+        Locator::Placeholder(Text::Is(t)) => Locator::Placeholder(Text::Has(t.clone())),
+        _ => return None,
+    };
+    let found = find(page, &loose).ok().filter(|f| !f.shown.is_empty())?;
+    let all = page.inspect(|doc, frame| {
+        let cx = Cx { doc, styles: &frame.styles };
+        let name = |n: NodeId| match &loose {
+            Locator::Placeholder(_) => cx.attr(n, "placeholder").map(norm).unwrap_or_default(),
+            Locator::Text(_) => norm(&cx.text(n)),
+            _ => norm(&cx.name(n)),
+        };
+        found.shown.iter().map(|h| name(h.node).chars().take(60).collect::<String>()).collect::<Vec<_>>()
+    })?;
+    let mut names: Vec<String> = Vec::new();
+    for name in all {
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    let more = if names.len() > 3 { ", …" } else { "" };
+    let list: Vec<String> = names.iter().take(3).map(|n| format!("{n:?}")).collect();
+    Some((format!("near: {}{more}", list.join(", ")), true))
 }
 
 /// The role and the accessible name of an element (for a failure message and for tests).

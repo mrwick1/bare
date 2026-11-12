@@ -107,7 +107,11 @@ impl Server {
     /// Run a tool. A tool error is a result with `isError`, not a protocol error, so the agent sees the message.
     fn call(&mut self, params: &Value) -> Value {
         let args = params.get("arguments").cloned().unwrap_or(json!({}));
-        let done = match params.get("name").and_then(Value::as_str).unwrap_or("") {
+        let name = params.get("name").and_then(Value::as_str).unwrap_or("");
+        if let Err(e) = known_args(name, &args) {
+            return json!({"content": [{"type": "text", "text": e}], "isError": true});
+        }
+        let done = match name {
             "run_steps" => self.run_steps(&args),
             "open" => self.open(&args),
             "step" => self.step(&args),
@@ -150,21 +154,25 @@ impl Server {
             Some(n) => Some(self.saved.get(n).cloned().ok_or(format!("no saved session named {n}"))?),
             None => None,
         };
-        if args.get("snapshot").and_then(Value::as_bool) == Some(true) {
-            let mut a = args.clone();
-            a["compact"] = json!(true);
-            let (rep, ok) = self.start(&a, url, state)?;
-            if !ok {
-                return Err(rep);
-            }
-            let mark = self.arm(args)?;
-            let snap = self.snapshot(args)?;
-            let errs = self.script_errors(args, mark, &rep)?;
-            return Ok(rep + &errs + "\n" + &snap);
+        // The JSON step report only on request: on a large site it has tens of thousands of characters (#398).
+        if args.get("report").and_then(Value::as_bool) == Some(true) {
+            let (rep, ok) = self.start(args, url, state)?;
+            self.arm(args)?;
+            return if ok { Ok(rep) } else { Err(rep) };
         }
-        let (rep, ok) = self.start(args, url, state)?;
-        self.arm(args)?;
-        if ok { Ok(rep) } else { Err(rep) }
+        let mut a = args.clone();
+        a["compact"] = json!(true);
+        let (rep, ok) = self.start(&a, url, state)?;
+        if !ok {
+            return Err(rep);
+        }
+        let mark = self.arm(args)?;
+        if args.get("snapshot").and_then(Value::as_bool) != Some(true) {
+            return Ok(rep);
+        }
+        let snap = self.snapshot(args)?;
+        let errs = self.script_errors(args, mark, &rep)?;
+        Ok(rep + &errs + "\n" + &snap)
     }
 
     /// Start a live session on URL, from a saved session or with an empty profile. One live session at a time: this ends the old one
@@ -294,10 +302,21 @@ impl Server {
         if self.live.is_empty() {
             return "no live sessions".into();
         }
+        // A tab that an action opened and no reply named yet (a `step` call takes no events) becomes a session first.
+        let mut names: Vec<String> = self.live.keys().cloned().collect();
+        names.sort();
+        let mut late = String::new();
+        for n in names {
+            let args = json!({"session": n});
+            if self.live.contains_key(&n) && self.live_mut(&args).and_then(|l| l.session.collect()).is_ok() {
+                late.push_str(&self.late(&args).unwrap_or_default());
+            }
+        }
         let mut names: Vec<&String> = self.live.keys().collect();
         names.sort();
         let names: Vec<String> = names.into_iter().cloned().collect();
-        names.into_iter().map(|n| { let u = self.live.get_mut(&n).and_then(|l| l.session.url()).unwrap_or_default(); format!("{n}: {}", bare_drive::run::safe_url(&u)) }).collect::<Vec<_>>().join("\n")
+        let list = names.into_iter().map(|n| { let u = self.live.get_mut(&n).and_then(|l| l.session.url()).unwrap_or_default(); format!("{n}: {}", bare_drive::run::safe_url(&u)) }).collect::<Vec<_>>().join("\n");
+        if late.is_empty() { list } else { format!("{}\n{list}", &late[1..]) }
     }
 
     fn max(args: &Value, d: usize) -> usize {
@@ -393,9 +412,11 @@ impl Server {
         } else {
             return Err("give one of role (with name), label, text, placeholder or css".into());
         };
+        // With another locator, css is the part of the page to look in.
+        let scope = get("css").filter(|_| !matches!(loc, Locator::Css(_)));
         let max = Self::max(args, 6_000);
         let live = self.live_mut(args)?;
-        let out = live.session.with_refs(move |p, refs| snap::find(p, refs, &loc, max))??;
+        let out = live.session.with_refs(move |p, refs| snap::find(p, refs, &loc, scope.as_deref(), max))??;
         let out = live.red.clean(&out);
         self.with_late(args, out)
     }
@@ -465,6 +486,10 @@ impl Server {
             (None, None) => String::new(),
         };
         let text = args.get("text").and_then(Value::as_str).unwrap_or("");
+        // `text` is for the ops that type or pick; on another op it is most likely the answer to a prompt, which is `prompt_text`.
+        if args.get("text").is_some() && !matches!(op, "type" | "fill" | "select" | "press" | "wait") {
+            return Err(format!("argument \"text\" is not used by op {op}: did you mean \"prompt_text\"?"));
+        }
         let q = |t: &str| format!("{t:?}");
         let need = |what: &str| if target.is_empty() { Err(format!("op {what} needs ref (or loc)")) } else { Ok(()) };
         let line = match op {
@@ -508,7 +533,8 @@ impl Server {
         let mark = self.live_mut(args)?.session.hist.mark();
         let mut out = receipt;
         let snap = if ok && args.get("snapshot").and_then(Value::as_bool) != Some(false) {
-            Some(self.snapshot_diff(args, args.get("diff").and_then(Value::as_bool) != Some(false))?)
+            // The action ran: a page with no layout yet (a style sheet still on its way) does not make it a failure, or the agent acts twice.
+            Some(self.snapshot_diff(args, args.get("diff").and_then(Value::as_bool) != Some(false)).unwrap_or_else(|e| format!("no snapshot: {e}: take one later")))
         } else {
             // No snapshot waits for the page, so let a started navigation finish before the URL check (#382).
             self.live_mut(args)?.session.with_refs(|p, _| snap::settle(p))?;
@@ -754,6 +780,40 @@ fn with_out(mut json: String, opt: &Options, end: bool) -> String {
     json
 }
 
+/// Refuse an argument that the input schema of tool `name` does not list, and name the closest valid key: a key with a typo would
+/// else be dropped without a word. An unknown tool passes: `call` says so.
+fn known_args(name: &str, args: &Value) -> Result<(), String> {
+    // `OnceLock` builds the tool list once, on the first call, and keeps it: like a module-level `const` that is computed lazily in JS.
+    static TOOLS: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+    let tools = TOOLS.get_or_init(tools);
+    let Some(tool) = tools.as_array().and_then(|t| t.iter().find(|t| t["name"] == name)) else { return Ok(()) };
+    let valid: Vec<&String> = tool["inputSchema"]["properties"].as_object().map(|p| p.keys().collect()).unwrap_or_default();
+    let Some(key) = args.as_object().and_then(|a| a.keys().find(|k| !valid.contains(k))) else { return Ok(()) };
+    let close = valid.iter().map(|v| (edits(key, v), *v)).min();
+    Err(match close {
+        Some((d, v)) if d <= 2.max(key.chars().count() / 3) => format!("unknown argument {key:?}: did you mean {v:?}?"),
+        Some(_) => format!("unknown argument {key:?}: {name} takes {}", valid.iter().map(|v| v.as_str()).collect::<Vec<_>>().join(", ")),
+        None => format!("unknown argument {key:?}: {name} takes no arguments"),
+    })
+}
+
+/// The edit distance of two texts: how many characters to insert, delete or change to turn `a` into `b`.
+fn edits(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    // One row of the table at a time: `row[j]` is the distance of the part of `a` so far and the first `j` characters of `b`.
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut prev = row[0];
+        row[0] = i + 1;
+        for j in 0..b.len() {
+            let here = (prev + usize::from(ca != b[j])).min(row[j] + 1).min(row[j + 1] + 1);
+            prev = row[j + 1];
+            row[j + 1] = here;
+        }
+    }
+    row[b.len()]
+}
+
 /// The session name of a call: `session`, default `main`.
 fn session_name(args: &Value) -> String {
     args.get("session").and_then(Value::as_str).unwrap_or("main").to_string()
@@ -788,6 +848,7 @@ fn compact(rep: &Report, red: &Redactor) -> String {
             let script = rep.logs.iter().find(|(_, l)| bare_drive::diag::uncaught(l)).filter(|_| matches!(f.kind, "not_found" | "hidden" | "page"));
             let hint = match script {
                 Some((_, l)) => format!("\nhint: the page script failed: {}", l.text.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(200).collect::<String>()),
+                None if f.message.contains("; near: ") => "\nhint: use a near name: name~ matches a part, in any case".into(),
                 None if hint.is_empty() => String::new(),
                 None => format!("\nhint: {hint}"),
             };
@@ -885,8 +946,8 @@ fn tools() -> Value {
         },
         {
             "name": "open",
-            "description": "Start a live session: load URL in the bare browser. A new open ends the old session. Returns the report of the open step.",
-            "inputSchema": with(json!({"url": {"type": "string"}, "state": {"type": "string", "description": "Start from the session that save_state or ensure_session saved under this name, in this server."}, "snapshot": {"type": "boolean", "description": "Return a short receipt and the page snapshot instead of the JSON report."}}), &["url"]),
+            "description": "Start a live session: load URL in the bare browser. A new open ends the old session. Returns a short receipt: ok or the failure, the time, a redirect, not ready, script errors and failed requests.",
+            "inputSchema": with(json!({"url": {"type": "string"}, "state": {"type": "string", "description": "Start from the session that save_state or ensure_session saved under this name, in this server."}, "snapshot": {"type": "boolean", "description": "Add the page snapshot after the receipt."}, "report": {"type": "boolean", "description": "Return the full JSON report of the open step (steps, console, network) instead of the receipt. It can be large."}}), &["url"]),
         },
         {
             "name": "step",
@@ -926,7 +987,7 @@ fn tools() -> Value {
         },
         {
             "name": "find",
-            "description": "Elements that match, as snapshot lines with refs, without a full snapshot. Give role (with name), label, text, placeholder or css. Text matches a part, in any case, unless exact.",
+            "description": "Elements that match, as snapshot lines with refs, without a full snapshot. Give role (with name), label, text, placeholder or css. Text matches a part, in any case, unless exact. css with one of the others: only the matches inside it.",
             "inputSchema": {"type": "object", "properties": {"session": S, "role": {"type": "string"}, "name": {"type": "string"}, "label": {"type": "string"}, "text": {"type": "string"}, "placeholder": {"type": "string"}, "css": {"type": "string"}, "exact": {"type": "boolean"}, "max_chars": {"type": "integer"}}},
         },
         {
@@ -946,7 +1007,7 @@ fn tools() -> Value {
         },
         {
             "name": "eval",
-            "description": "Run JavaScript in the live page and return its value as text. JSON.stringify an object. A Promise is awaited up to the time limit. Top-level await works: an expression gives its value; statements need a return. A thrown error shows as Name: message.",
+            "description": "Run JavaScript in the live page and return its value as text. A string shows as is. An array or object shows as compact JSON, cut at 4000 chars (a cycle is \"[Circular]\"). A DOM node shows as <tag#id.class>, a NodeList as a list of those, a function as function name(), a Map or Set as a list, a Date as its ISO string. A Promise is awaited up to the time limit. Top-level await works: an expression gives its value; statements need a return. A thrown error shows as Name: message.",
             "inputSchema": {"type": "object", "properties": {"session": S, "js": {"type": "string"}}, "required": ["js"]},
         },
         {
@@ -971,7 +1032,7 @@ fn tools() -> Value {
         },
         {
             "name": "sessions",
-            "description": "The live sessions and their URLs.",
+            "description": "The live sessions and their URLs. A tab that a page opened is listed, also when no reply named it yet.",
             "inputSchema": {"type": "object", "properties": {}},
         },
         {

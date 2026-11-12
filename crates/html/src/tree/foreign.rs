@@ -18,7 +18,8 @@
 //!
 //! What it does not do (known gaps, on purpose):
 //! - The MathML attribute `definitionurl` is adjusted, but no other MathML adjustment exists (the standard has no more).
-//! - Fragment parsing (`fragment.rs`) refuses a foreign context element, so the adjusted current node is always the current node.
+//! - A fragment with a foreign context element (`fragment.rs`) reads its tokens by these rules while only its root is open: the context is
+//!   the adjusted current node (`Builder::adjusted`). An end tag never closes the root.
 
 use super::{Builder, Token};
 use crate::dom::Ns;
@@ -73,7 +74,7 @@ impl Builder {
         if !self.doc.has_foreign() {
             return false;
         }
-        let current = self.current();
+        let current = self.adjusted();
         let ns = self.doc.element_ns(current);
         if ns == Ns::Html {
             return false;
@@ -95,10 +96,10 @@ impl Builder {
         }
     }
 
-    /// Does the tokenizer read `<![CDATA[` as text now? Only when the adjusted current node (the current node, as there is no fragment
-    /// parsing) is not an HTML element. It is the node, not the insertion point: in `<svg><foreignObject>` it is allowed.
+    /// Does the tokenizer read `<![CDATA[` as text now? Only when the adjusted current node is not an HTML element. It is the node,
+    /// not the insertion point: in `<svg><foreignObject>` it is allowed.
     pub(super) fn cdata_allowed(&self) -> bool {
-        self.doc.has_foreign() && !self.open.is_empty() && self.doc.element_ns(self.current()) != Ns::Html
+        self.doc.has_foreign() && !self.open.is_empty() && self.doc.element_ns(self.adjusted()) != Ns::Html
     }
 
     /// An SVG `foreignObject`, `desc` or `title`, or a MathML `annotation-xml` that says it holds HTML.
@@ -162,7 +163,7 @@ impl Builder {
                     self.leave_foreign();
                     self.process_html(Token::StartTag { name, attrs, self_closing });
                 } else {
-                    let ns = self.doc.element_ns(self.current());
+                    let ns = self.doc.element_ns(self.adjusted());
                     self.insert_foreign(ns, &name, &attrs, self_closing);
                 }
             }

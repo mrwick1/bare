@@ -335,6 +335,8 @@ struct Builder {
     // The scripting flag. True for a page (this browser runs scripts): `noscript` has raw text. A fragment for a context in an inert document has it false.
     tmpl: Vec<Tm>,
     // The stack of template insertion modes: one entry for each open `template`, and one at the bottom for the context of a fragment that is a `template`.
+    context: Option<NodeId>,
+    // The context element of a fragment that is in the SVG or MathML namespace (a copy with no parent). See `adjusted`.
 }
 
 impl Builder {
@@ -353,6 +355,7 @@ impl Builder {
             templates: Vec::new(),
             scripting: true,
             tmpl: Vec::new(),
+            context: None,
         }
     }
 
@@ -383,6 +386,15 @@ impl Builder {
     /// The current node: the top of the stack. Before the first element it is the document.
     fn current(&self) -> NodeId {
         self.open.last().copied().unwrap_or(self.doc.root())
+    }
+
+    /// The adjusted current node: the context element of a fragment while only the root of the fragment is open, else the current node.
+    /// Only a foreign context is kept (`context`), as the HTML rules read an HTML context through the insertion mode.
+    fn adjusted(&self) -> NodeId {
+        match self.context {
+            Some(c) if self.open.len() == 1 => c,
+            _ => self.current(),
+        }
     }
 
     /// Is this node an element with one of these names?

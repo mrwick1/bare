@@ -17,19 +17,41 @@
 // Storage: the canonical tag of each object in `intl.loc.locales`, capped with the other formatters by `max_formatters` and
 // pruned by `collect`.
 
-/// The state of `Intl.Locale` and `Intl.RelativeTimeFormat`. The objects are made on the first read of `Intl.Locale` or `Intl.RelativeTimeFormat` (see `intl_loc_lazy`).
+/// The state of the constructors of `LAZY_CTORS`. Each constructor is made on its first read (see `intl_loc_lazy`).
 struct IntlLoc {
     locales: FxMap<ObjId, Box<str>>,
     rtfs: FxMap<ObjId, IntlRtf>,
+    lfs: FxMap<ObjId, IntlLf>,
+    dns: FxMap<ObjId, IntlDn>,
     loc_proto: ObjId,
     rtf_proto: ObjId,
+    lf_proto: ObjId,
+    dn_proto: ObjId,
     loc_ctor: ObjId,
     rtf_ctor: ObjId,
+    lf_ctor: ObjId,
+    dn_ctor: ObjId,
 }
+
+/// The constructors that are accessors on `Intl` until their first read, in the order of `IntlFn::LazyLoc`.
+const LAZY_CTORS: [&str; 4] = ["Locale", "RelativeTimeFormat", "ListFormat", "DisplayNames"];
 
 impl IntlLoc {
     fn new(o: ObjId) -> IntlLoc {
-        IntlLoc { locales: FxMap::default(), rtfs: FxMap::default(), loc_proto: o, rtf_proto: o, loc_ctor: o, rtf_ctor: o }
+        IntlLoc {
+            locales: FxMap::default(),
+            rtfs: FxMap::default(),
+            lfs: FxMap::default(),
+            dns: FxMap::default(),
+            loc_proto: o,
+            rtf_proto: o,
+            lf_proto: o,
+            dn_proto: o,
+            loc_ctor: o,
+            rtf_ctor: o,
+            lf_ctor: o,
+            dn_ctor: o,
+        }
     }
 }
 
@@ -40,23 +62,26 @@ const LOCALE_KEYS: [&str; 6] = ["ca", "kf", "co", "hc", "kn", "nu"];
 const BAD_TAG: &str = "Incorrect locale information provided";
 
 impl<'p> Interp<'p> {
-    /// `Intl.Locale` and `Intl.RelativeTimeFormat` are accessors on `Intl` until a script first reads one (`IntlFn::LazyLoc`):
-    /// a realm that reads `Intl` for another constructor pays for 2 functions, not for the 21 of the two classes. The read
-    /// replaces the accessor with the data property of the spec.
+    /// The constructors of `LAZY_CTORS` are accessors on `Intl` until a script first reads one (`IntlFn::LazyLoc`): a realm
+    /// that reads `Intl` for another constructor pays for 4 functions, not for the 31 of the four classes. The read replaces the
+    /// accessor with the data property of the spec.
     fn intl_loc_lazy(&mut self, intl: ObjId) -> Res<()> {
-        for (i, n) in ["Locale", "RelativeTimeFormat"].iter().enumerate() {
+        for (i, n) in LAZY_CTORS.iter().enumerate() {
             let k = h!(self, self.heap.key_from_str(n));
-            let g = self.new_func_object(Callee::Native(Nat::Intl(IntlFn::LazyLoc(i as u8 == 1))))?;
+            let g = self.new_func_object(Callee::Native(Nat::Intl(IntlFn::LazyLoc(i as u8))))?;
             let d = PropertyDescriptor { get: Some(Some(g)), set: Some(Some(g)), enumerable: Some(false), configurable: Some(true), ..Default::default() };
             h!(self, self.heap.define_own_property(intl, k, &d));
         }
         Ok(())
     }
 
-    /// Make `Intl.Locale` (`rtf` false) or `Intl.RelativeTimeFormat` and define it on `Intl`.
-    fn intl_loc_make(&mut self, rtf: bool) -> Res<ObjId> {
+    /// Make the constructor `LAZY_CTORS[which]` and define it on `Intl`.
+    fn intl_loc_make(&mut self, which: u8) -> Res<ObjId> {
         let intl = self.intl.intl;
-        if rtf {
+        if which >= 2 {
+            return self.intl_list_make(which == 3);
+        }
+        if which == 1 {
             let (ctor, proto) = self.intl_ctor(intl, "RelativeTimeFormat", IntlFn::RtfCtor, IntlFn::Supported(4), "Intl.RelativeTimeFormat")?;
             self.method(proto, "resolvedOptions", Nat::Intl(IntlFn::RtfResolved), 0)?;
             self.method(proto, "format", Nat::Intl(IntlFn::RtfFormat(false)), 2)?;
@@ -193,14 +218,14 @@ impl<'p> Interp<'p> {
                 };
                 if part.is_empty() { Ok(Value::Undefined) } else { self.str_value(part) }
             }
-            IntlFn::LazyLoc(rtf) => {
+            IntlFn::LazyLoc(which) => {
                 // the getter has no argument; the setter has the new value
                 if let Some(&v) = args.first() {
-                    let k = h!(self, self.heap.key_from_str(if rtf { "RelativeTimeFormat" } else { "Locale" }));
+                    let k = h!(self, self.heap.key_from_str(LAZY_CTORS[which as usize]));
                     self.def(self.intl.intl, k, v, true, false, true)?;
                     return Ok(Value::Undefined);
                 }
-                Ok(Value::Object(self.intl_loc_make(rtf)?))
+                Ok(Value::Object(self.intl_loc_make(which)?))
             }
             _ => self.call_intl_rtf(f, this, args, is_new),
         }
