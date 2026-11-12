@@ -284,6 +284,15 @@ mod baked {
 }
 use baked::Baked;
 
+/// `String.prototype.normalize` to NFKC (`compose`) or NFKD, with the baked data.
+pub fn normalize_compat(s: &str, compose: bool) -> String {
+    if compose {
+        icu_normalizer::ComposingNormalizer::try_new_nfkc_unstable(&Baked).expect("baked NFKC data").as_borrowed().normalize(s).into_owned()
+    } else {
+        icu_normalizer::DecomposingNormalizer::try_new_nfkd_unstable(&Baked).expect("baked NFKD data").as_borrowed().normalize(s).into_owned()
+    }
+}
+
 /// Formatters that the evaluator makes once and keeps: a decimal formatter for each locale and grouping, and the plural rules.
 #[derive(Default)]
 pub struct Cache {

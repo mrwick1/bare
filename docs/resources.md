@@ -2031,7 +2031,7 @@ Design:
 - `toSorted` shares `ao_merge_sort` with `sort`. It makes the sorted copy first and no comparator runs after a throw.
 - `Object.freeze` and `Object.seal` run in one pass (`Heap::set_integrity`). The object stops being extensible and every property stops being configurable. With `freeze` every data property also stops being writable. Dense elements move to the property table, which keeps their attributes. A frozen element costs 72 B instead of 16 B (48 B entry and 24 B index). Freezing 1M elements adds about 56 MB. A flag that keeps dense storage for frozen arrays would avoid this. It would touch every element write, so it waits until a page needs it. `isFrozen` and `isSealed` read the flags without a key list (`Heap::test_integrity`).
 - A byte view with elements cannot be frozen (`TypeError`, as in V8 and the specification). `Object.seal` of such a view succeeds, as in V8. The specification says it throws, because the view's elements are configurable.
-- `normalize` uses `bare-unicode` (`nfd` is new, and the accent sort is now a stable sort of each run, not a swap loop that took O(n²) on a long run of accents). A string below U+0300 (NFC) or U+00C0 (NFD) is returned without a copy.
+- `normalize` uses `bare-unicode` for NFC and NFD (`nfd` is new, and the accent sort is now a stable sort of each run, not a swap loop that took O(n²) on a long run of accents). A string below U+0300 (NFC) or U+00C0 (NFD) is returned without a copy. NFKC and NFKD use `icu_normalizer` with the baked data (see the decision in `decisions.md`). A string below U+00A0 is returned without a copy.
 - `groupBy` uses the shared iterator machinery. The iterator is closed when the callback or the key conversion throws. Groups are kept in first-seen order.
 
 Results, release, AMD Ryzen 9 5900HX, one script in `eval_check`, 1M-element arrays. The generic row is the same data as an array-like object:
@@ -2090,7 +2090,6 @@ Validation:
 
 Gates (never silent):
 
-- `normalize("NFKC")` and `normalize("NFKD")`: `Unsupported`. `bare-unicode` has no compatibility tables.
 - `toLocaleLowerCase` and `toLocaleUpperCase` with a `tr`, `az` or `lt` locale: `Unsupported`. Other locales use the root rules.
 - `Reflect.set` on an integer index of a byte view with a receiver other than the target: `Unsupported`.
 - `RegExp.prototype[Symbol.search]` on a non-RegExp object with a callable `exec`: `Unsupported`.
@@ -2471,7 +2470,7 @@ The live staging dashboard calls `Number.prototype.toLocaleString` with `en-IN` 
 Crates and data (ICU4X 2.4, Unicode-3.0 license):
 
 - Crates: `icu_decimal` (digits, grouping), `icu_plurals`, `icu_collator`, `fixed_decimal` (exact decimals and rounding), `icu_locale_core`. All are used with `default-features = false`, so no compiled data is linked.
-- Data: `crates/js/src/icu_data` is made by `tools/js/icu_data_gen.sh` (icu4x-datagen 2.4.0, CLDR 49). It holds the 5 English locales of `intl.rs` and the root. The collator reads the root collation: English has no tailoring. The Chinese and other tailorings are dropped. The data is 676 KB of source.
+- Data: `crates/js/src/icu_data` is made by `tools/js/icu_data_gen.sh` (icu4x-datagen 2.4.0, CLDR 49). It holds the 5 English locales of `intl.rs` and the root. The collator reads the root collation: English has no tailoring. The Chinese and other tailorings are dropped. The data is 836 KB of source. The NFKD tables and the NFC composition table (160 KB) were added for `normalize("NFKC")` and `normalize("NFKD")`. The release `bare-mcp` binary grew by 104,992 B (+0.57%, 18,313,440 B to 18,418,432 B, unstripped, measured 2026-11-12).
 - Currency symbols and digits are not in ICU4X (its currency formatter is unstable). `tools/js/intl_num_gen.mjs` makes `intl_num_data.rs` from the ICU 77 data of Node 22.18. It has 22 symbols, 87 narrow symbols and the non-2-digit currencies.
 - Compact notation needs the unstable `CompactDecimalFormatter`. It is a gate.
 

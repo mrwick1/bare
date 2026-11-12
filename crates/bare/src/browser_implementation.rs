@@ -7,7 +7,8 @@
 //! - `createHTMLDocument(title)` makes a `Document` node outside the tree, with `html`, `head`, an optional `title` and `body`. The `Document`
 //!   getters (`documentElement`, `head`, `body`, `createElement`, ...) work on it. It lives while a script holds its wrapper.
 //! - Deviations: the new document has no doctype, `defaultView` and `location`, and a node made by its `createElement` has `ownerDocument`
-//!   `document`, not this one (the arena has one owner document, as for the contents of a `template`). Scripts in the new document never run.
+//!   `document`, not this one (the arena has one owner document, as for the contents of a `template`). The initial document of a blank
+//!   iframe is the exception: `browser_frames` records its window and its created nodes. Scripts in the new document never run.
 //!   `createDocument` and `createDocumentType` are absent.
 
 use crate::browser::*;

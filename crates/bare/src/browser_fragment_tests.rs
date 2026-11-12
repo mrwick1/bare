@@ -172,7 +172,7 @@ fn table_contexts_parse_with_the_table_insertion_modes() {
 
 #[test]
 fn unsupported_contexts_fail_before_any_change() {
-    for name in ["select", "html", "frameset"] {
+    for name in ["html", "frameset"] {
         let mut b = browser();
         let before = b.document().borrow().len();
         let r = js(&mut b, &format!("var e = document.createElement('{name}'); var k = e.appendChild(document.createElement('i')); e.innerHTML = '<b>x</b>'; 'done'"));
@@ -519,12 +519,12 @@ fn outer_html_setter_uses_the_parent_as_context() {
 #[test]
 fn outer_html_setter_gates_what_the_parser_does_not_build() {
     let mut b = browser();
-    let got = js(&mut b, "var p = document.createElement('select'), e = document.createElement('p'); p.appendChild(e); e.outerHTML = 'x'; p.childNodes.length");
+    let got = js(&mut b, "var p = document.createElement('html'), e = document.createElement('p'); p.appendChild(e); e.outerHTML = 'x'; p.childNodes.length");
     assert!(got.starts_with("other:Unsupported"), "{got}");
     // a table parent is a table context
     assert_eq!(js(&mut b, "var p = document.createElement('tr'), e = document.createElement('p'); p.appendChild(e); e.outerHTML = '<td>x</td>'; p.innerHTML"), "<td>x</td>");
     // The tree is unchanged after a gate.
-    js(&mut b, "var p = document.createElement('select'), e = document.createElement('p'); p.appendChild(e); e.outerHTML = 'x'");
+    js(&mut b, "var p = document.createElement('html'), e = document.createElement('p'); p.appendChild(e); e.outerHTML = 'x'");
     assert_eq!(js(&mut b, "[p.firstChild === e, e.parentNode === p].join()"), "true,true");
     assert!(js(&mut b, "var d = document.createElement('div'); d.innerHTML = '<a></a>'; d.firstChild.outerHTML = '<frameset></frameset>'").starts_with("other:Unsupported"));
     assert_eq!(js(&mut b, "document.createElement('noscript').outerHTML"), "<noscript></noscript>");

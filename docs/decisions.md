@@ -1754,3 +1754,58 @@ A focused element inside an editing host now takes key input. Text, Enter, Backs
 - The hashes are one-shot functions. Only `digest` needs them, and it has the whole message at once. A streaming API waits for a caller that needs one.
 - `SubtleCrypto` is the sixth lazy global of `browser_web.rs`. The first read of any of the six globals builds all their objects, as before.
 - Not built: a detached buffer hashes as empty. The standard rejects it with `TypeError`.
+
+## "In select" mode for a select fragment (2026-11-12)
+
+- Gmail sets `innerHTML` on a `select`. The parse returned `Unsupported` and the script stopped (bare issue #424).
+- The tree builder now has the "in select" mode (classic rules, HTML 13.2.6.4.16). A fragment with a `select` context starts in it.
+- The rules follow html5ever (`tree_builder/rules.rs`, MIT OR Apache-2.0) and Ladybird (`HTMLParser::handle_in_select`, BSD-2-Clause). `option`, `optgroup`, `hr`, text, comments, `script` and `template` stay. Other tags, such as `div` and `td`, are dropped. Their text stays.
+- A page still reads a `select` element as "in body". The page mode needs a `select` in scope and the reset of the mode, so it is not built.
+
+## `DOMTokenList` has indexed access (2026-11-12)
+
+- Closure Library reads `classList[i]` to find a decorator. A web mail app's tab bar was empty, because `classList[0]` was `undefined` (bare issue #427).
+- `classList` and `relList` are host-indexed objects (`Heap::new_indexed`), as `NodeList` and `NamedNodeMap` are. `list[i]` is `item(i)`. `i` at or past `length` is absent. `in`, `Object.keys`, `slice` and `for..in` see the tokens.
+- The indexes are live. Every read compares the attribute text with the text the cache was made from. A change makes the host refill the cache before the read.
+- The token strings need a value slot in the heap. `Slot::Str` (`crates/js/src/heap_binary.rs`) answers with a string. The list traces its strings, so the collector keeps them.
+- `item` follows Ladybird `DOMTokenList::item` (BSD-2). We wrote our own code and copied no file.
+- Gap: `CSSStyleDeclaration` has no indexed access (`style[0]` is `undefined`; Chrome gives the first property name). `DOMStringList` does not exist in bare. `sandbox` has no `DOMTokenList`.
+
+## `normalize` with NFKC and NFKD through `icu_normalizer` (2026-11-12)
+
+- A web mail app calls `normalize('NFKC')` when it opens a message. bare threw `Unsupported`, so the page stopped (bare issue #428).
+- NFKC and NFKD use `icu_normalizer` (`ComposingNormalizer::try_new_nfkc_unstable`, `DecomposingNormalizer::try_new_nfkd_unstable`) with the baked data in `crates/js/src/icu_data`. The data comes from `tools/js/icu_data_gen.sh` (icu4x-datagen 2.4.0, CLDR 49), which now adds the markers `NormalizerNfkdDataV1`, `NormalizerNfkdTablesV1` and `NormalizerNfcV1`.
+- The compiled data of `icu_normalizer` is not used. bare-js builds its ICU4X crates with `default-features = false` and bakes its own data (`docs/resources.md`, data choice). The size of the compiled normalizer data was not measured.
+- NFC and NFD stay on `bare-unicode`. The issue said they used `icu_normalizer`; they do not. Two normalizers now run in one `normalize` call, so their Unicode versions can differ. To verify: compare the two outputs on a full Unicode test file.
+- Cost: the release `bare-mcp` binary grows by 104,992 B (+0.57%). The new data is 160 KB of source.
+- Checks: 'ﬁ'.normalize('NFKC') is 'fi', '①'.normalize('NFKD') is '1', a Hangul pair composes to U+AC00, and a lone surrogate stays. Node 22 gives the same results.
+
+## A `<style>` in any document has a sheet (2026-11-12)
+
+- Closure's CSS sanitizer parses CSS in a `createHTMLDocument` document and reads `sheet.cssRules`. `sheet` was `null` there, so a web mail message view failed (bare issue #429).
+- A `style` element gets a `CSSStyleSheet` when its root is any document or a shadow root. This follows "update a style block" in the CSSOM standard and Ladybird `StyleElementUtils.cpp`. A removed element has `sheet` `null`.
+- The cascade of the page reads only the elements of the page tree. A rule in another document does not change the page style.
+- `document.styleSheets` of the page does not list a sheet of another document.
+- Not built: `styleSheets` on a document other than the page throws `Illegal invocation`. `SVGStyleElement.sheet` is absent.
+
+## CSSOM at-rules are real rule objects (2026-11-12)
+
+- A web mail app copies the CSS of a message. For a `MEDIA_RULE` it reads `Array.from(rule.cssRules)`. An at-rule was a plain object with `type` and `cssText`, and `CSSRule` did not exist, so the app failed (bare issue #430).
+- `CSSRule` is a global with an illegal constructor. The type constants are on the constructor and on the prototype. Every rule object inherits from `CSSRule.prototype`.
+- `CSSMediaRule` and `CSSSupportsRule` inherit from `CSSConditionRule`, which inherits from `CSSGroupingRule`. They have a live `cssRules` list of real rule objects, `conditionText`, `insertRule`, `deleteRule`, `parentRule` and `parentStyleSheet`. `CSSMediaRule.media` is a `MediaList` with `mediaText`.
+- `CSSKeyframesRule` has `name` and `cssRules` of `CSSKeyframeRule` (`keyText`, `style`). `CSSFontFaceRule` has `style`. `CSSImportRule` has `href`, `media` and `styleSheet`.
+- The interface shape follows Ladybird `LibWeb/CSS` (BSD-2). No code was copied.
+- A group rule makes its sheet text from its nested rules. An edit to a nested rule or a call of `insertRule` or `deleteRule` reaches the `<style>` text. The text of an unedited `@media` rule is now normalized.
+- Not built: `CSSImportRule.styleSheet` is `null` (the loader flattens imports). `MediaList` has only `mediaText`, and it is read-only. `CSSKeyframesRule` has no `appendRule`, `deleteRule` or `findRule`. `conditionText` is read-only. `CSSStyleRule` is not a grouping rule (no nested style rules). `@page`, `@namespace`, `@layer` and `@container` stay plain `CSSRule` objects.
+
+## A blank iframe window shares the parent realm (2026-11-12)
+
+- A web mail app uses blank iframes as scratch windows. It reads `doc.defaultView`, `node.ownerDocument` and `win.setTimeout` on them (bare issue #426).
+- bare has one realm: one global object, one set of constructors. A real second realm needs a second heap global and a second copy of every host wrapper. That is large, so we did not build it.
+- We use the same-origin approximation. The window of a blank frame inherits the parent global. A global it does not own resolves to the parent value, so `w.Array === Array` and `w.setTimeout` is the parent timer. The window keeps its own `window`, `self`, `frames`, `parent`, `top`, `length`, `frameElement`, `document` and `location`.
+- The model follows Ladybird `BrowsingContext` and `Navigable` (BSD-2): a nested context has a window, and an initial `about:blank` document that the window and the iframe share. We copied no code.
+- The blank document knows its window (`defaultView`), reports `URL` `about:blank`, has its body as `activeElement`, and owns the nodes of its `createElement`, `createTextNode` and `createComment`. The record lives in `browser_frames.rs`.
+- The frame `Location` is read only. It reads `about:blank`. A write or `assign` throws.
+- `w.postMessage` drops the message. The frame has no listener that runs, and the parent must not receive it.
+- Only blank frames inherit the parent global. A frame with another `src` keeps the inert window, so the parent's `document` and globals do not leak through it.
+- Not built: a separate `Object.prototype` per frame, so `w.Array !== Array` checks and `instanceof` across frames are the same as in the parent. Other `create*` methods (`createElementNS`, `createDocumentFragment`, `importNode`) of a frame document still give `ownerDocument` the main document.

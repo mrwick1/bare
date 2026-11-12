@@ -8,6 +8,8 @@
 //! `tbody`, `tfoot`, `tr`, `td`, `caption`, `colgroup`), in file order: 66 from `tests_innerHTML_1.dat`, 8 from `math.dat`, 8 from `svg.dat` and 9 from
 //! `tests6.dat`. The source is the copy in the Go module `golang.org/x/net` v0.62.0 (`html/testdata/html5lib-tests/tree-construction`).
 //!
+//! `tools/fixtures/html/select-fragments.dat` holds the fragment tests of html5lib-tests whose context is `select`, in file order. These are the classic rules (html5lib-tests before the customizable select). The source is the copy in the Go module `golang.org/x/net` v0.39.0 (`html/testdata/webkit`). The v0.62.0 copy has the new rules (`div`, `textarea` and `keygen` stay), which bare does not follow.
+//!
 //! `tools/fixtures/html/foreign-fragments.dat` holds the 63 fragment tests of html5lib-tests whose context is an SVG or MathML element (`svg path`,
 //! `math mi`), all from `foreign-fragment.dat`, in file order. The source is the same Go module.
 
@@ -16,6 +18,7 @@ use crate::dom::Ns;
 
 const TEMPLATE_DAT: &str = include_str!("../../../../tools/fixtures/html/template.dat");
 const TABLE_FRAGMENTS_DAT: &str = include_str!("../../../../tools/fixtures/html/table-fragments.dat");
+const SELECT_FRAGMENTS_DAT: &str = include_str!("../../../../tools/fixtures/html/select-fragments.dat");
 const FOREIGN_FRAGMENTS_DAT: &str = include_str!("../../../../tools/fixtures/html/foreign-fragments.dat");
 
 /// One test of a `.dat` file.
@@ -136,4 +139,11 @@ fn html5lib_foreign_context_fragments() {
     let unexpected: Vec<_> = bad.iter().filter(|(n, _)| *n != 52).map(|(_, text)| text.as_str()).collect();
     assert!(unexpected.is_empty(), "{} of 63 tests fail:\n{}", unexpected.len(), unexpected.join("\n"));
     assert_eq!(bad.iter().map(|(n, _)| *n).collect::<Vec<_>>(), [52], "the frameset test passes now: take it off");
+}
+
+#[test]
+fn html5lib_select_context_fragments() {
+    let bad = failures(SELECT_FRAGMENTS_DAT);
+    let text: Vec<_> = bad.iter().map(|(_, text)| text.as_str()).collect();
+    assert!(bad.is_empty(), "{} of {} tests fail:\n{}", bad.len(), cases(SELECT_FRAGMENTS_DAT).len(), text.join("\n"));
 }

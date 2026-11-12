@@ -1,0 +1,43 @@
+#data
+</select><option>
+#errors
+(1,9): XXX-undefined-error
+#document-fragment
+select
+#document
+| <option>
+
+#data
+<input><option>
+#errors
+(1,7): unexpected-input-in-select
+#document-fragment
+select
+#document
+| <option>
+
+#data
+<keygen><option>
+#errors
+(1,8): unexpected-input-in-select
+#document-fragment
+select
+#document
+| <option>
+
+#data
+<textarea><option>
+#errors
+(1,10): unexpected-input-in-select
+#document-fragment
+select
+#document
+| <option>
+
+#data
+<option><XH<optgroup></optgroup>
+#errors
+#document-fragment
+select
+#document
+| <option>

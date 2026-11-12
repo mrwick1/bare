@@ -81,7 +81,7 @@ fn make_on(d: &Dom, it: &mut Interp<'_>, o: ObjId, w: u32, h: u32, data: Option<
     let data = match data {
         Some(v) => v,
         None => {
-            let n = w as u64 * h as u64 * 4;
+            let n = (w as u64).saturating_mul(h as u64).saturating_mul(4);
             if n > MAX_BYTES {
                 return Err(it.range_error("Out of memory at ImageData creation"));
             }
