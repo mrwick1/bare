@@ -1603,3 +1603,10 @@ A click on a GitHub issue title did not navigate. GitHub cancels the click and c
 - A top-level `return` fails the parse of the block. Only then does the code run as an async function body. A failed parse runs nothing, so the code runs once.
 - Code with `await` runs as an async function, as before: first as an expression, then as statements. It never runs as a script, because `await (x)` is a call there.
 - Each wrapper starts on the first line of the code. A syntax error parses the code once more and names its line. Plain code and an expression with `await` parse once. A top-level `return` or statements with `await` first fail one parse.
+
+## eval follows the navigation that its code starts (2026-11-12)
+
+- Code that `eval` runs can ask for a navigation: `location.href`, `location.assign`, `location.replace`, a link `click()`, `form.submit()` or `history.back()`. The page records the request, and only a session turn follows it.
+- A tick ran a turn only when it saw work. A navigation request was not work (`live_work_of`), so an idle page kept the old document for good.
+- Now a navigation request is work. After the value, `eval` ticks until the next document has loaded, within the time limit.
+- The reply then adds one line: `navigated: URL`, as an `act` receipt does. The URL has no fragment, so a `#hash` change gives no line. It loads nothing.
