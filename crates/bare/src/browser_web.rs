@@ -15,6 +15,7 @@
 //! `getHighEntropyValues(hints)`. That method returns a Promise of an object with the three plus each hint asked for:
 //! `architecture` "x86", `bitness` "64", `model` "", `platformVersion` "", `uaFullVersion` and `fullVersionList` (from `CHROME`),
 //! `wow64` false and `formFactors` ["Desktop"]. It ignores other hints. `userAgent` and `userAgentData` report the same data.
+//! The requests of the page send the same `User-Agent` and the low-entropy hints (`wire_identity`).
 //! `cookieEnabled` is true, as asked. `document.cookie` and the network share one jar (`bare_net::cookie`, `browser_cookie.rs`). There is no `mediaDevices`.
 //!
 //! `Blob`: `new Blob(parts, {type})` with strings, `ArrayBuffer`s, views and Blobs, `size`, `type`, `text()`,
@@ -47,6 +48,18 @@ use std::fmt::Write;
 /// The user agent string, and the major version that `userAgentData.brands` reports. The only place of both.
 pub(crate) const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36";
 const CHROME: &str = "155";
+/// The brands of `userAgentData.brands` and of `sec-ch-ua`, in this order. The only place of them.
+const BRANDS: [(&str, &str); 3] = [("Not.A/Brand", "8"), ("Chromium", CHROME), ("Google Chrome", CHROME)];
+/// The platform of `userAgentData.platform`, and of `sec-ch-ua-platform` (quoted there). The only place of it.
+const PLATFORM: &str = "Linux";
+
+/// What the browser sends on the wire (`Client::set_identity`): `USER_AGENT`, and the low-entropy client hints of `userAgentData`
+/// (`sec-ch-ua`, `sec-ch-ua-mobile`, `sec-ch-ua-platform`), made from the same constants as `navigator`.
+pub(crate) fn wire_identity() -> bare_net::http::Identity {
+    let brands: Vec<String> = BRANDS.iter().map(|(b, v)| format!("\"{b}\";v=\"{v}\"")).collect();
+    let hints = vec![("sec-ch-ua", brands.join(", ")), ("sec-ch-ua-mobile", "?0".to_string()), ("sec-ch-ua-platform", format!("\"{PLATFORM}\""))];
+    bare_net::http::Identity { user_agent: USER_AGENT, hints }
+}
 
 const MAX_BLOB: usize = 64 << 20;
 const MAX_TOTAL: usize = 256 << 20;
@@ -358,12 +371,12 @@ fn make(d: &Dom, it: &mut Interp<'_>) -> R<Made> {
     let up = proto(it, op_, "NavigatorUAData")?;
     d.def_get(it, up, "brands", |d, it, t, _| uad(d, it, t).map(|m| Value::Object(m.brands)), None)?;
     d.def_get(it, up, "mobile", |d, it, t, _| uad(d, it, t).map(|_| Value::Bool(false)), None)?;
-    d.def_get(it, up, "platform", |d, it, t, _| uad(d, it, t).and_then(|_| d.js_str(it, "Linux")), None)?;
+    d.def_get(it, up, "platform", |d, it, t, _| uad(d, it, t).and_then(|_| d.js_str(it, PLATFORM)), None)?;
     op(d, it, up, "getHighEntropyValues", 1, high_entropy)?;
     op(d, it, up, "toJSON", 0, |d, it, t, _| uad(d, it, t).and_then(|m| low_entropy(d, it, m)).map(Value::Object))?;
     let uad = d.obj(it, up)?;
     let mut brands = Vec::new();
-    for (b, v) in [("Not.A/Brand", "8"), ("Chromium", CHROME), ("Google Chrome", CHROME)] {
+    for (b, v) in BRANDS {
         let o = d.obj(it, op_)?;
         for (k, s) in [("brand", b), ("version", v)] {
             let (k, s) = (d.key(it, k)?, d.js_str(it, s)?);
@@ -508,7 +521,7 @@ fn uad(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<Made> {
 /// A new object with `brands`, `mobile` and `platform`: the low entropy hints.
 fn low_entropy(d: &Dom, it: &mut Interp<'_>, m: Made) -> R<ObjId> {
     let o = d.obj(it, it.object_prototype())?;
-    let p = d.js_str(it, "Linux")?;
+    let p = d.js_str(it, PLATFORM)?;
     for (k, v) in [("brands", Value::Object(m.brands)), ("mobile", Value::Bool(false)), ("platform", p)] {
         put(d, it, o, k, v)?;
     }

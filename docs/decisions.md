@@ -1734,3 +1734,10 @@ A focused element inside an editing host now takes key input. Text, Enter, Backs
 - Gap: `PerformanceResourceTiming` and `PerformanceNavigationTiming` have no entries. The page gets no resource or navigation entry from `getEntries*`, as before.
 - Gap: `toJSON` does not check its receiver. A call on a non-object throws `Illegal invocation`. A call on another object does not.
 - Shape from Ladybird's IDL (`LibWeb/PerformanceTimeline/PerformanceEntry.idl`, `LibWeb/ResourceTiming/PerformanceResourceTiming.idl`, `LibWeb/CSS/Screen.idl`, BSD-2-Clause). We wrote our own code. No file was copied. Ladybird's `Screen` has its members on the interface. Ours keep them as own data properties of `screen`, as before.
+## One User-Agent on the wire and in the page (2026-11-12)
+
+- A web mail app served its legacy unsupported-browser path. The server chose that path from the request headers. The HTTP `User-Agent` was `bare/0.1`, and `navigator.userAgent` said Chrome 155.
+- Every request of a page now sends `browser_web::USER_AGENT`. A caller that sets its own `User-Agent` keeps it. The browser sets the value on each client it makes (`Client::set_identity`), so one string serves both the wire and the page.
+- An https request also sends the default low-entropy client hints: `sec-ch-ua`, `sec-ch-ua-mobile` and `sec-ch-ua-platform`. The brands come from the constants that `navigator.userAgentData` reads.
+- We send no other client hints.
+- A client with no identity, used outside a browser, keeps `bare/0.1`.

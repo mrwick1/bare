@@ -731,6 +731,7 @@ impl Browser {
         };
         // One jar for the page client, the `fetch` client and `document.cookie`, and the site of this document for `SameSite`.
         let jar = cfg.client.jar();
+        cfg.client.set_identity(crate::browser_web::wire_identity());
         cfg.client.set_site(Some(bare_net::cookie::site_of(&page)));
         match &mut cfg.fetch {
             Some((c, _)) => c.use_jar(jar.clone()),

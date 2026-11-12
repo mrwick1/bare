@@ -429,6 +429,7 @@ impl Session {
         // storage keeps them (`Page::open_with`). A session with a new storage starts with no cookie.
         let mut c = self.client.get_or_insert_with(|| {
             let mut c = make();
+            c.set_identity(crate::browser_web::wire_identity());
             c.use_jar(store.jar());
             c
         }).fork();

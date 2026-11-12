@@ -148,6 +148,19 @@ fn formdata_matches_node() {
 }
 
 #[test]
+fn wire_client_hints_match_user_agent_data() {
+    big(|| {
+        let mut b = browser();
+        let brands = js(&mut b, "navigator.userAgentData.brands.map(function (x) { return '\"' + x.brand + '\";v=\"' + x.version + '\"'; }).join(', ')");
+        let id = crate::browser_web::wire_identity();
+        assert_eq!(id.hints[0], ("sec-ch-ua", brands));
+        assert_eq!(&id.hints[1..], &[("sec-ch-ua-mobile", "?0".to_string()), ("sec-ch-ua-platform", "\"Linux\"".to_string())]);
+        assert_eq!(js(&mut b, "navigator.userAgentData.platform"), "Linux");
+        assert_eq!(id.user_agent, js(&mut b, "navigator.userAgent"));
+    });
+}
+
+#[test]
 fn navigator_has_the_fixed_chrome_like_values() {
     big(|| {
         let mut b = browser();

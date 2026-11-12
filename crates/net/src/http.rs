@@ -245,12 +245,25 @@ impl<'a> Request<'a> {
     }
 }
 
+/// What a browser sends about itself on the wire (`Client::set_identity`). A request with no `User-Agent` of its own gets `user_agent`.
+/// An https request gets each of `hints` (a header name and its value) that the caller did not set.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Identity {
+    pub user_agent: &'static str,
+    pub hints: Vec<(&'static str, String)>,
+}
+
+/// The `User-Agent` of a client with no `Identity`: direct use of this crate, outside a browser.
+const DEFAULT_USER_AGENT: &str = "bare/0.1";
+
 /// What to send for one hop of a redirect chain. A redirect can change the method, the body and the headers.
 struct Plan<'a> {
     cookies: Cookies<'a>,
     method: Method,
     headers: Cow<'a, [(&'a str, &'a str)]>,
     body: &'a [u8],
+    // The identity of the client that makes the request (`None`: `DEFAULT_USER_AGENT`, no hints).
+    ident: Option<Arc<Identity>>,
 }
 
 impl Plan<'_> {
@@ -299,6 +312,8 @@ pub struct Client {
     // The cookies. In memory only. A fork shares it, so a new document of the same session keeps its cookies; a new client starts empty.
     pub(crate) site: Option<Arc<str>>,
     // The site of the document that this client serves (`cookie::site_of`), for `SameSite`. `None`: every request is first-party.
+    identity: Option<Arc<Identity>>,
+    // The identity that every request of this client sends (see `set_identity`). A fork shares it.
 }
 
 /// Check a request before any DNS lookup or socket. The messages name no header value and no body byte.
@@ -362,7 +377,7 @@ impl Client {
 
     /// A second client that shares the connections, the root certificates and the worker threads of this one. The reply cache is not shared.
     pub fn fork(&self) -> Client {
-        Client { idle: self.idle.clone(), sessions: self.sessions.clone(), cache: self.cache.clone(), roots: self.roots.clone(), workers: self.workers.clone(), jar: self.jar.clone(), site: self.site.clone() }
+        Client { idle: self.idle.clone(), sessions: self.sessions.clone(), cache: self.cache.clone(), roots: self.roots.clone(), workers: self.workers.clone(), jar: self.jar.clone(), site: self.site.clone(), identity: self.identity.clone() }
     }
 
     /// The cookie jar of this client and its forks.
@@ -379,6 +394,12 @@ impl Client {
     /// only `SameSite=None` cookies.
     pub fn set_site(&mut self, site: Option<String>) {
         self.site = site.map(Into::into);
+    }
+
+    /// Send this identity from now on: its `user_agent` for a request with no `User-Agent`, and its hints on https requests. A browser sets it
+    /// on every client it gets. Without it, a request sends `bare/0.1` and no hints.
+    pub fn set_identity(&mut self, identity: Identity) {
+        self.identity = Some(Arc::new(identity));
     }
 
     /// Fetch a URL. Follow redirects, and use the cache. Any status can come back: a 404 is still a page.
@@ -404,7 +425,7 @@ impl Client {
     /// close-ended body fails when it passes the limit. The error names no header value and no body byte.
     pub fn send_once(&mut self, req: &Request, max_body: usize) -> Result<Arc<Response>, Error> {
         check_request(req)?;
-        let plan = Plan { cookies: req.cookies, method: req.method, headers: Cow::Borrowed(req.headers), body: req.body };
+        let plan = Plan { cookies: req.cookies, method: req.method, headers: Cow::Borrowed(req.headers), body: req.body, ident: self.identity.clone() };
         let (mut response, mut body) = self.start(req.url, &plan, "")?;
         if body.size_hint() > max_body {
             body.note(&io::Error::new(ErrorKind::InvalidData, "the reply is too big"));
@@ -429,7 +450,7 @@ impl Client {
     /// Send one checked request without cache or redirects. The caller reads the body and checks each redirect.
     pub fn send_stream_once(&mut self, req: &Request) -> Result<Streamed, Error> {
         check_request(req)?;
-        let plan = Plan { cookies: req.cookies, method: req.method, headers: Cow::Borrowed(req.headers), body: req.body };
+        let plan = Plan { cookies: req.cookies, method: req.method, headers: Cow::Borrowed(req.headers), body: req.body, ident: self.identity.clone() };
         let (response, body) = self.start(req.url, &plan, "")?;
         Ok(Streamed { response: Arc::new(response), body })
     }
@@ -438,7 +459,7 @@ impl Client {
     /// caller reads the body and gives it to `keep`, so that the next request can use it. For scripts and style sheets.
     pub fn send_stream_cached(&mut self, req: &Request) -> Result<Streamed, Error> {
         check_request(req)?;
-        let plan = Plan { cookies: req.cookies, method: req.method, headers: Cow::Borrowed(req.headers), body: req.body };
+        let plan = Plan { cookies: req.cookies, method: req.method, headers: Cow::Borrowed(req.headers), body: req.body, ident: self.identity.clone() };
         let (response, body) = self.hop_stream(req.url, &plan)?;
         Ok(Streamed { response, body: body.expect("a streamed hop has a body") })
     }
@@ -478,7 +499,7 @@ impl Client {
     ///   `Proxy-Authorization`.
     fn follow(&mut self, req: &Request, stream: bool) -> Result<(Arc<Response>, Option<Body>), Error> {
         check_request(req)?;
-        let mut plan = Plan { cookies: req.cookies, method: req.method, headers: Cow::Borrowed(req.headers), body: req.body };
+        let mut plan = Plan { cookies: req.cookies, method: req.method, headers: Cow::Borrowed(req.headers), body: req.body, ident: self.identity.clone() };
         let mut current = req.url;
         // The URL we ask for now. It starts as the one we were given.
         let mut next;
@@ -1082,12 +1103,21 @@ fn loopback(host: &str) -> bool {
     host == "localhost" || host == "::1" || host.strip_prefix("127.").is_some_and(|rest| rest.bytes().all(|b| b.is_ascii_digit() || b == b'.'))
 }
 
+/// The client hints of an https request: each hint of the identity that the caller did not set (`sec-ch-ua` and the other low-entropy hints).
+fn hints<'a>(url: &Url, plan: &'a Plan) -> Vec<(&'static str, &'a str)> {
+    let Some(ident) = plan.ident.as_deref().filter(|_| url.scheme == Scheme::Https) else { return Vec::new() };
+    ident.hints.iter().filter(|(name, _)| !plan.headers.iter().any(|(n, _)| n.eq_ignore_ascii_case(name))).map(|(name, value)| (*name, value.as_str())).collect()
+}
+
 /// The headers of an HTTP/2 request: the four pseudo headers first, then what `request_head` writes for HTTP/1.1, with no `Host`.
 /// `authority` is `host_header(url)`, and `length` is the length of the body in digits.
 fn h2_headers<'a>(url: &'a Url, plan: &'a Plan, conditions: &'a str, authority: &'a str, length: &'a str) -> Vec<(&'a str, &'a str)> {
     let mut headers = vec![(":method", plan.method.as_str()), (":scheme", "https"), (":authority", authority), (":path", url.path.as_str())];
     if !plan.headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("user-agent")) {
-        headers.push(("user-agent", "bare/0.1"));
+        headers.push(("user-agent", plan.ident.as_deref().map_or(DEFAULT_USER_AGENT, |i| i.user_agent)));
+    }
+    for (name, value) in hints(url, plan) {
+        headers.push((name, value));
     }
     if !loopback(&url.host) && !plan.headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("accept-encoding")) {
         headers.push(("accept-encoding", "gzip, deflate, br"));
@@ -1113,7 +1143,10 @@ fn request_head(url: &Url, plan: &Plan, conditions: &str, extra: usize) -> Vec<u
     // `Host:` says which site we want. One server can host many sites.
     // There is no `Connection:` header. For HTTP/1.1 "keep the connection" is the default.
     if !plan.headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("user-agent")) {
-        out.extend_from_slice(b"User-Agent: bare/0.1\r\n");
+        let _ = write!(out, "User-Agent: {}\r\n", plan.ident.as_deref().map_or(DEFAULT_USER_AGENT, |i| i.user_agent));
+    }
+    for (name, value) in hints(url, plan) {
+        let _ = write!(out, "{name}: {value}\r\n");
     }
     if !loopback(&url.host) && !plan.headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("accept-encoding")) {
         // `br` only over https, as Chrome does: some plain proxies break it.
@@ -1786,7 +1819,7 @@ mod tests {
     #[test]
     fn asks_for_compression_except_on_this_machine_and_br_only_over_https() {
         let ask = |input, headers: &[(&str, &str)]| {
-            let plan = Plan { method: Method::Get, headers: Cow::Borrowed(headers), body: b"", cookies: Default::default() };
+            let plan = Plan { method: Method::Get, headers: Cow::Borrowed(headers), body: b"", cookies: Default::default(), ident: None };
             String::from_utf8(request_head(&Url::parse(input).unwrap(), &plan, "", 0)).unwrap()
         };
         assert!(ask("https://a.com/", &[]).contains("\r\nAccept-Encoding: gzip, deflate, br\r\n"));
@@ -1807,7 +1840,7 @@ mod tests {
 
     #[test]
     fn asks_for_english_except_on_this_machine_or_when_the_caller_sets_it() {
-        let plan = |headers: &'static [(&'static str, &'static str)]| Plan { method: Method::Get, headers: Cow::Borrowed(headers), body: b"", cookies: Default::default() };
+        let plan = |headers: &'static [(&'static str, &'static str)]| Plan { method: Method::Get, headers: Cow::Borrowed(headers), body: b"", cookies: Default::default(), ident: None };
         let ask = |input, headers: &'static [(&'static str, &'static str)]| String::from_utf8(request_head(&Url::parse(input).unwrap(), &plan(headers), "", 0)).unwrap();
         for remote in ["https://a.com/", "http://a.com/"] {
             assert!(ask(remote, &[]).contains("\r\nAccept-Language: en-US,en;q=0.9\r\n"), "{remote}");
@@ -1828,7 +1861,7 @@ mod tests {
     #[test]
     fn the_headers_of_an_h2_request_have_the_pseudo_headers_first_and_no_host() {
         let url = Url::parse("https://example.com:8443/a/b?q=1").unwrap();
-        let plan = Plan { method: Method::Post, headers: Cow::Owned(vec![("X-Token", "t")]), body: b"abc", cookies: Default::default() };
+        let plan = Plan { method: Method::Post, headers: Cow::Owned(vec![("X-Token", "t")]), body: b"abc", cookies: Default::default(), ident: None };
         let h = h2_headers(&url, &plan, "If-None-Match: \"v1\"\r\nIf-Modified-Since: yesterday\r\n", "example.com:8443", "3");
         assert_eq!(
             h,
@@ -1848,8 +1881,31 @@ mod tests {
         );
         // A header of the caller replaces the default. A GET has no content-length. A loopback host asks for no coding.
         let url = Url::parse("https://localhost/").unwrap();
-        let plan = Plan { method: Method::Get, headers: Cow::Owned(vec![("User-Agent", "mine")]), body: b"", cookies: Default::default() };
+        let plan = Plan { method: Method::Get, headers: Cow::Owned(vec![("User-Agent", "mine")]), body: b"", cookies: Default::default(), ident: None };
         assert_eq!(h2_headers(&url, &plan, "", "localhost", "0")[4..], [("User-Agent", "mine")]);
+    }
+
+    #[test]
+    fn a_browser_identity_gives_the_user_agent_and_the_hints_of_https_requests() {
+        let ident = Some(Arc::new(Identity { user_agent: "UA/1", hints: vec![("sec-ch-ua", "\"A\";v=\"1\"".into()), ("sec-ch-ua-mobile", "?0".into())] }));
+        let plan = |headers: &'static [(&'static str, &'static str)], ident: Option<Arc<Identity>>| Plan { method: Method::Get, headers: Cow::Borrowed(headers), body: b"", cookies: Default::default(), ident };
+        let text = |url: &str, plan: &Plan| String::from_utf8(request_head(&Url::parse(url).unwrap(), plan, "", 0)).unwrap();
+        // No identity: `bare/0.1` and no hints.
+        assert!(text("https://a.com/", &plan(&[], None)).contains("User-Agent: bare/0.1\r\n"));
+        // The identity: its user agent on http and https; its hints on https only.
+        assert!(text("http://a.com/", &plan(&[], ident.clone())).contains("User-Agent: UA/1\r\n"));
+        assert!(!text("http://a.com/", &plan(&[], ident.clone())).contains("sec-ch-ua"));
+        assert!(text("https://a.com/", &plan(&[], ident.clone())).contains("\r\nsec-ch-ua: \"A\";v=\"1\"\r\nsec-ch-ua-mobile: ?0\r\n"));
+        // A header of the caller replaces its hint, and its own user agent replaces ours.
+        let theirs = text("https://a.com/", &plan(&[("sec-ch-ua-mobile", "?1"), ("User-Agent", "mine")], ident.clone()));
+        assert!(theirs.contains("\r\nsec-ch-ua: \"A\";v=\"1\"\r\n") && theirs.contains("sec-ch-ua-mobile: ?1\r\n") && theirs.contains("User-Agent: mine\r\n"));
+        assert!(!theirs.contains("UA/1") && !theirs.contains("?0"));
+        // HTTP/2 sends the same values, with lower-case names.
+        let (https, http) = (Url::parse("https://a.com/").unwrap(), Url::parse("http://a.com/").unwrap());
+        let (https_plan, http_plan) = (plan(&[], ident.clone()), plan(&[], ident.clone()));
+        let h2 = h2_headers(&https, &https_plan, "", "a.com", "0");
+        assert!(h2.contains(&("user-agent", "UA/1")) && h2.contains(&("sec-ch-ua-mobile", "?0")), "{h2:?}");
+        assert!(!h2_headers(&http, &http_plan, "", "a.com", "0").iter().any(|(n, _)| n.starts_with("sec-")));
     }
 
     #[test]
@@ -3065,7 +3121,7 @@ mod tests {
                 continue;
             }
             accepted += 1;
-            let plan = Plan { method, headers: Cow::Borrowed(&headers), body: b"", cookies: Default::default() };
+            let plan = Plan { method, headers: Cow::Borrowed(&headers), body: b"", cookies: Default::default(), ident: None };
             let head = request_head(&url, &plan, "", 0);
             let lines = head.split(|&b| b == b'\n').count() - 1;
             // Each line ends with "\n": the pieces are the lines and one empty rest. Request line, Host, User-Agent and

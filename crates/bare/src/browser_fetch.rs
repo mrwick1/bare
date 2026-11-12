@@ -556,7 +556,9 @@ pub(crate) struct Fetch {
 
 impl Default for Fetch {
     fn default() -> Fetch {
-        Fetch { st: RefCell::default(), lim: Cell::new(FetchLimits::default()), client: RefCell::new(Client::new()), protos: OnceCell::new(), fixed: RefCell::default(), json_parse: Cell::new(None), drain: Cell::new(None), live: Cell::new(false) }
+        let mut client = Client::new();
+        client.set_identity(crate::browser_web::wire_identity());
+        Fetch { st: RefCell::default(), lim: Cell::new(FetchLimits::default()), client: RefCell::new(client), protos: OnceCell::new(), fixed: RefCell::default(), json_parse: Cell::new(None), drain: Cell::new(None), live: Cell::new(false) }
     }
 }
 
@@ -1964,7 +1966,7 @@ fn prepare(d: &Dom, it: &mut Interp<'_>, promise: Value, a: &[Value]) -> R<()> {
         }
         st.queued_bytes += n;
         st.started += 1;
-        // Wire headers: combined by name. `Accept` has a default. The client adds Host, Content-Length and User-Agent.
+        // Wire headers: combined by name. `Accept` has a default. The client adds Host, Content-Length, User-Agent and the client hints.
         let mut headers: Vec<(String, String)> = Vec::new();
         for (name, _) in &core.headers.list {
             if !headers.iter().any(|(k, _)| k == name) {
@@ -2520,6 +2522,7 @@ impl Browser {
         let f = &self.dom.fetch;
         f.lim.set(cfg.limits);
         let mut client = cfg.client;
+        client.set_identity(crate::browser_web::wire_identity());
         client.set_site(base.as_ref().map(bare_net::cookie::site_of));
         // `document.cookie` uses the jar of the client that `fetch` uses (`run_page` makes all clients of a page share one).
         self.dom.nav.s.borrow_mut().store.use_jar(client.jar());
