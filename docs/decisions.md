@@ -1452,3 +1452,14 @@ GitHub read `offsetWidth` of a plain `span`, and the read stopped the page (issu
 - An empty inline box gives the height of its font and no width. It uses the layout that keeps every inline box, as `getClientRects` does.
 - A `br` gives 0. Chrome gives 0 too, because a `br` is not a box there.
 - No record was added to layout. The rectangles come from the fragments of the text and the atomic boxes.
+
+## offsetTop of an inline box with nothing to paint (2026-11-12)
+
+GitHub read `offsetTop` of a plain `span`, and the read stopped the issues page (issue #404).
+
+- `offsetTop` and `offsetLeft` of such a box now give the place of its first line. They use the first rectangle of `getClientRects`.
+- An empty inline box gives its place on the line.
+- That rectangle is in window coordinates. The read takes the scroll offsets and the sticky offset back out, as for a box with a fragment.
+- An offset parent with nothing to paint (a `span` with `position: relative`) uses the same first line. Before, it was a gate.
+- A `br` gives 0 and keeps its offset parent. Chrome does the same, because a `br` is not a box there.
+- An inline box with a border over more than one line is still a gate.
