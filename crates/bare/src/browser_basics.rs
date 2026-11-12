@@ -15,8 +15,8 @@
 //!
 //! `window`: `devicePixelRatio` 1, `screenX` and `screenY` 0, `crossOriginIsolated` false, `closed` false, `opener` and `frameElement`
 //! null (data properties); `isSecureContext` (https, or a loopback or `.localhost` host); `outerWidth` and `outerHeight` are the inner
-//! size (`browser_scroll.rs`); `alert`, `print`, `focus` and `blur` do nothing; `confirm` gives false; `prompt` gives null; `open` gives
-//! null (a blocked popup). `postMessage(message, targetOrigin | { targetOrigin, transfer })` clones the message (`structuredClone`), drops
+//! size (`browser_scroll.rs`); `print`, `focus` and `blur` do nothing; `alert`, `confirm`, `prompt` and `open` answer a driver (`agent.rs`); without one
+//! `alert` does nothing, `confirm` gives false, `prompt` gives null and `open` gives null (a blocked popup, as it does for a driver). `postMessage(message, targetOrigin | { targetOrigin, transfer })` clones the message (`structuredClone`), drops
 //! it when `targetOrigin` is not "*", "/" or the origin of the document (an unparsable `targetOrigin` is a `SyntaxError`), and queues a
 //! `message` event for the window as one task (`Dom::post_window`). The event has `origin` (the document origin), `source` (the window)
 //! and no ports. A transfer list with items is `Unsupported`, as for `MessagePort`.
@@ -81,9 +81,11 @@ pub(crate) fn define(d: &Dom, it: &mut Interp<'_>, key: &str) -> R<()> {
         "crossOriginIsolated" | "closed" => data(it, g, Value::Bool(false)),
         "opener" | "frameElement" => data(it, g, Value::Null),
         "postMessage" => d.def_method(it, g, "postMessage", 1, post_message).map(|_| ()),
-        "alert" | "print" | "focus" | "blur" => hidden(it, nothing),
-        "confirm" => hidden(it, no),
-        "prompt" | "open" => hidden(it, null),
+        "print" | "focus" | "blur" => hidden(it, nothing),
+        "alert" => hidden(it, alert),
+        "confirm" => hidden(it, confirm),
+        "prompt" => hidden(it, prompt),
+        "open" => hidden(it, open),
         "isSecureContext" => getter(d, it, g, &["isSecureContext"], |d, _, _, _| Ok(Value::Bool(secure(d))), false),
         "outerWidth" => getter(d, it, g, &["outerWidth"], crate::browser_scroll::win_inner_width, false),
         "outerHeight" => getter(d, it, g, &["outerHeight"], crate::browser_scroll::win_inner_height, false),
@@ -131,11 +133,41 @@ fn nothing(_: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
     Ok(Value::Undefined)
 }
 
-fn no(_: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
-    Ok(Value::Bool(false))
+/// The argument `i` as text; a missing one is "".
+fn text_arg(it: &mut Interp<'_>, a: &[Value], i: usize) -> R<String> {
+    if i >= a.len() {
+        return Ok(String::new());
+    }
+    let s = it.to_js_string(a[i])?;
+    it.heap.to_string_lossy(s).map_err(|e| it.heap_error(e))
 }
 
-fn null(_: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
+/// The dialogs answer from the policy of a driver (`agent.rs`). With no policy: `alert` does nothing, `confirm` gives false and `prompt` null.
+fn alert(_: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
+    let m = text_arg(it, a, 0)?;
+    crate::agent::dialog("alert", &m, "");
+    Ok(Value::Undefined)
+}
+
+fn confirm(_: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
+    let m = text_arg(it, a, 0)?;
+    Ok(Value::Bool(crate::agent::dialog("confirm", &m, "").is_some_and(|(ok, _)| ok)))
+}
+
+fn prompt(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
+    let (m, dflt) = (text_arg(it, a, 0)?, text_arg(it, a, 1)?);
+    match crate::agent::dialog("prompt", &m, &dflt) {
+        Some((true, Some(t))) => d.js_str(it, &t),
+        _ => Ok(Value::Null),
+    }
+}
+
+/// `window.open(url)`: a tab for a driver (`agent.rs`); else null, a blocked popup. It always gives null: the page gets no window.
+fn open(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
+    let u = text_arg(it, a, 0)?;
+    if let Some(url) = d.resolve_http(&u) {
+        crate::agent::tab(&url);
+    }
     Ok(Value::Null)
 }
 

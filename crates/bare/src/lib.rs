@@ -24,6 +24,7 @@ pub mod browser_ui;
 mod browser_drive;
 mod browser_point;
 mod browser_uievent;
+pub mod agent;
 pub mod page;
 mod images;
 pub mod control;

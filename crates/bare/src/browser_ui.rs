@@ -718,12 +718,17 @@ impl Dom {
         if canceled {
             return Ok(());
         }
-        let (is_label, href) = {
+        let (is_label, href, blank) = {
             let doc = self.doc.borrow();
-            (is_tag(&doc, t, "label"), if is_tag(&doc, t, "a") { attr(&doc, t, "href").map(str::to_string) } else { None })
+            let a = is_tag(&doc, t, "a");
+            (is_tag(&doc, t, "label"), if a { attr(&doc, t, "href").map(str::to_string) } else { None }, a && attr(&doc, t, "target").is_some_and(|v| v.eq_ignore_ascii_case("_blank")))
         };
         if let Some(h) = href {
             if self.queue_download(it, t, &h)? {
+                return Ok(());
+            }
+            // A driver that wants tabs (`agent.rs`) gets the URL; the page stays.
+            if blank && self.resolve_http(&h).is_some_and(|u| crate::agent::tab(&u)) {
                 return Ok(());
             }
             return self.navigate_href(it, &h);

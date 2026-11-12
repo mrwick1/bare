@@ -208,6 +208,11 @@ impl Page {
         }
     }
 
+    /// Go back (`-1`) or forward (`1`) in the history, as the mouse buttons of the window do. It returns at once, as `navigate` does.
+    pub fn go(&mut self, delta: i32) -> Result<(), String> {
+        if self.history_go(delta) { Ok(()) } else { Err("no history to go to".into()) }
+    }
+
     /// The elements that match `selector` now.
     pub fn query_all(&mut self, selector: &str) -> Result<Vec<Handle>, String> {
         let doc = self.doc_id();

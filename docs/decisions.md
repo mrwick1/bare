@@ -1284,3 +1284,11 @@ A key that changes nothing now says `no effect`. The driver compares the documen
 - `open` reports `redirected: URL` when the final address differs from the requested one. It is a tool error when the step fails.
 - Receipts show full URLs. Only the value of a query parameter whose name has `token`, `key`, `code`, `password`, `secret`, `auth`, `session` or `sig` is hidden. The fragment is still dropped.
 - `file://` is not supported: a live `open` of a URL that is not http(s) fails at once with `the URL is not an http(s) URL` (bare#381). A `file` scheme in `bare-url` touches every `match` on `Scheme` in 13 files, and sub-resources would need a loader too.
+## Dialogs, tabs, storage and history for agents (2026-11-12)
+The agent answers dialogs up front. `act` takes `dialog` (accept or dismiss, default accept) and `prompt_text`. The engine answers `alert`, `confirm` and `prompt` at once and never blocks. The receipt lists each one: `dialog: confirm "Delete item?" -> dismissed`.
+The dialog code lives in `crates/bare/src/agent.rs`, as a per-thread policy and event queue. Without a driver the old results stay: `alert` does nothing, `confirm` gives false, `prompt` gives null.
+`beforeunload` needs no entry. No navigation of the engine dispatches it, so it cannot block.
+A click on a `target=_blank` link, and `window.open(url)`, open a new session named `main~2`, `main~3` and so on. It copies the cookies and storage of the opener. The receipt says `opened tab: main~2 URL`. The opener stays on its page. `window.open` still gives `null`: the page gets no window object.
+The `storage` tool reads, sets and clears cookies, `localStorage` and `sessionStorage`. Known secrets show as `[secret]`.
+`back` and `forward` are step lines and `act` ops. `close` and `sessions` already handled named sessions.
+`act` no longer reports `navigated` when the page had no document before the action.

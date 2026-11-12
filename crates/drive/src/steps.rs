@@ -9,6 +9,7 @@
 //!                             credentials). The step output gives counts only. IndexedDB is not saved
 //! goto URL                    the address bar of the session
 //! reload
+//! back, forward           the history of the session, as the mouse buttons of the window do
 //! click LOC
 //! type LOC "text"             click the field, select its text, type one key in each tick (a line feed is Enter); "" clears it
 //! press [LOC] KEY              at the element (it takes the focus first) or the focused element: Enter, Tab, Escape, a, Shift+Tab, Control+a
@@ -69,6 +70,8 @@ pub enum Action {
     SaveState(String),
     Goto(String),
     Reload,
+    Back,
+    Forward,
     Click(Locator),
     Type(Locator, String),
     /// Pick options of a `<select>` by label or value.
@@ -221,6 +224,8 @@ fn parse_line(line: &str, vars: &HashMap<String, String>) -> Result<Action, Stri
         "save-state" => Action::SaveState(one()?),
         "goto" => Action::Goto(one()?),
         "reload" if raw.is_empty() => Action::Reload,
+        "back" if raw.is_empty() => Action::Back,
+        "forward" if raw.is_empty() => Action::Forward,
         "click" => match locator(rest, vars)? {
             (loc, n) if n == rest.len() => Action::Click(loc),
             _ => return Err("click LOC".into()),
@@ -417,6 +422,8 @@ mod tests {
         assert_eq!(p("press Shift+Tab"), Ok(Action::Press(None, "Shift+Tab".into())));
         assert_eq!(p("press ref=e9 Enter"), Ok(Action::Press(Some(Locator::Ref(9)), "Enter".into())));
         assert_eq!(p("press css=\"#a\" Enter"), Ok(Action::Press(Some(Locator::Css("#a".into())), "Enter".into())));
+        assert_eq!((p("back"), p("forward")), (Ok(Action::Back), Ok(Action::Forward)));
+        assert!(p("back now").is_err());
         assert_eq!(p("goto http://a.test/x?q=1&r=~2"), Ok(Action::Goto("http://a.test/x?q=1&r=~2".into())));
         assert_eq!(p("expect placeholder~\"search\" value=\"\""), Ok(Action::Expect(Check::El(Locator::Placeholder(Text::Has("search".into())), State::Value(Text::Is("".into()))))));
         for bad in ["cookie", "cookie set a", "cookie set a b secure=1", "expect cookie", "expect cookie a shiny", "click", "type css=\"a\"", "expect css=\"a\" shiny", "nope", "type css=\"a\" \"${NOPE}\"", "shot ../x", "press Hyper+x", "click role=button\"x\"", "type css=\"a\" \"open"] {
