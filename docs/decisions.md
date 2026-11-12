@@ -1351,3 +1351,14 @@ An agent clicked a ref under a spinner and got `covered`. A cookie banner over t
 - The failure names the cover, not the element under the pointer. Of the ancestors of that element that do not hold the target, it names the outermost with a role and a name. It falls back to the outermost one. It gives `tag#id.class` and `(role "name")`.
 - bare has no CSS transitions. A backdrop that fades with `transition` and removes itself on `transitionend` never goes, so the click fails after 1 s. A fade by script works.
 - Window mode routes each tool through `Remote::call` on the window thread. The dialog and tab policy is per thread and is set there, so it works. The test `the_agent_tools_work_in_a_window` checks the tools in a window. It is ignored because it needs a Wayland display. Run it on a nested compositor, not on a desktop in use.
+## WritableStream, TransformStream and pipes as a script shim (2026-11-12)
+
+`@assistant-ui/react` extends `TransformStream` at the top level of a module. bare had no such global, so the module failed to load (issue #389).
+
+- `shims/streams.js` defines `WritableStream`, `TransformStream`, their writer and controllers, `TextDecoderStream` and `TextEncoderStream`. It also replaces `ReadableStream.prototype.pipeTo` and `pipeThrough`.
+- The shim is JavaScript, as `EventSource` and `indexedDB` are. These algorithms are promise plumbing. Script expresses them in a third of the size of the Rust code, and a class can extend each constructor.
+- The first read of one of the seven names makes the shim (`browser_name` in `crates/js/src/heap.rs`). The first call of `pipeTo` or `pipeThrough` also makes it. A page that uses none of them pays nothing.
+- The readable side of each pair is the host `ReadableStream`. Its limits hold. The writable queue lives in the realm heap, so the heap limits bound it.
+- `pipeTo` reads an error of the source only when it reads, because the host reader has no `closed` promise.
+- An abort of the writable side of a `TransformStream` errors its readable side at once. This is the older text of the standard. `transformer.cancel` runs.
+- `tee` and async iteration stay gated.

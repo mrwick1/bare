@@ -372,7 +372,7 @@ fn response_constructor_request_and_clone() {
             ("new Request('/x', {redirect:'manual'})", "fetch redirect: manual (opaque redirect responses)"),
             ("new Request('/x', {integrity:'sha256-x'})", "fetch option integrity"),
             ("new Request('/x').body", "Request.body (a request body stream)"),
-            ("new Response('x').body.tee()", "ReadableStream tee, pipeTo, pipeThrough and async iteration"),
+            ("new Response('x').body.tee()", "ReadableStream tee and async iteration"),
             ("new Response('x').body.getReader().closed", "ReadableStreamDefaultReader.closed"),
             ("new Response('x').body.getReader({mode: 'byob'})", "ReadableStream BYOB reader"),
         ] {

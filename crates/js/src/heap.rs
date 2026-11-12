@@ -1429,6 +1429,8 @@ impl Heap {
             Some(98) => named!("blur"),
             Some(69) => named!("EventSource"),
             Some(70) => named!("FontFace"),
+            Some(84) => named!("TransformStream") || named!("TransformStreamDefaultController") || named!("TextDecoderStream") || named!("TextEncoderStream"),
+            Some(87) => named!("WritableStream") || named!("WritableStreamDefaultWriter") || named!("WritableStreamDefaultController"),
             Some(114) => named!("referrer"),
             _ => false,
         }
