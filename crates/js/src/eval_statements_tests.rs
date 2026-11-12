@@ -291,9 +291,9 @@ fn finite_walks_scale_in_width_without_growing_the_frame_need() {
 fn deep_expressions_and_native_recursion_still_stop_at_their_own_limits_inside_frames() {
     real_stack(|| {
         // a left-deep chain and a deep call nest, each under many statement frames: the traversal guard answers
-        let chain = format!("{{ {{ {{ {}1 }} }} }}", "1+".repeat(2000));
+        let chain = format!("{{ {{ {{ {}1 }} }} }}", "1+".repeat(5000));
         assert_eq!(outcome(&chain, lim(768)), "limit:TraversalDepth");
-        let nest = format!("function f(x) {{ return x }} {{ {{ {}0{} }} }}", "f(".repeat(300), ")".repeat(300));
+        let nest = format!("function f(x) {{ return x }} {{ {{ {}0{} }} }}", "f(".repeat(900), ")".repeat(900));
         assert_eq!(outcome(&nest, lim(768)), "limit:TraversalDepth");
         // native recursion through callbacks, coercions, getters and constructors, in bodies full of statements
         let cb = "function g(n) { try { { return [n].map(function (x) { { return g(x + 1); } })[0]; } } finally { } } g(0)";

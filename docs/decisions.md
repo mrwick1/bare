@@ -1657,3 +1657,10 @@ Layout puts the fragment of an absolute box after the other fragments of its con
 - Each successful command fires `input` at the host. `beforeinput` is not fired for a script call, as in Chrome.
 - The functions `insert_text`, `delete_back`, `delete_forward`, `insert_paragraph`, `insert_line_break` and `select_all` are `pub(crate)` on `Dom`. Key input and the format commands call them.
 - Gaps: no block merge on Backspace at a block start, no `&nbsp;` rules, `designMode` stays "off".
+
+## The parser takes 1000 nested calls (2026-11-12)
+
+Gmail's main script has a chain of 220 nested calls, `this.ha=_.LG(_.LG(...))`. The parser stopped it at depth 256 with "nesting too deep" (bare issue #418). A nested call argument costs 2 depth units, so 1000 nested calls need about 2000 units.
+`HARD_MAX_DEPTH` and the default `max_depth` are now 2048. The measured release stack at 2048 units, for the worst shapes: nested classes 2.3 MiB, functions 1.1 MiB, arrows and templates 1.0 MiB, parens, arrays and objects 0.8 MiB, calls 0.75 MiB. The parse test thread is 4 MiB in release and 24 MiB in debug. The page thread is 8 MiB, and a call keeps at least `STACK_RED` (4 MiB) free, so a parse inside a call fits.
+The evaluator then stopped the script: the setup walk of a 1000-deep call needs more than 768 traversal frames. `MAX_TRAVERSAL_DEPTH` is now 2048. The measured release stack of one call at that cap, for 12 deep shapes (calls, members, parens, arrays, objects, templates, `new`, function and arrow expressions): at most 1.1 MiB, under `STACK_RED`. A shape far over either cap still ends with a clean `Limit` error.
+Five old tests asserted the old values (256, 768); they now use inputs sized for the new caps.

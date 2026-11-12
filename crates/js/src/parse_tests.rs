@@ -466,14 +466,14 @@ fn truncated_input_never_panics() {
 }
 
 fn deep_in_thread(f: impl FnOnce() + Send + 'static) {
-    // Release: 2 MiB (the default of a spawned thread). The worst case at depth 256 measured about 0.5 MiB.
-    // Debug frames are about 6 times larger (about 3.5 MiB for nested classes), so debug uses 8 MiB.
-    let stack = if cfg!(debug_assertions) { 8 << 20 } else { 2 << 20 };
+    // Release: 4 MiB. The worst case at depth 2048 (nested classes) measured about 2.3 MiB.
+    // Debug frames are about 6 times larger (about 14 MiB for nested classes), so debug uses 24 MiB.
+    let stack = if cfg!(debug_assertions) { 24 << 20 } else { 4 << 20 };
     std::thread::Builder::new().stack_size(stack).spawn(f).unwrap().join().unwrap();
 }
 
 #[test]
-fn deep_nesting_is_a_bounded_error_on_a_2mib_stack() {
+fn deep_nesting_is_a_bounded_error_on_a_4mib_stack() {
     deep_in_thread(|| {
         let n = 100_000;
         let cases: Vec<(&str, String)> = vec![
@@ -600,7 +600,7 @@ fn cached_bundles_parse() {
 #[test]
 fn caller_cannot_remove_the_recursion_cap() {
     deep_in_thread(|| {
-        let source = format!("{}1{}", "(".repeat(500), ")".repeat(500));
+        let source = format!("{}1{}", "(".repeat(5000), ")".repeat(5000));
         let limits = Limits { max_depth: u32::MAX, ..Limits::default() };
         assert!(matches!(parse_script(&source, limits), Err(Error { kind: ErrorKind::Limit(LimitKind::Depth), .. })));
     });
@@ -846,4 +846,18 @@ fn a_module_counts_nodes_and_limits() {
     assert!(used > 3);
     // The same count is enough to parse the same source.
     assert!(parse_module(&big, Limits { max_nodes: used, ..Limits::default() }).is_ok());
+}
+
+#[test]
+fn nested_calls_parse_at_gmail_depth_and_at_one_thousand() {
+    deep_in_thread(|| {
+        for n in [220, 1000] {
+            let src = format!("x={}1{}", "f(".repeat(n), ")".repeat(n));
+            assert!(parse_script(&src, Limits::default()).is_ok(), "{n} nested calls");
+        }
+        // Far over the cap: a clean depth limit, no stack overflow.
+        let src = format!("x={}1{}", "f(".repeat(100_000), ")".repeat(100_000));
+        let e = parse_script(&src, Limits::default()).unwrap_err();
+        assert!(matches!(e.kind, ErrorKind::Limit(LimitKind::Depth)), "{e}");
+    });
 }

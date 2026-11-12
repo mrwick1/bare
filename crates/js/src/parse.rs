@@ -56,10 +56,10 @@ use std::collections::HashMap;
 pub const REGEXP_PATTERN_VALIDATED: bool = false;
 
 /// Hard recursion ceiling, even when the caller raises `Limits::max_depth`.
-pub const HARD_MAX_DEPTH: u32 = 256;
+pub const HARD_MAX_DEPTH: u32 = 2048;
 
 /// Parser limits. A program that exceeds one returns [`ErrorKind::Limit`].
-/// The recursive parser requires a caller stack of at least 8 MiB in debug builds or 2 MiB
+/// The recursive parser requires a caller stack of at least 24 MiB in debug builds or 4 MiB
 /// in release builds at the hard depth cap. Smaller embedding stacks are unsupported.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
@@ -70,14 +70,14 @@ pub struct Limits {
     /// Most entries in one list (arguments, elements, statements in one block, ...).
     pub max_list: u32,
     /// Deepest nesting of expressions, statements and patterns. Clamped to `HARD_MAX_DEPTH`. The Rust stack use is about
-    /// `max_depth` times 2 KiB at worst in a release build (nested classes), so 256 needs about 0.5 MiB.
-    /// A debug build uses about 6 times more. A test parses deep input on a 2 MiB (release) or 8 MiB (debug) thread.
+    /// `max_depth` times 1.2 KiB at worst in a release build (nested classes), so 2048 needs about 2.3 MiB.
+    /// A debug build uses about 6 times more. A test parses deep input on a 4 MiB (release) or 24 MiB (debug) thread.
     pub max_depth: u32,
 }
 
 impl Default for Limits {
     fn default() -> Self {
-        Limits { max_source: 16 << 20, max_nodes: 16 << 20, max_list: 1 << 20, max_depth: 256 }
+        Limits { max_source: 16 << 20, max_nodes: 16 << 20, max_list: 1 << 20, max_depth: 2048 }
     }
 }
 
