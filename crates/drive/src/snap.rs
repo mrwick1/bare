@@ -251,7 +251,8 @@ fn walk(cx: &Cx, root: NodeId, mode: Mode, clicks: &HashSet<NodeId>, out: &mut V
 }
 
 /// Settle the page before a read: the document loaded, and the tasks that are due now run (bounded, so a busy page still answers).
-fn settle(p: &mut Page) {
+/// Wait for the load, then run the tasks that are due now (at most 300 ms).
+pub fn settle(p: &mut Page) {
     let _ = p.wait_load(std::time::Duration::from_secs(10));
     let end = std::time::Instant::now() + std::time::Duration::from_millis(300);
     while std::time::Instant::now() < end {
