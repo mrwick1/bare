@@ -163,14 +163,15 @@ fn role_of(cx: &Cx, n: NodeId, clicks: &HashSet<NodeId>) -> Option<&'static str>
     }
 }
 
-/// Does an element below `n` (in the flat tree) have the role of a control?
+/// Does an element below `n` (in the flat tree) have the role of a control and a name?
+/// A control with no name (the `#` anchor icon of a docs heading) does not count: its line would cost tokens and tell nothing.
 fn holds_control(cx: &Cx, n: NodeId) -> bool {
     let mut stack: Vec<NodeId> = cx.doc.flat_children(n).collect();
     while let Some(c) = stack.pop() {
         if !matches!(cx.doc.data(c), NodeData::Element { .. }) || !cx.boxed(c) {
             continue;
         }
-        if cx.role(c).is_some_and(|r| CONTROLS.contains(&intern(r))) {
+        if cx.role(c).is_some_and(|r| CONTROLS.contains(&intern(r))) && !cx.name(c).is_empty() {
             return true;
         }
         stack.extend(cx.doc.flat_children(c));
