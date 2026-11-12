@@ -560,3 +560,4 @@ mod tests;
 // the parser rows of the cost matrix moved by 2%).
 include!("intl_locale.rs");
 include!("intl_rtf_data.rs");
+include!("intl_names_data.rs");
