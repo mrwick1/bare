@@ -342,6 +342,32 @@ struct Builder<'a> {
     ext: Option<&'a [[f32; 4]]>,
 }
 
+/// Put the positioned boxes of a context (`v`) in tree order, for the painter and the hit test. The fragment of an absolute
+/// box comes after the other fragments of its containing block, and layout drops its static position. So the order of the
+/// fragments is not the order of the tree, and a later relative box would be under an earlier absolute one. CSS 2.1, Appendix E,
+/// says that positioned boxes with `z-index` auto or 0 paint in tree order. The key of a box is the path of child numbers from the top.
+pub(crate) fn tree_order<T>(doc: &Document, tree: &Tree, frags: &[Fragment], v: &mut [T], frag: impl Fn(&T) -> usize) {
+    if v.len() < 2 || !v.iter().any(|t| tree.kind(frags[frag(t)].node) == Kind::OutOfFlow) {
+        return;
+    }
+    v.sort_by_cached_key(|t| {
+        let mut path = Vec::new();
+        let mut n = frags[frag(t)].node;
+        while let Some(parent) = doc.parent_or_host(n) {
+            let mut place = 0u32;
+            let mut s = doc.prev_sibling(n);
+            while let Some(p) = s {
+                place += 1;
+                s = doc.prev_sibling(p);
+            }
+            path.push(place);
+            n = parent;
+        }
+        path.reverse();
+        path
+    });
+}
+
 impl Builder<'_> {
     fn push(&mut self, line: bool, item: Item) {
         if line {
@@ -575,6 +601,7 @@ impl Builder<'_> {
         }
         self.list.lines.truncate(lines);
         let end = self.list.positioned.len();
+        tree_order(self.doc, &self.tree, self.frags, &mut self.list.positioned[positioned..end], |&j| j as usize);
         for k in positioned..end {
             self.context(self.list.positioned[k] as usize);
         }
