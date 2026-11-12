@@ -984,6 +984,18 @@ fn cssom_lists_and_declarations_stay_live() {
 }
 
 #[test]
+fn cssom_style_in_another_document_has_a_sheet() {
+    big(|| {
+        let mut b = browser_with("<style>p { color: blue }</style><p id=p>x</p>", BrowserLimits::default());
+        assert_eq!(js(&mut b, "var doc = document.implementation.createHTMLDocument(''); var s = doc.createElement('style'); doc.head.appendChild(s); var sheet = s.sheet; sheet.insertRule('a { color: red }', 0); JSON.stringify([sheet.cssRules.length, sheet.cssRules[0] instanceof CSSStyleRule, sheet.cssRules[0].style.color])"), "[1,true,\"red\"]");
+        assert_eq!(js(&mut b, "sheet.insertRule('p { color: red }', 0); [getComputedStyle(document.getElementById('p')).color, document.styleSheets.length].join()"), "rgb(0, 0, 255),1");
+        assert_eq!(js(&mut b, "sheet.deleteRule(0); sheet.cssRules.length"), "1");
+        assert_eq!(js(&mut b, "var pd = new DOMParser().parseFromString('<style>b{}</style>', 'text/html'); pd.querySelector('style').sheet.cssRules.length"), "1");
+        assert_eq!(js(&mut b, "s.remove(); String(s.sheet)"), "null");
+    });
+}
+
+#[test]
 fn cssom_style_element_keeps_its_html_interface() {
     big(|| {
         let mut b = browser_with("<style>p { color: red }</style>", BrowserLimits::default());

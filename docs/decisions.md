@@ -1778,3 +1778,11 @@ A focused element inside an editing host now takes key input. Text, Enter, Backs
 - NFC and NFD stay on `bare-unicode`. The issue said they used `icu_normalizer`; they do not. Two normalizers now run in one `normalize` call, so their Unicode versions can differ. To verify: compare the two outputs on a full Unicode test file.
 - Cost: the release `bare-mcp` binary grows by 104,992 B (+0.57%). The new data is 160 KB of source.
 - Checks: 'ﬁ'.normalize('NFKC') is 'fi', '①'.normalize('NFKD') is '1', a Hangul pair composes to U+AC00, and a lone surrogate stays. Node 22 gives the same results.
+
+## A `<style>` in any document has a sheet (2026-11-12)
+
+- Closure's CSS sanitizer parses CSS in a `createHTMLDocument` document and reads `sheet.cssRules`. `sheet` was `null` there, so a web mail message view failed (bare issue #429).
+- A `style` element gets a `CSSStyleSheet` when its root is any document or a shadow root. This follows "update a style block" in the CSSOM standard and Ladybird `StyleElementUtils.cpp`. A removed element has `sheet` `null`.
+- The cascade of the page reads only the elements of the page tree. A rule in another document does not change the page style.
+- `document.styleSheets` of the page does not list a sheet of another document.
+- Not built: `styleSheets` on a document other than the page throws `Illegal invocation`. `SVGStyleElement.sheet` is absent.

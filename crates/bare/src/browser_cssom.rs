@@ -3,7 +3,7 @@
 //! External rules require a supplied sheet and a same-origin URL. Group rules retain their text; their nested rule lists are not exposed.
 use crate::browser::*;
 use crate::browser_dom::{arg, attr_set, next_in, set_text_content, text_content};
-use bare_html::dom::{Document, NodeId};
+use bare_html::dom::{Document, NodeData, NodeId};
 use bare_js::eval::{Error, Interp};
 use bare_js::heap::{HeapError, Slot};
 use bare_js::value::{ObjId, Value};
@@ -275,10 +275,21 @@ fn sheet_get(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
                 && attr(&doc, n, "rel").is_some_and(|v| v.split_ascii_whitespace().any(|t| t.eq_ignore_ascii_case("stylesheet")))
                 && attr(&doc, n, "href").is_some_and(|h| d.computed.ext.borrow().contains_key(h))
     };
-    if !loaded || !d.in_document(it, n)? {
+    if !loaded || !has_style_root(d, it, n)? {
         return Ok(Value::Null);
     }
     sheet_of(d, it, n).map(Value::Object)
+}
+// "Update a style block": the element gets a sheet when its root is any document or a shadow root, not only the page document.
+// A sheet in another document is never read by the cascade of the page, and the page `styleSheets` does not list it.
+fn has_style_root(d: &Dom, it: &mut Interp<'_>, n: NodeId) -> R<bool> {
+    let doc = d.doc.borrow();
+    let mut top = n;
+    while let Some(p) = doc.parent(top) {
+        it.charge(1)?;
+        top = p;
+    }
+    Ok(matches!(doc.data(top), NodeData::Document | NodeData::ShadowRoot))
 }
 fn sheet(d: &Dom, it: &mut Interp<'_>, v: Value) -> R<ObjId> {
     match v {
