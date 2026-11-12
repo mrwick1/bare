@@ -71,7 +71,8 @@ pub struct NavLimits {
     /// Queued traversal/fragment tasks, and queued navigation requests.
     pub max_tasks: usize,
     pub max_requests: usize,
-    /// UTF-16 units of one storage key or value.
+    /// UTF-16 units of one storage key or value. A longer value is a `QuotaExceededError` of the write. The default is the origin quota of
+    /// `StorageLimits`: a browser has no cap on one item, so each item that fits the quota fits here too.
     pub max_item_units: usize,
 }
 
@@ -89,7 +90,7 @@ impl Default for NavLimits {
             max_state_nodes: 1 << 18,
             max_tasks: 64,
             max_requests: 64,
-            max_item_units: 1 << 20,
+            max_item_units: 5 << 20,
         }
     }
 }

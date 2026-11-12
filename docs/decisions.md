@@ -1463,3 +1463,15 @@ GitHub read `offsetTop` of a plain `span`, and the read stopped the issues page 
 - An offset parent with nothing to paint (a `span` with `position: relative`) uses the same first line. Before, it was a gate.
 - A `br` gives 0 and keeps its offset parent. Chrome does the same, because a `br` is not a box there.
 - An inline box with a border over more than one line is still a gate.
+## Storage bounds throw QuotaExceededError, and press follows a replaced field (2026-11-12)
+
+A `press` with a locator on the Wikipedia search failed as `detached`, and the page stopped on the `storage-item` bound (issue #405).
+
+- `storage-item` capped one key or value at 1M UTF-16 units. Wikipedia stores its ResourceLoader module cache as one value of about 1.17M units. So the cap stopped the page.
+- A browser has no cap on one item. It throws `QuotaExceededError` from `setItem` when the store is full. It never stops the page.
+- The default item cap is now the origin quota, 5M units. So each item that fits the quota fits the cap.
+- The bounds of bare (`storage-item`, `storage-entries`, `storage-origins`, `storage-total`) now fail the one write with a `QuotaExceededError`. Nothing is written. The message names the bound. Wikipedia catches the error, as it does in a browser.
+- `getItem` with a key over the cap gives `null`, and `removeItem` does nothing: no store holds such a key.
+- The counts were right: a write of the same key replaces its size, and the same value again is a no-op.
+- `press` follows a field that the page replaced, with the rule of `type`. The old field left the document, and a text field has the focus. Then the key goes to that field. This holds when the locator matches nothing now, and when the focus of the press makes the page swap the field.
+- The second swap of Wikipedia gives an input with no `id`. So `css="#searchInput"` matches nothing after `type`.
