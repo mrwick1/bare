@@ -334,16 +334,17 @@ impl Page {
     /// `open` in a new session with empty storage that shares the connections and the HTTP cache of `net`, as a new tab of one browser
     /// does. A driver that opens many pages pays no new TLS handshake and no new download of the immutable scripts of an app.
     pub fn open_in(url: &str, viewport: (u32, u32), net: &bare_net::http::Client) -> Result<Page, String> {
-        Page::open_in_with(url, viewport, net, None)
+        Page::open_in_with(url, viewport, net, None, None)
     }
 
     /// `open_in` that starts from a saved state (`None`: empty storage). The state is plain data, so it can go to a window thread.
-    pub fn open_in_with(url: &str, viewport: (u32, u32), net: &bare_net::http::Client, state: Option<&StorageState>) -> Result<Page, String> {
-        Page::open_cfg(Page::config_in(url, net, state)?, viewport)
+    pub fn open_in_with(url: &str, viewport: (u32, u32), net: &bare_net::http::Client, state: Option<&StorageState>, downloads: Option<crate::Downloads>) -> Result<Page, String> {
+        Page::open_cfg(Page::config_in(url, net, state, downloads)?, viewport)
     }
 
-    fn config_in(url: &str, net: &bare_net::http::Client, state: Option<&StorageState>) -> Result<SessionConfig, String> {
+    fn config_in(url: &str, net: &bare_net::http::Client, state: Option<&StorageState>, downloads: Option<crate::Downloads>) -> Result<SessionConfig, String> {
         let mut cfg = SessionConfig::new(url);
+        cfg.downloads = downloads;
         if let Some(st) = state {
             let store = crate::browser_navigation::WebStorage::default();
             store.import(st).map_err(|e| format!("session state: {e:?}"))?;
@@ -358,12 +359,12 @@ impl Page {
     /// canvas of a headless page) keeps the pixels of the old page until the first frame of the new one. If the new session
     /// cannot start, no document is left.
     pub fn reopen_in(&mut self, url: &str, net: &bare_net::http::Client) -> Result<(), String> {
-        self.reopen_in_with(url, net, None)
+        self.reopen_in_with(url, net, None, None)
     }
 
     /// `reopen_in` that starts from a saved state (`None`: empty storage).
-    pub fn reopen_in_with(&mut self, url: &str, net: &bare_net::http::Client, state: Option<&StorageState>) -> Result<(), String> {
-        let cfg = Page::config_in(url, net, state)?;
+    pub fn reopen_in_with(&mut self, url: &str, net: &bare_net::http::Client, state: Option<&StorageState>, downloads: Option<crate::Downloads>) -> Result<(), String> {
+        let cfg = Page::config_in(url, net, state, downloads)?;
         self.release_frame();
         if let Source::Session(s) = &mut self.source {
             s.end_document();
@@ -618,6 +619,9 @@ impl Page {
         }
         let images = self.images.pending();
         let Some(b) = self.browser().filter(|_| !stopped) else { return (false, images.then(|| Instant::now() + poll)) };
+        if b.has_download_request() {
+            return (true, Some(Instant::now()));
+        }
         let (due, now) = (b.next_scheduled_due(), b.now());
         let net = if b.live() { b.live_work() } else { (b.pending_fetches() > 0).then_some(true) };
         let at = due.map(|d| Instant::now() + Duration::from_secs_f64((d - now).max(0.0) / 1000.0));

@@ -723,6 +723,9 @@ impl Dom {
             (is_tag(&doc, t, "label"), if is_tag(&doc, t, "a") { attr(&doc, t, "href").map(str::to_string) } else { None })
         };
         if let Some(h) = href {
+            if self.queue_download(it, t, &h)? {
+                return Ok(());
+            }
             return self.navigate_href(it, &h);
         }
         if is_label && let Some(c) = self.label_control(it, t)? {

@@ -101,22 +101,22 @@ enum Host {
 impl Host {
     /// An `open` is a new tab of one browser, in a window too: empty storage, and the connections and the HTTP cache of `net`.
     /// `state`: the saved session to start from (`None`: empty storage).
-    fn open(&mut self, url: &str, size: (u32, u32), window: bool, net: &bare_net::http::Client, state: Option<StorageState>) -> Result<(), String> {
+    fn open(&mut self, url: &str, size: (u32, u32), window: bool, net: &bare_net::http::Client, state: Option<StorageState>, downloads: Option<bare::Downloads>) -> Result<(), String> {
         match self {
             // The new page takes the size of the window, not `size`: the compositor can have resized the window, and the window loop
             // calls `resize` only when the window size changes.
             Host::Window(r) => {
                 let (url, net) = (url.to_string(), net.fork());
-                r.call(move |p| p.reopen_in_with(&url, &net, state.as_ref()))?
+                r.call(move |p| p.reopen_in_with(&url, &net, state.as_ref(), downloads))?
             }
             _ if window => {
-                *self = Host::Window(Remote::open_with(url, size, net, state)?);
+                *self = Host::Window(Remote::open_with(url, size, net, state, downloads)?);
                 Ok(())
             }
             _ => {
                 // The old page ends first, so the two pages do not share the peak of memory. A failed open leaves no page.
                 *self = Host::None;
-                let mut p = Page::open_in_with(url, size, net, state.as_ref())?;
+                let mut p = Page::open_in_with(url, size, net, state.as_ref(), downloads)?;
                 p.quiet = true;
                 *self = Host::Local(Box::new(p));
                 Ok(())
@@ -237,6 +237,8 @@ pub struct Session {
     preload: Option<StorageState>,
     /// The last console entries and network records, kept after `drain` (the `console`, `network` and `diagnose` tools read it).
     pub hist: crate::diag::History,
+    /// Where this session saves downloads (`set_downloads`).
+    downloads: Option<bare::Downloads>,
     pub rep: Report,
 }
 
@@ -245,7 +247,12 @@ impl Session {
         bare_net::trace::enable();
         let _ = bare_net::trace::take();
         let rep = Report { ok: true, steps: Vec::new(), failure: None, logs: Vec::new(), net: Vec::new(), ms: 0.0, window: opt.window, ticks: Ticks::default(), cookies: Vec::new() };
-        Session { host: Host::None, net: bare_net::http::Client::new(), memo: Memo::default(), timeout: opt.timeout, window_cpu: 0, nav_first: 0, start: Instant::now(), preload: None, hist: Default::default(), rep }
+        Session { host: Host::None, net: bare_net::http::Client::new(), memo: Memo::default(), timeout: opt.timeout, window_cpu: 0, nav_first: 0, start: Instant::now(), preload: None, hist: Default::default(), downloads: None, rep }
+    }
+
+    /// Save the downloads of the pages that later `open` steps make in `d`.
+    pub fn set_downloads(&mut self, d: bare::Downloads) {
+        self.downloads = Some(d);
     }
 
     /// Make the next `open` step that has no state file start from `st`.
@@ -351,7 +358,7 @@ impl Session {
 
     /// Run one step, and add its result to `rep`. False when it failed (`rep.failure` says why).
     pub fn step(&mut self, step: &Step, opt: &Options, red: &mut Redactor) -> bool {
-        let Session { host, net, memo, timeout, window_cpu, nav_first, rep, preload, hist, .. } = self;
+        let Session { host, net, memo, timeout, window_cpu, nav_first, rep, preload, hist, downloads, .. } = self;
     let t0 = Instant::now();
     let deadline = t0 + *timeout;
     let (mut tries, mut busy, mut waited, mut ticks) = (0u32, Duration::ZERO, Duration::ZERO, Ticks::default());
@@ -371,7 +378,7 @@ impl Session {
             Action::Open(url, file) => {
                 memo.seen.clear();
                 let from = file.as_deref().map(crate::state::read).transpose().map(|st| st.or_else(|| preload.take()));
-                let opened = from.and_then(|st| host.open(url, opt.size, opt.window, net, st)).and_then(|_| host.run(|p| p.take_logs()));
+                let opened = from.and_then(|st| host.open(url, opt.size, opt.window, net, st, downloads.clone())).and_then(|_| host.run(|p| p.take_logs()));
                 let d = t.elapsed();
                 busy += d;
                 if !opt.window {

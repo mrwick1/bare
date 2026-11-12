@@ -78,6 +78,11 @@ fn pages(method: &str, target: &str, body: &str, auth: Option<&str>) -> (u16, &'
         ("/buttons", Some((_, n))) => (200, "text/html", buttons(n.parse().unwrap_or(1))),
         ("/forms", _) => (200, "text/html", FORMS.as_bytes().to_vec()),
         ("/upload", _) if method == "POST" => (200, "text/plain", upload_echo(body).into_bytes()),
+        ("/downloads", _) => (200, "text/html", DOWNLOADS_PAGE.as_bytes().to_vec()),
+        // The content type may carry one more header: the server writes it as it is.
+        ("/files/report.csv", _) => (200, "text/csv\r\nContent-Disposition: attachment; filename=\"report.csv\"", PAYLOAD_CSV.to_vec()),
+        ("/files/invoice.pdf", _) => (200, "application/pdf", PAYLOAD_PDF.to_vec()),
+        ("/files/notes.txt", _) => (200, "text/plain", b"plain notes".to_vec()),
         _ => reply(method, path, body, auth),
     }
 }
@@ -118,6 +123,15 @@ fn upload_echo(body: &str) -> String {
         .collect();
     format!("uploaded: {}", parts.join("; "))
 }
+pub const PAYLOAD_CSV: &[u8] = b"id,name\n1,Alpha\n2,Beta\n";
+pub const PAYLOAD_PDF: &[u8] = b"%PDF-1.4\n\x00\xff\xfe binary body\n%%EOF\n";
+/// Links to an attachment, a PDF, a `download` link to a plain text file, and a button whose script downloads a Blob.
+const DOWNLOADS_PAGE: &str = "<!DOCTYPE html><title>Downloads</title>\
+<a href=\"/files/report.csv\">Report</a> <a href=\"/files/invoice.pdf\">Invoice</a> <a href=\"/files/notes.txt\" download=\"my notes.txt\">Notes</a>\
+<a href=\"/files/missing.zip\" download>Missing</a> <button id=b>Export</button>\
+<script>document.getElementById('b').addEventListener('click', function () {\
+var u = URL.createObjectURL(new Blob(['x,y\\n1,2\\n'], {type: 'text/csv'}));\
+var a = document.createElement('a'); a.href = u; a.download = '../export.csv'; a.click(); });</script>";
 
 /// A page of `n` buttons (`#b0`..), each named "Button K", and a text that a timer adds after 2 s (`#late`). For the cost example.
 fn buttons(n: usize) -> Vec<u8> {

@@ -1248,3 +1248,15 @@ An agent must fill real forms. `act` and the step language now have `select`, `c
 - `upload` sets the files of an `<input type=file>` from local paths and fires `input` and `change`. The engine keeps only the paths, with the name and the time. It reads the bytes when a script reads `input.files` or a form submits. A file over 100 MiB is refused when set and when read. A hidden input needs a `css=` locator, because the other locators skip hidden elements.
 - Script cannot set files, as in other browsers. `input.files` is an array of `File` objects, not a `FileList`. `new FormData(form)` and a form with `enctype="multipart/form-data"` send the real files. A `POST` with that enctype is no longer `Unsupported`; `text/plain` still is.
 - A file is read into memory as a `Blob`. A big upload costs its size in memory while it is sent. Streaming from disk needs a body type in `bare-net` that is not a byte vector, so it is not built.
+## Downloads go to disk in bare-mcp sessions (2026-11-12)
+
+An agent must fetch files for a user: a CSV export, a PDF invoice, a ZIP. A browser saves these. bare showed them as a failed load.
+
+- A response is a download when it has `Content-Disposition: attachment`, or a type that bare does not show. bare shows HTML, text, JSON, XML, JavaScript and images. A link with a `download` attribute is always a download, also for a `blob:` or `data:` URL that a script made.
+- A download does not replace the page. The session saves the body in the downloads folder (`downloads_dir` of `open`, default `<temp>/bare-mcp-<pid>-downloads/`).
+- The body streams in 64 KiB pieces, so the memory stays flat. A download over 1 GiB fails and its file is removed.
+- The name comes from `Content-Disposition` (`filename*` first), then the `download` attribute, then the last path segment. It has no path separator and no leading dot. A name that exists gets ` (1)`, ` (2)`, and so on. A file is never replaced.
+- Only a session that has a `Downloads` list saves. Any other session keeps the old behavior, so `bare` and `bare-drive` do not change.
+- `act` adds `downloaded: PATH (BYTES bytes, MIME)` for each download that ended, and waits for a download that started in the action, up to the step time limit. A failure shows as `download failed: URL: reason`. The tool `downloads` lists the session's downloads.
+- `a.download` now reflects the attribute, and `a.click()` on a link with `download` saves the target. Before, `a.click()` on any link was refused. That refusal stays for links without `download`.
+- `blob:` and `data:` bytes are read in the document that made them, because the Blob store lives there. The save runs in the session.

@@ -58,9 +58,11 @@ use crate::browser_navigation::{Body, NavLimits, NavigationKind, WebStorage};
 use bare_html::{encoding, tree};
 use bare_js::eval::EvalLimits;
 use bare_js::heap::HeapLimits;
-use bare_net::http::{Client, Cookies, Ctx, Request};
+use crate::downloads::{self, DownloadRequest, Grab};
+use bare_net::http::{Client, Cookies, Ctx, Request, Response, Streamed};
 use bare_net::parallel::Task;
 use bare_url::Url;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug)]
@@ -110,6 +112,8 @@ pub struct SessionConfig {
     /// one stays. `run` and `navigate` also return at once: the document downloads on a worker, and the turns of `resume` load it.
     /// See `docs/decisions.md` ("Input that does not wait").
     pub live: bool,
+    /// Where downloads go (see `downloads.rs`). `None`: a response that the page cannot show is a failed load.
+    pub downloads: Option<downloads::Downloads>,
 }
 
 impl SessionConfig {
@@ -127,6 +131,7 @@ impl SessionConfig {
             virtual_clock: false,
             storage: None,
             live: false,
+            downloads: None,
         }
     }
 }
@@ -259,6 +264,14 @@ fn is_html(content_type: Option<&str>) -> bool {
     m.eq_ignore_ascii_case("text/html")
 }
 
+/// Does the browser show this type (lower case, no parameters) as text?
+pub(crate) fn text_mime(mime: &str) -> bool {
+    mime.starts_with("text/") || mime.ends_with("+json") || mime.ends_with("+xml") || matches!(mime, "application/json" | "application/xml" | "application/javascript" | "application/x-javascript")
+}
+
+/// The load that a worker did was a download: the file is saved, and the page stays. Not a failure.
+const SAVED: &str = "the response was saved as a download";
+
 /// The document for a response that is not HTML, as Chrome shows it: text (plain, JSON, XML, CSS, JS) in a `<pre>`, an
 /// image as a document with one `<img>`. Any other type is a download: no page. A response without a type is refused.
 pub(crate) fn non_html_document(content_type: Option<&str>, url: &str, body: &[u8]) -> Result<String, String> {
@@ -280,11 +293,36 @@ pub(crate) fn non_html_document(content_type: Option<&str>, url: &str, body: &[u
     if mime.starts_with("image/") {
         return Ok(format!("<img src=\"{}\">", esc(url, true)));
     }
-    let text = mime.starts_with("text/") || mime.ends_with("+json") || mime.ends_with("+xml") || matches!(mime.as_str(), "application/json" | "application/xml" | "application/javascript" | "application/x-javascript");
-    if !text {
+    if !text_mime(&mime) {
         return Err("the content is a download".into());
     }
     Ok(format!("<pre style=\"white-space:pre-wrap;word-wrap:break-word\">{}</pre>", esc(&encoding::decode(body, Some(ct)), false)))
+}
+
+/// One request of a load that may be a download. A response that is one goes to a file (`None`); any other is read whole, as `send_once` does.
+fn fetch_hop(client: &mut Client, req: &Request, max: usize, g: &Grab) -> Result<Option<Arc<Response>>, String> {
+    use std::io::Read;
+    let Streamed { response, mut body } = client.send_stream_once(req).map_err(|_| "network error".to_string())?;
+    let mut r = Arc::try_unwrap(response).map_err(|_| "network error".to_string())?;
+    let (ct, cd) = (r.header("content-type"), r.header("content-disposition"));
+    if (200..300).contains(&r.status) && (g.force || downloads::is_download(ct, cd)) {
+        let url = req.url.to_string();
+        let name = downloads::file_name(cd, g.name.as_deref(), &url);
+        let id = g.id.unwrap_or_else(|| g.dl.start(&url));
+        g.dl.save(id, &name, &downloads::mime_of(ct), &mut body);
+        return Ok(None);
+    }
+    // A redirect has no body to read.
+    if matches!(r.status, 301 | 302 | 303 | 307 | 308) {
+        return Ok(Some(Arc::new(r)));
+    }
+    let mut bytes = Vec::new();
+    (&mut body).take((max as u64).saturating_add(1)).read_to_end(&mut bytes).map_err(|_| "network error".to_string())?;
+    if bytes.len() > max {
+        return Err("network error".into());
+    }
+    r.body = bytes;
+    Ok(Some(Arc::new(r)))
 }
 
 /// May a redirect (or a navigation) go from `from` to `to`? http(s) only, and https never goes down to http.
@@ -294,7 +332,7 @@ pub(crate) fn redirect_allowed(from: &Url, to: &Url) -> bool {
 }
 
 /// Download one document with the caps of `lim`. Gives the final URL (with the fragment) and the decoded text.
-fn load_document(client: &mut Client, url: &str, from: Option<&str>, body: Option<&Body>, lim: &SessionLimits, deadline: Instant) -> Result<(String, String), String> {
+fn load_document(client: &mut Client, url: &str, from: Option<&str>, body: Option<&Body>, lim: &SessionLimits, deadline: Instant, grab: Option<&Grab>) -> Result<(String, String), String> {
     let max_url = NavLimits::default().max_url_bytes;
     if url.len() > max_url { return Err("the document URL is too big".into()); }
     let (bare, fragment) = match url.split_once('#') {
@@ -312,11 +350,18 @@ fn load_document(client: &mut Client, url: &str, from: Option<&str>, body: Optio
         }
         let cookies = Cookies { on: true, ctx: Ctx::Navigation(from) };
         let accept = ("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
-        let resp = match body {
-            Some(b) => bare_net::trace::blocked(|| client.send_once(&Request { cookies, ..Request::post(&cur, &[accept, ("Content-Type", b.content_type.as_str())], &b.bytes) }, lim.max_document_bytes)),
-            None => bare_net::trace::blocked(|| client.send_once(&Request { cookies, headers: &[accept], ..Request::get(&cur) }, lim.max_document_bytes)),
-        }
-        .map_err(|_| "network error".to_string())?;
+        let post_headers = [accept, ("Content-Type", body.map_or("", |b| b.content_type.as_str()))];
+        let req = match body {
+            Some(b) => Request { cookies, ..Request::post(&cur, &post_headers, &b.bytes) },
+            None => Request { cookies, headers: &[accept], ..Request::get(&cur) },
+        };
+        let resp = match grab {
+            None => bare_net::trace::blocked(|| client.send_once(&req, lim.max_document_bytes)).map_err(|_| "network error".to_string())?,
+            Some(g) => match bare_net::trace::blocked(|| fetch_hop(client, &req, lim.max_document_bytes, g))? {
+                Some(r) => r,
+                None => return Err(SAVED.into()),
+            },
+        };
         if matches!(resp.status, 301 | 302 | 303 | 307 | 308) {
             if body.is_some() && matches!(resp.status, 307 | 308) {
                 return Err("a redirect would send the form body again".into());
@@ -420,7 +465,8 @@ impl Session {
     fn start(&mut self, next: Next) -> SessionResult {
         let (url, body, from, lim) = (next.url.clone(), next.body.clone(), next.from.clone(), self.cfg.limits.clone());
         let deadline = deadline_after(lim.max_time.saturating_sub(self.used.time));
-        let task = self.fork().spawn(move |c| load_document(c, &url, from.as_deref(), body.as_ref(), &lim, deadline));
+        let grab = self.cfg.downloads.clone().map(|dl| Grab { dl, force: false, name: None, id: None });
+        let task = self.fork().spawn(move |c| load_document(c, &url, from.as_deref(), body.as_ref(), &lim, deadline, grab.as_ref()));
         self.loading = Some((next, task));
         SessionResult { stop: SessionStop::Page(Stop::Settled), pages: Vec::new(), urls: Vec::new(), tasks: 0, rounds: 0 }
     }
@@ -469,6 +515,33 @@ impl Session {
             return self.start(next);
         }
         self.drive(Some(next), &[])
+    }
+
+    /// Start the downloads that the page asked for with a `download` link. A `blob:` or `data:` URL is saved now; any other URL
+    /// downloads on a worker, which the list of `Downloads` shows as running.
+    fn start_downloads(&mut self) {
+        let Some(dl) = self.cfg.downloads.clone() else { return };
+        let Some(b) = self.browser.as_mut() else { return };
+        let mut asked = Vec::new();
+        while let Some(r) = b.take_download_request() {
+            asked.push(r);
+        }
+        for DownloadRequest { url, name, from, data } in asked {
+            let id = dl.start(&url);
+            if let Some((bytes, mime)) = data {
+                let file = downloads::file_name(None, name.as_deref(), if url.starts_with("data:") { "" } else { &url });
+                dl.save(id, &file, &downloads::mime_of(Some(&mime)), &bytes[..]);
+                continue;
+            }
+            let (lim, from) = (self.cfg.limits.clone(), initiator(&from));
+            let deadline = deadline_after(lim.max_time.saturating_sub(self.used.time));
+            let grab = Grab { dl: dl.clone(), force: true, name, id: Some(id) };
+            self.fork().spawn(move |c| {
+                if let Err(why) = load_document(c, &url, from.as_deref(), None, &lim, deadline, Some(&grab)) && why != SAVED {
+                    grab.dl.fail(id, why);
+                }
+            });
+        }
     }
 
     /// End the document now, and forget the next one that is on its way. Its realm is dropped; the history and the storage stay.
@@ -524,6 +597,14 @@ impl Session {
                     let Ok(scan) = scan else { return SessionStop::LoadFailed("the URL is not an http(s) URL".into()) };
                     self.parsing = Some(Box::new(Parsing { next: n, url, html, at: 0, parser: tree::Parser::new(), scan }));
                 }
+                // A download: the file is saved, and the document on screen stays.
+                Err(why) if why == SAVED => {
+                    // The page asked for this load: take its request, or the page stops on it again.
+                    if let Some(b) = self.browser.as_mut() {
+                        b.take_navigation_request();
+                    }
+                    return SessionStop::Page(Stop::Settled);
+                }
                 Err(why) => {
                     fetched = Some(Err(why));
                     next = Some(n);
@@ -570,7 +651,7 @@ impl Session {
                     let mut base = self.fork();
                     let doc = match fetched.take() {
                         Some(d) => d,
-                        None => load_document(&mut base, &url, from.as_deref(), body.as_ref(), &lim, deadline).map(|(url, html)| (url, tree::parse(&html))),
+                        None => load_document(&mut base, &url, from.as_deref(), body.as_ref(), &lim, deadline, None).map(|(url, html)| (url, tree::parse(&html))),
                     };
                     let (url, dom) = match doc {
                         Ok(d) => d,
@@ -611,6 +692,9 @@ impl Session {
                         return SessionStop::LoadFailed("the document URL could not be configured".into());
                     }
                     b.cross_document_history(true);
+                    if self.cfg.downloads.is_some() {
+                        b.enable_downloads();
+                    }
                     b.start_refresh();
                     if scroll != (0.0, 0.0) {
                         b.set_scroll(bare_paint::Scroll { x: scroll.0, y: scroll.1, ..Default::default() });
@@ -640,6 +724,7 @@ impl Session {
             let stop = r.stop.clone();
             out.pages.push(r);
             self.browser = Some(b);
+            self.start_downloads();
             steps = &[];
             let Stop::Navigate(n) = stop else { return SessionStop::Page(stop) };
             let req = n.0;

@@ -737,11 +737,11 @@ impl Remote {
     /// thread keeps them. Returns when the first frame is drawn. The storage is not `Send`: a job opens a page of the same profile with
     /// `Page::open_with(url, size, page.storage())` on the window thread.
     pub fn open(url: &str, size: (u32, u32), net: &bare_net::http::Client) -> Result<Remote, String> {
-        Remote::open_with(url, size, net, None)
+        Remote::open_with(url, size, net, None, None)
     }
 
     /// `open` that starts from a saved state (`None`: empty storage).
-    pub fn open_with(url: &str, size: (u32, u32), net: &bare_net::http::Client, state: Option<crate::page::StorageState>) -> Result<Remote, String> {
+    pub fn open_with(url: &str, size: (u32, u32), net: &bare_net::http::Client, state: Option<crate::page::StorageState>, downloads: Option<crate::Downloads>) -> Result<Remote, String> {
         let (ready_tx, ready_rx) = mpsc::channel();
         let (url, net) = (url.to_string(), net.fork());
         let ran = Ran::default();
@@ -752,7 +752,7 @@ impl Remote {
             .spawn(move || {
                 let fail = |e: String, r: &mpsc::Sender<Result<_, String>>| drop(r.send(Err(e)));
                 let t = Instant::now();
-                let mut page = match Page::open_in_with(&url, size, &net, state.as_ref()) {
+                let mut page = match Page::open_in_with(&url, size, &net, state.as_ref(), downloads) {
                     Ok(p) => p,
                     Err(e) => return fail(e, &ready_tx),
                 };
