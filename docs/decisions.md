@@ -1842,6 +1842,7 @@ Reason: a later relative box under an earlier fixed layer could not be clicked (
 - Chrome has no such cap. The cap now only stops pages that are far larger than that.
 - The cascade charges the real work as steps (one per node, then one per tested candidate). The step budget is the real guard, so the cap can be raised.
 - The bound and its check stay. A test sets a lower `max_work` to prove the refusal.
+
 ## Selection direction and containsNode (2026-11-12)
 
 - The selection keeps one flag for its direction. `setBaseAndExtent` and `extend` set it. Every other call that makes a new selection range sets it to forward.
