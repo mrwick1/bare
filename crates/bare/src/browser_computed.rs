@@ -122,11 +122,11 @@ impl Default for ComputedLimits {
             max_objects: 1 << 16,
             max_nodes: 1 << 17,
             max_sources: 1024,
-            max_sheet_bytes: 4 << 20,
+            max_sheet_bytes: 32 << 20,
             max_rules: 1 << 18,
             max_work: 1 << 27,
             max_external: 256,
-            max_external_bytes: 8 << 20,
+            max_external_bytes: 64 << 20,
         }
     }
 }

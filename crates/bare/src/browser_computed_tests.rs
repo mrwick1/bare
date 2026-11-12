@@ -832,3 +832,15 @@ fn rules_that_match_every_element_are_charged_by_their_candidates() {
         assert_eq!(b.computed_stats().computes, 2);
     });
 }
+
+/// A web mail app ships a 5 MB inline `<style>` (bare issue #432). Chrome applies it. The last rule must apply, and the
+/// CSSOM must read the sheet.
+#[test]
+fn style_over_4_mib_still_applies() {
+    big(|| {
+        let css = format!("/*{}*/#t{{position:absolute;height:100%}}", "x".repeat(5 << 20));
+        let mut b = at(&format!("<style>{css}</style><div id=t></div>"));
+        assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('t')).position"), "absolute");
+        assert_eq!(js(&mut b, "String(document.styleSheets[0].cssRules.length)"), "1");
+    });
+}

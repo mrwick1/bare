@@ -26,7 +26,7 @@
 //! What a pass does with a missing key (the exact `href` text of a link, or of an `@import` of a `<style>`)
 //! - Resolves it against the document base (first good `<base href>`, else the page URL: `resources::document_base`).
 //! - Fetches it with `resources::fetch` (the verified pipeline): 2xx, `text/css`, no content encoding, the caps of the
-//!   page limits (one body at most 4 MiB, all text `max_total_bytes`, `max_fetches`, the page deadline), every redirect checked
+//!   page limits (one body at most 32 MiB, all text `max_total_bytes`, `max_fetches`, the page deadline), every redirect checked
 //!   (http(s) only, never https to http). A page on https never asks for an `http:` sheet (mixed content): it fails the sheet.
 //! - Reads its `@import`s (`cascade::imports`) and resolves each against the URL of the sheet that holds it. Imports come first,
 //!   depth first, in the same layers as `main.rs` (`join_layer`). The flat parts go to the computed module under the raw key.
@@ -57,8 +57,8 @@ const MAX_IMPORT_DEPTH: usize = 8;
 /// `@import` rules that one supplied sheet reads, and the flat parts of it. Checked before the thing grows.
 const MAX_IMPORT_REFS: usize = 256;
 const MAX_PARTS: usize = 256;
-/// One body, and the flat text of one supplied sheet. The computed module takes 4 MiB for a sheet and its key.
-pub(super) const MAX_BODY: usize = 4 << 20;
+/// One body, and the flat text of one supplied sheet. The computed module takes 32 MiB for a sheet and its key.
+pub(super) const MAX_BODY: usize = 32 << 20;
 const MAX_FLAT: usize = MAX_BODY - (64 << 10);
 /// Passes of one boundary. Each supplies at least one new key, so this is a bound on keys, not a loop guard against a bug.
 const MAX_PASSES: usize = 64;

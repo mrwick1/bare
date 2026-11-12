@@ -1809,3 +1809,9 @@ A focused element inside an editing host now takes key input. Text, Enter, Backs
 - `w.postMessage` drops the message. The frame has no listener that runs, and the parent must not receive it.
 - Only blank frames inherit the parent global. A frame with another `src` keeps the inert window, so the parent's `document` and globals do not leak through it.
 - Not built: a separate `Object.prototype` per frame, so `w.Array !== Array` checks and `instanceof` across frames are the same as in the parent. Other `create*` methods (`createElementNS`, `createDocumentFragment`, `importNode`) of a frame document still give `ownerDocument` the main document.
+
+## Sheet text caps are 32 MiB (2026-11-12)
+
+- A real web mail app ships its main CSS as one inline `<style>` of about 5 MB (bare issue #432). The old 4 MiB caps dropped that sheet and every later one, without an error.
+- Raised to 32 MiB: `ComputedLimits::max_sheet_bytes` (one read), `max_external_bytes` raised to 64 MiB (supplied external sheets), the CSSOM `MAX_TEXT` and the loader `MAX_BODY` (one fetched sheet body).
+- Chrome has no such cap for a sheet. The cap stays, so a sheet over 32 MiB still stops with a limit error.
