@@ -1496,3 +1496,14 @@ A `press` with a locator on the Wikipedia search failed as `detached`, and the p
 - Only `type` and `press` use the rule. They send keys, and a browser sends keys to the focused element.
 - `click`, `select`, `check`, `upload`, `hover` and `dblclick` keep the strict rule. A field that is gone makes them fail.
 - `type` still selects the old text and replaces it. So `type " programming"` after `type "Rust"` leaves " programming" in the field.
+
+## Live requests start at once, and custom elements keep the cascade (2026-11-12)
+
+A live page now starts a queued `fetch` or XHR on a worker as the script queues it. Before, it started at the next network turn.
+GitHub issues kept the page thread busy, and a fetch waited 5 to 9 s to be sent.
+The reply still settles at a network turn, in the order of the queue.
+A request that is not a GET or a HEAD still starts only when it is first in the queue.
+The cascade cache and the partial restyle no longer skip pages with custom elements.
+`set_custom_state` and `set_states` move `revision` and mark the tree, so the kept cascade stays correct.
+On GitHub issues, full cascades for each layout or style read took 83 % of the CPU.
+The shared layout of reads drops the same check.

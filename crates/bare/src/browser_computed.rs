@@ -6,7 +6,7 @@
 //!   the current classes, `id`, `dir`, `style` attributes, `<style>` text, `<link>` elements and viewport. No snapshot is kept
 //!   and no computed value is stored as JS data. The parsed `RuleSet` is cached while its inputs (the sheet texts, the layers and
 //!   the viewport) are equal to the inputs of the last build. The last cascade of that `RuleSet` is cached too, while the document
-//!   counters (`revision`, `text_revision`, length, user state revisions) are the same and no element has custom element state
+//!   counters (`revision`, `text_revision`, length, user state revisions) are the same
 //!   (see `cascade_for`).
 //! - Author sheets: `<style>` text comes from the document. A `<link rel=stylesheet href>` has no text here: the embedder supplies it
 //!   with `Browser::set_external_stylesheet(href, parts)`, keyed by the exact `href` attribute text (`@import` of an inline `<style>`:
@@ -572,15 +572,13 @@ impl Dom {
             return Err(self.lim("computed-work"));
         }
         // The cascade reads only the tree, the attributes, the text, the `set_ui` and `set_states` state (they move
-        // `revision`), the hover, active and focus state (`UserState::revision`) and the custom element state. `attach_shadow`
-        // adds a node, so the length moves. A custom element state change moves no counter, so the cascade is kept and used
-        // only while no element has custom element state.
+        // `revision`), the hover, active and focus state (`UserState::revision`) and the custom element state (`set_custom_state`
+        // moves `revision` too). `attach_shadow` adds a node, so the length moves.
         let key = (doc.revision(), doc.text_revision(), doc.len(), doc.user().revision, want);
         let slot = usize::from(want.is_some());
         if let Some((k, kept, styles)) = &built.last[slot]
             && *k == key
             && (*kept || !keep)
-            && !doc.has_custom()
         {
             // The styles of the last read are still right: no cascade runs, so a read charges the check only.
             it.charge(1)?;
@@ -593,7 +591,6 @@ impl Dom {
         drop(doc);
         let doc = self.doc.borrow();
         if let (Some(old), Some(marks), Some((k, true, styles))) = (old, marks, built.last[0].as_mut())
-            && !doc.has_custom()
             && let Some(st) = Rc::get_mut(styles)
         {
             let new = chains(&doc);
@@ -611,8 +608,8 @@ impl Dom {
         let styles = Rc::new(if keep || read { built.rules.compute_kept(&doc) } else { built.rules.compute_for(&doc, want) });
         // The work cap bounds the compute. Charge the candidates the index tested, not nodes times all rules.
         it.charge(built.rules.tested_candidates() - before)?;
-        built.last[slot] = (!doc.has_custom()).then(|| (key, keep || read, styles.clone()));
-        if read && !doc.has_custom() {
+        built.last[slot] = Some((key, keep || read, styles.clone()));
+        if read {
             built.read = Some(chains(&doc));
             drop(doc);
             self.doc.borrow_mut().track_damage(DAMAGE_STYLE);
