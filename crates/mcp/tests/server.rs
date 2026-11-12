@@ -323,6 +323,11 @@ fn an_open_event_stream_delivers_events_and_does_not_block_a_fetch() {
     let steps = format!("open {base}/\ntimeout 10000\nexpect text=\"fetch done\" visible\nwait js \"document.getElementById('a').textContent.startsWith('start msg msg')\"");
     let (rep, error) = s.tool("run_steps", json!({"steps": steps, "timeout_ms": 30000}));
     assert!(!error && rep["ok"] == true, "{rep}");
+    // The stream stays open and does not hold `open`: `network` names it as a stream, not as a fetch.
+    let (rep, error) = s.tool("open", json!({"url": format!("{base}/"), "timeout_ms": 10000}));
+    assert!(!error && !rep.as_str().unwrap().contains("not ready"), "{rep}");
+    let (net, _) = s.tool("network", json!({}));
+    assert!(net.as_str().unwrap().contains("pending stream GET"), "{net}");
 }
 
 /// The ref of the first snapshot line that holds `what`.
@@ -1844,4 +1849,69 @@ fn id_globals_and_document_names_resolve_in_handlers_and_eval() {
     assert!(!error, "{r}");
     let (r, error) = s.tool("eval", json!({"js": "out.textContent"}));
     assert!(!error && r == json!("sent hi"), "{r}");
+}
+
+/// Pages for the pending tests (bare #406): a fetch and an XHR that answer late, and a picture that never comes. Each page has text, so
+/// only the request can hold `open`.
+fn pending_pages(_: &str, target: &str, _: &str, _: Option<&str>) -> (u16, &'static str, Vec<u8>) {
+    let path = target.split('?').next().unwrap_or("/");
+    let page = |inner: &str| (200, "text/html", format!("<!doctype html><title>Pending</title><body><p>Hello</p>{inner}</body>").into_bytes());
+    match path {
+        "/fetch" => page("<script>fetch('/api?delay=8000')</script>"),
+        "/xhr" => page("<script>var x = new XMLHttpRequest(); x.open('GET', '/api?delay=5000'); x.send()</script>"),
+        "/img" => page("<img src='/hang.png' alt='late'>"),
+        "/api" | "/hang.png" => {
+            let ms = target.split("delay=").nth(1).and_then(|d| d.parse().ok()).unwrap_or(20000);
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+            (200, "text/plain", b"late".to_vec())
+        }
+        _ => (404, "text/plain", b"no".to_vec()),
+    }
+}
+
+#[test]
+fn not_ready_names_the_pending_request_and_network_and_diagnose_list_it() {
+    let base = common::serve_route(pending_pages);
+    let mut s = Server::start();
+    let t = std::time::Instant::now();
+    let (rep, _) = s.tool("open", json!({"url": format!("{base}/fetch"), "timeout_ms": 600}));
+    let r = rep.as_str().unwrap();
+    assert!(r.contains(&format!("not ready: still loading after")) && r.contains(&format!("1 request pending: fetch GET {base}/api?delay=8000 (")), "{r}");
+    let (net, _) = s.tool("network", json!({}));
+    let net = net.as_str().unwrap().to_string();
+    assert!(net.contains(&format!("pending fetch GET {base}/api?delay=8000")), "{net}");
+    // A pending request stays new: the next call shows it again.
+    let (again, _) = s.tool("network", json!({}));
+    assert!(again.as_str().unwrap().contains("pending fetch GET"), "{again}");
+    let (d, _) = s.tool("diagnose", json!({}));
+    assert!(!d.as_str().unwrap().contains("pending"), "under 5 s is no finding: {d}");
+    std::thread::sleep(std::time::Duration::from_millis(5500u64.saturating_sub(t.elapsed().as_millis() as u64)));
+    let (d, _) = s.tool("diagnose", json!({}));
+    assert!(d.as_str().unwrap().contains(&format!("pending fetch GET {base}/api?delay=8000 (")), "{d}");
+    // Once it ends, it shows once more, with its status, and no longer as pending.
+    std::thread::sleep(std::time::Duration::from_millis(9000u64.saturating_sub(t.elapsed().as_millis() as u64)));
+    let (net, _) = s.tool("network", json!({"failed_only": false}));
+    let net = net.as_str().unwrap().to_string();
+    assert!(net.contains("200 fetch") && !net.contains("pending"), "{net}");
+}
+
+#[test]
+fn not_ready_names_a_pending_xhr() {
+    let base = common::serve_route(pending_pages);
+    let mut s = Server::start();
+    let (rep, _) = s.tool("open", json!({"url": format!("{base}/xhr"), "timeout_ms": 600}));
+    let r = rep.as_str().unwrap();
+    assert!(r.contains(&format!("1 request pending: xhr GET {base}/api?delay=5000 (")), "{r}");
+}
+
+#[test]
+fn a_picture_that_never_comes_does_not_hold_open_and_network_lists_it() {
+    let base = common::serve_route(pending_pages);
+    let mut s = Server::start();
+    let t = std::time::Instant::now();
+    let (rep, _) = s.tool("open", json!({"url": format!("{base}/img"), "timeout_ms": 3000}));
+    assert!(!rep.as_str().unwrap().contains("not ready"), "{rep}");
+    assert!(t.elapsed().as_millis() < 2000, "open waited for the picture: {:?}", t.elapsed());
+    let (net, _) = s.tool("network", json!({}));
+    assert!(net.as_str().unwrap().contains(&format!("pending image GET {base}/hang.png")), "{net}");
 }

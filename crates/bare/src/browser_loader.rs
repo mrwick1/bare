@@ -956,6 +956,43 @@ impl Browser {
             _ => Some(false),
         }
     }
+
+    /// Add to `out` what the loader waits for (`Page::pending`): each download of a script, a style sheet or a preload that runs, and
+    /// the work that holds the page and is not a request (a queued inline script, a navigation task, the parser). A download holds the
+    /// page before `load`, and after it when a turn waits for it (`live_work_of`).
+    pub(crate) fn waiting_loads(&self, out: &mut Vec<crate::page::Waiting>) {
+        let s = &self.dom.scripts;
+        let loaded = self.loaded();
+        let net = s.net.borrow();
+        if let Some(n) = net.as_ref() {
+            // The script that runs next, if it waits for its download.
+            let next = s.external.borrow().front().and_then(|e| if let Ext::Fetch(_, u) = e { Some(Net::key(Expect::Script, u)) } else { None });
+            for (k, t) in &n.started {
+                if t.done() {
+                    continue;
+                }
+                let (what, url) = k.split_once(' ').unwrap_or(("", k));
+                let kind = match what {
+                    "Script" => "script",
+                    "Style" => "stylesheet",
+                    _ => "preload",
+                };
+                let holds = !loaded || n.waits.contains(k) || next.as_ref() == Some(k);
+                let age = n.born.get(k).map_or(Duration::ZERO, |b| b.elapsed());
+                out.push(crate::page::Waiting { kind, method: "GET", url: url.to_string(), age, holds, state: "" });
+            }
+        }
+        let task = |kind| crate::page::Waiting { kind, method: "", url: String::new(), age: Duration::ZERO, holds: true, state: "" };
+        if !s.inline.borrow().is_empty() {
+            out.push(task("inline script"));
+        }
+        if self.navigation_stats().pending_tasks > 0 {
+            out.push(task("navigation task"));
+        }
+        if s.parse.borrow().as_ref().is_some_and(|p| !p.waiting) {
+            out.push(task("parser"));
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -982,6 +1019,8 @@ struct Net {
     done: Arc<AtomicUsize>,
     /// Live: the keys in `started` that the last style pass or script step did not wait for (`Run::on_the_way`). A later turn takes them.
     waits: Vec<String>,
+    /// When each download of `started` began (its age for `Page::pending`).
+    born: HashMap<String, Instant>,
 }
 
 /// Downloads that are started and not taken at once. The workers run `MAX_WORKERS` of them at a time (Chrome opens 6 connections for
@@ -991,7 +1030,7 @@ const WINDOW: usize = 32;
 
 impl Net {
     fn new(client: Client) -> Net {
-        Net { client, started: HashMap::new(), direct: HashSet::default(), done: Arc::default(), waits: Vec::new() }
+        Net { client, started: HashMap::new(), direct: HashSet::default(), done: Arc::default(), waits: Vec::new(), born: HashMap::new() }
     }
 
     fn tag(expect: Expect, url: &Url) -> u64 {
@@ -1017,6 +1056,7 @@ impl Net {
         }
         let url = Url { scheme: url.scheme, host: url.host.clone(), port: url.port, path: url.path.clone() };
         let (target, lim, done) = (resources::Target { expect, url }, lim.clone(), self.done.clone());
+        self.born.insert(key.clone(), Instant::now());
         self.started.insert(key, self.client.spawn(move |client| {
             if done.load(Ordering::Relaxed) >= lim.max_total_bytes {
                 return None;
@@ -1036,7 +1076,9 @@ impl Net {
         if self.started.is_empty() {
             return resources::fetch(&mut self.client, target, lim, deadline, retained);
         }
-        match self.started.remove(&Net::key(target.expect, &target.url)) {
+        let key = Net::key(target.expect, &target.url);
+        self.born.remove(&key);
+        match self.started.remove(&key) {
             // The text counts against the total cap now, with what the page keeps now (it was read with the room of the time it started).
             Some(task) => match task.wait() {
                 Some(Some(Ok(r))) => {
