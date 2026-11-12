@@ -951,6 +951,16 @@ fn scoped_selector_lists_use_the_query_root() {
 }
 
 #[test]
+fn cssrule_global_has_type_constants_and_is_the_base_of_style_rules() {
+    big(|| {
+        let mut b = browser_with("<style>p { color: red } @font-face { font-family: f }</style>", BrowserLimits::default());
+        assert_eq!(js(&mut b, "[typeof CSSRule, CSSRule.STYLE_RULE, CSSRule.MEDIA_RULE, CSSRule.prototype.SUPPORTS_RULE, CSSRule.KEYFRAMES_RULE].join('|')"), "function|1|4|12|7");
+        assert_eq!(js(&mut b, "var r = document.styleSheets[0].cssRules; [r[0] instanceof CSSRule, r[0] instanceof CSSStyleRule, Object.getPrototypeOf(CSSStyleRule.prototype) === CSSRule.prototype, r[1] instanceof CSSRule, String(r[0].parentRule), r[0].type, r[1].type].join('|')"), "true|true|true|true|null|1|5");
+        assert_eq!(js(&mut b, "try { new CSSRule() } catch (e) { e.constructor.name }"), "TypeError");
+    });
+}
+
+#[test]
 fn document_stylesheets_expose_and_edit_style_rules() {
     big(|| {
         let mut b = browser_with("<style>p { color: red }</style><p>hello</p>", BrowserLimits::default());

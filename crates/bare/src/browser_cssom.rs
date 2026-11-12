@@ -1,6 +1,7 @@
 //! Bounded CSSOM objects. Sheet and rule lists are live host-indexed objects. All allocation is deferred until a CSSOM read.
 //! Inline rule edits update the style text through the DOM. The existing sheet pipeline reads that text.
-//! External rules require a supplied sheet and a same-origin URL. Group rules retain their text; their nested rule lists are not exposed.
+//! External rules require a supplied sheet and a same-origin URL. `CSSRule` is the base interface of every rule object. The interface shape and the
+//! semantics follow Ladybird `LibWeb/CSS/CSSRule.cpp` (BSD-2).
 use crate::browser::*;
 use crate::browser_dom::{arg, attr_set, next_in, set_text_content, text_content};
 use bare_html::dom::{Document, NodeId};
@@ -24,12 +25,20 @@ struct Sheet {
     ctor: bool,
     stale: bool,
 }
+// The interface of a rule. The value is the index of its prototype in `State::protos`.
+#[derive(Clone, Copy, PartialEq)]
+enum Kind {
+    Other,
+    Style,
+}
 #[derive(Clone)]
 struct Rule {
     sheet: ObjId,
+    kind: Kind,
     selector: Option<String>,
     raw: String,
     style: Option<ObjId>,
+    parent: Option<ObjId>,
 }
 #[derive(Clone)]
 struct List {
@@ -40,7 +49,8 @@ struct List {
 pub(crate) struct State {
     roots: Vec<ObjId>,
     sheet_p: ObjId,
-    rule_p: ObjId,
+    // The prototypes of the rule interfaces, indexed by `Kind`.
+    protos: Vec<ObjId>,
     list_p: ObjId,
     rule_list_p: ObjId,
     doc_list: Option<ObjId>,
@@ -86,13 +96,14 @@ fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<()> {
         return Ok(());
     }
     let op = it.object_prototype();
-    let (sp, rp, lp, rlp) = (d.obj(it, op)?, d.obj(it, op)?, d.obj(it, op)?, d.obj(it, op)?);
+    let (sp, lp, rlp, base) = (d.obj(it, op)?, d.obj(it, op)?, d.obj(it, op)?, d.obj(it, op)?);
+    let rp = d.obj(it, base)?;
     d.cssom
         .state
         .set(RefCell::new(State {
-            roots: vec![sp, rp, lp, rlp],
+            roots: vec![sp, base, rp, lp, rlp],
             sheet_p: sp,
-            rule_p: rp,
+            protos: vec![base, rp],
             list_p: lp,
             rule_list_p: rlp,
             doc_list: None,
@@ -106,10 +117,21 @@ fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<()> {
             adopted: HashMap::new(),
         }))
         .ok();
-    for (name, p) in [("CSSStyleSheet", sp), ("CSSStyleRule", rp), ("StyleSheetList", lp), ("CSSRuleList", rlp)] {
+    let mut ctors: HashMap<ObjId, ObjId> = HashMap::new();
+    for (name, p, parent) in [
+        ("CSSStyleSheet", sp, None),
+        ("CSSRule", base, None),
+        ("CSSStyleRule", rp, Some(base)),
+        ("StyleSheetList", lp, None),
+        ("CSSRuleList", rlp, None),
+    ] {
         crate::browser_lazy::tag(d, it, p, name)?;
         let f = if name == "CSSStyleSheet" { d.add_ctor_nt(it, sheet_ctor, name, 0)? } else { d.add_fn(it, illegal, name, 0, false)? };
         keep(d, f)?;
+        ctors.insert(p, f);
+        if let Some(pf) = parent.and_then(|pp| ctors.get(&pp).copied()) {
+            it.heap.set_prototype_of(f, Some(pf)).map_err(|e| it.heap_error(e))?;
+        }
         let (kp, kc, k) = (d.key(it, "prototype")?, d.key(it, "constructor")?, d.key(it, name)?);
         it.define_data(f, kp, Value::Object(p), false, false, false)?;
         it.define_data(p, kc, Value::Object(f), true, false, true)?;
@@ -127,10 +149,33 @@ fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     d.def_method(it, sp, "replaceSync", 1, replace_sync)?;
     d.def_method(it, sp, "replace", 1, replace)?;
     d.def_get(it, rp, "selectorText", selector_get, Some(selector_set))?;
-    d.def_get(it, rp, "cssText", rule_text, None)?;
     d.def_get(it, rp, "style", style_get, None)?;
-    d.def_get(it, rp, "type", type_get, None)?;
-    d.def_get(it, rp, "parentStyleSheet", parent_get, None)?;
+    d.def_get(it, base, "cssText", rule_text, None)?;
+    d.def_get(it, base, "type", type_get, None)?;
+    d.def_get(it, base, "parentStyleSheet", parent_get, None)?;
+    d.def_get(it, base, "parentRule", parent_rule_get, None)?;
+    // The type constants are on the constructor and on the prototype.
+    let consts = [
+        ("STYLE_RULE", 1),
+        ("CHARSET_RULE", 2),
+        ("IMPORT_RULE", 3),
+        ("MEDIA_RULE", 4),
+        ("FONT_FACE_RULE", 5),
+        ("PAGE_RULE", 6),
+        ("KEYFRAMES_RULE", 7),
+        ("KEYFRAME_RULE", 8),
+        ("MARGIN_RULE", 9),
+        ("NAMESPACE_RULE", 10),
+        ("COUNTER_STYLE_RULE", 11),
+        ("SUPPORTS_RULE", 12),
+        ("FONT_FEATURE_VALUES_RULE", 14),
+    ];
+    for (name, n) in consts {
+        let k = d.key(it, name)?;
+        for o in [ctors[&base], base] {
+            it.define_data(o, k, Value::Number(n as f64), false, true, false)?;
+        }
+    }
     // The lists are array-like: their `[Symbol.iterator]` is the one of `Array.prototype`, as in browsers.
     let sym = d.plat.sym_iter.get().copied().expect("platform installed first");
     let values = it.get_value(Value::Object(it.array_prototype()), sym)?;
@@ -145,7 +190,7 @@ fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<()> {
 #[cold]
 pub(crate) fn define(d: &Dom, it: &mut Interp<'_>, name: &str) -> R<bool> {
     match name {
-        "CSSStyleSheet" | "CSSStyleRule" | "CSSRuleList" | "StyleSheetList" => {
+        "CSSStyleSheet" | "CSSRule" | "CSSStyleRule" | "CSSRuleList" | "StyleSheetList" => {
             ensure(d, it)?;
             Ok(true)
         }
@@ -414,14 +459,10 @@ fn declaration(d: &Dom, it: &mut Interp<'_>, text: &str) -> R<ObjId> {
     Ok(style)
 }
 fn new_rule(d: &Dom, it: &mut Interp<'_>, sheet: ObjId, sel: Option<String>, raw: String, decl: Option<String>) -> R<ObjId> {
-    let p = if sel.is_some() { state(d).borrow().rule_p } else { it.object_prototype() };
+    let kind = if sel.is_some() { Kind::Style } else { Kind::Other };
+    let p = state(d).borrow().protos[kind as usize];
     let o = d.obj(it, p)?;
     keep(d, o)?;
-    if sel.is_none() {
-        d.def_get(it, o, "cssText", rule_text, None)?;
-        d.def_get(it, o, "type", type_get, None)?;
-        d.def_get(it, o, "parentStyleSheet", parent_get, None)?;
-    }
     let style = match decl {
         Some(t) => Some(declaration(d, it, &t)?),
         None => None,
@@ -430,9 +471,11 @@ fn new_rule(d: &Dom, it: &mut Interp<'_>, sheet: ObjId, sel: Option<String>, raw
         o,
         Rule {
             sheet,
+            kind,
             selector: sel,
             raw,
             style,
+            parent: None,
         },
     );
     if let Some(style) = style {
@@ -635,7 +678,7 @@ fn style_get(d: &Dom, it: &mut Interp<'_>, t: Value, _: &[Value]) -> V {
 fn type_get(d: &Dom, it: &mut Interp<'_>, t: Value, _: &[Value]) -> V {
     let o = rule(d, it, t)?;
     let r = state(d).borrow().rules[&o].clone();
-    let n = if r.selector.is_some() {
+    let n = if r.kind == Kind::Style {
         1
     } else {
         match r.raw.split_whitespace().next().unwrap_or("").to_ascii_lowercase().as_str() {
@@ -648,6 +691,10 @@ fn type_get(d: &Dom, it: &mut Interp<'_>, t: Value, _: &[Value]) -> V {
         }
     };
     Ok(Value::Number(n as f64))
+}
+fn parent_rule_get(d: &Dom, it: &mut Interp<'_>, t: Value, _: &[Value]) -> V {
+    let o = rule(d, it, t)?;
+    Ok(state(d).borrow().rules[&o].parent.map(Value::Object).unwrap_or(Value::Null))
 }
 fn parent_get(d: &Dom, it: &mut Interp<'_>, t: Value, _: &[Value]) -> V {
     let o = rule(d, it, t)?;
