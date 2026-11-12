@@ -961,6 +961,27 @@ fn cssrule_global_has_type_constants_and_is_the_base_of_style_rules() {
 }
 
 #[test]
+fn media_and_supports_rules_expose_nested_rules() {
+    big(|| {
+        let mut b = browser_with("<p>x</p>", BrowserLimits::default());
+        let snippet = "var s = document.createElement('style'); s.textContent = '@media screen { a { color: red } b { color: blue } } @supports (display: grid) { i { color: green } } @keyframes k { from { opacity: 0 } }'; document.head.appendChild(s); var r = s.sheet.cssRules; JSON.stringify([typeof CSSRule, r[0].constructor.name, r[0].cssRules && r[0].cssRules.length, r[0].conditionText, r[0].media && r[0].media.mediaText, r[1].cssRules && r[1].cssRules.length, r[2].name])";
+        let out = js(&mut b, snippet);
+        // The `@keyframes` rule is the work of the next step: only the first six items are checked here.
+        assert!(out.starts_with("[\"function\",\"CSSMediaRule\",2,\"screen\",\"screen\",1,"), "{out}");
+        assert_eq!(js(&mut b, "var m = r[0]; Array.from(m.cssRules).map(x => [x.constructor.name, x.selectorText, x.style.color, x.parentRule === m, x.parentStyleSheet === s.sheet].join(':')).join('|')"), "CSSStyleRule:a:red:true:true|CSSStyleRule:b:blue:true:true");
+        assert_eq!(js(&mut b, "[m instanceof CSSMediaRule, m instanceof CSSConditionRule, m instanceof CSSGroupingRule, m instanceof CSSRule, r[1] instanceof CSSSupportsRule, r[1] instanceof CSSConditionRule, m.type, r[1].type, m.parentRule, m.parentStyleSheet === s.sheet].join('|')"), "true|true|true|true|true|true|4|12||true");
+        assert_eq!(js(&mut b, "Object.getPrototypeOf(CSSMediaRule) === CSSConditionRule && Object.getPrototypeOf(CSSConditionRule) === CSSGroupingRule && Object.getPrototypeOf(CSSGroupingRule) === CSSRule"), "true");
+        assert_eq!(js(&mut b, "var list = m.cssRules; m.insertRule('i { color: pink }', 1); [list === m.cssRules, list.length, list[1].selectorText, list[1].parentRule === m].join('|')"), "true|3|i|true");
+        assert!(js(&mut b, "s.textContent").contains("@media screen { a { color: red; } i { color: pink; } b { color: blue; } }"));
+        assert_eq!(js(&mut b, "var gone = list[0]; m.deleteRule(0); [list.length, list[0].selectorText, gone.parentRule, gone.parentStyleSheet].join('|')"), "2|i||");
+        assert!(!js(&mut b, "s.textContent").contains("color: red"));
+        assert_eq!(js(&mut b, "list[0].style.color = 'teal'; s.textContent.includes('i { color: teal; }')"), "true");
+        assert_eq!(js(&mut b, "try { m.deleteRule(9) } catch (e) { e.name }"), "IndexSizeError");
+        assert_eq!(js(&mut b, "try { m.insertRule('@@ {', 0) } catch (e) { e.name }"), "SyntaxError");
+    });
+}
+
+#[test]
 fn document_stylesheets_expose_and_edit_style_rules() {
     big(|| {
         let mut b = browser_with("<style>p { color: red }</style><p>hello</p>", BrowserLimits::default());
