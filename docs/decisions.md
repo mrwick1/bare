@@ -1292,3 +1292,14 @@ A click on a `target=_blank` link, and `window.open(url)`, open a new session na
 The `storage` tool reads, sets and clears cookies, `localStorage` and `sessionStorage`. Known secrets show as `[secret]`.
 `back` and `forward` are step lines and `act` ops. `close` and `sessions` already handled named sessions.
 `act` no longer reports `navigated` when the page had no document before the action.
+## Small replies for agents (2026-11-12)
+
+Each character of a `bare-mcp` reply costs model tokens. A reply must give what the agent needs and no more.
+
+- `act` gives the lines that changed since the last snapshot (marked `*`) and the lines that hold them, not the whole outline. After a navigation, or with `diff: false`, it gives the whole outline. With no change it says `no change`.
+- `*` now also marks an element whose name, value or state changed.
+- A link line in `snapshot` shows its `href` only when the link has no name. `links` lists all URLs. This halves the size of link-heavy pages.
+- A `clickable` that holds other lines drops its own copy of their text. It keeps its ref.
+- `links` and the `href` in a line cut tracking parameters (`utm_*`, `fbclid`, `gclid` and similar). `links` gives a path for a link on the origin of the page.
+- Each interactive element keeps its line and ref. The set of interactive lines of each test page is the same before and after.
+- Nothing collapses a long list. A list of links is a list of controls, and each control must stay reachable. The `max_chars` cut still applies.

@@ -347,7 +347,7 @@ fn an_agent_logs_in_with_snapshot_refs_and_no_step_lines() {
     let r = r.as_str().unwrap().to_string();
     assert!(!error && r.contains("= \"••••\""), "{r}");
     // Without a snapshot, the receipt still reports the navigation (#382).
-    let (r, error) = s.tool("act", json!({"op": "click", "ref": ref_of(&r, "button"), "snapshot": false}));
+    let (r, error) = s.tool("act", json!({"op": "click", "ref": ref_of(&snap, "button"), "snapshot": false}));
     let r = r.as_str().unwrap().to_string();
     assert!(!error && r.contains("navigated:"), "{r}");
     let (r, _) = s.tool("snapshot", json!({}));
@@ -574,7 +574,9 @@ fn an_agent_fills_a_form_with_select_check_hover_dblclick_and_upload() {
     let (r, error) = s.tool("open", json!({"url": format!("{base}/forms"), "snapshot": true}));
     let snap = r.as_str().unwrap().to_string();
     assert!(!error && snap.contains("combobox \"Country\" = \"Kenya\"") && snap.contains("listbox \"Fruit\""), "{snap}");
-    let act = |s: &mut Server, args: Value| {
+    // This test reads the whole outline after each action, not the changes.
+    let act = |s: &mut Server, mut args: Value| {
+        args["diff"] = json!(false);
         let (r, error) = s.tool("act", args);
         (r.as_str().unwrap().to_string(), error)
     };
@@ -1133,4 +1135,103 @@ fn back_and_forward_walk_the_history() {
     assert!(!e, "{r}");
     let (r, e) = s.tool("act", json!({"op": "wait", "loc": "text=\"page two\""}));
     assert!(!e, "{r}");
+}
+
+/// Serve one HTML page on 127.0.0.1 for every path. Gives the base URL.
+fn html_app(page: &'static str) -> String {
+    use std::io::Read;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for mut c in listener.incoming().flatten() {
+            std::thread::spawn(move || {
+                let (mut head, mut b) = (Vec::new(), [0u8; 1]);
+                while !head.ends_with(b"\r\n\r\n") && c.read(&mut b).unwrap_or(0) == 1 {
+                    head.push(b[0]);
+                }
+                let _ = write!(c, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{page}", page.len());
+            });
+        }
+    });
+    format!("http://127.0.0.1:{port}")
+}
+
+/// Thirty named links, a wrapper with a click handler, a nameless link and a button that adds a new button.
+const TOKENS_PAGE: &str = "<!doctype html><body><h1>Tokens</h1>
+<div id=wrap onclick='1'><span>Wrapper text that repeats what its children say</span><a href='/w?utm_source=x&id=7'>Inside</a></div>
+<a href='/blank'><img src='data:,' width=1 height=1></a>
+<ul id=list></ul><div id=out><button id=add onclick=\"var b=document.createElement('button');b.textContent='Added';document.getElementById('out').append(b)\">Add</button></div>
+<script>for(let i=0;i<30;i++){const li=document.createElement('li'),a=document.createElement('a');a.href='/p/'+i+'?utm_medium=m&keep='+i+'&fbclid=zz';a.textContent='Link '+i;li.append(a);document.getElementById('list').append(li)}</script></body>";
+
+fn opened(s: &mut Server, base: &str) -> String {
+    let (snap, error) = s.tool("open", json!({"url": format!("{base}/"), "snapshot": true, "timeout_ms": 30000}));
+    assert!(!error, "{snap}");
+    snap.as_str().unwrap().to_string()
+}
+
+#[test]
+fn act_gives_only_what_changed_and_its_parents() {
+    let mut s = Server::start();
+    let snap = opened(&mut s, &html_app(TOKENS_PAGE));
+    assert!(snap.contains("link \"Link 29\""), "{snap}");
+    let (r, error) = s.tool("act", json!({"op": "click", "ref": ref_of(&snap, "button \"Add\"")}));
+    let r = r.as_str().unwrap().to_string();
+    assert!(!error && r.starts_with("ok"), "{r}");
+    assert!(r.contains("*") && r.contains("button \"Added\""), "{r}");
+    // The parent of the new button is there for context; the unchanged links are not.
+    assert!(r.contains("button \"Add\""), "{r}");
+    assert!(!r.contains("Link 5") && !r.contains("Tokens"), "{r}");
+    assert!(r.len() * 3 < snap.len(), "{} chars of diff for {} of snapshot", r.len(), snap.len());
+    // A ref of the full snapshot still works on the diff's page, and the new button has a ref of its own.
+    let (r2, error) = s.tool("act", json!({"op": "click", "ref": ref_of(&r, "button \"Added\"")}));
+    assert!(!error, "{r2}");
+    // `diff: false` asks for the whole outline.
+    let (r, _) = s.tool("act", json!({"op": "scroll", "diff": false}));
+    assert!(r.as_str().unwrap().contains("link \"Link 29\""), "{r}");
+    // Nothing changed: say so, in a few characters.
+    let (r, _) = s.tool("act", json!({"op": "scroll"}));
+    let r = r.as_str().unwrap();
+    assert!(r.contains("no change") && r.len() < 80, "{r}");
+}
+
+#[test]
+fn a_snapshot_marks_changed_lines_too() {
+    let mut s = Server::start();
+    let snap = opened(&mut s, &html_app(TOKENS_PAGE));
+    s.tool("act", json!({"op": "click", "ref": ref_of(&snap, "button \"Add\""), "snapshot": false}));
+    let (r, _) = s.tool("snapshot", json!({}));
+    let r = r.as_str().unwrap();
+    assert!(r.lines().any(|l| l.trim_start().starts_with("*[e") && l.contains("\"Added\"")), "{r}");
+    assert!(r.lines().any(|l| l.trim_start().starts_with("*[e") && l.contains("\"Add\"") && l.contains("focused")), "{r}");
+    assert!(!r.lines().any(|l| l.contains("\"Link 3\"") && l.contains('*')), "{r}");
+}
+
+#[test]
+fn a_snapshot_keeps_each_control_without_the_href_the_links_tool_has() {
+    let mut s = Server::start();
+    let snap = opened(&mut s, &html_app(TOKENS_PAGE));
+    for i in 0..30 {
+        assert!(snap.contains(&format!("link \"Link {i}\"")), "link {i} missing: {snap}");
+    }
+    assert!(!snap.contains("utm_") && !snap.contains("/p/3"), "{snap}");
+    // A link with no name shows where it goes, so it can be told apart.
+    assert!(snap.lines().any(|l| l.contains("link") && l.contains("href=/blank")), "{snap}");
+    // The wrapper keeps its ref but not a copy of the text of its children.
+    let wrap = snap.lines().find(|l| l.contains("clickable")).unwrap();
+    assert!(!wrap.contains("Wrapper text"), "{wrap}");
+    assert!(snap.contains("link \"Inside\""), "{snap}");
+}
+
+#[test]
+fn links_drop_tracking_params_and_the_origin_of_the_page() {
+    let mut s = Server::start();
+    let base = html_app(TOKENS_PAGE);
+    opened(&mut s, &base);
+    let (r, _) = s.tool("links", json!({}));
+    let r = r.as_str().unwrap();
+    assert!(r.contains("\"Link 3\" -> /p/3?keep=3"), "{r}");
+    let lines = r.split_once("link(s)\n").unwrap().1;
+    assert!(!lines.contains("utm_") && !lines.contains("fbclid") && !lines.contains(&base), "{r}");
+    assert!(r.contains("\"Inside\" -> /w?id=7"), "{r}");
+    assert!(r.contains("-> /blank"), "{r}");
 }
