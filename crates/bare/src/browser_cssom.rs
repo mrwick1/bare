@@ -32,6 +32,10 @@ enum Kind {
     Style,
     Media,
     Supports,
+    Import,
+    FontFace,
+    Keyframes,
+    Keyframe,
 }
 #[derive(Clone)]
 struct Rule {
@@ -40,7 +44,8 @@ struct Rule {
     selector: Option<String>,
     raw: String,
     style: Option<ObjId>,
-    // The condition of `@media` and `@supports`. The nested rules of those two are in `list`.
+    // The condition of `@media` and `@supports`, the name of `@keyframes`, the key list of a keyframe, the prelude of `@import`.
+    // The nested rules of `@media`, `@supports` and `@keyframes` are in `list`.
     prelude: String,
     list: Option<ObjId>,
     media: Option<ObjId>,
@@ -112,12 +117,13 @@ fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     let (gp, mlp) = (d.obj(it, base)?, d.obj(it, op)?);
     let cp = d.obj(it, gp)?;
     let (mp, supp) = (d.obj(it, cp)?, d.obj(it, cp)?);
+    let (ip, fp, kfsp, kfp) = (d.obj(it, base)?, d.obj(it, base)?, d.obj(it, base)?, d.obj(it, base)?);
     d.cssom
         .state
         .set(RefCell::new(State {
-            roots: vec![sp, base, rp, gp, cp, mp, supp, mlp, lp, rlp],
+            roots: vec![sp, base, rp, gp, cp, mp, supp, ip, fp, kfsp, kfp, mlp, lp, rlp],
             sheet_p: sp,
-            protos: vec![base, rp, mp, supp],
+            protos: vec![base, rp, mp, supp, ip, fp, kfsp, kfp],
             list_p: lp,
             rule_list_p: rlp,
             media_p: mlp,
@@ -142,6 +148,10 @@ fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<()> {
         ("CSSConditionRule", cp, Some(gp)),
         ("CSSMediaRule", mp, Some(cp)),
         ("CSSSupportsRule", supp, Some(cp)),
+        ("CSSImportRule", ip, Some(base)),
+        ("CSSFontFaceRule", fp, Some(base)),
+        ("CSSKeyframesRule", kfsp, Some(base)),
+        ("CSSKeyframeRule", kfp, Some(base)),
         ("MediaList", mlp, None),
         ("StyleSheetList", lp, None),
         ("CSSRuleList", rlp, None),
@@ -176,6 +186,14 @@ fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     d.def_method(it, gp, "deleteRule", 1, group_delete)?;
     d.def_get(it, cp, "conditionText", condition_get, None)?;
     d.def_get(it, mp, "media", media_get, None)?;
+    d.def_get(it, ip, "media", media_get, None)?;
+    d.def_get(it, ip, "href", import_href_get, None)?;
+    d.def_get(it, ip, "styleSheet", import_sheet_get, None)?;
+    d.def_get(it, fp, "style", style_get, None)?;
+    d.def_get(it, kfsp, "name", condition_get, None)?;
+    d.def_get(it, kfsp, "cssRules", group_rules_get, None)?;
+    d.def_get(it, kfp, "keyText", condition_get, Some(key_text_set))?;
+    d.def_get(it, kfp, "style", style_get, None)?;
     d.def_get(it, mlp, "mediaText", media_text_get, None)?;
     d.def_get(it, base, "cssText", rule_text, None)?;
     d.def_get(it, base, "type", type_get, None)?;
@@ -218,7 +236,7 @@ fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<()> {
 pub(crate) fn define(d: &Dom, it: &mut Interp<'_>, name: &str) -> R<bool> {
     match name {
         "CSSStyleSheet" | "CSSRule" | "CSSStyleRule" | "CSSRuleList" | "StyleSheetList" | "CSSGroupingRule" | "CSSConditionRule" | "CSSMediaRule"
-        | "CSSSupportsRule" | "MediaList" => {
+        | "CSSSupportsRule" | "CSSImportRule" | "CSSFontFaceRule" | "CSSKeyframesRule" | "CSSKeyframeRule" | "MediaList" => {
             ensure(d, it)?;
             Ok(true)
         }
@@ -502,6 +520,19 @@ fn new_rule(d: &Dom, it: &mut Interp<'_>, mut r: Rule, decl: Option<String>) -> 
     }
     Ok(o)
 }
+fn declaration_text(ds: &[bare_css::parser::Declaration<'_>]) -> String {
+    let mut decl = String::new();
+    for p in ds {
+        decl.push_str(p.name.as_ref());
+        decl.push(':');
+        decl.push_str(p.value);
+        if p.important {
+            decl.push_str(" !important");
+        }
+        decl.push(';');
+    }
+    decl
+}
 // The text inside the outer `{ }` of an at-rule chunk.
 fn block_body(chunk: &str) -> Option<&str> {
     use bare_css::tokenizer::{Token, tokenize};
@@ -540,28 +571,31 @@ fn parsed_rules(d: &Dom, it: &mut Interp<'_>, sheet: ObjId, parent: Option<ObjId
             parent,
         };
         match r {
+            bare_css::parser::Rule::Style(r) if parent.is_some_and(|p| state(d).borrow().rules[&p].kind == Kind::Keyframes) => {
+                let rule = Rule { kind: Kind::Keyframe, prelude: r.prelude.to_owned(), raw: String::new(), ..base };
+                out.push(new_rule(d, it, rule, Some(declaration_text(&r.declarations)))?);
+            }
             bare_css::parser::Rule::Style(r) => {
-                let mut decl = String::new();
-                for p in r.declarations {
-                    decl.push_str(p.name.as_ref());
-                    decl.push(':');
-                    decl.push_str(p.value);
-                    if p.important {
-                        decl.push_str(" !important");
-                    }
-                    decl.push(';');
-                }
-                out.push(new_rule(d, it, Rule { kind: Kind::Style, selector: Some(r.prelude.to_owned()), raw: String::new(), ..base }, Some(decl))?);
+                let rule = Rule { kind: Kind::Style, selector: Some(r.prelude.to_owned()), raw: String::new(), ..base };
+                out.push(new_rule(d, it, rule, Some(declaration_text(&r.declarations)))?);
             }
             bare_css::parser::Rule::At(a) => {
                 let kind = match a.name.as_ref() {
                     "media" => Kind::Media,
                     "supports" => Kind::Supports,
+                    "import" => Kind::Import,
+                    "font-face" => Kind::FontFace,
+                    n if n.ends_with("keyframes") => Kind::Keyframes,
                     _ => Kind::Other,
                 };
-                let body = block_body(chunk).filter(|_| kind != Kind::Other && depth < MAX_DEPTH);
-                let kind = if body.is_some() { kind } else { Kind::Other };
-                let o = new_rule(d, it, Rule { kind, prelude: a.prelude.to_owned(), ..base }, None)?;
+                let nested = matches!(kind, Kind::Media | Kind::Supports | Kind::Keyframes);
+                let body = block_body(chunk).filter(|_| nested && depth < MAX_DEPTH);
+                let kind = if nested && body.is_none() { Kind::Other } else { kind };
+                let decl = match (&a.body, kind) {
+                    (bare_css::parser::AtBody::Declarations(ds), Kind::FontFace) => Some(declaration_text(ds)),
+                    _ => None,
+                };
+                let o = new_rule(d, it, Rule { kind, prelude: a.prelude.to_owned(), ..base }, decl)?;
                 if let Some(body) = body {
                     let kids = parsed_rules(d, it, sheet, Some(o), body, depth + 1)?;
                     let list = new_rule_list(d, it, o)?;
@@ -681,6 +715,12 @@ fn rule_string(d: &Dom, it: &mut Interp<'_>, o: ObjId) -> R<String> {
             let v = it.get_value(Value::Object(style), k)?;
             Ok(format!("{} {{ {} }}", sel, d.string_arg(it, v)?))
         }
+        (None, Some(style)) if matches!(r.kind, Kind::Keyframe | Kind::FontFace) => {
+            let k = d.key(it, "cssText")?;
+            let v = it.get_value(Value::Object(style), k)?;
+            let head = if r.kind == Kind::Keyframe { r.prelude.as_str() } else { "@font-face" };
+            Ok(format!("{head} {{ {} }}", d.string_arg(it, v)?))
+        }
         _ if r.list.is_some() => {
             // The text is built from the nested rules, so an edit of a nested rule reaches the sheet text.
             let kids = state(d).borrow().lists[&r.list.unwrap()].items.clone();
@@ -763,21 +803,19 @@ fn style_get(d: &Dom, it: &mut Interp<'_>, t: Value, _: &[Value]) -> V {
 fn type_get(d: &Dom, it: &mut Interp<'_>, t: Value, _: &[Value]) -> V {
     let o = rule(d, it, t)?;
     let r = state(d).borrow().rules[&o].clone();
-    let n = if r.kind == Kind::Style {
-        1
-    } else if r.kind == Kind::Media {
-        4
-    } else if r.kind == Kind::Supports {
-        12
-    } else {
-        match r.raw.split_whitespace().next().unwrap_or("").to_ascii_lowercase().as_str() {
-            "@import" => 3,
-            "@media" => 4,
-            "@font-face" => 5,
-            "@keyframes" | "@-webkit-keyframes" => 7,
-            "@supports" => 12,
+    let n = match r.kind {
+        Kind::Style => 1,
+        Kind::Import => 3,
+        Kind::Media => 4,
+        Kind::FontFace => 5,
+        Kind::Keyframes => 7,
+        Kind::Keyframe => 8,
+        Kind::Supports => 12,
+        Kind::Other => match r.raw.split_whitespace().next().unwrap_or("").to_ascii_lowercase().as_str() {
+            "@page" => 6,
+            "@namespace" => 10,
             _ => 0,
-        }
+        },
     };
     Ok(Value::Number(n as f64))
 }
@@ -888,7 +926,47 @@ fn media_text_get(d: &Dom, it: &mut Interp<'_>, t: Value, _: &[Value]) -> V {
         _ => None,
     };
     let Some(r) = r else { return Err(it.type_error("Illegal invocation")) };
-    condition_get(d, it, Value::Object(r), &[])
+    let (kind, prelude) = {
+        let s = state(d).borrow();
+        (s.rules[&r].kind, s.rules[&r].prelude.clone())
+    };
+    let text = if kind == Kind::Import { import_parts(&prelude).1.to_owned() } else { prelude };
+    d.js_str(it, &text)
+}
+// `@import` prelude: the URL (a string or `url()`) and the media list after it.
+fn import_parts(p: &str) -> (&str, &str) {
+    let p = p.trim();
+    let (href, rest) = match p.as_bytes().first() {
+        Some(&q @ (b'"' | b'\'')) => match p[1..].find(q as char) {
+            Some(e) => (&p[1..1 + e], &p[e + 2..]),
+            None => (&p[1..], ""),
+        },
+        _ if p.get(..4).is_some_and(|h| h.eq_ignore_ascii_case("url(")) => match p[4..].find(')') {
+            Some(e) => (p[4..4 + e].trim().trim_matches(['"', '\'']), &p[5 + e..]),
+            None => (p[4..].trim(), ""),
+        },
+        _ => ("", p),
+    };
+    (href, rest.trim())
+}
+fn import_href_get(d: &Dom, it: &mut Interp<'_>, t: Value, _: &[Value]) -> V {
+    let o = rule(d, it, t)?;
+    let prelude = state(d).borrow().rules[&o].prelude.clone();
+    let h = import_parts(&prelude).0;
+    let url = resolve(d, h);
+    d.js_str(it, url.as_deref().unwrap_or(h))
+}
+// Deviation: an imported sheet is flattened by the loader, so it has no sheet object here.
+fn import_sheet_get(d: &Dom, it: &mut Interp<'_>, t: Value, _: &[Value]) -> V {
+    rule(d, it, t)?;
+    Ok(Value::Null)
+}
+fn key_text_set(d: &Dom, it: &mut Interp<'_>, t: Value, a: &[Value]) -> V {
+    let o = rule(d, it, t)?;
+    let text = d.string_arg(it, arg(a, 0))?;
+    state(d).borrow_mut().rules.get_mut(&o).unwrap().prelude = text;
+    republish(d, it, o)?;
+    Ok(Value::Undefined)
 }
 fn wrap_declaration(d: &Dom, it: &mut Interp<'_>, rule: ObjId, style: ObjId) -> R<()> {
     use bare_js::heap::{Property, PropertyDescriptor};

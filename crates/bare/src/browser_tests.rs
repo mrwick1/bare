@@ -966,8 +966,7 @@ fn media_and_supports_rules_expose_nested_rules() {
         let mut b = browser_with("<p>x</p>", BrowserLimits::default());
         let snippet = "var s = document.createElement('style'); s.textContent = '@media screen { a { color: red } b { color: blue } } @supports (display: grid) { i { color: green } } @keyframes k { from { opacity: 0 } }'; document.head.appendChild(s); var r = s.sheet.cssRules; JSON.stringify([typeof CSSRule, r[0].constructor.name, r[0].cssRules && r[0].cssRules.length, r[0].conditionText, r[0].media && r[0].media.mediaText, r[1].cssRules && r[1].cssRules.length, r[2].name])";
         let out = js(&mut b, snippet);
-        // The `@keyframes` rule is the work of the next step: only the first six items are checked here.
-        assert!(out.starts_with("[\"function\",\"CSSMediaRule\",2,\"screen\",\"screen\",1,"), "{out}");
+        assert_eq!(out, "[\"function\",\"CSSMediaRule\",2,\"screen\",\"screen\",1,\"k\"]");
         assert_eq!(js(&mut b, "var m = r[0]; Array.from(m.cssRules).map(x => [x.constructor.name, x.selectorText, x.style.color, x.parentRule === m, x.parentStyleSheet === s.sheet].join(':')).join('|')"), "CSSStyleRule:a:red:true:true|CSSStyleRule:b:blue:true:true");
         assert_eq!(js(&mut b, "[m instanceof CSSMediaRule, m instanceof CSSConditionRule, m instanceof CSSGroupingRule, m instanceof CSSRule, r[1] instanceof CSSSupportsRule, r[1] instanceof CSSConditionRule, m.type, r[1].type, m.parentRule, m.parentStyleSheet === s.sheet].join('|')"), "true|true|true|true|true|true|4|12||true");
         assert_eq!(js(&mut b, "Object.getPrototypeOf(CSSMediaRule) === CSSConditionRule && Object.getPrototypeOf(CSSConditionRule) === CSSGroupingRule && Object.getPrototypeOf(CSSGroupingRule) === CSSRule"), "true");
@@ -978,6 +977,19 @@ fn media_and_supports_rules_expose_nested_rules() {
         assert_eq!(js(&mut b, "list[0].style.color = 'teal'; s.textContent.includes('i { color: teal; }')"), "true");
         assert_eq!(js(&mut b, "try { m.deleteRule(9) } catch (e) { e.name }"), "IndexSizeError");
         assert_eq!(js(&mut b, "try { m.insertRule('@@ {', 0) } catch (e) { e.name }"), "SyntaxError");
+    });
+}
+
+#[test]
+fn keyframes_font_face_and_import_rules_have_interfaces() {
+    big(|| {
+        let mut b = browser_with("<style>@import url(\"a.css\") screen; @font-face { font-family: f; src: url(f.woff2); font-display: swap } @keyframes k { from { opacity: 0 } 50% { opacity: .5 } to { opacity: 1 } }</style>", BrowserLimits::default());
+        assert_eq!(js(&mut b, "var r = document.styleSheets[0].cssRules; r.length"), "3");
+        assert_eq!(js(&mut b, "[r[0].constructor.name, r[0].type, r[0].media.mediaText, r[0].href, r[0].styleSheet].join('|')"), "CSSImportRule|3|screen|a.css|");
+        assert_eq!(js(&mut b, "[r[1].constructor.name, r[1].type, r[1].style.cssText.includes('src: url(f.woff2)'), r[1] instanceof CSSRule, r[1].parentStyleSheet === document.styleSheets[0]].join('|')"), "CSSFontFaceRule|5|true|true|true");
+        assert_eq!(js(&mut b, "var k = r[2]; [k.constructor.name, k.type, k.name, k.cssRules.length, Array.from(k.cssRules).map(x => [x.constructor.name, x.type, x.keyText, x.style.opacity, x.parentRule === k].join(':')).join(',')].join('|')"), "CSSKeyframesRule|7|k|3|CSSKeyframeRule:8:from:0:true,CSSKeyframeRule:8:50%:.5:true,CSSKeyframeRule:8:to:1:true");
+        assert_eq!(js(&mut b, "k.cssRules[0].style.opacity = '0.2'; document.querySelector('style').textContent.includes('from { opacity: 0.2; }')"), "true");
+        assert_eq!(js(&mut b, "document.styleSheets[0].cssRules[1].cssText.includes('font-family')"), "true");
     });
 }
 
