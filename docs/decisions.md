@@ -1545,3 +1545,10 @@ An agent gets the URL of a named link in one small call, not with `eval`.
 - bare loads no web fonts, so the set never fires these events on its own. A page can still dispatch them.
 - `values`, `keys`, `entries` and `Symbol.iterator` return iterators of the private member `Set`.
 - The set stays lazy. A page that never reads `document.fonts` or `FontFace` pays nothing.
+## A link inside a heading shows in the snapshot (2026-11-12)
+
+GitHub puts each issue title in a link inside an `<h3>`. The snapshot walk treated a heading as a leaf, so it skipped the link. `links` uses the same walk, so it missed the link too.
+
+- A heading stays a leaf only when it holds no control.
+- A heading that holds a control shows its children, so the link gets a line and a ref.
+- When the first line under the heading has the same name, the heading line drops its name. The title then shows once.
