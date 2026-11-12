@@ -104,6 +104,7 @@ fn a_live_session_runs_the_journey_one_line_at_a_time() {
     assert_eq!(lines.next(), Some("open ${BASE}/"));
     args["url"] = json!(format!("{}/", args["vars"]["BASE"].as_str().unwrap()));
     args["timeout_ms"] = json!(30000);
+    args["report"] = json!(true);
     let (rep, error) = s.tool("open", args);
     assert!(!error && rep["ok"] == true, "{rep}");
     let mut last = 1;
@@ -206,7 +207,7 @@ fn ensure_session_logs_in_again_when_a_saved_session_is_not_valid() {
     let mut args = ensure_args("x", "stale");
     args["file"] = json!(file.to_str().unwrap());
     // A session that is not logged in: the login page only.
-    let (rep, _) = a.tool("open", json!({"url": args["url"], "vars": args["vars"]}));
+    let (rep, _) = a.tool("open", json!({"url": args["url"], "vars": args["vars"], "report": true}));
     assert_eq!(rep["ok"], true, "{rep}");
     let (rep, error) = a.tool("save_state", json!({"name": "x", "file": file.to_str().unwrap()}));
     assert!(!error && rep["saved"] == "x", "{rep}");
@@ -250,7 +251,7 @@ fn save_state_writes_a_private_file_and_open_restores_a_name() {
     let saved: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
     let token = saved.to_string().split("app-token-").nth(1).map(|t| format!("app-token-{}", &t[..1])).expect("a token in the file");
     s.forbid.push(token);
-    let (rep, error) = s.tool("open", json!({"url": args["url"], "vars": args["vars"], "state": "n2"}));
+    let (rep, error) = s.tool("open", json!({"url": args["url"], "vars": args["vars"], "state": "n2", "report": true}));
     assert!(!error && rep["ok"] == true, "{rep}");
     let (rep, _) = s.tool("step", json!({"steps": CHECK}));
     assert_eq!(rep["ok"], true, "{rep}");
@@ -267,7 +268,7 @@ fn a_shot_right_after_open_shows_the_loaded_page() {
     let (rep, error) = s.tool("run_steps", json!({"steps": format!("open {url}\nexpect url~\"/login\"\nshot want"), "timeout_ms": 30000}));
     assert!(!error && rep["ok"] == true, "{rep}");
     let want = std::fs::read(format!("{}/want.png", rep["out"].as_str().unwrap())).unwrap();
-    let (rep, error) = s.tool("open", json!({"url": url, "timeout_ms": 30000}));
+    let (rep, error) = s.tool("open", json!({"url": url, "timeout_ms": 30000, "report": true}));
     assert!(!error && rep["ok"] == true, "{rep}");
     let (rep, error) = s.tool("step", json!({"steps": "shot got"}));
     assert!(!error && rep["ok"] == true, "{rep}");
@@ -358,8 +359,9 @@ fn an_agent_logs_in_with_snapshot_refs_and_no_step_lines() {
     assert!(error && r.as_str().unwrap().contains("FAILED detached"), "{r}");
     let (r, _) = s.tool("find", json!({"role": "link", "name": "agents"}));
     assert!(r.as_str().unwrap().starts_with("1 match"), "{r}");
-    let (r, _) = s.tool("read", json!({"max_chars": 20}));
-    assert!(r.as_str().unwrap().contains("read again with offset=20"), "{r}");
+    // A limit that the header fills is an error that names a limit that works (#398).
+    let (r, error) = s.tool("read", json!({"max_chars": 20}));
+    assert!(error && r.as_str().unwrap().contains("pass at least"), "{r}");
     let (r, _) = s.tool("eval", json!({"js": "1 + 1"}));
     assert_eq!(r, json!(2));
     // A second session runs beside the first.
@@ -1267,7 +1269,7 @@ fn tall_page() -> String {
 #[test]
 fn a_shot_of_a_tall_element_is_not_cut_at_the_window() {
     let mut s = Server::start();
-    let (rep, error) = s.tool("open", json!({"url": tall_page(), "timeout_ms": 30000}));
+    let (rep, error) = s.tool("open", json!({"url": tall_page(), "timeout_ms": 30000, "report": true}));
     assert!(!error && rep["ok"] == true, "{rep}");
     let (snap, _) = s.tool("snapshot", json!({}));
     let line = snap.as_str().unwrap().lines().find(|l| l.contains("\"tall\"")).unwrap_or_else(|| panic!("{snap}"));
@@ -1519,4 +1521,69 @@ fn agent_tools(window: bool) {
     let (r, e) = s.tool("act", json!({"op": "click", "ref": ref_of(snap.as_str().unwrap(), "\"Go\""), "session": "cover"}));
     let r = r.as_str().unwrap().to_string();
     assert!(e && r.contains("dialog \"Cookie consent\"") && t.elapsed().as_millis() < 1500, "{} ms: {r}", t.elapsed().as_millis());
+}
+
+/// A paragraph that a click changes, and a button that changes 20 long paragraphs.
+const TEXT_CHANGES: &str = "<!doctype html><body><h1>Text</h1><p id=out>You clicked: Cancel</p>
+<button onclick=\"document.getElementById('out').textContent = confirm('Sure?') ? 'You clicked: Ok' : 'You clicked: Cancel'\">Confirm</button>
+<button onclick=\"for (const p of document.querySelectorAll('.many')) p.textContent = 'changed ' + p.id + ' ' + 'x'.repeat(400)\">Many</button>
+<script>for (let i = 0; i < 20; i++) { const p = document.createElement('p'); p.className = 'many'; p.id = 'p' + i; p.textContent = 'old ' + i; document.body.append(p) }</script></body>";
+
+/// #398: a text change that the user sees is in the act diff, in a few short lines.
+#[test]
+fn act_shows_text_that_changed() {
+    let mut s = Server::start();
+    let snap = opened(&mut s, &pages(&[("/", TEXT_CHANGES)]));
+    assert!(!snap.contains("You clicked"), "interactive snapshot has no plain text: {snap}");
+    let (r, error) = s.tool("act", json!({"op": "click", "loc": "role=button name=\"Confirm\"", "dialog": "accept"}));
+    let r = r.as_str().unwrap().to_string();
+    assert!(!error && r.contains("text: \"You clicked: Ok\""), "{r}");
+    assert!(!r.contains("no change") && !r.contains("Cancel\""), "{r}");
+    // The same click again changes nothing.
+    let (r, _) = s.tool("act", json!({"op": "click", "loc": "role=button name=\"Confirm\"", "dialog": "accept"}));
+    assert!(r.as_str().unwrap().contains("no change"), "{r}");
+    // Many changed lines: 5 at most, each cut at 200 characters, and a line that says how many more.
+    let (r, _) = s.tool("act", json!({"op": "click", "loc": "role=button name=\"Many\""}));
+    let r = r.as_str().unwrap().to_string();
+    let text: Vec<&str> = r.lines().filter(|l| l.starts_with("text: ")).collect();
+    assert_eq!(text.len(), 5, "{r}");
+    assert!(text.iter().all(|l| l.chars().count() <= 212), "{r}");
+    assert!(r.contains("15 more changed text lines"), "{r}");
+    assert!(r.len() < 1500, "{} chars: {r}", r.len());
+}
+
+/// #398: `open` gives a short receipt by default, and the JSON step report only with `report: true`.
+#[test]
+fn open_gives_a_short_receipt_unless_the_report_is_asked() {
+    let base = pages(&[("/", TEXT_CHANGES)]);
+    let mut s = Server::start();
+    let (r, error) = s.tool("open", json!({"url": format!("{base}/")}));
+    let r = r.as_str().unwrap_or_else(|| panic!("not text: {r}")).to_string();
+    assert!(!error && r.starts_with("ok (") && r.len() < 100, "{r}");
+    let (r, error) = s.tool("open", json!({"url": format!("{base}/"), "report": true}));
+    assert!(!error && r["ok"] == true && r["steps"].is_array(), "{r}");
+    let (r, error) = s.tool("open", json!({"url": format!("{base}/missing")}));
+    assert!(error && r.as_str().unwrap().starts_with("FAILED"), "{r}");
+}
+
+/// #398: `read` and `links` stay within `max_chars`, header included.
+#[test]
+fn read_and_links_stay_within_max_chars() {
+    let rows: String = (0..200).map(|i| format!("<p>Paragraph {i} with some words in it.</p><a href='/page/{i}'>link number {i}</a>")).collect();
+    let base = page_server(format!("<!doctype html><title>A long title for the page</title><body>{rows}"));
+    let mut s = Server::start();
+    s.tool("open", json!({"url": format!("{base}/")}));
+    for max in [300, 1500] {
+        let (r, error) = s.tool("read", json!({"max_chars": max}));
+        let r = r.as_str().unwrap();
+        assert!(!error && r.chars().count() <= max && r.contains("read again with offset="), "{} chars: {r}", r.chars().count());
+        let (r, error) = s.tool("links", json!({"max_chars": max}));
+        let r = r.as_str().unwrap();
+        assert!(!error && r.chars().count() <= max && r.contains("lines cut"), "{} chars: {r}", r.chars().count());
+    }
+    // The next page of read starts where the cut line says.
+    let (r, _) = s.tool("read", json!({"max_chars": 300}));
+    let next: usize = r.as_str().unwrap().split("offset=").nth(1).unwrap().trim().parse().unwrap();
+    let (r, _) = s.tool("read", json!({"max_chars": 300, "offset": next}));
+    assert!(r.as_str().unwrap().contains(&format!("chars {next}-")), "{r}");
 }

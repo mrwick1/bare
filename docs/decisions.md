@@ -1351,3 +1351,15 @@ An agent clicked a ref under a spinner and got `covered`. A cookie banner over t
 - The failure names the cover, not the element under the pointer. Of the ancestors of that element that do not hold the target, it names the outermost with a role and a name. It falls back to the outermost one. It gives `tag#id.class` and `(role "name")`.
 - bare has no CSS transitions. A backdrop that fades with `transition` and removes itself on `transitionend` never goes, so the click fails after 1 s. A fade by script works.
 - Window mode routes each tool through `Remote::call` on the window thread. The dialog and tab policy is per thread and is set there, so it works. The test `the_agent_tools_work_in_a_window` checks the tools in a window. It is ignored because it needs a Wayland display. Run it on a nested compositor, not on a desktop in use.
+## Text changes in act, a short open and max_chars limits (2026-11-12)
+Issue #398 found three replies that cost too many tokens or hid a change.
+- A snapshot keeps a hash of each line of the rendered text, as `read` gives it. One more walk of the DOM does this.
+- An interactive `act` diff adds the text lines that the last snapshot did not show, as `text: "..."`. A click that changed `You clicked: Cancel` to `You clicked: Ok` gave `no change` before.
+- The text lines come in page order, once each. A line that a changed element line already shows as its name is left out.
+- The cap is 5 lines of at most 200 characters. A last line says how many more changed, and points to `read`. A removed text line does not show.
+- A diff in `all` mode already has text lines, so it adds none.
+- `open` gives the compact receipt of `act` by default: ok or the failure, the time, a redirect, not ready, script errors and failed requests. On github.com the reply went from 30076 to 12 characters.
+- `open` with `report: true` gives the full JSON step report, as before. `snapshot: true` still adds the snapshot.
+- `deck` passes a text reply through, so it needs no change.
+- `read` and `links` count the header, the count line and the cut line in `max_chars`. The snapshot cut line counts in its budget too. The snapshot header is still outside the limit.
+- A `max_chars` that the header fills is a tool error that names a limit that works. Before, `read` gave no text and the same offset again.

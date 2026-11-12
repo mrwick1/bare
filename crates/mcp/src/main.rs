@@ -150,21 +150,25 @@ impl Server {
             Some(n) => Some(self.saved.get(n).cloned().ok_or(format!("no saved session named {n}"))?),
             None => None,
         };
-        if args.get("snapshot").and_then(Value::as_bool) == Some(true) {
-            let mut a = args.clone();
-            a["compact"] = json!(true);
-            let (rep, ok) = self.start(&a, url, state)?;
-            if !ok {
-                return Err(rep);
-            }
-            let mark = self.arm(args)?;
-            let snap = self.snapshot(args)?;
-            let errs = self.script_errors(args, mark, &rep)?;
-            return Ok(rep + &errs + "\n" + &snap);
+        // The JSON step report only on request: on a large site it has tens of thousands of characters (#398).
+        if args.get("report").and_then(Value::as_bool) == Some(true) {
+            let (rep, ok) = self.start(args, url, state)?;
+            self.arm(args)?;
+            return if ok { Ok(rep) } else { Err(rep) };
         }
-        let (rep, ok) = self.start(args, url, state)?;
-        self.arm(args)?;
-        if ok { Ok(rep) } else { Err(rep) }
+        let mut a = args.clone();
+        a["compact"] = json!(true);
+        let (rep, ok) = self.start(&a, url, state)?;
+        if !ok {
+            return Err(rep);
+        }
+        let mark = self.arm(args)?;
+        if args.get("snapshot").and_then(Value::as_bool) != Some(true) {
+            return Ok(rep);
+        }
+        let snap = self.snapshot(args)?;
+        let errs = self.script_errors(args, mark, &rep)?;
+        Ok(rep + &errs + "\n" + &snap)
     }
 
     /// Start a live session on URL, from a saved session or with an empty profile. One live session at a time: this ends the old one
@@ -885,8 +889,8 @@ fn tools() -> Value {
         },
         {
             "name": "open",
-            "description": "Start a live session: load URL in the bare browser. A new open ends the old session. Returns the report of the open step.",
-            "inputSchema": with(json!({"url": {"type": "string"}, "state": {"type": "string", "description": "Start from the session that save_state or ensure_session saved under this name, in this server."}, "snapshot": {"type": "boolean", "description": "Return a short receipt and the page snapshot instead of the JSON report."}}), &["url"]),
+            "description": "Start a live session: load URL in the bare browser. A new open ends the old session. Returns a short receipt: ok or the failure, the time, a redirect, not ready, script errors and failed requests.",
+            "inputSchema": with(json!({"url": {"type": "string"}, "state": {"type": "string", "description": "Start from the session that save_state or ensure_session saved under this name, in this server."}, "snapshot": {"type": "boolean", "description": "Add the page snapshot after the receipt."}, "report": {"type": "boolean", "description": "Return the full JSON report of the open step (steps, console, network) instead of the receipt. It can be large."}}), &["url"]),
         },
         {
             "name": "step",
