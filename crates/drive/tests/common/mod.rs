@@ -26,6 +26,11 @@ pub fn serve_app() -> String {
     serve_with(app)
 }
 
+/// Start a server with the routes of a test. A status 301 to 308 sends the body as the `Location` header.
+pub fn serve_route(route: Route) -> String {
+    serve_with(route)
+}
+
 fn serve_with(route: Route) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -65,7 +70,8 @@ fn connection(mut s: TcpStream, route: Route) {
         let mut words = head.split_whitespace();
         let (method, target) = (words.next().unwrap_or(""), words.next().unwrap_or("/"));
         let (status, kind, out) = route(method, target, &body, header("authorization").as_deref());
-        let head = format!("HTTP/1.1 {status} X\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nCache-Control: no-store\r\n\r\n", out.len());
+        let location = if (301..=308).contains(&status) { format!("Location: {}\r\n", String::from_utf8_lossy(&out)) } else { String::new() };
+        let head = format!("HTTP/1.1 {status} X\r\nContent-Type: {kind}\r\nContent-Length: {}\r\n{location}Cache-Control: no-store\r\n\r\n", out.len());
         if s.write_all(head.as_bytes()).and_then(|_| s.write_all(&out)).is_err() {
             return;
         }

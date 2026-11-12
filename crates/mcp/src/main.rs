@@ -155,7 +155,8 @@ impl Server {
             let (rep, ok) = self.start(&a, url, state)?;
             return if ok { Ok(rep + "\n" + &self.snapshot(args)?) } else { Err(rep) };
         }
-        Ok(self.start(args, url, state)?.0)
+        let (rep, ok) = self.start(args, url, state)?;
+        if ok { Ok(rep) } else { Err(rep) }
     }
 
     /// Start a live session on URL, from a saved session or with an empty profile. One live session at a time: this ends the old one
@@ -166,6 +167,7 @@ impl Server {
         let (opt, red, vars) = self.options(args)?;
         self.place_window(&opt)?;
         let mut session = Session::new(&opt);
+        session.ready_wait = true;
         let dir = args.get("downloads_dir").and_then(Value::as_str).map_or_else(|| std::env::temp_dir().join(format!("bare-mcp-{}-downloads", std::process::id())), std::path::PathBuf::from);
         let dl = Downloads::new(dir);
         session.set_downloads(dl.clone());
@@ -173,7 +175,19 @@ impl Server {
             session.preload(st);
         }
         self.live.insert(name, Live { session, opt, red, vars, lines: 0, dl, told: Default::default() });
-        self.run_live(args, &format!("open {url}"))
+        let (mut rep, ok) = self.run_live(args, &format!("open {url}"))?;
+        // A redirect to another address: the agent must see where the page really is.
+        let end = self.live_mut(args)?.session.url().unwrap_or_default();
+        let bare = |u: &str| u.split('#').next().unwrap_or("").trim_end_matches('/').to_string();
+        if ok && bare(&end) != bare(url) {
+            let to = self.live_mut(args)?.red.clean(&bare_drive::run::safe_url(&end));
+            if args.get("compact").and_then(Value::as_bool) == Some(true) {
+                rep.push_str(&format!("\nredirected: {to}"));
+            } else {
+                rep.insert_str(rep.len() - 1, &format!(",\"redirected\":{}", json!(to)));
+            }
+        }
+        Ok((rep, ok))
     }
 
     /// Save the live session under a name, and in a file when asked. Gives counts only: the values never leave this process.

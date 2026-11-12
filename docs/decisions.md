@@ -1274,3 +1274,13 @@ A form control with no name takes one from what sits before it, after the standa
 A page script can move the focus while the driver types. The keys then went to another field, and the receipt said ok. Now `type` checks the focus before and after each key. It fails with `focus_lost` and names the field that has the focus. A text with a line feed is not checked, because Enter can remove the field.
 `press` ignored its ref and sent the key to the focused element. Now `press LOC KEY` gives the element the focus first. It fails with `hidden`, `disabled` or `no_focus` when it cannot. Enter in a form field then submits the form.
 A key that changes nothing now says `no effect`. The driver compares the document, the URL and the revision of the tree before and after the key.
+## `open` waits until the page is ready (2026-11-12)
+
+- The MCP server sets `Session::ready_wait`. Then `open`, `goto` and `reload` end when the document has loaded and no request, script or due task waits, or at `timeout_ms`. A step file keeps the old rule: these steps return at once, and the next step waits.
+- Open event streams and timers that are not due do not count as work. A page with a stream must not wait for the whole limit.
+- The page is ready only when it also shows content: text, a control or a picture, in the page or in a shadow tree. An empty page that nothing can change ends the wait at once. Otherwise the wait runs to the limit.
+- At the limit the receipt says so: `not ready: body empty after 8000 ms, 3 requests pending`. A page that stopped for good (a fatal script error) ends the wait with a note too.
+- A live session keeps the document of an HTTP error status. The `open` step fails with `status 403: URL (title "T"): text excerpt`, and the session stays open, so the agent can snapshot it. A batch session (`live` off) still fails the load.
+- `open` reports `redirected: URL` when the final address differs from the requested one. It is a tool error when the step fails.
+- Receipts show full URLs. Only the value of a query parameter whose name has `token`, `key`, `code`, `password`, `secret`, `auth`, `session` or `sig` is hidden. The fragment is still dropped.
+- `file://` is not supported: a live `open` of a URL that is not http(s) fails at once with `the URL is not an http(s) URL` (bare#381). A `file` scheme in `bare-url` touches every `match` on `Scheme` in 13 files, and sub-resources would need a loader too.

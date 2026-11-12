@@ -383,6 +383,10 @@ impl Page {
 
     fn live_session(mut cfg: SessionConfig, viewport: (u32, u32)) -> Result<Session, String> {
         let url = cfg.url.clone();
+        // The download starts on a worker, so a URL that no load can use fails here, at once, and not later in a tick.
+        if bare_url::Url::parse(url.split('#').next().unwrap_or("")).is_err() {
+            return Err(format!("{url}: the URL is not an http(s) URL"));
+        }
         cfg.viewport = Some((viewport.0 as f32, viewport.1 as f32));
         // A window runs for hours, not for one load: an input event adds a little time and a few tasks each.
         cfg.limits.max_time = Duration::from_secs(7 * 24 * 3600);
@@ -426,6 +430,25 @@ impl Page {
     /// Is a document on its way, or in but not shown yet? A live session loads it in the ticks after `open` and `navigate`.
     pub fn loading(&self) -> bool {
         matches!(&self.source, Source::Session(s) if s.loading().is_some())
+    }
+
+    /// Live: is the document in and `load` run, with no request, script or task waiting? `Err`: the number of requests that wait (0 while the
+    /// document itself is on its way). Timers that are not due, and open event streams, do not count.
+    pub fn idle(&mut self) -> Result<(), usize> {
+        if self.loading() {
+            return Err(0);
+        }
+        let Some(b) = self.browser() else { return Err(0) };
+        let pending = b.pending_fetches();
+        if pending == 0 && b.loaded() && b.live_work_of(false).is_none() { Ok(()) } else { Err(pending) }
+    }
+
+    /// The HTTP status of the last document of a live session (0: none yet, or not live).
+    pub fn http_status(&self) -> u16 {
+        match &self.source {
+            Source::Session(s) => s.status(),
+            Source::Browser(_) => 0,
+        }
     }
 
     /// Why the last document did not load, if it did not. The ticks of a live session load it after `open` and `navigate`.

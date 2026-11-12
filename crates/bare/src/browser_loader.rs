@@ -925,6 +925,11 @@ impl Browser {
     /// Live: can a turn do something now (`Some(true)`: a reply or a script is in, a queued request has not started, a script or a
     /// traversal task waits), or does the page wait for the network only (`Some(false)`)? `None`: nothing waits but the timers.
     pub(crate) fn live_work(&self) -> Option<bool> {
+        self.live_work_of(true)
+    }
+
+    /// `live_work`; with `streams` false an open event stream is not work: it can stay open for as long as the page lives.
+    pub(crate) fn live_work_of(&self, streams: bool) -> Option<bool> {
         let s = &self.dom.scripts;
         if !s.inline.borrow().is_empty() || self.navigation_stats().pending_tasks > 0 {
             return Some(true);
@@ -940,7 +945,7 @@ impl Browser {
         // dynamic script or a timer is what can change it, and the terms above and `next_scheduled_due` tell).
         let parse = s.parse.borrow().as_ref().map(|p| !p.waiting || waits.unwrap_or(false));
         // A queued request, or an open event stream: is a reply or a chunk in?
-        let net = match (self.fetch_ready(), self.streams_ready()) {
+        let net = match (self.fetch_ready(), if streams { self.streams_ready() } else { None }) {
             (Some(true), _) | (_, Some(true)) => Some(true),
             (None, None) => None,
             _ => Some(false),
