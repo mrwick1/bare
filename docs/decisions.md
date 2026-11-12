@@ -1809,3 +1809,10 @@ A focused element inside an editing host now takes key input. Text, Enter, Backs
 - `w.postMessage` drops the message. The frame has no listener that runs, and the parent must not receive it.
 - Only blank frames inherit the parent global. A frame with another `src` keeps the inert window, so the parent's `document` and globals do not leak through it.
 - Not built: a separate `Object.prototype` per frame, so `w.Array !== Array` checks and `instanceof` across frames are the same as in the parent. Other `create*` methods (`createElementNS`, `createDocumentFragment`, `importNode`) of a frame document still give `ownerDocument` the main document.
+
+## Selection direction and containsNode (2026-11-12)
+
+- The selection keeps one flag for its direction. `setBaseAndExtent` and `extend` set it. Every other call that makes a new selection range sets it to forward.
+- `anchorNode` and `focusNode` swap with the flag. `direction` reads `backward`, `forward` or `none`.
+- `containsNode` follows the standard text and Ladybird: it compares the points `(node, 0)` and `(node, length)` with the range. An element whose contents are all selected counts as contained. Chrome may answer false for it. We did not check this against Chrome.
+- `modify` and `deleteFromDocument` stay gates.

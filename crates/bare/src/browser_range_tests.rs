@@ -28,6 +28,64 @@ fn js(b: &mut Browser, src: &str) -> String {
     }
 }
 
+const SEL_PAGE: &str = "<p id=p>hello world</p><p id=q>second</p>";
+const SEL_JS: &str = "var s = getSelection(), t = document.getElementById('p').firstChild, u = document.getElementById('q').firstChild; ";
+
+#[test]
+fn set_base_and_extent_forwards_and_backwards() {
+    let mut b = page(SEL_PAGE);
+    js(&mut b, SEL_JS);
+    assert_eq!(js(&mut b, "s.setBaseAndExtent(t, 1, t, 4); [s.anchorOffset, s.focusOffset, s.direction, s.toString(), s.rangeCount, s.type].join()"), "1,4,forward,ell,1,Range");
+    assert_eq!(js(&mut b, "s.setBaseAndExtent(t, 4, t, 1); [s.anchorOffset, s.focusOffset, s.direction, s.toString(), s.getRangeAt(0).startOffset].join()"), "4,1,backward,ell,1");
+    assert_eq!(js(&mut b, "s.setBaseAndExtent(u, 2, t, 3); [s.anchorNode === u, s.focusNode === t, s.direction].join()"), "true,true,backward");
+    assert_eq!(js(&mut b, "s.setBaseAndExtent(t, 2, t, 2); [s.direction, s.type].join()"), "none,Caret");
+    assert_eq!(js(&mut b, "s.setBaseAndExtent(t, 4, t, 1); s.collapse(t, 2); s.direction"), "none");
+    assert_eq!(js(&mut b, "try { s.setBaseAndExtent(t, 99, t, 1) } catch (e) { e.name }"), "IndexSizeError");
+    assert_eq!(js(&mut b, "try { s.setBaseAndExtent(null, 0, t, 1) } catch (e) { e.name }"), "TypeError");
+    // Nodes outside the document: nothing happens.
+    assert_eq!(js(&mut b, "s.setBaseAndExtent(t, 1, t, 3); var x = document.createElement('i'); s.setBaseAndExtent(x, 0, t, 1); s.toString()"), "el");
+}
+
+#[test]
+fn extend_moves_the_focus() {
+    let mut b = page(SEL_PAGE);
+    js(&mut b, SEL_JS);
+    assert_eq!(js(&mut b, "try { s.extend(t, 1) } catch (e) { e.name }"), "InvalidStateError");
+    assert_eq!(js(&mut b, "s.collapse(t, 3); s.extend(t, 6); [s.anchorOffset, s.focusOffset, s.direction, s.toString()].join()"), "3,6,forward,lo ");
+    assert_eq!(js(&mut b, "s.collapse(t, 6); s.extend(t, 2); [s.anchorOffset, s.focusOffset, s.direction, s.toString()].join()"), "6,2,backward,llo ");
+    assert_eq!(js(&mut b, "s.extend(u, 3); [s.anchorNode === t, s.anchorOffset, s.focusNode === u, s.focusOffset, s.direction].join()"), "true,6,true,3,forward");
+    assert_eq!(js(&mut b, "s.extend(t, 8); [s.anchorOffset, s.focusOffset, s.direction].join()"), "6,8,forward");
+    assert_eq!(js(&mut b, "s.extend(t, 1); s.extend(t, 2); [s.anchorOffset, s.focusOffset, s.direction].join()"), "6,2,backward");
+    assert_eq!(js(&mut b, "try { s.extend(t, 99) } catch (e) { e.name }"), "IndexSizeError");
+    assert_eq!(js(&mut b, "s.extend(document.createElement('i'), 0); [s.anchorOffset, s.focusOffset].join()"), "6,2");
+}
+
+#[test]
+fn contains_node_full_and_partial() {
+    let mut b = page(SEL_PAGE);
+    js(&mut b, SEL_JS);
+    assert_eq!(js(&mut b, "document.getElementById('p').contains(t); s.containsNode(t)"), "false");
+    assert_eq!(js(&mut b, "s.selectAllChildren(document.getElementById('p')); [s.containsNode(t), s.containsNode(document.getElementById('p')), s.containsNode(u), s.containsNode(u, true)].join()"), "true,true,false,false");
+    assert_eq!(js(&mut b, "s.setBaseAndExtent(t, 2, u, 3); var p = document.getElementById('p'), q = document.getElementById('q'); [s.containsNode(t), s.containsNode(t, true), s.containsNode(u), s.containsNode(u, true), s.containsNode(p, true), s.containsNode(q, true), s.containsNode(document.body)].join()"), "false,true,false,true,true,true,false");
+    assert_eq!(js(&mut b, "s.setBaseAndExtent(p, 0, q, 1); [s.containsNode(p), s.containsNode(t), s.containsNode(u), s.containsNode(q)].join()"), "true,true,true,true");
+    assert_eq!(js(&mut b, "s.removeAllRanges(); s.containsNode(t, true)"), "false");
+    assert_eq!(js(&mut b, "try { s.containsNode(null) } catch (e) { e.name }"), "TypeError");
+}
+
+#[test]
+fn a_keydown_handler_can_set_the_selection_and_typing_goes_on() {
+    let mut b = page("<div id=e contenteditable></div>");
+    js(&mut b, "var e = document.getElementById('e'); window.n = 0; e.addEventListener('keydown', function () { var s = getSelection(); s.setBaseAndExtent(e, 0, e, 0); s.extend(e, 0); s.containsNode(e, true); n++ }); getSelection().collapse(e, 0);");
+    let e = b.query("#e").unwrap().unwrap();
+    b.focus(e).unwrap();
+    for (i, k) in ["a", "b", "c"].iter().enumerate() {
+        b.drive_key(if i == 0 { Some(e) } else { None }, k).unwrap();
+    }
+    assert_eq!(js(&mut b, "n"), "3");
+    // The handler puts the caret back at offset 0, so each key goes before the last.
+    assert_eq!(js(&mut b, "e.textContent"), "cba");
+}
+
 #[test]
 fn the_globals_are_lazy_and_work_when_read() {
     let mut b = page("<p id=p>abc</p>");
@@ -40,7 +98,7 @@ fn the_globals_are_lazy_and_work_when_read() {
 fn the_selection_methods_that_are_left_are_gates() {
     let mut b = page("<p id=p>abc</p>");
     js(&mut b, "var r = document.createRange(); r.selectNodeContents(document.getElementById('p'))");
-    for (m, what) in [("extend(document.body, 0)", "Selection.extend"), ("setBaseAndExtent(document.body, 0, document.body, 1)", "Selection.setBaseAndExtent"), ("containsNode(document.body)", "Selection.containsNode"), ("modify('move', 'forward', 'character')", "Selection.modify"), ("deleteFromDocument()", "Selection.deleteFromDocument")] {
+    for (m, what) in [("modify('move', 'forward', 'character')", "Selection.modify"), ("deleteFromDocument()", "Selection.deleteFromDocument")] {
         assert_eq!(js(&mut b, &format!("getSelection().{m}")), format!("unsupported:{what}"));
     }
     // A gate on the wrong receiver is still an illegal invocation, as for the other methods.
