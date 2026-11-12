@@ -1550,6 +1550,7 @@ impl<'p> Interp<'p> {
                 self.w_with_gate(st.span)?;
                 self.w_expr(obj, fs, ac)?;
                 let sc = self.sc_begin(RKind::Barrier);
+                self.sc_all[self.sc_cur as usize].with = true;
                 let r = self.w_stmt(body, fs, ac, true);
                 self.sc_end(sc);
                 r?

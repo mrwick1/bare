@@ -126,6 +126,14 @@ impl<'p> Interp<'p> {
             return Err("generator or async function");
         }
         let fs = self.bc_fn_scope(fid).ok_or("no scope")?;
+        // A name that leaves a `with` body meets its object environment, which the loop does not search: the walker runs it.
+        let mut p = self.sc_all[fs.scope as usize].parent;
+        while p != NONE {
+            if self.sc_all[p as usize].with {
+                return Err("a function inside with");
+            }
+            p = self.sc_all[p as usize].parent;
+        }
         let w = self.bc_walk(Some(fid), fs.scope);
         if w.bad.is_some() {
             return Err("scope walk");
