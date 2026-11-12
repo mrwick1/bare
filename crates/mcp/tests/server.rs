@@ -1292,3 +1292,33 @@ fn a_snapshot_leaves_out_what_an_adopted_sheet_hides() {
     let (r, error) = s.tool("eval", json!({"js": "var r = document.querySelector('x-card').shadowRoot; getComputedStyle(r.getElementById('seen')).color + ' ' + getComputedStyle(r.getElementById('gone')).display"}));
     assert!(!error && r.to_string().contains("rgb(0, 0, 255) none"), "{r}");
 }
+
+fn eval_pages(_: &str, target: &str, _: &str, _: Option<&str>) -> (u16, &'static str, Vec<u8>) {
+    match target {
+        "/report.csv" => (200, "text/csv", b"a,b\n1,2\n".to_vec()),
+        _ => (200, "text/html", b"<!doctype html><title>eval</title><p>page</p>".to_vec()),
+    }
+}
+
+#[test]
+fn eval_waits_for_a_promise_and_runs_top_level_await() {
+    let base = common::serve_route(eval_pages);
+    let mut s = Server::start();
+    let (r, error) = s.tool("open", json!({"url": format!("{base}/"), "timeout_ms": 1500}));
+    assert!(!error, "{r}");
+    // A promise: eval waits for it and gives the fulfilled value.
+    assert_eq!(s.tool("eval", json!({"js": "fetch('/report.csv').then(r => r.text())"})), (json!("a,b\n1,2\n"), false));
+    // Top-level await, as an expression and as statements with a return.
+    assert_eq!(s.tool("eval", json!({"js": "await (await fetch('/report.csv')).text()"})), (json!("a,b\n1,2\n"), false));
+    assert_eq!(s.tool("eval", json!({"js": "const t = await (await fetch('/report.csv')).text(); return t.length"})), (json!(8), false));
+    // A rejected promise and a thrown error show the name and the message.
+    let (r, error) = s.tool("eval", json!({"js": "Promise.reject(new TypeError('nope'))"}));
+    assert!(error && r.as_str().unwrap().contains("rejected: TypeError: nope"), "{r}");
+    let (r, error) = s.tool("eval", json!({"js": "throw new RangeError('bad')"}));
+    assert!(error && r.as_str().unwrap().contains("RangeError: bad") && !r.as_str().unwrap().contains("ObjId"), "{r}");
+    let (r, error) = s.tool("eval", json!({"js": "throw 'plain'"}));
+    assert!(error && r.as_str().unwrap().contains("plain") && !r.as_str().unwrap().contains("ObjId"), "{r}");
+    // A promise that never settles ends at the time limit.
+    let (r, error) = s.tool("eval", json!({"js": "new Promise(() => {})"}));
+    assert!(error && r.as_str().unwrap().contains("pending"), "{r}");
+}

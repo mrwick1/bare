@@ -857,7 +857,7 @@ fn tools() -> Value {
         },
         {
             "name": "eval",
-            "description": "Run JavaScript in the live page and return its value as text. JSON.stringify an object.",
+            "description": "Run JavaScript in the live page and return its value as text. JSON.stringify an object. A Promise is awaited up to the time limit. Top-level await works: an expression gives its value; statements need a return. A thrown error shows as Name: message.",
             "inputSchema": {"type": "object", "properties": {"session": S, "js": {"type": "string"}}, "required": ["js"]},
         },
         {

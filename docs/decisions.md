@@ -1320,3 +1320,6 @@ Lit and other web-component libraries style a shadow root with `new CSSStyleShee
 - The `adoptedStyleSheets` getter returns a copy. `push` on it has no effect. A page assigns a new array, as Lit does.
 - A sheet adopted by many shadow roots adds its rules once per root. A page with many instances pays for each. Sharing the parsed rules is a later step.
 - `snapshot` and `read` now enter a shadow root. They skipped it before, so a page built from web components showed no elements.
+
+## eval awaits promises and shows thrown errors (2026-11-12)
+`eval` ticks the page until a returned Promise settles, up to the step time limit. It gives the fulfilled value, or `rejected: Name: message`. Code with `await` runs as an async function. It first runs as `return (code)`. When that does not parse, it runs as a function body, and the code must `return` its value. A thrown value shows as `Name: message` for an error, else as its string form. Step `expect js` failures use the same text.
