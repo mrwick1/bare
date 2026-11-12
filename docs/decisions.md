@@ -1537,3 +1537,11 @@ An agent gets the URL of a named link in one small call, not with `eval`.
 - `pipeTo` reads an error of the source only when it reads, because the host reader has no `closed` promise.
 - An abort of the writable side of a `TransformStream` errors its readable side at once. This is the older text of the standard. `transformer.cancel` runs.
 - `tee` and async iteration stay gated.
+
+## A tick runs queued promise jobs (2026-11-12)
+
+- An agent `eval` runs its script outside a task. Its promise jobs stayed queued until a timer or a reply came due.
+- `Promise.resolve(1).then(...)` then timed out after 10 s on a quiet page.
+- `Page::work` now counts queued promise jobs as work for now.
+- The next tick runs the microtask checkpoint, so such an eval gives its value in under 1 ms.
+- The eval loop needs no timer for this.
