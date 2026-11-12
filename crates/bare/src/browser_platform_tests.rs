@@ -430,6 +430,55 @@ fn class_list_token_validation_and_order() {
 }
 
 #[test]
+fn class_list_indexes_are_live_and_match_item() {
+    big(|| {
+        let mut b = at(PAGE);
+        js(&mut b, "var el=document.getElementById('a'); var cl=el.classList; el.className='a b a c';");
+        // `list[i]` is `item(i)`; a duplicate token counts once; past the end is absent.
+        assert_eq!(js(&mut b, "[cl[0], cl[1], cl[2], String(cl[3]), cl[0] === cl.item(0)].join('|')"), "a|b|c|undefined|true");
+        assert_eq!(js(&mut b, "[0 in cl, 2 in cl, 3 in cl, '1' in cl, 'length' in cl].join()"), "true,true,false,true,true");
+        assert_eq!(js(&mut b, "Object.keys(cl).join()"), "0,1,2");
+        assert_eq!(js(&mut b, "Array.prototype.slice.call(cl).join() + '|' + Array.prototype.indexOf.call(cl, 'c') + '|' + Array.from(cl).length"), "a,b,c|2|3");
+        // Live: an index follows every change to the attribute, and an index past the new length is gone.
+        js(&mut b, "el.className = 'x y z'");
+        assert_eq!(js(&mut b, "[cl[0], cl[2], String(cl[3]), 3 in cl, Object.keys(cl).join()].join('|')"), "x|z|undefined|false|0,1,2");
+        js(&mut b, "el.className = 'q'");
+        assert_eq!(js(&mut b, "[cl[0], String(cl[1]), Object.keys(cl).join()].join('|')"), "q|undefined|0");
+        js(&mut b, "el.removeAttribute('class')");
+        assert_eq!(js(&mut b, "[String(cl[0]), Object.keys(cl).length].join()"), "undefined,0");
+        // Indexes are read-only: a write in sloppy code changes nothing.
+        js(&mut b, "el.className = 'm n'; cl[0] = 'zz'");
+        assert_eq!(js(&mut b, "el.className + '|' + cl[0]"), "m n|m");
+        // A token read before a remove and add still reads the list's current tokens.
+        assert_eq!(js(&mut b, "el.className = 'u v'; var t = cl[0]; cl.remove('u'); cl.add('u'); [t, cl[0], cl[1]].join()"), "u,v,u");
+        // The attributes of an element are indexed too (NamedNodeMap).
+        assert_eq!(js(&mut b, "var a = document.getElementById('a').attributes; [a[0].name, a[1].name, String(a[2])].join()"), "id,class,undefined");
+    });
+}
+
+#[test]
+fn class_list_index_survives_gc_of_detached_element() {
+    big(|| {
+        let mut b = at(PAGE);
+        js(&mut b, "var keep = (function(){ var e = document.createElement('section'); e.className = 'one two'; return e.classList; })();");
+        b.collect(&[]).unwrap();
+        assert_eq!(js(&mut b, "[keep[1], keep[0], String(keep[2]), Object.keys(keep).length].join()"), "two,one,undefined,2");
+        js(&mut b, "keep = null");
+        b.collect(&[]).unwrap();
+    });
+}
+
+#[test]
+fn rel_list_indexes_are_live() {
+    big(|| {
+        let mut b = at("<html><head><link id=k rel='preload  stylesheet preload'></head><body><a id=a rel='noopener x'></a></body></html>");
+        assert_eq!(js(&mut b, "var r = document.getElementById('k').relList; [r[0], r[1], String(r[2]), Object.keys(r).join()].join('|')"), "preload|stylesheet|undefined|0,1");
+        assert_eq!(js(&mut b, "document.getElementById('k').rel = 'icon'; [r[0], String(r[1]), r.length].join('|')"), "icon|undefined|1");
+        assert_eq!(js(&mut b, "var x = document.getElementById('a').relList; [x[0], x[1], x.item(1), 1 in x].join()"), "noopener,x,x,true");
+    });
+}
+
+#[test]
 fn class_list_iteration() {
     big(|| {
         let mut b = at(PAGE);

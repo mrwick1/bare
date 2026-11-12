@@ -1760,3 +1760,12 @@ A focused element inside an editing host now takes key input. Text, Enter, Backs
 - The tree builder now has the "in select" mode (classic rules, HTML 13.2.6.4.16). A fragment with a `select` context starts in it.
 - The rules follow html5ever (`tree_builder/rules.rs`, MIT OR Apache-2.0) and Ladybird (`HTMLParser::handle_in_select`, BSD-2-Clause). `option`, `optgroup`, `hr`, text, comments, `script` and `template` stay. Other tags, such as `div` and `td`, are dropped. Their text stays.
 - A page still reads a `select` element as "in body". The page mode needs a `select` in scope and the reset of the mode, so it is not built.
+
+## `DOMTokenList` has indexed access (2026-11-12)
+
+- Closure Library reads `classList[i]` to find a decorator. A web mail app's tab bar was empty, because `classList[0]` was `undefined` (bare issue #427).
+- `classList` and `relList` are host-indexed objects (`Heap::new_indexed`), as `NodeList` and `NamedNodeMap` are. `list[i]` is `item(i)`. `i` at or past `length` is absent. `in`, `Object.keys`, `slice` and `for..in` see the tokens.
+- The indexes are live. Every read compares the attribute text with the text the cache was made from. A change makes the host refill the cache before the read.
+- The token strings need a value slot in the heap. `Slot::Str` (`crates/js/src/heap_binary.rs`) answers with a string. The list traces its strings, so the collector keeps them.
+- `item` follows Ladybird `DOMTokenList::item` (BSD-2). We wrote our own code and copied no file.
+- Gap: `CSSStyleDeclaration` has no indexed access (`style[0]` is `undefined`; Chrome gives the first property name). `DOMStringList` does not exist in bare. `sandbox` has no `DOMTokenList`.

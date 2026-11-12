@@ -195,6 +195,9 @@ pub enum Slot {
     Absent,
     /// A property whose value is this object.
     Ready(ObjId),
+    /// A property whose value is this string. The host keeps it alive (its roots or trace), so it is still a live heap string
+    /// when this is answered. The host interns it in a fill, never in `indexed_item`.
+    Str(StrId),
     /// A property whose JavaScript object does not exist yet. The heap answers `NeedsHost`; the host makes the object.
     Missing,
 }
@@ -836,6 +839,7 @@ impl Heap {
         let value = match self.source()?.indexed_item(o, i as usize)? {
             Slot::Absent => return Ok(None),
             Slot::Ready(v) => Value::Object(v),
+            Slot::Str(s) => Value::String(s),
             Slot::Missing if want_value => return Err(HeapError::NeedsHost { owner: o, index: i }),
             Slot::Missing => Value::Undefined,
         };

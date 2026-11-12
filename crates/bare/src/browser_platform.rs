@@ -107,12 +107,14 @@ pub(crate) struct PState {
     /// Element and attribute -> its token list (`SameObject`).
     pub by_el: IdMap<(NodeId, &'static str), ObjId>,
     pub iters: IdMap<ObjId, TokIter>,
+    /// The indexes of each token list (`browser_platform_class.rs`): the attribute text they were made from, and the strings.
+    pub toks: IdMap<ObjId, crate::browser_platform_class::Toks>,
     pub halted: Option<Error>,
 }
 
 impl Default for PState {
     fn default() -> Self {
-        PState { viewport: (1280.0, 800.0), mql: IdMap::default(), seq: 0, lists: IdMap::default(), by_el: IdMap::default(), iters: IdMap::default(), halted: None }
+        PState { viewport: (1280.0, 800.0), mql: IdMap::default(), seq: 0, lists: IdMap::default(), by_el: IdMap::default(), iters: IdMap::default(), toks: IdMap::default(), halted: None }
     }
 }
 
@@ -155,6 +157,7 @@ pub(crate) fn trace(d: &Dom, owner: ObjId, out: &mut Vec<Value>) {
     let s = d.plat.s.borrow();
     if let Some(&el) = s.lists.get(&owner) {
         out.extend(d.st.borrow().by_node.get(&el.0).map(|&o| Value::Object(o)));
+        out.extend(s.toks.get(&owner).into_iter().flat_map(|t| t.vals.iter().map(|&v| Value::String(v))));
     } else if let Some(i) = s.iters.get(&owner) {
         out.push(Value::Object(i.list));
     } else if !s.by_el.is_empty()
@@ -171,6 +174,7 @@ pub(crate) fn prune(d: &Dom, live: &dyn Fn(ObjId) -> bool) {
     let s = &mut *s;
     s.mql.retain(|&o, _| live(o));
     s.lists.retain(|&o, _| live(o));
+    s.toks.retain(|&o, _| live(o));
     s.iters.retain(|&o, _| live(o));
     let lists = &s.lists;
     s.by_el.retain(|_, o| lists.contains_key(o));
