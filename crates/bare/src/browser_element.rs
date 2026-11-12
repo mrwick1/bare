@@ -192,14 +192,10 @@ struct Offset {
     left: i32,
 }
 
-/// The only box fragment of `n`. `None`: it has none. A gate: it has more than one (an inline box over lines), so "the first box" is not known.
-fn one_box(layout: &bare_layout::fragment::Layout, n: NodeId) -> R<Option<bare_layout::fragment::Rect>> {
-    let mut boxes = layout.fragments.iter().filter(|f| f.node == n && f.kind == bare_layout::fragment::Kind::Box);
-    let first = boxes.next().map(|f| f.rect);
-    if boxes.next().is_some() {
-        return Err(Dom::gate("offsetTop and offsetLeft of an element with more than one box"));
-    }
-    Ok(first)
+/// The first box fragment of `n`. `None`: it has none. An inline box over lines has one fragment for each line. Layout writes the
+/// lines in order, so the first fragment is the first line, as for `getClientRects`.
+fn first_fragment(layout: &bare_layout::fragment::Layout, n: NodeId) -> Option<bare_layout::fragment::Rect> {
+    layout.fragments.iter().find(|f| f.node == n && f.kind == bare_layout::fragment::Kind::Box).map(|f| f.rect)
 }
 
 /// What `offsetTop` and `offsetLeft` measure from: the first box of an element.
@@ -212,7 +208,7 @@ enum First {
 
 /// The first box of `n`, in layout coordinates.
 fn first_box(d: &Dom, it: &mut Interp<'_>, styles: &bare_css::cascade::Styles, layout: &bare_layout::fragment::Layout, n: NodeId) -> R<First> {
-    if let Some(r) = one_box(layout, n)? {
+    if let Some(r) = first_fragment(layout, n) {
         return Ok(First::Box(r));
     }
     // Layout makes no fragment for an inline box with no background and no border ("culled"): that is not "no box". Its first rectangle

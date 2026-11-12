@@ -1507,3 +1507,12 @@ The cascade cache and the partial restyle no longer skip pages with custom eleme
 `set_custom_state` and `set_states` move `revision` and mark the tree, so the kept cascade stays correct.
 On GitHub issues, full cascades for each layout or style read took 83 % of the CPU.
 The shared layout of reads drops the same check.
+
+## offsetTop of an inline box over more than one line, and no spin in settle (2026-11-12)
+
+GitHub read `offsetTop` of an inline box with a border over two lines, and the read stopped the issues page.
+
+- The gate said that "the first box" of such an element is not known. That reason does not hold. Inline layout writes the fragments of a box line by line, in order. `getClientRects` already gives them in that order.
+- `offsetTop` and `offsetLeft` now use the first fragment of the element. CSSOM View asks for the border edge of the first box. An offset parent over more than one line uses its first fragment too.
+- This replaces the last line of "offsetTop of an inline box with nothing to paint": that gate is gone.
+- `snap::settle` waited up to 2 s for an open `fetch` on a stopped page. `tick` gives no next time then, so the loop spun at full CPU. It now sleeps 5 ms between ticks. The wait limit stays 2 s. A test measured 1.996 s of CPU in 2.000 s before and almost none after.
