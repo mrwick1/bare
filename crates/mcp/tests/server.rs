@@ -2007,3 +2007,44 @@ fn eval_runs_the_microtasks_of_its_script_at_once() {
     assert!(error && r.as_str().unwrap().contains("rejected") && r.as_str().unwrap().contains("boom"), "{r}");
     assert!(t.elapsed().as_millis() < 1000);
 }
+
+/// A list page with a client-side router, as GitHub has it: a click on a title hands the navigation to the router with a hidden link
+/// and `click()`. The router cancels that click, calls `checkVisibility` (the sheet has `display: contents`), fetches the data and
+/// moves with `pushState`.
+fn router_pages(_: &str, target: &str, _: &str, _: Option<&str>) -> (u16, &'static str, Vec<u8>) {
+    const LIST: &str = "<!doctype html><title>Issues</title><style>.wrap { display: contents }</style>\
+<div class=wrap><h3><a href='/issues/7' tabindex='-1'><span>Issue seven</span></a></h3></div><div id=bar></div><script>\
+document.addEventListener('click', function (e) {\
+  var a = e.target.closest('a'); if (!a || a.hidden) return; e.preventDefault();\
+  var h = document.createElement('a'); h.href = a.getAttribute('href'); h.hidden = true; document.body.appendChild(h); h.click(); h.remove();\
+});\
+document.addEventListener('click', function (e) {\
+  var a = e.target.closest('a'); if (!a || !a.hidden) return; e.preventDefault();\
+  document.getElementById('bar').checkVisibility();\
+  var to = a.getAttribute('href');\
+  fetch(to + '.json').then(function (r) { return r.json() }).then(function (d) {\
+    history.pushState({}, '', to); document.title = d.title; document.body.innerHTML = '<h1>' + d.title + '</h1>';\
+  });\
+});</script>";
+    match target {
+        "/" => (200, "text/html", LIST.as_bytes().to_vec()),
+        "/issues/7.json" => (200, "application/json", br#"{"title":"Issue seven is open"}"#.to_vec()),
+        _ => (404, "text/plain", b"no".to_vec()),
+    }
+}
+
+#[test]
+fn a_click_that_a_router_hands_to_a_hidden_link_moves_with_push_state() {
+    let base = common::serve_route(router_pages);
+    let mut s = Server::start();
+    let (r, error) = s.tool("open", json!({"url": format!("{base}/"), "snapshot": false, "timeout_ms": 20000}));
+    assert!(!error, "{r}");
+    let (r, _) = s.tool("find", json!({"role": "link", "name": "Issue seven"}));
+    let r = r.as_str().unwrap();
+    let rf = r.split("[").nth(1).and_then(|x| x.split(']').next()).unwrap_or_else(|| panic!("no ref in {r}")).to_string();
+    let (r, error) = s.tool("act", json!({"op": "click", "ref": rf}));
+    let r = r.as_str().unwrap();
+    assert!(!error && r.contains(&format!("{base}/issues/7")) && r.contains("heading \"Issue seven is open\""), "{r}");
+    let (u, _) = s.tool("eval", json!({"js": "location.pathname"}));
+    assert_eq!(u, json!("/issues/7"));
+}

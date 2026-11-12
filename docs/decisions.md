@@ -1586,3 +1586,11 @@ Pages build a Response from a stream, e.g. `new Response(stream.pipeThrough(new 
 - `Page::work` now counts queued promise jobs as work for now.
 - The next tick runs the microtask checkpoint, so such an eval gives its value in under 1 ms.
 - The eval loop needs no timer for this.
+## HTMLElement.click() follows a link, and checkVisibility reads the rules (2026-11-12)
+
+A click on a GitHub issue title did not navigate. GitHub cancels the click and calls `click()` on a hidden link, so its router can take the visit. Turbo then calls `checkVisibility()` on its progress bar.
+
+- `click()` on a link sent the gate "the default action is built for the window only". The gate stopped the page script, so nothing navigated.
+- `click()` on an `a` with `href` now follows the link after a click that no listener canceled. It uses the same code as a window click (`follow_link`). `area` stays gated.
+- `checkVisibility()` was a gate on any page with `display: contents` in a sheet. GitHub has such rules, so every call failed.
+- Now the gate holds only when a rule can reach the element: `display: contents` on the element, or `content-visibility` on an ancestor. The rules and their selectors are found once for each rule set.
