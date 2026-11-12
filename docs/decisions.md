@@ -1537,3 +1537,11 @@ An agent gets the URL of a named link in one small call, not with `eval`.
 - `pipeTo` reads an error of the source only when it reads, because the host reader has no `closed` promise.
 - An abort of the writable side of a `TransformStream` errors its readable side at once. This is the older text of the standard. `transformer.cancel` runs.
 - `tee` and async iteration stay gated.
+
+## eval takes return and await without a retry (2026-11-12)
+
+- Code without the word `await` runs as a script inside a block: `{code\n}`. It gives the value of its last statement, like a console.
+- The block makes `let` and `const` last one call. The same declaration runs again in a later call. A value for later goes in `window.x`.
+- A top-level `return` fails the parse of the block. Only then does the code run as an async function body. A failed parse runs nothing, so the code runs once.
+- Code with `await` runs as an async function, as before: first as an expression, then as statements. It never runs as a script, because `await (x)` is a call there.
+- Each wrapper starts on the first line of the code. A syntax error parses the code once more and names its line. Plain code and an expression with `await` parse once. A top-level `return` or statements with `await` first fail one parse.

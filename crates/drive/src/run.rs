@@ -332,29 +332,41 @@ impl Session {
     }
 
     /// Run a script in the page and give its value as text: an object as compact JSON of at most `EVAL_MAX` characters (`Browser::inspect`). A Promise is awaited up to the time limit.
-    /// Code with a top-level `await` runs as an async function: an expression gives its value, statements need a `return`.
+    /// Code runs as a script in a block, so it gives the value of its last statement and its `let` and `const` last one call.
+    /// Code with a top-level `await` or `return` runs as an async function: an expression gives its value, statements need a `return`.
+    /// A syntax error names its line. Each wrapper starts on the first line of the code, so the lines stay the lines of the agent.
     pub fn eval(&mut self, code: String) -> Result<String, String> {
         let limit = self.timeout;
         self.with_refs(move |p, _| {
             let _ = p.wait_load(Duration::from_secs(10));
             let b = p.browser().ok_or("no document")?;
-            let mut r = None;
-            if has_await(&code) {
-                // The expression form first: a parse error leaves the code unrun.
-                for src in [format!("(async () => {{ return (\n{code}\n) }})()"), format!("(async () => {{\n{code}\n}})()")] {
-                    r = Some(b.run_script(&src));
-                    if r.as_ref().is_some_and(|r| r.is_ok()) {
-                        break;
-                    }
-                }
+            // The forms to try in order. A form that does not parse runs nothing, so the next form runs the code once.
+            // The `\n` before each closing brace ends a `//` comment on the last line.
+            let block = format!("{{{code}\n}}");
+            let expr = format!("(async () => {{ return ({code}\n) }})()");
+            let body = format!("(async () => {{{code}\n}})()");
+            // `await` is a plain name in a script, so `await (x)` would run as a call: code with the word never runs as a script.
+            let wait = has_await(&code);
+            let forms = if wait { [expr, body] } else { [block, body] };
+            // Parse again only after a failure: the engine's error value has no line. A runtime error parses, so it gives `None`.
+            let syntax = |src: &str| bare_js::parse::parse_script(src, Default::default()).err();
+            let mut src = &forms[0];
+            let mut r = b.run_script(src);
+            // The expression form fails to parse for statements with `await`: that needs no second look.
+            let mut bad = if r.is_err() && !wait { syntax(src) } else { None };
+            // A script goes on to the async form only for a top-level `return`.
+            if r.is_err() && (wait || bad.is_some_and(|e| e.msg == "'return' outside of a function")) {
+                src = &forms[1];
+                r = b.run_script(src);
+                bad = if r.is_err() { syntax(src) } else { None };
             }
-            let r = r.unwrap_or_else(|| b.run_script(&code));
             p.touched();
             let v = match r {
                 Ok(v) => v,
                 Err(e) => {
                     let m = thrown(p.browser().expect("checked"), &e);
-                    return Err(format!("the script threw: {m}"));
+                    let line = bad.map(|e| format!(" (line {})", e.location(src).line)).unwrap_or_default();
+                    return Err(format!("the script threw: {m}{line}"));
                 }
             };
             let end = Instant::now() + limit;

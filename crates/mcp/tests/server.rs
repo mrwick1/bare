@@ -1336,6 +1336,47 @@ fn eval_waits_for_a_promise_and_runs_top_level_await() {
     assert!(error && r.as_str().unwrap().contains("pending"), "{r}");
 }
 
+#[test]
+fn eval_takes_expressions_statements_return_and_await_alike() {
+    let base = common::serve_route(eval_pages);
+    let mut s = Server::start();
+    let (r, error) = s.tool("open", json!({"url": format!("{base}/"), "timeout_ms": 1500}));
+    assert!(!error, "{r}");
+    let cases = [
+        // An expression gives its value.
+        ("document.title", json!("eval")),
+        // Statements with a return, with or without await.
+        ("const a = 1; return a + 1", json!(2)),
+        ("return document.title", json!("eval")),
+        ("const r = await fetch('/report.csv'); return r.status", json!(200)),
+        // An expression with await.
+        ("await (await fetch('/report.csv')).text()", json!("a,b\n1,2\n")),
+        // Statements without a return give the value of the last one, like a console.
+        ("let x = 1; x++; x", json!(2)),
+        ("let y = 1; y++", json!(1)),
+        // A return inside a function is not a top-level return.
+        ("let z = [1, 2].map(function (i) { return i * 2 }); z.join()", json!("2,4")),
+        // A comment at the end does not hide the end of the wrapper.
+        ("1 + 1 // two", json!(2)),
+        ("const c = 3; return c // three", json!(3)),
+    ];
+    for (js, want) in cases {
+        assert_eq!(s.tool("eval", json!({"js": js})), (want, false), "{js}");
+    }
+    // let and const last one call: the same declaration runs again; window keeps a value.
+    for _ in 0..2 {
+        assert_eq!(s.tool("eval", json!({"js": "const k = 5; window.kept = k; k"})), (json!(5), false));
+        assert_eq!(s.tool("eval", json!({"js": "const k = 6; return k"})), (json!(6), false));
+    }
+    assert_eq!(s.tool("eval", json!({"js": "typeof k + ' ' + kept"})), (json!("undefined 5"), false));
+    // A real syntax error names the error and its line, in each form.
+    for js in ["let a = 1;\nlet = = 2", "let a = 1;\nreturn = = 2", "await 1;\nlet = = 2"] {
+        let (r, error) = s.tool("eval", json!({"js": js}));
+        let r = r.as_str().unwrap().to_string();
+        assert!(error && r.contains("SyntaxError") && r.contains("line 2"), "{js}: {r}");
+    }
+}
+
 fn eval_json_pages(_: &str, _: &str, _: &str, _: Option<&str>) -> (u16, &'static str, Vec<u8>) {
     (200, "text/html", b"<!doctype html><title>eval</title><div id=out class='a b'>x</div><p>one</p><p>two</p>".to_vec())
 }
