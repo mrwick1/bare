@@ -259,6 +259,26 @@ fn save_state_writes_a_private_file_and_open_restores_a_name() {
     assert!(error && rep.as_str().unwrap().contains("nope"), "{rep}");
 }
 
+#[test]
+fn open_reads_a_named_session_from_its_file_in_a_new_server() {
+    let file = state_file("openfile");
+    let mut s = Server::start();
+    let mut args = ensure_args("f", "openfile");
+    args["file"] = json!(file.to_str().unwrap());
+    let (rep, _) = s.tool("ensure_session", args.clone());
+    assert_eq!(rep["session"], "created", "{rep}");
+    drop(s);
+    // A new server has no session in memory: `open` reads it from `file`.
+    let mut s = Server::start();
+    let (rep, error) = s.tool("open", json!({"url": args["url"], "vars": args["vars"], "state": "f", "file": file.to_str().unwrap(), "report": true}));
+    assert!(!error && rep["ok"] == true, "{rep}");
+    let (rep, _) = s.tool("step", json!({"steps": CHECK}));
+    assert_eq!(rep["ok"], true, "{rep}");
+    // No file and no session in memory: still an error that names the session.
+    let (rep, error) = s.tool("open", json!({"url": args["url"], "state": "g", "file": "/nonexistent/state.json"}));
+    assert!(error && rep.as_str().unwrap().contains("g"), "{rep}");
+}
+
 /// A picture of the page right after `open` must show the page: the same picture as a run that waits for the page with `expect`.
 #[test]
 fn a_shot_right_after_open_shows_the_loaded_page() {
