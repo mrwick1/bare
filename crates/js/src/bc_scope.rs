@@ -384,6 +384,9 @@ impl<'p> Interp<'p> {
                 match f.body {
                     Body::Block(l) => prog.list(l).for_each(|s| self.sw_stmt(&mut w, s)),
                     Body::Expr(e) => self.sw_expr(&mut w, e),
+                    Body::Lazy(_) => {
+                        w.bad.get_or_insert(scope);
+                    }
                 }
             }
         }
@@ -407,7 +410,8 @@ impl<'p> Interp<'p> {
     fn sw_func(&self, w: &mut ScopeWalk, fid: FuncId) {
         let i = w.next;
         match self.sc_all.get(i as usize) {
-            Some(sc) if same_kind(sc.kind, RKind::Fn(fid, false)) && sc.parent == w.cur => {}
+            // A lazy function has no scope in `sc_all` yet.
+            Some(sc) if same_kind(sc.kind, RKind::Fn(fid, false)) && sc.parent == w.cur && !matches!(self.prog.func(fid).body, Body::Lazy(_)) => {}
             _ => {
                 w.bad.get_or_insert(i);
             }

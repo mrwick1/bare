@@ -554,6 +554,11 @@ pub struct Interp<'p> {
     hs: Box<HScope>,
     script_source: usize,
     script_nodes: usize,
+    /// The lazy functions of the current script (`Body::Lazy`), and how many scripts of `scripts` are the trees of lazy functions (they
+    /// do not count toward `max_scripts`). `lazy_work`: nodes that the second parses made, with the nodes that they dropped (bounded by `max_script_nodes`).
+    lazy: Vec<LazySlot>,
+    n_lazy: usize,
+    lazy_work: usize,
     /// Classic scripts by the hash of their text, so the same text keeps one slot (`add_script_kind`). One slot for each bucket
     /// (id + 1, 0 is empty); a text that lands on a used bucket takes it over. Allocated at the first script.
     script_ids: Vec<u32>,
@@ -761,6 +766,9 @@ impl<'p> Interp<'p> {
             hs: Box::default(),
             script_source: prog.source.len(),
             script_nodes: stats.nodes() + stats.list_items,
+            lazy: vec![LazySlot::default(); stats.lazies],
+            n_lazy: 0,
+            lazy_work: 0,
             script_ids: Vec::new(),
             _p: PhantomData,
             strict: prog.strict,
@@ -876,11 +884,11 @@ impl<'p> Interp<'p> {
 
     pub fn stats(&self) -> EvalStats {
         use std::mem::size_of;
-        let ast_bytes = self.scripts.iter().map(|c| c.prog.stats().bytes + c.prog.source.len()).sum();
+        let ast_bytes = self.scripts.iter().map(|c| c.prog.stats().bytes + if c.prog.lazy_tree { 0 } else { c.prog.source.len() }).sum();
         let script_cache_bytes = self.scripts.iter().map(|c| c.cache_bytes()).sum();
         let env_bytes = self.envs.capacity() * size_of::<Env>() + self.envs.iter().map(|e| e.bindings.capacity() * size_of::<Binding>() + e.index.as_ref().map_or(0, |m| m.capacity() * 9)).sum::<usize>();
         let func_bytes = self.funcs.bytes();
-        EvalStats { steps: self.steps, live_envs: self.live_envs, env_slots: self.envs.len(), functions: self.funcs.len(), scripts: self.scripts.len(), script_source: self.script_source, script_nodes: self.script_nodes, ast_bytes, script_cache_bytes, env_bytes, func_bytes }
+        EvalStats { steps: self.steps, live_envs: self.live_envs, env_slots: self.envs.len(), functions: self.funcs.len(), scripts: self.scripts.len() - self.n_lazy, script_source: self.script_source, script_nodes: self.script_nodes, ast_bytes, script_cache_bytes, env_bytes, func_bytes }
     }
 
     /// Run the script once. Returns its completion value (see the module comment). A second call is
@@ -1320,6 +1328,13 @@ impl<'p> Interp<'p> {
         if let Some(n) = f.name {
             self.func_name[fid.index()] = self.name_at(n);
         }
+        if let Body::Lazy(idx) = f.body {
+            // Not walked now. Its first call walks it, in the scope that holds it here. As an inner function it keeps this one out of frame slots.
+            let is_expr = std::mem::take(&mut self.sc_fn_expr);
+            self.lazy[idx as usize] = LazySlot { sc: self.sc_cur, is_expr, ..LazySlot::default() };
+            self.fl |= FL_NOFR;
+            return Ok(());
+        }
         let saved = self.cur_strict;
         self.cur_strict = f.strict;
         let new_cur = if f.kind == FuncKind::Arrow { self.cls.cur } else { self.cls.elem_ctx.take() };
@@ -1340,6 +1355,7 @@ impl<'p> Interp<'p> {
                     self.w_stmt(s, me, args_scope, false)?;
                 }
             }
+            Body::Lazy(_) => {}
             Body::Expr(e) => self.w_expr(e, me, args_scope)?,
         }
         self.sc_end(sc);
@@ -2221,9 +2237,15 @@ impl<'p> Interp<'p> {
         r
     }
 
-    fn call_script(&mut self, (script, fid): (u32, FuncId), fobj: ObjId, cenv: u32, self_binding: bool, this: Value, args: &[Value]) -> Res<Value> {
+    fn call_script(&mut self, (mut script, mut fid): (u32, FuncId), fobj: ObjId, cenv: u32, self_binding: bool, this: Value, args: &[Value]) -> Res<Value> {
         let new = std::mem::take(&mut self.stk.new);
-        let mode = self.func_of(script, fid).mode;
+        let mut f = self.func_of(script, fid);
+        if let Body::Lazy(idx) = f.body {
+            // The first call of a function that the parser checked and did not keep: its own tree and script slot run in its place.
+            (script, fid) = self.lazy_resolve(script, idx, fobj)?;
+            f = self.func_of(script, fid);
+        }
+        let mode = f.mode;
         match mode {
             FuncMode::Plain | FuncMode::Env => {}
             FuncMode::Async => return self.call_async((script, fid), fobj, cenv, self_binding, this, args),
@@ -2338,6 +2360,7 @@ impl<'p> Interp<'p> {
                     Err(_) => Err(unsupported("stray break or continue", f.span)),
                 }
             }
+            Body::Lazy(_) => Err(unsupported("lazy function body", f.span)),
         }
     }
 
@@ -3969,6 +3992,10 @@ mod interop_tests;
 #[cfg(test)]
 #[path = "eval_async_tests.rs"]
 mod async_tests;
+
+#[cfg(test)]
+#[path = "eval_lazy_tests.rs"]
+mod lazy_tests;
 
 #[cfg(test)]
 #[path = "eval_generator_tests.rs"]

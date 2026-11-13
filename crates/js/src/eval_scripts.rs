@@ -56,6 +56,19 @@ struct Code {
     /// Class walk flags (see `eval_classes.rs`): per function and per class of this script.
     fflags: Vec<u8>,
     cflags: Vec<u8>,
+    /// The lazy functions of the program (`Body::Lazy`), by index.
+    lazy: Vec<LazySlot>,
+}
+
+/// A function whose body the parser did not keep (`Body::Lazy`), in one realm.
+#[derive(Clone, Copy, Default)]
+struct LazySlot {
+    /// The scope that holds the function (the first walk's `sc_cur` at its stub).
+    sc: u32,
+    /// The slot of the script that holds the tree of the function, plus 1 (0: not parsed in this realm yet), and its function.
+    script: u32,
+    fid: u32,
+    is_expr: bool,
 }
 
 impl Code {
@@ -64,11 +77,11 @@ impl Code {
         use std::mem::size_of;
         (self.expr_name.capacity() + self.pat_name.capacity() + self.stmt_label.capacity() + self.func_name.capacity() + self.slots.sites.len()) * 4
             + self.site_strs.capacity() * size_of::<StrId>() + self.prop_str.capacity() * size_of::<Option<StrId>>()
-            + self.scopes.capacity() * size_of::<FScope>() + self.fflags.capacity() + self.cflags.capacity()
+            + self.scopes.capacity() * size_of::<FScope>() + self.fflags.capacity() + self.cflags.capacity() + self.lazy.capacity() * size_of::<LazySlot>()
     }
 
     fn placeholder(prog: &Rc<Program<'static>>) -> Code {
-        Code { prog: prog.clone(), expr_name: Vec::new(), pat_name: Vec::new(), stmt_label: Vec::new(), func_name: Vec::new(), site_strs: Vec::new(), prop_str: Vec::new(), scopes: Vec::new(), slots: Slots::default(), fflags: Vec::new(), cflags: Vec::new() }
+        Code { prog: prog.clone(), expr_name: Vec::new(), pat_name: Vec::new(), stmt_label: Vec::new(), func_name: Vec::new(), site_strs: Vec::new(), prop_str: Vec::new(), scopes: Vec::new(), slots: Slots::default(), fflags: Vec::new(), cflags: Vec::new(), lazy: Vec::new() }
     }
 
     /// Empty caches sized for the tree.
@@ -85,6 +98,7 @@ impl Code {
             slots: Slots::new(&st),
             fflags: vec![0; st.funcs],
             cflags: vec![0; st.classes],
+            lazy: vec![LazySlot::default(); st.lazies],
             prog,
         }
     }
@@ -128,7 +142,7 @@ impl<'p> Interp<'p> {
         if self.depth != 0 {
             return Err(unsupported("run_script during a call", Span::default()));
         }
-        let id = self.add_script(source)?;
+        let id = self.add_script_kind(source, crate::parse_cache::Kind::ClassicLazy)?;
         self.exec_script(id)
     }
 
@@ -138,13 +152,13 @@ impl<'p> Interp<'p> {
     }
 
     fn add_script_kind(&mut self, source: &str, kind: crate::parse_cache::Kind) -> Res<usize> {
-        if self.scripts.len() >= self.limits.max_scripts {
+        if self.scripts.len() - self.n_lazy >= self.limits.max_scripts {
             return Err(Error::Limit(LimitKind::Scripts));
         }
         // The same classic text keeps one slot: its code and caches do not depend on how often it runs, and a new run only
         // instantiates it again. Each run still makes its own functions and checks its own declarations. A harness that
         // polls with one text (`expect js`) would otherwise fill `max_scripts`. A full realm refuses first, so a refusal costs no lookup.
-        let key = (kind == crate::parse_cache::Kind::Classic).then(|| (script_hash(source.as_bytes()) >> (64 - SCRIPT_IDS_BITS)) as usize);
+        let key = kind.is_classic().then(|| (script_hash(source.as_bytes()) >> (64 - SCRIPT_IDS_BITS)) as usize);
         if let Some(k) = key {
             if let Some(&id) = self.script_ids.get(k).filter(|&&id| id != 0) {
                 let id = id as usize - 1;
@@ -163,16 +177,7 @@ impl<'p> Interp<'p> {
         let pl = crate::parse::Limits { max_source: per_script_source, max_nodes: node_room.min(u32::MAX as usize) as u32, ..Default::default() };
         let parsed = match crate::parse_cache::parse(kind, source, pl) {
             Ok(p) => p,
-            Err(e) => {
-                use crate::parse::{ErrorKind as K, LimitKind as L};
-                return Err(match e.kind {
-                    K::Limit(L::Source) => Error::Limit(LimitKind::ScriptSource),
-                    K::Limit(L::Nodes | L::List) => Error::Limit(LimitKind::ScriptNodes),
-                    K::Limit(L::Depth) => Error::Limit(LimitKind::TraversalDepth),
-                    K::Unsupported => unsupported(e.msg, Span { start: e.start, end: e.end }),
-                    _ => self.mk_err(4, e.msg),
-                });
-            }
+            Err(e) => return Err(self.parse_error(e)),
         };
         let st = parsed.stats();
         let nodes = st.nodes() + st.list_items;
@@ -205,6 +210,103 @@ impl<'p> Interp<'p> {
             self.script_ids[k] = id as u32 + 1;
         }
         Ok(id)
+    }
+
+    /// The error of a failed parse as the realm reports it.
+    fn parse_error(&mut self, e: crate::parse::Error) -> Error {
+        use crate::parse::{ErrorKind as K, LimitKind as L};
+        match e.kind {
+            K::Limit(L::Source) => Error::Limit(LimitKind::ScriptSource),
+            K::Limit(L::Nodes | L::List) => Error::Limit(LimitKind::ScriptNodes),
+            K::Limit(L::Depth) => Error::Limit(LimitKind::TraversalDepth),
+            K::Unsupported => unsupported(e.msg, Span { start: e.start, end: e.end }),
+            _ => self.mk_err(4, e.msg),
+        }
+    }
+
+    // ------------------------------------------------------------ lazy functions
+    //
+    // The parser checks a function body (`parse.rs`, `Body::Lazy`) and drops its nodes. The first walk of the script does not walk such a function: it
+    // keeps the scope that holds it in a `LazySlot`. The first call of the function (any closure of it) parses it again, with its parameters, into a tree
+    // of its own. That tree is shared by every realm of the thread through the program that holds the function. Here it becomes one more
+    // script slot, and its function is walked once, as the first walk would have walked it: in the scope that the slot kept. The function objects of
+    // the realm then point at that slot and function (`lazy_resolve`). The scope chain crosses scripts at this place only. Names of the outer
+    // scopes are found before the walk, while the outer script is the current one.
+
+    fn lazy_slot(&self, script: u32, idx: u32) -> LazySlot {
+        if script as usize == self.cur { self.lazy[idx as usize] } else { self.scripts[script as usize].lazy[idx as usize] }
+    }
+
+    /// The first call, in this realm, of the function that the lazy body `idx` of script `script` belongs to: its script slot and function.
+    /// The function object `fobj` points at them from now on.
+    #[cold]
+    #[inline(never)]
+    fn lazy_resolve(&mut self, script: u32, idx: u32, fobj: ObjId) -> Res<(u32, FuncId)> {
+        let s = self.lazy_slot(script, idx);
+        let (sub, fid) = if s.script != 0 { (s.script - 1, FuncId::from_index(s.fid as usize)) } else { self.lazy_load(script, idx, s)? };
+        if let Some(Callee::Script { script: cs, fid: cf, .. }) = self.funcs.get_mut(&fobj) {
+            (*cs, *cf) = (sub, fid);
+        }
+        Ok((sub, fid))
+    }
+
+    fn lazy_load(&mut self, script: u32, idx: u32, s: LazySlot) -> Res<(u32, FuncId)> {
+        let prog = if script as usize == self.cur { self.prog.clone() } else { self.scripts[script as usize].prog.clone() };
+        let node_room = self.limits.max_script_nodes.saturating_sub(self.script_nodes);
+        let work_room = self.limits.max_script_nodes.saturating_sub(self.lazy_work);
+        let pl = crate::parse::Limits { max_nodes: node_room.min(work_room).min(u32::MAX as usize) as u32, ..Default::default() };
+        let (tree, fid, used) = prog.lazy_function(idx, pl).map_err(|e| self.parse_error(e))?;
+        let st = tree.stats();
+        let nodes = st.nodes() + st.list_items;
+        if nodes > node_room {
+            return Err(Error::Limit(LimitKind::ScriptNodes));
+        }
+        if let Some(n) = used {
+            self.lazy_work += n as usize;
+        }
+        // The names of the scopes around the function, as they are before the walk: they belong to the script that holds the function.
+        self.in_script(script, |it| {
+            let mut sc = s.sc;
+            while sc != NONE {
+                it.sc_declares(sc, 0);
+                sc = it.sc_all[sc as usize].parent;
+            }
+            Ok(())
+        })?;
+        let (id, old, sc_mark) = (self.scripts.len(), self.cur, self.sc_all.len());
+        self.scripts.push(Code::new(tree));
+        self.n_lazy += 1;
+        self.select(id);
+        let r = self.in_call(|it| it.lazy_walk(s, fid));
+        self.select(old);
+        if let Err(e) = r {
+            self.scripts.pop();
+            self.n_lazy -= 1;
+            self.ext.lits.retain(|k, _| k.0 as usize != id);
+            self.sc_all.truncate(sc_mark);
+            self.async_forget(id);
+            return Err(e);
+        }
+        self.script_nodes += nodes;
+        let slot = LazySlot { script: id as u32 + 1, fid: fid.index() as u32, ..s };
+        if script as usize == self.cur { self.lazy[idx as usize] = slot } else { self.scripts[script as usize].lazy[idx as usize] = slot }
+        Ok((id as u32, fid))
+    }
+
+    /// Walk the function `fid` of the current script (a lazy function's tree) in scope `s.sc` of the script that holds it, as the walk of that
+    /// script would have.
+    fn lazy_walk(&mut self, s: LazySlot, fid: FuncId) -> Res<()> {
+        let saved = (self.sc_cur, self.sc_fn, self.sc_class, self.sc_fn_expr, self.cls.cur, self.cls.elem_ctx, self.fl, self.cur_strict);
+        self.sc_cur = s.sc;
+        self.sc_fn = self.scopes.len() - 1;
+        self.sc_class = 0;
+        self.sc_fn_expr = s.is_expr;
+        self.cls.cur = None;
+        self.cls.elem_ctx = None;
+        self.fl = 0;
+        let r = self.w_func(fid, usize::MAX);
+        (self.sc_cur, self.sc_fn, self.sc_class, self.sc_fn_expr, self.cls.cur, self.cls.elem_ctx, self.fl, self.cur_strict) = saved;
+        r
     }
 
     /// Run indirect eval in a fresh lexical environment outside the caller.
@@ -328,6 +430,7 @@ impl<'p> Interp<'p> {
         std::mem::swap(&mut self.slots, &mut c.slots);
         std::mem::swap(&mut self.cls.fflags, &mut c.fflags);
         std::mem::swap(&mut self.cls.cflags, &mut c.cflags);
+        std::mem::swap(&mut self.lazy, &mut c.lazy);
         // slot `cur` held the placeholder and slot `id` now holds the old current code: exchange them
         self.scripts.swap(self.cur, id);
         self.cur = id;

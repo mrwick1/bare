@@ -59,7 +59,7 @@ fn show_expr(p: &Program, id: ExprId) -> String {
             let kind = if f.kind == FuncKind::Arrow { "arrow" } else { "fn" };
             let ps: Vec<String> = p.list(f.params).map(|x| show_pat(p, x)).collect();
             format!("({}{} ({}){})", if f.is_async() { "async " } else { "" }, kind, ps.join(" "),
-                match f.body { Body::Expr(b) => format!(" => {}", show_expr(p, b)), Body::Block(_) => " {}".into() })
+                match f.body { Body::Expr(b) => format!(" => {}", show_expr(p, b)), Body::Block(_) | Body::Lazy(_) => " {}".into() })
         }
         _ => format!("<{:?}>", std::mem::discriminant(&e.kind)),
     }

@@ -27,8 +27,10 @@
 
 use crate::lex::{self, Kind, NumberBase, TemplatePart, Token};
 use std::borrow::Cow;
+use std::cell::OnceCell;
 use std::marker::PhantomData;
 use std::num::NonZeroU32;
+use std::rc::Rc;
 
 /// A typed index of a node of type `T`. `Option<Id<T>>` is 4 bytes.
 pub struct Id<T>(NonZeroU32, PhantomData<fn() -> T>);
@@ -358,6 +360,10 @@ pub enum Body {
     Block(List<Stmt>),
     /// The expression of a concise arrow `x => x + 1`.
     Expr(ExprId),
+    /// A block body that the parser checked and did not keep: [`Program::lazy`] with this index says where it is.
+    /// The first call parses the whole function again ([`Program::lazy_function`]) into a tree of its own.
+    /// Only a parse with lazy bodies makes it (`parse_script_lazy`); the evaluator never reads the body of such a node.
+    Lazy(u32),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -570,10 +576,49 @@ pub struct ModuleInfo {
 
 // ---------------------------------------------------------------- program
 
+/// The source text of a [`Program`]: borrowed from the caller, or shared (`Rc`) by a program and the trees of its lazy functions.
+#[derive(Debug, Clone)]
+pub enum Src<'a> {
+    Borrowed(&'a str),
+    Shared(Rc<str>),
+}
+
+impl std::ops::Deref for Src<'_> {
+    type Target = str;
+    fn deref(&self) -> &str {
+        match self {
+            Src::Borrowed(s) => s,
+            Src::Shared(s) => s,
+        }
+    }
+}
+
+impl PartialEq<&str> for Src<'_> {
+    fn eq(&self, o: &&str) -> bool {
+        **self == **o
+    }
+}
+
+/// A function whose body the parser checked and dropped (see [`Body::Lazy`]).
+#[derive(Debug, Clone)]
+pub struct LazyFn {
+    /// The `(` that opens the parameters: the second parse starts here.
+    pub params_at: u32,
+    /// The function name and the start of the function (`Func::span.start`).
+    pub name: Option<Span>,
+    pub start: u32,
+    pub kind: FuncKind,
+    pub mode: FuncMode,
+    /// The code around the function was strict (the function may become strict by a directive of its own).
+    pub strict: bool,
+    /// The tree of the function, made by the first [`Program::lazy_function`]. It is shared by every realm that runs this program.
+    pub(crate) parsed: OnceCell<Rc<Program<'static>>>,
+}
+
 /// A parsed script. Borrows the source (or owns it after [`Program::into_owned`]), owns all nodes.
 #[derive(Debug, Clone)]
 pub struct Program<'a> {
-    pub source: Cow<'a, str>,
+    pub source: Src<'a>,
     pub body: List<Stmt>,
     /// The script starts with a `"use strict"` directive.
     pub strict: bool,
@@ -593,8 +638,14 @@ pub struct Program<'a> {
     pub(crate) catches: Vec<Catch>,
     pub(crate) elems: Vec<ClassElem>,
     pub(crate) lists: Vec<u32>,
-    /// Location marks, made by the first `location` call (16 B per 4 KiB of source).
-    marks: std::cell::OnceCell<Box<[lex::Mark]>>,
+    /// The function bodies that were checked and not kept ([`Body::Lazy`]).
+    pub(crate) lazies: Vec<LazyFn>,
+    /// Parsed with the module goal (also a tree of a function of a module, which has no `module` of its own).
+    pub(crate) module_goal: bool,
+    /// The tree of one lazy function ([`Program::lazy_function`]): its source is the source of the program that holds the function.
+    pub(crate) lazy_tree: bool,
+    /// Location marks, made by the first `location` call (16 B per 4 KiB of source). The trees of the lazy functions share them: they share the source.
+    marks: Rc<OnceCell<Box<[lex::Mark]>>>,
 }
 
 /// How many nodes of each kind a program has, and the bytes they use (capacity not counted).
@@ -616,6 +667,8 @@ pub struct Stats {
     pub catches: usize,
     pub elems: usize,
     pub list_items: usize,
+    /// Function bodies that wait for their first call (not in [`Stats::nodes`]).
+    pub lazies: usize,
     pub bytes: usize,
 }
 
@@ -650,7 +703,7 @@ pub(crate) fn name_in(source: &str, span: Span) -> Cow<'_, str> {
 impl<'a> Program<'a> {
     pub(crate) fn new(source: &'a str) -> Program<'a> {
         Program {
-            source: Cow::Borrowed(source),
+            source: Src::Borrowed(source),
             body: List::new(0, 0),
             strict: false,
             module: None,
@@ -668,6 +721,9 @@ impl<'a> Program<'a> {
             catches: Vec::new(),
             elems: Vec::new(),
             lists: Vec::new(),
+            lazies: Vec::new(),
+            module_goal: false,
+            lazy_tree: false,
             marks: Default::default(),
         }
     }
@@ -675,13 +731,52 @@ impl<'a> Program<'a> {
     /// The same tree with an owned copy of the source. It holds no borrow, so a host can keep it
     /// after the source text is gone. Node ids and spans are unchanged.
     pub fn into_owned(self) -> Program<'static> {
+        let src: Rc<str> = match &self.source {
+            Src::Shared(s) => s.clone(),
+            Src::Borrowed(s) => Rc::from(*s),
+        };
+        self.with_shared_source(src)
+    }
+
+    /// The same tree over the shared source `src` (the same text as the source of this tree: the ids and spans are unchanged).
+    pub(crate) fn with_shared_source(self, src: Rc<str>) -> Program<'static> {
         Program {
-            source: Cow::Owned(self.source.into_owned()),
+            source: Src::Shared(src),
             body: self.body, strict: self.strict, module: self.module, exprs: tight(self.exprs), stmts: tight(self.stmts), pats: tight(self.pats),
             funcs: tight(self.funcs), classes: tight(self.classes), props: tight(self.props), pat_props: tight(self.pat_props),
             templates: tight(self.templates), quasis: tight(self.quasis), decls: tight(self.decls), cases: tight(self.cases),
-            catches: tight(self.catches), elems: tight(self.elems), lists: tight(self.lists), marks: self.marks,
+            catches: tight(self.catches), elems: tight(self.elems), lists: tight(self.lists), lazies: tight(self.lazies), module_goal: self.module_goal, lazy_tree: self.lazy_tree, marks: self.marks,
         }
+    }
+
+    pub(crate) fn share_marks(&mut self, marks: &Rc<OnceCell<Box<[lex::Mark]>>>) {
+        self.marks = marks.clone();
+    }
+
+    /// The tree of the lazy function `idx` ([`Body::Lazy`]): the function with its parameters and body, as the last function of the
+    /// tree. The first call parses it, bounded by `limits`. A tree that an earlier call made is given back as it is. The count is `Some(nodes)`
+    /// of the parse that made the tree now, `None` for a tree that was there.
+    pub fn lazy_function(&self, idx: u32, limits: crate::parse::Limits) -> Result<(Rc<Program<'static>>, FuncId, Option<u32>), crate::parse::Error> {
+        let lz = &self.lazies[idx as usize];
+        let (prog, used) = match lz.parsed.get() {
+            Some(p) => (p.clone(), None),
+            None => {
+                let Src::Shared(src) = &self.source else {
+                    return Err(crate::parse::Error { kind: crate::parse::ErrorKind::Unsupported, msg: "lazy function of an unshared source", start: lz.start, end: lz.start });
+                };
+                let (p, used) = crate::parse::parse_lazy_function(src, &self.marks, self.module_goal, lz, limits)?;
+                let p = Rc::new(p);
+                let _ = lz.parsed.set(p.clone());
+                (p, Some(used))
+            }
+        };
+        let fid = Id::from_index(prog.funcs.len() - 1);
+        Ok((prog, fid, used))
+    }
+
+    /// The lazy function `idx` of this tree ([`Body::Lazy`]).
+    pub fn lazy(&self, idx: u32) -> &LazyFn {
+        &self.lazies[idx as usize]
     }
 
     pub fn expr(&self, id: ExprId) -> &Expr {
@@ -805,11 +900,12 @@ impl<'a> Program<'a> {
             catches: self.catches.len(),
             elems: self.elems.len(),
             list_items: self.lists.len(),
+            lazies: self.lazies.len(),
             bytes: size_of_val(&*self.exprs) + size_of_val(&*self.stmts) + size_of_val(&*self.pats)
                 + size_of_val(&*self.funcs) + size_of_val(&*self.classes) + size_of_val(&*self.props)
                 + size_of_val(&*self.pat_props) + size_of_val(&*self.templates) + size_of_val(&*self.quasis)
                 + size_of_val(&*self.decls) + size_of_val(&*self.cases) + size_of_val(&*self.catches)
-                + size_of_val(&*self.elems) + size_of_val(&*self.lists),
+                + size_of_val(&*self.elems) + size_of_val(&*self.lists) + size_of_val(&*self.lazies),
         }
     }
 }

@@ -386,6 +386,13 @@ impl<'a> Lexer<'a> {
         Ok(Lexer { src, pos: 0, failed: None, html: false })
     }
 
+    /// A lexer over `src` that starts at byte `pos` (a token start): the second parse of a lazy function.
+    pub fn starting_at(src: &'a str, pos: u32) -> Result<Lexer<'a>, Error> {
+        let mut l = Lexer::new(src)?;
+        l.pos = (pos as usize).min(src.len());
+        Ok(l)
+    }
+
     /// Annex B (script goal only): `<!--` starts a comment to the end of the line, and so does `-->` at the start of a line
     /// (after only spaces and comments) or of the source. Off by default.
     pub fn set_html_comments(&mut self, on: bool) {

@@ -161,6 +161,7 @@ impl<'p> Interp<'p> {
                 g.expr(e, r)?;
                 g.emit(Op::Ret, r, 0, 0)?;
             }
+            Body::Lazy(_) => return Err("a function with a lazy body"),
             Body::Block(l) => {
                 if g.it.has_lexical(l) {
                     if fs.flags & bc_scope::BF_SELF_NAME != 0 && g.prog.list(l).any(|s| matches!(g.prog.stmt(s).kind, StmtKind::Function(d) if g.it.func_name[d.index()] == g.it.func_name[fid.index()])) {
