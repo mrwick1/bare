@@ -106,9 +106,9 @@ fn clones_moves_and_collection_keep_the_brand() {
 fn nested_browsing_contexts_are_inert() {
     big(|| {
         let mut b = browser(PAGE);
-        // The named window is inert. Child documents and navigation remain absent.
-        assert_eq!(js(&mut b, "var f = document.getElementById('p'); [typeof f.contentWindow, typeof f.contentDocument, typeof f.src, typeof f.srcdoc, typeof f.sandbox, typeof f.loading, typeof f.getSVGDocument, 'contentWindow' in HTMLIFrameElement.prototype].join()"), "object,object,string,string,undefined,string,undefined,true");
-        assert_eq!(js(&mut b, "Object.getOwnPropertyNames(HTMLIFrameElement.prototype).join()"), "constructor,contentWindow,contentDocument,name,src,srcdoc,allow,width,height,loading,referrerPolicy");
+        // The named window is inert. Child documents and navigation remain absent. `sandbox` is a token list (no enforcement).
+        assert_eq!(js(&mut b, "var f = document.getElementById('p'); [typeof f.contentWindow, typeof f.contentDocument, typeof f.src, typeof f.srcdoc, typeof f.sandbox, typeof f.loading, typeof f.getSVGDocument, 'contentWindow' in HTMLIFrameElement.prototype].join()"), "object,object,string,string,object,string,undefined,true");
+        assert_eq!(js(&mut b, "Object.getOwnPropertyNames(HTMLIFrameElement.prototype).join()"), "constructor,sandbox,contentWindow,contentDocument,name,src,srcdoc,allow,width,height,loading,referrerPolicy");
         assert_eq!(js(&mut b, "typeof window.frames + ',' + typeof window.parent + ',' + typeof window.frameElement"), "object,object,object");
         // attributes stay plain attributes: no reflection, no side effect
         assert_eq!(js(&mut b, "f.setAttribute('src', '/other.html'); f.setAttribute('srcdoc', '<p>x</p>'); [f.getAttribute('src'), f.getAttribute('srcdoc'), f.hasAttribute('name')].join()"), "/other.html,<p>x</p>,false");
