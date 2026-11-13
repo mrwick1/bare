@@ -435,7 +435,7 @@ struct Pending {
     queued: Option<std::time::Instant>,
     /// Its I/O, started on a worker thread before its turn (see `start_queued`). The outcome and the diagnostics. `None`: the job
     /// did not send it (the bodies that wait were at the cap, or the page is gone); the page thread sends it at its turn.
-    started: Option<Task<Option<(Outcome, Vec<String>)>>>,
+    started: Option<Task<Option<(Outcome, Vec<String>, std::time::Instant)>>>,
 }
 
 /// What a worker thread needs to send a queued request. It owns its data: a `Pending` holds values of the realm.
@@ -703,7 +703,7 @@ impl Dom {
                         // Saturating: `usize::MAX` marks a page that is gone (`Drop for Fetch`).
                         let _ = done.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |d| Some(d.saturating_add(body.len())));
                     }
-                    Some((out, diag))
+                    Some((out, diag, std::time::Instant::now()))
                 }));
             }
         }
@@ -2097,7 +2097,7 @@ pub(crate) fn queue_xhr_blob(d: &Dom, x: (ObjId, u64), url: Url, found: Option<(
         None => Outcome::Failed("blob URL not found"),
     };
     st.started += 1;
-    let started = Some(d.fetch.client.borrow().spawn(move |_| Some((out, Vec::new()))));
+    let started = Some(d.fetch.client.borrow().spawn(move |_| Some((out, Vec::new(), std::time::Instant::now()))));
     st.queue.push_back(Pending { promise: Value::Undefined, method: Method::Get, url, headers: Vec::new(), body: None, redirect: Redirect::Follow, cors: Cors::same("XMLHttpRequest"), xhr: Some(x), queued: None, started });
     Ok(())
 }
@@ -2694,7 +2694,8 @@ impl Browser {
                 break;
             };
             n += 1;
-            let (outcome, diag) = bare_net::trace::blocked(|| match task.started.take().map(|t| t.wait()) {
+            // `arrived`: when the reply came, which may be long before this turn (an XHR timeout counts until then).
+            let (outcome, diag, arrived) = bare_net::trace::blocked(|| match task.started.take().map(|t| t.wait()) {
                 Some(Some(Some(out))) => {
                     if let Outcome::Done { body, .. } = &out.0 {
                         dom.fetch.st.borrow().done.fetch_sub(body.len(), Ordering::Relaxed);
@@ -2702,13 +2703,13 @@ impl Browser {
                     out
                 }
                 // A lost worker is a network error.
-                Some(None) => (Outcome::Net("worker lost: the thread of the request ended".into()), Vec::new()),
+                Some(None) => (Outcome::Net("worker lost: the thread of the request ended".into()), Vec::new(), std::time::Instant::now()),
                 Some(Some(None)) | None => {
                     let mut diag = Vec::new();
                     if let Some(t) = task.queued {
                         bare_net::trace::wanted(t);
                     }
-                    (run_one(&mut dom.fetch.client.borrow_mut(), &lim, task.parts(), &mut diag), diag)
+                    (run_one(&mut dom.fetch.client.borrow_mut(), &lim, task.parts(), &mut diag), diag, std::time::Instant::now())
                 }
             });
             {
@@ -2727,7 +2728,7 @@ impl Browser {
                 crate::browser_console::push_text(&dom, &mut self.it, crate::browser_console::ConsoleLevel::Error, text);
             }
             if let Some((x, seq)) = task.xhr {
-                self.xhr_deliver(x, seq, outcome)?;
+                self.xhr_deliver(x, seq, outcome, arrived)?;
                 continue;
             }
             let promise = task.promise;

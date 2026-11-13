@@ -19,8 +19,9 @@
 //! to another origin follows CORS (see `browser_fetch.rs`): `Origin`, a preflight for a non-simple request, the check of the reply, and only the safelisted and the exposed response headers. A refused request fires `error` (status 0). Cookies follow the jar of the client (see `browser_fetch.rs`): `withCredentials` sends them to another origin, and without it only the document origin gets them. A request that has an upload listener gets no preflight for that reason (the standard asks for one).
 //! A response text in a charset other than UTF-8 is `Unsupported` unless every byte is ASCII.
 //!
-//! Deviations: `timeout` is checked when the reply arrives (the blocking I/O cannot be stopped): a reply later than the timeout is a
-//! `timeout`, with no `load`. `statusText` is the standard phrase of the code, not the phrase of the server (the client drops it).
+//! Deviations: `timeout` is checked when the reply is delivered (the blocking I/O cannot be stopped), against the time the reply came:
+//! a reply that came later than the timeout is a `timeout`, with no `load`. A reply that came in time but waited for a busy page is a
+//! `load`. `statusText` is the standard phrase of the code, not the phrase of the server (the client drops it).
 //! The `json` response is parsed at each read (Chrome does the same); `arraybuffer` and `blob` are made once. DOM methods are not
 //! enumerable, as everywhere in this host. Subclassing is not supported.
 //!
@@ -731,14 +732,15 @@ fn response(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
 
 impl Browser {
     /// A reply (or a failure) of the request `(x, seq)` came back from the pump of `fetch`. Fires the events, as the header says.
-    pub(crate) fn xhr_deliver(&mut self, x: ObjId, seq: u64, outcome: Outcome) -> R<()> {
+    /// `arrived`: when the reply came; the timeout counts until then.
+    pub(crate) fn xhr_deliver(&mut self, x: ObjId, seq: u64, outcome: Outcome, arrived: std::time::Instant) -> R<()> {
         let dom = self.dom.clone();
         if !dom.xcurrent(x, seq) {
             return Ok(());
         }
         // A microtask checkpoint follows each listener, as after a task.
         dom.st.borrow_mut().driver = true;
-        let r = self.xhr_steps(&dom, x, seq, outcome);
+        let r = self.xhr_steps(&dom, x, seq, outcome, arrived);
         dom.st.borrow_mut().driver = false;
         r
     }
@@ -750,8 +752,8 @@ impl Browser {
         })
     }
 
-    fn xhr_steps(&mut self, dom: &Rc<Dom>, x: ObjId, seq: u64, outcome: Outcome) -> R<()> {
-        let now = dom.now_ms();
+    fn xhr_steps(&mut self, dom: &Rc<Dom>, x: ObjId, seq: u64, outcome: Outcome, arrived: std::time::Instant) -> R<()> {
+        let now = dom.now_ms() - arrived.elapsed().as_secs_f64() * 1000.0;
         let late = dom.xs(x, |x| x.timeout != 0 && now - x.started >= f64::from(x.timeout));
         let (status, url, headers, body) = match outcome {
             Outcome::TooBig => return Err(dom.lim("fetch-response-body")),

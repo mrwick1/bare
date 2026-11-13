@@ -268,3 +268,18 @@ fn an_xhr_reads_a_blob_url_without_the_network() {
         assert_eq!(srv.recs().len(), 0, "no request reached the server");
     });
 }
+
+/// #462: a live reply that came in time but waited for a busy script is a `load`, not a `timeout`. The timeout counts until the reply
+/// came, not until the page could deliver it.
+#[test]
+fn a_reply_that_came_in_time_but_waited_for_a_busy_page_is_a_load() {
+    big(|| {
+        let srv = server();
+        let mut b = browser(srv.port);
+        b.dom.fetch.live.set(true);
+        js(&mut b, &format!("{PRELUDE}\nvar x = new XMLHttpRequest(); rec(x); done(x); x.timeout = 200; x.open('GET', '/text'); x.send();\
+            var t = Date.now(); while (Date.now() - t < 500) {{}}"));
+        settle(&mut b);
+        assert_eq!(js(&mut b, "x.status + ' ' + out.filter(function (e) { return /^(load|timeout)\\(/.test(e) }).join('|')"), "200 load(5/5!)");
+    });
+}
