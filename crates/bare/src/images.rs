@@ -17,7 +17,7 @@
 //! `4 * width * height` bytes from the header size before it allocates, and a picture over the budget fails.
 
 use crate::page::{Page, Source};
-use bare_html::dom::{Bitmap, Document, NodeData, NodeId};
+use bare_html::dom::{Bitmap, Document, NodeData, NodeId, Pixels};
 use bare_net::http::{Client, Request};
 use bare_net::parallel::Task;
 use bare_url::Url;
@@ -178,13 +178,15 @@ fn load(client: &mut Client, url: &str, used: &AtomicUsize) -> Option<Bitmap> {
     // An SVG file is drawn by the painter of an inline `<svg>`, at its own size.
     if bare_image::kind(&bytes).is_none() {
         let text = std::str::from_utf8(&bytes).ok().filter(|t| t.contains("<svg"))?;
-        let (w, h, px) = bare_paint::svg::bitmap(text)?;
-        let need = px.len() * 4;
+        let (w, h) = bare_paint::svg::bitmap_size(text)?;
+        let need = w as usize * h as usize * 4;
         if used.fetch_add(need, Ordering::Relaxed) + need > BUDGET {
             used.fetch_sub(need, Ordering::Relaxed);
             return None;
         }
-        return Some((w, h, px.into()));
+        // The raster waits for the first read of the pixels: a paint, a capture. The element needs the size only.
+        let text = text.to_string();
+        return Some((w, h, Pixels::lazy(move || bare_paint::svg::bitmap(&text).map_or_else(Vec::new, |b| b.2))));
     }
     let (w, h) = bare_image::size(&bytes).ok()?;
     let need = w as usize * h as usize * 4;
@@ -195,7 +197,7 @@ fn load(client: &mut Client, url: &str, used: &AtomicUsize) -> Option<Bitmap> {
     let i = bare_image::decode(&bytes);
     drop(bytes);
     match i {
-        Ok(i) => Some((i.width, i.height, i.pixels)),
+        Ok(i) => Some((i.width, i.height, i.pixels.into())),
         Err(_) => {
             used.fetch_sub(need, Ordering::Relaxed);
             None
@@ -422,5 +424,20 @@ impl Page {
                 self.images.css_queue.push_back((id, url));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_svg_picture_has_its_size_and_no_raster_until_its_pixels_are_read() {
+        let svg = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"12\"><rect width=\"12\" height=\"12\" fill=\"#f00\"/></svg>";
+        let (w, h, px) = load(&mut Client::new(), &format!("data:image/svg+xml,{svg}"), &AtomicUsize::new(0)).expect("a picture");
+        assert_eq!((w, h, px.is_ready()), (24, 12, false));
+        assert_eq!((px.len(), px[5 * 24 + 3], px[5 * 24 + 20] >> 24, px.is_ready()), (288, 0xffff_0000, 0, true));
+        // A file that is not an SVG picture fails at once, as it did when the raster was made at the load.
+        assert!(load(&mut Client::new(), "data:image/svg+xml,<svg width=\"5000\" height=\"5\"></svg>", &AtomicUsize::new(0)).is_none());
     }
 }

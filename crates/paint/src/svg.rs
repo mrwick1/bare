@@ -674,14 +674,23 @@ fn file_size(doc: &Document, root: NodeId) -> Option<(u32, u32)> {
 /// `<svg>` (see above), at the size of the file. The file is put in a page and painted twice, on white and on black: the difference of
 /// the two gives the alpha of each pixel. `None` for a file that is too long, has no `<svg>` or has a side over `MAX_SIDE`.
 pub fn bitmap(text: &str) -> Option<(u32, u32, Vec<u32>)> {
-    use bare_css::cascade::{Origin, RuleSet, Source, UA_CSS};
+    let (doc, size) = parse_file(text)?;
+    Some((size.0, size.1, raster(doc, size)))
+}
+
+/// `bitmap` without its pixels: the size, and whether the file is one that `bitmap` accepts. The pixels come from `bitmap` when they are read.
+pub fn bitmap_size(text: &str) -> Option<(u32, u32)> {
+    parse_file(text).map(|(_, size)| size)
+}
+
+/// The page of an SVG file, and the size of its picture.
+fn parse_file(text: &str) -> Option<(Document, (u32, u32))> {
     if text.len() > MAX_FILE {
         return None;
     }
     // The XML prolog and the doctype are not HTML: the page starts at the element.
     let svg = &text[text.find("<svg")?..];
-    // One page for both pictures: parse, style, layout and display list are made once. Only the color under the shapes changes.
-    let mut doc = bare_html::tree::parse(&format!("<body style=\"margin:0;font-size:0;line-height:0\">{svg}"));
+    let doc = bare_html::tree::parse(&format!("<body style=\"margin:0;font-size:0;line-height:0\">{svg}"));
     let size = {
         let svg = doc.find_atom("svg")?;
         let mut stack = vec![doc.root()];
@@ -694,6 +703,12 @@ pub fn bitmap(text: &str) -> Option<(u32, u32, Vec<u32>)> {
         };
         file_size(&doc, root)?
     };
+    Some((doc, size))
+}
+
+/// The pixels of the page of an SVG file. One page for both pictures: style, layout and display list are made once. Only the color under the shapes changes.
+fn raster(mut doc: Document, size: (u32, u32)) -> Vec<u32> {
+    use bare_css::cascade::{Origin, RuleSet, Source, UA_CSS};
     let viewport = (size.0 as f32, size.1 as f32);
     let mut rules = RuleSet::new(viewport);
     rules.add(&mut doc, UA_CSS, Origin::UserAgent);
@@ -711,7 +726,7 @@ pub fn bitmap(text: &str) -> Option<(u32, u32, Vec<u32>)> {
     let mut black = crate::canvas::Canvas::new(size.0, size.1);
     painter.list.background = 0xff00_0000;
     painter.draw(&mut black);
-    let px = white
+    white
         .pixels
         .iter()
         .zip(black.pixels.iter())
@@ -723,8 +738,7 @@ pub fn bitmap(text: &str) -> Option<(u32, u32, Vec<u32>)> {
                 a => (a << 24) | ((c(b, 16) * 255 / a).min(255) << 16) | ((c(b, 8) * 255 / a).min(255) << 8) | (c(b, 0) * 255 / a).min(255),
             }
         })
-        .collect();
-    Some((size.0, size.1, px))
+        .collect()
 }
 
 #[cfg(test)]
@@ -739,6 +753,14 @@ mod file_tests {
         assert_eq!(px[5 * 24 + 3], 0xffff_0000);
         // Outside the rectangle nothing is painted.
         assert_eq!(px[5 * 24 + 20] >> 24, 0);
+    }
+
+    #[test]
+    fn the_size_alone_agrees_with_the_bitmap() {
+        for t in ["<svg viewBox=\"0 0 20 10\"><rect width=\"20\" height=\"10\"/></svg>", "<svg width=\"5000\" height=\"5\"></svg>", "<p>no</p>", "<!-- <svg --><p>x</p>", "<svg width=\"3\" height=\"2\"></svg>"] {
+            assert_eq!(super::bitmap_size(t), bitmap(t).map(|b| (b.0, b.1)), "{t}");
+        }
+        assert!(super::bitmap_size(&format!("<svg>{}</svg>", " ".repeat(super::MAX_FILE))).is_none());
     }
 
     #[test]

@@ -8460,3 +8460,56 @@ Two profiles ran on the frozen commit `f6415364` with a symbol build. Reports ar
 Design documents: `docs/design-style.md`, `docs/design-js.md`, and an independent review in `docs/design-review.md`. Main findings: 95% of parsed JS syntax nodes are in functions that never run, about 13% of CSS rule entries ever match, and the sheet scans visit 110 times more nodes than the cascade styles.
 
 Owner decision: build every step in `docs/perf-goal.md` and show a visible improvement against the success criteria there.
+
+## Raster only when pixels are read (2026-11-13)
+
+Step 2 of `docs/perf-goal.md`, lever 1 of `docs/design-review.md`.
+
+### Step 1: what makes pixels in a headless run
+
+- `Page::paint` (headless pixels) has four callers in `bare-drive`: the `shot` step (`run.rs`, after `images_pending`), the failure capture (`run.rs`, only with `--out`), `Page::capture` and `capture_tall`. Nothing else calls it: a frame for `find`, `read`, `click` and `expect` is DOM, style, layout and fragments, with no display list and no raster. `snap.rs` and the hit tests read fragments (`bare_paint::hit`), not pixels. Canvas `getImageData` has its own 2D code in `browser_canvas.rs` and does not use the page raster. Headless raster was lazy already.
+- The "paint" share of `curl-se-home` (86.7%), `blog-rust-lang-home` (52.9%) and `rust-lang-org-home` (27.6%) is not `Page::paint`. Frame-pointer stacks from `/data/bare-tmp/prof/cpu/rawfp/` show `Canvas::fill_poly` under `Painter::draw_view`, under `bare_paint::svg::bitmap`, under `images::load`, on an image worker thread. `svg::bitmap` painted each SVG `<img>` file twice (on white and on black) as soon as it arrived, and nobody read the pixels. Inclusive share of `svg::bitmap`: `curl-se-home` 91.1%, `blog-rust-lang-home` 55.7%, `rust-lang-org-home` 54.1%. `Painter::paint` from the page: 0.5%.
+- `curl-se-home` has no `shot` step. No driver step decides by pixels (`visible` reads fragments).
+- Because the raster ran when a picture arrived, the instruction count of a journey depended on whether the picture arrived before the process ended. Base runs of `curl-se-home` gave 338 to 663 M, and `rust-lang-org-home` 119 M and 280 M.
+
+### Built
+
+- `bare_html::dom::Pixels` replaces `Arc<[u32]>` in `Bitmap`. A vector or an `Arc<[u32]>` makes it at once (`From`). `Pixels::lazy(make)` makes the pixels at the first read (`Deref`, `shared`), once, and clones share them.
+- `svg::bitmap_size` gives the size, and the same accept or refuse answer as `svg::bitmap`, without a raster (`parse_file`, then `raster`). `images::load` returns the size and a lazy raster that keeps the file text. The picture budget still reserves `4 * w * h` bytes at load, so a picture that failed before fails now.
+- Layout, `naturalWidth`, load and error events read the size only. The display list clones the handle. The raster runs in `Canvas::draw_image` and `Scaled::get`, that is at a screenshot, a window draw or a check frame.
+- A second effect: an unread SVG keeps its text (at most 512 KiB), not `4 * w * h` bytes of pixels.
+
+### Numbers (live pages, 3 runs each, `perf stat -e instructions:u`, max RSS, archMachine under load by other agents)
+
+The step-1 corpus is not on main, so these runs use the live sites. BASE `f6415364`, MAIN `a7ba0525`, NEW this branch. Instructions in M, run values.
+
+| Journey | BASE | MAIN | NEW |
+| --- | --- | --- | --- |
+| `curl-se-home` | 616, 584, 500 | 623, 369, 465 | 106, 106, 106 |
+| `blog-rust-lang-home` | 421, 420, 421 | 406, 424, 422 | 186, 187, 188 |
+| `rust-lang-org-home` | 119, 118, 118 | 123, 118, 118 | 122, 118, 118 |
+
+Peak RSS (MiB): `curl-se-home` 49, 49, 48 / 40, 37, 37 / 16, 16, 16. `blog-rust-lang-home` 25 to 27 / 27 / 17. `rust-lang-org-home` 17 to 18 on all three: the SVG picture did not arrive before the journey ended in these runs, so the saving is not visible there (an earlier run of BASE took 277 to 280 M when it arrived).
+
+All 48 journeys, 3 runs each (min of 3, without `duckduckgo-html-search`): instructions BASE 25,390 M, MAIN 24,174 M, NEW 24,206 M. RSS sum 1,153 / 1,127 / 1,106 MiB. The total is inside the live noise: other rows move by more than the three rows gain (for example `python-docs-search-results` spreads 2.6 to 2.9 G on one binary, and `python-org-docs-link` and `hn-*` swing on MAIN by load timing). Only `blog-rust-lang-home` and `curl-se-home` show a stable change (-56% and -77% against MAIN). Success criterion 2 (80% of baseline) is not reached by this step.
+
+`duckduckgo-html-search` served a "bots use DuckDuckGo" challenge in some runs (BASE run 3, NEW runs 1 to 3 in the parallel set). A sequential rerun passed on NEW (77 M) and failed once again by challenge. It is a site block, not a result of this change.
+
+### Checks
+
+- `cargo test --release --workspace --no-fail-fast`: all pass except 7 TLS tests (`bare-net` `https_openssl` 2, `bare-tls` `client_openssl` 4 and `tls12_openssl` 1). They fail the same way on `a7ba0525` (the openssl on this machine).
+- `tools/js/cost_matrix.sh` against `e0fa06eb` (the main this branch sits on): 803 rows, mean change glibc -0.004%, jemalloc +0.000%, no row over the limit. 2 rows do not run on either tree (`examples/parse_load deep 1` and `deep 10`, the known stack size issue in the fix candidates above).
+- After the rebase: `bare-html`, `bare-paint` and `bare` lib tests pass. `a_slow_fetch_does_not_hold_back_the_requests_queued_after_it` failed once under load and passed alone.
+- New tests: `dom::pixels_tests` (made once at the first read, clones share), `svg::file_tests::the_size_alone_agrees_with_the_bitmap`, `images::tests::an_svg_picture_has_its_size_and_no_raster_until_its_pixels_are_read`.
+- A local page with two SVG `<img>` (natural size and scaled) and an SVG `background-image`: the `shot` PNG is byte-identical on MAIN and NEW, and `naturalWidth` and `complete` read the right values.
+- The tests were written after the code, not before it.
+
+### Not tested
+
+The window mode with a display (only the unit tests that draw into a window buffer, which pass). The corpus runs of step 1. `test262_check.sh` and `exec_diff.sh` (no change in `crates/js`; the change touches `bare_html::dom::Bitmap` only). Cost of the first read of a large SVG inside a window frame (the raster now runs in the frame that needs it, on the main thread, not on a worker).
+
+### Noticed, not changed
+
+- The raster of a lazy SVG now runs on the thread that paints. A window page with a large SVG pays it in one frame; before, a worker paid it. A later step could raster on a worker when the picture enters the viewport.
+- `svg::bitmap` parses the file twice when the raster is read (once for the size). A size read of the root tag would avoid the first parse.
+- The SVG raster ignores `opacity` on a shape (same on MAIN).
