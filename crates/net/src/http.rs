@@ -762,6 +762,11 @@ impl Client {
         if !plan.method.safe() && (200..400).contains(&entry.status) {
             self.cache.lock().unwrap().forget(&(url.scheme, url.host.clone(), url.port, url.path.clone()));
         }
+        // The reply shows in the timing records (`BARE_NET_TRACE`, the `network` list of a driver report) with no time: nothing was waited for.
+        if let Some(mut rec) = trace::begin(|| format!("{}://{}:{}{}", url.scheme, url.host, url.port, url.path)) {
+            (rec.status, rec.bytes) = (entry.status, entry.body.len() as u64);
+            trace::push(*rec);
+        }
         let response = Response { status: entry.status, headers: entry.headers, body: Vec::new(), close: entry.close };
         let undo = response.header("content-encoding").and_then(encoding::codings).filter(|c| !c.is_empty()).filter(|_| !entry.body.is_empty());
         let live = if entry.complete {

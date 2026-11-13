@@ -37,17 +37,20 @@ def drive(binary, path, url, env, perf=None, pss=False):
     if perf:
         cmd = ["perf", "stat", "-x,", "-e", "instructions:u", "-o", perf] + cmd
     start = time.monotonic()
-    errlog = tempfile.TemporaryFile()
-    p = subprocess.Popen(cmd, env={**os.environ, "BARE_SEED": "1", **env}, stdout=subprocess.PIPE, stderr=errlog)
-    assert p.stdout
+    errlog, outlog = tempfile.TemporaryFile(), tempfile.TemporaryFile()
+    p = subprocess.Popen(cmd, env={**os.environ, "BARE_SEED": "1", **env}, stdout=outlog, stderr=errlog)
     peak_pss = 0
-    if pss:
-        while p.poll() is None:
+    while True:
+        if pss:
             peak_pss = max(peak_pss, pss_of(p.pid))
-            time.sleep(0.02)
-    out = p.stdout.read()
-    _, status, usage = os.wait4(p.pid, 0)
+        done, status, usage = os.wait4(p.pid, os.WNOHANG if pss else 0)
+        if done:
+            break
+        time.sleep(0.02)
     p.returncode = os.waitstatus_to_exitcode(status)
+    outlog.seek(0)
+    out = outlog.read()
+    outlog.close()
     wall = (time.monotonic() - start) * 1000
     try:
         ok = json.loads(out)["ok"] and p.returncode == 0
@@ -144,13 +147,15 @@ def recorded(opt):
 
 
 def measure(opt, binaries):
-    """Rows (label, journey, run, pass, instructions, cpu_ms, wall_ms, rss, pss, misses). The binaries run one after the other for each run."""
+    """Rows (label, journey, run, pass, instructions, cpu_ms, wall_ms, rss, pss, misses). The binaries run one after the other for each run.
+    With --pss, one more run of each binary (run number 0) samples the PSS: reading `smaps_rollup` takes the memory lock of the process and
+    changes the timing of its threads, so the runs that count instructions never sample."""
     rows = []
     perf = tempfile.mkstemp(prefix="journeys-perf-")[1]
     for name, path, url in recorded(opt):
-        for run in range(1, opt["runs"] + 1):
+        for run in range(0 if opt["pss"] else 1, opt["runs"] + 1):
             for label, binary in binaries:
-                r = drive(binary, path, url, {"BARE_NET_REPLAY": os.path.join(opt["corpus"], name)}, perf, opt["pss"])
+                r = drive(binary, path, url, {"BARE_NET_REPLAY": os.path.join(opt["corpus"], name)}, perf, run == 0)
                 rows.append((label, name, run, int(r[0]), r[1], round(r[2]), round(r[3]), r[4], r[5] or "", r[6]))
                 print(f"{label:6} {name:32} run {run} {'pass' if r[0] else 'FAIL'} {r[1] / 1e6:10.1f} Minstr {r[3]:7.0f} ms {r[4] // 1024:5} MiB" + (f"  {r[6]} MISSES" if r[6] else ""), flush=True)
     if os.path.exists(perf):
@@ -172,9 +177,11 @@ def spread(xs):
 
 def compare(rows, a="base", b="new"):
     """Per journey and in total: the median of the runs of each binary, the change, and the spread (max - min over the median) of each."""
-    by = {}
-    for label, name, _, ok, instr, _cpu, wall, rss, pss, _misses in rows:
-        by.setdefault(name, {}).setdefault(label, []).append((ok, instr, wall, rss, pss))
+    by, extra = {}, {}
+    for label, name, run, ok, instr, cpu, wall, rss, pss, _misses in rows:
+        extra.setdefault(label, {}).setdefault(name, []).append((cpu, wall, pss))
+        if run:  # run 0 is the PSS run (see `measure`)
+            by.setdefault(name, {}).setdefault(label, []).append((ok, instr, wall, rss, pss))
     print(f"\n{'journey':32} {'Minstr ' + a:>12} {'Minstr ' + b:>12} {'change':>8} {'spread ' + a:>9} {'spread ' + b:>9} {'MiB ' + a:>8} {'MiB ' + b:>8} {'change':>8}  pass")
     tot = {a: 0, b: 0}
     rss_tot = {a: 0, b: 0}
@@ -192,6 +199,15 @@ def compare(rows, a="base", b="new"):
             worst[k] = max(worst[k], sp[k])
         print(f"{name:32} {m[a] / 1e6:12.1f} {m[b] / 1e6:12.1f} {pct(m[a], m[b]):>8} {sp[a]:8.1f}% {sp[b]:8.1f}% {rs[a]:8.1f} {rs[b]:8.1f} {pct(rs[a], rs[b]):>8}  {'ok' if ok[a] and ok[b] else a + '=' + str(ok[a]) + ' ' + b + '=' + str(ok[b])}")
     print(f"{'TOTAL (sum of medians)':32} {tot[a] / 1e6:12.1f} {tot[b] / 1e6:12.1f} {pct(tot[a], tot[b]):>8} {'max ' + format(worst[a], '.1f') + '%':>9} {'max ' + format(worst[b], '.1f') + '%':>9} {rss_tot[a]:8.1f} {rss_tot[b]:8.1f} {pct(rss_tot[a], rss_tot[b]):>8}")
+
+
+    print("\nSums of the medians over the journeys (wall time holds only on an idle machine; PSS only with --pss):")
+    for k, name in enumerate(("cpu_ms", "wall_ms", "pss_MiB")):
+        t = {}
+        for label, d in extra.items():
+            vals = [statistics.median(r[k] for r in v if r[k] != "") if any(r[k] != "" for r in v) else 0 for v in d.values()]
+            t[label] = sum(vals) / (1024 if k == 2 else 1)
+        print(f"  {name:8} {a} {t[a]:10.1f}  {b} {t[b]:10.1f}  {pct(t[a], t[b])}")
 
 
 def pct(a, b):
