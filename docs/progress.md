@@ -9224,7 +9224,7 @@ Success criterion 6 (`python-docs-search-results` peak RSS -20%): this step give
 ### Cost matrix
 
 `tools/js/cost_matrix.sh` against `b6ec7df9`, 803 rows: mean glibc +0.037%, jemalloc +0.355%. One row is over the limit under both allocators: `scripts_load many 10` (+0.90% glibc, +0.51% jemalloc; 0.65 M instructions of 71.7 M, one more word to swap and one more allocation for each of many tiny scripts). 4 rows are over under one allocator only. `parse_load deep 1` and `deep 10` do not run (known stack size issue).
-The first matrix of this branch had 74 rows over the limit (up to +12%). Cause: the table of lazy functions was swapped with each cross-script call, and the `Program` grew. The tables moved out of the swap, and small scripts stay eager. A hypothesis that this was the whole cause is confirmed by the 5 rows left.
+The first matrix of this branch had 74 rows over the limit (up to +12%). Cause: the table of lazy functions was swapped with each cross-script call, and the `Program` grew. The tables moved out of the swap, and small scripts stay eager. After the change 5 rows are over under one or both allocators.
 
 ### Checks
 
@@ -9242,5 +9242,5 @@ A script of 16 KiB or more that uses `super`, `new.target`, generators or classe
 
 - An `Unsupported` error inside a lazy body (for example a feature that the evaluator refuses) shows at the first call, not at load. A `CompileError::Limit` of the regex emit pass shows at the first evaluation of the literal, not at load.
 - Arrows are the largest group of functions that stay eager. A later step can make them lazy once the lexical `this` and `arguments` cross the boundary.
-- `rust-book-search` calls 191 lazy functions of 144 (nested ones load again in each realm); 58% of its nodes are parsed twice. A script where most functions run pays about 2x parse for them.
-- The three `parse_load`, `scripts_load many` and the parse cache keep a separate entry for the lazy and the eager kind of the same text.
+- `rust-book-search` loads 191 lazy functions (its scripts hold 144 at the top level; the others sit inside lazy trees). 19,850 nodes of its 33,976 are parsed twice. A script where most functions run pays about two parses for them.
+- The parse cache keeps a separate entry for the lazy and the eager kind of the same text.
