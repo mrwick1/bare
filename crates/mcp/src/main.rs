@@ -47,6 +47,8 @@ struct Server {
     saved: HashMap<String, StorageState>,
     /// A counter for the capture folders of this process.
     runs: u32,
+    /// The network client that every `open` forks (see `start`): the connections and the reply cache outlive a session.
+    net: bare_net::http::Client,
 }
 
 fn main() {
@@ -62,7 +64,7 @@ fn main() {
         }
     }
     bare_net::parallel::limit_malloc_arenas(false);
-    let mut server = Server { workspace, live: HashMap::new(), saved: HashMap::new(), runs: 0 };
+    let mut server = Server { workspace, live: HashMap::new(), saved: HashMap::new(), runs: 0, net: bare_net::http::Client::new() };
     let mut out = std::io::stdout().lock();
     // Another thread reads the requests, so that the live pages go on between calls (#471): timers, replies and the requests that
     // they start, as in a browser tab. A page with work due now runs again after 1 ms at the earliest, so it does not spin a core.
@@ -214,7 +216,10 @@ impl Server {
         let _ = self.close(args);
         let (opt, red, vars) = self.options(args)?;
         self.place_window(&opt)?;
-        let mut session = Session::new(&opt);
+        // One client for the server: a script or a style sheet that an earlier `open` loaded is in its reply cache, and its connections stay
+        // open. `fresh` gives this open a clean client. Cookies and storage are the document's own either way.
+        let net = if args.get("fresh").and_then(Value::as_bool) == Some(true) { bare_net::http::Client::new() } else { self.net.fork() };
+        let mut session = Session::with_client(&opt, net);
         session.ready_wait = true;
         let dir = args.get("downloads_dir").and_then(Value::as_str).map_or_else(|| std::env::temp_dir().join(format!("bare-mcp-{}-downloads", std::process::id())), std::path::PathBuf::from);
         let dl = Downloads::new(dir);
@@ -984,8 +989,8 @@ fn tools() -> Value {
         },
         {
             "name": "open",
-            "description": "Start a live session: load URL in the bare browser. A new open ends the old session. Returns a short receipt: ok or the failure, the time, a redirect, not ready, script errors and failed requests.",
-            "inputSchema": with(json!({"url": {"type": "string"}, "state": {"type": "string", "description": "Start from the session that save_state or ensure_session saved under this name, in this server."}, "file": {"type": "string", "description": "With state: read the session from this file when it is not in memory. It holds live credentials."}, "snapshot": {"type": "boolean", "description": "Add the page snapshot after the receipt."}, "report": {"type": "boolean", "description": "Return the full JSON report of the open step (steps, console, network) instead of the receipt. It can be large."}}), &["url"]),
+            "description": "Start a live session: load URL in the bare browser. A new open ends the old session; it keeps the HTTP cache and the connections of the earlier opens unless fresh is true. Returns a short receipt: ok or the failure, the time, a redirect, not ready, script errors and failed requests.",
+            "inputSchema": with(json!({"url": {"type": "string"}, "state": {"type": "string", "description": "Start from the session that save_state or ensure_session saved under this name, in this server."}, "file": {"type": "string", "description": "With state: read the session from this file when it is not in memory. It holds live credentials."}, "snapshot": {"type": "boolean", "description": "Add the page snapshot after the receipt."}, "report": {"type": "boolean", "description": "Return the full JSON report of the open step (steps, console, network) instead of the receipt. It can be large."}, "fresh": {"type": "boolean", "description": "Use a clean network client for this open: no cached replies and no open connections from earlier opens. The default shares one client between opens, so a script or style sheet that an earlier open loaded (with a fresh Cache-Control) is not fetched again. Cookies and storage are always the page's own."}}), &["url"]),
         },
         {
             "name": "step",

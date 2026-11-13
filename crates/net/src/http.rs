@@ -96,6 +96,9 @@ struct Cached {
     stored: Instant,
     fresh_for: Duration,
     // Until this time has passed, we use the copy without asking the server.
+    owner: u64,
+    // 0: the reply says `public` or `immutable`, and answers every jar. Else the id of the jar that stored it (`Jar::id`): the reply
+    // can depend on its cookies, and it answers that jar only without a request. One slot for each URL: a reply of another jar replaces it.
 }
 
 /// The stored replies and their size, counted with `cache_size`. A client and its forks share one: a script that a worker
@@ -115,7 +118,7 @@ impl Cache {
     }
 
     /// Store a reply. The cache is emptied when the reply does not fit. A reply over `MAX_CACHE` is not kept, and it leaves the rest.
-    fn put(&mut self, key: CacheKey, response: Arc<Response>, fresh_for: Duration) {
+    fn put(&mut self, key: CacheKey, response: Arc<Response>, fresh_for: Duration, owner: u64) {
         self.forget(&key);
         let size = cache_size(&response);
         if size > MAX_CACHE {
@@ -126,7 +129,7 @@ impl Cache {
             self.bytes = 0;
         }
         self.bytes += size;
-        self.map.insert(key, Cached { response, stored: Instant::now(), fresh_for });
+        self.map.insert(key, Cached { response, stored: Instant::now(), fresh_for, owner });
     }
 
     /// The server answered 304 to a question about the stored reply: it is right. Its headers replace the stored ones of the same name
@@ -380,6 +383,18 @@ impl Client {
         Client { idle: self.idle.clone(), sessions: self.sessions.clone(), cache: self.cache.clone(), roots: self.roots.clone(), workers: self.workers.clone(), jar: self.jar.clone(), site: self.site.clone(), identity: self.identity.clone() }
     }
 
+    /// Whom a reply answers: every jar (0) when it says `public` or `immutable`, else the jar of this client.
+    fn owner_of(&self, response: &Response) -> u64 {
+        let control = response.header("cache-control").unwrap_or("").to_ascii_lowercase();
+        if control.split(',').map(str::trim).any(|d| d == "public" || d == "immutable") { 0 } else { self.jar.lock().unwrap_or_else(|e| e.into_inner()).id() }
+    }
+
+    /// A fresh stored reply may answer this client with no request: it is shared, or it was stored for the jar of this client. Any stored
+    /// reply can still be asked about with its validators (the server answers for the cookies of this client), so this does not stop that.
+    fn visible(&self, cached: &Cached) -> bool {
+        cached.owner == 0 || cached.owner == self.jar.lock().unwrap_or_else(|e| e.into_inner()).id()
+    }
+
     /// The cookie jar of this client and its forks.
     pub fn jar(&self) -> Arc<Mutex<Jar>> {
         self.jar.clone()
@@ -483,7 +498,8 @@ impl Client {
         }
         let mut stored = Response::clone(response);
         stored.body = body.to_vec();
-        cache.put(key, Arc::new(stored), fresh_for);
+        let owner = self.owner_of(response);
+        cache.put(key, Arc::new(stored), fresh_for, owner);
     }
 
     /// Like `send`, with a body that reads from the connection. See `get_stream`.
@@ -558,7 +574,7 @@ impl Client {
         // Extra request headers. They stay empty unless we have an old copy to check.
 
         if let Some(cached) = self.cache.lock().unwrap().map.get(&key) {
-            if cached.stored.elapsed() < cached.fresh_for {
+            if cached.stored.elapsed() < cached.fresh_for && self.visible(cached) {
                 return Ok(cached.response.clone());
                 // Still fresh: use the copy. No request at all.
             }
@@ -586,7 +602,8 @@ impl Client {
                 // - It has no `Vary` header, or only `Vary: Accept-Encoding`. `Vary` says the reply depends on a request
                 //   header. We do not handle that, except for the one header that this client always sends the same.
                 // - It is useful: it is fresh for a while, or we can ask the server about it later.
-                self.cache.lock().unwrap().put(key, response.clone(), fresh_for);
+                let owner = self.owner_of(&response);
+                self.cache.lock().unwrap().put(key, response.clone(), fresh_for, owner);
             }
             _ => {
                 self.cache.lock().unwrap().forget(&key);
@@ -830,7 +847,7 @@ impl Client {
             if !cache.map.is_empty() {
                 let key = (url.scheme, url.host.clone(), url.port, url.path.clone());
                 match cache.map.get(&key) {
-                    Some(c) if c.stored.elapsed() < c.fresh_for => return Ok(memory(c.response.clone())),
+                    Some(c) if c.stored.elapsed() < c.fresh_for && self.visible(c) => return Ok(memory(c.response.clone())),
                     Some(c) => stale = Some((key, questions(&c.response))),
                     None => {}
                 }
@@ -2267,7 +2284,7 @@ mod tests {
             let (port, wire) = untrusted();
             let mut client = Client::new();
             let plain = Arc::new(Response { status: 200, body: b"plain".to_vec(), ..Response::default() });
-            client.cache.lock().unwrap().map.insert((Scheme::Http, "localhost".to_string(), port, "/".to_string()), Cached { response: plain, stored: Instant::now(), fresh_for: Duration::from_secs(60) });
+            client.cache.lock().unwrap().map.insert((Scheme::Http, "localhost".to_string(), port, "/".to_string()), Cached { response: plain, stored: Instant::now(), fresh_for: Duration::from_secs(60), owner: 0 });
             let url = tls_url(port, "/");
             assert!(if stream { client.get_stream(&url).is_err() } else { client.get(&url).is_err() });
             only_a_client_hello(&wire.recv().unwrap());
@@ -2374,6 +2391,57 @@ mod tests {
         (body, s.response)
     }
 
+    /// A second client on the same connections with a cookie jar of its own: another profile.
+    fn other_profile(client: &Client) -> Client {
+        let mut other = client.fork();
+        other.use_jar(Arc::new(Mutex::new(Jar::default())));
+        other
+    }
+
+    /// A reply that is not `public` or `immutable` can depend on the cookies of the jar that asked: it answers that jar only.
+    /// A reply that says `public` or `immutable` answers every jar.
+    #[test]
+    fn a_reply_that_is_not_public_answers_only_the_jar_that_stored_it() {
+        let private = ["Cache-Control: private, max-age=60\r\n", "Cache-Control: max-age=60\r\n"];
+        for headers in private {
+            // Stream path (`keep`): jar A stores, jar B asks, then jar A asks again.
+            let (port, requests) = serve(vec![(vec![page(headers, "for a"), page(headers, "for b")], false)]);
+            let (mut a, u) = (Client::new(), url(port));
+            let mut b = other_profile(&a);
+            assert_eq!(stream_kept(&mut a, &u).0, b"for a");
+            assert_eq!(stream_kept(&mut a.fork(), &u).0, b"for a", "the same jar uses its copy");
+            assert_eq!(requests.try_iter().count(), 1);
+            assert_eq!(stream_kept(&mut b, &u).0, b"for b", "another jar must not get the copy of jar A");
+            assert_eq!(requests.try_iter().count(), 1);
+            // The same through `get`.
+            let (port, requests) = serve(vec![(vec![page(headers, "for a"), page(headers, "for b")], false)]);
+            let (mut a, u) = (Client::new(), url(port));
+            let mut b = other_profile(&a);
+            assert_eq!(a.get(&u).unwrap().body, b"for a");
+            assert_eq!(a.get(&u).unwrap().body, b"for a");
+            assert_eq!(b.get(&u).unwrap().body, b"for b");
+            assert_eq!(requests.try_iter().count(), 2);
+        }
+        // A private reply with a validator is asked about, not used: the server decides for the cookies of the jar that asks.
+        let not_modified = "HTTP/1.1 304 Not Modified\r\nETag: \"v1\"\r\nCache-Control: private, max-age=60\r\n\r\n";
+        let (port, requests) = serve(vec![(vec![page("Cache-Control: private, max-age=60\r\nETag: \"v1\"\r\n", "for a"), not_modified], false)]);
+        let (mut a, u) = (Client::new(), url(port));
+        let mut b = other_profile(&a);
+        assert_eq!(stream_kept(&mut a, &u).0, b"for a");
+        assert_eq!(stream_kept(&mut b, &u).0, b"for a", "the server said 304 to the jar of b");
+        let seen = seen(&requests);
+        assert!(seen.len() == 2 && seen[1].contains("If-None-Match: \"v1\"\r\n"), "{seen:?}");
+        for headers in ["Cache-Control: public, max-age=60\r\n", "Cache-Control: max-age=31536000, immutable\r\n"] {
+            let (port, requests) = serve(vec![(vec![page(headers, "shared"), page(headers, "again")], false)]);
+            let (mut a, u) = (Client::new(), url(port));
+            let mut b = other_profile(&a);
+            assert_eq!(stream_kept(&mut a, &u).0, b"shared");
+            assert_eq!(stream_kept(&mut b, &u).0, b"shared", "a public reply is shared");
+            assert_eq!(b.get(&u).unwrap().body, b"shared");
+            assert_eq!(requests.try_iter().count(), 1);
+        }
+    }
+
     /// A stale script with an `ETag` and a `Last-Modified` is asked about with a conditional request. A 304 gives the stored body,
     /// and its headers replace the stored ones (a new `max-age`), so the next use is fresh and sends nothing.
     #[test]
@@ -2438,19 +2506,19 @@ mod tests {
         let mut cache = Cache::default();
         let first = reply(MAX_CACHE / 2);
         let weak = Arc::downgrade(&first);
-        cache.put(key(1), first, Duration::from_secs(60));
-        cache.put(key(2), reply(MAX_CACHE / 4), Duration::from_secs(60));
+        cache.put(key(1), first, Duration::from_secs(60), 0);
+        cache.put(key(2), reply(MAX_CACHE / 4), Duration::from_secs(60), 0);
         assert!(cache.bytes <= MAX_CACHE && cache.map.len() == 2);
         assert!(weak.upgrade().is_some());
         // 1/2 + 1/4 + 1/2 does not fit: the cache empties and holds the new reply alone. Nothing else holds the first one.
-        cache.put(key(3), reply(MAX_CACHE / 2), Duration::from_secs(60));
+        cache.put(key(3), reply(MAX_CACHE / 2), Duration::from_secs(60), 0);
         assert_eq!((cache.map.len(), cache.bytes), (1, MAX_CACHE / 2 + 512));
         assert!(weak.upgrade().is_none(), "the evicted reply is still in memory");
         // A reply over the cap is not kept, and it does not empty the cache.
-        cache.put(key(4), reply(MAX_CACHE), Duration::from_secs(60));
+        cache.put(key(4), reply(MAX_CACHE), Duration::from_secs(60), 0);
         assert_eq!((cache.map.len(), cache.bytes), (1, MAX_CACHE / 2 + 512));
         // The same key twice counts once.
-        cache.put(key(3), reply(10), Duration::from_secs(60));
+        cache.put(key(3), reply(10), Duration::from_secs(60), 0);
         assert_eq!((cache.map.len(), cache.bytes), (1, 10 + 512));
         cache.forget(&key(3));
         assert_eq!((cache.map.len(), cache.bytes), (0, 0));
@@ -3031,7 +3099,7 @@ mod tests {
         let mut client = Client::new();
         let fake = Arc::new(Response { status: 200, body: b"tls".to_vec(), ..Response::default() });
         let key = |scheme| (scheme, "127.0.0.1".to_string(), port, "/".to_string());
-        client.cache.lock().unwrap().map.insert(key(Scheme::Https), Cached { response: fake, stored: Instant::now(), fresh_for: Duration::from_secs(60) });
+        client.cache.lock().unwrap().map.insert(key(Scheme::Https), Cached { response: fake, stored: Instant::now(), fresh_for: Duration::from_secs(60), owner: 0 });
         assert_eq!(client.get(&url(port)).unwrap().body, b"plain");
         let mut text = String::new();
         client.get_stream(&url(port)).unwrap().body.read_to_string(&mut text).unwrap();

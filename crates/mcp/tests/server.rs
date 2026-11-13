@@ -2333,4 +2333,58 @@ fn a_hidden_iframe_download_is_saved() {
     let (r, _) = s.tool("eval", json!({"js": "location.pathname"}));
     assert_eq!(r, json!("/frames"));
     let _ = std::fs::remove_dir_all(&dir);
+
+/// A site with two pages that load the same two scripts: `/app.js` is `public` and `/priv.js` is `private`. Gives the base URL and the log of the
+/// paths that the server answered.
+fn two_page_site() -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    use std::io::Read;
+    let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let seen = log.clone();
+    std::thread::spawn(move || {
+        for mut c in listener.incoming().flatten() {
+            let seen = seen.clone();
+            std::thread::spawn(move || {
+                let (mut head, mut b) = (Vec::new(), [0u8; 1]);
+                while !head.ends_with(b"\r\n\r\n") && c.read(&mut b).unwrap_or(0) == 1 {
+                    head.push(b[0]);
+                }
+                let head = String::from_utf8_lossy(&head).to_string();
+                let path = head.split(' ').nth(1).unwrap_or("").to_string();
+                seen.lock().unwrap().push(path.clone());
+                let (ty, cache, body) = match path.as_str() {
+                    "/app.js" => ("text/javascript", "public, max-age=3600", "document.title='app';"),
+                    "/priv.js" => ("text/javascript", "private, max-age=3600", "document.title+='priv';"),
+                    _ => ("text/html", "no-cache", "<!doctype html><title>t</title><script src=/app.js></script><script src=/priv.js></script><p>page</p>"),
+                };
+                let _ = write!(c, "HTTP/1.1 200 OK\r\nContent-Type: {ty}\r\nCache-Control: {cache}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            });
+        }
+    });
+    (format!("http://127.0.0.1:{port}"), log)
+}
+
+/// The server shares one network client between `open` calls: the second page of a site does not fetch a script that the first one loaded (when
+/// the reply is `public`). A `private` reply is kept for the cookie jar of its page only, and each `open` has its own jar. `fresh: true` starts
+/// from a clean client.
+#[test]
+fn open_shares_the_http_cache_between_opens_and_fresh_does_not() {
+    let (base, log) = two_page_site();
+    let count = |p: &str| log.lock().unwrap().iter().filter(|x| x.as_str() == p).count();
+    let mut s = Server::start();
+    let (rep, error) = s.tool("open", json!({"url": format!("{base}/a"), "timeout_ms": 10000}));
+    assert!(!error, "{rep}");
+    assert_eq!((count("/app.js"), count("/priv.js")), (1, 1));
+    let (rep, error) = s.tool("open", json!({"url": format!("{base}/b"), "timeout_ms": 10000}));
+    assert!(!error, "{rep}");
+    assert_eq!(count("/app.js"), 1, "the second open must use the cached script");
+    assert_eq!(count("/priv.js"), 2, "a private reply must not cross to the jar of another open");
+    let (rep, error) = s.tool("open", json!({"url": format!("{base}/c"), "fresh": true, "timeout_ms": 10000}));
+    assert!(!error, "{rep}");
+    assert_eq!(count("/app.js"), 2, "a fresh open has a clean client");
+    // The fresh open does not empty the shared client.
+    let (rep, error) = s.tool("open", json!({"url": format!("{base}/d"), "timeout_ms": 10000}));
+    assert!(!error, "{rep}");
+    assert_eq!(count("/app.js"), 2);
 }

@@ -8521,3 +8521,53 @@ The owner asked for download handling "like IDM": resume and retry, segmented pa
 Measured with `curl`, 3 rounds, n = 1, 4 and 8 range connections, on Wi-Fi from archMachine: more connections did not give a steady gain (best 2.6 times, worst 3.5 times slower). 2 of 6 single-connection runs stalled (0.65 MB/s and 0.08 MB/s). Splitting mainly protects against a stalled connection.
 Open owner questions are in section 8 of the design. The first is scope against the login and E2E goal of 2026-11-10.
 Owner decision, 2026-11-13: "work it out and get it done". Build all 3 steps now. Pause lasts only while the process runs. `MAX_DOWNLOAD` stays 1 GiB. Start values as in section 8 of the design.
+
+## One network client in `bare-mcp`, and jar-keyed private replies (step 5)
+
+Branch `t3/share-network-client-cache`. Design: `docs/design-suite.md`, section 2 (step 5, design A1) and section 9 (owner decisions 4, 6 and 8). Decision: `docs/decisions.md`, "One network client for `bare-mcp`".
+
+### What was built
+
+- `bare-mcp` keeps one network client in `Server` and gives a fork of it to each `open` (`Session::with_client`, new in `bare-drive`). The connections and the reply cache survive between opens. `Session::new` is unchanged for the step-file runs.
+- `open` has a `fresh` parameter (tool schema and description updated). With `fresh: true` the open gets a clean client. The shared one is not touched.
+- `bare-net`: a stored reply has an `owner`. `public` and `immutable` replies have owner 0 and answer every jar. Any other reply belongs to the jar that stored it (`Jar::id`, a counter), and it answers that jar only when it is fresh. Another jar asks the server with the validators (`If-None-Match`, `If-Modified-Since`); a 304 gives the stored body. Both lookups (`load`, `hop_stream`) and both stores (`load`, `keep`) use it. The cap and the "empty on overflow" rule did not change.
+- Tests (written first, the net one failed before the change): `bare-net` `a_reply_that_is_not_public_answers_only_the_jar_that_stored_it` (stream path and `get`; `private`, plain `max-age`, `public`, `immutable`; a validator case). `bare-mcp` `open_shares_the_http_cache_between_opens_and_fresh_does_not`: two pages of one site, the second open does not fetch the `public` script and does fetch the `private` one, `fresh` fetches again, and a later open is warm again.
+
+### Numbers
+
+Machine archMachine (shared, load 10 to 40). Fixture `/data/bare-tmp/design/suite/server.py` (300 KB script, 60 KB sheet, both `public, immutable`). Driver `mcpdrive.py` (not in the repository): one `bare-mcp` under `perf stat -e instructions:u`; log in once, save the state, then N times `open /pK state=s` and `expect #count`. MAIN is `8eb90c9c`. 3 runs each; run values.
+
+| N opens | build | instructions (M) | peak RSS (MiB) | static requests of the N opens |
+| --- | --- | --- | --- | --- |
+| 10 | MAIN | 983, 982, 983 | 30.2, 30.0, 30.4 | 20, 20, 20 |
+| 10 | NEW shared | 981, 980, 983 | 25.4, 25.5, 25.5 | 0, 0, 0 |
+| 10 | NEW `fresh` | 983, 984, 982 | 30.4, 30.4, 29.9 | 20, 20, 20 |
+| 50 | MAIN | 4115, 4115, 4108 | 37.7, 38.2, 44.2 | 100, 100, 100 |
+| 50 | NEW shared | 4110, 4112, 4104 | 25.3, 25.6, 25.9 | 0, 0, 0 |
+| 50 | NEW `fresh` | 4117, 4113, 4111 | 37.3, 41.6, 43.0 | 100, 100, 100 |
+
+- The instruction count does not change (0.1%). The reply of a loopback fixture is cheap, and the fetch of a cached script was only 2 of the requests of an open. The gain is the connection and the request on a real network (not measured: the fixture is plain HTTP on loopback).
+- **Memory.** The shared client is flat: RSS after 1, 2, 5, 10, 20, 30, 40 and 50 opens is 24.3 to 25.9 MiB (setup alone: 23.3 to 23.9 MiB). MAIN and `fresh` grow about 0.3 MiB for each open, and one run reached 44 MiB at 50 opens. The growth stays with a client that is made new for each open, so it is the cost of that client and not of the shared one. Hypothesis (not checked): the worker threads of a dropped client keep their fork, and with it the 64 MiB-capped reply cache of the old client, until the threads park.
+- Isolation gate (0.1 MiB for each document): at most 0.04 MiB for each of 50 documents, and flat after 10 opens.
+- Warm against cold on the step-file fixture (`cold1.steps` in a new process, `cold10.steps` in one process, 3 runs; the step runner already shared the client): one test in a new process 636, 638, 634 M; 10 tests in one process 5,683, 5,701, 5,705 M (568 to 570 M for a test). That is 1.12 times fewer instructions for a test in a warm process. MAIN: 638, 634, 638 M and 5,675, 5,677, 5,663 M. A second set of 4 runs each of `cold10`: NEW 5,655 to 5,703 M, MAIN 5,663 to 5,689 M. The change is inside the noise.
+- **Parse cache.** A temporary print of `parse_cache::counts()` at each new realm (not committed). The fixture, 12 opens, shared or `fresh`: 1 parse, 12 hits. The cache holds across documents in one process. The tree of the 300 KB script is 3.4 MiB.
+- `MAX_IDLE` = 2 against 8, measured on a variant fixture where each of 8 pages also loads its own 100 KB chunk (`server_chunks.py` in the scratchpad, not in the repository). 24 opens in the order p1 to p8, three times round. `MAX_IDLE` = 2: 25 parses, 24 hits (every chunk is parsed again at each visit, because 8 other documents ran between two visits). `MAX_IDLE` = 8: 10 parses, 39 hits. Instructions, 5 runs each, median: 3,297 M against 3,052 M (-7%); the runs spread from 2,846 to 4,038 M (see below). Peak RSS (median) 33.1 MiB against 38.5 MiB (+5.4 MiB, the cache holds 13.2 MB of trees against 7.2 MB). I did not change it: the gain is inside the spread, it exists only for a suite that visits more than 3 different chunk sets in turn, and it costs memory. A cache that evicts by age in bytes under the 32 MiB cap (not by realms) would give both; that is a parser-side change and not in this task.
+- The reply to the task's check "two pages of one site": see the `bare-mcp` test. Second open: 0 requests for the `public` script; `fresh`: 1.
+
+### Checks
+
+- `cargo test --release -p bare-net -p bare-mcp -p bare-drive`: all pass. `crates/drive/tests/cache.rs` failed after my first version of the change (a private stale script with an `ETag` was fetched in full by a second open). The fix is the rule above (the stored reply may still be asked about); the test passes and it is unchanged. `survive_limit` `a_page_that_aborts_task_after_task_fails_the_step_with_the_reason` failed once under load (65 s for a test that plans for 45 s) and passed alone in 70 s.
+- Cookie isolation: `crates/drive/tests/fixture_journey.rs` and the `bare-mcp` login tests pass with the shared client. The fixture shows `login_posts` right.
+
+### Not tested
+
+- An https site (TLS handshake and root load for each `open` before the change): the fixture is plain HTTP.
+- A late reply of a request of an old document: the page is dropped before the new one starts, and I wrote no test for a reply in flight.
+- Window mode: the parse cache is in the thread of the window. `start` closes the old window and opens a new thread, so by the code the cache is lost between MCP opens in a window (hypothesis, not measured). The headless MCP and the step runner keep it.
+- A real site whose scripts have `Cache-Control: max-age=N` and no `public`: they are not shared between two opens that have different jars (see the decision).
+
+### Noticed, not changed
+
+- The instruction count of a `bare-mcp` run depends on wall time: with the same input I saw 2,846 to 4,038 M in 24 opens under load, and 981 +/- 2 M in 10 opens on a quieter machine. The idle slice of the live page (decision of 2026-11-13, "A live page goes on between tool calls") runs while the server waits for the next request. Compare MCP runs on instructions only with a few runs and the minimum.
+- A client that is new for each open grows memory by 0.3 MiB for each open (above).
+- The reply cache still empties itself when one reply does not fit (design-suite.md, section 2.4).
