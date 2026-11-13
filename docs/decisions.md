@@ -1902,3 +1902,11 @@ Issue #442: `el.style.WebkitUserSelect` was `undefined`, so `el.style.WebkitUser
 - A page that is not live keeps the ordered queue. Its POSTs still reach the server in the order of the script.
 - A hung request still holds the page from idle, unless it is a detached XHR GET long-poll.
 - Reason: Gmail sends its attachment upload behind requests that do not answer. The upload was never sent (issue #461).
+
+## A request body over the cap is a `TypeError` (2026-11-13)
+
+- Over `max_request_body` (8 MiB), `new Request`, `new Response` and `XMLHttpRequest.send` throw a `TypeError` that names the limit. `fetch` rejects with it.
+- Before, the body was `Limit(Host("fetch-request-body"))`. That limit is fatal and sticky, so the whole page stopped.
+- The cap stays, and the body is still not copied. Form submission keeps its own cap.
+- Reason: a web mail app batches its analytics into one `fetch` POST of about 9.8 MB. The page stopped while the user typed, and an attachment upload never finished (issue #465).
+- This follows the refusal principle: the page makes the body, so the refusal must not stop the page. The stream body cap already rejects with a `TypeError`.

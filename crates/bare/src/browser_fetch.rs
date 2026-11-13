@@ -43,9 +43,10 @@
 //!   body byte, a path or a query. [`Browser::take_fetch_diagnostics`] gives fixed labels and the origin.
 //!
 //! Resource caps (`FetchLimits`) end the call with `Error::Limit(LimitKind::Host(name))`, never a JS exception: queued requests (1024, and 8 MiB of URL and header text),
-//! requests started, URL length, request and response body bytes, aggregate retained body bytes, live objects, live readers, header
+//! requests started, URL length, response body bytes, aggregate retained body bytes, live objects, live readers, header
 //! count and bytes, redirects. Copies and decoding charge the step budget. Objects count until the embedder collects them
-//! (`Browser::collect`): the VM never collects by itself.
+//! (`Browser::collect`): the VM never collects by itself. A request body over `max_request_body` is a `TypeError` instead: the page
+//! made it, so the refusal must not stop the page.
 //!
 //! Streams: `response.body` is a facade over a response that is fully buffered in memory. `getReader().read()` hands out real
 //! bytes of that response in `Uint8Array` chunks of `chunk_bytes`, then `{done: true}`. There is no live socket streaming and no
@@ -83,7 +84,7 @@
 use crate::browser::{Browser, Dom, IdMap, Kind, R, unsupported};
 use crate::browser_navigation_url::form_serialize;
 use crate::browser_streams as streams;
-use bare_js::eval::{Error, Interp};
+use bare_js::eval::{Error, Interp, LimitKind};
 use bare_js::value::{ObjId, Value};
 use bare_net::http::{Client, Cookies, Ctx, Method, Request as NetRequest};
 use bare_net::parallel::Task;
@@ -998,7 +999,8 @@ impl Dom {
         }
     }
 
-    /// The bytes of a body init, and its default content type. A copy is charged and bounded before it is made.
+    /// The bytes of a body init, and its default content type. A copy is charged and bounded before it is made. A body over
+    /// `max_request_body` is a `TypeError` (`body_over`): the page made it, so the refusal must not stop the page.
     /// `who` names the call in the error text, e.g. "construct 'Request'".
     pub(crate) fn extract_body(&self, it: &mut Interp<'_>, v: Value, who: &str) -> R<Option<BodyInit>> {
         let lim = self.fl();
@@ -1007,23 +1009,26 @@ impl Dom {
             Value::Object(_) if it.bytes_of(v).is_some() => {
                 let n = it.bytes_of(v).map_or(0, <[u8]>::len);
                 if n > lim.max_request_body {
-                    return Err(self.lim("fetch-request-body"));
+                    return Err(body_over(it, who, lim.max_request_body));
                 }
                 self.reserve(it, 0, n)?;
                 (it.bytes_of(v).map(<[u8]>::to_vec).unwrap_or_default(), None)
             }
             Value::Object(_) if let Some(n) = self.web_body_len(v) => {
                 if n > lim.max_request_body {
-                    return Err(self.lim("fetch-request-body"));
+                    return Err(body_over(it, who, lim.max_request_body));
                 }
                 self.reserve(it, 0, n)?;
-                let (bytes, ty) = self.web_body(it, v, lim.max_request_body)?;
+                let (bytes, ty) = self.web_body(it, v, lim.max_request_body).map_err(|e| match e {
+                    Error::Limit(LimitKind::Host("fetch-request-body")) => body_over(it, who, lim.max_request_body),
+                    e => e,
+                })?;
                 (bytes, ty.map(Cow::Owned))
             }
             Value::Object(o) if self.nav.s.borrow().params.contains_key(&o) => {
                 let s = form_serialize(&self.nav.s.borrow().params[&o].list);
                 if s.len() > lim.max_request_body {
-                    return Err(self.lim("fetch-request-body"));
+                    return Err(body_over(it, who, lim.max_request_body));
                 }
                 self.reserve(it, 0, s.len())?;
                 (s.into_bytes(), Some(Cow::Borrowed("application/x-www-form-urlencoded;charset=UTF-8")))
@@ -1040,18 +1045,19 @@ impl Dom {
                     };
                     return Err(it.type_error(&format!("Failed to {who}: {why}.")));
                 }
-                self.text_body(it, v)?
+                self.text_body(it, v, who)?
             }
-            _ => self.text_body(it, v)?,
+            _ => self.text_body(it, v, who)?,
         };
         Ok(Some((Rc::new(bytes), ty)))
     }
 
     /// A body that is converted to a string (UTF-8, `text/plain`).
-    fn text_body(&self, it: &mut Interp<'_>, v: Value) -> R<(Vec<u8>, Option<Cow<'static, str>>)> {
+    fn text_body(&self, it: &mut Interp<'_>, v: Value, who: &str) -> R<(Vec<u8>, Option<Cow<'static, str>>)> {
         let s = self.string_arg(it, v)?;
-        if s.len() > self.fl().max_request_body {
-            return Err(self.lim("fetch-request-body"));
+        let max = self.fl().max_request_body;
+        if s.len() > max {
+            return Err(body_over(it, who, max));
         }
         self.reserve(it, 0, s.len())?;
         Ok((s.into_bytes(), Some(Cow::Borrowed("text/plain;charset=UTF-8"))))
@@ -1211,6 +1217,11 @@ fn wire_method(m: &str) -> R<Method> {
 }
 
 // ---------------------------------------------------------------------------------------------- settle helpers
+
+/// The refusal of a body over `max` bytes. `who` names the call, e.g. "construct 'Request'".
+fn body_over(it: &mut Interp<'_>, who: &str, max: usize) -> Error {
+    it.type_error(&format!("Failed to {who}: the body is over the limit of {max} bytes."))
+}
 
 /// Settle `p` with the outcome of `r`: a value fulfills, a thrown value rejects, any other error is the result.
 pub(crate) fn settle(it: &mut Interp<'_>, p: Value, r: R<Value>) -> R<Value> {
