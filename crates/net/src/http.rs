@@ -313,6 +313,8 @@ pub struct Client {
     // The worker threads of this client and its forks (see `parallel.rs`).
     pub(crate) jar: Arc<Mutex<Jar>>,
     // The cookies. In memory only. A fork shares it, so a new document of the same session keeps its cookies; a new client starts empty.
+    big: bool,
+    // A download client (`allow_big`): a `Content-Length` over `MAX_REPLY` does not fail the request. A fork does not copy it.
     pub(crate) site: Option<Arc<str>>,
     // The site of the document that this client serves (`cookie::site_of`), for `SameSite`. `None`: every request is first-party.
     identity: Option<Arc<Identity>>,
@@ -380,7 +382,19 @@ impl Client {
 
     /// A second client that shares the connections, the root certificates and the worker threads of this one. The reply cache is not shared.
     pub fn fork(&self) -> Client {
-        Client { idle: self.idle.clone(), sessions: self.sessions.clone(), cache: self.cache.clone(), roots: self.roots.clone(), workers: self.workers.clone(), jar: self.jar.clone(), site: self.site.clone(), identity: self.identity.clone() }
+        Client { idle: self.idle.clone(), sessions: self.sessions.clone(), cache: self.cache.clone(), roots: self.roots.clone(), workers: self.workers.clone(), jar: self.jar.clone(), site: self.site.clone(), identity: self.identity.clone(), big: false }
+    }
+
+    /// Let a reply declare more than `MAX_REPLY` bytes. The body still stops at `MAX_REPLY` and at `MAX_TIME` until the caller calls
+    /// `Body::unlimited`. For a download, which goes to a file and not to memory.
+    pub fn allow_big(&mut self) {
+        self.big = true;
+    }
+
+    /// A fork with connections of its own: no idle connection and no HTTP/2 session is shared. A download range must not share the TCP
+    /// connection of another range.
+    pub fn fork_alone(&self) -> Client {
+        Client { idle: Pool::default(), sessions: Sessions::default(), ..self.fork() }
     }
 
     /// Whom a reply answers: every jar (0) when it says `public` or `immutable`, else the jar of this client.
@@ -680,7 +694,7 @@ impl Client {
             self.cache.lock().unwrap().forget(&(url.scheme, url.host.clone(), url.port, url.path.clone()));
         }
         let response = Response { status: head.status, headers: head.headers, body: Vec::new(), close: false };
-        if body.declared.is_some_and(|n| n > MAX_REPLY) {
+        if !self.big && body.declared.is_some_and(|n| n > MAX_REPLY) {
             return Err("the reply is too big".into());
         }
         let undo = response.header("content-encoding").and_then(encoding::codings).filter(|c| !c.is_empty()).filter(|_| !matches!(body.declared, Some(0)));
@@ -822,6 +836,7 @@ impl Client {
         }
         if let Framing::Length(n) = head.framing
             && n > MAX_REPLY
+            && !self.big
         {
             return Err("the reply is too big".into());
         }
@@ -1480,6 +1495,8 @@ struct Live {
     line: Vec<u8>,
     given: usize,
     start: Instant,
+    /// False after `Body::unlimited`: no `MAX_REPLY` and no `MAX_TIME`.
+    limited: bool,
     /// Where to put the connection when the body ends well, if it may be used again.
     pool: Option<(Pool, Server)>,
     done: bool,
@@ -1548,7 +1565,7 @@ impl Write for Stream {
 impl Live {
     fn new(stream: Stream, leftover: Vec<u8>, framing: Framing, pool: Option<(Pool, Server)>, start: Instant) -> Live {
         let left = if let Framing::Length(n) = framing { n } else { 0 };
-        Live { stream, buf: leftover, at: 0, framing, left, chunk: Chunk::Size, line: Vec::new(), given: 0, start, pool, done: false, rec: None }
+        Live { stream, buf: leftover, at: 0, framing, left, chunk: Chunk::Size, line: Vec::new(), given: 0, start, limited: true, pool, done: false, rec: None }
     }
 
     /// Make sure that there are bytes in `buf[at..]`. When there are none after this, the connection has closed.
@@ -1708,10 +1725,10 @@ impl Body {
         if live.done || out.is_empty() {
             return Ok(0);
         }
-        if live.given > MAX_REPLY {
+        if live.limited && live.given > MAX_REPLY {
             return Err(io::Error::new(ErrorKind::InvalidData, "the reply is too big"));
         }
-        if live.start.elapsed() > MAX_TIME {
+        if live.limited && live.start.elapsed() > MAX_TIME {
             return Err(io::Error::new(ErrorKind::TimedOut, "the server is too slow"));
         }
         let n = match live.framing {
@@ -1762,6 +1779,16 @@ impl Body {
         match &mut self.0 {
             Source::Decoded(decoded) => decoded.read_all(max, deadline),
             _ => None,
+        }
+    }
+
+    /// Lift `MAX_REPLY` and `MAX_TIME` from this body: the caller writes it to a file and sets its own cap. The 30 s limit of each read
+    /// stays. A decoded body keeps its caps: they guard against a compression bomb.
+    pub fn unlimited(&mut self) {
+        match &mut self.0 {
+            Source::Live(live) => live.limited = false,
+            Source::H2(stream) => stream.unlimited(),
+            Source::Memory(..) | Source::Decoded(_) => {}
         }
     }
 

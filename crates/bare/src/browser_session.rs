@@ -303,17 +303,28 @@ pub(crate) fn non_html_document(content_type: Option<&str>, url: &str, body: &[u
     Ok(format!("<pre style=\"white-space:pre-wrap;word-wrap:break-word\">{}</pre>", esc(&encoding::decode(body, Some(ct)), false)))
 }
 
-/// One request of a load that may be a download. A response that is one goes to a file (`None`); any other is read whole, as `send_once` does.
+/// One request of a load that may be a download. A response that is one goes on to its own threads (`downloads::Start`); any other is read
+/// whole, as `send_once` does. The client may take a reply bigger than `MAX_REPLY` (a download); a document is capped by `max` here.
 fn fetch_hop(client: &mut Client, req: &Request, max: usize, g: &Grab) -> Result<Option<Arc<Response>>, String> {
     use std::io::Read;
-    let Streamed { response, mut body } = client.send_stream_once(req).map_err(|_| "network error".to_string())?;
+    let mut big = client.fork();
+    big.allow_big();
+    let Streamed { response, mut body } = big.send_stream_once(req).map_err(|_| "network error".to_string())?;
     let mut r = Arc::try_unwrap(response).map_err(|_| "network error".to_string())?;
     let (ct, cd) = (r.header("content-type"), r.header("content-disposition"));
     if (200..300).contains(&r.status) && (g.force || downloads::is_download(ct, cd)) {
         let url = req.url.to_string();
         let name = downloads::file_name(cd, g.name.as_deref(), &url);
+        let mime = downloads::mime_of(ct);
         let id = g.id.unwrap_or_else(|| g.dl.start(&url));
-        g.dl.save(id, &name, &downloads::mime_of(ct), &mut body);
+        let from = match req.cookies.ctx {
+            Ctx::Navigation(f) => f.map(str::to_string),
+            Ctx::Embedded => None,
+        };
+        body.unlimited();
+        let Ok(url) = Url::parse(&url) else { return Err("the URL is not an http(s) URL".into()) };
+        let get = req.method == bare_net::http::Method::Get;
+        g.dl.begin(id, &name, &mime, downloads::Start { client: big, url, from, get, response: r, body });
         return Ok(None);
     }
     // A redirect has no body to read.
