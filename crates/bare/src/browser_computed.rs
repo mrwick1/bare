@@ -525,6 +525,7 @@ impl Dom {
         let l = self.computed.lim.get();
         let vp = self.plat.s.borrow().viewport;
         let t0 = crate::force::start();
+        let builds = self.computed.builds.get();
         if self.doc.borrow().len() > l.max_nodes {
             return Err(self.lim("computed-nodes"));
         }
@@ -576,7 +577,7 @@ impl Dom {
             }
             cache.as_mut().expect("built").stamp = stamp;
             drop(cache);
-            crate::force::style("rules", t0, 0);
+            crate::force::style(if self.computed.builds.get() == builds { "plan" } else { "rules" }, t0, 0);
         }
         let t0 = crate::force::start();
         let mut cache = self.computed.cache.borrow_mut();

@@ -1,6 +1,6 @@
 //! Counters for the passes that style and lay out a page, by the caller that forced them (`docs/progress.md`, "Who forces style and layout").
 //! Off unless `BARE_FORCE_STATS` is set. Then each pass writes one line to stderr, and a script adds them up:
-//! `FS style <hit|restyle|compute|rules> <caller> <elements> <instructions>`,
+//! `FS style <hit|restyle|compute|plan|rules> <caller> <elements> <instructions>`,
 //! `FS layout <hit|full|kept> <caller> <boxes> <instructions>` and `FS frame <caller> <1 when the call built a frame>`.
 //! A caller is a `file:line` of a window frame request (`#[track_caller]`), or the name of a script API (`tag`). Instructions are the user
 //! instructions of the thread (`perf_event_open`, Linux x86-64 only; 0 elsewhere).

@@ -8899,3 +8899,103 @@ Target not met. Spread is (max - min) / median over 3 runs of one binary. The wo
 - Replay of an `EventSource` stream with live events, and of a journey with a login.
 - Replay with a corpus that was recorded by another binary than the one that replays it, apart from the baseline above.
 - A second machine.
+
+## Who forces style and layout (step 6.0, 2026-11-14)
+
+Branch `t3/count-style-layout`. Design: `docs/design-suite.md`, section 3.5 and decision 7. This is the count that decides whether the styles-only frame is built. No behavior changes.
+
+### What was built
+
+- `crates/bare/src/force.rs`: counters for each style pass and each layout pass, off unless `BARE_FORCE_STATS` is set. With it set, each pass writes one line to stderr with its caller, the elements styled or boxes laid out, and the user instructions of the pass (`perf_event_open`, Linux x86-64; 0 elsewhere). Hook points: `cascade_inner` (outcomes `hit`, `restyle`, `compute`, `plan`, `rules`), `layout_at` (`full`, `kept`) and `layout_shared` (`hit`).
+- A caller is the `file:line` of a window frame request (`#[track_caller]` on `Page::frame_now`, `inspect`, `visible_box`, `hit`, `rehover` and `scroll_with`), or the name of a script API (`getComputedStyle`, `offsetWidth`, `getBoundingClientRect`, the motion step, the observers). The outermost caller wins.
+- `tools/drive/force_count.py BARE_DRIVE [--corpus DIR | --suite DIR]`: runs the journeys (live, or replayed from the corpus of `tools/bench/journeys.sh`) or the suite with one worker, each process under `perf stat -e instructions:u`, and adds the passes up by caller. It also finds the layouts that a styles-only frame would not make: a frame layout that was built for an `inspect` request (locators, snapshot, find, read) and that no geometry step used before the next layout.
+- Cost with the switch off: the suite V2 (one worker, shared login) is 15,588 to 15,601 M instructions with this change and 15,597 to 15,603 M on main `fe2d54cd` (3 runs each). No difference.
+
+### The count
+
+Machine archMachine, 16 cores, shared. Binary: release, this branch on `fe2d54cd`. Instruction counts per pass hold under load. The journeys on the corpus are not stable between runs (the replay uses real clocks, `docs/decisions.md`, "The journey benchmark replays recorded HTTP replies"): the total of the 47 journeys that pass was 64.1 to 67.7 G in three runs (one earlier run on the same code gave 86 G, with `rust-book-search` at 24.8 G against 16.4 G). `nextjs-docs` fails on the corpus on main too (`status.tsv` says 0), so 47 of 48 are counted. A live run also lost one journey to a network flake (`hn-new-past`, `nextjs-docs`).
+
+Share of all instructions (runs on the final code unless said):
+
+| Workload | Runs | Total | Style | of which rule-set builds | Layout | Layout of a frame that no geometry step used |
+| --- | --- | --- | --- | --- | --- | --- |
+| 47 journeys, corpus replay | 3 | 64.1 to 66.8 G | 19.8 to 20.8% | 7.8 to 8.3% | 8.3 to 8.6% | **0.30, 0.37, 0.43%** (197, 239, 280 M; 8 to 10 layouts) |
+| 47 or 48 journeys, live | 5 | 24.3 to 27.7 G | 18.4 to 20.4% | 9.5 and 10.8% (2 runs) | 7.3 to 8.7% | **1.76 to 2.00%** (about 480 to 505 M; 54 to 60 layouts) |
+| the suite, 40 tests, 1 worker, shared login | 4 | 15,626 to 15,635 M | 34.9% | **30.9%** | 7.1% | **2.69%** (420.6 M, 398 layouts, same in each run) |
+
+Style and layout together: 29% of the corpus journeys, 29% live, 42% of the suite. That agrees with the 24.6% of the design (the sum over all callers).
+
+Corpus replay, by caller class (one run, 65.9 G; style M is the cascade, rules M the rule-set builds before it):
+
+| caller class | style passes | elements | rules M | style M | layouts | layout M | % of total |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| rendering step: motion, observers | 71 | 249037 | 1,776 | 2,578 | 33 | 1,492 | 8.9 |
+| page script: getComputedStyle, offset*, scroll*, rects | 118 | 126786 | 1,195 | 2,182 | 296 | 1,371 | 7.2 |
+| picture arrived (images.rs) | 123 | 120303 | 1,272 | 1,656 | 219 | 1,492 | 6.7 |
+| driver: click, visible, hit test, rehover (geometry) | 110 | 127287 | 399 | 1,078 | 133 | 777 | 3.4 |
+| driver: locators and snapshot (style only) | 20 | 62107 | 567 | 590 | 32 | 507 | 2.5 |
+| other (untagged) | 5 | 2540 | 0 | 10 | 6 | 31 | 0.1 |
+
+The 12 largest callers of the same run:
+
+| caller | style passes | elements | cache hits | style M | rule builds | rules M | layouts | boxes | layout M | % of total |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `images.rs:248` self.frame_now(); | 123 | 120303 | 33 | 1656 | 66 | 1272 | 219 | 239586 | 1492 | 6.71 |
+| motion frame | 52 | 223953 | 10 | 2257 | 29 | 1771 | 0 | 0 | 0 | 6.11 |
+| `locate.rs:222` page.inspect(/doc, frame/ norm(&Cx | 18 | 60479 | 1 | 584 | 7 | 564 | 29 | 102292 | 493 | 2.49 |
+| IntersectionObserver | 0 | 0 | 35 | 0 | 0 | 0 | 33 | 216261 | 1492 | 2.26 |
+| scroll/client sizes | 24 | 14159 | 35 | 640 | 14 | 464 | 28 | 43804 | 270 | 2.09 |
+| offsetTop/Left/Parent | 18 | 66064 | 4 | 684 | 5 | 272 | 24 | 92108 | 396 | 2.05 |
+| `page.rs:934` let target = self.hit(x, y); | 65 | 74613 | 11 | 575 | 0 | 4 | 76 | 93979 | 464 | 1.58 |
+| getComputedStyle | 34 | 23983 | 1560 | 648 | 1 | 20 | 0 | 0 | 0 | 1.01 |
+| offsetWidth/Height | 30 | 7823 | 187 | 80 | 7 | 412 | 29 | 18338 | 76 | 0.86 |
+| `run.rs:1282` State::Visible => match p.visible_ | 8 | 4399 | 1 | 100 | 7 | 356 | 10 | 5979 | 31 | 0.74 |
+| getComputedStyle used | 0 | 0 | 0 | 0 | 0 | 0 | 188 | 114042 | 455 | 0.69 |
+| `control.rs:416` self.rehover(); | 33 | 25235 | 4 | 222 | 0 | 1 | 39 | 36703 | 176 | 0.61 |
+
+The suite (all callers; 15,635 M):
+
+| caller | style passes | elements | cache hits | style M | rule builds | rules M | layouts | boxes | layout M | % of total |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `locate.rs:222` page.inspect(/doc, frame/ norm(&Cx | 334 | 70055 | 0 | 300 | 186 | 4707 | 515 | 172297 | 553 | 35.56 |
+| `page.rs:934` let target = self.hit(x, y); | 340 | 67288 | 0 | 279 | 0 | 6 | 340 | 113356 | 349 | 4.05 |
+| getClientRects | 0 | 0 | 290 | 0 | 0 | 0 | 145 | 55535 | 167 | 1.07 |
+| `control.rs:560` self.visible_box(h)?; | 8 | 151 | 1 | 1 | 5 | 127 | 9 | 161 | 1 | 0.82 |
+| `locate.rs:107` .inspect(/doc, frame/ { | 36 | 8136 | 0 | 34 | 0 | 1 | 36 | 13788 | 43 | 0.49 |
+| `control.rs:416` self.rehover(); | 32 | 598 | 0 | 4 | 0 | 1 | 32 | 538 | 2 | 0.04 |
+
+Live journeys (24.3 G; the 6 largest callers):
+
+| caller | style passes | elements | cache hits | style M | rule builds | rules M | layouts | boxes | layout M | % of total |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `locate.rs:222` page.inspect(/doc, frame/ norm(&Cx | 38 | 66680 | 0 | 665 | 36 | 1340 | 67 | 133892 | 611 | 10.77 |
+| `page.rs:934` let target = self.hit(x, y); | 64 | 63765 | 10 | 489 | 0 | 3 | 74 | 89089 | 432 | 3.80 |
+| `run.rs:1282` State::Visible => match p.visible_ | 13 | 10653 | 0 | 144 | 12 | 487 | 19 | 19209 | 120 | 3.09 |
+| `control.rs:369` self.visible_box(h)?; | 13 | 22037 | 2 | 149 | 7 | 117 | 22 | 33424 | 165 | 1.77 |
+| `control.rs:416` self.rehover(); | 34 | 35480 | 3 | 242 | 0 | 1 | 37 | 33782 | 157 | 1.64 |
+| offsetWidth/Height | 22 | 4845 | 92 | 53 | 4 | 269 | 20 | 12968 | 51 | 1.53 |
+
+### What the count says
+
+1. The driver asks for little of the style and layout. Locators and snapshot (the callers that read only styles) are 2.5% of the corpus journeys. Click, visible, hit test and rehover are 3.4%. The rest comes from the page itself: the motion step (8.9%), script reads of geometry and style (7.2%) and a picture that arrived (6.7%). A styles-only frame cannot touch those.
+2. The layout that a styles-only frame would skip is 0.3 to 0.4% of the corpus journeys, about 2.0% of the live journeys and 2.7% of the suite. These are upper bounds. Without the frame, the next geometry step lays out from an older kept layout (`layout_kept`), so it does more work than the one it replaces. The cost of that is not measured. All the skipped layouts of the suite (398 of 398) and 7 of 8 on the corpus come from one request, `locate.rs:222`: the text of an element, read by `expect LOC text`. The poll of that step finds a stale frame about 1,200 times in the live journeys.
+3. `Frame.layout` is read at 34 places (`grep 'frame.layout\|f.layout\|fr.layout'`), not the 5 callers that the design counted. An `Option<Layout>` is a change in the paint, hit-test, scroll and screenshot paths too.
+4. The rule-set build is the largest cost that the count found, and it is not a layout cost. It is 30.9% of the suite (4.8 G of 15.6 G) and 7.8 to 8.3% of the corpus journeys. A new rule set is built for most documents: 186 builds for the 334 style passes of `locate.rs:222` in the suite. A check with the fixture sheet at 1 KB instead of 60 KB (`tools/suite/server.py --css-kb 1`) gives 322 M for the builds instead of 4,840 M, so the 60 KB sheet costs about 6.5 M instructions for each document (hypothesis: the index of the rules is built again for each document; the parse is cached). The sheet registry (#490) did not change this share. That is the part of criterion 7 that is left for the rule index and the registry (`cascade.rs`, `sources_capped`).
+5. Motion frames cost 6.1% of the corpus journeys (52 style passes, 224 K elements styled, 1.8 G in rule-set builds). Hypothesis: a page with no transition or animation does not need them. Not checked.
+
+### Decision
+
+The styles-only frame is not built. Its upper bound is 0.4% on the corpus journeys (the criterion 2 benchmark), 2.0% live and 2.7% on the suite. The rule was: under about 2% does not pay. The suite figure is over 2%, but a real saving is smaller than the bound (point 2), the change is larger than the design said (point 3), and it cannot lift criterion 7 (1.35 to 1.5 times needs 10% of the suite). Property-mask cascade (B) and closure layout (C) stay unbuilt: they need the same style-only share, and it is 2.5% of the corpus journeys. See `docs/decisions.md`.
+
+To check again: `tools/drive/force_count.py` after the rule-set cost falls. The skipped layout is a fixed 420 M on the suite, so its share rises when the other costs fall (about 4% of the suite without the rule-set builds).
+
+### Checks
+
+- `cargo test --release --workspace --no-fail-fast`: 3,818 passed, 9 failed. Two are downloads tests that fail under load and pass alone, 3 runs each (`a_changed_file_starts_again_from_zero`: "no connection for the download"; `a_hidden_iframe_download_is_saved`). Seven are `bare-tls` tests that use `openssl` (`client_openssl`, `tls12_openssl`, `https_openssl`: `BadSignature`; the machine has OpenSSL 4.1.0, hypothesis for the cause). This change touches no file of `crates/tls`, `crates/net`, `crates/mcp` or `downloads/` (`git diff origin/main --stat` is empty for them), so the same code fails on main. Not run on main.
+- The counters change no result: the 47 journeys that pass on the corpus pass with the switch, `nextjs-docs` fails on main without it too, and the suite passes 40 of 40 with it (the check of `force_count.py` counts only runs that pass).
+
+### Not tested
+
+- The styles-only frame itself (not built). The extra cost of a larger `layout_kept` after skipped layouts.
+- Wall time (not the subject). A second machine. `bare-mcp` sessions (the `snapshot`, `find` and `read` tools): they call the same `inspect`, so the count above covers their frame requests, but no MCP session was run.
+- The instruction count of a pass on a CPU without `perf_event_open` for user mode (`perf_event_paranoid` above 2): the counters then print 0 instructions and the counts of passes stay right.
