@@ -172,3 +172,17 @@ fn the_check_of_a_pattern_agrees_with_its_compile() {
         }
     }
 }
+
+#[test]
+fn lazy_functions_loaded_one_after_the_other_keep_their_own_frame_slots() {
+    big(|| {
+        // Each function is a leaf with a loop, so it may get frame slots. Each is the only function of its tree (the same function index).
+        let mut src = String::new();
+        for i in 0..6 {
+            src += &format!("function f{i}(n) {{ {PAD} var s = {i}; for (var k = 0; k < n; k++) {{ let t = k + p1; s += t; }} return s + p7; }}\n");
+        }
+        // The first calls come first: a function that has run once and is called again gets its frame while the next one is loaded.
+        src += "var o = [f0(3), f1(3), f2(3), f0(3), f3(3), f1(3), f4(3), f2(3), f5(3)]; for (var j = 0; j < 3; j++) { o.push(f0(3), f1(3), f2(3), f3(3), f4(3), f5(3)); } o.join()";
+        assert_eq!(run(&src), "27,28,29,27,30,28,31,29,32,27,28,29,30,31,32,27,28,29,30,31,32,27,28,29,30,31,32");
+    });
+}

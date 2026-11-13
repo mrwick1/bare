@@ -563,8 +563,9 @@ impl<'p> Interp<'p> {
         let me = fid.index();
         self.scopes[me].fr = FR_ENV;
         let lo = self.scopes[me].lo as usize;
-        // `func` is an index in the function table of one script. The scopes of the next script follow the last function, and its root can have the same index.
-        let hi = lo + self.sc_all[lo..].iter().take_while(|r| r.func as usize == me && !matches!(r.kind, RKind::Root)).count();
+        // `func` is an index in the function table of one script. The scopes of the next script follow the last function, and its root can have the
+        // same index. So can the function scope of a lazy function (`lazy_load`) that is walked next: a function has one `Fn` scope, the first.
+        let hi = lo + 1 + self.sc_all[lo + 1..].iter().take_while(|r| r.func as usize == me && !matches!(r.kind, RKind::Root | RKind::Fn(..))).count();
         let prog = self.prog.clone();
         let f = *prog.func(fid);
         let mut pool = std::mem::take(&mut self.fr_pool);
