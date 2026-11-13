@@ -2333,6 +2333,7 @@ fn a_hidden_iframe_download_is_saved() {
     let (r, _) = s.tool("eval", json!({"js": "location.pathname"}));
     assert_eq!(r, json!("/frames"));
     let _ = std::fs::remove_dir_all(&dir);
+}
 
 /// A site with two pages that load the same two scripts: `/app.js` is `public` and `/priv.js` is `private`. Gives the base URL and the log of the
 /// paths that the server answered.
