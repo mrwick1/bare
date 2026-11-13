@@ -8520,3 +8520,4 @@ The owner asked for download handling "like IDM": resume and retry, segmented pa
 `docs/design-downloads.md` holds the design. No code changed.
 Measured with `curl`, 3 rounds, n = 1, 4 and 8 range connections, on Wi-Fi from archMachine: more connections did not give a steady gain (best 2.6 times, worst 3.5 times slower). 2 of 6 single-connection runs stalled (0.65 MB/s and 0.08 MB/s). Splitting mainly protects against a stalled connection.
 Open owner questions are in section 8 of the design. The first is scope against the login and E2E goal of 2026-11-10.
+Owner decision, 2026-11-13: "work it out and get it done". Build all 3 steps now. Pause lasts only while the process runs. `MAX_DOWNLOAD` stays 1 GiB. Start values as in section 8 of the design.

@@ -1,6 +1,6 @@
 # Design: a download manager (resume, retry, parallel segments, queue)
 
-Status: proposal. The owner reviews this document before any code is built.
+Status: accepted on 2026-11-13. The owner said "work it out and get it done". The decisions are in section 8.
 Written on 2026-11-13 against main `8eb90c9c`. Machine: archMachine (16 cores, Wi-Fi link, load average 16 to 23 during the runs).
 Scope (owner choice, 2026-11-13): resume and retry, segmented parallel downloads, a queue with controls. Streaming uploads are out of scope.
 This document does not change code.
@@ -166,11 +166,13 @@ Instructions with `perf stat -e instructions`, 3 runs, spread given. Wall time o
 
 Each step is one PR with its benchmark rows in `docs/progress.md`.
 
-## 8. Open questions for the owner
+## 8. Decisions (2026-11-13)
 
-1. Scope: the goal of 2026-11-10 is login and E2E only. No journey fails on downloads today. Build now, or keep this design until a journey needs it?
-2. Resume after a restart of `bare-mcp`: write the segment list to a small file next to `name.part`? It adds a file format to keep. Without it, a pause lasts only while the process runs.
-3. `MAX_DOWNLOAD`: keep 1 GiB, or make it a setting?
+The owner left the open questions to the builder ("work it out and get it done").
+
+1. Scope: build now, all 3 steps.
+2. Resume after a restart: no. A pause lasts while the process runs. No sidecar file and no file format. A `bare-mcp` session lives in one process.
+3. `MAX_DOWNLOAD`: keep 1 GiB. It protects the disk.
 4. Start values: `MIN_SPLIT` 4 MiB, 8 connections for each job, 16 in total, 3 jobs at once. Step 2 measures them.
 
 Not tested: every claim about Chrome, Firefox, aria2 and IDM in section 3; the causes in section 2; any bare run.
