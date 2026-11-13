@@ -524,6 +524,7 @@ impl Dom {
 
     /// Compute every observation once, queue the entries of those that changed, and ask for their delivery.
     pub(crate) fn io_frame(&self, it: &mut Interp<'_>) -> R<()> {
+        let _caller = crate::force::tag("IntersectionObserver");
         let Some(st) = self.io.st.get() else { return Ok(()) };
         {
             let mut s = st.borrow_mut();

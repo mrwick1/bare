@@ -226,6 +226,7 @@ fn view(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
 }
 
 fn offset(d: &Dom, it: &mut Interp<'_>, this: Value, y: bool) -> V {
+        let _caller = crate::force::tag("event offsetX/Y");
     let (target, u) = with_ui(d, it, this, |e, u| (e.target, u.clone()))?;
     let (client, page) = if y { (u.y, u.page.1) } else { (u.x, u.page.0) };
     let mut v = page;

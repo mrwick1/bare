@@ -593,7 +593,10 @@ impl Page {
     }
 
     /// The layout of the last frame, made now if the page changed. A stale frame with the same render key keeps its layout.
+    #[track_caller]
     pub fn frame_now(&mut self) -> Option<&Frame> {
+        let _caller = crate::force::tag_at(std::panic::Location::caller());
+        crate::force::frame(self.frame.is_none() || self.stale);
         if self.frame.is_none() || self.stale {
             self.stale = false;
             self.built = false;
@@ -768,6 +771,7 @@ impl Page {
     }
 
     /// The element under the window point: one hit test for each point, frame and set of offsets (a click asks three times).
+    #[track_caller]
     pub(crate) fn hit(&mut self, x: f64, y: f64) -> Option<NodeId> {
         self.frame_now()?;
         let Page { source, frame, ext, epoch, last_hit, .. } = self;
@@ -794,6 +798,7 @@ impl Page {
 
     /// After the boxes moved under a still pointer, Chrome sends a "fake mouse move": `:hover` and the boundary events follow the new
     /// layout. Once for each frame, so a listener that changes the page again cannot loop.
+    #[track_caller]
     pub(crate) fn rehover(&mut self) {
         self.frame_now();
         if !(self.inside && self.moved) {
@@ -1086,6 +1091,7 @@ impl Page {
     }
 
     /// Run `f` on the page geometry and a copy of the offsets; keep the offsets when it says that it moved something.
+    #[track_caller]
     pub(crate) fn scroll_with(&mut self, f: impl FnOnce(&Geo, &mut Scroll) -> bool) -> bool {
         self.frame_now();
         let Page { source, frame, size, .. } = self;

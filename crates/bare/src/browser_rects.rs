@@ -423,6 +423,7 @@ fn gate(what: &'static str) -> Error {
 
 /// The rectangles of an element, in window coordinates.
 pub(crate) fn element_rects(d: &Dom, it: &mut Interp<'_>, el: NodeId) -> R<Vec<Rect>> {
+        let _caller = crate::force::tag("getClientRects");
     if !d.in_document(it, el)? {
         return Ok(Vec::new());
     }
@@ -460,6 +461,7 @@ fn client_rects(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
 }
 
 fn range_rects(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<Vec<Rect>> {
+        let _caller = crate::force::tag("range rects");
     let b = bounds(d, it, this)?;
     if !d.in_document(it, b.0)? || !d.in_document(it, b.2)? {
         return Ok(Vec::new());

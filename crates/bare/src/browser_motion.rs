@@ -259,6 +259,7 @@ impl Dom {
 
     /// The part of the rendering step: style the document, so that a change is seen.
     pub(crate) fn motion_frame(&self, it: &mut Interp<'_>) -> R<()> {
+        let _caller = crate::force::tag("motion frame");
         self.motion.s.borrow_mut().pending = false;
         if !self.motion.s.borrow().armed {
             return Ok(());
@@ -435,6 +436,7 @@ impl Dom {
 
     /// Run one step of the task of a transition or an animation.
     pub(crate) fn motion_task(&self, it: &mut Interp<'_>, id: u64, step: u8) -> R<()> {
+        let _caller = crate::force::tag("motion task");
         if step != CANCEL {
             // The element may be gone: the cascade finds it and cancels.
             match self.cascade_now(it) {

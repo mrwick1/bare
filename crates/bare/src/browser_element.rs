@@ -225,6 +225,7 @@ fn first_box(d: &Dom, it: &mut Interp<'_>, styles: &bare_css::cascade::Styles, l
 
 /// `None`: the element has no box. Else its offset parent and offsets.
 fn offset(d: &Dom, it: &mut Interp<'_>, el: NodeId) -> R<Option<Offset>> {
+        let _caller = crate::force::tag("offsetTop/Left/Parent");
     if !d.in_document(it, el)? {
         return Ok(None);
     }
@@ -389,6 +390,7 @@ fn transform(text: &str, t: Cv) -> String {
 }
 
 fn inner_text(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+        let _caller = crate::force::tag("innerText");
     let n = d.style_html_el(it, this)?;
     let styles = if d.in_document(it, n)? { Some(d.cascade_now(it)?) } else { None };
     let shown = |s: &bare_css::cascade::Styles, n| s.style(n).is_some_and(|c| !kw(c.get(Property::Display), Keyword::None));
@@ -621,6 +623,7 @@ fn odd_rules(doc: &mut Document, key: &[(NodeId, Option<String>, String)]) -> Op
 /// `Element.checkVisibility(options)` (CSSOM View). Options are read in the order of the dictionary (sorted by name). `opacityProperty` and
 /// `visibilityProperty` are the old names of `checkOpacity` and `checkVisibilityCSS`: either one turns the check on.
 fn check_visibility(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+        let _caller = crate::force::tag("checkVisibility");
     let n = d.el(it, this)?;
     let mut opt = [false; 5];
     match arg(a, 0) {

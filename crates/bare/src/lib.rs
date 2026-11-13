@@ -28,6 +28,7 @@ pub mod agent;
 pub mod page;
 mod images;
 pub mod control;
+pub mod force;
 #[cfg(test)]
 mod control_tests;
 #[cfg(test)]

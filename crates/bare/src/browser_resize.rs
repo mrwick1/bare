@@ -301,6 +301,7 @@ impl Dom {
 
     /// Measure every observed target once: one cascade and one bounded layout.
     fn measure(&self, it: &mut Interp<'_>) -> R<HashMap<NodeId, Sizes>> {
+        let _caller = crate::force::tag("ResizeObserver");
         let targets: Vec<NodeId> = {
             let s = self.resize.s.borrow();
             s.order.iter().flat_map(|o| s.observers[o].obs.iter().map(|x| x.target)).collect()
