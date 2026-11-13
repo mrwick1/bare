@@ -9,4 +9,5 @@ pub mod run;
 pub mod snap;
 pub mod state;
 pub mod steps;
+pub mod suite;
 pub use bare::{DownloadState, Downloads};

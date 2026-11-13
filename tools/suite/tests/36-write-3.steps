@@ -1,0 +1,8 @@
+# write: add a note through the page
+open ${BASE}/home state="${STATE}"
+expect css="h1" text="Heading home"
+click role=link name="Notes"
+expect css="h1" text="Heading notes"
+type css="#note" "note-3"
+click role=button name="Add note"
+expect css="#notes" text~"note-3"

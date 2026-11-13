@@ -1,0 +1,12 @@
+# iso: leave a cookie and storage behind
+open ${BASE}/home state="${STATE}"
+expect css="h1" text="Heading home"
+expect js "(localStorage.setItem('leak','1'), sessionStorage.setItem('leak','1'), true)"
+cookie set leak 1
+expect cookie leak value="1"
+click role=link name="Page 2"
+expect css="h1" text="Heading p2"
+expect css="#count" text="20"
+click role=link name="Page 3"
+expect css="h1" text="Heading p3"
+expect css="#count" text="20"
