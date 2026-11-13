@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Write the standard suite of 40 tests (docs/design-suite.md, section 5.2) into DIR.
 
-usage: gen_suite.py DIR
+usage: gen_suite.py DIR [PAGES]   (PAGES: pages that a read test visits after the start; default 5)
 
 setup.steps is the login that the shared tests start from. A test that begins with `open ... state="${STATE}"` is shared: the runner
 logs in once (setup.steps) and each such test starts from the saved session. A test with `sign out`, `password` or `delete` in its
@@ -18,6 +18,7 @@ import os
 import sys
 
 out = sys.argv[1]
+PAGES = int(sys.argv[2]) if len(sys.argv) > 2 else 5
 os.makedirs(out, exist_ok=True)
 
 START = 'open ${BASE}/home state="${STATE}"\nexpect css="h1" text="Heading home"\n'
@@ -28,7 +29,7 @@ def write(name, text):
         f.write(text)
 
 
-def visits(i, n=5):
+def visits(i, n=PAGES):
     s = ""
     for k in range(n):
         p = (i + k) % 8 + 1
@@ -52,7 +53,7 @@ save-state "${STATE}"
 n = 0
 for i in range(26):
     n += 1
-    write(f"{n:02d}-read-{i:02d}", "# read: 5 pages\n" + START + visits(i))
+    write(f"{n:02d}-read-{i:02d}", f"# read: {PAGES} pages\n" + START + visits(i))
 # The pair that checks the isolation of the shared login: the first test leaves a cookie and storage behind.
 n += 1
 write(

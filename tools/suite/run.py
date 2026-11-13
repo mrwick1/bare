@@ -2,7 +2,7 @@
 """The suite benchmark (docs/design-suite.md, section 5.3; success criterion 7 of docs/perf-goal.md).
 
 usage: run.py BARE_DRIVE [--suite DIR] [--variants V0,V1,V2,V3,V4] [--k 2,4,8,12] [--runs 3] [--login-ms N] [--js-kb N] [--css-kb N]
-              [--keep DIR] [--only TEXT]
+              [--keep DIR] [--only TEXT] [--v0-binary PATH]
 
 It starts the fixture server (server.py) and runs the variants against it, RUNS times each. For each run: wall time, the sum of the
 instructions of all processes (`perf stat -e instructions:u`), peak RSS of each process, the tests that passed, and the login POSTs
@@ -13,6 +13,7 @@ that the server counted. A run does not count when a test failed or when the log
   V2  one warm worker, the login runs once and the shared tests start from it (`--workers 1`)
   V3  V0 with K processes at a time (a pool of processes, a new process for each test, every test logs in)
   V4  V2 with K workers (`--workers K`): warm workers, one shared login
+--v0-binary runs the cold variants (V0, V3) with another bare-drive, for example the frozen baseline commit; the step files still come from BARE_DRIVE.
 The default suite is the one of gen_suite.py (tools/suite/tests). Output: one JSON line for each run, then a table.
 """
 import argparse
@@ -96,7 +97,7 @@ def one_run(variant, k, args, port, cold_files, work):
     n = len(cold_files)
     if variant in ("V0", "V3"):
         workers = 1 if variant == "V0" else k
-        res = cold_pool(args.binary, port, cold_files, workers, work)
+        res = cold_pool(args.v0_binary or args.binary, port, cold_files, workers, work)
         passed = sum(1 for r in res if r[0])
         instr = sum(r[1] for r in res) if all(r[1] is not None for r in res) else None
         peaks = [r[2] for r in res]
@@ -146,8 +147,10 @@ def main():
     ap.add_argument("--css-kb", type=int, default=60)
     ap.add_argument("--keep", default=None)
     ap.add_argument("--only", default=None)
+    ap.add_argument("--v0-binary", default=None)
     args = ap.parse_args()
     args.binary = os.path.abspath(args.binary)
+    args.v0_binary = os.path.abspath(args.v0_binary) if args.v0_binary else None
     work = args.keep or tempfile.mkdtemp(prefix="suite-bench-")
     os.makedirs(work, exist_ok=True)
     srv = subprocess.Popen(
