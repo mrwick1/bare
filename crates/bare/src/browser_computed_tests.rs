@@ -797,7 +797,7 @@ fn a_large_page_reads_with_the_default_limits() {
 }
 
 /// A read after a change restyles the elements that the change reaches. It charges for those, not for the whole page. 2,000 elements and
-/// 2,000 class rules are 1 M steps for a full cascade (each element charges 64 steps and its one candidate rule since 2026-11-12: 128 K), and the budget here is 6 M. Main charged the whole bound (4 M)
+/// 2,000 class rules are 1 M steps for a full cascade (each element charges 32 steps and its one candidate rule since 2026-11-13: 66 K), and the budget here is 6 M. Main charged the whole bound (4 M)
 /// for each of the 3 reads (dev.to: 84 M).
 #[test]
 fn a_read_after_a_change_charges_the_elements_it_restyles() {
@@ -812,8 +812,8 @@ fn a_read_after_a_change_charges_the_elements_it_restyles() {
         // A change that keeps the style of its element costs that one element: 100 reads fit (the whole page would be 1 M each).
         let same = "var b = document.body, n = 0; for (var i = 0; i < 100; i++) { b.className = 'z' + i; n += b.clientHeight >= 0; } n";
         assert_eq!(js(&mut b, same), "100");
-        // A change that restyles the whole subtree of the body is charged for it (64 steps for each element): 60 of them are over the budget.
-        let all = "var b = document.body; for (var i = 0; i < 60; i++) { b.className = i % 2 ? 'on' : 'z'; b.clientHeight; } 1";
+        // A change that restyles the whole subtree of the body is charged for it (32 steps for each element): 120 of them are over the budget.
+        let all = "var b = document.body; for (var i = 0; i < 120; i++) { b.className = i % 2 ? 'on' : 'z'; b.clientHeight; } 1";
         assert_eq!(js(&mut b, all), "limit:Steps");
     });
 }
@@ -871,5 +871,21 @@ fn ten_restyles_of_a_large_page_fit_the_step_budget() {
         let mut b = Browser::new(tree::parse(&page), BrowserLimits::default(), EvalLimits::default(), HeapLimits::default()).unwrap();
         let script = "for (var i = 0; i < 10; i++) { document.body.classList.toggle('x'); document.body.getBoundingClientRect(); } 1";
         assert_eq!(js(&mut b, script), "1");
+    });
+}
+
+/// A page of 3,000 divs with a `span` each and 18,000 `.kN span` rules: the list of `span` has 18,000 rules, and each restyle used to test all of them
+/// for each span (108 M steps for one whole-page restyle, so the fifth ended the task). The index splits the list by the class of the ancestor, so
+/// a restyle tests a few rules for each element and charges the work it does: 30 of them fit the default budget.
+#[test]
+fn thirty_restyles_of_a_page_with_a_long_tag_list_fit_the_step_budget() {
+    big(|| {
+        let css: String = (0..18_000).map(|i| format!(".k{i} span{{padding:1px}}")).collect::<String>() + "body.x .k1{margin:0}";
+        let body: String = (0..3000).map(|i| format!("<div class='k{} k{} k{} k{} k{} k{}'><span>x</span></div>", i, i + 1, i + 2, i * 5, i * 5 + 1, i * 5 + 2)).collect();
+        let page = format!("<style>{css}</style><body>{body}");
+        let mut b = Browser::new(tree::parse(&page), BrowserLimits::default(), EvalLimits::default(), HeapLimits::default()).unwrap();
+        let script = "for (var i = 0; i < 30; i++) { document.body.classList.toggle('x'); document.body.getBoundingClientRect(); } 1";
+        assert_eq!(js(&mut b, script), "1");
+        assert!(b.computed_stats().restyles >= 29, "{:?}", b.computed_stats());
     });
 }

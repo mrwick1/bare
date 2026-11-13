@@ -102,6 +102,7 @@ fn prop_of(attr: &str) -> Option<String> {
 }
 
 /// Does the attribute `attr` have the property name `key` (UTF-16)? Same as `prop_of(attr)` equals `key`, with no allocation.
+#[inline]
 fn matches(attr: &str, key: &[u16]) -> bool {
     let Some(tail) = attr.strip_prefix("data-") else { return false };
     if tail.is_ascii() {

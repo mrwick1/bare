@@ -66,7 +66,7 @@
 //! (sheets, and bytes of `<style>` text, `href` and supplied parts that one read uses), `computed-rules` (selectors after the build:
 //! the build is bounded by the bytes), `computed-work` (nodes times rules, or if that is over `STYLED_FROM` the styled elements times rules: a loose upper
 //! bound, the real work is far smaller because rules are indexed; see `styled_work`), `computed-external` and `computed-external-bytes` (stored external sheets). Steps are charged before the
-//! build. A full compute charges one step per node before the work, then its tested candidates (`RuleSet::tested_candidates`). A restyle charges `STEPS_PER_RESTYLED_ELEMENT` for each element that it styles, and its tested candidates; a read that finds the last styles right charges 1. Names that the sheets add to the document table are bounded by the sheet bytes and checked against
+//! build. A full compute charges one step per node before the work, then its tested candidates (`RuleSet::tested_candidates`). A restyle charges `STEPS_PER_RESTYLED_ELEMENT` for each element that it styles (`RuleSet::styled_elements`), and its tested candidates; a read that finds the last styles right charges 1. Names that the sheets add to the document table are bounded by the sheet bytes and checked against
 //! `max_names` after the build.
 //!
 //! Pseudo-elements (`getComputedStyle(el, '::before')`): the engine has no pseudo-element cascade. A rule with a pseudo-element in a selector
@@ -219,9 +219,10 @@ pub(crate) fn is_missing_sheet(e: &Error) -> bool {
 /// with a colon and is no pseudo-element).
 /// Above this bound (nodes x (rules + 1)) the work cap counts styled elements. This costs one tree walk.
 const STYLED_FROM: u64 = 1 << 20;
-/// Steps for each element that a restyle styles, over its candidate rules (one step each). Measured on 2026-11-12: a script step takes 26 ns, a restyle of 3,000
-/// elements with 12 candidates each takes 6 to 8 ms, so about 80 steps for each element. See `docs/decisions.md`.
-const STEPS_PER_RESTYLED_ELEMENT: u64 = 64;
+/// Steps for each element that a restyle styles, over its candidate rules (one step each). Measured on 2026-11-13: a step is about 200 instructions, and a
+/// restyle costs 6,500 to 7,200 instructions for each element with 8 candidates (`rest_13`, `compm_22000`), so about 33 to 36 steps for each element,
+/// candidates included. See `docs/decisions.md`.
+const STEPS_PER_RESTYLED_ELEMENT: u64 = 32;
 const PSEUDO: u8 = 1;
 const EMPTY: u8 = 2;
 
@@ -901,20 +902,12 @@ fn restyle_marks(it: &mut Interp<'_>, rules: &RuleSet, doc: &bare_html::dom::Doc
     Scopes::user_roots(scopes.focus, &old[2], &new[2], doc, &mut roots);
     it.charge(roots.len() as u64 + 1)?;
     let mut changed = Vec::new();
-    let before = rules.tested_candidates();
+    let (tested, styled) = (rules.tested_candidates(), rules.styled_elements());
     if !rules.restyle(doc, styles, &roots, &mut changed) {
         return Ok(None);
     }
-    // What a full cascade charges for each element, for each element that `RuleSet::restyle` styled: a root that is styled with its
-    // subtree, and the subtree of a root whose style changed. A root with the same style costs one element.
-    let (mut visited, changed_roots) = (0u64, changed.iter().map(|c| c.0).collect::<std::collections::HashSet<_>>());
-    for &(root, subtree) in &roots {
-        visited += elements_under(doc, root, if subtree || changed_roots.contains(&root) { doc.len() as u64 } else { 1 });
-        if visited >= doc.len() as u64 {
-            break;
-        }
-    }
-    it.charge(visited.saturating_mul(STEPS_PER_RESTYLED_ELEMENT).saturating_add(rules.tested_candidates() - before))?;
+    // The real work: the elements that `RuleSet::restyle` styled, and the candidates and look-ups of the index for them.
+    it.charge((rules.styled_elements() - styled).saturating_mul(STEPS_PER_RESTYLED_ELEMENT).saturating_add(rules.tested_candidates() - tested))?;
     Ok(Some(changed))
 }
 

@@ -152,8 +152,10 @@ const OUTER: u8 = 2;
 /// A `::part()` rule of the document: outside every shadow tree.
 const OUTERMOST: u8 = 3;
 
+/// A list of rules with more entries than this is split by an ancestor key (`Big`), when at least half of its rules have one.
+const SPLIT_FROM: usize = 16;
+
 /// The rules of one tree, found by what the last compound reads. The document, and each shadow tree, has one.
-#[derive(Default)]
 struct Index {
     by_id: Buckets<Box<str>>,
     by_class: Buckets<Box<str>>,
@@ -163,11 +165,134 @@ struct Index {
     by_attr: Buckets<Atom>,
     /// The rules that have no id, no class, no attribute and no tag in the last part: `*`, `:first-child`.
     other: Vec<u32>,
+    /// The long lists, split by an ancestor key. Made at the first look-up after a `push`.
+    big: std::cell::OnceCell<Option<Box<Bigs>>>,
+    /// A list over this length is split. A field so that a test can make small lists split, or never.
+    split_from: usize,
+}
+
+impl Default for Index {
+    fn default() -> Index {
+        Index { by_id: Buckets::default(), by_class: Buckets::default(), by_tag: Buckets::default(), by_attr: Buckets::default(), other: Vec::new(), big: std::cell::OnceCell::new(), split_from: SPLIT_FROM }
+    }
+}
+
+/// The long lists of an `Index` that have a split. A list that is not here is read whole.
+#[derive(Default)]
+struct Bigs {
+    by_id: HashMap<Box<str>, Big, BuildHasherDefault<Fnv>>,
+    by_class: HashMap<Box<str>, Big, BuildHasherDefault<Fnv>>,
+    by_tag: HashMap<Atom, Big, BuildHasherDefault<Fnv>>,
+    by_attr: HashMap<Atom, Big, BuildHasherDefault<Fnv>>,
+    other: Option<Big>,
+}
+
+/// One long list, split. A rule goes under the hash of its rarest ancestor (a tag, id or class that an ancestor of the element must have,
+/// see `ancestor_hashes`), or in `rest` when it has none. An element needs only `rest` and the groups for the hashes on its path.
+/// The three arrays are flat: group `i` is `list[starts[i]..starts[i + 1]]`, under the hash `keys[i]` (sorted, no repeats).
+struct Big {
+    keys: Box<[u32]>,
+    starts: Box<[u32]>,
+    list: Box<[u32]>,
+    rest: Box<[u32]>,
+}
+
+impl Big {
+    /// Split `rules`, in their order. `None` when fewer than half of them have a key: the split would not remove much.
+    fn split(rules: &[u32], entries: &[Entry]) -> Option<Big> {
+        // How many rules each hash could be the key of: the rarest one is the key.
+        let hashes: Vec<[u32; 4]> = rules.iter().map(|&r| ancestor_hashes(&entries[r as usize].selector, true)).collect();
+        let mut seen: HashMap<u32, u32, BuildHasherDefault<Fnv>> = HashMap::default();
+        for h in hashes.iter().flatten().filter(|&&h| h != 0) {
+            *seen.entry(*h).or_default() += 1;
+        }
+        let (mut keyed, mut rest) = (Vec::new(), Vec::new());
+        for (&r, hashes) in rules.iter().zip(&hashes) {
+            match hashes.iter().take_while(|&&h| h != 0).min_by_key(|h| seen[h]) {
+                Some(&h) => keyed.push((h, r)),
+                None => rest.push(r),
+            }
+        }
+        if keyed.len() * 2 < rules.len() {
+            return None;
+        }
+        keyed.sort_unstable();
+        let (mut keys, mut starts) = (Vec::new(), Vec::new());
+        for (i, &(h, _)) in keyed.iter().enumerate() {
+            if keys.last() != Some(&h) {
+                keys.push(h);
+                starts.push(i as u32);
+            }
+        }
+        starts.push(keyed.len() as u32);
+        Some(Big { keys: keys.into(), starts: starts.into(), list: keyed.iter().map(|k| k.1).collect(), rest: rest.into() })
+    }
+
+    /// Add to `out` the rules that may match an element with this path: `rest`, and the groups of the hashes that the path may have.
+    /// Gives the number of look-ups, as work for the step charge.
+    #[inline]
+    fn collect(&self, filter: &AncestorFilter, out: &mut Vec<u32>) -> u64 {
+        out.extend_from_slice(&self.rest);
+        let mut group = |i: usize| out.extend_from_slice(&self.list[self.starts[i] as usize..self.starts[i + 1] as usize]);
+        // Look up the shorter of the two: the keys in the filter (it may say yes for a hash that is not on the path: the matcher decides),
+        // or the hashes of the path in the keys (a binary search for each).
+        if self.keys.len() <= filter.path.len() {
+            for (i, &k) in self.keys.iter().enumerate() {
+                if filter.may_contain(k) {
+                    group(i);
+                }
+            }
+            self.keys.len() as u64
+        } else {
+            for &(h, _) in &filter.path {
+                if let Ok(i) = self.keys.binary_search(&h) {
+                    group(i);
+                }
+            }
+            filter.path.len() as u64
+        }
+    }
 }
 
 impl Index {
+    /// The split lists, made when first needed. `None` when no list is over `split_from`, or none has a split.
+    #[inline(always)]
+    fn bigs(&self, entries: &[Entry]) -> Option<&Bigs> {
+        match self.big.get() {
+            Some(b) => b.as_deref(),
+            None => self.make_bigs(entries),
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn make_bigs(&self, entries: &[Entry]) -> Option<&Bigs> {
+        self.big
+            .get_or_init(|| {
+                let (from, mut found) = (self.split_from, false);
+                let mut bigs = Bigs::default();
+                let mut make = |list: &Vec<u32>| (list.len() > from).then(|| Big::split(list, entries)).flatten().inspect(|_| found = true);
+                for (k, l) in &self.by_id {
+                    bigs.by_id.extend(make(l).map(|b| (k.clone(), b)));
+                }
+                for (k, l) in &self.by_class {
+                    bigs.by_class.extend(make(l).map(|b| (k.clone(), b)));
+                }
+                for (&k, l) in &self.by_tag {
+                    bigs.by_tag.extend(make(l).map(|b| (k, b)));
+                }
+                for (&k, l) in &self.by_attr {
+                    bigs.by_attr.extend(make(l).map(|b| (k, b)));
+                }
+                bigs.other = make(&self.other);
+                found.then(|| Box::new(bigs))
+            })
+            .as_deref()
+    }
+
     #[inline]
     fn push(&mut self, index: u32, selector: &Selector) {
+        self.big.take();
         // The bucket: an id is the most specific, then a class, then an attribute, then a tag. An attribute comes before a tag:
         // `input[type=checkbox]` is in the list of `type`, and few elements have a `type`; most elements are a `div`.
         let last = &selector.compounds[0].simples;
@@ -186,17 +311,51 @@ impl Index {
     }
 
     /// Add to `out` the rules that may match the element: the ones in the lists for its id, its classes, its attributes and its tag, and the "other" list.
+    /// A split list gives only the rules whose ancestor key may be on the path (`filter`). Gives the look-ups that the splits made, as work.
     #[inline(always)]
-    fn collect(&self, doc: &Document, el: NodeId, out: &mut Vec<u32>) {
-        out.extend_from_slice(&self.other);
+    fn collect(&self, doc: &Document, el: NodeId, out: &mut Vec<u32>, entries: &[Entry], filter: &AncestorFilter) -> u64 {
+        if filter.track { self.collect_with::<true>(doc, el, out, entries, filter) } else { self.collect_with::<false>(doc, el, out, entries, filter) }
+    }
+
+    /// `TRACK` is `filter.track`: false when no index has a split, and then there is nothing to look up.
+    #[inline(always)]
+    fn collect_with<const TRACK: bool>(&self, doc: &Document, el: NodeId, out: &mut Vec<u32>, entries: &[Entry], filter: &AncestorFilter) -> u64 {
+        if TRACK {
+            return self.collect_split(doc, el, out, entries, filter);
+        }
+        self.gather::<false>(doc, el, out, None, filter)
+    }
+
+    /// `collect` for a rule set that has a split somewhere. Apart, so that the code of the common case stays as it was.
+    #[inline(never)]
+    fn collect_split(&self, doc: &Document, el: NodeId, out: &mut Vec<u32>, entries: &[Entry], filter: &AncestorFilter) -> u64 {
+        match self.bigs(entries) {
+            Some(bigs) => self.gather::<true>(doc, el, out, Some(bigs), filter),
+            None => self.gather::<false>(doc, el, out, None, filter),
+        }
+    }
+
+    /// `collect`. With `SPLIT` false no list is split and it only copies the lists, as before the splits.
+    #[inline(always)]
+    fn gather<const SPLIT: bool>(&self, doc: &Document, el: NodeId, out: &mut Vec<u32>, bigs: Option<&Bigs>, filter: &AncestorFilter) -> u64 {
+        let mut work = 0;
+        // A list that is not over `split_from` has no split: no look-up in `bigs`.
+        let mut put = |list: &Vec<u32>, big: &dyn Fn(&Bigs) -> Option<&Big>| {
+            if SPLIT && list.len() > self.split_from && let Some(b) = bigs.and_then(big) {
+                work += b.collect(filter, out);
+            } else {
+                out.extend_from_slice(list);
+            }
+        };
+        put(&self.other, &|b| b.other.as_ref());
         if let NodeData::Element { name, attrs } = *doc.data(el) {
             if let Some(list) = self.by_tag.get(&name) {
-                out.extend_from_slice(list);
+                put(list, &|b| b.by_tag.get(&name));
             }
             if !self.by_attr.is_empty() {
                 for a in doc.attrs(attrs) {
                     if let Some(list) = self.by_attr.get(&a.name) {
-                        out.extend_from_slice(list);
+                        put(list, &|b| b.by_attr.get(&a.name));
                     }
                 }
             }
@@ -204,15 +363,16 @@ impl Index {
         if let Some(id) = doc.attr(el, Atom::ID)
             && let Some(list) = self.by_id.get(id)
         {
-            out.extend_from_slice(list);
+            put(list, &|b| b.by_id.get(id));
         }
         if let Some(classes) = doc.attr(el, Atom::CLASS) {
             for class in classes.split_ascii_whitespace() {
                 if let Some(list) = self.by_class.get(class) {
-                    out.extend_from_slice(list);
+                    put(list, &|b| b.by_class.get(class));
                 }
             }
         }
+        work
     }
 }
 
@@ -268,6 +428,8 @@ pub struct RuleSet {
     reach: std::cell::OnceCell<Reach>,
     /// The rules that the index offered for the elements that `walk` and `restyle` styled, summed over all calls. A caller takes the difference around one call.
     tested: std::cell::Cell<u64>,
+    /// The elements that `walk` and `restyle` styled, summed over all calls (one `candidates` call for each).
+    styled: std::cell::Cell<u64>,
     /// Does a rule have a logical property of the inline axis, or `float: inline-start | inline-end`? Only then does an `rtl` element need `logical_pass`.
     logical: Cell<bool>,
     /// Does a block that is not read yet have a declaration that may be a `transition` or an `animation`? (`scan::Found::Rule`)
@@ -491,7 +653,7 @@ impl RuleSet {
     }
 
     pub fn new(viewport: (f32, f32)) -> RuleSet {
-        RuleSet { viewport, entries: Vec::new(), bodies: Vec::new(), sources: Vec::new(), source: 0, decls: RefCell::default(), side: RefCell::default(), layers: vec![Layer { parent: 0 }], layer_by_name: HashMap::new(), customs: RefCell::default(), index: Index::default(), shadows: HashMap::default(), parts: Vec::new(), user: 0, scopes: Scopes::default(), reach: std::cell::OnceCell::new(), tested: std::cell::Cell::new(0), logical: Cell::new(false), motion: Cell::new(false), pending: None, keyframes: std::collections::HashSet::new() }
+        RuleSet { viewport, entries: Vec::new(), bodies: Vec::new(), sources: Vec::new(), source: 0, decls: RefCell::default(), side: RefCell::default(), layers: vec![Layer { parent: 0 }], layer_by_name: HashMap::new(), customs: RefCell::default(), index: Index::default(), shadows: HashMap::default(), parts: Vec::new(), user: 0, scopes: Scopes::default(), reach: std::cell::OnceCell::new(), tested: std::cell::Cell::new(0), styled: std::cell::Cell::new(0), logical: Cell::new(false), motion: Cell::new(false), pending: None, keyframes: std::collections::HashSet::new() }
     }
 
     /// Which user action state (`:hover`, `:active`, the focus pseudo-classes) some rule reads: the bits `selector::USES_*`.
@@ -825,7 +987,7 @@ impl RuleSet {
                 (None, false) => tree.index.push(index, &selector),
             }
         }
-        let ancestors = ancestor_hashes(&selector);
+        let ancestors = ancestor_hashes(&selector, false);
         self.entries.push(Entry { selector, body, layer, origin, ancestors, ctx });
     }
 
@@ -873,19 +1035,25 @@ impl RuleSet {
         body.unread.set(false);
     }
 
-    /// The candidate rules tested so far: one for each (element, rule) that the index offered. Take the difference around a call to `compute` or `restyle`.
+    /// The candidate rules tested so far: one for each (element, rule) that the index offered, and one for each look-up in a split list.
+    /// Take the difference around a call to `compute` or `restyle`.
     pub fn tested_candidates(&self) -> u64 {
         self.tested.get()
     }
 
+    /// The elements that `compute` and `restyle` styled so far. Take the difference around a call.
+    pub fn styled_elements(&self) -> u64 {
+        self.styled.get()
+    }
+
     /// Find the style of every element that is shown. The selectors must come from `add` with this same `doc`.
     pub fn compute(&self, doc: &Document) -> Styles {
-        if self.pending.is_some() { self.walk::<false, true>(doc, None, false) } else { self.walk::<false, false>(doc, None, false) }
+        self.walk_any::<false>(doc, None, false)
     }
 
     /// `compute`, and the styles keep the cache of the cascade, so that `restyle` can update a part of them later.
     pub fn compute_kept(&self, doc: &Document) -> Styles {
-        if self.pending.is_some() { self.walk::<false, true>(doc, None, true) } else { self.walk::<false, false>(doc, None, true) }
+        self.walk_any::<false>(doc, None, true)
     }
 
     /// The same, and the element `want` gets its style too, even inside `display:none` (for `getComputedStyle`: CSSOM gives the
@@ -895,22 +1063,34 @@ impl RuleSet {
     /// An element that the walk does not reach (a light child of a shadow host that no slot takes) still has no style.
     pub fn compute_for(&self, doc: &Document, want: Option<NodeId>) -> Styles {
         if want.is_some() {
-            if self.pending.is_some() { self.walk::<true, true>(doc, want, false) } else { self.walk::<true, false>(doc, want, false) }
+            self.walk_any::<true>(doc, want, false)
         } else {
-            if self.pending.is_some() { self.walk::<false, true>(doc, None, false) } else { self.walk::<false, false>(doc, None, false) }
+            self.walk_any::<false>(doc, None, false)
         }
     }
 
-    /// Const flags omit hidden-node and retained-input work from the ordinary layout loop.
+    /// `walk` with the flags that the rule set decides: retained inputs, and the path of the ancestor filter (only when a list has a split).
     #[inline(always)]
-    fn walk<const WANT: bool, const PENDING: bool>(&self, doc: &Document, want: Option<NodeId>, keep: bool) -> Styles {
+    fn walk_any<const WANT: bool>(&self, doc: &Document, want: Option<NodeId>, keep: bool) -> Styles {
+        match (self.pending.is_some(), self.tracks()) {
+            (true, true) => self.walk::<WANT, true, true>(doc, want, keep),
+            (true, false) => self.walk::<WANT, true, false>(doc, want, keep),
+            (false, true) => self.walk::<WANT, false, true>(doc, want, keep),
+            (false, false) => self.walk::<WANT, false, false>(doc, want, keep),
+        }
+    }
+
+    /// Const flags omit hidden-node and retained-input work from the ordinary layout loop. `TRACK`: `AncestorFilter::track`, as a flag of
+    /// the code, so that a page with no split list pays no test for it in the loop.
+    #[inline(never)]
+    fn walk<const WANT: bool, const PENDING: bool, const TRACK: bool>(&self, doc: &Document, want: Option<NodeId>, keep: bool) -> Styles {
         let mut way = Way { want, path: Vec::new(), sorted: Vec::new(), on: false, at: 0 };
         let mut styles = Styles { styles: vec![ComputedStyle::initial()], of_node: vec![NONE; doc.len()], calcs: Vec::new(), grids: Vec::new(), customs: var::Sets::default(), spaced: false, kept: None };
         // Style 0 is the starting style. It is the parent style of the `html` element.
         let mut cx = Cx { viewport: self.viewport, root_font_size: 16.0, layer_order: self.layer_order(), declared: &self.side, inline: RefCell::default(), computed: RefCell::default(), grids: RefCell::default(), customs: RefCell::default(), merges: RefCell::default() };
         let style_atom = doc.find_atom("style");
         let hints = crate::hints::Hints::new(doc);
-        let mut filter = AncestorFilter::new();
+        let mut filter = AncestorFilter::new(TRACK);
         let mut memo = Memo::default();
         let (mut candidates, mut matched): (Vec<u32>, Vec<u32>) = (Vec::new(), Vec::new());
         let mut stack = vec![(doc.root(), false, 0u32)];
@@ -923,7 +1103,7 @@ impl RuleSet {
         while let Some((node, leaving, scope)) = stack.pop() {
             match doc.data(node) {
                 NodeData::Element { .. } if leaving => {
-                    element_hashes(doc, node, &mut |h| filter.remove(h));
+                    filter.remove_element_with::<TRACK>(doc, node);
                     continue;
                 }
                 NodeData::Element { .. } => {
@@ -933,7 +1113,7 @@ impl RuleSet {
                         // Outside the hot loop: a page without a shadow root pays one test of a local for this.
                         self.match_shadowed(doc, node, scope, &filter, &mut (&mut candidates, &mut matched));
                     } else {
-                        self.candidates(doc, node, &mut candidates);
+                        self.candidates_with::<TRACK>(doc, node, &mut candidates, &filter);
                         matched.clear();
                         for &i in &candidates {
                             let e = &self.entries[i as usize];
@@ -966,7 +1146,7 @@ impl RuleSet {
                         // The root element. `rem` is a multiple of its font size.
                         cx.root_font_size = styles.styles[id as usize].px(Property::FontSize);
                     }
-                    element_hashes(doc, node, &mut |h| filter.add(h));
+                    filter.add_element_with::<TRACK>(doc, node);
                     stack.push((node, true, scope));
                 }
                 NodeData::Document => {}
@@ -1032,7 +1212,7 @@ impl RuleSet {
                 continue;
             }
             // Only a connected root that is shown: inside `display: none` all styles are `NONE`, and the hidden element has its own.
-            let mut filter = AncestorFilter::new();
+            let mut filter = AncestorFilter::new(self.tracks());
             let mut shadow = in_shadow(root);
             let mut up = doc.flat_parent(root);
             while let Some(a) = up {
@@ -1043,7 +1223,7 @@ impl RuleSet {
                 if s == NONE || styles.styles[s as usize].get(Property::Display) == Value::Keyword(Keyword::None) {
                     continue 'roots;
                 }
-                element_hashes(doc, a, &mut |h| filter.add(h));
+                filter.add_element(doc, a);
                 shadow |= in_shadow(a);
                 up = doc.flat_parent(a);
             }
@@ -1057,12 +1237,12 @@ impl RuleSet {
                     continue;
                 }
                 if leaving {
-                    element_hashes(doc, node, &mut |h| filter.remove(h));
+                    filter.remove_element(doc, node);
                     continue;
                 }
                 let parent = doc.flat_parent(node).map_or(0, |p| styles.of_node[p.index()]);
                 let parent = if parent == NONE { 0 } else { parent };
-                self.candidates(doc, node, &mut candidates);
+                self.candidates(doc, node, &mut candidates, &filter);
                 if shadow {
                     candidates.retain(|&i| self.entries[i as usize].origin == Origin::UserAgent);
                 }
@@ -1103,7 +1283,7 @@ impl RuleSet {
                 if node == root && !subtree && old == id {
                     continue;
                 }
-                element_hashes(doc, node, &mut |h| filter.add(h));
+                filter.add_element(doc, node);
                 stack.push((node, true, shadow));
                 let host = doc.shadow_root(node);
                 let mut child = doc.last_child(host.unwrap_or(node));
@@ -1183,10 +1363,10 @@ impl RuleSet {
             return None;
         }
         let in_shadow = |n: NodeId| doc.has_shadow_roots() && doc.parent(n).is_some_and(|p| doc.shadow_host(p).is_some());
-        let mut filter = AncestorFilter::new();
+        let mut filter = AncestorFilter::new(self.tracks());
         let mut shadow = false;
         for &a in &path[..first] {
-            element_hashes(doc, a, &mut |h| filter.add(h));
+            filter.add_element(doc, a);
             shadow |= in_shadow(a);
         }
         let cx = self.kept_cx(styles, &mut k);
@@ -1196,7 +1376,7 @@ impl RuleSet {
         let mut parent = styles.of_node[path[first - 1].index()];
         for &node in &path[first..] {
             shadow |= in_shadow(node);
-            self.candidates(doc, node, &mut candidates);
+            self.candidates(doc, node, &mut candidates, &filter);
             if shadow {
                 candidates.retain(|&i| self.entries[i as usize].origin == Origin::UserAgent);
             }
@@ -1213,7 +1393,7 @@ impl RuleSet {
             let input = if PENDING { self.pending.as_ref().and_then(|all| all.get(&node)).map(Vec::as_slice) } else { None };
             let hint = hints.as_ref().and_then(|h| h.of(doc, node));
             parent = self.style_of::<PENDING>(styles, &mut k.memo, parent, &matched, (inline, hint.as_deref()), &cx, input);
-            element_hashes(doc, node, &mut |h| filter.add(h));
+            filter.add_element(doc, node);
         }
         Self::put_back(cx, styles, k);
         Some(styles.styles[parent as usize].clone())
@@ -1225,11 +1405,11 @@ impl RuleSet {
     /// element with a `part` the `::part()` rules of the trees around it.
     #[inline(never)]
     fn match_shadowed(&self, doc: &Document, node: NodeId, scope: u32, filter: &AncestorFilter, (candidates, matched): &mut (&mut Vec<u32>, &mut Vec<u32>)) {
-        self.candidates(doc, node, candidates);
+        self.candidates(doc, node, candidates, filter);
         if scope != 0 {
             candidates.retain(|&i| self.entries[i as usize].origin == Origin::UserAgent);
             if let Some(tree) = self.shadows.get(&scope) {
-                tree.index.collect(doc, node, candidates);
+                tree.index.collect(doc, node, candidates, &self.entries, filter);
             }
         }
         matched.clear();
@@ -1302,12 +1482,27 @@ impl RuleSet {
         }
     }
 
+    /// Does a list of the index of the document or of a shadow tree have a split? Then the ancestor filter keeps the hashes of its path.
+    fn tracks(&self) -> bool {
+        self.index.bigs(&self.entries).is_some() || self.shadows.values().any(|s| s.index.bigs(&self.entries).is_some())
+    }
+
     /// The rules of the document that may match the element (`Index::collect`).
     #[inline(always)]
-    fn candidates(&self, doc: &Document, el: NodeId, out: &mut Vec<u32>) {
+    fn candidates(&self, doc: &Document, el: NodeId, out: &mut Vec<u32>, filter: &AncestorFilter) {
+        if filter.track {
+            self.candidates_with::<true>(doc, el, out, filter);
+        } else {
+            self.candidates_with::<false>(doc, el, out, filter);
+        }
+    }
+
+    #[inline(always)]
+    fn candidates_with<const TRACK: bool>(&self, doc: &Document, el: NodeId, out: &mut Vec<u32>, filter: &AncestorFilter) {
         out.clear();
-        self.index.collect(doc, el, out);
-        self.tested.set(self.tested.get() + out.len() as u64);
+        let lookups = self.index.collect_with::<TRACK>(doc, el, out, &self.entries, filter);
+        self.tested.set(self.tested.get() + out.len() as u64 + lookups);
+        self.styled.set(self.styled.get() + 1);
     }
 
     /// The number of the style of an element. It is found in the cache, or it is made.
@@ -1839,7 +2034,7 @@ impl Way {
         if doc.parent(node) == Some(doc.root()) {
             cx.root_font_size = styles.styles[id as usize].px(Property::FontSize);
         }
-        element_hashes(doc, node, &mut |h| filter.add(h));
+        filter.add_element(doc, node);
         stack.push((node, true, scope));
         stack.push((next, false, scope_of(doc, next)));
     }
@@ -2658,15 +2853,50 @@ impl ComputedStyle {
 /// 4096 counters of one byte. A hash has two places. A counter that reaches 255 stays there (it would be wrong to count down from it).
 struct AncestorFilter {
     counts: Box<[u8; 4096]>,
+    /// Keep `path`? Only when some list of the index is split: the split reads it.
+    track: bool,
+    /// The distinct hashes on the path, each with how many elements of the path have it. The filter alone cannot give the hashes back.
+    path: Vec<(u32, u32)>,
 }
 
 impl AncestorFilter {
-    fn new() -> AncestorFilter {
-        AncestorFilter { counts: Box::new([0; 4096]) }
+    fn new(track: bool) -> AncestorFilter {
+        AncestorFilter { counts: Box::new([0; 4096]), track, path: Vec::new() }
     }
 
     fn places(h: u32) -> [usize; 2] {
         [(h & 0xfff) as usize, ((h >> 16) & 0xfff) as usize]
+    }
+
+    /// Add the hashes of an element (`element_hashes`).
+    #[inline(always)]
+    fn add_element(&mut self, doc: &Document, el: NodeId) {
+        if self.track { self.add_element_with::<true>(doc, el) } else { self.add_element_with::<false>(doc, el) }
+    }
+
+    /// `TRACK` is `self.track`, as a flag of the code.
+    #[inline(always)]
+    fn add_element_with<const TRACK: bool>(&mut self, doc: &Document, el: NodeId) {
+        if TRACK {
+            element_hashes(doc, el, &mut |h| self.add_tracked(h));
+        } else {
+            element_hashes(doc, el, &mut |h| self.add(h));
+        }
+    }
+
+    /// Take out what `add_element` added.
+    #[inline(always)]
+    fn remove_element(&mut self, doc: &Document, el: NodeId) {
+        if self.track { self.remove_element_with::<true>(doc, el) } else { self.remove_element_with::<false>(doc, el) }
+    }
+
+    #[inline(always)]
+    fn remove_element_with<const TRACK: bool>(&mut self, doc: &Document, el: NodeId) {
+        if TRACK {
+            element_hashes(doc, el, &mut |h| self.remove_tracked(h));
+        } else {
+            element_hashes(doc, el, &mut |h| self.remove(h));
+        }
     }
 
     fn add(&mut self, h: u32) {
@@ -2675,12 +2905,31 @@ impl AncestorFilter {
         }
     }
 
+    fn add_tracked(&mut self, h: u32) {
+        // The filter never says "no" for a hash that it has, so after a "no" the hash is new, and the scan is for a "maybe".
+        match self.may_contain(h).then(|| self.path.iter_mut().rev().find(|p| p.0 == h)).flatten() {
+            Some(p) => p.1 += 1,
+            None => self.path.push((h, 1)),
+        }
+        self.add(h);
+    }
+
     fn remove(&mut self, h: u32) {
         for i in Self::places(h) {
             if self.counts[i] != u8::MAX {
                 self.counts[i] -= 1;
             }
         }
+    }
+
+    fn remove_tracked(&mut self, h: u32) {
+        if let Some(i) = self.path.iter().rposition(|p| p.0 == h) {
+            self.path[i].1 -= 1;
+            if self.path[i].1 == 0 {
+                self.path.swap_remove(i);
+            }
+        }
+        self.remove(h);
     }
 
     fn may_contain(&self, h: u32) -> bool {
@@ -2727,13 +2976,18 @@ fn element_hashes(doc: &Document, el: NodeId, f: &mut dyn FnMut(u32)) {
 /// The hashes that the ancestors of a matching element must have: from each compound that is an ancestor of the element,
 /// one tag, id or class. A compound is an ancestor when a space or `>` comes anywhere on its right. In `.list > :not([hidden]) ~
 /// :not([hidden])` the middle compound is a sibling, and `.list` is the parent of both, so an ancestor.
-fn ancestor_hashes(selector: &Selector) -> [u32; 4] {
+///
+/// With `exact`, a compound is an ancestor only when a space or `>` joins it to the compound on its right. The other rule also takes `.a` of
+/// `.a ~ .b > .c`, a sibling of the parent: the ancestor filter then rejects the rule for every element, which Chrome does not
+/// (to verify: `rust-book-chapters` depends on it). The filter keeps that rule (a style would change); the split lists use `exact`.
+fn ancestor_hashes(selector: &Selector, exact: bool) -> [u32; 4] {
     let mut out = [0; 4];
     let mut n = 0;
     let mut up = false;
     for pair in selector.compounds.windows(2) {
-        up |= matches!(pair[0].combinator, Combinator::Descendant | Combinator::Child);
-        if !up {
+        let joined = matches!(pair[0].combinator, Combinator::Descendant | Combinator::Child);
+        up |= joined;
+        if !(if exact { joined } else { up }) {
             continue;
         }
         let hash = pair[1].simples.iter().find_map(|s| match s {
@@ -2834,6 +3088,9 @@ fn walk(doc: &Document, shadows: bool, mut f: impl FnMut(NodeId)) {
         }
     }
 }
+
+#[cfg(test)]
+mod index_tests;
 
 #[cfg(test)]
 mod tests {
@@ -4124,7 +4381,7 @@ mod tests {
     fn an_ancestor_after_a_sibling_combinator_still_filters() {
         let mut doc = parse("");
         let list = crate::selector::parse_selector_list(".list > :not([hidden]) ~ :not([hidden])", &mut doc).expect("a selector");
-        assert_eq!(ancestor_hashes(&list[0]), [name_hash(2, "list"), 0, 0, 0]);
+        assert_eq!(ancestor_hashes(&list[0], false), [name_hash(2, "list"), 0, 0, 0]);
         let html = "<div class=list><b id=a></b><b id=b></b><b id=c hidden></b><b id=d></b></div><div><b id=x></b><b id=y></b></div>";
         let css = ".list > :not([hidden]) ~ :not([hidden]) { margin-top: 7px }";
         let m = |id: &str| get(html, &[css], id, Property::MarginTop);

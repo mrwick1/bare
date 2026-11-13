@@ -9248,3 +9248,88 @@ A script of 16 KiB or more that uses `super`, `new.target`, generators or classe
 ## Standing exception: PR #492 `scripts_load many 10` cost (approved by owner 2026-11-14)
 
 Lazy JS function bodies leave one cost row above the limit after two fix attempts: `scripts_load many 10` is +0.90% under glibc and +0.51% under jemalloc (0.65 M of 71.7 M instructions). The owner approved an exception for this one row only. Reason: the change cuts parsed-tree memory 2 to 4 times on large script pages, and test262 and the execution comparison are unchanged. A later change that makes arrow functions lazy may recover the cost.
+## 2026-11-13: ancestor-keyed rule lists and a restyle charge for real work (step 4, phase 2)
+
+Design: `design-style.md` section 3.1 (M2), 3.3 (I4, I5) and 4.2. Branch `t3/ancestor-bucket-indexing`, rebased on `e6b3f707`.
+
+### What changed
+
+- A rule list with more than 16 entries (`SPLIT_FROM`) gets a second level. Each rule goes under the rarest hash of its mandatory ancestors: the tags, ids and classes that a descendant or child combinator needs. A rule with no such hash goes to a `rest` list. The layout is flat: `keys` (sorted), `starts`, `list`, `rest`; one `Big` for each list. It is made once, at the first look-up after a rule is added (`Index::bigs`). It covers the id, class, tag and attribute lists and the `other` list.
+- An element reads `rest` and the groups of the hashes on its path. The ancestor filter now also keeps its path: the distinct hashes with a count, exact. The look-up takes the shorter of two ways: the keys through the Bloom filter, or the path hashes through a binary search of the keys. Source order and specificity order are not changed: the fuzz compares the matched lists with the old path.
+- The path is kept only when some list has a split (`AncestorFilter::track`). The loop of a full compute has the flag as a const generic, so a page with no split pays no test in the loop.
+- `RuleSet::styled_elements()` is new. The restyle charge is `STEPS_PER_RESTYLED_ELEMENT` (64 before, 32 now) for each element that `RuleSet::restyle` styled, plus its tested candidates and the look-ups. The estimate loop (`visited`, `changed_roots`, `elements_under`) is gone from `restyle_marks`.
+- `#[inline]` on `browser_dataset::matches`: see "Cost gate" below. It is not a change of behaviour.
+
+### Why 32 steps
+
+A step is about 200 instructions (26 ns). A restyle costs 6,500 to 7,200 instructions for each element with 8 candidates (probe on `rest_13` and `compm_22000`: 39 M for 6,002 elements, 315 M for 44,002). That is 33 to 36 steps, candidates included. `rest_13` charges 6,002 x 32 + 51,001 = 243 K steps for each restyle. The real cost is about 195 K steps (1.25 times). The old charge was about 35 M steps for a real cost of 3.9 M (9 to 10 times).
+
+### Numbers
+
+Machine archMachine, instructions of `perf stat -e instructions:u`, 3 runs, the spread is under 0.001 G on every row. BASE `f6415364`, MAIN `e6b3f707` (has none of this), BRANCH this branch. Pages from `/data/bare-tmp/bm/b/pages`, steps `run.steps`. "limit" is the drive result `ok=false`.
+
+| Page | BASE | MAIN | BRANCH | BASE / BRANCH |
+| --- | --- | --- | --- | --- |
+| `compm_2000` | 0.248 G | 0.248 G | 0.176 G | 1.4 |
+| `compm_8000` | 1.953 G | 1.953 G | 0.687 G | 2.8 |
+| `compm_22000` | 11.664 G | 11.664 G | 1.898 G | 6.1 |
+| `rest_2` | 2.178 G | 2.178 G | 0.729 G | 3.0 |
+| `rest_13` | 10.873 G | 10.873 G | 1.403 G | 7.7 |
+| `rest_30` | 11.636 G, Steps limit | 11.636 G, Steps limit | 2.443 G, passes | |
+| `rest_50` | 11.636 G, Steps limit | 11.636 G, Steps limit | 3.668 G, passes | |
+| `comp_8000` | 0.234 G | 0.234 G | 0.233 G | 1.0 |
+| `comp_16000` | 0.466 G | 0.466 G | 0.463 G | 1.0 |
+
+The growth exponent of `compm` (instructions against the size): BASE 1.61 from 2,000 to 22,000 (1.76 from 8,000 to 22,000); BRANCH 0.99 (1.00 from 8,000 to 22,000). Each added restyle in the `rest` ramp costs 0.79 G on BASE and 61 M on BRANCH (12.9 times less). The `comp` pages have few rules, so they were never quadratic.
+
+**Criterion 3 (10 times lower on `compm_22000` and `rest_13`) is not met: 6.1 and 7.7 times.** The matching is now linear and a restyle pass is 12.9 times cheaper, but a part of the page cost is not matching:
+- A fixed cost of about 0.6 G (the page parse, the parse of 36,000 rules, the index build). It belongs to phase 4 (lazy rule bodies, faster tokenizer). `rest_2` shows it: 0.73 G.
+- The cascade of the matched lists that are unique: `hash_values`, `ComputedStyle` equality and the dedupe. One `compute_kept` of `compm_22000` takes 536 M instructions for 44,002 elements, with 8 candidates for each element (351,930 tested). That is not matching.
+Hypothesis: with phase 4 done, `rest_13` falls to about 0.9 G (12 times). Not measured.
+
+### The limits
+
+- The restyle charge now matches the cost (criterion 8, first half). `rest_30` and `rest_50` end with the Steps limit on BASE and MAIN and pass on BRANCH.
+- `computed-work` (nodes times rules, or styled elements times rules) is kept, unchanged. It bounds one full compute, which cannot be interrupted, and the real work of the compute is still not bounded by the index: a list that stays whole (a rule with no ancestor, or many rules with the same key, like `html span`) gives elements x rules candidates. `css-same-class 20000` (20,000 elements, 20,000 rules `.a`) is 101.3 G instructions on BASE and BRANCH. The cap still refuses `comp_48000` and `compm_34000` on BRANCH, although the index makes them cheap. With the cap at 2^60 (one build of BASE and one of an earlier BRANCH): `comp_48000` 1.39 G on both; `compm_30000` BASE 14.2 G and Steps limit, BRANCH 2.42 G and passes; `compm_34000` BASE 18.2 G and Steps limit, BRANCH 2.98 G and passes. So the cap refuses pages that cost 1 to 3 G. A cap by the real work needs the compute to count candidates and stop. That is `sources_capped` in `cascade.rs`, which another task is changing. The cap is not changed here.
+- The 65,536 cap of `cssom-objects` is not part of this task.
+
+### Journeys
+
+The corpus of step 1 is on `t3/repeatable-journey-benchmarks` (`tools/bench`, not on main). I built that branch (`cc8cd9d0`) once with and once without this change and replayed the corpus with `journeys.sh compare --runs 3`. `nextjs-docs` is not in the corpus (it did not pass when recorded). All 47 pass on both.
+
+The sum of the medians moves by more than the change, because some journeys are not stable from run to run on the same binary (for example `rust-book-search`: 3.9 G to 13.7 G with no split at all; `wikipedia-search`, `mdn-reference`, `nodejs-org-home`). First compare (threshold 16): 76,244 to 74,900 M (-1.8%). Last compare (final code): 75,360 to 76,702 M (+1.8%). Over the 37 journeys whose spread is under 3% on both binaries: 37,071 to 37,139 M (+0.18%). I did not find a gain on the journeys. They have no long rule list with ancestor keys that the index could cut, except the noisy ones. The long-tail journeys `python-org-docs-link` (-0.4%) and `python-org-search` (-0.3%) did not move. Criterion 4 (1.3 times on the sheet-scan journeys) is therefore not shown by this change: `rust-book-search` cannot be read through its spread of 190%.
+
+Threshold: with `BARE_SPLIT_FROM` (a temporary switch, removed) at never, 8, 16, 32 and 64, the 23 stable journeys sum to 18,380 / 18,453 / 18,489 / 18,471 / 18,403 M (BASE 18,397 M). No threshold costs or gains more than 0.5%. 16 stays, the start value of the task.
+
+### Cost gate (`tools/js/cost_matrix.sh`, against `e6b3f707`)
+
+803 rows. First build: 124 rows over +0.5% under both allocators (the worst +4.1%, `block-deep-over-limit 20000`). Cause: about 90 instructions for each element in `Index::collect` (a call to `bigs` and an indirect call for each list) and in the filter. Fixes: `bigs` is one inlined test, and the common path is the old code (`gather::<false>`); the split path is a separate function; the `track` flag is a const generic in the loop of a full compute. Last build: 0 rows over under both; 3 rows over under glibc only (`block-deep 40`, `block-nested-collapse 20`, `overflow-nested-auto 20`, +0.51% to +0.54%, under jemalloc +0.13%). Mean change glibc +0.019%, jemalloc +0.131%. 2 rows (`parse_load deep 1` and `deep 10`) do not run on either tree.
+
+`examples/dataset_load keys 1000 50` and `10000 50` were +0.6% under both allocators. Bisect: they are JS rows that never run a cascade. With the `browser_computed.rs` of MAIN and the `cascade.rs` of this branch the count is the same as MAIN (336.87 M). With the `browser_computed.rs` of this branch it is +2.0 M. The loop in `browser_dataset::matches` is compiled in a different way. `#[inline]` on `matches` gives 336.77 M (-0.03%) and the rows pass. It is one attribute in a file that this task does not otherwise touch.
+
+### Memory
+
+`bare-stress scale css` (BASE and BRANCH): the same peak MB on `css-class-index` (138.1 MB at 200,000), `css-same-class` (10.7 MB), `css-import-many`. Instructions of `css-same-class 20000`: 101.29 G on both; `css-class-index 200000`: 12.10 G and 12.09 G. A first run flagged `css-same-class` and `css-class-index` as timeouts on BRANCH; the machine was loaded, the second run flagged none and the instructions are equal.
+Index size, measured with a counting allocator on the sheets of `compm_22000`, `compm_8000` and `rest_13` (a one-element page, `RuleSet::compute`): 4.2 to 4.9 B for each rule stays after the compute (`keys`, `starts`, `list`, `rest`). The peak during the build of the split is 18.0 to 19.5 B for each rule (the hashes of the rules, the frequency map, the sorted pairs). It is freed at once. Both are inside the budget of 20 B for each rule.
+Peak RSS of the ramps: `compm_22000` 68 to 69 MiB, `rest_13` 52 to 53 MiB (BASE 68 and 52).
+
+### Checks
+
+- `cargo test --release -p bare-css --lib`: 256 pass. `cargo test --release -p bare --lib browser_computed`: 41 pass, 1 ignored.
+- `cargo test --release --workspace --no-fail-fast`: all pass except 7 TLS tests (`bare-net` `https_openssl` 2, `bare-tls` `client_openssl` 4 and `tls12_openssl` 1). They fail the same way on main (the openssl of this machine, see the section above).
+- New file `crates/css/src/cascade/index_tests.rs`. A differential fuzz: random trees, random sheets (`:is()`, `:not()`, `:has()`, sibling combinators, child and descendant paths, repeated classes), with the split threshold at never, 0, 1, 2 and 5. The matched list with the split equals the matched list of the old path (all entries of the bucket, with the Bloom check and `matches`), and every true match is a candidate. 400 cases, over 100 sheets have a split. Also: a sibling of an ancestor is not a key; 200 nested divs; a filter counter that is saturated (300 ancestors with one class); shadow trees (150 cases, the style of each node is the same for all thresholds); `restyle` against a new `compute` (150 cases). Mutation checks: keys from the old hashes make the fuzz fail ("rule N matches element M and is not offered").
+- New test `thirty_restyles_of_a_page_with_a_long_tag_list_fit_the_step_budget` (3,000 divs and spans, 18,000 rules `.kN span`, 30 restyles under the default limits). I did not run it on BASE; by the model of the old charge it fails there.
+- `a_read_after_a_change_charges_the_elements_it_restyles` now runs 120 restyles (60 before): the charge is half.
+
+### Not tested
+
+`test262_check.sh` and `exec_diff.sh` (no change in `crates/js`). Window mode. Pages with shadow trees on a real site (only the fuzz and the unit tests). The journeys on the final code against main `e6b3f707` itself (the corpus runner is not on main; the compare is on `cc8cd9d0` with and without this change). Peak RSS on journeys. The new test against BASE.
+
+### Noticed, not changed
+
+- The old ancestor filter takes `.a` of `.a ~ .b > .c` as an ancestor, although `.a` is a sibling of the parent. The filter then rejects the rule for every element. Chrome does not (to verify). `rust-book-chapters` depends on it: with the rule fixed, `#mdbook-sidebar-toggle-anchor:checked ~ .page-wrapper .nav-wide-wrapper {display:none}` (in `@media (max-width:1380px)`) matches, `a.nav-chapters.next` is hidden and the journey fails. The Bloom hashes keep the old rule, so the styles are the same. The split keys use the exact ancestors.
+- The index offers a class list twice for an element that repeats a class token (`class="e e a"`). The matcher gives the same rule twice then (the fuzz compares the lists without the repeats).
+- The candidates of a shadow tree index are not counted in `tested`.
+- `restyle` allocates a 4 KiB filter for each root.
+- A list that stays whole (a rule with no ancestor, or many rules with the same key) is still elements x rules. `computed-work` guards that case.
+- The Bloom filter and the exact path are two structures for one set. One structure with a count for each hash would do both; it needs a hash table for the path.
