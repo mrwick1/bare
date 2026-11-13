@@ -524,6 +524,8 @@ impl Dom {
     fn cascade_inner(&self, it: &mut Interp<'_>, want: Option<NodeId>, keep: bool) -> R<Rc<Styles>> {
         let l = self.computed.lim.get();
         let vp = self.plat.s.borrow().viewport;
+        let t0 = crate::force::start();
+        let builds = self.computed.builds.get();
         if self.doc.borrow().len() > l.max_nodes {
             return Err(self.lim("computed-nodes"));
         }
@@ -574,7 +576,10 @@ impl Dom {
                 *cache = Some(Built { vp, key: plan.parts, inputs: plan.inputs, rules, last: [None, None], read: None, odd: OnceCell::new(), stamp });
             }
             cache.as_mut().expect("built").stamp = stamp;
+            drop(cache);
+            crate::force::style(if self.computed.builds.get() == builds { "plan" } else { "rules" }, t0, 0);
         }
+        let t0 = crate::force::start();
         let mut cache = self.computed.cache.borrow_mut();
         let built = cache.as_mut().expect("built");
         if self.style.has_pending.get() && built.rules.set_inline_inputs(self.style_inputs(it, &doc)?) {
@@ -601,6 +606,7 @@ impl Dom {
         {
             // The styles of the last read are still right: no cascade runs, so a read charges the check only.
             it.charge(1)?;
+            crate::force::style("hit", t0, 0);
             return Ok(styles.clone());
         }
         // A read after changes: restyle the cascade of the last read only where the changes reach, as a window frame does.
@@ -613,7 +619,8 @@ impl Dom {
             && let Some(st) = Rc::get_mut(styles)
         {
             let new = chains(&doc);
-            if restyle_marks(it, &built.rules, &doc, st, &marks, &old, &new)?.is_some() {
+            if let Some(changed) = restyle_marks(it, &built.rules, &doc, st, &marks, &old, &new)? {
+                crate::force::style("restyle", t0, changed.len() as u64);
                 *k = key;
                 built.read = Some(new);
                 self.computed.restyles.set(self.computed.restyles.get() + 1);
@@ -628,6 +635,9 @@ impl Dom {
         // The work cap bounds the compute. Charge the candidates the index tested, not nodes times all rules.
         it.charge(built.rules.tested_candidates() - before)?;
         built.last[slot] = Some((key, keep || read, styles.clone()));
+        if t0.is_some() {
+            crate::force::style("compute", t0, elements_under(&doc, doc.root(), u64::MAX));
+        }
         if read {
             built.read = Some(chains(&doc));
             drop(doc);
@@ -687,6 +697,7 @@ impl Dom {
 
     /// The style of `el` now, or `None` when the element is not connected (an empty declaration).
     pub(crate) fn snapshot(&self, it: &mut Interp<'_>, el: NodeId) -> R<Option<Snap>> {
+        let _caller = crate::force::tag("getComputedStyle");
         if !self.in_document(it, el)? {
             return Ok(None);
         }

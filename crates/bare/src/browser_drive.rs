@@ -114,6 +114,7 @@ impl Browser {
     /// element when `node` has no box, or when the page cannot be laid out yet (a style sheet that was not supplied): the click still
     /// happens, at `node`, as it did before layout was used. A hit inside a shadow tree is its outermost host: the events do not cross a shadow root here.
     fn click_point(&mut self, node: NodeId) -> R<((f64, f64), Option<NodeId>)> {
+        let _caller = crate::force::tag("drive click_point");
         let dom = self.dom.clone();
         let r = self.it.host_scope(|it| {
             if !dom.in_document(it, node)? {

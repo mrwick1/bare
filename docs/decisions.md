@@ -1992,3 +1992,12 @@ A test is `own` (it logs in itself) when a step says `sign out`, `password` or `
 - The session then ended with `Page(TimeBudget)`. No timer, reply or upload ran any more. `Page::stopped` gave `None`, so each wait said only that the page was idle.
 - Now `live_session` lifts the page budgets as well, as it does for the session: the page time is the session time (7 days), and the task and round budgets are unbounded. The wall-clock limits of the driver still apply.
 - `Page::stopped` also names a budget stop of the page or the session, so a driver says why the page stopped.
+## The styles-only frame is not built (step 6, 2026-11-14)
+
+- Count first (`docs/progress.md`, "Who forces style and layout"). The frame layouts that no geometry step used are 0.3 to 0.4% of the instructions of the 47 corpus journeys, about 2.0% of the live journeys and 2.7% of the suite. The rule of `design-suite.md` decision 7 says to stop below about 2%.
+- The numbers are upper bounds. A geometry step after a skipped layout lays out from an older kept layout, so it costs more than the layout that it replaces.
+- `Frame.layout` is read at 34 places. The design counted 5 callers. An `Option<Layout>` changes the paint, hit-test, scroll and screenshot paths too.
+- The driver asks for little: locators and snapshot are 2.5% of the corpus journeys. The page script, the motion step and arriving pictures force most of the style and layout, and a frame split cannot reach them.
+- Not built: A (styles-only frame), B (mask cascade), C (closure layout). B and C need the same style-only share. It is 2.5%.
+- Kept: the counters (`crates/bare/src/force.rs`, off unless `BARE_FORCE_STATS` is set; the suite V2 costs the same with and without them) and `tools/drive/force_count.py`. Run the count again after the rule-set cost falls: the skipped layout is a fixed 420 M on the suite, so its share grows when the rest shrinks.
+- Found, not changed: the rule-set build is 30.9% of the suite and 7.8 to 8.3% of the corpus journeys. It is the part of criterion 7 that is still open.

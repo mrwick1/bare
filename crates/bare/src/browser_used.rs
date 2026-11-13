@@ -69,6 +69,7 @@ fn px_text(v: f32) -> String {
 impl Dom {
     /// Run the bounded layout for a read of `props` of `el`, if one of them needs it (see the header). Not for an element that is not rendered.
     pub(crate) fn used_for(&self, it: &mut Interp<'_>, s: &Snap, el: NodeId, props: &[Property]) -> R<Option<Used>> {
+        let _caller = crate::force::tag("getComputedStyle used");
         // Most reads are of other properties: no box tree for them.
         let may = |p: &Property| {
             use Property::*;
