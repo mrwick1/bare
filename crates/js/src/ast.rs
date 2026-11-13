@@ -202,8 +202,7 @@ pub enum ExprKind {
     BigInt,
     /// The span includes the quotes. Value: [`Program::string`].
     String,
-    /// `/body/flags`. The span is the token. The flags are checked. The pattern grammar is **not**
-    /// checked here: see [`crate::parse::REGEXP_PATTERN_VALIDATED`].
+    /// `/body/flags`. The span is the token. The parser checks the flags and the pattern: see [`crate::parse`].
     RegExp,
     Template(Id<Template>),
     Tagged { tag: ExprId, quasi: Id<Template> },

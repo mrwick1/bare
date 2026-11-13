@@ -26,7 +26,7 @@
 //!
 //! Nothing is rejected as unsupported now ([`ErrorKind::Unsupported`] is kept for callers). The tested corpus and observed staging
 //! syntax are covered; this is not a claim of complete ES2022 compatibility.
-//! Not done here: regexp pattern grammar ([`REGEXP_PATTERN_VALIDATED`]), scope
+//! Not done here: the compile of a regexp pattern (the parser only checks it), scope
 //! resolution of names.
 //!
 //! Specification sections used for the subtle rules (ECMA-262, 2022):
@@ -52,10 +52,9 @@ use std::cell::OnceCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-/// The regexp token is scanned and its flags are checked, but the pattern grammar is not. A pattern
-/// such as `/(/` parses. Another component owns pattern validation; until it runs, a bad regexp is
-/// not an early error. This constant is the explicit gate: it is `false`.
-pub const REGEXP_PATTERN_VALIDATED: bool = false;
+/// The parser checks the pattern and the flags of every regexp literal ([`crate::regexp::Regex::check`]), also in a function body that it
+/// drops (see [`crate::ast::Body::Lazy`]). A bad pattern is [`ErrorKind::Unsupported`], as it was when the first walk compiled the
+/// literal. The compile (the code of the pattern) is done at the first evaluation of the literal.
 
 /// Hard recursion ceiling, even when the caller raises `Limits::max_depth`.
 pub const HARD_MAX_DEPTH: u32 = 2048;
@@ -235,6 +234,7 @@ fn parse_counted<'a>(source: &'a str, mut limits: Limits, used: &mut u32, module
         in_class: 0,
         facts: 0,
         eager_at: u32::MAX,
+        check_regexp: true,
     };
     p.p.module_goal = module;
     let r = if module { p.parse_module_body() } else { p.parse_program() };
@@ -283,6 +283,8 @@ pub(crate) fn parse_lazy_function(src: &Rc<str>, marks: &Rc<OnceCell<Box<[lex::M
         in_class: 0,
         facts: 0,
         eager_at: lz.start,
+        // The first parse of the whole text checked it.
+        check_regexp: false,
     };
     p.p.module_goal = module;
     p.parse_function_rest(lz.start, lz.name, lz.kind, false, false)?;
@@ -466,6 +468,7 @@ struct Parser<'a> {
     facts: u8,
     /// The start of the token after a `(` or a unary operator: a function that starts there is probably called at once, so it is not lazy.
     eager_at: u32,
+    check_regexp: bool,
 }
 
 const FACT_SUPER: u8 = 1;
@@ -618,6 +621,20 @@ impl<'a> Parser<'a> {
     }
     fn early(&self, msg: &'static str, span: Span) -> Error {
         self.err(ErrorKind::Early, msg, span.start, span.end)
+    }
+    /// The pattern and flags of the regexp token that is current must be valid.
+    fn check_regexp_literal(&self) -> R<()> {
+        use crate::regexp::{CompileError as C, Regex};
+        let Some((pat, flags)) = lex::regexp_parts(self.src, &self.tok) else { return Ok(()) };
+        let units: Vec<u16> = pat.encode_utf16().collect();
+        let msg = match Regex::check(&units, flags) {
+            Ok(()) => return Ok(()),
+            Err(C::Syntax { .. }) => "regexp literal: invalid pattern (early SyntaxError)",
+            Err(C::Unsupported { what, .. }) => what,
+            Err(C::InvalidFlags(_)) => "regexp literal: invalid flags (early SyntaxError)",
+            Err(C::Limit(_)) => "regexp literal: compile limit",
+        };
+        Err(self.err(ErrorKind::Unsupported, msg, self.tok.start, self.tok.end))
     }
     fn tspan(&self) -> Span {
         Span { start: self.tok.start, end: self.tok.end }
@@ -2675,6 +2692,9 @@ impl<'a> Parser<'a> {
             }
             Kind::Punct(P::Slash | P::SlashAssign) => {
                 self.rescan(Goal::RegExp)?;
+                if self.check_regexp {
+                    self.check_regexp_literal()?;
+                }
                 self.advance()?;
                 self.mk_expr(ExprKind::RegExp, start)
             }

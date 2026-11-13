@@ -1616,7 +1616,8 @@ impl<'p> Interp<'p> {
                 }
                 self.w_expr(arg, fs, ac)?
             }
-            ExprKind::RegExp => self.ext_walk_regexp(e, ex.span)?,
+            // The parser checked the literal. It is compiled when it is first evaluated.
+            ExprKind::RegExp => {}
             ExprKind::Template(t) => {
                 let t = *prog.template(t);
                 for x in prog.template_exprs(&t) {

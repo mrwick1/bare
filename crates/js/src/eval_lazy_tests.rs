@@ -127,3 +127,48 @@ fn a_failed_first_call_leaves_the_realm_usable() {
         assert_eq!(it.display(v), "3");
     });
 }
+
+#[test]
+fn a_bad_regexp_in_a_dropped_function_still_fails_the_script() {
+    big(|| {
+        for lit in ["/(/", "/a**/", "/(?<n>a)(?<n>b)/", "/\\k<x>(?<y>a)/"] {
+            let src = format!("function never() {{ {PAD} return {lit}; }} 1");
+            let r = realm().run_script(&src);
+            assert!(matches!(r, Err(Error::Unsupported(_))), "{lit}: {r:?}");
+        }
+    });
+}
+
+#[test]
+fn a_regexp_literal_compiles_at_first_use_and_is_a_new_object_each_time() {
+    big(|| {
+        let src = format!(
+            "function f() {{ {PAD} return /(\\d+)-(?<w>[a-z]+)/gi; }}
+             var r1 = f(), r2 = f(), m = r1.exec('x 12-Ab y');
+             var same = r1 !== r2 && r1.source === r2.source;
+             [same, r1.flags, r1.lastIndex, m[1], m.groups.w, /a|b/.test('b'), /\\//.source].join()"
+        );
+        assert_eq!(run(&src), "true,gi,7,12,Ab,true,\\/");
+        // The same literals in a second realm give the same results (the compiled program is shared, the objects are not).
+        assert_eq!(run(&src), "true,gi,7,12,Ab,true,\\/");
+    });
+}
+
+#[test]
+fn the_check_of_a_pattern_agrees_with_its_compile() {
+    use crate::regexp::Regex;
+    let flags = ["", "g", "i", "u", "v", "iu", "gg", "uv", "x"];
+    let pats = ["", "a", "(", ")", "a**", "a{2,1}", "[", "[z-a]", "\\", "(?<n>a)\\k<n>", "(?<n>a)(?<n>b)", "\\k<x>(?<y>a)", "(?<=a)b", "(?:a|b){3}", "\\p{L}", "\\p{Foo}", "[\\d-x]", "\\u{110000}", "{", "a{", "(?i:a)", "[a&&b]", "\\1(a)", "\\2(a)"];
+    for p in pats {
+        let u: Vec<u16> = p.encode_utf16().collect();
+        for f in flags {
+            let (c, n) = (Regex::check(&u, f), Regex::new(&u, f));
+            match n {
+                Ok(_) => assert_eq!(c, Ok(()), "/{p}/{f}"),
+                // A failure of the emit pass shows at the compile only.
+                Err(e @ (crate::regexp::CompileError::Syntax { .. } | crate::regexp::CompileError::InvalidFlags(_) | crate::regexp::CompileError::Unsupported { .. })) => assert_eq!(c, Err(e), "/{p}/{f}"),
+                Err(_) => {}
+            }
+        }
+    }
+}

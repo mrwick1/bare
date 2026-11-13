@@ -233,6 +233,17 @@ impl Regex {
         Ok(re)
     }
 
+    /// Check `pattern` and `flags` without building a program: the flags, the length and the grammar of the pattern. Everything that
+    /// [`Regex::new`] reports before it emits code is reported here, with the same error. The program limits (code size, nesting of the
+    /// emit pass) are not checked: they show at [`Regex::new`].
+    pub fn check(pattern: &[u16], flags: &str) -> Result<(), CompileError> {
+        let flags = Flags::parse(flags)?;
+        if pattern.len() > MAX_PATTERN_UNITS {
+            return Err(CompileError::Limit("pattern too long"));
+        }
+        Parser::new(pattern, flags).parse_pattern().map(drop)
+    }
+
     /// Collect the ASCII units a match can begin with. Returns `None` when a match may be empty
     /// or the walk meets something it does not model (then every start position is tried).
     fn first_set(&self) -> Option<Box<FirstSet>> {

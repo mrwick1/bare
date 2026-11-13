@@ -148,13 +148,19 @@ enum Hook {
     Absent,
 }
 
-/// A regexp literal, compiled once by the first walk. The object is made fresh on every evaluation.
+/// A regexp literal, compiled when it is first evaluated. The object is made fresh on every evaluation.
 struct Lit {
     re: Rc<rx::Regex>,
-    source: Vec<u16>,
-    flags: String,
-    strs: Option<(StrId, StrId)>,
+    strs: (StrId, StrId),
 }
+
+thread_local! {
+    /// Compiled programs of regexp literals by flags and pattern text, shared by the realms of the thread. A program is immutable.
+    static LIT_PROGRAMS: std::cell::RefCell<FxMap<String, Rc<rx::Regex>>> = std::cell::RefCell::new(FxMap::default());
+}
+
+/// The most programs `LIT_PROGRAMS` keeps. A full table is cleared: the programs in use stay alive in their realms.
+const LIT_PROGRAMS_MAX: usize = 2048;
 
 struct ReData {
     re: Rc<rx::Regex>,
@@ -375,10 +381,8 @@ impl<'p> Interp<'p> {
             v.push(Value::String(d.flags));
         }
         for l in e.lits.values() {
-            if let Some((a, b)) = l.strs {
-                v.push(Value::String(a));
-                v.push(Value::String(b));
-            }
+            v.push(Value::String(l.strs.0));
+            v.push(Value::String(l.strs.1));
         }
     }
 
@@ -388,37 +392,42 @@ impl<'p> Interp<'p> {
         self.ext.cache.clear();
     }
 
-    /// First walk: compile a literal now, so a bad pattern fails `Interp::new` before any script effect.
-    /// There is no early SyntaxError channel in `Interp::new`, so an invalid pattern is reported as `Unsupported`
-    /// with the literal's span. The parser checks only the flags, never the pattern.
-    fn ext_walk_regexp(&mut self, e: ExprId, span: Span) -> Res<()> {
-        let Some((pat, flags)) = self.prog.regexp(span) else { return Err(unsupported("regexp literal", span)) };
-        let units: Vec<u16> = pat.encode_utf16().collect();
-        let re = match rx::Regex::new(&units, flags) {
-            Ok(re) => re,
-            Err(rx::CompileError::Syntax { .. }) => return Err(unsupported("regexp literal: invalid pattern (early SyntaxError)", span)),
-            Err(rx::CompileError::Unsupported { what, .. }) => return Err(unsupported(what, span)),
-            Err(rx::CompileError::InvalidFlags(_)) => return Err(unsupported("regexp literal: invalid flags (early SyntaxError)", span)),
-            Err(rx::CompileError::Limit(_)) => return Err(unsupported("regexp literal: compile limit", span)),
-        };
-        let flags = canon_flags(re.flags());
-        self.ext.lits.insert((self.cur as u32, e.index() as u32), Lit { re: Rc::new(re), source: escape_source(&units), flags, strs: None });
-        Ok(())
-    }
-
-    /// A regexp literal evaluates to a new object every time. Only the immutable compiled pattern is shared.
+    /// A regexp literal evaluates to a new object every time. Only the immutable compiled pattern is shared: by the literal, and by every
+    /// literal with the same pattern and flags in the realms of the thread (`LIT_PROGRAMS`). The parser checked the literal, so a failure
+    /// here is a limit of the emit pass.
     fn ext_eval_regexp(&mut self, e: ExprId) -> Res<Value> {
-        let Some(l) = self.ext.lits.get(&(self.cur as u32, e.index() as u32)) else { return Err(unsupported("regexp literal", Span::default())) };
-        let (re, strs) = (l.re.clone(), l.strs);
-        let (src, fl) = match strs {
-            Some(p) => p,
+        let key = (self.cur as u32, e.index() as u32);
+        let (re, (src, fl)) = match self.ext.lits.get(&key) {
+            Some(l) => (l.re.clone(), l.strs),
             None => {
-                let (u, f) = (l.source.clone(), l.flags.clone());
-                let p = (h!(self, self.heap.intern_vec(u)), h!(self, self.heap.intern_str(&f)));
-                if let Some(l) = self.ext.lits.get_mut(&(self.cur as u32, e.index() as u32)) {
-                    l.strs = Some(p);
-                }
-                p
+                let span = self.prog.expr(e).span;
+                let Some((pat, flags)) = self.prog.regexp(span) else { return Err(unsupported("regexp literal", span)) };
+                let id = format!("{flags}/{pat}");
+                let hit = LIT_PROGRAMS.with(|c| c.borrow().get(&id).cloned());
+                let units: Vec<u16> = pat.encode_utf16().collect();
+                let re = match hit {
+                    Some(re) => re,
+                    None => {
+                        let re = match rx::Regex::new(&units, flags) {
+                            Ok(re) => Rc::new(re),
+                            Err(rx::CompileError::Syntax { .. }) => return Err(unsupported("regexp literal: invalid pattern (early SyntaxError)", span)),
+                            Err(rx::CompileError::Unsupported { what, .. }) => return Err(unsupported(what, span)),
+                            Err(rx::CompileError::InvalidFlags(_)) => return Err(unsupported("regexp literal: invalid flags (early SyntaxError)", span)),
+                            Err(rx::CompileError::Limit(_)) => return Err(unsupported("regexp literal: compile limit", span)),
+                        };
+                        LIT_PROGRAMS.with(|c| {
+                            let mut c = c.borrow_mut();
+                            if c.len() >= LIT_PROGRAMS_MAX {
+                                c.clear();
+                            }
+                            c.insert(id, re.clone());
+                        });
+                        re
+                    }
+                };
+                let strs = (h!(self, self.heap.intern_vec(escape_source(&units))), h!(self, self.heap.intern_str(&canon_flags(re.flags()))));
+                self.ext.lits.insert(key, Lit { re: re.clone(), strs });
+                (re, strs)
             }
         };
         Ok(Value::Object(self.make_regexp(re, src, fl)?))
