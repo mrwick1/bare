@@ -172,7 +172,7 @@ impl IndexedSource for Dom {
     }
 
     fn indexed_len(&self, owner: ObjId) -> Result<usize, HeapError> {
-        if let Some(r) = crate::browser_nodelist::len(self, owner).or_else(|| crate::browser_platform_class::indexed_len(self, owner)) {
+        if let Some(r) = crate::browser_nodelist::len(self, owner).or_else(|| crate::browser_platform_class::indexed_len(self, owner)).or_else(|| crate::browser_style::indexed_len(self, owner)) {
             return r;
         }
         let t = self.attr.s.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
@@ -183,7 +183,7 @@ impl IndexedSource for Dom {
     }
 
     fn indexed_item(&self, owner: ObjId, index: usize) -> Result<Slot, HeapError> {
-        if let Some(r) = crate::browser_nodelist::item(self, owner, index).or_else(|| crate::browser_platform_class::indexed_item(self, owner, index)) {
+        if let Some(r) = crate::browser_nodelist::item(self, owner, index).or_else(|| crate::browser_platform_class::indexed_item(self, owner, index)).or_else(|| crate::browser_style::indexed_item(self, owner, index)) {
             return r;
         }
         let t = self.attr.s.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
