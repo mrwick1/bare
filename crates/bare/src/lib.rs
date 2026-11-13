@@ -276,3 +276,5 @@ mod browser_basics_tests;
 
 #[cfg(test)]
 mod browser_rellist_tests;
+#[cfg(test)]
+mod browser_sandbox_tests;
