@@ -2015,3 +2015,13 @@ A test is `own` (it logs in itself) when a step says `sign out`, `password` or `
 - A byte-table scanner finds the end of the block. It follows the same block structure as the tokenizer and gives up on anything it is not sure of. The exact tokenizer then reads that rule. The other choice, to tokenize the block and keep only its span, saves no tokenizing.
 - `has_motion` must not change with laziness: it decides whether the engine tracks transitions. The scanner flags blocks that may name `transition-*` or `animation-*`, and `has_motion` reads only those, when it is asked. A flag that the scanner sets without a parse made a journey fail (see `docs/progress.md`, step 4).
 - Memory per rule did not fall on the tiny-rule stress case. The sheet text stays and each body has a record. Accepted: time and the journeys improve, and a real body is larger than the record.
+
+## Leaving a list in a contenteditable (2026-11-14)
+
+Issue #443. Enter in an empty list item, Backspace in an empty block, and the list toggle now act on one item, as Chrome does.
+
+- Enter in an empty `li` turns it into a `div` after the list. The items after it go to a clone of the list.
+- Backspace in an empty block removes it and puts the caret at the end of the block before it. The first item of a list becomes a `div` instead.
+- A list command of the same kind turns only the selected items into `div` blocks. The other kind still renames the whole list.
+- `insertText` removes the placeholder `br` of a block that has no other content.
+- Not done: Backspace at the start of a block with content does not merge it with the block before it.

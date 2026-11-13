@@ -9178,3 +9178,7 @@ Machine: archMachine, load average 8 to 12 from other agents. Instruction counts
 - Wall time on an idle machine.
 - A sheet with 64 or more nested blocks in a rule (the scanner bails out; not measured).
 - crates/js was not changed, so test262 and exec_diff were not run.
+
+### 2026-11-14: contenteditable list exit (issue #443)
+
+`browser_editing.rs` now outdents an empty list item on Enter, removes an empty block on Backspace, and toggles only the selected list items. Tests: `enter_in_an_empty_list_item_leaves_the_list`, `backspace_in_an_empty_block_removes_it`, `list_toggle_changes_only_the_selected_items`. Not done: merging a block with content into the block before it on Backspace.
