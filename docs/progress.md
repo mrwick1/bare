@@ -8612,4 +8612,6 @@ What changed:
 
 Checks: `cargo test --release -p bare --lib downloads` (22 pass, 3 runs). New tests: a fourth download waits and all 4 end correct; a paused download keeps its bytes (no change for 400 ms) and resumes with ranges that do not start at 0; a cancelled download leaves no file; a 2 MiB/s limit makes a 0.25 s download take more than 1.2 s; a download without ranges refuses pause. `bare-mcp` and `bare-drive` tests pass; the `bare-mcp` download test also checks the `#1` numbers and the errors of `op`.
 
-Not tested: pause and resume through `bare-mcp` by hand; a speed limit over many connections against a real server; a queued job whose first connection died while it waited (covered only by the resume path). Not benchmarked: the queue and the controls do not change the transfer path, except one lock-held subtraction for each piece when a limit is set.
+By hand through `bare-mcp` (`/data/bare-tmp/design/downloads/controls.py`, 64 MiB at 1 MiB/s for each connection, 1 run): pause held the bytes at 8,807,904 for 1 s; after resume with a 1 MiB/s limit the count grew by 2,334,496 bytes in 2 s; with the limit off the file ended with the expected MD5.
+
+Not tested: a speed limit over many connections against a real server; a queued job whose first connection died while it waited (covered only by the resume path). Not benchmarked: the queue and the controls do not change the transfer path, except one lock-held subtraction for each piece when a limit is set.
