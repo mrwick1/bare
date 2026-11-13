@@ -47,21 +47,21 @@ enum HKey {
     Null,
     Bool(bool),
     Num(u64),
-    Str(StrId),
+    Str(ByHandle),
     Sym(SymId),
     Obj(ObjId),
     Big(i64),
     BigHeap(BigId),
 }
 
-/// SameValueZero as a hash key: strings are interned, so a handle is the content; `NaN` has one key and `-0` is `+0`.
+/// SameValueZero as a hash key: a string key is an atom (`coll_key`), so a handle is the content; `NaN` has one key and `-0` is `+0`.
 fn hkey(v: Value) -> HKey {
     match v {
         Value::Undefined => HKey::Undef,
         Value::Null => HKey::Null,
         Value::Bool(b) => HKey::Bool(b),
         Value::Number(n) => HKey::Num(if n.is_nan() { 0x7ff8_0000_0000_0000 } else if n == 0.0 { 0 } else { n.to_bits() }),
-        Value::String(s) => HKey::Str(s),
+        Value::String(s) => HKey::Str(ByHandle(s)),
         Value::Symbol(s) => HKey::Sym(s),
         Value::Object(o) => HKey::Obj(o),
         Value::BigInt(n) => HKey::Big(n),
@@ -115,13 +115,22 @@ impl Interp<'_> {
         Ok(o)
     }
 
-    fn coll_get(&self, o: ObjId, k: Value) -> Option<&Entry> {
-        let c = self.sc.colls.get(&o)?;
-        c.entries.get(*c.index.get(&hkey(k))? as usize)
+    /// A string key as its atom, so that the handle is the content. The entry keeps the atom alive.
+    fn coll_key(&mut self, k: Value) -> Res<Value> {
+        match k {
+            Value::String(s) if !s.is_atom() => Ok(Value::String(h!(self, self.heap.atom_of(s)))),
+            _ => Ok(k),
+        }
+    }
+
+    fn coll_get(&mut self, o: ObjId, k: Value) -> Res<Option<&Entry>> {
+        let k = self.coll_key(k)?;
+        let Some(c) = self.sc.colls.get(&o) else { return Ok(None) };
+        Ok(c.index.get(&hkey(k)).and_then(|&p| c.entries.get(p as usize)))
     }
 
     fn coll_set(&mut self, o: ObjId, k: Value, v: Value) -> Res<()> {
-        let k = norm_zero(k);
+        let k = norm_zero(self.coll_key(k)?);
         let hk = hkey(k);
         let (max, max_total) = (self.sc.limits.max_entries.min(u32::MAX as usize), self.sc.limits.max_total_entries);
         let Some(c) = self.sc.colls.get_mut(&o) else { return Err(self.type_err("incompatible receiver")) };
@@ -150,6 +159,7 @@ impl Interp<'_> {
     }
 
     fn coll_delete(&mut self, o: ObjId, k: Value) -> Res<bool> {
+        let k = self.coll_key(k)?;
         let Some(c) = self.sc.colls.get_mut(&o) else { return Err(self.type_err("incompatible receiver")) };
         let Some(p) = c.index.remove(&hkey(k)) else { return Ok(false) };
         let e = &mut c.entries[p as usize];
@@ -263,7 +273,7 @@ impl Interp<'_> {
             _ => "entries",
         })?;
         match f {
-            ScFn::MapGet => Ok(self.coll_get(o, a0).map_or(Value::Undefined, |e| e.val)),
+            ScFn::MapGet => Ok(self.coll_get(o, a0)?.map_or(Value::Undefined, |e| e.val)),
             ScFn::MapSet => {
                 self.coll_set(o, a0, a1)?;
                 Ok(this)
@@ -273,7 +283,7 @@ impl Interp<'_> {
                 self.coll_set(o, k, k)?;
                 Ok(this)
             }
-            ScFn::MapHas | ScFn::SetHas => Ok(Value::Bool(self.coll_get(o, a0).is_some())),
+            ScFn::MapHas | ScFn::SetHas => Ok(Value::Bool(self.coll_get(o, a0)?.is_some())),
             ScFn::MapDelete | ScFn::SetDelete => Ok(Value::Bool(self.coll_delete(o, a0)?)),
             ScFn::MapClear | ScFn::SetClear => {
                 self.coll_clear(o)?;

@@ -279,7 +279,7 @@ impl<'p> Interp<'p> {
         {
             self.ao_reserve((k + 1) / 8)?;
             if let Some(e) = h!(self, self.heap.dense_elems(o, len)) {
-                let found = e[..=k as usize].iter().rposition(|y| matches!(y, Some(v) if v.strict_equals(x)));
+                let found = e[..=k as usize].iter().rposition(|y| matches!(y, Some(v) if self.heap.strict_equals(*v, x)));
                 self.spend((k + 1) / 8 + 1)?;
                 return Ok(found.map_or(none, |i| Value::Number(i as f64)));
             }
@@ -289,7 +289,7 @@ impl<'p> Interp<'p> {
             let key = self.index_key(k)?;
             if self.ao_has(this, key)? {
                 let v = self.get_prop(this, key)?;
-                if v.strict_equals(x) {
+                if self.heap.strict_equals(v, x) {
                     return Ok(Value::Number(k as f64));
                 }
             }

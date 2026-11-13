@@ -2053,3 +2053,12 @@ Step 4, phase 2 of `docs/perf-goal.md`. Design: `design-style.md` 3.1 (M2), 3.3 
 - Other choice: a streaming codec with state on the native side. It gives output before close, but the state must live in the host, keyed by stream, and be freed when the page drops the stream. A whole-buffer call keeps no native state.
 - Limits: a stream gives no output before its writable side closes. One `DecompressionStream` gives at most 256 MiB.
 - Errors follow the Compression Standard, and not the reply decoder of `bare-net` (`encoding::inflate`): empty input, cut or bad data, a wrong checksum and bytes after the end of the stream are a `TypeError`. `deflate` is zlib only, and `deflate-raw` is raw only.
+## JS strings: atoms up to 32 units, flat strings, ropes for `+` (2026-11-14)
+
+- Three kinds, told by two bits of `StrId.index`: atom (interned), flat (not interned), rope (own slab). Chosen over the design option C (8-bit storage) because it removes work: no hash and no probe for a long string, and `+` costs O(1) until the first read.
+- `StrId` loses `PartialEq` and `Hash`. Equality of strings is `Heap::str_eq`. The other choice, to keep `==` on the handle, would be wrong for two long strings with equal content. The compiler lists each place that must choose.
+- A key must be an atom. `check_key` refuses another string. The parser names use `atom_str` so a long identifier is still a key. The other choice, to hash a long key at each lookup, would add cost to the hot path.
+- A rope keeps its flat units in a `OnceCell` and the GC then drops the children. Cost: 32 B a node, not the 24 B of the design. The other choice, to overwrite the node in place with a `Flat` variant, needs `&mut self` on reads, and `str_units(&self)` has many callers.
+- `ATOM_MAX` is 32 (the value of the design). Not tuned.
+- The process-wide atom table of the design is not built (estimated 0.2% of a journey; it needs a snapshot or a lazy install per realm).
+- Open: the change costs +0.55% instructions on stable journeys and +0.8% for each key (keycost), +120 K in setup. The cost rule (0.5% a row) is broken on 426 of 803 rows. Not merged. The owner decides: accept the cost for linear `+`, or find the small extras first.

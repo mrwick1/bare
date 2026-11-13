@@ -9459,3 +9459,61 @@ Process-wide name atoms first, then a cache of immutable `Rc<RuleSet>` keyed by 
 ### Not tested
 
 Nothing was built, so no cost matrix, test262 or workspace test ran. Wall time. The live size of a rule set. The cost of a process-wide `intern`. The hit rate on a real warm suite. Details in section 7 of the design document.
+## JS strings: atoms, flat strings and ropes (2026-11-14, `docs/design-js.md` phase P2)
+
+Status: built and tested. **Not merged.** The change costs +0.55% instructions on stable journeys and +0.8% for each key of the React typing page. This breaks the cost rule (see "Cost"). The owner decides.
+
+### What changed
+
+- A string is one of three kinds. The two high bits of `StrId.index` tell the kind: atom (`STR_ATOM`), flat string (no bit), rope (`STR_ROPE`). The rope has its own slab (`Heap::ropes`).
+- Atom: interned. One atom for each content. `ATOM_MAX` is 32 code units. Every string of 32 units or fewer is an atom.
+- Flat string: more than 32 units, not interned. No hash, no table probe, one allocation.
+- Rope: the result of `+` or `+=` above 32 units. Node = `{left, right, len, flat: OnceCell<Box<[u16]>>}`. The first read of the units flattens it (iterative, from the end, no recursion). The node then keeps the flat units and the GC does not mark its children.
+- `===`: `Heap::str_eq`. Same handle: equal. Two atoms with different handles: not equal. Otherwise compare length, then units. `StrId` has no `PartialEq` and no `Hash`: the compiler found every use. `ByHandle` is the key of a table.
+- A property key, a `Map` or `Set` key, a `Symbol.for` key and a regexp cache key is an atom (`atom_of`). `check_key` refuses a non-atom key with `InvalidKey`. Names from the parser use `atom_str` (a long identifier is still a key).
+- Size: a rope node is 32 B plus about 12 B of slab slot, about 44 B for each part. The design said 24 B. The `OnceCell` (16 B) is the difference. `Value` is unchanged (16 B).
+- `max_bytes` (1 GiB) is the limit that the concat loop hit before (`Limit(Heap(Bytes))` at 100k parts). The loop does not reach it now. No limit was removed or raised: the limit still protects the flat result.
+
+### Ramps (`eval_load concat_n` and `concat_pre_n`, scale = number of parts, one part per step)
+
+Machine archMachine (AMD Zen3), `cargo --release`, one run each, run time from the example. Base = main `fe2d54cd`.
+
+| parts | `s += x` base | `s += x` new | `s = x + s` base | `s = x + s` new | peak RSS base / new |
+|---|---|---|---|---|---|
+| 1,000 | 1.3 ms | 0.2 ms | 1.4 ms | 0.2 ms | 7.3 / 5.7 MiB |
+| 10,000 | 85.6 ms | 2.0 ms | 90.5 ms | 2.0 ms | 196.9 / 6.1 MiB |
+| 100,000 | limit (Bytes) | 17.2 ms | limit (Bytes) | 17.1 ms | - / 10.7 MiB |
+| 1,000,000 | limit (Bytes) | 169.5 ms | limit (Bytes) | 167.4 ms | - / 56.2 MiB |
+
+New time is linear: 10x parts gives 8.6x to 10x time. Base is quadratic (10x parts gives 66x time, then the limit).
+
+### Cost (the problem)
+
+Same base `fe2d54cd` for both trees. Instruction counts (`instructions:u`).
+
+- `tools/js/typing/keycost.sh` (React page, `#a1`): 283.6 M for each key on base, 285.8 M new (+0.8%). Load and mount 579.6 M base, 583.4 M new (+0.7%). Peak RSS 34.4 MiB at 50 keys (budget 40 MiB).
+- `tools/js/cost_matrix.sh`: 803 rows, mean change +0.85% glibc, +1.56% jemalloc. 426 rows are over 0.5% under both allocators. Worst rows are small ones: `select_load churn 10` +7.6%, `form_load submit 10` +4.8%, `xhr_load 1` +4.8%, `web_apis_load segmenter` +3.8%. 2 rows fail to run on both trees (`parse_load deep 1` and `deep 10`, as on main).
+- Journeys (`tools/bench/journeys.py compare --runs 3`, replay corpus, 47 journeys, `nextjs-docs` skipped): 33 stable rows (spread under 1% on both sides) go from 29,030 M to 29,189 M (+0.55%). Most stable rows are +0.2% to +0.8%. Tiny pages are +2% (`example-page` 12.1 M to 12.3 M). The sum of all medians reads -2.5%, but this is noise: `wikipedia-search`, `wikipedia-portal` and `wiktionary-portal` have two modes (for example `wiktionary-portal` 1,345 M or 1,755 M on base too). Do not read it as a gain.
+- Setup: `eval_load loop 0` is 2.78 M on base and 2.90 M new (+120 K, +4.3%). This is the likely cause of the small-row numbers.
+- What I measured to find the cause. Each step is an A/B of exact instruction counts:
+  - `check_value` was not inlined any more (`Value::String` calls `check_str`): this cost +1.7% on `eval_load loop 20`. Fixed with `#[inline]`: now -0.08%.
+  - Inlining `intern_atom` and `find_atom`: no change.
+  - `Value::strict_equals_with` and `key_from_string` were not inlined in `binary` and `to_property_key`: `#[inline(always)]` gave about 0.1% on the keycost.
+  - Removing `flat_bytes` from `charge`: -4.5 K of 120 K. Removing the rope test in `Heap::str`: -3.6 K. Neither is the cause.
+  - Not found: the other +110 K of setup and the +0.8% on `objects`, `closures` and `webpack` of `eval_load`. Samples with `perf record` are too coarse to attribute it (hypothesis: the cost is many small extras, for example the `is_atom` test in `check_key`, the generation check of `atom_of`, `Marker::str` and `Marker::value` out of line, and layout of the code).
+
+### Not built
+
+- The process-wide atom table (design section 6.4, "built once per process for builtin and host names"). A realm would still need the table copied or built lazily, and a `Str` enum for static strings would add 8 B for each string. Estimate: about 0.2% of the instructions of a journey. It would also reduce the +120 K of setup. Left for a later step.
+- A different `ATOM_MAX`. The value 32 is the design's value (to tune). I took length counts of strings in a build with counters, then removed the counters. I did not run the journeys with 16 or 64.
+
+### Checks
+
+- `cargo test --release -p bare-js --lib`: all pass. New tests: `heap_str_tests.rs` (9, heap level: atoms and long strings, concat, rope reads, equality of all kinds, keys, GC and byte count, 1M-deep rope in both directions, limits) and `eval_str_tests.rs` (5, JS level, expected values from Node: long strings equal by content in `===`, `includes`, `switch`, `Set`, `Map`, object keys and `Symbol.for`; a 3000-part loop; a 1M-part loop; ropes as keys and arguments; long names as keys). I wrote the tests after the code, not before.
+- `cargo test --release --workspace --no-fail-fast`: 3833 passed, 8 failed. 7 failures are in `bare-net --test https_openssl` (2), `bare-tls --test client_openssl` (4) and `bare-tls --test tls12_openssl` (1): the same groups fail on main on this machine (see the section above). 1 failure, `downloads::run::tests::a_changed_file_starts_again_from_zero`, passes when it runs alone (flaky; it does not touch strings).
+- `TEST262=/data/claude-tmp/test262 tools/js/test262_check.sh`: gate ok, no directory lost a passing test (checkout at the commit of the subset). `tools/js/exec_diff.sh`: 79 runs, 0 differences.
+- Journeys: the page console shows the same errors as base on `craigslist-home`, `go-dev-home` and `nextjs-docs`. A first build showed `InvalidKey` errors (long names were not atoms). That is fixed and covered by `eval_str_tests.rs`.
+
+### Not tested
+
+- Wall time on an idle machine. Peak memory of a long page that builds many ropes (only the concat loop). `ATOM_MAX` other than 32. A page that flattens a deep rope inside a regexp (`exec`) or a `JSON.parse`. Live sites.

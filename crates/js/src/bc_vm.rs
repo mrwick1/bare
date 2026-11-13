@@ -737,8 +737,8 @@ impl<'p> Interp<'p> {
                             STRICT_EQ | EQ => Value::Bool(p == q),
                             _ => Value::Bool(p != q),
                         },
-                        _ if op == STRICT_EQ => Value::Bool(l.strict_equals(r)),
-                        _ if op == STRICT_NE => Value::Bool(!l.strict_equals(r)),
+                        _ if op == STRICT_EQ => Value::Bool(self.heap.strict_equals(l, r)),
+                        _ if op == STRICT_NE => Value::Bool(!self.heap.strict_equals(l, r)),
                         _ => tri!(at, self.binary(binop(op), l, r)),
                     };
                 }

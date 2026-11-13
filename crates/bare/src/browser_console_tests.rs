@@ -232,7 +232,7 @@ fn records_keep_raw_arguments_levels_and_sequence() {
         let r = b.take_console_records();
         assert_eq!(r.iter().map(|r| (r.seq, r.level, r.args.len())).collect::<Vec<_>>(), [(0, ConsoleLevel::Log, 6), (1, ConsoleLevel::Warn, 0), (2, ConsoleLevel::Error, 1)]);
         assert_eq!(b.it.get_str(r[0].args[0], "k"), "7");
-        assert!(r[0].args[0].strict_equals(r[2].args[0]));
+        assert!(b.it.heap.strict_equals(r[0].args[0], r[2].args[0]));
         assert_eq!(b.console_stats(), ConsoleStats { records: 0, values: 0, calls: 3, dropped: 0 });
         assert!(b.take_console_records().is_empty());
     });

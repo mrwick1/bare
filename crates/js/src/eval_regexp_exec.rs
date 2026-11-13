@@ -114,12 +114,12 @@ impl<'p> Interp<'p> {
     fn re_search_g(&mut self, r: ObjId, s: StrId) -> Res<Value> {
         let (rv, k) = (Value::Object(r), self.ext.k_last_index);
         let prev = self.get_prop(rv, k)?;
-        if !prev.same_value(Value::Number(0.0)) {
+        if !self.heap.same_value(prev, Value::Number(0.0)) {
             self.set_last_index(r, 0.0)?;
         }
         let res = self.re_exec_v(r, s)?;
         let cur = self.get_prop(rv, k)?;
-        if !cur.same_value(prev) {
+        if !self.heap.same_value(cur, prev) {
             let saved = std::mem::replace(&mut self.strict, true);
             let put = self.put_prop(rv, k, prev);
             self.strict = saved;

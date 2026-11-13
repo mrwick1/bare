@@ -5,9 +5,13 @@
 //! handle: an index into a slot table and a generation number. A handle is not a Rust
 //! reference, so the heap can move, free and reuse storage without a dangling pointer.
 //!
-//! The heap makes every string unique by content (interning). So two `StrId` are equal
-//! exactly when the two strings have the same UTF-16 code units. That is why `strict_equals`
-//! needs no heap. Handles from two different heaps are not comparable (caller contract).
+//! A string is one of three kinds, told by two bits of the handle (`StrId::is_atom`, `StrId::is_rope`).
+//! An atom is interned: the heap keeps one atom for each content, so two atoms are equal exactly when the
+//! handles are equal. Every string of at most `ATOM_MAX` code units is an atom. A longer string is a flat
+//! string or a rope, and it is not interned: two such strings with the same content have different handles.
+//! A property key, a `Map` key and a `Symbol.for` key are atoms. Equality of two `Value`s is therefore a
+//! `Heap` method (`Heap::strict_equals`): it compares handles first and the content only when one side is
+//! not an atom. Handles from two different heaps are not comparable (caller contract).
 
 use crate::number;
 
@@ -24,8 +28,81 @@ macro_rules! handle {
         }
     };
 }
-handle!(/// Handle of a string (UTF-16 code units).
-    StrId);
+/// Handle of a string (UTF-16 code units). No `PartialEq`: two handles of equal content are not always equal (see the top of this file).
+/// `same` compares the handles. It is the identity of an atom and of one string object, not equality of content.
+/// The two high bits of `index` tell the kind; the other bits are the slot.
+#[derive(Clone, Copy, Debug)]
+pub struct StrId {
+    pub(crate) index: u32,
+    pub(crate) gn: u32,
+}
+
+/// A string handle compared by the handle: `Eq` and `Hash` of an atom (the content) or of one string object. The key of a table.
+#[derive(Clone, Copy, Debug)]
+pub struct ByHandle(pub StrId);
+impl PartialEq for ByHandle {
+    #[inline]
+    fn eq(&self, o: &Self) -> bool {
+        self.0.same(o.0)
+    }
+}
+impl Eq for ByHandle {}
+impl std::hash::Hash for ByHandle {
+    #[inline]
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        (self.0.index, self.0.gn).hash(h)
+    }
+}
+
+/// `StrId::index` bit: the string is a rope (its slot is in the rope slab).
+pub(crate) const STR_ROPE: u32 = 1 << 31;
+/// `StrId::index` bit: the string is an atom (interned: unique by content).
+pub(crate) const STR_ATOM: u32 = 1 << 30;
+pub(crate) const STR_SLOT: u32 = STR_ATOM - 1;
+
+/// Tests compare handles of short strings (atoms) with `==`.
+#[cfg(test)]
+impl PartialEq for StrId {
+    fn eq(&self, o: &Self) -> bool {
+        self.same(*o)
+    }
+}
+#[cfg(test)]
+impl Eq for StrId {}
+
+#[cfg(test)]
+impl Value {
+    pub(crate) fn strict_equals(self, o: Value) -> bool {
+        self.strict_equals_with(o, StrId::same)
+    }
+    pub(crate) fn same_value(self, o: Value) -> bool {
+        self.same_value_with(o, StrId::same)
+    }
+    pub(crate) fn same_value_zero(self, o: Value) -> bool {
+        self.same_value_zero_with(o, StrId::same)
+    }
+}
+
+impl StrId {
+    /// The same handle (the same string object). For atoms, this is equality of content.
+    #[inline]
+    pub fn same(self, other: StrId) -> bool {
+        self.index == other.index && self.gn == other.gn
+    }
+    /// Interned: unique by content. A property key is always an atom.
+    #[inline]
+    pub fn is_atom(self) -> bool {
+        self.index & STR_ATOM != 0
+    }
+    #[inline]
+    pub(crate) fn is_rope(self) -> bool {
+        self.index & STR_ROPE != 0
+    }
+    #[inline]
+    pub(crate) fn slot(self) -> u32 {
+        self.index & STR_SLOT
+    }
+}
 handle!(/// Handle of a symbol. Each `new_symbol` call makes a distinct identity.
     SymId);
 handle!(/// Handle of an object.
@@ -63,15 +140,15 @@ impl Value {
         matches!(self, Value::BigInt(_) | Value::BigHeap(_))
     }
 
-    /// `a === b`.
-    #[inline]
-    pub fn strict_equals(self, other: Value) -> bool {
+    /// `a === b`, with `str_eq` for two strings. Use `Heap::strict_equals`.
+    #[inline(always)]
+    pub(crate) fn strict_equals_with(self, other: Value, str_eq: impl FnOnce(StrId, StrId) -> bool) -> bool {
         use Value::*;
         match (self, other) {
             (Undefined, Undefined) | (Null, Null) => true,
             (Bool(a), Bool(b)) => a == b,
             (Number(a), Number(b)) => a == b, // NaN != NaN, +0 == -0
-            (String(a), String(b)) => a == b,
+            (String(a), String(b)) => str_eq(a, b),
             (Symbol(a), Symbol(b)) => a == b,
             (Object(a), Object(b)) => a == b,
             (BigInt(a), BigInt(b)) => a == b,
@@ -80,23 +157,23 @@ impl Value {
         }
     }
 
-    /// `Object.is(a, b)`: NaN is NaN, +0 is not -0.
+    /// `Object.is(a, b)`: NaN is NaN, +0 is not -0. Use `Heap::same_value`.
     #[inline]
-    pub fn same_value(self, other: Value) -> bool {
+    pub(crate) fn same_value_with(self, other: Value, str_eq: impl FnOnce(StrId, StrId) -> bool) -> bool {
         match (self, other) {
             (Value::Number(a), Value::Number(b)) => {
                 (a.is_nan() && b.is_nan()) || (a == b && a.is_sign_negative() == b.is_sign_negative())
             }
-            _ => self.strict_equals(other),
+            _ => self.strict_equals_with(other, str_eq),
         }
     }
 
-    /// SameValueZero (`Map`, `Set`, `includes`): NaN is NaN, +0 is -0.
+    /// SameValueZero (`Map`, `Set`, `includes`): NaN is NaN, +0 is -0. Use `Heap::same_value_zero`.
     #[inline]
-    pub fn same_value_zero(self, other: Value) -> bool {
+    pub(crate) fn same_value_zero_with(self, other: Value, str_eq: impl FnOnce(StrId, StrId) -> bool) -> bool {
         match (self, other) {
             (Value::Number(a), Value::Number(b)) => (a.is_nan() && b.is_nan()) || a == b,
-            _ => self.strict_equals(other),
+            _ => self.strict_equals_with(other, str_eq),
         }
     }
 }
@@ -104,11 +181,36 @@ impl Value {
 /// A property key. Invariant: `String` never holds a canonical array index; that case is
 /// always `Index`. `Heap::key_from_string` builds keys that keep this invariant, and the heap
 /// rejects a key that breaks it.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub enum PropertyKey {
     Index(u32),
     String(StrId),
     Symbol(SymId),
+}
+
+// A key string is always an atom, so the handle is the content.
+impl PartialEq for PropertyKey {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (PropertyKey::Index(a), PropertyKey::Index(b)) => a == b,
+            (PropertyKey::String(a), PropertyKey::String(b)) => a.same(*b),
+            (PropertyKey::Symbol(a), PropertyKey::Symbol(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+impl Eq for PropertyKey {}
+impl std::hash::Hash for PropertyKey {
+    #[inline]
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        std::mem::discriminant(self).hash(h);
+        match self {
+            PropertyKey::Index(i) => i.hash(h),
+            PropertyKey::String(s) => (s.index, s.gn).hash(h),
+            PropertyKey::Symbol(s) => s.hash(h),
+        }
+    }
 }
 
 /// The array index of `units` if it is canonical: `"0"`, or no leading zero, at most 2^32-2.
