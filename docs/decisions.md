@@ -1985,3 +1985,10 @@ A test is `own` (it logs in itself) when a step says `sign out`, `password` or `
 - A page can end while a request is in flight. With a tape set, `bare-drive` waits for pending pictures between steps and for the requests in flight at the end. Without it, the work counted changes with the race (`curl-se-home` ranged from 322 M to 963 M instructions).
 - `BARE_SEED` fixes the page random streams only. A random id in a URL or in a body never matches a recording. TLS random stays real.
 - Not done: a virtual clock for page timers. Real clocks leave 20 of 47 journeys over 5% same-binary spread (see `docs/progress.md`). A virtual clock is the next design decision for step 1.
+
+## A live page has no page budget (2026-11-14)
+
+- A live session lifted its session budgets, but not the page budgets (`cfg.page`: 60 s, 100,000 tasks, 100,000 rounds). Since `resume_page` counts these over the whole life of the page (28445bfe), and a live page runs between calls (#474), a busy page used them up. Gmail did so in about two to three minutes.
+- The session then ended with `Page(TimeBudget)`. No timer, reply or upload ran any more. `Page::stopped` gave `None`, so each wait said only that the page was idle.
+- Now `live_session` lifts the page budgets as well, as it does for the session: the page time is the session time (7 days), and the task and round budgets are unbounded. The wall-clock limits of the driver still apply.
+- `Page::stopped` also names a budget stop of the page or the session, so a driver says why the page stopped.

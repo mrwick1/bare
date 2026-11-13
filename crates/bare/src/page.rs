@@ -413,6 +413,11 @@ impl Page {
         cfg.limits.max_documents = usize::MAX;
         cfg.limits.max_tasks = usize::MAX;
         cfg.limits.max_rounds = usize::MAX;
+        // The budgets of one page count over the whole life of the page (`resume_page`). A live page runs between calls, so they too
+        // must not end it.
+        cfg.page.max_time = cfg.limits.max_time;
+        cfg.page.max_tasks = usize::MAX;
+        cfg.page.max_rounds = usize::MAX;
         // Wait for no timer that is not due: the window cannot sleep inside an event.
         cfg.page.quiet = Duration::ZERO;
         // An input event or a tick is one turn of the event loop: it waits for no reply and no next document.
@@ -497,13 +502,14 @@ impl Page {
     }
 
     /// Why the page stopped for good, if it did: a fatal error of the engine or the host, or too many tasks aborted by script budgets
-    /// (`Fatal::Aborted`). The DOM stays and can be read, but no script, timer or input runs any more. A driver should fail a step
-    /// that waits for a change with this text.
+    /// (`Fatal::Aborted`), or a budget of the page or the session. The DOM stays and can be read, but no script, timer or input runs
+    /// any more. A driver should fail a step that waits for a change with this text.
     pub fn stopped(&self) -> Option<String> {
         match &self.source {
             Source::Session(s) => match s.ended() {
                 Some(SessionStop::Page(crate::Stop::Fatal(crate::Fatal::Aborted(why)))) => Some(why.clone()),
                 Some(SessionStop::Page(crate::Stop::Fatal(f))) => Some(format!("{f:?}")),
+                Some(b @ (SessionStop::Page(crate::Stop::TaskBudget | crate::Stop::RoundBudget | crate::Stop::TimeBudget) | SessionStop::TaskBudget | SessionStop::RoundBudget | SessionStop::TimeBudget)) => Some(format!("the {b:?} ran out")),
                 _ => None,
             },
             Source::Browser(_) => None,
