@@ -1917,7 +1917,8 @@ impl Body {
         match &mut self.0 {
             Source::Live(live) => live.limited = false,
             Source::H2(stream) => stream.unlimited(),
-            Source::Memory(..) | Source::Decoded(_) => {}
+            Source::Tap(tap) => tap.inner.unlimited(),
+            Source::Memory(..) | Source::Decoded(_) | Source::Cut(..) => {}
         }
     }
 
