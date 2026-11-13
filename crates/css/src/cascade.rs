@@ -2661,18 +2661,19 @@ pub fn sources_capped(doc: &Document, viewport: (f32, f32), max_sources: usize, 
     let attr = |el, name: Option<Atom>| name.and_then(|n| doc.attr(el, n));
     let mut out = Vec::new();
     let (mut bytes, mut over) = (0usize, false);
-    walk(doc, shadows, |el| {
-        let NodeData::Element { name, .. } = *doc.data(el) else { return };
+    for sheet in doc.sheet_nodes().iter().filter(|s| shadows || s.light) {
+        let el = sheet.node;
+        let NodeData::Element { name, .. } = *doc.data(el) else { continue };
         let (is_style, is_link) = (Some(name) == style, Some(name) == link);
         if over || !(is_style || is_link) || !attr(el, media).is_none_or(|m| at_rules::media_matches(m, viewport)) {
-            return;
+            continue;
         }
         if is_style {
             let size: usize = doc.children(el).map(|c| if let NodeData::Text(span) = *doc.data(c) { doc.text(span).len() } else { 0 }).sum();
             bytes = bytes.saturating_add(size);
             over = out.len() >= max_sources || bytes > max_bytes;
             if over {
-                return;
+                continue;
             }
             let mut text = String::with_capacity(size);
             for c in doc.children(el) {
@@ -2691,12 +2692,13 @@ pub fn sources_capped(doc: &Document, viewport: (f32, f32), max_sources: usize, 
                 }
             }
         }
-    });
+    }
     out
 }
 
 /// Call `f` for each node of the tree, in the order of the page. A loop with a stack. With `shadows`, the shadow tree of a host comes
 /// right after the host, before its light children.
+#[cfg(test)]
 fn walk(doc: &Document, shadows: bool, mut f: impl FnMut(NodeId)) {
     let mut stack = vec![doc.root()];
     while let Some(node) = stack.pop() {

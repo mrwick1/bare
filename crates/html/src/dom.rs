@@ -43,10 +43,11 @@
 
 mod slots;
 
-use std::cell::{OnceCell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasherDefault, Hasher};
 use std::num::NonZeroU32;
+use std::rc::Rc;
 
 /// The number of a node. It is the place of the node in the `Vec` of its `Document`, plus one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -261,6 +262,23 @@ pub struct Document {
     // The decoded pictures of `background-image` and `mask-image`, by the number of their address (`bare_css::urls`). See `set_css_image`.
     user: UserState,
     // What the user points at, presses and focuses: the user action pseudo-classes. See `user`.
+    sheet_names: [u32; 3],
+    // The atoms of `link`, `style` and `base`, when the name table has them. See `sheet_nodes`.
+    sheet_made: RefCell<Vec<NodeId>>,
+    sheet_scanned: Cell<usize>,
+    // Every `link`, `style` and `base` element among the first `sheet_scanned` nodes. The name of an element never changes, so the list is exact. See `sheet_nodes`.
+    sheet_list: RefCell<Option<Rc<[SheetNode]>>>,
+    // Those of them that are in the tree, in order. Made when it is read, and dropped when a change can alter it. See `sheet_nodes`.
+}
+
+/// A `link`, `style` or `base` element that is in the tree (see `Document::sheet_nodes`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SheetNode {
+    pub node: NodeId,
+    /// It is in the light tree: no shadow root is on its way up to the top node.
+    pub light: bool,
+    /// It is in the light tree, it is in the HTML namespace, and no HTML `template` is above it. A scan of the loader (`<link>`, `<base>`) takes only these.
+    pub html: bool,
 }
 
 /// The elements that the user action pseudo-classes start from. The host sets them (`Document::set_hover` and the others). A set
@@ -549,6 +567,10 @@ impl Document {
             css_images: HashMap::default(),
             user: UserState::default(),
             on_name: false,
+            sheet_names: [u32::MAX; 3],
+            sheet_made: RefCell::new(Vec::new()),
+            sheet_scanned: Cell::new(0),
+            sheet_list: RefCell::new(None),
         };
         // The order matters: it must match `Atom::ID` and `Atom::CLASS`.
         doc.intern("id");
@@ -842,6 +864,136 @@ impl Document {
         }
     }
 
+    /// The `link`, `style` and `base` elements that are in the tree, in the order of the page (a shadow tree comes right after its host, before the
+    /// light children). It is the list that the style sheet code needs, so it does not walk the tree. The name of an element never changes, so
+    /// `sheet_made` has every candidate. The list keeps nodes that are in the tree only (the top node, or a shadow root of a host that is), in order, and it is
+    /// made again at the next read after a node that can hold one joins or leaves the tree. It costs the depth of each of the L elements, and the
+    /// children of their ancestors up to the last one that leads to an element. An attribute or the text of an element is not kept here: read it when you need it.
+    /// In a debug build and in tests, each read checks the list against a walk of the whole tree (`sheet_nodes_walk`).
+    pub fn sheet_nodes(&self) -> Rc<[SheetNode]> {
+        self.scan_sheets();
+        let mut slot = self.sheet_list.borrow_mut();
+        let list = slot.get_or_insert_with(|| {
+            // A walk costs the nodes of the page, the other way costs the depth of each element and a table: the small page takes the walk.
+            if self.nodes.len() < 32 * self.sheet_made.borrow().len() { self.sheet_nodes_walk().into() } else { self.order_sheets() }
+        });
+        #[cfg(any(debug_assertions, test))]
+        {
+            let walk = self.sheet_nodes_walk();
+            assert_eq!(**list, *walk, "the sheet list is not the list of a walk");
+            assert_eq!(*self.order_sheets(), *walk, "the pruned sheet list is not the list of a walk");
+        }
+        list.clone()
+    }
+
+    /// Add the `link`, `style` and `base` elements of the nodes made since the last read to `sheet_made`. One pass over the new part of the `Vec`, so the
+    /// whole life of a document costs one pass, and a document that nobody asks pays nothing.
+    fn scan_sheets(&self) {
+        let from = self.sheet_scanned.replace(self.nodes.len());
+        let mut made = self.sheet_made.borrow_mut();
+        for (i, n) in self.nodes.iter().enumerate().skip(from) {
+            if matches!(n.data, NodeData::Element { name, .. } if self.is_sheet_name(name)) {
+                made.push(NodeId::from_index(i));
+            }
+        }
+    }
+
+    /// `sheet_nodes` without a walk of the tree: climb from each element that was made.
+    fn order_sheets(&self) -> Rc<[SheetNode]> {
+        self.scan_sheets();
+        let made = &self.sheet_made.borrow()[..];
+        if made.is_empty() {
+            return Rc::from([]);
+        }
+        let template = self.atoms.get("template").copied();
+        // `up[p]`: the shadow root and the light children of `p` that lead to an element, each once.
+        let mut up: HashMap<NodeId, (Option<NodeId>, HashSet<NodeId, BuildHasherDefault<Fnv>>), BuildHasherDefault<Fnv>> = HashMap::default();
+        let mut found: HashMap<NodeId, (bool, bool), BuildHasherDefault<Fnv>> = HashMap::default();
+        let mut path = Vec::new();
+        'each: for &el in made {
+            let (mut light, mut under_template, mut cur) = (true, false, el);
+            path.clear();
+            loop {
+                match self.nodes[cur.index()].parent {
+                    Some(p) => {
+                        path.push((p, cur, false));
+                        under_template |= light && matches!(self.nodes[p.index()].data, NodeData::Element { name, .. } if Some(name) == template) && !self.is_foreign(p);
+                        cur = p;
+                    }
+                    None if cur == self.root() => break,
+                    None => match self.shadow_host.get(&(cur.index() as u32)) {
+                        Some(&(host, _)) => {
+                            path.push((host, cur, true));
+                            light = false;
+                            cur = host;
+                        }
+                        None => continue 'each,
+                    },
+                }
+            }
+            for &(p, child, shadow) in &path {
+                let e = up.entry(p).or_default();
+                if shadow {
+                    e.0 = Some(child);
+                } else {
+                    e.1.insert(child);
+                }
+            }
+            found.insert(el, (light, light && !under_template && !self.is_foreign(el)));
+        }
+        let mut out = Vec::with_capacity(found.len());
+        let mut stack = vec![self.root()];
+        while let Some(n) = stack.pop() {
+            if let Some(&(light, html)) = found.get(&n) {
+                out.push(SheetNode { node: n, light, html });
+            }
+            let Some((shadow, kids)) = up.get(&n) else { continue };
+            // The marked children in the order of the page: walk the children until each one is seen.
+            let mut ordered = Vec::with_capacity(kids.len());
+            let mut c = self.nodes[n.index()].first_child;
+            while let Some(k) = c.filter(|_| ordered.len() < kids.len()) {
+                if kids.contains(&k) {
+                    ordered.push(k);
+                }
+                c = self.nodes[k.index()].next;
+            }
+            stack.extend(ordered.into_iter().rev());
+            stack.extend(*shadow);
+        }
+        out.into()
+    }
+
+    /// The list of `sheet_nodes`, made by a walk of the whole tree. It is the check of `sheet_nodes`.
+    pub fn sheet_nodes_walk(&self) -> Vec<SheetNode> {
+        let template = self.atoms.get("template").copied();
+        let mut out = Vec::new();
+        // The node, whether it is in the light tree, and whether an HTML `template` is above it.
+        let mut stack = vec![(self.root(), true, false)];
+        while let Some((n, light, under_template)) = stack.pop() {
+            if let NodeData::Element { name, .. } = self.nodes[n.index()].data {
+                if self.is_sheet_name(name) {
+                    out.push(SheetNode { node: n, light, html: light && !under_template && !self.is_foreign(n) });
+                }
+                let is_template = Some(name) == template && !self.is_foreign(n);
+                let mut c = self.nodes[n.index()].last_child;
+                while let Some(k) = c {
+                    stack.push((k, light, under_template || is_template));
+                    c = self.nodes[k.index()].prev;
+                }
+            } else {
+                let mut c = self.nodes[n.index()].last_child;
+                while let Some(k) = c {
+                    stack.push((k, light, under_template));
+                    c = self.nodes[k.index()].prev;
+                }
+            }
+            if let Some(&root) = self.shadow_of.get(&(n.index() as u32)) {
+                stack.push((root, false, under_template));
+            }
+        }
+        out
+    }
+
     /// Does any element have a shadow root?
     pub fn has_shadow_roots(&self) -> bool {
         !self.shadow_of.is_empty()
@@ -940,6 +1092,7 @@ impl Document {
         self.shadow_host.insert(root.index() as u32, (host, open));
         // The flat tree changed: the light children of the host are not rendered now.
         self.revision += 1;
+        self.sheets_moved();
         self.mark_full();
         root
     }
@@ -1097,6 +1250,9 @@ impl Document {
         }
         let atom = Atom(u32::try_from(self.names.len()).expect("more than 4 billion names"));
         self.on_name |= is_on_name(name);
+        if let Some(i) = ["link", "style", "base"].iter().position(|&n| n == name) {
+            self.sheet_names[i] = atom.0;
+        }
         self.names.push(name.into());
         self.atoms.insert(name.into(), atom);
         atom
@@ -1118,11 +1274,33 @@ impl Document {
         id
     }
 
+    /// Is `name` the atom of `link`, `style` or `base`?
+    #[inline(always)]
+    fn is_sheet_name(&self, name: Atom) -> bool {
+        let [a, b, c] = self.sheet_names;
+        name.0 == a || name.0 == b || name.0 == c
+    }
+
+    /// Can `node` (with its subtree) change `sheet_nodes` when it joins or leaves the tree? A `link`, `style` or `base` can, and so can a node
+    /// that has children. A node with no children that is none of the three cannot. A list that is not made (no read yet) has nothing to drop, so a page that never reads it pays one test.
+    fn may_hold_sheet(&mut self, node: NodeId) -> bool {
+        let n = &self.nodes[node.index()];
+        self.sheet_list.get_mut().is_some() && (n.first_child.is_some() || matches!(n.data, NodeData::Element { name, .. } if self.is_sheet_name(name)))
+    }
+
+    /// The list of `sheet_nodes` is out of date.
+    fn sheets_moved(&mut self) {
+        *self.sheet_list.get_mut() = None;
+    }
+
     /// Put `node`, which has no parent, in the list of children of `parent`, just before `before` (or at the end).
     fn link(&mut self, node: NodeId, parent: NodeId, before: Option<NodeId>) {
         self.places = Default::default();
         self.revision += 1;
         self.name_revision += u64::from(self.may_name(node));
+        if self.may_hold_sheet(node) {
+            self.sheets_moved();
+        }
         let before = before.filter(|&b| b != node && self.parent(b) == Some(parent));
         let prev = self.child_before(parent, before);
         let n = &mut self.nodes[node.index()];
@@ -1152,6 +1330,9 @@ impl Document {
         self.places = Default::default();
         self.revision += 1;
         self.name_revision += u64::from(self.may_name(node));
+        if self.may_hold_sheet(node) {
+            self.sheets_moved();
+        }
         match prev {
             Some(p) => self.nodes[p.index()].next = next,
             None => self.nodes[parent.index()].first_child = next,
@@ -1200,6 +1381,7 @@ impl Document {
         self.places = Default::default();
         self.revision += 1;
         self.name_revision += 1;
+        self.sheets_moved();
         self.mark_full();
         cut
     }
@@ -1225,6 +1407,7 @@ impl Document {
         self.places = Default::default();
         self.revision += 1;
         self.name_revision += 1;
+        self.sheets_moved();
         self.mark_full();
     }
 
@@ -1242,6 +1425,7 @@ impl Document {
         self.places = Default::default();
         self.revision += 1;
         self.name_revision += 1;
+        self.sheets_moved();
         self.mark_full();
     }
 
@@ -1323,6 +1507,7 @@ impl Document {
         if ns != Ns::Html {
             self.revision += 1;
             self.name_revision += 1;
+            self.sheets_moved();
             let prefix = prefix.map(|p| self.intern(p));
             self.foreign.insert(id.index() as u32, Foreign { ns, prefix });
         }
@@ -1848,6 +2033,80 @@ mod tests {
     fn text_of(doc: &Document, id: NodeId) -> &str {
         let NodeData::Text(span) = doc.data(id) else { panic!("not text") };
         doc.text(*span)
+    }
+
+    /// `sheet_nodes` checks itself against a walk at each read (in tests). This makes random trees with `link`, `style`, `base`, `template`, SVG,
+    /// shadow roots and fragments, changes them at random, and reads at random, so a change that the list misses fails.
+    #[test]
+    fn the_sheet_list_follows_random_changes() {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n as u64) as usize
+        };
+        for _ in 0..40 {
+            let mut doc = Document::new();
+            let mut boxes = vec![doc.root(), doc.create_fragment()];
+            let mut all: Vec<NodeId> = Vec::new();
+            for _ in 0..150 {
+                match next(10) {
+                    0..=2 => {
+                        let name = ["link", "style", "base", "div", "template", "p"][next(6)];
+                        let el = doc.create_element(name);
+                        all.push(el);
+                        boxes.push(el);
+                    }
+                    3 => {
+                        let name = ["style", "link", "template", "g"][next(4)];
+                        let el = doc.create_element_ns(if next(2) == 0 { Ns::Svg } else { Ns::MathMl }, None, name);
+                        all.push(el);
+                        boxes.push(el);
+                    }
+                    4..=6 if !all.is_empty() => {
+                        let (node, parent) = (all[next(all.len())], boxes[next(boxes.len())]);
+                        let mut up = Some(parent);
+                        while up.is_some_and(|u| u != node) {
+                            up = doc.parent_or_host(up.unwrap());
+                        }
+                        if up.is_none() {
+                            let before = doc.children(parent).nth(next(4));
+                            doc.move_to(node, parent, before);
+                        }
+                    }
+                    7 if !all.is_empty() => doc.detach(all[next(all.len())]),
+                    8 if !all.is_empty() => {
+                        let host = all[next(all.len())];
+                        if matches!(doc.data(host), NodeData::Element { .. }) && doc.shadow_root(host).is_none() {
+                            boxes.push(doc.attach_shadow(host, true));
+                        }
+                    }
+                    _ => {
+                        if let Some(&n) = all.get(next(all.len().max(1))) {
+                            let copy = doc.clone_element(n);
+                            all.push(copy);
+                            boxes.push(copy);
+                        }
+                    }
+                }
+                if next(3) == 0 {
+                    doc.sheet_nodes();
+                }
+            }
+            doc.sheet_nodes();
+        }
+    }
+
+    #[test]
+    fn the_sheet_list_is_in_tree_order_and_marks_what_the_loader_may_use() {
+        let mut doc = crate::tree::parse("<head><base href=/x/><link rel=stylesheet href=a.css><template><link href=t.css></template></head><body><svg><style>a{}</style></svg><div><style>b{}</style></div></body>");
+        // The contents of a parsed template are not in the tree. A `link` that a host puts below a `template` element is, but a loader must not take it.
+        let template = doc.find_atom("template").and_then(|t| (0..doc.len()).map(NodeId::from_index).find(|&n| matches!(doc.data(n), NodeData::Element { name, .. } if *name == t))).unwrap();
+        doc.insert_element(template, None, "link", &[("href", "u.css")]);
+        let kinds: Vec<_> = doc.sheet_nodes().iter().map(|s| (doc.element_name(s.node).to_string(), s.light, s.html)).collect();
+        let want = |n: &str, h| (n.to_string(), true, h);
+        assert_eq!(kinds, [want("base", true), want("link", true), want("link", false), want("style", false), want("style", true)]);
     }
 
     #[test]

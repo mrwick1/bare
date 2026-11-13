@@ -405,29 +405,18 @@ impl Run<'_> {
     fn tell_links(&mut self, raw: &str, url: &str, ok: bool) -> Flow {
         let nodes = {
             let doc = self.dom.doc.borrow();
-            let (link, template, rel, href, media, disabled) = (doc.find_atom("link"), doc.find_atom("template"), doc.find_atom("rel"), doc.find_atom("href"), doc.find_atom("media"), doc.find_atom("disabled"));
+            let (link, rel, href, media, disabled) = (doc.find_atom("link"), doc.find_atom("rel"), doc.find_atom("href"), doc.find_atom("media"), doc.find_atom("disabled"));
             let vp = self.dom.plat.s.borrow().viewport;
             let mut out = Vec::new();
-            let mut stack = vec![doc.root()];
-            while let Some(n) = stack.pop() {
-                if let NodeData::Element { name, .. } = *doc.data(n)
-                    && !doc.is_foreign(n)
-                {
-                    if Some(name) == template {
-                        continue;
+            for s in doc.sheet_nodes().iter().filter(|s| s.html) {
+                let n = s.node;
+                let NodeData::Element { name, .. } = *doc.data(n) else { continue };
+                let attr = |a: Option<bare_html::dom::Atom>| a.and_then(|a| doc.attr(n, a));
+                if Some(name) == link && attr(href) == Some(raw) {
+                    let is = |w: &str| attr(rel).is_some_and(|r| r.split_ascii_whitespace().any(|x| x.eq_ignore_ascii_case(w)));
+                    if is("stylesheet") && !is("alternate") && attr(disabled).is_none() && attr(media).is_none_or(|m| bare_css::at_rules::media_matches(m, vp)) {
+                        out.push(n);
                     }
-                    let attr = |a: Option<bare_html::dom::Atom>| a.and_then(|a| doc.attr(n, a));
-                    if Some(name) == link && attr(href) == Some(raw) {
-                        let is = |w: &str| attr(rel).is_some_and(|r| r.split_ascii_whitespace().any(|x| x.eq_ignore_ascii_case(w)));
-                        if is("stylesheet") && !is("alternate") && attr(disabled).is_none() && attr(media).is_none_or(|m| bare_css::at_rules::media_matches(m, vp)) {
-                            out.push(n);
-                        }
-                    }
-                }
-                let mut c = doc.last_child(n);
-                while let Some(k) = c {
-                    stack.push(k);
-                    c = doc.prev_sibling(k);
                 }
             }
             out

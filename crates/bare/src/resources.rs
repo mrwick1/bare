@@ -348,28 +348,8 @@ pub fn discover(doc: &Document, page: &Url, limits: &Limits) -> Result<Discovery
 /// The document base URL now: the first `<base href>` that resolves against `page`, else `None` (the base is `page`; the rule of `discover`).
 /// The driver calls it again after scripts ran, because a script can add or change a `<base>`.
 pub fn document_base(doc: &Document, page: &Url) -> Option<Url> {
-    let (base, template, href) = (doc.find_atom("base"), doc.find_atom("template"), doc.find_atom("href"));
-    let mut stack = vec![doc.root()];
-    while let Some(node) = stack.pop() {
-        if let NodeData::Element { name, .. } = *doc.data(node)
-            && !doc.is_foreign(node)
-        {
-            if Some(name) == template {
-                continue;
-            }
-            if Some(name) == base
-                && let Some(u) = href.and_then(|h| doc.attr(node, h)).and_then(|h| page.join(h.trim_matches(WS)).ok())
-            {
-                return Some(u);
-            }
-        }
-        let mut child = doc.last_child(node);
-        while let Some(c) = child {
-            stack.push(c);
-            child = doc.prev_sibling(c);
-        }
-    }
-    None
+    let (base, href) = (doc.find_atom("base")?, doc.find_atom("href")?);
+    doc.sheet_nodes().iter().filter(|s| s.html && matches!(*doc.data(s.node), NodeData::Element { name, .. } if name == base)).find_map(|s| doc.attr(s.node, href).and_then(|h| page.join(h.trim_matches(WS)).ok()))
 }
 
 /// The text of an inline script: the text children of the element. One child (the usual case) is borrowed, not copied.
