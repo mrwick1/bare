@@ -504,6 +504,20 @@ fn a_failed_step_names_the_script_error_that_may_explain_it() {
     assert!(r.as_str().unwrap().contains("hint: take a snapshot"), "{r}");
 }
 
+/// A live page goes on between calls, as a browser tab does (#471): its timers run while the agent does not call.
+#[test]
+fn a_live_page_runs_its_timers_between_calls() {
+    let mut s = Server::start();
+    let page = one_page("<!doctype html><title>t</title><script>var c = 0; setInterval(function () { c++ }, 50)</script>".to_string());
+    let (r, error) = s.tool("open", json!({"url": page}));
+    assert!(!error, "{r}");
+    let count = |s: &mut Server| s.tool("eval", json!({"js": "c"})).0.as_f64().unwrap();
+    let before = count(&mut s);
+    std::thread::sleep(std::time::Duration::from_millis(1000));
+    let after = count(&mut s);
+    assert!(after - before >= 10.0, "the timer ran {} times in 1 s between calls", after - before);
+}
+
 /// Serves one page at every path. Gives the base URL.
 fn one_page(html: String) -> String {
     use std::io::Read;

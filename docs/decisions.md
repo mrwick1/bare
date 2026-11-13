@@ -1926,3 +1926,11 @@ Issue #442: `el.style.WebkitUserSelect` was `undefined`, so `el.style.WebkitUser
 - A page that is stopped or still loading closes at once.
 - Not done: `beforeunload`, `unload`, and hide events on a navigation to another document.
 - Reason: web apps send pending changes from these handlers. An agent's last change was lost when the next tool call replaced the page (issue #471).
+
+## A live page goes on between tool calls (2026-11-13)
+
+- `bare-mcp` reads its requests on another thread. While it waits for the next request, it gives each live page one slice of work (`Session::tick`, then `Page::tick`) and waits until the next task of a page is due.
+- Timers, replies and the requests that they start therefore go on between calls, as in a browser tab.
+- A page with work due now runs again after 1 ms at the earliest, so it does not spin a core.
+- Before, a live page ran only during a tool call. A timer page ran 0 ticks in 6 s between calls.
+- Reason: a web mail app queues a change and sends it from a timer. The change waited until the agent's next call, and it was lost when that call replaced the page (issue #471).

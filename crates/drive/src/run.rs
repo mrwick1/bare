@@ -687,6 +687,15 @@ impl Session {
         &self.rep
     }
 
+    /// Run the tasks of the page that are due (`Page::tick`), as a browser runs a tab while nobody acts. Gives when the next task is
+    /// due. A page in a window runs on its own thread, so this does nothing for it.
+    pub fn tick(&mut self) -> Option<Instant> {
+        match &mut self.host {
+            Host::Local(p) => p.tick().1,
+            _ => None,
+        }
+    }
+
     /// Move out the steps, logs, network records and failure so far, and start a new part of the report. The page stays open. A caller
     /// that sends steps one call at a time gives each call its own report, and the session does not keep old records.
     pub fn drain(&mut self) -> Report {

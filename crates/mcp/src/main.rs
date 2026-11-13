@@ -22,7 +22,8 @@ use bare_drive::steps;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
-use std::time::Duration;
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::time::{Duration, Instant};
 
 /// A live session: the page, its options and its secrets, kept between tool calls.
 struct Live {
@@ -63,7 +64,28 @@ fn main() {
     bare_net::parallel::limit_malloc_arenas(false);
     let mut server = Server { workspace, live: HashMap::new(), saved: HashMap::new(), runs: 0 };
     let mut out = std::io::stdout().lock();
-    for line in std::io::stdin().lock().lines() {
+    // Another thread reads the requests, so that the live pages go on between calls (#471): timers, replies and the requests that
+    // they start, as in a browser tab. A page with work due now runs again after 1 ms at the earliest, so it does not spin a core.
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in std::io::stdin().lock().lines() {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    loop {
+        let line = match server.tick_live() {
+            Some(at) => match rx.recv_timeout(at.saturating_duration_since(Instant::now()).max(Duration::from_millis(1))) {
+                Ok(l) => l,
+                Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Disconnected) => break,
+            },
+            None => match rx.recv() {
+                Ok(l) => l,
+                Err(_) => break,
+            },
+        };
         let Ok(line) = line else { break };
         if line.trim().is_empty() {
             continue;
@@ -82,6 +104,11 @@ fn main() {
 }
 
 impl Server {
+    /// One slice of work for each live page. Gives when the next task of a page is due.
+    fn tick_live(&mut self) -> Option<Instant> {
+        self.live.values_mut().filter_map(|l| l.session.tick()).min()
+    }
+
     fn handle(&mut self, msg: &Value) -> Option<Value> {
         let id = msg.get("id")?.clone();
         let params = msg.get("params").cloned().unwrap_or(json!({}));
