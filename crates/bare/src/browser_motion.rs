@@ -202,7 +202,7 @@ fn norm(v: Cv, calc: &dyn Fn(u32) -> (f32, f32)) -> Option<String> {
 
 /// The value of the properties of `item` in `s`, as one text.
 fn read(item: &Item, s: &ComputedStyle, calc: &dyn Fn(u32) -> (f32, f32)) -> Option<String> {
-    let parts: Option<Vec<String>> = item.props.iter().map(|&p| norm(s.get(p), calc)).collect();
+    let parts: Option<Vec<String>> = item.props.iter().map(|&p| norm(s.value(p), calc)).collect();
     parts.map(|p| p.join("|"))
 }
 
