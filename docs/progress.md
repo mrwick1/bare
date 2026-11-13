@@ -8393,3 +8393,58 @@ Gaps:
 Checks: `cargo test -p bare --lib eventsource`: 9 passed. New tests: `events_arrive_while_the_stream_is_open`, `an_event_split_over_chunks_fires_once`, `close_stops_the_events`, `a_post_completes_while_a_stream_is_open`, and in `crates/mcp/tests/server.rs` `an_open_event_stream_delivers_events_and_does_not_block_a_fetch`. All failed before the change; the MCP test failed with `no element matches text="fetch done"`. `cargo test -p bare`: 1291 passed, 2 failed (`browser_canvas_tests::one_image_data_holds_at_most_64_mib` fails on main too; `browser_session_tests::a_pending_meta_refresh_is_queued_work` is flaky and passed alone). `cargo test -p bare-mcp -p bare-drive`: all pass except `chunked` (2 tests), which fails on main too. `cargo clippy`: no warning on a changed line. `tools/portable_check.sh`: ok. The app `deck` in `bare-mcp`: a new chat sends its message, the run streams, and the screenshot shows in the chat.
 
 Not tested: `withCredentials` with cookies. A cross-origin stream (CORS). HTTP/2 streams. Chrome comparison of the event order.
+
+## Benchmark round on frozen commits (2026-11-13)
+
+The owner asked for a benchmark of everything built so far. Main stays open, because other agents keep merging into it. We measure two frozen commits. A fix is rebased on the newest main and measured again there before merge.
+
+- BASE: `13c6b0bc` (merge of #365, status at the pause, 2026-11-10).
+- NEW: `f6415364` (merge of #456, 2026-11-13).
+
+Three agents ran at the same time on archMachine. Instruction counts do not depend on load. Wall times do, so all time numbers below are weak. Raw logs and reports are machine-local under `/data/bare-tmp/bm/{a,b,c}/`. `/usr/bin/time` is not installed, so max RSS comes from `wait4` or `getrusage`. `/data/bare-tmp/bin` (`heavy`, `base-build`) was missing on archMachine and was restored from arjun-e16 with archMachine paths and 3 slots. `merge-gate` is missing on both machines.
+
+### A: cost matrix, bench and stress
+
+- Cost matrix (813 rows): 171 rows over +0.5% under both allocators, 30 under one allocator only. Mean glibc change +0.640%, median +0.084%. Worst rows: `focus_load` +9.1%, `nodelist_load` +7.5%, `boxes-display-none` +6.9%. The largest decrease is -1.45%.
+- `parse_load deep 1` and `deep 10` overflow the stack in NEW. d88ad8ac raised `HARD_MAX_DEPTH` from 256 to 2048, and `crates/js/examples/parse_load.rs` still runs on a 2 MiB thread. The example is stale; the parser is not slower.
+- Bench: memory is the same in every step except `css: styles of 200,000 elements` (peak +6.5%, kept +10.3%).
+- Stress: no case has a growth exponent over 1.5 in either tree. Memory at 100x grew in `css-is-wide` (+79.7%), `css-var-many` (+35.5%), `css-var-cycle` (+20.0%), `css-var-fanout` (+17.1%) and `css-unique-styles` (+11.7%). `css-class-index` at 2,000,000 timed out in BASE and finishes in NEW (7.8 s).
+- Hypothesis: ff3cd703 "Keep custom property sets as numbers" caused the css-var memory growth. Not verified.
+
+### B: ramps up to the raised limits
+
+| Limit | NEW passes up to | BASE refused at | Worst passing point |
+| --- | --- | --- | --- |
+| Task steps (500M) | 55M loop iterations | 12M | 9 to 10 s, 15 MiB |
+| Computed work, simple page | 32k nodes, 32k rules | 12k | 152 ms, 56 MiB |
+| Computed work, 6 classes and descendant rules | N=22000 | 16000 | 1.16 s, 71 MiB |
+| Whole-page restyles (6000 elements, 36000 rules) | 13 restyles | 2 | about 1 s |
+| Style sheet, external | 16 MiB (then `css-resource-bytes`) | 4 MiB (`cssom-text`) | 2.1 s, 970 MiB |
+| Nested calls | 1022 deep (then traversal depth) | 200 | 20 ms, 15 MiB |
+
+- Every limit refuses cleanly, and growth is linear except the heavy computed-work page (instruction exponent 1.4 to 2.0).
+- A loop iteration costs about 9 steps. One step costs about 19 ns.
+- A restyle is charged about 35M steps but takes about 65 ms. The charge is about 10 times too high.
+- The 32 MiB sheet cap is never reached: the 8 MiB body cap and the 16 MiB resource cap refuse first. `cssom-objects` stops a page that reads `cssRules` of a dense 1 MiB sheet or a realistic 4 MiB sheet.
+
+### C: whole-browser journeys
+
+All 48 public journeys ran 3 times on each commit, alternating, and headless Chrome ran 3 times on each URL.
+
+- Totals over 48 journeys (min of passing runs): instructions 23,978 M to 24,945 M (+4.0%). Min wall 49,349 ms to 48,945 ms (-0.8%). RSS 1,172 MiB to 1,182 MiB (+0.9%). Median RSS 16.4 MiB to 17.5 MiB.
+- All 48 pass at least once on both commits. `nextjs-docs` and `duckduckgo-html-search` are flaky on both.
+- Live pages vary up to +124% in instructions between runs of the same binary. Flags on `react-docs`, `paulgraham-home`, `curl-se-home` and `python-org-docs-link` are noise.
+- Over +5% instructions: 13 journeys, for example `rust-book-search` +15%, `wikipedia-search` +14%, `mdn-reference` +11.5%. Over +10% RSS: `wikipedia-article`, `wikipedia-search`, `wikipedia-toc-languages`.
+- Heaviest in NEW: `rust-book-search` (4.46 G instructions, 96 MiB) and `python-docs-search-results` (2.74 G, 100 MiB).
+- Chrome: median load 528 ms and median RSS 1,216 MiB summed over its processes. Chrome time covers the first navigation only, and bare time covers the whole journey.
+
+### Fix candidates, in order
+
+1. Restyle step charge (about 10 times too high): pages run out of budget early.
+2. Heavy computed-work page: exponent 1.4 to 2.0.
+3. CSS memory: `css-is-wide` and the `css-var-*` cases.
+4. Top cost matrix rows: `focus_load`, `nodelist_load`, `boxes-display-none`.
+5. `parse_load.rs` stack size for the 2048 depth.
+6. A 16 MiB external sheet at 970 MiB RSS.
+
+Not tested: wall time on an idle machine, stress `fuzz`, Gmail and other logged-in pages, and layout and paint cost on the ramps. `bare-drive` is stripped, so perf could not name hot functions.
