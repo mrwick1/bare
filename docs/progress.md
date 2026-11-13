@@ -8448,3 +8448,15 @@ All 48 public journeys ran 3 times on each commit, alternating, and headless Chr
 6. A 16 MiB external sheet at 970 MiB RSS.
 
 Not tested: wall time on an idle machine, stress `fuzz`, Gmail and other logged-in pages, and layout and paint cost on the ramps. `bare-drive` is stripped, so perf could not name hot functions.
+
+## Profiles, designs and the performance goal (2026-11-13)
+
+Two profiles ran on the frozen commit `f6415364` with a symbol build. Reports are machine-local under `/data/bare-tmp/prof/{cpu,mem}/`.
+
+- CPU share on the 48 journeys (frame-pointer stacks, 144 runs): JS execution 25.5%, style 17.7%, sheet loader 10.7%, CSS parse 8.9%, layout 6.9%, JS parse 6.6%. On the ramps: JS execution 57.7%, style 32.2%.
+- `Run::tell_links` walks the whole DOM for each sheet that loads: O(sheets x nodes). It reaches 30.5% of `python-org-docs-link`.
+- Memory: the median journey peaks at 18.2 MiB, and 77% of it is the program image. The heaviest journey (`python-docs-search-results`, 116 MiB) is 39% JS heap, 19% script ASTs and 18% DOM. `wrap_declaration` copies about 130 accessors onto each CSSOM rule object: 10.2 KB per rule, 671 MiB at the cap of 65,536 objects.
+
+Design documents: `docs/design-style.md`, `docs/design-js.md`, and an independent review in `docs/design-review.md`. Main findings: 95% of parsed JS syntax nodes are in functions that never run, about 13% of CSS rule entries ever match, and the sheet scans visit 110 times more nodes than the cascade styles.
+
+Owner decision: build every step in `docs/perf-goal.md` and show a visible improvement against the success criteria there.
