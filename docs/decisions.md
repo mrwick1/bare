@@ -1910,3 +1910,10 @@ Issue #442: `el.style.WebkitUserSelect` was `undefined`, so `el.style.WebkitUser
 - The cap stays, and the body is still not copied. Form submission keeps its own cap.
 - Reason: a web mail app batches its analytics into one `fetch` POST of about 9.8 MB. The page stopped while the user typed, and an attachment upload never finished (issue #465).
 - This follows the refusal principle: the page makes the body, so the refusal must not stop the page. The stream body cap already rejects with a `TypeError`.
+
+## The address bar with a new fragment stays in the document (2026-11-13)
+
+- `Page::navigate` with the document URL and a fragment is a fragment navigation in the document (`Browser::navigate_same_document`). It is the path of `location.href = '#x'`: a new entry, then `hashchange`.
+- The page keeps its state and its requests. Any other URL loads a new document, as before.
+- Chrome does the same for the address bar.
+- Reason: a web mail app sends some actions a few seconds late. A `goto` to its `#search/...` view loaded a new document and dropped a pending delete (issue #468).

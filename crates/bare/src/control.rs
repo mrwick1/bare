@@ -192,10 +192,18 @@ impl Page {
     }
 
     /// Load `url` as the address bar does, or the current document again (`None`). It returns at once: the old document ends, the ticks
-    /// load the next one, and the window shows the old pixels until then. `Err`: the page has no session.
+    /// load the next one, and the window shows the old pixels until then. A `url` that is the document URL with a fragment stays in the
+    /// document (`Browser::navigate_same_document`). `Err`: the page has no session.
     pub fn navigate(&mut self, url: Option<&str>) -> Result<(), String> {
         if !matches!(self.source, Source::Session(_)) {
             return Err("a page without a session cannot navigate".into());
+        }
+        // Only the fragment differs: the same document goes on, as in Chrome.
+        if let (Some(u), Some(b)) = (url, self.browser())
+            && b.navigate_same_document(u).map_err(|e| format!("the page stopped: {e:?}"))?
+        {
+            self.touched();
+            return Ok(());
         }
         // The old document ends in `Session::navigate`: its frame goes first, the pixels stay.
         self.release_frame();
