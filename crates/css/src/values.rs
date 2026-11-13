@@ -71,7 +71,8 @@ macro_rules! properties {
 
             /// The property for a name in lowercase. `None` if we do not know it, or if it is a shorthand.
             pub fn from_name(name: &str) -> Option<Property> {
-                Property::from_core_name(name).or_else(|| Property::from_picture_name(name))
+                // `-webkit-user-select` is a legacy alias: the same property.
+                Property::from_core_name(name).or_else(|| Property::from_picture_name(name)).or_else(|| (name == "-webkit-user-select").then_some(Property::UserSelect))
             }
 
             /// `from_name` for the properties before `Property::CORE`. The parser asks this first: a name of a picture property costs it nothing.
@@ -191,6 +192,7 @@ properties! {
     Stroke => "stroke",
     ObjectFit => "object-fit",
     Cursor => "cursor",
+    UserSelect => "user-select",
     TranslateX => "-bare-translate-x",
     TranslateY => "-bare-translate-y",
     ;
@@ -307,7 +309,7 @@ keywords! {
     Top => "top", Bottom => "bottom", Middle => "middle", Sub => "sub",
     Super => "super", TextTop => "text-top", TextBottom => "text-bottom", Ltr => "ltr",
     Rtl => "rtl", Button => "button", Checkbox => "checkbox", Radio => "radio",
-    Textfield => "textfield", Textarea => "textarea", Menulist => "menulist",
+    Textfield => "textfield", Textarea => "textarea", Menulist => "menulist", Text => "text",
     All => "all", Painted => "painted", Fill => "fill", Stroke => "stroke", VisiblePainted => "visiblepainted",
     VisibleFill => "visiblefill", VisibleStroke => "visiblestroke",
     Contain => "contain", Cover => "cover", ScaleDown => "scale-down", Repeat => "repeat", NoRepeat => "no-repeat",
@@ -357,7 +359,7 @@ pub fn parse_declaration(mut name: &str, value: &str, important: bool, side: &mu
             return true;
         }
         match name.strip_prefix("-webkit-") {
-            Some(n) if n.starts_with("mask") => name = n,
+            Some(n) if n.starts_with("mask") || n == "user-select" => name = n,
             _ => return false,
         }
     }
@@ -1606,6 +1608,7 @@ fn longhand(property: Property, part: Part) -> Option<Value> {
         BorderTopLeftRadius | BorderTopRightRadius | BorderBottomRightRadius | BorderBottomLeftRadius => positive(part).map(Value::Length),
         Appearance => one_of(part, &[K::None, K::Auto, K::Button, K::Checkbox, K::Radio, K::Textfield, K::Textarea, K::Menulist]),
         Cursor => one_of(part, &[K::Auto, K::Default, K::Pointer]),
+        UserSelect => one_of(part, &[K::Auto, K::Text, K::None, K::Contain, K::All]),
         PointerEvents => one_of(part, &[K::Auto, K::None, K::Visible, K::VisiblePainted, K::VisibleFill, K::VisibleStroke, K::Painted, K::Fill, K::Stroke, K::All]),
         Top | Right | Bottom | Left => match part {
             Part::Keyword(K::Auto) => Some(Value::Keyword(K::Auto)),
@@ -1911,6 +1914,15 @@ mod tests {
         assert_eq!(one("opacity", "1px"), None);
         assert_eq!(one("appearance", "none"), Some(Value::Keyword(K::None)));
         assert_eq!(one("appearance", "textfield"), Some(Value::Keyword(K::Textfield)));
+        // `user-select` takes the CSS UI 4 keywords. `-webkit-user-select` is the same property.
+        assert_eq!(one("user-select", "none"), Some(Value::Keyword(K::None)));
+        assert_eq!(one("user-select", "text"), Some(Value::Keyword(K::Text)));
+        assert_eq!(one("user-select", "contain"), Some(Value::Keyword(K::Contain)));
+        assert_eq!(one("user-select", "all"), Some(Value::Keyword(K::All)));
+        assert_eq!(one("user-select", "element"), None);
+        assert_eq!(parse("-webkit-user-select", "none"), [(Property::UserSelect, Value::Keyword(K::None))]);
+        assert_eq!(parse("-webkit-user-select", "none"), parse("user-select", "none"));
+        assert_eq!(Property::from_name("-webkit-user-select"), Some(Property::UserSelect));
         assert_eq!(one("border-top-left-radius", "4px"), px(4.0));
         assert_eq!(one("border-top-left-radius", "-4px"), None);
         let all = |v: f32| vec![BorderTopLeftRadius, BorderTopRightRadius, BorderBottomRightRadius, BorderBottomLeftRadius].into_iter().map(|p| (p, Value::Length(Length::Px(v)))).collect::<Vec<_>>();

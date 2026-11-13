@@ -12,6 +12,8 @@ use bare_js::eval::*;
 use bare_js::heap::Heap;
 use bare_js::parse::{parse_script, Limits};
 use bare_js::value::Value;
+#[path = "common/exec.rs"]
+mod exec;
 
 fn esc(s: &str) -> String {
     s.replace('\\', "\\\\").replace('\n', "\\n").replace('\r', "\\r").replace('\t', "\\t")
@@ -41,6 +43,7 @@ fn run(src: &str) -> String {
         Err(Error::Unsupported(u)) => return format!("unsupported:{}", u.what),
         Err(e) => return format!("setup-error:{e:?}"),
     };
+    exec::set(&mut it);
     match it.run() {
         Ok(v) => show(&it, v),
         Err(Error::Throw(v)) => {

@@ -233,6 +233,19 @@ fn named_properties_and_feature_detection() {
     assert_eq!(js(&mut b, "p.style.color = 'blue'; s.color + '|' + p.style.color"), "|blue");
 }
 
+/// `user-select` and its `-webkit-` alias are one property. Each of the five names reads "" when unset, and any name reads a value set through another.
+#[test]
+fn user_select_and_its_webkit_alias_are_one_property() {
+    let mut b = at(PAGE);
+    js(&mut b, A);
+    let names = "['userSelect','user-select','webkitUserSelect','WebkitUserSelect','-webkit-user-select']";
+    assert_eq!(js(&mut b, &format!("{names}.map(function(k){{return k in s}}).join()")), "true,true,true,true,true");
+    assert_eq!(js(&mut b, &format!("{names}.map(function(k){{return s[k]}}).join('|')")), "||||");
+    assert_eq!(js(&mut b, &format!("s.cssText = ''; s.WebkitUserSelect = 'none'; {names}.map(function(k){{return s[k]}}).join('|') + '|' + s.cssText")), "none|none|none|none|none|user-select: none;");
+    assert_eq!(js(&mut b, &format!("s.userSelect = 'text'; s['-webkit-user-select'] + '|' + s.webkitUserSelect + '|' + a.getAttribute('style')")), "text|text|user-select: text;");
+    assert_eq!(js(&mut b, &format!("s.cssText = ''; s.getPropertyValue('-webkit-user-select') + '|' + s.length")), "|0");
+}
+
 /// Every supported property has its own accessor pair: set through one name, read back through the css name, and nothing else changes.
 #[test]
 fn every_property_has_its_own_slot() {

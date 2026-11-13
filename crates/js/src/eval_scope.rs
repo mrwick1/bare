@@ -89,6 +89,8 @@ struct RScope {
     base: u32,
     /// The function that the scope is in (an index of `Interp::scopes`; the script for a scope outside functions).
     func: u32,
+    /// The scope is the body of a `with` (a `Barrier` too). The bytecode compiler refuses a function inside it.
+    with: bool,
 }
 
 /// Slots of the identifier sites of one script. The scopes that they refer to are in `Interp::sc_all`.
@@ -114,7 +116,7 @@ impl<'p> Interp<'p> {
     /// Open a scope in the walk. Give the result to `sc_end`.
     fn sc_begin(&mut self, kind: RKind) -> u32 {
         let saved = self.sc_cur;
-        self.sc_all.push(RScope { parent: saved, kind, start: NONE, len: 0, base: NONE, func: self.sc_fn as u32 });
+        self.sc_all.push(RScope { parent: saved, kind, start: NONE, len: 0, base: NONE, func: self.sc_fn as u32, with: false });
         self.sc_cur = self.sc_all.len() as u32 - 1;
         saved
     }

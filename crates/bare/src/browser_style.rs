@@ -584,6 +584,8 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
 
     let mut props: Vec<&'static str> = Property::LISTED.iter().map(|p| p.name()).collect();
     props.extend(SHORTHANDS);
+    // The legacy alias of `user-select`: its own accessor names, and the same property (`Property::from_name`).
+    props.push("-webkit-user-select");
     let mut nm = String::new();
     for (i, css) in props.iter().enumerate() {
         let keys = keys_of(css);

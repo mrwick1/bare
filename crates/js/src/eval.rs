@@ -115,6 +115,9 @@ pub struct EvalLimits {
     pub max_script_source: usize,
     /// Syntax tree nodes (plus list entries) of all kept scripts together. The parser stops at the budget.
     pub max_script_nodes: usize,
+    /// The engine at the start (`Interp::set_exec`). Not a limit: it is here so a host that makes the interpreter (a session) can
+    /// choose it.
+    pub exec: Exec,
 }
 
 impl EvalLimits {
@@ -126,7 +129,7 @@ impl EvalLimits {
 
 impl Default for EvalLimits {
     fn default() -> Self {
-        EvalLimits { max_steps: 100_000_000, max_call_depth: 100, max_traversal_depth: 512, max_statement_frames: 512, max_envs: 1 << 20, max_functions: 1 << 20, max_scripts: 4096, max_script_source: 64 << 20, max_script_nodes: 8 << 20 }
+        EvalLimits { max_steps: 100_000_000, max_call_depth: 100, max_traversal_depth: 512, max_statement_frames: 512, max_envs: 1 << 20, max_functions: 1 << 20, max_scripts: 4096, max_script_source: 64 << 20, max_script_nodes: 8 << 20, exec: Exec::Tree }
     }
 }
 
@@ -671,7 +674,6 @@ pub struct Interp<'p> {
     #[allow(dead_code)] // read from step A2
     ics: IcState,
     /// The bytecode interpreter state (see `eval_bc.rs`).
-    #[allow(dead_code)] // read from step B3
     bc: BcState,
     /// Call frames for `Error.stack` (see `eval_stack.rs`).
     stk: StackState,
@@ -849,7 +851,7 @@ impl<'p> Interp<'p> {
             n_arguments: 0,
             cls: ClassState::default(),
             ics: IcState::default(),
-            bc: BcState::default(),
+            bc: BcState { exec: limits.exec, ..Default::default() },
         };
         it.n_arguments = it.intern_name("arguments");
         it.cls_init();
@@ -924,6 +926,7 @@ impl<'p> Interp<'p> {
         v.extend(self.tpl_objs.values().map(|&o| Value::Object(o)));
         self.module_values(&mut v, &mut Vec::new());
         self.script_roots(&mut v);
+        self.bc_roots(&mut v);
         for e in self.envs.iter().filter(|e| e.live) {
             v.extend(e.bindings.iter().map(|b| b.value));
             v.extend(e.this);
@@ -1547,6 +1550,7 @@ impl<'p> Interp<'p> {
                 self.w_with_gate(st.span)?;
                 self.w_expr(obj, fs, ac)?;
                 let sc = self.sc_begin(RKind::Barrier);
+                self.sc_all[self.sc_cur as usize].with = true;
                 let r = self.w_stmt(body, fs, ac, true);
                 self.sc_end(sc);
                 r?
@@ -2230,6 +2234,11 @@ impl<'p> Interp<'p> {
         // The callee runs on its own script code. The caller's code comes back on every exit.
         let saved_script = self.cur;
         self.select(script as usize);
+        if self.bc.exec != Exec::Tree
+            && let Some(r) = self.bc_enter((script, fid), fobj, cenv, self_binding, this, args, new, (saved_env, saved_strict, saved_script))
+        {
+            return r;
+        }
         // A class member never has frame slots (its mode is `Env`).
         if mode == FuncMode::Plain {
             let st = self.scopes[fid.index()].fr;

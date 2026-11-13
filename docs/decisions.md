@@ -294,6 +294,8 @@ Follow-ups of [Parallel downloads](#parallel-downloads). The numbers are in [res
 - `finally` (B2): two registers, the kind (0 normal, 1 throw, 2 + i for exit i) and the value (the exception or the return value). A `break`, `continue` or `return` that leaves a `try` with `finally` pops the environments to the depth of the `try`, sets the kind and jumps into the `finally` block. The end of the block compares the kind with each exit and jumps, then throws the value for kind 1. `Handler::depth` is the environment depth of the handler, so the loop (B3) pops the environments of the `try` before it enters the handler.
 - Limits of B2: a jump is always narrow (24 bits for `Jmp`, 16 bits for a conditional jump). A function that needs a longer jump stays on the tree walker. Script bodies are not compiled (B3 decides how the top level runs). An unsupported node gives a reason, and `Interp::bc_gen_check()` counts the reasons.
 - The verifier (B2) checks each `Code` before the loop runs it: every word decodes; registers, constants and inline caches exist and each inline cache has one instruction; jump and handler targets are the first word of an instruction; the environment depth is the same on every path, never below 0 and not below the depth of a handler in its range; no path runs past the end. So the loop (B3) can index registers and constants with no check of its own (hypothesis, to measure in B3).
+- Revived (2026-11-12, owner). A perf profile of a large real web app (a web mail client, about 45 s to load) shows about 60% of CPU in the tree walker: `link_inner` 8.5%, `eval_expr_inner` 6.9%, `exec_simple` 3.1%, `call_fn_inner` 2.2%. No single hot spot is left, so only a faster executor helps. Lane B is back. The B3 loop is merged behind the switch. The R1 gate (3x on `eval_load loop 10`) no longer blocks the merge. The default stays `Tree` until `byte` mode passes the gates.
+- `with` (B3, 2026-11-12). `bc_gen` refuses the `with` statement. It now also refuses a function made inside a `with` body, at any depth, with the reason "a function inside with". Such a function reads names through the object environment, and the loop does not search it. The walker runs it. `RScope::with` marks the body scope: a class is a `Barrier` too and keeps compiling. The 20 `statements/with` test262 files pass in byte mode.
 
 ## Code style
 
@@ -1874,3 +1876,12 @@ Issue #440: Control+B did nothing in a `contenteditable`, `execCommand('bold')` 
 - Source: Ladybird `Libraries/LibWeb/Editing/Commands.cpp` and `Internal/Algorithms.cpp` (BSD-2-Clause, notice in `crates/bare/LICENSE-LADYBIRD`). The port is simplified to the tree that Chrome makes with `styleWithCSS` off. The value override (`foreColor` and the others) is not built.
 - Control+B, +I and +U (Meta also, for macOS) in an editing host run the command as the default action of the key, after `keydown` and a `beforeinput` of `formatBold`, `formatItalic` or `formatUnderline`. `preventDefault` on either cancels it.
 - The `press` receipt compares the document `text_revision` too, so a key that changed text is not "no effect".
+
+## `user-select` and its `-webkit-` alias are one property (2026-11-12)
+
+Issue #442: `el.style.WebkitUserSelect` was `undefined`, so `el.style.WebkitUserSelect.toLowerCase()` threw. A webmail link dialog did not open.
+
+- `user-select` is a longhand of `bare_css`. Its keywords are `auto`, `text`, `none`, `contain` and `all` (CSS UI 4). Its initial value is `auto`. It is not inherited. The engine stores and serializes it. It has no selection behavior yet.
+- `-webkit-user-select` is the same property. `Property::from_name` and `parse_declaration` map it to `user-select`, so `WebkitUserSelect = "none"` reads back as `userSelect`, and `cssText` says `user-select: none;`.
+- `el.style` has five names: `userSelect`, `user-select`, `webkitUserSelect`, `WebkitUserSelect` and `-webkit-user-select`. Each reads `""` when unset.
+- The keyword list and the initial value are from the CSS UI 4 spec. No code is copied from another engine.

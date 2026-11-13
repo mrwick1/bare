@@ -2230,7 +2230,7 @@ fn initial(p: Property) -> Value {
         Stroke => Value::Keyword(K::None),
         Opacity => Value::Number(1.0),
         Appearance => Value::Keyword(K::None),
-        PointerEvents | Cursor => Value::Keyword(K::Auto),
+        PointerEvents | Cursor | UserSelect => Value::Keyword(K::Auto),
         BorderTopLeftRadius | BorderTopRightRadius | BorderBottomRightRadius | BorderBottomLeftRadius => px(0.0),
         BorderSpacingH | BorderSpacingV => px(0.0),
         TranslateX | TranslateY => px(0.0),
