@@ -234,7 +234,7 @@ impl Dom {
             return Ok(b);
         }
         let mut r = [0u8; 16];
-        if bare_tls::random::fill(&mut r).is_err() {
+        if page_random(&mut r).is_err() {
             return Err(random_failed(self, it));
         }
         const ALNUM: &[u8; 62] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
@@ -485,17 +485,33 @@ fn get_random_values(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> 
     }
     it.charge((len / 64) as u64)?;
     if let Some(b) = it.heap.bytes_mut(o)
-        && bare_tls::random::fill(b).is_err()
+        && page_random(b).is_err()
     {
         return Err(random_failed(d, it));
     }
     Ok(a[0])
 }
 
+/// Random bytes for page code (`crypto`, multipart boundaries): from the OS. With `BARE_SEED=<number>` in the environment they are one fixed
+/// stream instead, so that a benchmark that replays recorded replies makes the same URLs and bodies in every run. The TLS code does not use it.
+fn page_random(buf: &mut [u8]) -> Result<(), bare_tls::random::RandomError> {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    static SEED: std::sync::OnceLock<Option<AtomicU64>> = std::sync::OnceLock::new();
+    let Some(state) = SEED.get_or_init(|| std::env::var("BARE_SEED").ok().and_then(|v| v.parse().ok()).map(AtomicU64::new)) else { return bare_tls::random::fill(buf) };
+    for chunk in buf.chunks_mut(8) {
+        // SplitMix64.
+        let mut z = state.fetch_add(0x9E37_79B9_7F4A_7C15, Relaxed).wrapping_add(0x9E37_79B9_7F4A_7C15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        chunk.copy_from_slice(&(z ^ (z >> 31)).to_le_bytes()[..chunk.len()]);
+    }
+    Ok(())
+}
+
 /// A random UUID, RFC 9562 version 4, in lower case. `None` if the OS source fails.
 fn uuid_v4() -> Option<String> {
     let mut b = [0u8; 16];
-    bare_tls::random::fill(&mut b).ok()?;
+    page_random(&mut b).ok()?;
     b[6] = b[6] & 0x0f | 0x40;
     b[8] = b[8] & 0x3f | 0x80;
     let mut s = String::with_capacity(36);

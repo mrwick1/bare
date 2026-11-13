@@ -767,7 +767,7 @@ impl Client {
         let live = if entry.complete {
             Body(Source::Memory(Arc::new(Response { body: entry.body, ..response.clone() }), 0))
         } else {
-            Body(Source::Cut(io::Cursor::new(entry.body)))
+            Body(Source::Cut(io::Cursor::new(entry.body), entry.cut))
         };
         Ok((response, match undo {
             Some(codings) => Body(Source::Decoded(Box::new(encoding::Decoded::new(live, codings)))),
@@ -1526,8 +1526,8 @@ enum Source {
     H2(Box<h2::Body>),
     /// The same, with a `Content-Encoding` that is undone as it is read (see `encoding.rs`).
     Decoded(Box<encoding::Decoded>),
-    /// A recorded reply that was cut: the bytes that came, then a read error (see `replay.rs`).
-    Cut(io::Cursor<Vec<u8>>),
+    /// A recorded reply that was cut: the bytes that came, then a read error of the recorded kind (see `replay.rs`).
+    Cut(io::Cursor<Vec<u8>>, String),
     /// A body that is being recorded (see `replay.rs`).
     Tap(Box<Tap>),
 }
@@ -1548,13 +1548,16 @@ impl Tap {
 
     fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
         let r = self.inner.read(out);
-        match r {
+        match &r {
             Ok(0) if !out.is_empty() => {
                 self.entry.complete = true;
                 self.save();
             }
-            Ok(n) => self.entry.body.extend_from_slice(&out[..n]),
-            Err(_) => self.save(),
+            Ok(n) => self.entry.body.extend_from_slice(&out[..*n]),
+            Err(e) => {
+                self.entry.cut = format!("{:?}", e.kind());
+                self.save();
+            }
         }
         r
     }
@@ -1562,6 +1565,10 @@ impl Tap {
 
 impl Drop for Tap {
     fn drop(&mut self) {
+        // The body was dropped before its end (the page left): a live idle stream times out.
+        if self.slot.is_some() {
+            self.entry.cut = "TimedOut".into();
+        }
         self.save();
     }
 }
@@ -1821,9 +1828,20 @@ impl Body {
             Source::Decoded(decoded) => return decoded.read(out),
             Source::H2(stream) => return stream.read(out),
             Source::Tap(tap) => return tap.read(out),
-            Source::Cut(bytes) => {
+            Source::Cut(bytes, kind) => {
                 return match bytes.read(out)? {
-                    0 if !out.is_empty() => Err(io::Error::new(ErrorKind::TimedOut, "the recorded reply stops here")),
+                    0 if !out.is_empty() => Err(io::Error::new(
+                        match kind.as_str() {
+                            "UnexpectedEof" => ErrorKind::UnexpectedEof,
+                            "ConnectionReset" => ErrorKind::ConnectionReset,
+                            "ConnectionAborted" => ErrorKind::ConnectionAborted,
+                            "InvalidData" => ErrorKind::InvalidData,
+                            "BrokenPipe" => ErrorKind::BrokenPipe,
+                            "TimedOut" => ErrorKind::TimedOut,
+                            _ => ErrorKind::Other,
+                        },
+                        "the recorded reply stops here",
+                    )),
                     n => Ok(n),
                 };
             }
@@ -1908,7 +1926,7 @@ impl Body {
             Source::Memory(response, _) => response.body.len(),
             Source::H2(stream) => stream.declared.unwrap_or(0).min(MAX_REPLY),
             // The length on the wire is not the length of the decoded body.
-            Source::Decoded(_) | Source::Cut(_) => 0,
+            Source::Decoded(_) | Source::Cut(..) => 0,
             Source::Tap(tap) => tap.inner.size_hint(),
         }
     }

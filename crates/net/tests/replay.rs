@@ -133,7 +133,9 @@ fn a_cut_body_and_a_failed_request_replay_as_they_were() {
         }
     };
     assert_eq!(got, b"0123456789");
-    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    // The server closed the connection early: the live read said `UnexpectedEof`, and so does the replay.
+    assert_eq!(error.kind(), live_error.unwrap().kind());
+    assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
     assert_eq!(replay.get(&url(dead, "/")).err().unwrap().to_string(), live_refused);
     let _ = std::fs::remove_dir_all(&dir);
 }

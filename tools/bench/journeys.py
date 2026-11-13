@@ -1,13 +1,14 @@
 """The journey benchmark with recorded network inputs. Use it through `journeys.sh`.
 
   journeys.sh record  [--corpus DIR] [--only TEXT] [--tries N] BARE_DRIVE    record each public journey from the live sites, then fill what a fast replay asks for
-                      (--only: update only these; N tries for the live recording, default 4; fill rounds stop at a run with no miss, at most 6)
+                      (--only: update only these; N tries for the live recording, default 4; fill rounds stop at two runs in a row with no miss, at most 10)
+  journeys.sh fill    [--corpus DIR] [--only TEXT] BARE_DRIVE    only the fill rounds, on a recording that exists (the live sites are asked for the misses only)
   journeys.sh run     [--corpus DIR] [--only TEXT] [--runs N] [--pss] [--out TSV] BARE_DRIVE    replay each journey N times (cold: a new process each time)
   journeys.sh compare [--corpus DIR] [--only TEXT] [--runs N] [--pss] [--out TSV] BASE_DRIVE NEW_DRIVE    replay on both binaries, runs interleaved
 
 The corpus is machine-local and never in the repository: DIR/<journey>/ holds the replies of one journey (`crates/net/src/replay.rs`), DIR/status.tsv the
-result of the recording. A replay is faster than the live run, so a page asks for files that the live run never asked for before the process ended: after the
-live recording, `record` replays with BARE_NET_FILL (a missing reply goes to the network and is recorded) until a run has no miss. A journey that did not pass
+result of the recording. `BARE_SEED=1` is set for every run (a fixed `Math.random` and `crypto` stream: a random id in a URL or a body would never match a recording). A replay is faster than the live run, so a page asks for files that the live run never asked for before the process ended: after the
+live recording, `record` replays with BARE_NET_FILL (a missing reply goes to the network and is recorded) until two runs in a row have no miss. A journey that did not pass
 when it was recorded is not measured, and `run` says so. `run` counts the misses of each replay (a request with no recorded reply): a replay with a miss did not do the recorded work. Each run is one `perf stat -e instructions:u`
 over one `bare-drive` process: columns journey, run, pass, instructions, cpu_ms (user+system), wall_ms, peak_rss_kib (`wait4`), pss_kib (peak of a sample every
 20 ms of `smaps_rollup`, only with --pss: reading it costs time), misses. Instruction counts hold under load. Wall time holds only on an idle machine.
@@ -37,7 +38,7 @@ def drive(binary, path, url, env, perf=None, pss=False):
         cmd = ["perf", "stat", "-x,", "-e", "instructions:u", "-o", perf] + cmd
     start = time.monotonic()
     errlog = tempfile.TemporaryFile()
-    p = subprocess.Popen(cmd, env={**os.environ, **env}, stdout=subprocess.PIPE, stderr=errlog)
+    p = subprocess.Popen(cmd, env={**os.environ, "BARE_SEED": "1", **env}, stdout=subprocess.PIPE, stderr=errlog)
     assert p.stdout
     peak_pss = 0
     if pss:
@@ -94,25 +95,33 @@ def args(argv, flags):
     return opt, argv
 
 
-def record(opt, binary):
+def fill(binary, name, path, url, d, rounds=10):
+    """Replay with BARE_NET_FILL until two runs in a row have no miss (the requests of a page change a little from run to run). Gives whether the last run passed."""
+    ok, quiet = True, 0
+    for i in range(rounds):
+        r = drive(binary, path, url, {"BARE_NET_FILL": d})
+        ok, quiet = r[0], quiet + 1 if r[6] == 0 else 0
+        print(f"{name:32} fill {i + 1}: {'pass' if ok else 'FAIL'} {r[6]} misses", flush=True)
+        if quiet == 2 or not ok:
+            break
+    return ok
+
+
+def record(opt, binary, fill_only=False):
     os.makedirs(opt["corpus"], exist_ok=True)
     rows = {}
     status = os.path.join(opt["corpus"], "status.tsv")
     if os.path.exists(status):
         rows = {l.split("\t")[0]: l for l in open(status).read().splitlines()[1:]}
     for name, path, url in journeys(opt["only"]):
-        ok, d = False, os.path.join(opt["corpus"], name)
-        for _ in range(opt["tries"]):  # a flaky live site gets more tries (some sites answer a journey with another page now and then)
+        ok, d = fill_only, os.path.join(opt["corpus"], name)
+        for _ in range(0 if fill_only else opt["tries"]):  # a flaky live site gets more tries (some sites answer a journey with another page now and then)
             shutil.rmtree(d, ignore_errors=True)
             ok = drive(binary, path, url, {"BARE_NET_RECORD": d})[0]
             if ok:
                 break
-        for round_ in range(6 if ok else 0):
-            r = drive(binary, path, url, {"BARE_NET_FILL": d})
-            ok = r[0]
-            print(f"{name:32} fill {round_ + 1}: {'pass' if ok else 'FAIL'} {r[6]} misses", flush=True)
-            if r[6] == 0 or not ok:
-                break
+        if ok:
+            ok = fill(binary, name, path, url, d)
         files = len(os.listdir(d)) if os.path.isdir(d) else 0
         size = sum(os.path.getsize(os.path.join(d, f)) for f in os.listdir(d)) if files else 0
         print(f"{name:32} {'pass' if ok else 'FAIL'} {files:4} replies {size // 1024:7} KiB", flush=True)
@@ -194,8 +203,8 @@ def main():
         sys.exit(__doc__)
     mode, argv = sys.argv[1], sys.argv[2:]
     opt, argv = args(argv, ("corpus", "only", "runs", "tries", "pss", "out"))
-    if mode == "record" and len(argv) == 1:
-        record(opt, argv[0])
+    if mode in ("record", "fill") and len(argv) == 1:
+        record(opt, argv[0], mode == "fill")
     elif mode == "run" and len(argv) == 1:
         rows = measure(opt, [("bin", argv[0])])
         write(rows, opt["out"])

@@ -15,8 +15,9 @@
 //! decodes the body again, so the cost of gzip and brotli stays in the measurement. A request that failed (DNS, connect, TLS, a bad reply)
 //! is stored with its error text and fails in the same way when it is replayed.
 //!
-//! A reply whose body did not end (the page went away while an `EventSource` or a long poll was open, or the read failed) is stored with the
-//! bytes that came. A replay gives these bytes, then a `TimedOut` read error: what a live idle stream gives after its read limit.
+//! A reply whose body did not end is stored with the bytes that came, and the kind of the read error (`UnexpectedEof` for a server that closes
+//! TLS with no `close_notify`, as craigslist.org does). When the page went away while an `EventSource` or a long poll was open, the kind is
+//! `TimedOut`: what a live idle stream gives after its read limit. A replay gives these bytes, then a read error of this kind.
 //!
 //! Not stored: the request headers (a request that differs only in a header such as `Accept` or `Range` gets the same reply), and the
 //! time that the server took. The page has no WebSocket in this browser, so there is nothing to replay for it.
@@ -47,6 +48,8 @@ pub struct Entry {
     pub close: bool,
     /// The body ended well. False: the stored body is what came before a cut or an error.
     pub complete: bool,
+    /// For a body that did not end: the name of the `std::io::ErrorKind` of the read that failed.
+    pub cut: String,
     pub error: Option<String>,
     pub body: Vec<u8>,
 }
@@ -57,7 +60,7 @@ pub struct Slot {
     label: String,
 }
 
-const MAGIC: &[u8; 4] = b"BNT1";
+const MAGIC: &[u8; 4] = b"BNT2";
 
 impl Tape {
     /// The tape that the environment asks for, shared by every client of the process. `None` when neither variable is set.
@@ -150,6 +153,7 @@ impl Slot {
                     put(&mut out, n.as_bytes());
                     put(&mut out, v.as_bytes());
                 }
+                put(&mut out, entry.cut.as_bytes());
                 out.extend_from_slice(&entry.body);
             }
         }
@@ -208,6 +212,7 @@ fn read(path: &Path) -> Option<(String, Entry)> {
         for _ in 0..c.u32()? {
             entry.headers.push((c.text()?, c.text()?));
         }
+        entry.cut = c.text()?;
         entry.body = c.0.to_vec();
     }
     Some((label, entry))
@@ -229,7 +234,7 @@ mod tests {
     }
 
     fn reply(body: &str) -> Entry {
-        Entry { status: 200, headers: vec![("content-type".into(), "text/plain".into())], close: false, complete: true, error: None, body: body.into() }
+        Entry { status: 200, headers: vec![("content-type".into(), "text/plain".into())], close: false, complete: true, cut: String::new(), error: None, body: body.into() }
     }
 
     #[test]
@@ -275,11 +280,11 @@ mod tests {
         let d = dir("kinds");
         let rec = Tape::record(&d);
         rec.slot("GET http://a:80/f".into()).save(&Entry { error: Some("connection refused".into()), ..Entry::default() });
-        rec.slot("GET http://a:80/c".into()).save(&Entry { complete: false, ..reply("half") });
+        rec.slot("GET http://a:80/c".into()).save(&Entry { complete: false, cut: "UnexpectedEof".into(), ..reply("half") });
         let play = Tape::replay(&d);
         assert_eq!(play.find("GET http://a:80/f").unwrap().error.as_deref(), Some("connection refused"));
         let cut = play.find("GET http://a:80/c").unwrap();
-        assert!(!cut.complete && cut.body == b"half");
+        assert!(!cut.complete && cut.body == b"half" && cut.cut == "UnexpectedEof");
         let _ = fs::remove_dir_all(&d);
     }
 }

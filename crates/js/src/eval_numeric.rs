@@ -7,7 +7,8 @@
 // - `Math.random`: xorshift128+ state per realm (`AoState::rng`). The state is seeded once, at the first call, with
 //   16 bytes from `/dev/urandom`. A failed read, or an all-zero seed, is an explicit `Unsupported`; there is no time
 //   or PID fallback. The state is not cryptographic and nothing else reads it. Each call does no allocation.
-//   Tests set `rng` directly to get a fixed sequence.
+//   Tests set `rng` directly to get a fixed sequence. `BARE_SEED=<number>` in the environment gives each realm the same fixed sequence
+//   (a benchmark that replays recorded replies needs the same page code in every run).
 // - `Number.prototype.toString(radix)` for primitive numbers and the intrinsic prototype's zero value.
 //   Radix 10 uses `number_to_string`. The other radixes follow V8's `DoubleToRadixCString`: the spec leaves non-10
 //   radixes to the implementation, and V8's digit rule (digits up to half the gap to the next double, round-half-even,
@@ -339,6 +340,15 @@ impl<'p> Interp<'p> {
 
 /// 16 bytes of OS randomness, never all zero. `None` when the source cannot be read.
 fn os_seed() -> Option<[u64; 2]> {
+    if let Some(n) = std::env::var("BARE_SEED").ok().and_then(|v| v.parse::<u64>().ok()) {
+        // SplitMix64 (one multiply-xorshift round) makes two state words out of one number; both are never zero together.
+        let mix = |mut z: u64| {
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        };
+        return Some([mix(n.wrapping_add(0x9E37_79B9_7F4A_7C15)), mix(n.wrapping_add(0x3C6E_F372_FE94_F82A)) | 1]);
+    }
     seed_from(&mut std::fs::File::open("/dev/urandom").ok()?)
 }
 
