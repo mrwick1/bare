@@ -2267,3 +2267,70 @@ fn act_type_edits_a_contenteditable() {
     let (r, _) = s.tool("eval", json!({"js": "document.getElementById('body').textContent"}));
     assert_eq!(r, json!("Bye"));
 }
+
+static CROSS_HITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn frame_pages(_: &str, target: &str, _: &str, _: Option<&str>) -> (u16, &'static str, Vec<u8>) {
+    match target.split('?').next().unwrap_or("/") {
+        "/frames" => (200, "text/html", b"<!doctype html><title>Frames</title>\
+<button id=a>Attach</button> <button id=p>Page</button> <button id=s>Set</button> <button id=c>Cross</button>\
+<script>\
+function frame(src) { var f = document.createElement('iframe'); f.style.display = 'none'; f.src = src; document.body.appendChild(f); return f }\
+document.getElementById('a').onclick = function () { frame('/files/report.csv?id=1') };\
+document.getElementById('p').onclick = function () { frame('/frames') };\
+document.getElementById('s').onclick = function () { frame('about:blank').src = '/files/invoice.pdf' };\
+document.getElementById('c').onclick = function () { frame('http://localhost:' + location.port + '/files/cross.csv') };\
+</script>".to_vec()),
+        "/files/report.csv" => (200, "text/csv\r\nContent-Disposition: attachment; filename=\"report.csv\"", b"a,b\n1,2\n".to_vec()),
+        "/files/invoice.pdf" => (200, "application/pdf\r\nContent-Disposition: attachment; filename=\"invoice.pdf\"", b"%PDF-1.4 x".to_vec()),
+        "/files/cross.csv" => {
+            CROSS_HITS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            (200, "text/csv\r\nContent-Disposition: attachment; filename=\"cross.csv\"", b"x".to_vec())
+        }
+        _ => (404, "text/plain", b"no".to_vec()),
+    }
+}
+
+/// A page saves a file through a hidden iframe (Gmail's Download button): a same-origin `src` that replies with a download is saved,
+/// on insertion and on a later `src` change. A frame of a page saves nothing, and a cross-origin frame is never asked for.
+#[test]
+fn a_hidden_iframe_download_is_saved() {
+    let mut s = Server::start();
+    let base = common::serve_route(frame_pages);
+    let dir = std::env::temp_dir().join(format!("bare-mcp-test-frame-downloads-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (r, error) = s.tool("open", json!({"url": format!("{base}/frames"), "downloads_dir": dir.to_str().unwrap(), "timeout_ms": 20000}));
+    assert!(!error, "{r}");
+    let click = |s: &mut Server, id: &str| {
+        let (r, error) = s.tool("act", json!({"op": "click", "loc": format!("css=\"#{id}\""), "snapshot": false}));
+        assert!(!error, "{r}");
+        r.as_str().unwrap().to_string()
+    };
+    let wait = |s: &mut Server, n: usize| {
+        let t = std::time::Instant::now();
+        loop {
+            let (list, _) = s.tool("downloads", json!({}));
+            let list = list.as_str().unwrap().to_string();
+            if list.matches(" bytes").count() >= n || t.elapsed().as_secs() > 5 {
+                return list;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    };
+    click(&mut s, "a");
+    let list = wait(&mut s, 1);
+    assert!(list.contains("report.csv ("), "{list}");
+    assert_eq!(std::fs::read(dir.join("report.csv")).unwrap(), b"a,b\n1,2\n");
+    click(&mut s, "s");
+    let list = wait(&mut s, 2);
+    assert!(list.contains("invoice.pdf ("), "{list}");
+    click(&mut s, "p");
+    click(&mut s, "c");
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let (list, _) = s.tool("downloads", json!({}));
+    assert_eq!(list.as_str().unwrap().lines().count(), 2, "{list}");
+    assert_eq!(CROSS_HITS.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let (r, _) = s.tool("eval", json!({"js": "location.pathname"}));
+    assert_eq!(r, json!("/frames"));
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -274,6 +274,7 @@ pub(crate) fn text_mime(mime: &str) -> bool {
 
 /// The load that a worker did was a download: the file is saved, and the page stays. Not a failure.
 const SAVED: &str = "the response was saved as a download";
+const NOT_A_DOWNLOAD: &str = "the frame reply is not a download";
 
 /// The document for a response that is not HTML, as Chrome shows it: text (plain, JSON, XML, CSS, JS) in a `<pre>`, an
 /// image as a document with one `<img>`. Any other type is a download: no page. A response without a type is refused.
@@ -318,6 +319,9 @@ fn fetch_hop(client: &mut Client, req: &Request, max: usize, g: &Grab) -> Result
     // A redirect has no body to read.
     if matches!(r.status, 301 | 302 | 303 | 307 | 308) {
         return Ok(Some(Arc::new(r)));
+    }
+    if g.only {
+        return Err(NOT_A_DOWNLOAD.into());
     }
     let mut bytes = Vec::new();
     (&mut body).take((max as u64).saturating_add(1)).read_to_end(&mut bytes).map_err(|_| "network error".to_string())?;
@@ -473,7 +477,7 @@ impl Session {
     fn start(&mut self, next: Next) -> SessionResult {
         let (url, body, from, lim) = (next.url.clone(), next.body.clone(), next.from.clone(), self.cfg.limits.clone());
         let deadline = deadline_after(lim.max_time.saturating_sub(self.used.time));
-        let grab = self.cfg.downloads.clone().map(|dl| Grab { dl, force: false, name: None, id: None });
+        let grab = self.cfg.downloads.clone().map(|dl| Grab { dl, force: false, name: None, id: None, only: false });
         let task = self.fork().spawn(move |c| load_document(c, &url, from.as_deref(), body.as_ref(), &lim, deadline, grab.as_ref(), true));
         self.loading = Some((next, task));
         SessionResult { stop: SessionStop::Page(Stop::Settled), pages: Vec::new(), urls: Vec::new(), tasks: 0, rounds: 0 }
@@ -534,7 +538,16 @@ impl Session {
         while let Some(r) = b.take_download_request() {
             asked.push(r);
         }
-        for DownloadRequest { url, name, from, data } in asked {
+        for DownloadRequest { url, name, from, data, only } in asked {
+            if only {
+                let (lim, from) = (self.cfg.limits.clone(), initiator(&from));
+                let deadline = deadline_after(lim.max_time.saturating_sub(self.used.time));
+                let grab = Grab { dl: dl.clone(), force: false, name: None, id: None, only: true };
+                self.fork().spawn(move |c| {
+                    let _ = load_document(c, &url, from.as_deref(), None, &lim, deadline, Some(&grab), false);
+                });
+                continue;
+            }
             let id = dl.start(&url);
             if let Some((bytes, mime)) = data {
                 let file = downloads::file_name(None, name.as_deref(), if url.starts_with("data:") { "" } else { &url });
@@ -543,7 +556,7 @@ impl Session {
             }
             let (lim, from) = (self.cfg.limits.clone(), initiator(&from));
             let deadline = deadline_after(lim.max_time.saturating_sub(self.used.time));
-            let grab = Grab { dl: dl.clone(), force: true, name, id: Some(id) };
+            let grab = Grab { dl: dl.clone(), force: true, name, id: Some(id), only: false };
             self.fork().spawn(move |c| {
                 if let Err(why) = load_document(c, &url, from.as_deref(), None, &lim, deadline, Some(&grab), false) && why != SAVED {
                     grab.dl.fail(id, why);

@@ -376,13 +376,13 @@ impl Dom {
             if up != doc.root() {
                 return Ok(());
             }
-            let (script, template) = (doc.find_atom("script"), doc.find_atom("template"));
+            let (script, template, iframe) = (doc.find_atom("script"), doc.find_atom("template"), doc.find_atom("iframe"));
             let mut found = Vec::new();
             let mut stack = vec![node];
             while let Some(n) = stack.pop() {
                 it.charge(1)?;
                 if let NodeData::Element { name, .. } = *doc.data(n) {
-                    if Some(name) == script && !doc.is_foreign(n) {
+                    if (Some(name) == script || Some(name) == iframe) && !doc.is_foreign(n) {
                         found.push(n);
                     }
                     if Some(name) == template && !doc.is_foreign(n) {
@@ -398,7 +398,11 @@ impl Dom {
             found
         };
         for s in found {
-            self.prepare_script(it, s)?;
+            if self.doc.borrow().is_html(s, "iframe") {
+                self.frame_src(s);
+            } else {
+                self.prepare_script(it, s)?;
+            }
         }
         Ok(())
     }
@@ -413,6 +417,7 @@ impl Dom {
             // Only a script in the tree is prepared (`script_inserted` checks it and walks one node).
             self.script_inserted(it, node)?;
         }
+        self.frame_src(node);
         Ok(())
     }
 

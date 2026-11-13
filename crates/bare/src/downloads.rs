@@ -43,6 +43,8 @@ pub struct DownloadRequest {
     pub from: String,
     /// The bytes and type of a `blob:` or `data:` URL: no network.
     pub data: Option<(Vec<u8>, String)>,
+    /// An iframe asked for it: save the reply only when it is a download, and drop any other reply unread.
+    pub only: bool,
 }
 
 struct Inner {
@@ -162,6 +164,8 @@ pub(crate) struct Grab {
     pub name: Option<String>,
     /// The entry of a download that the session started (`Downloads::start`); else the load makes one.
     pub id: Option<usize>,
+    /// Drop a reply that is not a download unread (an iframe `src`, not a document load).
+    pub only: bool,
 }
 
 /// Is the response a download? `ct` is its `Content-Type`, `cd` its `Content-Disposition`.

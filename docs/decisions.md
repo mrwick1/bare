@@ -1934,3 +1934,11 @@ Issue #442: `el.style.WebkitUserSelect` was `undefined`, so `el.style.WebkitUser
 - A page with work due now runs again after 1 ms at the earliest, so it does not spin a core.
 - Before, a live page ran only during a tool call. A timer page ran 0 ticks in 6 s between calls.
 - Reason: a web mail app queues a change and sends it from a timer. The change waited until the agent's next call, and it was lost when that call replaced the page (issue #471).
+
+## A same-origin iframe can start a download (2026-11-13)
+
+- bare still loads no child document. But when an iframe in the tree gets an http(s) `src` of the page's origin, by insertion or by a change, the session asks for that URL.
+- The session saves the reply when it is a download (`Content-Disposition: attachment`, or a type that the browser does not show). It drops any other reply unread.
+- A cross-origin iframe is never asked for. Half of a third-party frame could do harm, for example a sign-in cookie rotation page, and none of its scripts would run.
+- Not done: an iframe that the parser makes from the HTML of the page.
+- Reason: a web mail app's Download button adds a hidden iframe with the attachment URL. Chrome saves the file; bare saved nothing (issue #472).

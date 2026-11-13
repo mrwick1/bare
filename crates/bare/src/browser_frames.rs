@@ -1,5 +1,6 @@
 //! Named access on `Window` (the `WindowProperties` object) and named properties of `Document`, and live named access to inert
-//! iframe windows. No child document is fetched or executed.
+//! iframe windows. No child document is fetched or executed. (A same-origin `src` is asked for only to catch a download:
+//! `Dom::frame_src`.)
 //!
 //! - The inert window of an iframe is an `EventTarget` (a `Target::Obj`: `addEventListener`, `removeEventListener`, `dispatchEvent`).
 //!   An iframe with no `src` (or an empty one, or `about:blank`) and no `srcdoc` gets an initial `about:blank` document at the first

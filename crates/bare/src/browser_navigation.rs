@@ -407,8 +407,42 @@ impl Dom {
             return Err(self.lim("nav-requests"));
         }
         it.charge(1 + data.as_ref().map_or(0, |d| d.0.len() / 64) as u64)?;
-        self.nav.s.borrow_mut().downloads.push_back(crate::downloads::DownloadRequest { url, name: Some(name), from, data });
+        self.nav.s.borrow_mut().downloads.push_back(crate::downloads::DownloadRequest { url, name: Some(name), from, data, only: false });
         Ok(true)
+    }
+
+    /// An iframe in the tree got a `src` (an insertion or a change). bare loads no child document, but a page may save a file through a
+    /// hidden iframe whose `src` replies with a download (Gmail does). So a same-origin http(s) `src` is asked for, and the session
+    /// saves the reply only when it is a download; it drops any other reply unread. A cross-origin frame is never asked for: half of a
+    /// third-party frame (a sign-in cookie rotation, an ad) could do harm, and no script of it would run.
+    pub(crate) fn frame_src(&self, n: bare_html::dom::NodeId) {
+        if !self.nav.s.borrow().downloads_on {
+            return;
+        }
+        let src = {
+            let doc = self.doc.borrow();
+            if !doc.is_html(n, "iframe") {
+                return;
+            }
+            let mut up = n;
+            while let Some(p) = doc.parent(up) {
+                up = p;
+            }
+            match (up == doc.root()).then(|| doc.find_atom("src").and_then(|k| doc.attr(n, k))).flatten() {
+                Some(s) => s.trim_matches(|c: char| c <= ' ').to_string(),
+                None => return,
+            }
+        };
+        let Ok(cur) = self.cur_rec() else { return };
+        let Ok(r) = nu::parse(&src, Some(&cur)) else { return };
+        let url = r.href();
+        if src.is_empty() || r.origin() != cur.origin() || !(url.starts_with("http://") || url.starts_with("https://")) {
+            return;
+        }
+        let mut s = self.nav.s.borrow_mut();
+        if s.downloads.len() < self.nav.lim.get().max_requests {
+            s.downloads.push_back(crate::downloads::DownloadRequest { url, name: None, from: cur.href(), data: None, only: true });
+        }
     }
 
     /// `href` resolved against the document URL, when the result is an http(s) URL.
