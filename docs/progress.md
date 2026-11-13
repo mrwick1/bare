@@ -8557,6 +8557,8 @@ Machine archMachine (shared, load 10 to 40). Fixture `/data/bare-tmp/design/suit
 ### Checks
 
 - `cargo test --release -p bare-net -p bare-mcp -p bare-drive`: all pass. `crates/drive/tests/cache.rs` failed after my first version of the change (a private stale script with an `ETag` was fetched in full by a second open). The fix is the rule above (the stored reply may still be asked about); the test passes and it is unchanged. `survive_limit` `a_page_that_aborts_task_after_task_fails_the_step_with_the_reason` failed once under load (65 s for a test that plans for 45 s) and passed alone in 70 s.
+- After the rebase on `e6b3f707`: `cargo test --release --workspace --no-fail-fast`: 3,778 passed and 7 failed. The 7 are the OpenSSL TLS tests that fail on main (`bare-net` `https_openssl` 2, `bare-tls` `client_openssl` 4, `tls12_openssl` 1). I ran `https_openssl` and `client_openssl` on `8eb90c9c` and the same 2 and 4 tests fail there; I did not rerun `tls12_openssl` on main.
+- `tools/js/cost_matrix.sh` against `e6b3f707` (the main this branch sits on): 803 rows, mean change glibc -0.003%, jemalloc +0.000%, no row over the limit. The 2 rows `examples/parse_load deep 1` and `deep 10` do not run on either tree.
 - Cookie isolation: `crates/drive/tests/fixture_journey.rs` and the `bare-mcp` login tests pass with the shared client. The fixture shows `login_posts` right.
 
 ### Not tested
