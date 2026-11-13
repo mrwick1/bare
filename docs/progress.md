@@ -8885,6 +8885,14 @@ Target not met. Spread is (max - min) / median over 3 runs of one binary. The wo
 - `cargo test --release -p bare-net`: the unit tests of the tape and `crates/net/tests/replay.rs` (record then replay a loopback server with a redirect, gzip, a cookie and a POST; a miss is the clear error; a cut body and a failed request replay as they were; fill fetches only the miss).
 - `crates/drive/tests/replay.rs`: a journey records against a loopback server, replays with no connection to it, and a page that was not recorded fails with the miss error.
 
+### Gates run at merge (2026-11-14, rebased on main `3c958f96`)
+
+- Rebase: only `docs/progress.md` conflicted. `crates/net/src/http.rs` merged with no conflict. The jar-keyed reply cache of #483 is above the tape hook, so both work: a reply from the cache never reaches the tape, and a miss goes to the tape first and then to the network.
+- `cargo test --release --workspace --no-fail-fast`: all pass except 3 groups that also fail on main `c8a75edd`/`3c958f96` on this machine: `bare-net --test https_openssl` (2 tests), `bare-tls --test client_openssl` (4), `bare-tls --test tls12_openssl` (1).
+- `tools/js/cost_matrix.sh` (main `3c958f96` vs this branch): 803 rows, mean change glibc -0.002%, 0 rows over the limit under either allocator. 2 rows (`parse_load deep 1`, `deep 10`) fail to run on both trees with a stack overflow.
+- `TEST262=/data/claude-tmp/test262 tools/js/test262_check.sh`: gate ok (the checkout is at the commit the subset names). `tools/js/exec_diff.sh`: 79 runs, 0 differences.
+- The variation gap above is open. The next section of this file (virtual clock in replay mode) works on it.
+
 ### Not tested
 
 - Wall time on an idle machine. Cold and warm cache runs apart: every run is cold (a new process), and the HTTP cache of a process starts empty.
