@@ -33,7 +33,7 @@ pub fn longhands(name: &str) -> Option<&'static [Property]> {
 }
 
 /// Cut `s` at the commas and spaces that are not inside parentheses.
-fn split<'a>(s: &'a str, at: fn(char) -> bool) -> Vec<&'a str> {
+fn split(s: &str, at: fn(char) -> bool) -> Vec<&str> {
     let (mut out, mut depth, mut from) = (Vec::new(), 0i32, 0);
     for (i, c) in s.char_indices() {
         match c {
@@ -244,4 +244,38 @@ pub fn initial_text(p: Property) -> &'static str {
 pub fn is_motion(p: Property) -> bool {
     use Property::*;
     matches!(p, TransitionProperty | TransitionDuration | TransitionDelay | TransitionTimingFunction | AnimationName | AnimationDuration | AnimationDelay | AnimationIterationCount)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn read(name: &str, value: &str) -> Option<Vec<Motion>> {
+        let (mut side, mut out) = (Side::default(), Vec::new());
+        match declaration(name, value, false, &mut side, &mut out)? {
+            true => Some(out.iter().filter_map(|d| match d.value { Value::Grid(i) => match &side.grids[i as usize] { crate::grid::Grid::Motion(m) => Some(m.clone()), _ => None }, _ => None }).collect()),
+            false => None,
+        }
+    }
+
+    #[test]
+    fn transition_shorthand() {
+        let m = read("transition", "opacity 100ms linear, transform 0.2s ease-in 50ms").unwrap();
+        assert_eq!(m[0], Motion::Names(vec!["opacity".into(), "transform".into()]));
+        assert_eq!(m[1], Motion::Times(vec![100_000, 200_000]));
+        assert_eq!(m[2], Motion::Times(vec![0, 50_000]));
+        assert_eq!(m[3], Motion::Names(vec!["linear".into(), "ease-in".into()]));
+        assert_eq!(read("transition", "1s").unwrap()[0], Motion::Names(vec!["all".into()]));
+    }
+
+    #[test]
+    fn animation_shorthand_and_bad_values() {
+        let m = read("animation", "k 1s 2s infinite alternate both").unwrap();
+        assert_eq!((&m[0], &m[1], &m[2], &m[3]), (&Motion::Names(vec!["k".into()]), &Motion::Times(vec![1_000_000]), &Motion::Times(vec![2_000_000]), &Motion::Times(vec![INFINITE])));
+        assert!(read("transition-duration", "-1s").is_none());
+        assert!(read("transition", "opacity 1s 1s 1s").is_none());
+        assert!(read("animation-iteration-count", "-1").is_none());
+        assert!(read("transition-delay", "-1s").is_some());
+        assert_eq!(text(Property::TransitionDuration, &Motion::Times(vec![1_500_000, 100_000])), "1.5s, 0.1s");
+    }
 }
