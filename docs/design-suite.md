@@ -475,3 +475,14 @@ Interaction with the five agents that are building now (I reference them as plan
 6. **Reply cache and `private` pages.** The reply cache keys on scheme, host, port and path, with no jar. I propose keying private responses by jar. It is a change of `bare-net` behavior (section 2.4). Do you accept it before A1?
 7. **Step 6: stop at the styles-only frame?** My estimate is 1.02 to 1.05 times on the 48 journeys. Building the property-mask cascade or the closure layout needs the count first. Do you accept that rule, or do you want B built now?
 8. **MCP: one shared client for the server.** `bare-mcp` makes a new client for each `open` today. Sharing one changes what an agent sees: a cached script survives between `open` calls. Do you want it on by default, or a flag per `open` (`fresh: true`)?
+
+## 9. Owner decisions (2026-11-13)
+
+1. Criterion 7 gets a second target: the sum of instructions of the suite is 1.5 times lower or more with one worker. The wall-time target of 2 times stays.
+2. The suite uses the local fixture of section 5.2. A real SSO login is not part of it now.
+3. The worker pool comes first as `bare-drive --suite DIR --workers K` (after a runner script in `tools/suite/`), then as an MCP tool `run_suite` on top.
+4. Isolation: design A. Documents are isolated by state and jar, and a failed test kills its worker.
+5. Shared login: the runner lint marks `own` tests, and a test author can also mark a test by hand.
+6. The reply cache keys `private` responses by jar.
+7. Step 6 stops at the styles-only frame. Count what forces style and layout before more is built.
+8. `bare-mcp` shares one network client by default. An `open` with `fresh: true` gets a clean client.
