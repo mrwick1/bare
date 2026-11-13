@@ -4,6 +4,7 @@
 //! The tools use the test driver (`bare-drive`), so each click and key goes through the same hit testing and input path as a user.
 //!
 //! - `run_steps`: run a whole step file and give its report.
+//! - `run_suite`: run a directory of step files with one shared login in K worker processes (`bare-drive --suite`) and give a short summary.
 //! - `ensure_session`, `save_state`: a logged-in live page from a saved session (in memory by default), or a new login when it is no longer valid.
 //! - `open`, `step`, `close`: a live session. `open` loads a page, each `step` call runs more step lines on the same page, and `close`
 //!   ends it. Each call gives the report of its own steps only, so the server keeps no old records.
@@ -142,6 +143,7 @@ impl Server {
         }
         let done = match name {
             "run_steps" => self.run_steps(&args),
+            "run_suite" => self.run_suite(&args),
             "open" => self.open(&args),
             "step" => self.step(&args),
             "save_state" => self.save_state(&args),
@@ -175,6 +177,58 @@ impl Server {
         self.place_window(&opt)?;
         let report = bare_drive::run::run(&list, &opt, &mut red);
         Ok(with_out(report.json(&red), &opt, true))
+    }
+
+    /// Run a suite directory through the library entry point of `bare-drive --suite` (`suite::run_report`): the coordinator is a thread of this
+    /// server. The workers are `bare-drive --suite-worker` processes: the runner starts a program for each worker, and this program is
+    /// not one (its `current_exe` is `bare-mcp`), so it gets the path of `bare-drive` (the `BARE_DRIVE` variable, else the file next to this
+    /// one). Own processes, own network client, own temp folder: the live sessions of this server keep their state (pages, cookies,
+    /// saved sessions) and a suite does not read or write them. The call blocks the server loop until the suite ends, so the live pages do
+    /// not tick meanwhile and catch up after; it is one reply to one request, as for `run_steps`.
+    fn run_suite(&mut self, args: &Value) -> Result<String, String> {
+        let dir = args.get("dir").and_then(Value::as_str).ok_or("dir (a suite folder: setup.steps and NAME.steps) is required")?;
+        let workers = match args.get("workers") {
+            None => None,
+            Some(w) if w == "auto" => None,
+            Some(w) => Some(w.as_u64().filter(|&n| n > 0).ok_or("workers: a number over 0, or \"auto\"")? as usize),
+        };
+        let num = |k: &str| args.get(k).and_then(Value::as_u64);
+        self.runs += 1;
+        let out = std::env::temp_dir().join(format!("bare-mcp-{}-{}", std::process::id(), self.runs));
+        let mut pass: Vec<String> = vec!["--out".into(), out.display().to_string(), "--var".into(), format!("STATE={}", out.join("state.json").display())];
+        pass.extend(["--size".into(), format!("{}x{}", num("width").unwrap_or(1280), num("height").unwrap_or(800)), "--timeout".into(), num("timeout_ms").unwrap_or(10_000).to_string()]);
+        if let Some(v) = args.get("vars").and_then(Value::as_object) {
+            for (k, v) in v {
+                pass.extend(["--var".into(), format!("{k}={}", v.as_str().ok_or(format!("vars.{k} must be a string"))?)]);
+            }
+        }
+        // The values of a secrets file go to the workers as the file: they never get into an argument list.
+        if let Some(f) = args.get("secrets_file").and_then(Value::as_str) {
+            pass.extend(["--secrets".into(), f.into()]);
+        }
+        let exe = std::env::var_os("BARE_DRIVE").map(std::path::PathBuf::from).or_else(|| std::env::current_exe().ok()?.with_file_name("bare-drive").into()).filter(|p| p.is_file());
+        let cfg = bare_drive::suite::Config {
+            dir: dir.into(),
+            out: out.clone(),
+            workers,
+            test_limit: Duration::from_millis(num("test_timeout_ms").unwrap_or(60_000)),
+            perf: args.get("perf").and_then(Value::as_bool).unwrap_or(false),
+            login_each: false,
+            only: args.get("filter").and_then(Value::as_str).map(str::to_string),
+            args: pass,
+            cores: std::thread::available_parallelism().map_or(1, |n| n.get()),
+            avail_kib: mem_available_kib(),
+            quiet: true,
+            exe: Some(exe.ok_or("bare-drive was not found next to bare-mcp: build it (cargo build -p bare-drive) or set BARE_DRIVE")?),
+        };
+        std::fs::create_dir_all(&out).map_err(|e| format!("{}: {e}", out.display()))?;
+        let report = bare_drive::suite::run_report(&cfg);
+        let text = report.map(|r| suite_summary(&r, &out));
+        // Captures are kept for a failure only; an empty or passed run leaves nothing behind.
+        if !matches!(&text, Ok(t) if t.starts_with("FAILED")) {
+            let _ = std::fs::remove_dir_all(&out);
+        }
+        text
     }
 
     fn open(&mut self, args: &Value) -> Result<String, String> {
@@ -894,6 +948,42 @@ fn ref_arg(args: &Value, k: &str) -> Result<Option<u32>, String> {
 }
 
 /// A short receipt of step lines for an agent: ok or the failure with a hint, then new console errors and failed requests.
+/// `MemAvailable` in KiB, or 0 when `/proc/meminfo` is not there (the worker rule then has no memory limit).
+fn mem_available_kib() -> u64 {
+    let s = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
+    s.lines().find_map(|l| l.strip_prefix("MemAvailable:")?.trim().strip_suffix("kB")?.trim().parse().ok()).unwrap_or(0)
+}
+
+/// The suite report as a few lines: counts, time, logins, each failure with its step and message, the peak RSS of each worker.
+/// At most 20 failures and 3000 characters, like the other tools keep their replies short; the full report is `out/suite.json`.
+fn suite_summary(r: &Value, out: &std::path::Path) -> String {
+    let n = |k: &str| r[k].as_u64().unwrap_or(0);
+    let mut s = format!("{} {}/{} passed, {} workers, {:.0} ms", if r["ok"] == true { "ok" } else { "FAILED" }, n("passed"), n("tests"), n("workers"), r["wall_ms"].as_f64().unwrap_or(0.0));
+    s.push_str(&format!(", logins {}", n("logins_expected")));
+    if let Some(i) = r["instructions"].as_u64() {
+        s.push_str(&format!(", {:.0} M instructions", i as f64 / 1e6));
+    }
+    if r["setup"]["ok"] == false {
+        let f = &r["setup"]["failure"];
+        s.push_str(&format!("\nsetup FAILED at line {} {}: {}", f["line"], f["kind"].as_str().unwrap_or(""), f["message"].as_str().unwrap_or("")));
+    }
+    let rows = r["results"].as_array().map(Vec::as_slice).unwrap_or_default();
+    let bad: Vec<&Value> = rows.iter().filter(|x| x["ok"] != true).collect();
+    for x in bad.iter().take(20) {
+        let f = &x["failure"];
+        s.push_str(&format!("\nFAIL {} (step line {}, {}): {}", x["test"].as_str().unwrap_or(""), f["line"], f["kind"].as_str().unwrap_or(""), f["message"].as_str().unwrap_or("").chars().take(300).collect::<String>()));
+    }
+    if bad.len() > 20 {
+        s.push_str(&format!("\n... and {} more failures", bad.len() - 20));
+    }
+    let peaks: Vec<String> = r["worker_stats"].as_array().map(Vec::as_slice).unwrap_or_default().iter().map(|w| format!("w{}:{}M", w["worker"], w["peak_kib"].as_u64().unwrap_or(0) >> 10)).collect();
+    s.push_str(&format!("\npeak RSS {}", peaks.join(" ")));
+    if !bad.is_empty() || r["ok"] != true {
+        s.push_str(&format!("\nout: {}", out.display()));
+    }
+    s.chars().take(3000).collect()
+}
+
 fn compact(rep: &Report, red: &Redactor) -> String {
     let ms: f64 = rep.steps.iter().map(|s| s.ms).sum();
     let mut out = match &rep.failure {
@@ -1009,6 +1099,17 @@ fn tools() -> Value {
             "name": "run_steps",
             "description": format!("Run a whole end-to-end journey in the bare browser and return a JSON report: each step, the failure with a capture, console logs and network requests. The first step must be open. {syntax}"),
             "inputSchema": with(json!({"steps": {"type": "string", "description": "The step file text, one step per line. # starts a comment."}}), &["steps"]),
+        },
+        {
+            "name": "run_suite",
+            "description": "Run a suite of step files that share one login, in K warm worker processes (like bare-drive --suite). The folder holds setup.steps (the login; its last step is save-state \"${STATE}\") and one NAME.steps for each test; a test starts with open URL state=\"${STATE}\". A test that signs out, changes a password or deletes logs in itself. Gives a short summary: passed and failed counts, wall time, logins, each failure with its test, step line and message, and the peak RSS of each worker. Your live sessions are not used or changed. The call returns when the suite ends.",
+            "inputSchema": with(json!({
+                "dir": {"type": "string", "description": "The suite folder."},
+                "workers": {"description": "A number of worker processes, or \"auto\" (default): the smaller of cores - 4, half of the free memory over one worker's peak, and the number of tests.", "oneOf": [{"type": "integer"}, {"type": "string", "enum": ["auto"]}]},
+                "filter": {"type": "string", "description": "Run only the tests whose name holds this text."},
+                "perf": {"type": "boolean", "description": "Count the instructions of each worker (needs perf). Default false."},
+                "test_timeout_ms": {"type": "integer", "description": "Time limit of one whole test; a test past it fails and its worker is replaced. Default 60000."},
+            }), &["dir"]),
         },
         {
             "name": "open",

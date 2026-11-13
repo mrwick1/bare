@@ -200,6 +200,8 @@ pub struct Config {
     pub cores: usize,
     pub avail_kib: u64,
     pub quiet: bool,
+    /// The program that runs as a worker (`--suite-worker`). `None`: this program. A host that is not `bare-drive` (the MCP server) gives the path of `bare-drive`.
+    pub exe: Option<PathBuf>,
 }
 
 struct Worker {
@@ -213,7 +215,10 @@ struct Worker {
 }
 
 fn spawn(cfg: &Config, id: usize) -> Result<Worker, String> {
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let exe = match &cfg.exe {
+        Some(e) => e.clone(),
+        None => std::env::current_exe().map_err(|e| e.to_string())?,
+    };
     let perf = cfg.perf.then(|| cfg.out.join(format!("perf.{id}")));
     let mut c;
     if let Some(p) = &perf {
@@ -320,42 +325,43 @@ fn pull(sh: &Shared, mut w: Option<Worker>) {
     }
 }
 
-/// Run the suite. Exit code: 0 all passed, 1 a test failed, 2 a bad suite.
+/// Run the suite and print the report. Exit code: 0 all passed, 1 a test failed, 2 a bad suite.
 pub fn run(cfg: &Config) -> i32 {
-    let t0 = Instant::now();
-    let suite = match load(&cfg.dir) {
-        Ok(s) => s,
+    match run_report(cfg) {
+        Ok(report) => {
+            println!("{report}");
+            !(report["ok"] == true) as i32
+        }
         Err(e) => {
             eprintln!("bare-drive: {e}");
-            return 2;
+            2
         }
-    };
+    }
+}
+
+/// Run the suite and give the report (the JSON that `run` prints; also written to `OUT/suite.json`). `Err` is a bad suite. It prints nothing
+/// on stdout, so a host that owns stdout (the MCP server) can call it.
+pub fn run_report(cfg: &Config) -> Result<Value, String> {
+    let t0 = Instant::now();
+    let suite = load(&cfg.dir)?;
     let tests: Vec<&Test> = suite.tests.iter().filter(|t| cfg.only.as_ref().is_none_or(|o| t.name.contains(o.as_str()))).collect();
     let shared = tests.iter().any(|t| t.class == Class::Shared && state_open(&t.text).is_some()) && !cfg.login_each;
     if shared && suite.setup.is_none() {
-        eprintln!("bare-drive: a test starts from a saved login, and {} has no setup.steps", cfg.dir.display());
-        return 2;
+        return Err(format!("a test starts from a saved login, and {} has no setup.steps", cfg.dir.display()));
     }
     if tests.is_empty() {
-        eprintln!("bare-drive: no test matches --only");
-        return 2;
+        return Err("no test matches the filter".into());
     }
     let _ = std::fs::create_dir_all(&cfg.out);
     let _ = std::fs::remove_file(cfg.out.join("state.json"));
-    let mut first = match spawn(cfg, 0) {
-        Ok(w) => w,
-        Err(e) => {
-            eprintln!("bare-drive: {e}");
-            return 2;
-        }
-    };
+    let mut first = spawn(cfg, 0)?;
     // The setup runs in the first worker, which then keeps the caches that it warmed.
     let mut setup = Value::Null;
     if shared || (suite.setup.is_some() && !cfg.login_each && tests.iter().any(|t| t.class == Class::Own)) {
         let r = exchange(&mut first, "setup", cfg.test_limit).unwrap_or_else(|e| json!({"name": "setup", "ok": false, "ms": 0.0, "failure": {"line": 0, "kind": "worker", "message": e}}));
         if r["ok"] != true {
             let s = retire(first, "the setup failed");
-            return finish(cfg, &suite, &tests, vec![], vec![s], r, 0, "the setup failed: no test ran".into(), t0);
+            return Ok(finish(cfg, &suite, &tests, vec![], vec![s], r, 0, "the setup failed: no test ran".into(), t0));
         }
         setup = r;
     }
@@ -374,11 +380,11 @@ pub fn run(cfg: &Config) -> i32 {
     });
     let results = std::mem::take(&mut *sh.results.lock().unwrap());
     let stats = std::mem::take(&mut *sh.stats.lock().unwrap());
-    finish(cfg, &suite, &tests, results, stats, setup, k, rule, t0)
+    Ok(finish(cfg, &suite, &tests, results, stats, setup, k, rule, t0))
 }
 
 #[allow(clippy::too_many_arguments)]
-fn finish(cfg: &Config, _suite: &Suite, tests: &[&Test], mut results: Vec<(usize, Value)>, mut stats: Vec<Value>, setup: Value, k: usize, rule: String, t0: Instant) -> i32 {
+fn finish(cfg: &Config, _suite: &Suite, tests: &[&Test], mut results: Vec<(usize, Value)>, mut stats: Vec<Value>, setup: Value, k: usize, rule: String, t0: Instant) -> Value {
     let _ = std::fs::remove_file(cfg.out.join("state.json"));
     results.sort_by_key(|(i, _)| *i);
     stats.sort_by_key(|s| s["worker"].as_u64());
@@ -404,7 +410,6 @@ fn finish(cfg: &Config, _suite: &Suite, tests: &[&Test], mut results: Vec<(usize
     });
     let text = report.to_string();
     let _ = std::fs::write(cfg.out.join("suite.json"), format!("{text}\n"));
-    println!("{text}");
     if !cfg.quiet {
         eprintln!("{:<5} {:<22} {:>8}  {:>6} {}", "", "test", "ms", "worker", "login");
         for r in &rows {
@@ -417,7 +422,7 @@ fn finish(cfg: &Config, _suite: &Suite, tests: &[&Test], mut results: Vec<(usize
         let peaks: Vec<String> = stats.iter().map(|s| format!("w{}:{}M", s["worker"], s["peak_kib"].as_u64().unwrap_or(0) >> 10)).collect();
         eprintln!("{passed}/{} passed, {k} workers ({rule}), wall {:.0} ms, instructions {}, peak RSS {}", tests.len(), t0.elapsed().as_secs_f64() * 1000.0, instr.map_or("n/a".into(), |i| format!("{:.0} M", i as f64 / 1e6)), peaks.join(" "));
     }
-    !ok as i32
+    report
 }
 
 #[cfg(test)]
