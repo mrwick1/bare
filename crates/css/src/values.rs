@@ -193,6 +193,14 @@ properties! {
     ObjectFit => "object-fit",
     Cursor => "cursor",
     UserSelect => "user-select",
+    TransitionProperty => "transition-property",
+    TransitionDuration => "transition-duration",
+    TransitionDelay => "transition-delay",
+    TransitionTimingFunction => "transition-timing-function",
+    AnimationName => "animation-name",
+    AnimationDuration => "animation-duration",
+    AnimationDelay => "animation-delay",
+    AnimationIterationCount => "animation-iteration-count",
     TranslateX => "-bare-translate-x",
     TranslateY => "-bare-translate-y",
     ;
@@ -513,6 +521,9 @@ fn parse_known(name: &str, value: &str, important: bool, side: &mut Side, out: &
         return ok;
     }
     if let Some(ok) = crate::grid::declaration(name, value, important, side, out) {
+        return ok;
+    }
+    if let Some(ok) = crate::motion::declaration(name, value, important, side, out) {
         return ok;
     }
     let Some(parts) = Parts::read(value, &mut side.calcs) else { return false };
@@ -1067,7 +1078,7 @@ pub fn mirror(p: Property) -> Property {
 pub const SHORTHANDS: &[&str] = &[
     "margin", "padding", "inset", "flex", "flex-flow", "gap", "border-spacing", "border-width", "border-style", "border-color",
     "border", "border-top", "border-right", "border-bottom", "border-left", "background", "font", "list-style", "text-decoration",
-    "overflow", "border-radius", "grid-row", "grid-column", "grid-area", "place-items", "place-self", "place-content",
+    "overflow", "border-radius", "grid-row", "grid-column", "grid-area", "place-items", "place-self", "place-content", "transition", "animation",
 ];
 
 /// The longhands of a shorthand, for `inherit` and the like. `None` if `name` is not a shorthand.
@@ -1114,7 +1125,7 @@ pub fn shorthand_longhands(name: &str) -> Option<&'static [Property]> {
         "text-decoration" => &[TextDecoration],
         "overflow" => &[OverflowX, OverflowY],
         "border-radius" => &[BorderTopLeftRadius, BorderTopRightRadius, BorderBottomRightRadius, BorderBottomLeftRadius],
-        _ => return crate::grid::longhands(name),
+        _ => return crate::grid::longhands(name).or_else(|| crate::motion::longhands(name)),
     };
     Some(list)
 }
@@ -1575,6 +1586,8 @@ fn longhand(property: Property, part: Part) -> Option<Value> {
         BackgroundRepeat | MaskRepeat => one_of(part, &[K::Repeat, K::NoRepeat, K::RepeatX, K::RepeatY]),
         // These are read as text (`grid.rs`), and never come here.
         GridTemplateColumns | GridTemplateRows | GridTemplateAreas | GridAutoColumns | GridAutoRows | GridAutoFlow | GridRowStart | GridRowEnd | GridColumnStart | GridColumnEnd => Option::None,
+        // Read as text (`motion.rs`).
+        TransitionProperty | TransitionDuration | TransitionDelay | TransitionTimingFunction | AnimationName | AnimationDuration | AnimationDelay | AnimationIterationCount => Option::None,
         RowGap | ColumnGap => match part {
             Part::Keyword(K::Normal) => Some(Value::Keyword(K::Normal)),
             _ => positive(part).map(Value::Length),

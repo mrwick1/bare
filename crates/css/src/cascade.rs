@@ -253,6 +253,8 @@ pub struct RuleSet {
     tested: std::cell::Cell<u64>,
     /// Does a rule have a logical property of the inline axis, or `float: inline-start | inline-end`? Only then does an `rtl` element need `logical_pass`.
     logical: bool,
+    /// The names of the `@keyframes` rules (`has_keyframes`). Their steps are not read: an animation only needs to know that the name exists.
+    keyframes: std::collections::HashSet<Box<str>>,
     pending: Option<Box<HashMap<NodeId, Vec<InputDeclaration>>>>,
 }
 
@@ -469,11 +471,20 @@ impl RuleSet {
     }
 
     pub fn new(viewport: (f32, f32)) -> RuleSet {
-        RuleSet { viewport, entries: Vec::new(), decls: Vec::new(), side: Side::default(), layers: vec![Layer { parent: 0 }], layer_by_name: HashMap::new(), customs: Vec::new(), index: Index::default(), shadows: HashMap::default(), parts: Vec::new(), user: 0, scopes: Scopes::default(), reach: std::cell::OnceCell::new(), tested: std::cell::Cell::new(0), logical: false, pending: None }
+        RuleSet { viewport, entries: Vec::new(), decls: Vec::new(), side: Side::default(), layers: vec![Layer { parent: 0 }], layer_by_name: HashMap::new(), customs: Vec::new(), index: Index::default(), shadows: HashMap::default(), parts: Vec::new(), user: 0, scopes: Scopes::default(), reach: std::cell::OnceCell::new(), tested: std::cell::Cell::new(0), logical: false, pending: None, keyframes: std::collections::HashSet::new() }
     }
 
     /// Which user action state (`:hover`, `:active`, the focus pseudo-classes) some rule reads: the bits `selector::USES_*`.
     /// A host that keeps styles must compute them again when one of those states changes.
+    /// Does a rule set one of the `transition-*` or `animation-*` properties, or is a `@keyframes` rule here?
+    pub fn has_motion(&self) -> bool {
+        !self.keyframes.is_empty() || self.decls.iter().any(|d| crate::motion::is_motion(d.property))
+    }
+
+    pub fn has_keyframes(&self, name: &str) -> bool {
+        self.keyframes.contains(name)
+    }
+
     pub fn user_flags(&self) -> u8 {
         self.user
     }
@@ -699,6 +710,10 @@ impl RuleSet {
                     continue;
                 }
                 Rule::At(at) => {
+                    if at.name.ends_with("keyframes") && matches!(at.body, AtBody::Rules(_)) {
+                        self.keyframes.insert(at.prelude.trim().trim_matches(['"', '\'']).into());
+                        continue;
+                    }
                     let AtBody::Rules(inner) = at.body else { continue };
                     let yes = match &*at.name {
                         "media" => at_rules::media_matches(at.prelude, self.viewport),
@@ -1801,7 +1816,39 @@ struct StyleKeep {
     base: usize,
 }
 
+/// A copy of the styles of the elements, for a host that compares two cascades (`bare/src/browser_motion.rs`). It holds the
+/// values and the `calc()` numbers, nothing else: a `Value::Grid` in it points to nothing.
+pub struct StyleMap {
+    styles: Vec<ComputedStyle>,
+    of_node: Vec<u32>,
+    calcs: Vec<[f32; 2]>,
+}
+
+impl StyleMap {
+    pub fn style(&self, node: NodeId) -> Option<&ComputedStyle> {
+        match self.of_node.get(node.index()) {
+            Some(&i) if i != NONE => self.styles.get(i as usize),
+            _ => None,
+        }
+    }
+
+    /// The pixels and the percent of a `Length::Calc`.
+    pub fn calc(&self, i: u32) -> (f32, f32) {
+        self.calcs.get(i as usize).map_or((0.0, 0.0), |c| (c[0], c[1]))
+    }
+}
+
 impl Styles {
+    /// Copy the styles (`StyleMap`).
+    pub fn map(&self) -> StyleMap {
+        StyleMap { styles: self.styles.clone(), of_node: self.of_node.clone(), calcs: self.calcs.clone() }
+    }
+
+    /// Does any style satisfy `f`? (Each different style is tested once.)
+    pub fn any_style(&self, f: impl Fn(&ComputedStyle) -> bool) -> bool {
+        self.styles.iter().any(f)
+    }
+
     pub fn spaced(&self) -> bool {
         self.spaced
     }
@@ -2219,6 +2266,7 @@ fn initial(p: Property) -> Value {
         JustifyContent | AlignContent | AlignItems | JustifyItems | RowGap | ColumnGap => Value::Keyword(K::Normal),
         AlignSelf | JustifySelf | TableLayout | GridAutoColumns | GridAutoRows | GridRowStart | GridRowEnd | GridColumnStart | GridColumnEnd => Value::Keyword(K::Auto),
         GridTemplateColumns | GridTemplateRows | GridTemplateAreas => Value::Keyword(K::None),
+        TransitionProperty | TransitionDuration | TransitionDelay | TransitionTimingFunction | AnimationName | AnimationDuration | AnimationDelay | AnimationIterationCount => Value::Keyword(K::None),
         GridAutoFlow => Value::Number(0.0),
         BorderCollapse => Value::Keyword(K::Separate),
         CaptionSide => Value::Keyword(K::Top),

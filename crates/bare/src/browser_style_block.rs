@@ -162,7 +162,11 @@ fn written(property: Property, value: &Value, side: &Side) -> Option<String> {
         },
         Value::Color(c) if c.a == 255 => format!("rgb({}, {}, {})", c.r, c.g, c.b),
         Value::Color(c) => format!("rgba({}, {}, {}, {})", c.r, c.g, c.b, (c.a as f32 / 255.0 * 1000.0).round() / 1000.0),
-        Value::Var(_) | Value::Grid(_) => return None,
+        Value::Grid(i) => match side.grids.get(i as usize)? {
+            bare_css::grid::Grid::Motion(m) => bare_css::motion::text(property, m),
+            _ => return None,
+        },
+        Value::Var(_) => return None,
     };
     reads_as(property, &t, value, side).then_some(t)
 }

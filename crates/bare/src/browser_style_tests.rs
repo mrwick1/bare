@@ -117,14 +117,14 @@ fn set_property_rules() {
         "s.setProperty('width', '1px; height: 2px')",
         "s.setProperty('width', '1px !important')",
         "s.setProperty('width', '1px', 'bogus')",
-        "s.setProperty('animation', 'x 1s')",
+        "s.setProperty('filter', 'blur(2px)')",
         "s.setProperty('nonsense', '1')",
         "s.setProperty('', '1')",
         "s.setProperty('width', '}')",
         "s.width = 'zzz'",
-        "s.animation = 'x'",
+        "s.filter = 'x'",
         "s.removeProperty('height')",
-        "s.removeProperty('animation')",
+        "s.removeProperty('filter')",
     ] {
         assert_eq!(js(&mut b, &format!("{call}; a.getAttribute('style')")), "width:5px;;junk", "{call}");
     }
@@ -152,7 +152,7 @@ fn set_property_rules() {
     assert_eq!(js(&mut b, "s.removeProperty()"), "throw:TypeError:Failed to execute 'removeProperty' on 'CSSStyleDeclaration': 1 argument required, but only 0 present.");
     assert_eq!(js(&mut b, "s.item()"), "throw:TypeError:Failed to execute 'item' on 'CSSStyleDeclaration': 1 argument required, but only 0 present.");
     // A change on an element with no style attribute makes one; a no-op does not.
-    assert_eq!(js(&mut b, "p.style.removeProperty('color'); p.style.setProperty('animation', 'x'); p.style.setProperty('color', 'zzz'); p.getAttribute('style')"), "null");
+    assert_eq!(js(&mut b, "p.style.removeProperty('color'); p.style.setProperty('filter', 'x'); p.style.setProperty('color', 'zzz'); p.getAttribute('style')"), "null");
     assert_eq!(js(&mut b, "p.style.color = 'blue'; p.getAttribute('style')"), "color: blue;");
     assert_eq!(js(&mut b, "p.style.removeProperty('color') + '|' + p.getAttribute('style')"), "blue|");
 }
@@ -221,10 +221,10 @@ fn named_properties_and_feature_detection() {
     let mut b = at(PAGE);
     js(&mut b, A);
     assert_eq!(js(&mut b, "['color','marginTop','margin-top','margin','cssFloat','float','WebkitBorderHorizontalSpacing','webkitBorderHorizontalSpacing','-webkit-border-horizontal-spacing','backgroundColor','gridTemplateColumns','placeItems'].map(function(k){return k in s}).join()"), "true,true,true,true,true,true,true,true,true,true,true,true");
-    assert_eq!(js(&mut b, "['WebkitAnimation','webkitAnimation','animation','transition','animationend','AnimationEvent','MozAnimation','transform','foo','length2'].map(function(k){return k in s}).join()"), "false,false,false,false,false,false,false,false,false,false");
+    assert_eq!(js(&mut b, "['WebkitAnimation','webkitAnimation','animation','transition','animationend','AnimationEvent','MozAnimation','transform','foo','length2'].map(function(k){return k in s}).join()"), "false,false,true,true,false,false,false,false,false,false");
     // An unsupported name stays a plain JS property: it does not reach the attribute.
-    assert_eq!(js(&mut b, "var before = a.getAttribute('style'); s.animation = 'x 1s'; s.animation + (a.getAttribute('style') === before)"), "x 1strue");
-    js(&mut b, "s.cssText = ''; delete s.animation");
+    assert_eq!(js(&mut b, "var before = a.getAttribute('style'); s.filter = 'x 1s'; s.filter + (a.getAttribute('style') === before)"), "x 1strue");
+    js(&mut b, "s.cssText = ''; delete s.filter");
     assert_eq!(js(&mut b, "s.cssFloat = 'left'; s.float + '|' + s.cssFloat + '|' + a.getAttribute('style')"), "left|left|float: left;");
     assert_eq!(js(&mut b, "s['margin-top'] = '3px'; s.marginTop + '|' + a.getAttribute('style')"), "3px|float: left; margin-top: 3px;");
     assert_eq!(js(&mut b, "var g = Object.getOwnPropertyDescriptor(CSSStyleDeclaration.prototype, 'marginTop'); g.get.name + ',' + g.set.name + ',' + g.set.length + ',' + g.enumerable"), "get marginTop,set marginTop,1,true");
@@ -275,8 +275,8 @@ fn css_text_and_forwarding_setter() {
     let mut b = at(PAGE);
     js(&mut b, A);
     // `bad` is not a declaration and goes; the ones the engine does not read stay as they were written.
-    js(&mut b, "s.cssText = 'color:red;;bad;margin:0;width:zzz;animation:x 1s'");
-    assert_eq!(js(&mut b, "s.cssText + '|' + a.getAttribute('style')"), "color: red; margin: 0; width: zzz; animation: x 1s;|color: red; margin: 0; width: zzz; animation: x 1s;");
+    js(&mut b, "s.cssText = 'color:red;;bad;margin:0;width:zzz;filter:x 1s'");
+    assert_eq!(js(&mut b, "s.cssText + '|' + a.getAttribute('style')"), "color: red; margin: 0; width: zzz; filter: x 1s;|color: red; margin: 0; width: zzz; filter: x 1s;");
     js(&mut b, "s.cssText = ''");
     assert_eq!(js(&mut b, "a.getAttribute('style') === ''"), "true");
     js(&mut b, "a.style = 'height: 3px'");
@@ -551,20 +551,20 @@ fn atomic_errors() {
 fn uninterpreted_declarations_are_preserved() {
     let mut b = at(PAGE);
     js(&mut b, A);
-    js(&mut b, "a.setAttribute('style', 'transition: opacity 1s; color: red; --k: \"a;b\"; animation: x 1s infinite; width: zzz')");
+    js(&mut b, "a.setAttribute('style', 'will-change: opacity; color: red; --k: \"a;b\"; filter: blur(2px); width: zzz')");
     assert_eq!(js(&mut b, "s.length + '|' + s.color + '|' + s.item(0) + '|' + s.item(1)"), "2|red|color|--k");
     js(&mut b, "s.height = '2px'");
-    assert_eq!(attr(&mut b), "transition: opacity 1s; color: red; --k: \"a;b\"; animation: x 1s infinite; width: zzz; height: 2px;");
+    assert_eq!(attr(&mut b), "will-change: opacity; color: red; --k: \"a;b\"; filter: blur(2px); width: zzz; height: 2px;");
     js(&mut b, "s.removeProperty('color')");
-    assert_eq!(attr(&mut b), "transition: opacity 1s; --k: \"a;b\"; animation: x 1s infinite; width: zzz; height: 2px;");
+    assert_eq!(attr(&mut b), "will-change: opacity; --k: \"a;b\"; filter: blur(2px); width: zzz; height: 2px;");
     // An important unknown stays important, and the cssText setter keeps what it was given the same way.
     js(&mut b, "s.cssText = 'will-change: transform !important; color: red'");
     assert_eq!(attr(&mut b), "will-change: transform !important; color: red;");
     assert_eq!(js(&mut b, "s.cssText"), "will-change: transform !important; color: red;");
     // Only unknown declarations: a no-op write leaves the attribute byte for byte.
-    js(&mut b, "a.setAttribute('style', 'transition:none;;')");
+    js(&mut b, "a.setAttribute('style', 'will-change:none;;')");
     js(&mut b, "s.setProperty('color', 'zzz'); s.removeProperty('color')");
-    assert_eq!(attr(&mut b), "transition:none;;");
+    assert_eq!(attr(&mut b), "will-change:none;;");
 }
 
 /// Defect 3: caps run before the block is built, and one declaration list is never longer than the cap.

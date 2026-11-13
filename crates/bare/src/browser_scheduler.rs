@@ -145,6 +145,8 @@ pub(crate) enum Task {
     IdleTimeout(u32),
     /// An event or a step of a media element (`browser_media.rs`): the node, the epoch of its load algorithm, the step.
     Media(NodeId, u32, u8),
+    /// A step of a CSS transition or animation: its number and the step (`browser_motion.rs`).
+    Motion(u64, u8),
 }
 
 struct Timer {
@@ -235,6 +237,7 @@ impl Sched {
         match t {
             Task::Timer(id) => self.timers.get(id).is_some_and(|t| t.idle),
             Task::Render => self.frame_idle,
+            Task::Motion(_, step) => *step == crate::browser_motion::ITER_INFINITE,
             Task::Idle | Task::IdleTimeout(_) => self.idle_quiet,
             _ => false,
         }
@@ -280,6 +283,7 @@ enum Run {
     Idle,
     IdleTimeout(u32),
     Media(NodeId, u32, u8),
+    Motion(u64, u8),
     Nothing,
 }
 
@@ -342,7 +346,7 @@ impl Dom {
         let ports = &s.ports;
         s.tasks.retain(|_, t| match t {
             Task::Deliver(o) => ports.contains_key(o),
-            Task::Timer(_) | Task::Select(_) | Task::SelectionChange(_) | Task::DocSelectionChange | Task::Render | Task::Scroll | Task::AbortTimeout(_) | Task::Worker(_) | Task::Notify | Task::Idle | Task::IdleTimeout(_) | Task::Media(..) => true,
+            Task::Timer(_) | Task::Select(_) | Task::SelectionChange(_) | Task::DocSelectionChange | Task::Render | Task::Scroll | Task::AbortTimeout(_) | Task::Worker(_) | Task::Notify | Task::Idle | Task::IdleTimeout(_) | Task::Media(..) | Task::Motion(..) => true,
         });
         s.queued = s.ports.values().map(|p| p.inbox.len()).sum();
         s.queued_bytes = s.ports.values().flat_map(|p| p.inbox.iter().map(|m| m.1)).sum();
@@ -551,6 +555,7 @@ impl Dom {
                 Run::Render
             }
             Task::Scroll => Run::Scroll,
+            Task::Motion(id, step) => Run::Motion(id, step),
             Task::Notify => Run::Notify,
             Task::Idle => Run::Idle,
             Task::IdleTimeout(id) => Run::IdleTimeout(id),
@@ -644,6 +649,14 @@ impl Dom {
                 let quiet = self.follow_up(mark);
                 self.sched.borrow_mut().frame_idle = quiet;
                 Ok(())
+            }
+            Run::Motion(id, step) => {
+                let r = it.host_scope(|it| {
+                    it.charge(1)?;
+                    self.motion_task(it, id, step)?;
+                    it.host_checkpoint().map(|_| ())
+                });
+                r
             }
             Run::Idle | Run::IdleTimeout(_) => {
                 let mark = self.settle_mark();
@@ -1314,7 +1327,7 @@ impl Browser {
         loop {
             let upto = target.unwrap_or_else(|| dom.now_ms());
             // A rendering step is due at the next frame of the grid after a change that observers could see.
-            if dom.frame_wanted() {
+            if dom.frame_wanted() | dom.motion_wants_frame() {
                 dom.want_frame()?;
             }
             if dom.scroll_wants_task() {

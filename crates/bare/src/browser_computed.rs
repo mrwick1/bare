@@ -169,7 +169,7 @@ pub(crate) struct Built {
     vp: (f32, f32),
     pub(crate) key: Vec<(NodeId, Option<String>, String)>,
     inputs: Option<Box<HashMap<usize, bare_css::cascade::InputSheet>>>,
-    rules: RuleSet,
+    pub(crate) rules: RuleSet,
     /// The last cascade of these rules, and its key: `revision`, `text_revision`, length and user state revisions of the
     /// document, and `want`. The flag tells that it keeps what `restyle_frame` needs (`RuleSet::compute_kept`).
     /// Two places: `[0]` for no `want`, `[1]` for a `want`. A read of a hidden element asks for both (`snapshot`), and one
@@ -310,6 +310,11 @@ impl Snap {
         Ok(match v {
             // Chrome gives `normal` for `letter-spacing` and `0px` for `word-spacing`.
             Cv::Keyword(Keyword::Normal) if p == Property::WordSpacing => "0px".to_string(),
+            Cv::Keyword(Keyword::None) if bare_css::motion::is_motion(p) => bare_css::motion::initial_text(p).to_string(),
+            Cv::Grid(i) if bare_css::motion::is_motion(p) => match self.styles.grid(i) {
+                bare_css::grid::Grid::Motion(m) => bare_css::motion::text(p, m),
+                _ => return Err(NO_TEXT),
+            },
             Cv::Keyword(k) => k.name().to_string(),
             // A number `line-height` is times the font size of the element, in pixels.
             Cv::Number(n) if p == Property::LineHeight => format!("{}px", num(n * self.style.px(Property::FontSize))),
@@ -505,6 +510,18 @@ impl Dom {
     }
 
     fn cascade_with(&self, it: &mut Interp<'_>, want: Option<NodeId>, keep: bool) -> R<Rc<Styles>> {
+        let styles = self.cascade_inner(it, want, keep)?;
+        if want.is_none() {
+            let key = self.motion_key();
+            // A cascade that the last one answered again has nothing new to show.
+            if self.motion_key_changed(key) {
+                self.motion_seen(it, &styles)?;
+            }
+        }
+        Ok(styles)
+    }
+
+    fn cascade_inner(&self, it: &mut Interp<'_>, want: Option<NodeId>, keep: bool) -> R<Rc<Styles>> {
         let l = self.computed.lim.get();
         let vp = self.plat.s.borrow().viewport;
         if self.doc.borrow().len() > l.max_nodes {

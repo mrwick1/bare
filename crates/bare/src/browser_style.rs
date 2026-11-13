@@ -14,8 +14,9 @@
 //!   declaration and the declaration traces the wrapper. The setter forwards to `cssText` (`[PutForwards=cssText]`).
 //! - Supported properties are exactly the ones `bare_css` understands: `values::Property::ALL` and `values::SHORTHANDS`.
 //!   For each one the prototype has camelCase and dashed accessors (and `cssFloat`; `-webkit-` names also get the
-//!   `webkitX` form), so `"x" in style` is true only for a property that really works. `WebkitAnimation`, `animation`,
-//!   `transition` and the like are NOT supported: absent, and `setProperty` ignores them.
+//!   `webkitX` form), so `"x" in style` is true only for a property that really works. `transition`, `animation` and their
+//!   `transition-*` / `animation-*` longhands are supported (`bare_css::motion`; the events are in `browser_motion.rs`). `WebkitAnimation`,
+//!   `animation-timing-function`, `-direction`, `-fill-mode`, `-play-state` and the like are NOT supported: absent, and `setProperty` ignores them.
 //! - Order of work: arguments are converted with `ToString` first (user code may run, no borrow is held), then the
 //!   block is read, changed in Rust and written once. A value that does not parse, an unsupported property, or a
 //!   priority other than `""`/`important` changes nothing (no write, no exception), as the standard says.
