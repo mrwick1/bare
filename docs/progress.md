@@ -8744,3 +8744,64 @@ The window mode. `test262_check.sh` and `exec_diff.sh` (no change in `crates/js`
 - Each stale-stamp read reads and compares the whole sheet text once.
 - Each declaration that is read still takes one DOM node.
 - `parse_load deep 1` and `deep 10` do not run on either tree.
+## Sheet registry (2026-11-13)
+
+Step 2 of `docs/perf-goal.md`, phase 1 of `docs/design-style.md`. Branch `t3/document-sheet-registry`.
+
+### What was built
+
+- The document keeps the list of its `<link>`, `<style>` and `<base>` elements that are in the tree, in the order of the page: `Document::sheet_nodes()` (`crates/html/src/dom.rs`). A shadow tree comes right after its host.
+- Each entry says whether the element is in the light tree (`light`) and whether a loader scan may use it (`html`: light tree, HTML namespace, no `template` above it).
+- Three code paths read it and do not walk the DOM any more: `Run::tell_links` (`browser_loader/sheets.rs`), `cascade::sources_capped` (called by `plan`) and `resources::document_base`. Attributes and the text of the elements are read when needed, so the list holds only structure.
+- How it stays exact. The name of an element never changes. So the list of all elements with these three names is exact. It is found by one pass over the new part of the node `Vec` at a read (`scan_sheets`), so a document that nobody asks pays nothing. Which of them are in the tree, and in which order, is made at a read and dropped when a change can alter it: `link` and `detach` of a node that has children or has one of the three names (only after a first read), `parse_cut`/`parse_open`/`parse_close`, `attach_shadow` and `set_foreign`. There is no second mutation system: these are the places where the tree changes.
+- Two ways to make the list. A page with few nodes for each element (nodes < 32 x elements) takes a walk. A big page climbs from each element to the top node and visits only the ancestors (cost: depth of each element plus the children of those ancestors, up to the last one that leads to an element). The cost of the walk on a small page is lower than the tables of the other way (the first version used the tables always: `preload_load style 10` +41% instructions).
+- No `href` index. The design (L3) asked for `HashMap<href, nodes>`. The list has only the L elements of one page (under 30 usually), `tell_links` filters it by `href` in O(L), and an index needs a drop on every `href` change. At S = 200 sheets and L = 200 links that is 40 k string compares in all. Decision: no index. Recorded in `docs/decisions.md`.
+- The correctness guard: in a debug build and in `bare-html` tests, each read of `sheet_nodes()` compares the list with `sheet_nodes_walk()` (a walk of the whole tree), for both ways of making it. A change that is missed fails the test.
+
+### Numbers
+
+Machine archMachine, shared with other build agents (instruction counts are not affected, wall time is). BASE `f6415364`, MAIN `e6b3f707` (the main this branch sits on), NEW this branch.
+
+**Sheet ramp** (new, `/data/bare-tmp/sheet-reg/www/r_<nodes>_<sheets>.html`): a script builds N `div`s, then adds S `<link rel=stylesheet>` to the head; the page is done when S `load` events came. Local server, `bare-drive`, `perf stat -e instructions:u`, 3 runs, minimum (spread = max/min).
+
+| nodes | sheets | MAIN (M instr) | NEW (M instr) | MAIN / NEW | peak RSS MAIN / NEW (MiB) |
+|---:|---:|---:|---:|---:|---|
+| 5,000 | 200 | 525 (1.08) | 156 (1.05) | 3.4x | 15.8 / 15.3 |
+| 10,000 | 200 | 948 (1.04) | 220 (1.11) | 4.3x | 16.8 / 17.0 |
+| 20,000 | 50 | 628 (1.12) | 254 (1.01) | 2.5x | 18.5 / 18.3 |
+| 20,000 | 100 | 980 (1.05) | 273 (1.01) | 3.6x | 18.6 / 18.3 |
+| 20,000 | 200 | 1,629 (1.14) | 331 (1.02) | 4.9x | 19.0 / 18.9 |
+| 40,000 | 200 | 3,217 (1.05) | 566 (1.03) | 5.7x | 23.1 / 23.3 |
+
+MAIN grows with nodes x sheets. NEW grows with the nodes (the page build) and slightly with the sheets. 400 sheets is refused on both trees (a source limit), so it is not in the table.
+
+**48 public journeys.** The recorded corpus of step 1 does not exist yet, so these are live pages: 48 journeys, 3 runs each for BASE, MAIN and NEW, interleaved (min of 3). Live pages change between runs, and the spread is large (up to 4x for one journey in one build: some runs load a different page). Treat small differences as noise.
+
+| set | BASE | MAIN | NEW | NEW / MAIN | NEW / BASE |
+|---|---:|---:|---:|---:|---:|
+| all 48 (M instr) | 24,379 | 23,589 | 22,881 | 0.970 | 0.939 |
+| 45 journeys that passed in all 9 runs | 24,100 | 23,240 | 22,568 | 0.971 | 0.936 |
+
+`hn-front`, `hn-new-past` and `hn-comments-back` failed in some runs on all three builds (the site), so they are not in the second row. Journeys named by the task: `rust-book-search` 4,369 / 4,260 / 4,099 M (BASE / MAIN / NEW), `python-org-docs-link` 1,318 / 1,386 / 1,462 M (spread 2.68 on NEW: one slow run). A first run before the rebase gave 26.06 / 25.49 / 24.49 G for the same set.
+
+**Where the gain is.** A profile (`perf record`, 200 k instruction period) of `rust-book-search`: `tell_links` is 9.4% of the instructions on MAIN and absent on NEW. A profile of `python-org-docs-link` today: `tell_links` 0.8% on MAIN (the profile of 2026-11-13 had 30.5% loader share; the site changed, or that share was not `tell_links`: hypothesis). So **success criterion 4 (1.3x on the heavy-scan journeys) is not shown on the live pages of today**. The sheet ramp shows 2.5x to 5.7x where the scans are heavy. The journeys total gains 3.0% against MAIN. The estimate of the design (8 to 9 points) is above this result: the node visits of the walks were 23.9 M over 43 journeys, but in instructions they are about 3% of the total, not 8%.
+
+**Cost matrix** (`tools/js/cost_matrix.sh`, MAIN `e6b3f707` vs NEW, 803 rows): mean change glibc -0.010%, jemalloc +0.000%, 0 rows over +0.5% under both allocators. 2 rows do not run on either tree (`examples/parse_load deep 1` and `deep 10`: stack overflow, exit 134 on MAIN too). The first full run found a regression: +0.9% to +1.4% on `fragment_load parse`, `browser_load svgparse` and `resources_load dups`, and +41% on `preload_load style 10`. The cause was a check at each node creation and the tables of the big-page way on a small page. Both are gone (lazy scan; the walk for small pages).
+
+### Checks
+
+- `bare-html` lib: 176 pass. New: `the_sheet_list_follows_random_changes` (40 random trees with `link`, `style`, `base`, `template`, SVG and MathML elements, shadow roots, fragments, clones; moves, detaches and reads at random; each read is compared with a walk) and `the_sheet_list_is_in_tree_order_and_marks_what_the_loader_may_use`.
+- `bare-css` lib 250 pass and `bare` lib 1,414 pass (release). In a debug build (assertions on, each read compared with a walk) `bare-html` 176, `bare-css` 250 and `bare` 1,413 pass. The one debug failure, `a_pending_meta_refresh_is_queued_work`, also fails on MAIN in debug (checked in a worktree of `origin/main`); in release it fails once in about 20 runs on both trees.
+- `cargo test --release --workspace --no-fail-fast`: all pass except 7 TLS tests (`bare-net` `https_openssl`, `bare-tls`; no code of this branch is below them) and two timing tests that pass on a rerun: `bare-drive` `a_driver_click_step_returns_and_the_expect_waits_for_the_reply` and `a_page_that_aborts_task_after_task_fails_the_step_with_the_reason` (step times of 50 ms and a 60 s run, on a shared machine). `browser_geometry_tests::external_sheets_embedded_sheets_and_inline_styles_cascade_in_order` failed once in about 25 full runs on NEW; it failed once in 50 full runs on MAIN too, and it passes 300 of 300 alone on NEW.
+- The tests of the random changes were written after the code.
+
+### Not tested
+
+`test262_check.sh`, `exec_diff.sh` and `keycost.sh` (no change in `crates/js`). A window with a display. A page that puts its sheets in a shadow tree and a script that moves a `<link>` between a shadow tree and the light tree, other than in the random test. The step-1 corpus (it does not exist). Peak RSS of the journeys. A `<style>` or `<link>` in a very long list of siblings with many insertions between reads (the list walks the siblings up to the last one that leads to an element).
+
+### Noticed, not changed
+
+- `resources::discover` still walks the DOM for scripts, sheets and the base once for each call.
+- `plan` still copies the text of all sheets at each revision (`flatten`, `absolute_urls`; design L4, later).
+- The sheet limit is 256 sources by default; a page with 400 `<link>` sheets is refused on both trees.
+- `tell_links` still filters the list by `href` for each arriving sheet: O(sheets x links).
