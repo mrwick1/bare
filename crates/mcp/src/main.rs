@@ -150,8 +150,13 @@ impl Server {
 
     fn open(&mut self, args: &Value) -> Result<String, String> {
         let url = args.get("url").and_then(Value::as_str).ok_or("url is required")?;
+        let file = args.get("file").and_then(Value::as_str).filter(|f| std::path::Path::new(f).exists());
         let state = match args.get("state").and_then(Value::as_str) {
-            Some(n) => Some(self.saved.get(n).cloned().ok_or(format!("no saved session named {n}"))?),
+            Some(n) => match (self.saved.get(n), file) {
+                (Some(st), _) => Some(st.clone()),
+                (None, Some(f)) => Some(bare_drive::state::read(f)?),
+                (None, None) => return Err(format!("no saved session named {n}")),
+            },
             None => None,
         };
         // The JSON step report only on request: on a large site it has tens of thousands of characters (#398).
@@ -953,7 +958,7 @@ fn tools() -> Value {
         {
             "name": "open",
             "description": "Start a live session: load URL in the bare browser. A new open ends the old session. Returns a short receipt: ok or the failure, the time, a redirect, not ready, script errors and failed requests.",
-            "inputSchema": with(json!({"url": {"type": "string"}, "state": {"type": "string", "description": "Start from the session that save_state or ensure_session saved under this name, in this server."}, "snapshot": {"type": "boolean", "description": "Add the page snapshot after the receipt."}, "report": {"type": "boolean", "description": "Return the full JSON report of the open step (steps, console, network) instead of the receipt. It can be large."}}), &["url"]),
+            "inputSchema": with(json!({"url": {"type": "string"}, "state": {"type": "string", "description": "Start from the session that save_state or ensure_session saved under this name, in this server."}, "file": {"type": "string", "description": "With state: read the session from this file when it is not in memory. It holds live credentials."}, "snapshot": {"type": "boolean", "description": "Add the page snapshot after the receipt."}, "report": {"type": "boolean", "description": "Return the full JSON report of the open step (steps, console, network) instead of the receipt. It can be large."}}), &["url"]),
         },
         {
             "name": "step",
