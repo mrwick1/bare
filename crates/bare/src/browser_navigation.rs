@@ -922,6 +922,20 @@ impl Browser {
         }
     }
 
+    /// The address bar with `url`. When it is the document URL with a fragment, it is a fragment navigation in this document, as in
+    /// Chrome: a new entry, and `hashchange` at the next navigation turn. The page keeps its state and its requests. `false`: `url` is
+    /// another document (or not a valid URL), and the caller loads it.
+    pub fn navigate_same_document(&mut self, url: &str) -> R<bool> {
+        let dom = self.dom.clone();
+        let cur = dom.cur_rec()?;
+        let Ok(new) = nu::parse(url, Some(&cur)) else { return Ok(false) };
+        if new.u != cur.u || new.frag.is_none() {
+            return Ok(false);
+        }
+        self.it.host_scope(|it| dom.navigate(it, new, false))?;
+        Ok(true)
+    }
+
     /// Raised each time the document URL changes (script, traversal, fragment navigation, `set_document_url`).
     pub fn url_generation(&self) -> u64 {
         self.dom.nav.s.borrow().generation
