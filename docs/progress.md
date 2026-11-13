@@ -12750,3 +12750,6 @@ Gmail's Labels menu click sends no mutation and the page posts to `/jserror`. Li
 
 - `bare-mcp` in the isolated browser tests of the parent.
 - A `Response.json` call on a live page.
+### 2026-11-14: contenteditable list exit (issue #443)
+
+`browser_editing.rs` now outdents an empty list item on Enter, removes an empty block on Backspace, and toggles only the selected list items. Tests: `enter_in_an_empty_list_item_leaves_the_list`, `backspace_in_an_empty_block_removes_it`, `list_toggle_changes_only_the_selected_items`. Not done: merging a block with content into the block before it on Backspace.

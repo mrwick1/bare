@@ -40,8 +40,12 @@
 //! - `document.designMode` stays "off" (`browser_basics.rs`); the setter ignores "on".
 //! - `insertText` puts the text in as given: no `&nbsp;` for a space at an edge, and a line feed in the text is a line feed.
 //! - `delete` and `forwardDelete` do not merge two blocks at a block boundary; they return false there. A range across blocks is cut
-//!   with `deleteContents`, which keeps both blocks.
-//! - `insertParagraph` makes a `div` in the host and clones the block it splits (a `p` gives `p`). Lists and tables are not special.
+//!   with `deleteContents`, which keeps both blocks. One exception (issue 443): Backspace in an empty block removes it, or turns the
+//!   first item of a list into a `div`. A block with content is not merged with the one before it.
+//! - `insertParagraph` makes a `div` in the host and clones the block it splits (a `p` gives `p`). Enter in an empty list item turns
+//!   it into a `div` after the list (the items after it go to a new list). Tables are not special.
+//! - A list command on a caret or selection in a list of the same kind turns only the selected items into `div` blocks and splits
+//!   the list. The other kind still renames the whole list.
 //! - No undo history, no `beforeinput`, no `styleWithCSS`, no `defaultParagraphSeparator`.
 
 use crate::browser::*;
@@ -333,6 +337,15 @@ impl Dom {
                 }
             }
         };
+        // A block that holds only a `br` (and empty Text) shows an empty line; the `br` goes when text arrives (as in Chrome).
+        let blank_brs: Vec<NodeId> = {
+            let doc = self.doc.borrow();
+            let block = target.unwrap_or(c);
+            let p = if units(&doc, block).is_some() { doc.parent(block) } else { Some(block) };
+            p.filter(|&p| p != host && is_block(&doc, p) && doc.children(p).all(|k| tag(&doc, k) == "br" || units(&doc, k).is_some_and(|u| u.is_empty())))
+                .map(|p| doc.children(p).filter(|&k| tag(&doc, k) == "br").collect())
+                .unwrap_or_default()
+        };
         let (node, at) = match target {
             Some(t) => {
                 let w = self.wrap(it, t)?;
@@ -348,6 +361,9 @@ impl Dom {
                 (self.nd(it, t)?, 0)
             }
         };
+        for br in blank_brs {
+            self.remove(it, br)?;
+        }
         let (node, end) = match over {
             Some(o) => self.apply_override(it, host, node, at, len, o)?,
             None => (node, at + len),
@@ -433,7 +449,7 @@ impl Dom {
             return Ok(true);
         }
         let found = find_del(&self.doc.borrow(), host, a.start.0, a.start.1, back);
-        let Some(found) = found else { return Ok(false) };
+        let Some(found) = found else { return if back { self.delete_empty_block(it, &a, host) } else { Ok(false) } };
         match found {
             Del::Chars(n, from, to) => {
                 let w = self.wrap(it, n)?;
@@ -465,6 +481,91 @@ impl Dom {
         Ok(true)
     }
 
+    /// Backspace at the start of an empty block. The first item of a list leaves the list. Any other empty block is removed and the
+    /// caret goes to the end of the block before it. A block with content, and the first block of the host, stay as they are.
+    fn delete_empty_block(&self, it: &mut Interp<'_>, a: &Act, host: NodeId) -> R<bool> {
+        let (block, prev, list) = {
+            let doc = self.doc.borrow();
+            let mut b = element_of(&doc, a.start.0).expect("in the host");
+            while b != host && !is_block(&doc, b) {
+                b = doc.parent(b).expect("in the host");
+            }
+            let empty = doc.children(b).all(|k| units(&doc, k).is_some_and(|u| u.is_empty()) || tag(&doc, k) == "br");
+            let list = doc.parent(b).filter(|&p| matches!(tag(&doc, p), "ul" | "ol"));
+            (b, doc.prev_sibling(b), list.filter(|_| empty))
+        };
+        let empty = self.doc.borrow().children(block).all(|k| units(&self.doc.borrow(), k).is_some_and(|u| u.is_empty()) || tag(&self.doc.borrow(), k) == "br");
+        if block == host || !empty {
+            return Ok(false);
+        }
+        match (list, prev) {
+            (Some(l), None) => {
+                let i = index(&self.doc.borrow(), block);
+                let divs = self.outdent(it, l, i, i)?;
+                let (t, o) = deep_start(&self.doc.borrow(), divs[0]);
+                caret(self, it, a.sel, t, o)?;
+            }
+            (_, Some(p)) => {
+                self.remove(it, block)?;
+                self.caret_end_of(it, a, p)?;
+            }
+            _ => return Ok(false),
+        }
+        let kind = "deleteContentBackward";
+        self.input_event(it, host, kind, None)?;
+        Ok(true)
+    }
+
+    /// The caret at the end of the content of `n`: after its last Text, going down through the last children.
+    fn caret_end_of(&self, it: &mut Interp<'_>, a: &Act, mut n: NodeId) -> R<()> {
+        let pos = {
+            let doc = self.doc.borrow();
+            loop {
+                let Some(l) = doc.children(n).last() else { break (n, 0) };
+                if let Some(u) = units(&doc, l) {
+                    break (l, u.len() as u32);
+                }
+                if is_void(&doc, l) {
+                    break (n, doc.children(n).count() as u32 - 1);
+                }
+                n = l;
+            }
+        };
+        caret(self, it, a.sel, pos.0, pos.1)
+    }
+
+    /// Turn the items `first..=last` of the list `l` into `div` blocks after it. The items before stay in `l`; the items after go to
+    /// a new list of the same kind. An empty `l` is removed. Gives the new blocks.
+    fn outdent(&self, it: &mut Interp<'_>, l: NodeId, first: u32, last: u32) -> R<Vec<NodeId>> {
+        let items: Vec<NodeId> = self.doc.borrow().children(l).collect();
+        let (lw, pw) = (self.wrap(it, l)?, self.wrap(it, self.doc.borrow().parent(l).expect("in the host"))?);
+        let next = self.doc.borrow().next_sibling(l);
+        let mut at = self.wrap_opt(it, next)?;
+        if (last as usize) + 1 < items.len() {
+            let tail = call(self, it, lw, "cloneNode", &[Value::Bool(false)])?;
+            for &li in &items[last as usize + 1..] {
+                let w = self.wrap(it, li)?;
+                call(self, it, tail, "appendChild", &[w])?;
+            }
+            call(self, it, pw, "insertBefore", &[tail, at])?;
+            at = tail;
+        }
+        let mut divs = Vec::new();
+        for &li in &items[first as usize..=last as usize] {
+            let div = self.make(it, "div")?;
+            self.move_children(it, li, div)?;
+            call(self, it, pw, "insertBefore", &[div, at])?;
+            let id = self.nd(it, div)?;
+            self.fill_empty(it, id)?;
+            self.remove(it, li)?;
+            divs.push(id);
+        }
+        if first == 0 {
+            call(self, it, pw, "removeChild", &[lw])?;
+        }
+        Ok(divs)
+    }
+
     /// `delete` (Backspace).
     pub(crate) fn delete_back(&self, it: &mut Interp<'_>) -> R<bool> {
         self.delete_step(it, true)
@@ -494,6 +595,19 @@ impl Dom {
     pub(crate) fn insert_paragraph(&self, it: &mut Interp<'_>) -> R<bool> {
         let Some((a, host)) = self.editing(it)? else { return Ok(false) };
         let (mut c, o) = self.cut_selection(it, &a)?;
+        let empty_item = {
+            let doc = self.doc.borrow();
+            let li = ancestor_with(&doc, host, c, &["li"]).filter(|&li| doc.children(li).all(|k| units(&doc, k).is_some_and(|u| u.is_empty()) || tag(&doc, k) == "br"));
+            li.and_then(|li| doc.parent(li).filter(|&l| matches!(tag(&doc, l), "ul" | "ol")).map(|l| (l, index(&doc, li))))
+        };
+        if let Some((l, i)) = empty_item {
+            // Enter in an empty item leaves the list.
+            let divs = self.outdent(it, l, i, i)?;
+            let (t, off) = deep_start(&self.doc.borrow(), divs[0]);
+            caret(self, it, a.sel, t, off)?;
+            self.input_event(it, host, "insertParagraph", None)?;
+            return Ok(true);
+        }
         let mut block = {
             let doc = self.doc.borrow();
             let mut b = element_of(&doc, c).expect("in the host");
@@ -735,7 +849,25 @@ impl Dom {
         if let Some(l) = inside {
             // Inside a list: the same kind unwraps it into `div` blocks, the other kind renames it.
             let same = tag(&self.doc.borrow(), l) == kind;
-            let (name, item) = if same { ("div", "div") } else { (kind, "li") };
+            if same {
+                let (first, last) = {
+                    let doc = self.doc.borrow();
+                    let at = |p: (NodeId, u32)| ancestor_with(&doc, host, p.0, &["li"]).filter(|&li| doc.parent(li) == Some(l)).map_or(0, |li| index(&doc, li));
+                    let n = doc.children(l).count() as u32;
+                    let (f, e) = (at(a.start), at(a.end));
+                    (f.min(n - 1), e.max(f).min(n - 1))
+                };
+                let divs = self.outdent(it, l, first, last)?;
+                self.keep_text_ends(it, &a)?;
+                if a.start == a.end && units(&self.doc.borrow(), a.start.0).is_none_or(|u| u.is_empty()) {
+                    // A caret in an empty item: it goes to the start of the new block.
+                    let (t, o) = deep_start(&self.doc.borrow(), divs[0]);
+                    caret(self, it, a.sel, t, o)?;
+                }
+                self.input_event(it, host, event, None)?;
+                return Ok(true);
+            }
+            let (name, item) = (kind, "li");
             let items: Vec<NodeId> = self.doc.borrow().children(l).collect();
             let lw = self.wrap(it, l)?;
             let pw = self.wrap(it, self.doc.borrow().parent(l).expect("in the host"))?;

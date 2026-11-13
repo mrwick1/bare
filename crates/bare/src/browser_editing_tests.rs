@@ -1,6 +1,7 @@
 //! Tests of `isContentEditable`, `contentEditable` and the `document.execCommand` text commands (`browser_editing.rs`).
 
 use crate::browser::*;
+use bare_html::dom::NodeId;
 use bare_html::tree;
 use bare_js::eval::{Error, EvalLimits};
 use bare_js::heap::HeapLimits;
@@ -293,5 +294,76 @@ fn bold_button_on_a_caret_styles_the_next_text() {
         assert_eq!(js(&mut b, "e.innerHTML"), "<i>i</i>");
         js(&mut b, "e.innerHTML = '<b>abcd</b>'; s.collapse(e.firstChild.firstChild, 2); document.execCommand('bold'); document.execCommand('insertText', false, 'X');");
         assert_eq!(js(&mut b, "e.innerHTML"), "<b>ab</b>X<b>cd</b>");
+    });
+}
+
+/// Issue 443: a page with host `#e`, the caret in it, and a helper that presses keys through the input path.
+fn keys_host(b: &mut Browser, html: &str) -> NodeId {
+    js(b, &format!("document.body.innerHTML = '<div contenteditable id=e>{html}</div>'; var e = document.getElementById('e');"));
+    let e = b.query("#e").unwrap().unwrap();
+    b.focus(e).unwrap();
+    e
+}
+
+fn press(b: &mut Browser, host: Option<NodeId>, keys: &[&str]) {
+    for (i, k) in keys.iter().enumerate() {
+        b.drive_key(if i == 0 { host } else { None }, k).unwrap();
+    }
+}
+
+#[test]
+fn enter_in_an_empty_list_item_leaves_the_list() {
+    big(|| {
+        let mut b = browser();
+        let e = keys_host(&mut b, "");
+        press(&mut b, Some(e), &["i", "Enter"]);
+        js(&mut b, "document.execCommand('insertUnorderedList')");
+        press(&mut b, None, &["a", "Enter", "b", "Enter", "Enter"]);
+        assert_eq!(js(&mut b, "e.innerHTML"), "<div>i</div><ul><li>a</li><li>b</li></ul><div><br></div>");
+        // The caret is in the new block.
+        press(&mut b, None, &["z"]);
+        assert_eq!(js(&mut b, "e.lastChild.textContent"), "z");
+        // An empty item in the middle splits the list.
+        js(&mut b, "e.innerHTML = '<ul><li>a</li><li><br></li><li>c</li></ul>'; getSelection().collapse(e.children[0].children[1], 0);");
+        press(&mut b, None, &["Enter"]);
+        assert_eq!(js(&mut b, "e.innerHTML"), "<ul><li>a</li></ul><div><br></div><ul><li>c</li></ul>");
+    });
+}
+
+#[test]
+fn backspace_in_an_empty_block_removes_it() {
+    big(|| {
+        let mut b = browser();
+        let e = keys_host(&mut b, "");
+        press(&mut b, Some(e), &["q", "Enter"]);
+        js(&mut b, "document.execCommand('insertUnorderedList')");
+        press(&mut b, None, &["a", "Enter", "Backspace"]);
+        assert_eq!(js(&mut b, "e.innerHTML"), "<div>q</div><ul><li>a</li></ul>");
+        assert_eq!(js(&mut b, "var s = getSelection(); [s.anchorNode.textContent, s.anchorOffset].join()"), "a,1");
+        // The only item of a list leaves the list.
+        js(&mut b, "e.innerHTML = '<div>x</div><ul><li><br></li></ul>'; getSelection().collapse(e.lastChild.firstChild, 0);");
+        press(&mut b, None, &["Backspace"]);
+        assert_eq!(js(&mut b, "e.innerHTML"), "<div>x</div><div><br></div>");
+        // Without a list: the second empty div goes.
+        js(&mut b, "e.innerHTML = '';");
+        press(&mut b, None, &["x", "Enter", "Enter", "Backspace"]);
+        assert_eq!(js(&mut b, "e.innerHTML"), "<div>x</div><div><br></div>");
+    });
+}
+
+#[test]
+fn list_toggle_changes_only_the_selected_items() {
+    big(|| {
+        let mut b = browser();
+        let e = keys_host(&mut b, "");
+        press(&mut b, Some(e), &["r", "Enter"]);
+        js(&mut b, "document.execCommand('insertUnorderedList')");
+        press(&mut b, None, &["a", "Enter"]);
+        js(&mut b, "document.execCommand('insertUnorderedList')");
+        press(&mut b, None, &["z"]);
+        assert_eq!(js(&mut b, "e.innerHTML"), "<div>r</div><ul><li>a</li></ul><div>z</div>");
+        // The middle item of three leaves; the list is split.
+        js(&mut b, "e.innerHTML = '<ul><li>a</li><li id=m>b</li><li>c</li></ul>'; getSelection().collapse(document.getElementById('m').firstChild, 1); document.execCommand('insertUnorderedList');");
+        assert_eq!(js(&mut b, "e.innerHTML"), "<ul><li>a</li></ul><div>b</div><ul><li>c</li></ul>");
     });
 }
