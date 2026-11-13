@@ -264,6 +264,8 @@ mod browser_survive_tests;
 mod browser_settle_tests;
 
 mod browser_cssom;
+#[cfg(test)]
+mod browser_cssom_tests;
 
 mod browser_frames;
 

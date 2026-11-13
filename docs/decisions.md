@@ -1961,3 +1961,11 @@ Issue #442: `el.style.WebkitUserSelect` was `undefined`, so `el.style.WebkitUser
 - Chosen: K `bare-drive --suite-worker` processes. Each is warm across its tests (one network client, one parse cache) and has its own memory, sockets and globals. A failed test ends its worker. This is the model of Playwright (one browser process for each worker, a fresh worker after a failure).
 
 A test is `own` (it logs in itself) when a step says `sign out`, `password` or `delete`, or when the file says `# own`. `# shared` forces the other way. The lint is a text rule and not a proof; a wrong `# shared` makes the next tests fail, never pass. K is `min(cores - 4, half of MemAvailable / peak RSS of worker 0, tests)`.
+## CSS rule declarations share one prototype, and rule objects are made on demand (2026-11-13)
+
+- `rule.style` has no own accessors. The properties are on the one `CSSStyleDeclaration` prototype that `el.style` uses. The internal slot is the rule id.
+- `cssRules` and `cssRules.length` make no rule object. `cssRules[i]` makes and caches one. `cssRules[3] === cssRules[3]` holds. A rule declaration is made on the first read of `rule.style`.
+- The list length is exact. A rule that does not parse does not count, as before.
+- Chrome differs: it lists the CSS properties as own keys of each declaration (`Object.keys(rule.style)`). bare lists only the indexes, the same as bare `el.style`. The design draft said that Chrome uses the prototype. That was wrong. No journey depends on the difference.
+- Limits: `MAX_OBJECTS` is 1 << 19 (524,288) objects. The cost of a rule that is read is 585 B (selector only) to about 0.9 KB (with `.style`), so the worst case is about 290 MiB. `MAX_RULES` is 1 << 21 entries (12 B each, about 24 MiB). The `style-objects` limit (65,536) stays. It binds first when a page reads `.style` of more than about 65,000 rules.
+- Reason: a rule object cost 10.2 KB, and a 16 MiB sheet read stopped on `cssom-objects` at 947 MiB (criteria 5 and 8 of `perf-goal.md`).

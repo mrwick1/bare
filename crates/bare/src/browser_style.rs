@@ -452,6 +452,24 @@ fn style_of(d: &Dom, it: &mut Interp<'_>, el: NodeId) -> V {
     Ok(Value::Object(o))
 }
 
+impl Dom {
+    /// The declaration of a CSSOM rule: the `style` object of a detached `span` that no script can reach, so it has no element wrapper.
+    pub(crate) fn rule_declaration(&self, it: &mut Interp<'_>, text: &str) -> R<ObjId> {
+        let el = {
+            let mut doc = self.doc.borrow_mut();
+            self.room(&doc, 1, 0)?;
+            if doc.find_atom("span").is_none() && doc.name_count() + 1 > self.lim.max_names {
+                return Err(self.lim("dom-names"));
+            }
+            doc.create_element("span")
+        };
+        let Value::Object(o) = style_of(self, it, el)? else { unreachable!("style_of makes an object") };
+        let css = self.js_str(it, text)?;
+        self.style_set_text(it, el, css)?;
+        Ok(o)
+    }
+}
+
 fn set_style_attr(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     let el = d.style_html_el(it, this)?;
     d.style_set_text(it, el, arg(a, 0))?;
@@ -497,6 +515,7 @@ fn css_text(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
 fn set_css_text(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     let el = d.style_el(it, this)?;
     d.style_set_text(it, el, arg(a, 0))?;
+    crate::browser_cssom::declaration_written(d, it, this)?;
     Ok(Value::Undefined)
 }
 
@@ -551,6 +570,7 @@ fn set_property(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
         Some(&v) => null_empty(d, it, v)?,
     };
     d.style_set(it, el, &name, &value, &prio)?;
+    crate::browser_cssom::declaration_written(d, it, this)?;
     Ok(Value::Undefined)
 }
 
@@ -559,6 +579,7 @@ fn remove_property(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V 
     required(it, a, 1, "removeProperty")?;
     let name = d.string_arg(it, a[0])?;
     let old = d.style_remove(it, el, &name)?;
+    crate::browser_cssom::declaration_written(d, it, this)?;
     d.js_str(it, &old)
 }
 
@@ -583,6 +604,7 @@ fn named_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     let el = d.style_el(it, this)?;
     let value = null_empty(d, it, arg(a, 0))?;
     d.style_set(it, el, name, &value, "")?;
+    crate::browser_cssom::declaration_written(d, it, this)?;
     Ok(Value::Undefined)
 }
 

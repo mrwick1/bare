@@ -1,5 +1,7 @@
 //! Bounded CSSOM objects. Sheet and rule lists are live host-indexed objects. All allocation is deferred until a CSSOM read.
 //! Inline rule edits update the style text through the DOM. The existing sheet pipeline reads that text.
+//! A rule object is made when a script reads its index. Until then a rule is a span (`Entry::Chunk`) of the sheet text, 12 bytes. The
+//! declaration of a rule (`rule.style`) is the object of `browser_style` with the shared `CSSStyleDeclaration` prototype: no own accessors.
 //! External rules require a supplied sheet and a same-origin URL. `CSSRule` is the base interface of every rule object. The interface shape and the
 //! semantics follow Ladybird `LibWeb/CSS/CSSRule.cpp` (BSD-2).
 use crate::browser::*;
@@ -8,17 +10,30 @@ use bare_html::dom::{Document, NodeData, NodeId};
 use bare_js::eval::{Error, Interp};
 use bare_js::heap::{HeapError, Slot};
 use bare_js::value::{ObjId, Value};
-use std::cell::{OnceCell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
 
 type V = R<Value>;
-const MAX_OBJECTS: usize = 65536;
+// Rule objects and the other objects that a page made through CSSOM, as GC roots. A rule object costs about 0.5 KB when only its selector is read
+// (measured on a 16 MiB sheet: 187,852 rules, 585 B each). This limit allows a read of all rules of the biggest sheet that the loader accepts and
+// holds the worst case near 290 MiB. The declaration of a rule counts for `style-objects` too (65,536, `browser_style`).
+const MAX_OBJECTS: usize = 1 << 19;
 const MAX_TEXT: usize = 32 << 20;
+// The rules of one list. A rule that no script has read is an `Entry` of 12 bytes, so this holds the list near 24 MiB.
+const MAX_RULES: usize = 1 << 21;
+// An item of a list that does not exist yet: the index that asks for the length only (as `browser_attr` and `browser_dataset` do).
+const LENGTH_ONLY: u32 = u32::MAX;
+// An item of a rule list: the object, or the span of its text that no script has read yet. The offsets are in the source of the
+// sheet (a rule list of a sheet) or in `Rule::raw` of the grouping rule that owns the list.
+#[derive(Clone, Copy, PartialEq)]
+enum Entry {
+    Obj(ObjId),
+    Chunk(u32, u32),
+}
 #[derive(Clone)]
 struct Sheet {
     node: NodeId,
     list: ObjId,
-    rules: Vec<ObjId>,
     source: String,
     text_key: Option<Vec<(NodeId, bare_html::dom::Span)>>,
     // `new CSSStyleSheet()`: no owner node (`node` is the document root, unused), the text is in `source`. `stale`: the rules are not parsed yet.
@@ -43,7 +58,9 @@ struct Rule {
     kind: Kind,
     selector: Option<String>,
     raw: String,
+    // The declaration object (`rule.style`). It is made when a script first needs it, from `decl`.
     style: Option<ObjId>,
+    decl: Option<String>,
     // The condition of `@media` and `@supports`, the name of `@keyframes`, the key list of a keyframe, the prelude of `@import`.
     // The nested rules of `@media`, `@supports` and `@keyframes` are in `list`.
     prelude: String,
@@ -56,8 +73,10 @@ struct List {
     sheet: Option<ObjId>,
     // The grouping rule that owns the list.
     rule: Option<ObjId>,
-    items: Vec<ObjId>,
+    items: Vec<Entry>,
     stamp: Option<(u64, u64, u64)>,
+    // How deep the rules of the list are nested: 0 for a sheet.
+    depth: usize,
 }
 pub(crate) struct State {
     roots: Vec<ObjId>,
@@ -74,9 +93,7 @@ pub(crate) struct State {
     by_node: HashMap<NodeId, ObjId>,
     rules: IdMap<ObjId, Rule>,
     lists: IdMap<ObjId, List>,
-    // A rule declaration is an ordinary detached declaration. Only its setters and methods get wrappers.
-    wrappers: HashMap<u32, ObjId>,
-    wrapped: IdMap<ObjId, ObjId>,
+    // The declaration object of a rule -> the rule. A write through the declaration publishes the sheet (`declaration_written`).
     style_rules: IdMap<ObjId, ObjId>,
     // The constructed sheets adopted by the document (key: its root) or a shadow root, in order.
     adopted: HashMap<NodeId, Vec<ObjId>>,
@@ -85,6 +102,9 @@ pub(crate) struct State {
 pub(crate) struct Cssom {
     state: OnceCell<RefCell<State>>,
     style_p: OnceCell<ObjId>,
+    // How far the revision and the text revision of the document moved by the detached elements of rule declarations (`declaration`).
+    // The list stamps leave them out: making a rule object must not make every rule list stale.
+    own: Cell<(u64, u64)>,
 }
 fn state(d: &Dom) -> &RefCell<State> {
     d.cssom.state.get().expect("CSSOM initialized")
@@ -102,6 +122,10 @@ fn keep(d: &Dom, o: ObjId) -> R<ObjId> {
     }
     s.roots.push(o);
     Ok(o)
+}
+#[cfg(test)]
+pub(crate) fn rule_objects(d: &Dom) -> usize {
+    d.cssom.state.get().map_or(0, |s| s.borrow().rules.len())
 }
 fn illegal(_: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
     Err(it.type_error("Illegal constructor"))
@@ -133,8 +157,6 @@ fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<()> {
             by_node: HashMap::new(),
             rules: IdMap::default(),
             lists: IdMap::default(),
-            wrappers: HashMap::new(),
-            wrapped: IdMap::default(),
             style_rules: IdMap::default(),
             adopted: HashMap::new(),
         }))
@@ -309,6 +331,7 @@ fn new_list(d: &Dom, it: &mut Interp<'_>, sheet: Option<ObjId>) -> R<ObjId> {
             rule: None,
             items: vec![],
             stamp: None,
+            depth: 0,
         },
     );
     Ok(o)
@@ -347,7 +370,6 @@ fn sheet_of(d: &Dom, it: &mut Interp<'_>, n: NodeId) -> R<ObjId> {
         Sheet {
             node: n,
             list,
-            rules: vec![],
             source: String::new(),
             text_key: None,
             ctor: false,
@@ -460,10 +482,10 @@ fn text_key(doc: &bare_html::dom::Document, node: NodeId) -> Vec<(NodeId, bare_h
     out
 }
 
-fn pending_key(d: &Dom, doc: &bare_html::dom::Document, node: NodeId, rules: &[ObjId]) -> Option<Vec<(NodeId, bare_html::dom::Span)>> {
+fn pending_key(d: &Dom, doc: &bare_html::dom::Document, node: NodeId, rules: &[Entry]) -> Option<Vec<(NodeId, bare_html::dom::Span)>> {
     if !d.style.has_pending.get() { return None; }
     let s = state(d).borrow();
-    rules.iter().any(|r| s.rules[r].style.and_then(|o| d.style_object_inputs(doc, o)).is_some()).then(|| text_key(doc, node))
+    rules.iter().any(|e| matches!(e, Entry::Obj(r) if s.rules[r].style.and_then(|o| d.style_object_inputs(doc, o)).is_some())).then(|| text_key(doc, node))
 }
 
 pub(crate) fn sheet_inputs(d: &Dom, doc: &bare_html::dom::Document, node: NodeId, text: &str) -> Option<bare_css::cascade::InputSheet> {
@@ -472,7 +494,14 @@ pub(crate) fn sheet_inputs(d: &Dom, doc: &bare_html::dom::Document, node: NodeId
     let s = cell.borrow();
     let sheet = s.sheets.get(s.by_node.get(&node)?)?;
     if sheet.source != text || sheet.text_key.as_ref()? != &text_key(doc, node) { return None; }
-    let blocks: Vec<_> = sheet.rules.iter().map(|r| s.rules[r].style.and_then(|o| d.style_object_inputs(doc, o))).collect();
+    let blocks: Vec<_> = s.lists[&sheet.list]
+        .items
+        .iter()
+        .map(|e| match e {
+            Entry::Obj(r) => s.rules[r].style.and_then(|o| d.style_object_inputs(doc, o)),
+            Entry::Chunk(..) => None,
+        })
+        .collect();
     blocks.iter().any(Option::is_some).then_some(blocks)
 }
 
@@ -506,30 +535,39 @@ fn source(d: &Dom, it: &mut Interp<'_>, o: ObjId) -> R<String> {
     Ok(text)
 }
 fn declaration(d: &Dom, it: &mut Interp<'_>, text: &str) -> R<ObjId> {
-    let (v, css) = (d.js_str(it, "span")?, d.js_str(it, text)?);
-    let doc = d.wrap(it, d.doc.borrow().root())?;
-    let el = crate::browser_dom::create_element(d, it, doc, &[v])?;
-    let key = d.key(it, "style")?;
-    let Value::Object(style) = it.get_value(el, key)? else { unreachable!() };
-    let k = d.key(it, "cssText")?;
-    it.put_value(Value::Object(style), k, css)?;
-    keep(d, style)?;
-    Ok(style)
+    let before = {
+        let doc = d.doc.borrow();
+        (doc.revision(), doc.text_revision())
+    };
+    let style = d.rule_declaration(it, text);
+    let doc = d.doc.borrow();
+    let own = d.cssom.own.get();
+    d.cssom.own.set((own.0 + doc.revision() - before.0, own.1 + doc.text_revision() - before.1));
+    drop(doc);
+    keep(d, style?)
 }
 fn new_rule(d: &Dom, it: &mut Interp<'_>, mut r: Rule, decl: Option<String>) -> R<ObjId> {
     let p = state(d).borrow().protos[r.kind as usize];
     let o = d.obj(it, p)?;
     keep(d, o)?;
-    r.style = match decl {
-        Some(t) => Some(declaration(d, it, &t)?),
-        None => None,
-    };
-    let style = r.style;
+    r.decl = decl;
     state(d).borrow_mut().rules.insert(o, r);
-    if let Some(style) = style {
-        wrap_declaration(d, it, o, style)?;
-    }
     Ok(o)
+}
+// The declaration object of a rule, made now when it does not exist yet. `None`: the rule has no declaration.
+fn style_of(d: &Dom, it: &mut Interp<'_>, o: ObjId) -> R<Option<ObjId>> {
+    let (style, decl) = {
+        let s = state(d).borrow();
+        let r = &s.rules[&o];
+        (r.style, r.decl.clone())
+    };
+    let Some(text) = decl else { return Ok(style) };
+    let style = declaration(d, it, &text)?;
+    let mut s = state(d).borrow_mut();
+    let r = s.rules.get_mut(&o).unwrap();
+    (r.style, r.decl) = (Some(style), None);
+    s.style_rules.insert(style, o);
+    Ok(Some(style))
 }
 fn declaration_text(ds: &[bare_css::parser::Declaration<'_>]) -> String {
     let mut decl = String::new();
@@ -558,68 +596,92 @@ fn block_body(chunk: &str) -> Option<&str> {
 }
 // Nested group rules go this deep. Deeper ones are plain text, as in the parser of `bare_css`.
 const MAX_DEPTH: usize = 32;
-fn parsed_rules(d: &Dom, it: &mut Interp<'_>, sheet: ObjId, parent: Option<ObjId>, text: &str, depth: usize) -> R<Vec<ObjId>> {
+// The rules of a text that have a chunk that parses to a rule, as spans of `base` (`text` is a part of it). Nothing is kept of the parse.
+fn chunk_entries(d: &Dom, it: &mut Interp<'_>, base: &str, text: &str) -> R<Vec<Entry>> {
     if text.len() > MAX_TEXT {
         return Err(d.lim("cssom-text"));
     }
     it.charge(text.len() as u64)?;
     let mut out = Vec::new();
     for chunk in chunks(text) {
-        let mut parsed = bare_css::parser::parse_stylesheet(chunk).into_iter();
-        let Some(r) = parsed.next() else { continue };
-        if out.len() >= MAX_OBJECTS {
+        if bare_css::parser::parse_stylesheet(chunk).is_empty() {
+            continue;
+        }
+        if out.len() >= MAX_RULES {
             return Err(d.lim("cssom-rules"));
         }
-        let base = Rule {
-            sheet,
-            kind: Kind::Other,
-            selector: None,
-            prelude: String::new(),
-            raw: chunk.to_owned(),
-            style: None,
-            list: None,
-            media: None,
-            parent,
-        };
-        match r {
-            bare_css::parser::Rule::Style(r) if parent.is_some_and(|p| state(d).borrow().rules[&p].kind == Kind::Keyframes) => {
-                let rule = Rule { kind: Kind::Keyframe, prelude: r.prelude.to_owned(), raw: String::new(), ..base };
-                out.push(new_rule(d, it, rule, Some(declaration_text(&r.declarations)))?);
-            }
-            bare_css::parser::Rule::Style(r) => {
-                let rule = Rule { kind: Kind::Style, selector: Some(r.prelude.to_owned()), raw: String::new(), ..base };
-                out.push(new_rule(d, it, rule, Some(declaration_text(&r.declarations)))?);
-            }
-            bare_css::parser::Rule::At(a) => {
-                let kind = match a.name.as_ref() {
-                    "media" => Kind::Media,
-                    "supports" => Kind::Supports,
-                    "import" => Kind::Import,
-                    "font-face" => Kind::FontFace,
-                    n if n.ends_with("keyframes") => Kind::Keyframes,
-                    _ => Kind::Other,
-                };
-                let nested = matches!(kind, Kind::Media | Kind::Supports | Kind::Keyframes);
-                let body = block_body(chunk).filter(|_| nested && depth < MAX_DEPTH);
-                let kind = if nested && body.is_none() { Kind::Other } else { kind };
-                let decl = match (&a.body, kind) {
-                    (bare_css::parser::AtBody::Declarations(ds), Kind::FontFace) => Some(declaration_text(ds)),
-                    _ => None,
-                };
-                let o = new_rule(d, it, Rule { kind, prelude: a.prelude.to_owned(), ..base }, decl)?;
-                if let Some(body) = body {
-                    let kids = parsed_rules(d, it, sheet, Some(o), body, depth + 1)?;
-                    let list = new_rule_list(d, it, o)?;
-                    state(d).borrow_mut().lists.get_mut(&list).unwrap().items = kids;
-                    state(d).borrow_mut().rules.get_mut(&o).unwrap().list = Some(list);
-                }
-                out.push(o);
-            }
+        let a = chunk.as_ptr() as usize - base.as_ptr() as usize;
+        out.push(Entry::Chunk(a as u32, (a + chunk.len()) as u32));
+    }
+    Ok(out)
+}
+// The rule objects of a text, made now (the text of one `insertRule`).
+fn parsed_rules(d: &Dom, it: &mut Interp<'_>, sheet: ObjId, parent: Option<ObjId>, text: &str, depth: usize) -> R<Vec<ObjId>> {
+    if text.len() > MAX_TEXT {
+        return Err(d.lim("cssom-text"));
+    }
+    let mut out = Vec::new();
+    for chunk in chunks(text) {
+        if let Some(o) = rule_from_chunk(d, it, sheet, parent, chunk, depth)? {
+            out.push(o);
         }
     }
     Ok(out)
 }
-fn new_rule_list(d: &Dom, it: &mut Interp<'_>, owner: ObjId) -> R<ObjId> {
+// The rule object of one chunk. `None`: the chunk is not a rule. The rules inside a grouping rule stay spans of its text.
+fn rule_from_chunk(d: &Dom, it: &mut Interp<'_>, sheet: ObjId, parent: Option<ObjId>, chunk: &str, depth: usize) -> R<Option<ObjId>> {
+    it.charge(chunk.len() as u64)?;
+    let mut parsed = bare_css::parser::parse_stylesheet(chunk).into_iter();
+    let Some(r) = parsed.next() else { return Ok(None) };
+    let base = Rule {
+        sheet,
+        kind: Kind::Other,
+        selector: None,
+        prelude: String::new(),
+        raw: chunk.to_owned(),
+        style: None,
+        decl: None,
+        list: None,
+        media: None,
+        parent,
+    };
+    Ok(Some(match r {
+        bare_css::parser::Rule::Style(r) if parent.is_some_and(|p| state(d).borrow().rules[&p].kind == Kind::Keyframes) => {
+            let rule = Rule { kind: Kind::Keyframe, prelude: r.prelude.to_owned(), raw: String::new(), ..base };
+            new_rule(d, it, rule, Some(declaration_text(&r.declarations)))?
+        }
+        bare_css::parser::Rule::Style(r) => {
+            let rule = Rule { kind: Kind::Style, selector: Some(r.prelude.to_owned()), raw: String::new(), ..base };
+            new_rule(d, it, rule, Some(declaration_text(&r.declarations)))?
+        }
+        bare_css::parser::Rule::At(a) => {
+            let kind = match a.name.as_ref() {
+                "media" => Kind::Media,
+                "supports" => Kind::Supports,
+                "import" => Kind::Import,
+                "font-face" => Kind::FontFace,
+                n if n.ends_with("keyframes") => Kind::Keyframes,
+                _ => Kind::Other,
+            };
+            let nested = matches!(kind, Kind::Media | Kind::Supports | Kind::Keyframes);
+            let body = block_body(chunk).filter(|_| nested && depth < MAX_DEPTH);
+            let kind = if nested && body.is_none() { Kind::Other } else { kind };
+            let decl = match (&a.body, kind) {
+                (bare_css::parser::AtBody::Declarations(ds), Kind::FontFace) => Some(declaration_text(ds)),
+                _ => None,
+            };
+            let o = new_rule(d, it, Rule { kind, prelude: a.prelude.to_owned(), ..base }, decl)?;
+            if let Some(body) = body {
+                let kids = chunk_entries(d, it, chunk, body)?;
+                let list = new_rule_list(d, it, o, depth + 1)?;
+                state(d).borrow_mut().lists.get_mut(&list).unwrap().items = kids;
+                state(d).borrow_mut().rules.get_mut(&o).unwrap().list = Some(list);
+            }
+            o
+        }
+    }))
+}
+fn new_rule_list(d: &Dom, it: &mut Interp<'_>, owner: ObjId, depth: usize) -> R<ObjId> {
     let p = state(d).borrow().rule_list_p;
     let o = it.heap.new_indexed(Some(p)).map_err(|e| it.heap_error(e))?;
     keep(d, o)?;
@@ -630,6 +692,7 @@ fn new_rule_list(d: &Dom, it: &mut Interp<'_>, owner: ObjId) -> R<ObjId> {
             rule: Some(owner),
             items: vec![],
             stamp: None,
+            depth,
         },
     );
     Ok(o)
@@ -637,15 +700,17 @@ fn new_rule_list(d: &Dom, it: &mut Interp<'_>, owner: ObjId) -> R<ObjId> {
 #[cold]
 fn refresh(d: &Dom, it: &mut Interp<'_>, o: ObjId) -> R<()> {
     if is_ctor(d, o) {
-        // The text is the source of truth. Parse it once after each `replaceSync`.
+        // The text is the source of truth. Find the rules once after each `replaceSync`.
         if !state(d).borrow().sheets[&o].stale {
             return Ok(());
         }
-        let text = state(d).borrow().sheets[&o].source.clone();
-        let rules = parsed_rules(d, it, o, None, &text, 0)?;
+        let rules = {
+            let s = state(d).borrow();
+            let text = &s.sheets[&o].source;
+            chunk_entries(d, it, text, text)?
+        };
         let mut st = state(d).borrow_mut();
         let sh = st.sheets.get_mut(&o).unwrap();
-        sh.rules = rules.clone();
         sh.stale = false;
         let list = sh.list;
         st.lists.get_mut(&list).unwrap().items = rules;
@@ -659,16 +724,19 @@ fn refresh(d: &Dom, it: &mut Interp<'_>, o: ObjId) -> R<()> {
         sh.source == text && sh.text_key.as_ref().is_none_or(|key| *key == text_key(&doc, sh.node))
     };
     if unchanged { return Ok(()); }
-    let rules = parsed_rules(d, it, o, None, &text, 0)?;
+    let rules = chunk_entries(d, it, &text, &text)?;
     let key = pending_key(d, &d.doc.borrow(), node(d, o), &rules);
     let mut st = state(d).borrow_mut();
     let sh = st.sheets.get_mut(&o).unwrap();
-    sh.rules = rules.clone();
     sh.source = text;
     sh.text_key = key;
     let list = sh.list;
     st.lists.get_mut(&list).unwrap().items = rules;
     Ok(())
+}
+// The items of the rule list of a sheet.
+fn items(s: &State, sheet: ObjId) -> &Vec<Entry> {
+    &s.lists[&s.sheets[&sheet].list].items
 }
 fn rules_get(d: &Dom, it: &mut Interp<'_>, t: Value, _: &[Value]) -> V {
     let o = sheet(d, it, t)?;
@@ -687,7 +755,7 @@ fn insert(d: &Dom, it: &mut Interp<'_>, t: Value, a: &[Value]) -> V {
     let text = d.string_arg(it, arg(a, 0))?;
     let i = index(it, a, 1)?;
     refresh(d, it, o)?;
-    if i > state(d).borrow().sheets[&o].rules.len() {
+    if i > items(&state(d).borrow(), o).len() {
         return Err(d.dom_err(it, "IndexSizeError", "Rule index is out of range"));
     }
     let parsed = bare_css::parser::parse_stylesheet(&text);
@@ -698,8 +766,8 @@ fn insert(d: &Dom, it: &mut Interp<'_>, t: Value, a: &[Value]) -> V {
         d.selectors(it, r.prelude)?;
     }
     let rules = parsed_rules(d, it, o, None, &text, 0)?;
-    let mut next = state(d).borrow().sheets[&o].rules.clone();
-    next.insert(i, rules[0]);
+    let mut next = items(&state(d).borrow(), o).clone();
+    next.insert(i, Entry::Obj(rules[0]));
     publish_rules(d, it, o, next)?;
     Ok(Value::Number(i as f64))
 }
@@ -710,15 +778,16 @@ fn delete(d: &Dom, it: &mut Interp<'_>, t: Value, a: &[Value]) -> V {
     }
     let i = index(it, a, 0)?;
     refresh(d, it, o)?;
-    if i >= state(d).borrow().sheets[&o].rules.len() {
+    if i >= items(&state(d).borrow(), o).len() {
         return Err(d.dom_err(it, "IndexSizeError", "Rule index is out of range"));
     }
-    let mut next = state(d).borrow().sheets[&o].rules.clone();
+    let mut next = items(&state(d).borrow(), o).clone();
     next.remove(i);
     publish_rules(d, it, o, next)?;
     Ok(Value::Undefined)
 }
 fn rule_string(d: &Dom, it: &mut Interp<'_>, o: ObjId) -> R<String> {
+    style_of(d, it, o)?;
     let r = state(d).borrow().rules[&o].clone();
     match (r.selector, r.style) {
         (Some(sel), Some(style)) => {
@@ -737,7 +806,10 @@ fn rule_string(d: &Dom, it: &mut Interp<'_>, o: ObjId) -> R<String> {
             let kids = state(d).borrow().lists[&r.list.unwrap()].items.clone();
             let mut parts = Vec::with_capacity(kids.len());
             for k in kids {
-                parts.push(rule_string(d, it, k)?);
+                parts.push(match k {
+                    Entry::Obj(k) => rule_string(d, it, k)?,
+                    Entry::Chunk(a, b) => r.raw[a as usize..b as usize].to_owned(),
+                });
             }
             let at = r.raw.split(|c: char| c.is_whitespace() || c == '{').next().unwrap_or("@media").to_ascii_lowercase();
             Ok(format!("{at} {} {{ {} }}", r.prelude, parts.join(" ")))
@@ -746,38 +818,55 @@ fn rule_string(d: &Dom, it: &mut Interp<'_>, o: ObjId) -> R<String> {
     }
 }
 fn publish(d: &Dom, it: &mut Interp<'_>, o: ObjId) -> R<()> {
-    let rules = state(d).borrow().sheets[&o].rules.clone();
+    let rules = items(&state(d).borrow(), o).clone();
     publish_rules(d, it, o, rules)
 }
-fn publish_rules(d: &Dom, it: &mut Interp<'_>, o: ObjId, rules: Vec<ObjId>) -> R<()> {
-    let mut sh = state(d).borrow().sheets[&o].clone();
-    sh.rules = rules;
+// The sheet text is the text of its rules in order. A rule that no script has read keeps its own text, so it needs no object.
+fn publish_rules(d: &Dom, it: &mut Interp<'_>, o: ObjId, rules: Vec<Entry>) -> R<()> {
+    let (ctor, node, list) = {
+        let s = state(d).borrow();
+        let sh = &s.sheets[&o];
+        (sh.ctor, sh.node, sh.list)
+    };
     let mut text = String::new();
-    for &r in &sh.rules {
-        let t = rule_string(d, it, r)?;
-        if text.len() + t.len() + 1 > MAX_TEXT {
-            return Err(d.lim("cssom-text"));
+    let mut next = Vec::with_capacity(rules.len());
+    for e in rules {
+        let start = text.len();
+        match e {
+            Entry::Obj(r) => {
+                let t = rule_string(d, it, r)?;
+                if text.len() + t.len() + 1 > MAX_TEXT {
+                    return Err(d.lim("cssom-text"));
+                }
+                text.push_str(&t);
+                next.push(e);
+            }
+            Entry::Chunk(a, b) => {
+                if text.len() + (b - a) as usize + 1 > MAX_TEXT {
+                    return Err(d.lim("cssom-text"));
+                }
+                text.push_str(&state(d).borrow().sheets[&o].source[a as usize..b as usize]);
+                next.push(Entry::Chunk(start as u32, text.len() as u32));
+            }
         }
-        text.push_str(&t);
         text.push('\n');
     }
-    let tag = if sh.ctor { String::new() } else { name_of(&d.doc.borrow(), sh.node) };
-    if sh.ctor {
+    let tag = if ctor { String::new() } else { name_of(&d.doc.borrow(), node) };
+    if ctor {
         d.computed.sheet_gen.set(d.computed.sheet_gen.get() + 1);
     } else if tag == "style" {
-        let v = d.wrap(it, sh.node)?;
+        let v = d.wrap(it, node)?;
         let s = d.js_str(it, &text)?;
         set_text_content(d, it, v, &[s])?;
     } else {
         return Err(Dom::gate("editing an external stylesheet through CSSOM"));
     }
-    let key = if sh.ctor { None } else { pending_key(d, &d.doc.borrow(), sh.node, &sh.rules) };
+    let key = if ctor { None } else { pending_key(d, &d.doc.borrow(), node, &next) };
     let mut s = state(d).borrow_mut();
     let sheet = s.sheets.get_mut(&o).unwrap();
     sheet.source = text;
     sheet.text_key = key;
-    sheet.rules = sh.rules.clone();
-    s.lists.get_mut(&sh.list).unwrap().items = sh.rules;
+    s.lists.get_mut(&list).unwrap().items = next;
     Ok(())
 }
 fn selector_get(d: &Dom, it: &mut Interp<'_>, t: Value, _: &[Value]) -> V {
@@ -809,7 +898,7 @@ fn rule_text(d: &Dom, it: &mut Interp<'_>, t: Value, _: &[Value]) -> V {
 }
 fn style_get(d: &Dom, it: &mut Interp<'_>, t: Value, _: &[Value]) -> V {
     let o = rule(d, it, t)?;
-    Ok(state(d).borrow().rules[&o].style.map(Value::Object).unwrap_or(Value::Undefined))
+    Ok(style_of(d, it, o)?.map(Value::Object).unwrap_or(Value::Undefined))
 }
 fn type_get(d: &Dom, it: &mut Interp<'_>, t: Value, _: &[Value]) -> V {
     let o = rule(d, it, t)?;
@@ -837,12 +926,12 @@ fn attached(d: &Dom, mut o: ObjId) -> Option<ObjId> {
         let r = &s.rules[&o];
         match r.parent {
             Some(p) => {
-                if !s.lists[&s.rules[&p].list?].items.contains(&o) {
+                if !s.lists[&s.rules[&p].list?].items.contains(&Entry::Obj(o)) {
                     return None;
                 }
                 o = p;
             }
-            None => return s.sheets[&r.sheet].rules.contains(&o).then_some(r.sheet),
+            None => return items(&s, r.sheet).contains(&Entry::Obj(o)).then_some(r.sheet),
         }
     }
 }
@@ -850,7 +939,7 @@ fn parent_rule_get(d: &Dom, it: &mut Interp<'_>, t: Value, _: &[Value]) -> V {
     let o = rule(d, it, t)?;
     let s = state(d).borrow();
     Ok(match s.rules[&o].parent {
-        Some(p) if s.lists[&s.rules[&p].list.unwrap()].items.contains(&o) => Value::Object(p),
+        Some(p) if s.lists[&s.rules[&p].list.unwrap()].items.contains(&Entry::Obj(o)) => Value::Object(p),
         _ => Value::Null,
     })
 }
@@ -895,7 +984,7 @@ fn group_insert(d: &Dom, it: &mut Interp<'_>, t: Value, a: &[Value]) -> V {
     }
     let sheet = state(d).borrow().rules[&o].sheet;
     let rules = parsed_rules(d, it, sheet, Some(o), &text, 1)?;
-    state(d).borrow_mut().lists.get_mut(&list).unwrap().items.insert(i, rules[0]);
+    state(d).borrow_mut().lists.get_mut(&list).unwrap().items.insert(i, Entry::Obj(rules[0]));
     republish(d, it, o)?;
     Ok(Value::Number(i as f64))
 }
@@ -979,64 +1068,17 @@ fn key_text_set(d: &Dom, it: &mut Interp<'_>, t: Value, a: &[Value]) -> V {
     republish(d, it, o)?;
     Ok(Value::Undefined)
 }
-fn wrap_declaration(d: &Dom, it: &mut Interp<'_>, rule: ObjId, style: ObjId) -> R<()> {
-    use bare_js::heap::{Property, PropertyDescriptor};
-    let p = *d.style.proto.get().expect("style installed");
-    let keys = it.heap.own_keys(p).map_err(|e| it.heap_error(e))?;
-    state(d).borrow_mut().style_rules.insert(style, rule);
-    let (set, remove) = (d.key(it, "setProperty")?, d.key(it, "removeProperty")?);
-    for key in keys {
-        let Some(prop) = it.heap.get_own_property(p, key).map_err(|e| it.heap_error(e))? else {
-            continue;
-        };
-        let original = match prop {
-            Property::Accessor { set: Some(f), .. } => f,
-            Property::Data { value: Value::Object(f), .. } if key == set || key == remove => f,
-            _ => continue,
-        };
-        let cached = state(d).borrow().wrapped.get(&original).copied();
-        let f = if let Some(f) = cached {
-            f
-        } else {
-            let id = d.handlers.borrow().len() as u32;
-            let f = d.add_fn(it, declaration_write, "CSSOM declaration update", 0, false)?;
-            state(d).borrow_mut().wrappers.insert(id, original);
-            state(d).borrow_mut().wrapped.insert(original, f);
-            keep(d, f)?;
-            f
-        };
-        let desc = match prop {
-            Property::Accessor { get, .. } => PropertyDescriptor {
-                get: Some(get),
-                set: Some(Some(f)),
-                enumerable: Some(true),
-                configurable: Some(true),
-                ..Default::default()
-            },
-            _ => PropertyDescriptor {
-                value: Some(Value::Object(f)),
-                writable: Some(true),
-                enumerable: Some(true),
-                configurable: Some(true),
-                ..Default::default()
-            },
-        };
-        it.heap.define_own_property(style, key, &desc).map_err(|e| it.heap_error(e))?;
+// A write through a rule declaration (`browser_style`: a named setter, `setProperty`, `removeProperty`, `cssText`) reaches the sheet text.
+pub(crate) fn declaration_written(d: &Dom, it: &mut Interp<'_>, style: Value) -> R<()> {
+    let (Some(cell), Value::Object(o)) = (d.cssom.state.get(), style) else { return Ok(()) };
+    let sheet = {
+        let s = cell.borrow();
+        s.style_rules.get(&o).map(|r| s.rules[r].sheet)
+    };
+    match sheet {
+        Some(sh) => publish(d, it, sh),
+        None => Ok(()),
     }
-    Ok(())
-}
-fn declaration_write(d: &Dom, it: &mut Interp<'_>, t: Value, a: &[Value]) -> V {
-    let id = d.style.cur.get();
-    let original = state(d).borrow().wrappers[&id];
-    let rule = match t {
-        Value::Object(o) => state(d).borrow().style_rules.get(&o).copied(),
-        _ => None,
-    }
-    .ok_or_else(|| it.type_error("Illegal invocation"))?;
-    let v = it.call_scoped(Value::Object(original), t, a, &[])?;
-    let sh = state(d).borrow().rules[&rule].sheet;
-    publish(d, it, sh)?;
-    Ok(v)
 }
 // ---------------------------------------------------------------------------------------- constructable style sheets
 // `new CSSStyleSheet()`, `replaceSync`, `replace` and `adoptedStyleSheets` of the document and of a shadow root. The sheet keeps its text.
@@ -1051,7 +1093,7 @@ fn sheet_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
     keep(d, o)?;
     let list = new_list(d, it, Some(o))?;
     let node = d.doc.borrow().root();
-    state(d).borrow_mut().sheets.insert(o, Sheet { node, list, rules: vec![], source: String::new(), text_key: None, ctor: true, stale: false });
+    state(d).borrow_mut().sheets.insert(o, Sheet { node, list, source: String::new(), text_key: None, ctor: true, stale: false });
     Ok(Value::Object(o))
 }
 fn constructed(d: &Dom, it: &mut Interp<'_>, t: Value, what: &str) -> R<ObjId> {
@@ -1069,7 +1111,6 @@ fn set_text(d: &Dom, it: &mut Interp<'_>, o: ObjId, text: String) -> R<()> {
     let mut st = state(d).borrow_mut();
     let sh = st.sheets.get_mut(&o).unwrap();
     sh.source = text;
-    sh.rules.clear();
     sh.stale = true;
     let list = sh.list;
     st.lists.get_mut(&list).unwrap().items.clear();
@@ -1166,53 +1207,76 @@ pub(crate) fn adopted(d: &Dom, out: &mut Vec<(NodeId, String)>) {
 }
 fn stamp(d: &Dom) -> (u64, u64, u64) {
     let doc = d.doc.borrow();
-    (doc.revision(), doc.text_revision(), d.computed.sheet_gen.get())
+    let own = d.cssom.own.get();
+    (doc.revision() - own.0, doc.text_revision() - own.1, d.computed.sheet_gen.get())
 }
 #[cold]
-pub(crate) fn fill(d: &Dom, it: &mut Interp<'_>, owner: ObjId) -> R<bool> {
+pub(crate) fn fill(d: &Dom, it: &mut Interp<'_>, owner: ObjId, index: u32) -> R<bool> {
     let Some(cell) = d.cssom.state.get() else { return Ok(false) };
-    let Some(list) = cell.borrow().lists.get(&owner).cloned() else {
+    let Some((sheet, rule, old)) = cell.borrow().lists.get(&owner).map(|l| (l.sheet, l.rule, l.stamp)) else {
         return Ok(false);
     };
-    if let Some(sh) = list.sheet {
-        refresh(d, it, sh)?;
-    } else if list.rule.is_none() {
-        let root = d.doc.borrow().root();
-        let (mut cur, mut depth) = (root, 0);
-        let mut nodes = Vec::new();
-        loop {
-            let next = {
+    if old != Some(stamp(d)) {
+        if let Some(sh) = sheet {
+            refresh(d, it, sh)?;
+        } else if rule.is_none() {
+            let root = d.doc.borrow().root();
+            let (mut cur, mut depth) = (root, 0);
+            let mut nodes = Vec::new();
+            loop {
+                let next = {
+                    let doc = d.doc.borrow();
+                    next_in(&doc, root, cur, depth)
+                };
+                let Some((n, dep)) = next else { break };
+                cur = n;
+                depth = dep;
+                it.charge(1)?;
                 let doc = d.doc.borrow();
-                next_in(&doc, root, cur, depth)
-            };
-            let Some((n, dep)) = next else { break };
-            cur = n;
-            depth = dep;
-            it.charge(1)?;
-            let doc = d.doc.borrow();
-            let tag = name_of(&doc, n);
-            if tag == "style"
-                || tag == "link"
-                    && attr(&doc, n, "rel").is_some_and(|r| r.split_ascii_whitespace().any(|t| t.eq_ignore_ascii_case("stylesheet")))
-                    && attr(&doc, n, "href").is_some_and(|h| d.computed.ext.borrow().contains_key(h))
-            {
-                nodes.push(n);
+                let tag = name_of(&doc, n);
+                if tag == "style"
+                    || tag == "link"
+                        && attr(&doc, n, "rel").is_some_and(|r| r.split_ascii_whitespace().any(|t| t.eq_ignore_ascii_case("stylesheet")))
+                        && attr(&doc, n, "href").is_some_and(|h| d.computed.ext.borrow().contains_key(h))
+                {
+                    nodes.push(n);
+                }
             }
+            let mut items = Vec::new();
+            for n in nodes {
+                items.push(Entry::Obj(sheet_of(d, it, n)?));
+            }
+            state(d).borrow_mut().lists.get_mut(&owner).unwrap().items = items;
         }
-        let mut items = Vec::new();
-        for n in nodes {
-            items.push(sheet_of(d, it, n)?);
-        }
-        state(d).borrow_mut().lists.get_mut(&owner).unwrap().items = items;
+        state(d).borrow_mut().lists.get_mut(&owner).unwrap().stamp = Some(stamp(d));
     }
-    state(d).borrow_mut().lists.get_mut(&owner).unwrap().stamp = Some(stamp(d));
+    if index != LENGTH_ONLY {
+        make_rule(d, it, owner, index as usize)?;
+    }
     Ok(true)
+}
+// The object of item `i` of a rule list, when it is a span of text still.
+fn make_rule(d: &Dom, it: &mut Interp<'_>, list: ObjId, i: usize) -> R<()> {
+    let (sheet, parent, depth, chunk) = {
+        let s = state(d).borrow();
+        let l = &s.lists[&list];
+        let Some(&Entry::Chunk(a, b)) = l.items.get(i) else { return Ok(()) };
+        let (sheet, parent, text) = match (l.sheet, l.rule) {
+            (Some(sh), _) => (sh, None, &s.sheets[&sh].source),
+            (None, Some(r)) => (s.rules[&r].sheet, Some(r), &s.rules[&r].raw),
+            (None, None) => return Ok(()),
+        };
+        (sheet, parent, l.depth, text[a as usize..b as usize].to_owned())
+    };
+    let o = rule_from_chunk(d, it, sheet, parent, &chunk, depth)?.ok_or_else(|| it.type_error("The text of a CSS rule changed"))?;
+    state(d).borrow_mut().lists.get_mut(&list).unwrap().items[i] = Entry::Obj(o);
+    Ok(())
 }
 pub(crate) fn len(d: &Dom, o: ObjId) -> Option<Result<usize, HeapError>> {
     let s = d.cssom.state.get()?.borrow();
     let l = s.lists.get(&o)?;
     Some(if l.stamp != Some(stamp(d)) {
-        Err(HeapError::NeedsHost { owner: o, index: 0 })
+        Err(HeapError::NeedsHost { owner: o, index: LENGTH_ONLY })
     } else {
         Ok(l.items.len())
     })
@@ -1221,16 +1285,20 @@ pub(crate) fn item(d: &Dom, o: ObjId, i: usize) -> Option<Result<Slot, HeapError
     let s = d.cssom.state.get()?.borrow();
     let l = s.lists.get(&o)?;
     Some(if l.stamp != Some(stamp(d)) {
-        Err(HeapError::NeedsHost { owner: o, index: i as u32 })
+        Err(HeapError::NeedsHost { owner: o, index: i.min(u32::MAX as usize - 1) as u32 })
     } else {
-        Ok(l.items.get(i).copied().map(Slot::Ready).unwrap_or(Slot::Absent))
+        Ok(match l.items.get(i) {
+            Some(&Entry::Obj(r)) => Slot::Ready(r),
+            Some(Entry::Chunk(..)) => Slot::Missing,
+            None => Slot::Absent,
+        })
     })
 }
 fn list_length(d: &Dom, it: &mut Interp<'_>, t: Value, _: &[Value]) -> V {
     let Value::Object(o) = t else {
         return Err(it.type_error("Illegal invocation"));
     };
-    if !fill(d, it, o)? {
+    if !fill(d, it, o, LENGTH_ONLY)? {
         return Err(it.type_error("Illegal invocation"));
     }
     Ok(Value::Number(state(d).borrow().lists[&o].items.len() as f64))
@@ -1243,10 +1311,13 @@ fn list_item(d: &Dom, it: &mut Interp<'_>, t: Value, a: &[Value]) -> V {
         return Err(it.type_error("item requires an index"));
     }
     let i = index(it, a, 0)?;
-    if !fill(d, it, o)? {
+    if !fill(d, it, o, i.min(u32::MAX as usize - 1) as u32)? {
         return Err(it.type_error("Illegal invocation"));
     }
-    Ok(state(d).borrow().lists[&o].items.get(i).copied().map(Value::Object).unwrap_or(Value::Null))
+    Ok(match state(d).borrow().lists[&o].items.get(i) {
+        Some(&Entry::Obj(r)) => Value::Object(r),
+        _ => Value::Null,
+    })
 }
 
 fn attr<'a>(doc: &'a Document, n: NodeId, key: &str) -> Option<&'a str> {
