@@ -314,7 +314,64 @@ pub enum Mark {
 }
 
 /// A decoded picture: its size and its pixels, `0xAARRGGBB` not premultiplied. Shared, so that one download serves many elements.
-pub type Bitmap = (u32, u32, std::sync::Arc<[u32]>);
+pub type Bitmap = (u32, u32, Pixels);
+
+/// The pixels of a picture. A vector makes them at once. `lazy` makes them at the first read (`Deref`, `shared`): an SVG file gives its size
+/// without a raster, and a page that nobody paints or reads never pays for one. Clones share the pixels.
+#[derive(Clone)]
+pub struct Pixels(std::sync::Arc<LazyPixels>);
+
+struct LazyPixels {
+    px: std::sync::OnceLock<std::sync::Arc<[u32]>>,
+    make: Option<Box<dyn Fn() -> Vec<u32> + Send + Sync>>,
+}
+
+impl Pixels {
+    /// Pixels that `make` gives, called once, at the first read.
+    pub fn lazy(make: impl Fn() -> Vec<u32> + Send + Sync + 'static) -> Pixels {
+        Pixels(std::sync::Arc::new(LazyPixels { px: std::sync::OnceLock::new(), make: Some(Box::new(make)) }))
+    }
+
+    /// The pixels as a shared slice (made now if they were not).
+    pub fn shared(&self) -> std::sync::Arc<[u32]> {
+        self.0.px.get_or_init(|| self.0.make.as_ref().map_or_else(Default::default, |m| m().into())).clone()
+    }
+
+    /// Were the pixels made already?
+    pub fn is_ready(&self) -> bool {
+        self.0.px.get().is_some()
+    }
+
+    /// The identity of the pixels: equal for clones, and not for another picture.
+    pub fn addr(&self) -> usize {
+        std::sync::Arc::as_ptr(&self.0) as usize
+    }
+}
+
+impl From<std::sync::Arc<[u32]>> for Pixels {
+    fn from(px: std::sync::Arc<[u32]>) -> Pixels {
+        Pixels(std::sync::Arc::new(LazyPixels { px: std::sync::OnceLock::from(px), make: None }))
+    }
+}
+
+impl From<Vec<u32>> for Pixels {
+    fn from(v: Vec<u32>) -> Pixels {
+        std::sync::Arc::<[u32]>::from(v).into()
+    }
+}
+
+impl std::ops::Deref for Pixels {
+    type Target = [u32];
+    fn deref(&self) -> &[u32] {
+        self.0.px.get_or_init(|| self.0.make.as_ref().map_or_else(Default::default, |m| m().into()))
+    }
+}
+
+impl std::fmt::Debug for Pixels {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Pixels({})", self.0.px.get().map_or(0, |p| p.len()))
+    }
+}
 
 /// The readers of the log of `Document::track_damage`: the window frame, and the styles of `getComputedStyle` and the geometry reads.
 pub const DAMAGE_FRAME: usize = 0;
@@ -2417,4 +2474,25 @@ fn pcen(c: char) -> bool {
 pub fn valid_custom_name(name: &str) -> bool {
     const RESERVED: [&str; 8] = ["annotation-xml", "color-profile", "font-face", "font-face-src", "font-face-uri", "font-face-format", "font-face-name", "missing-glyph"];
     name.starts_with(|c: char| c.is_ascii_lowercase()) && name.contains('-') && name.chars().all(pcen) && !RESERVED.contains(&name)
+}
+
+#[cfg(test)]
+mod pixels_tests {
+    use super::Pixels;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn lazy_pixels_are_made_once_at_the_first_read() {
+        static MADE: AtomicUsize = AtomicUsize::new(0);
+        let px = Pixels::lazy(|| {
+            MADE.fetch_add(1, Ordering::Relaxed);
+            vec![1, 2, 3]
+        });
+        let clone = px.clone();
+        assert!(!px.is_ready() && MADE.load(Ordering::Relaxed) == 0, "nothing is made before a read");
+        assert_eq!((&*px, clone.addr() == px.addr(), clone.is_ready()), (&[1, 2, 3][..], true, true));
+        assert_eq!(clone.shared()[..], [1, 2, 3]);
+        assert_eq!(MADE.load(Ordering::Relaxed), 1);
+        assert!(Pixels::from(vec![7]).is_ready());
+    }
 }

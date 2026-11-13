@@ -339,7 +339,7 @@ impl<'a> Canvas<'a> {
     /// Draw the picture scaled to fill `r`, inside `clip`: the nearest pixel of the picture for each pixel of the canvas. Not inline: the loop that
     /// draws a display list is hot, and a page with no picture never gets here.
     #[inline(never)]
-    pub fn draw_image(&mut self, r: IRect, clip: IRect, (sw, sh, px): &(u32, u32, std::sync::Arc<[u32]>)) {
+    pub fn draw_image(&mut self, r: IRect, clip: IRect, (sw, sh, px): &bare_html::dom::Bitmap) {
         let vis = r.intersect(clip).intersect(self.bounds());
         let (dw, dh) = ((r.x1 - r.x0) as u64, (r.y1 - r.y0) as u64);
         if vis.is_empty() || dw == 0 || dh == 0 || px.len() != *sw as usize * *sh as usize {

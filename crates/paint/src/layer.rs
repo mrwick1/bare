@@ -39,7 +39,7 @@ pub struct Layer {
 /// The pictures that were scaled, by (the pixels of the picture, width, height).
 #[derive(Default)]
 pub struct Scaled {
-    map: HashMap<(usize, u32, u32), (Arc<[u32]>, Arc<[u32]>)>,
+    map: HashMap<(usize, u32, u32), (bare_html::dom::Pixels, Arc<[u32]>)>,
     bytes: usize,
     /// How many pictures were scaled (not found in `map`): a test reads it.
     pub made: usize,
@@ -49,9 +49,9 @@ impl Scaled {
     /// The pixels of `bitmap` at `w` by `h` (`0xAARRGGBB`, not premultiplied). The pictures of the same size are not copied.
     pub fn get(&mut self, bitmap: &Bitmap, w: u32, h: u32) -> Arc<[u32]> {
         if (w, h) == (bitmap.0, bitmap.1) {
-            return bitmap.2.clone();
+            return bitmap.2.shared();
         }
-        let key = (Arc::as_ptr(&bitmap.2) as *const u32 as usize, w, h);
+        let key = (bitmap.2.addr(), w, h);
         if let Some((_, px)) = self.map.get(&key) {
             return px.clone();
         }
@@ -227,7 +227,7 @@ mod tests {
         let again = cache.get(&b, 4, 1);
         assert_eq!((cache.made, Arc::ptr_eq(&first, &again)), (1, true));
         // The natural size is the picture itself.
-        assert!(Arc::ptr_eq(&cache.get(&b, 2, 1), &b.2));
+        assert!(Arc::ptr_eq(&cache.get(&b, 2, 1), &b.2.shared()));
         assert_eq!(cache.made, 1);
     }
 
