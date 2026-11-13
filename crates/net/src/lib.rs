@@ -12,3 +12,4 @@ pub mod parallel;
 pub mod replay;
 pub mod tcp;
 pub mod trace;
+pub mod vclock;

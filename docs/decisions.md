@@ -2001,3 +2001,11 @@ A test is `own` (it logs in itself) when a step says `sign out`, `password` or `
 - Not built: A (styles-only frame), B (mask cascade), C (closure layout). B and C need the same style-only share. It is 2.5%.
 - Kept: the counters (`crates/bare/src/force.rs`, off unless `BARE_FORCE_STATS` is set; the suite V2 costs the same with and without them) and `tools/drive/force_count.py`. Run the count again after the rule-set cost falls: the skipped layout is a fixed 420 M on the suite, so its share grows when the rest shrinks.
 - Found, not changed: the rule-set build is 30.9% of the suite and 7.8 to 8.3% of the corpus journeys. It is the part of criterion 7 that is still open.
+## Replay mode has a virtual page clock with a due time for each reply (2026-11-14)
+
+- Chosen: a process clock that only the page scheduler, the driver and the reply tasks move (`crates/net/src/vclock.rs`, `docs/design-virtual-clock.md`). On with `BARE_CLOCK=virtual` and a tape that reads. Off for everything else.
+- Other choices: wait for all replies before each step (leaves the timers on real time); Chrome's virtual time budget (waits for pending fetches in real time, so a reply still races a key press).
+- A reply is due `REPLY_MS` (5 ms) after it starts, and the page sees it only then. Real time of the worker does not matter. A move of the clock first waits in real time for the replies that are due.
+- Cost of this choice: the clock picks one of the modes that the real clock showed. `rust-book-search` is always 16.5 G (the real clock gave 3.8 G to 19.7 G). Total of the corpus is 45% higher than on the real clock for the same binary. Only a comparison on the same clock and corpus holds.
+- The corpus for the virtual clock is a separate one (`corpus/virtual`), filled under that clock. The real-clock recording lacks replies that the virtual clock asks for (`react-docs`: 14).
+- Limits not removed: the time limits of a step, a script and a load still run on the real clock. They stop a hang. They do not make a result.

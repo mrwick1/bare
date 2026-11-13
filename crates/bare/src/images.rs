@@ -252,7 +252,7 @@ impl Page {
             self.touched();
         }
         let since = self.images.scanned.unwrap_or(self.started);
-        if since.elapsed() >= CAPTURE_WAIT {
+        if bare_net::vclock::since(since) >= CAPTURE_WAIT {
             return false;
         }
         // Before the first look, wait only if the tree has an `<img>` now: a page with none needs no wait for `interactive`.
@@ -289,7 +289,7 @@ impl Page {
         let first = self.images.scanned.is_none();
         // The first look at the loaded document: the pictures in tree order, so that the first ones of the page download first.
         if self.images.scanned.is_none() || (level == 2 && !self.images.rescanned) {
-            self.images.scanned.get_or_insert_with(std::time::Instant::now);
+            self.images.scanned.get_or_insert_with(bare_net::vclock::instant);
             self.images.rescanned = level == 2;
             let Some(b) = self.source.browser() else { return (false, false) };
             let doc = b.document();

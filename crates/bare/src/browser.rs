@@ -512,6 +512,8 @@ pub struct Dom {
     /// Prototypes and interface objects: permanent roots.
     pub(crate) fixed: RefCell<Vec<ObjId>>,
     pub(crate) start: Instant,
+    /// The time on the virtual clock (`bare_net::vclock`) when this document began: its time origin. 0 when that clock is off.
+    pub(crate) vorigin: f64,
     pub(crate) sched: RefCell<crate::browser_scheduler::Sched>,
     pub(crate) fetch: crate::browser_fetch::Fetch,
     /// Script-made `ReadableStream`s (`browser_streams.rs`).
@@ -1639,6 +1641,7 @@ impl Browser {
             handlers: RefCell::default(),
             fixed: RefCell::default(),
             start: Instant::now(),
+            vorigin: if bare_net::vclock::on() { bare_net::vclock::now() } else { 0.0 },
             sched: RefCell::default(),
             fetch: Default::default(),
             xhr: Default::default(),

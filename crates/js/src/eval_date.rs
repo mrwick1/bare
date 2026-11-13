@@ -115,6 +115,15 @@ pub enum WallClock {
     System,
     /// A fixed value that only `Interp::set_wall_clock` changes (a whole number of milliseconds within +-8.64e15).
     Virtual(f64),
+    /// The function that the host set with `set_host_wall_clock` (a benchmark with a virtual clock). `System` if it set none.
+    Host,
+}
+
+static HOST_NOW: std::sync::OnceLock<fn() -> f64> = std::sync::OnceLock::new();
+
+/// Give the clock of `WallClock::Host`: a function that returns milliseconds since 1970 as a whole number. One for the process; the first call wins.
+pub fn set_host_wall_clock(f: fn() -> f64) {
+    let _ = HOST_NOW.set(f);
 }
 
 struct DateState {
@@ -151,7 +160,8 @@ impl<'p> Interp<'p> {
     pub fn wall_now_ms(&self) -> f64 {
         match self.date.clock {
             WallClock::Virtual(t) => t,
-            WallClock::System => match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+            WallClock::Host if let Some(f) = HOST_NOW.get() => f(),
+            WallClock::System | WallClock::Host => match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
                 Ok(d) => d.as_millis() as f64,
                 Err(e) => -(e.duration().as_millis() as f64),
             },

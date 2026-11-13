@@ -45,7 +45,7 @@ impl Scan {
                 _ => {}
             }
             n += 1;
-            if n.is_multiple_of(64) && tokens.between() && Instant::now() >= end {
+            if n.is_multiple_of(64) && tokens.between() && bare_net::vclock::instant() >= end {
                 self.mark = tokens.mark();
                 return;
             }
