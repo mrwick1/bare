@@ -57,9 +57,9 @@
 //!   The element is marked started, so removing and inserting it again runs nothing. `src`, `type` and the inline text are
 //!   read at that moment. An empty `src` or one that does not resolve to http(s) queues an `error` event.
 //! - External dynamic scripts are tasks, in the order of insertion (all are `async`; the "force async" flag is not modelled).
-//!   Inline dynamic scripts cannot run inside `appendChild` (the engine does not nest scripts): they run right after the
-//!   current script (before its microtask checkpoint) or, from a timer, `fetch` or event task, after the pump step (whose own
-//!   checkpoint already ran). This is a deviation: code after `appendChild` runs first.
+//!   Inline dynamic scripts cannot run inside `appendChild` (the engine does not nest scripts). They run before the next
+//!   microtask job (`Host::between_jobs`), so a promise continuation of the inserting code sees what they define. Code after
+//!   `appendChild` in the same job still runs first. A script that throws is reported and the run goes on.
 //! - The URL base is the document base (`<base href>` or the page URL). A pending script element is a GC root until it has run.
 //!
 //! Budgets (`PageLimits`): tasks, rounds, wall time, fetches and bytes (`resources::Limits`), pending dynamic scripts and their
@@ -425,6 +425,35 @@ impl Dom {
             Some(_) => Err("blob script over the pending byte cap".into()),
             None => Err("blob URL not found".into()),
         }
+    }
+
+    /// Between two microtask jobs: the queued inline classic scripts run now, so that the next job sees what they define (the HTML
+    /// "execute the script element" step of an inserted inline script, at the first point where the engine can nest a script; Ladybird
+    /// `HTMLScriptElement::prepare_script` runs it inside the insertion). A throw is reported and ends only that script. A module
+    /// script, or a pending navigation, stops the run: the driver handles them. The driver counts none of these runs.
+    pub(crate) fn run_inline_scripts(&self, it: &mut Interp<'_>) -> R<()> {
+        let s = &self.scripts;
+        while self.nav.s.borrow().requests.is_empty() {
+            let next = {
+                let mut q = s.inline.borrow_mut();
+                match q.front() {
+                    Some((n, _)) if !s.modules.borrow().nodes.contains(n) => q.pop_front(),
+                    _ => None,
+                }
+            };
+            let Some((node, text)) = next else { break };
+            s.pending_bytes.set(s.pending_bytes.get().saturating_sub(text.len()));
+            it.host_scope(|it| crate::browser_frames::activate(self, it))?;
+            let was = s.current.replace(Some(node));
+            let r = it.run_script(&text);
+            s.current.set(was);
+            match r {
+                Ok(_) => {}
+                Err(Error::Throw(v)) => self.report(it, v, "error", EvTarget::Window),
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
     }
 
     /// The "prepare the script element" steps for a classic script that is in the document.

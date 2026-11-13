@@ -1,6 +1,6 @@
-//! `classList`, `relList` and `DOMTokenList` over native attributes (DOM Standard, "DOMTokenList").
+//! `classList`, `relList`, `sandbox` and `DOMTokenList` over native attributes (DOM Standard, "DOMTokenList").
 //!
-//! - The list stores its element and backing attribute (`class` or `rel`). Every call reads that attribute, splits it on ASCII
+//! - The list stores its element and backing attribute (`class`, `rel` or `sandbox`). Every call reads that attribute, splits it on ASCII
 //!   white space into an ordered set (first occurrence wins) and, for a change, writes the serialized set back with the
 //!   normal attribute path (`attr_set`: caps, charge, native cache invalidation). So `setAttribute("class", ...)`,
 //!   `className` and the list always agree, and the native selector matcher sees every change.
@@ -163,6 +163,25 @@ pub(crate) fn set_rel_list<const KIND: usize>(d: &Dom, it: &mut Interp<'_>, this
     let el = rel_element::<KIND>(d, it, this)?;
     let v = d.string_arg(it, arg(a, 0))?;
     attr_set(d, it, el, "rel", &v)?;
+    Ok(Value::Undefined)
+}
+
+pub(crate) fn sandbox_list(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    sandbox_element(d, it, this)?;
+    token_list(d, it, this, "sandbox")
+}
+
+fn sandbox_element(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<NodeId> {
+    let el = element(d, it, this)?;
+    if d.doc.borrow().is_html(el, "iframe") {
+        Ok(el)
+    } else { Err(it.type_error("Illegal invocation")) }
+}
+
+pub(crate) fn set_sandbox_list(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    let el = sandbox_element(d, it, this)?;
+    let v = d.string_arg(it, arg(a, 0))?;
+    attr_set(d, it, el, "sandbox", &v)?;
     Ok(Value::Undefined)
 }
 
@@ -373,6 +392,15 @@ fn supports(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
         // Report only link processing implemented by this browser. Navigation and
         // the other resource-hint lifecycles are not implemented.
         let supported = d.doc.borrow().is_html(el.0, "link") && matches!(token.as_str(), "preload" | "stylesheet");
+        return Ok(Value::Bool(supported));
+    }
+    if el.1 == "sandbox" {
+        let token = token.to_ascii_lowercase();
+        let supported = [
+            "allow-downloads", "allow-forms", "allow-modals", "allow-orientation-lock", "allow-pointer-lock", "allow-popups",
+            "allow-popups-to-escape-sandbox", "allow-presentation", "allow-same-origin", "allow-scripts", "allow-top-navigation",
+            "allow-top-navigation-by-user-activation", "allow-top-navigation-to-custom-protocols",
+        ].contains(&token.as_str());
         return Ok(Value::Bool(supported));
     }
     Err(it.type_error("Failed to execute 'supports' on 'DOMTokenList': DOMTokenList has no supported tokens."))
