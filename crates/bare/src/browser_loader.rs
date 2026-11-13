@@ -823,7 +823,7 @@ impl Browser {
             dom: dom.clone(),
             // Live: the downloads that the scan of the document started while the session parsed it (`adopt_scan`).
             net: dom.scripts.net.borrow_mut().take().filter(|_| live).map_or_else(|| Net::new(cfg.client), |n| *n),
-            slice: live.then(|| Instant::now() + SLICE),
+            slice: live.then(|| bare_net::vclock::instant() + SLICE),
             cursor: 0,
             https_only: page.scheme == bare_url::Scheme::Https,
             lim: cfg.limits,
@@ -902,7 +902,7 @@ impl Browser {
             b: self,
             dom: dom.clone(),
             net: net.map_or_else(|| Net::new(client), |n| *n),
-            slice: live.then(|| Instant::now() + SLICE),
+            slice: live.then(|| bare_net::vclock::instant() + SLICE),
             cursor: p.cursor,
             https_only: page.scheme == bare_url::Scheme::Https,
             deadline: deadline_after(limits.max_time),
@@ -1563,7 +1563,7 @@ impl Run<'_> {
 
     /// Live: the slice of the turn is used up.
     fn sliced(&self) -> bool {
-        (self.loaded || self.split) && self.slice.is_some_and(|end| Instant::now() >= end)
+        (self.loaded || self.split) && self.slice.is_some_and(|end| bare_net::vclock::instant() >= end)
     }
 
     /// Live, after `load` or in a split document: a turn waits for no download.

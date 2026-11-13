@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 use std::sync::Arc;
 
 const INDEX: &str = r#"<!doctype html><html><body><p id="n">0</p><script src="/app.js"></script></body></html>"#;
+const LATE: &str = "<!doctype html><html><body><script>var t0 = Date.now(); setTimeout(function () { window.dt = Date.now() - t0 }, 8000)</script></body></html>";
 const APP: &str = "fetch('/data').then(r => r.text()).then(t => { document.getElementById('n').textContent = 'data:' + t })";
 
 /// A server that counts its connections. Gives its origin.
@@ -39,6 +40,7 @@ fn connection(mut s: TcpStream) {
         seen.drain(..end);
         let (status, kind, body) = match head.split(' ').nth(1).unwrap_or("") {
             "/" => (200, "text/html", INDEX),
+            "/late" => (200, "text/html", LATE),
             "/app.js" => (200, "text/javascript", APP),
             "/data" => (200, "text/plain", "7"),
             _ => (404, "text/plain", "no"),
@@ -50,8 +52,8 @@ fn connection(mut s: TcpStream) {
     }
 }
 
-/// Run a step file as `bare-drive`, with one tape variable set. Gives the exit code and stderr.
-fn drive(dir: &PathBuf, steps: &str, base: &str, tape: (&str, &PathBuf)) -> (i32, String) {
+/// Run a step file as `bare-drive`, with one tape variable set, and more variables in `env`. Gives the exit code and stderr.
+fn drive(dir: &PathBuf, steps: &str, base: &str, tape: (&str, &PathBuf), env: &[(&str, &str)]) -> (i32, String) {
     let file = dir.join("journey.steps");
     std::fs::write(&file, steps).unwrap();
     let run = std::process::Command::new(env!("CARGO_BIN_EXE_bare-drive"))
@@ -59,6 +61,7 @@ fn drive(dir: &PathBuf, steps: &str, base: &str, tape: (&str, &PathBuf)) -> (i32
         .arg(&file)
         .env(tape.0, tape.1)
         .env("BARE_SEED", "1")
+        .envs(env.iter().copied())
         .output()
         .unwrap();
     (run.status.code().unwrap_or(-1), String::from_utf8_lossy(&run.stderr).to_string())
@@ -73,20 +76,45 @@ fn a_recorded_journey_passes_on_replay_with_no_request_and_a_missing_page_is_an_
     let base = serve(hits.clone());
     let steps = "timeout 20000\nopen ${BASE}/\nexpect js \"document.getElementById('n').textContent === 'data:7'\"\n";
 
-    let (code, err) = drive(&dir, steps, &base, ("BARE_NET_RECORD", &tape));
+    let (code, err) = drive(&dir, steps, &base, ("BARE_NET_RECORD", &tape), &[]);
     assert_eq!(code, 0, "the live run: {err}");
     let live = hits.load(SeqCst);
     assert!(live > 0);
 
-    let (code, err) = drive(&dir, steps, &base, ("BARE_NET_REPLAY", &tape));
+    let (code, err) = drive(&dir, steps, &base, ("BARE_NET_REPLAY", &tape), &[]);
     assert_eq!(code, 0, "the replay: {err}");
     assert_eq!(hits.load(SeqCst), live, "a replay must not reach the server");
     assert!(!err.contains("no recorded reply"), "{err}");
 
     let other = "timeout 3000\nopen ${BASE}/missing\nexpect js \"document.getElementById('n') !== null\"\n";
-    let (code, err) = drive(&dir, other, &base, ("BARE_NET_REPLAY", &tape));
+    let (code, err) = drive(&dir, other, &base, ("BARE_NET_REPLAY", &tape), &[]);
     assert_ne!(code, 0, "{err}");
     assert!(err.contains(&format!("no recorded reply for GET {base}/missing")), "{err}");
     assert_eq!(hits.load(SeqCst), live, "a miss must not reach the server");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_replay_on_the_virtual_clock_does_not_wait_for_a_timer_of_the_page() {
+    let dir = std::env::temp_dir().join(format!("bare-drive-vclock-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (hits, tape) = (Arc::new(AtomicUsize::new(0)), dir.join("tape"));
+    let base = serve(hits.clone());
+    // The timer is 8 s long. The page reads the time at its start and in the timer.
+    let steps = "timeout 60000\nopen ${BASE}/late\nexpect js \"window.dt >= 8000 && window.dt < 8100\"\n";
+
+    let (code, err) = drive(&dir, steps, &base, ("BARE_NET_RECORD", &tape), &[]);
+    assert_eq!(code, 0, "the live run: {err}");
+
+    let clock = [("BARE_CLOCK", "virtual")];
+    let start = std::time::Instant::now();
+    let (code, err) = drive(&dir, steps, &base, ("BARE_NET_REPLAY", &tape), &clock);
+    assert_eq!(code, 0, "the replay: {err}");
+    assert!(start.elapsed().as_secs() < 4, "the replay waited for the timer: {:?}", start.elapsed());
+
+    // Without a tape that answers, the variable does nothing: the clock stays real, and the page needs the 8 s.
+    let (code, err) = drive(&dir, "timeout 3000\nopen ${BASE}/late\nexpect js \"window.dt >= 8000\"\n", &base, ("BARE_NET_RECORD", &dir.join("tape2")), &clock);
+    assert_ne!(code, 0, "{err}");
     let _ = std::fs::remove_dir_all(&dir);
 }

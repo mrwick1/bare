@@ -31,6 +31,23 @@ All numbers use the recorded corpus from step 1, 3 runs each, against the baseli
 
 A target that is not met is reported with its numbers. It is not hidden.
 
+## Baseline on the recorded corpus (2026-11-14)
+
+Measured with the virtual page clock (`docs/design-virtual-clock.md`): `tools/bench/journeys.sh compare --clock virtual --runs 3 --pss`, corpus `virtual`, 47 journeys (the 48th, `nextjs-docs`, does not pass on replay). Same-binary spread is 0.7% or less on main, so these numbers are not noise. Baseline is `f6415364` plus the replay patch plus the clock. Main is `fe2d54cd` plus the clock. Per-journey table: `docs/progress.md`, section "A virtual page clock for replay mode".
+
+| # | Measure | Baseline | Main | Against the target |
+| --- | --- | --- | --- | --- |
+| 1 | Journeys that pass with recorded inputs | 47 of 47 | 47 of 47 | met for the 47 that replay. test262 gate and `exec_diff` unchanged. |
+| 2 | Total instructions | 105,217 M | 96,345 M (91.6%) | not met (target 80%) |
+| 3 | `compm_22000`, `rest_13` ramps | not in this corpus | | |
+| 4 | `python-org-docs-link`, `rust-book-search` | 1,438 M, 16,606 M | 1,419 M, 16,531 M (1.01 times, 1.00 times) | not met (target 1.3 times) |
+| 5 | Sheet ramp RSS | not in this corpus | | |
+| 6 | `python-docs-search-results` peak RSS and PSS | 113.5 MiB, 106.3 MiB | 113.7 MiB, 111.8 MiB | not met (target 20% lower) |
+
+Other totals, medians summed: CPU 13,388 ms to 12,228 ms (-8.7%). PSS 1,724 MiB to 1,565 MiB (-9.2%). Peak RSS 2,056 MiB to 1,882 MiB (-8.5%). Wall time is from a loaded machine.
+
+Use one clock for both sides. The virtual clock does more page work than the real clock on some journeys (the same binary: 66.6 G on the real clock, 96.3 G on the virtual clock), so a number from this table does not compare with a number from the real-clock corpus.
+
 ## Steps, in order
 
 1. Benchmark contract. Record the network inputs of each journey once and replay them. Report cold and warm runs apart. Report instructions, time to ready, peak RSS and PSS apart. Add a local login fixture. Count render triggers, cache hits and cost per script origin.

@@ -1,10 +1,13 @@
 """The journey benchmark with recorded network inputs. Use it through `journeys.sh`.
 
-  journeys.sh record  [--corpus DIR] [--only TEXT] [--tries N] BARE_DRIVE    record each public journey from the live sites, then fill what a fast replay asks for
+  journeys.sh record  [--corpus DIR] [--clock real|virtual] [--only TEXT] [--tries N] BARE_DRIVE    record each public journey from the live sites, then fill what a fast replay asks for
                       (--only: update only these; N tries for the live recording, default 4; fill rounds stop at two runs in a row with no miss, at most 10)
   journeys.sh fill    [--corpus DIR] [--only TEXT] BARE_DRIVE    only the fill rounds, on a recording that exists (the live sites are asked for the misses only)
   journeys.sh run     [--corpus DIR] [--only TEXT] [--runs N] [--pss] [--out TSV] BARE_DRIVE    replay each journey N times (cold: a new process each time)
   journeys.sh compare [--corpus DIR] [--only TEXT] [--runs N] [--pss] [--out TSV] BASE_DRIVE NEW_DRIVE    replay on both binaries, runs interleaved
+
+`--clock virtual` sets `BARE_CLOCK=virtual` (a page clock that replies move, `crates/net/src/vclock.rs`): the same work in every run. It is a clock for a replay, so the recording of the
+journeys in the corpus `virtual` is a fill under that clock (a copy of `main`, then `journeys.sh fill --clock virtual`); with it, `--corpus` defaults to `virtual`. `--clock real` (the default) removes `BARE_CLOCK`.
 
 The corpus is machine-local and never in the repository: DIR/<journey>/ holds the replies of one journey (`crates/net/src/replay.rs`), DIR/status.tsv the
 result of the recording. `BARE_SEED=1` is set for every run (a fixed `Math.random` and `crypto` stream: a random id in a URL or a body would never match a recording). A replay is faster than the live run, so a page asks for files that the live run never asked for before the process ended: after the
@@ -19,6 +22,7 @@ import glob, json, os, re, shutil, statistics, subprocess, sys, tempfile, time
 HERE = os.path.dirname(os.path.abspath(__file__))
 STEPS = os.path.join(HERE, "..", "drive", "public")
 CORPUS = "/data/bare-tmp/corpus/main"
+VIRTUAL_CORPUS = "/data/bare-tmp/corpus/virtual"
 
 
 def journeys(only):
@@ -89,12 +93,19 @@ def children(pid):
 
 
 def args(argv, flags):
-    opt = {"corpus": CORPUS, "only": "", "runs": 3, "tries": 4, "pss": False, "out": None}
+    opt = {"corpus": None, "only": "", "runs": 3, "tries": 4, "pss": False, "out": None, "clock": "real"}
     while argv and argv[0].startswith("--"):
         k = argv.pop(0)[2:]
         if k not in flags:
             sys.exit(f"unknown option --{k}")
         opt[k] = True if k == "pss" else (type(opt[k])(argv.pop(0)) if opt[k] is not None else argv.pop(0))
+    if opt["clock"] not in ("real", "virtual"):
+        sys.exit("--clock is real or virtual")
+    if opt["clock"] == "virtual":
+        os.environ["BARE_CLOCK"] = "virtual"
+    else:
+        os.environ.pop("BARE_CLOCK", None)
+    opt["corpus"] = opt["corpus"] or (VIRTUAL_CORPUS if opt["clock"] == "virtual" else CORPUS)
     return opt, argv
 
 
@@ -218,7 +229,7 @@ def main():
     if len(sys.argv) < 3:
         sys.exit(__doc__)
     mode, argv = sys.argv[1], sys.argv[2:]
-    opt, argv = args(argv, ("corpus", "only", "runs", "tries", "pss", "out"))
+    opt, argv = args(argv, ("corpus", "only", "runs", "tries", "pss", "out", "clock"))
     if mode in ("record", "fill") and len(argv) == 1:
         record(opt, argv[0], mode == "fill")
     elif mode == "run" and len(argv) == 1:

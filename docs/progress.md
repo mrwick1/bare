@@ -8999,3 +8999,131 @@ To check again: `tools/drive/force_count.py` after the rule-set cost falls. The 
 - The styles-only frame itself (not built). The extra cost of a larger `layout_kept` after skipped layouts.
 - Wall time (not the subject). A second machine. `bare-mcp` sessions (the `snapshot`, `find` and `read` tools): they call the same `inspect`, so the count above covers their frame requests, but no MCP session was run.
 - The instruction count of a pass on a CPU without `perf_event_open` for user mode (`perf_event_paranoid` above 2): the counters then print 0 instructions and the counts of passes stay right.
+## A virtual page clock for replay mode (2026-11-14)
+
+Branch `t3/deterministic-replay-clock`, on main after #486. Design: `docs/design-virtual-clock.md`. Decision: `docs/decisions.md`. Machine: archMachine, `heavy` lock held, corpus machine-local.
+
+### What was built
+
+- `BARE_CLOCK=virtual` with a tape that reads (`BARE_NET_REPLAY`, `BARE_NET_FILL`): page time (`Date.now`, `performance.now`, timers, frames, loader slice deadlines, driver waits) is a number that only the scheduler, the driver and the reply tasks move. A reply is due 5 ms after it starts. The page sees it only then. A move of the clock waits in real time for the replies due by then.
+- `journeys.sh ... --clock real|virtual`. `--clock virtual` uses the corpus `/data/bare-tmp/corpus/virtual` (a copy of `main`, filled with `journeys.sh fill --clock virtual`). The default stays `real` and `corpus/main`.
+- Test: `crates/drive/tests/replay.rs` (a page with an 8 s timer ends in under 4 s on replay with the clock on; with the clock off the same step does not end in 3 s). Unit test in `vclock.rs`.
+
+### Cause of the variation
+
+A reply is ready when a worker thread has read the tape and decoded the body. A step of the driver ends by timers and sleeps on the real clock. Which comes first depends on the load. Same binary on the real clock, 6 runs each, instructions in M:
+
+| Journey | Real clock | Virtual clock |
+| --- | --- | --- |
+| `rust-book-search` | 3846 3838 3838 3839 3846 3839 (this session); 3.9 G to 19.7 G in the #486 runs | 16532 16531 16531 16532 16532 16531 |
+| `python-docs-search` | 175 175 175 1432 175 175 | 2146 2145 2145 2146 2146 2145 |
+
+On the real clock the search index of `rust-book-search` reaches the page after 1 to 6+ of the 9 keys, and the page searches once per key after it. The virtual clock fixes this order. It then shows one mode in all runs (the one where a reply that takes 5 ms arrives after about 5 keys of 1 ms).
+
+### Same-binary spread (3 runs, 47 journeys, new binary)
+
+- Real clock, corpus `main`: 15 of 47 journeys over 2%, 7 over 5% (worst: `wikipedia-search` 34.8%, `wiktionary-portal` 33.0%, `wikipedia-portal` 15.1%, `github-docs-home` 14.5%, `lobsters-front` 8.5%, `nodejs-org-home` 6.7%, `kernel-org-home` 6.4%).
+- Virtual clock, corpus `virtual`: 47 of 47 under 2%. The worst is 0.3% (`kernel-org-home`). 40 of 47 was the target. In the baseline-vs-main run below the worst is 0.7% (main) and 3.7% (baseline, `archlinux-org-home`).
+- Journeys over 2% on the virtual clock: none. The rest of the variation: run 0 (the PSS run) of `wikipedia-article` and `wikipedia-search` shows 3 and 2 misses that the runs without PSS do not show. PSS reading changes thread timing, and part of the loader is still real time. Run 0 gives no instruction count.
+- `wikipedia-portal` has one miss in every run: a POST to `/ins-*/v2/events` whose body hash changes between runs (hypothesis: a value in the body that is not on the virtual clock; cause not found). It does not change the pass result.
+
+### The virtual clock changes the work, not the result
+
+Same binary, real clock on corpus `main` against virtual clock on corpus `virtual`, medians of 3. Total 66,562 M and 96,316 M. The change is not a speed-up or a slow-down. The clock selects the mode of the page, and the real runs ended before some work (journeys that change by more than 10% or that are over 2% on the real clock):
+
+| Journey | Real M | Virtual M |
+| --- | ---: | ---: |
+| `nodejs-org-home` | 1,243 | 5,828 |
+| `python-docs-search` | 175 | 2,146 |
+| `rust-book-search` | 3,846 | 16,531 |
+| `react-docs` | 6,004 | 16,727 |
+| `github-docs-home` | 2,280 | 5,225 |
+| `substack-home` | 842 | 1,468 |
+| `mdn-reference` | 8,666 | 6,866 |
+| `wikipedia-search` | 8,848 | 6,823 |
+| `craigslist-home` | 51 | 20 |
+
+All 47 journeys pass on both clocks. STOP check, finding: with the real-clock recording, `react-docs` fails on the virtual clock (14 recorded replies are missing: chunks that the real run never asked for). It is not a change of result of the page. After `fill --clock virtual` it passes 4 of 4. For that reason the virtual clock has its own corpus. Nothing else changed from pass to fail. `nextjs-docs` is not in either corpus (see the #486 section).
+
+### Baseline against main on the virtual clock
+
+Baseline: `f6415364` plus the replay patch plus the virtual clock, branch `bench-base-vclock` in `/data/bare-tmp/bench-base-src` (not pushed; the clock patch applied with one conflict in `page.rs`, where the baseline has no `hide`). Main: this branch (main `fe2d54cd` plus the clock). Corpus `virtual`, 3 runs, runs interleaved, `--pss`. Log and TSV: `/data/claude-tmp/cmp-v.{log,tsv}`.
+
+| | baseline | main | change |
+| --- | ---: | ---: | ---: |
+| Instructions, sum of medians | 105,217 M | 96,345 M | -8.4% |
+| CPU (user+system) | 13,388 ms | 12,228 ms | -8.7% |
+| Wall | 12,861 ms | 11,980 ms | -6.9% |
+| PSS | 1,724 MiB | 1,565 MiB | -9.2% |
+| Peak RSS | 2,056 MiB | 1,882 MiB | -8.5% |
+
+All 47 pass on both. Wall time is not from an idle machine. The #486 table gave -2.7% instructions, and said the change is smaller than the spread. This one is larger than the spread (max 0.7%).
+
+#### Per journey (medians of 3, spread = (max - min) / median)
+
+| Journey | M instr base | M instr main | change | spread base | spread main | RSS MiB base | RSS MiB main |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| archlinux-org-home | 57.1 | 54.4 | -4.7% | 3.7% | 0.0% | 16.4 | 16.6 |
+| blog-rust-lang-home | 566.1 | 222.9 | -60.6% | 0.0% | 0.7% | 26.5 | 18.2 |
+| cnn-lite-front | 58.4 | 58.5 | +0.1% | 0.0% | 0.0% | 17.5 | 17.6 |
+| craigslist-home | 20.1 | 20.0 | -0.3% | 0.1% | 0.0% | 16.0 | 16.0 |
+| crates-io-home | 133.5 | 133.4 | -0.0% | 0.0% | 0.0% | 20.1 | 20.3 |
+| curl-se-home | 2,229.4 | 147.9 | -93.4% | 0.0% | 0.0% | 70.2 | 17.9 |
+| debian-org-home | 886.8 | 712.0 | -19.7% | 0.0% | 0.0% | 73.3 | 35.9 |
+| devto-home | 3,485.9 | 3,417.0 | -2.0% | 0.0% | 0.0% | 67.4 | 71.0 |
+| docs-rs-home | 115.6 | 114.9 | -0.5% | 0.0% | 0.0% | 17.6 | 17.7 |
+| duckduckgo-html-search | 128.2 | 102.6 | -20.0% | 0.0% | 0.0% | 18.3 | 18.3 |
+| example-learn-more | 134.1 | 121.6 | -9.3% | 0.0% | 0.0% | 19.3 | 19.1 |
+| example-page | 12.0 | 12.1 | +0.8% | 0.0% | 0.0% | 16.2 | 16.2 |
+| github-docs-home | 5,224.8 | 5,224.4 | -0.0% | 0.0% | 0.0% | 96.8 | 95.6 |
+| go-dev-home | 5,615.4 | 3,256.1 | -42.0% | 0.0% | 0.0% | 117.2 | 65.2 |
+| hn-comments-back | 130.6 | 117.7 | -9.9% | 0.0% | 0.0% | 16.2 | 16.4 |
+| hn-front | 97.8 | 88.9 | -9.1% | 0.1% | 0.0% | 16.2 | 16.3 |
+| hn-new-past | 187.3 | 172.8 | -7.7% | 0.0% | 0.0% | 16.2 | 16.6 |
+| httpbin-cookies | 25.8 | 26.1 | +1.1% | 0.1% | 0.0% | 16.2 | 16.2 |
+| httpbin-form-fill | 27.0 | 26.2 | -2.8% | 0.0% | 0.0% | 16.2 | 16.2 |
+| httpbin-form-submit | 36.2 | 35.5 | -2.0% | 0.0% | 0.0% | 16.2 | 16.2 |
+| kernel-org-home | 77.2 | 66.2 | -14.3% | 0.3% | 0.2% | 16.5 | 16.7 |
+| lobsters-comments-back | 260.0 | 239.8 | -7.8% | 0.0% | 0.0% | 17.6 | 17.3 |
+| lobsters-front | 273.2 | 247.6 | -9.3% | 0.0% | 0.0% | 17.5 | 17.7 |
+| mdn-reference | 6,977.7 | 6,866.2 | -1.6% | 0.0% | 0.0% | 114.8 | 113.3 |
+| nginx-org-home | 103.3 | 63.0 | -39.0% | 0.0% | 0.0% | 22.7 | 20.1 |
+| nodejs-org-home | 5,832.6 | 5,828.3 | -0.1% | 0.0% | 0.0% | 78.3 | 78.5 |
+| npr-text-story | 36.2 | 36.3 | +0.4% | 0.0% | 0.0% | 16.2 | 16.2 |
+| paulgraham-home | 110.2 | 108.2 | -1.8% | 0.3% | 0.1% | 16.8 | 17.3 |
+| python-docs-search | 2,154.8 | 2,145.5 | -0.4% | 0.0% | 0.0% | 92.8 | 93.5 |
+| python-docs-search-results | 3,397.6 | 3,385.2 | -0.4% | 0.0% | 0.0% | 113.5 | 113.7 |
+| python-docs-tutorial | 393.7 | 376.6 | -4.4% | 0.1% | 0.0% | 17.7 | 17.6 |
+| python-org-docs-link | 1,437.9 | 1,418.8 | -1.3% | 0.1% | 0.0% | 32.2 | 32.6 |
+| python-org-search | 1,462.8 | 1,430.9 | -2.2% | 0.0% | 0.0% | 30.8 | 30.4 |
+| react-docs | 16,781.7 | 16,726.2 | -0.3% | 0.0% | 0.0% | 107.0 | 107.2 |
+| rust-book-chapters | 567.5 | 539.0 | -5.0% | 0.1% | 0.0% | 22.1 | 22.3 |
+| rust-book-search | 16,605.8 | 16,531.3 | -0.4% | 0.0% | 0.0% | 129.6 | 129.6 |
+| rust-book-sidebar | 338.0 | 322.5 | -4.6% | 0.1% | 0.1% | 20.9 | 21.1 |
+| rust-lang-org-home | 723.7 | 133.0 | -81.6% | 0.0% | 0.4% | 33.7 | 18.6 |
+| sqlite-org-home | 79.6 | 70.1 | -12.0% | 0.0% | 0.0% | 19.2 | 19.3 |
+| substack-home | 1,731.1 | 1,468.5 | -15.2% | 0.0% | 0.0% | 64.1 | 64.4 |
+| w3c-home-links | 970.2 | 458.0 | -52.8% | 0.0% | 0.0% | 48.9 | 39.9 |
+| wikipedia-article | 7,862.4 | 7,322.7 | -6.9% | 0.1% | 0.1% | 64.1 | 62.5 |
+| wikipedia-main-random | 4,070.9 | 3,714.4 | -8.8% | 0.0% | 0.0% | 54.5 | 54.7 |
+| wikipedia-portal | 1,220.0 | 1,113.7 | -8.7% | 0.1% | 0.0% | 42.4 | 42.4 |
+| wikipedia-search | 7,415.4 | 6,817.4 | -8.1% | 0.3% | 0.1% | 67.5 | 67.5 |
+| wikipedia-toc-languages | 3,753.2 | 3,505.1 | -6.6% | 0.1% | 0.2% | 56.8 | 56.2 |
+| wiktionary-portal | 1,408.4 | 1,345.5 | -4.5% | 0.0% | 0.0% | 47.7 | 47.8 |
+| **sum of medians** | 105,217 | 96,345 | -8.4% | | | | |
+
+### Checks
+
+- `cargo test --release -p bare-net --lib vclock`, `cargo test --release -p bare-drive --test replay`: pass. The drive test failed first with the clock off (the replay took 8.0 s).
+- Rebased once on main `4f3814bf` (no conflict). Gates ran after the rebase.
+- `cargo test --release --workspace --no-fail-fast`: all pass except the 3 groups that also fail on main on this machine (see the #486 section): `bare-net --test https_openssl` (2), `bare-tls --test client_openssl` (4), `bare-tls --test tls12_openssl` (1).
+- `tools/js/cost_matrix.sh` (main `4f3814bf` against this branch): 803 rows, mean change glibc -0.005%, 0 rows over the limit under either allocator. 2 rows (`parse_load deep 1`, `deep 10`) fail to run on both trees (stack overflow). The clock is off in every row.
+- `TEST262=/data/claude-tmp/test262 tools/js/test262_check.sh`: exit 0. `tools/js/exec_diff.sh`: 79 runs, 0 differences. The change to `eval_date.rs` adds an arm for the host clock that only the virtual clock sets.
+
+### Not tested
+
+- Wall time on an idle machine.
+- The clock with a journey that logs in, with `EventSource` events, or with a second tab.
+- `REPLY_MS` and `ACTION_MS` at other values. The mode of `rust-book-search` and `python-docs-search` depends on their ratio.
+- A recording made under the virtual clock from the live sites (`record --clock virtual`): the corpus was a copy of `main` plus fill rounds.
+- Another machine.

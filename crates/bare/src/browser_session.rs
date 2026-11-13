@@ -129,7 +129,7 @@ impl SessionConfig {
             eval: EvalLimits::session(),
             heap: HeapLimits::default(),
             viewport: None,
-            virtual_clock: false,
+            virtual_clock: bare_net::vclock::on(),
             storage: None,
             live: false,
             downloads: None,
@@ -650,7 +650,7 @@ impl Session {
             }
         }
         if next.is_none() && self.parsing.is_some() {
-            if !self.parsing.as_mut().expect("checked").step(Instant::now() + SLICE) {
+            if !self.parsing.as_mut().expect("checked").step(bare_net::vclock::instant() + SLICE) {
                 return SessionStop::Page(Stop::Settled);
             }
             let p = *self.parsing.take().expect("checked");

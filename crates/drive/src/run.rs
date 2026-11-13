@@ -140,9 +140,11 @@ impl Host {
     }
 
     /// Sleep until `until`. In a window, also wake when its loop runs a task of the page after `seen`.
-    fn sleep(&self, seen: u64, until: Instant) {
+    fn sleep(&mut self, seen: u64, until: Instant) {
         match self {
             Host::Window(r) => r.wait_work(seen, until),
+            // On the benchmark clock the page moves the clock to its next event and nothing sleeps (`Page::nap`).
+            Host::Local(p) if bare_net::vclock::on() => p.nap(Some(until), Duration::ZERO, Duration::MAX),
             _ => std::thread::sleep(until.saturating_duration_since(Instant::now())),
         }
     }
@@ -297,12 +299,12 @@ impl Session {
     pub fn screenshot(&mut self, path: PathBuf, r: Option<u32>, full: bool, red: &Redactor) -> Result<String, String> {
         let (red, limit) = (red.clone(), self.timeout);
         self.with_refs(move |p, refs| {
-            let end = Instant::now() + limit;
+            let end = bare_net::vclock::instant() + limit;
             let _ = p.wait_load(limit);
-            while (p.loading() || p.images_pending()) && Instant::now() < end {
+            while (p.loading() || p.images_pending()) && bare_net::vclock::instant() < end {
                 let (more, next) = p.tick();
                 if !more {
-                    std::thread::sleep(next.map_or(Duration::from_millis(5), |t| t.saturating_duration_since(Instant::now()).min(Duration::from_millis(20))));
+                    p.nap(next, Duration::from_millis(5), Duration::from_millis(20));
                 }
             }
             if !shown(p, &red) {
@@ -376,7 +378,7 @@ impl Session {
                     return Err(format!("the script threw: {m}{line}"));
                 }
             };
-            let end = Instant::now() + limit;
+            let end = bare_net::vclock::instant() + limit;
             let mut v = v;
             let out = loop {
                 let b = p.browser().ok_or("no document")?;
@@ -385,12 +387,12 @@ impl Session {
                     Some(bare_js::eval::PromiseStatus::Fulfilled(x)) => v = x,
                     Some(bare_js::eval::PromiseStatus::Rejected(x)) => return Err(format!("rejected: {}", thrown_value(b, x))),
                     Some(bare_js::eval::PromiseStatus::Pending) => {
-                        if Instant::now() >= end {
+                        if bare_net::vclock::instant() >= end {
                             return Err(format!("the promise is still pending after {} ms", limit.as_millis()));
                         }
                         let (more, next) = p.tick();
                         if !more {
-                            std::thread::sleep(next.map_or(Duration::from_millis(5), |t| t.saturating_duration_since(Instant::now()).min(Duration::from_millis(20))));
+                            p.nap(next, Duration::from_millis(5), Duration::from_millis(20));
                         }
                     }
                 }
@@ -398,13 +400,13 @@ impl Session {
             // The code started a navigation (a new address, a link `click()`, `form.submit()`, `history.back()`): the ticks follow it
             // until the next document has loaded, as after an `act`. A `#hash` change loads nothing.
             let started = |p: &mut Page| p.loading() || p.browser().map(|b| b.navigation_stats()).is_some_and(|n| n.pending_requests + n.pending_tasks > 0);
-            while started(p) && Instant::now() < end {
+            while started(p) && bare_net::vclock::instant() < end {
                 let (more, next) = p.tick();
                 if !more {
-                    std::thread::sleep(next.map_or(Duration::from_millis(5), |t| t.saturating_duration_since(Instant::now()).min(Duration::from_millis(20))));
+                    p.nap(next, Duration::from_millis(5), Duration::from_millis(20));
                 }
             }
-            let _ = p.wait_load(end.saturating_duration_since(Instant::now()));
+            let _ = p.wait_load(end.saturating_duration_since(bare_net::vclock::instant()));
             // The line names the URL without its fragment (`safe_url`), so a `#hash` change gives no line.
             let (before, after) = (safe_url(&before.unwrap_or_default()), safe_url(&p.url().unwrap_or_default()));
             Ok(if after != before { format!("{out}\nnavigated: {after}") } else { out })
@@ -483,11 +485,11 @@ impl Session {
     fn settle_pictures(&mut self) {
         if bare_net::replay::Tape::from_env().is_some() {
             let _ = self.host.run(|p| {
-                let end = Instant::now() + Duration::from_secs(5);
-                while p.images_pending() && Instant::now() < end {
+                let end = bare_net::vclock::instant() + Duration::from_secs(5);
+                while p.images_pending() && bare_net::vclock::instant() < end {
                     let (more, next) = p.tick();
                     if !more {
-                        std::thread::sleep(next.map_or(Duration::from_millis(5), |t| t.saturating_duration_since(Instant::now()).min(Duration::from_millis(20))));
+                        p.nap(next, Duration::from_millis(5), Duration::from_millis(20));
                     }
                 }
             });
@@ -499,7 +501,8 @@ impl Session {
         self.settle_pictures();
         let Session { host, net, memo, timeout, window_cpu, nav_first, rep, preload, hist, downloads, ready_wait, .. } = self;
     let t0 = Instant::now();
-    let deadline = t0 + *timeout;
+    // The limits of the step are on the benchmark clock when it is on (`bare_net::vclock`): a step ends at the same point of the page in every run.
+    let deadline = bare_net::vclock::instant() + *timeout;
     let (mut tries, mut busy, mut waited, mut ticks) = (0u32, Duration::ZERO, Duration::ZERO, Ticks::default());
     // With `ready_wait`, an `open`, `goto` or `reload` waits until the page is ready (`ready`); `calm` counts the looks that found it so.
     // So does an action that started a navigation: a link click, `back`, `forward`, or a script that changed the address.
@@ -516,6 +519,10 @@ impl Session {
     }
     let result: Result<Option<String>, Fail> = loop {
         tries += 1;
+        // On the benchmark clock (`bare_net::vclock`) each try of a step takes a fixed time: the round trip of an input event.
+        if bare_net::vclock::on() {
+            bare_net::vclock::advance_by(bare_net::vclock::ACTION_MS);
+        }
         let (t, seen) = (Instant::now(), host.work_count());
         let (tried, wait) = match &step.action {
             Action::Timeout(ms) => {
@@ -523,11 +530,11 @@ impl Session {
                 break Ok(None);
             }
             _ if navigating => {
-                let at_end = Instant::now() >= deadline;
+                let at_end = bare_net::vclock::instant() >= deadline;
                 match host.run(move |p| ready(p, at_end)) {
                     Ok(r) => {
                         let ms = t0.elapsed().as_millis();
-                        let now = Instant::now();
+                        let now = bare_net::vclock::instant();
                         let soon = now + Duration::from_millis(5);
                         let pending = |n: usize| format!("{n} request{} pending", if n == 1 { "" } else { "s" });
                         let state = match (r.fail, r.idle) {
@@ -631,7 +638,7 @@ impl Session {
             Try::More => {}
             Try::Stop(f) => break Err(f),
             Try::Again(f) => {
-                let now = Instant::now();
+                let (now, real) = (bare_net::vclock::instant(), Instant::now());
                 if f.kind != "covered" {
                     covered = None;
                 } else if now >= *covered.get_or_insert(now) + COVER_WAIT {
@@ -651,7 +658,7 @@ impl Session {
                     break Err(Fail { message: format!("{} (time limit {} ms)", f.message, timeout.as_millis()), ..f });
                 }
                 host.sleep(seen, next.min(deadline).min(covered.map_or(deadline, |c| c + COVER_WAIT)));
-                waited += now.elapsed();
+                waited += real.elapsed();
             }
         }
     };

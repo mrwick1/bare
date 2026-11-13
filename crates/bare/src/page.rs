@@ -328,7 +328,7 @@ impl Page {
             errors: Vec::new(),
             quiet: false,
             woken: false,
-            started: Instant::now(),
+            started: bare_net::vclock::instant(),
             first_frame: None,
             ticks: Default::default(),
             images: Default::default(),
@@ -432,7 +432,7 @@ impl Page {
     /// Run the ticks until the document is in and has fired `load`, as the old blocking `open` did. `Err`: the load failed, the page
     /// stopped, or `limit` passed.
     pub fn wait_load(&mut self, limit: Duration) -> Result<(), String> {
-        let end = Instant::now() + limit;
+        let end = bare_net::vclock::instant() + limit;
         loop {
             let loaded = match &mut self.source {
                 Source::Session(s) => s.loading().is_none() && s.browser().is_some_and(|b| b.loaded()),
@@ -446,9 +446,9 @@ impl Page {
                 continue;
             }
             let Some(next) = next.filter(|&n| n < end) else {
-                return Err(if Instant::now() < end && next.is_none() { self.no_document() } else { "the time limit passed before load".into() });
+                return Err(if bare_net::vclock::instant() < end && next.is_none() { self.no_document() } else { "the time limit passed before load".into() });
             };
-            std::thread::sleep(next.saturating_duration_since(Instant::now()));
+            self.nap(Some(next), Duration::ZERO, Duration::MAX);
         }
     }
 
@@ -660,16 +660,30 @@ impl Page {
     /// are done, for at most `limit`. Chrome lets a `keepalive` request or a beacon outlive the document; bare waits for every request
     /// made in the handlers, since its queue does not keep the `keepalive` flag. A page that is stopped or still loading closes at once.
     pub fn hide(&mut self, limit: Duration) {
-        let t = Instant::now();
+        let (t, v) = (Instant::now(), bare_net::vclock::instant());
         if !self.browser().is_some_and(|b| b.hide().is_ok()) {
             return;
         }
-        while t.elapsed() < limit && self.browser().is_some_and(|b| b.it.pending_jobs() > 0 || b.fetches_since(t) > 0) {
+        while bare_net::vclock::since(v) < limit && self.browser().is_some_and(|b| b.it.pending_jobs() > 0 || b.fetches_since(t) > 0) {
             let (ran, next) = self.tick();
             if !ran {
                 let Some(next) = next else { return };
-                std::thread::sleep(next.saturating_duration_since(Instant::now()).min(Duration::from_millis(5)));
+                self.nap(Some(next), Duration::ZERO, Duration::from_millis(5));
             }
+        }
+    }
+
+    /// Wait for the page to change. The caller got `next` from `tick`: the time of the next task, or `None`. Sleep until `next` (at most `cap`), or
+    /// `default` for `None`. On the benchmark clock (`bare_net::vclock`) nothing sleeps: the clock moves to that time, and that waits in real time
+    /// only for the replies that are due by then. The clock always moves, so a loop that waits on a limit reaches it.
+    pub fn nap(&mut self, next: Option<Instant>, default: Duration, cap: Duration) {
+        if bare_net::vclock::on() {
+            let now = bare_net::vclock::instant();
+            let want = next.unwrap_or(now + default);
+            let target = now.checked_add(cap).map_or(want, |limit| want.min(limit));
+            bare_net::vclock::advance_to(bare_net::vclock::ms_of(target).max(bare_net::vclock::now() + 0.001));
+        } else {
+            std::thread::sleep(next.map_or(default, |t| t.saturating_duration_since(Instant::now()).min(cap)));
         }
     }
 
@@ -685,9 +699,14 @@ impl Page {
         let ran = self.work().0;
         if ran {
             self.settle();
+            // A turn takes time on the benchmark clock, also when the loader could not go on (a download waits for a slot that a reply that is not
+            // due yet would free). Without it that page would turn for ever: time moves only here, and in the waits.
+            if bare_net::vclock::on() {
+                bare_net::vclock::advance_by(bare_net::vclock::TASK_MS);
+            }
         }
         let (now, next) = self.work();
-        (ran || finished, if now || finished { Some(Instant::now()) } else { next })
+        (ran || finished, if now || finished { Some(bare_net::vclock::instant()) } else { next })
     }
 
     /// Can a tick do something now, and when is the next task due (or the next look at the network)?
@@ -697,19 +716,24 @@ impl Page {
             Source::Session(s) => (s.ended().is_some(), s.loading()),
             Source::Browser(b) => (b.sched_stats().halted, None),
         };
+        // The next look at the network: after `poll`, or on the benchmark clock when the first reply that is on its way is due.
+        let look = || match bare_net::vclock::next_task_due() {
+            Some(t) if bare_net::vclock::on() => bare_net::vclock::instant() + Duration::from_secs_f64((t - bare_net::vclock::now()).max(0.0) / 1000.0),
+            _ => Instant::now() + poll,
+        };
         if let Some(done) = loading {
-            return (done, Some(Instant::now() + poll));
+            return (done, Some(look()));
         }
         let images = self.images.pending();
-        let Some(b) = self.browser().filter(|_| !stopped) else { return (false, images.then(|| Instant::now() + poll)) };
+        let Some(b) = self.browser().filter(|_| !stopped) else { return (false, images.then(look)) };
         // A script that ran outside a task (an agent `eval`) can leave promise jobs queued: they are work for now.
         if b.has_download_request() || b.it.pending_jobs() > 0 {
-            return (true, Some(Instant::now()));
+            return (true, Some(bare_net::vclock::instant()));
         }
         let (due, now) = (b.next_scheduled_due(), b.now());
         let net = if b.live() { b.live_work() } else { (b.pending_fetches() > 0).then_some(true) };
-        let at = due.map(|d| Instant::now() + Duration::from_secs_f64((d - now).max(0.0) / 1000.0));
-        let at = if net == Some(false) || images { Some(at.map_or(Instant::now() + poll, |a| a.min(Instant::now() + poll))) } else { at };
+        let at = due.map(|d| bare_net::vclock::instant() + Duration::from_secs_f64((d - now).max(0.0) / 1000.0));
+        let at = if net == Some(false) || images { Some(at.map_or(look(), |a| a.min(look()))) } else { at };
         (due.is_some_and(|d| d <= now) || net == Some(true), at)
     }
 
@@ -1086,7 +1110,7 @@ impl Page {
             // A next document on its way: the last frame of the old one stays.
             drew = false;
         }
-        self.first_frame.get_or_insert_with(|| self.started.elapsed());
+        self.first_frame.get_or_insert_with(|| bare_net::vclock::since(self.started));
         if drew
             && self.check_frames
             && let Err(e) = self.check_pixels(&canvas.pixels)

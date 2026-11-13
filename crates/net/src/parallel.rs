@@ -110,17 +110,31 @@ enum Slot<R> {
     Lost,
 }
 
-/// The result of a job that runs on a worker thread.
-pub struct Task<R>(Arc<(Mutex<Slot<R>>, Condvar)>);
+/// The result of a job that runs on a worker thread. The second field is the due time on the virtual clock (`vclock.rs`), when it is on.
+pub struct Task<R>(Arc<(Mutex<Slot<R>>, Condvar)>, Option<f64>);
+
+impl<R: Send> crate::vclock::Ended for (Mutex<Slot<R>>, Condvar) {
+    fn wait_ended(&self) {
+        let mut slot = self.0.lock().unwrap();
+        while matches!(*slot, Slot::Waiting) {
+            slot = self.1.wait(slot).unwrap();
+        }
+    }
+}
 
 impl<R> Task<R> {
-    /// Has the job ended (with a result, or lost)? Then `wait` does not block.
+    /// Has the job ended (with a result, or lost)? Then `wait` does not block. On the virtual clock the job must also be due: the
+    /// clock never passes the due time of a job that has not ended, so a job that is due has ended.
     pub fn done(&self) -> bool {
-        !matches!(*self.0.0.lock().unwrap(), Slot::Waiting)
+        !matches!(*self.0.0.lock().unwrap(), Slot::Waiting) && self.1.is_none_or(|due| crate::vclock::now() >= due)
     }
 
-    /// Wait for the result. `None` when the job was lost (it panicked, or no thread could start).
+    /// Wait for the result. `None` when the job was lost (it panicked, or no thread could start). On the virtual clock the wait moves the
+    /// clock to the due time of the job.
     pub fn wait(self) -> Option<R> {
+        if let Some(due) = self.1 {
+            crate::vclock::advance_to(due);
+        }
         let (slot, ready) = &*self.0;
         let mut slot = slot.lock().unwrap();
         loop {
@@ -192,6 +206,7 @@ impl Client {
     pub fn spawn<R: Send + 'static>(&self, job: impl FnOnce(&mut Client) -> R + Send + 'static) -> Task<R> {
         let task = Arc::new((Mutex::new(Slot::Waiting), Condvar::new()));
         let finish = Finish(task.clone());
+        let due = crate::vclock::start(Arc::downgrade(&(task.clone() as Arc<dyn crate::vclock::Ended>)));
         // A worker is shared by all forks, and it was made for the first one. The job must use the jar and the site of the client that
         // spawned it, or a new profile would send the cookies of an old one.
         let (jar, site) = (self.jar.clone(), self.site.clone());
@@ -220,7 +235,7 @@ impl Client {
                 }
             }
         }
-        Task(task)
+        Task(task, due)
     }
 
     fn work(&mut self) {

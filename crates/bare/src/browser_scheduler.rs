@@ -302,6 +302,9 @@ impl Dom {
 
     /// Milliseconds since the time origin, on the clock in use.
     pub(crate) fn now_ms(&self) -> f64 {
+        if bare_net::vclock::on() {
+            return bare_net::vclock::now() - self.vorigin;
+        }
         let s = self.sched.borrow();
         match s.virtual_now {
             Some(t) => t,
@@ -310,6 +313,25 @@ impl Dom {
                 s.last_read.set(t);
                 t
             }
+        }
+    }
+
+    /// The time `t` of this document on the benchmark clock. The first value `g` with `g - vorigin >= t`: a sum and a difference of doubles can
+    /// give a value just below `t`, and then a task that is due at `t` would not run at the time that the clock moved to for it.
+    pub(crate) fn global(&self, t: f64) -> f64 {
+        let mut g = t + self.vorigin;
+        while g - self.vorigin < t {
+            g = g.next_up();
+        }
+        g
+    }
+
+    /// Virtual clock only: move the clock to `t` ms since the time origin of this document (it never goes back).
+    fn move_clock(&self, t: f64) {
+        if bare_net::vclock::on() {
+            bare_net::vclock::advance_to(self.global(t));
+        } else if let Some(c) = &mut self.sched.borrow_mut().virtual_now {
+            *c = c.max(t);
         }
     }
 
@@ -1005,6 +1027,10 @@ fn queue_microtask(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V 
 }
 
 fn performance_now(d: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
+    // On the virtual clock a read takes a little time, so that a loop that waits for `performance.now()` to pass a value ends.
+    if bare_net::vclock::on() {
+        bare_net::vclock::advance_by(bare_net::vclock::READ_MS);
+    }
     Ok(Value::Number(d.now_ms()))
 }
 
@@ -1182,6 +1208,14 @@ impl Browser {
     pub fn use_virtual_clock(&mut self) {
         let now = self.dom.now_ms();
         self.dom.sched.borrow_mut().virtual_now = Some(now);
+        // The benchmark clock (`bare_net::vclock`) is one for the process: `Date.now()` reads it too, and a read takes a little time.
+        if bare_net::vclock::on() {
+            bare_js::eval::set_host_wall_clock(|| {
+                bare_net::vclock::advance_by(bare_net::vclock::READ_MS);
+                bare_net::vclock::epoch_ms()
+            });
+            let _ = self.it.set_wall_clock(WallClock::Host);
+        }
     }
 
     /// Like `use_virtual_clock`, starting at `t` ms. `t` must not be before the time the page has seen: the virtual time, or the last
@@ -1338,21 +1372,23 @@ impl Browser {
                 break;
             }
             let Some((due, run)) = dom.pop_due(upto) else { break };
-            if target.is_some()
-                && let Some(t) = &mut dom.sched.borrow_mut().virtual_now
-            {
-                *t = t.max(due);
+            if target.is_some() {
+                dom.move_clock(due);
             }
-            if !matches!(run, Run::Nothing) {
+            let counted = !matches!(run, Run::Nothing);
+            if counted {
                 ran += 1;
             }
             dom.run_task(&mut self.it, run)?;
+            // On the benchmark clock a task takes time: more tasks become due, and a reply that was on its way arrives.
+            if counted && bare_net::vclock::on() {
+                bare_net::vclock::advance_by(bare_net::vclock::TASK_MS);
+            }
         }
         if let Some(t) = target
             && !capped
-            && let Some(c) = &mut dom.sched.borrow_mut().virtual_now
         {
-            *c = c.max(t);
+            dom.move_clock(t);
         }
         Ok(Pump { ran, capped, next_due: dom.next_due() })
     }
