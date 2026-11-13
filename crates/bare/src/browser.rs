@@ -557,6 +557,8 @@ pub struct Dom {
     pub(crate) scrolling: crate::browser_scroll::Scrolling,
     /// `ResizeObserver` and its rendering step (`browser_resize.rs`).
     pub(crate) resize: crate::browser_resize::Resize,
+    /// CSS transition and animation events (`browser_motion.rs`).
+    pub(crate) motion: crate::browser_motion::MotionState,
     /// `requestAnimationFrame` (`browser_frame.rs`).
     pub(crate) frame: crate::browser_frame::Frame,
     /// `requestIdleCallback` (`browser_idle.rs`).
@@ -1664,6 +1666,7 @@ impl Browser {
             link_done: Default::default(),
             scrolling: Default::default(),
             resize: Default::default(),
+            motion: Default::default(),
             frame: Default::default(),
             idle: Default::default(),
             basics: Default::default(),

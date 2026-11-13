@@ -171,6 +171,7 @@ mod browser_style_block;
 pub mod browser_computed;
 mod browser_used;
 pub mod browser_geometry;
+pub mod browser_motion;
 pub mod browser_resize;
 mod browser_element;
 mod browser_frame;

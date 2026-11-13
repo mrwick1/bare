@@ -125,6 +125,7 @@ impl Dom {
             }
             it.host_checkpoint()?;
         }
+        self.motion_frame(it)?;
         self.resize_frame(it)?;
         self.io_frame(it)?;
         if !self.frame.cbs.borrow().is_empty() {
