@@ -619,37 +619,57 @@ impl Server {
         }
         let mut out = String::new();
         for (i, d) in live.dl.list().into_iter().enumerate() {
-            if d.state == DownloadState::Running || !live.told.insert(i) {
+            if matches!(d.state, DownloadState::Running | DownloadState::Queued | DownloadState::Paused) || !live.told.insert(i) {
                 continue;
             }
             out.push('\n');
             out.push_str(&match &d.state {
                 DownloadState::Failed(why) => format!("download failed: {}: {why}", bare_drive::run::safe_url(&d.url)),
+                DownloadState::Cancelled => format!("download cancelled: {}", bare_drive::run::safe_url(&d.url)),
                 _ => format!("downloaded: {} ({} bytes, {})", d.path.display(), d.bytes, d.mime),
             });
         }
         Ok(live.red.clean(&out))
     }
 
-    /// The files that the session saved.
+    /// The files that the session saved, with a number for each; or an operation on one of them: pause, resume, cancel, limit.
     fn downloads(&mut self, args: &Value) -> Result<String, String> {
         let live = self.live_mut(args)?;
+        let op = args.get("op").and_then(Value::as_str).unwrap_or("list");
+        if op != "list" {
+            let n = args.get("id").and_then(Value::as_u64).filter(|&n| n >= 1).ok_or("give id: the number of the download in the list")?;
+            let id = n as usize - 1;
+            match op {
+                "pause" => live.dl.pause(id)?,
+                "resume" => live.dl.resume(id)?,
+                "cancel" => live.dl.cancel(id)?,
+                "limit" => live.dl.limit(id, args.get("bytes_per_second").and_then(Value::as_u64))?,
+                _ => return Err(format!("unknown op {op}: use list, pause, resume, cancel or limit")),
+            }
+            return Ok(format!("ok: {op} #{n}"));
+        }
         let list = live.dl.list();
         if list.is_empty() {
             return Ok(format!("no downloads (folder: {})", live.dl.dir().display()));
         }
         let lines: Vec<String> = list
             .iter()
-            .map(|d| {
+            .enumerate()
+            .map(|(i, d)| {
                 let url = bare_drive::run::safe_url(&d.url);
-                match &d.state {
-                    DownloadState::Running => match d.total {
-                        Some(t) => format!("running: {url} ({} of {t} bytes)", d.bytes),
-                        None => format!("running: {url} ({} bytes)", d.bytes),
-                    },
+                let size = match d.total {
+                    Some(t) => format!("{} of {t} bytes", d.bytes),
+                    None => format!("{} bytes", d.bytes),
+                };
+                let line = match &d.state {
+                    DownloadState::Queued => format!("queued: {url}"),
+                    DownloadState::Running => format!("running: {url} ({size})"),
+                    DownloadState::Paused => format!("paused: {url} ({size})"),
                     DownloadState::Failed(why) => format!("failed: {url}: {why}"),
+                    DownloadState::Cancelled => format!("cancelled: {url}"),
                     DownloadState::Done => format!("{} ({} bytes, {}) from {url}", d.path.display(), d.bytes, d.mime),
-                }
+                };
+                format!("#{} {line}", i + 1)
             })
             .collect();
         Ok(live.red.clean(&lines.join("\n")))
@@ -1073,8 +1093,8 @@ fn tools() -> Value {
         },
         {
             "name": "downloads",
-            "description": "The files that the live session saved from downloads (a response with Content-Disposition: attachment or a type the page cannot show, or a link with a download attribute, also a blob: or data: URL made by a script): path, size, type and source URL, or running or failed. A download does not replace the page; act names each one that ends in its receipt.",
-            "inputSchema": {"type": "object", "properties": {"session": S}},
+            "description": "The files that the live session saved from downloads (a response with Content-Disposition: attachment or a type the page cannot show, or a link with a download attribute, also a blob: or data: URL made by a script): #number, path, size, type and source URL, or queued, running (bytes so far), paused, failed or cancelled. A download does not replace the page; act names each one that ends in its receipt. A big file downloads over up to 8 connections and resumes after a cut. op: list (default), pause, resume, cancel (removes the file), limit (bytes_per_second; 0 or absent: no limit), with id = the #number. Only a server that allows ranges lets a download pause. At most 3 downloads run at once; more wait as queued.",
+            "inputSchema": {"type": "object", "properties": {"session": S, "op": {"type": "string", "enum": ["list", "pause", "resume", "cancel", "limit"]}, "id": {"type": "integer"}, "bytes_per_second": {"type": "integer"}}},
         },
         {
             "name": "sessions",

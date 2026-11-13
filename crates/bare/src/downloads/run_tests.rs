@@ -124,11 +124,8 @@ fn send(w: &mut TcpStream, body: &[u8], cut: Option<usize>, rate: usize) -> io::
     Ok(())
 }
 
-/// Download `url` as the session does, and wait for the end.
-fn fetch(url: &str, tag: &str) -> (Downloads, super::super::Download) {
-    let dir = std::env::temp_dir().join(format!("bare-dl-run-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    let dl = Downloads::new(dir);
+/// Start a download of `url` in `dl` as the session does. Gives its number.
+fn begin(dl: &Downloads, url: &str) -> usize {
     let mut client = Client::new();
     client.allow_big();
     let u = Url::parse(url).unwrap();
@@ -138,14 +135,44 @@ fn fetch(url: &str, tag: &str) -> (Downloads, super::super::Download) {
     body.unlimited();
     let id = dl.start(url);
     dl.begin(id, "file.bin", "application/octet-stream", Start { client, url: u, from: None, get: true, response, body });
+    id
+}
+
+fn folder(tag: &str) -> Downloads {
+    let dir = std::env::temp_dir().join(format!("bare-dl-run-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    Downloads::new(dir)
+}
+
+/// Wait until download `id` is not running or queued.
+fn wait(dl: &Downloads, id: usize) -> super::super::Download {
     let end = std::time::Instant::now() + Duration::from_secs(60);
     loop {
         let d = dl.list()[id].clone();
-        if d.state != DownloadState::Running || std::time::Instant::now() > end {
-            return (dl, d);
+        if !matches!(d.state, DownloadState::Running | DownloadState::Queued) || std::time::Instant::now() > end {
+            return d;
         }
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+/// Try `f` until the job has started (`try again`).
+fn retry(f: impl Fn() -> Result<(), String>) {
+    for _ in 0..200 {
+        match f() {
+            Err(e) if e.contains("try again") => std::thread::sleep(Duration::from_millis(5)),
+            r => return r.unwrap(),
+        }
+    }
+    panic!("the job did not start");
+}
+
+/// Download `url` as the session does, and wait for the end.
+fn fetch(url: &str, tag: &str) -> (Downloads, super::super::Download) {
+    let dl = folder(tag);
+    let id = begin(&dl, url);
+    let d = wait(&dl, id);
+    (dl, d)
 }
 
 fn check(d: &super::super::Download, want: &[u8]) {
@@ -232,4 +259,91 @@ fn a_reply_over_128_mib_downloads() {
     let srv = serve(data.clone(), Cfg::default());
     let (_, d) = fetch(&srv.url, "big");
     check(&d, &data);
+}
+
+#[test]
+fn a_fourth_download_waits_for_a_place() {
+    let data = pattern(2 << 20, 10);
+    let srv = serve(data.clone(), Cfg { ranges: true, rate: 4 << 20, ..Cfg::default() });
+    let dl = folder("queue");
+    let ids: Vec<usize> = (0..4).map(|_| begin(&dl, &srv.url)).collect();
+    assert_eq!(dl.list()[3].state, DownloadState::Queued);
+    assert_eq!(dl.running(), 4);
+    for &id in &ids {
+        let d = wait(&dl, id);
+        assert_eq!(d.state, DownloadState::Done, "{d:?}");
+        assert!(std::fs::read(&d.path).unwrap() == data);
+    }
+    let _ = std::fs::remove_dir_all(dl.dir());
+}
+
+#[test]
+fn a_paused_download_keeps_its_bytes_and_resumes() {
+    let data = pattern(16 << 20, 11);
+    let srv = serve(data.clone(), Cfg { ranges: true, rate: 4 << 20, ..Cfg::default() });
+    let dl = folder("pause");
+    let id = begin(&dl, &srv.url);
+    std::thread::sleep(Duration::from_millis(300));
+    retry(|| dl.pause(id));
+    assert_eq!(dl.list()[id].state, DownloadState::Paused);
+    assert_eq!(dl.running(), 0);
+    // The threads stop after their next piece; then nothing moves.
+    std::thread::sleep(Duration::from_millis(400));
+    let a = dl.list()[id].bytes;
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(dl.list()[id].bytes, a);
+    assert!(a > 0 && a < 16 << 20, "{a}");
+    let requests = srv.log.lock().unwrap().len();
+    dl.resume(id).unwrap();
+    let d = wait(&dl, id);
+    check(&d, &data);
+    // The resumed ranges start where the bytes stopped, not at 0.
+    let log = srv.log.lock().unwrap().clone();
+    assert!(log[requests..].iter().all(|r| r.starts_with("bytes=") && r != "bytes=0-"), "{log:?}");
+}
+
+#[test]
+fn a_cancelled_download_leaves_no_file() {
+    let data = pattern(16 << 20, 12);
+    let srv = serve(data, Cfg { ranges: true, rate: 2 << 20, ..Cfg::default() });
+    let dl = folder("cancel");
+    let id = begin(&dl, &srv.url);
+    std::thread::sleep(Duration::from_millis(200));
+    retry(|| dl.cancel(id));
+    let d = wait(&dl, id);
+    assert_eq!(d.state, DownloadState::Cancelled);
+    assert_eq!(std::fs::read_dir(dl.dir()).map_or(0, |r| r.count()), 0);
+}
+
+#[test]
+fn a_limit_slows_the_whole_job() {
+    // 4 MiB at 16 MiB/s is 0.25 s without a limit (one connection: too small to split).
+    let data = pattern(4 << 20, 13);
+    let srv = serve(data.clone(), Cfg { ranges: true, rate: 16 << 20, ..Cfg::default() });
+    let dl = folder("limit");
+    let t = std::time::Instant::now();
+    let id = begin(&dl, &srv.url);
+    retry(|| dl.limit(id, Some(2 << 20)));
+    let d = wait(&dl, id);
+    // At 2 MiB/s it takes about 2 s; a few pieces pass before the limit is set.
+    assert!(t.elapsed() > Duration::from_millis(1200), "{:?}", t.elapsed());
+    check(&d, &data);
+}
+
+#[test]
+fn a_download_without_ranges_cannot_pause() {
+    let data = pattern(8 << 20, 14);
+    let srv = serve(data.clone(), Cfg { ranges: false, rate: 8 << 20, ..Cfg::default() });
+    let dl = folder("nopause");
+    let id = begin(&dl, &srv.url);
+    let mut r = Err(String::new());
+    for _ in 0..200 {
+        r = dl.pause(id);
+        if !matches!(&r, Err(e) if e.contains("try again")) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(r.unwrap_err().contains("cannot pause"));
+    check(&wait(&dl, id), &data);
 }

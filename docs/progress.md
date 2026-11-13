@@ -8599,3 +8599,19 @@ Checks: `cargo test --release -p bare --lib downloads` (17 pass, 3 runs). `bare-
 New tests: one request for a small file, resume after a cut, a split over 4 or more connections, a changed file, a restart without ranges, a refused range, a failed download leaves no file, a reply over 128 MiB.
 
 Not tested: instruction counts of the login journeys (every navigation of a session with downloads now makes one client fork; no journey was measured). A Windows build (`seek_write`). A server that sends a weak ETag only, or `Last-Modified` only. Many downloads at once against the 16-connection limit. The tests were written with the code, not before it.
+
+## 2026-11-13: downloads, step 3 (queue and controls)
+
+Design: `docs/design-downloads.md`, section 5.5.
+
+What changed:
+- `DownloadState` has `Queued`, `Paused` and `Cancelled`. At most 3 jobs of one `Downloads` run at once (`MAX_JOBS`); more wait in order. A queued job keeps its first reply unread; when its turn comes, a dead connection resumes like any cut.
+- `Downloads::pause`, `resume`, `cancel` and `limit`. Pause starts a new generation, so the range threads stop after their next piece; the bytes and the segment list stay. Resume starts the ranges again from their last byte. A job that cannot resume (no ranges, no validator, a coding or a POST) cannot pause. Cancel removes the file; a queued job leaves the queue. The limit is a token bucket for the whole job (all its connections).
+- `bare-mcp` `downloads`: each line has a `#number`. `op` = `list`, `pause`, `resume`, `cancel` or `limit` (`bytes_per_second`), with `id` = the number. `running()` counts queued downloads, so `act` waits for them; a paused one does not hold `act`.
+- A paused job keeps its place in the 3. Hypothesis: this is rare enough; change it if a journey needs more.
+
+Checks: `cargo test --release -p bare --lib downloads` (22 pass, 3 runs). New tests: a fourth download waits and all 4 end correct; a paused download keeps its bytes (no change for 400 ms) and resumes with ranges that do not start at 0; a cancelled download leaves no file; a 2 MiB/s limit makes a 0.25 s download take more than 1.2 s; a download without ranges refuses pause. `bare-mcp` and `bare-drive` tests pass; the `bare-mcp` download test also checks the `#1` numbers and the errors of `op`.
+
+By hand through `bare-mcp` (`/data/bare-tmp/design/downloads/controls.py`, 64 MiB at 1 MiB/s for each connection, 1 run): pause held the bytes at 8,807,904 for 1 s; after resume with a 1 MiB/s limit the count grew by 2,334,496 bytes in 2 s; with the limit off the file ended with the expected MD5.
+
+Not tested: a speed limit over many connections against a real server; a queued job whose first connection died while it waited (covered only by the resume path). Not benchmarked: the queue and the controls do not change the transfer path, except one lock-held subtraction for each piece when a limit is set.
