@@ -718,6 +718,10 @@ impl Session {
         self.report();
         drop(self.host);
         self.rep.ms = self.start.elapsed().as_secs_f64() * 1000.0;
+        // A recording or a replay (`bare_net::replay`) is a benchmark: let the pictures that still load and decode finish, so that each run does the same work.
+        if bare_net::replay::Tape::from_env().is_some() {
+            self.net.drain(Duration::from_secs(30));
+        }
         self.rep
     }
 }

@@ -137,3 +137,20 @@ fn a_cut_body_and_a_failed_request_replay_as_they_were() {
     assert_eq!(replay.get(&url(dead, "/")).err().unwrap().to_string(), live_refused);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_fill_goes_to_the_network_only_for_what_is_missing() {
+    let (dir, count) = (tmp("fill"), Arc::new(AtomicUsize::new(0)));
+    let port = serve(count.clone());
+    client(&Tape::record(&dir)).get(&url(port, "/gz")).unwrap();
+    assert_eq!(count.load(SeqCst), 1);
+    let mut fill = client(&Tape::fill(&dir));
+    fill.get(&url(port, "/gz")).unwrap();
+    assert_eq!(count.load(SeqCst), 1, "a recorded reply needs no request");
+    let echo = fill.send(&Request::post(&url(port, "/echo"), &[], b"q=1")).unwrap();
+    assert_eq!((echo.body.as_slice(), count.load(SeqCst)), (b"q=1".as_slice(), 2));
+    // The reply that the fill got is in the directory now: a replay needs no server.
+    let again = client(&Tape::replay(&dir)).send(&Request::post(&url(port, "/echo"), &[], b"q=1")).unwrap();
+    assert_eq!((again.body.as_slice(), count.load(SeqCst)), (b"q=1".as_slice(), 2));
+    let _ = std::fs::remove_dir_all(&dir);
+}

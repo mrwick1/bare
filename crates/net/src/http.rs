@@ -724,10 +724,13 @@ impl Client {
             }
             None => conditions,
         };
-        let replay = self.tape.clone().filter(|t| t.replays());
-        let result = match &replay {
-            Some(tape) => self.replayed(tape, url, plan),
-            None => match self.attempt(url, plan, conditions) {
+        let tape = self.tape.clone();
+        let found = tape.as_ref().filter(|t| t.reads()).map(|t| t.find(&Self::label(url, plan)));
+        let replayed = matches!(found, Some(Some(_)));
+        let result = match found {
+            Some(Some(entry)) => self.replayed(entry, url, plan),
+            Some(None) if !tape.as_ref().is_some_and(|t| t.writes()) => Err(format!("replay: no recorded reply for {}", Self::label(url, plan)).into()),
+            _ => match self.attempt(url, plan, conditions) {
                 // The server did not start the request (`GOAWAY`, a refused stream): any method may run again, once, on a new connection.
                 Err(e) if e.is::<h2::Unprocessed>() => self.attempt(url, plan, conditions),
                 result => result,
@@ -736,10 +739,8 @@ impl Client {
         let (response, body) = match result {
             Ok(ok) => ok,
             Err(e) => {
-                if let Some(tape) = &self.tape
-                    && !tape.replays()
-                {
-                    tape.slot(Self::label(url, plan)).0.save(&replay::Entry { error: Some(e.to_string()), ..replay::Entry::default() });
+                if let Some(tape) = tape.as_ref().filter(|t| t.writes() && !replayed) {
+                    tape.slot(Self::label(url, plan)).save(&replay::Entry { error: Some(e.to_string()), ..replay::Entry::default() });
                 }
                 return Err(e);
             }
@@ -754,8 +755,7 @@ impl Client {
     }
 
     /// Answer a request from the tape: no DNS, no socket. The reply is as `attempt` gives it, with its body in memory.
-    fn replayed(&mut self, tape: &replay::Tape, url: &Url, plan: &Plan) -> Result<(Response, Body), Error> {
-        let entry = tape.next(Self::label(url, plan))?;
+    fn replayed(&mut self, entry: replay::Entry, url: &Url, plan: &Plan) -> Result<(Response, Body), Error> {
         if let Some(error) = entry.error {
             return Err(error.into());
         }
@@ -778,9 +778,9 @@ impl Client {
     /// While recording, give the body a tap that writes the reply to the tape when the body ends. The body is the raw one, before `Content-Encoding` is undone.
     fn tapped(&self, url: &Url, plan: &Plan, response: &Response, body: Body) -> Body {
         match &self.tape {
-            Some(tape) if !tape.replays() => {
+            Some(tape) if tape.writes() => {
                 let entry = replay::Entry { status: response.status, headers: response.headers.clone(), close: response.close, ..replay::Entry::default() };
-                Body(Source::Tap(Box::new(Tap { inner: body, slot: Some(tape.slot(Self::label(url, plan)).0), entry })))
+                Body(Source::Tap(Box::new(Tap { inner: body, slot: Some(tape.slot(Self::label(url, plan))), entry })))
             }
             _ => body,
         }

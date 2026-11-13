@@ -3,7 +3,10 @@
 //! - `BARE_NET_RECORD=<dir>`: every reply that a client gets is also written to `<dir>`. Use an empty directory. The client works as usual.
 //! - `BARE_NET_REPLAY=<dir>`: no request leaves the process (no DNS lookup, no socket). Each request is answered from `<dir>`. A request
 //!   with no recorded reply fails with the error `replay: no recorded reply for <label>`, and the same text goes to stderr.
-//!   `BARE_NET_REPLAY` wins when both are set.
+//! - `BARE_NET_FILL=<dir>`: as replay, but a request with no recorded reply goes to the network and its reply is recorded in `<dir>`. A page
+//!   that runs fast on replay asks for files that the live recording never asked for (the recording ended first): fill until a run has no
+//!   such line on stderr, and the recording is closed for that journey.
+//!   Precedence: `BARE_NET_FILL`, then `BARE_NET_REPLAY`, then `BARE_NET_RECORD`.
 //!
 //! What is stored. One file for each request, named `<hash of the label>.<n>`. The label is `METHOD scheme://host:port/path?query`, then
 //! the FNV-1a hash of the request body when the body is not empty. `n` counts the requests with the same label, from 0: a page that polls
@@ -29,7 +32,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 /// A directory of stored replies, and how far each label has got in this process.
 pub struct Tape {
     dir: PathBuf,
-    replay: bool,
+    /// Answers from the directory when it can.
+    reads: bool,
+    /// Goes to the network, and records the reply, when the directory cannot answer.
+    writes: bool,
     seen: Mutex<HashMap<String, usize>>,
 }
 
@@ -59,9 +65,10 @@ impl Tape {
         static TAPE: OnceLock<Option<Arc<Tape>>> = OnceLock::new();
         TAPE.get_or_init(|| {
             let var = |name| std::env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from);
-            match (var("BARE_NET_REPLAY"), var("BARE_NET_RECORD")) {
-                (Some(dir), _) => Some(Tape::replay(dir)),
-                (None, Some(dir)) => Some(Tape::record(dir)),
+            match (var("BARE_NET_FILL"), var("BARE_NET_REPLAY"), var("BARE_NET_RECORD")) {
+                (Some(dir), ..) => Some(Tape::fill(dir)),
+                (None, Some(dir), _) => Some(Tape::replay(dir)),
+                (None, None, Some(dir)) => Some(Tape::record(dir)),
                 _ => None,
             }
         })
@@ -69,15 +76,25 @@ impl Tape {
     }
 
     pub fn record(dir: impl Into<PathBuf>) -> Arc<Tape> {
-        Arc::new(Tape { dir: dir.into(), replay: false, seen: Mutex::default() })
+        Arc::new(Tape { dir: dir.into(), reads: false, writes: true, seen: Mutex::default() })
     }
 
     pub fn replay(dir: impl Into<PathBuf>) -> Arc<Tape> {
-        Arc::new(Tape { dir: dir.into(), replay: true, seen: Mutex::default() })
+        Arc::new(Tape { dir: dir.into(), reads: true, writes: false, seen: Mutex::default() })
     }
 
-    pub fn replays(&self) -> bool {
-        self.replay
+    pub fn fill(dir: impl Into<PathBuf>) -> Arc<Tape> {
+        Arc::new(Tape { dir: dir.into(), reads: true, writes: true, seen: Mutex::default() })
+    }
+
+    /// Look in the directory before a request.
+    pub fn reads(&self) -> bool {
+        self.reads
+    }
+
+    /// Record the replies of requests that go to the network.
+    pub fn writes(&self) -> bool {
+        self.writes
     }
 
     /// The label of a request. `url` is `scheme://host:port/path?query`.
@@ -85,29 +102,35 @@ impl Tape {
         if body.is_empty() { format!("{method} {url}") } else { format!("{method} {url} {:016x}", fnv(body)) }
     }
 
-    /// The next slot of this label. Call it once for each request.
-    pub fn slot(&self, label: String) -> (Slot, usize) {
-        let n = {
-            let mut seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
-            let c = seen.entry(label.clone()).or_insert(0);
-            *c += 1;
-            *c - 1
-        };
-        (Slot { path: self.dir.join(format!("{:016x}.{n}", fnv(label.as_bytes()))), label }, n)
+    /// The slot for the next request with this label (it goes to the network, and `save` records the reply there). Call it once for each such request.
+    pub fn slot(&self, label: String) -> Slot {
+        let n = self.bump(&label);
+        Slot { path: self.path(&label, n), label }
     }
 
-    /// The reply for the next request with this label: the one that was recorded `n`-th, or the last one. The miss is logged.
-    pub fn next(&self, label: String) -> Result<Entry, String> {
-        let (slot, n) = self.slot(label);
-        let found = (0..=n).rev().find_map(|i| {
-            let path = slot.path.with_extension(i.to_string());
-            read(&path).filter(|(l, _)| *l == slot.label).map(|(_, e)| e)
-        });
-        found.ok_or_else(|| {
-            let msg = format!("replay: no recorded reply for {}", slot.label);
-            eprintln!("bare-net: {msg} (in {})", self.dir.display());
-            msg
-        })
+    fn bump(&self, label: &str) -> usize {
+        let mut seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
+        let c = seen.entry(label.to_string()).or_insert(0);
+        *c += 1;
+        *c - 1
+    }
+
+    fn path(&self, label: &str, n: usize) -> PathBuf {
+        self.dir.join(format!("{:016x}.{n}", fnv(label.as_bytes())))
+    }
+
+    /// The reply for the next request with this label: the one that was recorded `n`-th, or the last one. `None`: nothing is recorded for the
+    /// label (the miss is logged, and does not count as a request of the label: a `slot` for it records the reply at the same place).
+    pub fn find(&self, label: &str) -> Option<Entry> {
+        let n = self.seen.lock().unwrap_or_else(|e| e.into_inner()).get(label).copied().unwrap_or(0);
+        let found = (0..=n).rev().find_map(|i| read(&self.path(label, i)).filter(|(l, _)| l == label).map(|(_, e)| e));
+        match found {
+            Some(_) => {
+                self.bump(label);
+            }
+            None => eprintln!("bare-net: replay: no recorded reply for {label}{}", if self.writes { " (fetching it)" } else { "" }),
+        }
+        found
     }
 }
 
@@ -214,10 +237,10 @@ mod tests {
         let d = dir("order");
         let rec = Tape::record(&d);
         let label = || Tape::label("GET", "http://a:80/x", b"");
-        rec.slot(label()).0.save(&reply("one"));
-        rec.slot(label()).0.save(&reply("two"));
+        rec.slot(label()).save(&reply("one"));
+        rec.slot(label()).save(&reply("two"));
         let play = Tape::replay(&d);
-        let bodies: Vec<_> = (0..3).map(|_| String::from_utf8(play.next(label()).unwrap().body).unwrap()).collect();
+        let bodies: Vec<_> = (0..3).map(|_| String::from_utf8(play.find(&label()).unwrap().body).unwrap()).collect();
         assert_eq!(bodies, ["one", "two", "two"]);
         let _ = fs::remove_dir_all(&d);
     }
@@ -226,29 +249,36 @@ mod tests {
     fn the_body_of_a_request_is_part_of_the_label() {
         let d = dir("body");
         let rec = Tape::record(&d);
-        rec.slot(Tape::label("POST", "http://a:80/q", b"a=1")).0.save(&reply("first"));
+        rec.slot(Tape::label("POST", "http://a:80/q", b"a=1")).save(&reply("first"));
         let play = Tape::replay(&d);
-        assert!(play.next(Tape::label("POST", "http://a:80/q", b"a=2")).is_err());
-        assert_eq!(play.next(Tape::label("POST", "http://a:80/q", b"a=1")).unwrap().body, b"first");
+        assert!(play.find(&Tape::label("POST", "http://a:80/q", b"a=2")).is_none());
+        assert_eq!(play.find(&Tape::label("POST", "http://a:80/q", b"a=1")).unwrap().body, b"first");
         let _ = fs::remove_dir_all(&d);
     }
 
     #[test]
-    fn a_miss_names_the_request() {
-        let d = dir("miss");
-        let err = Tape::replay(&d).next(Tape::label("GET", "http://a:80/none", b"")).unwrap_err();
-        assert_eq!(err, "replay: no recorded reply for GET http://a:80/none");
+    fn a_fill_that_missed_records_at_the_place_of_the_miss() {
+        let d = dir("fill");
+        Tape::record(&d).slot("GET http://a:80/x".into()).save(&reply("one"));
+        let fill = Tape::fill(&d);
+        assert_eq!(fill.find("GET http://a:80/x").unwrap().body, b"one");
+        // The second request of the label is a miss: the network answers, and the slot holds the next number.
+        assert!(fill.find("GET http://a:80/x").is_some(), "after the last reply, the last one repeats");
+        assert!(fill.find("GET http://a:80/y").is_none());
+        fill.slot("GET http://a:80/y".into()).save(&reply("two"));
+        assert_eq!(Tape::replay(&d).find("GET http://a:80/y").unwrap().body, b"two");
+        let _ = fs::remove_dir_all(&d);
     }
 
     #[test]
     fn a_failure_and_a_cut_body_survive_the_file() {
         let d = dir("kinds");
         let rec = Tape::record(&d);
-        rec.slot("GET http://a:80/f".into()).0.save(&Entry { error: Some("connection refused".into()), ..Entry::default() });
-        rec.slot("GET http://a:80/c".into()).0.save(&Entry { complete: false, ..reply("half") });
+        rec.slot("GET http://a:80/f".into()).save(&Entry { error: Some("connection refused".into()), ..Entry::default() });
+        rec.slot("GET http://a:80/c".into()).save(&Entry { complete: false, ..reply("half") });
         let play = Tape::replay(&d);
-        assert_eq!(play.next("GET http://a:80/f".into()).unwrap().error.as_deref(), Some("connection refused"));
-        let cut = play.next("GET http://a:80/c".into()).unwrap();
+        assert_eq!(play.find("GET http://a:80/f").unwrap().error.as_deref(), Some("connection refused"));
+        let cut = play.find("GET http://a:80/c").unwrap();
         assert!(!cut.complete && cut.body == b"half");
         let _ = fs::remove_dir_all(&d);
     }
