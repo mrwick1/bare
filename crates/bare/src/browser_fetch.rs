@@ -522,6 +522,12 @@ struct OpenStream {
     since: std::time::Instant,
 }
 
+/// The position of the request to settle next: the first one, or on a live page the first that is ready (not started, or its reply is in).
+fn next_ready(queue: &VecDeque<Pending>, live: bool) -> Option<usize> {
+    let ready = |p: &Pending| p.started.as_ref().is_none_or(|t| t.done());
+    if live { queue.iter().position(ready) } else { queue.front().map(|_| 0) }
+}
+
 /// Open event streams on a page, as the 6 connections of Chrome to one HTTP/1.1 host. One more fails with a network error.
 const MAX_STREAMS: usize = 6;
 /// Live: a started GET that has no reply after this long is a long-poll and leaves the ordered queue (`Dom::sync_detached`).
@@ -662,7 +668,8 @@ impl Dom {
     /// turn hold `max_retained` bytes; the page thread sends it at its turn. So the result does not change, only the time.
     /// A request that is not a GET or a HEAD may change the server. It runs when all before it are done, on the thread that settles
     /// it (a worker gains nothing: nothing after it starts before it is done), so the server sees these requests in the order of the script.
-    /// Live: every queued request starts at once, also one alone; a request that is not a GET or a HEAD starts when it is first.
+    /// Live: every queued request starts at once, also one alone and one that is not a GET or a HEAD, and each settles when its reply
+    /// is in (`fetch_ready`), as in a browser: a request that hangs does not hold the requests after it.
     /// A live page calls this as it queues a request (`queue_now`), so a busy script thread does not hold the request back.
     pub(crate) fn start_queued(&self) {
         let live = self.fetch.live.get();
@@ -676,8 +683,8 @@ impl Dom {
         }
         let mut st = self.fetch.st.borrow_mut();
         let st = &mut *st;
-        for (i, p) in st.queue.iter_mut().take(AHEAD).enumerate() {
-            if !p.method.safe() && !(live && i == 0) {
+        for p in st.queue.iter_mut().take(AHEAD) {
+            if !p.method.safe() && !live {
                 break;
             }
             if p.started.is_none() {
@@ -2565,12 +2572,13 @@ impl Browser {
         }
     }
 
-    /// Can the first queued request settle now without a wait? `None`: none is queued. `Some(false)`: its reply is not in yet.
-    /// A request that has not started counts as ready: its turn starts it.
+    /// Can a queued request settle now without a wait? `None`: none is queued. `Some(false)`: no reply is in yet.
+    /// A request that has not started counts as ready: its turn starts it. Only the first request counts, but on a live page any one does.
     pub(crate) fn fetch_ready(&self) -> Option<bool> {
         self.dom.sync_detached();
         let st = self.dom.fetch.st.borrow();
-        st.queue.front().map(|p| p.started.as_ref().is_none_or(|t| t.done()))
+        st.queue.front()?;
+        Some(next_ready(&st.queue, self.dom.fetch.live.get()).is_some())
     }
 
     /// Event streams: `Some(true)` when one has a message for the page, `Some(false)` when streams are open and none has, `None` when
@@ -2637,7 +2645,7 @@ impl Browser {
         Ok(n)
     }
 
-    /// Run up to `max` queued requests, oldest first. Each one does its blocking I/O, settles its promise and runs a microtask
+    /// Run up to `max` queued requests, oldest first (on a live page, the oldest whose reply is in). Each one does its blocking I/O, settles its promise and runs a microtask
     /// checkpoint, so a callback may queue the next request: it runs in this call if `max` allows. Returns how many ran.
     /// A `Limit` ends the call (the VM is then unusable, as for any other limit).
     pub fn run_network_tasks(&mut self, max: usize) -> R<usize> {
@@ -2660,7 +2668,7 @@ impl Browser {
             }
             let Some(mut task) = ({
                 let mut st = dom.fetch.st.borrow_mut();
-                let t = st.queue.pop_front();
+                let t = next_ready(&st.queue, dom.fetch.live.get()).and_then(|i| st.queue.remove(i));
                 if let Some(t) = &t {
                     st.queued_bytes -= t.body.as_ref().map_or(0, |b| b.len());
                 }
