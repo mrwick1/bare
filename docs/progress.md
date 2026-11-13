@@ -8692,3 +8692,55 @@ The ratio grows when the test is shorter or the login is a larger part of it. Th
 
 - The reply cache still empties itself when one reply does not fit.
 - The steps of a composed own test have other line numbers than the test file (the setup is inserted before them); a failure names the line of the composed text.
+
+## 2026-11-13: cheap CSSOM objects (shared declaration prototype, rule objects on demand)
+
+Step 3 of `docs/perf-goal.md` (second part), `design-style.md` section 3.5 and phase 5.
+
+### What was built
+
+- A rule declaration (`rule.style`) has no own accessors. It uses the one `CSSStyleDeclaration` prototype of `el.style`. The internal slot is the rule id (`browser_style.rs` hooks `declaration_written` after each write).
+- `cssRules` and `cssRules.length` make no rule object. `cssRules[i]` makes one and caches it. The list keeps a 12-byte `Entry::Chunk(start, end)` span for each rule that JS has not read. The length stays exact: a validity parse of the chunk skips a rule that does not parse. An unread rule is published verbatim from its chunk text.
+- A declaration is made on the first read of `rule.style`. It costs one detached DOM node and is not counted by the wrapper limit.
+- `MAX_OBJECTS` goes from 65,536 to 1 << 19. `MAX_RULES` is 1 << 21 (24 MiB of entries). Why: a rule that is read costs 585 B (selector only) to about 0.9 KB (with `.style`). 187,852 rules cost 585 B each, so the worst case at the cap is about 290 MiB. The `style-objects` limit (65,536) stays and binds first when a page reads `.style` of more than about 65,000 rules.
+- Decision: `decisions.md`. `design-style.md` is corrected: Chrome has the CSS properties as own enumerable keys on each declaration. The shared prototype matches bare `el.style` and not Chrome. This is a known difference. No journey depends on it (checked: 2 of 48 journeys use the CSSOM at all, by a trace build).
+
+### Numbers
+
+`sheety_16383` (16 MiB sheet) with the `cssRules` read, 3 runs each, machine archMachine. Peak RSS by `wait4`, instructions by `perf stat -e instructions:u`.
+
+| Build | Peak RSS (range) | Instructions | Outcome |
+| --- | --- | --- | --- |
+| BASE `f6415364` | 970 MiB (969,904 to 970,576 KiB) | 18.18 G | stops on `cssom-objects` |
+| MAIN `1ea36fda` | 973 MiB (972,972 to 973,416 KiB) | 20.52 G | stops on `cssom-objects` |
+| NEW | 272 MiB (278,468 to 279,004 KiB) | 10.10 G | passes |
+
+Criterion 5 (300 MiB or lower): met, 272 MiB. `sheety_8192`: BASE 848 MB and 14.37 G, MAIN 851 MB and 16.71 G, NEW 147 MB and 5.08 G. Cost per rule before: 10.2 KB. After: 585 B (selector read), about 0.9 KB (with `.style`).
+
+Criterion 8 (cap by the rule count): the cap is now set by cost, with one limit (`style-objects`) that still binds at about 65,000 declarations.
+
+Journeys, live (the step-1 corpus runner is not on main), 3 runs each, min of 3, MAIN `a7ba0525` and NEW: 46 of 48 pass on both. `hn-front` and `hn-new-past` fail in all 3 runs on both builds (cause not examined). Total 23,878 M and 24,303 M (+1.8%). The sum is live noise: the same journey moves more between runs than between builds. `paulgraham-home` is 44 M and 61 M on NEW, but the same binary of MAIN `1ea36fda` also gives 43.9 M and 61.0 M in two runs. `go-dev-home` varies 121 to 271 M on MAIN. This total is not a clean A/B and must not be read as one. 2 of 48 journeys touch the CSSOM, so the journeys are not the place where this change shows.
+
+Cost matrix `tools/js/cost_matrix.sh` against `1ea36fda`: 803 rows, mean change +0.004%. Rows over 0.5%: `dataset_load keys 1000 50` +0.60% and `keys 10000 50` +0.63%, `resources_load small 1` +1.7% and `small 10` +2.2%. I think all four are codegen or timing noise, not CSSOM cost:
+- The two `dataset_load` rows do not call CSSOM code. I tried `#[inline(never)]` on the CSSOM `len`, `item` and `fill`: no change. Base commits swing -0.6% to +2.9% on this row.
+- `resources_load small 1` run 3 times on each build outside the matrix: 6.87 to 6.89 M on both.
+Two rows (`parse_load deep 1` and `deep 10`) do not run. I did not diagnose them. 
+
+### Checks
+
+- New tests in `crates/bare/src/browser_cssom_tests.rs` (8): the prototype and methods of a rule declaration, each write reaches the sheet text, `cssRules.length` makes no rule object, rule objects keep their place when the sheet changes, nested rules, a declaration made when a script needs it, a constructed sheet, and a read of more rules than the old cap. I do not claim they were written before the code.
+- Shape probe `probe.html` on Chrome and on bare before and after. Differences from Chrome that remain: own CSS keys (above), `parentRule` of a rule declaration is null (Chrome: the rule), `fontFamily` unsupported.
+- `cargo test --release -p bare --lib`: all pass.
+- `cargo test --release --workspace --no-fail-fast`: all pass except 7 TLS tests (`bare-net` `https_openssl` 2, `bare-tls` `client_openssl` 4 and `tls12_openssl` 1). The same 7 fail on main (openssl of this machine; see the entry of the SVG change above). `bare-drive` `chunked` failed in 2 of 2 workspace runs at load average about 40 (its limit is 10 s of wall time). It passes alone on NEW 4 times and on `1ea36fda` once. It is a load failure and does not touch the CSSOM.
+
+### Not tested
+
+The window mode. `test262_check.sh` and `exec_diff.sh` (no change in `crates/js`). The step-1 recorded corpus. Real logins. Memory with more than 65,000 declarations read (the `style-objects` limit stops it). The `cssom-objects` error at 524,288 objects.
+
+### Noticed, not changed
+
+- `parentRule` of a rule declaration is null. Chrome returns the rule.
+- A rule edit after `replaceSync` on a stale constructed sheet can write an empty source.
+- Each stale-stamp read reads and compares the whole sheet text once.
+- Each declaration that is read still takes one DOM node.
+- `parse_load deep 1` and `deep 10` do not run on either tree.
