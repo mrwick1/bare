@@ -142,6 +142,7 @@ fn drive() -> i32 {
             cores: std::thread::available_parallelism().map_or(1, |n| n.get()),
             avail_kib: mem_available_kib(),
             quiet: !opt.progress,
+            exe: None,
         };
         return suite::run(&cfg);
     }

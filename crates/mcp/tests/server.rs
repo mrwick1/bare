@@ -78,7 +78,7 @@ fn tools_list_names_the_tools() {
     let mut s = Server::start();
     let r = s.ask("tools/list", json!({}));
     let names: Vec<&str> = r["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(names, ["run_steps", "open", "step", "save_state", "ensure_session", "close", "snapshot", "act", "find", "read", "links", "screenshot", "eval", "console", "network", "diagnose", "downloads", "sessions", "storage"]);
+    assert_eq!(names, ["run_steps", "run_suite", "open", "step", "save_state", "ensure_session", "close", "snapshot", "act", "find", "read", "links", "screenshot", "eval", "console", "network", "diagnose", "downloads", "sessions", "storage"]);
 }
 
 #[test]
@@ -2396,4 +2396,76 @@ fn open_shares_the_http_cache_between_opens_and_fresh_does_not() {
     let (rep, error) = s.tool("open", json!({"url": format!("{base}/d"), "timeout_ms": 10000}));
     assert!(!error, "{rep}");
     assert_eq!(count("/app.js"), 2);
+}
+
+/// The suite fixture server of `tools/suite` (Python) on a free port. Gives the child (kill it at the end) and its origin.
+fn suite_server() -> (Child, String) {
+    let mut child = Command::new("python3").arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tools/suite/server.py")).stdout(Stdio::piped()).spawn().unwrap();
+    let mut line = String::new();
+    BufReader::new(child.stdout.as_mut().unwrap()).read_line(&mut line).unwrap();
+    let port = line.trim().strip_prefix("listening ").unwrap_or_else(|| panic!("fixture server said {line:?}"));
+    (child, format!("http://127.0.0.1:{port}"))
+}
+
+/// `bare-drive` is the worker program of a suite. `cargo test -p bare-mcp` does not build it: build it in the same target folder.
+fn ensure_bare_drive() {
+    let exe = std::path::PathBuf::from(env!("CARGO_BIN_EXE_bare-mcp"));
+    if exe.with_file_name("bare-drive").is_file() {
+        return;
+    }
+    let mut c = Command::new(std::env::var("CARGO").unwrap_or("cargo".into()));
+    c.args(["build", "-p", "bare-drive"]);
+    if exe.to_string_lossy().contains("/release/") {
+        c.arg("--release");
+    }
+    assert!(c.status().unwrap().success());
+}
+
+#[test]
+fn run_suite_gives_a_short_summary_and_names_a_failing_step_and_leaves_live_sessions_alone() {
+    ensure_bare_drive();
+    let (mut site, base) = suite_server();
+    let tests = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tools/suite/tests");
+    let dir = std::env::temp_dir().join(format!("bare-mcp-suite-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    for f in ["setup.steps", "01-read-00.steps", "02-read-01.steps"] {
+        std::fs::copy(format!("{tests}/{f}"), dir.join(f)).unwrap();
+    }
+    // A third test that fails at its third step: the page has no such heading.
+    std::fs::write(dir.join("03-broken.steps"), "open ${BASE}/home state=\"${STATE}\"\nexpect css=\"h1\" text=\"Heading home\"\nexpect css=\"h1\" text=\"No such heading\"\n").unwrap();
+    let secrets = dir.join("secrets");
+    std::fs::write(&secrets, "EMAIL=suite.user@example.test\nPASSWORD=suite pass 1!\n").unwrap();
+    let mut s = Server::start();
+    // A live session before the suite: the suite must leave it as it is.
+    let app = common::serve_app();
+    let (r, e) = s.tool("open", json!({"url": format!("{app}/"), "snapshot": false}));
+    assert!(!e, "{r}");
+    let (before, _) = s.tool("sessions", json!({}));
+    let args = |filter: Option<&str>| {
+        let mut a = json!({"dir": dir.to_str().unwrap(), "workers": 2, "vars": {"BASE": base}, "secrets_file": secrets.to_str().unwrap(), "timeout_ms": 5000});
+        if let Some(f) = filter {
+            a["filter"] = json!(f);
+        }
+        a
+    };
+    let (r, e) = s.tool("run_suite", args(None));
+    let text = r.as_str().unwrap().to_string();
+    assert!(!e, "{text}");
+    assert!(text.starts_with("FAILED 2/3 passed, 2 workers"), "{text}");
+    assert!(text.contains("logins 1"), "{text}");
+    assert!(text.contains("FAIL 03-broken (step line 3, "), "{text}");
+    assert!(text.contains("No such heading") && text.contains("peak RSS w0:"), "{text}");
+    assert!(!text.contains("suite pass 1!") && text.len() < 3000, "{text}");
+    // A filter runs only the tests that match, and a passing suite says ok.
+    let (r, e) = s.tool("run_suite", args(Some("read")));
+    assert!(!e && r.as_str().unwrap().starts_with("ok 2/2 passed"), "{r}");
+    let (r, e) = s.tool("run_suite", args(Some("nothing-like-this")));
+    assert!(e && r.as_str().unwrap().contains("no test matches"), "{r}");
+    let (after, _) = s.tool("sessions", json!({}));
+    assert_eq!(before, after);
+    let (r, e) = s.tool("read", json!({}));
+    assert!(!e, "{r}");
+    let _ = site.kill();
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -8805,3 +8805,28 @@ MAIN grows with nodes x sheets. NEW grows with the nodes (the page build) and sl
 - `plan` still copies the text of all sheets at each revision (`flatten`, `absolute_urls`; design L4, later).
 - The sheet limit is 256 sources by default; a page with 400 `<link>` sheets is refused on both trees.
 - `tell_links` still filters the list by `href` for each arriving sheet: O(sheets x links).
+
+## The `run_suite` tool of bare-mcp (owner decision 3 of `docs/design-suite.md`, section 9)
+
+### What was built
+
+`bare-mcp` has a tool `run_suite`: `dir` (required), `workers` (a number or `"auto"`), `filter` (a part of a test name), `perf` (bool), and `vars`, `secrets_file`, `width`, `height`, `timeout_ms`, `test_timeout_ms`. It runs the suite through `bare_drive::suite::run_report`, the same code as `bare-drive --suite`. The reply is a short text: `ok|FAILED P/N passed, K workers, MS ms, logins L`, one line for each failure (test, step line, kind, message; at most 20 and 300 characters each), and the peak RSS of each worker. It is cut at 3000 characters. For a failure it also gives the capture folder (`out:`); a passed run leaves no folder.
+
+Library change in `crates/drive/src/suite.rs` (small, no change of runner behavior): `run` split into `run_report(&Config) -> Result<Value, String>` (prints nothing) and `run` (prints the JSON, gives the exit code). `Config` has a new field `exe: Option<PathBuf>`: the program that runs as a worker.
+
+### Choice: the coordinator is a library call; the workers are a shell-out
+
+The workers must be `bare-drive --suite-worker` processes, and `spawn` started `current_exe()`. In `bare-mcp` that is `bare-mcp`, which has no worker role. The code forces a process here (a worker is one process that is killed on a timeout or a failure). So the MCP server starts `bare-drive` from `BARE_DRIVE`, else the file next to `bare-mcp`. If it is missing, the tool says so and names the build command. The other option was a worker role in `bare-mcp` that repeats the option parsing of `bare-drive`; I did not take it.
+
+### Choice: the call blocks the server loop; the live sessions are not touched
+
+The run is one reply to one request, as `run_steps` is. The server loop does not tick the live pages meanwhile (their timers run late, then catch up). The suite uses its own processes, network client, temp folder and `STATE` file. It does not read or write `live` or `saved`. A test checks that `sessions` and a live `read` are the same after three runs. A non-blocking run (a thread and a later reply) needs MCP progress or a polling tool; not built.
+
+### Checks
+
+- New test `run_suite_gives_a_short_summary_and_names_a_failing_step_and_leaves_live_sessions_alone` (`crates/mcp/tests/server.rs`): the `tools/suite` fixture server, `setup.steps` and two read tests of `tools/suite/tests`, and one broken test. It checks `FAILED 2/3 passed, 2 workers`, `logins 1`, the failing test with step line 3, no secret, the `filter`, the error for a filter that matches nothing, and the unchanged live session.
+- `cargo test --release -p bare-mcp -p bare-drive` (`server`, `suite`, lib): all pass.
+
+### Not tested
+
+`perf: true` (needs `perf`), `workers: "auto"`, a suite with an own test through MCP, a test that times out through MCP, Windows and macOS paths for the `bare-drive` lookup, `cargo test --release --workspace`, the cost matrix (no engine change, no change in the browser path).
