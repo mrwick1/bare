@@ -1942,3 +1942,12 @@ Issue #442: `el.style.WebkitUserSelect` was `undefined`, so `el.style.WebkitUser
 - A cross-origin iframe is never asked for. Half of a third-party frame could do harm, for example a sign-in cookie rotation page, and none of its scripts would run.
 - Not done: an iframe that the parser makes from the HTML of the page.
 - Reason: a web mail app's Download button adds a hidden iframe with the attachment URL. Chrome saves the file; bare saved nothing (issue #472).
+## One network client for `bare-mcp`, and a reply cache that knows its jar (2026-11-13)
+
+- `bare-mcp` keeps one `bare_net::http::Client` and forks it for each `open`. The idle connections and the reply cache outlive a session. Cookies and storage stay per document: each document uses the jar of its own storage.
+- `open` with `fresh: true` gets a new client for that open only. It does not empty the shared client, so a later `open` without `fresh` still finds the warm cache.
+- A stored reply has an owner. A reply that says `public` or `immutable` has no owner and answers every jar. Every other reply belongs to the jar that stored it, and it answers that jar only when it is fresh. A request of another jar can still ask the server about it with its `ETag` or `Last-Modified`: the server answers for the cookies of that jar, and a 304 is safe.
+- The rule is "not `public` and not `immutable`", not "says `private`" (design-suite.md, section 2.4). A page without `private` can still depend on cookies. Cost: a script with only `max-age=N` is not shared between two opens that have different jars. It is asked about when it has a validator, and fetched again when it has none. If this cost shows on a real app, the owner can narrow the rule to `private`.
+- One slot for each URL: a reply of another jar replaces the stored one. The other design (the jar id in the key) keeps both, and costs a second hash lookup for each cacheable request. Two live jars that use the same private URL in turn are rare, and the cache stays correct either way.
+- The jar id is a counter in `Jar::default`. A pointer would be reused after a jar is freed, and a new jar would read the old private replies.
+- Not changed: `MAX_IDLE` of the parse cache. See the progress section for the numbers.

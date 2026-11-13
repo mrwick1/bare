@@ -251,10 +251,16 @@ pub struct Session {
 
 impl Session {
     pub fn new(opt: &Options) -> Session {
+        Session::with_client(opt, bare_net::http::Client::new())
+    }
+
+    /// A session that uses `net`: a caller that keeps one client for many sessions (the MCP server) shares its connections and its reply
+    /// cache between them. Each document still has its own cookie jar and storage.
+    pub fn with_client(opt: &Options, net: bare_net::http::Client) -> Session {
         bare_net::trace::enable();
         let _ = bare_net::trace::take();
         let rep = Report { ok: true, steps: Vec::new(), failure: None, logs: Vec::new(), net: Vec::new(), ms: 0.0, window: opt.window, ticks: Ticks::default(), cookies: Vec::new() };
-        Session { host: Host::None, net: bare_net::http::Client::new(), memo: Memo::default(), timeout: opt.timeout, window_cpu: 0, nav_first: 0, start: Instant::now(), preload: None, hist: Default::default(), downloads: None, ready_wait: false, rep }
+        Session { host: Host::None, net, memo: Memo::default(), timeout: opt.timeout, window_cpu: 0, nav_first: 0, start: Instant::now(), preload: None, hist: Default::default(), downloads: None, ready_wait: false, rep }
     }
 
     /// Save the downloads of the pages that later `open` steps make in `d`.

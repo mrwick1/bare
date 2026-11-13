@@ -104,13 +104,21 @@ pub enum Via {
     Http { third: bool },
 }
 
-#[derive(Default)]
 pub struct Jar {
+    /// Never the same for two jars of this process (never 0). The reply cache names the jar that a stored reply belongs to by it.
+    id: u64,
     /// The cookies by the site (registrable domain) of their domain, each list in order of creation.
     map: HashMap<String, Vec<Cookie>>,
     tick: u64,
     /// Added to the clock of `now`. A test moves time with it.
     pub skew_ms: f64,
+}
+
+impl Default for Jar {
+    fn default() -> Jar {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Jar { id: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed), map: HashMap::new(), tick: 0, skew_ms: 0.0 }
+    }
 }
 
 fn is_ip(host: &str) -> bool {
@@ -217,6 +225,11 @@ impl Cookie {
 }
 
 impl Jar {
+    /// The identity of this jar (see the field `id`).
+    pub(crate) fn id(&self) -> u64 {
+        self.id
+    }
+
     /// The wall clock in ms since 1970, moved by `skew_ms`.
     pub fn now(&self) -> f64 {
         SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.0, |d| d.as_millis() as f64) + self.skew_ms
