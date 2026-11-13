@@ -174,3 +174,6 @@ The mapping follows the [CSS Color 4 local-MINDE algorithm](https://www.w3.org/T
 ## Grapheme boundaries in layout
 
 Added on 2026-11-14 for issue #467. Layout uses the existing icu_segmenter 2.4.0 dependency with default features disabled and compiled_data enabled. This is the same configuration as Intl.Segmenter. The lockfile retains one version. The license is Unicode-3.0. Layout uses UTF-8 grapheme boundaries and keeps its own DOM source mapping. It does not copy ICU implementation or data files.
+## Static site classification (2026-11-13)
+
+The bare crate uses `psl` 2.1.253 and `psl-types` 2.0.11 as dependencies. Both report MIT OR Apache-2.0. The pinned static list supplies registrable-domain classification for fetch metadata. No source file is copied. There is no runtime list download. The existing cookie suffix approximation is unchanged. Functional tests cover multi-label and private suffix boundaries. Resource measurements remain unrun; this adoption makes no speed or memory claim.
