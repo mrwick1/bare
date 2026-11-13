@@ -2009,3 +2009,9 @@ A test is `own` (it logs in itself) when a step says `sign out`, `password` or `
 - Cost of this choice: the clock picks one of the modes that the real clock showed. `rust-book-search` is always 16.5 G (the real clock gave 3.8 G to 19.7 G). Total of the corpus is 45% higher than on the real clock for the same binary. Only a comparison on the same clock and corpus holds.
 - The corpus for the virtual clock is a separate one (`corpus/virtual`), filled under that clock. The real-clock recording lacks replies that the virtual clock asks for (`react-docs`: 14).
 - Limits not removed: the time limits of a step, a script and a load still run on the real clock. They stop a hang. They do not make a result.
+## Rule bodies are read on first use (2026-11-14)
+
+- A style rule keeps the text of its block. `RuleSet::ensure` reads it when a style first needs it. Selectors and at-rules are still read at once, because the index needs selectors and `@media`, `@supports`, `@layer`, `@import` and `@keyframes` change which rules exist.
+- A byte-table scanner finds the end of the block. It follows the same block structure as the tokenizer and gives up on anything it is not sure of. The exact tokenizer then reads that rule. The other choice, to tokenize the block and keep only its span, saves no tokenizing.
+- `has_motion` must not change with laziness: it decides whether the engine tracks transitions. The scanner flags blocks that may name `transition-*` or `animation-*`, and `has_motion` reads only those, when it is asked. A flag that the scanner sets without a parse made a journey fail (see `docs/progress.md`, step 4).
+- Memory per rule did not fall on the tiny-rule stress case. The sheet text stays and each body has a record. Accepted: time and the journeys improve, and a real body is larger than the record.

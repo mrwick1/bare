@@ -36,6 +36,7 @@
 
 use std::borrow::Cow;
 
+use crate::scan;
 use crate::tokenizer::{Token, Tokens, tokenize};
 
 /// A rule of a style sheet.
@@ -51,7 +52,40 @@ pub enum Rule<'a> {
 pub struct StyleRule<'a> {
     /// The text before the `{`, without the spaces at the ends: `p.big`. Not parsed yet.
     pub prelude: &'a str,
-    pub declarations: Vec<Declaration<'a>>,
+    body: Body<'a>,
+}
+
+/// The block of a style rule.
+#[derive(Debug, PartialEq)]
+enum Body<'a> {
+    Parsed(Vec<Declaration<'a>>),
+    /// Not read yet: the text between the `{` and the `}`, and where it starts in the style sheet.
+    /// `motion`: a declaration of it may be a `transition` or an `animation` (`scan::Found::Rule`).
+    Lazy { text: &'a str, start: usize, motion: bool },
+}
+
+impl<'a> StyleRule<'a> {
+    /// The declarations. A lazy block is read now, each time that you ask: keep the result.
+    pub fn declarations(&self) -> Cow<'_, [Declaration<'a>]> {
+        match &self.body {
+            Body::Parsed(list) => Cow::Borrowed(list),
+            Body::Lazy { text, .. } => Cow::Owned(parse_block(text)),
+        }
+    }
+
+    /// Where the block is in the text that was parsed (`parse_stylesheet_lazy`), when it is not read yet, and if a declaration of
+    /// it may be a `transition` or an `animation`.
+    pub fn lazy_block(&self) -> Option<(std::ops::Range<usize>, bool)> {
+        match &self.body {
+            Body::Lazy { text, start, motion } => Some((*start..*start + text.len(), *motion)),
+            Body::Parsed(_) => None,
+        }
+    }
+}
+
+/// The declarations of the block of a style rule, from its text (what is between the `{` and the `}`).
+pub fn parse_block(text: &str) -> Vec<Declaration<'_>> {
+    Parser::new(text).declaration_list(true, usize::MAX).0
 }
 
 /// `@media screen { ... }` or `@import "a.css";`.
@@ -78,7 +112,7 @@ pub enum AtBody<'a> {
 }
 
 /// `margin: 10px !important`.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct Declaration<'a> {
     /// The property name in lowercase: `margin`. A custom property (`--x`) keeps its letter case.
     pub name: Cow<'a, str>,
@@ -94,6 +128,15 @@ const MAX_DEPTH: usize = 32;
 /// Parse a style sheet.
 pub fn parse_stylesheet(input: &str) -> Vec<Rule<'_>> {
     Parser::new(input).rule_list(false, 0)
+}
+
+/// Parse a style sheet, and do not read the blocks of the style rules: a rule keeps the text of its block (`StyleRule::lazy_block`).
+/// The rules and the declarations are the same as `parse_stylesheet` gives. The parser finds the end of a block by its bytes
+/// (`scan.rs`), and reads a rule with the tokenizer when it is not sure.
+pub fn parse_stylesheet_lazy(input: &str) -> Vec<Rule<'_>> {
+    let mut parser = Parser::new(input);
+    parser.lazy = true;
+    parser.rule_list(false, 0)
 }
 
 /// Parse a list of declarations with no `{ }` around it: the `style="..."` attribute of an element.
@@ -145,11 +188,13 @@ struct Parser<'a> {
     // Where the last token that we read ends.
     stack: Vec<Block>,
     // Used by `skip_block`. It lives here, so that skipping many blocks does not allocate each time.
+    lazy: bool,
+    // Do not read the blocks of the style rules (`parse_stylesheet_lazy`).
 }
 
 impl<'a> Parser<'a> {
     fn new(input: &'a str) -> Parser<'a> {
-        Parser { input, tokens: tokenize(input), peeked: None, last_end: 0, stack: Vec::new() }
+        Parser { input, tokens: tokenize(input), peeked: None, last_end: 0, stack: Vec::new(), lazy: false }
     }
 
     // ---- Reading tokens ----
@@ -168,6 +213,13 @@ impl<'a> Parser<'a> {
         let spanned = self.peeked.take()?;
         self.last_end = spanned.2;
         Some(spanned)
+    }
+
+    /// Go on at byte `at`, after we found where a rule ends without reading its tokens.
+    fn resume(&mut self, at: usize) {
+        self.tokens.seek(at);
+        self.peeked = None;
+        self.last_end = at;
     }
 
     /// The byte where the next token starts. At the end, the length of the style sheet.
@@ -232,6 +284,21 @@ impl<'a> Parser<'a> {
     /// A style rule: the prelude up to `{`, and then the declarations. Gives `None` when the rule is broken.
     fn qualified_rule(&mut self, nested: bool, depth: usize) -> Option<StyleRule<'a>> {
         let start = self.next_start();
+        if self.lazy && depth < MAX_DEPTH {
+            match scan::rule(self.input, start, nested) {
+                scan::Found::Bail => {}
+                scan::Found::Cut { at } => {
+                    self.resume(at);
+                    return None;
+                }
+                scan::Found::Rule { prelude_end, body_start, body_end, next, motion } => {
+                    self.resume(next);
+                    let prelude = self.input[start..prelude_end].trim_matches(SPACES);
+                    let text = &self.input[body_start..body_end];
+                    return (!prelude.is_empty()).then_some(StyleRule { prelude, body: Body::Lazy { text, start: body_start, motion } });
+                }
+            }
+        }
         let mut end = start;
         loop {
             match self.peek() {
@@ -257,7 +324,7 @@ impl<'a> Parser<'a> {
         }
         let declarations = self.declaration_list(true, usize::MAX).0;
         // We read the block even if the prelude is empty, so that we are after its `}`.
-        (!prelude.is_empty()).then_some(StyleRule { prelude, declarations })
+        (!prelude.is_empty()).then_some(StyleRule { prelude, body: Body::Parsed(declarations) })
     }
 
     /// An at-rule. We are at the `@name` token.
@@ -492,7 +559,7 @@ mod tests {
         rules
             .iter()
             .map(|rule| match rule {
-                Rule::Style(r) => format!("{}{{{}}}", r.prelude, show_declarations(&r.declarations)),
+                Rule::Style(r) => format!("{}{{{}}}", r.prelude, show_declarations(&r.declarations())),
                 Rule::At(r) => {
                     let body = match &r.body {
                         AtBody::None => ";".to_string(),
@@ -511,8 +578,11 @@ mod tests {
         declarations.iter().map(|d| format!("{}:{}{}", d.name, d.value, if d.important { "!" } else { "" })).collect::<Vec<_>>().join(";")
     }
 
+    /// The style sheet as text. The lazy parser must give the same rules and declarations, so each test of the parser checks it too.
     fn sheet(input: &str) -> String {
-        show(&parse_stylesheet(input))
+        let eager = show(&parse_stylesheet(input));
+        assert_eq!(show(&parse_stylesheet_lazy(input)), eager, "lazy parse of {input:?}");
+        eager
     }
 
     #[test]
@@ -692,9 +762,51 @@ mod tests {
             }
             seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
             // The slices must be valid, and the parser must end. `show` reads every slice.
-            show(&parse_stylesheet(&text));
+            sheet(&text);
             show_declarations(&parse_declarations(&text));
         }
+    }
+
+    /// The lazy parser finds the end of a block by its bytes. On text that is full of the pieces that can fool it (strings, urls,
+    /// comments, escapes, blocks of all kinds, a `}` that closes nothing), it must still give what the tokenizer gives.
+    #[test]
+    fn the_lazy_parser_equals_the_eager_one_on_junk() {
+        let pieces = [
+            "a", ".b", "#c", "{", "}", "(", ")", "[", "]", ";", ":", ",", "!important", "@media screen", "@import", "@font-face", "@keyframes x", "url(", "url(x)", "url( \"x\" )", "URL(", "-url(", "1url(", "@url(", "#url(", "u\\72 l(", "url(a;b}c)", "url(a(b)", "url(a\\)b)", "\"", "'", "\"}\"", "'{'", "\"\\\"}\"", "\\", "\\}", "\\\n", "\\41 ", "/*", "*/", "/* } */", "<!--", "-->", " ", "\n", "\r\n", "\x0C", "1px", "#fff", "rgb(", "--x", "é", "\0", "x:y", "color:red", "transition:1s", "animation-name:z", "TRANSITION-delay:1s", "a b", "~", ">", "+", "*", "&", "=", "|", "^", "$", ".",
+        ];
+        let mut seed: u32 = std::env::var("BARE_FUZZ_SEED").map_or(987_654_321, |s| s.parse().unwrap());
+        let mut next = move || {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            (seed >> 8) as usize
+        };
+        let rounds = std::env::var("BARE_FUZZ_ROUNDS").map_or(200_000, |s| s.parse().unwrap());
+        for _ in 0..rounds {
+            let mut text = String::new();
+            for _ in 0..(next() % 24) {
+                text.push_str(pieces[next() % pieces.len()]);
+                if next() % 3 == 0 {
+                    text.push(' ');
+                }
+            }
+            sheet(&text);
+        }
+    }
+
+    /// The same for a style sheet that is in `BARE_CSS_DIR` (every `*.css` there): `cargo test --release -p bare-css --lib lazy_equals_eager_on_a_folder -- --ignored`.
+    #[test]
+    #[ignore]
+    fn lazy_equals_eager_on_a_folder() {
+        let dir = std::env::var("BARE_CSS_DIR").expect("BARE_CSS_DIR");
+        let mut bytes = 0;
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|e| e == "css") && let Ok(text) = std::fs::read_to_string(&path) {
+                bytes += text.len();
+                let (eager, lazy) = (show(&parse_stylesheet(&text)), show(&parse_stylesheet_lazy(&text)));
+                assert!(eager == lazy, "{}", path.display());
+            }
+        }
+        eprintln!("{bytes} bytes of style sheets read the same, lazy and eager");
     }
 }
 

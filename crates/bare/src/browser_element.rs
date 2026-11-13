@@ -575,7 +575,7 @@ fn odd_rules(doc: &mut Document, key: &[(NodeId, Option<String>, String)]) -> Op
             match r {
                 Rule::Style(s) => {
                     let (mut contents, mut hidden, mut auto) = (false, false, false);
-                    for d in &s.declarations {
+                    for d in s.declarations().iter() {
                         let v = d.value.trim();
                         if d.name == "display" && v.eq_ignore_ascii_case("contents") {
                             contents = true;

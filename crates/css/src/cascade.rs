@@ -53,7 +53,7 @@
 //!
 //! Comments compare Rust with JavaScript, because you know JS.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::hash::BuildHasherDefault;
 
@@ -64,7 +64,7 @@ use crate::calc::{self, Linear, Node};
 use crate::color::Color;
 use crate::grid::{self, Grid};
 use crate::matching::{compound_match, matches};
-use crate::parser::{AtBody, Rule, parse_declarations, parse_stylesheet};
+use crate::parser::{AtBody, Rule, parse_block, parse_declarations, parse_stylesheet, parse_stylesheet_lazy};
 use crate::selector::{Combinator, Mode, Selector, ShadowPseudo, Simple, parse_selector_list_in};
 use crate::values::{Declared, Keyword, Length, Property, Side, Value, mirror, parse_declaration};
 use crate::var::{self, CustomDecl, VarDecl};
@@ -118,13 +118,8 @@ struct Layer {
 /// One selector of one rule. `a, b { ... }` makes two of them, and they share the declarations.
 struct Entry {
     selector: Selector,
-    /// The declarations of the rule: a range of `RuleSet::decls`.
-    decls: (u32, u32),
-    /// The custom properties of the rule: a range of `RuleSet::customs`.
-    customs: (u32, u32),
-    /// How many declarations of picture properties (`background-image`, `mask-size-x`, ...) the rule has. They are in `RuleSet::decls` after
-    /// the range `decls`, in their order: the cascade of an element reads them only when one of its rules has some (`picture_pass`).
-    pics: u16,
+    /// The block of the rule: a place in `RuleSet::bodies`.
+    body: u32,
     /// The layer of the rule: a place in `RuleSet::layers`. 0 is no layer.
     layer: u32,
     origin: Origin,
@@ -133,6 +128,22 @@ struct Entry {
     /// The tree context of the rule against the element that it styles (CSS Scoping): `OWN`, `INNER` (a rule of a shadow tree for its host
     /// or for a node that it slots), `OUTER` (a `::part()` rule of the shadow tree around the host) or `OUTERMOST` (one of the document).
     ctx: u8,
+}
+
+/// The block of a rule: its declarations, read when an element first needs them (`RuleSet::ensure`). `a, b { ... }` makes two entries and one body.
+struct Body {
+    /// The declarations of the rule: a range of `RuleSet::decls`. While `unread`, the place of the text of the block in `RuleSet::sources[source]`.
+    decls: Cell<(u32, u32)>,
+    /// The custom properties of the rule: a range of `RuleSet::customs`.
+    customs: Cell<(u32, u32)>,
+    /// How many declarations of picture properties (`background-image`, `mask-size-x`, ...) the rule has. They are in `RuleSet::decls` after
+    /// the range `decls`, in their order: the cascade of an element reads them only when one of its rules has some (`picture_pass`).
+    pics: Cell<u16>,
+    /// `customs` and `pics` are not set yet, and `decls` is the place of the text.
+    unread: Cell<bool>,
+    /// While `unread`: a declaration of the block may be a `transition-*` or `animation-*` property (`has_motion` reads these blocks).
+    motion: bool,
+    source: u32,
 }
 
 const OWN: u8 = 0;
@@ -226,16 +237,22 @@ pub struct RuleSet {
     /// The width and height of the window in pixels. `@media` reads it when a rule is added, `vw` and `vh` read it in `compute`.
     viewport: (f32, f32),
     entries: Vec<Entry>,
-    /// The declarations of all rules, one after the other.
-    decls: Vec<Declared>,
+    bodies: Vec<Body>,
+    /// The text of the style sheets that were added: the blocks that are not read yet are in it.
+    sources: Vec<Box<str>>,
+    /// The sheet that `add_rules` reads: a place in `sources`.
+    source: u32,
+    /// The declarations of all rules that are read, one after the other.
+    decls: RefCell<Vec<Declared>>,
     /// What a value in `decls` points to: the `calc()` that mix units, and the declarations with `var()`.
-    side: Side,
+    /// It grows when a block is read, and its entries stay where they are: a value is a place in it.
+    side: RefCell<Side>,
     /// The layers (`@layer`), in the order that we first saw them. Layer 0 is "no layer", the parent of the top layers.
     layers: Vec<Layer>,
     /// The layer for a parent and a name, to find a layer without a scan of all of them.
     layer_by_name: HashMap<(u32, Box<str>), u32>,
     /// The custom properties of all rules (`--gap: 8px`), one after the other.
-    customs: Vec<CustomDecl>,
+    customs: RefCell<Vec<CustomDecl>>,
     /// The rules of the document (and the browser's), found by what the last compound reads.
     index: Index,
     /// The rules of each shadow tree that has any, by `NodeId::index` of its root.
@@ -252,7 +269,10 @@ pub struct RuleSet {
     /// The rules that the index offered for the elements that `walk` and `restyle` styled, summed over all calls. A caller takes the difference around one call.
     tested: std::cell::Cell<u64>,
     /// Does a rule have a logical property of the inline axis, or `float: inline-start | inline-end`? Only then does an `rtl` element need `logical_pass`.
-    logical: bool,
+    logical: Cell<bool>,
+    /// Does a block that is not read yet have a declaration that may be a `transition` or an `animation`? (`scan::Found::Rule`)
+    /// `has_motion` reads those blocks, and then this is `false`.
+    motion: Cell<bool>,
     /// The names of the `@keyframes` rules (`has_keyframes`). Their steps are not read: an animation only needs to know that the name exists.
     keyframes: std::collections::HashSet<Box<str>>,
     pending: Option<Box<HashMap<NodeId, Vec<InputDeclaration>>>>,
@@ -471,14 +491,19 @@ impl RuleSet {
     }
 
     pub fn new(viewport: (f32, f32)) -> RuleSet {
-        RuleSet { viewport, entries: Vec::new(), decls: Vec::new(), side: Side::default(), layers: vec![Layer { parent: 0 }], layer_by_name: HashMap::new(), customs: Vec::new(), index: Index::default(), shadows: HashMap::default(), parts: Vec::new(), user: 0, scopes: Scopes::default(), reach: std::cell::OnceCell::new(), tested: std::cell::Cell::new(0), logical: false, pending: None, keyframes: std::collections::HashSet::new() }
+        RuleSet { viewport, entries: Vec::new(), bodies: Vec::new(), sources: Vec::new(), source: 0, decls: RefCell::default(), side: RefCell::default(), layers: vec![Layer { parent: 0 }], layer_by_name: HashMap::new(), customs: RefCell::default(), index: Index::default(), shadows: HashMap::default(), parts: Vec::new(), user: 0, scopes: Scopes::default(), reach: std::cell::OnceCell::new(), tested: std::cell::Cell::new(0), logical: Cell::new(false), motion: Cell::new(false), pending: None, keyframes: std::collections::HashSet::new() }
     }
 
     /// Which user action state (`:hover`, `:active`, the focus pseudo-classes) some rule reads: the bits `selector::USES_*`.
     /// A host that keeps styles must compute them again when one of those states changes.
     /// Does a rule set one of the `transition-*` or `animation-*` properties, or is a `@keyframes` rule here?
     pub fn has_motion(&self) -> bool {
-        !self.keyframes.is_empty() || self.decls.iter().any(|d| crate::motion::is_motion(d.property))
+        if self.motion.replace(false) {
+            for body in self.bodies.iter().filter(|b| b.unread.get() && b.motion) {
+                self.read_lazy(body);
+            }
+        }
+        !self.keyframes.is_empty() || self.decls.borrow().iter().any(|d| crate::motion::is_motion(d.property))
     }
 
     pub fn has_keyframes(&self, name: &str) -> bool {
@@ -605,7 +630,8 @@ impl RuleSet {
         let layer = layer.map_or(Some(0), |path| self.layer_path(0, path));
         if let Some(layer) = layer {
             let scope = if scope == doc.root() { 0 } else { scope.index() as u32 };
-            self.add_rules(doc, parse_stylesheet(text), origin, layer, scope, 0, Some(blocks));
+            let rules = self.parse_sheet(text);
+            self.add_rules(doc, rules, origin, layer, scope, 0, Some(blocks));
         }
     }
 
@@ -619,7 +645,8 @@ impl RuleSet {
     pub fn add_scoped(&mut self, doc: &mut Document, text: &str, origin: Origin, layer: Option<&str>, scope: NodeId) {
         let layer = layer.map_or(Some(0), |path| self.layer_path(0, path));
         if let Some(layer) = layer {
-            self.add_rules(doc, parse_stylesheet(text), origin, layer, scope.index() as u32, 0, None);
+            let rules = self.parse_sheet(text);
+            self.add_rules(doc, rules, origin, layer, scope.index() as u32, 0, None);
         }
     }
 
@@ -628,8 +655,16 @@ impl RuleSet {
     pub fn add_in_layer(&mut self, doc: &mut Document, text: &str, origin: Origin, layer: Option<&str>) {
         let layer = layer.map_or(Some(0), |path| self.layer_path(0, path));
         if let Some(layer) = layer {
-            self.add_rules(doc, parse_stylesheet(text), origin, layer, 0, 0, None);
+            let rules = self.parse_sheet(text);
+            self.add_rules(doc, rules, origin, layer, 0, 0, None);
         }
+    }
+
+    /// Keep a copy of the text of a sheet, and parse it without reading the blocks of its rules (`ensure` reads them).
+    fn parse_sheet<'t>(&mut self, text: &'t str) -> Vec<Rule<'t>> {
+        self.source = self.sources.len() as u32;
+        self.sources.push(text.into());
+        parse_stylesheet_lazy(text)
     }
 
     /// The layer `path` (`a` or `a.b.c`) inside the layer `parent`. It is made when it is new. `None` when a name is not good.
@@ -729,38 +764,36 @@ impl RuleSet {
             };
             // A rule with a selector that is not valid is dropped, with all its selectors (the standard says so).
             let Some(selectors) = parse_selector_list_in(rule.prelude, doc, if scope == 0 { Mode::Document } else { Mode::Shadow }) else { continue };
-            let (start, custom_start) = (self.decls.len(), self.customs.len());
-            if let Some(Some(input)) = blocks.and_then(|b| b.get(rule_index)) {
-                input_declarations(input, &mut self.side, &mut self.decls, &mut self.customs);
-            } else {
-            for d in &rule.declarations {
-                if d.name.starts_with("--") {
-                    self.customs.push(CustomDecl { name: (*d.name).into(), text: d.value.into(), important: d.important });
-                } else {
-                    parse_declaration(&d.name, d.value, d.important, &mut self.side, &mut self.decls);
+            let body = if let Some(Some(input)) = blocks.and_then(|b| b.get(rule_index)) {
+                self.read_block(|side, decls, customs| input_declarations(input, side, decls, customs))
+            } else if let Some((text, motion)) = rule.lazy_block() {
+                // Not read now. A block that cannot have a declaration (`a{}`, `a{;;}`, `a{:red}`) makes no entry, as a block that was read.
+                if !may_declare(&self.sources[self.source as usize][text.clone()]) {
+                    continue;
                 }
-            }
-            }
-            // The picture declarations go after the others (`Entry::pics`). One pass tests each declaration, here, not in the cascade.
-            let (mut logical, mut picture) = (false, false);
-            for d in &self.decls[start..] {
-                logical |= d.mirror || matches!(d.value, Value::Keyword(Keyword::InlineStart | Keyword::InlineEnd));
-                picture |= d.property as usize >= Property::CORE;
-            }
-            self.logical |= logical;
-            let (core_end, pics) = if picture { split_pictures(&mut self.decls, start) } else { (self.decls.len(), 0) };
-            if self.decls.len() == start && self.customs.len() == custom_start {
-                continue;
-            }
-            let decls = (start as u32, core_end as u32);
-            let customs = (custom_start as u32, self.customs.len() as u32);
+                self.motion.set(self.motion.get() | motion);
+                Some(Body { decls: Cell::new((text.start as u32, text.end as u32)), customs: Cell::default(), pics: Cell::default(), unread: Cell::new(true), motion, source: self.source })
+            } else {
+                self.read_block(|side, decls, customs| {
+                    for d in rule.declarations().iter() {
+                        if d.name.starts_with("--") {
+                            customs.push(CustomDecl { name: (*d.name).into(), text: d.value.into(), important: d.important });
+                        } else {
+                            parse_declaration(&d.name, d.value, d.important, side, decls);
+                        }
+                    }
+                })
+            };
+            let Some(body) = body else { continue };
+            self.bodies.push(body);
+            let body = self.bodies.len() as u32 - 1;
             for selector in selectors {
-                self.push(selector, decls, customs, pics, layer, origin, scope);
+                self.push(selector, body, layer, origin, scope);
             }
         }
     }
 
-    fn push(&mut self, selector: Selector, decls: (u32, u32), customs: (u32, u32), pics: u16, layer: u32, origin: Origin, scope: u32) {
+    fn push(&mut self, selector: Selector, body: u32, layer: u32, origin: Origin, scope: u32) {
         if selector.compounds.iter().any(|c| c.simples.contains(&Simple::Never)) {
             return;
             // `a:hover` never matches. Keep it out of the index: it only costs time.
@@ -793,7 +826,51 @@ impl RuleSet {
             }
         }
         let ancestors = ancestor_hashes(&selector);
-        self.entries.push(Entry { selector, decls, customs, pics, layer, origin, ancestors, ctx });
+        self.entries.push(Entry { selector, body, layer, origin, ancestors, ctx });
+    }
+
+    /// Read the declarations of a block into the lists of the rule set: `read` adds them. Gives the body, or `None` when the block has no declaration.
+    fn read_block(&mut self, read: impl FnOnce(&mut Side, &mut Vec<Declared>, &mut Vec<CustomDecl>)) -> Option<Body> {
+        let (decls, customs, side) = (self.decls.get_mut(), self.customs.get_mut(), self.side.get_mut());
+        let (ranges, logical) = read_block(decls, customs, side, read);
+        *self.logical.get_mut() |= logical;
+        ranges.map(|(decls, customs, pics)| Body { decls: Cell::new(decls), customs: Cell::new(customs), pics: Cell::new(pics), unread: Cell::new(false), motion: false, source: 0 })
+    }
+
+    /// Read the blocks of the rules that an element matched, when they are not read yet. A block is read once, when a style needs it.
+    #[inline(always)]
+    fn ensure(&self, matched: &[u32]) {
+        for &i in matched {
+            let body = &self.bodies[self.entries[i as usize].body as usize];
+            if body.unread.get() {
+                self.read_lazy(body);
+            }
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn read_lazy(&self, body: &Body) {
+        let text = &self.sources[body.source as usize][body.decls.get().0 as usize..body.decls.get().1 as usize];
+        let list = parse_block(text);
+        let (mut decls, mut customs, mut side) = (self.decls.borrow_mut(), self.customs.borrow_mut(), self.side.borrow_mut());
+        let (ranges, logical) = read_block(&mut decls, &mut customs, &mut side, |side, decls, customs| {
+            for d in &list {
+                if d.name.starts_with("--") {
+                    customs.push(CustomDecl { name: (*d.name).into(), text: d.value.into(), important: d.important });
+                } else {
+                    parse_declaration(&d.name, d.value, d.important, side, decls);
+                }
+            }
+        });
+        if logical {
+            self.logical.set(true);
+        }
+        let (decls, customs, pics) = ranges.unwrap_or_default();
+        body.decls.set(decls);
+        body.customs.set(customs);
+        body.pics.set(pics);
+        body.unread.set(false);
     }
 
     /// The candidate rules tested so far: one for each (element, rule) that the index offered. Take the difference around a call to `compute` or `restyle`.
@@ -1247,6 +1324,7 @@ impl RuleSet {
                 return found.style;
             }
         }
+        self.ensure(matched);
         let mut style = self.cascade_as::<0, PENDING>(matched, inline, hint, &styles.styles[parent as usize], cx, input);
         if style.2 != 0 {
             self.picture_pass::<PENDING>(matched, inline, &mut style, &styles.styles[parent as usize], cx, input);
@@ -1325,13 +1403,14 @@ impl RuleSet {
         };
         // The custom properties depend only on the set of the parent and on the rules that have some. Most elements of a page
         // share both (Tailwind puts 40 of them on `*`), so the set is made once for each pair. A `style=""` attribute may add some: no cache.
-        let merge_key = inline.is_none().then(|| (parent.1, matched.iter().copied().filter(|&i| self.entries[i as usize].customs.0 != self.entries[i as usize].customs.1).collect::<Vec<u32>>()));
+        let body_of = |i: u32| &self.bodies[self.entries[i as usize].body as usize];
+        let merge_key = inline.is_none().then(|| (parent.1, matched.iter().copied().filter(|&i| { let c = body_of(i).customs.get(); c.0 != c.1 }).collect::<Vec<u32>>()));
         let merged = merge_key.as_ref().and_then(|k| cx.merges.borrow().get(k).copied());
         // The custom properties of the `style=""` attribute. They live until the end of the function, because `own` points into them.
         let mut inline_customs = Vec::new();
         // The custom properties that win: name, key, text. `own_at` says where a name is in the list: a scan is slow for 20,000 names.
         // Sized once: a map that grows from empty to the 40 names of Tailwind's `*` rule moves its table 4 times.
-        let n_custom = if merged.is_none() { matched.iter().map(|&i| (self.entries[i as usize].customs.1 - self.entries[i as usize].customs.0) as usize).sum() } else { 0 };
+        let n_custom = if merged.is_none() { matched.iter().map(|&i| { let c = body_of(i).customs.get(); (c.1 - c.0) as usize }).sum() } else { 0 };
         let mut own: Vec<(&str, u128, &str)> = Vec::with_capacity(n_custom);
         let mut own_at: HashMap<&str, usize, BuildHasherDefault<Fnv>> = HashMap::with_capacity_and_hasher(n_custom, BuildHasherDefault::default());
         fn apply_custom<'a>(own: &mut Vec<(&'a str, u128, &'a str)>, own_at: &mut HashMap<&'a str, usize, BuildHasherDefault<Fnv>>, d: &'a CustomDecl, key: u128) {
@@ -1346,14 +1425,18 @@ impl RuleSet {
         }
         // Does a rule of the element have a picture declaration? Almost never: the others cost nothing more (`picture_pass`).
         let mut pictures = 0u16;
+        // The blocks are read before this (`ensure`), and none is read while these lists are borrowed.
+        let (all_decls, all_customs) = (self.decls.borrow(), self.customs.borrow());
         for &i in matched {
             let e = &self.entries[i as usize];
-            pictures |= e.pics;
-            for d in &self.decls[e.decls.0 as usize..e.decls.1 as usize] {
+            let body = body_of(i);
+            pictures |= body.pics.get();
+            let (decls, customs) = (body.decls.get(), body.customs.get());
+            for d in &all_decls[decls.0 as usize..decls.1 as usize] {
                 apply(d, e.origin, e.ctx, Some(e.layer), e.selector.specificity, i);
             }
             if merged.is_none() {
-                for d in &self.customs[e.customs.0 as usize..e.customs.1 as usize] {
+                for d in &all_customs[customs.0 as usize..customs.1 as usize] {
                     apply_custom(&mut own, &mut own_at, d, key(d.important, e.origin, e.ctx, Some(e.layer), e.selector.specificity, i));
                 }
             }
@@ -1382,7 +1465,7 @@ impl RuleSet {
                 }
             }
             // What these values point to comes after the ones of the style sheets (see `Cx::linear` and `Cx::var`).
-            let (calc_base, var_base, grid_base) = (cx.declared.calcs.len() as u32, cx.declared.vars.len() as u32, cx.declared.grids.len() as u32);
+            let (calc_base, var_base, grid_base) = cx.declared_len();
             for d in &mut inline_decls {
                 match &mut d.value {
                     Value::Length(Length::Calc(i)) => *i += calc_base,
@@ -1433,7 +1516,7 @@ impl RuleSet {
         style.2 = u32::from(pictures != 0 || inline_core < inline_decls.len());
         // A logical property of the inline axis (`margin-inline-start`) is its physical property for `ltr`, so the first pass is the same
         // for every element. An `rtl` element, or a `float` that is `inline-start`, gets `logical_pass`.
-        if PASS == 0 && (matches!(style.0[Property::Direction as usize], Value::Keyword(Keyword::Rtl)) || matches!(style.0[Property::Float as usize], Value::Keyword(Keyword::InlineStart | Keyword::InlineEnd))) && (self.logical || inline.is_some()) {
+        if PASS == 0 && (matches!(style.0[Property::Direction as usize], Value::Keyword(Keyword::Rtl)) || matches!(style.0[Property::Float as usize], Value::Keyword(Keyword::InlineStart | Keyword::InlineEnd))) && (self.logical.get() || inline.is_some()) {
             return self.logical_pass::<PENDING>(matched, inline, hint, parent, cx, input);
         }
         style
@@ -1457,12 +1540,16 @@ impl RuleSet {
                 (winners[k], keys[k]) = (Some(d.value), key);
             }
         };
+        let all_decls = self.decls.borrow();
         for &i in matched {
             let e = &self.entries[i as usize];
-            for d in &self.decls[e.decls.1 as usize..e.decls.1 as usize + usize::from(e.pics)] {
+            let body = &self.bodies[e.body as usize];
+            let end = body.decls.get().1 as usize;
+            for d in &all_decls[end..end + usize::from(body.pics.get())] {
                 apply(d, e.origin, e.ctx, Some(e.layer), e.selector.specificity, i);
             }
         }
+        drop(all_decls);
         // The declarations of the attribute again: `cascade_as` left the side of their values in `cx.inline`, the same for this parse.
         if let Some(text) = inline {
             let (mut side, mut decls) = (Side::default(), Vec::new());
@@ -1475,7 +1562,7 @@ impl RuleSet {
                     }
                 }
             }
-            let (calc_base, var_base, grid_base) = (cx.declared.calcs.len() as u32, cx.declared.vars.len() as u32, cx.declared.grids.len() as u32);
+            let (calc_base, var_base, grid_base) = cx.declared_len();
             for d in decls.iter_mut().filter(|d| d.property.is_picture()) {
                 match &mut d.value {
                     Value::Length(Length::Calc(i)) => *i += calc_base,
@@ -1532,12 +1619,12 @@ impl RuleSet {
         if let Value::Length(Length::Calc(c)) = &mut value {
             // A mix of units: keep it with the others of this element, after the ones that are there.
             let mut shared = cx.inline.borrow_mut();
-            *c += (cx.declared.calcs.len() + shared.calcs.len()) as u32;
+            *c += (cx.declared.borrow().calcs.len() + shared.calcs.len()) as u32;
             shared.calcs.extend(side.calcs);
         }
         if let Value::Grid(g) = &mut value {
             let mut shared = cx.inline.borrow_mut();
-            *g += (cx.declared.grids.len() + shared.grids.len()) as u32;
+            *g += (cx.declared.borrow().grids.len() + shared.grids.len()) as u32;
             shared.grids.extend(side.grids);
         }
         match value {
@@ -1601,7 +1688,7 @@ struct Cx<'a> {
     /// The `calc()` of the style sheets (`RuleSet::calcs`).
     /// The place of each layer in the order of the cascade (`RuleSet::layer_order`).
     layer_order: Vec<u32>,
-    declared: &'a Side,
+    declared: &'a RefCell<Side>,
     /// What the `style=""` of the element that we compute now points to, and the `calc()` that come from a `var()`.
     /// Their numbers start after the ones of `declared`.
     inline: RefCell<Side>,
@@ -1623,33 +1710,42 @@ struct Computed {
 }
 
 impl Cx<'_> {
+    /// How many `calc()`, `var()` and grid lists the style sheets have: the numbers of the ones of the `style=""` attribute start there.
+    fn declared_len(&self) -> (u32, u32, u32) {
+        let d = self.declared.borrow();
+        (d.calcs.len() as u32, d.vars.len() as u32, d.grids.len() as u32)
+    }
+
     fn linear(&self, i: u32) -> Linear {
-        match self.declared.calcs.get(i as usize) {
+        let declared = self.declared.borrow();
+        match declared.calcs.get(i as usize) {
             Some(&l) => l,
-            None => self.inline.borrow().calcs[i as usize - self.declared.calcs.len()],
+            None => self.inline.borrow().calcs[i as usize - declared.calcs.len()],
         }
     }
 
     /// The tree of a `min()`, `max()` or `clamp()` that starts at entry `i`, or the sum of units as a leaf.
     fn expr(&self, i: u32) -> Node<Linear> {
-        let inline = self.inline.borrow();
-        let n = self.declared.calcs.len();
-        let get = |at: usize| if at < n { self.declared.calcs[at] } else { inline.calcs[at - n] };
+        let (inline, declared) = (self.inline.borrow(), self.declared.borrow());
+        let n = declared.calcs.len();
+        let get = |at: usize| if at < n { declared.calcs[at] } else { inline.calcs[at - n] };
         crate::calc::decode(&get, i as usize).0
     }
 
     /// The grid list `i` of the style sheets or of the `style=""` attribute.
     fn declared_grid(&self, i: u32) -> Grid {
-        match self.declared.grids.get(i as usize) {
+        let declared = self.declared.borrow();
+        match declared.grids.get(i as usize) {
             Some(g) => g.clone(),
-            None => self.inline.borrow().grids[i as usize - self.declared.grids.len()].clone(),
+            None => self.inline.borrow().grids[i as usize - declared.grids.len()].clone(),
         }
     }
 
     fn var(&self, i: u32) -> VarDecl {
-        match self.declared.vars.get(i as usize) {
+        let declared = self.declared.borrow();
+        match declared.vars.get(i as usize) {
             Some(v) => v.clone(),
-            None => self.inline.borrow().vars[i as usize - self.declared.vars.len()].clone(),
+            None => self.inline.borrow().vars[i as usize - declared.vars.len()].clone(),
         }
     }
 
@@ -2220,6 +2316,31 @@ fn keep_pictures(set: &Pictures) -> u32 {
     let id = t.sets.len() as u32;
     t.by_hash.entry(hash).or_default().push(id);
     id
+}
+
+/// Can the text of a block have a declaration? A declaration has a name in front of its `:`. This says `false` only when no `:` has one
+/// (there is none, or each one is first in its statement), so a block that it rejects has none for sure.
+fn may_declare(text: &str) -> bool {
+    text.match_indices(':').any(|(at, _)| !matches!(text.as_bytes()[..at].iter().rev().find(|b| !b.is_ascii_whitespace()), None | Some(b';')))
+}
+
+/// Add the declarations of one block to `decls`, `customs` and `side` (`read` does it), and put the picture ones last. Gives their places and
+/// the number of picture declarations, or `None` when there is no declaration. The flag says that one has the inline axis (`RuleSet::logical`).
+#[allow(clippy::type_complexity)]
+fn read_block(decls: &mut Vec<Declared>, customs: &mut Vec<CustomDecl>, side: &mut Side, read: impl FnOnce(&mut Side, &mut Vec<Declared>, &mut Vec<CustomDecl>)) -> (Option<((u32, u32), (u32, u32), u16)>, bool) {
+    let (start, custom_start) = (decls.len(), customs.len());
+    read(side, decls, customs);
+    // The picture declarations go after the others (`Body::pics`). One pass tests each declaration, here, not in the cascade.
+    let (mut logical, mut picture) = (false, false);
+    for d in &decls[start..] {
+        logical |= d.mirror || matches!(d.value, Value::Keyword(Keyword::InlineStart | Keyword::InlineEnd));
+        picture |= d.property as usize >= Property::CORE;
+    }
+    let (core_end, pics) = if picture { split_pictures(decls, start) } else { (decls.len(), 0) };
+    if decls.len() == start && customs.len() == custom_start {
+        return (None, logical);
+    }
+    (Some(((start as u32, core_end as u32), (custom_start as u32, customs.len() as u32), pics)), logical)
 }
 
 /// Move the declarations of picture properties in `decls[start..]` to the end, in their order, and say where the others end and how many
@@ -2822,12 +2943,12 @@ mod tests {
         assert!(inline.styles.iter().all(|s| s.2 == 0));
     }
 
-    /// The size of `ComputedStyle` is the values of the other properties and two `u32`; an `Entry` has room for its count of picture
-    /// declarations without growing.
+    /// The size of `ComputedStyle` is the values of the other properties and two `u32`; an `Entry` has the place of its `Body` and no
+    /// declaration ranges, so a rule with a picture count does not make it grow.
     #[test]
     fn the_picture_set_does_not_grow_the_structures() {
         assert_eq!(std::mem::size_of::<ComputedStyle>(), 8 * Property::CORE + 8);
-        assert_eq!(std::mem::size_of::<Entry>(), 80);
+        assert_eq!(std::mem::size_of::<Entry>(), 72);
     }
 
     /// `Styles::change` after a hover: no matching rule is `Same`, a color is `Paint`, a size is `Layout`, and the background of a
@@ -4019,5 +4140,23 @@ mod tests {
         let h = |id: &str| get(html, &[css], id, Property::Height);
         assert_eq!((w("a"), w("b"), w("c")), (px(1.0), px(2.0), px(5.0)));
         assert_eq!((h("a"), h("c")), (px(9.0), px(6.0)));
+    }
+
+    /// A block that is read on first use must still tell at once whether the sheet has motion: the answer of a block that was read.
+    #[test]
+    fn has_motion_is_the_same_for_a_block_that_is_not_read() {
+        let motion = |css: &str| {
+            let mut doc = bare_html::tree::parse("");
+            let mut rules = RuleSet::new(VIEW);
+            rules.add(&mut doc, css, Origin::Author);
+            rules.has_motion()
+        };
+        assert!(motion("a{color:red;transition:opacity 1s}"));
+        assert!(motion("a{/* x */ animation-name:y}"));
+        assert!(motion("@keyframes k{from{color:red}}"));
+        assert!(!motion("a{transition:one two three four five six}"), "not valid: it sets nothing");
+        assert!(!motion("a{/* transition: opacity 1s */ color:red}"));
+        assert!(!motion("a{-webkit-transition:opacity 1s}"));
+        assert!(!motion("a{color:red}"));
     }
 }

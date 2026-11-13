@@ -9127,3 +9127,54 @@ All 47 pass on both. Wall time is not from an idle machine. The #486 table gave 
 - `REPLY_MS` and `ACTION_MS` at other values. The mode of `rust-book-search` and `python-docs-search` depends on their ratio.
 - A recording made under the virtual clock from the live sites (`record --clock virtual`): the corpus was a copy of `main` plus fill rounds.
 - Another machine.
+## Step 4: rule bodies are read on first use, and the CSS tokenizer is faster (2026-11-14)
+
+Design: `docs/design-style.md` §3.4 (P2, P4). Branch `t3/lazy-css-declarations`, based on main `fe2d54cd`.
+
+### What changed
+
+- `crates/css/src/scan.rs` (new): a byte-table scanner finds the end of a style rule. It follows the block structure of the tokenizer (strings, comments, `url(`, escapes, nested blocks). It gives up (`Bail`) on anything it is not sure of, and the exact tokenizer reads that rule.
+- `parse_stylesheet_lazy`: a style rule keeps its prelude and the text of its block. `RuleSet` parses the selectors at once. It reads the block on the first style that needs it (`RuleSet::ensure`, on a memo miss only). Rules with a block that cannot have a declaration (`a{}`, `a{;;}`, `a{:red}`) make no entry.
+- `@media`, `@supports`, `@layer`, `@import` and `@keyframes` are still found at once.
+- `has_motion` stays exact: the scanner says whether a block may set `transition-*` or `animation-*`. `has_motion` reads only those blocks, and only when it is asked.
+- Tokenizer: ASCII fast paths in `peek`, `name`, `string`, spaces, digits, comments, and a `short_number` path (at most 7 digits, equal to `str::parse::<f32>`).
+- `Entry` is 72 bytes (was 80).
+
+### Split of the parse cost (`crates/css/examples/parse_split.rs`, `perf stat -e instructions:u`, reps 11 minus reps 1, over 10)
+
+Declarations are the larger part: about 64% or more of a parse on the six sheets (bootstrap.min, bootstrap, fontawesome, docs-rs-home, debian-org-home, github-docs-home). So P2 and P4 both went ahead.
+
+| `RuleSet::add` | main | now |
+| --- | --- | --- |
+| bootstrap.min.css | 42.4 M | 16.6 M |
+| github-docs-home sheet | 312.6 M | 103.3 M |
+| tokenize, bootstrap.min.css | 17.4 M | 10.4 M |
+
+### Exactness
+
+- Lazy parse equals eager parse: 4 M junk-fuzz rounds plus 3 seeds of 2 M each, and 6.5 MB of real sheets (110 sheets of the journeys), with no difference. The fuzz found 4 bugs before it passed (trailing comment in a prelude, `<!--url(`, NUL before `url(`, a stack-class typo). Each has a test.
+- Old tokenizer equals new tokenizer: 3 M fuzz rounds and 10 MB of sheets.
+- `has_motion` over the 110 sheets: the same answer as main on all of them.
+- A first journey run failed `python-docs-search-results` (`Limit("computed-nodes")`): the scan flag said "motion" for a block with a comment in front of a name, which armed the motion code and made extra style reads. Fixed: comments are skipped, and `has_motion` reads the flagged blocks. Test: `has_motion_is_the_same_for_a_block_that_is_not_read`.
+
+### Numbers
+
+Machine: archMachine, load average 8 to 12 from other agents. Instruction counts hold under load. Wall time does not.
+
+- `bare-bench` (wall ms, 3 runs, main / now): css tokenize 41.7 to 45.2 / 23.3 to 24.0; css parse 85.9 to 90.7 / 67.8 to 70.5; `add 10,000 rules` 11.6 to 26.3 / 5.3 to 5.7. Memory of that row 7.3 MB / 7.8 MB.
+- Journeys, after the rebase on main `226935a5` (`tools/bench/journeys.sh compare --clock virtual --runs 3 --pss`, corpus `virtual`, 47 journeys, all pass, same-binary spread at most 0.5%): instructions, sum of medians 96,300 M / 93,856 M, -2.5%. CPU -2.7%, wall -2.5%, PSS sum 1,555.8 / 1,542.9 MiB (-0.8%), peak RSS +0.3%. No journey is over +0.5%. Largest: `docs-rs-home` -32.6%, `duckduckgo-html-search` -24.0%, `rust-lang-org-home` -18.8%, `python-org-docs-link` -16.0%, `python-org-search` -15.9%, `example-learn-more` -13.4%. JS-bound journeys (`react-docs`, `rust-book-search`) do not move.
+- Journeys before the virtual clock existed (real clock, main `fe2d54cd`, 3 runs): the 34 journeys with under 3% spread: -4.7%. The `python-docs-search-results` journey failed on this build in the first run (see Exactness, fixed).
+- `bare-stress scale css` (MB at the middle size, main / now): `css-rules` 433 / 450, `css-declarations` 63 / 73, `css-important` 31.5 / 41.5, `css-bad-rules` 151 / 162. Time at the middle size: `css-rules` 719 to 1021 ms / 390 to 422 ms, `css-bad-rules` 445 to 473 ms / 310 to 336 ms.
+- The target of about 250 B per rule on `css-rules` is not met. Memory went up by 10 to 17 B per rule. The retained sheet text and the `Body` record (24 bytes) cost more than the declarations that the old parse kept for a block of one declaration (`.a{color:red}`). The selector of each rule is the larger part of the 433 B, and it is parsed at once, as the design says. The journeys show no memory saving either (PSS +0.6%). To do: a smaller selector (agent 4a's area).
+
+### Checks
+
+- `cargo test --release --workspace`: all pass except 2 tests that also fail on main (`downloads::run::tests::a_changed_file_starts_again_from_zero`, 18 of 40 runs on main; `browser_geometry_tests::external_sheets_embedded_sheets_and_inline_styles_cascade_in_order`, 1 of 40 on main, 1 of 15 here) and the `*_openssl` groups listed above.
+- `tools/js/cost_matrix.sh` (main `fe2d54cd` vs now): 803 rows, mean change glibc -0.756%, 0 rows over the limit. `parse_load deep 1` and `deep 10` fail to run, as on main.
+
+### Not tested
+
+- Cascade results of a whole page, lazy against eager, apart from the cascade unit tests and the journeys.
+- Wall time on an idle machine.
+- A sheet with 64 or more nested blocks in a rule (the scanner bails out; not measured).
+- crates/js was not changed, so test262 and exec_diff were not run.

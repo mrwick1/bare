@@ -648,11 +648,11 @@ fn rule_from_chunk(d: &Dom, it: &mut Interp<'_>, sheet: ObjId, parent: Option<Ob
     Ok(Some(match r {
         bare_css::parser::Rule::Style(r) if parent.is_some_and(|p| state(d).borrow().rules[&p].kind == Kind::Keyframes) => {
             let rule = Rule { kind: Kind::Keyframe, prelude: r.prelude.to_owned(), raw: String::new(), ..base };
-            new_rule(d, it, rule, Some(declaration_text(&r.declarations)))?
+            new_rule(d, it, rule, Some(declaration_text(&r.declarations())))?
         }
         bare_css::parser::Rule::Style(r) => {
             let rule = Rule { kind: Kind::Style, selector: Some(r.prelude.to_owned()), raw: String::new(), ..base };
-            new_rule(d, it, rule, Some(declaration_text(&r.declarations)))?
+            new_rule(d, it, rule, Some(declaration_text(&r.declarations())))?
         }
         bare_css::parser::Rule::At(a) => {
             let kind = match a.name.as_ref() {
