@@ -147,11 +147,11 @@ impl<'p> Interp<'p> {
     /// of [`Interp::realm`]). Every walked script opens one root scope, in the order of the scripts. A lazy function's script opens none.
     pub(super) fn bc_root(&self) -> Option<u32> {
         // The tree of a lazy function (`Body::Lazy`) opens no root scope, and the bytecode does not run it.
-        if self.prog.lazy_tree {
+        if self.prog.is_lazy_tree() {
             return None;
         }
         let roots: Vec<u32> = (0..self.sc_all.len() as u32).filter(|&i| matches!(self.sc_all[i as usize].kind, RKind::Root)).collect();
-        let slots = |r: std::ops::Range<usize>| r.filter(|&i| i == self.cur || !self.scripts[i].prog.lazy_tree).count();
+        let slots = |r: std::ops::Range<usize>| r.filter(|&i| i == self.cur || !self.scripts[i].prog.is_lazy_tree()).count();
         let unwalked = slots(0..self.scripts.len()) - roots.len();
         slots(0..self.cur).checked_sub(unwalked).map(|k| roots[k])
     }

@@ -26,6 +26,11 @@ use std::rc::Rc;
 pub const MAX_BYTES: usize = 32 << 20;
 /// Shorter sources are not kept.
 pub const MIN_SOURCE: usize = 512;
+
+/// A source shorter than this keeps every function body, also for [`Kind::ClassicLazy`] and [`Kind::ModuleLazy`]. A lazy function that
+/// runs is parsed twice and walked in a script of its own: in a small script that costs more than the dropped nodes save.
+pub const LAZY_MIN_SOURCE: usize = 16 << 10;
+
 /// An entry that the last this many realms did not use goes at the next [`new_realm`].
 pub const MAX_IDLE: u64 = 2;
 
@@ -111,7 +116,7 @@ fn nodes_err(at: u32) -> Error {
 /// `source.len() <= limits.max_source` must be checked first (the realm does it).
 pub fn parse(kind: Kind, source: &str, limits: Limits) -> Result<Rc<Program<'static>>, Error> {
     let fresh = |limits| {
-        let (r, used) = match (kind.is_module(), kind.is_lazy()) {
+        let (r, used) = match (kind.is_module(), kind.is_lazy() && source.len() >= LAZY_MIN_SOURCE) {
             (true, false) => parse_module_used(source, limits),
             (false, false) => parse_script_used(source, limits),
             (true, true) => crate::parse::parse_module_lazy_used(source, limits),

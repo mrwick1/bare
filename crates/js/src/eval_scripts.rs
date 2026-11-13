@@ -56,8 +56,6 @@ struct Code {
     /// Class walk flags (see `eval_classes.rs`): per function and per class of this script.
     fflags: Vec<u8>,
     cflags: Vec<u8>,
-    /// The lazy functions of the program (`Body::Lazy`), by index.
-    lazy: Vec<LazySlot>,
 }
 
 /// A function whose body the parser did not keep (`Body::Lazy`), in one realm.
@@ -77,11 +75,11 @@ impl Code {
         use std::mem::size_of;
         (self.expr_name.capacity() + self.pat_name.capacity() + self.stmt_label.capacity() + self.func_name.capacity() + self.slots.sites.len()) * 4
             + self.site_strs.capacity() * size_of::<StrId>() + self.prop_str.capacity() * size_of::<Option<StrId>>()
-            + self.scopes.capacity() * size_of::<FScope>() + self.fflags.capacity() + self.cflags.capacity() + self.lazy.capacity() * size_of::<LazySlot>()
+            + self.scopes.capacity() * size_of::<FScope>() + self.fflags.capacity() + self.cflags.capacity()
     }
 
     fn placeholder(prog: &Rc<Program<'static>>) -> Code {
-        Code { prog: prog.clone(), expr_name: Vec::new(), pat_name: Vec::new(), stmt_label: Vec::new(), func_name: Vec::new(), site_strs: Vec::new(), prop_str: Vec::new(), scopes: Vec::new(), slots: Slots::default(), fflags: Vec::new(), cflags: Vec::new(), lazy: Vec::new() }
+        Code { prog: prog.clone(), expr_name: Vec::new(), pat_name: Vec::new(), stmt_label: Vec::new(), func_name: Vec::new(), site_strs: Vec::new(), prop_str: Vec::new(), scopes: Vec::new(), slots: Slots::default(), fflags: Vec::new(), cflags: Vec::new() }
     }
 
     /// Empty caches sized for the tree.
@@ -98,7 +96,6 @@ impl Code {
             slots: Slots::new(&st),
             fflags: vec![0; st.funcs],
             cflags: vec![0; st.classes],
-            lazy: vec![LazySlot::default(); st.lazies],
             prog,
         }
     }
@@ -234,7 +231,7 @@ impl<'p> Interp<'p> {
     // scopes are found before the walk, while the outer script is the current one.
 
     fn lazy_slot(&self, script: u32, idx: u32) -> LazySlot {
-        if script as usize == self.cur { self.lazy[idx as usize] } else { self.scripts[script as usize].lazy[idx as usize] }
+        self.lazy.get(&(script, idx)).copied().unwrap_or_default()
     }
 
     /// The first call, in this realm, of the function that the lazy body `idx` of script `script` belongs to: its script slot and function.
@@ -289,7 +286,7 @@ impl<'p> Interp<'p> {
         }
         self.script_nodes += nodes;
         let slot = LazySlot { script: id as u32 + 1, fid: fid.index() as u32, ..s };
-        if script as usize == self.cur { self.lazy[idx as usize] = slot } else { self.scripts[script as usize].lazy[idx as usize] = slot }
+        self.lazy.insert((script, idx), slot);
         Ok((id as u32, fid))
     }
 
@@ -432,10 +429,15 @@ impl<'p> Interp<'p> {
         std::mem::swap(&mut self.slots, &mut c.slots);
         std::mem::swap(&mut self.cls.fflags, &mut c.fflags);
         std::mem::swap(&mut self.cls.cflags, &mut c.cflags);
-        std::mem::swap(&mut self.lazy, &mut c.lazy);
         // slot `cur` held the placeholder and slot `id` now holds the old current code: exchange them
         self.scripts.swap(self.cur, id);
         self.cur = id;
+    }
+
+    /// [`Interp::func_of`] without the copy: the call path reads two fields.
+    #[inline(always)]
+    fn func_ref(&self, script: u32, fid: FuncId) -> &Func {
+        if script as usize == self.cur { self.prog.func(fid) } else { self.scripts[script as usize].prog.func(fid) }
     }
 
     /// The function node `fid` of script `script` (a closure's own code, not the current script's).

@@ -598,6 +598,20 @@ impl PartialEq<&str> for Src<'_> {
     }
 }
 
+/// Location marks, shared by a tree and the trees of its lazy functions.
+pub(crate) type Marks = Rc<OnceCell<Box<[lex::Mark]>>>;
+
+/// The lazy functions of a tree.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct LazyInfo {
+    /// The function bodies that were checked and not kept ([`Body::Lazy`]).
+    pub(crate) lazies: Vec<LazyFn>,
+    /// Parsed with the module goal (also a tree of a function of a module, which has no `module` of its own).
+    pub(crate) module_goal: bool,
+    /// The tree of one lazy function ([`Program::lazy_function`]): its source is the source of the program that holds the function.
+    pub(crate) tree: bool,
+}
+
 /// A function whose body the parser checked and dropped (see [`Body::Lazy`]).
 #[derive(Debug, Clone)]
 pub struct LazyFn {
@@ -637,14 +651,11 @@ pub struct Program<'a> {
     pub(crate) catches: Vec<Catch>,
     pub(crate) elems: Vec<ClassElem>,
     pub(crate) lists: Vec<u32>,
-    /// The function bodies that were checked and not kept ([`Body::Lazy`]).
-    pub(crate) lazies: Vec<LazyFn>,
-    /// Parsed with the module goal (also a tree of a function of a module, which has no `module` of its own).
-    pub(crate) module_goal: bool,
-    /// The tree of one lazy function ([`Program::lazy_function`]): its source is the source of the program that holds the function.
-    pub(crate) lazy_tree: bool,
+    /// What the lazy function bodies need ([`Body::Lazy`]); `None` for a tree that has none. One word: the realm swaps a `Program` at each call
+    /// from one script into another.
+    pub(crate) lz: Option<Box<LazyInfo>>,
     /// Location marks, made by the first `location` call (16 B per 4 KiB of source). The trees of the lazy functions share them: they share the source.
-    marks: Rc<OnceCell<Box<[lex::Mark]>>>,
+    marks: OnceCell<Marks>,
 }
 
 /// How many nodes of each kind a program has, and the bytes they use (capacity not counted).
@@ -720,10 +731,8 @@ impl<'a> Program<'a> {
             catches: Vec::new(),
             elems: Vec::new(),
             lists: Vec::new(),
-            lazies: Vec::new(),
-            module_goal: false,
-            lazy_tree: false,
-            marks: Default::default(),
+            lz: None,
+            marks: OnceCell::new(),
         }
     }
 
@@ -744,26 +753,47 @@ impl<'a> Program<'a> {
             body: self.body, strict: self.strict, module: self.module, exprs: tight(self.exprs), stmts: tight(self.stmts), pats: tight(self.pats),
             funcs: tight(self.funcs), classes: tight(self.classes), props: tight(self.props), pat_props: tight(self.pat_props),
             templates: tight(self.templates), quasis: tight(self.quasis), decls: tight(self.decls), cases: tight(self.cases),
-            catches: tight(self.catches), elems: tight(self.elems), lists: tight(self.lists), lazies: tight(self.lazies), module_goal: self.module_goal, lazy_tree: self.lazy_tree, marks: self.marks,
+            catches: tight(self.catches), elems: tight(self.elems), lists: tight(self.lists), lz: self.lz.map(|mut l| {
+                l.lazies.shrink_to_fit();
+                l
+            }), marks: self.marks,
         }
     }
 
-    pub(crate) fn share_marks(&mut self, marks: &Rc<OnceCell<Box<[lex::Mark]>>>) {
-        self.marks = marks.clone();
+    pub(crate) fn lazies(&self) -> &[LazyFn] {
+        self.lz.as_ref().map_or(&[], |l| &l.lazies)
+    }
+
+    pub(crate) fn lz_mut(&mut self) -> &mut LazyInfo {
+        self.lz.get_or_insert_default()
+    }
+
+    /// The tree of one lazy function ([`Program::lazy_function`]).
+    pub(crate) fn is_lazy_tree(&self) -> bool {
+        self.lz.as_ref().is_some_and(|l| l.tree)
+    }
+
+    /// The marks that this tree shares with its lazy functions (made empty at the first call).
+    fn shared_marks(&self) -> &Marks {
+        self.marks.get_or_init(Default::default)
+    }
+
+    pub(crate) fn share_marks(&mut self, marks: &Marks) {
+        self.marks = OnceCell::from(marks.clone());
     }
 
     /// The tree of the lazy function `idx` ([`Body::Lazy`]): the function with its parameters and body, as the last function of the
     /// tree. The first call parses it, bounded by `limits`. A tree that an earlier call made is given back as it is. The count is `Some(nodes)`
     /// of the parse that made the tree now, `None` for a tree that was there.
     pub fn lazy_function(&self, idx: u32, limits: crate::parse::Limits) -> Result<(Rc<Program<'static>>, FuncId, Option<u32>), crate::parse::Error> {
-        let lz = &self.lazies[idx as usize];
+        let lz = &self.lazies()[idx as usize];
         let (prog, used) = match lz.parsed.get() {
             Some(p) => (p.clone(), None),
             None => {
                 let Src::Shared(src) = &self.source else {
                     return Err(crate::parse::Error { kind: crate::parse::ErrorKind::Unsupported, msg: "lazy function of an unshared source", start: lz.start, end: lz.start });
                 };
-                let (p, used) = crate::parse::parse_lazy_function(src, &self.marks, self.module_goal, lz, limits)?;
+                let (p, used) = crate::parse::parse_lazy_function(src, self.shared_marks(), self.lz.as_ref().is_some_and(|l| l.module_goal), lz, limits)?;
                 let p = Rc::new(p);
                 let _ = lz.parsed.set(p.clone());
                 (p, Some(used))
@@ -775,7 +805,7 @@ impl<'a> Program<'a> {
 
     /// The lazy function `idx` of this tree ([`Body::Lazy`]).
     pub fn lazy(&self, idx: u32) -> &LazyFn {
-        &self.lazies[idx as usize]
+        &self.lazies()[idx as usize]
     }
 
     pub fn expr(&self, id: ExprId) -> &Expr {
@@ -874,12 +904,12 @@ impl<'a> Program<'a> {
         if self.source.len() <= lex::MARK_STEP {
             return lex::location(&self.source, byte as usize);
         }
-        lex::location_in(&self.source, self.marks.get_or_init(|| lex::location_marks(&self.source)), byte as usize)
+        lex::location_in(&self.source, self.shared_marks().get_or_init(|| lex::location_marks(&self.source)), byte as usize)
     }
 
     /// The most source bytes the next `location` call reads: the whole source before the marks exist.
     pub fn location_cost(&self) -> usize {
-        if self.marks.get().is_some() { lex::MARK_STEP } else { self.source.len() }
+        if self.marks.get().is_some_and(|m| m.get().is_some()) { lex::MARK_STEP } else { self.source.len() }
     }
 
     pub fn stats(&self) -> Stats {
@@ -899,12 +929,12 @@ impl<'a> Program<'a> {
             catches: self.catches.len(),
             elems: self.elems.len(),
             list_items: self.lists.len(),
-            lazies: self.lazies.len(),
+            lazies: self.lazies().len(),
             bytes: size_of_val(&*self.exprs) + size_of_val(&*self.stmts) + size_of_val(&*self.pats)
                 + size_of_val(&*self.funcs) + size_of_val(&*self.classes) + size_of_val(&*self.props)
                 + size_of_val(&*self.pat_props) + size_of_val(&*self.templates) + size_of_val(&*self.quasis)
                 + size_of_val(&*self.decls) + size_of_val(&*self.cases) + size_of_val(&*self.catches)
-                + size_of_val(&*self.elems) + size_of_val(&*self.lists) + size_of_val(&*self.lazies),
+                + size_of_val(&*self.elems) + size_of_val(&*self.lists) + size_of_val(self.lazies()),
         }
     }
 }

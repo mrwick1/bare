@@ -236,7 +236,9 @@ fn parse_counted<'a>(source: &'a str, mut limits: Limits, used: &mut u32, module
         eager_at: u32::MAX,
         check_regexp: true,
     };
-    p.p.module_goal = module;
+    if module && lazy {
+        p.p.lz_mut().module_goal = true;
+    }
     let r = if module { p.parse_module_body() } else { p.parse_program() };
     *used = p.used;
     r?;
@@ -246,7 +248,7 @@ fn parse_counted<'a>(source: &'a str, mut limits: Limits, used: &mut u32, module
 /// The second parse of a lazy function ([`Program::lazy_function`]): the parameters and the body, from the `(` of the parameters, with the context
 /// that the first parse had there. The function is the last function of the tree; the tree shares `src` and its location marks. The first parse
 /// found every early error of the function, so a syntax error here is a bug; a limit can still stop it. The count is the nodes and list entries made.
-pub(crate) fn parse_lazy_function(src: &Rc<str>, marks: &Rc<OnceCell<Box<[lex::Mark]>>>, module: bool, lz: &LazyFn, mut limits: Limits) -> Result<(Program<'static>, u32), Error> {
+pub(crate) fn parse_lazy_function(src: &Rc<str>, marks: &crate::ast::Marks, module: bool, lz: &LazyFn, mut limits: Limits) -> Result<(Program<'static>, u32), Error> {
     limits.max_depth = limits.max_depth.min(HARD_MAX_DEPTH);
     let mut lexer = Lexer::starting_at(src, lz.params_at).map_err(lex_err)?;
     lexer.set_html_comments(!module);
@@ -286,12 +288,14 @@ pub(crate) fn parse_lazy_function(src: &Rc<str>, marks: &Rc<OnceCell<Box<[lex::M
         // The first parse of the whole text checked it.
         check_regexp: false,
     };
-    p.p.module_goal = module;
+    if module {
+        p.p.lz_mut().module_goal = true;
+    }
     p.parse_function_rest(lz.start, lz.name, lz.kind, false, false)?;
     let used = p.used;
     let mut prog = p.p.with_shared_source(src.clone());
     prog.share_marks(marks);
-    prog.lazy_tree = true;
+    prog.lz_mut().tree = true;
     Ok((prog, used))
 }
 
@@ -3301,8 +3305,9 @@ impl<'a> Parser<'a> {
             return Ok((params, Body::Block(body), simple));
         }
         self.arena_truncate(&mark);
-        let idx = self.p.lazies.len() as u32;
-        self.p.lazies.push(LazyFn { params_at: pstart, name, start, kind, mode: FuncMode::Plain, strict: strict_in, parsed: OnceCell::new() });
+        let lz = self.p.lz_mut();
+        let idx = lz.lazies.len() as u32;
+        lz.lazies.push(LazyFn { params_at: pstart, name, start, kind, mode: FuncMode::Plain, strict: strict_in, parsed: OnceCell::new() });
         Ok((params, Body::Lazy(idx), simple))
     }
 
@@ -3311,7 +3316,7 @@ impl<'a> Parser<'a> {
         ArenaMark {
             exprs: p.exprs.len(), stmts: p.stmts.len(), pats: p.pats.len(), funcs: p.funcs.len(), classes: p.classes.len(), props: p.props.len(),
             pat_props: p.pat_props.len(), templates: p.templates.len(), quasis: p.quasis.len(), decls: p.decls.len(), cases: p.cases.len(),
-            catches: p.catches.len(), elems: p.elems.len(), lists: p.lists.len(), lazies: p.lazies.len(),
+            catches: p.catches.len(), elems: p.elems.len(), lists: p.lists.len(), lazies: p.lazies().len(),
         }
     }
 
@@ -3332,7 +3337,9 @@ impl<'a> Parser<'a> {
         p.catches.truncate(m.catches);
         p.elems.truncate(m.elems);
         p.lists.truncate(m.lists);
-        p.lazies.truncate(m.lazies);
+        if let Some(l) = &mut p.lz {
+            l.lazies.truncate(m.lazies);
+        }
     }
 
     /// `{ ... }` of a function, with the directive prologue. May turn on strict mode (the caller restores it).
