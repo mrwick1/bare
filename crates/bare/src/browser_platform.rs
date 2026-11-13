@@ -268,6 +268,7 @@ impl Dom {
         crate::browser_platform_class::install(self, it, list, iter, sym)?;
         self.def_get(it, p.element, "classList", crate::browser_platform_class::class_list, Some(crate::browser_platform_class::set_class_list))?;
         self.def_get(it, p.link, "relList", crate::browser_platform_class::rel_list::<0>, Some(crate::browser_platform_class::set_rel_list::<0>))?;
+        self.def_get(it, p.iframe, "sandbox", crate::browser_platform_class::sandbox_list, Some(crate::browser_platform_class::set_sandbox_list))?;
         crate::browser_platform_query::install(self, it)?;
 
         // interface objects and `matchMedia`
