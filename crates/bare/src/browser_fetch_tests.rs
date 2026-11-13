@@ -589,7 +589,11 @@ fn resource_caps_are_limits_before_growth() {
         assert_eq!(js(&mut b, "fetch('/c')"), lim("fetch-queue"));
         b.run_network_tasks(10).unwrap();
         assert_eq!(js(&mut b, &format!("fetch('/{}')", "x".repeat(100))), lim("fetch-url"));
-        assert_eq!(js(&mut b, &format!("fetch('/p', {{method:'POST', body:'{}'}})", "x".repeat(101))), lim("fetch-request-body"));
+        // A body over the cap is refused with a TypeError, and the page goes on (issue #465).
+        assert_eq!(js(&mut b, &format!("var m; fetch('/p', {{method:'POST', body:'{}'}}).catch(function (e) {{ m = e.name + ': ' + e.message }}); 1", "x".repeat(101))), "1");
+        b.drain().unwrap();
+        assert_eq!(js(&mut b, "m"), "TypeError: Failed to construct 'Request': the body is over the limit of 100 bytes.");
+        assert_eq!(js(&mut b, &format!("var x = new XMLHttpRequest(); x.open('POST', '/p'); x.send('{}')", "x".repeat(101))), "throw:TypeError:Failed to execute 'send' on 'XMLHttpRequest': the body is over the limit of 100 bytes.");
         // Aggregate: 3 queued bodies of 100 bytes are above 300 with the held ones.
         let mut b2 = mk(base.clone(), FetchLimits { max_pending: 8, ..l });
         assert_eq!(js(&mut b2, &format!("var body = '{}'; fetch('/p', {{method:'POST', body}}); fetch('/p', {{method:'POST', body}}); fetch('/p', {{method:'POST', body}}); 1", "y".repeat(100))), "1");
@@ -1059,8 +1063,14 @@ fn request_and_response_take_blob_form_and_params_bodies() {
 fn a_form_body_over_the_limit_is_refused_before_the_copy() {
     big(|| {
         let mut b = mk(Some("http://127.0.0.1:1/".into()), FetchLimits { max_request_body: 1000, ..Default::default() });
-        assert_eq!(js(&mut b, "var f = new FormData(); f.append('f', new Blob([new Uint8Array(2000)])); fetch('/x', {method: 'POST', body: f})"), lim("fetch-request-body"));
-        assert_eq!(js(&mut b, "fetch('/x', {method: 'POST', body: new Blob([new Uint8Array(2000)])})"), lim("fetch-request-body"));
+        let over = "throw:TypeError:Failed to construct 'Request': the body is over the limit of 1000 bytes.";
+        assert_eq!(js(&mut b, "var f = new FormData(); f.append('f', new Blob([new Uint8Array(2000)])); new Request('/x', {method: 'POST', body: f})"), over);
+        assert_eq!(js(&mut b, "var f = new FormData(); f.append('a', 'x'.repeat(600)); f.append('b', 'x'.repeat(600)); new Request('/x', {method: 'POST', body: f})"), over);
+        assert_eq!(js(&mut b, "new Request('/x', {method: 'POST', body: new Blob([new Uint8Array(2000)])})"), over);
+        assert_eq!(js(&mut b, "new Request('/x', {method: 'POST', body: new URLSearchParams({a: 'x'.repeat(2000)})})"), over);
+        assert_eq!(js(&mut b, "new Response('x'.repeat(2000))"), "throw:TypeError:Failed to construct 'Response': the body is over the limit of 1000 bytes.");
+        // The page goes on.
+        assert_eq!(js(&mut b, "new Request('/x', {method: 'POST', body: 'ok'}).method"), "POST");
     });
 }
 
