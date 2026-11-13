@@ -1,0 +1,12 @@
+# iso: another test must not see them
+open ${BASE}/home state="${STATE}"
+expect css="h1" text="Heading home"
+expect js "localStorage.getItem('leak') === null && sessionStorage.getItem('leak') === null"
+expect cookie leak absent
+expect cookie sid
+click role=link name="Page 3"
+expect css="h1" text="Heading p3"
+expect css="#count" text="20"
+click role=link name="Page 4"
+expect css="h1" text="Heading p4"
+expect css="#count" text="20"

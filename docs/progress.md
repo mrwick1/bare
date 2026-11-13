@@ -8615,3 +8615,80 @@ Checks: `cargo test --release -p bare --lib downloads` (22 pass, 3 runs). New te
 By hand through `bare-mcp` (`/data/bare-tmp/design/downloads/controls.py`, 64 MiB at 1 MiB/s for each connection, 1 run): pause held the bytes at 8,807,904 for 1 s; after resume with a 1 MiB/s limit the count grew by 2,334,496 bytes in 2 s; with the limit off the file ended with the expected MD5.
 
 Not tested: a speed limit over many connections against a real server; a queued job whose first connection died while it waited (covered only by the resume path). Not benchmarked: the queue and the controls do not change the transfer path, except one lock-held subtraction for each piece when a limit is set.
+
+## Suite benchmark: shared login, warm workers (step 7, 2026-11-13)
+
+Branch `t3/suite-benchmark-workers`. Design: `docs/design-suite.md`, sections 4, 5 and 9 (owner decisions). Decision: `docs/decisions.md`, "A suite runs in warm worker processes with one shared login".
+
+### What was built
+
+- `tools/suite/server.py`: the fixture app. Login form, `sid` cookie, 8 pages, a notes page that posts through `fetch`, `/logout` that ends the server session, the two public immutable assets (300 KB script, 60 KB sheet), `--login-ms`, `--js-kb`, `--css-kb`, and `/__stats` (login POSTs, requests). Head and body go out in one send (a two-send server adds 41 ms to each reply).
+- `tools/suite/gen_suite.py` and `tools/suite/tests/`: 40 tests and `setup.steps`. 26 read, 2 iso (the first leaves a cookie and storage behind, the second must not see them), 4 text, 4 write, 2 sign-out, 1 wrong password, 1 marked `# own` by hand. A shared test starts with `open ${BASE}/home state="${STATE}"`.
+- `crates/drive/src/suite.rs` and the flags of `bare-drive`: `--suite DIR [--workers K|auto] [--test-timeout MS] [--login-each] [--only TEXT] [--perf] [--list] [--cold OUTDIR]`.
+  - The setup runs once, in worker 0, and saves the session to `OUT/state.json`. The file is deleted at the end.
+  - The lint (`lint`) marks a test `own` when a step (not a comment) says `sign out`, `password` or `delete`. A line `# own` or `# shared` in the file decides. For an own test the runner replaces the first `open ... state=` line with the steps of the setup, so the test logs in itself. A test with no `state=` line runs as it is.
+  - A worker is a `bare-drive --suite-worker` process. It reads a test name for each line on stdin, runs the test in a new `Session` with a fork of the one network client of the process, and writes one JSON line. The parse caches are thread-local, so they stay warm across its tests.
+  - Isolation (design A): each `open` has its own storage and cookie jar. A test that fails, or runs past `--test-timeout`, ends its worker; the next test gets a new process.
+  - Queue: each worker thread of the coordinator takes the next test (no fixed split).
+  - K by `pick_workers`: `min(cores - 4, half of MemAvailable / peak RSS of worker 0 after the setup, tests)`. The 4 cores are for a local fixture server, the coordinator and the other users of the machine. On this machine: min(12, 324, 40) = 12.
+  - Summary (JSON on stdout and `OUT/suite.json`; a table on stderr): each test (class, why, ms, worker, failure), wall time, expected login POSTs, and for each worker its tests, peak RSS and (with `--perf`) instructions. `--perf` puts `perf stat -e instructions:u` around each worker. The sum matched an outer `perf stat` (15,860 M against 15,864 M at K = 4).
+- `tools/suite/run.py`: the benchmark. It starts the fixture, runs V0 to V4, and checks the login POSTs and the passed tests of each run (a run that fails a check does not count).
+- Tests (`crates/drive/tests/suite.rs`, 5; `suite.rs` unit tests, 3): shared tests start from one login and an own test logs in itself (2 login POSTs in all); a test sees no cookie or storage of the test before it, in the same worker; a failed test ends its worker and the next test runs in worker 1; a sign-out test that `# shared` forces onto the shared session makes the next test fail (no false pass); K workers share the queue.
+
+### Numbers (criterion 7)
+
+Machine archMachine, 16 cores, shared: load average 14 to 22 during the runs, so wall times are weak. Instruction counts are stable (0.1% between runs). Binary: this branch on `ad8c9a4b`, release. 40 tests, 3 runs, median and (min-max). Every run passed 40 of 40, and the server counted the expected login POSTs: 40 for V0, V1 and V3, 5 (the setup and 4 own tests) for V2 and V4.
+
+| Variant | What | Wall s | Instructions (M) | Peak RSS of a worker (MiB) | Against V0: wall, instructions |
+| --- | --- | --- | --- | --- | --- |
+| V0 | a new process for each test, every test logs in, one at a time | 4.30 (4.13-6.11) | 21,175 (21,175-21,176) | 26.0 | 1.00, 1.00 |
+| V1 | one warm worker, every test logs in | 3.48 (3.12-5.27) | 18,277 (18,244-18,282) | 26.5 | 1.23, 1.16 |
+| V2 | one warm worker, one shared login | 3.13 (3.07-4.41) | 15,682 (15,660-15,689) | 26.4 | 1.37, **1.35** |
+| V3 K = 2 / 4 / 8 / 12 | V0 with K processes at a time | 3.07 / 3.83 / 2.33 / 1.64 | 21,155 / 21,164 / 21,155 / 21,178 | 26.0 | 1.40 / 1.12 / 1.84 / 2.63, 1.00 |
+| V4 K = 2 | warm workers, shared login | 2.62 (1.71-2.92) | 15,756 | 26.6 | 1.64, 1.34 |
+| V4 K = 4 | the same | 0.91 (0.83-0.94) | 15,933 | 26.4 | **4.73**, 1.33 |
+| V4 K = 8 | the same | 0.63 (0.60-0.63) | 16,233 | 26.5 | **6.85**, 1.30 |
+| V4 K = 12 (the default K here) | the same | 0.57 (0.57-0.64) | 16,451 (16,261-16,532) | 26.3 (317 MiB for 12 workers) | **7.51**, 1.29 |
+
+The frozen baseline `f6415364` gives the same V0: 21,160 M (21,135-21,161), 4.17 s (4.11-6.68), 25.7 MiB. A run of the default (`--workers auto`) took 445 ms for 40 tests with 12 workers.
+
+**Verdict, wall time: met** for K = 4 or more (4.7 to 7.5 times against V0, median of 3, load 14 to 22). Not met at K = 2 (1.64 times), and not met with one worker on this fixture (1.37 times). The wall result is a result of the pool, not of the engine (design-suite.md, section 8, question 1).
+**Verdict, instructions with one worker: not met on the standard suite.** V2 is 1.35 times lower than V0 (target 1.5). Workers add instructions, not remove them: 12 workers parse the 300 KB script 12 times (+5% at K = 12).
+
+Why 1.35: a document costs about 75 M here (design-suite.md, section 1.2). A V0 test is 7 documents (login page, home and 5 pages) and a V2 test is 6, plus the first parse of the script (71 M) that V0 pays in each process and V2 pays once. The 4 own tests pay their login. That is the 1.35 (V1, warm only, gives 1.16; the shared login gives the other 1.16).
+
+Sensitivity (same fixture, other suites; 3 runs each; instruction ratio against V0 of that suite). These are not the verdict; they show what moves it.
+
+| Suite | V0 (M) | V2 (M) | V2 ratio | V4 K = 4 | V4 K = 8 |
+| --- | --- | --- | --- | --- | --- |
+| standard (5 pages after the start) | 21,175 | 15,682 | 1.35 | 1.33 | 1.30 |
+| the 26 `read` tests only (ceiling of 100% shared) | 16,608 | 12,914 | 1.29 | 1.26 | 1.24 |
+| 2 pages after the start | 14,699 | 9,226 | 1.59 | 1.55 | 1.50 |
+| 1 page after the start | 12,569 | 7,091 | 1.77 | 1.72 | 1.65 |
+| standard, `--login-ms 300` (wall: V0 20.0 s, V2 6.74 s, V4 K = 4 1.50 s) | 21,169 | 15,602 | 1.36 | 1.33 | 1.31 |
+
+The ratio grows when the test is shorter or the login is a larger part of it. The `read` tests alone give less than the whole suite because a `read` test is the longest class (5 pages). A slow server login makes setup reuse alone cut wall time 3 times (V2 against V0) and the pool 13 times at K = 4. K = 8 was slower than K = 4 there (1.79 s against 1.50 s, load 17 to 18): hypothesis, the single-process Python fixture and the other jobs of the machine; not checked.
+
+### Checks
+
+- After the rebase on `c8a75edd`: `cargo test --release --workspace --no-fail-fast`: 3,797 passed, 10 failed, none in `bare-drive` (its 5 new integration tests and 3 new unit tests pass). 7 of the 10 are the OpenSSL TLS tests (`bare-net` `https_openssl` 2, `bare-tls` `client_openssl` 4, `tls12_openssl` 1) that the notes of the shared-client change show failing on main; I did not run them on main again. The other 3 failed under load (14 to 22) and pass alone: `bare` `downloads::run::tests::a_changed_file_starts_again_from_zero`, `bare-mcp` `a_snapshot_of_5000_elements_takes_under_30_ms`, `bare-net` `h2_node_edge` `a_server_that_closes_idle_sessions_does_not_break_the_next_request`.
+- `tools/js/cost_matrix.sh`, `test262_check.sh` and `exec_diff.sh` were not run: the change touches only `crates/drive` (the `bare-drive` binary and its tests) and `tools/suite`, and no engine crate or `bare-stress` links it.
+- `tools/portable_check.sh --scan`: ok (the suite code has no OS code; `/proc/meminfo` and `VmHWM` are read in `main.rs`, which is on the list).
+- A sign-out test that a user forces onto the shared login makes the next shared test fail on its first check (`expect ... Heading home` meets the login page). That is the "no false pass" gate. The runner does not log in again: see below.
+
+### Not tested, not built
+
+- A real login or a real network. The fixture login is cheap (p = 0.12 by design-suite.md); the 300 ms row only adds server wait.
+- Wall time on an idle machine. The load was 14 to 22.
+- Re-login after a stale shared session (design-suite.md, section 4.3: "if the check fails, log in again once"): not built. A stale session fails the tests that start from it, and the summary says so.
+- Slowest-first order from the times of the last run: not built (the given order is used).
+- A worker restart after M tests for memory growth: not built. Peak RSS per worker is in the summary.
+- A hung test with `--perf`: the coordinator kills the `perf` process and not its child. Without `--perf` the worker is killed (tested only by the failed-test case, not by a timeout).
+- `--window`, Windows and macOS runs. The suite code builds on every target (no OS code in it), but only Linux ran.
+- The MCP tool `run_suite` (owner decision 3): next, as a separate PR.
+- Per-worker accounts (design B) and the `write` class with one account for each worker: the write tests add a note with a unique text and check that text, so they do not depend on the other writers.
+
+### Noticed, not changed
+
+- The reply cache still empties itself when one reply does not fit.
+- The steps of a composed own test have other line numbers than the test file (the setup is inserted before them); a failure names the line of the composed text.

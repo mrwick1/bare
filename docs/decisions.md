@@ -1951,3 +1951,13 @@ Issue #442: `el.style.WebkitUserSelect` was `undefined`, so `el.style.WebkitUser
 - One slot for each URL: a reply of another jar replaces the stored one. The other design (the jar id in the key) keeps both, and costs a second hash lookup for each cacheable request. Two live jars that use the same private URL in turn are rare, and the cache stays correct either way.
 - The jar id is a counter in `Jar::default`. A pointer would be reused after a jar is freed, and a new jar would read the old private replies.
 - Not changed: `MAX_IDLE` of the parse cache. See the progress section for the numbers.
+
+## A suite runs in warm worker processes with one shared login (2026-11-13)
+
+`bare-drive --suite DIR --workers K` runs the tests of DIR. The login runs once (`setup.steps`), and each shared test starts from the saved session (`open ... state="${STATE}"`). Chosen against two other designs (design-suite.md, sections 4.3 and 4.4):
+
+- A pool of threads in one process: rejected. `bare_net::trace` is a process-global, so the network records of two tests would mix, and the parse cache is thread-local, so K threads parse K times.
+- A fork server after the login: deferred (a JS heap carries timers and sockets, and the shared server session makes it unsafe).
+- Chosen: K `bare-drive --suite-worker` processes. Each is warm across its tests (one network client, one parse cache) and has its own memory, sockets and globals. A failed test ends its worker. This is the model of Playwright (one browser process for each worker, a fresh worker after a failure).
+
+A test is `own` (it logs in itself) when a step says `sign out`, `password` or `delete`, or when the file says `# own`. `# shared` forces the other way. The lint is a text rule and not a proof; a wrong `# shared` makes the next tests fail, never pass. K is `min(cores - 4, half of MemAvailable / peak RSS of worker 0, tests)`.

@@ -1,0 +1,7 @@
+# wrong: a wrong password. It has no state line, so it is its own.
+open ${BASE}/login
+type css="input[name=email]" "${EMAIL}"
+type css="input[name=password]" "not the password"
+click role=button name="Sign in"
+expect css="p" text="Sign-in failed"
+expect cookie sid absent

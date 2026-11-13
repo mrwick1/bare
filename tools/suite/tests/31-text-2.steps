@@ -1,0 +1,10 @@
+# text: only text, title and count checks after one click
+open ${BASE}/home state="${STATE}"
+expect css="h1" text="Heading home"
+click role=link name="Page 3"
+expect css="h1" text="Heading p3"
+expect title="p3"
+expect css="#count" text="20"
+expect css="tr" count 60
+expect css="nav a" count 10
+expect css="p" text~"Items"

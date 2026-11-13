@@ -1,0 +1,8 @@
+# The login that the shared tests start from. The runner runs it once and saves the session to ${STATE}.
+open ${BASE}/login
+type css="input[name=email]" "${EMAIL}"
+type css="input[name=password]" "${PASSWORD}"
+click role=button name="Sign in"
+expect url~"/home"
+expect css="h1" text="Heading home"
+save-state "${STATE}"

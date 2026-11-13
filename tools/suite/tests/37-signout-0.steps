@@ -1,0 +1,8 @@
+# signout: the lint marks it own (sign out)
+open ${BASE}/home state="${STATE}"
+expect css="h1" text="Heading home"
+click role=button name="Sign out"
+expect url~"/login"
+expect cookie sid absent
+open ${BASE}/p1
+expect url~"/login"
