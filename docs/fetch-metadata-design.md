@@ -1,6 +1,6 @@
 # Fetch metadata for page requests
 
-Date: 2026-11-13. Status: initial design and suffix amendment approved. Implementation under test. Issue: #475.
+Date: 2026-11-13. Status: initial design and suffix amendment approved. Implementation and candidate MCP check complete; broader gates have baseline failures. Issue: #475.
 
 ## Verified failure
 
@@ -47,7 +47,7 @@ Run the focused fetch tests, the bare crate tests, formatting and clippy. Use tw
 
 ## Limits
 
-The owner approved the static-list amendment. The implementation uses pinned `psl` 2.1.253 (MIT OR Apache-2.0) and its `psl-types` dependency. The initial wire-header regression failed on missing metadata. Focused metadata tests pass. Full tests and candidate-binary validation remain in progress. No resource benchmark has run. The existing cookie helper stays unchanged. The crate snapshot needs deliberate updates; there is no runtime list download. Record its pinned version and license before adding it. Add a regression for independent domains under a multi-label suffix and a private hosting suffix. No real account, credential or external login was used.
+The owner approved the static-list amendment. The implementation uses pinned `psl` 2.1.253 (MIT OR Apache-2.0) and its `psl-types` dependency. The initial wire-header regression failed on missing metadata. Focused metadata tests pass. The full run reports 1417 passes, one baseline timer failure and six ignored tests. Candidate MCP validation returns 200 from the header-gated local endpoint. Strict formatting and clippy have existing failures, recorded in progress.md. No resource benchmark has run. The existing cookie helper stays unchanged. The crate snapshot needs deliberate updates; there is no runtime list download. Record its pinned version and license before adding it. Add a regression for independent domains under a multi-label suffix and a private hosting suffix. No real account, credential or external login was used.
 
 ## Suffix amendment
 
