@@ -9115,7 +9115,10 @@ All 47 pass on both. Wall time is not from an idle machine. The #486 table gave 
 ### Checks
 
 - `cargo test --release -p bare-net --lib vclock`, `cargo test --release -p bare-drive --test replay`: pass. The drive test failed first with the clock off (the replay took 8.0 s).
-- WORKSPACE_GATES_TODO
+- Rebased once on main `4f3814bf` (no conflict). Gates ran after the rebase.
+- `cargo test --release --workspace --no-fail-fast`: all pass except the 3 groups that also fail on main on this machine (see the #486 section): `bare-net --test https_openssl` (2), `bare-tls --test client_openssl` (4), `bare-tls --test tls12_openssl` (1).
+- `tools/js/cost_matrix.sh` (main `4f3814bf` against this branch): 803 rows, mean change glibc -0.005%, 0 rows over the limit under either allocator. 2 rows (`parse_load deep 1`, `deep 10`) fail to run on both trees (stack overflow). The clock is off in every row.
+- `TEST262=/data/claude-tmp/test262 tools/js/test262_check.sh`: exit 0. `tools/js/exec_diff.sh`: 79 runs, 0 differences. The change to `eval_date.rs` adds an arm for the host clock that only the virtual clock sets.
 
 ### Not tested
 
