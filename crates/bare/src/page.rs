@@ -79,6 +79,9 @@ pub struct Waiting {
     pub state: &'static str,
 }
 
+/// The step budget of one task of a live page (`EvalLimits::default()` gives 100M).
+const LIVE_TASK_STEPS: u64 = 500_000_000;
+
 pub struct Page {
     pub(crate) source: Source,
     pub(crate) frame: Option<Frame>,
@@ -402,6 +405,9 @@ impl Page {
             return Err(format!("{url}: the URL is not an http(s) URL"));
         }
         cfg.viewport = Some((viewport.0 as f32, viewport.1 as f32));
+        // A large app runs its first render in one task (Gmail needs more than 100M steps). Chrome has no step limit for a task;
+        // the driver's wall-clock limits still apply.
+        cfg.eval.max_steps = LIVE_TASK_STEPS;
         // A window runs for hours, not for one load: an input event adds a little time and a few tasks each.
         cfg.limits.max_time = Duration::from_secs(7 * 24 * 3600);
         cfg.limits.max_documents = usize::MAX;

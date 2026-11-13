@@ -53,7 +53,7 @@ fn input_and_timers_work_after_a_runaway_script() {
 
 #[test]
 fn a_page_that_aborts_task_after_task_fails_the_step_with_the_reason() {
-    // Six runaway tasks of 100 M steps each: about 10 s.
+    // Six runaway tasks of 500 M steps each (the budget of a live page task): about 45 s.
     let (code, out) = drive("chain", "timeout 120000\nopen ORIGIN/chain\nexpect css=\"#never\" count 1\n");
     assert_eq!(code, 1, "{out}");
     assert!(out.contains("the page stopped") && out.contains("aborted by script budgets"), "{out}");
