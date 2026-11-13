@@ -278,3 +278,5 @@ mod browser_basics_tests;
 mod browser_rellist_tests;
 #[cfg(test)]
 mod browser_sandbox_tests;
+#[cfg(test)]
+mod browser_transition_tests;

@@ -562,6 +562,8 @@ pub(crate) fn grid_text(styles: &Styles, g: &Grid) -> String {
         Grid::Tracks(parts) => parts_text(styles, parts),
         Grid::Line(l) => line_text(l),
         Grid::Areas(a) => areas_text(a),
+        // The property is not known here: `Snap::text` gives the text of a motion list.
+        Grid::Motion(m) => bare_css::motion::text(Property::AnimationName, m),
     }
 }
 

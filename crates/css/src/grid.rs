@@ -126,6 +126,8 @@ pub enum Grid {
     Tracks(Vec<Part>),
     Line(Line),
     Areas(Areas),
+    /// `transition-*` and `animation-*` lists (`motion.rs`). They share this table, so the cascade keeps them like a track list.
+    Motion(crate::motion::Motion),
 }
 
 impl Grid {

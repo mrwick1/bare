@@ -9,6 +9,7 @@ pub mod form;
 pub mod grid;
 pub mod hints;
 pub mod matching;
+pub mod motion;
 pub mod parser;
 pub mod selector;
 #[cfg(test)]

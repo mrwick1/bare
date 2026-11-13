@@ -2219,6 +2219,7 @@ fn initial(p: Property) -> Value {
         JustifyContent | AlignContent | AlignItems | JustifyItems | RowGap | ColumnGap => Value::Keyword(K::Normal),
         AlignSelf | JustifySelf | TableLayout | GridAutoColumns | GridAutoRows | GridRowStart | GridRowEnd | GridColumnStart | GridColumnEnd => Value::Keyword(K::Auto),
         GridTemplateColumns | GridTemplateRows | GridTemplateAreas => Value::Keyword(K::None),
+        TransitionProperty | TransitionDuration | TransitionDelay | TransitionTimingFunction | AnimationName | AnimationDuration | AnimationDelay | AnimationIterationCount => Value::Keyword(K::None),
         GridAutoFlow => Value::Number(0.0),
         BorderCollapse => Value::Keyword(K::Separate),
         CaptionSide => Value::Keyword(K::Top),
