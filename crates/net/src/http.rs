@@ -17,7 +17,7 @@
 //! Comments compare Rust with JavaScript, because you know JS.
 
 use crate::cookie::{self, Jar, Party, Via};
-use crate::{cause, dns, encoding, h2, parallel, tcp, trace};
+use crate::{cause, dns, encoding, h2, parallel, replay, tcp, trace};
 // JS: like `import * as dns from "./dns"`: other files in this crate.
 use bare_tls::client::{self, ClientStream};
 use bare_tls::trust_store::{self, TrustStore};
@@ -319,6 +319,8 @@ pub struct Client {
     // The site of the document that this client serves (`cookie::site_of`), for `SameSite`. `None`: every request is first-party.
     identity: Option<Arc<Identity>>,
     // The identity that every request of this client sends (see `set_identity`). A fork shares it.
+    tape: Option<Arc<replay::Tape>>,
+    // Record or replay of replies (see `replay.rs`). Off unless `BARE_NET_RECORD` or `BARE_NET_REPLAY` is set, or a test sets it. A fork shares it.
 }
 
 /// Check a request before any DNS lookup or socket. The messages name no header value and no body byte.
@@ -369,20 +371,25 @@ fn alive(stream: &Stream) -> bool {
 
 impl Client {
     pub fn new() -> Client {
-        Client::default()
+        Client { tape: replay::Tape::from_env(), ..Client::default() }
+    }
+
+    /// Record or replay with this tape, for this client and its forks (a test; the environment does it for `new`).
+    pub fn use_tape(&mut self, tape: Arc<replay::Tape>) {
+        self.tape = Some(tape);
     }
 
     /// A client that trusts these roots for https, and not the OS bundle. For tests with a private CA.
     /// The roots are the only trust anchors: there is no way to turn the checks off.
     pub fn with_roots(roots: TrustStore) -> Client {
-        let client = Client::default();
+        let client = Client::new();
         let _ = client.roots.set(Ok(roots));
         client
     }
 
     /// A second client that shares the connections, the root certificates and the worker threads of this one. The reply cache is not shared.
     pub fn fork(&self) -> Client {
-        Client { idle: self.idle.clone(), sessions: self.sessions.clone(), cache: self.cache.clone(), roots: self.roots.clone(), workers: self.workers.clone(), jar: self.jar.clone(), site: self.site.clone(), identity: self.identity.clone(), big: false }
+        Client { idle: self.idle.clone(), sessions: self.sessions.clone(), cache: self.cache.clone(), roots: self.roots.clone(), workers: self.workers.clone(), jar: self.jar.clone(), site: self.site.clone(), identity: self.identity.clone(), tape: self.tape.clone(), big: false }
     }
 
     /// Let a reply declare more than `MAX_REPLY` bytes. The body still stops at `MAX_REPLY` and at `MAX_TIME` until the caller calls
@@ -701,7 +708,7 @@ impl Client {
         // The clock of the body starts where the head ended.
         body.start = Instant::now();
         body.rec = rec.take();
-        let mut live = Body(Source::H2(Box::new(body)));
+        let mut live = self.tapped(url, plan, &response, Body(Source::H2(Box::new(body))));
         if let Some(codings) = undo {
             live = Body(Source::Decoded(Box::new(encoding::Decoded::new(live, codings))));
         }
@@ -717,13 +724,66 @@ impl Client {
             }
             None => conditions,
         };
-        let (response, body) = match self.attempt(url, plan, conditions) {
-            // The server did not start the request (`GOAWAY`, a refused stream): any method may run again, once, on a new connection.
-            Err(e) if e.is::<h2::Unprocessed>() => self.attempt(url, plan, conditions)?,
-            result => result?,
+        let replay = self.tape.clone().filter(|t| t.replays());
+        let result = match &replay {
+            Some(tape) => self.replayed(tape, url, plan),
+            None => match self.attempt(url, plan, conditions) {
+                // The server did not start the request (`GOAWAY`, a refused stream): any method may run again, once, on a new connection.
+                Err(e) if e.is::<h2::Unprocessed>() => self.attempt(url, plan, conditions),
+                result => result,
+            },
+        };
+        let (response, body) = match result {
+            Ok(ok) => ok,
+            Err(e) => {
+                if let Some(tape) = &self.tape
+                    && !tape.replays()
+                {
+                    tape.slot(Self::label(url, plan)).0.save(&replay::Entry { error: Some(e.to_string()), ..replay::Entry::default() });
+                }
+                return Err(e);
+            }
         };
         self.store_cookies(url, plan, &response);
         Ok((response, body))
+    }
+
+    /// The label of a request on the tape (see `replay.rs`).
+    fn label(url: &Url, plan: &Plan) -> String {
+        replay::Tape::label(plan.method.as_str(), &format!("{}://{}:{}{}", url.scheme, url.host, url.port, url.path), plan.body)
+    }
+
+    /// Answer a request from the tape: no DNS, no socket. The reply is as `attempt` gives it, with its body in memory.
+    fn replayed(&mut self, tape: &replay::Tape, url: &Url, plan: &Plan) -> Result<(Response, Body), Error> {
+        let entry = tape.next(Self::label(url, plan))?;
+        if let Some(error) = entry.error {
+            return Err(error.into());
+        }
+        if !plan.method.safe() && (200..400).contains(&entry.status) {
+            self.cache.lock().unwrap().forget(&(url.scheme, url.host.clone(), url.port, url.path.clone()));
+        }
+        let response = Response { status: entry.status, headers: entry.headers, body: Vec::new(), close: entry.close };
+        let undo = response.header("content-encoding").and_then(encoding::codings).filter(|c| !c.is_empty()).filter(|_| !entry.body.is_empty());
+        let live = if entry.complete {
+            Body(Source::Memory(Arc::new(Response { body: entry.body, ..response.clone() }), 0))
+        } else {
+            Body(Source::Cut(io::Cursor::new(entry.body)))
+        };
+        Ok((response, match undo {
+            Some(codings) => Body(Source::Decoded(Box::new(encoding::Decoded::new(live, codings)))),
+            None => live,
+        }))
+    }
+
+    /// While recording, give the body a tap that writes the reply to the tape when the body ends. The body is the raw one, before `Content-Encoding` is undone.
+    fn tapped(&self, url: &Url, plan: &Plan, response: &Response, body: Body) -> Body {
+        match &self.tape {
+            Some(tape) if !tape.replays() => {
+                let entry = replay::Entry { status: response.status, headers: response.headers.clone(), close: response.close, ..replay::Entry::default() };
+                Body(Source::Tap(Box::new(Tap { inner: body, slot: Some(tape.slot(Self::label(url, plan)).0), entry })))
+            }
+            _ => body,
+        }
     }
 
     /// How the request relates to the document, for `SameSite`.
@@ -844,7 +904,7 @@ impl Client {
         let undo = if head.framing == Framing::None { None } else { head.response.header("content-encoding").and_then(encoding::codings).filter(|c| !c.is_empty()) };
         let mut live = Live::new(stream, leftover, head.framing, reusable.then(|| (self.idle.clone(), server)), head_end);
         live.rec = rec.take();
-        let live = Body(Source::Live(Box::new(live)));
+        let live = self.tapped(url, plan, &head.response, Body(Source::Live(Box::new(live))));
         Ok((head.response, match undo {
             Some(codings) => Body(Source::Decoded(Box::new(encoding::Decoded::new(live, codings)))),
             None => live,
@@ -1466,6 +1526,44 @@ enum Source {
     H2(Box<h2::Body>),
     /// The same, with a `Content-Encoding` that is undone as it is read (see `encoding.rs`).
     Decoded(Box<encoding::Decoded>),
+    /// A recorded reply that was cut: the bytes that came, then a read error (see `replay.rs`).
+    Cut(io::Cursor<Vec<u8>>),
+    /// A body that is being recorded (see `replay.rs`).
+    Tap(Box<Tap>),
+}
+
+/// Reads the body below it, and keeps the bytes. At the end of the body, or an error, or when the body is dropped, they go to the tape.
+struct Tap {
+    inner: Body,
+    slot: Option<replay::Slot>,
+    entry: replay::Entry,
+}
+
+impl Tap {
+    fn save(&mut self) {
+        if let Some(slot) = self.slot.take() {
+            slot.save(&self.entry);
+        }
+    }
+
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        let r = self.inner.read(out);
+        match r {
+            Ok(0) if !out.is_empty() => {
+                self.entry.complete = true;
+                self.save();
+            }
+            Ok(n) => self.entry.body.extend_from_slice(&out[..n]),
+            Err(_) => self.save(),
+        }
+        r
+    }
+}
+
+impl Drop for Tap {
+    fn drop(&mut self) {
+        self.save();
+    }
 }
 
 /// Where the chunks of a chunked body are.
@@ -1703,6 +1801,7 @@ impl Body {
         let rec = match &mut self.0 {
             Source::Live(live) => &mut live.rec,
             Source::H2(stream) => &mut stream.rec,
+            Source::Tap(tap) => return tap.inner.note(e),
             _ => return,
         };
         if let Some(r) = rec {
@@ -1721,6 +1820,13 @@ impl Body {
             Source::Live(live) => live,
             Source::Decoded(decoded) => return decoded.read(out),
             Source::H2(stream) => return stream.read(out),
+            Source::Tap(tap) => return tap.read(out),
+            Source::Cut(bytes) => {
+                return match bytes.read(out)? {
+                    0 if !out.is_empty() => Err(io::Error::new(ErrorKind::TimedOut, "the recorded reply stops here")),
+                    n => Ok(n),
+                };
+            }
         };
         if live.done || out.is_empty() {
             return Ok(0);
@@ -1802,7 +1908,8 @@ impl Body {
             Source::Memory(response, _) => response.body.len(),
             Source::H2(stream) => stream.declared.unwrap_or(0).min(MAX_REPLY),
             // The length on the wire is not the length of the decoded body.
-            Source::Decoded(_) => 0,
+            Source::Decoded(_) | Source::Cut(_) => 0,
+            Source::Tap(tap) => tap.inner.size_hint(),
         }
     }
 }
