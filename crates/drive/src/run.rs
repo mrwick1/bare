@@ -687,6 +687,15 @@ impl Session {
         &self.rep
     }
 
+    /// Run the tasks of the page that are due (`Page::tick`), as a browser runs a tab while nobody acts. Gives when the next task is
+    /// due. A page in a window runs on its own thread, so this does nothing for it.
+    pub fn tick(&mut self) -> Option<Instant> {
+        match &mut self.host {
+            Host::Local(p) => p.tick().1,
+            _ => None,
+        }
+    }
+
     /// Move out the steps, logs, network records and failure so far, and start a new part of the report. The page stays open. A caller
     /// that sends steps one call at a time gives each call its own report, and the session does not keep old records.
     pub fn drain(&mut self) -> Report {
@@ -696,8 +705,10 @@ impl Session {
         Report { ok, steps: std::mem::take(&mut r.steps), failure: r.failure.take(), logs: std::mem::take(&mut r.logs), net: std::mem::take(&mut r.net), ms: r.ms, window: r.window, ticks: std::mem::take(&mut r.ticks), cookies: std::mem::take(&mut r.cookies) }
     }
 
-    /// Close the page (and its window) and give the report.
+    /// Close the page (and its window) and give the report. The page first hears that it is hidden, and the requests of its handlers
+    /// get up to 2 s (`Page::hide`).
     pub fn finish(mut self) -> Report {
+        let _ = self.host.run(|p| p.hide(Duration::from_secs(2)));
         self.report();
         drop(self.host);
         self.rep.ms = self.start.elapsed().as_secs_f64() * 1000.0;

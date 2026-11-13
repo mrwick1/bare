@@ -5,8 +5,9 @@
 //! depends on the document is a getter. `navigator` is lazy as a whole (`browser_web.rs`), so its names cost a page that never reads
 //! `navigator` nothing. Values are Chrome 155 on Linux where the HTML Standard leaves a choice (`docs/decisions.md` lists each one).
 //!
-//! `document`: `referrer` "" (bare sends no `Referer`), `visibilityState` "visible", `hidden` false, `designMode` "off" (data
-//! properties: a write only stores the value, the page has no design mode); `characterSet`, `charset` and `inputEncoding` (one getter:
+//! `document`: `visibilityState` "visible" and `hidden` false (getters: "hidden" and true once the page closes, `Browser::hide`),
+//! `referrer` "" (bare sends no `Referer`), `designMode` "off" (data properties: a write only stores the value, the page has no design
+//! mode); `characterSet`, `charset` and `inputEncoding` (one getter:
 //! the `<meta charset>` or `<meta http-equiv=content-type>` in `<head>` through `bare_html::encoding`'s labels, else "UTF-8"; the
 //! `Content-Type` header is not known to the document), `contentType` "text/html", `compatMode` ("CSS1Compat" with a doctype, else
 //! "BackCompat"; the tree builder keeps the doctype name only, so a legacy public id is not seen), `dir` (the `dir` of `<html>`
@@ -48,6 +49,8 @@ pub(crate) struct Basics {
     loaded: Cell<f64>,
     /// The callback that makes a beacon promise handled. Made by the first beacon, then kept in `Dom::fixed`.
     noop: Cell<Option<bare_js::value::ObjId>>,
+    /// The page closes (`Browser::hide`): `document.visibilityState` is "hidden" and `document.hidden` is true.
+    pub(crate) hidden: Cell<bool>,
 }
 
 pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
@@ -89,12 +92,12 @@ pub(crate) fn define(d: &Dom, it: &mut Interp<'_>, key: &str) -> R<()> {
         "isSecureContext" => getter(d, it, g, &["isSecureContext"], |d, _, _, _| Ok(Value::Bool(secure(d))), false),
         "outerWidth" => getter(d, it, g, &["outerWidth"], crate::browser_scroll::win_inner_width, false),
         "outerHeight" => getter(d, it, g, &["outerHeight"], crate::browser_scroll::win_inner_height, false),
-        "hidden" => data(it, doc, Value::Bool(false)),
+        "hidden" => getter(d, it, doc, &[key], |d, _, _, _| Ok(Value::Bool(d.basics.hidden.get())), false),
         "referrer" => {
             let empty = d.js_str(it, "")?;
             data(it, doc, empty)
         }
-        "visibilityState" => getter(d, it, doc, &[key], |d, it, _, _| d.js_str(it, "visible"), false),
+        "visibilityState" => getter(d, it, doc, &[key], |d, it, _, _| d.js_str(it, if d.basics.hidden.get() { "hidden" } else { "visible" }), false),
         "contentType" => getter(d, it, doc, &[key], |d, it, _, _| d.js_str(it, "text/html"), false),
         "compatMode" => getter(d, it, doc, &[key], |d, it, _, _| d.js_str(it, if has_doctype(&d.doc.borrow()) { "CSS1Compat" } else { "BackCompat" }), false),
         "characterSet" | "charset" | "inputEncoding" => getter(d, it, doc, &[key], |d, it, _, _| d.js_str(it, charset(&d.doc.borrow())), false),
