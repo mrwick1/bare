@@ -193,3 +193,13 @@ fn style_object_knows_transition_and_animation() {
     assert_eq!(js(&mut b, "d.style.transitionDuration + '|' + d.style.transitionProperty"), "1s|opacity");
     assert_eq!(js(&mut b, "getComputedStyle(d).transitionDuration + '|' + getComputedStyle(d).animationName"), "1s|none");
 }
+
+#[test]
+fn a_transition_of_a_picture_property_does_not_panic() {
+    let mut b = page(".a{transition:background 100ms} .b{background-image:linear-gradient(red,blue)}", "<div id=d class=a></div>");
+    js(&mut b, LOG);
+    js(&mut b, "d.className = 'a b'");
+    run(&mut b, FRAME);
+    run(&mut b, 200.0);
+    assert_eq!(js(&mut b, "typeof log"), "object");
+}
