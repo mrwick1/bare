@@ -1893,3 +1893,12 @@ Issue #442: `el.style.WebkitUserSelect` was `undefined`, so `el.style.WebkitUser
 - The style object is host-indexed, like `DOMTokenList`. Its names are a cache of the attribute text and of the write count.
 - A stale cache asks the host first, so no read is stale.
 - Reason: Gmail's HTML sanitizer iterates `el.style` when it builds a reply. Without the names it threw, and the reply editor never started (issue #457).
+
+## A live page settles each request when its reply is in (2026-11-13)
+
+- On a live page, every queued request starts at once. This includes a request that is not a GET or a HEAD.
+- The run loop settles the first request whose reply is in, not only the first request.
+- A request that hangs therefore no longer holds the requests after it.
+- A page that is not live keeps the ordered queue. Its POSTs still reach the server in the order of the script.
+- A hung request still holds the page from idle, unless it is a detached XHR GET long-poll.
+- Reason: Gmail sends its attachment upload behind requests that do not answer. The upload was never sent (issue #461).
