@@ -26,7 +26,7 @@ All numbers use the recorded corpus from step 1, 3 runs each, against the baseli
 | 4 | Journeys with heavy sheet scans (`python-org-docs-link`, `rust-book-search`) | 100% | 1.3 times faster or more |
 | 5 | Peak RSS of the 16 MiB sheet ramp with a `cssRules` read | 947 MiB | 300 MiB or lower |
 | 6 | Peak RSS of `python-docs-search-results` | 116 MiB | 20% lower or more |
-| 7 | Wall time of a suite of related tests with a shared login setup | sequential cold runs | 2 times faster or more |
+| 7 | A suite of related tests with a shared login setup | sequential cold runs | wall time 2 times faster or more, and the sum of instructions 1.5 times lower or more with one worker |
 | 8 | Limits | restyle charge about 10 times its cost; `cssom-objects` cap 65,536 | the charge matches the cost; the cap is removed or set by the rule count |
 
 A target that is not met is reported with its numbers. It is not hidden.
