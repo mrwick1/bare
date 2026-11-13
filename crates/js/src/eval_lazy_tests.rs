@@ -186,3 +186,63 @@ fn lazy_functions_loaded_one_after_the_other_keep_their_own_frame_slots() {
         assert_eq!(run(&src), "27,28,29,27,30,28,31,29,32,27,28,29,30,31,32,27,28,29,30,31,32,27,28,29,30,31,32");
     });
 }
+
+#[test]
+fn the_bytecode_modes_agree_with_the_tree_walker_on_lazy_functions() {
+    big(|| {
+        let src = format!(
+            "var log = [];
+             function reactive(o) {{ {PAD} return {{ get: function (t, k) {{ {PAD} log.push('get' + k); return t[k] + p1; }}, set: function (t, k, v) {{ {PAD} log.push('set' + k); t[k] = v; return true; }} }}; }}
+             var h = reactive({{}}), o = {{ a: 1 }}; h.set(o, 'a', 5); log.push(h.get(o, 'a'));
+             function loop(n) {{ {PAD} var s = 0; for (var i = 0; i < n; i++) s += i; return s + p7; }}
+             log.push(loop(4), loop(5)); log.join()"
+        );
+        let mut want = String::new();
+        for mode in [Exec::Tree, Exec::Auto, Exec::Byte] {
+            let mut it = realm();
+            it.set_exec(mode);
+            let r = it.run_script(&src);
+            let got = match r {
+                Ok(v) => it.display(v),
+                Err(e) => format!("{e:?}"),
+            };
+            if mode == Exec::Tree {
+                want = got.clone();
+                assert_eq!(want, "seta,geta,6,27,31", "tree");
+            }
+            assert_eq!(got, want, "{mode:?}");
+        }
+    });
+}
+
+/// The cases of the proxy corpus (they have long functions inside functions) give the same result in each mode.
+#[test]
+fn the_bytecode_modes_agree_on_the_proxy_corpus() {
+    big(|| {
+        let mut cases: Vec<(&str, Vec<&str>)> = Vec::new();
+        for line in include_str!("../../../tools/fixtures/js/proxy-cases.txt").lines() {
+            if let Some(n) = line.strip_prefix("=== ") {
+                cases.push((n.trim(), Vec::new()));
+            } else if let Some(c) = cases.last_mut() {
+                c.1.push(line);
+            }
+        }
+        let mut bad = Vec::new();
+        for (name, lines) in &cases {
+            let mut got: Vec<String> = Vec::new();
+            for mode in [Exec::Tree, Exec::Auto, Exec::Byte] {
+                let mut it = realm();
+                it.set_exec(mode);
+                let r = it.run_script(&lines.join("\n")).and_then(|f| it.call(f, Value::Undefined, &[]));
+                got.push(match r {
+                    Ok(v) => it.display(v),
+                    Err(e) => format!("{e:?}"),
+                });
+            }
+            if got[0] != got[1] || got[0] != got[2] {
+                bad.push(format!("{name}: {got:?}"));
+            }
+        }
+        assert!(bad.is_empty(), "{}", bad.join("\n"));
+    });
+}

@@ -559,6 +559,8 @@ pub struct Interp<'p> {
     lazy: Vec<LazySlot>,
     n_lazy: usize,
     lazy_work: usize,
+    /// The walk of a lazy function is running: the scopes that it opens are marked (`RScope::lazy`).
+    sc_lazy: bool,
     /// Classic scripts by the hash of their text, so the same text keeps one slot (`add_script_kind`). One slot for each bucket
     /// (id + 1, 0 is empty); a text that lands on a used bucket takes it over. Allocated at the first script.
     script_ids: Vec<u32>,
@@ -769,6 +771,7 @@ impl<'p> Interp<'p> {
             lazy: vec![LazySlot::default(); stats.lazies],
             n_lazy: 0,
             lazy_work: 0,
+            sc_lazy: false,
             script_ids: Vec::new(),
             _p: PhantomData,
             strict: prog.strict,

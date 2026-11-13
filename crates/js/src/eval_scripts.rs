@@ -301,10 +301,12 @@ impl<'p> Interp<'p> {
         self.sc_fn = self.scopes.len() - 1;
         self.sc_class = 0;
         self.sc_fn_expr = s.is_expr;
+        self.sc_lazy = true;
         self.cls.cur = None;
         self.cls.elem_ctx = None;
         self.fl = 0;
         let r = self.w_func(fid, usize::MAX);
+        self.sc_lazy = false;
         (self.sc_cur, self.sc_fn, self.sc_class, self.sc_fn_expr, self.cls.cur, self.cls.elem_ctx, self.fl, self.cur_strict) = saved;
         r
     }

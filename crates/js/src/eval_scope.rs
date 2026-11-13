@@ -91,6 +91,8 @@ struct RScope {
     func: u32,
     /// The scope is the body of a `with` (a `Barrier` too). The bytecode compiler refuses a function inside it.
     with: bool,
+    /// The scope is in the tree of a lazy function (`lazy_load`). It follows the scopes of every script that was walked before it.
+    lazy: bool,
 }
 
 /// Slots of the identifier sites of one script. The scopes that they refer to are in `Interp::sc_all`.
@@ -116,7 +118,7 @@ impl<'p> Interp<'p> {
     /// Open a scope in the walk. Give the result to `sc_end`.
     fn sc_begin(&mut self, kind: RKind) -> u32 {
         let saved = self.sc_cur;
-        self.sc_all.push(RScope { parent: saved, kind, start: NONE, len: 0, base: NONE, func: self.sc_fn as u32, with: false });
+        self.sc_all.push(RScope { parent: saved, kind, start: NONE, len: 0, base: NONE, func: self.sc_fn as u32, with: false, lazy: self.sc_lazy });
         self.sc_cur = self.sc_all.len() as u32 - 1;
         saved
     }
