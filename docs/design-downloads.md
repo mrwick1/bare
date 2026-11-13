@@ -106,7 +106,7 @@ The file is made at its full size first (`set_len`). Each segment writes at its 
 
 A free connection slot takes the segment with the most bytes left. When that is at least 2 × `MIN_SPLIT`, the segment ends at its middle, and a new segment takes the second half with `Range: bytes=mid-(end-1)` and `If-Range`. The old connection keeps reading. It stops when `pos` reaches the new `end` and gives its connection back. Start values: `MIN_SPLIT` = 4 MiB, at most 8 connections for each job and 16 in total. The benchmark in section 6 sets the final values.
 
-A stall: a segment with no new byte for 10 s, or with less than 1/8 of the job's median segment speed for 10 s, is split the same way. A segment with no byte for 30 s closes its connection and retries.
+A stall (as built): no timer. When other segments end, their free connections cut the largest part left, which is the slow one. A dead connection fails its read after 30 s (`tcp.rs`) and retries from its last byte. Steps 1 and 2 were built in one PR, because they share the segment code.
 
 Every range request:
 

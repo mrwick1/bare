@@ -470,6 +470,13 @@ pub struct Body {
     pub rec: Option<Box<trace::Rec>>,
 }
 
+impl Body {
+    /// No size cap: see `http::Body::unlimited`.
+    pub(crate) fn unlimited(&mut self) {
+        self.max = usize::MAX;
+    }
+}
+
 impl Read for Body {
     fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
         if out.is_empty() {

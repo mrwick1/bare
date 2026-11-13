@@ -3,6 +3,7 @@
 //! A response is a download when it has `Content-Disposition: attachment`, or a type that the browser does not show (`text_mime`, images
 //! and HTML are shown), or when a link with a `download` attribute asked for it. The link may point to a `blob:` or `data:` URL that a script
 //! made. The body streams to a file in 64 KiB pieces, so the memory stays flat. A download stops at `MAX_DOWNLOAD` bytes and its file is removed.
+//! A download from the network runs on threads of its own, with resume, retry and parallel byte ranges (`run.rs`).
 //! The name comes from `Content-Disposition` (RFC 6266, `filename*` first), else the `download` attribute, else the last path segment.
 //! It has no path separator and no leading dot, and it never replaces a file: the next one is `name (1).ext`.
 //!
@@ -12,6 +13,9 @@
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+
+mod run;
+pub(crate) use run::Start;
 
 pub const MAX_DOWNLOAD: u64 = 1 << 30;
 const PIECE: usize = 64 << 10;
@@ -28,7 +32,10 @@ pub enum DownloadState {
 pub struct Download {
     /// Empty until the file exists.
     pub path: PathBuf,
+    /// The bytes written so far; the size when it is done.
     pub bytes: u64,
+    /// The size that the server gave, if any.
+    pub total: Option<u64>,
     pub mime: String,
     pub url: String,
     pub state: DownloadState,
@@ -87,7 +94,7 @@ impl Downloads {
     /// Record a download that starts now. Gives its number.
     pub fn start(&self, url: &str) -> usize {
         let mut s = self.inner();
-        s.list.push(Download { path: PathBuf::new(), bytes: 0, mime: String::new(), url: url.to_string(), state: DownloadState::Running });
+        s.list.push(Download { path: PathBuf::new(), bytes: 0, total: None, mime: String::new(), url: url.to_string(), state: DownloadState::Running });
         s.list.len() - 1
     }
 

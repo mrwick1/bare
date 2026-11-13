@@ -643,7 +643,10 @@ impl Server {
             .map(|d| {
                 let url = bare_drive::run::safe_url(&d.url);
                 match &d.state {
-                    DownloadState::Running => format!("running: {url}"),
+                    DownloadState::Running => match d.total {
+                        Some(t) => format!("running: {url} ({} of {t} bytes)", d.bytes),
+                        None => format!("running: {url} ({} bytes)", d.bytes),
+                    },
                     DownloadState::Failed(why) => format!("failed: {url}: {why}"),
                     DownloadState::Done => format!("{} ({} bytes, {}) from {url}", d.path.display(), d.bytes, d.mime),
                 }

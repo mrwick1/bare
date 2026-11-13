@@ -8573,3 +8573,29 @@ Machine archMachine (shared, load 10 to 40). Fixture `/data/bare-tmp/design/suit
 - The instruction count of a `bare-mcp` run depends on wall time: with the same input I saw 2,846 to 4,038 M in 24 opens under load, and 981 +/- 2 M in 10 opens on a quieter machine. The idle slice of the live page (decision of 2026-11-13, "A live page goes on between tool calls") runs while the server waits for the next request. Compare MCP runs on instructions only with a few runs and the minimum.
 - A client that is new for each open grows memory by 0.3 MiB for each open (above).
 - The reply cache still empties itself when one reply does not fit (design-suite.md, section 2.4).
+
+## 2026-11-13: downloads, steps 1 and 2 (resume, retry, parallel ranges)
+
+Built in one PR, because the two steps share the segment code. Design: `docs/design-downloads.md`.
+
+What changed:
+- `downloads/run.rs`: a download from the network runs on threads of its own, not on a page worker. A coordinator thread splits the largest running range when a connection is free (work stealing). Each range thread resumes from its last byte with `Range` and `If-Range`, after 1, 2, 4, 8 and 16 s, or `Retry-After`. A `200` to a range request restarts the job from 0, once. A `403` gives the range back to the connection before it. A job without ranges restarts from 0, once. Writes go to `NAME.part` at their offset; the file is renamed at the end.
+- `bare-net`: `Client::allow_big` lets a reply declare more than 128 MiB. `Body::unlimited` lifts the 128 MiB and 120 s caps of one body. `Client::fork_alone` gives a client with its own connections, so each range has its own TCP connection, also on HTTP/2 servers.
+- Found while building: before this change every download over 128 MiB failed at once, and a slow one failed after 120 s. The 1 GiB `MAX_DOWNLOAD` could never be reached.
+- `bare-mcp` `downloads`: a running download shows its bytes and its size.
+
+Benchmark (archMachine, load average 24 to 31, `bare-mcp` click on a link, 3 runs each). BASE `b6ec7df9` (main), NEW this branch. Fixture: `/data/bare-tmp/design/downloads/server.py`, 64 MiB, 4 MiB/s for each connection.
+
+| Case | BASE | NEW |
+| --- | --- | --- |
+| No cut | 16.01, 16.01, 16.01 s | 2.02, 2.03, 2.04 s |
+| Requests 1 and 3 cut after 1 MiB | failed (3 of 3) | 3.06, 3.07, 3.06 s (one 1 s retry wait) |
+| Peak RSS of `bare-mcp` | 15 to 16 MiB | 16 MiB |
+
+All NEW files have the expected MD5. Wall time is the link time of the fixture, not CPU, so the load does not change it.
+Real server, 1 run: kernel.org `linux-6.12.tar.xz` (147,906,904 bytes, HTTP/2). BASE failed in 0.24 s (the 128 MiB cap). NEW finished in 16.17 s, and its SHA-256 matches `sha256sums.asc`. proof.ovh.net did not answer from this machine during the run (`curl` timed out too).
+
+Checks: `cargo test --release -p bare --lib downloads` (17 pass, 3 runs). `bare-net`, `bare-drive`, `bare-mcp` tests pass except `https_openssl` 2 (the known openssl failures of this machine). `survive_limit::a_page_that_aborts_task_after_task_fails_the_step_with_the_reason` failed once under load average 31 and passed alone.
+New tests: one request for a small file, resume after a cut, a split over 4 or more connections, a changed file, a restart without ranges, a refused range, a failed download leaves no file, a reply over 128 MiB.
+
+Not tested: instruction counts of the login journeys (every navigation of a session with downloads now makes one client fork; no journey was measured). A Windows build (`seek_write`). A server that sends a weak ETag only, or `Last-Modified` only. Many downloads at once against the 16-connection limit. The tests were written with the code, not before it.
