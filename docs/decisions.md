@@ -1969,3 +1969,10 @@ A test is `own` (it logs in itself) when a step says `sign out`, `password` or `
 - Chrome differs: it lists the CSS properties as own keys of each declaration (`Object.keys(rule.style)`). bare lists only the indexes, the same as bare `el.style`. The design draft said that Chrome uses the prototype. That was wrong. No journey depends on the difference.
 - Limits: `MAX_OBJECTS` is 1 << 19 (524,288) objects. The cost of a rule that is read is 585 B (selector only) to about 0.9 KB (with `.style`), so the worst case is about 290 MiB. `MAX_RULES` is 1 << 21 entries (12 B each, about 24 MiB). The `style-objects` limit (65,536) stays. It binds first when a page reads `.style` of more than about 65,000 rules.
 - Reason: a rule object cost 10.2 KB, and a 16 MiB sheet read stopped on `cssom-objects` at 947 MiB (criteria 5 and 8 of `perf-goal.md`).
+
+## The sheet registry has no `href` index, and it reads the tree lazily (2026-11-13)
+
+- The document lists its `<link>`, `<style>` and `<base>` elements that are in the tree (`Document::sheet_nodes`). `tell_links`, `sources_capped` and `document_base` read the list and do not walk the DOM.
+- Options for the list: (1) a set that each insert, remove and attribute change updates; (2) a list of all elements with these names (the name never changes) and a list of those in the tree, made at a read and dropped when a node that can hold one joins or leaves the tree. Chosen: (2). It cannot miss an attribute change, and it needs no hook in `set_attr`. It is exact by construction: the debug check compares it with a walk.
+- No `HashMap<href, nodes>` (the L3 of the design). The list has L elements (under 30 on most pages, 200 in the ramp). A filter by `href` is O(L) for each sheet, and an index needs a drop at each `href` change. Add the index only if a page shows the filter in a profile.
+- Small pages (nodes < 32 x elements) make the list with a walk: the tables of the other way cost more there (`preload_load style 10` was +41% before this rule).
