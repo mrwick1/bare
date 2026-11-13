@@ -41,7 +41,11 @@
 //!   `list-style`, `text-decoration`, `grid-row`, `grid-column`, `grid-area` unless one declaration of that name is
 //!   still whole. Pending longhands expose `""`. Their source shorthand remains available to the cascade.
 //! - Lone surrogates are `Unsupported` at every string entry (the document is UTF-8), never ignored.
-//! - No indexed access (`style[0]`), no iterator, no `getPropertyCSSValue`, `parentRule` is `null`. No SVG `style`, no `innerHTML`/`outerHTML` parse of `style`, no layout reads.
+//! - Indexes: the object is host-indexed (`Heap::new_indexed`, like `DOMTokenList`). `style[i]` is `item(i)`, `i` past `length`
+//!   is absent, and `[Symbol.iterator]` is `Array.prototype.values` (the WebIDL value iterator of an indexed getter). The names
+//!   are a cache of the attribute text and of the write count (`Names`), so no read is stale: a stale cache asks the host
+//!   first (`fill`, the `Host::fill_indexed` of this module).
+//! - No `getPropertyCSSValue`, `parentRule` is `null`. No SVG `style`, no `innerHTML`/`outerHTML` parse of `style`, no layout reads.
 //! - Computed style is `browser_computed.rs`. It has its own read-only prototype under this one.
 //! - `new CSSStyleDeclaration()` and a subclass of it throw `TypeError: Illegal constructor`.
 
@@ -55,7 +59,8 @@ use bare_js::eval::Error;
 use std::borrow::Cow;
 use bare_html::dom::{NodeId, Ns};
 use bare_js::eval::Interp;
-use bare_js::value::{ObjId, Value};
+use bare_js::heap::{HeapError, Slot};
+use bare_js::value::{ObjId, StrId, Value};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
 
@@ -104,8 +109,17 @@ pub struct StyleStats {
     pub hits: usize,
 }
 
+/// The longhand names of one `CSSStyleDeclaration`, for its indexes. Valid for one attribute text and one write count.
+struct Names {
+    text: String,
+    writes: u64,
+    vals: Vec<StrId>,
+}
+
 #[derive(Default)]
 struct SState {
+    /// `CSSStyleDeclaration` object -> the names of its indexes.
+    names: IdMap<ObjId, Names>,
     /// `CSSStyleDeclaration` object -> its element.
     objs: IdMap<ObjId, NodeId>,
     /// element -> its `style` object (`SameObject`).
@@ -129,6 +143,8 @@ pub(crate) struct Style {
     /// The text buffer of a call: the probe of `setProperty` and the output of the serializer.
     buf: RefCell<String>,
     hits: Cell<usize>,
+    /// Writes of a block. A pending block can change the names while the attribute text stays the same.
+    writes: Cell<u64>,
     /// The supported property names, in CSS form.
     pub(crate) props: OnceCell<Vec<&'static str>>,
 }
@@ -277,6 +293,7 @@ impl Dom {
 
     /// Write exposed text, and retain pending state independently of the parse cache.
     fn style_write(&self, it: &mut Interp<'_>, el: NodeId, mut b: Block) -> R<()> {
+        self.style.writes.set(self.style.writes.get() + 1);
         let mut buf = self.style.buf.take();
         let serialized = self.style_text(it, &b.list, &mut buf)?;
         if serialized.pending { self.style_check_pending(it, el, &b.list)?; }
@@ -428,7 +445,7 @@ fn style_of(d: &Dom, it: &mut Interp<'_>, el: NodeId) -> V {
     if d.style.s.borrow().objs.len() >= d.style_lim().max_objects {
         return Err(d.lim("style-objects"));
     }
-    let o = d.obj(it, *d.style.proto.get().expect("installed"))?;
+    let o = it.heap.new_indexed(Some(*d.style.proto.get().expect("installed"))).map_err(|e| it.heap_error(e))?;
     let mut s = d.style.s.borrow_mut();
     s.objs.insert(o, el);
     s.by_el.insert(el, o);
@@ -452,6 +469,7 @@ impl Dom {
     fn style_set_text(&self, it: &mut Interp<'_>, el: NodeId, v: Value) -> R<()> {
         let text = null_empty(self, it, v)?;
         let (list, spent) = self.style_parse(it, &text)?;
+        self.style.writes.set(self.style.writes.get() + 1);
         let mut buf = self.style.buf.take();
         let serialized = self.style_text(it, &list, &mut buf)?;
         if serialized.pending { self.style_check_pending(it, el, &list)?; }
@@ -582,6 +600,10 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     d.def_method(it, proto, "getPropertyPriority", 1, get_property_priority)?;
     d.def_method(it, proto, "setProperty", 2, set_property)?;
     d.def_method(it, proto, "removeProperty", 1, remove_property)?;
+    // The value iterator of an interface with an indexed getter (WebIDL "iterable"): `Array.prototype.values`.
+    let sym = d.plat.sym_iter.get().copied().expect("platform installed first");
+    let values = it.get_value(Value::Object(it.array_prototype()), sym)?;
+    it.define_data(proto, sym, values, true, false, true)?;
 
     let mut props: Vec<&'static str> = Property::LISTED.iter().map(|p| p.name()).collect();
     props.extend(SHORTHANDS);
@@ -622,6 +644,52 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
 
 // ------------------------------------------------------------------------------------------ GC hooks
 
+// ------------------------------------------------------------------------------------------ indexes
+
+/// The names of `owner`, read by `f`, when they are fresh. `None`: `owner` is not a style object. Stale names answer
+/// `NeedsHost` (index 0: `fill` makes all of them), so the evaluator fills them and repeats the read.
+fn fresh<T>(d: &Dom, owner: ObjId, f: impl FnOnce(&[StrId]) -> T) -> Option<Result<T, HeapError>> {
+    let Ok(s) = d.style.s.try_borrow() else { return Some(Err(HeapError::HostUnavailable)) };
+    let el = *s.objs.get(&owner)?;
+    let Ok(doc) = d.doc.try_borrow() else { return Some(Err(HeapError::HostUnavailable)) };
+    let now = doc.find_atom("style").and_then(|a| doc.attr(el, a)).unwrap_or("");
+    Some(match s.names.get(&owner) {
+        Some(n) if n.text == now && n.writes == d.style.writes.get() => Ok(f(&n.vals)),
+        _ => Err(HeapError::NeedsHost { owner, index: 0 }),
+    })
+}
+
+/// `IndexedSource::indexed_len` for a style object. `None`: `owner` is not one.
+pub(crate) fn indexed_len(d: &Dom, owner: ObjId) -> Option<Result<usize, HeapError>> {
+    fresh(d, owner, |v| v.len())
+}
+
+/// `IndexedSource::indexed_item` for a style object. `None`: `owner` is not one.
+pub(crate) fn indexed_item(d: &Dom, owner: ObjId, index: usize) -> Option<Result<Slot, HeapError>> {
+    fresh(d, owner, |v| v.get(index).map_or(Slot::Absent, |&s| Slot::Str(s)))
+}
+
+/// `Host::fill_indexed` for a style object: make its names fresh. `Ok(false)`: `owner` is not a style object.
+pub(crate) fn fill(d: &Dom, it: &mut Interp<'_>, owner: ObjId) -> R<bool> {
+    let el = d.style.s.borrow().objs.get(&owner).copied();
+    let Some(el) = el else { return Ok(false) };
+    // The read charges the parse, like `item` and `length`.
+    let b = d.style_read(it, el)?;
+    let mut vals = Vec::new();
+    for i in 0..blk::length(&b.list) {
+        let name = blk::item(&b.list, i).unwrap_or_default();
+        match d.js_str(it, &name)? {
+            Value::String(s) => vals.push(s),
+            _ => unreachable!("js_str makes a string"),
+        }
+    }
+    let text = d.doc.borrow().find_atom("style").and_then(|a| d.doc.borrow().attr(el, a).map(str::to_string)).unwrap_or_default();
+    d.style_keep(el, b);
+    let writes = d.style.writes.get();
+    d.style.s.borrow_mut().names.insert(owner, Names { text, writes, vals });
+    Ok(true)
+}
+
 pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
     out.extend(d.style.fixed.borrow().iter().map(|&o| Value::Object(o)));
 }
@@ -630,6 +698,7 @@ pub(crate) fn trace(d: &Dom, owner: ObjId, out: &mut Vec<Value>) {
     let s = d.style.s.borrow();
     if let Some(&el) = s.objs.get(&owner) {
         out.extend(d.st.borrow().by_node.get(&el).map(|&o| Value::Object(o)));
+        out.extend(s.names.get(&owner).into_iter().flat_map(|n| n.vals.iter().map(|&v| Value::String(v))));
     } else if !s.by_el.is_empty()
         && let Some(&Target::Node(n)) = d.st.borrow().by_obj.get(&owner)
         && let Some(&o) = s.by_el.get(&n)
@@ -642,6 +711,7 @@ pub(crate) fn prune(d: &Dom, live: &dyn Fn(ObjId) -> bool) {
     let mut s = d.style.s.borrow_mut();
     let s = &mut *s;
     s.objs.retain(|&o, _| live(o));
+    s.names.retain(|&o, _| live(o));
     let objs = &s.objs;
     s.by_el.retain(|_, o| objs.contains_key(o));
     let by_el = &s.by_el;

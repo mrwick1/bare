@@ -773,3 +773,22 @@ fn kept_parse_is_invisible() {
     assert!(kept > 100 && none < kept / 2, "hits {kept}, with a changed text {none}");
     assert_eq!(plain, parsed);
 }
+
+#[test]
+fn indexes_and_the_iterator_give_the_longhand_names() {
+    let mut b = at(PAGE);
+    // CSSOM: `CSSStyleDeclaration` has an indexed getter (`item`), so WebIDL gives it `[Symbol.iterator]` = `Array.prototype.values`.
+    assert_eq!(js(&mut b, "var s = a.style; s.length + '|' + s[0] + '|' + s[1] + '|' + s[4] + '|' + typeof s[5]"), "5|color|margin-top|margin-left|undefined");
+    assert_eq!(js(&mut b, "JSON.stringify(Array.from(s))"), r#"["color","margin-top","margin-right","margin-bottom","margin-left"]"#);
+    assert_eq!(js(&mut b, "var o = []; for (var n of s) o.push(n); o.join(',')"), "color,margin-top,margin-right,margin-bottom,margin-left");
+    assert_eq!(js(&mut b, "CSSStyleDeclaration.prototype[Symbol.iterator] === Array.prototype.values"), "true");
+    assert_eq!(js(&mut b, "Object.keys(s).join(',') + '|' + (0 in s) + (5 in s)"), "0,1,2,3,4|truefalse");
+    // The indexes are live: a write through the object, and a write of the attribute.
+    assert_eq!(js(&mut b, "s.color = ''; s[0] + '|' + s.length"), "margin-top|4");
+    assert_eq!(js(&mut b, "a.setAttribute('style', 'width: 1px'); s[0] + '|' + typeof s[1]"), "width|undefined");
+    assert_eq!(js(&mut b, "a.removeAttribute('style'); s.length + '|' + typeof s[0]"), "0|undefined");
+    // An inert document, as an HTML sanitizer makes it.
+    assert_eq!(js(&mut b, "var d = document.implementation.createHTMLDocument(''); var e = d.createElement('div'); e.setAttribute('style', 'color: red'); [...e.style].join(',')"), "color");
+    // Indexes are read only.
+    assert_eq!(js(&mut b, "a.style.cssText = 'color: red'; a.style[0] = 'x'; a.style[0]"), "color");
+}

@@ -1885,3 +1885,11 @@ Issue #442: `el.style.WebkitUserSelect` was `undefined`, so `el.style.WebkitUser
 - `-webkit-user-select` is the same property. `Property::from_name` and `parse_declaration` map it to `user-select`, so `WebkitUserSelect = "none"` reads back as `userSelect`, and `cssText` says `user-select: none;`.
 - `el.style` has five names: `userSelect`, `user-select`, `webkitUserSelect`, `WebkitUserSelect` and `-webkit-user-select`. Each reads `""` when unset.
 - The keyword list and the initial value are from the CSS UI 4 spec. No code is copied from another engine.
+
+## `CSSStyleDeclaration` has an indexed getter and an iterator (2026-11-13)
+
+- `style[i]` gives the longhand name, the same as `item(i)`. An index past `length` is absent.
+- `[Symbol.iterator]` is `Array.prototype.values`, the WebIDL value iterator of an indexed getter.
+- The style object is host-indexed, like `DOMTokenList`. Its names are a cache of the attribute text and of the write count.
+- A stale cache asks the host first, so no read is stale.
+- Reason: Gmail's HTML sanitizer iterates `el.style` when it builds a reply. Without the names it threw, and the reply editor never started (issue #457).
