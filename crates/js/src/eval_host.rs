@@ -38,6 +38,12 @@ pub trait Host {
     /// A `queueMicrotask` callback threw `thrown`. Record it without running JavaScript that can fail
     /// (read data properties only). The queue goes on. The default drops the value.
     fn report_exception(&self, _it: &mut Interp<'_>, _thrown: Value) {}
+    /// Before each microtask job and once when the queue is empty, with an empty JS stack (`depth` 0), so the host can run a script (`Interp::run_script`) before the
+    /// next job. The host runs what must not wait for the rest of the queue. The step budget of the checkpoint is kept. An error
+    /// ends the checkpoint like a failed job. The default does nothing.
+    fn between_jobs(&self, _it: &mut Interp<'_>) -> Result<(), Error> {
+        Ok(())
+    }
     /// The end of a microtask checkpoint (HTML "notify about rejected promises"). `unhandled`: promises rejected with no
     /// handler that still have none, oldest first. `handled`: promises given here before that got a handler since. `dropped`:
     /// rejections over the bound since the last call. JavaScript may run, as one host call with the budget of the checkpoint.

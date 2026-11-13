@@ -208,15 +208,15 @@ fn dynamic_scripts_run_once_in_order_with_load_and_error_events() {
 }
 
 #[test]
-fn a_dynamic_inline_script_from_a_timer_runs_right_after_the_timer() {
+fn a_dynamic_inline_script_from_a_timer_runs_before_the_first_microtask() {
     big(|| {
         let html = format!(
             "{PRE}<script>setTimeout(function () {{ var s = document.createElement('script'); s.textContent = 'log.push(\"from-timer-script\")';
                document.body.appendChild(s); log.push('timer-end'); Promise.resolve().then(function () {{ log.push('micro') }}) }}, 0)</script>"
         );
         let (log, r, _) = page(&html, vec![], quick());
-        // the timer task checkpoint runs inside the pump, before the driver runs the queued inline script (documented deviation)
-        assert_eq!(log, "timer-end|micro|from-timer-script");
+        // the script runs before the first job of the timer checkpoint (#449)
+        assert_eq!(log, "timer-end|from-timer-script|micro");
         assert_eq!(r.stop, Stop::Settled);
     });
 }
@@ -720,5 +720,70 @@ fn document_write_inserts_after_the_running_script() {
         let (log,result,_)=page(html,vec![],quick());
         assert_eq!(result.script_throws,0);
         assert_eq!(log,"a|b|tail");
+    });
+}
+
+// Inline dynamic scripts (#449): an inserted inline classic script runs before the next microtask job (and so before the
+// checkpoint of the task that inserted it). Not inside `appendChild` itself: the engine does not nest scripts.
+
+const INS: &str = "var s = document.createElement('script'); s.text = 'window.h3 = 1'; document.head.appendChild(s); s.remove();";
+
+#[test]
+fn inline_dynamic_from_a_timer_is_set_for_the_next_microtask() {
+    big(|| {
+        let html = format!(
+            "{PRE}<script>setTimeout(function () {{ window.h3 = 0; {INS}
+               Promise.resolve().then(function () {{ log.push('micro=' + window.h3) }}) }}, 0)</script>"
+        );
+        let (log, r, _) = page(&html, vec![], quick());
+        assert_eq!(log, "micro=1");
+        assert_eq!(r.stop, Stop::Settled);
+    });
+}
+
+#[test]
+fn inline_dynamic_from_a_microtask_is_set_for_the_next_microtask() {
+    big(|| {
+        let html = format!(
+            "{PRE}<script>window.h3 = 0; Promise.resolve().then(function () {{ return new Promise(function (ok) {{ {INS} ok() }}) }})
+               .then(function () {{ log.push('micro=' + window.h3) }})</script>"
+        );
+        let (log, _, _) = page(&html, vec![], quick());
+        assert_eq!(log, "micro=1");
+    });
+}
+
+#[test]
+fn inline_dynamic_from_a_page_script_is_set_for_the_next_microtask() {
+    big(|| {
+        let html = format!("{PRE}<script>window.h3 = 0; {INS} Promise.resolve().then(function () {{ log.push('micro=' + window.h3) }}); log.push('sync=' + window.h3)</script>");
+        let (log, _, _) = page(&html, vec![], quick());
+        assert_eq!(log, "sync=0|micro=1");
+    });
+}
+
+#[test]
+fn inline_dynamic_that_throws_is_reported_and_the_inserter_goes_on() {
+    big(|| {
+        let html = format!(
+            "{PRE}<script>window.addEventListener('error', function () {{ log.push('error-event') }});
+               Promise.resolve().then(function () {{ var s = document.createElement('script'); s.text = 'throw new Error(\"x\")';
+                 document.head.appendChild(s); log.push('inserter-goes-on') }}).then(function () {{ log.push('next') }})</script>"
+        );
+        let (log, r, _) = page(&html, vec![], quick());
+        assert_eq!(log, "inserter-goes-on|error-event|next");
+        assert_eq!(r.stop, Stop::Settled);
+    });
+}
+
+#[test]
+fn inline_dynamic_removed_right_after_appending_still_runs() {
+    big(|| {
+        let html = format!(
+            "{PRE}<script>Promise.resolve().then(function () {{ var s = document.createElement('script'); s.text = 'log.push(\"ran\")';
+               document.head.appendChild(s); s.remove(); log.push('removed') }}).then(function () {{ log.push('next') }})</script>"
+        );
+        let (log, _, _) = page(&html, vec![], quick());
+        assert_eq!(log, "removed|ran|next");
     });
 }

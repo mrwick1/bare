@@ -244,7 +244,12 @@ impl<'p> Interp<'p> {
 
     fn drain_queue(&mut self, mut n: usize) -> Result<usize, Error> {
         if let Some(error) = self.promise.failed_job { return Err(error); }
-        while let Some(job) = self.promise.queue.pop_front() {
+        loop {
+            if let Err(error) = self.between_jobs() {
+                self.promise.failed_job = Some(error);
+                return Err(error);
+            }
+            let Some(job) = self.promise.queue.pop_front() else { break };
             if n >= self.promise.limits.max_jobs_per_drain {
                 self.promise.queue.push_front(job);
                 return Err(Error::Limit(LimitKind::DrainJobs));
@@ -769,6 +774,15 @@ impl<'p> Interp<'p> {
         }
         self.promise.map.get_mut(&p).expect("promise").handled = true;
         Ok(())
+    }
+
+    /// `Host::between_jobs`, before each job and once when the queue is empty. A script that the host runs there gets its own step budget; the budget of the checkpoint comes back after.
+    fn between_jobs(&mut self) -> Res<()> {
+        let Some(host) = self.host.clone().filter(|_| self.depth == 0) else { return Ok(()) };
+        let limit = self.step_limit;
+        let r = host.between_jobs(self);
+        self.step_limit = limit;
+        r
     }
 
     fn run_job(&mut self, job: Job) -> Res<()> {

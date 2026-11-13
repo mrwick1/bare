@@ -744,6 +744,10 @@ impl Host for Dom {
         self.report(it, thrown, "microtask", Target::Window);
     }
 
+    fn between_jobs(&self, it: &mut Interp<'_>) -> R<()> {
+        self.run_inline_scripts(it)
+    }
+
     fn promise_rejections(&self, it: &mut Interp<'_>, unhandled: &[Value], handled: &[Value], dropped: u32) -> R<()> {
         crate::browser_rejection::notify(self, it, unhandled, handled, dropped)
     }
