@@ -11,6 +11,7 @@ pub mod hints;
 pub mod matching;
 pub mod motion;
 pub mod parser;
+mod scan;
 pub mod selector;
 #[cfg(test)]
 mod shadow_tests;

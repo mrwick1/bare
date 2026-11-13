@@ -107,9 +107,7 @@ impl<'a> Tokens<'a> {
         // JS: `if (c === undefined) return null`.
         Some(match c {
             ' ' | '\t' | '\n' | '\r' | '\x0C' => {
-                while matches!(self.peek(), Some(' ' | '\t' | '\n' | '\r' | '\x0C')) {
-                    self.pos += 1;
-                }
+                self.skip_spaces();
                 Token::Whitespace
             }
             '"' | '\'' => {
@@ -169,19 +167,34 @@ impl<'a> Tokens<'a> {
         Some((token, start, self.pos))
     }
 
+    /// Go on at byte `pos`, which must be at the edge of a character.
+    pub(crate) fn seek(&mut self, pos: usize) {
+        self.pos = pos;
+    }
+
     /// The text that is not read yet.
     pub fn rest(&self) -> &'a str {
         &self.input[self.pos..]
     }
 
     /// Look at the next character, and do not move.
+    #[inline(always)]
     fn peek(&self) -> Option<char> {
-        self.rest().chars().next()
-        // `chars()` reads UTF-8 one character at a time. We only decode the ones that we need.
+        // An ASCII byte is a character: no decoding. Only the others are read as UTF-8, and only the ones that we need.
+        match *self.input.as_bytes().get(self.pos)? {
+            b if b < 0x80 => Some(b as char),
+            _ => self.rest().chars().next(),
+        }
     }
 
     /// Look at the next three characters, and do not move. The standard often needs to look this far.
+    #[inline(always)]
     fn peek3(&self) -> [Option<char>; 3] {
+        if let Some(&[a, b, c]) = self.input.as_bytes().get(self.pos..self.pos + 3).and_then(|s| <&[u8; 3]>::try_from(s).ok())
+            && (a | b | c) < 0x80
+        {
+            return [Some(a as char), Some(b as char), Some(c as char)];
+        }
         let mut chars = self.rest().chars();
         [chars.next(), chars.next(), chars.next()]
     }
@@ -193,8 +206,10 @@ impl<'a> Tokens<'a> {
     }
 
     /// Skip the comments in front of the next token: `/* ... */`. A comment with no end goes to the end.
+    #[inline(always)]
     fn skip_comments(&mut self) {
-        while self.rest().starts_with("/*") {
+        // Most tokens have no comment in front: one look at two bytes tells.
+        while self.input.as_bytes().get(self.pos..self.pos + 2) == Some(b"/*") {
             self.pos += match self.rest()[2..].find("*/") {
                 Some(i) => 2 + i + 2,
                 None => self.rest().len(),
@@ -207,6 +222,16 @@ impl<'a> Tokens<'a> {
     fn name(&mut self) -> Cow<'a, str> {
         let start = self.pos;
         let mut owned: Option<String> = None;
+        // The letters, digits, `-` and `_` come first, and almost always make the whole name: read them as bytes. The loop below reads the rest.
+        let bytes = self.input.as_bytes();
+        let mut end = start;
+        while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'-' || bytes[end] == b'_') {
+            end += 1;
+        }
+        self.pos = end;
+        if !matches!(bytes.get(end), Some(b'\\' | 0) | Some(0x80..)) {
+            return Cow::Borrowed(&self.input[start..end]);
+        }
         loop {
             match self.peek() {
                 Some('\\') if is_valid_escape(Some('\\'), self.peek3()[1]) => {
@@ -353,7 +378,8 @@ impl<'a> Tokens<'a> {
     }
 
     fn skip_spaces(&mut self) {
-        while matches!(self.peek(), Some(' ' | '\t' | '\n' | '\r' | '\x0C')) {
+        let bytes = self.input.as_bytes();
+        while matches!(bytes.get(self.pos), Some(b' ' | b'\t' | b'\n' | b'\r' | b'\x0C')) {
             self.pos += 1;
         }
     }
@@ -381,6 +407,17 @@ impl<'a> Tokens<'a> {
         let start = self.pos;
         let mut owned: Option<String> = None;
         loop {
+            // The bytes up to the next quote, backslash, newline or NUL are plain text. A character that is not ASCII is plain too:
+            // its bytes are never one of these.
+            let bytes = self.input.as_bytes();
+            let mut plain = self.pos;
+            while plain < bytes.len() && !matches!(bytes[plain], b'"' | b'\'' | b'\\' | b'\n' | b'\r' | b'\x0C' | 0) {
+                plain += 1;
+            }
+            if let Some(text) = &mut owned {
+                text.push_str(&self.input[self.pos..plain]);
+            }
+            self.pos = plain;
             let end = self.pos;
             match self.peek() {
                 Some(c) if c == quote => {
@@ -459,16 +496,47 @@ impl<'a> Tokens<'a> {
             self.pos += 2;
             self.digits();
         }
-        let value = self.input[start..self.pos].parse::<f32>().unwrap_or(0.0);
+        let text = &self.input[start..self.pos];
+        let value = short_number(text).unwrap_or_else(|| text.parse::<f32>().unwrap_or(0.0));
         // `parse` turns the text into a number. A number that is too big becomes infinity: we keep it in range.
         (value.clamp(f32::MIN, f32::MAX), is_int)
     }
 
     fn digits(&mut self) {
-        while self.peek().is_some_and(|c| c.is_ascii_digit()) {
+        let bytes = self.input.as_bytes();
+        while bytes.get(self.pos).is_some_and(u8::is_ascii_digit) {
             self.pos += 1;
         }
     }
+}
+
+/// The value of a number with no exponent and at most 7 digits, like `-12`, `.5`, `+0.25`. Both the digits (as a whole number) and the power of
+/// ten are exact in an `f32`, and a division of two exact numbers is rounded once, so this is the number that `parse` gives. `None` for the others.
+fn short_number(text: &str) -> Option<f32> {
+    let (negative, digits) = match text.as_bytes() {
+        [b'-', rest @ ..] => (true, rest),
+        [b'+', rest @ ..] => (false, rest),
+        all => (false, all),
+    };
+    let (mut whole, mut count, mut scale) = (0u32, 0, 0usize);
+    let mut seen_dot = false;
+    for &b in digits {
+        match b {
+            b'0'..=b'9' => {
+                whole = whole * 10 + u32::from(b - b'0');
+                count += 1;
+                scale += usize::from(seen_dot);
+                if count > 7 {
+                    return None;
+                }
+            }
+            b'.' if !seen_dot => seen_dot = true,
+            _ => return None,
+        }
+    }
+    const TEN: [f32; 8] = [1.0, 10.0, 100.0, 1e3, 1e4, 1e5, 1e6, 1e7];
+    let value = whole as f32 / TEN[scale];
+    Some(if negative { -value } else { value })
 }
 
 /// A letter, "_", or any character that is not ASCII. A name can start with one of these.

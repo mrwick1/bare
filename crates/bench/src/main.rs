@@ -157,7 +157,7 @@ fn main() {
         for _ in 0..20 {
             for rule in bare_css::parser::parse_stylesheet(&sheet) {
                 if let bare_css::parser::Rule::Style(rule) = rule {
-                    for d in &rule.declarations {
+                    for d in rule.declarations().iter() {
                         bare_css::values::parse_declaration(&d.name, d.value, d.important, &mut Default::default(), &mut Vec::new());
                     }
                 }
@@ -177,7 +177,7 @@ fn main() {
         let mut out = Vec::new();
         for rule in bare_css::parser::parse_stylesheet(&sheet) {
             if let bare_css::parser::Rule::Style(rule) = rule {
-                for d in &rule.declarations {
+                for d in rule.declarations().iter() {
                     bare_css::values::parse_declaration(&d.name, d.value, d.important, &mut Default::default(), &mut out);
                 }
             }
