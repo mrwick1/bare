@@ -8671,7 +8671,9 @@ The ratio grows when the test is shorter or the login is a larger part of it. Th
 
 ### Checks
 
-- `cargo test --release -p bare-drive`: see the end of this section for the workspace run. `tools/portable_check.sh --scan`: ok (the suite code has no OS code; `/proc/meminfo` and `VmHWM` are read in `main.rs`, which is on the list).
+- After the rebase on `c8a75edd`: `cargo test --release --workspace --no-fail-fast`: 3,797 passed, 10 failed, none in `bare-drive` (its 5 new integration tests and 3 new unit tests pass). 7 of the 10 are the OpenSSL TLS tests (`bare-net` `https_openssl` 2, `bare-tls` `client_openssl` 4, `tls12_openssl` 1) that the notes of the shared-client change show failing on main; I did not run them on main again. The other 3 failed under load (14 to 22) and pass alone: `bare` `downloads::run::tests::a_changed_file_starts_again_from_zero`, `bare-mcp` `a_snapshot_of_5000_elements_takes_under_30_ms`, `bare-net` `h2_node_edge` `a_server_that_closes_idle_sessions_does_not_break_the_next_request`.
+- `tools/js/cost_matrix.sh`, `test262_check.sh` and `exec_diff.sh` were not run: the change touches only `crates/drive` (the `bare-drive` binary and its tests) and `tools/suite`, and no engine crate or `bare-stress` links it.
+- `tools/portable_check.sh --scan`: ok (the suite code has no OS code; `/proc/meminfo` and `VmHWM` are read in `main.rs`, which is on the list).
 - A sign-out test that a user forces onto the shared login makes the next shared test fail on its first check (`expect ... Heading home` meets the login page). That is the "no false pass" gate. The runner does not log in again: see below.
 
 ### Not tested, not built
