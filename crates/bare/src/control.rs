@@ -238,6 +238,7 @@ impl Page {
 
     /// Read the document and the frame of the window (made now if the page changed). `None`: no document, or the page cannot be laid
     /// out (the reason is the last of `errors`).
+    #[track_caller]
     pub fn inspect<R>(&mut self, f: impl FnOnce(&Document, &Frame) -> R) -> Option<R> {
         self.frame_now()?;
         let Page { source, frame, .. } = self;
@@ -317,6 +318,7 @@ impl Page {
 
     /// The border box of the element in window pixels (what `getBoundingClientRect` gives on the frame of the window), when it is
     /// rendered: a box with a size, and not `visibility: hidden`. Else why it is hidden.
+    #[track_caller]
     pub fn visible_box(&mut self, h: Handle) -> Result<bare_layout::fragment::Rect, Refusal> {
         if !self.connected(h) {
             return Err(Refusal::Detached);

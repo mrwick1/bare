@@ -1985,3 +1985,13 @@ A test is `own` (it logs in itself) when a step says `sign out`, `password` or `
 - A page can end while a request is in flight. With a tape set, `bare-drive` waits for pending pictures between steps and for the requests in flight at the end. Without it, the work counted changes with the race (`curl-se-home` ranged from 322 M to 963 M instructions).
 - `BARE_SEED` fixes the page random streams only. A random id in a URL or in a body never matches a recording. TLS random stays real.
 - Not done: a virtual clock for page timers. Real clocks leave 20 of 47 journeys over 5% same-binary spread (see `docs/progress.md`). A virtual clock is the next design decision for step 1.
+
+## The styles-only frame is not built (step 6, 2026-11-14)
+
+- Count first (`docs/progress.md`, "Who forces style and layout"). The frame layouts that no geometry step used are 0.3 to 0.4% of the instructions of the 47 corpus journeys, about 2.0% of the live journeys and 2.7% of the suite. The rule of `design-suite.md` decision 7 says to stop below about 2%.
+- The numbers are upper bounds. A geometry step after a skipped layout lays out from an older kept layout, so it costs more than the layout that it replaces.
+- `Frame.layout` is read at 34 places. The design counted 5 callers. An `Option<Layout>` changes the paint, hit-test, scroll and screenshot paths too.
+- The driver asks for little: locators and snapshot are 2.5% of the corpus journeys. The page script, the motion step and arriving pictures force most of the style and layout, and a frame split cannot reach them.
+- Not built: A (styles-only frame), B (mask cascade), C (closure layout). B and C need the same style-only share. It is 2.5%.
+- Kept: the counters (`crates/bare/src/force.rs`, off unless `BARE_FORCE_STATS` is set; the suite V2 costs the same with and without them) and `tools/drive/force_count.py`. Run the count again after the rule-set cost falls: the skipped layout is a fixed 420 M on the suite, so its share grows when the rest shrinks.
+- Found, not changed: the rule-set build is 30.9% of the suite and 7.8 to 8.3% of the corpus journeys. It is the part of criterion 7 that is still open.

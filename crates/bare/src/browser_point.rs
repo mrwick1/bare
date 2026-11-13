@@ -77,6 +77,7 @@ pub(crate) fn retarget(doc: &Document, mut n: NodeId, roots: &[NodeId]) -> NodeI
 
 /// The elements under the point, the topmost first, retargeted against `scope`.
 fn under(d: &Dom, it: &mut Interp<'_>, scope: NodeId, x: f64, y: f64) -> R<Vec<NodeId>> {
+        let _caller = crate::force::tag("elementFromPoint");
     let roots = roots_of(&d.doc.borrow(), scope);
     it.charge(roots.len() as u64)?;
     if roots.last() != Some(&d.doc.borrow().root()) {

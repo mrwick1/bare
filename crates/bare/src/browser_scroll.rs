@@ -388,6 +388,7 @@ impl Dom {
             && *c == k
         {
             it.charge(1)?;
+            crate::force::layout("hit", crate::force::start(), 0);
             return Ok(lay.clone());
         }
         let (layout, areas, bars) = self.layout_areas(it, styles, None)?;
@@ -543,6 +544,7 @@ fn target_of(d: &Dom, it: &mut Interp<'_>, a: &[Value], cur: (f32, f32), by: boo
 impl Dom {
     /// Scroll `el` (the root element is the page) to `to`, or by `to` when `by`.
     fn scroll_el(&self, it: &mut Interp<'_>, el: NodeId, a: &[Value], by: bool) -> R<()> {
+        let _caller = crate::force::tag("scrollTo/scrollBy");
         if !self.in_document(it, el)? {
             return Ok(());
         }
@@ -627,6 +629,7 @@ fn set_left(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
 
 /// `scrollWidth`, `scrollHeight`, `clientWidth`, `clientHeight`, `clientTop`, `clientLeft` of `el`, in whole pixels.
 fn sizes(d: &Dom, it: &mut Interp<'_>, el: NodeId) -> R<[f32; 6]> {
+        let _caller = crate::force::tag("scroll/client sizes");
     if !d.in_document(it, el)? {
         return Ok([0.0; 6]);
     }
@@ -670,6 +673,7 @@ size_get!(client_top, 4);
 size_get!(client_left, 5);
 
 fn bounding_rect(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+        let _caller = crate::force::tag("getBoundingClientRect");
     let el = d.el(it, this)?;
     let r = if d.in_document(it, el)? { d.with_geo(it, |g, s| g.client_rect(s, el))? } else { None };
     // No box fragment: an inline box that layout culled (or no box at all, which is empty).

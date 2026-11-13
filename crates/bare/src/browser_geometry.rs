@@ -295,8 +295,10 @@ impl Dom {
     /// One bounded native layout at the size `vp` (the window minus the page bars, see `browser_scroll.rs`).
     pub(crate) fn layout_at(&self, it: &mut Interp<'_>, styles: &Styles, vp: (f32, f32), keep: Option<(Option<bare_layout::keep::Kept>, Option<&[bool]>)>) -> R<bare_layout::fragment::Layout> {
         let l = self.geometry.lim.get();
+        let t0 = crate::force::start();
         let doc = self.doc.borrow();
         it.charge(doc.len() as u64)?;
+        let incremental = keep.is_some();
         let walked = match &keep {
             Some((_, dirty)) => walk::<true>(&doc, styles, &l, Some(&mut self.geometry.sums.borrow_mut()), *dirty),
             None => walk::<false>(&doc, styles, &l, None, None),
@@ -322,11 +324,13 @@ impl Dom {
         let mut s = self.geometry.stats.get();
         s = GeometryStats { layouts: s.layouts + 1, last_bound: bound.fragments, last_fragments: layout.fragments.len() as u64, last_work: layout.work };
         self.geometry.stats.set(s);
+        crate::force::layout(if incremental { "kept" } else { "full" }, t0, layout.fragments.len() as u64);
         Ok(layout)
     }
 
     /// The border-box size of `el` in whole CSS pixels (width, height), zero when it has no box.
     fn offset_size(&self, it: &mut Interp<'_>, el: NodeId) -> R<(i32, i32)> {
+        let _caller = crate::force::tag("offsetWidth/Height");
         if !self.in_document(it, el)? {
             return Ok((0, 0));
         }
