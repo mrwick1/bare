@@ -23,9 +23,13 @@ const MAX_NAME: usize = 200;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DownloadState {
+    /// Waits for one of the `MAX_JOBS` places.
+    Queued,
     Running,
+    Paused,
     Done,
     Failed(String),
+    Cancelled,
 }
 
 #[derive(Clone, Debug)]
@@ -57,6 +61,12 @@ pub struct DownloadRequest {
 struct Inner {
     dir: PathBuf,
     list: Vec<Download>,
+    /// The jobs that run or are paused, by number: pause, resume, cancel and limit reach them here.
+    jobs: std::collections::HashMap<usize, Arc<run::Job>>,
+    /// Jobs that wait for a place, in order.
+    waiting: std::collections::VecDeque<run::Waiting>,
+    /// Jobs that hold a place (running or paused).
+    active: usize,
 }
 
 #[derive(Clone)]
@@ -64,7 +74,7 @@ pub struct Downloads(Arc<Mutex<Inner>>);
 
 impl Downloads {
     pub fn new(dir: PathBuf) -> Downloads {
-        Downloads(Arc::new(Mutex::new(Inner { dir, list: Vec::new() })))
+        Downloads(Arc::new(Mutex::new(Inner { dir, list: Vec::new(), jobs: Default::default(), waiting: Default::default(), active: 0 })))
     }
 
     fn inner(&self) -> std::sync::MutexGuard<'_, Inner> {
@@ -87,8 +97,9 @@ impl Downloads {
         self.len() == 0
     }
 
+    /// The downloads that will end without a call: running or queued. A paused one waits for `resume`.
     pub fn running(&self) -> usize {
-        self.inner().list.iter().filter(|d| d.state == DownloadState::Running).count()
+        self.inner().list.iter().filter(|d| matches!(d.state, DownloadState::Running | DownloadState::Queued)).count()
     }
 
     /// Record a download that starts now. Gives its number.

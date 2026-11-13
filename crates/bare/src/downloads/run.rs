@@ -35,6 +35,8 @@ pub(crate) const MIN_SPLIT: u64 = 4 << 20;
 pub(crate) const MAX_CONNS: usize = 8;
 /// Connections for all jobs of the process.
 const MAX_ALL: usize = 16;
+/// Jobs that run at once for one `Downloads`; more wait as `Queued`.
+pub(crate) const MAX_JOBS: usize = 3;
 /// Tries of a segment without progress.
 const TRIES: u32 = 5;
 const TICK: Duration = Duration::from_millis(250);
@@ -78,9 +80,23 @@ struct State {
     failed: Option<String>,
     /// Threads that run.
     threads: usize,
+    /// `pause`: the threads stop (a new generation) and no new one starts until `resume`.
+    paused: bool,
+    cancelled: bool,
+    /// Bytes per second for the whole job, and when the next piece may go (a token bucket of one piece).
+    limit: Option<u64>,
+    next_free: std::time::Instant,
 }
 
-struct Job {
+/// A job that waits for a place.
+pub(crate) struct Waiting {
+    id: usize,
+    name: String,
+    mime: String,
+    start: Start,
+}
+
+pub(crate) struct Job {
     url: Url,
     from: Option<String>,
     get: bool,
@@ -207,7 +223,16 @@ impl Job {
             s.pos += take;
             st.done += take;
             let at_end = st.segs[i].pos >= st.segs[i].end;
+            let wait = st.limit.map(|l| {
+                let now = std::time::Instant::now();
+                let from = st.next_free.max(now);
+                st.next_free = from + Duration::from_secs_f64(take as f64 / l.max(1) as f64);
+                from - now
+            });
             drop(st);
+            if let Some(w) = wait.filter(|w| !w.is_zero()) {
+                std::thread::sleep(w);
+            }
             wrote += take;
             if at_end {
                 return Ok(wrote);
@@ -409,8 +434,12 @@ fn split(job: &Arc<Job>, st: &mut State) -> bool {
     true
 }
 
-/// A segment that is not running and not done (its thread ended on a retry limit, or gave its range back): run it again.
+/// Run the segments that are not done again, when no thread runs (after `resume`, or when a thread ended early). The `running`
+/// marks of an old generation are stale then, so they are cleared first.
 fn revive(job: &Arc<Job>, st: &mut State) {
+    for s in &mut st.segs {
+        s.running = false;
+    }
     for i in 0..st.segs.len() {
         let s = &st.segs[i];
         if !s.running && s.pos < s.end && st.failed.is_none() && take_conn() {
@@ -421,13 +450,105 @@ fn revive(job: &Arc<Job>, st: &mut State) {
 
 impl Downloads {
     /// Run a download that `Start` began: on a thread of its own, so the page and its workers go on. `name` is clean (`sanitize`).
+    /// When `MAX_JOBS` hold a place, it waits as `Queued`, and its first reply waits unread (a resumable job asks again if that
+    /// connection died meanwhile).
     pub(crate) fn begin(&self, id: usize, name: &str, mime: &str, start: Start) {
+        let w = Waiting { id, name: name.to_string(), mime: mime.to_string(), start };
+        let mut s = self.inner();
+        if s.active >= MAX_JOBS {
+            s.list[id].state = DownloadState::Queued;
+            s.waiting.push_back(w);
+            return;
+        }
+        s.active += 1;
+        drop(s);
+        self.launch(w);
+    }
+
+    fn launch(&self, w: Waiting) {
         let dl = self.clone();
-        let (name, mime) = (name.to_string(), mime.to_string());
-        let ok = std::thread::Builder::new().name("bare-download-job".into()).spawn(move || dl.run(id, &name, &mime, start));
+        let id = w.id;
+        let ok = std::thread::Builder::new().name("bare-download-job".into()).spawn(move || {
+            dl.run(w.id, &w.name, &w.mime, w.start);
+            dl.next();
+        });
         if ok.is_err() {
             self.fail(id, "no thread for the download".into());
+            self.next();
         }
+    }
+
+    /// A job gave its place back: start the next one that waits.
+    fn next(&self) {
+        let mut s = self.inner();
+        s.active -= 1;
+        let Some(w) = s.waiting.pop_front() else { return };
+        s.active += 1;
+        s.list[w.id].state = DownloadState::Running;
+        drop(s);
+        self.launch(w);
+    }
+
+    fn job(&self, id: usize) -> Result<Arc<Job>, String> {
+        let s = self.inner();
+        match s.list.get(id).map(|d| &d.state) {
+            None => Err(format!("no download {}", id + 1)),
+            Some(DownloadState::Queued) => Err("the download waits for a place; it has not started".into()),
+            Some(DownloadState::Running) => s.jobs.get(&id).cloned().ok_or_else(|| "the download is starting; try again".into()),
+            _ => s.jobs.get(&id).cloned().ok_or_else(|| "the download has ended".into()),
+        }
+    }
+
+    /// Stop the transfer of download `id` and keep its bytes. `resume` goes on from them. A download that cannot resume (no ranges)
+    /// cannot pause.
+    pub fn pause(&self, id: usize) -> Result<(), String> {
+        let job = self.job(id)?;
+        if !job.resumable {
+            return Err("the server does not allow resume for this file, so it cannot pause".into());
+        }
+        let mut st = job.lock();
+        if !st.paused {
+            st.paused = true;
+            st.generation += 1;
+        }
+        drop(st);
+        self.inner().list[id].state = DownloadState::Paused;
+        job.cv.notify_all();
+        Ok(())
+    }
+
+    pub fn resume(&self, id: usize) -> Result<(), String> {
+        let job = self.job(id)?;
+        job.lock().paused = false;
+        self.inner().list[id].state = DownloadState::Running;
+        job.cv.notify_all();
+        Ok(())
+    }
+
+    /// Stop download `id` and remove its file. A queued one leaves the queue.
+    pub fn cancel(&self, id: usize) -> Result<(), String> {
+        let mut s = self.inner();
+        if let Some(i) = s.waiting.iter().position(|w| w.id == id) {
+            // Dropping the waiting reply closes its connection.
+            s.waiting.remove(i);
+            s.list[id].state = DownloadState::Cancelled;
+            return Ok(());
+        }
+        drop(s);
+        let job = self.job(id)?;
+        let mut st = job.lock();
+        st.cancelled = true;
+        st.failed.get_or_insert("cancelled".into());
+        drop(st);
+        job.cv.notify_all();
+        Ok(())
+    }
+
+    /// Limit download `id` to `bytes_per_second` (`None`: no limit).
+    pub fn limit(&self, id: usize, bytes_per_second: Option<u64>) -> Result<(), String> {
+        let job = self.job(id)?;
+        job.lock().limit = bytes_per_second.filter(|&b| b > 0);
+        Ok(())
     }
 
     fn run(&self, id: usize, name: &str, mime: &str, start: Start) {
@@ -462,8 +583,22 @@ impl Downloads {
             s.list[id].total = total;
         }
         let end = total.unwrap_or(u64::MAX);
-        let st = State { segs: vec![Seg { pos: 0, end, running: false }], done: 0, no_split: false, changed: None, restarted: false, generation: 0, failed: None, threads: 0 };
+        let st = State {
+            segs: vec![Seg { pos: 0, end, running: false }],
+            done: 0,
+            no_split: false,
+            changed: None,
+            restarted: false,
+            generation: 0,
+            failed: None,
+            threads: 0,
+            paused: false,
+            cancelled: false,
+            limit: None,
+            next_free: std::time::Instant::now(),
+        };
         let job = Arc::new(Job { url, from, get, client, file, total, validator: Mutex::new(validator), resumable, st: Mutex::new(st), cv: Condvar::new() });
+        self.inner().jobs.insert(id, job.clone());
         // The first segment always runs, even when the process is at `MAX_ALL`: it holds a connection already.
         CONNS.fetch_add(1, Ordering::Relaxed);
         let outcome = {
@@ -494,10 +629,12 @@ impl Downloads {
                 if st.segs.iter().all(|s| s.pos >= s.end) && st.threads == 0 {
                     break Ok(());
                 }
-                // Fill the free connections.
-                while split(&job, &mut st) {}
-                if st.threads == 0 {
-                    revive(&job, &mut st);
+                // Fill the free connections. A paused job only waits for its threads to stop.
+                if !st.paused {
+                    while split(&job, &mut st) {}
+                    if st.threads == 0 {
+                        revive(&job, &mut st);
+                    }
                 }
                 self.inner().list[id].bytes = st.done;
                 st = job.cv.wait_timeout(st, TICK).unwrap_or_else(|e| e.into_inner()).0;
@@ -514,14 +651,16 @@ impl Downloads {
         let done = job.lock().done;
         let size = total.unwrap_or(job.lock().segs.first().map_or(0, |s| s.pos));
         let end = outcome.and_then(|()| std::fs::rename(&part, &path).map_err(|e| format!("the file cannot be renamed: {}", e.kind())));
+        let cancelled = job.lock().cancelled;
         let mut s = self.inner();
+        s.jobs.remove(&id);
         s.list[id].bytes = if end.is_ok() { size } else { done };
         s.list[id].state = match end {
             Ok(()) => DownloadState::Done,
             Err(why) => {
                 let _ = std::fs::remove_file(&part);
                 let _ = std::fs::remove_file(&path);
-                DownloadState::Failed(why)
+                if cancelled { DownloadState::Cancelled } else { DownloadState::Failed(why) }
             }
         };
     }

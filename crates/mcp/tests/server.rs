@@ -726,6 +726,14 @@ fn a_download_goes_to_a_file_and_the_page_stays() {
     let (list, error) = s.tool("downloads", json!({}));
     let list = list.as_str().unwrap();
     assert!(!error && list.lines().count() == 6 && list.contains("failed: ") && list.contains("invoice.pdf (") && list.contains("from blob:"), "{list}");
+    assert!(list.lines().next().unwrap().starts_with("#1 "), "{list}");
+    // An ended download takes no operation; an unknown op and a missing id are named.
+    let (r, error) = s.tool("downloads", json!({"op": "pause", "id": 1}));
+    assert!(error && r.as_str().unwrap().contains("has ended"), "{r}");
+    let (r, error) = s.tool("downloads", json!({"op": "pause"}));
+    assert!(error && r.as_str().unwrap().contains("give id"), "{r}");
+    let (r, error) = s.tool("downloads", json!({"op": "stop", "id": 1}));
+    assert!(error && r.as_str().unwrap().contains("unknown op"), "{r}");
 }
 
 /// A server of one page. `/slow.png` never answers for 5 s, so a picture stays on its way. Gives the base URL.

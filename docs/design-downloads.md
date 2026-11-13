@@ -124,7 +124,7 @@ Every range request:
 
 ### 5.5 Queue and controls
 
-- At most 3 jobs run at once; more wait as `Queued`.
+- At most 3 jobs run at once; more wait as `Queued`. As built: a queued job keeps its first reply unread; when its turn comes, a dead connection resumes like any cut. A paused job keeps its place. Only a job that can resume can pause.
 - Pause closes the connections and keeps the file and the segment list. Resume sends range requests from each `pos`.
 - Cancel closes the connections and removes the file.
 - A speed limit is a token bucket for each job, read before each 64 KiB write.
