@@ -1,6 +1,6 @@
 # Fetch metadata for page requests
 
-Date: 2026-11-13. Status: proposed for owner review. Issue: #475.
+Date: 2026-11-13. Status: initial design approved; suffix amendment awaits owner review. Issue: #475.
 
 ## Verified failure
 
@@ -10,9 +10,9 @@ The Deck test controller requires `Sec-Fetch-Site: same-origin` before its one-u
 
 ## Existing design
 
-`browser_fetch.rs` validates script headers and queues page requests. Its shared `run_hops` path builds wire headers for fetch and XHR. It already tracks the initiating document, request mode and redirects. Scripts cannot set `Sec-` headers. `bare_net::cookie::same_site` already compares schemeful sites.
+`browser_fetch.rs` validates script headers and queues page requests. Its shared `run_hops` path builds wire headers for fetch and XHR. It already tracks the initiating document, request mode and redirects. Scripts cannot set `Sec-` headers. `bare_net::cookie::same_site` compares schemeful sites with a short suffix list. Inspection confirmed that it lacks the complete Public Suffix List, including multi-label suffixes such as `k12.ca.us`. It cannot establish this security boundary for all domains.
 
-The wire path allocates a vector per hop. This change adds three static header pairs and one small site classification. It adds no request, timer, queue, dependency or background work. It makes no performance claim.
+The wire path allocates a vector per hop. This change adds three static header pairs and one small site classification. It adds no request, timer, queue or background work. The amendment adds one static Public Suffix List dependency to the bare crate. It makes no performance claim.
 
 ## Options
 
@@ -29,7 +29,7 @@ Follow the [Fetch Metadata draft](https://w3c.github.io/webappsec-fetch-metadata
 - Add the headers on requests to potentially trustworthy targets. Reuse the existing trustworthy-URL predicate.
 - Use the actual request mode for `Sec-Fetch-Mode`.
 - Use `empty` for the fetch and XHR destination. Do not add `Sec-Fetch-User` for these requests.
-- Start the site relation from the initiating document. Use `same-origin`, `same-site` or `cross-site` as applicable. Reuse the existing schemeful site helper. Preserve the least-trusted relation across every redirect; a return to the original origin cannot erase a cross-site hop.
+- Start the site relation from the initiating document. Use `same-origin`, `same-site` or `cross-site` as applicable. Use a pinned `psl` crate snapshot for registrable-domain comparison. Compare schemes first. Treat identical hosts, including IP literals and localhost, as the same site. For different DNS hosts, require equal registrable domains from the static list. Do not change cookie behavior in this fix. Preserve the least-trusted relation across every redirect; a return to the original origin cannot erase a cross-site hop.
 - Add browser-generated metadata after author headers and after the CORS preflight decision. Author code still cannot set it. Metadata must not create an author-header preflight.
 - Keep generated metadata out of the script-visible Request headers.
 
@@ -47,4 +47,8 @@ Run the focused fetch tests, the bare crate tests, formatting and clippy. Use tw
 
 ## Limits
 
-No code is implemented by this design. No functional regression or candidate-binary test has run. No resource benchmark has run. The existing cookie site helper must be checked for the required public-suffix behavior before reuse. If it is insufficient, stop and revise this design. No real account, credential or external login was used.
+No code is implemented by this design. No functional regression or candidate-binary test has run. No resource benchmark has run. The existing cookie helper failed the required public-suffix check. Implementation stopped as specified. The owner must review the static-list amendment before code is built. The crate snapshot needs deliberate updates; there is no runtime list download. Record its pinned version and license before adding it. Add a regression for independent domains under a multi-label suffix and a private hosting suffix. No real account, credential or external login was used.
+
+## Suffix amendment
+
+The initial design was approved. The compatibility check then found the incomplete suffix list. Reusing it can label independent domains as the same site. The static [psl crate](https://docs.rs/psl/latest/psl/) supplies registrable-domain lookup without a runtime download. Select it instead of expanding a handwritten list or adding a generic HTTP-client policy. This is the only requested design amendment. No production code has changed.
