@@ -1,2 +1,3 @@
 crates/unicode/src/tables.rs linguist-generated=true
 data/unicode/** linguist-vendored=true
+docs/progress.md merge=union
