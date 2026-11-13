@@ -8830,3 +8830,64 @@ The run is one reply to one request, as `run_steps` is. The server loop does not
 ### Not tested
 
 `perf: true` (needs `perf`), `workers: "auto"`, a suite with an own test through MCP, a test that times out through MCP, Windows and macOS paths for the `bare-drive` lookup, `cargo test --release --workspace`, the cost matrix (no engine change, no change in the browser path).
+## Repeatable journey benchmark: record, replay, compare (2026-11-13)
+
+Branch `t3/repeatable-journey-benchmarks`. Step 1 of `docs/perf-goal.md` (the benchmark contract), minus the login fixture, the render-trigger counters and the per-origin cost.
+
+### What was built
+
+- Record and replay at the HTTP layer (`crates/net/src/replay.rs`, hook in `Client::start`). `BARE_NET_RECORD=<dir>` stores each reply. `BARE_NET_REPLAY=<dir>` serves them with no network. `BARE_NET_FILL=<dir>` serves what is stored and fetches only a miss, then stores it. Fill is the precedence winner, then replay, then record.
+- A request has a label: method, URL and a hash of its body. The same label is served in recorded order, then the last reply repeats. A miss is an error on the page and a line on stderr: `bare-net: replay: no recorded reply for <label>`.
+- The stored body is the raw body: after dechunking, before `Content-Encoding`. A replay decodes it again, so the decode cost stays in the measurement. Redirects, `Set-Cookie`, a cut body (with its `io::ErrorKind`) and a failed request replay as they were. This browser has no WebSocket. `EventSource` is a shim over `fetch`, so it goes through the tape. A long-poll or a stream that is still open when the page goes away is stored as a cut body (`TimedOut`) and replays as one.
+- Determinism in replay mode: `BARE_SEED=<n>` fixes `Math.random`, `crypto.getRandomValues`, `crypto.randomUUID` and multipart boundaries (TLS random is unchanged). With a tape set, `bare-drive` settles pending pictures between steps and at the end, and waits for the requests in flight at the end (`Client::drain`). Background image jobs raced the exit and the next step before this.
+- Runner `tools/bench/journeys.sh` (`journeys.py`): `record`, `fill`, `run` and `compare`. Each run is a new process (cold). The TSV holds journey, run, pass, instructions (`perf stat -e instructions:u`), cpu ms, wall ms, peak RSS (`wait4`), PSS and the miss count. PSS is sampled in its own run (run 0) because reading `smaps_rollup` changes thread timing and the instruction count.
+- Corpus: `/data/bare-tmp/corpus/main`, 47 journeys recorded with `bare-drive` of main at `cc8cd9d0`. It is machine-local and not in the repository.
+- Baseline: `f6415364` plus the replay patch, as local branch `bench-base-replay` (worktree `/data/bare-tmp/bench-base-src`, target `/data/bare-tmp/target-bench-base`, binary `/data/bare-tmp/bare-drive-journeys-base`). It is not pushed. The patch is the net, drive and seed changes of this PR, cherry-picked.
+- `wikipedia-main-random.steps`: the last `expect` also needs `!location.pathname.endsWith('Main_Page')`. The old check passed with no random page.
+
+### How to use it
+
+    tools/bench/journeys.sh record  <bare-drive>                 # live sites, then fill rounds
+    tools/bench/journeys.sh run     --runs 3 --pss <bare-drive>
+    tools/bench/journeys.sh compare --runs 3 --pss --out cmp.tsv <base bare-drive> <new bare-drive>
+
+### Result: 3 runs each, baseline vs main
+
+Machine: archMachine, loopback replay, `heavy` lock held. 47 journeys, cold runs, runs interleaved. Medians. Log: `/data/bare-tmp/corpus/compare-final.{log,tsv}`.
+
+| | baseline `f6415364` + replay | main `cc8cd9d0` | change |
+| --- | --- | --- | --- |
+| Instructions, sum of medians | 74,004 M | 71,981 M | -2.7% |
+| CPU (user+system), sum of medians | 16,642 ms | 16,418 ms | -1.3% |
+| Wall, sum of medians | 21,096 ms | 22,463 ms | +6.5% (loaded machine: a test build ran at the start) |
+| PSS, sum of medians | 1,675 MiB | 1,719 MiB | +2.6% |
+| Peak RSS, sum of medians | 1,824 MiB | 1,895 MiB | +3.9% |
+
+The totals are not a verdict on main: the same-binary spread below is larger than the change.
+
+### Same-binary variation (target: under 2% instructions per journey)
+
+Target not met. Spread is (max - min) / median over 3 runs of one binary. The worst side of each journey counts.
+
+- Under 2%: 19 of 47. Over 2%: 28. Over 5%: 20.
+- Over 5% (base / new): `archlinux-org-home` 31/1, `craigslist-home` 0/16, `crates-io-home` 14/71, `devto-home` 2/7, `github-docs-home` 6/1, `hn-comments-back` 6/6, `hn-front` 3/8, `kernel-org-home` 0/6, `mdn-reference` 16/70, `nodejs-org-home` 40/20, `python-docs-search` 1/99, `react-docs` 22/6, `rust-book-chapters` 1/17, `rust-book-search` 245/331, `substack-home` 7/7, `wikipedia-main-random` 10/3, `wikipedia-portal` 13/7, `wikipedia-search` 9/6, `wikipedia-toc-languages` 8/10, `wiktionary-portal` 18/18.
+- The runs fall into a few distinct values, not a smooth spread. Example, `python-docs-search`: 188 M, 183 M, 184 M on the baseline and 2,160 M, 2,154 M, 1,986 M, 188 M on main. A page reaches or misses work (a debounced search, a script that runs a search index) depending on when its timer fires against the other threads.
+- Cause (hypothesis, from the discrete modes, the zero-miss runs and the profiles of the earlier runs): page timers and debounces run on the real clock, so the order of timers, worker threads and the end of the journey changes between runs. Images (fixed here) and random ids (fixed here) were the two earlier causes. `rust-book-search` is the clearest case: 3.9 G to 19.7 G with identical inputs.
+- A second cause, for `crates-io-home` and `mdn-reference` (and in part `wikipedia-*`): the set of requests varies, so a replay has misses. Analytics beacons with a time or an id in the body never match (`wikipedia-*`, `go-dev-home`, `mdn-reference`). They are constant, harmless errors. A page that asks for a file that no recording run reached shows up as a miss in only some runs (`crates-io-home`, `mdn-reference`).
+- Not fixed, because it needs a design decision: a virtual clock for page timers in replay mode (jump to the next timer when the page is idle). I judged it out of scope for this task. It would remove the timer races, and it would change what "time to ready" means.
+
+### Journeys that pass live and cannot pass on replay
+
+- `nextjs-docs`: the engine stops the page at `checkVisibility`. Live latency hides it, and a fast replay reaches it. It is not in the corpus. This is an engine issue, not a replay issue.
+
+### Checks
+
+- `cargo test --release -p bare-net`: the unit tests of the tape and `crates/net/tests/replay.rs` (record then replay a loopback server with a redirect, gzip, a cookie and a POST; a miss is the clear error; a cut body and a failed request replay as they were; fill fetches only the miss).
+- `crates/drive/tests/replay.rs`: a journey records against a loopback server, replays with no connection to it, and a page that was not recorded fails with the miss error.
+
+### Not tested
+
+- Wall time on an idle machine. Cold and warm cache runs apart: every run is cold (a new process), and the HTTP cache of a process starts empty.
+- Replay of an `EventSource` stream with live events, and of a journey with a login.
+- Replay with a corpus that was recorded by another binary than the one that replays it, apart from the baseline above.
+- A second machine.
