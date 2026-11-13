@@ -2563,6 +2563,12 @@ impl Browser {
         self.dom.fetch.st.borrow().queue.len()
     }
 
+    /// Requests of the queue that were queued at `t` or later (`Page::hide` waits for them).
+    pub(crate) fn fetches_since(&self, t: std::time::Instant) -> usize {
+        self.dom.sync_detached();
+        self.dom.fetch.st.borrow().queue.iter().filter(|p| p.queued.is_some_and(|q| q >= t)).count()
+    }
+
     /// Add the requests that wait to `out` (`Page::pending`): each fetch and XHR of the queue, and each open event stream. A stream
     /// does not hold the page (`Page::idle`): it can stay open for as long as the page lives.
     pub(crate) fn waiting_requests(&self, out: &mut Vec<crate::page::Waiting>) {

@@ -1810,6 +1810,26 @@ impl Browser {
         Ok(Dispatched { not_canceled, reports })
     }
 
+    /// The tab closes: the document is hidden for good (`document.visibilityState` "hidden"), then `visibilitychange` fires at the
+    /// document and `pagehide` (`persisted` false: bare keeps no back/forward cache) at the window, as in Chrome. Pages send their
+    /// pending changes from these handlers. A second call does nothing.
+    pub fn hide(&mut self) -> R<()> {
+        let dom = self.dom.clone();
+        if dom.basics.hidden.replace(true) {
+            return Ok(());
+        }
+        let root = dom.doc.borrow().root();
+        self.it.host_scope(|it| {
+            let e = dom.new_event(it, "visibilitychange", true, false, false, None)?;
+            dom.dispatch(it, Target::Node(root), e)?;
+            let e = dom.new_event(it, "pagehide", false, false, false, None)?;
+            let k = dom.key(it, "persisted")?;
+            it.define_data(e, k, Value::Bool(false), false, false, true)?;
+            dom.dispatch(it, Target::Window, e)?;
+            Ok(())
+        })
+    }
+
     /// `submit` at a form (bubbles, cancelable). No validation, no navigation.
     pub fn submit(&mut self, form: NodeId) -> R<Dispatched> {
         self.dispatch(form, "submit", true, true)

@@ -696,8 +696,10 @@ impl Session {
         Report { ok, steps: std::mem::take(&mut r.steps), failure: r.failure.take(), logs: std::mem::take(&mut r.logs), net: std::mem::take(&mut r.net), ms: r.ms, window: r.window, ticks: std::mem::take(&mut r.ticks), cookies: std::mem::take(&mut r.cookies) }
     }
 
-    /// Close the page (and its window) and give the report.
+    /// Close the page (and its window) and give the report. The page first hears that it is hidden, and the requests of its handlers
+    /// get up to 2 s (`Page::hide`).
     pub fn finish(mut self) -> Report {
+        let _ = self.host.run(|p| p.hide(Duration::from_secs(2)));
         self.report();
         drop(self.host);
         self.rep.ms = self.start.elapsed().as_secs_f64() * 1000.0;

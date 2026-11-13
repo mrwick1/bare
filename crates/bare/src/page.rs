@@ -647,6 +647,23 @@ impl Page {
         self.woken = true;
     }
 
+    /// The page is about to close: fire its hide events (`Browser::hide`), then run it until the requests that its handlers queued
+    /// are done, for at most `limit`. Chrome lets a `keepalive` request or a beacon outlive the document; bare waits for every request
+    /// made in the handlers, since its queue does not keep the `keepalive` flag. A page that is stopped or still loading closes at once.
+    pub fn hide(&mut self, limit: Duration) {
+        let t = Instant::now();
+        if !self.browser().is_some_and(|b| b.hide().is_ok()) {
+            return;
+        }
+        while t.elapsed() < limit && self.browser().is_some_and(|b| b.it.pending_jobs() > 0 || b.fetches_since(t) > 0) {
+            let (ran, next) = self.tick();
+            if !ran {
+                let Some(next) = next else { return };
+                std::thread::sleep(next.saturating_duration_since(Instant::now()).min(Duration::from_millis(5)));
+            }
+        }
+    }
+
     /// Run the tasks that are due now (timers, animation frames, and the `fetch` calls and navigations that they start), as a browser
     /// does between input events. Gives whether a task ran (the next frame checks the render key then) and when the next task is due.
     /// `None`: no task is queued, or the page stopped for good (a fatal error), so only an input event can change it.

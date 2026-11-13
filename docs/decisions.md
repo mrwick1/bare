@@ -1917,3 +1917,12 @@ Issue #442: `el.style.WebkitUserSelect` was `undefined`, so `el.style.WebkitUser
 - The page keeps its state and its requests. Any other URL loads a new document, as before.
 - Chrome does the same for the address bar.
 - Reason: a web mail app sends some actions a few seconds late. A `goto` to its `#search/...` view loaded a new document and dropped a pending delete (issue #468).
+
+## A closing page hears that it is hidden (2026-11-13)
+
+- `Session::finish` calls `Page::hide` before it drops the page. `bare-mcp` calls `finish` on `close` and when `open` replaces a session.
+- `Browser::hide` sets `document.visibilityState` to "hidden" and `document.hidden` to true. Then `visibilitychange` fires at the document, and `pagehide` (`persisted` false) fires at the window. Chrome does the same when a tab closes.
+- The page then runs until the requests that its handlers queued are done, for at most 2 s. Chrome lets a `keepalive` request or a beacon outlive the document. The fetch queue does not keep the `keepalive` flag, so bare waits for every request made in the handlers.
+- A page that is stopped or still loading closes at once.
+- Not done: `beforeunload`, `unload`, and hide events on a navigation to another document.
+- Reason: web apps send pending changes from these handlers. An agent's last change was lost when the next tool call replaced the page (issue #471).
