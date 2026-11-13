@@ -12,4 +12,4 @@ click css="input#vector-main-menu-dropdown-checkbox"
 expect css="a[href='/wiki/Special:Random']" visible
 click css="a[href='/wiki/Special:Random']"
 expect url~"/wiki/"
-expect js "!location.pathname.endsWith('Special:Random') && document.querySelector('h1#firstHeading') !== null"
+expect js "!location.pathname.endsWith('Special:Random') && !location.pathname.endsWith('Main_Page') && document.querySelector('h1#firstHeading') !== null"

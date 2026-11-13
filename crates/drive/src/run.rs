@@ -477,8 +477,26 @@ impl Session {
         self.host.run(|p| p.storage().map(|s| s.export())).ok().flatten()
     }
 
+    /// A recording or a replay (`bare_net::replay`) is a benchmark: the pictures that the page started to load finish before the next step, and at the
+    /// end. Without it the work of a run depends on a race between a step (a click that leaves the page) and the queue of pictures. One look at a
+    /// document that has no picture costs nothing.
+    fn settle_pictures(&mut self) {
+        if bare_net::replay::Tape::from_env().is_some() {
+            let _ = self.host.run(|p| {
+                let end = Instant::now() + Duration::from_secs(5);
+                while p.images_pending() && Instant::now() < end {
+                    let (more, next) = p.tick();
+                    if !more {
+                        std::thread::sleep(next.map_or(Duration::from_millis(5), |t| t.saturating_duration_since(Instant::now()).min(Duration::from_millis(20))));
+                    }
+                }
+            });
+        }
+    }
+
     /// Run one step, and add its result to `rep`. False when it failed (`rep.failure` says why).
     pub fn step(&mut self, step: &Step, opt: &Options, red: &mut Redactor) -> bool {
+        self.settle_pictures();
         let Session { host, net, memo, timeout, window_cpu, nav_first, rep, preload, hist, downloads, ready_wait, .. } = self;
     let t0 = Instant::now();
     let deadline = t0 + *timeout;
@@ -714,10 +732,15 @@ impl Session {
     /// Close the page (and its window) and give the report. The page first hears that it is hidden, and the requests of its handlers
     /// get up to 2 s (`Page::hide`).
     pub fn finish(mut self) -> Report {
+        self.settle_pictures();
         let _ = self.host.run(|p| p.hide(Duration::from_secs(2)));
         self.report();
         drop(self.host);
         self.rep.ms = self.start.elapsed().as_secs_f64() * 1000.0;
+        // A recording or a replay (`bare_net::replay`) is a benchmark: let the pictures that still load and decode finish, so that each run does the same work.
+        if bare_net::replay::Tape::from_env().is_some() {
+            self.net.drain(Duration::from_secs(30));
+        }
         self.rep
     }
 }

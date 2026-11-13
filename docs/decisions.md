@@ -1976,3 +1976,12 @@ A test is `own` (it logs in itself) when a step says `sign out`, `password` or `
 - Options for the list: (1) a set that each insert, remove and attribute change updates; (2) a list of all elements with these names (the name never changes) and a list of those in the tree, made at a read and dropped when a node that can hold one joins or leaves the tree. Chosen: (2). It cannot miss an attribute change, and it needs no hook in `set_attr`. It is exact by construction: the debug check compares it with a walk.
 - No `HashMap<href, nodes>` (the L3 of the design). The list has L elements (under 30 on most pages, 200 in the ramp). A filter by `href` is O(L) for each sheet, and an index needs a drop at each `href` change. Add the index only if a page shows the filter in a profile.
 - Small pages (nodes < 32 x elements) make the list with a walk: the tables of the other way cost more there (`preload_load style 10` was +41% before this rule).
+## The journey benchmark replays recorded HTTP replies (2026-11-13)
+
+- The tape sits in `Client::start`, above the connection and TLS code. A replay needs no socket, so it also takes out DNS, connect and TLS time and their noise.
+- The stored body is the raw body, before `Content-Encoding`. A replay decodes it again. The other choice, the decoded body, would make decode cost vanish from every replay, and decode is part of what the browser does.
+- A label is method, URL and body hash. Replies of one label come back in recorded order, and the last one repeats.
+- A replay is faster than the live run, so a page asks for files the recording never reached. A fill round replays and fetches only the misses, until two runs in a row have none. The other choice, to fail the journey on a miss, would leave a corpus that grows by luck.
+- A page can end while a request is in flight. With a tape set, `bare-drive` waits for pending pictures between steps and for the requests in flight at the end. Without it, the work counted changes with the race (`curl-se-home` ranged from 322 M to 963 M instructions).
+- `BARE_SEED` fixes the page random streams only. A random id in a URL or in a body never matches a recording. TLS random stays real.
+- Not done: a virtual clock for page timers. Real clocks leave 20 of 47 journeys over 5% same-binary spread (see `docs/progress.md`). A virtual clock is the next design decision for step 1.

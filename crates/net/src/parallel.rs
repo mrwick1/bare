@@ -16,7 +16,7 @@ use crate::http::Client;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Worker threads at once for one client and its forks.
 pub const MAX_WORKERS: usize = 6;
@@ -59,6 +59,8 @@ pub struct Workers {
     state: Mutex<State>,
     /// A parked worker waits on it for a job.
     wake: Condvar,
+    /// `drain` waits on it until no job is queued or running.
+    idle: Condvar,
     /// A reply took `SLOW_HEAD` or more to start. Set once, for this client and its forks.
     slow: AtomicBool,
     pub(crate) connecting: Gate,
@@ -97,6 +99,8 @@ struct State {
     running: usize,
     /// Workers parked on `wake`.
     parked: usize,
+    /// Jobs that are queued or running.
+    active: usize,
 }
 
 enum Slot<R> {
@@ -198,6 +202,7 @@ impl Client {
             finish.set(Slot::Done(r));
         });
         let mut st = self.workers.state.lock().unwrap();
+        st.active += 1;
         st.queue.push_back(job);
         if st.parked >= st.queue.len() {
             self.workers.wake.notify_one();
@@ -209,6 +214,7 @@ impl Client {
             if started.is_err() {
                 st.running -= 1;
                 if st.running == 0 {
+                    st.active -= st.queue.len();
                     st.queue.clear();
                     // Nobody can run the jobs: drop them, so that their tasks end as lost.
                 }
@@ -237,7 +243,30 @@ impl Client {
                     }
                 }
             };
+            // A job that panics still ends: `drain` must not wait for it.
+            struct Ended<'a>(&'a Workers);
+            impl Drop for Ended<'_> {
+                fn drop(&mut self) {
+                    let mut st = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+                    st.active -= 1;
+                    if st.active == 0 {
+                        self.0.idle.notify_all();
+                    }
+                }
+            }
+            let _ended = Ended(&workers);
             job(self);
+        }
+    }
+
+    /// Wait until every job that `spawn` took (from this client and its forks) has ended, or until `limit` passes. A benchmark that replays
+    /// recorded replies calls it before the process ends, so that the work of a picture that is still decoded counts in every run.
+    pub fn drain(&self, limit: Duration) {
+        let end = Instant::now() + limit;
+        let mut st = self.workers.state.lock().unwrap();
+        while st.active > 0 {
+            let Some(left) = end.checked_duration_since(Instant::now()) else { return };
+            st = self.workers.idle.wait_timeout(st, left).unwrap().0;
         }
     }
 }

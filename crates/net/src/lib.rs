@@ -9,5 +9,6 @@ mod h2;
 mod hpack;
 pub mod http;
 pub mod parallel;
+pub mod replay;
 pub mod tcp;
 pub mod trace;
