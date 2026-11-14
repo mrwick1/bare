@@ -1,6 +1,6 @@
 # Modern CSS colors in the existing painter
 
-Date: 2026-11-14. Status: proposed for owner review. Issue: #464.
+Date: 2026-11-14. Status: approved by the owner for implementation. Issue: #464.
 
 ## Verified baseline
 
