@@ -10779,7 +10779,7 @@ Parse counters (the counter patch of `/data/bare-tmp/r2/R2-D/counters.patch`, po
 | Load step | 19.9 M | 19.9 M | 16.0 M | 16.0 M |
 | First parse, all scripts | 202.7 M | 203.2 M | 115.1 M | 115.5 M |
 
-The first parse costs 0.4 M to 0.5 M more (the table of each dropped function). The load step is the same, as expected. The "depth 0" row is lower than the "skipped bytes" model predicts by a margin because a function at depth 0 no longer carries inner bodies: the 117 depth-0 functions of `wiktionary-portal` now cost 9.2 M, not 155.0 M. (Before, "depth 0" held the whole subtree below it. The same function counts are kept: the count of second parses did not change, only the bytes that each one parses.)
+The first parse costs 0.4 M to 0.5 M more (the table of each dropped function). The load step is the same, as expected. The count of second parses is the same: each function that runs is still parsed once more, but it no longer parses the lazy bodies inside it. The second parses fall by 250 M and 175 M on the two portals; the journey totals fall by 249 M and 174 M.
 
 ### Cost matrix and gates
 
@@ -10796,7 +10796,6 @@ No limit is removed. A makes two limits weaker (design section 5): `LAZY_MIN_SOU
 ### Noticed on newest main, not changed
 
 - **The journey benchmark is broken on main since PR #479** (`c59e1bcf`, "Send browser fetch metadata…"). On `5bc18d14` the `wiktionary-portal` replay costs 1,560 M and loads the logo and more scripts; on `c59e1bcf` and on `b9c89248` it costs 95.9 M and 95.4 M, 0 replay misses, `ok: true`, and the network list is shorter (the logo `Wiktionary-logo-tiles_1x.png` is not requested; the run lasts 27 ms, not 408 ms). The full compare on `c59e1bcf` gave 51,593 M for main and 50,768 M for the branch (they agree, and both are about half of the real work). I did not find the cause. Hypothesis: the fetch metadata change alters the request or its replay key for the scripts and the pictures that the journeys load. The recording is untouched (mtime 2026-11-14 00:50). Any benchmark of the journeys on a main at or after #479 is not valid until this is fixed; for that reason the journey numbers above are from `5bc18d14`.
-- A second step still costs in the first parse: 0.4 M to 0.5 M for the stub tables, as the design said.
 
 ### Not tested
 
