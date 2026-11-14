@@ -396,6 +396,10 @@ struct Shadowed {
     parts: Vec<u32>,
 }
 
+fn slots_set<K>(m: &std::collections::HashSet<K>) -> usize {
+    m.capacity() * 8 / 7 * (std::mem::size_of::<K>() + 1)
+}
+
 type Buckets<K> = HashMap<K, Vec<u32>, BuildHasherDefault<Fnv>>;
 // A map from the name of an id, a class or a tag to the rules for it. The hasher is the fast one of the DOM.
 
@@ -782,6 +786,56 @@ impl RuleSet {
     /// browser's own)? `rule_cache` compares with it before it shares a set.
     pub fn built_from<'a>(&self, viewport: (f32, f32), sheets: impl ExactSizeIterator<Item = &'a str>) -> bool {
         self.viewport == viewport && self.sources.len() == sheets.len() + 1 && self.sources[1..].iter().zip(sheets).all(|(a, b)| **a == *b)
+    }
+
+    /// The bytes that the set owns on the heap now, counted from the sizes of its tables: what `rule_cache` weighs a set by. It grows
+    /// when blocks are read and lists are split. A hash table counts its slots and one control byte for each. The allocator adds
+    /// a little more for each block that it hands out (not counted here).
+    pub fn heap_bytes(&self) -> usize {
+        use std::mem::size_of;
+        fn slots<K, V, S>(m: &HashMap<K, V, S>) -> usize {
+            m.capacity() * 8 / 7 * (size_of::<K>() + size_of::<V>() + 1)
+        }
+        fn lists<K>(m: &Buckets<K>, key: impl Fn(&K) -> usize) -> usize {
+            slots(m) + m.iter().map(|(k, v)| key(k) + v.capacity() * 4).sum::<usize>()
+        }
+        let index = &self.index;
+        let bigs = index.big.get().and_then(|b| b.as_deref()).map_or(0, |b| {
+            let one = |big: &Big| (big.keys.len() + big.starts.len() + big.list.len() + big.rest.len()) * 4;
+            slots(&b.by_id) + slots(&b.by_class) + slots(&b.by_tag) + slots(&b.by_attr)
+                + b.by_id.iter().map(|(k, v)| k.len() + one(v)).sum::<usize>()
+                + b.by_class.iter().map(|(k, v)| k.len() + one(v)).sum::<usize>()
+                + b.by_tag.values().chain(b.by_attr.values()).map(one).sum::<usize>()
+                + b.other.as_ref().map_or(0, one)
+        });
+        let side = self.side.borrow();
+        let reach = self.reach.get().map_or(0, |r| slots(&r.class) + slots(&r.id) + slots(&r.attr) + r.class.keys().chain(r.id.keys()).map(|k| k.len()).sum::<usize>());
+        self.entries.capacity() * size_of::<Entry>()
+            + self.entries.iter().map(|e| e.selector.heap_bytes()).sum::<usize>()
+            + self.bodies.capacity() * size_of::<Body>()
+            + self.sources.capacity() * size_of::<Box<str>>()
+            + self.sources.iter().map(|t| t.len()).sum::<usize>()
+            + self.decls.borrow().capacity() * size_of::<Declared>()
+            + side.calcs.capacity() * size_of::<Linear>()
+            + side.vars.capacity() * size_of::<VarDecl>()
+            + side.vars.iter().map(|v| v.name.len() + v.text.len()).sum::<usize>()
+            + side.grids.capacity() * size_of::<Grid>()
+            + self.customs.borrow().capacity() * size_of::<CustomDecl>()
+            + self.customs.borrow().iter().map(|c| c.name.len() + c.text.len()).sum::<usize>()
+            + self.layers.capacity() * size_of::<Layer>()
+            + slots(&self.layer_by_name)
+            + self.layer_by_name.keys().map(|(_, n)| n.len()).sum::<usize>()
+            + lists(&index.by_id, |k| k.len())
+            + lists(&index.by_class, |k| k.len())
+            + lists(&index.by_tag, |_| 0)
+            + lists(&index.by_attr, |_| 0)
+            + index.other.capacity() * 4
+            + bigs
+            + slots(&self.shadows)
+            + self.parts.capacity() * 4
+            + reach
+            + slots_set(&self.keyframes)
+            + self.keyframes.iter().map(|k| k.len()).sum::<usize>()
     }
 
     /// The number of selectors in the set.

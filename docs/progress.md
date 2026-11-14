@@ -9791,3 +9791,86 @@ Not built: inline `new`. `new` goes through `bc_call` and `construct` (Rust recu
 ### Noticed, not changed
 
 - The GC still runs only at depth 0 of the lane (step 5 of the plan). `Auto` compiles at the second call of any function. A hotness count might remove the `webpack` loss (hypothesis, not built).
+
+## Rule-set cache: idle sets bounded by bytes (2026-11-14)
+
+Task: stage 1 of rule-set sharing (#515) raised the summed peak RSS of the 47 journeys by 2.3% (1,691 to 1,730 MiB), and the Wikipedia journeys by 4% to 14%. The cause was the last set of the document before, kept in the cache. Branch `t3/bound-rule-cache-bytes`, rebased on main `8d64702a`.
+
+Owner decision (2026-11-14): bound the idle sets (sets that only the cache holds) by bytes. Keep small repeated lists, drop large one-off sets. Compare at least two eviction rules before choosing one. Target: journeys summed peak RSS within +0.5% of the build before #515 (1,691 MiB), Wikipedia journeys within +1%, most of the instruction gain on `docs-rs-home`, `duckduckgo-html-search`, `rust-lang-org-home`, and the suite at about 10.4 G.
+
+### What I built
+
+- `RuleSet::heap_bytes` (`cascade.rs`, `Selector::heap_bytes` in `selector.rs`): the live bytes of a set, counted from the sizes of its tables, also the lazily read blocks and the split lists.
+- `rule_cache`: idle sets weigh at most `MAX_IDLE_BYTES` = 2,500,000. Over that, the set with the lowest priority goes. Priority = uses + the priority of the last set that went (GDSF with a cost in proportion to the size, so uses and age decide).
+- `settle` (called by the document after it replaced its set): the step of a page (the set before its next one) goes at once. Before, it went one list too late, so each loading page held one set more than before #515.
+- `Cache::diverged`: a document that asks for a list that the document before it did not ask for is on another site. The idle sets that it did not use go at that look. A page of the same site makes the same lists in the same order.
+- `MAX_RULES` (65,536 rules) is removed. The real bound is now the bytes. The `max_rules` and `max_names` limits of a document stay.
+
+### Measurement 1: the live size of a set (bytes, not rules)
+
+A counting allocator in a temporary build (not committed: `/data/bare-tmp/rcb/experiment-all.patch`) measured the bytes that one build leaves alive, for the first build of each of the 45 journeys that build one. `heap_bytes` gives 0.90 to 1.00 of that (the difference is the allocator's own bookkeeping of the sheet of the browser, about 7 KB, so small sets are the 0.90). Sets with 400 or more rules are 0.95 to 1.00.
+
+| Set | Rules | Live bytes | Bytes for each rule |
+| --- | ---: | ---: | ---: |
+| suite fixture (60 KB sheet) | 2,272 | 1.31 MB | 577 |
+| `docs-rs-home` | 1,333 | 0.94 MB | 704 |
+| `duckduckgo-html-search` | 1,489 | 0.97 MB | 648 |
+| `rust-lang-org-home` | 2,201 | 1.19 MB | 542 |
+| `wikipedia-article`, last list | 1,782 to 2,533 | 1.31 to 2.06 MB | 734 to 813 |
+| `python-org-docs-link`, the list that hits | 2,938 | 2.19 MB (2.26 MB after styles read blocks) | 745 |
+| `github-docs-home` | 8,919 | 7.88 MB | 884 |
+| `devto-home` | 17,456 | 12.4 MB | 711 |
+
+The sets that a later document found in the cache (31 hits in 22 journeys) are 0.08 to 2.26 MB. The sets that were idle and never hit (18 cases) sum to 19 MB, 7.9 MB of that is `github-docs-home`. A hit set and a wasted set have the same sizes, so size alone cannot tell them apart. All hits are one document after the set was used.
+
+### Measurement 2: the rules
+
+Journeys: `journeys.sh compare --clock virtual`, corpus `virtual`, 47 journeys. Base is main before #515 (`f68e956a`). The same-binary spread of the sum is -0.30% to +0.16% for RSS and -0.4% to -0.1% for the Wikipedia rows (two runs of 5, the binary against itself). Peak heap is the peak of live bytes of the page thread (counting allocator, deterministic: two runs gave the same number).
+
+| Config | RSS sum, median / min | Wikipedia RSS, median / min | Instructions | Peak heap sum (Wikipedia) |
+| --- | --- | --- | --- | --- |
+| #515 as merged (15 runs) | +1.25% / +1.26% | +3.7% / +4.3% | -0.76% | 775.2 MiB (145.1) |
+| drop every idle set at each look (9 runs) | -0.51% | +1.2% (noise) | -0.64%, gains of the 3 journeys gone (-2.0%, -1.7%, -1.7%) | 763.5 (143.7) |
+| `settle` and 2.5 MB, no `diverged` (15 runs) | +0.66% / +0.41% | +2.0% / +2.4% | -0.74% | 765.4 (144.0) |
+| `settle`, 2.5 MB and `diverged` (15 runs) | +0.26% / -0.20% | +0.2% / +0.1% | -0.74% | 764.1 (143.7) |
+
+- Byte bound alone: 1.5 MB gave +2.2% on Wikipedia (5 runs, before `settle`), 1.0 MB lost the gain of `rust-lang-org-home`, 2.5 MB gave +2.0% to +2.4%. The idle set that remains is a set of the page before that the next page does not use, and it is the same size as a set that is used. So the byte bound caps the worst case (`github-docs-home` 7.9 MB, `devto-home` 12.4 MB, `substack-home` 6.8 MB never stay), and `diverged` removes the rest.
+- `settle` alone changes the peak heap by 0.3 MiB over 47 journeys (774.9 against 775.2): the step costs less than it seemed. It stays because it is the same set one list too early.
+- Eviction rules among the idle sets, at 2.5 MB with `settle`: largest first, oldest first, GDSF. On the 47 journeys the peak heap is 765.4 MiB for all three: at most one or two sets are idle, so they choose the same set. On the suite the same: one set. A synthetic stream (30 sites, sizes lognormal with a median of 0.8 MB and a long tail to 8 MB, Zipf visits, half of the visits repeat the last site, 20 streams of 4,000 visits, `/data/bare-tmp/rcb/sim.py`) at 2.5 MB: hit bytes 0.580 (largest first, mean idle 2.21 MB), 0.609 (oldest first, 1.54 MB), 0.657 (GDSF, 1.83 MB). At 5 MB: 0.628, 0.672, 0.723. GDSF is chosen: the most hits at each budget, and it keeps a set that is used often.
+- The number 2.5 MB: the largest set that a journey found in the cache is 2.26 MB (`python-org-docs-link`); 2.5 MB leaves 0.24 MB of room over it. The suite's set is 1.37 MB. Below 2.3 MB the `python-org-*` gain (-3.2%) is lost.
+
+### Final numbers (clean build, rebased on `8d64702a`, measured before the rebase for the journeys and the suite: the rebase only added `crates/js` changes)
+
+Journeys, 9 runs, base = main before #515 (`f68e956a`):
+
+| Measure | Before #515 | Branch |
+| --- | ---: | ---: |
+| Instructions, sum of medians | 90,536 M | 89,729 M (-0.89%) |
+| Peak RSS, sum of medians | 1,684.0 MiB | 1,681.6 MiB (-0.14%). Minimum of the runs: 1,659.6 / 1,658.0 (-0.09%) |
+| Wikipedia journeys, peak RSS | | -0.1% (median), +0.5% (minimum) |
+| `docs-rs-home`, `duckduckgo-html-search`, `rust-lang-org-home`, `python-org-docs-link`, instructions | | -25.5%, -17.9%, -14.3%, -3.2% |
+
+Against main with #515 (`1e793d74`), 9 runs: instructions 89,713 M to 89,727 M (+0.02%), peak RSS 1,707.9 to 1,688.0 MiB (-1.2%), Wikipedia -3.3% to -9.8% for each journey (-4.9% summed). `github-docs-home` -7.7%, `python-org-docs-link` -4.4%. The three gains stay (+0.2% to +0.4% against #515 on those rows, 0.2 to 0.3 M).
+
+Suite (40 tests, one worker, shared login, 3 runs): branch 10,053 M (10,042 to 10,067), main with #515 10,061 M (10,054 to 10,066), before #515 13,162 M. Peak RSS of the worker 27.1 (26.8 to 27.4) / 26.8 / 26.2 MiB. The first build of this change walked the set at each idle check and cost 10,118 M (+0.57%); the walk now runs once for each set. Against the frozen V0 (21,078 M) the suite is 2.10 times lower. It is 10.05 G, not 10.4 G: main moved since #515.
+Suite of 800 tests (the 40 repeated 20 times, `/data/bare-tmp/rcb/suite800`), 1 run: 198,211 M, 28.0 MiB; main with #515 197,976 M, 27.9 MiB; before #515 259,671 M, 27.1 MiB.
+
+### Checks
+
+- `cargo test --release -p bare-css --lib rule_cache`: 10 tests, 4 new (`idle_sets_weigh_at_most_the_budget_and_the_one_with_fewer_uses_goes`, `a_set_over_the_budget_goes_when_nobody_holds_it`, `the_step_of_a_page_goes_when_the_page_has_its_next_set`, `a_page_on_other_lists_than_the_page_before_drops_its_idle_sets`). The old test of the 65,536-rule bound is replaced. `browser_rule_share_tests`: 11 of 11.
+- `cargo test --release --workspace --no-fail-fast`, after the rebase: only the known failures: 7 openssl tests (`https_openssl` 2, `client_openssl` 4, `tls12_openssl` 1, `BadSignature`), `a_hidden_iframe_download_is_saved`, `downloads::run::tests::a_changed_file_starts_again_from_zero`. None is in code that I changed.
+- `tools/js/cost_matrix.sh` against `8d64702a`: 803 rows, 0 over +0.5% under both allocators, 0 over under one. Mean change glibc +0.001%, jemalloc +0.000%. `parse_load deep 1` and `deep 10` do not run (stack overflow, as on main).
+- `tools/js/typing/keycost.sh`: `#a1` 295.7 M, `#f0` 301.0 M for each key, load and mount 613.6 M, peak RSS 30.9 MiB at 50 keys (the last merge: 295.7, 301.0, 613.6).
+- `test262_check.sh` and `exec_diff.sh` not run: no change in `crates/js`.
+
+### Not tested
+
+- Real network timing. `diverged` assumes that a page of the same site makes the same lists in the same order. With a real network the lists of the first look can differ, and then an idle set goes one document early (a lost gain, never a wrong style). The corpus replay uses a virtual clock.
+- A page with many frames (each frame is a document of the thread: its look counts for `diverged` and `new_document`). A suite on more than one worker. The wall time of the suite and of the journeys (shared machine). The 800-test suite has 1 run. The 15-run RSS rows use the build with the experiment switches (same code path as the final build; the final build was measured with 9 runs).
+- `heap_bytes` is read once for each set when it is first idle. The set grows by 3% after that (`python-org-docs-link`).
+- The measurement counters, the switches and the synthetic stream are not in the repository: `/data/bare-tmp/rcb/` (`experiment-all.patch`, `an.py`, `peaks.py`, `sim.py`, the traces in `trace/`).
+
+### Noticed, not changed
+
+- RSS of one journey moves by 2% to 3% from run to run on the same binary; the sum by 0.3%. A change of 1% on the Wikipedia rows needs 9 or more runs to show.
+- `Counts.rules` (rules in the cache) is removed with `MAX_RULES`; nothing used it.

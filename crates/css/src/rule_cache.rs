@@ -14,17 +14,25 @@
 //!   `Rc`, not `Arc`: a set never leaves its thread.
 //! - What is not shared: a set with a shadow tree sheet (its rules name the nodes of one document), a set with retained CSSOM inputs
 //!   (`RuleSet::add_inputs`, `set_inline_inputs`), and a set that a document grows by `add`. The caller decides this.
-//! - Memory: at most [`MAX_RULES`] rules of sets that only the cache holds, plus the sets that documents hold. The oldest entries go first.
-//!   A new document ([`new_document`]) drops the entries that none of the last [`MAX_IDLE`] documents used. A document that still has
-//!   such a set keeps its own `Rc`.
+//! - Memory: a set that only the cache holds is idle. The idle sets weigh at most [`MAX_IDLE_BYTES`] (`RuleSet::heap_bytes`). When they weigh
+//!   more, the set with the lowest priority goes first: the priority is the number of uses plus the priority of the last set that went
+//!   (GDSF where the cost of a build is in proportion to the size of the set, so size does not decide, uses and age do). A set that a
+//!   document holds is not idle: it is not counted and never goes while the document holds it.
+//! - Three more rules drop idle sets early, because an idle set is memory that a page that does not use it pays for:
+//!   a page that goes on to another list drops the set that it left (the step: `settle`); a new document ([`new_document`]) drops the sets that
+//!   none of the last [`MAX_IDLE`] documents used; and a document that asks for a list that the document before it did not ask for is on
+//!   another site, so the idle sets of the earlier documents are for nobody (`Cache::diverged`).
 
 use crate::cascade::RuleSet;
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::rc::Rc;
 
-/// Most rules in the sets that the cache keeps. A set that is larger is not kept.
-pub const MAX_RULES: usize = 1 << 16;
+/// Most bytes in the idle sets. The largest set that a journey of the corpus found in the cache is 2.26 MB; the suite's is 1.37 MB.
+pub const MAX_IDLE_BYTES: usize = 2_500_000;
+
+/// The keys that a document may add to the keys that it used (`Cache::diverged` compares with them).
+const MAX_KEYS: usize = 64;
 
 /// An entry that the last this many documents did not use goes at the next [`new_document`].
 pub const MAX_IDLE: u64 = 2;
@@ -40,27 +48,35 @@ pub struct Counts {
     /// Looks that found none: the caller built a set.
     pub misses: u64,
     pub entries: usize,
-    pub rules: usize,
 }
 
 struct Entry {
     rules: Rc<RuleSet>,
     layers: Box<[Option<Box<str>>]>,
-    cost: usize,
     /// The document count at the last look or insert.
     last: u64,
+    /// The inserts and the looks that found the set.
+    uses: u64,
+    /// The clock of the cache at the last use. The priority of the set is this and `uses`.
+    base: u64,
+    /// What `RuleSet::heap_bytes` gave when the set was first idle. The walk costs about as much as 2% of a build, so it runs once for each
+    /// set. The set grows after that when a style reads blocks, by 3% on the corpus (2.19 to 2.26 MB).
+    bytes: Option<usize>,
 }
 
 #[derive(Default)]
 struct Cache {
     map: HashMap<u64, Entry>,
-    order: VecDeque<u64>,
-    cost: usize,
     docs: u64,
     hits: u64,
     misses: u64,
     /// The key of the set that the current document looked up or kept last.
     recent: Option<u64>,
+    /// The priority of the last set that `enforce` dropped.
+    clock: u64,
+    /// The keys that the last document with a look used, and the keys that this document used so far.
+    prev_keys: Vec<u64>,
+    cur_keys: Vec<u64>,
     /// The key of the set before it, that the document left: it goes at the next look, when the document no longer holds it.
     step: Option<u64>,
 }
@@ -80,10 +96,48 @@ impl Cache {
     fn drop_step(&mut self) {
         if let Some(k) = self.step.take()
             && self.map.get(&k).is_some_and(|e| Rc::strong_count(&e.rules) == 1)
-            && let Some(old) = self.map.remove(&k)
         {
-            self.cost -= old.cost;
-            self.order.retain(|o| *o != k);
+            self.map.remove(&k);
+        }
+    }
+
+    /// The step goes now if nobody holds it, else it stays the step.
+    fn drop_idle_step(&mut self) {
+        if self.step.is_some_and(|k| self.map.get(&k).is_some_and(|e| Rc::strong_count(&e.rules) == 1)) {
+            self.drop_step();
+        }
+    }
+
+    /// The document asked for a list that the document before it did not ask for. It is not on the same pages, so the idle sets that it
+    /// did not use are for nobody. A page that is on the same site makes the same lists in the same order, and finds the last of them.
+    fn diverged(&mut self, k: u64) {
+        if !self.prev_keys.contains(&k) {
+            let docs = self.docs;
+            self.map.retain(|_, e| Rc::strong_count(&e.rules) > 1 || e.last == docs);
+        }
+    }
+
+    /// Drop idle sets, the lowest priority first, until the idle sets weigh at most [`MAX_IDLE_BYTES`].
+    fn enforce(&mut self) {
+        self.drop_idle_step();
+        let mut total = 0;
+        let mut idle = Vec::new();
+        for (k, e) in self.map.iter_mut() {
+            if Rc::strong_count(&e.rules) == 1 {
+                let bytes = *e.bytes.get_or_insert_with(|| e.rules.heap_bytes());
+                total += bytes;
+                idle.push((e.base + e.uses, e.last, *k, bytes));
+            }
+        }
+        // The lowest priority first, the oldest first among equals.
+        idle.sort_unstable();
+        for (priority, _, k, bytes) in idle {
+            if total <= MAX_IDLE_BYTES {
+                break;
+            }
+            self.map.remove(&k);
+            self.clock = priority;
+            total -= bytes;
         }
     }
 }
@@ -128,18 +182,24 @@ pub fn lookup(viewport: (f32, f32), parts: &[Part<'_>]) -> Option<Rc<RuleSet>> {
 pub fn lookup_key(k: Key, viewport: (f32, f32), parts: &[Part<'_>]) -> Option<Rc<RuleSet>> {
     let k = k.0;
     CACHE.with_borrow_mut(|c| {
-        let docs = c.docs;
+        let (docs, clock) = (c.docs, c.clock);
+        if c.cur_keys.len() < MAX_KEYS {
+            c.cur_keys.push(k);
+        }
         let found = c.map.get_mut(&k).filter(|e| e.layers.len() == parts.len() && e.layers.iter().zip(parts).all(|(a, b)| a.as_deref() == b.0) && e.rules.built_from(viewport, parts.iter().map(|p| p.1)));
         match found {
             Some(e) => {
-                e.last = docs;
+                (e.last, e.uses, e.base) = (docs, e.uses + 1, clock);
                 let rules = e.rules.clone();
                 c.hits += 1;
                 c.use_key(k);
+                c.enforce();
                 Some(rules)
             }
             None => {
                 c.misses += 1;
+                c.diverged(k);
+                c.enforce();
                 None
             }
         }
@@ -153,27 +213,19 @@ pub fn insert(viewport: (f32, f32), parts: &[Part<'_>], rules: &Rc<RuleSet>) {
 
 /// `insert` for a `key` that the caller made.
 pub fn insert_key(k: Key, parts: &[Part<'_>], rules: &Rc<RuleSet>) {
-    let cost = rules.len() + 1;
-    if cost > MAX_RULES {
-        return;
-    }
     let k = k.0;
     let layers = parts.iter().map(|p| p.0.map(Box::from)).collect();
     CACHE.with_borrow_mut(|c| {
-        if let Some(old) = c.map.remove(&k) {
-            c.cost -= old.cost;
-        }
-        while c.cost + cost > MAX_RULES {
-            let Some(oldest) = c.order.pop_front() else { break };
-            if let Some(old) = c.map.remove(&oldest) {
-                c.cost -= old.cost;
-            }
-        }
-        c.map.insert(k, Entry { rules: rules.clone(), layers, cost, last: c.docs });
-        c.order.push_back(k);
-        c.cost += cost;
+        let (last, base) = (c.docs, c.clock);
+        c.map.insert(k, Entry { rules: rules.clone(), layers, last, uses: 1, base, bytes: None });
         c.use_key(k);
+        c.enforce();
     });
+}
+
+/// The document made `rules`, the set of its last look, its set: the set that it had before is a step of the page. Drop it now if nobody holds it.
+pub fn settle() {
+    CACHE.with_borrow_mut(|c| c.drop_idle_step());
 }
 
 /// Take `rules` back as an owned set so that the caller can add sheets to it. It works when the cache and the caller are the only
@@ -182,9 +234,7 @@ pub fn unshare(rules: Rc<RuleSet>) -> Option<RuleSet> {
     if Rc::strong_count(&rules) == 2 {
         CACHE.with_borrow_mut(|c| {
             if let Some(&k) = c.map.iter().find(|(_, e)| Rc::ptr_eq(&e.rules, &rules)).map(|(k, _)| k) {
-                let old = c.map.remove(&k).expect("found");
-                c.cost -= old.cost;
-                c.order.retain(|o| *o != k);
+                c.map.remove(&k);
             }
         });
     }
@@ -197,26 +247,18 @@ pub fn new_document() {
         c.drop_step();
         c.recent = None;
         c.docs += 1;
-        let docs = c.docs;
-        let before = c.map.len();
-        let mut freed = 0;
-        c.map.retain(|_, e| {
-            let keep = docs - e.last <= MAX_IDLE;
-            if !keep {
-                freed += e.cost;
-            }
-            keep
-        });
-        if c.map.len() != before {
-            c.cost -= freed;
-            c.order.retain(|k| c.map.contains_key(k));
+        if !c.cur_keys.is_empty() {
+            c.prev_keys = std::mem::take(&mut c.cur_keys);
         }
+        let docs = c.docs;
+        c.map.retain(|_, e| docs - e.last <= MAX_IDLE);
+        c.enforce();
     });
 }
 
 /// The counts of this thread.
 pub fn counts() -> Counts {
-    CACHE.with_borrow(|c| Counts { hits: c.hits, misses: c.misses, entries: c.map.len(), rules: c.cost })
+    CACHE.with_borrow(|c| Counts { hits: c.hits, misses: c.misses, entries: c.map.len() })
 }
 
 /// Drop every entry. For tests that need a cold cache.
@@ -307,8 +349,7 @@ mod tests {
         // Make the entry sit under the key of another list, as a hash collision would.
         let layers: Box<[Option<Box<str>>]> = Box::new([None]);
         CACHE.with_borrow_mut(|c| {
-            c.map.insert(key(VIEW, &other).0, Entry { rules: kept.clone(), layers, cost: 1, last: 0 });
-            c.cost += 1;
+            c.map.insert(key(VIEW, &other).0, Entry { rules: kept.clone(), layers, last: 0, uses: 1, base: 0, bytes: None });
         });
         assert!(lookup(VIEW, &other).is_none());
         assert!(!kept.built_from(VIEW, other.iter().map(|p| p.1)));
@@ -347,21 +388,80 @@ mod tests {
         // A document that has the set keeps it alive.
         assert_eq!(Rc::strong_count(&a), 1);
         clear();
-        // Sets over the budget are not kept, and old ones go to make room.
-        let big: String = (0..MAX_RULES).map(|i| format!(".c{i} {{ color: red }}\n")).collect();
-        let parts: [Part<'_>; 1] = [(None, &big)];
+    }
+
+    /// A sheet of `n` rules named `tag`: a set of about 600 bytes for each rule.
+    fn sheet(tag: &str, n: usize) -> String {
+        (0..n).map(|i| format!(".{tag}{i} {{ color: red }}\n")).collect()
+    }
+
+    #[test]
+    fn idle_sets_weigh_at_most_the_budget_and_the_one_with_fewer_uses_goes() {
+        clear();
+        let (big_a, big_b) = (sheet("a", 2600), sheet("b", 2600));
+        let (pa, pb): ([Part<'_>; 1], [Part<'_>; 1]) = ([(None, &big_a)], [(None, &big_b)]);
+        let (a, b) = (built(VIEW, &pa), built(VIEW, &pb));
+        let weight = a.heap_bytes();
+        assert!(weight < MAX_IDLE_BYTES && weight * 2 > MAX_IDLE_BYTES, "one set fits, two do not: {weight}");
+        insert(VIEW, &pa, &a);
+        drop(lookup(VIEW, &pa)); // a has two uses
+        drop(a);
+        new_document();
+        // b is held by this test: nothing is idle but a, and a fits.
+        insert(VIEW, &pb, &b);
+        assert_eq!(counts().entries, 2);
+        // b is idle too: the two weigh more than the budget, and b (one use) goes.
+        drop(b);
+        new_document();
+        assert_eq!(counts().entries, 1);
+        assert!(lookup(VIEW, &pa).is_some() && lookup(VIEW, &pb).is_none());
+    }
+
+    #[test]
+    fn a_set_over_the_budget_goes_when_nobody_holds_it() {
+        clear();
+        let huge = sheet("h", 5000);
+        let parts: [Part<'_>; 1] = [(None, &huge)];
         let one = built(VIEW, &parts);
-        assert!(one.len() >= MAX_RULES);
+        assert!(one.heap_bytes() > MAX_IDLE_BYTES);
         insert(VIEW, &parts, &one);
+        assert_eq!(counts().entries, 1, "a document holds it");
+        drop(one);
+        new_document();
         assert_eq!(counts().entries, 0);
-        let half: String = (0..MAX_RULES / 2 + 10).map(|i| format!(".c{i} {{ color: red }}\n")).collect();
-        let (p1, p2): ([Part<'_>; 1], [Part<'_>; 1]) = ([(None, &half)], [(Some("l"), &half)]);
-        let (s1, s2) = (built(VIEW, &p1), built(VIEW, &p2));
-        insert(VIEW, &p1, &s1);
-        insert(VIEW, &p2, &s2);
-        let c = counts();
-        assert_eq!(c.entries, 1, "the second set made room by dropping the first");
-        assert!(c.rules <= MAX_RULES);
-        assert!(lookup(VIEW, &p1).is_none() && lookup(VIEW, &p2).is_some());
+    }
+
+    #[test]
+    fn the_step_of_a_page_goes_when_the_page_has_its_next_set() {
+        clear();
+        let (a, b) = ([(None, "a { color: red }")], [(None, "b { color: red }")]);
+        let first = keep(&a);
+        let second = keep(&b);
+        assert_eq!(counts().entries, 2, "the page still holds the first set");
+        drop(first);
+        settle();
+        assert_eq!(counts().entries, 1);
+        assert!(lookup(VIEW, &a).is_none() && lookup(VIEW, &b).is_some());
+        drop(second);
+    }
+
+    #[test]
+    fn a_page_on_other_lists_than_the_page_before_drops_its_idle_sets() {
+        clear();
+        let (a, b, c) = ([(None, "a { color: red }")], [(None, "b { color: red }")], [(None, "c { color: red }")]);
+        new_document();
+        assert!(lookup(VIEW, &a).is_none());
+        drop(keep(&a));
+        new_document();
+        // The next page asks for `a`, the list of the page before: it is on the same site, and the idle sets stay.
+        let held_a = lookup(VIEW, &a).unwrap();
+        assert!(lookup(VIEW, &b).is_none());
+        let held_b = keep(&b);
+        assert_eq!(counts().entries, 2);
+        drop((held_a, held_b));
+        new_document();
+        // This page asks for `c`, a list that the page before did not use: its idle sets are for nobody.
+        assert!(lookup(VIEW, &c).is_none());
+        assert_eq!(counts().entries, 0);
     }
 }

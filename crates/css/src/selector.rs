@@ -67,6 +67,45 @@ pub struct Selector {
     pub pseudo: Option<Box<ShadowPseudo>>,
 }
 
+impl Selector {
+    /// The bytes that the selector owns on the heap (not the selector itself). The cache of rule sets sums them to see how large a set is.
+    pub fn heap_bytes(&self) -> usize {
+        use std::mem::size_of;
+        let pseudo = self.pseudo.as_deref().map_or(0, |p| {
+            size_of::<ShadowPseudo>()
+                + match p {
+                    ShadowPseudo::Slotted(v) => simples_bytes(v),
+                    ShadowPseudo::Part { names, then } => names.capacity() * size_of::<Box<str>>() + names.iter().map(|n| n.len()).sum::<usize>() + simples_bytes(then),
+                }
+        });
+        compounds_bytes(&self.compounds) + pseudo
+    }
+}
+
+fn compounds_bytes(v: &Vec<Compound>) -> usize {
+    v.capacity() * std::mem::size_of::<Compound>() + v.iter().map(|c| simples_bytes(&c.simples)).sum::<usize>()
+}
+
+fn simples_bytes(v: &Vec<Simple>) -> usize {
+    v.capacity() * std::mem::size_of::<Simple>() + v.iter().map(simple_bytes).sum::<usize>()
+}
+
+fn simple_bytes(s: &Simple) -> usize {
+    use std::mem::size_of;
+    let lists = |l: &Vec<Vec<Simple>>| l.capacity() * size_of::<Vec<Simple>>() + l.iter().map(simples_bytes).sum::<usize>();
+    match s {
+        Simple::Id(t) | Simple::Class(t) | Simple::State(t) => t.len(),
+        Simple::Attr { test, .. } => match test {
+            AttrTest::Exists => 0,
+            AttrTest::Equals(t, _) | AttrTest::Word(t, _) | AttrTest::Dash(t, _) | AttrTest::Prefix(t, _) | AttrTest::Suffix(t, _) | AttrTest::Contains(t, _) => t.len(),
+        },
+        Simple::Not(l) | Simple::Is(l) => lists(l),
+        Simple::Complex(c) => size_of::<Complex>() + c.args.capacity() * size_of::<Vec<Compound>>() + c.args.iter().map(compounds_bytes).sum::<usize>(),
+        Simple::Host(h) => size_of::<Host>() + lists(&h.args),
+        _ => 0,
+    }
+}
+
 /// The two pseudo-elements that reach into a shadow tree (CSS Scoping).
 #[derive(Debug, PartialEq)]
 pub enum ShadowPseudo {
