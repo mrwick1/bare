@@ -2250,3 +2250,15 @@ Owner decision 2026-11-14: write a design for collecting garbage inside a long c
 - Not chosen: a conservative scan of the native stack (B: a `ObjId` is two `u32`s, `Vec<Value>` buffers are on the heap, per-OS unsafe code), RAII rooted handles (C: the same safety, 83 files of `crates/bare` change), a generational heap (a write barrier on every store), statement-window pinning (a looping native defeats it).
 - Independent of the choice: exact-fit element buffers (D) cut a 1-element array by about 22%.
 - Nothing is built. A missed root gives `HeapError::Stale` or a wrong result without an error, so the first slice is a stress mode that collects at every safe point.
+
+## `getComputedStyle` styles the way down to the element (design H of `docs/design-compm-10x.md`)
+
+Owner decision 2026-11-15: build design H. One PR for slices H1 to H3. H1 alone changes no behavior and H3 is the numbers of H2, so one PR gives one review and one measurement.
+
+- A `getComputedStyle` read styles the element and its ancestors (`RuleSet::style_chain`, `StyleChain`), not the page. The chain lives in `Built` for one revision key (`revision`, `text_revision`, length, user state). Any change to the document drops it.
+- It runs only when no cascade of the whole document is kept (`built.last[0]` is empty). A page that has read layout keeps the old way: a kept cascade is updated for the changes, which costs what they reach. So a page that lays out is not changed, and `rest_13` and the 47 journeys do not move.
+- A value that layout may decide (`width`, `height`, margins, paddings, offsets, grid tracks) is read from the chain first. If `needs_layout` says that this element needs the box, the read takes the whole cascade, as before (`layout_wanted`, `Snap::partial`).
+- It does not run for: a document with a shadow root (a change reaches through hosts, slots and parts); a rule set with `transition-*`, `animation-*` or `@keyframes`; an element whose own style has them. A read of the whole page starts transitions and animations (`motion_seen`) and the chain read does not, so these reads keep the whole cascade. One case is not covered: an inline `transition` on element A, a read of another element B first, then a change of A and a read of A. The read of A takes the whole cascade, but there is no earlier cascade to compare with, so the transition does not start. Before, the read of B was that cascade.
+- Not chosen: the winners memo and the selector arena (R2-E steps 2 and 3; a coin flip for criterion 3, and not needed after H); a cache of the last ancestor filter as a separate step (it is part of the chain: the filter stays open on the path of the last read).
+- Limits that this change makes unneeded for these reads: `computed-work` (nodes x rules) and `computed-nodes` still run before the chain, so `compm_24000` and larger are still refused. They bound the whole cascade, which a chain read does not make. Lifting them for chain reads is a separate decision.
+- Cost: a loop that reads the style of every element, in document order, costs 1.06 times the full cascade on `compm_22000` (the design said about 1.3).

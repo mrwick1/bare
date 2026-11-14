@@ -178,6 +178,13 @@ pub struct Sets {
     sorted: std::cell::OnceCell<Vec<u32>>,
 }
 
+impl Sets {
+    /// What stays in place while the real sets are moved out for a while (`mem::replace`): it makes no allocation, and nothing may use it.
+    pub fn moved_out() -> Sets {
+        Sets { names: Vec::new(), name_at: HashMap::default(), texts: Vec::new(), text_at: HashMap::default(), sets: Vec::new(), set_at: HashMap::default(), sorted: Default::default() }
+    }
+}
+
 impl Default for Sets {
     fn default() -> Sets {
         let mut set_at = HashMap::default();

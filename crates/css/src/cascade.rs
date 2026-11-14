@@ -1495,19 +1495,19 @@ impl RuleSet {
                 g.list = std::mem::take(&mut styles.grids);
                 g
             }),
-            customs: RefCell::new(std::mem::take(&mut styles.customs)),
+            customs: RefCell::new(std::mem::replace(&mut styles.customs, var::Sets::moved_out())),
             merges: RefCell::default(),
         }
     }
 
     /// Give the lists of `kept_cx` back to `styles` and `k`.
     fn put_back(cx: Cx<'_>, styles: &mut Styles, mut k: Box<StyleKeep>) {
-        let c = cx.computed.take();
+        let c = cx.computed.into_inner();
         (styles.calcs, k.calcs) = (c.list, c.index);
-        let mut g = cx.grids.take();
+        let mut g = cx.grids.into_inner();
         styles.grids = std::mem::take(&mut g.list);
         k.grids = g;
-        styles.customs = cx.customs.take();
+        styles.customs = cx.customs.into_inner();
         styles.kept = Some(k);
     }
 
@@ -1633,8 +1633,11 @@ impl RuleSet {
                 k.rem = styles.styles[parent as usize].px(Property::FontSize);
                 cx.root_font_size = k.rem;
             }
-            chain.filter.add_element(doc, node);
-            chain.open.push(node);
+            // `want` is not an ancestor of anything that this read styles: a later read that goes below it enters it then.
+            if node != want {
+                chain.filter.add_element(doc, node);
+                chain.open.push(node);
+            }
         }
         (chain.layers, chain.candidates, chain.matched) = (std::mem::take(&mut cx.layer_order), candidates, matched);
         Self::put_back(cx, styles, k);
