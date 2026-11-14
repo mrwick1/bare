@@ -310,18 +310,17 @@ impl ClassTable {
 
 thread_local! {
     static CLASSES: RefCell<ClassTable> = const { RefCell::new(ClassTable { text: String::new(), starts: Vec::new(), slots: Vec::new(), big: Vec::new() }) };
-    /// The number of names in the class table. It only grows, so it tells a document that its class lists are old (`ClassCache::epoch`).
+    /// The number of names in the class table. It only grows, so it tells a document that its class lists are old (`Document::class_epoch`).
     static CLASS_COUNT: Cell<u32> = const { Cell::new(0) };
 }
 
 /// The classes of the elements as class numbers (`Document::with_classes`): only the names that the class table has. For the node `i`, `slots[i]` is 0
 /// when its list is not made, 1 for no class, `ONE | id` for one class, and else the place of the list in `atoms` plus 2: there, the first
 /// atom holds the length of the list (as a number), and the classes follow, sorted. A write of `class` forgets the list of the element (the old one
-/// stays in `atoms`). The lists are valid for one size of the class table (`epoch`): when a selector adds a name, they are all made again.
+/// stays in `atoms`). The lists are valid for one size of the class table (`Document::class_epoch`): when a selector adds a name, they are all made again.
 /// Only an element that has a class, or comes before one in the arena, has a slot: a page with no `class` attribute pays no memory.
 #[derive(Default)]
 struct ClassCache {
-    epoch: u32,
     slots: Vec<u32>,
     atoms: Vec<ClassId>,
     scratch: Vec<ClassId>,
@@ -356,8 +355,7 @@ impl ClassCache {
 
     /// Forget all the lists: the class table has more names now.
     #[cold]
-    fn reset(&mut self, epoch: u32) {
-        self.epoch = epoch;
+    fn reset(&mut self) {
         self.slots.clear();
         self.atoms.clear();
     }
@@ -385,6 +383,8 @@ pub struct Document {
     // The attributes of an element never change, so this needs no clean-up.
     class_cache: RefCell<ClassCache>,
     // The class names of each element that a selector uses, as class numbers. See `with_classes`.
+    class_epoch: Cell<u32>,
+    // The size of the class table when the lists in `class_cache` were made, or 0 when none was.
     places: [OnceCell<Vec<(u32, u32)>>; 2],
     // The place of each element among its sibling elements, from the start and from the end. Made the
     // first time that `sibling_place` asks, and dropped when the tree changes. `[0]` counts all
@@ -878,6 +878,7 @@ impl Document {
             places: Default::default(),
             class_sets: Default::default(),
             class_cache: Default::default(),
+            class_epoch: Cell::new(0),
             foreign: HashMap::default(),
             any_ns: false,
             watched: HashSet::default(),
@@ -1512,14 +1513,15 @@ impl Document {
         if attrs.len == 0 {
             return f(&[]);
         }
-        let cache = self.class_cache.borrow();
-        if cache.epoch == used
-            && let Some(&slot) = cache.slots.get(el.index())
-            && slot != 0
-        {
-            return Self::with_slot(&cache, slot, f);
+        // Nothing is kept for a page that has no class on any element: only the attribute is read.
+        if self.class_epoch.get() == used {
+            let cache = self.class_cache.borrow();
+            if let Some(&slot) = cache.slots.get(el.index())
+                && slot != 0
+            {
+                return Self::with_slot(&cache, slot, f);
+            }
         }
-        drop(cache);
         if self.attr(el, Atom::CLASS).is_none() {
             return f(&[]);
         }
@@ -1548,8 +1550,9 @@ impl Document {
     #[inline(never)]
     fn fill_classes(&self, el: NodeId, used: u32) {
         let mut cache = self.class_cache.borrow_mut();
-        if cache.epoch != used {
-            cache.reset(used);
+        if self.class_epoch.get() != used {
+            cache.reset();
+            self.class_epoch.set(used);
         }
         let mut list = std::mem::take(&mut cache.scratch);
         list.clear();
@@ -1566,7 +1569,7 @@ impl Document {
     }
 
     /// Does the element `el` have the class `class`? Like `has_class`, with the number of the name (`class_id`).
-    #[inline(always)]
+    #[inline(never)]
     pub fn has_class_id(&self, el: NodeId, class: ClassId) -> bool {
         self.with_classes(el, |list| if list.len() <= 8 { list.contains(&class) } else { list.binary_search_by_key(&class.0, |a| a.0).is_ok() })
     }
