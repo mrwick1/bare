@@ -11277,3 +11277,37 @@ Where the 2.7 K did not come from: the restyle pass with all memo hits costs 5.4
 Not tested: steps 2 and 3; wall time; the live sites; test262 and exec_diff (no change in `crates/js`); quirks-mode class matching (the engine has none in these files); the memory cases with 3 or more runs.
 
 Noticed, not changed: a `while pgrep -f` wait loop in a background command matches its own command line and never ends.
+
+## 2026-11-14: criterion 3, step 1: class atoms, cost fixed (PR #541)
+
+Owner decision (2026-11-14): fix the cost of the class-atoms spike, merge it, then build step 2 (selector arena with a direct parser, R2-E option D) and step 3 (second memo keyed by the winning declaration values, option B). One PR each, in this order. This section covers step 1.
+
+What changed since the spike:
+- Only a class name that a selector uses enters the class table (`Document::class_id`, called by the selector parser). A page token that no selector uses is looked up with `class_lookup` and never inserted. A page with no class selector reads no class list.
+- The table is compact: a hash byte for each slot (`tags`), a name that is 1024 bytes or more is owned in `big`, and the name ends are implied by the next start. A lookup compares the hash byte first and the name in place.
+- A class lookup after a change of the class attribute is one hash probe for each token. `CLASS_COUNT` is an epoch: a document resets its list cache lazily when a later selector adds a name.
+- The selector parser keeps its simple selectors in one scratch stack and gives each compound a `Vec` of its exact size. Before, each compound `Vec` had room for 4. This is where most of the memory came back.
+- `has_class_id` is `#[inline(never)]`, reads a list only when one exists, and makes none. A script that asks once does not pay for a list that no style pass reads again.
+
+Measurements. Machine archMachine, `perf stat -e instructions:u`, 3 runs each, spread under 0.02% on the ramps. `bare-drive` built with `-p bare-drive`, ramp pages over http. MAIN is `95bd786440` for the ramps and journeys. Baseline `f6415364`.
+
+| Ramp (M instructions) | Baseline `f6415364` | MAIN `95bd786440` | BRANCH | BRANCH against baseline |
+| --- | ---: | ---: | ---: | ---: |
+| `compm_22000` | 11,664 | 1,828.0 | 1,554.8 | 7.50x lower (goal 10x: 1,166 M) |
+| `rest_13` | 10,873 | 1,239.3 | 1,040.4 | 10.45x lower (goal met) |
+
+The spike had 1,543.9 M and 1,020.3 M. The branch gives back 11 M and 20 M of that for the memory and the cost rows. Other ramps against MAIN: `compm_*` -0.4% to -13%, `rest_*` -10% to -23% (`rest_200` 12,489 to 9,757 M).
+
+The 47 journeys, virtual clock, corpus `virtual-settled`, 3 runs (version before the last change to `has_class_id`): sum of medians 42,316.5 to 41,846.0 M (-1.1%), cpu_ms -0.5%, PSS sum -0.6%. `python-docs-search-results`: MAIN 2,453.8 M (spread 0.04%); the version before the last change 2,486.5 M (+1.3%); the final version 2,460.9 M (+0.28%, 3 runs from 2,460.2 to 2,461.6 M). It is still not below MAIN. The cause of the last 7 M is not found: the symbol profile differs by 9% in samples for a 0.3% difference in instructions, so I do not trust it (hypothesis: the lookup of each class token of the page at the first style pass, which MAIN did not do). The gate "not worse than main" is **not met** on this one journey, by 0.28%.
+
+Cost matrix (803 rows, MAIN against the branch, both allocators; base built with `--workspace --examples -p bare-stress`): **0 rows over 0.5%** (run before the last change to `has_class_id` and to `fill_classes`, which touches only the page-token path; those two rows were not re-run: `python-docs-search-results`, `compm`, `rest`).
+
+Memory, `bare-stress scale css`, 2 runs each, 78 cases of 5 MB or more: **0 cases grow by more than 2%** (the spike had 6, worst `css-escapes` +11.3%).
+
+Keycost (page `p5-keycost`, MAIN `95bd786440`): `#a1` 278.5 M for each key on both, `#f0` 283.8 M on both, load and mount 590.9 M against 591.0 M, peak RSS 31.3 MiB at 50 keys.
+
+Tests: `cargo test --release -p bare-html -p bare-css --lib` passes (296 and 185 tests). Workspace: only the known failures (7 openssl TLS tests; three tests that are flaky under load). New tests: late-added selector classes match; exact name match; a compound keeps no spare room; a big list finds its groups by key; a sheet added later matches the classes that the page had before.
+
+Not tested: the per-element saving in the restyle pass after the fixes (the ramp totals above are the measure); the cost matrix after the last two edits; wall time; live sites; quirks-mode class folding (the engine has none in these files); test262 and exec_diff (no change in `crates/js`).
+
+Noticed, not changed: `python-docs-search-results` is the only journey above MAIN (+0.28%).

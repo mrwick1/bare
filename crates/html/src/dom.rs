@@ -1584,7 +1584,11 @@ impl Document {
         if let Some(value) = self.attr(el, Atom::CLASS) {
             CLASSES.with(|t| {
                 let t = t.borrow();
-                list.extend(value.split_ascii_whitespace().filter_map(|c| t.lookup(c)).map(ClassId));
+                for word in value.split_ascii_whitespace() {
+                    if let Some(id) = t.lookup(word) {
+                        list.push(ClassId(id));
+                    }
+                }
             });
             list.sort_unstable_by_key(|a| a.0);
             list.dedup();
@@ -1593,10 +1597,31 @@ impl Document {
         cache.scratch = list;
     }
 
-    /// Does the element `el` have the class `class`? Like `has_class`, with the number of the name (`class_id`).
+    /// Does the element `el` have the class `class`? Like `has_class`, with the number of the name (`class_id`). It reads the list of the element
+    /// when one is made (by a style pass). It makes none: a script that asks once should not pay for a list that nobody reads again.
     #[inline(never)]
     pub fn has_class_id(&self, el: NodeId, class: ClassId) -> bool {
-        self.with_classes(el, |list| if list.len() <= 8 { list.contains(&class) } else { list.binary_search_by_key(&class.0, |a| a.0).is_ok() })
+        let used = CLASS_COUNT.with(Cell::get);
+        if used == 0 {
+            return false;
+        }
+        let NodeData::Element { attrs, .. } = self.nodes[el.index()].data else { return false };
+        if attrs.len == 0 {
+            return false;
+        }
+        if self.class_epoch.get() == used {
+            let cache = self.class_cache.borrow();
+            if let Some(&slot) = cache.slots.get(el.index())
+                && slot != 0
+            {
+                return Self::with_slot(&cache, slot, |list| if list.len() <= 8 { list.contains(&class) } else { list.binary_search_by_key(&class.0, |a| a.0).is_ok() });
+            }
+        }
+        let Some(value) = self.attr(el, Atom::CLASS) else { return false };
+        CLASSES.with(|t| {
+            let t = t.borrow();
+            value.split_ascii_whitespace().any(|c| t.is(class.0 as usize, c.as_bytes()))
+        })
     }
 
     /// The place of the element `el` among its sibling elements: 1 for the first. It counts from the end with
