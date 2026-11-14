@@ -10897,3 +10897,38 @@ Limits made unneeded: none. The regexp step budget (`regexp_steps`) still guards
 Not tested: a live site; a page whose `test()` inputs never repeat (it pays a probe and a store: about 30 instructions a call; the cost matrix rows with `test` show no row over the limit); long strings built again for each call (no hit: different handles); a `RegExp` subclass with its own `exec` and a table hit in the same run (the `user_exec` check runs before the table, as in the programs above); more than 4 billion compiled patterns (the id counter is 64 bits).
 
 Noticed, not changed: `test()` still reads `regexps[&r]` and clones the `Rc` of the pattern on each call, and `user_exec` reads the `exec` property each call; that is part of the 5.2% wrapper cost of design section 2 and is not changed here. The 7 TLS tests and the 2 download tests above are not caused by this change.
+## R2-C2: the peak of `python-docs-search-results` without an allocator setting (2026-11-14, docs only)
+
+Design: [design-peak-memory.md](design-peak-memory.md). Task R2-C2 of round 2. No product code changed. Machine-local files: `/data/bare-tmp/r2/c2/` (counter patch `r2c2-counters.patch`, scripts, `out/` with every TSV, timeline and the massif output).
+
+Owner decision (2026-11-14): do not use the glibc mmap threshold (`mallopt(M_MMAP_THRESHOLD)`). Design the peak itself. This section and the design follow it. I read it as also excluding `malloc_trim` and other `mallopt` settings, and I measured none of them.
+
+Target: criterion 6 needs 90.7 MiB or lower (20% under 113.4 MiB, settled corpus). Main `b9c89248` gives 94.5 MiB (clean build, 5 runs: 93.6, 94.4, 94.5, 94.8, 94.9) and 2,454.0 M instructions (spread 0.01%). Corpus `virtual-settled`, virtual clock, 0 replay misses.
+
+Findings (counting build of main with a temporary patch; the patch changes nothing when its variables are unset: 94.2 MiB, 2,454.1 M, 3 runs):
+
+- The collector runs once. `gc_due` counts JS heap bytes only. The first collect runs at 34.45 MiB used (live after: 27.11 MiB). The next limit is 47.4 MiB. The JS heap reaches 35.86 MiB, so no second collect runs. RSS grows by 27.5 MiB after the first collect, and the JS heap by 8.7 MiB.
+- One collect costs about 145 M instructions (162 M at the first one). The walk of `Interp::collect` is 72% (116.8 M of 162.3 M). The mark and sweep of `Heap::collect` is 28% (44.9 M).
+- Collect more often by JS bytes (T2), 3 runs each, base 94.2 MiB and 2,454 M: every 8 MiB 94.6 MiB (+6.2%); 4 MiB 93.3 (+11.8%); 2 MiB 92.6 (+23.0%); 1 MiB 92.4 (+51.6%). Best case -1.8 MiB for +1.27 G instructions. Rejected.
+- The page parses 19 `DOMParser` documents (12 different texts, 5.15 MiB of HTML, 195,344 nodes, 60 B for each node with attributes and text). Every one is dead when its handler ends: at 7 collects, 1 tree had a live wrapper (the page, 608 to 844 of up to 195,966 nodes). The arena never frees: nodes 36 B, attributes 12 B, text in one `String`.
+- A suffix cut of the arena (`r2_truncate`) cut 0 nodes (the page appends nodes between the documents): 92.9 MiB. A free list for node slots with a rebuild of the text and attribute buffers (`r2_reclaim`), plus a trigger that counts native bytes of parsed documents, gives the rows below.
+
+| Prototype (3 runs, 5 where noted) | RSS median MiB (range) | Instructions M | Change |
+| --- | --- | ---: | ---: |
+| main, clean build (5 runs) | 94.5 (93.6 to 94.9) | 2,454.0 | |
+| reclaim + native limit 8 MiB | 89.9 (89.7 to 90.0) | 2,696.3 | +9.9% |
+| reclaim + native limit 4 MiB | 82.0 (82.0 to 82.1) | 2,869.8 | +16.9% |
+| reclaim + native limit 2 MiB | 79.7 (79.5 to 79.9) | 3,189.5 | +30.0% |
+| reclaim + native limit 4 MiB + cheaper walk (5 runs) | **82.4 (82.2 to 82.8)** | **2,651.5** | **+8.0%** |
+| reclaim + native limit 6 MiB + cheaper walk | 87.4 (87.3 to 87.8) | 2,554.2 | +4.1% |
+| native limit 2 MiB, no reclaim | 92.9 (92.2 to 93.8) | 3,133.6 | +27.7% |
+| native limit 4 MiB + cheaper walk, no reclaim | 93.6 (93.2 to 93.6) | 2,599.6 | +5.9% |
+
+- The cheaper walk skips the 12 side-table probes for plain arrays. First collect: walk 116.8 M to 63.2 M. Two extra collects: -150.8 M. On 47 journeys (1 run each) only `python-docs-search` (-4.46%), `python-docs-search-results` (-2.29%) and `go-dev-home` (-0.38%) change. The sum moves by +0.03% because the prototype reads an environment variable for each object.
+- Only `python-docs-search-results` calls `DOMParser` among the 48 journeys (census, 1 run each): a native-bytes trigger costs nothing elsewhere. The 48 journeys run 14 natural collects in all.
+- Other items over 5% of the massif peak (78.1 MiB): the object slab 14.5 MiB, the DOM node vector 13.0 MiB (6.7 used), atoms 7.4 MiB, flat strings 7.7 MiB, array elements 7.1 MiB, the HTTP cache body of `searchindex.js` 3.75 MiB plus the `Rc<str>` copy of the same source 3.69 MiB, and 14.3 MiB of file-backed RSS (9.7 MiB of it code). Dropping the code pages gave -0.6 MiB (one drop) and -2.3 MiB (three drops) for +26 M and +71 M instructions: rejected.
+- Not valid: storing no HTTP cache body fails the journey (0 of 3 pass). A collect every 256 KiB with the reclaim prototype panics (stale `NodeId`; the prototype checks wrapper liveness only).
+
+Recommendation: R1 (free dead trees in the page arena, with a free list and a rebuild of the text and attribute buffers) with T1 (a trigger that counts native bytes, 4 MiB), plus C1 (the walk skips plain arrays). Expected 82.4 MiB (-27.3% against 113.4 MiB, 8.3 MiB under the target) and +8.0% instructions on this journey, 0 elsewhere. S1 (one buffer for the cached body and the script source) is -3.7 MiB by arithmetic. The owner reviews the design before anything is built. Open questions are in section 11 of the design.
+
+Not tested: the native holders of a `NodeId` (parser stack, ranges, selection, observers, style and layout tables, sheet scans); CPU on an idle machine; allocators other than glibc; the 25% rule of the trigger; S1 (arithmetic); the cheaper walk with arrays as weak keys; R1 or T1 on the other 46 journeys; Gecko, Servo and Ladybird node sizes; massif ran once; workspace tests, cost matrix, test262 and `exec_diff` (no product code changed).
