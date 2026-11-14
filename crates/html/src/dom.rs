@@ -48,6 +48,7 @@ mod reclaim;
 pub use reclaim::Free;
 mod slots;
 
+use std::borrow::Cow;
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasherDefault, Hasher};
@@ -201,6 +202,192 @@ fn is_on_name(name: &str) -> bool {
     name.len() > 2 && name.as_bytes()[..2].eq_ignore_ascii_case(b"on")
 }
 
+/// The number of a class name in the class table of the thread (`Document::class_id`). Equal names have equal numbers in all the documents of
+/// the thread. The numbers start at 0 and have no gaps, and they are below 2^31. A class number means nothing in another thread, and it is no `Atom`.
+/// Only the names that a selector uses have a number (`Document::class_lookup`): the other class names of a page are never added.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ClassId(u32);
+
+impl ClassId {
+    /// The place of the name in the class table. Style code uses it to make hashes and to index lists.
+    pub fn index(self) -> u32 {
+        self.0
+    }
+}
+
+/// The class names of the thread, packed: the bytes of all the names in one string, the start of each (a name ends where the next one starts), and an open
+/// table (a power of two, at most three quarters full) from the hash of a name to its number plus one. About the length of the name and 14 bytes for each
+/// name. Names are never removed. A name of 1 KiB or more that comes as a `String` is kept as it is, not copied (`BIG`).
+struct ClassTable {
+    text: String,
+    starts: Vec<u32>,
+    slots: Vec<u32>,
+    /// One byte of the hash of the name in each slot: a probe reads the name only when the byte is equal.
+    tags: Vec<u8>,
+    /// The long names: the length of `text` when the name came, and the name. `starts` has `BIG | place in this list` for them.
+    big: Vec<(u32, Box<str>)>,
+}
+
+/// A name of this length or more is kept in its own allocation when the caller gives it up.
+const BIG_NAME: usize = 1024;
+/// The mark of a name in `ClassTable::big`, in `starts`.
+const BIG: u32 = 1 << 31;
+
+impl ClassTable {
+    fn hash(name: &str) -> u64 {
+        let mut h = NameHash::default();
+        h.write(name.as_bytes());
+        h.finish()
+    }
+
+    fn name(&self, id: usize) -> &str {
+        let start = self.starts[id];
+        if start & BIG != 0 {
+            return &self.big[(start & !BIG) as usize].1;
+        }
+        let end = self.starts.get(id + 1).map_or(self.text.len() as u32, |&e| if e & BIG != 0 { self.big[(e & !BIG) as usize].0 } else { e });
+        &self.text[start as usize..end as usize]
+    }
+
+    /// Is the name with the number `id` equal to `name`?
+    #[inline(always)]
+    fn is(&self, id: usize, name: &[u8]) -> bool {
+        let start = self.starts[id];
+        if start & BIG != 0 {
+            return self.big[(start & !BIG) as usize].1.as_bytes() == name;
+        }
+        let end = self.starts.get(id + 1).map_or(self.text.len() as u32, |&e| if e & BIG != 0 { self.big[(e & !BIG) as usize].0 } else { e });
+        end - start == name.len() as u32 && &self.text.as_bytes()[start as usize..end as usize] == name
+    }
+
+    /// The number of `name` (`Ok`), or the slot where it goes (`Err`). The table is not empty.
+    #[inline(always)]
+    fn find(&self, name: &[u8], h: u64) -> Result<u32, usize> {
+        let mask = self.slots.len() - 1;
+        let (mut at, tag) = (h as usize & mask, (h >> 56) as u8);
+        loop {
+            let slot = self.slots[at];
+            if slot == 0 {
+                return Err(at);
+            }
+            if self.tags[at] == tag && self.is(slot as usize - 1, name) {
+                return Ok(slot - 1);
+            }
+            at = (at + 1) & mask;
+        }
+    }
+
+    /// The number of `name`, or `None` when it was never added. One hash and, for a name that is there, one compare.
+    #[inline]
+    fn lookup(&self, name: &str) -> Option<u32> {
+        if self.slots.is_empty() {
+            return None;
+        }
+        self.find(name.as_bytes(), Self::hash(name)).ok()
+    }
+
+    fn intern(&mut self, name: Cow<str>) -> u32 {
+        if self.slots.is_empty() {
+            self.slots = vec![0; 64];
+            self.tags = vec![0; 64];
+        }
+        let h = Self::hash(&name);
+        let at = match self.find(name.as_bytes(), h) {
+            Ok(id) => return id,
+            Err(at) => at,
+        };
+        let id = u32::try_from(self.starts.len()).ok().filter(|&n| n < 1 << 31).expect("more than 2 billion class names");
+        let start = u32::try_from(self.text.len()).ok().filter(|&n| n < 1 << 31).expect("more than 2 GB of class names");
+        match name {
+            Cow::Owned(s) if s.len() >= BIG_NAME => {
+                self.starts.push(BIG | self.big.len() as u32);
+                self.big.push((start, s.into_boxed_str()));
+            }
+            name => {
+                self.starts.push(start);
+                self.text.push_str(&name);
+            }
+        }
+        self.slots[at] = id + 1;
+        self.tags[at] = (h >> 56) as u8;
+        if self.starts.len() * 4 > self.slots.len() * 3 {
+            self.grow();
+        }
+        CLASS_COUNT.with(|c| c.set(id + 1));
+        id
+    }
+
+    fn grow(&mut self) {
+        let mut slots = vec![0u32; self.slots.len() * 2];
+        let mut tags = vec![0u8; slots.len()];
+        let mask = slots.len() - 1;
+        for i in 0..self.starts.len() {
+            let h = Self::hash(self.name(i));
+            let mut at = h as usize & mask;
+            while slots[at] != 0 {
+                at = (at + 1) & mask;
+            }
+            slots[at] = i as u32 + 1;
+            tags[at] = (h >> 56) as u8;
+        }
+        self.slots = slots;
+        self.tags = tags;
+    }
+}
+
+thread_local! {
+    static CLASSES: RefCell<ClassTable> = const { RefCell::new(ClassTable { text: String::new(), starts: Vec::new(), slots: Vec::new(), tags: Vec::new(), big: Vec::new() }) };
+    /// The number of names in the class table. It only grows, so it tells a document that its class lists are old (`Document::class_epoch`).
+    static CLASS_COUNT: Cell<u32> = const { Cell::new(0) };
+}
+
+/// The classes of the elements as class numbers (`Document::with_classes`): only the names that the class table has. For the node `i`, `slots[i]` is 0
+/// when its list is not made, 1 for no class, `ONE | id` for one class, and else the place of the list in `atoms` plus 2: there, the first
+/// atom holds the length of the list (as a number), and the classes follow, sorted. A write of `class` forgets the list of the element (the old one
+/// stays in `atoms`). The lists are valid for one size of the class table (`Document::class_epoch`): when a selector adds a name, they are all made again.
+/// Only an element that has a class, or comes before one in the arena, has a slot: a page with no `class` attribute pays no memory.
+#[derive(Default)]
+struct ClassCache {
+    slots: Vec<u32>,
+    atoms: Vec<ClassId>,
+    scratch: Vec<ClassId>,
+}
+
+/// A slot that holds the only class of the element.
+const ONE: u32 = 1 << 31;
+
+impl ClassCache {
+    /// Keep the list of `node`, sorted with no repeat. `nodes` is the number of nodes now: the first table is that long, so it does not grow by doubling.
+    fn put(&mut self, node: usize, list: &[ClassId], nodes: usize) {
+        if self.slots.len() <= node {
+            self.slots.resize(nodes.max(node + 1), 0);
+        }
+        self.slots[node] = match list {
+            [] => 1,
+            [one] => ONE | one.0,
+            _ => {
+                let at = self.atoms.len();
+                self.atoms.push(ClassId(list.len() as u32));
+                self.atoms.extend_from_slice(list);
+                u32::try_from(at + 2).ok().filter(|&n| n < ONE).expect("more than 2 billion class names in the lists")
+            }
+        };
+    }
+
+    fn forget(&mut self, node: usize) {
+        if let Some(s) = self.slots.get_mut(node) {
+            *s = 0;
+        }
+    }
+
+    /// Forget all the lists: the class table has more names now.
+    #[cold]
+    fn reset(&mut self) {
+        self.slots.clear();
+        self.atoms.clear();
+    }
+}
+
 /// A whole tree. It owns all of its nodes.
 pub struct Document {
     nodes: Vec<Node>,
@@ -221,6 +408,12 @@ pub struct Document {
     class_sets: RefCell<HashMap<usize, HashSet<Box<str>, BuildHasherDefault<Fnv>>, BuildHasherDefault<Fnv>>>,
     // The classes of the elements that have a long `class` attribute, as a set. See `has_class`.
     // The attributes of an element never change, so this needs no clean-up.
+    class_cache: RefCell<ClassCache>,
+    // The class names of each element that a selector uses, as class numbers. See `with_classes`.
+    class_epoch: Cell<u32>,
+    /// The class tests of `has_class_id` that read the attribute because the element had no list (see there).
+    class_scans: Cell<u32>,
+    // The size of the class table when the lists in `class_cache` were made, or 0 when none was.
     places: [OnceCell<Vec<(u32, u32)>>; 2],
     // The place of each element among its sibling elements, from the start and from the end. Made the
     // first time that `sibling_place` asks, and dropped when the tree changes. `[0]` counts all
@@ -724,6 +917,9 @@ impl Document {
             text: String::new(),
             places: Default::default(),
             class_sets: Default::default(),
+            class_cache: Default::default(),
+            class_epoch: Cell::new(0),
+            class_scans: Cell::new(0),
             foreign: HashMap::default(),
             any_ns: false,
             watched: HashSet::default(),
@@ -1338,6 +1534,124 @@ impl Document {
         self.class_sets.borrow_mut().entry(el.index()).or_insert_with(|| value.split_ascii_whitespace().map(Box::from).collect()).contains(class)
     }
 
+    /// The number of a class name, added to the class table of the thread when it is new. For the names of selectors: a name that is added makes
+    /// the class lists of all the documents of the thread old (`with_classes`).
+    pub fn class_id<'a>(&self, class: impl Into<Cow<'a, str>>) -> ClassId {
+        ClassId(CLASSES.with(|t| t.borrow_mut().intern(class.into())))
+    }
+
+    /// The number of a class name that a selector uses, or `None` for any other name. It adds nothing: one hash probe.
+    pub fn class_lookup(&self, class: &str) -> Option<ClassId> {
+        CLASSES.with(|t| t.borrow().lookup(class)).map(ClassId)
+    }
+
+    /// Call `f` with the classes of the element `el` that some selector uses, as class numbers: sorted, with no repeat. No class, or not an element,
+    /// is an empty list. The list is made from the `class` attribute the first time, and kept until a write of `class` or a new name in the class
+    /// table. `f` must not call `with_classes` for an element that has no list yet: that would borrow the cache again.
+    #[inline(always)]
+    pub fn with_classes<R>(&self, el: NodeId, f: impl FnOnce(&[ClassId]) -> R) -> R {
+        // No selector of the thread uses a class: every list is empty, and no attribute is read.
+        let used = CLASS_COUNT.with(Cell::get);
+        if used == 0 {
+            return f(&[]);
+        }
+        // An element with no attribute at all costs one load and one compare.
+        let NodeData::Element { attrs, .. } = self.nodes[el.index()].data else { return f(&[]) };
+        if attrs.len == 0 {
+            return f(&[]);
+        }
+        // Nothing is kept for a page that has no class on any element: only the attribute is read.
+        if self.class_epoch.get() == used {
+            let cache = self.class_cache.borrow();
+            if let Some(&slot) = cache.slots.get(el.index())
+                && slot != 0
+            {
+                return Self::with_slot(&cache, slot, f);
+            }
+        }
+        if self.attr(el, Atom::CLASS).is_none() {
+            return f(&[]);
+        }
+        self.fill_classes(el, used);
+        let cache = self.class_cache.borrow();
+        match cache.slots.get(el.index()) {
+            Some(&slot) if slot != 0 => Self::with_slot(&cache, slot, f),
+            _ => f(&[]),
+        }
+    }
+
+    #[inline(always)]
+    fn with_slot<R>(cache: &ClassCache, slot: u32, f: impl FnOnce(&[ClassId]) -> R) -> R {
+        if slot & ONE != 0 {
+            f(&[ClassId(slot & !ONE)])
+        } else if slot == 1 {
+            f(&[])
+        } else {
+            let at = slot as usize - 2;
+            f(&cache.atoms[at + 1..at + 1 + cache.atoms[at].0 as usize])
+        }
+    }
+
+    /// Make the list of `el` from its `class` attribute: the words that are in the class table, one probe each.
+    #[cold]
+    #[inline(never)]
+    fn fill_classes(&self, el: NodeId, used: u32) {
+        let mut cache = self.class_cache.borrow_mut();
+        if self.class_epoch.get() != used {
+            cache.reset();
+            self.class_epoch.set(used);
+        }
+        let mut list = std::mem::take(&mut cache.scratch);
+        list.clear();
+        if let Some(value) = self.attr(el, Atom::CLASS) {
+            CLASSES.with(|t| {
+                let t = t.borrow();
+                for word in value.split_ascii_whitespace() {
+                    if let Some(id) = t.lookup(word) {
+                        list.push(ClassId(id));
+                    }
+                }
+            });
+            list.sort_unstable_by_key(|a| a.0);
+            list.dedup();
+            cache.put(el.index(), &list, self.nodes.len());
+        }
+        cache.scratch = list;
+    }
+
+    /// Does the element `el` have the class `class`? Like `has_class`, with the number of the name (`class_id`). It reads the list of the element
+    /// when one is made (by a style pass). When none is made it reads the attribute, until these reads number more than the nodes: a page
+    /// that asks about each element once (a script) pays no list, and a page that asks again and again (a query loop) makes the lists then.
+    #[inline(never)]
+    pub fn has_class_id(&self, el: NodeId, class: ClassId) -> bool {
+        let used = CLASS_COUNT.with(Cell::get);
+        if used == 0 {
+            return false;
+        }
+        let NodeData::Element { attrs, .. } = self.nodes[el.index()].data else { return false };
+        if attrs.len == 0 {
+            return false;
+        }
+        if self.class_epoch.get() == used {
+            let cache = self.class_cache.borrow();
+            if let Some(&slot) = cache.slots.get(el.index())
+                && slot != 0
+            {
+                return Self::with_slot(&cache, slot, |list| if list.len() <= 8 { list.contains(&class) } else { list.binary_search_by_key(&class.0, |a| a.0).is_ok() });
+            }
+        }
+        let scans = self.class_scans.get();
+        if scans as usize > self.nodes.len() {
+            return self.with_classes(el, |list| if list.len() <= 8 { list.contains(&class) } else { list.binary_search_by_key(&class.0, |a| a.0).is_ok() });
+        }
+        self.class_scans.set(scans + 1);
+        let Some(value) = self.attr(el, Atom::CLASS) else { return false };
+        CLASSES.with(|t| {
+            let t = t.borrow();
+            value.split_ascii_whitespace().any(|c| t.is(class.0 as usize, c.as_bytes()))
+        })
+    }
+
     /// The place of the element `el` among its sibling elements: 1 for the first. It counts from the end with
     /// `from_end`, and counts only the elements with the same name with `of_type`. This is what `:nth-child`
     /// and `:nth-of-type` ask. All the places are made in one pass the first time, so each answer is a look-up.
@@ -1939,6 +2253,9 @@ impl Document {
         self.name_revision += u64::from(self.names_attr(name));
         self.note_name(name, value);
         self.class_sets.get_mut().remove(&el.index());
+        if name == Atom::CLASS {
+            self.class_cache.get_mut().forget(el.index());
+        }
         // An empty list can start after the end (see `attrs`): it begins again at the end.
         let (start, len) = if attrs.len == 0 { (self.attrs.len(), 0) } else { (attrs.start as usize, attrs.len as usize) };
         if let Some(a) = self.attrs[start..start + len].iter_mut().find(|a| a.name == name) {
@@ -1979,6 +2296,9 @@ impl Document {
         self.revision += 1;
         self.name_revision += u64::from(self.names_attr(name));
         self.class_sets.get_mut().remove(&el.index());
+        if name == Atom::CLASS {
+            self.class_cache.get_mut().forget(el.index());
+        }
         let value = self.attrs[start + at].value;
         if self.watcher.is_some() {
             self.notify(Change::Attr { el, name, old: Some(value), new: None });
@@ -2504,6 +2824,167 @@ mod tests {
         assert!(doc.has_class(a, "other"));
         doc.remove_attr(a, "class");
         assert!(!doc.has_class(a, "other"));
+    }
+
+    /// The atoms of the classes of an element, as the words of the `class` attribute: sorted, with no repeat, and made again after a write.
+    fn class_words(doc: &Document, el: NodeId) -> Vec<String> {
+        doc.with_classes(el, |list| list.iter().map(|&c| CLASSES.with(|t| t.borrow().name(c.0 as usize).to_string())).collect())
+    }
+
+    #[test]
+    fn class_atoms_follow_the_class_attribute() {
+        let mut doc = Document::new();
+        let root = doc.root();
+        // The names that selectors use.
+        for name in ["x", "y", "z", "w", "n", "again", "other", "never-seen-before-class-name"] {
+            doc.class_id(name);
+        }
+        let a = element(&mut doc, root, "a", &[("class", " y  x\tz x\n")]);
+        let none = element(&mut doc, root, "a", &[("id", "q")]);
+        let mut sorted = class_words(&doc, a);
+        sorted.sort();
+        assert_eq!(sorted, ["x", "y", "z"]);
+        assert!(class_words(&doc, none).is_empty());
+        // A second read comes from the cache and gives the same list.
+        assert_eq!(class_words(&doc, a).len(), 3);
+        doc.set_attr(a, "class", "w x");
+        let mut now = class_words(&doc, a);
+        now.sort();
+        assert_eq!(now, ["w", "x"]);
+        doc.set_attr(none, "class", "n");
+        assert_eq!(class_words(&doc, none), ["n"]);
+        doc.remove_attr(a, "class");
+        assert!(class_words(&doc, a).is_empty());
+        doc.set_attr(a, "class", "again");
+        assert_eq!(class_words(&doc, a), ["again"]);
+        // A clone has its own list.
+        let copy = doc.clone_element(a);
+        doc.set_attr(a, "class", "other");
+        assert_eq!(class_words(&doc, copy), ["again"]);
+        assert_eq!(class_words(&doc, a), ["other"]);
+        // A text node has none.
+        let t = doc.create_text("x");
+        assert!(class_words(&doc, t).is_empty());
+        // The atoms are no names that the document uses.
+        let names = doc.name_count();
+        doc.set_attr(a, "class", "never-seen-before-class-name");
+        assert_eq!(class_words(&doc, a), ["never-seen-before-class-name"]);
+        assert_eq!(doc.name_count(), names);
+    }
+
+    /// A class name that no selector uses never enters the class table, and a name that a selector uses later is found on the elements that
+    /// already had their list made.
+    #[test]
+    fn only_the_names_of_selectors_enter_the_class_table() {
+        let mut doc = Document::new();
+        let root = doc.root();
+        let a = element(&mut doc, root, "a", &[("class", "only-page-x only-page-y shared")]);
+        let one = element(&mut doc, root, "a", &[("class", "only-page-z")]);
+        // Only an unrelated name is in the table: the lists are made, and they are empty.
+        doc.class_id("unrelated");
+        assert!(class_words(&doc, a).is_empty());
+        assert!(class_words(&doc, one).is_empty());
+        assert!(doc.class_lookup("only-page-x").is_none() && doc.class_lookup("shared").is_none());
+        // A selector uses `shared` and `only-page-z`: the lists that were made before now have them.
+        let (shared, z) = (doc.class_id("shared"), doc.class_id("only-page-z"));
+        assert_eq!(doc.class_lookup("shared"), Some(shared));
+        assert_eq!(class_words(&doc, a), ["shared"]);
+        assert_eq!(class_words(&doc, one), ["only-page-z"]);
+        assert!(doc.has_class_id(a, shared) && !doc.has_class_id(a, z) && doc.has_class_id(one, z));
+        assert!(doc.class_lookup("only-page-y").is_none(), "the other names stay out");
+        // A write of `class` keeps only the names of selectors, and the lookup adds nothing.
+        doc.set_attr(a, "class", "never-used shared only-page-z");
+        let mut now = class_words(&doc, a);
+        now.sort();
+        assert_eq!(now, ["only-page-z", "shared"]);
+        assert!(doc.class_lookup("never-used").is_none());
+        // A document made later sees the same table.
+        let other = Document::new();
+        assert_eq!(other.class_lookup("shared"), Some(shared));
+    }
+
+    /// A list made by one document is made again when another document adds a name (the table is shared by the thread).
+    #[test]
+    fn a_name_added_by_another_document_reaches_a_list_that_was_made() {
+        let mut doc = Document::new();
+        let root = doc.root();
+        let a = element(&mut doc, root, "a", &[("class", "late-one late-two")]);
+        let other = Document::new();
+        other.class_id("late-two");
+        assert_eq!(class_words(&doc, a), ["late-two"]);
+        other.class_id("late-one");
+        let mut both = class_words(&doc, a);
+        both.sort();
+        assert_eq!(both, ["late-one", "late-two"]);
+    }
+
+    #[test]
+    fn the_class_table_gives_one_number_to_a_name() {
+        let (a, b) = (Document::new(), Document::new());
+        // 5,000 names make the table grow several times; a name is the same number before and after, and in the other document.
+        let ids: Vec<ClassId> = (0..5000).map(|i| a.class_id(&format!("cls-{i}"))).collect();
+        for (i, id) in ids.iter().enumerate() {
+            assert_eq!(b.class_id(&format!("cls-{i}")), *id);
+        }
+        let mut sorted: Vec<u32> = ids.iter().map(|c| c.index()).collect();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), 5000, "different names, different numbers");
+        assert_ne!(a.class_id("cls-1"), a.class_id("cls-10"));
+        assert_ne!(a.class_id(""), a.class_id("cls-1"));
+        assert_eq!(a.class_id("é-ß-猫"), b.class_id("é-ß-猫"));
+    }
+
+    /// A long name that is given as a `String` is kept as it is. The names before and after it, and the lookup of all, are not changed by it.
+    #[test]
+    fn long_names_sit_between_short_ones() {
+        let doc = Document::new();
+        let long = |c: char| c.to_string().repeat(3000);
+        let ids: Vec<ClassId> = vec![
+            doc.class_id("before"),
+            doc.class_id(long('x')),
+            doc.class_id("between"),
+            doc.class_id(long('y').as_str()),
+            doc.class_id(long('z')),
+            doc.class_id("after"),
+        ];
+        assert_eq!(ids.iter().map(|c| c.index()).collect::<Vec<_>>(), [0, 1, 2, 3, 4, 5]);
+        for (name, id) in ["before", &long('x'), "between", &long('y'), &long('z'), "after"].into_iter().zip(&ids) {
+            assert_eq!(doc.class_lookup(name), Some(*id), "{}", name.len());
+            assert_eq!(doc.class_id(name), *id);
+            assert_eq!(doc.class_id(name.to_string()), *id, "an owned name that is there is not added again");
+            assert_eq!(CLASSES.with(|t| t.borrow().name(id.index() as usize).len()), name.len());
+        }
+        assert!(doc.class_lookup(&long('w')).is_none());
+        assert_eq!(doc.class_lookup(&"x".repeat(2999)), None);
+    }
+
+    /// `has_class_id` says what `has_class` says, for short and long lists, repeats, a name that is a prefix, and a different case.
+    #[test]
+    fn has_class_id_equals_has_class() {
+        let mut doc = Document::new();
+        let root = doc.root();
+        let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let names: Vec<String> = (0..40).map(|i| if i % 5 == 0 { format!("C{i}") } else { format!("c{i}") }).collect();
+        for round in 0..60 {
+            let len = if round % 3 == 0 { 30 } else { (next() % 6) as usize };
+            let value: Vec<&str> = (0..len).map(|_| names[(next() % 40) as usize].as_str()).collect();
+            let el = element(&mut doc, root, "i", &[("class", &value.join(" "))]);
+            for n in names.iter().map(String::as_str).chain(["c", "C", "c1x", "", "x"]) {
+                let atom = doc.class_id(n);
+                assert_eq!(doc.has_class_id(el, atom), doc.has_class(el, n), "{n} in {value:?}");
+            }
+            // A change gives the new answer.
+            doc.set_attr(el, "class", "c1 C5");
+            assert!(doc.has_class_id(el, doc.class_id("c1")) && doc.has_class_id(el, doc.class_id("C5")));
+            assert!(!doc.has_class_id(el, doc.class_id("c5")), "the case counts");
+        }
     }
 
     #[test]

@@ -2216,3 +2216,20 @@ Owner decision 2026-11-14: option A. The end of a journey (`Session::finish`) ti
 - Not chosen: a pace of 4 MiB. It removes the row cost, but `python-docs-search-results` stays at 92 MiB, because the walk misses the collect that the native-byte trigger starts. 1 MiB gives 81.3 MiB.
 - Result: 1 row of 803 is over +0.5% under both allocators (`select_load churn 1000`, +0.74%), against 11 on the eager free. Open for the owner. See [progress.md](progress.md#r2-c2-lazy-free-dead-trees-wait-on-a-list-and-the-arena-takes-slots-from-it-2026-11-14).
 
+## 2026-11-14: class names as numbers in a packed class table (spike, not merged)
+
+Owner decision 2026-11-14: spike class atoms first. Chosen for the spike: a separate `ClassTable` (one text buffer, spans, open-address slots) with the type `ClassId`, and a per-document list cache with no slot for an element that has no class. A hash probe finds the key group of a split list. Measured: 2.40 K instructions saved for each element in the restyle pass of `compm_22000` (gate 2.70 K), `rest_13` 10.66x below baseline `f6415364`, `compm_22000` 7.56x.
+
+Other designs tried and dropped:
+- The generic process-wide `Atom` table for class names: 2.51 K saved, but about 70 bytes of memory for each distinct class name.
+- A slot in a per-node table that doubles: a class-less page grew by up to 95% (`css-universal`).
+
+The spike has 5 cost-matrix rows over 0.5% and 6 `bare-stress` css cases that grow by more than 2%. It is pushed and not merged. Steps 2 and 3 of `docs/design-style-round2.md` wait for an owner decision. Numbers: `docs/progress.md`, "criterion 3, step 1 spike".
+
+## 2026-11-14: class atoms merged after a cost fix (step 1 of criterion 3, PR #541)
+
+Owner decision 2026-11-14: fix the cost of the spike and merge it. Chosen: intern only the class names that a selector uses; page tokens are looked up and never inserted; a hash byte for each table slot; exact-size compounds in the selector parser; `has_class_id` reads a list when one exists, and makes one only after its attribute reads number more than the nodes of the document. Result: `compm_22000` 1,554.8 M (7.50x below baseline, goal 10x), `rest_13` 1,040.4 M (10.45x), 0 cost-matrix rows over 0.5%, 0 `bare-stress` css cases over +2% memory.
+
+Not chosen: keep the generic `Atom` table for class names (about 70 bytes for each distinct name); fill a list on every `has_class_id` miss (+1.3% on `python-docs-search-results`); never fill one (+12% on `browser_load lookup`, a query loop read the attribute again and again).
+
+Open: `python-docs-search-results` is +0.4% against MAIN (gate: not worse). Numbers: `docs/progress.md`, "criterion 3, step 1: class atoms, cost fixed".

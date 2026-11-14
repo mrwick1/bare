@@ -390,7 +390,7 @@ mod tests {
         clear();
     }
 
-    /// A sheet of `n` rules named `tag`: a set of about 600 bytes for each rule.
+    /// A sheet of `n` rules named `tag`: a set of about 400 bytes for each rule.
     fn sheet(tag: &str, n: usize) -> String {
         (0..n).map(|i| format!(".{tag}{i} {{ color: red }}\n")).collect()
     }
@@ -398,7 +398,7 @@ mod tests {
     #[test]
     fn idle_sets_weigh_at_most_the_budget_and_the_one_with_fewer_uses_goes() {
         clear();
-        let (big_a, big_b) = (sheet("a", 2600), sheet("b", 2600));
+        let (big_a, big_b) = (sheet("a", 3500), sheet("b", 3500));
         let (pa, pb): ([Part<'_>; 1], [Part<'_>; 1]) = ([(None, &big_a)], [(None, &big_b)]);
         let (a, b) = (built(VIEW, &pa), built(VIEW, &pb));
         let weight = a.heap_bytes();
@@ -420,7 +420,7 @@ mod tests {
     #[test]
     fn a_set_over_the_budget_goes_when_nobody_holds_it() {
         clear();
-        let huge = sheet("h", 5000);
+        let huge = sheet("h", 8000);
         let parts: [Part<'_>; 1] = [(None, &huge)];
         let one = built(VIEW, &parts);
         assert!(one.heap_bytes() > MAX_IDLE_BYTES);

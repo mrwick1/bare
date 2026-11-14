@@ -159,7 +159,7 @@ fn simple_matches(doc: &Document, el: NodeId, simple: &Simple) -> bool {
     match simple {
         Simple::Tag(tag) => name == *tag,
         Simple::Id(id) => doc.attr(el, Atom::ID) == Some(id),
-        Simple::Class(class) => doc.has_class(el, class),
+        Simple::Class(class) => doc.has_class_id(el, *class),
         Simple::Attr { name, test } => doc.attrs(attrs).iter().find(|a| a.name == *name).is_some_and(|a| test_value(test, doc.text(a.value))),
         Simple::FirstChild => prev_element(doc, el).is_none(),
         Simple::LastChild => next_element(doc, el).is_none(),
@@ -384,6 +384,43 @@ mod tests {
         assert_eq!(find(html, ".y"), ["a"]);
         assert_eq!(find(html, ".z"), ["a"]);
         assert_eq!(find(html, ".x"), ["a"]);
+    }
+
+    #[test]
+    fn a_class_is_an_exact_name() {
+        // The case counts, a repeat is one class, and a name that is a prefix of another is another class.
+        let html = "<p id=a class='x x Y'></p><p id=b class='y'></p><p id=c class='xx'></p><p id=d class=''></p><p id=e></p>";
+        assert_eq!(find(html, ".x"), ["a"]);
+        assert_eq!(find(html, ".Y"), ["a"]);
+        assert_eq!(find(html, ".y"), ["b"]);
+        assert_eq!(find(html, ".x.Y"), ["a"]);
+        assert_eq!(find(html, ".xx"), ["c"]);
+        assert_eq!(find(html, "p:not(.x)"), ["b", "c", "d", "e"]);
+    }
+
+    /// A selector that is parsed after another one has made the class lists of the elements still sees the classes that it uses.
+    #[test]
+    fn a_class_that_a_later_selector_uses_matches() {
+        let html = "<p id=a class='x y'></p><p id=b class='y'></p><p id=c class='z'></p><p id=d></p>";
+        let mut doc = parse(html);
+        let ids = |doc: &Document, list: &[crate::selector::Selector]| -> Vec<String> {
+            let mut found = Vec::new();
+            for id in doc.children(doc.root()).flat_map(|h| doc.children(h)).flat_map(|b| doc.children(b)).collect::<Vec<_>>() {
+                if is_element(doc, id) && list.iter().any(|s| matches(doc, id, s)) {
+                    found.push(doc.attr(id, Atom::ID).unwrap_or("?").to_string());
+                }
+            }
+            found
+        };
+        let first = parse_selector_list(".x", &mut doc).unwrap();
+        assert_eq!(ids(&doc, &first), ["a"]);
+        // `.y` and `.z` were on the elements before any selector used them.
+        let second = parse_selector_list(".y, .z", &mut doc).unwrap();
+        assert_eq!(ids(&doc, &second), ["a", "b", "c"]);
+        assert_eq!(ids(&doc, &first), ["a"]);
+        doc.set_attr(doc.children(doc.root()).flat_map(|h| doc.children(h)).flat_map(|b| doc.children(b)).nth(3).unwrap(), "class", "w x");
+        let third = parse_selector_list(".w", &mut doc).unwrap();
+        assert_eq!(ids(&doc, &third), ["d"]);
     }
 
     #[test]

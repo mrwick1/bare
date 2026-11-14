@@ -361,3 +361,51 @@ fn rules_built_for_one_document_give_another_document_the_matches_and_styles_of_
         }
     }
 }
+
+/// `Big::find` gives the group of a key, as a binary search of the sorted keys does, for no key, one key, and many keys, and for hashes that are
+/// not keys (also the ones that collide in the table).
+#[test]
+fn a_big_list_finds_its_groups_by_key() {
+    let mut r = Rng(0x9e37_79b9_7f4a_7c15);
+    for n in [0usize, 1, 2, 3, 17, 64, 1000, 7334] {
+        let mut keys: Vec<u32> = (0..n).map(|_| r.next(u32::MAX as usize) as u32 | 1).collect();
+        keys.sort_unstable();
+        keys.dedup();
+        let big = Big { probe: Big::probe_of(&keys).into(), starts: Box::new([]), list: Box::new([]), rest: Box::new([]), keys: keys.clone().into() };
+        for (i, &k) in keys.iter().enumerate() {
+            assert_eq!(big.find(k), Some(i), "{n} keys");
+        }
+        for _ in 0..2000 {
+            let h = r.next(u32::MAX as usize) as u32;
+            assert_eq!(big.find(h), keys.binary_search(&h).ok(), "{n} keys, hash {h}");
+        }
+    }
+}
+
+/// The styles of a page, as text, for a sheet that was added after another sheet had made the class lists of the elements: the same as a thread
+/// that never saw the first sheet. The class table is shared by the thread, so the reference runs on a new one.
+#[test]
+fn a_sheet_added_later_matches_the_classes_that_the_page_had_before() {
+    let mut r = Rng(0x7f4a_7c15_9e37_79b9);
+    for i in 0..40 {
+        let html = page(&mut r);
+        let (n, m) = (1 + r.next(8), 1 + r.next(30));
+        let (first, later) = (sheet(&mut r, n, false), sheet(&mut r, m, false));
+        let styles = |warm: bool, html: String, first: String, later: String| {
+            let mut doc = parse(&html);
+            if warm {
+                // The first sheet makes the lists of all elements, with only its own names in the class table.
+                let one = rules_of(&mut doc, &[&first], usize::MAX);
+                one.compute(&doc);
+            }
+            let rules = rules_of(&mut doc, &[&later], usize::MAX);
+            let out = rules.compute(&doc);
+            all(&doc).iter().map(|&n| format!("{:?}", out.style(n))).collect::<Vec<_>>()
+        };
+        let (h, f, l) = (html.clone(), first.clone(), later.clone());
+        let want = std::thread::spawn(move || styles(false, h, f, l)).join().unwrap();
+        let (h, f, l) = (html.clone(), first.clone(), later.clone());
+        let got = std::thread::spawn(move || styles(true, h, f, l)).join().unwrap();
+        assert!(got == want, "case {i}: a later sheet gives other styles\n{html}\n{first}\n{later}");
+    }
+}
