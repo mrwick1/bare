@@ -182,6 +182,7 @@ mod browser_idle;
 mod browser_intersection;
 mod browser_walker;
 mod browser_range;
+mod browser_reclaim;
 mod browser_rects;
 mod browser_chardata;
 mod browser_lazy;
@@ -249,6 +250,8 @@ mod browser_svg_tests;
 mod browser_walker_tests;
 #[cfg(test)]
 mod browser_range_tests;
+#[cfg(test)]
+mod browser_reclaim_tests;
 #[cfg(test)]
 mod browser_resize_tests;
 #[cfg(test)]

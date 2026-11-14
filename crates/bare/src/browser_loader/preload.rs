@@ -277,3 +277,10 @@ impl Run<'_> {
         ok
     }
 }
+
+impl Preloads {
+    /// Forget the links that the reclaim freed.
+    pub(super) fn forget(&mut self, gone: &dyn Fn(NodeId) -> bool) {
+        self.done.retain(|&n, _| !gone(n));
+    }
+}

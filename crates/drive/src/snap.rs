@@ -77,7 +77,8 @@ impl Refs {
         }
     }
 
-    fn mint(&mut self, n: NodeId) -> u32 {
+    fn mint(&mut self, p: &mut Page, n: NodeId) -> u32 {
+        p.pin(n);
         *self.ids.entry(n).or_insert_with(|| {
             self.nodes.push(n);
             self.nodes.len() as u32
@@ -483,7 +484,7 @@ fn format(p: &mut Page, refs: &mut Refs, items: Vec<Item>, seen: Option<&Seen>) 
                 rows.push(Row { depth, text, changed, node: None });
             }
             Item::El(mut l) => {
-                let r = refs.mint(l.node);
+                let r = refs.mint(p, l.node);
                 let h = Handle { doc, node: l.node };
                 let value = live(p, h, l.role, &mut l.flags);
                 if off.contains(&l.node) {
@@ -795,7 +796,7 @@ pub fn links(p: &mut Page, refs: &mut Refs, max: usize, text: Option<&str>, root
         let name = if name.is_empty() { String::new() } else { format!(" {name:?}") };
         // The nearest landmark, with its name when it has one.
         let lm = lm.map_or(String::new(), |(r, ln)| if ln.is_empty() { format!(" ({r})") } else { format!(" ({r} {:?})", short(&ln, 80)) });
-        lines.push(format!("[e{}]{name} -> {shown}{lm}", refs.mint(n)));
+        lines.push(format!("[e{}]{name} -> {shown}{lm}", refs.mint(p, n)));
     }
     if lines.is_empty() && (text.is_some() || root.is_some() || external) {
         return Ok(format!("{}no link matches the filters", header(p)));

@@ -500,3 +500,10 @@ pub(crate) fn absolute_urls<'a>(text: &'a str, base: &Url) -> std::borrow::Cow<'
         None => text.into(),
     }
 }
+
+impl Sheets {
+    /// Forget the links that the reclaim freed.
+    pub(super) fn forget(&mut self, gone: &dyn Fn(NodeId) -> bool) {
+        self.notified.retain(|(n, _)| !gone(*n));
+    }
+}

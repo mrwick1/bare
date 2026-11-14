@@ -420,3 +420,16 @@ impl Browser {
         NodeListStats { lists: t.lists.len(), cached_ids: t.cached_ids, name_bytes: t.name_bytes }
     }
 }
+
+// ------------------------------------------------------------------------------------------ arena reclaim (`browser_reclaim.rs`)
+
+/// The nodes that live lists name. A list builds `ids` again when `Document::revision` moved, and the reclaim moves it.
+pub(crate) fn held(d: &Dom, out: &mut Vec<NodeId>) {
+    let t = d.nl.s.borrow();
+    for l in t.lists.values() {
+        if let Src::Options(n) | Src::Selected(n) | Src::Labels(n) | Src::Of(n, _) = l.src {
+            out.push(n);
+        }
+    }
+    out.extend(t.of.keys().map(|k| k.0));
+}

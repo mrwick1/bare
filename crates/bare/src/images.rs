@@ -324,6 +324,7 @@ impl Page {
             let mut stack = vec![doc.root()];
             while let Some(n) = stack.pop() {
                 if matches!(doc.data(n), NodeData::Element { .. }) && doc.element_name(n) == "img" && self.images.known.insert(n) {
+                    b.pin(n);
                     want(&mut self.images, b, &doc, n, &mut by_url);
                 }
                 let at = stack.len();
@@ -339,6 +340,7 @@ impl Page {
             let mut by_url: HashMap<String, usize> = HashMap::new();
             for n in b.img_requests() {
                 self.images.known.insert(n);
+                b.pin(n);
                 // A request that cannot start has ended already.
                 if !want(&mut self.images, b, &doc, n, &mut by_url) {
                     b.img_settled(n, false);

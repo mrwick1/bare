@@ -1471,3 +1471,11 @@ impl Dom {
         state(self).borrow_mut().sc_pending = false;
     }
 }
+
+// ------------------------------------------------------------------------------------------ arena reclaim (`browser_reclaim.rs`)
+
+/// The nodes that the ends of live ranges name.
+pub(crate) fn held(d: &Dom, out: &mut Vec<NodeId>) {
+    let Some(st) = d.range.st.get() else { return };
+    out.extend(st.borrow().ranges.values().flat_map(|r| [r.sc, r.ec]));
+}

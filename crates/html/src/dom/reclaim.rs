@@ -64,6 +64,11 @@ impl Document {
         self.attrs.len() - self.dead_attrs
     }
 
+    /// Bytes that the live nodes, text and attributes of the arena use: the native memory that a collect and a reclaim can release.
+    pub fn arena_bytes(&self) -> usize {
+        self.live_len() * std::mem::size_of::<Node>() + self.live_text_bytes() + self.live_attr_slots() * ATTR_BYTES
+    }
+
     /// Test mode: a freed node is never reused, and a link of it points outside the arena, so the first use of a stale `NodeId` panics.
     pub fn set_poison(&mut self, on: bool) {
         self.poison = on;

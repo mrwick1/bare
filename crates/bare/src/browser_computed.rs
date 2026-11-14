@@ -1238,3 +1238,15 @@ impl Browser {
         Ok(if p.missing.is_empty() { StyleAvailability::Ready } else { StyleAvailability::MissingExternal { hrefs: p.missing, more: p.more } })
     }
 }
+
+// ------------------------------------------------------------------------------------------ arena reclaim (`browser_reclaim.rs`)
+
+/// The nodes that live computed declarations name.
+pub(crate) fn held(d: &Dom, out: &mut Vec<NodeId>) {
+    out.extend(d.computed.objs.borrow().values().copied());
+}
+
+/// Drop the state of the nodes that the reclaim freed.
+pub(crate) fn forget(d: &Dom, gone: &dyn Fn(NodeId) -> bool) {
+    d.computed.bound.borrow_mut().retain(|&n, _| !gone(n));
+}

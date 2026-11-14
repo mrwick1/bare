@@ -648,3 +648,22 @@ use crate::browser_lazy::lazy_global;
 pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     crate::browser_lazy::install(d, it, &[("MutationObserver", lazy_observer as H), ("MutationRecord", lazy_record as H)])
 }
+
+// ------------------------------------------------------------------------------------------ arena reclaim (`browser_reclaim.rs`)
+
+/// The nodes that registrations and queued records name.
+pub(crate) fn held(d: &Dom, out: &mut Vec<NodeId>) {
+    let Some(st) = d.mo.st.get() else { return };
+    let s = st.borrow();
+    for (&n, regs) in &s.regs {
+        out.push(n);
+        out.extend(regs.iter().filter_map(|r| r.source));
+    }
+    for r in s.obs.values().flat_map(|o| &o.recs) {
+        out.push(r.target);
+        out.extend(r.added.iter().chain(&r.removed).copied());
+        out.extend(r.prev);
+        out.extend(r.next);
+    }
+    out.extend(s.grp.and_then(|g| g.all));
+}

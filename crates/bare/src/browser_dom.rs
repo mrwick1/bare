@@ -153,10 +153,10 @@ impl Dom {
 
     /// Room for `nodes` more nodes and `text` more bytes of text in the native arena.
     pub(crate) fn room(&self, doc: &Document, nodes: usize, text: usize) -> R<()> {
-        if doc.len() + nodes > self.lim.max_nodes {
+        if doc.live_len() + nodes > self.lim.max_nodes {
             return Err(self.lim("dom-nodes"));
         }
-        if doc.text_bytes().saturating_add(text) > self.lim.max_text_bytes {
+        if doc.live_text_bytes().saturating_add(text) > self.lim.max_text_bytes {
             return Err(self.lim("dom-text"));
         }
         Ok(())
@@ -165,7 +165,7 @@ impl Dom {
     /// Room for a new attribute (name, slot, value).
     pub(crate) fn attr_room(&self, doc: &Document, el: NodeId, name: &str, value: &str) -> R<()> {
         self.room(doc, 0, value.len())?;
-        if doc.attr_slots() + doc.attr_count(el) + 1 > self.lim.max_attr_slots {
+        if doc.live_attr_slots() + doc.attr_count(el) + 1 > self.lim.max_attr_slots {
             return Err(self.lim("dom-attrs"));
         }
         if doc.find_atom(name).is_none() && doc.name_count() + 1 > self.lim.max_names {
@@ -1303,7 +1303,7 @@ pub(crate) fn clone_tree(d: &Dom, it: &mut Interp<'_>, n: NodeId, deep: bool, im
             }
         }
         d.room(&doc, count, bytes)?;
-        if attrs > d.lim.max_attr_slots.saturating_sub(doc.attr_slots()) {
+        if attrs > d.lim.max_attr_slots.saturating_sub(doc.live_attr_slots()) {
             return Err(d.lim("dom-attrs"));
         }
         if input_bytes > d.lim.max_text_bytes.saturating_sub(st.input_bytes) {

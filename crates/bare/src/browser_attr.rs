@@ -775,3 +775,23 @@ impl Browser {
         AttrStats { attrs: s.attrs.len(), maps: s.maps.len() }
     }
 }
+
+// ------------------------------------------------------------------------------------ arena reclaim (`browser_reclaim.rs`)
+
+/// The nodes that `Attr` objects and `NamedNodeMap`s name.
+pub(crate) fn held(d: &Dom, out: &mut Vec<NodeId>) {
+    let t = d.attr.s.borrow();
+    out.extend(t.attrs.values().filter_map(|a| a.owner));
+    out.extend(t.by_el.keys().copied());
+    out.extend(t.maps.values().copied());
+    out.extend(t.map_of.keys().copied());
+}
+
+/// The spans of detached `Attr` values: the reclaim moves them when it builds the text list again.
+pub(crate) fn pins(d: &Dom, f: &mut dyn FnMut(&mut Span)) {
+    for a in d.attr.s.borrow_mut().attrs.values_mut() {
+        if let Some(v) = a.value.as_mut() {
+            f(v);
+        }
+    }
+}

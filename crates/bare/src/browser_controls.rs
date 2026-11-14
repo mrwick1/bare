@@ -940,3 +940,19 @@ mod tests {
         assert_eq!(step_message("1.5", None, None, Some("any"), None), None);
     }
 }
+
+// ------------------------------------------------------------------------------------------ arena reclaim (`browser_reclaim.rs`)
+
+/// The nodes that live `ValidityState` and `labels` objects name.
+pub(crate) fn held(d: &Dom, out: &mut Vec<NodeId>) {
+    let st = d.ctl.st.borrow();
+    out.extend(st.state.keys().copied());
+    out.extend(st.owner.values().copied());
+    out.extend(st.labels.keys().copied());
+    out.extend(st.locked.iter().copied());
+}
+
+/// Drop the state of the nodes that the reclaim freed.
+pub(crate) fn forget(d: &Dom, gone: &dyn Fn(NodeId) -> bool) {
+    d.ctl.st.borrow_mut().custom.retain(|&n, _| !gone(n));
+}

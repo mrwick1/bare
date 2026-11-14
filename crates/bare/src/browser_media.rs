@@ -1291,3 +1291,15 @@ fn caption_active(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let t = &ts[&n];
     Ok(if t.mode == "disabled" { Value::Null } else { t.active.map(Value::Object).unwrap_or(Value::Null) })
 }
+
+// ------------------------------------------------------------------------------------------ arena reclaim (`browser_reclaim.rs`)
+
+/// The media elements, their caption tracks and caption lists.
+pub(crate) fn held(d: &Dom, out: &mut Vec<NodeId>) {
+    out.extend(d.media.st.borrow().keys().copied());
+    out.extend(d.media.tracks.borrow().keys().copied());
+    for l in d.media.lists.borrow().values() {
+        out.push(l.node);
+        out.extend(l.ids.iter().copied());
+    }
+}

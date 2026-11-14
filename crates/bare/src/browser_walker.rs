@@ -713,3 +713,14 @@ impl Dom {
         }
     }
 }
+
+// ------------------------------------------------------------------------------------------ arena reclaim (`browser_reclaim.rs`)
+
+/// The nodes that live walkers and iterators name.
+pub(crate) fn held(d: &Dom, out: &mut Vec<NodeId>) {
+    let Some(st) = d.walk.st.get() else { return };
+    for w in st.borrow().walkers.values() {
+        out.extend([w.root, w.cur]);
+        out.extend(w.cand.map(|c| c.0));
+    }
+}

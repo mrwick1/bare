@@ -121,10 +121,12 @@ fn parse_from_string(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<V
     {
         let doc = d.doc.borrow();
         d.room(&doc, parsed.len(), parsed.text_bytes())?;
-        if parsed.attr_slots() > d.lim.max_attr_slots.saturating_sub(doc.attr_slots()) { return Err(d.lim("dom-attrs")); }
+        if parsed.attr_slots() > d.lim.max_attr_slots.saturating_sub(doc.live_attr_slots()) { return Err(d.lim("dom-attrs")); }
         if doc.name_count() + parsed.new_names_in(&doc) > d.lim.max_names { return Err(d.lim("dom-names")); }
     }
     it.charge(parsed.len() as u64)?;
+    // The nodes of the copy stay in the arena until a reclaim frees them: they count towards the next collect (`Interp::gc_due`).
+    it.add_external(parsed.arena_bytes());
     let mut pending = vec![(parsed.root(), 0)];
     while let Some((root, base)) = pending.pop() {
         let (mut cur, mut depth) = (root, 0);
