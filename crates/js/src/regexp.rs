@@ -46,7 +46,7 @@
 
 use bare_unicode::fold;
 use bare_unicode::tables::{CASE_FOLD, CASE_FOLD_INV};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// The longest pattern, in UTF-16 code units.
 pub const MAX_PATTERN_UNITS: usize = 1 << 16;
@@ -204,13 +204,22 @@ pub struct Regex {
     first: Option<Box<FirstSet>>,
     /// The pattern starts with a non-multiline `^`: only `last_index == 0` can match.
     anchored: bool,
+    /// Unique among the patterns compiled in this process, and never 0: a result table keys on it, as the address of a freed pattern can return.
+    id: u64,
 }
+
+static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Possible first code units of a match. Non-ASCII units are always "maybe".
 #[derive(Debug)]
 struct FirstSet([bool; 128]);
 
 impl Regex {
+    /// The identity of this compiled pattern (see the field).
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
     /// Compile `pattern` (UTF-16 code units) with `flags` (e.g. `"gi"`).
     pub fn new(pattern: &[u16], flags: &str) -> Result<Regex, CompileError> {
         let flags = Flags::parse(flags)?;
@@ -227,7 +236,7 @@ impl Regex {
         let mark_base = tmp_base + groups + 1;
         let nregs = mark_base + e.max_slot as usize;
         let names = (!p.names.is_empty()).then(|| Box::new(std::mem::take(&mut p.names)));
-        let mut re = Regex { prog: e.prog, classes: e.classes, flags, groups, names, nregs, tmp_base, mark_base, first: None, anchored: false };
+        let mut re = Regex { prog: e.prog, classes: e.classes, flags, groups, names, nregs, tmp_base, mark_base, first: None, anchored: false, id: NEXT_ID.fetch_add(1, Ordering::Relaxed) };
         re.anchored = matches!(re.prog[0], Inst::Start);
         re.first = re.first_set();
         Ok(re)

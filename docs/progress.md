@@ -10852,3 +10852,48 @@ Limits made unneeded: none. The restyle charge (`STEPS_PER_RESTYLED_ELEMENT`) co
 Not tested: shadow trees with a real hover (a page with shadow rules gives up the partial restyle before this code); `:has()` (the engine drops rules with it); sibling combinators in the random test (its roots are chosen by the test, not by `Scopes`, so a sibling rule would need sibling roots; the cover logic does not touch them); the live sites; wall time; `crates/js` gates (no change there).
 
 Noticed, not changed: after H1 one hover on `wikipedia-article` still styles 9,295 elements for 1 changed style, because `Scopes` keeps one scope for all selectors that read `:hover`. A per-selector invalidation map would remove that. The two `*-vs-branch` journey runs with a stale `bare-drive` (built with `--examples`, which skips the binary) gave wrong numbers; the table above is from a fresh build.
+
+## R2-A build 2: `RegExp.prototype.test` answers a repeated pair from a table (2026-11-14)
+
+Owner decision (2026-11-14): build D1 (PR #534, merged), then D2a of [design-heavy-js-journeys.md](design-heavy-js-journeys.md). This section is PR 2 (D2a).
+
+What I built (`eval_builtins.rs`, `regexp.rs`):
+
+- A result table for `test()` only (`Ext::re_tab`, `ReTable`). Direct-mapped. An entry (32 bytes) holds the compiled pattern id, the start index (`from`), the string handle (index and generation), the end of the match (or no match) and the steps the engine charged.
+- Key: the pattern is named by `Regex::id()`, a process-unique counter (never 0), not by its address: the address of a freed pattern can return. The string is named by its handle. A string is immutable, and a freed handle gets a new generation (`Slab::sweep` adds 1; no reuse of a generation before 2^31 frees of a slot), so one key names one answer for good. A short string is an atom (handle equal when the content is equal); a long string is a hit only when the same string object is tested again. The table holds no string: its handles are not roots.
+- `Interp::re_test_raw` is `re_exec_raw` for `test`. Both now start with `re_start` (the `lastIndex` read, its coercion that can run script, and the past-the-end case), so the `lastIndex` reads and writes run on every call, hit or miss. Only the engine call is replaced: `run_test` probes the table, and on a miss runs `run_engine` and stores the answer.
+- Step charge: a hit adds the stored steps to `Interp::steps`, as the engine did. A stored answer is used only when its steps fit the budget that the engine would have had (`min(regexp_steps, step limit left)`, and the budget left is not 0). Otherwise the engine runs and ends the run as before. Only an answer that the engine gave is stored, never an error. So the budget, the limit kind and the point where a loop of `test()` ends are the same as without the table.
+- `exec`, `match`, `replace`, `split` and `search` do not use the table (only 3.8% of the executions on this journey are `exec`; the table has no room for capture spans). A user-defined `exec` (an own property or one on `RegExp.prototype`) is found by `user_exec` before the table, as the spec calls it from `test`. Bare has no legacy statics (`RegExp.$1`, `lastMatch`), so there is no state to keep. A global or sticky pattern: `from` is in the key, and `lastIndex` is written from the stored end.
+- Memory: 0 bytes until the first `test()`. It then has 256 entries (8 KiB), and doubles when it has replaced as many entries as it holds, up to 32,768 entries (1 MiB). A new `set_builtin_limits` empties it (a stored answer holds for the limits it ran under). The size of the maximum was chosen by measurement (below).
+
+Tests (`eval_retable_tests.rs`, written first; the Node comparison passed on the old code, the counter tests failed):
+
+- 19 programs against Node 22: repeats, global progress, `lastIndex` set by hand and past the end, sticky, equal content in another string object, concatenated strings, an own `exec` and a prototype `exec` added and removed after hits, flags that differ, `new RegExp` with the same source, a `lastIndex` with a `valueOf` side effect, captures and `exec` after `test`, empty global matches, unicode and case folding, `replace`/`match`/`split`/`search` beside `test`, a look-behind with a back-reference, coerced inputs, 9,000 distinct pairs through table growth and replacement, and strings that die between tests.
+- Counter and budget tests: the second call of a pair is a hit and charges the same steps as the miss; `exec`, `match` and `replace` make no hit; a hit that does not fit the step budget is not used and the run ends with `Limit(Steps)`; a loop of `test()` still ends at the step limit; a call that hits the regexp budget is not stored and fails each time; new limits empty the table; 200,000 distinct pairs keep the table at or below 1 MiB.
+
+Numbers (archMachine, shared; corpus `virtual`, virtual clock, 3 runs, spread 0.0%):
+
+| `rust-book-search` | Instructions |
+|---|---:|
+| baseline `f6415364` (+ replay patch + clock) | 16,606.0 M |
+| main with D1 (`5be6a2ec`) | 13,442.2 M |
+| D2a | 10,189.6 M (-24.2% against main, -38.6% against the baseline) |
+
+- Criterion 4 (12,774 M or less, 1.3x): **met**, 1.63x against the baseline. D1 and D2a together: 16,606 M to 10,190 M; the design prototype of both gave 9,861 M (its table was an unbounded map).
+- Table size (3 runs each, same inputs, built on D1 main): 16,384 entries 10,577 M; 32,768 entries 10,205 M; 65,536 entries 10,005 M. I took 32,768 (1 MiB): 65,536 gains 2% more for 2 MiB. Hypothesis: a reuse distance longer than the table is the cause of the missing hits; not measured. The hit count on this journey was not recorded.
+- Peak RSS of the journey: 126.6 MiB (main) to 128.2 MiB (D2a), +1.3%: the table at 1 MiB. PSS sum over the 47 journeys: 1,162.7 MiB to 1,128.9 MiB (-2.9%; one run each is a sample, the spread of PSS is not measured here).
+- Wall time (weak, loaded): 1,218, 1,251 and 1,283 ms for D2a against about 1,390 ms for D1 (earlier runs); the baseline 1,650 ms.
+- 47 journeys against main `5be6a2ec`, `journeys.sh compare --clock virtual --runs 3 --pss`: 46,687 M to 43,428 M (-7.0%); the largest increase of any other journey is 0.1% (`react-docs`, `curl-se-home`), the largest decrease besides `rust-book-search` is `devto-home` -0.6%. CPU ms 7,026 to 6,627 (-5.7%). Against the baseline: 105,108 M to 43,428 M (-58.7%; the loop fix and the other merges are most of it). Logs: `/data/claude-tmp/forin/d2-vs-{main,base}.log`.
+- Typing (`keycost.sh`): `#a1` 285.5 M for each key, `#f0` 290.8 M, load and mount 601.6 M (D1: 285.7, 291.1, 603.2); peak RSS 31.0 MiB at 50 keys.
+
+Gates:
+
+- Cost matrix against main `c9ead755`: 803 rows, 0 over under both allocators, mean -0.001% (glibc). 2 rows fail to run: `parse_load deep 1` and `deep 10` (known on main).
+- test262 gate ok; the per-test results file is identical to the D1 run. `exec_diff`: 79 runs, 0 differences.
+- `cargo test --release --workspace --no-fail-fast` (after the rebase on `c9ead755`): `bare-js` all pass. Failures that are not mine: the 7 openssl TLS tests, `a_changed_file_starts_again_from_zero` (passes alone) and `a_hidden_iframe_download_is_saved` (a timing test: run alone 10 times it passed 1 of 10 on main and 3 of 10 on the branch).
+
+Limits made unneeded: none. The regexp step budget (`regexp_steps`) still guards a pattern that runs for the first time. The table makes repeats cheap; it does not remove the O(n x alternatives) work of a first run (design section 5.1; D2b, a lazy DFA, is the design that would).
+
+Not tested: a live site; a page whose `test()` inputs never repeat (it pays a probe and a store: about 30 instructions a call; the cost matrix rows with `test` show no row over the limit); long strings built again for each call (no hit: different handles); a `RegExp` subclass with its own `exec` and a table hit in the same run (the `user_exec` check runs before the table, as in the programs above); more than 4 billion compiled patterns (the id counter is 64 bits).
+
+Noticed, not changed: `test()` still reads `regexps[&r]` and clones the `Rc` of the pattern on each call, and `user_exec` reads the `exec` property each call; that is part of the 5.2% wrapper cost of design section 2 and is not changed here. The 7 TLS tests and the 2 download tests above are not caused by this change.
