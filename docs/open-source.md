@@ -170,3 +170,7 @@ This order is a proposal. It is not measured yet.
 Added on 2026-11-14. The CSS crate uses [color 0.3.3](https://crates.io/crates/color/0.3.3). Its license is Apache-2.0 OR MIT. The dependency disables default features and selects its libm feature. This uses [Rust libm 0.2.16](https://crates.io/crates/libm/0.2.16), under the MIT license. The selected backend avoids adding a shared math library to browser startup. It provides color-space conversion, modern absolute-color parsing, missing-component handling and premultiplied interpolation. Bare owns mix grammar, deferred currentColor resolution and sRGB gamut mapping.
 
 The mapping follows the [CSS Color 4 local-MINDE algorithm](https://www.w3.org/TR/css-color-4/#binsearch). Numeric regression cases use the local-MINDE results documented in [the WPT sRGB gamut-mapping test](https://github.com/web-platform-tests/wpt/blob/master/css/css-color/canvas-srgb-gamut-mapping.html). The tests allow one byte of rounding error. They do not copy the WPT harness.
+
+## Grapheme boundaries in layout
+
+Added on 2026-11-14 for issue #467. Layout uses the existing icu_segmenter 2.4.0 dependency with default features disabled and compiled_data enabled. This is the same configuration as Intl.Segmenter. The lockfile retains one version. The license is Unicode-3.0. Layout uses UTF-8 grapheme boundaries and keeps its own DOM source mapping. It does not copy ICU implementation or data files.

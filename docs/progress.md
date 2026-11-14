@@ -9883,3 +9883,8 @@ Issue #464. Candidate production source: 79164130. Modern absolute colors and tw
 The final serial release run passes 1,913 tests with seven ignored. The selected three-row browser cost gate passes its unchanged 0.5 percent rule under both allocators. The final 390-pixel synthetic page and real Deck primary button pass computed-color and inspected-pixel checks. The tests use headless bare; no mirrored test is claimed. Full resource samples, failed intermediate checks and syntax limits are in [the results](rendering-colors-results.md).
 
 No installation, merge or deployment is included. Wrapping remains separate in #467.
+
+
+## 2026-11-14: grapheme-safe wrapping
+
+Source 6841f650 adds inherited wrap properties and shared grapheme opportunities for placement and intrinsic sizing. The serial release checks pass 1,917 tests. The five selected cost rows pass under both allocators. Computed style grows by 16 bytes. Phone-width captures show the same request text wrapping inside the Deck card. The diagnostic rerun and all test limits are in [the results](rendering-wrap-results.md). No installation or merge is included.

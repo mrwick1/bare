@@ -10,6 +10,8 @@
 //! kept, and 806 ms without (and 298 MB against 216 MB at the peak).
 
 use crate::Cx;
+use crate::breaks::{self, Point, Run};
+use crate::text::Wrap;
 use crate::block::{Context, MAX_DEPTH, border_padding, resolve};
 use crate::boxes::Child;
 use crate::font::{self, LETTER, Metrics};
@@ -105,9 +107,23 @@ pub(crate) fn outer(cx: &mut Cx, node: NodeId) -> (f32, f32) {
 /// longest line if it only breaks where it must (`<br>`, a kept newline).
 pub(crate) fn lines(cx: &mut Cx, first: NodeId, last: NodeId) -> (f32, f32) {
     let tree = cx.tree;
+    if tree.styles.wrapping() && Events::new(&tree, first, last).any(|event| match event {
+        Event::Text(node) => { let style = tree.style(node); Wrap::of(style, WhiteSpace::of(style)).min_content() }
+        _ => false,
+    }) { lines_with::<true>(cx, first, last) } else { lines_with::<false>(cx, first, last) }
+}
+
+fn lines_with<const BREAKS: bool>(cx: &mut Cx, first: NodeId, last: NodeId) -> (f32, f32) {
+    let tree = cx.tree;
     let (mut min, mut max) = (0.0f32, 0.0f32);
     let (mut unit, mut line, mut hang) = (0.0f32, 0.0f32, 0.0f32);
     let mut flow = Flow::new();
+    let mut runs = Vec::<Run<'_>>::new();
+    let mut before = None;
+    let mut word_start = true;
+    let minimum = |runs: &[Run<'_>], total: f32, start: bool| {
+        if BREAKS && runs.iter().any(|run| run.policy.min_content()) { breaks::minimum(runs, total, start) } else { total }
+    };
     for event in Events::new(&tree, first, last) {
         match event {
             Event::Text(node) => {
@@ -117,35 +133,52 @@ pub(crate) fn lines(cx: &mut Cx, first: NodeId, last: NodeId) -> (f32, f32) {
                 let text = tree.doc.text(span);
                 let sp = font::spacing(tree.styles.spaced(), style);
                 let spaced = sp != (0.0, 0.0);
+                if BREAKS && runs.is_empty() { word_start = flow.after_space; }
+                let template = Run { item:0, start:0, text:"", x:0.0, before:Point {item:0, byte:None, x:0.0}, metrics:m, transform, spacing:sp,
+                    policy:if BREAKS { Wrap::of(style, ws) } else { Wrap::Normal } };
                 for piece in text::pieces(text, ws, transform, &mut flow) {
                     match piece {
                         Piece::Word { start, end, width } => {
                             let w = m.px(width) + if spaced { font::extra(&text[start as usize..end as usize], sp) } else { 0.0 };
+                            if BREAKS {
+                                runs.push(Run {item:runs.len(), start, text:&text[start as usize..end as usize], x:unit,
+                                    before:before.take().unwrap_or(Point {item:runs.len(), byte:Some(start), x:unit}), ..template});
+                            }
                             unit += w;
                             line += w;
                             hang = 0.0;
                         }
                         Piece::Space { width, .. } if ws.wrap => {
                             let w = m.px(width) + if spaced { font::extra_spaces(width, sp) } else { 0.0 };
-                            min = min.max(unit);
+                            min = min.max(minimum(&runs, unit, word_start));
                             unit = 0.0;
+                            if BREAKS { runs.clear(); before = None; word_start = true; }
                             line += w;
                             hang = w;
                         }
-                        Piece::Space { width, .. } => {
+                        Piece::Space { start, end, width } => {
                             let w = m.px(width) + if spaced { font::extra_spaces(width, sp) } else { 0.0 };
+                            if BREAKS {
+                                runs.push(Run {item:runs.len(), start, text:&text[start as usize..end as usize], x:unit,
+                                    before:before.take().unwrap_or(Point {item:runs.len(), byte:Some(start), x:unit}), ..template});
+                            }
                             unit += w;
                             line += w;
                         }
-                        Piece::Tab { .. } => {
+                        Piece::Tab { at } => {
                             let w = m.px(8 * LETTER) + 8.0 * (sp.0 + sp.1);
+                            if BREAKS {
+                                runs.push(Run {item:runs.len(), start:at, text:&text[at as usize..at as usize + 1], x:unit,
+                                    before:before.take().unwrap_or(Point {item:runs.len(), byte:Some(at), x:unit}), ..template});
+                            }
                             unit += w;
                             line += w;
                         }
                         Piece::Newline { .. } => {
-                            min = min.max(unit);
+                            min = min.max(minimum(&runs, unit, word_start));
                             max = max.max(line - hang);
                             (unit, line, hang) = (0.0, 0.0, 0.0);
+                            if BREAKS { runs.clear(); before = None; word_start = true; }
                         }
                     }
                 }
@@ -158,6 +191,9 @@ pub(crate) fn lines(cx: &mut Cx, first: NodeId, last: NodeId) -> (f32, f32) {
                 } else {
                     (Property::MarginRight, border.right, padding.right)
                 };
+                if BREAKS && matches!(event, Event::Open(_)) && before.is_none() {
+                    before = Some(Point {item:runs.len(), byte:None, x:unit});
+                }
                 let edge = resolve(cx, style.get(m), Some(0.0)).unwrap_or(0.0) + b + p;
                 unit += edge;
                 line += edge;
@@ -171,8 +207,9 @@ pub(crate) fn lines(cx: &mut Cx, first: NodeId, last: NodeId) -> (f32, f32) {
                 line += b;
             }
             Event::Atomic(node) => {
-                min = min.max(unit);
+                min = min.max(minimum(&runs, unit, word_start));
                 unit = 0.0;
+                if BREAKS { runs.clear(); before = None; word_start = false; }
                 let (a, b) = outer(cx, node);
                 min = min.max(a);
                 line += b;
@@ -180,10 +217,11 @@ pub(crate) fn lines(cx: &mut Cx, first: NodeId, last: NodeId) -> (f32, f32) {
                 flow.after_space = false;
             }
             Event::Break(_) | Event::Block(_) => {
-                min = min.max(unit);
+                min = min.max(minimum(&runs, unit, word_start));
                 max = max.max(line - hang);
                 (unit, line, hang) = (0.0, 0.0, 0.0);
                 flow = Flow::new();
+                if BREAKS { runs.clear(); before = None; word_start = true; }
                 if let Event::Block(node) = event {
                     let (a, b) = outer(cx, node);
                     min = min.max(a);
@@ -192,5 +230,5 @@ pub(crate) fn lines(cx: &mut Cx, first: NodeId, last: NodeId) -> (f32, f32) {
             }
         }
     }
-    (min.max(unit), max.max(line - hang))
+    (min.max(minimum(&runs, unit, word_start)), max.max(line - hang))
 }

@@ -80,3 +80,17 @@ fn equal_serialized_sheets_keep_distinct_sources() {
     run(&mut b, "var r = st.sheet.cssRules.item(0); r.style.margin = 'var(--x)'; r.style.marginTop = '1px'; getComputedStyle(a).marginRight", "4px");
     run(&mut b, "r.style.cssText = r.style.cssText; getComputedStyle(a).marginRight", "4px");
 }
+
+#[test]
+fn wrapping_properties_have_live_computed_text_and_aliases() {
+    let mut b = browser();
+    run(&mut b, "var a = document.getElementById('a'); a.style.overflowWrap = 'anywhere'; a.style.wordBreak = 'break-all'; getComputedStyle(a).overflowWrap + '|' + getComputedStyle(a).wordBreak", "anywhere|break-all");
+    run(&mut b, "a.style.wordWrap = 'break-word'; getComputedStyle(a).overflowWrap + '|' + a.style.getPropertyValue('word-wrap') + '|' + getComputedStyle(a).wordWrap", "break-word|break-word|break-word");
+}
+
+#[test]
+fn wrapping_style_changes_relayout_the_real_element() {
+    let mut b = browser();
+    run(&mut b, "var a = document.getElementById('a'); a.style.cssText = 'width:200px;font-size:14px;line-height:20px'; a.textContent = 'x'.repeat(120); var before = a.getBoundingClientRect().height; a.style.overflowWrap = 'anywhere'; before + '|' + a.getBoundingClientRect().height", "20|120");
+    run(&mut b, "a.style.overflowWrap = 'normal'; a.style.wordBreak = 'break-all'; a.getBoundingClientRect().height", "120");
+}

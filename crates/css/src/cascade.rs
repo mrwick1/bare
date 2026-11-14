@@ -1156,7 +1156,7 @@ impl RuleSet {
     #[inline(never)]
     fn walk<const WANT: bool, const PENDING: bool, const TRACK: bool>(&self, doc: &Document, want: Option<NodeId>, keep: bool) -> Styles {
         let mut way = Way { want, path: Vec::new(), sorted: Vec::new(), on: false, at: 0 };
-        let mut styles = Styles { styles: vec![ComputedStyle::initial()], of_node: vec![NONE; doc.len()], calcs: Vec::new(), grids: Vec::new(), customs: var::Sets::default(), spaced: false, kept: None };
+        let mut styles = Styles { styles: vec![ComputedStyle::initial()], of_node: vec![NONE; doc.len()], calcs: Vec::new(), grids: Vec::new(), customs: var::Sets::default(), spaced: false, wrapping: false, kept: None };
         // Style 0 is the starting style. It is the parent style of the `html` element.
         let mut cx = Cx { viewport: self.viewport, root_font_size: 16.0, layer_order: self.layer_order(), declared: &self.side, inline: RefCell::default(), computed: RefCell::default(), grids: RefCell::default(), customs: RefCell::default(), merges: RefCell::default() };
         let style_atom = doc.find_atom("style");
@@ -1602,6 +1602,8 @@ impl RuleSet {
         let id = same.unwrap_or_else(|| {
             let id = styles.styles.len() as u32;
             styles.spaced |= style.px(Property::LetterSpacing) != 0.0 || style.px(Property::WordSpacing) != 0.0;
+            styles.wrapping |= matches!(style.get(Property::OverflowWrap), Value::Keyword(Keyword::Anywhere | Keyword::BreakWord))
+                || style.get(Property::WordBreak) == Value::Keyword(Keyword::BreakAll);
             styles.styles.push(style);
             memo.by_hash.entry(hash).or_default().push(id);
             id
@@ -2201,6 +2203,8 @@ pub struct Styles {
     customs: var::Sets,
     /// Does any style have a `letter-spacing` or a `word-spacing` that is not 0? Layout and paint read the two only then.
     spaced: bool,
+    /// Conservative hint: some stored style requests additional text break opportunities.
+    wrapping: bool,
     /// The cache of the cascade, for `RuleSet::restyle`. Only `RuleSet::compute_kept` keeps it.
     kept: Option<Box<StyleKeep>>,
 }
@@ -2249,6 +2253,8 @@ impl Styles {
     pub fn any_style(&self, f: impl Fn(&ComputedStyle) -> bool) -> bool {
         self.styles.iter().any(f)
     }
+
+    pub fn wrapping(&self) -> bool { self.wrapping }
 
     pub fn spaced(&self) -> bool {
         self.spaced
@@ -2669,7 +2675,7 @@ fn initial(p: Property) -> Value {
         Display => Value::Keyword(K::Inline),
         Float | Clear | MaxWidth | MaxHeight | BorderTopStyle | BorderRightStyle | BorderBottomStyle | BorderLeftStyle | TextDecoration | TextTransform => Value::Keyword(K::None),
         Visibility | OverflowX | OverflowY => Value::Keyword(K::Visible),
-        WhiteSpace | FontStyle | LineHeight | LetterSpacing | WordSpacing => Value::Keyword(K::Normal),
+        WhiteSpace | OverflowWrap | WordBreak | FontStyle | LineHeight | LetterSpacing | WordSpacing => Value::Keyword(K::Normal),
         TextAlign => Value::Keyword(K::Start),
         ListStyleType => Value::Keyword(K::Disc),
         BoxSizing => Value::Keyword(K::ContentBox),
@@ -2718,7 +2724,7 @@ fn initial(p: Property) -> Value {
 /// Does a child take the value of the parent when it has no value of its own?
 pub const fn inherited(p: Property) -> bool {
     use Property::*;
-    matches!(p, TextColor | FontSize | FontWeight | FontStyle | LineHeight | LetterSpacing | WordSpacing | TextAlign | TextTransform | WhiteSpace | ListStyleType | Visibility | PointerEvents | Cursor | Fill | Stroke | BorderCollapse | BorderSpacingH | BorderSpacingV | CaptionSide | Direction)
+    matches!(p, TextColor | FontSize | FontWeight | FontStyle | LineHeight | LetterSpacing | WordSpacing | TextAlign | TextTransform | WhiteSpace | OverflowWrap | WordBreak | ListStyleType | Visibility | PointerEvents | Cursor | Fill | Stroke | BorderCollapse | BorderSpacingH | BorderSpacingV | CaptionSide | Direction)
 }
 
 /// The properties that `inherited` names, as bits.
@@ -3710,6 +3716,24 @@ mod tests {
         assert_ne!(text, Color { r:255, g:0, b:0, a:255 });
         assert_eq!((text.r, text.g, text.b), (bg.r, bg.g, bg.b));
         assert_eq!(bg.a, 128);
+    }
+
+    #[test]
+    fn wrapping_properties_inherit_and_supports_uses_the_real_parser() {
+        let html = "<div style='overflow-wrap: anywhere; word-break: break-all'><p id=p>x</p></div>";
+        for (name, expected) in [("overflow-wrap", "anywhere"), ("word-break", "break-all")] {
+            let p = Property::from_name(name).expect("wrapping property");
+            assert!(inherited(p));
+            let Value::Keyword(k) = get(html, &[], "p", p) else { panic!("keyword") };
+            assert_eq!(k.name(), expected);
+        }
+        let css = "p { color: red } @supports (overflow-wrap: anywhere) { p { color: blue } }";
+        assert_eq!(get(html, &[css], "p", Property::TextColor), rgb(0, 0, 255));
+    }
+
+    #[test]
+    fn wrapping_slots_have_the_reviewed_style_memory_cost() {
+        assert_eq!(std::mem::size_of::<ComputedStyle>(), 872, "baseline 856 plus two eight-byte values");
     }
 
     #[test]

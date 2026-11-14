@@ -54,6 +54,50 @@ impl WhiteSpace {
     }
 }
 
+/// The effective policy; no-wrap white-space always wins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Wrap {
+    Normal,
+    BreakWord,
+    Anywhere,
+    All,
+}
+
+impl Wrap {
+    pub(crate) fn of(style: &ComputedStyle, ws: WhiteSpace) -> Self {
+        if !ws.wrap { return Self::Normal; }
+        if style.get(Property::WordBreak) == Value::Keyword(Keyword::BreakAll) { return Self::All; }
+        match style.get(Property::OverflowWrap) {
+            Value::Keyword(Keyword::Anywhere) => Self::Anywhere,
+            Value::Keyword(Keyword::BreakWord) => Self::BreakWord,
+            _ => Self::Normal,
+        }
+    }
+
+    pub(crate) fn min_content(self) -> bool { matches!(self, Self::Anywhere | Self::All) }
+}
+
+/// Segment one affected unbreakable unit, including seams between DOM text nodes.
+/// Callers retain the source ranges; ICU returns UTF-8 byte boundaries in this join.
+pub(crate) fn grapheme_breaks<'a>(parts: impl Iterator<Item = &'a str>) -> Vec<usize> {
+    let mut joined = String::new();
+    for part in parts { joined.push_str(part); }
+    icu_segmenter::GraphemeClusterSegmenter::new().segment_str(&joined).collect()
+}
+
+/// The same case conversion as Pieces::width, with word-start state across sources.
+/// Spacing still counts source letters, as font::extra does.
+pub(crate) fn transformed_width(c: char, transform: Transform, word_start: &mut bool) -> Units {
+    let width = match transform {
+        Transform::Upper => c.to_uppercase().map(font::width_of).sum(),
+        Transform::Lower => c.to_lowercase().map(font::width_of).sum(),
+        Transform::Capitalize if *word_start => c.to_uppercase().map(font::width_of).sum(),
+        _ => font::width_of(c),
+    };
+    *word_start = matches!(c, ' ' | '\t' | '\n');
+    width
+}
+
 /// `text-transform`: the letters change case when they are shown. The DOM keeps the text as it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Transform {
@@ -283,6 +327,11 @@ mod tests {
     fn pre_line_keeps_newlines_only() {
         assert_eq!(cut("a  \n  b\n\nc", PRE_LINE, Transform::None, &mut Flow::new()), ["a:6", "n", "b:6", "n", "n", "c:6"]);
         // The spaces before and after a newline go (CSS Text 3, "Phase I: Collapsing and Transformation").
+    }
+
+    #[test]
+    fn graphemes_cross_source_parts_and_keep_utf8_offsets() {
+        assert_eq!(super::grapheme_breaks(["e", "\u{301}", "👩", "\u{200d}", "💻", "x"].into_iter()), vec![0, 3, 14, 15]);
     }
 
     #[test]
