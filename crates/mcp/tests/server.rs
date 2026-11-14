@@ -1397,6 +1397,24 @@ fn eval_waits_for_a_promise_and_runs_top_level_await() {
     assert!(error && r.as_str().unwrap().contains("pending"), "{r}");
 }
 
+#[test]
+fn eval_settles_promises_from_timers_digest_and_fetch() {
+    let base = common::serve_route(eval_pages);
+    let mut s = Server::start();
+    let (r, error) = s.tool("open", json!({"url": format!("{base}/"), "timeout_ms": 1500}));
+    assert!(!error, "{r}");
+    let (r, error) = s.tool("eval", json!({"js": "(async()=>{const d=await crypto.subtle.digest('SHA-256',new Uint8Array([97]));return {ok:true,n:d.byteLength}})()"}));
+    assert!(!error && r.to_string().contains("\"ok\":true"), "{r}");
+    let (r, error) = s.tool("eval", json!({"js": "const v = await new Promise(r => setTimeout(() => r(7), 50)); return {v}"}));
+    assert!(!error && r.to_string().contains("\"v\":7"), "{r}");
+    let (r, error) = s.tool("eval", json!({"js": "fetch('/favicon.ico').then(r => ({status: r.status}))"}));
+    assert!(!error && r.to_string().contains("\"status\":200"), "{r}");
+    let (r, error) = s.tool("eval", json!({"js": "window.__t = null; setTimeout(() => { window.__t = 'done' }, 50); 'started'"}));
+    assert!(!error && r == json!("started"), "{r}");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert_eq!(s.tool("eval", json!({"js": "String(window.__t)"})), (json!("done"), false));
+}
+
 fn eval_json_pages(_: &str, _: &str, _: &str, _: Option<&str>) -> (u16, &'static str, Vec<u8>) {
     (200, "text/html", b"<!doctype html><title>eval</title><div id=out class='a b'>x</div><p>one</p><p>two</p>".to_vec())
 }
