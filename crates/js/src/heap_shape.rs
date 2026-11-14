@@ -54,6 +54,8 @@ pub(super) const A_ACC: u8 = 8;
 pub(super) const MAX_PROPS: usize = 128;
 /// Most shapes. Past it no new shape is made and the object that needs one goes to dictionary mode.
 pub(super) const SHAPE_CAP: usize = 65_536;
+/// Entries of the table of certified `for-in` tails (`Heap::enum_tail`).
+pub(super) const ENUM_TAILS: usize = 16;
 /// The shape of an empty ordinary object, of an empty array (its only entry is `length`, slot 0) and of an empty exotic object.
 pub(super) const ROOT: u32 = 1;
 pub(super) const ROOT_ARRAY: u32 = 2;
@@ -1004,6 +1006,8 @@ pub struct IcStats {
     pub add_hits: u64,
     pub fill_store: u64,
     pub fill_add: u64,
+    /// `for-in` loops that stopped at a certified prototype tail (`Heap::enum_tail_clean`).
+    pub enum_tail_skips: u64,
 }
 
 // ---------- shape sweep (step A6) ----------
@@ -1420,6 +1424,51 @@ impl Heap {
             self.proto_epoch = self.proto_epoch.saturating_add(1);
             self.ic_stats.epoch_bumps += 1;
         }
+    }
+
+    /// `for-in`: the chain that starts at `p` has no enumerable string key, so the loop can stop before `p`. `true` only for a tail that
+    /// `enum_tail_certify` recorded at the current `proto_epoch`. A change of a key, an attribute or a prototype of a tail object bumps
+    /// the epoch (`certify` flags each object `ic_chain`). Index keys are not covered by the epoch, so each use checks that no tail
+    /// object has an element, and that no object is exotic (a proxy, a view, a String wrapper, a host object) or asks the host for
+    /// `on*` names. The check is about 8 loads for each tail object.
+    #[inline]
+    pub fn enum_tail_clean(&mut self, p: ObjId) -> bool {
+        match self.enum_tail[p.slot() % ENUM_TAILS] {
+            Some((q, epoch)) if q == p && epoch == self.proto_epoch && self.tail_plain(p) => {
+                self.ic_stats.enum_tail_skips += 1;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Every object on the chain from `p` is ordinary, has no element and no host-defined names.
+    fn tail_plain(&self, p: ObjId) -> bool {
+        let mut cur = Some(p);
+        while let Some(c) = cur {
+            let Some(ob) = self.objects.get(c.index, c.gn) else { return false };
+            if ob.exotic != 0 || ob.lazy & (LAZY_ONS | LAZY_CHAIN) != 0 || !ob.elems.is_empty() || ob.index_keys() != 0 {
+                return false;
+            }
+            cur = ob.proto;
+        }
+        true
+    }
+
+    /// A `for-in` walked the chain from `p` to its end and saw no enumerable string key on any object (shadowed keys included). Record
+    /// it, if no object of the chain is exotic or lazy. Nothing ran between the walk and this call that could add a key: the walk
+    /// reads flags and the heap-stored prototypes only, and `tail_plain` refuses every object that would call a host or a trap.
+    pub fn enum_tail_certify(&mut self, p: ObjId) {
+        if self.proto_epoch == u32::MAX || !self.tail_plain(p) {
+            return;
+        }
+        let mut cur = Some(p);
+        while let Some(c) = cur {
+            let ob = self.objects.get_mut(c.index, c.gn).expect("tail_plain found it");
+            ob.ic_chain = true;
+            cur = ob.proto;
+        }
+        self.enum_tail[p.slot() % ENUM_TAILS] = Some((p, self.proto_epoch));
     }
 
     /// The counters of the cache.

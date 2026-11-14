@@ -10683,3 +10683,48 @@ Gates: `cargo test --release --workspace --no-fail-fast`: 3,956 passed, 8 failed
 Limits made unneeded: none.
 
 Not tested: a text with a lone surrogate or invalid UTF-8 in a shared body beyond `from_utf8_lossy` (the table keys the lossy text); `responseText`, `innerHTML` and `textContent` sharing (the design lists them; not built); a live run; CPU of the threshold on an idle machine; the table's own cost with thousands of distinct large bodies (an entry is 32 bytes, dropped at the next collect).
+
+## R2-A build 1: `for-in` stops at a prototype tail with no enumerable key (2026-11-14)
+
+Owner decision (2026-11-14): build D1, then D2a of [design-heavy-js-journeys.md](design-heavy-js-journeys.md) as two PRs, in that order. This section is PR 1 (D1). D2a follows in its own section.
+
+What I built:
+
+- `Heap::enum_tail_clean(p)` and `Heap::enum_tail_certify(q)` (`heap_shape.rs`). A table of 16 entries (`Heap::enum_tail`, 256 bytes, direct-mapped by the slot of the first object) holds tails that a `for-in` found to hold no enumerable string key, each with the `proto_epoch` of that moment.
+- `Interp::for_in_keys` (`eval.rs`) tracks the run of objects after the receiver that have no enumerable key. The walk peeks the enumerability of shadowed keys too, so a hidden enumerable key keeps the run dirty. When the walk reaches the end of the chain, or an already certified tail, it certifies the run. A later walk stops before a certified tail. The receiver's own keys are always walked.
+- Invalidation: the design said "a shape count or a realm epoch". I reused the inline cache epoch (`proto_epoch`), not a new one. `certify` flags each tail object `ic_chain`. A change of a key, an attribute (the enumerable bit too) or a prototype of a flagged object bumps the epoch (`chain_changed`: `ordinary_define`, `delete`, `set_prototype_of`, `set_integrity`, `add_lazy_prototype`). That covers `defineProperty`, `defineProperties`, `Object.assign`, assignment, `delete`, `Object.setPrototypeOf` and `__proto__`. The inline caches already need these events, so no new write path is hooked. After a bump the next loop walks the tail again (about 52 peeks) and certifies it again.
+- Not covered by the epoch, so checked at each use (`tail_plain`, about 8 loads per tail object): no tail object is exotic (proxy, typed array, String wrapper, host object with named properties), none has `LAZY_ONS` or `LAZY_CHAIN` (host `on*` accessors), and none has an element or an index key. The epoch does not see element writes (`splice_dense` and the other dense paths write `elems` directly).
+- Spec order and shadowing are kept: a tail is skipped only when no object of it has an enumerable string key, so nothing can be yielded from it, and its keys cannot hide a key of a closer object (those are walked first). The proxy rule (`px_for_in_has`) is unchanged.
+- Steps: a skipped key does not charge a `tick`. The step charge of a `for-in` now follows the work done (own keys), not the length of the chain. No limit is removed.
+- Memory: 256 bytes per heap. A certified object has `ic_chain` set; `add_data_fast` takes the general path for it, as for any prototype that an inline cache walked.
+
+Tests (`eval_forin_tests.rs`; written first, they passed on the old code except the counter test):
+
+- 33 programs against Node 22 (one fresh context for each): an enumerable key added to `Array.prototype` or `Object.prototype` before, between and during the loop; `defineProperty` with `enumerable` flips; `Object.assign`; `defineProperties`; an accessor; an index key on a prototype; a non-enumerable own key that hides an enumerable key; `setPrototypeOf` and `__proto__` on the receiver, a class prototype and `Array.prototype`; an immutable `Object.prototype`; a proxy as receiver and as prototype; a typed array as receiver and as prototype; a String wrapper; a key deleted and a key added during the loop; class and function prototypes; a setter that adds the key; a frozen prototype; symbol keys.
+- The counter test: `Heap` stat `enum_tail_skips` counts one skip for each loop, and a loop over a dirty tail takes more than 60 more steps.
+- Mutation check: with the `ic_chain` flag line removed, 8 of the programs and the counter test fail.
+
+Numbers (archMachine, shared; corpus `virtual`, virtual clock, 3 runs, spread 0.0% on every row):
+
+| `rust-book-search` | Instructions | Change |
+|---|---:|---:|
+| baseline `f6415364` (+ replay patch + clock) | 16,606.0 M | |
+| main `5bc18d14` | 16,318.6 M | |
+| D1 | 13,456.9 M | -2,861.7 M (-17.5%) against main, -3,149 M (-19.0%) against the baseline |
+
+- The design prototype gave 13,446 M; the build gives 13,457 M (+11 M for the checks). Criterion 4 needs 12,774 M or less: **not met by D1 alone** (13,457 M is 1.234x the baseline; the target is 1.3x). The regex table (PR 2) is the next step.
+- The first build gave only 15,843 M: the walk stopped at the certified `Object.prototype` and never certified `Array.prototype`, so every array loop walked it again. I found it with a temporary counter and fixed it (the run before an already certified tail is certified too).
+- Wall time (weak, loaded machine): 1,650 ms (baseline), 1,640 ms (main), 1,386 ms and 1,367 ms (D1; one run 2,326 ms under load). Peak RSS 129 MiB, 126 MiB, 126 MiB.
+- 47 journeys, `journeys.sh compare --clock virtual --runs 3 --pss`: D1 against main: 95,456 M to 92,267 M (-3.3%); the largest change besides `rust-book-search` is `go-dev-home` -2.1%; no journey grew. PSS sum 1,437 M to 1,397 MiB. D1 against the baseline: 105,183 M to 92,278 M (-12.3%; most of it is the earlier merges). Logs: `/data/claude-tmp/forin/d1-vs-{main,base}.log`.
+- Typing (`keycost.sh`): `#a1` 285.7 M for each key (295.6 M before), `#f0` 291.1 M (301.0 M), load and mount 603.2 M (613.7 M), peak RSS 31.1 MiB at 50 keys.
+
+Gates:
+
+- Cost matrix against main `c4e32a85`: 803 rows, 0 rows over under both allocators, mean -0.14% (glibc). 2 rows fail to run: `parse_load deep 1` and `deep 10` (the stack overflow that main has).
+- `TEST262=/data/claude-tmp/test262 tools/js/test262_check.sh`: gate ok (no directory below the baseline; 37 directories above it, as the baseline file is older than main).
+- `tools/js/exec_diff.sh`: 79 runs, 0 differences.
+- `cargo test --release --workspace --no-fail-fast` (after the rebase on `476c04f9`): `bare-js` 954 passed. Failures that are not mine: the 7 openssl TLS tests (known on main) and `a_changed_file_starts_again_from_zero` (flaky under load; passes alone).
+
+Not tested: a live site (replay only); a page that bumps the epoch between every two loops (the cost then is one extra walk of the tail for each bump, about 24 K instructions, the same order as the walk it replaces); a receiver whose chain has a typed array or a host object before a clean tail (the run after it is certified only if the whole tail is plain); `for-in` over a string primitive does not walk `String.prototype` (it did not before, and Node does; not changed).
+
+Noticed, not changed: a proxy in the prototype chain of a plain object: Node 22 yields no key from behind it, bare yields `inh` (the spec order says it yields it). A `for-in` over a string primitive yields indices only, and no key of `String.prototype` or `Object.prototype`, where Node does.

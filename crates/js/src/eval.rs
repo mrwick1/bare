@@ -3847,23 +3847,45 @@ impl<'p> Interp<'p> {
         let mut seen: FxSet<PropertyKey> = FxSet::default();
         let mut out = Vec::new();
         let mut proxied = false;
+        // The first object of the run of objects, after the receiver, that have no enumerable key. A walk to the end of the chain that
+        // ends in such a run records it (`Heap::enum_tail_certify`), and a later walk stops before it (`Heap::enum_tail_clean`).
+        let (mut first, mut clean_from) = (true, None);
         loop {
             let proxy = self.heap.is_proxy(o);
             proxied |= proxy;
+            let mut dirty = proxy;
             for k in self.property_keys(o)? {
                 self.tick()?;
-                if matches!(k, PropertyKey::Symbol(_)) || !seen.insert(k) {
+                if matches!(k, PropertyKey::Symbol(_)) {
+                    continue;
+                }
+                let new = seen.insert(k);
+                // A key that a closer object hides still counts for the run: a hidden enumerable key is one more key that the run holds.
+                if !new && (first || dirty) {
                     continue;
                 }
                 // V8 does not ask a proxy for the enumerability of its keys here: it asks at each step of the loop.
                 if proxy || matches!(self.o_peek(o, k)?, Some(p) if p.enumerable()) {
-                    out.push(k);
+                    dirty = true;
+                    if new {
+                        out.push(k);
+                    }
                 }
             }
-            match self.o_get_prototype_of(o)? {
-                Some(p) => o = p,
-                None => break,
+            if !first {
+                clean_from = if dirty { None } else { clean_from.or(Some(o)) };
             }
+            first = false;
+            let next = self.o_get_prototype_of(o)?;
+            // The run ends at the end of the chain or before a tail that is already certified: in both cases nothing above it has an
+            // enumerable key, so the run is certified too (`Array.prototype` before the certified `Object.prototype`).
+            if next.is_none_or(|p| self.heap.enum_tail_clean(p)) {
+                if let Some(q) = clean_from {
+                    self.heap.enum_tail_certify(q);
+                }
+                break;
+            }
+            o = next.expect("is_none_or");
         }
         Ok((out, proxied))
     }
@@ -4106,6 +4128,10 @@ mod statements_tests;
 #[cfg(test)]
 #[path = "eval_ic_tests.rs"]
 mod ic_tests;
+
+#[cfg(test)]
+#[path = "eval_forin_tests.rs"]
+mod forin_tests;
 
 #[cfg(test)]
 #[path = "eval_inspect_tests.rs"]

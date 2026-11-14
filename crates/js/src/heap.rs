@@ -806,6 +806,9 @@ pub struct Heap {
     /// Bumped when an object with `ic_chain` changes its keys, its attributes or its prototype: every prototype and absent cache entry
     /// filled before stops hitting. It saturates: at `u32::MAX` no such entry is filled again.
     proto_epoch: u32,
+    /// Prototype tails that a `for-in` found to hold no enumerable key, with the `proto_epoch` of that moment (`enum_tail_clean`).
+    /// Direct-mapped by the slot of the first object: 16 entries of 16 bytes, so the memory is fixed.
+    enum_tail: [Option<(ObjId, u32)>; shape::ENUM_TAILS],
     ic_stats: IcStats,
     /// The cache entries of the reads with no site (`get_stub`), direct-mapped by the receiver's shape and the key.
     stubs: Box<[(PropertyKey, Ic); shape::STUBS]>,
@@ -856,6 +859,7 @@ impl Heap {
             lazy_key: Default::default(),
             lazy_on_set: Default::default(),
             proto_epoch: 0,
+            enum_tail: [None; shape::ENUM_TAILS],
             ic_stats: IcStats::default(),
             stubs: Box::new([(PropertyKey::Index(0), Ic::EMPTY); shape::STUBS]),
             setup: false,
