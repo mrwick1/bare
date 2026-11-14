@@ -1449,6 +1449,11 @@ impl Document {
     /// an element that has no list yet: that would borrow the cache again.
     #[inline(always)]
     pub fn with_classes<R>(&self, el: NodeId, f: impl FnOnce(&[ClassId]) -> R) -> R {
+        // An element with no attribute at all (most of them on a page with no class) costs one load and one compare.
+        let NodeData::Element { attrs, .. } = self.nodes[el.index()].data else { return f(&[]) };
+        if attrs.len == 0 {
+            return f(&[]);
+        }
         if let Some(r) = self.class_cache.borrow().get(el.index()) {
             return f(r);
         }

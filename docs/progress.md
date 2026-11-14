@@ -11232,3 +11232,48 @@ Per journey (medians of runs 1 to 3, spread = (max - min) / median):
 - `craigslist-home` costs 47 G and 749 MiB peak RSS on main (48 G and 783 MiB on the baseline) when its page is loaded to `load`. It is the largest journey now, about 4 times the next (`react-docs`, 12.6 G). It deserves a profile of its own.
 - `react-docs` costs 12.6 G with a ratio of 1.00, and `substack-home` 11.6 G with +9.9%: also not touched by our work.
 - `nextjs-docs` still does not pass on replay.
+## 2026-11-14: criterion 3, step 1 spike: class atoms (gate failed)
+
+Owner decision (2026-11-14): build the class-atoms spike first. Build the selector arena (step 2) and the value-keyed memo (step 3) only if the spike saves at least 2.7 K instructions for each element in the restyle pass of `compm_22000`. The spike does not. This section ends at the spike. Steps 2 and 3 are not built.
+
+Gate: **failed**. The restyle pass of `compm_22000` saves 2.40 K instructions for each element. The gate is 2.70 K. Earlier versions: 1.97 K (class names as atoms only), 2.51 K (atoms in the generic name table, before the packed class table).
+
+What was built (`docs/design-style-round2.md`, part A):
+- `ClassId`, a number for a class name, from a packed thread-local class table (`bare_html::dom::ClassTable`: one text buffer, spans, an open-address slot array).
+- An element has a sorted list of `ClassId`, made from its `class` attribute on first use and kept in a per-document cache (`ClassCache`) until `class` is written. An element with no class has no slot.
+- `Simple::Class`, the class buckets of the index, the class filter hash and `Reach` use the number. `has_class(&str)` stays for JS.
+- Split lists (`Big`) find a key group by a hash probe, not a binary search. It saves the 10 to 15 compares of each probe.
+- Quirks mode: the matcher (`matching.rs`, `selector.rs`, `dom.rs`) has no quirks-mode case folding, before or after this change. `has_class_id` compares exact names, like `has_class` did. The test `a_class_is_an_exact_name` covers the case, the repeat and the prefix. To verify: whether another crate folds the case of a class in quirks mode.
+
+Measurements. Machine archMachine, `perf stat -e instructions:u`, 3 runs each, spread under 0.01%, ramp pages over http, `bare-drive` built with `-p bare-drive`. MAIN is `c9ead755aa`. Baseline `f6415364`: `compm_22000` 11,664 M, `rest_13` 10,873 M.
+
+| Ramp (M instructions) | Baseline `f6415364` | MAIN | BRANCH | BRANCH against baseline |
+| --- | ---: | ---: | ---: | ---: |
+| `compm_22000` | 11,664 | 1,828.0 | 1,543.9 | 7.56x lower (goal 10x) |
+| `rest_13` | 10,873 | 1,239.4 | 1,020.3 | 10.66x lower (goal met) |
+
+The other ramps (earlier version of the branch; the last change touched only the empty-attribute path): `compm_*` -3% to -22% against MAIN (`compm_20000` 1,662 to 1,409 M), `rest_*` -10% to -23% (`rest_200` 12,489 to 9,581 M).
+
+The 47 journeys, virtual clock, corpus `virtual-settled`, 3 runs (earlier version): sum of medians 45,823.8 to 45,155.3 M (-1.5%), cpu_ms -1.4%, PSS sum -1.8%. Worst: `python-docs-search-results` +2.2% (2,453.8 to 2,507.8 M; it interns many distinct class names).
+
+Memory, `bare-stress scale css`, 2 runs each, cases of 5 MB or more (78 cases): 6 cases grow by more than 2%, all with many distinct class names: `css-escapes` 10,000,000 +11.3% (60.1 to 66.9 MB), `css-is-wide` 20000 +9.7%, 200000 +8.3%, 2000000 +5.9%, `css-class-index` 20000 +3.1%, 200000 +2.9%. Three cases shrink: `css-selector-list` 500000 -15.2%, `css-many-classes` 500000 -11.1%, `css-class-index` 2000000 -3.8%. The criterion "memory must not grow" is **not met**. Cause (hypothesis): the class table keeps one copy of each name, and the per-element list and the cache slot are new memory; a name used once costs more than before.
+
+Cost matrix (803 rows, MAIN `c9ead755aa` against BRANCH, both allocators): **5 rows over 0.5% under both allocators**: `flex-freeze-many` 2000 and 20000 (+0.64%, +0.66%), `grid-explicit-rows` 50000 (+0.53%), `fragment_load replace 10` (+0.79%), `sheets_load dynamic 10` (+0.69%). Mean glibc -0.02%, jemalloc +0.59% on the 7 rows that moved. Callgrind of `bare-stress run block-wide 20000` (element with no class): +1.5 M of 112 M; `element_hashes` +2.4 M, the ancestor-filter add and remove closures +0.7 M. The cost is the call and the closure of `with_classes` on an element that has an attribute but no `class`. Four versions of `with_classes` were tried:
+
+| Version | Rows over under both allocators |
+| --- | ---: |
+| First (cache first, then attribute scan) | 63 |
+| Return at once when the element has no attribute (kept) | 5 |
+| Same, plus a document flag "no list made yet" | 12 |
+| Same, plus an `#[inline(never)]` miss function | more than 12 |
+| Kept version, plus a `class` test in `element_hashes` | 49 |
+
+Per the 2-attempt rule I stopped here.
+
+Checks: `cargo test --release --workspace --no-fail-fast`: only known failures (7 openssl TLS tests; `a_changed_file_starts_again_from_zero` and `a_hidden_iframe_download_is_saved`, flaky under load). The new tests (`class_atoms_follow_the_class_attribute`, `has_class_id_equals_has_class`, `the_class_table_gives_one_number_to_a_name`, `a_class_is_an_exact_name`, `a_big_list_finds_its_groups_by_key`) pass. `keycost` (page `typing`): `#a1` 285.5 M for each key, `#f0` 290.9 M; the load of 50 keys is 14,878.6 M against 14,878.8 M on MAIN; peak RSS 30.7 MiB at 50 keys.
+
+Where the 2.7 K did not come from: the restyle pass with all memo hits costs 5.4 K for each element on MAIN. The class work was about 3 K of it by the R2-E estimate. The spike removes 2.40 K. The rest is the memo key, the style compare and the walk, which the selector arena and the value-keyed memo (steps 2 and 3) would change.
+
+Not tested: steps 2 and 3; wall time; the live sites; test262 and exec_diff (no change in `crates/js`); quirks-mode class matching (the engine has none in these files); the memory cases with 3 or more runs.
+
+Noticed, not changed: a `while pgrep -f` wait loop in a background command matches its own command line and never ends.
