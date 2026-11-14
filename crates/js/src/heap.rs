@@ -1141,7 +1141,7 @@ impl Heap {
 
     /// The code units of a string. Borrowed from the heap: no copy. A rope is flattened by the first call (the units are then kept in the
     /// rope, so a second call is a read), in a loop with its own stack: a deep rope does not use the native stack.
-    #[inline]
+    #[inline(always)]
     pub fn str_units(&self, s: StrId) -> R<&[u16]> {
         match self.strings.get(s.index, s.gn) {
             Some(st) => Ok(&st.units),
@@ -1204,7 +1204,7 @@ impl Heap {
         r.flat.get_or_init(|| out.into_boxed_slice())
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn str_len(&self, s: StrId) -> R<usize> {
         match self.strings.get(s.index, s.gn) {
             Some(st) => Ok(st.units.len()),
@@ -1219,6 +1219,7 @@ impl Heap {
     }
 
     /// `s.charCodeAt(i)`; `None` when out of range (JS gives NaN).
+    #[inline(always)]
     pub fn code_unit_at(&self, s: StrId, i: usize) -> R<Option<u16>> {
         Ok(self.str_units(s)?.get(i).copied())
     }
