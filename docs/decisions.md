@@ -2126,3 +2126,12 @@ Retain hint expressions with the element's inline arena. Rebase sheet, inline an
 ## 2026-11-14: include deferred colors in cache byte accounting
 
 Count the shared deferred arena and each color expression's owned nodes and text in rule-set heap bytes. Main introduced cache byte accounting after the color branch was measured. The rebased build exposed the obsolete variable-arena reference. The cache bound must include the replacement storage.
+
+
+## Grapheme-safe additional word breaks
+
+Approved on 2026-11-14. Issue #467. Add inherited overflow-wrap and word-break properties. Keep word-wrap as an alias in parsing and JavaScript accessors. Keep both values in the core style. The measured style size rises from 856 to 872 bytes.
+
+Use the existing ICU4X segmenter version for affected unbreakable units. Join source parts once. Keep UTF-8 source offsets and inline edges when a cluster crosses DOM nodes. Share opportunities and measured prefix widths with intrinsic sizing. Anywhere and break-all reduce min-content widths; break-word keeps the previous minimum. Preserve the ordinary path and no-wrap white-space rules.
+
+A conservative Styles hint follows the existing spacing hint. It skips the added path on ordinary pages. It does not replace either property value or add a global side lookup. Pending Item fields remain unchanged. Their measured size is 24 bytes; the previous 20-byte comment was inaccurate. See [the approved design](rendering-wrap-design.md).

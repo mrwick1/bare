@@ -34,6 +34,8 @@
 //! below the next float that ends (CSS 2.1, 9.5). A float in the middle of a line goes on that line if it fits next to
 //! what is already there, and the text on the line moves aside. If it does not fit, it waits for the next line.
 
+use crate::breaks::{self, Point, Run};
+use crate::text::Wrap;
 use crate::Cx;
 use crate::block::{self, MAX_DEPTH, Pos, Space, border_padding, clear_sides, resolve};
 use crate::boxes::Kind;
@@ -126,7 +128,7 @@ pub struct Lines {
 }
 
 /// Something on a line, before its fragments are written. `x` is from the start of the line (or of `pending`).
-/// 20 bytes: a line of 1,000,000 units in one piece (no space to break at) keeps 1,000,000 of them.
+/// 24 bytes in the measured build. Extra wrapping state stays outside each item.
 enum Item {
     /// Text of one node: the bytes `start..end`, `w` pixels wide.
     Text { node: NodeId, start: u32, end: u32, x: f32, w: f32 },
@@ -216,20 +218,24 @@ struct Aligned {
     shift: f32,
 }
 
-/// The pieces of text that has `letter-spacing` or `word-spacing`, given to the breaker (the loop of `lines`, with the spacing added to
-/// the widths). Not inline: it is for the rare page, and the loop of `lines` must stay as small as it is.
+/// The opted-in path for spacing or extra break opportunities. Keep the ordinary
+/// piece loop small; joined grapheme work runs only if the pending unit overflows.
 #[cold]
 #[inline(never)]
-fn spaced_pieces(b: &mut Breaker, node: NodeId, text: &str, (ws, transform, metrics): (WhiteSpace, Transform, Metrics), sp: (f32, f32), flow: &mut Flow) {
+fn spaced_pieces<const WRAPS: bool>(b: &mut Breaker<'_, '_, WRAPS>, node: NodeId, text: &str, (ws, transform, metrics): (WhiteSpace, Transform, Metrics), (sp, wrap): ((f32, f32), Wrap), flow: &mut Flow) {
     for piece in text::pieces(text, ws, transform, flow) {
         match piece {
-            Piece::Word { start, end, width } => b.add_text(node, start, end, metrics.px(width) + font::extra(&text[start as usize..end as usize], sp)),
+            Piece::Word { start, end, width } => {
+                if WRAPS { b.pending_wrap |= wrap != Wrap::Normal; }
+                b.add_text(node, start, end, metrics.px(width) + font::extra(&text[start as usize..end as usize], sp));
+            }
             Piece::Space { start, end, width } if ws.wrap => {
                 b.commit();
                 b.add_space(node, start, end, metrics.px(width) + font::extra_spaces(width, sp));
             }
             Piece::Space { start, end, width } => b.add_text(node, start, end, metrics.px(width) + font::extra_spaces(width, sp)),
             Piece::Tab { at } => {
+                if WRAPS { b.pending_wrap |= wrap != Wrap::Normal; }
                 let stop = metrics.px(8 * LETTER) + 8.0 * (sp.0 + sp.1);
                 let x = b.x + b.pending_w;
                 b.add_text(node, at, at + 1, if stop > 0.0 { ((x / stop).floor() + 1.0) * stop - x } else { 0.0 });
@@ -239,13 +245,14 @@ fn spaced_pieces(b: &mut Breaker, node: NodeId, text: &str, (ws, transform, metr
                 b.commit();
                 b.content = true;
                 b.finish();
+                if WRAPS { b.pending_word_start = true; }
             }
         }
     }
 }
 
 /// The line breaker. JS: an object with the state of the line that is being filled.
-struct Breaker<'c, 'a> {
+struct Breaker<'c, 'a, const WRAPS: bool> {
     cx: &'c mut Cx<'a>,
     block: NodeId,
     /// `text-align` of the block, with `start` and `end` turned into `left` and `right` by its direction.
@@ -263,6 +270,8 @@ struct Breaker<'c, 'a> {
     /// The unit that waits for the next break opportunity, and its width.
     pending: Vec<Item>,
     pending_w: f32,
+    pending_wrap: bool,
+    pending_word_start: bool,
     pending_content: bool,
     /// The inline boxes that are open now (not culled), outer first. A stack: a box closes before the box around it.
     open: Vec<Open>,
@@ -375,6 +384,11 @@ fn inline_box(cx: &Cx, node: NodeId, width: f32) -> Inline {
 /// Lay out the run `first..=last` of the children of `block` in lines `width` pixels wide. The fragments are relative to
 /// the top-left of the first line: the caller moves them. `bfc`: where that top-left is in the BFC, for the floats.
 pub fn lines(cx: &mut Cx, block: NodeId, first: NodeId, last: NodeId, width: f32, bfc: (f32, f32)) -> Lines {
+    if cx.tree.styles.wrapping() { lines_with::<true>(cx, block, first, last, width, bfc) }
+    else { lines_with::<false>(cx, block, first, last, width, bfc) }
+}
+
+fn lines_with<const WRAPS: bool>(cx: &mut Cx, block: NodeId, first: NodeId, last: NodeId, width: f32, bfc: (f32, f32)) -> Lines {
     let tree = cx.tree;
     let strut = reach(cx, block);
     let own = tree.style(block);
@@ -386,7 +400,7 @@ pub fn lines(cx: &mut Cx, block: NodeId, first: NodeId, last: NodeId, width: f32
         Value::Keyword(k) => k,
         _ => Keyword::Left,
     };
-    let mut b = Breaker {
+    let mut b = Breaker::<WRAPS> {
         cx,
         block,
         align,
@@ -397,6 +411,8 @@ pub fn lines(cx: &mut Cx, block: NodeId, first: NodeId, last: NodeId, width: f32
         trail: None,
         pending: Vec::new(),
         pending_w: 0.0,
+        pending_wrap: false,
+        pending_word_start: true,
         pending_content: false,
         open: Vec::new(),
         opened: 0,
@@ -426,12 +442,17 @@ pub fn lines(cx: &mut Cx, block: NodeId, first: NodeId, last: NodeId, width: f32
                 let style = tree.style(node);
                 let (ws, transform, metrics) = (WhiteSpace::of(style), Transform::of(style), Metrics::of(style));
                 let text = tree.doc.text(span);
+                let wrap = if WRAPS { Wrap::of(style, ws) } else { Wrap::Normal };
                 if tree.styles.spaced() {
                     let sp = font::spacing(true, style);
                     if sp != (0.0, 0.0) {
-                        spaced_pieces(&mut b, node, text, (ws, transform, metrics), sp, &mut flow);
+                        spaced_pieces(&mut b, node, text, (ws, transform, metrics), (sp, wrap), &mut flow);
                         continue;
                     }
+                }
+                if wrap != Wrap::Normal {
+                    spaced_pieces(&mut b, node, text, (ws, transform, metrics), ((0.0, 0.0), wrap), &mut flow);
+                    continue;
                 }
                 for piece in text::pieces(text, ws, transform, &mut flow) {
                     match piece {
@@ -454,6 +475,7 @@ pub fn lines(cx: &mut Cx, block: NodeId, first: NodeId, last: NodeId, width: f32
                             b.commit();
                             b.content = true;
                             b.finish();
+                            if WRAPS { b.pending_word_start = true; }
                         }
                     }
                 }
@@ -488,6 +510,7 @@ pub fn lines(cx: &mut Cx, block: NodeId, first: NodeId, last: NodeId, width: f32
                 b.pending_content = true;
                 b.commit();
                 flow.after_space = false;
+                if WRAPS { b.pending_word_start = false; }
             }
             Event::Float(node) => {
                 // Not a break opportunity: the unit that waits stays as it is.
@@ -522,12 +545,14 @@ pub fn lines(cx: &mut Cx, block: NodeId, first: NodeId, last: NodeId, width: f32
                 b.content = true;
                 b.finish();
                 flow = Flow::new();
+                if WRAPS { b.pending_word_start = true; }
             }
             Event::Block(node) => {
                 b.commit();
                 b.finish();
                 b.block_in_inline(node);
                 flow = Flow::new();
+                if WRAPS { b.pending_word_start = true; }
             }
         }
     }
@@ -537,7 +562,7 @@ pub fn lines(cx: &mut Cx, block: NodeId, first: NodeId, last: NodeId, width: f32
     Lines { height: if any { b.y } else { 0.0 }, any, baseline: b.baseline }
 }
 
-impl Breaker<'_, '_> {
+impl<const WRAPS: bool> Breaker<'_, '_, WRAPS> {
     /// Add text to the unit that waits. Text of the same node right after it joins the same item.
     #[inline(always)]
     fn add_text(&mut self, node: NodeId, start: u32, end: u32, w: f32) {
@@ -558,6 +583,7 @@ impl Breaker<'_, '_> {
     /// after it. If the line ends here, the space hangs: it does not count.
     #[inline(always)]
     fn add_space(&mut self, node: NodeId, start: u32, end: u32, w: f32) {
+        if WRAPS { self.pending_word_start = true; }
         if let Some(Item::Text { node: n, end: e, w: pw, .. }) = self.line.last_mut()
             && *n == node
             && *e == start
@@ -650,7 +676,86 @@ impl Breaker<'_, '_> {
     }
 
     /// A break opportunity: put the unit that waits on this line, or on a new line if it does not fit.
+    #[inline(always)]
     fn commit(&mut self) {
+        if WRAPS && self.pending_wrap && self.x + self.pending_w > self.avail + 0.01 && self.wrap_pending() { return; }
+        self.commit_ready();
+    }
+
+    /// Only an overflowing opted-in unit pays for joined text and ICU. Each source
+    /// item and grapheme is visited once. The ordinary Item representation stays small.
+    #[cold]
+    fn wrap_pending(&mut self) -> bool {
+        let tree = self.cx.tree;
+        let mut runs = Vec::new();
+        let mut before = None;
+        for (i, item) in self.pending.iter().enumerate() {
+            match *item {
+                Item::Open {node, x} => {
+                    if before.is_none() {
+                        before = Some(Point {item:i, byte:None, x:x - inline_box(self.cx, node, self.width).margins.0});
+                    }
+                }
+                Item::Text {node, start, end, x, ..} => {
+                    let NodeData::Text(span) = *tree.doc.data(node) else { continue };
+                    let style = tree.style(node);
+                    runs.push(Run {
+                        item:i, start, text:&tree.doc.text(span)[start as usize..end as usize], x,
+                        before:before.take().unwrap_or(Point {item:i, byte:Some(start), x}),
+                        metrics:Metrics::of(style), transform:Transform::of(style),
+                        spacing:font::spacing(tree.styles.spaced(), style),
+                        policy:Wrap::of(style, WhiteSpace::of(style)),
+                    });
+                }
+                _ => {}
+            }
+        }
+        let emergency = self.pending_w > self.width + 0.01;
+        let mask = breaks::ORDINARY | if emergency { breaks::EMERGENCY } else { 0 };
+        let mut cuts: Vec<_> = breaks::opportunities(&runs, self.pending_word_start, self.x).into_iter()
+            .filter(|op| op.kinds & mask != 0).map(|op| op.point).collect();
+        if cuts.is_empty() { return false; }
+        let ordinary = runs.iter().any(|run| run.policy == Wrap::All);
+        if !ordinary && self.content { self.finish(); }
+        cuts.push(Point {item:self.pending.len(), byte:None, x:self.pending_w});
+        let mut source: std::collections::VecDeque<_> = std::mem::take(&mut self.pending).into_iter().enumerate().collect();
+        let mut from = 0.0;
+        let mut next = 0;
+        while next < cuts.len() {
+            let room = self.avail - self.x;
+            if cuts[next].x - from > room + 0.01 && self.content {
+                self.finish();
+                continue;
+            }
+            let mut last = next;
+            while last + 1 < cuts.len() && cuts[last + 1].x - from <= room + 0.01 { last += 1; }
+            let cut = cuts[last];
+            while source.front().is_some_and(|(i, _)| *i < cut.item) {
+                let (_, mut item) = source.pop_front().unwrap();
+                item.shift(-from);
+                self.pending.push(item);
+            }
+            if let Some(stop) = cut.byte
+                && source.front().is_some_and(|(i, _)| *i == cut.item)
+            {
+                let (i, item) = source.pop_front().unwrap();
+                let Item::Text {node, start, end, x, w} = item else { unreachable!("a text cut names text") };
+                let width = cut.x - x;
+                if stop > start { self.pending.push(Item::Text {node, start, end:stop, x:x - from, w:width}); }
+                if stop < end { source.push_front((i, Item::Text {node, start:stop, end, x:cut.x, w:w - width})); }
+            }
+            self.pending_w = cut.x - from;
+            self.pending_content = true;
+            self.pending_wrap = false;
+            self.commit_ready();
+            next = last + 1;
+            from = cut.x;
+            if next < cuts.len() { self.finish(); }
+        }
+        true
+    }
+
+    fn commit_ready(&mut self) {
         if self.pending.is_empty() {
             return;
         }
@@ -717,6 +822,7 @@ impl Breaker<'_, '_> {
         self.content |= self.pending_content;
         self.pending_w = 0.0;
         self.pending_content = false;
+        if WRAPS { self.pending_wrap = false; }
     }
 
     /// The line is done: find its height and baseline, write its fragments, and start the next line.
@@ -1028,6 +1134,132 @@ mod tests {
     /// The fragments inside the `body`, without the lines of `html` and `body`.
     fn inside(html: &str, css: &str) -> String {
         dump(html, css).lines().skip(2).map(|l| format!("{}\n", l.trim_start())).collect()
+    }
+
+    #[test]
+    fn long_identifiers_wrap_only_when_requested() {
+        let html = format!("<div id=x>{}</div>", "x".repeat(120));
+        let base = "div { width:200px; font-size:14px; line-height:20px }";
+        assert_eq!(rect(&html, base, "x").h, 20.0);
+        for rule in ["overflow-wrap:anywhere", "overflow-wrap:break-word", "word-break:break-all"] {
+            let css = format!("{base} div {{ {rule} }}");
+            assert_eq!(rect(&html, &css, "x").h, 120.0, "{rule}");
+        }
+    }
+
+    #[test]
+    fn wrapping_keeps_clusters_together_across_inline_nodes() {
+        use bare_html::dom::NodeData;
+        for (html, original, cluster) in [
+            ("<div id=x>e<span>\u{301}</span>x</div>", "e\u{301}x", "e\u{301}"),
+            ("<div id=x>👩<span>\u{200d}</span>💻x</div>", "👩\u{200d}💻x", "👩\u{200d}💻"),
+        ] {
+            let css = "div { width:8.4px;font-size:14px;line-height:20px;overflow-wrap:anywhere }";
+            let (doc, layout) = run(html, css);
+            let mut joined = String::new();
+            let mut cluster_y = None;
+            for fragment in &layout.fragments {
+                let Kind::Text {start, end} = fragment.kind else { continue };
+                let NodeData::Text(span) = *doc.data(fragment.node) else { panic!("text node") };
+                let text = &doc.text(span)[start as usize..end as usize];
+                if joined.len() < cluster.len() {
+                    let y = *cluster_y.get_or_insert(fragment.rect.y);
+                    assert_eq!(fragment.rect.y, y, "cluster split before {text:?}");
+                } else {
+                    assert!(fragment.rect.y > cluster_y.unwrap(), "next cluster needs a new line");
+                }
+                joined.push_str(text);
+            }
+            assert_eq!(joined, original, "all source bytes occur once");
+            assert_eq!(rect(html, css, "x").h, 40.0);
+        }
+    }
+
+    #[test]
+    fn break_all_uses_the_current_line_but_emergency_wrapping_moves_the_word() {
+        let html = format!("<div id=x>aaa <span>{}</span></div>", "x".repeat(120));
+        let base = "div {width:200px;font-size:14px;line-height:20px}";
+        assert_eq!(rect(&html, &format!("{base} div {{word-break:break-all}}"), "x").h, 120.0);
+        assert_eq!(rect(&html, &format!("{base} div {{overflow-wrap:anywhere}}"), "x").h, 140.0);
+    }
+
+    #[test]
+    fn wrapping_preserves_inline_edges_spacing_and_case_expansion() {
+        let html = "<div id=x><span style='border:1px solid;padding:1px'>xxxxxxxxxx</span></div>";
+        assert_eq!(rect(html, "div {width:25px;font-size:14px;line-height:20px;overflow-wrap:anywhere}", "x").h, 100.0);
+        let html = format!("<div id=x>{}</div>", "x".repeat(120));
+        assert_eq!(rect(&html, "div {width:200px;font-size:14px;line-height:20px;letter-spacing:2px;word-break:break-all}", "x").h, 140.0);
+        assert_eq!(rect(&html, "div {width:200px;font-size:14px;line-height:20px;letter-spacing:-2px;word-break:break-all}", "x").h, 80.0);
+        let html = "<div id=x>ßßß</div>";
+        assert_eq!(rect(html, "div {width:17px;font-size:14px;line-height:20px;text-transform:uppercase;overflow-wrap:anywhere}", "x").h, 60.0);
+    }
+
+    #[test]
+    fn a_long_wrapped_identifier_keeps_each_source_byte_once() {
+        use bare_html::dom::NodeData;
+        let html = format!("<div id=x>{}</div>", "x".repeat(20_000));
+        let (doc, layout) = run(&html, "div {width:200px;font-size:14px;line-height:20px;word-break:break-all}");
+        let mut bytes = 0;
+        for f in &layout.fragments {
+            if let Kind::Text {start,end} = f.kind {
+                let NodeData::Text(span) = *doc.data(f.node) else { panic!("text") };
+                assert!(doc.text(span).is_char_boundary(start as usize) && doc.text(span).is_char_boundary(end as usize));
+                assert!(f.rect.w <= 200.01);
+                assert_eq!(start, bytes, "source ranges are contiguous and non-overlapping");
+                bytes += end - start;
+            }
+        }
+        assert_eq!(bytes, 20_000);
+        assert_eq!(rect(&html, "div {width:200px;font-size:14px;line-height:20px;word-break:break-all}", "x").h, 17_400.0);
+    }
+
+    #[test]
+    fn a_preserved_newline_restores_capitalization_before_wrapping() {
+        use bare_html::dom::NodeData;
+        let html = "<div><i style='display:inline-block'>z</i><span style='overflow-wrap:normal;white-space:pre'>\n</span>ßßß</div>";
+        let (doc, layout) = run(html, "div {width:17px;font-size:14px;line-height:20px;text-transform:capitalize;overflow-wrap:anywhere}");
+        let first = layout.fragments.iter().find_map(|f| {
+            let Kind::Text {start,end} = f.kind else { return None };
+            let NodeData::Text(span) = *doc.data(f.node) else { return None };
+            (doc.text(span) == "ßßß").then(|| &doc.text(span)[start as usize..end as usize])
+        });
+        assert_eq!(first, Some("ß"), "the expanded first cluster fills the line");
+    }
+
+    #[test]
+    fn an_opted_in_tab_can_break_before_a_normal_word() {
+        let html = format!("<div id=x><span style='white-space:pre-wrap;word-break:break-all'>\t</span><span>{}</span></div>", "x".repeat(100));
+        assert_eq!(rect(&html, "div {width:70px;font-size:14px;line-height:20px}", "x").h, 40.0);
+    }
+
+    #[test]
+    fn additional_breaks_change_flex_and_grid_minimums_except_break_word() {
+        let html = format!("<section><div id=x>{}</div></section>", "x".repeat(120));
+        for display in ["flex", "grid"] {
+            let base = format!("section {{display:{display};width:200px;font-size:14px;line-height:20px;grid-template-columns:1fr}}");
+            for policy in ["overflow-wrap:anywhere", "word-break:break-all"] {
+                let css = format!("{base} div {{ {policy} }}");
+                assert_eq!(rect(&html, &css, "x").w, 200.0, "{display}: {policy}");
+                assert_eq!(rect(&html, &css, "x").h, 120.0);
+            }
+            let css = format!("{base} div {{overflow-wrap:break-word}}");
+            assert!(rect(&html, &css, "x").w > 1000.0, "break-word keeps the unbroken minimum");
+        }
+    }
+
+    #[test]
+    fn a_tiny_box_consumes_whole_clusters_without_losing_source() {
+        let html = format!("<div id=x>{}</div>", "x".repeat(20));
+        assert_eq!(rect(&html, "div {width:1px;font-size:14px;line-height:20px;word-break:break-all}", "x").h, 400.0);
+    }
+
+    #[test]
+    fn wrap_requests_respect_nowrap_and_pre() {
+        let html = format!("<div id=x>{}</div>", "x".repeat(120));
+        for ws in ["nowrap", "pre"] {
+            let css = format!("div {{width:200px;font-size:14px;line-height:20px;overflow-wrap:anywhere;word-break:break-all;white-space:{ws}}}");
+            assert_eq!(rect(&html, &css, "x").h, 20.0);
+        }
     }
 
     #[test]

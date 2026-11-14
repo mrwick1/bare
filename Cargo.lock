@@ -142,6 +142,7 @@ dependencies = [
  "bare-css",
  "bare-html",
  "bare-unicode",
+ "icu_segmenter",
 ]
 
 [[package]]

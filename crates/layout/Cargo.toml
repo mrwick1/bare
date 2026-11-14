@@ -9,3 +9,4 @@ license.workspace = true
 bare-css = { path = "../css" }
 bare-html = { path = "../html" }
 bare-unicode = { path = "../unicode" }
+icu_segmenter = { version = "2.4.0", default-features = false, features = ["compiled_data"] }

@@ -80,6 +80,7 @@ macro_rules! properties {
             pub fn from_core_name(name: &str) -> Option<Property> {
                 match name {
                     $($name => Some(Property::$variant),)*
+                    "word-wrap" => Some(Property::OverflowWrap),
                     _ => None,
                 }
             }
@@ -102,6 +103,8 @@ properties! {
     Clear => "clear",
     Visibility => "visibility",
     WhiteSpace => "white-space",
+    OverflowWrap => "overflow-wrap",
+    WordBreak => "word-break",
     TextAlign => "text-align",
     TextDecoration => "text-decoration-line",
     TextTransform => "text-transform",
@@ -298,6 +301,7 @@ keywords! {
     Visible => "visible", Hidden => "hidden", Collapse => "collapse", Solid => "solid",
     Dashed => "dashed", Dotted => "dotted", Double => "double", Groove => "groove",
     Ridge => "ridge", Inset => "inset", Outset => "outset", Pre => "pre",
+    Anywhere => "anywhere", BreakWord => "break-word", BreakAll => "break-all",
     Nowrap => "nowrap", PreWrap => "pre-wrap", PreLine => "pre-line", BreakSpaces => "break-spaces",
     Underline => "underline", Overline => "overline", LineThrough => "line-through", Uppercase => "uppercase",
     Lowercase => "lowercase", Capitalize => "capitalize", Italic => "italic", Oblique => "oblique",
@@ -1558,6 +1562,8 @@ fn longhand(property: Property, part: Part) -> Option<Value> {
         Visibility => one_of(part, &[K::Visible, K::Hidden, K::Collapse]),
         Direction => one_of(part, &[K::Ltr, K::Rtl]),
         WhiteSpace => one_of(part, &[K::Normal, K::Nowrap, K::Pre, K::PreWrap, K::PreLine, K::BreakSpaces]),
+        OverflowWrap => one_of(part, &[K::Normal, K::Anywhere, K::BreakWord]),
+        WordBreak => one_of(part, &[K::Normal, K::BreakAll]),
         TextAlign => one_of(part, &[K::Left, K::Right, K::Center, K::Justify, K::Start, K::End]),
         TextDecoration => one_of(part, &[K::None, K::Underline, K::Overline, K::LineThrough]),
         TextTransform => one_of(part, &[K::None, K::Uppercase, K::Lowercase, K::Capitalize]),
@@ -1985,6 +1991,22 @@ mod tests {
         assert_eq!(parse("overflow", "hidden auto visible"), vec![]);
         assert_eq!(parse("overflow", "none"), vec![]);
         assert_eq!(parse("overflow-x", "clip"), vec![(OverflowX, k(K::Clip))]);
+    }
+
+    #[test]
+    fn wrapping_properties_and_the_legacy_alias_parse() {
+        for (name, words) in [("overflow-wrap", &["normal", "anywhere", "break-word"][..]), ("word-wrap", &["normal", "anywhere", "break-word"][..]), ("word-break", &["normal", "break-all"][..])] {
+            for word in words {
+                let parsed = parse(name, word);
+                assert_eq!(parsed.len(), 1, "{name}: {word}");
+                let Value::Keyword(k) = parsed[0].1 else { panic!("keyword") };
+                assert_eq!(k.name(), *word);
+            }
+        }
+        assert_eq!(Property::from_name("word-wrap"), Property::from_name("overflow-wrap"));
+        for (name, bad) in [("overflow-wrap", "break-all"), ("word-break", "anywhere"), ("word-break", "keep-all"), ("overflow-wrap", "anywhere normal")] {
+            assert!(parse(name, bad).is_empty());
+        }
     }
 
     #[test]
