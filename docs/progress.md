@@ -9604,3 +9604,65 @@ Branch `t3/register-bytecode-vm-spike`. The tree walker stays the default. The l
 ### Not tested
 
 - Wall time on an idle machine. The 48 journeys and the ramps in `/data/bare-tmp/bm` with the register lane on. A page that throws inside a deep chain of inline calls beyond the unit tests and exec_diff rows. `Error.stack` text of inline frames against Node beyond the exec_diff fixtures. Peak memory of a deep recursion (the register stack grows by `resize`). e16.
+## JS compact objects: three property values inside the object record (2026-11-14, `docs/design-js.md` phase P5)
+
+Status: pushed, not merged. The cost gate has 4 rows over +0.5% under both allocators. The memory target for `python-docs-search-results` is not met.
+
+### What I built
+
+An object keeps its first 3 property values inside its own record. A fourth value moves all values to one `Vec`. The 3 inline values hold the `length` of an array, the `length`, `name` and `prototype` of a function, and the properties of most object literals. An object with 3 or fewer properties needs no allocation outside the slab.
+
+### Layout before and after
+
+Before (80 B record): `proto`, `shape`, flags, `elems: Vec<Option<Value>>` (24 B), `slots: Vec<Value>` (24 B), `dict: Option<Box<PropMap>>` (8 B). The slab adds about 13 B for each object (`Meta` 8 B, `back` 4 B, `marks` 1 B). The values are a separate malloc block. A vector made by `push` has room for 4 values.
+
+After (104 B record): the same fields, but `slots` becomes `repr: Repr` plus `n: u8`. `Repr` is `In([Value; 3])` or `Heap(Vec<Value>)`. They share 48 B (the compiler uses the niche of `Value`; checked with `size_of`). `n` counts the values of `In`. `dict` stays a separate field. It is `Some` exactly when the object is in dictionary mode, and then `repr` is empty.
+
+Bytes for each object, with the slab overhead and the glibc chunk rule (usable size plus 8 B, rounded up to 16 B, at least 32 B). This is arithmetic, not a measurement:
+
+| Object | Before | After |
+| --- | --- | --- |
+| no property (wrapper, `{}`) | 80 + 13 = 93 B | 104 + 13 = 117 B (+24 B) |
+| array with `length` only | 93 + 32 = 125 B | 117 B |
+| literal with 2 properties (exact vector, 32 B) | 93 + 48 = 141 B | 117 B |
+| function (3 properties, exact vector, 48 B) | 93 + 64 = 157 B | 117 B |
+| 4 properties made by `push` (vector of 4 before, vector of 6 after) | 93 + 80 = 173 B | 117 + 112 = 229 B (+56 B) |
+
+An object with no property costs 24 B more. The accounted bytes of a `Number` wrapper are now 125 B. Before, they were at most 120 B (the limit of the test `a_wrapper_costs_one_object_and_one_table_entry`; I did not measure the old value). The limit is now 128 B.
+
+### Numbers (baseline `f6415364` was frozen; this section compares with main `f68e956a`, the base of the branch after the rebase)
+
+All runs use the virtual clock and the recorded corpus. 3 runs each.
+
+- 47 journeys, `tools/bench/journeys.sh compare --clock virtual --runs 3 --pss`: all 47 pass. Sum of median instructions 90,333 M to 89,721 M (-0.7%). The design expected -0.7 points: met. Spread of the same binary: 0.2% or less on 46 journeys, 2.9% on `wikipedia-search` (base).
+- Peak RSS: sum 1,691.8 MiB to 1,672.3 MiB (-1.2%). `python-docs-search-results` 96.9 to 96.4 MiB (-0.5%). `rust-book-search` 131.9 to 126.7 MiB (-4.0%). `react-docs` 102.1 to 99.2 MiB (-2.9%).
+- The design expected about -12 MiB (10%) on `python-docs-search-results`. I got -0.5 MiB: not met. Cause: its heap holds mostly arrays that have one value (88.7k arrays when I counted). An array with only `length` saves 8 B, not 60 B. The estimate of the design is older than the data-literal change. The design's 32 to 40 B record and size-class slabs would save more. I did not build them (see decisions).
+- PSS sum went from 1,298.9 MiB to 1,317.3 MiB (+1.4%) while peak RSS went down. I did not find the cause. Hypothesis: PSS is a sample every 20 ms on a loaded machine. CPU time (+1.4%) and wall time (+1.7%) are also from a loaded machine.
+- Cost matrix (`tools/js/cost_matrix.sh`, 803 rows, minimum of 3 runs, main `f68e956a` against the branch): 393 rows below -0.5%, 406 inside the band, 4 above +0.5% under both allocators. Sum of rows -0.54%. The 4 rows (glibc, jemalloc): `proxy_load keys 1` (+0.69%, +0.53%), `proxy_load keys 10` (+1.04%, +0.74%), `recursion_load react 1000` (+0.68%, +0.68%), `reflect_load keys 10` (+1.44%, +0.52%). `parse_load deep 1` and `10` fail as on main (stack overflow).
+- The 12 rows of the string-atom exception (PR #497) are recovered: `gen_load iterobj` -9.0% and -9.6%, `iterator_load generic` -6.4% and -6.6%, `iterator_load set_diff` and `set_sym` -0.5% to -0.2%, `sc_load custom_iter 10` -10.0%, `tagged_load sites 10` -1.0%, `weak_load dead_cycles 10` -11.0%, `wrapper_load forin` -1.7% and -1.3%, `arrobj_load tosorted 10` 0.0%. I did not measure the instructions of one `new_object_with_shape` call. The 12 rows moved because an object literal now fills inline values and makes no vector.
+- Keycost (`tools/js/typing/keycost.sh`): `#a1` 294.8 to 295.7 M for each key (+0.3%), `#f0` 300.1 to 301.1 M (+0.3%). Load and mount 620.0 M to 613.8 M (-1.0%). Peak RSS at 50 keys 34.3 to 30.7 MiB.
+
+### What went wrong on the way
+
+- A first matrix had 52 rows over +0.5%, up to +10% (`date_load clock`, `web_apis_load base64`, `proxy_load` +7%), and `react-docs` failed (`Object.keys is not a function` after the second page). Cause: `Object::to_shapes` did not clear `dict`, so an object that left dictionary mode kept a stale dictionary and was read as dictionary mode by part of the code. Three tests of `bare-js` failed and showed it. The commit "Drop the dictionary when an object returns to shape mode" fixes it, with the test `leaving_dictionary_mode_drops_the_dictionary_and_keeps_the_values`. I had run only a filtered test set before (`heap`), which hid the failures.
+- My cost analysis of the earlier variants (a 3-way `Repr` with `Dict(Box<PropMap>)`, 96 B) was made before I found this bug. The bug exists only in the 2-way layout, so the numbers of the 3-way variant are not affected by it. I could not separate the effect of the 3-way layout from other causes in the time I had. I kept the 2-way layout with a separate `dict` field, the one that I measured last. I did not show that it is better than the 3-way layout.
+- One more change did not help: a single `n != 0` test for `has_slots`. `proxy_load keys` improved, but `reflect_load keys` went from +1.4% to +2.6% and `arrobj_load freeze`, `lastindexof` and `date_load cap` went over +0.5%. I reverted it. Instruction counts do not depend on load, so the changes come from inlining and code layout. Hypothesis: the 4 remaining rows are the same effect (a few more instructions in `has_property` and `shape_get`: callgrind on `proxy_load keys 1` shows `has_property` +240 k, `shape_get` +165 k of 55.9 M).
+
+### Checks
+
+- `cargo test --release -p bare-js`: 947 tests pass.
+- `cargo test --release --workspace --no-fail-fast`: the 7 known openssl TLS failures and the known `a_hidden_iframe_download_is_saved` failure. No other failure.
+- `TEST262=/data/claude-tmp/test262 tools/js/test262_check.sh`: exit 0, no directory lost a passing test (it lists directories that gained tests since the stored baseline; they come from main).
+- `tools/js/exec_diff.sh`: 79 runs, 0 differences.
+- New tests: values stay readable across the inline limit and after deletes; array `length` and named properties; leaving dictionary mode drops the dictionary.
+
+### Not tested
+
+- The JS ramps of the benchmark round and the `bare-bench` JS rows.
+- Wall time on an idle machine.
+- The peak memory of an object-heavy page other than the three named journeys.
+- The 8-byte `Value`, `proto` stored in the shape, JSON objects with shapes, and the design's size-class slabs. None of them is built.
+
+## Standing exception: PR #512 compact object cost (approved by owner 2026-11-14)
+
+Compact objects leave 4 of 803 cost rows above +0.5% under both allocators: `proxy_load keys 1` (+0.7%), `proxy_load keys 10` (+1.0%), `recursion_load react 1000` (+0.7%) and `reflect_load keys 10` (+1.4%). The owner approved an exception for these 4 rows only. Reason: the 47 journeys use 0.7% fewer instructions and 1.2% less peak RSS, 393 rows are lower by more than 0.5%, and the 12 rows of the PR #497 exception are recovered. The target of 10% less memory on `python-docs-search-results` is not met (-0.5%). PSS rose 1.4%, and the cause is not known.
