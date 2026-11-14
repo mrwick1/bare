@@ -11313,3 +11313,67 @@ Tests: `cargo test --release --workspace --no-fail-fast` after the rebase on `49
 Not tested: the per-element saving in the restyle pass after the fixes (the ramp totals are the measure); the ramps and the keycost after the last change (`compm_22000` and `rest_13` were re-run: 1,554.8 M and 1,040.4 M, as before); wall time; live sites; quirks-mode class folding (the engine has none in these files); test262 and exec_diff (no change in `crates/js`).
 
 Noticed, not changed: 8 of the 47 journeys are slightly above MAIN (largest `docs-rs-home` +0.9%, a 59 M page).
+
+## Profile of `craigslist-home`: why the last page costs 47 G (2026-11-14, docs only)
+
+Task: research, docs only. Design: `docs/design-craigslist.md`. Main `49d6475d` (PR #542). Machine archMachine, `heavy` lock held. Scripts, patches, raw logs: `/data/bare-tmp/r2/craigslist/` (`README.txt` lists them). Nothing of it is in the repository. Symbol build: `CARGO_PROFILE_RELEASE_DEBUG=line-tables-only`, own target dirs.
+
+Owner decision 2026-11-14: profile `craigslist-home` and write a design document before any code. This section and the design are that profile. No product code is changed.
+
+### What I found
+
+- The 47,008 M are not a loop, a poll or a timer. One run is 5 ticks, 8 scripts, 8 timer tasks. 45,474 M (96.7%) run inside one listener: the `load` event of the last injected `<script>`. The listener calls `cl.onStagingComplete.unlock`, which runs every staged AMD factory. The 8 scripts (parse and top-level run) are 470 M (1.0%); the timers 7 M.
+- The page serves its ES5 path because `cl.oldBrowser = !window.SharedWorker || …`, and bare has no `SharedWorker`. Checked in the page: `OB=true SW=undefined`. Chrome 155 on the same page: `oldBrowser` false, `SharedWorker` is a function, 10 requests, no polyfill.
+- On the ES5 path the page loads formatjs polyfills (762 KB + 129 KB), core-js (289 KB) and an ES5 `browsePostings` (1.35 MB). In the formatjs `NumberFormat` and `DateTimeFormat` modules, `shouldPolyfill("en")` answers "polyfill" in bare, so each module runs the best-fit locale matcher: 561 available locales, about 1,125 rules, 1,122 calls of the distance function in all, 38 M instructions each. Probes that fail in bare: `unit:"bit"` long gives `"1E4 bit"` (a browser: `"1E4 bits"`), `DateTimeFormat.prototype.formatRange` is absent; hypothesis (not run or not read in the code): `roundingPriority` is ignored and `supportedLocalesOf(["es"])` is empty.
+- Memory: the JS heap grows 7.3 MiB per 1 G instructions, 3.15 M objects at 432 MiB, RSS 702 MiB there (about 234 B of RSS for each object). One collection runs, at the end of the task: 3.19 M objects, 433 MiB freed; 12 MiB live. `gc_due()` needs call depth 0, and `Interp::collect` refuses a call, so nothing is freed inside a 45 G call chain.
+
+### Numbers
+
+All with `BARE_SEED=1 BARE_CLOCK=virtual`, corpus `virtual-load` (and a copy with the modern bundle, filled live: 1 new file, 360 KB gz). `tools/bench/journeys.sh run --runs 3 --pss` (run 0 plus 3 runs; medians of runs 1 to 3), and `perf stat -e instructions:u`.
+
+| Case | Instructions | Peak RSS | Runs, spread |
+| --- | ---: | ---: | --- |
+| main, `SharedWorker` absent | 47,007.9 M | 749 MiB (PSS 748 MiB, run 0) | 4 runs, 0.002% (3 more `perf stat`: 47,007.7, 47,007.5, 47,006.6 M) |
+| `DateTimeFormat.prototype.formatRange` defined (temporary patch) | 23,949.7 M | 436 MiB | 2 runs |
+| and the 3 `NumberFormat` probes true | 4,148.6 M | 115 MiB | 2 runs |
+| `SharedWorker` defined (a stub function; page serves the modern bundle) | 2,681.9 M | 84 MiB | 4 runs, 0.0% |
+
+Split by subsystem (`perf record -e instructions:u`, 46,997 samples on main, 13,119 on the modern path; symbol names grouped by crate and module; libc and unresolved addresses are "other"):
+
+| Subsystem | main | modern path |
+| --- | ---: | ---: |
+| JS interpreter | 66.6% | 49.5% |
+| JS heap and object model | 19.1% | 18.0% |
+| other (libc, unresolved) | 4.6% | 7.7% |
+| JS builtins | 4.0% | 1.7% |
+| Allocator | 3.4% | 3.3% |
+| JS parse | 1.4% | 8.2% |
+| JS regexp | 0.4% | 2.0% |
+| Layout, style, DOM bindings, network, HTML, CSS parse, JS GC, paint | 0.6% together | 9.8% together |
+
+Chrome 155 headless, CDP, live site, 3 runs each (`Performance.getMetrics`): the page as shipped: script 100, 103, 120 ms, task 199, 202, 323 ms, JS heap 9.2 MB, 10 requests, 502 KB. With `SharedWorker` removed before the page runs (ES5 path): script 210, 210, 213 ms, task 310 to 316 ms, 13 requests, 889 KB. Chrome needs 2.0 times the script time on the ES5 path because its native `Intl` passes the probes, so the matcher never runs. bare needs 17.5 times the instructions.
+
+DOM: 1,278 elements at `DOMContentLoaded`, 955 at `complete` (952 on the modern path); 233 links on both; 9 script elements (6 on the modern path). Chrome: 443 elements, 152 links (hypothesis: viewport; not checked).
+
+### Recommendation (details and the other options in the design)
+
+1. Build `SharedWorker` as a worker that fails to start, like `Worker` (same host record, lazy accessor, `error` event). Expected: `craigslist-home` 47,008 → 2,682 M (-94.3%), peak RSS 749 → 84 MiB. Criterion 2: (119,049 − 47,008 + 2,682) / 138,272 = 54.0%. Sum of peak RSS 2,496 → about 1,831 MiB. Needs a `fill` of `virtual-load` with the modern bundle.
+2. Option 2, an `Intl` that passes the formatjs probes, gives 4,149 M (55.1%) in the faked test, with the cost of locale data, plural rules and a range formatter: a separate topic.
+3. GC inside a call would lower the peak of any page with one long call, not the instruction count. For the GC owner. A trigger that is checked at depth 0 cannot fire in this journey.
+
+The gain of 1 is a change of the page that we load, not a faster engine. Without `craigslist-home` criterion 2 stays 80.0%; `react-docs` (12.6 G) and `substack-home` (11.6 G) have not moved.
+
+### Checks
+
+- Clean binary for all timing numbers (the `SharedWorker` hunk only; it reads one environment variable at start). The counter builds are separate and their numbers are used for shares only. The first counter build added a per-call format and read 58 G for a 47 G run; I replaced it with a counter that runs only at the factory level (14% overhead, stated in the design).
+- A first fake of the `NumberFormat` probes set `format` by assignment, which a getter ignores: it changed nothing. The 23.9 G then came from `formatRange` alone. I redid it with `Object.defineProperty` (4.15 G).
+- `git status` of the worktree: only the two docs files. No test run: docs only.
+
+### Not tested
+
+Wall time on an idle machine. The other 46 journeys with `SharedWorker` defined (and `substack-home`, which names it). A live run in bare. Windows and macOS. The 443 against 952 elements. The 749 MiB by structure (malloc and mmap totals only). `nodejs-org-home` (5.8 G) loads formatjs: not profiled.
+
+### Noticed, not changed
+
+- `docs/perf-goal.md` and the #542 table say 47 journeys pass; this is unchanged.
+- Another site that loads formatjs will pay for the matcher while bare's `Intl` fails the probes.
