@@ -10800,3 +10800,55 @@ No limit is removed. A makes two limits weaker (design section 5): `LAZY_MIN_SOU
 ### Not tested
 
 The journeys on a main at or after #479 (broken, above). Live sites. Windows and macOS. A lower `LAZY_MIN_SOURCE` or `LAZY_MIN_BODY` in the benchmark. Memory at the end of a long run (a second-parse tree keeps its table until the cached program leaves the parse cache; the table is about 56 bytes for each lazy function). The bytecode lane with lazy functions (it does not run lazy functions).
+
+## H1: a restyle styles each element once (2026-11-14)
+
+Design: [design-wikipedia-journeys.md](design-wikipedia-journeys.md) section 6.2, option H1. Owner decision (2026-11-14): build H1. This is a retry of an earlier agent that stopped on a network error; its patch was the start (`/data/bare-tmp/r2/h1/wip.patch`). It put the cover set inside the hot walk and made the `rest_*` ramps slower (below), so I moved the check out of the walk.
+
+Cause, measured (the R2-B cause was a hypothesis): on `wikipedia-article` the one hover restyle has 292 roots, all subtree roots (`:hover`, `:active` and focus are all read with a sibling combinator somewhere in the sheets, so `Scopes` gives `Siblings`: the changed element, each ancestor that differs, and each of their later siblings, with their subtrees). The root of an ancestor contains the roots below it, nested. `RuleSet::restyle` styled 90,137 elements for one element whose style changed (9,295 after the change).
+
+Change (`crates/css/src/cascade.rs`, `restyle_with`): before the walk, sort the roots by depth, a subtree root before a root of the same element, and drop a root that has a subtree root as an ancestor on the flat-tree path. A hash set of the kept subtree roots holds them (each root costs one walk up its ancestors, only when the set is not empty). The alternative is a visited mark in the walk: it puts a lookup in the hot per-element loop. A non-subtree root covers nothing here, because it styles its subtree only when its own style changes (the walk still decides that). A root inside `display: none` is still skipped by the walk (its ancestor has no style). Not needed: the `USES_*` bits. They only say that some rule reads the state, and the sheets here read all three, so the hover cannot skip the restyle. A finer answer (which elements a `:hover` selector reaches, like the Stylo invalidation map) is a new design: after H1 the hover still styles 9,295 elements for 1 change.
+
+Tests (first one fails without the change: 358 elements styled against 49):
+
+- `nested_restyle_roots_style_each_element_once`: element count of a hover restyle with an ancestor chain as roots, and style equality with a full cascade.
+- `covered_roots_do_not_hide_a_root_that_a_walk_did_not_reach`: five root lists that cover each other, with and without the subtree flag.
+- `a_restyle_with_nested_and_repeated_roots_equals_a_full_cascade`: 30 random trees x 20 steps, random class changes, nested and repeated roots with random flags; every restyle that does not give up equals a full cascade (more than 500 of them).
+
+Measurements. Machine archMachine, instructions of `perf stat -e instructions:u`, virtual clock, corpus `virtual`, 3 runs, `tools/bench/journeys.sh compare --clock virtual --runs 3 --pss`. MAIN is `476c04f995` (it has the settle-loop fix, #bdd3d4bc). BRANCH is this change rebased on it. All 47 journeys pass on both; no replay misses.
+
+| Journey (M instructions, spread 0.0 to 0.3%) | MAIN | BRANCH | Change |
+| --- | ---: | ---: | ---: |
+| `wikipedia-article` | 2,741.4 | 2,175.4 | -20.6% |
+| `python-docs-tutorial` | 333.2 | 249.3 | -25.2% |
+| `wikipedia-main-random` | 1,402.8 | 1,270.6 | -9.4% |
+| `w3c-home-links` | 88.1 | 82.6 | -6.2% |
+| `python-org-docs-link` | 1,209.5 | 1,184.7 | -2.1% |
+| `rust-book-chapters` | 525.5 | 520.5 | -1.0% |
+| `github-docs-home` | 4,904.1 | 4,868.5 | -0.7% |
+| All 47 (sum of medians) | 51,601.1 | 50,738.5 | -1.7% |
+
+The other 36 journeys moved by 0.0% or +0.1% (noise). Peak PSS (sum of medians) 948.8 to 925.8 MiB (-2.4%); per-journey peak RSS moved by -3% to +4% (sampled every 20 ms; no journey allocates more).
+
+Before the settle-loop fix (MAIN `c4e32a85a1`, same method, run twice on two versions of this change): `wikipedia-article` 7,788.8 to 7,037.4 M (-9.6%, the design estimate was -9.9%), `python-docs-tutorial` -23.6%, total 95,181 to 94,101 M (-1.1%). The saving is the same 0.57 G in both; it is a larger share now that the loop is gone.
+
+Baseline `f6415364`: `wikipedia-article` 2,258.4 to 2,175.5 M (-3.7%). The other journeys are not comparable with that driver (the old driver and corpus replay differ in work; spreads up to 290%, for example `github-docs-home` 1,853.9 M against 4,868.9 M), so the per-journey table above is against MAIN only.
+
+`rest_*` ramps (`rest_N`: N restyles of about 6,000 elements, one root each; `/data/bare-tmp/bm/b/pages`), 3 runs, MAIN against BRANCH, M instructions, spread under 0.001:
+
+| Page | MAIN | BRANCH | In-walk set (first try) |
+| --- | ---: | ---: | ---: |
+| `rest_2` | 578.35 | 578.34 | +0.05% |
+| `rest_13` | 1,240.26 | 1,240.30 | +0.28% |
+| `rest_30` | 2,262.58 | 2,262.71 | +0.37% |
+| `rest_50` | 3,465.58 | 3,465.83 | +0.41% |
+
+The first version (set lookups inside the walk) was slower on every ramp, about 45 instructions for each styled element, though only the root does a lookup: the walk's code changed. The pre-pass leaves the walk as it was, and the ramps are within +0.007%.
+
+Checks: `cargo test --release --workspace --no-fail-fast`: 3,958 passed, 8 failed, all known on main: the 7 openssl TLS tests and `a_changed_file_starts_again_from_zero` (flaky under load). `a_hidden_iframe_download_is_saved` failed in a first run and passed in the second. Cost matrix against `476c04f995`: 803 rows, 0 over under both allocators (mean +0.001% glibc, +0.000% jemalloc); the only failures are `parse_load deep 1` and `deep 10` (stack overflow, also on main). `keycost` (page `typing-page-lazy-arrow`): `#a1` 295.6 M and `#f0` 301.0 M for each key, equal to main; peak RSS 31.3 MiB at 50 keys.
+
+Limits made unneeded: none. The restyle charge (`STEPS_PER_RESTYLED_ELEMENT`) counts styled elements, so a page with nested roots pays less steps.
+
+Not tested: shadow trees with a real hover (a page with shadow rules gives up the partial restyle before this code); `:has()` (the engine drops rules with it); sibling combinators in the random test (its roots are chosen by the test, not by `Scopes`, so a sibling rule would need sibling roots; the cover logic does not touch them); the live sites; wall time; `crates/js` gates (no change there).
+
+Noticed, not changed: after H1 one hover on `wikipedia-article` still styles 9,295 elements for 1 changed style, because `Scopes` keeps one scope for all selectors that read `:hover`. A per-selector invalidation map would remove that. The two `*-vs-branch` journey runs with a stale `bare-drive` (built with `--examples`, which skips the binary) gave wrong numbers; the table above is from a fresh build.
