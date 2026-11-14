@@ -107,6 +107,22 @@ fn control_actions_log_what_chrome_logs() {
     });
 }
 
+/// The pointer move lets the page run. A page that moves the element then (a list that a fetch fills, here a `pointermove` listener)
+/// must not make the button go down on the place where the element was.
+#[test]
+fn a_click_aims_again_after_the_page_moved_the_element() {
+    big(|| {
+        let mut p = page(
+            r#"<body style="margin:0"><input id=in style="position:absolute;top:10px;left:0;width:100px;height:20px">
+<script>addEventListener('pointermove', function () { var d = document.createElement('div'); d.style.cssText = 'height:200px'; document.body.insertBefore(d, document.getElementById('in')); document.getElementById('in').style.top = '210px'; }, { once: true });</script></body>"#,
+            400,
+        );
+        let input = one(&mut p, "#in");
+        p.click(input).unwrap();
+        assert_eq!(js(&mut p, "document.activeElement.id"), "in");
+    });
+}
+
 #[test]
 fn refusals_send_no_event() {
     big(|| {
