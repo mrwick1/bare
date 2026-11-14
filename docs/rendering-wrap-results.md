@@ -42,3 +42,22 @@ The first diagnostic reads failed because getComputedStyle().font returned Unsup
 The browser ran headless. A temporary screen existed, but the browser did not bind to it. No mirrored test is claimed. The owner declined a recording. Console logs were empty. The only failed request was the fixture's expected legacy bot 404. The challenge action was not clicked. The completion button was not visible in the captures and was not investigated. Colors from the separate #511 change were not tested here.
 
 The source grapheme remains the mapping unit when case conversion expands it. Full language-specific line breaking, shaping, bidi and hyphenation are outside this change. No VM, account, credential, browser installation, merge or deployment is included. No recording was requested.
+
+## Pre-merge integration
+
+The branch was rebased onto main at 7c41b3e3, which includes the merged color fix. The conflicts joined adjacent color and wrap tests and retained both dependency notes. No wrapping algorithm changed. Fresh release tests and three-run measurements must pass on this combined source before merge.
+
+Fresh samples use the same machine, inputs and three-run method stated above.
+
+| Case | Baseline instructions | Candidate instructions | Baseline RSS KiB | Candidate RSS KiB |
+| --- | ---: | ---: | ---: | ---: |
+| paragraph | 11,974,630–11,975,117 | 11,974,858–11,974,967 | 5,824–5,968 | 5,732–6,008 |
+| identifier | 4,012,425–4,013,649 | 4,012,412–4,012,549 | 5,780–5,900 | 5,900–5,920 |
+| spans | 307,509,679–307,510,131 | 307,109,404–307,109,836 | 13,220–13,332 | 13,196–13,368 |
+| unique_styles | 993,795,525–993,836,645 | 991,060,977–991,061,322 | 24,968–25,256 | 25,480–25,540 |
+| style_setget | 56,196,401–56,204,140 | 56,309,815–56,330,622 | 11,984–12,464 | 12,012–12,504 |
+| browser_mutation | 69,951,203–69,953,001 | 70,100,903–70,101,907 | 11,476–11,556 | 11,368–11,812 |
+
+All five selected cost rows pass the unchanged 0.5 percent threshold under both allocators. No row fails or exceeds the threshold under either allocator. Fresh pixel captures and the full cost matrix were not repeated for this rebase.
+
+The rebased serial release run passes 1,954 tests: 1,456 browser, 288 CSS, 161 layout and 49 paint. Seven remain ignored. Main remained at 7c41b3e3 when the pre-merge checks completed.
