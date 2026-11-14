@@ -169,11 +169,13 @@ struct Index {
     big: std::cell::OnceCell<Option<Box<Bigs>>>,
     /// A list over this length is split. A field so that a test can make small lists split, or never.
     split_from: usize,
+    /// The length of the longest list. No list is over `split_from` when this is not, and then `bigs` needs no scan of the lists.
+    longest: usize,
 }
 
 impl Default for Index {
     fn default() -> Index {
-        Index { by_id: Buckets::default(), by_class: Buckets::default(), by_tag: Buckets::default(), by_attr: Buckets::default(), other: Vec::new(), big: std::cell::OnceCell::new(), split_from: SPLIT_FROM }
+        Index { by_id: Buckets::default(), by_class: Buckets::default(), by_tag: Buckets::default(), by_attr: Buckets::default(), other: Vec::new(), big: std::cell::OnceCell::new(), split_from: SPLIT_FROM, longest: 0 }
     }
 }
 
@@ -270,6 +272,9 @@ impl Index {
         self.big
             .get_or_init(|| {
                 let (from, mut found) = (self.split_from, false);
+                if self.longest <= from {
+                    return None;
+                }
                 let mut bigs = Bigs::default();
                 let mut make = |list: &Vec<u32>| (list.len() > from).then(|| Big::split(list, entries)).flatten().inspect(|_| found = true);
                 for (k, l) in &self.by_id {
@@ -296,18 +301,20 @@ impl Index {
         // The bucket: an id is the most specific, then a class, then an attribute, then a tag. An attribute comes before a tag:
         // `input[type=checkbox]` is in the list of `type`, and few elements have a `type`; most elements are a `div`.
         let last = &selector.compounds[0].simples;
-        if let Some(Simple::Id(id)) = last.iter().find(|s| matches!(s, Simple::Id(_))) {
-            self.by_id.entry(id.clone()).or_default().push(index);
+        let list = if let Some(Simple::Id(id)) = last.iter().find(|s| matches!(s, Simple::Id(_))) {
+            self.by_id.entry(id.clone()).or_default()
         } else if let Some(Simple::Class(class)) = last.iter().find(|s| matches!(s, Simple::Class(_))) {
-            self.by_class.entry(class.clone()).or_default().push(index);
+            self.by_class.entry(class.clone()).or_default()
         } else if let Some(&Simple::Attr { name, .. }) = last.iter().find(|s| matches!(s, Simple::Attr { .. })) {
             // Every attribute test needs the attribute: an element without it never matches.
-            self.by_attr.entry(name).or_default().push(index);
+            self.by_attr.entry(name).or_default()
         } else if let Some(&Simple::Tag(tag)) = last.iter().find(|s| matches!(s, Simple::Tag(_))) {
-            self.by_tag.entry(tag).or_default().push(index);
+            self.by_tag.entry(tag).or_default()
         } else {
-            self.other.push(index);
-        }
+            &mut self.other
+        };
+        list.push(index);
+        self.longest = self.longest.max(list.len());
     }
 
     /// Add to `out` the rules that may match the element: the ones in the lists for its id, its classes, its attributes and its tag, and the "other" list.
