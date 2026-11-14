@@ -2243,3 +2243,10 @@ Owner decision 2026-11-14 (option 1 of `docs/design-craigslist.md`). `craigslist
 - One console warning for each page, separate from the one of `Worker`: `SharedWorker scripts do not run in bare (<url>)`.
 - Not chosen: make `Intl` pass the formatjs probes (the same gain on this page, but locale data, plural rules and a range formatter); free garbage inside a call (the instruction count does not fall); a faster matcher (38 times needed). Option 2 and 3 stay as topics.
 - Limit: this gain is a change of the page that bare loads, not a faster engine. A page that takes a polyfill path still pays the engine cost. The baseline binary has no `SharedWorker`, so it takes the ES5 path on the same corpus.
+## 2026-11-15: collecting inside a long call (recommended: design A; owner decides)
+
+Owner decision 2026-11-14: write a design for collecting garbage inside a long call. Recommended in `docs/design-gc-in-call.md`: design A, a shadow root stack with a pin counter. Every native and host call pins, so unaudited code behaves as today. The safe point runs through `tick()`, and the collect trigger counts bytes, not call depth. Built in slices, each gated on the cost matrix (no row over +0.5%).
+
+- Not chosen: a conservative scan of the native stack (B: a `ObjId` is two `u32`s, `Vec<Value>` buffers are on the heap, per-OS unsafe code), RAII rooted handles (C: the same safety, 83 files of `crates/bare` change), a generational heap (a write barrier on every store), statement-window pinning (a looping native defeats it).
+- Independent of the choice: exact-fit element buffers (D) cut a 1-element array by about 22%.
+- Nothing is built. A missed root gives `HeapError::Stale` or a wrong result without an error, so the first slice is a stress mode that collects at every safe point.

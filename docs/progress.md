@@ -11649,3 +11649,29 @@ Not the change: against the baseline `substack-home` is +3.5% and `paulgraham-ho
 
 - `Ext::re_tab_bytes` is used only by a test; the build warns of dead code. `browser_history_state_cap_tests.rs` has an unused import.
 - Options 2 and 3 of the design (`Intl` passing the formatjs probes, GC inside a call) remain open topics.
+
+## GC inside a long call: a design (2026-11-15, docs only)
+
+Owner decision (2026-11-14): write a design for collecting inside a long call. Cause (#544): on the ES5 path of `craigslist-home` one `load` listener is a 45 G call chain that makes 3.15 M objects (432 MiB accounted, peak RSS 749 MiB). `gc_due()` needs depth 0, so a trigger at depth 0 cannot fire. Design: `docs/design-gc-in-call.md`. No product code changed. The temporary instrumentation and its patches are outside the repository (`/data/bare-tmp/r2/gc-in-call/`).
+
+### Measured (archMachine, shared; instruction counts under load; `craigslist-home` ES5, `virtual-load`, main `4a27b7a9`)
+
+- Objects at 48 MiB used: 336,800; 88% arrays (294,930); 72% of the arrays with elements have length 1 (213,295). Byte-weighted sampler (one run): `z` (`n.split("-")`) 43.6%, `E` (`__spreadArray`: `arguments`, `slice`, `concat`) 30.5%, `R` (rule scan loop) 15.9%, the `reduce` callback 3.1%, others under 6%.
+- Live set with exact active roots (fork probe, one run): 3 MiB (7,391 objects) from 48 to 384 MiB of use; 9 MiB at 432 MiB. The all-environments roots gave 6 to 39 MiB, an over-approximation.
+- Cost of one collect (fork probe): about 14 M instructions fixed plus about 256 per freed object (100 M at 336,800 objects, 858 M at 3.15 M). A real in-parent collect of 210,720 objects: 67.8 to 69.8 M. A 32, 16 or 8 MiB trigger adds about 0.2, 0.38 or 0.76 G (+0.4%, +0.8%, +1.6% of 47 G): arithmetic, not measured end to end.
+- Bytes per object (micro cases, 500,000 objects, 3 runs, RSS): empty object 121.8 B, 1-element array 198.1 B, `concat` 314.8 B, closure 185.7 B, `arguments` 384.2 B. Slab record 117 B (104 + 8 + 4 + 1); an array adds 76 to 80 B (`Vec` minimum capacity 4). RSS is about 1.7 times the accounted bytes. Exact-fit element buffers: a 1-element array 198 to about 154 B (-22%).
+- Largest growth inside one outermost call on the 47 journeys (one run each): `craigslist-home` 421 MiB, `rust-book-search` 75, `substack-home` 40, `nodejs-org-home` 14, `react-docs` 10, `nextjs-docs` 8; the others 6 or less.
+- In-parent unsafe collect (trigger 32 MiB): 13 collects, 44.1 G instructions, peak RSS 152 MiB, `ok:true`, empty console, but a `Stale` remains in `ao_reduce`, so the run is cut short. **Not a valid number.** The first unrooted runs panicked (`browser_events.rs:221`) or ended at 4.0 G with `ok:true`: a missed root fails silently.
+- Hot path probe of design A (unoptimized, 3 of about 25 sites, no elision), `cost_matrix.sh -a -g`, 60 rows, both allocators: mean +0.79% (glibc) and +1.06% (jemalloc); 35 rows over +0.5%; `fib` +3.1% to +3.6%.
+
+### Recommendation
+
+Design A: a shadow root stack, a pin counter that blocks the collect in every frame that is not audited, and a safe point through `tick()`. Five slices after a stress mode; the first gates are the cost matrix (no row over +0.5%). Expected, as hypotheses: `craigslist-home` ES5 peak RSS 749 to 80 to 100 MiB; about -130 MiB of 1,831 MiB over the 47 peaks after the `SharedWorker` stub (7%); instructions +0.4% to +1.6% on one journey. After the stub this is a robustness feature more than a benchmark lever. Exact-fit element buffers (design D) are cheaper and independent. Rejected: conservative stack scan (unsound for Rust, per-OS unsafe code), RAII handles (83 files), generational (write barrier), window pinning.
+
+### Not measured
+
+A clean in-parent run with all holders rooted; the cost matrix for the final form; test262 and `exec_diff` under a stress mode; the 47 journeys with in-call collects; wall time; Windows and macOS; the audit size in `crates/bare`; the `Limit::Bytes` retry; exact-fit buffers in a build.
+
+### Noticed, not changed
+
+- The design touches the GC trigger and `Host::prune` of the DOM-arena work (a collect in a call can free a tree under a binding that holds its `NodeId`). It needs the old corpus for `craigslist-home` after the `SharedWorker` stub. It does not touch class atoms.
