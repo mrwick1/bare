@@ -214,12 +214,14 @@ impl ClassId {
 }
 
 /// The class names of the thread, packed: the bytes of all the names in one string, the start of each (a name ends where the next one starts), and an open
-/// table (a power of two, at most three quarters full) from the hash of a name to its number plus one. About the length of the name and 12 bytes for each
+/// table (a power of two, at most three quarters full) from the hash of a name to its number plus one. About the length of the name and 14 bytes for each
 /// name. Names are never removed. A name of 1 KiB or more that comes as a `String` is kept as it is, not copied (`BIG`).
 struct ClassTable {
     text: String,
     starts: Vec<u32>,
     slots: Vec<u32>,
+    /// One byte of the hash of the name in each slot: a probe reads the name only when the byte is equal.
+    tags: Vec<u8>,
     /// The long names: the length of `text` when the name came, and the name. `starts` has `BIG | place in this list` for them.
     big: Vec<(u32, Box<str>)>,
 }
@@ -230,10 +232,10 @@ const BIG_NAME: usize = 1024;
 const BIG: u32 = 1 << 31;
 
 impl ClassTable {
-    fn hash(name: &str) -> usize {
+    fn hash(name: &str) -> u64 {
         let mut h = NameHash::default();
         h.write(name.as_bytes());
-        h.finish() as usize
+        h.finish()
     }
 
     fn name(&self, id: usize) -> &str {
@@ -245,35 +247,53 @@ impl ClassTable {
         &self.text[start as usize..end as usize]
     }
 
+    /// Is the name with the number `id` equal to `name`?
+    #[inline(always)]
+    fn is(&self, id: usize, name: &[u8]) -> bool {
+        let start = self.starts[id];
+        if start & BIG != 0 {
+            return self.big[(start & !BIG) as usize].1.as_bytes() == name;
+        }
+        let end = self.starts.get(id + 1).map_or(self.text.len() as u32, |&e| if e & BIG != 0 { self.big[(e & !BIG) as usize].0 } else { e });
+        end - start == name.len() as u32 && &self.text.as_bytes()[start as usize..end as usize] == name
+    }
+
+    /// The number of `name` (`Ok`), or the slot where it goes (`Err`). The table is not empty.
+    #[inline(always)]
+    fn find(&self, name: &[u8], h: u64) -> Result<u32, usize> {
+        let mask = self.slots.len() - 1;
+        let (mut at, tag) = (h as usize & mask, (h >> 56) as u8);
+        loop {
+            let slot = self.slots[at];
+            if slot == 0 {
+                return Err(at);
+            }
+            if self.tags[at] == tag && self.is(slot as usize - 1, name) {
+                return Ok(slot - 1);
+            }
+            at = (at + 1) & mask;
+        }
+    }
+
     /// The number of `name`, or `None` when it was never added. One hash and, for a name that is there, one compare.
     #[inline]
     fn lookup(&self, name: &str) -> Option<u32> {
         if self.slots.is_empty() {
             return None;
         }
-        let mask = self.slots.len() - 1;
-        let mut at = Self::hash(name) & mask;
-        while self.slots[at] != 0 {
-            if self.name(self.slots[at] as usize - 1) == name {
-                return Some(self.slots[at] - 1);
-            }
-            at = (at + 1) & mask;
-        }
-        None
+        self.find(name.as_bytes(), Self::hash(name)).ok()
     }
 
     fn intern(&mut self, name: Cow<str>) -> u32 {
         if self.slots.is_empty() {
             self.slots = vec![0; 64];
+            self.tags = vec![0; 64];
         }
-        let mask = self.slots.len() - 1;
-        let mut at = Self::hash(&name) & mask;
-        while self.slots[at] != 0 {
-            if self.name(self.slots[at] as usize - 1) == name {
-                return self.slots[at] - 1;
-            }
-            at = (at + 1) & mask;
-        }
+        let h = Self::hash(&name);
+        let at = match self.find(name.as_bytes(), h) {
+            Ok(id) => return id,
+            Err(at) => at,
+        };
         let id = u32::try_from(self.starts.len()).ok().filter(|&n| n < 1 << 31).expect("more than 2 billion class names");
         let start = u32::try_from(self.text.len()).ok().filter(|&n| n < 1 << 31).expect("more than 2 GB of class names");
         match name {
@@ -287,6 +307,7 @@ impl ClassTable {
             }
         }
         self.slots[at] = id + 1;
+        self.tags[at] = (h >> 56) as u8;
         if self.starts.len() * 4 > self.slots.len() * 3 {
             self.grow();
         }
@@ -296,20 +317,24 @@ impl ClassTable {
 
     fn grow(&mut self) {
         let mut slots = vec![0u32; self.slots.len() * 2];
+        let mut tags = vec![0u8; slots.len()];
         let mask = slots.len() - 1;
         for i in 0..self.starts.len() {
-            let mut at = Self::hash(self.name(i)) & mask;
+            let h = Self::hash(self.name(i));
+            let mut at = h as usize & mask;
             while slots[at] != 0 {
                 at = (at + 1) & mask;
             }
             slots[at] = i as u32 + 1;
+            tags[at] = (h >> 56) as u8;
         }
         self.slots = slots;
+        self.tags = tags;
     }
 }
 
 thread_local! {
-    static CLASSES: RefCell<ClassTable> = const { RefCell::new(ClassTable { text: String::new(), starts: Vec::new(), slots: Vec::new(), big: Vec::new() }) };
+    static CLASSES: RefCell<ClassTable> = const { RefCell::new(ClassTable { text: String::new(), starts: Vec::new(), slots: Vec::new(), tags: Vec::new(), big: Vec::new() }) };
     /// The number of names in the class table. It only grows, so it tells a document that its class lists are old (`Document::class_epoch`).
     static CLASS_COUNT: Cell<u32> = const { Cell::new(0) };
 }
