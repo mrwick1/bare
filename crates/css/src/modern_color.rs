@@ -203,6 +203,9 @@ fn parse(text: &str) -> Option<Expression> {
 }
 
 impl Expression {
+    pub(crate) fn heap_bytes(&self) -> usize {
+        self.nodes.capacity() * std::mem::size_of::<Node>() + self.text.capacity()
+    }
     pub fn dependent(&self) -> bool {
         self.dependent
     }
@@ -288,4 +291,13 @@ fn paint(color: DynamicColor) -> Color {
     }
     let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
     Color { r: byte(rgb.components[0]), g: byte(rgb.components[1]), b: byte(rgb.components[2]), a: byte(rgb.components[3]) }
+}
+
+#[cfg(test)]
+mod heap_tests {
+    #[test]
+    fn deferred_color_counts_nodes_and_authored_text() {
+        let expr = super::parse("color-mix(in oklab, currentColor, red)").unwrap();
+        assert!(expr.heap_bytes() > expr.text.len());
+    }
 }

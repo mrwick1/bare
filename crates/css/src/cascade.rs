@@ -818,8 +818,11 @@ impl RuleSet {
             + self.sources.iter().map(|t| t.len()).sum::<usize>()
             + self.decls.borrow().capacity() * size_of::<Declared>()
             + side.calcs.capacity() * size_of::<Linear>()
-            + side.vars.capacity() * size_of::<VarDecl>()
-            + side.vars.iter().map(|v| v.name.len() + v.text.len()).sum::<usize>()
+            + side.deferred.capacity() * size_of::<Deferred>()
+            + side.deferred.iter().map(|entry| match entry {
+                Deferred::Variable(v) => v.name.len() + v.text.len(),
+                Deferred::Color(expr) => expr.heap_bytes(),
+            }).sum::<usize>()
             + side.grids.capacity() * size_of::<Grid>()
             + self.customs.borrow().capacity() * size_of::<CustomDecl>()
             + self.customs.borrow().iter().map(|c| c.name.len() + c.text.len()).sum::<usize>()

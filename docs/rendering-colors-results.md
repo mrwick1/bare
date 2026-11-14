@@ -57,3 +57,21 @@ These checks use headless bare through a private bridge. The created hyprcage sc
 This is not a full CSS Color conformance claim. Mixes require two operands and an explicit space. Relative colors, external profiles and math expressions in mix percentages remain unsupported. Resolved sRGB serialization remains unchanged.
 
 No other viewport, dark scheme, hover or focus check has run. No VM, account, real credential, installed browser update, merge or deployment is included. Wrapping remains a separate change for #467.
+
+## Pre-merge integration
+
+The branch was rebased onto main at 8f23dded. Main added byte accounting for cached rule sets. The first rebased build failed because that accounting still named the replaced variable arena. The integration now counts the shared deferred allocation, variable strings, color-expression nodes and authored text. This preserves the cache's byte bound. Fresh release tests and repeated measurements must pass before merge.
+
+Fresh samples use the same machine, inputs and three-run method stated above.
+
+| Case | Baseline instructions | Candidate instructions | Baseline RSS KiB | Candidate RSS KiB |
+| --- | ---: | ---: | ---: | ---: |
+| legacy_parse | 29,997,045,009–29,997,080,909 | 30,055,046,258–30,055,063,198 | 58,080–58,160 | 58,028–58,124 |
+| style_setget | 56,204,160–56,224,024 | 56,203,572–56,224,480 | 12,104–12,280 | 12,204–12,380 |
+| style_shown | 25,623,004–25,625,574 | 25,629,674–25,630,129 | 12,512–12,556 | 12,216–12,328 |
+| sheets_linked | 8,582,808–8,582,931 | 8,583,685–8,584,451 | 12,412–12,608 | 12,544–12,656 |
+| browser_mutation | 69,951,021–69,951,710 | 69,951,498–69,952,543 | 11,600–11,644 | 11,460–11,600 |
+
+The three selected cost rows pass under both allocators at the unchanged 0.5 percent threshold. No row fails or exceeds the threshold under either allocator. The full matrix and fresh pixel captures were not repeated for this rebase.
+
+The rebased serial release run passes 1,938 tests: 1,454 browser, 285 CSS, 150 layout and 49 paint. Seven remain ignored. The added heap check confirms that a deferred expression's counted allocation exceeds its authored text alone. The initial rebased compile failure and the corrected accounting are recorded above.
