@@ -39,3 +39,19 @@ The branch was rebased onto main at c4e32a85, which includes the independent tex
 Fetch POST remains within the documented cost accepted by the owner. Other sampled instruction rows remain below the general limit. The earlier two-allocator failure is retained and covered by the scoped exception. A new jemalloc comparison and full matrix were not repeated after this rebase.
 
 The final rebased serial release library run passes 1,464 tests with six ignored. Main remained at c4e32a85 at the final check. The approved exception and original failures remain in this report; the cost gate is not relabeled as an unqualified pass.
+
+## Latest-main integration
+
+Main advanced to 2612b710 before merge. Its new code changes picture loading, browser-session settling and the replay driver. The Fetch Metadata rebase was clean. The same resource cases were rebuilt and measured again on that main and candidate. The three-run method and machine are unchanged.
+
+| Case | Main instructions | Candidate instructions | Main RSS KiB | Candidate RSS KiB |
+| --- | ---: | ---: | ---: | ---: |
+| style_setget | 56,312,619–56,324,227 | 56,334,676–56,353,194 | 12,200–12,508 | 12,356–12,528 |
+| sheets_linked | 8,621,355–8,629,372 | 8,618,447–8,625,616 | 12,548–12,788 | 12,556–13,232 |
+| browser_mutation | 70,100,798–70,101,826 | 70,101,245–70,101,696 | 11,544–11,708 | 11,636–11,920 |
+| fetch_post | 21,594,146–21,594,950 | 22,063,556–22,065,012 | 12,928–13,100 | 13,016–13,160 |
+| xhr | 10,696,656–10,697,623 | 10,700,160–10,703,983 | 11,548–11,620 | 11,832–11,992 |
+
+Fetch POST remains within the scoped owner-approved exception. Other sampled rows remain below the general limit. The 1,464-test full release result above belongs to the preceding c4e32a85 rebase; it is not relabeled as a full-suite result for this head. No new jemalloc comparison, full matrix or UI journey is claimed on this final integration.
+
+All 53 Fetch/XHR release tests pass on the latest picture-loading integration. This focused result is separate from the preceding full-library run.
