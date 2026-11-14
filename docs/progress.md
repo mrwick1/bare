@@ -10651,3 +10651,35 @@ Gates: `cargo test --release --workspace`: all pass except 7 openssl TLS tests (
 Limits made unneeded: none removed. The `it.charge(doc.len())` for a list now applies only to a list build; a walk charges the nodes it visits.
 
 Not tested: a live Wikipedia page (corpus replay only); a page with thousands of different names asked at one revision (the list build after 16 walks covers it, by the counter test only); the replay `settle_pictures` fix (not on main when I measured); memory of `seen_names` on a page with many distinct ids (about 8 bytes each, plus table slack; PSS did not rise on the journeys).
+
+## R2-C build: equal response texts share one string buffer (2026-11-14)
+
+Design: [design-js-memory.md](design-js-memory.md), section 6.1 (Design 1, first half). Owner decision (2026-11-14): build the sharing of `Response.text()` alone first and measure. The `mallopt(M_MMAP_THRESHOLD)` call is **not merged**. The owner decides on it after these numbers. A first agent stopped on a network error; its patch was reviewed, tested and finished here.
+
+What was built:
+
+- `Heap::shared_text(&str)` (`crates/js/src/heap.rs`): a text of more than 256 bytes is looked up in a weak table `HashMap<(hash, utf8 length), StrId>`. A hit is valid only when the slot still holds the string (`strings.get(index, gn)`) and its units equal the bytes (so a hash collision gives a new string). `collect` drops the dead entries. A shorter text is an atom as before.
+- `Dom::js_text` (`crates/bare/src/browser.rs`) is `js_str` with that lookup. `consume` in `browser_fetch.rs` uses it for `text()` and for `json()`. Nothing else changed: `responseText`, `innerHTML` and `textContent` are not shared.
+- A string is an immutable value, so no script can tell the difference. The table holds no root.
+
+Tests (failing first): `equal_response_texts_share_one_string_buffer` (`browser_fetch_tests.rs`) failed with `js_str` (two more reads added 160,922 bytes, one copy is 80,002) and passes (under 8,000 bytes). Heap tests `equal_host_texts_share_one_string_and_one_buffer` and `a_shared_text_that_died_is_never_given_again`: same length and other content is another string; a dead entry is never given again; the table is empty after a collect.
+
+Numbers (archMachine, shared and loaded; corpus `virtual`, virtual clock; `journeys.sh compare --pss`; 5 runs + 1 warm-up line each; instructions spread 0.0%):
+
+| `python-docs-search-results` | Minstr | peak RSS MiB (median, range) | PSS MiB |
+|---|---:|---:|---:|
+| main `5bc18d14` | 2,487.3 | 97.9 (97.5 to 98.2) | 94.6 |
+| sharing only (this PR) | 2,455.3 | 93.9 (93.2 to 95.6) | 91.4 |
+| sharing + `M_MMAP_THRESHOLD` 256 KiB (local patch, not merged) | 2,452.8 | 85.9 | |
+
+- Sharing alone: -4.0 MiB RSS (-4.2%), -3.2 MiB PSS, -1.3% instructions. **Criterion 6 (92.8 MiB) is not met by sharing alone**: the median is 93.9 MiB, 1.1 MiB over, and the range is 93.2 to 95.6. The design predicted 94.0.
+- The threshold adds -8.0 MiB on top (93.9 to 85.9): criterion 6 is met with it, with 6.9 MiB margin. Local patch kept in `/data/bare-tmp/r2/text/out/mmap-local.patch` (one line in `limit_malloc_arenas`).
+- Baseline `f6415364` ran with another clock behaviour under `--clock virtual` (instructions 2,730 to 3,303 M, RSS 100.5 to 114.7 MiB, spread 19.7%), so its row is not a fair base. Against it: 106.3 to 94.6 MiB median.
+- CPU of the threshold on the three journeys the design names (sharing only vs sharing + threshold, mean cpu_ms of 6 runs, machine loaded, so weak): `python-docs-search-results` 281 to 286 ms (+2%), `github-docs-home` 866 to 985 ms (+14%), `wikipedia-article` 1,091 to 1,272 ms (+17%). Instructions are equal (-0.1% to -0.4%), so the cost is page faults of fresh `mmap` blocks (hypothesis). Peak RSS: github-docs-home 94.6 to 86.9, wikipedia-article 59.5 to 54.6. Repeat the CPU on an idle machine before the owner decides.
+- 47 journeys, 3 runs, main vs this PR (`/data/bare-tmp/r2/text/out/all-main-new.tsv`): total instructions 95,450.9 to 95,413.8 M (-0.0%); only `python-docs-search-results` changes (-1.3%). RSS total 1,768.3 to 1,770.3 MiB (+0.1%). `go-dev-home` showed 56.2 to 61.1 MiB (+8.7%) in the first run; 7 more runs gave 55.7 to 62.7 (main) and 57.0 to 62.3 (PR) with equal instructions: noise (hypothesis: thread timing of the allocator). No replay misses.
+
+Gates: `cargo test --release --workspace --no-fail-fast`: 3,956 passed, 8 failed. 7 are the known openssl TLS tests; `a_changed_file_starts_again_from_zero` is the known flaky test and passes alone. Cost matrix against main `c59e1bcf` (803 rows, rebuilt with `bare-stress` and examples): 0 rows over under both allocators; 1 over under glibc only (`resources_load small 1`, +0.698% glibc, +0.005% jemalloc: noise); 2 failures, the known `parse_load deep 1/10` stack overflow. `test262_check.sh`: exit 0, no row fewer. `exec_diff.sh`: 79 runs, 0 differences. `keycost.sh`: 295.6 M (`#a1`), 301.0 M (`#f0`), load and mount 613.7 M, RSS 31.0 and 31.2 MiB; the last merge's values.
+
+Limits made unneeded: none.
+
+Not tested: a text with a lone surrogate or invalid UTF-8 in a shared body beyond `from_utf8_lossy` (the table keys the lossy text); `responseText`, `innerHTML` and `textContent` sharing (the design lists them; not built); a live run; CPU of the threshold on an idle machine; the table's own cost with thousands of distinct large bodies (an entry is 32 bytes, dropped at the next collect).

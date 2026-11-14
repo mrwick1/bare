@@ -1715,7 +1715,7 @@ fn consume(d: &Dom, it: &mut Interp<'_>, this: Value, how: As) -> R<Value> {
                 it.charge((n / 16) as u64)?;
                 let body = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&bytes);
                 let text = String::from_utf8_lossy(body);
-                let s = d.js_str(it, &text)?;
+                let s = d.js_text(it, &text)?;
                 if let As::Text = how {
                     return Ok(s);
                 }

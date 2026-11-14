@@ -214,3 +214,43 @@ fn the_limits_hold_for_ropes() {
     }
     assert!(hit, "nodes are charged");
 }
+
+#[test]
+fn equal_host_texts_share_one_string_and_one_buffer() {
+    let mut h = Heap::default();
+    let body = format!("{}\u{2019}{}", long('a', 20_000), long('b', 5_000));
+    let a = h.shared_text(&body).unwrap();
+    let after_first = h.used_bytes();
+    let b = h.shared_text(&body).unwrap();
+    assert!(a.same(b), "an equal text is the same string");
+    assert_eq!(h.used_bytes(), after_first, "the second read adds no bytes");
+    assert_eq!(h.to_string_lossy(b).unwrap(), body);
+    // The same length and another content is another string.
+    let other = format!("{}\u{2019}{}", long('a', 20_000), long('c', 5_000));
+    let c = h.shared_text(&other).unwrap();
+    assert!(!c.same(a));
+    assert_eq!(h.to_string_lossy(c).unwrap(), other);
+    assert_eq!(h.to_string_lossy(a).unwrap(), body);
+    // A short text is an atom and is not tabled.
+    let s1 = h.shared_text("short").unwrap();
+    assert!(s1.is_atom() && s1.same(h.intern_str("short").unwrap()));
+}
+
+#[test]
+fn a_shared_text_that_died_is_never_given_again() {
+    let mut h = Heap::default();
+    let body = long('x', 10_000);
+    let a = h.shared_text(&body).unwrap();
+    // No root: a collect frees it. The next read makes a new, valid string.
+    h.collect(&[]).unwrap();
+    assert!(h.to_string_lossy(a).is_err(), "the old handle is dead");
+    let b = h.shared_text(&body).unwrap();
+    assert_eq!(h.to_string_lossy(b).unwrap(), body);
+    // A live text stays shared across a collect.
+    h.collect(&[Value::String(b)]).unwrap();
+    let c = h.shared_text(&body).unwrap();
+    assert!(b.same(c));
+    // The table holds no entry of a dead string after a collect.
+    h.collect(&[]).unwrap();
+    assert_eq!(h.shared_len(), 0);
+}

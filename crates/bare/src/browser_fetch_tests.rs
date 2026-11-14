@@ -1212,3 +1212,21 @@ fn fetch_metadata_targets_are_secure_or_local() {
         assert_eq!(potentially_trustworthy(&bare_url::Url::parse(url).unwrap()), expected, "{url}");
     }
 }
+
+#[test]
+fn equal_response_texts_share_one_string_buffer() {
+    big(|| {
+        let body = format!("{}\u{2019}{}", "a".repeat(30_000), "b".repeat(10_000));
+        let want = body.encode_utf16().count();
+        let srv = serve(move |_| reply(200, &[("Content-Type", "text/html; charset=utf-8")], body.as_bytes()));
+        let mut b = at(srv.port);
+        let src = "var out = [], keep = []; function one() { return fetch('/doc').then(function (r) { return r.text(); }).then(function (t) { keep.push(t); }); }";
+        js(&mut b, src);
+        go(&mut b, "one(); 0");
+        let first = b.it.heap.used_bytes();
+        go(&mut b, "one().then(one).then(function () { out.push(keep.length, keep[0] === keep[1], keep[1] === keep[2], keep[2].length); }); 0");
+        assert_eq!(js(&mut b, "out.join('|')"), format!("3|true|true|{want}"));
+        let grew = b.it.heap.used_bytes() - first;
+        assert!(grew < 8_000, "two more reads of an equal body added {grew} bytes (one copy is {} bytes)", want * 2);
+    });
+}
