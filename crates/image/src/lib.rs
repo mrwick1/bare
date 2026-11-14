@@ -1,9 +1,10 @@
-//! Image decoders for `<img>`: PNG, JPEG and WebP into `0xAARRGGBB` pixels (not premultiplied).
+//! Image decoders for `<img>`: PNG, JPEG, WebP and GIF into `0xAARRGGBB` pixels (not premultiplied).
 //!
 //! Each format has two steps. `size` reads the header only and allocates nothing. `decode` checks the same limits, then reads the
 //! pixels. A file over a limit fails with an error before any pixel buffer exists: a bad image cannot use the memory of the page.
-//! The crates are `png`, `zune-jpeg` and `image-webp` (pure Rust). GIF and animation are not supported: the first frame of an
-//! animated WebP is decoded and the rest is not read.
+//! The crates are `png`, `zune-jpeg`, `image-webp` and `gif` (pure Rust). Animation is not supported: the first frame of an
+//! animated WebP or GIF is decoded and the rest is not read. A GIF frame is put at its place on a clear screen of the size of the
+//! file; the decoder gives that frame in its own buffer first.
 
 use std::io::Cursor;
 use std::sync::Arc;
@@ -19,6 +20,7 @@ pub enum Kind {
     Png,
     Jpeg,
     Webp,
+    Gif,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,7 +29,7 @@ pub enum Error {
     TooLarge,
     /// A side of 0, or more than `MAX_PIXELS` pixels.
     Pixels,
-    /// Not PNG, JPEG or WebP.
+    /// Not PNG, JPEG, WebP or GIF.
     Unsupported,
     /// The header or the data is damaged.
     Corrupt,
@@ -47,6 +49,8 @@ pub fn kind(b: &[u8]) -> Option<Kind> {
         Some(Kind::Jpeg)
     } else if b.len() >= 12 && &b[..4] == b"RIFF" && &b[8..12] == b"WEBP" {
         Some(Kind::Webp)
+    } else if b.starts_with(b"GIF87a") || b.starts_with(b"GIF89a") {
+        Some(Kind::Gif)
     } else {
         None
     }
@@ -78,6 +82,11 @@ pub fn size(b: &[u8]) -> Result<(u32, u32), Error> {
             let (w, h) = d.dimensions();
             check(w, h)
         }
+        // The logical screen: two little-endian 16 bit numbers after the signature.
+        Kind::Gif => match b.get(6..10) {
+            Some(s) => check(u32::from(u16::from_le_bytes([s[0], s[1]])), u32::from(u16::from_le_bytes([s[2], s[3]]))),
+            None => Err(Error::Corrupt),
+        },
     }
 }
 
@@ -141,6 +150,25 @@ pub fn decode(b: &[u8]) -> Result<Image, Error> {
             }
             d.read_image(&mut bytes[..size]).map_err(|_| Error::Corrupt)?;
             channels
+        }
+        Kind::Gif => {
+            let mut o = gif::DecodeOptions::new();
+            o.set_color_output(gif::ColorOutput::RGBA);
+            o.set_memory_limit(gif::MemoryLimit::Bytes((MAX_PIXELS * 4).try_into().map_err(|_| Error::Pixels)?));
+            let mut d = o.read_info(Cursor::new(b)).map_err(|_| Error::Corrupt)?;
+            let f = d.read_next_frame().map_err(|_| Error::Corrupt)?.ok_or(Error::Corrupt)?;
+            let (left, top, fw, fh) = (usize::from(f.left), usize::from(f.top), usize::from(f.width), usize::from(f.height));
+            if f.buffer.len() != fw * fh * 4 {
+                return Err(Error::Corrupt);
+            }
+            // The screen starts clear (all zero). The part of the frame that is outside the screen is cut.
+            let w = width as usize;
+            for y in 0..fh.min((height as usize).saturating_sub(top)) {
+                let cols = fw.min(w.saturating_sub(left));
+                let at = ((top + y) * w + left) * 4;
+                bytes[at..at + cols * 4].copy_from_slice(&f.buffer[y * fw * 4..(y * fw + cols) * 4]);
+            }
+            4
         }
     };
     widen(bytes, n, channels, |p| if channels == 4 { argb(p[3], p[0], p[1], p[2]) } else { argb(255, p[0], p[1], p[2]) });

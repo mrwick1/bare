@@ -4,6 +4,11 @@ const PNG: &[u8] = include_bytes!("../../../tools/fixtures/img/red.png");
 const HALF: &[u8] = include_bytes!("../../../tools/fixtures/img/half.png");
 const JPG: &[u8] = include_bytes!("../../../tools/fixtures/img/blue.jpg");
 const WEBP: &[u8] = include_bytes!("../../../tools/fixtures/img/green.webp");
+const GIF: &[u8] = include_bytes!("../../../tools/fixtures/img/yellow.gif");
+/// The 1 by 1 transparent GIF that a web mail loads to check that it is online.
+const CLEAR: &[u8] = include_bytes!("../../../tools/fixtures/img/clear.gif");
+/// A 4 by 4 GIF whose only frame is 2 by 2 red pixels at (1, 1).
+const OFFSET: &[u8] = include_bytes!("../../../tools/fixtures/img/offset.gif");
 
 fn near(p: u32, want: (u8, u8, u8)) -> bool {
     let c = |s: u32| (p >> s) as u8;
@@ -45,7 +50,6 @@ fn alpha_is_kept() {
 #[test]
 fn an_unknown_file_is_refused() {
     assert_eq!(size(b"<svg></svg>").err(), Some(Error::Unsupported));
-    assert_eq!(size(b"GIF89a\x01\0\x01\0").err(), Some(Error::Unsupported));
     assert_eq!(size(&[]).err(), Some(Error::Unsupported));
 }
 
@@ -187,6 +191,40 @@ mod peak {
                 let g = ((x * n) * 7 % 251) as u8;
                 let a = if f { ((x * n + 1) * 7 % 251) as u8 } else { 255 };
                 assert_eq!(i.pixels[x], argb(a, g, g, g), "{color:?} at {x}");
+            }
+        }
+    }
+}
+
+#[test]
+fn a_gif_gives_its_size_and_the_colors_of_its_first_frame() {
+    assert_eq!(size(GIF), Ok((20, 10)));
+    let i = decode(GIF).unwrap();
+    assert_eq!((i.width, i.height, i.pixels.len()), (20, 10, 200));
+    assert!(near(i.pixels[0], (255, 255, 0)) && near(i.pixels[199], (255, 255, 0)), "{:08x}", i.pixels[0]);
+    // A header alone has the size, but no picture.
+    assert_eq!(size(b"GIF89a\x01\0\x01\0"), Ok((1, 1)));
+    assert_eq!(decode(b"GIF89a\x01\0\x01\0").err(), Some(Error::Corrupt));
+}
+
+#[test]
+fn a_transparent_gif_decodes_to_a_clear_pixel() {
+    let i = decode(CLEAR).unwrap();
+    assert_eq!((i.width, i.height), (1, 1));
+    assert_eq!(i.pixels[0] >> 24, 0);
+}
+
+#[test]
+fn a_gif_frame_is_put_at_its_place_on_a_clear_screen() {
+    let i = decode(OFFSET).unwrap();
+    assert_eq!((i.width, i.height), (4, 4));
+    for y in 0..4 {
+        for x in 0..4 {
+            let p = i.pixels[y * 4 + x];
+            if (1..3).contains(&x) && (1..3).contains(&y) {
+                assert!(near(p, (255, 0, 0)), "({x}, {y}) {p:08x}");
+            } else {
+                assert_eq!(p, 0, "({x}, {y})");
             }
         }
     }
