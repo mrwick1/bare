@@ -77,7 +77,11 @@ fn fold(mut h: u64, bytes: &[u8]) -> u64 {
     (h.rotate_left(5) ^ u64::from_le_bytes(last)).wrapping_mul(K)
 }
 
-fn key(viewport: (f32, f32), parts: &[Part<'_>]) -> u64 {
+/// What a look gives for its sheets: the next `insert` of the same sheets takes it, so that the text is hashed once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Key(u64);
+
+pub fn key(viewport: (f32, f32), parts: &[Part<'_>]) -> Key {
     let mut h = fold(parts.len() as u64, &viewport.0.to_le_bytes());
     h = fold(h, &viewport.1.to_le_bytes());
     for (layer, text) in parts {
@@ -85,12 +89,17 @@ fn key(viewport: (f32, f32), parts: &[Part<'_>]) -> u64 {
         h = fold(h ^ ((text.len() as u64) << 1) ^ u64::from(layer.is_some()), layer.unwrap_or("").as_bytes());
         h = fold(h, text.as_bytes());
     }
-    h
+    Key(h)
 }
 
 /// The set that was built for these sheets and this window size, if the cache has one.
 pub fn lookup(viewport: (f32, f32), parts: &[Part<'_>]) -> Option<Rc<RuleSet>> {
-    let k = key(viewport, parts);
+    lookup_key(key(viewport, parts), viewport, parts)
+}
+
+/// `lookup` for a `key` that the caller made.
+pub fn lookup_key(k: Key, viewport: (f32, f32), parts: &[Part<'_>]) -> Option<Rc<RuleSet>> {
+    let k = k.0;
     CACHE.with_borrow_mut(|c| {
         let docs = c.docs;
         let found = c.map.get_mut(&k).filter(|e| e.layers.len() == parts.len() && e.layers.iter().zip(parts).all(|(a, b)| a.as_deref() == b.0) && e.rules.built_from(viewport, parts.iter().map(|p| p.1)));
@@ -111,11 +120,16 @@ pub fn lookup(viewport: (f32, f32), parts: &[Part<'_>]) -> Option<Rc<RuleSet>> {
 
 /// Keep `rules`, built for these sheets and this window size, for the next documents.
 pub fn insert(viewport: (f32, f32), parts: &[Part<'_>], rules: &Rc<RuleSet>) {
+    insert_key(key(viewport, parts), parts, rules);
+}
+
+/// `insert` for a `key` that the caller made.
+pub fn insert_key(k: Key, parts: &[Part<'_>], rules: &Rc<RuleSet>) {
     let cost = rules.len() + 1;
     if cost > MAX_RULES {
         return;
     }
-    let k = key(viewport, parts);
+    let k = k.0;
     let layers = parts.iter().map(|p| p.0.map(Box::from)).collect();
     CACHE.with_borrow_mut(|c| {
         if let Some(old) = c.map.remove(&k) {
@@ -242,7 +256,7 @@ mod tests {
         // Make the entry sit under the key of another list, as a hash collision would.
         let layers: Box<[Option<Box<str>>]> = Box::new([None]);
         CACHE.with_borrow_mut(|c| {
-            c.map.insert(key(VIEW, &other), Entry { rules: kept.clone(), layers, cost: 1, last: 0 });
+            c.map.insert(key(VIEW, &other).0, Entry { rules: kept.clone(), layers, cost: 1, last: 0 });
             c.cost += 1;
         });
         assert!(lookup(VIEW, &other).is_none());

@@ -490,6 +490,33 @@ struct Names {
     ns_atoms: HashMap<(Ns, Box<str>), u32, BuildHasherDefault<Fnv>>,
     // The way back: from the atom of a namespaced attribute to its namespace.
     atom_ns: HashMap<u32, Ns, BuildHasherDefault<Fnv>>,
+    // The last atoms of the names of 8 bytes or less (the tags and the attributes of a page), one slot for each hash of the name.
+    // A hit costs a few instructions: no hash of the text, no probe, no compare of the text.
+    recent: Box<[Recent; RECENT]>,
+}
+
+const RECENT: usize = 512;
+
+#[derive(Clone, Copy)]
+struct Recent {
+    /// The bytes of the name (`pack`), and its length. A slot that was never used has a length that no name has.
+    key: u64,
+    len: u8,
+    atom: u32,
+}
+
+/// The bytes of a name of 8 bytes or less in one number. Two names of the same length have the same number only if they are the same.
+/// 1 to 3 bytes: the first, the middle, the last. 4 to 8 bytes: the first 4 and the last 4, which cover all of them.
+#[inline(always)]
+fn pack(b: &[u8]) -> u64 {
+    let n = b.len();
+    if n >= 4 {
+        u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as u64 | (u32::from_le_bytes([b[n - 4], b[n - 3], b[n - 2], b[n - 1]]) as u64) << 32
+    } else if n > 0 {
+        b[0] as u64 | (b[n / 2] as u64) << 8 | (b[n - 1] as u64) << 16
+    } else {
+        0
+    }
 }
 
 impl Names {
@@ -500,7 +527,24 @@ impl Names {
         atom
     }
 
+    #[inline]
     fn intern(&mut self, name: &str) -> u32 {
+        let b = name.as_bytes();
+        if b.len() > 8 {
+            return self.intern_slow(name);
+        }
+        let key = pack(b);
+        let at = ((key ^ b.len() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 55) as usize;
+        let slot = self.recent[at];
+        if slot.key == key && slot.len as usize == b.len() {
+            return slot.atom;
+        }
+        let atom = self.intern_slow(name);
+        self.recent[at] = Recent { key, len: b.len() as u8, atom };
+        atom
+    }
+
+    fn intern_slow(&mut self, name: &str) -> u32 {
         if let Some(&atom) = self.atoms.get(name) {
             return atom;
         }
@@ -535,7 +579,7 @@ thread_local! {
     // The table lives as long as the thread, and a `Document` keeps this reference (`Document::names`), so a look-up is not a
     // thread-local access. A `Document` is not `Send`, so it never sees the table of another thread.
     static NAMES: &'static Table = Box::leak(Box::new(Table(std::cell::UnsafeCell::new({
-        let mut n = Names { text: Vec::new(), atoms: HashMap::default(), ns_atoms: HashMap::default(), atom_ns: HashMap::default() };
+        let mut n = Names { text: Vec::new(), atoms: HashMap::default(), ns_atoms: HashMap::default(), atom_ns: HashMap::default(), recent: Box::new([Recent { key: 0, len: u8::MAX, atom: 0 }; RECENT]) };
         // The order matters: it must match `Atom::ID` and `Atom::CLASS`.
         n.intern("id");
         n.intern("class");
@@ -2483,6 +2527,32 @@ mod tests {
         assert_eq!(aa[0].name, Atom::CLASS);
         assert_eq!(doc.attr(a, Atom::CLASS), Some("x"));
         assert_eq!(doc.attr(a, Atom::ID), None);
+    }
+
+    #[test]
+    fn short_names_get_the_same_atom_as_the_table_gives() {
+        // Many names of 0 to 9 bytes, so that slots collide and the names that share bytes at the ends differ.
+        let mut doc = Document::new();
+        let mut names = vec![String::new()];
+        for len in 1..=9usize {
+            for k in 0..60u8 {
+                let mut s: Vec<u8> = (0..len).map(|i| b'a' + (i as u8 * 7 + k) % 26).collect();
+                s[len / 2] = b'0' + k % 10;
+                names.push(String::from_utf8(s).unwrap());
+            }
+        }
+        names.extend(["abcdefgh", "abcdXfgh", "abcdefgX", "Xbcdefgh", "abcXefgh"].map(String::from));
+        let first: Vec<_> = names.iter().map(|n| doc.intern(n)).collect();
+        for _ in 0..3 {
+            for (n, &a) in names.iter().zip(&first) {
+                assert_eq!(doc.intern(n), a, "{n}");
+                assert_eq!(doc.atom_str(a), n);
+            }
+        }
+        let mut sorted = first.clone();
+        sorted.sort_by_key(|a| doc.atom_str(*a).to_string());
+        sorted.dedup();
+        assert_eq!(sorted.len(), names.iter().collect::<std::collections::HashSet<_>>().len(), "one atom for each different name");
     }
 
     #[test]

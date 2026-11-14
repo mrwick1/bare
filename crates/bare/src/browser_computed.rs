@@ -558,7 +558,8 @@ impl Dom {
                 // The rules of a list that has no shadow tree sheet and no retained CSSOM input depend on the list and the window only.
                 let share = !self.style.has_pending.get() && plan.inputs.is_none() && plan.parts.iter().all(|p| p.0 == root);
                 let parts: Vec<Part<'_>> = if share { plan.parts.iter().map(|p| (p.1.as_deref(), p.2.as_str())).collect() } else { Vec::new() };
-                let rules = match share.then(|| rule_cache::lookup(vp, &parts)).flatten() {
+                let key = share.then(|| rule_cache::key(vp, &parts));
+                let rules = match key.and_then(|k| rule_cache::lookup_key(k, vp, &parts)) {
                     Some(rules) => {
                         *cache = None;
                         rules
@@ -590,8 +591,8 @@ impl Dom {
                         }
                         let rules = Rc::new(rules);
                         // The check of the limits is below: a set that is over one is not kept for the next document.
-                        if share && rules.len() <= l.max_rules && doc.name_count() <= self.lim.max_names {
-                            rule_cache::insert(vp, &parts, &rules);
+                        if let Some(k) = key.filter(|_| rules.len() <= l.max_rules && doc.name_count() <= self.lim.max_names) {
+                            rule_cache::insert_key(k, &parts, &rules);
                         }
                         rules
                     }
