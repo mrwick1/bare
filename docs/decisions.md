@@ -2209,3 +2209,10 @@ Owner decision 2026-11-14: option A. The end of a journey (`Session::finish`) ti
 - T1 limit 4 MiB of native bytes: 6 MiB gives 87.4 MiB peak, 2 MiB gives 80.0 MiB (design table), 4 MiB gives 81.6 to 82.1 MiB with 3 collects.
 - C1 needs no weak-key flag: `pending` is empty exactly when no weak table waits for a key. The test runs only when one object in eight is an array.
 - Custom elements turn the reclaim off. Their holders are not listed. See [progress.md](progress.md#r2-c2-build-dead-trees-of-the-page-arena-are-freed-and-native-bytes-start-a-collect-2026-11-14).
+## 2026-11-14: dead DOM trees wait on a list in the dead nodes and the arena takes slots from it (R2-C2 lazy free)
+
+- Chosen: `reclaim` puts each dead root on a list with one store, and `alloc` takes the head and splices the children chain of a whole node in front. `drain` and `rebuild_lists` run at a collect when the lists grew by 1 MiB. The list lives in the `next` links of the dead nodes: no side vector. Owner decision 2026-11-14.
+- Chosen: the pace of a walk is in bytes (1 MiB), and an empty walk doubles the wait up to 4 times.
+- Not chosen: a pace of 4 MiB. It removes the row cost, but `python-docs-search-results` stays at 92 MiB, because the walk misses the collect that the native-byte trigger starts. 1 MiB gives 81.3 MiB.
+- Result: 1 row of 803 is over +0.5% under both allocators (`select_load churn 1000`, +0.74%), against 11 on the eager free. Open for the owner. See [progress.md](progress.md#r2-c2-lazy-free-dead-trees-wait-on-a-list-and-the-arena-takes-slots-from-it-2026-11-14).
+

@@ -21,6 +21,7 @@ use std::hash::BuildHasherDefault;
 /// waits until this many bytes of nodes, text and attributes (and a fourth of the bytes in use after the last walk) were made since the last one.
 /// The same budget as the native-byte trigger of the collect (`Interp::gc_due`).
 const FLOOR: usize = 1 << 20;
+const MISSES: u32 = 4;
 
 /// The state of the reclaim of one realm.
 #[derive(Default)]
@@ -37,6 +38,8 @@ pub(crate) struct Reclaim {
     /// Bytes of the nodes, text and attributes in use after the last walk, and the growth that makes the next walk worth its cost (`FLOOR`, `set_floor` in tests).
     base: Cell<usize>,
     floor: Cell<usize>,
+    /// Walks in a row that found no dead tree. Each one doubles the growth that the next walk waits for (up to `MISSES` doublings): a walk that finds nothing is lost time.
+    misses: Cell<u32>,
     /// Reclaims that freed something, and nodes freed.
     runs: Cell<u32>,
     freed: Cell<u64>,
@@ -98,7 +101,7 @@ impl Dom {
             let base = r.base.get();
             let floor = if cfg!(test) { r.floor.get() } else { FLOOR };
             // `due` stays set: the walk comes when enough nodes were made. A busy document borrow (`try_borrow`) means a walk now is not safe either.
-            if self.doc.try_borrow().map_or(true, |d| d.arena_bytes() < base + floor.max(base / 4)) {
+            if self.doc.try_borrow().map_or(true, |d| d.arena_bytes() < base + (floor.max(base / 4) << r.misses.get())) {
                 return 0;
             }
         }
@@ -163,8 +166,10 @@ impl Dom {
         );
         r.base.set(doc.arena_bytes());
         if freed == 0 {
+            r.misses.set((r.misses.get() + 1).min(MISSES));
             return 0;
         }
+        r.misses.set(0);
         let doc: &Document = &doc;
         let gone = |n: NodeId| doc.is_free(n);
         {

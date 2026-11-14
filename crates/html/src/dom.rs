@@ -1914,6 +1914,7 @@ impl Document {
         self.new_node(NodeData::Doctype(span))
     }
 
+    #[inline(always)]
     fn new_node(&mut self, data: NodeData) -> NodeId {
         self.places = Default::default();
         // The sibling-place table has one entry for each node, so a new node makes it too short.

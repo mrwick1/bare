@@ -11304,7 +11304,7 @@ Owner decision 2026-11-14: build R1, T1 and C1 of `docs/design-peak-memory.md`. 
 
 - R1, in `crates/html/src/dom/reclaim.rs` and `crates/bare/src/browser_reclaim.rs`. `Document::reclaim` frees every tree that no node of the host's live list names. A freed slot goes on a free list, and `alloc` takes from it before it grows the arena. When the freed text and attributes are at least a fourth of the lists (and 256 KiB), `rebuild_lists` copies the live ones into new lists of exact size.
 - The reclaim runs only at two safe points: after `Interp::collect` in `Browser::collect`, and after each task in `pump_inner`. No script runs and no host call is on the stack there, so no Rust local holds a `NodeId`. `Host::prune` only sets `due`.
-- A walk waits until the arena grew by `max(2048, a fourth of the nodes after the last walk)`. Without this pace the cost matrix showed 79 rows over the limit, because every collect walked the arena.
+- A walk waits until the arena grew by `max(2048, a fourth of the nodes after the last walk)`. (Changed by the lazy free below: the pace is in bytes.) Without this pace the cost matrix showed 79 rows over the limit, because every collect walked the arena.
 - T1: `Interp::add_external` and `set_external_live`. `gc_due` is also true when the host added more than `max(4 MiB, a fourth of the native bytes live after the last collect)` since the last collect. The host adds the arena bytes of a parsed document (`parse_from_string`), and after a collect it says how many arena bytes are live.
 - C1: a plain array (`is_array`, `exotic == 0`) skips the side-table probes in `Interp::collect` when no weak map waits for a key (`pending` is empty) and no class has private fields. No flag for weak keys is needed: `pending` holds the values of weak keys that were not reached yet, so it is empty exactly when no weak table needs the array. The test is made only when at least one object in eight is an array (`Heap::arrays_are_common`); otherwise the test costs more than it saves.
 - Caps: `live_len`, `live_text_bytes` and `live_attr_slots` replace `len`, `text_bytes` and `attr_slots` in `room`, `attr_room`, the fragment limits and the namespace check.
@@ -11325,7 +11325,7 @@ Limits that remain:
 - Some holders keep a dead tree until their owner is gone: mutation observer records, Range, walkers, queued tasks, and the pinned image, loader and driver items. This costs memory only, not correctness.
 - The walk costs about 90 instructions for each freed node, and a reused slot costs about 26 instructions more than a push.
 
-Test mode: `Document::set_poison` never reuses a slot and points every link of a freed node outside the arena, so a stale id panics. `BARE_RECLAIM_STRESS=1 cargo test -p bare --lib` collects and walks after each script and each task with poison. `=collect` collects only. The whole `bare` lib suite under `=1` has no failure beyond the 28 that `=collect` has: those tests read GC counters.
+Test mode: `Document::set_poison` never reuses a slot and points every link of a freed node outside the arena, so a stale id panics. `BARE_RECLAIM_STRESS=1 cargo test -p bare --lib` collects and walks after each script and each task with poison. `=collect` collects only. The `bare` lib suite under `=1` has 31 failures on the PR head `b3f873c7` and 31 on the lazy free below. 28 are the `=collect` baseline (tests that read GC counters), and 3 are tests that hold a `NodeId` outside the realm or read the walk pace. This line first said "no failure beyond the 28". That was wrong.
 
 ### Caps
 
@@ -11394,3 +11394,60 @@ Live sites. Windows and macOS. Wall time (the machine was shared). Pages with cu
 - `eval_builtins.rs:261`: `Ext::re_tab_bytes` is used only by a test; the build warns of dead code.
 - `parse_load deep 1` and `10` abort with a stack overflow on main and on this branch.
 - The baseline instruction count of `python-docs-search-results` spreads by 37% from run to run.
+
+## R2-C2 lazy free: dead trees wait on a list and the arena takes slots from it (2026-11-14)
+
+Owner decision 2026-11-14: try lazy freeing of dead DOM trees, so that the free cost vanishes from the paths that make and drop trees. The PR #543 head `b3f873c7` has 11 cost rows over +0.5% under both allocators. This section records the decision and the result.
+
+### What changed
+
+- `Document::reclaim` no longer visits the nodes of a dead tree. It finds the roots of the dead trees (one scan of the arena, as before) and puts each on a list with one store: the root gets the parent `GONE`, and its `next` link is the list. No node of the tree is touched.
+- `alloc` takes the head of the list. If that node still has children, the whole chain of children (`first_child` to `last_child`) goes in front of the list in one step. So a dead tree of N nodes costs N small steps, and each step is made by the node that needs a slot. There is no side vector: the list lives in the dead nodes.
+- `drain` turns the rest of the list into free nodes. It runs at a collect when the text and attribute lists grew by `DRAIN_BYTES` (1 MiB) since the last drain, and in `Free::Now` mode (see below). `rebuild_lists` runs when the dead text and attributes are at least 256 KiB and a fourth of the lists. Dead text and attributes are counted when a node takes the slot (`retire`, `retire_attrs`) or at `drain`.
+- `Free::{Wait, Collect, Now}`. The scheduler calls `reclaim(false)`: dead trees wait. `Browser::collect` calls `reclaim(true)`. A page over half of a cap (`dom-nodes`, `dom-text`, `dom-attrs`) uses `Now`: the caps count live nodes, and a tree that waits counts as live.
+- Side tables (`foreign`, `class_sets`, `shadow_*`, `states`, `ui`, `images`, `sheet_made`, and the host tables) are purged when the tree is queued, with a memo of the climbs (`dead_memo`). A node that waits is never named by a table when a new node takes its slot. `scan_sheets` runs before the first root is queued, so a node that waits is never a sheet candidate. A walk that finds no dead tree does not run it.
+- The pace of a walk is in bytes of nodes, text and attributes (`arena_bytes`): `FLOOR` is 1 MiB, the same as the native-byte limit of the collect trigger. A walk that finds no dead tree doubles the wait for the next one, up to 4 doublings (`MISSES`, 16 times the floor).
+- C1 uses `Heap::plain_array_edges`: one lookup for the test and the edges. It replaces the separate test (`is_plain_array`) that cost about 15 instructions on rows where the side tables are cheap (`navigation_load subclass`, `observer_load mo`).
+- `new_node` is `inline(always)`. Without it the inlined `alloc` made `new_node` a call, and `fragment_load` paid 8 instructions for each node.
+- `BARE_RECLAIM_STRESS=1` keeps the poison and the eager `free_tree` (a stale id panics). `BARE_RECLAIM_STRESS=lazy` is new: no poison, a walk after each task, so the lazy path runs under the whole `bare` lib suite.
+
+### Numbers
+
+Main `4a27b7a9` (built with `base-build`: `--release --workspace --examples`, and `-p bare-stress`, `-p bare-drive`) against this branch rebased on it. Machine archMachine, shared.
+
+| Step | Rows over +0.5% under both allocators |
+| --- | ---: |
+| PR head `b3f873c7` (eager free, from the section above) | 11 |
+| Lazy free, first full matrix after the rebase on `4a27b7a9` | 4 (`browser_load svgparse 10`, `fragment_load deep 10`, `fragment_load parse 10`, `select_load churn 1000`) |
+| `new_node` inline | 2 (`svgparse 10` +0.60%, `churn 1000` +0.78%) |
+| `scan_sheets` only when a tree is found, back-off after an empty walk | 1 (`select_load churn 1000`: +0.743% glibc, +0.717% jemalloc) |
+
+Full matrix of the last build: 803 rows, mean change glibc -0.001%. `browser_load svgparse 10` +0.31%. Failed to run: `parse_load deep 1` and `10` (stack overflow, on main too). Counts are the minimum of 3 `perf stat` runs (`tools/js/cost_matrix.sh`); the base counts are cached.
+
+Why `select_load churn 1000` stays over. `callgrind` on the row (`diff.py` of the two profiles, self cost): `reuse` 1,125,600 for 20,010 calls (56 each), `retire_attrs` 420,000 (21 each), the reclaim walk 438,855, `IdTab::retain` and `is_free` (the purge of the host tables) 504,544, `scan_sheets` 228,240. The gain is `edges_of` against `stored_edges` (-0.72 M) and a few smaller ones. Net +2.5 M of 332 M. The row makes and drops an `<option>` with attributes 20,010 times, so every node pays the slot take. I did not find a cheaper take: it must read the old node, count its text and attributes (`retire`), and splice the children. The first brief said "26 instructions more than a push". On this row the take costs 77 (56 and 21), so that figure holds only for nodes with no attributes. This is hypothesis for the gap to a push in the base: I did not profile the base push path on this row.
+
+`dataset_load keys` is within +0.1% now (it was +0.6% on the PR head).
+
+`python-docs-search-results` (`tools/bench/journeys.sh compare --clock virtual --corpus virtual-settled --runs 3 --pss`, base `4a27b7a9`): peak RSS 94.4 against 81.3 MiB (-13.8%), instructions 2,453.8 against 2,545.9 M (+3.8%). Criterion 6 (at most 90.7 MiB) stays met. A pace of 4 MiB removes the row cost but gives 92 MiB there, because the walk then misses the collect that the native-byte trigger starts.
+
+The 47 journeys, 3 runs, `--pss`: sum of instruction medians 70,462.3 against 69,844.3 M (-0.9%, max spread 0.4%); the sum falls because `substack-home` -5.2%, `python-docs-search` -6.4% and `go-dev-home` -1.3% (the same corpus as before the PR); `python-docs-search-results` is +3.8%, all others within +0.3%. PSS sum 1,413.7 against 1,282.7 MiB (-9.3%). cpu_ms -1.3%. 47 of 47 pass. Replay misses are the same on both binaries (6 journeys, same counts). `bare-stress scale html`, 108 cases: no case has a peak over 5% worse, and no case is 1.5 times slower. `keycost`: `#a1` 278.3 M, `#f0` 283.7 M, 31.2 MiB at 50 keys (main 278.5 and 283.8).
+
+### Checks
+
+- `cargo test --release --workspace --no-fail-fast`: the 7 known openssl TLS tests and the flaky `a_hidden_iframe_download_is_saved` fail, nothing else.
+- Stress. `BARE_RECLAIM_STRESS=1`: 31 failures on the lazy branch and 31 on the PR head; the same tests except the renamed `the_walk_waits_until_enough_bytes_were_made_since_the_last_one` (was `..._nodes_...`). 28 are the `=collect` baseline. `=lazy`: 30 failures, none beyond those. `a_held_list_sees_changes_made_to_the_native_document` fails under `=1` on the PR head too: the test holds a detached node in Rust across a task.
+- `test262_check.sh`: `gate: ok`. `exec_diff.sh`: 0 differences in 79 runs.
+- New or changed tests in `reclaim.rs`: `a_dead_tree_is_queued_in_one_step_and_its_slots_are_reused_before_the_arena_grows` (the owner's test), and the existing reclaim tests run with `Free::Wait`, `Free::Collect` and `Free::Now` where the mode matters (`a_reused_slot_starts_clean`, the rebuild tests). The 16 reclaim tests of `bare-html` pass.
+
+### Not tested
+
+Live sites, Windows, macOS, wall time, pages with custom elements (reclaim is off there), `BARE_RECLAIM_STRESS=lazy` on the `drive`, `mcp` and `net` suites, and a base-push profile of `select_load churn 1000`.
+
+### Result
+
+STOPPED on one row. `select_load churn 1000` is +0.74% under both allocators. I made two tuning rounds after the first full matrix (inline `new_node`; scan and back-off). The rule says stop after two failed attempts. The branch is pushed and not merged. The owner decides: accept this row, or ask for a cheaper take for nodes with attributes.
+
+### Noticed, not changed
+
+- `parse_load deep 1` and `10` abort with a stack overflow on main and on this branch.
+- `Ext::re_tab_bytes` is used only by a test; the build warns of dead code.

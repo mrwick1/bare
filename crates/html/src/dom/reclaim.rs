@@ -206,13 +206,15 @@ impl Document {
                 break;
             }
         }
-        // `scan_sheets` has read every node that is dead now, so it never reads a node that waits on the list (its parent link may lead to a slot that
-        // a new node took), and the candidates among them go below.
-        self.scan_sheets();
         let (mut trees, mut freed) = (0, 0);
         for i in 1..self.nodes.len() {
             let n = &self.nodes[i];
             if n.parent.is_none() && n.data != FREE && !keep.contains(i) {
+                if trees == 0 {
+                    // `scan_sheets` has read every node that is dead now, so it never reads a node that waits on the list (its parent link may lead to a slot that
+                    // a new node took). A walk that finds no dead tree does not pay for it: a page that asks for no sheet pays nothing.
+                    self.scan_sheets();
+                }
                 trees += 1;
                 if self.poison {
                     freed += self.free_tree(i);
