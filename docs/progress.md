@@ -11582,3 +11582,70 @@ Option H is not built; its numbers are the measured floor (252.9 M) plus an esti
 ### Noticed, not changed
 
 - `nextjs-docs` fails in the journey run on main (47 counted, 1 failed). I did not look at the cause.
+## `SharedWorker` as a worker that fails to start (2026-11-15)
+
+Owner decision (2026-11-14): build option 1 of `docs/design-craigslist.md`. Define `SharedWorker` the same way bare defines `Worker`: a constructor that exists, whose worker fails to start, with the same `error` event behavior. The decision is also in `docs/decisions.md`.
+
+### What was built
+
+- `crates/bare/src/browser_worker.rs`: a second lazy accessor `SharedWorker` on the global. It uses the host record of `Worker` (the `objs` map, the cap `MAX_WORKERS = 64` for both kinds, the `Task::Worker` error task). The constructor and URL checks of `Worker` moved into `check_url`, `start` and `check_type`, and both constructors call them. The prototype has `onerror` and a read-only `port`. It has no `postMessage` and no `terminate`. A new table `ports` (shared worker to its port) holds the roots; `prune` drops the entry with its worker. `Worker.prototype.postMessage` and `terminate` refuse a shared worker (`dedicated_of`).
+- `crates/bare/src/browser_scheduler.rs`: `Dom::new_port` makes one `MessagePort` with no peer, under the same two caps as `MessageChannel`.
+- Tests (`browser_worker_tests.rs`, written first and seen failing: 6 of them with `SharedWorker is not defined`): 7 new tests (the last one checks the GC), and the line that asserted `typeof SharedWorker === "undefined"` now asserts the opposite.
+- It does not read `credentials` or `extraInfo`, and `port` is a getter on the prototype that reads a table, not an own slot.
+
+### The corpus
+
+`tools/bench/journeys.sh fill --corpus /data/bare-tmp/corpus/virtual-load --clock virtual` with the new binary: every journey ended with 2 runs in a row with 0 misses. One new file, no file removed or changed:
+
+| Journey | Host | Method | URL |
+| --- | --- | --- | --- |
+| craigslist-home | www.craigslist.org:443 | GET | `/static/www/browsePostings-2026-11-04-13-12-995e4b188266a9bd9a6597dae6a6a2522a59f805.js` (the modern bundle, 359,646 bytes in the file) |
+
+No other journey changed its set of requests. `substack-home` tests `SharedWorker` in Sentry's list of event targets; with the global defined its instruction count did not move against main (10,960.1 M both).
+
+### Numbers
+
+Machine archMachine (loaded, shared). Corpus `virtual-load`, `BARE_CLOCK=virtual`, `BARE_SEED=1`, `journeys.sh compare --clock virtual --runs 3 --pss`, 47 journeys, runs interleaved, medians of 3; run 0 gives PSS. NEW is this branch rebased on main `c4848ecc`. BASE is `bench-base-vclock` (`/data/bare-tmp/bench-base-src`, `300b8c53`), built with `-p bare-drive`. All 47 pass in every run on both, and there are 0 replay misses. Log and TSV: `/data/claude-tmp/sw/cmp2.{log,tsv}`.
+
+The baseline binary has no `SharedWorker`. On this corpus it keeps the ES5 path of `craigslist-home` (48,250 M, 783 MiB), as it did before.
+
+| | BASE | NEW | Change |
+| --- | ---: | ---: | ---: |
+| Instructions, sum of medians | 138,270.0 M | 73,242.0 M | -47.0% |
+| Peak RSS | 2,765.8 MiB | 1,799.8 MiB | -34.9% |
+| PSS (run 0) | 2,458.4 MiB | 1,429.0 MiB | -41.9% |
+
+Same-binary spread: 0.2% at most on BASE, 0.1% at most on NEW.
+
+| # | Criterion | BASE | NEW | Target | |
+| --- | --- | --- | --- | --- | --- |
+| 2 | Total instructions of the 47 journeys | 138,270 M | 73,242 M (**53.0%**) | 80% | met |
+| 2 | The same without `craigslist-home` | 90,020 M | 70,596 M (78.4%) | 80% | met (main moved since the #542 table, which gave 80.0%; `craigslist-home` is not in it) |
+| 4 | `python-org-docs-link`, `rust-book-search` | 1,434.1 M, 16,605.9 M | 1,094.3 M, 10,159.6 M (1.31 times, 1.63 times) | 1.3 times | met |
+| 6 | Peak RSS of `python-docs-search-results` | 114.1 MiB | 81.5 MiB (-28.6%) | -20% | met |
+
+Criterion 2 with `craigslist-home` on both sides at its ES5 cost (the old way, the baseline total unchanged): the NEW total would be 73,242 − 2,646 + 47,010 = 117,606 M, or 85.1%. So the gain of 32 points is the change of the page that is loaded: the page serves the modern bundle, as it does in every browser. The engine is as slow on the ES5 path as before.
+
+The change from main `c4848ecc` (same corpus, same method, `/data/claude-tmp/sw/cmp2-main.{log,tsv}`): sum 117,602.4 M to 73,240.1 M (-37.7%); peak RSS 2,462.9 to 1,796.0 MiB (-27.1%). Only `craigslist-home` moved by more than 1%: 47,010.1 to 2,646.0 M (-94.4%), 749.5 to 83.4 MiB (-88.9%), spread 0.0%. Every other journey is within ±1% in instructions (`python-docs-search-results` +0.3%, `nodejs-org-home` 0.0%, `substack-home` -0.0%). Peak RSS (one `wait4` figure for each run, median of 3) of 6 others moved by more than 2%: `devto-home` -6.7%, `go-dev-home` +5.8%, `wikipedia-article` -2.7%, `example-learn-more` -2.4%, `python-org-search` +2.3%, `python-org-docs-link` and `wiktionary-portal` -2.2%. Their instruction counts are within ±1%. I did not find the cause; hypothesis: allocator and thread timing on a loaded machine. Not checked.
+
+Not the change: against the baseline `substack-home` is +3.5% and `paulgraham-home` +1.5%; both are the same against main (within 0.1%).
+
+### Checks
+
+- `cargo test --release -p bare --lib browser_worker`: 17 pass.
+- `cargo test --release --workspace --no-fail-fast`: the 7 known openssl TLS tests fail (`client_openssl` 4, `https_openssl` 2, `tls12_openssl` 1). `a_changed_file_starts_again_from_zero` and `external_sheets_embedded_sheets_and_inline_styles_cascade_in_order` failed in the workspace run (load) and pass when run alone. Nothing else fails.
+- `tools/js/cost_matrix.sh` (base `c4848ecc`, built with `--workspace --examples` and `-p bare-stress`): 803 rows, mean change glibc +0.009%, jemalloc +0.000%, 0 rows over the limit under either allocator; `parse_load deep 1` and `deep 10` do not run on either tree (stack overflow, known).
+- `test262` and `exec_diff` were not run: there is no change in `crates/js`.
+- `bare-drive` builds with `-p bare-drive`.
+
+### Not tested
+
+- Wall time on an idle machine. A live run of `craigslist-home` (the modern bundle came from the live site once, in the fill).
+- A page that uses a `SharedWorker` for real: it gets an `error` event, as with `Worker`. Windows and macOS.
+- `nodejs-org-home` and `substack-home` with a changed `SharedWorker` path: only their instruction counts were compared (no change).
+- A real browser's order of the `error` event against other tasks, and `ErrorEvent` for it (as for `Worker`: a plain `Event`).
+
+### Noticed, not changed
+
+- `Ext::re_tab_bytes` is used only by a test; the build warns of dead code. `browser_history_state_cap_tests.rs` has an unused import.
+- Options 2 and 3 of the design (`Intl` passing the formatjs probes, GC inside a call) remain open topics.

@@ -1057,6 +1057,23 @@ fn message_channel_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> 
     Ok(Value::Object(ch))
 }
 
+impl Dom {
+    /// A `MessagePort` with no peer (the `port` of a `SharedWorker` that did not start): it takes messages and delivers none.
+    pub(crate) fn new_port(&self, it: &mut Interp<'_>) -> R<ObjId> {
+        if self.sched.borrow().ports.len() + 1 > self.sched.borrow().limits.max_ports {
+            return Err(self.lim("message-ports"));
+        }
+        if self.st.borrow().by_obj.len() + 1 > self.lim.max_wrappers {
+            return Err(self.lim("dom-wrappers"));
+        }
+        let protos = self.sched.borrow().protos.expect("installed");
+        let p = self.obj(it, protos.port)?;
+        self.st.borrow_mut().by_obj.insert(p, Target::Obj(p));
+        self.sched.borrow_mut().ports.insert(p, Port { peer: None, enabled: false, inbox: VecDeque::new(), keys: VecDeque::new(), handler: None });
+        Ok(p)
+    }
+}
+
 fn port_post_message(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     let port = d.port_of(it, this)?;
     if a.is_empty() {
