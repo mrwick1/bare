@@ -10212,3 +10212,32 @@ A prototype of A or S (their gain is arithmetic from counters and swap counts; t
 - Data literals only exist in the lazy parse mode (`self.lazy`). A switch that turns lazy parsing off also turns them off. A first sweep of this task did that and gave a false -857 M on `python-docs-search`.
 - `journeys.sh`-style runs under heavy load showed 1 to 4 replay misses on four `wikipedia-*` rows of the threshold sweep. The main sweeps had 0.
 - The parse cache keeps one entry for the lazy kind and one for the eager kind of the same text (from #492).
+
+## R2-B: where the Wikipedia journeys spend instructions (2026-11-14, docs only)
+
+Design: `docs/design-wikipedia-journeys.md`. Task R2-B of the round 2 plan. No product code changed. Machine-local files: `/data/bare-tmp/r2/R2-B/` (counter patch, no-settle patch, profiles, TSV files).
+
+Method: symbol build of main `28a8fbc2`; `perf record -e instructions:u -c 500000` with frame pointers, 3 runs per journey; counters in a patch (`BARE_FORCE_STATS`); the corpus `virtual`. Instruction spread of the journeys: 0.1% (`wikipedia-article`, 3 runs: 7,776 M), 0.0 to 3.1% (`wikipedia-search`, 7,338 M; run 0 had 2 timing misses).
+
+Measured split (mean of 3 profile runs, spread 0.5 points or less):
+
+| Subsystem | `wikipedia-article` | `wikipedia-search` |
+|---|---:|---:|
+| Style | 30.7% | 25.2% |
+| JS execution | 22.5% | 22.3% |
+| Window named-property list rebuilt (`browser_frames::build`) | 11.5% | 10.7% |
+| Layout | 8.8% | 11.9% |
+| JS parse | 8.4% | 10.6% |
+| Other (DOM bindings 3.7%, selector API 2.7%, HTML 2.4%, CSS parse 2.3%, regexp 1.8%, rest) | 18.1% | 18.7% |
+
+Findings:
+
+- The round 1 hypothesis (the heavy journeys are bound by page JS) is wrong for Wikipedia. JS is 33% and 35%. Style, layout and the name list are 51% and 48%.
+- The replay driver's `settle_pictures` loop is 74% of `wikipedia-article`, 56% of `wikipedia-search` and 52.8% of all 47 journeys (95,376 M with it, 45,037 M without; all journeys pass without it). The baseline pays it too: criterion 2 is 90.7% with it and 89.3% without it (2 runs each, `-p bare-drive` builds). `react-docs` is 99.3% loop (16,948 M to 127 M). Owner decision needed: keep or bound the loop (both sides, baseline measured again).
+- Window names: 54 and 40 rebuilds of a list of every id of the page (15 k nodes, 17 M each) for 16 and 18 global names that do not exist. All stale by `name_revision`. 894 M and 785 M.
+- Style: 8 full passes (782 M) for one load of the long article, caused by 4 appended sheets, 2 restyles that gave up and 2 frame requests. One hover restyled 90,232 elements (9 times the document, 865 M, 10.8% of the article): covered roots are styled again. The 10 "kept" layouts of each journey reused 0 fragments.
+- Memory (`massif`, one run): heap peak 50.6 MB, of which JS objects 27.6%, JS trees 10.5%, DOM attributes 7%, layout fragments 8%. RSS without the loop: 33.0 MiB against 60.3 MiB.
+
+Recommendation: W1 (window name by one walk, no list), H1 (skip a covered restyle root), S-A (one retained cascade and layout updated by damage marks). Estimate on the settled benchmark: article -38.5%, search -32.8%, the two -5.4 G (5.7% of the total): criterion 2 from 90.7% to about 85.5%. If the four other Wikipedia journeys gain 25 to 35% (hypothesis), 82 to 83%. The arithmetic is in section 7 of the design.
+
+Not measured: the four other Wikipedia journeys; the roots of the 90 k restyle (cause is a hypothesis); why a reload of the same page pays the same rule-build cost; wall time; the live sites.
