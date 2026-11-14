@@ -11341,7 +11341,7 @@ Each cap is still needed. It bounds the live memory of a page, and the live coun
 | Main `95bd7864` | 94.5 (93.6 to 95.2) | 86.4 | 2,453.6 (0.05%) | 6 | 1 |
 | This branch | 81.6 (81.4 to 82.9) | 80.2 | 2,554.5 (0.05%) | 6 | 3 |
 
-Criterion 6 (at most 90.7 MiB): met, 81.6 MiB. Instructions are +4.1% against main on this page. Build steps, 3 runs each, against main 94.5 MiB: R1 alone 95.4 MiB (the dead trees stay until a collect runs); R1 and T1 81.8 MiB and 2,788 M; R1, T1 and C1 82.1 MiB and 2,561 M. C1 removes 227 M of the 335 M that T1 added. The baseline varies much from run to run in this page (the old settle loop), so the baseline row is a range.
+Criterion 6 (at most 90.7 MiB): met, 81.6 MiB. Instructions are +4.1% against main on this page. Build steps, 3 runs each, against main 94.5 MiB: R1 alone 95.4 MiB (the dead trees stay until a collect runs); R1 and T1 81.8 MiB and 2,788 M; R1, T1 and C1 82.1 MiB and 2,561 M. C1 removes 227 M of the 326 M that T1 added. The baseline varies much from run to run in this page (the old settle loop), so the baseline row is a range.
 
 T1 limit: the design measured 6 MiB at 87.4 MiB and 2 MiB at 80.0 MiB. 4 MiB gives 81.6 to 82.1 MiB with 3 collects, so a smaller limit gains under 2 MiB and adds collects.
 
@@ -11373,14 +11373,14 @@ Causes (callgrind, exact counts):
 - `dataset_load keys`: the same code-layout effect as in the Custom Elements PR (an inlining flip in `from_fn` closures; callgrind: +4.5 M in `FromFn::next`, -2.5 M in `call_mut`, no code of this change runs in the loop). Arjun approved this row as a layout effect on 2026-11-07.
 - `navigation_load subclass`: `Interp::collect` +0.35 M of 73 M and no new work (the example makes subclasses with private fields, so the array path is off). Hypothesis: layout in the large `collect` function.
 
-I did not find a design that frees a tree for less than one pass over its nodes. A change that would lower the rows: free a tree lazily, by chunks, when a slot is needed (the memory gain would come later). I did not build it. The owner decides whether the first 8 rows are an accepted cost of R1.
+I did not find a design that frees a tree for less than one pass over its nodes. A change that would lower the rows: free a tree lazily, by chunks, when a slot is needed (the memory gain would come later). I did not build it. The owner decides whether the rows that make and drop trees are an accepted cost of R1.
 
 ### Checks
 
 - `cargo test --release --workspace --no-fail-fast`: 4,021 passed, 9 failed. Failed: the 7 openssl TLS tests (known), `downloads::run::tests::a_changed_file_starts_again_from_zero` (known, flaky), and `a_snapshot_of_5000_elements_takes_under_30_ms` (a timing test: 38 ms under load; it passes 3 of 3 alone). An earlier full run failed `a_hidden_iframe_download_is_saved` (known, flaky) instead of the snapshot test.
-- New tests: 9 in `browser_reclaim_tests.rs` (dead documents return their slots; a script that holds a document keeps it; a range and an observer keep their trees; state of freed nodes is forgotten; reclaim after every task with poison; the native-byte trigger; the live caps; the growth pace), 15 in `dom/reclaim.rs`, 2 in `eval_tests.rs` (T1 trigger, C1 keeps what hangs on an array). Each was written to fail first.
+- New tests: 8 in `browser_reclaim_tests.rs` (dead documents return their slots; a script that holds a document keeps it; a range and an observer keep their trees; state of freed nodes is forgotten; reclaim after every task with poison; the native-byte trigger; the live caps; the growth pace), 15 in `dom/reclaim.rs`, 2 in `eval_tests.rs` (T1 trigger, C1 keeps what hangs on an array).
 - Stress: the `bare` lib suite under `BARE_RECLAIM_STRESS=1` (poison, walk after each task, collect after each script) adds no failure beyond the collect-only baseline.
-- `TEST262=/data/claude-tmp/test262 tools/js/test262_check.sh`: exit 0, no directory lost passes (the log lists only gains).
+- `TEST262=/data/claude-tmp/test262 tools/js/test262_check.sh`: exit 0, `gate: ok` (no directory has fewer passes than the baseline; pass 29,731).
 - `tools/js/exec_diff.sh`: 79 runs, modes tree, auto and byte, 0 differences.
 - `keycost` (`/data/bare-tmp/r2/w1/typing`): `#a1` 278.4 M and `#f0` 283.7 M for each key, 31.0 MiB at 50 keys. Main: 278.5 M and 283.8 M.
 - `fragment_load` asserted that the arena grows by exactly the nodes made. The reclaim makes it grow by less, so the example now asserts "at most".
