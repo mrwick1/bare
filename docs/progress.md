@@ -10609,3 +10609,45 @@ On the first set (main `5bc18d14`) `wikipedia-search` showed +3.0%. It is not th
 ### Not tested
 
 Windows and macOS. A real page that edits a sheet (only generated pages). Memory after a collection inside a long run of more than 1,000,000 cycles on a `<style>` element (the arena limit stops it first). A wall time (the machine was shared). Live logins.
+## W1: a window name is answered by one walk, no list (2026-11-14)
+
+Design: `docs/design-wikipedia-journeys.md` section 6.1, W1. The owner decided on 2026-11-14 to build W1. This is a retry: an earlier agent stopped on a network error. I applied its patch (`/data/bare-tmp/r2/w1/wip.patch`), reviewed it, and finished it.
+
+What changed:
+- `crates/bare/src/browser_frames.rs`: a miss on a window or document name runs `walk`: one walk in tree order that stops at the first answer (an iframe wins over an element that came first, as `build` does). It keeps the last answer for the name revision, so the same name asked twice walks once. The step charge is the nodes walked, not `doc.len()`. `build` stays for an index (`window[0]`), key enumeration, and the 16th different name at one name revision (`WALKS`).
+- `crates/html/src/dom.rs`: `Document::may_have_name`, a hash set of every `id` and `name` value ever written (it only grows). A value that is not in it is a miss with no walk. Beyond W1 in the design; see `docs/decisions.md`. I added `Atom::NAME` (atom 2, in the table from the start) so that the check for a `name` attribute is one number compare. With a string compare per attribute, 5 rows of the cost matrix were over +0.5% under both allocators (`nodelist_load scan`, `resources_load dups`, `form_load gc`). With it, 0.
+- Review: I checked every place that writes an attribute (`insert_element`, `insert_element_ns`, `import_node`, `set_attr_atom`; `clone_element` copies from the same document). All record the value. I hashed the bytes of the value in one call, and fixed the indent of one test in `dom.rs`.
+
+Tests (written first by the earlier agent; they fail on main because `Frames::counts` does not exist, and the counter asserts no list is built): `a_missing_name_builds_no_list` (the counter: 0 builds and 0 nodes visited for a miss after each change), `a_walk_picks_the_same_node_as_the_list`, `a_name_asked_often_at_one_revision_builds_the_list_once`, `enumeration_and_an_index_still_see_the_names` (`in`, `for in`, `getOwnPropertyNames`, `frames[i]`), and `may_have_name_never_misses_a_name_that_was_set`. `bare` lib: 1462 pass; `bare-html`: 179 pass.
+
+Journeys (`tools/bench/journeys.sh compare --clock virtual --runs 3 --pss`; 4 runs shown by the runner, medians; machine archMachine, shared; instruction spread 0.3% or less). Main `c4e32a85` against this branch, all 47 journeys, all pass, 0 replay misses:
+
+| Journey | main (M) | branch (M) | change | PSS MiB |
+|---|---:|---:|---:|---:|
+| `wikipedia-article` | 7,778.8 | 6,877.5 | -11.6% | 62.2 to 59.2 |
+| `wikipedia-search` | 7,337.2 | 6,555.7 | -10.7% | 62.1 to 61.4 |
+| `wikipedia-toc-languages` | 3,809.6 | 3,355.7 | -11.9% | 54.1 to 52.2 |
+| `wikipedia-main-random` | 4,139.5 | 4,085.2 | -1.3% | 47.1 to 46.1 |
+| `wikipedia-portal` | 1,233.0 | 1,217.3 | -1.3% | |
+| `wiktionary-portal` | 1,560.0 | 1,550.8 | -0.6% | |
+| all 47 | 95,453.8 | 93,105.4 | -2.5% | 1,466.9 to 1,450.1 (-1.1%) |
+
+The design estimate was -10.9% and -10.2% for the first two; measured -11.6% and -10.7%. Baseline `f6415364` (the `bench-base-vclock` binary, 3 runs, Wikipedia journeys only): article 7.90 G to 6.88 G; the baseline binary had replay misses on the Wikipedia journeys in this run (3 to 8 for each), so I do not use those ratios. Criterion 2: the sum drops by 2.35 G of 95.45 G, so the ratio moves by about 2.2 points (estimate from the sums; the full criterion was not rerun).
+
+After the rebase on main `c59e1bcf` (it has the settled-driver change #529 and the corpus `virtual-settled`), the same command, 3 runs, 0 replay misses, all 47 pass. The page JS no longer runs in the settle loop, so the shares are different:
+
+| Journey | main (M) | branch (M) | change | PSS MiB |
+|---|---:|---:|---:|---:|
+| `wikipedia-article` | 2,741.6 | 2,577.9 | -6.0% | 41.5 to 40.3 |
+| `wikipedia-search` | 3,446.1 | 3,043.8 | -11.7% | 56.2 to 55.0 |
+| `wikipedia-toc-languages` | 3,012.8 | 2,661.7 | -11.7% | 51.2 to 49.2 |
+| `wikipedia-main-random` | 1,402.8 | 1,393.7 | -0.7% | |
+| all 47 | 51,592.2 | 50,559.6 | -2.0% | 1,087.0 to 972.1 (-10.6%; cause not examined) |
+
+The article saves 164 M here against 901 M before: with the loop off, fewer names are asked (hypothesis, not counted). The rebased `bare` and `bare-html` lib tests pass (1,467; `a_changed_file_starts_again_from_zero` failed once under load, known flaky). The matrix and keycost below ran before this rebase, on main `c4e32a85`; the rebase brought no change to the files I touched except docs.
+
+Gates: `cargo test --release --workspace`: all pass except 7 openssl TLS tests (known on main) and `a_changed_file_starts_again_from_zero` (known flaky; passes alone). Cost matrix against main `c4e32a85`, both allocators: 0 rows over +0.5% under both; 3 rows over under glibc only (`preload_load style 10`, `resources_load small 1` and `10`), under 0.5% with jemalloc; the focused rerun of the `resources_load` rows after the `Atom::NAME` change shows 0. `parse_load deep 1/10` fail to run (known, stack overflow). Keycost: `#a1` 295.5 M for each key against 295.6 M on main; `#f0` 300.8 against 301.0; RSS 30.8 MiB at 50 keys (budget 40). `exec_diff.sh` and `test262_check.sh` not run: `crates/js` is not touched.
+
+Limits made unneeded: none removed. The `it.charge(doc.len())` for a list now applies only to a list build; a walk charges the nodes it visits.
+
+Not tested: a live Wikipedia page (corpus replay only); a page with thousands of different names asked at one revision (the list build after 16 walks covers it, by the counter test only); the replay `settle_pictures` fix (not on main when I measured); memory of `seen_names` on a page with many distinct ids (about 8 bytes each, plus table slack; PSS did not rise on the journeys).

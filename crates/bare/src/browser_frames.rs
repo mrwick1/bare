@@ -17,15 +17,19 @@
 //! - Window names: an iframe by index, `name` or `id` (its inert window), then the first element in tree order with that `id`, or with
 //!   that `name` on a, embed, form, iframe, img or object. Several matches give the first one, not an `HTMLCollection`.
 //! - Document names: embed, form, iframe, img and object by `name`, iframe and object by `id`, and img by `id` when it has a `name`.
-//! - The lists are built by one walk on the first ask after a change. An ask costs one hash look-up.
+//! - A name that the page asks for after a change of named elements is answered by one walk that stops at the first answer (`walk`):
+//!   no list, no allocation. A page probes many names that do not exist, between changes, so a list would be built for one key and
+//!   dropped. A name that no element ever had (`Document::may_have_name`) is a miss with no walk at all. An index (`window[0]`),
+//!   a key list (`Object.keys(window)`) and the `WALKS`-th name asked at one revision build the list (one walk). Then an ask
+//!   costs one hash look-up.
 //! - Both objects are open (`Heap::new_named_open`): a property of the chain behind them wins over a name, and the heap finds it
 //!   without asking the host. So `document.createElement` and `window.addEventListener` never wait for a list. This differs from the
 //!   standard (`[LegacyOverrideBuiltIns]` on `Document`, `WindowProperties` before `EventTarget.prototype`): a page cannot hide the
 //!   DOM API with an element name.
 //! - A name that the host defines lazily on a miss (`Heap::lazy_chain_name`: `name`, `top`, `open`, `on*`) wins too: the host
 //!   defines it before the element can answer.
-//! - The list follows `Document::name_revision`, which moves only for changes of named elements. A miss after other changes (a
-//!   text edit, a bare element added) costs no walk.
+//! - The list and the walk follow `Document::name_revision`, which moves only for changes of named elements. A miss after other
+//!   changes (a text edit, a bare element added) costs no walk.
 use crate::browser::*;
 use bare_html::dom::{Atom, NodeData, NodeId};
 use bare_js::eval::Interp;
@@ -35,6 +39,8 @@ use std::cell::{Cell, OnceCell, Ref, RefCell, RefMut};
 use std::collections::{HashMap, HashSet};
 
 pub(crate) const FILL: u32 = u32::MAX - 8;
+/// Walks at one name revision before a list is built: a walk is about 1/20 of a build, so the list pays back after this many.
+const WALKS: u32 = 16;
 #[derive(Default)]
 pub(crate) struct Frames(OnceCell<Box<RefCell<State>>>);
 const _: () = assert!(std::mem::size_of::<Frames>() == std::mem::size_of::<usize>());
@@ -48,6 +54,11 @@ impl Frames {
     }
     fn state_mut(&self) -> Option<RefMut<'_, State>> {
         self.0.get().map(|s| s.borrow_mut())
+    }
+    /// Lists built so far, and nodes that walks visited.
+    #[cfg(test)]
+    pub(crate) fn counts(&self) -> (u32, u64) {
+        self.state().map_or((0, 0), |s| (s.builds.get(), s.visited.get()))
     }
 }
 struct State {
@@ -76,6 +87,19 @@ struct State {
     lazy_tried: RefCell<HashSet<Vec<u16>>>,
     /// The iframe getters and window names are defined.
     iframes: bool,
+    /// The answer of the last walk, while the list is out of date (see `State::find`).
+    one: RefCell<One>,
+    /// The name revision of the last walk, and the walks made at it.
+    walks: Cell<(u64, u32)>,
+    /// Lists built, and nodes visited by walks (for tests).
+    builds: Cell<u32>,
+    visited: Cell<u64>,
+}
+struct One {
+    rev: u64,
+    key: Vec<u16>,
+    document: bool,
+    hit: Option<(NodeId, bool)>,
 }
 #[derive(Default)]
 struct List {
@@ -113,7 +137,50 @@ fn add(map: &mut HashMap<Vec<u16>, NodeId>, keys: &mut Vec<Vec<u16>>, v: &str, n
         map.insert(k, n);
     }
 }
+/// What `build` would answer for `key` (not an index of the window), by one walk that stops at the first answer: the node, whether
+/// it is the inert window of an iframe, and the nodes visited. Without an iframe in the document the first match is final, as an
+/// iframe wins over an element that came first.
+fn walk(d: &Dom, key: &[u16], document: bool) -> (Option<(NodeId, bool)>, u64) {
+    let doc = d.doc.borrow();
+    let name_atom = doc.find_atom("name");
+    let frames = doc.find_atom("iframe").is_some();
+    let same = |v: Option<&str>| v.is_some_and(|v| v.encode_utf16().eq(key.iter().copied()));
+    let root = doc.root();
+    let (mut cur, mut depth, mut seen, mut first) = (root, 0, 0, None);
+    while let Some((n, dep)) = crate::browser_dom::next_in(&doc, root, cur, depth) {
+        (cur, depth) = (n, dep);
+        seen += 1;
+        if !matches!(doc.data(n), NodeData::Element { .. }) {
+            continue;
+        }
+        let id = doc.attr(n, Atom::ID).filter(|v| !v.is_empty());
+        let name = name_atom.and_then(|a| doc.attr(n, a)).filter(|v| !v.is_empty());
+        let (by_id, by_name) = (same(id), same(name));
+        if !by_id && !by_name {
+            continue;
+        }
+        let tag = if doc.is_foreign(n) { "" } else { doc.element_name(n) };
+        if document {
+            if by_name && matches!(tag, "embed" | "form" | "iframe" | "img" | "object")
+                || by_id && (matches!(tag, "object" | "iframe") || tag == "img" && name.is_some())
+            {
+                return (Some((n, false)), seen);
+            }
+        } else if tag == "iframe" {
+            return (Some((n, true)), seen);
+        } else if by_id || by_name && matches!(tag, "a" | "embed" | "form" | "img" | "object") {
+            first.get_or_insert(n);
+            if !frames {
+                break;
+            }
+        }
+    }
+    (first.map(|n| (n, false)), seen)
+}
 fn build(d: &Dom) -> List {
+    if let Some(s) = d.frames.state() {
+        s.builds.set(s.builds.get() + 1);
+    }
     let doc = d.doc.borrow();
     let name_atom = doc.find_atom("name");
     let mut l = List::default();
@@ -179,6 +246,15 @@ impl State {
     /// Is the list out of date? `index`: the query reads iframe indices.
     fn stale(&self, doc: &bare_html::dom::Document, index: bool) -> bool {
         self.rev != doc.name_revision() || index && self.full != doc.revision()
+    }
+    /// The node of the name `key` and whether it is an iframe window, from the list or from the last walk. `None`: neither is
+    /// current, so a fill must answer. The walk answers no index of the window.
+    fn find(&self, doc: &bare_html::dom::Document, key: &[u16], document: bool) -> Option<Option<(NodeId, bool)>> {
+        if !self.stale(doc, !document && index_key(key).is_some()) {
+            return Some(self.list.find(key, document));
+        }
+        let one = self.one.borrow();
+        (one.rev == doc.name_revision() && one.document == document && one.key == key).then_some(one.hit)
     }
 }
 impl List {
@@ -259,6 +335,10 @@ fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
             lazy: Cell::new(false),
             lazy_tried: RefCell::default(),
             iframes: false,
+            one: RefCell::new(One { rev: u64::MAX, key: Vec::new(), document: false, hit: None }),
+            walks: Cell::new((u64::MAX, 0)),
+            builds: Cell::new(0),
+            visited: Cell::new(0),
         })))
         .map_err(|_| d.lim("dom-frames"))?;
     Ok(())
@@ -277,13 +357,20 @@ pub(crate) fn has(d: &Dom, owner: ObjId, key: &[u16]) -> Result<Option<bool>, He
         return Ok(None);
     };
     let document = owner == s.document_owner;
-    if s.stale(&*d.doc.try_borrow().map_err(|_| HeapError::HostUnavailable)?, !document && index_key(key).is_some()) {
+    let doc = d.doc.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
+    let found = s.find(&doc, key, document);
+    let Some(found) = found else {
+        // No element ever had this `id` or `name`: a miss, with no walk (a window index is no name).
+        if (document || index_key(key).is_none()) && !doc.may_have_name(char::decode_utf16(key.iter().copied()).map(|c| c.unwrap_or('\u{FFFD}'))) {
+            return Ok(Some(false));
+        }
         *s.want.borrow_mut() = key.to_vec();
         return Err(HeapError::NeedsHost { owner, index: FILL });
-    }
-    let Some((n, window)) = s.list.find(key, document) else {
+    };
+    let Some((n, window)) = found else {
         return Ok(Some(false));
     };
+    drop(doc);
     if !window && Heap::lazy_chain_name(key) && !s.lazy_tried.borrow().contains(key) {
         *s.want.borrow_mut() = key.to_vec();
         s.lazy.set(true);
@@ -305,7 +392,7 @@ pub(crate) fn value(d: &Dom, owner: ObjId, key: &[u16]) -> Option<Value> {
     let s = state
         .as_ref()
         .filter(|s| owner == s.owner || owner == s.document_owner)?;
-    let (n, window) = s.list.find(key, owner == s.document_owner)?;
+    let (n, window) = s.find(&d.doc.borrow(), key, owner == s.document_owner)??;
     if window {
         s.contexts.get(&n).copied().map(Value::Object)
     } else {
@@ -348,12 +435,33 @@ pub(crate) fn fill(d: &Dom, it: &mut Interp<'_>, owner: ObjId, index: u32) -> R<
         let doc = d.doc.borrow();
         (doc.name_revision(), doc.revision())
     };
-    if d.frames.state().is_some_and(|s| s.stale(&d.doc.borrow(), true)) {
-        it.charge(d.doc.borrow().len() as u64)?;
-        let list = build(d);
-        if let Some(s) = d.frames.state_mut().as_mut() {
-            (s.list, s.rev, s.full) = (list, rev, full);
+    // One name is answered by a walk; an index, a key list and the `WALKS`-th name at one revision build the list.
+    let plan = d.frames.state().map(|s| {
+        let (doc, want) = (d.doc.borrow(), s.want.borrow());
+        let document = owner == s.document_owner;
+        let stale = if want.is_empty() { s.pending.get().is_none() && s.stale(&doc, true) } else { s.find(&doc, &want, document).is_none() };
+        let walks = if s.walks.get().0 == rev { s.walks.get().1 } else { 0 };
+        let one = !want.is_empty() && (document || index_key(&want).is_none()) && walks < WALKS;
+        (stale, one.then(|| (want.clone(), document, walks)))
+    });
+    match plan {
+        Some((true, Some((key, document, walks)))) => {
+            let (hit, seen) = walk(d, &key, document);
+            it.charge(seen)?;
+            if let Some(s) = d.frames.state() {
+                s.visited.set(s.visited.get() + seen);
+                *s.one.borrow_mut() = One { rev, key, document, hit };
+                s.walks.set((rev, walks + 1));
+            }
         }
+        Some((true, None)) => {
+            it.charge(d.doc.borrow().len() as u64)?;
+            let list = build(d);
+            if let Some(s) = d.frames.state_mut().as_mut() {
+                (s.list, s.rev, s.full) = (list, rev, full);
+            }
+        }
+        _ => {}
     }
     let lazy = d.frames.state().filter(|s| s.lazy.take()).map(|s| {
         let want = std::mem::take(&mut *s.want.borrow_mut());
@@ -366,7 +474,7 @@ pub(crate) fn fill(d: &Dom, it: &mut Interp<'_>, owner: ObjId, index: u32) -> R<
     }
     let n = d.frames.state().and_then(|s| {
         let want = std::mem::take(&mut *s.want.borrow_mut());
-        s.pending.take().or_else(|| s.list.find(&want, owner == s.document_owner))
+        s.pending.take().or_else(|| s.find(&d.doc.borrow(), &want, owner == s.document_owner).flatten())
     });
     match n {
         Some((n, true)) => {

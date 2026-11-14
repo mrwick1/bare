@@ -89,3 +89,70 @@ fn a_wrapper_dropped_by_a_collect_comes_back() {
         assert_eq!(js(&mut b, "z === document.getElementById('z')"), "true");
     });
 }
+
+#[test]
+fn a_missing_name_builds_no_list() {
+    big(|| {
+        let mut b = browser(PAGE);
+        // Each round changes a named element, then asks for a name that nobody defines (a feature probe).
+        let r = js(&mut b, "var out2 = []; for (var i = 0; i < 5; i++) { var e = document.createElement('p'); e.id = 'n' + i; document.body.appendChild(e); out2.push(typeof window['missing' + i], 'gone' + i in window, typeof document['nothing' + i]); } out2.join()");
+        assert_eq!(r, "undefined,false,undefined,undefined,false,undefined,undefined,false,undefined,undefined,false,undefined,undefined,false,undefined");
+        // A name that no element ever had is a miss with no walk at all.
+        assert_eq!(b.dom.frames.counts(), (0, 0));
+        // A name that exists is found by a walk, without a list, and a name that was added and removed is gone.
+        assert_eq!(js(&mut b, "[n3 === document.getElementById('n3'), (document.getElementById('n3').remove(), typeof window.n3)].join()"), "true,undefined");
+        let (builds, visited) = b.dom.frames.counts();
+        assert_eq!(builds, 0);
+        assert!(visited > 0);
+    });
+}
+
+#[test]
+fn a_walk_picks_the_same_node_as_the_list() {
+    big(|| {
+        let page = "<!doctype html><body><div id=k></div><img name=k><iframe name=k id=fr></iframe><a id=k name=k></a>\
+<img name=m><a name=m id=m2></a><span id=s></span><svg><rect id=r /></svg><form name=fm id=fid></form><img id=im name=imn><div id=dd></div></body>";
+        let mut b = browser(page);
+        // Bump the name revision before each ask, so that each ask walks.
+        let ask = |b: &mut Browser, q: &str| {
+            js(b, "var t = document.createElement('i'); t.id = 'bump' + (window.bumps = (window.bumps | 0) + 1); document.body.appendChild(t);");
+            js(b, q)
+        };
+        // An iframe wins over an element that came first; `name` counts on `a` and `img`, not on `span`.
+        assert_eq!(ask(&mut b, "k === document.getElementById('fr').contentWindow"), "true");
+        assert_eq!(ask(&mut b, "m === document.querySelector('img[name=m]')"), "true");
+        assert_eq!(ask(&mut b, "[m2.tagName, r.tagName, typeof window.imn, im.tagName, fm.tagName, fid.tagName].join()"), "A,rect,object,IMG,FORM,FORM");
+        // The document: `name` on form, img, iframe and embed; `id` on iframe, object and img with a name.
+        assert_eq!(ask(&mut b, "[document.fm === fid, document.imn === im, document.fr === document.getElementById('fr'), typeof document.m2, typeof document.dd, typeof document.s].join()"), "true,true,true,undefined,undefined,undefined");
+        assert_eq!(ask(&mut b, "[typeof window.nope, 'k' in window, 'nope' in window, typeof document.k].join()"), "undefined,true,false,object");
+        assert_eq!(b.dom.frames.counts().0, 0);
+    });
+}
+
+#[test]
+fn a_name_asked_often_at_one_revision_builds_the_list_once() {
+    big(|| {
+        let mut b = browser(PAGE);
+        // `id=out` exists: the ever-seen set says maybe, so each ask walks, until the list is built.
+        assert_eq!(js(&mut b, "var c = 0; for (var i = 0; i < 100; i++) { document.body.lastChild.id = 'x'; if (typeof window['out'] !== 'object') c++; } [c, typeof f].join()"), "0,object");
+        assert_eq!(b.dom.frames.counts().0, 0);
+        // The same name again costs nothing (the last answer stays); other names walk until the list is built, once.
+        assert_eq!(js(&mut b, "var c = 0, ns = ['out', 'f', 'q', 'pic']; for (var i = 0; i < 100; i++) { if (typeof window[ns[i % 4]] !== 'object') c++; } [c, typeof f].join()"), "0,object");
+        assert_eq!(b.dom.frames.counts().0, 1);
+    });
+}
+
+#[test]
+fn enumeration_and_an_index_still_see_the_names() {
+    big(|| {
+        let mut b = browser(PAGE);
+        js(&mut b, "var e = document.createElement('p'); e.id = 'late'; document.body.appendChild(e); typeof window.zzz");
+        // The names sit on the object behind `Window.prototype` (the `WindowProperties` object), so `for in` and its keys show them.
+        let r = js(&mut b, "var o = Object.getPrototypeOf(Object.getPrototypeOf(window)), k = Object.getOwnPropertyNames(o); var dk = []; for (var x in window) { if (x == 'late' || x == 'f') dk.push(x) } [k.indexOf('late') >= 0, k.indexOf('login') >= 0, k.indexOf('nope') >= 0, dk.sort().join('+')].join()");
+        assert_eq!(r, "true,true,false,f+late");
+        let mut b = browser("<body><iframe name=a></iframe><iframe id=b></iframe></body>");
+        js(&mut b, "var e = document.createElement('p'); e.id = 'x'; document.body.appendChild(e);");
+        assert_eq!(js(&mut b, "[frames.length, frames[1] === frames.b, frames[0] === window.a, typeof frames[2]].join()"), "2,true,true,undefined");
+        assert_eq!(js(&mut b, "document.body.firstChild.remove(); [frames.length, frames[0] === frames.b].join()"), "1,true");
+    });
+}
