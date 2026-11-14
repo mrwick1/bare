@@ -16,3 +16,6 @@ bare-paint = { path = "../paint" }
 bare-tls = { path = "../tls" }
 bare-url = { path = "../url" }
 bare-window = { path = "../window" }
+# `CompressionStream` (`browser_shims.rs`). `bare-net` already builds both.
+crc32fast = "1"
+miniz_oxide = "0.9"

@@ -62,6 +62,8 @@ dependencies = [
  "bare-tls",
  "bare-url",
  "bare-window",
+ "crc32fast",
+ "miniz_oxide 0.9.1",
 ]
 
 [[package]]
