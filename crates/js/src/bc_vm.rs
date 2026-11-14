@@ -393,6 +393,7 @@ impl<'p> Interp<'p> {
 
     /// The caller `fr` of an inline call is current again: leave the callee. It pops the environments that the callee pushed, and
     /// releases the one of its call. `ok`: it returned. The caller sets `strict`.
+    #[inline(always)]
     fn bc_frame_exit(&mut self, fr: &Fr, ok: bool, depth: &mut u32) {
         for _ in 0..*depth {
             let e = self.env;
@@ -1013,8 +1014,7 @@ impl<'p> Interp<'p> {
                         let k = &callee.code;
                         let (nb, nregs, this_v) = (base + b + 2, k.nregs as usize, regs[b + 1]);
                         // Every step that can fail comes before the first use of `st.regs`.
-                        let (t, caller_env, callee_env);
-                        let mut pushed = false;
+                        let (t, caller_env, callee_env, from, to);
                         if k.regfn && !k.has_env {
                             // A register function with no environment: the closure's environment is where its outer names come from.
                             t = if k.dyn_this {
@@ -1026,6 +1026,9 @@ impl<'p> Interp<'p> {
                             };
                             caller_env = std::mem::replace(&mut self.env, cenv);
                             callee_env = u32::MAX;
+                            (from, to) = (cc.min(k.nparams as usize), k.nlocals as usize);
+                            self.stk.frames.push(StackFrame { script: self.cur as u32, at: Where::Func(fid), new: false, saved_pos: x & 0x7fff_ffff });
+                            self.stk.pos = 0;
                         } else {
                             // The environment and the bindings of a call are those of `bc_enter`.
                             let env = tri!(at, self.new_env(cenv, true));
@@ -1040,23 +1043,17 @@ impl<'p> Interp<'p> {
                                 self.release(env);
                                 break 'op Err(e);
                             }
-                            pushed = true;
                             let fixed = if k.regfn { !k.dyn_this } else { self.prog.func(fid).kind != FuncKind::Arrow && self.cls.fflags[fid.index()] == 0 };
                             t = if fixed { This::Fixed(self.envs[env as usize].this.unwrap_or(Value::Undefined)) } else { This::Dynamic };
                             callee_env = env;
+                            (from, to) = if k.regfn { (cc.min(k.nparams as usize), k.nlocals as usize) } else { (0, nregs) };
                         }
                         if st.regs.len() < nb + nregs {
                             st.regs.resize(nb + nregs, Value::Undefined);
                         }
                         // The arguments are the first registers of the callee already. The other variables start as `undefined`.
-                        let from = if k.regfn { cc.min(k.nparams as usize) } else { 0 };
-                        let to = if k.regfn { k.nlocals as usize } else { nregs };
                         if from < to {
                             st.regs[nb + from..nb + to].fill(Value::Undefined);
-                        }
-                        if !pushed {
-                            self.stk.frames.push(StackFrame { script: self.cur as u32, at: Where::Func(fid), new: false, saved_pos: x & 0x7fff_ffff });
-                            self.stk.pos = 0;
                         }
                         self.depth += 1;
                         self.strict = k.strict;
