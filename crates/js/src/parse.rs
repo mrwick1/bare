@@ -191,6 +191,7 @@ pub fn parse_module_lazy_used(source: &str, limits: Limits) -> (Result<Program<'
 
 /// A function body shorter than this many bytes is kept: a second parse and a tree of its own cost more than the short body.
 const LAZY_MIN_BODY: u32 = 128;
+const LAZY_MAX_ARROW_BODY: u32 = 65536;
 
 #[inline(always)]
 fn parse_counted<'a>(source: &'a str, mut limits: Limits, used: &mut u32, module: bool, lazy: bool) -> Result<Program<'a>, Error> {
@@ -234,6 +235,7 @@ fn parse_counted<'a>(source: &'a str, mut limits: Limits, used: &mut u32, module
         in_class: 0,
         facts: 0,
         eager_at: u32::MAX,
+        whole_at: u32::MAX,
         check_regexp: true,
     };
     if module && lazy {
@@ -285,13 +287,22 @@ pub(crate) fn parse_lazy_function(src: &Rc<str>, marks: &crate::ast::Marks, modu
         in_class: 0,
         facts: 0,
         eager_at: lz.start,
+        whole_at: lz.start,
         // The first parse of the whole text checked it.
         check_regexp: false,
     };
     if module {
         p.p.lz_mut().module_goal = true;
     }
-    p.parse_function_rest(lz.start, lz.name, lz.kind, false, false)?;
+    if lz.kind == FuncKind::Arrow {
+        // The second parse of an arrow starts at its parameters, as an assignment expression, as the first parse did.
+        p.parse_assign(false, false)?;
+        if p.p.funcs.last().is_none_or(|f| f.kind != FuncKind::Arrow || f.span.start != lz.start) {
+            return Err(Error { kind: ErrorKind::Unsupported, msg: "lazy arrow function", start: lz.start, end: lz.start });
+        }
+    } else {
+        p.parse_function_rest(lz.start, lz.name, lz.kind, false, false)?;
+    }
     let used = p.used;
     let mut prog = p.p.with_shared_source(src.clone());
     prog.share_marks(marks);
@@ -472,11 +483,15 @@ struct Parser<'a> {
     facts: u8,
     /// The start of the token after a `(` or a unary operator: a function that starts there is probably called at once, so it is not lazy.
     eager_at: u32,
+    /// The start of the lazy function that this parse is the second parse of. A `(` moves `eager_at`, so an arrow with parentheses needs this too.
+    whole_at: u32,
     check_regexp: bool,
 }
 
 const FACT_SUPER: u8 = 1;
 const FACT_NEW_TARGET: u8 = 2;
+/// The name `arguments` as a value. A function that is not an arrow has its own `arguments`, so the fact does not leave it.
+const FACT_ARGUMENTS: u8 = 4;
 
 /// The length of every arena of the tree: a function body that is dropped goes back to these.
 struct ArenaMark {
@@ -2760,8 +2775,11 @@ impl<'a> Parser<'a> {
         // A plain name.
         let span = self.tspan();
         self.check_word(span)?;
-        if self.ctx.field_init && self.name_of(span) == "arguments" {
-            return Err(self.early("'arguments' is not allowed in a class field initializer", span));
+        if span.end - span.start >= 9 && self.name_of(span) == "arguments" {
+            if self.ctx.field_init {
+                return Err(self.early("'arguments' is not allowed in a class field initializer", span));
+            }
+            self.facts |= FACT_ARGUMENTS;
         }
         self.advance()?;
         if can_arrow && self.is(P::Arrow) && !self.tok.newline_before {
@@ -2849,6 +2867,8 @@ impl<'a> Parser<'a> {
     fn parse_paren(&mut self) -> R<ExprId> {
         let start = self.tok.start;
         let can_arrow = self.arrow_at == start;
+        // The `(` below moves `eager_at`; an arrow with parentheses is checked against the value that this `(` found.
+        let eager_here = self.eager_at == start;
         let old_await = std::mem::take(&mut self.await_pos);
         self.advance()?; // `(`
         self.eager_at = self.tok.start;
@@ -2906,6 +2926,9 @@ impl<'a> Parser<'a> {
                     self.lend(b2)
                 }
             };
+            if eager_here {
+                self.eager_at = start;
+            }
             return self.parse_arrow(start, params, false);
         }
         if self.await_pos == 0 {
@@ -2932,8 +2955,24 @@ impl<'a> Parser<'a> {
         self.mk_expr(ExprKind::Paren(inner), start)
     }
 
+    /// A literal of JSON values only, from the current `[` or `{` on, as one `Data` node (see [`crate::data_lit`]). Only in a parse with lazy
+    /// bodies: that is a large source (`parse_cache::LAZY_MIN_SOURCE`), the only place where a data literal is worth it.
+    fn parse_data(&mut self, start: u32) -> R<Option<ExprId>> {
+        if !self.lazy || self.peeked.is_some() {
+            return Ok(None);
+        }
+        let Some(end) = crate::data_lit::scan(self.src, start as usize).filter(|&e| e - start as usize >= crate::data_lit::MIN_BYTES) else { return Ok(None) };
+        self.lex.seek(end as u32);
+        self.tok.end = end as u32;
+        self.advance()?;
+        self.mk_expr_at(ExprKind::Data, start, end as u32).map(Some)
+    }
+
     fn parse_array(&mut self) -> R<ExprId> {
         let start = self.tok.start;
+        if let Some(e) = self.parse_data(start)? {
+            return Ok(e);
+        }
         self.advance()?;
         let base = self.lbegin();
         while !self.is(P::RBracket) {
@@ -2962,6 +3001,9 @@ impl<'a> Parser<'a> {
 
     fn parse_object(&mut self) -> R<ExprId> {
         let start = self.tok.start;
+        if let Some(e) = self.parse_data(start)? {
+            return Ok(e);
+        }
         self.advance()?;
         let base = self.lbegin();
         let mut protos = 0u32;
@@ -3051,8 +3093,11 @@ impl<'a> Parser<'a> {
         }
         let span = Span { start: kt.start, end: kt.end };
         self.check_word(span)?;
-        if self.ctx.field_init && self.name_of(span) == "arguments" {
-            return Err(self.early("'arguments' is not allowed in a class field initializer", span));
+        if span.end - span.start >= 9 && self.name_of(span) == "arguments" {
+            if self.ctx.field_init {
+                return Err(self.early("'arguments' is not allowed in a class field initializer", span));
+            }
+            self.facts |= FACT_ARGUMENTS;
         }
         let ident = self.mk_expr_at(ExprKind::Ident, span.start, span.end)?;
         let value = if self.is(P::Assign) {
@@ -3230,8 +3275,12 @@ impl<'a> Parser<'a> {
             && !is_async
             && !is_gen
             && matches!(kind, FuncKind::Normal | FuncKind::Method | FuncKind::Getter | FuncKind::Setter)
-            && self.eager_at != start;
+            && self.eager_at != start
+            && self.whole_at != start;
+        let outer_args = self.facts & FACT_ARGUMENTS;
+        self.facts &= !FACT_ARGUMENTS;
         let r = self.function_inner(start, name, kind, lazy_ok);
+        self.facts = self.facts & !FACT_ARGUMENTS | outer_args;
         self.await_pos = old_await;
         self.pop_scope();
         self.labels.truncate(self.label_base);
@@ -3383,6 +3432,13 @@ impl<'a> Parser<'a> {
         self.label_base = self.labels.len();
         self.push_scope(S_VAR | S_FUNC);
         let simple = self.is_simple_params(params);
+        // Like a plain function (`function_rest`), an arrow is checked and its nodes are dropped. What it takes from the code around it is
+        // `this` and the variables, which the evaluator finds at run time, and `arguments`, `super` and `new.target`, which the facts
+        // list. Not lazy: an async arrow, a parameter with a pattern or a default (the parameters run in the code around), a class body,
+        // an arrow that starts a call (`(() => ...)()`) or that stands in the head of a `for` with `no_in` (the second parse has no such flag).
+        let lazy_ok = self.lazy && simple && self.in_class == 0 && !is_async && !no_in && self.eager_at != start && self.whole_at != start;
+        let lazy_state = lazy_ok.then(|| (self.arena_mark(), std::mem::take(&mut self.facts)));
+        let (strict_in, body_at) = (self.strict, self.tok.start);
         let r = (|| -> R<Body> {
             let first_dup = self.declare_params(params, false)?;
             if self.is(P::LBrace) {
@@ -3397,7 +3453,21 @@ impl<'a> Parser<'a> {
         self.await_pos = old_await;
         let strict = self.strict;
         (self.ctx, self.strict, self.label_base, self.arrow_at) = (saved_ctx, saved_strict, saved_lb, saved_arrow);
-        let body = r?;
+        let lazy_state = lazy_state.map(|(mark, outer)| {
+            let facts = std::mem::replace(&mut self.facts, outer);
+            self.facts |= facts;
+            (mark, facts)
+        });
+        let mut body = r?;
+        if let Some((mark, facts)) = lazy_state
+            && facts & (FACT_SUPER | FACT_NEW_TARGET | FACT_ARGUMENTS) == 0
+            && (LAZY_MIN_BODY..LAZY_MAX_ARROW_BODY).contains(&(self.prev_end - body_at))
+        {
+            self.arena_truncate(&mark);
+            let lz = self.p.lz_mut();
+            body = Body::Lazy(lz.lazies.len() as u32);
+            lz.lazies.push(LazyFn { params_at: start, name: None, start, kind: FuncKind::Arrow, mode: FuncMode::Plain, strict: strict_in, parsed: OnceCell::new() });
+        }
         let span = Span { start, end: self.prev_end };
         let f = mk!(self, funcs, Func { name: None, params, body, kind: FuncKind::Arrow, mode: func_mode(is_async, false), strict, simple_params: simple, span });
         self.mk_expr(ExprKind::Function(f), start)

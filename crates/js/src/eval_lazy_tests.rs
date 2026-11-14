@@ -246,3 +246,110 @@ fn the_bytecode_modes_agree_on_the_proxy_corpus() {
         assert!(bad.is_empty(), "{}", bad.join("\n"));
     });
 }
+
+/// Run `src` twice: as it is (a short source is parsed whole) and behind a comment that makes the source large (long bodies are dropped).
+/// Both must give `want`. `lazies` is the number of lazy functions the large source gets, at least.
+fn same_lazy_and_eager(src: &str, want: &str, lazies: usize) {
+    let padded = format!("/*{}*/{src}", " ".repeat(crate::parse_cache::LAZY_MIN_SOURCE));
+    assert_eq!(run(src), want, "eager: {src}");
+    assert_eq!(run(&padded), want, "lazy: {src}");
+    let (r, _) = crate::parse::parse_script_lazy_used(&padded, Default::default());
+    let n = r.unwrap().stats().lazies;
+    assert!(n >= lazies, "{n} lazy functions, want {lazies}: {src}");
+}
+
+#[test]
+fn a_dropped_arrow_runs_with_its_closure_this_and_recursion() {
+    big(|| {
+        let pad = format!("{PAD} {PAD}");
+        let src = format!(
+            "var outer = 10; let blk = 5;
+             var add = (a, b) => {{ {pad} return a + b + outer + blk + p7; }};
+             var counter = () => {{ {pad} var n = 0; return () => {{ {pad} n += 1; return n + p7; }}; }};
+             var c = counter(); c(); var second = c();
+             var fact = n => {{ {pad} return n <= 1 ? 1 : n * fact(n - 1); }};
+             var curry = a => b => c => {{ {pad} return a + b + c + p7; }};
+             var o = {{ v: 7, m() {{ {pad} return [1, 2].map(x => {{ {pad} return x * this.v + p1; }}).join('|'); }} }};
+             function Box(v) {{ {pad} this.f = () => {{ {pad} return this.v + p1; }}; this.v = v; }}
+             var b = new Box(4);
+             [add(1, 2), second, fact(5), curry(1)(2)(3), o.m(), b.f(), (0, b.f)()].join()"
+        );
+        same_lazy_and_eager(&src, "39,23,120,27,8|15,5,5", 5);
+    });
+}
+
+#[test]
+fn a_dropped_arrow_reads_arguments_new_target_and_super_of_the_code_around() {
+    big(|| {
+        let pad = format!("{PAD} {PAD}");
+        let src = format!(
+            "function outer() {{ {pad} var f = () => {{ {pad} return arguments.length + arguments[0] + p1; }}; return f(); }}
+             function nt() {{ {pad} var f = () => {{ {pad} return new.target === undefined ? 'call' : 'new'; }}; return f(); }}
+             class A {{ m() {{ return 'A1'; }} }}
+             class B extends A {{ m() {{ var f = () => {{ {pad} return super.m() + p1; }}; return f(); }} }}
+             [outer(5, 6), nt(), new nt() instanceof nt, new B().m()].join()"
+        );
+        same_lazy_and_eager(&src, "8,call,true,A11", 1);
+    });
+}
+
+#[test]
+fn a_dropped_arrow_in_other_forms_runs_like_the_eager_one() {
+    big(|| {
+        let pad = format!("{PAD} {PAD}");
+        let src = format!(
+            "var g = function* () {{ {pad} var f = () => {{ {pad} return p7; }}; yield f(); yield f() + 1; }};
+             var async1 = async () => {{ {pad} return p7; }};
+             var cls = class {{ f = () => {{ {pad} return 3; }}; static s = () => {{ {pad} return 4; }}; }};
+             var dflt = (a = () => {{ {pad} return 9; }}) => a() + 1;
+             var rest = (...r) => {{ {pad} return r.length + p1; }};
+             var withdup = a => {{ {pad} return typeof a + p1; }};
+             var cond = k => k ? (m => {{ {pad} return m + p2; }}) : null;
+             var it = g(); var x = it.next().value, y = it.next().value;
+             [x, y, new cls().f(), cls.s(), dflt(), rest(1, 2, 3), withdup('s'), cond(1)(5), typeof async1().then].join()"
+        );
+        same_lazy_and_eager(&src, "21,22,3,4,10,4,string1,7,function", 3);
+    });
+}
+
+#[test]
+fn an_arrow_with_an_early_error_fails_the_script_even_when_never_called() {
+    big(|| {
+        let pad = format!("{PAD} {PAD}");
+        for body in ["let x; let x;", "'use strict'; var eval = 1;", "await 1;"] {
+            let src = format!("var never = a => {{ {pad} {body} }}; 1");
+            let padded = format!("/*{}*/{src}", " ".repeat(crate::parse_cache::LAZY_MIN_SOURCE));
+            assert_eq!(run(&padded), run(&src), "{body}");
+        }
+        let src = format!("var never = a => {{ {pad} let x; let x; }}; 1");
+        assert_eq!(run(&format!("/*{}*/{src}", " ".repeat(crate::parse_cache::LAZY_MIN_SOURCE))), "throw:SyntaxError");
+    });
+}
+
+#[test]
+fn the_bytecode_modes_agree_with_the_tree_walker_on_lazy_arrows() {
+    big(|| {
+        let pad = format!("{PAD} {PAD}");
+        let src = format!(
+            "/*{}*/var log = [];
+             var sum = (n) => {{ {pad} var s = 0; for (var i = 0; i < n; i++) s += i; return s + p7; }};
+             var mk = () => {{ {pad} return x => {{ {pad} log.push(x); return x + p1; }}; }};
+             log.push(sum(4), sum(5), mk()(2)); log.join()",
+            " ".repeat(crate::parse_cache::LAZY_MIN_SOURCE)
+        );
+        let mut want = String::new();
+        for mode in [Exec::Tree, Exec::Auto, Exec::Byte] {
+            let mut it = realm();
+            it.set_exec(mode);
+            let got = match it.run_script(&src) {
+                Ok(v) => it.display(v),
+                Err(e) => format!("{e:?}"),
+            };
+            if mode == Exec::Tree {
+                want = got.clone();
+                assert_eq!(want, "2,27,31,3", "tree");
+            }
+            assert_eq!(got, want, "{mode:?}");
+        }
+    });
+}

@@ -88,9 +88,9 @@ fn strictness_comes_from_the_code_around_and_from_the_directive() {
 fn these_functions_are_never_lazy() {
     let p = pad();
     for src in [
-        // an arrow, an async function, a generator
-        format!("var f = () => {{ {p} }};"),
+        // an async function, an async arrow, a generator
         format!("async function f() {{ {p} }}"),
+        format!("var f = async () => {{ {p} }};"),
         format!("function* f() {{ {p} }}"),
         // the first walk gives a class member its context
         format!("class C {{ m() {{ {p} }} }}"),
@@ -131,4 +131,122 @@ fn a_module_function_is_lazy_too() {
     // A module parses `await` as a keyword in the function again, as the first time.
     let src = format!("export function f() {{ {} var await = 1; }}", pad());
     assert!(parse_module_lazy_used(&src, Limits::default()).0.is_err());
+}
+
+// ---- arrow functions
+
+/// An expression of 128 bytes or more.
+fn long_expr() -> String {
+    (1..=40).map(|i| i.to_string()).collect::<Vec<_>>().join(" + ")
+}
+
+/// Statements that need no `return`.
+fn pad_stmts() -> String {
+    pad().replace("return ", "")
+}
+
+#[test]
+fn a_long_arrow_body_is_dropped_and_a_short_one_kept() {
+    let (p, e) = (pad_stmts(), long_expr());
+    let src = format!("var a = x => {{ {p} return x; }}; var b = (x, y) => x + y; var c = (x, y) => {{ {p} return x + y; }}; var d = () => {e};");
+    let prog = lazy(&src);
+    // a, c and d; not b.
+    assert_eq!(prog.stats().lazies, 3, "{:?}", prog.stats());
+    let eager = parse_script(&src, Limits::default()).unwrap();
+    assert!(prog.stats().nodes() < eager.stats().nodes());
+}
+
+#[test]
+fn an_arrow_that_takes_something_from_the_code_around_it_is_eager() {
+    let p = pad_stmts();
+    // The function around is called at once, so it is eager and the count is the one of the arrow.
+    for src in [
+        // the `arguments` of the function around, also from an arrow inside the arrow
+        format!("(function () {{ return () => {{ {p} return arguments[0]; }}; }})();"),
+        format!("(function () {{ return () => {{ {p} return () => arguments; }}; }})();"),
+        format!("(function () {{ return () => {{ {p} return {{ arguments }}; }}; }})();"),
+        format!("(function () {{ return () => {{ {p} return \\u0061rguments; }}; }})();"),
+        // `new.target` and `super`
+        format!("(function () {{ return () => {{ {p} return new.target; }}; }})();"),
+        format!("var o = {{ m() {{ return () => {{ {p} return super.x; }}; }} }};"),
+        // parameters that run in the code around
+        format!("var f = (a = 1) => {{ {p} }};"),
+        format!("var f = ({{ a }}) => {{ {p} }};"),
+        format!("var f = (...a) => {{ {p} }};"),
+        // an async arrow, an arrow in a class, an arrow that starts a call, an arrow in the head of a `for`
+        format!("var f = async x => {{ {p} }};"),
+        format!("class C {{ m() {{ return () => {{ {p} }}; }} }}"),
+        format!("class C {{ f = () => {{ {p} }}; }}"),
+        format!("(() => {{ {p} }})();"),
+        format!("for (var f = x => {{ {p} }}; false;) ;"),
+    ] {
+        assert_eq!(lazy(&src).stats().lazies, 0, "{src}");
+    }
+    // `arguments` of a function inside the arrow is its own.
+    let src = format!("var f = () => {{ {p} return function () {{ return arguments; }}; }};");
+    assert_eq!(lazy(&src).stats().lazies, 1);
+    // Without the fact the same arrow is lazy.
+    let src = format!("(function () {{ return () => {{ {p} return 1; }}; }})();");
+    assert_eq!(lazy(&src).stats().lazies, 1);
+    // The arrow inside an eager arrow is lazy.
+    let src = format!("var f = (g) => (h) => {{ {p} return g + h; }};");
+    assert_eq!(lazy(&src).stats().lazies, 1);
+}
+
+#[test]
+fn an_early_error_in_a_dropped_arrow_body_still_fails_the_parse() {
+    for body in ["let x; let x;", "var a = ;", "return 1 +;", "break;", "let y = 1; var y = 2;", "x = {a = 1};", "a: a: ;", "yield: 1; await: 2; async: 3; let z; z = new.target;"] {
+        let src = format!("var f = (u, v) => {{ {} {body} }};", pad_stmts());
+        let Some(want) = parse_script(&src, Limits::default()).err() else { continue };
+        assert_eq!(lazy_err(&src), want, "{body}");
+    }
+    // A duplicate parameter and a body that does not end.
+    for src in [format!("var f = (a, a) => {{ {} }};", pad()), format!("var f = a => {{ {} ", pad())] {
+        assert!(parse_script(&src, Limits::default()).is_err() && parse_script_lazy_used(&src, Limits::default()).0.is_err());
+    }
+}
+
+#[test]
+fn the_second_parse_of_an_arrow_gives_the_arrow_of_the_first() {
+    let (p, e) = (pad_stmts(), long_expr());
+    for src in [
+        format!("var f = (a, b) => {{ 'use strict'; {p} return a + b; }};"),
+        format!("var f = a => {{ {p} return a; }};"),
+        format!("var f = (a, b) => {e};"),
+        format!("x = (y, z) => {e}, 5;"),
+        format!("var g = k => k ? (m => {e}) : null;"),
+    ] {
+        let prog = lazy(&src);
+        assert_eq!(prog.stats().lazies, 1, "{src}");
+        let eager = parse_script(&src, Limits::default()).unwrap();
+        let (sub, fid, used) = prog.lazy_function(0, Limits::default()).unwrap();
+        let at = prog.lazies()[0].start;
+        let ef = eager.funcs.iter().find(|f| f.kind == FuncKind::Arrow && f.span.start == at).unwrap();
+        assert!(used.is_some_and(|n| n > 0));
+        let f = sub.func(fid);
+        assert_eq!((f.span, f.strict, f.simple_params, f.kind, f.mode, f.name), (ef.span, ef.strict, ef.simple_params, ef.kind, ef.mode, ef.name), "{src}");
+        assert_eq!(f.params.len(), ef.params.len());
+        assert_eq!(sub.text(f.span), eager.text(ef.span));
+        assert!(matches!((f.body, ef.body), (Body::Block(_), Body::Block(_)) | (Body::Expr(_), Body::Expr(_))), "{src}");
+        let (again, _, used2) = prog.lazy_function(0, Limits::default()).unwrap();
+        assert!(Rc::ptr_eq(&sub, &again) && used2.is_none());
+    }
+}
+
+#[test]
+fn an_arrow_inside_a_dropped_arrow_is_lazy_again() {
+    let p = pad_stmts();
+    let src = format!("var f = a => {{ {p} var g = b => {{ {p} {p} }}; return g; }};");
+    let prog = lazy(&src);
+    assert_eq!(prog.stats().lazies, 1);
+    let (sub, _, _) = prog.lazy_function(0, Limits::default()).unwrap();
+    assert_eq!(sub.stats().lazies, 1);
+}
+
+#[test]
+fn an_arrow_that_starts_a_call_is_eager_with_or_without_parentheses() {
+    let p = pad_stmts();
+    for src in [format!("var r = (() => {{ {p} return 1; }})();"), format!("var r = (x => {{ {p} return x; }})(1);"), format!("!(() => {{ {p} }})();")] {
+        assert_eq!(lazy(&src).stats().lazies, 0, "{src}");
+    }
 }
