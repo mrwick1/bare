@@ -5,7 +5,7 @@
 //! handle: an index into a slot table and a generation number. A handle is not a Rust
 //! reference, so the heap can move, free and reuse storage without a dangling pointer.
 //!
-//! A string is one of three kinds, told by two bits of the handle (`StrId::is_atom`, `StrId::is_rope`).
+//! A string is one of three kinds, told by two bits of the handle (`StrId::is_atom`: no bit set; `StrId::is_rope`).
 //! An atom is interned: the heap keeps one atom for each content, so two atoms are equal exactly when the
 //! handles are equal. Every string of at most `ATOM_MAX` code units is an atom. A longer string is a flat
 //! string or a rope, and it is not interned: two such strings with the same content have different handles.
@@ -56,9 +56,13 @@ impl std::hash::Hash for ByHandle {
 
 /// `StrId::index` bit: the string is a rope (its slot is in the rope slab).
 pub(crate) const STR_ROPE: u32 = 1 << 31;
-/// `StrId::index` bit: the string is an atom (interned: unique by content).
-pub(crate) const STR_ATOM: u32 = 1 << 30;
-pub(crate) const STR_SLOT: u32 = STR_ATOM - 1;
+/// `StrId::index` bit: the string is a flat string that is not an atom (its slot is in the string slab).
+/// An atom has no kind bit, so its `index` is the slot and a read of an atom is the same code as before ropes:
+/// a handle of another kind is out of range for the slab, so it misses and takes the slow path.
+pub(crate) const STR_FLAT: u32 = 1 << 30;
+pub(crate) const STR_SLOT: u32 = STR_FLAT - 1;
+/// Both kind bits: an atom has none of them.
+pub(crate) const STR_NOT_ATOM: u32 = STR_ROPE | STR_FLAT;
 
 /// Tests compare handles of short strings (atoms) with `==`.
 #[cfg(test)]
@@ -92,7 +96,11 @@ impl StrId {
     /// Interned: unique by content. A property key is always an atom.
     #[inline]
     pub fn is_atom(self) -> bool {
-        self.index & STR_ATOM != 0
+        self.index & STR_NOT_ATOM == 0
+    }
+    #[inline]
+    pub(crate) fn is_flat(self) -> bool {
+        self.index & STR_NOT_ATOM == STR_FLAT
     }
     #[inline]
     pub(crate) fn is_rope(self) -> bool {
