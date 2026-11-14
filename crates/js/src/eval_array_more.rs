@@ -279,7 +279,13 @@ impl<'p> Interp<'p> {
         {
             self.ao_reserve((k + 1) / 8)?;
             if let Some(e) = h!(self, self.heap.dense_elems(o, len)) {
-                let found = e[..=k as usize].iter().rposition(|y| matches!(y, Some(v) if v.strict_equals(x)));
+                // A string compares by content, which is a call that can unwind: a loop with it stores its iterator before each element.
+                // So the search for another value is a loop without it: no string element is equal to a value that is not a string.
+                let e = &e[..=k as usize];
+                let found = match x {
+                    Value::String(_) => e.iter().rposition(|y| matches!(y, Some(v) if self.heap.strict_equals(*v, x))),
+                    _ => e.iter().rposition(|y| matches!(y, Some(v) if v.strict_equals_with(x, |_, _| false))),
+                };
                 self.spend((k + 1) / 8 + 1)?;
                 return Ok(found.map_or(none, |i| Value::Number(i as f64)));
             }
@@ -289,7 +295,7 @@ impl<'p> Interp<'p> {
             let key = self.index_key(k)?;
             if self.ao_has(this, key)? {
                 let v = self.get_prop(this, key)?;
-                if v.strict_equals(x) {
+                if self.heap.strict_equals(v, x) {
                     return Ok(Value::Number(k as f64));
                 }
             }

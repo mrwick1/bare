@@ -1761,7 +1761,8 @@ impl<'p> Interp<'p> {
                     self.fpush(run, Fr::SwT { s, base, i: i as u32 })?;
                     return nx(Next::Eval(t));
                 }
-                if d.strict_equals(self.eval_expr(t)?) {
+                let tv = self.eval_expr(t)?;
+                if self.heap.strict_equals(d, tv) {
                     self.strunc(run, base as usize);
                     return self.sw_body(run, s, i);
                 }
@@ -2301,7 +2302,7 @@ impl<'p> Interp<'p> {
             }
             Fr::SwT { s, base, i } => {
                 let d = sval(run, base as usize);
-                if d.strict_equals(v) {
+                if self.heap.strict_equals(d, v) {
                     self.strunc(run, base as usize);
                     self.sw_body(run, s, i as usize)
                 } else {

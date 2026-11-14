@@ -232,8 +232,8 @@ impl ScFn {
 
 struct ScState {
     limits: ScLimits,
-    /// `Symbol.for` registry: key string to symbol. Strings are interned, so a `StrId` is the key text.
-    registry: FxMap<StrId, SymId>,
+    /// `Symbol.for` registry: key string to symbol. The key is an atom, so a handle is the key text.
+    registry: FxMap<ByHandle, SymId>,
     wk: Vec<SymId>,
     symbol_proto: ObjId,
     iter_proto: ObjId,
@@ -382,7 +382,7 @@ impl<'p> Interp<'p> {
     fn sc_roots(&self, out: &mut Vec<Value>) {
         out.extend(self.sc.objects().iter().map(|&o| Value::Object(o)));
         out.extend(self.sc.wk.iter().map(|&s| Value::Symbol(s)));
-        for (&k, &s) in &self.sc.registry {
+        for (&ByHandle(k), &s) in &self.sc.registry {
             out.push(Value::String(k));
             out.push(Value::Symbol(s));
         }
@@ -645,14 +645,15 @@ impl<'p> Interp<'p> {
             }
             ScFn::SymbolFor => {
                 let key = self.coerce_string(a0)?;
-                if let Some(&s) = self.sc.registry.get(&key) {
+                let key = h!(self, self.heap.atom_of(key));
+                if let Some(&s) = self.sc.registry.get(&ByHandle(key)) {
                     return Ok(Value::Symbol(s));
                 }
                 if self.sc.registry.len() >= self.sc.limits.max_registry {
                     return Err(Error::Limit(LimitKind::Sc(ScLimit::Registry)));
                 }
                 let s = h!(self, self.heap.new_symbol(Some(key)));
-                self.sc.registry.insert(key, s);
+                self.sc.registry.insert(ByHandle(key), s);
                 Ok(Value::Symbol(s))
             }
             ScFn::SymbolKeyFor => {
@@ -662,7 +663,7 @@ impl<'p> Interp<'p> {
                 };
                 let d = h!(self, self.heap.symbol_description(s));
                 Ok(match d {
-                    Some(d) if self.sc.registry.get(&d) == Some(&s) => Value::String(d),
+                    Some(d) if self.sc.registry.get(&ByHandle(d)) == Some(&s) => Value::String(d),
                     _ => Value::Undefined,
                 })
             }

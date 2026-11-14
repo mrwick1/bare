@@ -48,7 +48,7 @@ impl Heap {
         let len = self.str_len(s)?;
         Ok(match key {
             PropertyKey::Index(i) if (i as usize) < len => Some(Some(Property::Data { value: Value::Undefined, writable: false, enumerable: true, configurable: false })),
-            PropertyKey::String(k) if k == self.length => Some(Some(Property::Data { value: Value::Number(len as f64), writable: false, enumerable: false, configurable: false })),
+            PropertyKey::String(k) if k.same(self.length) => Some(Some(Property::Data { value: Value::Number(len as f64), writable: false, enumerable: false, configurable: false })),
             _ => None,
         })
     }
@@ -67,7 +67,7 @@ impl Heap {
         let Some(Exotic::Prim(Value::String(s))) = self.exotic(o) else { return Ok(None) };
         let Some(cur) = self.prim_str_own(*s, key)?.flatten() else { return Ok(None) };
         let cur = self.prim_realize(o, key, Some(cur))?;
-        Ok(Some(validate_apply(false, cur, d).is_some()))
+        Ok(Some(validate_apply(false, cur, d, |a, b| self.str_eq(a, b)).is_some()))
     }
 }
 

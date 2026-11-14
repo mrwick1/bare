@@ -179,7 +179,7 @@ struct Ext {
     regexps: FxMap<ObjId, ReData>,
     lits: FxMap<(u32, u32), Lit>,
     /// Compiled patterns of `RegExp(src, flags)` by string handles. Cleared by `collect`.
-    cache: FxMap<(StrId, StrId), (Rc<rx::Regex>, StrId, StrId)>,
+    cache: FxMap<(ByHandle, ByHandle), (Rc<rx::Regex>, StrId, StrId)>,
     scratch: rx::Scratch,
     k_last_index: PropertyKey,
     k_index: PropertyKey,
@@ -1239,7 +1239,7 @@ impl<'p> Interp<'p> {
     }
 
     fn regexp_create_proto(&mut self, pat: StrId, flags: StrId, proto: ObjId) -> Res<ObjId> {
-        if let Some((re, src, fl)) = self.ext.cache.get(&(pat, flags)).cloned() {
+        if let Some((re, src, fl)) = self.ext.cache.get(&(ByHandle(pat), ByHandle(flags))).cloned() {
             return self.make_regexp_proto(re, src, fl, proto);
         }
         let units = h!(self, self.heap.str_units(pat)).to_vec();
@@ -1254,7 +1254,7 @@ impl<'p> Interp<'p> {
         if self.ext.cache.len() >= 256 {
             self.ext.cache.clear();
         }
-        self.ext.cache.insert((pat, flags), (re.clone(), src, fl));
+        self.ext.cache.insert((ByHandle(pat), ByHandle(flags)), (re.clone(), src, fl));
         self.make_regexp_proto(re, src, fl, proto)
     }
 

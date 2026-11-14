@@ -2478,7 +2478,7 @@ mod tests {
             }
         }
         fn define(&mut self, key: PropertyKey, d: &PropertyDescriptor) -> bool {
-            match validate_apply(self.extensible, self.cur(key), d) {
+            match validate_apply(self.extensible, self.cur(key), d, StrId::same) {
                 Some(p) => {
                     self.put(key, p);
                     true

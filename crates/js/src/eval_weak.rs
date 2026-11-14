@@ -261,7 +261,7 @@ impl<'p> Interp<'p> {
             Value::Object(o) => return Ok(o),
             Value::Symbol(s) => {
                 let d = h!(self, self.heap.symbol_description(s));
-                if !matches!(d, Some(d) if self.sc.registry.get(&d) == Some(&s)) {
+                if !matches!(d, Some(d) if self.sc.registry.get(&ByHandle(d)) == Some(&s)) {
                     return Err(unsupported("non-registered Symbol as a weak key", Span::default()));
                 }
             }
@@ -393,7 +393,7 @@ impl<'p> Interp<'p> {
             Value::Object(o) => Ok(Some(o)),
             Value::Symbol(s) => {
                 let d = h!(self, self.heap.symbol_description(s));
-                if matches!(d, Some(d) if self.sc.registry.get(&d) == Some(&s)) {
+                if matches!(d, Some(d) if self.sc.registry.get(&ByHandle(d)) == Some(&s)) {
                     return Ok(None);
                 }
                 Err(unsupported("non-registered Symbol as a WeakRef or FinalizationRegistry target", Span::default()))

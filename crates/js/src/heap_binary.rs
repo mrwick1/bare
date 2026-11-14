@@ -189,7 +189,7 @@ pub fn sort_elems(ty: Elem, b: &mut [u8]) {
 }
 
 /// What a host says about one index of a host-indexed object right now.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub enum Slot {
     /// No property at this index (it is at or after the length).
     Absent,
@@ -200,6 +200,17 @@ pub enum Slot {
     Str(StrId),
     /// A property whose JavaScript object does not exist yet. The heap answers `NeedsHost`; the host makes the object.
     Missing,
+}
+
+impl PartialEq for Slot {
+    fn eq(&self, o: &Self) -> bool {
+        match (self, o) {
+            (Slot::Absent, Slot::Absent) | (Slot::Missing, Slot::Missing) => true,
+            (Slot::Ready(a), Slot::Ready(b)) => a == b,
+            (Slot::Str(a), Slot::Str(b)) => a.same(*b),
+            _ => false,
+        }
+    }
 }
 
 /// The read side of a host-indexed object (`Heap::new_indexed`). The host keeps the truth; the heap keeps no copy of the
@@ -379,8 +390,13 @@ impl Heap {
             Some(Exotic::View { buffer, offset, len, ty }) => (buffer.index, *offset..*offset + *len * ty.size()),
             _ => return Err(HeapError::InvalidKey),
         };
-        let Heap { strings, exotics, .. } = self;
-        let units = &strings.get(s.index, s.gn).ok_or(HeapError::Stale)?.units;
+        self.str_units(s)?; // flatten a rope first: the units are then a read of `&self.ropes`
+        let Heap { strings, ropes, exotics, .. } = self;
+        let units: &[u16] = if s.is_rope() {
+            ropes.get(s.slot(), s.gn).and_then(|r| r.flat.get()).ok_or(HeapError::Stale)?
+        } else {
+            &strings.get(s.slot(), s.gn).ok_or(HeapError::Stale)?.units
+        };
         match exotics.get_mut(&slot) {
             Some(Exotic::Buffer(v)) => Ok(crate::text::encode_into(units, &mut v[range])),
             Some(Exotic::Detached) => Ok((0, 0)),

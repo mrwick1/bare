@@ -411,7 +411,7 @@ impl<'p> Interp<'p> {
                 for (i, c) in prog.list(cases).enumerate() {
                     if let Some(t) = prog.case(c).test {
                         let v = self.eval_expr(t)?;
-                        if d.strict_equals(v) {
+                        if self.heap.strict_equals(d, v) {
                             start = Some(i);
                             break;
                         }

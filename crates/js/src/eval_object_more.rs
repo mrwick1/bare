@@ -92,7 +92,7 @@ impl<'p> Interp<'p> {
                 let key = self.coerce_key(a1)?;
                 Ok(Value::Bool(self.ro_has_own(a0, key)?))
             }
-            ObjIs => Ok(Value::Bool(a0.same_value(a1))),
+            ObjIs => Ok(Value::Bool(self.heap.same_value(a0, a1))),
             ObjPreventExtensions => {
                 if let Value::Object(o) = a0
                     && !self.o_prevent_extensions(o)?

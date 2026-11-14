@@ -58,8 +58,8 @@ impl Heap {
 
     /// `IsCompatiblePropertyDescriptor(extensible, d, current)`: could `d` be applied to `current` without a TypeError at
     /// the next `[[DefineOwnProperty]]`? It is `ValidateAndApplyPropertyDescriptor` with no object, so nothing is stored.
-    pub fn is_compatible_descriptor(extensible: bool, d: &PropertyDescriptor, current: Option<Property>) -> bool {
-        validate_apply(extensible, current, d).is_some()
+    pub fn is_compatible_descriptor(&self, extensible: bool, d: &PropertyDescriptor, current: Option<Property>) -> bool {
+        validate_apply(extensible, current, d, |a, b| self.str_eq(a, b)).is_some()
     }
 }
 
