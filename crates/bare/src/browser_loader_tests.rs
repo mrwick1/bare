@@ -509,6 +509,25 @@ fn dynamic_import_works_in_classic_scripts_and_modules() {
     });
 }
 
+/// A bundler runtime is one long module: its `import("./" + chunk)` sits in a function that the parser drops and parses again at its first
+/// call. The address is still relative to the module (`/static/`), not to the page (`/en/`).
+#[test]
+fn a_dynamic_import_in_a_lazy_function_is_relative_to_its_module() {
+    big(|| {
+        let pad = "var p1 = 1, p2 = 2, p3 = p1 + p2, p4 = p3 * 2, p5 = p4 - p1, p6 = p5 + p2, p7 = p6 * p3;";
+        let runtime = format!(
+            "/*{}*/ export function load(n) {{ {pad} return import('./' + n + '.js').then(function (ns) {{ return ns.v + p7 }}) }}",
+            " ".repeat(20_000)
+        );
+        let html = format!("{PRE}<script type=module>import {{ load }} from '/static/rt.js'; L('got:' + await load('c1'))</script>");
+        let routes = vec![js("/static/rt.js", &runtime), js("/static/c1.js", "export const v = 'c1:'")];
+        let (log, r, srv) = page(&html, routes, quick());
+        assert_eq!(log, "got:c1:21:interactive", "{log}");
+        assert_eq!(srv.hits("/static/c1.js"), 1);
+        assert_eq!(r.stop, Stop::Settled, "{r:?}");
+    });
+}
+
 #[test]
 fn an_import_map_scope_overrides_the_imports_for_modules_under_it() {
     big(|| {

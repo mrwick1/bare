@@ -10099,3 +10099,61 @@ Met. Wall time is 6.8 times lower at K = 4 and 1.89 times lower with one worker.
 - Criterion 6 was met at #501 and lost by 6 to 9 MiB since. A bound on the memory of #497, #512 and #515 would bring it back.
 - The PSS sampler of `journeys.sh` misses short journeys. Hypothesis: a journey shorter than about 100 ms ends before the sampler (every 20 ms, after the `perf` child starts) sees the process. Not checked.
 - The step budget gives 206 instructions for each charged step on a restyle loop and 198 on a JS loop. They agree within 5%, so the 32 steps for each restyled element hold today.
+
+## Fix: `import()` and `import.meta` in a lazy function belong to its module (2026-11-14)
+
+Branch `t3/fix-lazy-js-chunk-path`, on `8f879534`. Fixes the regression that the final benchmark found in `mdn-reference` (PR #492, lazy function bodies).
+
+### Cause
+
+`mdn-reference` loads a bundler runtime, `/static/client/runtime.<hash>.js`, an ES module of 19,664 bytes. Its loader is `import("./" + o.u(chunk))`, in a function of the runtime. A browser resolves `./<chunk>.js` against the module's address, `/static/client/`. Since #492 the function is lazy: its first call parses it again and runs the tree in a script slot of its own (`lazy_load`). `mod_of_current` found the module by comparing the running script slot with the slot of each module. The slot of a lazy tree is no module's slot, so `import()` gave no referrer, the host resolved against the page (`/en-US/`), and `import.meta` in such a function threw "import.meta outside a module". Verified: the recorded runtime has `o.p="/static/client/"` and `import("./"+o.u(s))`, and the replay asked for `/en-US/7489.879b548e785958fd.js`; the chunks are recorded under `/static/client/`. Hypotheses in the benchmark (`document.currentScript`, stack file names, a regex) were not the cause.
+
+### Change
+
+- `Interp.lazy_owner` (`eval.rs`): the slot of each lazy tree, mapped to the slot of the script that holds its stub. Filled in `lazy_load` (`eval_scripts.rs`), after the tree is walked.
+- `mod_of_current` (`eval_modules.rs`) follows `lazy_owner` up to the slot that a module owns (a lazy function inside a lazy tree takes more than one step). It runs only for `import()` and `import.meta`. Lazy parsing stays on for modules and pages.
+- Other readers of the current script slot do not need it: `hscope_find` reads handler functions, which are small and never lazy. The stack frames key by slot and keep working.
+
+### Tests (written first, failing on main)
+
+- `eval_modules_tests::a_dropped_function_of_a_module_is_still_code_of_that_module`: a module of 20 KB with two lazy functions (one nested in a lazy function) that call `import()` and read `import.meta.url`. Failed with `Unsupported("import.meta outside a module")`, passes now.
+- `browser_loader_tests::a_dynamic_import_in_a_lazy_function_is_relative_to_its_module`: a page loads `/static/rt.js` (long, lazy `load(n)` with `import('./' + n + '.js')`); the chunk must come from `/static/c1.js`. Fails on main (empty log), passes now.
+- No `exec_diff` case: the byte lane refuses module syntax (`bc_gen_expr.rs`), so the fixtures hold no module code.
+
+### `journeys.sh compare` checks replay misses
+
+`compare` prints "Replay misses" at the end: per journey, the most misses of runs 1 to N for each binary. A journey fails when NEW has more than BASE; the script prints `FAILED` and exits 1. A miss that BASE also has (the `wikipedia-portal` beacon POST, 1 each) does not fail. Run 0 (PSS) is left out, because its timing gives misses that the other runs do not. `run` prints the most misses of a journey after its median line. Check: `compare` of `0727ffef` against `e497ff5f` on `mdn-reference` prints `base 0 new 47 FAILED` (exit 1); a unit check of the report on made-up rows (mdn 0 vs 47, wp 1 vs 1, run-0 only miss) fails only the first.
+
+### Numbers (archMachine, corpus `virtual`, `BARE_CLOCK=virtual`, `bare-drive` built with `-p bare-drive`, instructions are the median of 3 runs)
+
+`mdn-reference` replay: 47 misses on main (`8f879534`), 0 on this branch (1 run, then 3 runs of the full set below). Instructions: 2,102.3 M on main, 7,179.3 M on this branch (+241.5%), peak RSS 31.9 to 113.9 MiB. This rise is expected: the page code now runs. The merge before #492 (`0727ffef`) gave 6,978 M and 116.0 MiB in the benchmark. The branch is +2.9% above that; main has moved since (#493 to #520 touch the page's code paths), cause not examined.
+
+The 47 journeys, main against branch, 3 runs: all pass, same-binary spread 0.4% or less on the branch (2.3% on main for `wikipedia-toc-languages`, 1 run with 1 miss). Except `mdn-reference`, no journey moves by more than 0.1% in instructions. Total 90,359 M to 95,445 M (+5.6%, all from `mdn-reference`; 88,257 M to 88,266 M without it). Peak RSS sums: 1,694 to 1,775 MiB (`mdn-reference` +82 MiB; others within noise, `wikipedia-article` +2.5 MiB with equal instructions). Misses: `mdn-reference` 47 to 0, `wikipedia-toc-languages` 1 to 0. The total of the final benchmark (85.3%) changes with this fix: its `mdn-reference` row was 1,862 M instead of about 7,100 M.
+
+### `wiktionary-portal` and `wikipedia-portal`: not the same cause
+
+Instructions, M, median of 3 runs, 0 misses in all runs, spread 0.1% or less:
+
+| Journey | `0727ffef` (before #492) | `e497ff5f` (#492) | main `8f879534` | this branch |
+| --- | ---: | ---: | ---: | ---: |
+| `wiktionary-portal` | 1,213.4 | 1,582.5 | 1,559.9 | 1,560.0 |
+| `wikipedia-portal` | 999.9 | 1,254.4 | 1,233.0 | 1,233.0 |
+
+The fix gives no change on either. They have no module with `import()`; the cost step is still #492. Hypothesis (not measured): the second parse and the extra script slot of the lazy functions that these pages call. They have a standing exception in "Standing exception: PR #492" for another row only; these two rows need their own look (a source-size threshold for lazy bodies, or cheaper second parse).
+
+### Checks
+
+- `cargo test --release --workspace --no-fail-fast`: all pass except the 7 TLS tests that fail on main (`https_openssl` 2, `client_openssl` 4, `tls12_openssl` 1) and `a_hidden_iframe_download_is_saved` (flaky under load; passes alone).
+- `tools/js/cost_matrix.sh` against main `8f879534`: 803 rows, 0 rows over under both allocators, 0 over under glibc, mean +0.000%; `parse_load deep 1` and `deep 10` do not run (known stack overflow).
+- `TEST262=/data/claude-tmp/test262 tools/js/test262_check.sh`: exit 0, no directory below the baseline.
+- `tools/js/exec_diff.sh`: 79 runs, 0 differences.
+- `tools/js/typing/keycost.sh`: 295.6 M for each key (`#a1`), 301.0 M (`#f0`), load and mount 613.7 M, peak RSS 30.9 and 31.0 MiB. Not compared with main (no change on the typing path; the cost matrix has the rows).
+
+### Not tested
+
+A live run on developer.mozilla.org (the chunks load on the recorded corpus only). `import()` inside a lazy function of a classic script (no referrer there, as before). A realm shared across threads with `lazy_owner` (the map is per realm, as `lazy`). Windows and macOS.
+
+### Noticed, not changed
+
+- `wiktionary-portal` and `wikipedia-portal` still cost 28% and 23% more than before #492 (above).
+- A page that passes with replay misses stayed unseen for a whole benchmark round; `journeys.sh run` still shows misses only as a count, and other tools (`run_suite`) have no such check.

@@ -558,6 +558,8 @@ pub struct Interp<'p> {
     /// do not count toward `max_scripts`). `lazy_work`: nodes that the second parses made, with the nodes that they dropped (bounded by `max_script_nodes`).
     /// A map, not a table in each script: the realm swaps the tables of the current script at each call into another script.
     lazy: FxMap<(u32, u32), LazySlot>,
+    /// The script slot that holds each lazy function's tree, and the slot of the script that holds its stub: the tree is code of that script.
+    lazy_owner: FxMap<u32, u32>,
     n_lazy: usize,
     lazy_work: usize,
     /// The walk of a lazy function is running: the scopes that it opens are marked (`RScope::lazy`).
@@ -770,6 +772,7 @@ impl<'p> Interp<'p> {
             script_source: prog.source.len(),
             script_nodes: stats.nodes() + stats.list_items,
             lazy: FxMap::default(),
+            lazy_owner: FxMap::default(),
             n_lazy: 0,
             lazy_work: 0,
             sc_lazy: false,

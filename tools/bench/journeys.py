@@ -5,6 +5,7 @@
   journeys.sh fill    [--corpus DIR] [--only TEXT] BARE_DRIVE    only the fill rounds, on a recording that exists (the live sites are asked for the misses only)
   journeys.sh run     [--corpus DIR] [--only TEXT] [--runs N] [--pss] [--out TSV] BARE_DRIVE    replay each journey N times (cold: a new process each time)
   journeys.sh compare [--corpus DIR] [--only TEXT] [--runs N] [--pss] [--out TSV] BASE_DRIVE NEW_DRIVE    replay on both binaries, runs interleaved
+                      (exit 1 when a journey has more replay misses on NEW than on BASE: that journey did not do the recorded work, whatever its pass column says)
 
 `--clock virtual` sets `BARE_CLOCK=virtual` (a page clock that replies move, `crates/net/src/vclock.rs`): the same work in every run. It is a clock for a replay, so the recording of the
 journeys in the corpus `virtual` is a fill under that clock (a copy of `main`, then `journeys.sh fill --clock virtual`); with it, `--corpus` defaults to `virtual`. `--clock real` (the default) removes `BARE_CLOCK`.
@@ -187,10 +188,13 @@ def spread(xs):
 
 
 def compare(rows, a="base", b="new"):
-    """Per journey and in total: the median of the runs of each binary, the change, and the spread (max - min over the median) of each."""
-    by, extra = {}, {}
-    for label, name, run, ok, instr, cpu, wall, rss, pss, _misses in rows:
+    """Per journey and in total: the median of the runs of each binary, the change, and the spread (max - min over the median) of each.
+    Gives False when a journey of `b` has more replay misses than the same journey of `a` (see `miss_report`)."""
+    by, extra, miss = {}, {}, {}
+    for label, name, run, ok, instr, cpu, wall, rss, pss, misses in rows:
         extra.setdefault(label, {}).setdefault(name, []).append((cpu, wall, pss))
+        if run:  # run 0 reads the PSS: its timing gives misses that the other runs do not
+            miss.setdefault(name, {}).setdefault(label, []).append(misses)
         if run:  # run 0 is the PSS run (see `measure`)
             by.setdefault(name, {}).setdefault(label, []).append((ok, instr, wall, rss, pss))
     print(f"\n{'journey':32} {'Minstr ' + a:>12} {'Minstr ' + b:>12} {'change':>8} {'spread ' + a:>9} {'spread ' + b:>9} {'MiB ' + a:>8} {'MiB ' + b:>8} {'change':>8}  pass")
@@ -219,6 +223,22 @@ def compare(rows, a="base", b="new"):
             vals = [statistics.median(r[k] for r in v if r[k] != "") if any(r[k] != "" for r in v) else 0 for v in d.values()]
             t[label] = sum(vals) / (1024 if k == 2 else 1)
         print(f"  {name:8} {a} {t[a]:10.1f}  {b} {t[b]:10.1f}  {pct(t[a], t[b])}")
+    return miss_report(miss, a, b)
+
+
+def miss_report(miss, a, b):
+    """A replay miss is a request with no recorded reply: the journey did not do the recorded work, and may still pass. Lists each journey that has
+    misses (the most of runs 1 to N, for each binary). A journey fails when `b` has more than `a`: a miss that `a` also has (a beacon whose body
+    changes between runs) is known and does not fail it. Gives False when a journey fails."""
+    seen = {n: {k: max(v) for k, v in d.items() if v} for n, d in miss.items()}
+    seen = {n: d for n, d in seen.items() if any(d.values())}
+    bad = [n for n, d in seen.items() if d.get(b, 0) > d.get(a, 0)]
+    print(f"\nReplay misses (most of the runs, per binary): {'none' if not seen else ''}")
+    for n, d in seen.items():
+        print(f"  {n:32} {a} {d.get(a, 0):4}  {b} {d.get(b, 0):4}  {'FAILED: more misses than ' + a if n in bad else 'same or fewer, not a failure'}")
+    if bad:
+        print(f"FAILED: {len(bad)} journey(s) have replay misses that {a} does not have: {', '.join(bad)}", file=sys.stderr)
+    return not bad
 
 
 def pct(a, b):
@@ -237,11 +257,13 @@ def main():
         write(rows, opt["out"])
         for name in dict.fromkeys(r[1] for r in rows):
             xs = [r[4] for r in rows if r[1] == name]
-            print(f"{name:32} median {statistics.median(xs) / 1e6:10.1f} Minstr  spread {spread(xs):5.1f}%")
+            misses = max(r[9] for r in rows if r[1] == name)
+            print(f"{name:32} median {statistics.median(xs) / 1e6:10.1f} Minstr  spread {spread(xs):5.1f}%" + (f"  {misses} MISSES at most" if misses else ""))
     elif mode == "compare" and len(argv) == 2:
         rows = measure(opt, [("base", argv[0]), ("new", argv[1])])
         write(rows, opt["out"])
-        compare(rows)
+        if not compare(rows):
+            sys.exit(1)
     else:
         sys.exit(__doc__)
 

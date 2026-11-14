@@ -287,6 +287,7 @@ impl<'p> Interp<'p> {
         self.script_nodes += nodes;
         let slot = LazySlot { script: id as u32 + 1, fid: fid.index() as u32, ..s };
         self.lazy.insert((script, idx), slot);
+        self.lazy_owner.insert(id as u32, script);
         Ok((id as u32, fid))
     }
 
