@@ -283,7 +283,7 @@ impl<'p> Interp<'p> {
                     return Ok(SGo::Done(Ok(())));
                 }
                 self.sf_room()?;
-                let mark = self.stmt_label[s.index()];
+                let mark = self.cc.cold.stmt_label[s.index()];
                 if mark != 0 {
                     // In a function with frame slots: no environment, only the TDZ again (`eval_scope.rs`).
                     self.fr_tdz(mark);
@@ -343,7 +343,7 @@ impl<'p> Interp<'p> {
                         if let StmtKind::Var { kind, decls } = vs.kind
                             && kind != VarKind::Var
                         {
-                            let mark = self.stmt_label[v.index()];
+                            let mark = self.cc.cold.stmt_label[v.index()];
                             if mark != 0 {
                                 self.fr_tdz(mark);
                             } else {
@@ -381,7 +381,7 @@ impl<'p> Interp<'p> {
                 if top {
                     self.completion = Value::Undefined;
                 }
-                let t = STry { handler, finalizer, env: self.env, strict: self.strict, phase: SPhase::Block, catch_env: None, pending: None, saved_ret: Value::Undefined, frame: self.stmt_label[s.index()] != 0 };
+                let t = STry { handler, finalizer, env: self.env, strict: self.strict, phase: SPhase::Block, catch_env: None, pending: None, saved_ret: Value::Undefined, frame: self.cc.cold.stmt_label[s.index()] != 0 };
                 self.sf_push(st, SFrame::Try(t))?;
                 Ok(SGo::Stmt(block))
             }
@@ -392,7 +392,7 @@ impl<'p> Interp<'p> {
                 }
                 let d = self.eval_expr(disc)?;
                 let any_lex = prog.list(cases).any(|c| self.has_lexical(prog.case(c).body));
-                let mark = if any_lex { self.stmt_label[s.index()] } else { 0 };
+                let mark = if any_lex { self.cc.cold.stmt_label[s.index()] } else { 0 };
                 self.sf_room()?;
                 let saved = self.env;
                 let env = if any_lex && mark == 0 { Some(self.new_env(saved, false)?) } else { None };
@@ -426,7 +426,7 @@ impl<'p> Interp<'p> {
                 Ok(SGo::Done(Ok(())))
             }
             StmtKind::Labeled { body, .. } => {
-                let label = self.stmt_label[s.index()];
+                let label = self.cc.cold.stmt_label[s.index()];
                 self.sf_room()?;
                 self.pending_labels.push(label);
                 self.sf_put(st, SFrame::Labeled { label });
@@ -449,7 +449,7 @@ impl<'p> Interp<'p> {
                 let prog = self.prog.clone();
                 for d in prog.list(decls) {
                     let d = *prog.decl(d);
-                    let name = if let PatKind::Ident = prog.pat(d.target).kind { Some(self.pat_name[d.target.index()]) } else { None };
+                    let name = if let PatKind::Ident = prog.pat(d.target).kind { Some(self.cc.cold.pat_name[d.target.index()]) } else { None };
                     match (kind, d.init) {
                         (VarKind::Var, None) => {}
                         (VarKind::Var, Some(i)) => {
@@ -476,8 +476,8 @@ impl<'p> Interp<'p> {
                 self.ret = v;
                 return Err(Ctl::Return);
             }
-            StmtKind::Break(l) => return Err(Ctl::Break(if l.is_some() { self.stmt_label[s.index()] } else { 0 })),
-            StmtKind::Continue(l) => return Err(Ctl::Continue(if l.is_some() { self.stmt_label[s.index()] } else { 0 })),
+            StmtKind::Break(l) => return Err(Ctl::Break(if l.is_some() { self.cc.cold.stmt_label[s.index()] } else { 0 })),
+            StmtKind::Continue(l) => return Err(Ctl::Continue(if l.is_some() { self.cc.cold.stmt_label[s.index()] } else { 0 })),
             StmtKind::Throw(e) => {
                 let v = self.eval_expr(e)?;
                 return Err(Ctl::Err(Error::Throw(v)));

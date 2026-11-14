@@ -589,18 +589,8 @@ pub struct Interp<'p> {
     name_strs: Vec<Option<StrId>>,
     /// For each name: the position of its property on the global object when it was last found there (a hint, checked on use).
     name_gpos: Vec<u32>,
-    expr_name: Vec<u32>,
-    pat_name: Vec<u32>,
-    stmt_label: Vec<u32>,
-    func_name: Vec<u32>,
-    /// The strings of the string literal and member name sites that ran, in the order they first ran. The site of such an
-    /// expression in `slots` holds its position + 1 (0: not yet), since only identifier sites use `slots`. A dense table of
-    /// 12 bytes for each expression cost about half of the per-script tables.
-    site_strs: Vec<StrId>,
-    prop_str: Vec<Option<StrId>>,
-    scopes: Vec<FScope>,
-    /// Static scopes and identifier slots of the current script (see `eval_scope.rs`), and the scope the first walk is in.
-    slots: Slots,
+    /// The caches of the current script, swapped with those of another script by `select` (see `Caches`).
+    cc: Caches,
     /// The scopes of all scripts and their names (see `eval_scope.rs`). A script keeps its scopes after it ran.
     sc_all: Vec<RScope>,
     sc_pool: Vec<u32>,
@@ -795,14 +785,7 @@ impl<'p> Interp<'p> {
             names: vec![String::new()],
             name_strs: vec![None],
             name_gpos: vec![NONE],
-            expr_name: vec![0; p.stats().exprs],
-            pat_name: vec![0; p.stats().pats],
-            stmt_label: vec![0; p.stats().stmts],
-            func_name: vec![0; p.stats().funcs],
-            site_strs: Vec::new(),
-            prop_str: vec![None; p.stats().props],
-            scopes: (0..=p.stats().funcs).map(|_| FScope::default()).collect(),
-            slots: Slots::new(&p.stats()),
+            cc: Caches::new(&p.stats()),
             sc_all: Vec::new(),
             sc_pool: Vec::new(),
             sc_cur: NONE,
@@ -936,8 +919,8 @@ impl<'p> Interp<'p> {
             }
         }
         v.extend(self.name_strs.iter().flatten().map(|&s| Value::String(s)));
-        v.extend(self.site_strs.iter().map(|&s| Value::String(s)));
-        v.extend(self.prop_str.iter().flatten().map(|&s| Value::String(s)));
+        v.extend(self.cc.cold.site_strs.iter().map(|&s| Value::String(s)));
+        v.extend(self.cc.cold.prop_str.iter().flatten().map(|&s| Value::String(s)));
         v.extend(self.tpl_objs.values().map(|&o| Value::Object(o)));
         self.module_values(&mut v, &mut Vec::new());
         self.script_roots(&mut v);
@@ -1305,7 +1288,7 @@ impl<'p> Interp<'p> {
 
     fn walk_program(&mut self) -> Res<()> {
         let prog = self.prog.clone();
-        let top = self.scopes.len() - 1;
+        let top = self.cc.scopes.len() - 1;
         self.cur_strict = prog.strict;
         self.sc_cur = NONE;
         self.sc_fn = top;
@@ -1313,7 +1296,7 @@ impl<'p> Interp<'p> {
         self.sc_begin(RKind::Root);
         if let Some(m) = &prog.module {
             self.w_func(m.func, usize::MAX)?;
-            self.scopes[m.func.index()].fr = FR_ENV;
+            self.cc.scopes[m.func.index()].fr = FR_ENV;
             return Ok(());
         }
         for s in prog.list(prog.body) {
@@ -1333,7 +1316,7 @@ impl<'p> Interp<'p> {
             self.async_preflight(fid)?;
         }
         if let Some(n) = f.name {
-            self.func_name[fid.index()] = self.name_at(n);
+            self.cc.cold.func_name[fid.index()] = self.name_at(n);
         }
         if let Body::Lazy(idx) = f.body {
             // Not walked now. Its first call walks it, in the scope that holds it here. As an inner function it keeps this one out of frame slots.
@@ -1367,7 +1350,7 @@ impl<'p> Interp<'p> {
         }
         self.sc_end(sc);
         self.sc_fn = parent;
-        let fsd = &mut self.scopes[me];
+        let fsd = &mut self.cc.scopes[me];
         fsd.lo = lo;
         // The function is an inner function of the one that holds it: that one has no frame slots.
         let fl = std::mem::replace(&mut self.fl, outer_fl | FL_NOFR);
@@ -1387,7 +1370,7 @@ impl<'p> Interp<'p> {
         match pat.kind {
             PatKind::Ident => {
                 let n = self.name_at(pat.span);
-                self.pat_name[p.index()] = n;
+                self.cc.cold.pat_name[p.index()] = n;
                 out.push(n);
             }
             PatKind::Array(l) => {
@@ -1415,7 +1398,7 @@ impl<'p> Interp<'p> {
         // A name has no child: it needs no clone of the program.
         if let PatKind::Ident = pat.kind {
             let n = self.name_at(pat.span);
-            self.pat_name[p.index()] = n;
+            self.cc.cold.pat_name[p.index()] = n;
             self.sc_site(self.pat_site(p.index()), n);
             return Ok(());
         }
@@ -1462,7 +1445,7 @@ impl<'p> Interp<'p> {
                     if kind == VarKind::Var {
                         let mut names = Vec::new();
                         self.pat_names(d.target, &mut names);
-                        self.scopes[fs].vars.extend(names);
+                        self.cc.scopes[fs].vars.extend(names);
                     }
                     self.w_pat(d.target, fs, ac)?;
                     if let Some(i) = d.init {
@@ -1474,8 +1457,8 @@ impl<'p> Interp<'p> {
                 self.w_func(fid, ac)?;
                 // Annex B.3.3 is only for plain functions, not async functions or generators.
                 if nested && !self.cur_strict && prog.func(fid).is_plain_ctor() {
-                    let n = self.func_name[fid.index()];
-                    self.scopes[fs].vars.push(n);
+                    let n = self.cc.cold.func_name[fid.index()];
+                    self.cc.scopes[fs].vars.push(n);
                 }
             }
             StmtKind::Class(c) => self.w_class(c, fs, ac)?,
@@ -1524,7 +1507,7 @@ impl<'p> Interp<'p> {
             }
             StmtKind::Break(l) | StmtKind::Continue(l) => {
                 if let Some(l) = l {
-                    self.stmt_label[s.index()] = self.name_at(l);
+                    self.cc.cold.stmt_label[s.index()] = self.name_at(l);
                 }
             }
             StmtKind::Try { block, handler, finalizer } => {
@@ -1558,7 +1541,7 @@ impl<'p> Interp<'p> {
                 self.sc_end(sc);
             }
             StmtKind::Labeled { label, body } => {
-                self.stmt_label[s.index()] = self.name_at(label);
+                self.cc.cold.stmt_label[s.index()] = self.name_at(label);
                 self.w_stmt(body, fs, ac, true)?;
             }
             StmtKind::Block(l) => {
@@ -1593,10 +1576,10 @@ impl<'p> Interp<'p> {
         match ex.kind {
             ExprKind::Ident => {
                 let n = self.name_at(ex.span);
-                self.expr_name[e.index()] = n;
+                self.cc.expr_name[e.index()] = n;
                 self.sc_site(e.index() as u32, n);
                 if n == self.n_arguments && ac != usize::MAX {
-                    self.scopes[ac].uses_args = true;
+                    self.cc.scopes[ac].uses_args = true;
                 }
                 return Ok(());
             }
@@ -1952,7 +1935,7 @@ impl<'p> Interp<'p> {
         // A plain name: the walk before the run cached its id, so no hashing and no list.
         let pat = *self.prog.pat(p);
         if let PatKind::Ident = pat.kind {
-            let n = self.pat_name[p.index()];
+            let n = self.cc.cold.pat_name[p.index()];
             debug_assert_eq!(n, self.name_at(pat.span));
             self.env_declare(self.env, n, flags, Value::Undefined);
             return;
@@ -1987,7 +1970,7 @@ impl<'p> Interp<'p> {
                 }
                 StmtKind::Function(fid) => {
                     let f = self.make_closure(fid, None, false)?;
-                    let n = self.func_name[fid.index()];
+                    let n = self.cc.cold.func_name[fid.index()];
                     if func_top && self.env == 0 {
                         let key = self.name_key(n)?;
                         let d = PropertyDescriptor { value: Some(f), writable: Some(true), enumerable: Some(true), configurable: Some(false), ..Default::default() };
@@ -2022,7 +2005,7 @@ impl<'p> Interp<'p> {
             return Err(Error::Limit(LimitKind::Functions));
         }
         let nstr = match (f.name.is_some(), name) {
-            (true, _) => self.name_str(self.func_name[fid.index()])?,
+            (true, _) => self.name_str(self.cc.cold.func_name[fid.index()])?,
             (false, Some(s)) => s,
             (false, None) => h!(self, self.heap.intern_str("")),
         };
@@ -2280,9 +2263,9 @@ impl<'p> Interp<'p> {
         }
         // A class member never has frame slots (its mode is `Env`).
         if mode == FuncMode::Plain {
-            let st = self.scopes[fid.index()].fr;
+            let st = self.cc.scopes[fid.index()].fr;
             if st == FR_NEW {
-                self.scopes[fid.index()].fr = FR_WAIT;
+                self.cc.scopes[fid.index()].fr = FR_WAIT;
             } else if st != FR_ENV && (st == FR_ON || self.fr_gate(fid)) {
                 return self.call_frame(fid, cenv, new, args, (saved_env, saved_strict, saved_script));
             }
@@ -2312,7 +2295,7 @@ impl<'p> Interp<'p> {
     fn bind_call(&mut self, fobj: ObjId, fid: FuncId, env: u32, self_binding: bool, this: Value, args: &[Value]) -> Res<()> {
         let f = *self.prog.func(fid);
         self.strict = f.strict;
-        if self.cls.fflags[fid.index()] != 0 {
+        if self.cc.cold.fflags[fid.index()] != 0 {
             self.cls_frame(env, fid, fobj);
         }
         if f.kind != FuncKind::Arrow {
@@ -2325,12 +2308,12 @@ impl<'p> Interp<'p> {
             self.envs[env as usize].this = Some(t);
         }
         if self_binding {
-            let n = self.func_name[fid.index()];
+            let n = self.cc.cold.func_name[fid.index()];
             self.env_declare(env, n, INIT | SELF, Value::Object(fobj));
         }
         if f.simple_params {
             for i in 0..f.params.len() {
-                let n = self.pat_name[self.list_at(f.params, i).index()];
+                let n = self.cc.cold.pat_name[self.list_at(f.params, i).index()];
                 self.env_declare(env, n, INIT | MUT, args.get(i).copied().unwrap_or(Value::Undefined));
             }
         } else {
@@ -2345,7 +2328,7 @@ impl<'p> Interp<'p> {
                 }
             }
         }
-        if self.scopes[fid.index()].uses_args && f.kind != FuncKind::Arrow {
+        if self.cc.scopes[fid.index()].uses_args && f.kind != FuncKind::Arrow {
             let o = h!(self, self.heap.new_object(Some(self.object_proto)));
             for (i, &a) in args.iter().enumerate() {
                 self.def(o, PropertyKey::Index(i as u32), a, true, true, true)?;
@@ -2354,8 +2337,8 @@ impl<'p> Interp<'p> {
             self.def(o, self.sc.k_iterator, Value::Object(self.sc.f_array_values), true, false, true)?;
             self.env_declare(env, self.n_arguments, INIT | MUT, Value::Object(o));
         }
-        for i in 0..self.scopes[fid.index()].vars.len() {
-            let n = self.scopes[fid.index()].vars[i];
+        for i in 0..self.cc.scopes[fid.index()].vars.len() {
+            let n = self.cc.scopes[fid.index()].vars[i];
             self.declare_var(env, n);
         }
         Ok(())
@@ -2654,11 +2637,11 @@ impl<'p> Interp<'p> {
             }
             Key::None | Key::Private(_) | Key::BigInt(_) => Err(unsupported("property key", Span::default())),
             _ => {
-                if let Some(s) = self.prop_str[pid.index()] {
+                if let Some(s) = self.cc.cold.prop_str[pid.index()] {
                     return Ok(h!(self, self.heap.key_from_string(s)));
                 }
                 let s = self.key_string(key, &prog)?;
-                self.prop_str[pid.index()] = Some(s);
+                self.cc.cold.prop_str[pid.index()] = Some(s);
                 Ok(h!(self, self.heap.key_from_string(s)))
             }
         }
@@ -2865,7 +2848,7 @@ impl<'p> Interp<'p> {
             if self.with_any {
                 return self.link_name_with(e);
             }
-            return Ok(Some((self.get_name(self.expr_name[e.index()], e.index() as u32)?, Value::Undefined)));
+            return Ok(Some((self.get_name(self.cc.expr_name[e.index()], e.index() as u32)?, Value::Undefined)));
         }
         self.link(e)
     }
@@ -2882,7 +2865,7 @@ impl<'p> Interp<'p> {
                     return Ok(None);
                 }
                 if let Value::Object(o) = base {
-                    if let Some(v) = self.heap.ic_own(o, &self.ics.ics[self.expr_name[e.index()] as usize]) {
+                    if let Some(v) = self.heap.ic_own(o, &self.ics.ics[self.cc.expr_name[e.index()] as usize]) {
                         self.ics.own_hits += 1;
                         return Ok(Some((v, base)));
                     }
@@ -2974,7 +2957,7 @@ impl<'p> Interp<'p> {
     fn operand(&mut self, e: ExprId) -> Res<Value> {
         if matches!(self.prog.expr(e).kind, ExprKind::Ident) {
             self.tick()?;
-            return self.get_name(self.expr_name[e.index()], e.index() as u32);
+            return self.get_name(self.cc.expr_name[e.index()], e.index() as u32);
         }
         self.eval_expr(e)
     }
@@ -2983,12 +2966,12 @@ impl<'p> Interp<'p> {
         self.tick()?;
         let ex = *self.prog.expr(e);
         match ex.kind {
-            ExprKind::Ident => self.get_name(self.expr_name[e.index()], e.index() as u32),
-            ExprKind::This if self.expr_name[e.index()] == 0 => Ok(self.lookup_this()),
+            ExprKind::Ident => self.get_name(self.cc.expr_name[e.index()], e.index() as u32),
+            ExprKind::This if self.cc.expr_name[e.index()] == 0 => Ok(self.lookup_this()),
             ExprKind::This => self.this_binding(),
             ExprKind::Null => Ok(Value::Null),
             ExprKind::Bool(b) => Ok(Value::Bool(b)),
-            ExprKind::Number(base) => match self.slots.sites[e.index()] {
+            ExprKind::Number(base) => match self.cc.slots.sites[e.index()] {
                 0 => Ok(Value::Number(self.number_literal(e, ex.span, base))),
                 c => Ok(Value::Number((c - 1) as f64)),
             },
@@ -3056,7 +3039,7 @@ impl<'p> Interp<'p> {
     fn number_literal(&mut self, e: ExprId, span: Span, base: NumBase) -> f64 {
         let n = self.num_lit(span, base);
         if n.fract() == 0.0 && (0.0..u32::MAX as f64).contains(&n) {
-            self.slots.sites[e.index()] = n as u32 + 1;
+            self.cc.slots.sites[e.index()] = n as u32 + 1;
         }
         n
     }
@@ -3065,12 +3048,12 @@ impl<'p> Interp<'p> {
     #[inline(always)]
     fn site_str(&self, e: ExprId) -> Option<StrId> {
         // 0 (not yet) wraps to an index past the end: one check for both cases.
-        self.site_strs.get((self.slots.sites[e.index()] as usize).wrapping_sub(1)).copied()
+        self.cc.cold.site_strs.get((self.cc.slots.sites[e.index()] as usize).wrapping_sub(1)).copied()
     }
 
     fn set_site_str(&mut self, e: ExprId, s: StrId) {
-        self.site_strs.push(s);
-        self.slots.sites[e.index()] = self.site_strs.len() as u32;
+        self.cc.cold.site_strs.push(s);
+        self.cc.slots.sites[e.index()] = self.cc.cold.site_strs.len() as u32;
     }
 
     #[inline(never)]
@@ -3174,7 +3157,7 @@ impl<'p> Interp<'p> {
         if l.len() == 0 {
             return Ok(Value::Object(h!(self, self.heap.new_object(Some(self.object_proto)))));
         }
-        let site = self.expr_name[e.index()];
+        let site = self.cc.expr_name[e.index()];
         if site > 1 {
             return self.object_shaped(l, site);
         }
@@ -3190,7 +3173,7 @@ impl<'p> Interp<'p> {
                 matches!(p.kind, PropKind::Init | PropKind::Shorthand | PropKind::Method) && !matches!(p.key, Key::Computed(_))
             });
             let shape = if named { self.heap.literal_shape(o, l.len()) } else { None };
-            self.expr_name[e.index()] = shape.unwrap_or(1);
+            self.cc.expr_name[e.index()] = shape.unwrap_or(1);
         }
         Ok(Value::Object(o))
     }
@@ -3204,7 +3187,7 @@ impl<'p> Interp<'p> {
         let (mut small, mut big) = ([Value::Undefined; 3], Vec::with_capacity(if n > 3 { n } else { 0 }));
         for (i, pid) in prog.list(l).enumerate() {
             let p = *prog.prop(pid);
-            let name = match self.prop_str[pid.index()] {
+            let name = match self.cc.cold.prop_str[pid.index()] {
                 Some(s) => s,
                 None => {
                     let k = self.prop_key(pid, p.key)?;
@@ -3314,7 +3297,7 @@ impl<'p> Interp<'p> {
                     while let ExprKind::Paren(i) = self.prog.expr(a).kind {
                         a = i;
                     }
-                    let n = self.expr_name[a.index()];
+                    let n = self.cc.expr_name[a.index()];
                     if self.with_any {
                         return self.typeof_with(n, a);
                     }
@@ -3385,7 +3368,7 @@ impl<'p> Interp<'p> {
                 Ok(Value::Bool(ok))
             }
             ExprKind::Ident => {
-                let n = self.expr_name[a.index()];
+                let n = self.cc.expr_name[a.index()];
                 if self.with_any {
                     if let Some(r) = self.delete_with(n)? {
                         return Ok(Value::Bool(r));
@@ -3431,7 +3414,7 @@ impl<'p> Interp<'p> {
     fn expr_ref(&mut self, e: ExprId) -> Res<Ref> {
         let ex = *self.prog.expr(e);
         match ex.kind {
-            ExprKind::Ident => Ok(Ref::Name(self.expr_name[e.index()], e.index() as u32)),
+            ExprKind::Ident => Ok(Ref::Name(self.cc.expr_name[e.index()], e.index() as u32)),
             ExprKind::Paren(i) => self.expr_ref(i),
             ExprKind::Member { .. } | ExprKind::Index { .. } | ExprKind::PrivateMember { .. } => self.member_target(e),
             _ => Err(unsupported("update target", ex.span)),
@@ -3461,7 +3444,7 @@ impl<'p> Interp<'p> {
     fn eval_assign(&mut self, op: AssignOp, target: PatId, value: ExprId) -> Res<Value> {
         let pat = *self.prog.pat(target);
         let r = match pat.kind {
-            PatKind::Ident => Ref::Name(self.pat_name[target.index()], self.pat_site(target.index())),
+            PatKind::Ident => Ref::Name(self.cc.cold.pat_name[target.index()], self.pat_site(target.index())),
             PatKind::Member(me) => self.member_target(me)?,
             PatKind::Array(_) | PatKind::Object(_) if op == AssignOp::Assign => {
                 let v = self.eval_expr(value)?;
@@ -3506,7 +3489,7 @@ impl<'p> Interp<'p> {
         let pat = *self.prog.pat(p);
         match pat.kind {
             PatKind::Ident => {
-                let n = self.pat_name[p.index()];
+                let n = self.cc.cold.pat_name[p.index()];
                 match mode {
                     Bind::Assign => self.assign_name(n, v, self.pat_site(p.index())),
                     Bind::Declare => {
@@ -3541,7 +3524,7 @@ impl<'p> Interp<'p> {
             }
             PatKind::Assign { target, default } => {
                 let v = if matches!(v, Value::Undefined) {
-                    let name = if let PatKind::Ident = self.prog.pat(target).kind { Some(self.pat_name[target.index()]) } else { None };
+                    let name = if let PatKind::Ident = self.prog.pat(target).kind { Some(self.cc.cold.pat_name[target.index()]) } else { None };
                     self.eval_named_n(default, name)?
                 } else {
                     v
@@ -3715,7 +3698,7 @@ impl<'p> Interp<'p> {
         if self.strict || self.envs[self.env as usize].var_scope || !self.prog.func(fid).is_plain_ctor() {
             return Ok(());
         }
-        let n = self.func_name[fid.index()];
+        let n = self.cc.cold.func_name[fid.index()];
         let Some(i) = self.find_in(self.env, n) else { return Ok(()) };
         let v = self.envs[self.env as usize].bindings[i].value;
         let mut e = self.envs[self.env as usize].parent;
@@ -3762,7 +3745,7 @@ impl<'p> Interp<'p> {
                 let Some(d) = d else { return Err(unsupported("for left", Span::default()).into()) };
                 if kind != VarKind::Var {
                     lexical = Some((d.target, kind));
-                    mark = self.stmt_label[v.index()];
+                    mark = self.cc.cold.stmt_label[v.index()];
                 }
                 d.target
             }

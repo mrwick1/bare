@@ -95,9 +95,6 @@ struct ClassState {
     n_this: u32,
     n_nt: u32,
     n_fn: u32,
-    /// Per function (`F_*`) and per class (`C_*`), set by the first walk.
-    fflags: Vec<u8>,
-    cflags: Vec<u8>,
     /// Some `super.x` or `super()` exists: `link_inner` checks for them.
     super_used: bool,
     classes: FxMap<ObjId, Rc<ClassData>>,
@@ -119,9 +116,6 @@ fn is_super(prog: &Program<'_>, e: ExprId) -> bool {
 
 impl<'p> Interp<'p> {
     fn cls_init(&mut self) {
-        let p = self.prog.clone();
-        self.cls.fflags = vec![0; p.stats().funcs];
-        self.cls.cflags = vec![0; p.stats().classes];
         self.cls.n_home = self.intern_name("%home");
         self.cls.n_this = self.intern_name("%this");
         self.cls.n_nt = self.intern_name("%nt");
@@ -184,7 +178,7 @@ impl<'p> Interp<'p> {
             match e.kind {
                 ElemKind::Method(f) | ElemKind::Getter(f) | ElemKind::Setter(f) | ElemKind::StaticBlock(f) => {
                     if prog.func(f).kind == FuncKind::DerivedConstructor {
-                        self.cls.fflags[f.index()] |= F_DERIVED;
+                        self.cc.cold.fflags[f.index()] |= F_DERIVED;
                     }
                     self.cls.elem_ctx = Some((c, e.is_static));
                     self.w_func(f, ac)?;
@@ -204,14 +198,14 @@ impl<'p> Interp<'p> {
 
     fn cls_w_this(&mut self, e: ExprId, ac: usize) {
         if ac != usize::MAX && self.prog.func(FuncId::from_index(ac)).kind == FuncKind::DerivedConstructor {
-            self.expr_name[e.index()] = self.cls.n_this;
+            self.cc.expr_name[e.index()] = self.cls.n_this;
         }
     }
 
     fn cls_w_super(&mut self, span: Span) -> Res<()> {
         let Some((c, is_static)) = self.cls.cur else { return Err(unsupported("super outside a class element", span)) };
         self.cls.super_used = true;
-        self.cls.cflags[c.index()] |= if is_static { C_HOME_STATIC } else { C_HOME_INST };
+        self.cc.cold.cflags[c.index()] |= if is_static { C_HOME_STATIC } else { C_HOME_INST };
         Ok(())
     }
 
@@ -219,12 +213,12 @@ impl<'p> Interp<'p> {
         if ac == usize::MAX {
             return Err(unsupported("new.target in a class field initializer", span));
         }
-        self.cls.fflags[ac] |= F_NT;
+        self.cc.cold.fflags[ac] |= F_NT;
         Ok(())
     }
 
     fn cls_w_private(&mut self, e: ExprId, name: Span) {
-        self.expr_name[e.index()] = self.private_id(name);
+        self.cc.expr_name[e.index()] = self.private_id(name);
     }
 
     // ------------------------------------------------------------ collect and roots
@@ -281,7 +275,7 @@ impl<'p> Interp<'p> {
 
     /// Walk flags of function `fid` of script `script` (not necessarily the current one).
     fn fflags_of(&self, script: u32, fid: FuncId) -> u8 {
-        if script as usize == self.cur { self.cls.fflags[fid.index()] } else { self.scripts[script as usize].fflags[fid.index()] }
+        if script as usize == self.cur { self.cc.cold.fflags[fid.index()] } else { self.scripts[script as usize].cc.cold.fflags[fid.index()] }
     }
 
     /// Run `f` with script `script` selected, and give the caller's script back on every exit.
@@ -296,7 +290,7 @@ impl<'p> Interp<'p> {
     /// Called by `call_body` for a flagged function: declare `%nt` (and `%this`, `%fn` of a derived constructor).
     fn cls_frame(&mut self, env: u32, fid: FuncId, fobj: ObjId) {
         let nt = self.cls.pending_nt.take().map_or(Value::Undefined, Value::Object);
-        if self.cls.fflags[fid.index()] & F_DERIVED != 0 {
+        if self.cc.cold.fflags[fid.index()] & F_DERIVED != 0 {
             self.env_declare(env, self.cls.n_this, MUT, Value::Undefined);
             self.env_declare(env, self.cls.n_fn, INIT, Value::Object(fobj));
         }
@@ -714,7 +708,7 @@ impl<'p> Interp<'p> {
 
     /// The name object, the `#name` id and the binding flags of the private name used by expression `e`.
     fn priv_lookup(&mut self, e: ExprId) -> Res<(ObjId, u32, u8)> {
-        let n = self.expr_name[e.index()];
+        let n = self.cc.expr_name[e.index()];
         if let Some((env, i)) = self.lookup(n) {
             let b = &self.envs[env as usize].bindings[i];
             if let Value::Object(o) = b.value {
@@ -989,7 +983,7 @@ impl<'p> Interp<'p> {
         let proto = h!(self, self.heap.new_object(proto_parent));
         let ctor = self.new_func_object(Callee::Class)?;
         h!(self, self.heap.set_prototype_of(ctor, Some(ctor_parent)));
-        let flags = self.cls.cflags[c.index()];
+        let flags = self.cc.cold.cflags[c.index()];
         let env_inst = if flags & C_HOME_INST != 0 { self.home_env(env_c, proto)? } else { env_c };
         let env_static = if flags & C_HOME_STATIC != 0 { self.home_env(env_c, ctor)? } else { env_c };
         let derived = class.superclass.is_some();

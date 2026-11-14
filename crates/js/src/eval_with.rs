@@ -210,7 +210,7 @@ impl<'p> Interp<'p> {
     #[inline(never)]
     fn link_name_with(&mut self, e: ExprId) -> Res<Option<(Value, Value)>> {
         self.hs.with_this = None;
-        let f = self.get_name(self.expr_name[e.index()], e.index() as u32)?;
+        let f = self.get_name(self.cc.expr_name[e.index()], e.index() as u32)?;
         Ok(Some((f, self.hs.with_this.take().map_or(Value::Undefined, Value::Object))))
     }
 }

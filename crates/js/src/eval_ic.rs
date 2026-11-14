@@ -59,9 +59,9 @@ impl Interp<'_> {
                 }
             }
         }
-        literals(&self.prog, &mut self.expr_name);
+        literals(&self.prog, &mut self.cc.expr_name);
         for c in &mut self.scripts {
-            literals(&c.prog, &mut c.expr_name);
+            literals(&c.prog, &mut c.cc.expr_name);
         }
     }
 
@@ -107,9 +107,9 @@ impl Interp<'_> {
     fn member_ic(&mut self, e: ExprId, name: Span, o: ObjId, base: Value) -> Res<Value> {
         self.ics.slow += 1;
         let key = self.expr_key(e, name)?;
-        let mut n = self.expr_name[e.index()] as usize;
+        let mut n = self.cc.expr_name[e.index()] as usize;
         let got = if n == 0 {
-            self.expr_name[e.index()] = 1;
+            self.cc.expr_name[e.index()] = 1;
             self.ics.first_runs += 1;
             self.heap.get(o, key)
         } else if self.heap.ic_refuses(o) {
@@ -119,7 +119,7 @@ impl Interp<'_> {
             if n == 1 {
                 n = self.ics.ics.len();
                 self.ics.ics.push(Ic::EMPTY);
-                self.expr_name[e.index()] = n as u32;
+                self.cc.expr_name[e.index()] = n as u32;
             }
             let mut ic = self.ics.ics[n];
             let r = self.heap.get_ic(o, key, &mut ic);
@@ -143,7 +143,7 @@ impl Interp<'_> {
     fn member_get(&mut self, e: ExprId, base: Value) -> Res<Value> {
         let ExprKind::Member { name, .. } = self.prog.expr(e).kind else { unreachable!("a member site") };
         if let Value::Object(o) = base {
-            if let Some(v) = self.heap.ic_own(o, &self.ics.ics[self.expr_name[e.index()] as usize]) {
+            if let Some(v) = self.heap.ic_own(o, &self.ics.ics[self.cc.expr_name[e.index()] as usize]) {
                 self.ics.own_hits += 1;
                 return Ok(v);
             }
@@ -158,7 +158,7 @@ impl Interp<'_> {
     #[inline(never)]
     fn member_put(&mut self, e: ExprId, base: Value, v: Value) -> Res<()> {
         if let Value::Object(o) = base
-            && self.heap.ic_store(o, &self.ics.ics[self.expr_name[e.index()] as usize], v)
+            && self.heap.ic_store(o, &self.ics.ics[self.cc.expr_name[e.index()] as usize], v)
         {
             self.ics.store_hits += 1;
             return Ok(());
@@ -173,9 +173,9 @@ impl Interp<'_> {
         let ExprKind::Member { name, .. } = self.prog.expr(e).kind else { unreachable!("a member site") };
         let key = self.expr_key(e, name)?;
         let Value::Object(o) = base else { return self.put_prop(base, key, v) };
-        let mut n = self.expr_name[e.index()] as usize;
+        let mut n = self.cc.expr_name[e.index()] as usize;
         if n == 0 {
-            self.expr_name[e.index()] = 1;
+            self.cc.expr_name[e.index()] = 1;
             return self.put_prop(base, key, v);
         }
         if self.ics.ics[n].is_mega() || self.heap.ic_refuses(o) || self.heap.has_exotics() && self.heap.is_view_index_key(o, key) {
@@ -184,7 +184,7 @@ impl Interp<'_> {
         if n == 1 {
             n = self.ics.ics.len();
             self.ics.ics.push(Ic::EMPTY);
-            self.expr_name[e.index()] = n as u32;
+            self.cc.expr_name[e.index()] = n as u32;
         }
         let mut ic = self.ics.ics[n];
         let r = self.heap.set_ic(o, key, v, &mut ic);

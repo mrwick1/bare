@@ -205,7 +205,7 @@ impl Gen<'_, '_> {
             if !matches!(prog.pat(d.target).kind, PatKind::Ident) {
                 return Err("destructuring");
             }
-            let n = self.it.pat_name[d.target.index()];
+            let n = self.it.cc.cold.pat_name[d.target.index()];
             let reg = if self.rf.is_some() { self.rf_decl_opt(self.it.pat_site(d.target.index()), n)? } else { None };
             if let Some((key, l)) = reg {
                 // The variable is a register. A `let` or `const` is readable after its initializer.
@@ -321,7 +321,7 @@ impl Gen<'_, '_> {
                     if !matches!(prog.pat(p).kind, PatKind::Ident) {
                         return Err("destructuring");
                     }
-                    let n = self.it.pat_name[p.index()];
+                    let n = self.it.cc.cold.pat_name[p.index()];
                     let (key, l) = self.rf_decl(self.it.pat_site(p.index()), n)?;
                     self.emit(Op::Mov, l.reg, exc, 0)?;
                     self.rf_set_init(key);
@@ -334,7 +334,7 @@ impl Gen<'_, '_> {
                     if !matches!(prog.pat(p).kind, PatKind::Ident) {
                         return Err("destructuring");
                     }
-                    let n = self.it.pat_name[p.index()];
+                    let n = self.it.cc.cold.pat_name[p.index()];
                     let Site::Env { hops: 0, index } = self.site(self.it.pat_site(p.index()), n)? else { return Err("a catch parameter outside its environment") };
                     self.emit(Op::InitEnv, exc, 0, index)?;
                 }

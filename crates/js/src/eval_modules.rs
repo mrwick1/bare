@@ -432,8 +432,8 @@ impl<'p> Interp<'p> {
     fn module_declare(&mut self, prog: &Rc<Program<'static>>, fid: FuncId) -> Res<()> {
         let env = self.env;
         let info = prog.module.as_ref().expect("module");
-        for i in 0..self.scopes[fid.index()].vars.len() {
-            let n = self.scopes[fid.index()].vars[i];
+        for i in 0..self.cc.scopes[fid.index()].vars.len() {
+            let n = self.cc.scopes[fid.index()].vars[i];
             self.declare_var(env, n);
         }
         for imp in &info.imports {

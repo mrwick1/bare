@@ -42,20 +42,57 @@ fn script_hash(b: &[u8]) -> u64 {
     h.wrapping_mul(K)
 }
 
-/// The per-script code and caches (see the header). The slot of the current script holds an empty placeholder.
-struct Code {
-    prog: Rc<Program<'static>>,
+/// The caches of one script, filled by the first walk. The `Interp` holds the ones of the current script in `Interp::cc` and `select`
+/// swaps them with the ones of another script. The three tables that every name lookup and call reads stay in the struct, so that a
+/// read costs no more than a read of an `Interp` field. The others sit in a box (`Cold`): a call across scripts swaps one pointer for them.
+#[derive(Default)]
+struct Caches {
     expr_name: Vec<u32>,
+    scopes: Vec<FScope>,
+    /// Static scopes and identifier slots of the script (see `eval_scope.rs`).
+    slots: Slots,
+    cold: Box<Cold>,
+}
+
+#[derive(Default)]
+struct Cold {
     pat_name: Vec<u32>,
     stmt_label: Vec<u32>,
     func_name: Vec<u32>,
+    /// The strings of the string literal and member name sites that ran, in the order they first ran. The site of such an
+    /// expression in `slots` holds its position + 1 (0: not yet), since only identifier sites use `slots`. A dense table of
+    /// 12 bytes for each expression cost about half of the per-script tables.
     site_strs: Vec<StrId>,
     prop_str: Vec<Option<StrId>>,
-    scopes: Vec<FScope>,
-    slots: Slots,
     /// Class walk flags (see `eval_classes.rs`): per function and per class of this script.
     fflags: Vec<u8>,
     cflags: Vec<u8>,
+}
+
+impl Caches {
+    /// Empty caches sized for the tree.
+    fn new(st: &crate::ast::Stats) -> Caches {
+        Caches {
+            expr_name: vec![0; st.exprs],
+            scopes: (0..=st.funcs).map(|_| FScope::default()).collect(),
+            slots: Slots::new(st),
+            cold: Box::new(Cold {
+                pat_name: vec![0; st.pats],
+                stmt_label: vec![0; st.stmts],
+                func_name: vec![0; st.funcs],
+                site_strs: Vec::new(),
+                prop_str: vec![None; st.props],
+                fflags: vec![0; st.funcs],
+                cflags: vec![0; st.classes],
+            }),
+        }
+    }
+}
+
+/// The per-script code and caches (see the header). The slot of the current script holds an empty placeholder.
+struct Code {
+    prog: Rc<Program<'static>>,
+    cc: Caches,
 }
 
 /// A function whose body the parser did not keep (`Body::Lazy`), in one realm.
@@ -73,31 +110,19 @@ impl Code {
     /// Capacity bytes of the caches of this script (not the syntax tree).
     fn cache_bytes(&self) -> usize {
         use std::mem::size_of;
-        (self.expr_name.capacity() + self.pat_name.capacity() + self.stmt_label.capacity() + self.func_name.capacity() + self.slots.sites.len()) * 4
-            + self.site_strs.capacity() * size_of::<StrId>() + self.prop_str.capacity() * size_of::<Option<StrId>>()
-            + self.scopes.capacity() * size_of::<FScope>() + self.fflags.capacity() + self.cflags.capacity()
+        let (c, k) = (&self.cc, &*self.cc.cold);
+        (c.expr_name.capacity() + k.pat_name.capacity() + k.stmt_label.capacity() + k.func_name.capacity() + c.slots.sites.len()) * 4
+            + k.site_strs.capacity() * size_of::<StrId>() + k.prop_str.capacity() * size_of::<Option<StrId>>()
+            + c.scopes.capacity() * size_of::<FScope>() + k.fflags.capacity() + k.cflags.capacity()
     }
 
     fn placeholder(prog: &Rc<Program<'static>>) -> Code {
-        Code { prog: prog.clone(), expr_name: Vec::new(), pat_name: Vec::new(), stmt_label: Vec::new(), func_name: Vec::new(), site_strs: Vec::new(), prop_str: Vec::new(), scopes: Vec::new(), slots: Slots::default(), fflags: Vec::new(), cflags: Vec::new() }
+        Code { prog: prog.clone(), cc: Caches::default() }
     }
 
     /// Empty caches sized for the tree.
     fn new(prog: Rc<Program<'static>>) -> Code {
-        let st = prog.stats();
-        Code {
-            expr_name: vec![0; st.exprs],
-            pat_name: vec![0; st.pats],
-            stmt_label: vec![0; st.stmts],
-            func_name: vec![0; st.funcs],
-            site_strs: Vec::new(),
-            prop_str: vec![None; st.props],
-            scopes: (0..=st.funcs).map(|_| FScope::default()).collect(),
-            slots: Slots::new(&st),
-            fflags: vec![0; st.funcs],
-            cflags: vec![0; st.classes],
-            prog,
-        }
+        Code { cc: Caches::new(&prog.stats()), prog }
     }
 }
 
@@ -296,7 +321,7 @@ impl<'p> Interp<'p> {
     fn lazy_walk(&mut self, s: LazySlot, fid: FuncId) -> Res<()> {
         let saved = (self.sc_cur, self.sc_fn, self.sc_class, self.sc_fn_expr, self.cls.cur, self.cls.elem_ctx, self.fl, self.cur_strict);
         self.sc_cur = s.sc;
-        self.sc_fn = self.scopes.len() - 1;
+        self.sc_fn = self.cc.scopes.len() - 1;
         self.sc_class = 0;
         self.sc_fn_expr = s.is_expr;
         self.sc_lazy = true;
@@ -330,9 +355,9 @@ impl<'p> Interp<'p> {
             eval_env=Some(self.env);
             self.completion=Value::Undefined;
             let prog=self.prog.clone();
-            let top=self.scopes.len()-1;
-            for i in 0..self.scopes[top].vars.len() {
-                let n=self.scopes[top].vars[i];
+            let top=self.cc.scopes.len()-1;
+            for i in 0..self.cc.scopes[top].vars.len() {
+                let n=self.cc.scopes[top].vars[i];
                 if self.strict { self.env_declare(self.env,n,INIT|MUT,Value::Undefined); }
                 else {
                     if self.find_in(0,n).is_some() { return Err(self.mk_err(4,"Eval var conflicts with a global lexical binding")); }
@@ -348,7 +373,7 @@ impl<'p> Interp<'p> {
                     StmtKind::Class(c)=>self.declare_class(c),
                     StmtKind::Function(fid)=>{
                         let f=self.make_closure(fid,None,false)?;
-                        let n=self.func_name[fid.index()];
+                        let n=self.cc.cold.func_name[fid.index()];
                         if self.strict {self.env_declare(self.env,n,INIT|MUT,f);}
                         else {
                             if self.find_in(0,n).is_some() {return Err(self.mk_err(4,"Eval function conflicts with a global lexical binding"));}
@@ -420,16 +445,7 @@ impl<'p> Interp<'p> {
         }
         let c = &mut self.scripts[id];
         std::mem::swap(&mut self.prog, &mut c.prog);
-        std::mem::swap(&mut self.expr_name, &mut c.expr_name);
-        std::mem::swap(&mut self.pat_name, &mut c.pat_name);
-        std::mem::swap(&mut self.stmt_label, &mut c.stmt_label);
-        std::mem::swap(&mut self.func_name, &mut c.func_name);
-        std::mem::swap(&mut self.site_strs, &mut c.site_strs);
-        std::mem::swap(&mut self.prop_str, &mut c.prop_str);
-        std::mem::swap(&mut self.scopes, &mut c.scopes);
-        std::mem::swap(&mut self.slots, &mut c.slots);
-        std::mem::swap(&mut self.cls.fflags, &mut c.fflags);
-        std::mem::swap(&mut self.cls.cflags, &mut c.cflags);
+        std::mem::swap(&mut self.cc, &mut c.cc);
         // slot `cur` held the placeholder and slot `id` now holds the old current code: exchange them
         self.scripts.swap(self.cur, id);
         self.cur = id;
@@ -449,8 +465,8 @@ impl<'p> Interp<'p> {
     /// Cached strings of the parked scripts, for `roots`.
     fn script_roots(&self, v: &mut Vec<Value>) {
         for c in &self.scripts {
-            v.extend(c.site_strs.iter().map(|&s| Value::String(s)));
-            v.extend(c.prop_str.iter().flatten().map(|&s| Value::String(s)));
+            v.extend(c.cc.cold.site_strs.iter().map(|&s| Value::String(s)));
+            v.extend(c.cc.cold.prop_str.iter().flatten().map(|&s| Value::String(s)));
         }
     }
 
@@ -469,7 +485,7 @@ impl<'p> Interp<'p> {
     /// GlobalDeclarationInstantiation checks (before anything is declared), for the current script.
     fn check_global_decls(&mut self) -> Res<()> {
         let prog = self.prog.clone();
-        let top = self.scopes.len() - 1;
+        let top = self.cc.scopes.len() - 1;
         let (mut lex, mut funcs) = (Vec::new(), Vec::new());
         for s in prog.list(prog.body) {
             match prog.stmt(s).kind {
@@ -478,7 +494,7 @@ impl<'p> Interp<'p> {
                         self.pat_names(prog.decl(d).target, &mut lex);
                     }
                 }
-                StmtKind::Function(fid) => funcs.push(self.func_name[fid.index()]),
+                StmtKind::Function(fid) => funcs.push(self.cc.cold.func_name[fid.index()]),
                 _ => {}
             }
         }
@@ -489,8 +505,8 @@ impl<'p> Interp<'p> {
                 return Err(redeclared(self, n));
             }
         }
-        for i in 0..self.scopes[top].vars.len() + funcs.len() {
-            let n = if i < funcs.len() { funcs[i] } else { self.scopes[top].vars[i - funcs.len()] };
+        for i in 0..self.cc.scopes[top].vars.len() + funcs.len() {
+            let n = if i < funcs.len() { funcs[i] } else { self.cc.scopes[top].vars[i - funcs.len()] };
             if self.find_in(0, n).is_some() {
                 return Err(redeclared(self, n));
             }
@@ -513,9 +529,9 @@ impl<'p> Interp<'p> {
         self.strict = self.prog.strict;
         let prog = self.prog.clone();
         self.check_global_decls()?;
-        let n = self.scopes.len() - 1;
-        for i in 0..self.scopes[n].vars.len() {
-            let name = self.scopes[n].vars[i];
+        let n = self.cc.scopes.len() - 1;
+        for i in 0..self.cc.scopes[n].vars.len() {
+            let name = self.cc.scopes[n].vars[i];
             let key = self.name_key(name)?;
             if !hx!(self, self.heap.has_own_property(self.global, key)) {
                 let d = PropertyDescriptor { value: Some(Value::Undefined), writable: Some(true), enumerable: Some(true), configurable: Some(false), ..Default::default() };

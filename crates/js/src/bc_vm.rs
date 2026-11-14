@@ -210,7 +210,7 @@ impl<'p> Interp<'p> {
                 self.bc.stats.calls_tree += 1;
                 return None;
             }
-            BcSlot::New if self.bc.exec == Exec::Auto && self.scopes[fid.index()].fl & FL_EAGER == 0 => {
+            BcSlot::New if self.bc.exec == Exec::Auto && self.cc.scopes[fid.index()].fl & FL_EAGER == 0 => {
                 self.bc.codes[s][fid.index()] = BcSlot::Seen;
                 return None;
             }
@@ -278,7 +278,7 @@ impl<'p> Interp<'p> {
         };
         self.env = env;
         let f = *self.prog.func(fid);
-        let fixed = f.kind != FuncKind::Arrow && self.cls.fflags[fid.index()] == 0;
+        let fixed = f.kind != FuncKind::Arrow && self.cc.cold.fflags[fid.index()] == 0;
         let r = self.in_frame(script, Where::Func(fid), new, |it| {
             it.bind_call(fobj, fid, env, self_binding, this, args)?;
             let t = if fixed { This::Fixed(it.envs[env as usize].this.unwrap_or(Value::Undefined)) } else { This::Dynamic };
@@ -1043,7 +1043,7 @@ impl<'p> Interp<'p> {
                                 self.release(env);
                                 break 'op Err(e);
                             }
-                            let fixed = if k.regfn { !k.dyn_this } else { self.prog.func(fid).kind != FuncKind::Arrow && self.cls.fflags[fid.index()] == 0 };
+                            let fixed = if k.regfn { !k.dyn_this } else { self.prog.func(fid).kind != FuncKind::Arrow && self.cc.cold.fflags[fid.index()] == 0 };
                             t = if fixed { This::Fixed(self.envs[env as usize].this.unwrap_or(Value::Undefined)) } else { This::Dynamic };
                             callee_env = env;
                             (from, to) = if k.regfn { (cc.min(k.nparams as usize), k.nlocals as usize) } else { (0, nregs) };

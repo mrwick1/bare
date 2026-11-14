@@ -1312,7 +1312,7 @@ impl<'p> Interp<'p> {
             AssignOp::Assign => self.ask(run, e, np, base, value),
             AssignOp::Compound(_) | AssignOp::Logical(_) => {
                 let r = match self.prog.pat(target).kind {
-                    PatKind::Ident => Ref::Name(self.pat_name[target.index()], self.pat_site(target.index())),
+                    PatKind::Ident => Ref::Name(self.cc.cold.pat_name[target.index()], self.pat_site(target.index())),
                     PatKind::Member(_) if member => self.assign_ref(run, target, b)?,
                     _ => return Err(unsupported("assignment target", self.prog.pat(target).span)),
                 };
@@ -1624,7 +1624,7 @@ impl<'p> Interp<'p> {
                     self.strunc(run, b);
                     return val(v);
                 }
-                let r = if member { self.assign_ref(run, target, b)? } else { Ref::Name(self.pat_name[target.index()], self.pat_site(target.index())) };
+                let r = if member { self.assign_ref(run, target, b)? } else { Ref::Name(self.cc.cold.pat_name[target.index()], self.pat_site(target.index())) };
                 let res = match op {
                     AssignOp::Compound(bop) => {
                         let old = sval(run, b + if member { 2 } else { 0 });
@@ -1705,7 +1705,7 @@ impl<'p> Interp<'p> {
                     if lb.n as usize >= lb.l.len() {
                         return Err(unsupported("more than three labels", st.span));
                     }
-                    lb.l[lb.n as usize] = self.stmt_label[cur.index()];
+                    lb.l[lb.n as usize] = self.cc.cold.stmt_label[cur.index()];
                     lb.n += 1;
                     cur = body;
                 }
@@ -1805,7 +1805,7 @@ impl<'p> Interp<'p> {
                 self.fpush(run, Fr::VarP { s, d: k as u32 })?;
                 return self.pat_step(run, d.target, v, if kind == VarKind::Var { Bind::Assign } else { Bind::Init });
             }
-            let name = if let PatKind::Ident = prog.pat(d.target).kind { Some(self.name_str(self.pat_name[d.target.index()])?) } else { None };
+            let name = if let PatKind::Ident = prog.pat(d.target).kind { Some(self.name_str(self.cc.cold.pat_name[d.target.index()])?) } else { None };
             match (kind, d.init) {
                 (VarKind::Var, None) => {}
                 (VarKind::Var, Some(i)) => {
@@ -1846,7 +1846,7 @@ impl<'p> Interp<'p> {
                     self.fpush(run, Fr::PatDef { target, mode })?;
                     return nx(Next::Eval(default));
                 }
-                let name = if let PatKind::Ident = prog.pat(target).kind { Some(self.pat_name[target.index()]) } else { None };
+                let name = if let PatKind::Ident = prog.pat(target).kind { Some(self.cc.cold.pat_name[target.index()]) } else { None };
                 let v = self.eval_named_n(default, name)?;
                 self.pat_step(run, target, v, mode)
             }

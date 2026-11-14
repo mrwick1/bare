@@ -74,8 +74,8 @@ fn slots_of(src: &str, name: &str) -> Vec<u32> {
     let mut it = Interp::new(&prog, Heap::default(), EvalLimits { max_steps: 100_000, ..Default::default() }).unwrap();
     it.run().unwrap();
     (0..it.prog.stats().exprs)
-        .filter(|&i| matches!(it.prog.expr(ExprId::from_index(i)).kind, ExprKind::Ident) && it.names[it.expr_name[i] as usize] == name)
-        .map(|i| it.slots.sites[i])
+        .filter(|&i| matches!(it.prog.expr(ExprId::from_index(i)).kind, ExprKind::Ident) && it.names[it.cc.expr_name[i] as usize] == name)
+        .map(|i| it.cc.slots.sites[i])
         .collect()
 }
 
@@ -100,7 +100,7 @@ fn a_function_with_a_with_keeps_its_environment() {
     let prog = parse_script("function f(o) { var x = 1; with (o) { x = 2; } return x; } f({}); f({});", Limits::default()).unwrap();
     let mut it = Interp::new(&prog, Heap::default(), EvalLimits::default()).unwrap();
     it.run().unwrap();
-    assert!(it.scopes.iter().all(|f| f.fr != FR_ON), "no function has a frame");
+    assert!(it.cc.scopes.iter().all(|f| f.fr != FR_ON), "no function has a frame");
 }
 
 #[test]
