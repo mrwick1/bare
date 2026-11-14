@@ -12,7 +12,8 @@
 //! - `hsl()` and `hsla()`. Hue is a number of degrees, or a unit (`deg`, `rad`, `grad`, `turn`).
 //!   Saturation and lightness are percents.
 //!
-//! Left out: `hwb()`, `lab()`, `lch()`, `oklab()`, `color()`, `color-mix()`, `none`, relative colors, system colors.
+//! Modern absolute colors and two-operand mixes use `modern_color`.
+//! Relative colors and system colors are not supported.
 //! A style that uses them is dropped like any value that we do not know.
 //!
 //! Comments compare Rust with JavaScript, because you know JS.
@@ -322,5 +323,76 @@ mod tests {
     fn a_function_that_is_not_closed_reads_to_the_end() {
         assert_eq!(func("rgb(1, 2, 3"), rgba(1, 2, 3, 255));
         assert_eq!(func("rgb(1, 2"), None);
+    }
+}
+
+#[cfg(test)]
+mod modern_tests {
+    use crate::values::{parse_declaration, Side, Value};
+
+    fn parsed(text: &str) -> Option<Color> {
+        let (mut side, mut out) = (Side::default(), Vec::new());
+        parse_declaration("color", text, false, &mut side, &mut out);
+        match out.first()?.value { Value::Color(c) => Some(c), _ => None }
+    }
+    use super::Color;
+
+    #[test]
+    fn modern_primary_and_neutral_colors_are_not_dropped() {
+        assert_eq!(parsed("oklch(100% 0 0)"), Some(Color { r:255, g:255, b:255, a:255 }));
+        assert_eq!(parsed("color(srgb 1 0 0 / .5)"), Some(Color { r:255, g:0, b:0, a:128 }));
+        assert!(parsed("oklch(48.8% .217 264)").is_some());
+    }
+
+    #[test]
+    fn mixes_normalize_weights_and_premultiply_alpha() {
+        assert_eq!(parsed("color-mix(in srgb, red, blue)"), Some(Color { r:128, g:0, b:128, a:255 }));
+        assert_eq!(parsed("color-mix(in srgb, red 20%, blue 20%)"), Some(Color { r:128, g:0, b:128, a:102 }));
+        assert_eq!(parsed("color-mix(in srgb, red, transparent)"), Some(Color { r:255, g:0, b:0, a:128 }));
+        assert_eq!(parsed("color-mix(in srgb, red 80%, blue 80%)"), parsed("color-mix(in srgb, red, blue)"));
+    }
+
+    #[test]
+    fn gamut_mapping_matches_css_reference_instead_of_channel_clipping() {
+        // CSS Color 4 canvas-srgb-gamut-mapping WPT: local-MINDE results, within one byte.
+        for (text, expected) in [("oklch(90% 0.35 0)", [255u8, 200, 220]), ("oklch(40% 0.35 210)", [0, 84, 98])] {
+            let c = parsed(text).unwrap();
+            for (actual, expected) in [c.r, c.g, c.b].into_iter().zip(expected) {
+                assert!(actual.abs_diff(expected) <= 1, "{text}: {c:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn nested_mixes_keep_float_precision_and_hue_direction() {
+        assert_eq!(parsed("color-mix(in srgb, color-mix(in srgb, red, blue), lime)"), Some(Color {r:64,g:128,b:64,a:255}));
+        assert_eq!(parsed("color-mix(in hsl shorter hue, red, blue)"), Some(Color {r:255,g:0,b:255,a:255}));
+        assert_eq!(parsed("color-mix(in hsl longer hue, red, blue)"), Some(Color {r:0,g:255,b:0,a:255}));
+        let zero = parsed("color-mix(in srgb, red 0%, blue 0%)").unwrap();
+        assert_eq!((zero.r, zero.b, zero.a), (128, 128, 0));
+        // CSS Color 5 premultiplied-alpha example, rounded once to sRGB bytes.
+        let c = parsed("color-mix(in srgb, rgb(100% 0% 0% / .7) 25%, rgb(0% 100% 0% / .2))").unwrap();
+        assert_eq!(c, Color {r:137,g:118,b:0,a:83});
+    }
+
+    #[test]
+    fn comments_and_missing_components_survive_modern_parsing() {
+        assert_eq!(parsed("oklch(60%/**/ .2 30)"), parsed("oklch(60% .2 30)"));
+        assert_eq!(parsed("color-mix(in oklch, oklch(none 0 none), oklch(.6 .2 30))"), parsed("oklch(.6 .1 30)"));
+        assert_eq!(parsed("color-mix(in srgb, color-mix(in srgb, red .2%, black), white 20%)"), Some(Color {r:51,g:51,b:51,a:255}));
+    }
+
+    #[test]
+    fn nested_mixes_do_not_use_the_call_stack() {
+        let n = 2000;
+        let text = format!("{}red{}", "color-mix(in srgb, ".repeat(n), ", blue 0%)".repeat(n));
+        assert_eq!(parsed(&text), Some(Color {r:255,g:0,b:0,a:255}));
+    }
+
+    #[test]
+    fn malformed_modern_colors_do_not_become_transparent() {
+        for text in ["color-mix(in srgb, red -1%, blue)", "color-mix(in srgb, red 101%, blue)", "color-mix(in srgb longer hue, red, blue)", "oklch(from red l c h)", "color(--profile 1 0 0)"] {
+            assert_eq!(parsed(text), None, "{text}");
+        }
     }
 }

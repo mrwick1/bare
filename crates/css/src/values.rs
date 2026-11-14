@@ -334,11 +334,12 @@ pub enum Value {
     /// `unset`: `inherit` for a property that is inherited, `initial` for the others.
     Unset,
     Color(Color),
+    ColorExpr(u32),
     Length(Length),
     /// `font-weight: 700`, `line-height: 1.5`.
     Number(f32),
     Keyword(Keyword),
-    /// The value has `var()` in it. The number is the place of its `VarDecl` in `Side::vars`. The cascade reads the text when it knows
+    /// The value has `var()` in it. The number is the place of its `VarDecl` in `Side::deferred`. The cascade reads the text when it knows
     /// the custom properties of the element.
     Var(u32),
     /// A track list, a line or area names: the place of a `grid::Grid` in `Side::grids` (declared) or `Styles::grids` (computed).
@@ -357,7 +358,7 @@ pub struct Declared {
 
 /// Read one declaration, and add what it means to `out`: one item for a longhand, more for a shorthand.
 /// Gives `false`, and adds nothing, when the name is not known or the value is not good.
-/// A `calc()` that mixes units goes in `side.calcs`, and a value with `var()` goes in `side.vars`: the value points to them.
+/// A `calc()` that mixes units goes in `side.calcs`, and a value with `var()` goes in `side.deferred`: the value points to them.
 /// `name` must be in lowercase (the parser does it).
 pub fn parse_declaration(mut name: &str, value: &str, important: bool, side: &mut Side, out: &mut Vec<Declared>) -> bool {
     // `-webkit-mask-image` is `mask-image`: the same property with the prefix taken off. The second round runs only after a name or a value
@@ -389,8 +390,8 @@ fn transform_declaration(name: &str, value: &str, important: bool, side: &mut Si
         return Some(true);
     }
     // One argument: a length, a percent or `0`.
-    fn arg(t: &str, calcs: &mut Vec<Linear>) -> Option<Length> {
-        match *Parts::read(t, calcs)?.as_slice() {
+    fn arg(t: &str, side: &mut Side) -> Option<Length> {
+        match *Parts::read(t, side)?.as_slice() {
             [Part::Length(l)] => Some(l),
             [Part::Percent(p)] => Some(Length::Percent(p)),
             [Part::Number { value: 0.0, .. }] => Some(Length::Px(0.0)),
@@ -404,9 +405,9 @@ fn transform_declaration(name: &str, value: &str, important: bool, side: &mut Si
         if parts.is_empty() || parts.len() > 3 || parts.iter().any(|p| p.contains('(')) && parts.len() > 1 {
             return Some(false);
         }
-        let Some(a) = arg(parts[0], &mut side.calcs) else {
+        let Some(a) = arg(parts[0], side) else {
             // `inherit`, `initial` and `unset`.
-            return Some(match Parts::read(text, &mut side.calcs).as_ref().map(Parts::as_slice) {
+            return Some(match Parts::read(text, side).as_ref().map(Parts::as_slice) {
                 Some([Part::Wide(w)]) => {
                     emit(*w, *w);
                     true
@@ -416,7 +417,7 @@ fn transform_declaration(name: &str, value: &str, important: bool, side: &mut Si
         };
         x = a;
         for (i, p) in parts.iter().enumerate().skip(1) {
-            match (arg(p, &mut side.calcs), i) {
+            match (arg(p, side), i) {
                 (Some(l), 1) => y = l,
                 (Some(_), _) => {}
                 _ => return Some(false),
@@ -425,7 +426,7 @@ fn transform_declaration(name: &str, value: &str, important: bool, side: &mut Si
         emit(Value::Length(x), Value::Length(y));
         return Some(true);
     }
-    if let Some(Part::Wide(w)) = Parts::read(text, &mut side.calcs).as_ref().and_then(|p| p.as_slice().first().copied().filter(|_| p.len == 1)) {
+    if let Some(Part::Wide(w)) = Parts::read(text, side).as_ref().and_then(|p| p.as_slice().first().copied().filter(|_| p.len == 1)) {
         emit(w, w);
         return Some(true);
     }
@@ -468,12 +469,12 @@ fn transform_declaration(name: &str, value: &str, important: bool, side: &mut Si
         }
         args.push(&inner[from..]);
         let (dx, dy) = match (func.as_str(), args.len()) {
-            ("translatex", 1) => (arg(args[0], &mut side.calcs), Some(Length::Px(0.0))),
-            ("translatey", 1) => (Some(Length::Px(0.0)), arg(args[0], &mut side.calcs)),
-            ("translate", 1) => (arg(args[0], &mut side.calcs), Some(Length::Px(0.0))),
-            ("translate", 2) => (arg(args[0], &mut side.calcs), arg(args[1], &mut side.calcs)),
+            ("translatex", 1) => (arg(args[0], side), Some(Length::Px(0.0))),
+            ("translatey", 1) => (Some(Length::Px(0.0)), arg(args[0], side)),
+            ("translate", 1) => (arg(args[0], side), Some(Length::Px(0.0))),
+            ("translate", 2) => (arg(args[0], side), arg(args[1], side)),
             // The z of `translate3d` must be a length and counts for nothing.
-            ("translate3d", 3) if arg(args[2], &mut side.calcs).is_some_and(|z| !matches!(z, Length::Percent(_))) => (arg(args[0], &mut side.calcs), arg(args[1], &mut side.calcs)),
+            ("translate3d", 3) if arg(args[2], side).is_some_and(|z| !matches!(z, Length::Percent(_))) => (arg(args[0], side), arg(args[1], side)),
             ("matrix" | "matrix3d" | "rotate" | "rotatex" | "rotatey" | "rotatez" | "rotate3d" | "scale" | "scalex" | "scaley" | "scalez" | "scale3d" | "skew" | "skewx"
             | "skewy" | "perspective", _) => (Some(Length::Px(0.0)), Some(Length::Px(0.0))),
             _ => return Some(false),
@@ -512,8 +513,8 @@ fn parse_known(name: &str, value: &str, important: bool, side: &mut Side, out: &
         let single = Property::from_name(name).map(|p| [p]);
         let Some(list) = all_longhands(name).or_else(|| logical(name)).or(single.as_ref().map(|p| &p[..])) else { return false };
         let mirror = mirrors(name);
-        side.vars.push(VarDecl { name: name.into(), text: value.trim().into() });
-        let index = side.vars.len() as u32 - 1;
+        side.deferred.push(Deferred::Variable(VarDecl { name: name.into(), text: value.trim().into() }));
+        let index = side.deferred.len() as u32 - 1;
         out.extend(list.iter().map(|&property| Declared { property, value: Value::Var(index), important, mirror }));
         return true;
     }
@@ -526,7 +527,7 @@ fn parse_known(name: &str, value: &str, important: bool, side: &mut Side, out: &
     if let Some(ok) = crate::motion::declaration(name, value, important, side, out) {
         return ok;
     }
-    let Some(parts) = Parts::read(value, &mut side.calcs) else { return false };
+    let Some(parts) = Parts::read(value, side) else { return false };
     let start = out.len();
     // `expand` says so when `name` is a logical property of the inline axis. It is the last arm there: a physical name never pays for it.
     let mirror = std::cell::Cell::new(false);
@@ -538,11 +539,19 @@ fn parse_known(name: &str, value: &str, important: bool, side: &mut Side, out: &
     ok
 }
 
-/// What a value can point to: the `calc()` that mix units, the declarations that have `var()`, and the grid lists.
+/// A typed deferred entry. Variable declarations and currentColor expressions share
+/// one arena so ordinary Side values need no extra empty collection.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Deferred {
+    Variable(VarDecl),
+    Color(crate::modern_color::Expression),
+}
+
+/// Indexed calculations, deferred declarations and color expressions, and grid lists.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Side {
     pub calcs: Vec<Linear>,
-    pub vars: Vec<VarDecl>,
+    pub deferred: Vec<Deferred>,
     pub grids: Vec<crate::grid::Grid>,
 }
 
@@ -550,6 +559,7 @@ pub struct Side {
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Part {
     Color(Color),
+    ColorExpr(u32),
     Length(Length),
     Number { value: f32, int: bool },
     Percent(f32),
@@ -580,7 +590,7 @@ struct Parts {
 impl Parts {
     /// `None` when the value has no part, or a part that is a mistake in every property (a `{` block, for example).
     #[inline(always)]
-    fn read(value: &str, calcs: &mut Vec<Linear>) -> Option<Parts> {
+    fn read(value: &str, side: &mut Side) -> Option<Parts> {
         let mut parts = Parts { items: [Part::Other; 8], len: 0, more: false, layer: usize::MAX };
         let mut tokens = tokenize(value);
         while let Some(token) = tokens.next() {
@@ -593,7 +603,12 @@ impl Parts {
                 Token::Dimension { value, unit, .. } => length(value, &unit).map_or(Part::Bad, Part::Length),
                 Token::Delim('/') => Part::Slash,
                 Token::Function(name) if color::is_function(&name) => color::parse_function(&name, &mut tokens).map_or(Part::Bad, Part::Color),
-                Token::Function(name) if calc::is_calc(&name) || calc::is_math(&name) => read_calc(&name, &mut tokens, calcs),
+                Token::Function(name) if crate::modern_color::is_function(&name) => match crate::modern_color::read(&name, &mut tokens) {
+                    None => Part::Bad,
+                    Some(expr) if !expr.dependent() => Part::Color(expr.resolve(Color::BLACK)),
+                    Some(expr) => { let i = side.deferred.len() as u32; side.deferred.push(Deferred::Color(expr)); Part::ColorExpr(i) }
+                },
+                Token::Function(name) if calc::is_calc(&name) || calc::is_math(&name) => read_calc(&name, &mut tokens, &mut side.calcs),
                 Token::Function(name) => picture_function(&name, &mut tokens),
                 Token::Url(address) => Part::Url(crate::urls::intern(address.trim())),
                 Token::Comma => {
@@ -1331,6 +1346,7 @@ fn layer_shorthand(slice: &[Part], later: &[Part], l: &Layer, emit: &mut dyn FnM
     for &part in slice {
         match part {
             Part::Color(c) if color.is_some() => color = Some(Value::Color(c)),
+            Part::ColorExpr(i) if color.is_some() => color = Some(Value::ColorExpr(i)),
             Part::Keyword(K::CurrentColor) if color.is_some() => color = Some(Value::Keyword(K::CurrentColor)),
             Part::Keyword(K::None) | Part::Gradient | Part::Url(_) => img = image(part).unwrap_or(img),
             Part::Keyword(K::Repeat | K::NoRepeat | K::RepeatX | K::RepeatY) => {
@@ -1362,6 +1378,7 @@ fn layer_shorthand(slice: &[Part], later: &[Part], l: &Layer, emit: &mut dyn FnM
     for &part in later {
         match part {
             Part::Color(c) if color.is_some() => color = Some(Value::Color(c)),
+            Part::ColorExpr(i) if color.is_some() => color = Some(Value::ColorExpr(i)),
             Part::Keyword(K::CurrentColor) if color.is_some() => color = Some(Value::Keyword(K::CurrentColor)),
             _ => {}
         }
@@ -1402,6 +1419,7 @@ fn text_decoration(slice: &[Part], emit: &mut dyn FnMut(Property, Value)) -> boo
             }
             Part::Keyword(K::Solid | K::Dashed | K::Dotted | K::Double | K::Auto | K::CurrentColor)
             | Part::Color(_)
+            | Part::ColorExpr(_)
             | Part::Length(_)
             | Part::Percent(_)
             | Part::Number { value: 0.0, .. }
@@ -1495,7 +1513,7 @@ fn font(slice: &[Part], emit: &mut dyn FnMut(Property, Value)) -> bool {
     }
     // The family: at least one part. We do not keep it, but it must be words, strings and commas, not numbers.
     // (A list that is too long is cut at 8 parts, and that is fine.)
-    if i >= slice.len() || slice[i..].iter().any(|p| !matches!(p, Part::Keyword(_) | Part::Color(_) | Part::Other)) {
+    if i >= slice.len() || slice[i..].iter().any(|p| !matches!(p, Part::Keyword(_) | Part::Color(_) | Part::ColorExpr(_) | Part::Other)) {
         return false;
     }
     emit(FontStyle, style);
@@ -1572,6 +1590,7 @@ fn longhand(property: Property, part: Part) -> Option<Value> {
         // The paint of an SVG shape: a color or `none`. A paint server (`url(#a)`) is not built, so it is not good.
         Fill | Stroke => match part {
             Part::Color(c) => Some(Value::Color(c)),
+            Part::ColorExpr(i) => Some(Value::ColorExpr(i)),
             Part::Keyword(k @ (K::None | K::CurrentColor)) => Some(Value::Keyword(k)),
             _ => Option::None,
         },
@@ -1630,6 +1649,7 @@ fn longhand(property: Property, part: Part) -> Option<Value> {
         OverflowX | OverflowY => one_of(part, &[K::Visible, K::Hidden, K::Clip, K::Scroll, K::Auto]),
         TextColor | BackgroundColor | BorderTopColor | BorderRightColor | BorderBottomColor | BorderLeftColor => match part {
             Part::Color(c) => Some(Value::Color(c)),
+            Part::ColorExpr(i) => Some(Value::ColorExpr(i)),
             Part::Keyword(K::CurrentColor) => Some(Value::Keyword(K::CurrentColor)),
             _ => Option::None,
         },
@@ -1762,6 +1782,7 @@ mod tests {
     #[test]
     fn sizes_are_small() {
         assert_eq!(std::mem::size_of::<Value>(), 8);
+        assert_eq!(std::mem::size_of::<Side>(), 3 * std::mem::size_of::<Vec<()>>());
         assert_eq!(std::mem::size_of::<Declared>(), 12);
         assert_eq!(std::mem::size_of::<Property>(), 1);
     }
@@ -2021,7 +2042,7 @@ mod tests {
         assert_eq!(one("color", "transparent"), Some(Value::Color(Color::TRANSPARENT)));
         assert_eq!(one("color", "currentcolor"), Some(Value::Keyword(K::CurrentColor)));
         assert_eq!(one("color", "CurrentColor"), Some(Value::Keyword(K::CurrentColor)));
-        for bad in ["#ff", "#ggg", "rgb(1,2)", "notacolor", "10px", "red blue", "rgb(1 2 3) red", "color-mix(in srgb, red, blue)", "1"] {
+        for bad in ["#ff", "#ggg", "rgb(1,2)", "notacolor", "10px", "red blue", "rgb(1 2 3) red", "1"] {
             assert_eq!(parse("color", bad), vec![], "{bad}");
         }
     }

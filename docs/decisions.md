@@ -2115,3 +2115,14 @@ Step 4, phase 2 of `docs/perf-goal.md`. Design: `design-style.md` 3.1 (M2), 3.3 
 - The bound of 65,536 rules is removed. The real bound was never the rule count: a set that is held by a document is not the cache's memory, and an idle set of 65,536 rules (33 MB) is far over 2.5 MB.
 - Risk of `diverged`: a page that is on the same site makes the same lists in the same order only when the sheets arrive in the same order. With a real network the first lists of a page can differ from run to run. Then the idle set goes one document too early and the page builds it again (a lost gain, not a wrong style). The corpus replay with the virtual clock cannot show this.
 - Limit that the change makes unneeded: `MAX_RULES`. The `max_rules` and `max_names` limits of a document stay.
+## Modern CSS color storage
+
+Approved on 2026-11-14. Issue #464.
+
+Keep Color at four bytes and Value at eight bytes. Use the pinned color 0.3.3 crate for modern absolute colors and interpolation. Disable its default features and select its Rust libm backend. This avoids a new shared-library load on ordinary pages. Keep ordinary RGB, HSL, hex and named colors on their existing paths. Resolve constant expressions during parsing. Store currentColor-dependent mixes with variable declarations in one typed Side arena. Keep Side at its previous size. Each expression owns flat postorder nodes. This avoids recursive parsing and evaluation. It also makes arena relocation independent of nested node indices.
+
+Retain hint expressions with the element's inline arena. Rebase sheet, inline and substituted values before computation. Resolve every expression before it enters a computed style. Use CSS Color 4 local-MINDE mapping for out-of-gamut sRGB output. See [the approved design](rendering-colors-design.md). This change does not claim complete CSS Color 5 syntax support.
+
+## 2026-11-14: include deferred colors in cache byte accounting
+
+Count the shared deferred arena and each color expression's owned nodes and text in rule-set heap bytes. Main introduced cache byte accounting after the color branch was measured. The rebased build exposed the obsolete variable-arena reference. The cache bound must include the replacement storage.
