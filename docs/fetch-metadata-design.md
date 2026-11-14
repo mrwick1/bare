@@ -55,4 +55,4 @@ The initial design was approved. The compatibility check then found the incomple
 
 ## Pre-merge measurements
 
-See [the current-main checks](fetch-metadata-merge-checks.md). The request header vector reserves generated header capacity once. This removes two growth allocations per request without changing the approved wire policy. A measured Fetch POST cost remains; no exception to the existing cost gate is approved.
+See [the current-main checks](fetch-metadata-merge-checks.md). The request header vector reserves generated header capacity once. This removes two growth allocations per request without changing the approved wire policy. The final Fetch POST gate grows by 2.146 percent under glibc and 1.624 percent under jemalloc. No exception to the existing cost gate is approved.

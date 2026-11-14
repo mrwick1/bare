@@ -22,4 +22,4 @@ Machine: Linux x86-64, Ryzen 9 5900HX. Two build jobs per build. The host is sha
 | fetch_post | 21,591,413–21,592,372 | 22,180,283–22,180,806 | 22,060,056–22,064,999 | 13,004–13,280 | 13,000–13,424 |
 | xhr | 10,691,794–10,694,630 | 10,702,012–10,702,461 | 10,701,414–10,702,521 | 11,608–11,872 | 11,668–11,956 |
 
-The reserved candidate still costs more instructions on Fetch POST than main. Its final two-allocator gate is pending. No threshold change or cost exception is approved. This PR remains unmerged. The full repository cost matrix was not run. The earlier accepted Deck journey uses the combined metadata and textarea candidate and remains separate evidence.
+The reserved candidate still costs more instructions on Fetch POST than main. Its final two-allocator gate fails: Fetch POST grows by 2.146 percent under glibc and 1.624 percent under jemalloc. All other selected rows pass. No threshold change or cost exception is approved. This PR remains unmerged. The full repository cost matrix was not run. The earlier accepted Deck journey uses the combined metadata and textarea candidate and remains separate evidence.
