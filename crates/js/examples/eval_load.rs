@@ -1,6 +1,6 @@
 //! Load test for the evaluator. One case at one scale per process, so that the peak memory belongs to that run.
 //!
-//!   eval_load CASE SCALE      CASE: loop | loopfn | calls | fib | closures | objects | webpack | throws | concat    SCALE: 1, 10, 100
+//!   eval_load CASE SCALE      CASE: loop | loopfn | calls | fib | closures | objects | webpack | throws | concat | concat_n | concat_pre_n    SCALE: 1, 10, 100 (concat_n and concat_pre_n: the number of parts)
 //!
 //! Each case builds a small program, runs it, and checks the result against the same computation done in Rust
 //! (the checksum). A wrong checksum exits with status 1 and prints no timing. It prints parse, setup and run
@@ -209,6 +209,17 @@ fn case(name: &str, scale: usize) -> Case {
             let n = 100 * scale;
             Case { src: format!("var s = ''; for (var i = 0; i < {n}; i++) s += 'ab'; s.length"), expect: (2 * n).to_string(), after_gc: None }
         }
+        // The scale is the number of parts. The read at the end forces one flatten of the whole string.
+        "concat_n" => Case {
+            src: format!("var s = ''; for (var i = 0; i < {scale}; i++) s += 'ab'; s.length + s.charCodeAt(s.length - 1)"),
+            expect: (2 * scale + 98).to_string(),
+            after_gc: None,
+        },
+        "concat_pre_n" => Case {
+            src: format!("var s = ''; for (var i = 0; i < {scale}; i++) s = 'ab' + s; s.length + s.charCodeAt(0)"),
+            expect: (2 * scale + 97).to_string(),
+            after_gc: None,
+        },
         _ => die(format!("unknown case {name}")),
     }
 }

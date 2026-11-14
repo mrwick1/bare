@@ -2060,3 +2060,12 @@ Step 4, phase 2 of `docs/perf-goal.md`. Design: `design-style.md` 3.1 (M2), 3.3 
 - Reason: an `<img>` or `new Image()` with a GIF fired `error`. Gmail loads a 1 by 1 GIF to check that it is online. The `error` set its online flag to false about 13 s after load, and each later search said "You're offline. Results may be limited."
 - The `color_quant` feature is off: it only encodes. The decoder memory limit is `MAX_PIXELS * 4` bytes, the limit of the other formats.
 - Not done: animation, and the disposal and background color of later frames.
+## JS strings: atoms up to 32 units, flat strings, ropes for `+` (2026-11-14)
+
+- Three kinds: atom (interned), flat (not interned), rope (own slab). Final encoding: `index` bit 31 = rope, `gn` bit 31 = atom (kept in the slab slot). A flat string and an atom are read by the one old lookup, a rope misses and takes a cold path. An encoding with a flat bit in `index` made every flat read two cold calls and cost +10% on some rows. Chosen over the design option C (8-bit storage) because it removes work: no hash and no probe for a long string, and `+` costs O(1) until the first read.
+- `StrId` loses `PartialEq` and `Hash`. Equality of strings is `Heap::str_eq`. The other choice, to keep `==` on the handle, would be wrong for two long strings with equal content. The compiler lists each place that must choose.
+- A key must be an atom. `check_key` refuses another string. The parser names use `atom_str` so a long identifier is still a key. The other choice, to hash a long key at each lookup, would add cost to the hot path.
+- A rope keeps its flat units in a `OnceCell` and the GC then drops the children. Cost: 32 B a node, not the 24 B of the design. The other choice, to overwrite the node in place with a `Flat` variant, needs `&mut self` on reads, and `str_units(&self)` has many callers.
+- `ATOM_MAX` is 32 (the value of the design). Not tuned.
+- The process-wide atom table of the design is not built (estimated 0.2% of a journey; it needs a snapshot or a lazy install per realm).
+- Open: after the cost fix, keycost is +0.2%, journeys +0.1%, setup +0.14%, but 12 of 803 rows are still over +0.5% under both allocators (largest +0.93%: `for-in`, iterator results, object literals). Not merged. The owner decides: accept 12 rows at +0.5% to +0.9% for linear `+`, or give the object allocation path a design pass.

@@ -596,7 +596,7 @@ impl<'p> Interp<'p> {
             }
             let extensible = it.o_is_extensible(target)?;
             let result = it.property_descriptor(obj)?.complete();
-            if !Heap::is_compatible_descriptor(extensible, &prop_desc(result), target_desc) {
+            if !it.heap.is_compatible_descriptor(extensible, &prop_desc(result), target_desc) {
                 return Err(it.px_invariant("getOwnPropertyDescriptor", "trap returned a descriptor that is incompatible with the proxy target"));
             }
             if !result.configurable() {
@@ -640,7 +640,7 @@ impl<'p> Interp<'p> {
                     }
                 }
                 Some(td) => {
-                    if !Heap::is_compatible_descriptor(extensible, d, Some(td)) {
+                    if !it.heap.is_compatible_descriptor(extensible, d, Some(td)) {
                         return Err(it.px_invariant("defineProperty", "trap returned truish for adding a property that is incompatible with the existing property in the proxy target"));
                     }
                     if setting_config_false && td.configurable() {
@@ -688,7 +688,7 @@ impl<'p> Interp<'p> {
                 && !td.configurable()
             {
                 match td {
-                    Property::Data { value, writable: false, .. } if !v.same_value(value) => {
+                    Property::Data { value, writable: false, .. } if !it.heap.same_value(v, value) => {
                         return Err(it.px_invariant("get", "trap did not return the actual value of a read-only and non-configurable data property of the proxy target"));
                     }
                     Property::Accessor { get: None, .. } if !matches!(v, Value::Undefined) => {
@@ -716,7 +716,7 @@ impl<'p> Interp<'p> {
                 && !td.configurable()
             {
                 match td {
-                    Property::Data { value, writable: false, .. } if !v.same_value(value) => {
+                    Property::Data { value, writable: false, .. } if !it.heap.same_value(v, value) => {
                         return Err(it.px_invariant("set", "trap returned truish for a read-only and non-configurable data property of the proxy target with a different value"));
                     }
                     Property::Accessor { set: None, .. } => {

@@ -521,7 +521,7 @@ impl<'p> Interp<'p> {
                 self.tick()?;
                 let key = self.index_key(k)?;
                 let v = self.get_prop(this, key)?;
-                if v.same_value_zero(x) {
+                if self.heap.same_value_zero(v, x) {
                     return Ok(Value::Bool(true));
                 }
                 k += 1;
@@ -533,7 +533,7 @@ impl<'p> Interp<'p> {
             let key = self.index_key(k)?;
             if self.ao_has(this, key)? {
                 let v = self.get_prop(this, key)?;
-                if v.strict_equals(x) {
+                if self.heap.strict_equals(v, x) {
                     return Ok(Value::Number(k as f64));
                 }
             }
@@ -821,7 +821,7 @@ impl<'p> Interp<'p> {
         self.tick()?;
         let sx = self.ao_sort_key(vals, keys, x)?;
         let sy = self.ao_sort_key(vals, keys, y)?;
-        Ok(sx != sy && h!(self, self.heap.str_units(sx)) > h!(self, self.heap.str_units(sy)))
+        Ok(!sx.same(sy) && h!(self, self.heap.str_units(sx)) > h!(self, self.heap.str_units(sy)))
     }
 
     #[inline] // the compiler inlined it before the proxy change moved other inlining decisions (measured: 1.5% on `sort`)

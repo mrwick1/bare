@@ -88,7 +88,7 @@ impl<'p> Interp<'p> {
     fn rec_has(&mut self, rec: &SetRec, v: Value) -> Res<bool> {
         if let Some(o) = rec.fast_has {
             self.tick()?;
-            return Ok(self.coll_get(o, v).is_some());
+            return Ok(self.coll_get(o, v)?.is_some());
         }
         let r = self.call_fn(rec.has, rec.obj, &[v])?;
         self.truthy(r)
@@ -180,7 +180,7 @@ impl<'p> Interp<'p> {
                 } else {
                     let mut it = self.rec_keys(&rec)?;
                     while let Some(k) = self.iter_next(&mut it)? {
-                        if self.coll_get(o, k).is_some() {
+                        if self.coll_get(o, k)?.is_some() {
                             let k = norm_zero(k);
                             self.coll_set(r, k, k)?;
                         }
@@ -209,7 +209,7 @@ impl<'p> Interp<'p> {
                 let mut it = self.rec_keys(&rec)?;
                 let r = self.coll_clone(o)?;
                 while let Some(k) = self.iter_next(&mut it)? {
-                    if self.coll_get(o, k).is_some() {
+                    if self.coll_get(o, k)?.is_some() {
                         self.coll_delete(r, k)?;
                     } else {
                         let k = norm_zero(k);
@@ -236,7 +236,7 @@ impl<'p> Interp<'p> {
                 }
                 let mut it = self.rec_keys(&rec)?;
                 while let Some(k) = self.iter_next(&mut it)? {
-                    if self.coll_get(o, k).is_none() {
+                    if self.coll_get(o, k)?.is_none() {
                         self.iter_close(&mut it)?;
                         return Ok(Value::Bool(false));
                     }
@@ -254,7 +254,7 @@ impl<'p> Interp<'p> {
                 } else {
                     let mut it = self.rec_keys(&rec)?;
                     while let Some(k) = self.iter_next(&mut it)? {
-                        if self.coll_get(o, k).is_some() {
+                        if self.coll_get(o, k)?.is_some() {
                             self.iter_close(&mut it)?;
                             return Ok(Value::Bool(false));
                         }

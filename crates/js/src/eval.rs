@@ -1208,7 +1208,7 @@ impl<'p> Interp<'p> {
         if let Some(s) = self.name_strs[n as usize] {
             return Ok(s);
         }
-        let s = h!(self, self.heap.intern_str(&self.names[n as usize]));
+        let s = h!(self, self.heap.atom_str(&self.names[n as usize]));
         self.name_strs[n as usize] = Some(s);
         Ok(s)
     }
@@ -2628,7 +2628,7 @@ impl<'p> Interp<'p> {
             return Ok(PropertyKey::String(s));
         }
         let n = self.prog.name(name);
-        let s = h!(self, self.heap.intern_str(&n));
+        let s = h!(self, self.heap.atom_str(&n));
         self.set_site_str(e, s);
         Ok(PropertyKey::String(s))
     }
@@ -2654,15 +2654,15 @@ impl<'p> Interp<'p> {
 
     fn key_string(&mut self, key: Key, prog: &Program<'_>) -> Res<StrId> {
         match key {
-            Key::Name(sp) => Ok(h!(self, self.heap.intern_str(&prog.name(sp)))),
+            Key::Name(sp) => Ok(h!(self, self.heap.atom_str(&prog.name(sp)))),
             Key::Str(sp) => {
                 let mut u = Vec::new();
                 let _ = prog.string(sp, &mut u);
-                Ok(h!(self, self.heap.intern_vec(u)))
+                Ok(h!(self, self.heap.atom_vec(u)))
             }
             Key::Num(sp) => {
                 let n = self.num_lit(sp, num_base(prog.text(sp)));
-                Ok(h!(self, self.heap.intern_str(&number_to_string(n))))
+                Ok(h!(self, self.heap.atom_str(&number_to_string(n))))
             }
             Key::BigInt(sp) => self.big_key_string(sp),
             _ => Err(unsupported("property key", Span::default())),
@@ -3623,8 +3623,8 @@ impl<'p> Interp<'p> {
                     _ => (to_int32(x) ^ to_int32(y)) as f64,
                 }))
             }
-            StrictEq => Ok(Value::Bool(a.strict_equals(b))),
-            StrictNe => Ok(Value::Bool(!a.strict_equals(b))),
+            StrictEq => Ok(Value::Bool(self.heap.strict_equals(a, b))),
+            StrictNe => Ok(Value::Bool(!self.heap.strict_equals(a, b))),
             Eq => Ok(Value::Bool(self.loose_eq(a, b)?)),
             Ne => Ok(Value::Bool(!self.loose_eq(a, b)?)),
             Lt | Gt | Le | Ge => {
@@ -3665,7 +3665,7 @@ impl<'p> Interp<'p> {
 
     fn loose_eq(&mut self, a: Value, b: Value) -> Res<bool> {
         match (a, b) {
-            (Value::Object(_), Value::Object(_)) => Ok(a.strict_equals(b)),
+            (Value::Object(_), Value::Object(_)) => Ok(self.heap.strict_equals(a, b)),
             (Value::Object(_), x) if !is_nullish(x) => {
                 let p = self.coerce_primitive(a, Hint::Default)?;
                 self.loose_eq(p, b)
@@ -3909,6 +3909,10 @@ include!("eval_inspect.rs");
 #[cfg(test)]
 #[path = "eval_class_tests.rs"]
 mod class_tests;
+
+#[cfg(test)]
+#[path = "eval_str_tests.rs"]
+mod str_tests;
 
 #[cfg(test)]
 #[path = "eval_interact_tests.rs"]

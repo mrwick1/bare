@@ -224,7 +224,7 @@ pub enum Set {
 /// `inline(always)`: `ordinary_define` was its only caller and had it inlined. `heap_prim.rs` and `is_compatible_descriptor` are more
 /// callers. Without this the compiler outlines it and every plain `define` pays a call.
 #[inline(always)]
-fn validate_apply(extensible: bool, cur: Option<Property>, d: &PropertyDescriptor) -> Option<Property> {
+fn validate_apply(extensible: bool, cur: Option<Property>, d: &PropertyDescriptor, str_eq: impl Fn(StrId, StrId) -> bool) -> Option<Property> {
     if d.is_accessor() && d.is_data() {
         return None; // callers check first; keep this safe
     }
@@ -254,7 +254,7 @@ fn validate_apply(extensible: bool, cur: Option<Property>, d: &PropertyDescripto
                 }
             }
             Property::Data { value, writable: false, .. }
-                if d.writable == Some(true) || d.value.is_some_and(|v| !v.same_value(value)) => return None,
+                if d.writable == Some(true) || d.value.is_some_and(|v| !v.same_value_with(value, &str_eq)) => return None,
             _ => {}
         }
     }
@@ -439,9 +439,26 @@ fn obj_bytes(o: &Object) -> usize {
 
 struct Str {
     units: Box<[u16]>,
+    /// Atoms only (the interner key). A flat string that is not an atom has 0.
     hash: u32,
-    /// The first unit is a digit, so the string may be an array index. Read without a jump to `units`, a separate block that is often cold.
+    /// The first unit is a digit, so the string may be an array index, or the string is not an atom, so it is no key. Read without a jump to
+    /// `units`, a separate block that is often cold. A key check that finds it set looks closer, so the common key pays no test of the kind.
     digit: bool,
+    /// In the interner: unique by content. Every string of at most `ATOM_MAX` units is an atom. A longer one is an atom only when a key made it so.
+    atom: bool,
+}
+
+/// The longest string that is always interned (an atom), in code units. A longer string is a flat string or a rope, and is not interned.
+/// The value is from the length counts of `docs/design-js.md` (to tune: `docs/progress.md`, "Strings").
+pub const ATOM_MAX: usize = 32;
+
+/// A concatenation, not yet copied. `left` and `right` are the `index` of the children (their kind bits and their slot, no generation): a rope
+/// keeps its children alive until it is flat, and a flat rope never reads them again. `flat` is filled by the first read of the units.
+struct Rope {
+    left: u32,
+    right: u32,
+    len: u32,
+    flat: std::cell::OnceCell<Box<[u16]>>,
 }
 
 struct Symbol {
@@ -452,9 +469,17 @@ fn string_cost(units: usize) -> usize {
     slot_bytes::<Str>() + units * 2 + 8 // 8: two interner slots at load 0.5
 }
 
-fn str_bytes(s: &Str) -> usize {
-    string_cost(s.units.len())
+/// A string that is not in the interner has no interner slots.
+fn flat_cost(units: usize) -> usize {
+    slot_bytes::<Str>() + units * 2
 }
+
+fn str_bytes(s: &Str) -> usize {
+    if s.atom { string_cost(s.units.len()) } else { flat_cost(s.units.len()) }
+}
+
+/// The node of a rope. The units of a flat rope are counted apart (`Heap::flat_bytes`).
+const ROPE_BYTES: usize = slot_bytes::<Rope>();
 
 // ---------- slabs ----------
 
@@ -494,6 +519,7 @@ impl<T> Slab<T> {
     fn can_alloc(&self) -> bool {
         !self.free.is_empty() || (self.meta.len() < self.max && self.meta.len() < u32::MAX as usize)
     }
+    #[inline(always)]
     fn alloc(&mut self, v: T, limit: Limit) -> Result<(u32, u32), HeapError> {
         let (i, gn) = if let Some(i) = self.free.pop() {
             (i, self.meta[i as usize].gn)
@@ -508,6 +534,12 @@ impl<T> Slab<T> {
         self.back.push(i);
         self.allocs += 1;
         Ok((i, gn))
+    }
+    /// Set or clear `bit` in the generation of the live slot `i`, and return the generation. A string slot keeps its kind (`GN_ATOM`) there.
+    fn tag(&mut self, i: u32, bit: u32, on: bool) -> u32 {
+        let g = &mut self.meta[i as usize].gn;
+        *g = if on { *g | bit } else { *g & !bit };
+        *g
     }
     /// `VACANT` is `u32::MAX`, and `live` never has that many values, so a vacant slot misses here.
     fn get(&self, index: u32, gn: u32) -> Option<&T> {
@@ -590,6 +622,7 @@ struct Interner {
 /// Strings up to this many code units are built on the stack before the interner lookup.
 const SHORT_UNITS: usize = 64;
 
+#[inline(always)]
 fn hash_units(units: &[u16]) -> u32 {
     const K: u64 = 0x517c_c1b7_2722_0a95;
     let mut h: u64 = units.len() as u64;
@@ -609,6 +642,7 @@ fn hash_units(units: &[u16]) -> u32 {
 
 impl Interner {
     /// Entries are dense positions in `strs.live`. A sweep moves values, so `rebuild` follows it.
+    #[inline(always)]
     fn find(&self, strs: &Slab<Str>, hash: u32, units: &[u16]) -> Option<u32> {
         let mask = self.table.len() - 1;
         let mut p = hash as usize & mask;
@@ -639,7 +673,9 @@ impl Interner {
         self.table.resize(size, 0);
         self.count = 0;
         for (d, s) in strs.live.iter().enumerate() {
-            self.insert_slot(s.hash, d as u32);
+            if s.atom {
+                self.insert_slot(s.hash, d as u32);
+            }
         }
     }
 }
@@ -715,11 +751,15 @@ pub struct Heap {
     /// The shapes of the named properties of all objects (`heap_shape.rs`).
     shapes: Shapes,
     strings: Slab<Str>,
+    /// The ropes. A rope handle has `STR_ROPE` in its `index`.
+    ropes: Slab<Rope>,
     symbols: Slab<Symbol>,
     bigs: Slab<big::Big>,
     big_table: big::BigTable,
     interner: Interner,
     bytes: usize,
+    /// Accounted bytes of the units of the flat ropes. A rope is flattened by a read, which has `&self`, so this is a `Cell`.
+    flat_bytes: std::cell::Cell<usize>,
     collections: u64,
     gray: Vec<u32>,
     /// The string `"length"`. A permanent root, so arrays can always name their length key.
@@ -771,12 +811,15 @@ impl Heap {
             limits,
             objects: Slab::new(limits.max_objects),
             shapes: Shapes::new(PropertyKey::Index(0)),
-            strings: Slab::new(limits.max_strings),
+            // The two high bits of a string handle's index are the kind (`value.rs`).
+            strings: Slab::new(limits.max_strings.min(STR_SLOT as usize)),
+            ropes: Slab::new(limits.max_strings.min(STR_SLOT as usize)),
             symbols: Slab::new(limits.max_symbols),
             bigs: Slab::new(limits.max_bigs),
             big_table: big::BigTable::new(),
             interner: Interner { table: vec![0; 4096], count: 0 },
             bytes: 0,
+            flat_bytes: std::cell::Cell::new(0),
             collections: 0,
             gray: Vec::new(),
             length: StrId { index: 0, gn: 0 },
@@ -834,13 +877,13 @@ impl Heap {
             f.by_len[b].1 += used;
             f.by_len[b].2 += cap;
         }
-        f.string_units = self.strings.live.iter().map(|s| s.units.len() * 2).sum();
+        f.string_units = self.strings.live.iter().map(|s| s.units.len() * 2).sum::<usize>() + self.flat_bytes.get();
         f
     }
 
     /// Accounted bytes of the live and the dead objects and strings that a sweep has not freed yet (`Stats::bytes`, with no copy of the rest).
     pub fn used_bytes(&self) -> usize {
-        self.bytes
+        self.bytes + self.flat_bytes.get()
     }
 
     /// The number of object slots (live and free): every handle's `slot()` is below it.
@@ -851,19 +894,19 @@ impl Heap {
     pub fn stats(&self) -> Stats {
         Stats {
             live_objects: self.objects.live.len(),
-            live_strings: self.strings.live.len(),
+            live_strings: self.strings.live.len() + self.ropes.live.len(),
             live_symbols: self.symbols.live.len(),
             live_bigints: self.bigs.live.len(),
             object_slots: self.objects.meta.len(),
-            string_slots: self.strings.meta.len(),
+            string_slots: self.strings.meta.len() + self.ropes.meta.len(),
             symbol_slots: self.symbols.meta.len(),
             object_payload_capacity: self.objects.live.capacity(),
             object_metadata_capacity: self.objects.meta.capacity(),
-            slab_capacity_bytes: self.objects.capacity_bytes() + self.strings.capacity_bytes() + self.symbols.capacity_bytes() + self.bigs.capacity_bytes(),
-            retired_slots: self.objects.retired + self.strings.retired + self.symbols.retired + self.bigs.retired,
-            bytes: self.bytes,
+            slab_capacity_bytes: self.objects.capacity_bytes() + self.strings.capacity_bytes() + self.ropes.capacity_bytes() + self.symbols.capacity_bytes() + self.bigs.capacity_bytes(),
+            retired_slots: self.objects.retired + self.strings.retired + self.ropes.retired + self.symbols.retired + self.bigs.retired,
+            bytes: self.bytes + self.flat_bytes.get(),
             total_object_allocs: self.objects.allocs,
-            total_string_allocs: self.strings.allocs,
+            total_string_allocs: self.strings.allocs + self.ropes.allocs,
             total_symbol_allocs: self.symbols.allocs,
             collections: self.collections,
             live_exotics: self.exotics.len(),
@@ -876,15 +919,29 @@ impl Heap {
     fn obj(&self, id: ObjId) -> R<&Object> {
         self.objects.get(id.index, id.gn).ok_or(HeapError::Stale)
     }
+    /// A string that is not a rope (an atom or a flat string). A rope handle is `Stale` here: a rope has no `Str`.
     fn str(&self, id: StrId) -> R<&Str> {
         self.strings.get(id.index, id.gn).ok_or(HeapError::Stale)
+    }
+    fn rope(&self, id: StrId) -> R<&Rope> {
+        if !id.is_rope() {
+            return Err(HeapError::Stale);
+        }
+        self.ropes.get(id.slot(), id.gn).ok_or(HeapError::Stale)
+    }
+    /// Is the handle of a live string of any kind? No call, even on a miss: a caller that is a short function keeps a small frame.
+    #[inline(always)]
+    fn check_str(&self, id: StrId) -> R<()> {
+        let live = self.strings.get(id.index, id.gn).is_some() || id.is_rope() && self.ropes.get(id.slot(), id.gn).is_some();
+        if live { Ok(()) } else { Err(HeapError::Stale) }
     }
     fn sym(&self, id: SymId) -> R<&Symbol> {
         self.symbols.get(id.index, id.gn).ok_or(HeapError::Stale)
     }
+    #[inline(always)]
     fn check_value(&self, v: Value) -> R<()> {
         match v {
-            Value::String(s) => self.str(s).map(drop),
+            Value::String(s) => self.check_str(s),
             Value::Symbol(s) => self.sym(s).map(drop),
             Value::Object(o) => self.obj(o).map(drop),
             Value::BigHeap(b) => self.check_big(b),
@@ -900,23 +957,30 @@ impl Heap {
             PropertyKey::Index(_) => Err(HeapError::InvalidKey),
             PropertyKey::Symbol(s) => self.sym(s).map(drop),
             PropertyKey::String(s) => {
-                let st = self.str(s)?;
-                if st.digit && parse_index(&st.units).is_some() {
-                    return Err(HeapError::InvalidKey);
+                // A key string is an atom: the handle is the content. `key_from_string` makes it so.
+                if self.str(s)?.digit {
+                    return self.check_digit_key(s);
                 }
                 Ok(())
             }
         }
     }
+    /// The rare key whose string starts with a digit, or that is not an atom: it must not be an array index, and it must be an atom.
+    #[cold]
+    #[inline(never)]
+    fn check_digit_key(&self, s: StrId) -> R<()> {
+        if !s.is_atom() || parse_index(&self.str(s)?.units).is_some() { Err(HeapError::InvalidKey) } else { Ok(()) }
+    }
     fn charge(&self, extra: usize) -> R<()> {
-        if self.bytes.saturating_add(extra) > self.limits.max_bytes { Err(HeapError::Limit(Limit::Bytes)) } else { Ok(()) }
+        if self.bytes.saturating_add(self.flat_bytes.get()).saturating_add(extra) > self.limits.max_bytes { Err(HeapError::Limit(Limit::Bytes)) } else { Ok(()) }
     }
 
 
     // ----- strings -----
 
-    /// The unique string with these code units (copied if new). Lone surrogates are kept as given.
-    /// The same content gives the same handle while that string is alive.
+    /// A string with these code units (copied). Lone surrogates are kept as given. A string of at most `ATOM_MAX` units is an atom:
+    /// the same content gives the same handle while that string is alive. A longer string is a new flat string each time, so compare
+    /// strings with `str_eq`, not with `same`, and make a key or a map key with `atom_of`.
     pub fn intern_units(&mut self, units: &[u16]) -> R<StrId> {
         self.intern(std::borrow::Cow::Borrowed(units))
     }
@@ -926,7 +990,27 @@ impl Heap {
         self.intern(std::borrow::Cow::Owned(units))
     }
 
+    /// Like `intern_units`, with a `&str` (UTF-8, converted to UTF-16).
     pub fn intern_str(&mut self, s: &str) -> R<StrId> {
+        self.str_from(s, false)
+    }
+
+    /// The atom with the content of `s`, whatever the length. For a name that becomes a key: the name of a variable, a member, a property.
+    pub fn atom_str(&mut self, s: &str) -> R<StrId> {
+        self.str_from(s, true)
+    }
+
+    /// The atom with these units, whatever the length (the units of a key).
+    pub fn atom_units(&mut self, units: &[u16]) -> R<StrId> {
+        self.intern_slice(units)
+    }
+
+    /// Like `atom_units`, but takes the vector.
+    pub fn atom_vec(&mut self, units: Vec<u16>) -> R<StrId> {
+        self.intern_owned(units)
+    }
+
+    fn str_from(&mut self, s: &str, atom: bool) -> R<StrId> {
         let ascii = s.is_ascii();
         let units = if ascii { s.len() } else { s.encode_utf16().count() };
         if units > self.limits.max_string_units { return Err(HeapError::Limit(Limit::StringLength)); }
@@ -947,23 +1031,80 @@ impl Heap {
                     n += 1;
                 }
             }
-            return self.intern(std::borrow::Cow::Borrowed(&buf[..n]));
+            return if atom || n <= ATOM_MAX { self.intern_slice(&buf[..n]) } else { self.new_flat(std::borrow::Cow::Borrowed(&buf[..n])) };
         }
-        self.intern_vec(s.encode_utf16().collect())
+        let v: Vec<u16> = s.encode_utf16().collect();
+        if atom || v.len() <= ATOM_MAX { self.intern_owned(v) } else { self.new_flat(std::borrow::Cow::Owned(v)) }
     }
 
+    #[inline]
     fn intern(&mut self, units: std::borrow::Cow<[u16]>) -> R<StrId> {
+        if units.len() > ATOM_MAX {
+            return self.new_flat(units);
+        }
+        match units {
+            std::borrow::Cow::Borrowed(u) => self.intern_slice(u),
+            std::borrow::Cow::Owned(v) => self.intern_owned(v),
+        }
+    }
+
+    /// A flat string that is not interned: no hash and no lookup.
+    fn new_flat(&mut self, units: std::borrow::Cow<[u16]>) -> R<StrId> {
+        if units.len() > self.limits.max_string_units { return Err(HeapError::Limit(Limit::StringLength)); }
+        let cost = flat_cost(units.len());
+        self.charge(cost)?;
+        if !self.strings.can_alloc() { return Err(HeapError::Limit(Limit::Strings)); }
+        let s = Str { digit: true, units: units.into_owned().into_boxed_slice(), hash: 0, atom: false };
+        let (index, _) = self.strings.alloc(s, Limit::Strings)?;
+        let gn = self.strings.tag(index, GN_ATOM, false);
+        self.bytes += cost;
+        Ok(StrId { index, gn })
+    }
+
+    /// The atom with these units, or the hash and the cost for a new one. The limits are checked here.
+    #[inline(always)]
+    fn atom_lookup(&self, units: &[u16]) -> R<Result<StrId, (u32, usize)>> {
         if units.len() > self.limits.max_string_units { return Err(HeapError::Limit(Limit::StringLength)); }
         let cost = string_cost(units.len());
         if cost > self.limits.max_bytes { return Err(HeapError::Limit(Limit::Bytes)); }
-        let hash = hash_units(&units);
-        if let Some(i) = self.interner.find(&self.strings, hash, &units) {
-            let index = self.strings.back[i as usize];
-            return Ok(StrId { index, gn: self.strings.meta[index as usize].gn });
+        let hash = hash_units(units);
+        Ok(match self.find_atom(hash, units) {
+            Some(a) => Ok(a),
+            None => Err((hash, cost)),
+        })
+    }
+
+    /// The atom with these units: found in the interner or made (copied), whatever the length. One copy of the hash, the probe and the insert.
+    #[inline(never)]
+    fn intern_slice(&mut self, units: &[u16]) -> R<StrId> {
+        match self.atom_lookup(units)? {
+            Ok(a) => Ok(a),
+            Err((hash, cost)) => self.insert_atom(hash, units.to_vec(), cost),
         }
+    }
+
+    /// Like `intern_slice`, and a new atom takes the vector: no copy.
+    #[inline(never)]
+    fn intern_owned(&mut self, units: Vec<u16>) -> R<StrId> {
+        match self.atom_lookup(&units)? {
+            Ok(a) => Ok(a),
+            Err((hash, cost)) => self.insert_atom(hash, units, cost),
+        }
+    }
+
+    #[inline(always)]
+    fn find_atom(&self, hash: u32, units: &[u16]) -> Option<StrId> {
+        let i = self.interner.find(&self.strings, hash, units)?;
+        let slot = self.strings.back[i as usize];
+        Some(StrId { index: slot, gn: self.strings.meta[slot as usize].gn })
+    }
+
+    /// Add a new atom. The caller has checked that no atom has these units.
+    #[inline(always)]
+    fn insert_atom(&mut self, hash: u32, units: Vec<u16>, cost: usize) -> R<StrId> {
         self.charge(cost)?;
         if !self.strings.can_alloc() { return Err(HeapError::Limit(Limit::Strings)); }
-        let s = Str { digit: units.first().is_some_and(|c| (0x30..=0x39).contains(c)), units: units.into_owned().into_boxed_slice(), hash };
+        let s = Str { digit: units.first().is_some_and(|c| (0x30..=0x39).contains(c)), units: units.into_boxed_slice(), hash, atom: true };
         if (self.interner.count + 1) * 2 > self.interner.table.len() {
             // Grow before the insert so the load stays at most 0.5 and a probe always ends.
             let size = self.interner.table.len() * 2;
@@ -971,33 +1112,122 @@ impl Heap {
             self.interner.table.resize(size, 0);
             self.interner.count = 0;
             for (d, old) in self.strings.live.iter().enumerate() {
-                self.interner.insert_slot(old.hash, d as u32);
+                if old.atom {
+                    self.interner.insert_slot(old.hash, d as u32);
+                }
             }
         }
-        let (index, gn) = self.strings.alloc(s, Limit::Strings)?;
+        let (index, _) = self.strings.alloc(s, Limit::Strings)?;
+        let gn = self.strings.tag(index, GN_ATOM, true);
         self.interner.insert_slot(hash, self.strings.live.len() as u32 - 1);
         self.bytes += cost;
         Ok(StrId { index, gn })
     }
 
-    /// The code units of a string. Borrowed from the heap: no copy.
-    pub fn str_units(&self, s: StrId) -> R<&[u16]> {
-        Ok(&self.str(s)?.units)
+    /// The atom with the content of `s`: `s` itself when it is one. For a key, a `Map` or `Set` key, a registry key.
+    #[inline(never)]
+    pub fn atom_of(&mut self, s: StrId) -> R<StrId> {
+        if s.is_atom() {
+            return self.str(s).map(|_| s);
+        }
+        let units = self.str_units(s)?;
+        let hash = hash_units(units);
+        if let Some(a) = self.find_atom(hash, units) {
+            return Ok(a);
+        }
+        let (v, cost) = (units.to_vec(), string_cost(units.len()));
+        self.insert_atom(hash, v, cost)
     }
 
+    /// The code units of a string. Borrowed from the heap: no copy. A rope is flattened by the first call (the units are then kept in the
+    /// rope, so a second call is a read), in a loop with its own stack: a deep rope does not use the native stack.
+    #[inline(always)]
+    pub fn str_units(&self, s: StrId) -> R<&[u16]> {
+        match self.strings.get(s.index, s.gn) {
+            Some(st) => Ok(&st.units),
+            None => self.units_slow(s),
+        }
+    }
+
+    /// The units of a rope (a string that the first lookup missed). A stale handle fails in `rope`.
+    #[cold]
+    #[inline(never)]
+    fn units_slow(&self, s: StrId) -> R<&[u16]> {
+        let r = self.rope(s)?;
+        if let Some(f) = r.flat.get() {
+            return Ok(f);
+        }
+        Ok(self.flatten(r))
+    }
+
+    /// The units of the flat string or the flat rope at `kid` (a child index of a rope). `kid` is alive: its parent is not flat.
+    fn kid_flat(&self, kid: u32) -> Option<&[u16]> {
+        let slot = (kid & STR_SLOT) as usize;
+        if kid & STR_ROPE != 0 {
+            self.ropes.live[self.ropes.meta[slot].dense as usize].flat.get().map(|f| &**f)
+        } else {
+            Some(&self.strings.live[self.strings.meta[slot].dense as usize].units)
+        }
+    }
+
+    /// Copy the leaves of the rope `r` into one buffer and keep it in `r`. The buffer is filled from the end, right to left: the node
+    /// that `s += x` makes has its long side on the left, so the pending list holds one entry, however many parts there are. A rope
+    /// built from the right (`s = x + s`) holds one entry for each part (4 bytes, against the 45 bytes of the part's own node).
+    #[cold]
+    #[inline(never)]
+    fn flatten<'a>(&'a self, r: &'a Rope) -> &'a [u16] {
+        let mut out = vec![0u16; r.len as usize];
+        let mut end = out.len();
+        // The root is a rope that is not flat: its right child first, its left child later.
+        let mut pending: Vec<u32> = vec![r.left];
+        let mut kid = r.right;
+        loop {
+            match self.kid_flat(kid) {
+                Some(u) => {
+                    end -= u.len();
+                    out[end..end + u.len()].copy_from_slice(u);
+                    match pending.pop() {
+                        Some(k) => kid = k,
+                        None => break,
+                    }
+                }
+                // A rope that is not flat: the same step.
+                None => {
+                    let n = &self.ropes.live[self.ropes.meta[(kid & STR_SLOT) as usize].dense as usize];
+                    pending.push(n.left);
+                    kid = n.right;
+                }
+            }
+        }
+        debug_assert_eq!(end, 0);
+        self.flat_bytes.set(self.flat_bytes.get() + out.len() * 2);
+        r.flat.get_or_init(|| out.into_boxed_slice())
+    }
+
+    #[inline(always)]
     pub fn str_len(&self, s: StrId) -> R<usize> {
-        Ok(self.str(s)?.units.len())
+        match self.strings.get(s.index, s.gn) {
+            Some(st) => Ok(st.units.len()),
+            None => self.len_slow(s),
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn len_slow(&self, s: StrId) -> R<usize> {
+        Ok(self.rope(s)?.len as usize)
     }
 
     /// `s.charCodeAt(i)`; `None` when out of range (JS gives NaN).
+    #[inline(always)]
     pub fn code_unit_at(&self, s: StrId, i: usize) -> R<Option<u16>> {
-        Ok(self.str(s)?.units.get(i).copied())
+        Ok(self.str_units(s)?.get(i).copied())
     }
 
     /// `s.codePointAt(i)`: the code point and how many code units it uses (1 or 2).
     /// A lone surrogate is returned as its own value with 1 unit.
     pub fn code_point_at(&self, s: StrId, i: usize) -> R<Option<(u32, u8)>> {
-        let u = &self.str(s)?.units;
+        let u = self.str_units(s)?;
         let Some(&hi) = u.get(i) else { return Ok(None) };
         if (0xD800..0xDC00).contains(&hi)
             && let Some(&lo) = u.get(i + 1).filter(|l| (0xDC00..0xE000).contains(*l)) {
@@ -1006,32 +1236,64 @@ impl Heap {
         Ok(Some((hi as u32, 1)))
     }
 
-    /// `a + b` for strings.
+    /// `a + b` for strings. A result of at most `ATOM_MAX` units is copied (an atom). A longer one is a rope: no copy, one node.
+    #[inline]
     pub fn concat(&mut self, a: StrId, b: StrId) -> R<StrId> {
-        let (x, y) = (&self.str(a)?.units, &self.str(b)?.units);
-        if x.len() + y.len() > self.limits.max_string_units {
+        // The common case, two atoms with a short sum: one lookup for each string.
+        if let (Some(x), Some(y)) = (self.strings.get(a.index, a.gn), self.strings.get(b.index, b.gn)) {
+            let (la, lb) = (x.units.len(), y.units.len());
+            let n = la + lb;
+            if n <= ATOM_MAX && n <= self.limits.max_string_units {
+                if lb == 0 {
+                    return Ok(a);
+                }
+                if la == 0 {
+                    return Ok(b);
+                }
+                let mut buf = [0u16; ATOM_MAX];
+                buf[..la].copy_from_slice(&x.units);
+                buf[la..n].copy_from_slice(&y.units);
+                return self.intern_slice(&buf[..n]);
+            }
+        }
+        self.concat_long(a, b)
+    }
+
+    /// `concat` for a result above `ATOM_MAX` units, or a string that is a rope.
+    #[inline(never)]
+    fn concat_long(&mut self, a: StrId, b: StrId) -> R<StrId> {
+        let (la, lb) = (self.str_len(a)?, self.str_len(b)?);
+        let n = la + lb;
+        if n > self.limits.max_string_units {
             return Err(HeapError::Limit(Limit::StringLength));
         }
-        let n = x.len() + y.len();
-        if n <= SHORT_UNITS {
-            let mut buf = [0u16; SHORT_UNITS];
-            buf[..x.len()].copy_from_slice(x);
-            buf[x.len()..n].copy_from_slice(y);
-            return self.intern(std::borrow::Cow::Borrowed(&buf[..n]));
+        if lb == 0 {
+            return Ok(a);
         }
-        let mut v = Vec::with_capacity(n);
-        v.extend_from_slice(x);
-        v.extend_from_slice(y);
-        self.intern_vec(v)
+        if la == 0 {
+            return Ok(b);
+        }
+        self.charge(ROPE_BYTES)?;
+        if !self.ropes.can_alloc() { return Err(HeapError::Limit(Limit::Strings)); }
+        let r = Rope { left: a.index, right: b.index, len: n as u32, flat: Default::default() };
+        let (index, gn) = self.ropes.alloc(r, Limit::Strings)?;
+        self.bytes += ROPE_BYTES;
+        Ok(StrId { index: index | STR_ROPE, gn })
     }
 
     /// `s.substring(start, end)` with both ends clamped to the length (and swapped if reversed).
     pub fn substring(&mut self, s: StrId, start: usize, end: usize) -> R<StrId> {
-        let u = &self.str(s)?.units;
+        let u = self.str_units(s)?;
         let (a, b) = (start.min(u.len()), end.min(u.len()));
         let (a, b) = (a.min(b), a.max(b));
         if a == 0 && b == u.len() {
             return Ok(s);
+        }
+        if b - a <= ATOM_MAX {
+            // A short part is looked up from the stack: only a new atom allocates.
+            let mut buf = [0u16; ATOM_MAX];
+            buf[..b - a].copy_from_slice(&u[a..b]);
+            return self.intern_slice(&buf[..b - a]);
         }
         let part = u[a..b].to_vec();
         self.intern_vec(part)
@@ -1040,7 +1302,7 @@ impl Heap {
     /// For logs and tests: UTF-8 text, with U+FFFD for each lone surrogate.
     pub fn to_string_lossy(&self, s: StrId) -> R<String> {
         // An explicit loop: `String::from_utf16_lossy` is a generic `collect` whose inlining depends on the code unit layout of the crate.
-        let units = &self.str(s)?.units;
+        let units = self.str_units(s)?;
         let mut out = String::with_capacity(units.len().max(8));
         for r in char::decode_utf16(units.iter().copied()) {
             out.push(r.unwrap_or('\u{FFFD}'));
@@ -1048,12 +1310,45 @@ impl Heap {
         Ok(out)
     }
 
+    /// Do two strings have the same code units? Two atoms are equal when the handles are. Otherwise the content decides.
+    #[inline]
+    pub fn str_eq(&self, a: StrId, b: StrId) -> bool {
+        a.same(b) || (a.gn & b.gn) & GN_ATOM == 0 && self.units_eq(a, b)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn units_eq(&self, a: StrId, b: StrId) -> bool {
+        match (self.str_len(a), self.str_len(b)) {
+            (Ok(x), Ok(y)) if x == y => matches!((self.str_units(a), self.str_units(b)), (Ok(p), Ok(q)) if p == q),
+            _ => false,
+        }
+    }
+
+    /// `a === b`.
+    #[inline(always)]
+    pub fn strict_equals(&self, a: Value, b: Value) -> bool {
+        a.strict_equals_with(b, |x, y| self.str_eq(x, y))
+    }
+
+    /// `Object.is(a, b)`.
+    #[inline]
+    pub fn same_value(&self, a: Value, b: Value) -> bool {
+        a.same_value_with(b, |x, y| self.str_eq(x, y))
+    }
+
+    /// SameValueZero (`Map`, `Set`, `includes`).
+    #[inline]
+    pub fn same_value_zero(&self, a: Value, b: Value) -> bool {
+        a.same_value_zero_with(b, |x, y| self.str_eq(x, y))
+    }
+
     // ----- symbols -----
 
     /// A new symbol. Each call is a distinct identity, even with the same description.
     pub fn new_symbol(&mut self, description: Option<StrId>) -> R<SymId> {
         if let Some(d) = description {
-            self.str(d)?;
+            self.check_str(d)?;
         }
         let cost = slot_bytes::<Symbol>();
         self.charge(cost)?;
@@ -1069,16 +1364,33 @@ impl Heap {
     // ----- keys and conversions -----
 
     /// The key for a string: `Index` for a canonical array index, else `String`.
-    pub fn key_from_string(&self, s: StrId) -> R<PropertyKey> {
+    #[inline(always)]
+    pub fn key_from_string(&mut self, s: StrId) -> R<PropertyKey> {
+        match self.strings.get(s.index, s.gn) {
+            Some(st) if !st.digit => Ok(PropertyKey::String(s)),
+            Some(st) if s.is_atom() => Ok(match parse_index(&st.units) {
+                Some(i) => PropertyKey::Index(i),
+                None => PropertyKey::String(s),
+            }),
+            _ => self.key_from_other(s),
+        }
+    }
+
+    /// `key_from_string` for a flat string that is not an atom or a rope (it is no index: it is longer than `ATOM_MAX`, so the key is its
+    /// atom), or a stale handle.
+    #[cold]
+    #[inline(never)]
+    fn key_from_other(&mut self, s: StrId) -> R<PropertyKey> {
+        let s = self.atom_of(s)?;
         let st = self.str(s)?;
-        Ok(match if st.digit { parse_index(&st.units) } else { None } {
+        Ok(match parse_index(&st.units) {
             Some(i) => PropertyKey::Index(i),
             None => PropertyKey::String(s),
         })
     }
 
     pub fn key_from_str(&mut self, s: &str) -> R<PropertyKey> {
-        let id = self.intern_str(s)?;
+        let id = self.atom_str(s)?;
         self.key_from_string(id)
     }
 
@@ -1113,7 +1425,7 @@ impl Heap {
             Value::Undefined | Value::Null => false,
             Value::Bool(b) => b,
             Value::Number(n) => !(n == 0.0 || n.is_nan()),
-            Value::String(s) => !self.str(s)?.units.is_empty(),
+            Value::String(s) => self.str_len(s)? != 0,
             Value::BigInt(n) => n != 0,
             Value::Symbol(_) | Value::Object(_) | Value::BigHeap(_) => true, // a heap BigInt is never zero
         })
@@ -1126,11 +1438,17 @@ impl Heap {
             Value::Null => Ok(0.0),
             Value::Bool(b) => Ok(b as u8 as f64),
             Value::Number(n) => Ok(n),
-            Value::String(s) => Ok(string_to_number(&self.str(s)?.units)),
+            Value::String(s) => self.string_number(s),
             Value::Symbol(_) => Err(HeapError::SymbolConversion),
             Value::BigInt(_) | Value::BigHeap(_) => Err(HeapError::BigIntToNumber),
             Value::Object(_) => Err(HeapError::NeedsExecution("ToNumber of an object calls valueOf/toString")),
         }
+    }
+
+    /// Out of line, so that `to_number` keeps a small frame for a number.
+    #[inline(never)]
+    fn string_number(&self, s: StrId) -> R<f64> {
+        Ok(string_to_number(self.str_units(s)?))
     }
 
     pub fn to_string(&mut self, v: Value) -> R<StrId> {
@@ -1170,8 +1488,8 @@ impl Heap {
         Ok(match (a, b) {
             (Undefined | Null, Undefined | Null) => true,
             (Undefined | Null, _) | (_, Undefined | Null) => false,
-            (Number(x), String(s)) | (String(s), Number(x)) => x == string_to_number(&self.str(s)?.units),
-            (BigInt(_) | BigHeap(_), BigInt(_) | BigHeap(_)) => a.strict_equals(b),
+            (Number(x), String(s)) | (String(s), Number(x)) => x == string_to_number(self.str_units(s)?),
+            (BigInt(_) | BigHeap(_), BigInt(_) | BigHeap(_)) => self.strict_equals(a, b),
             (BigInt(_) | BigHeap(_), Number(x)) | (Number(x), BigInt(_) | BigHeap(_)) => {
                 let big = if a.is_bigint() { a } else { b };
                 let mut buf = [0u64; 1];
@@ -1181,13 +1499,14 @@ impl Heap {
                 let big = if a.is_bigint() { a } else { b };
                 let mut buf = [0u64; 1];
                 let v = self.bigint_sv(big, &mut buf)?;
-                crate::bigint::string_to_bigint(&self.str(s)?.units).is_some_and(|n| crate::bigint::cmp(v, n.sv()).is_eq())
+                crate::bigint::string_to_bigint(self.str_units(s)?).is_some_and(|n| crate::bigint::cmp(v, n.sv()).is_eq())
             }
             (Bool(x), _) => return self.loose_equals(Number(x as u8 as f64), b),
             (_, Bool(y)) => return self.loose_equals(a, Number(y as u8 as f64)),
-            (Object(_), Object(_)) => a.strict_equals(b),
+            (Object(_), Object(_)) => self.strict_equals(a, b),
             (Object(_), _) | (_, Object(_)) => return Err(HeapError::NeedsExecution("== of an object and a primitive calls ToPrimitive")),
-            _ => a.strict_equals(b),
+            (String(x), String(y)) => self.str_eq(x, y),
+            _ => self.strict_equals(a, b),
         })
     }
 
@@ -1982,7 +2301,7 @@ impl Heap {
     fn ordinary_define(&mut self, o: ObjId, key: PropertyKey, d: &PropertyDescriptor) -> R<bool> {
         let obj = self.obj(o)?;
         let cur = self.own(obj, key);
-        let Some(new) = validate_apply(obj.extensible, cur, d) else { return Ok(false) };
+        let Some(new) = validate_apply(obj.extensible, cur, d, |a, b| self.str_eq(a, b)) else { return Ok(false) };
         let in_elems = matches!(key, PropertyKey::Index(i) if matches!(obj.elems.get(i as usize), Some(Some(_))));
         let extra = match key {
             PropertyKey::Index(i) if obj.dense_ok(i, &new) => (i as usize + 1).saturating_sub(obj.elems.len()) * ELEM_BYTES,
@@ -2237,11 +2556,13 @@ impl Heap {
         }
         self.collections += 1;
         let sweep = self.shapes.len() >= self.shape_sweep_at;
-        let Heap { objects, shapes, strings, symbols, bigs, gray, length, exotics, .. } = self;
+        let Heap { objects, shapes, strings, ropes, flat_bytes, symbols, bigs, gray, length, exotics, .. } = self;
         for sl in [&mut strings.marks, &mut symbols.marks] {
             sl.clear();
         }
         strings.marks.resize(strings.live.len(), false);
+        ropes.marks.clear();
+        ropes.marks.resize(ropes.live.len(), false);
         symbols.marks.resize(symbols.live.len(), false);
         bigs.marks.clear();
         bigs.marks.resize(bigs.live.len(), false);
@@ -2251,6 +2572,7 @@ impl Heap {
 
         let mut m = Marker {
             smeta: &strings.meta, smarks: &mut strings.marks,
+            rmeta: &ropes.meta, rmarks: &mut ropes.marks, rl: &ropes.live, rstack: Vec::new(),
             ymeta: &symbols.meta, ymarks: &mut symbols.marks, yl: &symbols.live,
             ometa: &objects.meta, omarks: &mut objects.marks, gray,
             bmeta: &bigs.meta, bmarks: &mut bigs.marks,
@@ -2289,7 +2611,7 @@ impl Heap {
                     if !std::mem::replace(&mut keyed[o.shape as usize], true) {
                         for e in shapes.entries(o.shape) {
                             match e.key {
-                                PropertyKey::String(s) => m.str(s),
+                                PropertyKey::String(s) => m.atom(s),
                                 PropertyKey::Symbol(s) => m.sym(s),
                                 PropertyKey::Index(_) => {}
                             }
@@ -2305,7 +2627,7 @@ impl Heap {
                 Some(dict) => {
                     for (k, p) in dict.iter() {
                         match k {
-                            PropertyKey::String(s) => m.str(s),
+                            PropertyKey::String(s) => m.atom(s),
                             PropertyKey::Symbol(s) => m.sym(s),
                             PropertyKey::Index(_) => {}
                         }
@@ -2324,7 +2646,12 @@ impl Heap {
         let mut freed_bytes = 0;
         let c = Collected {
             objects: objects.sweep(|o| freed_bytes += obj_bytes(o)),
-            strings: strings.sweep(|s| freed_bytes += str_bytes(s)),
+            strings: strings.sweep(|s| freed_bytes += str_bytes(s)) + ropes.sweep(|r| {
+                freed_bytes += ROPE_BYTES;
+                if let Some(f) = r.flat.get() {
+                    flat_bytes.set(flat_bytes.get() - f.len() * 2);
+                }
+            }),
             symbols: symbols.sweep(|_| freed_bytes += slot_bytes::<Symbol>()),
         };
         bigs.sweep(|b| freed_bytes += big::big_bytes(b));
@@ -2345,6 +2672,11 @@ impl Heap {
 struct Marker<'a> {
     smeta: &'a [Meta],
     smarks: &'a mut Vec<bool>,
+    rmeta: &'a [Meta],
+    rmarks: &'a mut Vec<bool>,
+    rl: &'a [Rope],
+    /// Ropes to visit: a rope is marked with its children, in a loop and not by recursion.
+    rstack: Vec<u32>,
     ymeta: &'a [Meta],
     ymarks: &'a mut Vec<bool>,
     yl: &'a [Symbol],
@@ -2362,8 +2694,37 @@ impl Marker<'_> {
             self.gray.push(d);
         }
     }
-    fn str(&mut self, s: StrId) {
+    /// A key string: always an atom.
+    #[inline]
+    fn atom(&mut self, s: StrId) {
         self.smarks[self.smeta[s.index as usize].dense as usize] = true;
+    }
+    #[inline(always)]
+    fn str(&mut self, s: StrId) {
+        if s.index & STR_ROPE == 0 {
+            self.smarks[self.smeta[s.index as usize].dense as usize] = true;
+        } else {
+            self.rope(s.index);
+        }
+    }
+    /// Mark the rope at `index` and the children of every rope that is not flat. A flat rope never reads its children again, so they are
+    /// not kept alive by it.
+    fn rope(&mut self, index: u32) {
+        let rl = self.rl;
+        self.rstack.push(index);
+        while let Some(i) = self.rstack.pop() {
+            let d = self.rmeta[(i & STR_SLOT) as usize].dense as usize;
+            if std::mem::replace(&mut self.rmarks[d], true) || rl[d].flat.get().is_some() {
+                continue;
+            }
+            for k in [rl[d].left, rl[d].right] {
+                if k & STR_ROPE != 0 {
+                    self.rstack.push(k);
+                } else {
+                    self.smarks[self.smeta[(k & STR_SLOT) as usize].dense as usize] = true;
+                }
+            }
+        }
     }
     fn sym(&mut self, s: SymId) {
         let d = self.ymeta[s.index as usize].dense as usize;
@@ -2372,6 +2733,7 @@ impl Marker<'_> {
             self.str(desc);
         }
     }
+    #[inline(always)]
     fn value(&mut self, v: Value) {
         match v {
             Value::String(s) => self.str(s),
@@ -3597,3 +3959,7 @@ mod tests {
 #[cfg(test)]
 #[path = "heap_sparse_tests.rs"]
 mod sparse_tests;
+
+#[cfg(test)]
+#[path = "heap_str_tests.rs"]
+mod str_tests;

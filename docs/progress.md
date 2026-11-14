@@ -9459,3 +9459,89 @@ Process-wide name atoms first, then a cache of immutable `Rc<RuleSet>` keyed by 
 ### Not tested
 
 Nothing was built, so no cost matrix, test262 or workspace test ran. Wall time. The live size of a rule set. The cost of a process-wide `intern`. The hit rate on a real warm suite. Details in section 7 of the design document.
+## JS strings: atoms, flat strings and ropes (2026-11-14, `docs/design-js.md` phase P2)
+
+Status: built and tested. **Not merged.** The first build broke the cost rule on 426 of 803 rows. The cost fix (below) leaves 12 rows over +0.5% under both allocators (largest +0.93%). The cost rule is still broken, so the owner decides.
+
+### What changed
+
+- A string is one of three kinds. `StrId.index` bit 31 (`STR_ROPE`) tells a rope. `StrId.gn` bit 31 (`GN_ATOM`) tells an atom. The slab keeps that bit in the generation of the slot (`Slab::tag`). Flat string: no bit. The rope has its own slab (`Heap::ropes`).
+- Atom: interned. One atom for each content. `ATOM_MAX` is 32 code units. Every string of 32 units or fewer is an atom.
+- Flat string: more than 32 units, not interned. No hash, no table probe, one allocation.
+- Rope: the result of `+` or `+=` above 32 units. Node = `{left, right, len, flat: OnceCell<Box<[u16]>>}`. The first read of the units flattens it (iterative, from the end, no recursion). The node then keeps the flat units and the GC does not mark its children.
+- `===`: `Heap::str_eq`. Same handle: equal. Two atoms with different handles: not equal. Otherwise compare length, then units. `StrId` has no `PartialEq` and no `Hash`: the compiler found every use. `ByHandle` is the key of a table.
+- A property key, a `Map` or `Set` key, a `Symbol.for` key and a regexp cache key is an atom (`atom_of`). `check_key` refuses a non-atom key with `InvalidKey`. Names from the parser use `atom_str` (a long identifier is still a key).
+- Size: a rope node is 32 B plus about 12 B of slab slot, about 44 B for each part. The design said 24 B. The `OnceCell` (16 B) is the difference. `Value` is unchanged (16 B).
+- `max_bytes` (1 GiB) is the limit that the concat loop hit before (`Limit(Heap(Bytes))` at 100k parts). The loop does not reach it now. No limit was removed or raised: the limit still protects the flat result.
+
+### Ramps (`eval_load concat_n` and `concat_pre_n`, scale = number of parts, one part per step)
+
+Machine archMachine (AMD Zen3), `cargo --release`, one run each, run time from the example. Base = main `fe2d54cd`.
+
+| parts | `s += x` base | `s += x` new | `s = x + s` base | `s = x + s` new | peak RSS base / new |
+|---|---|---|---|---|---|
+| 1,000 | 1.3 ms | 0.2 ms | 1.4 ms | 0.2 ms | 7.3 / 5.7 MiB |
+| 10,000 | 85.6 ms | 2.0 ms | 90.5 ms | 2.0 ms | 196.9 / 6.1 MiB |
+| 100,000 | limit (Bytes) | 17.2 ms | limit (Bytes) | 17.1 ms | - / 10.7 MiB |
+| 1,000,000 | limit (Bytes) | 169.5 ms | limit (Bytes) | 167.4 ms | - / 56.2 MiB |
+
+New time is linear: 10x parts gives 8.6x to 10x time. Base is quadratic (10x parts gives 66x time, then the limit).
+
+### Cost
+
+First build (base `fe2d54cd`): keycost +0.8% for each key, cost matrix mean +0.85% glibc, 426 of 803 rows over +0.5% under both allocators, journeys +0.55%, setup +120 K instructions.
+
+#### Cause
+
+I used callgrind (`valgrind --tool=callgrind`, per-function and per-instruction diffs of base against new). `perf record` gives too few samples on these short runs. The cost was not one thing. It was the compiler changing its inlining and register choices around the string code:
+
+- Small hot paths were not inlined any more (`check_value`, `check_str`, `str_units`, `str_len`, `code_unit_at`, `strict_equals`, `key_from_string`). Each one then cost a call and a frame.
+- A call that can fail inside a loop made the compiler store the iterator and keep more registers.
+- A flat read went through two cold calls when the kind was a bit of `index` (+4.6 M on `builtins_load zero`, +10% on some rows).
+- Double work: `intern` copied an owned `Vec` (one extra `malloc` and `free` for each `substring`), `+` did two lookups, `lastIndexOf` built its closure for every element.
+
+#### Fix (design, not patches)
+
+- One encoding rule: atoms and flat strings are read by the one old `strings.get(index, gn)`. A rope misses (its index is out of range) and takes a `#[cold] #[inline(never)]` slow path (`units_slow`, `len_slow`, `check_digit_key`, `key_from_other`, `units_eq`, `concat_long`). The common case has one branch and no rope code.
+- Tiny fast paths are `#[inline(always)]`. One copy of the intern code (`intern_slice`, `intern_owned`, `insert_atom`): one hash, one probe, one insert. `substring` of 32 units or fewer uses a stack buffer.
+- `Interner::rebuild` takes its size from the live count.
+- `Str.digit` also means "needs a closer key check" for flat strings, so a key check is one load.
+
+#### Numbers (archMachine, base = main `1306e82a`, new = this branch)
+
+- `tools/js/cost_matrix.sh`: 803 rows, mean -0.35% glibc. **12 rows over +0.5% under both allocators**, 2 more over under one only, 2 rows fail on both trees (`parse_load deep 1`, `deep 10`: stack overflow on main too). Rows over (glibc / jemalloc): `wrapper_load forin 10000 30000` +0.93% / +0.87%, `forin 1000 3000` +0.85% / +0.70%, `sc_load custom_iter 10` +0.76% / +0.72%, `gen_load iterobj 10` +0.72% / +0.74%, `gen_load iterobj 1` +0.69% / +0.60%, `iterator_load generic 10` +0.64% / +0.66%, `generic 1` +0.62% / +0.58%, `tagged_load sites 10` +0.60% / +0.60%, `weak_load dead_cycles 10` +0.58% / +0.56%, `iterator_load set_diff 10` +0.57% / +0.56%, `set_sym 10` +0.55% / +0.54%, `arrobj_load tosorted 10` +0.52% / +0.51%.
+- `tools/js/typing/keycost.sh`: `#a1` 294.8 M each key (base 294.2 M, +0.2%). `#f0` 300.1 M (base 299.6 M, +0.2%). Load and mount 620.0 M (base 618.6 M, +0.2%). Peak RSS 34.0 MiB at 50 keys (base 33.9 MiB).
+- Setup: `eval_load loop 0` 2.79 M (base 2.78 M, +0.14%). It was +120 K.
+- Journeys (`tools/bench/journeys.sh compare --clock virtual --runs 3 --pss`, corpus `virtual`, 47 journeys, all pass): sum of medians 90,448 M base, 90,517 M new (+0.1%). Instruction spread at most 0.2%. Two journeys are over +0.5%: `python-docs-search-results` +0.7%, `python-docs-search` +0.6%. PSS and peak RSS sums +0.5% and +0.8%: not stable (single journeys move from -3.5% to +4% in both directions, same as the run to run noise of the page).
+- Concat gains kept: the ramp table above is unchanged by the fix.
+
+#### What I tried and dropped (each an A/B of exact counts)
+
+- `extern "C"` string compare: no gain, worse on `arrays`. Manual index loop in `lastIndexOf`: +4.97%. Both reverted.
+- `Slab::alloc` split into an always-inline copy for strings: no change.
+- Hash of a string key as one `u64`, or without the `GN_ATOM` bit, and a final fold in `Fx`: no gain or worse on `wrapper_load forin` (+1.3% to +2.8%). The hash is not the cause.
+- `check_value` as a plain function: worse everywhere (+0.7% on `eval_load loop 0`). `check_value` with the rope test out of line: no gain on `iterator_load generic`, +0.3% on `loop 0`.
+
+#### Open cause (hypothesis)
+
+The 12 rows are object allocation and iterator results (`new_object_with_shape` +23 instructions a call, `member_put` +13) and `for-in` key sets (`HashMap::insert`, `PropMap::find`). In `new_object_with_shape` the inlined `check_value` loop keeps more live pointers (the rope slab is one more) and the compiler hoists and spills them. I did not find a layout that removes this without a cost elsewhere. Two attempts on this cost failed, so I stopped, as the rules say.
+
+### Not built
+
+- The process-wide atom table (design section 6.4, "built once per process for builtin and host names"). A realm would still need the table copied or built lazily, and a `Str` enum for static strings would add 8 B for each string. Estimate: about 0.2% of the instructions of a journey. It would also reduce the +120 K of setup. Left for a later step.
+- A different `ATOM_MAX`. The value 32 is the design's value (to tune). I took length counts of strings in a build with counters, then removed the counters. I did not run the journeys with 16 or 64.
+
+### Checks
+
+- `cargo test --release -p bare-js --lib`: all pass. New tests: `heap_str_tests.rs` (9, heap level: atoms and long strings, concat, rope reads, equality of all kinds, keys, GC and byte count, 1M-deep rope in both directions, limits) and `eval_str_tests.rs` (5, JS level, expected values from Node: long strings equal by content in `===`, `includes`, `switch`, `Set`, `Map`, object keys and `Symbol.for`; a 3000-part loop; a 1M-part loop; ropes as keys and arguments; long names as keys). I wrote the tests after the code, not before.
+- `cargo test --release --workspace --no-fail-fast` (run again at the end): the same 7 openssl failures and no other, apart from the flaky downloads test (first run: 3833 passed, 8 failed). 7 failures are in `bare-net --test https_openssl` (2), `bare-tls --test client_openssl` (4) and `bare-tls --test tls12_openssl` (1): the same groups fail on main on this machine (see the section above). 1 failure, `downloads::run::tests::a_changed_file_starts_again_from_zero`, passes when it runs alone (flaky; it does not touch strings).
+- `TEST262=/data/claude-tmp/test262 tools/js/test262_check.sh`: gate ok, no directory lost a passing test (checkout at the commit of the subset). `tools/js/exec_diff.sh`: 79 runs, 0 differences.
+- Journeys: the page console shows the same errors as base on `craigslist-home`, `go-dev-home` and `nextjs-docs`. A first build showed `InvalidKey` errors (long names were not atoms). That is fixed and covered by `eval_str_tests.rs`.
+
+### Not tested
+
+- Wall time on an idle machine. Peak memory of a long page that builds many ropes (only the concat loop). `ATOM_MAX` other than 32. A page that flattens a deep rope inside a regexp (`exec`) or a `JSON.parse`. Live sites.
+
+## Standing exception: PR #497 string atoms and ropes cost (approved by owner 2026-11-14)
+
+After two fix runs, 12 of 803 cost rows stay above +0.5% under both allocators. The worst row is +0.93%. The rows are `wrapper_load forin` (2 rows), `gen_load iterobj` (2 rows), `iterator_load` generic (2 rows), `iterator_load set_diff`, `iterator_load set_sym`, `sc_load custom_iter 10`, `tagged_load sites 10`, `weak_load dead_cycles 10` and `arrobj_load tosorted 10`. They create objects and read `for-in` keys: `new_object_with_shape` costs about 23 more instructions for each call. The matrix mean is -0.35% under glibc. keycost is +0.2%. The 47 journeys are +0.1% in total, with `python-docs-search-results` +0.7% and `python-docs-search` +0.6%. The owner approved an exception for these 12 rows only. Reason: a loop of `s += x` is now linear. 10,000 parts take 2.0 ms and 6 MiB, not 85.6 ms and 197 MiB. 100,000 and 1,000,000 parts no longer stop at the byte limit.
