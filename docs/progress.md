@@ -11532,3 +11532,7 @@ STOPPED on one row. `select_load churn 1000` is +0.74% under both allocators. I 
 
 - `parse_load deep 1` and `10` abort with a stack overflow on main and on this branch.
 - `Ext::re_tab_bytes` is used only by a test; the build warns of dead code.
+
+### Owner decision (2026-11-15)
+
+The owner grants a cost exception for one row: `select_load churn 1000` at +0.74% (glibc) and +0.72% (jemalloc). The reason: the PR meets criterion 6 (`python-docs-search-results` peak RSS 81.3 MiB) and lowers the 47 journeys by 0.9% in instructions and 9.3% in PSS. The PR merges as it is.
