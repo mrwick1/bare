@@ -11675,3 +11675,61 @@ A clean in-parent run with all holders rooted; the cost matrix for the final for
 ### Noticed, not changed
 
 - The design touches the GC trigger and `Host::prune` of the DOM-arena work (a collect in a call can free a tree under a binding that holds its `NodeId`). It needs the old corpus for `craigslist-home` after the `SharedWorker` stub. It does not touch class atoms.
+
+## Gmail: bare against Chrome (2026-11-15)
+
+Goal: compare one Gmail inbox tab in bare and in Chrome, on archMachine. Measure only. No product code changed. The account is the one bare has a saved session for. The same account is the live account `u/0` of the `chrome-auto` profile. No cookies were copied between the browsers. No account detail is in this document.
+
+Setup.
+- bare: release build of `c4848ecc` (`bare-mcp`, own target dir). One new `bare-mcp` process and one new page per run. `open` with the saved session, URL `mail.google.com/mail/u/0/#inbox`, 1280x800, no cache. No login step ran.
+- Chrome: 155.0.8059.39, headless, `chrome-auto` profile, CDP. One new tab per run, closed after the run. Before each run, the service workers were stopped and the extra renderers were left to exit, so no renderer was reused (Gmail's Meet worker kept one alive in the first attempt; that attempt was dropped). Main table: 1280x800, HTTP cache on.
+- Ready: the first `tr.zA` row exists in the DOM (50 rows in every run). Polled every 100 ms in Chrome.
+- Window: from navigation start to ready plus 30 s idle.
+- CPU: user plus system, from `/proc/<pid>/stat`, sampled every 0.5 s. bare: the `bare-mcp` process. Chrome: the browser, GPU and network service processes, and every renderer that did not exist before the runs (7 per run, one of them Chrome's spare renderer).
+- Instructions (`instructions:u`): bare, `perf stat` on `bare-mcp` (all threads). Chrome, `perf stat -a -G` on the whole `chrome-auto.service` cgroup, minus the idle rate of the first 2.5 s. Interval 0.5 s; the edges of the window are prorated.
+- Memory: `smaps_rollup` Rss and Pss. Chrome: the 7 new renderers, plus the browser, GPU and network service processes shown apart.
+- Requests: Chrome, CDP `Network` events of the tab and its frames and workers. bare, the `network` tool.
+- Machine: archMachine, 16 cores. n = 3 per column. Format: median [min to max].
+
+| | Chrome (1280x800, cache on) | bare, idle machine | bare, loaded machine |
+| --- | ---: | ---: | ---: |
+| Load average at start | 3.8, 3.2, 2.3 | 1.3, 1.2, 2.7 | 12.2, 5.6, 8.0 |
+| First list row | 1.2 s [1.1 to 1.2] | about 9 s (see below) | not measured |
+| `open` returns (bare's own settle) | no equal event | 23.3 s [19.9 to 24.0] | 33.3 s [32.5 to 39.5] |
+| CPU time, start to ready | 3.0 s [2.9 to 3.1] | 16.0 s [15.9 to 16.1] (to `open` return) | 27.9 s [27.2 to 34.1] |
+| CPU time, start to ready + 30 s | 11.7 s [11.7 to 13.1] | 18.3 s [18.0 to 18.4] | 29.8 s [29.3 to 37.4] |
+| `instructions:u`, start to ready | 14.5 G [14.4 to 15.4] | 120.5 G [120.3 to 122.8] | 142.2 G [138.9 to 145.2] |
+| `instructions:u`, start to ready + 30 s | 57.7 G [57.3 to 60.8] | 133.9 G [133.1 to 135.0] | 152.4 G [149.3 to 155.7] |
+| PSS at ready | 412 MiB [409 to 429] renderers, +52 MiB others | 470 MiB [460 to 478] | 480 MiB [466 to 483] |
+| PSS at ready + 30 s | 660 MiB [658 to 664] renderers, +51 MiB others | 470 MiB [462 to 481] | 486 MiB [474 to 489] |
+| Peak | 811 MiB PSS [808 to 813] renderers (sampled every 2 s); RSS sum 1,428 MiB (shared pages counted twice) | 472 MiB RSS [472 to 495] (`VmHWM`) | 492 MiB RSS [477 to 494] |
+| Requests (http and https) | 490 [489 to 495] | 176 [176 to 178] | 186 [183 to 187] |
+| Bytes | 2.8 MB [2.0 to 3.2] on the wire | 6.3 MB (bare's body size) | 6.5 MB (bare's body size) |
+
+Other Chrome runs, n = 3 each, within the same spread: default headless viewport (about 800x480), instructions 13.5 G to ready [13.5 to 16.2] and 61.5 G at ready + 30 s; cache disabled, 13.6 G [11.0 to 13.7] and 61.1 G, 8.5 MB on the wire, 522 requests. Ready took 1.3 to 2.5 s in these runs (loads 5.6 to 15).
+
+Reading.
+- To ready, bare runs about 8.3 times the instructions of Chrome (120.5 G against 14.5 G). Over ready + 30 s the ratio is 2.3 (133.9 G against 57.7 G), because Chrome keeps working after the first row: it adds about 43 G in the next 30 s, and bare adds about 13 G.
+- Chrome never went quiet. In every Chrome run, CPU stayed above 0.15 s per 3 s until the end of the window. bare's page was quiet by its own rule when `open` returned. The two "quiet" points are not the same event, so they are not compared.
+- Memory: at ready, bare's PSS (470 MiB) is close to Chrome's total (412 + 52 MiB). After 30 s, Chrome grows to about 711 MiB and bare stays at 470 MiB.
+- The first row in bare comes before `open` returns. On a machine with load 3 to 9, `open` with a 9.5 s limit already had 50 rows when it returned. With limits of 5, 6.5 and 8 s, the next `eval` call (the call itself runs the page) took 2 to 6 s before it showed 50 rows. So the first row comes at about 8 to 10 s (n = 1 per limit, plus or minus 1 s). The 23 s is the time until bare calls the page settled.
+- bare instructions rise with load: 120.5 G idle, 142.2 G loaded, for the same page. Hypothesis: time-driven work (timers, polling) runs more when the page stays longer. Not checked.
+
+Does the inbox work the same? No. In bare the inbox opens with 50 rows, the unread count (115) and "1-50 of 523", the same as Chrome. A visual check (screenshots, deleted after the check because they show mail) found these differences:
+- The icon font does not paint: no icons in the left rail, no Compose pencil, no row checkboxes, stars or importance markers, no icons in the right app column.
+- The row columns are squeezed: sender, subject and date are cut off or overlap. The category tabs are cut off.
+- The right side panel stays on "Loading..." (Chrome shows the Calendar panel there).
+- Requests fail with "connection refused": `ogads-pa.clients6.google.com` (3 in all) and `mail-ads.google.com`. One request to `mail.google.com` (`act=oetsha`) gets HTTP 403. `diagnose` says "site problem". Hypothesis: the first two are ad hosts that this machine's DNS blocks (both resolve to `::`). Chrome was not checked for the same failures.
+
+Caveats.
+- Chrome is cold for the page only. The browser, GPU and network processes are warm, and the HTTP cache is warm in the main column (the cache-disabled runs are given above). bare starts a new process with an empty cache each run. bare restores the session from a file; Chrome uses its live profile.
+- The two browsers do not do the same work. Chrome loads more (about 490 requests against about 180) and runs side panels and the Meet service worker that bare does not show. Bytes are not comparable: Chrome's value is the wire size, bare's is the body size it reports.
+- Chrome instructions are for the whole `chrome-auto` cgroup, so other idle tabs add a little. The idle baseline of the first 2.5 s is subtracted (0.06 to 1.4 M instructions per second, small). The 0.5 s intervals and a start delay of `perf` (about 0.1 to 0.3 s) give an error of a few percent on the "to ready" value.
+- The window to "ready + 30 s" lasts 31 s in Chrome and about 53 s in bare, because bare reaches ready later.
+- `instructions:u` counts user mode only. CPU time includes the kernel.
+- bare's "ready" is `open` returning with rows present, so it is an upper bound for the first row.
+- A first Chrome attempt reused a renderer that Gmail's Meet worker kept alive. It was dropped, and the cleanup step was added. The Meet worker was stopped with `ServiceWorker.stopAllWorkers`. I cleared no cookies or storage.
+
+Not tested: opening a message, scrolling, search, compose, a second account, a Chrome run with the same empty cache as bare, and bare on a symbol build (no hot-function split).
+
+Scripts and raw output: `/data/bare-tmp/gmail-compare/` (`chrome-run.mjs`, `bare-run.py`, `clean.mjs`, `analyze.py`, `raw/`). They are not in the repository.
