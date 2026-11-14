@@ -254,9 +254,10 @@ fn managed_and_sensitive_headers_cannot_be_set_by_script() {
                    fetch('/p', {method:'POST', body:'abc', headers:h});";
         assert_eq!(go(&mut b, src), "X-Ok,Authorization");
         let r = &srv.recs()[0];
-        for forbidden in ["cookie", "cookie2", "origin", "referer", "connection", "transfer-encoding", "accept-encoding", "upgrade", "te", "sec-fetch-mode", "sec-foo", "proxy-authorization", "proxy-x", "via", "date", "set-cookie"] {
+        for forbidden in ["cookie", "cookie2", "origin", "referer", "connection", "transfer-encoding", "accept-encoding", "upgrade", "te", "sec-foo", "proxy-authorization", "proxy-x", "via", "date", "set-cookie"] {
             assert!(r.header(forbidden).is_empty(), "{forbidden} reached the server: {}", r.head);
         }
+        assert_eq!(r.header("sec-fetch-mode"), vec!["cors".to_string()]);
         assert_eq!(r.header("host"), vec![format!("127.0.0.1:{}", srv.port)]);
         assert_eq!(r.header("content-length"), vec!["3".to_string()]);
         assert_eq!((r.header("x-ok"), r.header("authorization")), (vec!["yes".to_string()], vec!["Bearer t".to_string()]));
@@ -1125,4 +1126,89 @@ fn many_requests_in_one_task_are_queued() {
         assert_eq!(js(&mut b, "done"), "400");
         assert_eq!(b.pending_fetches(), 0);
     });
+}
+
+#[test]
+fn page_fetch_sends_browser_generated_fetch_metadata() {
+    big(|| {
+        let srv = serve(|_| ok("{}"));
+        let mut b = at(srv.port);
+        let src = "var out = []; var r = new Request('/metadata', {headers:{'Sec-Fetch-Site':'cross-site','Sec-Fetch-Mode':'navigate','Sec-Fetch-Dest':'document'}}); out.push(r.headers.has('sec-fetch-site')); fetch(r); fetch('/same', {mode:'same-origin'}); fetch('/opaque', {mode:'no-cors'});";
+        assert_eq!(go(&mut b, src), "false");
+        let recs = srv.recs();
+        for (path, mode) in [("/metadata", "cors"), ("/same", "same-origin"), ("/opaque", "no-cors")] {
+            let r = recs.iter().find(|r| r.path == path).unwrap();
+            assert_eq!(r.header("sec-fetch-site"), vec!["same-origin".to_string()]);
+            assert_eq!(r.header("sec-fetch-mode"), vec![mode.to_string()]);
+            assert_eq!(r.header("sec-fetch-dest"), vec!["empty".to_string()]);
+            assert!(r.header("sec-fetch-user").is_empty());
+        }
+    });
+}
+
+#[test]
+fn xhr_uses_the_same_generated_metadata_path() {
+    big(|| {
+        let srv = serve(|_| ok("{}"));
+        let mut b = at(srv.port);
+        go(&mut b, "var out = []; var x = new XMLHttpRequest(); x.open('GET', '/xhr'); x.send();");
+        let r = &srv.recs()[0];
+        assert_eq!(r.header("sec-fetch-site"), vec!["same-origin".to_string()]);
+        assert_eq!(r.header("sec-fetch-mode"), vec!["cors".to_string()]);
+        assert_eq!(r.header("sec-fetch-dest"), vec!["empty".to_string()]);
+    });
+}
+
+#[test]
+fn metadata_does_not_return_to_same_origin_after_a_same_site_redirect() {
+    big(|| {
+        let page = serve(|_| reply(200, &[("Access-Control-Allow-Origin", "*")], b"done"));
+        let page_port = page.port;
+        let other = serve(move |_| reply(302, &[("Access-Control-Allow-Origin", "*"), ("Location", &format!("http://127.0.0.1:{page_port}/back"))], b""));
+        let mut b = at(page.port);
+        assert_eq!(go(&mut b, &format!("var out = []; fetch('http://127.0.0.1:{}/away').then(r=>r.text()).then(t=>out.push(t));", other.port)), "done");
+        assert_eq!(other.recs()[0].header("sec-fetch-site"), vec!["same-site".to_string()]);
+        assert_eq!(page.recs()[0].header("sec-fetch-site"), vec!["same-site".to_string()]);
+        assert_eq!(other.recs()[0].method, "GET");
+        assert_eq!(page.recs()[0].method, "GET");
+    });
+}
+
+#[test]
+fn metadata_site_uses_schemeful_public_suffix_boundaries_and_redirect_history() {
+    let parse = |s: &str| bare_url::Url::parse(s).unwrap();
+    for (a, b, expected) in [
+        ("https://a.example.com/", "https://a.example.com/path", "same-origin"),
+        ("https://a.example.com/", "https://b.example.com/", "same-site"),
+        ("https://a.example.com/", "http://a.example.com/", "cross-site"),
+        ("https://a.k12.ca.us/", "https://b.k12.ca.us/", "cross-site"),
+        ("https://a.github.io/", "https://b.github.io/", "cross-site"),
+        ("https://a.example.co.uk/", "https://b.example.co.uk/", "same-site"),
+        ("http://127.0.0.1:80/", "http://127.0.0.1:81/", "same-site"),
+        ("http://127.0.0.1/", "http://128.0.0.1/", "cross-site"),
+        ("http://[::1]:80/", "http://[::1]:81/", "same-site"),
+        ("http://[::1]/", "http://[::2]/", "cross-site"),
+        ("http://localhost:80/", "http://localhost:81/", "same-site"),
+    ] {
+        assert_eq!(metadata_site(&parse(a), &parse(b), "same-origin"), expected, "{a} -> {b}");
+    }
+    let doc = parse("https://a.example.com/");
+    let cross = metadata_site(&doc, &parse("https://elsewhere.test/"), "same-origin");
+    assert_eq!(metadata_site(&doc, &doc, cross), "cross-site");
+    assert_eq!(metadata_site(&doc, &parse("https://b.example.com/"), cross), "cross-site");
+    assert_eq!(metadata_site(&doc, &doc, "same-site"), "same-site");
+}
+
+#[test]
+fn fetch_metadata_targets_are_secure_or_local() {
+    for (url, expected) in [
+        ("https://example.com/", true),
+        ("http://localhost/", true),
+        ("http://127.0.0.1/", true),
+        ("http://[::1]/", true),
+        ("http://example.com/", false),
+        ("http://127.example.com/", false),
+    ] {
+        assert_eq!(potentially_trustworthy(&bare_url::Url::parse(url).unwrap()), expected, "{url}");
+    }
 }

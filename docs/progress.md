@@ -10517,3 +10517,21 @@ Per journey (medians of runs 1 to 3, spread = (max - min) / median):
 - A journey that needs the document at `interactive` before its next step with no wait of its own: all 47 pass, so none does. A new journey could. The old loop gave it that wait for free; now a step must wait for its own condition.
 - The `Parsing::step` clock fix without the picture change (its effect on `wikipedia-portal` was seen by the first agent only).
 - Another machine. The baseline build is a local tree with uncommitted changes (`bench-base-vclock` HEAD `2ddee1da` plus the staged clock patch plus the driver change).
+## Fetch metadata request headers (2026-11-13)
+
+Issue 475: a same-origin page fetch omitted all Fetch Metadata headers. A local echo server confirmed the installed browser sent none. The first wire-header regression failed on an empty `Sec-Fetch-Site`.
+
+Page fetch and XHR now add browser-generated site, mode and destination metadata for trustworthy destinations. Site classification uses pinned static PSL data and preserves redirect history. Author headers cannot override it or cause an extra preflight. Loopback classification now parses numeric addresses, including the URL parser's normalized IPv6 address.
+
+Five new tests pass. They cover wire headers, XHR, redirect history, public and private suffixes, request modes, and secure/local targets. The full bare library run reports 1417 passed, one failed and six ignored. The failure is `a_pending_meta_refresh_is_queued_work`, which requires a timer deadline within 10 ms. The original pre-fix test binary fails the same test on this host. No timer change was made.
+
+Strict formatting fails on unchanged baseline files. Checking an unchanged example from the base reproduces its formatting failure. Strict clippy stops on existing type complexity in the HTML crate. A no-dependencies clippy run also reports existing diagnostics outside the changed logic. These gates are not green. The candidate bare MCP binary passes the local header-echo and protected-route check: status 200, site `same-origin`, mode `cors`, destination `empty`. The installed pre-fix browser sent none of these headers. Both checks used real page JavaScript and a local HTTP server. All owned processes and sessions stopped afterward. No load-test or performance claim is made.
+
+
+## 2026-11-14: Fetch Metadata pre-merge check
+
+The current-main full release rerun passes 1,462 tests with six ignored. A header-capacity refinement removes two growth allocations per request and passes all 53 Fetch/XHR tests. The initial cost gate fails on Fetch POST under both allocators. See [the measurements and limits](fetch-metadata-merge-checks.md). No merge or threshold exception is included.
+
+## 2026-11-14: Fetch Metadata cost exception approved
+
+The owner approved the documented Fetch POST exception for PR #479. The general 0.5 percent rule is unchanged. The branch is rebased onto main at c4e32a85, with the textarea fix included. All 1,464 release library tests pass with six ignored. Fresh three-run instruction and RSS samples remain within the scoped exception; other sampled rows stay below the general limit. See [the final checks](fetch-metadata-merge-checks.md#approved-final-rebase). The earlier two-allocator failure is retained.

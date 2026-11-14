@@ -2029,9 +2029,9 @@ fn policy(d: &Dom, lim: &FetchLimits, url: &Url, mode: Mode, api: &'static str) 
     Ok(cors)
 }
 
-/// `http:` to a loopback host is allowed from an `https:` page, as in Chrome.
+/// HTTPS and local HTTP targets may receive fetch metadata. Local HTTP is also allowed from an HTTPS page.
 pub(crate) fn potentially_trustworthy(u: &Url) -> bool {
-    u.host == "localhost" || u.host.ends_with(".localhost") || u.host == "[::1]" || u.host.starts_with("127.")
+    u.scheme == Scheme::Https || u.host == "localhost" || u.host.ends_with(".localhost") || u.host.trim_matches(['[', ']']).parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
 /// Queue the request of an `XMLHttpRequest` with the policy, the caps and the queue of `fetch`. `headers` are combined by name.
@@ -2197,6 +2197,23 @@ pub(crate) enum Outcome {
     TooBig,
 }
 
+/// The least-trusted site relation in the URL list. A later redirect cannot make it safer.
+pub(crate) fn metadata_site(doc: &Url, target: &Url, previous: &'static str) -> &'static str {
+    if previous == "cross-site" {
+        return previous;
+    }
+    if doc.same_origin(target) {
+        return previous;
+    }
+    let same_site = doc.scheme == target.scheme && (doc.host == target.host || {
+        // PSL lookup is for DNS hosts only. Numeric addresses are sites of their own.
+        let ip = |h: &str| h.starts_with('[') || h.parse::<std::net::IpAddr>().is_ok();
+        !ip(&doc.host) && !ip(&target.host) && psl::domain_str(&doc.host)
+            .zip(psl::domain_str(&target.host)).is_some_and(|(a, b)| a == b)
+    });
+    if same_site { "same-site" } else { "cross-site" }
+}
+
 fn run_one(client: &mut Client, lim: &FetchLimits, first: Parts<'_>, diag: &mut Vec<String>) -> Outcome {
     run_hops(client, lim, first, diag, None)
 }
@@ -2220,7 +2237,9 @@ fn run_hops(client: &mut Client, lim: &FetchLimits, first: Parts<'_>, diag: &mut
     let mut null_origin = false;
     let (mut method, mut url, mut headers, mut body) = (first.method, dup(first.url), first.headers.to_vec(), first.body);
     let mut redirected = false;
+    let mut site = "same-origin";
     for hop in 0..=lim.max_redirects {
+        site = metadata_site(doc, &url, site);
         let origin_s = (taint == Taint::Cors || (taint == Taint::Opaque && !method.safe())).then(|| if null_origin { "null".to_string() } else { origin(doc) });
         if taint == Taint::Cors && needs_preflight(method, &headers) {
             let o = origin_s.as_deref().unwrap_or("null");
@@ -2228,9 +2247,21 @@ fn run_hops(client: &mut Client, lim: &FetchLimits, first: Parts<'_>, diag: &mut
                 return out;
             }
         }
-        let mut wire: Vec<(&str, &str)> = headers.iter().map(|(n, v)| (n.as_str(), v.as_str())).collect();
+        let metadata = potentially_trustworthy(&url);
+        let extra = usize::from(origin_s.is_some()) + if metadata { 3 } else { 0 };
+        let mut wire: Vec<(&str, &str)> = Vec::with_capacity(headers.len() + extra);
+        wire.extend(headers.iter().map(|(n, v)| (n.as_str(), v.as_str())));
         if let Some(o) = &origin_s {
             wire.push(("origin", o));
+        }
+        // Browser metadata is not an author header and must not trigger a preflight. Compute it
+        // for each hop, retaining the least-trusted relation across the full redirect chain.
+        if metadata {
+            wire.push(("sec-fetch-site", site));
+            wire.push(("sec-fetch-mode", match cors.mode {
+                Mode::Cors => "cors", Mode::NoCors => "no-cors", Mode::SameOrigin => "same-origin",
+            }));
+            wire.push(("sec-fetch-dest", "empty"));
         }
         // Cookies: `include` sends them to any origin, `same-origin` (the default, and XHR without `withCredentials`) only to the origin of the
         // document, `omit` never. The same rule decides if the reply may set one.

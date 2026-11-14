@@ -2143,6 +2143,8 @@ Proposed in [the design](design-style-round2.md). The owner has not approved it 
 Criterion 3: build class atoms, then a selector arena with a direct parser, then a second memo keyed by the winning declaration values. Do not build signature sharing for the two ramps: it gives 0% there. Do not drop the style dedupe: it costs 56 MB on `compm_22000`.
 
 Criterion 8: un-keep the CSSOM objects that leave a list, prune the host tables on stale handles, and remove the `cssom-objects` cap. Do not tie the cap to the rule count: it fails a page that inserts and deletes rules in a loop sooner than today.
+## Page fetch metadata (2026-11-13)
+
 - Page fetch and XHR generate `Sec-Fetch-Site`, `Sec-Fetch-Mode` and `Sec-Fetch-Dest` at the wire-hop boundary for secure or loopback destinations. Scripts cannot set these headers.
 - Keep the least-trusted site relation across redirects. A later return to the initiating origin cannot clear a cross-site hop.
 - Use pinned `psl` 2.1.253 for registrable domains. The cookie helper has a partial suffix list and stays unchanged. Treat numeric addresses as separate hosts.
@@ -2163,3 +2165,7 @@ The replay driver ran the page (`tick`: loader, timers, scripts, frames) until `
 Owner decision 2026-11-14: fix the loop and measure the baseline again. Chosen: `Page::settle_images` only starts the queued pictures, waits for the ones in flight (on the benchmark clock it moves the clock to the due time of their replies) and delivers them. It runs no task of the page. A picture that no request started yet is not waited for. Other designs: (1) tick the page until the document is `interactive`, then pump (72,519 M, 76.3% of the loop-on run, spread 0.2%; measured by the first agent, not repeated): it still runs the scripts of the document up to `interactive`, for example 13.7 G in `react-docs`. (2) Tick until `load` (what the old loop did in practice): no saving. Rejected for the cost, not for determinism.
 
 The first try of the pump had a spread of 74% on `wikipedia-portal`. Cause: `Parsing::step` (the slice of the document parse) compared a deadline on the page clock with the real clock. Fixed in the same change.
+
+## 2026-11-14: approved Fetch Metadata cost exception
+
+The owner explicitly approved the documented cost exception for PR #479. The measured Fetch POST row grows by 2.146 percent under glibc and 1.624 percent under jemalloc after the allocation refinement. Correct browser-generated Fetch Metadata enables protected same-origin routes. The refinement removes two growth allocations per request and stays in place. This approval applies only to this documented Fetch Metadata change. It does not raise the general 0.5 percent cost threshold or approve unrelated regressions. Retain the failing original gate and its samples.
