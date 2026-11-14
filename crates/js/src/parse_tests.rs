@@ -467,8 +467,8 @@ fn truncated_input_never_panics() {
 
 fn deep_in_thread(f: impl FnOnce() + Send + 'static) {
     // Release: 4 MiB. The worst case at depth 2048 (nested classes) measured about 2.3 MiB.
-    // Debug frames are about 6 times larger (about 14 MiB for nested classes), so debug uses 24 MiB.
-    let stack = if cfg!(debug_assertions) { 24 << 20 } else { 4 << 20 };
+    // Debug frames are much larger. Nested classes at depth 2048 need about 31 MiB (30 MiB overflows, 32 MiB passes), so debug uses 48 MiB.
+    let stack = if cfg!(debug_assertions) { 48 << 20 } else { 4 << 20 };
     std::thread::Builder::new().stack_size(stack).spawn(f).unwrap().join().unwrap();
 }
 

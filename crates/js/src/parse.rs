@@ -60,7 +60,7 @@ use std::rc::Rc;
 pub const HARD_MAX_DEPTH: u32 = 2048;
 
 /// Parser limits. A program that exceeds one returns [`ErrorKind::Limit`].
-/// The recursive parser requires a caller stack of at least 24 MiB in debug builds or 4 MiB
+/// The recursive parser requires a caller stack of at least 32 MiB in debug builds or 4 MiB
 /// in release builds at the hard depth cap. Smaller embedding stacks are unsupported.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
@@ -72,7 +72,7 @@ pub struct Limits {
     pub max_list: u32,
     /// Deepest nesting of expressions, statements and patterns. Clamped to `HARD_MAX_DEPTH`. The Rust stack use is about
     /// `max_depth` times 1.2 KiB at worst in a release build (nested classes), so 2048 needs about 2.3 MiB.
-    /// A debug build uses about 6 times more. A test parses deep input on a 4 MiB (release) or 24 MiB (debug) thread.
+    /// A debug build needs about 31 MiB for nested classes. A test parses deep input on a 4 MiB (release) or 48 MiB (debug) thread.
     pub max_depth: u32,
 }
 
