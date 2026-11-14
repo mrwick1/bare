@@ -2737,8 +2737,9 @@ fn compute(winners: &[Option<Value>; Property::CORE], mut set: u128, parent: &Co
             continue;
         }
         let raw = match v {
-            // A grid list of the parent is computed already: its number is from `Styles::grids`, not from the style sheet.
-            Value::Inherit if matches!(parent.0[i], Value::Grid(_)) => {
+            // A grid list or a `calc()` of the parent is computed already: its number is from `Styles::grids` or `Styles::calcs`, not
+            // from the style sheet.
+            Value::Inherit if matches!(parent.0[i], Value::Grid(_) | Value::Length(Length::Calc(_))) => {
                 out[i] = parent.0[i];
                 continue;
             }
@@ -3824,6 +3825,20 @@ mod tests {
         assert_eq!(styles.math_text(w), "min(300px, 50%)");
         // `line-height` takes a percent of the font size now.
         assert_eq!(get("b", Property::LineHeight), px(30.0));
+    }
+
+    #[test]
+    fn inherit_keeps_the_computed_calc_of_the_parent() {
+        // The computed `calc()` of the parent is a number of `Styles::calcs`, not of the style sheets: the sheet has no `calc()`.
+        let page = "<div id=p style='width:calc(10px + 50%); padding-left:calc(2px + 10%)'><div id=c></div></div>";
+        let sheet = "#c { width: inherit; padding-left: inherit }";
+        let (doc, styles) = styles(page, &[sheet]);
+        let get = |id: &str, p: Property| styles.style(by_id(&doc, id)).unwrap().get(p);
+        for p in [Property::Width, Property::PaddingLeft] {
+            let Value::Length(Length::Calc(i)) = get("c", p) else { panic!("{:?}", get("c", p)) };
+            assert_eq!(get("c", p), get("p", p));
+            assert_eq!(styles.calc(i), if p == Property::Width { (10.0, 50.0) } else { (2.0, 10.0) });
+        }
     }
 
     #[test]
