@@ -22,4 +22,20 @@ Machine: Linux x86-64, Ryzen 9 5900HX. Two build jobs per build. The host is sha
 | fetch_post | 21,591,413–21,592,372 | 22,180,283–22,180,806 | 22,060,056–22,064,999 | 13,004–13,280 | 13,000–13,424 |
 | xhr | 10,691,794–10,694,630 | 10,702,012–10,702,461 | 10,701,414–10,702,521 | 11,608–11,872 | 11,668–11,956 |
 
-The reserved candidate still costs more instructions on Fetch POST than main. Its final two-allocator gate fails: Fetch POST grows by 2.146 percent under glibc and 1.624 percent under jemalloc. All other selected rows pass. No threshold change or cost exception is approved. This PR remains unmerged. The full repository cost matrix was not run. The earlier accepted Deck journey uses the combined metadata and textarea candidate and remains separate evidence.
+The reserved candidate still costs more instructions on Fetch POST than main. Its final two-allocator gate fails: Fetch POST grows by 2.146 percent under glibc and 1.624 percent under jemalloc. All other selected rows pass. On 2026-11-14 the owner explicitly approved the documented Fetch POST cost exception for this PR. The general 0.5 percent rule remains unchanged. The full repository cost matrix was not run. The earlier accepted Deck journey uses the combined metadata and textarea candidate and remains separate evidence.
+
+## Approved final rebase
+
+The branch was rebased onto main at c4e32a85, which includes the independent textarea fix. The baseline executables have the same production source as that main commit; the production diff was empty. The same five cases were measured again with three instruction and three RSS samples per case. The machine and counter settings are unchanged.
+
+| Case | Main instructions | Candidate instructions | Main RSS KiB | Candidate RSS KiB |
+| --- | ---: | ---: | ---: | ---: |
+| style_setget | 56,307,038–56,325,007 | 56,316,264–56,344,979 | 12,364–12,508 | 12,288–12,552 |
+| sheets_linked | 8,622,191–8,623,830 | 8,624,384–8,625,591 | 12,596–12,832 | 12,596–12,944 |
+| browser_mutation | 70,098,558–70,099,172 | 70,100,992–70,102,589 | 11,444–11,908 | 11,424–11,872 |
+| fetch_post | 21,587,543–21,592,335 | 22,064,482–22,065,847 | 12,892–13,228 | 13,040–13,104 |
+| xhr | 10,690,244–10,695,100 | 10,702,023–10,702,577 | 11,496–11,800 | 11,560–11,972 |
+
+Fetch POST remains within the documented cost accepted by the owner. Other sampled instruction rows remain below the general limit. The earlier two-allocator failure is retained and covered by the scoped exception. A new jemalloc comparison and full matrix were not repeated after this rebase.
+
+The final rebased serial release library run passes 1,464 tests with six ignored. Main remained at c4e32a85 at the final check. The approved exception and original failures remain in this report; the cost gate is not relabeled as an unqualified pass.

@@ -10531,3 +10531,7 @@ Strict formatting fails on unchanged baseline files. Checking an unchanged examp
 ## 2026-11-14: Fetch Metadata pre-merge check
 
 The current-main full release rerun passes 1,462 tests with six ignored. A header-capacity refinement removes two growth allocations per request and passes all 53 Fetch/XHR tests. The initial cost gate fails on Fetch POST under both allocators. See [the measurements and limits](fetch-metadata-merge-checks.md). No merge or threshold exception is included.
+
+## 2026-11-14: Fetch Metadata cost exception approved
+
+The owner approved the documented Fetch POST exception for PR #479. The general 0.5 percent rule is unchanged. The branch is rebased onto main at c4e32a85, with the textarea fix included. All 1,464 release library tests pass with six ignored. Fresh three-run instruction and RSS samples remain within the scoped exception; other sampled rows stay below the general limit. See [the final checks](fetch-metadata-merge-checks.md#approved-final-rebase). The earlier two-allocator failure is retained.
