@@ -10549,9 +10549,9 @@ Owner decision (2026-11-14): build design D1 of `design-style-round2.md` section
 - `insertRule` makes no rule object. The new rule is a span of its text, like a rule that no script has read. Its object is made when a script reads its index. So an insert and a delete in a loop make no object and no declaration. The text of the element is the text of the rule as written (`.new { top: 1px }`, not `.new { top: 1px; }`): the same as for every rule that no script has read. One assertion in `rule_objects_made_on_demand_keep_their_place_when_the_sheet_changes` changed for this.
 - I changed no file in `crates/js`. The design said `Heap::is_live` plus a prune at the start of `roots`. The host already has `trace` and `prune` hooks (used by `browser_style`, `browser_nodelist` and others), so I used them. See `decisions.md`.
 
-### Tests (written first; 6 fail on `5bc18d14`, all pass now)
+### Tests (written first; 6 fail on the old code, all pass now)
 
-`crates/bare/src/browser_cssom_tests.rs`, 9 new tests. They fail on the old code: the loop on a `<style>` sheet, the loop on a constructed sheet (1,000,000 cycles, more than the old cap), rules read and deleted, a removed `<style>` element, a replaced constructed sheet, and the changed text of `insertRule`. They pass on both: identity and expandos of a live rule across two collections, a held deleted rule (`parentStyleSheet` is null, its `.style` and nested rules still work, a write through it does not touch the live rules), and create-collect-read with no stale entry.
+`crates/bare/src/browser_cssom_tests.rs`, 8 new tests. 5 of them fail on the old code: the loop on a `<style>` sheet, the loop on a constructed sheet (1,000,000 cycles, more than the old cap), rules read and deleted, a removed `<style>` element and a replaced constructed sheet. The changed assertion for the text of `insertRule` fails too (6 in all). The other 3 pass on both old and new code, as guards: identity and expandos of a live rule across two collections, a held deleted rule (`parentStyleSheet` is null, its `.style` and nested rules still work, a write through it does not touch the live rules), and create-collect-read with no stale entry.
 
 ### Numbers
 
