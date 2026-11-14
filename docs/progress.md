@@ -9244,3 +9244,7 @@ A script of 16 KiB or more that uses `super`, `new.target`, generators or classe
 - Arrows are the largest group of functions that stay eager. A later step can make them lazy once the lexical `this` and `arguments` cross the boundary.
 - `rust-book-search` loads 191 lazy functions (its scripts hold 144 at the top level; the others sit inside lazy trees). 19,850 nodes of its 33,976 are parsed twice. A script where most functions run pays about two parses for them.
 - The parse cache keeps a separate entry for the lazy and the eager kind of the same text.
+
+## Standing exception: PR #492 `scripts_load many 10` cost (approved by owner 2026-11-14)
+
+Lazy JS function bodies leave one cost row above the limit after two fix attempts: `scripts_load many 10` is +0.90% under glibc and +0.51% under jemalloc (0.65 M of 71.7 M instructions). The owner approved an exception for this one row only. Reason: the change cuts parsed-tree memory 2 to 4 times on large script pages, and test262 and the execution comparison are unchanged. A later change that makes arrow functions lazy may recover the cost.
