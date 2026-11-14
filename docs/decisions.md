@@ -2069,3 +2069,11 @@ Step 4, phase 2 of `docs/perf-goal.md`. Design: `design-style.md` 3.1 (M2), 3.3 
 - `ATOM_MAX` is 32 (the value of the design). Not tuned.
 - The process-wide atom table of the design is not built (estimated 0.2% of a journey; it needs a snapshot or a lazy install per realm).
 - Open: after the cost fix, keycost is +0.2%, journeys +0.1%, setup +0.14%, but 12 of 803 rows are still over +0.5% under both allocators (largest +0.93%: `for-in`, iterator results, object literals). Not merged. The owner decides: accept 12 rows at +0.5% to +0.9% for linear `+`, or give the object allocation path a design pass.
+
+## Register VM spike: register functions inside the stage 1 format (2026-11-14, `docs/design-js.md` phase P3)
+
+- Chosen: one more kind of function, a register function (RF). It reuses the stage 1 word format, generator and verifier, with new ops (fused compare-and-jump `JnLt`..`JnSNeK`, constant operands `AddK`..`ModK`, `CallR`). Its variables are registers. A call from an RF to an RF pushes a frame in the same loop. Anything else (an inner function, `arguments`, a generator, `switch` with `let`) compiles as before. If an RF fails to compile, the function is compiled again as a stage 1 function.
+- Reason: it gives 4.86x on `loopfn` and 3.11x on `fib` and keeps every stage 1 construct working without a new lane. The other choice, a second code generator for stage 2, doubles the work for the same result.
+- A callee uses the argument registers of the caller as its first registers (no copy). `Error.stack` frames, `depth` and the step budget are kept for each inline call, so the output of the tree walker and the limits stay the same.
+- The default stays the tree walker. The switch is `BARE_JS_EXEC`.
+- Open: functions with closures are not RF (the next step is boxed cells for captured variables).

@@ -404,6 +404,8 @@ Measured by: `eval_load` rows (`loop`, `loopfn`, `calls`, `fib`, `closures`, `ob
 
 Limits: the step budget changes meaning. It counts back edges and calls (an interrupt budget), so 100 M buys several times the work. `max_call_depth` (100) and `max_statement_frames` (512) stop being Rust-stack limits for JS calls; the frame-stack bytes become the limit. The depth-0 rule of the collector goes.
 
+**Spike result (2026-11-14).** The gate passes. Instructions on `eval_load` at scale 10, 3 runs, spread under 0.01%: `loopfn` 4.091 G in tree and 0.841 G in the register lane (4.86x). `fib` 166.3 M and 53.5 M (3.11x). The call of `fib` costs about 546 instructions, not 1,763. `loop` (globals) is 1.99x, `calls` 1.67x, `closures` 1.23x. The spike builds a register function only for a function with no inner function, class, `with`, `arguments`, `new.target`, `super` or own name. Its variables are registers, there is no environment, and a call of another register function runs in the same Rust loop. Other functions run in the stage 1 lane as before. `loopfn` costs about 424 instructions for 6 ops in one iteration (about 71 each). Hypothesis: the `%` (`fmod`) is a large part of that. The cost per op is not yet the 45 of the plan, and I did not profile the loop op by op. What the spike does not cover, and the plan for the full stage 2, are in `docs/progress.md`, "P3 register VM spike".
+
 ### P4. The AST is transient
 
 Build: compile a function to bytecode at its first call, from its freshly parsed body, then drop the nodes. A fallback re-parses the function for the tree walker when bytecode cannot run it (`with`, direct `eval`).
