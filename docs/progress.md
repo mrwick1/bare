@@ -9777,7 +9777,7 @@ Not built: inline `new`. `new` goes through `bc_call` and `construct` (Rust recu
 
 ### Checks
 
-- `cargo test --release -p bare-js --lib`: 951 pass. New tests in `bc_gen_tests.rs`: 31 programs that run on tree, auto and byte and must agree (closures, loops that make closures, blocks and switch, arrow `this`, TDZ, `arguments`, default and rest parameters, throw through frames, `Error.stack`, call depth 200, shadowed names), global cells that follow a later script (a `let`, a deleted and made name, a `const`, a name in its TDZ), a listing of a function with a closure.
+- `cargo test --release -p bare-js --lib`: 951 pass. New tests in `bc_gen_tests.rs`: 33 programs that run on tree, auto and byte and must agree (closures, loops that make closures, blocks and switch, arrow `this`, TDZ, `arguments`, default and rest parameters, throw through frames, `Error.stack`, call depth 200, shadowed names), global cells that follow a later script (a `let`, a deleted and made name, a `const`, a name in its TDZ), a listing of a function with a closure.
 - `cargo test --release --workspace --no-fail-fast`: 3,917 pass, 8 fail. They are the 7 known openssl TLS tests and `a_hidden_iframe_download_is_saved`. Two other known flaky tests (`a_changed_file_starts_again_from_zero` and `external_sheets_embedded_sheets_and_inline_styles_cascade_in_order`) failed in one of two runs under load and pass alone.
 - `tools/js/exec_diff.sh`: 79 runs, 0 differences.
 - `tools/js/test262_check.sh`: tree, exit 0, no directory lost a test. With `BARE_JS_EXEC=byte`: only the 3 known `top-level-await` tests lose (40 to 37), and the result list of byte equals the one of tree otherwise (32,838 tests).
@@ -9790,5 +9790,4 @@ Not built: inline `new`. `new` goes through `bc_call` and `construct` (Rust recu
 
 ### Noticed, not changed
 
-- The GC still runs only at depth 0 of the lane (step 5 of the plan). `Auto` compiles at the second call of any function. A hotness count would remove the `webpack` loss, and I did not build it.
-- `Error.stack` of an error thrown in a default parameter value has the callee frame (as the tree walker). A thrown error leaves the loop through `bc_catch` once for each frame, so a deep throw costs a walk of all frames.
+- The GC still runs only at depth 0 of the lane (step 5 of the plan). `Auto` compiles at the second call of any function. A hotness count might remove the `webpack` loss (hypothesis, not built).
