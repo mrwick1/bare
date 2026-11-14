@@ -589,7 +589,7 @@ impl<'p> Interp<'p> {
         let prog = &self.prog;
         match prog.expr(e).kind {
             ExprKind::Ident => w.sites.push((e.index() as u32, w.cur)),
-            ExprKind::This | ExprKind::Null | ExprKind::Bool(_) | ExprKind::Number(_) | ExprKind::String | ExprKind::Hole | ExprKind::BigInt => {}
+            ExprKind::This | ExprKind::Null | ExprKind::Bool(_) | ExprKind::Number(_) | ExprKind::String | ExprKind::Hole | ExprKind::BigInt | ExprKind::Data => {}
             ExprKind::RegExp | ExprKind::NewTarget | ExprKind::Super => {}
             ExprKind::Template(t) => prog.template_exprs(prog.template(t)).for_each(|x| self.sw_expr(w, x)),
             ExprKind::Tagged { tag, quasi } => {

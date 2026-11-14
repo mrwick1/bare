@@ -433,6 +433,8 @@ impl<'a> Dump<'a> {
                 self.close();
             }
             ExprKind::Hole => self.out.push_str("(hole)"),
+            // Only a parse with lazy bodies makes one; this tool parses every body.
+            ExprKind::Data => self.out.push_str("(data)"),
             ExprKind::Chain(a) => {
                 self.open("chain", sp);
                 self.sp();

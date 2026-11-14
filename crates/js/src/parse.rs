@@ -2932,8 +2932,24 @@ impl<'a> Parser<'a> {
         self.mk_expr(ExprKind::Paren(inner), start)
     }
 
+    /// A literal of JSON values only, from the current `[` or `{` on, as one `Data` node (see [`crate::data_lit`]). Only in a parse with lazy
+    /// bodies: that is a large source (`parse_cache::LAZY_MIN_SOURCE`), the only place where a data literal is worth it.
+    fn parse_data(&mut self, start: u32) -> R<Option<ExprId>> {
+        if !self.lazy || self.peeked.is_some() {
+            return Ok(None);
+        }
+        let Some(end) = crate::data_lit::scan(self.src, start as usize).filter(|&e| e - start as usize >= crate::data_lit::MIN_BYTES) else { return Ok(None) };
+        self.lex.seek(end as u32);
+        self.tok.end = end as u32;
+        self.advance()?;
+        self.mk_expr_at(ExprKind::Data, start, end as u32).map(Some)
+    }
+
     fn parse_array(&mut self) -> R<ExprId> {
         let start = self.tok.start;
+        if let Some(e) = self.parse_data(start)? {
+            return Ok(e);
+        }
         self.advance()?;
         let base = self.lbegin();
         while !self.is(P::RBracket) {
@@ -2962,6 +2978,9 @@ impl<'a> Parser<'a> {
 
     fn parse_object(&mut self) -> R<ExprId> {
         let start = self.tok.start;
+        if let Some(e) = self.parse_data(start)? {
+            return Ok(e);
+        }
         self.advance()?;
         let base = self.lbegin();
         let mut protos = 0u32;

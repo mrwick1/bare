@@ -99,6 +99,7 @@ impl Gen<'_, '_> {
                 Ok(())
             }
             ExprKind::Object(l) => self.object(l, dst),
+            ExprKind::Data => Err("a data literal"),
             ExprKind::Function(f) => self.emit(Op::Closure, dst, f.index() as u32, 0),
             ExprKind::Unary { op, arg } => self.unary(op, arg, dst),
             ExprKind::Update { op, prefix, arg } => {

@@ -9339,3 +9339,89 @@ Peak RSS of the ramps: `compm_22000` 68 to 69 MiB, `rest_13` 52 to 53 MiB (BASE 
 - `restyle` allocates a 4 KiB filter for each root.
 - A list that stays whole (a rule with no ancestor, or many rules with the same key) is still elements x rules. `computed-work` guards that case.
 - The Bloom filter and the exact path are two structures for one set. One structure with a count for each hash would do both; it needs a hash table for the path.
+
+## 2026-11-14: large data literals are kept as source text; lazy arrow functions measured and not shipped (step 8, criterion 6)
+
+Task: lower the peak RSS of `python-docs-search-results` by 20% or more (criterion 6) with lazy arrow functions and a compact store for large data literals. Base: main `5b42d061` (the rebase target). Machine: archMachine, shared. Journeys: `tools/bench/journeys.sh compare --clock virtual --runs 3 --pss`, corpus `virtual`, both binaries built with `--release --workspace --examples`. The virtual clock makes the work the same in each run, so the instruction spread is 0.0%.
+
+### What was built
+
+- `ExprKind::Data` (`crates/js/src/data_lit.rs`). The parser checks an array or object literal with `data_lit::scan`. The literal must be JSON in script text: double-quoted strings with JSON escapes, JSON numbers, `true`, `false`, `null`, string keys, JSON white space only, depth 64 or less, and no key `__proto__` (also when an escape spells it). The literal must have 128 bytes or more. Then the literal is one node: its span. The lexer jumps over the text (`Lexer::seek`).
+- The evaluator builds the heap values from the text (`data_lit::build`): `intern_str` for strings, `define_own_property` for keys, `Heap::fill_array` for arrays, an integer path for numbers of 15 digits or less and `number::decimal_value` for the rest. It does not make the tree walk that the same literal makes, and it does not allocate a node for each value.
+- Only a source of 16 KiB or more has data nodes (the lazy kind of the parse cache). Smaller sources keep every literal as a tree, so test262 and the other short scripts do not use the new path.
+- A literal with code inside (`[f(), [1,2,...]]`) stays a tree. Its large plain parts are data nodes.
+- Observable values are those of the tree walk: property order, `-0`, `1e400`, numeric keys, duplicate keys, lone surrogates, `length` and `constructor` keys. `data_lit_tests.rs` has 12 tests, most of them differential: the same literal in a short source (tree) and a padded source (text) must give the same dump of prototype, key order, attributes and the sign of zero.
+- V8 comparison: V8 keeps boilerplates (`CreateObjectLiteral` makes them from constant data) and its guidance for a large literal is `JSON.parse` (<https://v8.dev/blog/cost-of-javascript-2019>). We copied the idea (a large literal of constants is data, not code). We copied no code. Our design keeps the source span as the only record, so the cost of a literal in memory is the text that the page already holds.
+- Other choices (see `docs/decisions.md`): a flat node table (a smaller tree, still 8 to 12 bytes for each value) and the generic `json.rs` parser (it makes a different property list for `__proto__`).
+
+### Numbers (base `5b42d061`, median of runs 1 to 3)
+
+| Journey | Minstr base | Minstr new | change | MiB base | MiB new | change |
+| --- | --- | --- | --- | --- | --- | --- |
+| python-docs-search-results | 3377.9 | 2539.6 | -24.8% | 114.5 | 91.2 | -20.4% |
+| python-docs-search | 2138.2 | 1300.5 | -39.2% | 93.8 | 68.1 | -27.5% |
+| rust-book-search | 16559.5 | 16418.0 | -0.9% | 129.6 | 129.4 | -0.1% |
+| 47 journeys, sum of medians | 92654.7 | 90256.9 | -2.6% | 1737.3 | 1671.5 | -3.8% |
+
+- Criterion 6: `python-docs-search-results` peak RSS 114.5 to 91.2 MiB (-20.4%). The criterion baseline is 116 MiB, so the target is 92.8 MiB or lower. The three runs are 93, 91 and 90 MiB (a spread of 3%, from the allocator). The peak of PSS (run 0): 103.9 to 90.6 MiB (-12.8%). The target is met on the median, not by a wide margin.
+- Instruction spread: at most 0.6% (base) and 0.2% (new) over all journeys. No journey grew by 0.3% or more in instructions. Peak RSS moves by up to 3% between builds and runs (`go-dev-home` +3.1%, `github-docs-home` -2.8%).
+- Same source, other build: a `-p bare-drive` build and a `--workspace --examples` build of the same commit differ by 2.5% instructions on `github-docs-home` (the difference is in `bare_css::matching::compound_matches` and `scan::rule`, which this change does not touch). Compare only binaries that were built the same way as the base.
+- Threshold. A script of 16 KiB with one literal of about N bytes, a new realm for each run, instructions of the whole process divided by the runs (`tools/js/instr.sh`, minimum of 3). The tree column has the first key unquoted, which makes the same literal a tree. A script without the literal costs 1.784 M.
+
+  | N (bytes) | run once: text | run once: tree | called 100 times in a function: text | tree |
+  | --- | --- | --- | --- | --- |
+  | 64 | 1.803 M | 1.836 M | 3.209 M | 3.316 M |
+  | 128 | 1.811 M | 1.861 M | 3.853 M | 3.946 M |
+  | 256 | 1.834 M | 1.934 M | 5.416 M | 5.660 M |
+  | 512 | 1.874 M | 2.053 M | 8.075 M | 8.453 M |
+  | 1024 | 1.953 M | 2.291 M | 13.417 M | 14.019 M |
+  | 2048 | 2.109 M | 2.762 M | | |
+  | 8192 | 3.038 M | 5.537 M | | |
+  | 65536 | 11.50 M | 30.75 M | | |
+
+  The text path costs less than the tree from 64 bytes up, also for a literal that a function builds 100 times. The gain grows with the size (`65536` bytes: 2.7 times). The threshold is 128 bytes: it is the first size where one literal saves more than 2% of the script. The first choice, 1024, was a guess; the table shows that it left the small literals out for no reason.
+- `max_script_nodes` counts a data literal as one node, so the node limit does not guard the size of a literal any more. The heap limits do (`HeapError` at the first value that does not fit; a test covers it). No limit was removed.
+
+### Lazy arrow functions: built, measured, not shipped
+
+The arrow work is on the branch `t3/lazy-arrows-experiment` (commit `6c4a4185`, based on `e497ff5f`), not in this change. It makes an arrow with a plain parameter list and a body of 128 bytes or more lazy by the rules of #492, plus a fact `arguments` (an arrow reads `arguments` of the function around it) and a start mark for the function that is parsed again. It has parse tests and run tests (this, closures, recursion, currying, `arguments`, `new.target`, `super`, async, class fields, early errors, three exec modes) and passes them.
+
+Measured against the same tree without lazy arrows (both built with `-p bare-drive`, 3 runs, 0.0% spread):
+
+| Journey | instructions with lazy arrows | peak RSS |
+| --- | --- | --- |
+| github-docs-home | +3.95% (4911 to 5105 M) | -1.8% |
+| nodejs-org-home | +2.24% | -0.7% |
+| react-docs | +1.29% | +0.3% |
+| python-docs-search | +0.76% | -0.5% |
+| python-docs-search-results | +0.41% | -0.5% |
+| 47 journeys | total -1.7% against -2.3% without lazy arrows | -2.7% against -3.2% |
+
+- Cause (measured by a counter in the parser and in `parse_lazy_function`): on `github-docs-home` 68 arrows were made lazy (1.22 MB of body text, nested ones counted at each level) and 51 of them ran (1.16 MB parsed a second time). The largest ones are 283, 175 and 133 KB: module factories of a bundle, called once at load. A function that runs pays two parses and saves no memory, because the tree of a called function stays in its own slot. Hypothesis: the second parse costs 167 instructions for each byte (194 M for 1.16 MB, the size of the difference).
+- Sizes that were tried (all on `github-docs-home`, instructions against the base): a minimum body of 512 bytes +3.7%, of 2048 bytes +3.3%; a maximum body of 4096 bytes +0.9%, of 16384 bytes +1.5%, of 65536 bytes +2.4%. No size removes the cost. No journey of the corpus holds memory in arrows that never run.
+- Decision: arrows stay eager. `scripts_load many 10` (the #492 exception) is not helped either: its scripts are smaller than 16 KiB.
+- The data path alone gives the whole gain for criterion 6: `python-docs-search-results` with and without lazy arrows differs by 0.5% RSS (with lazy arrows it is the higher one).
+
+### The double parse on `rust-book-search`
+
+`rust-book-search` has 456 lazy function bodies (560 KB of text) and 12 lazy arrows in the experiment (4.6 KB). 166 functions run (326 KB parsed a second time). So the double parse is the cost of a lazy function that runs (the design of #492), and arrows are not part of it. Estimated cost: 326 KB at about 167 instructions for each byte is 55 M, 0.3% of the 16.4 G of the journey (hypothesis: the 167 comes from the `github-docs-home` row above). It is not a large part of this journey. Not changed. A cheaper first parse (a preparser without tree nodes) would be the design change that removes this kind of cost; this task did not include it.
+
+### Checks
+
+- `cargo test --release -p bare-js --lib`: 930 passed, 1 ignored.
+- `cargo test --release --workspace --no-fail-fast`: all pass except the 7 TLS tests that fail on main (`bare-net` `https_openssl` 2, `bare-tls` `client_openssl` 4 and `tls12_openssl` 1). `a_hidden_iframe_download_is_saved` (`bare-mcp`) failed once under load and passed alone.
+- `tools/js/cost_matrix.sh` against `5b42d061`: 803 rows, mean glibc -0.011%, 0 rows over the limit, 2 rows did not run (`parse_load deep 1`, `deep 10`: the stack size issue that earlier entries list).
+- `TEST262=/data/claude-tmp/test262 tools/js/test262_check.sh`: gate ok (29731 pass).
+- `tools/js/exec_diff.sh`: 79 runs, tree, auto and byte, 0 differences.
+- `tools/js/typing/keycost.sh`: 294.2 M for each key on `#a1` (base 294.19 M), load and mount 618.6 M (base 618 M), peak RSS 33.9 MiB at 50 keys.
+
+### Not tested
+
+A data literal in a module source (`ModuleLazy`; the tests use classic scripts). Windows and macOS. Memory at the end of a long run. A page whose data literal is invalid JSON only at its end (the scan gives up and the tree is built; a test covers the grammar, not a large literal that fails at the last byte). The lazy arrow branch on the whole workspace test run and on test262 (its crate tests pass; the gates ran on this change only).
+
+### Noticed, not changed
+
+- A `super` call in an arrow inside an object-literal method gives `Unsupported "super outside a class element"` in the eager run (found while writing an arrow test on the experiment branch; not run on main).
+- Most tests of `eval_lazy_tests.rs` run on a source below 16 KiB, so they run the eager path. Only a padded source (a comment of 16 KiB) runs lazy functions.
+- On the experiment branch an arrow in parentheses that starts a call, `(() => ...)()`, was lazy at first, because the inner `(` moves `eager_at` before the arrow is checked. A test caught it. It matters only if arrows become lazy.
+- `rust-book-search` is 0.9% lower in instructions with this change. The cause was not examined.
