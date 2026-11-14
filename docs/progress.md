@@ -11289,25 +11289,27 @@ What changed since the spike:
 - The selector parser keeps its simple selectors in one scratch stack and gives each compound a `Vec` of its exact size. Before, each compound `Vec` had room for 4. This is where most of the memory came back.
 - `has_class_id` is `#[inline(never)]`, reads a list only when one exists, and makes none. A script that asks once does not pay for a list that no style pass reads again.
 
-Measurements. Machine archMachine, `perf stat -e instructions:u`, 3 runs each, spread under 0.02% on the ramps. `bare-drive` built with `-p bare-drive`, ramp pages over http. MAIN is `95bd786440` for the ramps and journeys. Baseline `f6415364`.
+Measurements. Machine archMachine, `perf stat -e instructions:u`, 3 runs each, spread under 0.02% on the ramps. `bare-drive` built with `-p bare-drive`, ramp pages over http. MAIN is `49d6475d05` for the matrix, the stress memory, the journeys and `lookup`; `95bd786440` for the ramps. Baseline `f6415364`.
 
 | Ramp (M instructions) | Baseline `f6415364` | MAIN `95bd786440` | BRANCH | BRANCH against baseline |
 | --- | ---: | ---: | ---: | ---: |
 | `compm_22000` | 11,664 | 1,828.0 | 1,554.8 | 7.50x lower (goal 10x: 1,166 M) |
 | `rest_13` | 10,873 | 1,239.3 | 1,040.4 | 10.45x lower (goal met) |
 
-The spike had 1,543.9 M and 1,020.3 M. The branch gives back 11 M and 20 M of that for the memory and the cost rows. Other ramps against MAIN: `compm_*` -0.4% to -13%, `rest_*` -10% to -23% (`rest_200` 12,489 to 9,757 M).
+The spike had 1,543.9 M and 1,020.3 M. The branch gives back 11 M and 20 M of that for the memory and the cost rows. Other ramps against MAIN (version before the last change): `compm_*` -0.4% to -13%, `rest_*` -10% to -23% (`rest_200` 12,489 to 9,757 M).
 
-The 47 journeys, virtual clock, corpus `virtual-settled`, 3 runs (version before the last change to `has_class_id`): sum of medians 42,316.5 to 41,846.0 M (-1.1%), cpu_ms -0.5%, PSS sum -0.6%. `python-docs-search-results`: MAIN 2,453.8 M (spread 0.04%); the version before the last change 2,486.5 M (+1.3%); the final version 2,460.9 M (+0.28%, 3 runs from 2,460.2 to 2,461.6 M). It is still not below MAIN. The cause of the last 7 M is not found: the symbol profile differs by 9% in samples for a 0.3% difference in instructions, so I do not trust it (hypothesis: the lookup of each class token of the page at the first style pass, which MAIN did not do). The gate "not worse than main" is **not met** on this one journey, by 0.28%.
+The last change (`has_class_id` makes a list only after its attribute reads number more than the nodes of the document) came from the matrix. The first version of `has_class_id` made no list at all. It cut `python-docs-search-results` from +1.3% to +0.3%, but the row `browser_load lookup 1` and `lookup 10` grew +12% and +13%, because a loop of `querySelectorAll` read the attribute of each element again and again. With the count, `lookup 1` is 92.70 M against 101.45 M on MAIN (-8.6%, 3 runs, spread under 0.001%).
 
-Cost matrix (803 rows, MAIN against the branch, both allocators; base built with `--workspace --examples -p bare-stress`): **0 rows over 0.5%** (run before the last change to `has_class_id` and to `fill_classes`, which touches only the page-token path; those two rows were not re-run: `python-docs-search-results`, `compm`, `rest`).
+The 47 journeys, virtual clock, corpus `virtual-settled`, 4 runs, `--pss`, MAIN `49d6475d05`: sum of medians 119,047.3 to 118,195.3 M (-0.7%), PSS sum -3.8%, cpu_ms +1.1% (wall time under load, not trusted), replay misses none. 8 of the 47 journeys are above MAIN. `python-docs-search-results` 2,453.3 to 2,462.4 M (**+0.4%**, spread 0.0%), `docs-rs-home` +0.9% (58.9 to 59.4 M), `debian-org-home` +0.6%, `kernel-org-home` +0.2%. The gate "`python-docs-search-results` not worse than main" is **not met**: +9 M of 2,453 M. I did not find the cause. The symbol profiles differ by 9% in samples for a 0.4% difference in instructions, so I do not trust them. Hypothesis: the lookup of each class token of the page at the first style pass, which MAIN did not do.
 
-Memory, `bare-stress scale css`, 2 runs each, 78 cases of 5 MB or more: **0 cases grow by more than 2%** (the spike had 6, worst `css-escapes` +11.3%).
+Cost matrix (803 rows, MAIN `49d6475d05` against the branch; base built with `--release -p bare-drive -p bare-stress` after `--workspace --examples`; both allocators): **0 rows over 0.5% under both allocators**. 7 rows are over under glibc only (`block-deep 40` +1.04%, `block-nested-collapse 20` +1.11%, `overflow-nested-auto 20` +1.09%, `inline-blocks-nested 40`, `inline-deep-spans-many-lines 100`, `overflow-wide-content 2000`, `flex-ref-block-nested-text 2000`) and under jemalloc they are -0.07% to -0.2%. Mean glibc -0.07%, jemalloc -0.12%. `parse_load deep 1` and `deep 10` fail to run (stack overflow, known on main).
 
-Keycost (page `p5-keycost`, MAIN `95bd786440`): `#a1` 278.5 M for each key on both, `#f0` 283.8 M on both, load and mount 590.9 M against 591.0 M, peak RSS 31.3 MiB at 50 keys.
+Memory, `bare-stress scale css`, 2 runs each, 78 cases of 5 MB or more, MAIN `49d6475d05`: **0 cases grow by more than 2%** (the spike had 6, worst `css-escapes` +11.3%). Best: `css-long-descendant` 500000 -58%, `css-selector-list` 500000 -33%.
 
-Tests: `cargo test --release -p bare-html -p bare-css --lib` passes (296 and 185 tests). Workspace: only the known failures (7 openssl TLS tests; three tests that are flaky under load). New tests: late-added selector classes match; exact name match; a compound keeps no spare room; a big list finds its groups by key; a sheet added later matches the classes that the page had before.
+Keycost (page `p5-keycost`, MAIN `95bd786440`, before the last change): `#a1` 278.5 M for each key on both, `#f0` 283.8 M on both, load and mount 590.9 M against 591.0 M, peak RSS 31.3 MiB at 50 keys.
 
-Not tested: the per-element saving in the restyle pass after the fixes (the ramp totals above are the measure); the cost matrix after the last two edits; wall time; live sites; quirks-mode class folding (the engine has none in these files); test262 and exec_diff (no change in `crates/js`).
+Tests: `cargo test --release --workspace --no-fail-fast` after the rebase on `49d6475d`: only the 7 known openssl TLS failures. New tests: late-added selector classes match; exact name match; a compound keeps no spare room; a big list finds its groups by key; a sheet added later matches the classes that the page had before.
 
-Noticed, not changed: `python-docs-search-results` is the only journey above MAIN (+0.28%).
+Not tested: the per-element saving in the restyle pass after the fixes (the ramp totals are the measure); the ramps and the keycost after the last change (`compm_22000` and `rest_13` were re-run: 1,554.8 M and 1,040.4 M, as before); wall time; live sites; quirks-mode class folding (the engine has none in these files); test262 and exec_diff (no change in `crates/js`).
+
+Noticed, not changed: 8 of the 47 journeys are slightly above MAIN (largest `docs-rs-home` +0.9%, a 59 M page).

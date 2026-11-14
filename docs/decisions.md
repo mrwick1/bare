@@ -2214,8 +2214,8 @@ The spike has 5 cost-matrix rows over 0.5% and 6 `bare-stress` css cases that gr
 
 ## 2026-11-14: class atoms merged after a cost fix (step 1 of criterion 3, PR #541)
 
-Owner decision 2026-11-14: fix the cost of the spike and merge it. Chosen: intern only the class names that a selector uses; page tokens are looked up and never inserted; a hash byte for each table slot; exact-size compounds in the selector parser; `has_class_id` reads a list only when one exists. Result: `compm_22000` 1,554.8 M (7.50x below baseline, goal 10x), `rest_13` 1,040.4 M (10.45x), 0 cost-matrix rows over 0.5%, 0 `bare-stress` css cases over +2% memory.
+Owner decision 2026-11-14: fix the cost of the spike and merge it. Chosen: intern only the class names that a selector uses; page tokens are looked up and never inserted; a hash byte for each table slot; exact-size compounds in the selector parser; `has_class_id` reads a list when one exists, and makes one only after its attribute reads number more than the nodes of the document. Result: `compm_22000` 1,554.8 M (7.50x below baseline, goal 10x), `rest_13` 1,040.4 M (10.45x), 0 cost-matrix rows over 0.5%, 0 `bare-stress` css cases over +2% memory.
 
-Not chosen: keep the generic `Atom` table for class names (about 70 bytes for each distinct name); fill a list in `has_class_id` (+1.3% on `python-docs-search-results`, a script that asks once paid for a list that nobody read again).
+Not chosen: keep the generic `Atom` table for class names (about 70 bytes for each distinct name); fill a list on every `has_class_id` miss (+1.3% on `python-docs-search-results`); never fill one (+12% on `browser_load lookup`, a query loop read the attribute again and again).
 
-Open: `python-docs-search-results` is +0.28% against MAIN. Numbers: `docs/progress.md`, "criterion 3, step 1: class atoms, cost fixed".
+Open: `python-docs-search-results` is +0.4% against MAIN (gate: not worse). Numbers: `docs/progress.md`, "criterion 3, step 1: class atoms, cost fixed".

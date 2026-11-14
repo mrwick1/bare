@@ -409,6 +409,8 @@ pub struct Document {
     class_cache: RefCell<ClassCache>,
     // The class names of each element that a selector uses, as class numbers. See `with_classes`.
     class_epoch: Cell<u32>,
+    /// The class tests of `has_class_id` that read the attribute because the element had no list (see there).
+    class_scans: Cell<u32>,
     // The size of the class table when the lists in `class_cache` were made, or 0 when none was.
     places: [OnceCell<Vec<(u32, u32)>>; 2],
     // The place of each element among its sibling elements, from the start and from the end. Made the
@@ -904,6 +906,7 @@ impl Document {
             class_sets: Default::default(),
             class_cache: Default::default(),
             class_epoch: Cell::new(0),
+            class_scans: Cell::new(0),
             foreign: HashMap::default(),
             any_ns: false,
             watched: HashSet::default(),
@@ -1598,7 +1601,8 @@ impl Document {
     }
 
     /// Does the element `el` have the class `class`? Like `has_class`, with the number of the name (`class_id`). It reads the list of the element
-    /// when one is made (by a style pass). It makes none: a script that asks once should not pay for a list that nobody reads again.
+    /// when one is made (by a style pass). When none is made it reads the attribute, until these reads number more than the nodes: a page
+    /// that asks about each element once (a script) pays no list, and a page that asks again and again (a query loop) makes the lists then.
     #[inline(never)]
     pub fn has_class_id(&self, el: NodeId, class: ClassId) -> bool {
         let used = CLASS_COUNT.with(Cell::get);
@@ -1617,6 +1621,11 @@ impl Document {
                 return Self::with_slot(&cache, slot, |list| if list.len() <= 8 { list.contains(&class) } else { list.binary_search_by_key(&class.0, |a| a.0).is_ok() });
             }
         }
+        let scans = self.class_scans.get();
+        if scans as usize > self.nodes.len() {
+            return self.with_classes(el, |list| if list.len() <= 8 { list.contains(&class) } else { list.binary_search_by_key(&class.0, |a| a.0).is_ok() });
+        }
+        self.class_scans.set(scans + 1);
         let Some(value) = self.attr(el, Atom::CLASS) else { return false };
         CLASSES.with(|t| {
             let t = t.borrow();
