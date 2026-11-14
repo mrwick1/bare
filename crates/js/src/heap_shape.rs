@@ -694,6 +694,7 @@ impl Object {
             }
         }
         self.shape = shape;
+        self.dict = None;
         self.set_slots(slots);
         true
     }
@@ -2208,6 +2209,28 @@ mod tests {
         let p = h.new_object(None).unwrap();
         setn(&mut h, p, keys[0], 9.0);
         assert_eq!(getn(&mut h, p, keys[0]), 9.0);
+    }
+
+    #[test]
+    fn leaving_dictionary_mode_drops_the_dictionary_and_keeps_the_values() {
+        let mut h = Heap::default();
+        let keys: Vec<_> = ["a", "b", "c", "d"].iter().map(|s| k(&mut h, s)).collect();
+        let o = h.new_object(None).unwrap();
+        for (i, key) in keys.iter().enumerate() {
+            setn(&mut h, o, *key, i as f64);
+        }
+        let Heap { objects, shapes, .. } = &mut h;
+        let ob = objects.get_mut(o.index, o.gn).unwrap();
+        ob.to_dict(shapes);
+        assert!(ob.dict().is_some());
+        assert!(ob.to_shapes(shapes));
+        assert!(ob.dict().is_none(), "no dictionary in shape mode");
+        assert_ne!(ob.shape, 0);
+        for (i, key) in keys.iter().enumerate() {
+            assert_eq!(getn(&mut h, o, *key), i as f64);
+        }
+        h.collect(&[Value::Object(o)]).unwrap();
+        assert_eq!(keys_text(&mut h, o), ["a", "b", "c", "d"]);
     }
 
     #[test]
