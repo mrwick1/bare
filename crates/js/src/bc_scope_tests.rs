@@ -13,10 +13,10 @@ fn big<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
 /// Make every function keep its environment (no frame slots) and every site resolve at its first run, so the walker learns the
 /// index of each binding that the run reads.
 fn force_env(it: &mut Interp) {
-    for s in &mut it.scopes {
+    for s in &mut it.cc.scopes {
         s.fr = FR_ENV;
     }
-    for s in &mut it.slots.sites {
+    for s in &mut it.cc.slots.sites {
         if *s & UNRES != 0 {
             *s |= SEEN;
         }
@@ -132,7 +132,7 @@ fn layout_corner_cases_match_the_walker() {
 /// Names of the bindings of the scope of the first function named `name`.
 fn binds_of(it: &mut Interp, name: &str) -> Vec<(String, u8, BindKind)> {
     let n = it.intern_name(name);
-    let fid = (0..it.prog.stats().funcs).map(FuncId::from_index).find(|f| it.func_name[f.index()] == n).unwrap();
+    let fid = (0..it.prog.stats().funcs).map(FuncId::from_index).find(|f| it.cc.cold.func_name[f.index()] == n).unwrap();
     let fs = it.bc_fn_scope(fid).unwrap();
     let mut b = Vec::new();
     it.bc_binds(fs.scope, &mut b);
@@ -148,7 +148,7 @@ fn function_layout_and_flags() {
         let mut it = Interp::new(&prog, Heap::default(), EvalLimits::default()).unwrap();
         let fid_of = |it: &mut Interp, name: &str| {
             let n = it.intern_name(name);
-            (0..it.prog.stats().funcs).map(FuncId::from_index).find(|f| it.func_name[f.index()] == n).unwrap()
+            (0..it.prog.stats().funcs).map(FuncId::from_index).find(|f| it.cc.cold.func_name[f.index()] == n).unwrap()
         };
         let b = binds_of(&mut it, "f");
         let got: Vec<(&str, u8, BindKind)> = b.iter().map(|(n, f, k)| (n.as_str(), *f, *k)).collect();

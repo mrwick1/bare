@@ -24,8 +24,8 @@ fn slots_of(src: &str, name: &str) -> Vec<u32> {
     let mut it = Interp::new(&prog, Heap::default(), EvalLimits { max_steps: 100_000, ..Default::default() }).unwrap();
     it.run().unwrap();
     (0..it.prog.stats().exprs)
-        .filter(|&i| matches!(it.prog.expr(ExprId::from_index(i)).kind, ExprKind::Ident) && it.names[it.expr_name[i] as usize] == name)
-        .map(|i| it.slots.sites[i])
+        .filter(|&i| matches!(it.prog.expr(ExprId::from_index(i)).kind, ExprKind::Ident) && it.names[it.cc.expr_name[i] as usize] == name)
+        .map(|i| it.cc.slots.sites[i])
         .collect()
 }
 
@@ -240,7 +240,7 @@ fn frame_count(src: &str) -> (usize, usize) {
         it.run().unwrap();
         it.drain_microtasks().unwrap();
         let n = it.prog.stats().funcs;
-        ((0..n).filter(|&i| it.scopes[i].fr == FR_ON).count(), n)
+        ((0..n).filter(|&i| it.cc.scopes[i].fr == FR_ON).count(), n)
     })
 }
 

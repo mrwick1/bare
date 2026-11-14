@@ -225,7 +225,7 @@ impl<'p> Interp<'p> {
             }
             Body::Block(l) => {
                 if g.it.has_lexical(l) {
-                    if fs.flags & bc_scope::BF_SELF_NAME != 0 && g.prog.list(l).any(|s| matches!(g.prog.stmt(s).kind, StmtKind::Function(d) if g.it.func_name[d.index()] == g.it.func_name[fid.index()])) {
+                    if fs.flags & bc_scope::BF_SELF_NAME != 0 && g.prog.list(l).any(|s| matches!(g.prog.stmt(s).kind, StmtKind::Function(d) if g.it.cc.cold.func_name[d.index()] == g.it.cc.cold.func_name[fid.index()])) {
                         // The declaration takes the flags of the own name (`SELF`), which `InitEnv` does not change.
                         return Err("a function declaration with the name of its function");
                     }
@@ -486,7 +486,7 @@ impl Gen<'_, '_> {
             for s in prog.list(l) {
                 match prog.stmt(s).kind {
                     StmtKind::Function(f) => {
-                        let n = self.it.func_name[f.index()];
+                        let n = self.it.cc.cold.func_name[f.index()];
                         let i = binds.iter().position(|b| b.name == n && matches!(b.kind, BindKind::Func(_))).ok_or("no binding")?;
                         let r = self.reg()?;
                         self.emit(Op::Closure, r, f.index() as u32, 0)?;

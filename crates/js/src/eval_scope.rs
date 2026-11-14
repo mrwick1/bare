@@ -138,7 +138,7 @@ impl<'p> Interp<'p> {
     /// Record the scope of an identifier site in the walk.
     fn sc_site(&mut self, site: u32, n: u32) {
         if n != self.n_arguments {
-            self.slots.sites[site as usize] = UNRES | (self.sc_cur + 1);
+            self.cc.slots.sites[site as usize] = UNRES | (self.sc_cur + 1);
         }
     }
 
@@ -146,7 +146,7 @@ impl<'p> Interp<'p> {
     fn pat_idents(&self, p: PatId, out: &mut Vec<u32>) {
         let prog = &self.prog;
         match prog.pat(p).kind {
-            PatKind::Ident => out.push(self.pat_name[p.index()]),
+            PatKind::Ident => out.push(self.cc.cold.pat_name[p.index()]),
             PatKind::Array(l) => prog.list(l).for_each(|q| self.pat_idents(q, out)),
             PatKind::Object(l) => prog.list(l).for_each(|q| self.pat_idents(prog.pat_prop(q).value, out)),
             PatKind::Assign { target, .. } | PatKind::Rest(target) => self.pat_idents(target, out),
@@ -164,7 +164,7 @@ impl<'p> Interp<'p> {
                         self.pat_idents(prog.decl(d).target, out);
                     }
                 }
-                StmtKind::Function(fid) if funcs => out.push(self.func_name[fid.index()]),
+                StmtKind::Function(fid) if funcs => out.push(self.cc.cold.func_name[fid.index()]),
                 StmtKind::Class(c) => {
                     if let Some(sp) = prog.class(c).name {
                         out.push(self.name_at(sp));
@@ -185,12 +185,12 @@ impl<'p> Interp<'p> {
             RKind::Fn(fid, is_expr) => {
                 let f = *prog.func(fid);
                 if is_expr && f.name.is_some() && f.kind == FuncKind::Normal {
-                    out.push(self.func_name[fid.index()]);
+                    out.push(self.cc.cold.func_name[fid.index()]);
                 }
                 for p in prog.list(f.params) {
                     self.pat_idents(p, out);
                 }
-                out.extend_from_slice(&self.scopes[fid.index()].vars);
+                out.extend_from_slice(&self.cc.scopes[fid.index()].vars);
                 if let Some(m) = prog.module.as_ref().filter(|m| m.func == fid) {
                     for i in &m.imports {
                         out.push(self.intern_name(&prog.name(i.local)));
@@ -300,7 +300,7 @@ impl<'p> Interp<'p> {
         // A dynamic site may meet an object environment (`eval_with.rs`): the plain search does not know it.
         #[cfg(debug_assertions)]
         {
-            let s = self.slots.sites[site as usize];
+            let s = self.cc.slots.sites[site as usize];
             if r.is_none_or(|(e, _)| e != FRAME_ENV) && !(self.with_any && s & (LOCAL | FRAME) == 0 && s != GLOBAL) {
                 assert_eq!(r, self.lookup(n), "static scope resolution of '{}' differs from the search", self.names[n as usize]);
             }
@@ -312,7 +312,7 @@ impl<'p> Interp<'p> {
     /// on the typing page), then an environment (0 hops: 36% and 24%; 1 hop: 4% and 3%; more: 2.2% and 0.3%). `None`: ask `find_name`.
     #[inline(always)]
     fn fast_binding(&mut self, n: u32, site: u32) -> Option<&mut Binding> {
-        let s = self.slots.sites[site as usize];
+        let s = self.cc.slots.sites[site as usize];
         let (e, i) = if s & (UNRES | LOCAL | FRAME) == FRAME {
             (FRAME_ENV, self.fp + (s & 0xFFFF) as usize)
         } else if s & LOCAL != 0 {
@@ -333,7 +333,7 @@ impl<'p> Interp<'p> {
 
     #[inline(always)]
     fn find_name_fast(&mut self, n: u32, site: u32) -> Option<(u32, usize)> {
-        let s = self.slots.sites[site as usize];
+        let s = self.cc.slots.sites[site as usize];
         if s & LOCAL != 0 {
             let mut e = self.env;
             for _ in 0..(s >> 16) & MAX_HOPS {
@@ -366,26 +366,26 @@ impl<'p> Interp<'p> {
             // A site in a function with frame slots has no environment to search, so it resolves at its first run. While no
             // function has a frame (`fr_any`), no scope is a frame scope, and the first run of a site is a search, as before.
             if s & SEEN == 0 && !(self.fr_any && self.sc_all[scope as usize].base != NONE) {
-                self.slots.sites[site as usize] = s | SEEN;
+                self.cc.slots.sites[site as usize] = s | SEEN;
                 return self.lookup_dyn(n);
             }
             // The first call of a function that may get its frame (`FR_WAIT`) resolves nothing: a site can run twice in one call
             // (`typeof x` reads its site twice), and a resolution for an environment would not suit the frame.
             let sc = &self.sc_all[scope as usize];
-            if sc.base == NONE && self.scopes[sc.func as usize].fr == FR_WAIT {
+            if sc.base == NONE && self.cc.scopes[sc.func as usize].fr == FR_WAIT {
                 return self.lookup_dyn(n);
             }
             s = self.sc_resolve(n, scope);
         }
         if s & (LOCAL | FRAME) == FRAME {
-            self.slots.sites[site as usize] = s;
+            self.cc.slots.sites[site as usize] = s;
             return Some((FRAME_ENV, self.fp + (s & 0xFFFF) as usize));
         }
         let mut found = None;
         if s == GLOBAL {
             found = self.find_in(0, n).map(|i| (0, i));
             if found.is_none() {
-                self.slots.sites[site as usize] = s;
+                self.cc.slots.sites[site as usize] = s;
                 return None;
             }
         } else if s & LOCAL != 0 {
@@ -405,7 +405,7 @@ impl<'p> Interp<'p> {
                 }
             }
         }
-        self.slots.sites[site as usize] = s;
+        self.cc.slots.sites[site as usize] = s;
         found.or_else(|| self.lookup_dyn(n))
     }
 }
@@ -483,7 +483,7 @@ impl<'p> Interp<'p> {
                 for p in prog.list(f.params) {
                     self.fr_put(p, INIT | MUT, out, names);
                 }
-                out.extend(self.scopes[fid.index()].vars.iter().map(|&name| Binding { name, flags: INIT | MUT, value: Value::Undefined }));
+                out.extend(self.cc.scopes[fid.index()].vars.iter().map(|&name| Binding { name, flags: INIT | MUT, value: Value::Undefined }));
                 if let Body::Block(l) = f.body {
                     self.fr_lex(l, out, names);
                 }
@@ -529,7 +529,7 @@ impl<'p> Interp<'p> {
     /// rest (`FScope`). A function in a class body keeps its environment too: the end of its walk set `FR_ENV`.
     fn fr_leaf(&self, fid: FuncId) -> bool {
         let f = self.prog.func(fid);
-        let fsd = &self.scopes[fid.index()];
+        let fsd = &self.cc.scopes[fid.index()];
         let is_expr = matches!(self.sc_all[fsd.lo as usize].kind, RKind::Fn(_, true));
         fsd.fl & FL_NOFR == 0
             && !fsd.uses_args
@@ -549,9 +549,9 @@ impl<'p> Interp<'p> {
         // The first call has not returned (a recursive call, or a getter that calls back): its sites resolve for an environment,
         // so this function keeps its environment.
         let cur = self.cur as u32;
-        let running = self.scopes[me].fr == FR_WAIT && self.stk.frames.iter().any(|f| f.script == cur && matches!(f.at, Where::Func(x) if x == fid));
+        let running = self.cc.scopes[me].fr == FR_WAIT && self.stk.frames.iter().any(|f| f.script == cur && matches!(f.at, Where::Func(x) if x == fid));
         if running || !self.fr_leaf(fid) {
-            self.scopes[me].fr = FR_ENV;
+            self.cc.scopes[me].fr = FR_ENV;
             return false;
         }
         self.fr_layout(fid)
@@ -563,8 +563,8 @@ impl<'p> Interp<'p> {
     #[cold]
     fn fr_layout(&mut self, fid: FuncId) -> bool {
         let me = fid.index();
-        self.scopes[me].fr = FR_ENV;
-        let lo = self.scopes[me].lo as usize;
+        self.cc.scopes[me].fr = FR_ENV;
+        let lo = self.cc.scopes[me].lo as usize;
         // `func` is an index in the function table of one script. The scopes of the next script follow the last function, and its root can have the
         // same index. So can the function scope of a lazy function (`lazy_load`) that is walked next: a function has one `Fn` scope, the first.
         let hi = lo + 1 + self.sc_all[lo + 1..].iter().take_while(|r| r.func as usize == me && !matches!(r.kind, RKind::Root | RKind::Fn(..))).count();
@@ -583,7 +583,7 @@ impl<'p> Interp<'p> {
             self.fr_ends.push(pool.len() as u32);
         }
         // The arguments go to the first slots, so the parameter names must be distinct.
-        ok = ok && prog.list(f.params).enumerate().all(|(i, p)| pool.get(first + i).is_some_and(|b| b.name == self.pat_name[p.index()]));
+        ok = ok && prog.list(f.params).enumerate().all(|(i, p)| pool.get(first + i).is_some_and(|b| b.name == self.cc.cold.pat_name[p.index()]));
         if ok {
             let mut base = first as u32;
             for (s, &end) in (lo..hi).zip(&self.fr_ends) {
@@ -593,13 +593,13 @@ impl<'p> Interp<'p> {
                 let sc = &mut self.sc_all[s];
                 (sc.start, sc.len, sc.base) = (start, len, rel);
                 match sc.kind {
-                    RKind::Block(st) | RKind::Switch(st) | RKind::ForVar(st) => self.stmt_label[st.index()] = FR_MARK | rel << 12 | len,
-                    RKind::Catch(st) => self.stmt_label[st.index()] = FR_MARK,
+                    RKind::Block(st) | RKind::Switch(st) | RKind::ForVar(st) => self.cc.cold.stmt_label[st.index()] = FR_MARK | rel << 12 | len,
+                    RKind::Catch(st) => self.cc.cold.stmt_label[st.index()] = FR_MARK,
                     RKind::Fn(..) | RKind::Root | RKind::Barrier => {}
                 }
                 base = end;
             }
-            let fsd = &mut self.scopes[me];
+            let fsd = &mut self.cc.scopes[me];
             (fsd.fr, fsd.lo, fsd.fr_len) = (FR_ON, first as u32, (pool.len() - first) as u8);
             self.fr_any = true;
         } else {
@@ -618,7 +618,7 @@ impl<'p> Interp<'p> {
         let f = *self.prog.func(fid);
         let base = self.envs[FRAME_ENV as usize].bindings.len();
         let bs = &mut self.envs[FRAME_ENV as usize].bindings;
-        let fsd = &self.scopes[fid.index()];
+        let fsd = &self.cc.scopes[fid.index()];
         bs.extend_from_slice(&self.fr_pool[fsd.lo as usize..fsd.lo as usize + fsd.fr_len as usize]);
         for (i, b) in bs[base..base + f.params.len()].iter_mut().enumerate() {
             b.value = args.get(i).copied().unwrap_or(Value::Undefined);
@@ -649,7 +649,7 @@ impl<'p> Interp<'p> {
     /// frame slots. For `let`, `const` and `catch` names, which are declared and not searched.
     #[inline(never)]
     fn pat_frame(&mut self, n: u32, site: u32) -> Option<usize> {
-        let s = self.slots.sites[site as usize];
+        let s = self.cc.slots.sites[site as usize];
         if s & (UNRES | LOCAL | FRAME) == FRAME {
             // The resolved slot: the end of `pat_frame_slow`, without its call.
             debug_assert_eq!(self.envs[FRAME_ENV as usize].bindings[self.fp + (s & 0xFFFF) as usize].name, n);
@@ -665,13 +665,13 @@ impl<'p> Interp<'p> {
             let sc = &self.sc_all[scope as usize];
             if sc.base == NONE {
                 // A function that may get its frame (before its decision) must keep its sites unmarked.
-                if self.scopes[sc.func as usize].fr == FR_ENV {
-                    self.slots.sites[site as usize] = NOFRAME;
+                if self.cc.scopes[sc.func as usize].fr == FR_ENV {
+                    self.cc.slots.sites[site as usize] = NOFRAME;
                 }
                 return None;
             }
             s = self.sc_resolve(n, scope);
-            self.slots.sites[site as usize] = s;
+            self.cc.slots.sites[site as usize] = s;
         }
         debug_assert!(s & (LOCAL | FRAME) == FRAME, "a declared name of a frame scope has a slot");
         let i = self.fp + (s & 0xFFFF) as usize;

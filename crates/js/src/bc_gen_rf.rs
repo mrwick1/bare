@@ -16,7 +16,7 @@ impl<'p> Interp<'p> {
             && f.simple_params
             && !f.is_async()
             && !f.is_generator()
-            && self.cls.fflags[fid.index()] == 0
+            && self.cc.cold.fflags[fid.index()] == 0
             && fs.flags & (BF_ARGS | BF_NEW_TARGET | BF_DERIVED | BF_IN_CLASS | BF_SELF_NAME) == 0;
         if !ok {
             return None;
@@ -68,7 +68,7 @@ impl<'p> Interp<'p> {
             }
             todo.extend(iw.funcs);
             for (site, s) in iw.sites {
-                let n = if site < nexprs { self.expr_name[site as usize] } else { self.pat_name[(site - nexprs) as usize] };
+                let n = if site < nexprs { self.cc.expr_name[site as usize] } else { self.cc.cold.pat_name[(site - nexprs) as usize] };
                 let mut t = s;
                 while t != NONE {
                     if self.bc_declares(t, n) {
@@ -206,7 +206,7 @@ impl Gen<'_, '_> {
     pub(super) fn operand(&mut self, e: ExprId, keep: bool) -> G<u32> {
         let x = self.strip(e);
         if keep && self.rf.is_some() && matches!(self.prog.expr(x).kind, ExprKind::Ident) {
-            let n = self.it.expr_name[x.index()];
+            let n = self.it.cc.expr_name[x.index()];
             if let Site::Reg(r) = self.site(x.index() as u32, n)? {
                 return Ok(r);
             }
@@ -340,7 +340,7 @@ impl Gen<'_, '_> {
                     None => false,
                 },
                 ExprKind::Assign { op, target, value } if matches!(self.prog.pat(target).kind, PatKind::Ident) => {
-                    let n = self.it.pat_name[target.index()];
+                    let n = self.it.cc.cold.pat_name[target.index()];
                     match self.site_w(self.it.pat_site(target.index()), n)? {
                         Site::Reg(r) => {
                             self.rf_assign(op, r, value, None)?;
@@ -368,7 +368,7 @@ impl Gen<'_, '_> {
         if !matches!(self.prog.expr(x).kind, ExprKind::Ident) {
             return Ok(None);
         }
-        let n = self.it.expr_name[x.index()];
+        let n = self.it.cc.expr_name[x.index()];
         let s = if write { self.site_w(x.index() as u32, n)? } else { self.site(x.index() as u32, n)? };
         Ok(if let Site::Reg(r) = s { Some(r) } else { None })
     }
@@ -469,7 +469,7 @@ impl Gen<'_, '_> {
                 }
             }
             ExprKind::Assign { op, target, value } if matches!(self.prog.pat(target).kind, PatKind::Ident) => {
-                let n = self.it.pat_name[target.index()];
+                let n = self.it.cc.cold.pat_name[target.index()];
                 let Site::Reg(r) = self.site_w(self.it.pat_site(target.index()), n)? else { return Ok(false) };
                 self.rf_assign(op, r, value, Some(dst))?;
             }

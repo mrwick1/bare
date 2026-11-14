@@ -26,7 +26,7 @@ fn listing(src: &str) -> String {
         let mut inner = it.bc_walk(Some(f), s).funcs;
         inner.reverse();
         todo.extend(inner);
-        let name = it.names[it.func_name[f.index()] as usize].clone();
+        let name = it.names[it.cc.cold.func_name[f.index()] as usize].clone();
         let _ = writeln!(out, "fn{} {}", f.index(), if name.is_empty() { "(anonymous)" } else { &name });
         match it.bc_compile(f) {
             Ok(c) => {

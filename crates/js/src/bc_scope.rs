@@ -203,8 +203,8 @@ impl<'p> Interp<'p> {
             return None;
         }
         let f = *self.prog.func(fid);
-        let fsd = &self.scopes[fid.index()];
-        let ff = self.cls.fflags[fid.index()];
+        let fsd = &self.cc.scopes[fid.index()];
+        let ff = self.cc.cold.fflags[fid.index()];
         let mut flags = 0;
         for (on, b) in [
             (fsd.fl & FL_THIS != 0, BF_THIS),
@@ -256,7 +256,7 @@ impl<'p> Interp<'p> {
             RKind::Barrier => {}
             RKind::Fn(fid, is_expr) => {
                 let f = *prog.func(fid);
-                let ff = self.cls.fflags[fid.index()];
+                let ff = self.cc.cold.fflags[fid.index()];
                 if ff != 0 {
                     if ff & F_DERIVED != 0 {
                         decl(out, Bind { name: self.cls.n_this, flags: MUT, kind: BindKind::Hidden }, false);
@@ -265,15 +265,15 @@ impl<'p> Interp<'p> {
                     decl(out, Bind { name: self.cls.n_nt, flags: INIT, kind: BindKind::Hidden }, false);
                 }
                 if is_expr && f.name.is_some() && f.kind == FuncKind::Normal {
-                    decl(out, Bind { name: self.func_name[fid.index()], flags: INIT | SELF, kind: BindKind::SelfName }, false);
+                    decl(out, Bind { name: self.cc.cold.func_name[fid.index()], flags: INIT | SELF, kind: BindKind::SelfName }, false);
                 }
                 for p in prog.list(f.params) {
                     pat(self, out, p, INIT | MUT, BindKind::Param);
                 }
-                if self.scopes[fid.index()].uses_args && f.kind != FuncKind::Arrow {
+                if self.cc.scopes[fid.index()].uses_args && f.kind != FuncKind::Arrow {
                     decl(out, Bind { name: self.n_arguments, flags: INIT | MUT, kind: BindKind::Arguments }, false);
                 }
-                for &name in &self.scopes[fid.index()].vars {
+                for &name in &self.cc.scopes[fid.index()].vars {
                     decl(out, Bind { name, flags: INIT | MUT, kind: BindKind::Var }, true);
                 }
                 if let Body::Block(l) = f.body {
@@ -328,7 +328,7 @@ impl<'p> Interp<'p> {
                         }
                     }
                 }
-                StmtKind::Function(fid) if funcs => add(out, Bind { name: self.func_name[fid.index()], flags: INIT | MUT, kind: BindKind::Func(fid) }),
+                StmtKind::Function(fid) if funcs => add(out, Bind { name: self.cc.cold.func_name[fid.index()], flags: INIT | MUT, kind: BindKind::Func(fid) }),
                 StmtKind::Class(c) => {
                     if let Some(sp) = prog.class(c).name {
                         let name = self.name_at(sp);
@@ -671,8 +671,8 @@ impl<'p> Interp<'p> {
     fn bc_check_site(&mut self, r: &mut ScopeCheck, site: u32, scope: u32) {
         r.sites += 1;
         let nexprs = self.prog.exprs.len() as u32;
-        let n = if site < nexprs { self.expr_name[site as usize] } else { self.pat_name[(site - nexprs) as usize] };
-        let s = self.slots.sites[site as usize];
+        let n = if site < nexprs { self.cc.expr_name[site as usize] } else { self.cc.cold.pat_name[(site - nexprs) as usize] };
+        let s = self.cc.slots.sites[site as usize];
         let b1 = self.bc_resolve(n, scope);
         let frame = self.sc_all[scope as usize].base != NONE;
         let mut bad = None;

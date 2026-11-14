@@ -411,3 +411,10 @@ fn call_scoped_looks_names_up_in_the_scope_first_for_handler_code_only() {
         assert_eq!(call_scoped(&mut it, g, Value::Undefined, &[], &[]), "undefinedglobal");
     });
 }
+
+#[test]
+fn a_call_across_scripts_swaps_a_few_words_not_the_tables() {
+    // `select` exchanges the `Code` of two slots with the live program and caches. Only the tables that every lookup reads stay
+    // in the struct (3 tables and a pointer, 80 bytes; it was 248); the other seven are behind one pointer.
+    assert!(std::mem::size_of::<Code>() <= 10 * std::mem::size_of::<usize>(), "{}", std::mem::size_of::<Code>());
+}

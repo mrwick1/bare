@@ -63,7 +63,7 @@ impl Gen<'_, '_> {
         let prog = self.prog.clone();
         match ex.kind {
             ExprKind::Ident => {
-                let n = self.it.expr_name[e.index()];
+                let n = self.it.cc.expr_name[e.index()];
                 let s = self.site(e.index() as u32, n)?;
                 self.load(s, n, dst)
             }
@@ -287,7 +287,7 @@ impl Gen<'_, '_> {
         }
         if op == UnaryOp::Typeof && matches!(self.prog.expr(a).kind, ExprKind::Ident) {
             // `typeof` of a missing name is "undefined" (a name in an environment always exists).
-            let n = self.it.expr_name[a.index()];
+            let n = self.it.cc.expr_name[a.index()];
             match self.site(a.index() as u32, n)? {
                 Site::Global => {
                     let k = self.name(n);
@@ -309,7 +309,7 @@ impl Gen<'_, '_> {
         let prog = self.prog.clone();
         match prog.expr(e).kind {
             ExprKind::Ident => {
-                let n = self.it.expr_name[e.index()];
+                let n = self.it.cc.expr_name[e.index()];
                 Ok(Place::Name(self.site(e.index() as u32, n)?, n))
             }
             ExprKind::Paren(i) => self.place_of(i),
@@ -351,7 +351,7 @@ impl Gen<'_, '_> {
         let mark = self.top;
         let p = match self.prog.pat(target).kind {
             PatKind::Ident => {
-                let n = self.it.pat_name[target.index()];
+                let n = self.it.cc.cold.pat_name[target.index()];
                 Place::Name(self.site(self.it.pat_site(target.index()), n)?, n)
             }
             PatKind::Member(me) => {
