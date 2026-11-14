@@ -9662,3 +9662,7 @@ All runs use the virtual clock and the recorded corpus. 3 runs each.
 - Wall time on an idle machine.
 - The peak memory of an object-heavy page other than the three named journeys.
 - The 8-byte `Value`, `proto` stored in the shape, JSON objects with shapes, and the design's size-class slabs. None of them is built.
+
+## Standing exception: PR #512 compact object cost (approved by owner 2026-11-14)
+
+Compact objects leave 4 of 803 cost rows above +0.5% under both allocators: `proxy_load keys 1` (+0.7%), `proxy_load keys 10` (+1.0%), `recursion_load react 1000` (+0.7%) and `reflect_load keys 10` (+1.4%). The owner approved an exception for these 4 rows only. Reason: the 47 journeys use 0.7% fewer instructions and 1.2% less peak RSS, 393 rows are lower by more than 0.5%, and the 12 rows of the PR #497 exception are recovered. The target of 10% less memory on `python-docs-search-results` is not met (-0.5%). PSS rose 1.4%, and the cause is not known.
