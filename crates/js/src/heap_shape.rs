@@ -445,13 +445,166 @@ impl Iterator for Props<'_> {
 }
 
 impl Object {
+    /// Switch to dictionary mode with the properties `m`: no values, no shape.
+    pub(super) fn set_dict(&mut self, m: PropMap) {
+        self.dict = Some(Box::new(m));
+        self.repr = Repr::In([Value::Undefined; INLINE]);
+        self.n = 0;
+        self.shape = 0;
+    }
+
+    /// The values of the named properties in shape mode (none in dictionary mode). An accessor uses two slots. `n & 3` is `n` (at most
+    /// `INLINE`, 3) and spares the bounds check.
+    #[inline(always)]
+    pub(super) fn slots(&self) -> &[Value] {
+        match &self.repr {
+            Repr::In(a) => &a[..(self.n & 3) as usize],
+            Repr::Heap(v) => v,
+        }
+    }
+
+    #[inline(always)]
+    pub(super) fn slots_mut(&mut self) -> &mut [Value] {
+        match &mut self.repr {
+            Repr::In(a) => &mut a[..(self.n & 3) as usize],
+            Repr::Heap(v) => v,
+        }
+    }
+
+    /// Slot `i` of an object in shape mode. For a hit of an inline cache, a shape already says that `i` is a slot of the object, so the inline form
+    /// reads its array of 3 and needs no count: one test of the form and one bounds check, as the vector had. `None` in dictionary mode.
+    #[inline(always)]
+    pub(super) fn slot(&self, i: usize) -> Option<&Value> {
+        match &self.repr {
+            Repr::In(a) => {
+                debug_assert!(i >= INLINE || i < self.n as usize);
+                a.get(i)
+            }
+            Repr::Heap(v) => v.get(i),
+        }
+    }
+
+    #[inline(always)]
+    pub(super) fn slot_mut(&mut self, i: usize) -> Option<&mut Value> {
+        match &mut self.repr {
+            Repr::In(a) => {
+                debug_assert!(i >= INLINE || i < self.n as usize);
+                a.get_mut(i)
+            }
+            Repr::Heap(v) => v.get_mut(i),
+        }
+    }
+
+    /// The values from slot `from` on (the inline form may add unused ones at the end): what `build` reads for a property.
+    #[inline(always)]
+    pub(super) fn tail(&self, from: usize) -> &[Value] {
+        match &self.repr {
+            Repr::In(a) => &a[from..],
+            Repr::Heap(v) => &v[from..],
+        }
+    }
+
+    /// Does the object have a value in shape mode?
+    #[inline(always)]
+    pub(super) fn has_slots(&self) -> bool {
+        match &self.repr {
+            Repr::In(_) => self.n != 0,
+            Repr::Heap(v) => !v.is_empty(),
+        }
+    }
+
+    /// Slot 0 in shape mode: the `length` of an array. `None` in dictionary mode.
+    #[inline(always)]
+    pub(super) fn slot0(&self) -> Option<&Value> {
+        if self.dict.is_some() {
+            return None;
+        }
+        match &self.repr {
+            Repr::In(a) => Some(&a[0]),
+            Repr::Heap(v) => v.first(),
+        }
+    }
+
+    /// The dictionary of an object in dictionary mode.
+    #[inline(always)]
+    pub(super) fn dict(&self) -> Option<&PropMap> {
+        self.dict.as_deref()
+    }
+
+    #[inline(always)]
+    pub(super) fn dict_mut(&mut self) -> Option<&mut PropMap> {
+        self.dict.as_deref_mut()
+    }
+
+    /// One more value in shape mode. The fourth value moves all of them to a vector.
+    #[inline]
+    pub(super) fn push_slot(&mut self, v: Value) {
+        match &mut self.repr {
+            Repr::In(a) if (self.n as usize) < INLINE => {
+                a[self.n as usize] = v;
+                self.n += 1;
+            }
+            Repr::In(a) => self.repr = Repr::Heap(Self::spill(a, v)),
+            Repr::Heap(vec) => vec.push(v),
+        }
+    }
+
+    /// The vector of a full inline array and one more value. Room for the next one is kept: an object that outgrows its record usually grows more.
+    #[cold]
+    #[inline(never)]
+    fn spill(a: &[Value; INLINE], v: Value) -> Vec<Value> {
+        let mut vec = Vec::with_capacity(2 * INLINE);
+        vec.extend_from_slice(a);
+        vec.push(v);
+        vec
+    }
+
+    /// The values of a new object in shape mode, which has none yet.
+    #[inline]
+    pub(super) fn fill_slots(&mut self, vs: &[Value]) {
+        if vs.len() <= INLINE {
+            if let Repr::In(a) = &mut self.repr {
+                a[..vs.len()].copy_from_slice(vs);
+                self.n = vs.len() as u8;
+                return;
+            }
+        }
+        self.repr = Repr::Heap(vs.to_vec());
+    }
+
+    /// Replace the values of an object that is in shape mode (`to_shapes`): they stay inline when they fit.
+    pub(super) fn set_slots(&mut self, vs: Vec<Value>) {
+        self.n = vs.len().min(INLINE) as u8;
+        self.repr = if vs.len() <= INLINE {
+            let mut a = [Value::Undefined; INLINE];
+            a[..vs.len()].copy_from_slice(&vs);
+            Repr::In(a)
+        } else {
+            Repr::Heap(vs)
+        };
+    }
+
+    /// Remove the `w` values from `at` on; the later ones move down.
+    fn remove_slots(&mut self, at: usize, w: usize) {
+        match &mut self.repr {
+            Repr::In(a) => {
+                let n = self.n as usize;
+                a.copy_within(at + w..n, at);
+                self.n -= w as u8;
+            }
+            Repr::Heap(v) => {
+                v.drain(at..at + w);
+            }
+        }
+    }
+
     /// The own named property `key` (an index key only if it is in `dict`; `elems` is the caller's business).
     #[inline(always)]
     pub(super) fn get_prop(&self, sh: &Shapes, key: PropertyKey) -> Option<Property> {
-        match &self.dict {
+        match self.dict() {
             Some(d) => d.get(key),
             // Each property of a shape has a slot: no slot, no property, and the shape is not read.
-            None if matches!(key, PropertyKey::Index(_)) || self.slots.is_empty() => None,
+            None if matches!(key, PropertyKey::Index(_)) || !self.has_slots() => None,
             None => self.shape_get(sh, key),
         }
     }
@@ -461,7 +614,7 @@ impl Object {
     fn shape_get(&self, sh: &Shapes, key: PropertyKey) -> Option<Property> {
         let (shape, k, slot, attrs) = sh.found[recent_at(self.shape, key)].get();
         if shape == self.shape && k == key {
-            return (slot != u32::MAX).then(|| build(attrs, &self.slots[slot as usize..]));
+            return (slot != u32::MAX).then(|| build(attrs, self.tail(slot as usize)));
         }
         self.shape_find(sh, key)
     }
@@ -476,20 +629,20 @@ impl Object {
             Some(e) => (self.shape, key, e.slot, e.attrs),
             None => (self.shape, key, u32::MAX, 0),
         });
-        e.map(|e| build(e.attrs, &self.slots[e.slot as usize..]))
+        e.map(|e| build(e.attrs, self.tail(e.slot as usize)))
     }
 
     pub(super) fn props<'a>(&'a self, sh: &'a Shapes) -> Props<'a> {
-        match &self.dict {
+        match self.dict() {
             Some(d) => Props::Dict(d.entries.iter()),
-            None => Props::Shape(sh.entries(self.shape).iter(), &self.slots),
+            None => Props::Shape(sh.entries(self.shape).iter(), self.slots()),
         }
     }
 
     /// Run `f` on each own named key in order. Cheaper than `props` when only the keys are needed: no property is built.
     #[inline]
     pub(super) fn each_key(&self, sh: &Shapes, mut f: impl FnMut(PropertyKey)) {
-        match &self.dict {
+        match self.dict() {
             Some(d) => d.entries.iter().flatten().for_each(|(k, _)| f(*k)),
             None => sh.entries(self.shape).iter().for_each(|e| f(e.key)),
         }
@@ -499,12 +652,12 @@ impl Object {
     /// How many index keys are in `dict`. An object in shape mode has none.
     #[inline]
     pub(super) fn index_keys(&self) -> u32 {
-        self.dict.as_ref().map_or(0, |d| d.index_keys)
+        self.dict().map_or(0, |d| d.index_keys)
     }
 
     /// Switch to dictionary mode. The properties keep their positions (`own_pos` hints stay true).
     pub(super) fn to_dict(&mut self, sh: &Shapes) {
-        if self.dict.is_some() {
+        if self.dict().is_some() {
             return;
         }
         let es = sh.entries(self.shape);
@@ -513,15 +666,13 @@ impl Object {
         m.entries.extend(self.props(sh).map(Some));
         m.live = es.len() as u32;
         m.rebuild_index();
-        self.slots = Vec::new();
-        self.shape = 0;
-        self.dict = Some(Box::new(m));
+        self.set_dict(m);
     }
 
     /// Leave dictionary mode: the properties get shapes and slots, in their order. `false` (no change) when the dictionary holds an index
     /// key, too many properties, an array `length` that is read-only, or when the shape table is full.
     pub(super) fn to_shapes(&mut self, sh: &mut Shapes) -> bool {
-        let Some(d) = &self.dict else { return true };
+        let Some(d) = self.dict() else { return true };
         if d.index_keys > 0 || d.live as usize > MAX_PROPS {
             return false;
         }
@@ -542,14 +693,15 @@ impl Object {
                 }
             }
         }
-        (self.shape, self.slots, self.dict) = (shape, slots, None);
+        self.shape = shape;
+        self.set_slots(slots);
         true
     }
 
     /// Write the own named property `key`: add it, or replace it. A change of attributes, an index key, or a full shape table
     /// sends the object to dictionary mode.
     pub(super) fn set_prop(&mut self, sh: &mut Shapes, key: PropertyKey, p: Property) {
-        if let Some(d) = &mut self.dict {
+        if let Some(d) = self.dict_mut() {
             return d.set(key, p);
         }
         let attrs = attrs_of(&p);
@@ -557,17 +709,18 @@ impl Object {
             Some(&Entry { slot, attrs: a, .. }) if a == attrs => {
                 let s = slot as usize;
                 match p {
-                    Property::Data { value, .. } => self.slots[s] = value,
+                    Property::Data { value, .. } => self.slots_mut()[s] = value,
                     Property::Accessor { get, set, .. } => {
-                        self.slots[s] = get.map_or(Value::Undefined, Value::Object);
-                        self.slots[s + 1] = set.map_or(Value::Undefined, Value::Object);
+                        let sl = self.slots_mut();
+                        sl[s] = get.map_or(Value::Undefined, Value::Object);
+                        sl[s + 1] = set.map_or(Value::Undefined, Value::Object);
                     }
                 }
                 return;
             }
             Some(_) => {
                 self.to_dict(sh);
-                return self.dict.as_mut().unwrap().set(key, p);
+                return self.dict_mut().unwrap().set(key, p);
             }
             None => {}
         }
@@ -579,14 +732,16 @@ impl Object {
     pub(super) fn init_fn(&mut self, sh: &mut Shapes, keys: (PropertyKey, PropertyKey), v: [Value; 2]) -> bool {
         let Some(shape) = sh.fn_shape(keys, None) else { return false };
         self.shape = shape;
-        self.slots.extend(v);
+        for x in v {
+            self.push_slot(x);
+        }
         true
     }
 
     /// Add the own named property `key`, which the object does not have (the caller has looked).
     #[inline]
     pub(super) fn add_prop(&mut self, sh: &mut Shapes, key: PropertyKey, p: Property) {
-        if let Some(d) = &mut self.dict {
+        if let Some(d) = self.dict_mut() {
             return d.set(key, p);
         }
         if !matches!(key, PropertyKey::Index(_))
@@ -594,23 +749,23 @@ impl Object {
         {
             self.shape = next;
             match p {
-                Property::Data { value, .. } => self.slots.push(value),
+                Property::Data { value, .. } => self.push_slot(value),
                 Property::Accessor { get, set, .. } => {
-                    self.slots.push(get.map_or(Value::Undefined, Value::Object));
-                    self.slots.push(set.map_or(Value::Undefined, Value::Object));
+                    self.push_slot(get.map_or(Value::Undefined, Value::Object));
+                    self.push_slot(set.map_or(Value::Undefined, Value::Object));
                 }
             }
             return;
         }
         self.to_dict(sh);
-        self.dict.as_mut().unwrap().set(key, p);
+        self.dict_mut().unwrap().set(key, p);
     }
 
     /// Remove the own named property `key`. The last key, or any key of an object of at most `SCAN_MAX` properties, keeps shape
     /// mode: the shape before `key` takes the later keys again, so objects that drop the same key share the new shapes (a reviver
     /// that drops a key of each record). Another key of a larger object sends it to dictionary mode.
     pub(super) fn remove_prop(&mut self, sh: &mut Shapes, key: PropertyKey) -> bool {
-        if let Some(d) = &mut self.dict {
+        if let Some(d) = self.dict_mut() {
             return d.remove(key);
         }
         let Some(pos) = sh.pos(self.shape, key) else { return false };
@@ -626,20 +781,20 @@ impl Object {
             }
             if let Some(next) = later[..n - pos - 1].iter().try_fold(base, |s, e| sh.add(s, e.key, e.attrs)) {
                 let w = 1 + (gone.attrs & A_ACC != 0) as usize;
-                self.slots.drain(gone.slot as usize..gone.slot as usize + w);
+                self.remove_slots(gone.slot as usize, w);
                 self.shape = next;
                 return true;
             }
         }
         self.to_dict(sh);
-        self.dict.as_mut().unwrap().remove(key);
+        self.dict_mut().unwrap().remove(key);
         true
     }
 
     /// Change the value of the own data property `key`. `false`: no such property (an accessor, or not there).
     #[inline]
     pub(super) fn set_value(&mut self, sh: &Shapes, key: PropertyKey, v: Value) -> bool {
-        match &mut self.dict {
+        match self.dict_mut() {
             Some(d) => match d.find(key).map(|p| &mut d.entries[p]) {
                 Some(Some((_, Property::Data { value, .. }))) => {
                     *value = v;
@@ -649,7 +804,7 @@ impl Object {
             },
             None => match sh.find(self.shape, key) {
                 Some(e) if e.attrs & A_ACC == 0 => {
-                    self.slots[e.slot as usize] = v;
+                    *self.slot_mut(e.slot as usize).expect("a slot of the shape") = v;
                     true
                 }
                 _ => false,
@@ -661,7 +816,7 @@ impl Object {
     /// that property, an accessor, or read-only.
     #[inline]
     pub(super) fn write_at(&mut self, sh: &Shapes, pos: usize, key: PropertyKey, v: Value) -> bool {
-        match &mut self.dict {
+        match self.dict_mut() {
             Some(d) => match d.entries.get_mut(pos) {
                 Some(Some((k, Property::Data { value, writable: true, .. }))) if *k == key => {
                     *value = v;
@@ -678,7 +833,7 @@ impl Object {
     fn write_slot(&mut self, sh: &Shapes, pos: usize, key: PropertyKey, v: Value) -> bool {
         match sh.entries(self.shape).get(pos) {
             Some(e) if e.key == key && e.attrs & (A_W | A_ACC) == A_W => {
-                self.slots[e.slot as usize] = v;
+                *self.slot_mut(e.slot as usize).expect("a slot of the shape") = v;
                 true
             }
             _ => false,
@@ -688,7 +843,7 @@ impl Object {
     /// The value of the data property at position `pos` if it is `key`.
     #[inline]
     pub(super) fn read_at(&self, sh: &Shapes, pos: usize, key: PropertyKey) -> Option<Value> {
-        match &self.dict {
+        match self.dict() {
             Some(d) => match d.entries.get(pos) {
                 Some(Some((k, Property::Data { value, .. }))) if *k == key => Some(*value),
                 _ => None,
@@ -701,7 +856,7 @@ impl Object {
     #[inline(never)]
     fn read_slot(&self, sh: &Shapes, pos: usize, key: PropertyKey) -> Option<Value> {
         match sh.entries(self.shape).get(pos) {
-            Some(e) if e.key == key && e.attrs & A_ACC == 0 => Some(self.slots[e.slot as usize]),
+            Some(e) if e.key == key && e.attrs & A_ACC == 0 => Some(self.tail(e.slot as usize)[0]),
             _ => None,
         }
     }
@@ -711,10 +866,10 @@ impl Object {
         if writable == Some(false) {
             self.to_dict(sh);
         }
-        match &mut self.dict {
+        match self.dict_mut() {
             None => {
                 if let Some(l) = len {
-                    self.slots[0] = Value::Number(l as f64);
+                    self.slots_mut()[0] = Value::Number(l as f64);
                 }
             }
             Some(d) => {
@@ -731,9 +886,32 @@ impl Object {
 
     /// Room for `n` more own properties.
     pub(super) fn reserve_props(&mut self, n: usize) {
-        match &mut self.dict {
+        match self.dict_mut() {
             Some(d) => d.entries.reserve_exact(n),
-            None => self.slots.reserve_exact(n),
+            None => self.reserve_slots(n),
+        }
+    }
+
+    /// Room for `n` more values in shape mode: nothing while they fit inline, else one vector of the exact size.
+    fn reserve_slots(&mut self, n: usize) {
+        match &mut self.repr {
+            Repr::In(a) if self.n as usize + n > INLINE => {
+                let mut v = Vec::with_capacity(self.n as usize + n);
+                v.extend_from_slice(&a[..self.n as usize]);
+                self.repr = Repr::Heap(v);
+            }
+            Repr::Heap(v) => v.reserve_exact(n),
+            _ => {}
+        }
+    }
+
+    /// The bytes that `push_slot` adds to `obj_bytes`: none while the values fit in the record, all of them when the fourth moves them to a vector.
+    #[inline(always)]
+    pub(super) fn push_bytes(&self) -> usize {
+        match &self.repr {
+            Repr::In(_) if (self.n as usize) < INLINE => 0,
+            Repr::In(_) => (INLINE + 1) * SLOT_BYTES,
+            _ => SLOT_BYTES,
         }
     }
 }
@@ -858,19 +1036,20 @@ impl Heap {
 impl Heap {
     /// A new ordinary object that starts in `shape` with the values `slots`: an object literal whose site knows its final shape skips the
     /// transition and the define of each key. `shape` must be an object literal shape of `slots.len()` keys (`Heap::literal_shape`).
-    pub(crate) fn new_object_with_shape(&mut self, proto: Option<ObjId>, shape: u32, slots: Vec<Value>) -> R<ObjId> {
+    pub(crate) fn new_object_with_shape(&mut self, proto: Option<ObjId>, shape: u32, slots: &[Value]) -> R<ObjId> {
         if shape as usize >= self.shapes.len() || shape == 0 || self.shapes.entries(shape).len() != slots.len() {
             return Err(HeapError::NeedsExecution("new_object_with_shape: the slots do not match the shape"));
         }
         debug_assert!(self.shapes.is_literal(shape, slots.len()));
-        for &v in &slots {
+        for &v in slots {
             self.check_value(v)?;
         }
-        let extra = slots.len() * SLOT_BYTES;
+        let extra = if slots.len() > INLINE { slots.len() * SLOT_BYTES } else { 0 };
         self.charge(extra)?;
         let o = self.alloc_object(proto, false)?;
         let ob = self.objects.get_mut(o.index, o.gn).expect("just made");
-        (ob.shape, ob.slots) = (shape, slots);
+        ob.shape = shape;
+        ob.fill_slots(slots);
         self.bytes += extra;
         Ok(o)
     }
@@ -879,7 +1058,7 @@ impl Heap {
     /// make the next object with `new_object_with_shape`. `None`: the object is in dictionary mode, has elements, or has other keys.
     pub(crate) fn literal_shape(&self, o: ObjId, n: usize) -> Option<u32> {
         let ob = self.objects.get(o.index, o.gn)?;
-        let ok = ob.dict.is_none() && ob.elems.is_empty() && ob.exotic == 0 && ob.lazy == 0 && ob.extensible && self.shapes.is_literal(ob.shape, n);
+        let ok = ob.dict().is_none() && ob.elems.is_empty() && ob.exotic == 0 && ob.lazy == 0 && ob.extensible && self.shapes.is_literal(ob.shape, n);
         ok.then_some(ob.shape)
     }
 
@@ -901,20 +1080,15 @@ impl Heap {
             }
             return Ok(o);
         };
-        let mut slots = Vec::with_capacity(cap.max(2 + lazy_proto as usize));
-        slots.extend([Value::Number(length.1), Value::String(name.1)]);
-        if lazy_proto {
-            slots.push(Value::Undefined);
-        }
-        let extra = slots.len() * SLOT_BYTES;
-        self.charge(extra)?;
+        let slots = [Value::Number(length.1), Value::String(name.1), Value::Undefined];
+        let slots = &slots[..2 + lazy_proto as usize];
         let o = self.alloc_object(proto, false)?;
         let ob = self.objects.get_mut(o.index, o.gn).expect("just made");
-        (ob.shape, ob.slots) = (shape, slots);
+        ob.shape = shape;
+        ob.fill_slots(slots);
         if lazy_proto {
             ob.lazy |= LAZY_PROTO;
         }
-        self.bytes += extra;
         Ok(o)
     }
 }
@@ -928,7 +1102,7 @@ impl Heap {
         if ob.shape != ic.shape {
             return None;
         }
-        let Some(&v) = ob.slots.get(ic.slot as usize) else { return self.ic_dict_own(o, ob, ic) };
+        let Some(&v) = ob.slot(ic.slot as usize) else { return self.ic_dict_own(o, ob, ic) };
         #[cfg(debug_assertions)]
         self.ic_verify(o, ic, Get::Value(v));
         Some(v)
@@ -940,7 +1114,7 @@ impl Heap {
         if ic.kind != IC_DICT || o != ic.first {
             return None;
         }
-        match ob.dict.as_ref()?.entries.get(ic.depth as usize)? {
+        match ob.dict()?.entries.get(ic.depth as usize)? {
             Some((PropertyKey::String(s), Property::Data { value, .. })) if s.index == ic.epoch && s.gn == ic.slot => {
                 #[cfg(debug_assertions)]
                 self.ic_verify(o, ic, Get::Value(*value));
@@ -1011,7 +1185,7 @@ impl Heap {
         if self.ic_refuses(o) {
             return self.get_refused(o, key);
         }
-        if self.objects.get(o.index, o.gn).is_some_and(|ob| ob.dict.is_some() && !ob.fast_on_use) {
+        if self.objects.get(o.index, o.gn).is_some_and(|ob| ob.dict().is_some() && !ob.fast_on_use) {
             return self.get_dict(o, key, ic);
         }
         self.ic_fill(o, key, ic)
@@ -1029,7 +1203,7 @@ impl Heap {
             return self.get_refused(o, key);
         }
         self.check_key(key)?;
-        let d = ob.dict.as_ref().expect("a dictionary receiver");
+        let d = ob.dict().expect("a dictionary receiver");
         if let Some(pos) = d.find(key) {
             let p = d.entries[pos].expect("find gives a live entry").1;
             if pos <= u8::MAX as usize {
@@ -1070,14 +1244,14 @@ impl Heap {
         }
         let slot = ic.slot as usize;
         match ic.kind {
-            IC_OWN | IC_STORE => return ob.slots.get(slot).map(|&v| Get::Value(v)),
-            IC_OWN_ACC => return ob.slots.get(slot).map(|&v| Get::Accessor { getter: obj_of(v) }),
+            IC_OWN | IC_STORE => return ob.slot(slot).map(|&v| Get::Value(v)),
+            IC_OWN_ACC => return ob.slot(slot).map(|&v| Get::Accessor { getter: obj_of(v) }),
             IC_EMPTY | IC_ADD | IC_MEGA => return None,
             IC_DICT => {
                 if o != ic.first {
                     return None;
                 }
-                return match ob.dict.as_ref()?.entries.get(ic.depth as usize)? {
+                return match ob.dict()?.entries.get(ic.depth as usize)? {
                     Some((k, p)) if *k == key => Some(get_of(*p)),
                     _ => None,
                 };
@@ -1102,10 +1276,10 @@ impl Heap {
             let p = h.proto?;
             h = self.objects.get(p.index, p.gn)?;
         }
-        if let Some(d) = &h.dict {
+        if let Some(d) = h.dict() {
             return d.entries.get(slot)?.map(|(_, p)| get_of(p));
         }
-        let v = *h.slots.get(slot)?;
+        let v = *h.slot(slot)?;
         Some(if ic.kind == IC_PROTO { Get::Value(v) } else { Get::Accessor { getter: obj_of(v) } })
     }
 
@@ -1133,7 +1307,7 @@ impl Heap {
             self.make_fast(o);
         }
         let recv = self.obj(o)?;
-        if matches!(key, PropertyKey::Index(_)) || recv.dict.is_some() || matches!(self.lazy, Some((_, kp, _)) if kp == key) {
+        if matches!(key, PropertyKey::Index(_)) || recv.dict().is_some() || matches!(self.lazy, Some((_, kp, _)) if kp == key) {
             return Ok(None);
         }
         // A plain exotic object (`ROOT_PLAIN`) is ordinary for a key that is not numeric. The key of a site never changes, so one test
@@ -1156,7 +1330,7 @@ impl Heap {
             } else if attrs & A_W != 0 && recv.exotic == 0 && recv.lazy == 0 && !(recv.is_array && key == PropertyKey::String(self.length)) {
                 ic.kind = IC_STORE;
             }
-            let g = got(attrs, recv.slots[slot as usize]);
+            let g = got(attrs, recv.tail(slot as usize)[0]);
             self.ic_stats.fill_own += 1;
             return Ok(Some((ic, g)));
         }
@@ -1183,7 +1357,7 @@ impl Heap {
             if let Some(p) = self.own(ob, key) {
                 // A dictionary holder (a prototype with more than `MAX_PROPS` keys, or one that changed attributes) is read at its entry
                 // position: a delete or a new key moves positions, and both bump the epoch.
-                let slot = match &ob.dict {
+                let slot = match ob.dict() {
                     Some(d) => d.find(key).expect("own found it") as u32,
                     None => self.shapes.find(ob.shape, key).expect("own found it").slot,
                 };
@@ -1285,7 +1459,7 @@ impl Heap {
         if ob.shape != ic.shape {
             return false;
         }
-        let Some(slot) = ob.slots.get_mut(ic.slot as usize) else { return false };
+        let Some(slot) = ob.slot_mut(ic.slot as usize) else { return false };
         *slot = v;
         #[cfg(debug_assertions)]
         self.ic_verify_set(o, ic);
@@ -1320,11 +1494,12 @@ impl Heap {
         #[cfg(debug_assertions)]
         self.ic_verify_set(o, ic);
         self.check_value(v)?;
-        self.charge(SLOT_BYTES)?;
+        let extra = ob.push_bytes();
+        self.charge(extra)?;
         let ob = self.objects.get_mut(o.index, o.gn).expect("checked above");
         ob.shape = ic.slot;
-        ob.slots.push(v);
-        self.bytes += SLOT_BYTES;
+        ob.push_slot(v);
+        self.bytes += extra;
         Ok(true)
     }
 
@@ -1344,7 +1519,7 @@ impl Heap {
         if matches!(key, PropertyKey::Index(_))
             || ob.exotic != 0
             || ob.lazy != 0
-            || ob.dict.is_some()
+            || ob.dict().is_some()
             || ob.fast_on_use
             || self.setup
             || ob.is_array && key == length
@@ -1353,7 +1528,7 @@ impl Heap {
             self.ic_stats.refused += 1;
             return self.set(o, key, value);
         }
-        let (shape, nslots) = (ob.shape, ob.slots.len());
+        let (shape, nslots) = (ob.shape, ob.slots().len());
         let mut new = Ic { shape, misses, ..Ic::EMPTY };
         #[cfg(debug_assertions)]
         {
@@ -1398,7 +1573,7 @@ impl Heap {
         }
         // The write must have been the plain transition: one more slot, the key added to S with all attributes.
         let ob = self.obj(o)?;
-        if ob.dict.is_some() || ob.slots.len() != nslots + 1 || !self.shapes.added(shape, ob.shape, key, A_W | A_E | A_C) {
+        if ob.dict().is_some() || ob.slots().len() != nslots + 1 || !self.shapes.added(shape, ob.shape, key, A_W | A_E | A_C) {
             self.ic_stats.refused += 1;
             return Ok(r);
         }
@@ -1425,7 +1600,7 @@ impl Heap {
     fn ic_verify_set(&self, o: ObjId, ic: &Ic) {
         let key = ic.key.expect("a filled entry has its key");
         let ob = self.obj(o).expect("a live receiver");
-        assert!(ob.exotic == 0 && ob.dict.is_none() && !(ob.is_array && key == PropertyKey::String(self.length)), "{ic:?}");
+        assert!(ob.exotic == 0 && ob.dict().is_none() && !(ob.is_array && key == PropertyKey::String(self.length)), "{ic:?}");
         if ic.kind == IC_STORE {
             assert!(matches!(self.own(ob, key), Some(Property::Data { writable: true, .. })), "store hit on {key:?}: {ic:?}");
             return;
@@ -1946,7 +2121,7 @@ mod tests {
         h.obj(o).unwrap().shape
     }
     fn in_dict(h: &Heap, o: ObjId) -> bool {
-        h.obj(o).unwrap().dict.is_some()
+        h.obj(o).unwrap().dict().is_some()
     }
     fn keys_text(h: &mut Heap, o: ObjId) -> Vec<String> {
         h.own_keys(o)
@@ -1975,12 +2150,12 @@ mod tests {
         def(&mut h, o, b, attrs(2.0, true, true, true));
         let s = h.literal_shape(o, 2).unwrap();
         assert_eq!(h.literal_shape(o, 3), None);
-        let p = h.new_object_with_shape(None, s, vec![n(5.0), n(6.0)]).unwrap();
+        let p = h.new_object_with_shape(None, s, &[n(5.0), n(6.0)]).unwrap();
         assert_eq!((shape_of(&h, p), getn(&mut h, p, a), getn(&mut h, p, b)), (s, 5.0, 6.0));
         assert_eq!(keys_text(&mut h, p), ["a", "b"]);
         setn(&mut h, p, a, 7.0);
         assert_eq!((getn(&mut h, p, a), getn(&mut h, o, a)), (7.0, 1.0));
-        assert!(h.new_object_with_shape(None, s, vec![n(5.0)]).is_err());
+        assert!(h.new_object_with_shape(None, s, &[n(5.0)]).is_err());
         // A read-only key, a key on an array, or a dictionary object is not a literal shape.
         let q = h.new_object(None).unwrap();
         def(&mut h, q, a, attrs(1.0, false, true, true));
@@ -2007,6 +2182,51 @@ mod tests {
     }
 
     #[test]
+    fn values_stay_readable_across_the_inline_boundary_and_after_deletes() {
+        let mut h = Heap::default();
+        let keys: Vec<_> = ["a", "b", "c", "d", "e", "f"].iter().map(|s| k(&mut h, s)).collect();
+        let o = h.new_object(None).unwrap();
+        for (i, key) in keys.iter().enumerate() {
+            setn(&mut h, o, *key, i as f64);
+            for (j, kj) in keys[..=i].iter().enumerate() {
+                assert_eq!(getn(&mut h, o, *kj), j as f64, "after {} adds", i + 1);
+            }
+        }
+        // Delete from the inline part, then from the spilled part.
+        assert_eq!(h.delete(o, keys[1]), Ok(true));
+        assert_eq!(h.delete(o, keys[4]), Ok(true));
+        assert_eq!(keys_text(&mut h, o), ["a", "c", "d", "f"]);
+        for (key, want) in [(keys[0], 0.0), (keys[2], 2.0), (keys[3], 3.0), (keys[5], 5.0)] {
+            assert_eq!(getn(&mut h, o, key), want);
+        }
+        // Deleting down to the inline size keeps the values.
+        assert_eq!(h.delete(o, keys[3]), Ok(true));
+        assert_eq!(h.delete(o, keys[5]), Ok(true));
+        assert_eq!(keys_text(&mut h, o), ["a", "c"]);
+        assert_eq!((getn(&mut h, o, keys[0]), getn(&mut h, o, keys[2])), (0.0, 2.0));
+        // A new object of the same history still shares the shape.
+        let p = h.new_object(None).unwrap();
+        setn(&mut h, p, keys[0], 9.0);
+        assert_eq!(getn(&mut h, p, keys[0]), 9.0);
+    }
+
+    #[test]
+    fn an_array_keeps_length_in_its_first_slot_with_named_properties_beyond_it() {
+        let mut h = Heap::default();
+        let (x, y, z) = (k(&mut h, "x"), k(&mut h, "y"), k(&mut h, "z"));
+        let a = h.new_array(None).unwrap();
+        for (i, key) in [x, y, z].iter().enumerate() {
+            setn(&mut h, a, *key, i as f64 + 10.0);
+        }
+        assert_eq!(h.array_length(a), Ok(Some(0)));
+        let len = k(&mut h, "length");
+        assert_eq!(getn(&mut h, a, len), 0.0);
+        assert_eq!(h.set(a, PropertyKey::Index(2), n(7.0)), Ok(Set::Done));
+        assert_eq!(getn(&mut h, a, len), 3.0);
+        assert_eq!((getn(&mut h, a, x), getn(&mut h, a, y), getn(&mut h, a, z)), (10.0, 11.0, 12.0));
+    }
+
+    #[test]
     fn objects_that_add_the_same_keys_share_one_shape_and_hold_only_values() {
         let mut h = Heap::default();
         let (a, b) = (k(&mut h, "a"), k(&mut h, "b"));
@@ -2018,13 +2238,13 @@ mod tests {
         }
         assert_eq!(shape_of(&h, x), shape_of(&h, y));
         assert!(!in_dict(&h, x));
-        assert_eq!(h.obj(x).unwrap().slots.len(), 2);
+        assert_eq!(h.obj(x).unwrap().slots().len(), 2);
         let z = h.new_object(None).unwrap();
         setn(&mut h, z, b, 2.0);
         setn(&mut h, z, a, 1.0);
         assert_ne!(shape_of(&h, z), shape_of(&h, x), "the order of keys makes the shape");
         assert_eq!(keys_text(&mut h, z), ["b", "a"]);
-        assert_eq!(size_of::<Object>(), 80);
+        assert_eq!(size_of::<Object>(), 104);
     }
 
     #[test]
@@ -2069,7 +2289,7 @@ mod tests {
         let d = PropertyDescriptor { get: Some(Some(g)), set: Some(Some(s)), enumerable: Some(true), configurable: Some(true), ..Default::default() };
         assert!(def(&mut h, o, key, d));
         setn(&mut h, o, after, 5.0);
-        assert_eq!(h.obj(o).unwrap().slots.len(), 3);
+        assert_eq!(h.obj(o).unwrap().slots().len(), 3);
         assert!(!in_dict(&h, o));
         assert!(matches!(h.get_own_property(o, key).unwrap(), Some(Property::Accessor { get: Some(a), set: Some(b), .. }) if a == g && b == s));
         assert_eq!(getn(&mut h, o, after), 5.0);
@@ -2082,7 +2302,7 @@ mod tests {
         assert_eq!(h.set(p, key, n(1.0)), Ok(Set::Rejected));
         assert!(matches!(h.get_own_property(p, key).unwrap(), Some(Property::Accessor { get: Some(_), set: None, .. })));
         // The two objects differ only in what the slots hold, so they share the shape.
-        assert_eq!(h.obj(p).unwrap().slots.len(), 2);
+        assert_eq!(h.obj(p).unwrap().slots().len(), 2);
         // Changing the getter of an accessor keeps the shape.
         let t = shape_of(&h, o);
         assert!(def(&mut h, o, key, PropertyDescriptor { get: Some(Some(s)), ..Default::default() }));
@@ -2102,7 +2322,7 @@ mod tests {
         assert!(h.delete(o, b).unwrap());
         assert!(!in_dict(&h, o));
         assert_eq!(shape_of(&h, o), one);
-        assert_eq!(h.obj(o).unwrap().slots.len(), 1);
+        assert_eq!(h.obj(o).unwrap().slots().len(), 1);
         setn(&mut h, o, b, 3.0);
         assert_eq!(shape_of(&h, o), two);
         assert_eq!(getn(&mut h, o, b), 3.0);
@@ -2141,7 +2361,7 @@ mod tests {
         let o = mk(&mut h);
         assert!(h.delete(o, g).unwrap());
         assert!(!in_dict(&h, o));
-        assert_eq!(h.obj(o).unwrap().slots.len(), 3);
+        assert_eq!(h.obj(o).unwrap().slots().len(), 3);
         assert_eq!(keys_text(&mut h, o), ["a", "c", "d"]);
         assert_eq!((getn(&mut h, o, a), getn(&mut h, o, c), getn(&mut h, o, d)), (1.0, 3.0, 4.0));
         // A data key before the accessor goes: the accessor moves down by one and keeps its getter.
@@ -2263,11 +2483,11 @@ mod tests {
         let a = h.new_array(None).unwrap();
         let len = k(&mut h, "length");
         assert_eq!(shape_of(&h, a), ROOT_ARRAY);
-        assert_eq!(h.obj(a).unwrap().slots.len(), 1);
+        assert_eq!(h.obj(a).unwrap().slots().len(), 1);
         for i in 0..5 {
             setn(&mut h, a, PropertyKey::Index(i), i as f64);
         }
-        assert_eq!(num(h.obj(a).unwrap().slots[0]), Some(5.0));
+        assert_eq!(num(h.obj(a).unwrap().slots()[0]), Some(5.0));
         assert_eq!(h.array_length(a), Ok(Some(5)));
         assert_eq!(getn(&mut h, a, len), 5.0);
         let extra = k(&mut h, "extra");
@@ -2405,14 +2625,20 @@ mod tests {
         assert_eq!(g.dict_objects, base.dict_objects + 1);
         assert_eq!(g.slots_used, base.slots_used);
         assert_eq!(g.entries_used - base.entries_used, 3 * ENTRY_BYTES, "the deleted first entry leaves a hole, as before");
-        // accounted bytes follow the real object: 16 bytes for each slot, not 48
+        // accounted bytes follow the real object: up to 3 values are in the record and cost nothing more; the fourth moves all of them to a
+        // vector, 16 bytes for each slot
+        let (d, e) = (k(&mut h, "fd"), k(&mut h, "fe"));
         let before = h.used_bytes();
         let p = h.new_object(None).unwrap();
         let empty = h.used_bytes() - before;
         for key in [a, b, c] {
             setn(&mut h, p, key, 1.0);
         }
-        assert_eq!(h.used_bytes() - before - empty, 3 * SLOT_BYTES);
+        assert_eq!(h.used_bytes() - before - empty, 0);
+        setn(&mut h, p, d, 1.0);
+        assert_eq!(h.used_bytes() - before - empty, 4 * SLOT_BYTES);
+        setn(&mut h, p, e, 1.0);
+        assert_eq!(h.used_bytes() - before - empty, 5 * SLOT_BYTES);
     }
 
     #[test]
@@ -2608,7 +2834,7 @@ mod tests {
                 }
             }
             let ob = h.obj(o).unwrap();
-            if ob.dict.is_some() { dict_seen += 1 } else { shape_seen += 1 }
+            if ob.dict().is_some() { dict_seen += 1 } else { shape_seen += 1 }
             at_most = at_most.max(h.shapes.len());
             let want = models[i].keys();
             assert_eq!(h.own_keys(o).unwrap(), want, "keys, step {step}");

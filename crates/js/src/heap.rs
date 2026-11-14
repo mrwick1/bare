@@ -400,11 +400,25 @@ struct Object {
     /// Dense index properties that are plain data (writable, enumerable, configurable).
     /// `None` is a hole. An index lives here or in `dict`, never in both.
     elems: Vec<Option<Value>>,
-    /// The values of the named properties in shape mode (`heap_shape.rs`). An accessor uses two slots. An array's `length` is slot 0.
-    slots: Vec<Value>,
+    /// The values of the named properties in shape mode (`Repr`). `n` is the number of values of `Repr::In`.
+    repr: Repr,
+    n: u8,
     /// The properties in dictionary mode: named keys, symbols, and index properties that are sparse or special. `shape` is 0 exactly when
-    /// this is `Some`, and `slots` is empty then. An array's `length` is the first entry.
+    /// this is `Some`, and there are no values then. An array's `length` is the first entry.
     dict: Option<Box<PropMap>>,
+}
+
+/// How many values an object keeps inside its own record (`Repr::In`): the `length` of an array, the `length`, `name` and `prototype` of a
+/// function, the properties of most object literals. A fourth value moves all of them to a vector.
+const INLINE: usize = 3;
+
+/// The values of an object in shape mode. The two forms share the bytes of one value array, so an object with up to `INLINE` properties is
+/// one allocation in the slab. An object in dictionary mode has the empty inline form.
+enum Repr {
+    /// At most `INLINE` values: `Object::n` of them are in use. An accessor uses two slots. An array's `length` is slot 0.
+    In([Value; INLINE]),
+    /// More values than that: a vector, as the object had before the inline form.
+    Heap(Vec<Value>),
 }
 
 const EXOTIC: u8 = 1;
@@ -415,7 +429,7 @@ const EXOTIC_STR: u8 = 4;
 const EXOTIC_PROXY: u8 = 8;
 
 // The flags fit in the padding.
-const _: () = assert!(std::mem::size_of::<Object>() <= 80);
+const _: () = assert!(std::mem::size_of::<Object>() <= 104);
 
 const ENTRY_BYTES: usize = std::mem::size_of::<Option<(PropertyKey, Property)>>();
 const SLOT_BYTES: usize = std::mem::size_of::<Value>();
@@ -431,8 +445,11 @@ const fn slot_bytes<T>() -> usize {
 fn obj_bytes(o: &Object) -> usize {
     slot_bytes::<Object>()
         + o.elems.len() * ELEM_BYTES
-        + o.slots.len() * SLOT_BYTES
-        + o.dict.as_ref().map_or(0, |d| {
+        + match &o.repr {
+            Repr::In(_) => 0,
+            Repr::Heap(v) => v.len() * SLOT_BYTES,
+        }
+        + o.dict().map_or(0, |d| {
             std::mem::size_of::<PropMap>() + d.entries.len() * ENTRY_BYTES + if d.index.is_some() { d.live as usize * INDEX_ENTRY_BYTES } else { 0 }
         })
 }
@@ -855,7 +872,7 @@ impl Heap {
         f.shape_bytes = self.shapes.bytes();
         f.shapes = self.shapes.len();
         for o in &self.objects.live {
-            let (n, used, cap) = match &o.dict {
+            let (n, used, cap) = match o.dict() {
                 Some(d) => {
                     f.dict_objects += 1;
                     f.entries_used += d.entries.len() * ENTRY_BYTES;
@@ -864,9 +881,10 @@ impl Heap {
                     (d.entries.len(), d.entries.len() * ENTRY_BYTES, d.entries.capacity() * ENTRY_BYTES)
                 }
                 None => {
-                    f.slots_used += o.slots.len() * SLOT_BYTES;
-                    f.slots_cap += o.slots.capacity() * SLOT_BYTES;
-                    (self.shapes.count(o.shape), o.slots.len() * SLOT_BYTES, o.slots.capacity() * SLOT_BYTES)
+                    let cap = match &o.repr { Repr::Heap(v) => v.capacity(), _ => o.slots().len() } * SLOT_BYTES;
+                    f.slots_used += o.slots().len() * SLOT_BYTES;
+                    f.slots_cap += cap;
+                    (self.shapes.count(o.shape), o.slots().len() * SLOT_BYTES, cap)
                 }
             };
             f.elems_used += o.elems.len() * ELEM_BYTES;
@@ -1516,8 +1534,8 @@ impl Heap {
         self.check_opt_obj(proto)?;
         if !self.objects.can_alloc() { return Err(HeapError::Limit(Limit::Objects)); }
         // An array starts with its `length` in slot 0: the array root shape names it.
-        let (shape, slots) = if is_array { (shape::ROOT_ARRAY, vec![Value::Number(0.0)]) } else { (shape::ROOT, Vec::new()) };
-        let o = Object { proto, shape, extensible: true, is_array, exotic: 0, lazy: 0, ic_chain: false, fast_on_use: false, elems: Vec::new(), slots, dict: None };
+        let (shape, n) = if is_array { (shape::ROOT_ARRAY, 1) } else { (shape::ROOT, 0) };
+        let o = Object { proto, shape, extensible: true, is_array, exotic: 0, lazy: 0, ic_chain: false, fast_on_use: false, elems: Vec::new(), repr: Repr::In([Value::Number(0.0), Value::Undefined, Value::Undefined]), n, dict: None };
         let cost = obj_bytes(&o);
         self.charge(cost)?;
         let (index, gn) = self.objects.alloc(o, Limit::Objects)?;
@@ -1565,7 +1583,8 @@ impl Heap {
             m.entries.extend(extra.map(|(k, v)| Some((k, p(v, false)))));
             (m.live, m.index_keys) = (n as u32, items.len() as u32);
             m.rebuild_index();
-            (ob.slots, ob.shape, ob.extensible, ob.dict) = (Vec::new(), 0, false, Some(Box::new(m)));
+            ob.set_dict(m);
+            ob.extensible = false;
         });
         Ok(o)
     }
@@ -1638,7 +1657,7 @@ impl Heap {
         Ok(())
     }
 
-    #[inline]
+    #[inline(always)]
     fn own(&self, o: &Object, key: PropertyKey) -> Option<Property> {
         if let PropertyKey::Index(i) = key
             && let Some(Some(v)) = o.elems.get(i as usize) {
@@ -1939,7 +1958,7 @@ impl Heap {
     /// The position of the own named property `key` of `o`: the hint for `own_data_at` and `set_own_data_at`.
     pub fn own_pos(&self, o: ObjId, key: PropertyKey) -> Option<u32> {
         let ob = self.obj(o).ok()?;
-        match &ob.dict {
+        match ob.dict() {
             Some(d) => d.find(key),
             None => self.shapes.pos(ob.shape, key),
         }
@@ -1954,7 +1973,7 @@ impl Heap {
         if ob.exotic != 0 || ob.lazy & (LAZY_PROTO | LAZY_HS) != 0 {
             return None;
         }
-        match ob.dict.as_ref()?.entries.get(pos as usize) {
+        match ob.dict()?.entries.get(pos as usize) {
             Some(Some((k, Property::Data { value, .. }))) if *k == key => Some(*value),
             _ => None,
         }
@@ -1971,7 +1990,7 @@ impl Heap {
         if ob.exotic != 0 || ob.lazy & (LAZY_PROTO | LAZY_HS) != 0 {
             return false;
         }
-        let Some(d) = &mut ob.dict else { return false };
+        let Some(d) = ob.dict_mut() else { return false };
         match d.entries.get_mut(pos as usize) {
             Some(Some((k, Property::Data { value, writable: true, .. }))) if *k == key => {
                 *value = v;
@@ -2110,7 +2129,7 @@ impl Heap {
     pub fn own_key_slots(&self, o: ObjId) -> R<usize> {
         let ob = self.obj(o)?;
         let virtual_len = self.virtual_len(o)?;
-        let named = ob.dict.as_ref().map_or_else(|| self.shapes.count(ob.shape), |d| d.entries.len());
+        let named = ob.dict().map_or_else(|| self.shapes.count(ob.shape), |d| d.entries.len());
         Ok(ob.elems.len().saturating_add(named).saturating_add(virtual_len))
     }
 
@@ -2121,8 +2140,8 @@ impl Heap {
         let ob = self.obj(o)?;
         out.extend(ob.elems.iter().flatten());
         // The slots of a shape-mode object hold data values and, for an accessor, a function or `undefined`.
-        out.extend_from_slice(&ob.slots);
-        if let Some(d) = &ob.dict {
+        out.extend_from_slice(ob.slots());
+        if let Some(d) = ob.dict() {
             for (_, p) in d.iter() {
                 match p {
                     Property::Data { value, .. } => out.push(value),
@@ -2267,7 +2286,7 @@ impl Heap {
             return Ok(None);
         }
         let Some(ob) = self.objects.get(o.index, o.gn) else { return Ok(None) };
-        if ob.exotic != 0 || ob.lazy != 0 || ob.dict.is_some() || !ob.extensible || ob.is_array || ob.ic_chain || ob.slots.len() >= shape::MAX_PROPS {
+        if ob.exotic != 0 || ob.lazy != 0 || ob.dict().is_some() || !ob.extensible || ob.is_array || ob.ic_chain || ob.slots().len() >= shape::MAX_PROPS {
             return Ok(None);
         }
         if self.shapes.find(ob.shape, key).is_some() {
@@ -2277,19 +2296,21 @@ impl Heap {
         self.check_value(v)?;
         let attrs = w as u8 * shape::A_W | e as u8 * shape::A_E | c as u8 * shape::A_C;
         let Some(next) = self.shapes.add(ob.shape, key, attrs) else { return Ok(None) };
-        self.charge(SLOT_BYTES)?;
+        let extra = ob.push_bytes();
+        self.charge(extra)?;
         let ob = self.objects.get_mut(o.index, o.gn).expect("checked above");
         ob.shape = next;
-        ob.slots.push(v);
-        self.bytes += SLOT_BYTES;
+        ob.push_slot(v);
+        self.bytes += extra;
         Ok(Some(true))
     }
 
     fn array_len(&self, o: &Object) -> (u32, bool) {
         // In shape mode `length` is slot 0 and is writable (a read-only `length` is a change of attributes: dictionary mode).
-        if o.dict.is_none() {
-            let Value::Number(n) = o.slots[0] else { unreachable!("an array always has a numeric `length`") };
-            return (n as u32, true);
+        match o.slot0() {
+            Some(&Value::Number(n)) => return (n as u32, true),
+            Some(_) => unreachable!("an array always has a numeric `length`"),
+            None => {}
         }
         match o.get_prop(&self.shapes, PropertyKey::String(self.length)) {
             Some(Property::Data { value: Value::Number(n), writable, .. }) => (n as u32, writable),
@@ -2312,7 +2333,7 @@ impl Heap {
         // Setup mode: a key that would make a new shape sends the object to a dictionary. Most objects of the realm (prototypes,
         // namespaces) share no shape with another object, and most of them are never used. The first cache fill that walks one gives
         // it shapes (`Heap::make_fast`).
-        let to_dict = self.setup && obj.dict.is_none() && obj.exotic == 0 && !self.shapes.has_child(obj.shape, key, shape::attrs_of(&new));
+        let to_dict = self.setup && obj.dict().is_none() && obj.exotic == 0 && !self.shapes.has_child(obj.shape, key, shape::attrs_of(&new));
         if obj.ic_chain && cur.map(|c| shape::attrs_of(&c)) != Some(shape::attrs_of(&new)) {
             self.chain_changed(o);
         }
@@ -2359,13 +2380,13 @@ impl Heap {
         }
         let blocked = self.edit_with(o, |ob, sh| {
             // Index keys are only in a dictionary.
-            let floor = ob.dict.iter().flat_map(|d| d.iter()).filter_map(|(k, p)| match k {
+            let floor = ob.dict().into_iter().flat_map(|d| d.iter()).filter_map(|(k, p)| match k {
                 PropertyKey::Index(i) if i >= n && !p.configurable() => Some(i),
                 _ => None,
             }).max();
             let keep = floor.map_or(n, |f| f + 1);
             ob.truncate_elems(keep as usize);
-            if let Some(d) = ob.dict.as_mut().filter(|d| d.index_keys > 0) {
+            if let Some(d) = ob.dict_mut().filter(|d| d.index_keys > 0) {
                 let dead: Vec<_> = d.iter().map(|e| e.0).filter(|k| matches!(k, PropertyKey::Index(i) if *i >= keep)).collect();
                 for k in dead {
                     d.remove(k);
@@ -2506,8 +2527,8 @@ impl Heap {
         }
         // Changing the attributes of a property, or moving an element to the property table, is dictionary mode.
         let moved = ob.elems.iter().flatten().count();
-        let named = ob.dict.as_ref().map_or_else(|| self.shapes.count(ob.shape), |d| d.live as usize);
-        self.charge((moved + if ob.dict.is_some() { 0 } else { named }) * (ENTRY_BYTES + INDEX_ENTRY_BYTES))?;
+        let named = ob.dict().map_or_else(|| self.shapes.count(ob.shape), |d| d.live as usize);
+        self.charge((moved + if ob.dict().is_some() { 0 } else { named }) * (ENTRY_BYTES + INDEX_ENTRY_BYTES))?;
         self.chain_changed(o);
         self.edit_with(o, |ob, sh| {
             ob.extensible = false;
@@ -2515,8 +2536,9 @@ impl Heap {
                 return;
             }
             ob.to_dict(sh);
-            let d = ob.dict.as_mut().unwrap();
-            for (i, v) in std::mem::take(&mut ob.elems).into_iter().enumerate() {
+            let elems = std::mem::take(&mut ob.elems);
+            let d = ob.dict_mut().unwrap();
+            for (i, v) in elems.into_iter().enumerate() {
                 if let Some(value) = v {
                     d.set(PropertyKey::Index(i as u32), Property::Data { value, writable: !frozen, enumerable: true, configurable: false });
                 }
@@ -2604,7 +2626,7 @@ impl Heap {
             for v in o.elems.iter().flatten() {
                 m.value(*v);
             }
-            match &o.dict {
+            match o.dict() {
                 None => {
                     // Shape mode: the keys of the shape (a shape holds its keys, but does not keep them alive), once for each shape,
                     // and every slot. A slot of an accessor holds a function or `undefined`, which `value` ignores.
@@ -2620,7 +2642,7 @@ impl Heap {
                             shapes.mark_parents(o.shape, &mut keyed);
                         }
                     }
-                    for &v in &o.slots {
+                    for &v in o.slots() {
                         m.value(v);
                     }
                 }
@@ -2761,25 +2783,25 @@ impl Object {
     #[cold]
     #[inline(never)]
     fn sparse_grow_ok(&self, i: usize) -> bool {
-        self.is_array || !self.slots.is_empty() || self.dict.as_ref().is_some_and(|d| d.live > d.index_keys) || self.elems.len() > 4096 ||
+        self.is_array || !self.slots().is_empty() || self.dict().is_some_and(|d| d.live > d.index_keys) || self.elems.len() > 4096 ||
             (self.elems.iter().filter(|e| e.is_some()).count() + 1) * 4 >= i + 1
     }
 
     /// The bytes that one more named property may cost (an upper bound is enough: `edit` keeps the count exact).
     fn prop_cost(&self) -> usize {
-        if self.dict.is_some() { ENTRY_BYTES } else { SLOT_BYTES }
+        if self.dict().is_some() { ENTRY_BYTES } else { SLOT_BYTES }
     }
 
     /// The bytes that adding the property `key` may cost: a slot or two in shape mode, an entry and its index share in a dictionary, and
     /// all the entries when an index key or the 129th property sends the object to a dictionary.
     fn add_cost(&self, sh: &Shapes, key: PropertyKey, p: &Property) -> usize {
-        match &self.dict {
+        match self.dict() {
             Some(d) => ENTRY_BYTES + if d.index.is_some() {
                 INDEX_ENTRY_BYTES
             } else if d.entries.len() + 1 > INDEX_AT {
                 (d.live as usize + 1) * INDEX_ENTRY_BYTES
             } else { 0 },
-            None if matches!(key, PropertyKey::Index(_)) || self.slots.len() >= shape::MAX_PROPS && sh.count(self.shape) >= shape::MAX_PROPS => {
+            None if matches!(key, PropertyKey::Index(_)) || self.slots().len() >= shape::MAX_PROPS && sh.count(self.shape) >= shape::MAX_PROPS => {
                 (sh.count(self.shape) + 1) * (ENTRY_BYTES + INDEX_ENTRY_BYTES)
             }
             None => SLOT_BYTES * (1 + matches!(p, Property::Accessor { .. }) as usize),
@@ -3618,11 +3640,11 @@ mod tests {
     #[test]
     fn layout_sizes_do_not_grow() {
         use std::mem::size_of;
-        // Measured on x86-64: Value 16, Property 32, entry 48, Object 80, Meta 8.
+        // Measured on x86-64: Value 16, Property 32, entry 48, Object 104 (with 3 inline values), Meta 8.
         assert!(size_of::<Value>() <= 16);
         assert!(size_of::<Property>() <= 32);
         const { assert!(ENTRY_BYTES <= 48); }
-        assert!(slot_bytes::<Object>() <= 88);
+        assert!(slot_bytes::<Object>() <= 112);
         assert_eq!(size_of::<Meta>(), 8);
         assert!(slot_bytes::<Str>() <= 32);
     }
@@ -3797,7 +3819,8 @@ mod tests {
         assert_eq!(h.stored_edges(stale, &mut out), Err(HeapError::Stale));
     }
 
-    /// An object that gets room for the properties it will have holds no slack; the same object built by push grows to 4.
+    /// Up to 3 values are in the record and leave no slack. A fourth moves them to a vector with room for 6 (an object that outgrows its
+    /// record grows more); an object that gets room for the properties it will have first holds no slack.
     #[test]
     fn reserved_property_room_leaves_no_slack() {
         let mut h = Heap::default();
@@ -3813,7 +3836,21 @@ mod tests {
         let p = h.new_object(None).unwrap();
         h.set(p, k, n(1.0)).unwrap();
         let f = h.footprint();
-        assert_eq!(f.slots_cap - f.slots_used, 3 * SLOT_BYTES, "a pushed vector of one slot has room for 4");
+        assert_eq!((f.slots_used, f.slots_cap), (4 * SLOT_BYTES, 4 * SLOT_BYTES), "an inline value leaves no slack");
+        let q = h.new_object(None).unwrap();
+        for key in [k, name, pk, key(&mut h, "x")] {
+            h.set(q, key, n(1.0)).unwrap();
+        }
+        let f = h.footprint();
+        assert_eq!(f.slots_cap - f.slots_used, 2 * SLOT_BYTES, "four values in a vector of 6");
+        let r = h.new_object(None).unwrap();
+        h.reserve_props(r, 5).unwrap();
+        for i in 0..5 {
+            let kk = key(&mut h, &format!("r{i}"));
+            h.set(r, kk, n(1.0)).unwrap();
+        }
+        let g = h.footprint();
+        assert_eq!(g.slots_cap - g.slots_used, f.slots_cap - f.slots_used, "a reserved vector of 5 holds no slack");
         let stale = h_stale(&mut h);
         assert_eq!(h.reserve_props(stale, 1), Err(HeapError::Stale));
     }

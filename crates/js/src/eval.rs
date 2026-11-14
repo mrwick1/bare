@@ -3187,8 +3187,10 @@ impl<'p> Interp<'p> {
     #[inline(never)]
     fn object_shaped(&mut self, l: List<Prop>, shape: u32) -> Res<Value> {
         let prog = self.prog.clone();
-        let mut slots = Vec::with_capacity(l.len());
-        for pid in prog.list(l) {
+        // The values of up to 3 keys wait on the stack: the object keeps that many in its record, so no vector is made.
+        let n = l.len();
+        let (mut small, mut big) = ([Value::Undefined; 3], Vec::with_capacity(if n > 3 { n } else { 0 }));
+        for (i, pid) in prog.list(l).enumerate() {
             let p = *prog.prop(pid);
             let name = match self.prop_str[pid.index()] {
                 Some(s) => s,
@@ -3197,8 +3199,14 @@ impl<'p> Interp<'p> {
                     self.key_str(k)?
                 }
             };
-            slots.push(self.eval_named(p.value, Some(name))?);
+            let v = self.eval_named(p.value, Some(name))?;
+            if n > 3 {
+                big.push(v);
+            } else {
+                small[i] = v;
+            }
         }
+        let slots: &[Value] = if n > 3 { &big } else { &small[..n] };
         let o = h!(self, self.heap.new_object_with_shape(Some(self.object_proto), shape, slots));
         Ok(Value::Object(o))
     }
