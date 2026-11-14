@@ -9874,3 +9874,12 @@ Suite of 800 tests (the 40 repeated 20 times, `/data/bare-tmp/rcb/suite800`), 1 
 
 - RSS of one journey moves by 2% to 3% from run to run on the same binary; the sum by 0.3%. A change of 1% on the Wikipedia rows needs 9 or more runs to show.
 - `Counts.rules` (rules in the cache) is removed with `MAX_RULES`; nothing used it.
+
+
+## Modern color rendering, 2026-11-14
+
+Issue #464. Candidate production source: 79164130. Modern absolute colors and two-operand mixes now reach the existing sRGB painter. Deferred currentColor expressions share the variable arena. Color stays four bytes, Value eight bytes and Side 72 bytes. Stored deferred entries grow from 32 to 56 bytes. The color crate uses its Rust libm backend to avoid an extra shared-library load on ordinary pages.
+
+The final serial release run passes 1,913 tests with seven ignored. The selected three-row browser cost gate passes its unchanged 0.5 percent rule under both allocators. The final 390-pixel synthetic page and real Deck primary button pass computed-color and inspected-pixel checks. The tests use headless bare; no mirrored test is claimed. Full resource samples, failed intermediate checks and syntax limits are in [the results](rendering-colors-results.md).
+
+No installation, merge or deployment is included. Wrapping remains separate in #467.
