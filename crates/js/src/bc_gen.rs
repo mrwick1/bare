@@ -28,6 +28,8 @@ use std::collections::HashMap;
 
 #[path = "bc_gen_expr.rs"]
 mod expr;
+#[path = "bc_gen_rf.rs"]
+mod rf;
 #[path = "bc_gen_stmt.rs"]
 mod stmt;
 #[cfg(test)]
@@ -80,6 +82,28 @@ enum KeyOf {
     Name(u32),
 }
 
+/// A variable of a register function.
+#[derive(Clone, Copy)]
+struct Local {
+    reg: u32,
+    /// `false` for a `let` or `const` whose declaration the generator has not reached: a read or write there is a TDZ error, so
+    /// the function does not compile as a register function.
+    init: bool,
+    is_const: bool,
+}
+
+/// Stage 2, a register function: no environment. The parameters, the `var`s and the `let`s and `const`s of all its scopes are
+/// registers (`bc_scope.rs` gives each scope's bindings in order). The function has no inner function or class, no `with`, no
+/// `arguments`, so nothing else can reach them.
+struct Rf {
+    /// The function scope, and its parent (names that the function does not declare resolve from the parent: the function pushes
+    /// no environment, so the environment of its closure is hop 0).
+    scope: u32,
+    outer: u32,
+    locals: HashMap<(u32, u32), Local>,
+    uses_this: bool,
+}
+
 pub(super) struct Gen<'g, 'p> {
     it: &'g mut Interp<'p>,
     prog: Rc<Program<'static>>,
@@ -102,6 +126,7 @@ pub(super) struct Gen<'g, 'p> {
     /// The completion register of a script body: each expression statement writes it, and `if`, loops, `switch` and `try`
     /// clear it as they start (`enter` and `exec_simple` at depth 0). `None` in a function.
     compl: Option<u32>,
+    rf: Option<Rf>,
 }
 
 /// The result of `bc_gen_check`.
@@ -121,6 +146,19 @@ impl<'p> Interp<'p> {
     /// Compile function `fid` of the current script. Call it after the script ran (the walker knows the names of environment 0
     /// then).
     pub(super) fn bc_compile(&mut self, fid: FuncId) -> G<Code> {
+        let off = self.bc.rf_off;
+        let r = self.bc_compile_in(fid);
+        if r.is_ok() || off {
+            return r;
+        }
+        // A construct that a register function does not hold (a `switch` with `let`): compile it as a stage 1 function.
+        self.bc.rf_off = true;
+        let r = self.bc_compile_in(fid);
+        self.bc.rf_off = false;
+        r
+    }
+
+    fn bc_compile_in(&mut self, fid: FuncId) -> G<Code> {
         let f = *self.prog.func(fid);
         if !matches!(f.mode, FuncMode::Plain | FuncMode::Env) {
             return Err("generator or async function");
@@ -138,14 +176,16 @@ impl<'p> Interp<'p> {
         if w.bad.is_some() {
             return Err("scope walk");
         }
+        let rf = if !self.bc.rf_off { self.rf_start(fid, &f, &fs) } else { None };
+        let (top, nparams) = rf.as_ref().map_or((0u32, 0usize), |(_, n, nl)| (*nl as u32, *n));
         let mut g = Gen {
             prog: self.prog.clone(),
             it: self,
             code: Code::new(0),
             pool: HashMap::new(),
             ics: 0,
-            top: 0,
-            max: 0,
+            top,
+            max: top,
             sites: w.sites.into_iter().collect(),
             scopes: w.stmts.into_iter().collect(),
             depth: 0,
@@ -154,14 +194,23 @@ impl<'p> Interp<'p> {
             pos: f.span.start,
             strict: f.strict,
             compl: None,
+            rf: rf.map(|r| r.0),
         };
         match f.body {
+            Body::Expr(e) if g.rf.is_some() => g.return_expr(e)?,
             Body::Expr(e) => {
                 let r = g.reg()?;
                 g.expr(e, r)?;
                 g.emit(Op::Ret, r, 0, 0)?;
             }
             Body::Lazy(_) => return Err("a function with a lazy body"),
+            Body::Block(l) if g.rf.is_some() => {
+                let prog = g.prog.clone();
+                for s in prog.list(l) {
+                    g.stmt(s)?;
+                }
+                g.emit(Op::RetUndef, 0, 0, 0)?;
+            }
             Body::Block(l) => {
                 if g.it.has_lexical(l) {
                     if fs.flags & bc_scope::BF_SELF_NAME != 0 && g.prog.list(l).any(|s| matches!(g.prog.stmt(s).kind, StmtKind::Function(d) if g.it.func_name[d.index()] == g.it.func_name[fid.index()])) {
@@ -181,6 +230,14 @@ impl<'p> Interp<'p> {
         let mut c = g.code;
         c.nregs = g.max as u16;
         c.ics = (0..g.ics).map(|_| Cell::new(Ic::EMPTY)).collect();
+        if let Some(rf) = &g.rf {
+            c.regfn = true;
+            c.nparams = nparams as u16;
+            c.nlocals = top as u16;
+            c.uses_this = rf.uses_this;
+            c.dyn_this = f.kind == FuncKind::Arrow;
+            c.strict = f.strict;
+        }
         Ok(c)
     }
 
@@ -209,6 +266,7 @@ impl<'p> Interp<'p> {
             fins: Vec::new(),
             pos: 0,
             compl: None,
+            rf: None,
         };
         let c = g.reg()?;
         g.compl = Some(c);
@@ -318,8 +376,13 @@ impl Gen<'_, '_> {
     }
 
     fn patch_to(&mut self, at: usize, target: usize) -> G<()> {
-        let off = target as i64 - at as i64 - 1;
         let w = self.code.ops[at];
+        // A fused compare and jump has two words: the offset is the second, and it counts from the word after it.
+        if Op::from_u8(w as u8).is_some_and(|o| o.is_fused_jump()) {
+            self.code.ops[at + 1] = (target as i64 - at as i64 - 2) as i32 as u32;
+            return Ok(());
+        }
+        let off = target as i64 - at as i64 - 1;
         self.code.ops[at] = if w as u8 == Op::Jmp as u8 {
             if !(-(1 << 23)..1 << 23).contains(&off) {
                 return Err("jump too far");
@@ -346,12 +409,32 @@ impl Gen<'_, '_> {
 
     /// What the name `n` at identifier site `site` means.
     fn site(&mut self, site: u32, n: u32) -> G<Site> {
+        self.site_of(site, n, false)
+    }
+
+    /// The same for a site that writes the name: a `const` is not a register that the code may write.
+    fn site_w(&mut self, site: u32, n: u32) -> G<Site> {
+        self.site_of(site, n, true)
+    }
+
+    fn site_of(&mut self, site: u32, n: u32, write: bool) -> G<Site> {
         let sc = *self.sites.get(&site).ok_or("a site that the walk did not visit")?;
+        if let Some(rf) = &self.rf {
+            return match self.local_at(sc, n) {
+                Some((_, l)) if !l.init => Err("a variable used before its declaration"),
+                Some((_, l)) if write && l.is_const => Err("assignment to a const"),
+                Some((_, l)) => Ok(Site::Reg(l.reg)),
+                None if rf.outer == NONE => Ok(Site::Global),
+                None => Ok(self.it.bc_resolve(n, rf.outer)),
+            };
+        }
         Ok(self.it.bc_resolve(n, sc))
     }
 
     fn load(&mut self, s: Site, n: u32, dst: u32) -> G<()> {
         match s {
+            Site::Reg(r) if r == dst => Ok(()),
+            Site::Reg(r) => self.emit(Op::Mov, dst, r, 0),
             Site::Env { hops, index } => self.emit(Op::GetEnv, dst, hops, index),
             Site::Global => {
                 let k = self.name(n);
@@ -366,6 +449,8 @@ impl Gen<'_, '_> {
 
     fn store(&mut self, s: Site, n: u32, src: u32) -> G<()> {
         match s {
+            Site::Reg(r) if r == src => Ok(()),
+            Site::Reg(r) => self.emit(Op::Mov, r, src, 0),
             Site::Env { hops, index } => self.emit(Op::SetEnv, src, hops, index),
             Site::Global => {
                 let k = self.name(n);

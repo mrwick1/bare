@@ -8,7 +8,8 @@
 //!   and at a handler target it is the handler's `depth`, which is at most the depth at each instruction in its range that can
 //!   throw;
 //! - no path runs past the last word;
-//! - the source positions are sorted by word.
+//! - the source positions are sorted by word;
+//! - a register function (stage 2) has `nparams <= nlocals <= nregs`; its ops read only registers and the environments outside it.
 use crate::bc::{decode, Code, Const, Form, Ins, Op};
 
 /// Check `code`. Gives the first error.
@@ -28,6 +29,9 @@ pub(super) fn verify(code: &Code) -> Result<(), String> {
     // The target of a jump at `pc` that takes `len` words (`usize::MAX` when it is before word 0).
     let target = |pc: usize, len: usize, i: &Ins| usize::try_from((pc + len) as i64 + i.offset() as i64).unwrap_or(usize::MAX);
     let nregs = code.nregs as u32;
+    if code.regfn && !(code.nparams <= code.nlocals && code.nlocals <= code.nregs) {
+        return Err("a register function: parameters, locals and registers do not fit".into());
+    }
     let mut ic_used = vec![false; code.ics.len()];
     for &(pc, i, len) in &ins {
         let err = |what: &str| Err(format!("{pc:04} {}: {what}", i.op.name()));
@@ -47,6 +51,10 @@ pub(super) fn verify(code: &Code) -> Result<(), String> {
                     Some(_) if i.op != Op::LoadK => return err("the constant is not a name"),
                     Some(_) => {}
                 },
+                Some('q') => match code.consts.get(v as usize) {
+                    Some(Const::Number(_)) => {}
+                    _ => return err("the constant is not a number"),
+                },
                 Some('c') => match ic_used.get_mut(v as usize) {
                     Some(u) if !*u => *u = true,
                     _ => return err("no such inline cache, or a second use of it"),
@@ -57,7 +65,7 @@ pub(super) fn verify(code: &Code) -> Result<(), String> {
             }
         }
         let regs_ok = match i.op {
-            Op::Call => i.b + 2 + i.c <= nregs,
+            Op::Call | Op::CallR => i.b + 2 + i.c <= nregs,
             Op::New => i.b + 1 + i.c <= nregs,
             Op::Concat => i.c >= 1 && i.b + i.c <= nregs,
             _ => true,
@@ -100,6 +108,7 @@ pub(super) fn verify(code: &Code) -> Result<(), String> {
         match i.op {
             Op::Jmp => work.push((target(pc, len, &i), d)),
             Op::JmpIf | Op::JmpIfNot | Op::JmpNullish | Op::JmpNotNullish => work.extend([(target(pc, len, &i), d), (pc + len, d)]),
+            op if op.is_fused_jump() => work.extend([(target(pc, len, &i), d), (pc + len, d)]),
             Op::Ret | Op::RetUndef | Op::Throw => {}
             _ => work.push((pc + len, d)),
         }

@@ -11,7 +11,7 @@ enum Place {
     Elem(u32, u32),
 }
 
-fn binary(op: BinaryOp) -> Op {
+pub(super) fn binary(op: BinaryOp) -> Op {
     match op {
         BinaryOp::Add => Op::Add,
         BinaryOp::Sub => Op::Sub,
@@ -57,6 +57,9 @@ impl Gen<'_, '_> {
     }
 
     fn expr_inner(&mut self, e: ExprId, ex: Expr, dst: u32) -> G<()> {
+        if self.rf.is_some() && self.rf_expr(ex, dst)? {
+            return Ok(());
+        }
         let prog = self.prog.clone();
         match ex.kind {
             ExprKind::Ident => {
@@ -182,7 +185,7 @@ impl Gen<'_, '_> {
     }
 
     /// `GetField` or `SetField`: `a` and `b` as the op says, with a new inline cache and the name as the constant.
-    fn field(&mut self, op: Op, a: u32, b: u32, name: Span) -> G<()> {
+    pub(super) fn field(&mut self, op: Op, a: u32, b: u32, name: Span) -> G<()> {
         let n = self.it.name_at(name);
         let k = self.name(n);
         let ic = self.ic();
@@ -294,7 +297,7 @@ impl Gen<'_, '_> {
                     let k = self.name(n);
                     return self.emit(Op::TypeofName, dst, k, 0);
                 }
-                Site::Env { .. } => {}
+                Site::Env { .. } | Site::Reg(_) => {}
             }
         }
         self.expr(arg, dst)?;
@@ -408,12 +411,21 @@ impl Gen<'_, '_> {
             ExprKind::Super => return Err("super"),
             _ => {
                 self.expr(callee, b)?;
-                self.emit(Op::LoadUndef, this, 0, 0)?;
+                // A register function does not load `this`: bit 31 of the call says it is `undefined`.
+                if self.rf.is_none() {
+                    self.emit(Op::LoadUndef, this, 0, 0)?;
+                }
             }
         }
         let n = self.args(args)?;
         self.code.calls.push((self.here() as u32, e.index() as u32));
-        self.emit(Op::Call, dst, b, n)?;
+        if self.rf.is_some() {
+            let plain = !matches!(self.prog.expr(c).kind, ExprKind::Member { .. } | ExprKind::Index { .. });
+            let x = self.prog.expr(e).span.start.saturating_add(1) & 0x7fff_ffff | (plain as u32) << 31;
+            self.emit_ins(Ins::new(Op::CallR, dst, b, n).with_x(x))?;
+        } else {
+            self.emit(Op::Call, dst, b, n)?;
+        }
         self.free(b);
         Ok(())
     }

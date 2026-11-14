@@ -9545,3 +9545,62 @@ The 12 rows are object allocation and iterator results (`new_object_with_shape` 
 ## Standing exception: PR #497 string atoms and ropes cost (approved by owner 2026-11-14)
 
 After two fix runs, 12 of 803 cost rows stay above +0.5% under both allocators. The worst row is +0.93%. The rows are `wrapper_load forin` (2 rows), `gen_load iterobj` (2 rows), `iterator_load` generic (2 rows), `iterator_load set_diff`, `iterator_load set_sym`, `sc_load custom_iter 10`, `tagged_load sites 10`, `weak_load dead_cycles 10` and `arrobj_load tosorted 10`. They create objects and read `for-in` keys: `new_object_with_shape` costs about 23 more instructions for each call. The matrix mean is -0.35% under glibc. keycost is +0.2%. The 47 journeys are +0.1% in total, with `python-docs-search-results` +0.7% and `python-docs-search` +0.6%. The owner approved an exception for these 12 rows only. Reason: a loop of `s += x` is now linear. 10,000 parts take 2.0 ms and 6 MiB, not 85.6 ms and 197 MiB. 100,000 and 1,000,000 parts no longer stop at the byte limit.
+
+## P3 register VM spike (2026-11-14, `docs/design-js.md` phase P3)
+
+Branch `t3/register-bytecode-vm-spike`. The tree walker stays the default. The lane runs with `BARE_JS_EXEC=byte` (or `auto`).
+
+### Result: the gate passes
+
+`eval_load CASE 10`, `perf stat -e instructions:u`, `GLIBC_TUNABLES=glibc.malloc.tcache_count=65535`, archMachine, 3 runs each (the three runs differ by under 0.01%). Numbers are the median.
+
+| Case | Base f6415364 tree | Main f68e956a tree | Branch tree | Branch byte | Byte vs main tree |
+|---|---|---|---|---|---|
+| `loopfn` | 4,091.19 M | 4,091.20 M | 4,091.20 M | 841.24 M | **4.86x** (gate 4x) |
+| `fib` | 165.83 M | 166.30 M | 166.30 M | 53.52 M | **3.11x** (gate 3x) |
+| `loop` (globals) | 5,015.18 M | 5,019.19 M | | 2,527.23 M | 1.99x |
+| `calls` | 3,533.41 M | 3,540.41 M | | 2,116.46 M | 1.67x |
+| `closures` | 669.91 M | 668.12 M | | 544.26 M | 1.23x |
+
+- Checksums are ok in both modes on all five cases.
+- The tree lane of the branch is the same as main: `loopfn` and `fib` differ by under 0.001%.
+- Cost of a call of `fib`: 546 instructions in the register lane, 1,763 in tree (the difference between scale 10 and scale 1, over 84,374 calls). The first version, before `CallR`, cost 627 (`fib` 61.0 M, 2.72x: below the gate).
+- Cost per op: `loopfn` runs 6 ops in an iteration (`JnLtK MulK Add ModK Inc Jmp`) for about 424 instructions, so about 71 for each op, against 46 in R1 on locals in stage 1. This is not better than R1 for each op. The gain is fewer ops (6, not 9 with 4 for `i++`) and no environment. Hypothesis: `fmod` costs a large part of the 424. I did not measure it alone.
+
+### What was built
+
+- Ops: fused compare-and-jump (`JnLt JnLe JnGt JnGe JnEq JnNe JnSEq JnSNe` with a register or a constant on the right), `AddK SubK MulK DivK ModK`, `CallR`. `Inc` and `Dec` from stage 1 are used in place.
+- `bc_gen_rf.rs`: the generator of a register function. A function is RF when it is a plain function, arrow or method with simple parameters, no `async` or generator, no inner function, class, `with`, `arguments`, `new.target`, `super` or own name. TDZ is checked while generating, in order. A name from outside is read from the closure environment.
+- `bc_vm.rs`: one loop for RF frames. A call of an RF from an RF reuses the argument registers of the caller as the registers of the callee. The call keeps `depth`, the step budget, the `Error.stack` frame, `strict` and the environment. One place unwinds an error through the frames.
+- The verifier checks fused jumps, constant operands and the register layout of an RF.
+- Stage 1 golden listings are unchanged: they run with the register lane off (`rf_off`). One new test, `a_simple_function_is_a_register_function`.
+
+### Checks
+
+- `cargo test --release --workspace --no-fail-fast`: 3,890 passed, 7 failed. The 7 are the known openssl TLS tests (`bare-net --test https_openssl` 2, `bare-tls --test client_openssl` 4, `bare-tls --test tls12_openssl` 1).
+- `tools/js/exec_diff.sh`: 79 runs, 0 differences between tree, auto and byte.
+- `tools/js/test262_check.sh` (tree): gate ok. With `BARE_JS_EXEC=byte` the gate says one directory lost tests against the baseline: `language/module-code/top-level-await` (40 to 37). The same three tests fail in byte on main (the base build f9a0c26b16 gives the same three results), so they are stage 1 faults, not new: `top-level-await/fulfillment-order`, `rejection-order` and `unobservable-global-async-evaluation-count-reset`. The byte results differ from tree in one more test, `module-code/namespace/internals/super-access-to-tdz-binding` (a different message, fails in both).
+- `tools/js/cost_matrix.sh` (main f68e956a against the branch, switch off, glibc; jemalloc runs only for a row over the limit): 803 rows, 0 rows over under one allocator, 0 over under both, mean -0.004%. Two rows fail to run in both trees (`parse_load deep 1` and `deep 10`: the known stack overflow).
+
+### What the lane does not cover
+
+- A function with an inner function, arrow, class, `arguments`, `new.target`, `super`, `with` or its own name runs in the stage 1 lane: all its variables stay in environments.
+- A `switch` with `let` or `const`, generators and async functions: stage 1 or tree.
+- A call from an RF to a function that is not an RF, and `new`, go through `bc_call` and Rust recursion.
+- A call from a native function (`map`, `sort`, a callback) enters the loop again by Rust recursion.
+- Script bodies keep globals in cells, so `loop` gains only 1.99x.
+- Module code with top-level await in the byte lane (the 3 tests above).
+- Not changed: `Auto` is not the default. The GC still runs only at depth 0.
+
+### Plan for the full stage 2
+
+1. Boxed cells for captured variables. This makes a function with a closure an RF and lifts the largest limit (`closures` is 1.23x now).
+2. `new` and inline calls of constructors; calls from RF to a stage 1 function in the same loop.
+3. Global access through the cells of the script by an inline cache, to bring `loop` from 1.99x to the `loopfn` level.
+4. Cost per op: profile the loop op by op (the 71 per op above), check `fmod`, the step tick of `Jmp` and the register bounds checks.
+5. GC safepoints at back edges and calls (the register stack is the root set). Then `Auto` as the default only when fallbacks are 0 on the corpora.
+6. Fix the 3 `top-level-await` byte tests.
+
+### Not tested
+
+- Wall time on an idle machine. The 48 journeys and the ramps in `/data/bare-tmp/bm` with the register lane on. A page that throws inside a deep chain of inline calls beyond the unit tests and exec_diff rows. `Error.stack` text of inline frames against Node beyond the exec_diff fixtures. Peak memory of a deep recursion (the register stack grows by `resize`). e16.

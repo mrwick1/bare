@@ -17,6 +17,7 @@ fn listing(src: &str) -> String {
     let prog = parse_script(src, Limits::default()).unwrap_or_else(|e| panic!("{e:?}: {src}"));
     let mut it = Interp::new(&prog, Heap::default(), EvalLimits { max_steps: 100_000, ..Default::default() }).unwrap();
     let _ = it.run();
+    it.bc.rf_off = true;
     let root = it.bc_root().unwrap();
     let mut out = String::new();
     let mut todo = it.bc_walk(None, root).funcs;
@@ -343,4 +344,25 @@ fn the_verifier_rejects_broken_code() {
     assert!(verify(&c).unwrap_err().contains("handler"));
     c.handlers[0] = Handler { start: 0, end: 1, target: 1, reg: 0, depth: 1 };
     assert!(verify(&c).unwrap_err().contains("depth"));
+}
+
+/// A small function with a loop and a call is a register function: no environment, fused jumps, `CallR`.
+#[test]
+fn a_simple_function_is_a_register_function() {
+    big(|| {
+        let src = "function fib(n) { if (n < 2) return n; return fib(n - 1) + fib(n - 2); } fib(3);";
+        let prog = parse_script(src, Limits::default()).unwrap();
+        let mut it = Interp::new(&prog, Heap::default(), EvalLimits::default()).unwrap();
+        let _ = it.run();
+        let root = it.bc_root().unwrap();
+        let (f, _) = it.bc_walk(None, root).funcs[0];
+        let c = it.bc_compile(f).unwrap();
+        verify(&c).unwrap_or_else(|e| panic!("{e}\n{}", c.disassemble()));
+        let text = c.disassemble();
+        assert!(c.regfn, "{text}");
+        for want in ["CallR", "JnLtK", "SubK"] {
+            assert!(text.contains(want), "{want}\n{text}");
+        }
+        assert!(!text.contains("Env"), "{text}");
+    });
 }

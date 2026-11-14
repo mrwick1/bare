@@ -69,7 +69,9 @@ struct BcState {
     codes: Vec<Box<[BcSlot]>>,
     /// Register files of finished frames, for reuse. A running frame owns its registers. They are not GC roots: `collect`
     /// refuses to run during a call, and a script body that runs on bytecode reaches host code only through a call.
-    pool: Vec<Vec<Value>>,
+    pool: Vec<bc_vm::RegStack>,
+    /// Stage 2 off: no function compiles as a register function (the stage 1 listings and tests).
+    pub(super) rf_off: bool,
     /// The bindings of the environment of a scope (`PushEnv`, `DeclEnv`), by scope.
     tmpl: FxMap<u32, Rc<[(u32, u8)]>>,
     stats: BcStats,
