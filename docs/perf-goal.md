@@ -31,6 +31,10 @@ All numbers use the recorded corpus from step 1, 3 runs each, against the baseli
 
 A target that is not met is reported with its numbers. It is not hidden.
 
+### Result (2026-11-14)
+
+The final benchmark compared the baseline `f6415364` with main `8f23dded` after every step merged. Three criteria are met and one is half met. Criterion 1 is met: 47 of 47 journeys pass on replay, test262 shows no loss, and `exec_diff` shows 0 differences. Criterion 5 is met: 273.6 MiB for the 16 MiB sheet ramp (947 MiB before). Criterion 7 is met: the suite is 6.8 times faster with 4 workers and uses 2.10 times fewer instructions with one worker. Criterion 8 is half met: the restyle charge now matches its cost, but the `cssom-objects` cap is a fixed 524,288, not removed and not set by the rule count. Four are not met. Criterion 2: 85.3% of the baseline instructions (target 80%), or 89.5% when `mdn-reference` is left out (the last sentence of this paragraph says why). Criterion 3: the ramps are 6.4 and 8.8 times lower (target 10). Criterion 4: 1.19 and 1.02 times (target 1.3). Criterion 6: 99.3 MiB, 13% lower (target 20%); it was met at 90 MiB after PR #501 and rose again after PR #497. The benchmark also found that `mdn-reference` asks for 47 chunk files at a wrong address since PR #492, so its -73% is not a gain. The table, the numbers, the run counts and what was not tested are in `docs/progress.md`, section "Final benchmark of the perf goal (2026-11-14)".
+
 ## Baseline on the recorded corpus (2026-11-14)
 
 Measured with the virtual page clock (`docs/design-virtual-clock.md`): `tools/bench/journeys.sh compare --clock virtual --runs 3 --pss`, corpus `virtual`, 47 journeys (the 48th, `nextjs-docs`, does not pass on replay). Same-binary spread is 0.7% or less on main, so these numbers are not noise. Baseline is `f6415364` plus the replay patch plus the clock. Main is `fe2d54cd` plus the clock. Per-journey table: `docs/progress.md`, section "A virtual page clock for replay mode".

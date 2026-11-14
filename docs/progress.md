@@ -9888,3 +9888,214 @@ No installation, merge or deployment is included. Wrapping remains separate in #
 ## 2026-11-14: grapheme-safe wrapping
 
 Source 6841f650 adds inherited wrap properties and shared grapheme opportunities for placement and intrinsic sizing. The serial release checks pass 1,917 tests. The five selected cost rows pass under both allocators. Computed style grows by 16 bytes. Phone-width captures show the same request text wrapping inside the Deck card. The diagnostic rerun and all test limits are in [the results](rendering-wrap-results.md). No installation or merge is included.
+## Final benchmark of the perf goal (2026-11-14)
+
+Task: measure the 8 success criteria of `docs/perf-goal.md` on two frozen commits. No code changed. Raw logs and TSV files are machine-local under `/data/bare-tmp/fb/`.
+
+- BASE: `f6415364`, the baseline of the goal. NEW: `8f23dded`, main after every step merged (#519).
+- Machine: archMachine (AMD Ryzen 9 5900HX, 16 cores, 30 GiB). The machine was shared: load average 2.5 to 10 during the runs, and up to 3 other `heavy` jobs. Instruction counts are stable under load (spread 0.3% or less on every journey). Wall times are weak.
+- Build: all three `bare-drive` binaries come from `cargo build --release -p bare-drive` (a `--workspace --examples` build does not make the `bare-drive` binary, and an earlier agent saw a 2.5% difference between the two build kinds). NEW and BASE: `base-build <sha> --release -p bare-drive`. The cost matrix and the stress runs use the `base-build` default trees (`--release --workspace --examples`) plus `--release -p bare-stress`.
+- BASE for the journeys is the baseline with the replay patch and the virtual clock: local branch `bench-base-vclock` in `/data/bare-tmp/bench-base-src` (HEAD `2ddee1da` plus the staged clock patch, not pushed). It is `f6415364` plus `crates/net` replay, seed, and clock code. For the ramps, the suite, the stress cases and the cost matrix BASE is `f6415364` itself (no patch).
+- Corpus: `/data/bare-tmp/corpus/virtual`, 47 journeys, virtual clock (`journeys.sh compare --clock virtual --runs 3 --pss`). The runner makes run 0 (PSS) and runs 1 to 3. Medians below are over runs 1 to 3.
+
+### Result: the 8 criteria
+
+| # | Criterion | Baseline | Target | NEW (8f23dded) | Verdict |
+| --- | --- | --- | --- | --- | --- |
+| 1 | Journeys pass with recorded inputs; test262 gate and `exec_diff` unchanged | 47 of 47 replay | all pass | 47 of 47 pass (376 runs, none failed; `mdn-reference` passes with 47 replay misses, see below). test262: exit 0, 29,731 pass, no directory below the baseline file (it has 29,483). `exec_diff`: 79 runs, 0 differences. `nextjs-docs` (the 48th) does not replay | met for the 47 that replay |
+| 2 | Total instructions of the journeys | 105,189 M (100%) | 80% or lower | 89,719 M (85.3%). CPU 87.5%, peak RSS 82.7%. Without `mdn-reference` (see below): 87,857 M against 98,211 M (89.5%) | not met |
+| 3 | `compm_22000` and `rest_13` ramps | 11,664 M and 10,873 M | 10 times lower | 1,828 M (6.4 times) and 1,238 M (8.8 times) | not met |
+| 4 | `python-org-docs-link`, `rust-book-search` | 1,438 M, 16,607 M; 150 ms, 1,591 ms | 1.3 times faster | 1,208 M (1.19 times), 16,315 M (1.02 times); wall 134 ms (1.12 times), 1,596 ms (1.00 times) | not met |
+| 5 | Peak RSS of the 16 MiB sheet ramp with a `cssRules` read | 947 MiB | 300 MiB or lower | 273.6 MiB | met |
+| 6 | Peak RSS of `python-docs-search-results` | 114.4 MiB measured (116 MiB in the goal) | 20% lower (92.8 MiB or lower) | 99.3 MiB (-13.2% against 114.4, -14.4% against 116) | not met |
+| 7 | Suite with a shared login | sequential cold runs: 3.93 s, 21,160 M | wall 2 times faster; instructions with one worker 1.5 times lower | K = 4: 0.577 s (6.8 times). K = 1: 2.08 s (1.89 times), 10,084 M (2.10 times lower) | met (wall at K = 2 or more; K = 1 alone gives 1.89 times) |
+| 8 | Limits | restyle charge about 9 times its cost; `cssom-objects` cap 65,536 | charge matches cost; cap removed or set by rule count | charge: 1.04 times the cost of a JS step (met). Cap: a fixed constant, 524,288 (not removed, not set by the rule count) | partly met: charge met, cap not as written |
+
+Read the table with the sections below. Criteria 5 and 7 are met. Criteria 2, 3, 4 and 6 are not met, and criterion 8 is half met.
+
+### Criterion 1 and 2: the journeys
+
+Inputs: corpus `virtual`, 47 journeys, 3 runs plus the PSS run for each journey and binary (94 journey-binaries, 4 runs each, runs interleaved). Command: `tools/bench/journeys.sh compare --clock virtual --runs 3 --pss /data/bare-tmp/fb/bin/bare-drive-base-vclock /data/bare-tmp/fb/bin/bare-drive-new`. Log: `/data/bare-tmp/fb/journeys.{log,tsv}`.
+
+- All 47 journeys pass in all runs on both binaries. The same-binary spread of instructions is 0.3% or less on every journey (target of the clock task: under 2%). The replay has zero misses, except `mdn-reference` on NEW (47 misses in each of its 4 runs) and 1 miss in run 0 of `wikipedia-toc-languages` on BASE.
+- **`mdn-reference` on NEW does not do the recorded work.** It asks for 47 JS chunk files at a wrong address (`GET https://developer.mozilla.org:443/en-US/7489.879b548e785958fd.js`, and 46 more like it; the recording has them under another path) and no reply is recorded for them. The journey still passes. Its instructions fall from 6,978 M to 1,862 M (-73.3%) and its peak RSS from 116.0 MiB to 29.6 MiB. That is not a gain. I ran the journey with `BARE_NET_REPLAY` on the merge commits in between: 0 misses at `226935a5` and `0727ffef` (#498), 47 misses from `e497ff5f` (#492) up to NEW. So PR #492 changed the address of these requests. Hypothesis: the page builds the chunk address from a script address or a script property (a webpack public path), and the lazy function parse of #492 changes that value. Not examined. On the live site this would be 47 failed chunk loads. This looks like a correctness regression; it needs an issue and a fix. I did not change code.
+- Without `mdn-reference`, the 46 other journeys give: instructions 98,211 M to 87,857 M (ratio 0.895), CPU 11,220 ms to 10,389 ms (0.926), peak RSS 1,989.7 MiB to 1,712.0 MiB (0.860). I report 85.3% (all 47, as measured) and 89.5% (without it). Both miss the 80% target.
+- Totals, sum of medians: instructions 105,189 M to 89,719 M (-14.7%, ratio 0.853). CPU (user+system) 12,090 ms to 10,579 ms (-12.5%). Wall 11,343 ms to 10,190 ms (-10.2%, loaded machine). Peak RSS 2,105.7 MiB to 1,741.6 MiB (-17.3%).
+- PSS: the 20 ms sampler of run 0 misses many short journeys (17 of 47 give under 10 MiB, mostly 0.0, for at least one binary). Over the 30 journeys with a valid sample on both sides, PSS is 1,696 MiB to 1,339 MiB (-21%). This is not a criterion and the sample is partial.
+- Median change of a journey: -13.7%. Geometric mean of the ratios: 0.729. 36 journeys are more than 5% lower, 9 are within 5%, 2 are more than 5% higher (`wiktionary-portal` +10.6%, `paulgraham-home` +10.3%).
+- The total is held up by five journeys: `react-docs` (16,936 M), `rust-book-search` (16,315 M), `wikipedia-article` (7,701 M), `wikipedia-search` (7,244 M) and `nodejs-org-home` (5,864 M). They are 60.3% of the NEW total, and they moved by -0.8% (54,510 M to 54,060 M). The other 42 journeys went from 50,679 M to 35,659 M (70.4%). Hypothesis: these five spend their instructions in page JS execution, which the steps of the goal did not reduce much (the profile of 2026-11-13 gave JS execution 25.5% of the journeys and 57.7% of the ramps). Not measured per subsystem on NEW.
+- The three journeys that cost more in NEW were bisected by running the journey on the merge commits in between (3 runs each, `-p bare-drive` builds, instruction spread 0.3% or less):
+  - `wiktionary-portal`: 1,345 M (`226935a5`, clock added), 1,214 M (#498 lazy CSS), 1,582 M (#492 lazy JS parse and regex), then 1,570 M, 1,557 M at NEW. `wikipedia-portal`: 1,079, 1,000, 1,254, 1,241, 1,231 M. The step is PR #492. Hypothesis: the second parse of a lazy function that runs (the cost the #492 notes describe as a standing exception). I did not measure the cause inside #492.
+  - `paulgraham-home`: 107.0 M (#507, `b2c3fcad`) to 124.7 M (#506 gif-images, `f68e956a`), 121.3 M at NEW. The step is PR #506. Hypothesis: GIF decode on a page that loads a GIF. Not checked.
+
+Per journey (medians of runs 1 to 3; spread is (max - min) / median over runs 1 to 3 of the worse binary; PSS is run 0 only, and 0.0 means the sampler missed):
+
+| Journey | M instr base | M instr new | change | spread | RSS base MiB | RSS new MiB | PSS base MiB | PSS new MiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| archlinux-org-home | 57.2 | 50.2 | -12.2% | 0.0% | 17.8 | 18.4 | 15.1 | 0.2 |
+| blog-rust-lang-home | 564.5 | 196.1 | -65.3% | 0.0% | 27.1 | 20.4 | 26.6 | 17.4 |
+| cnn-lite-front | 58.4 | 50.4 | -13.7% | 0.0% | 19.0 | 19.7 | 0.0 | 0.0 |
+| craigslist-home | 20.1 | 19.0 | -5.3% | 0.1% | 16.5 | 16.3 | 0.2 | 0.0 |
+| crates-io-home | 133.4 | 132.5 | -0.7% | 0.1% | 21.4 | 21.0 | 17.3 | 17.6 |
+| curl-se-home | 2229.4 | 141.6 | -93.7% | 0.1% | 75.5 | 19.3 | 68.3 | 16.3 |
+| debian-org-home | 886.9 | 692.9 | -21.9% | 0.0% | 74.4 | 37.3 | 70.2 | 35.5 |
+| devto-home | 3485.7 | 3155.3 | -9.5% | 0.0% | 69.0 | 67.8 | 75.4 | 67.0 |
+| docs-rs-home | 115.5 | 58.6 | -49.2% | 0.1% | 19.2 | 19.0 | 8.3 | 0.0 |
+| duckduckgo-html-search | 128.2 | 66.5 | -48.1% | 0.0% | 19.4 | 19.9 | 16.1 | 0.0 |
+| example-learn-more | 134.1 | 124.9 | -6.9% | 0.0% | 20.6 | 20.4 | 17.1 | 17.8 |
+| example-page | 12.0 | 10.6 | -11.5% | 0.0% | 16.7 | 16.8 | 0.0 | 0.0 |
+| github-docs-home | 5224.6 | 4895.9 | -6.3% | 0.0% | 95.4 | 93.5 | 96.0 | 94.0 |
+| go-dev-home | 5615.5 | 3167.7 | -43.6% | 0.0% | 118.6 | 63.9 | 104.5 | 55.8 |
+| hn-comments-back | 130.6 | 109.4 | -16.2% | 0.1% | 17.6 | 18.2 | 15.0 | 0.0 |
+| hn-front | 97.7 | 84.1 | -14.0% | 0.0% | 17.6 | 18.0 | 15.2 | 0.0 |
+| hn-new-past | 187.2 | 165.2 | -11.8% | 0.1% | 17.8 | 18.3 | 15.0 | 15.9 |
+| httpbin-cookies | 25.8 | 20.6 | -20.2% | 0.0% | 16.5 | 16.6 | 0.1 | 0.0 |
+| httpbin-form-fill | 27.0 | 24.8 | -8.1% | 0.0% | 16.7 | 16.9 | 0.1 | 0.0 |
+| httpbin-form-submit | 36.2 | 32.0 | -11.5% | 0.0% | 16.7 | 17.1 | 0.0 | 0.0 |
+| kernel-org-home | 77.3 | 56.9 | -26.5% | 0.2% | 18.0 | 18.3 | 15.5 | 0.0 |
+| lobsters-comments-back | 260.0 | 214.2 | -17.6% | 0.0% | 18.6 | 19.1 | 16.0 | 16.5 |
+| lobsters-front | 273.2 | 221.7 | -18.9% | 0.1% | 19.1 | 19.4 | 15.8 | 16.6 |
+| mdn-reference | 6978.1 | 1862.0 | -73.3% | 0.0% | 116.0 | 29.6 | 112.2 | 26.4 |
+| nginx-org-home | 103.2 | 60.9 | -41.0% | 0.0% | 23.7 | 22.0 | 8.5 | 0.0 |
+| nodejs-org-home | 5833.0 | 5864.4 | +0.5% | 0.0% | 79.1 | 76.1 | 76.0 | 74.2 |
+| npr-text-story | 36.2 | 29.9 | -17.4% | 0.0% | 16.9 | 17.1 | 0.1 | 0.0 |
+| paulgraham-home | 110.0 | 121.3 | +10.3% | 0.1% | 17.9 | 18.8 | 15.4 | 0.0 |
+| python-docs-search | 2154.8 | 1266.0 | -41.2% | 0.0% | 93.5 | 69.9 | 90.4 | 68.3 |
+| python-docs-search-results | 3397.7 | 2485.5 | -26.8% | 0.0% | 114.4 | 99.3 | 113.4 | 97.7 |
+| python-docs-tutorial | 393.6 | 344.5 | -12.5% | 0.0% | 18.8 | 19.2 | 16.4 | 16.5 |
+| python-org-docs-link | 1438.1 | 1208.3 | -16.0% | 0.0% | 33.4 | 34.9 | 29.7 | 29.7 |
+| python-org-search | 1462.7 | 1221.4 | -16.5% | 0.0% | 32.1 | 32.8 | 29.9 | 29.9 |
+| react-docs | 16782.5 | 16935.7 | +0.9% | 0.0% | 107.7 | 101.2 | 106.8 | 99.0 |
+| rust-book-chapters | 567.1 | 518.7 | -8.5% | 0.1% | 23.3 | 23.9 | 20.8 | 21.0 |
+| rust-book-search | 16606.7 | 16315.0 | -1.8% | 0.0% | 130.8 | 128.0 | 127.6 | 125.0 |
+| rust-book-sidebar | 338.0 | 320.6 | -5.1% | 0.2% | 22.0 | 22.1 | 19.8 | 19.1 |
+| rust-lang-org-home | 723.3 | 96.4 | -86.7% | 0.0% | 35.7 | 19.6 | 26.5 | 6.0 |
+| sqlite-org-home | 79.6 | 67.0 | -15.8% | 0.0% | 19.8 | 20.5 | 6.9 | 0.0 |
+| substack-home | 1731.7 | 1269.6 | -26.7% | 0.0% | 65.0 | 42.8 | 62.3 | 38.1 |
+| w3c-home-links | 969.2 | 432.7 | -55.4% | 0.0% | 48.4 | 40.8 | 44.2 | 31.2 |
+| wikipedia-article | 7859.5 | 7700.7 | -2.0% | 0.2% | 66.0 | 59.4 | 61.0 | 58.4 |
+| wikipedia-main-random | 4071.2 | 4126.7 | +1.4% | 0.1% | 55.0 | 47.0 | 56.7 | 44.9 |
+| wikipedia-portal | 1181.3 | 1231.3 | +4.2% | 0.1% | 43.1 | 39.8 | 39.8 | 35.1 |
+| wikipedia-search | 7427.9 | 7244.1 | -2.5% | 0.1% | 68.0 | 63.0 | 65.9 | 60.9 |
+| wikipedia-toc-languages | 3754.1 | 3747.7 | -0.2% | 0.3% | 57.2 | 54.5 | 55.6 | 52.9 |
+| wiktionary-portal | 1408.4 | 1557.0 | +10.6% | 0.0% | 48.6 | 43.8 | 45.5 | 40.1 |
+
+Gates on NEW:
+- `TEST262=/data/claude-tmp/test262 TEST262_RUN=<NEW test262_run> tools/js/test262_check.sh`: the checkout is at the pinned commit `e4fbf577`. Exit 0. 29,731 tests pass over 585 directories. The baseline file has 29,483, so 248 more pass. 37 directories pass more than the file says, and none passes less. I did not run the BASE tree through it: "unchanged" is read as "no directory below the baseline file".
+- `CARGO_TARGET_DIR=/data/bare-tmp/target-final-bench tools/js/exec_diff.sh`: 79 runs, modes tree, auto and byte, 0 differences.
+
+### Criterion 3: the ramps
+
+Pages `/data/bare-tmp/bm/b/pages` (`compm_22000`, `rest_13`), steps `run.steps`, local server, `bare-drive` of BASE (`f6415364`) and NEW, `perf stat -e instructions:u`, 3 runs each, interleaved. Peak RSS by `wait4`.
+
+| Page | BASE M instr (min-max) | NEW M instr (min-max) | Ratio | Peak RSS BASE / NEW (MiB) |
+| --- | --- | --- | --- | --- |
+| `compm_22000` | 11,664.5 (11,664.4-11,664.5) | 1,828.0 (1,828.0-1,828.0) | 6.38 | 69.3 / 70.4 |
+| `rest_13` | 10,873.4 (10,873.3-10,873.4) | 1,238.1 (1,238.1-1,238.1) | 8.78 | 52.5 / 53.9 |
+
+Not met: 10 times needs 1,166 M and 1,087 M. Wall: 1,088 ms to 320 ms and 974 ms to 203 ms (weak). The shape of the cost on NEW: `rest_2` is 577.4 M, and each added restyle costs 60.0 M (`rest_30` 2,258.6 M, `rest_50` 3,459.5 M; `rest_1000` 60,501 M, 1 run). So about 577 M is fixed cost (parse of the page and of 36,000 rules, the index) and the rest is linear. The step 4 notes name the same two parts. Hypothesis (from the rule-set sharing design, not measured on NEW): a cheaper first selector parse is the lever left. Ramps have one document, so the rule-set cache (#515) cannot help.
+
+### Criterion 4: the sheet-scan journeys
+
+Same runs as criterion 1 (3 runs, instructions). Wall time: a separate `journeys.sh compare --clock virtual --runs 5 --only <journey>`, load average 2.5 to 3 (shared machine, so weak).
+
+| Journey | BASE M instr | NEW M instr | Instruction ratio | BASE wall ms (min-max) | NEW wall ms (min-max) | Wall ratio |
+| --- | --- | --- | --- | --- | --- | --- |
+| `python-org-docs-link` | 1,438.1 (1,438.0-1,438.3) | 1,208.3 (1,208.3-1,208.6) | 1.19 | 150 (149-162) | 134 (133-136) | 1.12 |
+| `rust-book-search` | 16,606.7 (16,605.9-16,607.2) | 16,315.0 (16,314.8-16,315.2) | 1.02 | 1,591 (1,579-1,604) | 1,596 (1,590-1,599) | 1.00 |
+
+Not met for both (target 1.3 times). The sheet registry (#490) removed the `tell_links` walks; the sheet ramps of that section gained 2.5 to 5.7 times, but these two journeys have little of that cost on the recorded corpus. `rust-book-search` spends 16.3 G in page JS (the search index and 9 searches on the virtual clock). The gain of `python-org-docs-link` comes mostly from the rule-set cache (-3.2%, #515/#519) and the lazy CSS (#498) steps.
+
+### Criterion 5: the 16 MiB sheet ramp
+
+Page `sheety_16383` (a 16 MiB sheet of 187,852 rules, one `cssRules.length` read), steps `run2.steps`, 3 runs each.
+
+| Build | Peak RSS (min-max) | Instructions | Outcome |
+| --- | --- | --- | --- |
+| BASE | 947.5 MiB (970,168-970,608 KiB) | 18,182 M | stops on `cssom-objects` |
+| NEW | 273.6 MiB (280,064-280,416 KiB) | 5,397 M | passes |
+
+Met (300 MiB or lower). `sheety_8192`: BASE 828 MiB and 14,372 M (stops), NEW 144 MiB and 2,714 M. Probes on NEW, 1 run each (`/data/bare-tmp/fb/pages/rd_*.html`): a read of the selector text of all 187,852 rules passes (210.8 MiB, 7,157 M). A read of `.style.length` of every rule stops on `style-objects` (161.4 MiB). The dense 16 MiB sheet (844,366 rules, `x16383.css`) read rule by rule stops on `cssom-objects` at 460.7 MiB.
+
+### Criterion 6: `python-docs-search-results`
+
+Same runs as criterion 1: BASE 114.4 MiB (116,588 / 117,180 / 117,836 KiB), NEW 99.3 MiB (101,520 / 101,684 / 102,324 KiB), -13.2%. The goal gives 116 MiB, so the target is 92.8 MiB. Not met. PSS (run 0): 113.4 to 97.7 MiB. Instructions 3,397.7 M to 2,485.5 M (-26.8%).
+
+The criterion was met once and then lost. I ran the same journey (3 runs, `journeys.sh run --clock virtual --pss`) on binaries of the merge commits in between:
+
+| Commit | Peak RSS (MiB, runs 1 to 3) | Instructions (M) |
+| --- | --- | --- |
+| `5b42d061` before #501 | 113 to 114 | 3,378 |
+| `1306e82a` (#502, after #501 data literals) | 89 to 90 | 2,541 |
+| `55caaa19` (#504, rebuilt as `-p bare-drive`) | 89 to 91 | 2,541 |
+| `f9a0c26b` (#497 string atoms and ropes) | 94 to 96 | 2,558 |
+| `f68e956a` | 94 to 95 | 2,558 |
+| `f6292d53` (#512 compact objects) | 96 to 97 | 2,516 |
+| `1e793d74` (#515 rule-set cache) | 97 | 2,485 |
+| NEW | 96 to 99 | 2,486 |
+
+The #501 step reached 90 MiB (target met). PR #497 added 4 to 5 MiB. The merges after it, up to #512, added 1 to 2 MiB more, and #515 and #519 added none that shows. Verified: the steps, from the binaries. The binaries of `5b42d061`, `1306e82a`, `f68e956a` and `1e793d74` are the earlier `base-build` outputs; I did not check their build arguments. Not verified: the cause inside #497, #512 and #515 (hypothesis: the atom tables and rope nodes of #497; one idle rule set kept by #515). The journeys sum of peak RSS of #515 and #519 is a separate measure in their sections.
+
+### Criterion 7: the suite with a shared login
+
+Inputs: the 40-test fixture suite of `tools/suite` (`docs/design-suite.md`), local fixture server, `tools/suite/run.py <NEW bare-drive> --v0-binary <BASE bare-drive> --variants V0,V2,V4 --k 4,8,12 --runs 3`, plus a second run with `--variants V0,V4 --k 2` for the NEW binary. Every run passed 40 of 40 and the server counted the expected login POSTs (40 for V0, 5 for the others). Load average 2.8 to 4.6. Median and (min-max) of 3.
+
+| Variant | Wall s | Instructions (M) | Peak RSS of a worker (MiB) | Against V0 of BASE: wall, instructions |
+| --- | --- | --- | --- | --- |
+| V0, BASE `f6415364`: a new process for each test, every test logs in, one at a time | 3.930 (3.762-4.660) | 21,160 (21,160-21,161) | 26.8 | 1.00, 1.00 |
+| V0, NEW binary (same method) | 3.208 (3.149-3.230) | 15,151 (15,151-15,152) | 27.0 | 1.23, 1.40 |
+| V2, NEW, one warm worker, one shared login (`--workers 1`) | 2.079 (1.992-2.103) | 10,084 (10,084-10,090) | 27.6 | 1.89, **2.10** |
+| V4, NEW, K = 2 | 1.071 (1.040-1.073) | 10,181 (10,178-10,181) | 27.5 | 3.67, 2.08 |
+| V4, NEW, K = 4 | 0.577 (0.554-0.624) | 10,326 (10,324-10,329) | 27.6 | **6.81**, 2.05 |
+| V4, NEW, K = 8 | 0.463 (0.455-0.516) | 10,694 (10,691-10,700) | 27.4 | 8.49, 1.98 |
+| V4, NEW, K = 12 | 0.407 (0.404-0.415) | 10,988 (10,950-11,029) | 27.3 | 9.66, 1.93 |
+
+Met. Wall time is 6.8 times lower at K = 4 and 1.89 times lower with one worker. The sum of instructions with one worker is 2.10 times lower than the cold runs of BASE (target 1.5 times). Against the V0 of the same NEW binary it is 1.50 times lower, so 1.4 of the 2.1 comes from the engine and style steps (rule-set cache #515, lazy parse, and the rest) and 1.5 from the suite design. The step 7 section measured 1.35 times at the time.
+
+### Criterion 8: the limits
+
+- Restyle charge. Method: a page that restyles 6,002 elements (the `rest_13` page with 3,000 loops, element count from the step 4 notes) runs until the 500 M step budget of a task ends the script (`LIVE_TASK_STEPS`, `crates/bare/src/page.rs`). Then instructions divided by the budget is the instruction cost of one charged step. `/data/bare-tmp/fb/pages/rest_3000_j.html` logs the loop counter every 25 loops.
+  - BASE: the budget ends after 14 or fewer restyles (the ramps: `rest_13` passes, `rest_15` stops) at 11,636 M instructions: 23 instructions for each charged step.
+  - NEW: the budget ends after 1,700 to 1,724 restyles at 102,842 M instructions (60.1 M for each restyle): 206 instructions for each charged step.
+  - A step of a plain JS loop costs 198 instructions (`steps_5000000` to `steps_50000000`: 1,805 instructions for each iteration, about 9.1 steps for each iteration, from the benchmark round of 2026-11-13, section B: 55 M iterations fit in 500 M steps).
+  - So the charge was about 9 times the cost on BASE (23 against about 200) and is 1.04 times the cost on NEW (206 against 198). Met. `STEPS_PER_RESTYLED_ELEMENT` is 32 (`crates/bare/src/browser_computed.rs:229`). One run each, deterministic.
+- `cssom-objects` cap. `MAX_OBJECTS = 1 << 19` (524,288) at `crates/bare/src/browser_cssom.rs:20`, and `MAX_RULES = 1 << 21`. The old value was 65,536. The cap is not removed and is not computed from the rule count: it is a fixed constant chosen from the measured bytes of a read rule (585 B, about 290 MiB at the cap). Probes in criterion 5: the realistic 16 MiB sheet (187,852 rules) is read in full, and the dense one (844,366 rules) stops at the cap. A different limit, `style-objects` (65,536), binds first when a page reads `.style` of every rule. Not met as written ("removed or set by the rule count"). It is met in effect for the biggest sheet the loader accepts that has realistic rules. I report it as partly met.
+- The `computed-work` cap is unchanged (nodes times rules). The step 4 section shows it refuses `comp_48000` and `compm_34000`, which cost 1 to 3 G with the index. I did not re-measure that.
+
+### Other: `bare-stress` growth exponents on the style cases
+
+`bare-stress scale css` (50 style cases, each at 1x, 10x and 100x of its base size, one process for each size), BASE and NEW `bare-stress`, 3 runs each, alternating. The exponent is `log(time at the last size / time at 1x) / log(size ratio)` from wall time inside the process (not instructions: this tool measures time). Tables per run: `/data/bare-tmp/fb/stress/{BASE,NEW}.{1,2,3}.md`; per-case summary: `/data/bare-tmp/fb/ssum.md`.
+
+- No case has a time exponent over 1.5 on either tree, in any of the 6 runs. The largest median exponents: BASE `css-layers-statement` 1.19, `css-var-many` 1.18, `css-selector-list` 1.12. NEW `css-layers-statement` 1.20, `css-var-many` 1.18, `css-selector-list` 1.12, `css-var-chain` 1.12. The flagged list is the same in all 6 runs and on both trees: 3 memory limits at 2 GB (`css-rules` at 10,000,000, `css-selector-list` at 5,000,000, `css-unique-styles` at 2,000,000).
+- Memory (peak MB of the counting allocator at the largest size that ran, median of 3 runs). 41 cases have a peak of 5 MB or more on one tree. 19 of them are within 5%. NEW is more than 5% higher on 20, and more than 5% lower on 2 (`css-layers-anon` 1,111 to 952 MB, `css-media-many` 1,111 to 1,025 MB). The largest rises: `css-bad-rules` 1,208 to 1,313 MB (+9%), `css-declarations` 1,007 to 1,107 MB (+10%), `css-important` 503 to 603 MB (+20%), `css-long-value` 0.1 to 100.1 MB, `css-escapes` 20 to 60 MB, `css-import-many` 151 to 189 MB (+25%); `css-rules` at 1,000,000 rules 433 to 450 MB (+4%). Hypothesis: three of the rises are +100 MB on a 100 MB input, one extra copy of the sheet text. The lazy rule bodies (#498) keep the block text. Not checked.
+- Time at the largest size, median: NEW is faster on `css-rules` (722 to 410 ms), `css-bad-rules` (4,367 to 3,078 ms), `css-escapes` (236 to 147 ms) and `css-is-wide` (814 to 561 ms). It is slower on `css-var-uses` (213 to 250 ms) and `css-important` (1,548 to 1,691 ms). These are wall times of a shared machine, so they are weak.
+
+### Other: the cost matrix, BASE against NEW
+
+`tools/js/cost_matrix.sh -a /data/bare-tmp/base/f641536497/target /data/bare-tmp/base/8f23ddede8/target` (803 rows, 3 runs each with `instr.sh`, minimum, glibc; jemalloc only for rows over the limit). Raw rows: `/data/bare-tmp/fb/matrix.raw`. The earlier benchmark round measured `13c6b0bc` against `f6415364` (mean +0.640%, worst `focus_load` +9.1%).
+
+- Mean change glibc -2.785%, median -1.321%. 547 rows are more than 0.5% lower. No row is more than 2% higher.
+- 10 rows are over +0.5% under glibc, and 8 of them also under jemalloc (so the gate says: over the limit): `reflect_load keys 10` +1.42%, `dataset_load keys 10000 50` +1.18%, `recursion_load react 1000` +1.17%, `proxy_load keys 10` +0.97%, `dataset_load keys 1000 50` +0.70%, `arrobj_load tosorted 10` +0.69%, `arrobj_load sort 10` +0.67%, `iterator_load array_chain 10` +0.62%. Two more are over under one allocator only (`proxy_load keys 1`, `form_load gates 10`). Two rows (`parse_load deep 1` and `deep 10`) do not run (stack overflow, as in the earlier rounds). The script exit status is 1 because of the 8 rows. Each step merged with its own cost matrix against the main of that day (the standing exceptions of #492, #497 and #512 are in this file); this one is the sum over the steps. The two `dataset_load keys` rows were flagged at +0.6% in the CSSOM and ancestor sections too.
+- Largest decreases: `fragment_load deep 10` -46.1%, `fragment_load deep 1` -41.1%, `arrobj_load repeat 10` -38.9%, `eval_load concat 10` -28.8%, `bare-stress block-nested-collapse 20` -26.7%.
+
+### What was not tested
+
+- Wall time on an idle machine. Load average was 2.5 to 10, and wall numbers are in the tables as weak.
+- The live sites. The journeys replay a recorded corpus on a virtual clock. The 48th journey, `nextjs-docs`, does not pass on replay (an engine stop at `checkVisibility`, section "Repeatable journey benchmark"). I did not run it live and did not re-check it.
+- The corpus `virtual` was recorded by older binaries. NEW asks for different requests on `mdn-reference` (47 misses). A recording by NEW could change the totals of that journey and of any other that differs without a miss.
+- A real login or a real network in the suite (the fixture login is cheap). The suite with `--login-ms`. The `run_suite` tool of `bare-mcp`. A suite of more than 40 tests.
+- Window mode, Windows and macOS. A second machine.
+- The BASE tree through the test262 gate: only the baseline file was compared. The cost matrix and `bare-stress` ran on `--workspace --examples` builds, and the journeys and ramps on `-p bare-drive` builds, so a few instruction counts do not compare across them.
+- The cause of any regression above (#492 on `wiktionary-portal`, `wikipedia-portal` and `mdn-reference`; #506 on `paulgraham-home`; #497, #512 and #515 on RSS of `python-docs-search-results`). I named the PR that introduced each one by running binaries of the merge commits. The reasons are hypotheses.
+- BASE for the journeys is the local, unpushed branch `bench-base-vclock`. The result depends on that patch (replay, seed and clock only).
+- PSS: the sampler of run 0 missed 17 of 47 journeys. The PSS figures are not a criterion and are partial.
+- Probes on `style-objects` and the dense sheet are 1 run each.
+
+### Noticed, not changed
+
+- PR #492 changes the requests of `mdn-reference`: 47 chunk files are asked for at `/en-US/<chunk>.js`. It needs an issue and a fix. A journey that passes with misses hides this (the runner prints the misses, but a pass is still a pass). A gate on `misses == 0` in `journeys.sh compare` would catch it.
+- `wiktionary-portal` +10.6%, `wikipedia-portal` +4.2% (PR #492) and `paulgraham-home` +10.3% (PR #506) cost more instructions than BASE.
+- The five heaviest journeys (60% of the instructions) did not move (-0.8%). The next gain for criterion 2 is in page JS execution, not in style, layout or parse.
+- Criterion 6 was met at #501 and lost by 6 to 9 MiB since. A bound on the memory of #497, #512 and #515 would bring it back.
+- The PSS sampler of `journeys.sh` misses short journeys. Hypothesis: a journey shorter than about 100 ms ends before the sampler (every 20 ms, after the `perf` child starts) sees the process. Not checked.
+- The step budget gives 206 instructions for each charged step on a restyle loop and 198 on a JS loop. They agree within 5%, so the 32 steps for each restyled element hold today.
