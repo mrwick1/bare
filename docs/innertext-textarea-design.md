@@ -38,3 +38,7 @@ Preserve the fallback for detached or non-rendered elements. It reads DOM descen
 ## Limits
 
 This removes the textarea trigger. It does not establish correct recovery from every Unsupported host operation in an async function. Keep #481 open until that broader failure is tested separately. No resource benchmark has run, and no performance claim is made. The selected approach removes a rejected operation without adding a new traversal. The implementation skips rendered textarea children and preserves the existing boundary and non-rendered fallback paths. The pre-fix rendered-text test failed with Unsupported. All nine element tests now pass. The full library run passes 1416 tests with six ignored. The isolated combined candidate passes the async textarea getter, later timer and metadata-gated HTTP check. Strict formatting and clippy retain baseline failures, recorded in progress.md.
+
+## Current-main recheck: 2026-11-14
+
+The branch is stacked on the rebased Fetch Metadata fix. The combined serial release library run passes 1,464 tests with six ignored. The rebuilt MCP executable passes the same-origin header-gated request. Its async SHA-256 then body text read returns the visible text, and a later timer also resolves. No test page value enters the ancestor text. The Deck UI and private-viewer run remains pending. Resource benchmarks were not repeated. No merge is included.
