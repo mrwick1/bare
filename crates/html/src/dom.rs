@@ -238,6 +238,8 @@ pub struct Document {
     // Moves at every edit of the text of an existing node. See `text_revision`.
     name_revision: u64,
     // Moves at every change that can alter the `id` or `name` of an element in the tree. See `name_revision`.
+    seen_names: HashSet<u64, BuildHasherDefault<Fnv>>,
+    // The hash of every non-empty value that an `id` or `name` attribute of this document ever had. It only grows. See `may_have_name`.
     shadow_of: HashMap<u32, NodeId, BuildHasherDefault<Fnv>>,
     // The shadow root of each shadow host, by `NodeId::index` of the host. The root is not a child of the host: the light links of the host never show it.
     shadow_host: HashMap<u32, (NodeId, bool), BuildHasherDefault<Fnv>>,
@@ -610,6 +612,15 @@ impl Hasher for Fnv {
     }
 }
 
+/// The hash of an `id` or `name` value, by its UTF-8 bytes (see `Document::may_have_name`).
+fn name_value_hash(chars: impl Iterator<Item = char>) -> u64 {
+    let mut h = Fnv::default();
+    for c in chars {
+        h.write(c.encode_utf8(&mut [0; 4]).as_bytes());
+    }
+    h.finish()
+}
+
 /// A hash for the name table: 8 bytes at a time. A name is short, and `Fnv` costs 5 instructions for each byte of it. It is as open to a
 /// page that picks colliding names as `Fnv` is.
 #[derive(Default)]
@@ -704,6 +715,7 @@ impl Document {
             revision: 0,
             text_revision: 0,
             name_revision: 0,
+            seen_names: HashSet::default(),
             shadow_of: HashMap::default(),
             shadow_host: HashMap::default(),
             shadow_flags: HashMap::default(),
@@ -749,6 +761,21 @@ impl Document {
     /// Is `name` the `id` or the `name` attribute?
     fn names_attr(&self, name: Atom) -> bool {
         name == Atom::ID || self.atom_str(name) == "name"
+    }
+
+    /// Record that an attribute `name` got the value `value`: a later `may_have_name` for it says yes.
+    fn note_name(&mut self, name: Atom, value: &str) {
+        if !value.is_empty() && self.names_attr(name) {
+            self.seen_names.insert(name_value_hash(value.chars()));
+        }
+    }
+
+    /// Could an element have an `id` or `name` attribute with the value `value` (given as chars)? `false` is final: no element has
+    /// one now, and none had one that is gone, so a look-up for the name needs no walk of the tree. `true` means maybe: the value
+    /// was set once (on an element that may have left, or had the value changed), or another value has the same hash. The set
+    /// only grows, so it costs a hash look-up and no work when a node leaves the tree.
+    pub fn may_have_name(&self, value: impl Iterator<Item = char>) -> bool {
+        self.seen_names.contains(&name_value_hash(value))
     }
 
     /// Can `node` (with its subtree) change the named elements when it joins or leaves the tree?
@@ -1655,6 +1682,7 @@ impl Document {
         let start = self.attrs.len();
         for (key, value) in attrs {
             let attr = Attr { name: self.intern(key.as_ref()), value: self.push_text(value.as_ref()) };
+            self.note_name(attr.name, value.as_ref());
             self.attrs.push(attr);
         }
         let attrs = AttrList { start: to_u32(start), len: to_u32(attrs.len()) };
@@ -1696,6 +1724,7 @@ impl Document {
         let start = self.attrs.len();
         for (attr_ns, key, value) in attrs {
             let attr = Attr { name: self.intern_ns(*attr_ns, key.as_ref()), value: self.push_text(value.as_ref()) };
+            self.note_name(attr.name, value.as_ref());
             self.attrs.push(attr);
         }
         let attrs = AttrList { start: to_u32(start), len: to_u32(attrs.len()) };
@@ -1827,6 +1856,7 @@ impl Document {
                 let start = self.attrs.len();
                 for a in src.attrs(attrs) {
                     let attr = Attr { name: self.intern_ns(src.attr_ns(a.name), src.atom_str(a.name)), value: self.push_text(src.text(a.value)) };
+                    self.note_name(attr.name, src.text(a.value));
                     self.attrs.push(attr);
                 }
                 let list = AttrList { start: to_u32(start), len: attrs.len };
@@ -1887,6 +1917,7 @@ impl Document {
         let span = self.push_text(value);
         self.revision += 1;
         self.name_revision += u64::from(self.names_attr(name));
+        self.note_name(name, value);
         self.class_sets.get_mut().remove(&el.index());
         // An empty list can start after the end (see `attrs`): it begins again at the end.
         let (start, len) = if attrs.len == 0 { (self.attrs.len(), 0) } else { (attrs.start as usize, attrs.len as usize) };
@@ -2890,6 +2921,32 @@ mod tests {
         assert!(!doc.remove_attr(a, "absent"));
         let _ = c;
         assert_eq!(doc.revision(), r);
+    }
+
+    #[test]
+    fn may_have_name_never_misses_a_name_that_was_set() {
+        let mut doc = Document::new();
+        let root = doc.root();
+        let has = |doc: &Document, v: &str| doc.may_have_name(v.chars());
+        assert!(!has(&doc, "a"));
+        let el = doc.insert_element(root, None, "div", &[("id", "a"), ("class", "c"), ("name", "")]);
+        doc.insert_element_ns(root, None, Ns::Svg, "rect", &[(None, "id", "ns")]);
+        assert!(has(&doc, "a") && has(&doc, "ns"));
+        // A class is no name, and an empty value is none.
+        assert!(!has(&doc, "c") && !has(&doc, ""));
+        doc.set_attr(el, "name", "b\u{e9}\u{1f600}");
+        assert!(has(&doc, "b\u{e9}\u{1f600}"));
+        // The set only grows: a removed or changed name stays "maybe".
+        doc.set_attr(el, "id", "z");
+        doc.remove_attr(el, "name");
+        assert!(has(&doc, "a") && has(&doc, "b\u{e9}\u{1f600}") && has(&doc, "z"));
+        // A node copied from another document brings its names.
+        let mut other = Document::new();
+        let r = other.root();
+        let src = other.insert_element(r, None, "p", &[("id", "copied")]);
+        assert!(!has(&doc, "copied"));
+        doc.import_node(&other, src).unwrap();
+        assert!(has(&doc, "copied"));
     }
 
     #[test]
