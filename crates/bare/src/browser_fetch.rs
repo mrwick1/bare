@@ -2247,13 +2247,16 @@ fn run_hops(client: &mut Client, lim: &FetchLimits, first: Parts<'_>, diag: &mut
                 return out;
             }
         }
-        let mut wire: Vec<(&str, &str)> = headers.iter().map(|(n, v)| (n.as_str(), v.as_str())).collect();
+        let metadata = potentially_trustworthy(&url);
+        let extra = usize::from(origin_s.is_some()) + if metadata { 3 } else { 0 };
+        let mut wire: Vec<(&str, &str)> = Vec::with_capacity(headers.len() + extra);
+        wire.extend(headers.iter().map(|(n, v)| (n.as_str(), v.as_str())));
         if let Some(o) = &origin_s {
             wire.push(("origin", o));
         }
         // Browser metadata is not an author header and must not trigger a preflight. Compute it
         // for each hop, retaining the least-trusted relation across the full redirect chain.
-        if potentially_trustworthy(&url) {
+        if metadata {
             wire.push(("sec-fetch-site", site));
             wire.push(("sec-fetch-mode", match cors.mode {
                 Mode::Cors => "cors", Mode::NoCors => "no-cors", Mode::SameOrigin => "same-origin",

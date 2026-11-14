@@ -52,3 +52,7 @@ The owner approved the static-list amendment. The implementation uses pinned `ps
 ## Suffix amendment
 
 The initial design was approved. The compatibility check then found the incomplete suffix list. Reusing it can label independent domains as the same site. The static [psl crate](https://docs.rs/psl/latest/psl/) supplies registrable-domain lookup without a runtime download. Select it instead of expanding a handwritten list or adding a generic HTTP-client policy. This is the only requested design amendment. No production code has changed.
+
+## Pre-merge measurements
+
+See [the current-main checks](fetch-metadata-merge-checks.md). The request header vector reserves generated header capacity once. This removes two growth allocations per request without changing the approved wire policy. A measured Fetch POST cost remains; no exception to the existing cost gate is approved.
