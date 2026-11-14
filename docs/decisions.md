@@ -2178,3 +2178,9 @@ The owner approved criterion 8 of [the design](design-style-round2.md) and asked
 - `insertRule` makes no object: the new rule is a span of its text, like a rule that no script has read.
 - Reason: the cap failed a correct page (an edit loop on a one-rule sheet) and guarded a root list that never shrank. A held deleted rule stays a valid object (its `parentStyleSheet` is null), and `sheet.cssRules[0] === sheet.cssRules[0]` holds while the rule is in the list.
 - Cost: the collector does 4 table lookups for each visited object on a page that uses CSSOM (+0.5% on a page that reads 187,852 rule objects). A page with no CSSOM pays one `OnceCell` test for each visited object.
+## Window names by one walk (2026-11-14)
+
+- Answer a window or document name look-up with one walk of the tree that stops at the first answer (design W1). Build no list for one name.
+- Add `Document::may_have_name`: a set of 64-bit hashes of every `id` and `name` value that the document ever had. It only grows. A name that is not in it is a miss with no walk. It costs one hash look-up for each `id` or `name` write, and 8 bytes for each distinct value. Chosen over a walk for every miss: the page probes about 17 names that no element has.
+- Build the list after 16 walks at one name revision (`WALKS`), and for an index (`window[0]`) and key enumeration. A walk costs about 1/20 of a list.
+- Choose W1 over W2 (an index of `id` and `name` in the `Document`): W2 has the same gain here and a larger change. The owner chose W1 on 2026-11-14.

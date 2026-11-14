@@ -88,6 +88,8 @@ impl Atom {
     pub const ID: Atom = Atom(0);
     /// The atom of `class`. Same reason as `ID`.
     pub const CLASS: Atom = Atom(1);
+    /// The atom of `name`. The table has it from the start, but a document counts it as used only when an element has it.
+    pub const NAME: Atom = Atom(2);
 }
 
 /// A piece of text in the text buffer of a `Document`: where it starts, and how long it is, in bytes.
@@ -582,9 +584,10 @@ thread_local! {
     // thread-local access. A `Document` is not `Send`, so it never sees the table of another thread.
     static NAMES: &'static Table = Box::leak(Box::new(Table(std::cell::UnsafeCell::new({
         let mut n = Names { text: Vec::new(), atoms: HashMap::default(), ns_atoms: HashMap::default(), atom_ns: HashMap::default(), recent: Box::new([Recent { key: 0, len: u8::MAX, atom: 0 }; RECENT]) };
-        // The order matters: it must match `Atom::ID` and `Atom::CLASS`.
+        // The order matters: it must match `Atom::ID`, `Atom::CLASS` and `Atom::NAME`.
         n.intern("id");
         n.intern("class");
+        n.intern("name");
         n
     }))));
 }
@@ -760,13 +763,15 @@ impl Document {
 
     /// Is `name` the `id` or the `name` attribute?
     fn names_attr(&self, name: Atom) -> bool {
-        name == Atom::ID || self.atom_str(name) == "name"
+        name == Atom::ID || name == Atom::NAME
     }
 
     /// Record that an attribute `name` got the value `value`: a later `may_have_name` for it says yes.
     fn note_name(&mut self, name: Atom, value: &str) {
         if !value.is_empty() && self.names_attr(name) {
-            self.seen_names.insert(name_value_hash(value.chars()));
+            let mut h = Fnv::default();
+            h.write(value.as_bytes());
+            self.seen_names.insert(h.finish());
         }
     }
 
