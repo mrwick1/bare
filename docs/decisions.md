@@ -2085,3 +2085,13 @@ Step 4, phase 2 of `docs/perf-goal.md`. Design: `design-style.md` 3.1 (M2), 3.3 
 - `INLINE` is 3 because an array needs 1, a function 3 and most literals 1 to 3.
 - Cost: an object with no property is 24 B larger (117 B against 93 B with the slab overhead). An object with a fourth property made by `push` is 56 B larger.
 - The result is open: 4 rows of the cost matrix stay over +0.5% under both allocators (`proxy_load keys`, `recursion_load react 1000`, `reflect_load keys 10`), and `python-docs-search-results` gains 0.5% of peak RSS, not 10%. The owner decides whether to accept it.
+
+## Rule sets are shared by a cache of `Rc<RuleSet>` in each thread, over process-wide atoms (2026-11-14)
+
+- Chosen: one name table for each thread, so that an atom means the same in every document. A cache of built rule sets keyed by the window size and the ordered list of (layer, text) of the sheets. A hit compares the text, so a hash collision is a miss. Only a list with no shadow-tree sheet, no retained CSSOM input and no pending inline input is shared. A page that appends a sheet grows its own set when the cache and the page are the only holders.
+- Reason: a suite makes the same sheets in each document. The build is 11.2 M instructions, 16% of the suite. The suite goes from 13,147 M to 10,431 M (-20.7%).
+- Other choices: copy the atoms of each set into the document (the set would be built for one document only, so no sharing). `Arc<RuleSet>` (a set never leaves its thread, and the atomic count would cost). Stage 2, a parse cache for each sheet (not built: it saves the parse but not the rule index, and a page with a changed sheet list would still rebuild).
+- Cost: the table was a cost problem. The fix was by design (a `&'static` table reference, an `UnsafeCell` read path, a cold first use, a word hash, and a front table of 512 slots for names of 8 bytes or less), not a limit.
+- Memory: the cache keeps the last set of the document before. On a journey that visits only new sites this is extra memory with no gain (+4% to +14% peak RSS on the Wikipedia journeys, +2.3% in total). Dropping every set at a miss removes the memory, and also the gain of a repeated sheet list. Open for the owner.
+- Bound: 65,536 rules in sets that only the cache holds (about 33 MB at the measured 500 bytes for a rule), an entry that the last 2 documents did not use goes at the next document, and a document keeps its own set.
+- Limit that the change makes unneeded: none. The `max_rules` and `max_names` limits stay, and they still apply to a set before it is cached.

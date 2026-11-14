@@ -26,9 +26,12 @@
 //!   allocation for each node. Adding at the end, or in front of a known node, is O(1). The
 //!   cost: to reach child number 5, you walk the list. CSS and layout walk all the children
 //!   in order, so for us this is no cost. Chrome stores children the same way.
-//! - Names of elements and attributes (`div`, `class`) are stored once, in a table of the
-//!   `Document`. A node holds an `Atom`: the number of its name in the table. A page has
+//! - Names of elements and attributes (`div`, `class`) are stored once, in a table of the thread
+//!   (`Names`). A node holds an `Atom`: the number of its name in the table. A page has
 //!   100,000 `div` and the word is in memory once. Comparing two names is comparing two numbers.
+//!   The table is shared by all documents of the thread, so an atom means the same in each of them
+//!   and a parsed selector does not depend on one document. A `Document` keeps the list of the names that it
+//!   uses (`name_count`, `atom_at`, `find_atom`).
 //! - Texts, attribute values, comments and doctypes are not `String`s. They all live in one big
 //!   `String` of the `Document`, and a node holds a `Span`: where its text starts, and how long it is.
 //!   A `String` for each small text costs 24 bytes for the header, and a heap allocation of at least
@@ -69,8 +72,8 @@ impl NodeId {
     }
 }
 
-/// The number of a name in the name table of a `Document`. Two atoms of one document are equal
-/// when the names are equal. Atoms of different documents mean nothing together.
+/// The number of a name in the name table of the thread. Two atoms are equal when the names are equal, also when they
+/// come from different documents of the thread. An atom means nothing in another thread.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Atom(u32);
 
@@ -80,7 +83,7 @@ impl Atom {
         self.0
     }
 
-    /// The atom of `id`. Every document has it from the start, so the style code can find an `id`
+    /// The atom of `id`. The table has it from the start, so the style code can find an `id`
     /// attribute with one number compare and no table lookup.
     pub const ID: Atom = Atom(0);
     /// The atom of `class`. Same reason as `ID`.
@@ -198,10 +201,13 @@ fn is_on_name(name: &str) -> bool {
 pub struct Document {
     nodes: Vec<Node>,
     // The arena. The first node is the `Document` node, and every other node comes after it.
-    names: Vec<Box<str>>,
-    // The name table: the text for each atom.
-    atoms: HashMap<Box<str>, Atom, BuildHasherDefault<Fnv>>,
-    // The way back: from a name to its atom. A page has few different names, so the second copy is small.
+    names: &'static Table,
+    // The name table of the thread.
+    used: Vec<u32>,
+    // The atoms that this document uses (a tag or an attribute name of a node, or a name that a selector or a script added),
+    // in the order of their first use. See `name_count`.
+    used_bits: Vec<u64>,
+    // The same set, by atom number: one bit for each atom.
     on_name: bool,
     // Has the name table ever had a name that starts with `on`? See `has_on_name`.
     attrs: Vec<Attr>,
@@ -219,11 +225,8 @@ pub struct Document {
     // The SVG and MathML elements, by `NodeId::index`. An element that is not here is in the HTML namespace, so a page
     // without SVG pays nothing. The name atom of a foreign element is its local name, shared with the HTML atoms, so a
     // type selector `rect` matches an SVG `rect`. The namespace stays with the node when it moves, and `clone_element` copies it.
-    ns_atoms: HashMap<(Ns, Box<str>), Atom, BuildHasherDefault<Fnv>>,
-    // The attributes that are in a namespace (`xlink:href`). Their atom is for the pair (namespace, qualified name), and the
-    // name table holds the qualified name. The same qualified name with no namespace is another atom (see `intern`).
-    atom_ns: HashMap<u32, Ns, BuildHasherDefault<Fnv>>,
-    // The way back: from the atom of a namespaced attribute to its namespace.
+    any_ns: bool,
+    // Has this document used an attribute in a namespace (`xlink:href`)? See `intern_ns`.
     watched: HashSet<(u32, u32), BuildHasherDefault<Fnv>>,
     // The attributes (element index, atom) that a host holds an `Attr` object for. See `watch_attr`.
     removed: Vec<RemovedAttr>,
@@ -477,6 +480,113 @@ pub struct RemovedAttr {
     pub value: Span,
 }
 
+/// The names of the thread: the text of each atom, and the way back. Names are never removed, so the text is kept for the life of
+/// the thread (`&'static str`) and `Document::atom_str` gives it without a borrow of the document.
+struct Names {
+    text: Vec<&'static str>,
+    atoms: HashMap<&'static str, u32, BuildHasherDefault<NameHash>>,
+    // The attributes that are in a namespace (`xlink:href`). Their atom is for the pair (namespace, qualified name), and `text` holds the
+    // qualified name. The same qualified name with no namespace is another atom.
+    ns_atoms: HashMap<(Ns, Box<str>), u32, BuildHasherDefault<Fnv>>,
+    // The way back: from the atom of a namespaced attribute to its namespace.
+    atom_ns: HashMap<u32, Ns, BuildHasherDefault<Fnv>>,
+    // The last atoms of the names of 8 bytes or less (the tags and the attributes of a page), one slot for each hash of the name.
+    // A hit costs a few instructions: no hash of the text, no probe, no compare of the text.
+    recent: Box<[Recent; RECENT]>,
+}
+
+const RECENT: usize = 512;
+
+#[derive(Clone, Copy)]
+struct Recent {
+    /// The bytes of the name (`pack`), and its length. A slot that was never used has a length that no name has.
+    key: u64,
+    len: u8,
+    atom: u32,
+}
+
+/// The bytes of a name of 8 bytes or less in one number. Two names of the same length have the same number only if they are the same.
+/// 1 to 3 bytes: the first, the middle, the last. 4 to 8 bytes: the first 4 and the last 4, which cover all of them.
+#[inline(always)]
+fn pack(b: &[u8]) -> u64 {
+    let n = b.len();
+    if n >= 4 {
+        u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as u64 | (u32::from_le_bytes([b[n - 4], b[n - 3], b[n - 2], b[n - 1]]) as u64) << 32
+    } else if n > 0 {
+        b[0] as u64 | (b[n / 2] as u64) << 8 | (b[n - 1] as u64) << 16
+    } else {
+        0
+    }
+}
+
+impl Names {
+    fn add(&mut self, name: &str) -> u32 {
+        let atom = u32::try_from(self.text.len()).expect("more than 4 billion names");
+        let text: &'static str = Box::leak(Box::from(name));
+        self.text.push(text);
+        atom
+    }
+
+    #[inline]
+    fn intern(&mut self, name: &str) -> u32 {
+        let b = name.as_bytes();
+        if b.len() > 8 {
+            return self.intern_slow(name);
+        }
+        let key = pack(b);
+        let at = ((key ^ b.len() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 55) as usize;
+        let slot = self.recent[at];
+        if slot.key == key && slot.len as usize == b.len() {
+            return slot.atom;
+        }
+        let atom = self.intern_slow(name);
+        self.recent[at] = Recent { key, len: b.len() as u8, atom };
+        atom
+    }
+
+    fn intern_slow(&mut self, name: &str) -> u32 {
+        if let Some(&atom) = self.atoms.get(name) {
+            return atom;
+        }
+        let atom = self.add(name);
+        self.atoms.insert(self.text[atom as usize], atom);
+        atom
+    }
+}
+
+/// The name table of one thread. Reads of the text of a name are the hottest calls of the tree builder and of the style code
+/// (`Document::atom_str`), so they do not pay for a `RefCell` flag.
+struct Table(std::cell::UnsafeCell<Names>);
+
+impl Table {
+    /// The text of an atom.
+    #[inline]
+    fn text(&self, atom: u32) -> &'static str {
+        // SAFETY: `Table` is not `Sync`, so only the thread that made it uses it. `with` is the only place that makes a `&mut Names`, and
+        // its closures never call a `Table` method again. So no `&mut Names` is alive here. The `&'static str` is copied out of the table.
+        unsafe { (&(*self.0.get()).text)[atom as usize] }
+    }
+
+    /// Use the table. `f` must not use a `Table` method.
+    #[inline]
+    fn with<R>(&self, f: impl FnOnce(&mut Names) -> R) -> R {
+        // SAFETY: as in `text`: one thread, and no other reference to the table is alive while `f` runs.
+        f(unsafe { &mut *self.0.get() })
+    }
+}
+
+thread_local! {
+    // The table lives as long as the thread, and a `Document` keeps this reference (`Document::names`), so a look-up is not a
+    // thread-local access. A `Document` is not `Send`, so it never sees the table of another thread.
+    static NAMES: &'static Table = Box::leak(Box::new(Table(std::cell::UnsafeCell::new({
+        let mut n = Names { text: Vec::new(), atoms: HashMap::default(), ns_atoms: HashMap::default(), atom_ns: HashMap::default(), recent: Box::new([Recent { key: 0, len: u8::MAX, atom: 0 }; RECENT]) };
+        // The order matters: it must match `Atom::ID` and `Atom::CLASS`.
+        n.intern("id");
+        n.intern("class");
+        n
+    }))));
+}
+
 /// A fast hash for short names (FNV-1a). The standard one (SipHash) is slower, and it protects against
 /// a server that picks keys to make the table slow. Here the "server" is the page, and it can only
 /// slow down its own tab.
@@ -497,6 +607,47 @@ impl Hasher for Fnv {
         for &b in bytes {
             self.0 = (self.0 ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
         }
+    }
+}
+
+/// A hash for the name table: 8 bytes at a time. A name is short, and `Fnv` costs 5 instructions for each byte of it. It is as open to a
+/// page that picks colliding names as `Fnv` is.
+#[derive(Default)]
+struct NameHash(u64);
+
+impl NameHash {
+    const K: u64 = 0x517c_c1b7_2722_0a95;
+
+    #[inline]
+    fn add(&mut self, word: u64) {
+        self.0 = (self.0.rotate_left(5) ^ word).wrapping_mul(Self::K);
+    }
+}
+
+impl Hasher for NameHash {
+    #[inline]
+    fn finish(&self) -> u64 {
+        // The low bits of a product depend on the low bits of the words only. The table uses them for the place of the name.
+        self.0.rotate_left(26)
+    }
+
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        let mut chunks = bytes.chunks_exact(8);
+        for w in &mut chunks {
+            self.add(u64::from_le_bytes(w.try_into().unwrap()));
+        }
+        let rest = chunks.remainder();
+        if !rest.is_empty() {
+            let mut last = [0u8; 8];
+            last[..rest.len()].copy_from_slice(rest);
+            self.add(u64::from_le_bytes(last));
+        }
+    }
+
+    #[inline]
+    fn write_u8(&mut self, byte: u8) {
+        self.add(u64::from(byte));
     }
 }
 
@@ -539,15 +690,15 @@ impl Document {
     pub fn new() -> Document {
         let mut doc = Document {
             nodes: vec![Node { parent: None, first_child: None, last_child: None, prev: None, next: None, data: NodeData::Document }],
-            names: Vec::new(),
-            atoms: HashMap::default(),
+            names: NAMES.with(|n| *n),
+            used: Vec::new(),
+            used_bits: Vec::new(),
             attrs: Vec::new(),
             text: String::new(),
             places: Default::default(),
             class_sets: Default::default(),
             foreign: HashMap::default(),
-            ns_atoms: HashMap::default(),
-            atom_ns: HashMap::default(),
+            any_ns: false,
             watched: HashSet::default(),
             removed: Vec::new(),
             revision: 0,
@@ -905,7 +1056,7 @@ impl Document {
         if made.is_empty() {
             return Rc::from([]);
         }
-        let template = self.atoms.get("template").copied();
+        let template = self.find_atom("template");
         // `up[p]`: the shadow root and the light children of `p` that lead to an element, each once.
         let mut up: HashMap<NodeId, (Option<NodeId>, HashSet<NodeId, BuildHasherDefault<Fnv>>), BuildHasherDefault<Fnv>> = HashMap::default();
         let mut found: HashMap<NodeId, (bool, bool), BuildHasherDefault<Fnv>> = HashMap::default();
@@ -965,7 +1116,7 @@ impl Document {
 
     /// The list of `sheet_nodes`, made by a walk of the whole tree. It is the check of `sheet_nodes`.
     pub fn sheet_nodes_walk(&self) -> Vec<SheetNode> {
-        let template = self.atoms.get("template").copied();
+        let template = self.find_atom("template");
         let mut out = Vec::new();
         // The node, whether it is in the light tree, and whether an HTML `template` is above it.
         let mut stack = vec![(self.root(), true, false)];
@@ -1176,7 +1327,7 @@ impl Document {
 
     /// The number of different names (tags and attributes) in the name table. It only grows.
     pub fn name_count(&self) -> usize {
-        self.names.len()
+        self.used.len()
     }
 
     /// Has the name table ever had a name that starts with `on` (an event handler attribute may exist)? It never goes back to false.
@@ -1188,8 +1339,7 @@ impl Document {
     /// The atom of the `i`-th name of the table (`i < name_count()`). Names are never removed, so the atoms from an earlier
     /// `name_count()` up are the names added since.
     pub fn atom_at(&self, i: usize) -> Atom {
-        assert!(i < self.names.len());
-        Atom(i as u32)
+        Atom(self.used[i])
     }
 
     /// The number of nodes, with the top node.
@@ -1209,7 +1359,39 @@ impl Document {
 
     /// The atom for a name, if the document has it. It does not add the name.
     pub fn find_atom(&self, name: &str) -> Option<Atom> {
-        self.atoms.get(name).copied()
+        let atom = self.names.with(|n| n.atoms.get(name).copied())?;
+        self.uses(atom).then_some(Atom(atom))
+    }
+
+    /// Does this document use the atom?
+    #[inline]
+    fn uses(&self, atom: u32) -> bool {
+        self.used_bits.get((atom >> 6) as usize).is_some_and(|w| w >> (atom & 63) & 1 == 1)
+    }
+
+    /// Add an atom that this document does not use yet to its names.
+    #[cold]
+    fn first_use(&mut self, atom: u32, name: &str) {
+        self.use_atom(atom);
+        self.on_name |= is_on_name(name);
+        if let Some(i) = ["link", "style", "base"].iter().position(|&n| n == name) {
+            self.sheet_names[i] = atom;
+        }
+    }
+
+    /// Add the atom to the names of this document. Gives `true` when it was not there.
+    fn use_atom(&mut self, atom: u32) -> bool {
+        let word = (atom >> 6) as usize;
+        if word >= self.used_bits.len() {
+            self.used_bits.resize(word + 1, 0);
+        }
+        let bit = 1u64 << (atom & 63);
+        if self.used_bits[word] & bit != 0 {
+            return false;
+        }
+        self.used_bits[word] |= bit;
+        self.used.push(atom);
+        true
     }
 
     /// The sibling before this node. JS: `previousSibling`.
@@ -1245,22 +1427,16 @@ impl Document {
 
     /// The atom for a name. A name that is new goes in the table.
     pub fn intern(&mut self, name: &str) -> Atom {
-        if let Some(&atom) = self.atoms.get(name) {
-            return atom;
+        let atom = self.names.with(|n| n.intern(name));
+        if !self.uses(atom) {
+            self.first_use(atom, name);
         }
-        let atom = Atom(u32::try_from(self.names.len()).expect("more than 4 billion names"));
-        self.on_name |= is_on_name(name);
-        if let Some(i) = ["link", "style", "base"].iter().position(|&n| n == name) {
-            self.sheet_names[i] = atom.0;
-        }
-        self.names.push(name.into());
-        self.atoms.insert(name.into(), atom);
-        atom
+        Atom(atom)
     }
 
     /// The text of a name.
     pub fn atom_str(&self, atom: Atom) -> &str {
-        &self.names[atom.0 as usize]
+        self.names.text(atom.0)
     }
 
     /// Add a new node as a child of `parent`, just before `before`. With `None`, add it at the end.
@@ -1571,28 +1747,37 @@ impl Document {
     /// the same name with no namespace.
     pub fn intern_ns(&mut self, ns: Option<Ns>, qname: &str) -> Atom {
         let Some(ns) = ns else { return self.intern(qname) };
-        if let Some(&atom) = self.ns_atoms.get(&(ns, Box::from(qname))) {
-            return atom;
+        let atom = self.names.with(|n| {
+            if let Some(&atom) = n.ns_atoms.get(&(ns, Box::from(qname))) {
+                atom
+            } else {
+                let atom = n.add(qname);
+                n.ns_atoms.insert((ns, qname.into()), atom);
+                n.atom_ns.insert(atom, ns);
+                atom
+            }
+        });
+        self.any_ns = true;
+        if self.use_atom(atom) {
+            self.on_name |= is_on_name(qname);
         }
-        let atom = Atom(u32::try_from(self.names.len()).expect("more than 4 billion names"));
-        self.on_name |= is_on_name(qname);
-        self.names.push(qname.into());
-        self.ns_atoms.insert((ns, qname.into()), atom);
-        self.atom_ns.insert(atom.0, ns);
-        atom
+        Atom(atom)
     }
 
     /// The atom for an attribute name in a namespace, if the document has it. It does not add the name.
     pub fn find_ns_atom(&self, ns: Option<Ns>, qname: &str) -> Option<Atom> {
         match ns {
             None => self.find_atom(qname),
-            Some(ns) => self.ns_atoms.get(&(ns, Box::from(qname))).copied(),
+            Some(ns) => {
+                let atom = self.names.with(|n| n.ns_atoms.get(&(ns, Box::from(qname))).copied())?;
+                self.uses(atom).then_some(Atom(atom))
+            }
         }
     }
 
     /// The namespace of an attribute. `None` for no namespace.
     pub fn attr_ns(&self, name: Atom) -> Option<Ns> {
-        if self.atom_ns.is_empty() { None } else { self.atom_ns.get(&name.0).copied() }
+        if !self.any_ns { None } else { self.names.with(|n| n.atom_ns.get(&name.0).copied()) }
     }
 
     /// The prefix of an attribute: `xlink` for `xlink:href`. Only a namespaced attribute has one. (A plain `setAttribute('a:b')`
@@ -1614,7 +1799,7 @@ impl Document {
     /// The first attribute of `el` whose qualified name is `qname`, in any namespace. JS: `getAttribute(qname)`.
     pub fn find_attr_qname(&self, el: NodeId, qname: &str) -> Option<Atom> {
         let NodeData::Element { attrs, .. } = self.nodes[el.index()].data else { return None };
-        if self.ns_atoms.is_empty() {
+        if !self.any_ns {
             // No attribute has a namespace: a plain atom compare finds it.
             let atom = self.find_atom(qname)?;
             return self.attrs(attrs).iter().any(|a| a.name == atom).then_some(atom);
@@ -1657,12 +1842,7 @@ impl Document {
     /// How many names of this document (tags and attribute names) the table of `target` does not have yet. A host checks it against its name cap
     /// before `import_node`. It counts every name of this table, also one that no node of the tree uses any more, so it is an upper bound.
     pub fn new_names_in(&self, target: &Document) -> usize {
-        (0..self.names.len())
-            .filter(|&i| match self.atom_ns.get(&(i as u32)) {
-                Some(&ns) => target.find_ns_atom(Some(ns), &self.names[i]).is_none(),
-                None => target.find_atom(&self.names[i]).is_none(),
-            })
-            .count()
+        self.used.iter().filter(|&&atom| !target.uses(atom)).count()
     }
 
     /// A new text node with no parent. It does not join a neighbour (only the parser joins texts).
@@ -1936,7 +2116,7 @@ impl Document {
     /// A `Vec` doubles when it is full, so after 400,000 pushes it can hold 524,288 nodes.
     pub fn shrink_to_fit(&mut self) {
         self.nodes.shrink_to_fit();
-        self.names.shrink_to_fit();
+        self.used.shrink_to_fit();
         self.attrs.shrink_to_fit();
         self.text.shrink_to_fit();
     }
@@ -2341,12 +2521,66 @@ mod tests {
         assert_eq!(doc.atom_str(na), "div");
         assert_eq!(doc.atom_str(aa[0].name), "class");
         assert_eq!((doc.text(aa[0].value), doc.text(ab[0].value)), ("x", "y"));
-        assert_eq!(doc.names.len(), 3);
+        assert_eq!(doc.name_count(), 3);
         // "id" and "class" from the start, and "div". Not 4, although we made two elements.
         assert_eq!(doc.atom_str(Atom::ID), "id");
         assert_eq!(aa[0].name, Atom::CLASS);
         assert_eq!(doc.attr(a, Atom::CLASS), Some("x"));
         assert_eq!(doc.attr(a, Atom::ID), None);
+    }
+
+    #[test]
+    fn short_names_get_the_same_atom_as_the_table_gives() {
+        // Many names of 0 to 9 bytes, so that slots collide and the names that share bytes at the ends differ.
+        let mut doc = Document::new();
+        let mut names = vec![String::new()];
+        for len in 1..=9usize {
+            for k in 0..60u8 {
+                let mut s: Vec<u8> = (0..len).map(|i| b'a' + (i as u8 * 7 + k) % 26).collect();
+                s[len / 2] = b'0' + k % 10;
+                names.push(String::from_utf8(s).unwrap());
+            }
+        }
+        names.extend(["abcdefgh", "abcdXfgh", "abcdefgX", "Xbcdefgh", "abcXefgh"].map(String::from));
+        let first: Vec<_> = names.iter().map(|n| doc.intern(n)).collect();
+        for _ in 0..3 {
+            for (n, &a) in names.iter().zip(&first) {
+                assert_eq!(doc.intern(n), a, "{n}");
+                assert_eq!(doc.atom_str(a), n);
+            }
+        }
+        let mut sorted = first.clone();
+        sorted.sort_by_key(|a| doc.atom_str(*a).to_string());
+        sorted.dedup();
+        assert_eq!(sorted.len(), names.iter().collect::<std::collections::HashSet<_>>().len(), "one atom for each different name");
+    }
+
+    #[test]
+    fn two_documents_share_atoms_and_keep_their_own_names() {
+        let mut a = Document::new();
+        let mut b = Document::new();
+        // The same name is the same atom in both documents, whatever each document added before.
+        let first = a.intern("x-first-only-in-a");
+        let (a_div, b_div) = (a.intern("x-shared"), b.intern("x-shared"));
+        assert_eq!(a_div, b_div);
+        assert_eq!(a.atom_str(a_div), "x-shared");
+        // A document finds only the names that it uses, and counts only those.
+        assert_eq!(a.find_atom("x-first-only-in-a"), Some(first));
+        assert_eq!(b.find_atom("x-first-only-in-a"), None);
+        assert_eq!((a.name_count(), b.name_count()), (4, 3));
+        assert_eq!(a.atom_at(3), a_div);
+        assert_eq!(b.atom_at(2), b_div);
+        // Names that the other document used before are not new for it.
+        assert_eq!(a.new_names_in(&b), 1);
+        assert_eq!(b.new_names_in(&a), 0);
+        // A namespaced name is another atom than the same name with no namespace, in each document.
+        let plain = a.intern("xlink:href");
+        let ns = a.intern_ns(Some(Ns::Xlink), "xlink:href");
+        assert_ne!(plain, ns);
+        assert_eq!(b.find_ns_atom(Some(Ns::Xlink), "xlink:href"), None);
+        assert_eq!(b.intern_ns(Some(Ns::Xlink), "xlink:href"), ns);
+        assert_eq!(b.attr_ns(ns), Some(Ns::Xlink));
+        assert_eq!(b.attr_ns(plain), None);
     }
 
     #[test]

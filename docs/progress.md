@@ -9666,3 +9666,64 @@ All runs use the virtual clock and the recorded corpus. 3 runs each.
 ## Standing exception: PR #512 compact object cost (approved by owner 2026-11-14)
 
 Compact objects leave 4 of 803 cost rows above +0.5% under both allocators: `proxy_load keys 1` (+0.7%), `proxy_load keys 10` (+1.0%), `recursion_load react 1000` (+0.7%) and `reflect_load keys 10` (+1.4%). The owner approved an exception for these 4 rows only. Reason: the 47 journeys use 0.7% fewer instructions and 1.2% less peak RSS, 393 rows are lower by more than 0.5%, and the 12 rows of the PR #497 exception are recovered. The target of 10% less memory on `python-docs-search-results` is not met (-0.5%). PSS rose 1.4%, and the cause is not known.
+
+## Rule-set sharing, stage 1: process-wide atoms and a rule-set cache (2026-11-14)
+
+Task: build stage 1 of `docs/design-rule-share.md`. Branch `t3/rule-set-cache`, rebased on main `f6292d53`. Stage 2 (a parse cache for each sheet) is not built.
+
+Owner decision (2026-11-14): build stage 1 of the design, in this order. First, atoms that all documents of a thread share. Measure `intern` and the change on the cost matrix before the cache, and fix by design if the cost rule breaks. Second, an `Rc<RuleSet>` cache keyed by the ordered sheet list and the window size.
+
+### What I built
+
+- Atoms (`crates/html/src/dom.rs`). One name table for each thread. An `Atom` has the same number in every document of the thread. A document keeps the list and the bit map of the names that it uses, so `name_count`, `atom_at`, `find_atom` and `new_names_in` keep their meaning, and the name cap of a document still counts its own names.
+- Rule-set cache (`crates/css/src/rule_cache.rs`). A set is shared when the list has no shadow-tree sheet, no retained CSSOM input and no pending inline input. The key is a hash of the window size, and of the layer and text of each sheet. A hit compares the layers, the window size and all the texts, so a hash collision is a miss (`RuleSet::built_from`). A page that appends a sheet grows its own set in place when the cache and the page are the only holders (`unshare`). Otherwise it builds the set again.
+- What is shared, and why it is safe. `decls`, `side`, `customs`, `reach`, `Index::big`, the lazy bodies, `logical` and `motion` are made from the rules alone, only grow, and no borrow of them overlaps with another (one thread, no re-entry). `tested` and `styled` are read as differences around one call. I use `Rc`, not `Arc`: a set never leaves its thread.
+- What bounds the cache. At most `MAX_RULES` (65,536) rules in sets that only the cache holds. I measured 500 to 620 bytes for each rule with unread bodies (1,000 rules: 1.47 MB, 20,000: 12.4 MB, 65,000: 32.9 MB), so the bound is about 33 MB in the worst case. An entry that none of the last 2 documents used goes when a document starts (`Browser::new`). A document keeps its own set in any case. Of the sets that one document used, only the last one stays: a page that changes its sheets while it loads builds one set for each list, and the sets before the last are in no other page (this was the first cause of extra memory, see "Memory").
+
+### Findings during the build
+
+- The cost rule broke at step 1: +3.3% on large `bare-stress` pages, 180 rows over under both allocators. A thread-local table with a `RefCell` on each `atom_str` and `intern` cost that. The fix was by design: each document keeps a `&'static` reference to the table, a read of a name text uses an `UnsafeCell` and no flag, the first use of a name in a document is a cold function, and the hash is a word hash. At the cache step the cost matrix still had 12 rows over (about +0.6%: `intern` of each tag name costs about 100 instructions, 20,000 elements). A front table of 512 slots for names of 8 bytes or less removed the hash, the probe and the compare for almost every tag and attribute: `boxes-one-long-run 20000` went from +0.57% to -0.68% against main (callgrind).
+- A hidden dependency on the sheet of the browser (a real bug that the cache exposed). `Hints::new` gave `None` when no `table` atom was in the document. Each document had that atom, because the sheet of the browser has a `table` selector. On a cache hit that sheet is not read, so an `<img width=30 height=40>` lost its size (`rects_cases` failed: 5 of 54 cases). `Hints::new` now looks for each tag that has a hint. The unit test that described the old behavior (an `<img>` page with no table has no hint) now says the browser always hinted an `img`.
+- A race in the driver that the cache made visible. The `write` tests of the suite failed in 1% to 14% of the runs (`type` on `#note`: "did not take the focus after the click"), and 3 of 8 suite runs failed. Cause: `Page::click` moves the pointer, the move lets the page run, a `fetch` fills a list, the input moves down, and the button goes down on the old place. The network log of a failing run shows the reply at 35.0 ms inside step 12. Main has the same race, but a rule-set build that takes 3 ms hid it. With the cache off in the same binary (`BARE_NO_SHARE`, a temporary switch that is not in the code): 0 of 400 failed; with it on: 57 of 400. Fix (in `control.rs`): after the move, when the element is not under the pointer, aim again with `actionable`. The hit test that checks this is the one that the button makes next, so it costs no instructions. A version that always aimed again cost +240 M on the suite. Test: `a_click_aims_again_after_the_page_moved_the_element` (it fails without the fix). After the fix: 0 of 400 cold runs of `36-write-3` and of `34-write-1`, and 12 of 12 suite runs pass. `dblclick` and `hover` have the same pattern. I did not change them.
+
+### Numbers
+
+Machine archMachine, 16 cores, shared (load 3 to 14 while I measured). Instruction counts are stable. 3 runs each unless I say so.
+
+| Measure | Frozen `f6415364` | Main `f68e956a` | Branch (final) |
+| --- | --- | --- | --- |
+| Suite, 40 tests, 1 worker, shared login (V2), M instructions | not measured (V0, a new process for each test: 21,078, spread 21,064 to 21,134) | 13,147 (13,110 to 13,163). V0: 18,239 | 10,431 (10,414 to 10,432). V0: 15,542. -20.7% against main V2; 2.02 times lower than the frozen V0 |
+| Suite of 800 tests (the 40 repeated 20 times), V2, 1 run, M instructions | | 258,127, peak RSS of the worker 28.06 MiB | 205,325 (-20.5%), 28.60 MiB (+0.54 MiB) |
+| 47 journeys, virtual clock, sum of medians, M instructions | 105,217 (from `perf-goal.md`) | 90,534 | 90,293 (-0.3%) |
+| 47 journeys, sum of peak RSS | | 1,691 MiB | 1,730 MiB (+2.3%). PSS 1,448 / 1,483 MiB (+2.5%) |
+| `compm_22000`, M instructions | 11,664 (spread 0.001%) | 1,834 | 1,829 |
+| `rest_13`, M instructions | 10,873 | 1,241 | 1,239 |
+| Keycost, `#a1` and `#f0`, M for each key | | 294.77, 300.13 | 294.76, 300.12 |
+
+- The design expected 13.1 G to about 10.75 G on the suite. The result is 10.43 G: a build costs 11.2 M and the suite makes 190 of them.
+- Journeys: one process, mostly different sites, so a hit is rare. Gains: `docs-rs-home` -23.7%, `duckduckgo-html-search` -16.3%, `rust-lang-org-home` -12.8%, `python-docs-tutorial` -4.9%, `python-org-docs-link` and `python-org-search` -2.8% (a repeated sheet list). All the other journeys are within 0.5%. `python-docs-search-results`: instructions -1.2%, peak RSS +0.1%, so criterion 6 does not move. Criterion 3 does not move either, as the design said: each ramp is one document, so the first build is a miss. Criterion 7 (instructions with one worker, target 1.5 times lower): 2.02 times against the frozen V0. Against the V0 of the same binary: 1.49 times.
+- Cost matrix (`tools/js/cost_matrix.sh`, 803 rows, against main `f68e956a`, base counts cached): 0 rows over +0.5% under both allocators, 0 under one. Mean change glibc -0.23%. `parse_load deep 1` and `deep 10` fail to run (stack overflow) on main too.
+
+### Memory (the cost of the cache)
+
+- Before the last two changes the 47 journeys gave peak RSS +4.3% and `wikipedia-article` +26%: the cache kept every set of a page that changes its sheets while it loads (Wikipedia: four lists, python.org: three), so up to six sets were in memory together.
+- Tried and dropped: drop all the sets that only the cache holds at each miss. Memory +3%, but the instruction gain of the repeated lists was gone (`python-org-*` -8% to 0%): a page builds three lists, and the second document would have hit all three.
+- Kept: the sets of one document go when the document goes on to another list, and when a document starts only its last set stays (`use_key`, `drop_step`).
+- Result: the Wikipedia journeys +4% to +14% peak RSS (+2.5 to +6.4 MiB), `github-docs-home` +8%, `wiktionary-portal` +8%, `python-org-*` +11%. This is one set of the page before, which the next document may hit. A journey that visits only new sites pays for it and gets nothing back. A suite that returns to one site gets the 20%. I did not find a rule that tells these two apart before the next document asks. The owner decides if the memory is worth it.
+
+### Checks
+
+- `cargo test --release --workspace --no-fail-fast`: see the last line of this section.
+- New tests: `crates/html` (short names, two documents share atoms), `crates/css` (`rule_cache`: 6 tests; the cross-document differential in `cascade/index_tests.rs`), `crates/bare/src/browser_rule_share_tests.rs` (11: same sheets, window size, CSSOM edit, inserted style, grown set, late link, layered part, shadow tree, retained inputs, image hint, with and without the cache give the same styles), `control_tests.rs` (the click). The differential test fails on the commit before the global atoms.
+- Failures that are not mine. On a run of the workspace: `bare-net --test https_openssl` (2) and `bare-tls` `client_openssl` (4) and `tls12_openssl` (1) fail with `BadSignature` in the test certificates; these crates do not depend on html or css. `downloads::run::tests::a_changed_file_starts_again_from_zero` and `bare-mcp --test server a_hidden_iframe_download_is_saved` are flaky: the second counts "(0 bytes)" of a download that is still running, and passes one run in three. Run alone, the first passes.
+- Not run: `test262_check.sh` and `exec_diff.sh` (`crates/js` is not touched).
+
+### Not tested
+
+- Wall time on an idle machine (the suite wall time here is from a loaded machine). Live sites. A page with many frames (each frame is a document of the thread: `new_document` ages the cache for it too). A suite on more than one worker (the cache is for each thread, so each worker builds its own sets). `dblclick` and `hover` with a page that moves under the pointer. The peak RSS of a long run on a site with a very large sheet (the 65,536-rule bound is from the measured bytes for each rule, not from a run that reaches it).
+
+### Noticed, not changed
+
+- The global name table only grows. A document is capped by `max_names`, the table is not. A thread that opens many different sites collects every tag and attribute name of them. I measured no problem on the suite or the journeys. An epoch or a reset when the cache and all documents are gone would bound it.
+- `name_count` of a document can differ between a cache hit and a miss: selector parsing interns names into the document that builds the set.
+- `dblclick` and `hover` aim once, like `click` did.

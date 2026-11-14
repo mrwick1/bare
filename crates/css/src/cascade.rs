@@ -778,6 +778,12 @@ impl RuleSet {
         std::iter::successors(Some(el), |&n| doc.parent(n).or_else(|| doc.shadow_host(n))).last() == Some(doc.root())
     }
 
+    /// Was this set built for a window of `viewport` pixels and these sheets (the text of each, in the order of the page, after the
+    /// browser's own)? `rule_cache` compares with it before it shares a set.
+    pub fn built_from<'a>(&self, viewport: (f32, f32), sheets: impl ExactSizeIterator<Item = &'a str>) -> bool {
+        self.viewport == viewport && self.sources.len() == sheets.len() + 1 && self.sources[1..].iter().zip(sheets).all(|(a, b)| **a == *b)
+    }
+
     /// The number of selectors in the set.
     pub fn len(&self) -> usize {
         self.entries.len()

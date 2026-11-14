@@ -418,13 +418,33 @@ impl Page {
 
     /// A user click on the element: the pointer moves to the point of `actionable`, the left button goes down and up. Gives the point.
     pub fn click(&mut self, h: Handle) -> Result<(f64, f64), Refusal> {
-        let (x, y) = self.actionable(h)?;
+        let (mut x, mut y) = self.actionable(h)?;
         // A driver click is one click: two driver clicks at one point are not a double click (as the CDP click of Playwright).
         if let Some(b) = self.browser() {
             b.dom.st.borrow_mut().ui.last = None;
         }
         let mods = Mods::default();
         self.handle(Event::PointerMove { x, y, buttons: 0, mods });
+        // The move lets the page run (a fetch that fills a list, a `pointermove` listener): it may have moved the element. When it is not under
+        // the pointer any more, aim again, so that the button does not go down on the place where it was. When it cannot be aimed at any more,
+        // the first point stays. The hit test below is the one that the button makes next, so it costs nothing more.
+        self.frame_now();
+        let top = self.hit(x, y);
+        let under = self.browser().is_some_and(|b| {
+            let doc = b.document();
+            let doc = doc.borrow();
+            let mut cur = top;
+            while let Some(c) = cur.filter(|&c| c != h.node) {
+                cur = doc.parent_or_host(c);
+            }
+            cur.is_some()
+        });
+        if !under
+            && let Ok(point) = self.actionable(h)
+        {
+            (x, y) = point;
+            self.handle(Event::PointerMove { x, y, buttons: 0, mods });
+        }
         self.handle(Event::PointerButton { x, y, button: 0, buttons: 1, pressed: true, mods });
         self.handle(Event::PointerButton { x, y, button: 0, buttons: 0, pressed: false, mods });
         self.after_action();
