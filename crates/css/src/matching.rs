@@ -387,6 +387,18 @@ mod tests {
     }
 
     #[test]
+    fn a_class_is_an_exact_name() {
+        // The case counts, a repeat is one class, and a name that is a prefix of another is another class.
+        let html = "<p id=a class='x x Y'></p><p id=b class='y'></p><p id=c class='xx'></p><p id=d class=''></p><p id=e></p>";
+        assert_eq!(find(html, ".x"), ["a"]);
+        assert_eq!(find(html, ".Y"), ["a"]);
+        assert_eq!(find(html, ".y"), ["b"]);
+        assert_eq!(find(html, ".x.Y"), ["a"]);
+        assert_eq!(find(html, ".xx"), ["c"]);
+        assert_eq!(find(html, "p:not(.x)"), ["b", "c", "d", "e"]);
+    }
+
+    #[test]
     fn structural_pseudo_classes() {
         assert_eq!(find(PAGE, "li:first-child"), ["l1"]);
         assert_eq!(find(PAGE, "li:last-child"), ["l3"]);

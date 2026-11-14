@@ -361,3 +361,23 @@ fn rules_built_for_one_document_give_another_document_the_matches_and_styles_of_
         }
     }
 }
+
+/// `Big::find` gives the group of a key, as a binary search of the sorted keys does, for no key, one key, and many keys, and for hashes that are
+/// not keys (also the ones that collide in the table).
+#[test]
+fn a_big_list_finds_its_groups_by_key() {
+    let mut r = Rng(0x9e37_79b9_7f4a_7c15);
+    for n in [0usize, 1, 2, 3, 17, 64, 1000, 7334] {
+        let mut keys: Vec<u32> = (0..n).map(|_| r.next(u32::MAX as usize) as u32 | 1).collect();
+        keys.sort_unstable();
+        keys.dedup();
+        let big = Big { probe: Big::probe_of(&keys).into(), starts: Box::new([]), list: Box::new([]), rest: Box::new([]), keys: keys.clone().into() };
+        for (i, &k) in keys.iter().enumerate() {
+            assert_eq!(big.find(k), Some(i), "{n} keys");
+        }
+        for _ in 0..2000 {
+            let h = r.next(u32::MAX as usize) as u32;
+            assert_eq!(big.find(h), keys.binary_search(&h).ok(), "{n} keys, hash {h}");
+        }
+    }
+}

@@ -195,6 +195,8 @@ struct Bigs {
 /// The three arrays are flat: group `i` is `list[starts[i]..starts[i + 1]]`, under the hash `keys[i]` (sorted, no repeats).
 struct Big {
     keys: Box<[u32]>,
+    /// An open-addressing table of the groups, by key: `probe[at]` is the group plus one, or 0. Twice the keys, a power of two.
+    probe: Box<[u32]>,
     starts: Box<[u32]>,
     list: Box<[u32]>,
     rest: Box<[u32]>,
@@ -228,7 +230,40 @@ impl Big {
             }
         }
         starts.push(keyed.len() as u32);
-        Some(Big { keys: keys.into(), starts: starts.into(), list: keyed.iter().map(|k| k.1).collect(), rest: rest.into() })
+        Some(Big { probe: Self::probe_of(&keys).into(), keys: keys.into(), starts: starts.into(), list: keyed.iter().map(|k| k.1).collect(), rest: rest.into() })
+    }
+
+    /// The table of the groups of `keys` (sorted, no repeats).
+    fn probe_of(keys: &[u32]) -> Vec<u32> {
+        let size = (keys.len() * 2).next_power_of_two().max(2);
+        let mut probe = vec![0u32; size];
+        for (i, &k) in keys.iter().enumerate() {
+            let mut at = Self::slot(k, size);
+            while probe[at] != 0 {
+                at = (at + 1) & (size - 1);
+            }
+            probe[at] = i as u32 + 1;
+        }
+        probe
+    }
+
+    #[inline(always)]
+    fn slot(h: u32, size: usize) -> usize {
+        (h.wrapping_mul(0x9E37_79B1) >> 7) as usize & (size - 1)
+    }
+
+    /// The group of the key `h`.
+    #[inline(always)]
+    fn find(&self, h: u32) -> Option<usize> {
+        let size = self.probe.len();
+        let mut at = Self::slot(h, size);
+        loop {
+            match self.probe[at] {
+                0 => return None,
+                n if self.keys[n as usize - 1] == h => return Some(n as usize - 1),
+                _ => at = (at + 1) & (size - 1),
+            }
+        }
     }
 
     /// Add to `out` the rules that may match an element with this path: `rest`, and the groups of the hashes that the path may have.
@@ -248,7 +283,7 @@ impl Big {
             self.keys.len() as u64
         } else {
             for &(h, _) in &filter.path {
-                if let Ok(i) = self.keys.binary_search(&h) {
+                if let Some(i) = self.find(h) {
                     group(i);
                 }
             }
@@ -852,7 +887,7 @@ impl RuleSet {
         }
         let index = &self.index;
         let bigs = index.big.get().and_then(|b| b.as_deref()).map_or(0, |b| {
-            let one = |big: &Big| (big.keys.len() + big.starts.len() + big.list.len() + big.rest.len()) * 4;
+            let one = |big: &Big| (big.keys.len() + big.probe.len() + big.starts.len() + big.list.len() + big.rest.len()) * 4;
             slots(&b.by_id) + slots(&b.by_class) + slots(&b.by_tag) + slots(&b.by_attr)
                 + b.by_id.iter().map(|(k, v)| k.len() + one(v)).sum::<usize>()
                 + b.by_class.values().map(one).sum::<usize>()
@@ -4754,7 +4789,7 @@ mod tests {
     fn an_ancestor_after_a_sibling_combinator_still_filters() {
         let mut doc = parse("");
         let list = crate::selector::parse_selector_list(".list > :not([hidden]) ~ :not([hidden])", &mut doc).expect("a selector");
-        assert_eq!(ancestor_hashes(&list[0], false), [name_hash(2, "list"), 0, 0, 0]);
+        assert_eq!(ancestor_hashes(&list[0], false), [class_hash(doc.class_atom("list")), 0, 0, 0]);
         let html = "<div class=list><b id=a></b><b id=b></b><b id=c hidden></b><b id=d></b></div><div><b id=x></b><b id=y></b></div>";
         let css = ".list > :not([hidden]) ~ :not([hidden]) { margin-top: 7px }";
         let m = |id: &str| get(html, &[css], id, Property::MarginTop);

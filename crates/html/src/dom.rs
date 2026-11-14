@@ -2564,6 +2564,76 @@ mod tests {
         assert!(!doc.has_class(a, "other"));
     }
 
+    /// The atoms of the classes of an element, as the words of the `class` attribute: sorted, with no repeat, and made again after a write.
+    fn class_words(doc: &Document, el: NodeId) -> Vec<String> {
+        doc.with_classes(el, |list| list.iter().map(|&a| doc.atom_str(a).to_string()).collect())
+    }
+
+    #[test]
+    fn class_atoms_follow_the_class_attribute() {
+        let mut doc = Document::new();
+        let root = doc.root();
+        let a = element(&mut doc, root, "a", &[("class", " y  x\tz x\n")]);
+        let none = element(&mut doc, root, "a", &[("id", "q")]);
+        let mut sorted = class_words(&doc, a);
+        sorted.sort();
+        assert_eq!(sorted, ["x", "y", "z"]);
+        assert!(class_words(&doc, none).is_empty());
+        // A second read comes from the cache and gives the same list.
+        assert_eq!(class_words(&doc, a).len(), 3);
+        doc.set_attr(a, "class", "w x");
+        let mut now = class_words(&doc, a);
+        now.sort();
+        assert_eq!(now, ["w", "x"]);
+        doc.set_attr(none, "class", "n");
+        assert_eq!(class_words(&doc, none), ["n"]);
+        doc.remove_attr(a, "class");
+        assert!(class_words(&doc, a).is_empty());
+        doc.set_attr(a, "class", "again");
+        assert_eq!(class_words(&doc, a), ["again"]);
+        // A clone has its own list.
+        let copy = doc.clone_element(a);
+        doc.set_attr(a, "class", "other");
+        assert_eq!(class_words(&doc, copy), ["again"]);
+        assert_eq!(class_words(&doc, a), ["other"]);
+        // A text node has none.
+        let t = doc.create_text("x");
+        assert!(class_words(&doc, t).is_empty());
+        // The atoms are no names that the document uses.
+        let names = doc.name_count();
+        doc.set_attr(a, "class", "never-seen-before-class-name");
+        assert_eq!(class_words(&doc, a), ["never-seen-before-class-name"]);
+        assert_eq!(doc.name_count(), names);
+    }
+
+    /// `has_class_atom` says what `has_class` says, for short and long lists, repeats, a name that is a prefix, and a different case.
+    #[test]
+    fn has_class_atom_equals_has_class() {
+        let mut doc = Document::new();
+        let root = doc.root();
+        let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let names: Vec<String> = (0..40).map(|i| if i % 5 == 0 { format!("C{i}") } else { format!("c{i}") }).collect();
+        for round in 0..60 {
+            let len = if round % 3 == 0 { 30 } else { (next() % 6) as usize };
+            let value: Vec<&str> = (0..len).map(|_| names[(next() % 40) as usize].as_str()).collect();
+            let el = element(&mut doc, root, "i", &[("class", &value.join(" "))]);
+            for n in names.iter().map(String::as_str).chain(["c", "C", "c1x", "", "x"]) {
+                let atom = doc.class_atom(n);
+                assert_eq!(doc.has_class_atom(el, atom), doc.has_class(el, n), "{n} in {value:?}");
+            }
+            // A change gives the new answer.
+            doc.set_attr(el, "class", "c1 C5");
+            assert!(doc.has_class_atom(el, doc.class_atom("c1")) && doc.has_class_atom(el, doc.class_atom("C5")));
+            assert!(!doc.has_class_atom(el, doc.class_atom("c5")), "the case counts");
+        }
+    }
+
     #[test]
     fn text_nodes_can_be_made_detached_and_changed() {
         let mut doc = Document::new();
