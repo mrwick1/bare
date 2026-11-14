@@ -11536,3 +11536,49 @@ STOPPED on one row. `select_load churn 1000` is +0.74% under both allocators. I 
 ### Owner decision (2026-11-15)
 
 The owner grants a cost exception for one row: `select_load churn 1000` at +0.74% (glibc) and +0.72% (jemalloc). The reason: the PR meets criterion 6 (`python-docs-search-results` peak RSS 81.3 MiB) and lowers the 47 journeys by 0.9% in instructions and 9.3% in PSS. The PR merges as it is.
+
+## 2026-11-15: criterion 3, a design for `compm_22000` at 10x (docs only)
+
+### Owner decisions (2026-11-14)
+
+1. Accept the +0.4% that #541 adds on `python-docs-search-results` (cause not found). Merge #541. Done: #541 is merged at `79829d19`.
+2. Profile `compm_22000` again and find a design that reaches 10x before any more build.
+
+### State
+
+Main `79829d19`. `compm_22000` is 1,558.5 M in a symbol build (7.48x against `f6415364`, 11,664 M; goal 1,166.4 M). `rest_13` is 1,042.5 M (10.43x, goal 1,087.3 M, met).
+
+### Measured split (`compm_22000`, M instructions, share of 1,558 M)
+
+Machine archMachine. Phase counters read `instructions:u` between phases. 3 runs per stage, spread at most 0.01%. The sum of the laps is within 1.7% of the staged runs.
+
+| Item | M | Share |
+| --- | --- | --- |
+| Style identity (hash and compare of the 872-byte style) | 370.7 | 23.8% |
+| Selector matching | 321.2 | 20.6% |
+| Cascade (`cascade_as`, `ensure_lazy`) | 229.9 | 14.8% |
+| HTML parse | 131.9 | 8.5% |
+| CSS rule build | 112.7 | 7.2% |
+| Ancestor filter, memo, glue | 218.7 | 14.0% |
+| Exit drop | 45 | 2.9% |
+| Rest, by difference | about 147 | 9.4% |
+
+The page reads 3 styles. The browser styles 44,002 elements twice. The walk costs 11.6 k instructions per element. 75.5% of the misses repeat a winner key that was seen before.
+The forced style work is 4.7% of the 118,240 M of the 47 journeys; the forced layout work is 3.3%.
+
+### Recommendation
+
+Build option H: a lazy chain read for `getComputedStyle` (style the element and its ancestors only). Expected `compm_22000`: about 393 M (29.7x; range 370 to 420 M). `rest_13` does not change, because it reads layout. Slices H1 (chain style and equal-style tests), H2 (wire into `cascade_inner`), H3 (numbers). The R2-E steps 2 and 3 (selector arena, winners memo) give about 1,170 to 1,210 M (9.3x to 10.5x): not enough alone for criterion 3, and not needed after H. They stay open on their own merits for pages that read layout. Details: `docs/design-compm-10x.md`.
+The `has_class_id` rule is an amortization policy (ski rental). A per-element rule would remove its dependence on the node count. The gain is small and unmeasured. No build.
+
+### Checks
+
+Docs only. No test run. No product code changed. The phase-counter patch is outside the repository (`/data/bare-tmp/r2/compm10x/`).
+
+### Not tested
+
+Option H is not built; its numbers are the measured floor (252.9 M) plus an estimate, and the reserve of about 140 M is a hypothesis. The numbers of the other options are estimates from the laps. Wall time, peak memory, the 813 cost-matrix rows, and allocation as its own row were not measured. The Gecko and Blink claims are marked "to verify" in the design.
+
+### Noticed, not changed
+
+- `nextjs-docs` fails in the journey run on main (47 counted, 1 failed). I did not look at the cause.
