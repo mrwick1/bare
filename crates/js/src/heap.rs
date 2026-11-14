@@ -441,7 +441,8 @@ struct Str {
     units: Box<[u16]>,
     /// Atoms only (the interner key). A flat string that is not an atom has 0.
     hash: u32,
-    /// The first unit is a digit, so the string may be an array index. Read without a jump to `units`, a separate block that is often cold.
+    /// The first unit is a digit, so the string may be an array index, or the string is not an atom, so it is no key. Read without a jump to
+    /// `units`, a separate block that is often cold. A key check that finds it set looks closer, so the common key pays no test of the kind.
     digit: bool,
     /// In the interner: unique by content. Every string of at most `ATOM_MAX` units is an atom. A longer one is an atom only when a key made it so.
     atom: bool,
@@ -518,6 +519,7 @@ impl<T> Slab<T> {
     fn can_alloc(&self) -> bool {
         !self.free.is_empty() || (self.meta.len() < self.max && self.meta.len() < u32::MAX as usize)
     }
+    #[inline(always)]
     fn alloc(&mut self, v: T, limit: Limit) -> Result<(u32, u32), HeapError> {
         let (i, gn) = if let Some(i) = self.free.pop() {
             (i, self.meta[i as usize].gn)
@@ -532,6 +534,12 @@ impl<T> Slab<T> {
         self.back.push(i);
         self.allocs += 1;
         Ok((i, gn))
+    }
+    /// Set or clear `bit` in the generation of the live slot `i`, and return the generation. A string slot keeps its kind (`GN_ATOM`) there.
+    fn tag(&mut self, i: u32, bit: u32, on: bool) -> u32 {
+        let g = &mut self.meta[i as usize].gn;
+        *g = if on { *g | bit } else { *g & !bit };
+        *g
     }
     /// `VACANT` is `u32::MAX`, and `live` never has that many values, so a vacant slot misses here.
     fn get(&self, index: u32, gn: u32) -> Option<&T> {
@@ -660,7 +668,7 @@ impl Interner {
         self.count += 1;
     }
     fn rebuild(&mut self, strs: &Slab<Str>) {
-        let size = (strs.live.iter().filter(|s| s.atom).count() * 2).next_power_of_two().max(16);
+        let size = (strs.live.len() * 2).next_power_of_two().max(16);
         self.table.clear();
         self.table.resize(size, 0);
         self.count = 0;
@@ -912,28 +920,19 @@ impl Heap {
         self.objects.get(id.index, id.gn).ok_or(HeapError::Stale)
     }
     /// A string that is not a rope (an atom or a flat string). A rope handle is `Stale` here: a rope has no `Str`.
-    /// An atom is found by the first lookup, as before ropes. A flat string has `STR_FLAT` in its `index`: out of range, so it misses and
-    /// `str_slow` finds it. A rope and a stale handle miss there too.
-    #[inline]
     fn str(&self, id: StrId) -> R<&Str> {
-        match self.strings.get(id.index, id.gn) {
-            Some(s) => Ok(s),
-            None => self.str_slow(id),
-        }
-    }
-    #[cold]
-    #[inline(never)]
-    fn str_slow(&self, id: StrId) -> R<&Str> {
-        if id.is_flat() { self.strings.get(id.slot(), id.gn).ok_or(HeapError::Stale) } else { Err(HeapError::Stale) }
+        self.strings.get(id.index, id.gn).ok_or(HeapError::Stale)
     }
     fn rope(&self, id: StrId) -> R<&Rope> {
+        if !id.is_rope() {
+            return Err(HeapError::Stale);
+        }
         self.ropes.get(id.slot(), id.gn).ok_or(HeapError::Stale)
     }
     /// Is the handle of a live string of any kind? No call, even on a miss: a caller that is a short function keeps a small frame.
     #[inline(always)]
     fn check_str(&self, id: StrId) -> R<()> {
-        let live = self.strings.get(id.index, id.gn).is_some()
-            || if id.is_rope() { self.ropes.get(id.slot(), id.gn).is_some() } else { id.is_flat() && self.strings.get(id.slot(), id.gn).is_some() };
+        let live = self.strings.get(id.index, id.gn).is_some() || id.is_rope() && self.ropes.get(id.slot(), id.gn).is_some();
         if live { Ok(()) } else { Err(HeapError::Stale) }
     }
     fn sym(&self, id: SymId) -> R<&Symbol> {
@@ -958,16 +957,19 @@ impl Heap {
             PropertyKey::Index(_) => Err(HeapError::InvalidKey),
             PropertyKey::Symbol(s) => self.sym(s).map(drop),
             PropertyKey::String(s) => {
-                // A key string is an atom: the handle is the content. `key_from_string` makes it so. Another kind misses the first lookup.
-                let Some(st) = self.strings.get(s.index, s.gn) else {
-                    return Err(if s.is_atom() { HeapError::Stale } else { HeapError::InvalidKey });
-                };
-                if st.digit && parse_index(&st.units).is_some() {
-                    return Err(HeapError::InvalidKey);
+                // A key string is an atom: the handle is the content. `key_from_string` makes it so.
+                if self.str(s)?.digit {
+                    return self.check_digit_key(s);
                 }
                 Ok(())
             }
         }
+    }
+    /// The rare key whose string starts with a digit, or that is not an atom: it must not be an array index, and it must be an atom.
+    #[cold]
+    #[inline(never)]
+    fn check_digit_key(&self, s: StrId) -> R<()> {
+        if !s.is_atom() || parse_index(&self.str(s)?.units).is_some() { Err(HeapError::InvalidKey) } else { Ok(()) }
     }
     fn charge(&self, extra: usize) -> R<()> {
         if self.bytes.saturating_add(self.flat_bytes.get()).saturating_add(extra) > self.limits.max_bytes { Err(HeapError::Limit(Limit::Bytes)) } else { Ok(()) }
@@ -1000,12 +1002,12 @@ impl Heap {
 
     /// The atom with these units, whatever the length (the units of a key).
     pub fn atom_units(&mut self, units: &[u16]) -> R<StrId> {
-        self.intern_atom(std::borrow::Cow::Borrowed(units))
+        self.intern_slice(units)
     }
 
     /// Like `atom_units`, but takes the vector.
     pub fn atom_vec(&mut self, units: Vec<u16>) -> R<StrId> {
-        self.intern_atom(std::borrow::Cow::Owned(units))
+        self.intern_owned(units)
     }
 
     fn str_from(&mut self, s: &str, atom: bool) -> R<StrId> {
@@ -1029,11 +1031,10 @@ impl Heap {
                     n += 1;
                 }
             }
-            let units = std::borrow::Cow::Borrowed(&buf[..n]);
-            return if atom { self.intern_atom(units) } else { self.intern(units) };
+            return if atom || n <= ATOM_MAX { self.intern_slice(&buf[..n]) } else { self.new_flat(std::borrow::Cow::Borrowed(&buf[..n])) };
         }
-        let units = std::borrow::Cow::Owned(s.encode_utf16().collect());
-        if atom { self.intern_atom(units) } else { self.intern(units) }
+        let v: Vec<u16> = s.encode_utf16().collect();
+        if atom || v.len() <= ATOM_MAX { self.intern_owned(v) } else { self.new_flat(std::borrow::Cow::Owned(v)) }
     }
 
     #[inline]
@@ -1041,7 +1042,10 @@ impl Heap {
         if units.len() > ATOM_MAX {
             return self.new_flat(units);
         }
-        self.intern_atom(units)
+        match units {
+            std::borrow::Cow::Borrowed(u) => self.intern_slice(u),
+            std::borrow::Cow::Owned(v) => self.intern_owned(v),
+        }
     }
 
     /// A flat string that is not interned: no hash and no lookup.
@@ -1050,23 +1054,42 @@ impl Heap {
         let cost = flat_cost(units.len());
         self.charge(cost)?;
         if !self.strings.can_alloc() { return Err(HeapError::Limit(Limit::Strings)); }
-        let s = Str { digit: units.first().is_some_and(|c| (0x30..=0x39).contains(c)), units: units.into_owned().into_boxed_slice(), hash: 0, atom: false };
-        let (index, gn) = self.strings.alloc(s, Limit::Strings)?;
+        let s = Str { digit: true, units: units.into_owned().into_boxed_slice(), hash: 0, atom: false };
+        let (index, _) = self.strings.alloc(s, Limit::Strings)?;
+        let gn = self.strings.tag(index, GN_ATOM, false);
         self.bytes += cost;
-        Ok(StrId { index: index | STR_FLAT, gn })
+        Ok(StrId { index, gn })
     }
 
-    /// The atom with these units: found in the interner or made, whatever the length.
+    /// The atom with these units, or the hash and the cost for a new one. The limits are checked here.
     #[inline(always)]
-    fn intern_atom(&mut self, units: std::borrow::Cow<[u16]>) -> R<StrId> {
+    fn atom_lookup(&self, units: &[u16]) -> R<Result<StrId, (u32, usize)>> {
         if units.len() > self.limits.max_string_units { return Err(HeapError::Limit(Limit::StringLength)); }
         let cost = string_cost(units.len());
         if cost > self.limits.max_bytes { return Err(HeapError::Limit(Limit::Bytes)); }
-        let hash = hash_units(&units);
-        if let Some(a) = self.find_atom(hash, &units) {
-            return Ok(a);
+        let hash = hash_units(units);
+        Ok(match self.find_atom(hash, units) {
+            Some(a) => Ok(a),
+            None => Err((hash, cost)),
+        })
+    }
+
+    /// The atom with these units: found in the interner or made (copied), whatever the length. One copy of the hash, the probe and the insert.
+    #[inline(never)]
+    fn intern_slice(&mut self, units: &[u16]) -> R<StrId> {
+        match self.atom_lookup(units)? {
+            Ok(a) => Ok(a),
+            Err((hash, cost)) => self.insert_atom(hash, units.to_vec(), cost),
         }
-        self.insert_atom(hash, units.into_owned(), cost)
+    }
+
+    /// Like `intern_slice`, and a new atom takes the vector: no copy.
+    #[inline(never)]
+    fn intern_owned(&mut self, units: Vec<u16>) -> R<StrId> {
+        match self.atom_lookup(&units)? {
+            Ok(a) => Ok(a),
+            Err((hash, cost)) => self.insert_atom(hash, units, cost),
+        }
     }
 
     #[inline(always)]
@@ -1077,8 +1100,7 @@ impl Heap {
     }
 
     /// Add a new atom. The caller has checked that no atom has these units.
-    #[cold]
-    #[inline(never)]
+    #[inline(always)]
     fn insert_atom(&mut self, hash: u32, units: Vec<u16>, cost: usize) -> R<StrId> {
         self.charge(cost)?;
         if !self.strings.can_alloc() { return Err(HeapError::Limit(Limit::Strings)); }
@@ -1095,7 +1117,8 @@ impl Heap {
                 }
             }
         }
-        let (index, gn) = self.strings.alloc(s, Limit::Strings)?;
+        let (index, _) = self.strings.alloc(s, Limit::Strings)?;
+        let gn = self.strings.tag(index, GN_ATOM, true);
         self.interner.insert_slot(hash, self.strings.live.len() as u32 - 1);
         self.bytes += cost;
         Ok(StrId { index, gn })
@@ -1126,13 +1149,10 @@ impl Heap {
         }
     }
 
-    /// The units of a flat string that is not an atom, or of a rope.
+    /// The units of a rope (a string that the first lookup missed). A stale handle fails in `rope`.
     #[cold]
     #[inline(never)]
     fn units_slow(&self, s: StrId) -> R<&[u16]> {
-        if !s.is_rope() {
-            return Ok(&self.str_slow(s)?.units);
-        }
         let r = self.rope(s)?;
         if let Some(f) = r.flat.get() {
             return Ok(f);
@@ -1195,7 +1215,7 @@ impl Heap {
     #[cold]
     #[inline(never)]
     fn len_slow(&self, s: StrId) -> R<usize> {
-        if s.is_rope() { Ok(self.rope(s)?.len as usize) } else { Ok(self.str_slow(s)?.units.len()) }
+        Ok(self.rope(s)?.len as usize)
     }
 
     /// `s.charCodeAt(i)`; `None` when out of range (JS gives NaN).
@@ -1232,13 +1252,13 @@ impl Heap {
                 let mut buf = [0u16; ATOM_MAX];
                 buf[..la].copy_from_slice(&x.units);
                 buf[la..n].copy_from_slice(&y.units);
-                return self.intern_atom(std::borrow::Cow::Borrowed(&buf[..n]));
+                return self.intern_slice(&buf[..n]);
             }
         }
         self.concat_long(a, b)
     }
 
-    /// `concat` for a result above `ATOM_MAX` units, or a string that is a rope or a flat string.
+    /// `concat` for a result above `ATOM_MAX` units, or a string that is a rope.
     #[inline(never)]
     fn concat_long(&mut self, a: StrId, b: StrId) -> R<StrId> {
         let (la, lb) = (self.str_len(a)?, self.str_len(b)?);
@@ -1268,6 +1288,12 @@ impl Heap {
         if a == 0 && b == u.len() {
             return Ok(s);
         }
+        if b - a <= ATOM_MAX {
+            // A short part is looked up from the stack: only a new atom allocates.
+            let mut buf = [0u16; ATOM_MAX];
+            buf[..b - a].copy_from_slice(&u[a..b]);
+            return self.intern_slice(&buf[..b - a]);
+        }
         let part = u[a..b].to_vec();
         self.intern_vec(part)
     }
@@ -1286,7 +1312,7 @@ impl Heap {
     /// Do two strings have the same code units? Two atoms are equal when the handles are. Otherwise the content decides.
     #[inline]
     pub fn str_eq(&self, a: StrId, b: StrId) -> bool {
-        a.same(b) || (a.index | b.index) & STR_NOT_ATOM != 0 && self.units_eq(a, b)
+        a.same(b) || (a.gn & b.gn) & GN_ATOM == 0 && self.units_eq(a, b)
     }
 
     #[cold]
@@ -1340,22 +1366,23 @@ impl Heap {
     #[inline(always)]
     pub fn key_from_string(&mut self, s: StrId) -> R<PropertyKey> {
         match self.strings.get(s.index, s.gn) {
-            Some(st) => Ok(match if st.digit { parse_index(&st.units) } else { None } {
+            Some(st) if !st.digit => Ok(PropertyKey::String(s)),
+            Some(st) if s.is_atom() => Ok(match parse_index(&st.units) {
                 Some(i) => PropertyKey::Index(i),
                 None => PropertyKey::String(s),
             }),
-            None => self.key_from_other(s),
+            _ => self.key_from_other(s),
         }
     }
 
-    /// `key_from_string` for a string that the first lookup missed: a flat string or a rope (it is no index: it is longer than
-    /// `ATOM_MAX`, so the key is its atom), or a stale handle.
+    /// `key_from_string` for a flat string that is not an atom or a rope (it is no index: it is longer than `ATOM_MAX`, so the key is its
+    /// atom), or a stale handle.
     #[cold]
     #[inline(never)]
     fn key_from_other(&mut self, s: StrId) -> R<PropertyKey> {
         let s = self.atom_of(s)?;
         let st = self.str(s)?;
-        Ok(match if st.digit { parse_index(&st.units) } else { None } {
+        Ok(match parse_index(&st.units) {
             Some(i) => PropertyKey::Index(i),
             None => PropertyKey::String(s),
         })
@@ -2671,21 +2698,12 @@ impl Marker<'_> {
     fn atom(&mut self, s: StrId) {
         self.smarks[self.smeta[s.index as usize].dense as usize] = true;
     }
-    #[inline]
+    #[inline(always)]
     fn str(&mut self, s: StrId) {
-        if s.index & STR_NOT_ATOM == 0 {
+        if s.index & STR_ROPE == 0 {
             self.smarks[self.smeta[s.index as usize].dense as usize] = true;
         } else {
-            self.str_other(s);
-        }
-    }
-    /// A flat string that is not an atom, or a rope.
-    #[inline(never)]
-    fn str_other(&mut self, s: StrId) {
-        if s.is_rope() {
             self.rope(s.index);
-        } else {
-            self.smarks[self.smeta[s.slot() as usize].dense as usize] = true;
         }
     }
     /// Mark the rope at `index` and the children of every rope that is not flat. A flat rope never reads its children again, so they are
