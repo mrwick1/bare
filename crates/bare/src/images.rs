@@ -239,6 +239,32 @@ impl Page {
         }
     }
 
+    /// Finish the pictures that the page started, and run nothing else of the page: no timer, no script, no frame, no load of the document.
+    /// A benchmark driver (a replay) calls it so that a run does not depend on a race between a step and the queue of pictures. The wait ends
+    /// when no picture can still arrive. A picture that is queued or in flight arrives or fails (a request with no reply on the tape fails at
+    /// once). A picture that nothing started yet is not waited for: the document is not at `interactive`, or a script has not asked for it, and
+    /// the page needs ticks for that (a driver step gives them). The `load` or `error` event of a picture is queued for the next tick of the
+    /// page. It gives at the latest after `CAPTURE_WAIT`.
+    pub fn settle_images(&mut self) {
+        let end = bare_net::vclock::instant() + CAPTURE_WAIT;
+        loop {
+            // The styles of the frame say which CSS pictures the page needs (see `images_pending`).
+            if self.images_level() > 0 && (self.frame.is_none() || !self.images.pending()) {
+                self.frame_now();
+            }
+            if self.images_step().0 {
+                self.touched();
+            }
+            if !self.images.pending() || bare_net::vclock::instant() >= end {
+                return;
+            }
+            // On the benchmark clock the move waits for the replies that are due. Otherwise a short sleep.
+            let due = bare_net::vclock::next_task_due().filter(|_| bare_net::vclock::on());
+            let next = due.map(|t| bare_net::vclock::instant() + std::time::Duration::from_secs_f64((t - bare_net::vclock::now()).max(0.0) / 1000.0));
+            self.nap(next, std::time::Duration::from_millis(5), std::time::Duration::from_millis(20));
+        }
+    }
+
     /// Do the pictures still load (or the document, which starts them), for less than `CAPTURE_WAIT`? A driver waits for them before a
     /// capture, and not before an `expect`.
     pub fn images_pending(&mut self) -> bool {

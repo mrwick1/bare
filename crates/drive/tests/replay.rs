@@ -41,6 +41,7 @@ fn connection(mut s: TcpStream) {
         let (status, kind, body) = match head.split(' ').nth(1).unwrap_or("") {
             "/" => (200, "text/html", INDEX),
             "/late" => (200, "text/html", LATE),
+            "/pics" => (200, "text/html", PICS),
             "/app.js" => (200, "text/javascript", APP),
             "/data" => (200, "text/plain", "7"),
             _ => (404, "text/plain", "no"),
@@ -116,5 +117,34 @@ fn a_replay_on_the_virtual_clock_does_not_wait_for_a_timer_of_the_page() {
     // Without a tape that answers, the variable does nothing: the clock stays real, and the page needs the 8 s.
     let (code, err) = drive(&dir, "timeout 3000\nopen ${BASE}/late\nexpect js \"window.dt >= 8000\"\n", &base, ("BARE_NET_RECORD", &dir.join("tape2")), &clock);
     assert_ne!(code, 0, "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+const PICS: &str = "<!doctype html><html><body><img src=\"/gone.png\"><script>window.n = 0; setInterval(function () { window.n++; new Image().src = '/gone' + window.n + '.png' }, 1)</script></body></html>";
+
+#[test]
+fn a_replay_does_not_run_the_page_for_pictures_that_have_no_reply_on_the_tape() {
+    let dir = std::env::temp_dir().join(format!("bare-drive-pictures-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (hits, tape) = (Arc::new(AtomicUsize::new(0)), dir.join("tape"));
+    let base = serve(hits.clone());
+    let steps = "timeout 20000\nopen ${BASE}/pics\nexpect js \"document.images.length >= 1\"\nexpect js \"window.n < 100\"\n";
+
+    let (code, err) = drive(&dir, steps, &base, ("BARE_NET_RECORD", &tape), &[]);
+    assert_eq!(code, 0, "the live run: {err}");
+    // The tape keeps the page and its script, and no picture: each picture is a request with no reply.
+    let label = format!("GET {base}/gone");
+    for f in std::fs::read_dir(&tape).unwrap().flatten() {
+        if std::fs::read(f.path()).unwrap().windows(label.len()).any(|w| w == label.as_bytes()) {
+            std::fs::remove_file(f.path()).unwrap();
+        }
+    }
+
+    // A picture that never comes ends the wait for pictures. The page does not run for it: its timer fires about once for each ms
+    // that the clock moves, and the old wait (5 s of ticks while the page asked for new pictures) made it fire thousands of times.
+    let clock = [("BARE_CLOCK", "virtual")];
+    let (code, err) = drive(&dir, steps, &base, ("BARE_NET_REPLAY", &tape), &clock);
+    assert_eq!(code, 0, "the replay: {err}");
     let _ = std::fs::remove_dir_all(&dir);
 }

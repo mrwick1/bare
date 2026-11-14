@@ -33,7 +33,7 @@ A target that is not met is reported with its numbers. It is not hidden.
 
 ### Result (2026-11-14)
 
-The final benchmark compared the baseline `f6415364` with main `8f23dded` after every step merged. Three criteria are met and one is half met. Criterion 1 is met: 47 of 47 journeys pass on replay, test262 shows no loss, and `exec_diff` shows 0 differences. Criterion 5 is met: 273.6 MiB for the 16 MiB sheet ramp (947 MiB before). Criterion 7 is met: the suite is 6.8 times faster with 4 workers and uses 2.10 times fewer instructions with one worker. Criterion 8 is half met: the restyle charge now matches its cost, but the `cssom-objects` cap is a fixed 524,288, not removed and not set by the rule count. Four are not met. Criterion 2: 85.3% of the baseline instructions (target 80%), or 89.5% when `mdn-reference` is left out (the last sentence of this paragraph says why). Criterion 3: the ramps are 6.4 and 8.8 times lower (target 10). Criterion 4: 1.19 and 1.02 times (target 1.3). Criterion 6: 99.3 MiB, 13% lower (target 20%); it was met at 90 MiB after PR #501 and rose again after PR #497. The benchmark also found that `mdn-reference` asks for 47 chunk files at a wrong address since PR #492, so its -73% is not a gain. The table, the numbers, the run counts and what was not tested are in `docs/progress.md`, section "Final benchmark of the perf goal (2026-11-14)".
+The final benchmark compared the baseline `f6415364` with main `8f23dded` after every step merged. Three criteria are met and one is half met. Criterion 1 is met: 47 of 47 journeys pass on replay, test262 shows no loss, and `exec_diff` shows 0 differences. Criterion 5 is met: 273.6 MiB for the 16 MiB sheet ramp (947 MiB before). Criterion 7 is met: the suite is 6.8 times faster with 4 workers and uses 2.10 times fewer instructions with one worker. Criterion 8 is half met: the restyle charge now matches its cost, but the `cssom-objects` cap is a fixed 524,288, not removed and not set by the rule count. Four are not met. Criterion 2: 85.3% of the baseline instructions (target 80%), or 89.5% when `mdn-reference` is left out (the last sentence of this paragraph says why). Criterion 3: the ramps are 6.4 and 8.8 times lower (target 10). Criterion 4: 1.19 and 1.02 times (target 1.3). Criterion 6: 99.3 MiB, 13% lower (target 20%); it was met at 90 MiB after PR #501 and rose again after PR #497. The benchmark also found that `mdn-reference` asks for 47 chunk files at a wrong address since PR #492, so its -73% is not a gain. The table, the numbers, the run counts and what was not tested are in `docs/progress.md`, section "Final benchmark of the perf goal (2026-11-14)". The numbers of this paragraph, of the correction below and of the table "Baseline on the recorded corpus (2026-11-14)" counted the settle loop of the replay driver (it ran the last document of each journey to the end of its load, about 44% of the baseline instructions); the table "Baseline on the recorded corpus, settled driver (2026-11-14)" measures them again without it (criterion 2: 86.9%).
 
 Correction (2026-11-14): PR #521 fixed the `mdn-reference` chunk address. That journey now loads its code and costs 7,179 M instructions, not 2,102 M. The other 46 journeys changed by less than 0.1%. So criterion 2 is about 94,796 M of 105,189 M, or 90.1% of the baseline (target 80%). This is an estimate: it adds the PR #521 number for `mdn-reference` to the final benchmark totals of `8f23dded`. A full rerun was not done.
 
@@ -53,6 +53,23 @@ Measured with the virtual page clock (`docs/design-virtual-clock.md`): `tools/be
 Other totals, medians summed: CPU 13,388 ms to 12,228 ms (-8.7%). PSS 1,724 MiB to 1,565 MiB (-9.2%). Peak RSS 2,056 MiB to 1,882 MiB (-8.5%). Wall time is from a loaded machine.
 
 Use one clock for both sides. The virtual clock does more page work than the real clock on some journeys (the same binary: 66.6 G on the real clock, 96.3 G on the virtual clock), so a number from this table does not compare with a number from the real-clock corpus.
+
+## Baseline on the recorded corpus, settled driver (2026-11-14)
+
+The settle loop of the replay driver no longer runs the page (`Page::settle_images`, `docs/decisions.md`, `docs/progress.md` section "The replay driver settles pictures without running the page"). Same method as above, corpus `virtual-settled` (the corpus `virtual` plus the replies that the new end state asks for), 47 journeys, 3 runs, runs interleaved, `--pss`. Baseline: `2ddee1da` (`f6415364` plus the replay patch) plus the virtual clock plus the same driver change, local only (branch `bench-base-vclock`). Main: `5bc18d14` plus the driver change. All 47 pass on both, 0 replay misses. Same-binary spread is 0.2% or less on main and 0.4% or less on the baseline.
+
+| # | Measure | Baseline | Main | Against the target |
+| --- | --- | --- | --- | --- |
+| 1 | Journeys that pass with recorded inputs | 47 of 47 | 47 of 47 | met for the 47 that replay |
+| 2 | Total instructions | 59,372 M | 51,595 M (86.9%) | not met (target 80%) |
+| 3 | `compm_22000`, `rest_13` ramps | no tape, not affected | | |
+| 4 | `python-org-docs-link`, `rust-book-search` | 1,434 M, 16,607 M | 1,209 M, 16,319 M (1.19 times, 1.02 times) | not met (target 1.3 times) |
+| 5 | Sheet ramp RSS | no tape, not affected | | |
+| 6 | `python-docs-search-results` peak RSS and PSS | 113.6 MiB, 110.2 MiB | 97.4 MiB, 94.7 MiB (-14.3%, -14.1%) | not met (target 20% lower) |
+
+Other totals, medians summed: CPU 9,126 ms to 8,669 ms (-5.0%). PSS 1,273 MiB to 991 MiB (-22.2%, run 0 only). Peak RSS 1,601 MiB to 1,421 MiB (-11.2%). Criteria 7 and 8 do not use the corpus or a tape: not affected.
+
+Use the new baseline for every later comparison on the journeys. A number from the tables above does not compare with it: the old loop made each journey run its last document to the end of its load.
 
 ## Steps, in order
 

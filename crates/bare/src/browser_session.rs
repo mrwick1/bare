@@ -234,7 +234,8 @@ const CHUNK: usize = 16 << 10;
 impl Parsing {
     /// Scan ahead for half of the time that is left, then parse until `end`. True: the parser has the whole text.
     fn step(&mut self, end: Instant) -> bool {
-        let now = Instant::now();
+        // `end` is on the page clock (`bare_net::vclock::instant`, the real clock when the benchmark clock is off): read the same clock.
+        let now = bare_net::vclock::instant();
         self.scan.step(&self.html, now + end.saturating_duration_since(now) / 2);
         while self.at < self.html.len() {
             let mut cut = (self.at + CHUNK).min(self.html.len());
@@ -243,7 +244,7 @@ impl Parsing {
             }
             self.parser.feed(&self.html[self.at..cut]);
             self.at = cut;
-            if Instant::now() >= end {
+            if bare_net::vclock::instant() >= end {
                 break;
             }
         }

@@ -10365,3 +10365,139 @@ Whitespace diff checks pass. Strict rustfmt fails on pre-existing compact format
 ## 2026-11-14: standalone textarea pre-merge checks
 
 The textarea fix is independent of Fetch Metadata and is rebased onto main at 5bc18d14. Its release library run passes 1,459 tests with six ignored. All five three-run instruction comparisons remain below the existing 0.5 percent limit on glibc. See [the samples and limits](innertext-textarea-design.md#independent-pre-merge-check-2026-11-14).
+## The replay driver settles pictures without running the page (2026-11-14)
+
+Branch `t3/settle-replay-pictures`, on main `5bc18d14`. Owner decision 2026-11-14: fix the settle loop of the replay driver and measure the baseline again. Decision: `docs/decisions.md`. Machine: archMachine, `heavy` lock held. A first agent built the change and stopped on a network error. This agent applied its patch, reviewed it, and measured everything again. Files: `/data/claude-tmp/settle/` (first agent, counters), `/data/claude-tmp/settle2/` (this agent: `cmp.log`, `cmp.tsv`, `ws.log`).
+
+### Why pictures stayed pending
+
+The counts come from an instrumented build of main `1bb278e9` (first agent, `/data/claude-tmp/settle/all.log`, corpus `virtual`, 1 run, 48 journeys). Each call of `Session::settle_pictures` printed its ticks, its page time and the state of the picture queue at its first look. 347 calls. 273 end at once (0 ticks). 74 tick the page: 1,148 ticks and 1,539 ms of page time in all. No call reached the 5 s limit. The longest sum for one journey is 126 ms of page time (`wikipedia-article`, 9 calls, 107 ticks). Reasons at the first look of the 74 calls: 64 had a document that was not at `interactive` (the loop ticked the page until it got there), 5 had pictures queued or in flight, 5 had a document at `interactive` with nothing queued (the frame for CSS pictures, or the start of the pictures, was missing). Journeys with no ticking call are left out of the table (`nextjs-docs` too: it does not pass on replay).
+
+| Journey | Calls | Calls that tick | Ticks | Page ms | Document not at `interactive` | Pictures queued or in flight | Other |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `archlinux-org-home` | 9 | 1 | 6 | 14 | 1 | 0 | 0 |
+| `blog-rust-lang-home` | 7 | 2 | 13 | 27 | 2 | 0 | 0 |
+| `curl-se-home` | 9 | 2 | 11 | 27 | 2 | 0 | 0 |
+| `debian-org-home` | 8 | 2 | 19 | 42 | 2 | 0 | 0 |
+| `devto-home` | 3 | 1 | 46 | 56 | 1 | 0 | 0 |
+| `duckduckgo-html-search` | 5 | 2 | 11 | 24 | 1 | 0 | 1 |
+| `example-learn-more` | 5 | 1 | 5 | 9 | 1 | 0 | 0 |
+| `go-dev-home` | 7 | 2 | 68 | 102 | 2 | 0 | 0 |
+| `hn-comments-back` | 7 | 3 | 11 | 26 | 3 | 0 | 0 |
+| `hn-front` | 10 | 2 | 7 | 17 | 2 | 0 | 0 |
+| `hn-new-past` | 9 | 3 | 8 | 22 | 2 | 1 | 0 |
+| `kernel-org-home` | 6 | 2 | 21 | 42 | 2 | 0 | 0 |
+| `lobsters-comments-back` | 9 | 3 | 56 | 97 | 3 | 0 | 0 |
+| `lobsters-front` | 11 | 3 | 68 | 122 | 3 | 0 | 0 |
+| `mdn-reference` | 5 | 3 | 13 | 19 | 2 | 0 | 1 |
+| `nginx-org-home` | 4 | 1 | 6 | 14 | 1 | 0 | 0 |
+| `paulgraham-home` | 7 | 2 | 7 | 27 | 1 | 1 | 0 |
+| `python-docs-search-results` | 6 | 2 | 12 | 28 | 2 | 0 | 0 |
+| `python-docs-search` | 5 | 2 | 12 | 28 | 2 | 0 | 0 |
+| `python-docs-tutorial` | 10 | 4 | 17 | 44 | 3 | 1 | 0 |
+| `python-org-docs-link` | 8 | 2 | 12 | 14 | 1 | 1 | 0 |
+| `python-org-search` | 7 | 2 | 12 | 14 | 1 | 1 | 0 |
+| `react-docs` | 5 | 2 | 42 | 72 | 2 | 0 | 0 |
+| `rust-lang-org-home` | 7 | 2 | 17 | 33 | 2 | 0 | 0 |
+| `sqlite-org-home` | 9 | 2 | 9 | 22 | 2 | 0 | 0 |
+| `substack-home` | 2 | 1 | 149 | 14 | 1 | 0 | 0 |
+| `w3c-home-links` | 6 | 2 | 23 | 38 | 2 | 0 | 0 |
+| `wikipedia-article` | 9 | 4 | 107 | 126 | 3 | 0 | 1 |
+| `wikipedia-main-random` | 12 | 4 | 114 | 125 | 4 | 0 | 0 |
+| `wikipedia-portal` | 7 | 2 | 44 | 57 | 2 | 0 | 0 |
+| `wikipedia-search` | 5 | 3 | 92 | 117 | 2 | 0 | 1 |
+| `wikipedia-toc-languages` | 8 | 2 | 48 | 54 | 1 | 0 | 1 |
+| `wiktionary-portal` | 7 | 2 | 36 | 47 | 2 | 0 | 0 |
+
+So the hypothesis "pictures stay pending for 5 s" is wrong. The loop ends when the pictures are done. Its cost is what each tick runs: the loader, the scripts of the document, timers, idle callbacks, animation frames. In 64 of 74 calls the pictures were not even started: the loop ticked the page to the end of the load of the last document of a journey, and a live run does not do that. A picture with no reply on the tape fails at once (replay returns the error without a socket), so it never held the loop. A page that keeps asking for new pictures could: the test below does it, and the old loop ticks it about 5,000 times.
+
+### What was built
+
+- `Page::settle_images` (`crates/bare/src/images.rs`): look at the frame for CSS pictures, `images_step` (starts the queued pictures and gives the finished ones to their elements), and while pictures are queued or in flight move the page clock to the due time of the next reply (`vclock::next_task_due`; `nap`, with a short sleep when the clock is off). No timer, script, frame or document load runs. The `load` or `error` event of a picture waits for the next tick of the page. It ends when no picture can still arrive. The 5 s bound (`CAPTURE_WAIT`) stays as a stop for a hang. It is not a guard for a slow algorithm, and no journey reaches it.
+- `Session::settle_pictures` (`crates/drive/src/run.rs`) calls it. Same call points (before each step and at the end), still only with a tape.
+- Fix of a time leak: `Parsing::step` (`crates/bare/src/browser_session.rs`, the slice of the document parse) compared a deadline on the page clock with the real clock. The first agent saw `wikipedia-portal` at 160 M, 349 M, 384 M or 397 M in one binary, by machine load, before this fix. The old loop hid it because it ran every journey to the end of the load. With the page clock in the three places, `wikipedia-portal` gave 160.3 M with 0.2% spread in my run. I did not run the binary without this fix. When the clock is off, `vclock::instant()` is `Instant::now()`: nothing changes outside the benchmark.
+- Test (`crates/drive/tests/replay.rs`): a page starts a timer every 1 ms, and each time asks for a new picture that has no reply on the tape. Steps: `open`, then two `expect`. Before the change (old `settle_pictures` put back, checked in this session): fails (the drive exits with 1; the page asked for pictures up to `/gone5254.png`, so its timer ran more than 5,000 times). After: passes in 0.02 s.
+
+### Numbers
+
+Corpus `virtual-settled`: a copy of `virtual` with the replies that the new end state asks for (5 journeys had 1 to 3 misses, mostly `POST` beacons to telemetry hosts; `journeys.sh fill --clock virtual`, 2 runs without a miss). The first agent made it. That fill sent those POSTs to the live hosts, as every earlier fill did. `virtual` is not changed. Pass `--corpus /data/bare-tmp/corpus/virtual-settled` to `journeys.sh`: the default of `--clock virtual` is still `virtual`.
+
+Baseline: local branch `bench-base-vclock` in `/data/bare-tmp/bench-base-src`, HEAD `2ddee1da` (replay patch on `f6415364`) plus the staged virtual clock patch plus the same driver change (the three functions are identical to this branch; not committed, not pushed). New: main `5bc18d14` plus this change. `journeys.sh compare --corpus .../virtual-settled --clock virtual --runs 3 --pss`, 47 journeys, runs interleaved; run 0 is the PSS run, runs 1 to 3 give the medians. Log: `/data/claude-tmp/settle2/cmp.log`.
+
+| | Baseline | Main + change | Change |
+| --- | ---: | ---: | ---: |
+| Instructions, sum of medians | 59,372 M | 51,595 M | -13.1% (86.9% of the baseline) |
+| CPU (user+system) | 9,126 ms | 8,669 ms | -5.0% |
+| Peak RSS | 1,601 MiB | 1,421 MiB | -11.2% |
+| PSS (run 0 only) | 1,273 MiB | 991 MiB | -22.2% |
+| Spread, worst journey | 0.4% (`devto-home`) | 0.2% (`devto-home`, `wikipedia-portal`) | |
+
+All 47 pass on both. 0 replay misses on both. The sum with the old loop was 105,217 M (baseline) and 96,345 M (main). The loop was 43.6% of the baseline and 46.4% of main. CPU and wall are from a loaded machine, and the CPU of the first agent's run (7,154 ms and 6,418 ms) differs from mine: do not compare them.
+
+Determinism: the same-binary spread of the new binary is 0.2% or less on all 47 journeys (3 runs; the first agent saw 1.0% on `devto-home`, 67 M instructions, in 8 runs alone: 67.0 to 67.7 M). The limit of 0.5% holds in this run. The baseline binary: 0.4% or less. 0 new replay misses.
+
+Criteria on the settled driver (details in `docs/perf-goal.md`):
+
+| # | Measure | Baseline | Main + change | Target | |
+| --- | --- | --- | --- | --- | --- |
+| 2 | Total instructions of the 47 journeys | 59,372 M | 51,595 M (86.9%) | 80% | not met |
+| 4 | `python-org-docs-link`, `rust-book-search` | 1,434 M, 16,607 M | 1,209 M, 16,319 M (1.19 times, 1.02 times) | 1.3 times | not met |
+| 6 | `python-docs-search-results` peak RSS, PSS | 113.6 MiB, 110.2 MiB | 97.4 MiB, 94.7 MiB (-14.3%, -14.1%) | 20% lower | not met |
+
+Criteria 3, 5, 7 and 8 do not use the journey corpus and no tape (the ramps run in `bare-stress` and the cost matrix, the suite on a local fixture server), so `settle_pictures` does not run in them: not affected, and not measured again. Criterion 1 is unchanged: 47 of 47 pass.
+
+The journeys that gain most are the ones that ended in the middle of a page load: `curl-se-home` -94% (2,205 M to 123 M), `rust-lang-org-home` -88%, `blog-rust-lang-home` -69%, `go-dev-home` -64%. `mdn-reference` (+10%) and `wikipedia-toc-languages` (+4%) are higher on main than on the baseline: real changes between the two trees (lazy function bodies and later work), not the driver. The heavy journeys now are `rust-book-search` (16.3 G, 31.6% of the total), `nodejs-org-home` (5.9 G), `github-docs-home` (4.9 G), `wikipedia-search` (3.4 G), `mdn-reference` (3.3 G) and `wikipedia-toc-languages` (3.0 G). `react-docs` fell from 16.7 G to 134 M.
+
+Per journey (medians of runs 1 to 3, spread = (max - min) / median):
+
+| Journey | M instr base | M instr new | change | spread base | spread new | RSS MiB base | RSS MiB new |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `archlinux-org-home` | 59.5 | 52.4 | -11.9% | 0.1% | 0.0% | 16.7 | 17.3 |
+| `blog-rust-lang-home` | 520.9 | 159.2 | -69.4% | 0.0% | 0.1% | 26.6 | 19.1 |
+| `cnn-lite-front` | 58.4 | 50.4 | -13.6% | 0.0% | 0.0% | 17.5 | 18.0 |
+| `craigslist-home` | 19.9 | 18.8 | -5.2% | 0.1% | 0.0% | 16.0 | 16.0 |
+| `crates-io-home` | 133.5 | 132.5 | -0.7% | 0.0% | 0.0% | 19.8 | 19.9 |
+| `curl-se-home` | 2,204.7 | 122.8 | -94.4% | 0.0% | 0.0% | 70.1 | 18.1 |
+| `debian-org-home` | 103.1 | 83.2 | -19.3% | 0.0% | 0.1% | 16.4 | 16.7 |
+| `devto-home` | 69.1 | 67.5 | -2.4% | 0.4% | 0.2% | 26.1 | 25.8 |
+| `docs-rs-home` | 115.7 | 59.0 | -49.1% | 0.0% | 0.0% | 17.9 | 17.7 |
+| `duckduckgo-html-search` | 71.5 | 44.5 | -37.8% | 0.0% | 0.0% | 16.9 | 17.5 |
+| `example-learn-more` | 27.7 | 25.7 | -7.3% | 0.1% | 0.0% | 16.4 | 16.7 |
+| `example-page` | 12.0 | 10.7 | -11.2% | 0.0% | 0.0% | 16.0 | 16.0 |
+| `github-docs-home` | 5,226.7 | 4,900.6 | -6.2% | 0.0% | 0.0% | 94.5 | 92.1 |
+| `go-dev-home` | 2,980.8 | 1,078.2 | -63.8% | 0.0% | 0.0% | 88.5 | 41.5 |
+| `hn-comments-back` | 79.5 | 75.1 | -5.5% | 0.0% | 0.0% | 16.1 | 16.4 |
+| `hn-front` | 104.4 | 93.7 | -10.2% | 0.1% | 0.0% | 16.1 | 16.8 |
+| `hn-new-past` | 171.8 | 153.5 | -10.7% | 0.0% | 0.0% | 16.2 | 16.9 |
+| `httpbin-cookies` | 25.8 | 20.7 | -19.8% | 0.0% | 0.1% | 16.1 | 16.1 |
+| `httpbin-form-fill` | 27.0 | 24.8 | -8.1% | 0.0% | 0.0% | 16.1 | 16.1 |
+| `httpbin-form-submit` | 36.2 | 32.1 | -11.3% | 0.0% | 0.0% | 16.1 | 16.1 |
+| `kernel-org-home` | 21.3 | 19.8 | -7.0% | 0.0% | 0.0% | 16.1 | 16.1 |
+| `lobsters-comments-back` | 118.3 | 109.2 | -7.7% | 0.0% | 0.0% | 16.2 | 16.9 |
+| `lobsters-front` | 99.7 | 88.7 | -11.0% | 0.0% | 0.0% | 16.7 | 17.0 |
+| `mdn-reference` | 2,971.6 | 3,271.2 | +10.1% | 0.0% | 0.0% | 51.4 | 48.4 |
+| `nginx-org-home` | 103.3 | 61.2 | -40.7% | 0.0% | 0.0% | 22.2 | 20.3 |
+| `nodejs-org-home` | 5,834.2 | 5,917.5 | +1.4% | 0.0% | 0.0% | 77.4 | 74.3 |
+| `npr-text-story` | 36.4 | 30.2 | -17.0% | 0.0% | 0.0% | 16.1 | 16.1 |
+| `paulgraham-home` | 51.0 | 51.5 | +1.1% | 0.0% | 0.1% | 16.1 | 16.6 |
+| `python-docs-search-results` | 3,392.7 | 2,481.5 | -26.9% | 0.0% | 0.0% | 113.6 | 97.4 |
+| `python-docs-search` | 2,140.2 | 1,253.2 | -41.4% | 0.0% | 0.0% | 93.4 | 69.6 |
+| `python-docs-tutorial` | 359.9 | 333.2 | -7.4% | 0.0% | 0.0% | 17.4 | 17.7 |
+| `python-org-docs-link` | 1,434.3 | 1,209.3 | -15.7% | 0.0% | 0.1% | 31.8 | 32.8 |
+| `python-org-search` | 848.7 | 783.5 | -7.7% | 0.1% | 0.0% | 30.7 | 29.6 |
+| `react-docs` | 136.5 | 133.8 | -1.9% | 0.0% | 0.1% | 18.9 | 19.0 |
+| `rust-book-chapters` | 567.2 | 525.7 | -7.3% | 0.0% | 0.1% | 22.2 | 22.4 |
+| `rust-book-search` | 16,606.6 | 16,318.9 | -1.7% | 0.0% | 0.0% | 129.2 | 126.8 |
+| `rust-book-sidebar` | 337.9 | 323.2 | -4.4% | 0.1% | 0.1% | 20.8 | 21.2 |
+| `rust-lang-org-home` | 711.2 | 85.4 | -88.0% | 0.0% | 0.0% | 33.7 | 18.6 |
+| `sqlite-org-home` | 66.7 | 60.6 | -9.1% | 0.0% | 0.0% | 19.1 | 19.5 |
+| `substack-home` | 489.3 | 382.8 | -21.8% | 0.0% | 0.0% | 30.6 | 31.6 |
+| `w3c-home-links` | 91.5 | 88.1 | -3.7% | 0.0% | 0.0% | 17.4 | 17.7 |
+| `wikipedia-article` | 2,782.0 | 2,742.1 | -1.4% | 0.0% | 0.0% | 44.0 | 41.4 |
+| `wikipedia-main-random` | 1,465.9 | 1,402.9 | -4.3% | 0.0% | 0.0% | 37.6 | 33.3 |
+| `wikipedia-portal` | 166.7 | 160.3 | -3.9% | 0.3% | 0.2% | 18.6 | 19.2 |
+| `wikipedia-search` | 3,499.0 | 3,448.7 | -1.4% | 0.0% | 0.0% | 63.0 | 57.7 |
+| `wikipedia-toc-languages` | 2,891.2 | 3,010.9 | +4.1% | 0.0% | 0.1% | 53.3 | 50.8 |
+| `wiktionary-portal` | 100.7 | 96.0 | -4.7% | 0.0% | 0.1% | 17.7 | 18.3 |
+| **sum of medians** | 59,372 | 51,595 | -13.1% | max 0.4% | max 0.2% | 1,601 | 1,421 |
+

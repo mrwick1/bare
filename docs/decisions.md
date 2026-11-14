@@ -2155,3 +2155,11 @@ Criterion 8: un-keep the CSSOM objects that leave a list, prune the host tables 
 - Keep existing whitespace and block boundaries. Preserve descendant DOM text for hidden or detached getter targets.
 - Keep the separate select gate unchanged. Add no cache, dependency or extra full-document traversal.
 - Reason: issue 482 stopped whole-page text reads and triggered a pending async continuation in the Deck helper. The owner approved the design. This does not establish recovery from every Unsupported async operation.
+
+## 2026-11-14: a replay settles pictures without running the page
+
+The replay driver ran the page (`tick`: loader, timers, scripts, frames) until `images_pending()` was false, before each step and at the end. That counted 52.8% of the instructions of the 47 journeys (95,376 M of the loop-on run). It also made the end state of a journey the end of the page load, so it hid timing races.
+
+Owner decision 2026-11-14: fix the loop and measure the baseline again. Chosen: `Page::settle_images` only starts the queued pictures, waits for the ones in flight (on the benchmark clock it moves the clock to the due time of their replies) and delivers them. It runs no task of the page. A picture that no request started yet is not waited for. Other designs: (1) tick the page until the document is `interactive`, then pump (72,519 M, 76.3% of the loop-on run, spread 0.2%): it still runs the scripts of the document up to `interactive`, for example 13.7 G in `react-docs`. (2) Tick until `load` (what the old loop did in practice): no saving. Rejected for the cost, not for determinism.
+
+The first try of the pump had a spread of 74% on `wikipedia-portal`. Cause: `Parsing::step` (the slice of the document parse) compared a deadline on the page clock with the real clock. Fixed in the same change.
