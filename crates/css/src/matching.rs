@@ -398,6 +398,31 @@ mod tests {
         assert_eq!(find(html, "p:not(.x)"), ["b", "c", "d", "e"]);
     }
 
+    /// A selector that is parsed after another one has made the class lists of the elements still sees the classes that it uses.
+    #[test]
+    fn a_class_that_a_later_selector_uses_matches() {
+        let html = "<p id=a class='x y'></p><p id=b class='y'></p><p id=c class='z'></p><p id=d></p>";
+        let mut doc = parse(html);
+        let ids = |doc: &Document, list: &[crate::selector::Selector]| -> Vec<String> {
+            let mut found = Vec::new();
+            for id in doc.children(doc.root()).flat_map(|h| doc.children(h)).flat_map(|b| doc.children(b)).collect::<Vec<_>>() {
+                if is_element(doc, id) && list.iter().any(|s| matches(doc, id, s)) {
+                    found.push(doc.attr(id, Atom::ID).unwrap_or("?").to_string());
+                }
+            }
+            found
+        };
+        let first = parse_selector_list(".x", &mut doc).unwrap();
+        assert_eq!(ids(&doc, &first), ["a"]);
+        // `.y` and `.z` were on the elements before any selector used them.
+        let second = parse_selector_list(".y, .z", &mut doc).unwrap();
+        assert_eq!(ids(&doc, &second), ["a", "b", "c"]);
+        assert_eq!(ids(&doc, &first), ["a"]);
+        doc.set_attr(doc.children(doc.root()).flat_map(|h| doc.children(h)).flat_map(|b| doc.children(b)).nth(3).unwrap(), "class", "w x");
+        let third = parse_selector_list(".w", &mut doc).unwrap();
+        assert_eq!(ids(&doc, &third), ["d"]);
+    }
+
     #[test]
     fn structural_pseudo_classes() {
         assert_eq!(find(PAGE, "li:first-child"), ["l1"]);

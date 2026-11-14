@@ -840,7 +840,9 @@ impl RuleSet {
                     // Only the classes that were added or removed.
                     let (old, new) = (|| old.split_ascii_whitespace(), || new.split_ascii_whitespace());
                     for c in old().filter(|c| !new().any(|n| n == *c)).chain(new().filter(|c| !old().any(|o| o == *c))) {
-                        scope = scope.max(r.class.get(&doc.class_id(c)).copied().unwrap_or_default());
+                        if let Some(class) = doc.class_lookup(c) {
+                            scope = scope.max(r.class.get(&class).copied().unwrap_or_default());
+                        }
                     }
                 } else if name == Atom::ID && old != new {
                     for id in [old, new] {
