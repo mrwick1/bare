@@ -10815,7 +10815,7 @@ Tests (first one fails without the change: 358 elements styled against 49):
 - `covered_roots_do_not_hide_a_root_that_a_walk_did_not_reach`: five root lists that cover each other, with and without the subtree flag.
 - `a_restyle_with_nested_and_repeated_roots_equals_a_full_cascade`: 30 random trees x 20 steps, random class changes, nested and repeated roots with random flags; every restyle that does not give up equals a full cascade (more than 500 of them).
 
-Measurements. Machine archMachine, instructions of `perf stat -e instructions:u`, virtual clock, corpus `virtual`, 3 runs, `tools/bench/journeys.sh compare --clock virtual --runs 3 --pss`. MAIN is `476c04f995` (it has the settle-loop fix, #bdd3d4bc). BRANCH is this change rebased on it. All 47 journeys pass on both; no replay misses.
+Measurements. Machine archMachine, instructions of `perf stat -e instructions:u`, virtual clock, corpus `virtual`, 3 runs, `tools/bench/journeys.sh compare --clock virtual --runs 3 --pss`. MAIN is `476c04f995` (it has the settle-loop fix, commit `bdd3d4bc`). BRANCH is this change rebased on it. All 47 journeys pass on both; no replay misses.
 
 | Journey (M instructions, spread 0.0 to 0.3%) | MAIN | BRANCH | Change |
 | --- | ---: | ---: | ---: |
@@ -10828,7 +10828,7 @@ Measurements. Machine archMachine, instructions of `perf stat -e instructions:u`
 | `github-docs-home` | 4,904.1 | 4,868.5 | -0.7% |
 | All 47 (sum of medians) | 51,601.1 | 50,738.5 | -1.7% |
 
-The other 36 journeys moved by 0.0% or +0.1% (noise). Peak PSS (sum of medians) 948.8 to 925.8 MiB (-2.4%); per-journey peak RSS moved by -3% to +4% (sampled every 20 ms; no journey allocates more).
+The other 36 journeys moved by 0.0% or +0.1% (noise). Peak PSS (sum of medians) 948.8 to 925.8 MiB (-2.4%); per-journey peak RSS moved by -3% to +4% (sampled every 20 ms, so it is noisy).
 
 Before the settle-loop fix (MAIN `c4e32a85a1`, same method, run twice on two versions of this change): `wikipedia-article` 7,788.8 to 7,037.4 M (-9.6%, the design estimate was -9.9%), `python-docs-tutorial` -23.6%, total 95,181 to 94,101 M (-1.1%). The saving is the same 0.57 G in both; it is a larger share now that the loop is gone.
 
