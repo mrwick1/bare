@@ -1271,9 +1271,24 @@ impl RuleSet {
         let style_atom = doc.find_atom("style");
         let hints = crate::hints::Hints::new(doc);
         let mut ok = true;
-        // Parents first: a root inside a subtree that is styled again by an earlier root costs a little more, and is still right.
+        // Parents first, a subtree root before a root of the same element. A root inside the subtree of a subtree root is dropped, so each
+        // element is styled once: a hover that gives an element and all its ancestors as roots would style the document once for each of
+        // them. The drop is made here and not in the walk below, which is hot and gets slower with a set in it. A subtree root always styles
+        // its whole subtree, or hides it (then a root inside has a hidden ancestor and the walk skips it too). A root that is not a
+        // subtree root styles it only when its own style changes: it covers nothing here.
         let mut order: Vec<(usize, NodeId, bool)> = roots.iter().map(|&(n, sub)| (std::iter::successors(Some(n), |&p| doc.flat_parent(p)).count(), n, sub)).collect();
-        order.sort_unstable_by_key(|r| (r.0, r.1.index()));
+        order.sort_unstable_by_key(|r| (r.0, r.1.index(), !r.2));
+        order.dedup_by(|a, b| a.1 == b.1);
+        let mut whole: std::collections::HashSet<usize, BuildHasherDefault<Fnv>> = Default::default();
+        order.retain(|&(_, n, sub)| {
+            if !whole.is_empty() && std::iter::successors(doc.flat_parent(n), |&p| doc.flat_parent(p)).any(|p| whole.contains(&p.index())) {
+                return false;
+            }
+            if sub && matches!(doc.data(n), NodeData::Element { .. }) {
+                whole.insert(n.index());
+            }
+            true
+        });
         let (mut candidates, mut matched): (Vec<u32>, Vec<u32>) = (Vec::new(), Vec::new());
         // As in `walk`: the flat tree, and only the browser's rules in a shadow tree. The third value says the node is in one.
         let mut stack: Vec<(NodeId, bool, bool)> = Vec::new();
@@ -4411,6 +4426,120 @@ mod tests {
             }
         }
         assert!(restyled > 1000 && full_runs < 200, "restyled {restyled}, full {full_runs}");
+    }
+
+    /// A hover that reads `:hover` on an ancestor gives the hovered element and each ancestor as a subtree root, nested one in the other.
+    /// A restyle styles each element once, not once for each root above it.
+    #[test]
+    fn nested_restyle_roots_style_each_element_once() {
+        let leaves: String = (0..40).map(|_| "<span class=c>x</span>").collect();
+        let html = format!("<div id=d0><div id=d1><div id=d2><div id=d3><div id=d4><div id=d5>{leaves}</div></div></div></div></div></div>");
+        let mut doc = parse(&html);
+        let mut rules = RuleSet::new(VIEW);
+        rules.add(&mut doc, UA_CSS, Origin::UserAgent);
+        rules.add(&mut doc, "div:hover .c { color: #123 }", Origin::Author);
+        let mut st = rules.compute_kept(&doc);
+        let all = rules.styled_elements();
+        let full = {
+            rules.compute(&doc);
+            rules.styled_elements() - all
+        };
+        let leaf = doc.children(by_id(&doc, "d5")).next().unwrap();
+        doc.set_hover(Some(leaf));
+        let chain: Vec<NodeId> = std::iter::successors(Some(leaf), |&p| doc.parent(p)).filter(|&p| matches!(doc.data(p), NodeData::Element { .. })).collect();
+        let mut roots = Vec::new();
+        Scopes::user_roots(rules.scopes().hover, &[], &chain, &doc, &mut roots);
+        assert_eq!(roots.len(), chain.len() + 1, "the leaf twice (an end and a change) and each ancestor: {roots:?}");
+        assert!(roots.iter().all(|r| r.1));
+        let before = rules.styled_elements();
+        let mut changed = Vec::new();
+        assert!(rules.restyle(&doc, &mut st, &roots, &mut changed));
+        let styled = rules.styled_elements() - before;
+        assert_eq!(styled, full, "the root `html` covers the others: one pass of the document, not one for each root");
+        let again = rules.compute(&doc);
+        for n in std::iter::successors(Some(by_id(&doc, "d0")), |_| None).chain(chain.iter().copied()) {
+            assert_eq!(st.style(n), again.style(n));
+        }
+        assert_eq!(changed.len(), 40, "only the leaves get a new color");
+    }
+
+    /// Roots that cover each other, with and without the subtree flag: the result is the full cascade. An ancestor root that is not a
+    /// subtree root and keeps its style does not cover the roots below it.
+    #[test]
+    fn covered_roots_do_not_hide_a_root_that_a_walk_did_not_reach() {
+        let html = "<div id=a><div id=b><div id=c class=x><p id=p>t</p></div></div></div>";
+        let lists = |[a, b, c, p]: [NodeId; 4]| [vec![(a, false), (c, true)], vec![(c, true), (a, false), (b, false), (p, false)], vec![(a, false), (b, false), (c, false), (p, true)], vec![(b, true), (b, false), (c, false)], vec![(c, true), (c, true)]];
+        for i in 0..5 {
+            let mut doc = parse(html);
+            let mut rules = RuleSet::new(VIEW);
+            rules.add(&mut doc, UA_CSS, Origin::UserAgent);
+            rules.add(&mut doc, ".x { color: red } .y { margin-top: 3px }", Origin::Author);
+            let mut st = rules.compute_kept(&doc);
+            let ids = ["a", "b", "c", "p"].map(|i| by_id(&doc, i));
+            doc.set_attr(ids[2], "class", "y");
+            let roots = lists(ids)[i].clone();
+            assert!(rules.restyle(&doc, &mut st, &roots, &mut Vec::new()), "{roots:?}");
+            let full = rules.compute(&doc);
+            for n in ids {
+                assert_eq!(st.style(n), full.style(n), "node {n:?} roots {roots:?}");
+            }
+        }
+    }
+
+    /// A random tree, changes of classes, and the restyle of the changed elements as subtree roots plus random roots (nested and
+    /// repeated, each with a random subtree flag): equal to a full cascade.
+    #[test]
+    fn a_restyle_with_nested_and_repeated_roots_equals_a_full_cascade() {
+        const CSS: &str = ".a{color:red}.b .c{margin-top:3px}.a > .d{padding-left:2px}.n{font-size:2em}.m{display:none}.a .m{display:block}.e .f .g{color:blue}";
+        const CLASSES: [&str; 8] = ["a", "b", "c", "d", "e", "f", "g", "h"];
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut rnd = |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n as u64) as usize
+        };
+        let elements = |doc: &Document| {
+            let mut all = Vec::new();
+            walk(doc, false, |n| all.push(n));
+            all.into_iter().filter(|&n| matches!(doc.data(n), NodeData::Element { .. })).collect::<Vec<_>>()
+        };
+        let mut restyled = 0;
+        for _ in 0..30 {
+            let mut doc = parse("<!doctype html><body></body>");
+            for _ in 0..60 {
+                let els = elements(&doc);
+                let parent = els[2 + rnd(els.len() - 2)];
+                doc.insert_element(parent, None, "div", &[("class", CLASSES[rnd(CLASSES.len())])]);
+            }
+            let mut rules = RuleSet::new(VIEW);
+            rules.add(&mut doc, UA_CSS, Origin::UserAgent);
+            rules.add(&mut doc, CSS, Origin::Author);
+            let mut st = rules.compute_kept(&doc);
+            for step in 0..20 {
+                let els = elements(&doc);
+                let mut roots = Vec::new();
+                for _ in 0..1 + rnd(3) {
+                    let pick = els[2 + rnd(els.len() - 2)];
+                    doc.set_attr(pick, "class", [CLASSES[rnd(CLASSES.len())], "n", "m", "a n"][rnd(4)]);
+                    roots.push((pick, true));
+                }
+                for _ in 0..rnd(8) {
+                    roots.push((els[rnd(els.len())], rnd(2) == 0));
+                }
+                let mut changed = Vec::new();
+                if rules.restyle(&doc, &mut st, &roots, &mut changed) {
+                    restyled += 1;
+                    let full = rules.compute(&doc);
+                    for &n in &els {
+                        assert_eq!(st.style(n), full.style(n), "step {step} node {n:?} roots {roots:?}");
+                    }
+                } else {
+                    st = rules.compute_kept(&doc);
+                }
+            }
+        }
+        assert!(restyled > 500, "restyled {restyled}");
     }
 
     /// A `data-state` toggle on one element restyles that element and the elements that its selectors reach, not the whole
