@@ -508,8 +508,8 @@ fn rule_set_is_reused_until_an_input_changes() {
     b.set_external_stylesheet("a.css", vec![part("#a { color: red }")]).unwrap();
     b.set_external_stylesheet("b.css", vec![]).unwrap();
     js(&mut b, "var cs = getComputedStyle(document.getElementById('a')); cs.color; cs.display; cs.direction; 0");
-    // The document does not change between the reads: one cascade.
-    assert_eq!((b.computed_stats().builds, b.computed_stats().computes), (1, 1));
+    // The document does not change between the reads: no cascade of the page, the way down to the element is styled once.
+    assert_eq!((b.computed_stats().builds, b.computed_stats().computes), (1, 0));
     // Class and attribute changes do not rebuild the rules.
     js(&mut b, "document.getElementById('a').className = 'q'; cs.color; 0");
     assert_eq!(b.computed_stats().builds, 1);
@@ -685,6 +685,9 @@ fn an_indexed_cascade_does_not_reserve_every_rule() {
         let page = format!("<style>{sheet}</style><body>{}<p id=q>x</p>", "<div></div>".repeat(100));
         let mut b = Browser::new(tree::parse(&page), BrowserLimits::default(), EvalLimits {max_steps: 5000, ..Default::default()}, HeapLimits::default()).unwrap();
         assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('q')).color"), "rgb(0, 0, 0)");
+        // The way down to the element is styled: 3 elements, not the page. A value that layout decides styles the page: its candidates are the index's, not all 100 rules.
+        assert_eq!((b.computed_stats().computes, b.computed_stats().chains), (0, 1));
+        assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('q')).width"), "1264px");
         assert_eq!(b.computed_stats().computes, 1);
     });
 }
@@ -701,7 +704,9 @@ fn reads_of_a_hidden_element_keep_both_cascades() {
     let mut b = at("<!doctype html><html><head><style>.h { display: none }</style></head><body><div class=h><p id=p>t</p></div><p id=q>u</p></body></html>");
     // The value, the full cascades and the partial ones (`ComputedStats::restyles`).
     let n = |b: &mut Browser, s: &str| (js(b, s), b.computed_stats().computes, b.computed_stats().restyles);
-    // The first read of a hidden element styles the page, then only the way down to it.
+    // A read of a value that layout decides keeps the cascade of the whole page; reads of other values style the way down to the element only (`browser_computed_chain_tests.rs`).
+    js(&mut b, "getComputedStyle(document.body).width; 0");
+    // The first read of a hidden element styles only the way down to it.
     assert_eq!(n(&mut b, "var p = document.getElementById('p'), q = document.getElementById('q'); getComputedStyle(p).display"), ("block".into(), 1, 1));
     // With no change, more reads of it and of a shown element use the cascade again. Main did two more cascades for each read of `p`.
     assert_eq!(n(&mut b, "getComputedStyle(p).display + getComputedStyle(q).display + getComputedStyle(p).color"), ("blockblockrgb(0, 0, 0)".into(), 1, 3));
@@ -715,6 +720,8 @@ fn a_data_state_toggle_needs_no_full_cascade() {
     let mut b = at("<!doctype html><html><head><style>button:disabled { opacity: .5 } [data-state=open] { color: red }</style></head>\
         <body><form><button id=t data-state=closed>x</button></form></body></html>");
     let n = |b: &mut Browser, s: &str| (js(b, s), b.computed_stats().computes, b.computed_stats().restyles);
+    // A read of a value that layout decides keeps the cascade of the whole page; reads of other values style the way down to the element only (`browser_computed_chain_tests.rs`).
+    js(&mut b, "getComputedStyle(document.body).width; 0");
     assert_eq!(n(&mut b, "var t = document.getElementById('t'); getComputedStyle(t).color"), ("rgb(0, 0, 0)".into(), 1, 0));
     assert_eq!(n(&mut b, "t.dataset.state = 'open'; getComputedStyle(t).color"), ("rgb(255, 0, 0)".into(), 1, 1));
     assert_eq!(n(&mut b, "t.disabled = true; getComputedStyle(t).opacity"), ("0.5".into(), 1, 2));
@@ -792,6 +799,10 @@ fn a_large_page_reads_with_the_default_limits() {
         let page = format!("<style>{css}</style><body>{}", "<i class=c1></i>".repeat(22_000));
         let mut b = Browser::new(tree::parse(&page), BrowserLimits::default(), EvalLimits::default(), HeapLimits::default()).expect("browser");
         assert_eq!(js(&mut b, "getComputedStyle(document.querySelector('i')).color"), "rgb(255, 0, 0)");
+        assert_eq!((b.computed_stats().computes, b.computed_stats().chains), (0, 1));
+        // A value that layout decides takes the cascade of the page, under the same bound.
+        assert_eq!(js(&mut b, "getComputedStyle(document.querySelector('i')).display"), "inline");
+        assert_eq!(js(&mut b, "typeof getComputedStyle(document.body).width"), "string");
         assert_eq!(b.computed_stats().computes, 1);
     });
 }

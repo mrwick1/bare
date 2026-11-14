@@ -133,7 +133,7 @@ fn times(styles: &Styles, s: &ComputedStyle, p: Property) -> Option<Vec<i64>> {
     }
 }
 
-fn has_motion(s: &ComputedStyle) -> bool {
+pub(crate) fn has_motion(s: &ComputedStyle) -> bool {
     [Property::TransitionProperty, Property::TransitionDuration, Property::TransitionDelay, Property::AnimationName, Property::AnimationDuration, Property::AnimationDelay]
         .iter()
         .any(|&p| matches!(s.get(p), Cv::Grid(_)))

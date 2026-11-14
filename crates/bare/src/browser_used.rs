@@ -66,23 +66,29 @@ fn px_text(v: f32) -> String {
     format!("{}px", num(lu(v)))
 }
 
+/// Is `p` a property whose resolved value may come from layout? Most reads are of other properties: no box tree for them.
+fn may_need_layout(p: &Property) -> bool {
+    use Property::*;
+    matches!(p, Width | Height | MarginTop | MarginRight | MarginBottom | MarginLeft | PaddingTop | PaddingRight | PaddingBottom | PaddingLeft | Top | Right | Bottom | Left | GridTemplateColumns | GridTemplateRows)
+}
+
 impl Dom {
-    /// Run the bounded layout for a read of `props` of `el`, if one of them needs it (see the header). Not for an element that is not rendered.
-    pub(crate) fn used_for(&self, it: &mut Interp<'_>, s: &Snap, el: NodeId, props: &[Property]) -> R<Option<Used>> {
-        let _caller = crate::force::tag("getComputedStyle used");
-        // Most reads are of other properties: no box tree for them.
-        let may = |p: &Property| {
-            use Property::*;
-            matches!(p, Width | Height | MarginTop | MarginRight | MarginBottom | MarginLeft | PaddingTop | PaddingRight | PaddingBottom | PaddingLeft | Top | Right | Bottom | Left | GridTemplateColumns | GridTemplateRows)
-        };
-        if s.hidden || !props.iter().any(may) {
-            return Ok(None);
+    /// Does a read of `props` of `el` need the layout (`used_for`)? `Some(tracks)` when it does: `tracks` says that a grid container's used tracks are wanted.
+    /// It reads the styles of `el` and its parent only, so the chain of `el` is enough for it.
+    pub(crate) fn layout_wanted(&self, s: &Snap, el: NodeId, props: &[Property]) -> Option<bool> {
+        if s.hidden || !props.iter().any(may_need_layout) {
+            return None;
         }
         let kind = Tree::new(&self.doc.borrow(), &s.styles).kind(el);
         let tracks = props.iter().any(|&p| wants_tracks(&s.style, p));
-        if !tracks && !props.iter().any(|&p| needs_layout(&s.style, kind, p)) {
-            return Ok(None);
-        }
+        (tracks || props.iter().any(|&p| needs_layout(&s.style, kind, p))).then_some(tracks)
+    }
+
+    /// Run the bounded layout for a read of `props` of `el`, if one of them needs it (see the header). Not for an element that is not rendered.
+    pub(crate) fn used_for(&self, it: &mut Interp<'_>, s: &Snap, el: NodeId, props: &[Property]) -> R<Option<Used>> {
+        let _caller = crate::force::tag("getComputedStyle used");
+        let Some(tracks) = self.layout_wanted(s, el, props) else { return Ok(None) };
+        assert!(!s.partial, "layout needs the styles of the whole page");
         self.geometry.probe.set(tracks.then_some(el));
         let r = self.layout_areas(it, &s.styles, None);
         self.geometry.probe.set(None);
