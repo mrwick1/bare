@@ -152,6 +152,10 @@ impl Gen<'_, '_> {
             if let Some(&l) = rf.locals.get(&(sc, n)) {
                 return Some(((sc, n), l));
             }
+            // A captured variable is a binding of an environment: a name of a scope outside it is another variable.
+            if rf.captured.contains(&(sc, n)) {
+                return None;
+            }
             if sc == rf.scope || sc == NONE {
                 return None;
             }

@@ -1014,6 +1014,7 @@ impl<'p> Interp<'p> {
                         let (nb, nregs, this_v) = (base + b + 2, k.nregs as usize, regs[b + 1]);
                         // Every step that can fail comes before the first use of `st.regs`.
                         let (t, caller_env, callee_env);
+                        let mut pushed = false;
                         if k.regfn && !k.has_env {
                             // A register function with no environment: the closure's environment is where its outer names come from.
                             t = if k.dyn_this {
@@ -1028,11 +1029,18 @@ impl<'p> Interp<'p> {
                         } else {
                             // The environment and the bindings of a call are those of `bc_enter`.
                             let env = tri!(at, self.new_env(cenv, true));
+                            // Default values of parameters run here, in the callee's environment and frame.
+                            caller_env = std::mem::replace(&mut self.env, env);
+                            self.stk.frames.push(StackFrame { script: self.cur as u32, at: Where::Func(fid), new: false, saved_pos: x & 0x7fff_ffff });
+                            self.stk.pos = 0;
                             if let Err(e) = self.bind_call(fobj, fid, env, false, this_v, &regs[b + 2..b + 2 + cc]) {
+                                self.stk.frames.pop();
+                                self.stk.pos = x & 0x7fff_ffff;
+                                self.env = caller_env;
                                 self.release(env);
                                 break 'op Err(e);
                             }
-                            caller_env = std::mem::replace(&mut self.env, env);
+                            pushed = true;
                             let fixed = if k.regfn { !k.dyn_this } else { self.prog.func(fid).kind != FuncKind::Arrow && self.cls.fflags[fid.index()] == 0 };
                             t = if fixed { This::Fixed(self.envs[env as usize].this.unwrap_or(Value::Undefined)) } else { This::Dynamic };
                             callee_env = env;
@@ -1046,8 +1054,10 @@ impl<'p> Interp<'p> {
                         if from < to {
                             st.regs[nb + from..nb + to].fill(Value::Undefined);
                         }
-                        self.stk.frames.push(StackFrame { script: self.cur as u32, at: Where::Func(fid), new: false, saved_pos: x & 0x7fff_ffff });
-                        self.stk.pos = 0;
+                        if !pushed {
+                            self.stk.frames.push(StackFrame { script: self.cur as u32, at: Where::Func(fid), new: false, saved_pos: x & 0x7fff_ffff });
+                            self.stk.pos = 0;
+                        }
                         self.depth += 1;
                         self.strict = k.strict;
                         st.frames.push(Fr { code: std::mem::replace(&mut code, callee), pc: pc as u32, base: base as u32, dst: a as u32, env: caller_env, this, depth: std::mem::take(depth), callee_env });
