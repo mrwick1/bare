@@ -45,6 +45,7 @@
 //! Comments compare Rust with JavaScript, because you know JS.
 
 mod reclaim;
+pub use reclaim::Free;
 mod slots;
 
 use std::cell::{Cell, OnceCell, RefCell};
@@ -277,11 +278,15 @@ pub struct Document {
     // Every `link`, `style` and `base` element among the first `sheet_scanned` nodes. The name of an element never changes, so the list is exact. See `sheet_nodes`.
     sheet_list: RefCell<Option<Rc<[SheetNode]>>>,
     // Those of them that are in the tree, in order. Made when it is read, and dropped when a change can alter it. See `sheet_nodes`.
-    free: Vec<u32>,
-    // The slots of the nodes that `reclaim` freed, by `NodeId::index`. `alloc` takes from here before it grows `nodes`.
+    dead: Option<NodeId>,
+    // The first node of the list of dead trees and free nodes that `reclaim` made (`next` links). `alloc` takes from here before it grows `nodes`.
+    free_nodes: usize,
+    // The `FREE` nodes among them: the number that `live_len` takes off the length of the arena.
     dead_text: usize,
     // Bytes of `text` that only a freed node used, and slots of `attrs` that only a freed element used. `reclaim` rebuilds the two lists when these are a part of them.
     dead_attrs: usize,
+    list_mark: usize,
+    // The size of `text` and `attrs` in bytes when `reclaim` last freed the nodes that wait, and rebuilt the lists if they were mostly dead.
     poison: bool,
     // Test mode (`set_poison`): a freed node is never reused and its links point outside the arena, so a stale `NodeId` panics at its first use.
 }
@@ -745,9 +750,11 @@ impl Document {
             sheet_made: RefCell::new(Vec::new()),
             sheet_scanned: Cell::new(0),
             sheet_list: RefCell::new(None),
-            free: Vec::new(),
+            dead: None,
+            free_nodes: 0,
             dead_text: 0,
             dead_attrs: 0,
+            list_mark: 0,
             poison: false,
         };
         // The order matters: it must match `Atom::ID` and `Atom::CLASS`.

@@ -1038,11 +1038,7 @@ impl<'p> Interp<'p> {
             // A plain array has no function entry, promise, host wrapper, iterator or class state, and no private fields unless an instance of a subclass
             // (`cls.privs`). It can be the key of a weak collection: `pending` holds the values of keys that were not reached yet. Without these the
             // walk goes straight to its elements and prototype, and skips about 12 table probes for each array of a data literal.
-            if arrays && pending.is_empty() && self.heap.is_plain_array(o) {
-                h!(self, self.heap.stored_edges(o, &mut work));
-                if let Some(p) = h!(self, self.heap.stored_prototype(o)) {
-                    work.push(Value::Object(p));
-                }
+            if arrays && pending.is_empty() && self.heap.plain_array_edges(o, &mut work) {
                 continue;
             }
             // A host function owns no host state: the embedder's `trace` is not asked about it.

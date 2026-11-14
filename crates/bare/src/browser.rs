@@ -1721,8 +1721,9 @@ impl Browser {
         #[cfg(test)]
         if let Some(mode) = std::env::var_os("BARE_RECLAIM_STRESS") {
             dom.reclaim.set_each(true);
+            // `1`: poison, so a stale node panics. `lazy`: no poison, so a slot is reused and the dead trees wait for slots. `collect`: collect only.
             if mode != "collect" {
-                dom.doc.borrow_mut().set_poison(true);
+                dom.doc.borrow_mut().set_poison(mode != "lazy");
                 dom.reclaim.set_always(true);
             }
         }
@@ -1784,7 +1785,7 @@ impl Browser {
     pub fn collect(&mut self, extra: &[Value]) -> R<bare_js::heap::Collected> {
         let c = self.it.collect(extra)?;
         // The caller is at a safe point (no script runs, no host call is on the stack): the trees that lost their wrappers can go.
-        self.dom.reclaim();
+        self.dom.reclaim(true);
         let native = self.dom.doc.try_borrow().map_or(0, |d| d.arena_bytes());
         self.it.set_external_live(native);
         Ok(c)

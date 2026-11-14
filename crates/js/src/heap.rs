@@ -911,17 +911,10 @@ impl Heap {
         f
     }
 
-    /// Is at least one object in eight an array? `Interp::collect` then tests each object with `is_plain_array`: the test costs about 15 instructions, and
-    /// saves about 150 for an array, so it pays above that share.
+    /// Is at least one object in eight an array? `Interp::collect` then tests each object with `plain_array_edges`: the test costs about 10 instructions for
+    /// an object that is not an array, and saves about 100 for an array, so it pays above that share.
     pub fn arrays_are_common(&self) -> bool {
         self.array_allocs * 8 >= self.objects.allocs
-    }
-
-    /// Is `o` an array that is not exotic? Only the weak tables (a `WeakMap` key) and a subclass with private fields give such an array state
-    /// outside the heap (`Interp::collect` asks, to skip the side-table probes).
-    #[inline]
-    pub fn is_plain_array(&self, o: ObjId) -> bool {
-        self.obj(o).is_ok_and(|ob| ob.is_array && ob.exotic == 0)
     }
 
     /// Accounted bytes of the live and the dead objects and strings that a sweep has not freed yet (`Stats::bytes`, with no copy of the rest).
@@ -2194,7 +2187,11 @@ impl Heap {
     /// The values that the stored properties of `o` point to (elements, data values, accessor functions), pushed on `out`. The same edges as
     /// `collect` follows, with no key lookup and no copy of the key list: the evaluator's collect pass uses it for each object.
     pub fn stored_edges(&self, o: ObjId, out: &mut Vec<Value>) -> R<()> {
-        let ob = self.obj(o)?;
+        Self::edges_of(self.obj(o)?, out);
+        Ok(())
+    }
+
+    fn edges_of(ob: &Object, out: &mut Vec<Value>) {
         out.extend(ob.elems.iter().flatten());
         // The slots of a shape-mode object hold data values and, for an accessor, a function or `undefined`.
         out.extend_from_slice(ob.slots());
@@ -2209,7 +2206,17 @@ impl Heap {
                 }
             }
         }
-        Ok(())
+    }
+
+    /// For `Interp::collect`: if `o` is an array that is not exotic, push its stored edges and its prototype and say so. Only the weak tables (a `WeakMap`
+    /// key) and a subclass with private fields give such an array state outside the heap, so the caller can skip its side-table probes. One lookup
+    /// for the test and the edges: a separate test costs about as much as the probes cost for an array in a small realm.
+    #[inline]
+    pub fn plain_array_edges(&self, o: ObjId, out: &mut Vec<Value>) -> bool {
+        let Some(ob) = self.objects.get(o.index, o.gn).filter(|ob| ob.is_array && ob.exotic == 0) else { return false };
+        Self::edges_of(ob, out);
+        out.extend(ob.proto.map(Value::Object));
+        true
     }
 
     fn own_keys_with(&self, o: ObjId, virt: bool) -> R<Vec<PropertyKey>> {

@@ -1381,7 +1381,7 @@ impl Browser {
             }
             dom.run_task(&mut self.it, run)?;
             // No script runs and no host call is on the stack: the nodes of dead trees can go back to the arena.
-            dom.reclaim();
+            dom.reclaim(false);
             // On the benchmark clock a task takes time: more tasks become due, and a reply that was on its way arrives.
             if counted && bare_net::vclock::on() {
                 bare_net::vclock::advance_by(bare_net::vclock::TASK_MS);

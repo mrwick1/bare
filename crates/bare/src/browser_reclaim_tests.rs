@@ -38,13 +38,13 @@ fn the_nodes_of_documents_that_died_go_back_to_the_arena() {
         js(&mut b, &format!("{PARSE}40)"));
         assert!(live(&b) > base + 40 * 100, "the arena grew: {}", live(&b));
         b.collect(&[]).unwrap();
-        assert!(live(&b) < base + 300, "dead documents left {} nodes", live(&b) - base);
-        let (runs, freed) = b.reclaim_stats();
-        assert!(runs >= 1 && freed > 40 * 100, "runs {runs} freed {freed}");
-        // the page still works, and the freed slots are used again
+        let (runs, trees) = b.reclaim_stats();
+        assert!(runs >= 1 && trees >= 40, "runs {runs} trees {trees}");
+        // The trees wait for new nodes, which take their slots one by one: the arena does not grow, and the nodes are in use once they are taken.
         let slots = b.document().borrow().len();
         js(&mut b, &format!("{PARSE}40)"));
         assert!(b.document().borrow().len() <= slots + 300, "slots grew from {slots} to {}", b.document().borrow().len());
+        assert!(live(&b) < base + 40 * 150 + 300, "{} nodes in use, {base} before", live(&b));
         assert_eq!(js(&mut b, "document.getElementById('p').textContent"), "hi");
     });
 }
@@ -58,16 +58,16 @@ fn a_document_that_a_script_holds_stays() {
         b.collect(&[]).unwrap();
         assert_eq!(js(&mut b, "keep.getElementById('k').textContent + keep.mark"), "kept1");
         js(&mut b, "keep = null;");
-        let before = live(&b);
-        // the walk waits for new nodes (`FLOOR`): the parses are those
-        js(&mut b, &format!("{PARSE}20)"));
+        let before = b.reclaim_stats().1;
+        // the walk waits for new bytes (`FLOOR`, a fourth of the bytes in use in a test): the parses are those
+        js(&mut b, &format!("{PARSE}80)"));
         b.collect(&[]).unwrap();
-        assert!(live(&b) < before, "{} nodes, {before} before", live(&b));
+        assert!(b.reclaim_stats().1 >= before + 81, "the 80 parses and the document that was held are dead: {} trees, {before} before", b.reclaim_stats().1);
     });
 }
 
 #[test]
-fn the_walk_waits_until_enough_nodes_were_made_since_the_last_one() {
+fn the_walk_waits_until_enough_bytes_were_made_since_the_last_one() {
     big(|| {
         let mut b = browser();
         b.dom.reclaim.set_floor(1_000_000);
@@ -78,7 +78,7 @@ fn the_walk_waits_until_enough_nodes_were_made_since_the_last_one() {
         assert_eq!(b.reclaim_stats(), (0, 0));
         b.dom.reclaim.set_floor(0);
         b.collect(&[]).unwrap();
-        assert!(live(&b) < made, "the walk that was due runs once the floor is met");
+        assert!(b.reclaim_stats().1 > 0, "the walk that was due runs once the floor is met");
     });
 }
 
