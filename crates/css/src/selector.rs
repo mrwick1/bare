@@ -46,7 +46,7 @@
 //!
 //! Comments compare Rust with JavaScript, because you know JS.
 
-use bare_html::dom::{Atom, Document};
+use bare_html::dom::{Atom, ClassId, Document};
 
 use crate::form::Form;
 use crate::tokenizer::{Token, Tokens, tokenize};
@@ -94,7 +94,7 @@ fn simple_bytes(s: &Simple) -> usize {
     use std::mem::size_of;
     let lists = |l: &Vec<Vec<Simple>>| l.capacity() * size_of::<Vec<Simple>>() + l.iter().map(simples_bytes).sum::<usize>();
     match s {
-        Simple::Id(t) | Simple::Class(t) | Simple::State(t) => t.len(),
+        Simple::Id(t) | Simple::State(t) => t.len(),
         Simple::Attr { test, .. } => match test {
             AttrTest::Exists => 0,
             AttrTest::Equals(t, _) | AttrTest::Word(t, _) | AttrTest::Dash(t, _) | AttrTest::Prefix(t, _) | AttrTest::Suffix(t, _) | AttrTest::Contains(t, _) => t.len(),
@@ -150,8 +150,8 @@ pub enum Simple {
     Tag(Atom),
     /// `#main`
     Id(Box<str>),
-    /// `.item`
-    Class(Box<str>),
+    /// `.item`, as the class number of the name (`Document::class_id`).
+    Class(ClassId),
     /// `[href^="http"]`
     Attr { name: Atom, test: AttrTest },
     /// `:first-child`: no element before this one in its parent.
@@ -303,7 +303,7 @@ pub fn parse_selector_list_in(text: &str, doc: &mut Document, mode: Mode) -> Opt
 
 /// Parse a script selector with its reference element.
 pub fn parse_scoped(text: &str, doc: &mut Document, mode: Mode, scope: Option<std::rc::Rc<std::cell::Cell<Option<bare_html::dom::NodeId>>>>) -> Option<Vec<Selector>> {
-    let mut parser = Parser { tokens: Peek { tokens: tokenize(text), peeked: None }, doc, mode, scope, pseudo: None, host: false };
+    let mut parser = Parser { tokens: Peek { tokens: tokenize(text), peeked: None }, doc, mode, scope, pseudo: None, host: false, simples: Vec::new() };
     let mut list = Vec::new();
     loop {
         list.push(parser.selector(0)?);
@@ -335,6 +335,9 @@ struct Parser<'a, 'd> {
     pseudo: Option<ShadowPseudo>,
     /// Did the selector have `:host` or `:host-context()`? Only a sheet of a shadow tree can.
     host: bool,
+    /// The simple selectors of the compounds that are being read, as one stack: a compound keeps its own part, from where it began. A finished
+    /// compound is copied into a `Vec` of its exact length, so a compound of one simple selector does not keep room for four.
+    simples: Vec<Simple>,
 }
 
 /// The tokens, and a way to look at the next one without taking it (JS: like an iterator with a `peek()`).
@@ -429,7 +432,17 @@ impl Parser<'_, '_> {
 
     /// A compound selector: `li.item:first-child`. It has at least one simple selector, or `*`.
     fn compound(&mut self, depth: u32, counts: &mut [u32; 3]) -> Option<Vec<Simple>> {
-        let mut simples = Vec::new();
+        let base = self.simples.len();
+        if self.compound_from(base, depth, counts) != Some(true) {
+            self.simples.truncate(base);
+            return None;
+        }
+        Some(self.simples.drain(base..).collect())
+    }
+
+    /// Read a compound and leave its simple selectors in `self.simples` from `base`. It gives `false` for no compound, and `None` for a selector that is
+    /// not valid.
+    fn compound_from(&mut self, base: usize, depth: u32, counts: &mut [u32; 3]) -> Option<bool> {
         let mut any = false;
         // Where `::part()` came in `simples`: what follows it is for the part, not for the host.
         let mut taken = None;
@@ -437,7 +450,8 @@ impl Parser<'_, '_> {
         match self.tokens.peek() {
             Some(Token::Ident(_)) => {
                 let Some(Token::Ident(name)) = self.tokens.next() else { unreachable!() };
-                simples.push(Simple::Tag(self.doc.intern(&name.to_ascii_lowercase())));
+                let tag = Simple::Tag(self.doc.intern(&name.to_ascii_lowercase()));
+                self.simples.push(tag);
                 counts[2] += 1;
                 any = true;
             }
@@ -451,28 +465,30 @@ impl Parser<'_, '_> {
             match self.tokens.peek() {
                 Some(Token::Hash { is_id: true, .. }) => {
                     let Some(Token::Hash { value, .. }) = self.tokens.next() else { unreachable!() };
-                    simples.push(Simple::Id(value.into()));
+                    self.simples.push(Simple::Id(value.into()));
                     counts[0] += 1;
                 }
                 Some(Token::Delim('.')) => {
                     self.tokens.next();
                     let Some(Token::Ident(name)) = self.tokens.next() else { return None };
-                    simples.push(Simple::Class(name.into()));
+                    let class = Simple::Class(self.doc.class_id(name));
+                    self.simples.push(class);
                     counts[1] += 1;
                 }
                 Some(Token::OpenSquare) => {
                     self.tokens.next();
-                    simples.push(self.attribute()?);
+                    let attr = self.attribute()?;
+                    self.simples.push(attr);
                     counts[1] += 1;
                 }
                 Some(Token::Colon) => {
                     self.tokens.next();
                     match self.pseudo_element(depth, counts)? {
-                        Pe::Never => simples.push(Simple::Never),
-                        Pe::Taken => taken = Some(simples.len()),
+                        Pe::Never => self.simples.push(Simple::Never),
+                        Pe::Taken => taken = Some(self.simples.len() - base),
                         Pe::No => {
                             let simple = self.pseudo(depth, counts)?;
-                            simples.push(simple);
+                            self.simples.push(simple);
                         }
                     }
                 }
@@ -481,13 +497,13 @@ impl Parser<'_, '_> {
             any = true;
         }
         if let (Some(at), Some(ShadowPseudo::Part { then, .. })) = (taken, &mut self.pseudo) {
-            *then = simples.split_off(at);
+            *then = self.simples.split_off(base + at);
         }
         // The host has no type, id, class or attribute of its own that a rule of the shadow tree may read (CSS Scoping: it is featureless).
-        if self.host && simples.iter().any(is_host) && simples.iter().any(|s| matches!(s, Simple::Tag(_) | Simple::Id(_) | Simple::Class(_) | Simple::Attr { .. })) {
+        if self.host && self.simples[base..].iter().any(is_host) && self.simples[base..].iter().any(|s| matches!(s, Simple::Tag(_) | Simple::Id(_) | Simple::Class(_) | Simple::Attr { .. })) {
             return None;
         }
-        any.then_some(simples)
+        Some(any)
     }
 
     /// After the first `:`. Reads `::before` (or the old `:before`) and gives `Pe::Never`, `::slotted()` or `::part()` and gives `Pe::Taken`,
@@ -773,6 +789,11 @@ fn an_plus_b(text: &str) -> Option<(i32, i32)> {
 mod tests {
     use super::*;
 
+    fn class(name: &str) -> ClassId {
+        // All the documents of a thread share the name table.
+        Document::new().class_id(name)
+    }
+
     #[test]
     fn nth_with_a_wide_character_after_n_is_not_a_panic() {
         assert_eq!(an_plus_b("2n\u{fffd}1"), None);
@@ -798,7 +819,7 @@ mod tests {
             list[0].compounds[0].simples,
             vec![
                 Simple::Tag(li),
-                Simple::Class("a".into()),
+                Simple::Class(class("a")),
                 Simple::Id("b".into()),
                 Simple::Attr { name: href, test: AttrTest::Exists },
             ]
@@ -885,7 +906,7 @@ mod tests {
         assert_eq!(args.len(), 2);
         // From the right to the left, like a selector.
         assert_eq!(args[0].iter().map(|c| (c.simples.len(), c.combinator)).collect::<Vec<_>>(), [(1, Combinator::Child), (1, Combinator::Descendant)]);
-        assert_eq!(args[0][0].simples, [Simple::Class("b".into())]);
+        assert_eq!(args[0][0].simples, [Simple::Class(class("b"))]);
         assert_eq!(args[1].len(), 1);
         let Simple::Complex(c) = simple(":where(a b)") else { panic!("not complex") };
         assert!(!c.not);
@@ -930,10 +951,30 @@ mod tests {
         }
     }
 
+    /// The simple selectors of a compound, also in a nested one, are in their own list with room for no more, and a selector that is
+    /// not valid leaves nothing for the next one.
+    #[test]
+    fn a_compound_keeps_no_spare_room_and_no_leftovers() {
+        let list = parse(":is(.a, .c).d > :not(.e, f#g):hover, i").unwrap();
+        let first = &list[0].compounds;
+        assert_eq!(first[0].simples.len(), 2);
+        assert_eq!(first[0].simples.capacity(), 2);
+        assert_eq!(first[1].simples.len(), 2);
+        assert_eq!(first[1].simples.capacity(), 2);
+        assert_eq!(list[1].compounds[0].simples.capacity(), 1);
+        let Simple::Is(args) = &first[1].simples[0] else { panic!("not :is") };
+        assert!(args.iter().all(|a| a.capacity() == a.len()));
+        // After a bad selector in an argument the stack of the parser is clean: the same text without the bad part gives the same compound.
+        assert!(parse(".x:is(.a, [):hover, .y").is_none());
+        let (with_bad, without) = (parse(".x:not(.a, .b > ), .y"), parse(".x:not(.a, .b > .z), .y"));
+        assert!(with_bad.is_none() && without.is_some());
+        assert_eq!(without.unwrap()[1].compounds[0].simples, [Simple::Class(class("y"))]);
+    }
+
     #[test]
     fn escapes_in_names() {
         let list = parse(r".a\:b #\31 23").unwrap();
-        assert_eq!(list[0].compounds[1].simples, vec![Simple::Class("a:b".into())]);
+        assert_eq!(list[0].compounds[1].simples, vec![Simple::Class(class("a:b"))]);
         assert_eq!(list[0].compounds[0].simples, vec![Simple::Id("123".into())]);
     }
 
@@ -956,8 +997,8 @@ mod tests {
         assert_eq!(simple(":link"), Simple::Link);
         assert_eq!(simple(":hover"), Simple::User(User::Hover));
         assert_eq!(simple(":visited"), Simple::Never);
-        assert_eq!(simple(":is(.a, #b)"), Simple::Is(vec![vec![Simple::Class("a".into())], vec![Simple::Id("b".into())]]));
-        assert_eq!(simple(":not(.a, #b)"), Simple::Not(vec![vec![Simple::Class("a".into())], vec![Simple::Id("b".into())]]));
+        assert_eq!(simple(":is(.a, #b)"), Simple::Is(vec![vec![Simple::Class(class("a"))], vec![Simple::Id("b".into())]]));
+        assert_eq!(simple(":not(.a, #b)"), Simple::Not(vec![vec![Simple::Class(class("a"))], vec![Simple::Id("b".into())]]));
     }
 
     #[test]
