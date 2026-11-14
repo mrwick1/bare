@@ -653,7 +653,7 @@ The cascade also charges its real candidates (2026-11-10). The model above is pa
 - `postMessage` sends nothing. It still throws `DataCloneError` for a function or a symbol, as `MessagePort` does. It does not look inside objects.
 - Bound: 64 live worker objects for each page (`MAX_WORKERS`). The next one throws `NotSupportedError`. A worker that was collected frees its place. The bound is against a page that makes workers in a loop; a map library makes one.
 - One console warning for each page names the first worker URL: `Worker scripts do not run in bare (<url>)`. The failure is visible, and it does not repeat.
-- `SharedWorker` and `ServiceWorker` are unchanged (absent).
+- `ServiceWorker` is unchanged (absent). `SharedWorker` is defined later: see "`SharedWorker` fails to start like `Worker`".
 
 ## What holds the memory at the peak of a page load
 
@@ -2233,3 +2233,13 @@ Owner decision 2026-11-14: fix the cost of the spike and merge it. Chosen: inter
 Not chosen: keep the generic `Atom` table for class names (about 70 bytes for each distinct name); fill a list on every `has_class_id` miss (+1.3% on `python-docs-search-results`); never fill one (+12% on `browser_load lookup`, a query loop read the attribute again and again).
 
 Open: `python-docs-search-results` is +0.4% against MAIN (gate: not worse). Numbers: `docs/progress.md`, "criterion 3, step 1: class atoms, cost fixed".
+
+## `SharedWorker` fails to start like `Worker`
+
+Owner decision 2026-11-14 (option 1 of `docs/design-craigslist.md`). `craigslist-home` tests `!window.SharedWorker` to pick its code. Without the global it loads the ES5 bundle and four polyfills, and the formatjs locale matcher costs 42.9 G instructions and 749 MiB. Every browser has `SharedWorker`, so a browser never takes that path.
+
+- `SharedWorker` exists, as `Worker` does: a lazy accessor of the global, the same host record, the same cap of 64 live objects (shared with `Worker`), the same URL and origin checks, the same `error` task after the constructor. The second argument is a name (a string) or the options (`type` is checked; `name`, `credentials` and `extraInfo` are ignored).
+- The object has `onerror` and a read-only `port` (a `MessagePort` with no peer: it takes `postMessage` and `start`, and delivers nothing). It has no `postMessage` and no `terminate`, as the spec says. The ports are GC roots while their worker lives.
+- One console warning for each page, separate from the one of `Worker`: `SharedWorker scripts do not run in bare (<url>)`.
+- Not chosen: make `Intl` pass the formatjs probes (the same gain on this page, but locale data, plural rules and a range formatter); free garbage inside a call (the instruction count does not fall); a faster matcher (38 times needed). Option 2 and 3 stay as topics.
+- Limit: this gain is a change of the page that bare loads, not a faster engine. A page that takes a polyfill path still pays the engine cost. The baseline binary has no `SharedWorker`, so it takes the ES5 path on the same corpus.
