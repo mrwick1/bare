@@ -366,9 +366,7 @@ impl<'p> Interp<'p> {
                 let index = if matches!(self.sc_all[scope as usize].kind, RKind::Root) {
                     self.find_in(0, n)
                 } else {
-                    let mut b = Vec::new();
-                    self.bc_binds(scope, &mut b);
-                    b.iter().position(|b| b.name == n)
+                    self.bc_tmpl(scope).iter().position(|b| b.0 == n)
                 };
                 return match index {
                     Some(i) if i < 0xFFFF => Site::Env { hops, index: i as u32 },

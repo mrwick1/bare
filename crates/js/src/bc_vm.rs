@@ -426,7 +426,7 @@ impl<'p> Interp<'p> {
     }
 
     /// The bindings of the environment of scope `s`, in the order of `bc_binds`.
-    fn bc_tmpl(&mut self, s: u32) -> Rc<[(u32, u8)]> {
+    pub(super) fn bc_tmpl(&mut self, s: u32) -> Rc<[(u32, u8)]> {
         if let Some(t) = self.bc.tmpl.get(&s) {
             return t.clone();
         }

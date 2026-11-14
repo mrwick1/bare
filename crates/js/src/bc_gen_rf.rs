@@ -107,9 +107,7 @@ impl Gen<'_, '_> {
         let mut hops = 0;
         loop {
             if self.it.bc_declares(sc, n) {
-                let mut b = Vec::new();
-                self.it.bc_binds(sc, &mut b);
-                return match b.iter().position(|b| b.name == n) {
+                return match self.it.bc_tmpl(sc).iter().position(|b| b.0 == n) {
                     Some(i) if hops < 0x3FFF && i < 0xFFFF => Site::Env { hops, index: i as u32 },
                     _ => Site::Dynamic,
                 };
