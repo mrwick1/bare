@@ -44,6 +44,7 @@
 //!
 //! Comments compare Rust with JavaScript, because you know JS.
 
+mod reclaim;
 mod slots;
 
 use std::cell::{Cell, OnceCell, RefCell};
@@ -276,6 +277,13 @@ pub struct Document {
     // Every `link`, `style` and `base` element among the first `sheet_scanned` nodes. The name of an element never changes, so the list is exact. See `sheet_nodes`.
     sheet_list: RefCell<Option<Rc<[SheetNode]>>>,
     // Those of them that are in the tree, in order. Made when it is read, and dropped when a change can alter it. See `sheet_nodes`.
+    free: Vec<u32>,
+    // The slots of the nodes that `reclaim` freed, by `NodeId::index`. `alloc` takes from here before it grows `nodes`.
+    dead_text: usize,
+    // Bytes of `text` that only a freed node used, and slots of `attrs` that only a freed element used. `reclaim` rebuilds the two lists when these are a part of them.
+    dead_attrs: usize,
+    poison: bool,
+    // Test mode (`set_poison`): a freed node is never reused and its links point outside the arena, so a stale `NodeId` panics at its first use.
 }
 
 /// A `link`, `style` or `base` element that is in the tree (see `Document::sheet_nodes`).
@@ -737,6 +745,10 @@ impl Document {
             sheet_made: RefCell::new(Vec::new()),
             sheet_scanned: Cell::new(0),
             sheet_list: RefCell::new(None),
+            free: Vec::new(),
+            dead_text: 0,
+            dead_attrs: 0,
+            poison: false,
         };
         // The order matters: it must match `Atom::ID` and `Atom::CLASS`.
         doc.intern("id");
@@ -1475,9 +1487,7 @@ impl Document {
     /// `before` must be a child of `parent`. If it is not, the node goes at the end.
     /// Gives the new node. The tree builder needs this to put text before a table.
     fn insert(&mut self, parent: NodeId, before: Option<NodeId>, data: NodeData) -> NodeId {
-        let id = NodeId::from_index(self.nodes.len());
-        // The new node goes at the end of the `Vec`, so its number is the length now.
-        self.nodes.push(Node { parent: None, first_child: None, last_child: None, prev: None, next: None, data });
+        let id = self.alloc(data);
         self.link(id, parent, before);
         id
     }
@@ -1670,10 +1680,9 @@ impl Document {
         if attrs.len != 0 {
             self.attrs.extend_from_within(attrs.start as usize..(attrs.start + attrs.len) as usize);
         }
-        let id = NodeId::from_index(self.nodes.len());
         let data = NodeData::Element { name, attrs: AttrList { start: to_u32(start), len: attrs.len } };
         self.places = Default::default();
-        self.nodes.push(Node { parent: None, first_child: None, last_child: None, prev: None, next: None, data });
+        let id = self.alloc(data);
         if let Some(&f) = self.foreign.get(&(node.index() as u32)) {
             self.foreign.insert(id.index() as u32, f);
         }
@@ -1901,9 +1910,7 @@ impl Document {
     fn new_node(&mut self, data: NodeData) -> NodeId {
         self.places = Default::default();
         // The sibling-place table has one entry for each node, so a new node makes it too short.
-        let id = NodeId::from_index(self.nodes.len());
-        self.nodes.push(Node { parent: None, first_child: None, last_child: None, prev: None, next: None, data });
-        id
+        self.alloc(data)
     }
 
     /// Set an attribute of an element: change the value, or add it at the end of the list. The caller
