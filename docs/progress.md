@@ -10890,7 +10890,7 @@ Gates:
 
 - Cost matrix against main `c9ead755`: 803 rows, 0 over under both allocators, mean -0.001% (glibc). 2 rows fail to run: `parse_load deep 1` and `deep 10` (known on main).
 - test262 gate ok; the per-test results file is identical to the D1 run. `exec_diff`: 79 runs, 0 differences.
-- `cargo test --release --workspace --no-fail-fast` (after the rebase on `c9ead755`): `bare-js` all pass. Failures that are not mine: the 7 openssl TLS tests, `a_changed_file_starts_again_from_zero` (passes alone) and `a_hidden_iframe_download_is_saved` (a timing test: it fails alone in 2 of 3 runs on main and in 3 of 3 runs on the branch; it passed once on main).
+- `cargo test --release --workspace --no-fail-fast` (after the rebase on `c9ead755`): `bare-js` all pass. Failures that are not mine: the 7 openssl TLS tests, `a_changed_file_starts_again_from_zero` (passes alone) and `a_hidden_iframe_download_is_saved` (a timing test: run alone 10 times it passed 1 of 10 on main and 3 of 10 on the branch).
 
 Limits made unneeded: none. The regexp step budget (`regexp_steps`) still guards a pattern that runs for the first time. The table makes repeats cheap; it does not remove the O(n x alternatives) work of a first run (design section 5.1; D2b, a lazy DFA, is the design that would).
 
