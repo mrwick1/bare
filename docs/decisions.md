@@ -2080,7 +2080,7 @@ Step 4, phase 2 of `docs/perf-goal.md`. Design: `design-style.md` 3.1 (M2), 3.3 
 ## JS compact objects: inline values in the object record (2026-11-14, P5)
 
 - Choice: an object record keeps up to 3 values (`Repr::In([Value; 3])`) and moves all of them to one vector at the fourth (`Repr::Heap`). `dict` stays a separate field.
-- Other choice 1: a 3-way `Repr` (`In`, `Heap`, `Dict(Box<PropMap>)`), 96 B. Smaller by 8 B, but the decode of the form in `Heap::own` and the inline cache hit has 3 cases. I did not find a gain over the 2-way form and could not measure it apart from the other causes.
+- Other choice 1: a 3-way `Repr` (`In`, `Heap`, `Dict(Box<PropMap>)`), 96 B. Smaller by 8 B, but the decode of the form in `Heap::own` and the inline cache hit has 3 cases. I did not show a gain over the 2-way form. The rows of its matrix were affected by other causes that I did not separate.
 - Other choice 2: the design's 32 to 40 B record and size-class slabs for the values. It saves more memory (the record shrinks and a value block has no malloc header). It does not fit the slab now: the `live` vector holds records densely and a sweep moves them, and a handle has a fixed `gn`. I did not build it.
 - `INLINE` is 3 because an array needs 1, a function 3 and most literals 1 to 3.
 - Cost: an object with no property is 24 B larger (117 B against 93 B with the slab overhead). An object with a fourth property made by `push` is 56 B larger.

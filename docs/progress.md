@@ -9628,7 +9628,7 @@ Bytes for each object, with the slab overhead and the glibc chunk rule (usable s
 | function (3 properties, exact vector, 48 B) | 93 + 64 = 157 B | 117 B |
 | 4 properties made by `push` (vector of 4 before, vector of 6 after) | 93 + 80 = 173 B | 117 + 112 = 229 B (+56 B) |
 
-An object with no property costs 24 B more. The accounted bytes of a `Number` wrapper went from about 101 B to 125 B (the test `a_wrapper_costs_one_object_and_one_table_entry` had a limit of 120 B and now has 128 B).
+An object with no property costs 24 B more. The accounted bytes of a `Number` wrapper are now 125 B. Before, they were at most 120 B (the limit of the test `a_wrapper_costs_one_object_and_one_table_entry`; I did not measure the old value). The limit is now 128 B.
 
 ### Numbers (baseline `f6415364` was frozen; this section compares with main `f68e956a`, the base of the branch after the rebase)
 
@@ -9645,7 +9645,7 @@ All runs use the virtual clock and the recorded corpus. 3 runs each.
 ### What went wrong on the way
 
 - A first matrix had 52 rows over +0.5%, up to +10% (`date_load clock`, `web_apis_load base64`, `proxy_load` +7%), and `react-docs` failed (`Object.keys is not a function` after the second page). Cause: `Object::to_shapes` did not clear `dict`, so an object that left dictionary mode kept a stale dictionary and was read as dictionary mode by part of the code. Three tests of `bare-js` failed and showed it. The commit "Drop the dictionary when an object returns to shape mode" fixes it, with the test `leaving_dictionary_mode_drops_the_dictionary_and_keeps_the_values`. I had run only a filtered test set before (`heap`), which hid the failures.
-- My cost analysis of the earlier variants (a 3-way `Repr` with `Dict(Box<PropMap>)`, 96 B) was made with this bug present in one of them only. The 3-way variant had no such bug. I could not separate the effect of the 3-way layout from other causes in the time I had. I chose the 2-way layout with a separate `dict` field, because it keeps `Heap::own` and the inline cache hit shorter.
+- My cost analysis of the earlier variants (a 3-way `Repr` with `Dict(Box<PropMap>)`, 96 B) was made before I found this bug. The bug exists only in the 2-way layout, so the numbers of the 3-way variant are not affected by it. I could not separate the effect of the 3-way layout from other causes in the time I had. I kept the 2-way layout with a separate `dict` field, the one that I measured last. I did not show that it is better than the 3-way layout.
 - One more change did not help: a single `n != 0` test for `has_slots`. `proxy_load keys` improved, but `reflect_load keys` went from +1.4% to +2.6% and `arrobj_load freeze`, `lastindexof` and `date_load cap` went over +0.5%. I reverted it. Instruction counts do not depend on load, so the changes come from inlining and code layout. Hypothesis: the 4 remaining rows are the same effect (a few more instructions in `has_property` and `shape_get`: callgrind on `proxy_load keys 1` shows `has_property` +240 k, `shape_get` +165 k of 55.9 M).
 
 ### Checks
