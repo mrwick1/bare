@@ -413,7 +413,10 @@ fn inner_text(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     };
     let mut out = Out { s: String::new(), brk: 0, space: false, line_start: true };
     // The nodes to leave: the exit steps of an element run after its children.
-    let mut stack: Vec<(NodeId, bool)> = doc.children(n).collect::<Vec<_>>().into_iter().rev().map(|c| (c, false)).collect();
+    // A rendered textarea is a replaced control. Its DOM children have no CSS text boxes.
+    let mut stack: Vec<(NodeId, bool)> = if html_name(&doc, n) == "textarea" { Vec::new() } else {
+        doc.children(n).collect::<Vec<_>>().into_iter().rev().map(|c| (c, false)).collect()
+    };
     while let Some((c, exit)) = stack.pop() {
         it.charge(1)?;
         if out.s.len() > d.lim.max_string_bytes {
@@ -441,8 +444,8 @@ fn inner_text(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
                 let p = html_name(&doc, c) == "p";
                 if !exit {
                     if visible {
-                        if matches!(html_name(&doc, c), "select" | "textarea") {
-                            return Err(Dom::gate("innerText over a select or a textarea"));
+                        if html_name(&doc, c) == "select" {
+                            return Err(Dom::gate("innerText over a select"));
                         }
                         out.count(if p { 2 } else { block as usize });
                         if atomic {
@@ -455,7 +458,9 @@ fn inner_text(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
                         }
                     }
                     stack.push((c, true));
-                    stack.extend(doc.children(c).collect::<Vec<_>>().into_iter().rev().map(|k| (k, false)));
+                    if html_name(&doc, c) != "textarea" {
+                        stack.extend(doc.children(c).collect::<Vec<_>>().into_iter().rev().map(|k| (k, false)));
+                    }
                 } else if visible {
                     if html_name(&doc, c) == "br" {
                         out.lit("\n");

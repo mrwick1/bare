@@ -38,9 +38,8 @@ fn click_gate_comes_before_any_event() {
 }
 
 #[test]
-fn inner_text_gates_select_and_textarea() {
+fn inner_text_still_gates_select() {
     assert!(unsupported("<div id=x><select><option>a</option></select></div>", "document.getElementById('x').innerText"));
-    assert!(unsupported("<div id=x><textarea>t</textarea></div>", "document.getElementById('x').innerText"));
 }
 
 #[test]
@@ -113,4 +112,34 @@ fn click_on_a_link_follows_it_unless_canceled() {
     // A canceled click stays on the page.
     b.run_script("document.addEventListener('click', function (e) { e.preventDefault() }); document.getElementById('x').click()").unwrap();
     assert!(b.take_navigation_request().is_none());
+}
+
+#[test]
+fn inner_text_excludes_rendered_textarea_contents_and_values() {
+    for (body, script, expected) in [
+        ("<div id=x>before<textarea id=t>default</textarea>after</div>", "document.getElementById('t').value='edited'; document.getElementById('x').innerText", "beforeafter"),
+        ("<textarea id=x>default</textarea>", "document.getElementById('x').value='edited'; document.getElementById('x').innerText", ""),
+        ("<div id=x>before<textarea style='display:block'>default</textarea>after</div>", "document.getElementById('x').innerText", "before\nafter"),
+        ("<div id=x>before <textarea>default</textarea> after</div>", "document.getElementById('x').innerText", "before  after"),
+        ("<div id=x>before<textarea style='visibility:hidden'>default</textarea>after</div>", "document.getElementById('x').innerText", "beforeafter"),
+        ("<div id=x>a<textarea>one</textarea>b<textarea>two</textarea>c</div>", "document.getElementById('x').innerText", "abc"),
+    ] {
+        let mut b = page(body);
+        let value = b.run_script(script).expect("rendered text must not reject a textarea");
+        assert_eq!(b.it.display(value), expected, "{body}");
+    }
+}
+
+#[test]
+fn inner_text_preserves_unrendered_textarea_fallback_and_hidden_ancestors() {
+    for (body, script, expected) in [
+        ("<textarea id=x style='display:none'>default</textarea>", "document.getElementById('x').value='edited'; document.getElementById('x').innerText", "default"),
+        ("<div style='display:none'><textarea id=x>default</textarea></div>", "document.getElementById('x').innerText", "default"),
+        ("", "var t=document.createElement('textarea'); t.textContent='default'; t.value='edited'; t.innerText", "default"),
+        ("<div id=x>before<span style='display:none'><textarea>hidden</textarea></span>after</div>", "document.getElementById('x').innerText", "beforeafter"),
+    ] {
+        let mut b = page(body);
+        let value = b.run_script(script).unwrap();
+        assert_eq!(b.it.display(value), expected, "{body}");
+    }
 }

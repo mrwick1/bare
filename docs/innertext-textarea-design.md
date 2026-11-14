@@ -1,6 +1,6 @@
 # Rendered text around textareas
 
-Date: 2026-11-13. Status: proposed for owner review. Issue: #482.
+Date: 2026-11-13. Status: approved; implementation under test. Issue: #482.
 
 ## Verified failure
 
@@ -37,4 +37,4 @@ Preserve the fallback for detached or non-rendered elements. It reads DOM descen
 
 ## Limits
 
-This removes the textarea trigger. It does not establish correct recovery from every Unsupported host operation in an async function. Keep #481 open until that broader failure is tested separately. No resource benchmark has run, and no performance claim is made. The selected approach removes a rejected operation without adding a new traversal. No production change is implemented by this document.
+This removes the textarea trigger. It does not establish correct recovery from every Unsupported host operation in an async function. Keep #481 open until that broader failure is tested separately. No resource benchmark has run, and no performance claim is made. The selected approach removes a rejected operation without adding a new traversal. The implementation skips rendered textarea children and preserves the existing boundary and non-rendered fallback paths. The pre-fix rendered-text test failed with Unsupported. All nine element tests now pass. Candidate MCP and full-suite validation remain pending.
