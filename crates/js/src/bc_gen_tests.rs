@@ -427,7 +427,16 @@ fn register_functions_with_closures_agree_with_the_tree_walker() {
             ("closure assigned to a captured param", "function p(a, b) { var g = function() { a = a + b; return a; }; g(); return g() + b; } p(1, 2)"),
             ("var in a block", "function v() { var f = function() { return m; }; { var m = 7; } return f(); } v()"),
             ("named function expression", "function n1() { var f = function me(k) { return k < 1 ? 0 : k + me(k - 1); }; return f(4); } n1()"),
+            ("caller with open blocks, callee throws", "function bad(x) { if (x > 1) throw new Error('b' + x); return x; } function w(n) { var f = function() { return n; }; var o = ''; for (let i = 0; i < 4; i++) { let q = i; try { { let z = bad(q) + f(); o += z; } } catch (e) { o += e.message; } } return o; } w(1)"),
+            ("callee with a handler, caller in blocks", "function safe(x) { try { if (x > 1) throw 1; return x; } catch (e) { return -x; } } function w(n) { var f = function() { return n; }; var o = []; for (let i = 0; i < 4; i++) { let q = i; { let z = safe(q); o.push(z + f()); } } return o.join(); } w(1)"),
+            ("script body calls", "function a(x) { return x + 1; } var s = 0; for (var i = 0; i < 5; i++) { let q = i; s += a(q); } try { (function() { throw new Error('t'); })(); } catch (e) { s += e.message; } s"),
             ("stack", "function e1() { var f = function() { return new Error('x').stack.split('\\n').length; }; return f(); } e1() > 1"),
+            ("callee with arguments", "function a() { return arguments.length + arguments[1]; } function w(n) { var f = function() { return n; }; return a(1, 20, 3) + f(); } w(1)"),
+            ("callee with this", "var o = { v: 3, m: function() { return this.v; } }; function w(n) { var f = function() { return n; }; return o.m() + f(); } w(1)"),
+            ("callee with a closure called in a loop", "function mk(x) { return function() { return x; }; } function w(n) { var t = 0; for (var i = 0; i < n; i++) t += mk(i)(); return t; } w(5)"),
+            ("env callee throws through env frames", "function in1(x) { var f = function() { return x; }; if (x > 1) throw new Error('i' + x); return f(); } function mid(x) { var g = function() { return in1(x); }; return g() + 1; } function w(n) { try { return mid(n); } catch (e) { return e.message; } } w(1) + w(4)"),
+            ("env callee depth", "function d(n) { var f = function() { return n; }; return n == 0 ? 0 : 1 + d(n - 1) + f() - n; } d(200)"),
+            ("stack across env frames", "function inner() { var f = () => 1; return new Error('x').stack.split('\\n').length + f(); } function outer() { var g = () => 2; return inner() + g(); } outer() > 3"),
         ];
         let mut bad = Vec::new();
         for (name, src) in cases {

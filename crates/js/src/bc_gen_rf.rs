@@ -86,10 +86,10 @@ impl<'p> Interp<'p> {
 }
 
 impl Gen<'_, '_> {
-    /// Whether a call here may be `CallR`, which runs a register function of the same script in the loop of the caller. A function
-    /// with an environment does it only where it has pushed none: a frame of the loop does not keep the count of its environments.
+    /// Whether a call here is `CallR`, which runs a register function of the same script in the loop of the caller. Every function
+    /// uses it, except in the stage 1 listings (`rf_off`).
     pub(super) fn callr_ok(&self) -> bool {
-        self.rf.as_ref().is_some_and(|r| !r.env || self.depth == 0)
+        !self.it.bc.rf_off
     }
 
     /// Whether scope `sc` of the function has an environment at run time. Every scope of a function of stage 1 has one.
