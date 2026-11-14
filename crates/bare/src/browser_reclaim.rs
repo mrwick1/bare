@@ -24,6 +24,7 @@ pub(crate) struct Reclaim {
     /// Test mode: reclaim after every task, even when no collection ran.
     always: Cell<bool>,
     /// Test mode: collect after each `run_script` (`BARE_RECLAIM_STRESS`).
+    #[cfg(test)]
     each: Cell<bool>,
     /// Nodes that code outside the realm keeps for the life of the document (the refs of a driver, the pictures of a page, the scripts that the loader found): their trees stay.
     pins: RefCell<HashSet<NodeId>>,
