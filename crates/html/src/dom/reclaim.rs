@@ -25,6 +25,23 @@ const GONE: NodeId = NodeId(NonZeroU32::MAX);
 const REBUILD_BYTES: usize = 256 << 10;
 const ATTR_BYTES: usize = std::mem::size_of::<Attr>();
 
+/// A set of slot numbers, one bit each.
+struct Keep(Vec<u64>);
+
+impl Keep {
+    /// Add `i`. Is it new?
+    fn insert(&mut self, i: usize) -> bool {
+        let w = &mut self.0[i / 64];
+        let new = *w >> (i % 64) & 1 == 0;
+        *w |= 1 << (i % 64);
+        new
+    }
+
+    fn contains(&self, i: usize) -> bool {
+        self.0[i / 64] >> (i % 64) & 1 != 0
+    }
+}
+
 impl Document {
     /// A node slot for `data`: a freed one if there is one, else a new one at the end of the arena. The node has no links.
     /// Inline: the common case is one push, as before the free list existed. `reuse` is out of line: inlined into the tree builder it costs more.
@@ -105,21 +122,22 @@ impl Document {
     /// node number, and a reused slot would answer with the old node, so a reclaim that frees a node moves `revision` and tells the readers of the
     /// damage log to start over.
     pub fn reclaim(&mut self, live: &[NodeId], pins: &mut dyn FnMut(&mut dyn FnMut(&mut Span))) -> usize {
-        let mut keep: HashSet<u32, BuildHasherDefault<Fnv>> = HashSet::default();
+        // One bit for each slot: the tops of the live trees. A bit costs less than a hash, and the scan below visits every slot anyway.
+        let mut keep = Keep(vec![0; self.nodes.len().div_ceil(64)]);
         keep.insert(0);
         let user = [self.user.hover, self.user.active, self.user.focus];
         let watched = self.watched.iter().map(|&(el, _)| NodeId::from_index(el as usize)).collect::<Vec<_>>();
         let removed = self.removed.iter().map(|r| r.el).collect::<Vec<_>>();
         for id in live.iter().copied().chain(user.into_iter().flatten()).chain(watched).chain(removed) {
-            keep.insert(self.tree_top(id).index() as u32);
+            keep.insert(self.tree_top(id).index());
         }
         // A host and its shadow root, and a template and its contents, live and die together.
         loop {
             let mut grew = false;
             let links = self.shadow_of.iter().map(|(&h, &r)| (NodeId::from_index(h as usize), r)).chain(self.template_content.iter().map(|(&t, &c)| (NodeId::from_index(t as usize), c)));
             for (a, b) in links.collect::<Vec<_>>() {
-                let (a, b) = (self.tree_top(a).index() as u32, self.tree_top(b).index() as u32);
-                match (keep.contains(&a), keep.contains(&b)) {
+                let (a, b) = (self.tree_top(a).index(), self.tree_top(b).index());
+                match (keep.contains(a), keep.contains(b)) {
                     (true, false) => grew |= keep.insert(b),
                     (false, true) => grew |= keep.insert(a),
                     _ => {}
@@ -130,11 +148,10 @@ impl Document {
             }
         }
         let mut freed = 0;
-        let mut stack = Vec::new();
         for i in 1..self.nodes.len() {
             let n = &self.nodes[i];
-            if n.parent.is_none() && n.data != FREE && !keep.contains(&(i as u32)) {
-                freed += self.free_tree(i, &mut stack);
+            if n.parent.is_none() && n.data != FREE && !keep.contains(i) {
+                freed += self.free_tree(i);
             }
         }
         if freed == 0 {
@@ -163,31 +180,41 @@ impl Document {
         freed
     }
 
-    /// Free the tree that starts at slot `top`. Gives the number of nodes.
-    fn free_tree(&mut self, top: usize, stack: &mut Vec<usize>) -> usize {
-        stack.push(top);
+    /// Free the tree that starts at slot `top`. Gives the number of nodes. A node goes after its children (post-order) and the walk reads the
+    /// links of a node before it clears them, so it needs no stack.
+    fn free_tree(&mut self, top: usize) -> usize {
+        let link = if self.poison { Some(GONE) } else { None };
+        let mut i = top;
         let mut count = 0;
-        while let Some(i) = stack.pop() {
-            let Node { first_child, data, .. } = self.nodes[i];
-            let mut c = first_child;
-            while let Some(k) = c {
-                stack.push(k.index());
-                c = self.nodes[k.index()].next;
+        loop {
+            while let Some(c) = self.nodes[i].first_child {
+                i = c.index();
             }
-            match data {
-                NodeData::Text(s) | NodeData::Comment(s) | NodeData::Doctype(s) => self.dead_text += s.len as usize,
-                NodeData::Element { attrs, .. } => {
-                    self.dead_attrs += attrs.len as usize;
-                    self.dead_text += self.attrs(attrs).iter().map(|a| a.value.len as usize).sum::<usize>();
+            loop {
+                let Node { parent, next, data, .. } = self.nodes[i];
+                match data {
+                    NodeData::Text(s) | NodeData::Comment(s) | NodeData::Doctype(s) => self.dead_text += s.len as usize,
+                    NodeData::Element { attrs, .. } => {
+                        self.dead_attrs += attrs.len as usize;
+                        self.dead_text += self.attrs(attrs).iter().map(|a| a.value.len as usize).sum::<usize>();
+                    }
+                    NodeData::Document | NodeData::ShadowRoot => {}
                 }
-                NodeData::Document | NodeData::ShadowRoot => {}
+                self.nodes[i] = Node { parent: link, first_child: link, last_child: link, prev: link, next: link, data: FREE };
+                self.free.push(i as u32);
+                count += 1;
+                if i == top {
+                    return count;
+                }
+                match next {
+                    Some(n) => {
+                        i = n.index();
+                        break;
+                    }
+                    None => i = parent.map_or(top, |p| p.index()),
+                }
             }
-            let link = if self.poison { Some(GONE) } else { None };
-            self.nodes[i] = Node { parent: link, first_child: link, last_child: link, prev: link, next: link, data: FREE };
-            self.free.push(i as u32);
-            count += 1;
         }
-        count
     }
 
     /// Build `text` and `attrs` again from the nodes that are alive. A node keeps its place: only the spans move.
