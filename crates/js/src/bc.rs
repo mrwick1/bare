@@ -29,7 +29,7 @@ pub enum Form {
 
 /// `ops!` makes the opcode enum and its tables from one list, so the name, the form and the operand letters cannot drift apart.
 /// The letters say what each operand is, in the order a, b, c, x (for `Abx` and `AsBx`: a, then the wide operand):
-/// `r` register, `k` constant number, `c` inline cache number, `f` function number, `n` plain number, `i` signed number,
+/// `r` register, `k` constant number, `q` a constant that is a number (an operand of a stage 2 instruction), `c` inline cache number, `f` function number, `n` plain number, `i` signed number,
 /// `j` jump offset, `s` scope number (an index of the scope table of the tree walker), `-` an operand that is not used (always 0).
 /// A letter list shorter than the form means the operands that are left are 0.
 macro_rules! ops {
@@ -93,6 +93,7 @@ ops! {
     Closure Abx "r f" "`a` = a new function for the function number `bx` of the script, in the current environment.",
     ClosureName AbcX "r k - f" "`a` = a new function for the function number `x`, named by constant `b` (an anonymous function that takes the name of its binding or key).",
     Call Abc "r r n" "`a = b(...)`. The callee is in `b`, `this` in `b+1`, the `c` arguments in `b+2` and after.",
+    CallR AbcX "r r n n" "Stage 2 `Call` of a register function. `x` is the source offset of the call + 1, with bit 31 set when the call has no object (`this` is `undefined`, and register `b+1` is not loaded). The loop runs a register function without leaving the loop.",
     New Abc "r r n" "`a = new b(...)`. The constructor is in `b` and the `c` arguments in `b+1` and after.",
     Add Abc "r r r" "`a = b + c`.",
     Sub Abc "r r r" "`a = b - c`.",
@@ -132,12 +133,38 @@ ops! {
     JmpIfNot AsBx "r j" "Jump when `a` is falsy.",
     JmpNullish AsBx "r j" "Jump when `a` is `undefined` or `null`.",
     JmpNotNullish AsBx "r j" "Jump when `a` is neither `undefined` nor `null`.",
+    JnLt AbcX "r r - j" "Jump when `a < b` is false (fused test and jump, stage 2).",
+    JnLe AbcX "r r - j" "Jump when `a <= b` is false.",
+    JnGt AbcX "r r - j" "Jump when `a > b` is false.",
+    JnGe AbcX "r r - j" "Jump when `a >= b` is false.",
+    JnEq AbcX "r r - j" "Jump when `a == b` is false.",
+    JnNe AbcX "r r - j" "Jump when `a != b` is false.",
+    JnSEq AbcX "r r - j" "Jump when `a === b` is false.",
+    JnSNe AbcX "r r - j" "Jump when `a !== b` is false.",
+    JnLtK AbcX "r q - j" "Jump when `a < K[b]` is false (`K[b]` is a number constant).",
+    JnLeK AbcX "r q - j" "Jump when `a <= K[b]` is false.",
+    JnGtK AbcX "r q - j" "Jump when `a > K[b]` is false.",
+    JnGeK AbcX "r q - j" "Jump when `a >= K[b]` is false.",
+    JnEqK AbcX "r q - j" "Jump when `a == K[b]` is false.",
+    JnNeK AbcX "r q - j" "Jump when `a != K[b]` is false.",
+    JnSEqK AbcX "r q - j" "Jump when `a === K[b]` is false.",
+    JnSNeK AbcX "r q - j" "Jump when `a !== K[b]` is false.",
+    AddK Abc "r r q" "`a = b + K[c]` (`K[c]` is a number constant).",
+    SubK Abc "r r q" "`a = b - K[c]`.",
+    MulK Abc "r r q" "`a = b * K[c]`.",
+    DivK Abc "r r q" "`a = b / K[c]`.",
+    ModK Abc "r r q" "`a = b % K[c]`.",
     Ret Abc "r" "Return `a`.",
     RetUndef Abc "" "Return `undefined`.",
     Throw Abc "r" "Throw `a`.",
 }
 
 impl Op {
+    /// A fused compare and jump (stage 2): the offset is in the word after the instruction.
+    pub fn is_fused_jump(self) -> bool {
+        (Op::JnLt as u8..=Op::JnSNeK as u8).contains(&(self as u8))
+    }
+
     /// The opcode of a byte, or `None` for a byte that is no opcode.
     pub fn from_u8(b: u8) -> Option<Op> {
         Op::ALL.get(b as usize).copied()
@@ -166,7 +193,11 @@ impl Ins {
     }
     /// The signed operand of a jump (`AsBx` and `Sj`), in words from the word after the instruction.
     pub fn offset(&self) -> i32 {
-        if self.op.form() == Form::Sj { self.a as i32 } else { self.b as i32 }
+        match self.op.form() {
+            Form::Sj => self.a as i32,
+            Form::AbcX => self.x as i32,
+            _ => self.b as i32,
+        }
     }
 }
 
@@ -295,11 +326,35 @@ pub struct Code {
     /// Pairs `(word, expression)` for each `Call` and `New`, sorted by word: the call or `new` node, for the position of
     /// `Error.stack` and for the text of a callee in an error.
     pub calls: Vec<(u32, u32)>,
+    /// Stage 2: the function keeps all its variables in registers (no environment). Registers `0..nparams` are the parameters
+    /// and `0..nlocals` all the variables: the loop sets `nparams..nlocals` to `undefined` at a call.
+    pub regfn: bool,
+    pub nparams: u16,
+    pub nlocals: u16,
+    /// A stage 2 function that reads `this`, and its strictness (the loop binds `this` as `bind_call` does).
+    pub uses_this: bool,
+    /// An arrow function: `this` comes from its closure (the loop reads it through the environments).
+    pub dyn_this: bool,
+    pub strict: bool,
 }
 
 impl Code {
     pub fn new(nregs: u16) -> Code {
-        Code { ops: Vec::new(), consts: Vec::new(), ics: Box::new([]), handlers: Vec::new(), lines: Vec::new(), nregs, calls: Vec::new() }
+        Code {
+            ops: Vec::new(),
+            consts: Vec::new(),
+            ics: Box::new([]),
+            handlers: Vec::new(),
+            lines: Vec::new(),
+            nregs,
+            calls: Vec::new(),
+            regfn: false,
+            nparams: 0,
+            nlocals: 0,
+            uses_this: false,
+            dyn_this: false,
+            strict: false,
+        }
     }
 
     /// The handler for an exception thrown at word `pc`.
@@ -357,7 +412,7 @@ impl Code {
                         let t = (pc + n) as i64 + v as i32 as i64;
                         format!("-> {t:04}")
                     }
-                    'k' => {
+                    'k' | 'q' => {
                         let _ = write!(note, "  ; {}", self.const_text(v));
                         format!("k{v}")
                     }

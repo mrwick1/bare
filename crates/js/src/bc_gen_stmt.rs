@@ -27,12 +27,7 @@ impl Gen<'_, '_> {
             }
         }
         match st.kind {
-            StmtKind::Expr(e) => {
-                let r = self.reg()?;
-                self.expr(e, r)?;
-                self.free(r);
-                Ok(())
-            }
+            StmtKind::Expr(e) => self.expr_void(e),
             StmtKind::Directive(_) | StmtKind::Empty => Ok(()),
             StmtKind::Var { kind, decls } => self.var(kind, decls),
             // The closure was made when its scope started (`hoist`). In sloppy code, a declaration in a block also writes the
@@ -40,6 +35,7 @@ impl Gen<'_, '_> {
             StmtKind::Function(f) if self.depth > 0 && !self.strict && prog.func(f).is_plain_ctor() => Err("a function declaration in a block (Annex B)"),
             StmtKind::Function(_) => Ok(()),
             StmtKind::Return(None) if self.fins.is_empty() => self.emit(Op::RetUndef, 0, 0, 0),
+            StmtKind::Return(Some(e)) if self.rf.is_some() => self.return_expr(e),
             StmtKind::Return(e) => {
                 let r = self.reg()?;
                 match e {
@@ -51,10 +47,7 @@ impl Gen<'_, '_> {
                 Ok(())
             }
             StmtKind::If { test, cons, alt } => {
-                let r = self.reg()?;
-                self.expr(test, r)?;
-                let j = self.jump(Op::JmpIfNot, r)?;
-                self.free(r);
+                let j = self.jump_if_false(test)?;
                 self.stmt(cons)?;
                 if let Some(a) = alt {
                     let end = self.jump(Op::Jmp, 0)?;
@@ -67,10 +60,7 @@ impl Gen<'_, '_> {
             }
             StmtKind::While { test, body } => {
                 let top = self.here();
-                let r = self.reg()?;
-                self.expr(test, r)?;
-                let j = self.jump(Op::JmpIfNot, r)?;
-                self.free(r);
+                let j = self.jump_if_false(test)?;
                 self.open(true, Some(top));
                 self.stmt(body)?;
                 self.jump_back(Op::Jmp, 0, top)?;
@@ -93,51 +83,49 @@ impl Gen<'_, '_> {
                     ForInit::Var(v) => self.scopes.get(&v).copied(),
                     _ => None,
                 };
+                // A register function keeps the loop variables in registers: no environment, no copy per iteration.
+                let rf_mark = self.top;
+                let envs = scope.is_some() && self.rf.is_none();
                 if let Some(sc) = scope {
-                    self.push_env(sc)?;
+                    if self.rf.is_some() {
+                        self.rf_scope(sc)?;
+                    } else {
+                        self.push_env(sc)?;
+                    }
                 }
                 match init {
                     ForInit::None => {}
-                    ForInit::Expr(e) => {
-                        let r = self.reg()?;
-                        self.expr(e, r)?;
-                        self.free(r);
-                    }
+                    ForInit::Expr(e) => self.expr_void(e)?,
                     ForInit::Var(v) => self.stmt(v)?,
                 }
                 // `for_head` and `for_update`: a fresh copy of the loop environment before the test and before the update.
                 let top = self.here();
-                if scope.is_some() {
+                if envs {
                     self.emit(Op::CopyEnv, 0, 0, 0)?;
                 }
                 let j = match test {
-                    Some(t) => {
-                        let r = self.reg()?;
-                        self.expr(t, r)?;
-                        let j = self.jump(Op::JmpIfNot, r)?;
-                        self.free(r);
-                        Some(j)
-                    }
+                    Some(t) => Some(self.jump_if_false(t)?),
                     None => None,
                 };
                 self.open(true, None);
                 self.stmt(body)?;
                 self.land_conts()?;
-                if scope.is_some() {
+                if envs {
                     self.emit(Op::CopyEnv, 0, 0, 0)?;
                 }
                 if let Some(u) = update {
-                    let r = self.reg()?;
-                    self.expr(u, r)?;
-                    self.free(r);
+                    self.expr_void(u)?;
                 }
                 self.jump_back(Op::Jmp, 0, top)?;
                 if let Some(j) = j {
                     self.patch(j)?;
                 }
                 self.close()?;
-                if scope.is_some() {
+                if envs {
                     self.pop_env()?;
+                }
+                if self.rf.is_some() {
+                    self.free(rf_mark);
                 }
                 Ok(())
             }
@@ -161,14 +149,21 @@ impl Gen<'_, '_> {
             StmtKind::Switch { disc, cases } => self.switch(s, disc, cases),
             StmtKind::Block(l) => {
                 let sc = self.scopes.get(&s).copied();
-                if let Some(sc) = sc {
-                    self.push_env(sc)?;
-                    self.hoist(&[l], sc)?;
+                let mark = self.top;
+                match sc {
+                    Some(sc) if self.rf.is_some() => self.rf_scope(sc)?,
+                    Some(sc) => {
+                        self.push_env(sc)?;
+                        self.hoist(&[l], sc)?;
+                    }
+                    None => {}
                 }
                 for x in prog.list(l) {
                     self.stmt(x)?;
                 }
-                if sc.is_some() {
+                if self.rf.is_some() {
+                    self.free(mark);
+                } else if sc.is_some() {
                     self.pop_env()?;
                 }
                 Ok(())
@@ -203,6 +198,19 @@ impl Gen<'_, '_> {
                 return Err("destructuring");
             }
             let n = self.it.pat_name[d.target.index()];
+            if self.rf.is_some() {
+                // The variable is a register. A `let` or `const` is readable after its initializer.
+                let (key, l) = self.rf_decl(self.it.pat_site(d.target.index()), n)?;
+                match (kind, d.init) {
+                    (VarKind::Var, None) => {}
+                    (_, Some(i)) => self.expr_into(i, l.reg)?,
+                    (_, None) => self.emit(Op::LoadUndef, l.reg, 0, 0)?,
+                }
+                if kind != VarKind::Var {
+                    self.rf_set_init(key);
+                }
+                continue;
+            }
             let site = self.site(self.it.pat_site(d.target.index()), n)?;
             let k = Some(n);
             let r = self.reg()?;
@@ -232,6 +240,9 @@ impl Gen<'_, '_> {
         let d = self.reg()?;
         self.expr(disc, d)?;
         let sc = self.scopes.get(&s).copied();
+        if sc.is_some() && self.rf.is_some() {
+            return Err("a switch with let or const in a register function");
+        }
         if let Some(sc) = sc {
             self.push_env(sc)?;
             let lists: Vec<List<Stmt>> = prog.list(cases).map(|c| prog.case(c).body).collect();
@@ -293,18 +304,33 @@ impl Gen<'_, '_> {
             let exc = self.reg()?;
             self.code.handlers.push(Handler { start, end: self.here() as u32, target: self.here() as u32, reg: exc as u16, depth: hdepth });
             let sc = *self.scopes.get(&s).ok_or("no catch scope")?;
-            self.push_env(sc)?;
-            if let Some(p) = c.param {
-                if !matches!(prog.pat(p).kind, PatKind::Ident) {
-                    return Err("destructuring");
+            if self.rf.is_some() {
+                self.rf_scope(sc)?;
+                if let Some(p) = c.param {
+                    if !matches!(prog.pat(p).kind, PatKind::Ident) {
+                        return Err("destructuring");
+                    }
+                    let n = self.it.pat_name[p.index()];
+                    let (key, l) = self.rf_decl(self.it.pat_site(p.index()), n)?;
+                    self.emit(Op::Mov, l.reg, exc, 0)?;
+                    self.rf_set_init(key);
                 }
-                let n = self.it.pat_name[p.index()];
-                let Site::Env { hops: 0, index } = self.site(self.it.pat_site(p.index()), n)? else { return Err("a catch parameter outside its environment") };
-                self.emit(Op::InitEnv, exc, 0, index)?;
+                self.stmt(c.body)?;
+                self.free(exc);
+            } else {
+                self.push_env(sc)?;
+                if let Some(p) = c.param {
+                    if !matches!(prog.pat(p).kind, PatKind::Ident) {
+                        return Err("destructuring");
+                    }
+                    let n = self.it.pat_name[p.index()];
+                    let Site::Env { hops: 0, index } = self.site(self.it.pat_site(p.index()), n)? else { return Err("a catch parameter outside its environment") };
+                    self.emit(Op::InitEnv, exc, 0, index)?;
+                }
+                self.free(exc);
+                self.stmt(c.body)?;
+                self.pop_env()?;
             }
-            self.free(exc);
-            self.stmt(c.body)?;
-            self.pop_env()?;
         }
         let tail = self.here() as u32;
         for j in ends {
@@ -344,7 +370,7 @@ impl Gen<'_, '_> {
 
     /// Leave statements for `ex`. A `finally` on the way runs first: the jump goes to it, and it continues the exit at its end.
     /// `val` holds the return value of a `return`.
-    fn exit(&mut self, ex: Exit, val: u32) -> G<()> {
+    pub(super) fn exit(&mut self, ex: Exit, val: u32) -> G<()> {
         let (fins, depth) = match ex {
             Exit::Return => (0, 0),
             Exit::Break(i) | Exit::Continue(i) => (self.jumps[i].fins, self.jumps[i].depth),

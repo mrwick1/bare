@@ -19,11 +19,31 @@ use crate::bc::{self, Const, Op};
 
 /// How the loop reads `this`.
 #[derive(Clone, Copy)]
-enum This {
+pub(super) enum This {
     /// The `this` of the call (a function that is not an arrow and not in a class).
     Fixed(Value),
     /// Through the environments (an arrow function, the code of a class, a script body).
     Dynamic,
+}
+
+/// A caller that waits for an inline call (stage 2: a register function calls another one in the same loop).
+pub(super) struct Fr {
+    code: Rc<Compiled>,
+    /// The word after the call, the base of the caller's registers, the register of the caller that gets the result.
+    pc: u32,
+    base: u32,
+    dst: u32,
+    /// The environment of the caller.
+    env: u32,
+    this: This,
+}
+
+/// The registers and the waiting callers of one run of the loop. One run has one of these from the pool, so a nested run (a
+/// native function that calls back into script code) has its own.
+#[derive(Default)]
+pub(super) struct RegStack {
+    regs: Vec<Value>,
+    frames: Vec<Fr>,
 }
 
 macro_rules! op_consts {
@@ -41,6 +61,9 @@ op_consts! {
     IN = In, INSTANCE_OF = InstanceOf, NEG = Neg, PLUS = Plus, NOT = Not, BIT_NOT = BitNot, TYPEOF = Typeof, INC = Inc, DEC = Dec,
     TO_NUMERIC = ToNumeric, TO_STR = ToStr, CONCAT = Concat, DELETE = Delete, JMP = Jmp, JMP_IF = JmpIf, JMP_IF_NOT = JmpIfNot,
     JMP_NULLISH = JmpNullish, JMP_NOT_NULLISH = JmpNotNullish, RET = Ret, RET_UNDEF = RetUndef, THROW = Throw,
+    JN_LT = JnLt, JN_LE = JnLe, JN_GT = JnGt, JN_GE = JnGe, JN_EQ = JnEq, JN_NE = JnNe, JN_SEQ = JnSEq, JN_SNE = JnSNe,
+    JN_LT_K = JnLtK, JN_LE_K = JnLeK, JN_GT_K = JnGtK, JN_GE_K = JnGeK, JN_EQ_K = JnEqK, JN_NE_K = JnNeK, JN_SEQ_K = JnSEqK,
+    JN_SNE_K = JnSNeK, CALL_R = CallR, ADD_K = AddK, SUB_K = SubK, MUL_K = MulK, DIV_K = DivK, MOD_K = ModK,
 }
 
 fn binop(op: u8) -> BinaryOp {
@@ -179,6 +202,16 @@ impl<'p> Interp<'p> {
     pub(super) fn bc_enter(&mut self, (script, fid): (u32, FuncId), fobj: ObjId, cenv: u32, self_binding: bool, this: Value, args: &[Value], new: bool, saved: (u32, bool, usize)) -> Option<Res<Value>> {
         let code = self.bc_code(script, fid)?;
         let (saved_env, saved_strict, saved_script) = saved;
+        if code.code.regfn {
+            // A register function has no environment: its closure's environment is the one its outer names resolve from.
+            self.env = cenv;
+            self.strict = code.code.strict;
+            let r = self.in_frame(script, Where::Func(fid), new, |it| it.bc_run_rf(&code, this, args));
+            self.select(saved_script);
+            self.env = saved_env;
+            self.strict = saved_strict;
+            return Some(r);
+        }
         let env = match self.new_env(cenv, true) {
             Ok(e) => e,
             Err(e) => {
@@ -232,20 +265,75 @@ impl<'p> Interp<'p> {
     }
 
     /// Run `c` in a new frame of registers. Every exit pops the environments that the code pushed.
-    fn bc_run(&mut self, c: &Compiled, this: This) -> Res<Value> {
+    fn bc_run(&mut self, c: &Rc<Compiled>, this: This) -> Res<Value> {
         self.bc.stats.runs += 1;
-        let mut regs = self.bc.pool.pop().unwrap_or_default();
-        regs.clear();
-        regs.resize(c.code.nregs as usize, Value::Undefined);
+        let mut st = self.bc.pool.pop().unwrap_or_default();
+        st.regs.clear();
+        st.regs.resize(c.code.nregs as usize, Value::Undefined);
         let mut depth = 0u32;
-        let r = self.bc_loop(c, &mut regs, this, &mut depth);
+        let r = self.bc_loop(c, &mut st, &mut depth, this);
         for _ in 0..depth {
             let e = self.env;
             self.env = self.envs[e as usize].parent;
             self.release(e);
         }
-        self.bc.pool.push(regs);
+        self.bc.pool.push(st);
         r
+    }
+
+    /// Run a register function: the arguments are its first registers, the other variables start as `undefined`.
+    fn bc_run_rf(&mut self, c: &Rc<Compiled>, this: Value, args: &[Value]) -> Res<Value> {
+        self.bc.stats.runs += 1;
+        let k = &c.code;
+        let t = if k.dyn_this {
+            This::Dynamic
+        } else if k.uses_this {
+            This::Fixed(self.bc_bind_this(this, k.strict)?)
+        } else {
+            This::Fixed(Value::Undefined)
+        };
+        let mut st = self.bc.pool.pop().unwrap_or_default();
+        st.regs.clear();
+        st.regs.resize(k.nregs as usize, Value::Undefined);
+        let n = args.len().min(k.nparams as usize);
+        st.regs[..n].copy_from_slice(&args[..n]);
+        let mut depth = 0u32;
+        let r = self.bc_loop(c, &mut st, &mut depth, t);
+        self.bc.pool.push(st);
+        r
+    }
+
+    /// `this` of a call, as `bind_call` makes it.
+    fn bc_bind_this(&mut self, this: Value, strict: bool) -> Res<Value> {
+        Ok(match this {
+            Value::Object(_) => this,
+            _ if strict => this,
+            _ if is_nullish(this) => Value::Object(self.global),
+            _ => self.to_object(this)?,
+        })
+    }
+
+    /// The register function that `f` is, when it can run in the loop of the caller: a script function of the same script whose
+    /// code is a register function. `None`: the call goes through `call_fn`.
+    #[inline(always)]
+    fn bc_target(&self, f: Value) -> Option<(Rc<Compiled>, FuncId, u32)> {
+        let Value::Object(o) = f else { return None };
+        let Some(&Callee::Script { script, fid, env, self_binding: false }) = self.funcs.get(&o) else { return None };
+        if script as usize != self.cur {
+            return None;
+        }
+        match self.bc.codes.get(self.cur)?.get(fid.index())? {
+            BcSlot::Byte(c) if c.code.regfn => Some((c.clone(), fid, env)),
+            _ => None,
+        }
+    }
+
+    /// The caller `fr` of an inline call is current again: undo what the call set (`ok`: it returned). The caller sets `strict`.
+    fn bc_inline_exit(&mut self, fr: &Fr, ok: bool) {
+        self.depth -= 1;
+        let saved_pos = self.stk.frames.pop().map_or(0, |f| f.saved_pos);
+        self.stk.pos = if ok { 0 } else { saved_pos };
+        self.env = fr.env;
     }
 
     /// A thrown error at word `pc`: the target of its handler, the register of the exception and the exception. Any other error,
@@ -569,32 +657,20 @@ impl<'p> Interp<'p> {
 
     /// The loop. `depth` counts the environments that the code pushed and did not pop. The verifier checked the code, and
     /// `bc_finish` refused wide forms, so every word is a narrow instruction.
-    fn bc_loop(&mut self, c: &Compiled, regs: &mut [Value], this: This, depth: &mut u32) -> Res<Value> {
-        let ops = &c.code.ops[..];
+    ///
+    /// Stage 2: a `Call` of a register function from a register function does not leave the loop. It pushes the caller on
+    /// `st.frames`, puts the callee's registers on `st.regs` from the argument registers of the caller, and goes on. A `Ret`
+    /// pops it. An error that no handler of the callee takes goes to the handler of the caller, and so on up. Every exit of the
+    /// loop leaves `st.frames` empty and `depth`, `strict`, `env` and the call stack as the entry had them (`bc_inline_exit`).
+    fn bc_loop(&mut self, code0: &Rc<Compiled>, st: &mut RegStack, depth: &mut u32, this0: This) -> Res<Value> {
+        let mut code = code0.clone();
+        let mut c: &Compiled = &code;
+        let mut ops: &[u32] = &c.code.ops[..];
+        let mut this = this0;
+        let mut base = 0usize;
+        let mut regs: &mut [Value] = &mut st.regs[..c.code.nregs as usize];
         let mut pc = 0usize;
-        // The value of a fallible step, or the jump to the handler of the instruction at `at`.
-        macro_rules! tri {
-            ($at:expr, $e:expr) => {
-                match $e {
-                    Ok(v) => v,
-                    Err(err) => {
-                        let (t, r, v) = self.bc_catch(c, $at, depth, err)?;
-                        regs[r] = v;
-                        pc = t;
-                        continue;
-                    }
-                }
-            };
-        }
-        macro_rules! name {
-            ($k:expr) => {
-                match c.code.consts[$k as usize] {
-                    Const::Name(n) => n,
-                    _ => unreachable!("the verifier checks name operands"),
-                }
-            };
-        }
-        loop {
+        'run: loop {
             let at = pc;
             let w = ops[pc];
             pc += 1;
@@ -604,197 +680,375 @@ impl<'p> Interp<'p> {
             // `Abx`, `AsBx` and `Sj` operands.
             let bx = w >> 16;
             let sbx = w as i32 >> 16;
-            match w as u8 {
-                NOP => {}
-                MOV => regs[a] = regs[b],
-                LOAD_UNDEF => regs[a] = Value::Undefined,
-                LOAD_NULL => regs[a] = Value::Null,
-                LOAD_TRUE => regs[a] = Value::Bool(true),
-                LOAD_FALSE => regs[a] = Value::Bool(false),
-                LOAD_THIS => {
-                    regs[a] = match this {
-                        This::Fixed(t) => t,
-                        This::Dynamic => tri!(at, self.bc_this()),
-                    }
-                }
-                LOAD_I => regs[a] = Value::Number(sbx as f64),
-                LOAD_K => regs[a] = c.kv[bx as usize],
-                GET_ENV => {
-                    let (e, i) = self.bc_slot(b as u32, cc as u32);
-                    regs[a] = match self.envs[e as usize].bindings.get(i) {
-                        Some(bd) if bd.flags & INIT != 0 => bd.value,
-                        _ => tri!(at, Err::<Value, _>(self.bc_env_err(e, i))),
-                    };
-                }
-                SET_ENV => {
-                    let (e, i) = self.bc_slot(b as u32, cc as u32);
-                    let v = regs[a];
-                    match self.envs[e as usize].bindings.get_mut(i) {
-                        Some(bd) if bd.flags & (INIT | MUT) == INIT | MUT => bd.value = v,
-                        Some(_) => tri!(at, self.bc_assign(e, i, v)),
-                        None => tri!(at, Err::<(), _>(self.bc_env_err(e, i))),
-                    }
-                }
-                INIT_ENV => {
-                    let (e, i) = self.bc_slot(b as u32, cc as u32);
-                    let v = regs[a];
-                    match self.envs[e as usize].bindings.get_mut(i) {
-                        Some(bd) => {
-                            bd.value = v;
-                            bd.flags |= INIT;
+            let step: Result<(), Error> = 'op: {
+                // The value of a fallible step, or the exit from this instruction with its error.
+                macro_rules! tri {
+                    ($at:expr, $e:expr) => {
+                        match $e {
+                            Ok(v) => v,
+                            Err(err) => break 'op Err(err),
                         }
-                        None => tri!(at, Err::<(), _>(self.bc_env_err(e, i))),
+                    };
+                }
+                macro_rules! name {
+                    ($k:expr) => {
+                        match c.code.consts[$k as usize] {
+                            Const::Name(n) => n,
+                            _ => unreachable!("the verifier checks name operands"),
+                        }
+                    };
+                }
+                // `a = f(l, r)` on two numbers, else the general operator.
+                macro_rules! arith {
+                    ($l:expr, $r:expr, $f:expr, $bop:expr) => {{
+                        let (l, r) = ($l, $r);
+                        regs[a] = match (l, r) {
+                            (Value::Number(p), Value::Number(q)) => Value::Number($f(p, q)),
+                            _ => tri!(at, self.binary($bop, l, r)),
+                        };
+                    }};
+                }
+                macro_rules! cmp {
+                    ($l:expr, $r:expr, $f:expr, $bop:expr) => {{
+                        let (l, r) = ($l, $r);
+                        regs[a] = match (l, r) {
+                            (Value::Number(p), Value::Number(q)) => Value::Bool($f(p, q)),
+                            _ => tri!(at, self.binary($bop, l, r)),
+                        };
+                    }};
+                }
+                // The fused test and jump: jump when the comparison of `regs[a]` and the right side is false.
+                macro_rules! jn {
+                    ($r:expr, $f:expr, $bop:expr) => {{
+                        let x = ops[pc];
+                        pc += 1;
+                        let (l, r) = (regs[a], $r);
+                        let t = match (l, r) {
+                            (Value::Number(p), Value::Number(q)) => $f(p, q),
+                            _ => matches!(tri!(at, self.binary($bop, l, r)), Value::Bool(true)),
+                        };
+                        if !t {
+                            pc = (pc as isize + x as i32 as isize) as usize;
+                        }
+                    }};
+                }
+                macro_rules! jn_strict {
+                    ($r:expr, $want:expr) => {{
+                        let x = ops[pc];
+                        pc += 1;
+                        let (l, r) = (regs[a], $r);
+                        let t = match (l, r) {
+                            (Value::Number(p), Value::Number(q)) => (p == q) == $want,
+                            _ => self.heap.strict_equals(l, r) == $want,
+                        };
+                        if !t {
+                            pc = (pc as isize + x as i32 as isize) as usize;
+                        }
+                    }};
+                }
+                // `Ret`: back to the caller of an inline call, or out of the loop.
+                macro_rules! ret {
+                    ($v:expr) => {{
+                        let v = $v;
+                        let Some(fr) = st.frames.pop() else { return Ok(v) };
+                        self.bc_inline_exit(&fr, true);
+                        code = fr.code;
+                        c = &code;
+                        ops = &c.code.ops[..];
+                        this = fr.this;
+                        base = fr.base as usize;
+                        pc = fr.pc as usize;
+                        self.strict = c.code.strict;
+                        regs = &mut st.regs[base..base + c.code.nregs as usize];
+                        regs[fr.dst as usize] = v;
+                    }};
+                }
+                match w as u8 {
+                    NOP => {}
+                    MOV => regs[a] = regs[b],
+                    LOAD_UNDEF => regs[a] = Value::Undefined,
+                    LOAD_NULL => regs[a] = Value::Null,
+                    LOAD_TRUE => regs[a] = Value::Bool(true),
+                    LOAD_FALSE => regs[a] = Value::Bool(false),
+                    LOAD_THIS => {
+                        regs[a] = match this {
+                            This::Fixed(t) => t,
+                            This::Dynamic => tri!(at, self.bc_this()),
+                        }
                     }
-                }
-                PUSH_ENV => {
-                    tri!(at, self.bc_declare(bx, true));
-                    *depth += 1;
-                }
-                DECL_ENV => tri!(at, self.bc_declare(bx, false)),
-                POP_ENV => {
-                    let e = self.env;
-                    self.env = self.envs[e as usize].parent;
-                    self.release(e);
-                    *depth -= 1;
-                }
-                COPY_ENV => {
-                    if self.envs[self.env as usize].captured {
-                        tri!(at, self.copy_env());
+                    LOAD_I => regs[a] = Value::Number(sbx as f64),
+                    LOAD_K => regs[a] = c.kv[bx as usize],
+                    GET_ENV => {
+                        let (e, i) = self.bc_slot(b as u32, cc as u32);
+                        regs[a] = match self.envs[e as usize].bindings.get(i) {
+                            Some(bd) if bd.flags & INIT != 0 => bd.value,
+                            _ => tri!(at, Err::<Value, _>(self.bc_env_err(e, i))),
+                        };
                     }
-                }
-                // A cell hit is what `get_global` and `assign_global` find first. A lexical binding of environment 0 shadows the cells.
-                GET_GLOBAL => {
-                    let cell = &c.cells[bx as usize];
-                    let hit = if self.envs[0].bindings.is_empty() { self.heap.cell_get(self.global, cell.1.get(), cell.0) } else { None };
-                    regs[a] = match hit {
-                        Some(v) => v,
-                        None => tri!(at, self.bc_get_global(name!(bx), cell)),
-                    };
-                }
-                SET_GLOBAL => {
-                    let cell = &c.cells[bx as usize];
-                    let v = regs[a];
-                    if !(self.envs[0].bindings.is_empty() && self.heap.cell_set(self.global, cell.1.get(), cell.0, v)) {
-                        tri!(at, self.bc_set_global(name!(bx), v, cell));
+                    SET_ENV => {
+                        let (e, i) = self.bc_slot(b as u32, cc as u32);
+                        let v = regs[a];
+                        match self.envs[e as usize].bindings.get_mut(i) {
+                            Some(bd) if bd.flags & (INIT | MUT) == INIT | MUT => bd.value = v,
+                            Some(_) => tri!(at, self.bc_assign(e, i, v)),
+                            None => tri!(at, Err::<(), _>(self.bc_env_err(e, i))),
+                        }
                     }
-                }
-                TYPEOF_GLOBAL => regs[a] = tri!(at, self.bc_typeof_name(name!(bx), false)),
-                GET_NAME => regs[a] = tri!(at, self.bc_get_name(name!(bx))),
-                SET_NAME => tri!(at, self.bc_set_name(name!(bx), regs[a])),
-                TYPEOF_NAME => regs[a] = tri!(at, self.bc_typeof_name(name!(bx), true)),
-                GET_FIELD => {
-                    let x = ops[pc];
-                    pc += 1;
-                    let base = regs[b];
-                    let ic = &c.code.ics[cc];
-                    let hit = if let Value::Object(o) = base { self.heap.ic_own(o, &ic.get()) } else { None };
-                    regs[a] = match hit {
-                        Some(v) => v,
-                        None => tri!(at, self.bc_get_field(base, name!(x), ic)),
-                    };
-                }
-                SET_FIELD => {
-                    let x = ops[pc];
-                    pc += 1;
-                    let (o, v) = (regs[a], regs[b]);
-                    let ic = &c.code.ics[cc];
-                    if !matches!(o, Value::Object(ob) if self.heap.ic_store(ob, &ic.get(), v)) {
-                        tri!(at, self.bc_set_field(o, name!(x), v, ic));
+                    INIT_ENV => {
+                        let (e, i) = self.bc_slot(b as u32, cc as u32);
+                        let v = regs[a];
+                        match self.envs[e as usize].bindings.get_mut(i) {
+                            Some(bd) => {
+                                bd.value = v;
+                                bd.flags |= INIT;
+                            }
+                            None => tri!(at, Err::<(), _>(self.bc_env_err(e, i))),
+                        }
                     }
-                }
-                GET_ELEM => regs[a] = tri!(at, self.bc_get_elem(regs[b], regs[cc])),
-                SET_ELEM => {
-                    let (o, k, v) = (regs[a], regs[b], regs[cc]);
-                    let key = tri!(at, self.coerce_key(k));
-                    tri!(at, self.put_prop(o, key, v));
-                }
-                TO_KEY => regs[a] = tri!(at, self.bc_to_key(regs[b], regs[cc])),
-                DEF_FIELD => tri!(at, self.bc_def_field(regs[a], name!(cc), regs[b])),
-                ARRAY_PUSH => tri!(at, self.bc_array_push(regs[a], regs[b])),
-                NEW_OBJECT => regs[a] = Value::Object(tri!(at, self.heap.new_object(Some(self.object_proto)).map_err(|e| self.herr(e)))),
-                NEW_ARRAY => regs[a] = Value::Object(tri!(at, self.heap.new_array(Some(self.array_proto)).map_err(|e| self.herr(e)))),
-                CLOSURE => regs[a] = tri!(at, self.bc_closure(FuncId::from_index(bx as usize), None)),
-                CLOSURE_NAME => {
-                    let x = ops[pc];
-                    pc += 1;
-                    regs[a] = tri!(at, self.bc_closure(FuncId::from_index(x as usize), Some(name!(b))));
-                }
-                CALL => regs[a] = tri!(at, self.bc_call(c, at, regs, b, cc, false)),
-                NEW => regs[a] = tri!(at, self.bc_call(c, at, regs, b, cc, true)),
-                op @ (ADD | SUB | MUL | DIV | MOD | LT | LE | GT | GE | STRICT_EQ | STRICT_NE | EQ | NE) => {
-                    let (l, r) = (regs[b], regs[cc]);
-                    regs[a] = match (l, r) {
-                        (Value::Number(p), Value::Number(q)) => match op {
-                            ADD => Value::Number(p + q),
-                            SUB => Value::Number(p - q),
-                            MUL => Value::Number(p * q),
-                            DIV => Value::Number(p / q),
-                            MOD => Value::Number(p % q),
-                            LT => Value::Bool(p < q),
-                            LE => Value::Bool(p <= q),
-                            GT => Value::Bool(p > q),
-                            GE => Value::Bool(p >= q),
-                            STRICT_EQ | EQ => Value::Bool(p == q),
-                            _ => Value::Bool(p != q),
-                        },
-                        _ if op == STRICT_EQ => Value::Bool(self.heap.strict_equals(l, r)),
-                        _ if op == STRICT_NE => Value::Bool(!self.heap.strict_equals(l, r)),
-                        _ => tri!(at, self.binary(binop(op), l, r)),
-                    };
-                }
-                op @ (EXP | BIT_AND | BIT_OR | BIT_XOR | SHL | SHR | USHR | IN | INSTANCE_OF) => regs[a] = tri!(at, self.binary(binop(op), regs[b], regs[cc])),
-                NOT => {
-                    let v = regs[b];
-                    let t = match v {
-                        Value::Bool(t) => t,
-                        _ => tri!(at, self.truthy(v)),
-                    };
-                    regs[a] = Value::Bool(!t);
-                }
-                op @ (INC | DEC) => {
-                    regs[a] = match regs[b] {
-                        Value::Number(n) => Value::Number(if op == INC { n + 1.0 } else { n - 1.0 }),
-                        v => tri!(at, self.bc_unary(op, v)),
-                    };
-                }
-                TO_NUMERIC => {
-                    let v = regs[b];
-                    regs[a] = if matches!(v, Value::Number(_)) { v } else { tri!(at, self.bc_unary(TO_NUMERIC, v)) };
-                }
-                op @ (NEG | PLUS | BIT_NOT | TYPEOF | TO_STR) => regs[a] = tri!(at, self.bc_unary(op, regs[b])),
-                CONCAT => regs[a] = tri!(at, self.bc_concat(&regs[b..b + cc])),
-                JMP => {
-                    let off = w as i32 >> 8;
-                    if off < 0 {
+                    PUSH_ENV => {
+                        tri!(at, self.bc_declare(bx, true));
+                        *depth += 1;
+                    }
+                    DECL_ENV => tri!(at, self.bc_declare(bx, false)),
+                    POP_ENV => {
+                        let e = self.env;
+                        self.env = self.envs[e as usize].parent;
+                        self.release(e);
+                        *depth -= 1;
+                    }
+                    COPY_ENV => {
+                        if self.envs[self.env as usize].captured {
+                            tri!(at, self.copy_env());
+                        }
+                    }
+                    // A cell hit is what `get_global` and `assign_global` find first. A lexical binding of environment 0 shadows the cells.
+                    GET_GLOBAL => {
+                        let cell = &c.cells[bx as usize];
+                        let hit = if self.envs[0].bindings.is_empty() { self.heap.cell_get(self.global, cell.1.get(), cell.0) } else { None };
+                        regs[a] = match hit {
+                            Some(v) => v,
+                            None => tri!(at, self.bc_get_global(name!(bx), cell)),
+                        };
+                    }
+                    SET_GLOBAL => {
+                        let cell = &c.cells[bx as usize];
+                        let v = regs[a];
+                        if !(self.envs[0].bindings.is_empty() && self.heap.cell_set(self.global, cell.1.get(), cell.0, v)) {
+                            tri!(at, self.bc_set_global(name!(bx), v, cell));
+                        }
+                    }
+                    TYPEOF_GLOBAL => regs[a] = tri!(at, self.bc_typeof_name(name!(bx), false)),
+                    GET_NAME => regs[a] = tri!(at, self.bc_get_name(name!(bx))),
+                    SET_NAME => tri!(at, self.bc_set_name(name!(bx), regs[a])),
+                    TYPEOF_NAME => regs[a] = tri!(at, self.bc_typeof_name(name!(bx), true)),
+                    GET_FIELD => {
+                        let x = ops[pc];
+                        pc += 1;
+                        let base_v = regs[b];
+                        let ic = &c.code.ics[cc];
+                        let hit = if let Value::Object(o) = base_v { self.heap.ic_own(o, &ic.get()) } else { None };
+                        regs[a] = match hit {
+                            Some(v) => v,
+                            None => tri!(at, self.bc_get_field(base_v, name!(x), ic)),
+                        };
+                    }
+                    SET_FIELD => {
+                        let x = ops[pc];
+                        pc += 1;
+                        let (o, v) = (regs[a], regs[b]);
+                        let ic = &c.code.ics[cc];
+                        if !matches!(o, Value::Object(ob) if self.heap.ic_store(ob, &ic.get(), v)) {
+                            tri!(at, self.bc_set_field(o, name!(x), v, ic));
+                        }
+                    }
+                    GET_ELEM => regs[a] = tri!(at, self.bc_get_elem(regs[b], regs[cc])),
+                    SET_ELEM => {
+                        let (o, k, v) = (regs[a], regs[b], regs[cc]);
+                        let key = tri!(at, self.coerce_key(k));
+                        tri!(at, self.put_prop(o, key, v));
+                    }
+                    TO_KEY => regs[a] = tri!(at, self.bc_to_key(regs[b], regs[cc])),
+                    DEF_FIELD => tri!(at, self.bc_def_field(regs[a], name!(cc), regs[b])),
+                    ARRAY_PUSH => tri!(at, self.bc_array_push(regs[a], regs[b])),
+                    NEW_OBJECT => regs[a] = Value::Object(tri!(at, self.heap.new_object(Some(self.object_proto)).map_err(|e| self.herr(e)))),
+                    NEW_ARRAY => regs[a] = Value::Object(tri!(at, self.heap.new_array(Some(self.array_proto)).map_err(|e| self.herr(e)))),
+                    CLOSURE => regs[a] = tri!(at, self.bc_closure(FuncId::from_index(bx as usize), None)),
+                    CLOSURE_NAME => {
+                        let x = ops[pc];
+                        pc += 1;
+                        regs[a] = tri!(at, self.bc_closure(FuncId::from_index(x as usize), Some(name!(b))));
+                    }
+                    CALL => regs[a] = tri!(at, self.bc_call(c, at, regs, b, cc, false)),
+                    CALL_R => {
+                        let x = ops[pc];
+                        pc += 1;
+                        // `x` bit 31: no object, so `this` is `undefined`.
+                        if x >> 31 != 0 {
+                            regs[b + 1] = Value::Undefined;
+                        }
+                        let Some((callee, fid, cenv)) = self.bc_target(regs[b]) else {
+                            regs[a] = tri!(at, self.bc_call(c, at, regs, b, cc, false));
+                            continue 'run;
+                        };
+                        // What `call_fn_inner` and `call_script` do for a call, without the Rust frames.
+                        if self.depth >= self.limits.max_call_depth {
+                            break 'op Err(Error::Limit(LimitKind::CallDepth));
+                        }
                         tri!(at, self.tick());
-                    }
-                    pc = (pc as isize + off as isize) as usize;
-                }
-                op @ (JMP_IF | JMP_IF_NOT | JMP_NULLISH | JMP_NOT_NULLISH) => {
-                    let v = regs[a];
-                    let on = match op {
-                        JMP_IF | JMP_IF_NOT => {
-                            let t = match v {
-                                Value::Bool(t) => t,
-                                _ => tri!(at, self.truthy(v)),
-                            };
-                            t == (op == JMP_IF)
+                        let k = &callee.code;
+                        let t = if k.dyn_this {
+                            This::Dynamic
+                        } else if k.uses_this {
+                            This::Fixed(tri!(at, self.bc_bind_this(regs[b + 1], k.strict)))
+                        } else {
+                            This::Fixed(Value::Undefined)
+                        };
+                        let nb = base + b + 2;
+                        let nregs = k.nregs as usize;
+                        if st.regs.len() < nb + nregs {
+                            st.regs.resize(nb + nregs, Value::Undefined);
                         }
-                        JMP_NULLISH => is_nullish(v),
-                        _ => !is_nullish(v),
-                    };
-                    if on {
-                        if sbx < 0 {
+                        // The arguments are the first registers of the callee already. The other variables start as `undefined`.
+                        let (lo, hi) = (cc.min(k.nparams as usize), k.nlocals as usize);
+                        if lo < hi {
+                            st.regs[nb + lo..nb + hi].fill(Value::Undefined);
+                        }
+                        self.stk.frames.push(StackFrame { script: self.cur as u32, at: Where::Func(fid), new: false, saved_pos: x & 0x7fff_ffff });
+                        self.stk.pos = 0;
+                        self.depth += 1;
+                        self.strict = k.strict;
+                        let env = std::mem::replace(&mut self.env, cenv);
+                        st.frames.push(Fr { code: std::mem::replace(&mut code, callee), pc: pc as u32, base: base as u32, dst: a as u32, env, this });
+                        c = &code;
+                        ops = &c.code.ops[..];
+                        this = t;
+                        base = nb;
+                        pc = 0;
+                        regs = &mut st.regs[nb..nb + nregs];
+                    }
+                    NEW => regs[a] = tri!(at, self.bc_call(c, at, regs, b, cc, true)),
+                    ADD => arith!(regs[b], regs[cc], |p: f64, q: f64| p + q, BinaryOp::Add),
+                    SUB => arith!(regs[b], regs[cc], |p: f64, q: f64| p - q, BinaryOp::Sub),
+                    MUL => arith!(regs[b], regs[cc], |p: f64, q: f64| p * q, BinaryOp::Mul),
+                    DIV => arith!(regs[b], regs[cc], |p: f64, q: f64| p / q, BinaryOp::Div),
+                    MOD => arith!(regs[b], regs[cc], |p: f64, q: f64| p % q, BinaryOp::Mod),
+                    ADD_K => arith!(regs[b], c.kv[cc], |p: f64, q: f64| p + q, BinaryOp::Add),
+                    SUB_K => arith!(regs[b], c.kv[cc], |p: f64, q: f64| p - q, BinaryOp::Sub),
+                    MUL_K => arith!(regs[b], c.kv[cc], |p: f64, q: f64| p * q, BinaryOp::Mul),
+                    DIV_K => arith!(regs[b], c.kv[cc], |p: f64, q: f64| p / q, BinaryOp::Div),
+                    MOD_K => arith!(regs[b], c.kv[cc], |p: f64, q: f64| p % q, BinaryOp::Mod),
+                    LT => cmp!(regs[b], regs[cc], |p: f64, q: f64| p < q, BinaryOp::Lt),
+                    LE => cmp!(regs[b], regs[cc], |p: f64, q: f64| p <= q, BinaryOp::Le),
+                    GT => cmp!(regs[b], regs[cc], |p: f64, q: f64| p > q, BinaryOp::Gt),
+                    GE => cmp!(regs[b], regs[cc], |p: f64, q: f64| p >= q, BinaryOp::Ge),
+                    EQ => cmp!(regs[b], regs[cc], |p: f64, q: f64| p == q, BinaryOp::Eq),
+                    NE => cmp!(regs[b], regs[cc], |p: f64, q: f64| p != q, BinaryOp::Ne),
+                    STRICT_EQ => regs[a] = Value::Bool(self.heap.strict_equals(regs[b], regs[cc])),
+                    STRICT_NE => regs[a] = Value::Bool(!self.heap.strict_equals(regs[b], regs[cc])),
+                    JN_LT => jn!(regs[b], |p: f64, q: f64| p < q, BinaryOp::Lt),
+                    JN_LE => jn!(regs[b], |p: f64, q: f64| p <= q, BinaryOp::Le),
+                    JN_GT => jn!(regs[b], |p: f64, q: f64| p > q, BinaryOp::Gt),
+                    JN_GE => jn!(regs[b], |p: f64, q: f64| p >= q, BinaryOp::Ge),
+                    JN_EQ => jn!(regs[b], |p: f64, q: f64| p == q, BinaryOp::Eq),
+                    JN_NE => jn!(regs[b], |p: f64, q: f64| p != q, BinaryOp::Ne),
+                    JN_SEQ => jn_strict!(regs[b], true),
+                    JN_SNE => jn_strict!(regs[b], false),
+                    JN_LT_K => jn!(c.kv[b], |p: f64, q: f64| p < q, BinaryOp::Lt),
+                    JN_LE_K => jn!(c.kv[b], |p: f64, q: f64| p <= q, BinaryOp::Le),
+                    JN_GT_K => jn!(c.kv[b], |p: f64, q: f64| p > q, BinaryOp::Gt),
+                    JN_GE_K => jn!(c.kv[b], |p: f64, q: f64| p >= q, BinaryOp::Ge),
+                    JN_EQ_K => jn!(c.kv[b], |p: f64, q: f64| p == q, BinaryOp::Eq),
+                    JN_NE_K => jn!(c.kv[b], |p: f64, q: f64| p != q, BinaryOp::Ne),
+                    JN_SEQ_K => jn_strict!(c.kv[b], true),
+                    JN_SNE_K => jn_strict!(c.kv[b], false),
+                    op @ (EXP | BIT_AND | BIT_OR | BIT_XOR | SHL | SHR | USHR | IN | INSTANCE_OF) => regs[a] = tri!(at, self.binary(binop(op), regs[b], regs[cc])),
+                    NOT => {
+                        let v = regs[b];
+                        let t = match v {
+                            Value::Bool(t) => t,
+                            _ => tri!(at, self.truthy(v)),
+                        };
+                        regs[a] = Value::Bool(!t);
+                    }
+                    op @ (INC | DEC) => {
+                        regs[a] = match regs[b] {
+                            Value::Number(n) => Value::Number(if op == INC { n + 1.0 } else { n - 1.0 }),
+                            v => tri!(at, self.bc_unary(op, v)),
+                        };
+                    }
+                    TO_NUMERIC => {
+                        let v = regs[b];
+                        regs[a] = if matches!(v, Value::Number(_)) { v } else { tri!(at, self.bc_unary(TO_NUMERIC, v)) };
+                    }
+                    op @ (NEG | PLUS | BIT_NOT | TYPEOF | TO_STR) => regs[a] = tri!(at, self.bc_unary(op, regs[b])),
+                    CONCAT => regs[a] = tri!(at, self.bc_concat(&regs[b..b + cc])),
+                    JMP => {
+                        let off = w as i32 >> 8;
+                        if off < 0 {
                             tri!(at, self.tick());
                         }
-                        pc = (pc as isize + sbx as isize) as usize;
+                        pc = (pc as isize + off as isize) as usize;
+                    }
+                    op @ (JMP_IF | JMP_IF_NOT | JMP_NULLISH | JMP_NOT_NULLISH) => {
+                        let v = regs[a];
+                        let on = match op {
+                            JMP_IF | JMP_IF_NOT => {
+                                let t = match v {
+                                    Value::Bool(t) => t,
+                                    _ => tri!(at, self.truthy(v)),
+                                };
+                                t == (op == JMP_IF)
+                            }
+                            JMP_NULLISH => is_nullish(v),
+                            _ => !is_nullish(v),
+                        };
+                        if on {
+                            if sbx < 0 {
+                                tri!(at, self.tick());
+                            }
+                            pc = (pc as isize + sbx as isize) as usize;
+                        }
+                    }
+                    RET => ret!(regs[a]),
+                    RET_UNDEF => ret!(Value::Undefined),
+                    THROW => tri!(at, Err::<(), _>(Error::Throw(regs[a]))),
+                    DELETE => break 'op Err(unsupported("delete in bytecode", Span::default())),
+                    _ => break 'op Err(unsupported("bad bytecode", Span::default())),
+                }
+                Ok(())
+            };
+            if let Err(err) = step {
+                // The handler of the running function, else the caller's (at the word of its call), and so on up. Any error that
+                // is not a thrown value leaves the whole loop.
+                let (mut err, mut fault) = (err, at);
+                loop {
+                    match self.bc_catch(c, fault, depth, err) {
+                        Ok((t, r, v)) => {
+                            regs[r] = v;
+                            pc = t;
+                            break;
+                        }
+                        Err(e) => {
+                            if st.frames.is_empty() || !matches!(e, Error::Throw(_)) {
+                                while let Some(fr) = st.frames.pop() {
+                                    self.bc_inline_exit(&fr, false);
+                                }
+                                return Err(e);
+                            }
+                            let Some(fr) = st.frames.pop() else { return Err(e) };
+                            self.bc_inline_exit(&fr, false);
+                            code = fr.code;
+                            c = &code;
+                            ops = &c.code.ops[..];
+                            this = fr.this;
+                            base = fr.base as usize;
+                            self.strict = c.code.strict;
+                            regs = &mut st.regs[base..base + c.code.nregs as usize];
+                            fault = fr.pc as usize - 2;
+                            err = e;
+                        }
                     }
                 }
-                RET => return Ok(regs[a]),
-                RET_UNDEF => return Ok(Value::Undefined),
-                THROW => tri!(at, Err::<(), _>(Error::Throw(regs[a]))),
-                DELETE => return Err(unsupported("delete in bytecode", Span::default())),
-                _ => return Err(unsupported("bad bytecode", Span::default())),
             }
         }
     }

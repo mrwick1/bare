@@ -40,6 +40,8 @@ pub(super) enum Site {
     /// The full search: a site behind a class, a site named `arguments`, or a binding that does not exist yet (a parameter default
     /// that reads a `var` of the same function, or a script name before its script runs).
     Dynamic,
+    /// Stage 2: the name is a variable of a register function, in this register. `bc_resolve` never gives it; the code generator does.
+    Reg(u32),
 }
 
 /// What made a binding.
@@ -685,6 +687,7 @@ impl<'p> Interp<'p> {
                 Site::Global => st == GLOBAL,
                 // A declared name with no binding (yet) is dynamic here, and local there.
                 Site::Dynamic => st == 0 || st & LOCAL != 0,
+                Site::Reg(_) => false,
             };
             if !ok {
                 bad = Some(format!("static {st:#x}"));
