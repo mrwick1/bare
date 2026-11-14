@@ -4134,5 +4134,9 @@ mod ic_tests;
 mod forin_tests;
 
 #[cfg(test)]
+#[path = "eval_retable_tests.rs"]
+mod retable_tests;
+
+#[cfg(test)]
 #[path = "eval_inspect_tests.rs"]
 mod inspect_tests;

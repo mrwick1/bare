@@ -168,6 +168,72 @@ struct ReData {
     flags: StrId,
 }
 
+/// One answer of `RegExp.prototype.test`: the end of the match (`NO_MATCH` for none) of the pattern `re` on the string `si`/`sg` from index
+/// `from`, and the steps the engine charged for it. `re == 0` is an empty entry (a pattern id is never 0).
+#[derive(Clone, Copy)]
+struct ReEntry {
+    re: u64,
+    from: u32,
+    si: u32,
+    sg: u32,
+    steps: u32,
+    end: u32,
+}
+
+const NO_MATCH: u32 = u32::MAX;
+const RE_EMPTY: ReEntry = ReEntry { re: 0, from: 0, si: 0, sg: 0, steps: 0, end: 0 };
+/// The table has this many entries when it is first used, and doubles when it replaces as many entries as it has, up to `RE_TAB_MAX`
+/// (32 bytes each: 8 KiB to 1 MiB). A fixed bound, whatever the page does.
+const RE_TAB_MIN: usize = 256;
+const RE_TAB_MAX: usize = 1 << 15;
+
+/// The result table of `test()`: direct-mapped, keyed by the compiled pattern, the start index and the string handle. A string is immutable
+/// and a freed handle gets a new generation, so the key names one answer for good. The table holds no string: a handle in it is not a root.
+#[derive(Default)]
+struct ReTable {
+    e: Vec<ReEntry>,
+    /// Entries replaced by another key since the last growth.
+    replaced: usize,
+}
+
+impl ReTable {
+    #[inline]
+    fn slot(&self, re: u64, from: u32, si: u32) -> usize {
+        let h = re.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (((si as u64) << 32) | from as u64).wrapping_mul(0x517C_C1B7_2722_0A95);
+        (h >> 32) as usize & (self.e.len() - 1)
+    }
+
+    #[inline]
+    fn get(&self, re: u64, from: u32, s: StrId) -> Option<ReEntry> {
+        if self.e.is_empty() {
+            return None;
+        }
+        let e = self.e[self.slot(re, from, s.index)];
+        (e.re == re && e.from == from && e.si == s.index && e.sg == s.gn).then_some(e)
+    }
+
+    fn put(&mut self, e: ReEntry) {
+        if self.e.is_empty() {
+            self.e = vec![RE_EMPTY; RE_TAB_MIN];
+        }
+        let i = self.slot(e.re, e.from, e.si);
+        if self.e[i].re != 0 {
+            self.replaced += 1;
+            if self.replaced > self.e.len() && self.e.len() < RE_TAB_MAX {
+                let n = 2 * self.e.len();
+                let old = std::mem::replace(&mut self.e, vec![RE_EMPTY; n]);
+                self.replaced = 0;
+                for o in old.into_iter().filter(|o| o.re != 0) {
+                    let j = self.slot(o.re, o.from, o.si);
+                    self.e[j] = o;
+                }
+            }
+        }
+        let i = self.slot(e.re, e.from, e.si);
+        self.e[i] = e;
+    }
+}
+
 /// State of the bindings. Every handle in it is a root (see `ext_roots`) except `regexps` keys and `cache` keys.
 struct Ext {
     bl: BuiltinLimits,
@@ -181,6 +247,9 @@ struct Ext {
     /// Compiled patterns of `RegExp(src, flags)` by string handles. Cleared by `collect`.
     cache: FxMap<(ByHandle, ByHandle), (Rc<rx::Regex>, StrId, StrId)>,
     scratch: rx::Scratch,
+    re_tab: ReTable,
+    /// `test()` calls answered by the result table (tests and tools).
+    re_hits: u64,
     k_last_index: PropertyKey,
     k_index: PropertyKey,
     k_input: PropertyKey,
@@ -189,6 +258,10 @@ struct Ext {
 }
 
 impl Ext {
+    fn re_tab_bytes(&self) -> usize {
+        self.re_tab.e.capacity() * std::mem::size_of::<ReEntry>()
+    }
+
     fn new(heap: &mut Heap, object_proto: ObjId) -> Result<Ext, HeapError> {
         let string_proto = heap.new_object(Some(object_proto))?;
         let regexp_proto = heap.new_object(Some(object_proto))?;
@@ -204,6 +277,8 @@ impl Ext {
             lits: FxMap::default(),
             cache: FxMap::default(),
             scratch: rx::Scratch::new(),
+            re_tab: ReTable::default(),
+            re_hits: 0,
             k_last_index: heap.key_from_str("lastIndex")?,
             k_index: heap.key_from_str("index")?,
             k_input: heap.key_from_str("input")?,
@@ -357,6 +432,8 @@ impl<'p> Interp<'p> {
     /// Replace the bounds of the bindings (defaults: [`BuiltinLimits::default`]).
     pub fn set_builtin_limits(&mut self, bl: BuiltinLimits) {
         self.ext.bl = bl;
+        // A stored answer holds for the limits it ran under.
+        self.ext.re_tab = ReTable::default();
     }
 
     /// How many regexp objects the evaluator tracks (for tools and tests). `collect` drops the dead ones.
@@ -631,7 +708,7 @@ impl<'p> Interp<'p> {
                 if self.user_exec(r)? {
                     return self.re_test_g(r, s);
                 }
-                Ok(Value::Bool(self.re_exec_raw(r, s)?.is_some()))
+                Ok(Value::Bool(self.re_test_raw(r, s)?))
             }
             Bi::ReToString => {
                 let Value::Object(o) = this else { return Err(self.type_err("RegExp.prototype.toString requires that 'this' be an Object")) };
@@ -1392,19 +1469,9 @@ impl<'p> Interp<'p> {
     /// The match, and whether the regexp has named groups (`Match` has no room for it: it is the same size as before, 24 bytes).
     fn re_exec_raw(&mut self, r: ObjId, s: StrId) -> Res<Option<(rx::Match, bool)>> {
         let re = self.ext.regexps[&r].re.clone();
-        let lv = self.get_prop(Value::Object(r), self.ext.k_last_index)?;
-        let n = self.coerce_number(lv)?;
-        let fl = re.flags();
-        let track = fl.global || fl.sticky;
-        let li = if !track || n.is_nan() || n <= 0.0 { 0.0 } else { n.trunc().min(9007199254740991.0) };
-        let len = h!(self, self.heap.str_len(s));
-        if li > len as f64 {
-            if track {
-                self.set_last_index(r, 0.0)?;
-            }
-            return Ok(None);
-        }
-        let m = self.run_engine(&re, s, li as usize)?;
+        let Some(li) = self.re_start(r, s, &re)? else { return Ok(None) };
+        let track = re.flags().global || re.flags().sticky;
+        let m = self.run_engine(&re, s, li)?;
         match m {
             None => {
                 if track {
@@ -1420,6 +1487,54 @@ impl<'p> Interp<'p> {
                 Ok(Some((m, re.has_names() || re.flags().has_indices)))
             }
         }
+    }
+
+    /// The start of `RegExpBuiltinExec`: reads and coerces `lastIndex` (this can run script) and gives the index to match from. `None`: it is
+    /// past the end of `s`, so there is no match (`lastIndex` is reset for `g` and `y`).
+    fn re_start(&mut self, r: ObjId, s: StrId, re: &rx::Regex) -> Res<Option<usize>> {
+        let lv = self.get_prop(Value::Object(r), self.ext.k_last_index)?;
+        let n = self.coerce_number(lv)?;
+        let fl = re.flags();
+        let track = fl.global || fl.sticky;
+        let li = if !track || n.is_nan() || n <= 0.0 { 0.0 } else { n.trunc().min(9007199254740991.0) };
+        let len = h!(self, self.heap.str_len(s));
+        if li > len as f64 {
+            if track {
+                self.set_last_index(r, 0.0)?;
+            }
+            return Ok(None);
+        }
+        Ok(Some(li as usize))
+    }
+
+    /// `re_exec_raw` for `test`: the same reads and `lastIndex` writes, and the answer comes from the result table when the pair was run before.
+    fn re_test_raw(&mut self, r: ObjId, s: StrId) -> Res<bool> {
+        let re = self.ext.regexps[&r].re.clone();
+        let Some(li) = self.re_start(r, s, &re)? else { return Ok(false) };
+        let end = self.run_test(&re, s, li)?;
+        if re.flags().global || re.flags().sticky {
+            self.set_last_index(r, end.unwrap_or(0) as f64)?;
+        }
+        Ok(end.is_some())
+    }
+
+    /// The end of the match of `re` on `s` from `from`, or `None`. A pair that ran before is answered from the table, with the steps of the
+    /// first run charged again: the budget stays what the engine would have used. A stored answer that does not fit the budget left is not
+    /// used: the engine runs and ends the run as it did. Only an answer that the engine gave is stored.
+    fn run_test(&mut self, re: &rx::Regex, s: StrId, from: usize) -> Res<Option<usize>> {
+        let left = self.step_limit.saturating_sub(self.steps);
+        let from32 = u32::try_from(from).ok();
+        if let Some(f) = from32 && let Some(e) = self.ext.re_tab.get(re.id(), f, s) && left > 0 && e.steps as u64 <= self.ext.bl.regexp_steps.min(left) {
+            self.ext.re_hits += 1;
+            self.steps = self.steps.saturating_add(e.steps as u64);
+            return Ok((e.end != NO_MATCH).then_some(e.end as usize));
+        }
+        let m = self.run_engine(re, s, from)?;
+        let end = m.map(|m| m.spans[0].map_or(0, |x| x.1));
+        if let (Some(f), Ok(steps), Some(end32)) = (from32, u32::try_from(self.ext.scratch.steps), end.map_or(Some(NO_MATCH), |e| u32::try_from(e).ok().filter(|&e| e != NO_MATCH))) {
+            self.ext.re_tab.put(ReEntry { re: re.id(), from: f, si: s.index, sg: s.gn, steps, end: end32 });
+        }
+        Ok(end)
     }
 
     /// All matches of a global regexp, from index 0. Sets `lastIndex` to 0 first (a read-only `lastIndex` throws)
