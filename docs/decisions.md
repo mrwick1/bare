@@ -2143,3 +2143,15 @@ Proposed in [the design](design-style-round2.md). The owner has not approved it 
 Criterion 3: build class atoms, then a selector arena with a direct parser, then a second memo keyed by the winning declaration values. Do not build signature sharing for the two ramps: it gives 0% there. Do not drop the style dedupe: it costs 56 MB on `compm_22000`.
 
 Criterion 8: un-keep the CSSOM objects that leave a list, prune the host tables on stale handles, and remove the `cssom-objects` cap. Do not tie the cap to the rule count: it fails a page that inserts and deletes rules in a loop sooner than today.
+- Page fetch and XHR generate `Sec-Fetch-Site`, `Sec-Fetch-Mode` and `Sec-Fetch-Dest` at the wire-hop boundary for secure or loopback destinations. Scripts cannot set these headers.
+- Keep the least-trusted site relation across redirects. A later return to the initiating origin cannot clear a cross-site hop.
+- Use pinned `psl` 2.1.253 for registrable domains. The cookie helper has a partial suffix list and stays unchanged. Treat numeric addresses as separate hosts.
+- Add metadata after the author-header preflight decision. Fetch and XHR use destination `empty` and do not claim a user activation.
+- Reason: issue 475 blocked a same-origin endpoint that requires browser metadata. The owner reviewed the design and its suffix-list amendment before implementation. This does not implement metadata for every browser resource or navigation.
+
+## Textarea rendered text (2026-11-14)
+
+- Treat a rendered textarea as a replaced control during innerText collection. Do not walk its DOM children or append its edited value.
+- Keep existing whitespace and block boundaries. Preserve descendant DOM text for hidden or detached getter targets.
+- Keep the separate select gate unchanged. Add no cache, dependency or extra full-document traversal.
+- Reason: issue 482 stopped whole-page text reads and triggered a pending async continuation in the Deck helper. The owner approved the design. This does not establish recovery from every Unsupported async operation.
