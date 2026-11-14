@@ -1,6 +1,6 @@
 # Wrap unbroken text through the existing line breaker
 
-Date: 2026-11-14. Status: proposed for owner review. Issue: #467.
+Date: 2026-11-14. Status: approved by the owner; implementation follows the color fix. Issue: #467.
 
 ## Verified baseline
 
@@ -37,4 +37,4 @@ Run CSS and layout suites, then the browser library tests. Repeat the 390-pixel 
 
 Change CSS property/cascade handling, text segmentation for the opted-in path, inline placement, intrinsic sizing, related tests and the existing ICU dependency wiring. Do not rewrite the font system, paint pipeline or ordinary paragraph layout. Full language-specific line breaking, hyphenation and keep-all are outside this fix.
 
-Stop and revise this design if cluster boundaries or source mappings cannot be preserved across inline nodes without a wider layout rewrite. The dependency and style-size costs need measurement. The owner must review this design before implementation. No production code has changed.
+Stop and revise this design if cluster boundaries or source mappings cannot be preserved across inline nodes without a wider layout rewrite. The dependency and style-size costs need measurement. The owner approved this design before implementation. No production code has changed.
