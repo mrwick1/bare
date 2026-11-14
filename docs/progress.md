@@ -9425,3 +9425,37 @@ A data literal in a module source (`ModuleLazy`; the tests use classic scripts).
 - Most tests of `eval_lazy_tests.rs` run on a source below 16 KiB, so they run the eager path. Only a padded source (a comment of 16 KiB) runs lazy functions.
 - On the experiment branch an arrow in parentheses that starts a call, `(() => ...)()`, was lazy at first, because the inner `(` moves `eager_at` before the arrow is checked. A test caught it. It matters only if arrows become lazy.
 - `rust-book-search` is 0.9% lower in instructions with this change. The cause was not examined.
+## Rule-set sharing: measurements and design (docs only)
+
+Design: `docs/design-rule-share.md`. Nothing is built. Main `5b42d061`, archMachine (shared, load 6 to 22). Instructions are `instructions:u`. Totals are 3 runs; the phase split comes from temporary counters (1 run each, not in the repository) and `force_count.py` agrees on the suite.
+
+### Hypothesis verdict
+
+The rule set and its index are built again for each document: confirmed. The parsed sheet is cached: rejected. There is no CSS parse cache. The tokenizer and the selector parse run in every build and are 73% of it.
+
+### Share of the build
+
+| Workload | Total (3 runs) | Build | Build, split lists, body reads |
+| --- | ---: | ---: | ---: |
+| Suite, V2, one worker | 13,101 M (13,099 to 13,103) | 2,134 M (16.3%), 191 builds, 11.17 M each | 2,368 M (18.1%) |
+| 47 corpus journeys | 92,643 M (92,434 to 92,643) | 2,005 M (2.16%), 140 builds, 94 documents | 2,421 M (2.61%) |
+| `compm_22000` | 1,834 M (spread 0.1 M) | 111.6 M (6.1%), 1 build | 156.5 M (8.5%) |
+| `rest_13` | 1,241 M (spread 0.0 M) | 180.5 M (14.5%), 1 build | 214.6 M (17.3%) |
+
+The step 6 shares (30.9% suite, 7.8 to 8.3% journeys) are lower today. Hypothesis: lazy bodies (#498). I did not run the old commit. The "0.6 G fixed cost" of the ramps is not the build (`rest_2` costs 580 M, the build 215 M).
+
+Split of the suite build: selector parse 51% (2,690 per selector), tokenizer and text copy 22%, index push 12% (590 per entry), entry and the rest 11%, body step 4%.
+
+### Repeats
+
+- Suite: 1 distinct sheet list in 191 builds. 190 builds repeat (99.5% of the build).
+- Journeys: 41 of 140 builds repeat a whole earlier list (338 M, 0.36% of all instructions); 24 of 47 journeys have one. 41 builds are full rebuilds inside one document (a late `<link>` or an edited `<style>` breaks `starts_with`). 63% of the build instructions are in a sheet that an earlier build had (890 M in the same document, 316 M in an earlier document, 51 M the UA sheet).
+- Ramps: one document, one build. No repeat.
+
+### Recommendation and expected gain (estimates, not built)
+
+Process-wide name atoms first, then a cache of immutable `Rc<RuleSet>` keyed by the sheet list and the viewport. A per-sheet parse cache only if a gate says so. Suite V2 13.1 to about 10.75 G (criterion 7: 1.97 times against the frozen V0, 1.69 times against V0 of the same binary; now 1.62 and 1.38). Journeys -0.4% (all sharing together at most 1.6%). Ramps: no change. A cheaper first selector parse is the only lever on the ramps (hypothesis: `rest_13` 9.3 times, `compm_22000` 6.5 times) and is a separate design.
+
+### Not tested
+
+Nothing was built, so no cost matrix, test262 or workspace test ran. Wall time. The live size of a rule set. The cost of a process-wide `intern`. The hit rate on a real warm suite. Details in section 7 of the design document.
