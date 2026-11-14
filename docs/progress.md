@@ -10161,3 +10161,26 @@ A live run on developer.mozilla.org (the chunks load on the recorded corpus only
 ## Correction of criterion 2 after PR #521 (2026-11-14)
 
 The final benchmark gave 85.3% for criterion 2. That total held a broken `mdn-reference` row: the journey did not load its chunk files. PR #521 fixed it. `mdn-reference` now costs 7,179 M instructions (2,102 M before the fix), and the other 46 journeys moved by less than 0.1%. The corrected estimate is 94,796 M of 105,189 M, or 90.1% of the baseline. It adds the PR #521 number to the totals of `8f23dded`. A full rerun was not done.
+
+## Perf goal, round 2: plan (2026-11-14)
+
+The owner started round 2 on 2026-11-14. Round 1 met criteria 1, 5 and 7, and half of 8. Criteria 2 (about 90.1%), 3, 4 and 6 are not met. See "Final benchmark of the perf goal (2026-11-14)" and "Correction of criterion 2 after PR #521".
+
+Method: `CLAUDE.md`. Each task measures first and writes a design document. The owner reviews each document before code is built. Every result and owner decision goes in this file.
+
+Owner decisions:
+
+- Round 2 starts with profiles and designs, not code.
+- Register VM stage 2 slice 2 is on hold. The journeys are not JS-bound for the VM: the lane on gave -0.07% (PR #518).
+
+Tasks (measure and design, docs only):
+
+| Task | Criterion | Question |
+| --- | --- | --- |
+| R2-A | 2, 4 | Where do `react-docs`, `rust-book-search` and `nodejs-org-home` spend instructions, by subsystem and by call subtree? |
+| R2-B | 2 | The same for `wikipedia-article` and `wikipedia-search`. |
+| R2-C | 6 | Which merges after PR #501 added about 9 MiB to `python-docs-search-results`, and what design removes it? |
+| R2-D | 2 | Why do `wiktionary-portal` (+28%) and `wikipedia-portal` (+23%) cost more since PR #492? Hypothesis: lazy functions that run are parsed twice. |
+| R2-E | 3, 8 | What is left in `compm_22000` and `rest_13` (first selector parse, cascade on unique lists), and what replaces the `cssom-objects` cap (524,288)? |
+
+The five heavy journeys are 60% of the journey instructions and moved -0.8% in round 1. R2-A and R2-B decide the next designs for criterion 2.
