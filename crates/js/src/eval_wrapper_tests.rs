@@ -71,7 +71,7 @@ fn a_wrapper_costs_one_object_and_one_table_entry() {
         assert_eq!(after.live_exotics, 1000);
         assert!(after.live_strings <= before.live_strings + 3, "no string for a Number wrapper: {} -> {}", before.live_strings, after.live_strings);
         let per = (after.bytes - before.bytes) / 1000;
-        assert!(per <= 120, "accounted bytes for each wrapper: {per}");
+        assert!(per <= 128, "accounted bytes for each wrapper: {per}"); // 125: the record holds 3 inline values (104 B, was 80 B)
     });
 }
 
