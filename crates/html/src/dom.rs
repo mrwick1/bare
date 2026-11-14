@@ -199,6 +199,38 @@ fn is_on_name(name: &str) -> bool {
     name.len() > 2 && name.as_bytes()[..2].eq_ignore_ascii_case(b"on")
 }
 
+/// The classes of the elements as atoms (`Document::with_classes`): for the node `i`, `slots[i]` is the start and the length of its list
+/// in `atoms`, or `u32::MAX` as the start when the list is not made yet. A write of `class` forgets the list (the old one stays in `atoms`).
+#[derive(Default)]
+struct ClassCache {
+    slots: Vec<(u32, u32)>,
+    atoms: Vec<Atom>,
+}
+
+impl ClassCache {
+    #[inline(always)]
+    fn get(&self, node: usize) -> Option<&[Atom]> {
+        match self.slots.get(node) {
+            Some(&(start, len)) if start != u32::MAX => Some(&self.atoms[start as usize..(start + len) as usize]),
+            _ => None,
+        }
+    }
+
+    fn put(&mut self, node: usize, list: &[Atom]) {
+        if self.slots.len() <= node {
+            self.slots.resize(node + 1, (u32::MAX, 0));
+        }
+        self.slots[node] = (self.atoms.len() as u32, list.len() as u32);
+        self.atoms.extend_from_slice(list);
+    }
+
+    fn forget(&mut self, node: usize) {
+        if let Some(s) = self.slots.get_mut(node) {
+            s.0 = u32::MAX;
+        }
+    }
+}
+
 /// A whole tree. It owns all of its nodes.
 pub struct Document {
     nodes: Vec<Node>,
@@ -219,6 +251,8 @@ pub struct Document {
     class_sets: RefCell<HashMap<usize, HashSet<Box<str>, BuildHasherDefault<Fnv>>, BuildHasherDefault<Fnv>>>,
     // The classes of the elements that have a long `class` attribute, as a set. See `has_class`.
     // The attributes of an element never change, so this needs no clean-up.
+    class_cache: RefCell<ClassCache>,
+    // The class names of each element as atoms. See `with_classes`.
     places: [OnceCell<Vec<(u32, u32)>>; 2],
     // The place of each element among its sibling elements, from the start and from the end. Made the
     // first time that `sibling_place` asks, and dropped when the tree changes. `[0]` counts all
@@ -711,6 +745,7 @@ impl Document {
             text: String::new(),
             places: Default::default(),
             class_sets: Default::default(),
+            class_cache: Default::default(),
             foreign: HashMap::default(),
             any_ns: false,
             watched: HashSet::default(),
@@ -1319,6 +1354,38 @@ impl Document {
         self.class_sets.borrow_mut().entry(el.index()).or_insert_with(|| value.split_ascii_whitespace().map(Box::from).collect()).contains(class)
     }
 
+    /// The atom of a class name. The name goes in the name table of the thread, but it is not a name that this document uses (`name_count`).
+    pub fn class_atom(&self, class: &str) -> Atom {
+        Atom(self.names.with(|n| n.intern(class)))
+    }
+
+    /// Call `f` with the classes of the element `el` as atoms: sorted, with no repeat. No class, or not an element, is an empty list.
+    /// The list is made from the `class` attribute the first time, and kept until a write of `class`. `f` must not call `with_classes` for
+    /// an element that has no list yet: that would borrow the cache again.
+    #[inline(always)]
+    pub fn with_classes<R>(&self, el: NodeId, f: impl FnOnce(&[Atom]) -> R) -> R {
+        if let Some(r) = self.class_cache.borrow().get(el.index()) {
+            return f(r);
+        }
+        self.fill_classes(el);
+        f(self.class_cache.borrow().get(el.index()).unwrap_or(&[]))
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn fill_classes(&self, el: NodeId) {
+        let mut atoms: Vec<Atom> = self.attr(el, Atom::CLASS).map_or_else(Vec::new, |v| v.split_ascii_whitespace().map(|c| self.class_atom(c)).collect());
+        atoms.sort_unstable_by_key(|a| a.0);
+        atoms.dedup();
+        self.class_cache.borrow_mut().put(el.index(), &atoms);
+    }
+
+    /// Does the element `el` have the class `class`? Like `has_class`, with the atom of the name (`class_atom`).
+    #[inline(always)]
+    pub fn has_class_atom(&self, el: NodeId, class: Atom) -> bool {
+        self.with_classes(el, |list| if list.len() <= 8 { list.contains(&class) } else { list.binary_search_by_key(&class.0, |a| a.0).is_ok() })
+    }
+
     /// The place of the element `el` among its sibling elements: 1 for the first. It counts from the end with
     /// `from_end`, and counts only the elements with the same name with `of_type`. This is what `:nth-child`
     /// and `:nth-of-type` ask. All the places are made in one pass the first time, so each answer is a look-up.
@@ -1924,6 +1991,9 @@ impl Document {
         self.name_revision += u64::from(self.names_attr(name));
         self.note_name(name, value);
         self.class_sets.get_mut().remove(&el.index());
+        if name == Atom::CLASS {
+            self.class_cache.get_mut().forget(el.index());
+        }
         // An empty list can start after the end (see `attrs`): it begins again at the end.
         let (start, len) = if attrs.len == 0 { (self.attrs.len(), 0) } else { (attrs.start as usize, attrs.len as usize) };
         if let Some(a) = self.attrs[start..start + len].iter_mut().find(|a| a.name == name) {
@@ -1964,6 +2034,9 @@ impl Document {
         self.revision += 1;
         self.name_revision += u64::from(self.names_attr(name));
         self.class_sets.get_mut().remove(&el.index());
+        if name == Atom::CLASS {
+            self.class_cache.get_mut().forget(el.index());
+        }
         let value = self.attrs[start + at].value;
         if self.watcher.is_some() {
             self.notify(Change::Attr { el, name, old: Some(value), new: None });

@@ -94,7 +94,7 @@ fn simple_bytes(s: &Simple) -> usize {
     use std::mem::size_of;
     let lists = |l: &Vec<Vec<Simple>>| l.capacity() * size_of::<Vec<Simple>>() + l.iter().map(simples_bytes).sum::<usize>();
     match s {
-        Simple::Id(t) | Simple::Class(t) | Simple::State(t) => t.len(),
+        Simple::Id(t) | Simple::State(t) => t.len(),
         Simple::Attr { test, .. } => match test {
             AttrTest::Exists => 0,
             AttrTest::Equals(t, _) | AttrTest::Word(t, _) | AttrTest::Dash(t, _) | AttrTest::Prefix(t, _) | AttrTest::Suffix(t, _) | AttrTest::Contains(t, _) => t.len(),
@@ -150,8 +150,8 @@ pub enum Simple {
     Tag(Atom),
     /// `#main`
     Id(Box<str>),
-    /// `.item`
-    Class(Box<str>),
+    /// `.item`, as the atom of the name (`Document::class_atom`).
+    Class(Atom),
     /// `[href^="http"]`
     Attr { name: Atom, test: AttrTest },
     /// `:first-child`: no element before this one in its parent.
@@ -457,7 +457,7 @@ impl Parser<'_, '_> {
                 Some(Token::Delim('.')) => {
                     self.tokens.next();
                     let Some(Token::Ident(name)) = self.tokens.next() else { return None };
-                    simples.push(Simple::Class(name.into()));
+                    simples.push(Simple::Class(self.doc.class_atom(&name)));
                     counts[1] += 1;
                 }
                 Some(Token::OpenSquare) => {
@@ -773,6 +773,11 @@ fn an_plus_b(text: &str) -> Option<(i32, i32)> {
 mod tests {
     use super::*;
 
+    fn class(name: &str) -> Atom {
+        // All the documents of a thread share the name table.
+        Document::new().class_atom(name)
+    }
+
     #[test]
     fn nth_with_a_wide_character_after_n_is_not_a_panic() {
         assert_eq!(an_plus_b("2n\u{fffd}1"), None);
@@ -798,7 +803,7 @@ mod tests {
             list[0].compounds[0].simples,
             vec![
                 Simple::Tag(li),
-                Simple::Class("a".into()),
+                Simple::Class(class("a")),
                 Simple::Id("b".into()),
                 Simple::Attr { name: href, test: AttrTest::Exists },
             ]
@@ -885,7 +890,7 @@ mod tests {
         assert_eq!(args.len(), 2);
         // From the right to the left, like a selector.
         assert_eq!(args[0].iter().map(|c| (c.simples.len(), c.combinator)).collect::<Vec<_>>(), [(1, Combinator::Child), (1, Combinator::Descendant)]);
-        assert_eq!(args[0][0].simples, [Simple::Class("b".into())]);
+        assert_eq!(args[0][0].simples, [Simple::Class(class("b"))]);
         assert_eq!(args[1].len(), 1);
         let Simple::Complex(c) = simple(":where(a b)") else { panic!("not complex") };
         assert!(!c.not);
@@ -933,7 +938,7 @@ mod tests {
     #[test]
     fn escapes_in_names() {
         let list = parse(r".a\:b #\31 23").unwrap();
-        assert_eq!(list[0].compounds[1].simples, vec![Simple::Class("a:b".into())]);
+        assert_eq!(list[0].compounds[1].simples, vec![Simple::Class(class("a:b"))]);
         assert_eq!(list[0].compounds[0].simples, vec![Simple::Id("123".into())]);
     }
 
@@ -956,8 +961,8 @@ mod tests {
         assert_eq!(simple(":link"), Simple::Link);
         assert_eq!(simple(":hover"), Simple::User(User::Hover));
         assert_eq!(simple(":visited"), Simple::Never);
-        assert_eq!(simple(":is(.a, #b)"), Simple::Is(vec![vec![Simple::Class("a".into())], vec![Simple::Id("b".into())]]));
-        assert_eq!(simple(":not(.a, #b)"), Simple::Not(vec![vec![Simple::Class("a".into())], vec![Simple::Id("b".into())]]));
+        assert_eq!(simple(":is(.a, #b)"), Simple::Is(vec![vec![Simple::Class(class("a"))], vec![Simple::Id("b".into())]]));
+        assert_eq!(simple(":not(.a, #b)"), Simple::Not(vec![vec![Simple::Class(class("a"))], vec![Simple::Id("b".into())]]));
     }
 
     #[test]

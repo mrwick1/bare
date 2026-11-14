@@ -159,7 +159,7 @@ const SPLIT_FROM: usize = 16;
 /// The rules of one tree, found by what the last compound reads. The document, and each shadow tree, has one.
 struct Index {
     by_id: Buckets<Box<str>>,
-    by_class: Buckets<Box<str>>,
+    by_class: ClassBuckets,
     by_tag: Buckets<Atom>,
     /// The rules with an attribute test and no id or class in the last part, by the name of the attribute: `[data-state=open]`.
     /// An element looks up the names of its own attributes, so a rule for an attribute that it does not have costs nothing.
@@ -176,7 +176,7 @@ struct Index {
 
 impl Default for Index {
     fn default() -> Index {
-        Index { by_id: Buckets::default(), by_class: Buckets::default(), by_tag: Buckets::default(), by_attr: Buckets::default(), other: Vec::new(), big: std::cell::OnceCell::new(), split_from: SPLIT_FROM, longest: 0 }
+        Index { by_id: Buckets::default(), by_class: ClassBuckets::default(), by_tag: Buckets::default(), by_attr: Buckets::default(), other: Vec::new(), big: std::cell::OnceCell::new(), split_from: SPLIT_FROM, longest: 0 }
     }
 }
 
@@ -184,7 +184,7 @@ impl Default for Index {
 #[derive(Default)]
 struct Bigs {
     by_id: HashMap<Box<str>, Big, BuildHasherDefault<Fnv>>,
-    by_class: HashMap<Box<str>, Big, BuildHasherDefault<Fnv>>,
+    by_class: HashMap<Atom, Big, BuildHasherDefault<Fnv>>,
     by_tag: HashMap<Atom, Big, BuildHasherDefault<Fnv>>,
     by_attr: HashMap<Atom, Big, BuildHasherDefault<Fnv>>,
     other: Option<Big>,
@@ -281,8 +281,8 @@ impl Index {
                 for (k, l) in &self.by_id {
                     bigs.by_id.extend(make(l).map(|b| (k.clone(), b)));
                 }
-                for (k, l) in &self.by_class {
-                    bigs.by_class.extend(make(l).map(|b| (k.clone(), b)));
+                for (k, l) in self.by_class.iter() {
+                    bigs.by_class.extend(make(l).map(|b| (k, b)));
                 }
                 for (&k, l) in &self.by_tag {
                     bigs.by_tag.extend(make(l).map(|b| (k, b)));
@@ -304,8 +304,8 @@ impl Index {
         let last = &selector.compounds[0].simples;
         let list = if let Some(Simple::Id(id)) = last.iter().find(|s| matches!(s, Simple::Id(_))) {
             self.by_id.entry(id.clone()).or_default()
-        } else if let Some(Simple::Class(class)) = last.iter().find(|s| matches!(s, Simple::Class(_))) {
-            self.by_class.entry(class.clone()).or_default()
+        } else if let Some(&Simple::Class(class)) = last.iter().find(|s| matches!(s, Simple::Class(_))) {
+            self.by_class.list(class)
         } else if let Some(&Simple::Attr { name, .. }) = last.iter().find(|s| matches!(s, Simple::Attr { .. })) {
             // Every attribute test needs the attribute: an element without it never matches.
             self.by_attr.entry(name).or_default()
@@ -373,13 +373,13 @@ impl Index {
         {
             put(list, &|b| b.by_id.get(id));
         }
-        if let Some(classes) = doc.attr(el, Atom::CLASS) {
-            for class in classes.split_ascii_whitespace() {
+        doc.with_classes(el, |classes| {
+            for &class in classes {
                 if let Some(list) = self.by_class.get(class) {
-                    put(list, &|b| b.by_class.get(class));
+                    put(list, &|b| b.by_class.get(&class));
                 }
             }
-        }
+        });
         work
     }
 }
@@ -399,6 +399,56 @@ struct Shadowed {
 
 fn slots_set<K>(m: &std::collections::HashSet<K>) -> usize {
     m.capacity() * 8 / 7 * (std::mem::size_of::<K>() + 1)
+}
+
+/// The rules for each class, found by the number of the atom: one bounds check and one load, no hash. `slot[atom - base]` is the place of the
+/// list in `lists` plus one, or 0. The table covers the atoms from the smallest to the largest class of the rules.
+#[derive(Default)]
+struct ClassBuckets {
+    base: u32,
+    slot: Vec<u32>,
+    lists: Vec<Vec<u32>>,
+    atoms: Vec<Atom>,
+}
+
+impl ClassBuckets {
+    #[inline(always)]
+    fn get(&self, class: Atom) -> Option<&Vec<u32>> {
+        match self.slot.get(class.index().wrapping_sub(self.base) as usize) {
+            Some(&n) if n != 0 => Some(&self.lists[n as usize - 1]),
+            _ => None,
+        }
+    }
+
+    /// The list of the class, made when it is new.
+    fn list(&mut self, class: Atom) -> &mut Vec<u32> {
+        let at = class.index();
+        if self.slot.is_empty() {
+            self.base = at;
+        } else if at < self.base {
+            let by = (self.base - at) as usize;
+            self.slot.splice(0..0, std::iter::repeat_n(0, by));
+            self.base = at;
+        }
+        let i = (at - self.base) as usize;
+        if i >= self.slot.len() {
+            self.slot.resize(i + 1, 0);
+        }
+        if self.slot[i] == 0 {
+            self.lists.push(Vec::new());
+            self.atoms.push(class);
+            self.slot[i] = self.lists.len() as u32;
+        }
+        &mut self.lists[self.slot[i] as usize - 1]
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (Atom, &Vec<u32>)> {
+        self.atoms.iter().copied().zip(&self.lists)
+    }
+
+    fn heap_bytes(&self) -> usize {
+        self.slot.capacity() * 4 + self.lists.capacity() * size_of::<Vec<u32>>() + self.atoms.capacity() * 4 + self.lists.iter().map(|l| l.capacity() * 4).sum::<usize>()
+    }
 }
 
 type Buckets<K> = HashMap<K, Vec<u32>, BuildHasherDefault<Fnv>>;
@@ -457,7 +507,7 @@ pub struct RuleSet {
 /// same sets; theirs also keep the selectors on the right of the name, to restyle fewer descendants.
 #[derive(Default)]
 struct Reach {
-    class: HashMap<Box<str>, Scope, BuildHasherDefault<Fnv>>,
+    class: HashMap<Atom, Scope, BuildHasherDefault<Fnv>>,
     id: HashMap<Box<str>, Scope, BuildHasherDefault<Fnv>>,
     attr: HashMap<Atom, Scope, BuildHasherDefault<Fnv>>,
     /// `:link` and `:any-link` read `href`.
@@ -470,7 +520,7 @@ impl Reach {
             for s in list {
                 let slot = match s {
                     Simple::Id(id) => me.id.entry(id.clone()).or_default(),
-                    Simple::Class(class) => me.class.entry(class.clone()).or_default(),
+                    Simple::Class(class) => me.class.entry(*class).or_default(),
                     Simple::Attr { name, .. } => me.attr.entry(*name).or_default(),
                     Simple::Link => &mut me.link,
                     Simple::Not(args) | Simple::Is(args) => {
@@ -755,7 +805,7 @@ impl RuleSet {
                     // Only the classes that were added or removed.
                     let (old, new) = (|| old.split_ascii_whitespace(), || new.split_ascii_whitespace());
                     for c in old().filter(|c| !new().any(|n| n == *c)).chain(new().filter(|c| !old().any(|o| o == *c))) {
-                        scope = scope.max(r.class.get(c).copied().unwrap_or_default());
+                        scope = scope.max(r.class.get(&doc.class_atom(c)).copied().unwrap_or_default());
                     }
                 } else if name == Atom::ID && old != new {
                     for id in [old, new] {
@@ -805,12 +855,12 @@ impl RuleSet {
             let one = |big: &Big| (big.keys.len() + big.starts.len() + big.list.len() + big.rest.len()) * 4;
             slots(&b.by_id) + slots(&b.by_class) + slots(&b.by_tag) + slots(&b.by_attr)
                 + b.by_id.iter().map(|(k, v)| k.len() + one(v)).sum::<usize>()
-                + b.by_class.iter().map(|(k, v)| k.len() + one(v)).sum::<usize>()
+                + b.by_class.values().map(one).sum::<usize>()
                 + b.by_tag.values().chain(b.by_attr.values()).map(one).sum::<usize>()
                 + b.other.as_ref().map_or(0, one)
         });
         let side = self.side.borrow();
-        let reach = self.reach.get().map_or(0, |r| slots(&r.class) + slots(&r.id) + slots(&r.attr) + r.class.keys().chain(r.id.keys()).map(|k| k.len()).sum::<usize>());
+        let reach = self.reach.get().map_or(0, |r| slots(&r.class) + slots(&r.id) + slots(&r.attr) + r.id.keys().map(|k| k.len()).sum::<usize>());
         self.entries.capacity() * size_of::<Entry>()
             + self.entries.iter().map(|e| e.selector.heap_bytes()).sum::<usize>()
             + self.bodies.capacity() * size_of::<Body>()
@@ -830,7 +880,7 @@ impl RuleSet {
             + slots(&self.layer_by_name)
             + self.layer_by_name.keys().map(|(_, n)| n.len()).sum::<usize>()
             + lists(&index.by_id, |k| k.len())
-            + lists(&index.by_class, |k| k.len())
+            + index.by_class.heap_bytes()
             + lists(&index.by_tag, |_| 0)
             + lists(&index.by_attr, |_| 0)
             + index.other.capacity() * 4
@@ -3079,6 +3129,11 @@ fn name_hash(kind: u32, name: &str) -> u32 {
     mix(h)
 }
 
+/// The hash of a class: from its atom, so that the filter and the splits never read the text of a class name.
+fn class_hash(class: Atom) -> u32 {
+    mix((0x811c_9dc5 ^ 0x5bd1_e995 ^ (class.index() + 1)).wrapping_mul(0x0100_0193))
+}
+
 fn tag_hash(tag: Atom) -> u32 {
     mix((0x811c_9dc5 ^ (tag.index() + 1)).wrapping_mul(0x0100_0193))
 }
@@ -3099,11 +3154,11 @@ fn element_hashes(doc: &Document, el: NodeId, f: &mut dyn FnMut(u32)) {
     if let Some(id) = doc.attr(el, Atom::ID) {
         f(name_hash(1, id));
     }
-    if let Some(classes) = doc.attr(el, Atom::CLASS) {
-        for class in classes.split_ascii_whitespace() {
-            f(name_hash(2, class));
+    doc.with_classes(el, |classes| {
+        for &class in classes {
+            f(class_hash(class));
         }
-    }
+    });
 }
 
 /// The hashes that the ancestors of a matching element must have: from each compound that is an ancestor of the element,
@@ -3126,7 +3181,7 @@ fn ancestor_hashes(selector: &Selector, exact: bool) -> [u32; 4] {
         let hash = pair[1].simples.iter().find_map(|s| match s {
             Simple::Tag(t) => Some(tag_hash(*t)),
             Simple::Id(id) => Some(name_hash(1, id)),
-            Simple::Class(class) => Some(name_hash(2, class)),
+            Simple::Class(class) => Some(class_hash(*class)),
             _ => None,
         });
         if let Some(h) = hash
