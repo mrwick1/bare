@@ -133,7 +133,7 @@ impl Hasher for IdHash {
 pub(crate) type IdMap<K, V> = HashMap<K, V, BuildHasherDefault<IdHash>>;
 
 /// A key that is a slot number of the engine: `ObjId` (its slot is reused, so the whole handle tells a dead object from a new one)
-/// or `NodeId` (the document never reuses one).
+/// or `NodeId` (the reclaim reuses a freed slot, so a holder of a `NodeId` is a root or is forgotten at once: `browser_reclaim.rs`).
 pub(crate) trait SlotKey: Copy + Eq {
     fn slot(self) -> usize;
 }
