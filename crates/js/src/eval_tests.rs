@@ -228,6 +228,61 @@ fn collect_keeps_what_roots_reach_and_frees_the_rest() {
     });
 }
 
+/// The walk skips the side-table probes for a plain array (`Interp::collect`). These cases need a probe: an array that is a key of a `WeakMap`, an
+/// array that a `WeakRef` holds, and an instance of a subclass of `Array` with a private field. All must behave as before.
+#[test]
+fn collect_with_plain_arrays_keeps_what_hangs_on_an_array() {
+    big(|| {
+        let src = "var wm = new WeakMap(); var kept = [1, 2, 3]; wm.set(kept, { v: 'value of kept' }); wm.set([9], { v: 'dies' });\
+                   var keep2 = [7]; var wr2 = new WeakRef(keep2);\
+                   class Sub extends Array { #p = 'private'; get p() { return this.#p; } } var sub = new Sub(); sub.push(1);\
+                   var big = []; for (var i = 0; i < 2000; i++) big.push([i, [i], { a: [i] }]);\
+                   var inner = [[{ deep: [42] }]]; wm.set(inner[0], { v: inner });\
+                   function c1() { return wm.get(kept).v + ',' + wm.get(inner[0]).v[0][0].deep[0]; }\
+                   function c2() { return sub.p + sub.length + (sub instanceof Sub); }\
+                   function c3() { return wr2.deref()[0] + ',' + big.length + big[1999][1][0] + big[5][2].a[0]; }";
+        let prog = parse_script(src, Limits::default()).unwrap();
+        let mut it = setup(&prog, EvalLimits { max_steps: u64::MAX / 2, ..Default::default() });
+        it.run().unwrap();
+        let before = it.heap.stats().live_objects;
+        it.collect(&[]).unwrap();
+        it.collect(&[]).unwrap();
+        for (f, want) in [("c1", "value of kept,42"), ("c2", "private1true"), ("c3", "7,200019995")] {
+            let f = global_get(&mut it, f);
+            let v = it.call(f, Value::Undefined, &[]).unwrap();
+            assert_eq!(it.display(v), want);
+        }
+        // `[9]` was a weak key that nothing else held: its value went.
+        assert!(it.heap.stats().live_objects < before, "{} objects before, {} after", before, it.heap.stats().live_objects);
+    });
+}
+
+/// Native memory that only a collect can release (the nodes of a parsed document) also asks for a collect: 4 MiB since the last one, or a
+/// fourth of the native bytes that were live after it. The collect resets the count.
+#[test]
+fn gc_is_due_when_the_host_added_four_mib_of_native_bytes_since_the_last_collect() {
+    big(|| {
+        let prog = parse_script("var x = 1;", Limits::default()).unwrap();
+        let mut it = setup(&prog, EvalLimits { max_steps: u64::MAX / 2, ..Default::default() });
+        it.run().unwrap();
+        it.add_external(3 << 20);
+        assert!(!it.gc_due(), "3 MiB is below the floor");
+        it.add_external(2 << 20);
+        assert!(it.gc_due(), "5 MiB of native bytes, and the heap is small");
+        it.collect(&[]).unwrap();
+        assert!(!it.gc_due(), "a collect resets the count");
+        // A large live native size raises the limit to a fourth of it.
+        it.set_external_live(40 << 20);
+        it.add_external(6 << 20);
+        assert!(!it.gc_due(), "6 MiB is under a fourth of 40 MiB");
+        it.add_external(5 << 20);
+        assert!(it.gc_due(), "11 MiB is over a fourth of 40 MiB");
+        // Not inside a call: the same rule as for the heap size.
+        it.collect(&[]).unwrap();
+        assert!(!it.gc_due());
+    });
+}
+
 /// `gc_due` is the host's safe-point question: has the heap grown to half as large again as the previous collect left (past 8 MiB accounted)?
 /// A small heap, a call in progress or a collect that just ran all answer no.
 #[test]

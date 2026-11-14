@@ -221,6 +221,9 @@ pub struct EvalStats {
 /// `Interp::gc_due`: collect when the accounted heap is 1.75 times what the previous collect left, and more than this many bytes.
 /// QuickJS (1.5 x) and SpiderMonkey (150%) use 1.5. A sweep on the React typing page chose 1.75 (docs/decisions.md).
 const GC_MIN_BYTES: usize = 8 << 20;
+/// `Interp::gc_due`: collect when the host added this many native bytes (`add_external`) since the last collect, or a fourth of the native bytes
+/// that were live after it (`set_external_live`). V8 (`UpdateExternalMemory`) and SpiderMonkey count malloc bytes with a second limit in the same way.
+const EXTERNAL_MIN_BYTES: usize = 4 << 20;
 
 /// Capacity to keep in a table of `len` entries after a collect: twice the live entries, or the live entries plus
 /// `since` (what the program made since the previous collect), so steady churn does not shrink and regrow every
@@ -618,6 +621,9 @@ pub struct Interp<'p> {
     gc_allocs: u64,
     /// Accounted heap bytes at the end of the previous `collect` (see `gc_due`).
     gc_live: usize,
+    /// Native bytes that the host added since the previous `collect`, and the native bytes that it said were live after it (see `gc_due`).
+    ext_since: usize,
+    ext_live: usize,
     live_envs: usize,
     funcs: ObjTab<Callee>,
     // run state
@@ -803,6 +809,8 @@ impl<'p> Interp<'p> {
             free_envs: Vec::new(),
             gc_allocs: 0,
             gc_live: 0,
+            ext_since: 0,
+            ext_live: 0,
             live_envs: 0,
             funcs: ObjTab::default(),
             env: 0,
@@ -1025,6 +1033,16 @@ impl<'p> Interp<'p> {
             if !seen.insert(o) {
                 continue;
             }
+            // A plain array has no function entry, promise, host wrapper, iterator or class state, and no private fields unless an instance of a subclass
+            // (`cls.privs`). It can be the key of a weak collection: `pending` holds the values of keys that were not reached yet. Without these the
+            // walk goes straight to its elements and prototype, and skips about 12 table probes for each array of a data literal.
+            if pending.is_empty() && self.cls.privs.is_empty() && self.heap.is_plain_array(o) {
+                h!(self, self.heap.stored_edges(o, &mut work));
+                if let Some(p) = h!(self, self.heap.stored_prototype(o)) {
+                    work.push(Value::Object(p));
+                }
+                continue;
+            }
             // A host function owns no host state: the embedder's `trace` is not asked about it.
             let mut host_fn = false;
             match self.funcs.get(&o) {
@@ -1096,6 +1114,7 @@ impl<'p> Interp<'p> {
         }
         self.gc_allocs = self.heap.stats().total_object_allocs;
         self.gc_live = self.heap.used_bytes();
+        self.ext_since = 0;
         Ok(r)
     }
 
@@ -1103,7 +1122,19 @@ impl<'p> Interp<'p> {
     /// The driver asks at each safe point (between tasks, after each key or click), so garbage cannot pile up while one call of the host
     /// runs many events. QuickJS and SpiderMonkey use the same rule: a limit that is a factor of the live size after the last collect.
     pub fn gc_due(&self) -> bool {
-        self.depth == 0 && self.stmt_frames == 0 && self.heap.used_bytes() > GC_MIN_BYTES.max(self.gc_live / 4 * 7)
+        self.depth == 0
+            && self.stmt_frames == 0
+            && (self.heap.used_bytes() > GC_MIN_BYTES.max(self.gc_live / 4 * 7) || self.ext_since > EXTERNAL_MIN_BYTES.max(self.ext_live / 4))
+    }
+
+    /// The host kept `n` native bytes that only a collect can release (the nodes of a parsed document). They count towards `gc_due`.
+    pub fn add_external(&mut self, n: usize) {
+        self.ext_since = self.ext_since.saturating_add(n);
+    }
+
+    /// The native bytes that are live after a collect. The next trigger is a fourth of them, at least `EXTERNAL_MIN_BYTES`.
+    pub fn set_external_live(&mut self, n: usize) {
+        self.ext_live = n;
     }
 
     /// Give back the capacity of the side tables after a burst died, by the rule of `Slab::trim` (see `trim_to`).

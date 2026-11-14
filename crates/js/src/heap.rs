@@ -908,6 +908,12 @@ impl Heap {
         f
     }
 
+    /// Is `o` an array that is not exotic? Only the weak tables (a `WeakMap` key) and a subclass with private fields give such an array state
+    /// outside the heap (`Interp::collect` asks, to skip the side-table probes).
+    pub fn is_plain_array(&self, o: ObjId) -> bool {
+        self.obj(o).is_ok_and(|ob| ob.is_array && ob.exotic == 0)
+    }
+
     /// Accounted bytes of the live and the dead objects and strings that a sweep has not freed yet (`Stats::bytes`, with no copy of the rest).
     pub fn used_bytes(&self) -> usize {
         self.bytes + self.flat_bytes.get()
