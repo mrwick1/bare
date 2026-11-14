@@ -10978,3 +10978,135 @@ The journeys on a main at or after #479 (broken). Live sites. Windows and macOS.
 
 - The journey benchmark is broken on main since #479 (PR 1 section).
 - The design estimate of -730 M assumed no extra load on the hot tables. Moving `expr_name`, `scopes` and `slots` to the cold side would save 130 M more but costs on the pure-eval rows. A different split needs a profile of the loads, which I did not do.
+
+## Where a journey ends: bisect of the 1,560 M drop and the load state of the settled driver (2026-11-14, docs only)
+
+Task: research, docs only. Design: `docs/design-journey-end.md`. Main `d6837f6d`. Machine archMachine, `heavy` lock held. Scripts, patches and raw logs: `/data/bare-tmp/r2/journey-end/` (`trace.patch`: temporary counters and end-point switches on main; `trace-old.patch`: the same counters on `c4e32a85`; `jrun.py`, `parse.py`, `summ.py`, `tot.py`; `runs/`). Nothing of it is in the repository.
+
+### Correction: the journey benchmark is not broken by PR #479
+
+The R2-D build sections say the journey benchmark is broken on main since PR #479 (`c59e1bcf`): `wiktionary-portal` costs 1,560 M on `5bc18d14` and 95.9 M on `c59e1bcf`. The drop is real. The cause is not #479. It is PR #529 (`2612b710`, the settled driver). A bisect of the merge commits between the two, `bare-drive` release builds, `journeys.sh run --clock virtual --runs 3`, both corpora, instructions as the median of 3 runs (spread 0.2% or less), all runs pass:
+
+| Commit | `wiktionary-portal` `virtual` / `virtual-settled`, M | `curl-se-home`, M | `go-dev-home`, M (misses on `virtual`) |
+| --- | ---: | ---: | ---: |
+| `5bc18d14` | 1,560.1 / 1,560.0 | 146.5 / 146.5 | 3,165.5 / 3,165.5 (0) |
+| `c4e32a85` (#500) | 1,560.1 / 1,560.0 | 146.4 / 146.6 | 3,165.7 / 3,165.7 (0) |
+| `2612b710` (#529, settle fix) | **96.0** / 96.0 | **122.9** / 122.8 | **1,078.1** / 1,078.2 (6) |
+| `df1b9001` (#530, default corpus) | 96.0 / 96.0 | 122.8 / 122.8 | 1,078.1 / 1,078.1 (6) |
+| `c59e1bcf` (#479, fetch metadata) | 95.9 / 96.0 | 122.8 / 122.8 | 1,078.1 / 1,078.2 (6) |
+
+- The step is at #529 on all three journeys. #479 changes nothing (95.9 against 96.0 M).
+- The corpus does not change the instructions of a commit. It changes the misses: the new driver on `virtual` has 6 misses on `go-dev-home`, 0 on `virtual-settled`. The old driver (before #529) has 0 misses on both corpora.
+- #530 only changes the default corpus in `tools/bench/journeys.py` (one line).
+- The journeys did not break. They measure a different end state since #529: the page of the last step is not run to its load. R2-D compared `5bc18d14` (old driver) with `c59e1bcf` (new driver), so the 1,560 M against 95.9 M is the driver. Its other claims (the logo is not requested, 408 ms against 27 ms, fewer scripts) are the same effect: the document of the click is not loaded (below). R2-D's PR 1 and PR 2 journey numbers (93,295 M, 92,697 M) are valid on the old driver and `5bc18d14`; they are not comparable with the settled-driver totals (42,319 M now).
+- The "journeys on a main at or after #479" are valid measurements with `virtual-settled`: 0 misses, 47 of 47 pass.
+
+### Claim 2: the old loop did too much work, the new driver too little
+
+Counters: `Page::je_state` (document generation, `ready_level`, `DOMContentLoaded` flag, `load`, `Page::pending`, script elements of the tree that did not run) is printed before and after the settle call of each step and at the end (`BARE_JE_TRACE`). One run per binary (the counts of a document do not vary). The last record of each document says how far it got when it was left.
+
+Old driver: `c4e32a85` plus the counters, corpus `virtual`, 0 misses. A cross-check with main plus the old loop (`BARE_OLD_SETTLE`) gives the same counts, with 7 journeys that have misses on `virtual` and on `virtual-settled` (hypothesis: requests of the page code that changed after `c4e32a85`; not examined). New driver: main plus the counters, corpus `virtual-settled`, 0 misses. 47 journeys (`nextjs-docs` does not pass on replay under any driver).
+
+| | New driver (main) | Old driver |
+| --- | ---: | ---: |
+| Documents (navigations) | 96 | 96 |
+| Left without `DOMContentLoaded` | 26 | 3 |
+| Left without `load` | 37 | 6 |
+| Last document not at `DOMContentLoaded` / not at `load` | 20 / 25 | 3 / 5 |
+| Requests pending at the end (journeys with at least 1) | 113 (26) | 31 (10) |
+| Scripts of the last documents that did not run | 217 of 381 | 29 of 382 |
+| Scripts of all documents that did not run | 265 of 658 | 41 of 648 |
+| Page time in the settle calls (calls with more than 0.5 ms) | 1,033 ms (39 of 346) | 1,569 ms (74 of 346) |
+
+- The old loop never came near its 5 s limit: 1,569 ms of page time in 346 calls, 127 ms at most in one journey (`wikipedia-main-random`, `wikipedia-article`). It ran each document up to the end of its load, so its extra cost is the load of the document. That is work that a user pays. The R2 hypothesis "the old loop ran page timers for up to 5 s" is wrong.
+- The new driver ends 25 of 47 journeys in an unloaded last document, for example `wiktionary-portal`: after the click the English edition has 4 requests pending (3 style sheets and `load.php`) and 0 of its 4 scripts ran (the old driver: loaded, `idle`).
+- Most scripts that do not run are relative `src` (153 of the 217 sorted by host), then 31 inline scripts, then `assets.dev.to` (12), `en.wikipedia.org` (6), `analytics.python.org` (5).
+- The old driver is not a fair end either: it waited for the pictures, not for `load`. 5 last documents did not reach `load` with it (`archlinux-org-home`, `craigslist-home`, `crates-io-home`, `nodejs-org-home`, `substack-home`). The 6 documents left without `load` there are these 5 and one earlier document of `nodejs-org-home`.
+
+Per journey (documents that reached `DOMContentLoaded` / `load` / all; then the last document: at `load`, requests pending, scripts not run):
+
+| Journey | New: documents with DCL / load / all | final doc at `load` | requests pending | scripts not run | Old: DCL / load / all | final doc at `load` | requests pending | scripts not run |
+| --- | ---: | :-: | ---: | ---: | ---: | :-: | ---: | ---: |
+| `archlinux-org-home` | 1 / 1 / 2 | **no** | 2 | 0 of 0 | 1 / 1 / 2 | **no** | 2 | 0 of 0 |
+| `blog-rust-lang-home` | 2 / 1 / 2 | **no** | 0 | 0 of 2 | 2 / 2 / 2 | yes | 0 | 0 of 2 |
+| `cnn-lite-front` | 1 / 1 / 1 | yes | 0 | 0 of 2 | 1 / 1 / 1 | yes | 0 | 0 of 2 |
+| `craigslist-home` | 0 / 0 / 1 | **no** | 1 | 3 of 3 | 0 / 0 / 1 | **no** | 1 | 3 of 3 |
+| `crates-io-home` | 1 / 0 / 1 | **no** | 2 | 0 of 2 | 1 / 0 / 1 | **no** | 2 | 0 of 2 |
+| `curl-se-home` | 2 / 2 / 2 | yes | 0 | 0 of 0 | 2 / 2 / 2 | yes | 0 | 0 of 0 |
+| `debian-org-home` | 2 / 2 / 2 | yes | 0 | 0 of 0 | 2 / 2 / 2 | yes | 0 | 0 of 0 |
+| `devto-home` | 0 / 0 / 1 | **no** | 15 | 14 of 14 | 1 / 1 / 1 | yes | 0 | 0 of 15 |
+| `docs-rs-home` | 2 / 2 / 2 | yes | 2 | 0 of 3 | 2 / 2 / 2 | yes | 2 | 0 of 3 |
+| `duckduckgo-html-search` | 1 / 1 / 2 | **no** | 1 | 0 of 0 | 2 / 2 / 2 | yes | 0 | 0 of 0 |
+| `example-learn-more` | 1 / 1 / 2 | **no** | 4 | 4 of 4 | 2 / 2 / 2 | yes | 0 | 0 of 4 |
+| `example-page` | 1 / 1 / 1 | yes | 0 | 0 of 1 | 1 / 1 / 1 | yes | 0 | 0 of 1 |
+| `github-docs-home` | 2 / 2 / 2 | yes | 1 | 0 of 16 | 2 / 2 / 2 | yes | 1 | 0 of 16 |
+| `go-dev-home` | 1 / 0 / 2 | **no** | 12 | 12 of 12 | 2 / 2 / 2 | yes | 0 | 2 of 17 |
+| `hn-comments-back` | 1 / 1 / 3 | **no** | 2 | 1 of 1 | 3 / 3 / 3 | yes | 0 | 0 of 1 |
+| `hn-front` | 2 / 2 / 2 | yes | 0 | 0 of 1 | 2 / 2 / 2 | yes | 0 | 0 of 1 |
+| `hn-new-past` | 3 / 3 / 3 | yes | 0 | 0 of 1 | 3 / 3 / 3 | yes | 0 | 0 of 1 |
+| `httpbin-cookies` | 3 / 3 / 3 | yes | 0 | 0 of 0 | 3 / 3 / 3 | yes | 0 | 0 of 0 |
+| `httpbin-form-fill` | 1 / 1 / 1 | yes | 0 | 0 of 0 | 1 / 1 / 1 | yes | 0 | 0 of 0 |
+| `httpbin-form-submit` | 2 / 2 / 2 | yes | 0 | 0 of 0 | 2 / 2 / 2 | yes | 0 | 0 of 0 |
+| `kernel-org-home` | 0 / 0 / 2 | **no** | 1 | 0 of 0 | 2 / 2 / 2 | yes | 0 | 0 of 0 |
+| `lobsters-comments-back` | 1 / 1 / 3 | **no** | 3 | 1 of 1 | 3 / 3 / 3 | yes | 0 | 0 of 1 |
+| `lobsters-front` | 1 / 1 / 3 | **no** | 3 | 1 of 1 | 3 / 3 / 3 | yes | 0 | 0 of 1 |
+| `mdn-reference` | 1 / 1 / 2 | yes | 3 | 0 of 7 | 2 / 2 / 2 | yes | 2 | 0 of 7 |
+| `nginx-org-home` | 1 / 1 / 1 | yes | 0 | 0 of 0 | 1 / 1 / 1 | yes | 0 | 0 of 0 |
+| `nodejs-org-home` | 2 / 0 / 2 | **no** | 3 | 2 of 27 | 2 / 0 / 2 | **no** | 3 | 2 of 27 |
+| `npr-text-story` | 3 / 3 / 3 | yes | 0 | 0 of 0 | 3 / 3 / 3 | yes | 0 | 0 of 0 |
+| `paulgraham-home` | 1 / 1 / 2 | **no** | 3 | 8 of 11 | 2 / 2 / 2 | yes | 0 | 0 of 11 |
+| `python-docs-search-results` | 2 / 2 / 2 | yes | 1 | 1 of 15 | 2 / 2 / 2 | yes | 1 | 1 of 15 |
+| `python-docs-search` | 2 / 2 / 2 | yes | 1 | 1 of 15 | 2 / 2 / 2 | yes | 1 | 1 of 15 |
+| `python-docs-tutorial` | 3 / 3 / 4 | **no** | 16 | 13 of 13 | 4 / 4 / 4 | yes | 0 | 1 of 13 |
+| `python-org-docs-link` | 2 / 2 / 2 | yes | 0 | 1 of 9 | 2 / 2 / 2 | yes | 0 | 1 of 9 |
+| `python-org-search` | 1 / 1 / 2 | **no** | 11 | 9 of 9 | 2 / 2 / 2 | yes | 0 | 1 of 9 |
+| `react-docs` | 0 / 0 / 2 | **no** | 11 | 13 of 13 | 2 / 2 / 2 | yes | 0 | 0 of 13 |
+| `rust-book-chapters` | 3 / 3 / 3 | yes | 0 | 0 of 14 | 3 / 3 / 3 | yes | 0 | 0 of 14 |
+| `rust-book-search` | 1 / 1 / 1 | yes | 0 | 0 of 15 | 1 / 1 / 1 | yes | 0 | 0 of 15 |
+| `rust-book-sidebar` | 2 / 2 / 2 | yes | 0 | 0 of 14 | 2 / 2 / 2 | yes | 0 | 0 of 14 |
+| `rust-lang-org-home` | 2 / 2 / 2 | yes | 0 | 0 of 4 | 2 / 2 / 2 | yes | 0 | 0 of 4 |
+| `sqlite-org-home` | 1 / 1 / 2 | **no** | 1 | 2 of 2 | 2 / 2 / 2 | yes | 0 | 0 of 2 |
+| `substack-home` | 0 / 0 / 1 | **no** | 0 | 110 of 116 | 0 / 0 / 1 | **no** | 16 | 17 of 116 |
+| `w3c-home-links` | 1 / 0 / 2 | **no** | 4 | 3 of 3 | 2 / 2 / 2 | yes | 0 | 0 of 4 |
+| `wikipedia-article` | 3 / 1 / 3 | **no** | 0 | 3 of 7 | 3 / 3 / 3 | yes | 0 | 0 of 4 |
+| `wikipedia-main-random` | 3 / 1 / 4 | **no** | 3 | 4 of 4 | 4 / 4 / 4 | yes | 0 | 0 of 4 |
+| `wikipedia-portal` | 1 / 1 / 2 | **no** | 3 | 4 of 4 | 2 / 2 / 2 | yes | 0 | 0 of 4 |
+| `wikipedia-search` | 2 / 1 / 2 | **no** | 0 | 3 of 7 | 2 / 2 / 2 | yes | 0 | 0 of 4 |
+| `wikipedia-toc-languages` | 1 / 1 / 1 | yes | 0 | 0 of 4 | 1 / 1 / 1 | yes | 0 | 0 of 4 |
+| `wiktionary-portal` | 1 / 1 / 2 | **no** | 4 | 4 of 4 | 2 / 2 / 2 | yes | 0 | 0 of 4 |
+
+### What ends a journey, options and totals
+
+Switches in the temporary patch: `BARE_JE_END=load|idle` (tick the page until `load`, or until `Page::idle()`, before the final settle) and `BARE_JE_STEP=load` (the same before each step), bound `BARE_JE_BOUND_MS` (5,000 ms of page time). Same binary (new) and the frozen baseline `bench-base-vclock` (`2ddee1da` plus its staged patches, built from a copy with the same counters; `/data/bare-tmp/r2/journey-end/src-base`). Corpus `virtual-settled`, `BARE_CLOCK=virtual`, `BARE_SEED=1`, 3 runs, sum of medians, 47 journeys:
+
+| Option | Main, M | Baseline, M | Criterion 2 | Journeys with misses | Worst spread |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 0. Keep (settled driver) | 42,319 | 59,372 | 71.3% | 0 | 0.38% |
+| A. End at `load` | 70,467 | 89,059 | 79.1% | 6 (main and baseline) | 0.23% |
+| B. End at network idle | 74,399 | 95,115 | 78.2% | 10 (main), 9 (baseline) | 0.16% |
+| C. Every step after `load`, and the end | 93,932 | 114,251 | 82.2% | 13 | 0.35% |
+| Old driver, `c4e32a85`, corpus `virtual` | 95,453 | (not run) | | 0 | 0.23% |
+
+- Sums over the journeys with 0 misses on both trees: A 38,716 against 54,872 M (70.6%, 41 journeys), B 27,646 against 41,805 (66.1%, 37), C 24,735 against 38,406 (64.4%, 34). Option 0 has no misses.
+- Journeys with misses: A `crates-io-home` 12, `substack-home` 10, `react-docs` 9, `go-dev-home` 2, `craigslist-home` 1, `nodejs-org-home` 1. B adds `python-docs-search` 34, `python-docs-search-results` 15, `mdn-reference` 3, `github-docs-home` 2. A miss ends a request at once, so these journeys cost less than the real work: the sums are lower bounds for them.
+- Wait for `load` at the end (A): 2 ms of page time at the median, 33.6 ms at most (`react-docs`); the bound was never hit. B hit it on `nextjs-docs` only (the journey does not pass).
+- Increase from option 0 to A: `react-docs` +12,458 M, `substack-home` +10,339 M, `go-dev-home` +1,401 M, `devto-home` +1,306 M, `wiktionary-portal` +792 M, `wikipedia-portal` +475 M, `python-org-search` +414 M, `wikipedia-main-random` +394 M, `wikipedia-search` +115 M. 25 of 47 journeys move by more than 1 M. To C: 34 of 47, for example `react-docs` +17,425 M, `mdn-reference` +6,281 M, `wikipedia-article` +3,471 M.
+- Criterion 4 (`python-org-docs-link`, `rust-book-search`): 1.28 and 1.63 times under every option (their last documents are at `load` already). Criterion 6 (`python-docs-search-results` peak RSS, 3 runs, median): option 0 94.2 against 114.3 MiB (-17.5%), A 94.7 against 113.3 (-16.4%), C 93.8 against 113.4 (-17.2%). Neither moves.
+- Criterion 2 is 71.3% now under option 0. That number is measured with 25 of 47 final documents not loaded. Under A it is 79.1% (70.6% on the 41 journeys without misses); under C 82.2%. Recommendation in `docs/design-journey-end.md`: option A, then a corpus fill and a new frozen baseline.
+
+### Checks
+
+- Bisect: 5 commits, 2 corpora, 3 journeys, 3 runs each, all pass; the first option runs were wrong (the switches were not passed; totals equal to option 0) and were discarded and redone.
+- Counters: a module script was not counted at first, so "scripts not run" was too high (222 against 217 for the new driver, 129 against 29 for the old). I fixed it and redid all trace runs.
+- The counter patch builds on `d6837f6d`, `c4e32a85` and the baseline tree. Option 0 traced (1 run) gives 42,411 M, untraced (3-run median) 42,319 M: the trace costs about 0.2%. I did not run an unpatched main binary for this task.
+- No product code, no test, no `cargo test` run: docs only.
+
+### Not tested
+
+A corpus filled for the new end state (so 6 to 13 journeys have no valid number). Wall time. A live run. Option D (an `expect load` step). The WebPageTest quiet window of 2 s. Windows and macOS. Criterion 6 under option B.
+
+### Noticed, not changed
+
+- Main with the old settle loop has replay misses on 7 journeys on `virtual`; `c4e32a85` has none. Cause not examined.
+- `nextjs-docs` fails under every driver and option (not in the 47).
+- `docs/perf-goal.md` says "48 journeys" in the criteria table; 47 pass on replay.
