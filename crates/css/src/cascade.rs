@@ -1589,7 +1589,7 @@ impl RuleSet {
         self.ensure(matched);
         let mut style = self.cascade_as::<0, PENDING>(matched, inline, hint, &styles.styles[parent as usize], cx, input);
         if style.2 != 0 {
-            self.picture_pass::<PENDING>(matched, inline, &mut style, &styles.styles[parent as usize], cx, input);
+            self.picture_pass::<PENDING>(matched, (inline, hint), &mut style, &styles.styles[parent as usize], cx, input);
         }
         // Two different rule lists may give the same style (`div div` inside `div`). Then they share it, and the children of both
         // have the same parent style, so they find each other in the cache.
@@ -1638,14 +1638,23 @@ impl RuleSet {
         // the layer, the specificity, and the place in the page. A `style=""` attribute has no layer (`None`): it beats every layer.
         let key = |important: bool, origin: Origin, ctx: u8, layer: Option<u32>, specificity: u32, order: u32| cascade_key(cx, important, origin, ctx, layer, specificity, order);
         // The presentational hints (`hints.rs`): author declarations that any rule beats. Their key is the least of the author origin.
+        let mut inline_side = Side::default();
         if let Some(text) = hint {
             let mut out = Vec::new();
             for d in parse_declarations(text) {
-                parse_declaration(&d.name, d.value, false, &mut Side::default(), &mut out);
+                parse_declaration(&d.name, d.value, false, &mut inline_side, &mut out);
             }
             for d in out.iter().filter(|d| !d.property.is_picture()) {
                 let p = d.property as usize;
-                winners[p] = Some(d.value);
+                let (calcs, vars, grids, colors) = cx.declared_len();
+                let v = match d.value {
+                    Value::Length(Length::Calc(i)) => Value::Length(Length::Calc(i + calcs)),
+                    Value::Var(i) => Value::Var(i + vars),
+                    Value::Grid(i) => Value::Grid(i + grids),
+                    Value::ColorExpr(i) => Value::ColorExpr(i + colors),
+                    v => v,
+                };
+                winners[p] = Some(v);
                 keys[p] = 1 << 98;
                 set |= 1 << p;
             }
@@ -1704,7 +1713,6 @@ impl RuleSet {
             }
         }
         // What the `style=""` attribute gives.
-        let mut inline_side = Side::default();
         let mut inline_decls = Vec::new();
         // The declarations of the attribute before this one are not for pictures (`split_pictures`); the others follow.
         let mut inline_core = 0;
@@ -1713,6 +1721,7 @@ impl RuleSet {
             shared.calcs.clear();
             shared.vars.clear();
             shared.grids.clear();
+            shared.colors.clear();
         }
         if let Some(text) = inline {
             if PENDING && let Some(input) = input {
@@ -1727,16 +1736,16 @@ impl RuleSet {
                 }
             }
             // What these values point to comes after the ones of the style sheets (see `Cx::linear` and `Cx::var`).
-            let (calc_base, var_base, grid_base) = cx.declared_len();
+            let (calc_base, var_base, grid_base, color_base) = cx.declared_len();
             for d in &mut inline_decls {
                 match &mut d.value {
                     Value::Length(Length::Calc(i)) => *i += calc_base,
                     Value::Var(i) => *i += var_base,
                     Value::Grid(i) => *i += grid_base,
+                    Value::ColorExpr(i) => *i += color_base,
                     _ => {}
                 }
             }
-            *cx.inline.borrow_mut() = inline_side;
             inline_core = if inline_decls.iter().any(|d| d.property.is_picture()) { split_pictures(&mut inline_decls, 0).0 } else { inline_decls.len() };
             // The specificity of a `style=""` attribute is more than the most that a selector can have (1 << 30, and the most is one less).
             for d in &inline_decls[..inline_core] {
@@ -1746,6 +1755,7 @@ impl RuleSet {
                 apply_custom(&mut own, &mut own_at, d, key(d.important, Origin::Author, OWN, None, 1 << 30, u32::MAX >> 1));
             }
         }
+        *cx.inline.borrow_mut() = inline_side;
         // The custom properties: the ones of the parent, and the ones of this element. Most elements set none, and share the set of the parent.
         let custom = if let Some(m) = merged {
             m
@@ -1790,7 +1800,7 @@ impl RuleSet {
     /// the others the cascade has no more work than before, and it does not hold its style for this call.
     #[cold]
     #[inline(never)]
-    fn picture_pass<const PENDING: bool>(&self, matched: &[u32], inline: Option<&str>, style: &mut ComputedStyle, parent: &ComputedStyle, cx: &Cx<'_>, input: Option<&[InputDeclaration]>) {
+    fn picture_pass<const PENDING: bool>(&self, matched: &[u32], (inline, hint): (Option<&str>, Option<&str>), style: &mut ComputedStyle, parent: &ComputedStyle, cx: &Cx<'_>, input: Option<&[InputDeclaration]>) {
         #[cfg(test)]
         PICTURE_PASSES.with(|n| n.set(n.get() + 1));
         let custom = style.1;
@@ -1815,6 +1825,13 @@ impl RuleSet {
         // The declarations of the attribute again: `cascade_as` left the side of their values in `cx.inline`, the same for this parse.
         if let Some(text) = inline {
             let (mut side, mut decls) = (Side::default(), Vec::new());
+            // Match the prefix that cascade_as retained before inline declarations.
+            if let Some(hint) = hint {
+                let mut ignored = Vec::new();
+                for d in parse_declarations(hint) {
+                    parse_declaration(&d.name, d.value, false, &mut side, &mut ignored);
+                }
+            }
             if PENDING && let Some(input) = input {
                 input_declarations(input, &mut side, &mut decls, &mut Vec::new());
             } else {
@@ -1824,12 +1841,13 @@ impl RuleSet {
                     }
                 }
             }
-            let (calc_base, var_base, grid_base) = cx.declared_len();
+            let (calc_base, var_base, grid_base, color_base) = cx.declared_len();
             for d in decls.iter_mut().filter(|d| d.property.is_picture()) {
                 match &mut d.value {
                     Value::Length(Length::Calc(i)) => *i += calc_base,
                     Value::Var(i) => *i += var_base,
                     Value::Grid(i) => *i += grid_base,
+                    Value::ColorExpr(i) => *i += color_base,
                     _ => {}
                 }
                 apply(d, Origin::Author, OWN, None, 1 << 30, u32::MAX >> 1);
@@ -1884,6 +1902,11 @@ impl RuleSet {
             *c += (cx.declared.borrow().calcs.len() + shared.calcs.len()) as u32;
             shared.calcs.extend(side.calcs);
         }
+        if let Value::ColorExpr(i) = &mut value {
+            let mut shared = cx.inline.borrow_mut();
+            *i += (cx.declared.borrow().colors.len() + shared.colors.len()) as u32;
+            shared.colors.extend(side.colors);
+        }
         if let Value::Grid(g) = &mut value {
             let mut shared = cx.inline.borrow_mut();
             *g += (cx.declared.borrow().grids.len() + shared.grids.len()) as u32;
@@ -1934,6 +1957,7 @@ pub(crate) fn hash_values(mut h: u64, values: &[Value]) -> u64 {
             Value::Grid(i) => 8 << 40 | u64::from(i),
             Value::Number(x) => 4 << 40 | u64::from(x.to_bits()),
             Value::Keyword(k) => 5 << 40 | k as u64,
+            Value::ColorExpr(i) => 7 << 40 | i as u64,
             _ => 6 << 40,
             // A computed value is none of the others. (A length is `Px` or `Percent`.)
         };
@@ -1973,9 +1997,9 @@ struct Computed {
 
 impl Cx<'_> {
     /// How many `calc()`, `var()` and grid lists the style sheets have: the numbers of the ones of the `style=""` attribute start there.
-    fn declared_len(&self) -> (u32, u32, u32) {
+    fn declared_len(&self) -> (u32, u32, u32, u32) {
         let d = self.declared.borrow();
-        (d.calcs.len() as u32, d.vars.len() as u32, d.grids.len() as u32)
+        (d.calcs.len() as u32, d.vars.len() as u32, d.grids.len() as u32, d.colors.len() as u32)
     }
 
     fn linear(&self, i: u32) -> Linear {
@@ -2000,6 +2024,14 @@ impl Cx<'_> {
         match declared.grids.get(i as usize) {
             Some(g) => g.clone(),
             None => self.inline.borrow().grids[i as usize - declared.grids.len()].clone(),
+        }
+    }
+
+    fn color(&self, i: u32, current: Color) -> Color {
+        let declared = self.declared.borrow();
+        match declared.colors.get(i as usize) {
+            Some(expr) => expr.resolve(current),
+            None => self.inline.borrow().colors.get(i as usize - declared.colors.len()).expect("color index belongs to this element").resolve(current),
         }
     }
 
@@ -2863,6 +2895,7 @@ fn resolve_math(p: Property, i: u32, fs: f32, cx: &Cx<'_>) -> Value {
 fn resolve(p: Property, v: Value, out: &[Value; Property::CORE], parent: &ComputedStyle, fs: f32, cx: &Cx<'_>) -> Value {
     let px = |x| Value::Length(Length::Px(x));
     match v {
+        Value::ColorExpr(i) => Value::Color(cx.color(i, if p == Property::TextColor { parent.color(p) } else { as_color(out[Property::TextColor as usize]) })),
         // The color of the element. `color: currentcolor` means the color of the parent (the element has no color yet).
         Value::Keyword(Keyword::CurrentColor) if p == Property::TextColor => Value::Color(parent.color(p)),
         Value::Keyword(Keyword::CurrentColor) => Value::Color(as_color(out[Property::TextColor as usize])),
@@ -3627,6 +3660,45 @@ mod tests {
         assert_eq!(s("div { font-weight: 700 } p { font-weight: bolder }", Property::FontWeight), Value::Number(900.0));
         assert_eq!(s("div { font-weight: 700 } p { font-weight: lighter }", Property::FontWeight), Value::Number(400.0));
         assert_eq!(s("div { font-weight: 400 } p { font-weight: lighter }", Property::FontWeight), Value::Number(100.0));
+    }
+
+    #[test]
+    fn modern_colors_bind_currentcolor_after_the_text_color() {
+        let html = "<div style='color: red'><p id=p>x</p></div>";
+        let sheets = ["p { color: color-mix(in srgb, currentColor, blue); background: color-mix(in srgb, currentColor, lime) }"];
+        assert_eq!(get(html, &sheets, "p", Property::TextColor), rgb(128, 0, 128));
+        assert_eq!(get(html, &sheets, "p", Property::BackgroundColor), rgb(64, 128, 64));
+    }
+
+    #[test]
+    fn modern_colors_keep_sheet_inline_variable_and_hint_arenas_separate() {
+        let sheets = [".unused { color: color-mix(in srgb, currentColor, lime) }", "p { color: red; --mix: color-mix(in srgb, currentColor, blue); background-color: var(--mix) }"];
+        assert_eq!(get("<p id=p>x</p>", &sheets, "p", Property::BackgroundColor), rgb(128, 0, 128));
+        assert_eq!(get("<p id=p style='background: color-mix(in srgb, currentColor, white)'>x</p>", &sheets, "p", Property::BackgroundColor), rgb(255, 128, 128));
+        let html = "<svg style='color: red'><rect id=p fill='color-mix(in srgb, currentColor, blue)' style='stroke: color-mix(in srgb, currentColor, white)'></rect></svg>";
+        assert_eq!(get(html, &sheets, "p", Property::Fill), rgb(128, 0, 128));
+        assert_eq!(get(html, &sheets, "p", Property::Stroke), rgb(255, 128, 128));
+    }
+
+    #[test]
+    fn hint_arena_prefix_does_not_shift_inline_picture_variables() {
+        let html = "<svg><rect id=p fill='var(--paint)' style='--paint: color-mix(in srgb, currentColor, blue); color: red; --image: url(right.svg); background-image: var(--image)'></rect></svg>";
+        let (doc, all) = styles(html, &[]);
+        let style = all.style(by_id(&doc, "p")).unwrap();
+        assert_eq!(style.color(Property::Fill), Color {r:128,g:0,b:128,a:255});
+        assert_eq!(style.picture(Property::BackgroundImage), Value::Number(crate::urls::intern("right.svg") as f32));
+    }
+
+    #[test]
+    fn modern_colors_enable_the_real_theme_feature_query() {
+        let css = ":root { --primary: oklch(48.8% .217 264) } p { color: red } @supports (color: color-mix(in lab, red, red)) { p { color: var(--primary); background: color-mix(in oklab, var(--primary) 50%, transparent) } }";
+        let (doc, all) = styles("<p id=p>x</p>", &[css]);
+        let style = all.style(by_id(&doc, "p")).unwrap();
+        let text = style.color(Property::TextColor);
+        let bg = style.color(Property::BackgroundColor);
+        assert_ne!(text, Color { r:255, g:0, b:0, a:255 });
+        assert_eq!((text.r, text.g, text.b), (bg.r, bg.g, bg.b));
+        assert_eq!(bg.a, 128);
     }
 
     #[test]

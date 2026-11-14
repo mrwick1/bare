@@ -49,3 +49,9 @@ Record source, binary and dependency versions, resource rows, baseline failures 
 Scope: color parsing and conversion, indexed expression storage, cascade resolution, their tests and necessary dependency/documentation changes. Do not refactor the painter, tokenization of unrelated values or application CSS.
 
 Stop and revise this design if the chosen crate cannot preserve the required missing-component or interpolation semantics, or if the existing cache and side-index paths cannot safely carry deferred expressions. Performance and memory costs are not yet measured. No production code has changed.
+
+## Implementation storage refinement
+
+Measured on 2026-11-14. An eager color vector raised the legacy parser instruction count by about 0.83 percent. Use a lazy boxed vector header for deferred colors. Its empty state occupies one word. The extra allocation occurs only when a Side stores a currentColor-dependent expression. Color and Value keep their previous sizes. A three-run parser check reduced the instruction growth to about 0.67 percent. Final browser cost gates and limits belong in the results document.
+
+The supported mix syntax has two operands and an explicit interpolation space. The latest CSS Color 5 draft also permits omitted spaces and more operands. These extensions are outside this change. Zero-sum weights follow the current draft: mix equally with zero alpha. Relative colors, external profiles and math expressions in mix percentages remain unsupported.

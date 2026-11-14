@@ -5,6 +5,7 @@ pub mod calc;
 pub mod cascade;
 pub mod color;
 mod colors;
+pub mod modern_color;
 pub mod form;
 pub mod grid;
 pub mod hints;

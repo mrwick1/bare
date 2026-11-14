@@ -164,3 +164,9 @@ This order is a proposal. It is not measured yet.
 - [Blitz](https://github.com/dioxuslabs/blitz)
 - [Servo 0.1.0 on crates.io](https://servo.org/blog/2026/04/13/servo-0.1.0-release/)
 - [Servo LTS (Phoronix)](https://www.phoronix.com/news/Servo-Embed-Crates-LTS)
+
+## Modern CSS colors
+
+Added on 2026-11-14. The CSS crate uses [color 0.3.3](https://crates.io/crates/color/0.3.3). Its license is Apache-2.0 OR MIT. The dependency uses its default std feature. It provides color-space conversion, modern absolute-color parsing, missing-component handling and premultiplied interpolation. Bare owns mix grammar, deferred currentColor resolution and sRGB gamut mapping.
+
+The mapping follows the [CSS Color 4 local-MINDE algorithm](https://www.w3.org/TR/css-color-4/#binsearch). Numeric regression cases use the local-MINDE results documented in [the WPT sRGB gamut-mapping test](https://github.com/web-platform-tests/wpt/blob/master/css/css-color/canvas-srgb-gamut-mapping.html). The tests allow one byte of rounding error. They do not copy the WPT harness.

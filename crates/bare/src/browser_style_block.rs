@@ -128,6 +128,7 @@ fn same(a: (&Value, &Side), b: (&Value, &Side)) -> bool {
     match (a.0, b.0) {
         (Value::Length(Calc(i)), Value::Length(Calc(j))) => a.1.calcs.get(*i as usize) == b.1.calcs.get(*j as usize) && a.1.calcs.get(*i as usize).is_some(),
         (Value::Grid(i), Value::Grid(j)) => a.1.grids.get(*i as usize) == b.1.grids.get(*j as usize) && a.1.grids.get(*i as usize).is_some(),
+        (Value::ColorExpr(i), Value::ColorExpr(j)) => a.1.colors.get(*i as usize) == b.1.colors.get(*j as usize) && a.1.colors.get(*i as usize).is_some(),
         (Value::Var(_), _) | (_, Value::Var(_)) => false,
         (x, y) => x == y,
     }
@@ -166,6 +167,7 @@ fn written(property: Property, value: &Value, side: &Side) -> Option<String> {
             bare_css::grid::Grid::Motion(m) => bare_css::motion::text(property, m),
             _ => return None,
         },
+        Value::ColorExpr(i) => side.colors.get(i as usize)?.text().to_owned(),
         Value::Var(_) => return None,
     };
     reads_as(property, &t, value, side).then_some(t)
@@ -640,3 +642,29 @@ pub(crate) fn serialize(list: &[Decl], lim: Lim, s: &mut String, charge: Charge)
 #[cfg(test)]
 #[path = "browser_style_pending_tests.rs"]
 mod pending_reduction;
+
+#[cfg(test)]
+mod modern_colors {
+    use super::*;
+
+    #[test]
+    fn a_shorthand_keeps_its_deferred_color_when_another_longhand_changes() {
+        let limits = Lim { bytes:10000, decls:100 };
+        let mut charge = |_| Ok(());
+        let mut list = parse("background: color-mix(in srgb, currentColor, blue)", limits, &mut charge).ok().unwrap();
+        let mut output = String::new();
+        set(&mut list, "background-image", "none", false, limits, &mut output, &mut charge).ok().unwrap();
+        assert_eq!(get(&list, "background-color", limits.bytes, &mut charge).ok().unwrap().as_deref(), Some("color-mix(in srgb, currentColor, blue)"));
+        serialize(&list, limits, &mut output, &mut charge).ok().unwrap();
+        let reparsed = parse(&output, limits, &mut charge).ok().unwrap();
+        assert_eq!(get(&reparsed, "background-color", limits.bytes, &mut charge).ok().unwrap(), get(&list, "background-color", limits.bytes, &mut charge).ok().unwrap());
+    }
+
+    #[test]
+    fn equal_local_indices_do_not_make_different_expressions_equal() {
+        let (mut a, mut b, mut av, mut bv) = (Side::default(), Side::default(), Vec::new(), Vec::new());
+        assert!(parse_declaration("color", "color-mix(in srgb, currentColor, red)", false, &mut a, &mut av));
+        assert!(parse_declaration("color", "color-mix(in srgb, currentColor, blue)", false, &mut b, &mut bv));
+        assert!(!same((&av[0].value, &a), (&bv[0].value, &b)));
+    }
+}
