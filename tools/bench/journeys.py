@@ -23,7 +23,7 @@ import glob, json, os, re, shutil, statistics, subprocess, sys, tempfile, time
 HERE = os.path.dirname(os.path.abspath(__file__))
 STEPS = os.path.join(HERE, "..", "drive", "public")
 CORPUS = "/data/bare-tmp/corpus/main"
-VIRTUAL_CORPUS = "/data/bare-tmp/corpus/virtual"
+VIRTUAL_CORPUS = "/data/bare-tmp/corpus/virtual-settled"
 
 
 def journeys(only):
