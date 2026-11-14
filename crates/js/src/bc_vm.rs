@@ -104,6 +104,15 @@ impl<'p> Interp<'p> {
         self.bc.stats
     }
 
+    /// A call that the tree walker runs while the lane is on (the counters of the measurement).
+    #[inline(always)]
+    pub(super) fn bc_tree_call(&mut self, why: &'static str) {
+        if self.bc.exec != Exec::Tree {
+            self.bc.stats.calls_tree += 1;
+            *self.bc.refused.entry(why).or_default() += 1;
+        }
+    }
+
     /// The string constants of compiled code (`roots`).
     pub(super) fn bc_roots(&self, v: &mut Vec<Value>) {
         for s in &self.bc.codes {
@@ -132,9 +141,20 @@ impl<'p> Interp<'p> {
     fn bc_finish(&mut self, r: G<crate::bc::Code>) -> Option<Rc<Compiled>> {
         // The loop reads only narrow words: code with a wide form stays on the tree walker.
         let code = match r {
-            Ok(c) if bc_verify::verify(&c).is_ok() && !c.ops.iter().scan(0usize, |skip, &w| Some(if *skip > 0 { *skip -= 1; false } else { *skip = matches!(Op::from_u8(w as u8), Some(o) if o.form() == bc::Form::AbcX) as usize; w as u8 == Op::Wide as u8 })).any(|w| w) => c,
-            Ok(_) | Err(_) => {
+            Ok(c) if bc_verify::verify(&c).is_err() => {
                 self.bc.stats.fallbacks += 1;
+                self.bc.why = "verify";
+                return None;
+            }
+            Ok(c) if c.ops.iter().scan(0usize, |skip, &w| Some(if *skip > 0 { *skip -= 1; false } else { *skip = matches!(Op::from_u8(w as u8), Some(o) if o.form() == bc::Form::AbcX) as usize; w as u8 == Op::Wide as u8 })).any(|w| w) => {
+                self.bc.stats.fallbacks += 1;
+                self.bc.why = "wide form";
+                return None;
+            }
+            Ok(c) => c,
+            Err(e) => {
+                self.bc.stats.fallbacks += 1;
+                self.bc.why = e;
                 return None;
             }
         };
@@ -146,6 +166,7 @@ impl<'p> Interp<'p> {
                     Ok(key) => key,
                     Err(_) => {
                         self.bc.stats.fallbacks += 1;
+                        self.bc.why = "constant";
                         return None;
                     }
                 },
@@ -158,6 +179,7 @@ impl<'p> Interp<'p> {
                     Ok(s) => Value::String(s),
                     Err(_) => {
                         self.bc.stats.fallbacks += 1;
+                        self.bc.why = "constant";
                         return None;
                     }
                 },
@@ -179,7 +201,11 @@ impl<'p> Interp<'p> {
         }
         match &self.bc.codes[s][fid.index()] {
             BcSlot::Byte(c) => return Some(c.clone()),
-            BcSlot::Tree => return None,
+            BcSlot::Tree(r) => {
+                *self.bc.refused.entry(r).or_default() += 1;
+                self.bc.stats.calls_tree += 1;
+                return None;
+            }
             BcSlot::New if self.bc.exec == Exec::Auto && self.scopes[fid.index()].fl & FL_EAGER == 0 => {
                 self.bc.codes[s][fid.index()] = BcSlot::Seen;
                 return None;
@@ -188,10 +214,15 @@ impl<'p> Interp<'p> {
         }
         let r = self.bc_compile(fid);
         let c = self.bc_finish(r);
+        let why = self.bc.why;
         self.bc.codes[s][fid.index()] = match &c {
             Some(c) => BcSlot::Byte(c.clone()),
-            None => BcSlot::Tree,
+            None => BcSlot::Tree(why),
         };
+        if c.is_none() {
+            *self.bc.refused.entry(why).or_default() += 1;
+            self.bc.stats.calls_tree += 1;
+        }
         c
     }
 
@@ -201,7 +232,29 @@ impl<'p> Interp<'p> {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn bc_enter(&mut self, (script, fid): (u32, FuncId), fobj: ObjId, cenv: u32, self_binding: bool, this: Value, args: &[Value], new: bool, saved: (u32, bool, usize)) -> Option<Res<Value>> {
         let code = self.bc_code(script, fid)?;
+        self.bc.stats.calls_lane += 1;
         let (saved_env, saved_strict, saved_script) = saved;
+        if code.code.regfn && code.code.has_env {
+            // A register function with inner functions: the environment and the bindings of a call are those of stage 1 (the inner
+            // functions find the variables that they name there). Its other variables are registers.
+            let env = match self.new_env(cenv, true) {
+                Ok(e) => e,
+                Err(e) => {
+                    self.select(saved_script);
+                    return Some(Err(e));
+                }
+            };
+            self.env = env;
+            let r = self.in_frame(script, Where::Func(fid), new, |it| {
+                it.bind_call(fobj, fid, env, self_binding, this, args)?;
+                it.bc_run_rf(&code, this, args)
+            });
+            self.select(saved_script);
+            self.env = saved_env;
+            self.strict = saved_strict;
+            self.release(env);
+            return Some(r);
+        }
         if code.code.regfn {
             // A register function has no environment: its closure's environment is the one its outer names resolve from.
             self.env = cenv;
@@ -299,6 +352,12 @@ impl<'p> Interp<'p> {
         st.regs[..n].copy_from_slice(&args[..n]);
         let mut depth = 0u32;
         let r = self.bc_loop(c, &mut st, &mut depth, t);
+        // A function with an environment can leave blocks open (a return in a block).
+        for _ in 0..depth {
+            let e = self.env;
+            self.env = self.envs[e as usize].parent;
+            self.release(e);
+        }
         self.bc.pool.push(st);
         r
     }
@@ -323,7 +382,7 @@ impl<'p> Interp<'p> {
             return None;
         }
         match self.bc.codes.get(self.cur)?.get(fid.index())? {
-            BcSlot::Byte(c) if c.code.regfn => Some((c.clone(), fid, env)),
+            BcSlot::Byte(c) if c.code.regfn && !c.code.has_env => Some((c.clone(), fid, env)),
             _ => None,
         }
     }
@@ -895,6 +954,7 @@ impl<'p> Interp<'p> {
                             break 'op Err(Error::Limit(LimitKind::CallDepth));
                         }
                         tri!(at, self.tick());
+                        self.bc.stats.calls_lane += 1;
                         let k = &callee.code;
                         let t = if k.dyn_this {
                             This::Dynamic

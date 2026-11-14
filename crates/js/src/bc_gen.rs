@@ -102,6 +102,13 @@ struct Rf {
     outer: u32,
     locals: HashMap<(u32, u32), Local>,
     uses_this: bool,
+    /// A function with inner functions (`bc_scope.rs` layout, see `rfc_analyze`): the scopes that have an environment at run time
+    /// (the function scope always, a block or a loop head only when an inner function is inside it). The variables of such a scope
+    /// that an inner function names are bindings of that environment, and the others are registers.
+    env: bool,
+    env_scopes: std::collections::HashSet<u32>,
+    /// The variables that an inner function names (declaring scope, name): bindings of an environment, not registers.
+    captured: std::collections::HashSet<(u32, u32)>,
 }
 
 pub(super) struct Gen<'g, 'p> {
@@ -205,6 +212,11 @@ impl<'p> Interp<'p> {
             }
             Body::Lazy(_) => return Err("a function with a lazy body"),
             Body::Block(l) if g.rf.is_some() => {
+                // The names of the `let`, `const` and function declarations that are bindings of the environment of the function.
+                if g.rf.as_ref().is_some_and(|r| r.env) && g.it.has_lexical(l) {
+                    g.emit(Op::DeclEnv, 0, fs.scope, 0)?;
+                    g.hoist(&[l], fs.scope)?;
+                }
                 let prog = g.prog.clone();
                 for s in prog.list(l) {
                     g.stmt(s)?;
@@ -232,6 +244,7 @@ impl<'p> Interp<'p> {
         c.ics = (0..g.ics).map(|_| Cell::new(Ic::EMPTY)).collect();
         if let Some(rf) = &g.rf {
             c.regfn = true;
+            c.has_env = rf.env;
             c.nparams = nparams as u16;
             c.nlocals = top as u16;
             c.uses_this = rf.uses_this;
@@ -424,6 +437,7 @@ impl Gen<'_, '_> {
                 Some((_, l)) if !l.init => Err("a variable used before its declaration"),
                 Some((_, l)) if write && l.is_const => Err("assignment to a const"),
                 Some((_, l)) => Ok(Site::Reg(l.reg)),
+                None if rf.env => Ok(self.rfc_site(sc, n)),
                 None if rf.outer == NONE => Ok(Site::Global),
                 None => Ok(self.it.bc_resolve(n, rf.outer)),
             };
@@ -476,7 +490,10 @@ impl Gen<'_, '_> {
                         let i = binds.iter().position(|b| b.name == n && matches!(b.kind, BindKind::Func(_))).ok_or("no binding")?;
                         let r = self.reg()?;
                         self.emit(Op::Closure, r, f.index() as u32, 0)?;
-                        self.emit(Op::InitEnv, r, 0, i as u32)?;
+                        match self.rf.as_ref().and_then(|rf| rf.locals.get(&(scope, n)).copied()) {
+                            Some(l) => self.emit(Op::Mov, l.reg, r, 0)?,
+                            None => self.emit(Op::InitEnv, r, 0, i as u32)?,
+                        }
                         self.free(r);
                     }
                     StmtKind::Class(_) => return Err("class"),

@@ -341,7 +341,7 @@ impl<'p> Interp<'p> {
     }
 
     /// Whether scope `s` declares the name `n` (the set of `sc_declares`). A frame scope keeps its names unsorted.
-    fn bc_declares(&mut self, s: u32, n: u32) -> bool {
+    pub(super) fn bc_declares(&mut self, s: u32, n: u32) -> bool {
         let sc = &self.sc_all[s as usize];
         if sc.base != NONE {
             return self.sc_pool[sc.start as usize..(sc.start + sc.len) as usize].contains(&n);

@@ -43,7 +43,7 @@ enum BcSlot {
     /// Called once on the tree walker (`Exec::Auto`).
     Seen,
     /// The code generator refused it: it stays on the tree walker.
-    Tree,
+    Tree(&'static str),
     Byte(Rc<Compiled>),
 }
 
@@ -55,6 +55,10 @@ pub struct BcStats {
     pub fallbacks: u64,
     /// Runs of the loop.
     pub runs: u64,
+    /// Calls of script functions that the lane ran (also the inline calls of register functions), and the calls that the tree
+    /// walker ran because the lane was on and refused the function (or it is a generator or an async function).
+    pub calls_lane: u64,
+    pub calls_tree: u64,
 }
 
 /// The state of the bytecode interpreter (B3 of `docs/engine-plan.md`). The format is in `bc.rs`, the loop in `bc_vm.rs`.
@@ -75,6 +79,30 @@ struct BcState {
     /// The bindings of the environment of a scope (`PushEnv`, `DeclEnv`), by scope.
     tmpl: FxMap<u32, Rc<[(u32, u8)]>>,
     stats: BcStats,
+    /// For each reason that the code generator refused a function: the calls that the tree walker then ran.
+    refused: FxMap<&'static str, u64>,
+    /// Why the last `bc_finish` refused.
+    why: &'static str,
+}
+
+impl BcState {
+    fn new(exec: Exec) -> Self {
+        let mut b = BcState::default();
+        b.exec = exec;
+        b
+    }
+}
+
+/// `BARE_JS_STATS=1` prints the counters of a lane that was used, when its interpreter goes (for the measurement of the lane).
+impl Drop for BcState {
+    fn drop(&mut self) {
+        let s = self.stats;
+        if s.calls_lane + s.calls_tree > 0 && std::env::var_os("BARE_JS_STATS").is_some() {
+            let mut r: Vec<_> = self.refused.iter().collect();
+            r.sort();
+            eprintln!("bcstats compiled={} fallbacks={} runs={} calls_lane={} calls_tree={} refused={r:?}", s.compiled, s.fallbacks, s.runs, s.calls_lane, s.calls_tree);
+        }
+    }
 }
 
 /// The scope data of the code generator (step B1). A child module of `eval`, so it reads the tables of the tree walker.
