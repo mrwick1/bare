@@ -159,7 +159,7 @@ fn simple_matches(doc: &Document, el: NodeId, simple: &Simple) -> bool {
     match simple {
         Simple::Tag(tag) => name == *tag,
         Simple::Id(id) => doc.attr(el, Atom::ID) == Some(id),
-        Simple::Class(class) => doc.has_class_atom(el, *class),
+        Simple::Class(class) => doc.has_class_id(el, *class),
         Simple::Attr { name, test } => doc.attrs(attrs).iter().find(|a| a.name == *name).is_some_and(|a| test_value(test, doc.text(a.value))),
         Simple::FirstChild => prev_element(doc, el).is_none(),
         Simple::LastChild => next_element(doc, el).is_none(),

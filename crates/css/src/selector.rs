@@ -46,7 +46,7 @@
 //!
 //! Comments compare Rust with JavaScript, because you know JS.
 
-use bare_html::dom::{Atom, Document};
+use bare_html::dom::{Atom, ClassId, Document};
 
 use crate::form::Form;
 use crate::tokenizer::{Token, Tokens, tokenize};
@@ -150,8 +150,8 @@ pub enum Simple {
     Tag(Atom),
     /// `#main`
     Id(Box<str>),
-    /// `.item`, as the atom of the name (`Document::class_atom`).
-    Class(Atom),
+    /// `.item`, as the class number of the name (`Document::class_id`).
+    Class(ClassId),
     /// `[href^="http"]`
     Attr { name: Atom, test: AttrTest },
     /// `:first-child`: no element before this one in its parent.
@@ -457,7 +457,7 @@ impl Parser<'_, '_> {
                 Some(Token::Delim('.')) => {
                     self.tokens.next();
                     let Some(Token::Ident(name)) = self.tokens.next() else { return None };
-                    simples.push(Simple::Class(self.doc.class_atom(&name)));
+                    simples.push(Simple::Class(self.doc.class_id(&name)));
                     counts[1] += 1;
                 }
                 Some(Token::OpenSquare) => {
@@ -773,9 +773,9 @@ fn an_plus_b(text: &str) -> Option<(i32, i32)> {
 mod tests {
     use super::*;
 
-    fn class(name: &str) -> Atom {
+    fn class(name: &str) -> ClassId {
         // All the documents of a thread share the name table.
-        Document::new().class_atom(name)
+        Document::new().class_id(name)
     }
 
     #[test]

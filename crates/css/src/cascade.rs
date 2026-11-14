@@ -57,7 +57,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::hash::BuildHasherDefault;
 
-use bare_html::dom::{Atom, Document, Fnv, Mark, NodeData, NodeId};
+use bare_html::dom::{Atom, ClassId, Document, Fnv, Mark, NodeData, NodeId};
 
 use crate::at_rules;
 use crate::calc::{self, Linear, Node};
@@ -184,7 +184,7 @@ impl Default for Index {
 #[derive(Default)]
 struct Bigs {
     by_id: HashMap<Box<str>, Big, BuildHasherDefault<Fnv>>,
-    by_class: HashMap<Atom, Big, BuildHasherDefault<Fnv>>,
+    by_class: HashMap<ClassId, Big, BuildHasherDefault<Fnv>>,
     by_tag: HashMap<Atom, Big, BuildHasherDefault<Fnv>>,
     by_attr: HashMap<Atom, Big, BuildHasherDefault<Fnv>>,
     other: Option<Big>,
@@ -436,19 +436,19 @@ fn slots_set<K>(m: &std::collections::HashSet<K>) -> usize {
     m.capacity() * 8 / 7 * (std::mem::size_of::<K>() + 1)
 }
 
-/// The rules for each class, found by the number of the atom: one bounds check and one load, no hash. `slot[atom - base]` is the place of the
-/// list in `lists` plus one, or 0. The table covers the atoms from the smallest to the largest class of the rules.
+/// The rules for each class, found by the class number: one bounds check and one load, no hash. `slot[class - base]` is the place of the
+/// list in `lists` plus one, or 0. The table covers the atoms from the smallest to the largest class number of the rules.
 #[derive(Default)]
 struct ClassBuckets {
     base: u32,
     slot: Vec<u32>,
     lists: Vec<Vec<u32>>,
-    atoms: Vec<Atom>,
+    atoms: Vec<ClassId>,
 }
 
 impl ClassBuckets {
     #[inline(always)]
-    fn get(&self, class: Atom) -> Option<&Vec<u32>> {
+    fn get(&self, class: ClassId) -> Option<&Vec<u32>> {
         match self.slot.get(class.index().wrapping_sub(self.base) as usize) {
             Some(&n) if n != 0 => Some(&self.lists[n as usize - 1]),
             _ => None,
@@ -456,7 +456,7 @@ impl ClassBuckets {
     }
 
     /// The list of the class, made when it is new.
-    fn list(&mut self, class: Atom) -> &mut Vec<u32> {
+    fn list(&mut self, class: ClassId) -> &mut Vec<u32> {
         let at = class.index();
         if self.slot.is_empty() {
             self.base = at;
@@ -477,7 +477,7 @@ impl ClassBuckets {
         &mut self.lists[self.slot[i] as usize - 1]
     }
 
-    fn iter(&self) -> impl Iterator<Item = (Atom, &Vec<u32>)> {
+    fn iter(&self) -> impl Iterator<Item = (ClassId, &Vec<u32>)> {
         self.atoms.iter().copied().zip(&self.lists)
     }
 
@@ -542,7 +542,7 @@ pub struct RuleSet {
 /// same sets; theirs also keep the selectors on the right of the name, to restyle fewer descendants.
 #[derive(Default)]
 struct Reach {
-    class: HashMap<Atom, Scope, BuildHasherDefault<Fnv>>,
+    class: HashMap<ClassId, Scope, BuildHasherDefault<Fnv>>,
     id: HashMap<Box<str>, Scope, BuildHasherDefault<Fnv>>,
     attr: HashMap<Atom, Scope, BuildHasherDefault<Fnv>>,
     /// `:link` and `:any-link` read `href`.
@@ -840,7 +840,7 @@ impl RuleSet {
                     // Only the classes that were added or removed.
                     let (old, new) = (|| old.split_ascii_whitespace(), || new.split_ascii_whitespace());
                     for c in old().filter(|c| !new().any(|n| n == *c)).chain(new().filter(|c| !old().any(|o| o == *c))) {
-                        scope = scope.max(r.class.get(&doc.class_atom(c)).copied().unwrap_or_default());
+                        scope = scope.max(r.class.get(&doc.class_id(c)).copied().unwrap_or_default());
                     }
                 } else if name == Atom::ID && old != new {
                     for id in [old, new] {
@@ -3164,8 +3164,8 @@ fn name_hash(kind: u32, name: &str) -> u32 {
     mix(h)
 }
 
-/// The hash of a class: from its atom, so that the filter and the splits never read the text of a class name.
-fn class_hash(class: Atom) -> u32 {
+/// The hash of a class: from its number, so that the filter and the splits never read the text of a class name.
+fn class_hash(class: ClassId) -> u32 {
     mix((0x811c_9dc5 ^ 0x5bd1_e995 ^ (class.index() + 1)).wrapping_mul(0x0100_0193))
 }
 
@@ -4789,7 +4789,7 @@ mod tests {
     fn an_ancestor_after_a_sibling_combinator_still_filters() {
         let mut doc = parse("");
         let list = crate::selector::parse_selector_list(".list > :not([hidden]) ~ :not([hidden])", &mut doc).expect("a selector");
-        assert_eq!(ancestor_hashes(&list[0], false), [class_hash(doc.class_atom("list")), 0, 0, 0]);
+        assert_eq!(ancestor_hashes(&list[0], false), [class_hash(doc.class_id("list")), 0, 0, 0]);
         let html = "<div class=list><b id=a></b><b id=b></b><b id=c hidden></b><b id=d></b></div><div><b id=x></b><b id=y></b></div>";
         let css = ".list > :not([hidden]) ~ :not([hidden]) { margin-top: 7px }";
         let m = |id: &str| get(html, &[css], id, Property::MarginTop);
