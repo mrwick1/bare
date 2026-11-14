@@ -37,7 +37,7 @@ Run CSS and layout suites, then the browser library tests. Repeat the 390-pixel 
 
 Change CSS property/cascade handling, text segmentation for the opted-in path, inline placement, intrinsic sizing, related tests and the existing ICU dependency wiring. Do not rewrite the font system, paint pipeline or ordinary paragraph layout. Full language-specific line breaking, hyphenation and keep-all are outside this fix.
 
-Stop and revise this design if cluster boundaries or source mappings cannot be preserved across inline nodes without a wider layout rewrite. The dependency and style-size costs need measurement. The owner approved this design before implementation. Implementation is under validation.
+Stop and revise this design if cluster boundaries or source mappings cannot be preserved across inline nodes without a wider layout rewrite. The dependency and style-size costs need measurement. The owner approved this design before implementation. Implementation checks are complete within the limits in [the results](rendering-wrap-results.md).
 
 ## Implementation checks
 
@@ -45,6 +45,6 @@ The frozen production baseline is 8713d4c2, with doc-only head c57e06df. Three-r
 
 CSS, inheritance, alias, supports and memory-contract tests failed before implementation. The 120-character layout test failed at 20 pixels before the fix. A flex minimum test also failed before shared intrinsic sizing: the item stayed 1,008 pixels wide. Initial grapheme tests failed before the helper existed. The JavaScript alias test caught a missing accessor. Newline capitalization and opted-in tab tests caught state errors and now pass.
 
-A conservative Styles hint follows the existing spacing hint. The ordinary intrinsic path has a separate constant-generic variant. Only affected units copy text for ICU. Shared opportunity coordinates use integer font-unit prefixes to avoid repeated float drift. Source ranges, opening edges and closing edges remain in order. Final resource gates and browser pixels remain pending.
+A conservative Styles hint follows the existing spacing hint. The ordinary intrinsic path has a separate constant-generic variant. Only affected units copy text for ICU. Shared opportunity coordinates use integer font-unit prefixes to avoid repeated float drift. Source ranges, opening edges and closing edges remain in order. Final selected resource gates and scoped browser checks pass. See [the results](rendering-wrap-results.md).
 
 The first normal paragraph control grew by about 0.65 percent. Inline layout now dispatches once per run to a constant-generic normal or opted-in path, as intrinsic sizing does. This removes wrapping checks and word-start bookkeeping from the ordinary word loop. The repeated paragraph control returns to baseline. All five selected existing cost rows pass the unchanged 0.5 percent rule under both allocators.
