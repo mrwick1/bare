@@ -452,22 +452,6 @@ pub struct RuleSet {
     pending: Option<Box<HashMap<NodeId, Vec<InputDeclaration>>>>,
 }
 
-/// The roots of one `restyle` that styled their whole subtree. Out of line: the walk of `restyle_with` is hot, and a set inlined into it makes it slower.
-#[derive(Default)]
-struct Covered(std::collections::HashSet<usize, BuildHasherDefault<Fnv>>);
-
-impl Covered {
-    #[inline(never)]
-    fn has(&self, n: NodeId) -> bool {
-        !self.0.is_empty() && self.0.contains(&n.index())
-    }
-
-    #[inline(never)]
-    fn add(&mut self, n: NodeId) {
-        self.0.insert(n.index());
-    }
-}
-
 /// The invalidation sets: for each class, id and attribute name that a selector reads, the widest `Scope` where it reads it.
 /// A change of `class` restyles only what the added and removed classes reach (`RuleSet::roots`). Blink and Stylo keep the
 /// same sets; theirs also keep the selectors on the right of the name, to restyle fewer descendants.
@@ -1287,13 +1271,24 @@ impl RuleSet {
         let style_atom = doc.find_atom("style");
         let hints = crate::hints::Hints::new(doc);
         let mut ok = true;
-        // Parents first, a subtree root before a root of the same element. A root inside a subtree that an earlier root styled is skipped, so
-        // each element is styled once (`covered`: the roots that styled their whole subtree). Without it, a hover that gives an element and
-        // all its ancestors as roots styles the document once for each of them.
+        // Parents first, a subtree root before a root of the same element. A root inside the subtree of a subtree root is dropped, so each
+        // element is styled once: a hover that gives an element and all its ancestors as roots would style the document once for each of
+        // them. The drop is made here and not in the walk below, which is hot and gets slower with a set in it. A subtree root always styles
+        // its whole subtree, or hides it (then a root inside has a hidden ancestor and the walk skips it too). A root that is not a
+        // subtree root styles it only when its own style changes: it covers nothing here.
         let mut order: Vec<(usize, NodeId, bool)> = roots.iter().map(|&(n, sub)| (std::iter::successors(Some(n), |&p| doc.flat_parent(p)).count(), n, sub)).collect();
         order.sort_unstable_by_key(|r| (r.0, r.1.index(), !r.2));
         order.dedup_by(|a, b| a.1 == b.1);
-        let mut covered = Covered::default();
+        let mut whole: std::collections::HashSet<usize, BuildHasherDefault<Fnv>> = Default::default();
+        order.retain(|&(_, n, sub)| {
+            if !whole.is_empty() && std::iter::successors(doc.flat_parent(n), |&p| doc.flat_parent(p)).any(|p| whole.contains(&p.index())) {
+                return false;
+            }
+            if sub && matches!(doc.data(n), NodeData::Element { .. }) {
+                whole.insert(n.index());
+            }
+            true
+        });
         let (mut candidates, mut matched): (Vec<u32>, Vec<u32>) = (Vec::new(), Vec::new());
         // As in `walk`: the flat tree, and only the browser's rules in a shadow tree. The third value says the node is in one.
         let mut stack: Vec<(NodeId, bool, bool)> = Vec::new();
@@ -1303,18 +1298,12 @@ impl RuleSet {
                 continue;
             }
             // Only a connected root that is shown: inside `display: none` all styles are `NONE`, and the hidden element has its own.
-            if covered.has(root) {
-                continue;
-            }
             let mut filter = AncestorFilter::new(self.tracks());
             let mut shadow = in_shadow(root);
             let mut up = doc.flat_parent(root);
             while let Some(a) = up {
                 if a == doc.root() {
                     break;
-                }
-                if covered.has(a) {
-                    continue 'roots;
                 }
                 let s = styles.of_node[a.index()];
                 if s == NONE || styles.styles[s as usize].get(Property::Display) == Value::Keyword(Keyword::None) {
@@ -1377,11 +1366,8 @@ impl RuleSet {
                     }
                     continue;
                 }
-                if node == root {
-                    if !subtree && old == id {
-                        continue;
-                    }
-                    covered.add(root);
+                if node == root && !subtree && old == id {
+                    continue;
                 }
                 filter.add_element(doc, node);
                 stack.push((node, true, shadow));
