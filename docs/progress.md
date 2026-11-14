@@ -10634,6 +10634,18 @@ Journeys (`tools/bench/journeys.sh compare --clock virtual --runs 3 --pss`; 4 ru
 
 The design estimate was -10.9% and -10.2% for the first two; measured -11.6% and -10.7%. Baseline `f6415364` (the `bench-base-vclock` binary, 3 runs, Wikipedia journeys only): article 7.90 G to 6.88 G; the baseline binary had replay misses on the Wikipedia journeys in this run (3 to 8 for each), so I do not use those ratios. Criterion 2: the sum drops by 2.35 G of 95.45 G, so the ratio moves by about 2.2 points (estimate from the sums; the full criterion was not rerun).
 
+After the rebase on main `c59e1bcf` (it has the settled-driver change #529 and the corpus `virtual-settled`), the same command, 3 runs, 0 replay misses, all 47 pass. The page JS no longer runs in the settle loop, so the shares are different:
+
+| Journey | main (M) | branch (M) | change | PSS MiB |
+|---|---:|---:|---:|---:|
+| `wikipedia-article` | 2,741.6 | 2,577.9 | -6.0% | 41.5 to 40.3 |
+| `wikipedia-search` | 3,446.1 | 3,043.8 | -11.7% | 56.2 to 55.0 |
+| `wikipedia-toc-languages` | 3,012.8 | 2,661.7 | -11.7% | 51.2 to 49.2 |
+| `wikipedia-main-random` | 1,402.8 | 1,393.7 | -0.7% | |
+| all 47 | 51,592.2 | 50,559.6 | -2.0% | 1,087.0 to 972.1 (-10.6%, not from this change alone: run noise on PSS) |
+
+The article saves 164 M here against 901 M before: with the loop off, fewer names are asked (hypothesis, not counted). The rebased `bare` and `bare-html` lib tests pass (1,467; `a_changed_file_starts_again_from_zero` failed once under load, known flaky). The matrix and keycost below ran before this rebase, on main `c4e32a85`; the rebase brought no change to the files I touched except docs.
+
 Gates: `cargo test --release --workspace`: all pass except 7 openssl TLS tests (known on main) and `a_changed_file_starts_again_from_zero` (known flaky; passes alone). Cost matrix against main `c4e32a85`, both allocators: 0 rows over +0.5% under both; 3 rows over under glibc only (`preload_load style 10`, `resources_load small 1` and `10`), under 0.5% with jemalloc; the focused rerun of the `resources_load` rows after the `Atom::NAME` change shows 0. `parse_load deep 1/10` fail to run (known, stack overflow). Keycost: `#a1` 295.5 M for each key against 295.6 M on main; `#f0` 300.8 against 301.0; RSS 30.8 MiB at 50 keys (budget 40). `exec_diff.sh` and `test262_check.sh` not run: `crates/js` is not touched.
 
 Limits made unneeded: none removed. The `it.charge(doc.len())` for a list now applies only to a list build; a walk charges the nodes it visits.
