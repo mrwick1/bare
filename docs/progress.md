@@ -10642,7 +10642,7 @@ After the rebase on main `c59e1bcf` (it has the settled-driver change #529 and t
 | `wikipedia-search` | 3,446.1 | 3,043.8 | -11.7% | 56.2 to 55.0 |
 | `wikipedia-toc-languages` | 3,012.8 | 2,661.7 | -11.7% | 51.2 to 49.2 |
 | `wikipedia-main-random` | 1,402.8 | 1,393.7 | -0.7% | |
-| all 47 | 51,592.2 | 50,559.6 | -2.0% | 1,087.0 to 972.1 (-10.6%, not from this change alone: run noise on PSS) |
+| all 47 | 51,592.2 | 50,559.6 | -2.0% | 1,087.0 to 972.1 (-10.6%; cause not examined) |
 
 The article saves 164 M here against 901 M before: with the loop off, fewer names are asked (hypothesis, not counted). The rebased `bare` and `bare-html` lib tests pass (1,467; `a_changed_file_starts_again_from_zero` failed once under load, known flaky). The matrix and keycost below ran before this rebase, on main `c4e32a85`; the rebase brought no change to the files I touched except docs.
 
