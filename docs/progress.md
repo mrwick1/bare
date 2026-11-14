@@ -8353,3 +8353,10 @@ Checks (release, 2026-11-10):
 - `tools/portable_check.sh`: exit 0.
 
 Not tested: the staging journey. A real Playwright file. `window: true`. A session with cookies (the fixture app keeps its token in `sessionStorage`). Two live sessions at once (not supported: a new open ends the old one).
+
+## Static Response.json (#549)
+
+- `Response.json(data, init)` now exists. The body is `JSON.stringify(data)`. The content type defaults to `application/json`. `init` works as in `new Response`. Data that does not serialize throws a `TypeError`.
+- `cargo test -p bare static_response_json`: passed.
+
+Not tested: a live `bare-mcp` session on the Deck fixture.

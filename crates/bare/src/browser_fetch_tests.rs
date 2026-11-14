@@ -349,6 +349,19 @@ fn body_is_consumed_once_and_clones_share_safely() {
 }
 
 #[test]
+fn static_response_json_makes_a_json_response() {
+    big(|| {
+        let mut b = at(1);
+        assert_eq!(js(&mut b, "typeof Response.json + Response.json.length"), "function2");
+        assert_eq!(js(&mut b, "var r = Response.json({enabled: true}); [r.status, r.ok, r.type, r.headers.get('content-type')].join()"), "200,true,default,application/json");
+        assert_eq!(js(&mut b, "var t = ''; Response.json({a: [1]}, {status: 201, headers: {'X-A': 'b', 'Content-Type': 'x/y'}}).text().then(function (v) { t = v }); 1"), "1");
+        assert_eq!(js(&mut b, "var r2 = Response.json(1, {status: 201, headers: {'X-A': 'b'}}); [r2.status, r2.headers.get('x-a')].join()"), "201,b");
+        assert_eq!(js(&mut b, "Response.json(undefined)"), "throw:TypeError:Failed to execute 'json' on 'Response': The data is not JSON serializable");
+        assert_eq!(js(&mut b, "Response.json(1, {status: 204})"), "throw:TypeError:Response with null body status cannot have body");
+    });
+}
+
+#[test]
 fn response_constructor_request_and_clone() {
     big(|| {
         let mut b = at(1);

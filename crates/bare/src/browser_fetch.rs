@@ -512,6 +512,7 @@ pub(crate) struct Fetch {
     protos: OnceCell<[ObjId; 6]>,
     fixed: RefCell<Vec<ObjId>>,
     pub(crate) json_parse: Cell<Option<Value>>,
+    json_stringify: Cell<Option<Value>>,
     /// Live (the window and the control interface): each request starts on a worker at once, and `run_network_tasks` takes only the
     /// replies that are in. Off: a request that is not in is waited for (a test or a headless run settles the page).
     pub(crate) live: Cell<bool>,
@@ -519,7 +520,7 @@ pub(crate) struct Fetch {
 
 impl Default for Fetch {
     fn default() -> Fetch {
-        Fetch { st: RefCell::default(), lim: Cell::new(FetchLimits::default()), client: RefCell::new(Client::new()), protos: OnceCell::new(), fixed: RefCell::default(), json_parse: Cell::new(None), live: Cell::new(false) }
+        Fetch { st: RefCell::default(), lim: Cell::new(FetchLimits::default()), client: RefCell::new(Client::new()), protos: OnceCell::new(), fixed: RefCell::default(), json_parse: Cell::new(None), json_stringify: Cell::new(None), live: Cell::new(false) }
     }
 }
 
@@ -537,6 +538,7 @@ impl Fetch {
     pub(crate) fn roots(&self, out: &mut Vec<Value>) {
         out.extend(self.fixed.borrow().iter().map(|&o| Value::Object(o)));
         out.extend(self.json_parse.get());
+        out.extend(self.json_stringify.get());
         out.extend(self.st.borrow().queue.iter().flat_map(|p| [p.promise].into_iter().chain(p.xhr.map(|x| Value::Object(x.0)))));
     }
 
@@ -1268,8 +1270,21 @@ fn status_null_body(s: u16) -> bool {
 
 fn response_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
     let proto = it.host_proto_from_new_target(d.fproto(Pr::Response))?;
+    make_response(d, it, proto, arg(a, 0), arg(a, 1), false)
+}
+
+/// `Response.json(data, init)`: the body is `JSON.stringify(data)` and the content type defaults to `application/json`.
+fn response_json(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
+    let Some(stringify) = d.fetch.json_stringify.get() else { return Err(Error::Unsupported(unsupported("Response.json without JSON.stringify"))) };
+    let s = it.call(stringify, Value::Undefined, &[arg(a, 0)])?;
+    if !matches!(s, Value::String(_)) {
+        return Err(it.type_error("Failed to execute 'json' on 'Response': The data is not JSON serializable"));
+    }
+    make_response(d, it, d.fproto(Pr::Response), s, arg(a, 1), true)
+}
+
+fn make_response(d: &Dom, it: &mut Interp<'_>, proto: ObjId, body: Value, init: Value, json: bool) -> R<Value> {
     let lim = d.fl();
-    let init = arg(a, 1);
     let (mut status, mut text, mut list) = (200u16, String::new(), HeaderList::new(Guard::Response));
     if !matches!(init, Value::Undefined | Value::Null) {
         if !matches!(init, Value::Object(_)) {
@@ -1293,7 +1308,10 @@ fn response_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value
         let h = d.prop(it, init, "headers")?;
         d.fill(it, &mut list, h)?;
     }
-    let body = match d.extract_body(it, arg(a, 0))? {
+    if json && list.get("content-type").is_none() {
+        list.append(&lim, "content-type".into(), "application/json".into()).map_err(|e| d.herr(it, e))?;
+    }
+    let body = match d.extract_body(it, body)? {
         Some((bytes, ty)) => {
             if status_null_body(status) {
                 return Err(it.type_error("Response with null body status cannot have body"));
@@ -2535,6 +2553,12 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
         let k = d.key(it, name)?;
         it.define_data(g, k, Value::Object(f), true, false, true)?;
         fixed.push(f);
+        if name == "Response" {
+            let j = d.add_fn(it, response_json, "json", 2, false)?;
+            let k = d.key(it, "json")?;
+            it.define_data(f, k, Value::Object(j), true, false, true)?;
+            fixed.push(j);
+        }
     }
     let f = d.add_fn(it, fetch, "fetch", 1, false)?;
     let k = d.key(it, "fetch")?;
@@ -2548,6 +2572,10 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
         let parse = d.prop(it, json, "parse")?;
         if it.is_callable_value(parse) {
             d.fetch.json_parse.set(Some(parse));
+        }
+        let stringify = d.prop(it, json, "stringify")?;
+        if it.is_callable_value(stringify) {
+            d.fetch.json_stringify.set(Some(stringify));
         }
     }
     Ok(())
