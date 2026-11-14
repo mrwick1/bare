@@ -10932,3 +10932,49 @@ Findings (counting build of main with a temporary patch; the patch changes nothi
 Recommendation: R1 (free dead trees in the page arena, with a free list and a rebuild of the text and attribute buffers) with T1 (a trigger that counts native bytes, 4 MiB), plus C1 (the walk skips plain arrays). Expected 82.4 MiB (-27.3% against 113.4 MiB, 8.3 MiB under the target) and +8.0% instructions on this journey, 0 elsewhere. S1 (one buffer for the cached body and the script source) is -3.7 MiB by arithmetic. The owner reviews the design before anything is built. Open questions are in section 11 of the design.
 
 Not tested: the native holders of a `NodeId` (parser stack, ranges, selection, observers, style and layout tables, sheet scans); CPU on an idle machine; allocators other than glibc; the 25% rule of the trigger; S1 (arithmetic); the cheaper walk with arrays as weak keys; R1 or T1 on the other 46 journeys; Gecko, Servo and Ladybird node sizes; massif ran once; workspace tests, cost matrix, test262 and `exec_diff` (no product code changed).
+## R2-D build, PR 2 (design S): a call across lazy script slots swaps a few words (2026-11-14)
+
+Branch `t3/slot-swap-one-pointer`, on `c9ead755` (PR 1 is merged, PR #535). Design: `docs/design-js-reparse.md`, option S. Owner decision of 2026-11-14 is in the PR 1 section above: A first, then S.
+
+### What changed
+
+- `Interp::select` (`eval_scripts.rs`) used to swap `prog` and ten per-script tables (11 fields, about 190 instructions for each call that crosses scripts). The ten tables now sit in one `Caches` struct. `Code` holds `prog` and `cc: Caches`, and `select` swaps those two, then `scripts.swap(cur, id)`.
+- Design S puts all ten tables behind one pointer. I built that first (attempt 1) and it failed the cost matrix: every access to `expr_name`, `scopes` or `slots` costs one more load, and those three are read for each expression. Attempt 2 (this PR) keeps the three hot tables inline in `Caches` and puts the seven cold ones in `Caches.cold: Box<Cold>`: `pat_name`, `stmt_label`, `func_name`, `site_strs`, `prop_str`, `fflags`, `cflags`. A swap moves the inline part (3 `Vec`s and a `Box` and the `Rc`, 10 words or less) and does not touch the cold tables.
+- `ClassState` no longer has `fflags` and `cflags` (they were copies of two tables that now live in `cc.cold`).
+- All uses are renamed (`self.it.cc.…`). No change of behavior.
+
+### Test (written first)
+
+`eval_scripts_tests::a_call_across_scripts_swaps_a_few_words_not_the_tables`: `size_of::<Code>() <= 10 * size_of::<usize>()`. It failed before the change (the struct had the 10 tables inline) and passes now. The behavior tests (lazy functions across slots, `import()` and `import.meta` of a lazy function, `Error.stack`, `toString`, `eval`, `with`, `arguments`, default parameters, `super`) all pass unchanged.
+
+### Numbers
+
+Machine archMachine. Journeys: corpus `virtual`, `BARE_CLOCK=virtual`, `journeys.sh compare --clock virtual --runs 3 --pss`, 47 journeys, sum of medians. The base is the PR 1 head on `5bc18d14` (the journeys are broken on main since #479; see the PR 1 section), the branch is this change on the same base (`/data/bare-tmp/wt-s-vbase`).
+
+| | PR 1 | PR 2, attempt 2 (this PR) | PR 2, attempt 1 (all ten behind a pointer) |
+| --- | ---: | ---: | ---: |
+| Instructions, 47 journeys | 93,295 M | 92,697 M (-598 M, -0.6%) | about -535 M |
+| Matrix rows over +0.5% under both allocators | | 0 | 80 |
+
+- The design estimate was -730 M. The hybrid gets 82% of it. The rest is the cost of the three inline tables.
+- Cost matrix against `c9ead755` (803 rows, limit +0.5% under both allocators): 0 over under both, mean -0.215% glibc and +0.046% jemalloc (2 rows measured by the jemalloc pass). Two rows are over under glibc only: `resources_load small 1` (+1.5% glibc, +0.2% jemalloc) and `resources_load small 10` (+1.9% glibc, -0.1% jemalloc). They pass the gate. Hypothesis: allocator layout noise, because the jemalloc counts are equal and the code on that path is the same. I did not confirm it.
+- Attempt 1 (all ten behind one pointer): 80 rows over under both allocators (for example `wrapper_load strindex` +0.9%, `select_load react 1000` +0.5%), mean +0.65% jemalloc. I dropped it and built attempt 2. This is one failed attempt, not two on the same problem.
+- Peak RSS and PSS (`--pss`, sum of medians): 1,577.6 against 1,581.3 MiB (+0.2%), within the noise of a single sample. Three sites, 3 runs of the drive: `wikipedia-article` 59.6 to 60.9 MiB against 59.6 to 62.8 MiB (PR 1), `go-dev-home` 58.4 to 62.4 against 58.8 to 63.8, `crates-io-home` about 20 MiB on both. No difference beyond the spread. The change does not allocate more: one `Box` for each script.
+- `keycost` (`typing-page`): `#a1` 278.5 M and `#f0` 283.9 M for each key, peak RSS 31.0 MiB at 50 keys. The H1 section records 295.6 M and 301.0 M on an older main; I did not run `keycost` on `c9ead755` alone, so I do not know how much of the drop is PR 1 and how much is PR 2.
+
+### Checks
+
+- `cargo test --release -p bare-js`: 964 passed.
+- `cargo test --release --workspace --no-fail-fast`: only the known failures (the 7 openssl TLS tests in `bare-net` and `bare-tls`).
+- `TEST262=/data/claude-tmp/test262 tools/js/test262_check.sh`: exit 0, and `results.txt` is identical to the PR 1 run.
+- `tools/js/exec_diff.sh`: 79 runs, modes tree, auto and byte, 0 differences.
+- Journeys: all 47 pass. `wikipedia-search` shows "more replay misses than base" (0 against 2) in one compare; reruns show the same on both binaries, so it is timing noise.
+
+### Not tested
+
+The journeys on a main at or after #479 (broken). Live sites. Windows and macOS. Wall time (the machine was not idle). The bytecode lane across scripts (it does not run lazy functions). A page with hundreds of scripts that call each other (no corpus page has one): the swap is cheaper there, but I did not measure it.
+
+### Noticed, not changed
+
+- The journey benchmark is broken on main since #479 (PR 1 section).
+- The design estimate of -730 M assumed no extra load on the hot tables. Moving `expr_name`, `scopes` and `slots` to the cold side would save 130 M more but costs on the pure-eval rows. A different split needs a profile of the loads, which I did not do.

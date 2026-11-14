@@ -2188,3 +2188,8 @@ The owner approved criterion 8 of [the design](design-style-round2.md) and asked
 ## 2026-11-14: skip data for nested lazy functions, then one pointer swap for a script slot (R2-D)
 
 Owner decision 2026-11-14: build design A of `docs/design-js-reparse.md` first, then design S, as two PRs in order. Chosen: A keeps the lazy stubs of a dropped function body as skip data (`LazyFn.inner`, `end`, `strict_out`), so the second parse of a function that runs jumps over the lazy bodies inside it. Measured -2,080 M instructions over the 47 journeys with the peak RSS unchanged (`docs/progress.md`, "R2-D build, PR 1"). Other designs, not built: no lazy functions (-3,490 M but +61.9 MiB peak RSS), a higher body limit, an eager rule for call forms, and a record of which functions ran. S follows in PR 2.
+
+## 2026-11-14: a script slot swap moves the hot caches inline and the cold ones behind one pointer (R2-D, PR 2)
+
+- Chosen: `Caches` keeps `expr_name`, `scopes` and `slots` inline and puts the other seven per-script tables in `Box<Cold>`. A call across scripts swaps `prog` and `cc` (10 words or less), not 11 fields.
+- Not chosen: all ten tables behind one pointer, as in the design. Built and measured: 80 cost-matrix rows over +0.5% under both allocators, because each expression read pays one more load. The hybrid has 0 rows over and keeps -598 M of the -730 M estimate on the journeys.
