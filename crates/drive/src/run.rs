@@ -480,19 +480,11 @@ impl Session {
     }
 
     /// A recording or a replay (`bare_net::replay`) is a benchmark: the pictures that the page started to load finish before the next step, and at the
-    /// end. Without it the work of a run depends on a race between a step (a click that leaves the page) and the queue of pictures. One look at a
-    /// document that has no picture costs nothing.
+    /// end (`Page::settle_images`: no timer or script of the page runs for it). Without it the work of a run depends on a race between a step (a click
+    /// that leaves the page) and the queue of pictures. One look at a document that has no picture costs nothing.
     fn settle_pictures(&mut self) {
         if bare_net::replay::Tape::from_env().is_some() {
-            let _ = self.host.run(|p| {
-                let end = bare_net::vclock::instant() + Duration::from_secs(5);
-                while p.images_pending() && bare_net::vclock::instant() < end {
-                    let (more, next) = p.tick();
-                    if !more {
-                        p.nap(next, Duration::from_millis(5), Duration::from_millis(20));
-                    }
-                }
-            });
+            let _ = self.host.run(|p| p.settle_images());
         }
     }
 
