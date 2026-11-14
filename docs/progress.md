@@ -10360,3 +10360,8 @@ Issue 482: the rendered-text regression failed with Unsupported before the fix. 
 All nine element tests pass, including the existing 46-case element fixture. The full bare library run passes 1416 tests with six ignored. The new table cases cover a direct textarea getter, default and edited contents, surrounding whitespace, block display, multiple controls, hidden visibility, a hidden ancestor, a hidden target and a detached target.
 
 Whitespace diff checks pass. Strict rustfmt fails on pre-existing compact formatting; the unchanged base file reproduces the failure. Strict no-dependencies clippy reports 32 existing diagnostics, including unchanged code outside this fix. These two gates are not green. No benchmark or resource claim is made. An isolated candidate with both the metadata and textarea fixes passes the minimal MCP reproduction. SHA-256 followed by body.innerText resolves to the surrounding text, and a later timer resolves. The same candidate receives 200 from the metadata-gated local endpoint. Shared installations stay unchanged.
+
+
+## 2026-11-14: standalone textarea pre-merge checks
+
+The textarea fix is independent of Fetch Metadata and is rebased onto main at 5bc18d14. Its release library run passes 1,459 tests with six ignored. All five three-run instruction comparisons remain below the existing 0.5 percent limit on glibc. See [the samples and limits](innertext-textarea-design.md#independent-pre-merge-check-2026-11-14).

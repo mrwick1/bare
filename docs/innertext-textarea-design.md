@@ -42,3 +42,19 @@ This removes the textarea trigger. It does not establish correct recovery from e
 ## Current-main recheck: 2026-11-14
 
 The branch is stacked on the rebased Fetch Metadata fix. The combined serial release library run passes 1,464 tests with six ignored. The rebuilt MCP executable passes the same-origin header-gated request. Its async SHA-256 then body text read returns the visible text, and a later timer also resolves. No test page value enters the ancestor text. The Deck UI and private-viewer run remains pending. Resource benchmarks were not repeated. No merge is included.
+
+## Independent pre-merge check: 2026-11-14
+
+The branch was rebased directly onto main at 5bc18d14. Fetch Metadata is not part of this branch. Its separate PR remains blocked by its request cost. The standalone textarea release library run passes 1,459 tests with six ignored. The earlier combined MCP and accepted Deck journey remain historical combined-candidate evidence; they are not standalone metadata evidence.
+
+The same five workloads were measured on frozen main and this candidate. Each instruction and RSS interval has three fresh process samples. Machine: Linux x86-64, Ryzen 9 5900HX. Two build jobs. Shared host; no wall-time claim. Instructions use perf instructions:u and the existing tcache setting. Peak RSS uses a C fork/exec/wait4 wrapper without that setting and is in KiB. Frozen main executable hashes were checked before retention.
+
+| Case | Main instructions | Candidate instructions | Main RSS KiB | Candidate RSS KiB |
+| --- | ---: | ---: | ---: | ---: |
+| style_setget | 56,310,566–56,326,469 | 56,305,604–56,322,886 | 12,364–12,428 | 12,096–12,532 |
+| sheets_linked | 8,622,008–8,623,555 | 8,621,857–8,624,827 | 12,676–12,856 | 12,648–12,808 |
+| browser_mutation | 70,097,876–70,098,479 | 70,098,560–70,099,026 | 11,472–12,036 | 11,560–11,704 |
+| fetch_post | 21,591,413–21,592,372 | 21,592,361–21,593,265 | 13,004–13,280 | 12,880–13,156 |
+| xhr | 10,691,794–10,694,630 | 10,694,412–10,695,832 | 11,608–11,872 | 11,448–11,728 |
+
+All five instruction rows remain below the 0.5 percent gate on glibc. No row therefore exceeds the limit under both allocators. A fresh jemalloc run and the full cost matrix were not run for this independent branch. The maximum observed increase is 0.024 percent. Fresh UI captures were not repeated for this rebase.
