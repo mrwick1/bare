@@ -131,7 +131,7 @@ impl<'p> Interp<'p> {
             for c in s.iter() {
                 if let BcSlot::Byte(c) = c {
                     c.code.ics.iter().for_each(|ic| ic.set(Ic::EMPTY));
-                    c.cells.iter().for_each(|cell| cell.1.set(u32::MAX));
+                    c.cells.iter().for_each(GCell::forget);
                 }
             }
         }
@@ -172,7 +172,7 @@ impl<'p> Interp<'p> {
                 },
                 _ => PropertyKey::Index(0),
             };
-            cells.push((key, std::cell::Cell::new(u32::MAX)));
+            cells.push(GCell::new(key));
             kv.push(match k {
                 Const::Number(n) => Value::Number(*n),
                 Const::String(u) => match self.heap.intern_vec(u.to_vec()) {
@@ -460,10 +460,11 @@ impl<'p> Interp<'p> {
 
     /// `GetGlobal`: environment 0 (a lexical name of another script), then the global object.
     #[inline(never)]
-    fn bc_get_global(&mut self, n: u32, cell: &(PropertyKey, std::cell::Cell<u32>)) -> Res<Value> {
+    fn bc_get_global(&mut self, n: u32, cell: &GCell) -> Res<Value> {
         if !self.envs[0].bindings.is_empty()
             && let Some(i) = self.find_in(0, n)
         {
+            cell.lex.set(i as u32);
             let b = self.envs[0].bindings[i];
             return if b.flags & INIT != 0 { Ok(b.value) } else { Err(self.tdz(n)) };
         }
@@ -473,15 +474,17 @@ impl<'p> Interp<'p> {
     }
 
     /// Keep the position of a global property in its cell, after a slow path.
-    fn bc_learn(&mut self, cell: &(PropertyKey, std::cell::Cell<u32>)) {
-        cell.1.set(self.heap.own_pos(self.global, cell.0).unwrap_or(u32::MAX));
+    fn bc_learn(&mut self, cell: &GCell) {
+        cell.pos.set(self.heap.own_pos(self.global, cell.key).unwrap_or(u32::MAX));
+        cell.e0.set(self.envs[0].bindings.len() as u32);
     }
 
     #[inline(never)]
-    fn bc_set_global(&mut self, n: u32, v: Value, cell: &(PropertyKey, std::cell::Cell<u32>)) -> Res<()> {
+    fn bc_set_global(&mut self, n: u32, v: Value, cell: &GCell) -> Res<()> {
         if !self.envs[0].bindings.is_empty()
             && let Some(i) = self.find_in(0, n)
         {
+            cell.lex.set(i as u32);
             return self.bc_assign(0, i, v);
         }
         self.assign_global(n, v)?;
@@ -883,7 +886,17 @@ impl<'p> Interp<'p> {
                     // A cell hit is what `get_global` and `assign_global` find first. A lexical binding of environment 0 shadows the cells.
                     GET_GLOBAL => {
                         let cell = &c.cells[bx as usize];
-                        let hit = if self.envs[0].bindings.is_empty() { self.heap.cell_get(self.global, cell.1.get(), cell.0) } else { None };
+                        let lex = cell.lex.get();
+                        let hit = if lex != u32::MAX {
+                            match self.envs[0].bindings.get(lex as usize) {
+                                Some(b) if b.flags & INIT != 0 => Some(b.value),
+                                _ => None,
+                            }
+                        } else if self.envs[0].bindings.len() as u32 == cell.e0.get() {
+                            self.heap.cell_get(self.global, cell.pos.get(), cell.key)
+                        } else {
+                            None
+                        };
                         regs[a] = match hit {
                             Some(v) => v,
                             None => tri!(at, self.bc_get_global(name!(bx), cell)),
@@ -892,7 +905,19 @@ impl<'p> Interp<'p> {
                     SET_GLOBAL => {
                         let cell = &c.cells[bx as usize];
                         let v = regs[a];
-                        if !(self.envs[0].bindings.is_empty() && self.heap.cell_set(self.global, cell.1.get(), cell.0, v)) {
+                        let lex = cell.lex.get();
+                        let done = if lex != u32::MAX {
+                            match self.envs[0].bindings.get_mut(lex as usize) {
+                                Some(b) if b.flags & (INIT | MUT) == INIT | MUT => {
+                                    b.value = v;
+                                    true
+                                }
+                                _ => false,
+                            }
+                        } else {
+                            self.envs[0].bindings.len() as u32 == cell.e0.get() && self.heap.cell_set(self.global, cell.pos.get(), cell.key, v)
+                        };
+                        if !done {
                             tri!(at, self.bc_set_global(name!(bx), v, cell));
                         }
                     }

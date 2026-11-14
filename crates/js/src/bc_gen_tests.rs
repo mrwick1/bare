@@ -442,3 +442,45 @@ fn register_functions_with_closures_agree_with_the_tree_walker() {
         assert!(bad.is_empty(), "{}", bad.join("\n"));
     });
 }
+
+/// Run each script in turn in one realm and show the last completion value.
+fn show_all(srcs: &[&str], mode: Exec) -> String {
+    let mut it = Interp::realm(Heap::default(), EvalLimits { max_steps: 50_000_000, ..Default::default() }).unwrap();
+    it.set_exec(mode);
+    let mut out = String::new();
+    for src in srcs {
+        out = match it.run_script(src) {
+            Ok(v) => it.display(v),
+            Err(Error::Throw(v @ Value::Object(_))) => format!("throw:{}", it.get_str(v, "name")),
+            Err(e) => format!("{e:?}"),
+        };
+    }
+    out
+}
+
+/// The global cells follow a lexical declaration of a later script (it shadows the property of the global object), a name that
+/// is deleted and made again, a `const`, and a name in its TDZ.
+#[test]
+fn global_cells_follow_the_declarations_of_later_scripts() {
+    big(|| {
+        let cases: &[(&str, &[&str])] = &[
+            ("shadow", &["globalThis.q = 1; function rd() { return q; } function wr(v) { q = v; } var a = [rd(), rd()]; wr(7); a.push(rd()); a.join()", "let q = 2; var b = [rd()]; wr(9); b.push(rd(), globalThis.q); b.join()"]),
+            ("loop", &["globalThis.n = 0; function inc() { for (var i = 0; i < 5; i++) n = n + i; return n; } inc(); inc()", "let n2 = 1; globalThis.n + ',' + inc()"]),
+            ("const", &["globalThis.k = 1; function w() { k = 2; return k; } w()", "const k = 3; try { w(); } catch (e) { e.name + k }"]),
+            ("tdz", &["function rd() { return zz; } 1", "var r = []; try { rd(); } catch (e) { r.push(e.name); } let zz = 4; r.push(rd(), rd()); r.join()"]),
+            ("delete and make again", &["globalThis.d = 1; function rd() { return typeof d == 'undefined' ? -1 : d; } var r = [rd()]; delete globalThis.d; r.push(rd()); globalThis.e = 5; globalThis.d = 8; r.push(rd()); r.join()"]),
+            ("accessor", &["Object.defineProperty(globalThis, 'ac', { get: function() { return 11; }, configurable: true }); function rd() { return ac; } rd() + rd()"]),
+        ];
+        let mut bad = Vec::new();
+        for (name, srcs) in cases {
+            let want = show_all(srcs, Exec::Tree);
+            for mode in [Exec::Auto, Exec::Byte] {
+                let got = show_all(srcs, mode);
+                if got != want {
+                    bad.push(format!("{name} {mode:?}: {got} (tree {want})"));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "{}", bad.join("\n"));
+    });
+}

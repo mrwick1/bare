@@ -28,10 +28,34 @@ struct Compiled {
     code: crate::bc::Code,
     /// For each constant: a number, an interned string (rooted by `bc_roots`), or `undefined` for a name.
     kv: Box<[Value]>,
-    /// For each constant: its global cell. A name has its key and the position of the property in the dictionary of the global
-    /// object (`u32::MAX` until a slow path learns it). `GetGlobal` and `SetGlobal` read it. Other constants hold a key that is never
-    /// read.
-    cells: Box<[(PropertyKey, std::cell::Cell<u32>)]>,
+    /// For each constant: its global cell. `GetGlobal` and `SetGlobal` read it. Constants that are not names hold a key that is
+    /// never read.
+    cells: Box<[GCell]>,
+}
+
+/// A global name of compiled code and what the loop learned about it (`GetGlobal`, `SetGlobal`). Both hits are what the full path
+/// would find: a binding of environment 0 (a `let`, `const` or `class` of a script) shadows the global object.
+struct GCell {
+    key: PropertyKey,
+    /// The position of the property in the dictionary of the global object (`u32::MAX` until a slow path learns it).
+    pos: std::cell::Cell<u32>,
+    /// The number of bindings of environment 0 when `pos` was learned. The name was not one of them. Environment 0 only gains
+    /// bindings, so `pos` is valid while the count is the same (`u32::MAX`: never).
+    e0: std::cell::Cell<u32>,
+    /// The binding of environment 0 that holds the name (`u32::MAX`: none was found). A binding keeps its index.
+    lex: std::cell::Cell<u32>,
+}
+
+impl GCell {
+    fn new(key: PropertyKey) -> GCell {
+        GCell { key, pos: std::cell::Cell::new(u32::MAX), e0: std::cell::Cell::new(u32::MAX), lex: std::cell::Cell::new(u32::MAX) }
+    }
+
+    fn forget(&self) {
+        self.pos.set(u32::MAX);
+        self.e0.set(u32::MAX);
+        self.lex.set(u32::MAX);
+    }
 }
 
 /// The state of one function for the switch.

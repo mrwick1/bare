@@ -449,7 +449,7 @@ fn a_shape_sweep_resets_the_caches_of_bytecode_code() {
             for c in it.bc.codes.iter().flat_map(|s| s.iter()) {
                 if let BcSlot::Byte(c) = c {
                     ics += c.code.ics.iter().filter(|ic| format!("{:?}", ic.get()) != empty).count();
-                    cells += c.cells.iter().filter(|cell| cell.1.get() != u32::MAX).count();
+                    cells += c.cells.iter().filter(|cell| cell.pos.get() != u32::MAX).count();
                 }
             }
             (ics, cells)
