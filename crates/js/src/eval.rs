@@ -1597,12 +1597,12 @@ impl<'p> Interp<'p> {
                 }
                 return Ok(());
             }
-            ExprKind::Null | ExprKind::Bool(_) | ExprKind::Number(_) | ExprKind::String | ExprKind::Hole | ExprKind::BigInt => return Ok(()),
+            ExprKind::Null | ExprKind::Bool(_) | ExprKind::Number(_) | ExprKind::String | ExprKind::Hole | ExprKind::BigInt | ExprKind::Data => return Ok(()),
             _ => {}
         }
         let prog = self.prog.clone();
         match ex.kind {
-            ExprKind::Ident | ExprKind::Null | ExprKind::Bool(_) | ExprKind::Number(_) | ExprKind::String | ExprKind::Hole | ExprKind::BigInt => {}
+            ExprKind::Ident | ExprKind::Null | ExprKind::Bool(_) | ExprKind::Number(_) | ExprKind::String | ExprKind::Hole | ExprKind::BigInt | ExprKind::Data => {}
             ExprKind::This => {
                 self.fl |= FL_THIS;
                 self.cls_w_this(e, ac)
@@ -2989,6 +2989,7 @@ impl<'p> Interp<'p> {
             ExprKind::Template(t) => self.eval_template(t),
             ExprKind::Array(l) => self.eval_array(l),
             ExprKind::Object(l) => self.eval_object(e, l),
+            ExprKind::Data => self.eval_data(e),
             ExprKind::Function(fid) => self.make_closure(fid, None, true),
             ExprKind::Unary { op, arg } => self.eval_unary(op, arg),
             ExprKind::Update { op, prefix, arg } => self.eval_update(op, prefix, arg),
@@ -3103,6 +3104,15 @@ impl<'p> Interp<'p> {
         }
         hxw!(self, self.heap.set(a, self.k_length, Value::Number(n as f64)));
         Ok(Value::Object(a))
+    }
+
+    /// A literal that the parser kept as text (`ExprKind::Data`): the heap values come straight from the source.
+    #[inline(never)]
+    fn eval_data(&mut self, e: ExprId) -> Res<Value> {
+        let prog = self.prog.clone();
+        let sp = prog.expr(e).span;
+        let text = &prog.source[sp.start as usize..sp.end as usize];
+        Ok(h!(self, crate::data_lit::build(&mut self.heap, self.object_proto, self.array_proto, text)))
     }
 
     #[inline(never)]

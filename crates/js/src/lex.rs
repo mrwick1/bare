@@ -393,6 +393,11 @@ impl<'a> Lexer<'a> {
         Ok(l)
     }
 
+    /// Go on scanning at byte `pos`, a token start that the parser found by itself (the end of a data literal).
+    pub fn seek(&mut self, pos: u32) {
+        self.pos = (pos as usize).min(self.src.len());
+    }
+
     /// Annex B (script goal only): `<!--` starts a comment to the end of the line, and so does `-->` at the start of a line
     /// (after only spaces and comments) or of the source. Off by default.
     pub fn set_html_comments(&mut self, on: bool) {

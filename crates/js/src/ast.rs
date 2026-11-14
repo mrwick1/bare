@@ -209,6 +209,8 @@ pub enum ExprKind {
     /// Elements are expressions, [`ExprKind::Spread`] or [`ExprKind::Hole`].
     Array(List<Expr>),
     Object(List<Prop>),
+    /// An array or object literal of JSON values only, kept as its source span (see [`crate::data_lit`]). The evaluator builds the values from the text.
+    Data,
     /// A function or arrow function expression (also the value of a method).
     Function(FuncId),
     Class(ClassId),

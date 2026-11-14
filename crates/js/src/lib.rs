@@ -21,6 +21,7 @@ pub mod eval;
 pub mod bc;
 
 mod number;
+mod data_lit;
 mod obj_tab;
 mod bigint;
 mod ieee754;
