@@ -59,6 +59,33 @@ struct Cache {
     docs: u64,
     hits: u64,
     misses: u64,
+    /// The key of the set that the current document looked up or kept last.
+    recent: Option<u64>,
+    /// The key of the set before it, that the document left: it goes at the next look, when the document no longer holds it.
+    step: Option<u64>,
+}
+
+impl Cache {
+    /// The current document uses the set `k`. The set that it used before is a step of the page (a page that changes its sheets while it
+    /// loads gets one set for each list): no page keeps it, and it would be in memory with the next one.
+    fn use_key(&mut self, k: u64) {
+        self.drop_step();
+        if self.recent != Some(k) {
+            self.step = self.recent;
+            self.recent = Some(k);
+        }
+    }
+
+    /// Drop the step of the document if nobody holds it.
+    fn drop_step(&mut self) {
+        if let Some(k) = self.step.take()
+            && self.map.get(&k).is_some_and(|e| Rc::strong_count(&e.rules) == 1)
+            && let Some(old) = self.map.remove(&k)
+        {
+            self.cost -= old.cost;
+            self.order.retain(|o| *o != k);
+        }
+    }
 }
 
 thread_local! {
@@ -108,6 +135,7 @@ pub fn lookup_key(k: Key, viewport: (f32, f32), parts: &[Part<'_>]) -> Option<Rc
                 e.last = docs;
                 let rules = e.rules.clone();
                 c.hits += 1;
+                c.use_key(k);
                 Some(rules)
             }
             None => {
@@ -144,6 +172,7 @@ pub fn insert_key(k: Key, parts: &[Part<'_>], rules: &Rc<RuleSet>) {
         c.map.insert(k, Entry { rules: rules.clone(), layers, cost, last: c.docs });
         c.order.push_back(k);
         c.cost += cost;
+        c.use_key(k);
     });
 }
 
@@ -165,6 +194,8 @@ pub fn unshare(rules: Rc<RuleSet>) -> Option<RuleSet> {
 /// A new document starts on this thread: drop the entries that the last [`MAX_IDLE`] documents did not use.
 pub fn new_document() {
     CACHE.with_borrow_mut(|c| {
+        c.drop_step();
+        c.recent = None;
         c.docs += 1;
         let docs = c.docs;
         let before = c.map.len();
@@ -231,10 +262,30 @@ mod tests {
     }
 
     #[test]
+    fn a_document_keeps_only_its_last_set_in_the_cache() {
+        clear();
+        let (a, b, c): ([Part<'_>; 1], [Part<'_>; 1], [Part<'_>; 1]) = ([(None, "a { color: red }")], [(None, "b { color: blue }")], [(None, "c { color: green }")]);
+        new_document();
+        // A page that changes its sheets twice while it loads: three sets, one after the other. Nothing holds the first two.
+        drop(keep(&a));
+        drop(keep(&b));
+        drop(keep(&c));
+        new_document();
+        assert_eq!(counts().entries, 1, "the steps of the page are gone, its last set stays");
+        assert!(lookup(VIEW, &c).is_some() && lookup(VIEW, &a).is_none() && lookup(VIEW, &b).is_none());
+        // A set that the page still holds stays when the page goes on to another list.
+        let hold = keep(&a);
+        drop(keep(&b));
+        assert_eq!(counts().entries, 2, "`c` was the step before `a`; `a` is held and `b` is last");
+        new_document();
+        assert!(lookup(VIEW, &a).is_some() && Rc::strong_count(&hold) == 2);
+    }
+
+    #[test]
     fn another_text_layer_order_count_or_window_is_another_set() {
         clear();
         let parts: [Part<'_>; 2] = [(None, "a { color: red }"), (None, "b { color: blue }")];
-        keep(&parts);
+        let _held = keep(&parts);
         assert!(lookup((801.0, 600.0), &parts).is_none(), "the window width");
         assert!(lookup((800.0, 601.0), &parts).is_none(), "the window height");
         assert!(lookup(VIEW, &[parts[1], parts[0]]).is_none(), "the order");
