@@ -2193,3 +2193,12 @@ Owner decision 2026-11-14: build design A of `docs/design-js-reparse.md` first, 
 
 - Chosen: `Caches` keeps `expr_name`, `scopes` and `slots` inline and puts the other seven per-script tables in `Box<Cold>`. A call across scripts swaps `prog` and `cc` (10 words or less), not 11 fields.
 - Not chosen: all ten tables behind one pointer, as in the design. Built and measured: 80 cost-matrix rows over +0.5% under both allocators, because each expression read pays one more load. The hybrid has 0 rows over and keeps -598 M of the -730 M estimate on the journeys.
+
+## 2026-11-14: the last document of a journey runs to its `load` event (option A of `design-journey-end.md`)
+
+Owner decision 2026-11-14: option A. The end of a journey (`Session::finish`) ticks the page until the last document has fired `load`, then settles the pictures as before. The bound is 5 s of page time (virtual on the benchmark clock). It is a stop for a hang: no journey reaches it. A step still ends at its own `expect`. There is no wait for network idle.
+
+- Chosen because it is Playwright's `goto` default (`load`) and the WebPageTest "Document Complete", and because the settled driver left the last document of 25 of 47 journeys unloaded, so the benchmark did not count work that a user who stays on the page pays.
+- Not chosen: B (also wait for network idle: the end then depends on beacons and polling that the page starts after `load`; Playwright marks it discouraged), C (every step waits for `load`: it counts the load of a page that a fast user left, and the browser aborts that load), D (a new `expect load` step and 47 file edits).
+- The wait is in `Session::finish`, so it runs in replay and in live mode alike, in `bare-drive` and in `bare-mcp` `close`. A page that is loaded costs one look. A page that is not loaded runs its ticks until `load`, or until nothing is scheduled, or 5 s. I did not gate it on the tape.
+- It needs a new frozen baseline and a new corpus (`virtual-load`). Numbers: `docs/progress.md`, section "The last document of a journey runs to `load` (2026-11-14)".

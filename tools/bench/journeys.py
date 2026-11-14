@@ -8,7 +8,7 @@
                       (exit 1 when a journey has more replay misses on NEW than on BASE: that journey did not do the recorded work, whatever its pass column says)
 
 `--clock virtual` sets `BARE_CLOCK=virtual` (a page clock that replies move, `crates/net/src/vclock.rs`): the same work in every run. It is a clock for a replay, so the recording of the
-journeys in the corpus `virtual` is a fill under that clock (a copy of `main`, then `journeys.sh fill --clock virtual`); with it, `--corpus` defaults to `virtual`. `--clock real` (the default) removes `BARE_CLOCK`.
+journeys in a virtual corpus is a fill under that clock (a copy of `main`, then `journeys.sh fill --clock virtual`); with it, `--corpus` defaults to `virtual-load` (the journey ends at the `load` event of its last document). `--clock real` (the default) removes `BARE_CLOCK`.
 
 The corpus is machine-local and never in the repository: DIR/<journey>/ holds the replies of one journey (`crates/net/src/replay.rs`), DIR/status.tsv the
 result of the recording. `BARE_SEED=1` is set for every run (a fixed `Math.random` and `crypto` stream: a random id in a URL or a body would never match a recording). A replay is faster than the live run, so a page asks for files that the live run never asked for before the process ended: after the
@@ -23,7 +23,7 @@ import glob, json, os, re, shutil, statistics, subprocess, sys, tempfile, time
 HERE = os.path.dirname(os.path.abspath(__file__))
 STEPS = os.path.join(HERE, "..", "drive", "public")
 CORPUS = "/data/bare-tmp/corpus/main"
-VIRTUAL_CORPUS = "/data/bare-tmp/corpus/virtual-settled"
+VIRTUAL_CORPUS = "/data/bare-tmp/corpus/virtual-load"
 
 
 def journeys(only):

@@ -731,6 +731,9 @@ impl Session {
     /// Close the page (and its window) and give the report. The page first hears that it is hidden, and the requests of its handlers
     /// get up to 2 s (`Page::hide`).
     pub fn finish(mut self) -> Report {
+        // The last document of a journey runs to its `load` event (Playwright's `goto` default), as a user who stays on the page waits for it.
+        // A step ends at its own condition and does not wait. The bound is a stop for a hang: no journey reaches it.
+        let _ = self.host.run(|p| p.wait_load(END_LOAD_WAIT));
         self.settle_pictures();
         let _ = self.host.run(|p| p.hide(Duration::from_secs(2)));
         self.report();
@@ -795,6 +798,9 @@ fn thread_cpu_ns() -> u64 {
 /// How long an action waits for a cover to go (a spinner, a backdrop that fades) before it fails as `covered`. A cover that stays (a cookie
 /// banner) is for the caller to close, so it must not cost the whole time limit.
 const COVER_WAIT: Duration = Duration::from_secs(1);
+
+/// How long the end of a journey waits for the last document to reach `load` (`Session::finish`). Page time: on the benchmark clock it is virtual.
+const END_LOAD_WAIT: Duration = Duration::from_secs(5);
 
 /// The most pixels tall that a screenshot is.
 const SHOT_MAX: u32 = 8000;
