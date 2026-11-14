@@ -26,7 +26,7 @@
 //!
 //! Nothing is rejected as unsupported now ([`ErrorKind::Unsupported`] is kept for callers). The tested corpus and observed staging
 //! syntax are covered; this is not a claim of complete ES2022 compatibility.
-//! Not done here: regexp pattern grammar ([`REGEXP_PATTERN_VALIDATED`]), scope
+//! Not done here: the compile of a regexp pattern (the parser only checks it), scope
 //! resolution of names.
 //!
 //! Specification sections used for the subtle rules (ECMA-262, 2022):
@@ -48,12 +48,13 @@
 use crate::ast::*;
 use crate::lex::{self, Goal, Keyword as K, Kind, Lexer, Punct as P, TemplatePart, Token};
 use std::borrow::Cow;
+use std::cell::OnceCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
-/// The regexp token is scanned and its flags are checked, but the pattern grammar is not. A pattern
-/// such as `/(/` parses. Another component owns pattern validation; until it runs, a bad regexp is
-/// not an early error. This constant is the explicit gate: it is `false`.
-pub const REGEXP_PATTERN_VALIDATED: bool = false;
+/// The parser checks the pattern and the flags of every regexp literal ([`crate::regexp::Regex::check`]), also in a function body that it
+/// drops (see [`crate::ast::Body::Lazy`]). A bad pattern is [`ErrorKind::Unsupported`], as it was when the first walk compiled the
+/// literal. The compile (the code of the pattern) is done at the first evaluation of the literal.
 
 /// Hard recursion ceiling, even when the caller raises `Limits::max_depth`.
 pub const HARD_MAX_DEPTH: u32 = 2048;
@@ -150,18 +151,18 @@ fn lex_err(e: lex::Error) -> Error {
 
 /// Parse `source` as a script (not a module). Borrows `source`; the [`Program`] owns its nodes.
 pub fn parse_script(source: &str, limits: Limits) -> Result<Program<'_>, Error> {
-    parse_counted(source, limits, &mut 0, false)
+    parse_counted(source, limits, &mut 0, false, false)
 }
 
 /// Parse `source` as a module: strict code, `await` at the top level, `import` and `export` declarations.
 pub fn parse_module(source: &str, limits: Limits) -> Result<Program<'_>, Error> {
-    parse_counted(source, limits, &mut 0, true)
+    parse_counted(source, limits, &mut 0, true, false)
 }
 
 /// [`parse_module`], and the node count as in [`parse_script_used`].
 pub fn parse_module_used(source: &str, limits: Limits) -> (Result<Program<'_>, Error>, u32) {
     let mut used = 0;
-    let r = parse_counted(source, limits, &mut used, true);
+    let r = parse_counted(source, limits, &mut used, true, false);
     (r, used)
 }
 
@@ -169,12 +170,30 @@ pub fn parse_module_used(source: &str, limits: Limits) -> (Result<Program<'_>, E
 /// the same source with a `max_nodes` of at least that count gives the same result.
 pub fn parse_script_used(source: &str, limits: Limits) -> (Result<Program<'_>, Error>, u32) {
     let mut used = 0;
-    let r = parse_counted(source, limits, &mut used, false);
+    let r = parse_counted(source, limits, &mut used, false, false);
     (r, used)
 }
 
+/// [`parse_script_used`] where a function body that no early error or scope rule needs later is checked and dropped ([`Body::Lazy`]). The
+/// result must be made owned ([`Program::into_owned`]) before a function is parsed again ([`Program::lazy_function`]).
+pub fn parse_script_lazy_used(source: &str, limits: Limits) -> (Result<Program<'_>, Error>, u32) {
+    let mut used = 0;
+    let r = parse_counted(source, limits, &mut used, false, true);
+    (r, used)
+}
+
+/// [`parse_module_used`] with lazy function bodies, see [`parse_script_lazy_used`].
+pub fn parse_module_lazy_used(source: &str, limits: Limits) -> (Result<Program<'_>, Error>, u32) {
+    let mut used = 0;
+    let r = parse_counted(source, limits, &mut used, true, true);
+    (r, used)
+}
+
+/// A function body shorter than this many bytes is kept: a second parse and a tree of its own cost more than the short body.
+const LAZY_MIN_BODY: u32 = 128;
+
 #[inline(always)]
-fn parse_counted<'a>(source: &'a str, mut limits: Limits, used: &mut u32, module: bool) -> Result<Program<'a>, Error> {
+fn parse_counted<'a>(source: &'a str, mut limits: Limits, used: &mut u32, module: bool, lazy: bool) -> Result<Program<'a>, Error> {
     limits.max_depth = limits.max_depth.min(HARD_MAX_DEPTH);
     if source.len() > limits.max_source {
         let at = limits.max_source.min(u32::MAX as usize) as u32;
@@ -211,11 +230,73 @@ fn parse_counted<'a>(source: &'a str, mut limits: Limits, used: &mut u32, module
         module,
         export_names: Default::default(),
         local_exports: Vec::new(),
+        lazy,
+        in_class: 0,
+        facts: 0,
+        eager_at: u32::MAX,
+        check_regexp: true,
     };
+    if module && lazy {
+        p.p.lz_mut().module_goal = true;
+    }
     let r = if module { p.parse_module_body() } else { p.parse_program() };
     *used = p.used;
     r?;
     Ok(p.p)
+}
+
+/// The second parse of a lazy function ([`Program::lazy_function`]): the parameters and the body, from the `(` of the parameters, with the context
+/// that the first parse had there. The function is the last function of the tree; the tree shares `src` and its location marks. The first parse
+/// found every early error of the function, so a syntax error here is a bug; a limit can still stop it. The count is the nodes and list entries made.
+pub(crate) fn parse_lazy_function(src: &Rc<str>, marks: &crate::ast::Marks, module: bool, lz: &LazyFn, mut limits: Limits) -> Result<(Program<'static>, u32), Error> {
+    limits.max_depth = limits.max_depth.min(HARD_MAX_DEPTH);
+    let mut lexer = Lexer::starting_at(src, lz.params_at).map_err(lex_err)?;
+    lexer.set_html_comments(!module);
+    let tok = lexer.next(Goal::Div).map_err(lex_err)?;
+    let mut p = Parser {
+        src,
+        lex: lexer,
+        tok,
+        peeked: None,
+        prev_end: lz.params_at,
+        p: Program::new(src),
+        limits,
+        used: 0,
+        scratch: Vec::new(),
+        depth: 0,
+        strict: lz.strict,
+        ctx: Ctx::default(),
+        labels: Vec::new(),
+        label_base: 0,
+        scopes: Vec::new(),
+        nscopes: 0,
+        privs: Vec::new(),
+        arrow_at: u32::MAX,
+        last_octal: None,
+        cover: Cover::default(),
+        no_in: false,
+        spread_commas: Vec::new(),
+        for_await_head: false,
+        await_pos: 0,
+        module,
+        export_names: Default::default(),
+        local_exports: Vec::new(),
+        lazy: true,
+        in_class: 0,
+        facts: 0,
+        eager_at: lz.start,
+        // The first parse of the whole text checked it.
+        check_regexp: false,
+    };
+    if module {
+        p.p.lz_mut().module_goal = true;
+    }
+    p.parse_function_rest(lz.start, lz.name, lz.kind, false, false)?;
+    let used = p.used;
+    let mut prog = p.p.with_shared_source(src.clone());
+    prog.share_marks(marks);
+    prog.lz_mut().tree = true;
+    Ok((prog, used))
 }
 
 // ---------------------------------------------------------------- scopes
@@ -383,6 +464,37 @@ struct Parser<'a> {
     export_names: std::collections::BTreeSet<Box<str>>,
     /// Local names of `export {a}`: each must be declared at the end of the module.
     local_exports: Vec<Span>,
+    /// Check and drop the bodies of functions that the evaluator does not need to see at first (see [`Body::Lazy`]).
+    lazy: bool,
+    /// How many class bodies the parser is in. A function inside a class is not lazy: the class walk gives it a context.
+    in_class: u32,
+    /// What the code since the start of the function used (`FACT_*`). A function that used `super` or `new.target` is not lazy.
+    facts: u8,
+    /// The start of the token after a `(` or a unary operator: a function that starts there is probably called at once, so it is not lazy.
+    eager_at: u32,
+    check_regexp: bool,
+}
+
+const FACT_SUPER: u8 = 1;
+const FACT_NEW_TARGET: u8 = 2;
+
+/// The length of every arena of the tree: a function body that is dropped goes back to these.
+struct ArenaMark {
+    exprs: usize,
+    stmts: usize,
+    pats: usize,
+    funcs: usize,
+    classes: usize,
+    props: usize,
+    pat_props: usize,
+    templates: usize,
+    quasis: usize,
+    decls: usize,
+    cases: usize,
+    catches: usize,
+    elems: usize,
+    lists: usize,
+    lazies: usize,
 }
 
 /// Add a node to an arena. The caller has already checked the node limit.
@@ -513,6 +625,20 @@ impl<'a> Parser<'a> {
     }
     fn early(&self, msg: &'static str, span: Span) -> Error {
         self.err(ErrorKind::Early, msg, span.start, span.end)
+    }
+    /// The pattern and flags of the regexp token that is current must be valid.
+    fn check_regexp_literal(&self) -> R<()> {
+        use crate::regexp::{CompileError as C, Regex};
+        let Some((pat, flags)) = lex::regexp_parts(self.src, &self.tok) else { return Ok(()) };
+        let units: Vec<u16> = pat.encode_utf16().collect();
+        let msg = match Regex::check(&units, flags) {
+            Ok(()) => return Ok(()),
+            Err(C::Syntax { .. }) => "regexp literal: invalid pattern (early SyntaxError)",
+            Err(C::Unsupported { what, .. }) => what,
+            Err(C::InvalidFlags(_)) => "regexp literal: invalid flags (early SyntaxError)",
+            Err(C::Limit(_)) => "regexp literal: compile limit",
+        };
+        Err(self.err(ErrorKind::Unsupported, msg, self.tok.start, self.tok.end))
     }
     fn tspan(&self) -> Span {
         Span { start: self.tok.start, end: self.tok.end }
@@ -2293,6 +2419,7 @@ impl<'a> Parser<'a> {
         };
         if let Some(op) = op {
             self.advance()?;
+            self.eager_at = self.tok.start;
             let arg = self.parse_unary()?;
             if op == UnaryOp::Delete {
                 let mut a = arg;
@@ -2486,6 +2613,7 @@ impl<'a> Parser<'a> {
                 return Err(self.early("'new.target' outside of a function", Span { start, end: self.tok.end }));
             }
             self.advance()?;
+            self.facts |= FACT_NEW_TARGET;
             return self.mk_expr(ExprKind::NewTarget, start);
         }
         let cstart = self.tok.start;
@@ -2568,6 +2696,9 @@ impl<'a> Parser<'a> {
             }
             Kind::Punct(P::Slash | P::SlashAssign) => {
                 self.rescan(Goal::RegExp)?;
+                if self.check_regexp {
+                    self.check_regexp_literal()?;
+                }
                 self.advance()?;
                 self.mk_expr(ExprKind::RegExp, start)
             }
@@ -2589,6 +2720,7 @@ impl<'a> Parser<'a> {
         if !ok {
             return Err(self.syntax("'super' is not allowed here", Span { start: t.start, end: t.end }));
         }
+        self.facts |= FACT_SUPER;
         self.mk_expr(ExprKind::Super, t.start)
     }
 
@@ -2719,6 +2851,7 @@ impl<'a> Parser<'a> {
         let can_arrow = self.arrow_at == start;
         let old_await = std::mem::take(&mut self.await_pos);
         self.advance()?; // `(`
+        self.eager_at = self.tok.start;
         let base = self.lbegin();
         let mut rest: Option<PatId> = None;
         let mut trailing_comma = false;
@@ -3091,7 +3224,14 @@ impl<'a> Parser<'a> {
         self.label_base = self.labels.len();
         self.push_scope(S_VAR | S_FUNC);
         let old_await = std::mem::take(&mut self.await_pos);
-        let r = self.function_inner(start, name, kind, is_async);
+        // An arrow, an async function, a generator and a class member run on a state that the walk of the code around them makes. They are not lazy.
+        let lazy_ok = self.lazy
+            && self.in_class == 0
+            && !is_async
+            && !is_gen
+            && matches!(kind, FuncKind::Normal | FuncKind::Method | FuncKind::Getter | FuncKind::Setter)
+            && self.eager_at != start;
+        let r = self.function_inner(start, name, kind, lazy_ok);
         self.await_pos = old_await;
         self.pop_scope();
         self.labels.truncate(self.label_base);
@@ -3102,8 +3242,7 @@ impl<'a> Parser<'a> {
         Ok(mk!(self, funcs, Func { name, params, body, kind, mode: func_mode(is_async, is_gen), strict, simple_params: simple, span }))
     }
 
-    fn function_inner(&mut self, _start: u32, name: Option<Span>, kind: FuncKind, is_async: bool) -> R<(List<Pat>, Body, bool)> {
-        let _ = is_async;
+    fn function_inner(&mut self, start: u32, name: Option<Span>, kind: FuncKind, lazy_ok: bool) -> R<(List<Pat>, Body, bool)> {
         let pstart = self.tok.start;
         self.expect(P::LParen)?;
         let base = self.lbegin();
@@ -3151,8 +3290,56 @@ impl<'a> Parser<'a> {
         let allow_dup = !self.strict && simple && kind == FuncKind::Normal;
         let first_dup = self.declare_params(params, allow_dup)?;
         let info = BodyInfo { params, name, simple, first_dup };
-        let body = self.parse_function_body(info)?;
-        Ok((params, Body::Block(body), simple))
+        if !lazy_ok {
+            let body = self.parse_function_body(info)?;
+            return Ok((params, Body::Block(body), simple));
+        }
+        // Check the body as before, then drop its nodes: the first call parses the function again. Every early error is found now.
+        let (mark, strict_in, body_at) = (self.arena_mark(), self.strict, self.tok.start);
+        let outer_facts = std::mem::take(&mut self.facts);
+        let body = self.parse_function_body(info);
+        let facts = std::mem::replace(&mut self.facts, outer_facts);
+        self.facts |= facts;
+        let body = body?;
+        if facts & (FACT_SUPER | FACT_NEW_TARGET) != 0 || self.prev_end - body_at < LAZY_MIN_BODY {
+            return Ok((params, Body::Block(body), simple));
+        }
+        self.arena_truncate(&mark);
+        let lz = self.p.lz_mut();
+        let idx = lz.lazies.len() as u32;
+        lz.lazies.push(LazyFn { params_at: pstart, name, start, kind, mode: FuncMode::Plain, strict: strict_in, parsed: OnceCell::new() });
+        Ok((params, Body::Lazy(idx), simple))
+    }
+
+    fn arena_mark(&self) -> ArenaMark {
+        let p = &self.p;
+        ArenaMark {
+            exprs: p.exprs.len(), stmts: p.stmts.len(), pats: p.pats.len(), funcs: p.funcs.len(), classes: p.classes.len(), props: p.props.len(),
+            pat_props: p.pat_props.len(), templates: p.templates.len(), quasis: p.quasis.len(), decls: p.decls.len(), cases: p.cases.len(),
+            catches: p.catches.len(), elems: p.elems.len(), lists: p.lists.len(), lazies: p.lazies().len(),
+        }
+    }
+
+    /// Drop every node made since `m`. The arenas keep their room, so the next body reuses it.
+    fn arena_truncate(&mut self, m: &ArenaMark) {
+        let p = &mut self.p;
+        p.exprs.truncate(m.exprs);
+        p.stmts.truncate(m.stmts);
+        p.pats.truncate(m.pats);
+        p.funcs.truncate(m.funcs);
+        p.classes.truncate(m.classes);
+        p.props.truncate(m.props);
+        p.pat_props.truncate(m.pat_props);
+        p.templates.truncate(m.templates);
+        p.quasis.truncate(m.quasis);
+        p.decls.truncate(m.decls);
+        p.cases.truncate(m.cases);
+        p.catches.truncate(m.catches);
+        p.elems.truncate(m.elems);
+        p.lists.truncate(m.lists);
+        if let Some(l) = &mut p.lz {
+            l.lazies.truncate(m.lazies);
+        }
     }
 
     /// `{ ... }` of a function, with the directive prologue. May turn on strict mode (the caller restores it).
@@ -3222,7 +3409,9 @@ impl<'a> Parser<'a> {
         self.advance()?; // `class`
         let saved_strict = self.strict;
         self.strict = true; // all parts of a class are strict code
+        self.in_class += 1;
         let r = self.class_inner(start, is_decl);
+        self.in_class -= 1;
         self.strict = saved_strict;
         r
     }
@@ -3451,3 +3640,7 @@ impl<'a> Parser<'a> {
 #[cfg(test)]
 #[path = "parse_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "parse_lazy_tests.rs"]
+mod lazy_tests;

@@ -132,17 +132,16 @@ fn the_flags_getter_reads_any_object() {
 
 #[test]
 fn gates_are_explicit_unsupported() {
-    // A literal pattern is compiled by `Interp::new`: nothing of the script runs. The parser checks only the flags.
+    // The parser checks a literal pattern: nothing of the script runs.
     let literal = [
         ("var x = 1; /(/;", "regexp literal: invalid pattern (early SyntaxError)"),
         ("function f() { return /[b-a]/; }", "regexp literal: invalid pattern (early SyntaxError)"),
     ];
     for (src, what) in literal {
-        let prog = parse_script(src, Limits::default()).unwrap_or_else(|e| panic!("{src}: {e}"));
-        match Interp::new(&prog, Heap::default(), EvalLimits::default()) {
-            Err(Error::Unsupported(u)) => {
-                assert_eq!(u.what, what, "{src}");
-                assert!(u.span.end > u.span.start && src[u.span.start as usize..u.span.end as usize].starts_with('/'), "{src}: span");
+        match parse_script(src, Limits::default()) {
+            Err(e) if e.kind == crate::parse::ErrorKind::Unsupported => {
+                assert_eq!(e.msg, what, "{src}");
+                assert!(e.end > e.start && src[e.start as usize..e.end as usize].starts_with('/'), "{src}: span");
             }
             Err(e) => panic!("{src}: {e:?}"),
             Ok(_) => panic!("{src}: accepted"),
@@ -162,8 +161,7 @@ fn gates_are_explicit_unsupported() {
 #[test]
 fn invalid_literal_stops_before_any_effect() {
     let src = "globalThis.ran = 1; var r = /(?:/;";
-    let prog = parse_script(src, Limits::default()).unwrap();
-    assert!(matches!(Interp::new(&prog, Heap::default(), EvalLimits::default()), Err(Error::Unsupported(_))));
+    assert!(matches!(parse_script(src, Limits::default()), Err(e) if e.kind == crate::parse::ErrorKind::Unsupported));
 }
 
 #[test]

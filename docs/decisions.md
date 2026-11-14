@@ -2015,3 +2015,13 @@ A test is `own` (it logs in itself) when a step says `sign out`, `password` or `
 - A byte-table scanner finds the end of the block. It follows the same block structure as the tokenizer and gives up on anything it is not sure of. The exact tokenizer then reads that rule. The other choice, to tokenize the block and keep only its span, saves no tokenizing.
 - `has_motion` must not change with laziness: it decides whether the engine tracks transitions. The scanner flags blocks that may name `transition-*` or `animation-*`, and `has_motion` reads only those, when it is asked. A flag that the scanner sets without a parse made a journey fail (see `docs/progress.md`, step 4).
 - Memory per rule did not fall on the tiny-rule stress case. The sheet text stays and each body has a record. Accepted: time and the journeys improve, and a real body is larger than the record.
+
+## Function bodies are parsed lazily, regex literals compile at first use (2026-11-14)
+
+- The first parse of a source of 16 KiB or more checks a plain function body of 128 bytes or more and drops its nodes. The function is parsed again, with its parameters, at its first call, and runs as its own script slot. The tree is shared by all realms through the parse cache.
+- Not lazy: arrows, async functions, generators, class members, bodies with `super` or `new.target`, and functions that are called at once.
+- A regex literal is checked by the parser (a bad pattern is `Unsupported`, as before). Its program is compiled at the first evaluation and shared by pattern and flags.
+- The bytecode never runs a lazy function.
+- Reason: 95% of the nodes of the journeys sit in functions that never run. Measured: the tree of `github-docs-home` fell from 13.8 to 6.7 MB and of `nextjs-docs` from 13.7 to 3.5 MB. Journey totals did not move beyond the noise (+0.14% instructions, -0.75% RSS).
+- Rejected: dropping the body without a full first parse (early errors in an uncalled function would be lost, and the test262 gate checks them).
+- Rejected: lazy for every source of 512 bytes or more. The synthetic load rows grew by up to 12%: the lazy tables slowed the script swap, and a small script that runs all its functions pays two parses.

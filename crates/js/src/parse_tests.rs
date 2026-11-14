@@ -59,7 +59,7 @@ fn show_expr(p: &Program, id: ExprId) -> String {
             let kind = if f.kind == FuncKind::Arrow { "arrow" } else { "fn" };
             let ps: Vec<String> = p.list(f.params).map(|x| show_pat(p, x)).collect();
             format!("({}{} ({}){})", if f.is_async() { "async " } else { "" }, kind, ps.join(" "),
-                match f.body { Body::Expr(b) => format!(" => {}", show_expr(p, b)), Body::Block(_) => " {}".into() })
+                match f.body { Body::Expr(b) => format!(" => {}", show_expr(p, b)), Body::Block(_) | Body::Lazy(_) => " {}".into() })
         }
         _ => format!("<{:?}>", std::mem::discriminant(&e.kind)),
     }
@@ -389,11 +389,11 @@ fn regexp_goal_is_chosen_by_the_parser() {
 
 #[test]
 fn regexp_pattern_gate() {
-    // The pattern grammar is owned by another worker. Until it lands the parser only splits body and flags.
-    const { assert!(!REGEXP_PATTERN_VALIDATED) };
-    ok("/(/");
-    ok("/a**/");
-    ok("/a{2,1}/");
+    // The parser checks the pattern as well as the flags. A bad pattern is `Unsupported`, as it was when the first walk compiled it.
+    for src in ["/(/", "/a**/", "/a{2,1}/"] {
+        assert_eq!(parse_script(src, Limits::default()).err().map(|e| e.kind), Some(ErrorKind::Unsupported), "{src}");
+    }
+    ok("/(a|b)+/gi");
 }
 
 #[test]

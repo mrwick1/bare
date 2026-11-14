@@ -26,6 +26,11 @@ use std::rc::Rc;
 pub const MAX_BYTES: usize = 32 << 20;
 /// Shorter sources are not kept.
 pub const MIN_SOURCE: usize = 512;
+
+/// A source shorter than this keeps every function body, also for [`Kind::ClassicLazy`] and [`Kind::ModuleLazy`]. A lazy function that
+/// runs is parsed twice and walked in a script of its own: in a small script that costs more than the dropped nodes save.
+pub const LAZY_MIN_SOURCE: usize = 16 << 10;
+
 /// An entry that the last this many realms did not use goes at the next [`new_realm`].
 pub const MAX_IDLE: u64 = 2;
 
@@ -35,6 +40,22 @@ pub enum Kind {
     Classic,
     /// The module goal ([`crate::parse::parse_module`]).
     Module,
+    /// [`Kind::Classic`] with lazy function bodies ([`crate::ast::Body::Lazy`]): the same source is an entry of its own.
+    ClassicLazy,
+    /// [`Kind::Module`] with lazy function bodies.
+    ModuleLazy,
+}
+
+impl Kind {
+    pub fn is_classic(self) -> bool {
+        matches!(self, Kind::Classic | Kind::ClassicLazy)
+    }
+    fn is_module(self) -> bool {
+        matches!(self, Kind::Module | Kind::ModuleLazy)
+    }
+    fn is_lazy(self) -> bool {
+        matches!(self, Kind::ClassicLazy | Kind::ModuleLazy)
+    }
 }
 
 /// Counts of this thread, for tests and reports.
@@ -95,12 +116,17 @@ fn nodes_err(at: u32) -> Error {
 /// `source.len() <= limits.max_source` must be checked first (the realm does it).
 pub fn parse(kind: Kind, source: &str, limits: Limits) -> Result<Rc<Program<'static>>, Error> {
     let fresh = |limits| {
-        let (r, used) = if kind == Kind::Module { parse_module_used(source, limits) } else { parse_script_used(source, limits) };
+        let (r, used) = match (kind.is_module(), kind.is_lazy() && source.len() >= LAZY_MIN_SOURCE) {
+            (true, false) => parse_module_used(source, limits),
+            (false, false) => parse_script_used(source, limits),
+            (true, true) => crate::parse::parse_module_lazy_used(source, limits),
+            (false, true) => crate::parse::parse_script_lazy_used(source, limits),
+        };
         (r.map(|p| Rc::new(p.into_owned())), used)
     };
     let plain = Limits { max_source: limits.max_source, max_nodes: limits.max_nodes, ..Limits::default() };
     if source.len() < MIN_SOURCE || limits != plain {
-        let r = if kind == Kind::Module { crate::parse::parse_module(source, limits) } else { crate::parse::parse_script(source, limits) };
+        let r = if kind.is_module() { crate::parse::parse_module(source, limits) } else { crate::parse::parse_script(source, limits) };
         return r.map(|p| Rc::new(p.into_owned()));
     }
     let key = (hash(source.as_bytes()), kind);

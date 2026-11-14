@@ -144,17 +144,27 @@ fn same_kind(a: RKind, b: RKind) -> bool {
 
 impl<'p> Interp<'p> {
     /// The index in `sc_all` of the root scope of the current script, or `None` for a script that was never walked (the empty script
-    /// of [`Interp::realm`]). Every walked script opens one root scope, in the order of the scripts.
+    /// of [`Interp::realm`]). Every walked script opens one root scope, in the order of the scripts. A lazy function's script opens none.
     pub(super) fn bc_root(&self) -> Option<u32> {
+        // The tree of a lazy function (`Body::Lazy`) opens no root scope, and the bytecode does not run it.
+        if self.prog.is_lazy_tree() {
+            return None;
+        }
         let roots: Vec<u32> = (0..self.sc_all.len() as u32).filter(|&i| matches!(self.sc_all[i as usize].kind, RKind::Root)).collect();
-        let unwalked = self.scripts.len() - roots.len();
-        self.cur.checked_sub(unwalked).map(|k| roots[k])
+        let slots = |r: std::ops::Range<usize>| r.filter(|&i| i == self.cur || !self.scripts[i].prog.is_lazy_tree()).count();
+        let unwalked = slots(0..self.scripts.len()) - roots.len();
+        slots(0..self.cur).checked_sub(unwalked).map(|k| roots[k])
     }
 
     /// One after the last scope inside scope `i` (its inner scopes follow it in `sc_all`).
     pub(super) fn bc_scope_end(&self, i: u32) -> u32 {
         let mut j = i + 1;
         while (j as usize) < self.sc_all.len() {
+            // The scopes of a lazy function belong to its own tree.
+            if self.sc_all[j as usize].lazy {
+                j += 1;
+                continue;
+            }
             let mut p = self.sc_all[j as usize].parent;
             while p != NONE && p > i {
                 p = self.sc_all[p as usize].parent;
@@ -177,7 +187,9 @@ impl<'p> Interp<'p> {
             let mut t = vec![NONE; self.prog.stats().funcs + 1].into_boxed_slice();
             if let Some(r) = self.bc_root() {
                 for i in r + 1..self.bc_scope_end(r) {
-                    if let RKind::Fn(f, _) = self.sc_all[i as usize].kind {
+                    if let RKind::Fn(f, _) = self.sc_all[i as usize].kind
+                        && !self.sc_all[i as usize].lazy
+                    {
                         t[f.index()] = i;
                     }
                 }
@@ -384,6 +396,9 @@ impl<'p> Interp<'p> {
                 match f.body {
                     Body::Block(l) => prog.list(l).for_each(|s| self.sw_stmt(&mut w, s)),
                     Body::Expr(e) => self.sw_expr(&mut w, e),
+                    Body::Lazy(_) => {
+                        w.bad.get_or_insert(scope);
+                    }
                 }
             }
         }
@@ -407,7 +422,8 @@ impl<'p> Interp<'p> {
     fn sw_func(&self, w: &mut ScopeWalk, fid: FuncId) {
         let i = w.next;
         match self.sc_all.get(i as usize) {
-            Some(sc) if same_kind(sc.kind, RKind::Fn(fid, false)) && sc.parent == w.cur => {}
+            // A lazy function has no scope in `sc_all` yet.
+            Some(sc) if same_kind(sc.kind, RKind::Fn(fid, false)) && sc.parent == w.cur && !matches!(self.prog.func(fid).body, Body::Lazy(_)) => {}
             _ => {
                 w.bad.get_or_insert(i);
             }

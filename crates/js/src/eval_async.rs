@@ -386,6 +386,7 @@ impl<'p> Interp<'p> {
                     any |= self.scan_stmt(s)?;
                 }
             }
+            Body::Lazy(_) => {}
         }
         if any {
             self.mark(fid.index(), 2)?;
@@ -929,6 +930,7 @@ impl<'p> Interp<'p> {
         let bound = self.bind_call(fobj, fid, env, self_binding, this, args).and_then(|()| match f.body {
             Body::Block(l) => self.declare_scope(l, true),
             Body::Expr(_) => Ok(()),
+            Body::Lazy(_) => Err(unsupported("lazy async function body", f.span)),
         });
         match bound {
             Ok(()) => {}
@@ -948,6 +950,7 @@ impl<'p> Interp<'p> {
                 Step::Next(n) => n,
                 Step::Out(_) => Next::Val(Value::Undefined),
             }),
+            Body::Lazy(_) => Err(unsupported("lazy async function body", f.span)),
         };
         let r = match first {
             Ok(n) => self.drive(&mut run, n),

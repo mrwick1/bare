@@ -113,7 +113,7 @@ impl<'p> Interp<'p> {
         if self.depth != 0 {
             return Err(unsupported("module_parse during a call", Span::default()));
         }
-        let id = self.add_script_kind(source, crate::parse_cache::Kind::Module)?;
+        let id = self.add_script_kind(source, crate::parse_cache::Kind::ModuleLazy)?;
         let prog = self.scripts[id].prog.clone();
         let n = prog.module.as_ref().map_or(0, |m| m.requests.len());
         let rec = ModRec {

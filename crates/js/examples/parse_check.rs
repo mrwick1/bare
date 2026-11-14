@@ -137,7 +137,8 @@ impl<'a> Dump<'a> {
                 self.out.push_str("(expr ");
                 self.expr(e);
                 self.close();
-            }
+            }            // `parse_script` keeps every body.
+            Body::Lazy(_) => self.out.push_str("(lazy)"),
         }
         self.close();
     }

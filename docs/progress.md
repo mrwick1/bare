@@ -9178,3 +9178,73 @@ Machine: archMachine, load average 8 to 12 from other agents. Instruction counts
 - Wall time on an idle machine.
 - A sheet with 64 or more nested blocks in a rule (the scanner bails out; not measured).
 - crates/js was not changed, so test262 and exec_diff were not run.
+## 2026-11-14: lazy function bodies and regex literals compiled at first use (JS phase P1)
+
+Spec: `docs/design-js.md` P1 (sections 2.3, 2.4, 6.5, 6.6), `docs/design-review.md` section 1. Branch `t3/lazy-js-parse-regex`, on `b6ec7df9`.
+
+### What changed
+
+- The parser parses a long function body fully (so every early error stays), then drops its nodes and keeps a `LazyFn` (`Body::Lazy`). The first call of the function parses it again, with its parameters, into a tree of its own. The tree runs as one more script slot, in the scope that held the stub.
+- The tree of a lazy function sits in `LazyFn.parsed`. The cross-realm parse cache keeps the outer program, so all realms of a thread share one parse of each called function. Each realm walks it once.
+- Which functions are lazy: a body of 128 bytes or more, in a source of 16 KiB or more, of a plain function, method, getter or setter. Never lazy: arrows, async functions, generators, anything in a class body, a body with `super` or `new.target`, and a function that is called at once (`(function(){...})()`, `!function(){...}()`). The facts that cross the boundary (`arguments`, `this`, `super`, `new.target`, class context) are the reason.
+- Limits. The nodes of a loaded function count in `script_nodes`. The second parse counts in `lazy_work`. Both are bound by `max_script_nodes`. A lazy tree does not count toward `max_scripts`. The first parse still counts every node, so a body that is too large still fails at load.
+- Regex. The parser checks every literal (`Regex::check`: flags, length, pattern grammar), also in a dropped body. A bad pattern is `Unsupported`, as before. The program is compiled when the literal is first evaluated, and shared by pattern and flags across the realms of the thread (`LIT_PROGRAMS`, at most 2048 programs).
+- The bytecode does not run a lazy function. It stays on the tree walker.
+
+### Parse cache
+
+Measured with a temporary counter on the journeys: 24.9% of the scripts that a realm parsed were a hit, 15.8% of the source bytes. Lazy bodies are safe to share: the lazy tree is immutable and owned by the cached program.
+
+### Numbers
+
+Machine archMachine, live sites (the step-1 corpus is not on main), `perf stat -e instructions:u`, 3 runs, minimum. BASE `b6ec7df9`, NEW this branch. The same page gives runs that differ by up to 25%, so a row under about 10% is noise.
+
+Syntax tree size, same binary, lazy on and off (one run each, exact for that run):
+
+| Journey | scripts | nodes eager | nodes lazy | tree bytes eager | tree bytes lazy |
+| --- | --- | --- | --- | --- | --- |
+| `github-docs-home` | 15 | 533,615 | 251,856 | 13.8 MB | 6.7 MB |
+| `nextjs-docs` | 141 | 530,693 | 132,369 | 13.7 MB | 3.5 MB |
+| `rust-book-search` | 17 | 33,976 | 5,656 | 0.90 MB | 0.16 MB |
+| `python-docs-search-results` | 25 | 591,883 | 586,694 | 16.5 MB | 16.4 MB |
+
+Called functions: `github-docs-home` 58 of 1,089 lazy functions, `nextjs-docs` 28 of 1,308, `python-docs-search-results` 15 of 17.
+
+All 46 journeys that pass on both trees (without `duckduckgo-html-search`; `hn-*` fail on both trees in this run, a site block):
+
+| | BASE | NEW |
+| --- | --- | --- |
+| instructions, sum of minimums | 27,636 M | 27,673 M (+0.14%) |
+| peak RSS, sum of minimums | 1,124 MiB | 1,115 MiB (-0.75%) |
+
+The total is inside the noise. The rows that moved most: `nodejs-org-home` 635 to 525 M (-17%) and 28.4 to 22.7 MiB (-20%). `github-docs-home` RSS 55.2 to 56.5 MiB in this set, and 59 to 56 MiB in a same-binary lazy-versus-eager set (3 runs each). The named journeys, instructions M / RSS MiB: `python-docs-search-results` 2,910 / 105.4 to 2,916 / 105.6; `rust-book-search` 4,634 / 96.0 to 4,711 / 95.5; `github-docs-home` 1,503 / 55.2 to 1,533 / 56.5; `nextjs-docs` 1,136 / 30.4 to 1,211 / 32.0.
+
+Success criterion 6 (`python-docs-search-results` peak RSS -20%): this step gives about 0 of it. The 16.4 MB of tree on that journey is one data literal (586,694 nodes in 17 lazy functions). No function body is in it. Hypothesis: a data literal needs its own design (parse it to values, or keep it as text and parse at first use). This is a lever for a later step. Peak RSS of the tree also does not drop by the full tree saving on `github-docs-home` (7 MB less tree, 3 MiB less peak). Hypothesis: the peak is at another point of the run.
+
+### Cost matrix
+
+`tools/js/cost_matrix.sh` against `b6ec7df9`, 803 rows: mean glibc +0.037%, jemalloc +0.355%. One row is over the limit under both allocators: `scripts_load many 10` (+0.90% glibc, +0.51% jemalloc; 0.65 M instructions of 71.7 M, one more word to swap and one more allocation for each of many tiny scripts). 4 rows are over under one allocator only. `parse_load deep 1` and `deep 10` do not run (known stack size issue).
+The first matrix of this branch had 74 rows over the limit (up to +12%). Cause: the table of lazy functions was swapped with each cross-script call, and the `Program` grew. The tables moved out of the swap, and small scripts stay eager. After the change 5 rows are over under one or both allocators.
+
+### Checks
+
+- `cargo test --release --workspace --no-fail-fast`: all pass except 7 TLS tests (`bare-net` `https_openssl` 2, `bare-tls` `client_openssl` 4 and `tls12_openssl` 1), as on main.
+- `tools/js/test262_check.sh`: gate ok, no directory below the baseline. The first run (every source of 512 bytes or more lazy) and the last run (16 KiB or more) both pass. Test262 files are small, so the last run keeps them eager.
+- `tools/js/exec_diff.sh`: 0 differences in 79 runs (tree, auto, byte). It found two bugs in the first version (scope tables of the bytecode). They have tests now.
+- New tests: `parse_lazy_tests.rs` (8), `eval_lazy_tests.rs` (13: closures, recursion, constructors, nested lazy functions, early errors, bad regex in a dropped body, limits, two realms, frame slots of functions loaded in turn, the three exec modes on the proxy corpus). `parse_tests::regexp_pattern_gate` and two `eval_builtins_tests` changed: a bad pattern fails at parse time, with the same message and span.
+- Two bugs were found by journeys, not by the unit tests: the re-parse of a lazy function made its own body lazy again (found by a test), and the frame layout of one lazy function took the scopes of the next one (found on `rust-book-search`; `lazy_functions_loaded_one_after_the_other_keep_their_own_frame_slots` passes with and without the fix, so it does not guard it).
+
+### Not tested
+
+A script of 16 KiB or more that uses `super`, `new.target`, generators or classes together with lazy functions beyond the corpus fixtures. The byte lane with a lazy function inside a class (not lazy by rule). Windows and macOS. Memory at the end of a long run (the lazy trees live as long as the cached program, bound by `parse_cache::MAX_BYTES`). `keycost.sh` (no change on the typing path).
+
+### Noticed, not changed
+
+- An `Unsupported` error inside a lazy body (for example a feature that the evaluator refuses) shows at the first call, not at load. A `CompileError::Limit` of the regex emit pass shows at the first evaluation of the literal, not at load.
+- Arrows are the largest group of functions that stay eager. A later step can make them lazy once the lexical `this` and `arguments` cross the boundary.
+- `rust-book-search` loads 191 lazy functions (its scripts hold 144 at the top level; the others sit inside lazy trees). 19,850 nodes of its 33,976 are parsed twice. A script where most functions run pays about two parses for them.
+- The parse cache keeps a separate entry for the lazy and the eager kind of the same text.
+
+## Standing exception: PR #492 `scripts_load many 10` cost (approved by owner 2026-11-14)
+
+Lazy JS function bodies leave one cost row above the limit after two fix attempts: `scripts_load many 10` is +0.90% under glibc and +0.51% under jemalloc (0.65 M of 71.7 M instructions). The owner approved an exception for this one row only. Reason: the change cuts parsed-tree memory 2 to 4 times on large script pages, and test262 and the execution comparison are unchanged. A later change that makes arrow functions lazy may recover the cost.
