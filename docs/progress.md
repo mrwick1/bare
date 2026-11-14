@@ -10184,3 +10184,31 @@ Tasks (measure and design, docs only):
 | R2-E | 3, 8 | What is left in `compm_22000` and `rest_13` (first selector parse, cascade on unique lists), and what replaces the `cssom-objects` cap (524,288)? |
 
 The five heavy journeys are 60% of the journey instructions and moved -0.8% in round 1. R2-A and R2-B decide the next designs for criterion 2.
+
+## R2-D: why lazy JS functions cost more on the portal journeys (2026-11-14)
+
+Task: measure and design, docs only. Design: `docs/design-js-reparse.md`. Main `28a8fbc2`. Counters and scripts: `/data/bare-tmp/r2/R2-D/` (`counters.patch`, `r2d.rs`, `sweep*.sh`, `s1` to `s4` raw rows). Machine archMachine, corpus `virtual`, 3 runs per journey and mode (counter files: 1 run).
+
+### Result
+
+- **The hypothesis holds, with a correction.** The first parse of a long function is a full parse that drops its nodes, not a preparse. A function that runs is parsed again, and so is every long function inside it. A function `d` lazy functions deep that runs is parsed `d + 2` times. Depth reaches 7.
+- `wiktionary-portal`: 1,561 M lazy, 1,239 M with lazy functions off (same binary), 1,213 M before #492. Second parses 331.4 M (655 functions, 3.04 MB), load step 19.9 M, walk saved -39.1 M. `wikipedia-portal`: 1,234 M, 996 M, 1,000 M. Second parses 237.8 M (703, 2.11 MB), load 16.0 M, walk saved -25.6 M.
+- 47 journeys: lazy 95,488 M, lazy off 91,998 M (+3,490 M, +3.8%), `nonest` (lazy only in the first tree) 93,804 M. Peak RSS sums 1,779.7 / 1,841.6 / 1,800.3 MiB. Split of the 3,490 M: second parses +3,115.5 M, load +357.6 M, walk saved -809.0 M, slot swaps +822.5 M.
+- **A second cause: slot swaps.** Each lazy function is a script slot. A call across slots swaps 11 interpreter fields, about 190 instructions. `react-docs` has 1.40 M more swaps than eager code (272 M), `nodejs-org-home` 0.67 M (129 M), `github-docs-home` 0.44 M (83 M). This explains the rows that the second parses do not.
+- Not the cause: the parse cache (0 hits on the portals), the regex compile (185 programs, 42 M, lazy is cheaper than the old walk-time compile), the garbage collector.
+- Share of lazy functions that run: depth 0, 37% by count and 75% by bytes (3,470 of 9,471; 13.91 of 18.44 MB). The portals: 85% and 83%. 66% of the second-parse bytes are lazy bodies inside the function (17.34 of 26.37 MB).
+- Raising `LAZY_MIN_BODY` from 128 to 8,192 gives -1.6% instructions and +5.3% RSS on 18 journeys. It is a weak lever.
+
+### Recommendation
+
+A: keep skip data (end position, strictness, inner table) for lazy functions inside a lazy function, as V8 skippable functions and the JSC `SourceProviderCache` do. Estimate: -1,989 M over the 47 journeys (range 1.6 to 2.4 G), `wiktionary-portal` about 1,317 M, `wikipedia-portal` about 1,072 M, RSS unchanged (0.3% for the table). Then S: make a slot swap one pointer swap (estimate -730 M). Criterion 2: 90.1% to about 88.2% (A) and 87.5% (A and S). Not B1 (no lazy functions: -3,490 M, but +61.9 MiB RSS), B2 (a higher body limit), B3 (a heuristic), or C (a record of which functions ran: no gain on a cold run). Fallback: D, measured -1,685 M, +20.6 MiB.
+
+### Not tested
+
+A prototype of A or S (their gain is arithmetic from counters and swap counts; the per-byte cost of inner bodies may differ by 20%). Swap counts on 39 of the 47 journeys. RSS of A. Live sites, other platforms, the byte lane. The cause of +25 M at lazy off against `0727ffef` on `wiktionary-portal` (23 merges in between).
+
+### Noticed, not changed
+
+- Data literals only exist in the lazy parse mode (`self.lazy`). A switch that turns lazy parsing off also turns them off. A first sweep of this task did that and gave a false -857 M on `python-docs-search`.
+- `journeys.sh`-style runs under heavy load showed 1 to 4 replay misses on four `wikipedia-*` rows of the threshold sweep. The main sweeps had 0.
+- The parse cache keeps one entry for the lazy kind and one for the eager kind of the same text (from #492).
