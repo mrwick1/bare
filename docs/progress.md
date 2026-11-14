@@ -9541,3 +9541,7 @@ The 12 rows are object allocation and iterator results (`new_object_with_shape` 
 ### Not tested
 
 - Wall time on an idle machine. Peak memory of a long page that builds many ropes (only the concat loop). `ATOM_MAX` other than 32. A page that flattens a deep rope inside a regexp (`exec`) or a `JSON.parse`. Live sites.
+
+## Standing exception: PR #497 string atoms and ropes cost (approved by owner 2026-11-14)
+
+After two fix runs, 12 of 803 cost rows stay above +0.5% under both allocators. The worst row is +0.93%. The rows are `wrapper_load forin` (2 rows), `gen_load iterobj` (2 rows), `iterator_load` generic (2 rows), `iterator_load set_diff`, `iterator_load set_sym`, `sc_load custom_iter 10`, `tagged_load sites 10`, `weak_load dead_cycles 10` and `arrobj_load tosorted 10`. They create objects and read `for-in` keys: `new_object_with_shape` costs about 23 more instructions for each call. The matrix mean is -0.35% under glibc. keycost is +0.2%. The 47 journeys are +0.1% in total, with `python-docs-search-results` +0.7% and `python-docs-search` +0.6%. The owner approved an exception for these 12 rows only. Reason: a loop of `s += x` is now linear. 10,000 parts take 2.0 ms and 6 MiB, not 85.6 ms and 197 MiB. 100,000 and 1,000,000 parts no longer stop at the byte limit.
