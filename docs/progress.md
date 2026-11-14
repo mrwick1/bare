@@ -10157,3 +10157,7 @@ A live run on developer.mozilla.org (the chunks load on the recorded corpus only
 
 - `wiktionary-portal` and `wikipedia-portal` still cost 28% and 23% more than before #492 (above).
 - A page that passes with replay misses stayed unseen for a whole benchmark round; `journeys.sh run` still shows misses only as a count, and other tools (`run_suite`) have no such check.
+
+## Correction of criterion 2 after PR #521 (2026-11-14)
+
+The final benchmark gave 85.3% for criterion 2. That total held a broken `mdn-reference` row: the journey did not load its chunk files. PR #521 fixed it. `mdn-reference` now costs 7,179 M instructions (2,102 M before the fix), and the other 46 journeys moved by less than 0.1%. The corrected estimate is 94,796 M of 105,189 M, or 90.1% of the baseline. It adds the PR #521 number to the totals of `8f23dded`. A full rerun was not done.
