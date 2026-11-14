@@ -1628,6 +1628,7 @@ impl Browser {
         ] {
             if used > cap { return Err(Error::Limit(LimitKind::Host(name))); }
         }
+        bare_css::rule_cache::new_document();
         let heap = Heap::new(heap).map_err(Error::Heap)?;
         let mut it = Interp::realm(heap, eval)?;
         let dom = Rc::new(Dom {

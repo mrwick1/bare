@@ -87,6 +87,7 @@ use crate::browser_style_block::{self as blk, Fail, Lim, custom};
 use crate::browser_used::{Ctx, calc_of, calc_text, flow_text, grid_text};
 use crate::browser_ui::chains;
 use bare_css::cascade::{self, ComputedStyle, Origin, RuleSet, Scopes, Source, Styles, UA_CSS, inherited};
+use bare_css::rule_cache::{self, Part};
 use bare_css::values::{Keyword, Length, Property, SHORTHANDS, Value as Cv, shorthand_longhands};
 use bare_html::dom::{DAMAGE_STYLE, Mark, NodeData, NodeId};
 use bare_js::eval::{Error, Interp, LimitKind};
@@ -169,7 +170,10 @@ pub(crate) struct Built {
     vp: (f32, f32),
     pub(crate) key: Vec<(NodeId, Option<String>, String)>,
     inputs: Option<Box<HashMap<usize, bare_css::cascade::InputSheet>>>,
-    pub(crate) rules: RuleSet,
+    /// The rules are shared with other documents when `shared` (`bare_css::rule_cache`): they do not change.
+    pub(crate) rules: Rc<RuleSet>,
+    /// Did the rules come from the rule cache, or go into it? A document with retained inline inputs (`set_inline_inputs`) needs rules of its own.
+    shared: bool,
     /// The last cascade of these rules, and its key: `revision`, `text_revision`, length and user state revisions of the
     /// document, and `want`. The flag tells that it keeps what `restyle_frame` needs (`RuleSet::compute_kept`).
     /// Two places: `[0]` for no `want`, `[1]` for a `want`. A read of a hidden element asks for both (`snapshot`), and one
@@ -532,6 +536,13 @@ impl Dom {
         }
         let mut doc = self.doc.borrow_mut();
         let stamp = (doc.revision(), doc.text_revision(), doc.len(), self.computed.sheet_gen.get());
+        if self.style.has_pending.get() {
+            // The retained inline inputs are written into the rules, so these rules must not be the ones that other documents use.
+            let mut cache = self.computed.cache.borrow_mut();
+            if cache.as_ref().is_some_and(|b| b.shared) {
+                *cache = None;
+            }
+        }
         // The same inputs as the plan of the rules in the cache: that plan was not strict, and its sheets are the rules' sheets.
         let same = self.computed.cache.borrow().as_ref().is_some_and(|b| b.vp == vp && b.stamp == stamp);
         if !same {
@@ -543,30 +554,48 @@ impl Dom {
             it.charge(plan.bytes as u64 / 32)?;
             let mut cache = self.computed.cache.borrow_mut();
             if !cache.as_ref().is_some_and(|b| b.vp == vp && b.key == plan.parts && b.inputs == plan.inputs) {
-                // Sheets only added at the end (a script appends a `<link>` or `<style>`): add them to the rules of the last build.
-                // Adding in order gives the same rules as a new build, without parsing the sheets again.
-                let old = cache.take().filter(|b| b.vp == vp && plan.parts.starts_with(&b.key) && b.inputs.is_none() && plan.inputs.is_none());
-                let from = old.as_ref().map_or(0, |b| b.key.len());
-                let mut rules = match old {
-                    Some(b) => b.rules,
+                let root = doc.root();
+                // The rules of a list that has no shadow tree sheet and no retained CSSOM input depend on the list and the window only.
+                let share = !self.style.has_pending.get() && plan.inputs.is_none() && plan.parts.iter().all(|p| p.0 == root);
+                let parts: Vec<Part<'_>> = if share { plan.parts.iter().map(|p| (p.1.as_deref(), p.2.as_str())).collect() } else { Vec::new() };
+                let rules = match share.then(|| rule_cache::lookup(vp, &parts)).flatten() {
+                    Some(rules) => {
+                        *cache = None;
+                        rules
+                    }
                     None => {
-                        let mut rules = RuleSet::new(vp);
-                        rules.add(&mut doc, UA_CSS, Origin::UserAgent);
+                        // Sheets only added at the end (a script appends a `<link>` or `<style>`): add them to the rules of the last build.
+                        // Adding in order gives the same rules as a new build, without parsing the sheets again. Rules that other documents
+                        // use cannot grow: they are taken back only when this document and the cache are their only holders.
+                        let old = cache.take().filter(|b| b.vp == vp && plan.parts.starts_with(&b.key) && b.inputs.is_none() && plan.inputs.is_none());
+                        let kept = old.and_then(|b| rule_cache::unshare(b.rules).map(|r| (r, b.key.len())));
+                        let (mut rules, from) = match kept {
+                            Some(kept) => kept,
+                            None => {
+                                let mut rules = RuleSet::new(vp);
+                                rules.add(&mut doc, UA_CSS, Origin::UserAgent);
+                                (rules, 0)
+                            }
+                        };
+                        for (index, (scope, layer, text)) in plan.parts.iter().enumerate().skip(from) {
+                            if let Some(inputs) = plan.inputs.as_ref().and_then(|all| all.get(&index)) {
+                                rules.add_inputs(&mut doc, text, Origin::Author, layer.as_deref(), *scope, inputs);
+                                continue;
+                            }
+                            if *scope == root {
+                                rules.add_in_layer(&mut doc, text, Origin::Author, layer.as_deref());
+                            } else {
+                                rules.add_scoped(&mut doc, text, Origin::Author, layer.as_deref(), *scope);
+                            }
+                        }
+                        let rules = Rc::new(rules);
+                        // The check of the limits is below: a set that is over one is not kept for the next document.
+                        if share && rules.len() <= l.max_rules && doc.name_count() <= self.lim.max_names {
+                            rule_cache::insert(vp, &parts, &rules);
+                        }
                         rules
                     }
                 };
-                let root = doc.root();
-                for (index, (scope, layer, text)) in plan.parts.iter().enumerate().skip(from) {
-                    if let Some(inputs) = plan.inputs.as_ref().and_then(|all| all.get(&index)) {
-                        rules.add_inputs(&mut doc, text, Origin::Author, layer.as_deref(), *scope, inputs);
-                        continue;
-                    }
-                    if *scope == root {
-                        rules.add_in_layer(&mut doc, text, Origin::Author, layer.as_deref());
-                    } else {
-                        rules.add_scoped(&mut doc, text, Origin::Author, layer.as_deref(), *scope);
-                    }
-                }
                 self.computed.builds.set(self.computed.builds.get() + 1);
                 if rules.len() > l.max_rules {
                     return Err(self.lim("computed-rules"));
@@ -574,7 +603,7 @@ impl Dom {
                 if doc.name_count() > self.lim.max_names {
                     return Err(self.lim("dom-names"));
                 }
-                *cache = Some(Built { vp, key: plan.parts, inputs: plan.inputs, rules, last: [None, None], read: None, odd: OnceCell::new(), stamp });
+                *cache = Some(Built { vp, key: plan.parts, inputs: plan.inputs, rules, shared: share, last: [None, None], read: None, odd: OnceCell::new(), stamp });
             }
             cache.as_mut().expect("built").stamp = stamp;
             drop(cache);
@@ -583,7 +612,7 @@ impl Dom {
         let t0 = crate::force::start();
         let mut cache = self.computed.cache.borrow_mut();
         let built = cache.as_mut().expect("built");
-        if self.style.has_pending.get() && built.rules.set_inline_inputs(self.style_inputs(it, &doc)?) {
+        if self.style.has_pending.get() && Rc::get_mut(&mut built.rules).expect("rules of a document with retained inputs are its own").set_inline_inputs(self.style_inputs(it, &doc)?) {
             built.last = [None, None];
             built.read = None;
         }
@@ -647,6 +676,12 @@ impl Dom {
         Ok(styles)
     }
 
+    /// Which rule set the document styles with: the same number for documents that share one (`bare_css::rule_cache`).
+    #[cfg(test)]
+    pub(crate) fn rules_id(&self) -> Option<usize> {
+        self.computed.cache.borrow().as_ref().map(|b| Rc::as_ptr(&b.rules) as usize)
+    }
+
     /// How many times the rule set was built. Styles from one build can be updated with the rules of the same build only.
     pub(crate) fn rule_builds(&self) -> u64 {
         self.computed.builds.get()
@@ -675,8 +710,11 @@ impl Dom {
         if doc.len() > self.computed.lim.get().max_nodes {
             return Err(self.lim("computed-nodes"));
         }
-        if self.style.has_pending.get() && built.rules.set_inline_inputs(self.style_inputs(it, &doc)?) {
-            return Ok(None);
+        if self.style.has_pending.get() {
+            // The next cascade gives this document rules of its own.
+            if built.shared || Rc::get_mut(&mut built.rules).expect("own rules").set_inline_inputs(self.style_inputs(it, &doc)?) {
+                return Ok(None);
+            }
         }
         restyle_marks(it, &built.rules, &doc, styles, marks, old, new)
     }

@@ -11,6 +11,7 @@ pub mod hints;
 pub mod matching;
 pub mod motion;
 pub mod parser;
+pub mod rule_cache;
 mod scan;
 pub mod selector;
 #[cfg(test)]

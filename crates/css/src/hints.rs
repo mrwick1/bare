@@ -38,8 +38,10 @@ impl Hints {
     pub fn new(doc: &Document) -> Option<Hints> {
         let a = |n| doc.find_atom(n);
         // The sheet of the browser has a selector `svg`, so its atom is there on every page: look for an element that is not in HTML.
+        // A document that took its rules from the cache did not read that sheet: a name is in it only if a node uses it.
         let (table, svg) = (a("table"), if doc.has_foreign() { a("svg") } else { None });
-        if table.is_none() && svg.is_none() && !doc.has_images() {
+        let (td, th, tr, group, col, img) = (a("td"), a("th"), a("tr"), [a("thead"), a("tbody"), a("tfoot")], [a("col"), a("colgroup")], a("img"));
+        if table.is_none() && svg.is_none() && img.is_none() && td.is_none() && th.is_none() && tr.is_none() && group.iter().chain(&col).all(Option::is_none) && !doc.has_images() {
             return None;
         }
         Some(Hints {
@@ -49,12 +51,12 @@ impl Hints {
             view_box: svg.and_then(|_| a("viewBox")),
             fill: svg.and_then(|_| a("fill")),
             stroke: svg.and_then(|_| a("stroke")),
-            td: a("td"),
-            th: a("th"),
-            tr: a("tr"),
-            group: [a("thead"), a("tbody"), a("tfoot")],
-            col: [a("col"), a("colgroup")],
-            img: a("img"),
+            td,
+            th,
+            tr,
+            group,
+            col,
+            img,
             width: a("width"),
             height: a("height"),
             border: a("border"),
@@ -274,9 +276,9 @@ mod tests {
             }
             Hints::new(&doc).and_then(|hints| hints.of(&doc, img))
         };
-        // No picture: only the attributes, and only on a page that has hints (a `<table>`), as before.
+        // No picture: only the attributes. The browser always hinted an `img`: its sheet made the `table` atom for every page.
         assert_eq!(h("<table></table><img width=5 height=6>", None), Some("width:5px;height:6px;".into()));
-        assert_eq!(h("<img width=5 height=6>", None), None);
+        assert_eq!(h("<img width=5 height=6>", None), Some("width:5px;height:6px;".into()));
         assert_eq!(h("<img>", Some((20, 10))), Some("aspect-ratio:20/10;width:20px;".into()));
         assert_eq!(h("<img width=40>", Some((20, 10))), Some("width:40px;aspect-ratio:20/10;".into()));
         assert_eq!(h("<img height=30>", Some((20, 10))), Some("height:30px;aspect-ratio:20/10;width:60px;".into()));

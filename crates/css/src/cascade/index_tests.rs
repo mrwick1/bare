@@ -326,3 +326,38 @@ fn a_restyle_gives_the_styles_of_a_new_compute_with_every_split() {
         }
     }
 }
+
+fn with_ua(doc: &mut Document, css: &str, from: usize) -> RuleSet {
+    let mut rules = RuleSet::new(VIEW);
+    rules.add(doc, UA_CSS, Origin::UserAgent);
+    rules.add(doc, css, Origin::Author);
+    split_from(&mut rules, from);
+    rules
+}
+
+#[test]
+fn rules_built_for_one_document_give_another_document_the_matches_and_styles_of_its_own_rules() {
+    // `rule_cache` shares one set between documents. The set holds atoms, so it must not depend on the names that its document had.
+    let mut r = Rng(0x5eed_0001_5eed_0002);
+    for i in 0..200 {
+        let n = 1 + r.next(50);
+        let css = sheet(&mut r, n, false);
+        // The builder interns other names first, in another order, so that its numbers differ from the numbers of the others.
+        let mut builder = parse(&page(&mut r));
+        for name in ["zz-first", "li", "p", "title", "x-custom", "span"] {
+            builder.intern(name);
+        }
+        let from = FROM[r.next(FROM.len())];
+        let shared = with_ua(&mut builder, &css, from);
+        for _ in 0..3 {
+            let html = page(&mut r);
+            let mut doc = parse(&html);
+            let own = with_ua(&mut doc, &css, from);
+            assert_eq!(found(&shared, &doc), found(&own, &doc), "case {i}\n{html}\n{css}");
+            let (a, b) = (shared.compute(&doc), own.compute(&doc));
+            for el in all(&doc) {
+                assert!(a.style(el) == b.style(el), "case {i}: element {} has another style\n{html}\n{css}", el.index());
+            }
+        }
+    }
+}
