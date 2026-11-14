@@ -10241,3 +10241,41 @@ Findings:
 Recommendation: W1 (window name by one walk, no list), H1 (skip a covered restyle root), S-A (one retained cascade and layout updated by damage marks). Estimate on the settled benchmark: article -38.5%, search -32.8%, the two -5.4 G (5.7% of the total): criterion 2 from 90.7% to about 85.5%. If the four other Wikipedia journeys gain 25 to 35% (hypothesis), 82 to 83%. The arithmetic is in section 7 of the design.
 
 Not measured: the four other Wikipedia journeys; the roots of the 90 k restyle (cause is a hypothesis); why a reload of the same page pays the same rule-build cost; wall time; the live sites.
+
+## Style round 2: measurements and design (R2-E, 2026-11-14)
+
+Task R2-E of the round 2 plan. Design: [design-style-round2.md](design-style-round2.md). Docs only. Base: main `28a8fbc2`. Machine: archMachine. Each case ran 3 times. The spread of instruction counts was 0.
+
+### Criterion 3: what is left in `compm_22000` and `rest_13`
+
+Driver totals: `compm_22000` 1,835 M (target 1,166 M, -36.5%), `rest_13` 1,240 M (target 1,087 M, -12.3%).
+
+| Stage (M instructions) | `compm_22000` | `rest_13` |
+| --- | ---: | ---: |
+| HTML parse | 131 (7.1%) | 25 (2.0%) |
+| Rule set build | 130 (7.1%) | 210 (16.9%) |
+| First full compute | 581 (31.7%) | 103 (8.3%) |
+| Restyles (2 and 13) | 825 (45.0%) | 456 (36.8%) |
+| JS, layout, glue, exit | 169 (9.2%) | 450 (36.3%) |
+
+- PR #494 and #502 facts: one build per ramp (confirmed). Build share 7.1% and 16.9% (confirmed, a little higher). The selector parse is 42% of the build on `compm_22000` (54.6 of 130 M), not 51%. The first selector parse is 3.0% of `compm_22000` and 7% of `rest_13`. It is not the lever.
+- Cost of a restyle pass where every element hits the memo: 236 M on `compm_22000` (5.4 K per element) and 31.7 M on `rest_13` (5.3 K per element). About 3 K of it is string work on class names (hash, compare, split, attribute scan).
+- Cost of a memo miss: 9.2 K. `compm_22000` has 77,769 misses in 3 passes (89% of the full compute). 82% of the misses end with a style that already exists. The full-style hash (1.5 K) and compare (2.0 K) are paid for nothing in those cases.
+- Model: 132,006 element-passes x 5.4 K + 77,769 misses x 9.2 K = 1,429 M. Measured compute plus restyles: 1,406 M.
+- Signature sharing (M3) gives 0% on both ramps: all 22,000 matched lists differ. Precise invalidation skips only about 9% of the elements (each div has 6 classes).
+
+### Recommendation
+
+Three parts, in this order, each measured on the whole browser: A class atoms (class and id index keyed by atom, per-element class atom slice), D selector arena with a direct parser, B cascade by winners (second memo keyed by winner values). Estimated saving on `compm_22000`: 506 M (low), 614 M (middle), 781 M (high) against 669 M needed. Only the high case reaches 10x. The middle case gives 9.6x. On `rest_13`: 221 M, 263 M, 340 M against 153 M needed: all cases reach 10x. All gains are estimates. A spike of part A must show 2.7 K or more saved per element before the rest is built. Option H (a lazy style for one element) would remove 77% of `compm_22000` but changes no journey and not `rest_13`. The owner decides.
+
+### Criterion 8: the `cssom-objects` cap
+
+- It protects memory, not an algorithm. `State::roots` in `browser_cssom.rs` gets every CSSOM object that the host makes and never loses one. `deleteRule`, `replaceSync` and a removed sheet leave the roots in place.
+- Cost per object after PR #491: 17.8 K instructions and 750 to 960 B for a rule read; 31.4 K and 1,258 B with `.style`; 34.8 K and 839 B leaked for one `insertRule` plus `deleteRule`. A one-rule sheet edited in a loop hits the cap after about 506 K iterations at 494 MiB.
+- Recommended design (D1): un-keep the objects that leave a list, prune the host tables when the heap says a handle is stale (`Heap::is_live`), and remove the cap. The JS heap limits (1 GiB, 16 M objects) stay. Tying the cap to the rule count (D2) was rejected: it fails the churn loop sooner.
+
+### Not measured
+
+The journeys. Wall-clock time. Whether a span of the text arena can be reused (needed for part A). Quirks-mode class matching. The Gecko lazy-resolve implementation. Layout inside `rest_13` beyond its call-tree share (about 18.5%).
+
+Kept outside the repo: `/data/bare-tmp/r2/R2-E/` (staged example, counter patch, scripts, profiles).
