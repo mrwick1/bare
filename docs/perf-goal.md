@@ -56,18 +56,18 @@ Use one clock for both sides. The virtual clock does more page work than the rea
 
 ## Baseline on the recorded corpus, settled driver (2026-11-14)
 
-The settle loop of the replay driver no longer runs the page (`Page::settle_images`, `docs/decisions.md`, `docs/progress.md` section "The replay driver settles pictures without running the page"). Same method as above, corpus `virtual-settled` (the corpus `virtual` plus the replies that the new end state asks for), 47 journeys, 3 runs, runs interleaved, `--pss`. Baseline: `2ddee1da` (`f6415364` plus the replay patch) plus the virtual clock plus the same driver change, local only (branch `bench-base-vclock`). Main: `5bc18d14` plus the driver change. All 47 pass on both, 0 replay misses. Same-binary spread is 0.2% or less on main and 0.4% or less on the baseline.
+The settle loop of the replay driver no longer runs the page (`Page::settle_images`, `docs/decisions.md`, `docs/progress.md` section "The replay driver settles pictures without running the page"). Same method as above, corpus `virtual-settled` (the corpus `virtual` plus the replies that the new end state asks for), 47 journeys, 3 runs, runs interleaved, `--pss`. Baseline: `2ddee1da` (`f6415364` plus the replay patch) plus the virtual clock plus the same driver change, local only (branch `bench-base-vclock`). Main: `c4e32a85` plus the driver change. All 47 pass on both, 0 replay misses. Same-binary spread is 0.3% or less on both sides, except `devto-home` (67 M instructions, 0.4 M apart: up to 0.6% on main, 0.7% on the baseline).
 
 | # | Measure | Baseline | Main | Against the target |
 | --- | --- | --- | --- | --- |
 | 1 | Journeys that pass with recorded inputs | 47 of 47 | 47 of 47 | met for the 47 that replay |
-| 2 | Total instructions | 59,372 M | 51,595 M (86.9%) | not met (target 80%) |
+| 2 | Total instructions | 59,370 M | 51,597 M (86.9%) | not met (target 80%) |
 | 3 | `compm_22000`, `rest_13` ramps | no tape, not affected | | |
-| 4 | `python-org-docs-link`, `rust-book-search` | 1,434 M, 16,607 M | 1,209 M, 16,319 M (1.19 times, 1.02 times) | not met (target 1.3 times) |
+| 4 | `python-org-docs-link`, `rust-book-search` | 1,434 M, 16,606 M | 1,210 M, 16,319 M (1.19 times, 1.02 times) | not met (target 1.3 times) |
 | 5 | Sheet ramp RSS | no tape, not affected | | |
-| 6 | `python-docs-search-results` peak RSS and PSS | 113.6 MiB, 110.2 MiB | 97.4 MiB, 94.7 MiB (-14.3%, -14.1%) | not met (target 20% lower) |
+| 6 | `python-docs-search-results` peak RSS and PSS | 113.4 MiB, 106.0 MiB | 96.7 MiB, 89.9 MiB (-14.7%, -15.2%) | not met (target 20% lower) |
 
-Other totals, medians summed: CPU 9,126 ms to 8,669 ms (-5.0%). PSS 1,273 MiB to 991 MiB (-22.2%, run 0 only). Peak RSS 1,601 MiB to 1,421 MiB (-11.2%). Criteria 7 and 8 do not use the corpus or a tape: not affected.
+Other totals, medians summed: CPU 7,489 ms to 6,698 ms (-10.6%). PSS 1,253 MiB to 938 MiB (-25.2%, run 0 only). Peak RSS 1,592 MiB to 1,418 MiB (-10.9%). Criteria 7 and 8 do not use the corpus or a tape: not affected.
 
 Use the new baseline for every later comparison on the journeys. A number from the tables above does not compare with it: the old loop made each journey run its last document to the end of its load.
 

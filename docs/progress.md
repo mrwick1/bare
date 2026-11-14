@@ -10367,7 +10367,7 @@ Whitespace diff checks pass. Strict rustfmt fails on pre-existing compact format
 The textarea fix is independent of Fetch Metadata and is rebased onto main at 5bc18d14. Its release library run passes 1,459 tests with six ignored. All five three-run instruction comparisons remain below the existing 0.5 percent limit on glibc. See [the samples and limits](innertext-textarea-design.md#independent-pre-merge-check-2026-11-14).
 ## The replay driver settles pictures without running the page (2026-11-14)
 
-Branch `t3/settle-replay-pictures`, on main `5bc18d14`. Owner decision 2026-11-14: fix the settle loop of the replay driver and measure the baseline again. Decision: `docs/decisions.md`. Machine: archMachine, `heavy` lock held. A first agent built the change and stopped on a network error. This agent applied its patch, reviewed it, and measured everything again. Files: `/data/claude-tmp/settle/` (first agent, counters), `/data/claude-tmp/settle2/` (this agent: `cmp.log`, `cmp.tsv`, `ws.log`).
+Branch `t3/settle-replay-pictures`, on main `c4e32a85`. Owner decision 2026-11-14: fix the settle loop of the replay driver and measure the baseline again. Decision: `docs/decisions.md`. Machine: archMachine, `heavy` lock held. A first agent built the change and stopped on a network error. This agent applied its patch, reviewed it, and measured everything again. Files: `/data/claude-tmp/settle/` (first agent, counters), `/data/claude-tmp/settle2/` (this agent: `cmp.log`, `cmp.tsv`, `ws.log`).
 
 ### Why pictures stayed pending
 
@@ -10422,82 +10422,98 @@ So the hypothesis "pictures stay pending for 5 s" is wrong. The loop ends when t
 
 Corpus `virtual-settled`: a copy of `virtual` with the replies that the new end state asks for (5 journeys had 1 to 3 misses, mostly `POST` beacons to telemetry hosts; `journeys.sh fill --clock virtual`, 2 runs without a miss). The first agent made it. That fill sent those POSTs to the live hosts, as every earlier fill did. `virtual` is not changed. Pass `--corpus /data/bare-tmp/corpus/virtual-settled` to `journeys.sh`: the default of `--clock virtual` is still `virtual`.
 
-Baseline: local branch `bench-base-vclock` in `/data/bare-tmp/bench-base-src`, HEAD `2ddee1da` (replay patch on `f6415364`) plus the staged virtual clock patch plus the same driver change (the three functions are identical to this branch; not committed, not pushed). New: main `5bc18d14` plus this change. `journeys.sh compare --corpus .../virtual-settled --clock virtual --runs 3 --pss`, 47 journeys, runs interleaved; run 0 is the PSS run, runs 1 to 3 give the medians. Log: `/data/claude-tmp/settle2/cmp.log`.
+Baseline: local branch `bench-base-vclock` in `/data/bare-tmp/bench-base-src`, HEAD `2ddee1da` (replay patch on `f6415364`) plus the staged virtual clock patch plus the same driver change (the three functions are identical to this branch; not committed, not pushed). New: main `c4e32a85` plus this change (the first measurement was on `5bc18d14`, before the rebase onto the textarea change of PR #500: 59,372 M and 51,595 M, the same within 0.01%). `journeys.sh compare --corpus .../virtual-settled --clock virtual --runs 3 --pss`, 47 journeys, runs interleaved; run 0 is the PSS run, runs 1 to 3 give the medians. Log: `/data/claude-tmp/settle2/cmp2.log` (`cmp.log`: the first measurement).
 
 | | Baseline | Main + change | Change |
 | --- | ---: | ---: | ---: |
-| Instructions, sum of medians | 59,372 M | 51,595 M | -13.1% (86.9% of the baseline) |
-| CPU (user+system) | 9,126 ms | 8,669 ms | -5.0% |
-| Peak RSS | 1,601 MiB | 1,421 MiB | -11.2% |
-| PSS (run 0 only) | 1,273 MiB | 991 MiB | -22.2% |
-| Spread, worst journey | 0.4% (`devto-home`) | 0.2% (`devto-home`, `wikipedia-portal`) | |
+| Instructions, sum of medians | 59,370 M | 51,597 M | -13.1% (86.9% of the baseline) |
+| CPU (user+system) | 7,489 ms | 6,698 ms | -10.6% |
+| Peak RSS | 1,592 MiB | 1,418 MiB | -10.9% |
+| PSS (run 0 only) | 1,253 MiB | 938 MiB | -25.2% |
+| Spread, worst journey | 0.7% (`devto-home`) | 0.6% (`devto-home`); the next worst is 0.3% | |
 
-All 47 pass on both. 0 replay misses on both. The sum with the old loop was 105,217 M (baseline) and 96,345 M (main). The loop was 43.6% of the baseline and 46.4% of main. CPU and wall are from a loaded machine, and the CPU of the first agent's run (7,154 ms and 6,418 ms) differs from mine: do not compare them.
+All 47 pass on both. 0 replay misses on both. The sum with the old loop was 105,217 M (baseline) and 96,345 M (main). The loop was 43.6% of the baseline and 46.4% of main. CPU and wall are from a loaded machine: CPU was 9,126 ms and 8,669 ms in my first measurement, so do not read them closely.
 
-Determinism: the same-binary spread of the new binary is 0.2% or less on all 47 journeys (3 runs; the first agent saw 1.0% on `devto-home`, 67 M instructions, in 8 runs alone: 67.0 to 67.7 M). The limit of 0.5% holds in this run. The baseline binary: 0.4% or less. 0 new replay misses.
+Determinism: the same-binary spread of the new binary (3 runs, 47 journeys) is 0.3% or less on 46 journeys. `devto-home` (67 M instructions) varies by 0.4 M: 0.2% in the first measurement, 0.6% in this one (67.4 to 67.8 M); the baseline binary varies the same way (0.4% and 0.7%). The limit of 0.5% is missed on that journey in one of two measurements. The cause is not examined (hypothesis: a worker thread that is still decoding or reading when the process ends). It is 0.0008% of the total. 0 new replay misses, 0 on both binaries.
 
 Criteria on the settled driver (details in `docs/perf-goal.md`):
 
 | # | Measure | Baseline | Main + change | Target | |
 | --- | --- | --- | --- | --- | --- |
-| 2 | Total instructions of the 47 journeys | 59,372 M | 51,595 M (86.9%) | 80% | not met |
-| 4 | `python-org-docs-link`, `rust-book-search` | 1,434 M, 16,607 M | 1,209 M, 16,319 M (1.19 times, 1.02 times) | 1.3 times | not met |
-| 6 | `python-docs-search-results` peak RSS, PSS | 113.6 MiB, 110.2 MiB | 97.4 MiB, 94.7 MiB (-14.3%, -14.1%) | 20% lower | not met |
+| 2 | Total instructions of the 47 journeys | 59,370 M | 51,597 M (86.9%) | 80% | not met |
+| 4 | `python-org-docs-link`, `rust-book-search` | 1,434 M, 16,606 M | 1,210 M, 16,319 M (1.19 times, 1.02 times) | 1.3 times | not met |
+| 6 | `python-docs-search-results` peak RSS, PSS | 113.4 MiB, 106.0 MiB | 96.7 MiB, 89.9 MiB (-14.7%, -15.2%) | 20% lower | not met |
 
 Criteria 3, 5, 7 and 8 do not use the journey corpus and no tape (the ramps run in `bare-stress` and the cost matrix, the suite on a local fixture server), so `settle_pictures` does not run in them: not affected, and not measured again. Criterion 1 is unchanged: 47 of 47 pass.
 
-The journeys that gain most are the ones that ended in the middle of a page load: `curl-se-home` -94% (2,205 M to 123 M), `rust-lang-org-home` -88%, `blog-rust-lang-home` -69%, `go-dev-home` -64%. `mdn-reference` (+10%) and `wikipedia-toc-languages` (+4%) are higher on main than on the baseline: real changes between the two trees (lazy function bodies and later work), not the driver. The heavy journeys now are `rust-book-search` (16.3 G, 31.6% of the total), `nodejs-org-home` (5.9 G), `github-docs-home` (4.9 G), `wikipedia-search` (3.4 G), `mdn-reference` (3.3 G) and `wikipedia-toc-languages` (3.0 G). `react-docs` fell from 16.7 G to 134 M.
+The journeys that gain most are the ones that ended in the middle of a page load: `curl-se-home` -94% (2,205 M to 123 M), `rust-lang-org-home` -88%, `blog-rust-lang-home` -69%, `go-dev-home` -64%. `mdn-reference` (+10%) and `wikipedia-toc-languages` (+4%) are higher on main than on the baseline: real changes between the two trees (lazy function bodies and later work), not the driver. The heavy journeys now are `rust-book-search` (16.3 G, 31.6% of the total), `nodejs-org-home` (5.9 G), `github-docs-home` (4.9 G), `wikipedia-search` (3.4 G), `mdn-reference` (3.3 G) and `wikipedia-toc-languages` (3.0 G). `react-docs` fell from 16.7 G to 134 M. PSS is one sample (run 0): the first measurement gave 110.2 and 94.7 MiB (-14.1%).
 
 Per journey (medians of runs 1 to 3, spread = (max - min) / median):
 
 | Journey | M instr base | M instr new | change | spread base | spread new | RSS MiB base | RSS MiB new |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `archlinux-org-home` | 59.5 | 52.4 | -11.9% | 0.1% | 0.0% | 16.7 | 17.3 |
-| `blog-rust-lang-home` | 520.9 | 159.2 | -69.4% | 0.0% | 0.1% | 26.6 | 19.1 |
-| `cnn-lite-front` | 58.4 | 50.4 | -13.6% | 0.0% | 0.0% | 17.5 | 18.0 |
-| `craigslist-home` | 19.9 | 18.8 | -5.2% | 0.1% | 0.0% | 16.0 | 16.0 |
-| `crates-io-home` | 133.5 | 132.5 | -0.7% | 0.0% | 0.0% | 19.8 | 19.9 |
-| `curl-se-home` | 2,204.7 | 122.8 | -94.4% | 0.0% | 0.0% | 70.1 | 18.1 |
-| `debian-org-home` | 103.1 | 83.2 | -19.3% | 0.0% | 0.1% | 16.4 | 16.7 |
-| `devto-home` | 69.1 | 67.5 | -2.4% | 0.4% | 0.2% | 26.1 | 25.8 |
-| `docs-rs-home` | 115.7 | 59.0 | -49.1% | 0.0% | 0.0% | 17.9 | 17.7 |
-| `duckduckgo-html-search` | 71.5 | 44.5 | -37.8% | 0.0% | 0.0% | 16.9 | 17.5 |
-| `example-learn-more` | 27.7 | 25.7 | -7.3% | 0.1% | 0.0% | 16.4 | 16.7 |
+| `archlinux-org-home` | 59.5 | 52.4 | -11.9% | 0.0% | 0.0% | 16.3 | 16.9 |
+| `blog-rust-lang-home` | 520.9 | 159.1 | -69.4% | 0.0% | 0.1% | 25.4 | 18.9 |
+| `cnn-lite-front` | 58.4 | 50.4 | -13.6% | 0.0% | 0.0% | 17.4 | 17.9 |
+| `craigslist-home` | 19.9 | 18.8 | -5.1% | 0.2% | 0.2% | 15.9 | 15.9 |
+| `crates-io-home` | 133.5 | 132.5 | -0.7% | 0.0% | 0.1% | 19.8 | 19.7 |
+| `curl-se-home` | 2,204.8 | 122.9 | -94.4% | 0.0% | 0.0% | 69.1 | 18.1 |
+| `debian-org-home` | 103.1 | 83.2 | -19.3% | 0.1% | 0.0% | 16.4 | 16.6 |
+| `devto-home` | 68.9 | 67.6 | -1.9% | 0.7% | 0.6% | 21.9 | 28.8 |
+| `docs-rs-home` | 115.7 | 59.0 | -49.1% | 0.0% | 0.0% | 17.6 | 17.8 |
+| `duckduckgo-html-search` | 71.5 | 44.5 | -37.8% | 0.0% | 0.1% | 17.2 | 17.7 |
+| `example-learn-more` | 27.7 | 25.6 | -7.4% | 0.0% | 0.1% | 16.0 | 16.5 |
 | `example-page` | 12.0 | 10.7 | -11.2% | 0.0% | 0.0% | 16.0 | 16.0 |
-| `github-docs-home` | 5,226.7 | 4,900.6 | -6.2% | 0.0% | 0.0% | 94.5 | 92.1 |
-| `go-dev-home` | 2,980.8 | 1,078.2 | -63.8% | 0.0% | 0.0% | 88.5 | 41.5 |
-| `hn-comments-back` | 79.5 | 75.1 | -5.5% | 0.0% | 0.0% | 16.1 | 16.4 |
-| `hn-front` | 104.4 | 93.7 | -10.2% | 0.1% | 0.0% | 16.1 | 16.8 |
-| `hn-new-past` | 171.8 | 153.5 | -10.7% | 0.0% | 0.0% | 16.2 | 16.9 |
-| `httpbin-cookies` | 25.8 | 20.7 | -19.8% | 0.0% | 0.1% | 16.1 | 16.1 |
-| `httpbin-form-fill` | 27.0 | 24.8 | -8.1% | 0.0% | 0.0% | 16.1 | 16.1 |
-| `httpbin-form-submit` | 36.2 | 32.1 | -11.3% | 0.0% | 0.0% | 16.1 | 16.1 |
-| `kernel-org-home` | 21.3 | 19.8 | -7.0% | 0.0% | 0.0% | 16.1 | 16.1 |
-| `lobsters-comments-back` | 118.3 | 109.2 | -7.7% | 0.0% | 0.0% | 16.2 | 16.9 |
-| `lobsters-front` | 99.7 | 88.7 | -11.0% | 0.0% | 0.0% | 16.7 | 17.0 |
-| `mdn-reference` | 2,971.6 | 3,271.2 | +10.1% | 0.0% | 0.0% | 51.4 | 48.4 |
-| `nginx-org-home` | 103.3 | 61.2 | -40.7% | 0.0% | 0.0% | 22.2 | 20.3 |
-| `nodejs-org-home` | 5,834.2 | 5,917.5 | +1.4% | 0.0% | 0.0% | 77.4 | 74.3 |
-| `npr-text-story` | 36.4 | 30.2 | -17.0% | 0.0% | 0.0% | 16.1 | 16.1 |
-| `paulgraham-home` | 51.0 | 51.5 | +1.1% | 0.0% | 0.1% | 16.1 | 16.6 |
-| `python-docs-search-results` | 3,392.7 | 2,481.5 | -26.9% | 0.0% | 0.0% | 113.6 | 97.4 |
-| `python-docs-search` | 2,140.2 | 1,253.2 | -41.4% | 0.0% | 0.0% | 93.4 | 69.6 |
-| `python-docs-tutorial` | 359.9 | 333.2 | -7.4% | 0.0% | 0.0% | 17.4 | 17.7 |
-| `python-org-docs-link` | 1,434.3 | 1,209.3 | -15.7% | 0.0% | 0.1% | 31.8 | 32.8 |
-| `python-org-search` | 848.7 | 783.5 | -7.7% | 0.1% | 0.0% | 30.7 | 29.6 |
-| `react-docs` | 136.5 | 133.8 | -1.9% | 0.0% | 0.1% | 18.9 | 19.0 |
-| `rust-book-chapters` | 567.2 | 525.7 | -7.3% | 0.0% | 0.1% | 22.2 | 22.4 |
-| `rust-book-search` | 16,606.6 | 16,318.9 | -1.7% | 0.0% | 0.0% | 129.2 | 126.8 |
-| `rust-book-sidebar` | 337.9 | 323.2 | -4.4% | 0.1% | 0.1% | 20.8 | 21.2 |
-| `rust-lang-org-home` | 711.2 | 85.4 | -88.0% | 0.0% | 0.0% | 33.7 | 18.6 |
-| `sqlite-org-home` | 66.7 | 60.6 | -9.1% | 0.0% | 0.0% | 19.1 | 19.5 |
-| `substack-home` | 489.3 | 382.8 | -21.8% | 0.0% | 0.0% | 30.6 | 31.6 |
-| `w3c-home-links` | 91.5 | 88.1 | -3.7% | 0.0% | 0.0% | 17.4 | 17.7 |
-| `wikipedia-article` | 2,782.0 | 2,742.1 | -1.4% | 0.0% | 0.0% | 44.0 | 41.4 |
-| `wikipedia-main-random` | 1,465.9 | 1,402.9 | -4.3% | 0.0% | 0.0% | 37.6 | 33.3 |
-| `wikipedia-portal` | 166.7 | 160.3 | -3.9% | 0.3% | 0.2% | 18.6 | 19.2 |
-| `wikipedia-search` | 3,499.0 | 3,448.7 | -1.4% | 0.0% | 0.0% | 63.0 | 57.7 |
-| `wikipedia-toc-languages` | 2,891.2 | 3,010.9 | +4.1% | 0.0% | 0.1% | 53.3 | 50.8 |
-| `wiktionary-portal` | 100.7 | 96.0 | -4.7% | 0.0% | 0.1% | 17.7 | 18.3 |
-| **sum of medians** | 59,372 | 51,595 | -13.1% | max 0.4% | max 0.2% | 1,601 | 1,421 |
+| `github-docs-home` | 5,226.5 | 4,900.5 | -6.2% | 0.0% | 0.0% | 93.9 | 91.6 |
+| `go-dev-home` | 2,980.9 | 1,078.2 | -63.8% | 0.0% | 0.0% | 89.6 | 41.9 |
+| `hn-comments-back` | 79.5 | 75.1 | -5.5% | 0.0% | 0.1% | 16.0 | 16.3 |
+| `hn-front` | 104.4 | 93.7 | -10.2% | 0.0% | 0.0% | 16.0 | 16.8 |
+| `hn-new-past` | 171.8 | 153.4 | -10.7% | 0.0% | 0.0% | 16.4 | 16.7 |
+| `httpbin-cookies` | 25.8 | 20.7 | -19.8% | 0.0% | 0.0% | 16.0 | 16.0 |
+| `httpbin-form-fill` | 27.0 | 24.8 | -8.1% | 0.0% | 0.0% | 16.0 | 16.0 |
+| `httpbin-form-submit` | 36.2 | 32.2 | -11.2% | 0.0% | 0.1% | 16.0 | 16.0 |
+| `kernel-org-home` | 21.3 | 19.8 | -7.1% | 0.0% | 0.0% | 16.0 | 16.0 |
+| `lobsters-comments-back` | 118.3 | 109.3 | -7.7% | 0.0% | 0.0% | 16.1 | 16.7 |
+| `lobsters-front` | 99.7 | 88.7 | -11.0% | 0.0% | 0.1% | 16.7 | 17.0 |
+| `mdn-reference` | 2,971.5 | 3,271.5 | +10.1% | 0.0% | 0.0% | 51.1 | 48.3 |
+| `nginx-org-home` | 103.3 | 61.2 | -40.8% | 0.0% | 0.0% | 22.7 | 20.5 |
+| `nodejs-org-home` | 5,834.1 | 5,917.1 | +1.4% | 0.0% | 0.0% | 76.9 | 74.0 |
+| `npr-text-story` | 36.4 | 30.2 | -16.9% | 0.0% | 0.1% | 16.0 | 16.0 |
+| `paulgraham-home` | 51.0 | 51.4 | +1.0% | 0.1% | 0.1% | 16.2 | 16.6 |
+| `python-docs-search-results` | 3,392.6 | 2,482.0 | -26.8% | 0.0% | 0.0% | 113.4 | 96.7 |
+| `python-docs-search` | 2,140.2 | 1,253.1 | -41.4% | 0.0% | 0.0% | 93.5 | 69.5 |
+| `python-docs-tutorial` | 360.0 | 333.2 | -7.4% | 0.0% | 0.0% | 17.2 | 17.6 |
+| `python-org-docs-link` | 1,434.1 | 1,210.0 | -15.6% | 0.1% | 0.1% | 32.4 | 32.5 |
+| `python-org-search` | 848.9 | 783.3 | -7.7% | 0.1% | 0.0% | 30.7 | 29.7 |
+| `react-docs` | 136.5 | 133.9 | -1.9% | 0.0% | 0.1% | 19.3 | 19.5 |
+| `rust-book-chapters` | 567.2 | 525.8 | -7.3% | 0.0% | 0.1% | 22.0 | 22.7 |
+| `rust-book-search` | 16,606.0 | 16,318.7 | -1.7% | 0.0% | 0.0% | 129.4 | 126.4 |
+| `rust-book-sidebar` | 338.0 | 323.3 | -4.3% | 0.0% | 0.1% | 20.7 | 21.3 |
+| `rust-lang-org-home` | 711.3 | 85.4 | -88.0% | 0.0% | 0.1% | 33.7 | 18.4 |
+| `sqlite-org-home` | 66.7 | 60.6 | -9.1% | 0.0% | 0.0% | 18.8 | 19.6 |
+| `substack-home` | 489.3 | 382.8 | -21.8% | 0.0% | 0.0% | 30.7 | 31.4 |
+| `w3c-home-links` | 91.5 | 88.1 | -3.7% | 0.0% | 0.0% | 17.1 | 17.6 |
+| `wikipedia-article` | 2,782.1 | 2,742.2 | -1.4% | 0.0% | 0.0% | 43.3 | 39.7 |
+| `wikipedia-main-random` | 1,466.2 | 1,402.9 | -4.3% | 0.0% | 0.0% | 36.9 | 33.4 |
+| `wikipedia-portal` | 166.3 | 160.3 | -3.6% | 0.3% | 0.2% | 18.6 | 19.0 |
+| `wikipedia-search` | 3,496.3 | 3,448.4 | -1.4% | 0.0% | 0.0% | 62.2 | 57.7 |
+| `wikipedia-toc-languages` | 2,892.2 | 3,012.3 | +4.2% | 0.0% | 0.3% | 53.9 | 50.7 |
+| `wiktionary-portal` | 100.7 | 96.0 | -4.6% | 0.0% | 0.0% | 17.7 | 18.0 |
+| **sum of medians** | 59,370 | 51,597 | -13.1% | max 0.7% | max 0.6% | 1,592 | 1,418 |
 
+### Checks
+
+- Test first: `cargo test --release -p bare-drive --test replay` fails on the old loop with the new test (old `settle_pictures` put back) and passes with the change (3 of 3).
+- All 47 journeys pass in every run, on both binaries. 0 replay misses on corpus `virtual-settled`. On corpus `virtual` the new driver shows 1 to 3 misses on 5 journeys (first agent): the end state is not the old one, so the corpus needed the fill.
+- Rebased once on main `c4e32a85` (only `browser_element*.rs` changed since `5bc18d14`; no conflict). Journeys, matrix and the drive test ran on the rebased tree.
+- `cargo test --release --workspace --no-fail-fast` (tree on `5bc18d14`; the rebase brought a change in `browser_element*.rs` only): all pass except 7 openssl TLS tests (`bare-net --test https_openssl` 2, `bare-tls --test client_openssl` 4, `bare-tls --test tls12_openssl` 1; known on main), `a_changed_file_starts_again_from_zero` (flaky under load: passes alone), and `a_hidden_iframe_download_is_saved` (`bare-mcp --test server`; fails alone on this branch and on main `c4e32a85`, so it is not from this change).
+- `tools/js/cost_matrix.sh` (main `c4e32a85` against this branch): 803 rows, mean change glibc +0.002%, jemalloc +0.000%, 0 rows over the limit under either allocator. 2 rows (`parse_load deep 1`, `deep 10`) fail to run on both trees (stack overflow, known).
+- `test262` and `exec_diff` not run: no change in `crates/js`.
+
+### Not tested
+
+- Wall time on an idle machine.
+- A live run (no tape): `settle_pictures` does nothing then, as before.
+- A journey that needs the document at `interactive` before its next step with no wait of its own: all 47 pass, so none does. A new journey could. The old loop gave it that wait for free; now a step must wait for its own condition.
+- The `Parsing::step` clock fix without the picture change (its effect on `wikipedia-portal` was seen by the first agent only).
+- Another machine. The baseline build is a local tree with uncommitted changes (`bench-base-vclock` HEAD `2ddee1da` plus the staged clock patch plus the driver change).
