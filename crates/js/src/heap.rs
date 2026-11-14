@@ -779,6 +779,8 @@ pub struct Heap {
     /// Shared host texts by (hash, UTF-8 length). Weak: `collect` drops the dead ones.
     shared: std::collections::HashMap<(u64, usize), StrId>,
     bytes: usize,
+    /// Arrays made, all time. `arrays_are_common` compares it with the objects made.
+    array_allocs: u64,
     /// Accounted bytes of the units of the flat ropes. A rope is flattened by a read, which has `&self`, so this is a `Cell`.
     flat_bytes: std::cell::Cell<usize>,
     collections: u64,
@@ -843,6 +845,7 @@ impl Heap {
             big_table: big::BigTable::new(),
             interner: Interner { table: vec![0; 4096], count: 0 },
             bytes: 0,
+            array_allocs: 0,
             flat_bytes: std::cell::Cell::new(0),
             shared: std::collections::HashMap::new(),
             collections: 0,
@@ -908,8 +911,15 @@ impl Heap {
         f
     }
 
+    /// Is at least one object in eight an array? `Interp::collect` then tests each object with `is_plain_array`: the test costs about 15 instructions, and
+    /// saves about 150 for an array, so it pays above that share.
+    pub fn arrays_are_common(&self) -> bool {
+        self.array_allocs * 8 >= self.objects.allocs
+    }
+
     /// Is `o` an array that is not exotic? Only the weak tables (a `WeakMap` key) and a subclass with private fields give such an array state
     /// outside the heap (`Interp::collect` asks, to skip the side-table probes).
+    #[inline]
     pub fn is_plain_array(&self, o: ObjId) -> bool {
         self.obj(o).is_ok_and(|ob| ob.is_array && ob.exotic == 0)
     }
@@ -1586,6 +1596,7 @@ impl Heap {
         self.charge(cost)?;
         let (index, gn) = self.objects.alloc(o, Limit::Objects)?;
         self.bytes += cost;
+        self.array_allocs += is_array as u64;
         Ok(ObjId { index, gn })
     }
 

@@ -48,6 +48,13 @@ fn expect(what: &str, got: String, want: String) {
     }
 }
 
+/// The reclaim gives the slots of dead trees to new nodes (`browser_reclaim.rs`): the arena grows by at most the nodes that the case made.
+fn at_most(what: &str, got: usize, max: usize) {
+    if got > max {
+        die(format!("{what}: {got} > {max}"));
+    }
+}
+
 const PAGE: &str = "<!doctype html><html><head></head><body></body></html>";
 
 /// Canonical markup of round `r`: it serializes to itself.
@@ -102,8 +109,8 @@ fn exec(name: &str, scale: usize) {
             }
             expect("replace contents", run(&mut b, "els.map(function (e) { return e.innerHTML + '#' + e.childNodes.length }).join('|')"), model.iter().map(|m| format!("{m}#1")).collect::<Vec<_>>().join("|"));
             expect("replace held", run(&mut b, "held.tagName + held.parentNode"), "Snull".into());
-            // Each replacement makes 2 nodes (the arena never frees); plus the 20 divs, `held` and the `hr`.
-            expect("replace nodes", (b.stats().nodes - nodes0).to_string(), (2 * n + 20 + 1).to_string());
+            // Each replacement makes 2 nodes; plus the 20 divs, `held` and the `hr`.
+            at_most("replace nodes", b.stats().nodes - nodes0, 2 * n + 20 + 1);
         }
         "deep" => {
             let rounds = 10 * scale;
@@ -119,7 +126,7 @@ fn exec(name: &str, scale: usize) {
                 }
             }
             expect("deep sum", run(&mut b, "sum"), sum.to_string());
-            expect("deep nodes", (b.stats().nodes - nodes0).to_string(), (rounds * 401 + 1).to_string());
+            at_most("deep nodes", b.stats().nodes - nodes0, rounds * 401 + 1);
         }
         _ => die(format!("unknown case {name}")),
     }

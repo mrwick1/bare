@@ -59,8 +59,26 @@ fn a_document_that_a_script_holds_stays() {
         assert_eq!(js(&mut b, "keep.getElementById('k').textContent + keep.mark"), "kept1");
         js(&mut b, "keep = null;");
         let before = live(&b);
+        // the walk waits for new nodes (`FLOOR`): the parses are those
+        js(&mut b, &format!("{PARSE}20)"));
         b.collect(&[]).unwrap();
-        assert!(live(&b) < before);
+        assert!(live(&b) < before, "{} nodes, {before} before", live(&b));
+    });
+}
+
+#[test]
+fn the_walk_waits_until_enough_nodes_were_made_since_the_last_one() {
+    big(|| {
+        let mut b = browser();
+        b.dom.reclaim.set_floor(1_000_000);
+        js(&mut b, &format!("{PARSE}20)"));
+        let made = live(&b);
+        b.collect(&[]).unwrap();
+        assert_eq!(live(&b), made, "no walk: too few nodes were made");
+        assert_eq!(b.reclaim_stats(), (0, 0));
+        b.dom.reclaim.set_floor(0);
+        b.collect(&[]).unwrap();
+        assert!(live(&b) < made, "the walk that was due runs once the floor is met");
     });
 }
 

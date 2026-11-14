@@ -1004,6 +1004,8 @@ impl<'p> Interp<'p> {
         self.big_roots(&mut work);
         self.intl_roots(&mut work);
         let mut pending: FxMap<ObjId, Vec<Value>> = FxMap::default();
+        // Test each object for the fast path of a plain array only when arrays are common (`Heap::arrays_are_common`).
+        let arrays = self.cls.privs.is_empty() && self.heap.arrays_are_common();
         let mut agg_seen: FxSet<u64> = FxSet::default();
         let mut env_work: Vec<u32> = vec![0];
         let mut act_seen = vec![false; self.aw.acts.len()];
@@ -1036,7 +1038,7 @@ impl<'p> Interp<'p> {
             // A plain array has no function entry, promise, host wrapper, iterator or class state, and no private fields unless an instance of a subclass
             // (`cls.privs`). It can be the key of a weak collection: `pending` holds the values of keys that were not reached yet. Without these the
             // walk goes straight to its elements and prototype, and skips about 12 table probes for each array of a data literal.
-            if pending.is_empty() && self.cls.privs.is_empty() && self.heap.is_plain_array(o) {
+            if arrays && pending.is_empty() && self.heap.is_plain_array(o) {
                 h!(self, self.heap.stored_edges(o, &mut work));
                 if let Some(p) = h!(self, self.heap.stored_prototype(o)) {
                     work.push(Value::Object(p));

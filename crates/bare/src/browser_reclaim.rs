@@ -15,6 +15,11 @@ use crate::browser::*;
 use bare_html::dom::{Document, NodeId, Span};
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
+use std::hash::BuildHasherDefault;
+
+/// A walk costs time in the nodes in use. Free nodes help only the nodes that a script makes next, so a walk waits until this many nodes
+/// (and a fourth of the nodes in use after the last walk) were made since the last one. The same pacing as the heap collect (`gc_due`).
+const FLOOR: usize = 2048;
 
 /// The state of the reclaim of one realm.
 #[derive(Default)]
@@ -27,13 +32,21 @@ pub(crate) struct Reclaim {
     #[cfg(test)]
     each: Cell<bool>,
     /// Nodes that code outside the realm keeps for the life of the document (the refs of a driver, the pictures of a page, the scripts that the loader found): their trees stay.
-    pins: RefCell<HashSet<NodeId>>,
+    pins: RefCell<HashSet<NodeId, BuildHasherDefault<IdHash>>>,
+    /// Nodes in use after the last walk, and the growth that makes the next walk worth its cost (`FLOOR`, `set_floor` in tests).
+    base: Cell<usize>,
+    floor: Cell<usize>,
     /// Reclaims that freed something, and nodes freed.
     runs: Cell<u32>,
     freed: Cell<u64>,
 }
 
 impl Reclaim {
+    #[cfg(test)]
+    pub(crate) fn set_floor(&self, n: usize) {
+        self.floor.set(n);
+    }
+
     #[cfg(test)]
     pub(crate) fn set_always(&self, on: bool) {
         self.always.set(on);
@@ -63,11 +76,38 @@ impl Dom {
     }
 
     /// Free the trees that nothing names. Call it only when no script runs and no host call is on the stack.
+    /// The test for "nothing to do" is inline: the event loop asks after each task.
+    #[inline]
     pub(crate) fn reclaim(&self) -> usize {
         let r = &self.reclaim;
-        if !(r.due.replace(false) || r.always.get()) || self.ce.on.get() {
+        if !(r.due.get() || r.always.get()) {
             return 0;
         }
+        self.reclaim_walk()
+    }
+
+    #[inline]
+    fn reclaim_walk(&self) -> usize {
+        let r = &self.reclaim;
+        if self.ce.on.get() {
+            return 0;
+        }
+        if !r.always.get() {
+            let base = r.base.get();
+            let floor = if cfg!(test) { r.floor.get() } else { FLOOR };
+            // `due` stays set: the walk comes when enough nodes were made. A busy document borrow (`try_borrow`) means a walk now is not safe either.
+            if self.doc.try_borrow().map_or(true, |d| d.live_len() < base + floor.max(base / 4)) {
+                return 0;
+            }
+        }
+        self.reclaim_run()
+    }
+
+    /// The walk. A function of its own: the early returns above pay for none of its locals.
+    #[inline(never)]
+    fn reclaim_run(&self) -> usize {
+        let r = &self.reclaim;
+        r.due.set(false);
         let mut live = Vec::new();
         {
             let st = self.st.borrow();
@@ -106,6 +146,7 @@ impl Dom {
             crate::browser_cssom::pins(self, f);
             crate::browser_style::pins(self, f);
         });
+        r.base.set(doc.live_len());
         if freed == 0 {
             return 0;
         }

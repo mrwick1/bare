@@ -27,18 +27,30 @@ const ATTR_BYTES: usize = std::mem::size_of::<Attr>();
 
 impl Document {
     /// A node slot for `data`: a freed one if there is one, else a new one at the end of the arena. The node has no links.
+    /// Inline: the common case is one push, as before the free list existed. `reuse` is out of line: inlined into the tree builder it costs more.
+    #[inline(always)]
     pub(super) fn alloc(&mut self, data: NodeData) -> NodeId {
+        if self.free.is_empty() {
+            let id = NodeId::from_index(self.nodes.len());
+            self.nodes.push(Node { parent: None, first_child: None, last_child: None, prev: None, next: None, data });
+            return id;
+        }
+        self.reuse(data)
+    }
+
+    #[inline(never)]
+    fn reuse(&mut self, data: NodeData) -> NodeId {
         let node = Node { parent: None, first_child: None, last_child: None, prev: None, next: None, data };
-        let slot = if self.poison { None } else { self.free.pop() };
-        let Some(i) = slot else {
+        let Some(i) = (if self.poison { None } else { self.free.pop() }) else {
             let id = NodeId::from_index(self.nodes.len());
             self.nodes.push(node);
             return id;
         };
-        self.nodes[i as usize] = node;
         let id = NodeId::from_index(i as usize);
         // `scan_sheets` read the nodes before `sheet_scanned` once: a style element in a reused slot there would never be seen.
-        if (i as usize) < self.sheet_scanned.get() && matches!(data, NodeData::Element { name, .. } if self.is_sheet_name(name)) {
+        let sheet = (i as usize) < self.sheet_scanned.get() && matches!(data, NodeData::Element { name, .. } if self.is_sheet_name(name));
+        self.nodes[i as usize] = node;
+        if sheet {
             self.sheet_made.get_mut().push(id);
         }
         id
@@ -118,10 +130,11 @@ impl Document {
             }
         }
         let mut freed = 0;
+        let mut stack = Vec::new();
         for i in 1..self.nodes.len() {
             let n = &self.nodes[i];
             if n.parent.is_none() && n.data != FREE && !keep.contains(&(i as u32)) {
-                freed += self.free_tree(i);
+                freed += self.free_tree(i, &mut stack);
             }
         }
         if freed == 0 {
@@ -151,8 +164,8 @@ impl Document {
     }
 
     /// Free the tree that starts at slot `top`. Gives the number of nodes.
-    fn free_tree(&mut self, top: usize) -> usize {
-        let mut stack = vec![top];
+    fn free_tree(&mut self, top: usize, stack: &mut Vec<usize>) -> usize {
+        stack.push(top);
         let mut count = 0;
         while let Some(i) = stack.pop() {
             let Node { first_child, data, .. } = self.nodes[i];
