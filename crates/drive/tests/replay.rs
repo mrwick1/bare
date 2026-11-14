@@ -42,6 +42,8 @@ fn connection(mut s: TcpStream) {
             "/" => (200, "text/html", INDEX),
             "/late" => (200, "text/html", LATE),
             "/pics" => (200, "text/html", PICS),
+            "/loadend" => (200, "text/html", LOADEND),
+            "/late.js" => (200, "text/javascript", "fetch('/beacon')"),
             "/app.js" => (200, "text/javascript", APP),
             "/data" => (200, "text/plain", "7"),
             _ => (404, "text/plain", "no"),
@@ -146,5 +148,36 @@ fn a_replay_does_not_run_the_page_for_pictures_that_have_no_reply_on_the_tape() 
     let clock = [("BARE_CLOCK", "virtual")];
     let (code, err) = drive(&dir, steps, &base, ("BARE_NET_REPLAY", &tape), &clock);
     assert_eq!(code, 0, "the replay: {err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// An async script runs after `DOMContentLoaded` and before `load`. The step ends at once (the `expect` holds at the first look).
+const LOADEND: &str = "<!doctype html><html><body><p id=\"n\">0</p><script async src=\"/late.js\"></script></body></html>";
+
+#[test]
+fn a_replay_ends_the_last_document_of_a_journey_at_its_load_event() {
+    let dir = std::env::temp_dir().join(format!("bare-drive-loadend-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (hits, tape) = (Arc::new(AtomicUsize::new(0)), dir.join("tape"));
+    let base = serve(hits.clone());
+    let steps = "timeout 20000\nopen ${BASE}/loadend\nexpect js \"document.getElementById('n') !== null\"\n";
+
+    let (code, err) = drive(&dir, steps, &base, ("BARE_NET_RECORD", &tape), &[]);
+    assert_eq!(code, 0, "the live run: {err}");
+    // The tape keeps the page and the late script, and no reply to the request that the late script sends.
+    let label = format!("GET {base}/beacon");
+    for f in std::fs::read_dir(&tape).unwrap().flatten() {
+        if std::fs::read(f.path()).unwrap().windows(label.len()).any(|w| w == label.as_bytes()) {
+            std::fs::remove_file(f.path()).unwrap();
+        }
+    }
+
+    // The journey ends when the last `expect` holds, and then the last document runs to `load`: the late script runs, and its request has
+    // no reply (a replay miss, which the benchmark counts). A journey that ended before `load` would not show it.
+    let clock = [("BARE_CLOCK", "virtual")];
+    let (code, err) = drive(&dir, steps, &base, ("BARE_NET_REPLAY", &tape), &clock);
+    assert_eq!(code, 0, "the replay: {err}");
+    assert!(err.contains(&label.replace("GET ", "no recorded reply for GET ")), "the late script did not run before the journey ended: {err}");
     let _ = std::fs::remove_dir_all(&dir);
 }

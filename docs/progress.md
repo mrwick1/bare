@@ -11110,3 +11110,125 @@ A corpus filled for the new end state (so 6 to 13 journeys have no valid number)
 - Main with the old settle loop has replay misses on 7 journeys on `virtual`; `c4e32a85` has none. Cause not examined.
 - `nextjs-docs` fails under every driver and option (not in the 47).
 - `docs/perf-goal.md` says "48 journeys" in the criteria table; 47 pass on replay.
+
+## The last document of a journey runs to `load` (2026-11-14)
+
+Branch `t3/journey-end-at-load`, on main `95bd7864`. Owner decision 2026-11-14: option A of `docs/design-journey-end.md` (decision: `docs/decisions.md`). Machine: archMachine, `heavy` lock held. Files: `/data/bare-tmp/virtual-load/` (`fill.log`, `new-requests.txt`, `cmp1.log`, `cmp1.tsv`, `summ.py`, the two `bare-drive` binaries).
+
+### What was built
+
+- `Session::finish` (`crates/drive/src/run.rs`) calls `Page::wait_load(END_LOAD_WAIT)` before `settle_pictures`. `wait_load` is the existing loop (tick the page until the document is in and `load` ran, or nothing is scheduled, or the limit passes). `END_LOAD_WAIT` is 5 s of page time (virtual on the benchmark clock, as the 5 s of `CAPTURE_WAIT`). It is a stop for a hang. No step changes: a step ends at its own condition. No network-idle wait.
+- It is in replay and in live mode alike, because the design puts it in `finish` and the old picture wait had the tape test but this one has none. In a live run (`bare-drive` without a tape, and `bare-mcp` `close`) a page that is not loaded now runs its ticks until `load` (or until nothing is scheduled, or 5 s). A page that is loaded costs one look. I did not measure a live run.
+- Test first (`crates/drive/tests/replay.rs`, `a_replay_ends_the_last_document_of_a_journey_at_its_load_event`): the last page has an `async` script that runs after `DOMContentLoaded` and before `load`, and sends a request with no reply on the tape. The step (`expect js ...`) holds at the first look. The journey must end with the script run: stderr must show `no recorded reply for GET .../beacon`. Without the change the test fails (the script is fetched and not run); with it, it passes (4 of 4 tests in the file). The log of the page and its network list are not in the report after the last step, so a replay miss is the signal.
+
+### The corpus `virtual-load`
+
+A copy of `virtual-settled`, then `tools/bench/journeys.sh fill --corpus /data/bare-tmp/corpus/virtual-load --clock virtual` with the new binary (the same method as `virtual-settled`: replay with `BARE_NET_FILL` until two runs in a row have no miss). 6 of 47 journeys had misses in round 1: `substack-home` 11, `crates-io-home` 14, `react-docs` 9, `craigslist-home` 2, `go-dev-home` 1, `nodejs-org-home` 1. Every journey ended with 2 runs and 0 misses. The fill made 38 live requests (one for each new file; 33 GET and 5 POST). The POST requests went to `www.google.com` (go.dev analytics collect), `nodejs.org` (`/_vercel/insights/view`), `substack.com` (`experiment_exposure`, `firehose/batch`) and `o350427.ingest.sentry.io` (an error report envelope). Hosts of the 38: `crates.io` 13, `react.dev` 9, `substack.com` 5, `substackcdn.com` 4, `www.craigslist.org` 2, and one each for `nodejs.org`, `o350427.ingest.sentry.io`, `play.rust-lang.org`, `www.google.com`, `www.googletagmanager.com`. The list with URLs is `/data/bare-tmp/virtual-load/new-requests.txt`. No file was removed. `virtual` and `virtual-settled` are not changed. `nextjs-docs` still fails to pass (not in the 47).
+
+`tools/bench/journeys.py` now uses `virtual-load` by default for `--clock virtual`.
+
+### The frozen baseline
+
+The local branch `bench-base-vclock` in `/data/bare-tmp/bench-base-src` got a commit, `300b8c53` (parent `2ddee1da` = `f6415364` plus the replay patch): the virtual clock patch and the settle driver change of PR #529 (both were staged and not committed before) and the same `finish` change as here. It is local, not pushed. Built with `cargo build --release -p bare-drive`.
+
+### Numbers
+
+`journeys.sh compare --clock virtual --runs 3 --pss`, 47 journeys, runs interleaved; run 0 gives the PSS, runs 1 to 3 give the medians. Main is `95bd7864` plus this change.
+
+| | Baseline | Main + change | Change |
+| --- | ---: | ---: | ---: |
+| Instructions, sum of medians | 138,272 M | 119,049 M | -13.9% (86.1% of the baseline) |
+| CPU (user+system) | 18,281 ms | 16,674 ms | -8.8% |
+| Peak RSS | 2,754 MiB | 2,496 MiB | -9.4% |
+| PSS (run 0 only) | 2,476 MiB | 2,145 MiB | -13.4% |
+
+All 47 pass on both, in every run. 0 replay misses on both binaries. Same-binary spread of the instructions (runs 1 to 3): 0.37% at most on the baseline (`paulgraham-home`), 0.42% at most on main (`wikipedia-toc-languages`); the limit is 0.5%.
+
+| # | Measure | Baseline | Main + change | Target | |
+| --- | --- | --- | --- | --- | --- |
+| 2 | Total instructions of the 47 journeys | 138,272 M | 119,049 M (86.1%) | 80% | not met |
+| 4 | `python-org-docs-link`, `rust-book-search` | 1,434 M, 16,606 M | 1,122 M, 10,165 M (1.28 times, 1.63 times) | 1.3 times | `rust-book-search` met, `python-org-docs-link` not |
+| 6 | `python-docs-search-results` peak RSS, PSS | 112.9 MiB, 109.5 MiB | 94.4 MiB, 87.3 MiB (-16.4%, -20.3%) | 20% lower | not met on peak RSS; the PSS is one sample |
+
+What moved the total:
+
+- The estimate of the design (79.1%, 70,467 M against 89,059 M) was made with 6 journeys that had misses. A miss ends a request at once, so those journeys cost less than the real work. With the replies on the tape the total is higher on both sides: 138,272 M and 119,049 M (design: 89,059 M and 70,467 M), and the ratio is 86.1%, not 79.1%. The design said "criterion 2 near 79%"; that was wrong by 7 points.
+- `craigslist-home` is 48,250 M on the baseline and 47,008 M on main (-2.6%), 35% and 39% of the totals. It was 19 M under the settled driver. Its last document loads jQuery, Leaflet, polyfills and `browsePostings`, and the step `expect js "document.readyState === 'complete'"` took 6.7 s in one run (8 tries, 12 ticks in all). The wait does not reach the 5 s bound (the `expect` sees `complete`). So this is real page load work in our engine, and our changes have not lowered it. Without `craigslist-home`: 90,022 M against 72,041 M (80.0%). I do not use that as the criterion: it is the effect of one journey.
+- Other large journeys on main (M, baseline in brackets): `react-docs` 12,619 (12,626), `substack-home` 11,639 (10,586, +9.9%), `rust-book-search` 10,165 (16,606), `nodejs-org-home` 5,813 (5,900), `github-docs-home` 4,763 (5,227), `mdn-reference` 3,138 (2,972, +5.6%), `go-dev-home` 2,426 (4,935). `react-docs` and `substack-home` also ratio about 1.0 or worse: our work has not changed what they run. `rust-book-search` is lower than in the settled table (16,319 M) because of the PRs that merged since `c4e32a85` (lazy function skip data and the script slot swap).
+- Criterion 4 and 6 did not move from the design's numbers (1.28 and 1.63 times; -16.4%).
+
+Per journey (medians of runs 1 to 3, spread = (max - min) / median):
+
+| Journey | M instr base | M instr new | change | spread base | spread new | RSS MiB base | RSS MiB new |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `archlinux-org-home` | 88.0 | 72.8 | -17.3% | 0.0% | 0.0% | 16.7 | 17.1 |
+| `blog-rust-lang-home` | 522.0 | 159.4 | -69.5% | 0.0% | 0.1% | 27.3 | 19.5 |
+| `cnn-lite-front` | 58.4 | 50.4 | -13.8% | 0.0% | 0.0% | 17.6 | 18.3 |
+| `craigslist-home` | 48,249.8 | 47,008.1 | -2.6% | 0.0% | 0.0% | 783.2 | 749.4 |
+| `crates-io-home` | 1,104.1 | 830.7 | -24.8% | 0.1% | 0.1% | 35.3 | 36.4 |
+| `curl-se-home` | 2,204.8 | 122.9 | -94.4% | 0.0% | 0.0% | 75.3 | 18.1 |
+| `debian-org-home` | 103.1 | 83.2 | -19.3% | 0.0% | 0.0% | 16.3 | 17.1 |
+| `devto-home` | 1,651.8 | 1,374.0 | -16.8% | 0.0% | 0.1% | 52.1 | 56.8 |
+| `docs-rs-home` | 115.7 | 58.9 | -49.1% | 0.0% | 0.0% | 17.7 | 17.9 |
+| `duckduckgo-html-search` | 123.7 | 61.4 | -50.4% | 0.0% | 0.1% | 18.3 | 18.7 |
+| `example-learn-more` | 131.7 | 110.4 | -16.2% | 0.0% | 0.0% | 19.1 | 19.1 |
+| `example-page` | 12.0 | 10.7 | -11.2% | 0.0% | 0.1% | 16.1 | 16.1 |
+| `github-docs-home` | 5,226.9 | 4,763.3 | -8.9% | 0.0% | 0.0% | 94.8 | 94.2 |
+| `go-dev-home` | 4,934.6 | 2,426.3 | -50.8% | 0.0% | 0.0% | 95.9 | 60.2 |
+| `hn-comments-back` | 100.3 | 88.7 | -11.5% | 0.1% | 0.1% | 16.1 | 16.6 |
+| `hn-front` | 104.4 | 93.2 | -10.7% | 0.1% | 0.0% | 16.1 | 16.9 |
+| `hn-new-past` | 171.8 | 152.5 | -11.2% | 0.0% | 0.1% | 16.2 | 16.9 |
+| `httpbin-cookies` | 25.8 | 20.7 | -19.8% | 0.0% | 0.1% | 16.1 | 16.1 |
+| `httpbin-form-fill` | 27.0 | 24.8 | -8.0% | 0.0% | 0.0% | 16.1 | 16.1 |
+| `httpbin-form-submit` | 36.2 | 32.2 | -11.1% | 0.0% | 0.0% | 16.1 | 16.1 |
+| `kernel-org-home` | 43.3 | 33.9 | -21.6% | 0.0% | 0.0% | 16.1 | 16.5 |
+| `lobsters-comments-back` | 159.5 | 137.2 | -14.0% | 0.0% | 0.0% | 16.9 | 17.7 |
+| `lobsters-front` | 140.1 | 115.9 | -17.3% | 0.1% | 0.0% | 17.2 | 18.0 |
+| `mdn-reference` | 2,971.7 | 3,138.1 | +5.6% | 0.0% | 0.0% | 51.1 | 48.8 |
+| `nginx-org-home` | 103.3 | 61.2 | -40.7% | 0.0% | 0.0% | 22.2 | 20.7 |
+| `nodejs-org-home` | 5,899.8 | 5,813.3 | -1.5% | 0.0% | 0.0% | 77.8 | 74.1 |
+| `npr-text-story` | 36.4 | 30.2 | -17.0% | 0.0% | 0.0% | 16.2 | 16.2 |
+| `paulgraham-home` | 95.2 | 96.6 | +1.5% | 0.4% | 0.2% | 16.7 | 17.5 |
+| `python-docs-search` | 2,140.2 | 1,252.4 | -41.5% | 0.0% | 0.0% | 92.2 | 69.4 |
+| `python-docs-search-results` | 3,392.4 | 2,453.7 | -27.7% | 0.0% | 0.0% | 112.9 | 94.4 |
+| `python-docs-tutorial` | 390.7 | 266.1 | -31.9% | 0.0% | 0.0% | 17.2 | 18.0 |
+| `python-org-docs-link` | 1,434.0 | 1,121.8 | -21.8% | 0.0% | 0.0% | 32.0 | 32.4 |
+| `python-org-search` | 1,445.8 | 1,136.8 | -21.4% | 0.0% | 0.0% | 30.6 | 32.1 |
+| `react-docs` | 12,626.3 | 12,618.8 | -0.1% | 0.0% | 0.0% | 108.5 | 99.4 |
+| `rust-book-chapters` | 567.2 | 497.9 | -12.2% | 0.0% | 0.0% | 22.1 | 22.7 |
+| `rust-book-search` | 16,606.1 | 10,165.4 | -38.8% | 0.0% | 0.0% | 129.3 | 127.6 |
+| `rust-book-sidebar` | 338.0 | 304.5 | -9.9% | 0.1% | 0.1% | 20.7 | 21.4 |
+| `rust-lang-org-home` | 711.3 | 82.2 | -88.4% | 0.0% | 0.0% | 33.7 | 18.9 |
+| `sqlite-org-home` | 78.0 | 65.6 | -15.9% | 0.0% | 0.1% | 19.1 | 19.6 |
+| `substack-home` | 10,585.9 | 11,638.8 | +9.9% | 0.0% | 0.0% | 209.4 | 190.3 |
+| `w3c-home-links` | 446.3 | 118.8 | -73.4% | 0.0% | 0.0% | 29.9 | 19.3 |
+| `wikipedia-article` | 2,863.1 | 1,885.6 | -34.1% | 0.0% | 0.0% | 44.7 | 37.9 |
+| `wikipedia-main-random` | 1,963.4 | 1,516.7 | -22.8% | 0.0% | 0.0% | 40.8 | 34.9 |
+| `wikipedia-portal` | 741.6 | 632.6 | -14.7% | 0.1% | 0.0% | 35.9 | 31.0 |
+| `wikipedia-search` | 3,651.6 | 2,948.2 | -19.3% | 0.1% | 0.0% | 62.4 | 55.3 |
+| `wikipedia-toc-languages` | 2,891.6 | 2,485.3 | -14.1% | 0.0% | 0.4% | 53.8 | 49.6 |
+| `wiktionary-portal` | 956.9 | 887.0 | -7.3% | 0.0% | 0.0% | 41.4 | 34.3 |
+| **sum of medians** | 138,272 | 119,049 | -13.9% | | | 2754 | 2496 |
+
+### Checks
+
+- Test first: described above. It fails on the driver without the wait, and passes with it.
+- Fill: 47 of 47 pass; the last two runs of each journey have 0 misses.
+- Determinism and misses: see above (3 runs plus run 0 on each side).
+- `cargo test --release --workspace --no-fail-fast`: all pass except the 7 openssl TLS tests (`bare-net --test https_openssl` 2, `bare-tls --test client_openssl` 4, `bare-tls --test tls12_openssl` 1; known on main) and `a_changed_file_starts_again_from_zero` (flaky under load; passes alone). `bare-drive --test replay`: 4 of 4. The known `parse_load deep 1/10` overflow is in the matrix, not the test run.
+- `tools/js/cost_matrix.sh` (base `95bd786440` built with `--workspace --examples -p bare-stress`, against this branch): 803 rows, mean change glibc +0.004%, jemalloc +0.000%, 0 rows over the limit under either allocator. 2 rows (`parse_load deep 1`, `deep 10`) fail to run on both trees (stack overflow, known; the script exits 1 for them). The change is in `crates/drive` only.
+- `test262` and `exec_diff` not run: no change in `crates/js`.
+
+### Not tested
+
+- Wall time on an idle machine (the CPU and wall columns are from a loaded machine).
+- A live run, and `bare-mcp` `close` with the new wait (the wait is in `finish`, so it applies; I ran no live journey).
+- Another machine. The baseline is a local commit that is not pushed.
+- The old corpus `virtual` and `virtual-settled` with this driver (journeys with misses there are not valid).
+- Option B (network idle) and C (every step at `load`) on the new corpus.
+
+### Noticed, not changed
+
+- `craigslist-home` costs 47 G and 749 MiB peak RSS on main (48 G and 783 MiB on the baseline) when its page is loaded to `load`. It is the largest journey now, about 4 times the next (`react-docs`, 12.6 G). It deserves a profile of its own.
+- `react-docs` costs 12.6 G with a ratio of 1.00, and `substack-home` 11.6 G with +9.9%: also not touched by our work.
+- `nextjs-docs` still does not pass on replay.
