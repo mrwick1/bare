@@ -55,3 +55,17 @@ Main advanced to 2612b710 before merge. Its new code changes picture loading, br
 Fetch POST remains within the scoped owner-approved exception. Other sampled rows remain below the general limit. The 1,464-test full release result above belongs to the preceding c4e32a85 rebase; it is not relabeled as a full-suite result for this head. No new jemalloc comparison, full matrix or UI journey is claimed on this final integration.
 
 All 53 Fetch/XHR release tests pass on the latest picture-loading integration. This focused result is separate from the preceding full-library run.
+
+## Final benchmark-default-only main update
+
+The final base is df1b9001. The change from 2612b710 only updates the corpus benchmark default. The production diff across crates and dependency manifests is empty, so the validated runtime and test binaries are unchanged. The branch was rebased and the same five three-run comparisons were repeated with those same-runtime executables.
+
+| Case | Main instructions | Candidate instructions | Main RSS KiB | Candidate RSS KiB |
+| --- | ---: | ---: | ---: | ---: |
+| style_setget | 56,306,966–56,319,041 | 56,339,608–56,375,636 | 12,224–12,304 | 12,272–12,416 |
+| sheets_linked | 8,627,048–8,627,851 | 8,623,982–8,625,140 | 12,716–12,844 | 12,620–12,996 |
+| browser_mutation | 70,100,709–70,101,081 | 70,101,130–70,103,784 | 11,472–11,720 | 11,636–11,764 |
+| fetch_post | 21,595,273–21,595,646 | 22,064,157–22,064,645 | 13,104–13,280 | 12,832–13,140 |
+| xhr | 10,697,380–10,697,668 | 10,700,983–10,701,929 | 11,440–11,676 | 11,736–11,928 |
+
+The results remain within the approved exception and unchanged general limits. The same test, allocator and UI coverage limits stated above still apply.
