@@ -14,10 +14,12 @@ use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
 
 type V = R<Value>;
-// Rule objects and the other objects that a page made through CSSOM, as GC roots. A rule object costs about 0.5 KB when only its selector is read
-// (measured on a 16 MiB sheet: 187,852 rules, 585 B each). This limit allows a read of all rules of the biggest sheet that the loader accepts and
-// holds the worst case near 290 MiB. The declaration of a rule counts for `style-objects` too (65,536, `browser_style`).
-const MAX_OBJECTS: usize = 1 << 19;
+// The CSSOM objects of a page follow the collector. `State::roots` holds the prototypes and constructors only. A sheet in the tree is a root
+// (`roots`). Every other object is reached through `trace`: a sheet reaches its list, a list its sheet or rule and its rule objects, a rule
+// its sheet, parent, nested list, declaration and media list, and a declaration or media list its rule. A rule that leaves its list (deleted,
+// or a replaced text) is garbage unless a script holds it, and `prune` drops the host table entries of a collected object. So the number of
+// objects follows the live rules, and no fixed cap is needed. A rule object costs about 0.5 KB when only its selector is read (measured on a
+// 16 MiB sheet: 187,852 rules, 585 B each). The declaration of a rule counts for `style-objects` too (65,536, `browser_style`).
 const MAX_TEXT: usize = 32 << 20;
 // The rules of one list. A rule that no script has read is an `Entry` of 12 bytes, so this holds the list near 24 MiB.
 const MAX_RULES: usize = 1 << 21;
@@ -111,21 +113,83 @@ fn state(d: &Dom) -> &RefCell<State> {
 }
 pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
     out.extend(d.cssom.style_p.get().copied().map(Value::Object));
-    if let Some(s) = d.cssom.state.get() {
-        out.extend(s.borrow().roots.iter().copied().map(Value::Object));
+    let Some(cell) = d.cssom.state.get() else { return };
+    let s = cell.borrow();
+    out.extend(s.roots.iter().copied().map(Value::Object));
+    out.extend(s.adopted.values().flatten().copied().map(Value::Object));
+    // The sheet of an element that is in a document or a shadow tree stays (`el.sheet === el.sheet`). A sheet of a removed element is
+    // garbage unless a script holds it.
+    let doc = d.doc.try_borrow().ok();
+    for (&n, &o) in &s.by_node {
+        if doc.as_ref().is_none_or(|doc| in_tree(doc, n)) {
+            out.push(Value::Object(o));
+        }
     }
 }
-fn keep(d: &Dom, o: ObjId) -> R<ObjId> {
-    let mut s = state(d).borrow_mut();
-    if s.roots.len() >= MAX_OBJECTS {
-        return Err(d.lim("cssom-objects"));
+fn in_tree(doc: &Document, mut n: NodeId) -> bool {
+    while let Some(p) = doc.parent(n) {
+        n = p;
     }
-    s.roots.push(o);
+    matches!(doc.data(n), NodeData::Document | NodeData::ShadowRoot)
+}
+/// The objects that `owner` reaches (see the head of the file).
+#[inline]
+pub(crate) fn trace(d: &Dom, owner: ObjId, out: &mut Vec<Value>) {
+    // A page that made no CSSOM object pays this one test for each object that the collector visits.
+    if let Some(cell) = d.cssom.state.get() {
+        trace_objects(cell, owner, out);
+    }
+}
+fn trace_objects(cell: &RefCell<State>, owner: ObjId, out: &mut Vec<Value>) {
+    let s = cell.borrow();
+    let mut push = |o: Option<ObjId>| out.extend(o.map(Value::Object));
+    if let Some(r) = s.rules.get(&owner) {
+        for o in [Some(r.sheet), r.style, r.list, r.media, r.parent] {
+            push(o);
+        }
+    } else if let Some(l) = s.lists.get(&owner) {
+        push(l.sheet);
+        push(l.rule);
+        for e in &l.items {
+            if let &Entry::Obj(o) = e {
+                push(Some(o));
+            }
+        }
+    } else if let Some(sh) = s.sheets.get(&owner) {
+        push(Some(sh.list));
+    } else if let Some(&r) = s.style_rules.get(&owner).or_else(|| s.medias.get(&owner)) {
+        push(Some(r));
+    }
+}
+/// Drop the table entries of the objects that the collector freed.
+pub(crate) fn prune(d: &Dom, live: &dyn Fn(ObjId) -> bool) {
+    let Some(cell) = d.cssom.state.get() else { return };
+    let mut s = cell.borrow_mut();
+    let s = &mut *s;
+    s.rules.retain(|&o, _| live(o));
+    s.lists.retain(|&o, _| live(o));
+    s.sheets.retain(|&o, _| live(o));
+    s.style_rules.retain(|&o, _| live(o));
+    s.medias.retain(|&o, _| live(o));
+    let sheets = &s.sheets;
+    s.by_node.retain(|_, o| sheets.contains_key(o));
+}
+// A prototype or a constructor: an object that stays as long as the page.
+fn keep(d: &Dom, o: ObjId) -> R<ObjId> {
+    state(d).borrow_mut().roots.push(o);
     Ok(o)
 }
 #[cfg(test)]
 pub(crate) fn rule_objects(d: &Dom) -> usize {
     d.cssom.state.get().map_or(0, |s| s.borrow().rules.len())
+}
+/// The entries of the host tables: (rules, lists, sheets, declarations, media lists).
+#[cfg(test)]
+pub(crate) fn table_sizes(d: &Dom) -> (usize, usize, usize, usize, usize) {
+    d.cssom.state.get().map_or((0, 0, 0, 0, 0), |s| {
+        let s = s.borrow();
+        (s.rules.len(), s.lists.len(), s.sheets.len(), s.style_rules.len(), s.medias.len())
+    })
 }
 fn illegal(_: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
     Err(it.type_error("Illegal constructor"))
@@ -323,7 +387,6 @@ fn new_list(d: &Dom, it: &mut Interp<'_>, sheet: Option<ObjId>) -> R<ObjId> {
         if sheet.is_some() { s.rule_list_p } else { s.list_p }
     };
     let o = it.heap.new_indexed(Some(p)).map_err(|e| it.heap_error(e))?;
-    keep(d, o)?;
     state(d).borrow_mut().lists.insert(
         o,
         List {
@@ -346,6 +409,7 @@ fn document_list(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
         Some(o) => o,
         None => {
             let o = new_list(d, it, None)?;
+            keep(d, o)?;
             state(d).borrow_mut().doc_list = Some(o);
             o
         }
@@ -359,11 +423,6 @@ fn sheet_of(d: &Dom, it: &mut Interp<'_>, n: NodeId) -> R<ObjId> {
     }
     let p = state(d).borrow().sheet_p;
     let o = d.obj(it, p)?;
-    keep(d, o)?;
-    let owner = d.wrap(it, n)?;
-    if let Value::Object(owner) = owner {
-        keep(d, owner)?;
-    }
     let list = new_list(d, it, Some(o))?;
     state(d).borrow_mut().sheets.insert(
         o,
@@ -544,12 +603,11 @@ fn declaration(d: &Dom, it: &mut Interp<'_>, text: &str) -> R<ObjId> {
     let own = d.cssom.own.get();
     d.cssom.own.set((own.0 + doc.revision() - before.0, own.1 + doc.text_revision() - before.1));
     drop(doc);
-    keep(d, style?)
+    style
 }
 fn new_rule(d: &Dom, it: &mut Interp<'_>, mut r: Rule, decl: Option<String>) -> R<ObjId> {
     let p = state(d).borrow().protos[r.kind as usize];
     let o = d.obj(it, p)?;
-    keep(d, o)?;
     r.decl = decl;
     state(d).borrow_mut().rules.insert(o, r);
     Ok(o)
@@ -684,7 +742,6 @@ fn rule_from_chunk(d: &Dom, it: &mut Interp<'_>, sheet: ObjId, parent: Option<Ob
 fn new_rule_list(d: &Dom, it: &mut Interp<'_>, owner: ObjId, depth: usize) -> R<ObjId> {
     let p = state(d).borrow().rule_list_p;
     let o = it.heap.new_indexed(Some(p)).map_err(|e| it.heap_error(e))?;
-    keep(d, o)?;
     state(d).borrow_mut().lists.insert(
         o,
         List {
@@ -765,10 +822,27 @@ fn insert(d: &Dom, it: &mut Interp<'_>, t: Value, a: &[Value]) -> V {
     if let bare_css::parser::Rule::Style(r) = &parsed[0] {
         d.selectors(it, r.prelude)?;
     }
-    let rules = parsed_rules(d, it, o, None, &text, 0)?;
+    // The new rule is a span of its text like the rules that no script has read: its object is made when a script reads its index.
+    // The span is appended to the source for now. `publish_rules` builds the new source from the spans.
+    if text.len() > MAX_TEXT {
+        return Err(d.lim("cssom-text"));
+    }
+    let Some(chunk) = chunks(&text).into_iter().find(|c| !bare_css::parser::parse_stylesheet(c).is_empty()) else {
+        return Err(d.dom_err(it, "SyntaxError", "Expected one CSS rule"));
+    };
+    it.charge(chunk.len() as u64)?;
     let mut next = items(&state(d).borrow(), o).clone();
-    next.insert(i, Entry::Obj(rules[0]));
-    publish_rules(d, it, o, next)?;
+    let at = {
+        let mut s = state(d).borrow_mut();
+        let source = &mut s.sheets.get_mut(&o).unwrap().source;
+        source.push_str(chunk);
+        source.len() - chunk.len()
+    };
+    next.insert(i, Entry::Chunk(at as u32, (at + chunk.len()) as u32));
+    if let Err(e) = publish_rules(d, it, o, next) {
+        state(d).borrow_mut().sheets.get_mut(&o).unwrap().source.truncate(at);
+        return Err(e);
+    }
     Ok(Value::Number(i as f64))
 }
 fn delete(d: &Dom, it: &mut Interp<'_>, t: Value, a: &[Value]) -> V {
@@ -1014,7 +1088,6 @@ fn media_get(d: &Dom, it: &mut Interp<'_>, t: Value, _: &[Value]) -> V {
     }
     let p = state(d).borrow().media_p;
     let m = d.obj(it, p)?;
-    keep(d, m)?;
     let mut s = state(d).borrow_mut();
     s.medias.insert(m, o);
     s.rules.get_mut(&o).unwrap().media = Some(m);
@@ -1090,7 +1163,6 @@ fn sheet_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
     let sp = state(d).borrow().sheet_p;
     let proto = it.host_proto_from_new_target(sp)?;
     let o = d.obj(it, proto)?;
-    keep(d, o)?;
     let list = new_list(d, it, Some(o))?;
     let node = d.doc.borrow().root();
     state(d).borrow_mut().sheets.insert(o, Sheet { node, list, source: String::new(), text_key: None, ctor: true, stale: false });
@@ -1166,9 +1238,6 @@ fn adopted_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     let len = it.get_value(list, k)?;
     let len = it.to_js_number(len)?;
     let len = if len.is_finite() { len.max(0.0) as usize } else { 0 };
-    if len > MAX_OBJECTS {
-        return Err(d.lim("cssom-objects"));
-    }
     it.charge(len as u64)?;
     let mut next = Vec::with_capacity(len);
     for i in 0..len {

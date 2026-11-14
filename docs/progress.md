@@ -10535,3 +10535,77 @@ The current-main full release rerun passes 1,462 tests with six ignored. A heade
 ## 2026-11-14: Fetch Metadata cost exception approved
 
 The owner approved the documented Fetch POST exception for PR #479. The general 0.5 percent rule is unchanged. The branch is rebased onto main at c4e32a85, with the textarea fix included. All 1,464 release library tests pass with six ignored. Fresh three-run instruction and RSS samples remain within the scoped exception; other sampled rows stay below the general limit. See [the final checks](fetch-metadata-merge-checks.md#approved-final-rebase). The earlier two-allocator failure is retained.
+
+## Criterion 8: CSSOM objects follow the collector, the `cssom-objects` cap is removed (2026-11-14)
+
+Owner decision (2026-11-14): build design D1 of `design-style-round2.md` section 4 and remove the cap. A first agent stopped on a network error and left an unfinished patch (`/data/bare-tmp/r2/crit8/wip.patch`). I took it as a start. It had a debug stub (`if true { return; }`) in the trace function, so the trace did nothing. I removed the stub and kept the rest after tests.
+
+### What I built
+
+- `State::roots` (`crates/bare/src/browser_cssom.rs`) holds the prototypes and the constructors only. `keep` is not called for a rule, a list, a sheet, a declaration or a media list any more. `MAX_OBJECTS` and the `cssom-objects` error are gone. The `adoptedStyleSheets` length check stays an argument charge (`it.charge(len)`).
+- `trace` (new, called from `Host::trace`) gives the collector the links of an object: a sheet reaches its list; a list its sheet, its rule and its rule objects; a rule its sheet, parent, nested list, declaration and media list; a declaration or a media list its rule.
+- `roots` gives the collector the sheets that are alive by themselves: the adopted sheets, and the sheet of each element that is in a document or a shadow tree (`el.sheet === el.sheet`). The sheet of a removed `<style>` element is garbage unless a script holds it.
+- `prune` (new, called from `Host::prune`) drops the host table entries (`rules`, `lists`, `sheets`, `style_rules`, `medias`, `by_node`) of an object that the collector freed. The tables never keep a stale handle.
+- `insertRule` makes no rule object. The new rule is a span of its text, like a rule that no script has read. Its object is made when a script reads its index. So an insert and a delete in a loop make no object and no declaration. The text of the element is the text of the rule as written (`.new { top: 1px }`, not `.new { top: 1px; }`): the same as for every rule that no script has read. One assertion in `rule_objects_made_on_demand_keep_their_place_when_the_sheet_changes` changed for this.
+- I changed no file in `crates/js`. The design said `Heap::is_live` plus a prune at the start of `roots`. The host already has `trace` and `prune` hooks (used by `browser_style`, `browser_nodelist` and others), so I used them. See `decisions.md`.
+
+### Tests (written first; 6 fail on the old code, all pass now)
+
+`crates/bare/src/browser_cssom_tests.rs`, 8 new tests. 5 of them fail on the old code: the loop on a `<style>` sheet, the loop on a constructed sheet (1,000,000 cycles, more than the old cap), rules read and deleted, a removed `<style>` element and a replaced constructed sheet. The changed assertion for the text of `insertRule` fails too (6 in all). The other 3 pass on both old and new code, as guards: identity and expandos of a live rule across two collections, a held deleted rule (`parentStyleSheet` is null, its `.style` and nested rules still work, a write through it does not touch the live rules), and create-collect-read with no stale entry.
+
+### Numbers
+
+Machine: archMachine, shared (the load varies). Instructions: `perf stat -e instructions:u`. 3 runs each. Spread is under 0.1% unless said. BASE `f6415364`. MAIN `c4e32a85` (newest main at merge time; the first set was on `5bc18d14` and gave the same numbers). NEW is this branch on top of MAIN. Pages: `/data/bare-tmp/r2/crit8/pages/` (`gen.py`), runs by `ramp.py`.
+
+Edit loop on a constructed sheet: `sh.insertRule('.b{top:1px}', 0); sh.deleteRule(0)` 1,000,000 times.
+
+| Page | BASE | MAIN | NEW |
+| --- | --- | --- | --- |
+| `cc_1000000` (one task) | stops on `cssom-objects`, 699 MiB (at 100,000 cycles) | stops on `style-objects` at about 66,000 cycles, 79 MiB | passes, 15.0 MiB (15.0-15.4), 16.15 G (16.1 K per cycle) |
+| `ccs_1000000` (a task per 1,000 cycles) | stops, 700 MiB | stops, 82.6 MiB | passes, 15.0 MiB (14.7-15.1), 17.2 G |
+| `ccr_1000000` (also reads `cssRules[0].selectorText` each cycle) | not run | stops, 82 MiB | passes, 55.4 MiB (55.4-55.8), 26.85 G. It is flat: 100,000 cycles 55.6 MiB, 300,000 cycles 55.2 MiB. |
+
+Before (design table): one insert and delete leaked 839 B and cost 34.8 K instructions. Now it leaks 0 B after a collection and costs 16.1 K.
+
+Criterion 5, the 16 MiB sheet ramp with a `cssRules` read (`sheety_16383`, steps `run2.steps`): NEW 274.3 MiB (274.0-274.4), 5,406.1 M. MAIN 273.8 MiB, 5,406.1 M. BASE 947.6 MiB, stops. Met (300 MiB or lower), same as before the change. `sheety_8192`: NEW 145.0 MiB, 2,717.5 M. MAIN 144.9 MiB, 2,717.5 M. BASE 828 MiB, stops.
+
+Probes (one task, so the collector cannot help; the objects are live):
+
+| Page | MAIN | NEW |
+| --- | --- | --- |
+| `rd_y_sel` (selector text of all 187,852 rules) | 211.2 MiB, 7,167.6 M | 212.5 MiB, 7,204.1 M (+0.5%) |
+| `rd_x_sel` (all 844,366 rules of the dense sheet) | stops on `cssom-objects`, 461 MiB | passes, 545.0 MiB, 14,039.7 M |
+| `rd_y_sty`, `rd_x_sty` (`.style.length` of every rule) | stop on `style-objects` | stop on `style-objects` (same, 161 and 157 MiB) |
+
+The +0.5% on `rd_y_sel` is the new `trace` work: the collector looks up each visited object in the CSSOM tables (about 190 instructions for each of 187,852 rules). A page with no CSSOM object pays one `OnceCell` test for each visited object.
+
+Journeys (47 on the recorded corpus, `tools/bench/journeys.sh compare --clock virtual --runs 3 --pss`, runs interleaved, all pass, no replay miss):
+
+| Comparison | Instructions (sum of medians) | Peak RSS (sum) | CPU ms | Largest change of one journey |
+| --- | --- | --- | --- | --- |
+| NEW against MAIN `c4e32a85` | 95,442 M to 95,475.8 M (+0.0%) | 1,772.8 to 1,772.3 MiB (-0.0%) | 11,541 to 11,606 (+0.6%, load) | within 0.4% |
+| NEW against BASE (`bench-base-vclock`) | 105,187 M to 95,470 M (-9.2%) | 2,052.6 to 1,781.5 MiB (-13.2%) | 15,087 to 14,474 (-4.1%) | not examined |
+
+On the first set (main `5bc18d14`) `wikipedia-search` showed +3.0%. It is not the change: the runs with 2 replay misses give 7,117 M and the runs with 0 misses give 7,338 M, on both binaries, and the same-run values are equal (7,117.36 M and 7,117.34 M). The rebased run has no miss.
+
+### Checks
+
+- `cargo test --release -p bare --lib browser_cssom`: 16 pass.
+- `cargo test --release --workspace --no-fail-fast`: all pass except the 7 openssl TLS tests that fail on main (`https_openssl` 2, `client_openssl` 4, `tls12_openssl` 1). `a_changed_file_starts_again_from_zero` failed once in the first run and passed in the second (flaky under load, as known).
+- `tools/js/cost_matrix.sh` against MAIN `c4e32a85`: 803 rows, 0 rows over 0.5% under both allocators (mean +0.001% glibc). 2 rows fail to run: `parse_load deep 1` and `deep 10` (the known stack overflow, also on main).
+- `keycost.sh` (`#a1`): 295.6 M per key, load and mount 613.7 M, peak RSS 31.2 and 30.8 MiB at 20 and 50 keys. MAIN gives the same 295.6 M and 613.7 M.
+- `test262_check.sh` and `exec_diff.sh`: not run. No change in `crates/js`.
+
+### Limits
+
+`cssom-objects` is gone. `MAX_RULES` (2,097,152, the length of one list), `MAX_TEXT` (32 MiB), `style-objects` (65,536) and the JS heap limits stay. `style-objects` now counts the declaration objects that are alive, not the ones ever made, because the collector frees them. It still stops a page that reads `.style` of more than 65,536 live rules.
+
+### What I noticed and did not change
+
+- A `<style>` element edited in a loop stops on `dom-nodes` (the DOM arena never frees a node, and each edit writes a new text node): `el_1000000` stops after about 500,000 cycles on NEW. The sheet objects are not the cause. A constructed sheet has no text node and passes 1,000,000 cycles.
+- Each `rule.style` that a script reads makes one detached element in the DOM arena for the declaration. The arena does not free it. A loop that reads `.style` each cycle (`ccst_1000000`, 1,000,000 cycles) passes, and its peak RSS grows by about 70 B for each read (66 MiB at 300,000 cycles, 116 MiB at 1,000,000). It is the same arena as above.
+- `group_insert` (`insertRule` on a `@media` rule) still makes the object at once. The collector frees it, so it leaks nothing; the lazy path would save instructions only.
+
+### Not tested
+
+Windows and macOS. A real page that edits a sheet (only generated pages). Memory after a collection inside a long run of more than 1,000,000 cycles on a `<style>` element (the arena limit stops it first). A wall time (the machine was shared). Live logins.
