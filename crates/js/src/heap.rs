@@ -779,6 +779,8 @@ pub struct Heap {
     /// Shared host texts by (hash, UTF-8 length). Weak: `collect` drops the dead ones.
     shared: std::collections::HashMap<(u64, usize), StrId>,
     bytes: usize,
+    /// Arrays made, all time. `arrays_are_common` compares it with the objects made.
+    array_allocs: u64,
     /// Accounted bytes of the units of the flat ropes. A rope is flattened by a read, which has `&self`, so this is a `Cell`.
     flat_bytes: std::cell::Cell<usize>,
     collections: u64,
@@ -843,6 +845,7 @@ impl Heap {
             big_table: big::BigTable::new(),
             interner: Interner { table: vec![0; 4096], count: 0 },
             bytes: 0,
+            array_allocs: 0,
             flat_bytes: std::cell::Cell::new(0),
             shared: std::collections::HashMap::new(),
             collections: 0,
@@ -906,6 +909,12 @@ impl Heap {
         }
         f.string_units = self.strings.live.iter().map(|s| s.units.len() * 2).sum::<usize>() + self.flat_bytes.get();
         f
+    }
+
+    /// Is at least one object in eight an array? `Interp::collect` then tests each object with `plain_array_edges`: the test costs about 10 instructions for
+    /// an object that is not an array, and saves about 100 for an array, so it pays above that share.
+    pub fn arrays_are_common(&self) -> bool {
+        self.array_allocs * 8 >= self.objects.allocs
     }
 
     /// Accounted bytes of the live and the dead objects and strings that a sweep has not freed yet (`Stats::bytes`, with no copy of the rest).
@@ -1580,6 +1589,7 @@ impl Heap {
         self.charge(cost)?;
         let (index, gn) = self.objects.alloc(o, Limit::Objects)?;
         self.bytes += cost;
+        self.array_allocs += is_array as u64;
         Ok(ObjId { index, gn })
     }
 
@@ -2177,7 +2187,11 @@ impl Heap {
     /// The values that the stored properties of `o` point to (elements, data values, accessor functions), pushed on `out`. The same edges as
     /// `collect` follows, with no key lookup and no copy of the key list: the evaluator's collect pass uses it for each object.
     pub fn stored_edges(&self, o: ObjId, out: &mut Vec<Value>) -> R<()> {
-        let ob = self.obj(o)?;
+        Self::edges_of(self.obj(o)?, out);
+        Ok(())
+    }
+
+    fn edges_of(ob: &Object, out: &mut Vec<Value>) {
         out.extend(ob.elems.iter().flatten());
         // The slots of a shape-mode object hold data values and, for an accessor, a function or `undefined`.
         out.extend_from_slice(ob.slots());
@@ -2192,7 +2206,17 @@ impl Heap {
                 }
             }
         }
-        Ok(())
+    }
+
+    /// For `Interp::collect`: if `o` is an array that is not exotic, push its stored edges and its prototype and say so. Only the weak tables (a `WeakMap`
+    /// key) and a subclass with private fields give such an array state outside the heap, so the caller can skip its side-table probes. One lookup
+    /// for the test and the edges: a separate test costs about as much as the probes cost for an array in a small realm.
+    #[inline]
+    pub fn plain_array_edges(&self, o: ObjId, out: &mut Vec<Value>) -> bool {
+        let Some(ob) = self.objects.get(o.index, o.gn).filter(|ob| ob.is_array && ob.exotic == 0) else { return false };
+        Self::edges_of(ob, out);
+        out.extend(ob.proto.map(Value::Object));
+        true
     }
 
     fn own_keys_with(&self, o: ObjId, virt: bool) -> R<Vec<PropertyKey>> {

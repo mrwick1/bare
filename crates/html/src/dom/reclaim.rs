@@ -1,0 +1,762 @@
+//! Give the nodes of dead trees back to the arena.
+//!
+//! The arena never freed a node. A page that parses a document, reads it and drops it (`DOMParser`, a removed subtree that no script holds)
+//! kept every node, attribute and text of it for the life of the page. `Document::reclaim` finds them:
+//! - A tree is a node with no parent and everything below it. A tree is live when a node of it is in the list that the host gives (the
+//!   nodes that a wrapper, a range, an observer or any other state of the host still names), or the top node is in it, or a shadow root
+//!   or a template content that belongs to a live tree. All other trees are dead.
+//! - A dead tree costs one step: its top goes on a list of dead subtrees (`dead`). The list lives in the `next` links of the dead nodes
+//!   themselves, so it has no side vector. No node of the tree is read.
+//! - `alloc` takes the first node of the list for a new node. The children of that node go to the front of the list (one splice, `last_child`
+//!   gives the end of the chain). So a node is freed when its slot is needed, and the free and the reuse are one step. A churn loop that makes
+//!   and drops trees pays one step for each slot that it takes, and a node that nothing needs is never read.
+//! - At a collect (`full`), `drain` walks what is left of the list and turns it into `FREE` nodes, and the text and attribute lists are built
+//!   again from the live nodes when much of them was used by dead nodes only (one pass, exact size), so the memory goes back at once.
+//!
+//! The host must name every `NodeId` that it keeps. A `NodeId` is 4 bytes and has no generation, so one that outlives its node would read the
+//! node that took the slot. `set_poison` makes such a mistake a panic in tests: a dead node is freed at once, never reused, and every link of
+//! it leaves the arena.
+
+use super::*;
+
+/// Make `Node` slots for a freed node look like nothing: an empty comment that no link names. The start of the span is a value that no text has.
+const FREE: NodeData = NodeData::Comment(Span { start: u32::MAX, len: 0 });
+/// A link that no node has: the parent of the top of a dead tree on the list (so the scan does not find it again), and every link of a poisoned node.
+const GONE: NodeId = NodeId(NonZeroU32::MAX);
+
+/// Rebuild the text and attribute lists when at least this many bytes were used by dead nodes only, and they are at least a fourth of the lists.
+/// The rebuild costs one pass over the slots and a copy of what is live, so a fourth keeps its cost under four times the bytes that it frees.
+const REBUILD_BYTES: usize = 256 << 10;
+/// Free the dead trees that wait on the list when the text and attribute lists have grown by this many bytes since the last time (see `reclaim`).
+const DRAIN_BYTES: usize = 1 << 20;
+const ATTR_BYTES: usize = std::mem::size_of::<Attr>();
+
+/// What `Document::reclaim` does with the dead trees that it finds.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Free {
+    /// Queue them. A new node that needs a slot frees one node.
+    Wait,
+    /// A collect: queue them, free the queue when the lists have grown by `DRAIN_BYTES` since the last time, and rebuild the lists if they are mostly dead.
+    Collect,
+    /// Queue them and free the queue now, so that `live_len` and the caps count nodes in use only.
+    Now,
+}
+
+/// A set of slot numbers, one bit each.
+struct Keep(Vec<u64>);
+
+impl Keep {
+    /// Add `i`. Is it new?
+    fn insert(&mut self, i: usize) -> bool {
+        let w = &mut self.0[i / 64];
+        let new = *w >> (i % 64) & 1 == 0;
+        *w |= 1 << (i % 64);
+        new
+    }
+
+    fn contains(&self, i: usize) -> bool {
+        self.0[i / 64] >> (i % 64) & 1 != 0
+    }
+}
+
+impl Document {
+    /// A node slot for `data`: the first node of the dead list if there is one, else a new one at the end of the arena. The node has no links.
+    /// Inline: the common case is one push, as before the list existed. `reuse` is out of line: inlined into the tree builder it costs more.
+    #[inline(always)]
+    pub(super) fn alloc(&mut self, data: NodeData) -> NodeId {
+        match self.dead {
+            None => {
+                let id = NodeId::from_index(self.nodes.len());
+                self.nodes.push(Node { parent: None, first_child: None, last_child: None, prev: None, next: None, data });
+                id
+            }
+            Some(head) => self.reuse(head, data),
+        }
+    }
+
+    /// Take the node at the head of the dead list for `data`. A node of a dead tree that is still whole gives its children to the list first.
+    #[inline(never)]
+    fn reuse(&mut self, head: NodeId, data: NodeData) -> NodeId {
+        let i = head.index();
+        let Node { next, first_child, last_child, data: old, .. } = std::mem::replace(&mut self.nodes[i], Node { parent: None, first_child: None, last_child: None, prev: None, next: None, data });
+        self.dead = next;
+        if let (Some(first), Some(last)) = (first_child, last_child) {
+            self.nodes[last.index()].next = next;
+            self.dead = Some(first);
+        }
+        self.retire(old);
+        // `scan_sheets` read the nodes before `sheet_scanned` once: a style element in a reused slot there would never be seen.
+        if matches!(data, NodeData::Element { name, .. } if self.is_sheet_name(name)) && i < self.sheet_scanned.get() {
+            self.sheet_made.get_mut().push(head);
+        }
+        head
+    }
+
+    /// A node that held `data` is gone: count the text and the attribute slots that only it used, or the free node that a new one takes.
+    #[inline(always)]
+    fn retire(&mut self, data: NodeData) {
+        match data {
+            NodeData::Comment(s) if s.start == u32::MAX => self.free_nodes -= 1,
+            NodeData::Text(s) | NodeData::Comment(s) | NodeData::Doctype(s) => self.dead_text += s.len as usize,
+            NodeData::Element { attrs, .. } if attrs.len != 0 => self.retire_attrs(attrs),
+            NodeData::Element { .. } | NodeData::Document | NodeData::ShadowRoot => {}
+        }
+    }
+
+    /// The attributes of a node that is gone. Out of line: the nodes that take a slot are mostly not elements with attributes, and the loop would cost them registers.
+    #[inline(never)]
+    fn retire_attrs(&mut self, attrs: AttrList) {
+        self.dead_attrs += attrs.len as usize;
+        self.dead_text += self.attrs(attrs).iter().map(|a| a.value.len as usize).sum::<usize>();
+    }
+
+    /// Is this node free, or does it belong to a dead tree that waits for slots?
+    pub fn is_free(&self, id: NodeId) -> bool {
+        dead_in(&self.nodes, id.index() as u32)
+    }
+
+    /// Nodes in use: the length of the arena less the free nodes. A dead tree that waits on the list counts as in use until `drain` or a new node takes it.
+    /// The caps of a host count these, not `len`.
+    pub fn live_len(&self) -> usize {
+        self.nodes.len() - self.free_nodes
+    }
+
+    /// Bytes of the text list that a node uses or may use. `text_bytes` less the bytes that only freed nodes used.
+    pub fn live_text_bytes(&self) -> usize {
+        self.text.len() - self.dead_text
+    }
+
+    /// Slots of the attribute list that an element uses or may use. `attr_slots` less the slots that only freed elements used.
+    pub fn live_attr_slots(&self) -> usize {
+        self.attrs.len() - self.dead_attrs
+    }
+
+    /// Bytes that the live nodes, text and attributes of the arena use: the native memory that a collect and a reclaim can release.
+    pub fn arena_bytes(&self) -> usize {
+        self.live_len() * std::mem::size_of::<Node>() + self.live_text_bytes() + self.live_attr_slots() * ATTR_BYTES
+    }
+
+    /// Test mode: a dead node is freed at once and never reused, and a link of it points outside the arena, so the first use of a stale `NodeId` panics.
+    pub fn set_poison(&mut self, on: bool) {
+        self.poison = on;
+    }
+
+    /// The top of the tree of `id`: climb the parents.
+    fn tree_top(&self, mut id: NodeId) -> NodeId {
+        while let Some(p) = self.nodes[id.index()].parent {
+            id = p;
+        }
+        id
+    }
+
+    /// Find the dead trees and put them on the list. Gives the number of trees. `free` tells how soon the nodes of the trees are freed.
+    ///
+    /// `live` is every node that the host still names. The top node, the hover, active and focus nodes, the elements that a host watches an
+    /// attribute of, and the shadow roots and template contents of live trees are live too. A host that keeps a `Span` (a value that a
+    /// removed attribute had, a detached `Attr`) gives it to `pins` when the lists are rebuilt: `pins` calls the function that it gets
+    /// once for each `&mut Span`, and the span reads the same text afterwards. The host forgets what it keeps about a dead node: ask `is_free`.
+    ///
+    /// The tree of a dead node is not in the tree of the page, so the page does not change. But the styles and the layout of a host keep a table by
+    /// node number, and a reused slot would answer with the old node, so a reclaim that finds a dead tree moves `revision` and tells the readers of the
+    /// damage log to start over.
+    pub fn reclaim(&mut self, live: &[NodeId], pins: &mut dyn FnMut(&mut dyn FnMut(&mut Span)), free: Free) -> usize {
+        let trees = self.queue_dead(live);
+        if free != Free::Wait {
+            // A dead tree that waits holds its text and attributes. A node that takes a slot counts what the old one held, so a page that goes on
+            // making nodes finds the dead bytes by itself. A page that stops holds the waiting trees: when the lists have grown by `DRAIN_BYTES` since
+            // the last drain, one walk frees them and counts them.
+            let list = self.text.len() + self.attrs.len() * ATTR_BYTES;
+            if free == Free::Now || list.saturating_sub(self.list_mark) >= DRAIN_BYTES {
+                self.drain();
+                self.list_mark = list;
+            }
+            let bytes = self.dead_text + self.dead_attrs * ATTR_BYTES;
+            if bytes >= REBUILD_BYTES && bytes * 4 >= list {
+                self.rebuild_lists(pins);
+                self.list_mark = self.text.len() + self.attrs.len() * ATTR_BYTES;
+            }
+        }
+        trees
+    }
+
+    /// Put the top of each dead tree on the list, and forget what the document keeps about the nodes of those trees.
+    fn queue_dead(&mut self, live: &[NodeId]) -> usize {
+        // One bit for each slot: the tops of the live trees. A bit costs less than a hash, and the scan below visits every slot anyway.
+        let mut keep = Keep(vec![0; self.nodes.len().div_ceil(64)]);
+        keep.insert(0);
+        let user = [self.user.hover, self.user.active, self.user.focus];
+        let watched = self.watched.iter().map(|&(el, _)| NodeId::from_index(el as usize)).collect::<Vec<_>>();
+        let removed = self.removed.iter().map(|r| r.el).collect::<Vec<_>>();
+        for id in live.iter().copied().chain(user.into_iter().flatten()).chain(watched).chain(removed) {
+            keep.insert(self.tree_top(id).index());
+        }
+        // A host and its shadow root, and a template and its contents, live and die together.
+        loop {
+            let mut grew = false;
+            let links = self.shadow_of.iter().map(|(&h, &r)| (NodeId::from_index(h as usize), r)).chain(self.template_content.iter().map(|(&t, &c)| (NodeId::from_index(t as usize), c)));
+            for (a, b) in links.collect::<Vec<_>>() {
+                let (a, b) = (self.tree_top(a).index(), self.tree_top(b).index());
+                match (keep.contains(a), keep.contains(b)) {
+                    (true, false) => grew |= keep.insert(b),
+                    (false, true) => grew |= keep.insert(a),
+                    _ => {}
+                }
+            }
+            if !grew {
+                break;
+            }
+        }
+        let (mut trees, mut freed) = (0, 0);
+        for i in 1..self.nodes.len() {
+            let n = &self.nodes[i];
+            if n.parent.is_none() && n.data != FREE && !keep.contains(i) {
+                if trees == 0 {
+                    // `scan_sheets` has read every node that is dead now, so it never reads a node that waits on the list (its parent link may lead to a slot that
+                    // a new node took). A walk that finds no dead tree does not pay for it: a page that asks for no sheet pays nothing.
+                    self.scan_sheets();
+                }
+                trees += 1;
+                if self.poison {
+                    freed += self.free_tree(i);
+                } else {
+                    self.nodes[i].parent = Some(GONE);
+                    self.nodes[i].next = self.dead;
+                    self.dead = Some(NodeId::from_index(i));
+                }
+            }
+        }
+        self.free_nodes += freed;
+        if trees == 0 {
+            return 0;
+        }
+        // The tables below name nodes of live trees too, deep ones: a memo of the nodes that a climb passed keeps each climb short.
+        let nodes = &self.nodes;
+        let words = nodes.len().div_ceil(64);
+        let mut memo = (Keep(vec![0; words]), Keep(vec![0; words]));
+        let mut gone = |k: u32| dead_memo(nodes, &mut memo, k);
+        self.foreign.retain(|&k, _| !gone(k));
+        self.class_sets.get_mut().retain(|&k, _| !gone(k as u32));
+        self.template_content.retain(|&k, _| !gone(k));
+        self.shadow_of.retain(|&k, _| !gone(k));
+        self.shadow_host.retain(|&k, _| !gone(k));
+        self.shadow_flags.retain(|&k, _| !gone(k));
+        self.custom.retain(|&k, _| !gone(k));
+        self.states.retain(|&k, _| !gone(k));
+        self.ui.retain(|&k, _| !gone(k));
+        self.images.retain(|&k, _| !gone(k));
+        self.sheet_made.get_mut().retain(|n| !gone(n.index() as u32));
+        self.places = Default::default();
+        *self.slots.get_mut() = None;
+        self.revision += 1;
+        self.mark_full();
+        trees
+    }
+
+    /// Turn what is left of the list into `FREE` nodes, one after the other, and count what they used. The list then holds `FREE` nodes only.
+    fn drain(&mut self) {
+        let mut out = None;
+        while let Some(head) = self.dead {
+            let i = head.index();
+            let Node { next, first_child, last_child, data, .. } = self.nodes[i];
+            self.dead = next;
+            if let (Some(first), Some(last)) = (first_child, last_child) {
+                self.nodes[last.index()].next = next;
+                self.dead = Some(first);
+            }
+            self.retire(data);
+            self.nodes[i] = Node { parent: None, first_child: None, last_child: None, prev: None, next: out, data: FREE };
+            self.free_nodes += 1;
+            out = Some(head);
+        }
+        self.dead = out;
+    }
+
+    /// Free the tree that starts at slot `top` now (poison mode). Gives the number of nodes. A node goes after its children (post-order) and the walk
+    /// reads the links of a node before it clears them, so it needs no stack.
+    fn free_tree(&mut self, top: usize) -> usize {
+        let mut i = top;
+        let mut count = 0;
+        loop {
+            while let Some(c) = self.nodes[i].first_child {
+                i = c.index();
+            }
+            loop {
+                let Node { parent, next, data, .. } = self.nodes[i];
+                self.retire(data);
+                self.nodes[i] = Node { parent: Some(GONE), first_child: Some(GONE), last_child: Some(GONE), prev: Some(GONE), next: Some(GONE), data: FREE };
+                count += 1;
+                if i == top {
+                    return count;
+                }
+                match next {
+                    Some(n) => {
+                        i = n.index();
+                        break;
+                    }
+                    None => i = parent.map_or(top, |p| p.index()),
+                }
+            }
+        }
+    }
+
+    /// Build `text` and `attrs` again from the nodes that are alive. A node keeps its place: only the spans move.
+    fn rebuild_lists(&mut self, pins: &mut dyn FnMut(&mut dyn FnMut(&mut Span))) {
+        let (mut bytes, mut slots) = (0, 0);
+        for n in self.nodes.iter().filter(|n| n.data != FREE) {
+            match n.data {
+                NodeData::Text(s) | NodeData::Comment(s) | NodeData::Doctype(s) => bytes += s.len as usize,
+                NodeData::Element { attrs, .. } => {
+                    slots += attrs.len as usize;
+                    bytes += self.attrs(attrs).iter().map(|a| a.value.len as usize).sum::<usize>();
+                }
+                NodeData::Document | NodeData::ShadowRoot => {}
+            }
+        }
+        let old = std::mem::take(&mut self.text);
+        let mut text = String::with_capacity(bytes);
+        let mut attrs: Vec<Attr> = Vec::with_capacity(slots);
+        let copy = |text: &mut String, s: Span| {
+            let start = text.len();
+            text.push_str(&old[s.start as usize..s.end()]);
+            Span { start: to_u32(start), len: s.len }
+        };
+        for i in 0..self.nodes.len() {
+            if self.nodes[i].data == FREE {
+                continue;
+            }
+            let data = match self.nodes[i].data {
+                NodeData::Text(s) => NodeData::Text(copy(&mut text, s)),
+                NodeData::Comment(s) => NodeData::Comment(copy(&mut text, s)),
+                NodeData::Doctype(s) => NodeData::Doctype(copy(&mut text, s)),
+                NodeData::Element { name, attrs: list } => {
+                    let start = attrs.len();
+                    if list.len != 0 {
+                        for a in &self.attrs[list.start as usize..(list.start + list.len) as usize] {
+                            attrs.push(Attr { name: a.name, value: copy(&mut text, a.value) });
+                        }
+                    }
+                    NodeData::Element { name, attrs: AttrList { start: to_u32(start), len: list.len } }
+                }
+                d @ (NodeData::Document | NodeData::ShadowRoot) => d,
+            };
+            self.nodes[i].data = data;
+        }
+        // What the document keeps: the removed attributes that the host did not take. The damage log is empty: `reclaim` made the readers start over.
+        for r in &mut self.removed {
+            r.value = copy(&mut text, r.value);
+        }
+        pins(&mut |s: &mut Span| *s = copy(&mut text, *s));
+        text.shrink_to_fit();
+        self.text = text;
+        self.attrs = attrs;
+        self.dead_text = 0;
+        self.dead_attrs = 0;
+    }
+}
+
+/// `dead_in` for many nodes: `memo` holds the nodes known to be live (`.0`) and dead (`.1`), which a climb adds and stops at.
+fn dead_memo(nodes: &[Node], memo: &mut (Keep, Keep), k: u32) -> bool {
+    let mut i = k as usize;
+    let dead = loop {
+        if memo.1.contains(i) {
+            break true;
+        }
+        if memo.0.contains(i) {
+            break false;
+        }
+        let n = &nodes[i];
+        if n.data == FREE {
+            break true;
+        }
+        match n.parent {
+            None => break false,
+            Some(GONE) => break true,
+            Some(p) => i = p.index(),
+        }
+    };
+    let set = if dead { &mut memo.1 } else { &mut memo.0 };
+    let mut j = k as usize;
+    while j != i {
+        set.insert(j);
+        j = nodes[j].parent.map_or(i, |p| p.index());
+    }
+    set.insert(i);
+    dead
+}
+
+/// Is node `k` free, or in a tree that waits on the dead list (the top of it has the parent `GONE`)?
+fn dead_in(nodes: &[Node], k: u32) -> bool {
+    let mut i = k as usize;
+    loop {
+        let n = &nodes[i];
+        if n.data == FREE {
+            return true;
+        }
+        match n.parent {
+            None => return false,
+            Some(GONE) => return true,
+            Some(p) => i = p.index(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn no_pins(_: &mut dyn FnMut(&mut Span)) {}
+
+    /// A detached tree like a parsed document: a document node, `<html><body>` and `items` paragraphs with an attribute and a text each.
+    fn tree(doc: &mut Document, items: usize, text: &str) -> (NodeId, NodeId) {
+        let top = doc.create_document();
+        let html = doc.insert_element(top, None, "html", &[("lang", "en")] as &[(&str, &str)]);
+        let body = doc.insert_element(html, None, "body", &[] as &[(&str, &str)]);
+        let mut last = body;
+        for i in 0..items {
+            last = doc.insert_element(body, None, "p", &[("id", format!("p{i}"))]);
+            doc.append_text(last, text);
+        }
+        (top, last)
+    }
+
+    fn page(doc: &mut Document) -> NodeId {
+        let root = doc.root();
+        let html = doc.insert_element(root, None, "html", &[] as &[(&str, &str)]);
+        let body = doc.insert_element(html, None, "body", &[("class", "page")]);
+        let a = doc.insert_element(body, None, "p", &[("id", "keep")]);
+        doc.append_text(a, "hello");
+        a
+    }
+
+    #[test]
+    fn a_dead_tree_gives_its_slots_to_new_nodes() {
+        let mut doc = Document::new();
+        let keep = page(&mut doc);
+        let before = doc.len();
+        for _ in 0..3 {
+            tree(&mut doc, 100, "some text");
+            assert_eq!(doc.live_len(), before + 203, "the tree took the slots of the one before");
+            assert_eq!(doc.reclaim(&[keep], &mut no_pins, Free::Now), 1, "the dead tree is found");
+            assert_eq!(doc.len(), before + 203, "the arena keeps its length");
+        }
+        doc.drain();
+        assert_eq!(doc.live_len(), before, "the nodes that wait are free after a drain");
+        // The arena grew for the first tree only: later trees take the free slots.
+        assert_eq!(doc.len(), before + 203);
+    }
+
+    #[test]
+    fn a_dead_tree_is_queued_in_one_step_and_its_slots_are_reused_before_the_arena_grows() {
+        let mut doc = Document::new();
+        let keep = page(&mut doc);
+        let before = doc.len();
+        tree(&mut doc, 100, "some text");
+        assert_eq!(doc.len(), before + 203);
+        assert_eq!(doc.reclaim(&[keep], &mut no_pins, Free::Wait), 1, "one tree is dead");
+        assert_eq!(doc.free_nodes, 0, "no node was walked: the tree waits for a node that needs a slot");
+        for n in 0..203 {
+            doc.create_element("div");
+            assert_eq!(doc.len(), before + 203, "node {n} took a slot of the dead tree");
+        }
+        assert!(doc.dead.is_none(), "the dead tree is used up");
+        doc.create_element("div");
+        assert_eq!(doc.len(), before + 204, "only now does the arena grow");
+        assert_eq!(doc.live_len(), before + 204);
+    }
+
+    #[test]
+    fn a_live_tree_and_the_top_node_stay() {
+        let mut doc = Document::new();
+        let keep = page(&mut doc);
+        let (_, leaf) = tree(&mut doc, 5, "x");
+        let (dead_top, _) = tree(&mut doc, 5, "y");
+        let dump = doc.dump();
+        let freed = doc.reclaim(&[keep, leaf], &mut no_pins, Free::Now);
+        assert_eq!(freed, 1, "the third tree only");
+        assert!(doc.is_free(dead_top) && !doc.is_free(leaf) && !doc.is_free(keep));
+        assert_eq!(doc.dump(), dump, "the page is the same");
+        assert_eq!(doc.text(match doc.data(doc.children(keep).next().unwrap()) {
+            NodeData::Text(s) => *s,
+            _ => unreachable!(),
+        }), "hello");
+        assert_eq!(doc.reclaim(&[keep, leaf], &mut no_pins, Free::Now), 0, "nothing is left to free");
+    }
+
+    #[test]
+    fn a_reused_slot_starts_clean() {
+        reused_slot_starts_clean(Free::Now);
+        reused_slot_starts_clean(Free::Wait);
+    }
+
+    fn reused_slot_starts_clean(free: Free) {
+        let mut doc = Document::new();
+        let keep = page(&mut doc);
+        let (top, _) = tree(&mut doc, 3, "t");
+        let html = doc.children(top).next().unwrap();
+        doc.set_custom_state(html, Some(7));
+        doc.set_states(html, vec!["a".into()]);
+        doc.set_ui(html, UI_CHECKED_DIRTY);
+        doc.set_image(html, Some((1, 1, vec![0u32].into())));
+        let svg = doc.create_element_ns(Ns::Svg, None, "rect");
+        let svg2 = doc.create_element_ns(Ns::Svg, None, "rect");
+        let long = doc.insert_element(top, None, "div", &[("class", "a b c d e f g h i j k l m n o p q r s t u v w x y z a1 b1 c1 d1 e1 f1")]);
+        assert!(doc.has_class(long, "z"));
+        doc.reclaim(&[keep, svg2], &mut no_pins, free);
+        assert!(doc.is_free(svg) && !doc.is_free(svg2));
+        assert!(doc.is_foreign(svg2));
+        for _ in 0..40 {
+            let e = doc.create_element("div");
+            assert_eq!(doc.custom_state(e), None, "no custom state");
+            assert!(doc.states(e).is_empty());
+            assert_eq!(doc.ui(e), 0);
+            assert!(doc.image(e).is_none());
+            assert!(!doc.is_foreign(e), "an HTML element");
+            assert!(!doc.has_class(e, "z"));
+        }
+        assert!(!doc.has_custom() && !doc.has_images());
+    }
+
+    #[test]
+    fn the_text_and_attribute_lists_are_built_again_when_most_is_dead() {
+        let mut doc = Document::new();
+        let keep = page(&mut doc);
+        let text = "0123456789".repeat(100);
+        for _ in 0..12 {
+            tree(&mut doc, 100, &text);
+        }
+        let (text0, attrs0) = (doc.text_bytes(), doc.attr_slots());
+        assert!(text0 > DRAIN_BYTES);
+        let dump = doc.dump();
+        let freed = doc.reclaim(&[keep], &mut no_pins, Free::Now);
+        assert_eq!(freed, 12);
+        assert!(doc.text_bytes() < 100, "the text list holds only the page: {}", doc.text_bytes());
+        assert!(doc.attr_slots() < 10, "{} of {attrs0} slots", doc.attr_slots());
+        assert_eq!((doc.live_text_bytes(), doc.live_attr_slots()), (doc.text_bytes(), doc.attr_slots()));
+        assert_eq!(doc.dump(), dump, "the page reads the same");
+        let p = doc.children(doc.children(doc.children(doc.root()).next().unwrap()).next().unwrap()).next().unwrap();
+        assert_eq!(doc.attr(p, Atom::ID), Some("keep"));
+        // A node that is made now reads right, and a freed tree that is made again reads right.
+        let (top, last) = tree(&mut doc, 3, "again");
+        assert_eq!(doc.attr(last, Atom::ID), Some("p2"));
+        assert_eq!(doc.text(match doc.data(doc.children(last).next().unwrap()) { NodeData::Text(s) => *s, _ => unreachable!() }), "again");
+        let _ = top;
+    }
+
+    #[test]
+    fn a_small_amount_of_dead_text_is_not_worth_a_rebuild() {
+        let mut doc = Document::new();
+        let keep = page(&mut doc);
+        tree(&mut doc, 10, "short");
+        let before = doc.text_bytes();
+        assert!(doc.reclaim(&[keep], &mut no_pins, Free::Wait) > 0);
+        assert_eq!(doc.live_text_bytes(), before, "the tree waits: nothing is counted yet");
+        doc.drain();
+        assert_eq!(doc.text_bytes(), before, "no rebuild");
+        assert!(doc.live_text_bytes() < before, "but the dead bytes are not counted");
+    }
+
+    #[test]
+    fn a_span_that_the_host_holds_reads_the_same_after_a_rebuild() {
+        let mut doc = Document::new();
+        let keep = page(&mut doc);
+        let text = "x".repeat(DRAIN_BYTES + 1);
+        tree(&mut doc, 1, &text);
+        let mut held = doc.new_span("detached attribute value");
+        let mut other = doc.attr_span(keep, Atom::ID).unwrap();
+        doc.reclaim(&[keep], &mut |remap: &mut dyn FnMut(&mut Span)| {
+            remap(&mut held);
+            remap(&mut other);
+        }, Free::Now);
+        assert_eq!(doc.text(held), "detached attribute value");
+        assert_eq!(doc.text(other), "keep");
+        assert!(doc.text_bytes() < 100);
+    }
+
+    #[test]
+    fn the_damage_log_and_the_removed_attributes_follow_a_rebuild() {
+        let mut doc = Document::new();
+        let keep = page(&mut doc);
+        doc.track_damage(DAMAGE_FRAME);
+        doc.set_attr(keep, "title", "first value");
+        doc.set_attr(keep, "title", "second value");
+        let title = doc.find_atom("title").unwrap();
+        doc.watch_attr(keep, title);
+        doc.remove_attr(keep, "title");
+        tree(&mut doc, 1, &"y".repeat(DRAIN_BYTES + 1));
+        let log = doc.peek_damage();
+        assert!(doc.reclaim(&[keep], &mut no_pins, Free::Now) > 0);
+        assert!(doc.text_bytes() < 100, "rebuilt");
+        let removed = doc.take_removed_attrs();
+        assert_eq!(removed.iter().map(|r| doc.text(r.value)).collect::<Vec<_>>(), ["second value"]);
+        // The readers start over: a free node may be named in the log, and a reused slot has a stale style.
+        assert_eq!(doc.take_damage(DAMAGE_FRAME), None);
+        drop(log);
+    }
+
+    #[test]
+    fn a_reclaim_that_frees_moves_the_revision_and_one_that_frees_nothing_does_not() {
+        let mut doc = Document::new();
+        let keep = page(&mut doc);
+        tree(&mut doc, 2, "z");
+        let rev = doc.revision();
+        assert!(doc.reclaim(&[keep], &mut no_pins, Free::Now) > 0);
+        assert!(doc.revision() > rev, "styles keyed by revision are made again");
+        assert_eq!(doc.reclaim(&[keep], &mut no_pins, Free::Now), 0);
+        let rev = doc.revision();
+        doc.reclaim(&[keep], &mut no_pins, Free::Now);
+        assert_eq!(doc.revision(), rev, "a reclaim that frees nothing changes nothing");
+    }
+
+    #[test]
+    fn a_shadow_root_and_its_host_live_and_die_together() {
+        let mut doc = Document::new();
+        let keep = page(&mut doc);
+        let (_, leaf) = tree(&mut doc, 2, "a");
+        let root = doc.attach_shadow(leaf, true);
+        let inner = doc.insert_element(root, None, "span", &[] as &[(&str, &str)]);
+        // The wrapper of the shadow root alone keeps the host tree.
+        assert_eq!(doc.reclaim(&[keep, root], &mut no_pins, Free::Now), 0);
+        assert!(!doc.is_free(leaf) && !doc.is_free(inner));
+        // The wrapper of the host alone keeps the shadow tree.
+        assert_eq!(doc.reclaim(&[keep, leaf], &mut no_pins, Free::Now), 0);
+        assert!(!doc.is_free(inner));
+        assert_eq!(doc.shadow_root(leaf), Some(root));
+        // Nothing holds them: both go, and the host forgets its root.
+        let n = doc.reclaim(&[keep], &mut no_pins, Free::Now);
+        assert!(n == 2 && doc.is_free(inner) && doc.is_free(root) && doc.is_free(leaf));
+        assert!(!doc.has_shadow_roots());
+    }
+
+    #[test]
+    fn the_contents_of_a_template_live_and_die_with_the_template() {
+        let mut doc = Document::new();
+        let keep = page(&mut doc);
+        let tpl = doc.create_element("template");
+        let content = doc.make_template_content(tpl);
+        let li = doc.insert_element(content, None, "li", &[] as &[(&str, &str)]);
+        assert_eq!(doc.reclaim(&[keep, li], &mut no_pins, Free::Now), 0, "a node of the contents keeps the template");
+        assert_eq!(doc.template_content(tpl), Some(content));
+        assert_eq!(doc.reclaim(&[keep, tpl], &mut no_pins, Free::Now), 0);
+        assert_eq!(doc.reclaim(&[keep], &mut no_pins, Free::Now), 2, "the template and its contents");
+        assert!(!doc.has_template_content());
+    }
+
+    #[test]
+    fn the_user_state_and_a_watched_attribute_keep_their_tree() {
+        let mut doc = Document::new();
+        let keep = page(&mut doc);
+        let (_, a) = tree(&mut doc, 1, "a");
+        let (_, b) = tree(&mut doc, 1, "b");
+        let (_, c) = tree(&mut doc, 1, "c");
+        doc.set_hover(Some(a));
+        doc.set_focus(Some(b), false);
+        doc.watch_attr(c, Atom::ID);
+        assert_eq!(doc.reclaim(&[keep], &mut no_pins, Free::Now), 0, "all three trees are named");
+        doc.set_hover(None);
+        doc.set_focus(None, false);
+        doc.unwatch_attr(c, Atom::ID);
+        assert_eq!(doc.reclaim(&[keep], &mut no_pins, Free::Now), 3);
+    }
+
+    #[test]
+    fn the_sheet_list_stays_exact_when_a_freed_slot_becomes_a_style_element() {
+        sheet_list_stays_exact(Free::Now);
+        sheet_list_stays_exact(Free::Wait);
+    }
+
+    fn sheet_list_stays_exact(free: Free) {
+        let mut doc = Document::new();
+        let keep = page(&mut doc);
+        let root = doc.root();
+        let body = doc.parent(keep).unwrap();
+        doc.insert_element(body, None, "style", &[] as &[(&str, &str)]);
+        let top = doc.create_document();
+        for _ in 0..4 {
+            doc.insert_element(top, None, "link", &[("rel", "stylesheet")]);
+        }
+        if free == Free::Now {
+            assert_eq!(doc.sheet_nodes().len(), 1, "the scan has read every slot");
+        }
+        doc.reclaim(&[keep], &mut no_pins, free);
+        assert_eq!(doc.sheet_nodes().len(), 1);
+        // New style elements land in the freed slots, which the scan read before.
+        for _ in 0..4 {
+            doc.insert_element(root, None, "style", &[] as &[(&str, &str)]);
+        }
+        assert_eq!(doc.sheet_nodes().len(), 5);
+        let loose = doc.create_element("link");
+        doc.move_to(loose, body, None);
+        assert_eq!(doc.sheet_nodes().len(), 6);
+    }
+
+    #[test]
+    #[should_panic]
+    fn a_stale_node_panics_in_poison_mode() {
+        let mut doc = Document::new();
+        doc.set_poison(true);
+        let keep = page(&mut doc);
+        let (top, _) = tree(&mut doc, 2, "a");
+        doc.reclaim(&[keep], &mut no_pins, Free::Now);
+        assert!(doc.is_free(top));
+        let _ = doc.children(top).count();
+    }
+
+    #[test]
+    fn poison_mode_never_reuses_a_slot() {
+        let mut doc = Document::new();
+        doc.set_poison(true);
+        let keep = page(&mut doc);
+        tree(&mut doc, 2, "a");
+        let n = doc.len();
+        doc.reclaim(&[keep], &mut no_pins, Free::Now);
+        let e = doc.create_element("div");
+        assert_eq!(e.index(), n, "a new slot");
+        assert_eq!(doc.live_len(), doc.len() - 7, "the poisoned slots are not live");
+    }
+
+    /// Random trees, random live sets, random edits: the page that is live reads the same before and after, and the arena does not grow past the
+    /// most nodes that were alive at one time plus what a round makes.
+    #[test]
+    fn random_reclaims_keep_what_is_live() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n as u64) as usize
+        };
+        let mut doc = Document::new();
+        let keep = page(&mut doc);
+        let mut held: Vec<(NodeId, String)> = Vec::new();
+        let mut high = 0;
+        for round in 0..60 {
+            for _ in 0..next(4) {
+                let (top, leaf) = tree(&mut doc, 1 + next(40), &"w".repeat(next(30_000)));
+                if next(3) == 0 {
+                    doc.set_attr(leaf, "title", &format!("t{round}"));
+                    held.push((leaf, doc.dump_node_for_test(top)));
+                }
+            }
+            if next(2) == 0 && !held.is_empty() {
+                held.remove(next(held.len()));
+            }
+            let live: Vec<NodeId> = held.iter().map(|h| h.0).chain([keep]).collect();
+            doc.reclaim(&live, &mut no_pins, [Free::Wait, Free::Collect, Free::Now][next(3)]);
+            for (leaf, dump) in &held {
+                assert!(!doc.is_free(*leaf));
+                let top = doc.tree_top(*leaf);
+                assert_eq!(&doc.dump_node_for_test(top), dump, "round {round}");
+            }
+            high = high.max(doc.live_len());
+            assert!(doc.len() <= high + 4 * 82, "round {round}: {} slots, {high} live at most", doc.len());
+        }
+    }
+
+    impl Document {
+        fn dump_node_for_test(&self, id: NodeId) -> String {
+            let mut out = String::new();
+            self.dump_node(id, 0, false, &mut out);
+            out
+        }
+    }
+}

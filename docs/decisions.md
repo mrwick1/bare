@@ -2202,6 +2202,20 @@ Owner decision 2026-11-14: option A. The end of a journey (`Session::finish`) ti
 - Not chosen: B (also wait for network idle: the end then depends on beacons and polling that the page starts after `load`; Playwright marks it discouraged), C (every step waits for `load`: it counts the load of a page that a fast user left, and the browser aborts that load), D (a new `expect load` step and 47 file edits).
 - The wait is in `Session::finish`, so it runs in replay and in live mode alike, in `bare-drive` and in `bare-mcp` `close`. A page that is loaded costs one look. A page that is not loaded runs its ticks until `load`, or until nothing is scheduled, or 5 s. I did not gate it on the tape.
 - It needs a new frozen baseline and a new corpus (`virtual-load`). Numbers: `docs/progress.md`, section "The last document of a journey runs to `load` (2026-11-14)".
+## 2026-11-14: freed arena slots are reused with no generation counter on `NodeId` (R2-C2)
+
+- Chosen: `Document::reclaim` frees whole dead trees and `alloc` reuses their slots. A `NodeId` stays a 4-byte slot number. Each holder is a root (`held`), is weak (`forget` right after the walk), or is a cache that `Document::revision` makes stale. The walk runs only at a safe point (after `Interp::collect` and after each task), where no Rust local holds a `NodeId`. Holders outside the realm call `pin`.
+- Not chosen: a generation in `NodeId` (8 bytes, a check at each use in a hot path of every host call, and every holder would still need a list). Not chosen: a walk at each collect (79 rows over the cost limit). It is paced by growth: `max(2048, a fourth of the nodes after the last walk)`.
+- T1 limit 4 MiB of native bytes: 6 MiB gives 87.4 MiB peak, 2 MiB gives 80.0 MiB (design table), 4 MiB gives 81.6 to 82.1 MiB with 3 collects.
+- C1 needs no weak-key flag: `pending` is empty exactly when no weak table waits for a key. The test runs only when one object in eight is an array.
+- Custom elements turn the reclaim off. Their holders are not listed. See [progress.md](progress.md#r2-c2-build-dead-trees-of-the-page-arena-are-freed-and-native-bytes-start-a-collect-2026-11-14).
+## 2026-11-14: dead DOM trees wait on a list in the dead nodes and the arena takes slots from it (R2-C2 lazy free)
+
+- Chosen: `reclaim` puts each dead root on a list with one store, and `alloc` takes the head and splices the children chain of a whole node in front. `drain` and `rebuild_lists` run at a collect when the lists grew by 1 MiB. The list lives in the `next` links of the dead nodes: no side vector. Owner decision 2026-11-14.
+- Chosen: the pace of a walk is in bytes (1 MiB), and an empty walk doubles the wait up to 4 times.
+- Not chosen: a pace of 4 MiB. It removes the row cost, but `python-docs-search-results` stays at 92 MiB, because the walk misses the collect that the native-byte trigger starts. 1 MiB gives 81.3 MiB.
+- Result: 1 row of 803 is over +0.5% under both allocators (`select_load churn 1000`, +0.74%), against 11 on the eager free. Open for the owner. See [progress.md](progress.md#r2-c2-lazy-free-dead-trees-wait-on-a-list-and-the-arena-takes-slots-from-it-2026-11-14).
+
 ## 2026-11-14: class names as numbers in a packed class table (spike, not merged)
 
 Owner decision 2026-11-14: spike class atoms first. Chosen for the spike: a separate `ClassTable` (one text buffer, spans, open-address slots) with the type `ClassId`, and a per-document list cache with no slot for an element that has no class. A hash probe finds the key group of a split list. Measured: 2.40 K instructions saved for each element in the restyle pass of `compm_22000` (gate 2.70 K), `rest_13` 10.66x below baseline `f6415364`, `compm_22000` 7.56x.

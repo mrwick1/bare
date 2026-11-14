@@ -1170,3 +1170,12 @@ impl Dom {
         self.sel.made.get().is_some()
     }
 }
+
+// ------------------------------------------------------------------------------------------ arena reclaim (`browser_reclaim.rs`)
+
+/// Drop the state of the nodes that the reclaim freed. The option lists are caches: the next read builds them again.
+pub(crate) fn forget(d: &Dom, gone: &dyn Fn(NodeId) -> bool) {
+    let mut st = d.sel.st.borrow_mut();
+    st.opt.retain(|&n, _| !gone(n));
+    st.cache.clear();
+}

@@ -649,3 +649,14 @@ pub(crate) fn prune(d: &Dom, live: &dyn Fn(ObjId) -> bool) {
         s.locs = locs.into_iter().filter(|o| live(*o)).collect();
     }
 }
+
+// ------------------------------------------------------------------------------------------ arena reclaim (`browser_reclaim.rs`)
+
+/// The nodes of iframes with a window, and the nodes that frame documents made. The name list and the answer of the last walk are of the
+/// tree of the document: a node that left it moved `Document::name_revision` first.
+pub(crate) fn held(d: &Dom, out: &mut Vec<NodeId>) {
+    let Some(s) = d.frames.state() else { return };
+    out.extend(s.contexts.keys().copied());
+    out.extend(s.docs.keys().copied());
+    out.extend(s.owned.iter().flat_map(|(&a, &b)| [a, b]));
+}

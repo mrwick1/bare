@@ -178,6 +178,14 @@ impl Page {
         self.doc_id()
     }
 
+    /// Keep the tree of `node` for the life of the document. A driver that keeps a `Handle` across calls pins its node: the page frees
+    /// the nodes of trees that nothing names, and a new node takes the slot.
+    pub fn pin(&mut self, node: NodeId) {
+        if let Some(b) = self.browser() {
+            b.pin(node);
+        }
+    }
+
     /// The URL of the document, with its query and fragment. Give it to a person only through a redacting filter.
     pub fn url(&mut self) -> Option<String> {
         self.browser().and_then(|b| b.document_url())

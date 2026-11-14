@@ -133,7 +133,7 @@ impl Hasher for IdHash {
 pub(crate) type IdMap<K, V> = HashMap<K, V, BuildHasherDefault<IdHash>>;
 
 /// A key that is a slot number of the engine: `ObjId` (its slot is reused, so the whole handle tells a dead object from a new one)
-/// or `NodeId` (the document never reuses one).
+/// or `NodeId` (the reclaim reuses a freed slot, so a holder of a `NodeId` is a root or is forgotten at once: `browser_reclaim.rs`).
 pub(crate) trait SlotKey: Copy + Eq {
     fn slot(self) -> usize;
 }
@@ -603,6 +603,8 @@ pub struct Dom {
     pub(crate) geom: crate::browser_geom::Geom,
     /// `Worker` (`browser_worker.rs`).
     pub(crate) worker: crate::browser_worker::WorkerHost,
+    /// Freeing the nodes of dead trees (`browser_reclaim.rs`).
+    pub(crate) reclaim: crate::browser_reclaim::Reclaim,
 }
 
 impl Host for Dom {
@@ -744,6 +746,7 @@ impl Host for Dom {
         crate::browser_abort::prune(self, live);
         crate::browser_xhr::prune(self, live);
         crate::browser_worker::prune(self, live);
+        self.reclaim_wanted();
     }
 
     fn report_exception(&self, it: &mut Interp<'_>, thrown: Value) {
@@ -1705,6 +1708,7 @@ impl Browser {
             ce: Default::default(),
             geom: Default::default(),
             worker: Default::default(),
+            reclaim: Default::default(),
         });
         it.set_host(dom.clone())?;
         it.heap.set_indexed_source(dom.clone());
@@ -1714,6 +1718,15 @@ impl Browser {
             dom.install_scheduler(it)?;
             crate::browser_frames::activate(&dom, it)
         })?;
+        #[cfg(test)]
+        if let Some(mode) = std::env::var_os("BARE_RECLAIM_STRESS") {
+            dom.reclaim.set_each(true);
+            // `1`: poison, so a stale node panics. `lazy`: no poison, so a slot is reused and the dead trees wait for slots. `collect`: collect only.
+            if mode != "collect" {
+                dom.doc.borrow_mut().set_poison(mode != "lazy");
+                dom.reclaim.set_always(true);
+            }
+        }
         Ok(Browser { it, dom })
     }
 
@@ -1750,7 +1763,17 @@ impl Browser {
     }
 
     pub fn run_script(&mut self, source: &str) -> R<Value> {
-        self.it.run_script(source)
+        let r = self.it.run_script(source);
+        // `BARE_RECLAIM_STRESS=1 cargo test`: collect and reclaim after each script, freed nodes poisoned (`browser_reclaim.rs`).
+        #[cfg(test)]
+        if self.dom.reclaim.each() {
+            let keep = match &r {
+                Ok(v) | Err(Error::Throw(v)) => Some(*v),
+                _ => None,
+            };
+            self.collect(keep.as_slice())?;
+        }
+        r
     }
 
     /// The microtask checkpoint (Promise jobs).
@@ -1760,7 +1783,12 @@ impl Browser {
 
     /// Collect the heap. Attached wrappers and their listeners live. `extra` are values the caller still holds.
     pub fn collect(&mut self, extra: &[Value]) -> R<bare_js::heap::Collected> {
-        self.it.collect(extra)
+        let c = self.it.collect(extra)?;
+        // The caller is at a safe point (no script runs, no host call is on the stack): the trees that lost their wrappers can go.
+        self.dom.reclaim(true);
+        let native = self.dom.doc.try_borrow().map_or(0, |d| d.arena_bytes());
+        self.it.set_external_live(native);
+        Ok(c)
     }
 
     /// Listener exceptions so far, oldest first. Clears the list.

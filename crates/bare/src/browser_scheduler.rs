@@ -1380,6 +1380,8 @@ impl Browser {
                 ran += 1;
             }
             dom.run_task(&mut self.it, run)?;
+            // No script runs and no host call is on the stack: the nodes of dead trees can go back to the arena.
+            dom.reclaim(false);
             // On the benchmark clock a task takes time: more tasks become due, and a reply that was on its way arrives.
             if counted && bare_net::vclock::on() {
                 bare_net::vclock::advance_by(bare_net::vclock::TASK_MS);
@@ -1392,4 +1394,14 @@ impl Browser {
         }
         Ok(Pump { ran, capped, next_due: dom.next_due() })
     }
+}
+
+// ------------------------------------------------------------------------------------------ arena reclaim (`browser_reclaim.rs`)
+
+/// The nodes that queued tasks name.
+pub(crate) fn held(d: &Dom, out: &mut Vec<NodeId>) {
+    out.extend(d.sched.borrow().tasks.values().filter_map(|t| match t {
+        Task::Select(n) | Task::SelectionChange(n) | Task::Media(n, ..) => Some(*n),
+        _ => None,
+    }));
 }

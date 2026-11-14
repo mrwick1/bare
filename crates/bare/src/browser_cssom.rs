@@ -1436,3 +1436,25 @@ fn name_of(doc: &Document, n: NodeId) -> String {
         String::new()
     }
 }
+
+// ------------------------------------------------------------------------------------ arena reclaim (`browser_reclaim.rs`)
+
+/// The nodes that sheets, and the sheets that a document or a shadow root adopted, name.
+pub(crate) fn held(d: &Dom, out: &mut Vec<NodeId>) {
+    let Some(cell) = d.cssom.state.get() else { return };
+    let s = cell.borrow();
+    out.extend(s.sheets.values().filter(|sh| !sh.ctor).map(|sh| sh.node));
+    out.extend(s.sheets.values().filter_map(|sh| sh.text_key.as_ref()).flatten().map(|&(n, _)| n));
+    out.extend(s.by_node.keys().copied());
+    out.extend(s.adopted.keys().copied());
+}
+
+/// The spans of the text keys of sheets: the reclaim moves them when it builds the text list again.
+pub(crate) fn pins(d: &Dom, f: &mut dyn FnMut(&mut bare_html::dom::Span)) {
+    let Some(cell) = d.cssom.state.get() else { return };
+    for sh in cell.borrow_mut().sheets.values_mut() {
+        for (_, sp) in sh.text_key.iter_mut().flatten() {
+            f(sp);
+        }
+    }
+}

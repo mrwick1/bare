@@ -515,3 +515,13 @@ impl Dom {
         self.dispatch(it, Target::Node(n), e).map(|_| ())
     }
 }
+
+// ------------------------------------------------------------------------------------------ arena reclaim (`browser_reclaim.rs`)
+
+/// The nodes that running transitions and animations name.
+pub(crate) fn held(d: &Dom, out: &mut Vec<NodeId>) {
+    let s = d.motion.s.borrow();
+    out.extend(s.live.values().map(|l| l.node));
+    out.extend(s.transitions.keys().map(|k| k.0));
+    out.extend(s.animations.keys().map(|k| k.0));
+}

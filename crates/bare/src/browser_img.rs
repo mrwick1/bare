@@ -207,3 +207,12 @@ impl Browser {
         self.dom.img.pending.borrow_mut().insert(n);
     }
 }
+
+// ------------------------------------------------------------------------------------------ arena reclaim (`browser_reclaim.rs`)
+
+/// The elements with a picture request, a download on the way or a `decode()` promise.
+pub(crate) fn held(d: &Dom, out: &mut Vec<NodeId>) {
+    out.extend(d.img.requests.borrow().iter().copied());
+    out.extend(d.img.pending.borrow().iter().copied());
+    out.extend(d.img.decodes.borrow().keys().copied());
+}

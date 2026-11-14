@@ -320,9 +320,9 @@ fn replace(d: &Dom, it: &mut Interp<'_>, html: &str, n: NodeId, in_frag: bool, p
         let doc = d.doc.borrow();
         FragmentLimits {
             max_source: d.lim.max_string_bytes,
-            max_nodes: d.lim.max_nodes.saturating_sub(doc.len()),
-            max_text_bytes: d.lim.max_text_bytes.saturating_sub(doc.text_bytes()),
-            max_attr_slots: d.lim.max_attr_slots.saturating_sub(doc.attr_slots()),
+            max_nodes: d.lim.max_nodes.saturating_sub(doc.live_len()),
+            max_text_bytes: d.lim.max_text_bytes.saturating_sub(doc.live_text_bytes()),
+            max_attr_slots: d.lim.max_attr_slots.saturating_sub(doc.live_attr_slots()),
             max_names: d.lim.max_names,
             max_depth: d.lim.max_tree_depth.saturating_sub(base),
         }
@@ -381,7 +381,7 @@ fn replace(d: &Dom, it: &mut Interp<'_>, html: &str, n: NodeId, in_frag: bool, p
         // Text next to the result joins it (below): that copies the two texts.
         let seam: usize = this.iter().flat_map(|&t| [doc.prev_sibling(t), doc.next_sibling(t)]).flatten().map(|x| if let NodeData::Text(sp) = *doc.data(x) { doc.text(sp).len() } else { 0 }).sum();
         d.room(&doc, count, bytes + seam)?;
-        if attrs > d.lim.max_attr_slots.saturating_sub(doc.attr_slots()) {
+        if attrs > d.lim.max_attr_slots.saturating_sub(doc.live_attr_slots()) {
             return Err(d.lim("dom-attrs"));
         }
         if doc.name_count() + frag.doc.new_names_in(&doc) > d.lim.max_names {

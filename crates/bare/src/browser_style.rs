@@ -752,3 +752,23 @@ impl Browser {
         StyleStats { objects: s.objs.len(), blocks: s.blocks.len(), hits: self.dom.style.hits.get() }
     }
 }
+
+// ------------------------------------------------------------------------------------ arena reclaim (`browser_reclaim.rs`)
+
+/// The elements that `style` objects and kept blocks name.
+pub(crate) fn held(d: &Dom, out: &mut Vec<NodeId>) {
+    let s = d.style.s.borrow();
+    out.extend(s.objs.values().copied());
+    out.extend(s.by_el.keys().copied());
+    out.extend(s.blocks.keys().copied());
+    out.extend(s.pending.iter().flat_map(|m| m.keys().copied()));
+}
+
+/// The spans of the pending blocks: the reclaim moves them when it builds the text list again.
+pub(crate) fn pins(d: &Dom, f: &mut dyn FnMut(&mut bare_html::dom::Span)) {
+    for p in d.style.s.borrow_mut().pending.iter_mut().flat_map(|m| m.values_mut()) {
+        if let Some(sp) = p.span.as_mut() {
+            f(sp);
+        }
+    }
+}

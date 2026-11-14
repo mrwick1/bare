@@ -795,3 +795,10 @@ impl Browser {
         !self.dom.scrolling.s.borrow().pending.is_empty()
     }
 }
+
+// ------------------------------------------------------------------------------------------ arena reclaim (`browser_reclaim.rs`)
+
+/// The nodes with a `scroll` event to send.
+pub(crate) fn held(d: &Dom, out: &mut Vec<NodeId>) {
+    out.extend(d.scrolling.s.borrow().pending.iter().flatten().copied());
+}

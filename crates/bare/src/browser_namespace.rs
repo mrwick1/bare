@@ -156,7 +156,7 @@ pub(crate) fn create_element_ns(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[
 pub(crate) fn put(d: &Dom, it: &mut Interp<'_>, n: NodeId, existing: Option<Atom>, ns: Option<Ns>, qname: &str, value: &str) -> R<()> {
     let mut doc = d.doc.borrow_mut();
     d.room(&doc, 0, value.len())?;
-    if doc.attr_slots() + doc.attr_count(n) + 1 > d.lim.max_attr_slots {
+    if doc.live_attr_slots() + doc.attr_count(n) + 1 > d.lim.max_attr_slots {
         return Err(d.lim("dom-attrs"));
     }
     let atom = match existing {

@@ -1392,3 +1392,11 @@ fn line_at(text: &str, c: u32, area: bool) -> (u32, u32) {
     let b = u[c..].iter().position(|&x| x == 10).map_or(u.len(), |i| c + i);
     (a as u32, b as u32)
 }
+
+// ------------------------------------------------------------------------------------------ arena reclaim (`browser_reclaim.rs`)
+
+/// The nodes that the pointer state names.
+pub(crate) fn held(d: &Dom, out: &mut Vec<NodeId>) {
+    let u = &d.st.borrow().ui;
+    out.extend([u.hover, u.down, u.last.map(|l| l.0), u.capture, u.captured, u.sel_drag.map(|s| s.0)].into_iter().flatten());
+}

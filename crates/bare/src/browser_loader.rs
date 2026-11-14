@@ -803,6 +803,8 @@ impl Browser {
         *s.base.borrow_mut() = Some(disc.base.clone());
         s.caps.set((cfg.limits.max_pending_scripts, cfg.limits.max_pending_script_bytes));
         s.started.borrow_mut().extend(disc.items.iter().map(|i| i.node));
+        // The loader runs these scripts across collections: a script that another one removed must not give its slot away.
+        disc.items.iter().for_each(|i| dom.pin(i.node));
         let mut refs = vec![0usize; disc.targets.len()];
         let mut items = Vec::new();
         for (n, item) in disc.items.iter().enumerate() {
@@ -1980,4 +1982,33 @@ fn write(d: &Dom,it: &mut Interp<'_>,this: Value,a: &[Value],newline: bool)->V {
     let body=crate::browser_dom::body(d,it,this,&[])?;
     let n=d.el(it,body)?;
     crate::browser_fragment::write_at(d,it,&text,n,None)
+}
+
+// ---------------------------------------------------------------------------------------------- arena reclaim (`browser_reclaim.rs`)
+
+/// The nodes that the script queues and the running script name.
+pub(crate) fn held(d: &Dom, out: &mut Vec<NodeId>) {
+    let s = &d.scripts;
+    out.extend(s.current.get());
+    out.extend(s.write_anchor.get().into_iter().flat_map(|(a, b)| [Some(a), b]).flatten());
+    out.extend(s.inline.borrow().iter().map(|(n, _)| *n));
+    out.extend(s.external.borrow().iter().map(|e| match e {
+        Ext::Fetch(n, _) | Ext::Fail(n) | Ext::Text(n, _) => *n,
+    }));
+}
+
+/// Drop the state of the nodes that the reclaim freed: the started flag of a script, its load handlers and the link states.
+pub(crate) fn forget(d: &Dom, gone: &dyn Fn(NodeId) -> bool) {
+    let s = &d.scripts;
+    s.started.borrow_mut().retain(|&n| !gone(n));
+    s.handlers.borrow_mut().retain(|&(n, _), _| !gone(n));
+    s.modules.borrow_mut().nodes.retain(|&n| !gone(n));
+    s.preloads.borrow_mut().forget(gone);
+    s.sheets.borrow_mut().forget(gone);
+}
+
+/// How many script elements have the started flag (tests of the reclaim).
+#[cfg(test)]
+pub(crate) fn started_len(d: &Dom) -> usize {
+    d.scripts.started.borrow().len()
 }
