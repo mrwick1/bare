@@ -297,6 +297,29 @@ fn dynamic_import_asks_the_host_and_resolves_with_the_namespace() {
     });
 }
 
+/// A function of a module whose body the parser dropped (`Body::Lazy`) runs in a script slot of its own. It is still code of the module:
+/// `import()` takes the module as its referrer (a bundler's `import("./" + chunk)` is relative to it), and `import.meta` is the module's.
+#[test]
+fn a_dropped_function_of_a_module_is_still_code_of_that_module() {
+    big(|| {
+        let pad = "var p1 = 1, p2 = 2, p3 = p1 + p2, p4 = p3 * 2, p5 = p4 - p1, p6 = p5 + p2, p7 = p6 * p3;";
+        let comment = " ".repeat(20_000);
+        let src = format!(
+            "/*{comment}*/ function load(n) {{ {pad} globalThis.p = import('x' + n); return import.meta.url + p7; }}
+             function outer() {{ {pad} function inner() {{ {pad} import('y'); return import.meta.url; }} return inner() + p7; }}
+             globalThis.a = load(1); globalThis.b = outer();"
+        );
+        let mut it = Interp::realm(Heap::default(), EvalLimits::default()).expect("realm");
+        let m = it.module_parse(&src, "https://h/static/runtime.js").unwrap();
+        it.module_link(m).unwrap();
+        it.module_evaluate(m).unwrap();
+        let reqs = it.take_dynamic_imports();
+        assert_eq!(reqs.iter().map(|r| (r.specifier.as_str(), r.referrer)).collect::<Vec<_>>(), [("x1", Some(m)), ("y", Some(m))]);
+        let r = it.run_script("a + '|' + b").unwrap();
+        assert_eq!(it.display(r), "https://h/static/runtime.js21|https://h/static/runtime.js21");
+    });
+}
+
 #[test]
 fn a_dynamic_import_of_a_failing_module_rejects() {
     big(|| {

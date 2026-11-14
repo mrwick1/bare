@@ -762,8 +762,13 @@ impl<'p> Interp<'p> {
 
     // ------------------------------------------------------------ import() and import.meta
 
+    /// The module whose code is running. A lazy function runs in a script slot of its own (`lazy_load`): go to the script that holds it.
     fn mod_of_current(&self) -> Option<u32> {
-        self.modules.mods.iter().position(|m| m.script == self.cur).map(|i| i as u32)
+        let mut s = self.cur as u32;
+        while let Some(&o) = self.lazy_owner.get(&s) {
+            s = o;
+        }
+        self.modules.mods.iter().position(|m| m.script == s as usize).map(|i| i as u32)
     }
 
     #[cold]
