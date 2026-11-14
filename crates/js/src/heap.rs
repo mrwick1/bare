@@ -468,6 +468,8 @@ struct Str {
 /// The longest string that is always interned (an atom), in code units. A longer string is a flat string or a rope, and is not interned.
 /// The value is from the length counts of `docs/design-js.md` (to tune: `docs/progress.md`, "Strings").
 pub const ATOM_MAX: usize = 32;
+/// A host text of at most this many bytes is not looked up in the table of shared texts.
+const SHARE_MIN: usize = 256;
 
 /// A concatenation, not yet copied. `left` and `right` are the `index` of the children (their kind bits and their slot, no generation): a rope
 /// keeps its children alive until it is flat, and a flat rope never reads them again. `flat` is filled by the first read of the units.
@@ -774,6 +776,8 @@ pub struct Heap {
     bigs: Slab<big::Big>,
     big_table: big::BigTable,
     interner: Interner,
+    /// Shared host texts by (hash, UTF-8 length). Weak: `collect` drops the dead ones.
+    shared: std::collections::HashMap<(u64, usize), StrId>,
     bytes: usize,
     /// Accounted bytes of the units of the flat ropes. A rope is flattened by a read, which has `&self`, so this is a `Cell`.
     flat_bytes: std::cell::Cell<usize>,
@@ -837,6 +841,7 @@ impl Heap {
             interner: Interner { table: vec![0; 4096], count: 0 },
             bytes: 0,
             flat_bytes: std::cell::Cell::new(0),
+            shared: std::collections::HashMap::new(),
             collections: 0,
             gray: Vec::new(),
             length: StrId { index: 0, gn: 0 },
@@ -1011,6 +1016,37 @@ impl Heap {
     /// Like `intern_units`, with a `&str` (UTF-8, converted to UTF-16).
     pub fn intern_str(&mut self, s: &str) -> R<StrId> {
         self.str_from(s, false)
+    }
+
+    /// A string of host text (a response body). A text over `SHARE_MIN` bytes is shared: an equal live one gives the same handle,
+    /// so a page that reads the same document again does not copy it. A string is a value, so no script can tell. The table is
+    /// weak: a collect drops the entries of dead strings.
+    pub fn shared_text(&mut self, s: &str) -> R<StrId> {
+        if s.len() <= SHARE_MIN {
+            return self.intern_str(s);
+        }
+        let mut h = s.len() as u64;
+        let mut words = s.as_bytes().chunks_exact(8);
+        for w in &mut words {
+            h = (h.rotate_left(5) ^ u64::from_le_bytes(w.try_into().unwrap())).wrapping_mul(0x517c_c1b7_2722_0a95);
+        }
+        for &b in words.remainder() {
+            h = (h.rotate_left(5) ^ b as u64).wrapping_mul(0x517c_c1b7_2722_0a95);
+        }
+        let key = (h, s.len());
+        if let Some(&id) = self.shared.get(&key) {
+            if self.strings.get(id.index, id.gn).is_some_and(|st| st.units.iter().copied().eq(s.encode_utf16())) {
+                return Ok(id);
+            }
+        }
+        let id = self.intern_str(s)?;
+        self.shared.insert(key, id);
+        Ok(id)
+    }
+
+    /// Entries of the table of shared texts (live or not yet dropped).
+    pub fn shared_len(&self) -> usize {
+        self.shared.len()
     }
 
     /// The atom with the content of `s`, whatever the length. For a name that becomes a key: the name of a variable, a member, a property.
@@ -2684,6 +2720,8 @@ impl Heap {
         self.prune_exotics();
         // The interner is weak: rebuild it from the strings that survived.
         self.interner.rebuild(&self.strings);
+        let strings = &self.strings;
+        self.shared.retain(|_, id| strings.get(id.index, id.gn).is_some());
         self.big_table.rebuild(&self.bigs);
         Ok(c)
     }

@@ -952,6 +952,16 @@ impl Dom {
         }
     }
 
+    /// Like `js_str`, for a body of text: an equal live text is the same string (`Heap::shared_text`).
+    pub(crate) fn js_text(&self, it: &mut Interp<'_>, s: &str) -> R<Value> {
+        if s.len() > self.lim.max_string_bytes { return Err(self.lim("dom-string")); }
+        it.charge((s.len() / 32) as u64)?;
+        match it.heap.shared_text(s) {
+            Ok(s) => Ok(Value::String(s)),
+            Err(e) => Err(it.heap_error(e)),
+        }
+    }
+
     /// `ToString(v)` as UTF-8. A lone surrogate cannot be stored: `Unsupported`, never a lossy copy.
     pub(crate) fn string_arg(&self, it: &mut Interp<'_>, v: Value) -> R<String> {
         let s = it.to_js_string(v)?;
