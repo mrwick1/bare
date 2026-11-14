@@ -662,6 +662,7 @@ impl Host for Dom {
         crate::browser_navigation::trace(self, owner, out);
         crate::browser_platform::trace(self, owner, out);
         crate::browser_style::trace(self, owner, out);
+        crate::browser_cssom::trace(self, owner, out);
         crate::browser_computed::trace(self, owner, out);
         self.resize_trace(owner, out);
         self.mo_trace(owner, out);
@@ -710,6 +711,7 @@ impl Host for Dom {
         crate::browser_platform::prune(self, live);
         crate::browser_geom::prune(self, live);
         crate::browser_style::prune(self, live);
+        crate::browser_cssom::prune(self, live);
         crate::browser_computed::prune(self, live);
         self.resize_prune(live);
         self.mo_prune(live);
