@@ -46,6 +46,7 @@
 
 mod slots;
 
+use std::borrow::Cow;
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasherDefault, Hasher};
@@ -212,13 +213,21 @@ impl ClassId {
     }
 }
 
-/// The class names of the thread, packed: the bytes of all the names in one string, the start and the length of each, and an open table (twice the names,
-/// a power of two) from the hash of a name to its number plus one. About the length of the name and 20 bytes for each name. Names are never removed.
+/// The class names of the thread, packed: the bytes of all the names in one string, the start of each (a name ends where the next one starts), and an open
+/// table (a power of two, at most three quarters full) from the hash of a name to its number plus one. About the length of the name and 12 bytes for each
+/// name. Names are never removed. A name of 1 KiB or more that comes as a `String` is kept as it is, not copied (`BIG`).
 struct ClassTable {
     text: String,
-    spans: Vec<(u32, u32)>,
+    starts: Vec<u32>,
     slots: Vec<u32>,
+    /// The long names: the length of `text` when the name came, and the name. `starts` has `BIG | place in this list` for them.
+    big: Vec<(u32, Box<str>)>,
 }
+
+/// A name of this length or more is kept in its own allocation when the caller gives it up.
+const BIG_NAME: usize = 1024;
+/// The mark of a name in `ClassTable::big`, in `starts`.
+const BIG: u32 = 1 << 31;
 
 impl ClassTable {
     fn hash(name: &str) -> usize {
@@ -228,8 +237,12 @@ impl ClassTable {
     }
 
     fn name(&self, id: usize) -> &str {
-        let (start, len) = self.spans[id];
-        &self.text[start as usize..(start + len) as usize]
+        let start = self.starts[id];
+        if start & BIG != 0 {
+            return &self.big[(start & !BIG) as usize].1;
+        }
+        let end = self.starts.get(id + 1).map_or(self.text.len() as u32, |&e| if e & BIG != 0 { self.big[(e & !BIG) as usize].0 } else { e });
+        &self.text[start as usize..end as usize]
     }
 
     /// The number of `name`, or `None` when it was never added. One hash and, for a name that is there, one compare.
@@ -249,24 +262,32 @@ impl ClassTable {
         None
     }
 
-    fn intern(&mut self, name: &str) -> u32 {
+    fn intern(&mut self, name: Cow<str>) -> u32 {
         if self.slots.is_empty() {
             self.slots = vec![0; 64];
         }
         let mask = self.slots.len() - 1;
-        let mut at = Self::hash(name) & mask;
+        let mut at = Self::hash(&name) & mask;
         while self.slots[at] != 0 {
             if self.name(self.slots[at] as usize - 1) == name {
                 return self.slots[at] - 1;
             }
             at = (at + 1) & mask;
         }
-        let id = u32::try_from(self.spans.len()).ok().filter(|&n| n < 1 << 31).expect("more than 2 billion class names");
-        let start = u32::try_from(self.text.len()).expect("more than 4 GB of class names");
-        self.text.push_str(name);
-        self.spans.push((start, name.len() as u32));
+        let id = u32::try_from(self.starts.len()).ok().filter(|&n| n < 1 << 31).expect("more than 2 billion class names");
+        let start = u32::try_from(self.text.len()).ok().filter(|&n| n < 1 << 31).expect("more than 2 GB of class names");
+        match name {
+            Cow::Owned(s) if s.len() >= BIG_NAME => {
+                self.starts.push(BIG | self.big.len() as u32);
+                self.big.push((start, s.into_boxed_str()));
+            }
+            name => {
+                self.starts.push(start);
+                self.text.push_str(&name);
+            }
+        }
         self.slots[at] = id + 1;
-        if self.spans.len() * 2 > self.slots.len() {
+        if self.starts.len() * 4 > self.slots.len() * 3 {
             self.grow();
         }
         CLASS_COUNT.with(|c| c.set(id + 1));
@@ -276,7 +297,7 @@ impl ClassTable {
     fn grow(&mut self) {
         let mut slots = vec![0u32; self.slots.len() * 2];
         let mask = slots.len() - 1;
-        for i in 0..self.spans.len() {
+        for i in 0..self.starts.len() {
             let mut at = Self::hash(self.name(i)) & mask;
             while slots[at] != 0 {
                 at = (at + 1) & mask;
@@ -288,7 +309,7 @@ impl ClassTable {
 }
 
 thread_local! {
-    static CLASSES: RefCell<ClassTable> = const { RefCell::new(ClassTable { text: String::new(), spans: Vec::new(), slots: Vec::new() }) };
+    static CLASSES: RefCell<ClassTable> = const { RefCell::new(ClassTable { text: String::new(), starts: Vec::new(), slots: Vec::new(), big: Vec::new() }) };
     /// The number of names in the class table. It only grows, so it tells a document that its class lists are old (`ClassCache::epoch`).
     static CLASS_COUNT: Cell<u32> = const { Cell::new(0) };
 }
@@ -1467,8 +1488,8 @@ impl Document {
 
     /// The number of a class name, added to the class table of the thread when it is new. For the names of selectors: a name that is added makes
     /// the class lists of all the documents of the thread old (`with_classes`).
-    pub fn class_id(&self, class: &str) -> ClassId {
-        ClassId(CLASSES.with(|t| t.borrow_mut().intern(class)))
+    pub fn class_id<'a>(&self, class: impl Into<Cow<'a, str>>) -> ClassId {
+        ClassId(CLASSES.with(|t| t.borrow_mut().intern(class.into())))
     }
 
     /// The number of a class name that a selector uses, or `None` for any other name. It adds nothing: one hash probe.
@@ -2835,6 +2856,30 @@ mod tests {
         assert_ne!(a.class_id("cls-1"), a.class_id("cls-10"));
         assert_ne!(a.class_id(""), a.class_id("cls-1"));
         assert_eq!(a.class_id("é-ß-猫"), b.class_id("é-ß-猫"));
+    }
+
+    /// A long name that is given as a `String` is kept as it is. The names before and after it, and the lookup of all, are not changed by it.
+    #[test]
+    fn long_names_sit_between_short_ones() {
+        let doc = Document::new();
+        let long = |c: char| c.to_string().repeat(3000);
+        let ids: Vec<ClassId> = vec![
+            doc.class_id("before"),
+            doc.class_id(long('x')),
+            doc.class_id("between"),
+            doc.class_id(long('y').as_str()),
+            doc.class_id(long('z')),
+            doc.class_id("after"),
+        ];
+        assert_eq!(ids.iter().map(|c| c.index()).collect::<Vec<_>>(), [0, 1, 2, 3, 4, 5]);
+        for (name, id) in ["before", &long('x'), "between", &long('y'), &long('z'), "after"].into_iter().zip(&ids) {
+            assert_eq!(doc.class_lookup(name), Some(*id), "{}", name.len());
+            assert_eq!(doc.class_id(name), *id);
+            assert_eq!(doc.class_id(name.to_string()), *id, "an owned name that is there is not added again");
+            assert_eq!(CLASSES.with(|t| t.borrow().name(id.index() as usize).len()), name.len());
+        }
+        assert!(doc.class_lookup(&long('w')).is_none());
+        assert_eq!(doc.class_lookup(&"x".repeat(2999)), None);
     }
 
     /// `has_class_id` says what `has_class` says, for short and long lists, repeats, a name that is a prefix, and a different case.
