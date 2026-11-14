@@ -86,7 +86,7 @@ use crate::browser_style::{current, keys_of};
 use crate::browser_style_block::{self as blk, Fail, Lim, custom};
 use crate::browser_used::{Ctx, calc_of, calc_text, flow_text, grid_text};
 use crate::browser_ui::chains;
-use bare_css::cascade::{self, ComputedStyle, Origin, RuleSet, Scopes, Source, Styles, UA_CSS, inherited};
+use bare_css::cascade::{self, ComputedStyle, Origin, RuleSet, Scopes, Source, StyleChain, Styles, UA_CSS, inherited};
 use bare_css::rule_cache::{self, Part};
 use bare_css::values::{Keyword, Length, Property, SHORTHANDS, Value as Cv, shorthand_longhands};
 use bare_html::dom::{DAMAGE_STYLE, Mark, NodeData, NodeId};
@@ -161,6 +161,8 @@ pub struct ComputedStats {
     /// Reads that restyled only the elements that the changes reach (`RuleSet::restyle`), and hidden reads that styled only the
     /// way down to the element (`RuleSet::style_hidden`). They are not in `computes`.
     pub restyles: u64,
+    /// Reads that styled only the elements from the root down to the one asked about (`RuleSet::style_chain`). They are not in `computes`.
+    pub chains: u64,
 }
 
 /// The key of `Built::last`.
@@ -179,6 +181,11 @@ pub(crate) struct Built {
     /// Two places: `[0]` for no `want`, `[1]` for a `want`. A read of a hidden element asks for both (`snapshot`), and one
     /// place made each such read throw away the other cascade: a poll of a hidden element did two full cascades for each read.
     last: [Option<(LastKey, bool, Rc<Styles>)>; 2],
+    /// The styles of the elements that `getComputedStyle` asked about, and of their ancestors, at the revision of the key (`snapshot`). They are made
+    /// only while no cascade of the whole document is kept in `last[0]`, and they are not read again by anything else.
+    chain: Option<(LastKey, StyleChain)>,
+    /// Do the rules set a `transition-*` or `animation-*` property, or have `@keyframes`? A read of the whole document starts them (`motion_seen`): a chain read does not.
+    motion: Cell<Option<bool>>,
     /// `Some` when `last[0]` is the cascade of the reads: the document logs its changes for it (`DAMAGE_STYLE`), and the next read
     /// restyles only what they reach. The user state chains (`chains`) of that cascade.
     read: Option<[Vec<NodeId>; 3]>,
@@ -212,6 +219,7 @@ pub(crate) struct Computed {
     builds: Cell<u64>,
     computes: Cell<u64>,
     restyles: Cell<u64>,
+    chains: Cell<u64>,
 }
 
 const MISSING: &str = "computed style needs an external stylesheet that the embedder has not supplied (Browser::style_availability lists them)";
@@ -274,6 +282,8 @@ pub(crate) struct Snap {
     pub(crate) style: ComputedStyle,
     /// The element is not rendered: it, or an ancestor, is `display:none`. Its resolved values are the computed ones.
     pub(crate) hidden: bool,
+    /// Only the element and its ancestors have a style in `styles` (`Styles::partial`): layout cannot run on them.
+    pub(crate) partial: bool,
 }
 
 /// A number as Chrome prints it: 6 significant digits, no trailing zeros, no `-0`.
@@ -515,7 +525,7 @@ impl Dom {
     }
 
     fn cascade_with(&self, it: &mut Interp<'_>, want: Option<NodeId>, keep: bool) -> R<Rc<Styles>> {
-        let styles = self.cascade_inner(it, want, keep)?;
+        let styles = self.cascade_inner(it, want, keep, None)?;
         if want.is_none() {
             let key = self.motion_key();
             // A cascade that the last one answered again has nothing new to show.
@@ -526,7 +536,20 @@ impl Dom {
         Ok(styles)
     }
 
-    fn cascade_inner(&self, it: &mut Interp<'_>, want: Option<NodeId>, keep: bool) -> R<Rc<Styles>> {
+    /// The styles for a read of `el` that needs no layout: the cascade of the whole document when one is kept and current (or when
+    /// the chain cannot be used), else only the elements from the root down to `el` (`Styles::partial`).
+    fn cascade_lazy(&self, it: &mut Interp<'_>, el: NodeId) -> R<Rc<Styles>> {
+        let styles = self.cascade_inner(it, None, false, Some(el))?;
+        if !styles.partial() {
+            let key = self.motion_key();
+            if self.motion_key_changed(key) {
+                self.motion_seen(it, &styles)?;
+            }
+        }
+        Ok(styles)
+    }
+
+    fn cascade_inner(&self, it: &mut Interp<'_>, want: Option<NodeId>, keep: bool, lazy: Option<NodeId>) -> R<Rc<Styles>> {
         let l = self.computed.lim.get();
         let vp = self.plat.s.borrow().viewport;
         let t0 = crate::force::start();
@@ -604,7 +627,7 @@ impl Dom {
                 if doc.name_count() > self.lim.max_names {
                     return Err(self.lim("dom-names"));
                 }
-                *cache = Some(Built { vp, key: plan.parts, inputs: plan.inputs, rules, shared: share, last: [None, None], read: None, odd: OnceCell::new(), stamp });
+                *cache = Some(Built { vp, key: plan.parts, inputs: plan.inputs, rules, shared: share, last: [None, None], chain: None, motion: Cell::new(None), read: None, odd: OnceCell::new(), stamp });
                 if share {
                     rule_cache::settle();
                 }
@@ -618,6 +641,8 @@ impl Dom {
         let built = cache.as_mut().expect("built");
         if self.style.has_pending.get() && Rc::get_mut(&mut built.rules).expect("rules of a document with retained inputs are its own").set_inline_inputs(self.style_inputs(it, &doc)?) {
             built.last = [None, None];
+            built.chain = None;
+            built.motion.set(None);
             built.read = None;
         }
         // The bound of a full compute: nodes x (rules + 1), or styled elements x (rules + 1) when that is over `STYLED_FROM`. It is the cap
@@ -642,6 +667,31 @@ impl Dom {
             it.charge(1)?;
             crate::force::style("hit", t0, 0);
             return Ok(styles.clone());
+        }
+        // A read of one element that needs no layout, and no cascade of the whole document is kept: style the way down to the element only.
+        // A cascade that is kept is updated for the changes (below), which costs what they reach, so it stays the way for a page that has one.
+        if let Some(el) = lazy
+            && built.last[0].is_none()
+            && !built.motion.get().unwrap_or_else(|| {
+                let m = built.rules.has_motion();
+                built.motion.set(Some(m));
+                m
+            })
+        {
+            if built.chain.as_ref().is_some_and(|c| c.0 != key) {
+                built.chain = None;
+            }
+            let chain = &mut built.chain.get_or_insert_with(|| (key, StyleChain::new(&built.rules, &doc))).1;
+            let (tested, styled) = (built.rules.tested_candidates(), built.rules.styled_elements());
+            if let Some(styles) = built.rules.style_chain(&doc, chain, el)
+                // A style that starts a transition or an animation needs the cascade of the page before it, to compare with: the whole cascade.
+                && !styles.style(el).is_some_and(crate::browser_motion::has_motion)
+            {
+                it.charge((built.rules.styled_elements() - styled).saturating_mul(STEPS_PER_RESTYLED_ELEMENT).saturating_add(built.rules.tested_candidates() - tested).saturating_add(1))?;
+                crate::force::style("chain", t0, built.rules.styled_elements() - styled);
+                self.computed.chains.set(self.computed.chains.get() + 1);
+                return Ok(styles);
+            }
         }
         // A read after changes: restyle the cascade of the last read only where the changes reach, as a window frame does.
         let read = want.is_none() && !keep;
@@ -740,11 +790,16 @@ impl Dom {
 
     /// The style of `el` now, or `None` when the element is not connected (an empty declaration).
     pub(crate) fn snapshot(&self, it: &mut Interp<'_>, el: NodeId) -> R<Option<Snap>> {
+        self.snapshot_with(it, el, false)
+    }
+
+    /// `snapshot`. With `lazy`, the styles may be the chain of `el` only (`Snap::partial`): the caller reads no value that needs layout.
+    pub(crate) fn snapshot_with(&self, it: &mut Interp<'_>, el: NodeId, lazy: bool) -> R<Option<Snap>> {
         let _caller = crate::force::tag("getComputedStyle");
         if !self.in_document(it, el)? {
             return Ok(None);
         }
-        let mut styles = self.cascade_for(it, None)?;
+        let mut styles = if lazy { self.cascade_lazy(it, el)? } else { self.cascade_for(it, None)? };
         let style = match styles.style(el).cloned() {
             Some(style) => style,
             None => {
@@ -782,7 +837,8 @@ impl Dom {
         }
         drop(doc);
         it.charge(n / 8 + 1)?;
-        Ok(Some(Snap { styles, style, hidden }))
+        let partial = styles.partial();
+        Ok(Some(Snap { styles, style, hidden, partial }))
     }
 
     fn connected(&self, it: &mut Interp<'_>, el: NodeId) -> R<bool> {
@@ -844,14 +900,19 @@ impl Dom {
         if long == Some(Property::Direction) && self.connected(it, el)? && self.direction_needs_text(it, el)? {
             return Err(Self::gate(AUTO_DIR));
         }
-        let Some(s) = self.snapshot(it, el)? else { return Ok(String::new()) };
+        let longs = long.as_ref().map(std::slice::from_ref).or_else(|| shorthand_longhands(&key));
+        // The chain of `el` has the styles of `el` and its ancestors. A value that layout decides needs those of the whole page.
+        let Some(mut s) = self.snapshot_with(it, el, true)? else { return Ok(String::new()) };
+        if s.partial && !is_custom && kind != PSEUDO && self.layout_wanted(&s, el, longs.expect("a longhand or a shorthand")).is_some() {
+            s = self.snapshot(it, el)?.expect("in the document");
+        }
         if is_custom {
             return Ok(s.styles.custom_properties(&s.style).iter().find(|(n, _)| **n == *key).map(|(_, t)| t.to_string()).unwrap_or_default());
         }
-        let longs = long.as_ref().map(std::slice::from_ref).or_else(|| shorthand_longhands(&key)).expect("a longhand or a shorthand");
+        let longs = longs.expect("a longhand or a shorthand");
         // A pseudo-element has no box here: no layout, and the computed values stay.
         let used = if kind == PSEUDO { None } else { self.used_for(it, &s, el, longs)? };
-        let init = (kind == PSEUDO).then(|| Snap { styles: s.styles.clone(), style: ComputedStyle::initial(), hidden: true });
+        let init = (kind == PSEUDO).then(|| Snap { styles: s.styles.clone(), style: ComputedStyle::initial(), hidden: true, partial: s.partial });
         let pick = |p: Property| match &init {
             Some(i) if !inherited(p) => i,
             _ => &s,
@@ -1072,7 +1133,7 @@ fn length(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     if d.computed_kind(this) == EMPTY {
         return Ok(Value::Number(0.0));
     }
-    let n = d.snapshot(it, el)?.map_or(0, |s| Property::LISTED.len() + s.styles.custom_properties(&s.style).len());
+    let n = d.snapshot_with(it, el, true)?.map_or(0, |s| Property::LISTED.len() + s.styles.custom_properties(&s.style).len());
     Ok(Value::Number(n as f64))
 }
 
@@ -1088,7 +1149,7 @@ fn item(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     if d.computed_kind(this) == EMPTY {
         return d.js_str(it, "");
     }
-    let Some(s) = d.snapshot(it, el)? else { return d.js_str(it, "") };
+    let Some(s) = d.snapshot_with(it, el, true)? else { return d.js_str(it, "") };
     it.charge((Property::LISTED.len() + s.styles.custom_properties(&s.style).len()) as u64)?;
     d.js_str(it, names(&s).get(i).copied().unwrap_or(""))
 }
@@ -1174,6 +1235,7 @@ impl Browser {
             builds: c.builds.get(),
             computes: c.computes.get(),
             restyles: c.restyles.get(),
+            chains: c.chains.get(),
         }
     }
 

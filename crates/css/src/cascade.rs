@@ -56,6 +56,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::hash::BuildHasherDefault;
+use std::rc::Rc;
 
 use bare_html::dom::{Atom, ClassId, Document, Fnv, Mark, NodeData, NodeId};
 
@@ -1243,7 +1244,7 @@ impl RuleSet {
     #[inline(never)]
     fn walk<const WANT: bool, const PENDING: bool, const TRACK: bool>(&self, doc: &Document, want: Option<NodeId>, keep: bool) -> Styles {
         let mut way = Way { want, path: Vec::new(), sorted: Vec::new(), on: false, at: 0 };
-        let mut styles = Styles { styles: vec![ComputedStyle::initial()], of_node: vec![NONE; doc.len()], calcs: Vec::new(), grids: Vec::new(), customs: var::Sets::default(), spaced: false, wrapping: false, kept: None };
+        let mut styles = Styles { styles: vec![ComputedStyle::initial()], of_node: vec![NONE; doc.len()], calcs: Vec::new(), grids: Vec::new(), customs: var::Sets::default(), spaced: false, wrapping: false, kept: None, partial: false };
         // Style 0 is the starting style. It is the parent style of the `html` element.
         let mut cx = Cx { viewport: self.viewport, root_font_size: 16.0, layer_order: self.layer_order(), declared: &self.side, inline: RefCell::default(), computed: RefCell::default(), grids: RefCell::default(), customs: RefCell::default(), merges: RefCell::default() };
         let style_atom = doc.find_atom("style");
@@ -1478,10 +1479,14 @@ impl RuleSet {
 
     /// A `Cx` that adds to the value lists of `styles` and to the indexes of `k`, so that equal values keep their numbers.
     fn kept_cx(&self, styles: &mut Styles, k: &mut StyleKeep) -> Cx<'_> {
+        self.kept_cx_in(styles, k, self.layer_order())
+    }
+
+    fn kept_cx_in(&self, styles: &mut Styles, k: &mut StyleKeep, layer_order: Vec<u32>) -> Cx<'_> {
         Cx {
             viewport: self.viewport,
             root_font_size: k.rem,
-            layer_order: self.layer_order(),
+            layer_order,
             declared: &self.side,
             inline: RefCell::default(),
             computed: RefCell::new(Computed { list: std::mem::take(&mut styles.calcs), index: std::mem::take(&mut k.calcs) }),
@@ -1490,19 +1495,19 @@ impl RuleSet {
                 g.list = std::mem::take(&mut styles.grids);
                 g
             }),
-            customs: RefCell::new(std::mem::take(&mut styles.customs)),
+            customs: RefCell::new(std::mem::replace(&mut styles.customs, var::Sets::moved_out())),
             merges: RefCell::default(),
         }
     }
 
     /// Give the lists of `kept_cx` back to `styles` and `k`.
     fn put_back(cx: Cx<'_>, styles: &mut Styles, mut k: Box<StyleKeep>) {
-        let c = cx.computed.take();
+        let c = cx.computed.into_inner();
         (styles.calcs, k.calcs) = (c.list, c.index);
-        let mut g = cx.grids.take();
+        let mut g = cx.grids.into_inner();
         styles.grids = std::mem::take(&mut g.list);
         k.grids = g;
-        styles.customs = cx.customs.take();
+        styles.customs = cx.customs.into_inner();
         styles.kept = Some(k);
     }
 
@@ -1570,6 +1575,73 @@ impl RuleSet {
         }
         Self::put_back(cx, styles, k);
         Some(styles.styles[parent as usize].clone())
+    }
+
+    /// The styles of the elements from the root element down to `want`, in `chain` (made for this `doc` by `StyleChain::new`): the values that
+    /// `compute_for(doc, Some(want))` gives for them. An element with a style is not styled again. The cost of the first read is the depth of
+    /// `want`, not the size of the page; the next element in document order costs one style and a step of the filter. `None` when it cannot: the
+    /// document has a shadow root (a change reaches through hosts, slots and parts), `want` is not an element on a path from the root, or
+    /// the chain is shared (a caller still holds its styles). Then use the whole cascade. The element is styled even inside `display: none`.
+    pub fn style_chain(&self, doc: &Document, chain: &mut StyleChain, want: NodeId) -> Option<Rc<Styles>> {
+        if self.pending.is_some() { self.chain_with::<true>(doc, chain, want) } else { self.chain_with::<false>(doc, chain, want) }
+    }
+
+    fn chain_with<const PENDING: bool>(&self, doc: &Document, chain: &mut StyleChain, want: NodeId) -> Option<Rc<Styles>> {
+        if doc.has_shadow_roots() || !matches!(doc.data(want), NodeData::Element { .. }) {
+            return None;
+        }
+        let mut path: Vec<NodeId> = std::iter::successors(Some(want), |&n| doc.parent(n)).collect();
+        if path.pop() != Some(doc.root()) || path.is_empty() {
+            return None;
+        }
+        path.reverse();
+        let Some(first) = path.iter().position(|n| chain.styles.of_node[n.index()] == NONE) else { return Some(chain.styles.clone()) };
+        let styles = Rc::get_mut(&mut chain.styles)?;
+        let mut k = styles.kept.take()?;
+        // The filter holds the ancestors of `path[first]`: leave the part of the last path that this path does not share, and enter the rest.
+        let shared = chain.open.iter().zip(&path[..first]).take_while(|(a, b)| a == b).count();
+        while chain.open.len() > shared {
+            let n = chain.open.pop().expect("longer than shared");
+            chain.filter.remove_element(doc, n);
+        }
+        for &a in &path[shared..first] {
+            chain.filter.add_element(doc, a);
+            chain.open.push(a);
+        }
+        let mut cx = self.kept_cx_in(styles, &mut k, std::mem::take(&mut chain.layers));
+        let (style_atom, hints) = (chain.style_atom, chain.hints.as_ref());
+        let (mut candidates, mut matched) = (std::mem::take(&mut chain.candidates), std::mem::take(&mut chain.matched));
+        let mut parent = if first == 0 { 0 } else { styles.of_node[path[first - 1].index()] };
+        for &node in &path[first..] {
+            self.candidates(doc, node, &mut candidates, &chain.filter);
+            matched.clear();
+            for &i in &candidates {
+                let e = &self.entries[i as usize];
+                let possible = e.ancestors.iter().take_while(|&&h| h != 0).all(|&h| chain.filter.may_contain(h));
+                if possible && matches(doc, node, &e.selector) {
+                    matched.push(i);
+                }
+            }
+            matched.sort_unstable();
+            let inline = style_atom.and_then(|a| doc.attr(node, a));
+            let input = if PENDING { self.pending.as_ref().and_then(|all| all.get(&node)).map(Vec::as_slice) } else { None };
+            let hint = hints.and_then(|h| h.of(doc, node));
+            parent = self.style_of::<PENDING>(styles, &mut k.memo, parent, &matched, (inline, hint.as_deref()), &cx, input);
+            styles.of_node[node.index()] = parent;
+            if doc.parent(node) == Some(doc.root()) {
+                // The root element. `rem` is a multiple of its font size, for the elements below it.
+                k.rem = styles.styles[parent as usize].px(Property::FontSize);
+                cx.root_font_size = k.rem;
+            }
+            // `want` is not an ancestor of anything that this read styles: a later read that goes below it enters it then.
+            if node != want {
+                chain.filter.add_element(doc, node);
+                chain.open.push(node);
+            }
+        }
+        (chain.layers, chain.candidates, chain.matched) = (std::mem::take(&mut cx.layer_order), candidates, matched);
+        Self::put_back(cx, styles, k);
+        Some(chain.styles.clone())
     }
 
     /// The rules that match `node` when the document has a shadow root: `matched` is the list (not sorted). `scope` is the tree of `node` (0 for the
@@ -2309,6 +2381,8 @@ pub struct Styles {
     wrapping: bool,
     /// The cache of the cascade, for `RuleSet::restyle`. Only `RuleSet::compute_kept` keeps it.
     kept: Option<Box<StyleKeep>>,
+    /// Made by `RuleSet::style_chain`: only the elements that were asked for, and their ancestors, have a style. Layout needs the styles of a whole page.
+    partial: bool,
 }
 
 /// What `RuleSet::restyle` needs from the cascade that made the styles: the style cache and the indexes of the value lists, so
@@ -2321,6 +2395,39 @@ struct StyleKeep {
     rem: f32,
     /// How many styles the full cascade made.
     base: usize,
+}
+
+/// The styles that `getComputedStyle` asked for, and the styles of their ancestors, in one document at one revision (`RuleSet::style_chain`). The
+/// ancestor filter stays open on the path of the last read, so that a read of the next element in the document pays for the steps that differ.
+pub struct StyleChain {
+    styles: Rc<Styles>,
+    filter: AncestorFilter,
+    /// The elements whose hashes are in `filter`, from the root element down: the path of the last read.
+    open: Vec<NodeId>,
+    /// What each read needs and the document and the rules fix for the revision: made once, not for each read.
+    style_atom: Option<Atom>,
+    hints: Option<crate::hints::Hints>,
+    layers: Vec<u32>,
+    candidates: Vec<u32>,
+    matched: Vec<u32>,
+}
+
+impl StyleChain {
+    /// No element has a style yet. It is the size of `doc`: the document must not change while the chain is used.
+    pub fn new(rules: &RuleSet, doc: &Document) -> StyleChain {
+        let kept = StyleKeep { memo: Memo::default(), calcs: HashMap::default(), grids: grid::Kept::default(), rem: 16.0, base: 1 };
+        let styles = Styles { styles: vec![ComputedStyle::initial()], of_node: vec![NONE; doc.len()], calcs: Vec::new(), grids: Vec::new(), customs: var::Sets::default(), spaced: false, wrapping: false, kept: Some(Box::new(kept)), partial: true };
+        StyleChain {
+            styles: Rc::new(styles),
+            filter: AncestorFilter::new(rules.tracks()),
+            open: Vec::new(),
+            style_atom: doc.find_atom("style"),
+            hints: crate::hints::Hints::new(doc),
+            layers: rules.layer_order(),
+            candidates: Vec::new(),
+            matched: Vec::new(),
+        }
+    }
 }
 
 /// A copy of the styles of the elements, for a host that compares two cascades (`bare/src/browser_motion.rs`). It holds the
@@ -2357,6 +2464,11 @@ impl Styles {
     }
 
     pub fn wrapping(&self) -> bool { self.wrapping }
+
+    /// Do only some elements have a style (`RuleSet::style_chain`)? Then layout and paint cannot use these styles.
+    pub fn partial(&self) -> bool {
+        self.partial
+    }
 
     pub fn spaced(&self) -> bool {
         self.spaced

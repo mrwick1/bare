@@ -11733,3 +11733,70 @@ Caveats.
 Not tested: opening a message, scrolling, search, compose, a second account, a Chrome run with the same empty cache as bare, and bare on a symbol build (no hot-function split).
 
 Scripts and raw output: `/data/bare-tmp/gmail-compare/` (`chrome-run.mjs`, `bare-run.py`, `clean.mjs`, `analyze.py`, `raw/`). They are not in the repository.
+
+## 2026-11-15: criterion 3, design H built: `getComputedStyle` styles the way down to the element
+
+### Owner decision (2026-11-15)
+
+Build design H of `docs/design-compm-10x.md`, slices H1 to H3. One PR for the three slices: H1 alone changes no behavior and H3 is the numbers of H2. Decision text: `docs/decisions.md`.
+
+### What was built
+
+- `RuleSet::style_chain` and `StyleChain` (`crates/css/src/cascade.rs`): the styles of the elements from the root element down to the element asked about, in a `Styles` that is `partial`. The ancestor filter stays open on the path of the last read, so the next element in document order costs one style and no filter work for its ancestors. The `kept_cx`/`put_back` pair now moves `Sets` with no allocation (`Sets::moved_out`, `into_inner`): it cost 2.5 k instructions for each chain read.
+- `cascade_inner` (`browser_computed.rs`) takes the chain when `built.last[0]` is empty (no cascade of the whole document is kept), the rule set has no motion, and the style of the element has none. A value that layout may decide is read from the chain first; if `layout_wanted` says it needs the box, the read takes the whole cascade as before (`Snap::partial`). `length` and `item` use the chain too.
+- Not used for: a document with a shadow root, a rule set with `transition-*`, `animation-*` or `@keyframes`, an element with such a style, a page that has a kept cascade (it lays out: the old restyle path stays). The limits `computed-work` and `computed-nodes` still run first, so `compm_24000` and larger are still refused. Chain reads make them unneeded; lifting them is a separate decision.
+
+### Tests (written first)
+
+`crates/bare/src/browser_computed_chain_tests.rs`, 10 tests. The oracle is a second browser that read layout first, so it answers from the full cascade. Every element and every property that needs no layout (about 110 properties and the custom properties) is compared in document order, reverse order and a mixed order, on a page with inheritance, `em`, `rem`, `currentColor`, custom properties with `var()` and `calc()`, `:nth-child`, `+`, `~`, `>`, descendant, `:checked`, `:empty`, `:first-child`, `:last-child`, an inline style, a `display: none` subtree and the `hidden` attribute. The same after each of: a class change on an ancestor, a class and an attribute change on a sibling, a checkbox, an added and a removed node, a text edit, an inline style write, a new `<style>`, a changed `<style>` text, the root font size, and a subtree hidden and shown. Also: reads and writes in one script, hidden elements, a layout read after a style read (`getBoundingClientRect`, `offsetHeight`, `width`, `height`, `padding`, `margin`: same values as the oracle, one full cascade), fixed-length shorthands on the chain, a detached element, a page with a shadow tree, and pages with motion. Each test asserts that the lazy browser made no full cascade and that the chain ran. I broke the invalidation on purpose (kept a stale chain): 2 tests failed. `:has()` is not supported by the engine (`selector.rs`), so it has no case.
+Five tests of `browser_computed_tests.rs` counted the full cascade of a first style read (`computes == 1`). The counts changed on purpose: three now start with a read of `width`, which keeps the cascade of the page (the machinery they test), two expect `(computes, chains) == (0, 1)`, and one reads `width` after to reach the full cascade.
+
+### Numbers (instructions:u, `bare-drive` through `tools/` pages of `/data/bare-tmp/bm/b`, 3 runs each, spread at most 0.03%)
+
+Machine archMachine. BASE `f6415364`, MAIN `bcc7a7e5` (newest main; later commits are docs only), NEW the branch.
+
+| Page | BASE M | MAIN M | NEW M | NEW against BASE | NEW against MAIN |
+| --- | --- | --- | --- | --- | --- |
+| `compm_22000` | 11,664.4 | 1,558.6 | 400.1 | 29.2x | -74.3% |
+| `rest_13` | 10,873.4 | 1,042.5 | 1,042.5 | 10.43x | 0.00% |
+| `compm_1000` | 108.2 | 77.5 | 25.9 | 4.2x | -66.5% |
+| `compm_2000` | 248.1 | 146.6 | 43.8 | 5.7x | -70.1% |
+| `compm_4000` | 653.3 | 285.7 | 79.3 | 8.2x | -72.3% |
+| `compm_8000` | 1,952.7 | 565.4 | 150.3 | 13.0x | -73.4% |
+| `compm_12000` | 3,823.8 | 777.0 | 223.6 | 17.1x | -71.2% |
+| `compm_16000` | 6,516.9 | 1,127.7 | 294.6 | 22.1x | -73.9% |
+| `compm_20000` | 9,786.3 | 1,414.7 | 364.7 | 26.8x | -74.2% |
+
+`compm_22000` is below the goal of 1,166 M by a factor of 2.9; the design estimate was 393 M (370 to 420 M), measured 400.1 M. Peak RSS of `compm_22000`: BASE 70.7 MiB, MAIN 67.4, NEW 33.8. `compm_11000`, `compm_18000`: -74.0% and -70.9%. `compm_24000` and larger (24, 30, 32, 34 thousand) are refused by `computed-work` on all three, equal on MAIN and NEW. `rest_2` to `rest_50`, `rest_200`, `rest_1000`: MAIN and NEW equal within 0.01%.
+
+Read-all loop (a script that reads `color` of every element of the 44,002-element `compm_22000` page; the three pages are in `/data/claude-tmp/claude-1000/pages/`, not in the repository):
+
+| Loop | BASE M | MAIN M | NEW M | NEW against MAIN |
+| --- | --- | --- | --- | --- |
+| all elements, document order | 4,821.1 | 1,425.6 | 1,511.4 | +6.0% (1.06x) |
+| all elements, reverse order | 4,807.9 | 1,412.2 | 1,479.8 | +4.8% |
+| the 22,000 `span` only | 4,549.8 | 1,217.7 | 1,266.8 | +4.0% |
+
+The design said about 1.3x. Measured 1.06x, because the filter stays open on the path (document order) and a leaf is not added to it. This is the cost of the design: a page that reads every element and no layout pays 4 to 6% more than the full cascade. No limit and no switch was added.
+
+Other gates, all against MAIN:
+
+- `bare-stress scale css`, 2 runs each: 145 cases, the 76 of 5 MB or more: peak MB equal on all (0.0% change; the stress cases do not read computed style, so this checks the other paths).
+- `keycost.sh` (page `/data/bare-tmp/typing-page-lazy-arrow`): 278.4 M for each key (`#a1`), 283.7 M (`#f0`), load and mount 591.0 M, RSS 31.1 MiB at 50 keys; equal on MAIN and NEW.
+- 47 journeys (`tools/bench/journeys.sh compare --clock virtual --runs 3 --pss`, corpus `virtual-load`, `nextjs-docs` skipped): 47 pass on both, no replay miss, sum of medians 73,242.6 M against 73,243.4 M (+0.0%, no journey over +0.1%), PSS +0.3% (noise). The journeys do not move, as the design said: they lay out first, so a kept cascade exists and the old path runs. The frozen BASE cannot replay this corpus (43 pass), so the journeys are compared with MAIN only.
+- Cost matrix against MAIN (805 rows, 803 measured, glibc and jemalloc): 0 rows over +0.5% under both allocators, 0 under one; mean glibc -0.043%. A first run flagged `sheets_load linked 10` (+1.2% and +0.9%): 80 reads of 80 sibling elements cost 2.8 k instructions more for each read than the full cascade. The `Sets` move and the leaf rule cut it to +0.33% glibc and +0.17% jemalloc. `parse_load deep 1` and `deep 10` fail to run (the known stack overflow, same on MAIN).
+- `cargo test --release --workspace`: 4,052 passed, 8 failed, all known: 7 openssl TLS tests and `a_hidden_iframe_download_is_saved` (flaky under load).
+- test262: no regression (exit 0; the checkout is newer than the baseline, so "newly passing" lines appear; no JS crate file changed). `exec_diff.sh`: 79 runs, 0 differences.
+
+### Not tested
+
+- Wall time on an idle machine. Real sites with a script that reads styles before any layout (the corpus has none that moves: the journeys lay out first).
+- A transition that starts from a baseline read of another element: with an inline `transition` on A, a read of B, a change of A and a read of A, the transition does not start on the chain path (before: the read of B made the baseline). Rules with motion and elements with a motion style take the whole cascade, so only this inline case is open.
+- `:has()` (not supported by the engine), pages with shadow roots (they take the whole cascade), the effect on memory of pages that read many different elements (the chain keeps its own style list until the next change).
+- Gmail and other live pages.
+
+### Noticed, not changed
+
+- `compm_24000` and larger are refused by `computed-work` (nodes x rules) although a chain read does not do that work. Moving that check behind the chain would lift it. Owner decision.
+- `rest_1000` costs 47.1 G on MAIN (11.6 G on BASE, refused there by `computed-work`).
+- `nextjs-docs` does not replay; `parse_load deep 1/10` overflow the stack; the 7 openssl tests fail on MAIN (all as listed by the owner).
