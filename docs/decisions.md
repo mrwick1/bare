@@ -2184,3 +2184,7 @@ The owner approved criterion 8 of [the design](design-style-round2.md) and asked
 - Add `Document::may_have_name`: a set of 64-bit hashes of every `id` and `name` value that the document ever had. It only grows. A name that is not in it is a miss with no walk. It costs one hash look-up for each `id` or `name` write, and 8 bytes for each distinct value. Chosen over a walk for every miss: the page probes about 17 names that no element has.
 - Build the list after 16 walks at one name revision (`WALKS`), and for an index (`window[0]`) and key enumeration. A walk costs about 1/20 of a list.
 - Choose W1 over W2 (an index of `id` and `name` in the `Document`): W2 has the same gain here and a larger change. The owner chose W1 on 2026-11-14.
+
+## 2026-11-14: skip data for nested lazy functions, then one pointer swap for a script slot (R2-D)
+
+Owner decision 2026-11-14: build design A of `docs/design-js-reparse.md` first, then design S, as two PRs in order. Chosen: A keeps the lazy stubs of a dropped function body as skip data (`LazyFn.inner`, `end`, `strict_out`), so the second parse of a function that runs jumps over the lazy bodies inside it. Measured -2,080 M instructions over the 47 journeys with the peak RSS unchanged (`docs/progress.md`, "R2-D build, PR 1"). Other designs, not built: no lazy functions (-3,490 M but +61.9 MiB peak RSS), a higher body limit, an eager rule for call forms, and a record of which functions ran. S follows in PR 2.

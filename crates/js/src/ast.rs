@@ -626,6 +626,13 @@ pub struct LazyFn {
     pub mode: FuncMode,
     /// The code around the function was strict (the function may become strict by a directive of its own).
     pub strict: bool,
+    /// The byte after the `}` of the body, and the strict state after the body (a directive of the body). A second parse of the code around
+    /// the function jumps to `end` and goes on in that state.
+    pub end: u32,
+    pub strict_out: bool,
+    /// The lazy functions that the first parse found in the body, by start (they were dropped with it). The second parse of this function skips
+    /// their bodies: a function that runs is parsed twice, not once for each lazy function around it.
+    pub(crate) inner: Option<Rc<[LazyFn]>>,
     /// The tree of the function, made by the first [`Program::lazy_function`]. It is shared by every realm that runs this program.
     pub(crate) parsed: OnceCell<Rc<Program<'static>>>,
 }

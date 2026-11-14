@@ -234,6 +234,7 @@ fn parse_counted<'a>(source: &'a str, mut limits: Limits, used: &mut u32, module
         in_class: 0,
         facts: 0,
         eager_at: u32::MAX,
+        skip: None,
         check_regexp: true,
     };
     if module && lazy {
@@ -285,6 +286,7 @@ pub(crate) fn parse_lazy_function(src: &Rc<str>, marks: &crate::ast::Marks, modu
         in_class: 0,
         facts: 0,
         eager_at: lz.start,
+        skip: lz.inner.clone(),
         // The first parse of the whole text checked it.
         check_regexp: false,
     };
@@ -470,6 +472,9 @@ struct Parser<'a> {
     in_class: u32,
     /// What the code since the start of the function used (`FACT_*`). A function that used `super` or `new.target` is not lazy.
     facts: u8,
+    /// The lazy functions that the first parse found in the body of the function that is parsed again ([`LazyFn::inner`]), by start. The second
+    /// parse skips their bodies. `None` in the first parse.
+    skip: Option<Rc<[LazyFn]>>,
     /// The start of the token after a `(` or a unary operator: a function that starts there is probably called at once, so it is not lazy.
     eager_at: u32,
     check_regexp: bool,
@@ -3313,6 +3318,18 @@ impl<'a> Parser<'a> {
             let body = self.parse_function_body(info)?;
             return Ok((params, Body::Block(body), simple));
         }
+        // The first parse found this function in the body that is parsed again: its body is checked, so the lexer jumps over it.
+        if let Some(e) = self.skip.as_ref().and_then(|t| t.binary_search_by_key(&start, |e| e.start).ok().map(|i| t[i].clone())) {
+            self.lex.seek(e.end);
+            self.tok.end = e.end;
+            self.peeked = None;
+            self.advance()?;
+            self.strict = e.strict_out;
+            let lz = self.p.lz_mut();
+            let idx = lz.lazies.len() as u32;
+            lz.lazies.push(e);
+            return Ok((params, Body::Lazy(idx), simple));
+        }
         // Check the body as before, then drop its nodes: the first call parses the function again. Every early error is found now.
         let (mark, strict_in, body_at) = (self.arena_mark(), self.strict, self.tok.start);
         let outer_facts = std::mem::take(&mut self.facts);
@@ -3323,10 +3340,21 @@ impl<'a> Parser<'a> {
         if facts & (FACT_SUPER | FACT_NEW_TARGET) != 0 || self.prev_end - body_at < LAZY_MIN_BODY {
             return Ok((params, Body::Block(body), simple));
         }
+        // The lazy functions of the body stay as skip data for the second parse of this function.
+        // A function in the parameters of a later sibling is made before it, so the list may be out of order: the lookup needs it sorted.
+        let inner = self.p.lz.as_mut().map(|l| l.lazies.split_off(mark.lazies)).filter(|v| !v.is_empty()).map(|mut v| {
+            if !v.is_sorted_by_key(|e| e.start) {
+                v.sort_unstable_by_key(|e| e.start);
+            }
+            v
+        });
         self.arena_truncate(&mark);
         let lz = self.p.lz_mut();
         let idx = lz.lazies.len() as u32;
-        lz.lazies.push(LazyFn { params_at: pstart, name, start, kind, mode: FuncMode::Plain, strict: strict_in, parsed: OnceCell::new() });
+        lz.lazies.push(LazyFn {
+            params_at: pstart, name, start, kind, mode: FuncMode::Plain, strict: strict_in, end: self.prev_end, strict_out: self.strict,
+            inner: inner.map(Rc::from), parsed: OnceCell::new(),
+        });
         Ok((params, Body::Lazy(idx), simple))
     }
 

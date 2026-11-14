@@ -132,3 +132,105 @@ fn a_module_function_is_lazy_too() {
     let src = format!("export function f() {{ {} var await = 1; }}", pad());
     assert!(parse_module_lazy_used(&src, Limits::default()).0.is_err());
 }
+
+/// The nodes that the second parse of the function `idx` of `p` made, counted by the parser.
+fn second_parse_nodes(p: &Program<'static>, idx: u32) -> u32 {
+    p.lazy_function(idx, Limits::default()).unwrap().2.unwrap()
+}
+
+#[test]
+fn the_second_parse_skips_the_lazy_functions_inside_the_function() {
+    // f holds g, g holds h. The second parse of f and the second parse of g cost the same however long the bodies inside are.
+    let nodes = |k: usize| {
+        let src = format!("function f() {{ {} function g() {{ {} function h() {{ {} }} }} }}", pad(), pad().repeat(k), pad().repeat(k));
+        let p = lazy(&src);
+        let n_f = second_parse_nodes(&p, 0);
+        let (tf, _, _) = p.lazy_function(0, Limits::default()).unwrap();
+        let n_g = second_parse_nodes(&tf, 0);
+        let (tg, _, _) = tf.lazy_function(0, Limits::default()).unwrap();
+        let n_h = second_parse_nodes(&tg, 0);
+        (n_f, n_g, n_h)
+    };
+    let (small, big) = (nodes(1), nodes(6));
+    assert_eq!(small.0, big.0, "the second parse of f does not parse g again");
+    // g parses its own body and not the body of h; h parses its own body.
+    assert_eq!(big.1 - small.1, 5 * (nodes(2).1 - small.1));
+    assert!(big.2 > small.2);
+}
+
+/// The tree of the function at each lazy stub of `p` (and, recursively, of the trees below it) has the functions and statements that the
+/// full parse `eager` has for the same function.
+fn same_as_eager(p: &Program<'static>, eager: &Program<'_>, depth: usize) -> usize {
+    let mut seen = 0;
+    for i in 0..p.stats().lazies as u32 {
+        let (sub, fid, _) = p.lazy_function(i, Limits::default()).unwrap();
+        let f = sub.func(fid);
+        let ef = eager.funcs.iter().find(|e| e.span.start == f.span.start).unwrap_or_else(|| panic!("no function at {}", f.span.start));
+        assert_eq!((f.span, f.strict, f.simple_params, f.kind, f.mode, f.name), (ef.span, ef.strict, ef.simple_params, ef.kind, ef.mode, ef.name));
+        let (Body::Block(fb), Body::Block(eb)) = (f.body, ef.body) else { panic!("not a block") };
+        let spans = |p: &Program<'_>, l| p.list(l).map(|s| p.stmt(s).span).collect::<Vec<_>>();
+        assert_eq!(spans(&sub, fb), spans(eager, eb), "statements of the function at {}", f.span.start);
+        seen += 1 + same_as_eager(&sub, eager, depth + 1);
+    }
+    seen
+}
+
+#[test]
+fn a_skipped_function_leaves_the_parser_where_the_full_parse_leaves_it() {
+    let p = pad();
+    let g = format!("function g() {{ {p} }}");
+    let h = format!("function h() {{ {p} }}");
+    for body in [
+        // a declaration, then a regular expression statement (not a division)
+        format!("{g} /x/.test('x');"),
+        // an expression, then a newline and a division
+        format!("var a = function () {{ {p} }}\n/ 2 / 3;"),
+        // no semicolon: the next line starts a statement
+        format!("{g}\nfoo()"),
+        format!("var o = {{ m() {{ {p} }}, get x() {{ {p} }}, set x(v) {{ {p} }}, k: 1 }}; o.k"),
+        // a directive in the inner body makes it strict and not the code around it
+        format!("function s() {{ 'use strict'; {p} }} var l = 010;"),
+        format!("var t = function () {{ 'use strict'; {p} }}; with (o) {{}}"),
+        // a function in a block, a label, a function in a function that is kept (it is short)
+        format!("if (x) {{ {g} }} lbl: for (;;) {{ break lbl; }}"),
+        format!("function k() {{ {h} }} {g}"),
+        // two levels
+        format!("function g1() {{ {p} function g2() {{ {p} function g3() {{ {p} }} }} }} /y/g;"),
+        // a function that uses `super` is kept, its lazy function inside is not
+        format!("var q = {{ m() {{ {p} return super.x; }}, n() {{ {p} {g} }} }};"),
+    ] {
+        let src = format!("function f() {{ {p} {body} }}");
+        let eager = parse_script(&src, Limits::default()).unwrap_or_else(|e| panic!("{src}: {e}"));
+        let lz = lazy(&src);
+        assert!(same_as_eager(&lz, &eager, 0) >= 2, "{src}");
+    }
+}
+
+#[test]
+fn a_skipped_function_in_a_module_and_a_getter_load_with_their_own_tables() {
+    let p = pad();
+    let src = format!("export function f() {{ {p} var o = {{ get x() {{ {p} function z() {{ {p} }} }} }}; }}");
+    let (r, _) = parse_module_lazy_used(&src, Limits::default());
+    let prog = r.unwrap().into_owned();
+    let (tf, _, _) = prog.lazy_function(0, Limits::default()).unwrap();
+    assert_eq!(tf.stats().lazies, 1);
+    let (tg, fid, _) = tf.lazy_function(0, Limits::default()).unwrap();
+    assert_eq!(tg.func(fid).kind, FuncKind::Getter);
+    assert!(tg.func(fid).strict);
+    let (tz, zid, _) = tg.lazy_function(0, Limits::default()).unwrap();
+    assert_eq!(tz.func(zid).name.map(|n| tz.text(n)), Some("z"));
+}
+
+#[test]
+fn a_function_in_the_parameters_of_a_sibling_is_skipped_too() {
+    // `p` is made before `g` (its start is after the start of `g`): the table of `f` must still find both.
+    let nodes = |k: usize| {
+        let src = format!(
+            "function f() {{ {0} function a() {{ {0} }} function g(q = function p() {{ {1} }}) {{ {0} }} function b() {{ {1} }} function c() {{ {1} }} }}",
+            pad(),
+            pad().repeat(k)
+        );
+        second_parse_nodes(&lazy(&src), 0)
+    };
+    assert_eq!(nodes(1), nodes(6));
+}

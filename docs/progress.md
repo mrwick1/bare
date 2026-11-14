@@ -10728,3 +10728,75 @@ Gates:
 Not tested: a live site (replay only); a page that bumps the epoch between every two loops (the cost then is one extra walk of the tail for each bump, about 24 K instructions, the same order as the walk it replaces); a receiver whose chain has a typed array or a host object before a clean tail (the run after it is certified only if the whole tail is plain); `for-in` over a string primitive does not walk `String.prototype` (it did not before, and Node does; not changed).
 
 Noticed, not changed: a proxy in the prototype chain of a plain object: Node 22 yields no key from behind it, bare yields `inh` (the spec order says it yields it). A `for-in` over a string primitive yields indices only, and no key of `String.prototype` or `Object.prototype`, where Node does.
+
+## R2-D build, PR 1 (design A): a lazy function inside a lazy function is skipped in the second parse (2026-11-14)
+
+Branch `t3/retain-nested-lazy-skip-data`. Design: `docs/design-js-reparse.md` section 4, option A (PR #524). This is a retry: an earlier agent stopped on a network error; its patch (`/data/bare-tmp/r2/r2d/wip.patch`) was applied, reviewed and finished.
+
+**Owner decision (2026-11-14):** build design A, then design S, as two PRs in order. PR 1 is design A (this section). PR 2 is design S (one pointer swap for a call across lazy script slots); it is rebased on PR 1 after PR 1 merges.
+
+### What changed
+
+- `LazyFn` (`ast.rs`) keeps three more fields: `end` (the byte after the `}` of the body), `strict_out` (the strict state after the body) and `inner: Option<Rc<[LazyFn]>>` (the lazy functions that the first parse found inside the body, sorted by `start`).
+- `function_inner` (`parse.rs`): when it drops a body, it moves the stubs of that body (`lazies[mark.lazies..]`) into `inner` of the dropped function, instead of truncating them away. The second parse (`parse_lazy_function`) gets the table of its function in `Parser.skip`. At a lazy-eligible function that has an entry for its `start`, the parser jumps the lexer to `end` (`Lexer::seek`, as the data literals do), sets the strict state and pushes the entry as `Body::Lazy`. It does not parse the body.
+- Review of the earlier patch found one fault. A function inside the parameters of a later sibling (`function g(q = function p() {...}) {...}`) is made before `g` but starts after it, so the list was out of order and the binary search could miss it (the lookup then parses the function in full: correct, slower). `inner` is now sorted when it is not (`sort_unstable_by_key`, only for an unsorted list).
+- Nothing else changes: the first parse, the load step, the walk, `lazy_owner` and the limits are as before. A function that was not lazy in the first parse (a call form, `super`, `new.target`, a class body) has no entry and parses in full.
+
+### Tests (written first)
+
+- `parse_lazy_tests::the_second_parse_skips_the_lazy_functions_inside_the_function` failed on main (`left == right` on the node count of the second parse of `f`, which grew with the length of `g`'s body) and passes now. Checked by running the new tests with `parse.rs` and `ast.rs` reverted.
+- `a_function_in_the_parameters_of_a_sibling_is_skipped_too`: fails when the sort is removed, passes with it.
+- Correctness guards (they also pass on main, they must still pass): `a_skipped_function_leaves_the_parser_where_the_full_parse_leaves_it` (10 texts: a declaration then a regex, a division after a function expression, no semicolon, getters and setters, a directive in the inner body, `010` and `with` after a strict inner function, a function in a block, a label, three levels, `super`; each lazy tree is compared with the eager parse: spans, strictness, kind, name, statements), `a_skipped_function_in_a_module_and_a_getter_load_with_their_own_tables`, `a_function_three_levels_deep_runs_as_it_would_with_its_body_kept` (scopes, `arguments`, `with`, a default parameter, strictness, `Function.prototype.toString`), `error_stack_positions_in_a_function_below_a_skipped_body_are_the_source_positions`, `eval_and_super_below_a_skipped_body_give_what_the_eager_parse_gives` (eval and `super` in a class below lazy functions, each compared with the same text without padding).
+- `import()` and `import.meta` (PR #521): `eval_modules_tests::a_dropped_function_of_a_module_is_still_code_of_that_module` has a lazy function nested in a lazy function and passes; so does `browser_loader_tests::a_dynamic_import_in_a_lazy_function_is_relative_to_its_module`. `lazy_owner` is unchanged: the second-parse tree still gets its own slot.
+- Direct `eval` is not supported by the engine (an `eval` call is indirect), so the eval test compares lazy and eager answers and does not assert a value.
+
+### Numbers
+
+Machine archMachine, corpus `virtual`, `BARE_CLOCK=virtual`, `journeys.sh compare --clock virtual --runs 3 --pss` (runs interleaved), 47 journeys (`nextjs-docs` is not in the corpus), instructions are the median of 3 runs. Baseline: `f6415364` plus the replay patch plus the virtual clock (branch `bench-base-vclock`; its `wiktionary-portal` run gives 1,408.3 M, as in the earlier record). Main: `5bc18d14` (`/data/bare-tmp/base/5bc18d14f5`). Branch: this change on `5bc18d14`. The plain `f6415364` build cannot replay the corpus (it has no replay support), so it is not used.
+
+| | baseline | main | branch | branch against main |
+| --- | ---: | ---: | ---: | ---: |
+| Instructions, sum of medians, 47 journeys | 105,187 M | 95,232 M | 93,152 M | -2,080 M (-2.2%) |
+| against the baseline (criterion 2) | 100% | 90.5% | 88.6% | |
+| Peak RSS, sum of medians | 2,056 MiB | 1,780.5 MiB | 1,778.8 MiB | -0.1% |
+| `wiktionary-portal` | 1,408.3 M | 1,559.9 M | 1,310.4 M | -16.0% |
+| `wikipedia-portal` | 1,181.5 M | 1,233.0 M | 1,059.0 M | -14.1% |
+| `wikipedia-main-random` | 4,070.8 M | 4,138.7 M | 3,591.3 M | -13.2% |
+| `wikipedia-article` | 7,859.8 M | 7,784.6 M | 7,449.8 M | -4.3% |
+
+The design expected -1,989 M (range 1.6 to 2.4 G), `wiktionary-portal` about 1,317 M and `wikipedia-portal` about 1,072 M. Measured: -2,080 M, 1,310 M and 1,059 M. The model held. Spread over the 3 runs (max minus min over median): 0.2% or less on all rows of the branch except `wikipedia-search` (3.2%, it has a replay miss on both binaries, 2 and 3 misses; it is not a failure). The branch has no new replay miss.
+
+Memory. Peak RSS (median of 3, sum) is the same: 1,780.5 to 1,778.8 MiB. No journey moves by more than 3.5% and the largest falls (`github-docs-home` -3.5%) are noise-sized. The 61.9 MiB saving of lazy functions (against `nofn`) stays. The PSS column is one sample of run 0 each (sum 1,414.5 to 1,432.8 MiB); it swings by several MiB on small pages (`archlinux-org-home` 5.0 to 13.1 MiB, `sqlite-org-home` 0.1 to 4.9 MiB, with equal peak RSS), so I do not use it.
+
+Parse counters (the counter patch of `/data/bare-tmp/r2/R2-D/counters.patch`, ported to this tree in a scratch worktree; 1 run each, fixed work under the virtual clock):
+
+| | `wiktionary-portal` before | after | `wikipedia-portal` before | after |
+| --- | ---: | ---: | ---: | ---: |
+| Second parses (count) | 655 | 655 | 703 | 703 |
+| Second parses, instructions: depth 0 | 155.0 M | 9.2 M | 97.2 M | 9.8 M |
+| Second parses, instructions: inside a second-parse tree | 176.3 M | 71.8 M | 140.5 M | 53.4 M |
+| Second parses, total | 331.4 M | 81.0 M | 237.7 M | 63.2 M |
+| Load step | 19.9 M | 19.9 M | 16.0 M | 16.0 M |
+| First parse, all scripts | 202.7 M | 203.2 M | 115.1 M | 115.5 M |
+
+The first parse costs 0.4 M to 0.5 M more (the table of each dropped function). The load step is the same, as expected. The count of second parses is the same: each function that runs is still parsed once more, but it no longer parses the lazy bodies inside it. The second parses fall by 250 M and 175 M on the two portals; the journey totals fall by 249 M and 174 M.
+
+### Cost matrix and gates
+
+- `tools/js/cost_matrix.sh` against main `c59e1bcf` (the newest main when I ran it; 803 rows, `parse_load deep 1` and `deep 10` do not run, the known stack overflow): mean glibc -0.004%, 0 rows over under one allocator, 0 under both.
+- `cargo test --release --workspace --no-fail-fast`: all pass except the 7 TLS tests that fail on main (`https_openssl` 2, `client_openssl` 4, `tls12_openssl` 1) and `a_hidden_iframe_download_is_saved` (flaky under load; passes alone). After the last rebase (on `b9c89248`) `cargo test --release -p bare-js` passes: 963 tests.
+- `TEST262=/data/claude-tmp/test262 tools/js/test262_check.sh`: gate ok (exit 0, no directory below the baseline). I ran it a second time with `LAZY_MIN_SOURCE = 0` and `LAZY_MIN_BODY = 1` (every function body is lazy, so every test runs the skip code; temporary change, not committed): `results.txt` of both runs is identical (32,838 lines, no difference). `test262_run` runs each test through `run_script`, which uses the lazy parse.
+- `tools/js/exec_diff.sh`: 79 runs (tree, auto, byte), 0 differences.
+- `tools/js/typing/keycost.sh`: 295.6 M for each key on `#a1`, 301.0 M on `#f0`, load and mount 612.2 M, peak RSS 31.1 and 31.2 MiB (the earlier records: 295.6, 301.0, 613.7).
+
+### Limits
+
+No limit is removed. A makes two limits weaker (design section 5): `LAZY_MIN_SOURCE` (16 KiB) protects the second parse, which is now cheap, and the `lazy_work` count in `lazy_load` counts less work. I did not try lower values.
+
+### Noticed on newest main, not changed
+
+- **The journey benchmark is broken on main since PR #479** (`c59e1bcf`, "Send browser fetch metadata…"). On `5bc18d14` the `wiktionary-portal` replay costs 1,560 M and loads the logo and more scripts; on `c59e1bcf` and on `b9c89248` it costs 95.9 M and 95.4 M, 0 replay misses, `ok: true`, and the network list is shorter (the logo `Wiktionary-logo-tiles_1x.png` is not requested; the run lasts 27 ms, not 408 ms). The full compare on `c59e1bcf` gave 51,593 M for main and 50,768 M for the branch (they agree, and both are about half of the real work). I did not find the cause. Hypothesis: the fetch metadata change alters the request or its replay key for the scripts and the pictures that the journeys load. The recording is untouched (mtime 2026-11-14 00:50). Any benchmark of the journeys on a main at or after #479 is not valid until this is fixed; for that reason the journey numbers above are from `5bc18d14`.
+
+### Not tested
+
+The journeys on a main at or after #479 (broken, above). Live sites. Windows and macOS. A lower `LAZY_MIN_SOURCE` or `LAZY_MIN_BODY` in the benchmark. Memory at the end of a long run (a second-parse tree keeps its table until the cached program leaves the parse cache; the table is about 56 bytes for each lazy function). The bytecode lane with lazy functions (it does not run lazy functions).
