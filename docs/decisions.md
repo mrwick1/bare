@@ -2169,3 +2169,12 @@ The first try of the pump had a spread of 74% on `wikipedia-portal`. Cause: `Par
 ## 2026-11-14: approved Fetch Metadata cost exception
 
 The owner explicitly approved the documented cost exception for PR #479. The measured Fetch POST row grows by 2.146 percent under glibc and 1.624 percent under jemalloc after the allocation refinement. Correct browser-generated Fetch Metadata enables protected same-origin routes. The refinement removes two growth allocations per request and stays in place. This approval applies only to this documented Fetch Metadata change. It does not raise the general 0.5 percent cost threshold or approve unrelated regressions. Retain the failing original gate and its samples.
+## 2026-11-14: CSSOM objects follow the collector; the `cssom-objects` cap is removed
+
+The owner approved criterion 8 of [the design](design-style-round2.md) and asked to remove the cap.
+
+- A CSSOM object is reached through `Host::trace`. A sheet in the tree and an adopted sheet are roots. `Host::prune` drops the table entries of a freed object. `State::roots` keeps only the prototypes and the constructors. `MAX_OBJECTS` is removed.
+- The design named a root set, `Heap::is_live` and a prune at the start of `roots`. I did not build that. The host already has `trace` and `prune` hooks, and the collector then finds a rule through its list, so no un-keep call is needed in `deleteRule`, `replaceSync` or the removal of an element. A path that I forgot cannot leak. There is no change in `crates/js`.
+- `insertRule` makes no object: the new rule is a span of its text, like a rule that no script has read.
+- Reason: the cap failed a correct page (an edit loop on a one-rule sheet) and guarded a root list that never shrank. A held deleted rule stays a valid object (its `parentStyleSheet` is null), and `sheet.cssRules[0] === sheet.cssRules[0]` holds while the rule is in the list.
+- Cost: the collector does 4 table lookups for each visited object on a page that uses CSSOM (+0.5% on a page that reads 187,852 rule objects). A page with no CSSOM pays one `OnceCell` test for each visited object.
