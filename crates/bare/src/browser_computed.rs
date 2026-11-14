@@ -605,6 +605,9 @@ impl Dom {
                     return Err(self.lim("dom-names"));
                 }
                 *cache = Some(Built { vp, key: plan.parts, inputs: plan.inputs, rules, shared: share, last: [None, None], read: None, odd: OnceCell::new(), stamp });
+                if share {
+                    rule_cache::settle();
+                }
             }
             cache.as_mut().expect("built").stamp = stamp;
             drop(cache);
