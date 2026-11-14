@@ -1267,7 +1267,7 @@ impl Heap {
             cur = ob.proto;
         };
         let same = match (hit, want) {
-            (Get::Value(a), Get::Value(b)) => a.same_value(b),
+            (Get::Value(a), Get::Value(b)) => self.same_value(a, b),
             (Get::Accessor { getter: a }, Get::Accessor { getter: b }) => a == b,
             _ => false,
         };
