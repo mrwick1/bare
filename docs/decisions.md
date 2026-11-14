@@ -2045,3 +2045,11 @@ Step 4, phase 2 of `docs/perf-goal.md`. Design: `design-style.md` 3.1 (M2), 3.3 
 - Threshold 128 bytes. The text path costs less than the tree from 64 bytes up, in a literal that runs once and in one that runs 100 times (`docs/progress.md`).
 - Limits: `max_script_nodes` counts a data literal as one node. The heap limits guard the size. Depth over 64 stays a tree.
 - Arrows stay eager. Lazy arrows were built and measured (branch `t3/lazy-arrows-experiment`). On the journeys the total instructions rose by 0.6% and the peak RSS did not fall (-2.7% with lazy arrows, -3.2% without). The cost is the second parse of the arrows that run: bundles hold big arrows that run once at load (`github-docs-home`: 51 of 68 lazy arrows ran, 95% of their bytes). A minimum or maximum size of body did not remove it. A change that makes the first parse cheaper (a preparser without nodes) is the way to make lazy arrows pay.
+
+## CompressionStream and DecompressionStream buffer until close (2026-11-14)
+
+- Chosen: `shims/compression.js` builds both on `TransformStream`. It keeps the chunks until the writable side closes. Then one native call (`codec` in `browser_shims.rs`) compresses or decompresses all the bytes, and the output is one chunk. The codec uses `miniz_oxide` and `crc32fast`, which `bare-net` already builds.
+- Reason: a web mail logger gzips each upload when `CompressionStream` exists. Without it, each upload was a plain string of 1 to 5 MB. With it, each upload is 0.3 to 20 KB, and the server answers 200.
+- Other choice: a streaming codec with state on the native side. It gives output before close, but the state must live in the host, keyed by stream, and be freed when the page drops the stream. A whole-buffer call keeps no native state.
+- Limits: a stream gives no output before its writable side closes. One `DecompressionStream` gives at most 256 MiB.
+- Errors follow the Compression Standard, and not the reply decoder of `bare-net` (`encoding::inflate`): empty input, cut or bad data, a wrong checksum and bytes after the end of the stream are a `TypeError`. `deflate` is zlib only, and `deflate-raw` is raw only.
