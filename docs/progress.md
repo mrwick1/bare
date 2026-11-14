@@ -10279,3 +10279,47 @@ Three parts, in this order, each measured on the whole browser: A class atoms (c
 The journeys. Wall-clock time. Whether a span of the text arena can be reused (needed for part A). Quirks-mode class matching. The Gecko lazy-resolve implementation. Layout inside `rest_13` beyond its call-tree share (about 18.5%).
 
 Kept outside the repo: `/data/bare-tmp/r2/R2-E/` (staged example, counter patch, scripts, profiles).
+
+## R2-C: memory of `python-docs-search-results` after PR #501 (2026-11-14)
+
+Task R2-C of perf goal round 2. Docs only. Design: `docs/design-js-memory.md`.
+
+Question: criterion 6 needs a peak RSS of 92.8 MiB or lower. PR #501 gave 90.3 MiB. Main gives 98.2 MiB. Where did the 8 MiB come from?
+
+Method: 18 merge commits from #498 to `28a8fbc2`, built clean with `base-build`. Recorded corpus, virtual clock, 4 rows each (run 0 with PSS, runs 1 to 3). Machine: archMachine, shared. A second set of builds with a temporary patch (not in the repository) printed live counts. massif gave allocation sites on main. `heaptrack` is not installed. I installed no package.
+
+Results (medians of 4 runs, MiB):
+
+| Merge | Peak RSS | Live bytes in malloc | Cause |
+| --- | --- | --- | --- |
+| #494 | 114.1 | 104.3 to 104.9 | syntax tree of the data literal: 19.4 MiB |
+| #501 | 90.3 | 79.2 to 79.6 | the literal is source text: 3.9 MiB |
+| #504 | 90.2 | 78.6 to 79.5 | |
+| #497 | 97.5 (+7.3) | 84.3 to 84.7 (+5.1 to +5.5) | strings over 32 units are no longer shared: 5.74 M units become 8.61 M units |
+| #512 | 95.8 | 84.7 (+0.0) | object record +24 B (+2.3 MiB) against 88.7 K slot `Vec`s removed (about 2.8 MiB) |
+| #515 | 97.8 | 85.2 (+0.5) | not examined |
+| main | 98.2 | 84.7 | |
+
+- PR #497 explains the growth. The page fetches equal documents several times (`whatsnew/3.14` four times). Each copy is now a new flat string. A forced collect frees 13.5 MiB of them. The collector ran once, because of the 1.75 factor and the 8 MiB minimum.
+- PR #512 added no live bytes. Its slab capacity grew by 3.0 MiB and stayed untouched.
+- The steps of 1 to 2 MiB after #497 have no change of live bytes behind them. Hypothesis: allocator layout. Not proven.
+- Peak split on main (massif, 81.9 MiB live): DOM arena from `DOMParser` documents 22.1 (27%), JS strings 14.0 (17%), object records 12.8 (16%), atoms 8.1 (10%), array elements 7.1 (9%), dictionary properties 5.0 (6%), source copy 3.69, client bodies 3.75, other about 5.4.
+
+Experiments on main (peak RSS, median of 5 runs; MiB):
+
+| Setting | RSS | Instructions |
+| --- | --- | --- |
+| default | 97.5 | 2,487 M |
+| shared equal text from `Response.text()` | 94.0 | 2,471 M |
+| `M_MMAP_THRESHOLD` 256 KiB | 91.5 | 2,484 M |
+| both | 85.9 | 2,469 M |
+| collect when 8 MiB of flat strings arrived | 94.5 | 2,633 M |
+| jemalloc by `LD_PRELOAD` | 121 to 123 | 2,468 M |
+
+Recommendation: build Design 1 (share equal host text, and a fixed mmap threshold of 256 KiB). Expected: criterion 6 at about 86 MiB (-26% against 116). Design 2 (size-class element blocks, inline Latin-1 atoms) is the portable follow-up (about 88 MiB, arithmetic only). Design 3 (free `DOMParser` documents and strings at once) needs a cheaper collector first (one collect costs about 137 M instructions).
+
+The threshold call is glibc only. The fixed threshold costs CPU through page faults: +0.4% to +5.7% on three journeys, +2.8% summed over 47 journeys (loaded machine). Peak RSS summed over 47 journeys: -3.9%.
+
+Not measured: CPU on an idle machine; macOS, Windows and musl allocators; the sharing on the other 46 journeys; XHR `responseText` and `innerHTML` as duplicate sources; Designs 2 and 3 (arithmetic only); test262 and `exec_diff` (no product code changed).
+
+Open questions for the owner are in section 11 of the design document.
