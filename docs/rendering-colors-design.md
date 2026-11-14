@@ -50,8 +50,12 @@ Scope: color parsing and conversion, indexed expression storage, cascade resolut
 
 Stop and revise this design if the chosen crate cannot preserve the required missing-component or interpolation semantics, or if the existing cache and side-index paths cannot safely carry deferred expressions. Performance and memory costs are not yet measured. No production code has changed.
 
-## Implementation storage refinement
+## Implementation checks
 
-Measured on 2026-11-14. An eager color vector raised the legacy parser instruction count by about 0.83 percent. Use a lazy boxed vector header for deferred colors. Its empty state occupies one word. The extra allocation occurs only when a Side stores a currentColor-dependent expression. Color and Value keep their previous sizes. A three-run parser check reduced the instruction growth to about 0.67 percent. Final browser cost gates and limits belong in the results document.
+Separate eager and lazy color arenas both failed the stylesheet cost gate under both allocators. Store currentColor expressions in the existing deferred-declaration arena instead. Use a tagged entry for a variable declaration or a color expression. This keeps Side at its previous size and removes an extra empty-arena constructor and destructor from ordinary declarations. On the measured 64-bit build, Side remains 72 bytes. A deferred entry is 56 bytes, compared with 32 bytes for the previous variable declaration. This trades space for stored variable declarations against removing common empty-arena work. Color stays four bytes and Value stays eight bytes. Rebase variable and color indices together. Keep their typed Value variants distinct. Verify the same ownership, numeric and resource gates. This refines storage within the approved Side-arena design.
 
 The supported mix syntax has two operands and an explicit interpolation space. The latest CSS Color 5 draft also permits omitted spaces and more operands. These extensions are outside this change. Zero-sum weights follow the current draft: mix equally with zero alpha. Relative colors, external profiles and math expressions in mix percentages remain unsupported.
+
+## Math backend check
+
+The std backend adds a dynamic dependency on the platform math library. The frozen baseline does not load that library. All short browser rows show a similar added instruction count. Hypothesis: this startup load causes the remaining stylesheet gate failure. Test color 0.3.3 with its libm feature and default features disabled. This uses Rust libm 0.2.16 instead of the extra shared library. It adds one mandatory Rust dependency. The numeric and full browser checks must still pass. Do not accept this option from the loader inspection alone.

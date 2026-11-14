@@ -6,36 +6,6 @@ use crate::{
 };
 use color::{ColorSpaceTag as Space, DynamicColor, HueDirection};
 
-// Most Side values never need deferred colors. Keep their empty arena at one word.
-#[derive(Debug, Default, Clone, PartialEq)]
-#[expect(clippy::box_collection, reason = "one-word empty Side storage; allocate the vector header only for deferred colors")]
-pub struct Arena(Option<Box<Vec<Expression>>>);
-
-impl Arena {
-    pub fn len(&self) -> usize {
-        self.0.as_ref().map_or(0, |v| v.len())
-    }
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-    pub fn get(&self, index: usize) -> Option<&Expression> {
-        self.0.as_ref()?.get(index)
-    }
-    pub fn push(&mut self, expression: Expression) {
-        self.0.get_or_insert_with(Default::default).push(expression);
-    }
-    pub fn clear(&mut self) {
-        self.0 = None;
-    }
-    pub fn extend(&mut self, other: Self) {
-        match (&mut self.0, other.0) {
-            (None, other) => self.0 = other,
-            (Some(here), Some(other)) => here.extend(*other),
-            _ => {}
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct Expression {
     nodes: Vec<Node>,

@@ -334,17 +334,16 @@ pub enum Value {
     /// `unset`: `inherit` for a property that is inherited, `initial` for the others.
     Unset,
     Color(Color),
+    ColorExpr(u32),
     Length(Length),
     /// `font-weight: 700`, `line-height: 1.5`.
     Number(f32),
     Keyword(Keyword),
-    /// The value has `var()` in it. The number is the place of its `VarDecl` in `Side::vars`. The cascade reads the text when it knows
+    /// The value has `var()` in it. The number is the place of its `VarDecl` in `Side::deferred`. The cascade reads the text when it knows
     /// the custom properties of the element.
     Var(u32),
     /// A track list, a line or area names: the place of a `grid::Grid` in `Side::grids` (declared) or `Styles::grids` (computed).
     Grid(u32),
-    /// A currentColor-dependent modern color in Side::colors.
-    ColorExpr(u32),
 }
 
 /// One property with its value, after the shorthands are split.
@@ -359,7 +358,7 @@ pub struct Declared {
 
 /// Read one declaration, and add what it means to `out`: one item for a longhand, more for a shorthand.
 /// Gives `false`, and adds nothing, when the name is not known or the value is not good.
-/// A `calc()` that mixes units goes in `side.calcs`, and a value with `var()` goes in `side.vars`: the value points to them.
+/// A `calc()` that mixes units goes in `side.calcs`, and a value with `var()` goes in `side.deferred`: the value points to them.
 /// `name` must be in lowercase (the parser does it).
 pub fn parse_declaration(mut name: &str, value: &str, important: bool, side: &mut Side, out: &mut Vec<Declared>) -> bool {
     // `-webkit-mask-image` is `mask-image`: the same property with the prefix taken off. The second round runs only after a name or a value
@@ -514,8 +513,8 @@ fn parse_known(name: &str, value: &str, important: bool, side: &mut Side, out: &
         let single = Property::from_name(name).map(|p| [p]);
         let Some(list) = all_longhands(name).or_else(|| logical(name)).or(single.as_ref().map(|p| &p[..])) else { return false };
         let mirror = mirrors(name);
-        side.vars.push(VarDecl { name: name.into(), text: value.trim().into() });
-        let index = side.vars.len() as u32 - 1;
+        side.deferred.push(Deferred::Variable(VarDecl { name: name.into(), text: value.trim().into() }));
+        let index = side.deferred.len() as u32 - 1;
         out.extend(list.iter().map(|&property| Declared { property, value: Value::Var(index), important, mirror }));
         return true;
     }
@@ -540,19 +539,27 @@ fn parse_known(name: &str, value: &str, important: bool, side: &mut Side, out: &
     ok
 }
 
-/// What a value can point to: the `calc()` that mix units, the declarations that have `var()`, and the grid lists.
+/// A typed deferred entry. Variable declarations and currentColor expressions share
+/// one arena so ordinary Side values need no extra empty collection.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Deferred {
+    Variable(VarDecl),
+    Color(crate::modern_color::Expression),
+}
+
+/// Indexed calculations, deferred declarations and color expressions, and grid lists.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Side {
     pub calcs: Vec<Linear>,
-    pub vars: Vec<VarDecl>,
+    pub deferred: Vec<Deferred>,
     pub grids: Vec<crate::grid::Grid>,
-    pub colors: crate::modern_color::Arena,
 }
 
 /// One piece of a value, after the tokens are read. A function like `rgb(...)` is one piece.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Part {
     Color(Color),
+    ColorExpr(u32),
     Length(Length),
     Number { value: f32, int: bool },
     Percent(f32),
@@ -568,7 +575,6 @@ enum Part {
     Bad,
     /// Anything else that may be good: a string, a url, a comma, a name that we do not know, a function that we do not know.
     Other,
-    ColorExpr(u32),
 }
 
 /// The parts of a value. At most 8 are kept, in an array: no allocation.
@@ -600,7 +606,7 @@ impl Parts {
                 Token::Function(name) if crate::modern_color::is_function(&name) => match crate::modern_color::read(&name, &mut tokens) {
                     None => Part::Bad,
                     Some(expr) if !expr.dependent() => Part::Color(expr.resolve(Color::BLACK)),
-                    Some(expr) => { let i = side.colors.len() as u32; side.colors.push(expr); Part::ColorExpr(i) }
+                    Some(expr) => { let i = side.deferred.len() as u32; side.deferred.push(Deferred::Color(expr)); Part::ColorExpr(i) }
                 },
                 Token::Function(name) if calc::is_calc(&name) || calc::is_math(&name) => read_calc(&name, &mut tokens, &mut side.calcs),
                 Token::Function(name) => picture_function(&name, &mut tokens),
@@ -1776,6 +1782,7 @@ mod tests {
     #[test]
     fn sizes_are_small() {
         assert_eq!(std::mem::size_of::<Value>(), 8);
+        assert_eq!(std::mem::size_of::<Side>(), 3 * std::mem::size_of::<Vec<()>>());
         assert_eq!(std::mem::size_of::<Declared>(), 12);
         assert_eq!(std::mem::size_of::<Property>(), 1);
     }

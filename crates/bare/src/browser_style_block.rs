@@ -128,7 +128,7 @@ fn same(a: (&Value, &Side), b: (&Value, &Side)) -> bool {
     match (a.0, b.0) {
         (Value::Length(Calc(i)), Value::Length(Calc(j))) => a.1.calcs.get(*i as usize) == b.1.calcs.get(*j as usize) && a.1.calcs.get(*i as usize).is_some(),
         (Value::Grid(i), Value::Grid(j)) => a.1.grids.get(*i as usize) == b.1.grids.get(*j as usize) && a.1.grids.get(*i as usize).is_some(),
-        (Value::ColorExpr(i), Value::ColorExpr(j)) => a.1.colors.get(*i as usize) == b.1.colors.get(*j as usize) && a.1.colors.get(*i as usize).is_some(),
+        (Value::ColorExpr(i), Value::ColorExpr(j)) => a.1.deferred.get(*i as usize) == b.1.deferred.get(*j as usize) && a.1.deferred.get(*i as usize).is_some(),
         (Value::Var(_), _) | (_, Value::Var(_)) => false,
         (x, y) => x == y,
     }
@@ -167,7 +167,10 @@ fn written(property: Property, value: &Value, side: &Side) -> Option<String> {
             bare_css::grid::Grid::Motion(m) => bare_css::motion::text(property, m),
             _ => return None,
         },
-        Value::ColorExpr(i) => side.colors.get(i as usize)?.text().to_owned(),
+        Value::ColorExpr(i) => match side.deferred.get(i as usize)? {
+            bare_css::values::Deferred::Color(expr) => expr.text().to_owned(),
+            _ => return None,
+        },
         Value::Var(_) => return None,
     };
     reads_as(property, &t, value, side).then_some(t)

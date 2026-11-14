@@ -7,4 +7,4 @@ license.workspace = true
 
 [dependencies]
 bare-html = { path = "../html" }
-color = "=0.3.3"
+color = { version = "=0.3.3", default-features = false, features = ["libm"] }
