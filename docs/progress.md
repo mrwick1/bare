@@ -10323,3 +10323,32 @@ The threshold call is glibc only. The fixed threshold costs CPU through page fau
 Not measured: CPU on an idle machine; macOS, Windows and musl allocators; the sharing on the other 46 journeys; XHR `responseText` and `innerHTML` as duplicate sources; Designs 2 and 3 (arithmetic only); test262 and `exec_diff` (no product code changed).
 
 Open questions for the owner are in section 11 of the design document.
+
+## R2-A: where the heavy JS journeys spend instructions (2026-11-14, docs only)
+
+Design: [design-heavy-js-journeys.md](design-heavy-js-journeys.md). Task R2-A of the round 2 plan. No product code changed. Machine-local files: `/data/bare-tmp/r2/a/` (counting profiler, `for-in` and regex prototypes, loop-off patch, profiles, perf data).
+
+Method: main `28a8fbc2`, archMachine (shared), corpus `virtual`, virtual clock. Instruction totals: 3 runs each for `rust-book-search` and `nodejs-org-home` (spread 0.0%), 4 runs for `react-docs` without the loop. Subsystem split: one `perf record -e instructions:u` run per journey with frame pointers. JS-level counts: a counting profiler (patch, 3x overhead; counts and shares only).
+
+Measured split of `rust-book-search` (16,322 M; the loop adds 0 to it):
+
+| Subsystem | Share |
+|---|---:|
+| Evaluator (tree walker) | 32.3% |
+| Regex engine | 25.8% |
+| `for-in` key enumeration | 18.0% |
+| JS builtins | 9.3% |
+| Regex wrapper | 5.2% |
+| GC / `JSON.parse` / parse / rest | 9.4% |
+
+Findings:
+
+- `rust-book-search`: 113,523 `for-in` loops examine 6,115,194 prototype keys for 340,317 own keys (all prototype keys are non-enumerable built-in names). 987,649 `RegExp.test` calls run 49,109 different (regex, input) pairs: 95.0% repeat an earlier run. 96.2% of the regex executions are `test()`. 91% of the journey is `makeTeaser` and its callees; the Porter stemmer function of `elasticlunr.js` is 52% (109,398 calls).
+- `react-docs`: 16,951 M with the `settle_pictures` loop, 127 to 138 M without it. No lever outside the loop. A lazy image decode (-3.4%) was confounded by the loop and is dropped. One `compare` run gave 4,321 M with the loop off; not explained.
+- `nodejs-org-home` (5,921 M, the same with and without the loop): evaluator 75%, parse 6.6%, GC 3.6%, regex compile 1.9%, `for-in` 1.6%. Flat. The register VM lane is not a lever (PR #518: -0.07%).
+
+Prototypes on `rust-book-search` (upper bounds, no invalidation code): `for-in` without the prototype walk 16,322 M to 13,446 M (-17.6%); regex result memo 12,751 M (-21.9%); both 9,861 M (-39.6%, 1.68x against the 16,607 M baseline). Criterion 4 needs 12,774 M or less: the memo alone passes by 23 M only.
+
+Recommendation: D1 (`for-in` stops at a prototype tail with no enumerable key; a count in the shape, or a realm epoch) and D2a (regex result table that charges the stored steps; plus a `test()` wrapper fast path). Estimate: `rust-book-search` about 9.5 to 9.9 G (1.68x to 1.74x), criterion 4 met. Criterion 2: 90.1% to about 84.0% from these two (94,796 M to 88,334 M of 105,189 M); about 79% if the R2-B estimate (-5.4 G) also holds. D2b (a lazy DFA for `test()`) is a later option, estimate only. Nothing for `react-docs` (fix the loop) or `nodejs-org-home`.
+
+Not measured: property gets by kind, string allocations, array growth; live runs; the other 44 journeys; wall time and memory of the prototypes; `size_of::<Res<Value>>()`; the cause of the 4,321 M run; D2b (not prototyped).
