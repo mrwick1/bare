@@ -246,3 +246,85 @@ fn the_bytecode_modes_agree_on_the_proxy_corpus() {
         assert!(bad.is_empty(), "{}", bad.join("\n"));
     });
 }
+
+#[test]
+fn a_function_three_levels_deep_runs_as_it_would_with_its_body_kept() {
+    big(|| {
+        // Each function is loaded from the tree of the one around it, which skipped its body: scopes, `arguments`, `with`, a default
+        // parameter, strictness and the text of the function must all be as with every body kept.
+        let src = format!(
+            "function a(x) {{ {PAD} var va = 1;
+               function b(y, z = x + 1) {{ {PAD} var vb = 2;
+                 function c() {{ {PAD}
+                   return [typeof arguments, arguments.length, x, y, z, va, vb, (function () {{ with ({{ w: 5 }}) return w + vb; }})()].join();
+                 }}
+                 return c(1, 2, 3);
+               }}
+               return b(10);
+             }}
+             a(100)"
+        );
+        assert_eq!(run(&src), "object,3,100,10,101,1,2,7");
+        let src = format!(
+            "function outer() {{ {PAD}
+               var o = {{ m() {{ {PAD} return 7 + g(); function g() {{ {PAD} return p7; }} }} }};
+               function strictOne() {{ 'use strict'; {PAD} return this === undefined; }}
+               return o.m() + ',' + strictOne() + ',' + (function () {{ return this === globalThis; }})();
+             }}
+             outer()"
+        );
+        assert_eq!(run(&src), "28,true,true");
+        let c = format!("function c() {{ {PAD} return 1; }}");
+        let src = format!("function a() {{ {PAD} function b() {{ {PAD} {c} return c; }} return b(); }} String(a()) === {c:?}");
+        assert_eq!(run(&src), "true");
+    });
+}
+
+#[test]
+fn error_stack_positions_in_a_function_below_a_skipped_body_are_the_source_positions() {
+    big(|| {
+        let nested = format!("function a() {{ {PAD}\n function b() {{ {PAD}\n function c() {{ {PAD}\n return new Error('x').stack; }}\n return c(); }}\n return b(); }}\n a()");
+        let flat = format!("function a() {{\n var _ = 1;\n function b() {{\n var _ = 1;\n function c() {{\n return new Error('x').stack; }}\n return c(); }}\n return b(); }}\n a()");
+        let position = |s: &str| -> String { s.lines().next().unwrap_or("").to_string() };
+        let (n, f) = (run(&nested), run(&flat));
+        // Both runs name the three frames; the line and column of the `new Error` are those of the text, as the first parse gives them.
+        assert!(n.contains(":4:"), "{n}");
+        assert!(f.contains(":6:"), "{f}");
+        let frames = |s: &str| s.matches("\n    at ").count();
+        assert_eq!(frames(&n), frames(&f), "{n} / {f}");
+        let _ = position;
+    });
+}
+
+#[test]
+fn eval_and_super_below_a_skipped_body_give_what_the_eager_parse_gives() {
+    big(|| {
+        // The same text with and without the padding (below 16 KiB nothing is lazy): the answers must be equal.
+        let both = |f: &dyn Fn(&str) -> String| {
+            let (lazy, eager) = (run(&f(PAD)), run(&f("")));
+            assert_eq!(lazy, eager);
+            lazy
+        };
+        both(&|pad| {
+            format!(
+                "function a() {{ {pad} var av = 1;
+                   function b() {{ {pad} var bv = 2;
+                     function c() {{ {pad} try {{ return eval('av + bv'); }} catch (e) {{ return e.name; }} }}
+                     return c();
+                   }}
+                   return b();
+                 }}
+                 a()"
+            )
+        });
+        let r = both(&|pad| {
+            format!(
+                "function w() {{ {pad} class A {{ x() {{ return 5; }} }} class B extends A {{ m() {{ return super.x() + 1; }} }}
+                   function g() {{ {pad} return new B().m(); }} return g(); }}
+                 function wrap() {{ {pad} function m2() {{ {pad} return w(); }} return m2(); }}
+                 wrap()"
+            )
+        });
+        assert_eq!(r, "6");
+    });
+}
