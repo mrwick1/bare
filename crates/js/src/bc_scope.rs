@@ -341,7 +341,7 @@ impl<'p> Interp<'p> {
     }
 
     /// Whether scope `s` declares the name `n` (the set of `sc_declares`). A frame scope keeps its names unsorted.
-    fn bc_declares(&mut self, s: u32, n: u32) -> bool {
+    pub(super) fn bc_declares(&mut self, s: u32, n: u32) -> bool {
         let sc = &self.sc_all[s as usize];
         if sc.base != NONE {
             return self.sc_pool[sc.start as usize..(sc.start + sc.len) as usize].contains(&n);
@@ -366,9 +366,7 @@ impl<'p> Interp<'p> {
                 let index = if matches!(self.sc_all[scope as usize].kind, RKind::Root) {
                     self.find_in(0, n)
                 } else {
-                    let mut b = Vec::new();
-                    self.bc_binds(scope, &mut b);
-                    b.iter().position(|b| b.name == n)
+                    self.bc_tmpl(scope).iter().position(|b| b.0 == n)
                 };
                 return match index {
                     Some(i) if i < 0xFFFF => Site::Env { hops, index: i as u32 },

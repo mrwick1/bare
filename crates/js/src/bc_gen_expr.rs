@@ -412,14 +412,14 @@ impl Gen<'_, '_> {
             _ => {
                 self.expr(callee, b)?;
                 // A register function does not load `this`: bit 31 of the call says it is `undefined`.
-                if self.rf.is_none() {
+                if !self.callr_ok() {
                     self.emit(Op::LoadUndef, this, 0, 0)?;
                 }
             }
         }
         let n = self.args(args)?;
         self.code.calls.push((self.here() as u32, e.index() as u32));
-        if self.rf.is_some() {
+        if self.callr_ok() {
             let plain = !matches!(self.prog.expr(c).kind, ExprKind::Member { .. } | ExprKind::Index { .. });
             let x = self.prog.expr(e).span.start.saturating_add(1) & 0x7fff_ffff | (plain as u32) << 31;
             self.emit_ins(Ins::new(Op::CallR, dst, b, n).with_x(x))?;

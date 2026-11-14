@@ -9727,3 +9727,67 @@ Machine archMachine, 16 cores, shared (load 3 to 14 while I measured). Instructi
 - The global name table only grows. A document is capped by `max_names`, the table is not. A thread that opens many different sites collects every tag and attribute name of them. I measured no problem on the suite or the journeys. An epoch or a reset when the cache and all documents are gone would bound it.
 - `name_count` of a document can differ between a cache hit and a miss: selector parsing interns names into the document that builds the set.
 - `dblclick` and `hover` aim once, like `click` did.
+
+## P3 register VM, stage 2 slice 1: closures, inline calls and global cells (2026-11-14, `docs/design-js.md` phase P3)
+
+Branch `t3/bytecode-closures-globals`, rebased on main `1e793d74`. The tree walker stays the default. The lane runs with `BARE_JS_EXEC=byte` or `auto`. The browser session now reads `BARE_JS_EXEC` too (`SessionConfig::new`), so the journeys can run the lane. With the variable unset the mode is `Tree`, as before.
+
+### What I built
+
+1. Captured variables (a function with inner functions is a register function with an environment). The call makes the stage 1 environment (`new_env` and `bind_call`). A variable that an inner function names stays a binding of that environment. All other variables are registers. A scope has a run-time environment only when an inner function lies inside it, so the hop count of `bc_resolve` stays right for the inner function, on the tree walker and in the lane. Boxed cells of a new kind were not needed: the existing `Env` layout is the cell.
+2. Inline calls. A call from any lane code (stage 1, register function, register function with environment) to any compiled function of the same script runs in the same loop, with no Rust frame. A frame keeps its own environment depth (`Fr.depth`) and the environment of its call (`Fr.callee_env`). `bc_frame_exit` unwinds them. Default parameter values run in the callee environment and frame.
+3. Global cells. A cell keeps the position of a global property, or the index of a binding of environment 0, with the count of those bindings. Environment 0 only gains bindings, so a cell stays valid while the count is the same. A script with `let`, `const` or `class` at top level (environment 0 not empty) uses the cell too.
+4. Counters: `BARE_JS_STATS=1` prints, for each interpreter, the functions compiled, the calls that the lane ran, the calls that the tree walker ran because the lane refused the function, and the refusal reasons.
+
+Order. The plan puts boxed cells first, then calls, then global cells. The task listed globals first. I followed the plan: a global cell gains nothing while environment 0 is empty (the `loop` row did not move), and the gain of a closure is larger (`closures` 1.23x to 1.35x, and every function with an inner function stops being stage 1).
+
+Not built: inline `new`. `new` goes through `bc_call` and `construct` (Rust recursion). A call from a native function (`map`, `sort`, a callback) enters the loop again by Rust recursion. Both work and are covered by the differential tests.
+
+### Numbers: `eval_load CASE 10`
+
+`tools/js/instr.sh` method (`instructions:u`, large malloc cache), archMachine, 3 runs each, the three runs differ by under 0.01%. Tree is the same on main and on the branch (under 0.01%). "Main byte" is main `1e793d74` with `BARE_JS_EXEC=byte`.
+
+| Case | Tree | Main byte | Branch byte | Tree / branch byte |
+|---|---|---|---|---|
+| `loopfn` | 4,091.0 M | 841.0 M | 823.0 M | 4.97x |
+| `fib` | 165.9 M | 53.2 M | 56.6 M | 2.93x |
+| `loop` (globals) | 5,007.0 M | 2,515.0 M | 2,487.0 M | 2.01x |
+| `calls` | 3,532.2 M | 2,109.3 M | 1,641.3 M | 2.15x |
+| `closures` | 646.4 M | 522.5 M | 478.8 M | 1.35x |
+| `objects` | 2,389.4 M | 2,329.0 M | 2,335.8 M | 1.02x |
+| `throws` | 1,947.2 M | 1,496.2 M | 1,490.5 M | 1.31x |
+| `webpack` | 38.5 M | 50.2 M | 50.5 M | 0.76x |
+
+- `fib` costs 6.3% more than on main in the lane: 581 instructions for each call, against 546. The cause is the larger frame record and the two checks of the environment of a frame. I made `bc_frame_exit` inline (60.4 M to 56.6 M). A cold side for the environments made it worse (58.4 M), because of code layout, so I kept the first form. The spike gate of 3x on `fib` is now 2.93x.
+- `webpack` is slower in the lane than in the tree walker: 502 functions compile, and each runs about 3 times. This is the compile cost. `auto` gives the same number as `byte`, because it compiles at the second call. A start of the lane in `byte` mode costs 0.3 M instructions more than on main (`fib 1`: 7.20 M to 7.50 M).
+- `loop` is limited by the script body, not by globals. The body of a script runs as stage 1 (a stack code), about 600 instructions for each iteration. `loopfn` is 410.
+
+### Numbers: ramps and journeys
+
+- JS ramps of the benchmark round (`/data/bare-tmp/bm/b/pages`, `bare-drive`, 3 runs, spread under 0.01%). `steps_1000000` (a loop in a script body): tree 1,812.5 M, lane 959.5 M (1.89x). `steps_10000000`: 18,057.5 M and 9,527.5 M (1.90x). `nest_100`: 7.7 M and 7.9 M. `nest_1022`: 10.7 M and 11.0 M (+2.8%: the compile cost of the first call is not paid back). All pass in both modes.
+- 47 journeys on the recorded virtual-clock corpus, lane on against off (`/data/bare-tmp/slice1/jrun.py`, 3 runs each, spread 0.4% or less): the sum of instructions goes from 89,935 M to 89,871 M (-0.07%), median row -0.08%. No journey is over +5%. The best rows: `crates-io-home` -48.4% (132 M to 68 M), `docs-rs-home` -22.6%, `duckduckgo-html-search` -16.5%, `rust-lang-org-home` -12.3%. The worst: `rust-book-sidebar` +2.8%, `nodejs-org-home` +2.3%, `rust-book-chapters` +2.1%. PSS sum 1,315 MiB to 1,320 MiB (+0.4%). PSS is a poll every 20 ms in the first run only, so single rows (for example -99% on `crates-io-home`) are noise. `nextjs-docs` fails in both modes (it is flaky on main too).
+- **The lane runs 34.9% of the function calls of the 47 journeys** (1,090 k of 3,127 k). The tree walker runs the other 65.1% after the lane refused the function. The reasons, in calls: `no scope` 1,629 k (80% of the refused calls: the body of a lazy function, which the lane never runs), `wide form` 276 k (13.5%), `destructuring` 65 k, `spread` 39 k, `for-in or for-of` 17 k, `regexp literal` 6 k.
+- Answer for the owner: the lane is not ready to become the default. On the journeys it gives -0.07% instructions and +0.4% memory. The cost of compiling is paid by cold pages, and the gain is on the pages that run a hot loop in a function. Two designs move the share: run lazy bodies in the lane (80% of the refused calls), and compile the script body as a register function (the `steps` ramps and `loop`).
+
+### What went wrong on the way
+
+- A first journey run showed -10% instructions in total, with `react-docs` -55% and `mdn-reference` -24%. It was wrong: `function f(a, b = a + 1)` and `function f(a, ...r)` failed in the lane ("a binding that the code generator expected"), because a call from the loop evaluated the default values before the callee environment was current. The page swallowed the error and ran less code. A journey that passes only shows that its steps pass, not that the JS result is the same. `exec_diff.sh` found it (2 differences). With the fix `react-docs` is -2% and `mdn-reference` +0.9%.
+- The same run showed `go-dev-home` at 46.3 G instead of 3.2 G. Cause: `bc_resolve` built the list of bindings of a scope for each site of a function, so a function with many sites in a large scope cost sites times statements. The list is now the cached template of the scope (`bc_tmpl`). The old code is on main and runs in `byte` mode there too. I did not run main on the journeys: main ignores the switch in the browser.
+- `local_at` found a variable of an outer scope when a captured variable of an inner scope had the same name (`var x; { let x; { const x; return (() => x)() } }`). A captured name now stops the search.
+
+### Checks
+
+- `cargo test --release -p bare-js --lib`: 951 pass. New tests in `bc_gen_tests.rs`: 33 programs that run on tree, auto and byte and must agree (closures, loops that make closures, blocks and switch, arrow `this`, TDZ, `arguments`, default and rest parameters, throw through frames, `Error.stack`, call depth 200, shadowed names), global cells that follow a later script (a `let`, a deleted and made name, a `const`, a name in its TDZ), a listing of a function with a closure.
+- `cargo test --release --workspace --no-fail-fast`: 3,917 pass, 8 fail. They are the 7 known openssl TLS tests and `a_hidden_iframe_download_is_saved`. Two other known flaky tests (`a_changed_file_starts_again_from_zero` and `external_sheets_embedded_sheets_and_inline_styles_cascade_in_order`) failed in one of two runs under load and pass alone.
+- `tools/js/exec_diff.sh`: 79 runs, 0 differences.
+- `tools/js/test262_check.sh`: tree, exit 0, no directory lost a test. With `BARE_JS_EXEC=byte`: only the 3 known `top-level-await` tests lose (40 to 37), and the result list of byte equals the one of tree otherwise (32,838 tests).
+- `tools/js/cost_matrix.sh` against main `1e793d74`: 803 rows, 0 over +0.5% under both allocators, mean glibc +0.002%, jemalloc +0.009%. Two rows are over under glibc only: `form_load gates 1` +0.62% and `gates 10` +0.65% (jemalloc +0.01%). The switch is off in these rows, so I treat them as heap layout. `parse_load deep 1` and `deep 10` fail to run (stack overflow) on main too.
+- `tools/js/typing/keycost.sh`: tree 295.7 M for each key on `#a1` and 301.0 M on `#f0`, load and mount 613.6 M, peak RSS 30.7 MiB at 50 keys (the values of the last merge: 295.7 M, 301.1 M, 613.8 M). With `BARE_JS_EXEC=byte`: 296.8 M, 302.2 M, 629.3 M.
+
+### Not tested
+
+- Wall time on an idle machine. Live pages. A deep recursion beyond depth 200 in a program that mixes the three kinds of frame (the unit test stops at 200, the ramp `nest_1022` runs a plain function). `Error.stack` text of inline frames against Node beyond the fixtures. The peak memory of a deep recursion (the register stack grows by `resize`). Journeys on e16. A page that reads `cssRules` or the DOM from a function with a closure in the lane beyond the 47 journeys.
+
+### Noticed, not changed
+
+- The GC still runs only at depth 0 of the lane (step 5 of the plan). `Auto` compiles at the second call of any function. A hotness count might remove the `webpack` loss (hypothesis, not built).

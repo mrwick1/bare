@@ -329,6 +329,10 @@ pub struct Code {
     /// Stage 2: the function keeps all its variables in registers (no environment). Registers `0..nparams` are the parameters
     /// and `0..nlocals` all the variables: the loop sets `nparams..nlocals` to `undefined` at a call.
     pub regfn: bool,
+    /// A stage 2 function with inner functions: the call makes the environment of the function (as stage 1 does, so the inner
+    /// functions find the captured variables at the usual place), and only the captured variables are bindings of it. The others
+    /// are registers.
+    pub has_env: bool,
     pub nparams: u16,
     pub nlocals: u16,
     /// A stage 2 function that reads `this`, and its strictness (the loop binds `this` as `bind_call` does).
@@ -349,6 +353,7 @@ impl Code {
             nregs,
             calls: Vec::new(),
             regfn: false,
+            has_env: false,
             nparams: 0,
             nlocals: 0,
             uses_this: false,

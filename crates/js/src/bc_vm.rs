@@ -36,6 +36,10 @@ pub(super) struct Fr {
     /// The environment of the caller.
     env: u32,
     this: This,
+    /// The number of environments that the caller pushed. The callee's handlers count from 0.
+    depth: u32,
+    /// The environment of the call that the callee made (a callee with an environment, as stage 1 makes), or `u32::MAX`.
+    callee_env: u32,
 }
 
 /// The registers and the waiting callers of one run of the loop. One run has one of these from the pool, so a nested run (a
@@ -104,6 +108,15 @@ impl<'p> Interp<'p> {
         self.bc.stats
     }
 
+    /// A call that the tree walker runs while the lane is on (the counters of the measurement).
+    #[inline(always)]
+    pub(super) fn bc_tree_call(&mut self, why: &'static str) {
+        if self.bc.exec != Exec::Tree {
+            self.bc.stats.calls_tree += 1;
+            *self.bc.refused.entry(why).or_default() += 1;
+        }
+    }
+
     /// The string constants of compiled code (`roots`).
     pub(super) fn bc_roots(&self, v: &mut Vec<Value>) {
         for s in &self.bc.codes {
@@ -122,7 +135,7 @@ impl<'p> Interp<'p> {
             for c in s.iter() {
                 if let BcSlot::Byte(c) = c {
                     c.code.ics.iter().for_each(|ic| ic.set(Ic::EMPTY));
-                    c.cells.iter().for_each(|cell| cell.1.set(u32::MAX));
+                    c.cells.iter().for_each(GCell::forget);
                 }
             }
         }
@@ -132,9 +145,20 @@ impl<'p> Interp<'p> {
     fn bc_finish(&mut self, r: G<crate::bc::Code>) -> Option<Rc<Compiled>> {
         // The loop reads only narrow words: code with a wide form stays on the tree walker.
         let code = match r {
-            Ok(c) if bc_verify::verify(&c).is_ok() && !c.ops.iter().scan(0usize, |skip, &w| Some(if *skip > 0 { *skip -= 1; false } else { *skip = matches!(Op::from_u8(w as u8), Some(o) if o.form() == bc::Form::AbcX) as usize; w as u8 == Op::Wide as u8 })).any(|w| w) => c,
-            Ok(_) | Err(_) => {
+            Ok(c) if bc_verify::verify(&c).is_err() => {
                 self.bc.stats.fallbacks += 1;
+                self.bc.why = "verify";
+                return None;
+            }
+            Ok(c) if c.ops.iter().scan(0usize, |skip, &w| Some(if *skip > 0 { *skip -= 1; false } else { *skip = matches!(Op::from_u8(w as u8), Some(o) if o.form() == bc::Form::AbcX) as usize; w as u8 == Op::Wide as u8 })).any(|w| w) => {
+                self.bc.stats.fallbacks += 1;
+                self.bc.why = "wide form";
+                return None;
+            }
+            Ok(c) => c,
+            Err(e) => {
+                self.bc.stats.fallbacks += 1;
+                self.bc.why = e;
                 return None;
             }
         };
@@ -146,18 +170,20 @@ impl<'p> Interp<'p> {
                     Ok(key) => key,
                     Err(_) => {
                         self.bc.stats.fallbacks += 1;
+                        self.bc.why = "constant";
                         return None;
                     }
                 },
                 _ => PropertyKey::Index(0),
             };
-            cells.push((key, std::cell::Cell::new(u32::MAX)));
+            cells.push(GCell::new(key));
             kv.push(match k {
                 Const::Number(n) => Value::Number(*n),
                 Const::String(u) => match self.heap.intern_vec(u.to_vec()) {
                     Ok(s) => Value::String(s),
                     Err(_) => {
                         self.bc.stats.fallbacks += 1;
+                        self.bc.why = "constant";
                         return None;
                     }
                 },
@@ -179,7 +205,11 @@ impl<'p> Interp<'p> {
         }
         match &self.bc.codes[s][fid.index()] {
             BcSlot::Byte(c) => return Some(c.clone()),
-            BcSlot::Tree => return None,
+            BcSlot::Tree(r) => {
+                *self.bc.refused.entry(r).or_default() += 1;
+                self.bc.stats.calls_tree += 1;
+                return None;
+            }
             BcSlot::New if self.bc.exec == Exec::Auto && self.scopes[fid.index()].fl & FL_EAGER == 0 => {
                 self.bc.codes[s][fid.index()] = BcSlot::Seen;
                 return None;
@@ -188,10 +218,15 @@ impl<'p> Interp<'p> {
         }
         let r = self.bc_compile(fid);
         let c = self.bc_finish(r);
+        let why = self.bc.why;
         self.bc.codes[s][fid.index()] = match &c {
             Some(c) => BcSlot::Byte(c.clone()),
-            None => BcSlot::Tree,
+            None => BcSlot::Tree(why),
         };
+        if c.is_none() {
+            *self.bc.refused.entry(why).or_default() += 1;
+            self.bc.stats.calls_tree += 1;
+        }
         c
     }
 
@@ -201,7 +236,29 @@ impl<'p> Interp<'p> {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn bc_enter(&mut self, (script, fid): (u32, FuncId), fobj: ObjId, cenv: u32, self_binding: bool, this: Value, args: &[Value], new: bool, saved: (u32, bool, usize)) -> Option<Res<Value>> {
         let code = self.bc_code(script, fid)?;
+        self.bc.stats.calls_lane += 1;
         let (saved_env, saved_strict, saved_script) = saved;
+        if code.code.regfn && code.code.has_env {
+            // A register function with inner functions: the environment and the bindings of a call are those of stage 1 (the inner
+            // functions find the variables that they name there). Its other variables are registers.
+            let env = match self.new_env(cenv, true) {
+                Ok(e) => e,
+                Err(e) => {
+                    self.select(saved_script);
+                    return Some(Err(e));
+                }
+            };
+            self.env = env;
+            let r = self.in_frame(script, Where::Func(fid), new, |it| {
+                it.bind_call(fobj, fid, env, self_binding, this, args)?;
+                it.bc_run_rf(&code, this, args)
+            });
+            self.select(saved_script);
+            self.env = saved_env;
+            self.strict = saved_strict;
+            self.release(env);
+            return Some(r);
+        }
         if code.code.regfn {
             // A register function has no environment: its closure's environment is the one its outer names resolve from.
             self.env = cenv;
@@ -299,6 +356,12 @@ impl<'p> Interp<'p> {
         st.regs[..n].copy_from_slice(&args[..n]);
         let mut depth = 0u32;
         let r = self.bc_loop(c, &mut st, &mut depth, t);
+        // A function with an environment can leave blocks open (a return in a block).
+        for _ in 0..depth {
+            let e = self.env;
+            self.env = self.envs[e as usize].parent;
+            self.release(e);
+        }
         self.bc.pool.push(st);
         r
     }
@@ -316,24 +379,35 @@ impl<'p> Interp<'p> {
     /// The register function that `f` is, when it can run in the loop of the caller: a script function of the same script whose
     /// code is a register function. `None`: the call goes through `call_fn`.
     #[inline(always)]
-    fn bc_target(&self, f: Value) -> Option<(Rc<Compiled>, FuncId, u32)> {
+    fn bc_target(&self, f: Value) -> Option<(Rc<Compiled>, FuncId, u32, ObjId)> {
         let Value::Object(o) = f else { return None };
         let Some(&Callee::Script { script, fid, env, self_binding: false }) = self.funcs.get(&o) else { return None };
         if script as usize != self.cur {
             return None;
         }
         match self.bc.codes.get(self.cur)?.get(fid.index())? {
-            BcSlot::Byte(c) if c.code.regfn => Some((c.clone(), fid, env)),
+            BcSlot::Byte(c) => Some((c.clone(), fid, env, o)),
             _ => None,
         }
     }
 
-    /// The caller `fr` of an inline call is current again: undo what the call set (`ok`: it returned). The caller sets `strict`.
-    fn bc_inline_exit(&mut self, fr: &Fr, ok: bool) {
+    /// The caller `fr` of an inline call is current again: leave the callee. It pops the environments that the callee pushed, and
+    /// releases the one of its call. `ok`: it returned. The caller sets `strict`.
+    #[inline(always)]
+    fn bc_frame_exit(&mut self, fr: &Fr, ok: bool, depth: &mut u32) {
+        for _ in 0..*depth {
+            let e = self.env;
+            self.env = self.envs[e as usize].parent;
+            self.release(e);
+        }
         self.depth -= 1;
         let saved_pos = self.stk.frames.pop().map_or(0, |f| f.saved_pos);
         self.stk.pos = if ok { 0 } else { saved_pos };
         self.env = fr.env;
+        if fr.callee_env != u32::MAX {
+            self.release(fr.callee_env);
+        }
+        *depth = fr.depth;
     }
 
     /// A thrown error at word `pc`: the target of its handler, the register of the exception and the exception. Any other error,
@@ -353,7 +427,7 @@ impl<'p> Interp<'p> {
     }
 
     /// The bindings of the environment of scope `s`, in the order of `bc_binds`.
-    fn bc_tmpl(&mut self, s: u32) -> Rc<[(u32, u8)]> {
+    pub(super) fn bc_tmpl(&mut self, s: u32) -> Rc<[(u32, u8)]> {
         if let Some(t) = self.bc.tmpl.get(&s) {
             return t.clone();
         }
@@ -401,10 +475,11 @@ impl<'p> Interp<'p> {
 
     /// `GetGlobal`: environment 0 (a lexical name of another script), then the global object.
     #[inline(never)]
-    fn bc_get_global(&mut self, n: u32, cell: &(PropertyKey, std::cell::Cell<u32>)) -> Res<Value> {
+    fn bc_get_global(&mut self, n: u32, cell: &GCell) -> Res<Value> {
         if !self.envs[0].bindings.is_empty()
             && let Some(i) = self.find_in(0, n)
         {
+            cell.st.set((GC_LEX as u64) << 32 | i as u64);
             let b = self.envs[0].bindings[i];
             return if b.flags & INIT != 0 { Ok(b.value) } else { Err(self.tdz(n)) };
         }
@@ -413,16 +488,55 @@ impl<'p> Interp<'p> {
         Ok(v)
     }
 
+    /// `GetGlobal` when environment 0 has bindings: the value if the cell knows where the name is, else `None` (the slow path).
+    #[inline(never)]
+    fn bc_global_hit(&self, cell: &GCell) -> Option<Value> {
+        let st = cell.st.get();
+        if (st >> 32) as usize == self.envs[0].bindings.len() {
+            self.heap.cell_get(self.global, st as u32, cell.key)
+        } else if (st >> 32) as u32 == GC_LEX {
+            match self.envs[0].bindings.get(st as u32 as usize) {
+                Some(b) if b.flags & INIT != 0 => Some(b.value),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    }
+
+    /// `SetGlobal` when environment 0 has bindings: `true` if the cell stored the value.
+    #[inline(never)]
+    fn bc_global_put(&mut self, cell: &GCell, v: Value) -> bool {
+        let st = cell.st.get();
+        if (st >> 32) as usize == self.envs[0].bindings.len() {
+            self.heap.cell_set(self.global, st as u32, cell.key, v)
+        } else if (st >> 32) as u32 == GC_LEX {
+            match self.envs[0].bindings.get_mut(st as u32 as usize) {
+                Some(b) if b.flags & (INIT | MUT) == INIT | MUT => {
+                    b.value = v;
+                    true
+                }
+                _ => false,
+            }
+        } else {
+            false
+        }
+    }
+
     /// Keep the position of a global property in its cell, after a slow path.
-    fn bc_learn(&mut self, cell: &(PropertyKey, std::cell::Cell<u32>)) {
-        cell.1.set(self.heap.own_pos(self.global, cell.0).unwrap_or(u32::MAX));
+    fn bc_learn(&mut self, cell: &GCell) {
+        cell.st.set(match self.heap.own_pos(self.global, cell.key) {
+            Some(p) => (self.envs[0].bindings.len() as u64) << 32 | p as u64,
+            None => GC_NONE,
+        });
     }
 
     #[inline(never)]
-    fn bc_set_global(&mut self, n: u32, v: Value, cell: &(PropertyKey, std::cell::Cell<u32>)) -> Res<()> {
+    fn bc_set_global(&mut self, n: u32, v: Value, cell: &GCell) -> Res<()> {
         if !self.envs[0].bindings.is_empty()
             && let Some(i) = self.find_in(0, n)
         {
+            cell.st.set((GC_LEX as u64) << 32 | i as u64);
             return self.bc_assign(0, i, v);
         }
         self.assign_global(n, v)?;
@@ -751,7 +865,7 @@ impl<'p> Interp<'p> {
                     ($v:expr) => {{
                         let v = $v;
                         let Some(fr) = st.frames.pop() else { return Ok(v) };
-                        self.bc_inline_exit(&fr, true);
+                        self.bc_frame_exit(&fr, true, depth);
                         code = fr.code;
                         c = &code;
                         ops = &c.code.ops[..];
@@ -824,7 +938,7 @@ impl<'p> Interp<'p> {
                     // A cell hit is what `get_global` and `assign_global` find first. A lexical binding of environment 0 shadows the cells.
                     GET_GLOBAL => {
                         let cell = &c.cells[bx as usize];
-                        let hit = if self.envs[0].bindings.is_empty() { self.heap.cell_get(self.global, cell.1.get(), cell.0) } else { None };
+                        let hit = if self.envs[0].bindings.is_empty() { self.heap.cell_get(self.global, cell.st.get() as u32, cell.key) } else { self.bc_global_hit(cell) };
                         regs[a] = match hit {
                             Some(v) => v,
                             None => tri!(at, self.bc_get_global(name!(bx), cell)),
@@ -833,7 +947,8 @@ impl<'p> Interp<'p> {
                     SET_GLOBAL => {
                         let cell = &c.cells[bx as usize];
                         let v = regs[a];
-                        if !(self.envs[0].bindings.is_empty() && self.heap.cell_set(self.global, cell.1.get(), cell.0, v)) {
+                        let done = if self.envs[0].bindings.is_empty() { self.heap.cell_set(self.global, cell.st.get() as u32, cell.key, v) } else { self.bc_global_put(cell, v) };
+                        if !done {
                             tri!(at, self.bc_set_global(name!(bx), v, cell));
                         }
                     }
@@ -886,7 +1001,7 @@ impl<'p> Interp<'p> {
                         if x >> 31 != 0 {
                             regs[b + 1] = Value::Undefined;
                         }
-                        let Some((callee, fid, cenv)) = self.bc_target(regs[b]) else {
+                        let Some((callee, fid, cenv, fobj)) = self.bc_target(regs[b]) else {
                             regs[a] = tri!(at, self.bc_call(c, at, regs, b, cc, false));
                             continue 'run;
                         };
@@ -895,30 +1010,54 @@ impl<'p> Interp<'p> {
                             break 'op Err(Error::Limit(LimitKind::CallDepth));
                         }
                         tri!(at, self.tick());
+                        self.bc.stats.calls_lane += 1;
                         let k = &callee.code;
-                        let t = if k.dyn_this {
-                            This::Dynamic
-                        } else if k.uses_this {
-                            This::Fixed(tri!(at, self.bc_bind_this(regs[b + 1], k.strict)))
+                        let (nb, nregs, this_v) = (base + b + 2, k.nregs as usize, regs[b + 1]);
+                        // Every step that can fail comes before the first use of `st.regs`.
+                        let (t, caller_env, callee_env, from, to);
+                        if k.regfn && !k.has_env {
+                            // A register function with no environment: the closure's environment is where its outer names come from.
+                            t = if k.dyn_this {
+                                This::Dynamic
+                            } else if k.uses_this {
+                                This::Fixed(tri!(at, self.bc_bind_this(this_v, k.strict)))
+                            } else {
+                                This::Fixed(Value::Undefined)
+                            };
+                            caller_env = std::mem::replace(&mut self.env, cenv);
+                            callee_env = u32::MAX;
+                            (from, to) = (cc.min(k.nparams as usize), k.nlocals as usize);
+                            self.stk.frames.push(StackFrame { script: self.cur as u32, at: Where::Func(fid), new: false, saved_pos: x & 0x7fff_ffff });
+                            self.stk.pos = 0;
                         } else {
-                            This::Fixed(Value::Undefined)
-                        };
-                        let nb = base + b + 2;
-                        let nregs = k.nregs as usize;
+                            // The environment and the bindings of a call are those of `bc_enter`.
+                            let env = tri!(at, self.new_env(cenv, true));
+                            // Default values of parameters run here, in the callee's environment and frame.
+                            caller_env = std::mem::replace(&mut self.env, env);
+                            self.stk.frames.push(StackFrame { script: self.cur as u32, at: Where::Func(fid), new: false, saved_pos: x & 0x7fff_ffff });
+                            self.stk.pos = 0;
+                            if let Err(e) = self.bind_call(fobj, fid, env, false, this_v, &regs[b + 2..b + 2 + cc]) {
+                                self.stk.frames.pop();
+                                self.stk.pos = x & 0x7fff_ffff;
+                                self.env = caller_env;
+                                self.release(env);
+                                break 'op Err(e);
+                            }
+                            let fixed = if k.regfn { !k.dyn_this } else { self.prog.func(fid).kind != FuncKind::Arrow && self.cls.fflags[fid.index()] == 0 };
+                            t = if fixed { This::Fixed(self.envs[env as usize].this.unwrap_or(Value::Undefined)) } else { This::Dynamic };
+                            callee_env = env;
+                            (from, to) = if k.regfn { (cc.min(k.nparams as usize), k.nlocals as usize) } else { (0, nregs) };
+                        }
                         if st.regs.len() < nb + nregs {
                             st.regs.resize(nb + nregs, Value::Undefined);
                         }
                         // The arguments are the first registers of the callee already. The other variables start as `undefined`.
-                        let (lo, hi) = (cc.min(k.nparams as usize), k.nlocals as usize);
-                        if lo < hi {
-                            st.regs[nb + lo..nb + hi].fill(Value::Undefined);
+                        if from < to {
+                            st.regs[nb + from..nb + to].fill(Value::Undefined);
                         }
-                        self.stk.frames.push(StackFrame { script: self.cur as u32, at: Where::Func(fid), new: false, saved_pos: x & 0x7fff_ffff });
-                        self.stk.pos = 0;
                         self.depth += 1;
                         self.strict = k.strict;
-                        let env = std::mem::replace(&mut self.env, cenv);
-                        st.frames.push(Fr { code: std::mem::replace(&mut code, callee), pc: pc as u32, base: base as u32, dst: a as u32, env, this });
+                        st.frames.push(Fr { code: std::mem::replace(&mut code, callee), pc: pc as u32, base: base as u32, dst: a as u32, env: caller_env, this, depth: std::mem::take(depth), callee_env });
                         c = &code;
                         ops = &c.code.ops[..];
                         this = t;
@@ -1031,12 +1170,12 @@ impl<'p> Interp<'p> {
                         Err(e) => {
                             if st.frames.is_empty() || !matches!(e, Error::Throw(_)) {
                                 while let Some(fr) = st.frames.pop() {
-                                    self.bc_inline_exit(&fr, false);
+                                    self.bc_frame_exit(&fr, false, depth);
                                 }
                                 return Err(e);
                             }
                             let Some(fr) = st.frames.pop() else { return Err(e) };
-                            self.bc_inline_exit(&fr, false);
+                            self.bc_frame_exit(&fr, false, depth);
                             code = fr.code;
                             c = &code;
                             ops = &c.code.ops[..];

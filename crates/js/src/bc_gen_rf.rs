@@ -17,10 +17,12 @@ impl<'p> Interp<'p> {
             && !f.is_async()
             && !f.is_generator()
             && self.cls.fflags[fid.index()] == 0
-            && fs.flags & (BF_ARGS | BF_NEW_TARGET | BF_DERIVED | BF_IN_CLASS | BF_INNER | BF_SELF_NAME) == 0;
+            && fs.flags & (BF_ARGS | BF_NEW_TARGET | BF_DERIVED | BF_IN_CLASS | BF_SELF_NAME) == 0;
         if !ok {
             return None;
         }
+        // Inner functions: the variables that they name stay in the environment (see `rfc_analyze`).
+        let (captured, env_scopes) = if fs.flags & BF_INNER != 0 { self.rfc_analyze(fid, fs)? } else { Default::default() };
         let mut binds = Vec::new();
         self.bc_binds(fs.scope, &mut binds);
         let nparams = f.params.len();
@@ -28,18 +30,131 @@ impl<'p> Interp<'p> {
         if binds.len() > 200 || binds.iter().filter(|b| b.kind == BindKind::Param).count() != nparams || !binds[..nparams].iter().all(|b| b.kind == BindKind::Param) {
             return None;
         }
-        let locals = binds.iter().enumerate().map(|(i, b)| ((fs.scope, b.name), Local { reg: i as u32, init: b.flags & INIT != 0, is_const: b.kind == BindKind::Const })).collect();
-        Some((Rf { scope: fs.scope, outer: self.sc_all[fs.scope as usize].parent, locals, uses_this: false }, nparams, binds.len()))
+        let locals = binds
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| !captured.contains(&(fs.scope, b.name)))
+            .map(|(i, b)| ((fs.scope, b.name), Local { reg: i as u32, init: b.flags & INIT != 0, is_const: b.kind == BindKind::Const }))
+            .collect();
+        let env = fs.flags & BF_INNER != 0;
+        Some((Rf { scope: fs.scope, outer: self.sc_all[fs.scope as usize].parent, locals, uses_this: false, env, env_scopes, captured }, nparams, binds.len()))
+    }
+
+    /// What the inner functions of function `fid` take from it. Gives the variables that an inner function names, as pairs of the
+    /// declaring scope and the name (an inner function that names one reads or writes it by (hops, index) in an environment, in the
+    /// bytecode lane and on the tree walker alike, so the variable must be a binding there), and the scopes of `fid` that have an
+    /// inner function inside them (each of them keeps its environment, so the hop count of a site in the inner function stays that
+    /// of `bc_resolve`). `None` when the walk of an inner function fails.
+    fn rfc_analyze(&mut self, fid: FuncId, fs: &FnScope) -> Option<(std::collections::HashSet<(u32, u32)>, std::collections::HashSet<u32>)> {
+        let w = self.bc_walk(Some(fid), fs.scope);
+        if w.bad.is_some() {
+            return None;
+        }
+        let own: std::collections::HashSet<u32> = std::iter::once(fs.scope).chain(w.stmts.iter().map(|&(_, s)| s)).collect();
+        let (mut captured, mut env_scopes) = (std::collections::HashSet::new(), std::collections::HashSet::new());
+        for &(_, isc) in &w.funcs {
+            let mut p = self.sc_all[isc as usize].parent;
+            while p != NONE && p != fs.scope {
+                env_scopes.insert(p);
+                p = self.sc_all[p as usize].parent;
+            }
+        }
+        let nexprs = self.prog.exprs.len() as u32;
+        let mut todo = w.funcs;
+        while let Some((f, isc)) = todo.pop() {
+            let iw = self.bc_walk(Some(f), isc);
+            if iw.bad.is_some() {
+                return None;
+            }
+            todo.extend(iw.funcs);
+            for (site, s) in iw.sites {
+                let n = if site < nexprs { self.expr_name[site as usize] } else { self.pat_name[(site - nexprs) as usize] };
+                let mut t = s;
+                while t != NONE {
+                    if self.bc_declares(t, n) {
+                        if own.contains(&t) {
+                            captured.insert((t, n));
+                        }
+                        break;
+                    }
+                    t = self.sc_all[t as usize].parent;
+                }
+            }
+        }
+        Some((captured, env_scopes))
     }
 }
 
 impl Gen<'_, '_> {
+    /// Whether a call here is `CallR`, which runs a register function of the same script in the loop of the caller. Every function
+    /// uses it, except in the stage 1 listings (`rf_off`).
+    pub(super) fn callr_ok(&self) -> bool {
+        !self.it.bc.rf_off
+    }
+
+    /// Whether scope `sc` of the function has an environment at run time. Every scope of a function of stage 1 has one.
+    pub(super) fn scope_has_env(&self, sc: u32) -> bool {
+        self.rf.as_ref().is_none_or(|r| r.env_scopes.contains(&sc))
+    }
+
+    /// What the name `n` means at a site in scope `sc`, in a register function that has an environment, when no register holds it:
+    /// a binding of an environment of this function, or a name of the scopes around it.
+    pub(super) fn rfc_site(&mut self, mut sc: u32, n: u32) -> Site {
+        let (fscope, outer) = {
+            let rf = self.rf.as_ref().expect("a register function");
+            (rf.scope, rf.outer)
+        };
+        let mut hops = 0;
+        loop {
+            if self.it.bc_declares(sc, n) {
+                return match self.it.bc_tmpl(sc).iter().position(|b| b.0 == n) {
+                    Some(i) if hops < 0x3FFF && i < 0xFFFF => Site::Env { hops, index: i as u32 },
+                    _ => Site::Dynamic,
+                };
+            }
+            if sc == fscope {
+                if outer == NONE {
+                    return Site::Global;
+                }
+                return match self.it.bc_resolve(n, outer) {
+                    Site::Env { hops: h, index } if h + hops + 1 < 0x3FFF => Site::Env { hops: h + hops + 1, index },
+                    Site::Env { .. } => Site::Dynamic,
+                    other => other,
+                };
+            }
+            if self.scope_has_env(sc) {
+                hops += 1;
+            }
+            sc = self.it.sc_all[sc as usize].parent;
+        }
+    }
+
+    /// The registers of the variables of scope `sc` that no inner function names. The scope has an environment (`PushEnv` made all
+    /// its bindings), so a binding keeps its place there, and a captured variable has no register.
+    pub(super) fn rf_env_scope(&mut self, sc: u32) -> G<()> {
+        let mut binds = Vec::new();
+        self.it.bc_binds(sc, &mut binds);
+        for b in binds {
+            if self.rf.as_ref().is_some_and(|r| r.captured.contains(&(sc, b.name))) {
+                continue;
+            }
+            let reg = self.reg()?;
+            let l = Local { reg, init: b.flags & INIT != 0, is_const: b.kind == BindKind::Const };
+            self.rf.as_mut().expect("a register function").locals.insert((sc, b.name), l);
+        }
+        Ok(())
+    }
+
     /// The variable `n` that a site in scope `sc` means, when a scope of this function declares it.
     pub(super) fn local_at(&self, mut sc: u32, n: u32) -> Option<((u32, u32), Local)> {
         let rf = self.rf.as_ref()?;
         loop {
             if let Some(&l) = rf.locals.get(&(sc, n)) {
                 return Some(((sc, n), l));
+            }
+            // A captured variable is a binding of an environment: a name of a scope outside it is another variable.
+            if rf.captured.contains(&(sc, n)) {
+                return None;
             }
             if sc == rf.scope || sc == NONE {
                 return None;
@@ -59,6 +174,12 @@ impl Gen<'_, '_> {
             self.rf.as_mut().expect("a register function").locals.insert((sc, b.name), l);
         }
         Ok(())
+    }
+
+    /// The same, or `None` when the variable is a binding of an environment.
+    pub(super) fn rf_decl_opt(&mut self, site: u32, n: u32) -> G<Option<((u32, u32), Local)>> {
+        let sc = *self.sites.get(&site).ok_or("a site that the walk did not visit")?;
+        Ok(self.local_at(sc, n))
     }
 
     /// The register of the variable that the declaration site `site` declares, before its initializer ran.

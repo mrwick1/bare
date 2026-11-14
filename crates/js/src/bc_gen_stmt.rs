@@ -85,12 +85,15 @@ impl Gen<'_, '_> {
                 };
                 // A register function keeps the loop variables in registers: no environment, no copy per iteration.
                 let rf_mark = self.top;
-                let envs = scope.is_some() && self.rf.is_none();
+                let envs = scope.is_some_and(|sc| self.scope_has_env(sc));
                 if let Some(sc) = scope {
-                    if self.rf.is_some() {
-                        self.rf_scope(sc)?;
-                    } else {
+                    if envs {
                         self.push_env(sc)?;
+                        if self.rf.is_some() {
+                            self.rf_env_scope(sc)?;
+                        }
+                    } else {
+                        self.rf_scope(sc)?;
                     }
                 }
                 match init {
@@ -150,10 +153,14 @@ impl Gen<'_, '_> {
             StmtKind::Block(l) => {
                 let sc = self.scopes.get(&s).copied();
                 let mark = self.top;
+                let env = sc.is_some_and(|sc| self.scope_has_env(sc));
                 match sc {
-                    Some(sc) if self.rf.is_some() => self.rf_scope(sc)?,
+                    Some(sc) if !env => self.rf_scope(sc)?,
                     Some(sc) => {
                         self.push_env(sc)?;
+                        if self.rf.is_some() {
+                            self.rf_env_scope(sc)?;
+                        }
                         self.hoist(&[l], sc)?;
                     }
                     None => {}
@@ -161,10 +168,11 @@ impl Gen<'_, '_> {
                 for x in prog.list(l) {
                     self.stmt(x)?;
                 }
+                if env {
+                    self.pop_env()?;
+                }
                 if self.rf.is_some() {
                     self.free(mark);
-                } else if sc.is_some() {
-                    self.pop_env()?;
                 }
                 Ok(())
             }
@@ -198,9 +206,9 @@ impl Gen<'_, '_> {
                 return Err("destructuring");
             }
             let n = self.it.pat_name[d.target.index()];
-            if self.rf.is_some() {
+            let reg = if self.rf.is_some() { self.rf_decl_opt(self.it.pat_site(d.target.index()), n)? } else { None };
+            if let Some((key, l)) = reg {
                 // The variable is a register. A `let` or `const` is readable after its initializer.
-                let (key, l) = self.rf_decl(self.it.pat_site(d.target.index()), n)?;
                 match (kind, d.init) {
                     (VarKind::Var, None) => {}
                     (_, Some(i)) => self.expr_into(i, l.reg)?,
@@ -305,6 +313,9 @@ impl Gen<'_, '_> {
             self.code.handlers.push(Handler { start, end: self.here() as u32, target: self.here() as u32, reg: exc as u16, depth: hdepth });
             let sc = *self.scopes.get(&s).ok_or("no catch scope")?;
             if self.rf.is_some() {
+                if self.scope_has_env(sc) {
+                    return Err("a catch with an inner function in a register function");
+                }
                 self.rf_scope(sc)?;
                 if let Some(p) = c.param {
                     if !matches!(prog.pat(p).kind, PatKind::Ident) {

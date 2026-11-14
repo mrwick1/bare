@@ -2095,3 +2095,13 @@ Step 4, phase 2 of `docs/perf-goal.md`. Design: `design-style.md` 3.1 (M2), 3.3 
 - Memory: the cache keeps the last set of the document before. On a journey that visits only new sites this is extra memory with no gain (+4% to +14% peak RSS on the Wikipedia journeys, +2.3% in total). Dropping every set at a miss removes the memory, and also the gain of a repeated sheet list. Open for the owner.
 - Bound: 65,536 rules in sets that only the cache holds (about 33 MB at the measured 500 bytes for a rule), an entry that the last 2 documents did not use goes at the next document, and a document keeps its own set.
 - Limit that the change makes unneeded: none. The `max_rules` and `max_names` limits stay, and they still apply to a set before it is cached.
+
+## Register VM stage 2, slice 1: the stage 1 environment is the cell for a captured variable (2026-11-14, P3)
+
+- Chosen: a function with inner functions is a register function with an environment. The call makes the environment of stage 1. A variable that an inner function names stays a binding of that environment. The other variables are registers. A scope has an environment at run time only when an inner function lies inside it. A call from any lane code to any compiled function of the script runs in the same loop. A frame keeps its own environment depth.
+- Reason: the inner function finds a variable by (hops, index), on the tree walker and in the lane alike, so no inner function needs a new kind of access. `closures` goes from 1.23x to 1.35x, `calls` from 1.67x to 2.15x. A function with an inner function is no longer a stage 1 function.
+- Other choices: a separate boxed cell for each captured variable (a new value kind, new ops in the inner function, and the tree walker would need it too); every function of a script gets an environment (no gain over stage 1).
+- Order: boxed cells, then calls, then global cells, as the plan says. A global cell gives nothing while environment 0 is empty.
+- Not done: inline `new`, calls from native callbacks without Rust recursion, lazy function bodies in the lane (80% of the calls that the tree walker still runs on the journeys), the script body as a register function.
+- Result: 34.9% of the function calls of the 47 journeys run in the lane. Instructions -0.07%, memory +0.4%. The lane stays off by default. `fib` costs 6.3% more than before this slice (581 against 546 instructions for each call).
+- Limit that the change makes unneeded: none.

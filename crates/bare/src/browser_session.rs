@@ -57,7 +57,7 @@ use crate::browser_fetch::FetchLimits;
 use crate::browser_loader::{Input, PageConfig, PageLimits, PageResult, SLICE, Scan, Stop, deadline_after, label};
 use crate::browser_navigation::{Body, NavLimits, NavigationKind, WebStorage};
 use bare_html::{encoding, tree};
-use bare_js::eval::EvalLimits;
+use bare_js::eval::{EvalLimits, Exec};
 use bare_js::heap::HeapLimits;
 use crate::downloads::{self, DownloadRequest, Grab};
 use bare_net::http::{Client, Cookies, Ctx, Request, Response, Streamed};
@@ -126,7 +126,7 @@ impl SessionConfig {
             fetch: FetchLimits::default(),
             limits: SessionLimits::default(),
             browser: BrowserLimits::default(),
-            eval: EvalLimits::session(),
+            eval: EvalLimits { exec: Exec::from_name(&std::env::var("BARE_JS_EXEC").unwrap_or_default()).unwrap_or_default(), ..EvalLimits::session() },
             heap: HeapLimits::default(),
             viewport: None,
             virtual_clock: bare_net::vclock::on(),

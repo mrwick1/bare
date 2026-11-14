@@ -863,7 +863,7 @@ impl<'p> Interp<'p> {
             n_arguments: 0,
             cls: ClassState::default(),
             ics: IcState::default(),
-            bc: BcState { exec: limits.exec, ..Default::default() },
+            bc: BcState::new(limits.exec),
         };
         it.n_arguments = it.intern_name("arguments");
         it.cls_init();
@@ -2253,9 +2253,18 @@ impl<'p> Interp<'p> {
         }
         match mode {
             FuncMode::Plain | FuncMode::Env => {}
-            FuncMode::Async => return self.call_async((script, fid), fobj, cenv, self_binding, this, args),
-            FuncMode::Generator => return self.call_generator((script, fid), fobj, cenv, self_binding, this, args),
-            FuncMode::AsyncGen => return self.call_agen((script, fid), fobj, cenv, self_binding, this, args),
+            FuncMode::Async => {
+                self.bc_tree_call("an async function");
+                return self.call_async((script, fid), fobj, cenv, self_binding, this, args);
+            }
+            FuncMode::Generator => {
+                self.bc_tree_call("a generator");
+                return self.call_generator((script, fid), fobj, cenv, self_binding, this, args);
+            }
+            FuncMode::AsyncGen => {
+                self.bc_tree_call("an async generator");
+                return self.call_agen((script, fid), fobj, cenv, self_binding, this, args);
+            }
         }
         let (saved_env, saved_strict) = (self.env, self.strict);
         // The callee runs on its own script code. The caller's code comes back on every exit.

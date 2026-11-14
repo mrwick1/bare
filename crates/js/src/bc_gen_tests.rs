@@ -366,3 +366,133 @@ fn a_simple_function_is_a_register_function() {
         assert!(!text.contains("Env"), "{text}");
     });
 }
+
+/// Run `src` in each mode and show the completion value (or the error name).
+fn show(src: &str, mode: Exec) -> String {
+    let mut it = Interp::realm(Heap::default(), EvalLimits { max_steps: 50_000_000, ..Default::default() }).unwrap();
+    it.set_exec(mode);
+    match it.run_script(src) {
+        Ok(v) => it.display(v),
+        Err(Error::Throw(v @ Value::Object(_))) => format!("throw:{}", it.get_str(v, "name")),
+        Err(e) => format!("{e:?}"),
+    }
+}
+
+/// A function with inner functions is a register function that has an environment: the variables that an inner function names are
+/// bindings of it (`GetEnv`, `SetEnv`), the others are registers.
+#[test]
+fn a_function_with_a_closure_is_a_register_function_with_an_environment() {
+    big(|| {
+        let src = "function mk(n) { var c = n, k = 2; var s = 0; for (var i = 0; i < k; i++) s += i; return function() { c = c + s; return c; }; } mk(1);";
+        let prog = parse_script(src, Limits::default()).unwrap();
+        let mut it = Interp::new(&prog, Heap::default(), EvalLimits::default()).unwrap();
+        let _ = it.run();
+        let root = it.bc_root().unwrap();
+        let (f, _) = it.bc_walk(None, root).funcs[0];
+        let c = it.bc_compile(f).unwrap();
+        verify(&c).unwrap_or_else(|e| panic!("{e}\n{}", c.disassemble()));
+        let text = c.disassemble();
+        assert!(c.regfn && c.has_env, "{text}");
+        // `c` and `s` are named by the inner function: bindings. `n`, `k` and `i` are registers.
+        assert!(text.contains("Closure"), "{text}");
+        assert!(text.contains("SetEnv") && text.contains("GetEnv"), "{text}");
+        assert!(text.contains("JnLt") && text.contains("Inc"), "{text}");
+        assert_eq!(text.matches("GetEnv").count() + text.matches("SetEnv").count(), 4, "{text}");
+    });
+}
+
+/// The three engines agree on functions with closures: captured variables, loops that make closures, blocks with and without
+/// closures, arrow `this`, function declarations, errors and the TDZ.
+#[test]
+fn register_functions_with_closures_agree_with_the_tree_walker() {
+    big(|| {
+        let cases: &[(&str, &str)] = &[
+            ("counter", "function mk(n) { var c = n; return function() { c = c + 1; return c; }; } var f = mk(5); f(); f()"),
+            ("mixed", "function g(n) { var s = 0, k = 3; var add = function(x) { s += x; }; for (var i = 0; i < n; i++) add(i * k); return s + k; } g(10) + g(4)"),
+            ("let per iteration", "function h() { var fs = []; for (let i = 0; i < 3; i++) fs.push(function() { return i; }); var o = ''; for (var j = 0; j < 3; j++) o += fs[j](); return o; } h()"),
+            ("block lets", "function b() { var r = [], t = 0; for (var j = 0; j < 3; j++) { let a = j * 10; let u = j + 1; t += u; r.push(() => a); } return t + ':' + r[0]() + r[1]() + r[2](); } b()"),
+            ("arrow this", "var o = { v: 4, m: function() { var f = () => this.v; var w = 1; return f() + w; } }; o.m()"),
+            ("declarations", "function outer(x) { function helper(y) { return y + x; } var z = helper(1); return z + helper(2); } outer(10)"),
+            ("recursive declaration", "function outer(n) { function fact(k) { return k < 2 ? 1 : k * fact(k - 1); } return fact(n); } outer(6)"),
+            ("three levels", "function a(x) { var y = 1; return function() { var z = 2; return function() { x += y + z; y++; return x; }; }; } var g = a(1)(); g(); g()"),
+            ("shadow", "function s(x) { var r = []; { let x = 5; r.push(function() { return x; }); } r.push(function() { return x; }); return r[0]() * 10 + r[1](); } s(3)"),
+            ("catch", "function c() { var f = function() { throw new Error('boom'); }; try { f(); } catch (e) { return e.message; } } c()"),
+            ("tdz", "function t() { var f = () => z; try { f(); } catch (e) { return e.name; } let z = 1; return 'no'; } t()"),
+            ("break and continue in a block with a closure", "function w() { var o = []; for (var i = 0; i < 6; i++) { let q = i; if (q == 1) continue; if (q == 4) break; o.push(function() { return q; }); } return o.map(function(f) { return f(); }).join(); } w()"),
+            ("return in a block", "function r(n) { var f = function() { return n; }; for (var i = 0; i < 3; i++) { let q = i; if (q == n) return f() + q; } return -1; } r(2) + r(7)"),
+            ("inline call at depth 0 and in a block", "function sq(x) { return x * x; } function w(n) { var t = 0; var inc = function() { t++; }; { let q = n; inc(); t += sq(q); } return t + sq(n); } w(3)"),
+            ("throw through inline frames", "function bad(x) { if (x > 2) throw new Error('b' + x); return x; } function w(n) { var f = function() { return n; }; try { return bad(n) + f(); } catch (e) { return e.message; } } w(1) + w(5)"),
+            ("call depth", "function d(n) { var f = function() { return n; }; return n == 0 ? 0 : 1 + d(n - 1); } d(50)"),
+            ("closure in a switch", "function sw(n) { var f = function() { return n; }; switch (n) { case 1: let k = 5; return f() + k; default: return f(); } } sw(1) + sw(2)"),
+            ("closure assigned to a captured param", "function p(a, b) { var g = function() { a = a + b; return a; }; g(); return g() + b; } p(1, 2)"),
+            ("var in a block", "function v() { var f = function() { return m; }; { var m = 7; } return f(); } v()"),
+            ("named function expression", "function n1() { var f = function me(k) { return k < 1 ? 0 : k + me(k - 1); }; return f(4); } n1()"),
+            ("caller with open blocks, callee throws", "function bad(x) { if (x > 1) throw new Error('b' + x); return x; } function w(n) { var f = function() { return n; }; var o = ''; for (let i = 0; i < 4; i++) { let q = i; try { { let z = bad(q) + f(); o += z; } } catch (e) { o += e.message; } } return o; } w(1)"),
+            ("callee with a handler, caller in blocks", "function safe(x) { try { if (x > 1) throw 1; return x; } catch (e) { return -x; } } function w(n) { var f = function() { return n; }; var o = []; for (let i = 0; i < 4; i++) { let q = i; { let z = safe(q); o.push(z + f()); } } return o.join(); } w(1)"),
+            ("script body calls", "function a(x) { return x + 1; } var s = 0; for (var i = 0; i < 5; i++) { let q = i; s += a(q); } try { (function() { throw new Error('t'); })(); } catch (e) { s += e.message; } s"),
+            ("stack", "function e1() { var f = function() { return new Error('x').stack.split('\\n').length; }; return f(); } e1() > 1"),
+            ("default params", "function f(a, b = a + 1, c = b * 2) { return [a, b, c].join(); } f(1) + '|' + f(1, 5) + '|' + f(1, undefined, 0)"),
+            ("rest params", "function f(a, ...r) { return a + ':' + r.length + ':' + r.join('-'); } f(1) + '|' + f(1, 2, 3)"),
+            ("shadow levels", "var x = 'g'; function f() { var x = 'f'; { let x = 'b'; { const x = 'bb'; return (() => x)() + x } } } f() + x"),
+            ("callee with arguments", "function a() { return arguments.length + arguments[1]; } function w(n) { var f = function() { return n; }; return a(1, 20, 3) + f(); } w(1)"),
+            ("callee with this", "var o = { v: 3, m: function() { return this.v; } }; function w(n) { var f = function() { return n; }; return o.m() + f(); } w(1)"),
+            ("callee with a closure called in a loop", "function mk(x) { return function() { return x; }; } function w(n) { var t = 0; for (var i = 0; i < n; i++) t += mk(i)(); return t; } w(5)"),
+            ("env callee throws through env frames", "function in1(x) { var f = function() { return x; }; if (x > 1) throw new Error('i' + x); return f(); } function mid(x) { var g = function() { return in1(x); }; return g() + 1; } function w(n) { try { return mid(n); } catch (e) { return e.message; } } w(1) + w(4)"),
+            ("env callee depth", "function d(n) { var f = function() { return n; }; return n == 0 ? 0 : 1 + d(n - 1) + f() - n; } d(200)"),
+            ("stack across env frames", "function inner() { var f = () => 1; return new Error('x').stack.split('\\n').length + f(); } function outer() { var g = () => 2; return inner() + g(); } outer() > 3"),
+        ];
+        let mut bad = Vec::new();
+        for (name, src) in cases {
+            let want = show(src, Exec::Tree);
+            for mode in [Exec::Auto, Exec::Byte] {
+                let got = show(src, mode);
+                if got != want {
+                    bad.push(format!("{name} {mode:?}: {got} (tree {want})"));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "{}", bad.join("\n"));
+    });
+}
+
+/// Run each script in turn in one realm and show the last completion value.
+fn show_all(srcs: &[&str], mode: Exec) -> String {
+    let mut it = Interp::realm(Heap::default(), EvalLimits { max_steps: 50_000_000, ..Default::default() }).unwrap();
+    it.set_exec(mode);
+    let mut out = String::new();
+    for src in srcs {
+        out = match it.run_script(src) {
+            Ok(v) => it.display(v),
+            Err(Error::Throw(v @ Value::Object(_))) => format!("throw:{}", it.get_str(v, "name")),
+            Err(e) => format!("{e:?}"),
+        };
+    }
+    out
+}
+
+/// The global cells follow a lexical declaration of a later script (it shadows the property of the global object), a name that
+/// is deleted and made again, a `const`, and a name in its TDZ.
+#[test]
+fn global_cells_follow_the_declarations_of_later_scripts() {
+    big(|| {
+        let cases: &[(&str, &[&str])] = &[
+            ("shadow", &["globalThis.q = 1; function rd() { return q; } function wr(v) { q = v; } var a = [rd(), rd()]; wr(7); a.push(rd()); a.join()", "let q = 2; var b = [rd()]; wr(9); b.push(rd(), globalThis.q); b.join()"]),
+            ("loop", &["globalThis.n = 0; function inc() { for (var i = 0; i < 5; i++) n = n + i; return n; } inc(); inc()", "let n2 = 1; globalThis.n + ',' + inc()"]),
+            ("const", &["globalThis.k = 1; function w() { k = 2; return k; } w()", "const k = 3; try { w(); } catch (e) { e.name + k }"]),
+            ("tdz", &["function rd() { return zz; } 1", "var r = []; try { rd(); } catch (e) { r.push(e.name); } let zz = 4; r.push(rd(), rd()); r.join()"]),
+            ("delete and make again", &["globalThis.d = 1; function rd() { return typeof d == 'undefined' ? -1 : d; } var r = [rd()]; delete globalThis.d; r.push(rd()); globalThis.e = 5; globalThis.d = 8; r.push(rd()); r.join()"]),
+            ("accessor", &["Object.defineProperty(globalThis, 'ac', { get: function() { return 11; }, configurable: true }); function rd() { return ac; } rd() + rd()"]),
+        ];
+        let mut bad = Vec::new();
+        for (name, srcs) in cases {
+            let want = show_all(srcs, Exec::Tree);
+            for mode in [Exec::Auto, Exec::Byte] {
+                let got = show_all(srcs, mode);
+                if got != want {
+                    bad.push(format!("{name} {mode:?}: {got} (tree {want})"));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "{}", bad.join("\n"));
+    });
+}
