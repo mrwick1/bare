@@ -72,7 +72,7 @@ impl Images {
 }
 
 fn supported(kind: &str) -> bool {
-    matches!(kind.trim().to_ascii_lowercase().as_str(), "image/png" | "image/jpeg" | "image/webp")
+    matches!(kind.trim().to_ascii_lowercase().as_str(), "image/png" | "image/jpeg" | "image/webp" | "image/gif")
 }
 
 /// The first URL of a `srcset`.

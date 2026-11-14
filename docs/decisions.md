@@ -2053,6 +2053,13 @@ Step 4, phase 2 of `docs/perf-goal.md`. Design: `design-style.md` 3.1 (M2), 3.3 
 - Other choice: a streaming codec with state on the native side. It gives output before close, but the state must live in the host, keyed by stream, and be freed when the page drops the stream. A whole-buffer call keeps no native state.
 - Limits: a stream gives no output before its writable side closes. One `DecompressionStream` gives at most 256 MiB.
 - Errors follow the Compression Standard, and not the reply decoder of `bare-net` (`encoding::inflate`): empty input, cut or bad data, a wrong checksum and bytes after the end of the stream are a `TypeError`. `deflate` is zlib only, and `deflate-raw` is raw only.
+
+## GIF images through the `gif` crate, first frame only (2026-11-14)
+
+- Chosen: `bare-image` decodes GIF with the `gif` crate (image-rs, pure Rust, the same family as `png` and `image-webp`). Only the first frame is read. It is put at its place on a clear screen of the logical screen size.
+- Reason: an `<img>` or `new Image()` with a GIF fired `error`. Gmail loads a 1 by 1 GIF to check that it is online. The `error` set its online flag to false about 13 s after load, and each later search said "You're offline. Results may be limited."
+- The `color_quant` feature is off: it only encodes. The decoder memory limit is `MAX_PIXELS * 4` bytes, the limit of the other formats.
+- Not done: animation, and the disposal and background color of later frames.
 ## JS strings: atoms up to 32 units, flat strings, ropes for `+` (2026-11-14)
 
 - Three kinds: atom (interned), flat (not interned), rope (own slab). Final encoding: `index` bit 31 = rope, `gn` bit 31 = atom (kept in the slab slot). A flat string and an atom are read by the one old lookup, a rope misses and takes a cold path. An encoding with a flat bit in `index` made every flat read two cold calls and cost +10% on some rows. Chosen over the design option C (8-bit storage) because it removes work: no hash and no probe for a long string, and `+` costs O(1) until the first read.

@@ -1,4 +1,4 @@
-# Image decoders: PNG, JPEG and WebP into 0xAARRGGBB pixels, with hard limits. SVG is not here: paint draws it.
+# Image decoders: PNG, JPEG, WebP and GIF into 0xAARRGGBB pixels, with hard limits. SVG is not here: paint draws it.
 [package]
 name = "bare-image"
 version.workspace = true
@@ -9,3 +9,5 @@ license.workspace = true
 png = "0.18"
 zune-jpeg = "0.5"
 image-webp = "0.2"
+# Without `color_quant`: that feature only encodes.
+gif = { version = "0.14", default-features = false, features = ["std", "raii_no_panic"] }
