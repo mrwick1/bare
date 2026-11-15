@@ -2314,3 +2314,15 @@ Owner decision (2026-11-15): verify the Stage 2 hypothesis of PR #567 (run the b
 - Result (`design-gmail-load.md` section 8, `progress.md` "Gmail: Stage 2 check"): the big Gmail scripts are named by four `<link rel=preload as=script>` tags in the first piece of the document, and an inline script (`_GM_loadJS()`, byte 233,464) runs them. Chrome requests them at the first byte and runs them during the body. bare requests them at the last byte + 0.02 s. The most that Stage 2 can give on the first row is 0.58 s (0.50 to 0.70), from 4.29 s to about 3.7 s. A preload rule in the scan gives 0.13 s.
 - Recommendation (the owner decides): build the preload rule in the scan. Do not build Stage 2 now.
 - Not chosen: an early runner for the first inline scripts (the cost of Stage 2 and the same gain: the realm must see the live tree); a prefetch of URL strings found in inline script text (the same request time as the preload rule, but a guess about program text that could fetch URLs the page never loads).
+
+## Gmail: the preload rule in the scan (2026-11-15)
+
+Owner decision (2026-11-15): build the preload rule (option P of `design-gmail-load.md` section 8) in the scan. Do not build Stage 2.
+
+- Built: `Scan` starts a download for `<link rel=preload as=script>` and `as=style` (no `crossorigin`, `media` all or screen, not `disabled`). The element that the page code adds later with the same URL takes the response (`Net::fetch`, key = kind and URL). Gmail names its four big scripts in such links, and the scan now requests them at the first piece of the document, as Chrome does. The first row is 0.15 s earlier (pairs of equal first byte; 0.09 to 0.22 s).
+- Why a rule in the scan and not in `preload.rs`: `preload.rs` works in the style pass, after the tree is whole, and fires events. The scan runs while the body streams. A hint needs no event and no element: only a download that waits under the key of the element.
+- A hint is marked (`Net::hints`) and holds no page work (`Page::pending`) until an element names the same URL. So a hint that no element takes does not delay `load` or the settle. This keeps what `preload.rs` protected: no event before a script can listen, and no cost that the page waits for.
+- `as=style` is built too: the same few lines, and `sheets.rs` finds the hint by the same key.
+- Credentials mode: bare has one mode for scripts and sheets. A link with `crossorigin` starts nothing and the script makes its own request. `integrity` is not checked anywhere in bare, so a reused response cannot differ in effect.
+- Not chosen: Stage 2 (a rewrite of the front half of the loader for at most 0.58 s on one class of page, and a change of the order of effects for every page); a prefetch from URL strings in inline script text; fetching `crossorigin` links under a second key (a script with `crossorigin` cannot be told apart in the scan).
+- Not changed: a link and a script that both have `crossorigin` request twice (Chrome reuses the response).

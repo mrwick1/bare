@@ -329,6 +329,8 @@ What none of this changes: the work after the scripts (about 16.5 G, 2.0 s on on
 
 ### 8.8 Recommendation
 
+Built (owner decision 2026-11-15): option P, in `progress.md` "Gmail: the preload rule in the scan". Stage 2 is not built.
+
 **Build option P. Do not build Stage 2 now.**
 - P costs about 6 lines and gives 0.13 s on Gmail (3% of 4.29 s). It is the only change that moves the *request* to Chrome's offset.
 - Stage 2 gives at most 0.58 s (13.5%) on Gmail, and only on pages with a long body and an early blocking script. It costs a rewrite of the front half of the loader and changes the order of effects of every page. On the 47 journeys it gives nothing that can be measured: they use the virtual clock and see no stream at all. On live pages with a body of about 0.2 s the window is under 0.2 s (hypothesis: not measured).

@@ -12379,3 +12379,63 @@ Not tested: Stage 2 and P themselves (nothing was built); the gain is the measur
 Noticed, not changed:
 - `m=m,m_i` and `ebdd` are requested 0.02 to 0.15 s after `m=b` and `m=a` in 3 of 7 bare runs, in the same round as `_GM_loadJS()` in the other 4 (hypothesis: a limit of the worker slots in `Net`). P would hide it.
 - `preload.rs` says that a fetch for the preload links of a parsed document "would only cost time and memory" because bare has no HTTP cache. That is true for a link that no script uses, and false for a link whose URL a script takes later, as here. P must keep the first case from costing anything: check that an unused scan download does not hold `Page::pending`.
+
+## Gmail: the preload rule in the scan (2026-11-15)
+
+Owner decision (2026-11-15): build option P of [design-gmail-load.md](design-gmail-load.md) section 8 (a preload rule in the scan). Do not build Stage 2. Recorded in `decisions.md`.
+
+**What was built.** `Scan::start` (`browser_loader/scan.rs`) now starts a download for `<link rel=preload as=script href>` and for `<link rel=preload as=style href>`. It is the same few lines for both kinds, so both are built. The download is a hint: it has the key of a `<script src>` or a stylesheet link (`Net::key(kind, url)`), so the element that the page code adds later takes it (`Net::fetch`), and the element makes no second request. Gmail names its four big scripts in such links at bytes 5,807 to 6,882 of a 2.3 MB document, and `_GM_loadJS()` adds the elements at byte 233,464.
+
+What `preload.rs` protected, and how it stays protected.
+- "A browser fires their events before any script can listen": the scan fires no event. `preload.rs` still skips the parsed links in the style pass, so a parsed link gets no `load` and no second fetch.
+- "bare has no HTTP cache, so a fetch would only cost time and memory": true for a link that no element takes. Such a hint (a) holds no page work: `Net::hints` marks it, and `waiting_loads` (`Page::pending`) says `holds = false` for it before `load` and after it, until an element names the same URL (the scan then clears the mark, and `Net::fetch` clears it when the file is taken); (b) delays no `load`, because `load` never waited for a download that no element took; (c) keeps its text under the same caps as any scan download (`WINDOW` of 32, `max_fetches`, `max_total_bytes` through `done`), and a page that ends drops it (`Drop for Net`). Fonts, images and the other `as` values start nothing (the staging login has four font preloads).
+- Credentials mode. bare has one mode for scripts and sheets (no CORS mode; `crossorigin` is "Not done" in `preload.rs`, `sheets.rs` and `modules.rs`). A link with `crossorigin` has another mode than a script without it. So it starts nothing, and the script requests its own file. A link without `crossorigin` has the mode of a script without it, so the URL and that mode match. Not done: a link and a script that both have `crossorigin` (Chrome reuses the response, bare requests it at the script). `integrity`: bare checks none, so a reused response cannot differ in effect. Not done: a script with `crossorigin` taking a hint without it (bare does not model the mismatch).
+- A hint that comes before a `<base href>` resolves against the page, as a `<script src>` does: its download is then not used (a second request, as before).
+
+Tests (written first; `browser_stream_tests.rs`). Before the change 3 of 5 failed:
+1. A preload link in the first piece, the script added later by an inline script: one request, started before the document ends (log order `GET /a.js` before `piece 1`), and the script runs. Failed on main (`GET /a.js` after `end`).
+2. A link with `crossorigin`: the script requests its own file once, after the end of the document (passes on main and after: it guards the rule).
+3. A hint that no script takes (`/a.js` answers 3 s late): `load` is not delayed (page loaded in under 2.5 s), and the inline script of the page ran. Failed on main (no request at all).
+4. `Page::pending` before `load` (a scan adopted by a page that has not loaded): the hint has `holds = false`; with a `<script src>` of the same URL before or after it, `holds = true`. I checked that this test fails when the rule is removed. (The test above cannot show it alone: after `load`, `holds` is false anyway.)
+5. A style preload and a stylesheet link added later: one request, before the end of the document. Failed on main.
+
+**Gmail measurement.** Saved session, read only, no click. `bare-mcp` probe builds as in #569 (`probe-full.patch`, not in the repository): newest main `2211c276` and this branch, each in its own target dir, 5 alternating pairs, 9 s window, machine load 12 down to 3.8 (pair 1 ran at load 12). No account detail is written here. Raw output is under `/data/bare-tmp/gmail-preload-runs/` (it holds session URLs).
+
+| Run (base, new) | First byte of the document | End of the document to first row | First row from `open` | Instructions to first row |
+| --- | --- | --- | --- | --- |
+| 1 | 0.61, 0.53 s | 3.00, 2.21 s (load 12) | 4.49, 3.57 s | 16.7, 17.0 G |
+| 2 | 1.23, 0.48 s | 2.27, 2.23 s | 4.35, 3.49 s | 16.8, 16.9 G |
+| 3 | 0.55, 0.52 s | 2.35, 2.17 s | 3.70, 3.48 s | 16.6, 16.8 G |
+| 4 | 1.14, 1.17 s | 2.26, 2.16 s | 4.31, 4.16 s | 16.7, 16.9 G |
+| 5 | 1.11, 1.14 s | 2.33, 2.21 s | 4.19, 4.10 s | 17.0, 17.0 G |
+| Median | | 2.33, 2.21 s | 4.31, 3.57 s | 16.7, 16.9 G |
+
+The first byte of the document is bimodal (0.5 or 1.1 to 1.2 s: the server wait) and dominates "from `open`". So the fair numbers are the pairs with the same first byte, and the time from the end of the document. Pairs 3, 4, 5 (same first-byte mode): first row 0.22, 0.15 and 0.09 s earlier (mean 0.15 s). End of document to first row: median 2.33 to 2.21 s (-0.12 s); excluding run 1 (load 12) the base range is 2.26 to 2.35 s and the new range 2.16 to 2.23 s. The design estimate was 0.13 s (0.09 to 0.18). Pair 2 (first byte 1.23 against 0.48 s) is not a pair of equal conditions: its 0.86 s is the server wait, not the change.
+
+Request time of the four big scripts, seconds after the first byte of the document:
+
+| | `m=b` | `m=a` | `m=m,m_i` | `m=ebdd,…` |
+| --- | --- | --- | --- | --- |
+| main (5 runs) | 0.77 to 0.93 | 0.77 to 0.93 | 0.82 to 1.01 | 0.88 to 1.02 |
+| branch (5 runs) | 0.006 to 0.017 | 0.006 to 0.017 | 0.006 to 0.017 | 0.006 to 0.017 |
+
+On the branch all four are requested in the same instant, at the first piece (Chrome: +0.001 s). On main they come 0.02 s after the last byte (0.77 s to 1.02 s after the first byte); in 3 of 5 runs `m=m,m_i` and `ebdd` started 0.08 to 0.15 s after `m=b` and `m=a`. Peak RSS (VmHWM) 333 to 363 MiB on main (mean 346) and 340 to 369 MiB on the branch (mean 353): the spread of one build (30 MiB) is larger than the difference, so no claim. The four scripts are about 5 MB of text and now wait in `started` for 0.8 s longer (hypothesis: that is the +7 MiB; not measured apart).
+
+The late starts of two scripts on main (3 of 5 runs here, 3 of 7 in #569). The hypothesis of #569 was a limit of the worker slots. That is not it: `MAX_WORKERS` is 6, and four downloads need 4. On the branch the four start at once in 5 of 5 runs, so the case does not appear on a page that names its scripts in preload links. The cause on a page that does not is not found (hypothesis: `Run::prefetch` returns early while `Client::parallel_pays()` is false, so the page thread fetches the later scripts itself, one at a time; to verify). Not changed.
+
+**Checks** (branch `9b336c91` on main `2211c276`, archMachine, `bin/heavy` was missing for the later checks, see below; the machine had no other build running, load 2 to 6).
+- `cargo test --release --workspace --no-fail-fast`: all pass except the 7 openssl TLS tests (`https_openssl`, `client_openssl`, `tls12_openssl`: known, fail on main) and 2 flaky tests under load (`a_changed_file_starts_again_from_zero`, `a_hidden_iframe_download_is_saved`), which pass when run alone. The 9 new and old `browser_stream_tests` pass.
+- `tools/js/cost_matrix.sh` against main `2211c276` (built with `--workspace --examples -p bare-stress`, then `-p bare-drive -p bare-stress`): 803 rows, 0 rows over +0.5% under both allocators, 0 under one; mean change glibc -0.000%, jemalloc +0.000%; 2 rows fail to run (`parse_load deep 1` and `deep 10`: stack overflow, on main too).
+- 47 journeys, `journeys.sh compare --clock virtual --runs 3 --pss`: all ok, 0 replay misses ("none"); sum of median instructions 73,188.4 M base and 73,192.9 M new (+0.0%; the largest change is +0.2% on `httpbin-form-fill`, 0.05 M), largest spread 0.3%. A hint that a journey did not take would show as a replay miss or as more instructions: there are none, so (hypothesis, not checked per page) no journey has an unused script or sheet preload. The PSS sum and the peak-RSS column disagree (PSS -8.0%, peak RSS +0.4%): no claim on memory from the journeys.
+- `test262_check.sh`: gate ok (exit 0). `exec_diff.sh`: 79 runs, 0 differences. `keycost.sh`: 278.3 M for each key (`#a1`), 283.6 M (`#f0`), peak RSS 30.7 MiB at 20 keys and 31.0 MiB at 50 keys. These three run on code that this change does not touch.
+
+**Not tested.**
+- A preload link of a page that is not Gmail on the live web (the 47 journeys have none for a script or sheet that they do not use, so the cost of an unused hint is only tested with a stalled file, not measured on a real page).
+- A document that has the preload links after a `<base href>` that moves the base (the hint is requested and not used).
+- A hint and a dynamic `<link rel=preload>` (the style pass of `preload.rs`) for the same URL: bare may fetch it twice. `preload.rs` keeps its own text by URL, and `Net::started` has the hint.
+- A script or sheet that is 5 to 6 MB while the page reads the document: the memory cost of holding it 0.8 s longer is within the noise of RSS.
+- Gmail with another account, a slower network, or a larger mailbox. Five pairs, not seven.
+
+Noticed, not changed.
+- `bin/heavy` and the other tools of `/data/bare-tmp/bin` were gone after the cost matrix (at 16:52, no other cargo process was running). The later checks ran without `heavy`: the scripts fall back to no wrapper.
+- The `pss_MiB` line of the journey summary and the `MiB` column of its table disagree by 8% in one direction and 0.4% in the other. The two columns come from different samples.
