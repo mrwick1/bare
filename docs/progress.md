@@ -12587,11 +12587,11 @@ An earlier build of the scan (3 passes) gave 30 M for the errors and -0.156 G (m
 
 **Built.** A classic script that a document names is parsed on one worker thread when its text arrives (`crates/js/src/parse_ahead.rs`). The download thread hands the text to the worker, as one `Rc<str>` that the tree keeps afterwards (no second copy). `parse_cache::parse` calls `parse_ahead::take`. A text that the worker has not begun is parsed by the page thread; a text that the worker runs is waited for; a finished tree is taken after a byte compare and a node-room check. A syntax error is stored in the result and reported by the run at the same place as before. A navigation (`Ahead::cancel`) closes the worker, drops the finished trees and marks the queued texts gone. A running parse is not interrupted. The worker ends 2 s after its last text. Design and decision: [design-gmail-js.md](design-gmail-js.md), [decisions.md](decisions.md).
 
-Scope, chosen from the journey numbers: only scripts that the document names (scan scripts, `as=script` preloads) and that no cache holds (`parse_cache::known`). A dynamic script is not parsed ahead: the first build did it and the 47 journeys paid +1.4% instructions for texts that no run needed.
+Scope, chosen from the journey numbers: only scripts that the document names (scan scripts, `as=script` preloads) and that no cache holds (`parse_cache::known`). A dynamic script is not parsed ahead: the first build did it and the 47 journeys paid more instructions for texts that no run needed.
 
 Replay under the virtual clock: the worker is not a `parallel::Task`, reads no `bare_net` clock, and the page thread waits in real time. The tree is a pure function of (text, kind, limits), so the replay is the same with and without the worker. 0 replay misses.
 
-**Idle window re-check (main `c73dc3c3` or later).** The first-row window between the end of the document and the first row is 2.0 to 2.3 s on main, so the window P1 uses exists.
+**Idle window re-check (main `c73dc3c3` or later).** The idle window that P1 uses is 0.61 to 0.75 s on the newest main, so it exists (it is larger than the design counted).
 
 **Numbers (Gmail first row; machine archMachine, 5 runs each in 2 rounds, load average 3.0 to 8.2, probe build for the per-thread counter).** Page-thread instructions to the first row:
 
