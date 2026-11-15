@@ -2333,3 +2333,12 @@ Owner decision (2026-11-15): design how to cut the JS cost of Gmail. No build ye
 - Result (`design-gmail-js.md`, `progress.md` "Gmail JS cost: design"): the JS interpreter takes 70% of the first row (17.3 G) and 77% of the settle. Tree-walk dispatch is 30%. Calls are 10.5% (653 instructions per frame call). Parse is 13.8% of the first row. 41% of the member reads refill the one-entry IC. The cost is flat, so no single hot function is worth a patch.
 - Recommendation (the owner decides): build P1 (parse on arrival on a worker, -1.4 G on the page thread), P4 (small removals), then P2 (dictionary IC hint, measure first), then P3 (call path). Together -3 G (-18%). Decide on P6 (a hot tier, -20 to -24%) after P3.
 - Not chosen: more patches of single hot functions (the top function is 5.7% of function self); the old byte lane as it is (it refuses lazy functions and runs 5% of the Gmail calls); a baseline JIT (not portable, and no gain proof here); a disk cache before P1 (it helps repeat visits only).
+
+## Gmail P2: a dictionary read at any position (2026-11-15)
+
+Owner decision (2026-11-15): build P1, P4 and P2 of `design-gmail-js.md` now in parallel (three agents, separate code), then P3; decide on P6 (bytecode) after P3.
+
+- Built: `Ic::depth` is a `u16`, so an `IC_DICT` entry holds a key position up to 65,535 (it was 255). The step 1 count (`progress.md`, "Gmail P2") shows that 91% of the Gmail first-row misses are on dictionary receivers, 99.4% of them on a dictionary of 256 or more keys read again and again as the same object. The entry could not hold their position. First row: -0.74 G (-4.5%) on the page thread (5 pairs), 0 cost rows over, 0 journey change.
+- Why not the design's position hint (read another object of the same layout at the same position): it would hit 0.2% of the reads.
+- Why not a polymorphic entry or the shared stub table: the count gives 0.13 M shaped misses that they could hit at the first row (about 0.3% of the instructions). The entry would grow, or a 64 KB table would be added, for that.
+- Not chosen: an entry with a 32-bit position (`Ic` would grow past 24 bytes; no Gmail dictionary has 65,536 keys, to verify).

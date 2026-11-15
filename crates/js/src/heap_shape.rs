@@ -933,7 +933,9 @@ pub struct Ic {
     /// The first slot of the property, in the receiver (own kinds) or in the holder (prototype kinds).
     slot: u32,
     kind: u8,
-    depth: u8,
+    /// The prototype depth of the chain kinds (below 256), or the position of the key in the dictionary of an `IC_DICT` entry. It shares
+    /// the 4 bytes of `kind`, `depth` and `misses`, so the entry stays 24 bytes.
+    depth: u16,
     /// The prototype of the receiver at fill time (prototype and absent kinds with `depth` > 0).
     first: ObjId,
     /// `Heap::proto_epoch` at fill time (prototype and absent kinds).
@@ -950,8 +952,8 @@ const IC_OWN_ACC: u8 = 2;
 const IC_PROTO: u8 = 3;
 const IC_PROTO_ACC: u8 = 4;
 const IC_ABSENT: u8 = 5;
-/// An own property of one dictionary receiver (a frozen or sealed object, a template object): `first` is the receiver and `depth` the
-/// position of the key in its `PropMap` (below 256). The key is a string: `epoch` holds its index and `slot` its generation. `shape`
+/// An own property of one dictionary receiver (a frozen or sealed object, a template object, a namespace object of hundreds of keys): `first` is the receiver and `depth` the
+/// position of the key in its `PropMap` (below 65,536). The key is a string: `epoch` holds its index and `slot` its generation. `shape`
 /// is 0, the shape of every dictionary, with no tag: the inline `ic_own` passes the shape test, finds no slot (a dictionary has none)
 /// and asks `ic_dict_own`. A hit checks the identity and the key at that position, so a delete or a move only misses.
 const IC_DICT: u8 = 6;
@@ -1211,8 +1213,8 @@ impl Heap {
         let d = ob.dict().expect("a dictionary receiver");
         if let Some(pos) = d.find(key) {
             let p = d.entries[pos].expect("find gives a live entry").1;
-            if pos <= u8::MAX as usize {
-                *ic = Ic { shape: 0, slot: s.gn, kind: IC_DICT, depth: pos as u8, first: o, epoch: s.index, ..Ic::EMPTY };
+            if pos <= u16::MAX as usize {
+                *ic = Ic { shape: 0, slot: s.gn, kind: IC_DICT, depth: pos as u16, first: o, epoch: s.index, ..Ic::EMPTY };
             }
             #[cfg(debug_assertions)]
             {
@@ -1384,7 +1386,7 @@ impl Heap {
             cur = ob.proto;
         }
         ic.shape |= SHAPE_TAG;
-        ic.depth = depth;
+        ic.depth = depth as u16;
         ic.first = first.unwrap_or(ic.first);
         ic.epoch = self.proto_epoch;
         Ok(Some(match found {
@@ -1637,7 +1639,7 @@ impl Heap {
         }
         new.shape |= SHAPE_TAG;
         new.kind = IC_ADD;
-        new.depth = depth;
+        new.depth = depth as u16;
         new.first = first.unwrap_or(new.first);
         new.epoch = self.proto_epoch;
         *ic = new;

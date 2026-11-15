@@ -293,6 +293,23 @@ All numbers are for the first row of Gmail unless marked. "Hypothesis" means not
 
 **Size.** S: about 60 lines for step 2, 120 more for step 3.
 
+**Result of step 1 (2026-11-15, built and measured; `progress.md`, "Gmail P2").** A probe build counted every member read that left the inline hit, by cause (main `ca67571d`, Gmail first row, 2 runs agree to 0.3%).
+
+| Cause | First row | Share of the misses |
+| --- | --- | --- |
+| Slow reads (all that leave the inline hit) | 3.41 M | |
+| Chain hits (a method on the prototype, an absent key) | 0.99 M | not misses |
+| Misses on a dictionary receiver | 2.06 M | 91% |
+| Misses on a shaped receiver | 0.22 M | 9% |
+
+The gate is met: dictionary receivers are most of the refills. But the cause is not the one that this section guessed. 99.4% of the dictionary misses read a key at position 256 or higher, and 99% read the same object as the last read at that site. The entry held the position in a `u8`, so a dictionary of 256 or more keys never got an entry, and every read took `get_dict` and a hash lookup. Hypothesis (not checked): the object is a namespace object of a few thousand keys (Gmail code reads helpers as `_.name`). The position hint for another object of the same layout would hit 4.4 K reads (0.2%): not built.
+
+Of the 0.22 M shaped misses, 0.14 M are a site that has seen a second shape (polymorphic). A simulated 4-shape entry per site or a 4,096-entry stub table would hit 0.13 M of them (about 45 M instructions, 0.3% of the first row). That does not pay for the memory per site. Neither is built.
+
+**Other engines (from the authors' public docs, not re-read for this change: to verify).** V8 keeps a site mono (1 map), poly (up to 4 maps) or mega (a global stub cache keyed by map and name). A dictionary-mode receiver has no stable map, so V8 does the name-dictionary probe in the handler: it caches nothing about the position. SpiderMonkey's CacheIR guards the shape. A dictionary-mode object has its own shape, so a stub for it holds only while the same object is read, as the bare entry does. So the bare entry (the object and the position, checked by the key) is already the shape of the answer in both; what bare lacked was the range of the position.
+
+**Built.** `Ic::depth` is a `u16` (it shares the 4 bytes of `kind`, `depth` and `misses`, so `Ic` stays 24 bytes). An `IC_DICT` entry holds a position up to 65,535. A read of a dictionary of 256 or more keys now hits inline (`ic_dict_own`: the same object, the same key at that position).
+
 ### P3. A call path with a smaller frame and no `select`
 
 **Problem.** A call costs 653 or 839 instructions before the body. 2.06 G (10.5%) at the first row. A one-step function costs 702 per call.
@@ -404,7 +421,7 @@ Order of build: P1 and P4 now, P2 step 1 beside them, P3 next, P6 decision after
 ## 9. Not measured
 
 - Wall time of any change (nothing was built; the times are instruction counts divided by an assumed 4 to 5 G per second).
-- The share of dictionary receivers in the refills (P2 step 1 counts it).
+- ~~The share of dictionary receivers in the refills~~ Counted in P2 step 1: 91% of the misses.
 - Arguments objects, scope-depth lookups, string operations other than the natives, closure memory.
 - Why `fr_gate` sends 28% of the calls to the env path.
 - The byte lane with lazy functions (it refuses them; the gain in section 5, P6, is a model).
