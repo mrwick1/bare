@@ -90,6 +90,9 @@ pub struct Tree<'a> {
     start: Option<Atom>,
     value: Option<Atom>,
     body: Option<Atom>,
+    details: Option<Atom>,
+    open: Option<Atom>,
+    summary: Option<Atom>,
     /// The atoms of the form controls (`controls.rs`).
     pub controls: crate::controls::Atoms,
     // The atoms of these names, if the page has them. A page with no `<br>` has no atom for `br`.
@@ -97,7 +100,7 @@ pub struct Tree<'a> {
 
 impl<'a> Tree<'a> {
     pub fn new(doc: &'a Document, styles: &'a Styles) -> Tree<'a> {
-        Tree { doc, styles, br: doc.find_atom("br"), ol: doc.find_atom("ol"), start: doc.find_atom("start"), value: doc.find_atom("value"), body: doc.find_atom("body"), controls: crate::controls::Atoms::new(doc) }
+        Tree { doc, styles, br: doc.find_atom("br"), ol: doc.find_atom("ol"), start: doc.find_atom("start"), value: doc.find_atom("value"), body: doc.find_atom("body"), details: doc.find_atom("details"), open: doc.find_atom("open"), summary: doc.find_atom("summary"), controls: crate::controls::Atoms::new(doc) }
     }
 
     /// The `html` element: the root of the boxes. `None` if it is not shown.
@@ -116,11 +119,26 @@ impl<'a> Tree<'a> {
         self.styles.style(element).expect("layout only asks for the style of a box")
     }
 
+    /// Is `node` content of a `details` with no `open` attribute that does not show? Only the first `summary` child shows (HTML, "the
+    /// details and summary elements": the rest is in a slot with `content-visibility: hidden`). A page with no `details` pays one test.
+    fn in_closed_details(&self, node: NodeId) -> bool {
+        let Some(details) = self.details else { return false };
+        let Some(parent) = self.doc.flat_parent(node) else { return false };
+        let NodeData::Element { name, .. } = *self.doc.data(parent) else { return false };
+        if name != details || self.doc.is_foreign(parent) || self.open.is_some_and(|o| self.doc.attr(parent, o).is_some()) {
+            return false;
+        }
+        let is_summary = |n| matches!(*self.doc.data(n), NodeData::Element { name, .. } if Some(name) == self.summary);
+        !(is_summary(node) && self.doc.flat_children(parent).find(|&c| is_summary(c)) == Some(node))
+    }
+
     /// What box `node` makes.
     pub fn kind(&self, node: NodeId) -> Kind {
         match *self.doc.data(node) {
+            NodeData::Text(_) if self.in_closed_details(node) => Kind::None,
             NodeData::Text(_) => Kind::Text,
             // The parent of a text node is shown, or layout would not be here.
+            NodeData::Element { .. } if self.in_closed_details(node) => Kind::None,
             NodeData::Element { name, .. } => {
                 let Some(style) = self.styles.style(node) else { return Kind::None };
                 let Value::Keyword(display) = style.get(Property::Display) else { return Kind::Block };
