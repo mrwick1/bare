@@ -2858,6 +2858,7 @@ impl<'a> Parser<'a> {
         let old_await = std::mem::take(&mut self.await_pos);
         self.advance()?; // `(`
         self.eager_at = self.tok.start;
+        let first_at = self.tok.start;
         let base = self.lbegin();
         let mut rest: Option<PatId> = None;
         let mut trailing_comma = false;
@@ -2885,6 +2886,7 @@ impl<'a> Parser<'a> {
             }
         }
         let close = self.tok;
+        let last_end = self.prev_end;
         self.advance()?; // `)`
         let is_arrow = self.is(P::Arrow) && !self.tok.newline_before;
         if is_arrow {
@@ -2929,11 +2931,9 @@ impl<'a> Parser<'a> {
             self.scratch.truncate(base);
             id
         } else {
-            let first = Id::<Expr>::from_raw_pub(self.scratch[base]);
-            let last = Id::<Expr>::from_raw_pub(self.scratch[self.scratch.len() - 1]);
-            let (s, e) = (self.ex(first).span.start, self.ex(last).span.end);
+            // The sequence starts at the first token and ends at the last one, as the items do: an item may be in parentheses itself.
             let list = self.lend(base);
-            self.mk_expr_at(ExprKind::Seq(list), s, e)?
+            self.mk_expr_at(ExprKind::Seq(list), first_at, last_end)?
         };
         self.parens.push(inner.raw());
         Ok(inner)

@@ -1019,3 +1019,15 @@ fn parentheses_keep_their_meaning() {
     }
     assert!(bad.is_empty(), "{} differ:\n{}", bad.len(), bad.join("\n"));
 }
+
+/// A sequence in parentheses spans from its first token to its last, also when an item is in parentheses (Acorn gives the same).
+#[test]
+fn a_sequence_in_parentheses_spans_its_first_and_last_tokens() {
+    for (src, want) in [("((a, b), c)", (1, 10)), ("(a, (b))", (1, 7)), ("(a, b)", (1, 5)), ("( ((a)), b )", (2, 10))] {
+        let p = ok(src);
+        let StmtKind::Expr(e) = p.stmt(p.list(p.body).next().unwrap()).kind else { panic!("{src}") };
+        let ex = p.expr(e);
+        assert!(matches!(ex.kind, ExprKind::Seq(_)), "{src}");
+        assert_eq!((ex.span.start, ex.span.end), want, "{src}");
+    }
+}
