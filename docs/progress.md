@@ -12115,3 +12115,57 @@ Met, read as in round 1: wall time is 2 times lower or more at K = 2 or more (3.
 - `substack-home` is 10,941 M here and 1,270 M in the `virtual` corpus of round 1: the `load` end point makes it run its scripts to the end. It is 15% of the NEW total.
 - `mdn-reference` is 3,099.5 M on NEW (+4.3% against the baseline) with 0 replay misses: the chunk address fix of PR #521 holds.
 - `cargo build --release -p bare-drive -p bare-stress` after a `-p bare-drive` build left the `bare-drive` binary unchanged (`cmp`), so a stress build does not change the journey binary on this tree.
+
+## Fix: a live turn runs one task before its slice can end it (criterion 5, 2026-11-15)
+
+Task: the 16 MiB sheet ramp `sheety_16383` did not finish since PR #541 (class atoms; "Final benchmark of the perf goal, round 2"). Machine archMachine. Raw logs and scripts are machine-local under `/data/claude-tmp/j/` and `/data/claude-tmp/`. Main at the start: `16b39b5a` (it has #551, #554, #555).
+
+### Cause (verified)
+
+- Reproduced on `16b39b5a`: the page does not finish in 20 s. With counters in `feed_styles` it ran more than 1,000 passes with `tasks 0`; `style_availability` said `Ready` each time. Every pass came from `Page::tick` → `settle` → `Session::resume` → `Run::resume`, so the loop was in the ticks of the page, not in one call.
+- A live turn has a slice of 8 ms (`SLICE`, set when the turn starts). `Run::resume` calls `feed_styles` first, then goes on with the scripts or the rounds. In a split document `sliced()` is checked before each script and at the top of each round. One `feed_styles` of the 16 MiB sheet takes 1.2 to 5 ms for the first passes and 9 ms (`plan` 8.7 to 9.0 ms) from the sixth on; `plan` copies the sheet text once (`add`: `text.to_string()`), and `style_availability` throws the copy away. Timed with `Instant` around `feed_styles` and `plan`, 12 first calls and each 500th (`DBG` build, not kept).
+- So each turn spent its whole slice on the style pass, `sliced()` was true before the first script (or the first round), and the turn ended with `Settled` and no work done. The next turn did the same. The page never ran its second script or its `load` event. The cost of a turn did not change with the number of turns, so this is a livelock, not a slow loop.
+- Why a sheet of half the size works: the pass is 4.5 ms, below the slice. Why it worked at `4a27b7a9`: hypothesis (not measured): the pass cost then was below 8 ms. I did not time `feed_styles` on `4a27b7a9`. #541 changed allocation, and the copy of a 16 MiB block (page faults of a fresh mapping) varies from 1.2 to 9 ms between passes in the same process.
+- The earlier hypothesis of round 2 ("`add` copies the text again and again; each call is a few ms") was right about the symbol and wrong about the shape: it is not a call count that grows with the rules (about 100,000 calls); it is a loop of ticks that never ends because no tick makes progress.
+- It also explains why the driver `--timeout` did not stop it. See "Driver" below.
+
+### Change
+
+- `Run::sliced` is true only after the turn has run one task or one round (`res.tasks + res.rounds > 0`). A turn that is late before it starts still does one unit of work, so the page moves on. No limit, no budget and no time-out was added; the slice is the same 8 ms for a turn that has done something.
+- `PageLimits::slice` (default `SLICE`) so a test can set the slice. The two places that made the slice read it.
+
+Complexity. B is the sheet bytes, S the slice, T the tasks of the page. Before: a turn costs Θ(B) before its first task; with Θ(B) ≥ S no turn runs a task, so the work is unbounded (no end). After: each turn runs at least one task, so the page ends in at most T + rounds turns; each turn still pays one Θ(B) pass (not changed, see below), so the total is O(T·B) in the worst case and 8 to 9 turns for this page.
+
+### Test
+
+`browser_session_tests::a_live_turn_with_its_slice_used_up_still_runs_one_script`: a live session with a sheet and two scripts, `slice` zero (every turn starts late). It fails before the change ("the page did not load in 5 s") and passes after (0.01 s).
+
+### Numbers (run counts: 3, interleaved, `perf stat -e instructions:u`, peak RSS by `wait4`; spread under 0.01% on instructions)
+
+| Page | `4a27b7a9` | main `16b39b5a` | NEW |
+| --- | ---: | ---: | ---: |
+| `sheety_16383` instructions (M) | 5,404.1 (5,404.08 to 5,404.10) | no result in 40 to 90 s (4 tries) | 5,320.4 (5,320.37 to 5,320.42) |
+| `sheety_16383` peak RSS (MiB) | 274.1 | - | 216.5 (216.4 to 216.7) |
+| `sheety_8192` instructions (M) | 2,717.4 | - | 2,679.6 |
+| `sheety_8192` peak RSS (MiB) | 144.9 | - | 115.8 |
+
+Criterion 5 (300 MiB or lower): **met, 216.5 MiB**.
+
+- Ramps, main `16b39b5a` against NEW, 3 runs each: `rest_2` to `rest_1000` (12 pages) and `compm_1000` to `compm_34000` (15 pages): the instructions differ by at most 0.003% (spread), peak RSS by at most 1.1% (noise, 0.5 MiB at most). Example: `rest_13` 1,042.52 M and 1,042.53 M, `compm_22000` 391.26 M and 391.26 M, `rest_1000` 47,084.1 M and 47,084.9 M. The ramps do not run split live turns, so they do not move.
+- `bare-stress scale css`, 2 runs each, main against NEW: 148 case rows, the 76 of 5 MB or more: 0 differ by more than 2% in peak MB; no status differs.
+- 47 journeys (`tools/bench/journeys.sh compare --clock virtual --runs 3 --pss`, corpus `virtual-load`, `nextjs-docs` skipped): 47 pass on both, no replay miss, sum of medians 73,185.2 M against 73,185.1 M (-0.0%, no journey over +0.1%). PSS sum -8.9% and RSS sum +0.1%: the PSS sample is noise (a sample every 20 ms; no journey changed in instructions).
+- Cost matrix against main (805 rows, 803 measured, glibc and jemalloc, base dir built with `--workspace --examples -p bare-stress`, then `-p bare-drive -p bare-stress`): **0 rows over +0.5% under both allocators**, 0 under one. `parse_load deep 1` and `deep 10` fail to run on both (the known stack overflow).
+- `cargo test --release --workspace --no-fail-fast`: 4,061 passed, 9 failed. 7 are the known openssl TLS tests. `external_sheets_embedded_sheets_and_inline_styles_cascade_in_order` and `a_hidden_iframe_download_is_saved` are the known flaky ones: both pass when run alone.
+- test262: exit 0, gate ok, 29,731 pass (checkout at `e4fbf577`). `exec_diff.sh`: 79 runs, 0 differences. `keycost.sh` (page `typing-page-lazy-arrow`): 278.3 M for each key (`#a1`), 283.6 M (`#f0`), load and mount 591.1 M, RSS 30.7 MiB at 50 keys, equal on main and NEW. No file of `crates/js` changed; these three are for the record.
+
+### Driver
+
+The driver `--timeout` does not stop this page for another reason, in `Page::wait_load`: the loop `continue`s when a tick ran, and it checks the time limit only after a tick that did nothing. A page that always has work (here the split document that "goes on at once") never reaches the check. The steps of the ramp finish; then `Session::finish` calls `wait_load(END_LOAD_WAIT)` (5 s) and spins in it with no end. Verified: with `--timeout 3000` the old binary ran 90 s; the debug build showed the steps passing and more than 600 ticks inside the last call. This is fixed in a second PR (see the section "Fix: `wait_load` checks its time limit after a tick that ran").
+
+### Not tested
+
+Wall time on an idle machine. Windows and macOS. The pass cost on `4a27b7a9` (so "why #541" is a hypothesis). A page with many scripts and a large sheet (each turn still pays one Θ(B) pass; see below).
+
+### Noticed, not changed
+
+- Each turn of `Run::resume` calls `feed_styles` without the `still()` check that `feed_if_ran` uses, and `style_availability` makes a copy of every sheet text in `plan` that it throws away. A page with a 16 MiB sheet pays about 9 ms for each turn for this. A guard on `still()` is not safe as it is: a preload that finished with no change of the tree is not in the stamp. Not touched.

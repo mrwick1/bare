@@ -672,3 +672,30 @@ fn a_pending_meta_refresh_is_queued_work() {
         assert!((5000.0..5010.0).contains(&b.next_scheduled_due().unwrap()));
     });
 }
+
+/// A live turn that spends its slice before it runs one script made no progress, and the next turn did the same for ever. The
+/// slice is zero here: every turn starts with its slice used up (a feed of a 16 MiB sheet took longer than the 8 ms slice).
+#[test]
+fn a_live_turn_with_its_slice_used_up_still_runs_one_script() {
+    big(|| {
+        let srv = server(|| {
+            vec![
+                ("/", html("<link rel=stylesheet href=/a.css><script>localStorage.setItem('a', '1')</script><script>localStorage.setItem('b', '2')</script>")),
+                ("/a.css", Reply::new(200, Some("text/css"), "p { color: red }")),
+            ]
+        });
+        let mut c = cfg(srv.url("/"));
+        c.virtual_clock = false;
+        c.live = true;
+        c.page.slice = Duration::ZERO;
+        let mut s = Session::new(c);
+        s.run();
+        let end = std::time::Instant::now() + Duration::from_secs(5);
+        while !s.browser().is_some_and(|b| b.loaded()) && std::time::Instant::now() < end {
+            s.resume(&[]);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(s.browser().is_some_and(|b| b.loaded()), "the page did not load in 5 s");
+        assert_eq!((get(&s, &srv, "a").as_deref(), get(&s, &srv, "b").as_deref()), (Some("1"), Some("2")));
+    });
+}
