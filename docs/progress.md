@@ -11923,3 +11923,195 @@ The cost grows linearly from `compm_22000` to `compm_43000`: 391 M, 430 M, 534 M
 - A document change makes `plan()` walk the document for its sheets again (`stamp` includes the revision), so a loop that writes and reads one element is O(nodes) for each read. Not measured here.
 - `a_hidden_iframe_download_is_saved` fails 3 of 4 runs alone on this machine under load.
 - `base-build` with `--workspace --examples -p bare-stress` does not build the `bare-stress` binary; the matrix then fails every stress row. A second `base-build origin/main --release -p bare-stress` fixes it.
+
+## Final benchmark of the perf goal, round 2 (2026-11-15)
+
+Task: measure the 8 success criteria of `docs/perf-goal.md` again on a frozen commit after exact-fit arrays (owner decision of 2026-11-15). No product code changed. Raw logs and TSV files are machine-local under `/data/bare-tmp/r2f/out/`. The method is the one of the section "Final benchmark of the perf goal (2026-11-14)".
+
+- NEW: `294f1c01` (main after PR #554). Main moved to `1545792b` (PR #555, the `computed-work` limit) while I measured. I did not measure it.
+- Baselines. Journeys (criteria 1, 2, 4, 6): local branch `bench-base-vclock`, commit `300b8c53` (`f6415364` plus the replay patch, the virtual clock, the settled driver and the `load` end point; never pushed), corpus `/data/bare-tmp/corpus/virtual-load`. The baseline total of 138,272.1 M instructions is the same to the last digit as in the load-end baseline of 2026-11-14, so the baseline is reproduced. Ramps, sheet ramp, suite, limits (criteria 3, 5, 7, 8), test262, `exec_diff`, cost matrix: `f6415364`.
+- Machine: archMachine (AMD Ryzen 9 5900HX, 16 cores, 30 GiB). Journeys and ramps ran from 09:58 to 10:09 with a load average of 5 to 17 (other agents built at the same time). The suite ran at a load average of 1.9 to 2.7. The machine was never idle, so wall times are weak and I give instruction counts. RSS comes from `wait4`.
+- Builds: `cargo build --release -p bare-drive` in `/data/bare-tmp/target-r2f-new` (NEW, worktree `/data/bare-tmp/r2f/src`) and `/data/bare-tmp/target-r2f-base` (`300b8c53`). The gates and the cost matrix use a second call, `--release --workspace --examples -p bare-stress`, in the NEW target dir. The `bare-drive` binary was the same file after the second call (checked with `cmp`).
+
+### Result: the 8 criteria
+
+| # | Criterion | Baseline | Target | NEW (`294f1c01`) | Verdict |
+| --- | --- | --- | --- | --- | --- |
+| 1 | Journeys pass with recorded inputs; test262 gate and `exec_diff` unchanged | 47 of 47 replay | all pass | 47 of 47 pass (376 runs, none failed), 0 replay misses. test262: exit 0, 29,731 pass (baseline file 29,483), gate ok. `exec_diff`: 79 runs, 0 differences. `nextjs-docs` (the 48th) is not in the 47 | met |
+| 2 | Total instructions of the journeys | 138,272.1 M (100%) | 80% or lower | 73,186.4 M (52.9%). Without `craigslist-home`: 70,543.2 M of 90,022.2 M (78.4%) | met, with the `craigslist-home` caveat below |
+| 3 | `compm_22000` and `rest_13` ramps | 11,664.3 M and 10,873.3 M | 10 times lower | 400.1 M (29.2 times) and 1,042.5 M (10.43 times) | met |
+| 4 | `python-org-docs-link`, `rust-book-search` | 1,434.2 M, 16,606.1 M | 1.3 times faster | 1,094.5 M (1.310 times), 10,146.8 M (1.637 times) | met (`python-org-docs-link` by 0.8%) |
+| 5 | Peak RSS of the 16 MiB sheet ramp with a `cssRules` read | 947.5 MiB | 300 MiB or lower | does not finish: no result after 60 s in 3 runs, and a run that I left going spun for more than 10 minutes. Last good merge `4a27b7a9`: 274.0 MiB | **not met: regression** |
+| 6 | Peak RSS of `python-docs-search-results` | 113.1 MiB measured (116 MiB in the goal) | 20% lower (90.5 MiB; 92.8 MiB against 116) | 80.5 MiB (-28.8% against 113.1; -30.6% against 116) | met |
+| 7 | Suite with a shared login | V0 cold runs: 3.319 s, 21,160 M | wall 2 times faster; instructions with one worker 1.5 times lower | K = 4: 0.536 s (6.19 times). K = 2: 1.071 s (3.10 times). One worker: 2.207 s (1.50 times), 10,081 M (2.10 times lower) | met |
+| 8 | Limits | restyle charge about 9 times its cost; `cssom-objects` cap 65,536 | charge matches cost; cap removed or set by rule count | charge 1.23 times the cost of a JS step (161 against 198.5 instructions for each step); the `cssom-objects` cap is gone (PR #531) | met |
+
+Seven of the eight criteria are met. Criterion 5 fails because a later merge broke the page: see "Criterion 5". Criteria 2, 3, 4 and 6 were not met in round 1 and are met now. Criterion 8 was half met and is met now.
+
+### Criteria 1, 2, 4 and 6: the journeys
+
+Inputs: corpus `virtual-load`, 47 journeys, 3 runs plus a PSS run 0 for each journey and binary (94 journey-binaries, 4 runs each, runs interleaved). Command: `tools/bench/journeys.sh compare --clock virtual --runs 3 --pss --out /data/bare-tmp/r2f/out/journeys.tsv <base bare-drive> <new bare-drive>`, run in `/data/bare-tmp/r2f/src` (the step files of `294f1c01`). Log: `journeys.log`.
+
+- All 47 journeys pass in all runs on both binaries. The runner reports "Replay misses: none": 0 misses on both. The same-binary spread of instructions is 0.31% or less on every journey (runs 1 to 3).
+- Totals, sum of medians of runs 1 to 3: instructions 138,272.1 M to 73,186.4 M (-47.1%, ratio 0.529). CPU (user+system) 18,126 ms to 11,550 ms (-36.3%, loaded machine). Peak RSS 2,750.2 MiB to 1,800.4 MiB (-34.5%). PSS (run 0) 2,425.9 MiB to 1,369.4 MiB (-43.5%); see the PSS note below.
+- Median change of a journey: -18.3%. Geometric mean of the ratios: 0.649. 42 journeys are more than 5% lower, 5 are within 5%, none is more than 5% higher. Three are more than 1% higher: `mdn-reference` +4.3%, `substack-home` +3.4%, `paulgraham-home` +1.5%.
+- **`craigslist-home` is a changed page input, not engine speed.** It costs 48,249.9 M on the baseline and 2,643.2 M on NEW (-94.5%); its peak RSS goes from 783.6 MiB to 81.5 MiB. The baseline binary has no `SharedWorker`, so the page stays on its ES5 path there (PR #546 added `SharedWorker`; the corpus holds the replies of the new path). NEW runs a different, smaller set of scripts. So criterion 2 is 52.9% with it and 78.4% without it. Both meet the target. Only the 78.4% number measures the engine and style steps on unchanged page input, and it passes by 1.6 points. The load-end baseline of 2026-11-14 gave 80.0% without `craigslist-home`.
+- Criterion 2, other split: the five heaviest journeys on NEW (`react-docs` 12,429.5 M, `substack-home` 10,941.5 M, `rust-book-search` 10,146.8 M, `nodejs-org-home` 5,809.4 M, `github-docs-home` 4,618.4 M) are 60.0% of the NEW total. They went from 50,944.5 M to 43,945.6 M (86.3%). The other 42 journeys went from 87,327.6 M to 29,240.8 M (33.5%), and 41 of them without `craigslist-home`: 39,078 M to 26,598 M (68.1%).
+- Criterion 4 (3 runs, instructions, spread 0.03% or less): `python-org-docs-link` 1,434.2 M (1,433.9-1,434.4) to 1,094.5 M (1,094.3-1,094.6), 1.310 times; `rust-book-search` 16,606.1 M (16,605.9-16,607.0) to 10,146.8 M (10,146.7-10,146.8), 1.637 times. Wall (loaded, weak): 189 ms to 158 ms and 1,867 ms to 1,291 ms.
+- Criterion 6: peak RSS of `python-docs-search-results` 113.1 MiB (113.0-115.0) to 80.5 MiB (79.6-81.1), -28.8%. PSS (run 0, one sample): 108.0 to 73.0 MiB. Instructions 3,392.6 M to 2,559.6 M (-24.6%).
+- PSS note: the 20 ms sampler of run 0 misses short journeys. 26 of the 94 run-0 samples are under 10 MiB (12 on the baseline, 14 on NEW). Over the 33 journeys with a valid sample on both sides PSS goes from 2,395 MiB to 1,369 MiB (-42.8%). PSS is not a criterion.
+
+Per journey (medians of runs 1 to 3; spread is (max - min) / median over runs 1 to 3 of the worse binary; PSS is run 0 only):
+
+| Journey | M instr base | M instr new | change | spread | RSS base MiB | RSS new MiB | PSS base MiB | PSS new MiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| archlinux-org-home | 88.0 | 73.0 | -17.1% | 0.1% | 16.6 | 17.7 | 13.9 | 14.3 |
+| blog-rust-lang-home | 521.9 | 156.2 | -70.1% | 0.0% | 26.3 | 19.6 | 23.1 | 16.7 |
+| cnn-lite-front | 58.4 | 50.5 | -13.5% | 0.0% | 17.4 | 18.7 | 0.1 | 0.0 |
+| craigslist-home | 48249.9 | 2643.2 | -94.5% | 0.0% | 783.6 | 81.5 | 781.5 | 79.3 |
+| crates-io-home | 1104.1 | 827.5 | -25.0% | 0.1% | 35.1 | 36.6 | 32.5 | 34.6 |
+| curl-se-home | 2204.7 | 122.3 | -94.5% | 0.0% | 70.8 | 18.6 | 53.6 | 16.0 |
+| debian-org-home | 103.1 | 83.8 | -18.7% | 0.0% | 16.4 | 17.7 | 0.0 | 0.0 |
+| devto-home | 1652.2 | 1287.4 | -22.1% | 0.0% | 55.9 | 52.2 | 49.8 | 51.7 |
+| docs-rs-home | 115.8 | 59.5 | -48.6% | 0.0% | 17.6 | 18.3 | 15.4 | 0.0 |
+| duckduckgo-html-search | 123.7 | 60.8 | -50.9% | 0.0% | 18.2 | 19.1 | 15.3 | 0.0 |
+| example-learn-more | 131.7 | 110.4 | -16.2% | 0.0% | 19.2 | 19.2 | 17.0 | 16.9 |
+| example-page | 12.0 | 10.7 | -10.7% | 0.0% | 16.2 | 16.2 | 0.1 | 0.1 |
+| github-docs-home | 5226.6 | 4618.4 | -11.6% | 0.0% | 93.6 | 90.9 | 91.8 | 91.7 |
+| go-dev-home | 4934.8 | 2392.0 | -51.5% | 0.0% | 94.4 | 55.8 | 86.1 | 54.2 |
+| hn-comments-back | 100.3 | 88.4 | -11.9% | 0.1% | 16.2 | 17.2 | 0.0 | 0.0 |
+| hn-front | 104.3 | 92.9 | -11.0% | 0.0% | 16.2 | 17.2 | 0.0 | 0.0 |
+| hn-new-past | 171.8 | 151.1 | -12.1% | 0.1% | 16.4 | 17.6 | 13.9 | 14.9 |
+| httpbin-cookies | 25.8 | 20.9 | -19.3% | 0.0% | 16.2 | 16.2 | 0.0 | 0.0 |
+| httpbin-form-fill | 27.0 | 25.0 | -7.6% | 0.1% | 16.2 | 16.3 | 0.0 | 0.0 |
+| httpbin-form-submit | 36.2 | 32.3 | -10.9% | 0.1% | 16.2 | 16.4 | 0.0 | 0.0 |
+| kernel-org-home | 43.3 | 34.1 | -21.3% | 0.0% | 16.3 | 17.1 | 0.0 | 0.1 |
+| lobsters-comments-back | 159.5 | 132.9 | -16.7% | 0.0% | 17.0 | 18.0 | 14.3 | 15.5 |
+| lobsters-front | 140.0 | 114.4 | -18.3% | 0.1% | 16.8 | 17.9 | 14.7 | 15.8 |
+| mdn-reference | 2971.6 | 3099.5 | +4.3% | 0.0% | 51.4 | 48.6 | 48.9 | 45.3 |
+| nginx-org-home | 103.3 | 61.3 | -40.7% | 0.0% | 22.3 | 20.7 | 0.0 | 0.0 |
+| nodejs-org-home | 5899.7 | 5809.4 | -1.5% | 0.0% | 77.7 | 76.1 | 76.3 | 68.3 |
+| npr-text-story | 36.4 | 30.3 | -16.7% | 0.1% | 16.2 | 16.4 | 0.0 | 0.0 |
+| paulgraham-home | 95.0 | 96.5 | +1.5% | 0.3% | 16.3 | 18.0 | 0.1 | 0.0 |
+| python-docs-search | 2140.1 | 1167.1 | -45.5% | 0.0% | 93.5 | 69.5 | 89.9 | 62.2 |
+| python-docs-search-results | 3392.6 | 2559.6 | -24.6% | 0.0% | 113.1 | 80.5 | 108.0 | 73.0 |
+| python-docs-tutorial | 390.7 | 255.4 | -34.6% | 0.0% | 17.6 | 18.6 | 15.3 | 11.3 |
+| python-org-docs-link | 1434.2 | 1094.5 | -23.7% | 0.0% | 32.0 | 31.9 | 28.5 | 23.0 |
+| python-org-search | 1445.9 | 1111.2 | -23.1% | 0.0% | 30.7 | 30.7 | 28.5 | 24.1 |
+| react-docs | 12626.3 | 12429.5 | -1.6% | 0.0% | 109.1 | 99.3 | 107.2 | 90.6 |
+| rust-book-chapters | 567.2 | 493.0 | -13.1% | 0.1% | 22.5 | 23.2 | 20.1 | 16.3 |
+| rust-book-search | 16606.1 | 10146.8 | -38.9% | 0.0% | 129.4 | 125.0 | 126.3 | 117.0 |
+| rust-book-sidebar | 338.1 | 301.4 | -10.9% | 0.1% | 21.1 | 21.7 | 18.0 | 13.5 |
+| rust-lang-org-home | 711.3 | 81.0 | -88.6% | 0.0% | 33.5 | 19.0 | 28.6 | 11.5 |
+| sqlite-org-home | 78.0 | 65.7 | -15.8% | 0.0% | 19.1 | 20.1 | 14.3 | 10.3 |
+| substack-home | 10585.8 | 10941.5 | +3.4% | 0.0% | 210.4 | 180.3 | 208.5 | 172.9 |
+| w3c-home-links | 446.3 | 116.3 | -74.0% | 0.0% | 28.4 | 19.7 | 21.8 | 10.6 |
+| wikipedia-article | 2863.4 | 1835.0 | -35.9% | 0.0% | 43.8 | 40.8 | 43.2 | 33.1 |
+| wikipedia-main-random | 1963.8 | 1477.8 | -24.7% | 0.0% | 40.5 | 34.2 | 38.1 | 26.4 |
+| wikipedia-portal | 741.3 | 630.5 | -14.9% | 0.1% | 35.9 | 30.8 | 32.2 | 21.5 |
+| wikipedia-search | 3651.3 | 2906.7 | -20.4% | 0.1% | 62.2 | 56.4 | 59.1 | 47.8 |
+| wikipedia-toc-languages | 2891.7 | 2407.9 | -16.7% | 0.1% | 53.7 | 49.1 | 51.3 | 42.3 |
+| wiktionary-portal | 956.7 | 880.8 | -7.9% | 0.0% | 41.0 | 33.6 | 38.5 | 26.0 |
+
+Gates on NEW:
+- test262: `TEST262=/data/claude-tmp/test262 TEST262_RUN=/data/bare-tmp/target-r2f-new/release/examples/test262_run tools/js/test262_check.sh` (the checkout is at the pinned commit `e4fbf577`). Exit 0, "gate: ok". 29,731 tests pass over 585 directories. The baseline file has 29,483, so 248 more pass. 37 directories pass more than the file says, none passes less. The count is the same as at `8f23dded`. I did not run the BASE tree through it: "unchanged" is read as "no directory below the baseline file".
+- `exec_diff`: `tools/js/exec_diff.sh /data/bare-tmp/target-r2f-new`: 79 runs, modes tree, auto and byte, 0 differences.
+
+### Criterion 3: the ramps
+
+Pages `/data/bare-tmp/bm/b/pages`, steps `run.steps`, local server, `bare-drive` of BASE (`f6415364`) and NEW, `perf stat -e instructions:u`, 3 runs each, interleaved. Script: `/data/bare-tmp/r2f/ramp.py` (the script of round 1 with the NEW path changed). Peak RSS by `wait4`.
+
+| Page | BASE M instr (min-max) | NEW M instr (min-max) | Ratio | Target | Peak RSS BASE / NEW (MiB) |
+| --- | --- | --- | --- | --- | --- |
+| `compm_22000` | 11,664.3 (11,664.3-11,664.4) | 400.1 (400.1-400.2) | 29.15 | 1,166 M | 69.1 / 33.8 |
+| `rest_13` | 10,873.3 (10,873.3-10,873.4) | 1,042.5 (1,042.5-1,042.6) | 10.43 | 1,087 M | 52.6 / 46.4 |
+
+Met for both. `compm_22000` improved from 1,828 M at round 1 and `rest_13` from 1,238 M. Hypothesis, not bisected: design H (PR #551, `getComputedStyle` styles only the way down to the element) for `compm_22000`, and H1 (PR #536, a restyle styles each element once) for `rest_13`. The shape of the cost of `rest_n` on NEW (spread under 0.001%): `rest_2` 529.2 M, `rest_30` 1,835.3 M, `rest_50` 2,768.3 M. Each added restyle costs 46.65 M (round 1: 60.0 M). About 436 M is fixed cost (parse of the page and of 36,000 rules, the index). `rest_13` is 10.43 times lower, only 4% over the target: a later change that adds 45 M to the fixed cost would lose it. Wall (weak): `compm_22000` 1,112 ms to 55 ms, `rest_13` 988 ms to 167 ms.
+
+### Criterion 5: the 16 MiB sheet ramp. Not met: regression since PR #541
+
+Page `sheety_16383` (a 16 MiB sheet of 187,852 rules, `getComputedStyle` of one element, then one `cssRules.length` read), steps `run2.steps`.
+
+| Build | Peak RSS | Instructions | Outcome |
+| --- | --- | --- | --- |
+| BASE `f6415364`, 3 runs | 947.5 MiB (947.4-947.8) | 18,182.7 M | stops on `cssom-objects` |
+| NEW `294f1c01`, 3 runs, `timeout 60` | no result | no result | killed after 60 s each |
+| NEW, 1 run, no timeout | `ps` showed 200 to 215 MiB while it ran (not a peak) | at 98% CPU for more than 10 minutes, then I killed it | does not finish |
+| `4a27b7a9` (#544), 3 runs | 274.0 MiB (274.0-274.3) | 5,404.1 M (5,403.8-5,405.6) | passes |
+
+NEW does not meet the 300 MiB target because the page does not finish. The step `timeout 120000` of `run2.steps` and the `--timeout 300000` of `bare-drive` do not stop it, so a script that waits for the process to exit waits for ever.
+
+Bisect: I ran `sheety_16383` with a 40 s limit on the binaries of the merge commits in between (`-p bare-drive` builds, or the earlier `base-build` trees). They pass (5,403.7 to 5,404.4 M instructions) at `c59e1bcf`, `476c04f9` (#531), `c9ead755` (#536), `95bd7864`, `49d6475d` and `4a27b7a9` (#544). They hang at `79829d19` (#541, class atoms), `c4848ecc` (#543), `2889fa06` (#551) and NEW. I built `79829d19` for this (`base-build 79829d19 --release -p bare-drive`). So the first bad merge is PR #541, "criterion 3, step 1: class atoms". PR #543 and later only keep it. `sheety_8192` (half the sheet) is fine on NEW: 2,680.2 M, 116.1 MiB (2,713.9 M and 143.7 MiB at round 1). The pages that read the sheet through the CSSOM only (`rd_y_sel`, `rd_x_sel`; no `getComputedStyle`) are fine on NEW too.
+
+Where it spins (verified): I ran the page under `gdb` as a child and stopped it after 12 s. The page thread is in `bare::browser_computed::<impl Dom>::plan::add`, called from `Browser::style_availability`, from `browser_loader::sheets::Run::feed_styles`, from `Run::resume`, `Session::drive_loop` and `Page::wait_load`. The top frame is a libc copy (an AVX `memmove` loop); `perf record` of the running process shows the same libc loop (about 77% of the samples, plus about 14% in the kernel). Hypothesis (not verified): `feed_styles` runs again and again, and each run calls `plan()`, where `add` does `text.to_string()` of the 16 MiB sheet. At a few ms for each copy of 16 MiB (copy and page faults), 10 minutes is of the order of 100,000 to 200,000 calls, the same order as the number of rules (187,852). I did not count the calls. I did not find why #541 started it and why a sheet of half the size does not. I did not change code. Main moved to `1545792b` (#555) after the freeze; I did not run it.
+
+Other probes on NEW (1 run each, `/data/bare-tmp/fb/pages/rd_*.html`, `run2.steps`, 60 s limit):
+
+| Probe | BASE | NEW |
+| --- | --- | --- |
+| `rd_y_sel`: selector text of all 187,852 rules | stops on `cssom-objects`, 12,847 M, 773.6 MiB | passes, 7,205 M, 212.7 MiB (round 1: 7,157 M, 210.8 MiB) |
+| `rd_y_sty`: `.style.length` of every rule | stops on `cssom-objects` | stops on `style-objects`, 6,940 M, 161.3 MiB |
+| `rd_x_sel`: dense 16 MiB sheet (844,366 rules), selector text of every rule | stops on `cssom-objects`, 11,793 M, 776.0 MiB | passes, 14,051 M, 545.7 MiB (round 1: stopped on the 524,288 cap at 460.7 MiB) |
+| `rd_x_sty`: dense sheet, `.style.length` of every rule | stops on `cssom-objects` | stops on `style-objects`, 4,973 M, 157.6 MiB |
+
+### Criterion 7: the suite with a shared login
+
+Inputs: the 40-test fixture suite of `tools/suite` (`docs/design-suite.md`), local fixture server, `tools/suite/run.py <NEW bare-drive> --v0-binary <BASE bare-drive> --variants V0,V2,V4 --k 4,8,12 --runs 3`, plus `--variants V0,V4 --k 2 --runs 3` for the NEW binary alone. Every run passed 40 of 40 and the server counted the expected login POSTs (40 for V0, 5 for the others). Load average 1.9 to 2.7 (not idle). Median and (min-max) of 3. Logs: `suite-a.out`, `suite-b.out`.
+
+| Variant | Wall s | Instructions (M) | Peak RSS of a worker (MiB) | Against V0 of BASE: wall, instructions |
+| --- | --- | --- | --- | --- |
+| V0, BASE `f6415364`: a new process for each test, every test logs in, one at a time | 3.319 (3.314-3.331) | 21,160 (21,159-21,161) | 25.6 | 1.00, 1.00 |
+| V0, NEW binary (same method) | 2.976 (2.972-3.026) | 15,164 (15,164-15,166) | 26.4 | 1.12, 1.40 |
+| V2, NEW, one warm worker, one shared login | 2.207 (2.204-2.221) | 10,081 (10,064-10,083) | 27.7 | 1.50, **2.10** |
+| V4, NEW, K = 2 | 1.071 (0.987-1.088) | 10,181 (10,176-10,196) | 27.3 | 3.10, 2.08 |
+| V4, NEW, K = 4 | 0.536 (0.526-0.546) | 10,362 (10,359-10,366) | 27.1 | **6.19**, 2.04 |
+| V4, NEW, K = 8 | 0.355 (0.349-0.368) | 10,716 (10,714-10,721) | 26.8 | 9.35, 1.97 |
+| V4, NEW, K = 12 | 0.301 (0.300-0.302) | 10,974 (10,913-11,015) | 26.8 | 11.03, 1.93 |
+
+Met, read as in round 1: wall time is 2 times lower or more at K = 2 or more (3.10 times at K = 2, 6.19 times at K = 4), and the sum of instructions with one worker is 2.10 times lower (target 1.5 times). With one worker alone, wall time is 1.50 times lower, which is under 2 times; round 1 gave 1.89 times at a higher load for the V0 baseline (3.93 s). Instructions: 21,160 M, 15,164 M and 10,081 M for the three steps. Against V0 of the same NEW binary, one worker is 1.50 times lower, as in round 1.
+
+### Criterion 8: the limits
+
+- Restyle charge, same method as round 1: the page `/data/bare-tmp/fb/pages/rest_3000_j.html` restyles 6,002 elements in a loop of 3,000 and runs until the 500 M step budget of a task (`LIVE_TASK_STEPS`, `crates/bare/src/page.rs:83`) ends the script. NEW: the budget ended after 1,700 to 1,724 restyles (the loop logs every 25; last line `j=1700`) at 80,397.6 M instructions: 160.8 instructions for each charged step (47 M for each restyle). Round 1 gave the same restyle count at 102,842 M (205.7 for each step). The restyle got 22% cheaper (#536); the charge did not change (`STEPS_PER_RESTYLED_ELEMENT` is still 32, `crates/bare/src/browser_computed.rs:237`).
+- A step of a plain JS loop (pages `steps_5000000` and `steps_50000000`, 3 runs each, spread under 0.0002%): NEW 9,037.6 M and 90,307.6 M, so 1,806 instructions for each iteration, 198.5 for each step at 9.1 steps for each iteration (BASE: 9,053.1 M, 90,458.1 M, 198.8). Round 1: 198.
+- So the charge was about 9 times too small on BASE (23 against about 200), 1.04 times the cost at round 1, and is 1.23 times the cost now (198.5 against 160.8: a restyle step costs 81% of a JS step). A budget of 500 M steps now allows 80 G instructions of restyling, not 100 G. Met (the goal asks that the charge match the cost), but it moved to the safe side after #536. Not changed.
+- `cssom-objects` cap: the string `cssom-objects` is in no file under `crates` (PR #531, CSSOM objects follow the collector). Verified by `grep`, and by the probe `rd_x_sel` above: the dense sheet with 844,366 rules is read in full (545.7 MiB), where round 1 stopped at the fixed 524,288 cap. Met.
+- Other limits still in the code that guard a cost. These are notes, not fails:
+  - `computed-work`: `max_work` is `1 << 30` (nodes times rules, `crates/bare/src/browser_computed.rs:128`, checked at line 655). It is a bound on a slow algorithm. Another agent removes it (PR #555, merged after the freeze; not measured).
+  - `style-objects`: 65,536 `.style` objects for a page (`browser_style.rs:282`); it stops `rd_y_sty` and `rd_x_sty` above. `computed-objects` (`max_objects` 65,536) and `computed-sources` (1,024 sources, 32 MiB of sheet text) also stay.
+  - `cssom-rules` (`MAX_RULES` 1 << 21, 2,097,152 rules) and `cssom-text` (`MAX_TEXT` 32 MiB) in `browser_cssom.rs:23,25`. These bound memory and text, not an algorithm.
+  - `computed-nodes` (2^17 nodes, `browser_computed.rs:64`) stays; the section of PR #555 says it stops `compm_44000` and larger. Not measured here.
+
+### Other: the cost matrix, BASE against NEW
+
+`tools/js/cost_matrix.sh -a /data/bare-tmp/base/f641536497/target /data/bare-tmp/target-r2f-new`: 803 rows, `instr.sh` minimum of 3 runs, glibc, jemalloc only for rows over the limit under glibc. The base counts were in the cache of the round 1 run, so 803 rows took 70 s. Table: `matrix.out`.
+
+- Mean change under glibc -3.147%, median -1.475%. 576 rows are more than 0.5% lower. One row is more than 2% higher.
+- 7 rows are over +0.5% under both allocators (the gate says: over the limit; exit status 1): `fetch_load post 10` +2.32% (glibc) and +1.93% (jemalloc), `recursion_load react 1000` +1.14%, `reflect_load keys 10` +0.97%, `date_load cap 10` +0.70%, `iterator_load set_sym 10` +0.68%, `date_load gc 10` +0.54%, `arrobj_load freeze 10` +0.50%. Two more are over under glibc only (`arrobj_load descriptors 10`, `dataset_load keys 10000 50`). `parse_load deep 1` and `deep 10` do not run (stack overflow, known).
+- Largest decreases: `wrapper_load forin 10000 30000` -58.7%, `wrapper_load forin 1000 3000` -52.7%, `fragment_load deep 10` -45.8%, `sheets_load dynamic 10` -43.5%, `fragment_load deep 1` -41.0%.
+- `fetch_load post 10` is new in this list; round 1 had `reflect_load keys 10` as the worst (+1.42%). Hypothesis: the Fetch Metadata request headers (PR #479, with its own cost exception in `docs/progress.md`). Not checked.
+
+### What was not tested
+
+- Wall time on an idle machine. The load average was 5 to 17 for the journeys and the ramps and 1.9 to 2.7 for the suite. Wall times in the tables are weak.
+- The live sites. The journeys replay a recorded corpus on a virtual clock. `nextjs-docs` (the 48th journey) does not replay and was not run.
+- The corpus `virtual-load` was recorded by older binaries. It holds the replies of the `SharedWorker` path of `craigslist-home`; the baseline binary does not use them. A recording by NEW could change the totals of any journey that differs without a miss.
+- `bare-stress scale css` (growth exponents and memory of the 50 style cases): not run again.
+- `cargo test --release --workspace`: not run (no product code changed; known failures on main: 7 openssl TLS tests, some timing tests under load).
+- The BASE tree through the test262 gate (only the baseline file was compared).
+- The cause of the `sheety_16383` loop (hypothesis only), and whether `1545792b` (#555) still has it.
+- The two cost-matrix rows `parse_load deep 1` and `deep 10` (do not run).
+- Window mode, Windows, macOS, a second machine. A real login or network in the suite.
+- PSS: 26 of 94 samples of run 0 are under 10 MiB (sampler misses).
+- Probes of criterion 5 and 8 are 1 run each.
+
+### Noticed, not changed
+
+- `sheety_16383` does not finish on main since PR #541 (criterion 5, above). It needs an issue and a fix. A guard that would have caught it: the ramp script of this benchmark must run each page with a hard time limit (my `ramp.py` now takes `TO=<seconds>`), and `bare-drive` should stop a page that has no page-time progress (its `--timeout` did not fire).
+- `craigslist-home` is 2,643 M on NEW against 48,250 M on the baseline only because the page changes its code path with `SharedWorker`. Do not report it as an engine gain. The next baseline for the journeys needs a binary that has `SharedWorker`, or a corpus that does not depend on it.
+- Criterion 3 has a 4% margin on `rest_13` (10.43 times), and criterion 4 a 0.8% margin on `python-org-docs-link` (1.310 times). A small change in the fixed cost of a page can lose them.
+- The restyle charge is 1.23 times the cost now; it was 1.04 at round 1. A restyle of a large page could take 20% more steps than its work. The two steps agree within 25%.
+- The five heaviest journeys still hold 60% of the instructions and moved by -13.7% (round 1: -0.8%). `rust-book-search` is -38.9% on its own. The next gain for criterion 2 is in page JS execution of `react-docs`, `substack-home` and `nodejs-org-home` (-1.6%, +3.4%, -1.5%).
+- `substack-home` is 10,941 M here and 1,270 M in the `virtual` corpus of round 1: the `load` end point makes it run its scripts to the end. It is 15% of the NEW total.
+- `mdn-reference` is 3,099.5 M on NEW (+4.3% against the baseline) with 0 replay misses: the chunk address fix of PR #521 holds.
+- `cargo build --release -p bare-drive -p bare-stress` after a `-p bare-drive` build left the `bare-drive` binary unchanged (`cmp`), so a stress build does not change the journey binary on this tree.
