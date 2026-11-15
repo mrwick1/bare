@@ -12210,3 +12210,49 @@ Results.
 Recommendation (ranked): B1 make the document request equal to Chrome's (first byte 1.24 s against 0.43 s; hypothesis), A1 stream the document and start its scripts at the first bytes (first row 4.4 s to about 2.5 to 3 s; hypothesis), C1 slim the call path (-4% instructions), C2 and C3 parse and code cache, C4 bytecode (stopped by the owner).
 
 Not tested: Chrome's renderer instructions alone; bare's call count at the end of `open`; the effect of Chrome's headers or a service-worker stub on bare; a quiet machine (wall times are an upper bound); mail open, search, compose.
+
+## Gmail PR 1 (design 1): the document request equals Chrome's, and why the first byte is late (2026-11-15)
+
+Owner decision (2026-11-15): build design 1 of [design-gmail-load.md](design-gmail-load.md) (make the document request equal to Chrome's), then design 2 (stream the document into the parser). Main `93c8b27e`, archMachine. This section is design 1. Safety as in #565: read only, bare's saved session, Chrome only through CDP on `chrome-auto` with one new tab per run (closed after), no cookie copied, no account detail written. Raw data (timings only, no mail) is under `/data/bare-tmp/gmail-stream/`.
+
+Built. A document request (`load_document`: the address bar, `location.assign`, a link, a form, a redirect hop) now sends what Chrome 155 sends on a navigation: `Upgrade-Insecure-Requests: 1`, `Sec-Fetch-Dest: document`, `Sec-Fetch-Mode: navigate`, `Sec-Fetch-Site` and, for a load that the user started, `Sec-Fetch-User: ?1`. `Sec-Fetch-Site` is `none` (no page started the load), `same-origin`, `same-site` or `cross-site` (the page that started it, by `metadata_site` of PR #479), and a redirect keeps the least trusted value. The Fetch Metadata headers go only to a potentially trustworthy target; `Upgrade-Insecure-Requests` goes to every target. `Next.from` now holds the URL of the initiating page, not its site, because the origin is needed for `same-origin`; `load_document` takes the site for the cookie rules from it. Two tests, written first (they failed on empty headers): `a_load_that_no_page_started_sends_the_navigation_metadata`, `a_navigation_by_the_page_is_same_origin_and_has_no_user_flag_and_a_redirect_keeps_the_least_trusted_site`.
+
+Measured: what Chrome sends (CDP `requestWillBeSentExtraInfo`, 5 cold runs, cache off, service worker bypassed). The document is `GET /mail/u/0/` over HTTP/2, `accept-encoding: gzip, deflate, br, zstd`, the response is `content-encoding: gzip` and `vary: Sec-Fetch-Dest, Sec-Fetch-Mode, Sec-Fetch-Site`. bare did not send `sec-fetch-*`, `upgrade-insecure-requests`, `priority`, `dnt`, the high-entropy `sec-ch-ua-*` hints, `x-client-data` (a Chrome variations header) and the `x-browser-*` headers. Chrome's cookie header has 24 names, bare's saved session sends 17 (missing: `AEC`, `GMAIL_LF`, `SEARCH_SAMESITE`, `__Host-GMAIL_SCH`, `__Secure-1PSIDTS`, `__Secure-3PSIDTS`). The state file is from 2026-11-13.
+
+Result: none of these changes the first byte. The time from request to the response head ("ttfb" of `bare_net::trace`) of the document is bimodal in bare: about 1.0 to 1.18 s (slow) or about 0.41 to 0.52 s (fast). Chrome (cold, same account, 5 runs of this task and 18 requests of #565): 0.38 to 0.53 s every time. Experiments, each with the probe build of `93c8b27e` (one run each unless a count is given; "slow" is 1.0 to 1.15 s):
+
+| Change on the document request | Result |
+| --- | --- |
+| Baseline, no change: the first document of a new process (48 runs, in 9 groups over 2 hours) | 39 slow, 9 fast (0.43 to 0.58 s) |
+| `Sec-Fetch-*` and `Upgrade-Insecure-Requests` (the built change, 6 runs alternating with the baseline) | 5 slow, 1 fast. Baseline in the same alternation: 6 slow |
+| Full Chrome header set (client hints, `Accept-Language: en-IN,...`, `Priority`, `DNT`, `Sec-Fetch-*`) | slow |
+| `Accept-Encoding`: `gzip`, `gzip, deflate, br, zstd`, `identity` | all slow. The wire size is 333 KB with gzip and br, 2.3 MB with identity |
+| Connect to Chrome's address (142.251.106.19) or to bare's (142.250.77.101), 3 runs each | all slow |
+| A copy of the session file, saved after one load (37 cookies, with `SEARCH_SAMESITE`, a second `COMPASS`), 6 runs | 5 slow, 1 fast. The original: 6 slow |
+| A gap of 1, 10 or 20 s after another bare run | slow |
+| A first load of 15 s, then a new process at once (3 pairs) | the second process: 2 slow, 1 fast |
+| The same process, later documents (`location.assign`, the first load ran 8 s, 4 processes) | 10 of 10 fast (0.39 to 0.46 s) |
+| The same process, later documents, loads of 3 s each, a new connection each (`fresh`, 4 processes, documents 2 to 4) | 8 of 12 fast; the 4 slow ones are the second or third |
+
+The headers were checked on the wire against a local echo server (the override reached the request). The same TLS stack and network are not slow for other requests: `logstreamz` waits 330 to 343 ms in bare and 341 ms (median, n = 6) in Chrome; `cleardot.gif` 22 to 25 ms in both. So the extra time is only on the document, and it is the server's wait before the first byte, not a client cost. A fast document makes the first row 0.6 s earlier (3.44 to 3.67 s against 4.04 to 4.83 s).
+
+Reading. The headers, the encoding, the address, the cookie set of the file, the connection and the gap between runs are not the cause. Hypothesis: the wait is the server's state for this account or session, not a property of the request. The first document of a new process is slow in 39 of 48 runs; later documents of a process that has been running for 8 s or more are fast in 10 of 10. The state is not in the saved cookies (the copy saved after a load is not faster), not the connection (a new connection is fast too), and not the page activity of an earlier process (a 15 s run does not make the next process fast). Chrome keeps Gmail tabs and service workers alive, so its state may always be warm (to verify). Candidates left, not tested: a session cookie that `save_state` does not write, the TLS ClientHello of the hand-written stack (it is not Chrome's; `logstreamz` through the same stack is as fast as in Chrome, so this is the weaker one), `Cookie` header order and size. To verify: a run of the same `curl` or Chrome request with a cookie set that is cut in steps (Chrome through CDP `Fetch.requestPaused`, which does not change the profile).
+
+Numbers (probe build; the probe is the one of #565: `/data/bare-tmp/r2/gmail-load/probe.patch`, not in the repository). Alternating base and branch, 6 runs each, machine load average 11.7 to 3.5 during the 12 runs (the base always ran first in a pair, so its first rows are the more loaded ones):
+
+| | base `93c8b27e` | branch |
+| --- | --- | --- |
+| First byte of the document | 1.16, 1.17, 1.19, 1.21, 1.22, 1.22 s | 0.59 (a fast run), 1.16, 1.17, 1.17, 1.20, 1.23 s |
+| First row (`tr.zA`) | 4.20, 4.49, 4.51, 4.55, 4.70, 4.83 s | 3.67, 4.25, 4.33, 4.42, 4.45, 4.45 s |
+| Instructions to the first row | 16.5 to 16.8 G | 16.6 to 16.8 G |
+| Peak RSS (`VmHWM`, 5.5 s window) | 240 to 250 MiB | 242 to 255 MiB (277 in the fast run) |
+
+Instructions do not change. The time difference of the first row is the load and the one fast run: without it, the branch is 4.25 to 4.45 s. No gain in the first byte is claimed.
+
+Checks (branch `f39d5163` on main `93c8b27e`, archMachine, load 4 to 6):
+- `cargo test --release --workspace --no-fail-fast`: 4,065 passed, 8 failed, 15 ignored. The 8 are on main too and are not from this change: the 7 openssl TLS tests and `a_hidden_iframe_download_is_saved` (flaky under load). A first run also had `external_sheets_embedded_sheets_and_inline_styles_cascade_in_order` fail once (known flaky); it passed in the second run.
+- `tools/js/cost_matrix.sh` against main `93c8b27e` (803 rows): 0 rows over +0.5% under both allocators; mean change glibc -0.005%, jemalloc +0.000%; 2 rows fail to run (`parse_load deep 1` and `deep 10`: stack overflow, on main too).
+- 47 journeys, `journeys.sh compare --clock virtual --runs 3 --pss` (corpus `virtual-load`): 0 replay misses, all pass; sum of median instructions 73,186.7 M base and 73,178.2 M new (-0.0%), largest spread 0.3%; the sum of PSS medians moved -5.8% (noise: single journeys move +7.8% and -2.4% with no instruction change).
+- `exec_diff.sh`: 79 runs, 0 differences. `test262_check.sh`: gate ok (exit 0; checkout at `e4fbf577`). `keycost.sh`: 278.3 M for each key (`#a1`), 283.6 M (`#f0`), peak RSS 30.9 MiB. These three JS gates run on code that this change does not touch.
+
+Not tested: a subframe navigation (iframe) still sends no Fetch Metadata (it goes through another path); `Sec-Fetch-User` is sent only when no page started the load, so a user click that the driver makes through `act` has `same-origin` and no user flag (hypothesis: Chrome sends `?1` there); `Accept` is not Chrome's (no `image/avif`, `image/webp`, `application/signed-exchange`: bare does not decode them for a document); `accept-encoding` has no `zstd` (no decoder); the high-entropy client hints and `x-client-data` are not sent (Chrome sends them only to a server that asks for them, and `x-client-data` is a variations id of Chrome).
