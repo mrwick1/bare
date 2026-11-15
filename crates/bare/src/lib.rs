@@ -162,6 +162,8 @@ pub use downloads::{Download, DownloadState, Downloads};
 #[cfg(test)]
 mod browser_session_tests;
 #[cfg(test)]
+mod browser_stream_tests;
+#[cfg(test)]
 mod browser_loader_tests;
 #[cfg(test)]
 mod browser_current_script_tests;

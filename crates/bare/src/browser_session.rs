@@ -25,6 +25,13 @@
 //! redirect of it is a `GET` without the body, a 307 or 308 is refused (a body is never sent twice). Gates: no cookies
 //! (the client has none); no `Referer`; a failed load ends the session (the old page stays gone, as a browser error page would).
 //!
+//! Streamed document (live, real clock). The worker gives an HTML body to the page thread as it reads it (`Feed`): `encoding::Decoder` makes
+//! the text, `Parsing` takes each piece, the preload scan (`Scan`) starts the fetches of the scripts and sheets that it finds, and
+//! `tree::Parser` builds the tree while the rest of the body is on its way. No script runs before the tree is complete (the loader keeps
+//! its pre-parsed model), so the tree, the order of the scripts and the events are the same as for a body that came in one piece. A redirect,
+//! a type that is not HTML, a download and an encoded body keep the whole-body path. A body that fails or is too big fails the load, as before.
+//! On the benchmark clock (`vclock::on`) and in a run that is not live, the document is one task: no race of two threads sets the cuts.
+//!
 //! History of documents: the session keeps the URL of each document it loaded, and where it is (`hist`, `at`). A `back` or `forward`
 //! (`history.go(n)`, Alt+Left, a mouse button) past the end of the document's own entries loads the neighbor document again from
 //! its URL (no cache: the state of that page, its `history.state` and its form values are not restored). A neighbor that a form
@@ -60,10 +67,13 @@ use bare_html::{encoding, tree};
 use bare_js::eval::{EvalLimits, Exec};
 use bare_js::heap::HeapLimits;
 use crate::downloads::{self, DownloadRequest, Grab};
-use bare_net::http::{Client, Cookies, Ctx, Request, Response, Streamed};
+use bare_net::http::{self as bnet, Client, Cookies, Ctx, Request, Response, Streamed};
 use bare_net::parallel::Task;
 use bare_url::Url;
-use std::sync::Arc;
+use std::collections::VecDeque;
+use std::io::Read;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug)]
@@ -208,15 +218,95 @@ pub struct Session {
     /// sockets of a browser outlive a navigation.
     client: Option<Client>,
     /// Live: the next document, while a worker downloads it. The old document stays until it is in.
-    loading: Option<(Next, Task<Result<(String, String, u16), String>>)>,
+    loading: Option<(Next, Loading)>,
     /// The HTTP status of the last document that a live session loaded (0: none yet).
     status: u16,
     /// Live: the next document after its download, while turns parse it. The old document stays until the parse is done.
     parsing: Option<Box<Parsing>>,
 }
 
-/// Live: a downloaded document that turns parse in slices (`step`), as a browser does. No script runs before the whole tree is built (the
-/// loader keeps its pre-parsed model), so the tree, the order of the scripts and the events are those of `tree::parse`.
+/// What a live load gives the page thread: one result, or a feed of text for a document that is still on its way.
+enum Loading {
+    Task(Task<Result<(String, String, u16), String>>),
+    Feed(Arc<Feed>),
+}
+
+impl Loading {
+    /// Can a turn do something with it now?
+    fn ready(&self) -> bool {
+        match self {
+            Loading::Task(t) => t.done(),
+            Loading::Feed(f) => f.waiting(),
+        }
+    }
+}
+
+/// A message from the worker that loads a document to the page thread.
+enum Msg {
+    /// The load ended with this result, with no feed of text: a redirect chain that failed, a text that is not HTML, a download, a body that
+    /// has a coding that we cannot undo. The same value that `load_document` gives.
+    Whole(Result<(String, String, u16), String>),
+    /// The reply is HTML and its body follows: the final URL (with the fragment) and the status.
+    Head(String, u16),
+    /// The next piece of the decoded text.
+    Text(String),
+    /// The body ended well.
+    End,
+    /// The body failed (the network, or the limit of `max_document_bytes`).
+    Err(String),
+}
+
+/// The text of a document that a worker still downloads. The worker pushes, the page thread takes. The page polls the network every few
+/// milliseconds already, so there is no wake-up: a queue behind a lock is enough. JS: an async iterator that the other side fills.
+#[derive(Default)]
+struct Feed {
+    q: Mutex<VecDeque<Msg>>,
+    /// A `Head` went out: the end of the load is `End` or `Err`, not `Whole`.
+    streamed: AtomicBool,
+}
+
+impl Feed {
+    fn push(&self, m: Msg) {
+        self.streamed.fetch_or(matches!(m, Msg::Head(..)), Ordering::Relaxed);
+        self.q.lock().unwrap_or_else(|e| e.into_inner()).push_back(m);
+    }
+
+    /// The worker is done: say how the load ended.
+    fn finish(&self, res: Result<(String, String, u16), String>) {
+        self.push(match (self.streamed.load(Ordering::Relaxed), res) {
+            (false, res) => Msg::Whole(res),
+            (true, Ok(_)) => Msg::End,
+            (true, Err(why)) => Msg::Err(why),
+        });
+    }
+
+    fn pop(&self) -> Option<Msg> {
+        self.q.lock().unwrap_or_else(|e| e.into_inner()).pop_front()
+    }
+
+    fn take_all(&self) -> VecDeque<Msg> {
+        std::mem::take(&mut *self.q.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    fn waiting(&self) -> bool {
+        !self.q.lock().unwrap_or_else(|e| e.into_inner()).is_empty()
+    }
+}
+
+/// Tells the page thread that a worker ended without a result (it panicked), so the page does not wait for ever.
+struct Lost<'a>(&'a Feed, bool);
+
+impl Drop for Lost<'_> {
+    fn drop(&mut self) {
+        if !self.1 {
+            self.0.finish(Err("network error".into()));
+        }
+    }
+}
+
+/// Live: a document that turns parse in slices (`step`), as a browser does, while the rest of its body may still be on its way. No script runs
+/// before the whole tree is built (the loader keeps its pre-parsed model), so the tree, the order of the scripts and the events are those of
+/// `tree::parse`.
 struct Parsing {
     next: Next,
     url: String,
@@ -226,17 +316,41 @@ struct Parsing {
     parser: tree::Parser,
     /// Starts the downloads of the scripts and sheets ahead of the parser.
     scan: Scan,
+    /// Where the rest of the text comes from. `None`: `html` is the whole document.
+    feed: Option<Arc<Feed>>,
+    /// The body is over: `html` is all of it.
+    ended: bool,
 }
 
 /// The text that one parse step feeds. A step costs well under a millisecond, so a turn ends close to the end of its slice.
 const CHUNK: usize = 16 << 10;
 
 impl Parsing {
-    /// Scan ahead for half of the time that is left, then parse until `end`. True: the parser has the whole text.
-    fn step(&mut self, end: Instant) -> bool {
+    /// Take the pieces that came. An error is a body that failed, and the load fails.
+    fn pull(&mut self) -> Result<(), String> {
+        let Some(feed) = &self.feed else { return Ok(()) };
+        for m in feed.take_all() {
+            match m {
+                Msg::Text(t) => self.html.push_str(&t),
+                Msg::End => self.ended = true,
+                Msg::Err(why) => return Err(why),
+                Msg::Whole(_) | Msg::Head(..) => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Can a step do something now: text that the parser has not read, a piece that came, or the end?
+    fn ready(&self) -> bool {
+        self.at < self.html.len() || self.ended || self.feed.as_ref().is_some_and(|f| f.waiting())
+    }
+
+    /// Take what came, scan ahead for half of the time that is left, then parse until `end`. `Ok(true)`: the parser has the whole text.
+    fn step(&mut self, end: Instant) -> Result<bool, String> {
+        self.pull()?;
         // `end` is on the page clock (`bare_net::vclock::instant`, the real clock when the benchmark clock is off): read the same clock.
         let now = bare_net::vclock::instant();
-        self.scan.step(&self.html, now + end.saturating_duration_since(now) / 2);
+        self.scan.step(&self.html, now + end.saturating_duration_since(now) / 2, !self.ended);
         while self.at < self.html.len() {
             let mut cut = (self.at + CHUNK).min(self.html.len());
             while !self.html.is_char_boundary(cut) {
@@ -248,7 +362,7 @@ impl Parsing {
                 break;
             }
         }
-        self.at == self.html.len()
+        Ok(self.ended && self.at == self.html.len())
     }
 }
 
@@ -304,16 +418,28 @@ pub(crate) fn non_html_document(content_type: Option<&str>, url: &str, body: &[u
     Ok(format!("<pre style=\"white-space:pre-wrap;word-wrap:break-word\">{}</pre>", esc(&encoding::decode(body, Some(ct)), false)))
 }
 
+/// What one request of a document load gave.
+enum Hop {
+    /// A download: the file goes to its own threads.
+    Saved,
+    /// A reply with its whole body.
+    Whole(Arc<Response>),
+    /// The reply of an HTML document, with its body still on the connection (the caller can stream it).
+    Open(Response, bnet::Body),
+}
+
 /// One request of a load that may be a download. A response that is one goes on to its own threads (`downloads::Start`); any other is read
 /// whole, as `send_once` does. The client may take a reply bigger than `MAX_REPLY` (a download); a document is capped by `max` here.
-fn fetch_hop(client: &mut Client, req: &Request, max: usize, g: &Grab) -> Result<Option<Arc<Response>>, String> {
-    use std::io::Read;
+/// `open`: an HTML reply that the caller can use as it is read comes back unread.
+fn fetch_hop(client: &mut Client, req: &Request, max: usize, g: Option<&Grab>, open: bool) -> Result<Hop, String> {
     let mut big = client.fork();
-    big.allow_big();
+    if g.is_some() {
+        big.allow_big();
+    }
     let Streamed { response, mut body } = big.send_stream_once(req).map_err(|_| "network error".to_string())?;
     let mut r = Arc::try_unwrap(response).map_err(|_| "network error".to_string())?;
     let (ct, cd) = (r.header("content-type"), r.header("content-disposition"));
-    if (200..300).contains(&r.status) && (g.force || downloads::is_download(ct, cd)) {
+    if let Some(g) = g.filter(|g| (200..300).contains(&r.status) && (g.force || downloads::is_download(ct, cd))) {
         let url = req.url.to_string();
         let name = downloads::file_name(cd, g.name.as_deref(), &url);
         let mime = downloads::mime_of(ct);
@@ -326,14 +452,17 @@ fn fetch_hop(client: &mut Client, req: &Request, max: usize, g: &Grab) -> Result
         let Ok(url) = Url::parse(&url) else { return Err("the URL is not an http(s) URL".into()) };
         let get = req.method == bare_net::http::Method::Get;
         g.dl.begin(id, &name, &mime, downloads::Start { client: big, url, from, get, response: r, body });
-        return Ok(None);
+        return Ok(Hop::Saved);
     }
     // A redirect has no body to read.
     if matches!(r.status, 301 | 302 | 303 | 307 | 308) {
-        return Ok(Some(Arc::new(r)));
+        return Ok(Hop::Whole(Arc::new(r)));
     }
-    if g.only {
+    if g.is_some_and(|g| g.only) {
         return Err(NOT_A_DOWNLOAD.into());
+    }
+    if open && is_html(r.header("content-type")) && !r.encoded() {
+        return Ok(Hop::Open(r, body));
     }
     let mut bytes = Vec::new();
     (&mut body).take((max as u64).saturating_add(1)).read_to_end(&mut bytes).map_err(|_| "network error".to_string())?;
@@ -341,7 +470,33 @@ fn fetch_hop(client: &mut Client, req: &Request, max: usize, g: &Grab) -> Result
         return Err("network error".into());
     }
     r.body = bytes;
-    Ok(Some(Arc::new(r)))
+    Ok(Hop::Whole(Arc::new(r)))
+}
+
+/// Read the body of an HTML reply as it comes: decode each piece (`encoding::Decoder` gives the text that `decode` gives for the whole
+/// body, wherever the pieces are cut) and give it to the page thread. The page thread parses and scans while the rest is on its way.
+fn stream_body(mut body: bnet::Body, ct: Option<&str>, max: usize, feed: &Arc<Feed>) -> Result<(), String> {
+    let mut decoder = encoding::Decoder::new(ct);
+    let mut buf = vec![0u8; 64 << 10];
+    let mut total = 0usize;
+    loop {
+        // The page left this document (a navigation, or the session ended): nobody reads the text, so stop reading the body.
+        if Arc::strong_count(feed) == 1 {
+            return Err("the document was left".into());
+        }
+        let n = body.read(&mut buf).map_err(|_| "network error".to_string())?;
+        let text = if n == 0 { decoder.finish() } else { decoder.feed(&buf[..n]) };
+        total += text.len();
+        if total > max {
+            return Err("the document is too big".into());
+        }
+        if !text.is_empty() {
+            feed.push(Msg::Text(text));
+        }
+        if n == 0 {
+            return Ok(());
+        }
+    }
 }
 
 /// May a redirect (or a navigation) go from `from` to `to`? http(s) only, and https never goes down to http.
@@ -353,7 +508,7 @@ pub(crate) fn redirect_allowed(from: &Url, to: &Url) -> bool {
 /// Download one document with the caps of `lim`. Gives the final URL (with the fragment) and the decoded text.
 ///
 /// `keep_errors`: a status outside 200 to 299 still gives the document (a live page shows it), with that status as the last value.
-fn load_document(client: &mut Client, url: &str, from: Option<&str>, body: Option<&Body>, lim: &SessionLimits, deadline: Instant, grab: Option<&Grab>, keep_errors: bool) -> Result<(String, String, u16), String> {
+fn load_document(client: &mut Client, url: &str, from: Option<&str>, body: Option<&Body>, lim: &SessionLimits, deadline: Instant, grab: Option<&Grab>, keep_errors: bool, feed: Option<&Arc<Feed>>) -> Result<(String, String, u16), String> {
     let max_url = NavLimits::default().max_url_bytes;
     if url.len() > max_url { return Err("the document URL is too big".into()); }
     let (bare, fragment) = match url.split_once('#') {
@@ -397,11 +552,27 @@ fn load_document(client: &mut Client, url: &str, from: Option<&str>, body: Optio
             Some(b) => Request { cookies, ..Request::post(&cur, &post_headers[..2 + n], &b.bytes) },
             None => Request { cookies, headers: &get_headers[..1 + n], ..Request::get(&cur) },
         };
-        let resp = match grab {
-            None => bare_net::trace::blocked(|| client.send_once(&req, lim.max_document_bytes)).map_err(|_| "network error".to_string())?,
-            Some(g) => match bare_net::trace::blocked(|| fetch_hop(client, &req, lim.max_document_bytes, g))? {
-                Some(r) => r,
-                None => return Err(SAVED.into()),
+        let resp = match (grab, feed) {
+            (None, None) => bare_net::trace::blocked(|| client.send_once(&req, lim.max_document_bytes)).map_err(|_| "network error".to_string())?,
+            _ => match bare_net::trace::blocked(|| fetch_hop(client, &req, lim.max_document_bytes, grab, feed.is_some()))? {
+                Hop::Whole(r) => r,
+                Hop::Saved => return Err(SAVED.into()),
+                Hop::Open(r, body) => {
+                    if !(200..300).contains(&r.status) && !keep_errors {
+                        return Err(format!("status {}", r.status));
+                    }
+                    let mut final_url = cur.to_string();
+                    if let Some(f) = fragment {
+                        final_url.push('#');
+                        final_url.push_str(&f);
+                    }
+                    let feed = feed.expect("fetch_hop opens a reply only for a feed");
+                    // From here the result goes through the feed: the head now, the text as it comes, the end (or the failure) when `load_document`
+                    // returns. The page thread parses while the body is on its way.
+                    feed.push(Msg::Head(final_url.clone(), r.status));
+                    stream_body(body, r.header("content-type"), lim.max_document_bytes, feed)?;
+                    return Ok((final_url, String::new(), r.status));
+                }
             },
         };
         if matches!(resp.status, 301 | 302 | 303 | 307 | 308) {
@@ -509,8 +680,21 @@ impl Session {
         let (url, body, from, lim) = (next.url.clone(), next.body.clone(), next.from.clone(), self.cfg.limits.clone());
         let deadline = deadline_after(lim.max_time.saturating_sub(self.used.time));
         let grab = self.cfg.downloads.clone().map(|dl| Grab { dl, force: false, name: None, id: None, only: false });
-        let task = self.fork().spawn(move |c| load_document(c, &url, from.as_deref(), body.as_ref(), &lim, deadline, grab.as_ref(), true));
-        self.loading = Some((next, task));
+        // A live session on the real clock takes the body of an HTML document in pieces (`Feed`). On the benchmark clock a document is one task with a
+        // due time, so a run does the same work each time (see `vclock.rs`): there the text is never cut by the race of two threads.
+        let feed = (self.cfg.live && !bare_net::vclock::on()).then(|| Arc::new(Feed::default()));
+        let worker = feed.clone();
+        let task = self.fork().spawn(move |c| {
+            let mut lost = worker.as_deref().map(|f| Lost(f, false));
+            let res = load_document(c, &url, from.as_deref(), body.as_ref(), &lim, deadline, grab.as_ref(), true, worker.as_ref());
+            if let (Some(lost), Some(f)) = (&mut lost, &worker) {
+                lost.1 = true;
+                f.finish(res);
+                return Err(String::new());
+            }
+            res
+        });
+        self.loading = Some((next, feed.map_or(Loading::Task(task), Loading::Feed)));
         SessionResult { stop: SessionStop::Page(Stop::Settled), pages: Vec::new(), urls: Vec::new(), tasks: 0, rounds: 0 }
     }
 
@@ -575,7 +759,7 @@ impl Session {
                 let deadline = deadline_after(lim.max_time.saturating_sub(self.used.time));
                 let grab = Grab { dl: dl.clone(), force: false, name: None, id: None, only: true };
                 self.fork().spawn(move |c| {
-                    let _ = load_document(c, &url, from.as_deref(), None, &lim, deadline, Some(&grab), false);
+                    let _ = load_document(c, &url, from.as_deref(), None, &lim, deadline, Some(&grab), false, None);
                 });
                 continue;
             }
@@ -589,7 +773,7 @@ impl Session {
             let deadline = deadline_after(lim.max_time.saturating_sub(self.used.time));
             let grab = Grab { dl: dl.clone(), force: true, name, id: Some(id), only: false };
             self.fork().spawn(move |c| {
-                if let Err(why) = load_document(c, &url, from.as_deref(), None, &lim, deadline, Some(&grab), false) && why != SAVED {
+                if let Err(why) = load_document(c, &url, from.as_deref(), None, &lim, deadline, Some(&grab), false, None) && why != SAVED {
                     grab.dl.fail(id, why);
                 }
             });
@@ -605,10 +789,10 @@ impl Session {
 
     /// Live: is a next document on its way (`Some(false)`), or in (`Some(true)`: the next `resume` parses a slice of it or shows it)?
     pub fn loading(&self) -> Option<bool> {
-        if self.parsing.is_some() {
-            return Some(true);
+        if let Some(p) = &self.parsing {
+            return Some(p.ready());
         }
-        self.loading.as_ref().map(|l| l.1.done())
+        self.loading.as_ref().map(|l| l.1.ready())
     }
 
     /// The HTTP status of the last document that a live session loaded (0: none yet).
@@ -640,11 +824,21 @@ impl Session {
         // stops each run).
         let (mut fetched, mut scan) = (None, None);
         if next.is_none() && self.parsing.is_none() && self.loading.is_some() {
-            if self.loading.as_ref().is_some_and(|l| !l.1.done()) {
+            if self.loading.as_ref().is_some_and(|l| !l.1.ready()) {
                 return SessionStop::Page(Stop::Settled);
             }
-            let (n, task) = self.loading.take().expect("checked");
-            match task.wait().unwrap_or_else(|| Err("network error".into())) {
+            let (n, loading) = self.loading.take().expect("checked");
+            // The first thing a load gives: a whole result, or the head of a document whose text follows.
+            let (got, feed) = match loading {
+                Loading::Task(task) => (task.wait().unwrap_or_else(|| Err("network error".into())), None),
+                Loading::Feed(feed) => match feed.pop() {
+                    Some(Msg::Whole(res)) => (res, None),
+                    Some(Msg::Head(url, status)) => (Ok((url, String::new(), status)), Some(feed)),
+                    Some(Msg::Err(why)) => (Err(why), None),
+                    _ => (Err("network error".into()), None),
+                },
+            };
+            match got {
                 Ok((url, html, status)) => {
                     self.status = status;
                     let scan = Url::parse(url.split('#').next().unwrap_or("")).map(|page| {
@@ -653,7 +847,8 @@ impl Session {
                         Scan::new(c, page, self.cfg.page.resources.clone(), deadline)
                     });
                     let Ok(scan) = scan else { return SessionStop::LoadFailed("the URL is not an http(s) URL".into()) };
-                    self.parsing = Some(Box::new(Parsing { next: n, url, html, at: 0, parser: tree::Parser::new(), scan }));
+                    let ended = feed.is_none();
+                    self.parsing = Some(Box::new(Parsing { next: n, url, html, at: 0, parser: tree::Parser::new(), scan, feed, ended }));
                 }
                 // A download: the file is saved, and the document on screen stays.
                 Err(why) if why == SAVED => {
@@ -670,14 +865,22 @@ impl Session {
             }
         }
         if next.is_none() && self.parsing.is_some() {
-            if !self.parsing.as_mut().expect("checked").step(bare_net::vclock::instant() + SLICE) {
-                return SessionStop::Page(Stop::Settled);
+            match self.parsing.as_mut().expect("checked").step(bare_net::vclock::instant() + SLICE) {
+                Ok(false) => return SessionStop::Page(Stop::Settled),
+                Ok(true) => {
+                    let p = *self.parsing.take().expect("checked");
+                    bare_net::trace::mark(|| "document parsed in slices".into(), 0);
+                    fetched = Some(Ok((p.url, p.parser.finish())));
+                    scan = Some(p.scan);
+                    next = Some(p.next);
+                }
+                // The body failed on its way: the load fails, as it does when the body is read whole.
+                Err(why) => {
+                    let p = *self.parsing.take().expect("checked");
+                    fetched = Some(Err(why));
+                    next = Some(p.next);
+                }
             }
-            let p = *self.parsing.take().expect("checked");
-            bare_net::trace::mark(|| "document parsed in slices".into(), 0);
-            fetched = Some(Ok((p.url, p.parser.finish())));
-            scan = Some(p.scan);
-            next = Some(p.next);
         }
         loop {
             if next.is_some() && self.used.documents >= lim.max_documents {
@@ -709,7 +912,7 @@ impl Session {
                     let mut base = self.fork();
                     let doc = match fetched.take() {
                         Some(d) => d,
-                        None => load_document(&mut base, &url, from.as_deref(), body.as_ref(), &lim, deadline, None, false).map(|(url, html, _)| (url, tree::parse(&html))),
+                        None => load_document(&mut base, &url, from.as_deref(), body.as_ref(), &lim, deadline, None, false, None).map(|(url, html, _)| (url, tree::parse(&html))),
                     };
                     let (url, dom) = match doc {
                         Ok(d) => d,
@@ -825,10 +1028,7 @@ impl Session {
 mod tests {
     use super::*;
 
-    /// The saved pages of the repository, each repeated until it is several parse steps long, give the tree of `tree::parse` when turns
-    /// parse them in slices: the cuts fall inside tags, texts and scripts.
-    #[test]
-    fn a_page_parsed_in_slices_gives_the_tree_of_a_one_step_parse() {
+    fn saved_pages() -> Vec<String> {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let mut pages = Vec::new();
         for dir in ["tools/fixtures/staging", "tools/fixtures/ui", "tools/fixtures/drive", "crates/paint/tests/fixtures"] {
@@ -839,20 +1039,64 @@ mod tests {
             }
         }
         assert!(pages.len() >= 10, "{} saved pages", pages.len());
-        for page in pages {
+        pages
+    }
+
+    fn parsing(html: String, feed: Option<Arc<Feed>>) -> Parsing {
+        let mut lim = crate::resources::Limits::default();
+        lim.max_fetches = 0;
+        let scan = Scan::new(Client::new(), Url::parse("http://127.0.0.1:1/").unwrap(), lim, Instant::now());
+        let next = Next { from: None, url: String::new(), body: None, how: How::Push };
+        let ended = feed.is_none();
+        Parsing { next, url: String::new(), html, at: 0, parser: tree::Parser::new(), scan, feed, ended }
+    }
+
+    /// The saved pages of the repository, each repeated until it is several parse steps long, give the tree of `tree::parse` when turns
+    /// parse them in slices: the cuts fall inside tags, texts and scripts.
+    #[test]
+    fn a_page_parsed_in_slices_gives_the_tree_of_a_one_step_parse() {
+        for page in saved_pages() {
             let html = page.repeat(3 * CHUNK / page.len() + 2);
-            let mut lim = crate::resources::Limits::default();
-            lim.max_fetches = 0;
-            let scan = Scan::new(Client::new(), Url::parse("http://127.0.0.1:1/").unwrap(), lim, Instant::now());
-            let next = Next { from: None, url: String::new(), body: None, how: How::Push };
-            let mut p = Parsing { next, url: String::new(), html: html.clone(), at: 0, parser: tree::Parser::new(), scan };
+            let mut p = parsing(html.clone(), None);
             let mut steps = 1;
             // An end in the past: each step feeds one chunk.
-            while !p.step(Instant::now()) {
+            while !p.step(Instant::now()).unwrap() {
                 steps += 1;
             }
             assert!(steps >= 3, "{steps} steps");
             assert!(p.parser.finish().dump() == tree::parse(&html).dump(), "a page parsed in slices gives another tree");
+        }
+    }
+
+    /// The same pages, but the text comes through the feed in pieces of 1, 7 and 5,000 bytes (cut at a letter), one piece for each step: the
+    /// tree is the one of `tree::parse`, and a step with no new piece does not finish.
+    #[test]
+    fn a_page_fed_in_pieces_gives_the_tree_of_a_one_step_parse() {
+        for page in saved_pages() {
+            let html = page.repeat(2 * CHUNK / page.len() + 2);
+            for size in [1, 7, 5000] {
+                let feed = Arc::new(Feed::default());
+                feed.push(Msg::Head(String::new(), 200));
+                let mut p = parsing(String::new(), Some(feed.clone()));
+                let mut at = 0;
+                let mut guard = 0;
+                // Pieces of at most `size` bytes. A page of 5,000 pieces of 1 byte is slow, so only the start is cut small.
+                while at < html.len() {
+                    let step = if size == 1 && at > 2000 { 5000 } else { size };
+                    let mut cut = (at + step).min(html.len());
+                    while !html.is_char_boundary(cut) {
+                        cut += 1;
+                    }
+                    feed.push(Msg::Text(html[at..cut].to_string()));
+                    at = cut;
+                    assert!(!p.step(Instant::now()).unwrap(), "finished before the end of the body");
+                    guard += 1;
+                    assert!(guard < 100_000);
+                }
+                feed.push(Msg::End);
+                while !p.step(Instant::now()).unwrap() {}
+                assert!(p.parser.finish().dump() == tree::parse(&html).dump(), "a page fed in pieces of {size} gives another tree");
+            }
         }
     }
 }
