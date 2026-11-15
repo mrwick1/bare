@@ -249,19 +249,23 @@ fn scan(src: &str, mut m: Mark, end: usize) -> Mark {
     let b = src.as_bytes();
     let mut i = m.byte as usize;
     while i < end {
-        // A block of 32 bytes with no CR and no E2 byte: LF are counted, the column is the units after the last LF. The loops
-        // over the fixed array become a few vector instructions each, so a long run of plain text costs about 1 instruction per byte.
+        // A block of 32 bytes with no CR and no E2 byte: LF are counted, the column is the units after the last LF. One loop over the
+        // fixed array makes a few vector instructions for each 16 bytes, so a long run of plain text costs about 1 instruction per byte.
         if i + BLOCK <= end && !m.prev_cr {
             let c: &[u8; BLOCK] = b[i..i + BLOCK].try_into().unwrap();
-            if !c.iter().fold(false, |a, &x| a | (x == b'\r') | (x == 0xE2)) {
-                let lf = c.iter().map(|&x| u8::from(x == b'\n')).sum::<u8>();
-                let tail = if lf == 0 { &c[..] } else { &c[c.iter().rposition(|&x| x == b'\n').unwrap() + 1..] };
-                let units = u32::from(tail.iter().map(|&x| u8::from(x & 0xC0 != 0x80) + u8::from(x >= 0xF0)).sum::<u8>());
+            let (mut special, mut lf, mut units) = (0u8, 0u8, 0u8);
+            for &x in c {
+                special |= u8::from(x == b'\r') | u8::from(x == 0xE2);
+                lf += u8::from(x == b'\n');
+                units += u8::from(x & 0xC0 != 0x80) + u8::from(x >= 0xF0);
+            }
+            if special == 0 {
                 if lf == 0 {
-                    m.column += units;
+                    m.column += u32::from(units);
                 } else {
+                    let tail = &c[c.iter().rposition(|&x| x == b'\n').unwrap() + 1..];
                     m.line += u32::from(lf);
-                    m.column = units;
+                    m.column = tail.iter().map(|&x| u32::from(x & 0xC0 != 0x80) + u32::from(x >= 0xF0)).sum();
                 }
                 i += BLOCK;
                 continue;
