@@ -592,7 +592,7 @@ impl<'p> Interp<'p> {
         let no = |what: &'static str| Err(unsupported(what, st.span));
         let aw = match st.kind {
             StmtKind::Expr(e) | StmtKind::Throw(e) => self.scan_expr(e)?,
-            StmtKind::ExportDefault(e) => self.scan_expr(e)?,
+            StmtKind::ExportDefault(e, _) => self.scan_expr(e)?,
             StmtKind::Return(Some(e)) => self.scan_expr(e)? | self.aw.scan_ag,
             StmtKind::Var { decls, .. } => {
                 let mut any = false;
@@ -1659,7 +1659,7 @@ impl<'p> Interp<'p> {
                 self.fpush(run, Fr::Discard)?;
                 nx(Next::Eval(e))
             }
-            StmtKind::ExportDefault(e) => {
+            StmtKind::ExportDefault(e, _) => {
                 self.fpush(run, Fr::ExpDef)?;
                 nx(Next::Eval(e))
             }

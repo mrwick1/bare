@@ -1590,7 +1590,7 @@ impl<'p> Interp<'p> {
                 self.sc_end(sc);
                 r?
             }
-            StmtKind::ExportDefault(e) => self.w_expr(e, fs, ac)?,
+            StmtKind::ExportDefault(e, _) => self.w_expr(e, fs, ac)?,
         }
         Ok(())
     }
@@ -2010,7 +2010,7 @@ impl<'p> Interp<'p> {
                 }
                 StmtKind::Class(c) => self.declare_class(c),
                 // `export default function () {}` is hoisted like a declaration, under the name "default".
-                StmtKind::ExportDefault(e) => {
+                StmtKind::ExportDefault(e, true) => {
                     if let ExprKind::Function(fid) = prog.expr(e).kind {
                         let s = h!(self, self.heap.intern_str("default"));
                         let f = self.make_closure(fid, Some(s), false)?;

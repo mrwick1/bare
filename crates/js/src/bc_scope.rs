@@ -509,7 +509,7 @@ impl<'p> Interp<'p> {
                 self.sw_stmt(w, body);
                 w.cur = saved;
             }
-            StmtKind::ExportDefault(e) => self.sw_expr(w, e),
+            StmtKind::ExportDefault(e, _) => self.sw_expr(w, e),
             StmtKind::Try { block, handler, finalizer } => {
                 self.sw_stmt(w, block);
                 if let Some(c) = handler {

@@ -519,8 +519,9 @@ pub enum StmtKind {
     Debugger,
     With { obj: ExprId, body: StmtId },
     /// `export default expr;` and the anonymous `export default function () {}` / `class {}`. The value is stored in the
-    /// module binding `*default*` and gets the name `default`. Only in a module.
-    ExportDefault(ExprId),
+    /// module binding `*default*` and gets the name `default`. Only in a module. The flag is true when the expression is a function that
+    /// is not in parentheses: it is made when the module is instantiated, as a declaration is (`(function () {})` is made when the statement runs).
+    ExportDefault(ExprId, bool),
 }
 
 // ---------------------------------------------------------------- modules

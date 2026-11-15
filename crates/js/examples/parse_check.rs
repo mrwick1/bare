@@ -707,7 +707,7 @@ impl<'a> Dump<'a> {
                 self.open("debugger", sp);
                 self.close();
             }
-            StmtKind::ExportDefault(e) => {
+            StmtKind::ExportDefault(e, _) => {
                 self.open("exportdefault", sp);
                 self.sp();
                 self.expr(e);

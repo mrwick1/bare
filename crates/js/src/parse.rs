@@ -1272,13 +1272,14 @@ impl<'a> Parser<'a> {
                     } else {
                         let id = self.parse_class(cs, false)?;
                         let e = self.mk_expr(ExprKind::Class(id), cs)?;
-                        self.mk_stmt(StmtKind::ExportDefault(e), cs)?
+                        self.mk_stmt(StmtKind::ExportDefault(e, false), cs)?
                     }
                 } else {
                     let es = self.tok.start;
                     let e = self.parse_assign(false, false)?;
                     self.semicolon()?;
-                    self.mk_stmt(StmtKind::ExportDefault(e), es)?
+                    let hoist = matches!(self.ex(e).kind, ExprKind::Function(_)) && !self.is_paren(e);
+                    self.mk_stmt(StmtKind::ExportDefault(e, hoist), es)?
                 };
                 let source = match self.p.stmts[st.index()].kind {
                     StmtKind::Function(f) => ExportSource::Local(self.p.func(f).name.unwrap_or_default()),
@@ -3185,7 +3186,7 @@ impl<'a> Parser<'a> {
         if anon && self.is(P::LParen) {
             let f = self.parse_function_rest(start, None, FuncKind::Normal, is_async, is_gen)?;
             let e = self.mk_expr(ExprKind::Function(f), start)?;
-            return self.mk_stmt(StmtKind::ExportDefault(e), start);
+            return self.mk_stmt(StmtKind::ExportDefault(e, true), start);
         }
         if self.tok.kind != Kind::Ident {
             return Err(self.unexpected());
