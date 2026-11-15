@@ -11837,3 +11837,89 @@ Wall time on an idle machine; Windows and macOS; the live `craigslist-home` page
 - Slab record of a plain array: 32 B of inline slots are unused (needs design 2a). Still 117 B plus the buffer per object.
 - `Ext::re_tab_bytes` is dead code (the build warns), as noted in an earlier section.
 - A `filter` result of one element still gets a 4-slot buffer (64 B); a trim on return is a possible follow-up.
+## 2026-11-15: the `computed-work` limit counts the path of a chain read, not the page
+
+### Owner decision (2026-11-15)
+
+Design the removal of the `computed-work` limit, now that a `getComputedStyle` read that needs no layout styles only the root-to-element path (design H, #551).
+
+### Plan (written before the code)
+
+Where it is counted: `cascade_inner` (`browser_computed.rs`) computed `nodes x (rules + 1)` (or `styled elements x (rules + 1)` over `STYLED_FROM`, one tree walk for each document revision) before everything else, and refused over `max_work` (2^30). It ran before the cache hit, the chain and the restyle.
+
+What it protects: one native operation that cannot be interrupted. `RuleSet::compute` and `RuleSet::restyle` run to the end, and the steps are charged for the candidates they tested after the work.
+
+Path by path (N nodes, E elements, R rules, d depth of the element, c candidates that the rule index gives for an element):
+
+| Path | Work now | Needs the limit? |
+| --- | --- | --- |
+| Cache hit (`built.last` is current) | O(1), charges 1 | No. It ran the cap check first; that was wasted. |
+| Chain read (`style_chain`) | O(d x c) for a new path; O(c) for the next element in document order (the filter stays open); worst case d x R | Only as d x (R + 1). The page size N does not matter. |
+| Restyle of a kept cascade | O(elements that the marks reach x c) | Yes, as before (a restyle cannot be interrupted). |
+| Full compute: a layout read, `keep`, `want`, a page with shadow roots, motion, an element with a motion style | O(E x c), worst case E x R (rules that no index key holds) | Yes, as before. |
+| Read-all loop | one chain read for each element: O(E x c) in all, plus O(d) filter work for each | Steps bound it. No limit needed per read. |
+
+Change:
+1. The cap check moves behind the cache hit and the chain, so a hit and a chain read no longer pay for it (and no longer walk the tree for `styled_work` after each change).
+2. A chain read has its own bound: the number of elements on the path times (rules + 1), against `max_work`. The cheap test (nodes x (rules + 1)) comes first, so a page that is under the limit pays nothing and does not walk up. Only over it, the read walks up from the element (charged `d / 8 + 1` steps) and compares `d x (rules + 1)`.
+3. The full compute and the restyle keep the old bound. They are still E x c work in one uninterruptible call. A cap by real work needs a candidate count inside `RuleSet::compute` (`sources_capped` in `cascade.rs`); that is a change of the hot cascade loop, larger than this limit, so it is not part of this PR.
+4. `computed-nodes` (2^17 nodes, one `u32` for each node in the chain's `of_node` table) stays. `compm_43000` (129,000 nodes) is the largest page of the ramp that it lets through.
+
+### What was built
+
+- `cascade_inner` (`browser_computed.rs`): the `computed-work` check moved from the top of the function to the place where the whole cascade starts (a restyle or a full compute), behind the cache hit and the chain read. A hit and a chain read no longer pay for it, and no longer walk the tree for `styled_work` after each document change.
+- A chain read has its own bound: if `nodes x (rules + 1)` is over `max_work`, the read walks up from the element (charged `depth / 8 + 1` steps) and compares `depth x (rules + 1)` with `max_work`. A page that is under the limit pays nothing. A path that is too long for the rule count (200 nested elements and 1,000 rules against a limit of 100,000) is still refused before any style is made.
+- Unchanged: the bound of the full compute and the restyle, `computed-nodes`, and the step charge.
+
+### Tests (written first; the three new tests failed on main)
+
+`browser_computed_chain_tests.rs`:
+- `a_chain_read_runs_over_the_default_work_limit_and_reads_the_right_value`: pages of 24,000 divs and rules, 40,000 and 43,000 divs (129,000 nodes, just under `computed-nodes`); three chain reads each, `(computes, chains) == (0, 3)`.
+- `the_work_limit_of_a_chain_read_counts_the_path`: a short path reads, a deep path is refused with `computed-work` and styles nothing.
+- `a_layout_read_loop_and_a_read_all_loop_stay_bounded`: a layout read (`offsetWidth`) on a page over the limit is still refused; a read of every element runs as chain reads with no full cascade; with a small step budget the read-all loop ends with `Limit(Steps)`.
+`browser_computed_tests.rs`: `work_bound_counts_styled_elements_not_text_nodes` now asks for the refusal with a layout read (`offsetWidth`); a style read of one element is no longer refused there.
+
+### Numbers (instructions:u, `bare-drive`, 3 runs each, spread at most 0.03%)
+
+Machine archMachine (loaded). MAIN `2889fa06` (the base of the branch), NEW the branch before the rebase. Pages: the `compm_N` shape of the earlier rounds, regenerated for 40,000 and 43,000 in `/data/claude-tmp/cwpages/` (not in the repository). "refused" means exit 1 with `Limit(Host("computed-work"))`; its count is the load and the parse up to the refusal.
+
+| Page | MAIN M | NEW M | Peak RSS MiB MAIN / NEW |
+| --- | --- | --- | --- |
+| `compm_22000` | 400.1 | 391.2 (-2.2%) | 33.4 / 33.3 |
+| `compm_24000` | refused (421.7) | 429.9 | 31.3 / 33.0 |
+| `compm_30000` | refused (524.4) | 534.4 | 38.3 / 40.1 |
+| `compm_34000` | refused (591.5) | 602.7 | 42.8 / 44.2 |
+| `compm_40000` | refused (691.9) | 705.0 | 42.1 / 45.0 |
+| `compm_43000` | refused (742.2) | 756.2 | 48.3 / 50.9 |
+| `rest_13` | 1,042.5 | 1,042.5 | 46.2 / 46.1 |
+| read-all, document order | 1,511.6 | 1,509.8 (-0.1%) | 69.5 / 69.4 |
+| read-all, reverse order | 1,479.9 | 1,478.1 | 69.5 / 69.5 |
+| read-all, 22,000 `span` | 1,266.8 | 1,264.5 | 66.8 / 66.5 |
+
+The cost grows linearly from `compm_22000` to `compm_43000`: 391 M, 430 M, 534 M, 603 M, 705 M, 756 M (about 17.5 K instructions for each div). `compm_22000` is 2.2% cheaper because the tree walk of `styled_work` is gone.
+
+47 journeys (`tools/bench/journeys.sh compare --clock virtual --runs 3 --pss`, corpus `virtual-load`, `nextjs-docs` skipped): 47 pass on both, no replay miss, sum of medians 73,245.4 M (MAIN) against 73,243.4 M (-0.0%), no journey over +0.1%, spread at most 0.3%. cpu_ms -0.1%. PSS +0.1% by the sum of the medians (one run each, noise; `crates-io-home` +10.4% and `devto-home` +5.0% have no change in instructions). The journeys lay out first, so they keep a cascade and never reach the chain path.
+
+### Gates (after the rebase on main `294f1c01`, which has #554)
+
+- `cargo test --release --workspace --no-fail-fast`: 4,060 passed, 9 failed: the 7 openssl TLS tests, and `a_hidden_iframe_download_is_saved` and `a_changed_file_starts_again_from_zero` (the known flaky ones: the second passed alone, the first passed 1 of 4 alone, with "0 bytes" running).
+- Cost matrix against `294f1c01` (805 rows, 803 measured, glibc, jemalloc for rows over the limit): mean glibc +0.001%, 0 rows over +0.5% under one allocator, 0 under both. `parse_load deep 1` and `deep 10` fail to run (the known stack overflow).
+- test262: exit 0 (no regression; the "newly passing" lines are from a checkout that is newer than the baseline). `exec_diff.sh`: 79 runs, 0 differences. No file of `crates/js` changed.
+- `keycost.sh`: 278.3 M for each key (`#a1`), 283.6 M (`#f0`), load and mount 591.1 M, RSS 30.8 MiB at 50 keys; equal on main and branch.
+
+### Limits that this change makes unneeded, and the ones that stay
+
+- Unneeded: `computed-work` for a chain read, as `nodes x rules`. It is now `path length x rules`, which a page of any size does not reach. It is also no longer checked on a cache hit.
+- Stays: `computed-work` for a full compute and a restyle (a layout read, a page with a shadow root or motion, `getComputedStyle` with a value that needs a box). That path is still elements x candidates in one call that cannot be interrupted, and a page of rules that no index key holds (`*:not(.zN)`) is elements x rules. A bound by the real count of candidates needs a counter inside `RuleSet::compute` (`sources_capped` in `cascade.rs`). It is a change of the hot loop, so I did not do it here. With it, the full compute of `compm_34000` (3 G) would no longer be refused by the model.
+- Stays, and is now the limit that stops the ramp: `computed-nodes` (2^17 nodes). `compm_44000` and larger (more than 131,072 nodes) are refused by it. The chain makes one `u32` for each node (`of_node`), so its memory bound is 512 KiB at the limit; lifting it for the chain is a separate decision.
+
+### Not tested
+
+- Wall time on an idle machine. Journeys after the rebase on #554 (they were run on the branch before the rebase; the rebase brought array-buffer changes only, which the cost matrix and the workspace tests cover). Pages over 131,072 nodes. A deep path with a real page (the deep-path refusal is tested with 200 nested divs and a low limit).
+- A page where a layout read first needs the cascade after chain reads: the whole cascade is then refused above the limit, as before (tested with `offsetWidth`).
+
+### Noticed, not changed
+
+- A document change makes `plan()` walk the document for its sheets again (`stamp` includes the revision), so a loop that writes and reads one element is O(nodes) for each read. Not measured here.
+- `a_hidden_iframe_download_is_saved` fails 3 of 4 runs alone on this machine under load.
+- `base-build` with `--workspace --examples -p bare-stress` does not build the `bare-stress` binary; the matrix then fails every stress row. A second `base-build origin/main --release -p bare-stress` fixes it.

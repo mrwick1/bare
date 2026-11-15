@@ -2272,3 +2272,13 @@ Owner decision (2026-11-15): build exact-fit array element buffers (option D of 
 - Limit: a reservation is cut at 4096 elements (64 KiB). The reserve of a length that nothing has filled yet is not counted by the byte limits, so a big `new Array(n)`-like length must not reserve it.
 - Not chosen: shrinking after the fact (a second allocator call for each array); a one-element inline array (needs a new element representation); dropping fields of the 104 B record (see progress.md).
 - Not covered (size unknown when the array is made): `filter`, `JSON.parse` arrays, `Array.prototype.push` loops, `Object.keys`-style results.
+
+## The `computed-work` limit counts the path of a chain read, not the page (2026-11-15)
+
+Owner decision 2026-11-15: design the removal of the limit after design H.
+
+- The cap check moves behind the cache hit and the chain read. It stays in front of a restyle and a full compute.
+- A chain read is bounded by `path length x (rules + 1)`. The cheap test (nodes x (rules + 1)) runs first, so a page under the limit pays nothing and does not walk up. Only a page over it walks up from the element.
+- Not chosen: remove the limit for the chain read with no bound (a path of 100,000 nested elements and 250,000 rules is 2.5e10 candidates in one call that cannot be interrupted); count the real candidates inside `RuleSet::compute` and drop the model bound (the right fix for the full compute, but a change of the cascade hot loop, larger than the limit; left as the next step).
+- Stays: `computed-work` for the full compute and the restyle, and `computed-nodes`. `computed-nodes` now stops the ramp at 131,072 nodes (`compm_44000`).
+- Effect: `compm_24000` to `compm_43000` run and cost 17.5 K instructions for each div; `compm_22000` is 2.2% cheaper; `rest_13`, the read-all loops and the 47 journeys do not move.

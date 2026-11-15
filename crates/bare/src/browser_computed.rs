@@ -64,8 +64,8 @@
 //! `RuleSet::compute` cannot be interrupted: `computed-objects` (live objects), `computed-nodes` (document nodes at a read: the
 //! engine makes one `u32` per node and up to one style (about 700 bytes) per different style, so this bounds its memory), `computed-sources`
 //! (sheets, and bytes of `<style>` text, `href` and supplied parts that one read uses), `computed-rules` (selectors after the build:
-//! the build is bounded by the bytes), `computed-work` (nodes times rules, or if that is over `STYLED_FROM` the styled elements times rules: a loose upper
-//! bound, the real work is far smaller because rules are indexed; see `styled_work`), `computed-external` and `computed-external-bytes` (stored external sheets). Steps are charged before the
+//! the build is bounded by the bytes), `computed-work` (for the cascade of the whole document: nodes times rules, or if that is over `STYLED_FROM` the styled elements times rules: a loose upper
+//! bound, the real work is far smaller because rules are indexed; see `styled_work`. For a chain read of one element: the length of its path times rules), `computed-external` and `computed-external-bytes` (stored external sheets). Steps are charged before the
 //! build. A full compute charges one step per node before the work, then its tested candidates (`RuleSet::tested_candidates`). A restyle charges `STEPS_PER_RESTYLED_ELEMENT` for each element that it styles (`RuleSet::styled_elements`), and its tested candidates; a read that finds the last styles right charges 1. Names that the sheets add to the document table are bounded by the sheet bytes and checked against
 //! `max_names` after the build.
 //!
@@ -109,7 +109,8 @@ pub struct ComputedLimits {
     pub max_sheet_bytes: usize,
     /// Selectors of the built rule set. `computed-rules`.
     pub max_rules: usize,
-    /// Nodes times (selectors + 1), or the styled elements times (selectors + 1) when the first is over. `computed-work`.
+    /// Nodes times (selectors + 1), or the styled elements times (selectors + 1) when the first is over, for the cascade of the whole
+    /// document. The elements of the path from the root times (selectors + 1), for a chain read of one element. `computed-work`.
     pub max_work: u64,
     /// Supplied external sheets. `computed-external`.
     pub max_external: usize,
@@ -645,15 +646,6 @@ impl Dom {
             built.motion.set(None);
             built.read = None;
         }
-        // The bound of a full compute: nodes x (rules + 1), or styled elements x (rules + 1) when that is over `STYLED_FROM`. It is the cap
-        // check. The full compute charges nodes and tested candidates. A restyle charges the elements that it styles.
-        let mut work = (doc.len() as u64).saturating_mul(built.rules.len() as u64 + 1);
-        if work > STYLED_FROM {
-            work = self.styled_work(&doc, built.rules.len());
-        }
-        if work > l.max_work {
-            return Err(self.lim("computed-work"));
-        }
         // The cascade reads only the tree, the attributes, the text, the `set_ui` and `set_states` state (they move
         // `revision`), the hover, active and focus state (`UserState::revision`) and the custom element state (`set_custom_state`
         // moves `revision` too). `attach_shadow` adds a node, so the length moves.
@@ -678,6 +670,19 @@ impl Dom {
                 m
             })
         {
+            // The bound of this read: the path from the root to `el` (every element of it over every rule), not the page. The cheap bound
+            // (nodes) comes first, so a small page does not walk up.
+            if (doc.len() as u64).saturating_mul(built.rules.len() as u64 + 1) > l.max_work {
+                let (mut depth, mut up) = (1u64, el);
+                while let Some(p) = doc.parent(up) {
+                    depth += 1;
+                    up = p;
+                }
+                it.charge(depth / 8 + 1)?;
+                if depth.saturating_mul(built.rules.len() as u64 + 1) > l.max_work {
+                    return Err(self.lim("computed-work"));
+                }
+            }
             if built.chain.as_ref().is_some_and(|c| c.0 != key) {
                 built.chain = None;
             }
@@ -692,6 +697,15 @@ impl Dom {
                 self.computed.chains.set(self.computed.chains.get() + 1);
                 return Ok(styles);
             }
+        }
+        // The bound of the whole cascade (a full compute or a restyle): nodes x (rules + 1), or styled elements x (rules + 1) when that is over
+        // `STYLED_FROM`. It is the cap check. The full compute charges nodes and tested candidates. A restyle charges the elements that it styles.
+        let mut work = (doc.len() as u64).saturating_mul(built.rules.len() as u64 + 1);
+        if work > STYLED_FROM {
+            work = self.styled_work(&doc, built.rules.len());
+        }
+        if work > l.max_work {
+            return Err(self.lim("computed-work"));
         }
         // A read after changes: restyle the cascade of the last read only where the changes reach, as a window frame does.
         let read = want.is_none() && !keep;
