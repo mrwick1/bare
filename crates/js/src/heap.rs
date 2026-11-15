@@ -434,6 +434,8 @@ const _: () = assert!(std::mem::size_of::<Object>() <= 104);
 const ENTRY_BYTES: usize = std::mem::size_of::<Option<(PropertyKey, Property)>>();
 const SLOT_BYTES: usize = std::mem::size_of::<Value>();
 const ELEM_BYTES: usize = std::mem::size_of::<Option<Value>>();
+/// The most elements `new_array_cap` and `reserve_elems` reserve before the elements exist (64 KiB). A bigger result grows by the normal rule.
+const ELEMS_RESERVE_MAX: usize = 4096;
 /// Accounted cost of one hash-index entry (key + position + table overhead, estimate).
 const INDEX_ENTRY_BYTES: usize = 24;
 
@@ -1580,11 +1582,16 @@ impl Heap {
     // ----- objects -----
 
     fn alloc_object(&mut self, proto: Option<ObjId>, is_array: bool) -> R<ObjId> {
+        self.alloc_object_cap(proto, is_array, 0)
+    }
+
+    /// `alloc_object` with room for `cap` elements (at most `ELEMS_RESERVE_MAX`) in one exact allocation. The accounted bytes follow the length, so the room costs nothing in the limits.
+    fn alloc_object_cap(&mut self, proto: Option<ObjId>, is_array: bool, cap: usize) -> R<ObjId> {
         self.check_opt_obj(proto)?;
         if !self.objects.can_alloc() { return Err(HeapError::Limit(Limit::Objects)); }
         // An array starts with its `length` in slot 0: the array root shape names it.
         let (shape, n) = if is_array { (shape::ROOT_ARRAY, 1) } else { (shape::ROOT, 0) };
-        let o = Object { proto, shape, extensible: true, is_array, exotic: 0, lazy: 0, ic_chain: false, fast_on_use: false, elems: Vec::new(), repr: Repr::In([Value::Number(0.0), Value::Undefined, Value::Undefined]), n, dict: None };
+        let o = Object { proto, shape, extensible: true, is_array, exotic: 0, lazy: 0, ic_chain: false, fast_on_use: false, elems: Vec::with_capacity(cap.min(ELEMS_RESERVE_MAX)), repr: Repr::In([Value::Number(0.0), Value::Undefined, Value::Undefined]), n, dict: None };
         let cost = obj_bytes(&o);
         self.charge(cost)?;
         let (index, gn) = self.objects.alloc(o, Limit::Objects)?;
@@ -1609,6 +1616,24 @@ impl Heap {
     /// A new empty array with the exotic `length`.
     pub fn new_array(&mut self, proto: Option<ObjId>) -> R<ObjId> {
         self.alloc_object(proto, true)
+    }
+
+    /// A new empty array whose element buffer holds `n` elements at once: for a result whose length is known, so that no slack is made. A push past `n` grows it by the
+    /// normal rule of `Vec`. `n` above `ELEMS_RESERVE_MAX` is cut to it, because a length that nothing has filled yet is not memory the limits have counted.
+    pub fn new_array_cap(&mut self, proto: Option<ObjId>, n: usize) -> R<ObjId> {
+        self.alloc_object_cap(proto, true, n)
+    }
+
+    /// `new_object` with room for `n` index elements (see `new_array_cap`): the `arguments` object.
+    pub fn new_object_cap(&mut self, proto: Option<ObjId>, n: usize) -> R<ObjId> {
+        self.alloc_object_cap(proto, false, n)
+    }
+
+    /// Room for `n` more elements in one exact allocation (see `new_array_cap`), for a result whose size is found after it is made (`concat`).
+    pub fn reserve_elems(&mut self, o: ObjId, n: usize) -> R<()> {
+        self.obj(o)?;
+        self.edit(o, |ob| ob.elems.reserve_exact(n.min(ELEMS_RESERVE_MAX)));
+        Ok(())
     }
 
     /// A frozen array of `items`, with one more named property `extra` (not enumerable) when given: a template object (`GetTemplateObject`,

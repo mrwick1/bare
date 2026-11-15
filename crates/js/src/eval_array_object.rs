@@ -327,7 +327,8 @@ impl<'p> Interp<'p> {
         if len > u32::MAX as u64 {
             return Err(self.mk_err(RANGE_ERROR, "Invalid array length"));
         }
-        let a = h!(self, self.heap.new_array(Some(self.array_proto)));
+        // The callers (`slice`, `map`, `Array.from`, `splice`) fill the `len` elements, so the buffer is made for them at once.
+        let a = h!(self, self.heap.new_array_cap(Some(self.array_proto), len as usize));
         if len > 0 {
             hxw!(self, self.heap.set(a, self.k_length, Value::Number(len as f64)));
         }
@@ -545,6 +546,15 @@ impl<'p> Interp<'p> {
     fn ao_concat(&mut self, this: Value, args: &[Value]) -> Res<Value> {
         self.ao_this(this, "concat")?;
         let a = self.ao_species(this, 0)?;
+        // A guess of the result length for one exact buffer: an array counts its length, anything else one. Only a buffer size, never read for the result.
+        let mut hint = 0usize;
+        for item in std::iter::once(this).chain(args.iter().copied()) {
+            hint += match item {
+                Value::Object(o) => h!(self, self.heap.array_length(o)).map_or(1, |n| n as usize),
+                _ => 1,
+            };
+        }
+        h!(self, self.heap.reserve_elems(a, hint));
         let mut n = 0u64;
         for item in std::iter::once(this).chain(args.iter().copied()) {
             self.tick()?;
@@ -946,6 +956,9 @@ impl<'p> Interp<'p> {
         // from the map function or from creating the element closes the iterator.
         if let Some(mut it) = self.iter_open(items)? {
             let (a, custom) = self.ao_from_target(this, &[], 0)?;
+            if !custom && let Value::Object(o) = items && let Some(n) = h!(self, self.heap.array_length(o)) {
+                h!(self, self.heap.reserve_elems(a, n as usize));
+            }
             let mut k = 0u64;
             while let Some(v) = self.iter_next(&mut it)? {
                 if let Err(e) = self.ao_from_item(a, k, mapping.then_some(mapfn), this_arg, v) {

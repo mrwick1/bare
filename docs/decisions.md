@@ -2262,3 +2262,13 @@ Owner decision 2026-11-15: build design H. One PR for slices H1 to H3. H1 alone 
 - Not chosen: the winners memo and the selector arena (R2-E steps 2 and 3; a coin flip for criterion 3, and not needed after H); a cache of the last ancestor filter as a separate step (it is part of the chain: the filter stays open on the path of the last read).
 - Limits that this change makes unneeded for these reads: `computed-work` (nodes x rules) and `computed-nodes` still run before the chain, so `compm_24000` and larger are still refused. They bound the whole cascade, which a chain read does not make. Lifting them for chain reads is a separate decision.
 - Cost: a loop that reads the style of every element, in document order, costs 1.06 times the full cascade on `compm_22000` (the design said about 1.3).
+
+## Exact-fit element buffers, not GC in a call (2026-11-15)
+
+Owner decision (2026-11-15): build exact-fit array element buffers (option D of `design-gc-in-call.md`) and park the GC-in-call build (option A). The design of A stays in `docs/`.
+
+- Chosen: a result whose length is known when it is made gets a buffer of that length (`Heap::new_array_cap`, `new_object_cap`, `reserve_elems`). A push past that length grows the buffer by the normal `Vec` rule (doubling, minimum 4).
+- Why this form: V8 pre-sizes the `FixedArray` and then grows by `old + old/2 + 16` (`JSObject::NewElementsCapacity`). SpiderMonkey doubles small requests, but when the array length is known and the doubled capacity is 2/3 of it or more, it allocates exactly the length (`NativeObject::goodElementsAllocationAmount`). So both engines already fit the buffer to a known length and use a growth rule only after it. We keep our growth rule (the `Vec` rule) and only add the exact first allocation. This changes no data structure and no accounted byte.
+- Limit: a reservation is cut at 4096 elements (64 KiB). The reserve of a length that nothing has filled yet is not counted by the byte limits, so a big `new Array(n)`-like length must not reserve it.
+- Not chosen: shrinking after the fact (a second allocator call for each array); a one-element inline array (needs a new element representation); dropping fields of the 104 B record (see progress.md).
+- Not covered (size unknown when the array is made): `filter`, `JSON.parse` arrays, `Array.prototype.push` loops, `Object.keys`-style results.

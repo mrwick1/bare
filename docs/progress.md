@@ -11800,3 +11800,40 @@ Other gates, all against MAIN:
 - `compm_24000` and larger are refused by `computed-work` (nodes x rules) although a chain read does not do that work. Moving that check behind the chain would lift it. Owner decision.
 - `rest_1000` costs 47.1 G on MAIN (11.6 G on BASE, refused there by `computed-work`).
 - `nextjs-docs` does not replay; `parse_load deep 1/10` overflow the stack; the 7 openssl tests fail on MAIN (all as listed by the owner).
+
+## Exact-fit array element buffers (2026-11-15)
+
+Owner decision (2026-11-15): build exact-fit array element buffers (option D of `docs/design-gc-in-call.md`, PR #547) and park the GC-in-call build (option A); the design stays in `docs/`. Decision record: `docs/decisions.md`.
+
+### What was built
+
+- `crates/js/src/heap.rs`: `alloc_object_cap` (the old `alloc_object` calls it with 0), `Heap::new_array_cap`, `Heap::new_object_cap`, `Heap::reserve_elems`, and `ELEMS_RESERVE_MAX = 4096`. The accounted bytes follow `elems.len()`, so a reservation changes no limit and no `heap_bytes`.
+- Callers: `new_array_from_proto` (literals through `Array(...)`, `split`, rest parameters, `Array.of`-style helpers), `eval_array` (the literal list length, and a spread of an array adds its length), the `arguments` object, the regexp `exec` result, `ao_new_array(len)` (so `slice`, `map`, `Array.from` of an array-like and `splice` results), `concat` (a hint: the sum of the array lengths, 1 for the rest) and `Array.from` of an iterable array.
+- Not exact (the size is not known when the array is made): `filter`, `JSON.parse`, results that grow by `push`. They keep the normal growth.
+- Tests, written first (`crates/js/src/eval_exact_fit_tests.rs`): the capacity tests failed before (48,384 spare bytes for 1000 one-element arrays), the behaviour tests (length, holes, push after an exact-fit array, sort, splice, `length` set larger and smaller, big lengths) held before and after. `cargo test --release -p bare-js`: 979 pass.
+- The 117 B slab record: no field can go without a new layout. The 104 B `Object` has `proto`, `shape`, the flags (in padding), the `elems` header (24 B), `repr` (48 B for the three inline values, an array uses one), `n` and `dict`. The unused part of an array is two inline slots (32 B). Removing it is design 2a of `docs/design-js-memory.md` (a different array layout), not a small safe change. Not done.
+
+### Numbers (archMachine, shared; base = main `2889fa06`, new = this branch; 3 runs, medians)
+
+- Micro cases, 500,000 garbage objects, RSS per object (`wait4` peak minus the empty page, spread under 0.5%): 1-element literal 197.1 to 149.3 B (-24%); 3-element literal 197.1 to 181.3 B; `split` of one piece 197.3 to 149.6 B; `slice` 196.6 to 149.2 B; `[...a]` 197.1 to 149.5 B; `concat` 314.2 to 266.4 B; call with `arguments` 384.0 to 336.5 B; `map` of one element 384.0 to 336.3 B; ES5 `__spreadArray` helper 511.4 to 416.0 B (-19%). Files: the cases of `/data/bare-tmp/r2/gc-in-call/micro/` plus `map1`, `spread1`, `spread_es5`.
+- `craigslist-home` ES5 path: `virtual-load` (which now holds the modern bundle too) with both binaries built with `SharedWorker` hidden (a temporary one-line patch to `browser_worker.rs`, not committed; the binary of main also has it). 47,009.1 to 46,826.5 M instructions (-0.4%), peak RSS 749.6 to 624.9 MiB (-16.6%), PSS 746.7 to 620.0 MiB, spread 0.0%, 0 replay misses. (`virtual-settled` and `virtual-load.bak-pre-sw` with normal binaries do not take the ES5 path: 43 M and 3,750 M.)
+- 47 journeys (`journeys.sh compare --clock virtual --runs 3 --pss`, `virtual-load`): all pass, 0 misses. Instructions 73,245.5 to 73,179.0 M (-0.1%, max spread 0.4%). Peak RSS sum 1,796.9 to 1,781.2 MiB (-0.9%), PSS sum 1,508.6 to 1,374.2 MiB (-8.9%, one sampled run). Largest: `substack-home` 188.9 to 180.9 MiB (-4.2%), `rust-book-search` 127.5 to 124.2 (-2.6%), `wikipedia-search` 57.0 to 55.3 (-2.9%).
+- JS memory (`bare-stress` has no JS case; the load examples print peak RSS and live bytes): `arrobj_load`, `eval_load`, `builtins_load` at scale 10 and 100, 3 runs. Down: `arrobj_load flat 100` 113.7 to 98.4 MiB (-13.5%), `flat 10` -9.3%, `objects 100` -5.2%, `builtins_load scan 100` 139.9 to 130.7 (-6.6%). No row up by more than noise: the largest rises (`arrobj_load queue 100` +2.6%, `sort 10` +2.4%) have equal live bytes and are allocator wobble of 5 to 8 MiB runs.
+- `keycost` (`/data/bare-tmp/typing-page-lazy-arrow`): `#a1` 278.3 M for each key, `#f0` 283.6 M, RSS 30.8 MiB at 50 keys. Main: 278.4 M, 283.7 M, 30.8 MiB.
+
+### Gates
+
+- Cost matrix (`cost_matrix.sh`, base `2889fa06` built with `--workspace --examples` and `-p bare-stress`), 803 rows: mean glibc +0.017%, jemalloc -0.405% (on the 2 rows measured); **0 rows over +0.5% under both allocators**. Two rows are over under glibc only: `console_load patch 1` +1.0% and `patch 10` +1.45% (jemalloc -0.25%, -0.56%). Repeated alone: stable (161.25 M to 163.59 M glibc; jemalloc 167.03 M to 166.08 M). Callgrind: +2.55 M, of which about +2.5 M is in libc `malloc`/`free` internals, not in our code (hypothesis: the different small chunk size, 48 B for two elements against 80 B, takes a slower glibc path; not verified). The two `parse_load deep` rows overflow the stack on both trees (known).
+- `cargo test --release --workspace --no-fail-fast`: only the known failures: the 7 openssl TLS tests and `a_hidden_iframe_download_is_saved`. The last one fails alone (0.01 s) on main `2889fa06` too (`running: .../files/report.csv?id=1 (0 bytes)`), so it is not from this change.
+- `TEST262=/data/claude-tmp/test262 tools/js/test262_check.sh`: `gate: ok` (pass 29,731, fail 2,352, skip 755); the checkout is at `e4fbf577`, the commit of the subset file. `tools/js/exec_diff.sh`: 79 runs, 0 differences.
+- `cargo build --release -p bare-drive` builds. Note: `cargo build --workspace --examples -p bare-stress -p bare-drive` builds no binary (`--examples` selects only examples); build `-p bare-drive -p bare-stress` in a second call.
+
+### Not tested
+
+Wall time on an idle machine; Windows and macOS; the live `craigslist-home` page (replay only); the bytecode lane (`bc_vm` `NEW_ARRAY` is unchanged and unused by default; `exec_diff` equal); `filter`, `JSON.parse` and `push`-built arrays are not exact; the real size of the 4096 cut on a page that builds very large arrays; GC in a call (parked).
+
+### Noticed, not changed
+
+- Slab record of a plain array: 32 B of inline slots are unused (needs design 2a). Still 117 B plus the buffer per object.
+- `Ext::re_tab_bytes` is dead code (the build warns), as noted in an earlier section.
+- A `filter` result of one element still gets a 4-slot buffer (64 B); a trim on return is a possible follow-up.

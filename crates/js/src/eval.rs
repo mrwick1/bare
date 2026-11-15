@@ -2358,7 +2358,7 @@ impl<'p> Interp<'p> {
             }
         }
         if self.cc.scopes[fid.index()].uses_args && f.kind != FuncKind::Arrow {
-            let o = h!(self, self.heap.new_object(Some(self.object_proto)));
+            let o = h!(self, self.heap.new_object_cap(Some(self.object_proto), args.len()));
             for (i, &a) in args.iter().enumerate() {
                 self.def(o, PropertyKey::Index(i as u32), a, true, true, true)?;
             }
@@ -2429,7 +2429,7 @@ impl<'p> Interp<'p> {
     }
 
     fn new_array_from_proto(&mut self, items: &[Value], proto: ObjId) -> Res<Value> {
-        let a = h!(self, self.heap.new_array(Some(proto)));
+        let a = h!(self, self.heap.new_array_cap(Some(proto), items.len()));
         for (i, &v) in items.iter().enumerate() {
             self.def(a, PropertyKey::Index(i as u32), v, true, true, true)?;
         }
@@ -3106,13 +3106,17 @@ impl<'p> Interp<'p> {
     #[inline(never)]
     fn eval_array(&mut self, l: List<Expr>) -> Res<Value> {
         let prog = self.prog.clone();
-        let a = h!(self, self.heap.new_array(Some(self.array_proto)));
+        let a = h!(self, self.heap.new_array_cap(Some(self.array_proto), l.len()));
         let mut n: u32 = 0;
         for x in prog.list(l) {
             match prog.expr(x).kind {
                 ExprKind::Hole => n += 1,
                 ExprKind::Spread(inner) => {
                     let v = self.eval_expr(inner)?;
+                    // An array that is spread has a known length: one exact buffer, not a doubling (a no-op when the room is there).
+                    if let Value::Object(o) = v && let Some(more) = h!(self, self.heap.array_length(o)) {
+                        h!(self, self.heap.reserve_elems(a, more as usize));
+                    }
                     let mut it = self.iter_start(v, inner)?;
                     while let Some(item) = self.iter_next(&mut it)? {
                         self.def(a, PropertyKey::Index(n), item, true, true, true)?;
@@ -4152,3 +4156,7 @@ mod retable_tests;
 #[cfg(test)]
 #[path = "eval_inspect_tests.rs"]
 mod inspect_tests;
+
+#[cfg(test)]
+#[path = "eval_exact_fit_tests.rs"]
+mod exact_fit_tests;
