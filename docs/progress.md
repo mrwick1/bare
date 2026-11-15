@@ -12583,3 +12583,62 @@ An earlier build of the scan (3 passes) gave 30 M for the errors and -0.156 G (m
 - `export default () => 1` is made when the module is instantiated, as a declaration is (spec: when the statement runs). Main does the same: its check is `ExprKind::Function(_)`, as is the new flag (read from the code; no test run).
 - `keycost.sh` and every other script that builds with `cargo` use the current directory and `CARGO_TARGET_DIR`. Run from a worktree with `CARGO_TARGET_DIR` set to a `base-build` directory, it builds the worktree's source into the base. That happened once during this work (`examples/type_load` of `5b0b76b124` was replaced); it was restored from the original build output (`type_load-fe82c79384938f3a`). Run the script of the base from its own `src` directory.
 
+
+## Pause after the perf goal and the first Gmail work (2026-11-15)
+
+The owner asked for a stopping point on 2026-11-15. This section records the state. No new agent starts after it.
+
+### Perf goal
+
+All 8 criteria of `docs/perf-goal.md` are met. Round 2 final benchmark: PR #560 at frozen `294f1c01`. Criterion 5 failed there and was fixed by PR #562 (`sheety_16383` 216.5 MiB). PR #563 makes the driver `--timeout` stop a run in `Page::wait_load`.
+
+Round 2 PRs after #540, in merge order:
+
+| PR | Change | Main result |
+| --- | --- | --- |
+| #541 | Class atoms for selector classes only | `rest_13` 10.45 times; owner accepted +0.4% on `python-docs-search-results` |
+| #542 | The last document of a journey runs to `load`; corpus `virtual-load`; baseline `300b8c53` (local branch `bench-base-vclock`) | Criterion 2 86.1% on the new end point |
+| #543 | Free dead DOM trees (lazy), GC trigger on native bytes, cheaper collect walk | Criterion 6 met; owner exception for `select_load churn 1000` (+0.74%) |
+| #544 | craigslist-home profile (docs) | 97% of its cost is the ES5 path, taken because bare had no `SharedWorker` |
+| #545 | `compm_22000` design (docs) | Design H |
+| #546 | `SharedWorker` that fails to start, as `Worker` | craigslist-home 47,010 M to 2,646 M; a changed page input, not engine speed |
+| #547 | GC inside a long call (design, docs) | Parked by the owner |
+| #548 | Gmail against Chrome (docs) | First measure; the "8 times" was partly a measuring error (see #565) |
+| #551 | Design H: `getComputedStyle` styles the path to the element only | `compm_22000` 400 M (29.2 times) |
+| #554 | Exact-fit array element buffers | One-element array 197 B to 149 B; journeys PSS -8.9% |
+| #555 | `computed-work` no longer limits a chain read | `compm_43000` runs (756 M); the limit stays for a full compute and a restyle |
+| #560 | Final benchmark, round 2 (docs) | 7 of 8; criterion 5 fixed by #562 |
+| #562, #563 | Slice livelock fix; `wait_load` time limit | Criterion 5 met again |
+
+### Gmail work
+
+The owner set Gmail load time as the main task on 2026-11-15.
+
+| PR | Change | Gmail result |
+| --- | --- | --- |
+| #565 | Profile and design (docs) | First row bare 4.3–4.5 s, Chrome 1.2–1.5 s (about 3.4 times, not 8). No extra JS path in bare. |
+| #566 | Document request headers equal to Chrome's | First byte unchanged; the server wait is bimodal (about 0.5 s or 1.1 s) |
+| #567 | Stream the document body to the scan and the tree builder | No gain on Gmail; scripts still run after the whole document |
+| #569 | Stage 2 check (docs) | Big scripts come from `<link rel=preload>`; Stage 2 at most -0.46 s; owner chose not to build it |
+| #570 | Scan fetches `<link rel=preload as=script|style>` | End of document to first row 2.33 s to 2.21 s |
+| #571 | JS cost design (docs) | Ranked designs P1 to P6 in `docs/design-gmail-js.md` |
+| #572 | P2: IC position up to 65,535 (`Ic::depth` `u16`) | Page thread to first row 16.42 G to 15.68 G (-4.5%) |
+| #574 | P4: faster line marks for error positions; no `Paren` node | 15.51 G to 15.34 G (-1.1%); journeys -0.7% |
+
+### Open at the pause
+
+- P1 (parse scripts on a worker), branch `t3/worker-script-parsing`, is not merged. Before the rebase: Gmail page thread -1.2 to -1.5 G, first row about -0.1 s, whole-process instructions unchanged. 4 `builtins_load` rows (`replace`, `scan`) were +1.0% to +1.4%; hypothesis: a different inlining choice. The owner decided: rebase, measure again, and try to bring the rows back. An agent works on it at the time of this section. Its result goes in its own section.
+- P3 (cheaper call path) is next after P1. The owner decides on P6 (bytecode for hot functions) after P3.
+- Matrix method: a base built by `base-build` in another directory gave false differences of up to +4.7% (P1 agent). Build the base and the branch in the same layout.
+- `/data/bare-tmp/bin/` disappeared at about 16:52 on 2026-11-15 (cause not known). `heavy`, `base-build` and `README.txt` were restored from their first sources. The arjun-e16 copies were not reachable for a compare.
+
+### Noted, not started
+
+- Gmail in bare: the icon font does not paint, row columns are narrow, the right side panel stays on "Loading...".
+- About 1 M Gmail reads per first row hit the prototype chain and leave the inline IC test (hypothesis: a second inline test removes the cost).
+- One style pass per turn copies the sheet text in `plan` (about 9 ms per turn for a 16 MiB sheet).
+- Limits still in the code: `computed-work` (full compute and restyle), `computed-nodes` (131,072), `style-objects`, `computed-objects`, `computed-sources`, `cssom-rules`, `cssom-text`.
+- Each document change makes `plan()` walk the document again (a write-then-read loop is probably O(nodes) per read; not measured).
+- `fetch_load post 10` is +2.3% against `f6415364` (hypothesis: Fetch Metadata headers, PR #479).
+- GC inside a long call: design in `docs/design-gc-in-call.md`, parked.
+- `Ext::re_tab_bytes` is dead code outside tests.
