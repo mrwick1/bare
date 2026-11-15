@@ -2282,3 +2282,11 @@ Owner decision 2026-11-15: design the removal of the limit after design H.
 - Not chosen: remove the limit for the chain read with no bound (a path of 100,000 nested elements and 250,000 rules is 2.5e10 candidates in one call that cannot be interrupted); count the real candidates inside `RuleSet::compute` and drop the model bound (the right fix for the full compute, but a change of the cascade hot loop, larger than the limit; left as the next step).
 - Stays: `computed-work` for the full compute and the restyle, and `computed-nodes`. `computed-nodes` now stops the ramp at 131,072 nodes (`compm_44000`).
 - Effect: `compm_24000` to `compm_43000` run and cost 17.5 K instructions for each div; `compm_22000` is 2.2% cheaper; `rest_13`, the read-all loops and the 47 journeys do not move.
+
+## A live turn runs one task before its slice can end it (2026-11-15)
+
+Owner task 2026-11-15: the 16 MiB sheet ramp hung since PR #541 (cause: see progress.md, "Fix: a live turn runs one task before its slice can end it").
+
+- A turn ends at its slice only after it ran one task or one round (`Run::sliced`). Work that comes before the first task (a style pass) cannot use the whole slice and leave the turn with no progress.
+- Not chosen: a longer slice or a slice that grows when a turn makes no progress (it is a budget that hides the design flaw: a slower machine or a bigger sheet crosses it again); skipping the style pass of a turn when the page is unchanged (`still()`: not safe, a finished preload is not in its stamp); no text copy in `style_availability` (a gain of time for this page, but a turn that is late for another reason would still make no progress).
+- No limit added, none removed.

@@ -139,6 +139,8 @@ pub struct PageLimits {
     pub collect_every: usize,
     /// Kept diagnostics. More are counted, not kept.
     pub max_diagnostics: usize,
+    /// Live: the most work that one turn does before it gives the thread back (`SLICE`).
+    pub slice: Duration,
 }
 
 impl Default for PageLimits {
@@ -154,6 +156,7 @@ impl Default for PageLimits {
             max_pending_script_bytes: 8 << 20,
             collect_every: 32,
             max_diagnostics: 64,
+            slice: SLICE,
         }
     }
 }
@@ -825,7 +828,7 @@ impl Browser {
             dom: dom.clone(),
             // Live: the downloads that the scan of the document started while the session parsed it (`adopt_scan`).
             net: dom.scripts.net.borrow_mut().take().filter(|_| live).map_or_else(|| Net::new(cfg.client), |n| *n),
-            slice: live.then(|| bare_net::vclock::instant() + SLICE),
+            slice: live.then(|| bare_net::vclock::instant() + cfg.limits.slice),
             cursor: 0,
             https_only: page.scheme == bare_url::Scheme::Https,
             lim: cfg.limits,
@@ -904,7 +907,7 @@ impl Browser {
             b: self,
             dom: dom.clone(),
             net: net.map_or_else(|| Net::new(client), |n| *n),
-            slice: live.then(|| bare_net::vclock::instant() + SLICE),
+            slice: live.then(|| bare_net::vclock::instant() + limits.slice),
             cursor: p.cursor,
             https_only: page.scheme == bare_url::Scheme::Https,
             deadline: deadline_after(limits.max_time),
@@ -1563,9 +1566,10 @@ impl Run<'_> {
         first.is_some_and(|k| self.net.started.get(&k).is_some_and(|t| !t.done()))
     }
 
-    /// Live: the slice of the turn is used up.
+    /// Live: the slice of the turn is used up. A turn first runs one task or one round, whatever it spent before (a style pass of a large
+    /// sheet can take longer than the slice): else a turn that is always late makes no progress and the page never loads.
     fn sliced(&self) -> bool {
-        (self.loaded || self.split) && self.slice.is_some_and(|end| bare_net::vclock::instant() >= end)
+        (self.loaded || self.split) && self.slice.is_some_and(|end| bare_net::vclock::instant() >= end) && self.res.tasks + self.res.rounds > 0
     }
 
     /// Live, after `load` or in a split document: a turn waits for no download.
