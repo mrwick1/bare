@@ -12194,3 +12194,19 @@ In `wait_load`, a tick that ran also checks the limit (`vclock::instant() >= end
 ### Not tested
 
 The end-to-end case (driver `--timeout` on the livelocked page) after the fix: PR #562 removed the livelock, so no page that I have hangs any more; the test stands for it. The 47 journeys and the ramps (the added check runs once for each tick that ran; no instruction row moved in the matrix). Windows and macOS.
+
+## Gmail load: why bare is slower than Chrome (research, 2026-11-15)
+
+Task R2-G. Docs only. Design: [design-gmail-load.md](design-gmail-load.md). Main `b5efbde0`, archMachine (load 2.2 to 4.4 at the start of the bare runs). A temporary probe (a mark at the first `tr.zA` row, and a timer per script) was used and is not in the repository. Safety: read-only runs, bare's saved session, Chrome's `chrome-auto` profile with one new tab per run. No account detail is in the document. The raw recordings (network records, perf data, Chrome traces) are only under `/data/bare-tmp/gmail-profile/` and `/data/bare-tmp/r2/gmail-load/raw/` because they hold session data.
+
+Results.
+- The "8x" of #548 compares bare's `open` return (21.1 to 22.4 s) with Chrome's first row (1.2 s). At the same event, the first row, bare needs 4.28 to 4.52 s (3 runs) and Chrome 1.16 to 1.47 s (9 runs, cache on, cache off, and cold with the service worker bypassed; one cold run 2.20 s). That is about 3.4x. The 9 s of #548 came from `eval` running the page for about 8 s.
+- Instructions at the first row: bare 17.1 G (samples; 18.0 to 20.5 G by 0.5 s intervals), Chrome 12 to 19.6 G (whole cgroup). Whole start-up: bare 104.5 to 108.3 G, Chrome 52 to 57 G after 30 s. bare reaches Chrome's 47 G (6 s) at about 8 s.
+- bare is idle until the document ends (2.0 s). Its first byte is at 1.24 s; cold Chrome's is at 0.43 s, and Chrome starts the scripts then. bare starts them at 2.03 s. After the document bare needs 2.5 s and 17 G to the first row; Chrome's main thread is busy 1.42 s (JS self 0.80 s, compile 0.33 s).
+- Same code: at the first row bare has 3.02 M calls and Chrome 4.06 M (0.74); the top functions are within 0.72x to 0.96x. Without `navigator.serviceWorker` bare gets a 325 KB document, Chrome cold 447 KB.
+- Subsystems, whole run (107.4 G): JS interpreter 78.9%, bindings 4.6%, JS parse 4.5% (13.5% to the first row), allocator 4.0%, style 3.0%, GC 1.6%, layout 1.2%. Network, TLS and decompression are 0.7% after the document. The interpreter costs 389 instructions per step and 5.7 K per call (44.0 M steps, 3.02 M calls to the first row). 83% of the steps are in `m=b`, 14% in `m=ebdd,…`. Top-level scripts run in 0.6 s in total.
+- Settle: not a rule problem. The start-up work ends at about 19 s in bare and at 14 to 22 s in Chrome (96% of Chrome's calls by 13.6 s).
+
+Recommendation (ranked): B1 make the document request equal to Chrome's (first byte 1.24 s against 0.43 s; hypothesis), A1 stream the document and start its scripts at the first bytes (first row 4.4 s to about 2.5 to 3 s; hypothesis), C1 slim the call path (-4% instructions), C2 and C3 parse and code cache, C4 bytecode (stopped by the owner).
+
+Not tested: Chrome's renderer instructions alone; bare's call count at the end of `open`; the effect of Chrome's headers or a service-worker stub on bare; a quiet machine (wall times are an upper bound); mail open, search, compose.
