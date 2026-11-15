@@ -24,19 +24,24 @@ pub(crate) struct Scan {
     deadline: Instant,
     /// Open `template`, `svg` and `math` elements. Nothing in them is loaded.
     skip: usize,
+    /// Do not read again before `html` is this long (see `step`).
+    retry_at: usize,
 }
 
 impl Scan {
     pub(crate) fn new(client: Client, page: Url, lim: Limits, deadline: Instant) -> Scan {
-        Scan { net: Net::new(client), mark: Mark::default(), done: false, page, base: None, lim, deadline, skip: 0 }
+        Scan { net: Net::new(client), mark: Mark::default(), done: false, page, base: None, lim, deadline, skip: 0, retry_at: 0 }
     }
 
-    /// Read `html` from where the last call stopped, until `end`.
-    pub(crate) fn step(&mut self, html: &str, end: Instant) {
-        if self.done {
+    /// Read `html` from where the last call stopped, until `end`. `more`: the document is still on its way, so `html` may stop in the
+    /// middle of a tag, and the scan is not done when it has read it all.
+    pub(crate) fn step(&mut self, html: &str, end: Instant, more: bool) {
+        // A token that is cut and very long (an inline script of 1 MB) would be read again for each piece: wait until its text has grown
+        // by its own size, as `tree::Parser` does.
+        if self.done || (more && html.len() < self.retry_at) {
             return;
         }
-        let mut tokens = Tokens::new(html, self.mark, false);
+        let mut tokens = Tokens::new(html, self.mark, more);
         let mut n = 0u32;
         while let Some(t) = tokens.next() {
             match t {
@@ -50,7 +55,9 @@ impl Scan {
                 return;
             }
         }
-        self.done = true;
+        self.mark = tokens.mark();
+        self.done = !more;
+        self.retry_at = html.len() + (html.len() - self.mark.done());
     }
 
     fn start(&mut self, name: &str, attrs: &[bare_html::tokenizer::Attr<'_>], self_closing: bool) {
