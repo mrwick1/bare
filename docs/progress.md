@@ -11837,3 +11837,30 @@ Wall time on an idle machine; Windows and macOS; the live `craigslist-home` page
 - Slab record of a plain array: 32 B of inline slots are unused (needs design 2a). Still 117 B plus the buffer per object.
 - `Ext::re_tab_bytes` is dead code (the build warns), as noted in an earlier section.
 - A `filter` result of one element still gets a 4-slot buffer (64 B); a trim on return is a possible follow-up.
+## 2026-11-15: the `computed-work` limit counts the path of a chain read, not the page
+
+### Owner decision (2026-11-15)
+
+Design the removal of the `computed-work` limit, now that a `getComputedStyle` read that needs no layout styles only the root-to-element path (design H, #551).
+
+### Plan (written before the code)
+
+Where it is counted: `cascade_inner` (`browser_computed.rs`) computed `nodes x (rules + 1)` (or `styled elements x (rules + 1)` over `STYLED_FROM`, one tree walk for each document revision) before everything else, and refused over `max_work` (2^30). It ran before the cache hit, the chain and the restyle.
+
+What it protects: one native operation that cannot be interrupted. `RuleSet::compute` and `RuleSet::restyle` run to the end, and the steps are charged for the candidates they tested after the work.
+
+Path by path (N nodes, E elements, R rules, d depth of the element, c candidates that the rule index gives for an element):
+
+| Path | Work now | Needs the limit? |
+| --- | --- | --- |
+| Cache hit (`built.last` is current) | O(1), charges 1 | No. It ran the cap check first; that was wasted. |
+| Chain read (`style_chain`) | O(d x c) for a new path; O(c) for the next element in document order (the filter stays open); worst case d x R | Only as d x (R + 1). The page size N does not matter. |
+| Restyle of a kept cascade | O(elements that the marks reach x c) | Yes, as before (a restyle cannot be interrupted). |
+| Full compute: a layout read, `keep`, `want`, a page with shadow roots, motion, an element with a motion style | O(E x c), worst case E x R (rules that no index key holds) | Yes, as before. |
+| Read-all loop | one chain read for each element: O(E x c) in all, plus O(d) filter work for each | Steps bound it. No limit needed per read. |
+
+Change:
+1. The cap check moves behind the cache hit and the chain, so a hit and a chain read no longer pay for it (and no longer walk the tree for `styled_work` after each change).
+2. A chain read has its own bound: the number of elements on the path times (rules + 1), against `max_work`. The cheap test (nodes x (rules + 1)) comes first, so a page that is under the limit pays nothing and does not walk up. Only over it, the read walks up from the element (charged `d / 8 + 1` steps) and compares `d x (rules + 1)`.
+3. The full compute and the restyle keep the old bound. They are still E x c work in one uninterruptible call. A cap by real work needs a candidate count inside `RuleSet::compute` (`sources_capped` in `cascade.rs`); that is a change of the hot cascade loop, larger than this limit, so it is not part of this PR.
+4. `computed-nodes` (2^17 nodes, one `u32` for each node in the chain's `of_node` table) stays. `compm_43000` (129,000 nodes) is the largest page of the ramp that it lets through.

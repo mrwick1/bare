@@ -3,8 +3,9 @@
 //! keeps the cascade of the whole page and answers from it.
 
 use crate::browser::*;
+use crate::browser_computed::ComputedLimits;
 use bare_html::tree;
-use bare_js::eval::{Error, EvalLimits};
+use bare_js::eval::{Error, EvalLimits, LimitKind};
 use bare_js::heap::HeapLimits;
 use bare_js::value::Value;
 
@@ -280,4 +281,67 @@ fn a_page_with_motion_reads_by_the_whole_cascade() {
     let (mut lazy, mut full) = (at(page), at(page));
     js(&mut full, "getComputedStyle(document.body).width; 0");
     assert_eq!(js(&mut lazy, src), js(&mut full, src));
+}
+
+fn lim(name: &'static str) -> String {
+    format!("error:{:?}", Error::Limit(LimitKind::Host(name)))
+}
+
+/// A page of `n` divs that hold a span each, and `rules` class rules (the shape of `compm_N`).
+fn wide(n: usize, rules: usize) -> String {
+    let css: String = (0..rules).map(|i| format!(".c{i}{{color:#{:03x}}}", i % 4096)).collect();
+    let body: String = (0..n).map(|i| format!("<div class='c{} c{}'><span>x</span></div>", i % rules, (i * 7) % rules)).collect();
+    format!("<!doctype html><style>{css}</style><body>{body}</body>")
+}
+
+fn big<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    std::thread::Builder::new().stack_size(64 << 20).spawn(f).unwrap().join().unwrap()
+}
+
+#[test]
+fn a_chain_read_runs_over_the_default_work_limit_and_reads_the_right_value() {
+    // nodes x rules is over 1 << 30 (3 nodes for each div; 43,000 divs are 129,000 nodes, just under `computed-nodes`): the chain styles a path of
+    // 4 elements, not the page.
+    big(|| {
+        for (n, rules) in [(24_000, 24_000), (40_000, 40_000), (43_000, 30_000)] {
+            let mut b = at(&wide(n, rules));
+            let r = js(&mut b, "var d = document.body.children; var a = getComputedStyle(d[0]).color, z = getComputedStyle(d[d.length - 1].firstChild).color, m = getComputedStyle(d[d.length >> 1]).color; a + '|' + z + '|' + m");
+            assert!(!r.starts_with("error"), "{n} x {rules}: {r}");
+            let s = b.computed_stats();
+            assert_eq!((s.computes, s.chains), (0, 3), "{n} x {rules}");
+        }
+    });
+}
+
+#[test]
+fn the_work_limit_of_a_chain_read_counts_the_path() {
+    // 1,000 rules and a path of about 200 elements: 200 x 1,001 is over the limit, a short path under it. The page is 300 nodes x 1,001.
+    let css: String = (0..1000).map(|i| format!(".c{i}{{color:red}}")).collect();
+    let page = format!("<!doctype html><style>{css}</style><body>{}<i id=near>x</i>{}</body>", "<div>".repeat(200), "</div>".repeat(200));
+    let mut b = at(&page);
+    b.set_computed_limits(ComputedLimits { max_work: 100 * 1001, ..Default::default() });
+    assert_eq!(js(&mut b, "getComputedStyle(document.body).display"), "block");
+    assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('near')).display"), lim("computed-work"));
+    assert_eq!((b.computed_stats().computes, b.computed_stats().chains), (0, 1), "the refused read styled nothing");
+}
+
+#[test]
+fn a_layout_read_loop_and_a_read_all_loop_stay_bounded() {
+    big(|| {
+        let page = wide(3000, 1500);
+        // A layout read styles the whole page: the limit (nodes x rules, 9,000 x 1,500) still stops it.
+        let mut b = at(&page);
+        b.set_computed_limits(ComputedLimits { max_work: 1 << 20, ..Default::default() });
+        assert_eq!(js(&mut b, "document.body.children[5].offsetWidth"), lim("computed-work"));
+        assert_eq!(b.computed_stats().computes, 0);
+        // A read of every element has no whole-page work: each read is a chain read. The step budget bounds the loop, as for any script.
+        let mut b = at(&page);
+        b.set_computed_limits(ComputedLimits { max_work: 1 << 20, ..Default::default() });
+        let all = "var a = document.getElementsByTagName('*'), r = 0; for (var i = 0; i < a.length; i++) r += getComputedStyle(a[i]).color.length; r";
+        assert!(js(&mut b, all).parse::<u64>().is_ok());
+        assert_eq!(b.computed_stats().computes, 0);
+        let mut b = Browser::new(tree::parse(&page), BrowserLimits::default(), EvalLimits { max_steps: 100_000, ..Default::default() }, HeapLimits::default()).expect("browser");
+        b.set_computed_limits(ComputedLimits { max_work: 1 << 20, ..Default::default() });
+        assert_eq!(js(&mut b, all), "error:Limit(Steps)");
+    });
 }

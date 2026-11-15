@@ -783,10 +783,11 @@ fn work_bound_counts_styled_elements_not_text_nodes() {
         let page = format!("<style>{css}</style><body>{}</body>", "<i>x</i>".repeat(50_000));
         let mut b = Browser::new(tree::parse(&page), BrowserLimits::default(), EvalLimits::default(), HeapLimits::default()).expect("browser");
         assert_eq!(js(&mut b, "getComputedStyle(document.querySelector('i')).display"), "inline");
-        // The cap still stops a page whose styled elements times rules are over it.
+        // The cap still stops a read of the whole page (a layout read) whose styled elements times rules are over it. A read of one element
+        // styles only its path, so it is not stopped (`browser_computed_chain_tests`).
         b.set_computed_limits(ComputedLimits { max_work: 50_000 * 1000, ..Default::default() });
         js(&mut b, "document.body.className = 'z'; 0");
-        assert_eq!(js(&mut b, "getComputedStyle(document.querySelector('i')).display"), lim("computed-work"));
+        assert_eq!(js(&mut b, "document.querySelector('i').offsetWidth"), lim("computed-work"));
     });
 }
 
