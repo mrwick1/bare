@@ -823,11 +823,13 @@ impl Browser {
         bare_net::trace::page_start();
         let deadline = deadline_after(cfg.limits.max_time);
         let live = self.live();
+        let net = dom.scripts.net.borrow_mut().take().filter(|_| live).map_or_else(|| Net::new(cfg.client), |n| *n);
+        net.ahead.attach();
         let mut run = Run {
             b: self,
             dom: dom.clone(),
             // Live: the downloads that the scan of the document started while the session parsed it (`adopt_scan`).
-            net: dom.scripts.net.borrow_mut().take().filter(|_| live).map_or_else(|| Net::new(cfg.client), |n| *n),
+            net,
             slice: live.then(|| bare_net::vclock::instant() + cfg.limits.slice),
             cursor: 0,
             https_only: page.scheme == bare_url::Scheme::Https,
@@ -903,10 +905,12 @@ impl Browser {
             step: 0,
             waiting: false,
         });
+        let net = net.map_or_else(|| Net::new(client), |n| *n);
+        net.ahead.attach();
         let mut run = Run {
             b: self,
             dom: dom.clone(),
-            net: net.map_or_else(|| Net::new(client), |n| *n),
+            net,
             slice: live.then(|| bare_net::vclock::instant() + limits.slice),
             cursor: p.cursor,
             https_only: page.scheme == bare_url::Scheme::Https,
@@ -1066,6 +1070,9 @@ struct Net {
     /// The keys in `started` that only a `<link rel=preload>` of the document asked for (`scan.rs`). They hold the page for nothing until
     /// an element takes the file: a hint that no element uses must not delay `load` or the settle.
     hints: HashSet<String>,
+    /// The worker that parses the text of a classic script when its download ends (`bare_js::parse_ahead`). The page thread finds the tree
+    /// ready when the script runs. It ends with the page: dropping the `Net` drops the parses that wait.
+    ahead: bare_js::parse_ahead::Ahead,
 }
 
 /// Downloads that are started and not taken at once. The workers run `MAX_WORKERS` of them at a time (Chrome opens 6 connections for
@@ -1075,7 +1082,7 @@ const WINDOW: usize = 32;
 
 impl Net {
     fn new(client: Client) -> Net {
-        Net { client, started: HashMap::new(), direct: HashSet::default(), done: Arc::default(), waits: Vec::new(), born: HashMap::new(), hints: HashSet::new() }
+        Net { client, started: HashMap::new(), direct: HashSet::default(), done: Arc::default(), waits: Vec::new(), born: HashMap::new(), hints: HashSet::new(), ahead: bare_js::parse_ahead::Ahead::new() }
     }
 
     fn tag(expect: Expect, url: &Url) -> u64 {
@@ -1095,18 +1102,29 @@ impl Net {
 
     /// Start the download of `url` on a worker thread. Nothing happens when `WINDOW` downloads wait, or this one runs already.
     fn start(&mut self, expect: Expect, url: &Url, lim: &Limits, deadline: Instant, retained: usize) {
+        self.start_with(expect, url, lim, deadline, retained, false);
+    }
+
+    /// `start`. `classic`: the text is a classic script that the document names (a `<script src>` or a preload hint). It will run before `load`,
+    /// so the worker parses it when it arrives, if it is long enough (`parse_ahead`). A script that page code adds later may never run: its
+    /// text is not parsed ahead (an unused parse costs instructions).
+    fn start_with(&mut self, expect: Expect, url: &Url, lim: &Limits, deadline: Instant, retained: usize, classic: bool) {
         let key = Net::key(expect, url);
         if self.started.len() >= WINDOW || self.started.contains_key(&key) {
             return;
         }
         let url = Url { scheme: url.scheme, host: url.host.clone(), port: url.port, path: url.path.clone() };
         let (target, lim, done) = (resources::Target { expect, url }, lim.clone(), self.done.clone());
+        let ahead = classic.then(|| self.ahead.sender());
         self.born.insert(key.clone(), Instant::now());
         self.started.insert(key, self.client.spawn(move |client| {
             if done.load(Ordering::Relaxed) >= lim.max_total_bytes {
                 return None;
             }
             let r = resources::fetch(client, &target, &lim, deadline, retained);
+            if let (Ok(r), Some(ahead)) = (&r, &ahead) {
+                ahead.submit(bare_js::parse_cache::Kind::ClassicLazy, &r.text);
+            }
             if let Ok(r) = &r {
                 // Saturating: `usize::MAX` marks a page that is done (`Drop`).
                 let _ = done.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |d| Some(d.saturating_add(r.text.len())));
@@ -1559,7 +1577,7 @@ impl Run<'_> {
             for e in ext.iter().take(WINDOW) {
                 if let Ext::Fetch(_, u) = e && room > 0 && !pre.has_script(u) && !(self.https_only && u.scheme == bare_url::Scheme::Http) {
                     room -= 1;
-                    self.net.start(Expect::Script, u, &self.lim.resources, self.deadline, kept);
+                    self.net.start_with(Expect::Script, u, &self.lim.resources, self.deadline, kept, false);
                 }
             }
             match ext.front() {
@@ -1687,11 +1705,13 @@ impl Run<'_> {
         let room = WINDOW.saturating_sub(self.net.started.len()).min(lim.max_fetches.saturating_sub(self.res.fetches + self.net.started.len()));
         let allowed = |https_only: bool, u: &Url| !(https_only && u.scheme == bare_url::Scheme::Http);
         let mut cursor = self.cursor;
-        let mut todo: Vec<(Expect, &Url)> = Vec::new();
+        let mut todo: Vec<(Expect, &Url, bool)> = Vec::new();
         while cursor < self.disc.targets.len() && todo.len() < room {
             let t = &self.disc.targets[cursor];
             if allowed(self.https_only, &t.url) && !self.net.direct.contains(&Net::tag(t.expect, &t.url)) {
-                todo.push((t.expect, &t.url));
+                // Only a target that no module element names is a classic script (`parse_ahead` parses classic text).
+                let classic = t.expect == Expect::Script && !self.items.iter().any(|p| p.module && matches!(p.source, Source::External(i) if i == cursor));
+                todo.push((t.expect, &t.url, classic));
             }
             cursor += 1;
         }
@@ -1699,7 +1719,7 @@ impl Run<'_> {
         let external = self.dom.scripts.external.borrow();
         for e in external.iter().take(WINDOW) {
             if let Ext::Fetch(_, u) = e && todo.len() < room && allowed(self.https_only, u) && !preloads.has_script(u) {
-                todo.push((Expect::Script, u));
+                todo.push((Expect::Script, u, false));
             }
         }
         if !self.split && todo.len() + self.net.started.len() < 2 {
@@ -1707,12 +1727,12 @@ impl Run<'_> {
         }
         self.cursor = cursor;
         let kept = self.kept();
-        for (expect, url) in todo {
+        for (expect, url, classic) in todo {
             let mut lim = lim.clone();
             if expect == Expect::Style {
                 lim.max_resource_bytes = lim.max_resource_bytes.min(sheets::MAX_BODY);
             }
-            self.net.start(expect, url, &lim, self.deadline, kept);
+            self.net.start_with(expect, url, &lim, self.deadline, kept, classic);
         }
     }
 

@@ -91,12 +91,31 @@ struct Cache {
     realms: u64,
 }
 
+/// The keys that a cache of some thread holds. A download thread asks it before it hands a text to the parse worker (`parse_ahead`):
+/// a text that the cache has is never parsed again. A thread that clears or drops its entries removes its keys. Several threads that hold
+/// one key may remove it early: then a text is parsed ahead for nothing, never the other way.
+static KNOWN: std::sync::Mutex<Vec<(u64, Kind)>> = std::sync::Mutex::new(Vec::new());
+
+/// Does a cache hold this text? (`hash` of its bytes.)
+pub(crate) fn known(key: (u64, Kind)) -> bool {
+    KNOWN.lock().unwrap().contains(&key)
+}
+
+fn forget(keys: impl IntoIterator<Item = (u64, Kind)>) {
+    let mut k = KNOWN.lock().unwrap();
+    for key in keys {
+        if let Some(i) = k.iter().position(|x| *x == key) {
+            k.swap_remove(i);
+        }
+    }
+}
+
 thread_local! {
     static CACHE: RefCell<Cache> = RefCell::default();
 }
 
 /// Multiply hash of 8 bytes at a time, and the length.
-fn hash(b: &[u8]) -> u64 {
+pub(crate) fn hash(b: &[u8]) -> u64 {
     const K: u64 = 0x517c_c1b7_2722_0a95;
     let mut h = b.len() as u64;
     let mut c = b.chunks_exact(8);
@@ -112,16 +131,21 @@ fn nodes_err(at: u32) -> Error {
     Error { kind: ErrorKind::Limit(LimitKind::Nodes), msg: "too many syntax tree nodes", start: at, end: at }
 }
 
+/// The parse of `source` as `kind` with a tree that borrows it, and the count of nodes made.
+pub(crate) fn parse_raw(kind: Kind, source: &str, limits: Limits) -> (Result<Program<'_>, Error>, u32) {
+    match (kind.is_module(), kind.is_lazy() && source.len() >= LAZY_MIN_SOURCE) {
+        (true, false) => parse_module_used(source, limits),
+        (false, false) => parse_script_used(source, limits),
+        (true, true) => crate::parse::parse_module_lazy_used(source, limits),
+        (false, true) => crate::parse::parse_script_lazy_used(source, limits),
+    }
+}
+
 /// The result of `parse_script(source, limits)` with an owned tree, from the cache when it has one.
 /// `source.len() <= limits.max_source` must be checked first (the realm does it).
 pub fn parse(kind: Kind, source: &str, limits: Limits) -> Result<Rc<Program<'static>>, Error> {
     let fresh = |limits| {
-        let (r, used) = match (kind.is_module(), kind.is_lazy() && source.len() >= LAZY_MIN_SOURCE) {
-            (true, false) => parse_module_used(source, limits),
-            (false, false) => parse_script_used(source, limits),
-            (true, true) => crate::parse::parse_module_lazy_used(source, limits),
-            (false, true) => crate::parse::parse_script_lazy_used(source, limits),
-        };
+        let (r, used) = parse_raw(kind, source, limits);
         (r.map(|p| Rc::new(p.into_owned())), used)
     };
     let plain = Limits { max_source: limits.max_source, max_nodes: limits.max_nodes, ..Limits::default() };
@@ -150,7 +174,20 @@ pub fn parse(kind: Kind, source: &str, limits: Limits) -> Result<Rc<Program<'sta
     if let Some(r) = hit {
         return r;
     }
-    let (r, used) = fresh(limits);
+    // A worker may have parsed it already (`parse_ahead`). It parsed with the default room: its result is the one of this realm
+    // when the room holds the nodes, and for a `Limit(Nodes)` when the room is not more than the worker's.
+    let nodes_limit = |r: &Result<Rc<Program<'static>>, Error>| matches!(r, Err(e) if e.kind == ErrorKind::Limit(LimitKind::Nodes));
+    let ahead = crate::parse_ahead::take(kind, key.0, source).filter(|(r, used)| if nodes_limit(r) { limits.max_nodes <= Limits::default().max_nodes } else { limits.max_nodes >= *used });
+    let (r, used, room) = match ahead {
+        Some((r, used)) => {
+            let room = if nodes_limit(&r) { Limits::default().max_nodes } else { limits.max_nodes };
+            (r, used, room)
+        }
+        None => {
+            let (r, used) = fresh(limits);
+            (r, used, limits.max_nodes)
+        }
+    };
     let (res, bytes) = match &r {
         Ok(p) => (Res::Ok(p.clone()), p.source.len() + p.stats().bytes),
         Err(e) => (Res::Err(*e, source.into()), source.len()),
@@ -162,14 +199,17 @@ pub fn parse(kind: Kind, source: &str, limits: Limits) -> Result<Rc<Program<'sta
         }
         if let Some(old) = c.map.remove(&key) {
             c.counts.bytes -= old.bytes;
+            forget([key]);
         }
         while c.counts.bytes + bytes > MAX_BYTES {
             let Some(k) = c.order.pop_front() else { break };
             if let Some(old) = c.map.remove(&k) {
                 c.counts.bytes -= old.bytes;
+                forget([k]);
             }
         }
-        c.map.insert(key, Entry { res, used, room: limits.max_nodes, bytes, last: c.realms });
+        KNOWN.lock().unwrap().push(key);
+        c.map.insert(key, Entry { res, used, room, bytes, last: c.realms });
         c.order.push_back(key);
         c.counts.bytes += bytes;
         c.counts.entries = c.map.len();
@@ -188,13 +228,16 @@ pub fn new_realm() {
         c.realms += 1;
         let before = c.map.len();
         let (realms, mut freed) = (c.realms, 0);
-        c.map.retain(|_, e| {
+        let mut gone = Vec::new();
+        c.map.retain(|k, e| {
             let keep = realms - e.last <= MAX_IDLE;
             if !keep {
                 freed += e.bytes;
+                gone.push(*k);
             }
             keep
         });
+        forget(gone);
         if c.map.len() != before {
             c.counts.bytes -= freed;
             c.order.retain(|k| c.map.contains_key(k));
@@ -204,6 +247,7 @@ pub fn new_realm() {
 
 /// Drop every entry of this thread and reset the counts.
 pub fn clear() {
+    CACHE.with_borrow_mut(|c| forget(std::mem::take(&mut c.map).into_keys()));
     CACHE.with_borrow_mut(|c| *c = Cache::default());
 }
 

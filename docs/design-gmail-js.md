@@ -249,31 +249,33 @@ All numbers are for the first row of Gmail unless marked. "Hypothesis" means not
 
 ### P1. Parse a script on arrival, on a worker thread
 
-**Problem.** The page thread parses the top level of 29 scripts for 1.4 to 1.5 G (about 8% of the thread) after the document ends. During the body download it waits (the window is 0.46 s, 0.37 to 0.57 in 7 runs, from #569).
+Built 2026-11-15 on main `ca67571d` (after the preload rule #570). Code: `crates/js/src/parse_ahead.rs`, the hook in `parse_cache::parse`, `Net::start_with` in `browser_loader.rs`.
 
-**Data structures.** A persistent parse worker (one thread, started on the first script). A channel of `(script id, source)` jobs. A result slot per script id: `Mutex<Option<ParsedProgram>>` plus a condvar. `ParsedProgram` is a `Program` moved whole to the page thread.
+**Problem.** The page thread parses the top level of 29 scripts for 1.4 to 1.5 G (about 8% of the thread). Before the preload rule it waited 0.46 s for the bodies. After #570 the bodies arrive earlier.
+
+**Re-check of the idle window on main `ca67571d`** (5 runs of the #570 branch, trace of `BARE_NET_TRACE`). The three big scripts (1.46, 1.41 and 2.03 MB of source) are complete 0.61 to 0.67 s after their request, which is at the first piece of the document. The page thread runs the first one at the end of the document: 0.62 to 0.75 s later (5 runs: 0.63, 0.69, 0.62, 0.65, 0.61 s; the document end is at 1.26 to 2.00 s). The window is larger than the 0.46 s of #569, not smaller. The fourth big script (`m=ebdd`, 2.2 MB) is requested at the end of the document and has no window. About 4.9 of about 7 MB of source have the window.
+
+**Data structures.** One `Ahead` for each page, owned by `Net` (made in `Net::new`, also for the scan before the page exists). One worker thread, started on the first job, ends after 2 s with no job. A registry `HashMap<(hash, Kind), Arc<Slot>>` and a queue. A slot is `Mutex<St>` and a `Condvar`. `St` is `Queued(Rc<str>)`, `Running`, `Done(result)`, `Gone`.
 
 **Algorithm.**
-1. The loader gives the worker each script source as soon as the bytes are complete (external scripts) or the scan has the inline script text.
-2. The worker runs the same `parse_top` the page thread runs now. It stores the result.
-3. At `exec_script` the page thread asks the slot. If the result is there, it takes it. If the worker is still busy with this script, the page thread waits on the condvar (it never parses the same script twice). If the script has no job, the page thread parses as now.
-4. `lazy_load` (1.094 G) stays on the page thread in this design. A worker cannot know which functions will run.
+1. The download thread has the text of a classic script (`Net::start_with(.., classic = true)`: scan scripts and `as=script` preload hints, targets that no module element names, dynamic scripts that are not modules). If the text has 16 KB or more (`MIN_AHEAD` = `LAZY_MIN_SOURCE`), it hashes it with the hash of the parse cache, makes the one `Rc<str>` copy that the tree keeps, registers the slot and queues it.
+2. The worker pops a slot. `Queued` becomes `Running`. It runs `parse_raw` (the code of `parse_cache`: same parser, same lazy rule, `Limits::default()`) over the `Rc<str>` and swaps the borrow for the owner (`with_shared_source`). It stores the result (`Ok(Rc<Program>)` or `Err`) and the node count, and wakes the page thread.
+3. `parse_cache::parse` is the only reader. On a cache miss it asks `parse_ahead::take(kind, hash, source)` first: no slot gives `None`; `Queued` is cancelled (`Gone`) and `None` (the page thread parses; the same text is never parsed twice); `Running` waits on the condvar; `Done` is taken after a byte compare with the source. The result then goes through the same insert code as a fresh parse.
+4. `lazy_load` stays on the page thread. It uses `Src::Shared`, which the worker makes.
 
-**Soundness problem.** `Program` holds `Rc` (`ast.rs:584, 604, 635, 637`), so it is not `Send`. Two ways: (a) a wrapper with `unsafe impl Send`, valid only while the whole tree has no other owner (true when the worker makes it and drops its handle; the `parse_cache` thread-local is not touched on the worker); (b) change `Rc` to `Arc` (atomic counts cost every clone on the hot path). Prefer (a), with a debug assertion on `Rc::strong_count == 1` for each shared node at the hand-over.
+**Node limits.** The worker parses with the default room (16 M nodes). The page uses the result when its room holds the nodes (`max_nodes >= used`), and for a `Limit(Nodes)` result when its room is not larger than the worker's. Else it parses again. So the result equals the fresh parse with the realm's own room (test: `a_node_room_that_is_too_small_gives_the_error_of_a_fresh_parse`).
 
-**Memory layout.** No change. The AST is the same. Peak memory moves earlier (the AST exists before execution), by 0 to 30 MB on Gmail (hypothesis: the same trees live later anyway).
+**Order and errors.** The worker only fills a slot. It never runs code and reports nothing. A syntax error is stored as the result. The realm gets it at `run_script` or `module_parse`, which is where it got it before (same message, same place; the script that follows still runs after it). Scripts run in the order that the loader chooses: nothing in that order changed.
 
-**Expected.**
-- Page-thread instructions: -1.4 G (-8% of 17.3 G). The instrumented build reads `parse_top` at 1.50 G. The perf record gives all parse as 13.8% (2.39 G); `parse_top` is 58% of the instrumented parse cost.
-- Total instructions: +0 (the same work), +a few M for the channel and the hand-over.
-- First-row time: -0.3 s (hypothesis: 1.4 G at about 4 to 5 G per second is 0.28 to 0.35 s, and the window is 0.46 s, so all of it fits). With rule P of #569 the scripts arrive earlier and the window is the same size or larger.
-- Settle: -1.5 G to -3.6 G on the page thread (`parse_top` at settle: 3.61 G, 97 calls).
+**Soundness (`Send`).** `Program` holds `Rc`. The module `Hand<T>` has `unsafe impl Send`. The condition: every `Rc` of the tree (the source, the marks, the lazy lists) is owned by that tree, and every other handle (the submitting thread's, the worker's `view`) is dropped before the hand-over. The hand-over goes through a mutex. A `debug_assert` checks that the source `Rc` has one owner at the hand-over (test: `the_tree_from_the_worker_is_the_only_owner_of_its_text`). The `thread_local` parse cache is not touched on the worker.
 
-**47 journeys.** Every journey with a script of 100 KB or more gains the parse time that fits in the idle window. Small pages gain nothing and lose nothing (the worker is idle, one thread is parked).
+**Memory.** One copy of the text, as before: the `Rc<str>` that the tree keeps. The loader's `String` is dropped after the script runs, as before. After the hand-over the registry holds nothing. The copy and the tree are made earlier than before (at arrival, not at the turn of the script). A tree that waits for its script is bounded by the same cap as the text that waits (`done`, `max_total_bytes`), and by `WINDOW`. A navigation away drops them: `Net` drops `Ahead`, which closes it, skips the slots that have not begun and drops the finished trees. A parse that runs is not interrupted (the parser has no check): its tree is dropped when it ends.
 
-**Cost matrix risk.** Low to medium. Parse is a pure function of the source and the limits. Risks: the `Rc` hand-over (above); an error in a script must give the same error at the same moment (the worker stores `Result`; the page thread reports it at `exec_script`, not earlier); a script that changes after the fetch (not possible: the source is a `String` owned by the job).
+**Determinism under the virtual clock.** The worker is not a `parallel::Task` and does not read the clock of `bare_net`. The page thread waits for a slot in real time, on a condition variable, and no virtual time passes. The tree is a pure function of (text, kind, limits), so the page sees the same steps, the same errors and the same node counts whether the worker or the page thread made it. Which of the two did it can change from run to run. That changes only the instructions of the page thread, not the replay.
 
-**Size.** S to M: about 150 lines in the loader and `eval_scripts.rs`, the `Send` wrapper, 4 tests (error order, missing job, double ask, a drop without ask).
+**Measured** (Gmail, saved session, read only, 5 alternating pairs of main `ca67571d` and this branch, plain release build with a probe, load 4 to 8): page-thread instructions to the first row 16.42 to 16.45 G on main and 14.88 to 14.99 G on the branch (-1.5 G, -9%). All threads: 17.0 to 17.1 G and 16.8 to 17.0 G. Time from the end of the document to the first row: median 2.37 s on main, 2.15 s on the branch (-0.2 s). See `progress.md`.
+
+**Size.** About 280 lines with the tests in `parse_ahead.rs`, 25 in `browser_loader.rs`, 15 in `parse_cache.rs`.
 
 ### P2. Dictionary receiver reads: position hint, then a shared stub cache
 

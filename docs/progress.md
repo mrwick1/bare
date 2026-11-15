@@ -12583,6 +12583,62 @@ An earlier build of the scan (3 passes) gave 30 M for the errors and -0.156 G (m
 - `export default () => 1` is made when the module is instantiated, as a declaration is (spec: when the statement runs). Main does the same: its check is `ExprKind::Function(_)`, as is the new flag (read from the code; no test run).
 - `keycost.sh` and every other script that builds with `cargo` use the current directory and `CARGO_TARGET_DIR`. Run from a worktree with `CARGO_TARGET_DIR` set to a `base-build` directory, it builds the worktree's source into the base. That happened once during this work (`examples/type_load` of `5b0b76b124` was replaced); it was restored from the original build output (`type_load-fe82c79384938f3a`). Run the script of the base from its own `src` directory.
 
+## Gmail P1: parse a script on a worker thread (2026-11-15)
+
+**Built.** A classic script that a document names is parsed on one worker thread when its text arrives (`crates/js/src/parse_ahead.rs`). The download thread hands the text to the worker, as one `Rc<str>` that the tree keeps afterwards (no second copy). `parse_cache::parse` calls `parse_ahead::take`. A text that the worker has not begun is parsed by the page thread; a text that the worker runs is waited for; a finished tree is taken after a byte compare and a node-room check. A syntax error is stored in the result and reported by the run at the same place as before. A navigation (`Ahead::cancel`) closes the worker, drops the finished trees and marks the queued texts gone. A running parse is not interrupted. The worker ends 2 s after its last text. Design and decision: [design-gmail-js.md](design-gmail-js.md), [decisions.md](decisions.md).
+
+Scope, chosen from the journey numbers: only scripts that the document names (scan scripts, `as=script` preloads) and that no cache holds (`parse_cache::known`). A dynamic script is not parsed ahead: the first build did it and the 47 journeys paid more instructions for texts that no run needed.
+
+Replay under the virtual clock: the worker is not a `parallel::Task`, reads no `bare_net` clock, and the page thread waits in real time. The tree is a pure function of (text, kind, limits), so the replay is the same with and without the worker. 0 replay misses.
+
+**Idle window re-check (main `c73dc3c3` or later).** The idle window that P1 uses is 0.61 to 0.75 s on the newest main, so it exists (it is larger than the design counted).
+
+**Numbers (Gmail first row; machine archMachine, 5 runs each in 2 rounds, load average 3.0 to 8.2, probe build for the per-thread counter).** Page-thread instructions to the first row:
+
+| build | page thread to first row | whole process to first row |
+|---|---|---|
+| main `5b0b76b1` | 16.42 G (16.25 to 16.45 in 10 runs) | 17.0 G |
+| this change | 14.9 to 15.2 G (10 runs) | 16.4 to 17.1 G |
+
+The page thread is 1.2 to 1.5 G lower (-8% to -9%). The whole process is not lower: the work moved to the worker. The expected -1.4 G holds. The first byte of the server is bimodal (0.5 s or 1.1 s), so the first-row times are compared inside one mode. First byte 0.5 s: main 3.42, 3.57, 3.65 s; this change 3.44, 3.46, 3.47 s (-0.1 s). First byte 1.1 s: main 4.05, 4.17 s; this change 4.03, 4.07 s. The saving in wall time is about 0.1 s, not the expected 0.3 s (the first row waits for other work too). Peak RSS (VmHWM) is 339 to 379 MiB in main and 339 to 368 MiB in this change: no change.
+
+**Checks.**
+- New tests (they fail without `take`): same results and errors with and without the worker, a parse that ends after the page needs it, a navigation that drops pending parses, a syntax error at the right place, and 2 browser stream tests. 11 unit tests in `parse_ahead.rs`.
+- `cargo test --release --workspace`: only the known failures (the 7 openssl TLS tests; one flaky test of the known list in one run).
+- 47 journeys, `journeys.sh compare --clock virtual --runs 3 --pss`: all ok, 0 replay misses; sum of median instructions 73,190 M main and 73,295 M this change (+0.1%, largest journey +0.2%); CPU time +0.5%, wall time -0.5%, PSS -1.0% (under load).
+- `test262_check.sh`: gate ok (exit 0). `exec_diff.sh`: 79 runs, 0 differences. `keycost.sh`: 278.3 M (`#a1`), 283.6 M (`#f0`), as before.
+- Cost matrix, 803 rows (2 fail to run as on main: `parse_load deep 1` and `deep 10`): **the gate does not pass: 4 rows are over +0.5% under both allocators.** `builtins_load replace 1` (+1.20%), `replace 10` (+1.36%), `scan 1` (+1.03%), `scan 10` (+1.15%) against main built in the same worktree path; mean glibc +0.025%. The rows run no code of this change in their loop. The sampled difference is in `Regex::exec_in` (-38 samples) and in `builtins_load::run` (a `Vec::from_iter` that was inlined in main is a call here: +25 samples). Hypothesis: a different inlining choice from the added code in the crate, as in the cost-of-frame-slots entry. Moving the cache-miss code of `parse` into a cold function gave the same counts, so it is not that code.
+- A matrix against the shared base build `base-build origin/main` shows 91 rows over (worst `date_load utc` +4.7%). That is a difference of build environment: main built in this worktree gives the same +4.7% against the shared base. The base for the matrix of a branch must be built in the same path as the branch.
+
+**Not tested.**
+- Gmail with another account or a warm cache.
+- A parse that the worker runs while a second window navigates (one worker, one registry for all pages).
+- Wall time of the first row on an idle machine (load average above 3 in all runs).
+- Modules and dynamic scripts (not parsed ahead by design; they take the old path).
+
+### Gmail P1 after the rebase: the 4 cost rows (2026-11-15, main `d710aa97`)
+
+Owner decision (2026-11-15): rebase P1 on the newest main, run the gates again, and try to bring the 4 cost rows back. The rebase had no conflict (#574 touched other lines). Result: **the 4 rows stay over. The branch is pushed and the PR is open, not merged.**
+
+**Method.** Main and the branch were built in this one worktree path (the same path depth and layout), into two target dirs, once with `--release --workspace --examples` and once with `--release -p bare-drive -p bare-stress`. The shared `base-build` was not used for the matrix.
+
+**Gates (rebased branch, machine archMachine).**
+- Cost matrix, 803 rows: the same 4 rows are over under both allocators: `builtins_load replace 1` +0.99%, `replace 10` +1.15%, `scan 1` +0.85%, `scan 10` +0.97% (glibc). Mean glibc change +0.011%. No other row. `parse_load deep 1` and `deep 10` fail to run, as on main.
+- `cargo test --release --workspace --no-fail-fast`: only known failures (the 7 openssl TLS tests; `a_changed_file_starts_again_from_zero`, `external_sheets_embedded_sheets_and_inline_styles_cascade_in_order`, `a_hidden_iframe_download_is_saved`: a different one of these 3 flaky tests fails in each run).
+- test262: gate ok. `exec_diff.sh`: 79 runs, 0 differences. `keycost.sh`: 276.9 M (`#a1`), 282.2 M (`#f0`), peak RSS 30.8 MiB at 50 keys.
+- 47 journeys, `journeys.sh compare --clock virtual --runs 3 --pss`: all ok, 0 replay misses. Sum of median instructions 72,675 M main, 72,776 M branch (+0.1%; largest `react-docs` +0.4%, `rust-book-search` +0.4%). CPU time +0.8%, wall time +0.1% (the machine was loaded), PSS -8.7% (noise: one run of `devto-home` and others move PSS by several MiB).
+
+**Gmail (saved session, read only, no click; probe builds that read the page-thread counter; 6 alternating pairs; load average 4.7 to 10).** Page-thread instructions to the first row: main 15.34, 15.51, 15.50, 15.50, 15.34, 15.51 G (median 15.50 G); branch 14.12, 14.27, 14.27, 14.10, 14.20, 14.11 G (median 14.16 G). That is -1.3 G (-8.6%) on the page thread. Time from the start of the load to the first row: main 1.96 to 2.51 s (median 2.11 s), branch 1.92 to 2.18 s (median 2.06 s). The load was too high and the first-byte mode was not recorded for these runs, so the time is not a claim. Settle and peak RSS: not measured again.
+
+**Cause of the 4 rows (measured; the fix is not found).**
+- All 4 rows are `builtins_load` and run `Regex::exec_in`. Callgrind (`replace 1`): the call lists and the call counts of `exec_in` are the same in both builds. Its own instructions are 18.52 M in main and 19.12 M in the branch (+0.60 M). `replace 1` runs 633,974 regexp steps, so it is 1 instruction for each step.
+- The disassembly shows it: in main the dispatch loop keeps the address of the jump table in a callee-saved register. In the branch the compiler makes that address (`lea`) again at each step. The rest is a different choice of registers. No inlining changed.
+- The cause is the choice of the codegen units. `-Z print-mono-items` shows that the CGU of `regexp` is merged with the `alloc` instances in main and with the `std` instances in the branch. With `-C codegen-units=1`, main and the branch are the same: `replace 1` 62,696,254 and 62,696,564. (That is 1.9% above main with 16 units, so main has the good layout by luck.)
+- Narrow builds (`-p bare-js --example builtins_load`, same path, `replace 1`): main 61,533,963 to 61,534,392; the branch 62,143,846. Main plus only `pub(crate) hash` and the `parse_raw` split: 61,533,963 (no change). Main plus the `take` call and the node-room code, without the registry of keys: 61,534,141 (no change). The calls of the cache to the registry of keys (`remember` on insert, `forget` on evict, `new_realm` and `clear`) bring the +1.0%, in each form that was tried. The `parse_ahead` module is not needed for it (the same +1.0% when the module is left out, and when its code is inside `parse_cache.rs`).
+- Attempt 1: move the registry of keys from `parse_cache.rs` into `parse_ahead.rs`: 62,145,865 (no change). Attempt 2: replace the `Mutex<Vec>` by a table of 1024 `AtomicU64` tags (no `Vec` and no `Mutex` instances): 62,146,235 (no change). Both were reverted. The 2 attempts are used up: stopped as the rule says.
+- The cost is a +1 instruction in the hot dispatch of the regexp matcher, set by a partition of the codegen units that no source change controls. Any change in `bare-js` can move it in either direction. A hypothesis for a lasting fix (not built): a matcher loop that does not need the table address in a register (fewer live values in `run`), and a design document first (CLAUDE.md, "How to improve a part").
+
+**Not tested.** Gmail settle, peak RSS and the first-byte mode of the 12 Gmail runs. A second pass of the matrix on a quiet machine. A build with `-C relocation-model=static` (it would remove the table base, but it is a change for the whole project).
 
 ## Pause after the perf goal and the first Gmail work (2026-11-15)
 
@@ -12642,3 +12698,7 @@ The owner set Gmail load time as the main task on 2026-11-15.
 - `fetch_load post 10` is +2.3% against `f6415364` (hypothesis: Fetch Metadata headers, PR #479).
 - GC inside a long call: design in `docs/design-gc-in-call.md`, parked.
 - `Ext::re_tab_bytes` is dead code outside tests.
+
+### Owner decision on P1 (2026-11-15)
+
+The owner grants a cost exception for 4 rows: `builtins_load replace 1` (+0.99%), `replace 10` (+1.15%), `scan 1` (+0.85%) and `scan 10` (+0.97%). The reason: the cause is the codegen-unit split of `bare-js` (with `-C codegen-units=1` main and the branch are equal), not new work in those rows. P1 cuts the Gmail page thread to the first row from 15.50 G to 14.16 G (-8.6%). The PR merges as it is. Work stays paused after this merge (see "Pause after the perf goal and the first Gmail work (2026-11-15)"). The next step on resume is P3.
