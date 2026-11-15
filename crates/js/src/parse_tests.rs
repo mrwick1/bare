@@ -50,7 +50,6 @@ fn show_expr(p: &Program, id: ExprId) -> String {
         ExprKind::PrivateMember { obj, name, .. } => format!("({}.{})", show_expr(p, obj), p.text(name)),
         ExprKind::Seq(l) => format!("(seq{})", show_list(p, l)),
         ExprKind::Spread(a) => format!("(... {})", show_expr(p, a)),
-        ExprKind::Paren(a) => show_expr(p, a),
         ExprKind::Chain(a) => format!("(chain {})", show_expr(p, a)),
         ExprKind::Array(l) => format!("[{}]", show_list(p, l).trim_start()),
         ExprKind::Hole => "<hole>".into(),

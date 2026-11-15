@@ -15,7 +15,8 @@
 //! [`Program::module`]: its code is one synthetic function, and its `import` and `export` declarations are in [`ModuleInfo`].
 //!
 //! Distinctions an executor needs, kept on purpose:
-//! - [`ExprKind::Paren`]: `(a)` is not `a` (name inference, `(a?.b).c`, directive detection).
+//! - Parentheses have no node: `(a)` is the node of `a`. The parser keeps what they mean (a target, an arrow, a directive, `**`, `??`).
+//!   `(a?.b).c` is a [`ExprKind::Chain`] as the object of a member; `(a, b)` is a [`ExprKind::Seq`].
 //! - [`ExprKind::Chain`]: wraps a whole optional chain, where `?.` short-circuits to.
 //! - Assignment targets and bindings are [`Pat`] nodes, never expressions pretending to be patterns.
 //! - [`StmtKind::Directive`]: a string expression statement in a directive prologue.
@@ -244,8 +245,6 @@ pub enum ExprKind {
     Spread(ExprId),
     /// An elision in an array: `[a, , b]`.
     Hole,
-    /// `( expr )`. Kept: see the module comment.
-    Paren(ExprId),
     /// The whole optional chain `a?.b.c`. Inside, some links have `optional: true`. If a `?.` link finds
     /// `null`/`undefined`, the value of this whole node is `undefined`.
     Chain(ExprId),

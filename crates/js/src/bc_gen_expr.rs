@@ -169,7 +169,6 @@ impl Gen<'_, '_> {
                 Ok(())
             }
             ExprKind::Seq(l) => prog.list(l).try_for_each(|x| self.expr(x, dst)),
-            ExprKind::Paren(i) => self.expr(i, dst),
             ExprKind::Super => Err("super"),
             ExprKind::Class(_) => Err("class"),
             ExprKind::Tagged { .. } => Err("tagged template"),
@@ -202,7 +201,6 @@ impl Gen<'_, '_> {
                 self.pos = saved;
                 r
             }
-            (ExprKind::Paren(i), Some(_)) => self.named(i, dst, n),
             (ExprKind::Class(_), Some(_)) => Err("class"),
             _ => self.expr(e, dst),
         }
@@ -281,10 +279,7 @@ impl Gen<'_, '_> {
             UnaryOp::Void => Op::LoadUndef,
             UnaryOp::Delete => return Err("delete"),
         };
-        let mut a = arg;
-        while let ExprKind::Paren(i) = self.prog.expr(a).kind {
-            a = i;
-        }
+        let a = arg;
         if op == UnaryOp::Typeof && matches!(self.prog.expr(a).kind, ExprKind::Ident) {
             // `typeof` of a missing name is "undefined" (a name in an environment always exists).
             let n = self.it.cc.expr_name[a.index()];
@@ -312,7 +307,6 @@ impl Gen<'_, '_> {
                 let n = self.it.cc.expr_name[e.index()];
                 Ok(Place::Name(self.site(e.index() as u32, n)?, n))
             }
-            ExprKind::Paren(i) => self.place_of(i),
             ExprKind::Member { obj, name, optional: false } => {
                 let o = self.reg()?;
                 self.expr(obj, o)?;
@@ -389,10 +383,7 @@ impl Gen<'_, '_> {
     fn call(&mut self, e: ExprId, callee: ExprId, args: List<Expr>, dst: u32) -> G<()> {
         let b = self.reg()?;
         let this = self.reg()?;
-        let mut c = callee;
-        while let ExprKind::Paren(i) = self.prog.expr(c).kind {
-            c = i;
-        }
+        let c = callee;
         match self.prog.expr(c).kind {
             ExprKind::Member { obj, name, optional: false } => {
                 self.expr(obj, this)?;

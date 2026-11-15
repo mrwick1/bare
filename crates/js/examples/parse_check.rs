@@ -196,7 +196,6 @@ impl<'a> Dump<'a> {
         let ex = *self.p.expr(e);
         let sp = ex.span;
         match ex.kind {
-            ExprKind::Paren(inner) => self.expr(inner),
             ExprKind::Ident => {
                 self.open("id", sp);
                 self.sp();

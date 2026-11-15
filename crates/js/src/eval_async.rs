@@ -546,10 +546,7 @@ impl<'p> Interp<'p> {
                 let c = self.scan_expr(callee)?;
                 let a = self.scan_list(args)?;
                 if c || a {
-                    let mut x = callee;
-                    while let ExprKind::Paren(i) = prog.expr(x).kind {
-                        x = i;
-                    }
+                    let x = callee;
                     if matches!(prog.expr(x).kind, ExprKind::Super) {
                         return no("await in the arguments of super()");
                     }
@@ -574,7 +571,7 @@ impl<'p> Interp<'p> {
             }
             ExprKind::PrivateMember { obj, .. } => self.scan_expr(obj)?,
             ExprKind::PrivateIn { right, .. } => self.scan_expr(right)?,
-            ExprKind::Spread(a) | ExprKind::Paren(a) => self.scan_expr(a)?,
+            ExprKind::Spread(a) => self.scan_expr(a)?,
             ExprKind::Chain(a) => self.scan_expr(a)?,
             // leaves, nested functions (scanned when the walk reaches them) and what the walk rejects
             _ => false,
@@ -1043,13 +1040,6 @@ impl<'p> Interp<'p> {
         Id::from_raw_pub(self.prog.lists[l.start as usize + i])
     }
 
-    fn strip(&self, mut e: ExprId) -> ExprId {
-        while let ExprKind::Paren(i) = self.prog.expr(e).kind {
-            e = i;
-        }
-        e
-    }
-
     // ---- expressions
 
     fn ask(&mut self, run: &mut Run, e: ExprId, i: u32, base: u32, x: ExprId) -> Res<Step> {
@@ -1066,7 +1056,6 @@ impl<'p> Interp<'p> {
         let ex = *prog.expr(e);
         let base = run.slots.len() as u32;
         match ex.kind {
-            ExprKind::Paren(i) => nx(Next::Eval(i)),
             ExprKind::Chain(inner) => {
                 self.fpush(run, Fr::Chain { base })?;
                 nx(Next::Eval(inner))
@@ -1117,7 +1106,7 @@ impl<'p> Interp<'p> {
             ExprKind::New { callee, .. } => self.ask(run, e, 0, base, callee),
             ExprKind::Assign { target, .. } => match prog.pat(target).kind {
                 PatKind::Member(me) => {
-                    let m = self.strip(me);
+                    let m = me;
                     let obj = match prog.expr(m).kind {
                         ExprKind::Member { obj, .. } | ExprKind::Index { obj, .. } if matches!(prog.expr(obj).kind, ExprKind::Super) => {
                             // `super.x = ...`: the receiver and the key are known now. Only the value waits.
@@ -1173,7 +1162,7 @@ impl<'p> Interp<'p> {
     }
 
     fn callee_shape(&self, callee: ExprId) -> CShape {
-        let c = self.strip(callee);
+        let c = callee;
         match self.prog.expr(c).kind {
             ExprKind::Member { obj, .. } if matches!(self.prog.expr(obj).kind, ExprKind::Super) => CShape::Super(c),
             ExprKind::Member { obj, .. } => CShape::Member(c, obj),
@@ -1337,7 +1326,7 @@ impl<'p> Interp<'p> {
     /// (number of member operands before the value, is a member target)
     fn assign_parts(&self, target: PatId) -> (u32, bool) {
         match self.prog.pat(target).kind {
-            PatKind::Member(me) => match self.prog.expr(self.strip(me)).kind {
+            PatKind::Member(me) => match self.prog.expr(me).kind {
                 // a super property keeps the receiver and the key in two slots, like a name
                 ExprKind::Member { obj, .. } | ExprKind::Index { obj, .. } if matches!(self.prog.expr(obj).kind, ExprKind::Super) => (1, true),
                 ExprKind::Index { .. } => (2, true),
@@ -1350,7 +1339,7 @@ impl<'p> Interp<'p> {
     /// The member reference of an assignment target whose receiver and key are in the slots at `b`.
     fn assign_ref(&mut self, run: &Run, target: PatId, b: usize) -> Res<Ref> {
         let PatKind::Member(me) = self.prog.pat(target).kind else { return Err(unsupported("assignment target", self.prog.pat(target).span)) };
-        let m = self.strip(me);
+        let m = me;
         Ok(match self.prog.expr(m).kind {
             ExprKind::PrivateMember { .. } => {
                 let (pn, n, fl) = self.priv_lookup(m)?;
@@ -1554,7 +1543,7 @@ impl<'p> Interp<'p> {
                         }
                         CShape::Index(_, index) => {
                             if i == 0 {
-                                if self.link_optional(self.strip(callee)) && is_nullish(v) {
+                                if self.link_optional(callee) && is_nullish(v) {
                                     return self.chain_short(run);
                                 }
                                 self.spush(run, Slot::V(v))?;
@@ -1590,7 +1579,7 @@ impl<'p> Interp<'p> {
                 let (np, member) = self.assign_parts(target);
                 if i < np {
                     let PatKind::Member(me) = prog.pat(target).kind else { return Err(unsupported("assignment target", ex.span)) };
-                    let m = self.strip(me);
+                    let m = me;
                     match prog.expr(m).kind {
                         ExprKind::Member { name, .. } => {
                             let key = self.expr_key(m, name)?;
