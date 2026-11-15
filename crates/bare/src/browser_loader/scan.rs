@@ -108,7 +108,8 @@ impl Scan {
         }
         let key = Net::key(expect, &url);
         let new = !self.net.started.contains_key(&key);
-        self.net.start(expect, &url, &lim, self.deadline, 0);
+        // A scanned script is classic (a module has `type=module`), and so is a preload hint of `as=script`.
+        self.net.start_with(expect, &url, &lim, self.deadline, 0, expect == Expect::Script);
         // An element of the document with the URL of a hint is a real reference: from then on it holds the page like any other.
         if !hint {
             self.net.hints.remove(&key);

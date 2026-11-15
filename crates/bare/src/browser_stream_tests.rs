@@ -339,3 +339,41 @@ fn a_style_preload_link_in_the_first_piece_starts_the_sheet_that_a_later_link_ad
         assert_eq!(count(&log, "GET /s.css"), 1, "{log:?}");
     });
 }
+
+/// A script of about 40 KB (more than `bare_js::parse_ahead::MIN_AHEAD`) that ends with `tail`.
+fn long_script(tail: &str) -> &'static str {
+    Box::leak(format!("/*{}*/\n{tail}", "x".repeat(40_000)).into_boxed_str())
+}
+
+#[test]
+fn a_long_script_that_the_scan_started_runs_from_the_tree_that_the_worker_parsed() {
+    big(|| {
+        let mut plan = preload_page("<link rel=preload as=script href=/a.js>", ADD_SCRIPT);
+        plan.files = vec![("/a.js", long_script("localStorage.setItem('a', 'ran')"))];
+        let srv = slow(plan);
+        let before = bare_js::parse_ahead::taken_here();
+        let (s, stop) = load(Session::new(cfg(srv.port, true)));
+        assert_eq!(stop, SessionStop::Page(crate::Stop::Settled));
+        assert_eq!(item(&s, srv.port, "a").as_deref(), Some("ran"));
+        assert_eq!(bare_js::parse_ahead::taken_here() - before.min(bare_js::parse_ahead::taken_here()), 1, "the page thread did not take the tree of the worker");
+    });
+}
+
+#[test]
+fn a_syntax_error_of_a_long_script_is_reported_when_the_script_runs_and_the_next_script_runs() {
+    big(|| {
+        let body = format!("<script>window.addEventListener('error', function (e) {{ localStorage.setItem('err', e.message); }}); localStorage.setItem('first', 'ran')</script>{ADD_SCRIPT}<script>var b=document.createElement('script');b.src='/b.js';b.async=false;document.body.appendChild(b)</script>");
+        let mut plan = preload_page("<link rel=preload as=script href=/a.js>", Box::leak(body.into_boxed_str()));
+        let bad = long_script("var = 1;");
+        plan.files = vec![("/a.js", bad), ("/b.js", "localStorage.setItem('after', localStorage.getItem('err') ? 'late' : 'early')")];
+        let srv = slow(plan);
+        let (s, stop) = load(Session::new(cfg(srv.port, true)));
+        assert_eq!(stop, SessionStop::Page(crate::Stop::Settled));
+        let want = bare_js::parse::parse_script(bad, Default::default()).err().unwrap().msg;
+        let err = item(&s, srv.port, "err").unwrap_or_default();
+        assert!(err.contains(want), "{err:?} does not hold {want:?}");
+        assert_eq!(item(&s, srv.port, "first").as_deref(), Some("ran"));
+        // The script that follows the failed one runs after it, and no error comes before it runs.
+        assert_eq!(item(&s, srv.port, "after").as_deref(), Some("late"), "the error was reported before its script ran, or the next script did not follow it");
+    });
+}

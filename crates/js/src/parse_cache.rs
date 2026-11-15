@@ -96,7 +96,7 @@ thread_local! {
 }
 
 /// Multiply hash of 8 bytes at a time, and the length.
-fn hash(b: &[u8]) -> u64 {
+pub(crate) fn hash(b: &[u8]) -> u64 {
     const K: u64 = 0x517c_c1b7_2722_0a95;
     let mut h = b.len() as u64;
     let mut c = b.chunks_exact(8);
@@ -112,16 +112,21 @@ fn nodes_err(at: u32) -> Error {
     Error { kind: ErrorKind::Limit(LimitKind::Nodes), msg: "too many syntax tree nodes", start: at, end: at }
 }
 
+/// The parse of `source` as `kind` with a tree that borrows it, and the count of nodes made.
+pub(crate) fn parse_raw(kind: Kind, source: &str, limits: Limits) -> (Result<Program<'_>, Error>, u32) {
+    match (kind.is_module(), kind.is_lazy() && source.len() >= LAZY_MIN_SOURCE) {
+        (true, false) => parse_module_used(source, limits),
+        (false, false) => parse_script_used(source, limits),
+        (true, true) => crate::parse::parse_module_lazy_used(source, limits),
+        (false, true) => crate::parse::parse_script_lazy_used(source, limits),
+    }
+}
+
 /// The result of `parse_script(source, limits)` with an owned tree, from the cache when it has one.
 /// `source.len() <= limits.max_source` must be checked first (the realm does it).
 pub fn parse(kind: Kind, source: &str, limits: Limits) -> Result<Rc<Program<'static>>, Error> {
     let fresh = |limits| {
-        let (r, used) = match (kind.is_module(), kind.is_lazy() && source.len() >= LAZY_MIN_SOURCE) {
-            (true, false) => parse_module_used(source, limits),
-            (false, false) => parse_script_used(source, limits),
-            (true, true) => crate::parse::parse_module_lazy_used(source, limits),
-            (false, true) => crate::parse::parse_script_lazy_used(source, limits),
-        };
+        let (r, used) = parse_raw(kind, source, limits);
         (r.map(|p| Rc::new(p.into_owned())), used)
     };
     let plain = Limits { max_source: limits.max_source, max_nodes: limits.max_nodes, ..Limits::default() };
@@ -150,7 +155,20 @@ pub fn parse(kind: Kind, source: &str, limits: Limits) -> Result<Rc<Program<'sta
     if let Some(r) = hit {
         return r;
     }
-    let (r, used) = fresh(limits);
+    // A worker may have parsed it already (`parse_ahead`). It parsed with the default room: its result is the one of this realm
+    // when the room holds the nodes, and for a `Limit(Nodes)` when the room is not more than the worker's.
+    let nodes_limit = |r: &Result<Rc<Program<'static>>, Error>| matches!(r, Err(e) if e.kind == ErrorKind::Limit(LimitKind::Nodes));
+    let ahead = crate::parse_ahead::take(kind, key.0, source).filter(|(r, used)| if nodes_limit(r) { limits.max_nodes <= Limits::default().max_nodes } else { limits.max_nodes >= *used });
+    let (r, used, room) = match ahead {
+        Some((r, used)) => {
+            let room = if nodes_limit(&r) { Limits::default().max_nodes } else { limits.max_nodes };
+            (r, used, room)
+        }
+        None => {
+            let (r, used) = fresh(limits);
+            (r, used, limits.max_nodes)
+        }
+    };
     let (res, bytes) = match &r {
         Ok(p) => (Res::Ok(p.clone()), p.source.len() + p.stats().bytes),
         Err(e) => (Res::Err(*e, source.into()), source.len()),
@@ -169,7 +187,7 @@ pub fn parse(kind: Kind, source: &str, limits: Limits) -> Result<Rc<Program<'sta
                 c.counts.bytes -= old.bytes;
             }
         }
-        c.map.insert(key, Entry { res, used, room: limits.max_nodes, bytes, last: c.realms });
+        c.map.insert(key, Entry { res, used, room, bytes, last: c.realms });
         c.order.push_back(key);
         c.counts.bytes += bytes;
         c.counts.entries = c.map.len();
