@@ -154,6 +154,10 @@ impl Sender {
             return;
         }
         let key = (parse_cache::hash(source.as_bytes()), kind);
+        // A text that a cache has already (an earlier document of the session ran it) is not parsed again.
+        if parse_cache::known(key) {
+            return;
+        }
         let slot = Arc::new(Slot { st: Mutex::new(St::Queued(Hand(Rc::from(source)))), ready: Condvar::new() });
         let mut i = sh.inner.lock().unwrap();
         if sh.closed.load(Ordering::Acquire) || i.slots.contains_key(&key) {
@@ -411,7 +415,7 @@ mod tests {
 
     #[test]
     fn the_tree_from_the_worker_is_the_only_owner_of_its_text() {
-        let src = big("1");
+        let src = big("1 + 7");
         let a = Ahead::new();
         a.sender().submit(Kind::ClassicLazy, &src);
         a.attach();
@@ -468,6 +472,22 @@ mod tests {
         wait_for(|| a.began() >= 1);
         std::thread::sleep(Duration::from_millis(50));
         assert_eq!(a.began(), 1);
+    }
+
+    #[test]
+    fn a_text_that_a_cache_holds_is_not_parsed_ahead() {
+        let src = big("3 + 9");
+        parse_cache::clear();
+        let mut it = realm();
+        assert!(matches!(it.run_script(&src), Ok(Value::Number(n)) if n == 12.0));
+        let a = Ahead::new();
+        a.sender().submit(Kind::ClassicLazy, &src);
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!((a.began(), a.running()), (0, false));
+        // After the cache lets go of it, it is parsed ahead again.
+        parse_cache::clear();
+        a.sender().submit(Kind::ClassicLazy, &src);
+        wait_for(|| a.began() == 1);
     }
 
     #[test]

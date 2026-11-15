@@ -1105,11 +1105,9 @@ impl Net {
         self.start_with(expect, url, lim, deadline, retained, false);
     }
 
-    /// `start` for the text of a classic script: the worker parses it when it arrives, if it is long enough (`parse_ahead`).
-    fn start_classic(&mut self, url: &Url, lim: &Limits, deadline: Instant, retained: usize) {
-        self.start_with(Expect::Script, url, lim, deadline, retained, true);
-    }
-
+    /// `start`. `classic`: the text is a classic script that the document names (a `<script src>` or a preload hint). It will run before `load`,
+    /// so the worker parses it when it arrives, if it is long enough (`parse_ahead`). A script that page code adds later may never run: its
+    /// text is not parsed ahead (an unused parse costs instructions).
     fn start_with(&mut self, expect: Expect, url: &Url, lim: &Limits, deadline: Instant, retained: usize, classic: bool) {
         let key = Net::key(expect, url);
         if self.started.len() >= WINDOW || self.started.contains_key(&key) {
@@ -1575,13 +1573,11 @@ impl Run<'_> {
         let kept = self.kept();
         let first = {
             let (ext, pre) = (self.dom.scripts.external.borrow(), self.dom.scripts.preloads.borrow());
-            let modules = self.dom.scripts.modules.borrow();
-            let modules = &modules.nodes;
             let mut room = self.lim.resources.max_fetches.saturating_sub(self.res.fetches);
             for e in ext.iter().take(WINDOW) {
-                if let Ext::Fetch(n, u) = e && room > 0 && !pre.has_script(u) && !(self.https_only && u.scheme == bare_url::Scheme::Http) {
+                if let Ext::Fetch(_, u) = e && room > 0 && !pre.has_script(u) && !(self.https_only && u.scheme == bare_url::Scheme::Http) {
                     room -= 1;
-                    self.net.start_with(Expect::Script, u, &self.lim.resources, self.deadline, kept, !modules.contains(n));
+                    self.net.start_with(Expect::Script, u, &self.lim.resources, self.deadline, kept, false);
                 }
             }
             match ext.front() {
@@ -1721,11 +1717,9 @@ impl Run<'_> {
         }
         let preloads = self.dom.scripts.preloads.borrow();
         let external = self.dom.scripts.external.borrow();
-        let modules = self.dom.scripts.modules.borrow();
-        let modules = &modules.nodes;
         for e in external.iter().take(WINDOW) {
-            if let Ext::Fetch(n, u) = e && todo.len() < room && allowed(self.https_only, u) && !preloads.has_script(u) {
-                todo.push((Expect::Script, u, !modules.contains(n)));
+            if let Ext::Fetch(_, u) = e && todo.len() < room && allowed(self.https_only, u) && !preloads.has_script(u) {
+                todo.push((Expect::Script, u, false));
             }
         }
         if !self.split && todo.len() + self.net.started.len() < 2 {

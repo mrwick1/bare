@@ -91,6 +91,25 @@ struct Cache {
     realms: u64,
 }
 
+/// The keys that a cache of some thread holds. A download thread asks it before it hands a text to the parse worker (`parse_ahead`):
+/// a text that the cache has is never parsed again. A thread that clears or drops its entries removes its keys. Several threads that hold
+/// one key may remove it early: then a text is parsed ahead for nothing, never the other way.
+static KNOWN: std::sync::Mutex<Vec<(u64, Kind)>> = std::sync::Mutex::new(Vec::new());
+
+/// Does a cache hold this text? (`hash` of its bytes.)
+pub(crate) fn known(key: (u64, Kind)) -> bool {
+    KNOWN.lock().unwrap().contains(&key)
+}
+
+fn forget(keys: impl IntoIterator<Item = (u64, Kind)>) {
+    let mut k = KNOWN.lock().unwrap();
+    for key in keys {
+        if let Some(i) = k.iter().position(|x| *x == key) {
+            k.swap_remove(i);
+        }
+    }
+}
+
 thread_local! {
     static CACHE: RefCell<Cache> = RefCell::default();
 }
@@ -180,13 +199,16 @@ pub fn parse(kind: Kind, source: &str, limits: Limits) -> Result<Rc<Program<'sta
         }
         if let Some(old) = c.map.remove(&key) {
             c.counts.bytes -= old.bytes;
+            forget([key]);
         }
         while c.counts.bytes + bytes > MAX_BYTES {
             let Some(k) = c.order.pop_front() else { break };
             if let Some(old) = c.map.remove(&k) {
                 c.counts.bytes -= old.bytes;
+                forget([k]);
             }
         }
+        KNOWN.lock().unwrap().push(key);
         c.map.insert(key, Entry { res, used, room, bytes, last: c.realms });
         c.order.push_back(key);
         c.counts.bytes += bytes;
@@ -206,13 +228,16 @@ pub fn new_realm() {
         c.realms += 1;
         let before = c.map.len();
         let (realms, mut freed) = (c.realms, 0);
-        c.map.retain(|_, e| {
+        let mut gone = Vec::new();
+        c.map.retain(|k, e| {
             let keep = realms - e.last <= MAX_IDLE;
             if !keep {
                 freed += e.bytes;
+                gone.push(*k);
             }
             keep
         });
+        forget(gone);
         if c.map.len() != before {
             c.counts.bytes -= freed;
             c.order.retain(|k| c.map.contains_key(k));
@@ -222,6 +247,7 @@ pub fn new_realm() {
 
 /// Drop every entry of this thread and reset the counts.
 pub fn clear() {
+    CACHE.with_borrow_mut(|c| forget(std::mem::take(&mut c.map).into_keys()));
     CACHE.with_borrow_mut(|c| *c = Cache::default());
 }
 
