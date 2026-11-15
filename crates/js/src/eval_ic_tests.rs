@@ -77,6 +77,28 @@ for (var i = 0; i < 6; i++) { if (i == 2) delete o.a; if (i == 4) o.b = 'B'; out
 Object.freeze(o);
 out.push(rd(o), rd(o));
 out.join()"#, "2,2,2,2,B,B,B,B"),
+    ("big_dict", r#"function mkbig(n, rev) { var o = {}; for (var i = 0; i < n; i++) o['k' + (rev ? n - 1 - i : i)] = i; return o; }
+var a = mkbig(600), b = mkbig(600, true), out = [];
+function rd(o) { return o.k500; }
+for (var i = 0; i < 14; i++) {
+  if (i == 2) a.k500 = 'w';
+  if (i == 3) delete a.k500;
+  if (i == 4) a.k500 = 'again';
+  if (i == 5) { for (var j = 0; j < 100; j++) delete a['k' + j]; }
+  if (i == 6) { for (var j = 0; j < 100; j++) a['n' + j] = j; }
+  if (i == 7) Object.defineProperty(a, 'k500', { get() { return 'getter'; }, configurable: true });
+  if (i == 8) Object.defineProperty(a, 'k500', { value: 'data', writable: false, configurable: true });
+  if (i == 9) Object.freeze(a);
+  out.push(rd(a), rd(b));
+}
+var p = mkbig(600), c = Object.create(p), d = Object.create(c);
+for (var i = 0; i < 8; i++) {
+  if (i == 3) c.k500 = 'own-c';
+  if (i == 5) delete c.k500;
+  if (i == 6) Object.setPrototypeOf(d, {k500: 'swap'});
+  out.push(rd(d));
+}
+out.join()"#, "500,99,500,99,w,99,,99,again,99,again,99,again,99,getter,99,data,99,data,99,data,99,data,99,data,99,data,99,500,500,500,own-c,own-c,500,swap,swap"),
     ("frozen_proto", r#"var p = { x: 1 }, r = Object.create(p), out = [];
 function rd(o) { return o.x; }
 for (var i = 0; i < 4; i++) { if (i == 2) Object.freeze(p); out.push(rd(r)); }
@@ -129,6 +151,21 @@ fn the_counters_show_own_prototype_and_absent_hits() {
         assert_eq!(c.heap.fill_proto - before.heap.fill_proto, 1);
         assert_eq!(c.heap.fill_absent - before.heap.fill_absent, 1);
         assert_eq!(c.heap.fill_own - before.heap.fill_own, 1);
+    });
+}
+
+#[test]
+fn a_site_that_reads_a_dictionary_of_over_255_keys_hits_inline() {
+    big(|| {
+        let mut it = Interp::realm(Heap::default(), EvalLimits::default()).unwrap();
+        let src = "var o = {}; for (var i = 0; i < 300; i++) o['k' + i] = i; function rd(o) { return o.k280; } var s = 0; for (var i = 0; i < 100; i++) s += rd(o); s";
+        assert_eq!(run(&mut it, src), "28000");
+        let before = it.ic_counts();
+        assert_eq!(run(&mut it, "var s = 0; for (var i = 0; i < 100; i++) s += rd(o); s"), "28000");
+        let c = it.ic_counts();
+        // The entry holds the position 280: every read of the second loop hits inline, none fills again.
+        assert_eq!(c.own_hits - before.own_hits, 100);
+        assert_eq!(c.heap.fill_own, before.heap.fill_own);
     });
 }
 
