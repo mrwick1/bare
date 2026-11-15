@@ -12583,3 +12583,35 @@ An earlier build of the scan (3 passes) gave 30 M for the errors and -0.156 G (m
 - `export default () => 1` is made when the module is instantiated, as a declaration is (spec: when the statement runs). Main does the same: its check is `ExprKind::Function(_)`, as is the new flag (read from the code; no test run).
 - `keycost.sh` and every other script that builds with `cargo` use the current directory and `CARGO_TARGET_DIR`. Run from a worktree with `CARGO_TARGET_DIR` set to a `base-build` directory, it builds the worktree's source into the base. That happened once during this work (`examples/type_load` of `5b0b76b124` was replaced); it was restored from the original build output (`type_load-fe82c79384938f3a`). Run the script of the base from its own `src` directory.
 
+## Gmail P1: parse a script on a worker thread (2026-11-15)
+
+**Built.** A classic script that a document names is parsed on one worker thread when its text arrives (`crates/js/src/parse_ahead.rs`). The download thread hands the text to the worker, as one `Rc<str>` that the tree keeps afterwards (no second copy). `parse_cache::parse` calls `parse_ahead::take`. A text that the worker has not begun is parsed by the page thread; a text that the worker runs is waited for; a finished tree is taken after a byte compare and a node-room check. A syntax error is stored in the result and reported by the run at the same place as before. A navigation (`Ahead::cancel`) closes the worker, drops the finished trees and marks the queued texts gone. A running parse is not interrupted. The worker ends 2 s after its last text. Design and decision: [design-gmail-js.md](design-gmail-js.md), [decisions.md](decisions.md).
+
+Scope, chosen from the journey numbers: only scripts that the document names (scan scripts, `as=script` preloads) and that no cache holds (`parse_cache::known`). A dynamic script is not parsed ahead: the first build did it and the 47 journeys paid +1.4% instructions for texts that no run needed.
+
+Replay under the virtual clock: the worker is not a `parallel::Task`, reads no `bare_net` clock, and the page thread waits in real time. The tree is a pure function of (text, kind, limits), so the replay is the same with and without the worker. 0 replay misses.
+
+**Idle window re-check (main `c73dc3c3` or later).** The first-row window between the end of the document and the first row is 2.0 to 2.3 s on main, so the window P1 uses exists.
+
+**Numbers (Gmail first row; machine archMachine, 5 runs each in 2 rounds, load average 3.0 to 8.2, probe build for the per-thread counter).** Page-thread instructions to the first row:
+
+| build | page thread to first row | whole process to first row |
+|---|---|---|
+| main `5b0b76b1` | 16.42 G (16.25 to 16.45 in 10 runs) | 17.0 G |
+| this change | 14.9 to 15.2 G (10 runs) | 16.4 to 17.1 G |
+
+The page thread is 1.2 to 1.5 G lower (-8% to -9%). The whole process is not lower: the work moved to the worker. The expected -1.4 G holds. The first byte of the server is bimodal (0.5 s or 1.1 s), so the first-row times are compared inside one mode. First byte 0.5 s: main 3.42, 3.57, 3.65 s; this change 3.44, 3.46, 3.47 s (-0.1 s). First byte 1.1 s: main 4.05, 4.17 s; this change 4.03, 4.07 s. The saving in wall time is about 0.1 s, not the expected 0.3 s (the first row waits for other work too). Peak RSS (VmHWM) is 339 to 379 MiB in main and 339 to 368 MiB in this change: no change.
+
+**Checks.**
+- New tests (they fail without `take`): same results and errors with and without the worker, a parse that ends after the page needs it, a navigation that drops pending parses, a syntax error at the right place, and 2 browser stream tests. 11 unit tests in `parse_ahead.rs`.
+- `cargo test --release --workspace`: only the known failures (the 7 openssl TLS tests; one flaky test of the known list in one run).
+- 47 journeys, `journeys.sh compare --clock virtual --runs 3 --pss`: all ok, 0 replay misses; sum of median instructions 73,190 M main and 73,295 M this change (+0.1%, largest journey +0.2%); CPU time +0.5%, wall time -0.5%, PSS -1.0% (under load).
+- `test262_check.sh`: gate ok (exit 0). `exec_diff.sh`: 79 runs, 0 differences. `keycost.sh`: 278.3 M (`#a1`), 283.6 M (`#f0`), as before.
+- Cost matrix, 803 rows (2 fail to run as on main: `parse_load deep 1` and `deep 10`): **the gate does not pass: 4 rows are over +0.5% under both allocators.** `builtins_load replace 1` (+1.20%), `replace 10` (+1.36%), `scan 1` (+1.03%), `scan 10` (+1.15%) against main built in the same worktree path; mean glibc +0.025%. The rows run no code of this change in their loop. The sampled difference is in `Regex::exec_in` (-38 samples) and in `builtins_load::run` (a `Vec::from_iter` that was inlined in main is a call here: +25 samples). Hypothesis: a different inlining choice from the added code in the crate, as in the cost-of-frame-slots entry. Moving the cache-miss code of `parse` into a cold function gave the same counts, so it is not that code.
+- A matrix against the shared base build `base-build origin/main` shows 91 rows over (worst `date_load utc` +4.7%). That is a difference of build environment: main built in this worktree gives the same +4.7% against the shared base. The base for the matrix of a branch must be built in the same path as the branch.
+
+**Not tested.**
+- Gmail with another account or a warm cache.
+- A parse that the worker runs while a second window navigates (one worker, one registry for all pages).
+- Wall time of the first row on an idle machine (load average above 3 in all runs).
+- Modules and dynamic scripts (not parsed ahead by design; they take the old path).
