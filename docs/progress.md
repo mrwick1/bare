@@ -12565,11 +12565,12 @@ An earlier build of the scan (3 passes) gave 30 M for the errors and -0.156 G (m
 - 47 journeys, `journeys.sh compare --clock virtual --runs 3 --pss`: all ok, 0 replay misses; sum of median instructions 73,189.0 M base and 72,677.7 M new (-0.7%, spread 0.2% at most); the largest: `wiktionary-portal` -2.4%, `wikipedia-portal` -2.0%, `wikipedia-main-random` -1.7%, `github-docs-home` -1.3%. cpu_ms -0.7%, wall_ms -0.8%, PSS sum -0.6%. Single PSS rows move by up to 7% (a sample every 20 ms): `devto-home` and `wikipedia-article` rerun with 7 runs: +1.3% and -3.6%, instructions equal.
 - `cargo test --release --workspace --no-fail-fast`: 4,080 pass, 9 fail: the 7 openssl TLS tests (known on main) and `a_hidden_iframe_download_is_saved` and `a_changed_file_starts_again_from_zero` (known flaky under load). `bare-js` alone: 985 pass.
 - `test262_check.sh`: gate ok; the result of each of the 32,838 tests is the same as with the runner of main `ca67571d` (`diff` of `results.txt` is empty). The baseline file is older than main: the gate also prints many "newly passing" directories on main; this change does not update it. `exec_diff.sh`: 79 runs, 0 differences. `keycost.sh`: 276.9 M for each key (`#a1`), 282.2 M (`#f0`), peak RSS 31.0 and 30.9 MiB; main gives the same.
-- Parser against Acorn 8.16.0 (`parse_check cases` on the 2,207 cases, binary of main against the branch): every accepted tree is the same; 13 rejected cases differ in the text and the column of the error only (the inner expression has no parentheses in its span).
+- Parser output of main against the branch (`parse_check cases` on the 2,207 cases, after the error text is normalized): every accepted tree and span is the same; 13 rejected cases differ in the text and the column of the error only (the inner expression has no parentheses in its span). `parse_check dump` of 13 real script files: 0 differences. This is not a comparison with Acorn: the pinned Acorn is 8.15.0 and `parse_check.sh` was not run.
 
 **Limits.** None removed. The step charge of the first location lookup in a script (1 step for 32 bytes) is now higher than the work; it is left. `Limits::max_nodes` counts one node fewer for each parenthesis, so a script near the cap parses with a little room.
 
 **Not tested.**
+- The cost matrix, the journeys, `cargo test --workspace`, `keycost.sh` and the Gmail numbers ran before the last commit (the span of a parenthesized sequence: one `mk_expr_at` call changed). After it, `bare-js` tests (986), `exec_diff.sh` (0 differences) and `test262_check.sh` (gate ok, results equal to main) ran again.
 - Settle of Gmail, peak RSS of Gmail, Gmail with another account or a warm cache.
 - Wall time of the first row (load 1 to 6 from other agents; the first byte is bimodal).
 - Another architecture: the block loop is plain Rust and the compiler makes vectors from it; only x86-64 was measured.
@@ -12578,7 +12579,7 @@ An earlier build of the scan (3 passes) gave 30 M for the errors and -0.156 G (m
 
 **Noticed, not changed.**
 - Three differences from V8 that the tests found on the old code too: `with (o) { (f)() }` calls `f` with the global as `this` (V8: `o`); `delete (o?.p)` does not delete (V8 does); `010` gives 10 in a sloppy function (V8: 8). The tests leave them out.
-- `(a) = function () {}` names the function `a` (spec: it does not, `(a)` is not an identifier reference).
-- `export default () => 1` is made when the module is instantiated, as a declaration is (spec: when the statement runs).
+- `(a) = function () {}` names the function `a` (spec: it does not, `(a)` is not an identifier reference). Main does the same: test262 `language/expressions/assignment/fn-name-lhs-cover.js` fails in both runs.
+- `export default () => 1` is made when the module is instantiated, as a declaration is (spec: when the statement runs). Main does the same: its check is `ExprKind::Function(_)`, as is the new flag (read from the code; no test run).
 - `keycost.sh` and every other script that builds with `cargo` use the current directory and `CARGO_TARGET_DIR`. Run from a worktree with `CARGO_TARGET_DIR` set to a `base-build` directory, it builds the worktree's source into the base. That happened once during this work (`examples/type_load` of `5b0b76b124` was replaced); it was restored from the original build output (`type_load-fe82c79384938f3a`). Run the script of the base from its own `src` directory.
 
