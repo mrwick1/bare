@@ -12333,3 +12333,49 @@ Checks (branch on main `81cb68d1`, archMachine, load 3 to 6):
 Not tested: the stream on a TLS server that sends HTTP/2 data frames of other sizes (Gmail and Wikipedia are HTTP/2, and ran); a document that redirects after a streamed `Head` (a redirect has no body, so it never streams); a navigation that leaves a document while its body still comes (the worker stops at its next read by `Arc::strong_count`; no test checks that the socket closes early); a body with a coding that the client cannot undo and a download keep the old path and have their old tests only; `document.write` and `document.open` during the stream (no script runs before the end, so they run as before); the stream under the virtual clock (off by design).
 
 Noticed, not changed: the encoding sniff holds the first 1,024 bytes, so a first piece smaller than that is not scanned until more comes (a real first piece is 16 KiB); `Parsing` keeps the whole decoded text until the parser has it (the scan reads from an absolute offset; to free the front, both would need a rebased offset); the first inline `<script>` of Gmail could run at about 0.4 s in Chrome and runs at 2.0 s here.
+
+## Gmail: Stage 2 check (2026-11-15)
+
+Owner decision (2026-11-15): verify the Stage 2 hypothesis of PR #567 before any build. This is a measurement task: no product code changed. Main `53d8809b`, archMachine, load average 2 to 8. The full result, with the structure of the document, is in [design-gmail-load.md](design-gmail-load.md) section 8. Safety as in #565 and #567: read only, bare's saved session, Chrome only through CDP on `chrome-auto` (one new tab per run, closed after, no click, no cookie copied), no account detail in any file. The saved documents and raw records are only under `/data/bare-tmp/gmail-verify/`. The scripts and the temporary probe patch are under `/data/bare-tmp/r2/gmail-verify/`.
+
+Hypothesis: the big scripts (`m=b`, `m=a`, `m=ebdd,…`) are added by inline scripts, so bare requests them after `DOMContentLoaded` and Chrome early. Up to 0.8 s.
+
+**Result: half right.** The effect is real; the mechanism is not inline code.
+- The four URLs are in four `<link rel=preload as=script>` tags at bytes 5,807 to 6,882 of the document (the first piece). The same URLs are in `GM_JS_URLS` (inline script #1, byte 70.9 KB). Inline script #3 (bytes 126 to 202 KB) defines `_GM_loadJS`, which makes four `<script>` elements (`async = false`) and appends them to `document.body`. Inline script #7 calls it at byte 233,464 (10% of the body).
+- Chrome requests the four scripts at the first byte of the document (+0.001 s, 3 cold runs), initiator `parser` (the link tags). It has no second request when `_GM_loadJS()` adds the elements. It runs them while the body streams: `_jsl` (all four ran, `_B_init` returned) is 0.60 to 0.86 s before the last byte, and the first row is 0.10 to 0.35 s before the last byte.
+- bare requests them at the last byte + 0.02 s (7 runs). The scan (#567) reads only `<script src>` and stylesheet links. `preload.rs` skips the preload links of a parsed document on purpose. bare runs `_GM_loadJS()` at the last byte + 0.006 s, `_jsl` at +0.71 to +0.81 s, and the first row at +2.21 to +2.29 s.
+
+| Big script | Source in the document | Chrome request (cold, 3 runs) and initiator | bare request (7 runs) |
+| --- | --- | --- | --- |
+| `m=b` | preload link (byte 5,807); `GM_JS_URLS` (70,908); `_GM_loadJS()` (233,464) | first byte +0.001 s (0.440 to 0.610 s after the request); `parser`, line 11 col 1220 | last byte +0.023 s (0.020 to 0.026) = first byte +0.76 s |
+| `m=a` | preload link (6,156); `GM_JS_URLS` (71,244); `_GM_loadJS()` | first byte +0.001 s; `parser`, line 11 col 1580 | last byte +0.023 s (0.020 to 0.026) |
+| `m=m,m_i` | preload link (6,516); `GM_JS_URLS` (71,601); `_GM_loadJS()` | first byte +0.001 s; `parser`, line 11 col 1946 | last byte +0.062 s (0.020 to 0.142) |
+| `m=ebdd,sps,l,spit,t,it,anc` | preload link (6,882); `GM_JS_URLS` (71,964); `_GM_loadJS()` | first byte +0.001 s; `parser`, line 11 col 2337 | last byte +0.069 s (0.020 to 0.151) |
+
+The other 45 to 58 `mail-static` scripts that Chrome loads have the initiator `script` (code inside `m=b`). They are not in the document.
+
+Chrome with its service worker (cache on or off, 6 runs): the scripts are requested at 0.006 to 0.017 s, initiator `parser`; `_jsl` at 0.07 to 0.27 s; first row 1.03 to 1.15 s. bare has no service worker, so the cold runs are the fair comparison.
+
+**What Stage 2 can give at most.** The loader call is at byte 233 KB, 0.23 to 0.32 s after the first byte, so the body has a window of 0.46 s (0.37 to 0.57, 7 runs) left when it runs. The CPU work to `_jsl` is 5.5 to 5.6 G instructions (0.65 s), more than the window. Before the work starts, the CPU idles 0.11 to 0.20 s after the last byte (it waits for the fetch of the scripts). The work after `_jsl` is 10.9 G (1.5 s) and does not need the late pieces of the document (Chrome's row comes before the last byte, and the data of #14 is in before `_jsl` in every bare run).
+
+| Case | Gain on the first row (mean; range) | First row |
+| --- | --- | --- |
+| P: request the four scripts at the first piece (a scan rule), run them as now | 0.13 s (0.09 to 0.18) | about 4.15 s |
+| Stage 2 alone (scripts run while the body streams) | 0.46 s (0.37 to 0.57) | about 3.8 s |
+| Stage 2 and P | 0.58 s (0.50 to 0.70) | about 3.7 s |
+
+The hypothesis said up to 0.8 s. The bound is 0.58 s (0.50 to 0.70 s). The first row of bare stays far from Chrome's 1.2 to 1.5 s: after the scripts there are still 16.5 G of JS on one thread.
+
+Other options (gain, complexity, risk in design section 8.7): an early runner limited to the first inline scripts has the cost and the gain of Stage 2 (inline script #7 appends to `document.body`, so the realm must see the live tree); a prefetch of URLs found in inline script text gets the same request time as P (+0.03 s) from a guess about program text, and could fetch URLs that the page never loads.
+
+**Recommendation: build option P (the preload rule in the scan, about 6 lines and two tests, 0.13 s). Do not build Stage 2 now.** Stage 2 gives at most 0.58 s (13.5%) on one page class (a long body and an early blocking script). It is a rewrite of the front half of the loader that changes the order of effects of every page, and the 47 journeys (virtual clock) cannot show its gain. If the owner wants it, the order is: P, then the JS work, then Stage 2. The window stays about 0.4 to 0.6 s when JS gets faster, so its share of the first row grows. The owner decides.
+
+Method. A probe build of main `53d8809b` with the #565 probe and a dump of each decoded piece of the document with its arrival time (`/data/bare-tmp/r2/gmail-verify/probe-full.patch`, own target dir `/data/bare-tmp/target-gmail-verify`). bare: 7 runs of one fresh `bare-mcp`, `open` with the saved session; 4 runs with the first-row probe (`tr.zA`), 3 with a probe on `window._jsl === true`; `perf stat -I 100` for instructions; request times from `BARE_NET_TRACE`. Chrome 155 through CDP: `Network.requestWillBeSent` (initiator), `Network.dataReceived` (arrival of decoded bytes), `Page.addScriptToEvaluateOnNewDocument` (a setter on `_jsl`, a `MutationObserver` for the first `tr.zA`, `PerformanceResourceTiming` initiator types). 9 runs: cache off with the service worker bypassed (3), cache off (3), cache on (3). The document structure comes from the saved text of one bare run and one cold Chrome run (same offsets for the first 233 KB).
+
+Checks: none to run (docs only). The scripts were run on the numbers above. Each run closed its tab (`Target.closeTarget`); after the 9 runs the target list has the same 8 entries as before them. A Gmail `service_worker` target showed up once during the runs and went away.
+
+Not tested: Stage 2 and P themselves (nothing was built); the gain is the measured window and idle gap, not a run. The idle gap has 0.05 s of error (100 ms bins). A slow network, another account, a larger mailbox. The split of the 0.65 s of work to `_jsl` (fetch decode, top-level run, `_B_init`). Whether a page that needs the last piece of the document would get less.
+
+Noticed, not changed:
+- `m=m,m_i` and `ebdd` are requested 0.02 to 0.15 s after `m=b` and `m=a` in 3 of 7 bare runs, in the same round as `_GM_loadJS()` in the other 4 (hypothesis: a limit of the worker slots in `Net`). P would hide it.
+- `preload.rs` says that a fetch for the preload links of a parsed document "would only cost time and memory" because bare has no HTTP cache. That is true for a link that no script uses, and false for a link whose URL a script takes later, as here. P must keep the first case from costing anything: check that an unused scan download does not hold `Page::pending`.
