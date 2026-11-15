@@ -458,6 +458,28 @@ fn json_uses_the_intrinsic_parse() {
 }
 
 #[test]
+fn response_json_static_makes_a_json_response() {
+    big(|| {
+        let mut b = at(1);
+        // Default status 200, `application/json` body type, and Response.json has length 1.
+        assert_eq!(js(&mut b, "var r = Response.json({enabled: true}); [r.status, r.ok, r.statusText, r.type, r.headers.get('content-type'), r.bodyUsed, r instanceof Response, Response.json.length].join()"), "200,true,,default,application/json,false,true,1");
+        // The body is the JSON text. Init status, statusText and headers apply. An explicit Content-Type wins.
+        assert_eq!(js(&mut b, "var q = Response.json('x', {status: 201, statusText: 'Made', headers: {'X-A': 'b', 'Content-Type': 'application/vnd.x+json'}}); [q.status, q.statusText, q.headers.get('x-a'), q.headers.get('content-type')].join()"), "201,Made,b,application/vnd.x+json");
+        assert_eq!(go(&mut b, "var out = []; Promise.all([Response.json({enabled: true}).text(), Response.json([1, 'a']).json(), Response.json(null).text()]).then(function (v) { out.push(v[0], v[1][1], v[2]); });"), "{\"enabled\":true}|a|null");
+        // `JSON.stringify` is the intrinsic one, as for `json()`.
+        assert_eq!(go(&mut b, "var out = []; var real = JSON.stringify; JSON.stringify = function () { return 'hijack'; }; Response.json([1]).text().then(function (t) { JSON.stringify = real; out.push(t); });"), "[1]");
+        // A status with no body is refused, as in the constructor. A status out of range is a RangeError.
+        assert_eq!(js(&mut b, "Response.json(null, {status: 204})"), "throw:TypeError:Response with null body status cannot have body");
+        assert_eq!(js(&mut b, "Response.json(1, {status: 99})"), "throw:RangeError:init[\"status\"] must be in the range of 200 to 599, inclusive.");
+        // Values that JSON cannot serialize are a TypeError: undefined, a function, a BigInt and a cycle.
+        assert_eq!(js(&mut b, "Response.json(undefined)"), "throw:TypeError:Failed to execute 'json' on 'Response': Value is not JSON serializable");
+        assert_eq!(js(&mut b, "Response.json(function () {})"), "throw:TypeError:Failed to execute 'json' on 'Response': Value is not JSON serializable");
+        assert_eq!(js(&mut b, "var e; try { Response.json(1n); } catch (x) { e = x.name; } e"), "TypeError");
+        assert_eq!(js(&mut b, "var c = {}; c.self = c; var e2; try { Response.json(c); } catch (x) { e2 = x.name; } e2"), "TypeError");
+    });
+}
+
+#[test]
 fn a_gzip_body_is_decoded_and_its_headers_stay() {
     big(|| {
         let srv = serve(|r| match r.path.as_str() {
