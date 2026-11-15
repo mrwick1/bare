@@ -30,6 +30,10 @@
 //! Skipped on purpose: the links that were in the document when the page was parsed. A browser fires their events before any
 //! script can listen, and bare has no HTTP cache, so a fetch would only cost time and memory (the staging login has four font
 //! preloads). A parsed `<script>` or `<link rel=stylesheet>` still loads at its turn.
+//! The one exception is a live document (`scan.rs`): there the preload scan starts the download of a parsed `as=script` or `as=style`
+//! link without `crossorigin`, as a hint for the element that the page code adds later (Gmail names its four big scripts so, and adds
+//! them 10% into the body). No event is fired for it. It sits in `Net::started` until an element with the same URL takes it, and holds
+//! nothing until then (`Net::hints`).
 //!
 //! Not done: `modulepreload`, `type`, `imagesrcset`, `integrity`, `crossorigin` (no CORS mode), `fetchpriority`, `Link:` headers,
 //! `<link rel=prefetch>`, `disabled`. A script text that was taken is not kept: a second script with the same URL fetches again.

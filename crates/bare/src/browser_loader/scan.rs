@@ -4,7 +4,9 @@
 //!
 //! The scan finds what `resources::discover` finds, by the same rules: no `template`, SVG or MathML content, a script with a JavaScript
 //! type and no `nomodule`, a `stylesheet` link that is not `alternate`. A link with a `media` other than `all` or `screen` is left to the
-//! style pass. A `<base href>` counts from where it is: a script before it resolves against the page, so its early download is not used.
+//! style pass. A `<link rel=preload as=script|style>` without `crossorigin` is a hint: its download starts too, and waits for the element that
+//! the page code adds later with the same URL (`Net::fetch` finds it by kind and URL). A hint that no element takes holds no page work
+//! (`Net::hints`). A `<base href>` counts from where it is: a script before it resolves against the page, so its early download is not used.
 
 use super::{Net, sheets};
 use crate::browser::Browser;
@@ -69,22 +71,33 @@ impl Scan {
             "script" => {
                 let classic = attr("type").is_none_or(|t| t.is_empty() || JS_TYPES.iter().any(|j| t.eq_ignore_ascii_case(j)));
                 if let Some(src) = attr("src").filter(|s| classic && !s.is_empty() && attr("nomodule").is_none()) {
-                    self.fetch(Expect::Script, src);
+                    self.fetch(Expect::Script, src, false);
                 }
             }
             "link" => {
                 let rel = attr("rel").unwrap_or("");
                 let has = |w: &str| rel.split_ascii_whitespace().any(|r| r.eq_ignore_ascii_case(w));
                 let media = attr("media").is_none_or(|m| m.eq_ignore_ascii_case("all") || m.eq_ignore_ascii_case("screen"));
-                if let Some(href) = attr("href").filter(|h| has("stylesheet") && !has("alternate") && media && attr("disabled").is_none() && !h.is_empty()) {
-                    self.fetch(Expect::Style, href);
+                let Some(href) = attr("href").filter(|h| media && attr("disabled").is_none() && !h.is_empty()) else { return };
+                if has("stylesheet") && !has("alternate") {
+                    self.fetch(Expect::Style, href, false);
+                } else if has("preload") && attr("crossorigin").is_none() {
+                    // A hint: the page names a file that its code adds later (the loader of Gmail). It has no element yet, so the download
+                    // waits in `started` for the element that asks for the same URL, and it holds nothing until then (`Net::hints`).
+                    // `crossorigin` is another credentials mode than a script without it. bare has one mode, so such a link starts nothing.
+                    match attr("as") {
+                        Some(a) if a.eq_ignore_ascii_case("script") => self.fetch(Expect::Script, href, true),
+                        Some(a) if a.eq_ignore_ascii_case("style") => self.fetch(Expect::Style, href, true),
+                        _ => {}
+                    }
                 }
             }
             _ => {}
         }
     }
 
-    fn fetch(&mut self, expect: Expect, raw: &str) {
+    /// `hint`: the URL comes from a preload link, not from an element of the document.
+    fn fetch(&mut self, expect: Expect, raw: &str, hint: bool) {
         let Ok(url) = self.base.as_ref().unwrap_or(&self.page).join(raw) else { return };
         if (self.page.scheme == bare_url::Scheme::Https && url.scheme == bare_url::Scheme::Http) || self.net.started.len() >= self.lim.max_fetches {
             return;
@@ -93,7 +106,15 @@ impl Scan {
         if expect == Expect::Style {
             lim.max_resource_bytes = lim.max_resource_bytes.min(sheets::MAX_BODY);
         }
+        let key = Net::key(expect, &url);
+        let new = !self.net.started.contains_key(&key);
         self.net.start(expect, &url, &lim, self.deadline, 0);
+        // An element of the document with the URL of a hint is a real reference: from then on it holds the page like any other.
+        if !hint {
+            self.net.hints.remove(&key);
+        } else if new && self.net.started.contains_key(&key) {
+            self.net.hints.insert(key);
+        }
     }
 }
 

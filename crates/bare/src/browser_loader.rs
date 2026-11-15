@@ -1019,7 +1019,7 @@ impl Browser {
                     "Style" => "stylesheet",
                     _ => "preload",
                 };
-                let holds = !loaded || n.waits.contains(k) || next.as_ref() == Some(k);
+                let holds = n.waits.contains(k) || next.as_ref() == Some(k) || (!loaded && !n.hints.contains(k));
                 let age = n.born.get(k).map_or(Duration::ZERO, |b| b.elapsed());
                 out.push(crate::page::Waiting { kind, method: "GET", url: url.to_string(), age, holds, state: "" });
             }
@@ -1063,6 +1063,9 @@ struct Net {
     waits: Vec<String>,
     /// When each download of `started` began (its age for `Page::pending`).
     born: HashMap<String, Instant>,
+    /// The keys in `started` that only a `<link rel=preload>` of the document asked for (`scan.rs`). They hold the page for nothing until
+    /// an element takes the file: a hint that no element uses must not delay `load` or the settle.
+    hints: HashSet<String>,
 }
 
 /// Downloads that are started and not taken at once. The workers run `MAX_WORKERS` of them at a time (Chrome opens 6 connections for
@@ -1072,7 +1075,7 @@ const WINDOW: usize = 32;
 
 impl Net {
     fn new(client: Client) -> Net {
-        Net { client, started: HashMap::new(), direct: HashSet::default(), done: Arc::default(), waits: Vec::new(), born: HashMap::new() }
+        Net { client, started: HashMap::new(), direct: HashSet::default(), done: Arc::default(), waits: Vec::new(), born: HashMap::new(), hints: HashSet::new() }
     }
 
     fn tag(expect: Expect, url: &Url) -> u64 {
@@ -1120,6 +1123,7 @@ impl Net {
         }
         let key = Net::key(target.expect, &target.url);
         self.born.remove(&key);
+        self.hints.remove(&key);
         match self.started.remove(&key) {
             // The text counts against the total cap now, with what the page keeps now (it was read with the room of the time it started).
             Some(task) => match task.wait() {

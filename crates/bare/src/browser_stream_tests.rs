@@ -29,11 +29,13 @@ struct Plan {
     /// The header says this many bytes more than the pieces hold, then the connection closes.
     short_by: usize,
     files: Vec<(&'static str, &'static str)>,
+    /// This file answers 3 s late.
+    stall: Option<&'static str>,
 }
 
 impl Plan {
     fn new(pieces: &[&[u8]]) -> Plan {
-        Plan { pieces: pieces.iter().map(|p| p.to_vec()).collect(), content_type: "text/html; charset=utf-8", hold: None, gap: Duration::ZERO, short_by: 0, files: Vec::new() }
+        Plan { pieces: pieces.iter().map(|p| p.to_vec()).collect(), content_type: "text/html; charset=utf-8", hold: None, gap: Duration::ZERO, short_by: 0, files: Vec::new(), stall: None }
     }
 }
 
@@ -65,8 +67,11 @@ fn answer(mut c: TcpStream, plan: &Plan, log: &Mutex<Vec<String>>) {
     let path = head.split_whitespace().nth(1).unwrap_or("/").to_string();
     log.lock().unwrap().push(format!("GET {path}"));
     if path != "/" {
+        if plan.stall == Some(path.as_str()) {
+            std::thread::sleep(Duration::from_secs(3));
+        }
         let (status, ct, body) = match plan.files.iter().find(|f| f.0 == path) {
-            Some(f) => ("200 OK", "application/javascript", f.1),
+            Some(f) => ("200 OK", if path.ends_with(".css") { "text/css" } else { "application/javascript" }, f.1),
             None => ("404 Not Found", "text/plain", "no"),
         };
         let _ = write!(c, "HTTP/1.1 {status}\r\nContent-Type: {ct}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
@@ -221,5 +226,116 @@ fn a_document_over_the_limit_or_cut_short_fails_to_load() {
         let srv = slow(plan);
         let (_, stop) = load(Session::new(cfg(srv.port, true)));
         assert!(matches!(stop, SessionStop::LoadFailed(_)), "{stop:?}");
+    });
+}
+
+/// A document whose first piece names `/a.js` in a preload link, and whose second piece adds the script by code, as the page loader of Gmail does.
+/// The server holds the rest of the document until `/a.js` is requested (it gives up after 5 s), so a request after the end shows in the log.
+fn preload_page(link: &str, body: &str) -> Plan {
+    let mut first = pad();
+    first.extend_from_slice(format!("<head>{link}</head><body>").as_bytes());
+    let mut plan = Plan::new(&[&first, body.as_bytes(), b"</body>"]);
+    plan.hold = Some((0, "/a.js"));
+    plan.files = vec![("/a.js", "localStorage.setItem('a', 'ran')"), ("/s.css", "p{color:red}")];
+    plan
+}
+
+const ADD_SCRIPT: &str = "<script>var s=document.createElement('script');s.src='/a.js';s.async=false;document.body.appendChild(s)</script>";
+
+fn count(log: &[String], what: &str) -> usize {
+    log.iter().filter(|l| *l == what).count()
+}
+
+#[test]
+fn a_preload_link_in_the_first_piece_starts_the_script_that_a_later_script_adds() {
+    big(|| {
+        let srv = slow(preload_page("<link rel=preload as=script href=/a.js>", ADD_SCRIPT));
+        let (s, stop) = load(Session::new(cfg(srv.port, true)));
+        assert_eq!(stop, SessionStop::Page(crate::Stop::Settled));
+        let log = srv.log.lock().unwrap().clone();
+        let at = |what: &str| log.iter().position(|l| l == what).unwrap_or_else(|| panic!("{what} not in {log:?}"));
+        assert!(at("GET /a.js") < at("piece 1"), "the preloaded script was requested after the document went on: {log:?}");
+        assert_eq!(count(&log, "GET /a.js"), 1, "{log:?}");
+        assert_eq!(item(&s, srv.port, "a").as_deref(), Some("ran"));
+    });
+}
+
+#[test]
+fn a_preload_link_with_another_credentials_mode_is_not_taken_by_the_script() {
+    big(|| {
+        // `crossorigin` asks for a request of another credentials mode than a script without it. bare has one mode for scripts, so this
+        // link starts nothing: the script requests its own file, and only when it is added (after the end of the document).
+        let mut plan = preload_page("<link rel=preload as=script crossorigin href=/a.js>", ADD_SCRIPT);
+        plan.hold = None;
+        let srv = slow(plan);
+        let (s, stop) = load(Session::new(cfg(srv.port, true)));
+        assert_eq!(stop, SessionStop::Page(crate::Stop::Settled));
+        let log = srv.log.lock().unwrap().clone();
+        let at = |what: &str| log.iter().position(|l| l == what).unwrap_or_else(|| panic!("{what} not in {log:?}"));
+        assert!(at("GET /a.js") > at("end"), "{log:?}");
+        assert_eq!(count(&log, "GET /a.js"), 1, "{log:?}");
+        assert_eq!(item(&s, srv.port, "a").as_deref(), Some("ran"));
+    });
+}
+
+#[test]
+fn a_preload_link_that_no_script_takes_does_not_delay_load_or_hold_the_page() {
+    big(|| {
+        let mut plan = preload_page("<link rel=preload as=script href=/a.js><link rel=preload as=style href=/s.css>", "<p id=x>x</p><script>localStorage.setItem('inline', 'ran')</script>");
+        plan.hold = None;
+        plan.stall = Some("/a.js");
+        let srv = slow(plan);
+        let t = Instant::now();
+        let (mut s, stop) = load(Session::new(cfg(srv.port, true)));
+        assert_eq!(stop, SessionStop::Page(crate::Stop::Settled));
+        assert!(t.elapsed() < Duration::from_millis(2500), "load waited for the unused preload: {:?}", t.elapsed());
+        assert!(s.browser().is_some_and(|b| b.loaded()));
+        assert_eq!(item(&s, srv.port, "inline").as_deref(), Some("ran"));
+        let log = srv.log.lock().unwrap().clone();
+        assert_eq!(count(&log, "GET /a.js"), 1, "the preload did not start: {log:?}");
+    });
+}
+
+/// What `Page::pending` holds for before `load`: a scan that read `html` (the server answers `/a.js` 3 s late) is adopted by a page that has
+/// not loaded.
+fn held_by(html: &str) -> Vec<(String, bool)> {
+    let mut plan = Plan::new(&[]);
+    plan.stall = Some("/a.js");
+    plan.files = vec![("/a.js", "1")];
+    let srv = slow(plan);
+    let page = bare_url::Url::parse(&format!("http://127.0.0.1:{}/", srv.port)).unwrap();
+    let mut scan = crate::browser_loader::Scan::new(bare_net::http::Client::new(), page, crate::resources::Limits::default(), Instant::now() + Duration::from_secs(20));
+    scan.step(html, Instant::now() + Duration::from_secs(1), false);
+    let mut b = crate::browser::Browser::new(bare_html::tree::parse("<p>"), Default::default(), Default::default(), Default::default()).unwrap();
+    b.adopt_scan(scan);
+    assert!(!b.loaded());
+    let mut waiting = Vec::new();
+    b.waiting_loads(&mut waiting);
+    waiting.iter().map(|w| (w.url.rsplit('/').next().unwrap().to_string(), w.holds)).collect()
+}
+
+#[test]
+fn a_preload_hint_holds_the_page_only_when_an_element_of_the_document_names_the_file_too() {
+    big(|| {
+        let a = |holds| vec![("a.js".to_string(), holds)];
+        assert_eq!(held_by("<link rel=preload as=script href=/a.js>"), a(false));
+        assert_eq!(held_by("<link rel=preload as=script href=/a.js><script src=/a.js></script>"), a(true));
+        assert_eq!(held_by("<script src=/a.js></script><link rel=preload as=script href=/a.js>"), a(true));
+    });
+}
+
+#[test]
+fn a_style_preload_link_in_the_first_piece_starts_the_sheet_that_a_later_link_adds() {
+    big(|| {
+        let add = "<script>var l=document.createElement('link');l.rel='stylesheet';l.href='/s.css';document.head.appendChild(l)</script>";
+        let mut plan = preload_page("<link rel=preload as=style href=/s.css>", add);
+        plan.hold = Some((0, "/s.css"));
+        let srv = slow(plan);
+        let (_, stop) = load(Session::new(cfg(srv.port, true)));
+        assert_eq!(stop, SessionStop::Page(crate::Stop::Settled));
+        let log = srv.log.lock().unwrap().clone();
+        let at = |what: &str| log.iter().position(|l| l == what).unwrap_or_else(|| panic!("{what} not in {log:?}"));
+        assert!(at("GET /s.css") < at("piece 1"), "{log:?}");
+        assert_eq!(count(&log, "GET /s.css"), 1, "{log:?}");
     });
 }
