@@ -53,7 +53,7 @@
 //! Results and diagnostics name `scheme://host:port/path` only: no query, fragment, header, body or source.
 
 use crate::browser::{Browser, BrowserLimits};
-use crate::browser_fetch::FetchLimits;
+use crate::browser_fetch::{FetchLimits, metadata_site, potentially_trustworthy};
 use crate::browser_loader::{Input, PageConfig, PageLimits, PageResult, SLICE, Scan, Stop, deadline_after, label};
 use crate::browser_navigation::{Body, NavLimits, NavigationKind, WebStorage};
 use bare_html::{encoding, tree};
@@ -182,17 +182,17 @@ enum How {
 
 /// A document to load.
 struct Next {
-    /// The site of the page that asked for this load (`cookie::site_of`), or `None`: the user did (the address bar, a reload, history).
+    /// The URL of the page that asked for this load (`initiator`), or `None`: the user did (the address bar, a reload, history).
     from: Option<String>,
     url: String,
     body: Option<Body>,
     how: How,
 }
 
-/// The site of the page that started a navigation, for the `SameSite` rules.
+/// The URL of the page that started a navigation, with no fragment. `load_document` takes its site for the `SameSite` rules and its origin for
+/// `Sec-Fetch-Site`. A URL that does not parse counts as another site.
 fn initiator(from: &str) -> Option<String> {
-    // A URL that does not parse counts as another site.
-    Some(Url::parse(from.split('#').next().unwrap_or("")).map_or_else(|_| String::new(), |u| bare_net::cookie::site_of(&u)))
+    Some(from.split('#').next().unwrap_or("").to_string())
 }
 
 pub struct Session {
@@ -366,17 +366,36 @@ fn load_document(client: &mut Client, url: &str, from: Option<&str>, body: Optio
     let mut fragment = fragment;
     let mut body = body;
     // Cookies: a navigation that a page of another site started sends `Lax` cookies on a GET, and a chain that leaves that site stays cross-site.
-    let mut from = from;
+    // `from` is the URL of the page that started the load. The cookie rules want its site; `""` is a chain that left the site.
+    let page = from.and_then(|f| Url::parse(f).ok());
+    let from_site = from.map(|_| page.as_ref().map_or_else(String::new, bare_net::cookie::site_of));
+    let mut from = from_site.as_deref();
+    // Fetch Metadata of a navigation: `none` for a load that no page started (`from` is `None`), else the relation to the page that started it
+    // (a page that did not parse: another site). A redirect keeps the least trusted relation.
+    let mut site = match (from, &page) {
+        (None, _) => "none",
+        (Some(_), Some(_)) => "same-origin",
+        (Some(_), None) => "cross-site",
+    };
+    let doc = page.or_else(|| Url::parse(bare).ok());
     for hop in 0..=lim.max_redirects {
         if Instant::now() >= deadline {
             return Err("the time limit passed".into());
         }
         let cookies = Cookies { on: true, ctx: Ctx::Navigation(from) };
         let accept = ("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
-        let post_headers = [accept, ("Content-Type", body.map_or("", |b| b.content_type.as_str()))];
+        if let Some(doc) = &doc {
+            site = metadata_site(doc, &cur, site);
+        }
+        // Chrome sends `Upgrade-Insecure-Requests` on every navigation, the Fetch Metadata only to a trustworthy target, and `Sec-Fetch-User` for a
+        // navigation that the user started.
+        let t = [("Upgrade-Insecure-Requests", "1"), ("Sec-Fetch-Dest", "document"), ("Sec-Fetch-Mode", "navigate"), ("Sec-Fetch-Site", site), ("Sec-Fetch-User", "?1")];
+        let n = if !potentially_trustworthy(&cur) { 1 } else if site == "none" { 5 } else { 4 };
+        let get_headers = [accept, t[0], t[1], t[2], t[3], t[4]];
+        let post_headers = [accept, ("Content-Type", body.map_or("", |b| b.content_type.as_str())), t[0], t[1], t[2], t[3], t[4]];
         let req = match body {
-            Some(b) => Request { cookies, ..Request::post(&cur, &post_headers, &b.bytes) },
-            None => Request { cookies, headers: &[accept], ..Request::get(&cur) },
+            Some(b) => Request { cookies, ..Request::post(&cur, &post_headers[..2 + n], &b.bytes) },
+            None => Request { cookies, headers: &get_headers[..1 + n], ..Request::get(&cur) },
         };
         let resp = match grab {
             None => bare_net::trace::blocked(|| client.send_once(&req, lim.max_document_bytes)).map_err(|_| "network error".to_string())?,

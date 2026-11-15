@@ -699,3 +699,41 @@ fn a_live_turn_with_its_slice_used_up_still_runs_one_script() {
         assert_eq!((get(&s, &srv, "a").as_deref(), get(&s, &srv, "b").as_deref()), (Some("1"), Some("2")));
     });
 }
+
+// ---- Fetch Metadata of a document request (the headers that Chrome sends on a navigation) ----
+
+fn nav_head(r: &crate::browser_fetch_tests::Rec) -> Vec<String> {
+    ["upgrade-insecure-requests", "sec-fetch-dest", "sec-fetch-mode", "sec-fetch-site", "sec-fetch-user"].iter().map(|n| r.header(n).join(",")).collect()
+}
+
+#[test]
+fn a_load_that_no_page_started_sends_the_navigation_metadata() {
+    big(|| {
+        let srv = crate::browser_fetch_tests::serve(|_| crate::browser_fetch_tests::reply(200, &[("Content-Type", "text/html")], b"<p>x</p>"));
+        let mut s = Session::new(cfg(format!("http://127.0.0.1:{}/", srv.port)));
+        s.run();
+        let recs = srv.recs();
+        assert_eq!(nav_head(&recs[0]), ["1", "document", "navigate", "none", "?1"]);
+    });
+}
+
+#[test]
+fn a_navigation_by_the_page_is_same_origin_and_has_no_user_flag_and_a_redirect_keeps_the_least_trusted_site() {
+    big(|| {
+        use crate::browser_fetch_tests::{reply, serve};
+        let other = serve(|_| reply(200, &[("Content-Type", "text/html")], b"<p>far</p>"));
+        let far = format!("http://localhost:{}/far", other.port);
+        let srv = serve(move |r| match r.path.as_str() {
+            "/" => reply(200, &[("Content-Type", "text/html")], b"<script>location.assign('/next')</script>"),
+            "/next" => reply(302, &[("Location", &far)], b""),
+            _ => reply(404, &[], b""),
+        });
+        let mut s = Session::new(cfg(format!("http://127.0.0.1:{}/", srv.port)));
+        s.run();
+        let recs = srv.recs();
+        let next = recs.iter().find(|r| r.path == "/next").unwrap();
+        assert_eq!(nav_head(next), ["1", "document", "navigate", "same-origin", ""]);
+        // The redirect leaves the site: the next hop is cross-site.
+        assert_eq!(nav_head(&other.recs()[0]), ["1", "document", "navigate", "cross-site", ""]);
+    });
+}

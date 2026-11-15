@@ -2290,3 +2290,10 @@ Owner task 2026-11-15: the 16 MiB sheet ramp hung since PR #541 (cause: see prog
 - A turn ends at its slice only after it ran one task or one round (`Run::sliced`). Work that comes before the first task (a style pass) cannot use the whole slice and leave the turn with no progress.
 - Not chosen: a longer slice or a slice that grows when a turn makes no progress (it is a budget that hides the design flaw: a slower machine or a bigger sheet crosses it again); skipping the style pass of a turn when the page is unchanged (`still()`: not safe, a finished preload is not in its stamp); no text copy in `style_availability` (a gain of time for this page, but a turn that is late for another reason would still make no progress).
 - No limit added, none removed.
+
+## Gmail load: build design 1, then design 2 (2026-11-15)
+
+Owner decision (2026-11-15), from `design-gmail-load.md` (#565): build design 1 (make bare's document request equal to Chrome's), then design 2 (stream the document into the parser and start its scripts at the first bytes). Designs C1 to C4 (the JS call path, a parse thread, a code cache, bytecode) stay behind them.
+
+- Design 1 result: a document request sends the navigation headers of Chrome (`Upgrade-Insecure-Requests`, `Sec-Fetch-Dest`, `-Mode`, `-Site`, `-User`). The first byte of the Gmail document did not move: no header, no encoding, no address and no cookie set that we could test changed it (see progress.md, "Gmail PR 1"). The server wait is bimodal (0.45 s or 1.1 s). Design 2 does not depend on it: it removes the wait for the end of the body, whatever the first byte.
+- Not chosen: copy Chrome's full header set (client hints, `x-client-data`, `Priority`): no effect measured, and `x-client-data` is a Chrome variations id that bare must not claim. A `zstd` decoder: no effect on the server's wait, and a new decoder.
