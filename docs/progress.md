@@ -12486,3 +12486,54 @@ Noticed, not changed:
 - `<&str as Pattern>::is_contained_in` is 2.5% after the first row (about 2.2 G at settle). It is in the bindings or style path. Not JS.
 - `get clientWidth` costs 4.79 G at settle (91 calls). This is forced layout, not JS.
 - `Program` holds `Rc` in `ast.rs` (lines 584, 604, 635, 637), so it is not `Send`. P1 needs a hand-over wrapper, and P5 needs relocatable arenas.
+
+## Gmail P2: a dictionary read hits at any position (2026-11-15)
+
+Owner decision (2026-11-15): build P1, P4 and P2 of `design-gmail-js.md` now in parallel, then P3; decide on P6 (bytecode) after P3. This section is P2.
+
+**Step 1: the count.** A probe build (not committed; diff and counters in `/data/bare-tmp/r2/p2/`) classified every member read that left the inline hit. Main `ca67571d`, Gmail inbox, saved bare session, read only. First row, 2 runs (agree to 0.3%); settle, 1 run.
+
+| | First row | Settle |
+| --- | --- | --- |
+| Slow reads (out of the inline hit) | 3.41 M | 26.2 M |
+| Chain hits (prototype method, absent key): not misses | 0.99 M | 6.3 M |
+| Misses on a dictionary receiver | 2.06 M (91% of misses) | 17.8 M (91%) |
+| Misses on a shaped receiver | 0.22 M | 1.76 M |
+| Dictionary misses with the key at position 256 or more | 99.4% | 99.6% |
+| Dictionary misses on the same object as the last read at the site | 99% | 99.5% |
+| Dictionary misses that the position hint of the design would hit (another object, same position) | 4.4 K | 16 K |
+| Shaped misses that a 4-shape entry or a 4,096-entry stub table would hit (simulated) | 0.13 M | 1.3 M |
+
+The gate (dictionary refills more than half) is met, but the cause is different from the design guess. The `IC_DICT` entry held the key position in a `u8`. A dictionary of 256 or more keys never got an entry, so every read of it took `get_dict` and a hash lookup. The design's position hint (read another object at the same position) hits 0.2% of the reads: not built. A polymorphic entry or a stub table would remove 0.13 M refills (about 45 M instructions, 0.3%): not built, it does not pay for the memory.
+
+**Built.** `Ic::depth` is a `u16`. An `IC_DICT` entry holds a position up to 65,535. `Ic` stays 24 bytes (test `an_entry_is_24_bytes_and_the_empty_entry_never_hits` in `heap_shape.rs`; `depth`, `kind` and `misses` share 4 bytes). 14 lines of code. Memory per site: no change.
+
+**Tests (written first, the counter test failed before the change).** `a_site_that_reads_a_dictionary_of_over_255_keys_hits_inline` (100 reads, 100 inline hits, 0 fills). Case `big_dict` in `eval_ic_tests.rs` (expected text from Node 22): a 600-key dictionary read at one site through a write, a delete, a re-add, 100 deletes, 100 adds (positions move), a getter, a read-only data property, `Object.freeze`, a second object with the key at another position, and a chain of prototypes with a shadow, a delete and a prototype swap. The debug build checks every hit against the plain walk (`ic_verify`): the `ic_tests` pass there too.
+
+**Numbers, Gmail** (plain build of main `ca67571d` and of the branch, with one measurement patch on both that reads the page-thread instruction counter at the first row; 5 pairs, alternating, load average 3.5 to 16 from other agents). Instructions on the page thread from the page start to the first row (`tr.zA` present):
+
+| | base | new |
+| --- | --- | --- |
+| median | 16.424 G | 15.681 G |
+| range | 16.254 to 16.430 | 15.612 to 15.701 |
+
+Change: -0.743 G (-4.5%). The design hypothesis was -0.3 to -0.6 G. Slow reads at the first row fall from 3.41 M to 1.35 M; dictionary misses from 2.06 M to 25 K. At settle the counter gives 79 to 110 G in both builds (the settle point moves from run to run), so no claim on settle: the probe build shows slow reads from 26.2 M to 7.6 M (1 run each). Wall time: the time from the end of the document to the first row is 2.0 to 5.6 s in the new build and 2.1 to 2.7 s in the base build under that load: no claim (the document end moved 1.5 to 2.4 s: the first byte is bimodal; not paired by mode).
+
+**Checks.**
+- `cargo test --release --workspace --no-fail-fast`: 4,076 pass, 8 fail: the 7 openssl TLS tests (known on main) and `a_hidden_iframe_download_is_saved` (known flaky).
+- `cost_matrix.sh` against main `ca67571d` (built with `--workspace --examples -p bare-stress`, then `-p bare-drive -p bare-stress`): 803 rows, 0 rows over +0.5% under both allocators, 0 under one; mean glibc +0.001%, jemalloc +0.000%; 2 rows fail to run (`parse_load deep 1` and `deep 10`, stack overflow, as on main).
+- 47 journeys, `journeys.sh compare --clock virtual --runs 3 --pss`: all ok, 0 replay misses; sum of median instructions 73,191.0 M base and 73,192.7 M new (+0.0%, largest journey change +0.2% spread). No journey reads a dictionary of 256 or more keys often enough to move.
+- `test262_check.sh`: gate ok (exit 0). `exec_diff.sh`: 79 runs, 0 differences. `keycost.sh`: 278.3 M for each key (`#a1`), 283.6 M (`#f0`), peak RSS 30.9 MiB at 20 keys and 31.0 MiB at 50 keys (same as before: the typing page has no big dictionary).
+
+**Not tested.**
+- Peak RSS of Gmail (the entry is 24 bytes as before; no new table).
+- A dictionary of more than 65,535 keys (the entry is not filled; the read takes the old path).
+- The bytecode lane (it has its own entries).
+- Gmail with another account or a warm cache.
+- Which object is the big dictionary (hypothesis: a namespace object of a few thousand keys).
+- Wall time of the first row (load average above 3.5 in all runs).
+
+Noticed, not changed.
+- 0.99 M reads at the first row (6.3 M at settle) are chain hits (a method on the prototype, an absent key). They leave the inline `ic_own` and go through `member_ic` and `get_ic` each time. A second inline test for the prototype kind could remove the call and the stats update (hypothesis; not measured).
+- 1.3 M settle reads miss because the site saw 2 to 4 shapes in turn (polymorphic); 0.13 M at the first row.
+- The `BARE_PROBE_JS` environment variable that earlier probe builds used is not in main: `trace::probe()` is set only from code. Probe runs need a local patch.
