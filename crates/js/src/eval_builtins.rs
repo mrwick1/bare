@@ -1626,7 +1626,7 @@ impl<'p> Interp<'p> {
     /// The array `exec` returns: captures, then `index`, `input`, `groups`. `r` is the regexp that made `m`.
     fn match_result(&mut self, r: ObjId, s: StrId, m: &rx::Match, named: bool) -> Res<Value> {
         let spans = &m.spans;
-        let a = h!(self, self.heap.new_array(Some(self.array_proto)));
+        let a = h!(self, self.heap.new_array_cap(Some(self.array_proto), spans.len()));
         for (i, sp) in spans.iter().enumerate() {
             let v = match *sp {
                 Some((x, y)) => Value::String(self.sub(s, x, y)?),
