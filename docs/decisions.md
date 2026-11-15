@@ -2342,3 +2342,14 @@ Owner decision (2026-11-15): build P1, P4 and P2 of `design-gmail-js.md` now in 
 - Why not the design's position hint (read another object of the same layout at the same position): it would hit 0.2% of the reads.
 - Why not a polymorphic entry or the shared stub table: the count gives 0.13 M shaped misses that they could hit at the first row (about 0.3% of the instructions). The entry would grow, or a 64 KB table would be added, for that.
 - Not chosen: an entry with a 32-bit position (`Ic` would grow past 24 bytes; no Gmail dictionary has 65,536 keys, to verify).
+
+## Gmail P4: the cost of an error and the Paren node (2026-11-15)
+
+Owner decision (2026-11-15): build P1, P4 and P2 of `design-gmail-js.md` now in parallel (three agents, separate code), then P3; decide on P6 (bytecode) after P3.
+
+- Built: the location scan (`lex::scan`) reads a block of 32 bytes in one vector pass when the block holds no CR and no E2 byte. The Gmail first row spends 109.5 M instructions on `Error` construction (23 to 28 calls) and now 14.0 M. The cost was the one-time pass of `location_marks` over each big script (19 instructions per byte), not the work of each error.
+- Built: `ExprKind::Paren` is removed. The parser keeps a sorted list of the ids that had parentheses, for the checks that need it (target, arrow, directive, label, `**`, `??`, `for ((async) of`, and the flag of `export default`). First row: -0.165 G (-1.1%) with the error change (7 pairs); 47 journeys -0.7%; 803 cost rows, 0 over.
+- Why a side list and not a flag in the node: `Expr` is 24 bytes with no free bit (a test fixes it), and the answer is needed in the parser only. An evaluator needs no flag: the shapes `Chain`, `Member`, `Seq` and `Ident` already hold the meaning.
+- Why not a lazy `stack` text (V8): after the scan fix the marks are 14 M for the whole first row (0.09%) and an error costs 20 K in a small script. The side table, the property hook and the GC pruning are not worth that.
+- Why not marks made only up to the asked offset: about half of 14 M for a growing table with interior mutability.
+- Not chosen: a `Paren` node kept only where a flag matters (`(a, b)`): the `Seq` node already says it.

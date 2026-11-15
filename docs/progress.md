@@ -12537,3 +12537,48 @@ Noticed, not changed.
 - 0.99 M reads at the first row (6.3 M at settle) are chain hits (a method on the prototype, an absent key). They leave the inline `ic_own` and go through `member_ic` and `get_ic` each time. A second inline test for the prototype kind could remove the call and the stats update (hypothesis; not measured).
 - 1.3 M settle reads miss because the site saw 2 to 4 shapes in turn (polymorphic); 0.13 M at the first row.
 - The `BARE_PROBE_JS` environment variable that earlier probe builds used is not in main: `trace::probe()` is set only from code. Probe runs need a local patch.
+
+## Gmail P4: the cost of an error and the Paren node (2026-11-15)
+
+Owner decision (2026-11-15): build P1, P4 and P2 of `design-gmail-js.md` now in parallel (three agents, separate code), then P3; decide on P6 (bytecode) after P3. This section is P4. Decision record: `decisions.md`, design: `design-gmail-js.md` (P4, "Result").
+
+**What the cost of an error was.** `ErrorCtor` took 3.8 M instructions per call on the Gmail first row. The cause is not the work of one error. The first position lookup in a script makes the location marks of the whole script (`lex::location_marks`, one pass at 19 instructions per byte). A 1.5 MB one-line script: 28.6 M for the marks, then 54 K for each later error (a scan of up to 4 KiB). A small script: 20 K for each error. Gmail has three scripts of 4.9 MB in all. The lazy `stack` text (V8) would remove the work, but the work is now small (see below), so it is not built.
+
+**Built.**
+1. `lex::scan` reads 32 bytes in one pass when the block has no CR (13) and no E2 byte (a possible LS or PS). The pass counts LF, the units, and sets a flag for the two special bytes; a block with one of them takes the byte loop as before. A block with LF takes the units after the last LF. 1.5 MB marks: 28.6 M to 3.0 M (9.6 times fewer, 2 instructions per byte). I tried 16 and 64 bytes and three passes over the block: slower or equal.
+2. `ExprKind::Paren` is removed. `parse_paren` returns the inner expression. The parser keeps `parens`, the sorted ids of the expressions that were in parentheses (an expression gets its id after its parts, so the list is sorted without a sort; `arena_truncate` cuts it back for a dropped lazy body). It is asked in: `pattern_of` (a target in parentheses is a name or a member only, and no binding), `is_arrow`, the directive and the label of an expression statement, `**` after a unary or `await`, `??` beside `&&` or `||`, `for ((async) of`, and the flag of `export default (function () {})`. `StmtKind::ExportDefault(e, bool)`: true when the function is not in parentheses (it is made at instantiation). The evaluator and the bytecode generator lost their `Paren` arms and `unparen`/`strip` helpers.
+
+**Tests (written first, they passed on the old code and still pass).** `parse::tests::parentheses_keep_their_meaning`: 143 texts, each with the status that Node gives (accept or reject). `eval::paren_tests`: 64 scripts with the value that Node gives (the `this` of `(o.f)()`, `(o?.f)()`, `((o.f))()`, tagged templates and `with`-less cases; `(o?.b).c` and `(o?.b)()` on null; `delete`; `typeof (nope)`; name inference through parentheses and `(0, f)`; `toString` text; targets of `=`, `+=`, `++`, destructuring and `for ((a) of`; `**`; `??`; arrows; directives; `new (o.C)`), and the stack position of a call with a parenthesized callee (`(g)()`, `((g))()`, `(o.g)()`, `(o?.g)()`, `(0, g)()`, `(g)\`x\``, `( g )( )`). `lex::tests::marked_locations_match_the_reference_on_random_text`: 6 random texts of 8 KB with runs of plain text, CR, LF, CRLF, LS, PS, E2 and wide characters, every offset compared with the character reference. After the change test262 found one more case (`language/module-code/instn-named-bndng-dflt-expr`, `export default (function () {})` was hoisted); `a_default_function_in_parentheses_is_made_when_its_statement_runs` covers it.
+
+**Numbers, Gmail first row** (saved bare session, read only, no click; probe builds that read the page-thread instruction counter, on main `5b0b76b1` and on the branch; 7 alternating pairs; load average 1 to 4; the raw output holds session URLs and stays under `/data/bare-tmp/r2/p4/raw/`):
+
+| | base | new |
+| --- | --- | --- |
+| page-thread instructions to the first row, median | 15.509 G | 15.344 G (-0.165 G, -1.1%) |
+| range of the 7 runs | 15.153 to 15.675 | 14.969 to 15.505 |
+| `Error` construction at the first row (19 to 28 calls) | 102.7 to 112.4 M | 13.0 to 14.7 M (-87%) |
+
+An earlier build of the scan (3 passes) gave 30 M for the errors and -0.156 G (median 15.673 to 15.517, 7 pairs). The error probe explains -95.5 M of the -0.165 G; the rest (-70 M) fits 1.13 M evaluations of `Paren` at about 64 instructions each (hypothesis: not counted on its own in Gmail). A synthetic loop with 9 parentheses in each pass: 7,430 to 6,850 instructions for each pass (-7.8%, `paren_cost`, 200,000 passes, not committed). The first row moves from run to run by 0.5 G (the first byte of the document is bimodal), so the gain is a median of 7 pairs, not a claim for one run. Settle: not measured (the settle point moves from run to run, as in P2).
+
+**Checks.**
+- `cost_matrix.sh` against main `5b0b76b1` (built with `--workspace --examples`, then `-p bare-drive -p bare-stress`): 803 rows, 0 rows over +0.5% under both allocators; mean glibc -0.275%, jemalloc +0.007%; 1 noise candidate (`loader_load blocking 10`: glibc +0.62%, jemalloc +0.01%); 2 rows fail to run (`parse_load deep 1` and `10`, stack overflow, as on main). The best rows: `date_load utc` -4.5%, `parse_load malformed` -3.0%, `eval_load throws` -2.6% (errors with positions).
+- 47 journeys, `journeys.sh compare --clock virtual --runs 3 --pss`: all ok, 0 replay misses; sum of median instructions 73,189.0 M base and 72,677.7 M new (-0.7%, spread 0.2% at most); the largest: `wiktionary-portal` -2.4%, `wikipedia-portal` -2.0%, `wikipedia-main-random` -1.7%, `github-docs-home` -1.3%. cpu_ms -0.7%, wall_ms -0.8%, PSS sum -0.6%. Single PSS rows move by up to 7% (a sample every 20 ms): `devto-home` and `wikipedia-article` rerun with 7 runs: +1.3% and -3.6%, instructions equal.
+- `cargo test --release --workspace --no-fail-fast`: 4,080 pass, 9 fail: the 7 openssl TLS tests (known on main) and `a_hidden_iframe_download_is_saved` and `a_changed_file_starts_again_from_zero` (known flaky under load). `bare-js` alone: 985 pass.
+- `test262_check.sh`: gate ok; the result of each of the 32,838 tests is the same as with the runner of main `ca67571d` (`diff` of `results.txt` is empty). The baseline file is older than main: the gate also prints many "newly passing" directories on main; this change does not update it. `exec_diff.sh`: 79 runs, 0 differences. `keycost.sh`: 276.9 M for each key (`#a1`), 282.2 M (`#f0`), peak RSS 31.0 and 30.9 MiB; main gives the same.
+- Parser against Acorn 8.16.0 (`parse_check cases` on the 2,207 cases, binary of main against the branch): every accepted tree is the same; 13 rejected cases differ in the text and the column of the error only (the inner expression has no parentheses in its span).
+
+**Limits.** None removed. The step charge of the first location lookup in a script (1 step for 32 bytes) is now higher than the work; it is left. `Limits::max_nodes` counts one node fewer for each parenthesis, so a script near the cap parses with a little room.
+
+**Not tested.**
+- Settle of Gmail, peak RSS of Gmail, Gmail with another account or a warm cache.
+- Wall time of the first row (load 1 to 6 from other agents; the first byte is bimodal).
+- Another architecture: the block loop is plain Rust and the compiler makes vectors from it; only x86-64 was measured.
+- A script with many LS or PS characters in its first 32-byte blocks (they take the byte loop; correct by test, not measured).
+- The bytecode lane: it has no `Paren` arms any more and `exec_diff` shows no difference, but it runs 5% of the Gmail calls.
+
+**Noticed, not changed.**
+- Three differences from V8 that the tests found on the old code too: `with (o) { (f)() }` calls `f` with the global as `this` (V8: `o`); `delete (o?.p)` does not delete (V8 does); `010` gives 10 in a sloppy function (V8: 8). The tests leave them out.
+- `(a) = function () {}` names the function `a` (spec: it does not, `(a)` is not an identifier reference).
+- `export default () => 1` is made when the module is instantiated, as a declaration is (spec: when the statement runs).
+- `keycost.sh` and every other script that builds with `cargo` use the current directory and `CARGO_TARGET_DIR`. Run from a worktree with `CARGO_TARGET_DIR` set to a `base-build` directory, it builds the worktree's source into the base. That happened once during this work (`examples/type_load` of `5b0b76b124` was replaced); it was restored from the original build output (`type_load-fe82c79384938f3a`). Run the script of the base from its own `src` directory.
+
