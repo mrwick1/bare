@@ -12698,3 +12698,7 @@ The owner set Gmail load time as the main task on 2026-11-15.
 - `fetch_load post 10` is +2.3% against `f6415364` (hypothesis: Fetch Metadata headers, PR #479).
 - GC inside a long call: design in `docs/design-gc-in-call.md`, parked.
 - `Ext::re_tab_bytes` is dead code outside tests.
+
+### Owner decision on P1 (2026-11-15)
+
+The owner grants a cost exception for 4 rows: `builtins_load replace 1` (+0.99%), `replace 10` (+1.15%), `scan 1` (+0.85%) and `scan 10` (+0.97%). The reason: the cause is the codegen-unit split of `bare-js` (with `-C codegen-units=1` main and the branch are equal), not new work in those rows. P1 cuts the Gmail page thread to the first row from 15.50 G to 14.16 G (-8.6%). The PR merges as it is. Work stays paused after this merge (see "Pause after the perf goal and the first Gmail work (2026-11-15)"). The next step on resume is P3.
