@@ -4114,6 +4114,10 @@ mod iterator_tests;
 mod stack_tests;
 
 #[cfg(test)]
+#[path = "eval_paren_tests.rs"]
+mod paren_tests;
+
+#[cfg(test)]
 #[path = "eval_weak_tests.rs"]
 mod weak_tests;
 
