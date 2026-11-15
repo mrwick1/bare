@@ -2326,3 +2326,10 @@ Owner decision (2026-11-15): build the preload rule (option P of `design-gmail-l
 - Credentials mode: bare has one mode for scripts and sheets. A link with `crossorigin` starts nothing and the script makes its own request. `integrity` is not checked anywhere in bare, so a reused response cannot differ in effect.
 - Not chosen: Stage 2 (a rewrite of the front half of the loader for at most 0.58 s on one class of page, and a change of the order of effects for every page); a prefetch from URL strings in inline script text; fetching `crossorigin` links under a second key (a script with `crossorigin` cannot be told apart in the scan).
 - Not changed: a link and a script that both have `crossorigin` request twice (Chrome reuses the response).
+## Gmail: JS cost design (2026-11-15)
+
+Owner decision (2026-11-15): design how to cut the JS cost of Gmail. No build yet.
+
+- Result (`design-gmail-js.md`, `progress.md` "Gmail JS cost: design"): the JS interpreter takes 70% of the first row (17.3 G) and 77% of the settle. Tree-walk dispatch is 30%. Calls are 10.5% (653 instructions per frame call). Parse is 13.8% of the first row. 41% of the member reads refill the one-entry IC. The cost is flat, so no single hot function is worth a patch.
+- Recommendation (the owner decides): build P1 (parse on arrival on a worker, -1.4 G on the page thread), P4 (small removals), then P2 (dictionary IC hint, measure first), then P3 (call path). Together -3 G (-18%). Decide on P6 (a hot tier, -20 to -24%) after P3.
+- Not chosen: more patches of single hot functions (the top function is 5.7% of function self); the old byte lane as it is (it refuses lazy functions and runs 5% of the Gmail calls); a baseline JIT (not portable, and no gain proof here); a disk cache before P1 (it helps repeat visits only).
