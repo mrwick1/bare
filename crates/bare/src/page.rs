@@ -443,6 +443,10 @@ impl Page {
             }
             let (ran, next) = self.tick();
             if ran {
+                // A page that always has work (a due timer, a turn that waits for a script) must still end at the limit.
+                if bare_net::vclock::instant() >= end {
+                    return Err("the time limit passed before load".into());
+                }
                 continue;
             }
             let Some(next) = next.filter(|&n| n < end) else {

@@ -12169,3 +12169,28 @@ Wall time on an idle machine. Windows and macOS. The pass cost on `4a27b7a9` (so
 ### Noticed, not changed
 
 - Each turn of `Run::resume` calls `feed_styles` without the `still()` check that `feed_if_ran` uses, and `style_availability` makes a copy of every sheet text in `plan` that it throws away. A page with a 16 MiB sheet pays about 9 ms for each turn for this. A guard on `still()` is not safe as it is: a preload that finished with no change of the tree is not in the stamp. Not touched.
+
+## Fix: `wait_load` checks its time limit after a tick that ran (2026-11-15)
+
+Second part of the task of "Fix: a live turn runs one task before its slice can end it" (PR #562): the driver `--timeout` did not stop the page of `sheety_16383`.
+
+### Cause (verified)
+
+`Page::wait_load(limit)` ran `tick` in a loop and `continue`d when the tick ran. It checked `limit` only after a tick that did nothing. A page that always has work never reaches that check: here a split document that waits for a script has a timer that is due, so `work()` is true and each tick "ran". `Session::finish` calls `wait_load(END_LOAD_WAIT)` (5 s) after the last step, so a driver run whose steps all passed spun in it with no end, whatever `--timeout` said. Seen on the binary of `294f1c01` (the page livelock of PR #562) with `--timeout 3000` and steps of `open` and two `expect js`: 90 s with no result; the page thread used the CPU and the main thread waited on the join; a debug build showed the three steps pass and more than 600 ticks inside the one last call.
+
+### Change
+
+In `wait_load`, a tick that ran also checks the limit (`vclock::instant() >= end`) and returns the same error as the idle case ("the time limit passed before load"). Before: the loop ended at the limit only after an idle tick (O(ticks until idle), unbounded). After: it ends at the first tick after the limit.
+
+### Test
+
+`crates/drive/tests/wait_load_limit.rs`: a page with a due timer and a script that the server holds for 3 s; `wait_load(300 ms)` must return an error in under 1.5 s. Before: it took 3.0 s and the page loaded (the test failed). After: 0.30 s.
+
+### Checks
+
+- `cargo test --release --workspace --no-fail-fast`: 4,062 passed, 9 failed: the 7 known openssl TLS tests, `a_hidden_iframe_download_is_saved` and `a_changed_file_starts_again_from_zero` (known flaky under load).
+- Cost matrix against main `241fa13d` (805 rows, 803 measured, both allocators): 0 rows over +0.5% under both allocators; `parse_load deep 1` and `deep 10` fail to run (known).
+
+### Not tested
+
+The end-to-end case (driver `--timeout` on the livelocked page) after the fix: PR #562 removed the livelock, so no page that I have hangs any more; the test stands for it. The 47 journeys and the ramps (the added check runs once for each tick that ran; no instruction row moved in the matrix). Windows and macOS.
