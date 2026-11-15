@@ -509,7 +509,7 @@ impl<'p> Interp<'p> {
                 self.sw_stmt(w, body);
                 w.cur = saved;
             }
-            StmtKind::ExportDefault(e) => self.sw_expr(w, e),
+            StmtKind::ExportDefault(e, _) => self.sw_expr(w, e),
             StmtKind::Try { block, handler, finalizer } => {
                 self.sw_stmt(w, block);
                 if let Some(c) = handler {
@@ -608,7 +608,7 @@ impl<'p> Interp<'p> {
             }
             ExprKind::Function(f) => self.sw_func(w, f),
             ExprKind::Class(c) => self.sw_class(w, c),
-            ExprKind::Unary { arg, .. } | ExprKind::Update { arg, .. } | ExprKind::Spread(arg) | ExprKind::Paren(arg) | ExprKind::Chain(arg) | ExprKind::Await(arg) => self.sw_expr(w, arg),
+            ExprKind::Unary { arg, .. } | ExprKind::Update { arg, .. } | ExprKind::Spread(arg) | ExprKind::Chain(arg) | ExprKind::Await(arg) => self.sw_expr(w, arg),
             ExprKind::Binary { left, right, .. } | ExprKind::Logical { left, right, .. } => {
                 self.sw_expr(w, left);
                 self.sw_expr(w, right);

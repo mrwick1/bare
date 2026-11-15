@@ -194,17 +194,10 @@ impl Gen<'_, '_> {
         }
     }
 
-    fn strip(&self, mut e: ExprId) -> ExprId {
-        while let ExprKind::Paren(i) = self.prog.expr(e).kind {
-            e = i;
-        }
-        e
-    }
-
     /// The register that holds the value of `e`. A local variable is its own register when `keep` is true (nothing that runs
     /// before the use assigns it); any other expression is evaluated into a new register.
     pub(super) fn operand(&mut self, e: ExprId, keep: bool) -> G<u32> {
-        let x = self.strip(e);
+        let x = e;
         if keep && self.rf.is_some() && matches!(self.prog.expr(x).kind, ExprKind::Ident) {
             let n = self.it.cc.expr_name[x.index()];
             if let Site::Reg(r) = self.site(x.index() as u32, n)? {
@@ -222,7 +215,7 @@ impl Gen<'_, '_> {
         let prog = &self.prog;
         match prog.expr(e).kind {
             ExprKind::Ident | ExprKind::This | ExprKind::Null | ExprKind::Bool(_) | ExprKind::Number(_) | ExprKind::String => true,
-            ExprKind::Paren(i) | ExprKind::Unary { arg: i, .. } | ExprKind::Member { obj: i, .. } => self.pure(i),
+            ExprKind::Unary { arg: i, .. } | ExprKind::Member { obj: i, .. } => self.pure(i),
             ExprKind::Binary { left, right, .. } | ExprKind::Logical { left, right, .. } | ExprKind::Index { obj: left, index: right, .. } => self.pure(left) && self.pure(right),
             ExprKind::Cond { test, cons, alt } => self.pure(test) && self.pure(cons) && self.pure(alt),
             ExprKind::Call { callee, args, .. } | ExprKind::New { callee, args } => self.pure(callee) && prog.list(args).all(|a| self.pure(a)),
@@ -232,11 +225,11 @@ impl Gen<'_, '_> {
 
     /// The constant of a number literal (also `-1`), when it is one of the first 256 constants.
     fn num_konst(&mut self, e: ExprId) -> Option<u32> {
-        let x = self.strip(e);
+        let x = e;
         let n = match self.prog.expr(x).kind {
             ExprKind::Number(base) => self.it.num_lit(self.prog.expr(x).span, base),
             ExprKind::Unary { op: UnaryOp::Neg, arg } => {
-                let a = self.strip(arg);
+                let a = arg;
                 match self.prog.expr(a).kind {
                     ExprKind::Number(base) => -self.it.num_lit(self.prog.expr(a).span, base),
                     _ => return None,
@@ -259,7 +252,7 @@ impl Gen<'_, '_> {
     /// test goes into a register, and `JmpIfNot` tests it. Patch it with `patch`.
     pub(super) fn jump_if_false(&mut self, test: ExprId) -> G<usize> {
         let mark = self.top;
-        let t = self.strip(test);
+        let t = test;
         if self.rf.is_some()
             && let ExprKind::Binary { op, left, right } = self.prog.expr(t).kind
         {
@@ -299,7 +292,6 @@ impl Gen<'_, '_> {
     /// Whether `e` writes its register once, as its last op, so the register may be a variable that `e` also reads.
     fn direct_ok(&self, e: ExprId) -> bool {
         match self.prog.expr(e).kind {
-            ExprKind::Paren(i) => self.direct_ok(i),
             ExprKind::Ident | ExprKind::This | ExprKind::Null | ExprKind::Bool(_) | ExprKind::Number(_) | ExprKind::String => true,
             ExprKind::Binary { .. } | ExprKind::Member { optional: false, .. } | ExprKind::Index { optional: false, .. } | ExprKind::Call { optional: false, .. } | ExprKind::New { .. } => true,
             ExprKind::Unary { op, .. } => !matches!(op, UnaryOp::Typeof | UnaryOp::Void | UnaryOp::Delete),
@@ -323,7 +315,7 @@ impl Gen<'_, '_> {
     /// An expression whose value nobody reads. A register function skips the copy of an assignment and the temporary of `i++`.
     pub(super) fn expr_void(&mut self, e: ExprId) -> G<()> {
         let mark = self.top;
-        let x = self.strip(e);
+        let x = e;
         if self.rf.is_some() {
             let saved = std::mem::replace(&mut self.pos, self.prog.expr(x).span.start);
             let done = match self.prog.expr(x).kind {
@@ -364,7 +356,7 @@ impl Gen<'_, '_> {
 
     /// The register of an identifier (in parentheses too) that is a variable of the function.
     fn reg_of(&mut self, e: ExprId, write: bool) -> G<Option<u32>> {
-        let x = self.strip(e);
+        let x = e;
         if !matches!(self.prog.expr(x).kind, ExprKind::Ident) {
             return Ok(None);
         }
@@ -489,7 +481,7 @@ impl Gen<'_, '_> {
 
     /// `return e`. A conditional returns from each branch.
     pub(super) fn return_expr(&mut self, e: ExprId) -> G<()> {
-        let x = self.strip(e);
+        let x = e;
         if let ExprKind::Cond { test, cons, alt } = self.prog.expr(x).kind {
             let j = self.jump_if_false(test)?;
             self.return_expr(cons)?;

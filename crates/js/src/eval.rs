@@ -1590,7 +1590,7 @@ impl<'p> Interp<'p> {
                 self.sc_end(sc);
                 r?
             }
-            StmtKind::ExportDefault(e) => self.w_expr(e, fs, ac)?,
+            StmtKind::ExportDefault(e, _) => self.w_expr(e, fs, ac)?,
         }
         Ok(())
     }
@@ -1630,7 +1630,7 @@ impl<'p> Interp<'p> {
                 }
             }
             ExprKind::Unary { op: UnaryOp::Delete, arg } => {
-                if matches!(prog.expr(arg).kind, ExprKind::Ident | ExprKind::Paren(_)) {
+                if matches!(prog.expr(arg).kind, ExprKind::Ident) {
                     self.fl |= FL_NOFR;
                 }
                 self.w_expr(arg, fs, ac)?
@@ -1670,7 +1670,7 @@ impl<'p> Interp<'p> {
                 self.w_func(f, ac)?
             }
             ExprKind::Class(c) => self.w_class(c, fs, ac)?,
-            ExprKind::Unary { arg, .. } | ExprKind::Update { arg, .. } | ExprKind::Spread(arg) | ExprKind::Paren(arg) | ExprKind::Chain(arg) => self.w_expr(arg, fs, ac)?,
+            ExprKind::Unary { arg, .. } | ExprKind::Update { arg, .. } | ExprKind::Spread(arg) | ExprKind::Chain(arg) => self.w_expr(arg, fs, ac)?,
             ExprKind::Binary { left, right, .. } | ExprKind::Logical { left, right, .. } => {
                 self.w_expr(left, fs, ac)?;
                 self.w_expr(right, fs, ac)?;
@@ -2010,7 +2010,7 @@ impl<'p> Interp<'p> {
                 }
                 StmtKind::Class(c) => self.declare_class(c),
                 // `export default function () {}` is hoisted like a declaration, under the name "default".
-                StmtKind::ExportDefault(e) => {
+                StmtKind::ExportDefault(e, true) => {
                     if let ExprKind::Function(fid) = prog.expr(e).kind {
                         let s = h!(self, self.heap.intern_str("default"));
                         let f = self.make_closure(fid, Some(s), false)?;
@@ -2830,7 +2830,6 @@ impl<'p> Interp<'p> {
         match ex.kind {
             ExprKind::Function(fid) if self.prog.func(fid).name.is_none() => self.make_closure(fid, name, true),
             ExprKind::Class(c) if self.prog.class(c).name.is_none() => self.eval_class(c, name),
-            ExprKind::Paren(inner) => self.eval_named(inner, name),
             _ => self.operand(e),
         }
     }
@@ -2839,7 +2838,7 @@ impl<'p> Interp<'p> {
     #[inline(always)]
     fn eval_named_n(&mut self, e: ExprId, n: Option<u32>) -> Res<Value> {
         match (self.prog.expr(e).kind, n) {
-            (ExprKind::Function(_) | ExprKind::Class(_) | ExprKind::Paren(_), Some(n)) => {
+            (ExprKind::Function(_) | ExprKind::Class(_), Some(n)) => {
                 let s = self.name_str(n)?;
                 self.eval_named(e, Some(s))
             }
@@ -2929,7 +2928,6 @@ impl<'p> Interp<'p> {
                 Ok(Some((r, Value::Undefined)))
             }
             ExprKind::Tagged { tag, quasi } => self.link_tagged(e, tag, quasi),
-            ExprKind::Paren(inner) if matches!(self.unparen(inner), ExprKind::Member { .. } | ExprKind::Index { .. } | ExprKind::PrivateMember { .. } | ExprKind::Chain(_)) => self.link(inner),
             ExprKind::Chain(inner) => Ok(Some(self.link(inner)?.unwrap_or((Value::Undefined, Value::Undefined)))),
             _ => Ok(Some((self.eval_expr(e)?, Value::Undefined))),
         }
@@ -2968,13 +2966,6 @@ impl<'p> Interp<'p> {
         let r = r?;
         self.arg_pool.push(argv);
         Ok(Some((r, Value::Undefined)))
-    }
-
-    fn unparen(&self, mut e: ExprId) -> ExprKind {
-        while let ExprKind::Paren(i) = self.prog.expr(e).kind {
-            e = i;
-        }
-        self.prog.expr(e).kind
     }
 
     fn eval_expr(&mut self, e: ExprId) -> Res<Value> {
@@ -3046,7 +3037,6 @@ impl<'p> Interp<'p> {
             ExprKind::ImportMeta => self.import_meta(),
             ExprKind::New { callee, args } => self.eval_new(e, callee, args),
             ExprKind::Seq(l) => self.eval_seq(l),
-            ExprKind::Paren(inner) => self.eval_expr(inner),
             ExprKind::Spread(_) | ExprKind::Hole => Err(unsupported("spread or hole outside a list", ex.span)),
             // The first walk rejects these before anything runs.
             _ => Err(unsupported("expression", ex.span)),
@@ -3325,11 +3315,8 @@ impl<'p> Interp<'p> {
     fn eval_unary(&mut self, op: UnaryOp, arg: ExprId) -> Res<Value> {
         match op {
             UnaryOp::Typeof => {
-                if let ExprKind::Ident = self.unparen(arg) {
-                    let mut a = arg;
-                    while let ExprKind::Paren(i) = self.prog.expr(a).kind {
-                        a = i;
-                    }
+                if let ExprKind::Ident = self.prog.expr(arg).kind {
+                    let a = arg;
                     let n = self.cc.expr_name[a.index()];
                     if self.with_any {
                         return self.typeof_with(n, a);
@@ -3377,10 +3364,7 @@ impl<'p> Interp<'p> {
     }
 
     fn eval_delete(&mut self, arg: ExprId) -> Res<Value> {
-        let mut a = arg;
-        while let ExprKind::Paren(i) = self.prog.expr(a).kind {
-            a = i;
-        }
+        let a = arg;
         match self.prog.expr(a).kind {
             ExprKind::Member { .. } | ExprKind::Index { .. } => {
                 let (base, key) = self.member_ref(a)?;
@@ -3439,7 +3423,6 @@ impl<'p> Interp<'p> {
                 }
                 Ok((base, self.coerce_key(iv)?))
             }
-            ExprKind::Paren(i) => self.member_ref(i),
             _ => Err(unsupported("assignment target", ex.span)),
         }
     }
@@ -3448,7 +3431,6 @@ impl<'p> Interp<'p> {
         let ex = *self.prog.expr(e);
         match ex.kind {
             ExprKind::Ident => Ok(Ref::Name(self.cc.expr_name[e.index()], e.index() as u32)),
-            ExprKind::Paren(i) => self.expr_ref(i),
             ExprKind::Member { .. } | ExprKind::Index { .. } | ExprKind::PrivateMember { .. } => self.member_target(e),
             _ => Err(unsupported("update target", ex.span)),
         }
@@ -4112,6 +4094,10 @@ mod iterator_tests;
 #[cfg(test)]
 #[path = "eval_stack_tests.rs"]
 mod stack_tests;
+
+#[cfg(test)]
+#[path = "eval_paren_tests.rs"]
+mod paren_tests;
 
 #[cfg(test)]
 #[path = "eval_weak_tests.rs"]

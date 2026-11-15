@@ -179,7 +179,7 @@ impl Gen<'_, '_> {
             StmtKind::Class(_) => Err("class"),
             StmtKind::ForIn { .. } | StmtKind::ForOf { .. } => Err("for-in or for-of"),
             StmtKind::With { .. } => Err("with"),
-            StmtKind::ExportDefault(_) => Err("module code"),
+            StmtKind::ExportDefault(..) => Err("module code"),
             StmtKind::Debugger => Err("debugger"),
         }
     }

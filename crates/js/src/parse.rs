@@ -225,6 +225,7 @@ fn parse_counted<'a>(source: &'a str, mut limits: Limits, used: &mut u32, module
         cover: Cover::default(),
         no_in: false,
         spread_commas: Vec::new(),
+        parens: Vec::new(),
         for_await_head: false,
         await_pos: 0,
         module,
@@ -277,6 +278,7 @@ pub(crate) fn parse_lazy_function(src: &Rc<str>, marks: &crate::ast::Marks, modu
         cover: Cover::default(),
         no_in: false,
         spread_commas: Vec::new(),
+        parens: Vec::new(),
         for_await_head: false,
         await_pos: 0,
         module,
@@ -456,6 +458,10 @@ struct Parser<'a> {
     no_in: bool,
     /// Start offsets of arrays and objects that have a comma after a final `...x` (invalid as a pattern).
     spread_commas: Vec<u32>,
+    /// The ids of the expressions that were in parentheses, in increasing order: the tree has no node for `( )`, and a target, an arrow,
+    /// a directive, a label, `**` and `??` need to know. An expression gets its id after the ids of its parts, so a parenthesis that closes
+    /// later has the larger id.
+    parens: Vec<u32>,
     /// True while the head of a `for await (` is parsed: `async of` is then not an arrow (Acorn: `potentialArrowInForAwait`).
     for_await_head: bool,
     /// Start + 1 of the first `await` expression since the last reset; 0 when none (Acorn: `awaitPos`).
@@ -500,6 +506,7 @@ struct ArenaMark {
     elems: usize,
     lists: usize,
     lazies: usize,
+    parens: usize,
 }
 
 /// Add a node to an arena. The caller has already checked the node limit.
@@ -1265,13 +1272,14 @@ impl<'a> Parser<'a> {
                     } else {
                         let id = self.parse_class(cs, false)?;
                         let e = self.mk_expr(ExprKind::Class(id), cs)?;
-                        self.mk_stmt(StmtKind::ExportDefault(e), cs)?
+                        self.mk_stmt(StmtKind::ExportDefault(e, false), cs)?
                     }
                 } else {
                     let es = self.tok.start;
                     let e = self.parse_assign(false, false)?;
                     self.semicolon()?;
-                    self.mk_stmt(StmtKind::ExportDefault(e), es)?
+                    let hoist = matches!(self.ex(e).kind, ExprKind::Function(_)) && !self.is_paren(e);
+                    self.mk_stmt(StmtKind::ExportDefault(e, hoist), es)?
                 };
                 let source = match self.p.stmts[st.index()].kind {
                     StmtKind::Function(f) => ExportSource::Local(self.p.func(f).name.unwrap_or_default()),
@@ -1574,11 +1582,11 @@ impl<'a> Parser<'a> {
     fn parse_expr_statement(&mut self, start: u32, prologue: bool, sc: Sc) -> R<StmtId> {
         let e = self.parse_expression(false)?;
         let ex = self.ex(e);
-        if matches!(ex.kind, ExprKind::Ident) && self.is(P::Colon) {
+        if matches!(ex.kind, ExprKind::Ident) && self.is(P::Colon) && !self.is_paren(e) {
             return self.parse_labeled(start, ex.span, sc);
         }
         self.semicolon()?;
-        if prologue && matches!(ex.kind, ExprKind::String) {
+        if prologue && matches!(ex.kind, ExprKind::String) && !self.is_paren(e) {
             return self.mk_stmt(StmtKind::Directive(e), start);
         }
         self.mk_stmt(StmtKind::Expr(e), start)
@@ -1903,7 +1911,7 @@ impl<'a> Parser<'a> {
         let of = self.is_word("of");
         if of || self.is_kw(K::In) {
             let ex = self.ex(first);
-            if of && !is_await && matches!(ex.kind, ExprKind::Ident) && self.p.text(ex.span) == "async" {
+            if of && !is_await && matches!(ex.kind, ExprKind::Ident) && self.p.text(ex.span) == "async" && !self.is_paren(first) {
                 return Err(self.syntax("the left-hand side of a for-of loop may not be 'async'", ex.span));
             }
             if is_await && !of {
@@ -2100,7 +2108,6 @@ impl<'a> Parser<'a> {
     fn check_simple_target(&self, e: ExprId, msg: &'static str) -> R<()> {
         let ex = self.ex(e);
         match ex.kind {
-            ExprKind::Paren(inner) => self.check_simple_target(inner, msg),
             ExprKind::Ident => self.check_assign_name(ex.span),
             ExprKind::Member { optional: false, .. } | ExprKind::Index { optional: false, .. } | ExprKind::PrivateMember { optional: false, .. } => Ok(()),
             _ => Err(self.syntax(msg, ex.span)),
@@ -2118,6 +2125,12 @@ impl<'a> Parser<'a> {
     fn pattern_of_inner(&mut self, e: ExprId, binding: bool) -> R<PatId> {
         let ex = self.ex(e);
         let (s, en) = (ex.span.start, ex.span.end);
+        // In parentheses only a name or a member access is a target (`(a) = 1`, `[(a.b)] = x`), and not a binding: `({a}) = 1` is an error.
+        if self.is_paren(e)
+            && (binding || !matches!(ex.kind, ExprKind::Ident | ExprKind::Member { optional: false, .. } | ExprKind::Index { optional: false, .. } | ExprKind::PrivateMember { optional: false, .. }))
+        {
+            return Err(self.syntax("invalid parenthesized assignment pattern", ex.span));
+        }
         match ex.kind {
             ExprKind::Ident => {
                 if !binding {
@@ -2127,18 +2140,6 @@ impl<'a> Parser<'a> {
             }
             ExprKind::Member { optional: false, .. } | ExprKind::Index { optional: false, .. } | ExprKind::PrivateMember { optional: false, .. } if !binding => {
                 self.mk_pat(PatKind::Member(e), s, en)
-            }
-            ExprKind::Paren(inner) if !binding => {
-                let mut i = inner;
-                while let ExprKind::Paren(x) = self.ex(i).kind {
-                    i = x;
-                }
-                match self.ex(i).kind {
-                    ExprKind::Ident | ExprKind::Member { optional: false, .. } | ExprKind::Index { optional: false, .. } | ExprKind::PrivateMember { optional: false, .. } => {
-                        self.pattern_of(i, false)
-                    }
-                    _ => Err(self.syntax("invalid parenthesized assignment pattern", ex.span)),
-                }
             }
             ExprKind::Array(list) => {
                 let base = self.lbegin();
@@ -2272,7 +2273,15 @@ impl<'a> Parser<'a> {
     }
 
     fn is_arrow(&self, e: ExprId) -> bool {
-        matches!(self.ex(e).kind, ExprKind::Function(f) if self.p.func(f).kind == FuncKind::Arrow)
+        matches!(self.ex(e).kind, ExprKind::Function(f) if self.p.func(f).kind == FuncKind::Arrow) && !self.is_paren(e)
+    }
+
+    /// Was the expression written in parentheses? The newest expressions are the common question: one comparison answers them.
+    fn is_paren(&self, e: ExprId) -> bool {
+        match self.parens.last() {
+            Some(&last) if e.raw() <= last => self.parens.binary_search(&e.raw()).is_ok(),
+            _ => false,
+        }
     }
 
     /// AssignmentExpression. `pass`: this is an element of an array or object, or an item that may become
@@ -2372,7 +2381,7 @@ impl<'a> Parser<'a> {
                 break;
             }
             let is_exp = matches!(op, Op::B(BinaryOp::Exp));
-            if is_exp && matches!(self.ex(left).kind, ExprKind::Unary { .. } | ExprKind::Await(_)) {
+            if is_exp && matches!(self.ex(left).kind, ExprKind::Unary { .. } | ExprKind::Await(_)) && !self.is_paren(left) {
                 return Err(self.syntax("unary operator before '**' needs parentheses", self.ex(left).span));
             }
             self.advance()?;
@@ -2391,6 +2400,7 @@ impl<'a> Parser<'a> {
                     for side in [left, right] {
                         if let ExprKind::Logical { op: o, .. } = self.ex(side).kind
                             && (o == LogicalOp::Nullish) != (op == LogicalOp::Nullish)
+                            && !self.is_paren(side)
                         {
                             return Err(self.syntax("'??' cannot be mixed with '&&' or '||' without parentheses", self.ex(side).span));
                         }
@@ -2428,21 +2438,12 @@ impl<'a> Parser<'a> {
             let arg = self.parse_unary()?;
             if op == UnaryOp::Delete {
                 let mut a = arg;
-                while let ExprKind::Paren(i) | ExprKind::Chain(i) = self.ex(a).kind {
+                while let ExprKind::Chain(i) = self.ex(a).kind {
                     a = i;
                 }
                 let ax = self.ex(a);
                 if self.strict && matches!(self.ex(arg).kind, ExprKind::Ident) {
                     return Err(self.early("deleting a variable in strict mode", ax.span));
-                }
-                if self.strict {
-                    let mut p = arg;
-                    while let ExprKind::Paren(i) = self.ex(p).kind {
-                        p = i;
-                    }
-                    if matches!(self.ex(p).kind, ExprKind::Ident) {
-                        return Err(self.early("deleting a variable in strict mode", ax.span));
-                    }
                 }
                 if matches!(ax.kind, ExprKind::PrivateMember { .. }) {
                     return Err(self.early("private fields cannot be deleted", ax.span));
@@ -2857,6 +2858,7 @@ impl<'a> Parser<'a> {
         let old_await = std::mem::take(&mut self.await_pos);
         self.advance()?; // `(`
         self.eager_at = self.tok.start;
+        let first_at = self.tok.start;
         let base = self.lbegin();
         let mut rest: Option<PatId> = None;
         let mut trailing_comma = false;
@@ -2884,6 +2886,7 @@ impl<'a> Parser<'a> {
             }
         }
         let close = self.tok;
+        let last_end = self.prev_end;
         self.advance()?; // `)`
         let is_arrow = self.is(P::Arrow) && !self.tok.newline_before;
         if is_arrow {
@@ -2928,13 +2931,12 @@ impl<'a> Parser<'a> {
             self.scratch.truncate(base);
             id
         } else {
-            let first = Id::<Expr>::from_raw_pub(self.scratch[base]);
-            let last = Id::<Expr>::from_raw_pub(self.scratch[self.scratch.len() - 1]);
-            let (s, e) = (self.ex(first).span.start, self.ex(last).span.end);
+            // The sequence starts at the first token and ends at the last one, as the items do: an item may be in parentheses itself.
             let list = self.lend(base);
-            self.mk_expr_at(ExprKind::Seq(list), s, e)?
+            self.mk_expr_at(ExprKind::Seq(list), first_at, last_end)?
         };
-        self.mk_expr(ExprKind::Paren(inner), start)
+        self.parens.push(inner.raw());
+        Ok(inner)
     }
 
     /// A literal of JSON values only, from the current `[` or `{` on, as one `Data` node (see [`crate::data_lit`]). Only in a parse with lazy
@@ -3184,7 +3186,7 @@ impl<'a> Parser<'a> {
         if anon && self.is(P::LParen) {
             let f = self.parse_function_rest(start, None, FuncKind::Normal, is_async, is_gen)?;
             let e = self.mk_expr(ExprKind::Function(f), start)?;
-            return self.mk_stmt(StmtKind::ExportDefault(e), start);
+            return self.mk_stmt(StmtKind::ExportDefault(e, true), start);
         }
         if self.tok.kind != Kind::Ident {
             return Err(self.unexpected());
@@ -3363,12 +3365,13 @@ impl<'a> Parser<'a> {
         ArenaMark {
             exprs: p.exprs.len(), stmts: p.stmts.len(), pats: p.pats.len(), funcs: p.funcs.len(), classes: p.classes.len(), props: p.props.len(),
             pat_props: p.pat_props.len(), templates: p.templates.len(), quasis: p.quasis.len(), decls: p.decls.len(), cases: p.cases.len(),
-            catches: p.catches.len(), elems: p.elems.len(), lists: p.lists.len(), lazies: p.lazies().len(),
+            catches: p.catches.len(), elems: p.elems.len(), lists: p.lists.len(), lazies: p.lazies().len(), parens: self.parens.len(),
         }
     }
 
     /// Drop every node made since `m`. The arenas keep their room, so the next body reuses it.
     fn arena_truncate(&mut self, m: &ArenaMark) {
+        self.parens.truncate(m.parens);
         let p = &mut self.p;
         p.exprs.truncate(m.exprs);
         p.stmts.truncate(m.stmts);

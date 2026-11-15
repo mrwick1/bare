@@ -241,12 +241,36 @@ const MARK_START: Mark = Mark { byte: 0, line: 1, column: 0, prev_cr: false };
 /// Bytes between two marks: a location reads at most this many bytes once the marks exist.
 pub const MARK_STEP: usize = 4096;
 
+const BLOCK: usize = 32;
+
 /// Read `src[m.byte..end]` (`end` on a character boundary) byte by byte: an ASCII byte is one UTF-16 unit, a
 /// lead byte of a 4-byte character two, a continuation byte none. LS and PS (E2 80 A8/A9) end a line.
 fn scan(src: &str, mut m: Mark, end: usize) -> Mark {
     let b = src.as_bytes();
     let mut i = m.byte as usize;
     while i < end {
+        // A block of 32 bytes with no CR and no E2 byte: LF are counted, the column is the units after the last LF. One loop over the
+        // fixed array makes a few vector instructions for each 16 bytes, so a long run of plain text costs about 1 instruction per byte.
+        if i + BLOCK <= end && !m.prev_cr {
+            let c: &[u8; BLOCK] = b[i..i + BLOCK].try_into().unwrap();
+            let (mut special, mut lf, mut units) = (0u8, 0u8, 0u8);
+            for &x in c {
+                special |= u8::from(x == b'\r') | u8::from(x == 0xE2);
+                lf += u8::from(x == b'\n');
+                units += u8::from(x & 0xC0 != 0x80) + u8::from(x >= 0xF0);
+            }
+            if special == 0 {
+                if lf == 0 {
+                    m.column += u32::from(units);
+                } else {
+                    let tail = &c[c.iter().rposition(|&x| x == b'\n').unwrap() + 1..];
+                    m.line += u32::from(lf);
+                    m.column = tail.iter().map(|&x| u32::from(x & 0xC0 != 0x80) + u32::from(x >= 0xF0)).sum();
+                }
+                i += BLOCK;
+                continue;
+            }
+        }
         let c = b[i];
         // Most bytes: one test, then a count without branches.
         if c > b'\r' && c != 0xE2 {
@@ -1958,5 +1982,52 @@ mod tests {
             assert_eq!(location(&src, b), want, "byte {b}");
         }
         assert_eq!(location_in("", &location_marks(""), 5), Location { line: 1, column: 0 });
+    }
+
+    /// Long runs of plain text (the block path of the scan) with line breaks, E2 bytes and wide characters at random places, so
+    /// that they fall at every position of a block and across the edges of blocks and marks. Each offset is checked.
+    #[test]
+    fn marked_locations_match_the_reference_on_random_text() {
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        for round in 0..6 {
+            let mut src = String::new();
+            while src.len() < 2 * MARK_STEP + 100 {
+                let run = match round % 3 {
+                    0 => next(200),
+                    1 => next(40),
+                    _ => next(4),
+                };
+                for _ in 0..run {
+                    src.push(['a', 'b', ' ', ';', '\t', '\0', '\u{b}', '\u{c}'][next(8) as usize]);
+                }
+                src.push_str(["\n", "\r", "\r\n", "\u{2028}", "\u{2029}", "\u{2027}", "\u{20ac}", "\u{e9}", "\u{30a2}", "\u{1f600}", "\n\n", "\n\r"][next(12) as usize]);
+            }
+            let reference = |byte: usize| {
+                let mut end = byte.min(src.len());
+                while !src.is_char_boundary(end) {
+                    end -= 1;
+                }
+                let (mut line, mut column, mut prev_cr) = (1u32, 0u32, false);
+                for ch in src[..end].chars() {
+                    match ch {
+                        '\n' if prev_cr => {}
+                        '\n' | '\r' | '\u{2028}' | '\u{2029}' => (line, column) = (line + 1, 0),
+                        _ => column += ch.len_utf16() as u32,
+                    }
+                    prev_cr = ch == '\r';
+                }
+                Location { line, column }
+            };
+            let marks = location_marks(&src);
+            for b in 0..=src.len() {
+                assert_eq!(location_in(&src, &marks, b), reference(b), "round {round} byte {b}");
+            }
+        }
     }
 }

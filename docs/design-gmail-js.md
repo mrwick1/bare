@@ -341,6 +341,16 @@ Of the 0.22 M shaped misses, 0.14 M are a site that has seen a second shape (pol
 
 **Size.** XS each.
 
+**Result (2026-11-15, built and measured; `progress.md`, "Gmail P4").**
+
+*`ErrorCtor`.* The hypothesis was right in kind and wrong in detail. An error does not scan the source for each frame. The first line and column lookup of a script builds the location marks of the whole script (`lex::location_marks`, one pass over every byte at 19 instructions per byte). The three big Gmail scripts are 4.9 MB, so the first error in each of them costs 25 to 40 M. Later errors cost 54 K each in a 1.5 MB script (a scan of at most 4 KiB) and 20 K in a small one. The 3.8 M per call is the mean of a few calls of the first kind and many of the second. The scan now reads blocks of 32 bytes with no CR and no E2 byte in one vector pass: 2 instructions per byte, 9.6 times fewer. Gmail first row: 23 to 28 calls cost 109.5 M before and 14.0 M after (-87%). The stack text is the same: the old and the new scan are compared with a character reference at every offset of random texts.
+
+Not built: a lazy `stack` (format the text on the first read, as V8 does). After this change the work of an error is 20 K instructions in a small script, and the marks are 14 M for the whole first row (0.09%). The lazy design needs a side table, a property hook and GC pruning for that. Also not built: marks made only up to the offset that is asked. It would save about half of the 14 M. The step charge of a first lookup (one step for 32 bytes of the script) was set for the old scan and is higher than the work now; it is a limit, and it is left as it is.
+
+*`Paren`.* The node is gone (`ExprKind::Paren` is removed from the tree). The parser keeps a sorted list of the ids of the expressions that had parentheses (4 bytes each, only while parsing, cut back with the arenas when a lazy function body is dropped). Its questions: is a target valid (`(a) = 1`, `[(a.b)] = x` yes; `({a}) = 1`, `[(a = 1)] = x`, `((a)) => 1` no), is the expression an arrow (`(x => x) ? a : b`), a directive (`("use strict")` is not), a label (`(a): 1` is not), `**` after a unary (`(-a) ** 2`), `??` mixed with `&&` or `||`, `for ((async) of x)`, and `export default (function () {})` (an expression, not a hoisted declaration: `StmtKind::ExportDefault` has a flag for it). The rest needed no flag: `(a?.b).c` is a `Chain` as the object of a member, `(a.b)()` keeps its `this` because the callee is the member, `delete (x)` is `delete x`, `(a, b)` is a `Seq`, and a function's `toString` reads its own span. 1.13 M evaluations of a node are gone from the Gmail first row; a loop with 9 parentheses in each pass takes 7.8% fewer instructions (about 64 per parenthesis).
+
+Measured on the Gmail first row (page-thread instructions, probe builds of main `5b0b76b1` and the branch, 7 alternating pairs, load average 1 to 4): median 15.509 G before, 15.344 G after (-0.165 G, -1.1%); the 7 values are 15.153 to 15.675 before and 14.969 to 15.505 after. The error probe gives -95.5 M of that; the rest (-70 M) fits 1.13 M evaluations at 64 instructions (hypothesis: not counted on its own in Gmail). The design hypothesis was -0.1 to -0.4 G.
+
 ### P5. Disk cache of parse results
 
 **Problem.** Parse and lazy load cost 2.59 G (13.2% at the first row). A repeat visit parses the same bytes again.

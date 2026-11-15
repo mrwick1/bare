@@ -415,10 +415,7 @@ impl<'p> Interp<'p> {
                 let fid = match one.as_slice() {
                     [s] => match prog.stmt(*s).kind {
                         StmtKind::Expr(e) => match prog.expr(e).kind {
-                            ExprKind::Paren(i) => match prog.expr(i).kind {
-                                ExprKind::Function(f) => Some(f),
-                                _ => None,
-                            },
+                            ExprKind::Function(f) => Some(f),
                             _ => None,
                         },
                         _ => None,
@@ -437,10 +434,10 @@ impl<'p> Interp<'p> {
         let (old, env, strict) = (self.cur, self.env, self.strict);
         self.select(id);
         let prog = self.prog.clone();
-        let fid = match prog.expr(match prog.expr(match prog.stmt(prog.list(prog.body).next().expect("checked")).kind {
+        let fid = match prog.expr(match prog.stmt(prog.list(prog.body).next().expect("checked")).kind {
             StmtKind::Expr(e) => e,
             _ => unreachable!("checked"),
-        }).kind { ExprKind::Paren(i) => i, _ => unreachable!("checked") }).kind {
+        }).kind {
             ExprKind::Function(f) => f,
             _ => unreachable!("checked"),
         };

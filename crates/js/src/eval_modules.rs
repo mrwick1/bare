@@ -516,8 +516,8 @@ impl<'p> Interp<'p> {
     /// The statement `export default expr;`. A function after `export default` was made when the module was instantiated.
     #[cold]
     #[inline(never)]
-    fn exec_export_default(&mut self, e: ExprId) -> Res<()> {
-        if matches!(self.prog.expr(e).kind, ExprKind::Function(_)) {
+    fn exec_export_default(&mut self, e: ExprId, hoisted: bool) -> Res<()> {
+        if hoisted {
             return Ok(());
         }
         let s = h!(self, self.heap.intern_str("default"));

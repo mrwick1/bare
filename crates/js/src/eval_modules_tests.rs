@@ -205,6 +205,18 @@ fn default_exports_get_the_name_default() {
 }
 
 #[test]
+fn a_default_function_in_parentheses_is_made_when_its_statement_runs() {
+    // `export default function () {}` is made at instantiation, so the binding is there at once; `(function () {})` is an expression.
+    let tdz = "try { dflt; log.push('seen') } catch (e) { log.push(e.name) } import dflt from 'a'; ";
+    let r = run(&[("a", &format!("{tdz}export default (function () {{}});"))], "a");
+    assert_eq!(r, "ReferenceError | ok");
+    let r = run(&[("a", &format!("{tdz}export default function () {{}}"))], "a");
+    assert_eq!(r, "seen | ok");
+    let r = run(&[("a", "import f from 'b'; log.push(f.name, f())"), ("b", "export default (function () { return 7 });")], "a");
+    assert_eq!(r, "default,7 | ok");
+}
+
+#[test]
 fn a_throwing_module_rejects_and_every_importer_sees_the_same_error() {
     let r = run(&[("a", "import 'b'; log.push('a')"), ("b", "log.push('b'); throw new RangeError('boom')")], "a");
     assert_eq!(r, "b | rejected throw:RangeError:boom");
