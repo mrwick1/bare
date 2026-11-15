@@ -12439,3 +12439,50 @@ The late starts of two scripts on main (3 of 5 runs here, 3 of 7 in #569). The h
 Noticed, not changed.
 - `bin/heavy` and the other tools of `/data/bare-tmp/bin` were gone after the cost matrix (at 16:52, no other cargo process was running). The later checks ran without `heavy`: the scripts fall back to no wrapper.
 - The `pss_MiB` line of the journey summary and the `MiB` column of its table disagree by 8% in one direction and 0.4% in the other. The two columns come from different samples.
+## Gmail JS cost: design (2026-11-15)
+
+Owner decision (2026-11-15): design how to cut the JS cost of Gmail. No build yet. Task R2-J. Design: `docs/design-gmail-js.md`.
+
+**Method.** Main `2211c276`. Release build with symbols and frame pointers. Gmail inbox, saved bare session, read only (no click, no input, no login). Machine archMachine, load average 3 to 7. Plain build: `perf stat` 3 runs and `perf record` 1 run. Counting build: 1 run (counts do not vary). Instruction build with a per-call counter: 3 runs (first row agrees to 0.3%). The counter adds 13% at the first row, so shares are exact and sizes are low by that factor. Raw data stays under `/data/bare-tmp/r2/gmail-js/raw/`. `/data/bare-tmp/bin/` was gone during the work; a private copy of `heavy` with the same lock was used.
+
+**Result (first row, 17.3 G; settle 103 to 116 G, mean 107.6 G, 3 runs).**
+
+| Item | First row | Settle |
+| --- | --- | --- |
+| JS interpreter | 69.8% | 77.0% |
+| JS parse (top parse 1.5 G, lazy load 1.1 G, instrumented) | 13.8% | 4.7% |
+| allocator | 4.7% | 4.4% |
+| bindings | 2.1% | 4.7% |
+| style | 2.0% | 3.4% |
+| tree-walk dispatch functions (`link_inner`, `eval_expr_inner`, `exec_simple`, `exec_list`, `machine`, `test_true`, `eval_assign`, `link_base`) | 30% | 31% |
+| calls (dispatch 168, select 127, setup 221, teardown 82, return 55 = 653 per frame call; 839 per env call) | 10.5% | 11.7% |
+
+- 50.75 M steps and 3.06 M calls to the first row (268 instructions per step inside functions). 2.92 M script calls: 2.10 M frame path, 0.82 M env path. 0.59 M native calls. 12 K host calls.
+- 41% of the object member reads refill the one-entry cache (2.25 M of 5.49 M). 919 sites cause 84% of the refills. `get_dict` + `lookup` + `PropMap::find` cost 4.5%. The `IC_DICT` entry names one object (`heap_shape.rs:1119`). Hypothesis: dictionary receivers are most of the refills (step 1 of design P2 counts it).
+- 365 functions with 1,000 or more calls take 68% of function self (41% of the thread). 5,021 functions run once (0.55 G). Cold cost (parse and first run) is 3.3 G.
+- A one-step function costs 702 instructions per call.
+- Natives are 4%. Host calls are 6%, mostly forced layout (`clientWidth` 13 calls 457 M).
+- The byte lane runs 5% of the calls (lazy functions are refused). It gives nothing on Gmail today (18.3 G against 17.7 G at the first row, 1 run).
+- The cost is flat: the top JS function is 5.7% of function self, the top 20 are 38%.
+
+**Designs, ranked** (`design-gmail-js.md` sections 5 to 7). Gains are hypotheses (nothing was built).
+
+| Rank | Design | Gain, first row | Work |
+| --- | --- | --- | --- |
+| 1 | P1 parse a script on arrival, on a worker (the body download leaves 0.46 s idle) | page thread -1.4 G (-8%), about -0.3 s | S to M |
+| 2 | P4 `ErrorCtor` (3.8 M per call), `Paren` nodes | -0.1 to -0.4 G | XS |
+| 3 | P2 dictionary position hint, then a shared stub cache | -0.3 to -0.6 G (2 to 3.5%) | S |
+| 4 | P3 call path: callee index in the function object, one `ScriptCtx` pointer, arguments into frame slots | -0.8 to -1.1 G (5 to 6%) | M |
+| 5 | P5 disk cache of parse results | repeat visit -2.0 G (-0.9 G after P1) | L |
+| 6 | P6 hot tier (finish the bytecode lane: lazy functions, shared ICs, 100 calls) | -3.5 to -4.2 G (-20 to -24%) at 2.0x to 2.49x | L to XL |
+
+P1 to P4 together: -3 G (-18%), first row about 3.5 s (now 4.15 s). With P6: about 2.6 to 2.8 s. Chrome: 1.2 to 1.5 s. A byte-code tier does not close the gap. Only a baseline JIT can, and it is not proposed.
+
+**Recommendation (the owner decides).** Build P1 and P4 first, with the step 1 count of P2. Then P3. Decide on P6 after P3, because P3 is a part of P6.
+
+**Not tested.** Nothing was built or timed in wall clock. The gains are instruction counts, with time at an assumed 4 to 5 G per second. Not measured: the dictionary share of refills, arguments objects, scope-depth lookups, why 28% of the calls take the env path, memory, other accounts, the 47 journeys, the cost matrix. Main moved to `c73dc3c3` (#570, the preload rule) after the measurement; the window for P1 is the one measured in #569 (0.46 s) and needs a new check on the new main.
+
+Noticed, not changed:
+- `<&str as Pattern>::is_contained_in` is 2.5% after the first row (about 2.2 G at settle). It is in the bindings or style path. Not JS.
+- `get clientWidth` costs 4.79 G at settle (91 calls). This is forced layout, not JS.
+- `Program` holds `Rc` in `ast.rs` (lines 584, 604, 635, 637), so it is not `Send`. P1 needs a hand-over wrapper, and P5 needs relocatable arenas.
