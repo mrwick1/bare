@@ -150,3 +150,69 @@ pub fn extra(text: &str, (letter, word): (f32, f32)) -> f32 {
 pub fn extra_spaces(width: Units, (letter, word): (f32, f32)) -> f32 {
     (width / LETTER) as f32 * (letter + word)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::block::tests::rect;
+
+    /// The width of `text` in an inline-block box (shrink-to-fit: the width of its text) at 16 px.
+    fn width_of_text(style: &str, text: &str) -> f32 {
+        rect(&format!("<span id=x style='display:inline-block;font-size:16px;{style}'>{text}</span>"), "", "x").w
+    }
+
+    /// The advances here are from `hmtx` of the font files: W 930, i 258, l 258 in Noto Sans Regular; W 967, i 299, l 298 in Bold.
+    /// `the_advance_tables_match_the_font_files` (bare-paint) checks the tables against the files.
+    #[test]
+    fn sans_serif_text_uses_the_advances_of_noto_sans() {
+        let sans = width_of_text("font-family: sans-serif", "Wil");
+        assert!((sans - (930 + 258 + 258) as f32 * 16.0 / 1000.0).abs() < 0.001, "{sans}");
+        assert!((sans - 3.0 * 0.6 * 16.0).abs() > 1.0, "not three letters of 0.6 em");
+        assert_eq!(width_of_text("", "Wil"), sans, "the initial family is sans-serif");
+        assert_eq!(width_of_text("font-family: Verdana, Geneva, sans-serif", "Wil"), sans);
+    }
+
+    #[test]
+    fn monospace_text_keeps_0_6_em_a_letter() {
+        for family in ["monospace", "Courier New", "Menlo, sans-serif"] {
+            let w = width_of_text(&format!("font-family: {family}"), "Wil");
+            assert!((w - 3.0 * 0.6 * 16.0).abs() < 0.001, "{family}: {w}");
+        }
+        assert!((width_of_text("", "<code>Wil</code>") - 3.0 * 0.6 * 16.0).abs() < 0.001, "the UA sheet: `code` is monospace");
+    }
+
+    #[test]
+    fn the_first_family_decides() {
+        let sans = width_of_text("font-family: sans-serif", "Wil");
+        assert_eq!(width_of_text("font-family: \"Unknown\", monospace", "Wil"), sans);
+        assert_eq!(width_of_text("font-family: Verdana, monospace", "Wil"), sans);
+    }
+
+    #[test]
+    fn bold_sans_uses_the_bold_advances() {
+        let bold = width_of_text("font-family: sans-serif; font-weight: bold", "Wil");
+        assert!((bold - (967 + 299 + 298) as f32 * 16.0 / 1000.0).abs() < 0.001, "{bold}");
+        assert_eq!(width_of_text("font-weight: 600", "Wil"), bold, "600 is bold, as in paint");
+        assert_eq!(width_of_text("font-weight: 500", "Wil"), width_of_text("", "Wil"), "500 is regular, as in paint");
+        let mono = width_of_text("font-family: monospace; font-weight: bold", "Wil");
+        assert!((mono - 3.0 * 0.6 * 16.0).abs() < 0.001, "bold mono has the same advance: {mono}");
+    }
+
+    #[test]
+    fn advances_by_face() {
+        assert_eq!(width_of(Face::Sans, 'W'), 930);
+        assert_eq!(width_of(Face::SansBold, 'W'), 967);
+        assert_eq!(width_of(Face::Mono, 'W'), LETTER);
+        assert_eq!(width_of(Face::Sans, ' '), 260);
+        assert_eq!(width(Face::Sans, "Wil"), 1446);
+        assert_eq!(width_of(Face::Sans, '\u{e9}'), 564, "a letter of Latin-1 is in the table");
+        assert_eq!(width_of(Face::SansBold, '\u{e9}'), 597);
+        assert_eq!(width_of(Face::Sans, '\u{301}'), 0, "an accent has no width");
+        assert_eq!(width_of(Face::Sans, '\u{ad}'), 0, "the soft hyphen");
+        assert_eq!(width_of(Face::Sans, '\u{4e2d}'), WIDE, "Chinese: 1 em");
+        for c in ['\u{2190}', '\u{21d4}', '\u{221a}', '\u{221e}', '\u{2248}', '\u{2260}', '\u{2264}', '\u{2265}', '\u{25a0}', '\u{25cf}', '\u{25ff}'] {
+            assert_eq!(width_of(Face::Sans, c), LETTER, "{c:?}: Noto Sans lacks it, paint takes the Mono glyph, and layout uses 0.6 em");
+            assert_eq!(width_of(Face::SansBold, c), LETTER, "{c:?}");
+        }
+    }
+}
