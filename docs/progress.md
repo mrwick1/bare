@@ -12734,3 +12734,19 @@ Gmail's Labels menu click sends no mutation and the page posts to `/jserror`. Li
 - Click path: a click on a `menuitemcheckbox` fires the Chrome event order (pointer, mouse, focus, click). `Event.srcElement`, `Event.returnValue` and `Event.cancelBubble` were missing. They are now defined (`browser_events.rs`). Still missing and not fixed: `which`, `layerX`, `layerY`, `fromElement`, `toElement`, `sourceCapabilities` on mouse events and `initMouseEvent`.
 - The cause of `oEd: Xqd` is still open. It is not proven that these members cause it.
 - Test: `legacy_event_members_srcelement_returnvalue_cancelbubble`. `cargo test -p bare --lib`: 1283 passed, 2 failed. `one_image_data_holds_at_most_64_mib` fails on an overflow in `browser_canvas.rs:84` (not touched here). `a_pending_meta_refresh_is_queued_work` failed in the full run and passed alone.
+## 2026-11-15: bare#549, `Response.json` static method
+
+- `Response.json(data, init)` is added. It calls the intrinsic `JSON.stringify`, as `json()` calls the intrinsic `JSON.parse`. The body type is `application/json` unless `init` sets a Content-Type.
+- The status, statusText, header and body rules are those of the `Response` constructor. Both use `init_response`.
+- A value that JSON cannot serialize is a TypeError. The test was written first and failed with `Response.json is not a function`.
+
+### Tests
+
+- `cargo test -p bare --lib response_json_static`: 1 passed.
+- `cargo test -p bare --lib browser_fetch_tests`: 55 passed.
+- `cargo test --workspace --no-fail-fast`: the same 14 tests fail on HEAD `2889fa06`. They are TLS, layout overflow, snapshot timing and session timing. One more test (`a_driver_click_step_returns_and_the_expect_waits_for_the_reply`) failed once with the change. It passed in three reruns alone.
+
+### Not tested
+
+- `bare-mcp` in the isolated browser tests of the parent.
+- A `Response.json` call on a live page.
