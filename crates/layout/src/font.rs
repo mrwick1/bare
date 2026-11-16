@@ -76,7 +76,7 @@ impl Face {
 pub const MAX_SIZE: f32 = 10_000.0;
 
 /// The font numbers for one font size, in pixels.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy)]
 pub struct Metrics {
     pub size: f32,
     pub face: Face,
@@ -84,6 +84,14 @@ pub struct Metrics {
     pub ascent: f32,
     /// From the baseline down to the bottom of `g` and `p`.
     pub descent: f32,
+}
+
+/// Equal when the line box is the same: the size, the ascent and the descent. The face is not compared. Bold and regular text, and Noto Sans
+/// and Noto Sans Mono, have the same line numbers, and an inline box with such a font has no reason to make its own fragment (`inline.rs`, `culled`).
+impl PartialEq for Metrics {
+    fn eq(&self, other: &Metrics) -> bool {
+        (self.size, self.ascent, self.descent) == (other.size, other.ascent, other.descent)
+    }
 }
 
 impl Metrics {

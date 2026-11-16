@@ -46,7 +46,7 @@ fn inner_text_still_gates_select() {
 fn offset_of_a_box_that_wraps_is_its_first_box() {
     // An inline box with a border over two lines has two fragments, one for each line. CSSOM View: the offsets come from the border
     // edge of the first box. A 10px font: a letter is 6px wide.
-    let css = "<style>body { margin: 0; font-size: 10px }</style>";
+    let css = "<style>body { margin: 0; font-size: 10px; font-family: monospace }</style>";
     let body = "<div style='width: 50px'>xxx <span id=x style='border: 1px solid'>aaaa bbbbb</span></div>\
                 <div style='width: 50px'>xx<span id=p style='position: relative; border: 2px solid'>aa <b id=c>bbbbb</b></span></div>";
     let mut b = page(&format!("{css}{body}"));
@@ -67,7 +67,7 @@ fn offset_of_a_box_that_wraps_is_its_first_box() {
 #[test]
 fn offset_of_an_inline_box_with_nothing_to_paint_is_its_first_line() {
     // A 10px font: a letter is 6px wide and a line is 14px high. Layout makes no fragment for these spans (no background, no border).
-    let css = "<style>body { margin: 0; font-size: 10px; height: 2000px }</style>";
+    let css = "<style>body { margin: 0; font-size: 10px; height: 2000px; font-family: monospace }</style>";
     let body = "<div style='padding: 5px'>xx<span id=a>aaaa</span></div>\
                 <div style='width: 50px'>xxx <span id=w>aaaa bbbbb</span></div>\
                 <div>xx<span id=e></span></div>\

@@ -513,7 +513,7 @@ fn many_events_fit_in_the_event_cap() {
 // ------------------------------------------------------------------------------------------ painting
 
 const PAINT: &str = r#"<!DOCTYPE html><html><head><style>
-body { margin: 0; font-size: 16px; }
+body { margin: 0; font-size: 16px; font-family: monospace; }
 input { position: absolute; left: 10px; width: 200px; height: 30px; box-sizing: border-box; margin: 0; padding: 0 4px; border: 1px solid #888; }
 </style></head><body>
 <input id="a" style="top:10px" type="text"><input id="b" style="top:50px" type="password"><input id="c" style="top:90px" type="text">

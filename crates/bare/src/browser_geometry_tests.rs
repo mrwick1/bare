@@ -44,8 +44,10 @@ fn size(b: &mut Browser, id: &str) -> String {
     js(b, &format!("var e = document.getElementById('{id}'); e.offsetWidth + 'x' + e.offsetHeight"))
 }
 
+/// The `html` element has `font-family: monospace`: the expected sizes of these tests are written for a letter of 0.6 em (see the header).
+/// The initial `font-family` is `sans-serif`.
 fn page(css: &str, body: &str) -> Browser {
-    at(&format!("<!doctype html><html><head><style>{css}</style></head><body>{body}</body></html>"))
+    at(&format!("<!doctype html><html style='font-family: monospace'><head><style>{css}</style></head><body>{body}</body></html>"))
 }
 
 #[test]
