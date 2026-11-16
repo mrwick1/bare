@@ -137,7 +137,7 @@ pub fn label<'a>(tree: &Tree<'a>, node: NodeId) -> &'a str {
 
 /// The width of a text, in pixels, in a font of `m`.
 pub fn text_width(m: &Metrics, s: &str) -> f32 {
-    m.px(s.chars().map(font::width_of).sum())
+    m.px(s.chars().map(|c| font::width_of(m.face, c)).sum())
 }
 
 /// The text of an `<option>`: its `label`, or its text with the spaces collapsed.

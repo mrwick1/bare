@@ -5,25 +5,72 @@
 //! word widths. Shaping is the slow part of layout: it turns letters into glyphs, with kerning (`AV` closer together)
 //! and ligatures (`fi` as one glyph).
 //!
-//! `bare` starts with one monospace font (`docs/decisions.md`, "Fonts"): every letter has the same width. So we need
-//! no shaping and no cache. The width of a word is the number of its letters times one width. The numbers here are the
-//! numbers of Noto Sans Mono, so a test page in Chrome with that font gives the same layout. The bitmap font of module 5
-//! must keep these numbers.
+//! `bare` has no shaping and no cache (`docs/decisions.md`, "Fonts"). The width of a letter comes from the advance width
+//! of the face (`hmtx`): Noto Sans Regular and Bold for proportional text, and Noto Sans Mono for `monospace`. In Noto Sans
+//! Mono every letter is 0.6 em. In Noto Sans each letter has its own width, and the tables are in `advances.rs`. A test page
+//! in Chrome with the same font gives the same layout. The width of a word is the sum of the widths of its letters. There is
+//! no kerning (`AV` closer together) and no ligature (`fi` as one glyph). The bitmap font of module 5 must keep these numbers.
 //!
-//! Widths are counted in tenths of an em (`Units`), as whole numbers: a letter is 6, a wide letter (Chinese, Japanese,
-//! Korean) is 10, an accent on a letter is 0. Adding whole numbers has no rounding error, so a line of 1,000 letters is
-//! exactly 1,000 times one letter. Pixels come at the end: `px(units)`.
+//! Widths are counted in 1/1000 em (`Units`), as whole numbers. The fonts have 1000 units to the em, so the unit is the
+//! number in `hmtx`: a letter of Noto Sans Mono is 600, a wide letter (Chinese, Japanese, Korean) is 1000, an accent on a
+//! letter is 0. Adding whole numbers has no rounding error, so a line of 1,000 letters is exactly the sum of its letters.
+//! Pixels come at the end: `px(units)`.
 
+use crate::advances;
 use bare_css::cascade::ComputedStyle;
 use bare_css::values::{Keyword, Property, Value};
 
-/// A width in tenths of an em. JS: a number, but always a whole one.
+/// A width in 1/1000 em. JS: a number, but always a whole one.
 pub type Units = u32;
 
-/// The width of a normal letter: 0.6 em (600 of the 1000 units of the font).
-pub const LETTER: Units = 6;
-/// The width of a wide letter. Noto Sans Mono has none: the browser takes it from another font, and those are 1 em wide.
-pub const WIDE: Units = 10;
+/// The width of a letter of Noto Sans Mono: 0.6 em (600 of the 1000 units of the font). Also the width of a letter that Noto Sans lacks.
+pub const LETTER: Units = 600;
+/// The width of a wide letter. The fonts have none: the browser takes it from another font, and those are 1 em wide.
+pub const WIDE: Units = 1000;
+
+/// The face that measures and draws the text of an element: `font-family` and `font-weight` choose it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Face {
+    /// Noto Sans Regular: any family that is not a monospace one, and the initial value.
+    Sans,
+    /// Noto Sans Bold: the same, with `font-weight` 600 or more (paint chooses bold in the same way).
+    SansBold,
+    /// Noto Sans Mono Regular: `monospace` and the common monospace names.
+    Mono,
+    /// Noto Sans Mono Bold. It has the same advance as the Regular one, so layout treats the two alike. Paint draws the bold glyphs.
+    MonoBold,
+}
+
+impl Face {
+    pub fn of(style: &ComputedStyle) -> Face {
+        let bold = matches!(style.get(Property::FontWeight), Value::Number(w) if w >= 600.0);
+        match (style.get(Property::FontFamily) == Value::Keyword(Keyword::Monospace), bold) {
+            (true, false) => Face::Mono,
+            (true, true) => Face::MonoBold,
+            (false, false) => Face::Sans,
+            (false, true) => Face::SansBold,
+        }
+    }
+
+    pub fn is_mono(self) -> bool {
+        matches!(self, Face::Mono | Face::MonoBold)
+    }
+
+    /// The width of a space. A tab goes to the next stop of 8 of them.
+    pub fn space(self) -> Units {
+        if self.is_mono() {
+            LETTER
+        } else {
+            260
+            // In Noto Sans Regular and Bold alike (the test `advances_by_face` checks it).
+        }
+    }
+
+    /// The advances of the letters 0 to 127.
+    fn ascii(self) -> &'static [u16; 128] {
+        if self == Face::SansBold { &advances::BOLD_ASCII } else { &advances::REGULAR_ASCII }
+    }
+}
 
 /// The biggest font size, in pixels. Chrome has the same limit (`kMaximumAllowedFontSize`).
 pub const MAX_SIZE: f32 = 10_000.0;
@@ -32,6 +79,7 @@ pub const MAX_SIZE: f32 = 10_000.0;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Metrics {
     pub size: f32,
+    pub face: Face,
     /// From the baseline up to the top of the tallest letter.
     pub ascent: f32,
     /// From the baseline down to the bottom of `g` and `p`.
@@ -39,20 +87,20 @@ pub struct Metrics {
 }
 
 impl Metrics {
-    /// The metrics for a font size in pixels. Noto Sans Mono: ascent 1069 and descent 293 for 1000 units.
+    /// The metrics for a font size in pixels. Noto Sans and Noto Sans Mono alike: ascent 1069 and descent 293 for 1000 units.
     /// Chrome rounds the ascent and the descent to whole pixels (`SimpleFontData`), so we do too.
-    pub fn new(size: f32) -> Metrics {
+    pub fn new(size: f32, face: Face) -> Metrics {
         let size = size.clamp(0.0, MAX_SIZE);
-        Metrics { size, ascent: round(size * 1.069), descent: round(size * 0.293) }
+        Metrics { size, face, ascent: round(size * 1.069), descent: round(size * 0.293) }
     }
 
     pub fn of(style: &ComputedStyle) -> Metrics {
-        Metrics::new(style.px(Property::FontSize))
+        Metrics::new(style.px(Property::FontSize), Face::of(style))
     }
 
-    /// Pixels for a width in tenths of an em.
+    /// Pixels for a width in 1/1000 em.
     pub fn px(&self, units: Units) -> f32 {
-        units as f32 * self.size / 10.0
+        units as f32 * self.size / 1000.0
     }
 
     /// Half the x-height (`0.536` em in Noto Sans Mono) as Chrome keeps it: the height in 1/64 px, rounded, and halved in
@@ -95,9 +143,25 @@ pub fn lu(px: f32) -> f32 {
     floor(px * 64.0) / 64.0
 }
 
-/// The width of one letter. An accent that sits on the letter before it is 0. Zero-width spaces and joiners are 0.
-pub fn width_of(c: char) -> Units {
+/// The width of one letter in a face. An accent that sits on the letter before it is 0. Zero-width spaces and joiners are 0.
+/// Noto Sans has the letters of its table. The others have the width that they have in Noto Sans Mono: 0.6 em, 0 or 1 em. (Paint draws the
+/// arrows, math signs and shapes that Noto Sans lacks with the Noto Sans Mono glyph.)
+pub fn width_of(face: Face, c: char) -> Units {
     let cp = c as u32;
+    if !face.is_mono() {
+        if cp < 0x80 {
+            return face.ascii()[cp as usize] as Units;
+        }
+        let table: &[(u32, u16)] = if face == Face::SansBold { &advances::BOLD } else { &advances::REGULAR };
+        if let Ok(i) = table.binary_search_by_key(&cp, |&(cp, _)| cp) {
+            return table[i].1 as Units;
+        }
+    }
+    mono_width_of(cp)
+}
+
+/// The width of a letter in Noto Sans Mono, and of a letter that no face has.
+fn mono_width_of(cp: u32) -> Units {
     if cp < 0x300 {
         // Latin, the most common case: one compare. (The soft hyphen U+00AD is only drawn at a line break.)
         return if cp == 0xad { 0 } else { LETTER };
@@ -112,6 +176,11 @@ pub fn width_of(c: char) -> Units {
     LETTER
 }
 
+/// Does a letter have a width? An accent that sits on the letter before it has none. (`letter-spacing` comes after a letter, not after an accent.)
+pub fn has_width(c: char) -> bool {
+    mono_width_of(c as u32) != 0
+}
+
 /// Is it a letter of the "wide" set of Unicode (East Asian Width W and F): Chinese, Japanese, Korean, full-width forms
 /// and most emoji. Only the big blocks are here: a short list, and no table.
 fn is_wide(cp: u32) -> bool {
@@ -121,13 +190,22 @@ fn is_wide(cp: u32) -> bool {
         | 0x1f300..=0x1f64f | 0x1f900..=0x1f9ff | 0x20000..=0x2fffd | 0x30000..=0x3fffd)
 }
 
-/// The width of a piece of text with no spaces. Plain ASCII is the fast case: one byte is one letter.
-pub fn width(text: &str) -> Units {
+/// The width of a piece of text with no spaces. Plain ASCII is the fast case.
+pub fn width(face: Face, text: &str) -> Units {
     if text.is_ascii() {
+        return ascii_width(face, text.as_bytes());
+    }
+    text.chars().fold(0, |sum: Units, c| sum.saturating_add(width_of(face, c)))
+    // `saturating_add`: a sum that is too big stops at the largest `u32`, and does not wrap round to a small number.
+}
+
+/// The width of ASCII text: one byte is one letter.
+pub fn ascii_width(face: Face, text: &[u8]) -> Units {
+    if face.is_mono() {
         return (text.len() as Units).saturating_mul(LETTER);
     }
-    text.chars().fold(0, |sum: Units, c| sum.saturating_add(width_of(c)))
-    // `saturating_add`: a sum that is too big stops at the largest `u32`, and does not wrap round to a small number.
+    let table = face.ascii();
+    text.iter().fold(0, |sum: Units, &b| sum.saturating_add(table[b as usize & 127] as Units))
 }
 
 /// `letter-spacing` and `word-spacing` of a style, in pixels. `spaced`: `Styles::spaced`, false for most pages.
@@ -140,25 +218,25 @@ pub fn spacing(spaced: bool, style: &ComputedStyle) -> (f32, f32) {
 pub fn extra(text: &str, (letter, word): (f32, f32)) -> f32 {
     let (mut letters, mut spaces) = (0u32, 0u32);
     for c in text.chars() {
-        letters += (width_of(c) != 0) as u32;
+        letters += has_width(c) as u32;
         spaces += (c == ' ' || c == '\u{a0}') as u32;
     }
     letters as f32 * letter + spaces as f32 * word
 }
 
-/// The same for a run of spaces of this width (a run of collapsing spaces is one space).
-pub fn extra_spaces(width: Units, (letter, word): (f32, f32)) -> f32 {
-    (width / LETTER) as f32 * (letter + word)
+/// The same for a run of spaces of this width in a face (a run of collapsing spaces is one space).
+pub fn extra_spaces(face: Face, width: Units, (letter, word): (f32, f32)) -> f32 {
+    (width / face.space()) as f32 * (letter + word)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::block::tests::rect;
+    use crate::block::tests::rect_in;
 
     /// The width of `text` in an inline-block box (shrink-to-fit: the width of its text) at 16 px.
     fn width_of_text(style: &str, text: &str) -> f32 {
-        rect(&format!("<span id=x style='display:inline-block;font-size:16px;{style}'>{text}</span>"), "", "x").w
+        rect_in(&format!("<span id=x style='display:inline-block;font-size:16px;{style}'>{text}</span>"), "", "", "x").w
     }
 
     /// The advances here are from `hmtx` of the font files: W 930, i 258, l 258 in Noto Sans Regular; W 967, i 299, l 298 in Bold.
@@ -203,6 +281,7 @@ mod tests {
         assert_eq!(width_of(Face::Sans, 'W'), 930);
         assert_eq!(width_of(Face::SansBold, 'W'), 967);
         assert_eq!(width_of(Face::Mono, 'W'), LETTER);
+        assert_eq!(width_of(Face::MonoBold, 'W'), LETTER);
         assert_eq!(width_of(Face::Sans, ' '), 260);
         assert_eq!(width(Face::Sans, "Wil"), 1446);
         assert_eq!(width_of(Face::Sans, '\u{e9}'), 564, "a letter of Latin-1 is in the table");

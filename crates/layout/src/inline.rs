@@ -39,7 +39,7 @@ use crate::text::Wrap;
 use crate::Cx;
 use crate::block::{self, MAX_DEPTH, Pos, Space, border_padding, clear_sides, resolve};
 use crate::boxes::Kind;
-use crate::font::{self, LETTER, Metrics};
+use crate::font::{self, Metrics};
 use crate::fragment::{Fragment, Kind as FragmentKind, Rect};
 use crate::intrinsic;
 use crate::text::{self, Flow, Piece, Transform, WhiteSpace};
@@ -223,7 +223,7 @@ struct Aligned {
 #[cold]
 #[inline(never)]
 fn spaced_pieces<const WRAPS: bool>(b: &mut Breaker<'_, '_, WRAPS>, node: NodeId, text: &str, (ws, transform, metrics): (WhiteSpace, Transform, Metrics), (sp, wrap): ((f32, f32), Wrap), flow: &mut Flow) {
-    for piece in text::pieces(text, ws, transform, flow) {
+    for piece in text::pieces(text, ws, transform, metrics.face, flow) {
         match piece {
             Piece::Word { start, end, width } => {
                 if WRAPS { b.pending_wrap |= wrap != Wrap::Normal; }
@@ -231,12 +231,12 @@ fn spaced_pieces<const WRAPS: bool>(b: &mut Breaker<'_, '_, WRAPS>, node: NodeId
             }
             Piece::Space { start, end, width } if ws.wrap => {
                 b.commit();
-                b.add_space(node, start, end, metrics.px(width) + font::extra_spaces(width, sp));
+                b.add_space(node, start, end, metrics.px(width) + font::extra_spaces(metrics.face, width, sp));
             }
-            Piece::Space { start, end, width } => b.add_text(node, start, end, metrics.px(width) + font::extra_spaces(width, sp)),
+            Piece::Space { start, end, width } => b.add_text(node, start, end, metrics.px(width) + font::extra_spaces(metrics.face, width, sp)),
             Piece::Tab { at } => {
                 if WRAPS { b.pending_wrap |= wrap != Wrap::Normal; }
-                let stop = metrics.px(8 * LETTER) + 8.0 * (sp.0 + sp.1);
+                let stop = metrics.px(8 * metrics.face.space()) + 8.0 * (sp.0 + sp.1);
                 let x = b.x + b.pending_w;
                 b.add_text(node, at, at + 1, if stop > 0.0 { ((x / stop).floor() + 1.0) * stop - x } else { 0.0 });
             }
@@ -454,7 +454,7 @@ fn lines_with<const WRAPS: bool>(cx: &mut Cx, block: NodeId, first: NodeId, last
                     spaced_pieces(&mut b, node, text, (ws, transform, metrics), ((0.0, 0.0), wrap), &mut flow);
                     continue;
                 }
-                for piece in text::pieces(text, ws, transform, &mut flow) {
+                for piece in text::pieces(text, ws, transform, metrics.face, &mut flow) {
                     match piece {
                         Piece::Word { start, end, width } => b.add_text(node, start, end, metrics.px(width)),
                         Piece::Space { start, end, width } if ws.wrap => {
@@ -464,7 +464,7 @@ fn lines_with<const WRAPS: bool>(cx: &mut Cx, block: NodeId, first: NodeId, last
                         Piece::Space { start, end, width } => b.add_text(node, start, end, metrics.px(width)),
                         Piece::Tab { at } => {
                             // The next tab stop: every 8 letters.
-                            let stop = metrics.px(8 * LETTER);
+                            let stop = metrics.px(8 * metrics.face.space());
                             let x = b.x + b.pending_w;
                             let w = if stop > 0.0 { ((x / stop).floor() + 1.0) * stop - x } else { 0.0 };
                             // A font size of 0 puts the tab stops 0 pixels apart: no width, and no division by 0.
@@ -1115,7 +1115,7 @@ fn marker(cx: &mut Cx, item: NodeId, x: f32, baseline: f32) {
     let style = cx.tree.style(item);
     let Some(text) = crate::boxes::marker_text(style, cx.number) else { return };
     let m = Metrics::of(style);
-    let w = m.px(font::width(&text));
+    let w = m.px(font::width(m.face, &text));
     let at = cx.out.len() as u32;
     cx.out.push(Fragment { rect: Rect { x: x - w, y: baseline - m.ascent, w, h: m.ascent + m.descent }, node: item, kind: FragmentKind::Marker { number: cx.number }, end: at + 1 });
 }

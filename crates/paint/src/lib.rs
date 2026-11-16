@@ -19,7 +19,7 @@ pub mod svg;
 
 use bare_css::cascade::Styles;
 use bare_html::dom::Document;
-use bare_layout::font::{self, Units};
+use bare_layout::font::{self, Face, Units};
 use bare_html::dom::NodeId;
 use bare_layout::fragment::Layout;
 use bare_layout::scroll::Areas;
@@ -157,8 +157,8 @@ impl Painter {
                     clips.pop();
                 }
                 Item::Spacing { letter, word } => spacing = (letter, word),
-                Item::Text { x, baseline, size, color, at: from, len, bold } => {
-                    text(canvas, glyphs, clip, x + tx as f32, baseline + ty, size, color, bold, std::mem::take(&mut spacing), &list.text[from as usize..(from + len) as usize]);
+                Item::Text { x, baseline, size, color, at: from, len, face } => {
+                    text(canvas, glyphs, clip, x + tx as f32, baseline + ty, size, color, face, std::mem::take(&mut spacing), &list.text[from as usize..(from + len) as usize]);
                 }
                 Item::PushScroll(node) => {
                     offsets.push(off);
@@ -233,33 +233,33 @@ fn moved(s: &canvas::Shape, (dx, dy): (i32, i32)) -> canvas::Shape {
     canvas::Shape { r: IRect { x0: s.r.x0 + dx, y0: s.r.y0 + dy, x1: s.r.x1 + dx, y1: s.r.y1 + dy }, rad: s.rad }
 }
 
-/// Draw one run of text. The letters are `font::width_of` apart, as layout placed them: whole units of a tenth of an
+/// Draw one run of text. The letters are `font::width_of` apart, as layout placed them: whole units of 1/1000
 /// em, added up, so a line of 1,000 letters ends where layout says.
 #[allow(clippy::too_many_arguments)]
-pub fn text(canvas: &mut Canvas, glyphs: &mut Glyphs, clip: IRect, x: f32, baseline: i32, size: f32, color: u32, bold: bool, spacing: (f32, f32), run: &str) {
+pub fn text(canvas: &mut Canvas, glyphs: &mut Glyphs, clip: IRect, x: f32, baseline: i32, size: f32, color: u32, face: Face, spacing: (f32, f32), run: &str) {
     // A run with no spacing (nearly all of them) takes the loop that has no spacing in it.
     if spacing == (0.0, 0.0) {
-        letters::<false>(canvas, glyphs, clip, x, baseline, size, color, bold, spacing, run);
+        letters::<false>(canvas, glyphs, clip, x, baseline, size, color, face, spacing, run);
     } else {
-        letters::<true>(canvas, glyphs, clip, x, baseline, size, color, bold, spacing, run);
+        letters::<true>(canvas, glyphs, clip, x, baseline, size, color, face, spacing, run);
     }
 }
 
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
-fn letters<const SPACED: bool>(canvas: &mut Canvas, glyphs: &mut Glyphs, clip: IRect, x: f32, baseline: i32, size: f32, color: u32, bold: bool, (letter, word): (f32, f32), run: &str) {
+fn letters<const SPACED: bool>(canvas: &mut Canvas, glyphs: &mut Glyphs, clip: IRect, x: f32, baseline: i32, size: f32, color: u32, face: Face, (letter, word): (f32, f32), run: &str) {
     // Not even the tallest letter reaches the clip: skip the run.
     if (baseline as f32 + size * 0.4) < clip.y0 as f32 || (baseline as f32 - size * 1.2) > clip.y1 as f32 {
         return;
     }
-    let px = size / 10.0;
+    let px = size / 1000.0;
     let (mut units, mut extra): (Units, f32) = (0, 0.0);
     for c in run.chars() {
         // A newline or a tab that was kept (`white-space: pre`) is not a letter, and has no width here.
         if c < ' ' {
             continue;
         }
-        let w = font::width_of(c);
+        let w = font::width_of(face, c);
         let mut at = x + units as f32 * px;
         units += w;
         // `letter-spacing` comes after each letter, and `word-spacing` after each space (`font::extra`).
@@ -278,13 +278,13 @@ fn letters<const SPACED: bool>(canvas: &mut Canvas, glyphs: &mut Glyphs, clip: I
         if c == ' ' {
             continue;
         }
-        let (face, id) = glyphs.glyph(bold, c);
+        let (face_id, id) = glyphs.glyph(face, c);
         if id == 0 {
             continue;
         }
         let whole = at.floor();
         let sub = ((at - whole) * SUBPIXELS) as u8;
-        let e = glyphs.get(face, id, size, sub.min(SUBPIXELS as u8 - 1));
+        let e = glyphs.get(face_id, id, size, sub.min(SUBPIXELS as u8 - 1));
         if e.w > 0 {
             canvas.mask((whole as i32 + e.left as i32, baseline + e.top as i32), (e.w as usize, e.h as usize), glyphs.mask(e), color, clip);
         }

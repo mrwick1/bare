@@ -3,6 +3,7 @@
 //! `layout` is the way in. It walks the DOM once, from the `html` element down (`block.rs`, `inline.rs`), and writes a
 //! list of fragments (`fragment.rs`): one rectangle for each box and each piece of text on a line.
 
+pub mod advances;
 pub mod block;
 pub mod boxes;
 mod breaks;

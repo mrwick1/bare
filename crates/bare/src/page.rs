@@ -157,7 +157,7 @@ fn x_of(text: &str, u: u32, m: &Metrics) -> f32 {
             break;
         }
         n += c.len_utf16() as u32;
-        units += font::width_of(c);
+        units += font::width_of(m.face, c);
     }
     m.px(units)
 }
@@ -166,7 +166,7 @@ fn x_of(text: &str, u: u32, m: &Metrics) -> f32 {
 fn offset_at(text: &str, x: f32, m: &Metrics) -> u32 {
     let (mut left, mut n) = (0.0, 0);
     for c in text.chars() {
-        let w = m.px(font::width_of(c));
+        let w = m.px(font::width_of(m.face, c));
         if x < left + w / 2.0 {
             break;
         }
@@ -1180,7 +1180,7 @@ impl Page {
                     canvas.fill(IRect { x0: at(s), y0: top, x1: at(s) + 1, y1: top + line as i32 }.intersect(f.clip), f.color);
                 }
             }
-            bare_paint::text(canvas, &mut painter.glyphs, f.clip, f.x, baseline, f.m.size, f.color, false, (0.0, 0.0), text);
+            bare_paint::text(canvas, &mut painter.glyphs, f.clip, f.x, baseline, f.m.size, f.color, f.m.face, (0.0, 0.0), text);
             start = end + 1;
         }
     }
@@ -1196,7 +1196,7 @@ impl Page {
             let (a, b) = (x_of(&f.text, s, &f.m), x_of(&f.text, e, &f.m));
             canvas.fill(IRect { x0: (x0 + a).round() as i32, y0: top, x1: (x0 + b).round() as i32, y1: top + line as i32 }.intersect(f.clip), 0xFFB3_D7FF);
         }
-        bare_paint::text(canvas, &mut painter.glyphs, f.clip, x0, f.baseline, f.m.size, f.color, false, (0.0, 0.0), &f.text);
+        bare_paint::text(canvas, &mut painter.glyphs, f.clip, x0, f.baseline, f.m.size, f.color, f.m.face, (0.0, 0.0), &f.text);
         if let Some((s, _, _)) = sel.filter(|s| s.0 == s.1) {
             let cx = (x0 + x_of(&f.text, s, &f.m)).round() as i32;
             canvas.fill(IRect { x0: cx, y0: top, x1: cx + 1, y1: top + line as i32 }.intersect(f.clip), f.color);
