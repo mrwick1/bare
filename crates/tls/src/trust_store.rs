@@ -26,11 +26,8 @@ pub const MAX_FILE_BYTES: usize = 4 << 20;
 pub const MAX_CERTS: usize = 1024;
 pub const MAX_CERT_DER_BYTES: usize = 16 << 10;
 
-/// Checked in this order. A missing path is skipped. The first existing path is the only
-/// one used. (Only `/etc/ssl/certs/ca-certificates.crt` and `/etc/ssl/cert.pem` were seen
-/// on the Arch machine of 2026-11-04. The Red Hat path is the documented location. openSUSE has only `/etc/ssl/ca-bundle.pem`.)
-pub const SYSTEM_PATHS: [&str; 4] =
-    ["/etc/ssl/certs/ca-certificates.crt", "/etc/pki/tls/certs/ca-bundle.crt", "/etc/ssl/cert.pem", "/etc/ssl/ca-bundle.pem"];
+/// OS bundle paths on Unix. The list lives in `bare-os`.
+pub use bare_os::trust::UNIX_PEM_PATHS as SYSTEM_PATHS;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
@@ -43,7 +40,7 @@ pub enum Error {
     Format { line: usize, why: &'static str },
     /// The input holds no certificate.
     Empty,
-    /// No path in `SYSTEM_PATHS` exists.
+    /// The OS has no trust store that we can read.
     NoSystemStore,
 }
 
@@ -257,9 +254,35 @@ pub fn load_first(paths: &[&'static str]) -> Result<(TrustStore, &'static str), 
     Err(Error::NoSystemStore)
 }
 
-/// Loads the OS bundle from `SYSTEM_PATHS`. Returns the path used.
+/// Builds a store from DER certificates. A certificate that is over `MAX_CERT_DER_BYTES` or
+/// is not one DER SEQUENCE of the right length is skipped: one odd OS entry must not
+/// remove all roots. More than `MAX_CERTS` is an error, as for PEM.
+pub fn from_der(certs: &[Vec<u8>]) -> Result<TrustStore, Error> {
+    let mut der = Vec::new();
+    let mut ends: Vec<u32> = Vec::new();
+    for c in certs {
+        if c.len() > MAX_CERT_DER_BYTES || !der_frame_ok(c) {
+            continue;
+        }
+        if ends.len() == MAX_CERTS {
+            return Err(Error::TooManyCerts);
+        }
+        der.extend_from_slice(c);
+        ends.push(der.len() as u32);
+    }
+    if ends.is_empty() {
+        return Err(Error::Empty);
+    }
+    Ok(TrustStore { der, ends })
+}
+
+/// Loads the OS roots. Returns where they came from: a file path or a store label.
 pub fn load_system() -> Result<(TrustStore, &'static str), Error> {
-    load_first(&SYSTEM_PATHS)
+    match bare_os::trust::roots() {
+        Ok(bare_os::trust::Roots::PemFiles(paths)) => load_first(paths),
+        Ok(bare_os::trust::Roots::Der(certs)) => from_der(&certs).map(|s| (s, bare_os::trust::WINDOWS_LABEL)),
+        Err(_) => Err(Error::NoSystemStore),
+    }
 }
 
 #[cfg(test)]
@@ -279,6 +302,28 @@ mod tests {
             Err(e) => panic!("other error {e:?}"),
             Ok(_) => panic!("accepted"),
         }
+    }
+
+    #[test]
+    fn from_der_applies_limits() {
+        let big = {
+            let mut v = vec![0x30, 0x82, (MAX_CERT_DER_BYTES >> 8) as u8, 0];
+            v.resize(4 + MAX_CERT_DER_BYTES, 0);
+            v
+        };
+        let s = from_der(&[D.to_vec(), big, vec![1, 2, 3], D.to_vec()]).unwrap();
+        assert_eq!(s.iter().collect::<Vec<_>>(), [&D[..], &D[..]]);
+        assert_eq!(from_der(&[]).unwrap_err(), Error::Empty);
+        assert_eq!(from_der(&[vec![0]]).unwrap_err(), Error::Empty);
+        assert!(from_der(&vec![D.to_vec(); MAX_CERTS]).is_ok());
+        assert_eq!(from_der(&vec![D.to_vec(); MAX_CERTS + 1]).unwrap_err(), Error::TooManyCerts);
+    }
+
+    #[test]
+    fn system_store_has_roots() {
+        let (s, from) = load_system().expect("OS roots");
+        eprintln!("{} roots from {from}", s.len());
+        assert!(s.len() >= 10);
     }
 
     #[test]
