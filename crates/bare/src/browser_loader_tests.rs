@@ -360,6 +360,21 @@ fn module_scripts_are_deferred_in_document_order_with_defer_scripts() {
 }
 
 #[test]
+fn the_loaded_document_has_one_navigation_entry() {
+    big(|| {
+        let srv = server(vec![]);
+        let mut b = make("<p>x</p>", &srv, 5_000_000, true);
+        let r = load(&mut b, &srv, quick());
+        assert_eq!(r.stop, Stop::Settled);
+        let src = "var n = performance.getEntriesByType('navigation'); var e = n[0];
+            [n.length, e.entryType, e.type, e.name === location.href, e.startTime, e.domContentLoadedEventStart <= e.loadEventStart,
+             e.domInteractive <= e.domComplete, e.loadEventStart <= e.loadEventEnd, e.duration === e.loadEventEnd,
+             performance.getEntriesByName(location.href, 'navigation').length, performance.getEntries()[0].entryType].join()";
+        assert_eq!(eval(&mut b, src), "1,navigation,navigate,true,0,true,true,true,true,1,navigation");
+    });
+}
+
+#[test]
 fn an_async_module_runs_after_dom_content_loaded() {
     big(|| {
         let html = format!(

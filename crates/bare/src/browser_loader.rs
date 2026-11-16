@@ -1773,6 +1773,7 @@ impl Run<'_> {
             self.dom.ce.parsing.set(None);
             self.release_elements(None)?;
             self.step += 1;
+            self.dom.load_times.borrow_mut().interactive = self.dom.now_ms();
             self.set_ready(1)?;
         }
         while self.step <= nb + 1 + nd {
@@ -1790,7 +1791,9 @@ impl Run<'_> {
             self.step += 1;
             let root = self.dom.doc.borrow().root();
             bare_net::trace::mark(|| "DOMContentLoaded".into(), 0);
+            self.dom.load_times.borrow_mut().dcl_start = self.dom.now_ms();
             self.fire(EvTarget::Node(root), "DOMContentLoaded", true)?;
+            self.dom.load_times.borrow_mut().dcl_end = self.dom.now_ms();
             self.after_js()?;
             self.async_queue.extend(items.iter().filter(|p| p.timing == Timing::Async));
         }
@@ -1828,8 +1831,11 @@ impl Run<'_> {
             if !self.loaded && self.async_queue.is_empty() && self.dom.scripts.external.borrow().is_empty() && self.net.waits.is_empty() {
                 self.loaded = true;
                 self.set_ready(2)?;
+                self.dom.load_times.borrow_mut().complete = self.dom.now_ms();
                 bare_net::trace::mark(|| "load".into(), 0);
+                self.dom.load_times.borrow_mut().load_start = self.dom.now_ms();
                 self.fire(EvTarget::Window, "load", false)?;
+                self.dom.load_times.borrow_mut().load_end = self.dom.now_ms();
                 self.after_js()?;
                 did += 1;
             }

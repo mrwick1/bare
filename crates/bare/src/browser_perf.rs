@@ -4,13 +4,15 @@
 //! Cause: Bing, GitLab and other pages call `performance.getEntriesByType('navigation')` or `performance.mark(...)` at load. A missing
 //! method threw `TypeError` and stopped the script.
 //!
-//! - Only `mark` and `measure` entries exist. `navigation`, `resource`, `paint` and every other type give an empty array.
+//! - `mark` and `measure` entries exist, and one `navigation` entry per document. `resource`, `paint` and every other type give an empty array.
 //! - An entry is plain Rust data. Each read makes new plain objects with `name`, `entryType`, `startTime`, `duration` and `detail`, so
 //!   two reads of one entry are not `===`, and there is nothing to root. The object that `mark` or `measure` returns carries the `detail`
 //!   of its options; a later read has `detail: null`.
 //! - The interfaces `PerformanceEntry`, `PerformanceResourceTiming`, `PerformanceNavigationTiming`, `PerformanceMark` and `PerformanceMeasure`
 //!   are lazy globals (`install_interfaces`). Each is an illegal constructor. A mark or a measure is an instance of its interface, and
-//!   `toJSON` gives the plain copy. A resource or navigation entry is never made. Gap: `new PerformanceMark(name)` throws.
+//!   `toJSON` gives the plain copy. A resource entry is never made. Gap: `new PerformanceMark(name)` throws.
+//! - The navigation entry is made on each read. Its times are the ones the loader stamps in `LoadTimes`. A phase not reached is `0`.
+//!   A document without a URL has no navigation entry.
 //! - A `measure` argument that names a mark uses the last mark of that name. `navigationStart` is 0. An unknown name is a `SyntaxError`.
 //! - After `MAX_ENTRIES` entries, a new one is returned but not kept.
 //! - The methods and legacy navigation accessors are installed with the scheduler. The entry list is empty until the first `mark`.
@@ -92,6 +94,41 @@ pub(crate) struct Entry {
     measure: bool,
     start: f64,
     dur: f64,
+}
+
+/// The times of the load of one document, in ms since the origin. The loader stamps them (`browser_loader.rs`). `0` is a phase not reached.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct LoadTimes {
+    pub(crate) interactive: f64,
+    pub(crate) dcl_start: f64,
+    pub(crate) dcl_end: f64,
+    pub(crate) complete: f64,
+    pub(crate) load_start: f64,
+    pub(crate) load_end: f64,
+}
+
+/// The navigation entry of the document `url`. Each read makes a new object. Its times are those of `LoadTimes`.
+fn nav_entry(d: &Dom, it: &mut Interp<'_>, url: &str) -> R<Value> {
+    let i = ensure(d, it)?;
+    let o = d.obj(it, i.navigation.proto)?;
+    let t = *d.load_times.borrow();
+    for (k, v) in [
+        ("name", d.js_str(it, url)?),
+        ("entryType", d.js_str(it, "navigation")?),
+        ("startTime", Value::Number(0.0)),
+        ("duration", Value::Number(t.load_end)),
+        ("type", d.js_str(it, "navigate")?),
+        ("domInteractive", Value::Number(t.interactive)),
+        ("domContentLoadedEventStart", Value::Number(t.dcl_start)),
+        ("domContentLoadedEventEnd", Value::Number(t.dcl_end)),
+        ("domComplete", Value::Number(t.complete)),
+        ("loadEventStart", Value::Number(t.load_start)),
+        ("loadEventEnd", Value::Number(t.load_end)),
+    ] {
+        let k = d.key(it, k)?;
+        it.define_data(o, k, v, true, true, true)?;
+    }
+    Ok(Value::Object(o))
 }
 
 fn arg(a: &[Value], i: usize) -> Value {
@@ -216,6 +253,13 @@ fn measure(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
 }
 
 fn list(d: &Dom, it: &mut Interp<'_>, ty: Option<&str>, name: Option<&str>) -> R<Value> {
+    let mut out = Vec::new();
+    if let Ok(rec) = d.cur_rec() {
+        let url = rec.href();
+        if ty.is_none_or(|t| t == "navigation") && name.is_none_or(|n| n == url) {
+            out.push(nav_entry(d, it, &url)?);
+        }
+    }
     let mut idx: Vec<usize> = {
         let l = d.perf_entries.borrow();
         (0..l.len()).filter(|&i| ty.is_none_or(|t| t == if l[i].measure { "measure" } else { "mark" }) && name.is_none_or(|n| n == l[i].name)).collect()
@@ -225,7 +269,6 @@ fn list(d: &Dom, it: &mut Interp<'_>, ty: Option<&str>, name: Option<&str>) -> R
         let l = d.perf_entries.borrow();
         l[x].start.total_cmp(&l[y].start)
     });
-    let mut out = Vec::with_capacity(idx.len());
     for i in idx {
         let e = {
             let l = d.perf_entries.borrow();
@@ -243,7 +286,7 @@ fn get_entries(d: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> 
 fn by_type(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
     need(it, a, "getEntriesByType")?;
     let t = d.string_arg(it, a[0])?;
-    if t != "mark" && t != "measure" {
+    if !matches!(t.as_str(), "mark" | "measure" | "navigation") {
         return it.array_from(&[]);
     }
     list(d, it, Some(&t), None)
@@ -256,7 +299,7 @@ fn by_name(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
         Value::Undefined => None,
         v => Some(d.string_arg(it, v)?),
     };
-    if t.as_deref().is_some_and(|t| t != "mark" && t != "measure") {
+    if t.as_deref().is_some_and(|t| !matches!(t, "mark" | "measure" | "navigation")) {
         return it.array_from(&[]);
     }
     list(d, it, t.as_deref(), Some(&n))

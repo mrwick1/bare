@@ -1733,7 +1733,7 @@ A focused element inside an editing host now takes key input. Text, Enter, Backs
 - A mark or a measure is an instance of `PerformanceMark` or `PerformanceMeasure`. Its own fields do not change. Its `toJSON` gives a plain copy. A mark or measure keeps `detail` in the copy. An entry keeps only the four common members.
 - `Screen` is a lazy global (`browser.rs`). `window.screen` is its instance. `new Screen()` throws.
 - Gap: `new PerformanceMark(name)` and `new PerformanceMeasure(name)` throw. They are not constructible yet. Entries have no getters on the prototype. Their fields stay own data properties.
-- Gap: `PerformanceResourceTiming` and `PerformanceNavigationTiming` have no entries. The page gets no resource or navigation entry from `getEntries*`, as before.
+- Gap: `PerformanceResourceTiming` has no entries. The navigation entry is made per document (2026-11-16).
 - Gap: `toJSON` does not check its receiver. A call on a non-object throws `Illegal invocation`. A call on another object does not.
 - Shape from Ladybird's IDL (`LibWeb/PerformanceTimeline/PerformanceEntry.idl`, `LibWeb/ResourceTiming/PerformanceResourceTiming.idl`, `LibWeb/CSS/Screen.idl`, BSD-2-Clause). We wrote our own code. No file was copied. Ladybird's `Screen` has its members on the interface. Ours keep them as own data properties of `screen`, as before.
 
@@ -2369,6 +2369,20 @@ Issue #577: `new Intl.Collator('en', { usage: 'search' })` raised `Unsupported`.
 - Why `compare` does not change: bare has no search collation data. The spec lets an engine use the sort rules for `search`.
 - Kept: the `sensitivity` option and every other option of the collator work as before.
 - Not changed: the `collation` option and the `co-emoji` and `co-eor` locale keywords still throw `Unsupported` that page code cannot catch.
+## Navigation entry for each document (2026-11-16)
+
+- `performance.getEntriesByType('navigation')` gives one entry for the document. Its `name` is the document URL, its `startTime` is 0 and its `type` is `navigate`.
+- The entry holds the load times of the document: `domInteractive`, `domContentLoadedEventStart` and `End`, `domComplete`, `loadEventStart` and `End`. The loader stamps them. A phase not reached is 0.
+- Each read makes a new entry. `getEntries()` and `getEntriesByName(url)` return it too. A document without a URL has no entry.
+- Reason: techcrunch.com reads `[0].domContentLoadedEventStart`. The array was empty, so the page threw (bare issue #578).
+- Source: the spec, Navigation Timing Level 2 (`PerformanceNavigationTiming`). No file of another engine was read or copied.
+- Not built: `redirectCount`, `transferSize` and the other navigation members. `type` is `navigate` on reload and on back too.
+## Type clears a number or email field first (2026-11-16)
+
+- Bug (#579): `type` on `<input type=number>` with value `3` and text `5` gave `35`.
+- Cause: `type_start` clears a filled field with Control+A and Backspace. Control+A on a focused field selects its text only when selection applies to it. Selection does not apply to `email` and `number` (as in the spec). The key fell through to a no-op, so the old text stayed.
+- Fix: Control+A on any editable field selects its text through `select_text`. The test also covers `url`, `tel`, `search` and `password`.
+- Test: `act_type_replaces_the_old_value_of_a_value_input` in `crates/mcp/tests/server.rs`.
 ## A labelledby loop no longer overflows the stack (2026-11-16)
 
 Issue #580: `bare-mcp` aborted with a stack overflow when a snapshot named an element on the deepmind blog page. The page has an element inside the element that its `aria-labelledby` points at.
