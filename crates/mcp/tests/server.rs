@@ -2276,6 +2276,29 @@ fn act_type_edits_a_contenteditable() {
     assert_eq!(r, json!("Bye"));
 }
 
+#[test]
+fn act_type_replaces_the_old_value_of_a_value_input() {
+    // Issue #579: `type` on a number input with value 3 and text 5 gave 35. Each kind of value input must get the new text alone.
+    let page = "<!doctype html><title>forms</title><body>\
+        <input id=n type=number value=3>\
+        <input id=e type=email value='a@b.c'>\
+        <input id=u type=url value='http://a.test/'>\
+        <input id=t type=tel value=111>\
+        <input id=s type=search value=old>\
+        <input id=p type=password value=old>";
+    let base = page_server(page.to_string());
+    let mut s = Server::start();
+    let (r, error) = s.tool("open", json!({"url": format!("{base}/"), "snapshot": false}));
+    assert!(!error, "{r}");
+    for (id, text) in [("n", "5"), ("e", "x@y.z"), ("u", "http://b.test/"), ("t", "222"), ("s", "new"), ("p", "new")] {
+        let (r, error) = s.tool("act", json!({"op": "type", "loc": format!("css=\"#{id}\""), "text": text, "snapshot": false}));
+        assert!(!error, "{id}: {r}");
+        // A boolean: `eval` masks a password value and returns a numeric-looking string as a number.
+        let (v, _) = s.tool("eval", json!({"js": format!("document.getElementById('{id}').value === '{text}'")}));
+        assert_eq!(v, json!(true), "{id}");
+    }
+}
+
 static CROSS_HITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 fn frame_pages(_: &str, target: &str, _: &str, _: Option<&str>) -> (u16, &'static str, Vec<u8>) {

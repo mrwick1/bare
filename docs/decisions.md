@@ -2369,6 +2369,12 @@ Owner decision (2026-11-15): build P1, P4 and P2 of [design-gmail-js.md](design-
 - Reason: techcrunch.com reads `[0].domContentLoadedEventStart`. The array was empty, so the page threw (bare issue #578).
 - Source: the spec, Navigation Timing Level 2 (`PerformanceNavigationTiming`). No file of another engine was read or copied.
 - Not built: `redirectCount`, `transferSize` and the other navigation members. `type` is `navigate` on reload and on back too.
+## Type clears a number or email field first (2026-11-16)
+
+- Bug (#579): `type` on `<input type=number>` with value `3` and text `5` gave `35`.
+- Cause: `type_start` clears a filled field with Control+A and Backspace. Control+A on a focused field selects its text only when selection applies to it. Selection does not apply to `email` and `number` (as in the spec). The key fell through to a no-op, so the old text stayed.
+- Fix: Control+A on any editable field selects its text through `select_text`. The test also covers `url`, `tel`, `search` and `password`.
+- Test: `act_type_replaces_the_old_value_of_a_value_input` in `crates/mcp/tests/server.rs`.
 ## A labelledby loop no longer overflows the stack (2026-11-16)
 
 Issue #580: `bare-mcp` aborted with a stack overflow when a snapshot named an element on the deepmind blog page. The page has an element inside the element that its `aria-labelledby` points at.
