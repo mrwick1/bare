@@ -1489,9 +1489,10 @@ fn is_family(parts: &[Part]) -> bool {
 }
 
 /// The face for a `font-family` list, after the first `skip` parts of `value`: the keyword `Monospace` or `SansSerif`. The first entry decides. A value is 8
-/// bytes and has no list, and the browser has two faces. A monospace name (`monospace`, `ui-monospace`, `Menlo`, `Monaco`, `Consolas`, `Courier`,
-/// `Courier New`, `SFMono-Regular`, `Liberation Mono`, `DejaVu Sans Mono`, `Noto Sans Mono`) gives Noto Sans Mono. Any other name gives Noto Sans:
-/// we cannot know that a font is missing, and a page that lists `Verdana, monospace` wants proportional text. A part is one token, or one block.
+/// bytes and has no list, and the browser has two faces. A monospace name gives Noto Sans Mono: a name with `mono` in it (`monospace`, `ui-monospace`,
+/// `SFMono-Regular`, `JetBrains Mono`), a name with the word `code` (`Source Code Pro`, `Fira Code`), `Menlo`, `Monaco`, `Consolas` or `Courier`. Any
+/// other name gives Noto Sans: we cannot know that a font is missing, and a page that lists `Verdana, monospace` wants proportional text. A part is one
+/// token, or one block.
 fn family(value: &str, skip: usize) -> Value {
     let mut tokens = tokenize(value);
     for _ in 0..skip {
@@ -1504,8 +1505,8 @@ fn family(value: &str, skip: usize) -> Value {
             break;
         }
     }
-    // The first entry in lowercase, with one space between its words. The longest name in the list has 16 letters: a longer entry is not in it.
-    let (mut buf, mut len, mut long) = ([0u8; 24], 0, false);
+    // The first entry in lowercase, with one space between its words. A longer entry than the buffer is not a monospace name.
+    let (mut buf, mut len, mut long) = ([0u8; 48], 0, false);
     let mut add = |text: &str| {
         let space = (len > 0) as usize;
         if len + space + text.len() > buf.len() {
@@ -1531,10 +1532,10 @@ fn family(value: &str, skip: usize) -> Value {
             _ => {}
         }
     }
-    let mono = !long && matches!(
-        std::str::from_utf8(&buf[..len]),
-        Ok("monospace" | "ui-monospace" | "menlo" | "monaco" | "consolas" | "courier" | "courier new" | "sfmono-regular" | "liberation mono" | "dejavu sans mono" | "noto sans mono")
-    );
+    let mono = !long
+        && std::str::from_utf8(&buf[..len]).is_ok_and(|name| {
+            name.contains("mono") || name.split(' ').any(|w| w == "code") || matches!(name, "menlo" | "monaco" | "consolas" | "courier" | "courier new")
+        });
     Value::Keyword(if mono { Keyword::Monospace } else { Keyword::SansSerif })
 }
 
@@ -2171,6 +2172,10 @@ mod tests {
         assert_eq!(one("font-family", "Verdana, sans-serif"), Some(Value::Keyword(K::SansSerif)));
         assert_eq!(one("font-family", "\"Courier New\", Verdana"), Some(Value::Keyword(K::Monospace)));
         assert_eq!(one("font-family", "COURIER NEW"), Some(Value::Keyword(K::Monospace)));
+        for mono in ["\"Source Code Pro\", monospace", "\"Fira Code\"", "\"JetBrains Mono\", monospace", "\"SF Mono\"", "\"Cascadia Code\", Consolas", "\"IBM Plex Mono\", monospace"] {
+            assert_eq!(one("font-family", mono), Some(Value::Keyword(K::Monospace)), "{mono}");
+        }
+        assert_eq!(one("font-family", "Verdana, monospace"), Some(Value::Keyword(K::SansSerif)), "the first entry decides");
         assert_eq!(one("font-family", "-apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif"), Some(Value::Keyword(K::SansSerif)));
         assert_eq!(parse("font-family", "12px"), vec![]);
         assert_eq!(parse("font-family", ""), vec![]);
