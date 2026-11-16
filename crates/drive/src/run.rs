@@ -171,6 +171,8 @@ impl Host {
             Host::Window(r) => r.wait_work(seen, if CANCEL.with(|c| c.borrow().is_some()) { until.min(Instant::now() + Duration::from_millis(100)) } else { until }),
             // On the benchmark clock the page moves the clock to its next event and nothing sleeps (`Page::nap`).
             Host::Local(p) if bare_net::vclock::on() => p.nap(Some(until), Duration::ZERO, Duration::MAX),
+            // The standalone driver has no token: preserve its single sleep instead of adding polling wakeups.
+            _ if CANCEL.with(|c| c.borrow().is_none()) => std::thread::sleep(until.saturating_duration_since(Instant::now())),
             // In slices, so that a cancellation ends the sleep (the loop then ends the step).
             _ => {
                 while !cancelled() {

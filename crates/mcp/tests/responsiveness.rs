@@ -357,3 +357,24 @@ fn the_end_of_input_stops_the_server_and_its_suite_workers() {
         wait_for("a suite worker ends with the server", || !std::path::Path::new(&format!("/proc/{p}")).exists());
     }
 }
+
+#[test]
+fn queued_close_reopen_and_later_calls_keep_their_order() {
+    let base = common::serve_route(route);
+    let mut c = Client::start();
+    c.open("a", &base);
+    let first = c.call("act", json!({"session": "a", "op": "goto", "url": format!("{base}/slow/reopen")}));
+    wait_arrived("reopen");
+    let close = c.call("close", json!({"session": "a"}));
+    let reopen = c.call("open", json!({"session": "a", "url": format!("{base}/ok")}));
+    let write = c.call("step", json!({"session": "a", "steps": "cookie set reopened yes", "compact": true}));
+    let read = c.call("storage", json!({"session": "a", "area": "cookies"}));
+    c.ping();
+    release("reopen");
+    for id in [first, close, reopen, write] {
+        let (text, error) = c.text(id);
+        assert!(!error, "{text}");
+    }
+    let (text, error) = c.text(read);
+    assert!(!error && text.contains("reopened=yes"), "{text}");
+}

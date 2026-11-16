@@ -302,7 +302,10 @@ impl Shared {
 
     /// A call that has no session of its own: a thread for this call alone.
     fn oneshot(self: &Arc<Self>, job: Job) {
-        if lock(&self.threads).iter().filter(|h| !h.is_finished()).count() >= ONESHOT + lock(&self.sessions).len() {
+        // Session creation takes sessions before threads. Do not hold either lock while acquiring the other.
+        let sessions = lock(&self.sessions).len();
+        let running = lock(&self.threads).iter().filter(|h| !h.is_finished()).count();
+        if running >= ONESHOT + sessions {
             return self.finish(job, error_result(format!("{ONESHOT} calls of run_steps, run_suite or sessions are running: wait for one")));
         }
         let sh = self.clone();
@@ -328,13 +331,15 @@ impl Shared {
         t.push(h);
     }
 
-    /// A worker that has no session left leaves the map, then hands the calls that wait in its queue to `route`: a call after a `close`
-    /// finds no session, and an `open` after it starts a new worker, as in the order that the client sent them.
-    fn retire(self: &Arc<Self>, name: &str, rx: &Receiver<Job>) {
-        lock(&self.sessions).remove(name);
-        for job in rx.try_iter() {
-            self.route(job);
+    /// An empty worker drains its own pending calls before freeing the name. Checking the queue and removing the slot share the routing
+    /// lock, so a newer call cannot jump ahead of calls queued before close.
+    fn retire(&self, name: &str, rx: &Receiver<Job>) -> Option<Job> {
+        let mut sessions = lock(&self.sessions);
+        if let Ok(job) = rx.try_recv() {
+            return Some(job);
         }
+        sessions.remove(name);
+        None
     }
 
     /// Call `tool` on session `name` with no client request behind it, and wait for the result text. `None` when the session is gone.
@@ -402,27 +407,28 @@ fn worker(shared: Arc<Shared>, name: String, rx: Receiver<Job>, url: Arc<Mutex<S
     if let Some(t) = tab {
         server.begin_tab(&name, t);
         server.publish(&name, &url);
-        if server.live.is_empty() {
-            return shared.retire(&name, &rx);
-        }
     }
     loop {
-        let job = match server.tick_live() {
-            Some(at) => match rx.recv_timeout(at.saturating_duration_since(Instant::now()).max(Duration::from_millis(1))) {
-                Ok(j) => j,
-                Err(RecvTimeoutError::Timeout) => continue,
-                Err(RecvTimeoutError::Disconnected) => return,
-            },
-            None => match rx.recv() {
-                Ok(j) => j,
-                Err(_) => return,
-            },
+        let job = if server.live.is_empty() {
+            match shared.retire(&name, &rx) {
+                Some(job) => job,
+                None => return,
+            }
+        } else {
+            match server.tick_live() {
+                Some(at) => match rx.recv_timeout(at.saturating_duration_since(Instant::now()).max(Duration::from_millis(1))) {
+                    Ok(j) => j,
+                    Err(RecvTimeoutError::Timeout) => continue,
+                    Err(RecvTimeoutError::Disconnected) => return,
+                },
+                None => match rx.recv() {
+                    Ok(j) => j,
+                    Err(_) => return,
+                },
+            }
         };
         server.run_job(job, Some(&busy));
         server.publish(&name, &url);
-        if server.live.is_empty() {
-            return shared.retire(&name, &rx);
-        }
     }
 }
 
@@ -1600,5 +1606,35 @@ mod instructions_tests {
         assert!(off.contains("report_issue, area \"bare\". Never open a GitHub issue."));
         assert!(!off.contains("mrwick1/bare"));
         assert_eq!(gh[..gh.find("When").unwrap()], off[..off.find("When").unwrap()]);
+    }
+}
+
+#[cfg(test)]
+mod dispatch_tests {
+    use super::*;
+
+    #[test]
+    fn retirement_keeps_pending_calls_on_the_owner_queue() {
+        let (out, _output) = mpsc::channel();
+        let shared = Arc::new(Shared {
+            workspace: None, saved: Mutex::new(HashMap::new()), runs: AtomicU32::new(0),
+            net: Mutex::new(bare_net::http::Client::new()), out,
+            sessions: Mutex::new(HashMap::new()), inflight: Mutex::new(HashMap::new()),
+            threads: Mutex::new(Vec::new()), closing: AtomicBool::new(false),
+        });
+        let (tx, rx) = mpsc::sync_channel(QUEUE);
+        let (done_tx, done_rx) = mpsc::channel();
+        tx.send(Job {
+            key: None, params: json!({"name": "snapshot", "arguments": {"session": "a"}}),
+            cancel: Arc::new(AtomicBool::new(false)),
+            done: Box::new(move |_| { let _ = done_tx.send(()); }),
+        }).unwrap();
+        lock(&shared.sessions).insert("a".into(), Slot {
+            tx, url: Arc::new(Mutex::new(String::new())), busy: Arc::new(AtomicUsize::new(1)),
+        });
+        // A pending call must stay with this owner, rather than being dispatched through a newly freed name.
+        let _ = shared.retire("a", &rx);
+        assert!(lock(&shared.sessions).contains_key("a"), "retirement exposed a free name before draining older calls");
+        assert!(done_rx.try_recv().is_err(), "a queued call was rerouted during retirement");
     }
 }

@@ -72,7 +72,7 @@ Locks: `sessions` (name to queue sender), `inflight` (request id to token), `sav
 
 - Calls on one session are one FIFO queue, so snapshot, act and step never race. Calls on different sessions finish in any order. Every reply keeps its request id.
 - `open` and `ensure_session` create the worker if none exists. Any other tool for an unknown session gets the old error `no live session NAME: call open first` at once.
-- A queue sender is used only under the `sessions` lock, and a worker removes its slot under the same lock (`retire`). So no job is lost between the two. The jobs that wait behind a worker that retires are routed again in order: an `open` after a `close` starts a new worker, other calls get the no-session error.
+- A queue sender is used only under the `sessions` lock, and a worker removes its slot under the same lock (`retire`). So no job is lost between the two. A worker with no live page drains older queued calls itself before it frees the name. Queue inspection and name removal share the routing lock. A queued `open` can reuse that owner; other calls see the current empty-session state. New arrivals cannot jump ahead of the backlog.
 - `close` runs on the worker after every earlier call. The slot leaves the map only after `Session::finish` returned, so the session and its captures are accounted for first.
 - A worker whose session is gone (`close`, failed first `open`, failed tab load) ends. A full queue gives an error reply at once.
 - A panic in a call becomes an `isError` reply; the thread goes on.
@@ -80,7 +80,7 @@ Locks: `sessions` (name to queue sender), `inflight` (request id to token), `sav
 
 ## Cancellation (MCP `notifications/cancelled`)
 
-Spec checked: https://modelcontextprotocol.io/specification/latest/basic/utilities/cancellation (2026-07-28 revision). `params.requestId` names the request. On stdio the client MUST send the notification. A server SHOULD stop the work, free resources and not send a response; it MAY ignore an unknown or finished request. The notification itself has no JSON-RPC `id`, so it is read on the main thread while a call runs.
+Protocol reference: https://modelcontextprotocol.io/specification/2025-06-18/basic/utilities/cancellation. `params.requestId` names the request. A receiver SHOULD stop the work, free resources and not send a response; it MAY ignore unknown or finished requests. The notification itself has no JSON-RPC `id`, so the main thread reads it while a call runs. The stdio tests request this protocol version.
 
 - Each tool call has an atomic token in `inflight`. The notification sets the token of its `requestId` (matched as JSON text, so `1` and `"1"` differ). Unknown ids, finished requests and malformed notifications are ignored.
 - A call cancelled before it runs is skipped and gets no reply. A call cancelled while it runs gets no reply: the worker drops the result.
@@ -128,3 +128,11 @@ Cost: one more fixed thread (the writer) and one thread per session, about 0.3 t
 - `crates/mcp/src/main.rs`: the `Server` struct, `main` and `handle` are replaced (`Shared`, `worker`, `Job`). The tool methods keep their bodies; the changes inside them are `self.saved`, `self.net`, `self.runs`, `self.workspace` going through `self.shared`, `sessions`, `open_tab`, and one `cancelled()` check after the step in `act`. PR #614 changes `act` (action and page status, `expect`): keep both. Its edits sit in the body of `act` after `run_live`, next to the check added here.
 - `crates/drive/src/run.rs`: `set_cancel`, `cancelled`, `current_cancel` (thread local), the check at the top of the try loop in `Session::step`, `Host::sleep`, two `eval` loops, and no failure capture for kind `cancelled`. Recovery or observation work in `Session::step` must keep the `cancelled()` check before `tries += 1`.
 - `crates/drive/src/suite.rs`: `Config::cancel`, `exchange(w, name, cfg)`.
+
+## Parent review
+
+A retirement regression failed before the correction: the old code freed a session name before handling its queued calls. The owner now drains those calls before retiring. A stdio regression also checks close, reopen, write and read in one queued sequence. One-shot dispatch no longer holds the thread registry lock while acquiring the session registry lock; session creation used the opposite order. The standalone driver keeps its original single sleep when no cancellation token exists.
+
+Both MCP unit tests and all ten responsiveness tests pass. The drive library tests (eight), `cargo check --workspace` and `git diff --check` pass. The broader MCP server suite has 94 passes, one snapshot timing failure and one ignored window test. The timing test also failed on the clean baseline. No performance gain is claimed. Parent verification used the MCP 2025-06-18 cancellation specification, which matches the version requested by the stdio tests: https://modelcontextprotocol.io/specification/2025-06-18/basic/utilities/cancellation.
+
+Combined-branch behavior, windowed cancellation, Windows, release builds, large session counts and full workspace tests remain unverified. Shutdown waits for cooperative workers for up to ten seconds; native work that does not return still relies on process exit.
