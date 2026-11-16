@@ -2469,3 +2469,11 @@ fn run_suite_gives_a_short_summary_and_names_a_failing_step_and_leaves_live_sess
     let _ = site.kill();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// An `aria-labelledby` that points at an ancestor made the name computation call itself without end: a stack overflow that killed the
+/// server (#580). Now the name stops at a depth limit.
+#[test]
+fn a_labelledby_loop_does_not_overflow_the_stack() {
+    let snap = snap_of("<body><div id=x><button aria-labelledby=x>Go</button> after</div><a id=a href=/ aria-labelledby=b>A</a><a id=b href=/ aria-labelledby=a>B</a>", json!({}));
+    assert!(snap.contains("button"), "{snap}");
+}

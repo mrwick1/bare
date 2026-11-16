@@ -2360,3 +2360,11 @@ Owner decision (2026-11-15): build P1, P4 and P2 of [design-gmail-js.md](design-
 - P1 is built: a classic script of 16 KB or more is parsed on one worker thread when its text arrives. The page thread takes the tree in `parse_cache::parse`, waits if the worker runs that text, and parses it itself if the worker has not begun.
 - Chosen: the worker fills a slot of a registry keyed like the parse cache; it runs no code and reports nothing. Not chosen: `Arc` instead of `Rc` in the tree (atomic counts on the hot path of every clone); a parse on the download thread itself (it would hold one of the 6 download slots); a worker for module scripts and for scripts of unknown kind (the kind decides the cache key, a wrong guess parses for nothing).
 - The tree is handed over with `unsafe impl Send` for a wrapper (`Hand`). The condition is in `parse_ahead.rs` and has a test. Check the condition again when `ast.rs` gets a new `Rc` or a shared cache.
+
+## A labelledby loop no longer overflows the stack (2026-11-16)
+
+Issue #580: `bare-mcp` aborted with a stack overflow when a snapshot named an element on the deepmind blog page. The page has an element inside the element that its `aria-labelledby` points at.
+- Cause: `Cx::alt` restarted its depth at 0 for each referenced element, so the limit of 32 never held in a loop of references.
+- Fix: a reference passes `depth + 1`. The referenced node itself is still shown when hidden (`in_ref`), as accname 1.2 says.
+- Parallel opens were not the cause. A snapshot of that page crashed the server alone.
+- Not done: a loop that fans out over many ids can still cost up to width^32 steps before the limit. No page has shown it.
