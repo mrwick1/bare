@@ -2399,3 +2399,12 @@ Issue #580: `bare-mcp` aborted with a stack overflow when a snapshot named an el
 - Fix: `Dom::navigate` still replaces the entry for the same address. It queues no task. A fragment that changes still queues `popstate` then `hashchange`.
 - Test: `crates/drive/tests/goto_spa_route.rs` (a hash-routed fixture, four `goto` of one address) and `fragment_navigation_updates_at_once_and_queues_events`, which now expects 2 events (it expected 3).
 - Not verified: live Gmail. This is the one difference that a local fixture shows. It is a hypothesis that it is the cause of the live failures.
+## Leaving a list in a contenteditable (2026-11-14)
+
+Issue #443. Enter in an empty list item, Backspace in an empty block, and the list toggle now act on one item, as Chrome does.
+
+- Enter in an empty `li` turns it into a `div` after the list. The items after it go to a clone of the list.
+- Backspace in an empty block removes it and puts the caret at the end of the block before it. The first item of a list becomes a `div` instead.
+- A list command of the same kind turns only the selected items into `div` blocks. The other kind still renames the whole list.
+- `insertText` removes the placeholder `br` of a block that has no other content.
+- Not done: Backspace at the start of a block with content does not merge it with the block before it.
