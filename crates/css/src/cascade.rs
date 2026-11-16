@@ -2146,6 +2146,8 @@ pub(crate) fn hash_values(mut h: u64, values: &[Value]) -> u64 {
 }
 
 /// What the computation of the values needs to know about the page.
+type Merges = HashMap<(u32, Vec<u32>), u32, BuildHasherDefault<Fnv>>;
+
 struct Cx<'a> {
     viewport: (f32, f32),
     /// The font size of the `html` element, for `rem`. 16 until we know it.
@@ -2164,7 +2166,7 @@ struct Cx<'a> {
     /// The sets of custom properties, each one once.
     customs: RefCell<var::Sets>,
     /// The set of custom properties for a parent set and the rules with custom properties that an element matched.
-    merges: RefCell<HashMap<(u32, Vec<u32>), u32, BuildHasherDefault<Fnv>>>,
+    merges: RefCell<Merges>,
 }
 
 /// The computed `calc()` values, each one once. Two elements with the same value get the same number, so that their styles can be shared.
