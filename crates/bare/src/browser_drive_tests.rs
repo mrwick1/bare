@@ -306,3 +306,21 @@ fn a_click_on_a_target_with_no_box_is_not_a_hit_test() {
         assert_eq!(s.storage().get_item(false, &srv.url(""), "h").as_deref(), Some("yes"), "as before: an element with no box still gets its click");
     });
 }
+
+// ------------------------------------------------------------------------------------------ details
+
+/// The hidden absolute child of a closed `details` is not under the pointer: `elementFromPoint` gives what is behind it, and it is hit when the `details` is open.
+/// A click on a `summary` does not toggle `open` yet: that default action is not built (`browser_form.rs`).
+#[test]
+fn the_hidden_child_of_a_closed_details_is_not_hit() {
+    big(|| {
+        let page = "<body style='margin:0'><div id=u style='position:absolute;left:100px;top:100px;width:50px;height:50px'></div><details id=d><summary id=s>sum</summary><div id=c style='position:absolute;left:100px;top:100px;width:50px;height:50px;z-index:1'>c</div></details><script>0</script>";
+        let mut b = browser(page);
+        let at = "document.elementFromPoint(110, 110).id";
+        let v = b.run_script(at).unwrap();
+        assert_eq!(b.it.display(v), "u");
+        b.run_script("document.getElementById('d').setAttribute('open', '')").unwrap();
+        let v = b.run_script(at).unwrap();
+        assert_eq!(b.it.display(v), "c");
+    });
+}
