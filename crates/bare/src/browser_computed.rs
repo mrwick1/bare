@@ -907,6 +907,9 @@ impl Dom {
         if kind == PSEUDO && key == "content" {
             return Ok("normal".into());
         }
+        if key == "transform" || key == "-webkit-transform" {
+            return self.computed_transform(it, el, kind);
+        }
         let long = Property::from_name(&key);
         if !is_custom && long.is_none() && !SHORTHANDS.contains(&key.as_str()) {
             return Ok(String::new());
@@ -943,6 +946,27 @@ impl Dom {
             let name = a.starts_with(|c: char| c.is_alphabetic() || c == '_') && !a.starts_with("span ") && a != "auto";
             return Ok(if b == "auto" || (name && a == b) { a } else { format!("{a} / {b}") });
         }
+        // Chrome writes `font` as style, weight, size, `/ line-height` and family, and leaves out a `normal` style, a 400 weight and a `normal` line height.
+        if key == "font" {
+            let t = |p: Property| pick(p).text(p, ctx.as_ref()).map_err(Self::gate);
+            let mut out = String::new();
+            for (p, default) in [(Property::FontStyle, "normal"), (Property::FontWeight, "400")] {
+                let v = t(p)?;
+                if v != default {
+                    out.push_str(&v);
+                    out.push(' ');
+                }
+            }
+            out.push_str(&t(Property::FontSize)?);
+            let line = t(Property::LineHeight)?;
+            if line != "normal" {
+                out.push_str(" / ");
+                out.push_str(&line);
+            }
+            out.push(' ');
+            out.push_str(&t(Property::FontFamily)?);
+            return Ok(out);
+        }
         let mut text = String::new();
         for &p in longs {
             text.push_str(&format!("{}:{};", p.name(), pick(p).text(p, ctx.as_ref()).map_err(Self::gate)?));
@@ -959,6 +983,23 @@ impl Dom {
             Some(t) if !t.is_empty() => Ok(t),
             _ => Err(Self::gate(NO_SHORT)),
         }
+    }
+
+    /// `transform`: the engine keeps only the move (`TranslateX`, `TranslateY`), so the text is `none` or a matrix of a move. A percent needs the box: it is gated.
+    fn computed_transform(&self, it: &mut Interp<'_>, el: NodeId, kind: u8) -> R<String> {
+        // `transform` is not inherited: a pseudo-element here has the initial value.
+        if kind == PSEUDO {
+            return Ok("none".into());
+        }
+        let Some(s) = self.snapshot_with(it, el, true)? else { return Ok(String::new()) };
+        let mut xy = [0.0; 2];
+        for (v, p) in xy.iter_mut().zip([Property::TranslateX, Property::TranslateY]) {
+            *v = match s.style.value(p) {
+                Cv::Length(Length::Px(x)) => x,
+                _ => return Err(Self::gate("a computed transform that moves by a percent (it needs the box)")),
+            };
+        }
+        Ok(if xy == [0.0, 0.0] { "none".into() } else { format!("matrix(1, 0, 0, 1, {}, {})", num(xy[0]), num(xy[1])) })
     }
 
     /// 0 for the element, `PSEUDO` or `EMPTY` (see `computed_value`). Call it after `computed_el` accepted `this`.
@@ -1175,6 +1216,12 @@ fn named_get(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     d.js_str(it, &v)
 }
 
+fn transform_get(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    let el = d.computed_el(it, this)?;
+    let v = d.computed_value(it, el, "transform", d.computed_kind(this))?;
+    d.js_str(it, &v)
+}
+
 fn named_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     let name = current(d, it)?;
     d.computed_el(it, this)?;
@@ -1204,6 +1251,14 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
         for k in &keys {
             let key = d.key(it, k)?;
             d.define_accessor(it, proto, key, gf, Some(sf))?;
+        }
+    }
+    // `transform` is not a property of the style block, so the computed object has its own accessor.
+    for css in ["transform", "-webkit-transform"] {
+        let gf = d.add_fn(it, transform_get, &format!("get {}", keys_of(css)[0]), 0, false)?;
+        for k in keys_of(css) {
+            let key = d.key(it, &k)?;
+            d.define_accessor(it, proto, key, gf, None)?;
         }
     }
     let f = d.def_method(it, g, "getComputedStyle", 1, get_computed_style)?;
