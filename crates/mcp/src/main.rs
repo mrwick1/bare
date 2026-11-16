@@ -15,7 +15,10 @@
 //! Only JSON goes to stdout: the protocol owns it. Progress and errors go to stderr. JS: like a Node script that reads `readline`
 //! lines from `process.stdin` and writes `JSON.stringify(reply)` lines to `process.stdout`.
 
+mod recovery;
+
 use bare_drive::{DownloadState, Downloads};
+use recovery::Failure;
 use bare_drive::locate::{Locator, Text};
 use bare_drive::run::{Event, Options, Redactor, Report, Session, StorageState};
 use bare_drive::snap::{self, Mode};
@@ -138,35 +141,49 @@ impl Server {
     fn call(&mut self, params: &Value) -> Value {
         let args = params.get("arguments").cloned().unwrap_or(json!({}));
         let name = params.get("name").and_then(Value::as_str).unwrap_or("");
+        // The secrets of the session that the call names, for the evidence of a failure; `close` drops the session, so take them first.
+        let red = self.live.get(&session_name(&args)).map(|l| l.red.clone()).unwrap_or_default();
+        let fail = |f: Failure| json!({"content": [{"type": "text", "text": f.text}], "isError": true, "structuredContent": recovery::structured(&f, &red)});
         if let Err(e) = known_args(name, &args) {
-            return json!({"content": [{"type": "text", "text": e}], "isError": true});
+            return fail(Failure::args(e));
         }
-        let done = match name {
-            "run_steps" => self.run_steps(&args),
-            "run_suite" => self.run_suite(&args),
-            "open" => self.open(&args),
-            "step" => self.step(&args),
-            "save_state" => self.save_state(&args),
-            "ensure_session" => self.ensure_session(&args),
-            "close" => self.close(&args),
-            "snapshot" => self.snapshot(&args),
-            "find" => self.find(&args),
-            "read" => self.read(&args),
-            "links" => self.links(&args),
+        // The tools that act on a live session: the lookup of the session is the source of `missing_session`, before any argument is used.
+        if matches!(name, "step" | "close" | "snapshot" | "find" | "read" | "links" | "act" | "downloads" | "eval" | "console" | "network" | "diagnose" | "screenshot" | "storage" | "save_state")
+            && !self.live.contains_key(&session_name(&args))
+        {
+            return fail(Failure::no_session(&session_name(&args)));
+        }
+        // The failure of a step that did not make the call an error: it is only in the structured part, from this call's own report.
+        let mut step_failure = None;
+        let done: Result<String, Failure> = match name {
+            "run_steps" => self.run_steps(&args).map_err(Failure::from),
+            "run_suite" => self.run_suite(&args).map_err(Failure::from),
+            "open" => self.open(&args).map_err(Failure::from),
+            "step" => self.step(&args).map(|(t, f)| { step_failure = f; t }).map_err(Failure::from),
+            "save_state" => self.save_state(&args).map_err(Failure::from),
+            "ensure_session" => self.ensure_session(&args).map_err(Failure::from),
+            "close" => self.close(&args).map_err(Failure::from),
+            "snapshot" => self.snapshot(&args).map_err(Failure::from),
+            "find" => self.find(&args).map_err(Failure::from),
+            "read" => self.read(&args).map_err(Failure::from),
+            "links" => self.links(&args).map_err(Failure::from),
             "act" => self.act(&args),
-            "downloads" => self.downloads(&args),
-            "eval" => self.eval(&args),
-            "console" => self.console(&args),
-            "network" => self.network(&args),
-            "diagnose" => self.diagnose(&args),
+            "downloads" => self.downloads(&args).map_err(Failure::from),
+            "eval" => self.eval(&args).map_err(Failure::from),
+            "console" => self.console(&args).map_err(Failure::from),
+            "network" => self.network(&args).map_err(Failure::from),
+            "diagnose" => self.diagnose(&args).map_err(Failure::from),
             "sessions" => Ok(self.sessions()),
-            "storage" => self.storage(&args),
-            "screenshot" => return self.screenshot(&args).unwrap_or_else(|e| json!({"content": [{"type": "text", "text": e}], "isError": true})),
-            n => Err(format!("unknown tool {n}")),
+            "storage" => self.storage(&args).map_err(Failure::from),
+            "screenshot" => return self.screenshot(&args).unwrap_or_else(|e| fail(Failure::from(e))),
+            n => Err(Failure::unknown_tool(n)),
         };
         match done {
-            Ok(text) => json!({"content": [{"type": "text", "text": text}]}),
-            Err(e) => json!({"content": [{"type": "text", "text": e}], "isError": true}),
+            Ok(text) => match step_failure {
+                Some(f) => json!({"content": [{"type": "text", "text": text}], "structuredContent": recovery::structured(&f, &red)}),
+                None => json!({"content": [{"type": "text", "text": text}]}),
+            },
+            Err(f) => fail(f),
         }
     }
 
@@ -353,9 +370,10 @@ impl Server {
         Ok(with_session(rep, if had { "recreated" } else { "created" }))
     }
 
-    fn step(&mut self, args: &Value) -> Result<String, String> {
+    fn step(&mut self, args: &Value) -> Result<(String, Option<Failure>), String> {
         let src = args.get("steps").and_then(Value::as_str).ok_or("steps (one or more step lines) is required")?;
-        Ok(self.run_live(args, src)?.0)
+        let (text, _, failure) = self.run_live_typed(args, src)?;
+        Ok((text, failure))
     }
 
     fn close(&mut self, args: &Value) -> Result<String, String> {
@@ -366,6 +384,11 @@ impl Server {
 
     /// Run step lines on the live session until one fails, and give the report of these lines.
     fn run_live(&mut self, args: &Value, src: &str) -> Result<(String, bool), String> {
+        self.run_live_typed(args, src).map(|(t, ok, _)| (t, ok))
+    }
+
+    /// `run_live` with the failure of this run: the driver `kind` and message, taken from the report of these steps.
+    fn run_live_typed(&mut self, args: &Value, src: &str) -> Result<(String, bool, Option<Failure>), String> {
         let live = self.live_mut(args)?;
         let mut list = steps::parse(src, &live.vars).map_err(|e| live.red.clean(&e))?;
         for s in &mut list {
@@ -377,11 +400,15 @@ impl Server {
                 break;
             }
         }
-        let ok = live.session.rep.failure.is_none();
-        if args.get("compact").and_then(Value::as_bool) == Some(true) {
-            return Ok((compact(&live.session.drain(), &live.red), ok));
-        }
-        Ok((with_out(live.session.drain().json(&live.red), &live.opt, false), ok))
+        let failure = live.session.rep.failure.as_ref().map(|(_, f, _)| (f.kind, f.message.clone()));
+        let ok = failure.is_none();
+        let text = if args.get("compact").and_then(Value::as_bool) == Some(true) {
+            compact(&live.session.drain(), &live.red)
+        } else {
+            with_out(live.session.drain().json(&live.red), &live.opt, false)
+        };
+        let failure = failure.map(|(k, m)| Failure::driver(k, m, text.clone()));
+        Ok((text, ok, failure))
     }
 
     fn live_mut(&mut self, args: &Value) -> Result<&mut Live, String> {
@@ -575,7 +602,9 @@ impl Server {
     }
 
     /// One action on an element or the page, as a step line; gives a short receipt and, unless `snapshot` is false, the new snapshot.
-    fn act(&mut self, args: &Value) -> Result<String, String> {
+    fn act(&mut self, args: &Value) -> Result<String, Failure> {
+        // The checks of the arguments come first: each failure is `invalid_arguments`, before any input reaches the page.
+        let (line, accept) = (|| -> Result<(String, bool), String> {
         let op = args.get("op").and_then(Value::as_str).unwrap_or("click");
         let target = match (args.get("ref").and_then(Value::as_str), args.get("loc").and_then(Value::as_str)) {
             (Some(r), _) => format!("ref={}", r.trim()),
@@ -621,12 +650,14 @@ impl Server {
             Some("dismiss") => false,
             Some(_) => return Err("dialog must be accept or dismiss".into()),
         };
+        Ok((line, accept))
+        })().map_err(Failure::args)?;
         let mut a = args.clone();
         a["compact"] = json!(true);
         let live = self.live_mut(args)?;
         live.session.set_dialog(accept, args.get("prompt_text").and_then(Value::as_str).map(str::to_string));
         let before = live.session.url();
-        let (receipt, ok) = self.run_live(&a, &line)?;
+        let (receipt, ok, failure) = self.run_live_typed(&a, &line)?;
         let mark = self.live_mut(args)?.session.hist.mark();
         let mut out = receipt;
         let snap = if ok && args.get("snapshot").and_then(Value::as_bool) != Some(false) {
@@ -653,7 +684,11 @@ impl Server {
             out.push('\n');
             out.push_str(&s);
         }
-        if ok { Ok(out) } else { Err(out) }
+        match failure {
+            None => Ok(out),
+            // The receipt stays the text of the error; the driver kind and message are the structured part.
+            Some(f) => Err(Failure { text: out, ..f }),
+        }
     }
 
     /// Wait up to the step time limit for the downloads that run, and for a page load that may be one. Then say what finished since the last
