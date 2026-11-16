@@ -889,8 +889,6 @@ impl Server {
     }
 }
 
-/// Add the capture folder to a report, so the agent can read the pictures of `shot` steps and failures. At the `end` of a run an empty
-/// folder is removed (`remove_dir` fails on a folder with files), so a server that runs for days leaves only folders with pictures.
 /// The `initialize` text. `BARE_MCP_REPORT=offstage` sends reports through offstage, not GitHub.
 fn instructions(report: Option<&str>) -> String {
     let first = "Call ensure_session before a test to get a logged-in live page: it restores a saved session or logs in again. ";
@@ -902,6 +900,8 @@ fn instructions(report: Option<&str>) -> String {
     format!("{first}{rest}")
 }
 
+/// Add the capture folder to a report, so the agent can read the pictures of `shot` steps and failures. At the `end` of a run an empty
+/// folder is removed (`remove_dir` fails on a folder with files), so a server that runs for days leaves only folders with pictures.
 fn with_out(mut json: String, opt: &Options, end: bool) -> String {
     if let Some(dir) = &opt.out
         && !(end && std::fs::remove_dir(dir).is_ok())
