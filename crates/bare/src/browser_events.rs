@@ -589,6 +589,33 @@ pub(crate) fn event_time_stamp(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[V
     with_event(d, it, this, |e| Value::Number(e.time))
 }
 
+/// `Event.srcElement`: the legacy name of `target`.
+pub(crate) fn event_src_element(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    event_target(d, it, this, a)
+}
+
+/// `Event.returnValue`: `!defaultPrevented`. Setting it to `false` is `preventDefault()`; `true` does nothing.
+pub(crate) fn event_return_value(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    with_event(d, it, this, |e| Value::Bool(!e.canceled))
+}
+
+pub(crate) fn set_event_return_value(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    let keep = it.to_js_bool(a.first().copied().unwrap_or(Value::Undefined))?;
+    with_event(d, it, this, |e| e.canceled |= !keep && e.cancelable && !e.in_passive)?;
+    Ok(Value::Undefined)
+}
+
+/// `Event.cancelBubble`: whether propagation is stopped. Setting it to `true` is `stopPropagation()`; `false` does nothing.
+pub(crate) fn event_cancel_bubble(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    with_event(d, it, this, |e| Value::Bool(e.stop))
+}
+
+pub(crate) fn set_event_cancel_bubble(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    let on = it.to_js_bool(a.first().copied().unwrap_or(Value::Undefined))?;
+    with_event(d, it, this, |e| e.stop |= on)?;
+    Ok(Value::Undefined)
+}
+
 pub(crate) fn prevent_default(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     with_event(d, it, this, |e| e.canceled |= e.cancelable && !e.in_passive)?;
     Ok(Value::Undefined)
