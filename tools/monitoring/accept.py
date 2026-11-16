@@ -38,22 +38,22 @@ try:
             label = f"{mode}-{run}"
             capture = args.artifacts / (label + ".jsonl")
             perf = args.artifacts / (label + ".perf")
-            rss = args.artifacts / (label + ".rss")
             env = dict(os.environ, BARE_OBSERVE=mode, BARE_OBSERVE_FILE=str(capture))
             command = ["perf", "stat", "-x", ";", "-e", "instructions:u", "-o", str(perf),
-                       "/usr/bin/time", "-f", "%M", "-o", str(rss), str(args.binary.resolve()),
+                       str(args.binary.resolve()),
                        "--quiet", "--repeat", "20", str(steps)]
-            out = subprocess.run(command, env=env, capture_output=True, timeout=120)
-            (args.artifacts / (label + ".stderr")).write_bytes(out.stderr)
-            (args.artifacts / (label + ".stdout")).write_bytes(out.stdout)
-            if out.returncode:
-                raise RuntimeError(f"{label}: exit {out.returncode}; see artifacts")
+            with (args.artifacts / (label + ".stderr")).open("wb") as err, (args.artifacts / (label + ".stdout")).open("wb") as out:
+                child = subprocess.Popen(command, env=env, stdout=out, stderr=err)
+                _, status, usage = os.wait4(child.pid, 0)
+                child.returncode = os.waitstatus_to_exitcode(status)
+            if child.returncode:
+                raise RuntimeError(f"{label}: exit {child.returncode}; see artifacts")
             records = [json.loads(line) for line in capture.read_text().splitlines()] if capture.exists() else []
             if mode != "off":
                 assert records and records[-1]["event"] == "collector_status"
             instructions = next(int(line.split(";")[0]) for line in perf.read_text().splitlines() if ";instructions:u;" in line)
             results.append(dict(mode=mode, run=run, instructions=instructions,
-                                peak_rss_kib=int(rss.read_text()), records=len(records),
+                                peak_rss_kib=usage.ru_maxrss, records=len(records),
                                 drops=records[-1]["fields"]["dropped"] if records else 0))
 finally:
     server.shutdown()
