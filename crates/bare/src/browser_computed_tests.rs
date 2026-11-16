@@ -238,10 +238,10 @@ fn the_reads_of_a_floating_popper_do_not_stop() {
         js(&mut b, &format!("var cs = getComputedStyle(document.getElementById('{id}')); 0"));
         let r = js(&mut b, all);
         assert!(!r.starts_with("unsupported") && !r.starts_with("limit"), "{id}: {r}");
-        assert!(!r.contains("undefined") || r.contains("transform=undefined"), "{id}: {r}");
+        assert!(!r.contains("undefined") || r.contains("translate=undefined"), "{id}: {r}");
     }
     js(&mut b, "var cs = getComputedStyle(document.getElementById('t')); 0");
-    assert_eq!(js(&mut b, "cs.getPropertyValue('width') + ' ' + cs.getPropertyValue('transform') + '|' + cs.getPropertyValue('will-change') + '|' + cs.position"), "135px ||relative");
+    assert_eq!(js(&mut b, "cs.getPropertyValue('width') + ' ' + cs.getPropertyValue('transform') + '|' + cs.getPropertyValue('will-change') + '|' + cs.position"), "135px none||relative");
 }
 
 /// The picture properties are not in the list of `getComputedStyle` (`Property::LISTED`) but `getPropertyValue` and `setProperty` know them:
@@ -265,8 +265,8 @@ fn supported_names_only_and_gates_for_unavailable_values() {
     js(&mut b, "var cs = getComputedStyle(document.getElementById('a')); 0");
     assert_eq!(js(&mut b, "['direction', 'display', 'position', 'color', 'fontSize', 'marginTop', 'cssFloat', 'webkitBorderHorizontalSpacing', 'opacity', 'zIndex', 'borderTopLeftRadius'].map(function (k) { return k in cs; }).join()"), "true,true,true,true,true,true,true,true,true,true,true");
     // Not supported by the engine: absent, `getPropertyValue` gives "" (CSSOM), no fake value.
-    assert_eq!(js(&mut b, "['filter', 'transform', 'WebkitAnimation'].map(function (k) { return k in cs; }).join()"), "false,false,false");
-    assert_eq!(js(&mut b, "cs.getPropertyValue('transform') + '|' + cs.getPropertyValue('nope') + '|'"), "||");
+    assert_eq!(js(&mut b, "['filter', 'transform', 'WebkitAnimation'].map(function (k) { return k in cs; }).join()"), "false,true,false");
+    assert_eq!(js(&mut b, "cs.getPropertyValue('transform') + '|' + cs.getPropertyValue('nope') + '|'"), "none||");
     // Computed values that are known without layout.
     assert_eq!(js(&mut b, "cs.getPropertyValue('Display') + cs.position + cs.visibility + cs.fontWeight + cs.fontSize + cs.borderTopWidth + cs.paddingLeft"), "blockstaticvisible40016px0px0px");
     assert_eq!(js(&mut b, "cs.getPropertyValue('DIRECTION')"), "ltr");
@@ -900,4 +900,20 @@ fn thirty_restyles_of_a_page_with_a_long_tag_list_fit_the_step_budget() {
         assert_eq!(js(&mut b, script), "1");
         assert!(b.computed_stats().restyles >= 29, "{:?}", b.computed_stats());
     });
+}
+
+#[test]
+fn font_shorthand_has_one_text() {
+    let mut b = at("<!doctype html><body><div id=a style='font: italic 700 20px/30px monospace'></div><div id=d></div></body>");
+    assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('a')).font"), "italic 700 20px / 30px monospace");
+    assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('d')).font"), "16px sans-serif");
+}
+
+#[test]
+fn transform_reads_as_none_or_matrix() {
+    let mut b = at("<!doctype html><body><div id=a></div><div id=t style='transform: translate(10px, 20px)'></div></body>");
+    assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('a')).transform"), "none");
+    assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('t')).transform"), "matrix(1, 0, 0, 1, 10, 20)");
+    assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('t')).webkitTransform"), "matrix(1, 0, 0, 1, 10, 20)");
+    assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('t')).getPropertyValue('transform')"), "matrix(1, 0, 0, 1, 10, 20)");
 }

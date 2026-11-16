@@ -38,8 +38,13 @@ fn click_gate_comes_before_any_event() {
 }
 
 #[test]
-fn inner_text_still_gates_select() {
-    assert!(unsupported("<div id=x><select><option>a</option></select></div>", "document.getElementById('x').innerText"));
+fn inner_text_over_a_select_is_its_options() {
+    // Chrome (headless 2026-11): "a\none\ntwo\nb", "p\nq" (an optgroup label is not text), "c" (a hidden select has none).
+    let mut b = page("<div id=x>a<select><option>one</option><option>two</option></select>b</div><div id=y><select multiple><optgroup label=g><option>p<option>q</select></div><div id=z><select style='display:none'><option>hid</select>c</div>");
+    let t = |b: &mut Browser, id: &str| format!("{:?}", b.run_script(&format!("document.getElementById('{id}').innerText")).map(|v| b.it.display(v)));
+    assert_eq!(t(&mut b, "x"), r#"Ok("a\none\ntwo\nb")"#);
+    assert_eq!(t(&mut b, "y"), r#"Ok("p\nq")"#);
+    assert_eq!(t(&mut b, "z"), r#"Ok("c")"#);
 }
 
 #[test]
