@@ -12819,3 +12819,8 @@ Backspace at the start of a block with content moves its children to the end of 
 - A list before the block gives its last item; a next list gives its first item. The first item of a list leaves the list, as for an empty item (#499). Inline formatting moves with the children.
 - Gaps: only sibling blocks merge. The last item of a list does not take the block after the list. A block nested in a `div` is not merged with a block outside it.
 - Tests: 3 new in `browser_editing_tests.rs`. Not compared with Chrome in a live browser.
+## Shift+Arrow extends the selection (#444, 2026-11-16)
+
+Shift with ArrowLeft, ArrowRight, Home and End now extends the selection in a `contenteditable` host. Control makes it by word, or to the end of the host with Home and End. `Selection.modify("move" | "extend", direction, granularity)` is built (granularities `character`, `word`, `lineboundary`, `paragraphboundary`, `documentboundary`). It reads the text of the host once per call, and cuts lines at blocks and `<br>`. In `<input>` and `<textarea>`, Control+Shift+Arrow now moves the selection end by word (`word_move`, shared with `modify`). No new crate: the word rule is the one of `word_at`. Tests: `browser_editing_tests` (three new tests). Before the change they failed ("" instead of "ld"; `modify` was a gate).
+
+Not done: a double click or triple click on text in a `contenteditable` or plain text. A press has no hit test from a point to a text offset outside text fields (`caret_in` in `page.rs` reads the field layout only). Input and textarea already select a word and a line. Not tested: a real pointer on a laid-out page, Chrome comparison of word boundaries with punctuation, plain arrows (no Shift) in a host.
