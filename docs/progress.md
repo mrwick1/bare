@@ -12753,3 +12753,10 @@ Gmail's Labels menu click sends no mutation and the page posts to `/jserror`. Li
 ### 2026-11-14: contenteditable list exit (issue #443)
 
 `browser_editing.rs` now outdents an empty list item on Enter, removes an empty block on Backspace, and toggles only the selected list items. Tests: `enter_in_an_empty_list_item_leaves_the_list`, `backspace_in_an_empty_block_removes_it`, `list_toggle_changes_only_the_selected_items`. Not done: merging a block with content into the block before it on Backspace.
+## Summary activation and `toggle` (#557, 2026-11-16)
+
+- Done: a window click, Enter or Space on the first `summary` child of a `details` toggles its `open` attribute. A canceled click does not toggle. A click inside a link, button or field in the summary does not toggle, because that control is the activation target.
+- Done: a change of `open` by that activation or by the `details.open` setter queues one `toggle` task. The event is a `ToggleEvent` with `oldState` and `newState`. A task that is still queued for the same `details` is replaced and keeps its old state. Code: `browser_details.rs`.
+- Tests: 6 tests in `browser_ui_tests.rs`. With the summary default action switched off, 3 of them fail (click toggles, keys toggle, second summary). The other 3 pass in that state: 2 check that nothing toggles, and 1 uses the `open` setter.
+- Not done: `setAttribute`, `removeAttribute` and `toggleAttribute` of `open` queue no `toggle` event. The `name` attribute (exclusive group) closes no other `details`. `HTMLElement.click()` on a summary stays gated. An `<a>` with no `href` inside a summary blocks the toggle (the activation target is the `a`).
+- With PR #561 (layout and hit tests of a closed `details`), this completes #557.

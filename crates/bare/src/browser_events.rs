@@ -89,6 +89,7 @@ impl Dom {
             related: Value::Null,
             is_focus: false,
             is_submit: false,
+            toggle: None,
             ui: None,
             trusted: false,
         };

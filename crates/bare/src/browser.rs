@@ -343,6 +343,8 @@ pub(crate) struct EventState {
     pub is_focus: bool,
     /// `SubmitEvent.submitter` is in `related` (traced). Only a `SubmitEvent` has this set.
     pub is_submit: bool,
+    /// `ToggleEvent.oldState` and `newState`. Only a `ToggleEvent` has this set.
+    pub toggle: Option<(String, String)>,
     /// The fields of a mouse, pointer, keyboard or input event that the window made (`browser_ui.rs`). `related` holds `relatedTarget`.
     pub ui: Option<Box<crate::browser_ui::Ui>>,
     /// `isTrusted`: set for the events of `browser_ui.rs`.
@@ -444,6 +446,7 @@ pub(crate) struct Protos {
     pub form: ObjId,
     pub button: ObjId,
     pub submit: ObjId,
+    pub toggle: ObjId,
     pub chardata: ObjId,
     pub text: ObjId,
     pub comment: ObjId,
@@ -471,6 +474,7 @@ pub(crate) enum P {
     Form,
     Button,
     Submit,
+    Toggle,
     CharData,
     Text,
     Document,
@@ -1165,6 +1169,7 @@ impl Dom {
             P::Form => ps.form,
             P::Button => ps.button,
             P::Submit => ps.submit,
+            P::Toggle => ps.toggle,
             P::CharData => ps.chardata,
             P::Text => ps.text,
             P::Document => ps.document,
@@ -1219,19 +1224,20 @@ impl Dom {
         let custom = mk(it, event)?;
         let focus = mk(it, event)?;
         let submit = mk(it, event)?;
+        let toggle = mk(it, event)?;
         let mouse = mk(it, event)?;
         let pointer = mk(it, mouse)?;
         let keyboard = mk(it, event)?;
         let inputev = mk(it, event)?;
         let domexc = mk(it, ep)?;
-        let _ = self.p.set(Protos { et, node, element, html, svg, input, iframe, link, form, button, submit, chardata, text, comment, document, fragment, shadow, event, custom, focus, mouse, pointer, keyboard, inputev, domexc });
+        let _ = self.p.set(Protos { et, node, element, html, svg, input, iframe, link, form, button, submit, toggle, chardata, text, comment, document, fragment, shadow, event, custom, focus, mouse, pointer, keyboard, inputev, domexc });
         // The global object is `window`: its prototype is `Window.prototype`, an EventTarget.
         let win = mk(it, et)?;
         if let Err(e) = it.heap.set_prototype_of(g, Some(win)) {
             return Err(it.heap_error(e));
         }
         self.st.borrow_mut().by_obj.insert(g, Target::Window);
-        let mut fixed = vec![win, et, node, element, html, svg, input, iframe, link, form, button, submit, chardata, text, comment, document, fragment, shadow, event, custom, focus, mouse, pointer, keyboard, inputev, domexc];
+        let mut fixed = vec![win, et, node, element, html, svg, input, iframe, link, form, button, submit, toggle, chardata, text, comment, document, fragment, shadow, event, custom, focus, mouse, pointer, keyboard, inputev, domexc];
 
         // methods and accessors
         // One buffer for the names "get x" and "set x" (a `format!` for each of the 130 accessors cost 1.5% of the start).
@@ -1273,7 +1279,7 @@ impl Dom {
         }
 
         // interface objects
-        let ifaces: [(&str, ObjId, Option<H>); 25] = [
+        let ifaces: [(&str, ObjId, Option<H>); 26] = [
             ("EventTarget", et, Some(ev::event_target_ctor as H)),
             ("Window", win, None),
             ("Node", node, None),
@@ -1295,6 +1301,7 @@ impl Dom {
             ("CustomEvent", custom, Some(ev::custom_event_ctor as H)),
             ("FocusEvent", focus, Some(crate::browser_focus::focus_event_ctor as H)),
             ("SubmitEvent", submit, Some(crate::browser_form::submit_event_ctor as H)),
+            ("ToggleEvent", toggle, Some(crate::browser_details::toggle_event_ctor as H)),
             ("MouseEvent", mouse, Some(crate::browser_uievent::ctor::<0> as H)),
             ("PointerEvent", pointer, Some(crate::browser_uievent::ctor::<1> as H)),
             ("KeyboardEvent", keyboard, Some(crate::browser_uievent::ctor::<2> as H)),
@@ -1553,6 +1560,8 @@ pub(crate) static DEFS: &[Def] = &[
     Def { on: &[Input, Button], name: "checkValidity", len: 0, kind: M(crate::browser_submit::control_check_validity) },
     Def { on: &[Input, Button], name: "reportValidity", len: 0, kind: M(crate::browser_submit::control_report_validity) },
     Def { on: &[Submit], name: "submitter", len: 0, kind: G(fm::submit_event_submitter) },
+    Def { on: &[Toggle], name: "oldState", len: 0, kind: G(crate::browser_details::old_state) },
+    Def { on: &[Toggle], name: "newState", len: 0, kind: G(crate::browser_details::new_state) },
     Def { on: &[Event], name: "type", len: 0, kind: G(ev::event_type) },
     Def { on: &[Event], name: "target", len: 0, kind: G(ev::event_target) },
     Def { on: &[Event], name: "currentTarget", len: 0, kind: G(ev::event_current_target) },
