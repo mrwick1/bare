@@ -872,6 +872,11 @@ impl Dom {
                 let f = focus.expect("checked");
                 self.set_user_selection(it, f, Some(0), Some(u32::MAX), Dir::Forward)?;
             }
+            // A field that selection does not apply to (`email`, `number`): Control+A still selects its text, as in Chrome.
+            "a" | "A" if m.ctrl && !m.alt && focus.is_some_and(|f| self.editable(f)) => {
+                let f = focus.expect("checked");
+                self.select_text(it, f, None)?;
+            }
             " " if edit.is_none() && !m.ctrl && !m.alt && !m.meta => {
                 if !self.key_ev(it, t, "keypress", k)? {
                     return Ok(());
