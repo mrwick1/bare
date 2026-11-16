@@ -10,3 +10,4 @@ license.workspace = true
 force-portable = []
 
 [dependencies]
+bare-os = { path = "../os" }
