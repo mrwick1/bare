@@ -119,6 +119,7 @@ dependencies = [
 name = "bare-js"
 version = "0.1.0"
 dependencies = [
+ "bare-os",
  "bare-unicode",
  "fixed_decimal",
  "icu_collator",

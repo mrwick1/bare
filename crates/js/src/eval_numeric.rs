@@ -5,7 +5,7 @@
 // - `Math.clz32` (ToUint32, then leading zeros), `Math.log` (`f64::ln`: log(-0) = -Infinity, log(x<0) = NaN),
 //   `Math.LN2` (writable false, enumerable false, configurable false).
 // - `Math.random`: xorshift128+ state per realm (`AoState::rng`). The state is seeded once, at the first call, with
-//   16 bytes from `/dev/urandom`. A failed read, or an all-zero seed, is an explicit `Unsupported`; there is no time
+//   16 bytes from `bare_os::random::fill`. A failed read, or an all-zero seed, is an explicit `Unsupported`; there is no time
 //   or PID fallback. The state is not cryptographic and nothing else reads it. Each call does no allocation.
 //   Tests set `rng` directly to get a fixed sequence. `BARE_SEED=<number>` in the environment gives each realm the same fixed sequence
 //   (a benchmark that replays recorded replies needs the same page code in every run).
@@ -349,7 +349,9 @@ fn os_seed() -> Option<[u64; 2]> {
         };
         return Some([mix(n.wrapping_add(0x9E37_79B9_7F4A_7C15)), mix(n.wrapping_add(0x3C6E_F372_FE94_F82A)) | 1]);
     }
-    seed_from(&mut std::fs::File::open("/dev/urandom").ok()?)
+    let mut b = [0u8; 16];
+    bare_os::random::fill(&mut b).ok()?;
+    seed_from(&mut &b[..])
 }
 
 fn seed_from(source: &mut impl std::io::Read) -> Option<[u64; 2]> {
