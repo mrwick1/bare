@@ -2,7 +2,7 @@
 
 Date: 2026-11-16.
 Baseline: `00e701b089a9abe9a399bbe69150c5d772b5c4cc`.
-Status: implementation authorized; foundation tasks delegated first.
+Status: monitoring implementation extended; functional and performance acceptance remain partial.
 
 ## Goal
 
@@ -165,3 +165,20 @@ Final checks on the partial integration:
 - `git diff --check`: exit 0.
 
 The worktree has no uncommitted implementation changes.
+
+## Completion work on 2026-11-16
+
+This section supersedes the partial integration stop above.
+The dependency range through `87859cb9` applied without scoped drift.
+The continuation adds thread-affine context guards, transactional startup ownership, duplicate-start protection and sampler termination after capture stop.
+Filtered spans now check category and level before they read the clock.
+Network bodies retain numeric context and record delivered wire bytes, status, EOF/error/abandonment and trace timing without buffering page data.
+HTTP/1 first-byte wait and HTTP/2 complete-header timing have distinct semantics.
+Scheduler tasks have individual spans. Pump results expose existing queue counts and cap state.
+Driver readiness exposes fixed boolean state.
+Browser counters now sample after scripts, drains and explicit GC, including existing heap and capacity counters.
+
+Local fixtures exercise real scripts, concurrent sessions, headless paint, GC, seeded response headers, suite-worker output paths and error flushing.
+`tools/monitoring/accept.py` provides a repeatable three-mode local measurement.
+Final gate results and performance limitations are recorded in `docs/monitoring.md`.
+HTTP/2 first-frame timing remains a follow-up. Complete subsystem memory accounting remains out of scope.

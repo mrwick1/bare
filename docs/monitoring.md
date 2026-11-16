@@ -1,74 +1,217 @@
-# Engine monitoring (partial integration)
+# Engine monitoring
 
-Phase 2 is incomplete. Do not treat this branch as accepted monitoring support.
-The local journey test passes after adding retained and incremental style hooks. Remaining coverage and acceptance work is listed below.
+Monitoring is opt-in. Performance acceptance is reported below separately from functional coverage.
 
-## Invocation
+## Invocation and ownership
 
-Build with symbols: `cargo build --profile profiling --workspace`.
-The profiling profile inherits release, enables debug symbols, and sets `strip = false`.
+Build with symbols: `cargo build -j3 --profile profiling -p bare-drive`.
+The profiling profile inherits release, enables debug symbols, and disables stripping.
 The normal release profile is unchanged.
 
-Example: `BARE_OBSERVE=trace BARE_OBSERVE_FILE=/tmp/journey.jsonl cargo run -p bare-drive -- --quiet journey.steps`.
+Example: `BARE_OBSERVE=trace BARE_OBSERVE_FILE=/tmp/journey.jsonl target/profiling/bare-drive --quiet journey.steps`.
 Use `metrics` for process samples and engine counters. Use `trace` to add durations.
 The default is `off`. Off mode creates no capture or monitoring threads.
-Each executable initializes an owner. Normal returns drain the collector.
-The bare and bare-drive exit paths shut down the owner before `process::exit`.
+Each executable owns initialization and shutdown. One enabled owner may start per process.
+A rejected second start creates no file or thread and does not reset the existing owner.
+Initialization publishes the global mode only after collector and sampler creation succeed.
+Normal returns drain the collector. The bare and bare-drive exit paths drain before `process::exit`.
 Configuration and file-open errors print to stderr and exit with code 2.
-Writer and flush errors print to stderr at shutdown. MCP stdout remains protocol output.
-A crash, forced termination, or blocked sink can prevent completion of shutdown.
+Writer errors print to stderr at shutdown. MCP stdout remains protocol output.
+A crash, forced termination, or blocked sink can prevent shutdown completion.
 
 Suite workers append `.pid-PID` to `BARE_OBSERVE_FILE`.
-The suite parent retains the exact configured path.
-Each path uses create-new semantics. Existing files cause an error.
-This rule also applies when a suite uses `perf` to launch workers.
+The suite parent uses the exact configured path.
+All captures use create-new semantics and Unix mode 0600.
+This rule also applies when the suite launches workers through `perf`.
 
 See [the collector contract](../crates/observe/README.md) for all controls and the JSONL schema.
-`BARE_OBSERVE_INTERVAL_MS` controls both process sampling and writer flush intervals.
-Process samples have no session or document attribution.
-Each sample includes optional RSS, peak RSS, allocator bytes, CPU microseconds, and thread count.
-Linux supports procfs counters. Allocator accounting requires glibc.
-Other platforms return null for unsupported process counters.
-Allocator bytes, resident bytes, and JS accounted bytes measure different scopes.
-No complete subsystem memory total is provided.
+`BARE_OBSERVE_INTERVAL_MS` controls process sampling and writer flush intervals.
+The sampler stops after collector cap exhaustion or failure, at its next wake.
+Category and level filters precede span clock reads and counter construction.
+Context guards restore numeric attribution only on the thread that entered the scope.
 
-## Current hooks
+## Measurements and coverage
 
 Categories are `process`, `engine`, `html`, `js`, `gc`, `style`, `layout`, `paint`, `scheduler`, `network`, `loader`, and `driver`.
-Duration fields use `duration_ns`. Trace durations emit at info level.
-HTML feed and finish, JS parsing and script/function execution, GC, style entry points, layout, paint, scheduler pumps, and network headers have hooks.
-Network connection hooks measure DNS, TCP, and TLS.
-JS counters emit at script entry. Browser counters emit at the microtask drain entry.
-Engine counters are owning-thread snapshots, not interval samples.
-They use existing counters. They do not request collection or layout.
-Loader milestones emit at their source. They do not consume legacy trace records.
+Trace spans use `duration_ns` and info level.
+HTML feed and finish, JS parse and execution, GC, retained and incremental style, layout, paint, scheduler pumps and individual tasks have duration hooks.
+Scheduler pump results include executed tasks, the cap flag, queued tasks, message count and message bytes.
+Driver readiness includes idle, stopped, load-failed and deadline flags. Arbitrary error text is excluded.
+Loader milestones emit at their source without consuming legacy trace records.
+
+Process samples have no session or document attribution.
+They include optional RSS, peak RSS, allocator bytes, CPU microseconds and thread count.
+Linux supports procfs counters. Allocator accounting requires glibc.
+Other platforms return null for unsupported counters.
+Allocator live bytes, resident bytes and JS accounted bytes measure different scopes.
+No complete subsystem memory total is provided.
+
+Owning-thread browser counters emit after scripts, microtask drains and explicit collections.
+They include node, wrapper, listener, event, text-byte and attribute-slot counts.
+They also include JS accounted bytes, live objects, collection count and slab capacity bytes.
+Script entry also emits JS counters. These snapshots do not force collection or layout.
+They read existing scalar state and capacities, with no heap traversal.
+Process samples continue independently during long scripts.
 
 Driver steps carry process-local numeric session and step IDs.
-Network worker jobs copy the calling context into a scoped thread-local guard.
-Window jobs copy the calling context across the control handoff.
-Browser script, drain, collection, and scheduler entry points add document IDs.
-Some asynchronous paths and phase records still lack document or request IDs.
-A process sample never inherits these IDs.
+Network worker jobs and window handoffs copy these IDs into scoped thread-local guards.
+Browser work adds document IDs. Requests add request IDs.
+Some asynchronous records still lack document attribution. Process samples never inherit page IDs.
 
-Names are fixed literals. Field values are scalars.
-The hooks do not emit URLs, headers, bodies, source, console messages, or input text.
-Legacy switches keep their existing behavior. A new capture does not enable legacy tracing.
-The existing driver still enables its own legacy network records.
+## Network timing semantics
 
-## Limits and remaining work
+DNS, TCP, TLS and request-header spans use the shared clock.
+HTTP/1 `ttfb` measures the wait from entry into response-header reading to the first positive transport read.
+It excludes request writes and connection setup. It emits only if a byte arrives.
+HTTP/2 `h2_response_headers` measures the request call through delivery of the complete decoded response headers.
+It includes request writes and stream-slot waits. It is not a first-frame or first-byte measurement.
+
+`first_body_byte` measures from body construction after header parsing to first positive caller read.
+It includes caller delay and can include bytes already buffered with the headers.
+The `body` record emits when the wire body is dropped. It preserves its original numeric IDs.
+`bytes` counts payload delivered before content decoding, excluding HTTP framing.
+`status` is the numeric HTTP status. `outcome` is 0 for abandonment, 1 for observed EOF, or 2 for read failure.
+`body_duration_ns` covers construction through drop in trace mode and is null in metrics mode.
+It includes caller pauses and retention after EOF. It is not socket-active time.
+Memory-cache and replay bodies have no wire-body record.
+Body records add no buffering and do not enable legacy trace storage.
+
+Names are fixed literals and field values are scalars.
+Default hooks emit no URLs, query values, headers, bodies, source, console text or typed input.
+Legacy switches retain their behavior. The driver still enables its own legacy network records independently.
+
+## Bounds
 
 The queue holds 256 records. Each record is limited to 4096 bytes and 32 fields.
-The default file cap is 64 MiB, with space reserved for terminal status.
-Queue overflow drops records. File-cap exhaustion stops recording.
-Terminal status reports drops and the stop reason.
-An I/O failure may leave an incomplete final line. Readers must discard that line.
+Queued serialized payload is bounded by 1 MiB, excluding producer-local records and allocator overhead.
+The default file cap is 64 MiB, with room reserved for terminal status.
+Overflow drops records. Cap exhaustion stops recording.
+Terminal status reports dropped records and the stop reason.
+An I/O failure can leave an incomplete final line. Readers must discard it.
 Shutdown waits for sink I/O. Flush does not imply fsync durability.
 
-The local journey test covers style records from retained and incremental cascade entry points.
-Phase coverage is not complete. Network body and TTFB phases lack separate unified records.
-Scheduler records measure pumps, not every individual task.
-Long-page sampling is tested with bounded worker activity in the process facade, not a long script in the engine.
-Concurrent-session and worker attribution need stronger integration tests.
-GC and paint hook coverage, suite child file naming, error-exit flushing, and header-secret exclusion need fixture tests.
-No GUI, non-Linux runtime, authenticated traffic, or measured overhead acceptance was tested.
-Phase 3 remains pending. No performance claim is made.
+## Verification
+
+Local fixtures cover real long-script sampling, concurrent sessions and documents, GC, headless paint, streaming bytes and outcomes, worker request attribution, seeded header/query/source/console/input secrets, suite per-PID captures, normal/error exit flush, mode distinctions and MCP protocol stdout.
+Collector tests cover partial writes, failed writers, bounded overflow, filtering and file protection.
+Process tests cover disabled thread absence, rejected duplicate ownership, failed initialization and sampler exit at the file cap.
+A compile-fail doctest checks thread-affine context guards.
+
+Commands:
+
+```
+cargo test -j3 -p bare-os -p bare-observe
+cargo test -j3 -p bare-drive --test monitoring
+cargo test -j3 -p bare-mcp --test monitoring
+cargo test -j3 --workspace
+cargo check -j3 --workspace
+git diff --check
+```
+
+No GUI, non-Linux runtime or authenticated traffic is required or tested.
+HTTP/2 first-frame timing and error-before-headers outcome records remain unavailable.
+Memory attribution does not account for all engine subsystems or isolate logger allocator usage.
+
+## Performance acceptance
+
+Run `python3 tools/monitoring/accept.py "$PWD/target/profiling/bare-drive" /tmp/bare-monitor-accept-UNIQUE` on a committed candidate.
+The script runs a bounded loopback HTML/JS journey 20 times per process, three runs per mode.
+It records user-mode instructions with `perf stat`, child-tree peak RSS with Linux `wait4`, record counts and terminal drops.
+Artifacts include the exact HTML, steps, commit, machine, raw perf output and protocol output.
+No wall-time claim is made under machine load.
+The provisional instruction budgets are disabled <=1%, metrics <=3%, trace <=10%.
+A baseline off binary is required to accept the disabled budget separately.
+
+Measured candidate: `006ce7f7413cd00062864302a85e2b1c36472425`.
+Machine: archMachine, AMD Ryzen 9 5900HX, Linux `7.2.15-zen1-1-zen`.
+Binary: profiling build, ELF debug_info present, not stripped.
+Command: `python3 tools/monitoring/accept.py "$PWD/target/profiling/bare-drive" /tmp/bare-monitor-accept-process-rss`.
+The exact HTML is stored in `results.json`. It has one div, a 100000-iteration JS loop and one timer.
+The journey opens the loopback URL and checks that the div is visible.
+Each measured process repeats the journey 20 times. Modes run in off/metrics/trace order for each of three rounds.
+Counters include the `perf` workload and descendants. Browser peak RSS uses the driver’s procfs VmHWM readings after repetitions.
+The artifacts also retain wait4 child-tree peak RSS, which can include perf and is not browser-only memory.
+
+| Mode | Instructions in runs 1, 2, 3 | Mean overhead against candidate off | Peak RSS KiB in runs 1, 2, 3 | Records in runs 1, 2, 3 | Drops |
+|---|---|---|---|---|---|
+| off | 3238715621, 3238763872, 3238598090 | reference | 16928, 16700, 16856 | 0, 0, 0 | 0 |
+| metrics | 3250270250, 3250149526, 3250053028 | +0.354% | 16764, 16952, 17040 | 343, 343, 343 | 0 |
+| trace | 3258476653, 3258290136, 3258671925 | +0.611% | 16824, 16996, 17212 | 744, 743, 743 | 0 |
+
+Instruction spreads (max minus min) are 165782 off, 217222 metrics and 381789 trace.
+Metrics and trace meet the provisional instruction budgets on this one local journey.
+This does not establish performance on other journeys or sampling intervals.
+The default 1000 ms sample interval was used. Record-count variation comes from interval samples.
+All enabled captures ended with terminal status and zero dropped records.
+No off capture was created. No wall-time result is accepted under concurrent load.
+The queued serialized logger payload limit is 1 MiB; separate logger allocator usage was not measured.
+Raw artifacts remain at `/tmp/bare-monitor-accept-process-rss` on archMachine.
+
+The disabled <=1% budget is unverified. A verified baseline profiling binary was unavailable in the prepared worktree.
+The task prohibited another checkout. No baseline instruction-overhead pass is claimed.
+
+## Functional gate results for the continuation
+
+- `cargo test -j3 -p bare-os -p bare-observe`: exit 0. Nine OS tests, twelve collector tests, four process tests and the thread-affinity compile-fail doctest pass.
+- `cargo test -j3 -p bare-drive --test monitoring`: exit 0. Four tests pass.
+- `cargo test -j3 -p bare-mcp --test monitoring`: exit 0. Protocol and error-exit checks pass.
+- `cargo check -j3 --workspace`: exit 0. Existing warnings remain.
+- `git diff --check`: exit 0.
+- `cargo test -j3 --workspace`: exit 101 on two attempts. The bare library reports 1521 passed, one failed and six ignored.
+
+The failing test is `browser_session_tests::a_pending_meta_refresh_is_queued_work`.
+It fails at `crates/bare/src/browser_session_tests.rs:684` on `(5000.0..5010.0).contains(&b.next_scheduled_due().unwrap())`.
+An isolated rerun also fails. The test source is unchanged from `00e701b0`.
+Hypothesis: its absolute 10 ms allowance includes setup time on this loaded machine. This cause has not been verified against a baseline binary.
+No scheduling behavior or unrelated test assertion was changed.
+The workspace test gate is not accepted.
+
+Supplemental gates:
+
+- `cargo test -j3 -p bare --test fetch_https --test window_memory`: exit 0. Four synthetic TLS tests and five headless memory tests pass.
+- `cargo test -j3 --workspace --exclude bare --no-fail-fast`: continues beyond individual target failures to check the remaining crates.
+- `cargo test -j3 -p bare-drive --test chunked -- --test-threads=1`: exit 101. Both unchanged fixtures hit `time limit` at lines 147 and 173 after 10 seconds each. The workspace run hit the same limits.
+
+The remainder run also reports `a_driver_click_step_returns_and_the_expect_waits_for_the_reply` at `crates/drive/tests/nonblocking.rs:241`.
+Its recorded step times were `[3.339915, 136.263362, 2.810418, 0.27709, 526.075154]` ms.
+The chunked and nonblocking test files are unchanged from `00e701b0`.
+These failures prevent a clean workspace gate. Their cause is unverified without a baseline reproduction.
+Do not interpret the local instruction-budget results as acceptance of the entire workspace.
+
+The supplemental remainder run was stopped before GUI targets.
+`crates/drive/tests/window_arenas.rs` launches Cage and a real browser window when Cage is installed.
+Cage is installed on this machine. The task prohibits GUI execution.
+The run was still in `task_budget` when its own process tree was stopped. That test has no accepted result.
+No GUI target was launched by this continuation.
+The opt-in real-compositor test in `crates/window/tests/live.rs` remains disabled because `BARE_WINDOW_LIVE` is unset.
+
+Before that stop, `a_page_that_aborts_task_after_task_fails_the_step_with_the_reason` also failed at `crates/drive/tests/survive_limit.rs:59`.
+It reached the 120000 ms step deadline after three script-budget aborts, before the expected fatal page stop.
+The report records 133346.0 ms for the expect step and `time limit 120000 ms`.
+That test file is unchanged from `00e701b0`. No runtime or test limits were changed.
+
+The remaining-crate run found additional failures in unchanged test files:
+
+- `bare-layout`: `keep::tests::a_kept_layout_equals_a_full_layout_after_random_changes` panics at `crates/layout/src/keep.rs:387` with `attempt to multiply with overflow`. The test computes `seed * 0x9E37_79B9_7F4A_7C15` for seeds through 12 in a debug build.
+- `bare-mcp --test server`: `a_hidden_iframe_download_is_saved` sees a download still running with 0 of 8 bytes at line 2353.
+- The same target reports `a_click_under_a_cookie_banner_fails_fast_and_names_the_banner` at line 1567 with 2377 ms for a 1000 ms covered-element wait.
+- The same target reports `a_snapshot_of_5000_elements_takes_under_30_ms` at line 608 with a best snapshot time of 339 ms.
+
+These assertions and the layout test seed expression were not edited. No unrelated test or engine fix was made.
+
+`bare-net --test https_openssl` reports 15 passed and two failed.
+`an_untrusted_or_wrong_name_peer_gets_no_request_and_no_body` fails at line 307 with `certificate verification failed: BadSignature`.
+`a_redirect_from_a_trusted_server_to_an_untrusted_one_sends_nothing_there` fails at line 342 because the returned error does not contain `NoIssuer`.
+The test file is unchanged from `00e701b0`. Certificate verification and expected errors were not changed.
+These are negative synthetic-certificate fixtures. No untrusted peer was accepted to make them pass.
+
+`cargo test -j3 --workspace --exclude bare --exclude bare-drive --no-fail-fast` completed with exit 101 and five failed targets: layout lib, MCP server, net HTTPS, TLS client and TLS 1.2 fixtures.
+The TLS client fixture reports four failures at lines 108, 119, 157 and 232, all with `certificate verification failed: BadSignature`.
+The TLS 1.2 fixture reports `certificate_checks_are_the_same_as_for_tls13` at line 133 with the same error.
+Both test files are unchanged from `00e701b0`. No TLS implementation file was changed by monitoring.
+The complete output is `/tmp/monitor-remaining-crates.log` on archMachine.
+Other gate outputs are `/tmp/monitor-foundation-final.log`, `/tmp/monitor-drive-final.log`, `/tmp/monitor-mcp-final.log`, `/tmp/monitor-bare-integration.log`, `/tmp/monitor-workspace-retry.log` and `/tmp/monitor-workspace-check.log`.
+
+Final status: partial acceptance. Monitoring-specific functional checks and the measured metrics/trace instruction budgets pass.
+The workspace gate, original-baseline disabled overhead, GUI execution and non-Linux runtime are not accepted.
+HTTP/2 first-frame timing, pre-header failure outcomes and complete subsystem memory attribution remain limitations.
