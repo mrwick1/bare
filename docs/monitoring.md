@@ -1,7 +1,7 @@
 # Engine monitoring (partial integration)
 
 Phase 2 is incomplete. Do not treat this branch as accepted monitoring support.
-The local journey test reports missing style events. Implementation stopped at the verification limit.
+The local journey test passes after adding retained and incremental style hooks. Remaining coverage and acceptance work is listed below.
 
 ## Invocation
 
@@ -64,7 +64,7 @@ Terminal status reports drops and the stop reason.
 An I/O failure may leave an incomplete final line. Readers must discard that line.
 Shutdown waits for sink I/O. Flush does not imply fsync durability.
 
-The local journey test currently fails because its capture has no style records.
+The local journey test covers style records from retained and incremental cascade entry points.
 Phase coverage is not complete. Network body and TTFB phases lack separate unified records.
 Scheduler records measure pumps, not every individual task.
 Long-page sampling is tested with bounded worker activity in the process facade, not a long script in the engine.

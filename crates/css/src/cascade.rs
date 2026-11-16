@@ -1207,11 +1207,13 @@ impl RuleSet {
 
     /// Find the style of every element that is shown. The selectors must come from `add` with this same `doc`.
     pub fn compute(&self, doc: &Document) -> Styles {
+        let _observe = bare_observe::process::span("style", "compute");
         self.walk_any::<false>(doc, None, false)
     }
 
     /// `compute`, and the styles keep the cache of the cascade, so that `restyle` can update a part of them later.
     pub fn compute_kept(&self, doc: &Document) -> Styles {
+        let _observe = bare_observe::process::span("style", "compute_kept");
         self.walk_any::<false>(doc, None, true)
     }
 
@@ -1519,6 +1521,7 @@ impl RuleSet {
     /// of `want`, not the size of the page. `None` when it cannot: the styles keep no cache or grew too much, the root element
     /// is hidden (`rem`), or `want` is not on a way that the walk takes (a light child of a shadow host). Then use `compute_for`.
     pub fn style_hidden(&self, doc: &Document, styles: &mut Styles, want: NodeId) -> Option<ComputedStyle> {
+        let _observe = bare_observe::process::span("style", "hidden");
         if self.pending.is_some() { self.hidden_with::<true>(doc, styles, want) } else { self.hidden_with::<false>(doc, styles, want) }
     }
 
@@ -1585,6 +1588,7 @@ impl RuleSet {
     /// document has a shadow root (a change reaches through hosts, slots and parts), `want` is not an element on a path from the root, or
     /// the chain is shared (a caller still holds its styles). Then use the whole cascade. The element is styled even inside `display: none`.
     pub fn style_chain(&self, doc: &Document, chain: &mut StyleChain, want: NodeId) -> Option<Rc<Styles>> {
+        let _observe = bare_observe::process::span("style", "chain");
         if self.pending.is_some() { self.chain_with::<true>(doc, chain, want) } else { self.chain_with::<false>(doc, chain, want) }
     }
 
