@@ -12796,3 +12796,9 @@ Tests: `registered_property_in_layer_and_media_and_perf` (also: 50 `@property` r
 Not tested: the page of the issue in `bare-mcp`. Syntax types are not checked. A name that a style sheet `@property` has is not a duplicate for `registerProperty`.
 
 Seen, not fixed: `browser_geometry_tests::external_sheets_embedded_sheets_and_inline_styles_cascade_in_order` fails with this change. The layout cache (`browser_scroll.rs:384`) keys on `Rc::as_ptr(styles)`, and a bigger `RuleSet` makes the allocator reuse the address of the old rules (hypothesis, from the key and the stale 77x30; not proven with a tool). A parallel agent owns the layout cache.
+## `computed-nodes` stopped a long SPA session (#550, 2026-11-16)
+
+- Cause: the node arena is freed only by a collect and a reclaim. The page driver collected when the script heap grew (`Interp::gc_due`). A page that replaces a list makes many dead nodes and almost no script heap, so no collect ran. The arena grew with every replace. `computed-nodes` counted `Document::len` (all slots, with free ones), so it fired while the live tree was small.
+- Fix: `Browser::collect_due` also asks for a collect when the arena has grown by 2 MiB (or a fourth of the live bytes) since the last one; the page driver and `ui_call` use it. `computed-nodes` counts `live_len`, as the DOM cap already did. The cap is not changed.
+- Test: `replacing_a_list_many_times_does_not_reach_computed_nodes` (700 rows of 5 nodes, replaced 50 times, one `getComputedStyle` after each). Before: `computed-nodes` at round 37, `len` 133,006. After: `len` stays at 108,506 from round 32 to round 49.
+- Not tested: live Gmail; the `goto` case of the issue (a new document should have a small arena; not reproduced); peak RSS (arena slots peak at 108,506 against 175,006 without the fix, one run).

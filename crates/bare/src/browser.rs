@@ -1796,6 +1796,13 @@ impl Browser {
         self.it.drain_microtasks()
     }
 
+    /// Is a collect due at a safe point? The heap asks (`Interp::gc_due`), or the node arena has grown by the same rule since the last collect:
+    /// a page that replaces its lists makes dead nodes and little script heap, and only a collect and reclaim free them.
+    pub fn collect_due(&self) -> bool {
+        let live = self.it.external_live();
+        self.it.gc_due() || self.dom.doc.try_borrow().is_ok_and(|d| d.arena_bytes() > live + (2usize << 20).max(live / 4))
+    }
+
     /// Collect the heap. Attached wrappers and their listeners live. `extra` are values the caller still holds.
     pub fn collect(&mut self, extra: &[Value]) -> R<bare_js::heap::Collected> {
         let c = self.it.collect(extra)?;
