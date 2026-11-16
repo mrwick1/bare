@@ -1,0 +1,19 @@
+<!doctype html>
+<html><head><title>Agent guide fixture</title>
+<style>#veil{position:fixed;left:0;top:0;width:100%;height:100%;background:#fff}</style></head>
+<body>
+<h1>Synthetic shop</h1>
+<div id="veil" role="dialog" aria-label="Cookie notice"><p>We use synthetic cookies.</p><button id="ok">Accept notice</button></div>
+<form id="f" onsubmit="event.preventDefault();document.getElementById('res').textContent='Saved '+document.getElementById('n').value">
+<label for="n">Nickname</label><input id="n" value="old">
+<label for="c">Colour</label><select id="c"><option>Red</option><option>Blue</option></select>
+<label><input type="checkbox" id="t"> Terms</label>
+<button type="submit">Save profile</button></form>
+<p id="res">Nothing saved</p>
+<button id="load">Load report</button>
+<p id="report"></p>
+<script>
+document.getElementById('ok').onclick = () => document.getElementById('veil').remove();
+document.getElementById('load').onclick = () => setTimeout(() => { document.getElementById('report').textContent = 'Report ready: 3 rows'; }, 300);
+</script>
+</body></html>
