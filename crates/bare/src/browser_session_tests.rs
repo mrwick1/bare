@@ -680,8 +680,9 @@ fn a_pending_meta_refresh_is_queued_work() {
         b.use_virtual_clock();
         b.set_document_url("http://127.0.0.1:1/").unwrap();
         assert_eq!(b.next_scheduled_due(), None);
+        let t0 = b.dom.now_ms();
         b.start_refresh();
-        assert!((5000.0..5010.0).contains(&b.next_scheduled_due().unwrap()));
+        assert_eq!(b.next_scheduled_due(), Some(t0 + 5000.0));
     });
 }
 
