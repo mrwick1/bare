@@ -93,7 +93,7 @@ pub struct SessionLimits {
 
 impl Default for SessionLimits {
     fn default() -> Self {
-        SessionLimits { max_documents: 8, max_redirects: 10, max_document_bytes: 8 << 20, max_time: Duration::from_secs(60), max_tasks: 200_000, max_rounds: 200_000 }
+        SessionLimits { max_documents: 8, max_redirects: 10, max_document_bytes: 64 << 20, max_time: Duration::from_secs(60), max_tasks: 200_000, max_rounds: 200_000 }
     }
 }
 
