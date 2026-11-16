@@ -2534,3 +2534,75 @@ fn a_labelledby_loop_does_not_overflow_the_stack() {
     let snap = snap_of("<body><div id=x><button aria-labelledby=x>Go</button> after</div><a id=a href=/ aria-labelledby=b>A</a><a id=b href=/ aria-labelledby=a>B</a>", json!({}));
     assert!(snap.contains("button"), "{snap}");
 }
+
+
+#[test]
+fn act_outcomes_separate_execution_from_verification() {
+    let base = pages(&[("/", "<!doctype html><body><button onclick=\"this.textContent='Saved'\">Save</button>")]);
+    let mut s = Server::start();
+    s.tool("open", json!({"url": base, "timeout_ms": 1000}));
+    let r = s.ask("tools/call", json!({"name": "act", "arguments": {
+        "op": "click", "loc": "role=button name=\"Save\"", "expect": "expect role=button name=\"Saved\" visible"
+    }}));
+    let out = &r["result"]["structuredContent"];
+    assert_eq!(serde_json::from_str::<Value>(r["result"]["content"][1]["text"].as_str().unwrap()).unwrap(), *out);
+    assert_eq!(out["action_status"], "completed", "{r}");
+    assert_eq!(out["page_status"], "ready", "{r}");
+    assert_eq!(out["verification"], "passed", "{r}");
+    assert_ne!(r["result"]["isError"], true, "{r}");
+    let r = s.ask("tools/call", json!({"name": "act", "arguments": {
+        "op": "click", "loc": "role=button name=\"Saved\"", "expect": "expect url=\"https://invalid.example/\""
+    }}));
+    assert_eq!(r["result"]["structuredContent"]["action_status"], "completed", "{r}");
+    assert_eq!(r["result"]["structuredContent"]["verification"], "failed", "{r}");
+    assert_eq!(r["result"]["isError"], true, "{r}");
+}
+
+
+#[test]
+fn act_outcomes_keep_a_completed_navigation_when_layout_is_pending() {
+    let mut s = Server::start();
+    let base = common::serve_route(nav_pages);
+    s.tool("open", json!({"url": format!("{base}/"), "timeout_ms": 1000}));
+    let r = s.ask("tools/call", json!({"name": "act", "arguments": {
+        "op": "click", "loc": "role=link name=\"Stuck\""
+    }}));
+    assert_eq!(r["result"]["structuredContent"], json!({
+        "action_status": "completed", "page_status": "pending", "verification": "not_requested"
+    }), "{r}");
+    assert_eq!(r["result"]["isError"], false, "{r}");
+    assert!(r["result"]["content"][0]["text"].as_str().unwrap().contains("no snapshot:"), "{r}");
+}
+
+#[test]
+fn act_outcomes_reject_invalid_checks_before_dispatch() {
+    let base = pages(&[("/", "<!doctype html><body><button onclick=\"this.textContent='Saved'\">Save</button>")]);
+    let mut s = Server::start();
+    s.tool("open", json!({"url": base}));
+    for expect in [json!("click text=\"Save\""), json!("expect js \"true\""), json!(""), json!(false)] {
+        let r = s.ask("tools/call", json!({"name": "act", "arguments": {
+            "op": "click", "loc": "role=button name=\"Save\"", "expect": expect
+        }}));
+        assert_eq!(r["result"]["structuredContent"]["action_status"], "not_started", "{r}");
+        assert_eq!(r["result"]["structuredContent"]["verification"], "not_run", "{r}");
+        assert_eq!(r["result"]["isError"], true, "{r}");
+    }
+    let (snap, _) = s.tool("snapshot", json!({}));
+    assert!(snap.as_str().unwrap().contains("\"Save\"") && !snap.as_str().unwrap().contains("Saved"), "{snap}");
+    let r = s.ask("tools/call", json!({"name": "act", "arguments": {"op": "click", "unexpected": true}}));
+    assert_eq!(r["result"]["structuredContent"]["action_status"], "not_started", "{r}");
+}
+
+#[test]
+fn act_outcomes_do_not_claim_failed_input_is_safe_to_repeat() {
+    let mut s = Server::start();
+    let r = s.ask("tools/call", json!({"name": "act", "arguments": {"op": "click", "loc": "text=\"Go\""}}));
+    assert_eq!(r["result"]["structuredContent"]["action_status"], "not_started", "{r}");
+    s.tool("open", json!({"url": covered_page(""), "timeout_ms": 1000}));
+    let r = s.ask("tools/call", json!({"name": "act", "arguments": {
+        "op": "click", "loc": "role=button name=\"Go\"", "expect": "expect text=\"Clicked\" visible"
+    }}));
+    assert_eq!(r["result"]["structuredContent"]["action_status"], "unknown", "{r}");
+    assert_eq!(r["result"]["structuredContent"]["verification"], "not_run", "{r}");
+    assert_eq!(r["result"]["isError"], true, "{r}");
+}
