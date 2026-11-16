@@ -2360,3 +2360,12 @@ Owner decision (2026-11-15): build P1, P4 and P2 of [design-gmail-js.md](design-
 - P1 is built: a classic script of 16 KB or more is parsed on one worker thread when its text arrives. The page thread takes the tree in `parse_cache::parse`, waits if the worker runs that text, and parses it itself if the worker has not begun.
 - Chosen: the worker fills a slot of a registry keyed like the parse cache; it runs no code and reports nothing. Not chosen: `Arc` instead of `Rc` in the tree (atomic counts on the hot path of every clone); a parse on the download thread itself (it would hold one of the 6 download slots); a worker for module scripts and for scripts of unknown kind (the kind decides the cache key, a wrong guess parses for nothing).
 - The tree is handed over with `unsafe impl Send` for a wrapper (`Hand`). The condition is in `parse_ahead.rs` and has a test. Check the condition again when `ast.rs` gets a new `Rc` or a shared cache.
+
+## Intl.Collator accepts usage "search" (2026-11-16)
+
+Issue #577: `new Intl.Collator('en', { usage: 'search' })` raised `Unsupported`. Page code cannot catch it, and it stopped anthropic.com/news.
+
+- Built: `usage: "search"` is accepted. `resolvedOptions().usage` returns `"search"`. `compare` uses the same rules as `"sort"`.
+- Why `compare` does not change: bare has no search collation data. The spec lets an engine use the sort rules for `search`.
+- Kept: the `sensitivity` option and every other option of the collator work as before.
+- Not changed: the `collation` option and the `co-emoji` and `co-eor` locale keywords still throw `Unsupported` that page code cannot catch.
