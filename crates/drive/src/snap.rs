@@ -628,11 +628,12 @@ pub fn snapshot(p: &mut Page, refs: &mut Refs, mode: Mode, root: Option<u32>, of
     }
     // The elements that the last snapshot showed and this outline does not: gone from the page, or hidden.
     let mut removed: Vec<(u32, NodeId)> = Vec::new();
-    if let Some(prev) = prev.as_ref().filter(|_| diff_only && full) {
+    if let Some(prev) = prev.as_ref().filter(|_| full) {
         let now: HashSet<NodeId> = rows.iter().filter_map(|r| r.node).collect();
         removed = prev.els.keys().filter(|n| !now.contains(n)).filter_map(|n| refs.ids.get(n).map(|&r| (r, *n))).collect();
         removed.sort_unstable_by_key(|&(r, _)| r);
     }
+    let mut pending_text = HashSet::new();
     let mut delivered = vec![true; rows.len()];
     let mut listed = removed.len().min(REMOVED);
     let out = if diff_only && full && refs_had_prev {
@@ -662,6 +663,7 @@ pub fn snapshot(p: &mut Page, refs: &mut Refs, mode: Mode, root: Option<u32>, of
                 let _ = write!(out, "\ntext: {:?}", short(t, TEXT_CHARS));
             }
             if new_text.len() > TEXT_LINES {
+                pending_text.extend(new_text.iter().skip(TEXT_LINES).map(|t| hash(t.as_str())));
                 let _ = write!(out, "\n… {} more changed text lines: use read", new_text.len() - TEXT_LINES);
             }
             format!("{}\n{}", out.trim_start_matches('\n'), refs.doc_line())
@@ -673,15 +675,18 @@ pub fn snapshot(p: &mut Page, refs: &mut Refs, mode: Mode, root: Option<u32>, of
             "(no elements: the page is empty, or it has not rendered yet)".into()
         } else {
             let (body, shown) = budget(lines, max, Some(offset));
-            // The rows that `offset` skipped or the cut hid were not delivered. A full snapshot does not report removals, so it drops them.
+            // The rows that `offset` skipped or the cut hid were not delivered. Only a complete outline accounts for removals; a partial one retains them.
             delivered = shown;
             body
         };
+        if offset == 0 && delivered.iter().all(|shown| *shown) {
+            listed = removed.len();
+        }
         let why = reset.map_or(String::new(), |w| format!("reset: {w}; this is the full outline\n"));
         header(p, refs) + &why + &body
     };
     if full {
-        let mut seen = Seen { mode, read: text.iter().map(|t| hash(t.as_str())).collect(), ..Seen::default() };
+        let mut seen = Seen { mode, read: text.iter().map(|t| hash(t.as_str())).filter(|h| !pending_text.contains(h)).collect(), ..Seen::default() };
         for (r, ok) in rows.iter().zip(&delivered) {
             let h = hash(&r.text);
             match r.node {

@@ -75,7 +75,7 @@ Overflow of the `u32` counter (4.29 billion refs in one server lifetime) is not 
 
 - After a first snapshot that the cut truncated, the next act diff lists the rows that were never delivered as new, until they are
   delivered. This is correct but can cost more characters than before on a large page.
-- The text lines of an interactive diff (`text:`) keep their old rule: the first 5 are shown, the rest say `use read`.
+- Interactive diffs show at most five supplemental text lines. Unshown lines remain pending for a later diff or focused read.
 - `snapshot`, `no change (N lines)` gained a second line `doc: ...`. Existing assertions (`no change`, `len < 80`) still hold.
 
 ## CPU and memory
@@ -102,3 +102,7 @@ sort of the removed refs. A ref costs a `HashMap<u32, NodeId>` entry in place of
   it passed 3 of 3 alone. `a_hidden_iframe_download_is_saved` failed on the base run and passed here: not investigated.
 - `cargo test -p bare-drive`: `tests/chunked.rs` fails 2 tests ("time limit") on this branch and on the base snap.rs; it does not use `snap`.
 - Not tested: a live site, the Windows build, `find` doc identity, behavior over 4 billion refs.
+
+## Parent review
+
+The initial 11 observation tests passed on rerun. Two additional regressions then failed: a partial full-page snapshot discarded unreported removals, and supplemental text beyond the five-line excerpt vanished from the next diff. Both are fixed. All 13 observation tests and all 9 drive library tests pass. `cargo check --workspace` and `git diff --check` pass. The broader MCP server suite has 94 passes, 1 failure and 1 ignored test. The snapshot timing failure also occurred on the baseline; no performance gain is claimed. Integration with #614, live browsing, Windows and counter exhaustion remain untested.

@@ -272,3 +272,27 @@ fn a_paged_snapshot_does_not_hide_a_change_in_the_rows_it_skipped() {
     let r = s.diff("main", json!({"max_chars": 20000}));
     assert!(r.contains("renamed b2 ") && r.contains("renamed b30 "), "{r}");
 }
+
+#[test]
+fn changed_text_beyond_the_excerpt_is_not_lost() {
+    let base = pages(&[("/", "<!doctype html><body><p>Before</p></body>")]);
+    let mut s = Server::start();
+    s.open("main", &format!("{base}/"));
+    s.tool("eval", json!({"js": "document.body.innerHTML = '<p>update0</p><p>update1</p><p>update2</p><p>update3</p><p>update4</p><p>update5</p><p>update6</p>'"}));
+    let first = s.diff("main", json!({}));
+    assert!(first.contains("more changed text lines"), "{first}");
+    let next = s.diff("main", json!({}));
+    assert!(next.contains("update5") && next.contains("update6"), "{first}\n---\n{next}");
+    assert!(s.diff("main", json!({})).contains("no change"));
+}
+
+#[test]
+fn a_partial_snapshot_does_not_discard_unreported_removals() {
+    let base = pages(&[("/", MANY)]);
+    let mut s = Server::start();
+    let snap = s.open("main", &format!("{base}/"));
+    s.tool("act", json!({"op": "click", "ref": ref_of(&snap, "button \"Drop\""), "snapshot": false}));
+    s.snap("main", json!({"offset": 1}));
+    let next = s.diff("main", json!({}));
+    assert!(next.contains("removed:"), "{next}");
+}
