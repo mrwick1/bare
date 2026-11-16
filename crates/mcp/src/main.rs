@@ -206,7 +206,7 @@ impl Server {
         if let Some(f) = args.get("secrets_file").and_then(Value::as_str) {
             pass.extend(["--secrets".into(), f.into()]);
         }
-        let exe = std::env::var_os("BARE_DRIVE").map(std::path::PathBuf::from).or_else(|| std::env::current_exe().ok()?.with_file_name("bare-drive").into()).filter(|p| p.is_file());
+        let exe = std::env::var_os("BARE_DRIVE").map(std::path::PathBuf::from).or_else(|| std::env::current_exe().ok()?.with_file_name(format!("bare-drive{}", std::env::consts::EXE_SUFFIX)).into()).filter(|p| p.is_file());
         let cfg = bare_drive::suite::Config {
             dir: dir.into(),
             out: out.clone(),
