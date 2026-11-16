@@ -93,5 +93,5 @@ If a step fails and the page looks fine in a real browser, call `diagnose`. It g
 
 These are not documented as current and are not tested here.
 
-- PR #614 adds structured outcomes (`action_status`, `page_status`, `verification`) and an optional `expect` argument of `act`. On this base use `step` with `expect` as shown above. `the_tools_and_arguments_of_the_guide_exist` fails when `act.expect` appears, as a reminder to update this guide.
+- PR #614 adds structured outcomes (`action_status`, `page_status`, `verification`) and an optional `expect` argument of `act`. On this base use `step` with `expect` as shown above. Refresh this section when #614 is integrated; additive arguments do not invalidate the examples above.
 - Other planned sibling work (new observations, error codes, cancellation, document revisions) is not described here.

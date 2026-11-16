@@ -112,9 +112,7 @@ fn the_tools_and_arguments_of_the_guide_exist() {
     has("close", &["session"]);
     has("downloads", &["op", "id"]);
     has("diagnose", &["session"]);
-    // The pending #614 field is not on this base.
-    let act = tools.as_array().unwrap().iter().find(|t| t["name"] == "act").unwrap();
-    assert!(act["inputSchema"]["properties"].get("expect").is_none(), "act.expect exists: update the guide to present it as current");
+    // Check the arguments used here; additive tool arguments must remain compatible.
 }
 
 /// open, find, act by ref, read: the basic loop, with an overlay in the way.
