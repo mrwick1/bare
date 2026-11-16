@@ -109,15 +109,36 @@ fn long_scripts_gc_and_concurrent_documents() {
 
 #[test]
 fn suite_worker_paths_and_error_flush() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let done = stop.clone();
+    let server = std::thread::spawn(move || {
+        while !done.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+                    let _ = stream.read(&mut [0; 4096]);
+                    let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 15\r\nConnection: close\r\n\r\n<body>ok</body>");
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => std::thread::sleep(std::time::Duration::from_millis(1)),
+                Err(e) => panic!("{e}"),
+            }
+        }
+    });
+
     let dir = std::env::temp_dir().join(format!("monitor-suite-{}", std::process::id()));
     std::fs::create_dir(&dir).unwrap();
     for name in ["one", "two"] {
-        std::fs::write(dir.join(format!("{name}.steps")), "open about:blank\n").unwrap();
+        std::fs::write(dir.join(format!("{name}.steps")), format!("open http://{address}/\n")).unwrap();
     }
     let path = dir.join("capture");
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_bare-drive"))
         .arg("--suite").arg(&dir).args(["--workers", "2", "--out"]).arg(dir.join("out"))
         .env("BARE_OBSERVE", "metrics").env("BARE_OBSERVE_FILE", &path).output().unwrap();
+    stop.store(true, Ordering::Relaxed);
+    server.join().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let workers: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().path()).filter(|p| p.file_name().unwrap().to_string_lossy().starts_with("capture.pid-")).collect();
     assert_eq!(workers.len(), 2);
