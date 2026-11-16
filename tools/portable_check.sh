@@ -12,8 +12,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 pat='cfg\((all\(|not\()?(unix|windows|target_os)|"/(proc|etc|dev|usr)/|extern "C"|std::os::(unix|linux|windows|macos)'
-# The OS layer: these files may call the OS.
-layer='^crates/window/src/(wayland|none|lib)\.rs$'
+# The OS layer: these files may call the OS. `bare-os` holds the OS services other than the window.
+layer='^crates/window/src/(wayland|none|lib)\.rs$|^crates/os/src/[a-z_]+\.rs$'
 # OS code that the next topic moves into the OS layer. Remove a file when it is clean. Do not add files.
 known='^crates/(bare/src/main|bench/src/main|drive/src/main|drive/src/run|js/src/eval_intl|js/src/eval_numeric|net/src/dns|net/src/parallel|net/src/tcp|tls/src/random|tls/src/trust_store)\.rs$'
 

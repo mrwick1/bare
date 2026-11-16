@@ -159,6 +159,7 @@ dependencies = [
 name = "bare-net"
 version = "0.1.0"
 dependencies = [
+ "bare-os",
  "bare-tls",
  "bare-url",
  "brotli-decompressor",
@@ -166,6 +167,10 @@ dependencies = [
  "flate2",
  "miniz_oxide 0.9.1",
 ]
+
+[[package]]
+name = "bare-os"
+version = "0.1.0"
 
 [[package]]
 name = "bare-paint"
@@ -192,6 +197,9 @@ dependencies = [
 [[package]]
 name = "bare-tls"
 version = "0.1.0"
+dependencies = [
+ "bare-os",
+]
 
 [[package]]
 name = "bare-unicode"
