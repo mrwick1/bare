@@ -732,6 +732,9 @@ impl Dom {
             self.focus_node(it, c)?;
             return self.user_click(it, c, Some(ui.clone())).map(|_| ());
         }
+        if is_tag(&self.doc.borrow(), t, "summary") {
+            return self.summary_activate(it, t);
+        }
         self.activate(it, t)
     }
 
@@ -804,7 +807,7 @@ impl Dom {
             let t = self.focus_target(it)?;
             let by_space = {
                 let doc = self.doc.borrow();
-                is_tag(&doc, t, "button") || (is_tag(&doc, t, "input") && !text_kind(nd::input_kind(&doc, t)))
+                is_tag(&doc, t, "button") || is_tag(&doc, t, "summary") || (is_tag(&doc, t, "input") && !text_kind(nd::input_kind(&doc, t)))
             };
             if by_space {
                 self.user_click(it, t, Some(self.zero_click()))?;
@@ -884,7 +887,7 @@ impl Dom {
                 // On a button, a checkbox or a radio, Space clicks on key up; elsewhere it scrolls a page.
                 let by_space = {
                     let doc = self.doc.borrow();
-                    is_tag(&doc, t, "button") || (is_tag(&doc, t, "input") && !text_kind(nd::input_kind(&doc, t)))
+                    is_tag(&doc, t, "button") || is_tag(&doc, t, "summary") || (is_tag(&doc, t, "input") && !text_kind(nd::input_kind(&doc, t)))
                 };
                 if !by_space {
                     self.note_scroll_key(if m.shift { crate::browser_scroll::ScrollKey::PageUp } else { crate::browser_scroll::ScrollKey::PageDown });

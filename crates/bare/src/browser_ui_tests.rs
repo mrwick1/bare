@@ -635,3 +635,82 @@ fn measure_input() {
         let _ = &mut times;
     });
 }
+
+// ---- `<summary>` activation (HTML "the summary element": toggle the `open` attribute of the parent `details`)
+
+const DETAILS: &str = r#"<body style="margin:0"><details id="d" style="position:absolute;left:0;top:0"><summary id="s" style="display:block;width:100px;height:20px">sum<button id="b" style="position:absolute;left:200px;top:0;width:50px;height:20px">x</button></summary><p>body</p></details>
+<script>window.t = [];
+document.getElementById('d').addEventListener('toggle', function (e) { window.t.push(e.constructor.name + ':' + e.oldState + '>' + e.newState + ':' + e.bubbles + e.cancelable); });</script></body>"#;
+const AT_SUMMARY: (f64, f64) = (50.0, 10.0);
+
+impl Driver {
+    /// The `open` attribute of `#d`, and the toggle events that ran after the input.
+    fn details(&mut self) -> String {
+        self.page.browser().expect("browser").run_scheduled_tasks(100).expect("tasks");
+        self.js("document.getElementById('d').hasAttribute('open') + ' ' + window.t.join()")
+    }
+}
+
+#[test]
+fn a_summary_click_opens_and_closes_its_details() {
+    big(|| {
+        let mut d = Driver::new(DETAILS);
+        d.click(AT_SUMMARY);
+        assert_eq!(d.details(), "true ToggleEvent:closed>open:falsefalse");
+        d.click(AT_SUMMARY);
+        assert_eq!(d.details(), "false ToggleEvent:closed>open:falsefalse,ToggleEvent:open>closed:falsefalse");
+    });
+}
+
+#[test]
+fn a_click_on_a_button_inside_a_summary_does_not_toggle() {
+    big(|| {
+        let mut d = Driver::new(DETAILS);
+        d.click((225.0, 10.0));
+        assert_eq!(d.details(), "false ");
+    });
+}
+
+#[test]
+fn a_canceled_summary_click_does_not_toggle() {
+    big(|| {
+        let mut d = Driver::new(DETAILS);
+        d.js("document.getElementById('s').addEventListener('click', function (e) { e.preventDefault(); });");
+        d.click(AT_SUMMARY);
+        assert_eq!(d.details(), "false ");
+    });
+}
+
+#[test]
+fn enter_and_space_on_a_focused_summary_toggle_its_details() {
+    big(|| {
+        let mut d = Driver::new(DETAILS);
+        d.js("document.getElementById('s').focus()");
+        d.press("Enter", NO);
+        assert_eq!(d.details(), "true ToggleEvent:closed>open:falsefalse");
+        d.press(" ", NO);
+        assert_eq!(d.details(), "false ToggleEvent:closed>open:falsefalse,ToggleEvent:open>closed:falsefalse");
+    });
+}
+
+#[test]
+fn a_second_summary_does_not_toggle_its_details() {
+    big(|| {
+        let mut d = Driver::new(r#"<body style="margin:0"><details id="d" open><summary id="s1" style="display:block;height:20px">1</summary><summary id="s2" style="display:block;height:20px">2</summary></details></body>"#);
+        d.click((50.0, 30.0));
+        assert_eq!(d.js("document.getElementById('d').hasAttribute('open')"), "true");
+        d.click((50.0, 10.0));
+        assert_eq!(d.js("document.getElementById('d').hasAttribute('open')"), "false");
+    });
+}
+
+#[test]
+fn toggles_before_the_task_runs_make_one_event() {
+    big(|| {
+        let mut d = Driver::new(DETAILS);
+        d.js("var e = document.getElementById('d'); e.open = true; e.open = false; e.open = true;");
+        assert_eq!(d.details(), "true ToggleEvent:closed>open:falsefalse");
+        d.js("window.t.length = 0; var e = document.getElementById('d'); e.open = false; e.open = true; e.open = false;");
+        assert_eq!(d.details(), "false ToggleEvent:open>closed:falsefalse");
+    });
+}
