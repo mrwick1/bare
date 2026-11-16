@@ -761,6 +761,10 @@ impl Dom {
         if kind == PSEUDO && key == "content" {
             return Ok("normal".into());
         }
+        // The engine has no transform. Every element computes to `none`, as Chrome does for an element with no transform.
+        if key == "transform" || key == "-webkit-transform" {
+            return Ok("none".into());
+        }
         let long = Property::from_name(&key);
         if !is_custom && long.is_none() && !SHORTHANDS.contains(&key.as_str()) {
             return Ok(String::new());
@@ -1033,6 +1037,19 @@ fn named_get(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     d.js_str(it, &v)
 }
 
+/// `transform` and `webkitTransform`: the engine has no transform, so the value is `none` (see `computed_value`).
+fn transform_get(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    let el = d.computed_el(it, this)?;
+    let v = d.computed_value(it, el, "transform", d.computed_kind(this))?;
+    d.js_str(it, &v)
+}
+
+fn transform_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    d.computed_el(it, this)?;
+    null_empty(d, it, arg(a, 0))?;
+    Err(d.read_only(it, "transform"))
+}
+
 fn named_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     let name = current(d, it)?;
     d.computed_el(it, this)?;
@@ -1063,6 +1080,12 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
             let key = d.key(it, k)?;
             d.define_accessor(it, proto, key, gf, Some(sf))?;
         }
+    }
+    let gf = d.add_fn(it, transform_get, "get transform", 0, false)?;
+    let sf = d.add_fn(it, transform_set, "set transform", 1, false)?;
+    for k in ["transform", "webkitTransform", "-webkit-transform"] {
+        let key = d.key(it, k)?;
+        d.define_accessor(it, proto, key, gf, Some(sf))?;
     }
     let f = d.def_method(it, g, "getComputedStyle", 1, get_computed_style)?;
     // Window operations are enumerable.

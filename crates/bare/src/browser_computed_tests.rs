@@ -42,6 +42,16 @@ fn big<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
 }
 
 #[test]
+fn transform_is_none() {
+    let mut b = at(PAGE);
+    // Vaul `getTranslate`: `style.transform || style.webkitTransform`, then `.match(...)`. The engine has no transform, so it is `none`.
+    assert_eq!(js(&mut b, "var s = getComputedStyle(document.getElementById('a')); [typeof s.transform, s.transform, s.webkitTransform, s.getPropertyValue('transform'), s.getPropertyValue('-webkit-transform')].join('|')"), "string|none|none|none|none");
+    assert_eq!(js(&mut b, "'none'.match(/^matrix\\((.+)\\)$/) === null"), "true");
+    assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('a'), '::before').transform"), "none");
+    assert_eq!(js(&mut b, "try { getComputedStyle(document.getElementById('a')).transform = 'x'; 'ok' } catch (e) { e.name }"), "NoModificationAllowedError");
+}
+
+#[test]
 fn root_direction_shape() {
     let mut b = at(PAGE);
     // The shape of the cached bundle: `getComputedStyle(document.documentElement).direction`.
@@ -238,10 +248,10 @@ fn the_reads_of_a_floating_popper_do_not_stop() {
         js(&mut b, &format!("var cs = getComputedStyle(document.getElementById('{id}')); 0"));
         let r = js(&mut b, all);
         assert!(!r.starts_with("unsupported") && !r.starts_with("limit"), "{id}: {r}");
-        assert!(!r.contains("undefined") || r.contains("transform=undefined"), "{id}: {r}");
+        assert!(!r.contains("transform=undefined"), "{id}: {r}");
     }
     js(&mut b, "var cs = getComputedStyle(document.getElementById('t')); 0");
-    assert_eq!(js(&mut b, "cs.getPropertyValue('width') + ' ' + cs.getPropertyValue('transform') + '|' + cs.getPropertyValue('will-change') + '|' + cs.position"), "135px ||relative");
+    assert_eq!(js(&mut b, "cs.getPropertyValue('width') + ' ' + cs.getPropertyValue('transform') + '|' + cs.getPropertyValue('will-change') + '|' + cs.position"), "135px none||relative");
 }
 
 /// The picture properties are not in the list of `getComputedStyle` (`Property::LISTED`) but `getPropertyValue` and `setProperty` know them:
@@ -264,9 +274,9 @@ fn supported_names_only_and_gates_for_unavailable_values() {
     let mut b = at(PAGE);
     js(&mut b, "var cs = getComputedStyle(document.getElementById('a')); 0");
     assert_eq!(js(&mut b, "['direction', 'display', 'position', 'color', 'fontSize', 'marginTop', 'cssFloat', 'webkitBorderHorizontalSpacing', 'opacity', 'zIndex', 'borderTopLeftRadius'].map(function (k) { return k in cs; }).join()"), "true,true,true,true,true,true,true,true,true,true,true");
-    // Not supported by the engine: absent, `getPropertyValue` gives "" (CSSOM), no fake value.
-    assert_eq!(js(&mut b, "['animation', 'transform', 'WebkitAnimation'].map(function (k) { return k in cs; }).join()"), "false,false,false");
-    assert_eq!(js(&mut b, "cs.getPropertyValue('transform') + '|' + cs.getPropertyValue('nope') + '|'"), "||");
+    // Not supported by the engine: absent, `getPropertyValue` gives "" (CSSOM), no fake value. `transform` is the exception: it is always `none`.
+    assert_eq!(js(&mut b, "['animation', 'transform', 'WebkitAnimation'].map(function (k) { return k in cs; }).join()"), "false,true,false");
+    assert_eq!(js(&mut b, "cs.getPropertyValue('transform') + '|' + cs.getPropertyValue('nope') + '|'"), "none||");
     // Computed values that are known without layout.
     assert_eq!(js(&mut b, "cs.getPropertyValue('Display') + cs.position + cs.visibility + cs.fontWeight + cs.fontSize + cs.borderTopWidth + cs.paddingLeft"), "blockstaticvisible40016px0px0px");
     assert_eq!(js(&mut b, "cs.getPropertyValue('DIRECTION')"), "ltr");

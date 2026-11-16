@@ -8353,3 +8353,13 @@ Checks (release, 2026-11-10):
 - `tools/portable_check.sh`: exit 0.
 
 Not tested: the staging journey. A real Playwright file. `window: true`. A session with cookies (the fixture app keeps its token in `sessionStorage`). Two live sessions at once (not supported: a new open ends the old one).
+
+## Computed `transform` (2026-11-17, #558)
+
+`getComputedStyle(el).transform`, `.webkitTransform` and `getPropertyValue('transform')` (also `-webkit-transform`) now give `"none"`. Before, the engine had no transform property, so the accessor was `undefined`. Vaul `getTranslate` calls `.match` on `style.transform || style.webkitTransform`, so a sheet release threw `TypeError`. A pseudo-element read gives `none`. A write throws `NoModificationAllowedError`, as for other computed properties. The code is in `browser_computed.rs` (`transform_get`, `computed_value`).
+
+Limit: the engine does not parse `transform`. A page that sets `transform: translateY(10px)` still reads `none`, not `matrix(...)`. Vaul takes the `none` path (translate is 0 or null). A real `matrix()` value needs a transform property in `bare-css`.
+
+Checks: `cargo test -p bare --lib browser_computed`: 37 passed (new `transform_is_none`; two old tests that pinned `transform` as absent now expect `none`). `cargo test -p bare --lib`: 1282 passed, 3 failed before the test edits; 2 of the 3 were those old tests. The third, `browser_canvas_tests::one_image_data_holds_at_most_64_mib`, fails in debug with `attempt to multiply with overflow` at `browser_canvas.rs:84`. It does not touch this change.
+
+Not tested: a real Vaul bundle or the Deck fixture. Release mode. Windows and macOS.
