@@ -4,5 +4,6 @@
 //! with one implementation per OS behind `cfg`.
 
 pub mod dns;
+pub mod metrics;
 pub mod random;
 pub mod trust;
