@@ -15,7 +15,7 @@ pat='cfg\((all\(|not\()?(unix|windows|target_os)|"/(proc|etc|dev|usr)/|extern "C
 # The OS layer: these files may call the OS. `bare-os` holds the OS services other than the window.
 layer='^crates/window/src/(wayland|none|lib)\.rs$|^crates/os/src/[a-z_]+\.rs$'
 # OS code that the next topic moves into the OS layer. Remove a file when it is clean. Do not add files.
-known='^crates/(bare/src/main|bench/src/main|drive/src/main|drive/src/run|js/src/eval_intl|js/src/eval_numeric|net/src/dns|net/src/parallel|net/src/tcp|tls/src/random|tls/src/trust_store)\.rs$'
+known='^crates/(bare/src/main|bench/src/main|drive/src/main|drive/src/run|js/src/eval_intl|js/src/eval_numeric|net/src/parallel|net/src/tcp|tls/src/random|tls/src/trust_store)\.rs$'
 
 bad=$(grep -rlE "$pat" crates/*/src --include='*.rs' | grep -vE '_tests\.rs$' | grep -vE "$layer" | grep -vE "$known" || true)
 if [ -n "$bad" ]; then
