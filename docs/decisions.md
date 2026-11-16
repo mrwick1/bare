@@ -1733,7 +1733,7 @@ A focused element inside an editing host now takes key input. Text, Enter, Backs
 - A mark or a measure is an instance of `PerformanceMark` or `PerformanceMeasure`. Its own fields do not change. Its `toJSON` gives a plain copy. A mark or measure keeps `detail` in the copy. An entry keeps only the four common members.
 - `Screen` is a lazy global (`browser.rs`). `window.screen` is its instance. `new Screen()` throws.
 - Gap: `new PerformanceMark(name)` and `new PerformanceMeasure(name)` throw. They are not constructible yet. Entries have no getters on the prototype. Their fields stay own data properties.
-- Gap: `PerformanceResourceTiming` and `PerformanceNavigationTiming` have no entries. The page gets no resource or navigation entry from `getEntries*`, as before.
+- Gap: `PerformanceResourceTiming` has no entries. The navigation entry is made per document (2026-11-16).
 - Gap: `toJSON` does not check its receiver. A call on a non-object throws `Illegal invocation`. A call on another object does not.
 - Shape from Ladybird's IDL (`LibWeb/PerformanceTimeline/PerformanceEntry.idl`, `LibWeb/ResourceTiming/PerformanceResourceTiming.idl`, `LibWeb/CSS/Screen.idl`, BSD-2-Clause). We wrote our own code. No file was copied. Ladybird's `Screen` has its members on the interface. Ours keep them as own data properties of `screen`, as before.
 
@@ -2361,6 +2361,14 @@ Owner decision (2026-11-15): build P1, P4 and P2 of [design-gmail-js.md](design-
 - Chosen: the worker fills a slot of a registry keyed like the parse cache; it runs no code and reports nothing. Not chosen: `Arc` instead of `Rc` in the tree (atomic counts on the hot path of every clone); a parse on the download thread itself (it would hold one of the 6 download slots); a worker for module scripts and for scripts of unknown kind (the kind decides the cache key, a wrong guess parses for nothing).
 - The tree is handed over with `unsafe impl Send` for a wrapper (`Hand`). The condition is in `parse_ahead.rs` and has a test. Check the condition again when `ast.rs` gets a new `Rc` or a shared cache.
 
+## Navigation entry for each document (2026-11-16)
+
+- `performance.getEntriesByType('navigation')` gives one entry for the document. Its `name` is the document URL, its `startTime` is 0 and its `type` is `navigate`.
+- The entry holds the load times of the document: `domInteractive`, `domContentLoadedEventStart` and `End`, `domComplete`, `loadEventStart` and `End`. The loader stamps them. A phase not reached is 0.
+- Each read makes a new entry. `getEntries()` and `getEntriesByName(url)` return it too. A document without a URL has no entry.
+- Reason: techcrunch.com reads `[0].domContentLoadedEventStart`. The array was empty, so the page threw (bare issue #578).
+- Source: the spec, Navigation Timing Level 2 (`PerformanceNavigationTiming`). No file of another engine was read or copied.
+- Not built: `redirectCount`, `transferSize` and the other navigation members. `type` is `navigate` on reload and on back too.
 ## Type clears a number or email field first (2026-11-16)
 
 - Bug (#579): `type` on `<input type=number>` with value `3` and text `5` gave `35`.

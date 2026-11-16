@@ -547,6 +547,8 @@ pub struct Dom {
     /// The `mark` and `measure` entries of `performance` (`browser_perf.rs`).
     pub(crate) frames: crate::browser_frames::Frames,
     pub(crate) perf_entries: RefCell<Vec<crate::browser_perf::Entry>>,
+    /// The times of the load of this document, for its navigation entry (`browser_perf.rs`).
+    pub(crate) load_times: RefCell<crate::browser_perf::LoadTimes>,
     /// The prototype and constructor of each interface of `browser_html.rs`, once made.
     pub(crate) html_ifaces: RefCell<Vec<Option<(ObjId, ObjId)>>>,
     /// A global of `browser_html.rs` was read: new wrappers get their interface prototype.
@@ -1679,6 +1681,7 @@ impl Browser {
             screen_iface: Default::default(),
             frames: Default::default(),
             perf_entries: Default::default(),
+            load_times: Default::default(),
             html_ifaces: Default::default(),
             html_on: Default::default(),
             dialogs: Default::default(),
