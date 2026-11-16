@@ -306,8 +306,8 @@ pub struct Client {
     cache: Arc<Mutex<Cache>>,
     // Replies we may use again. The key is the scheme, the host, the port and the path.
     // It lives in memory only. `MAX_CACHE` is the size limit. A fork shares it.
-    roots: Arc<OnceLock<Result<TrustStore, String>>>,
-    // The trusted root certificates for https. `open` loads the OS bundle on the first https connection and keeps it.
+    roots: Arc<OnceLock<Result<(TrustStore, bool), String>>>,
+    // The trusted root certificates for https, and whether they come from the OS. `open` loads the OS bundle on the first https connection and keeps it.
     // The roots never come from a peer. A fork of the client shares them: the bundle is read once.
     pub(crate) workers: Arc<parallel::Workers>,
     // The worker threads of this client and its forks (see `parallel.rs`).
@@ -383,7 +383,7 @@ impl Client {
     /// The roots are the only trust anchors: there is no way to turn the checks off.
     pub fn with_roots(roots: TrustStore) -> Client {
         let client = Client::new();
-        let _ = client.roots.set(Ok(roots));
+        let _ = client.roots.set(Ok((roots, false)));
         client
     }
 
@@ -977,7 +977,7 @@ pub struct Streamed {
 /// Open a new connection to the server of this URL. The only place that makes a `Stream`.
 /// `https`: TCP, then a TLS 1.3 handshake with the host name checked against `roots` (loaded from the OS on first use).
 /// The handshake runs under the read and write time limits that `tcp::connect` sets.
-fn open(url: &Url, roots: &OnceLock<Result<TrustStore, String>>, proxy: Option<&'static Proxy>, rec: &mut Option<Box<trace::Rec>>) -> Result<Stream, Error> {
+fn open(url: &Url, roots: &OnceLock<Result<(TrustStore, bool), String>>, proxy: Option<&'static Proxy>, rec: &mut Option<Box<trace::Rec>>) -> Result<Stream, Error> {
     let mut clock = trace::Clock::new();
     let (host, port) = proxy.map_or((url.host.as_str(), url.port), |p| (p.host.as_str(), p.port));
     let addrs: Vec<SocketAddr> = dns::resolve(host).map_err(|e| cause::Phase("dns", e.into()))?.into_iter().map(|ip| SocketAddr::new(ip, port)).collect();
@@ -997,8 +997,13 @@ fn open(url: &Url, roots: &OnceLock<Result<TrustStore, String>>, proxy: Option<&
     if let Some(p) = proxy {
         p.tunnel(&mut tcp, url).map_err(|e| cause::Phase("proxy", e))?;
     }
-    let roots = roots.get_or_init(|| trust_store::load_system().map(|r| r.0).map_err(|e| e.to_string())).as_ref().map_err(|e| e.clone())?;
-    let tls = if h1_only() { client::connect(tcp, &url.host, roots)? } else { client::connect_h2(tcp, &url.host, roots)? };
+    let (roots, from_os) = roots.get_or_init(|| trust_store::load_system().map(|r| (r.0, true)).map_err(|e| e.to_string())).as_ref().map_err(|e| e.clone())?;
+    // OS roots: a root that the OS has not downloaded yet is fetched on a `NoIssuer` (see `client::connect_os`). Private roots: never.
+    let tls = match (*from_os, h1_only()) {
+        (true, h1) => client::connect_os(tcp, &url.host, roots, !h1)?,
+        (false, true) => client::connect(tcp, &url.host, roots)?,
+        (false, false) => client::connect_h2(tcp, &url.host, roots)?,
+    };
     if let Some(r) = rec {
         r.tls = clock.lap();
     }

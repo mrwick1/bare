@@ -36,10 +36,11 @@ use crate::key_schedule::{HandshakeSecret, Transcript};
 use crate::record::{self, Record, RecordLayer};
 use crate::sha256::sha256;
 use crate::sha384::sha384;
-use crate::trust_store::TrustStore;
+use crate::trust_store::{self, TrustStore};
 use crate::{ecc, random, rsa, verify, x25519, x509};
 use std::fmt;
 use std::io::{self, ErrorKind, Read, Write};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 #[path = "tls12.rs"]
@@ -262,6 +263,42 @@ impl ChainVerifier for Roots<'_> {
     }
 }
 
+/// `Roots` for the roots of the OS. A root can be missing because the OS has not downloaded it yet
+/// (Windows does that when an application asks for a chain that needs it). When the chain fails with
+/// `NoIssuer`, this asks the OS to fetch the root (`bare_os::trust::fetch_missing_root`), reads the
+/// OS roots again and verifies once more. The checks are still ours: the OS only fills its store.
+/// The normal path (the chain verifies) does no extra work. Other OSes cannot fetch, so they stop at the first answer.
+struct OsRoots<'a>(&'a TrustStore);
+
+/// The OS roots after a fetch. Later connections use them before they ask the OS again.
+static REFRESHED: Mutex<Option<Arc<TrustStore>>> = Mutex::new(None);
+
+impl ChainVerifier for OsRoots<'_> {
+    fn verify_chain(&self, chain: &[&[u8]], host: &str, now: i64) -> Result<(), String> {
+        let first = verify::verify_server_chain(chain, self.0, host, now).map(|_| ());
+        if !matches!(first, Err(verify::Error::NoIssuer)) {
+            return first.map_err(|e| e.to_string());
+        }
+        let cached = REFRESHED.lock().ok().and_then(|g| g.clone());
+        if let Some(r) = cached {
+            let second = verify::verify_server_chain(chain, &r, host, now).map(|_| ());
+            if !matches!(second, Err(verify::Error::NoIssuer)) {
+                return second.map_err(|e| e.to_string());
+            }
+        }
+        if bare_os::trust::fetch_missing_root(chain).is_err() {
+            return first.map_err(|e| e.to_string());
+        }
+        let Ok((fresh, _)) = trust_store::load_system() else { return first.map_err(|e| e.to_string()) };
+        let fresh = Arc::new(fresh);
+        let r = verify::verify_server_chain(chain, &fresh, host, now).map(|_| ()).map_err(|e| e.to_string());
+        if let Ok(mut g) = REFRESHED.lock() {
+            *g = Some(fresh);
+        }
+        r
+    }
+}
+
 /// Connect over `io`: TLS 1.3 handshake with `host`, the chain checked against `roots`
 /// (never against certificates the peer sends), the real clock and OS random.
 /// The caller must set socket read and write timeouts.
@@ -272,6 +309,13 @@ pub fn connect<T: Read + Write>(io: T, host: &str, roots: &TrustStore) -> Result
 /// Same as `connect`, and offers ALPN `h2` before `http/1.1`. Check `alpn_h2` after.
 pub fn connect_h2<T: Read + Write>(io: T, host: &str, roots: &TrustStore) -> Result<ClientStream<T>, Error> {
     connect_with(io, host, &Roots(roots), true)
+}
+
+/// Same as `connect` and `connect_h2` (`h2`: offer ALPN `h2`), for `roots` that came from the OS.
+/// A root that the OS has not downloaded yet is fetched once when the chain has no issuer (see `OsRoots`).
+/// Do not use it with private roots: after a fetch the chain is checked against the OS roots.
+pub fn connect_os<T: Read + Write>(io: T, host: &str, roots: &TrustStore, h2: bool) -> Result<ClientStream<T>, Error> {
+    connect_with(io, host, &OsRoots(roots), h2)
 }
 
 /// Connect over `io` with the real clock and OS random.
