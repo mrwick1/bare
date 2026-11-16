@@ -52,7 +52,8 @@ try:
             if mode != "off":
                 assert records and records[-1]["event"] == "collector_status"
             instructions = next(int(line.split(";")[0]) for line in perf.read_text().splitlines() if ";instructions:u;" in line)
-            results.append(dict(mode=mode, run=run, instructions=instructions,
+            report = json.loads((args.artifacts / (label + ".stdout")).read_text())
+            results.append(dict(browser_peak_rss_kib=max(r["peak_rss_kib"] for r in report["runs"]), mode=mode, run=run, instructions=instructions,
                                 peak_rss_kib=usage.ru_maxrss, records=len(records),
                                 drops=records[-1]["fields"]["dropped"] if records else 0))
 finally:
