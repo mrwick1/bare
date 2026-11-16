@@ -47,6 +47,7 @@ h5 { margin: 1.67em 0; font-size: .83em; font-weight: bold }
 h6 { margin: 2.33em 0; font-size: .67em; font-weight: bold }
 
 pre, xmp, listing { white-space: pre }
+pre, code, kbd, samp, tt, listing, plaintext, xmp { font-family: monospace }
 b, strong, th { font-weight: bold }
 i, em, cite, var, dfn, address { font-style: italic }
 th { text-align: center }
