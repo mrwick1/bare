@@ -2369,3 +2369,10 @@ Issue #577: `new Intl.Collator('en', { usage: 'search' })` raised `Unsupported`.
 - Why `compare` does not change: bare has no search collation data. The spec lets an engine use the sort rules for `search`.
 - Kept: the `sensitivity` option and every other option of the collator work as before.
 - Not changed: the `collation` option and the `co-emoji` and `co-eor` locale keywords still throw `Unsupported` that page code cannot catch.
+## A labelledby loop no longer overflows the stack (2026-11-16)
+
+Issue #580: `bare-mcp` aborted with a stack overflow when a snapshot named an element on the deepmind blog page. The page has an element inside the element that its `aria-labelledby` points at.
+- Cause: `Cx::alt` restarted its depth at 0 for each referenced element, so the limit of 32 never held in a loop of references.
+- Fix: a reference passes `depth + 1`. The referenced node itself is still shown when hidden (`in_ref`), as accname 1.2 says.
+- Parallel opens were not the cause. A snapshot of that page crashed the server alone.
+- Not done: a loop that fans out over many ids can still cost up to width^32 steps before the limit. No page has shown it.
