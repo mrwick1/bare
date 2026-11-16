@@ -182,3 +182,11 @@ Local fixtures exercise real scripts, concurrent sessions, headless paint, GC, s
 `tools/monitoring/accept.py` provides a repeatable three-mode local measurement.
 Final gate results and performance limitations are recorded in `docs/monitoring.md`.
 HTTP/2 first-frame timing remains a follow-up. Complete subsystem memory accounting remains out of scope.
+
+## Parent acceptance result
+
+The parent reviewed the final instrumentation and reran monitoring fixtures, foundation tests, and workspace compilation. All passed.
+The parent reproduced the meta-refresh and layout-overflow failures on original baseline `00e701b0`. Other suite failures remain unclassified.
+The parent measured disabled overhead against the original baseline. All three instruction budgets pass on the single local fixture.
+See `docs/monitoring.md` for exact commands, counts, artifacts and limitations.
+Implementation is complete for the documented coverage. Full workspace acceptance, GUI and non-Linux runtime validation remain open.

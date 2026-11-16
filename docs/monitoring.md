@@ -147,8 +147,7 @@ No off capture was created. No wall-time result is accepted under concurrent loa
 The queued serialized logger payload limit is 1 MiB; separate logger allocator usage was not measured.
 Raw artifacts remain at `/tmp/bare-monitor-accept-process-rss` on archMachine.
 
-The disabled <=1% budget is unverified. A verified baseline profiling binary was unavailable in the prepared worktree.
-The task prohibited another checkout. No baseline instruction-overhead pass is claimed.
+The continuation did not verify disabled overhead. The parent subsequently completed this comparison; see Parent verification below.
 
 ## Functional gate results for the continuation
 
@@ -213,5 +212,51 @@ The complete output is `/tmp/monitor-remaining-crates.log` on archMachine.
 Other gate outputs are `/tmp/monitor-foundation-final.log`, `/tmp/monitor-drive-final.log`, `/tmp/monitor-mcp-final.log`, `/tmp/monitor-bare-integration.log`, `/tmp/monitor-workspace-retry.log` and `/tmp/monitor-workspace-check.log`.
 
 Final status: partial acceptance. Monitoring-specific functional checks and the measured metrics/trace instruction budgets pass.
-The workspace gate, original-baseline disabled overhead, GUI execution and non-Linux runtime are not accepted.
+The workspace gate, GUI execution and non-Linux runtime are not accepted. The parent subsequently accepted the disabled-overhead budget on the local fixture.
 HTTP/2 first-frame timing, pre-header failure outcomes and complete subsystem memory attribution remain limitations.
+
+## Parent verification
+
+The parent reran the five driver/MCP monitoring fixture tests successfully.
+The parent reran all 25 OS, collector and process tests plus the thread-affinity doctest successfully.
+The parent reran `cargo check -j3 --workspace` successfully.
+
+On original baseline `00e701b089a9abe9a399bbe69150c5d772b5c4cc`, the parent ran:
+
+```
+cargo test -j3 -p bare --lib browser_session_tests::a_pending_meta_refresh_is_queued_work -- --exact
+```
+
+It failed at the same line 684 assertion. This failure predates the monitoring changes.
+This reproduction does not establish the causes of other workspace failures.
+
+The parent also ran this test on the original baseline:
+
+```
+cargo test -j3 -p bare-layout --lib keep::tests::a_kept_layout_equals_a_full_layout_after_random_changes -- --exact
+```
+
+It failed with the same multiplication overflow at `crates/layout/src/keep.rs:387`.
+The meta-refresh and layout-overflow failures both predate this change. Other reported failures remain unclassified.
+
+
+### Disabled-overhead comparison
+
+The parent built original baseline `00e701b089a9abe9a399bbe69150c5d772b5c4cc` in the existing main checkout. No source changes were made.
+Command: `CARGO_PROFILE_RELEASE_DEBUG=2 CARGO_PROFILE_RELEASE_STRIP=false cargo build -j3 --release -p bare-drive`.
+These settings match the candidate profiling optimization and symbol settings.
+The candidate binary contains code from `006ce7f7`; candidate HEAD `df2bbb87` adds documentation only.
+The parent used the same loopback fixture as the enabled-mode measurements.
+Baseline and candidate ran alternately, both off, three runs each, 20 journeys per process.
+Machine: archMachine. No wall-time claim is made under concurrent load.
+
+Baseline instructions: `[3238639776, 3238542109, 3238515880]`. Spread: 123896.
+Candidate instructions: `[3238628071, 3238586943, 3238466294]`. Spread: 161777.
+Mean instruction difference: -0.000169%. The disabled <=1% budget passes on this fixture.
+This near-zero difference does not establish a speed improvement or performance on other inputs.
+Baseline browser peak RSS: 16856, 16732, 16804 KiB. Candidate: 17128, 16920, 16980 KiB.
+No capture was created in either mode.
+Raw outputs, exact input, commit metadata, and binary SHA-256 hashes are in `/tmp/monitor-parent-baseline-20261116/results.json` and its sibling files.
+The comparison script is `/tmp/monitor-parent-compare-20261116.py`.
+All three provisional instruction budgets pass on the measured local fixture.
+The full workspace gate remains unaccepted. GUI, non-Linux execution, other workloads and separate logger allocator usage remain untested.
