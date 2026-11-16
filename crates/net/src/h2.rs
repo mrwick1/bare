@@ -387,7 +387,7 @@ impl Conn {
             break id;
         };
         // From here, dropping the `Body` cleans up the stream, on every way out.
-        let mut reply = Body { conn: self.clone(), id, declared: None, given: 0, max: max_body, start: Instant::now(), rec: None };
+        let mut reply = Body { conn: self.clone(), id, declared: None, given: 0, max: max_body, start: Instant::now(), rec: None, observe: None };
         let mut sent = 0;
         while sent < body.len() {
             let take = {
@@ -468,6 +468,7 @@ pub struct Body {
     pub start: Instant,
     /// The timing record of this request (only when `BARE_NET_TRACE` is set). It goes out when the body is dropped.
     pub rec: Option<Box<trace::Rec>>,
+    pub(crate) observe: Option<super::http::ObservedBody>,
 }
 
 impl Body {

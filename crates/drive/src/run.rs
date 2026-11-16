@@ -1022,6 +1022,10 @@ fn ready(p: &mut Page, at_end: bool) -> Look {
     let idle = p.idle();
     let fail = p.load_error().map(|why| fail("page", format!("the document did not load: {why}")));
     let stopped = p.stopped();
+    bare_observe::process::emit("driver", "readiness", || {
+        use bare_observe::{Field, Scalar::Bool};
+        [Field("idle", Bool(idle.is_ok())), Field("stopped", Bool(stopped.is_some())), Field("load_failed", Bool(fail.is_some())), Field("at_end", Bool(at_end))]
+    });
     let (status, url) = (p.http_status(), p.url().unwrap_or_default());
     let (mut title, mut text) = (String::new(), String::new());
     if idle.is_ok() || at_end || stopped.is_some() {

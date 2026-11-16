@@ -211,6 +211,14 @@ pub struct Handle {
     inner: Option<(Arc<Shared>, SyncSender<Vec<u8>>)>,
 }
 impl Handle {
+    pub fn accepts(&self, level: Level, category: &str) -> bool {
+        self.inner.as_ref().is_some_and(|(s, _)| !s.closed.load(Ordering::Relaxed)
+            && level <= s.config.level
+            && s.config.categories.as_ref().is_none_or(|c| c.contains(category)))
+    }
+    pub fn running(&self) -> bool {
+        self.inner.as_ref().is_some_and(|(s, _)| !s.closed.load(Ordering::Relaxed))
+    }
     pub fn status(&self) -> Status {
         self.inner
             .as_ref()

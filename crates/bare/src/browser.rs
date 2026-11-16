@@ -1771,6 +1771,7 @@ impl Browser {
         ids.document = self.observe_document;
         let _context = bare_observe::process::enter(ids);
         let r = self.it.run_script(source);
+        self.observe_stats();
         // `BARE_RECLAIM_STRESS=1 cargo test`: collect and reclaim after each script, freed nodes poisoned (`browser_reclaim.rs`).
         #[cfg(test)]
         if self.dom.reclaim.each() {
@@ -1788,12 +1789,18 @@ impl Browser {
         let mut ids = bare_observe::process::context();
         ids.document = self.observe_document;
         let _context = bare_observe::process::enter(ids);
+        let result = self.it.drain_microtasks();
+        self.observe_stats();
+        result
+    }
+
+    fn observe_stats(&self) {
         bare_observe::process::emit("engine", "browser_stats", || {
             use bare_observe::{Field, Scalar::U64};
             let s = self.stats();
-            [Field("nodes", U64(s.nodes as u64)), Field("wrappers", U64(s.wrappers as u64)), Field("listeners", U64(s.listeners as u64)), Field("events", U64(s.events as u64))]
+            let h = self.it.heap.stats();
+            [Field("heap_accounted_bytes", U64(h.bytes as u64)), Field("live_objects", U64(h.live_objects as u64)), Field("collections", U64(h.collections)), Field("heap_slab_capacity_bytes", U64(h.slab_capacity_bytes as u64)), Field("text_bytes", U64(s.text_bytes as u64)), Field("attr_slots", U64(s.attr_slots as u64)), Field("nodes", U64(s.nodes as u64)), Field("wrappers", U64(s.wrappers as u64)), Field("listeners", U64(s.listeners as u64)), Field("events", U64(s.events as u64))]
         });
-        self.it.drain_microtasks()
     }
 
     /// Collect the heap. Attached wrappers and their listeners live. `extra` are values the caller still holds.
@@ -1806,6 +1813,7 @@ impl Browser {
         self.dom.reclaim(true);
         let native = self.dom.doc.try_borrow().map_or(0, |d| d.arena_bytes());
         self.it.set_external_live(native);
+        self.observe_stats();
         Ok(c)
     }
 

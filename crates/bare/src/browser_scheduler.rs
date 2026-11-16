@@ -1400,7 +1400,10 @@ impl Browser {
             if counted {
                 ran += 1;
             }
-            dom.run_task(&mut self.it, run)?;
+            {
+                let _task = bare_observe::process::span("scheduler", "task");
+                dom.run_task(&mut self.it, run)?;
+            }
             // No script runs and no host call is on the stack: the nodes of dead trees can go back to the arena.
             dom.reclaim(false);
             // On the benchmark clock a task takes time: more tasks become due, and a reply that was on its way arrives.
@@ -1413,6 +1416,13 @@ impl Browser {
         {
             dom.move_clock(t);
         }
+        bare_observe::process::emit("scheduler", "pump_result", || {
+            use bare_observe::{Field, Scalar};
+            let s = dom.sched.borrow();
+            [Field("ran", Scalar::U64(ran as u64)), Field("capped", Scalar::Bool(capped)),
+             Field("tasks", Scalar::U64(s.tasks.len() as u64)), Field("messages", Scalar::U64(s.queued as u64)),
+             Field("message_bytes", Scalar::U64(s.queued_bytes as u64))]
+        });
         Ok(Pump { ran, capped, next_due: dom.next_due() })
     }
 }
