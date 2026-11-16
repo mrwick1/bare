@@ -469,6 +469,11 @@ impl Session {
         self.host.run(|p| p.url()).ok().flatten()
     }
 
+    /// Why the last document did not load, if it did not.
+    pub fn load_error(&mut self) -> Option<String> {
+        self.host.run(|p| p.load_error().map(str::to_string)).ok().flatten()
+    }
+
     /// A copy of the storage of the open page (it holds live credentials). `None` with no page.
     pub fn export_state(&mut self) -> Option<StorageState> {
         self.host.run(|p| p.storage().map(|s| s.export())).ok().flatten()

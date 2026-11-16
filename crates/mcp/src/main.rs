@@ -406,7 +406,7 @@ impl Server {
         let mut names: Vec<&String> = self.live.keys().collect();
         names.sort();
         let names: Vec<String> = names.into_iter().cloned().collect();
-        let list = names.into_iter().map(|n| { let u = self.live.get_mut(&n).and_then(|l| l.session.url()).unwrap_or_default(); format!("{n}: {}", bare_drive::run::safe_url(&u)) }).collect::<Vec<_>>().join("\n");
+        let list = names.into_iter().map(|n| { let l = self.live.get_mut(&n).unwrap(); match l.session.url() { Some(u) => format!("{n}: {}", bare_drive::run::safe_url(&u)), None => match l.session.load_error() { Some(why) => format!("{n}: (no document: the document did not load: {why})"), None => format!("{n}: (no document)") } } }).collect::<Vec<_>>().join("\n");
         if late.is_empty() { list } else { format!("{}\n{list}", &late[1..]) }
     }
 

@@ -428,6 +428,13 @@ enum Hop {
     Open(Response, bnet::Body),
 }
 
+/// The text of a failed load: `network error` and the kind of the cause (`dns`, `connect refused`, `read timeout`...). Not the error text:
+/// it may name a host or a URL.
+fn cause(e: &(dyn std::error::Error + 'static)) -> String {
+    let d = bare_net::cause::describe(e);
+    format!("network error: {}", d.split(':').next().unwrap_or("io"))
+}
+
 /// One request of a load that may be a download. A response that is one goes on to its own threads (`downloads::Start`); any other is read
 /// whole, as `send_once` does. The client may take a reply bigger than `MAX_REPLY` (a download); a document is capped by `max` here.
 /// `open`: an HTML reply that the caller can use as it is read comes back unread.
@@ -436,7 +443,7 @@ fn fetch_hop(client: &mut Client, req: &Request, max: usize, g: Option<&Grab>, o
     if g.is_some() {
         big.allow_big();
     }
-    let Streamed { response, mut body } = big.send_stream_once(req).map_err(|_| "network error".to_string())?;
+    let Streamed { response, mut body } = big.send_stream_once(req).map_err(|e| cause(&*e))?;
     let mut r = Arc::try_unwrap(response).map_err(|_| "network error".to_string())?;
     let (ct, cd) = (r.header("content-type"), r.header("content-disposition"));
     if let Some(g) = g.filter(|g| (200..300).contains(&r.status) && (g.force || downloads::is_download(ct, cd))) {
@@ -465,7 +472,7 @@ fn fetch_hop(client: &mut Client, req: &Request, max: usize, g: Option<&Grab>, o
         return Ok(Hop::Open(r, body));
     }
     let mut bytes = Vec::new();
-    (&mut body).take((max as u64).saturating_add(1)).read_to_end(&mut bytes).map_err(|_| "network error".to_string())?;
+    (&mut body).take((max as u64).saturating_add(1)).read_to_end(&mut bytes).map_err(|e| cause(&e))?;
     if bytes.len() > max {
         return Err("network error".into());
     }
@@ -484,7 +491,7 @@ fn stream_body(mut body: bnet::Body, ct: Option<&str>, max: usize, feed: &Arc<Fe
         if Arc::strong_count(feed) == 1 {
             return Err("the document was left".into());
         }
-        let n = body.read(&mut buf).map_err(|_| "network error".to_string())?;
+        let n = body.read(&mut buf).map_err(|e| cause(&e))?;
         let text = if n == 0 { decoder.finish() } else { decoder.feed(&buf[..n]) };
         total += text.len();
         if total > max {
