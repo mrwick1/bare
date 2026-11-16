@@ -34,20 +34,20 @@ Exit status: 0 when all requested tasks pass, 1 when a task fails, 2 for bad usa
 
 ## Tasks
 
-Each task has a prompt, a fixture page set, an independent grader and a scripted sequence (`tools/agent-eval/tasks.py`). The task corpus version is `tasks.VERSION` (now 1). A change to a prompt, fixture or grader must raise it.
+Each task has a prompt, a fixture page set, an independent grader and a scripted sequence (`tools/agent-eval/tasks.py`). The task corpus version is `tasks.VERSION` (now 2). A change to a prompt, fixture or grader must raise it.
 
 | Task | What a pass needs (read from the fixture record or a saved file) |
 |---|---|
-| `login_restore` | Exactly 1 successful login. At least 2 authenticated `/account` loads with the same session. A second login is a repeat. |
+| `login_restore` | Exactly 1 successful login and at least 2 authenticated `/account` loads with the same session. The transcript must show repeated `ensure_session` for one saved name or `save_state` followed by `open state=name`. A second login is a repeat. |
 | `search_extract` | The answer holds the SKU and the price of the target item and no SKU of another item. The item page was opened. |
 | `duplicate_button` | Of 5 identical Approve buttons, only the target was approved, once. |
 | `overlay_delayed` | The page dismissed its overlay. One submit with the exact note. The delayed result was delivered. |
 | `nav_stale_ref` | Steps 1, 2, 3 loaded in order. The answer holds the completion code. No step skipped. Link order changes on each load. |
-| `two_sessions` | Two sessions, two users, one note each, each posted by the right user. |
+| `two_sessions` | Two named sessions remain open at task completion, with two users and one note each posted by the right user. Session lifecycle requests must succeed in the transcript. |
 | `upload` | One upload. The received bytes equal the seeded bytes (SHA-256 and length) and the name is kept. |
 | `download` | One file in the downloads folder. Its bytes equal the seeded bytes (SHA-256). |
 
-A grader never reads a tool receipt. A receipt such as `ok` or a page that says "Report accepted" does not pass a task. The unit tests prove this for each task: a wrong button, a second submit, a changed upload byte and an `ok`-only server all fail. The `ok`-only server is `tests/fake_mcp.py`; the smoke command against it completes 0 of 8 tasks.
+An outcome grader never reads receipt text. Lifecycle checks also use correlated successful tool calls, so repeated reads cannot prove a session restore. A task needs a nonempty tool transcript. A receipt such as `ok` or a page that says "Report accepted" does not pass a task. The unit tests prove this for each task: a wrong button, a second submit, a changed upload byte and an `ok`-only server all fail. The `ok`-only server is `tests/fake_mcp.py`; the smoke command against it completes 0 of 8 tasks.
 
 `search_extract` and `nav_stale_ref` compare the agent's answer text with data made from the seed. They also need the page to have been opened. An answer that holds every SKU fails.
 
@@ -68,7 +68,7 @@ The submit endpoint of `/report` has its own counter. A task fails when the coun
 - `final_answer`: `text`. A runner or an agent harness writes it for extraction tasks.
 - `note`: a runner event such as a deadline.
 
-The collector matches a reply to its request by `id`, not by order, so late or reordered replies stay correct. `validate()` reports a request with no response, a second or unknown response, a missing field, a wrong schema version and a time that goes back. A transcript with a problem fails the task through the `transcript_valid` check.
+The collector matches a reply to its request by `id`, not by order, so late or reordered replies stay correct. `validate()` reports a request with no response, a second or unknown response, a missing field, a wrong schema version and a time that goes back. A transcript with a problem fails the task through the `transcript_valid` check. Request and response IDs must be strings or integers; container IDs are reported as invalid instead of crashing validation.
 
 Redaction: passwords, session ids, any key that names a credential, and the `file` and `secrets_file` arguments are replaced. Do not pass `save_state` with a `file`: it holds live credentials. The data in a run is synthetic.
 
@@ -85,6 +85,10 @@ Redaction: passwords, session ids, any key that names a credential, and the `fil
 - An external run: CPU and RSS are `null` ("the runner of the agent owns the process"). Supply them from outside.
 
 ## Observed results
+
+### Original corpus version 1
+
+The following measurements describe the original version 1 corpus. They are historical results, not measurements of the revised lifecycle checks.
 
 Frozen input. Same inputs for every run:
 
@@ -114,6 +118,12 @@ What this shows: the fixtures, the graders and the stdio protocol path work on t
 - It is **not** a model-agent result. A scripted sequence knows the page. It does not show that an agent finds the way.
 - It is **not** a performance claim. There is no before and after. The instruction counts are a baseline for later runs of the same scripts only.
 - No browser gap was found, so no task is marked unsupported here. A task the browser cannot do stays in the corpus as a scored failure.
+
+### Reviewed corpus version 2
+
+The parent review added five regression tests. Before the correction, three lifecycle checks failed their regressions and a container request ID crashed validation. Version 2 requires a nonempty transcript, restore-specific requests, and both named sessions to remain open. The two-session smoke sequence leaves both pages open until process cleanup.
+
+Validation after correction: 62 Python tests passed. All eight scripted tasks passed in each of three runs, with zero duplicate actions. The runs used the same checkout-local release binary from `00e701b089a9abe9a399bbe69150c5d772b5c4cc`, seed 1 and viewport 1280x800. No instruction counter was requested for these runs. They establish task correctness on this binary, not a performance improvement or real-agent success. The two-session script now makes 12 tool calls rather than the version 1 count of 14.
 
 ## Limits and unsupported features
 

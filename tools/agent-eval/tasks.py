@@ -12,7 +12,7 @@ import re
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-VERSION = 1  # the version of the task corpus: a change of a prompt, a fixture or a grader raises it
+VERSION = 2  # the version of the task corpus: a change of a prompt, a fixture or a grader raises it
 
 
 @dataclass
@@ -286,8 +286,7 @@ def _script_two(c, call):
         call("act", session=who, op="click", loc='role=button name="Sign in"', snapshot=False)
         call("act", session=who, op="type", loc='label="Note"', text=f"{who.title()} note {s}", snapshot=False)
         call("act", session=who, op="click", loc='role=button name="Post note"', snapshot=False)
-    call("close", session="alice")
-    call("close", session="bob")
+    # Leave both sessions open for grading; EOF performs cleanup after the task.
 
 
 def _script_upload(c, call):

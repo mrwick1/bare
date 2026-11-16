@@ -102,6 +102,33 @@ def grade(task, ctx, events, problems):
     if task.needs_answer and not (ctx.answer or "").strip():
         checks.append(tk.check("final_answer_present", False, "this task needs the agent's final answer in the transcript"))
     checks += task.grade(ctx)
+    calls = [e for e in events if e.get("type") == "request" and e.get("method") == "tools/call"]
+    checks.append(tk.check("tool_calls_present", bool(calls), "task completion needs a nonempty tool transcript"))
+    successful = {e.get("id") for e in events if e.get("type") == "response" and not e.get("is_error") and tr.valid_id(e.get("id"))}
+    live, saved, ensured, restored = set(), set(), set(), False
+    for e in calls:
+        if not tr.valid_id(e.get("id")) or e["id"] not in successful:
+            continue
+        tool, session, args = e.get("tool"), e.get("session", "main"), e.get("arguments", {})
+        if not isinstance(args, dict):
+            continue
+        if tool == "ensure_session":
+            name = args.get("name")
+            if isinstance(name, str):
+                restored |= (session, name) in ensured
+                ensured.add((session, name))
+            live.add(session)
+        elif tool == "save_state" and isinstance(args.get("name"), str):
+            saved.add(args["name"])
+        elif tool == "open":
+            restored |= isinstance(args.get("state"), str) and args["state"] in saved
+            live.add(session)
+        elif tool == "close":
+            live.discard(session)
+    if task.id == "login_restore":
+        checks.append(tk.check("session_restore_requested", restored, "need repeated ensure_session for one saved name or save_state followed by open state=name"))
+    if task.id == "two_sessions":
+        checks.append(tk.check("independent_live_sessions", set(task.sessions) <= live, "both named sessions must remain open at task completion"))
     dups = task.duplicates(ctx)
     for k, n in dups.items():
         checks.append(tk.check(f"no_repeat_{k}", n == 0, f"{n} repeated {k} action(s)"))

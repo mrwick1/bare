@@ -53,3 +53,7 @@ Deviations from the plan, with the reason:
 - Python unit tests use a fake MCP server (`tests/fake_mcp.py`) for the collector (out-of-order replies, deadline) and for the check that a server that only says `ok` completes no task.
 - No unsupported browser feature was found. The `nav_stale_ref` script includes one deliberate stale-ref call; the browser refused it as expected.
 - No integration hunks: this branch changes no file outside its scope. It does not depend on PR #614. The scripts use `act` with `snapshot:false` and read no receipt field, so they should not depend on #614 fields. This was not tested against #614.
+
+## Parent review corrections
+
+The initial 57 tests passed on rerun. Five added regressions exposed acceptance of empty task transcripts, repeated reads as restoration evidence, sequential single-session use as two-session evidence, and a crash on container request IDs. The scoring correction raises the corpus to version 2. All 62 tests pass. Three scripted runs on the frozen base browser completed all eight tasks with no duplicate actions. No real-agent run, sibling-branch integration or production Rust checks were performed during this review.

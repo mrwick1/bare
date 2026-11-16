@@ -62,7 +62,7 @@ class Cli(unittest.TestCase):
         self.assertFalse(one["completed"])
         self.assertEqual(one["tokens"]["available"], False)
         man = json.load(open(self.p("o", "upload", "manifest.json")))
-        self.assertEqual((man["runner"]["kind"], man["task"]["version"], man["viewport"], man["fixture"]["seed"]), ("scripted", 1, {"width": 1280, "height": 800}, 1))
+        self.assertEqual((man["runner"]["kind"], man["task"]["version"], man["viewport"], man["fixture"]["seed"]), ("scripted", 2, {"width": 1280, "height": 800}, 1))
         self.assertEqual(len(man["browser"]["binary_sha256"]), 64)
 
     def test_smoke_refuses_a_used_output_folder_and_a_bad_binary(self):

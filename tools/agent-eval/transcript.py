@@ -27,6 +27,10 @@ EXCLUDED_KEYS = {"file", "secrets_file"}  # paths of files that hold live creden
 EVENT_TYPES = ("request", "response", "final_answer", "note")
 
 
+def valid_id(value):
+    return isinstance(value, (str, int)) and not isinstance(value, bool)
+
+
 class Redactor:
     """Replace secrets in text and values. `source` is a function that gives the secret strings known now (it can grow while a run goes on)."""
 
@@ -101,7 +105,7 @@ class McpClient:
                 self.rec.add("note", text="unparsable output line", bytes=len(raw))
                 continue
             with self.lock:
-                slot = self.pending.pop(msg.get("id"), None)
+                slot = self.pending.pop(msg.get("id"), None) if valid_id(msg.get("id")) else None
             res = msg.get("result") or {}
             text = "".join(c.get("text", "") for c in res.get("content", []) if isinstance(c, dict))
             ev = {"id": msg.get("id"), "bytes": len(raw), "is_error": bool(res.get("isError")) or "error" in msg}
@@ -246,6 +250,9 @@ def validate(events):
             if last_t is not None and t < last_t:
                 problems.append(f"{at}: t goes back ({t} < {last_t})")
             last_t = t
+        if typ in ("request", "response") and not valid_id(ev.get("id")):
+            problems.append(f"{at}: id must be a string or integer")
+            continue
         if typ == "request":
             if "id" not in ev or "method" not in ev or not isinstance(ev.get("bytes"), int):
                 problems.append(f"{at}: request needs id, method and bytes")
@@ -279,11 +286,11 @@ def metrics(events):
     by_tool = {}
     for e in calls:
         by_tool[e.get("tool")] = by_tool.get(e.get("tool"), 0) + 1
-    ids = {e["id"] for e in calls if "id" in e}
+    ids = {e["id"] for e in calls if valid_id(e.get("id"))}
     return {
         "tool_calls": len(calls),
         "tool_calls_by_tool": by_tool,
-        "tool_errors": sum(1 for e in resps if e.get("is_error") and e.get("id") in ids),
+        "tool_errors": sum(1 for e in resps if e.get("is_error") and valid_id(e.get("id")) and e.get("id") in ids),
         "sessions": sorted({e.get("session") for e in calls if e.get("session")}),
         "request_bytes": sum(e.get("bytes", 0) for e in reqs),
         "response_bytes": sum(e.get("bytes", 0) for e in resps),
