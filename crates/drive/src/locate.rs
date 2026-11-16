@@ -399,11 +399,13 @@ impl<'a> Cx<'a> {
 
     /// The text alternative of a node (accname 1.2, step 2), without the parts that the controls here do not use.
     fn alt(&self, n: NodeId, in_ref: bool, depth: u8) -> String {
-        if depth > 0 && !self.rendered(n) || depth > 32 {
+        // A referenced element is shown even when hidden, so `in_ref` skips the check for that one node.
+        if depth > 0 && !in_ref && !self.rendered(n) || depth > 32 {
             return String::new();
         }
         if !in_ref && let Some(ids) = self.attr(n, "aria-labelledby") {
-            let text: Vec<String> = ids.split_whitespace().filter_map(|id| self.by_id(id)).map(|r| self.alt(r, true, 0)).collect();
+            // The reference carries the depth on: a loop of references (an element inside the element that labels it) ends at the limit (#580).
+            let text: Vec<String> = ids.split_whitespace().filter_map(|id| self.by_id(id)).map(|r| self.alt(r, true, depth + 1)).collect();
             if text.iter().any(|t| !t.trim().is_empty()) {
                 return text.join(" ");
             }
