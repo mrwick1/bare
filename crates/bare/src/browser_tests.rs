@@ -319,6 +319,20 @@ fn listener_options_removal_and_mutation_during_dispatch() {
 }
 
 #[test]
+fn legacy_event_members_srcelement_returnvalue_cancelbubble() {
+    big(|| {
+        let mut b = browser();
+        log_setup(&mut b);
+        js(&mut b, "var a = document.getElementById('a'); var s = document.getElementById('s'); var seen = [];
+            s.addEventListener('t', function (e) { seen.push(e.srcElement === s, e.returnValue, e.cancelBubble); e.returnValue = false; seen.push(e.defaultPrevented, e.returnValue); e.cancelBubble = true; seen.push(e.cancelBubble) });
+            a.addEventListener('t', function () { seen.push('reached') });");
+        assert_eq!(js(&mut b, "s.dispatchEvent(new Event('t', { bubbles: true, cancelable: true })); seen.join()"), "true,true,false,true,false,true");
+        // returnValue = true does not undo a cancel, and a non-cancelable event stays uncanceled
+        assert_eq!(js(&mut b, "var e = new Event('u', { cancelable: true }); e.preventDefault(); e.returnValue = true; var n = new Event('n'); n.returnValue = false; [e.returnValue, e.defaultPrevented, n.returnValue].join()"), "false,true,true");
+    });
+}
+
+#[test]
 fn stop_propagation_prevent_default_and_passive() {
     big(|| {
         let mut b = browser();

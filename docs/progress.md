@@ -12726,3 +12726,11 @@ The owner grants a cost exception for 4 rows: `builtins_load replace 1` (+0.99%)
 - `getComputedStyle(el).transform` and `webkitTransform` were `undefined`, because `transform` is not in the property list of the style block. The computed object now has its own read-only accessors. The value is `none`, or `matrix(1, 0, 0, 1, tx, ty)` for a translate in px. Left: the engine keeps only the move, so rotate and scale read as `none`, `translate(0, 0)` reads as `none` (Chrome gives a matrix), and a percent move is gated (it needs the box). `el.style.transform` is still not supported. #558 is `Refs`, not closed.
 - `innerText` over a `select` threw. Now each `option` of the select (also in an `optgroup`) is one line, as in Chrome. Options have `display: none` in the UA sheet, so the walk reads them from the select. A hidden select gives nothing.
 - Chrome 2026-11 (headless) gave the expected values in the tests. Not tested: `option` text with nested elements or `white-space` collapse, a `select` inside `display: contents`.
+## Issue #568: legacy `Event` members (partial, 2026-11-16)
+
+Gmail's Labels menu click sends no mutation and the page posts to `/jserror`. Live Gmail was not tested. Two parts were checked with local fixtures.
+
+- Reporting: an uncaught listener, timer or microtask exception already reaches `console` and `diagnose` (`Page::take_logs`, level `exception`). An exception that the page catches and reports itself (Closure's reporter posts to `/jserror`) is not uncaught. Chrome shows it nowhere either, so there is no bare fault to fix.
+- Click path: a click on a `menuitemcheckbox` fires the Chrome event order (pointer, mouse, focus, click). `Event.srcElement`, `Event.returnValue` and `Event.cancelBubble` were missing. They are now defined (`browser_events.rs`). Still missing and not fixed: `which`, `layerX`, `layerY`, `fromElement`, `toElement`, `sourceCapabilities` on mouse events and `initMouseEvent`.
+- The cause of `oEd: Xqd` is still open. It is not proven that these members cause it.
+- Test: `legacy_event_members_srcelement_returnvalue_cancelbubble`. `cargo test -p bare --lib`: 1283 passed, 2 failed. `one_image_data_holds_at_most_64_mib` fails on an overflow in `browser_canvas.rs:84` (not touched here). `a_pending_meta_refresh_is_queued_work` failed in the full run and passed alone.
