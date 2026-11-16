@@ -2662,6 +2662,7 @@ impl Heap {
     /// Mark everything reachable from `roots`, free the rest, and return what was freed.
     /// All handles not reached become stale. Errors (stale root) leave the heap unchanged.
     pub fn collect(&mut self, roots: &[Value]) -> R<Collected> {
+        let _observe = bare_observe::process::span("gc", "collect");
         for &r in roots {
             self.check_value(r)?;
         }

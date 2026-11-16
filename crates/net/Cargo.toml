@@ -6,6 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+bare-observe = { path = "../observe" }
 bare-os = { path = "../os" }
 bare-url = { path = "../url" }
 bare-tls = { path = "../tls" }

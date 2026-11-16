@@ -53,6 +53,7 @@ struct Server {
 }
 
 fn main() {
+    let _monitor = bare_observe::process::Process::from_env(false).unwrap_or_else(|e| { eprintln!("{e}"); std::process::exit(2) });
     let mut workspace = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {

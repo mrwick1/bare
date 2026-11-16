@@ -1371,6 +1371,10 @@ impl Browser {
     }
 
     fn pump_inner(&mut self, dom: &Dom, max: usize, target: Option<f64>) -> R<Pump> {
+        let mut ids = bare_observe::process::context();
+        ids.document = self.observe_document;
+        let _context = bare_observe::process::enter(ids);
+        let _observe = bare_observe::process::span("scheduler", "pump");
         // An empty queue can still carry a sticky failed-job error.
         self.it.host_scope(|it| it.host_checkpoint().map(|_| ()))?;
         let mut ran = 0usize;

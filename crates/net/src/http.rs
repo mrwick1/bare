@@ -485,6 +485,10 @@ impl Client {
 
     /// Send one checked request without cache or redirects. The caller reads the body and checks each redirect.
     pub fn send_stream_once(&mut self, req: &Request) -> Result<Streamed, Error> {
+        let mut ids = bare_observe::process::context();
+        if ids.request.is_none() { ids.request = bare_observe::process::next_id(); }
+        let _context = bare_observe::process::enter(ids);
+        let _observe = bare_observe::process::span("network", "request_once");
         check_request(req)?;
         let plan = Plan { cookies: req.cookies, method: req.method, headers: Cow::Borrowed(req.headers), body: req.body, ident: self.identity.clone() };
         let (response, body) = self.start(req.url, &plan, "")?;
@@ -525,6 +529,10 @@ impl Client {
 
     /// Like `send`, with a body that reads from the connection. See `get_stream`.
     pub fn send_stream(&mut self, req: &Request) -> Result<Streamed, Error> {
+        let mut ids = bare_observe::process::context();
+        ids.request = bare_observe::process::next_id();
+        let _context = bare_observe::process::enter(ids);
+        let _observe = bare_observe::process::span("network", "request_head");
         let (response, body) = self.follow(req, true)?;
         Ok(Streamed { response, body: body.expect("a streamed hop has a body") })
     }
@@ -978,6 +986,7 @@ pub struct Streamed {
 /// `https`: TCP, then a TLS 1.3 handshake with the host name checked against `roots` (loaded from the OS on first use).
 /// The handshake runs under the read and write time limits that `tcp::connect` sets.
 fn open(url: &Url, roots: &OnceLock<Result<(TrustStore, bool), String>>, proxy: Option<&'static Proxy>, rec: &mut Option<Box<trace::Rec>>) -> Result<Stream, Error> {
+    let dns_observe = bare_observe::process::span("network", "dns");
     let mut clock = trace::Clock::new();
     let (host, port) = proxy.map_or((url.host.as_str(), url.port), |p| (p.host.as_str(), p.port));
     let addrs: Vec<SocketAddr> = dns::resolve(host).map_err(|e| cause::Phase("dns", e.into()))?.into_iter().map(|ip| SocketAddr::new(ip, port)).collect();
@@ -986,11 +995,14 @@ fn open(url: &Url, roots: &OnceLock<Result<(TrustStore, bool), String>>, proxy: 
     }
     // Our own DNS lookup (see `dns.rs`) gives IP addresses. Add the port to each one.
     // JS: `ips.map(ip => ({ ip, port }))`.
+    drop(dns_observe);
+    let tcp_observe = bare_observe::process::span("network", "tcp");
     let mut tcp = tcp::connect(&addrs).map_err(|e| cause::Phase("connect", e.into()))?;
     // Open a connection, with time limits (see `tcp.rs`).
     if let Some(r) = rec {
         r.tcp = clock.lap();
     }
+    drop(tcp_observe);
     if url.scheme == Scheme::Http {
         return Ok(match proxy { Some(p) => Stream::ProxyTcp(Box::new((tcp, p))), None => Stream::Tcp(tcp) });
     }
@@ -999,6 +1011,7 @@ fn open(url: &Url, roots: &OnceLock<Result<(TrustStore, bool), String>>, proxy: 
     }
     let (roots, from_os) = roots.get_or_init(|| trust_store::load_system().map(|r| (r.0, true)).map_err(|e| e.to_string())).as_ref().map_err(|e| e.clone())?;
     // OS roots: a root that the OS has not downloaded yet is fetched on a `NoIssuer` (see `client::connect_os`). Private roots: never.
+    let _tls_observe = bare_observe::process::span("network", "tls");
     let tls = match (*from_os, h1_only()) {
         (true, h1) => client::connect_os(tcp, &url.host, roots, !h1)?,
         (false, true) => client::connect(tcp, &url.host, roots)?,

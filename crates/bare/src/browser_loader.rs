@@ -1685,6 +1685,7 @@ impl Run<'_> {
     }
 
     fn go(&mut self) -> Stop {
+        bare_observe::process::emit("loader", "go", || []);
         bare_net::trace::mark(|| "go".into(), 0);
         match self.go_inner() {
             Ok(()) => unreachable!("go_inner ends with a stop"),
@@ -1790,6 +1791,7 @@ impl Run<'_> {
         if self.step == nb + nd + 2 {
             self.step += 1;
             let root = self.dom.doc.borrow().root();
+            bare_observe::process::emit("loader", "DOMContentLoaded", || []);
             bare_net::trace::mark(|| "DOMContentLoaded".into(), 0);
             self.dom.load_times.borrow_mut().dcl_start = self.dom.now_ms();
             self.fire(EvTarget::Node(root), "DOMContentLoaded", true)?;
@@ -1809,6 +1811,7 @@ impl Run<'_> {
         if let Ok(v) = self.b.run_script(&js)
             && matches!(v, bare_js::value::Value::Bool(true)) {
             self.probed = true;
+            bare_observe::process::emit("loader", "probe", || []);
             bare_net::trace::mark(|| "probe".into(), 0);
         }
     }
@@ -1832,6 +1835,7 @@ impl Run<'_> {
                 self.loaded = true;
                 self.set_ready(2)?;
                 self.dom.load_times.borrow_mut().complete = self.dom.now_ms();
+                bare_observe::process::emit("loader", "load", || []);
                 bare_net::trace::mark(|| "load".into(), 0);
                 self.dom.load_times.borrow_mut().load_start = self.dom.now_ms();
                 self.fire(EvTarget::Window, "load", false)?;
@@ -1925,6 +1929,7 @@ impl Run<'_> {
             // for the next task of any kind, so a recurring timer that the rule skips still runs on time on the way.
             let now = self.b.now();
             if !self.b.blocks_settle(now + self.lim.quiet.as_secs_f64() * 1000.0) {
+                bare_observe::process::emit("loader", "settled", || []);
                 bare_net::trace::mark(|| "settled".into(), 0);
                 return Err(Stop::Settled);
             }

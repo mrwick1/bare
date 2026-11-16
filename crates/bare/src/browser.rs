@@ -1608,6 +1608,7 @@ pub(crate) static DEFS: &[Def] = &[
 
 /// One realm with a DOM. This is the type tests and tools use.
 pub struct Browser {
+    pub(crate) observe_document: Option<u64>,
     pub it: Interp<'static>,
     pub(crate) dom: Rc<Dom>,
 }
@@ -1730,7 +1731,7 @@ impl Browser {
                 dom.reclaim.set_always(true);
             }
         }
-        Ok(Browser { it, dom })
+        Ok(Browser { it, dom, observe_document: bare_observe::process::next_id() })
     }
 
     /// The native document. Do not hold a mutable borrow across a call into the browser.
@@ -1766,6 +1767,9 @@ impl Browser {
     }
 
     pub fn run_script(&mut self, source: &str) -> R<Value> {
+        let mut ids = bare_observe::process::context();
+        ids.document = self.observe_document;
+        let _context = bare_observe::process::enter(ids);
         let r = self.it.run_script(source);
         // `BARE_RECLAIM_STRESS=1 cargo test`: collect and reclaim after each script, freed nodes poisoned (`browser_reclaim.rs`).
         #[cfg(test)]
@@ -1781,11 +1785,22 @@ impl Browser {
 
     /// The microtask checkpoint (Promise jobs).
     pub fn drain(&mut self) -> R<usize> {
+        let mut ids = bare_observe::process::context();
+        ids.document = self.observe_document;
+        let _context = bare_observe::process::enter(ids);
+        bare_observe::process::emit("engine", "browser_stats", || {
+            use bare_observe::{Field, Scalar::U64};
+            let s = self.stats();
+            [Field("nodes", U64(s.nodes as u64)), Field("wrappers", U64(s.wrappers as u64)), Field("listeners", U64(s.listeners as u64)), Field("events", U64(s.events as u64))]
+        });
         self.it.drain_microtasks()
     }
 
     /// Collect the heap. Attached wrappers and their listeners live. `extra` are values the caller still holds.
     pub fn collect(&mut self, extra: &[Value]) -> R<bare_js::heap::Collected> {
+        let mut ids = bare_observe::process::context();
+        ids.document = self.observe_document;
+        let _context = bare_observe::process::enter(ids);
         let c = self.it.collect(extra)?;
         // The caller is at a safe point (no script runs, no host call is on the stack): the trees that lost their wrappers can go.
         self.dom.reclaim(true);

@@ -27,6 +27,13 @@ use bare::resources;
 // Now we can write `Url` instead of `bare_url::Url`.
 
 fn main() {
+    let monitor = bare_observe::process::Process::from_env(false).unwrap_or_else(|e| { eprintln!("{e}"); std::process::exit(2) });
+    let code = run_main();
+    monitor.shutdown();
+    std::process::exit(code);
+}
+
+fn run_main() -> i32 {
     // The program starts here.
     bare_net::parallel::limit_malloc_arenas(std::env::args().any(|a| a == "--window"));
 
@@ -57,25 +64,25 @@ fn main() {
             // The URL is missing.
             eprintln!("usage: bare <http://url>");
             // Print a help message. JS: `console.error(...)`.
-            std::process::exit(2);
+            return 2;
             // Stop the program. A number other than 0 means "something went wrong".
         }
     };
     // `let` is like `const`: `arg` cannot change.
 
     if let Some(out) = paint {
-        std::process::exit(paint_file(arg, out, viewport));
+        return paint_file(arg, out, viewport);
     }
     if window {
-        std::process::exit(show_window(arg, viewport));
+        return show_window(arg, viewport);
     }
     if run {
         // The session loads the first document itself (one verified path for every document).
         if Url::parse(arg).is_err() {
             eprintln!("error: --run needs a valid URL");
-            std::process::exit(2);
+            return 2;
         }
-        std::process::exit(run_page(arg.to_string(), viewport));
+        return run_page(arg.to_string(), viewport);
     }
     let url = Url::parse(&arg);
     let result = url
@@ -93,7 +100,7 @@ fn main() {
         Err(e) => {
             eprintln!("error: {e}");
             // It failed: print the error.
-            std::process::exit(1);
+            return 1;
             // Stop with an error number.
         }
     };
@@ -115,7 +122,7 @@ fn main() {
             Ok(n) => n,
             Err(e) => {
                 eprintln!("error: {e}");
-                std::process::exit(1);
+                return 1;
             }
         };
         let text = decoder.feed(&piece[..n]);
@@ -138,12 +145,12 @@ fn main() {
         if resources {
             let Ok(page) = url.as_ref() else {
                 eprintln!("error: --resources needs a valid URL");
-                std::process::exit(2);
+                return 2;
             };
             let (text, ok) = resources::report(&doc, page);
             print!("{text}");
             if !ok {
-                std::process::exit(1);
+                return 1;
             }
         } else if styles {
             let computed = computed_styles(&mut doc, url.as_ref().ok(), viewport);
@@ -159,6 +166,7 @@ fn main() {
             // Print the tree, one line for each node.
         }
     }
+    0
 }
 
 /// The window is 1280 by 800 until module 5 has a window. `@media`, `vw`, `vh` and layout use it.

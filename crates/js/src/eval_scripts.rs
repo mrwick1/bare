@@ -472,6 +472,13 @@ impl<'p> Interp<'p> {
 
     /// Run script `id` at the top level and give back the caller's script.
     fn exec_script(&mut self, id: usize) -> Result<Value, Error> {
+        bare_observe::process::emit("engine", "js_stats", || {
+            use bare_observe::{Field, Scalar::U64};
+            let h = self.heap.stats();
+            [Field("steps", U64(self.steps)), Field("heap_accounted_bytes", U64(h.bytes as u64)), Field("live_objects", U64(h.live_objects as u64)), Field("collections", U64(h.collections as u64))]
+        });
+
+        let _observe = bare_observe::process::span("js", "script");
         let old = self.cur;
         self.begin();
         self.completion = Value::Undefined;

@@ -128,6 +128,7 @@ pub fn layout_uncull(doc: &Document, styles: &Styles, viewport: (f32, f32), budg
 }
 
 fn layout_with<'a>(doc: &'a Document, styles: &'a Styles, viewport: (f32, f32), budget: u64, probe: Option<NodeId>, uncull: bool, mut keep: Option<keep::Keep<'a>>) -> Layout {
+        let _observe = bare_observe::process::span("layout", "layout");
     let out = keep.as_mut().map_or_else(|| Vec::with_capacity(doc.len()), |k| k.kept.room(doc.len()));
     let mut cx = Cx { tree: boxes::Tree::new(doc, styles), out, depth: 0, marker: None, number: 0, sizes: Fast::default(), measuring: 0, spare: Vec::new(), floats: Default::default(), bars: Fast::default(), again: 0, rel: Fast::default(), fixed: false, waiting: 0, unknown: Default::default(), work: 0, budget, scrolls: 0, items: 0, memo_from: if probe.is_some() { u64::MAX } else { memo::start().min(budget) }, open: 0, fx: Vec::new(), memo: Default::default(), probe, tracks: None, uncull, keep, next: keep::Next::No, statics: 0, sets: 0 };
     // Most pages make about one fragment for each DOM node: one for each element and each text on one line, none for

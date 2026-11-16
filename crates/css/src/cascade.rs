@@ -1221,6 +1221,7 @@ impl RuleSet {
     /// below changes only at a `display:none` element and on the way from it to `want`.
     /// An element that the walk does not reach (a light child of a shadow host that no slot takes) still has no style.
     pub fn compute_for(&self, doc: &Document, want: Option<NodeId>) -> Styles {
+        let _observe = bare_observe::process::span("style", "compute");
         if want.is_some() {
             self.walk_any::<true>(doc, want, false)
         } else {
@@ -1339,6 +1340,7 @@ impl RuleSet {
     /// cache, the font size of the root element changes, or the styles grew too much): then the caller runs
     /// `compute_kept`; no node has a new style then. Equal style numbers mean equal values, so a style that did not change keeps its number.
     pub fn restyle(&self, doc: &Document, styles: &mut Styles, roots: &[(NodeId, bool)], changed: &mut Vec<(NodeId, u32)>) -> bool {
+        let _observe = bare_observe::process::span("style", "restyle");
         if self.pending.is_some() { self.restyle_with::<true>(doc, styles, roots, changed) } else { self.restyle_with::<false>(doc, styles, roots, changed) }
     }
 

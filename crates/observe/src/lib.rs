@@ -487,3 +487,5 @@ fn run_writer(s: Arc<Shared>, rx: mpsc::Receiver<Vec<u8>>, mut writer: impl Writ
 
 #[cfg(test)]
 mod tests;
+
+pub mod process;
