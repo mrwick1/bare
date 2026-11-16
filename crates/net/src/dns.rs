@@ -4,10 +4,10 @@
 //!
 //! 1. "localhost" is always this machine. It never goes to the network.
 //! 2. Look in our cache of earlier answers. Each answer says how long we may keep it. The cache comes
-//!    first: it is a memory lookup (9 µs), and reading `/etc/hosts` is a file read (47 µs).
-//! 3. Look in `/etc/hosts`, a local list of names and addresses. A name that is already in the cache
+//!    first: it is a memory lookup (9 µs), and reading the hosts file is a file read (47 µs).
+//! 3. Look in the hosts file, a local list of names and addresses. A name that is already in the cache
 //!    keeps its cached address until the TTL ends, even if someone adds it to this file.
-//! 4. Ask the DNS server listed in `/etc/resolv.conf`. The question is a small message
+//! 4. Ask the DNS server listed by the OS. The question is a small message
 //!    sent over UDP (quick, no connection). We ask twice at the same time: once for an IPv4 address
 //!    (an "A" record) and once for an IPv6 address (an "AAAA" record).
 //! 5. If the answer is too big for one UDP message, the server says "truncated".
@@ -71,18 +71,15 @@ pub fn resolve(host: &str) -> Result<Vec<IpAddr>, String> {
         }
     }
 
-    let hosts = std::fs::read_to_string("/etc/hosts").unwrap_or_default();
-    // A missing file is fine. `unwrap_or_default()` gives "" then.
-    let addrs = hosts_lookup(&hosts, &name);
+    let addrs = hosts_lookup(&bare_os::dns::hosts_text(), &name);
     if !addrs.is_empty() {
         return Ok(addrs);
     }
 
-    let conf = std::fs::read_to_string("/etc/resolv.conf").unwrap_or_default();
-    let mut servers = nameservers(&conf);
+    let mut servers = bare_os::dns::servers();
     if servers.is_empty() {
         servers.push(IpAddr::V4(Ipv4Addr::LOCALHOST));
-        // No "nameserver" line: ask this machine, like other Linux programs do.
+        // No server known: ask this machine, like other programs do.
     }
 
     let (addrs, ttl) = lookup(&servers, &name)?;
@@ -323,7 +320,7 @@ fn read_u32(p: &[u8], i: usize) -> Result<u32, String> {
     Ok(u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
 }
 
-/// The addresses for `name` in the text of `/etc/hosts`. Each line: address, then names.
+/// The addresses for `name` in the text of the hosts file. Each line: address, then names.
 fn hosts_lookup(text: &str, name: &str) -> Vec<IpAddr> {
     let mut addrs = Vec::new();
     for line in text.lines() {
@@ -338,16 +335,6 @@ fn hosts_lookup(text: &str, name: &str) -> Vec<IpAddr> {
         }
     }
     addrs
-}
-
-/// The DNS server addresses in the text of `/etc/resolv.conf`: lines like "nameserver 1.1.1.1".
-fn nameservers(text: &str) -> Vec<IpAddr> {
-    text.lines()
-        .filter_map(|line| line.strip_prefix("nameserver"))
-        .filter_map(|rest| rest.split_whitespace().next()?.parse().ok())
-        .collect()
-    // `filter_map` is `map` and `filter` in one: it keeps only the `Some` results.
-    // JS: `.map(f).filter(x => x !== undefined)`.
 }
 
 #[cfg(test)]
@@ -431,12 +418,16 @@ mod tests {
     }
 
     #[test]
-    fn reads_hosts_and_resolv_conf() {
+    fn reads_hosts() {
         let hosts = "127.0.0.1 localhost\n10.0.0.5  Box box.lan # my server\n::1 box\nbad line\n";
         assert_eq!(hosts_lookup(hosts, "box"), vec!["10.0.0.5".parse::<IpAddr>().unwrap(), "::1".parse().unwrap()]);
         assert!(hosts_lookup(hosts, "lan").is_empty());
-        let conf = "# comment\nnameserver 127.0.0.53\nnameserver 2606:4700::1111\noptions edns0\n";
-        assert_eq!(nameservers(conf), vec!["127.0.0.53".parse::<IpAddr>().unwrap(), "2606:4700::1111".parse().unwrap()]);
+    }
+
+    #[test]
+    #[ignore = "needs the network"]
+    fn resolves_example_com() {
+        assert!(!resolve("example.com").unwrap().is_empty());
     }
 
     #[test]
