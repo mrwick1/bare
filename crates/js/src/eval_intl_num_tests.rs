@@ -80,7 +80,6 @@ fn gates_refuse_what_bare_cannot_format() {
             ("new Intl.NumberFormat('en').formatRange(1, 2)", "Intl.NumberFormat.prototype.formatRange"),
             ("new Intl.NumberFormat('en-u-nu-arab')", "Intl.NumberFormat option numberingSystem"),
             ("new Intl.Collator('en-u-co-emoji')", "Intl.Collator option collation"),
-            ("new Intl.Collator('en', { usage: 'search' })", "Intl.Collator option usage search"),
             ("new Intl.Collator('en', { collation: 'phonebk' })", "Intl.Collator option collation"),
             ("'a'.localeCompare('b', 'en', { collation: 'phonebk' })", "Intl.Collator option collation"),
             ("new Intl.PluralRules('en', { roundingIncrement: 5 })", "Intl.NumberFormat option roundingIncrement"),
@@ -88,6 +87,19 @@ fn gates_refuse_what_bare_cannot_format() {
             let r = out(&mut it, src);
             assert!(r.starts_with("unsupported:") && r.contains(what), "{src}: {r}");
         }
+    });
+}
+
+#[test]
+fn collator_usage_search_is_accepted_and_compares_as_sort() {
+    big(|| {
+        let mut it = realm();
+        // bare has no search tailoring, so `search` compares as `sort` (the spec allows it)
+        assert_eq!(out(&mut it, "new Intl.Collator('en', { usage: 'search', sensitivity: 'base' }).compare('a', 'A')"), "number:0");
+        assert_eq!(out(&mut it, "new Intl.Collator('en', { usage: 'search' }).compare('a', 'b')"), "number:-1");
+        assert_eq!(out(&mut it, "new Intl.Collator('en', { usage: 'search' }).resolvedOptions().usage"), "string:search");
+        assert_eq!(out(&mut it, "new Intl.Collator('en').resolvedOptions().usage"), "string:sort");
+        assert_eq!(out(&mut it, "try { new Intl.Collator('en', { usage: 'find' }) } catch (e) { e.name }"), "string:RangeError");
     });
 }
 

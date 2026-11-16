@@ -12,13 +12,13 @@
 //   `roundingIncrement` (1), `roundingMode`, `roundingPriority`, `trailingZeroDisplay`), `compactDisplay`, `useGrouping`,
 //   `signDisplay`. A string argument keeps its exact decimal digits.
 // - `Intl.Collator`: `supportedLocalesOf`, `compare` (a getter, one bound function per collator), `resolvedOptions`; options
-//   `usage` (sort), `localeMatcher`, `collation`, `numeric`, `caseFirst`, `sensitivity`, `ignorePunctuation`.
+//   `usage` (sort, search), `localeMatcher`, `collation`, `numeric`, `caseFirst`, `sensitivity`, `ignorePunctuation`.
 // - `Intl.PluralRules` (needs `new`): `supportedLocalesOf`, `select`, `resolvedOptions`; options `type` and the digit options.
 // - `Intl.getCanonicalLocales`, `Number.prototype.toLocaleString`, `String.prototype.localeCompare`.
 // - Locales: the 5 of `intl.rs`. A locale with an extension is a gate (see `intl_locales`).
 //
 // Gates (Unsupported): `numberingSystem` other than
-// `latn`; `roundingIncrement` other than 1; Collator `usage: "search"` and any `collation`; the methods `formatRange`,
+// `latn`; `roundingIncrement` other than 1; Collator `collation`; the methods `formatRange`,
 // `formatRangeToParts` and `selectRange`.
 //
 // Known deviations: the locale of an unsupported region (`en-AU`) resolves to `en` (V8 keeps `en-AU`); `Intl` is installed on its first read, so `Object.getOwnPropertyDescriptor(globalThis,
@@ -43,6 +43,8 @@ struct IntlColl {
     key: icu::CollKey,
     loc: u8,
     bound: Option<ObjId>,
+    /// `usage: "search"`. bare compares it as `sort`: it has no search tailoring.
+    search: bool,
 }
 
 /// Plural rules. `found` is false when no requested locale matched (the default locale is used).
@@ -416,9 +418,7 @@ impl<'p> Interp<'p> {
     fn intl_coll_create(&mut self, locales: Value, options: Value, who: &'static str) -> Res<IntlColl> {
         let requested = self.intl_locales(locales)?;
         let opts = self.intl_options(options, who)?;
-        if self.intl_opt_for(who, opts, "usage", &["sort", "search"])? == Some(1) {
-            return Err(unsupported("Intl.Collator option usage search", Span::default()));
-        }
+        let search = self.intl_opt_for(who, opts, "usage", &["sort", "search"])? == Some(1);
         self.intl_opt_for(who, opts, "localeMatcher", &["lookup", "best fit"])?;
         if let Some(c) = self.intl_opt_str(opts, "collation")? {
             self.intl_type_syntax(&c, "collation")?;
@@ -433,7 +433,7 @@ impl<'p> Interp<'p> {
         let (numeric, case_first) = (numeric.unwrap_or(false), case_first.unwrap_or(0));
         let sensitivity = self.intl_opt_for(who, opts, "sensitivity", &SENSITIVITY)?.unwrap_or(3) as u8;
         let ignore_punctuation = self.intl_opt_bool(opts, "ignorePunctuation")?.unwrap_or(false);
-        Ok(IntlColl { key: icu::CollKey { sensitivity, case_first, numeric, ignore_punctuation }, loc, bound: None })
+        Ok(IntlColl { key: icu::CollKey { sensitivity, case_first, numeric, ignore_punctuation }, loc, bound: None, search })
     }
 
     /// The locale of `resolvedOptions` of a collator: `en-US` or `en`, and the kept extension.
@@ -663,7 +663,7 @@ impl<'p> Interp<'p> {
                 let c = self.this_intl_coll(this, "Intl.Collator.prototype.resolvedOptions")?;
                 let props: Vec<(&str, Value)> = vec![
                     ("locale", self.intl_coll_locale(this, c.loc)?),
-                    ("usage", self.str_value("sort")?),
+                    ("usage", self.str_value(if c.search { "search" } else { "sort" })?),
                     ("sensitivity", self.str_value(SENSITIVITY[c.key.sensitivity as usize])?),
                     ("ignorePunctuation", Value::Bool(c.key.ignore_punctuation)),
                     ("collation", self.str_value("default")?),
