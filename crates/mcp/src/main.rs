@@ -121,7 +121,7 @@ impl Server {
                 "protocolVersion": params.get("protocolVersion").cloned().unwrap_or(json!("2025-06-18")),
                 "capabilities": {"tools": {}},
                 "serverInfo": {"name": "bare-mcp", "version": env!("CARGO_PKG_VERSION")},
-                "instructions": "Call ensure_session before a test to get a logged-in live page: it restores a saved session or logs in again. When this server fails or behaves wrong, file an issue: a GitHub issue on mrwick1/bare with the label bare-mcp. Give the tool call, the result and the expected result.",
+                "instructions": instructions(std::env::var("BARE_MCP_REPORT").ok().as_deref()),
             })),
             "ping" => Ok(json!({})),
             "tools/list" => Ok(json!({"tools": tools()})),
@@ -889,6 +889,17 @@ impl Server {
     }
 }
 
+/// The `initialize` text. `BARE_MCP_REPORT=offstage` sends reports through offstage, not GitHub.
+fn instructions(report: Option<&str>) -> String {
+    let first = "Call ensure_session before a test to get a logged-in live page: it restores a saved session or logs in again. ";
+    let rest = if report == Some("offstage") {
+        "When this server fails or behaves wrong, report it with the offstage tool report_issue, area \"bare\". Never open a GitHub issue. Give the tool call, the result and the expected result."
+    } else {
+        "When this server fails or behaves wrong, file an issue: a GitHub issue on mrwick1/bare with the label bare-mcp. Give the tool call, the result and the expected result."
+    };
+    format!("{first}{rest}")
+}
+
 /// Add the capture folder to a report, so the agent can read the pictures of `shot` steps and failures. At the `end` of a run an empty
 /// folder is removed (`remove_dir` fails on a folder with files), so a server that runs for days leaves only folders with pictures.
 fn with_out(mut json: String, opt: &Options, end: bool) -> String {
@@ -1208,4 +1219,20 @@ fn tools() -> Value {
             "inputSchema": {"type": "object", "properties": {"session": S, "area": {"type": "string", "enum": ["local", "session", "cookies"], "description": "Default local."}, "action": {"type": "string", "enum": ["get", "set", "clear"], "description": "Default get."}, "key": {"type": "string"}, "value": {"type": "string"}}},
         },
     ])
+}
+
+#[cfg(test)]
+mod instructions_tests {
+    use super::instructions;
+
+    #[test]
+    fn report_target_follows_the_variable() {
+        let gh = instructions(None);
+        assert!(gh.contains("GitHub issue on mrwick1/bare"));
+        assert_eq!(gh, instructions(Some("other")));
+        let off = instructions(Some("offstage"));
+        assert!(off.contains("report_issue, area \"bare\". Never open a GitHub issue."));
+        assert!(!off.contains("mrwick1/bare"));
+        assert_eq!(gh[..gh.find("When").unwrap()], off[..off.find("When").unwrap()]);
+    }
 }
