@@ -14,7 +14,7 @@ use crate::breaks::{self, Point, Run};
 use crate::text::Wrap;
 use crate::block::{Context, MAX_DEPTH, border_padding, resolve};
 use crate::boxes::Child;
-use crate::font::{self, LETTER, Metrics};
+use crate::font::{self, Metrics};
 use crate::inline::{Event, Events};
 use crate::text::{self, Flow, Piece, Transform, WhiteSpace};
 use bare_css::values::{Keyword, Property, Value};
@@ -136,7 +136,7 @@ fn lines_with<const BREAKS: bool>(cx: &mut Cx, first: NodeId, last: NodeId) -> (
                 if BREAKS && runs.is_empty() { word_start = flow.after_space; }
                 let template = Run { item:0, start:0, text:"", x:0.0, before:Point {item:0, byte:None, x:0.0}, metrics:m, transform, spacing:sp,
                     policy:if BREAKS { Wrap::of(style, ws) } else { Wrap::Normal } };
-                for piece in text::pieces(text, ws, transform, &mut flow) {
+                for piece in text::pieces(text, ws, transform, m.face, &mut flow) {
                     match piece {
                         Piece::Word { start, end, width } => {
                             let w = m.px(width) + if spaced { font::extra(&text[start as usize..end as usize], sp) } else { 0.0 };
@@ -149,7 +149,7 @@ fn lines_with<const BREAKS: bool>(cx: &mut Cx, first: NodeId, last: NodeId) -> (
                             hang = 0.0;
                         }
                         Piece::Space { width, .. } if ws.wrap => {
-                            let w = m.px(width) + if spaced { font::extra_spaces(width, sp) } else { 0.0 };
+                            let w = m.px(width) + if spaced { font::extra_spaces(m.face, width, sp) } else { 0.0 };
                             min = min.max(minimum(&runs, unit, word_start));
                             unit = 0.0;
                             if BREAKS { runs.clear(); before = None; word_start = true; }
@@ -157,7 +157,7 @@ fn lines_with<const BREAKS: bool>(cx: &mut Cx, first: NodeId, last: NodeId) -> (
                             hang = w;
                         }
                         Piece::Space { start, end, width } => {
-                            let w = m.px(width) + if spaced { font::extra_spaces(width, sp) } else { 0.0 };
+                            let w = m.px(width) + if spaced { font::extra_spaces(m.face, width, sp) } else { 0.0 };
                             if BREAKS {
                                 runs.push(Run {item:runs.len(), start, text:&text[start as usize..end as usize], x:unit,
                                     before:before.take().unwrap_or(Point {item:runs.len(), byte:Some(start), x:unit}), ..template});
@@ -166,7 +166,7 @@ fn lines_with<const BREAKS: bool>(cx: &mut Cx, first: NodeId, last: NodeId) -> (
                             line += w;
                         }
                         Piece::Tab { at } => {
-                            let w = m.px(8 * LETTER) + 8.0 * (sp.0 + sp.1);
+                            let w = m.px(8 * m.face.space()) + 8.0 * (sp.0 + sp.1);
                             if BREAKS {
                                 runs.push(Run {item:runs.len(), start:at, text:&text[at as usize..at as usize + 1], x:unit,
                                     before:before.take().unwrap_or(Point {item:runs.len(), byte:Some(at), x:unit}), ..template});

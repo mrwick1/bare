@@ -59,15 +59,15 @@ pub(crate) fn opportunities(runs: &[Run<'_>], mut word_start: bool, line_x: f32)
         for (at, c) in run.text.char_indices() {
             let previous = run.metrics.px(units) + letters as f32 * run.spacing.0 + spaces as f32 * run.spacing.1 + tabs;
             if c == '\t' {
-                let stop = run.metrics.px(8 * font::LETTER) + 8.0 * (run.spacing.0 + run.spacing.1);
+                let stop = run.metrics.px(8 * run.metrics.face.space()) + 8.0 * (run.spacing.0 + run.spacing.1);
                 let pen = line_x + run.x + previous;
                 if stop > 0.0 {
                     tabs += ((pen / stop).floor() + 1.0) * stop - pen;
                 }
                 word_start = true;
             } else {
-                units = units.saturating_add(text::transformed_width(c, run.transform, &mut word_start));
-                letters += (font::width_of(c) != 0) as u32;
+                units = units.saturating_add(text::transformed_width(run.metrics.face, c, run.transform, &mut word_start));
+                letters += font::has_width(c) as u32;
                 spaces += matches!(c, ' ' | '\u{a0}') as u32;
             }
             let end = at + c.len_utf8();

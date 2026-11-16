@@ -2901,6 +2901,7 @@ fn initial(p: Property) -> Value {
         BackgroundRepeat | MaskRepeat => Value::Keyword(K::Repeat),
         FontSize => px(16.0),
         FontWeight => Value::Number(400.0),
+        FontFamily => Value::Keyword(K::SansSerif),
         // `min-width: auto` is 0, except on a flex item: there it is the "automatic minimum size" (`flex.rs`).
         Width | Height | MinWidth | MinHeight | Top | Right | Bottom | Left | AspectRatio => Value::Keyword(K::Auto),
         Position => Value::Keyword(K::Static),
@@ -2938,7 +2939,7 @@ fn initial(p: Property) -> Value {
 /// Does a child take the value of the parent when it has no value of its own?
 pub const fn inherited(p: Property) -> bool {
     use Property::*;
-    matches!(p, TextColor | FontSize | FontWeight | FontStyle | LineHeight | LetterSpacing | WordSpacing | TextAlign | TextTransform | WhiteSpace | OverflowWrap | WordBreak | ListStyleType | Visibility | PointerEvents | Cursor | Fill | Stroke | BorderCollapse | BorderSpacingH | BorderSpacingV | CaptionSide | Direction)
+    matches!(p, TextColor | FontSize | FontWeight | FontStyle | FontFamily | LineHeight | LetterSpacing | WordSpacing | TextAlign | TextTransform | WhiteSpace | OverflowWrap | WordBreak | ListStyleType | Visibility | PointerEvents | Cursor | Fill | Stroke | BorderCollapse | BorderSpacingH | BorderSpacingV | CaptionSide | Direction)
 }
 
 /// The properties that `inherited` names, as bits.
@@ -3715,6 +3716,53 @@ mod tests {
         Value::Color(Color { r, g, b, a: 255 })
     }
 
+    /// `font-family` is inherited. The first entry of the list decides: a monospace name gives Noto Sans Mono, anything else Noto Sans.
+    #[test]
+    fn font_family_is_inherited_and_the_first_entry_decides() {
+        use Keyword::{Monospace as M, SansSerif as S};
+        let family = |html: &str, sheets: &[&str], id: &str| get(html, sheets, id, Property::FontFamily);
+        assert_eq!(family("<p id=p>", &[], "p"), Value::Keyword(S), "the initial value");
+        assert_eq!(family("<p id=p style='font-family: Verdana, sans-serif'>", &[], "p"), Value::Keyword(S));
+        assert_eq!(family("<p style='font-family: Courier New, monospace'><b id=c>x", &[], "c"), Value::Keyword(M), "a child inherits");
+        assert_eq!(family("<p id=p style='font-family: \"Unknown\", monospace'>", &[], "p"), Value::Keyword(S), "the first entry decides");
+        assert_eq!(family("<p id=p style='font-family: Verdana, monospace'>", &[], "p"), Value::Keyword(S));
+        for name in ["monospace", "MONOSPACE", "ui-monospace", "Menlo", "Monaco", "Consolas", "Courier", "Courier New", "\"Courier New\"", "SFMono-Regular", "Liberation Mono", "DejaVu Sans Mono", "Noto Sans Mono"] {
+            assert_eq!(family(&format!("<p id=p style='font-family: {name}, serif'>"), &[], "p"), Value::Keyword(M), "{name}");
+        }
+        for name in ["serif", "sans-serif", "system-ui", "Arial", "\"Helvetica Neue\"", "-apple-system"] {
+            assert_eq!(family(&format!("<p style='font-family: monospace'><b id=c style='font-family: {name}'>"), &[], "c"), Value::Keyword(S), "{name}");
+        }
+        assert_eq!(family("<p style='font-family: monospace'><b id=c style='font-family: initial'>", &[], "c"), Value::Keyword(S));
+        assert_eq!(family("<p style='font-family: monospace'><b id=c style='font-family: inherit'>", &[], "c"), Value::Keyword(M));
+        let long = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans', sans-serif";
+        assert_eq!(family(&format!("<p id=p style=\"font-family: {long}\">"), &[], "p"), Value::Keyword(S), "a long list is good");
+    }
+
+    /// The `font` shorthand sets the family. The family is its last part.
+    #[test]
+    fn the_font_shorthand_sets_the_family() {
+        use Keyword::{Monospace as M, SansSerif as S};
+        let html = "<p id=p style='font: 12px/1.5 \"Courier New\", monospace'>";
+        assert_eq!(get(html, &[], "p", Property::FontFamily), Value::Keyword(M));
+        assert_eq!(get(html, &[], "p", Property::FontSize), px(12.0));
+        assert_eq!(get("<p id=p style='font: bold 12px Verdana, monospace'>", &[], "p", Property::FontFamily), Value::Keyword(S));
+        assert_eq!(get("<p style='font-family: monospace'><b id=c style='font: 12px serif'>", &[], "c", Property::FontFamily), Value::Keyword(S), "the shorthand resets it");
+        assert_eq!(get("<p style='font-family: monospace'><b id=c style='font: inherit'>", &[], "c", Property::FontFamily), Value::Keyword(M));
+    }
+
+    /// The UA sheet makes `pre`, `code` and its relatives monospace.
+    #[test]
+    fn code_and_pre_are_monospace_by_default() {
+        use Keyword::{Monospace as M, SansSerif as S};
+        let html = "<p id=p>a <code id=c>b</code> <kbd id=k>k</kbd><samp id=s>s</samp><tt id=t>t</tt></p><pre id=r>x</pre><xmp id=x>x</xmp><listing id=l>x</listing><plaintext id=n>x";
+        for id in ["c", "k", "s", "t", "r", "x", "l", "n"] {
+            assert_eq!(get(html, &[], id, Property::FontFamily), Value::Keyword(M), "{id}");
+        }
+        assert_eq!(get(html, &[], "p", Property::FontFamily), Value::Keyword(S));
+        assert_eq!(get("<p style='font-family: Arial'><code id=c>x", &[], "c", Property::FontFamily), Value::Keyword(M), "the UA rule beats inheritance");
+        assert_eq!(get("<code id=c style='font-family: Arial'>x", &[], "c", Property::FontFamily), Value::Keyword(S), "a page rule beats the UA rule");
+    }
+
     #[test]
     fn the_browser_style_sheet() {
         let html = "<h1 id=h>x</h1><p id=p>y</p><b id=b>z</b><ul id=u><li id=l>w</ul>";
@@ -3952,7 +4000,7 @@ mod tests {
 
     #[test]
     fn wrapping_slots_have_the_reviewed_style_memory_cost() {
-        assert_eq!(std::mem::size_of::<ComputedStyle>(), 872, "baseline 856 plus two eight-byte values");
+        assert_eq!(std::mem::size_of::<ComputedStyle>(), 880, "baseline 856 plus three eight-byte values (the third is `font-family`)");
     }
 
     #[test]

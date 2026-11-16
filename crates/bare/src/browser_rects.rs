@@ -255,7 +255,7 @@ impl<'a> Pass<'a> {
         for c in text[s..o].chars() {
             let sp = is_space(c);
             if !(collapse && sp && prev) {
-                let w = font::width_of(c);
+                let w = font::width_of(m.face, c);
                 units += w;
                 if w != 0 {
                     extra += spacing.0;

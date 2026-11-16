@@ -91,6 +91,6 @@ fn wrapping_properties_have_live_computed_text_and_aliases() {
 #[test]
 fn wrapping_style_changes_relayout_the_real_element() {
     let mut b = browser();
-    run(&mut b, "var a = document.getElementById('a'); a.style.cssText = 'width:200px;font-size:14px;line-height:20px'; a.textContent = 'x'.repeat(120); var before = a.getBoundingClientRect().height; a.style.overflowWrap = 'anywhere'; before + '|' + a.getBoundingClientRect().height", "20|120");
+    run(&mut b, "var a = document.getElementById('a'); a.style.cssText = 'width:200px;font-size:14px;line-height:20px;font-family:monospace'; a.textContent = 'x'.repeat(120); var before = a.getBoundingClientRect().height; a.style.overflowWrap = 'anywhere'; before + '|' + a.getBoundingClientRect().height", "20|120");
     run(&mut b, "a.style.overflowWrap = 'normal'; a.style.wordBreak = 'break-all'; a.getBoundingClientRect().height", "120");
 }

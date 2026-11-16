@@ -29,7 +29,7 @@
 //! - `!important` is kept as a flag. The cascade uses it.
 //! - Properties that we do not know. They are dropped. The list is what layout and paint will need in module 4 and 5.
 //!   To add one, add a line in `properties!` and a case in `longhand`.
-//! - `font-family`, `background-image`, `box-shadow`: later, when something needs them.
+//! - `font-family` is kept as a class, not as a list: `monospace` or `sans-serif` (see `family`). `box-shadow`: later, when something needs it.
 //! - `border-radius` takes one radius for each corner (a circle). The part after a `/` is read and dropped.
 //! - Approximations that we know: `ch` is half an `em` (the real value needs the font; `ex` is 0.536 em, the x-height of the one font). In `background`,
 //!   only the color is used, and the other parts are checked a little and ignored. In `text-decoration`, only the line kind is used.
@@ -115,6 +115,7 @@ properties! {
     FontSize => "font-size",
     FontWeight => "font-weight",
     FontStyle => "font-style",
+    FontFamily => "font-family",
     LineHeight => "line-height",
     LetterSpacing => "letter-spacing",
     WordSpacing => "word-spacing",
@@ -326,6 +327,7 @@ keywords! {
     VisibleFill => "visiblefill", VisibleStroke => "visiblestroke",
     Contain => "contain", Cover => "cover", ScaleDown => "scale-down", Repeat => "repeat", NoRepeat => "no-repeat",
     RepeatX => "repeat-x", RepeatY => "repeat-y", Default => "default", Pointer => "pointer",
+    Monospace => "monospace", SansSerif => "sans-serif",
 }
 
 /// The value of one property. It does not say which property: a `Declared` has that.
@@ -535,7 +537,7 @@ fn parse_known(name: &str, value: &str, important: bool, side: &mut Side, out: &
     let start = out.len();
     // `expand` says so when `name` is a logical property of the inline axis. It is the last arm there: a physical name never pays for it.
     let mirror = std::cell::Cell::new(false);
-    let ok = expand(name, &parts, &mirror, &mut |property, value| out.push(Declared { property, value, important, mirror: mirror.get() }));
+    let ok = expand(name, value, &parts, &mirror, &mut |property, value| out.push(Declared { property, value, important, mirror: mirror.get() }));
     if !ok {
         out.truncate(start);
         // A shorthand may have added some items before it found the mistake. Take them back.
@@ -796,7 +798,7 @@ pub(crate) fn length(value: f32, unit: &str) -> Option<Length> {
 
 /// Give each longhand of the declaration `name` to `emit`. `false` if the name or the value is not good.
 #[inline(always)]
-fn expand(name: &str, parts: &Parts, mirror: &std::cell::Cell<bool>, emit: &mut dyn FnMut(Property, Value)) -> bool {
+fn expand(name: &str, value: &str, parts: &Parts, mirror: &std::cell::Cell<bool>, emit: &mut dyn FnMut(Property, Value)) -> bool {
     use Property::*;
     let slice = parts.as_slice();
     // `inherit`, `initial` and `unset` are the whole value, for a longhand and for a shorthand.
@@ -819,7 +821,7 @@ fn expand(name: &str, parts: &Parts, mirror: &std::cell::Cell<bool>, emit: &mut 
             },
         };
     }
-    if parts.more && name != "font" {
+    if parts.more && name != "font" && name != "font-family" {
         return false;
     }
     match name {
@@ -930,7 +932,11 @@ fn expand(name: &str, parts: &Parts, mirror: &std::cell::Cell<bool>, emit: &mut 
             emit(AspectRatio, if value > 0.0 && value.is_finite() { Value::Number(value) } else { Value::Keyword(Keyword::Auto) });
             true
         }
-        "font" => font(slice, emit),
+        "font" => font(slice, value, emit),
+        "font-family" => is_family(slice) && {
+            emit(FontFamily, family(value, 0));
+            true
+        },
         "list-style" => match slice {
             [one] => longhand(ListStyleType, *one).map(|v| emit(ListStyleType, v)).is_some(),
             _ => false,
@@ -1139,7 +1145,7 @@ pub fn shorthand_longhands(name: &str) -> Option<&'static [Property]> {
         "border-bottom" => &[BorderBottomWidth, BorderBottomStyle, BorderBottomColor],
         "border-left" => &[BorderLeftWidth, BorderLeftStyle, BorderLeftColor],
         "background" => &[BackgroundColor],
-        "font" => &[FontStyle, FontWeight, FontSize, LineHeight],
+        "font" => &[FontStyle, FontWeight, FontSize, LineHeight, FontFamily],
         "list-style" => &[ListStyleType],
         "text-decoration" => &[TextDecoration],
         "overflow" => &[OverflowX, OverflowY],
@@ -1477,8 +1483,64 @@ fn flex(slice: &[Part], emit: &mut dyn FnMut(Property, Value)) -> bool {
     true
 }
 
-/// `font: [style] [weight] size[/line-height] family`. The family is checked a little, and thrown away (module 5 has one font).
-fn font(slice: &[Part], emit: &mut dyn FnMut(Property, Value)) -> bool {
+/// Is a list of parts a font family list: words, strings and commas, and no numbers? (A list that is too long is cut at 8 parts, and that is fine.)
+fn is_family(parts: &[Part]) -> bool {
+    !parts.is_empty() && parts.iter().all(|p| matches!(p, Part::Keyword(_) | Part::Color(_) | Part::ColorExpr(_) | Part::Other))
+}
+
+/// The face for a `font-family` list, after the first `skip` parts of `value`: the keyword `Monospace` or `SansSerif`. The first entry decides. A value is 8
+/// bytes and has no list, and the browser has two faces. A monospace name gives Noto Sans Mono: a name with `mono` in it (`monospace`, `ui-monospace`,
+/// `SFMono-Regular`, `JetBrains Mono`), a name with the word `code` (`Source Code Pro`, `Fira Code`), `Menlo`, `Monaco`, `Consolas` or `Courier`. Any
+/// other name gives Noto Sans: we cannot know that a font is missing, and a page that lists `Verdana, monospace` wants proportional text. A part is one
+/// token, or one block.
+fn family(value: &str, skip: usize) -> Value {
+    let mut tokens = tokenize(value);
+    for _ in 0..skip {
+        while let Some(token) = tokens.next() {
+            match token {
+                Token::Whitespace => continue,
+                Token::Function(_) | Token::OpenParen | Token::OpenSquare | Token::OpenCurly => skip_block(&mut tokens),
+                _ => {}
+            }
+            break;
+        }
+    }
+    // The first entry in lowercase, with one space between its words. A longer entry than the buffer is not a monospace name.
+    let (mut buf, mut len, mut long) = ([0u8; 48], 0, false);
+    let mut add = |text: &str| {
+        let space = (len > 0) as usize;
+        if len + space + text.len() > buf.len() {
+            long = true;
+            return;
+        }
+        if space == 1 {
+            buf[len] = b' ';
+            len += 1;
+        }
+        buf[len..len + text.len()].copy_from_slice(text.as_bytes());
+        buf[len..len + text.len()].make_ascii_lowercase();
+        len += text.len();
+    };
+    for token in tokens {
+        match token {
+            Token::Ident(word) => add(&word),
+            Token::String(text) => {
+                add(&text);
+                break;
+            }
+            Token::Comma => break,
+            _ => {}
+        }
+    }
+    let mono = !long
+        && std::str::from_utf8(&buf[..len]).is_ok_and(|name| {
+            name.contains("mono") || name.split(' ').any(|w| w == "code") || matches!(name, "menlo" | "monaco" | "consolas" | "courier" | "courier new")
+        });
+    Value::Keyword(if mono { Keyword::Monospace } else { Keyword::SansSerif })
+}
+
+/// `font: [style] [weight] size[/line-height] family`. The family is the last part: see `family`.
+fn font(slice: &[Part], value: &str, emit: &mut dyn FnMut(Property, Value)) -> bool {
     use Property::*;
     let mut style = Value::Keyword(Keyword::Normal);
     let mut weight = Value::Number(400.0);
@@ -1515,15 +1577,14 @@ fn font(slice: &[Part], emit: &mut dyn FnMut(Property, Value)) -> bool {
         line_height = v;
         i += 2;
     }
-    // The family: at least one part. We do not keep it, but it must be words, strings and commas, not numbers.
-    // (A list that is too long is cut at 8 parts, and that is fine.)
-    if i >= slice.len() || slice[i..].iter().any(|p| !matches!(p, Part::Keyword(_) | Part::Color(_) | Part::ColorExpr(_) | Part::Other)) {
+    if !is_family(&slice[i.min(slice.len())..]) {
         return false;
     }
     emit(FontStyle, style);
     emit(FontWeight, weight);
     emit(FontSize, size);
     emit(LineHeight, line_height);
+    emit(FontFamily, family(value, i));
     true
 }
 
@@ -1646,6 +1707,8 @@ fn longhand(property: Property, part: Part) -> Option<Value> {
         BorderTopLeftRadius | BorderTopRightRadius | BorderBottomRightRadius | BorderBottomLeftRadius => positive(part).map(Value::Length),
         Appearance => one_of(part, &[K::None, K::Auto, K::Button, K::Checkbox, K::Radio, K::Textfield, K::Textarea, K::Menulist]),
         Cursor => one_of(part, &[K::Auto, K::Default, K::Pointer]),
+        // A list, read by `family` from the text of the value. It is no one part.
+        FontFamily => Option::None,
         UserSelect => one_of(part, &[K::Auto, K::Text, K::None, K::Contain, K::All]),
         PointerEvents => one_of(part, &[K::Auto, K::None, K::Visible, K::VisiblePainted, K::VisibleFill, K::VisibleStroke, K::Painted, K::Fill, K::Stroke, K::All]),
         Top | Right | Bottom | Left => match part {
@@ -2106,6 +2169,16 @@ mod tests {
         assert_eq!(parse("font-weight", "1001"), vec![]);
         assert_eq!(parse("font-weight", "10px"), vec![]);
         assert_eq!(one("font-style", "italic"), Some(Value::Keyword(K::Italic)));
+        assert_eq!(one("font-family", "Verdana, sans-serif"), Some(Value::Keyword(K::SansSerif)));
+        assert_eq!(one("font-family", "\"Courier New\", Verdana"), Some(Value::Keyword(K::Monospace)));
+        assert_eq!(one("font-family", "COURIER NEW"), Some(Value::Keyword(K::Monospace)));
+        for mono in ["\"Source Code Pro\", monospace", "\"Fira Code\"", "\"JetBrains Mono\", monospace", "\"SF Mono\"", "\"Cascadia Code\", Consolas", "\"IBM Plex Mono\", monospace"] {
+            assert_eq!(one("font-family", mono), Some(Value::Keyword(K::Monospace)), "{mono}");
+        }
+        assert_eq!(one("font-family", "Verdana, monospace"), Some(Value::Keyword(K::SansSerif)), "the first entry decides");
+        assert_eq!(one("font-family", "-apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif"), Some(Value::Keyword(K::SansSerif)));
+        assert_eq!(parse("font-family", "12px"), vec![]);
+        assert_eq!(parse("font-family", ""), vec![]);
         assert_eq!(one("line-height", "1.5"), Some(Value::Number(1.5)));
         assert_eq!(one("line-height", "20px"), px(20.0));
         assert_eq!(one("line-height", "150%"), Some(Value::Length(Length::Percent(150.0))));
@@ -2130,8 +2203,11 @@ mod tests {
                 (FontWeight, Value::Number(700.0)),
                 (FontSize, Value::Length(Length::Px(12.0))),
                 (LineHeight, Value::Number(1.5)),
+                (FontFamily, Value::Keyword(K::SansSerif)),
             ]
         );
+        assert_eq!(parse("font", "12px/1.5 \"Courier New\", monospace")[4], (FontFamily, Value::Keyword(K::Monospace)));
+        assert_eq!(parse("font", "bold calc(10px + 2px) Menlo")[4], (FontFamily, Value::Keyword(K::Monospace)));
         let list = parse("font", "12px serif");
         assert_eq!(list[0], (FontStyle, Value::Keyword(K::Normal)));
         assert_eq!(list[1], (FontWeight, Value::Number(400.0)));
@@ -2254,7 +2330,7 @@ mod tests {
         assert_eq!(one("display", "unset"), Some(Value::Unset));
         assert_eq!(parse("margin", "inherit").len(), 4);
         assert_eq!(parse("border", "initial").len(), 12);
-        assert_eq!(parse("font", "inherit").len(), 4);
+        assert_eq!(parse("font", "inherit").len(), 5);
         assert_eq!(parse("background", "inherit").len(), 7);
         assert_eq!(parse("mask", "initial").len(), 6);
         assert_eq!(parse("margin", "inherit auto"), vec![]);
@@ -2302,7 +2378,7 @@ mod tests {
     fn a_long_value_is_fine() {
         let value = format!("1px {}", "a ".repeat(10_000));
         assert_eq!(parse("margin", &value), vec![]);
-        assert_eq!(parse("font", &format!("12px {}", "a, ".repeat(10_000))).len(), 4);
+        assert_eq!(parse("font", &format!("12px {}", "a, ".repeat(10_000))).len(), 5);
     }
 
     #[test]

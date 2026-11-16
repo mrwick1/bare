@@ -917,10 +917,21 @@ pub(crate) mod tests {
         crate::dump(&doc, &layout)
     }
 
+    /// The default font of the tests. Their expected numbers come from the box model and from a letter of 0.6 em wide (`font::LETTER`, Noto Sans
+    /// Mono), so a page that sets no `font-family` gets `monospace`. The initial `font-family` is `sans-serif`: a test of proportional text
+    /// uses `run_in` and `rect_in` with no default font (`font::tests`).
+    pub const MONO: &str = "html { font-family: monospace }";
+
     pub fn run(html: &str, css: &str) -> (Document, crate::fragment::Layout) {
+        run_in(html, css, MONO)
+    }
+
+    /// `run` with the style sheet `ua` after the default style sheet of the browser.
+    pub fn run_in(html: &str, css: &str, ua: &str) -> (Document, crate::fragment::Layout) {
         let mut doc = parse(html);
         let mut rules = RuleSet::new((800.0, 600.0));
         rules.add(&mut doc, UA_CSS, Origin::UserAgent);
+        rules.add(&mut doc, ua, Origin::UserAgent);
         rules.add(&mut doc, css, Origin::Author);
         let styles = rules.compute(&doc);
         let layout = crate::layout(&doc, &styles, (800.0, 600.0));
@@ -929,7 +940,12 @@ pub(crate) mod tests {
 
     /// The border box of the element with this `id`.
     pub fn rect(html: &str, css: &str, id: &str) -> Rect {
-        let (doc, layout) = run(html, css);
+        rect_in(html, css, MONO, id)
+    }
+
+    /// `rect` with the style sheet `ua` after the default style sheet of the browser.
+    pub fn rect_in(html: &str, css: &str, ua: &str, id: &str) -> Rect {
+        let (doc, layout) = run_in(html, css, ua);
         let node = find(&doc, id);
         layout.fragments.iter().find(|f| f.node == node).unwrap_or_else(|| panic!("no fragment for {id}")).rect
     }

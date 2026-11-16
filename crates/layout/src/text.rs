@@ -25,7 +25,7 @@
 //!
 //! Comments compare Rust with JavaScript, because you know JS.
 
-use crate::font::{self, LETTER, Units};
+use crate::font::{self, Face, Units};
 use bare_css::cascade::ComputedStyle;
 use bare_css::values::{Keyword, Property, Value};
 
@@ -87,12 +87,12 @@ pub(crate) fn grapheme_breaks<'a>(parts: impl Iterator<Item = &'a str>) -> Vec<u
 
 /// The same case conversion as Pieces::width, with word-start state across sources.
 /// Spacing still counts source letters, as font::extra does.
-pub(crate) fn transformed_width(c: char, transform: Transform, word_start: &mut bool) -> Units {
+pub(crate) fn transformed_width(face: Face, c: char, transform: Transform, word_start: &mut bool) -> Units {
     let width = match transform {
-        Transform::Upper => c.to_uppercase().map(font::width_of).sum(),
-        Transform::Lower => c.to_lowercase().map(font::width_of).sum(),
-        Transform::Capitalize if *word_start => c.to_uppercase().map(font::width_of).sum(),
-        _ => font::width_of(c),
+        Transform::Upper => c.to_uppercase().map(|u| font::width_of(face, u)).sum(),
+        Transform::Lower => c.to_lowercase().map(|l| font::width_of(face, l)).sum(),
+        Transform::Capitalize if *word_start => c.to_uppercase().map(|u| font::width_of(face, u)).sum(),
+        _ => font::width_of(face, c),
     };
     *word_start = matches!(c, ' ' | '\t' | '\n');
     width
@@ -158,13 +158,14 @@ pub struct Pieces<'t> {
     pos: usize,
     ws: WhiteSpace,
     transform: Transform,
+    face: Face,
     flow: &'t mut Flow,
     // `&mut`: the iterator changes the `Flow` of its caller, so the next text node sees where this one ended.
 }
 
 /// Cut the text of a node into pieces.
-pub fn pieces<'t>(text: &'t str, ws: WhiteSpace, transform: Transform, flow: &'t mut Flow) -> Pieces<'t> {
-    Pieces { text, pos: 0, ws, transform, flow }
+pub fn pieces<'t>(text: &'t str, ws: WhiteSpace, transform: Transform, face: Face, flow: &'t mut Flow) -> Pieces<'t> {
+    Pieces { text, pos: 0, ws, transform, face, flow }
 }
 
 fn is_space(b: u8) -> bool {
@@ -192,12 +193,12 @@ impl Iterator for Pieces<'_> {
                 }
                 self.pos = end;
                 let word = &self.text[start..end];
-                let width = if high < 0x80 { (word.len() as Units).saturating_mul(LETTER) } else { self.width(word) };
+                let width = if high < 0x80 { font::ascii_width(self.face, word.as_bytes()) } else { self.width(word) };
                 self.flow.after_space = false;
                 return Some(Piece::Word { start: start as u32, end: end as u32, width });
             }
             if !self.ws.collapse {
-                // Spaces are kept: each space is one letter wide, each tab and newline is a piece of its own.
+                // Spaces are kept: each space is one space wide, each tab and newline is a piece of its own.
                 self.flow.after_space = true;
                 self.pos += 1;
                 match b {
@@ -207,7 +208,7 @@ impl Iterator for Pieces<'_> {
                         let end = bytes[start..].iter().position(|&b| b != b' ').map_or(bytes.len(), |i| start + i);
                         self.pos = end.max(start + 1);
                         let count = (self.pos - start) as Units;
-                        return Some(Piece::Space { start: start as u32, end: self.pos as u32, width: count.saturating_mul(LETTER) });
+                        return Some(Piece::Space { start: start as u32, end: self.pos as u32, width: count.saturating_mul(self.face.space()) });
                     }
                 }
             }
@@ -226,7 +227,7 @@ impl Iterator for Pieces<'_> {
                 // A second space in a row, or a space at the start of a line: nothing to show.
             }
             self.flow.after_space = true;
-            return Some(Piece::Space { start: start as u32, end: end as u32, width: LETTER });
+            return Some(Piece::Space { start: start as u32, end: end as u32, width: self.face.space() });
         }
     }
 }
@@ -235,11 +236,12 @@ impl Pieces<'_> {
     /// The width of a word, after `text-transform`. A change of case can change the number of letters: `ß` becomes `SS`.
     fn width(&self, word: &str) -> Units {
         if word.is_ascii() || self.transform == Transform::None {
-            return font::width(word);
+            return font::width(self.face, word);
             // In ASCII, a change of case never changes the number of letters.
         }
-        let upper = |c: char| c.to_uppercase().fold(0, |sum: Units, u| sum + font::width_of(u));
-        let lower = |c: char| c.to_lowercase().fold(0, |sum: Units, l| sum + font::width_of(l));
+        let face = self.face;
+        let upper = |c: char| c.to_uppercase().fold(0, |sum: Units, u| sum + font::width_of(face, u));
+        let lower = |c: char| c.to_lowercase().fold(0, |sum: Units, l| sum + font::width_of(face, l));
         let mut chars = word.chars();
         let first = match (self.transform, self.flow.after_space) {
             (Transform::Upper, _) | (Transform::Capitalize, true) => chars.next().map_or(0, upper),
@@ -248,7 +250,7 @@ impl Pieces<'_> {
         let rest: Units = match self.transform {
             Transform::Upper => chars.map(upper).sum(),
             Transform::Lower => chars.map(lower).sum(),
-            _ => chars.map(font::width_of).sum(),
+            _ => chars.map(|c| font::width_of(face, c)).sum(),
         };
         first.saturating_add(rest)
     }
@@ -282,6 +284,7 @@ pub fn shown(text: &str, ws: WhiteSpace, transform: Transform, mut word_start: b
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::font::LETTER;
 
     const NORMAL: WhiteSpace = WhiteSpace { collapse: true, newlines: false, wrap: true };
     const PRE: WhiteSpace = WhiteSpace { collapse: false, newlines: true, wrap: false };
@@ -289,7 +292,7 @@ mod tests {
 
     /// The pieces as short text: `w:abc` for a word, `s` for a space with its width in letters, `n` and `t`.
     fn cut(text: &str, ws: WhiteSpace, transform: Transform, flow: &mut Flow) -> Vec<String> {
-        pieces(text, ws, transform, flow)
+        pieces(text, ws, transform, Face::Mono, flow)
             .map(|p| match p {
                 Piece::Word { start, end, width } => format!("{}:{}", &text[start as usize..end as usize], width),
                 Piece::Space { width, .. } => format!("s{}", width / LETTER),
@@ -301,7 +304,7 @@ mod tests {
 
     #[test]
     fn spaces_collapse() {
-        assert_eq!(cut("  a   b\n\n c  ", NORMAL, Transform::None, &mut Flow::new()), ["a:6", "s1", "b:6", "s1", "c:6", "s1"]);
+        assert_eq!(cut("  a   b\n\n c  ", NORMAL, Transform::None, &mut Flow::new()), ["a:600", "s1", "b:600", "s1", "c:600", "s1"]);
         // The space at the end stays here: the line breaker drops it at the end of a line, and it may be the space
         // between this node and the next one.
     }
@@ -309,23 +312,23 @@ mod tests {
     #[test]
     fn spaces_collapse_across_nodes() {
         let mut flow = Flow::new();
-        assert_eq!(cut("a ", NORMAL, Transform::None, &mut flow), ["a:6", "s1"]);
-        assert_eq!(cut(" b", NORMAL, Transform::None, &mut flow), ["b:6"]);
+        assert_eq!(cut("a ", NORMAL, Transform::None, &mut flow), ["a:600", "s1"]);
+        assert_eq!(cut(" b", NORMAL, Transform::None, &mut flow), ["b:600"]);
         assert_eq!(cut("   ", NORMAL, Transform::None, &mut flow), ["s1"], "the space between b and c");
         assert_eq!(cut(" ", NORMAL, Transform::None, &mut flow), Vec::<String>::new(), "a second space in a row");
-        assert_eq!(cut("c", NORMAL, Transform::None, &mut flow), ["c:6"]);
-        assert_eq!(cut("d", NORMAL, Transform::None, &mut flow), ["d:6"]);
+        assert_eq!(cut("c", NORMAL, Transform::None, &mut flow), ["c:600"]);
+        assert_eq!(cut("d", NORMAL, Transform::None, &mut flow), ["d:600"]);
     }
 
     #[test]
     fn pre_keeps_everything() {
-        assert_eq!(cut("a  b\n\tc", PRE, Transform::None, &mut Flow::new()), ["a:6", "s2", "b:6", "n", "t", "c:6"]);
+        assert_eq!(cut("a  b\n\tc", PRE, Transform::None, &mut Flow::new()), ["a:600", "s2", "b:600", "n", "t", "c:600"]);
         assert_eq!(cut("  ", PRE, Transform::None, &mut Flow::new()), ["s2"]);
     }
 
     #[test]
     fn pre_line_keeps_newlines_only() {
-        assert_eq!(cut("a  \n  b\n\nc", PRE_LINE, Transform::None, &mut Flow::new()), ["a:6", "n", "b:6", "n", "n", "c:6"]);
+        assert_eq!(cut("a  \n  b\n\nc", PRE_LINE, Transform::None, &mut Flow::new()), ["a:600", "n", "b:600", "n", "n", "c:600"]);
         // The spaces before and after a newline go (CSS Text 3, "Phase I: Collapsing and Transformation").
     }
 
@@ -336,14 +339,14 @@ mod tests {
 
     #[test]
     fn widths() {
-        assert_eq!(font::width("hello"), 30);
-        assert_eq!(font::width("e\u{301}"), 6, "an accent on a letter has no width");
-        assert_eq!(font::width("\u{4e2d}\u{6587}"), 20, "Chinese letters are 1 em");
-        assert_eq!(font::width("caf\u{e9}"), 24);
-        assert_eq!(cut("stra\u{df}e", NORMAL, Transform::Upper, &mut Flow::new()), ["stra\u{df}e:42"], "\u{df} becomes SS");
-        assert_eq!(cut("\u{df}a \u{df}b", NORMAL, Transform::Capitalize, &mut Flow::new()), ["\u{df}a:18", "s1", "\u{df}b:18"]);
+        assert_eq!(font::width(Face::Mono, "hello"), 3000);
+        assert_eq!(font::width(Face::Mono, "e\u{301}"), 600, "an accent on a letter has no width");
+        assert_eq!(font::width(Face::Mono, "\u{4e2d}\u{6587}"), 2000, "Chinese letters are 1 em");
+        assert_eq!(font::width(Face::Mono, "caf\u{e9}"), 2400);
+        assert_eq!(cut("stra\u{df}e", NORMAL, Transform::Upper, &mut Flow::new()), ["stra\u{df}e:4200"], "\u{df} becomes SS");
+        assert_eq!(cut("\u{df}a \u{df}b", NORMAL, Transform::Capitalize, &mut Flow::new()), ["\u{df}a:1800", "s1", "\u{df}b:1800"]);
         let mut flow = Flow { after_space: false };
-        assert_eq!(cut("\u{df}c", NORMAL, Transform::Capitalize, &mut flow), ["\u{df}c:12"], "not the start of a word");
+        assert_eq!(cut("\u{df}c", NORMAL, Transform::Capitalize, &mut flow), ["\u{df}c:1200"], "not the start of a word");
     }
 
     #[test]
@@ -355,9 +358,9 @@ mod tests {
 
     #[test]
     fn metrics() {
-        let m = font::Metrics::new(16.0);
+        let m = font::Metrics::new(16.0, Face::Mono);
         assert_eq!((m.ascent, m.descent), (17.0, 5.0));
         assert_eq!(m.normal_line_height(), 22.0);
-        assert_eq!(m.px(60), 96.0, "ten letters at 16px");
+        assert_eq!(m.px(6000), 96.0, "ten letters at 16px");
     }
 }

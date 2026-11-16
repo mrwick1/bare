@@ -5,6 +5,7 @@ use bare_css::cascade::{Origin, RuleSet, Styles, UA_CSS};
 use bare_html::dom::{Document, NodeId};
 use bare_html::tree;
 use bare_layout::boxes::{Child, Kind, Tree};
+use bare_layout::font::Face;
 use bare_layout::text::{self, Flow, Transform, WhiteSpace};
 use std::hint::black_box;
 
@@ -68,7 +69,7 @@ fn boxes(page: String, sheet: &str) -> Work {
 fn pieces(text: String, ws: WhiteSpace, transform: Transform) -> Work {
     Box::new(move || {
         let mut flow = Flow::new();
-        black_box(text::pieces(&text, ws, transform, &mut flow).count());
+        black_box(text::pieces(&text, ws, transform, Face::Sans, &mut flow).count());
     })
 }
 
