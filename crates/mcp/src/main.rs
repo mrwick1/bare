@@ -143,15 +143,15 @@ impl Server {
         let name = params.get("name").and_then(Value::as_str).unwrap_or("");
         // The secrets of the session that the call names, for the evidence of a failure; `close` drops the session, so take them first.
         let red = self.live.get(&session_name(&args)).map(|l| l.red.clone()).unwrap_or_default();
-        let fail = |f: Failure| json!({"content": [{"type": "text", "text": f.text}], "isError": true, "structuredContent": recovery::structured(&f, &red)});
+        let fail = |f: Failure, red: &Redactor| json!({"content": [{"type": "text", "text": red.clean(&f.text)}], "isError": true, "structuredContent": recovery::structured(&f, &red)});
         if let Err(e) = known_args(name, &args) {
-            return fail(Failure::args(e));
+            return fail(Failure::args(e), &red);
         }
         // The tools that act on a live session: the lookup of the session is the source of `missing_session`, before any argument is used.
         if matches!(name, "step" | "close" | "snapshot" | "find" | "read" | "links" | "act" | "downloads" | "eval" | "console" | "network" | "diagnose" | "screenshot" | "storage" | "save_state")
             && !self.live.contains_key(&session_name(&args))
         {
-            return fail(Failure::no_session(&session_name(&args)));
+            return fail(Failure::no_session(&session_name(&args)), &red);
         }
         // The failure of a step that did not make the call an error: it is only in the structured part, from this call's own report.
         let mut step_failure = None;
@@ -175,15 +175,17 @@ impl Server {
             "diagnose" => self.diagnose(&args).map_err(Failure::from),
             "sessions" => Ok(self.sessions()),
             "storage" => self.storage(&args).map_err(Failure::from),
-            "screenshot" => return self.screenshot(&args).unwrap_or_else(|e| fail(Failure::from(e))),
+            "screenshot" => return self.screenshot(&args).unwrap_or_else(|e| fail(Failure::from(e), &red)),
             n => Err(Failure::unknown_tool(n)),
         };
+        // A step can learn a new password. Use the redactor after execution for its evidence.
+        let red = self.live.get(&session_name(&args)).map(|l| l.red.clone()).unwrap_or(red);
         match done {
             Ok(text) => match step_failure {
                 Some(f) => json!({"content": [{"type": "text", "text": text}], "structuredContent": recovery::structured(&f, &red)}),
                 None => json!({"content": [{"type": "text", "text": text}]}),
             },
-            Err(f) => fail(f),
+            Err(f) => fail(f, &red),
         }
     }
 

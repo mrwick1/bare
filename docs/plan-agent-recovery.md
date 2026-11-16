@@ -75,10 +75,14 @@ A failed `tools/call` result keeps `content` (the text receipt) and `isError`. I
 
 - The driver gives no retry fact and no engine-feature evidence, so there is no `retry_safe` field and no `unsupported_browser_feature` code. A generic page error stays `page`.
 - Only `act`, `step`, session lookup, argument checks and tool lookup are typed. Other tools keep text errors and get `internal`.
-- `missing_session` is checked before dispatch for the session tools, so a bad-argument call with no session now reports the session first.
+- `missing_session` is checked before dispatch for the session tools, so operation-specific argument validation follows session lookup. Unknown argument names are checked first.
 - The failure is built from the per-call report of `run_live_typed`. No server-level "last error" slot exists.
 
 ### Integration with #614 (not done here)
 
 - Its `act` wrapper must keep the `Err(Failure { text: out, ..f })` return so `isError`, `structuredContent` and its `action_status`, `page_status` and `verification` fields all stay on every error path.
 - The case "input ran but the `expect` postcondition failed" gives driver kind `expect` here (`inspect_page`, `input_dispatched: unknown`). It needs a test after #614 lands.
+
+## Parent review
+
+The initial nine recovery tests passed on rerun. A tenth regression failed because structured evidence used a redactor captured before the step learned a password. Replies now use the updated session redactor after execution, retaining the original redactor for a removed session. Error receipt text is also cleaned. All ten recovery tests pass. `cargo check --workspace` and `git diff --check` pass. The broader MCP server suite has 93 passes, 2 failures and 1 ignored test. Both failing tests (snapshot timing and hidden-iframe downloads) reproduced on the clean baseline. Combined behavior with #614 and full workspace tests remain unverified.

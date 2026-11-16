@@ -185,3 +185,16 @@ fn a_generic_page_failure_is_not_called_an_unsupported_feature() {
         assert!(["page", "not_found", "internal", "expect"].contains(&r["structuredContent"]["failure"]["code"].as_str().unwrap()), "{r}");
     }
 }
+
+#[test]
+fn secrets_learned_during_a_step_are_redacted_in_its_failure() {
+    fn password_page(_: &str, _: &str, _: &str, _: Option<&str>) -> (u16, &'static str, Vec<u8>) {
+        (200, "text/html", b"<!doctype html><body><label>Password<input type=password></label></body>".to_vec())
+    }
+    let mut s = Server::start();
+    s.call("open", json!({"url": common::serve_route(password_page), "timeout_ms": 1000}));
+    let r = s.call("step", json!({"steps": "type label=\"Password\" \"learned-password-123\"\nexpect text=\"learned-password-123\" visible"}));
+    assert_eq!(r["structuredContent"]["failure"]["code"], "not_found", "{r}");
+    assert!(!r.to_string().contains("learned-password-123"), "{r}");
+    assert!(r.to_string().contains("[secret]"), "{r}");
+}
