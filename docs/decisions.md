@@ -2390,3 +2390,10 @@ Issue #580: `bare-mcp` aborted with a stack overflow when a snapshot named an el
 - Fix: a reference passes `depth + 1`. The referenced node itself is still shown when hidden (`in_ref`), as accname 1.2 says.
 - Parallel opens were not the cause. A snapshot of that page crashed the server alone.
 - Not done: a loop that fans out over many ids can still cost up to width^32 steps before the limit. No page has shown it.
+
+## Same address again fires no hashchange (issue #564, 2026-11-16)
+
+- Problem: `deck` scans Gmail with `goto` to the same `#search/...` address each cycle. A `goto` or `location` change to the address that the document already has queued `popstate` and `hashchange`. Chrome fires no event then (to verify: from the HTML Standard, which fires `hashchange` only when the fragment changes). A router that renders on `hashchange` rendered the view twice. This can leave a stale search box or a grid count other than 1.
+- Fix: `Dom::navigate` still replaces the entry for the same address. It queues no task. A fragment that changes still queues `popstate` then `hashchange`.
+- Test: `crates/drive/tests/goto_spa_route.rs` (a hash-routed fixture, four `goto` of one address) and `fragment_navigation_updates_at_once_and_queues_events`, which now expects 2 events (it expected 3).
+- Not verified: live Gmail. This is the one difference that a local fixture shows. It is a hypothesis that it is the cause of the live failures.
