@@ -2367,3 +2367,10 @@ Owner decision (2026-11-15): build P1, P4 and P2 of [design-gmail-js.md](design-
 - Cause: `type_start` clears a filled field with Control+A and Backspace. Control+A on a focused field selects its text only when selection applies to it. Selection does not apply to `email` and `number` (as in the spec). The key fell through to a no-op, so the old text stayed.
 - Fix: Control+A on any editable field selects its text through `select_text`. The test also covers `url`, `tel`, `search` and `password`.
 - Test: `act_type_replaces_the_old_value_of_a_value_input` in `crates/mcp/tests/server.rs`.
+## A labelledby loop no longer overflows the stack (2026-11-16)
+
+Issue #580: `bare-mcp` aborted with a stack overflow when a snapshot named an element on the deepmind blog page. The page has an element inside the element that its `aria-labelledby` points at.
+- Cause: `Cx::alt` restarted its depth at 0 for each referenced element, so the limit of 32 never held in a loop of references.
+- Fix: a reference passes `depth + 1`. The referenced node itself is still shown when hidden (`in_ref`), as accname 1.2 says.
+- Parallel opens were not the cause. A snapshot of that page crashed the server alone.
+- Not done: a loop that fans out over many ids can still cost up to width^32 steps before the limit. No page has shown it.
