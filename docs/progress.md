@@ -12702,3 +12702,7 @@ The owner set Gmail load time as the main task on 2026-11-15.
 ### Owner decision on P1 (2026-11-15)
 
 The owner grants a cost exception for 4 rows: `builtins_load replace 1` (+0.99%), `replace 10` (+1.15%), `scan 1` (+0.85%) and `scan 10` (+0.97%). The reason: the cause is the codegen-unit split of `bare-js` (with `-C codegen-units=1` main and the branch are equal), not new work in those rows. P1 cuts the Gmail page thread to the first row from 15.50 G to 14.16 G (-8.6%). The PR merges as it is. Work stays paused after this merge (see "Pause after the perf goal and the first Gmail work (2026-11-15)"). The next step on resume is P3.
+
+## `shot` waits for the page scripts (2026-11-16)
+
+`shot` waited for the document and the pictures only. It could take the picture before a page script ran or before the requests of a script ended. Now `shot` waits by the rule of `ready`: the document is in, `load` ran, `Page::idle` is `Ok` on two looks in a row, and no picture loads. This holds in step files and in the MCP `screenshot` tool. The wait ends at the step time limit. The picture is then taken anyway, and the step note says `not ready: ...`. Tests: `crates/drive/tests/shot_ready.rs`. Not tested: a live page such as `https://example.com/`.
