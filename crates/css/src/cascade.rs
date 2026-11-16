@@ -1065,6 +1065,25 @@ impl RuleSet {
                     }
                     continue;
                 }
+                // `@property --x { syntax: "*"; inherits: false; initial-value: v }`: the value of `--x` when nothing sets it. A rule of the
+                // browser origin gives it, so any author value wins. It lands on `*` (not inherited) or on `:root` (inherited). Types are not checked.
+                Rule::At(at) if &*at.name == "property" => {
+                    let AtBody::Declarations(ds) = &at.body else { continue };
+                    let name = at.prelude.trim();
+                    let get = |n: &str| ds.iter().rev().find(|d| d.name.eq_ignore_ascii_case(n)).map(|d| d.value.trim());
+                    let (Some(_), Some(inherits), Some(value)) = (get("syntax"), get("inherits"), get("initial-value")) else { continue };
+                    if !name.starts_with("--") || name.len() == 2 || !(inherits.eq_ignore_ascii_case("true") || inherits.eq_ignore_ascii_case("false")) {
+                        continue;
+                    }
+                    let Some(selectors) = parse_selector_list_in(if inherits.eq_ignore_ascii_case("true") { ":root" } else { "*" }, doc, if scope == 0 { Mode::Document } else { Mode::Shadow }) else { continue };
+                    let Some(body) = self.read_block(|_, _, customs| customs.push(CustomDecl { name: name.into(), text: value.into(), important: false })) else { continue };
+                    self.bodies.push(body);
+                    let body = self.bodies.len() as u32 - 1;
+                    for selector in selectors {
+                        self.push(selector, body, layer, Origin::UserAgent, scope);
+                    }
+                    continue;
+                }
                 Rule::At(at) => {
                     if at.name.ends_with("keyframes") && matches!(at.body, AtBody::Rules(_)) {
                         self.keyframes.insert(at.prelude.trim().trim_matches(['"', '\'']).into());
@@ -4540,6 +4559,25 @@ mod tests {
         let page = "<p id=p style='color: lime !important'>x</p>";
         assert_eq!(get(page, &["@layer a { p { color: red !important } }"], "p", Property::TextColor), lime);
         let _ = blue;
+    }
+
+    #[test]
+    fn registered_property_initial_value_is_used() {
+        let (red, blue) = (rgb(255, 0, 0), rgb(0, 0, 255));
+        let color = |css: &str, id: &str| {
+            let mut doc = parse("<div id=a><p id=p>x</p></div>");
+            let mut rules = RuleSet::new(VIEW);
+            rules.add(&mut doc, css, Origin::Author);
+            rules.compute(&doc).style(by_id(&doc, id)).unwrap().get(Property::TextColor)
+        };
+        let reg = "@property --c { syntax: \"*\"; inherits: false; initial-value: red }";
+        assert_eq!(color(&format!("{reg} p {{ color: var(--c) }}"), "p"), red);
+        // An author value wins, and a value that is not inherited does not reach the child.
+        assert_eq!(color(&format!("{reg} #a {{ --c: blue }} #a {{ color: var(--c) }}"), "a"), blue);
+        assert_eq!(color(&format!("{reg} #a {{ --c: blue }} p {{ color: var(--c) }}"), "p"), red);
+        let inh = "@property --c { syntax: \"*\"; inherits: true; initial-value: red }";
+        assert_eq!(color(&format!("{inh} #a {{ --c: blue }} p {{ color: var(--c) }}"), "p"), blue);
+        assert_eq!(color(&format!("{inh} p {{ color: var(--c) }}"), "p"), red);
     }
 
     #[test]

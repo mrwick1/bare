@@ -11,7 +11,7 @@
 //!   `var()` with no value and no fallback, makes the property not set. A normal property in that case is `unset`.
 //! - The set of custom properties of an element is kept once for all the elements that have the same one (`Sets`).
 //!
-//! Left out: `@property` (types, initial values, no inheritance), and `var()` inside `env()` and the like.
+//! `@property` gives an `initial-value` (see `RuleSet::add_rules`); its types are not checked. Left out: `var()` inside `env()` and the like.
 //! The text is cut and pasted, not split in tokens, so `var(--a)px` with `--a: 1` gives `1px` here, and Chrome does not accept it.
 //! JS: like a template string, where `${}` is replaced and the result is read again.
 
