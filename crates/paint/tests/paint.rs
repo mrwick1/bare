@@ -24,12 +24,17 @@ struct Page {
     layout: Layout,
 }
 
+/// The default font of these tests: Noto Sans Mono. The fixtures and their hashes were made with it (the fixtures were drawn in Chrome with that
+/// font), and the initial `font-family` is `sans-serif`. Only the bars tests below and the Sans pen test use the proportional face.
+const MONO: &str = "html { font-family: monospace }";
+
 /// Parse, cascade (the browser sheet and the `<style>` elements) and lay out.
 fn page(html: &str) -> Page {
     let mut doc = tree::parse(html);
     let viewport = (W as f32, H as f32);
     let mut rules = RuleSet::new(viewport);
     rules.add(&mut doc, UA_CSS, Origin::UserAgent);
+    rules.add(&mut doc, MONO, Origin::UserAgent);
     for source in bare_css::cascade::sources(&doc, viewport) {
         if let Source::Inline(text) = source {
             rules.add(&mut doc, &text, Origin::Author);
@@ -135,21 +140,16 @@ fn borders() {
     assert_eq!(c.hash(), 0x91f6_b033_d5cf_7d87);
 }
 
-#[test]
-fn text_uses_the_layout_metrics() {
-    // 50 bars at 16 px: each is 9.6 px wide in layout, so the run is 480 px: it wraps. Use a wide window of 100 letters.
-    let p = {
-        let mut doc = tree::parse(&format!("<!doctype html><body style='margin:0'><div style='width:2000px'>{}</div>", "|".repeat(50)));
-        let viewport = (2000.0, 40.0);
-        let mut rules = RuleSet::new(viewport);
-        rules.add(&mut doc, UA_CSS, Origin::UserAgent);
-        let styles = rules.compute(&doc);
-        let layout = bare_layout::layout(&doc, &styles, viewport);
-        Page { doc, styles, layout }
-    };
-    let c = capture(&p.doc, &p.styles, &p.layout, 2000, 40);
-    let text = p.layout.fragments.iter().find(|f| matches!(f.kind, bare_layout::fragment::Kind::Text { .. })).unwrap();
-    assert_eq!(text.rect.w, 480.0, "50 letters of 9.6 px");
+/// 50 bars at 16 px in a wide window: lay out the page, draw it, and give the layout rectangle of the run and the columns of ink of each bar.
+fn bars(family: &str) -> (bare_layout::fragment::Rect, Vec<(u32, u32)>) {
+    let mut doc = tree::parse(&format!("<!doctype html><body style='margin:0;font-family:{family}'><div style='width:2000px'>{}</div>", "|".repeat(50)));
+    let viewport = (2000.0, 40.0);
+    let mut rules = RuleSet::new(viewport);
+    rules.add(&mut doc, UA_CSS, Origin::UserAgent);
+    let styles = rules.compute(&doc);
+    let layout = bare_layout::layout(&doc, &styles, viewport);
+    let c = capture(&doc, &styles, &layout, 2000, 40);
+    let text = layout.fragments.iter().find(|f| matches!(f.kind, bare_layout::fragment::Kind::Text { .. })).unwrap();
     // The ink of each bar: find the columns that have ink, and group them.
     let mut groups: Vec<(u32, u32)> = Vec::new();
     for x in 0..2000 {
@@ -160,15 +160,68 @@ fn text_uses_the_layout_metrics() {
             _ => {}
         }
     }
-    assert_eq!(groups.len(), 50, "one group of columns for each letter");
-    // The pitch from the first letter to the last is 49 steps of 9.6 px. The centers of the groups measure it to
-    // better than a quarter of a pixel, even though each letter sits on a whole pixel or a quarter.
+    (text.rect, groups)
+}
+
+/// The pitch from the first bar to the last: the centers of the groups of ink measure it to better than a quarter of a pixel, even though
+/// each bar sits on a whole pixel or a quarter.
+fn pitch(groups: &[(u32, u32)]) -> f32 {
     let center = |g: (u32, u32)| (g.0 + g.1) as f32 / 2.0;
-    let pitch = (center(groups[49]) - center(groups[0])) / 49.0;
-    assert!((pitch - 9.6).abs() < 0.02, "pitch {pitch}");
+    (center(groups[49]) - center(groups[0])) / 49.0
+}
+
+#[test]
+fn text_uses_the_layout_metrics() {
+    // Noto Sans Mono: each bar is 9.6 px wide in layout, so the run is 480 px.
+    let (rect, groups) = bars("monospace");
+    assert_eq!(rect.w, 480.0, "50 letters of 9.6 px");
+    assert_eq!(groups.len(), 50, "one group of columns for each letter");
+    assert!((pitch(&groups) - 9.6).abs() < 0.02, "pitch {}", pitch(&groups));
     // The run stays inside the rectangle that layout made for it.
-    assert!(groups[0].0 as f32 >= text.rect.x - 1.0);
-    assert!(groups[49].1 as f32 <= text.rect.x + text.rect.w + 1.0);
+    assert!(groups[0].0 as f32 >= rect.x - 1.0);
+    assert!(groups[49].1 as f32 <= rect.x + rect.w + 1.0);
+}
+
+/// Noto Sans: the advance of `|` is 551 of 1000 units, so a bar is 8.816 px wide at 16 px. The pitch of the ink is that of layout.
+#[test]
+fn sans_text_uses_the_layout_metrics() {
+    let (rect, groups) = bars("sans-serif");
+    assert!((rect.w - 50.0 * 8.816).abs() < 0.01, "50 letters of 8.816 px: {}", rect.w);
+    assert_eq!(groups.len(), 50, "one group of columns for each letter");
+    assert!((pitch(&groups) - 8.816).abs() < 0.02, "pitch {}", pitch(&groups));
+    assert!(groups[0].0 as f32 >= rect.x - 1.0);
+    assert!(groups[49].1 as f32 <= rect.x + rect.w + 1.0);
+}
+
+/// Each glyph of a word sits where layout puts it: at the sum of the advances of the letters before it, in whole units of 1/1000 em. Drawing the
+/// letters one by one at those places gives the same pixels as drawing the word. (A place is quantised to a quarter of a pixel, so equal pixels
+/// mean the same place to better than 0.02 px for all but a rounding case, and the word is 5 letters of different widths.)
+#[test]
+fn the_glyphs_of_a_sans_word_sit_at_the_layout_widths() {
+    use bare_layout::font::{self, Face};
+    use bare_paint::canvas::IRect;
+    let clip = IRect { x0: 0, y0: 0, x1: 300, y1: 60 };
+    for (face, size) in [(Face::Sans, 16.0), (Face::SansBold, 16.0), (Face::Sans, 13.0), (Face::SansBold, 21.5)] {
+        let word = "Wilmi.W";
+        let mut glyphs = bare_paint::glyphs::Glyphs::new();
+        let mut whole = Canvas::new(300, 60);
+        whole.fill(clip, WHITE);
+        bare_paint::text(&mut whole, &mut glyphs, clip, 10.3, 40, size, 0xff00_0000, face, (0.0, 0.0), word);
+        let mut parts = Canvas::new(300, 60);
+        parts.fill(clip, WHITE);
+        let mut units = 0;
+        for c in word.chars() {
+            let x = 10.3 + units as f32 * size / 1000.0;
+            bare_paint::text(&mut parts, &mut glyphs, clip, x, 40, size, 0xff00_0000, face, (0.0, 0.0), &c.to_string());
+            units += font::width_of(face, c);
+        }
+        assert_eq!(whole.hash(), parts.hash(), "{face:?} at {size}");
+        assert!(whole.pixels.iter().any(|&p| p != WHITE), "something is drawn");
+        // And the run is as wide as layout says: no ink past the layout width (plus the overhang of the last glyph, less than 2 px).
+        let width = font::Metrics::new(size, face).px(font::width(face, word));
+        let right = (0..300u32).rev().find(|&x| (0..60).any(|y| whole.pixel(x, y) != WHITE)).unwrap();
+        assert!((right as f32) < 10.3 + width + 2.0, "{face:?}: ink to {right}, layout width {width}");
+    }
 }
 
 #[test]
