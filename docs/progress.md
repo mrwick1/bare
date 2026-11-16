@@ -12714,3 +12714,9 @@ The owner grants a cost exception for 4 rows: `builtins_load replace 1` (+0.99%)
 ## `shot` waits for the page scripts (2026-11-16)
 
 `shot` waited for the document and the pictures only. It could take the picture before a page script ran or before the requests of a script ended. Now `shot` waits by the rule of `ready`: the document is in, `load` ran, `Page::idle` is `Ok` on two looks in a row, and no picture loads. This holds in step files and in the MCP `screenshot` tool. The wait ends at the step time limit. The picture is then taken anyway, and the step note says `not ready: ...`. Tests: `crates/drive/tests/shot_ready.rs`. Not tested: a live page such as `https://example.com/`.
+
+## `sessions` names a session with no document, and the hidden iframe download test (#573, #585, 2026-11-16)
+
+- #573: after a `goto` that fails, `sessions` printed `main: `. Now it prints `main: (no document: the document did not load: network error: connect refused)`. A session with no document and no error prints `main: (no document)`. `load_document` now keeps the kind of the cause (`dns`, `connect refused`, `read timeout`, `reset`...) from `bare_net::cause::describe`. It drops the error text, because the text can name a host or a URL. New test: `sessions_names_a_session_whose_document_did_not_load` (failed before, passes after).
+- #585: root cause is the test, not the product. The wait loop counted `" bytes"` in the list. A running download prints `running: <url> (0 bytes)`, so the loop ended at once (the test ended in 0.03 s) and the check for `report.csv (` ran before the file was saved. The loop now counts `" bytes, "`, which only a finished download prints. Before: 5 failures in 10 runs. After: 0 in 10.
+- Not tested: a `read timeout` cause end to end (the test uses a closed port); other load errors (`the time limit passed` and similar) keep their text.

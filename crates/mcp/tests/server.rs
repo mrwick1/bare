@@ -2342,7 +2342,7 @@ fn a_hidden_iframe_download_is_saved() {
         loop {
             let (list, _) = s.tool("downloads", json!({}));
             let list = list.as_str().unwrap().to_string();
-            if list.matches(" bytes").count() >= n || t.elapsed().as_secs() > 5 {
+            if list.matches(" bytes, ").count() >= n || t.elapsed().as_secs() > 5 {
                 return list;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
@@ -2364,6 +2364,22 @@ fn a_hidden_iframe_download_is_saved() {
     let (r, _) = s.tool("eval", json!({"js": "location.pathname"}));
     assert_eq!(r, json!("/frames"));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A `goto` to a URL that does not answer leaves a session with no document. `sessions` says so, with the cause (#573).
+#[test]
+fn sessions_names_a_session_whose_document_did_not_load() {
+    let mut s = Server::start();
+    let base = common::serve_route(frame_pages);
+    let (r, error) = s.tool("open", json!({"url": format!("{base}/frames"), "snapshot": false}));
+    assert!(!error, "{r}");
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let (r, _) = s.tool("step", json!({"steps": format!("goto http://127.0.0.1:{closed}/x?token=secret")}));
+    assert!(r.to_string().contains("did not load"), "{r}");
+    let (r, _) = s.tool("sessions", json!({}));
+    let r = r.as_str().unwrap();
+    assert!(r.contains("main: (no document: the document did not load: network error: connect refused)"), "{r}");
+    assert!(!r.contains("secret"), "{r}");
 }
 
 /// A site with two pages that load the same two scripts: `/app.js` is `public` and `/priv.js` is `private`. Gives the base URL and the log of the
