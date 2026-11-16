@@ -252,6 +252,18 @@ fn a_bad_status_type_encoding_or_size_ends_the_session_with_a_fixed_label() {
 }
 
 #[test]
+fn a_16_mib_document_loads_with_the_default_limits() {
+    // The one-page HTML Standard is near 16 MB of HTML.
+    big(|| {
+        let srv = server(|| vec![("/huge", html(&format!("<p>{}</p><script>localStorage.setItem('ran','yes')</script>", "a".repeat(16 << 20))))]);
+        let mut s = Session::new(cfg(srv.url("/huge")));
+        let r = s.run();
+        assert!(!matches!(r.stop, SessionStop::LoadFailed(_)), "{:?}", r.stop);
+        assert_eq!(get(&s, &srv, "ran").as_deref(), Some("yes"));
+    });
+}
+
+#[test]
 fn a_text_or_image_document_becomes_a_pre_or_an_img_and_other_types_are_downloads() {
     let doc = |ct: &str, body: &[u8]| non_html_document(Some(ct), "http://h.test/a?x=1&y=2", body);
     assert_eq!(doc("application/json", b"{\"a\": \"<b>\"}").unwrap(), "<pre style=\"white-space:pre-wrap;word-wrap:break-word\">{\"a\": \"&lt;b&gt;\"}</pre>");

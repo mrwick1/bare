@@ -295,18 +295,12 @@ impl Session {
 
     /// A PNG at `path` of the page window, of the whole page (`full`), or of the whole box of the element of ref `r`, whatever its
     /// height: the page is painted from its layout, without a scroll. A picture is at most `SHOT_MAX` pixels tall; the reply says when
-    /// that cut it. Waits up to the step time limit for the document and its pictures. Refused when a secret shows on the page.
+    /// that cut it. Waits up to the step time limit for the page to be ready (`settle`), and then says `not ready` if it was not. Refused when a secret shows on the page.
     pub fn screenshot(&mut self, path: PathBuf, r: Option<u32>, full: bool, red: &Redactor) -> Result<String, String> {
         let (red, limit) = (red.clone(), self.timeout);
-        self.with_refs(move |p, refs| {
-            let end = bare_net::vclock::instant() + limit;
-            let _ = p.wait_load(limit);
-            while (p.loading() || p.images_pending()) && bare_net::vclock::instant() < end {
-                let (more, next) = p.tick();
-                if !more {
-                    p.nap(next, Duration::from_millis(5), Duration::from_millis(20));
-                }
-            }
+        let (late, logs) = self.host.run(move |p| settle(p, bare_net::vclock::instant() + limit))?;
+        self.hist.feed(logs, []);
+        let said = self.with_refs(move |p, refs| {
             if !shown(p, &red) {
                 return Err("withheld: a secret shows on the page".to_string());
             }
@@ -336,7 +330,8 @@ impl Session {
             bare_paint::png::write_file(&c, &path).map_err(|e| format!("{}: {e}", path.display()))?;
             let note = if cut { format!(", cut at the limit of {SHOT_MAX} px") } else { String::new() };
             Ok(format!("{} ({}x{}{note})", path.display(), c.width, c.height))
-        })?
+        })??;
+        Ok(late.map_or(said.clone(), |n| format!("{said}; {n}")))
     }
 
     /// Run a script in the page and give its value as text: an object as compact JSON of at most `EVAL_MAX` characters (`Browser::inspect`). A Promise is awaited up to the time limit.
@@ -509,6 +504,15 @@ impl Session {
     if matches!(step.action, Action::Open(..) | Action::Goto(_) | Action::Reload | Action::Back | Action::Forward) {
         *nav_first = rep.net.len();
     }
+    // A `shot` first waits for the page by the rule of an `open` with `ready_wait`; a page that is not ready at the limit still gets its picture.
+    let mut late = None;
+    if matches!(step.action, Action::Shot(_)) {
+        // If the page thread is gone, the first try of the step says so.
+        if let Ok((note, logs)) = host.run(move |p| settle(p, deadline)) {
+            late = note;
+            rep.logs.extend(logs.into_iter().map(|l| (step.line, l)));
+        }
+    }
     let result: Result<Option<String>, Fail> = loop {
         tries += 1;
         // On the benchmark clock (`bare_net::vclock`) each try of a step takes a fixed time: the round trip of an input event.
@@ -626,7 +630,10 @@ impl Session {
                 (navigating, doc0) = (true, None);
             }
             Try::Done(_) if *ready_wait && doc0.is_some() => navigating = true,
-            Try::Done(note) => break Ok(note),
+            Try::Done(note) => break Ok(match (note, late.take()) {
+                (Some(n), Some(l)) => Some(format!("{n}; {l}")),
+                (n, l) => n.or(l),
+            }),
             Try::More => {}
             Try::Stop(f) => break Err(f),
             Try::Again(f) => {
@@ -1020,6 +1027,44 @@ fn ready(p: &mut Page, at_end: bool) -> Look {
     }
     let waits = if at_end && idle.is_err() { waits(&p.pending()) } else { String::new() };
     Look { ran, next, idle, fail, stopped, doc: p.generation(), status, url: safe_url(&url), title: locate::norm(&title), text, waits, logs: p.take_logs() }
+}
+
+/// Wait until the page is ready, by the rule of `ready`: the document is in, `load` ran, nothing waits and no picture loads, on two looks
+/// in a row. Stops at `end`. Gives a `not ready` note when it stopped before, and the logs of the page that the looks took.
+fn settle(p: &mut Page, end: Instant) -> (Option<String>, Vec<Log>) {
+    let (t0, mut calm, mut logs) = (Instant::now(), 0u8, Vec::new());
+    let note = loop {
+        let at_end = bare_net::vclock::instant() >= end;
+        let r = ready(p, at_end);
+        let ms = t0.elapsed().as_millis();
+        logs.extend(r.logs);
+        // A document that did not load is not waited for: the picture shows what there is.
+        if r.fail.is_some() {
+            break None;
+        }
+        if r.stopped.is_some() {
+            break Some(format!("not ready: the page stopped after {ms} ms ({}), body {}", r.stopped.as_deref().unwrap_or(""), if r.text.is_empty() { "empty" } else { "has content" }));
+        }
+        let quiet = r.idle.is_ok() && !p.images_pending();
+        if quiet && !r.text.is_empty() {
+            calm = if r.ran { 0 } else { calm + 1 };
+            if calm >= 2 {
+                break None;
+            }
+        } else if quiet && !r.ran && r.next.is_none() {
+            // Empty and nothing can change it: no task, no request, no timer.
+            break Some(format!("not ready: body empty after {ms} ms, 0 requests pending"));
+        } else {
+            calm = 0;
+            if at_end {
+                break Some(format!("not ready: {} after {ms} ms, {}", if r.text.is_empty() { "body empty" } else { "still loading" }, if r.waits.is_empty() { waits(&p.pending()) } else { r.waits }));
+            }
+        }
+        if !r.ran {
+            p.nap(r.next, Duration::from_millis(5), Duration::from_millis(20));
+        }
+    };
+    (note, logs)
 }
 
 /// What holds a page that is not ready, for the `not ready` note: the number of requests, then up to 2 of the things that hold it,
