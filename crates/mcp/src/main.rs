@@ -17,13 +17,17 @@
 
 use bare_drive::{DownloadState, Downloads};
 use bare_drive::locate::{Locator, Text};
-use bare_drive::run::{Event, Options, Redactor, Report, Session, StorageState};
+use bare_drive::run::{Event, Options, Redactor, Report, Session, StorageState, cancelled, set_cancel};
 use bare_drive::snap::{self, Mode};
 use bare_drive::steps;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
-use std::sync::mpsc::{self, RecvTimeoutError};
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 /// A live session: the page, its options and its secrets, kept between tool calls.
@@ -40,16 +44,75 @@ struct Live {
     told: std::collections::HashSet<usize>,
 }
 
+/// The tools that one worker thread runs for one live session, and also the one-shot calls (`run_steps`, `run_suite`, `sessions`), each on
+/// a thread of its own with an empty `live`. A page is not `Send`: it is built on the thread that owns it and never leaves it. Only JSON
+/// and plain data cross between threads.
 struct Server {
-    workspace: Option<u32>,
-    /// Live sessions by name (`session`, default `main`): one page each, side by side.
+    shared: Arc<Shared>,
+    /// A session worker holds its one session here, by name (`session`, default `main`).
     live: HashMap<String, Live>,
+}
+
+/// What every thread shares. No lock is held while a page runs: each lock guards a short read or write of a map.
+struct Shared {
+    workspace: Option<u32>,
     /// Saved sessions by name: cookies and storage, in this process only. A file is written only when a call gives `file`.
-    saved: HashMap<String, StorageState>,
+    saved: Mutex<HashMap<String, StorageState>>,
     /// A counter for the capture folders of this process.
-    runs: u32,
+    runs: AtomicU32,
     /// The network client that every `open` forks (see `start`): the connections and the reply cache outlive a session.
-    net: bare_net::http::Client,
+    net: Mutex<bare_net::http::Client>,
+    /// The writer thread: one complete JSON line at a time.
+    out: mpsc::Sender<Out>,
+    /// The session workers by name. The only holders of a queue sender, so removing a slot closes its queue.
+    sessions: Mutex<HashMap<String, Slot>>,
+    /// The cancellation token of each request that has no reply yet, by request id (as JSON text).
+    inflight: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    /// Session workers and one-shot calls, joined at shutdown.
+    threads: Mutex<Vec<JoinHandle<()>>>,
+    closing: AtomicBool,
+}
+
+enum Out {
+    Line(String),
+    /// Answer when every line before is written.
+    Flush(mpsc::Sender<()>),
+}
+
+enum Input {
+    Line(String),
+    Eof,
+    WriterGone,
+}
+
+/// A tool call on its way: where its reply goes and the token that cancels it.
+struct Job {
+    /// The request id as JSON text. `None` for an internal job.
+    key: Option<String>,
+    /// The `params` of the `tools/call` request.
+    params: Value,
+    cancel: Arc<AtomicBool>,
+    done: Box<dyn FnOnce(Value) + Send>,
+}
+
+/// The queue of a session worker. `busy` counts its queued and running jobs; `url` is its page address as of its last job.
+struct Slot {
+    tx: SyncSender<Job>,
+    url: Arc<Mutex<String>>,
+    busy: Arc<AtomicUsize>,
+}
+
+/// The calls that wait for one session. More than this is refused at once with an error, so a client cannot grow the queue without a bound.
+const QUEUE: usize = 64;
+/// The most one-shot calls at the same time.
+const ONESHOT: usize = 16;
+
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn error_result(text: impl Into<String>) -> Value {
+    json!({"content": [{"type": "text", "text": text.into()}], "isError": true})
 }
 
 fn main() {
@@ -65,57 +128,86 @@ fn main() {
         }
     }
     bare_net::parallel::limit_malloc_arenas(false);
-    let mut server = Server { workspace, live: HashMap::new(), saved: HashMap::new(), runs: 0, net: bare_net::http::Client::new() };
-    let mut out = std::io::stdout().lock();
-    // Another thread reads the requests, so that the live pages go on between calls (#471): timers, replies and the requests that
-    // they start, as in a browser tab. A page with work due now runs again after 1 ms at the earliest, so it does not spin a core.
-    let (tx, rx) = mpsc::channel();
+    // This thread only reads requests and routes them (`Shared::handle_line`), so `ping`, `tools/list` and `notifications/cancelled` are
+    // answered while pages work. A thread writes the replies, one whole line at a time. Each live session has a thread of its own that runs
+    // its calls in order and its page between calls (#471): timers, replies and the requests that they start, as in a browser tab. A page
+    // with work due now runs again after 1 ms at the earliest, so it does not spin a core.
+    let (otx, orx) = mpsc::channel::<Out>();
+    let (itx, irx) = mpsc::channel::<Input>();
+    let gone = itx.clone();
     std::thread::spawn(move || {
-        for line in std::io::stdin().lock().lines() {
-            if tx.send(line).is_err() {
-                break;
+        let mut out = std::io::stdout().lock();
+        for m in orx {
+            match m {
+                Out::Line(l) => {
+                    if writeln!(out, "{l}").and_then(|_| out.flush()).is_err() {
+                        let _ = gone.send(Input::WriterGone);
+                        return;
+                    }
+                }
+                Out::Flush(ack) => {
+                    let _ = ack.send(());
+                }
             }
         }
     });
-    loop {
-        let line = match server.tick_live() {
-            Some(at) => match rx.recv_timeout(at.saturating_duration_since(Instant::now()).max(Duration::from_millis(1))) {
-                Ok(l) => l,
-                Err(RecvTimeoutError::Timeout) => continue,
-                Err(RecvTimeoutError::Disconnected) => break,
-            },
-            None => match rx.recv() {
-                Ok(l) => l,
+    std::thread::spawn(move || {
+        for line in std::io::stdin().lock().lines() {
+            match line {
+                Ok(l) => {
+                    if itx.send(Input::Line(l)).is_err() {
+                        break;
+                    }
+                }
                 Err(_) => break,
-            },
-        };
-        let Ok(line) = line else { break };
-        if line.trim().is_empty() {
-            continue;
-        }
-        let reply = match serde_json::from_str::<Value>(&line) {
-            Ok(msg) => server.handle(&msg),
-            Err(e) => Some(json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32700, "message": format!("parse error: {e}")}})),
-        };
-        // A notification (no `id`) gets no reply.
-        if let Some(r) = reply {
-            if writeln!(out, "{r}").and_then(|_| out.flush()).is_err() {
-                break;
             }
         }
+        let _ = itx.send(Input::Eof);
+    });
+    let shared = Arc::new(Shared {
+        workspace,
+        saved: Mutex::new(HashMap::new()),
+        runs: AtomicU32::new(0),
+        net: Mutex::new(bare_net::http::Client::new()),
+        out: otx,
+        sessions: Mutex::new(HashMap::new()),
+        inflight: Mutex::new(HashMap::new()),
+        threads: Mutex::new(Vec::new()),
+        closing: AtomicBool::new(false),
+    });
+    while let Ok(Input::Line(line)) = irx.recv() {
+        shared.handle_line(&line);
     }
+    shared.shutdown();
 }
 
-impl Server {
-    /// One slice of work for each live page. Gives when the next task of a page is due.
-    fn tick_live(&mut self) -> Option<Instant> {
-        self.live.values_mut().filter_map(|l| l.session.tick()).min()
+impl Shared {
+    fn send(&self, v: Value) {
+        let _ = self.out.send(Out::Line(v.to_string()));
     }
 
-    fn handle(&mut self, msg: &Value) -> Option<Value> {
-        let id = msg.get("id")?.clone();
+    /// Read one line of input. A request gets one reply, except a cancelled one (see `finish`); a notification gets none.
+    fn handle_line(self: &Arc<Self>, line: &str) {
+        if line.trim().is_empty() {
+            return;
+        }
+        let msg = match serde_json::from_str::<Value>(line) {
+            Ok(m) => m,
+            Err(e) => return self.send(json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32700, "message": format!("parse error: {e}")}})),
+        };
+        let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
+        let Some(id) = msg.get("id").cloned() else {
+            // A notification: no `id`, and no reply. The id of the request to cancel is `params.requestId`. An unknown id, a request that
+            // already ended and a malformed notification are ignored, as the protocol says.
+            if method == "notifications/cancelled" {
+                if let Some(t) = msg.pointer("/params/requestId").and_then(|r| lock(&self.inflight).get(&r.to_string()).cloned()) {
+                    t.store(true, Ordering::SeqCst);
+                }
+            }
+            return;
+        };
         let params = msg.get("params").cloned().unwrap_or(json!({}));
-        let result = match msg.get("method").and_then(Value::as_str).unwrap_or("") {
+        let result = match method {
             "initialize" => Ok(json!({
                 // Answer with the version that the client asked for: this server uses only the tools part, which has not changed.
                 "protocolVersion": params.get("protocolVersion").cloned().unwrap_or(json!("2025-06-18")),
@@ -125,13 +217,252 @@ impl Server {
             })),
             "ping" => Ok(json!({})),
             "tools/list" => Ok(json!({"tools": tools()})),
-            "tools/call" => Ok(self.call(&params)),
+            "tools/call" => return self.dispatch(id, params),
             m => Err(json!({"code": -32601, "message": format!("unknown method {m}")})),
         };
-        Some(match result {
+        self.send(match result {
             Ok(r) => json!({"jsonrpc": "2.0", "id": id, "result": r}),
             Err(e) => json!({"jsonrpc": "2.0", "id": id, "error": e}),
-        })
+        });
+    }
+
+    /// Start a tool call. It runs on the thread of its session, or on one of its own for the tools that need no session.
+    fn dispatch(self: &Arc<Self>, id: Value, params: Value) {
+        let tool = params.get("name").and_then(Value::as_str).unwrap_or("").to_string();
+        let key = id.to_string();
+        let cancel = Arc::new(AtomicBool::new(false));
+        lock(&self.inflight).insert(key.clone(), cancel.clone());
+        let sh = self.clone();
+        let done = Box::new(move |v: Value| sh.send(json!({"jsonrpc": "2.0", "id": id, "result": v})));
+        let job = Job { key: Some(key), params, cancel, done };
+        if !tool_list().as_array().is_some_and(|t| t.iter().any(|t| t["name"] == tool.as_str())) {
+            return self.finish(job, error_result(format!("unknown tool {tool}")));
+        }
+        match tool.as_str() {
+            "run_steps" | "run_suite" | "sessions" => self.oneshot(job),
+            _ => self.route(job),
+        }
+    }
+
+    /// Deliver the result of a job, once. A cancelled job gets no reply: the protocol asks a server to stop and to send none.
+    fn finish(&self, job: Job, result: Value) {
+        if let Some(k) = &job.key {
+            lock(&self.inflight).remove(k);
+        }
+        if !job.cancel.load(Ordering::SeqCst) {
+            (job.done)(result);
+        }
+    }
+
+    /// Queue a job on the worker of its session, in arrival order. `open` and `ensure_session` start the worker when there is none. The
+    /// queue sender is used under the lock of the map, so a worker that retires (`retire`) cannot lose a job between the two.
+    fn route(self: &Arc<Self>, job: Job) {
+        let tool = job.params.get("name").and_then(Value::as_str).unwrap_or("");
+        let name = session_name(job.params.get("arguments").unwrap_or(&Value::Null));
+        let creates = matches!(tool, "open" | "ensure_session");
+        if self.closing.load(Ordering::SeqCst) {
+            return self.finish(job, error_result("the server is shutting down"));
+        }
+        let mut map = lock(&self.sessions);
+        if let Some(slot) = map.get(&name) {
+            slot.busy.fetch_add(1, Ordering::SeqCst);
+            return match slot.tx.try_send(job) {
+                Ok(()) => {}
+                Err(TrySendError::Full(job)) => {
+                    slot.busy.fetch_sub(1, Ordering::SeqCst);
+                    drop(map);
+                    self.finish(job, error_result(format!("session {name} has {QUEUE} calls queued: wait for their replies")));
+                }
+                Err(TrySendError::Disconnected(job)) => {
+                    map.remove(&name);
+                    drop(map);
+                    self.finish(job, error_result(format!("the worker of session {name} ended: call open first")));
+                }
+            };
+        }
+        if !creates {
+            drop(map);
+            return self.finish(job, error_result(format!("no live session {name}: call open first")));
+        }
+        let (tx, rx) = mpsc::sync_channel(QUEUE);
+        let (url, busy) = (Arc::new(Mutex::new(String::new())), Arc::new(AtomicUsize::new(1)));
+        let (sh, n, u, b) = (self.clone(), name.clone(), url.clone(), busy.clone());
+        match std::thread::Builder::new().name(format!("bare-mcp {name}")).spawn(move || worker(sh, n, rx, u, b, None)) {
+            Ok(h) => {
+                self.keep(h);
+                let _ = tx.try_send(job);
+                map.insert(name, Slot { tx, url, busy });
+            }
+            Err(e) => {
+                drop(map);
+                self.finish(job, error_result(format!("cannot start a thread for session {name}: {e}")));
+            }
+        }
+    }
+
+    /// A call that has no session of its own: a thread for this call alone.
+    fn oneshot(self: &Arc<Self>, job: Job) {
+        if lock(&self.threads).iter().filter(|h| !h.is_finished()).count() >= ONESHOT + lock(&self.sessions).len() {
+            return self.finish(job, error_result(format!("{ONESHOT} calls of run_steps, run_suite or sessions are running: wait for one")));
+        }
+        let sh = self.clone();
+        let slot = Arc::new(Mutex::new(Some(job)));
+        let moved = slot.clone();
+        match std::thread::Builder::new().name("bare-mcp call".into()).spawn(move || {
+            if let Some(job) = lock(&moved).take() {
+                Server { shared: sh, live: HashMap::new() }.run_job(job, None);
+            }
+        }) {
+            Ok(h) => self.keep(h),
+            Err(e) => {
+                if let Some(job) = lock(&slot).take() {
+                    self.finish(job, error_result(format!("cannot start a thread: {e}")));
+                }
+            }
+        }
+    }
+
+    fn keep(&self, h: JoinHandle<()>) {
+        let mut t = lock(&self.threads);
+        t.retain(|h| !h.is_finished());
+        t.push(h);
+    }
+
+    /// A worker that has no session left leaves the map, then hands the calls that wait in its queue to `route`: a call after a `close`
+    /// finds no session, and an `open` after it starts a new worker, as in the order that the client sent them.
+    fn retire(self: &Arc<Self>, name: &str, rx: &Receiver<Job>) {
+        lock(&self.sessions).remove(name);
+        for job in rx.try_iter() {
+            self.route(job);
+        }
+    }
+
+    /// Call `tool` on session `name` with no client request behind it, and wait for the result text. `None` when the session is gone.
+    fn ask(self: &Arc<Self>, name: &str, tool: &str) -> Option<Result<String, String>> {
+        let (tx, rx) = mpsc::channel();
+        let done = Box::new(move |v: Value| {
+            let text = v["content"][0]["text"].as_str().unwrap_or("").to_string();
+            let _ = tx.send(if v["isError"] == true { Err(text) } else { Ok(text) });
+        });
+        let params = json!({"name": tool, "arguments": {"session": name}});
+        self.route(Job { key: None, params, cancel: Arc::new(AtomicBool::new(false)), done });
+        // A busy worker is not asked (`sessions`), so this returns when one call ends; a cancellation of the caller stops the wait.
+        loop {
+            match rx.recv_timeout(Duration::from_millis(25)) {
+                Ok(r) => return Some(r),
+                Err(RecvTimeoutError::Timeout) if !cancelled() => {}
+                Err(_) => return None,
+            }
+        }
+    }
+
+    /// Start the worker of a tab of `base` under a free name `BASE~N`, and give the name.
+    fn start_tab(self: &Arc<Self>, base: &str, tab: Tab) -> Result<String, String> {
+        if self.closing.load(Ordering::SeqCst) {
+            return Err("the server is shutting down".into());
+        }
+        let mut map = lock(&self.sessions);
+        let name = (2..).map(|n| format!("{base}~{n}")).find(|n| !map.contains_key(n)).expect("a free name");
+        let (tx, rx) = mpsc::sync_channel(QUEUE);
+        let (url, busy) = (Arc::new(Mutex::new(String::new())), Arc::new(AtomicUsize::new(0)));
+        let (sh, n, u, b) = (self.clone(), name.clone(), url.clone(), busy.clone());
+        let h = std::thread::Builder::new().name(format!("bare-mcp {name}")).spawn(move || worker(sh, n, rx, u, b, Some(tab))).map_err(|e| format!("cannot start a thread: {e}"))?;
+        self.keep(h);
+        map.insert(name.clone(), Slot { tx, url, busy });
+        Ok(name)
+    }
+
+    fn run_no(&self) -> u32 {
+        self.runs.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// Stop at the end of input: cancel every request, close every queue, wait for the threads (a suite kills and reaps its workers when
+    /// it sees the token), and let the writer finish. A thread inside a native call that does not end is left to the exit of the process.
+    fn shutdown(&self) {
+        self.closing.store(true, Ordering::SeqCst);
+        for t in lock(&self.inflight).values() {
+            t.store(true, Ordering::SeqCst);
+        }
+        drop(std::mem::take(&mut *lock(&self.sessions)));
+        let end = Instant::now() + Duration::from_secs(10);
+        while lock(&self.threads).iter().any(|h| !h.is_finished()) && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let (ack, wait) = mpsc::channel();
+        if self.out.send(Out::Flush(ack)).is_ok() {
+            let _ = wait.recv_timeout(Duration::from_secs(2));
+        }
+    }
+}
+
+/// The thread of one live session: it runs the calls of its queue in order, and the page between calls. It ends when its session is gone
+/// (`close`, or a failed open) or when the queue closes. A tab starts with `tab`: it opens its page first and reports to its opener.
+fn worker(shared: Arc<Shared>, name: String, rx: Receiver<Job>, url: Arc<Mutex<String>>, busy: Arc<AtomicUsize>, tab: Option<Tab>) {
+    let mut server = Server { shared: shared.clone(), live: HashMap::new() };
+    if let Some(t) = tab {
+        server.begin_tab(&name, t);
+        server.publish(&name, &url);
+        if server.live.is_empty() {
+            return shared.retire(&name, &rx);
+        }
+    }
+    loop {
+        let job = match server.tick_live() {
+            Some(at) => match rx.recv_timeout(at.saturating_duration_since(Instant::now()).max(Duration::from_millis(1))) {
+                Ok(j) => j,
+                Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Disconnected) => return,
+            },
+            None => match rx.recv() {
+                Ok(j) => j,
+                Err(_) => return,
+            },
+        };
+        server.run_job(job, Some(&busy));
+        server.publish(&name, &url);
+        if server.live.is_empty() {
+            return shared.retire(&name, &rx);
+        }
+    }
+}
+
+/// The start of a tab session: what it copies from its opener, and where it reports the result of its first load.
+struct Tab {
+    opt: Options,
+    red: Redactor,
+    vars: HashMap<String, String>,
+    state: Option<StorageState>,
+    url: String,
+    done: mpsc::Sender<Result<(), String>>,
+}
+
+impl Server {
+    /// One slice of work for each live page. Gives when the next task of a page is due.
+    fn tick_live(&mut self) -> Option<Instant> {
+        self.live.values_mut().filter_map(|l| l.session.tick()).min()
+    }
+
+    /// Run a job on this thread with its token set, and deliver its reply unless it was cancelled. A job cancelled before it starts does
+    /// not run. A panic becomes an error reply and does not end the server.
+    fn run_job(&mut self, job: Job, busy: Option<&AtomicUsize>) {
+        let result = if job.cancel.load(Ordering::SeqCst) {
+            Value::Null
+        } else {
+            set_cancel(Some(job.cancel.clone()));
+            let r = catch_unwind(AssertUnwindSafe(|| self.call(&job.params)));
+            set_cancel(None);
+            r.unwrap_or_else(|_| error_result("internal error: the call panicked"))
+        };
+        // `busy` drops before the reply is sent, so a client that has the reply sees an idle session.
+        if let Some(b) = busy {
+            b.fetch_sub(1, Ordering::SeqCst);
+        }
+        self.shared.clone().finish(job, result);
+    }
+
+    /// Publish the page address for `sessions`, which does not wait for a busy session.
+    fn publish(&mut self, name: &str, url: &Mutex<String>) {
+        *lock(url) = self.live.get_mut(name).and_then(|l| l.session.url()).unwrap_or_default();
     }
 
     /// Run a tool. A tool error is a result with `isError`, not a protocol error, so the agent sees the message.
@@ -160,6 +491,8 @@ impl Server {
             "network" => self.network(&args),
             "diagnose" => self.diagnose(&args),
             "sessions" => Ok(self.sessions()),
+            // Internal: `sessions` asks an idle session for its tabs and dialogs. Not in the tool list, so a client cannot call it.
+            "sessions_probe" => self.live_mut(&args).and_then(|l| l.session.collect()).and_then(|_| self.late(&args)),
             "storage" => self.storage(&args),
             "screenshot" => return self.screenshot(&args).unwrap_or_else(|e| json!({"content": [{"type": "text", "text": e}], "isError": true})),
             n => Err(format!("unknown tool {n}")),
@@ -183,8 +516,8 @@ impl Server {
     /// server. The workers are `bare-drive --suite-worker` processes: the runner starts a program for each worker, and this program is
     /// not one (its `current_exe` is `bare-mcp`), so it gets the path of `bare-drive` (the `BARE_DRIVE` variable, else the file next to this
     /// one). Own processes, own network client, own temp folder: the live sessions of this server keep their state (pages, cookies,
-    /// saved sessions) and a suite does not read or write them. The call blocks the server loop until the suite ends, so the live pages do
-    /// not tick meanwhile and catch up after; it is one reply to one request, as for `run_steps`.
+    /// saved sessions) and a suite does not read or write them. The call runs on a thread of its own, so the live pages and the
+    /// control path go on meanwhile. A cancellation kills and reaps the workers of this suite only, and gives no reply.
     fn run_suite(&mut self, args: &Value) -> Result<String, String> {
         let dir = args.get("dir").and_then(Value::as_str).ok_or("dir (a suite folder: setup.steps and NAME.steps) is required")?;
         let workers = match args.get("workers") {
@@ -193,8 +526,7 @@ impl Server {
             Some(w) => Some(w.as_u64().filter(|&n| n > 0).ok_or("workers: a number over 0, or \"auto\"")? as usize),
         };
         let num = |k: &str| args.get(k).and_then(Value::as_u64);
-        self.runs += 1;
-        let out = std::env::temp_dir().join(format!("bare-mcp-{}-{}", std::process::id(), self.runs));
+        let out = std::env::temp_dir().join(format!("bare-mcp-{}-{}", std::process::id(), self.shared.run_no()));
         let mut pass: Vec<String> = vec!["--out".into(), out.display().to_string(), "--var".into(), format!("STATE={}", out.join("state.json").display())];
         pass.extend(["--size".into(), format!("{}x{}", num("width").unwrap_or(1280), num("height").unwrap_or(800)), "--timeout".into(), num("timeout_ms").unwrap_or(10_000).to_string()]);
         if let Some(v) = args.get("vars").and_then(Value::as_object) {
@@ -220,6 +552,7 @@ impl Server {
             avail_kib: mem_available_kib(),
             quiet: true,
             exe: Some(exe.ok_or("bare-drive was not found next to bare-mcp: build it (cargo build -p bare-drive) or set BARE_DRIVE")?),
+            cancel: Some(cancel_token()),
         };
         std::fs::create_dir_all(&out).map_err(|e| format!("{}: {e}", out.display()))?;
         let report = bare_drive::suite::run_report(&cfg);
@@ -235,8 +568,8 @@ impl Server {
         let url = args.get("url").and_then(Value::as_str).ok_or("url is required")?;
         let file = args.get("file").and_then(Value::as_str).filter(|f| std::path::Path::new(f).exists());
         let state = match args.get("state").and_then(Value::as_str) {
-            Some(n) => match (self.saved.get(n), file) {
-                (Some(st), _) => Some(st.clone()),
+            Some(n) => match (lock(&self.shared.saved).get(n).cloned(), file) {
+                (Some(st), _) => Some(st),
                 (None, Some(f)) => Some(bare_drive::state::read(f)?),
                 (None, None) => return Err(format!("no saved session named {n}")),
             },
@@ -272,7 +605,7 @@ impl Server {
         self.place_window(&opt)?;
         // One client for the server: a script or a style sheet that an earlier `open` loaded is in its reply cache, and its connections stay
         // open. `fresh` gives this open a clean client. Cookies and storage are the document's own either way.
-        let net = if args.get("fresh").and_then(Value::as_bool) == Some(true) { bare_net::http::Client::new() } else { self.net.fork() };
+        let net = if args.get("fresh").and_then(Value::as_bool) == Some(true) { bare_net::http::Client::new() } else { lock(&self.shared.net).fork() };
         let mut session = Session::with_client(&opt, net);
         session.ready_wait = true;
         let dir = args.get("downloads_dir").and_then(Value::as_str).map_or_else(|| std::env::temp_dir().join(format!("bare-mcp-{}-downloads", std::process::id())), std::path::PathBuf::from);
@@ -311,7 +644,7 @@ impl Server {
         }
         let origins: std::collections::HashSet<&String> = st.local.iter().chain(&st.session).map(|(o, _)| o).collect();
         let reply = json!({"saved": name, "cookies": st.cookies.len(), "origins": origins.len()}).to_string();
-        self.saved.insert(name.to_string(), st);
+        lock(&self.shared.saved).insert(name.to_string(), st);
         Ok(reply)
     }
 
@@ -321,8 +654,9 @@ impl Server {
         let get = |k: &str| args.get(k).and_then(Value::as_str).ok_or(format!("{k} is required"));
         let (name, url, login, check) = (get("name")?, get("url")?, get("login")?, get("check")?);
         let file = args.get("file").and_then(Value::as_str);
-        let found = match self.saved.get(name) {
-            Some(st) => Some(st.clone()),
+        let saved = lock(&self.shared.saved).get(name).cloned();
+        let found = match saved {
+            Some(st) => Some(st),
             None => match file.filter(|f| std::path::Path::new(f).exists()) {
                 Some(f) => Some(bare_drive::state::read(f)?),
                 None => None,
@@ -373,7 +707,7 @@ impl Server {
         }
         live.lines += src.lines().count();
         for s in &list {
-            if !live.session.step(s, &live.opt, &mut live.red) {
+            if cancelled() || !live.session.step(s, &live.opt, &mut live.red) {
                 break;
             }
         }
@@ -389,24 +723,33 @@ impl Server {
         self.live.get_mut(&name).ok_or(format!("no live session {name}: call open first"))
     }
 
+    /// The live sessions. A session that is idle first gets its late tabs and dialogs as a call, so they are listed (and a tab becomes a
+    /// session); a session that is busy is not asked and keeps its last address, so a slow call does not stall this one.
     fn sessions(&mut self) -> String {
-        if self.live.is_empty() {
+        let sh = self.shared.clone();
+        let names = |sh: &Shared| {
+            let mut v: Vec<String> = lock(&sh.sessions).keys().cloned().collect();
+            v.sort();
+            v
+        };
+        if names(&sh).is_empty() {
             return "no live sessions".into();
         }
-        // A tab that an action opened and no reply named yet (a `step` call takes no events) becomes a session first.
-        let mut names: Vec<String> = self.live.keys().cloned().collect();
-        names.sort();
         let mut late = String::new();
-        for n in names {
-            let args = json!({"session": n});
-            if self.live.contains_key(&n) && self.live_mut(&args).and_then(|l| l.session.collect()).is_ok() {
-                late.push_str(&self.late(&args).unwrap_or_default());
+        for n in names(&sh) {
+            let idle = lock(&sh.sessions).get(&n).is_some_and(|s| s.busy.load(Ordering::SeqCst) == 0);
+            if idle && let Some(Ok(text)) = sh.ask(&n, "sessions_probe") {
+                late.push_str(&text);
             }
         }
-        let mut names: Vec<&String> = self.live.keys().collect();
-        names.sort();
-        let names: Vec<String> = names.into_iter().cloned().collect();
-        let list = names.into_iter().map(|n| { let u = self.live.get_mut(&n).and_then(|l| l.session.url()).unwrap_or_default(); format!("{n}: {}", bare_drive::run::safe_url(&u)) }).collect::<Vec<_>>().join("\n");
+        let list = names(&sh)
+            .into_iter()
+            .filter_map(|n| {
+                let u = lock(&lock(&sh.sessions).get(&n)?.url).clone();
+                Some(format!("{n}: {}", bare_drive::run::safe_url(&u)))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         if late.is_empty() { list } else { format!("{}\n{list}", &late[1..]) }
     }
 
@@ -627,6 +970,10 @@ impl Server {
         live.session.set_dialog(accept, args.get("prompt_text").and_then(Value::as_str).map(str::to_string));
         let before = live.session.url();
         let (receipt, ok) = self.run_live(&a, &line)?;
+        // Cancelled: no settle, snapshot or download wait follows, and the caller discards the reply.
+        if cancelled() {
+            return Err("cancelled".into());
+        }
         let mark = self.live_mut(args)?.session.hist.mark();
         let mut out = receipt;
         let snap = if ok && args.get("snapshot").and_then(Value::as_bool) != Some(false) {
@@ -661,7 +1008,7 @@ impl Server {
     fn finish_downloads(&mut self, args: &Value) -> Result<String, String> {
         let live = self.live_mut(args)?;
         let end = std::time::Instant::now() + live.opt.timeout;
-        while std::time::Instant::now() < end {
+        while std::time::Instant::now() < end && !cancelled() {
             let loading = live.session.with_refs(|p, _| {
                 p.tick();
                 p.loading()
@@ -730,15 +1077,27 @@ impl Server {
     }
 
     /// A new live session `BASE~N` for a tab that the page of session `from` opened: the same size, secrets and variables, and a copy of
-    /// its cookies and storage. The load starts at once. Gives the name.
+    /// its cookies and storage. The load starts at once, on the thread of the new session, and this call waits for its first result.
+    /// Gives the name.
     fn open_tab(&mut self, from: &str, url: &str) -> Result<String, String> {
         let base = from.split('~').next().unwrap_or(from);
-        let name = (2..).map(|n| format!("{base}~{n}")).find(|n| !self.live.contains_key(n)).expect("a free name");
         let l = self.live.get_mut(from).ok_or("the opener is gone")?;
         let (size, timeout, window, red, vars, state) = (l.opt.size, l.opt.timeout, l.opt.window, l.red.clone(), l.vars.clone(), l.session.export_state());
         let (mut opt, _, _) = self.options(&json!({"width": size.0, "height": size.1, "timeout_ms": timeout.as_millis() as u64, "window": window}))?;
         opt.progress = false;
         self.place_window(&opt)?;
+        let (done, wait) = mpsc::channel();
+        let name = self.shared.start_tab(base, Tab { opt, red, vars, state, url: url.to_string(), done })?;
+        match wait.recv() {
+            Ok(Ok(())) => Ok(name),
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err("the tab thread ended".into()),
+        }
+    }
+
+    /// The first load of a tab, on its own thread. Reports the result to the opener. A failed load leaves no session.
+    fn begin_tab(&mut self, name: &str, t: Tab) {
+        let Tab { opt, red, vars, state, url, done } = t;
         let mut session = Session::new(&opt);
         if let Some(st) = state {
             session.preload(st);
@@ -746,17 +1105,16 @@ impl Server {
         session.ready_wait = true;
         let dl = Downloads::new(std::env::temp_dir().join(format!("bare-mcp-{}-downloads", std::process::id())));
         session.set_downloads(dl.clone());
-        self.live.insert(name.clone(), Live { session, opt, red, vars, lines: 0, dl, told: Default::default() });
-        match self.run_live(&json!({"session": name, "compact": true}), &format!("open {url}")) {
-            Ok((_, true)) => {
-                self.arm(&json!({"session": name}))?;
-                Ok(name)
-            }
+        self.live.insert(name.to_string(), Live { session, opt, red, vars, lines: 0, dl, told: Default::default() });
+        let args = json!({"session": name, "compact": true});
+        let r = match self.run_live(&args, &format!("open {url}")) {
+            Ok((_, true)) => self.arm(&args).map(|_| ()),
             Ok((r, false)) | Err(r) => {
-                self.live.remove(&name);
+                self.live.remove(name);
                 Err(r)
             }
-        }
+        };
+        let _ = done.send(r);
     }
 
     /// Read, set or clear the cookies, `localStorage` or `sessionStorage` of a session. Values go through the redactor.
@@ -818,12 +1176,12 @@ impl Server {
         let r = ref_arg(args, "ref")?;
         let full = args.get("full_page").and_then(Value::as_bool) == Some(true);
         let inline = args.get("inline").and_then(Value::as_bool) == Some(true);
-        self.runs += 1;
+        let run = self.shared.run_no();
         let dir = std::env::temp_dir().join(format!("bare-mcp-{}-shots", std::process::id()));
         std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         let path = match args.get("path").and_then(Value::as_str) {
             Some(p) => std::path::PathBuf::from(p),
-            None => dir.join(format!("shot-{}.png", self.runs)),
+            None => dir.join(format!("shot-{run}.png")),
         };
         let live = self.live_mut(args)?;
         let red = live.red.clone();
@@ -844,8 +1202,7 @@ impl Server {
         if size.0 == 0 || size.1 == 0 {
             return Err("width and height must be over 0".into());
         }
-        self.runs += 1;
-        let out = std::env::temp_dir().join(format!("bare-mcp-{}-{}", std::process::id(), self.runs));
+        let out = std::env::temp_dir().join(format!("bare-mcp-{}-{}", std::process::id(), self.shared.run_no()));
         std::fs::create_dir_all(&out).map_err(|e| format!("{}: {e}", out.display()))?;
         let opt = Options {
             size,
@@ -876,7 +1233,7 @@ impl Server {
     /// Before a window opens: ask Hyprland to put the driven window on the workspace, without the focus. The rule lives in the running
     /// compositor only (a config reload drops it), so it is set again before each window.
     fn place_window(&self, opt: &Options) -> Result<(), String> {
-        let (true, Some(n)) = (opt.window, self.workspace) else { return Ok(()) };
+        let (true, Some(n)) = (opt.window, self.shared.workspace) else { return Ok(()) };
         // The Lua config of Hyprland 0.56 (`hyprctl keyword` refuses it). A named rule replaces the rule of the same name, so the rules do
         // not pile up. `silent`: the window does not take the focus or move the view.
         let rule = format!(r#"hl.window_rule({{ name = "bare-mcp", match = {{ class = "^(bare)$", title = "^(bare \\(driven\\))$" }}, workspace = "{n} silent" }})"#);
@@ -911,12 +1268,21 @@ fn with_out(mut json: String, opt: &Options, end: bool) -> String {
     json
 }
 
+/// The tool list, built once on the first call and kept: like a module-level `const` that is computed lazily in JS.
+fn tool_list() -> &'static Value {
+    static TOOLS: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+    TOOLS.get_or_init(tools)
+}
+
+/// The token of the request that this thread runs, for a worker that this call starts (`run_suite`).
+fn cancel_token() -> Arc<AtomicBool> {
+    bare_drive::run::current_cancel().unwrap_or_default()
+}
+
 /// Refuse an argument that the input schema of tool `name` does not list, and name the closest valid key: a key with a typo would
 /// else be dropped without a word. An unknown tool passes: `call` says so.
 fn known_args(name: &str, args: &Value) -> Result<(), String> {
-    // `OnceLock` builds the tool list once, on the first call, and keeps it: like a module-level `const` that is computed lazily in JS.
-    static TOOLS: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
-    let tools = TOOLS.get_or_init(tools);
+    let tools = tool_list();
     let Some(tool) = tools.as_array().and_then(|t| t.iter().find(|t| t["name"] == name)) else { return Ok(()) };
     let valid: Vec<&String> = tool["inputSchema"]["properties"].as_object().map(|p| p.keys().collect()).unwrap_or_default();
     let Some(key) = args.as_object().and_then(|a| a.keys().find(|k| !valid.contains(k))) else { return Ok(()) };
