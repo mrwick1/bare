@@ -40,6 +40,13 @@ struct Live {
     told: std::collections::HashSet<usize>,
 }
 
+/// What is known independently of the text receipt, including errors after dispatch.
+struct ActionOutcome {
+    action_status: &'static str,
+    page_status: &'static str,
+    verification: &'static str,
+}
+
 struct Server {
     workspace: Option<u32>,
     /// Live sessions by name (`session`, default `main`): one page each, side by side.
@@ -138,6 +145,9 @@ impl Server {
     fn call(&mut self, params: &Value) -> Value {
         let args = params.get("arguments").cloned().unwrap_or(json!({}));
         let name = params.get("name").and_then(Value::as_str).unwrap_or("");
+        if name == "act" {
+            return self.act(&args);
+        }
         if let Err(e) = known_args(name, &args) {
             return json!({"content": [{"type": "text", "text": e}], "isError": true});
         }
@@ -153,7 +163,6 @@ impl Server {
             "find" => self.find(&args),
             "read" => self.read(&args),
             "links" => self.links(&args),
-            "act" => self.act(&args),
             "downloads" => self.downloads(&args),
             "eval" => self.eval(&args),
             "console" => self.console(&args),
@@ -575,7 +584,38 @@ impl Server {
     }
 
     /// One action on an element or the page, as a step line; gives a short receipt and, unless `snapshot` is false, the new snapshot.
-    fn act(&mut self, args: &Value) -> Result<String, String> {
+    fn act(&mut self, args: &Value) -> Value {
+        let mut outcome = ActionOutcome { action_status: "not_started", page_status: "unknown", verification: if args.get("expect").is_some() { "not_run" } else { "not_requested" } };
+        let result = known_args("act", args).and_then(|_| self.act_inner(args, &mut outcome));
+        if outcome.action_status != "not_started" {
+            if let Ok(live) = self.live_mut(args) {
+                outcome.page_status = live.session.with_refs(|p, _| {
+                    if !p.loading() && p.inspect(|_, _| ()).is_some() { "ready" } else { "pending" }
+                }).unwrap_or("unknown");
+            }
+        }
+        let error = result.is_err();
+        let text = result.unwrap_or_else(|e| e);
+        let text = self.live_mut(args).map(|live| live.red.clean(&text)).unwrap_or(text);
+        let status = json!({"action_status": outcome.action_status, "page_status": outcome.page_status, "verification": outcome.verification});
+        json!({"content": [{"type": "text", "text": text}, {"type": "text", "text": status.to_string()}], "structuredContent": status, "isError": error})
+    }
+
+    fn act_inner(&mut self, args: &Value, outcome: &mut ActionOutcome) -> Result<String, String> {
+        // Validate every assertion before the operation can change the page.
+        let expect = match args.get("expect") {
+            None => None,
+            Some(v) => {
+                let src = v.as_str().ok_or("expect must be a string of expect steps")?;
+                let live = self.live_mut(args)?;
+                let checks = steps::parse(src, &live.vars).map_err(|e| live.red.clean(&e))?;
+                if checks.is_empty() || checks.iter().any(|s| !matches!(&s.action, steps::Action::Expect(c) if !matches!(c, steps::Check::Js(_)))) {
+                    return Err("expect needs one or more expect steps, without JavaScript".into());
+                }
+                Some(src)
+            }
+        };
+
         let op = args.get("op").and_then(Value::as_str).unwrap_or("click");
         let target = match (args.get("ref").and_then(Value::as_str), args.get("loc").and_then(Value::as_str)) {
             (Some(r), _) => format!("ref={}", r.trim()),
@@ -626,9 +666,23 @@ impl Server {
         let live = self.live_mut(args)?;
         live.session.set_dialog(accept, args.get("prompt_text").and_then(Value::as_str).map(str::to_string));
         let before = live.session.url();
+        // A driver failure can happen after input was dispatched. Do not claim it is safe to retry.
+        outcome.action_status = "unknown";
         let (receipt, ok) = self.run_live(&a, &line)?;
+        if ok {
+            outcome.action_status = "completed";
+        }
         let mark = self.live_mut(args)?.session.hist.mark();
         let mut out = receipt;
+        if ok {
+            if let Some(expect) = expect {
+                outcome.verification = "unknown";
+                let (receipt, verified) = self.run_live(&a, expect)?;
+                outcome.verification = if verified { "passed" } else { "failed" };
+                out.push_str("\nverification: ");
+                out.push_str(&receipt);
+            }
+        }
         let snap = if ok && args.get("snapshot").and_then(Value::as_bool) != Some(false) {
             // The action ran: a page with no layout yet (a style sheet still on its way) does not make it a failure, or the agent acts twice.
             Some(self.snapshot_diff(args, args.get("diff").and_then(Value::as_bool) != Some(false)).unwrap_or_else(|e| format!("no snapshot: {e}: take one later")))
@@ -653,7 +707,7 @@ impl Server {
             out.push('\n');
             out.push_str(&s);
         }
-        if ok { Ok(out) } else { Err(out) }
+        if ok && outcome.verification != "failed" { Ok(out) } else { Err(out) }
     }
 
     /// Wait up to the step time limit for the downloads that run, and for a page load that may be one. Then say what finished since the last
@@ -1160,8 +1214,13 @@ fn tools() -> Value {
         },
         {
             "name": "act",
+            "outputSchema": {"type": "object", "properties": {
+                "action_status": {"type": "string", "enum": ["not_started", "completed", "unknown"], "description": "Completed means the operation succeeded, not that its business result is verified. Unknown may have dispatched input: inspect before retrying."},
+                "page_status": {"type": "string", "enum": ["ready", "pending", "unknown"], "description": "Ready means a layout exists and document loading ended; application data may still be pending."},
+                "verification": {"type": "string", "enum": ["not_requested", "passed", "failed", "not_run", "unknown"]}
+            }, "required": ["action_status", "page_status", "verification"]},
             "description": "Act on the live page like a user and get a short receipt (ok, or the failure with a hint, up to 3 script error lines for uncaught errors, new console errors and failed requests, navigation, dialogs and the answer given, tabs the page opened: \"opened tab: main~2 URL\" is a new session that you read with session=main~2 and end with close), then what changed on the page (only the lines marked *, with the lines that hold them; the whole outline after a navigation or with diff false). Ops: click, type (clears the field, then types text; \\n is Enter), press (key: Enter, Escape, Tab, Control+a; with ref it acts on that element, and Enter in a form field submits the form), scroll (dy pixels, over ref or the page), goto (url), reload, back, forward (the history), wait (ref until text state: visible, hidden, enabled, checked, text~\"x\"), select (text = the option label or value; options = several for a multiple select; fires input and change), check and uncheck (a checkbox or radio; clicks only when the state differs), hover (pointer over the element: :hover and mouseenter), dblclick, upload (files = local paths for an <input type=file>, at most 100 MiB each; a hidden input needs loc css=\"input[type=file]\"). The action waits for the element up to timeout_ms.",
-            "inputSchema": {"type": "object", "properties": {"session": S, "op": {"type": "string", "enum": ["click", "type", "select", "check", "uncheck", "hover", "dblclick", "upload", "press", "scroll", "goto", "reload", "back", "forward", "wait"]}, "options": {"type": "array", "items": {"type": "string"}, "description": "For select: several options of a multiple select."}, "files": {"type": "array", "items": {"type": "string"}, "description": "For upload: local file paths."}, "dialog": {"type": "string", "enum": ["accept", "dismiss"], "description": "How to answer alert, confirm and prompt dialogs that the action opens. Default accept. The receipt lists each one."}, "prompt_text": {"type": "string", "description": "The answer of an accepted prompt. Default: the default value of the prompt."}, "ref": {"type": "string", "description": "e7 from snapshot or find."}, "loc": {"type": "string", "description": "A step locator instead of ref: role=button name=\"Save\", label=\"Email\", text=\"x\", css=\"...\"."}, "text": {"type": "string"}, "key": {"type": "string"}, "dy": {"type": "number"}, "url": {"type": "string"}, "snapshot": {"type": "boolean", "description": "Default true: add the changes of the page after the action."}, "diff": {"type": "boolean", "description": "Default true. False: add the whole outline instead of the changes."}, "mode": {"type": "string", "enum": ["interactive", "all"]}, "max_chars": {"type": "integer"}}, "required": ["op"]},
+            "inputSchema": {"type": "object", "properties": {"session": S, "expect": {"type": "string", "description": "Optional postconditions: one or more expect step lines (no JavaScript). Validated before the action. A failed check keeps action_status completed: inspect before retrying."}, "op": {"type": "string", "enum": ["click", "type", "select", "check", "uncheck", "hover", "dblclick", "upload", "press", "scroll", "goto", "reload", "back", "forward", "wait"]}, "options": {"type": "array", "items": {"type": "string"}, "description": "For select: several options of a multiple select."}, "files": {"type": "array", "items": {"type": "string"}, "description": "For upload: local file paths."}, "dialog": {"type": "string", "enum": ["accept", "dismiss"], "description": "How to answer alert, confirm and prompt dialogs that the action opens. Default accept. The receipt lists each one."}, "prompt_text": {"type": "string", "description": "The answer of an accepted prompt. Default: the default value of the prompt."}, "ref": {"type": "string", "description": "e7 from snapshot or find."}, "loc": {"type": "string", "description": "A step locator instead of ref: role=button name=\"Save\", label=\"Email\", text=\"x\", css=\"...\"."}, "text": {"type": "string"}, "key": {"type": "string"}, "dy": {"type": "number"}, "url": {"type": "string"}, "snapshot": {"type": "boolean", "description": "Default true: add the changes of the page after the action."}, "diff": {"type": "boolean", "description": "Default true. False: add the whole outline instead of the changes."}, "mode": {"type": "string", "enum": ["interactive", "all"]}, "max_chars": {"type": "integer"}}, "required": ["op"]},
         },
         {
             "name": "find",
