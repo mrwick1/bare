@@ -507,3 +507,77 @@ fn shift_home_and_word_arrows_extend_an_input_selection() {
         assert_eq!(js(&mut b, "i.selectionStart + ',' + i.selectionEnd"), "9,15");
     });
 }
+
+/// `n` presses and releases in a row at (`x`, `y`) on `target`, 40 ms apart: a click, a double click or a triple click.
+fn press_n(b: &mut Browser, target: bare_html::dom::NodeId, x: f64, y: f64, n: u32) {
+    let up = crate::browser_ui::Pointer { x, y, ..Default::default() };
+    b.ui_pointer_move(Some(target), up).unwrap();
+    for _ in 0..n {
+        b.ui_pointer_button(Some(target), crate::browser_ui::Pointer { buttons: 1, ..up }, 0, true, None).unwrap();
+        b.advance_time(40.0, 10_000).unwrap();
+        b.ui_pointer_button(Some(target), up, 0, false, None).unwrap();
+        b.advance_time(40.0, 10_000).unwrap();
+    }
+}
+
+/// The window point at the middle of `len` letters from offset `from` of the first Text node of `#id`.
+fn middle_of(b: &mut Browser, id: &str, from: u32, len: u32) -> (f64, f64) {
+    let v = js(b, &format!("var t = document.getElementById('{id}').firstChild, r = document.createRange(); r.setStart(t, {from}); r.setEnd(t, {}); var q = r.getBoundingClientRect(); (q.x + q.width / 2) + ',' + (q.y + q.height / 2)", from + len));
+    let (x, y) = v.split_once(',').unwrap();
+    (x.parse().unwrap(), y.parse().unwrap())
+}
+
+/// A double click on a word in an editing host selects the word, a triple click the paragraph (#444).
+#[test]
+fn double_and_triple_click_select_in_a_contenteditable() {
+    big(|| {
+        let mut b = browser();
+        js(&mut b, "document.body.innerHTML = '<div contenteditable id=e>hello world</div>';");
+        let e = b.query("#e").unwrap().unwrap();
+        let (x, y) = middle_of(&mut b, "e", 6, 5);
+        press_n(&mut b, e, x, y, 2);
+        assert_eq!(js(&mut b, "getSelection().toString()"), "world");
+        let (x, y) = middle_of(&mut b, "e", 0, 5);
+        b.advance_time(1000.0, 10_000).unwrap();
+        press_n(&mut b, e, x, y, 2);
+        assert_eq!(js(&mut b, "getSelection().toString()"), "hello");
+        b.advance_time(1000.0, 10_000).unwrap();
+        press_n(&mut b, e, x, y, 3);
+        assert_eq!(js(&mut b, "getSelection().toString()"), "hello world");
+    });
+}
+
+/// The same in plain page text, and a triple click selects only the paragraph under the pointer.
+#[test]
+fn double_and_triple_click_select_in_page_text() {
+    big(|| {
+        let mut b = browser();
+        js(&mut b, "document.body.innerHTML = '<p id=p>alpha beta</p><p id=q>gamma delta</p>';");
+        let p = b.query("#p").unwrap().unwrap();
+        let (x, y) = middle_of(&mut b, "p", 6, 4);
+        press_n(&mut b, p, x, y, 2);
+        assert_eq!(js(&mut b, "getSelection().toString()"), "beta");
+        b.advance_time(1000.0, 10_000).unwrap();
+        press_n(&mut b, p, x, y, 3);
+        assert_eq!(js(&mut b, "getSelection().toString()"), "alpha beta");
+        let q = b.query("#q").unwrap().unwrap();
+        let (x, y) = middle_of(&mut b, "q", 6, 5);
+        b.advance_time(1000.0, 10_000).unwrap();
+        press_n(&mut b, q, x, y, 2);
+        assert_eq!(js(&mut b, "getSelection().toString()"), "delta");
+    });
+}
+
+/// `caretRangeFromPoint` gives the offset of the letter boundary nearest to the point.
+#[test]
+fn caret_range_from_point_gives_the_text_offset() {
+    big(|| {
+        let mut b = browser();
+        js(&mut b, "document.body.innerHTML = '<p id=p>hello world</p>';");
+        let (x, y) = middle_of(&mut b, "p", 6, 5);
+        assert_eq!(js(&mut b, &format!("var r = document.caretRangeFromPoint({x}, {y}); (r.startContainer === p.firstChild) + ',' + r.startOffset + ',' + r.collapsed")), "true,8,true");
+        assert_eq!(js(&mut b, &format!("document.caretRangeFromPoint(1, {y}).startOffset")), "0");
+        assert_eq!(js(&mut b, &format!("document.caretRangeFromPoint(700, {y}).startOffset")), "11");
+        assert_eq!(js(&mut b, "document.caretRangeFromPoint(-5, 0)"), "null");
+    });
+}

@@ -1338,6 +1338,48 @@ impl Dom {
     }
 }
 
+impl Dom {
+    /// A collapsed range at a text position, for `caretRangeFromPoint`.
+    pub(crate) fn caret_range(&self, it: &mut Interp<'_>, n: NodeId, o: u32) -> V {
+        new_range(self, it, Rng { sc: n, so: o, ec: n, eo: o })
+    }
+
+    /// The selection of a double click at offset `off` of Text node `n`: the word there (inside the node); of a triple click: the text of the
+    /// nearest block around it (a list item, a paragraph, ..., or the editing host), from its first to its last Text node.
+    pub(crate) fn select_at_text(&self, it: &mut Interp<'_>, n: NodeId, off: u32, paragraph: bool) -> R<()> {
+        // `set_sel` has no selection object to change until one was asked for.
+        get_selection(self, it, Value::Undefined, &[])?;
+        let doc = self.doc.borrow();
+        let NodeData::Text(span) = *doc.data(n) else { return Ok(()) };
+        let r = if paragraph {
+            let mut block = doc.parent(n);
+            while let Some(b) = block {
+                let name = doc.element_name(b);
+                if matches!(name, "br" | "div" | "p" | "li" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "blockquote" | "pre" | "ul" | "ol" | "td" | "th" | "section" | "article" | "body" | "html") || crate::browser_editing::host_of(&doc, b) == Some(b) {
+                    break;
+                }
+                block = doc.parent(b);
+            }
+            let block = block.unwrap_or(doc.root());
+            let (mut first, mut last, mut cur, mut depth) = (None, None, block, 0);
+            while let Some((c, dp)) = crate::browser_dom::next_in(&doc, block, cur, depth) {
+                (cur, depth) = (c, dp);
+                if matches!(doc.data(c), NodeData::Text(_)) {
+                    first.get_or_insert(c);
+                    last = Some(c);
+                }
+            }
+            let (Some(a), Some(z)) = (first, last) else { return Ok(()) };
+            Rng { sc: a, so: 0, ec: z, eo: length(&doc, z) }
+        } else {
+            let (a, b) = crate::browser_ui::word_at(doc.text(span), off);
+            Rng { sc: n, so: a, ec: n, eo: b }
+        };
+        drop(doc);
+        set_new(self, it, r, false)
+    }
+}
+
 // ------------------------------------------------------------ install
 
 fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<()> {

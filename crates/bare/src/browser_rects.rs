@@ -27,7 +27,7 @@
 
 use crate::browser::*;
 use crate::browser_platform::V;
-use crate::browser_range::bounds;
+use crate::browser_range::{bounds, utf16_len};
 use bare_css::values::{Keyword, Property, Value as Cv};
 use bare_html::dom::{Document, NodeData, NodeId};
 use bare_js::eval::{Error, Interp};
@@ -452,6 +452,69 @@ pub(crate) fn element_rects(d: &Dom, it: &mut Interp<'_>, el: NodeId) -> R<Vec<R
         }
         with_pass(d, it, g, s, |p| p.element(el))
     })?
+}
+
+/// The text position at the window point (`x`, `y`): a Text node and a UTF-16 offset (CSSOM View `caretPositionFromPoint`). The element on
+/// top at the point gives the text: the Text fragments of its box (or, for an inline with no box, of the box around it) whose parent is
+/// it or inside it. The nearest line wins (a point in a gap, or past the ends of a line, takes the nearest line and its nearest end), then
+/// the boundary between two letters nearest to `x`, measured as `Pass::x_at` does. `None` when the point holds no text.
+/// Cost: one hit test (`bare_paint::hit`, one pass over the fragments), one scan for the box, then the fragments of that box and the letters of one.
+pub(crate) fn text_at(g: &Geo, s: &Scroll, x: f32, y: f32) -> Option<(NodeId, u32)> {
+    let doc = g.doc;
+    let top = *bare_paint::hit::hits_scrolled(doc, g.styles, g.layout, g.areas, s, x, y).first()?;
+    let frags = &g.layout.fragments;
+    let mut cur = Some(top);
+    let (from, to) = loop {
+        let a = cur?;
+        if let Some(i) = frags.iter().position(|f| f.node == a && f.kind == Frag::Box) {
+            break (i, frags[i].end as usize);
+        }
+        cur = doc.parent(a);
+    };
+    let inside = |mut n: NodeId| loop {
+        if n == top {
+            return true;
+        }
+        match doc.parent(n) {
+            Some(p) => n = p,
+            None => return false,
+        }
+    };
+    // (vertical distance, horizontal distance), the fragment and its place in the window.
+    let mut best: Option<((f32, f32), &Fragment, f32)> = None;
+    for f in &frags[from..to] {
+        let Frag::Text { .. } = f.kind else { continue };
+        if !inside(f.node) {
+            continue;
+        }
+        let (dx, dy) = g.shift(s, f.node);
+        let (left, top_y) = (f.rect.x + dx, f.rect.y + dy);
+        let dist = ((top_y - y).max(y - (top_y + f.rect.h)).max(0.0), (left - x).max(x - (left + f.rect.w)).max(0.0));
+        if best.is_none_or(|b| dist < b.0) {
+            best = Some((dist, f, left));
+        }
+    }
+    let (_, f, left) = best?;
+    let Frag::Text { start, end } = f.kind else { return None };
+    let NodeData::Text(span) = *doc.data(f.node) else { return None };
+    let text = doc.text(span);
+    let style = g.styles.style(doc.flat_parent(f.node)?)?;
+    let (m, collapse, spacing) = (Metrics::of(style), WhiteSpace::of(style).collapse, font::spacing(true, style));
+    let (mut units, mut prev, mut extra, mut at) = (0, false, 0.0, start as usize);
+    for (i, c) in text[start as usize..end as usize].char_indices() {
+        let sp = is_space(c);
+        let w = if collapse && sp && prev { 0 } else { font::width_of(m.face, c) };
+        let more = if w != 0 { spacing.0 } else { 0.0 } + if !(collapse && sp && prev) && (c == ' ' || c == '\u{a0}') { spacing.1 } else { 0.0 };
+        let width = m.px(w) + more;
+        if x < left + m.px(units) + extra + width / 2.0 {
+            break;
+        }
+        units += w;
+        extra += more;
+        prev = sp;
+        at = start as usize + i + c.len_utf8();
+    }
+    Some((f.node, utf16_len(&text[..at])))
 }
 
 fn client_rects(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
