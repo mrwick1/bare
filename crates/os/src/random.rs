@@ -39,7 +39,7 @@ fn os_fill(buf: &mut [u8]) -> io::Result<()> {
 
 #[cfg(windows)]
 fn os_fill(buf: &mut [u8]) -> io::Result<()> {
-    #[link(name = "bcryptprimitives")]
+    #[link(name = "bcryptprimitives", kind = "raw-dylib")]
     unsafe extern "system" {
         fn ProcessPrng(pbData: *mut u8, cbData: usize) -> i32;
     }
