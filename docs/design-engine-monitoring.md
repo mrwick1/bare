@@ -133,3 +133,35 @@ The parent reran `cargo test -p bare-observe` (12 passed) and `cargo check -p ba
 The integration agent must combine both foundation commits on its prepared branch and copy this plan into that branch.
 The collector uses scalar fields only. Integration must choose metrics versus trace events; the transport does not choose them.
 A failed partial write can leave an incomplete final line. Readers must discard it. Shutdown waits for sink I/O to return.
+
+## Phase 2 integration result (partial)
+
+The integration branch is `t3/integrate-engine-monitoring`.
+The scoped files matched baseline before integration.
+Both foundation commits applied without conflicts.
+The foundation gate passed: 9 bare-os tests and 12 collector tests.
+The process facade adds an independent interruptible sampler and scoped numeric contexts.
+The three process entry points own initialization and shutdown.
+Narrow engine hooks and a profiling profile are present.
+See `docs/monitoring.md` for current coverage and limitations.
+
+Implementation stopped at the required repeated-verification limit.
+The journey fixture first failed on an unquoted type argument.
+After that scoped fix, the journey ran but failed its style-event assertion.
+The current fixture remains failing. Phase 2 is not complete.
+The MCP protocol fixture and process-facade fixture passed.
+Adding the collector dependency exposed three ambiguous empty-vector assertions in JS tests.
+Those assertions now specify their existing u16 element type.
+Workspace verification and phase 3 acceptance must be completed by the parent.
+No overhead measurement or authenticated live traffic ran.
+
+Final checks on the partial integration:
+
+- `cargo test -p bare-os -p bare-observe`: exit 0, including two process-facade integration tests.
+- `cargo test -p bare-mcp --test monitoring`: exit 0.
+- `cargo test -p bare-drive --test monitoring`: exit 101; missing style events after the step-syntax fix.
+- `cargo test --workspace`: first attempt failed to compile the three ambiguous JS assertions. The retry was canceled during compilation after the verification stop.
+- `cargo check --workspace`: exit 0. Existing dead-code warnings remain unchanged.
+- `git diff --check`: exit 0.
+
+The worktree has no uncommitted implementation changes.
