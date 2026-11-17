@@ -981,6 +981,24 @@ impl Dom {
             out.push_str(&t(Property::FontFamily)?);
             return Ok(out);
         }
+        // Chrome writes `transition` as `property duration timing-function delay` for each name, and repeats the shorter lists.
+        if key == "transition" {
+            use bare_css::motion::Motion;
+            let items = |p: Property| -> R<Vec<String>> {
+                let s = pick(p);
+                Ok(match s.style.value(p) {
+                    Cv::Grid(i) => match s.styles.grid(i) {
+                        bare_css::grid::Grid::Motion(Motion::Names(n)) => n.clone(),
+                        bare_css::grid::Grid::Motion(Motion::Times(t)) => t.iter().map(|&t| bare_css::motion::text(p, &Motion::Times(vec![t]))).collect(),
+                        _ => return Err(Self::gate(NO_TEXT)),
+                    },
+                    _ => vec![s.text(p, None).map_err(Self::gate)?],
+                })
+            };
+            let (names, d, f, l) = (items(Property::TransitionProperty)?, items(Property::TransitionDuration)?, items(Property::TransitionTimingFunction)?, items(Property::TransitionDelay)?);
+            let at = |v: &[String], i: usize| v.get(i % v.len().max(1)).cloned().unwrap_or_default();
+            return Ok((0..names.len()).map(|i| format!("{} {} {} {}", names[i], at(&d, i), at(&f, i), at(&l, i))).collect::<Vec<_>>().join(", "));
+        }
         let mut text = String::new();
         for &p in longs {
             text.push_str(&format!("{}:{};", p.name(), pick(p).text(p, ctx.as_ref()).map_err(Self::gate)?));
