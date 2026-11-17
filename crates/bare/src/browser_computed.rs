@@ -214,6 +214,8 @@ pub(crate) struct Computed {
     bound: RefCell<HashMap<NodeId, String>>,
     /// Moves when a supplied sheet is set or removed. `ResizeObserver` reads it to know that styles may have changed.
     pub(crate) sheet_gen: Cell<u64>,
+    /// `CSS.registerProperty`: the name and the `@property` text of each call. They make a last sheet part (`plan`).
+    pub(crate) registered: RefCell<Vec<(String, String)>>,
     pub(crate) cache: RefCell<Option<Built>>,
     /// Styled elements of the last tree that `styled_work` counted, and its key (`revision`, length).
     elements: Cell<Option<((u64, usize), u64)>>,
@@ -449,6 +451,10 @@ impl Dom {
         crate::browser_cssom::adopted(self, &mut adopted);
         for (scope, text) in adopted {
             add(self, &mut p, scope, None, &text)?;
+        }
+        let registered: String = self.computed.registered.borrow().iter().map(|r| r.1.as_str()).collect();
+        if !registered.is_empty() {
+            add(self, &mut p, doc.root(), None, &registered)?;
         }
         drop(bound);
         if record {
