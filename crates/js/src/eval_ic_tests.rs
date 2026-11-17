@@ -532,3 +532,68 @@ a + ' ' + b"#;
         assert_eq!(out[0], out[1]);
     });
 }
+
+/// A module function with hundreds of bindings (a webpack module): its inner functions read and write bindings past index 255,
+/// and an object literal has keys past constant 255. Those words take the wide form. The loop runs them, and byte mode gives the
+/// result of tree mode.
+#[test]
+fn wide_environment_and_field_words_run_on_the_bytecode_lane() {
+    big(|| {
+        let vars: Vec<String> = (0..300).map(|i| format!("var v{i} = {i};")).collect();
+        let keys: Vec<String> = (0..300).map(|i| format!("k{i}: {i}")).collect();
+        let src = format!(
+            "function mod() {{ {} let late = 7; function rd() {{ return v299 + v260 + late; }} function wr(x) {{ v299 = x; return v299; }}
+               function obj() {{ var o = {{ {} }}; return o.k0 + o.k299; }}
+               return [rd(), wr(5), rd(), obj()].join(); }}
+             mod()",
+            vars.join(" "),
+            keys.join(", ")
+        );
+        let mut out = Vec::new();
+        for mode in [Exec::Tree, Exec::Byte] {
+            let mut it = Interp::realm(Heap::default(), EvalLimits::default()).unwrap();
+            it.set_exec(mode);
+            out.push(run(&mut it, &src));
+            if mode == Exec::Byte {
+                let s = it.bc_stats();
+                assert_eq!(s.calls_tree, 0, "{s:?}");
+            }
+        }
+        assert_eq!(out[0], "566,5,272,299");
+        assert_eq!(out[0], out[1]);
+    });
+}
+
+/// Labels as minified code uses them: a labeled block left by `break`, `continue` of an outer loop, a `break` of an outer loop
+/// from a `switch`, a plain `break` inside a labeled block in a loop, two labels on one loop, and a labeled exit through `finally`.
+/// They run on the bytecode lane, and byte mode gives the result of tree mode.
+#[test]
+fn labels_run_on_the_bytecode_lane() {
+    big(|| {
+        let src = r#"function f(n) {
+  var o = [];
+  e: { if (n > 1) break e; o.push('in'); }
+  outer: for (var i = 0; i < 3; i++) {
+    for (var j = 0; j < 3; j++) { if (j === 1) continue outer; if (i === 2) break outer; o.push(i + '' + j); }
+  }
+  loop: while (true) { switch (n >= 2) { case true: break loop; default: n++; continue loop; } }
+  for (var k = 0; k < 3; k++) { blk: { if (k === 1) break; o.push('k' + k); } }
+  a: b: for (var m = 0; m < 4; m++) { if (m === 1) continue a; if (m === 3) break b; o.push('m' + m); }
+  t: { try { o.push('try'); break t; } finally { o.push('fin'); } o.push('never'); }
+  return o.join() + '|' + n;
+}
+f(0) + ' ' + f(3)"#;
+        let mut out = Vec::new();
+        for mode in [Exec::Tree, Exec::Byte] {
+            let mut it = Interp::realm(Heap::default(), EvalLimits::default()).unwrap();
+            it.set_exec(mode);
+            out.push(run(&mut it, src));
+            if mode == Exec::Byte {
+                let s = it.bc_stats();
+                assert_eq!(s.calls_tree, 0, "{s:?}");
+            }
+        }
+        assert_eq!(out[0], "in,00,10,k0,m0,m2,try,fin|2 00,10,k0,m0,m2,try,fin|3");
+        assert_eq!(out[0], out[1]);
+    });
+}

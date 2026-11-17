@@ -328,3 +328,96 @@ fn eval_and_super_below_a_skipped_body_give_what_the_eager_parse_gives() {
         assert_eq!(r, "6");
     });
 }
+
+/// In `byte` mode a lazy function runs on the bytecode lane, as does the function that holds a lazy inner function. The results
+/// agree with the tree walker. The names of the outer scopes belong to another script (the one that holds the lazy function).
+#[test]
+fn lazy_functions_run_on_the_bytecode_lane() {
+    big(|| {
+        let src = format!(
+            "var g = 3; let lx = 4;
+             function mk(a) {{ {PAD} var own = a * 2; let blk = 1;
+               function inner(b) {{ {PAD} own += b; return own + blk + a + g + lx + p7; }}
+               return inner;
+             }}
+             function plain(n) {{ {PAD} var s = 0; for (var i = 0; i < n; i++) s += i * g + lx; return s + p1; }}
+             var f = mk(5), r = [];
+             for (var k = 0; k < 3; k++) r.push(f(k), plain(k + 2));
+             r.join()"
+        );
+        // Only a source of `LAZY_MIN_SOURCE` bytes or more drops function bodies.
+        let src = format!("/*{}*/{src}", " ".repeat(crate::parse_cache::LAZY_MIN_SOURCE));
+        let mut want = String::new();
+        for mode in [Exec::Tree, Exec::Byte] {
+            let mut it = realm();
+            it.set_exec(mode);
+            let r = it.run_script(&src);
+            let got = match r {
+                Ok(v) => it.display(v),
+                Err(e) => format!("{e:?}"),
+            };
+            if mode == Exec::Tree {
+                want = got.clone();
+                assert!(!want.contains("Error"), "{want}");
+            } else {
+                assert_eq!(got, want, "byte");
+                let s = it.bc_stats();
+                assert_eq!(s.calls_tree, 0, "{s:?}");
+                assert!(s.calls_lane >= 7, "{s:?}");
+            }
+        }
+    });
+}
+
+/// Every case of the corpora with all function bodies lazy (a long comment after each `{`, and a source of `LAZY_MIN_SOURCE`
+/// bytes): `byte` gives what the tree walker gives. The comments change some strings too, the same way in both modes.
+#[test]
+fn the_bytecode_lane_agrees_with_the_tree_walker_on_the_corpora_with_lazy_bodies() {
+    big(|| {
+        let pad = format!("{{/*{}*/", " ".repeat(130));
+        let head = format!("/*{}*/", " ".repeat(crate::parse_cache::LAZY_MIN_SOURCE));
+        let mut bad = Vec::new();
+        let mut n = 0;
+        for text in [
+            include_str!("../../../tools/fixtures/js/eval-cases.txt"),
+            include_str!("../../../tools/fixtures/js/statements-cases.txt"),
+            include_str!("../../../tools/fixtures/js/class-cases.txt"),
+            include_str!("../../../tools/fixtures/js/arrobj-cases.txt"),
+            include_str!("../../../tools/fixtures/js/with-cases.txt"),
+            include_str!("../../../tools/fixtures/js/tagged-cases.txt"),
+            include_str!("../../../tools/fixtures/js/iterator-cases.txt"),
+        ] {
+            let mut cases: Vec<(&str, Vec<&str>)> = Vec::new();
+            for line in text.lines() {
+                if let Some(name) = line.strip_prefix("=== ") {
+                    cases.push((name.trim(), Vec::new()));
+                } else if let Some(c) = cases.last_mut() {
+                    c.1.push(line);
+                }
+            }
+            for (name, lines) in &cases {
+                let src = format!("{head}{}", lines.join("\n").replace('{', &pad));
+                let mut got = Vec::new();
+                for mode in [Exec::Tree, Exec::Byte] {
+                    let mut it = realm();
+                    it.set_exec(mode);
+                    let r = it.run_script(&src);
+                    got.push(match r {
+                        Ok(v) => it.display(v),
+                        Err(e) => format!("{e:?}"),
+                    });
+                    // The sites of the lazy trees that ran resolve as the walker resolves them.
+                    if mode == Exec::Tree {
+                        bad.extend(it.bc_scope_check().mismatches.into_iter().map(|m| format!("{name}: {m}")));
+                    }
+                }
+                n += 1;
+                if got[0] != got[1] {
+                    bad.push(format!("{name}: tree {:?} byte {:?}", got[0], got[1]));
+                }
+            }
+        }
+        assert!(n > 500, "{n} cases");
+        assert!(bad.is_empty(), "{} of {n}:\n{}", bad.len(), bad.join("\n"));
+    });
+}

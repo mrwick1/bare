@@ -4,6 +4,32 @@ This file records what is built, what comes next and what is missing. Update it 
 
 The reasons for the design are in [decisions.md](decisions.md). Time and memory numbers for each module are in [resources.md](resources.md).
 
+## Bytecode lane runs lazy functions (2026-11-17)
+
+`BARE_JS_EXEC=byte` now compiles lazy functions (bodies that `parse_cache` drops in a source of 16 KiB or more). Before, the lane refused them with "no scope", so on a React page most calls stayed on the tree walker. The default stays `tree`.
+
+- A lazy function is parsed into its own script slot. Its scopes now carry `owner`, the slot whose walk opened them. `bc_fn_scope`, `bc_scope_end` and `bc_resolve` use `owner` to find the scopes of a lazy tree and to resolve names in the outer slot.
+- A function that holds a lazy inner function stays on stage 1 (all names in the environment). `rfc_analyze` refuses it for stage 2.
+- A named function expression with a lazy body takes `is_expr` from its `LazySlot`. Before this fix, React failed with a TypeError in byte mode.
+- The loop now runs the wide forms of `GetEnv`, `SetEnv`, `InitEnv` and `DefField` (an index above 255). `bc_finish` still refuses other wide words.
+- Labels compile: `break label` and `continue label` on loops, and `break label` out of a labelled block.
+- Calls on bytecode on a private React dashboard journey: 93.6% (6,911,573 on the lane, 475,945 on the tree walker).
+
+Measurements (3 runs each, replay, `BARE_CLOCK=virtual`, main `8b6a71bb`):
+
+| Journey | main `tree` | branch `byte` |
+|---|---|---|
+| Private React dashboard, 230 typed keys | 74.537 to 74.539 G | 48.902 to 48.905 G (-34.4%) |
+| Public React page, cost per key (`keycost.sh`) | 276.9 M | 180.7 M |
+
+Branch `tree` is unchanged (74.538 G). Peak RSS on the public page: 31.6 MiB `tree`, 32.8 MiB `byte`.
+
+Tests: a differential test runs 1,018 cases of 7 fixture corpora with lazy bodies in `tree` and `byte` and expects equal results and no `bc_scope_check` mismatch. New tests cover lazy calls, wide words and labels. `exec_diff.sh`: 79 runs, 0 differences.
+
+Refusals left on the dashboard journey (calls): for-in and for-of 239,306, destructuring 104,472, optional chain 69,676, spread 39,782, private name 10,746, regexp literal 9,314, delete 2,390, others under 200.
+
+Not tested: test262 in byte mode (its runner does not read `BARE_JS_EXEC`), wall time, Windows and macOS, live sites.
+
 ## Agent browser integration (2026-11-17)
 
 The MCP combines document-scoped references and observation revisions, removal diffs, typed recovery evidence, independent session workers, cooperative cancellation and an eight-task evaluation corpus. Action outcomes retain execution and verification states alongside failure evidence. Cancellation cannot turn skipped step lines into a successful result. The guide describes the combined workflow.

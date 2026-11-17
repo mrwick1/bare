@@ -56,7 +56,7 @@ macro_rules! op_consts {
 op_consts! {
     NOP = Nop, MOV = Mov, LOAD_UNDEF = LoadUndef, LOAD_NULL = LoadNull, LOAD_TRUE = LoadTrue, LOAD_FALSE = LoadFalse,
     LOAD_THIS = LoadThis, LOAD_I = LoadI, LOAD_K = LoadK, GET_ENV = GetEnv, SET_ENV = SetEnv, INIT_ENV = InitEnv, PUSH_ENV = PushEnv,
-    DECL_ENV = DeclEnv, POP_ENV = PopEnv, COPY_ENV = CopyEnv, GET_GLOBAL = GetGlobal, SET_GLOBAL = SetGlobal,
+    DECL_ENV = DeclEnv, WIDE = Wide, POP_ENV = PopEnv, COPY_ENV = CopyEnv, GET_GLOBAL = GetGlobal, SET_GLOBAL = SetGlobal,
     TYPEOF_GLOBAL = TypeofGlobal, GET_NAME = GetName, SET_NAME = SetName, TYPEOF_NAME = TypeofName, GET_FIELD = GetField,
     SET_FIELD = SetField, GET_ELEM = GetElem, SET_ELEM = SetElem, TO_KEY = ToKey, DEF_FIELD = DefField, ARRAY_PUSH = ArrayPush,
     NEW_OBJECT = NewObject, NEW_ARRAY = NewArray, CLOSURE = Closure, CLOSURE_NAME = ClosureName, CALL = Call, NEW = New,
@@ -68,6 +68,19 @@ op_consts! {
     JN_LT = JnLt, JN_LE = JnLe, JN_GT = JnGt, JN_GE = JnGe, JN_EQ = JnEq, JN_NE = JnNe, JN_SEQ = JnSEq, JN_SNE = JnSNe,
     JN_LT_K = JnLtK, JN_LE_K = JnLeK, JN_GT_K = JnGtK, JN_GE_K = JnGeK, JN_EQ_K = JnEqK, JN_NE_K = JnNeK, JN_SEQ_K = JnSEqK,
     JN_SNE_K = JnSNeK, CALL_R = CallR, ADD_K = AddK, SUB_K = SubK, MUL_K = MulK, DIV_K = DivK, MOD_K = ModK,
+}
+
+/// Every wide word of the (verified) code is one that the loop reads: `GetEnv`, `SetEnv`, `InitEnv` or `DefField`.
+fn bc_wide_ok(ops: &[u32]) -> bool {
+    let mut pc = 0;
+    while pc < ops.len() {
+        let Ok((ins, n)) = bc::decode(ops, pc) else { return false };
+        if ops[pc] as u8 == Op::Wide as u8 && !matches!(ins.op, Op::GetEnv | Op::SetEnv | Op::InitEnv | Op::DefField) {
+            return false;
+        }
+        pc += n;
+    }
+    true
 }
 
 fn binop(op: u8) -> BinaryOp {
@@ -143,14 +156,15 @@ impl<'p> Interp<'p> {
 
     /// Compile `code` into a `Compiled` (verify it and make its constants).
     fn bc_finish(&mut self, r: G<crate::bc::Code>) -> Option<Rc<Compiled>> {
-        // The loop reads only narrow words: code with a wide form stays on the tree walker.
+        // The loop reads the wide form of `GetEnv`, `SetEnv`, `InitEnv` and `DefField` only: code with another wide word stays on the tree
+        // walker.
         let code = match r {
             Ok(c) if bc_verify::verify(&c).is_err() => {
                 self.bc.stats.fallbacks += 1;
                 self.bc.why = "verify";
                 return None;
             }
-            Ok(c) if c.ops.iter().scan(0usize, |skip, &w| Some(if *skip > 0 { *skip -= 1; false } else { *skip = matches!(Op::from_u8(w as u8), Some(o) if o.form() == bc::Form::AbcX) as usize; w as u8 == Op::Wide as u8 })).any(|w| w) => {
+            Ok(c) if !bc_wide_ok(&c.ops) => {
                 self.bc.stats.fallbacks += 1;
                 self.bc.why = "wide form";
                 return None;
@@ -704,9 +718,15 @@ impl<'p> Interp<'p> {
     #[inline(never)]
     fn bc_closure(&mut self, fid: FuncId, name: Option<u32>) -> Res<Value> {
         let f = *self.prog.func(fid);
-        // Only a named plain function expression gets its own name binding: ask the scope whether the node is an expression.
+        // Only a named plain function expression gets its own name binding: ask the scope whether the node is an expression. A lazy
+        // function has no scope yet: its slot keeps what the first walk saw.
         let is_expr = name.is_some()
-            || f.name.is_some() && f.kind == FuncKind::Normal && self.bc_fn_scope(fid).is_some_and(|s| matches!(self.sc_all[s.scope as usize].kind, RKind::Fn(_, true)));
+            || f.name.is_some()
+                && f.kind == FuncKind::Normal
+                && match f.body {
+                    Body::Lazy(idx) => self.lazy_is_expr(idx),
+                    _ => self.bc_fn_scope(fid).is_some_and(|s| matches!(self.sc_all[s.scope as usize].kind, RKind::Fn(_, true))),
+                };
         let s = match name {
             Some(n) => Some(self.name_str(n)?),
             None => None,
@@ -812,6 +832,40 @@ impl<'p> Interp<'p> {
                         }
                     };
                 }
+                // `GetEnv`, `SetEnv` and `InitEnv`: register `$a`, binding `$i` of the environment `$h` levels up.
+                macro_rules! get_env {
+                    ($a:expr, $h:expr, $i:expr) => {{
+                        let (e, i) = self.bc_slot($h as u32, $i as u32);
+                        regs[$a] = match self.envs[e as usize].bindings.get(i) {
+                            Some(bd) if bd.flags & INIT != 0 => bd.value,
+                            _ => tri!(at, Err::<Value, _>(self.bc_env_err(e, i))),
+                        };
+                    }};
+                }
+                macro_rules! set_env {
+                    ($a:expr, $h:expr, $i:expr) => {{
+                        let (e, i) = self.bc_slot($h as u32, $i as u32);
+                        let v = regs[$a];
+                        match self.envs[e as usize].bindings.get_mut(i) {
+                            Some(bd) if bd.flags & (INIT | MUT) == INIT | MUT => bd.value = v,
+                            Some(_) => tri!(at, self.bc_assign(e, i, v)),
+                            None => tri!(at, Err::<(), _>(self.bc_env_err(e, i))),
+                        }
+                    }};
+                }
+                macro_rules! init_env {
+                    ($a:expr, $h:expr, $i:expr) => {{
+                        let (e, i) = self.bc_slot($h as u32, $i as u32);
+                        let v = regs[$a];
+                        match self.envs[e as usize].bindings.get_mut(i) {
+                            Some(bd) => {
+                                bd.value = v;
+                                bd.flags |= INIT;
+                            }
+                            None => tri!(at, Err::<(), _>(self.bc_env_err(e, i))),
+                        }
+                    }};
+                }
                 // `a = f(l, r)` on two numbers, else the general operator.
                 macro_rules! arith {
                     ($l:expr, $r:expr, $f:expr, $bop:expr) => {{
@@ -892,31 +946,21 @@ impl<'p> Interp<'p> {
                     }
                     LOAD_I => regs[a] = Value::Number(sbx as f64),
                     LOAD_K => regs[a] = c.kv[bx as usize],
-                    GET_ENV => {
-                        let (e, i) = self.bc_slot(b as u32, cc as u32);
-                        regs[a] = match self.envs[e as usize].bindings.get(i) {
-                            Some(bd) if bd.flags & INIT != 0 => bd.value,
-                            _ => tri!(at, Err::<Value, _>(self.bc_env_err(e, i))),
-                        };
-                    }
-                    SET_ENV => {
-                        let (e, i) = self.bc_slot(b as u32, cc as u32);
-                        let v = regs[a];
-                        match self.envs[e as usize].bindings.get_mut(i) {
-                            Some(bd) if bd.flags & (INIT | MUT) == INIT | MUT => bd.value = v,
-                            Some(_) => tri!(at, self.bc_assign(e, i, v)),
-                            None => tri!(at, Err::<(), _>(self.bc_env_err(e, i))),
-                        }
-                    }
-                    INIT_ENV => {
-                        let (e, i) = self.bc_slot(b as u32, cc as u32);
-                        let v = regs[a];
-                        match self.envs[e as usize].bindings.get_mut(i) {
-                            Some(bd) => {
-                                bd.value = v;
-                                bd.flags |= INIT;
-                            }
-                            None => tri!(at, Err::<(), _>(self.bc_env_err(e, i))),
+                    GET_ENV => get_env!(a, b, cc),
+                    SET_ENV => set_env!(a, b, cc),
+                    INIT_ENV => init_env!(a, b, cc),
+                    // The wide form of the words that name a binding or a constant past 255 (the many bindings of a webpack module
+                    // function, an object literal with many keys). `bc_finish` refuses any other wide word.
+                    WIDE => {
+                        let w2 = ops[pc];
+                        pc += 1;
+                        let (a, b, cc) = ((w >> 16) as usize, (w2 & 0xffff) as usize, (w2 >> 16) as usize);
+                        match (w >> 8) as u8 {
+                            GET_ENV => get_env!(a, b, cc),
+                            SET_ENV => set_env!(a, b, cc),
+                            INIT_ENV => init_env!(a, b, cc),
+                            DEF_FIELD => tri!(at, self.bc_def_field(regs[a], name!(cc), regs[b])),
+                            _ => unreachable!("bc_finish refuses this wide word"),
                         }
                     }
                     PUSH_ENV => {

@@ -50,7 +50,8 @@ impl<'p> Interp<'p> {
     /// of `bc_resolve`). `None` when the walk of an inner function fails.
     fn rfc_analyze(&mut self, fid: FuncId, fs: &FnScope) -> Option<RfcSets> {
         let w = self.bc_walk(Some(fid), fs.scope);
-        if w.bad.is_some() {
+        // A lazy inner function can name any variable: they all stay in the environment (stage 1).
+        if w.bad.is_some() || w.lazy_inner {
             return None;
         }
         let own: std::collections::HashSet<u32> = std::iter::once(fs.scope).chain(w.stmts.iter().map(|&(_, s)| s)).collect();
@@ -66,7 +67,7 @@ impl<'p> Interp<'p> {
         let mut todo = w.funcs;
         while let Some((f, isc)) = todo.pop() {
             let iw = self.bc_walk(Some(f), isc);
-            if iw.bad.is_some() {
+            if iw.bad.is_some() || iw.lazy_inner {
                 return None;
             }
             todo.extend(iw.funcs);
