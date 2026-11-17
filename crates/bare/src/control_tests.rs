@@ -182,3 +182,32 @@ fn key_specs_give_the_events_of_the_window() {
     assert_eq!(keys(" "), "+ /Space/ /0 - /Space//0");
     assert!(key_events("Hyper+a").is_none() && key_events("Nope").is_none());
 }
+
+/// OFS-11: a click scrolls the target into view through every scroll container, and clear of a sticky or fixed bar that covers it.
+#[test]
+fn a_click_scrolls_the_target_into_view_clear_of_bars() {
+    big(|| {
+        let cases = [
+            // 1: a scrollable list in a fixed modal, the target far down.
+            r#"<body style="margin:0"><div style="position:fixed;top:20px;left:20px;width:300px;height:200px;background:#fff"><div id=list style="height:200px;overflow:auto">
+<div style="height:1500px"></div><button id=t style="display:block;height:30px">T</button><div style="height:300px"></div></div></div></body>"#,
+            // 1b: the fixed modal itself scrolls.
+            r#"<body style="margin:0"><div style="position:fixed;top:0;left:0;width:300px;height:200px;overflow:auto"><div style="height:1500px"></div><button id=t style="display:block;height:30px">T</button><div style="height:300px"></div></div></body>"#,
+            // 2: a form with a sticky footer at the bottom that covers the target.
+            r#"<body style="margin:0"><div style="height:700px"></div><label id=t style="display:block;height:30px">S</label><div style="height:40px"></div>
+<div style="position:sticky;bottom:0;height:60px;background:#ccc">bar</div><div style="height:400px"></div></body>"#,
+            // 3: a button at the bottom of a long page.
+            r#"<body style="margin:0"><div style="height:3000px"></div><button id=t style="display:block;height:30px">T</button></body>"#,
+        ];
+        let mut bad = Vec::new();
+        for (i, html) in cases.iter().enumerate() {
+            let mut p = page(&format!("{html}<script>window.n = 0; document.getElementById('t').addEventListener('click', function () {{ n++ }});</script>"), 300);
+            let t = one(&mut p, "#t");
+            let r = p.click(t);
+            if r.is_err() || js(&mut p, "n") != "1" {
+                bad.push(format!("case {}: {r:?}", i + 1));
+            }
+        }
+        assert!(bad.is_empty(), "{bad:?}");
+    });
+}
