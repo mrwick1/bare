@@ -2485,11 +2485,12 @@ impl StyleChain {
 }
 
 /// A copy of the styles of the elements, for a host that compares two cascades (`bare/src/browser_motion.rs`). It holds the
-/// values and the `calc()` numbers, nothing else: a `Value::Grid` in it points to nothing.
+/// values, the `calc()` numbers and the grid lists (a transform that is not a plain move is a `Value::Grid`), nothing else.
 pub struct StyleMap {
     styles: Vec<ComputedStyle>,
     of_node: Vec<u32>,
     calcs: Vec<[f32; 2]>,
+    grids: Vec<Grid>,
 }
 
 impl StyleMap {
@@ -2504,12 +2505,17 @@ impl StyleMap {
     pub fn calc(&self, i: u32) -> (f32, f32) {
         self.calcs.get(i as usize).map_or((0.0, 0.0), |c| (c[0], c[1]))
     }
+
+    /// The grid list that a `Value::Grid` points to.
+    pub fn grid(&self, i: u32) -> Option<&Grid> {
+        self.grids.get(i as usize)
+    }
 }
 
 impl Styles {
     /// Copy the styles (`StyleMap`).
     pub fn map(&self) -> StyleMap {
-        StyleMap { styles: self.styles.clone(), of_node: self.of_node.clone(), calcs: self.calcs.clone() }
+        StyleMap { styles: self.styles.clone(), of_node: self.of_node.clone(), calcs: self.calcs.clone(), grids: self.grids.clone() }
     }
 
     /// Does any style satisfy `f`? (Each different style is tested once.)

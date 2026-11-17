@@ -203,3 +203,24 @@ fn a_transition_of_a_picture_property_does_not_panic() {
     run(&mut b, 200.0);
     assert_eq!(js(&mut b, "typeof log"), "object");
 }
+
+/// The page slide of the Google sign-in (bare#654): a new view is added hidden, its slider gets a "start" class, a frame later a
+/// `transition`, and a frame after that the view is shown, `offsetWidth` is read and the class swap moves the child. The page
+/// waits for the `transitionend` that bubbles from the child to the slider; only then does it remove its busy overlay.
+#[test]
+fn shown_view_slides_after_a_forced_layout() {
+    let mut b = page(
+        ".p.h{overflow-x:hidden} .c{display:flex} .p.h .c{transition:transform .3s cubic-bezier(.4,0,.2,1)} .p.q .c{transform:translateZ(0)} .p.g .c{transform:translate3d(-100%,0,0)}",
+        "<div id=host><div id=old><div class=p><div class=c><div id=os>old</div></div></div></div></div>",
+    );
+    js(&mut b, "var log = []; document.body.getBoundingClientRect(); \
+        var root = document.createElement('div'); root.innerHTML = '<div class=p id=d><div class=c><div id=ns>new</div></div></div>'; \
+        var d = root.querySelector('#d'); d.addEventListener('transitionend', function (e) { log.push('end:' + e.propertyName) }); \
+        d.classList.add('q'); root.style.display = 'none'; document.getElementById('host').appendChild(root); \
+        requestAnimationFrame(function () { d.classList.add('h'); requestAnimationFrame(function () { \
+            document.getElementById('old').style.display = 'none'; root.style.display = ''; \
+            document.getElementById('ns').before(document.getElementById('os')); \
+            if (d.offsetWidth) { d.classList.remove('q'); d.classList.add('g') } else log.push('no width') }) })");
+    run(&mut b, 1000.0);
+    assert_eq!(js(&mut b, "log.join(' ')"), "end:transform");
+}
