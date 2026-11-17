@@ -78,7 +78,8 @@ op_consts! {
     JN_LT = JnLt, JN_LE = JnLe, JN_GT = JnGt, JN_GE = JnGe, JN_EQ = JnEq, JN_NE = JnNe, JN_SEQ = JnSEq, JN_SNE = JnSNe,
     JN_LT_K = JnLtK, JN_LE_K = JnLeK, JN_GT_K = JnGtK, JN_GE_K = JnGeK, JN_EQ_K = JnEqK, JN_NE_K = JnNeK, JN_SEQ_K = JnSEqK,
     JN_SNE_K = JnSNeK, CALL_R = CallR, ADD_K = AddK, SUB_K = SubK, MUL_K = MulK, DIV_K = DivK, MOD_K = ModK,
-    ITER_OPEN = IterOpen, FOR_IN_OPEN = ForInOpen, ITER_NEXT = IterNext, ITER_CLOSE = IterClose,
+    ITER_OPEN = IterOpen, FOR_IN_OPEN = ForInOpen, ITER_NEXT = IterNext, ITER_CLOSE = IterClose, ITER_STEP = IterStep,
+    ITER_REST = IterRest, OBJ_REST = ObjRest, REQUIRE_OBJ = RequireObj,
 }
 
 /// Every wide word of the (verified) code is one that the loop reads: `GetEnv`, `SetEnv`, `InitEnv` or `DefField`.
@@ -463,6 +464,54 @@ impl<'p> Interp<'p> {
             }
         }
         e
+    }
+
+    /// `IterOpen`: `iter_start`, or for an array pattern `iter_start_val`. Out of the loop, as the pattern ops are: their code in
+    /// the loop made every other op slower (2.7% more instructions on a React journey with the same work).
+    #[inline(never)]
+    fn bc_iter_open(&mut self, c: &Compiled, at: usize, v: Value, pattern: bool) -> Res<It> {
+        if pattern { self.iter_start_val(v) } else { self.iter_start(v, Self::bc_call_expr(c, at)) }
+    }
+
+    /// The ops of patterns: `IterStep`, `IterRest`, `ObjRest` (`c` keys after register `a`) and `RequireObj`.
+    #[inline(never)]
+    fn bc_pattern_op(&mut self, op: u8, a: usize, b: usize, c: usize, regs: &mut [Value], iters: &mut [BcIter]) -> Res<()> {
+        match op {
+            ITER_STEP | ITER_REST => {
+                let Some(BcIter::Of(it)) = iters.last_mut() else { return Err(unsupported("bad bytecode", Span::default())) };
+                regs[a] = if op == ITER_STEP { self.iter_next(it)?.unwrap_or(Value::Undefined) } else { self.bc_iter_rest(it)? };
+            }
+            OBJ_REST => regs[a] = self.bc_obj_rest(regs[b], &regs[a + 1..a + 1 + c])?,
+            _ => {
+                let v = regs[a];
+                if is_nullish(v) {
+                    let t = self.display(v);
+                    return Err(self.type_err(&format!("Cannot destructure '{t}' as it is {t}.")));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The values that are left in `it`, as a new array (a rest element, `bind_array_elems`).
+    fn bc_iter_rest(&mut self, it: &mut It) -> Res<Value> {
+        let mut rest = Vec::new();
+        while let Some(x) = self.iter_next(it)? {
+            self.iter_buffer_room(rest.len())?;
+            rest.push(x);
+        }
+        self.new_array_from(&rest)
+    }
+
+    /// A rest property: a new object with the properties of `src` except `keys` (`bind_pattern`).
+    fn bc_obj_rest(&mut self, src: Value, keys: &[Value]) -> Res<Value> {
+        let mut used = Vec::with_capacity(keys.len());
+        for &k in keys {
+            used.push(self.coerce_key(k)?);
+        }
+        let o = h!(self, self.heap.new_object(Some(self.object_proto)));
+        self.copy_props(o, src, &used)?;
+        Ok(Value::Object(o))
     }
 
     /// The next key of a `for-in` that the object still has (`exec_for_each`).
@@ -1237,7 +1286,7 @@ impl<'p> Interp<'p> {
                         }
                     }
                     ITER_OPEN => {
-                        let it = tri!(at, self.iter_start(regs[a], Self::bc_call_expr(c, at)));
+                        let it = tri!(at, self.bc_iter_open(c, at, regs[a], b == 1));
                         st.iters.push(BcIter::Of(it));
                     }
                     FOR_IN_OPEN => {
@@ -1259,6 +1308,7 @@ impl<'p> Interp<'p> {
                             }
                         }
                     }
+                    op @ (ITER_STEP | ITER_REST | OBJ_REST | REQUIRE_OBJ) => tri!(at, self.bc_pattern_op(op, a, b, cc, regs, &mut st.iters)),
                     ITER_CLOSE => match st.iters.pop() {
                         Some(BcIter::Of(mut it)) => tri!(at, self.iter_close(&mut it)),
                         Some(BcIter::In { .. }) => {}

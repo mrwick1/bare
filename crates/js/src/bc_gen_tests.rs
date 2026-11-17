@@ -386,6 +386,27 @@ fn a_for_of_and_a_for_in_are_register_function_loops() {
     });
 }
 
+/// Object and array patterns in a function with no inner function: a register function. The bound names are registers.
+#[test]
+fn patterns_bind_registers_in_a_register_function() {
+    big(|| {
+        let src = "function f(o) { const { a, b = 1, ...r } = o; let [c, , ...d] = a; var x; [x] = d; return b + c + x + r.k; } f({ a: [1, 2, 3], k: 4 });";
+        let prog = parse_script(src, Limits::default()).unwrap();
+        let mut it = Interp::new(&prog, Heap::default(), EvalLimits::default()).unwrap();
+        let _ = it.run();
+        let root = it.bc_root().unwrap();
+        let (f, _) = it.bc_walk(None, root).funcs[0];
+        let c = it.bc_compile(f).unwrap();
+        verify(&c).unwrap_or_else(|e| panic!("{e}\n{}", c.disassemble()));
+        let text = c.disassemble();
+        assert!(c.regfn && !c.has_env, "{text}");
+        assert!(!text.contains("Env"), "{text}");
+        for want in ["RequireObj", "ObjRest", "IterStep", "IterRest"] {
+            assert!(text.contains(want), "{want}\n{text}");
+        }
+    });
+}
+
 /// Run `src` in each mode and show the completion value (or the error name).
 fn show(src: &str, mode: Exec) -> String {
     let mut it = Interp::realm(Heap::default(), EvalLimits { max_steps: 50_000_000, ..Default::default() }).unwrap();

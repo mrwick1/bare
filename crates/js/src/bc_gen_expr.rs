@@ -358,6 +358,15 @@ impl Gen<'_, '_> {
                 // A member target with a member inside a paren has the same place.
                 self.place_of(me)?
             }
+            PatKind::Array(_) | PatKind::Object(_) if op == AssignOp::Assign => {
+                // The value is in a register of its own: the pattern may write the register of `dst`.
+                let t = self.reg()?;
+                self.expr(value, t)?;
+                self.bind_pat(false, VarKind::Var, target, t)?;
+                self.emit(Op::Mov, dst, t, 0)?;
+                self.free(mark);
+                return Ok(());
+            }
             _ => return Err("destructuring"),
         };
         let k = if let Place::Name(_, n) = p { Some(n) } else { None };

@@ -228,7 +228,11 @@ impl Gen<'_, '_> {
         for d in prog.list(decls) {
             let d = *prog.decl(d);
             if !matches!(prog.pat(d.target).kind, PatKind::Ident) {
-                return Err("destructuring");
+                let r = self.reg()?;
+                self.expr(d.init.ok_or("a pattern with no initializer")?, r)?;
+                self.bind_pat(true, kind, d.target, r)?;
+                self.free(r);
+                continue;
             }
             let n = self.it.cc.cold.pat_name[d.target.index()];
             let reg = if self.rf.is_some() { self.rf_decl_opt(self.it.pat_site(d.target.index()), n)? } else { None };
@@ -343,10 +347,9 @@ impl Gen<'_, '_> {
                     return Err("a catch with an inner function in a register function");
                 }
                 self.rf_scope(sc)?;
-                if let Some(p) = c.param {
-                    if !matches!(prog.pat(p).kind, PatKind::Ident) {
-                        return Err("destructuring");
-                    }
+                if let Some(p) = c.param.filter(|&p| !matches!(prog.pat(p).kind, PatKind::Ident)) {
+                    self.bind_pat(true, VarKind::Let, p, exc)?;
+                } else if let Some(p) = c.param {
                     let n = self.it.cc.cold.pat_name[p.index()];
                     let (key, l) = self.rf_decl(self.it.pat_site(p.index()), n)?;
                     self.emit(Op::Mov, l.reg, exc, 0)?;
@@ -356,10 +359,9 @@ impl Gen<'_, '_> {
                 self.free(exc);
             } else {
                 self.push_env(sc)?;
-                if let Some(p) = c.param {
-                    if !matches!(prog.pat(p).kind, PatKind::Ident) {
-                        return Err("destructuring");
-                    }
+                if let Some(p) = c.param.filter(|&p| !matches!(prog.pat(p).kind, PatKind::Ident)) {
+                    self.bind_pat(true, VarKind::Let, p, exc)?;
+                } else if let Some(p) = c.param {
                     let n = self.it.cc.cold.pat_name[p.index()];
                     let Site::Env { hops: 0, index } = self.site(self.it.pat_site(p.index()), n)? else { return Err("a catch parameter outside its environment") };
                     self.emit(Op::InitEnv, exc, 0, index)?;
@@ -508,7 +510,7 @@ impl Gen<'_, '_> {
         if envs {
             self.emit(Op::CopyEnv, 0, 0, 0)?;
         }
-        self.bind_each(var.is_some(), kind, target, v)?;
+        self.bind_pat(var.is_some(), kind, target, v)?;
         self.open(true, Some(top));
         self.stmt(body)?;
         self.jump_back(Op::Jmp, 0, top)?;
@@ -523,13 +525,15 @@ impl Gen<'_, '_> {
         Ok(())
     }
 
-    /// Bind the value in `v` to the target of a `for-in` or `for-of`: a declaration (`decl`) or an assignment target.
-    fn bind_each(&mut self, decl: bool, kind: VarKind, target: PatId, v: u32) -> G<()> {
+    /// Bind the value in `v` to the pattern `p` (`bind_pattern`): a declaration (`decl`, of `kind`) or an assignment target. `v`
+    /// is not written. The order of reads, defaults and writes is the one of the tree walker.
+    pub(super) fn bind_pat(&mut self, decl: bool, kind: VarKind, p: PatId, v: u32) -> G<()> {
+        let prog = self.prog.clone();
         let mark = self.top;
-        match self.prog.pat(target).kind {
+        match prog.pat(p).kind {
             PatKind::Ident => {
-                let n = self.it.cc.cold.pat_name[target.index()];
-                let site = self.it.pat_site(target.index());
+                let n = self.it.cc.cold.pat_name[p.index()];
+                let site = self.it.pat_site(p.index());
                 let reg = if decl && self.rf.is_some() { self.rf_decl_opt(site, n)? } else { None };
                 if let Some((key, l)) = reg {
                     self.emit(Op::Mov, l.reg, v, 0)?;
@@ -545,6 +549,89 @@ impl Gen<'_, '_> {
                 }
             }
             PatKind::Member(me) if !decl => self.put_member(me, v)?,
+            PatKind::Assign { target, default } => {
+                // `undefined` takes the default (an anonymous function takes the name of a name target).
+                let x = self.reg()?;
+                let t = self.reg()?;
+                self.emit(Op::Mov, x, v, 0)?;
+                self.emit(Op::LoadUndef, t, 0, 0)?;
+                self.emit(Op::StrictEq, t, x, t)?;
+                let j = self.jump(Op::JmpIfNot, t)?;
+                let name = matches!(prog.pat(target).kind, PatKind::Ident).then(|| self.it.cc.cold.pat_name[target.index()]);
+                self.named(default, x, name)?;
+                self.patch(j)?;
+                self.bind_pat(decl, kind, target, x)?;
+            }
+            PatKind::Object(l) => {
+                self.emit(Op::RequireObj, v, 0, 0)?;
+                let rest = prog.list(l).any(|q| matches!(prog.pat(prog.pat_prop(q).value).kind, PatKind::Rest(_)));
+                // With a rest property, each key stays in a register after the one of the rest object, for `ObjRest`.
+                let o = if rest { self.reg()? } else { 0 };
+                let mut nkeys = 0;
+                for q in prog.list(l) {
+                    let pp = *prog.pat_prop(q);
+                    if let PatKind::Rest(t) = prog.pat(pp.value).kind {
+                        self.emit(Op::ObjRest, o, v, nkeys)?;
+                        self.bind_pat(decl, kind, t, o)?;
+                        continue;
+                    }
+                    if let (Key::Name(sp), false) = (pp.key, rest) {
+                        let x = self.reg()?;
+                        self.field(Op::GetField, x, v, sp)?;
+                        self.bind_pat(decl, kind, pp.value, x)?;
+                        self.free(x);
+                        continue;
+                    }
+                    // The key (`coerce_key`), then the value, then the binding.
+                    let k = self.reg()?;
+                    if let Key::Computed(e) = pp.key {
+                        self.expr(e, k)?;
+                        self.emit(Op::ToKey, k, v, k)?;
+                    } else {
+                        let s = match pp.key {
+                            Key::Name(sp) => prog.name(sp).into_owned(),
+                            Key::Str(sp) => {
+                                let mut u = Vec::new();
+                                prog.string(sp, &mut u).map_err(|_| "string")?;
+                                String::from_utf16(&u).map_err(|_| "a key with a lone surrogate")?
+                            }
+                            Key::Num(sp) => number_to_string(self.it.num_lit(sp, num_base(prog.text(sp)))),
+                            _ => return Err("pattern key"),
+                        };
+                        let c = self.konst(KeyOf::String(s.encode_utf16().collect()));
+                        self.emit(Op::LoadK, k, c, 0)?;
+                    }
+                    let x = self.reg()?;
+                    self.emit(Op::GetElem, x, v, k)?;
+                    self.bind_pat(decl, kind, pp.value, x)?;
+                    if rest {
+                        self.free(x);
+                        nkeys += 1;
+                    } else {
+                        self.free(k);
+                    }
+                }
+            }
+            PatKind::Array(l) => {
+                self.emit(Op::IterOpen, v, 1, 0)?;
+                self.iters += 1;
+                let x = self.reg()?;
+                for q in prog.list(l) {
+                    match prog.pat(q).kind {
+                        PatKind::Hole => self.emit(Op::IterStep, x, 0, 0)?,
+                        PatKind::Rest(t) => {
+                            self.emit(Op::IterRest, x, 0, 0)?;
+                            self.bind_pat(decl, kind, t, x)?;
+                        }
+                        _ => {
+                            self.emit(Op::IterStep, x, 0, 0)?;
+                            self.bind_pat(decl, kind, q, x)?;
+                        }
+                    }
+                }
+                self.emit(Op::IterClose, 0, 0, 0)?;
+                self.iters -= 1;
+            }
             _ => return Err("destructuring"),
         }
         self.free(mark);
