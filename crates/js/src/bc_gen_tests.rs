@@ -728,6 +728,16 @@ fn spread_runs_on_the_lane() {
     ]);
 }
 
+/// `delete` on an optional chain deletes the property (#635). A `?.` that finds `null` or `undefined` gives `true`.
+#[test]
+fn delete_on_an_optional_chain_deletes() {
+    let src = "var x = { a: 1 }, y = { a: { b: 1 } }; function f(o) { return delete o?.a; } function g(o) { return delete o?.a.b; } \
+        [delete x?.a, JSON.stringify(x), delete y?.a.b, JSON.stringify(y), delete null?.a, f({ a: 1 }), f(null), g(null), g({ a: { b: 1 } })].join()";
+    for mode in [Exec::Tree, Exec::Auto, Exec::Byte] {
+        assert_eq!(big(move || show(src, mode)), r#"true,{},true,{"a":{}},true,true,true,true,true"#, "{mode:?}");
+    }
+}
+
 #[test]
 fn computed_keys_delete_and_regexp_literals_run_on_the_lane() {
     same_on_the_lane(&[
@@ -748,6 +758,9 @@ fn computed_keys_delete_and_regexp_literals_run_on_the_lane() {
         ("delete order", "var log = []; function o() { log.push('o'); return { a: 1 }; } function k() { log.push('k'); return 'a'; } function f() { delete o()[k()]; return log.join(); } f()"),
         ("delete call result", "var n = 0; function g() { n++; return 1; } function f() { return delete g() + ',' + n; } f()"),
         ("delete optional", "function f(o) { return delete o?.a; } var x = { a: 1 }; [f(null), f(x), JSON.stringify(x)].join()"),
+        ("delete optional long chain", "function f(o) { return delete o?.a.b; } var y = { a: { b: 1 } }; [f(null), f(y), JSON.stringify(y)].join()"),
+        ("delete optional index", "var n = 0; function k() { n++; return 'a'; } function f(o) { return delete o?.[k()]; } var x = { a: 1, b: 2 }; [f(null), n, f(x), n, JSON.stringify(x)].join()"),
+        ("delete optional inner nullish", "function f(o) { try { return delete o?.a.b; } catch (e) { return e.name + ':' + e.message; } } f({})"),
         ("delete in condition", "function f(o) { if (delete o.a) { return Object.keys(o).length; } return -1; } f({ a: 1, b: 2 })"),
         ("regexp", "function f(s) { return /b+/.test(s) + ',' + s.replace(/a/g, 'x') + ',' + /(\\d+)-(\\d+)/.exec(s)[2]; } f('aabb 12-34')"),
         ("regexp new object each time", "function f() { return /a/ === /a/; } function g() { var r = []; for (var i = 0; i < 2; i++) r.push(/a/g); return r[0] === r[1]; } f() + ',' + g()"),

@@ -3398,21 +3398,31 @@ impl<'p> Interp<'p> {
         match self.prog.expr(a).kind {
             ExprKind::Member { .. } | ExprKind::Index { .. } => {
                 let (base, key) = self.member_ref(a)?;
-                let o = match base {
-                    Value::Object(o) => o,
-                    Value::Undefined | Value::Null => {
-                        let t = self.display(base);
-                        let k = self.key_text(key);
-                        return Err(self.type_err(&format!("Cannot convert undefined or null to object ({t}, deleting '{k}')")));
-                    }
-                    _ => return Ok(Value::Bool(true)),
+                self.delete_ref(base, key)
+            }
+            // `delete a?.b`: a `?.` that finds `null` or `undefined` gives `true`, as in `link`.
+            ExprKind::Chain(inner) => {
+                let ex = *self.prog.expr(inner);
+                let (ExprKind::Member { obj, optional, .. } | ExprKind::Index { obj, optional, .. }) = ex.kind else {
+                    self.eval_expr(arg)?;
+                    return Ok(Value::Bool(true));
                 };
-                let ok = hxw!(self, self.heap.delete(o, key), self.px_delete(o, key)?);
-                if !ok && self.strict {
-                    let k = self.key_text(key);
-                    return Err(self.type_err(&format!("Cannot delete property '{k}' of #<Object>")));
+                let Some((base, _)) = self.link_base(obj)? else { return Ok(Value::Bool(true)) };
+                if optional && is_nullish(base) {
+                    return Ok(Value::Bool(true));
                 }
-                Ok(Value::Bool(ok))
+                let key = match ex.kind {
+                    ExprKind::Member { name, .. } => self.expr_key(inner, name)?,
+                    ExprKind::Index { index, .. } => {
+                        let iv = self.operand(index)?;
+                        if is_nullish(base) {
+                            return Err(self.index_nullish_err(base, iv));
+                        }
+                        self.coerce_key(iv)?
+                    }
+                    _ => unreachable!(),
+                };
+                self.delete_ref(base, key)
             }
             ExprKind::Ident => {
                 let n = self.cc.expr_name[a.index()];
@@ -3431,6 +3441,25 @@ impl<'p> Interp<'p> {
                 Ok(Value::Bool(true))
             }
         }
+    }
+
+    /// Delete the property `key` of `base` (`delete a.b`, `delete a[b]`, `delete a?.b`).
+    fn delete_ref(&mut self, base: Value, key: PropertyKey) -> Res<Value> {
+        let o = match base {
+            Value::Object(o) => o,
+            Value::Undefined | Value::Null => {
+                let t = self.display(base);
+                let k = self.key_text(key);
+                return Err(self.type_err(&format!("Cannot convert undefined or null to object ({t}, deleting '{k}')")));
+            }
+            _ => return Ok(Value::Bool(true)),
+        };
+        let ok = hxw!(self, self.heap.delete(o, key), self.px_delete(o, key)?);
+        if !ok && self.strict {
+            let k = self.key_text(key);
+            return Err(self.type_err(&format!("Cannot delete property '{k}' of #<Object>")));
+        }
+        Ok(Value::Bool(ok))
     }
 
     // ------------------------------------------------------------ references and assignment
