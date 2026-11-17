@@ -13054,3 +13054,21 @@ Base: origin/main `4d4b5e5442`. `Auto`, public React page, `#a1`, callgrind with
 - For-in: `for_in_keys` is 304.5M of 7,177.9M (4.24%) at 50 keys: 4,206 instructions for each of 72,406 loop entries (`own_keys` copies 81.4M, seen-set inserts 71.4M, `peek_own_property` 71.2M, `Vec` growth 30.8M). All 72,406 entries are plain shape-mode objects with prototype `Object.prototype`; loops average 5.03 keys over 147 shapes. Recommended design B: read keys in place from the shape table and skip `has_property` while the receiver keeps its shape. A throwaway prototype (reverted): load 441.29M to 433.92M (-1.67%), 5 keys 1152.39M to 1111.83M (-3.52%), 50 keys 7167.78M to 6823.40M (-4.80%); output, render counts and `bcstats` equal; RSS no growth (medians of 7 fresh-copy runs). Safety condition: no shape sweep while a loop is open (`collect` refuses at `depth != 0` today). Not run on the prototype: full tests, clippy, `exec_diff.sh`, narrow rows, cost matrix. Waits for the owner's review.
 - Keyed access: `GetElem` and `SetElem` ops are 517.5M, 7.7% of the steady page (648,770 `GetElem` at 387 instructions; 263,492 `SetElem`). Two classes make 77% of the cost, both a short string key on a plain object: `SetElem` that adds a key (196,075 ops at 1,064 each, 3.10%; three lookups of the same key) and `GetElem` of an own property (474,375 ops at 405 each, 2.85%). Array index keys are about 1.2%. Sources: a few for-in loops of the bundle (the JSX props copy, rest-props copies, DOM prop diff); the top 10 sites run 69.5% of the keyed ops. A per-site cache does not fit (the key changes on every pass; one entry hits 5.8%, four entries 18.0%). Ranked (hypothesis): (1) a global (shape, key) cache in out-of-line functions, 3.5% to 5.5% of the steady page; (2) the for-in design extended with slot indices; (3) array dense read, write and append fast paths, about 1%; (4) one-character string table, about 0.1%.
 - Not tested: any keyed fast path (no code built); the hit rate of a global (shape, key) table; the private dashboard journey.
+## ToInt32 fast path for bit operators (`toint-fast-path`, 2026-11-17)
+
+Lever 1 of `docs/research-lane-profile-after-calls.md`: every `BitAnd` and `BitOr` called `trunc` and `fmod` (about 2M `fmod` calls at 50 keys). Base: origin/main `4d4b5e5442`. Machine: archMachine. `Auto`, public React page, `#a1`. Instruction counts: minimum of 3 `perf stat` runs, spread at most 0.058%. Narrow rows: `byte`, scale 10.
+
+- `to_uint32` returns at once when `n as i32` converts back to exactly `n` (NaN fails the check, -0 gives 0). A new out-of-line helper `bc_binary` runs the bitwise operators and shifts when both operands are numbers; every other case calls `binary`. The hot loop has no new arm.
+
+| Row | main | now |
+| --- | --- | --- |
+| Page load | 441.26M | 436.66M (-1.04%) |
+| Page 50 keys | 7167.74M | 7020.65M (-2.05%) |
+| loopfn / fib / calls / loop | 837.05 / 58.21 / 1599.28 / 2369.05M | unchanged (±0.00%) |
+| closures | 469.74M | 466.70M (-0.65%) |
+
+- The `to_uint32` change alone: 50 keys 7044.46M (-1.72%); the lane helper adds -0.33%.
+- Cost matrix against main (803 rows): 0 rows over +0.5% under either allocator. Mean glibc -0.088%. A first helper converted the operands before it checked the operator, so `**` paid for a slow `to_uint32(1.5)` (`numeric_load pow 10000` +3.84%); it checks the operator first now (+0.148%).
+- Peak RSS, medians of 7 interleaved runs of `cp --reflink=never` copies: load +0.07%, 50 keys -0.02%.
+- Tests: 1019 passed, 1 ignored. The new test `bitwise_operators_wrap_as_in_node_in_every_mode` runs 31 edge values through 11 expressions and 3 BigInt cases against literals from Node, in Tree, Auto and Byte. It passes on main too (behavior does not change); a deliberately wrong fast path (`n as i64`, no range guard) failed it. `tools/js/exec_diff.sh`: 79 runs, 0 differences. `bcstats` unchanged.
+- Not tested: operands in [2^31, 2^32) (for example the result of `x >>> 0`) still take the slow path and were not measured; wall time; Windows and macOS; the private dashboard journey.

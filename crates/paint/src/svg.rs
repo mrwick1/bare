@@ -7,13 +7,14 @@
 //!
 //! `text` and the `tspan` inside it draw their letters with the font of the `text` (the cascade, and the `font-*` attributes as hints).
 //! `x`, `y`, `dx` and `dy` (the first number of each, in `px` or `em`) place a run, and `text-anchor` moves each chunk that an `x`
-//! starts. The spaces collapse as in HTML. A run is never turned or skewed: a transform moves it and scales its size.
+//! starts. The spaces collapse as in HTML. A run under a uniform scale and a move stays text. Under any other matrix (a turn, a skew, an unequal scale or a flip) its letters are filled as outlines (polygons).
+//! `dominant-baseline` (and `alignment-baseline` on the element of a run) moves the baseline by Chrome's offsets for Noto Sans.
 //!
 //! A shape becomes polygons in pixels, and `Canvas::fill_poly` fills them with the non-zero rule. A fill is the outline of the shape. A
 //! stroke is one quad for each segment, plus a join (a disc, a bevel or a miter) at each corner and a cap at each end, all with the same
 //! winding, so that the non-zero rule makes their union.
 //!
-//! Not built: `fill-rule`, `stroke-dasharray`, `fill-opacity`, `stroke-opacity`, `opacity` on a shape, `transform` from a style sheet, `use`, `textPath`, `dominant-baseline`, a style on a `tspan`, `image`,
+//! Not built: `fill-rule`, `stroke-dasharray`, `fill-opacity`, `stroke-opacity`, `opacity` on a shape, `transform` from a style sheet, `use`, `textPath`, a style on a `tspan`, `image`,
 //! paint servers (`url(#a)`), `preserveAspectRatio` other than the default, `stroke-width` from a style sheet, a unit other than `px` or none.
 
 use crate::display::argb;
@@ -222,10 +223,12 @@ fn first_len(doc: &Document, node: NodeId, name: &str, em: f32) -> Option<f32> {
     }
 }
 
-/// Draw the letters of the `text` element `node`. The runs of a chunk (one `x`) move together for `text-anchor`.
-fn text(doc: &Document, root: NodeId, node: NodeId, m: Metrics, color: u32, map: Map, out: Out<'_>) {
-    // (x, y, dx, dy, the letters) of each run, in document order. The positions of an element go to the run that comes next.
-    type Run = (Option<f32>, Option<f32>, f32, f32, String);
+/// (x, y, dx, dy, the letters, the text node) of a run.
+type Run = (Option<f32>, Option<f32>, f32, f32, String, NodeId);
+
+/// The runs of the `text` element `node`, in document order, with the spaces collapsed. The positions of an element go to the run that
+/// comes next. `em` is the font size, for the `em` units of `x`, `y`, `dx` and `dy`.
+fn runs(doc: &Document, node: NodeId, em: f32) -> Vec<Run> {
     let mut runs: Vec<Run> = Vec::new();
     let mut pending = (None, None, 0.0, 0.0);
     let mut stack = vec![node];
@@ -241,11 +244,11 @@ fn text(doc: &Document, root: NodeId, node: NodeId, m: Metrics, color: u32, map:
     for n in order {
         match doc.data(n) {
             NodeData::Element { .. } if n == node || matches!(doc.element_name(n), "tspan" | "a") => {
-                let l = |name| first_len(doc, n, name, m.size);
+                let l = |name| first_len(doc, n, name, em);
                 pending = (l("x").or(pending.0), l("y").or(pending.1), pending.2 + l("dx").unwrap_or(0.0), pending.3 + l("dy").unwrap_or(0.0));
             }
             &NodeData::Text(span) => {
-                runs.push((pending.0, pending.1, pending.2, pending.3, doc.text(span).to_string()));
+                runs.push((pending.0, pending.1, pending.2, pending.3, doc.text(span).to_string(), n));
                 pending = (None, None, 0.0, 0.0);
             }
             _ => {}
@@ -271,6 +274,48 @@ fn text(doc: &Document, root: NodeId, node: NodeId, m: Metrics, color: u32, map:
     if let Some(last) = runs.iter_mut().rev().find(|r| !r.4.is_empty()) {
         last.4.truncate(last.4.trim_end().len());
     }
+    runs
+}
+
+/// The advance of the letters `start` to `start + n` of `part` (`getComputedTextLength`, `getSubStringLength`), in user units. `part` is the
+/// `text` element `text`, or a `tspan` in it: the spaces collapse across the whole `text`. `None` when `start` is not before the end.
+pub fn text_length(doc: &Document, text: NodeId, part: NodeId, m: &Metrics, start: usize, n: usize) -> Option<f32> {
+    let runs = runs(doc, text, m.size);
+    let inside = |r: &Run| std::iter::successors(doc.parent(r.5), |&p| if p == text { None } else { doc.parent(p) }).any(|p| p == part);
+    let mut chars = runs.iter().filter(|r| inside(r)).flat_map(|r| r.4.chars()).skip(start).peekable();
+    chars.peek()?;
+    let part: String = chars.take(n).collect();
+    Some(bare_layout::controls::text_width(m, &part))
+}
+
+/// How far a baseline name moves the letters down from the `y` (in user units). Chrome's values for Noto Sans: the other names, and the two that
+/// Chrome does not know (`text-top`, `text-bottom`), leave the letters where they are.
+fn baseline_offset(name: &str, m: &Metrics) -> f32 {
+    match name.trim() {
+        "middle" => m.half_x_height(),
+        "central" => (m.ascent - m.descent) / 2.0,
+        "hanging" => m.ascent * 0.8,
+        "mathematical" => m.ascent / 2.0,
+        "text-before-edge" => m.ascent,
+        "ideographic" | "text-after-edge" => -m.descent,
+        _ => 0.0,
+    }
+}
+
+/// The baseline of a run: `dominant-baseline` of its element or the nearest one above it, or `alignment-baseline` of its own element.
+fn baseline_shift(doc: &Document, root: NodeId, text_node: NodeId, m: &Metrics) -> f32 {
+    let Some(parent) = doc.parent(text_node) else { return 0.0 };
+    attr(doc, parent, "dominant-baseline")
+        .or_else(|| attr(doc, parent, "alignment-baseline"))
+        .or_else(|| std::iter::successors(Some(parent), |&n| if n == root { None } else { doc.parent(n) }).find_map(|n| attr(doc, n, "dominant-baseline")))
+        .map_or(0.0, |v| baseline_offset(v, m))
+}
+
+/// Draw the letters of the `text` element `node`. The runs of a chunk (one `x`) move together for `text-anchor`.
+fn text(doc: &Document, root: NodeId, node: NodeId, m: Metrics, color: u32, map: Map, out: Out<'_>) {
+    let runs = runs(doc, node, m.size);
+    // The attributes are rare: a page that has none skips the walk up the tree for each run.
+    let shifts = doc.find_atom("dominant-baseline").is_some() || doc.find_atom("alignment-baseline").is_some();
     // `text-anchor` from the `text` or the nearest element above it: 0 start, 0.5 middle, 1 end.
     let anchor = std::iter::successors(Some(node), |&n| if n == root { None } else { doc.parent(n) })
         .find_map(|n| attr(doc, n, "text-anchor"))
@@ -297,16 +342,34 @@ fn text(doc: &Document, root: NodeId, node: NodeId, m: Metrics, color: u32, map:
         }
         x = r.0.unwrap_or(x) + r.2;
         y = r.1.unwrap_or(y) + r.3;
-        placed.push((x, y, i));
+        placed.push((x, y + if shifts { baseline_shift(doc, root, r.5, &m) } else { 0.0 }, i));
         x += bare_layout::controls::text_width(&m, &r.4);
     }
     shift(&mut placed, chunk, x);
+    // A uniform scale and a move keep the run as text: the glyph cache draws it, crisp. Any other matrix draws outlines.
+    let upright = map.m[1].abs() < 1e-6 && map.m[2].abs() < 1e-6 && map.m[0] > 0.0 && (map.m[0] - map.m[3]).abs() <= map.m[0] * 1e-4;
+    let mut buf = Vec::new();
     for (x, y, i) in placed {
         if runs[i].4.is_empty() {
             continue;
         }
-        let (px, py) = map.at((x, y));
-        out(Shape::Text { x: px, baseline: py, size: m.size * map.s, color, face: m.face, text: &runs[i].4 });
+        if upright {
+            let (px, py) = map.at((x, y));
+            out(Shape::Text { x: px, baseline: py, size: m.size * map.s, color, face: m.face, text: &runs[i].4 });
+            continue;
+        }
+        // A turned, skewed or unevenly scaled run: the outlines of its letters go through the whole matrix. Each curve gets as many lines as
+        // the size in pixels needs (about 0.3 px of error).
+        let steps = ((m.size * map.s).sqrt() / 2.0).ceil().clamp(2.0, 12.0) as usize;
+        buf.clear();
+        let mut pen = x;
+        for c in runs[i].4.chars() {
+            crate::glyphs::flatten(m.face, c, steps, |ex, ey| map.at((pen + ex * m.size, y + ey * m.size)), &mut buf);
+            pen += bare_layout::controls::text_width(&m, c.encode_utf8(&mut [0; 4]));
+        }
+        if !buf.is_empty() {
+            out(Shape::Poly(&buf, color));
+        }
     }
 }
 

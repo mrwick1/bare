@@ -234,6 +234,11 @@ pub fn parse_index(units: &[u16]) -> Option<u32> {
 
 /// ToUint32 (section 7.1.7): wrap modulo 2^32. NaN and infinity give 0.
 pub fn to_uint32(n: f64) -> u32 {
+    // Most operands are already i32. NaN fails the compare; -0 gives 0. Both are right.
+    let i = n as i32;
+    if i as f64 == n {
+        return i as u32;
+    }
     if !n.is_finite() {
         return 0;
     }

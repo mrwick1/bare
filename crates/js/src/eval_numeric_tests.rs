@@ -313,3 +313,74 @@ fn number_is_nan_survives_gc_and_deleting_number() {
     let out = big(|| outcome("for (;;) Number.isNaN(1)", EvalLimits { max_steps: 20_000, ..Default::default() }, Heap::default()));
     assert_eq!(out, "limit:Steps");
 }
+
+/// ToInt32 and ToUint32 in the bitwise operators and shifts: integers in and out of the i32 and u32 ranges, -0,
+/// fractions, NaN, infinities, huge values, `valueOf` and BigInt. The expected text is from Node. Tree, Auto and Byte agree.
+#[test]
+fn bitwise_operators_wrap_as_in_node_in_every_mode() {
+    let src = r#"function f(v) {
+  var out = [];
+  for (var i = 0; i < v.length; i++) {
+    var x = v[i];
+    out.push([x | 0, x >>> 0, x >> 0, x << 1, x >> 1, x >>> 1, 1 << x, x ^ 0, ~x, x & -1, 7 >>> x].join(' '));
+  }
+  var e = '';
+  try { BigInt(1) | 1; } catch (err) { e = err.name; }
+  return out.join(';') + ';' + e + ';' + (BigInt(5) | BigInt(3)) + ';' + (-BigInt(8) >> BigInt(1));
+}
+f([-1, -0, 0.5, -0.5, 1.5, -1.5, 2147483647, 2147483648, -2147483648, -2147483649, 4294967295, 4294967296, 4294967297,
+   4294967295.5, -4294967297, 2 ** 53, 2 ** 53 + 2, 2 ** 63, -(2 ** 63), 2 ** 64, 1e21, -1e21, NaN, Infinity, -Infinity,
+   5e-324, { valueOf: function () { return 4294967297; } }, '12', true, null, undefined])"#;
+    let want = [
+        "-1 4294967295 -1 -2 -1 2147483647 -2147483648 -1 0 -1 0;",
+        "0 0 0 0 0 0 1 0 -1 0 7;",
+        "0 0 0 0 0 0 1 0 -1 0 7;",
+        "0 0 0 0 0 0 1 0 -1 0 7;",
+        "1 1 1 2 0 0 2 1 -2 1 3;",
+        "-1 4294967295 -1 -2 -1 2147483647 -2147483648 -1 0 -1 0;",
+        "2147483647 2147483647 2147483647 -2 1073741823 1073741823 -2147483648 2147483647 -2147483648 2147483647 0;",
+        "-2147483648 2147483648 -2147483648 0 -1073741824 1073741824 1 -2147483648 2147483647 -2147483648 7;",
+        "-2147483648 2147483648 -2147483648 0 -1073741824 1073741824 1 -2147483648 2147483647 -2147483648 7;",
+        "2147483647 2147483647 2147483647 -2 1073741823 1073741823 -2147483648 2147483647 -2147483648 2147483647 0;",
+        "-1 4294967295 -1 -2 -1 2147483647 -2147483648 -1 0 -1 0;",
+        "0 0 0 0 0 0 1 0 -1 0 7;",
+        "1 1 1 2 0 0 2 1 -2 1 3;",
+        "-1 4294967295 -1 -2 -1 2147483647 -2147483648 -1 0 -1 0;",
+        "-1 4294967295 -1 -2 -1 2147483647 -2147483648 -1 0 -1 0;",
+        "0 0 0 0 0 0 1 0 -1 0 7;",
+        "2 2 2 4 1 1 4 2 -3 2 1;",
+        "0 0 0 0 0 0 1 0 -1 0 7;",
+        "0 0 0 0 0 0 1 0 -1 0 7;",
+        "0 0 0 0 0 0 1 0 -1 0 7;",
+        "-559939584 3735027712 -559939584 -1119879168 -279969792 1867513856 1 -559939584 559939583 -559939584 7;",
+        "559939584 559939584 559939584 1119879168 279969792 279969792 1 559939584 -559939585 559939584 7;",
+        "0 0 0 0 0 0 1 0 -1 0 7;",
+        "0 0 0 0 0 0 1 0 -1 0 7;",
+        "0 0 0 0 0 0 1 0 -1 0 7;",
+        "0 0 0 0 0 0 1 0 -1 0 7;",
+        "1 1 1 2 0 0 2 1 -2 1 3;",
+        "12 12 12 24 6 6 4096 12 -13 12 0;",
+        "1 1 1 2 0 0 2 1 -2 1 3;",
+        "0 0 0 0 0 0 1 0 -1 0 7;",
+        "0 0 0 0 0 0 1 0 -1 0 7;",
+        "TypeError;",
+        "7;",
+        "-4",
+    ]
+    .concat();
+    big(move || {
+        for mode in [Exec::Tree, Exec::Auto, Exec::Byte] {
+            let mut it = Interp::realm(Heap::default(), EvalLimits::default()).unwrap();
+            it.set_exec(mode);
+            let got = match it.run_script(src) {
+                Ok(v) => it.display(v),
+                Err(e) => format!("{e:?}"),
+            };
+            assert_eq!(got, want, "{mode:?}");
+            if mode == Exec::Byte {
+                let s = it.bc_stats();
+                assert_eq!(s.calls_tree, 0, "{s:?} {:?}", it.bc.refused);
+            }
+        }
+    });
+}

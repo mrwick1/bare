@@ -116,6 +116,25 @@ fn bc_wide_ok(ops: &[u32]) -> bool {
     true
 }
 
+impl Interp<'_> {
+    /// An operator without an arm fast path. Bitwise ops and shifts of two numbers do not enter the large `binary`.
+    #[inline(never)]
+    fn bc_binary(&mut self, op: u8, l: Value, r: Value) -> Res<Value> {
+        if let (Value::Number(x), Value::Number(y), BIT_AND | BIT_OR | BIT_XOR | SHL | SHR | USHR) = (l, r, op) {
+            let (i, j) = (to_int32(x), to_uint32(y));
+            return Ok(Value::Number(match op {
+                BIT_AND => (i & j as i32) as f64,
+                BIT_OR => (i | j as i32) as f64,
+                BIT_XOR => (i ^ j as i32) as f64,
+                SHL => i.wrapping_shl(j & 31) as f64,
+                SHR => (i >> (j & 31)) as f64,
+                _ => ((i as u32) >> (j & 31)) as f64,
+            }));
+        }
+        self.binary(binop(op), l, r)
+    }
+}
+
 fn binop(op: u8) -> BinaryOp {
     match op {
         ADD => BinaryOp::Add,
@@ -1454,7 +1473,7 @@ impl<'p> Interp<'p> {
                     JN_NE_K => jn!(c.kv[b], |p: f64, q: f64| p != q, BinaryOp::Ne),
                     JN_SEQ_K => jn_strict!(c.kv[b], true),
                     JN_SNE_K => jn_strict!(c.kv[b], false),
-                    op @ (EXP | BIT_AND | BIT_OR | BIT_XOR | SHL | SHR | USHR | IN | INSTANCE_OF) => regs[a] = tri!(at, self.binary(binop(op), regs[b], regs[cc])),
+                    op @ (EXP | BIT_AND | BIT_OR | BIT_XOR | SHL | SHR | USHR | IN | INSTANCE_OF) => regs[a] = tri!(at, self.bc_binary(op, regs[b], regs[cc])),
                     NOT => {
                         let v = regs[b];
                         let t = match v {
