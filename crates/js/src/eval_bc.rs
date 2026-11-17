@@ -26,6 +26,9 @@ impl Exec {
 /// The code of a function for the loop (`bc_vm.rs`): the bytecode and the values of its constants.
 struct Compiled {
     code: crate::bc::Code,
+    /// The slot of the script that holds the function. The loop runs the code of any script and selects this one only for the ops
+    /// that read the code tables of the current script (`bc_sync`).
+    script: u32,
     /// For each constant: a number, an interned string (rooted by `bc_roots`), or `undefined` for a name.
     kv: Box<[Value]>,
     /// For each constant: its global cell. `GetGlobal` and `SetGlobal` read it. Constants that are not names hold a key that is
@@ -112,6 +115,9 @@ struct BcState {
     why: &'static str,
     #[cfg(feature = "bc-hist")]
     hist: bc_hist::Hist,
+    /// Poison mode (tests and the feature `bc-poison`): the empty program that `prog` holds while the script is parked.
+    #[cfg(any(test, feature = "bc-poison"))]
+    poison: Option<Rc<crate::ast::Program<'static>>>,
 }
 
 impl BcState {

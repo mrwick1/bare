@@ -421,3 +421,41 @@ fn the_bytecode_lane_agrees_with_the_tree_walker_on_the_corpora_with_lazy_bodies
         assert!(bad.is_empty(), "{} of {n}:\n{}", bad.len(), bad.join("\n"));
     });
 }
+
+/// A lazy function that calls another lazy function: the callee runs in the loop of the caller, though each has its own script
+/// slot. `Error.stack` names each frame with its own script, as the tree walker does.
+#[test]
+fn a_call_to_a_lazy_function_of_another_script_stays_in_the_loop() {
+    big(|| {
+        let src = format!(
+            "function inner(i) {{ {PAD} if (i == 9) throw new Error('boom'); return i + p7; }}
+             function outer(n) {{ {PAD} var s = 0; for (var i = 0; i < n; i++) s += inner(i); return s; }}
+             var st = '';
+             try {{ outer(10); }} catch (e) {{ st = e.stack; }}
+             outer(5) + '|' + st"
+        );
+        let src = format!("/*{}*/{src}", " ".repeat(crate::parse_cache::LAZY_MIN_SOURCE));
+        let mut want = String::new();
+        for mode in [Exec::Tree, Exec::Auto, Exec::Byte] {
+            let mut it = realm();
+            it.set_exec(mode);
+            let got = match it.run_script(&src) {
+                Ok(v) => it.display(v),
+                Err(e) => format!("{e:?}"),
+            };
+            if mode == Exec::Tree {
+                want = got.clone();
+                assert!(want.contains("at inner (script#") && want.contains("at outer (script#"), "{want}");
+                continue;
+            }
+            assert_eq!(got, want, "{mode:?}");
+            if mode == Exec::Byte {
+                // The script body, the two calls of `outer` and the first call of `inner` (it resolves the lazy body) enter the loop.
+                // The other 14 calls of `inner` run in the loop of `outer`.
+                let s = it.bc_stats();
+                assert_eq!(s.calls_tree, 0, "{s:?}");
+                assert!(s.runs <= 4, "{s:?}");
+            }
+        }
+    });
+}
