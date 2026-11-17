@@ -727,6 +727,8 @@ impl Client {
     }
 
     fn start(&mut self, url: &Url, plan: &Plan, conditions: &str) -> Result<(Response, Body), Error> {
+        let begun = (bare_observe::process::tracing() && bare_observe::process::accepts("network")).then(Instant::now);
+        let mut retried = false;
         let with_cookies;
         let conditions = match self.cookie_line(url, plan) {
             Some(line) => {
@@ -743,7 +745,10 @@ impl Client {
             Some(None) if !tape.as_ref().is_some_and(|t| t.writes()) => Err(format!("replay: no recorded reply for {}", Self::label(url, plan)).into()),
             _ => match self.attempt(url, plan, conditions) {
                 // The server did not start the request (`GOAWAY`, a refused stream): any method may run again, once, on a new connection.
-                Err(e) if e.is::<h2::Unprocessed>() => self.attempt(url, plan, conditions),
+                Err(e) if e.is::<h2::Unprocessed>() => {
+                    retried = true;
+                    self.attempt(url, plan, conditions)
+                }
                 result => result,
             },
         };
@@ -752,6 +757,13 @@ impl Client {
             Err(e) => {
                 if let Some(tape) = tape.as_ref().filter(|t| t.writes() && !replayed) {
                     tape.slot(Self::label(url, plan)).save(&replay::Entry { error: Some(e.to_string()), ..replay::Entry::default() });
+                }
+                if bare_observe::process::accepts("network") {
+                    use bare_observe::{Field, Scalar::{Bool, Null, U64}};
+                    bare_observe::process::emit("network", "request_failed", || [
+                        Field("kind", U64(cause::code(cause::kind(&*e)))), Field("retried", Bool(retried)), Field("replay", Bool(replayed || tape.as_ref().is_some_and(|t| t.reads() && !t.writes()))),
+                        Field("duration_ns", begun.map_or(Null, |t| U64(t.elapsed().as_nanos().min(u64::MAX as u128) as u64))),
+                    ]);
                 }
                 return Err(e);
             }
