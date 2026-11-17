@@ -598,3 +598,31 @@ fn optional_chains_run_on_the_lane() {
         ("new on chain", "function f(a) { return new (a?.C)(); } try { f({}); } catch (e) { e.name + ':' + e.message }"),
     ]);
 }
+
+#[test]
+fn spread_runs_on_the_lane() {
+    same_on_the_lane(&[
+        ("call", "function g(a, b, c) { return [a, b, c].join(); } function f(x) { return g(...x); } f([1, 2, 3])"),
+        ("call mixed", "function g() { return Array.prototype.join.call(arguments, '-'); } function f(x, y) { return g(0, ...x, 9, ...y); } f([1, 2], 'ab')"),
+        ("call method this", "var o = { v: 5, m() { return this.v + arguments.length; } }; function f(x) { return o.m(...x) + o['m'](...x); } f([1, 2])"),
+        ("call in chain", "var o = { v: 5, m() { return this.v + arguments.length; } }; function f(a, x) { return a?.m(...x); } [f(o, [1, 2]), f(null, [1])].join()"),
+        ("call set and map", "function g() { return arguments.length; } function f() { return g(...new Set([1, 2, 3]), ...new Map([[1, 2]]).keys()); } f()"),
+        ("call iterable", "var it = {}; it[Symbol.iterator] = function () { var i = 0; return { next() { return { done: i >= 2, value: ++i }; } }; }; function g() { return Array.prototype.join.call(arguments); } function f() { return g(...it); } f()"),
+        ("call hole", "function g(a, b) { return String(a) + String(b); } function f() { var h = new Array(2); h[1] = 1; return g(...h); } f()"),
+        ("call not iterable", "function g() {} function f(x) { try { g(...x); } catch (e) { return e.name + ':' + e.message; } } [f(null), f(5), f({})].join('|')"),
+        ("call not a function", "function f(x) { try { var o = {}; o.nope(...x); } catch (e) { return e.name + ':' + e.message; } } f([1])"),
+        ("call order", "var log = []; function a() { log.push('a'); return [1]; } function b() { log.push('b'); return [2]; } function g() { return arguments.length; } function f() { return g(...a(), ...b()) + log.join(); } f()"),
+        ("call array iterator changed", "var orig = Array.prototype[Symbol.iterator]; function g() { return Array.prototype.join.call(arguments); } function f() { return g(...[1, 2]); } var r = [f()]; Array.prototype[Symbol.iterator] = function () { var d = false; return { next() { var r = { done: d, value: 7 }; d = true; return r; } }; }; r.push(f()); Array.prototype[Symbol.iterator] = orig; r.join('|')"),
+        ("array", "function f(x, y) { return [0, ...x, 9, ...y].join(); } f([1, 2], 'ab')"),
+        ("array copy", "function f(x) { var c = [...x]; c.push(4); return x.length + ',' + c.length; } f([1, 2, 3])"),
+        ("array of set", "function f(s) { return [...s, ...s].length; } f(new Set([1, 2]))"),
+        ("array not iterable", "function f(x) { try { return [...x]; } catch (e) { return e.name + ':' + e.message; } } [f(undefined), f(1)].join('|')"),
+        ("array holes read as undefined", "function f(x) { var r = [...x]; return r.length + ',' + (1 in r); } f((function () { var h = new Array(3); h[0] = 1; h[2] = 3; return h; })())"),
+        ("new", "function P(a, b) { this.s = a + b; } function f(x) { return new P(...x).s; } f([1, 2])"),
+        ("new mixed", "function P() { this.n = arguments.length; } function f(x) { return new P(...x, ...x).n; } f([1, 2])"),
+        ("new not a constructor", "function f(x) { try { new (function () {}.bind().call)(...x); } catch (e) { return e.name; } } f([])"),
+        ("in loop and try", "function g() { return arguments.length; } function f(l) { var s = 0; for (var i = 0; i < l.length; i++) { try { s += g(...l[i]); } catch (e) { s += 100; } } return s; } f([[1], null, [1, 2]])"),
+        ("closure", "function f(x) { return function (y) { return [...x, ...y]; }; } f([1])([2]).join()"),
+        ("math", "function f(x) { return Math.max(...x) + Math.min(...x); } f([3, 1, 2])"),
+    ]);
+}

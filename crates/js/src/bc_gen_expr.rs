@@ -92,7 +92,12 @@ impl Gen<'_, '_> {
                 for x in prog.list(l) {
                     match prog.expr(x).kind {
                         ExprKind::Hole => return Err("hole in an array literal"),
-                        ExprKind::Spread(_) => return Err("spread"),
+                        ExprKind::Spread(inner) => {
+                            self.expr(inner, t)?;
+                            self.code.calls.push((self.here() as u32, inner.index() as u32));
+                            self.emit(Op::SpreadPush, dst, t, 0)?;
+                            continue;
+                        }
                         _ => {}
                     }
                     self.expr(x, t)?;
@@ -151,6 +156,13 @@ impl Gen<'_, '_> {
             ExprKind::New { callee, args } => {
                 let b = self.reg()?;
                 self.expr(callee, b)?;
+                if self.has_spread(args) {
+                    self.args_array(args)?;
+                    self.code.calls.push((self.here() as u32, e.index() as u32));
+                    self.emit(Op::CallSpread, dst, b, 1)?;
+                    self.free(b);
+                    return Ok(());
+                }
                 let n = self.args(args)?;
                 self.code.calls.push((self.here() as u32, e.index() as u32));
                 self.emit(Op::New, dst, b, n)?;
@@ -514,6 +526,17 @@ impl Gen<'_, '_> {
         if let (true, Some(x)) = (optional, exits) {
             self.nullish_exit(b, x)?;
         }
+        if self.has_spread(args) {
+            // `CallSpread` reads `this` from its register, also when the callee has no object.
+            if self.callr_ok() && !matches!(self.prog.expr(c).kind, ExprKind::Member { .. } | ExprKind::Index { .. } | ExprKind::Chain(_)) {
+                self.emit(Op::LoadUndef, this, 0, 0)?;
+            }
+            self.args_array(args)?;
+            self.code.calls.push((self.here() as u32, e.index() as u32));
+            self.emit(Op::CallSpread, dst, b, 0)?;
+            self.free(b);
+            return Ok(());
+        }
         let n = self.args(args)?;
         self.code.calls.push((self.here() as u32, e.index() as u32));
         if self.callr_ok() {
@@ -524,6 +547,30 @@ impl Gen<'_, '_> {
             self.emit(Op::Call, dst, b, n)?;
         }
         self.free(b);
+        Ok(())
+    }
+
+    fn has_spread(&self, l: List<Expr>) -> bool {
+        self.prog.list(l).any(|a| matches!(self.prog.expr(a).kind, ExprKind::Spread(_)))
+    }
+
+    /// The arguments with a spread, as an array in the next register.
+    fn args_array(&mut self, l: List<Expr>) -> G<()> {
+        let prog = self.prog.clone();
+        let arr = self.reg()?;
+        self.emit(Op::NewArray, arr, l.len().min(255) as u32, 0)?;
+        let t = self.reg()?;
+        for a in prog.list(l) {
+            if let ExprKind::Spread(inner) = prog.expr(a).kind {
+                self.expr(inner, t)?;
+                self.code.calls.push((self.here() as u32, inner.index() as u32));
+                self.emit(Op::SpreadPush, arr, t, 1)?;
+            } else {
+                self.expr(a, t)?;
+                self.emit(Op::ArrayPush, arr, t, 0)?;
+            }
+        }
+        self.free(t);
         Ok(())
     }
 

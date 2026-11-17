@@ -165,6 +165,8 @@ ops! {
     IterRest Abc "r" "`a` = a new array of the values that are left in the top iterator (a rest element).",
     ObjRest Abc "r r n" "`a` = a new object with the own enumerable properties of `b` except the keys in the `c` registers after `a` (a rest property).",
     RequireObj Abc "r" "Throw a TypeError when `a` is `undefined` or `null` (an object pattern).",
+    SpreadPush Abc "r r n" "Append the values of the iteration of `b` to the array `a` (`...b` in an array literal, or in the arguments when `c` is 1). The call table names the spread expression.",
+    CallSpread Abc "r r n" "`a = b(...)` (`c` 0) or `a = new b(...)` (`c` 1) with the arguments in the array at `b+2` (a call, `this` in `b+1`) or `b+1` (`new`).",
 }
 
 impl Op {

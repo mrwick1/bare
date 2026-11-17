@@ -69,6 +69,7 @@ pub(super) fn verify(code: &Code) -> Result<(), String> {
             Op::New => i.b + 1 + i.c <= nregs,
             Op::Concat => i.c >= 1 && i.b + i.c <= nregs,
             Op::ObjRest => i.a + 1 + i.c <= nregs,
+            Op::CallSpread => i.b + 3 <= nregs,
             _ => true,
         };
         if !regs_ok {

@@ -79,7 +79,7 @@ op_consts! {
     JN_LT_K = JnLtK, JN_LE_K = JnLeK, JN_GT_K = JnGtK, JN_GE_K = JnGeK, JN_EQ_K = JnEqK, JN_NE_K = JnNeK, JN_SEQ_K = JnSEqK,
     JN_SNE_K = JnSNeK, CALL_R = CallR, ADD_K = AddK, SUB_K = SubK, MUL_K = MulK, DIV_K = DivK, MOD_K = ModK,
     ITER_OPEN = IterOpen, FOR_IN_OPEN = ForInOpen, ITER_NEXT = IterNext, ITER_CLOSE = IterClose, ITER_STEP = IterStep,
-    ITER_REST = IterRest, OBJ_REST = ObjRest, REQUIRE_OBJ = RequireObj,
+    ITER_REST = IterRest, OBJ_REST = ObjRest, REQUIRE_OBJ = RequireObj, SPREAD_PUSH = SpreadPush, CALL_SPREAD = CallSpread,
 }
 
 /// Every wide word of the (verified) code is one that the loop reads: `GetEnv`, `SetEnv`, `InitEnv` or `DefField`.
@@ -491,6 +491,69 @@ impl<'p> Interp<'p> {
             }
         }
         Ok(())
+    }
+
+    /// The rare ops without an arm in the loop: the word `w` at `at`. They run in one cold call so that they do not change the code
+    /// of the hot arms.
+    #[inline(never)]
+    fn bc_rare(&mut self, code: &Compiled, at: usize, w: u32, regs: &mut [Value]) -> Res<()> {
+        let (op, a, b, c) = (w as u8, (w >> 8 & 255) as usize, (w >> 16 & 255) as usize, (w >> 24) as usize);
+        match op {
+            SPREAD_PUSH => self.bc_spread_push(code, at, regs, a, b, c != 0),
+            CALL_SPREAD => {
+                regs[a] = self.bc_call_spread(code, at, regs, b, c != 0)?;
+                Ok(())
+            }
+            _ => Err(unsupported("bad bytecode", Span::default())),
+        }
+    }
+
+    /// `SpreadPush`: the values of the iteration of `regs[b]` go to the end of the array `regs[a]`. The call table of the word names
+    /// the spread operand for the error text. `args` is a spread in the arguments of a call (the buffer limit of `eval_args`).
+    fn bc_spread_push(&mut self, c: &Compiled, pc: usize, regs: &[Value], a: usize, b: usize, args: bool) -> Res<()> {
+        let Value::Object(arr) = regs[a] else { return Err(unsupported("SpreadPush on a value that is not an array", Span::default())) };
+        let v = regs[b];
+        let mut n = h!(self, self.heap.array_length(arr)).unwrap_or(0);
+        if !args && let Value::Object(o) = v && let Some(more) = h!(self, self.heap.array_length(o)) {
+            h!(self, self.heap.reserve_elems(arr, more as usize));
+        }
+        let mut it = self.iter_start(v, Self::bc_call_expr(c, pc))?;
+        while let Some(item) = self.iter_next(&mut it)? {
+            if args {
+                self.iter_buffer_room(n as usize)?;
+            }
+            self.def(arr, PropertyKey::Index(n), item, true, true, true)?;
+            n += 1;
+        }
+        Ok(())
+    }
+
+    /// `CallSpread`: `bc_call` with the arguments in an array.
+    fn bc_call_spread(&mut self, c: &Compiled, pc: usize, regs: &[Value], b: usize, new: bool) -> Res<Value> {
+        let e = Self::bc_call_expr(c, pc);
+        let f = regs[b];
+        let Value::Object(arr) = regs[b + if new { 1 } else { 2 }] else { return Err(unsupported("CallSpread without an array", Span::default())) };
+        let mut argv = self.arg_pool.pop().unwrap_or_default();
+        argv.clear();
+        for i in 0..h!(self, self.heap.array_length(arr)).unwrap_or(0) {
+            argv.push(self.get_prop(Value::Object(arr), PropertyKey::Index(i))?);
+        }
+        self.mark_call(e);
+        let callee = match self.prog.expr(e).kind {
+            ExprKind::Call { callee, .. } | ExprKind::New { callee, .. } => callee,
+            _ => e,
+        };
+        let r = if new {
+            self.construct(f, &argv, callee)
+        } else if self.is_callable(f) {
+            self.call_fn(f, regs[b + 1], &argv)
+        } else {
+            Err(self.not_a_function(callee))
+        };
+        self.stk.pos = 0;
+        let r = r?;
+        self.arg_pool.push(argv);
+        Ok(r)
     }
 
     /// The values that are left in `it`, as a new array (a rest element, `bind_array_elems`).
@@ -1318,7 +1381,8 @@ impl<'p> Interp<'p> {
                     RET_UNDEF => ret!(Value::Undefined),
                     THROW => tri!(at, Err::<(), _>(Error::Throw(regs[a]))),
                     DELETE => break 'op Err(unsupported("delete in bytecode", Span::default())),
-                    _ => break 'op Err(unsupported("bad bytecode", Span::default())),
+                    // Every op without an arm here is one cold call: it must not change the code of the hot arms.
+                    _ => tri!(at, self.bc_rare(c, at, w, regs)),
                 }
                 Ok(())
             };
