@@ -10,6 +10,7 @@ license = "(MIT OR Apache-2.0) AND BSD-3-Clause AND Unicode-3.0"
 bc-hist = []
 
 [dependencies]
+bare-observe = { path = "../observe" }
 bare-os = { path = "../os" }
 bare-unicode = { path = "../unicode" }
 fixed_decimal = "0.7.3"

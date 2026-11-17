@@ -124,9 +124,20 @@ struct Stream {
     received: u64,
     /// A reply that has no body whatever its headers say (HEAD, 204, 304).
     no_body: bool,
+    /// `None`: not traced. `Some(None)`: traced, and no frame has come yet. `Some(Some(t))`: the reader parsed the first frame at `t`.
+    first_frame: Option<Option<Instant>>,
 }
 
 impl Stream {
+    /// Note the first frame of the reply. Costs one branch when the stream is not traced.
+    fn note_frame(&mut self) {
+        if let Some(t) = &mut self.first_frame
+            && t.is_none()
+        {
+            *t = Some(Instant::now());
+        }
+    }
+
     /// Tell the server about the bytes that the caller read and the padding that we dropped, once they are half of a window.
     fn credit(&mut self, id: u32, out: &mut Vec<u8>) {
         if !self.remote_done && self.unacked >= STREAM_WINDOW / 2 {
@@ -330,6 +341,7 @@ impl Conn {
             };
             Some(Unprocessed(why).into())
         };
+        let timed = bare_observe::process::tracing() && bare_observe::process::accepts("network");
         let id = loop {
             {
                 let mut st = lock(&sh.st);
@@ -367,6 +379,7 @@ impl Conn {
                 declared: None,
                 received: 0,
                 no_body: head_only,
+                first_frame: timed.then_some(None),
             });
             let max = st.max_frame;
             drop(st);
@@ -387,7 +400,7 @@ impl Conn {
             break id;
         };
         // From here, dropping the `Body` cleans up the stream, on every way out.
-        let mut reply = Body { conn: self.clone(), id, declared: None, given: 0, max: max_body, start: Instant::now(), rec: None };
+        let mut reply = Body { conn: self.clone(), id, declared: None, given: 0, max: max_body, start: Instant::now(), rec: None, observe: None };
         let mut sent = 0;
         while sent < body.len() {
             let take = {
@@ -417,7 +430,8 @@ impl Conn {
             frame(&mut out, DATA, if sent == body.len() { END_STREAM } else { 0 }, id, &body[sent - take..sent]);
             sh.write(&out)?;
         }
-        let head = {
+        let written = timed.then(Instant::now);
+        let (head, first) = {
             let mut st = lock(&sh.st);
             if sent == body.len() {
                 st.streams.get_mut(&id).expect("an open stream").local_done = true;
@@ -427,7 +441,7 @@ impl Conn {
                 let s = st.streams.get_mut(&id).expect("an open stream");
                 if let Some(head) = s.head.take() {
                     reply.declared = s.declared.map(|d| d as usize);
-                    break head;
+                    break (head, s.first_frame.flatten());
                 }
                 if let Some(reset) = &s.reset {
                     return Err(reset.to_error());
@@ -438,6 +452,10 @@ impl Conn {
                 st = sh.wait(st, deadline)?;
             }
         };
+        // On this thread, so the record carries the ids of the request.
+        if let (Some(written), Some(first)) = (written, first) {
+            bare_observe::process::emit("network", "h2_ttfb", || [bare_observe::Field("duration_ns", bare_observe::Scalar::U64(first.saturating_duration_since(written).as_nanos().min(u64::MAX as u128) as u64))]);
+        }
         Ok((head, reply))
     }
 }
@@ -468,6 +486,7 @@ pub struct Body {
     pub start: Instant,
     /// The timing record of this request (only when `BARE_NET_TRACE` is set). It goes out when the body is dropped.
     pub rec: Option<Box<trace::Rec>>,
+    pub(crate) observe: Option<super::http::ObservedBody>,
 }
 
 impl Body {
@@ -742,6 +761,7 @@ impl Reader {
         if let Some(s) = st.streams.get_mut(&id)
             && s.reset.is_none()
         {
+            s.note_frame();
             s.recv -= p.len() as i64;
             s.received += data.len() as u64;
             let end = flags & END_STREAM != 0;
@@ -848,6 +868,7 @@ impl Reader {
         if let Some(s) = st.streams.get_mut(&id)
             && s.reset.is_none()
         {
+            s.note_frame();
             let problem = if let Some(why) = bad {
                 Some(why)
             } else if s.remote_done {
@@ -907,6 +928,7 @@ impl Reader {
             && !s.remote_done
             && s.reset.is_none()
         {
+            s.note_frame();
             s.reset = Some(Reset::Peer(code));
             st.settle(id);
         }

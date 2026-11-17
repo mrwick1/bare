@@ -36,6 +36,8 @@ mod control_tests;
 #[cfg(test)]
 mod page_tests;
 #[cfg(test)]
+mod paint_trace_tests;
+#[cfg(test)]
 mod browser_ui_tests;
 mod browser_scroll;
 #[cfg(test)]

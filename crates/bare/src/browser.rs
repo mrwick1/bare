@@ -1622,6 +1622,7 @@ pub(crate) static DEFS: &[Def] = &[
 
 /// One realm with a DOM. This is the type tests and tools use.
 pub struct Browser {
+    pub(crate) observe_document: Option<u64>,
     pub it: Interp<'static>,
     pub(crate) dom: Rc<Dom>,
 }
@@ -1744,7 +1745,7 @@ impl Browser {
                 dom.reclaim.set_always(true);
             }
         }
-        Ok(Browser { it, dom })
+        Ok(Browser { it, dom, observe_document: bare_observe::process::next_id() })
     }
 
     /// The native document. Do not hold a mutable borrow across a call into the browser.
@@ -1780,7 +1781,11 @@ impl Browser {
     }
 
     pub fn run_script(&mut self, source: &str) -> R<Value> {
+        let mut ids = bare_observe::process::context();
+        ids.document = self.observe_document;
+        let _context = bare_observe::process::enter(ids);
         let r = self.it.run_script(source);
+        self.observe_stats();
         // `BARE_RECLAIM_STRESS=1 cargo test`: collect and reclaim after each script, freed nodes poisoned (`browser_reclaim.rs`).
         #[cfg(test)]
         if self.dom.reclaim.each() {
@@ -1795,7 +1800,21 @@ impl Browser {
 
     /// The microtask checkpoint (Promise jobs).
     pub fn drain(&mut self) -> R<usize> {
-        self.it.drain_microtasks()
+        let mut ids = bare_observe::process::context();
+        ids.document = self.observe_document;
+        let _context = bare_observe::process::enter(ids);
+        let result = self.it.drain_microtasks();
+        self.observe_stats();
+        result
+    }
+
+    fn observe_stats(&self) {
+        bare_observe::process::emit("engine", "browser_stats", || {
+            use bare_observe::{Field, Scalar::U64};
+            let s = self.stats();
+            let h = self.it.heap.stats();
+            [Field("heap_accounted_bytes", U64(h.bytes as u64)), Field("live_objects", U64(h.live_objects as u64)), Field("collections", U64(h.collections)), Field("heap_slab_capacity_bytes", U64(h.slab_capacity_bytes as u64)), Field("text_bytes", U64(s.text_bytes as u64)), Field("attr_slots", U64(s.attr_slots as u64)), Field("nodes", U64(s.nodes as u64)), Field("wrappers", U64(s.wrappers as u64)), Field("listeners", U64(s.listeners as u64)), Field("events", U64(s.events as u64))]
+        });
     }
 
     /// Is a collect due at a safe point? The heap asks (`Interp::gc_due`), or the node arena has grown by the same rule since the last collect:
@@ -1807,11 +1826,15 @@ impl Browser {
 
     /// Collect the heap. Attached wrappers and their listeners live. `extra` are values the caller still holds.
     pub fn collect(&mut self, extra: &[Value]) -> R<bare_js::heap::Collected> {
+        let mut ids = bare_observe::process::context();
+        ids.document = self.observe_document;
+        let _context = bare_observe::process::enter(ids);
         let c = self.it.collect(extra)?;
         // The caller is at a safe point (no script runs, no host call is on the stack): the trees that lost their wrappers can go.
         self.dom.reclaim(true);
         let native = self.dom.doc.try_borrow().map_or(0, |d| d.arena_bytes());
         self.it.set_external_live(native);
+        self.observe_stats();
         Ok(c)
     }
 

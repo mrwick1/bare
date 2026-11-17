@@ -210,7 +210,9 @@ impl Client {
         // A worker is shared by all forks, and it was made for the first one. The job must use the jar and the site of the client that
         // spawned it, or a new profile would send the cookies of an old one.
         let (jar, site) = (self.jar.clone(), self.site.clone());
+        let observe_ids = bare_observe::process::context();
         let job: Job = Box::new(move |client| {
+            let _context = bare_observe::process::enter(observe_ids);
             client.jar = jar;
             client.site = site;
             let r = job(client);

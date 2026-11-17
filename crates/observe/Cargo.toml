@@ -1,0 +1,9 @@
+[package]
+name = "bare-observe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde_json = "1"
+bare-os = { path = "../os" }

@@ -21,6 +21,11 @@ impl Error for Phase {}
 /// `kind: text`. Kinds: `dns`, `connect refused`, `connect timeout`, `connect failed`, `proxy`, `tls`, `h2 goaway`, `body cap`, `read timeout`,
 /// `reset`, `closed early`, `protocol`, `io`.
 pub fn describe(e: &(dyn Error + 'static)) -> String {
+    format!("{}: {}", kind(e), e)
+}
+
+/// The kind of an error, as `describe` names it.
+pub(crate) fn kind(e: &(dyn Error + 'static)) -> &'static str {
     let text = e.to_string();
     let io = |k: io::ErrorKind| match k {
         io::ErrorKind::ConnectionReset | io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionAborted => "reset",
@@ -29,7 +34,7 @@ pub fn describe(e: &(dyn Error + 'static)) -> String {
         io::ErrorKind::InvalidData => "protocol",
         _ => "io",
     };
-    let kind = if text.contains("too big") {
+    if text.contains("too big") {
         "body cap"
     } else if text.contains("GOAWAY") {
         "h2 goaway"
@@ -49,8 +54,13 @@ pub fn describe(e: &(dyn Error + 'static)) -> String {
         if i.get_ref().is_some_and(|s| s.is::<bare_tls::client::Error>()) { "tls" } else { io(i.kind()) }
     } else {
         "protocol"
-    };
-    format!("{kind}: {text}")
+    }
+}
+
+/// The number of a kind in the `network/request_failed` record, in the order of the list above. 0 is none of them.
+pub(crate) fn code(kind: &str) -> u64 {
+    const KINDS: [&str; 13] = ["dns", "connect refused", "connect timeout", "connect failed", "proxy", "tls", "h2 goaway", "body cap", "read timeout", "reset", "closed early", "protocol", "io"];
+    KINDS.iter().position(|k| *k == kind).map_or(0, |i| i as u64 + 1)
 }
 
 #[cfg(test)]
