@@ -69,10 +69,13 @@ fn password_learned_by_act_is_redacted_in_failed_postcondition_metadata() {
 #[test]
 fn predispatch_errors_keep_both_outcomes_and_recovery_at_transport_boundary() {
     let mut s = Server::start();
-    for args in [json!({"op":"click","loc":"text=\"Save\""}), json!({"op":"click","unexpected":true})] {
+    let missing = s.call("act", json!({"op":"click","loc":"text=\"Save\""}));
+    assert_eq!(missing["structuredContent"]["failure"]["code"], "missing_session", "{missing}");
+    s.open();
+    for args in [json!({"op":"click"}), json!({"op":"click","unexpected":true})] {
         let r = s.call("act", args);
         assert_eq!(r["structuredContent"]["action_status"], "not_started", "{r}");
         assert_eq!(r["structuredContent"]["failure"]["input_dispatched"], "no", "{r}");
-        assert!(r["structuredContent"]["failure"]["code"].is_string(), "{r}");
+        assert_eq!(r["structuredContent"]["failure"]["code"], "invalid_arguments", "{r}");
     }
 }

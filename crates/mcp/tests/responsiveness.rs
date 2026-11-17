@@ -397,3 +397,43 @@ fn cancelling_a_postcondition_does_not_repeat_the_completed_click() {
     let (count, error) = c.tool("eval", json!({"session":"a","js":"window.count"}));
     assert!(!error && count == "1", "{count}");
 }
+
+#[test]
+fn queue_rejection_preserves_action_outcomes_and_recovery() {
+    let base = common::serve_route(route);
+    let mut c = Client::start();
+    c.open("a", &base);
+    let slow = c.call("act", json!({"session":"a","op":"goto","url":format!("{base}/slow/overflow")}));
+    wait_arrived("overflow");
+    for _ in 0..64 {
+        c.call("console", json!({"session":"a"}));
+    }
+    let rejected = c.call("act", json!({"session":"a","op":"click","loc":"role=button name=\"Go\""}));
+    let reply = c.reply(rejected);
+    release("overflow");
+    let r = &reply["result"];
+    assert_eq!(r["isError"], true, "{r}");
+    assert_eq!(r["structuredContent"]["action_status"], "not_started", "{r}");
+    assert_eq!(r["structuredContent"]["failure"]["input_dispatched"], "no", "{r}");
+    assert!(!c.text(slow).1);
+}
+
+#[test]
+fn cancelling_a_call_waiting_for_a_tab_unblocks_its_parent() {
+    let base = common::serve_route(route);
+    let mut c = Client::start();
+    c.open("a", &base);
+    let js = format!("document.querySelector('button').onclick=()=>window.open('{base}/slow/tab-cancel', '_blank')");
+    assert!(!c.tool("eval", json!({"session":"a","js":js})).1);
+    let action = c.call("act", json!({"session":"a","op":"click","loc":"role=button name=\"Go\""}));
+    wait_arrived("tab-cancel");
+    c.cancel(action);
+    let next = c.call("console", json!({"session":"a"}));
+    let reply = c.try_reply(next, Duration::from_secs(3));
+    let listing = c.call("sessions", json!({}));
+    let listed = c.try_reply(listing, Duration::from_secs(2));
+    release("tab-cancel");
+    assert!(reply.is_some(), "parent stayed blocked on a cancelled tab-open wait");
+    assert!(listed.is_some(), "sessions waited for the loading tab");
+    assert!(c.try_reply(action, Duration::from_millis(100)).is_none());
+}

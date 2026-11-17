@@ -103,10 +103,12 @@ struct Job {
     /// The `params` of the `tools/call` request.
     params: Value,
     cancel: Arc<AtomicBool>,
+    /// Whether an owner started this call. Transport refusals cannot have sent input; panics after this point are unknown.
+    started: bool,
     done: Box<dyn FnOnce(Value) + Send>,
 }
 
-/// The queue of a session worker. `busy` counts its queued and running jobs; `url` is its page address as of its last job.
+/// The queue of a session worker. `busy` counts its queued and running jobs; `url` is its last published address or failed-load diagnostic.
 struct Slot {
     tx: SyncSender<Job>,
     url: Arc<Mutex<String>>,
@@ -245,7 +247,7 @@ impl Shared {
         lock(&self.inflight).insert(key.clone(), cancel.clone());
         let sh = self.clone();
         let done = Box::new(move |v: Value| sh.send(json!({"jsonrpc": "2.0", "id": id, "result": v})));
-        let job = Job { key: Some(key), params, cancel, done };
+        let job = Job { key: Some(key), params, cancel, started: false, done };
         if !tool_list().as_array().is_some_and(|t| t.iter().any(|t| t["name"] == tool.as_str())) {
             let failure = Failure::unknown_tool(&tool);
             let result = json!({"content": [{"type": "text", "text": failure.text}], "isError": true,
@@ -259,13 +261,34 @@ impl Shared {
     }
 
     /// Deliver the result of a job, once. A cancelled job gets no reply: the protocol asks a server to stop and to send none.
-    fn finish(&self, job: Job, result: Value) {
+    fn finish(&self, job: Job, mut result: Value) {
         if let Some(k) = &job.key {
             lock(&self.inflight).remove(k);
         }
-        if !job.cancel.load(Ordering::SeqCst) {
-            (job.done)(result);
+        if job.cancel.load(Ordering::SeqCst) {
+            return;
         }
+        // Queue refusals and caught panics do not pass through Server::call. Preserve the same error contract here.
+        if result["isError"] == true {
+            if !result["structuredContent"].is_object() {
+                result["structuredContent"] = json!({});
+            }
+            if result["structuredContent"].get("failure").is_none() {
+                let text = result["content"][0]["text"].as_str().unwrap_or("tool failed").to_string();
+                let mut failure = Failure::from(text);
+                failure.input = if job.started { "unknown" } else { "no" };
+                result["structuredContent"]["failure"] = recovery::structured(&failure, &Redactor::default())["failure"].clone();
+            }
+            if job.params["name"] == "act" && result["structuredContent"].get("action_status").is_none() {
+                let status = &mut result["structuredContent"];
+                status["action_status"] = json!(if job.started { "unknown" } else { "not_started" });
+                status["page_status"] = json!("unknown");
+                status["verification"] = json!(if job.params.pointer("/arguments/expect").is_none() { "not_requested" } else if job.started { "unknown" } else { "not_run" });
+                let text = status.to_string();
+                result["content"].as_array_mut().expect("tool content").push(json!({"type": "text", "text": text}));
+            }
+        }
+        (job.done)(result);
     }
 
     /// Queue a job on the worker of its session, in arrival order. `open` and `ensure_session` start the worker when there is none. The
@@ -365,7 +388,7 @@ impl Shared {
             let _ = tx.send(if v["isError"] == true { Err(text) } else { Ok(text) });
         });
         let params = json!({"name": tool, "arguments": {"session": name}});
-        self.route(Job { key: None, params, cancel: Arc::new(AtomicBool::new(false)), done });
+        self.route(Job { key: None, params, cancel: Arc::new(AtomicBool::new(false)), started: false, done });
         // A busy worker is not asked (`sessions`), so this returns when one call ends; a cancellation of the caller stops the wait.
         loop {
             match rx.recv_timeout(Duration::from_millis(25)) {
@@ -384,7 +407,7 @@ impl Shared {
         let mut map = lock(&self.sessions);
         let name = (2..).map(|n| format!("{base}~{n}")).find(|n| !map.contains_key(n)).expect("a free name");
         let (tx, rx) = mpsc::sync_channel(QUEUE);
-        let (url, busy) = (Arc::new(Mutex::new(String::new())), Arc::new(AtomicUsize::new(0)));
+        let (url, busy) = (Arc::new(Mutex::new(String::new())), Arc::new(AtomicUsize::new(1)));
         let (sh, n, u, b) = (self.clone(), name.clone(), url.clone(), busy.clone());
         let h = std::thread::Builder::new().name(format!("bare-mcp {name}")).spawn(move || worker(sh, n, rx, u, b, Some(tab))).map_err(|e| format!("cannot start a thread: {e}"))?;
         self.keep(h);
@@ -422,6 +445,7 @@ fn worker(shared: Arc<Shared>, name: String, rx: Receiver<Job>, url: Arc<Mutex<S
     if let Some(t) = tab {
         server.begin_tab(&name, t);
         server.publish(&name, &url);
+        busy.fetch_sub(1, Ordering::SeqCst);
     }
     loop {
         let job = if server.live.is_empty() {
@@ -465,10 +489,11 @@ impl Server {
 
     /// Run a job on this thread with its token set, and deliver its reply unless it was cancelled. A job cancelled before it starts does
     /// not run. A panic becomes an error reply and does not end the server.
-    fn run_job(&mut self, job: Job, busy: Option<&AtomicUsize>) {
+    fn run_job(&mut self, mut job: Job, busy: Option<&AtomicUsize>) {
         let result = if job.cancel.load(Ordering::SeqCst) {
             Value::Null
         } else {
+            job.started = true;
             set_cancel(Some(job.cancel.clone()));
             let r = catch_unwind(AssertUnwindSafe(|| self.call(&job.params)));
             set_cancel(None);
@@ -481,9 +506,9 @@ impl Server {
         self.shared.clone().finish(job, result);
     }
 
-    /// Publish the page address for `sessions`, which does not wait for a busy session.
+    /// Publish the safe page address or diagnostic for `sessions`, which does not wait for a busy session.
     fn publish(&mut self, name: &str, url: &Mutex<String>) {
-        *lock(url) = self.live.get_mut(name).map(|l| l.session.url().unwrap_or_else(|| match l.session.load_error() {
+        *lock(url) = self.live.get_mut(name).map(|l| l.session.url().map(|u| bare_drive::run::safe_url(&u)).unwrap_or_else(|| match l.session.load_error() {
             Some(why) => format!("(no document: the document did not load: {why})"),
             None => "(no document)".into(),
         })).unwrap_or_default();
@@ -678,6 +703,7 @@ impl Server {
     }
 
     fn store(&mut self, args: &Value, name: &str, file: Option<&str>) -> Result<String, String> {
+        if cancelled() { return Err("cancelled".into()); }
         let live = self.live_mut(args)?;
         let st = live.session.export_state().ok_or("the page has no session")?;
         if let Some(f) = file {
@@ -754,7 +780,11 @@ impl Server {
         }
         live.lines += src.lines().count();
         for s in &list {
-            if cancelled() || !live.session.step(s, &live.opt, &mut live.red) {
+            if cancelled() {
+                live.session.drain();
+                return Err("cancelled".into());
+            }
+            if !live.session.step(s, &live.opt, &mut live.red) {
                 break;
             }
         }
@@ -797,7 +827,7 @@ impl Server {
             .into_iter()
             .filter_map(|n| {
                 let u = lock(&lock(&sh.sessions).get(&n)?.url).clone();
-                Some(format!("{n}: {}", bare_drive::run::safe_url(&u)))
+                Some(format!("{n}: {u}"))
             })
             .collect::<Vec<_>>()
             .join("\n");
@@ -869,6 +899,7 @@ impl Server {
 
     /// With `diff`: only what changed since the last snapshot, and its parents.
     fn snapshot_diff(&mut self, args: &Value, diff: bool) -> Result<String, String> {
+        if cancelled() { return Err("cancelled".into()); }
         let mode = match args.get("mode").and_then(Value::as_str) {
             Some("all") => Mode::All,
             _ => Mode::Interactive,
@@ -1208,10 +1239,16 @@ impl Server {
         self.place_window(&opt)?;
         let (done, wait) = mpsc::channel();
         let name = self.shared.start_tab(base, Tab { opt, red, vars, state, url: url.to_string(), done })?;
-        match wait.recv() {
-            Ok(Ok(())) => Ok(name),
-            Ok(Err(e)) => Err(e),
-            Err(_) => Err("the tab thread ended".into()),
+        loop {
+            if cancelled() {
+                return Err("cancelled".into());
+            }
+            match wait.recv_timeout(Duration::from_millis(25)) {
+                Ok(Ok(())) => return Ok(name),
+                Ok(Err(e)) => return Err(e),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(_) => return Err("the tab thread ended".into()),
+            }
         }
     }
 
@@ -1737,20 +1774,65 @@ mod instructions_tests {
 mod dispatch_tests {
     use super::*;
 
-    #[test]
-    fn retirement_keeps_pending_calls_on_the_owner_queue() {
+    fn test_shared() -> Arc<Shared> {
         let (out, _output) = mpsc::channel();
-        let shared = Arc::new(Shared {
+        Arc::new(Shared {
             workspace: None, saved: Mutex::new(HashMap::new()), runs: AtomicU32::new(0),
             net: Mutex::new(bare_net::http::Client::new()), out,
             sessions: Mutex::new(HashMap::new()), inflight: Mutex::new(HashMap::new()),
             threads: Mutex::new(Vec::new()), closing: AtomicBool::new(false),
+        })
+    }
+
+    #[test]
+    fn an_error_after_dispatch_never_claims_input_was_not_sent() {
+        let shared = test_shared();
+        let (tx, rx) = mpsc::channel();
+        let job = Job {
+            key: None, params: json!({"name":"act","arguments":{"expect":"expect title=\"Saved\""}}),
+            cancel: Arc::new(AtomicBool::new(false)), started: true,
+            done: Box::new(move |result| { let _ = tx.send(result); }),
+        };
+        shared.finish(job, error_result("internal error: the call panicked"));
+        let result = rx.recv().unwrap();
+        assert_eq!(result["structuredContent"]["action_status"], "unknown", "{result}");
+        assert_eq!(result["structuredContent"]["verification"], "unknown", "{result}");
+        assert_eq!(result["structuredContent"]["failure"]["input_dispatched"], "unknown", "{result}");
+    }
+
+    #[test]
+    fn failed_load_diagnostics_preserve_hash_characters() {
+        let shared = test_shared();
+        let (tx, _rx) = mpsc::sync_channel(QUEUE);
+        lock(&shared.sessions).insert("a".into(), Slot {
+            tx, url: Arc::new(Mutex::new("(no document: load failed at #target)".into())),
+            busy: Arc::new(AtomicUsize::new(1)),
         });
+        let mut server = Server { shared, live: HashMap::new() };
+        assert!(server.sessions().contains("#target"), "a diagnostic was treated as a URL");
+    }
+
+    #[test]
+    fn cancellation_between_lines_is_not_success() {
+        let opt = Options { size: (1280, 800), timeout: Duration::from_secs(1), out: None, window: false, progress: false };
+        let session = Session::new(&opt);
+        let dl = Downloads::new(std::env::temp_dir().join(format!("bare-cancel-unit-{}", std::process::id())));
+        let live = Live { session, opt, dl, red: Redactor::default(), vars: HashMap::new(), lines: 0, told: Default::default() };
+        let mut server = Server { shared: test_shared(), live: HashMap::from([("main".into(), live)]) };
+        set_cancel(Some(Arc::new(AtomicBool::new(true))));
+        let result = server.run_live_typed(&json!({}), "cookie set should_not_run yes");
+        set_cancel(None);
+        assert!(result.is_err(), "cancelled steps were reported as successful");
+    }
+
+    #[test]
+    fn retirement_keeps_pending_calls_on_the_owner_queue() {
+        let shared = test_shared();
         let (tx, rx) = mpsc::sync_channel(QUEUE);
         let (done_tx, done_rx) = mpsc::channel();
         tx.send(Job {
             key: None, params: json!({"name": "snapshot", "arguments": {"session": "a"}}),
-            cancel: Arc::new(AtomicBool::new(false)),
+            cancel: Arc::new(AtomicBool::new(false)), started: false,
             done: Box::new(move |_| { let _ = done_tx.send(()); }),
         }).unwrap();
         lock(&shared.sessions).insert("a".into(), Slot {
