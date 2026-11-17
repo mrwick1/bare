@@ -833,3 +833,28 @@ fn a_constructor_slot_hint_changes_no_result() {
           var s = [], i; for (i = 0; i < 4; i++) s.push(Object.keys(new P(3)).length); s.push(Object.keys(new P(50)).length); s.push(Object.keys(new P(0)).length); s.join()"),
     ]);
 }
+
+/// A constructor remembers the slot count of its last object, at most 64: a class of 2 fields never reserves more than 2.
+#[test]
+fn a_constructor_keeps_the_observed_slot_count_as_a_hint() {
+    big(|| {
+        for mode in [Exec::Auto, Exec::Byte] {
+            let mut it = Interp::realm(Heap::default(), EvalLimits::default()).unwrap();
+            it.set_exec(mode);
+            let src = "function P() { for (var i = 0; i < 16; i++) this['k' + i] = i; } function Q() { this.a = 1; this.b = 2; }
+              function R() { for (var i = 0; i < 100; i++) this['k' + i] = i; } for (var i = 0; i < 3; i++) { new P(); new Q(); new R(); }
+              [P, Q, R]";
+            let Ok(Value::Object(arr)) = it.run_script(src) else { panic!("{mode:?}") };
+            let hints: Vec<u8> = (0..3)
+                .map(|i| {
+                    let Value::Object(f) = it.get_prop(Value::Object(arr), PropertyKey::Index(i)).unwrap() else { panic!() };
+                    let Some(&Callee::Script { hint, .. }) = it.funcs.get(&f) else { panic!() };
+                    hint
+                })
+                .collect();
+            // R stops at 100 properties as dictionary or shape objects: the hint is at most 64 either way.
+            assert_eq!((hints[0], hints[1]), (16, 2), "{mode:?}");
+            assert!(hints[2] <= 64, "{mode:?} {hints:?}");
+        }
+    });
+}

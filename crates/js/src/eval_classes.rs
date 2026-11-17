@@ -376,7 +376,7 @@ impl<'p> Interp<'p> {
         enum D {
             Class,
             Host(u32),
-            Script(u32, FuncId, u32, bool),
+            Script(u32, FuncId, u32, bool, u8),
             /// A host constructor that does not read `new.target` yet (it did not opt in with `add_ctor_nt`).
             NoNt(&'static str),
             Native(Nat),
@@ -387,7 +387,7 @@ impl<'p> Interp<'p> {
         let d = match self.funcs.get(&f) {
             Some(Callee::Class) => D::Class,
             Some(&Callee::Host { id, ctor: true, nt: true }) => D::Host(id),
-            Some(&Callee::Script { script, fid, env, self_binding }) if self.func_of(script, fid).is_plain_ctor() => D::Script(script, fid, env, self_binding),
+            Some(&Callee::Script { script, fid, env, self_binding, hint }) if self.func_of(script, fid).is_plain_ctor() => D::Script(script, fid, env, self_binding, hint),
             Some(&Callee::Native(n)) if matches!(n, Nat::ObjectCtor | Nat::FnCtor(_) | Nat::ArrayCtor | Nat::ErrorCtor(_) | Nat::StringFn | Nat::NumberFn | Nat::BooleanFn | Nat::Ext(Bi::RegExpCtor) | Nat::Sc(ScFn::IterCtor) | Nat::Px(PxFn::Ctor)) || Self::native_branded(n) => D::Native(n),
             Some(&Callee::Promise(pf @ (PFn::Ctor | PFn::AggErrCtor))) => D::Promise(pf),
             Some(&Callee::Host { ctor: true, nt: false, .. }) => D::NoNt("subclassing a host constructor (new.target is not passed to the constructor)"),
@@ -431,7 +431,7 @@ impl<'p> Interp<'p> {
                 self.depth -= 1;
                 r
             }
-            D::Script(script, fid, env, sb) => {
+            D::Script(script, fid, env, sb, hint) => {
                 if self.depth >= self.limits.max_call_depth {
                     return Err(Error::Limit(LimitKind::CallDepth));
                 }
@@ -440,11 +440,13 @@ impl<'p> Interp<'p> {
                 let r: Res<Value> = (|| {
                     let proto = self.proto_from_ctor(nt)?;
                     let obj = h!(self, self.heap.new_object(Some(proto)));
+                    self.reserve_hint(obj, hint)?;
                     self.cls_set_nt(script, fid, nt);
                     self.stk.new = true;
                     let r = self.call_script((script, fid), f, env, sb, Value::Object(obj), args);
                     self.cls.pending_nt = None;
                     let r = r?;
+                    self.save_hint(f, obj, hint);
                     Ok(if matches!(r, Value::Object(_)) { r } else { Value::Object(obj) })
                 })();
                 self.depth -= 1;

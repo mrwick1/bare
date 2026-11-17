@@ -407,7 +407,7 @@ impl<'p> Interp<'p> {
     #[inline(always)]
     fn bc_target(&self, f: Value) -> Option<(Rc<Compiled>, FuncId, u32, ObjId)> {
         let Value::Object(o) = f else { return None };
-        let Some(&Callee::Script { script, fid, env, self_binding: false }) = self.funcs.get(&o) else { return None };
+        let Some(&Callee::Script { script, fid, env, self_binding: false, .. }) = self.funcs.get(&o) else { return None };
         if script as usize != self.cur {
             return None;
         }

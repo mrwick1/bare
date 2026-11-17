@@ -470,7 +470,7 @@ enum Nat {
 
 enum Callee {
     /// `script` is the slot of the script that owns `fid`.
-    Script { script: u32, fid: FuncId, env: u32, self_binding: bool },
+    Script { script: u32, fid: FuncId, env: u32, self_binding: bool, hint: u8 },
     Native(Nat),
     Bound { target: ObjId, this: Value, args: Vec<Value> },
     Promise(PFn),
@@ -2066,7 +2066,7 @@ impl<'p> Interp<'p> {
             self.function_proto
         };
         let o = h!(self, self.heap.new_function(Some(proto), (self.k_length, len as f64), (self.k_name, nstr), plain, cap));
-        self.funcs.insert(o, Callee::Script { script: self.cur as u32, fid, env: self.env, self_binding });
+        self.funcs.insert(o, Callee::Script { script: self.cur as u32, fid, env: self.env, self_binding, hint: 0 });
         if f.mode == FuncMode::AsyncGen {
             self.ag_function(o)?;
         } else if f.is_generator() {
@@ -2107,7 +2107,7 @@ impl<'p> Interp<'p> {
             R,
         }
         let d = match self.funcs.get(&o) {
-            Some(&Callee::Script { script, fid, env, self_binding }) => D::S(script, fid, env, self_binding),
+            Some(&Callee::Script { script, fid, env, self_binding, .. }) => D::S(script, fid, env, self_binding),
             Some(Callee::Proxy { .. }) => D::X,
             Some(Callee::Revoke(_)) => D::R,
             Some(&Callee::Host { id, .. }) => D::H(id),
@@ -2202,6 +2202,26 @@ impl<'p> Interp<'p> {
         self.descend(|it| it.construct_inner(f, args, callee))
     }
 
+    /// Room for the slots that the last `new` of this constructor left, in one allocation (a hint of 3 or less needs none).
+    #[inline]
+    pub(crate) fn reserve_hint(&mut self, obj: ObjId, hint: u8) -> Res<()> {
+        if hint > 3 {
+            h!(self, self.heap.reserve_props(obj, hint as usize));
+        }
+        Ok(())
+    }
+
+    /// The hint of the constructor `f`: the slot count of the object that its last `new` made, at most 64.
+    #[inline]
+    pub(crate) fn save_hint(&mut self, f: ObjId, obj: ObjId, old: u8) {
+        let n = self.heap.slot_count(obj).min(64) as u8;
+        if n != old
+            && let Some(Callee::Script { hint, .. }) = self.funcs.get_mut(&f)
+        {
+            *hint = n;
+        }
+    }
+
     fn construct_inner(&mut self, f: Value, args: &[Value], callee: ExprId) -> Res<Value> {
         if self.low_stack() {
             return self.construct_low(f, args, callee);
@@ -2217,7 +2237,7 @@ impl<'p> Interp<'p> {
         }
         self.tick()?;
         enum D {
-            S(u32, FuncId, u32, bool),
+            S(u32, FuncId, u32, bool, u8),
             N(Nat),
             B(ObjId, Vec<Value>),
             P(PFn),
@@ -2229,7 +2249,7 @@ impl<'p> Interp<'p> {
             Some(Callee::Class) => D::C,
             Some(&Callee::Proxy { ctor: true }) => D::X,
             Some(&Callee::Host { id, ctor: true, .. }) => D::H(id),
-            Some(&Callee::Script { script, fid, env, self_binding }) if self.func_of(script, fid).is_plain_ctor() => D::S(script, fid, env, self_binding),
+            Some(&Callee::Script { script, fid, env, self_binding, hint }) if self.func_of(script, fid).is_plain_ctor() => D::S(script, fid, env, self_binding, hint),
             Some(&Callee::Native(n)) if matches!(n, Nat::ObjectCtor | Nat::FnCtor(_) | Nat::ArrayCtor | Nat::ErrorCtor(_) | Nat::StringFn | Nat::NumberFn | Nat::BooleanFn | Nat::Ext(Bi::RegExpCtor) | Nat::Sc(ScFn::IterCtor) | Nat::Px(PxFn::Ctor)) || matches!(n, Nat::Bin(b) if b.ctor_name().is_some() || b == BinFn::TaCtor) || matches!(n, Nat::Sc(f) if f.is_ctor()) || n == Nat::Date(DateFn::Ctor) || matches!(n, Nat::Intl(f) if f.is_ctor()) => D::N(n),
             Some(Callee::Bound { target, args, .. }) => D::B(*target, args.clone()),
             Some(&Callee::Promise(pf @ (PFn::Ctor | PFn::AggErrCtor))) => D::P(pf),
@@ -2237,15 +2257,17 @@ impl<'p> Interp<'p> {
         };
         self.depth += 1;
         let r = self.in_frames(|it| match d {
-            D::S(script, fid, env, sb) => (|| {
+            D::S(script, fid, env, sb, hint) => (|| {
                 let pv = it.get_prop(f, it.k_prototype)?;
                 let proto = if let Value::Object(p) = pv { p } else { it.object_proto };
                 let obj = h!(it, it.heap.new_object(Some(proto)));
+                it.reserve_hint(obj, hint)?;
                 it.cls_set_nt(script, fid, o);
                 it.stk.new = true;
                 let r = it.call_script((script, fid), o, env, sb, Value::Object(obj), args);
                 it.cls.pending_nt = None;
                 let r = r?;
+                it.save_hint(o, obj, hint);
                 Ok(if matches!(r, Value::Object(_)) { r } else { Value::Object(obj) })
             })(),
             D::C => it.construct_class_body(o, args, o),
