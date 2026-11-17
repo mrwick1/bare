@@ -335,7 +335,7 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>, perf: ObjId) -> R<()> {
     ] {
         d.def_method(it, perf, name, len, h)?;
     }
-    for (name, h) in [("timing", timing as H), ("navigation", navigation as H)] {
+    for (name, h) in [("timing", timing as H), ("navigation", navigation as H), ("timeOrigin", time_origin as H)] {
         let f = d.add_fn(it, h, name, 0, false)?;
         let k = d.key(it, name)?;
         let desc = bare_js::heap::PropertyDescriptor { get: Some(Some(f)), enumerable: Some(true), configurable: Some(true), ..Default::default() };
@@ -373,4 +373,13 @@ fn timing(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
 }
 fn navigation(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
     legacy(d, it, this, false)
+}
+/// The wall clock at time 0 of the scheduler clock, in ms. The first read fixes it on the owner, as `legacy` does.
+fn time_origin(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
+    let v = Value::Number(it.wall_now_ms() - d.now_ms());
+    if let Value::Object(owner) = this {
+        let k = d.key(it, "timeOrigin")?;
+        it.define_data(owner, k, v, false, true, true)?;
+    }
+    Ok(v)
 }

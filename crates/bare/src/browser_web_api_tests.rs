@@ -168,6 +168,19 @@ fn legacy_performance_objects_are_stable() {
     });
 }
 
+/// Google sign-in reads `performance.timeOrigin` as a number (#655).
+#[test]
+fn performance_time_origin_is_the_wall_clock_at_time_zero() {
+    big(|| {
+        let mut b = browser();
+        b.use_virtual_wall_clock_at(1_700_000_001_000.0).unwrap();
+        assert_eq!(js(&mut b, "[typeof performance.timeOrigin, performance.timeOrigin].join()"), "number,1700000000000");
+        b.advance_time(50.0, 1_000_000).unwrap();
+        b.use_virtual_wall_clock_at(1_800_000_000_000.0).unwrap();
+        assert_eq!(js(&mut b, "performance.timeOrigin"), "1700000000000");
+    });
+}
+
 #[test]
 fn document_type_has_a_distinct_node_brand() {
     big(|| {
