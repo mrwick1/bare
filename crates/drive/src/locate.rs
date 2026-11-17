@@ -58,6 +58,8 @@ pub enum Locator {
     Placeholder(Text),
     /// A ref from a snapshot (`ref=e7`): the run resolves it, not `find`.
     Ref(u32),
+    /// The match of the locator at this index, from 0, in tree order (`css="a" nth=1`).
+    Nth(Box<Locator>, usize),
 }
 
 impl std::fmt::Display for Locator {
@@ -70,6 +72,7 @@ impl std::fmt::Display for Locator {
             Locator::Text(t) => write!(f, "text{t}"),
             Locator::Placeholder(t) => write!(f, "placeholder{t}"),
             Locator::Ref(r) => write!(f, "ref=e{r}"),
+            Locator::Nth(l, n) => write!(f, "{l} nth={n}"),
         }
     }
 }
@@ -92,6 +95,12 @@ pub fn find(page: &mut Page, loc: &Locator) -> Result<Found, String> {
 
 /// The elements that `loc` names, and with `scope` only those that are inside an element of that CSS selector (or are one).
 pub fn find_in(page: &mut Page, loc: &Locator, scope: Option<&str>) -> Result<Found, String> {
+    if let Locator::Nth(inner, n) = loc {
+        let all = find_in(page, inner, scope)?;
+        // Past the last match, `hidden` stays 0: the failure is "no match", not "hidden".
+        let hidden = if all.shown.is_empty() { all.hidden } else { 0 };
+        return Ok(Found { shown: all.shown.get(*n).copied().into_iter().collect(), hidden });
+    }
     if let Locator::Css(sel) = loc {
         return Ok(Found { shown: page.query_all(sel)?, hidden: 0 });
     }
@@ -145,6 +154,10 @@ pub fn near(page: &mut Page, loc: &Locator) -> Option<(String, bool)> {
         Locator::Role(r, Some(_)) if some.is_none() => {
             let n = find(page, &Locator::Role(r.clone(), None)).ok()?.shown.len();
             (n > 0).then(|| (format!("{n} element(s) with role={r}, none with that name"), false))
+        }
+        Locator::Nth(inner, _) => {
+            let n = find(page, inner).ok()?.shown.len();
+            (n > 0).then(|| (format!("only {n} element(s) match {inner}"), false))
         }
         _ => some,
     }
@@ -288,7 +301,7 @@ impl<'a> Cx<'a> {
             Locator::Label(t) => self.label(n).is_some_and(|l| t.matches(&l)),
             Locator::Placeholder(t) => matches!(self.tag(n), "input" | "textarea") && self.attr(n, "placeholder").is_some_and(|p| t.matches(p)),
             Locator::Text(t) => !self.in_head(n) && t.matches(&self.text(n)),
-            Locator::Ref(_) => false,
+            Locator::Ref(_) | Locator::Nth(..) => false,
         }
     }
 

@@ -24,7 +24,7 @@ Use `read` for the text of the page or of one element (`ref`), and `links` for U
 | Situation | What happens | What to do |
 |---|---|---|
 | Ref lifetime | Refs stay valid until the page navigates. | `snapshot` or `find` again after a navigation. |
-| Duplicate target | `FAILED duplicate: ... matches 2 elements`, with the hint to use a ref. | Take the ref from `find`, or narrow the locator. |
+| Duplicate target | `FAILED duplicate: ... matches 2 elements`, with the hint to use a ref. | Take the ref from `find`, narrow the locator, or add `nth=N` (from 0) to pick one match: `css="a.item" nth=1`. With exactly one rendered match, no `nth` is needed. A step syntax error (for example a quote inside an unquoted value) is `invalid_arguments`: fix the locator. |
 | Overlay | `FAILED covered: input#a is covered by div ...`. | Close the overlay first (its button, or `press` Escape), then repeat the act. |
 | Delayed result | The page changes after the receipt. | `step` with `expect ...`. It waits until its time limit. |
 | Field text | `act type` clears the field, then types. `\n` is Enter. | Do not clear it yourself. |

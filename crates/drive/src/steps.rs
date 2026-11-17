@@ -326,8 +326,23 @@ fn text_of(op: bool, v: String) -> Text {
     if op { Text::Has(v) } else { Text::Is(v) }
 }
 
-/// A locator at the start of `w`, and how many words it used.
+/// A locator at the start of `w`, with an optional `nth=N` (from 0) after it, and how many words it used.
 fn locator(w: &[Word], vars: &HashMap<String, String>) -> Result<(Locator, usize), String> {
+    let (loc, used) = base_locator(w, vars)?;
+    match w.get(used) {
+        Some(Word::Pair(k, false, n)) if k == "nth" => {
+            let n = expand(n, vars)?;
+            let i = n.parse().map_err(|_| format!("not an index: nth={n} (a number from 0)"))?;
+            if matches!(loc, Locator::Ref(_)) {
+                return Err("nth does not go with ref=: a ref names one element".into());
+            }
+            Ok((Locator::Nth(Box::new(loc), i), used + 1))
+        }
+        _ => Ok((loc, used)),
+    }
+}
+
+fn base_locator(w: &[Word], vars: &HashMap<String, String>) -> Result<(Locator, usize), String> {
     let Some(Word::Pair(k, op, v)) = w.first() else { return Err("a locator is missing (ref=, css=, role=, label=, text=, placeholder=)".into()) };
     let v = expand(v, vars)?;
     let t = text_of(*op, v.clone());
@@ -411,6 +426,10 @@ mod tests {
         assert_eq!(p("fill css=\"#q\" \"ab\" keys=all"), Err("fill LOC \"text\" [keys=last]".into()));
         assert_eq!(p("select label=\"Country\" \"Kenya\""), Ok(Action::Select(Locator::Label(Text::Is("Country".into())), vec!["Kenya".into()])));
         assert_eq!(p("select css=\"#f\" \"a\" \"b c\""), Ok(Action::Select(Locator::Css("#f".into()), vec!["a".into(), "b c".into()])));
+        assert_eq!(p("click css=\"a\" nth=1"), Ok(Action::Click(Locator::Nth(Box::new(Locator::Css("a".into())), 1))));
+        assert_eq!(p("press role=link name=\"X\" nth=0 Enter"), Ok(Action::Press(Some(Locator::Nth(Box::new(Locator::Role("link".into(), Some(Text::Is("X".into())))), 0)), "Enter".into())));
+        assert_eq!(p("click css=\"a\" nth=x"), Err("not an index: nth=x (a number from 0)".into()));
+        assert!(p("click css=\"a\" nth=-1").is_err() && p("click ref=e1 nth=0").is_err());
         assert_eq!(p("check ref=e3"), Ok(Action::Check(Locator::Ref(3), true)));
         assert_eq!(p("uncheck ref=e3"), Ok(Action::Check(Locator::Ref(3), false)));
         assert_eq!(p("hover text=\"Menu\""), Ok(Action::Hover(Locator::Text(Text::Is("Menu".into())))));

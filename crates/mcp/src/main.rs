@@ -569,10 +569,10 @@ impl Server {
         }
     }
 
-    fn run_steps(&mut self, args: &Value) -> Result<String, String> {
+    fn run_steps(&mut self, args: &Value) -> Result<String, Failure> {
         let src = args.get("steps").and_then(Value::as_str).ok_or("steps (the text of a step file) is required")?;
         let (opt, mut red, vars) = self.options(args)?;
-        let list = steps::parse(src, &vars).map_err(|e| red.clean(&e))?;
+        let list = steps::parse(src, &vars).map_err(|e| Failure::args(red.clean(&e)))?;
         self.place_window(&opt)?;
         let report = bare_drive::run::run(&list, &opt, &mut red);
         Ok(with_out(report.json(&red), &opt, true))
@@ -754,7 +754,7 @@ impl Server {
         Ok(with_session(rep, if had { "recreated" } else { "created" }))
     }
 
-    fn step(&mut self, args: &Value) -> Result<(String, Option<Failure>), String> {
+    fn step(&mut self, args: &Value) -> Result<(String, Option<Failure>), Failure> {
         let src = args.get("steps").and_then(Value::as_str).ok_or("steps (one or more step lines) is required")?;
         let (text, _, failure) = self.run_live_typed(args, src)?;
         Ok((text, failure))
@@ -768,16 +768,16 @@ impl Server {
 
     /// Run step lines on the live session until one fails, and give the report of these lines.
     fn run_live(&mut self, args: &Value, src: &str) -> Result<(String, bool), String> {
-        self.run_live_typed(args, src).map(|(t, ok, _)| (t, ok))
+        self.run_live_typed(args, src).map(|(t, ok, _)| (t, ok)).map_err(|f| f.text)
     }
 
     /// `run_live` with the failure of this run: the driver `kind` and message, taken from the report of these steps.
-    fn run_live_typed(&mut self, args: &Value, src: &str) -> Result<(String, bool, Option<Failure>), String> {
+    fn run_live_typed(&mut self, args: &Value, src: &str) -> Result<(String, bool, Option<Failure>), Failure> {
         let live = self.live_mut(args)?;
         // A `timeout` line lasts only for this call: the next call starts from the default of the session, or from `timeout_ms`.
         let limit = args.get("timeout_ms").and_then(Value::as_u64).map_or(live.opt.timeout, Duration::from_millis);
         live.session.set_timeout(limit);
-        let mut list = steps::parse(src, &live.vars).map_err(|e| live.red.clean(&e))?;
+        let mut list = steps::parse(src, &live.vars).map_err(|e| Failure::args(live.red.clean(&e)))?;
         for s in &mut list {
             s.line += live.lines;
         }
@@ -1540,7 +1540,7 @@ fn compact(rep: &Report, red: &Redactor) -> String {
                 "hidden" => "open the menu, tab or section that holds it, or scroll",
                 "covered" => "close the dialog or overlay first (press Escape), or act on the covering element",
                 "disabled" => "fill the required fields first, or wait",
-                "duplicate" => "use a ref from snapshot or find",
+                "duplicate" => "use a ref from snapshot or find, or add nth=N (from 0) to pick one match",
                 _ => "",
             };
             let script = rep.logs.iter().find(|(_, l)| bare_drive::diag::uncaught(l)).filter(|_| matches!(f.kind, "not_found" | "hidden" | "page"));
@@ -1635,7 +1635,7 @@ fn tools() -> Value {
         expect LOC visible|hidden|enabled|disabled|checked|unchecked|focused|count N|text=\"x\"|value~\"x\", \
         expect url=\"x\"|url~\"x\", expect title=\"x\"|title~\"x\", expect js \"expression\", expect cookie NAME [absent|value=\"x\"], \
         cookie set NAME VALUE, shot NAME (a PNG in the out folder), timeout MS. \
-        LOC: ref=e7 (from snapshot), css=\"...\", role=NAME [name=\"...\"|name~\"...\"], label=\"...\", text=\"...\", placeholder=\"...\"; it must match one element. \
+        LOC: ref=e7 (from snapshot), css=\"...\", role=NAME [name=\"...\"|name~\"...\"], label=\"...\", text=\"...\", placeholder=\"...\"; it must match one element, or exactly one of the matches must be rendered; add nth=N (from 0) after it to pick the Nth match, as css=\"a.item\" nth=1. \
         A step waits for its condition until its time limit; there are no fixed sleeps.";
     json!([
         {
