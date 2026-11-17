@@ -12834,3 +12834,11 @@ How the hit test works: `bare_paint::hit` names the top element at the point. Th
 Tests: three new tests in `browser_editing_tests`. Before the change, all three failed. After, they pass.
 
 Not done or not tested: `caretPositionFromPoint` (no `CaretPosition` interface yet). A word is cut at the Text node (`he<b>llo</b>` selects one part). A triple click in a block that holds a nested block selects the nested text too. A single press on plain text does not move the caret (a press in a host still puts it at the end). Not tested: scrolled containers, `position: fixed` and sticky text, right-to-left text, a comparison with Chrome on a real page.
+## Clippy clean (`fix/clippy-clean`, 2026-11-17)
+
+`cargo clippy --all-targets -- -D warnings` exits 0 on bare. On the base (f4e1fcd8) clippy stops at the first failing crate, so the counts show only as each crate is fixed. Largest per-crate error counts that cargo printed (lib and test targets overlap): bare-js 49, bare 48, bare-paint 7, bare-css 6, bare-mcp 3 plus 3, bare-net 2 plus 5 (tests), bare-stress 5, bare-drive 1 plus 3 (about 132 in all). After the change: 0.
+
+- Most fixes are the suggested rewrite: collapsed `if let` chains, `is_multiple_of`, `is_empty`, needless borrows, `Default` derive for `bare_net::http::Response`.
+- Items with `#[allow(clippy::...)]` and a reason comment: `too_many_arguments` (hot paths `add_rules`, `style_of`, `Regex::backward`, plus `build_response`, `load_document`), `wrong_self_convention` (spec names `to_object`, `to_numeric`, `to_bigint`, `to_bit_width`, `to_dict`, `to_shapes`, `from_clause`), `box_collection` (fields that stay one pointer wide), `type_complexity` (one-off tuple fields), `diverging_sub_expression` (`hx!` early return), `needless_range_loop` (two loops that also use the index), `items_after_test_module`, `drop_non_drop` (test).
+- Compiler warnings: `re_tab_bytes` is used only by tests, so it is `#[cfg(test)]`. The unused import and the needless `mut` are removed.
+- No logic change is intended. `cargo test -q --workspace --lib` passes. Not run: integration tests under `tests/`, Windows builds, benchmarks.
