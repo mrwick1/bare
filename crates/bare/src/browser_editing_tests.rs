@@ -439,3 +439,71 @@ fn list_toggle_changes_only_the_selected_items() {
         assert_eq!(js(&mut b, "e.innerHTML"), "<ul><li>a</li></ul><div>b</div><ul><li>c</li></ul>");
     });
 }
+
+/// Shift with an arrow, Home or End extends the selection in an editing host; Control makes it by word (#444).
+#[test]
+fn shift_arrows_extend_a_contenteditable_selection() {
+    big(|| {
+        let mut b = browser();
+        js(&mut b, "document.body.innerHTML = '<div contenteditable id=e></div>'; var e = document.getElementById('e');");
+        let e = b.query("#e").unwrap().unwrap();
+        b.drive_type(e, "hello world").unwrap();
+        b.drive_key(None, "Shift+ArrowLeft").unwrap();
+        b.drive_key(None, "Shift+ArrowLeft").unwrap();
+        assert_eq!(js(&mut b, "var s = getSelection(); s.toString() + '|' + s.anchorOffset + '|' + s.focusOffset + '|' + s.direction"), "ld|11|9|backward");
+        b.drive_key(None, "Shift+ArrowRight").unwrap();
+        assert_eq!(js(&mut b, "getSelection().toString()"), "d");
+        b.drive_key(None, "Shift+Home").unwrap();
+        assert_eq!(js(&mut b, "getSelection().toString()"), "hello world");
+        b.drive_key(None, "Shift+End").unwrap();
+        assert_eq!(js(&mut b, "getSelection().toString() + '|' + getSelection().direction"), "|none");
+        // By word, from the end.
+        b.drive_key(None, "Control+Shift+ArrowLeft").unwrap();
+        assert_eq!(js(&mut b, "getSelection().toString()"), "world");
+        b.drive_key(None, "Control+Shift+ArrowLeft").unwrap();
+        assert_eq!(js(&mut b, "getSelection().toString()"), "hello world");
+        assert_eq!(js(&mut b, "e.textContent"), "hello world");
+    });
+}
+
+/// `Selection.modify` moves or extends by character, word and line boundary; an unknown argument changes nothing (#444).
+#[test]
+fn selection_modify_moves_and_extends() {
+    big(|| {
+        let mut b = browser();
+        js(&mut b, "document.body.innerHTML = '<p id=p>one <b>two</b> three</p><p id=q>four</p>'; var s = getSelection(); s.collapse(p.firstChild, 0);");
+        js(&mut b, "s.modify('move', 'forward', 'word')");
+        assert_eq!(js(&mut b, "s.anchorOffset + ':' + s.isCollapsed"), "3:true");
+        js(&mut b, "s.modify('extend', 'forward', 'word')");
+        assert_eq!(js(&mut b, "s.toString()"), " two");
+        js(&mut b, "s.modify('extend', 'forward', 'lineboundary')");
+        assert_eq!(js(&mut b, "s.toString()"), " two three");
+        assert_eq!(js(&mut b, "s.modify('move', 'backward', 'lineboundary')"), "undefined");
+        assert_eq!(js(&mut b, "s.anchorNode.data + ':' + s.anchorOffset + ':' + s.isCollapsed"), "one :0:true");
+        js(&mut b, "s.modify('extend', 'forward', 'character')");
+        assert_eq!(js(&mut b, "s.toString()"), "o");
+        js(&mut b, "s.modify('extend', 'sideways', 'character'); s.modify('extend', 'forward', 'sentence')");
+        assert_eq!(js(&mut b, "s.toString()"), "o");
+    });
+}
+
+/// In an `<input>`, Shift+Home and Control+Shift+Arrow move the selection end; Control moves by word (#444).
+#[test]
+fn shift_home_and_word_arrows_extend_an_input_selection() {
+    big(|| {
+        let mut b = browser();
+        js(&mut b, "document.body.innerHTML = '<input id=i value=\"hello big world\">';");
+        let i = b.query("#i").unwrap().unwrap();
+        b.focus(i).unwrap();
+        b.drive_key(None, "End").unwrap();
+        b.drive_key(None, "Shift+Home").unwrap();
+        assert_eq!(js(&mut b, "i.selectionStart + ',' + i.selectionEnd + ',' + i.selectionDirection"), "0,15,backward");
+        b.drive_key(None, "End").unwrap();
+        b.drive_key(None, "Control+Shift+ArrowLeft").unwrap();
+        assert_eq!(js(&mut b, "i.selectionStart + ',' + i.selectionEnd"), "10,15");
+        b.drive_key(None, "Control+Shift+ArrowLeft").unwrap();
+        assert_eq!(js(&mut b, "i.selectionStart + ',' + i.selectionEnd"), "6,15");
+        b.drive_key(None, "Control+Shift+ArrowRight").unwrap();
+        assert_eq!(js(&mut b, "i.selectionStart + ',' + i.selectionEnd"), "9,15");
+    });
+}

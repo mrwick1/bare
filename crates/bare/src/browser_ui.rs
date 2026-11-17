@@ -301,12 +301,12 @@ fn u16_len(s: &str) -> u32 {
 }
 
 /// The UTF-16 offset one character before `u`.
-fn prev_off(s: &str, u: u32) -> u32 {
+pub(crate) fn prev_off(s: &str, u: u32) -> u32 {
     s[..byte_at(s, u)].chars().next_back().map_or(0, |c| u - c.len_utf16() as u32)
 }
 
 /// The UTF-16 offset one character after `u`.
-fn next_off(s: &str, u: u32) -> u32 {
+pub(crate) fn next_off(s: &str, u: u32) -> u32 {
     s[byte_at(s, u)..].chars().next().map_or(u, |c| u + c.len_utf16() as u32)
 }
 
@@ -855,7 +855,7 @@ impl Dom {
                 self.edit(it, f, if k.key == "Backspace" { "deleteContentBackward" } else { "deleteContentForward" }, None)?;
             }
             "ArrowLeft" | "ArrowRight" | "Home" | "End" if focus.is_some_and(|f| self.selection_applies(f)) => {
-                self.move_caret(it, focus.expect("checked"), &k.key, m.shift)?;
+                self.move_caret(it, focus.expect("checked"), &k.key, m.shift, m.ctrl)?;
             }
             "ArrowUp" | "ArrowDown" | "ArrowLeft" | "ArrowRight" | "PageUp" | "PageDown" | "Home" | "End" if !m.ctrl && !m.alt && !m.meta && !(matches!(k.key.as_str(), "ArrowUp" | "ArrowDown") && edit.is_some()) => {
                 use crate::browser_scroll::ScrollKey as S;
@@ -928,6 +928,19 @@ impl Dom {
         }
         if m.alt || m.meta {
             return Ok(false);
+        }
+        // Shift with an arrow, Home or End extends the selection (Control: by word, or to the end of the host).
+        if m.shift && matches!(k.key.as_str(), "ArrowLeft" | "ArrowRight" | "Home" | "End") {
+            self.caret_into_host(it, f)?;
+            let fwd = matches!(k.key.as_str(), "ArrowRight" | "End");
+            let gran = match (k.key.as_str(), m.ctrl) {
+                ("ArrowLeft" | "ArrowRight", false) => "character",
+                ("ArrowLeft" | "ArrowRight", true) => "word",
+                (_, false) => "lineboundary",
+                _ => "documentboundary",
+            };
+            self.modify_selection(it, "extend", if fwd { "forward" } else { "backward" }, gran)?;
+            return Ok(true);
         }
         let (kind, text) = match k.key.as_str() {
             "Enter" => (if m.shift { "insertLineBreak" } else { "insertParagraph" }, None),
@@ -1011,7 +1024,7 @@ impl Dom {
         Ok(())
     }
 
-    fn move_caret(&self, it: &mut Interp<'_>, n: NodeId, key: &str, extend: bool) -> R<()> {
+    fn move_caret(&self, it: &mut Interp<'_>, n: NodeId, key: &str, extend: bool, word: bool) -> R<()> {
         let Some((sel, len)) = self.effective(None, n)? else { return Ok(()) };
         let value = self.input_value_of(n).unwrap_or_default();
         // The selection has an anchor and a focus end: Shift moves the focus end.
@@ -1022,6 +1035,8 @@ impl Dom {
                 let c = if left { sel.start } else { sel.end };
                 return self.set_user_selection(it, n, Some(c), Some(c), Dir::Forward);
             }
+            "ArrowLeft" if word => word_move(&value, focus, false),
+            "ArrowRight" if word => word_move(&value, focus, true),
             "ArrowLeft" => prev_off(&value, focus),
             "ArrowRight" => next_off(&value, focus),
             "Home" => 0,
@@ -1359,6 +1374,24 @@ impl Browser {
         let dom = self.dom.clone();
         self.it.host_scope(|it| dom.tab_order(it))
     }
+}
+
+/// The offset after Control+Arrow from `u` in `text` (UTF-16 units): spaces are skipped, then the run of letters, digits and `_`, or of
+/// other characters, is crossed. Forward gives its end (Chrome on Linux), backward its start.
+pub(crate) fn word_move(text: &str, u: u32, forward: bool) -> u32 {
+    let class = |ch: char| if ch.is_whitespace() { 0 } else if ch.is_alphanumeric() || ch == '_' { 1 } else { 2 };
+    let mut at = u;
+    let step = |at: u32| if forward { next_off(text, at) } else { prev_off(text, at) };
+    let char_at = |at: u32| if forward { text[byte_at(text, at)..].chars().next() } else { text[..byte_at(text, at)].chars().next_back() };
+    while char_at(at).is_some_and(|c| class(c) == 0) {
+        at = step(at);
+    }
+    if let Some(k) = char_at(at).map(class) {
+        while char_at(at).is_some_and(|c| class(c) == k) {
+            at = step(at);
+        }
+    }
+    at
 }
 
 /// Where a double click at offset `c` of `text` selects (UTF-16 offsets): the run of letters, digits and `_`, or the run of spaces,

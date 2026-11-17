@@ -19,7 +19,8 @@
 //!   new range (`collapse`, `selectAllChildren`, `addRange` and the others) sets the direction to forward.
 //!
 //! Gates (`Error::Unsupported`, none is faked)
-//! - The selection methods `modify` and `deleteFromDocument`.
+//! - The selection method `deleteFromDocument`. `modify` takes `move` and `extend` with the granularities `character`, `word`, `lineboundary`,
+//!   `paragraphboundary` and `documentboundary` (`line`, `sentence`, `paragraph` change nothing).
 //!
 //! Live ranges (DOM Standard, "live range")
 //! - A range follows the tree. The document watcher (see `Dom::sync_watcher`) tells the ranges of each node linked or unlinked: the "insert" and
@@ -1242,17 +1243,99 @@ fn contains_node(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     Ok(Value::Bool(hit))
 }
 
-macro_rules! sel_gated {
-    ($($f:ident => $what:literal),* $(,)?) => {$(
-        fn $f(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-            sel_of(d, it, this)?;
-            Err(gate($what))
-        }
-    )*};
+/// `modify`: JS arguments, then `modify_selection`.
+fn modify(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    sel_of(d, it, this)?;
+    let mut s = [String::new(), String::new(), String::new()];
+    for (i, v) in a.iter().take(3).enumerate() {
+        s[i] = d.string_arg(it, *v)?.to_ascii_lowercase();
+    }
+    d.modify_selection(it, &s[0], &s[1], &s[2])?;
+    Ok(Value::Undefined)
 }
-sel_gated! {
-    modify => "Selection.modify",
-    delete_from_document => "Selection.deleteFromDocument",
+
+fn delete_from_document(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    sel_of(d, it, this)?;
+    Err(gate("Selection.deleteFromDocument"))
+}
+
+impl Dom {
+    /// `Selection.modify(alter, direction, granularity)` for `alter` `move` or `extend` (lowercase). The granularities are `character`, `word`,
+    /// `lineboundary`, `paragraphboundary` and `documentboundary`; another one, another direction or no range changes nothing (Chrome).
+    /// The text is that of the Text nodes inside the editing host of the focus (the document when it is in none), cut into lines at
+    /// blocks and `<br>`; one move reads it once.
+    pub(crate) fn modify_selection(&self, it: &mut Interp<'_>, alter: &str, dir: &str, gran: &str) -> R<()> {
+        let d = self;
+        let fwd = match dir {
+            "forward" | "right" => true,
+            "backward" | "left" => false,
+            _ => return Ok(()),
+        };
+        if !matches!(alter, "move" | "extend") || !matches!(gran, "character" | "word" | "lineboundary" | "paragraphboundary" | "documentboundary") {
+            return Ok(());
+        }
+        ensure(d, it)?;
+        let Value::Object(so) = get_selection(d, it, Value::Undefined, &[])? else { return Ok(()) };
+        let Some(r) = sel_range(d, state(d).borrow().sel.filter(|s| s.0 == so).and_then(|s| s.1)) else { return Ok(()) };
+        let back = state(d).borrow().back;
+        let (anchor, focus) = if back { (r.end(), r.start()) } else { (r.start(), r.end()) };
+        let doc = d.doc.borrow();
+        // The scope: the editing host of the focus, else the document.
+        let scope = crate::browser_editing::host_of(&doc, focus.0).unwrap_or_else(|| doc.root());
+        // The text nodes of the scope in tree order: node, line, start in the joined text (UTF-16 units).
+        let (mut nodes, mut text, mut line, mut at) = (Vec::<(NodeId, u32, u32)>::new(), String::new(), 0u32, 0u32);
+        let (mut cur, mut depth) = (scope, 0);
+        while let Some((c, dp)) = crate::browser_dom::next_in(&doc, scope, cur, depth) {
+            (cur, depth) = (c, dp);
+            match *doc.data(c) {
+                NodeData::Text(s) => {
+                    nodes.push((c, line, at));
+                    text.push_str(doc.text(s));
+                    at += utf16_len(doc.text(s));
+                }
+                NodeData::Element { name, .. } if matches!(doc.atom_str(name), "br" | "div" | "p" | "li" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "blockquote" | "pre" | "ul" | "ol" | "td" | "th" | "section" | "article") => line += 1,
+                _ => {}
+            }
+        }
+        if nodes.is_empty() {
+            return Ok(());
+        }
+        // The offset in the joined text of a boundary point: inside a Text node, or after the Text nodes that end before the point.
+        let flat = |p: (NodeId, u32)| -> u32 {
+            if let Some(x) = nodes.iter().find(|x| x.0 == p.0) {
+                return x.2 + p.1;
+            }
+            nodes.iter().filter(|x| position(&doc, (x.0, length(&doc, x.0)), p) != Ordering::Greater).last().map_or(0, |x| x.2 + length(&doc, x.0))
+        };
+        let f = flat(focus);
+        let end = at;
+        let target = match gran {
+            "character" if alter == "move" && r.start() != r.end() => flat(if fwd { r.end() } else { r.start() }),
+            "character" if fwd => crate::browser_ui::next_off(&text, f),
+            "character" => crate::browser_ui::prev_off(&text, f),
+            "word" => crate::browser_ui::word_move(&text, f, fwd),
+            "documentboundary" => if fwd { end } else { 0 },
+            // A line (a paragraph): the text nodes with the line of the point.
+            _ => {
+                // The text node of the focus gives the line; a point between nodes takes the node before it (after it, going back).
+                let l = nodes.iter().find(|x| x.0 == focus.0).or_else(|| nodes.iter().rev().find(|x| if fwd { x.2 < f } else { x.2 <= f })).unwrap_or(&nodes[0]).1;
+                let on: Vec<&(NodeId, u32, u32)> = nodes.iter().filter(|x| x.1 == l).collect();
+                match (on.first(), on.last()) {
+                    (Some(a), Some(b)) => if fwd { b.2 + length(&doc, b.0) } else { a.2 },
+                    _ => f,
+                }
+            }
+        };
+        // The boundary point of a text offset: the end of the node it ends, else the node that holds it.
+        let to = nodes.iter().find(|x| target <= x.2 + length(&doc, x.0)).map_or_else(|| nodes.last().map(|x| (x.0, length(&doc, x.0))), |x| Some((x.0, target.saturating_sub(x.2)))).expect("not empty");
+        drop(doc);
+        if alter == "move" {
+            return set_new(d, it, Rng { sc: to.0, so: to.1, ec: to.0, eo: to.1 }, false);
+        }
+        let after = position(&d.doc.borrow(), to, anchor) != Ordering::Less;
+        let (s, e) = if after { (anchor, to) } else { (to, anchor) };
+        set_new(d, it, Rng { sc: s.0, so: s.1, ec: e.0, eo: e.1 }, !after)
+    }
 }
 
 // ------------------------------------------------------------ install

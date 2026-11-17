@@ -96,7 +96,7 @@ fn editable(doc: &Document, n: NodeId) -> bool {
 }
 
 /// The editing host of `n`: the topmost editable element above it.
-fn host_of(doc: &Document, n: NodeId) -> Option<NodeId> {
+pub(crate) fn host_of(doc: &Document, n: NodeId) -> Option<NodeId> {
     if !editable(doc, n) {
         return None;
     }
