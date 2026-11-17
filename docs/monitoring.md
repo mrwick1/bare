@@ -312,3 +312,22 @@ Result: every failure that remains also fails on the baseline. The monitoring br
 With the meta-refresh and layout-overflow failures above, all known workspace failures predate this branch.
 Causes are not classified. The TLS failures are negative tests: the peer is still refused, but the error differs from the expected one. Hypothesis: the synthetic certificate fixtures or the local OpenSSL version cause `BadSignature`.
 Logs: the session scratchpad `classify/` directory (temporary).
+
+## Windows runtime check (2026-11-17)
+
+The parent cross-built candidate `ad970b02` with `RUSTFLAGS="-C target-feature=+crt-static" cargo xwin test --target x86_64-pc-windows-msvc --no-run`.
+The tests ran once on the local Windows 11 VM (`/data/vms/winssh`), debug profile.
+The driver and MCP tests start `env!("CARGO_BIN_EXE_...")`, a Linux path. On Windows that path resolves under `C:\`. The parent copied `bare-drive.exe` and `bare-mcp.exe` to that path.
+
+All pass:
+
+- `bare-os` lib: 6 passed. Linux runs 9; the Linux-only parser tests do not compile on Windows.
+- `bare-observe` lib: 12 passed. `bare-observe --test process`: 4 passed.
+- `bare-drive --test monitoring`: 4 passed, `--test-threads=1`.
+- `bare-mcp --test monitoring`: 1 passed.
+- `bare` lib `paint_trace_tests`: 2 passed.
+
+A manual `bare-mcp.exe` capture with `BARE_OBSERVE=metrics` and a 5 ms interval wrote 23 records, 22 samples, zero drops and a `collector_status` record with reason `shutdown`.
+Every sample field is `null`: RSS, peak RSS, allocator bytes, CPU times and thread count.
+This matches the design: unsupported platforms return unavailable fields. Native Windows and macOS metrics are not built.
+macOS runtime is untested. The Mac was offline (ssh timeout) during this check.

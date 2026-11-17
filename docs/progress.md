@@ -12722,3 +12722,7 @@ The owner grants a cost exception for 4 rows: `builtins_load replace 1` (+0.99%)
 ## Monitoring branch: workspace failures predate it (2026-11-17)
 
 The parent ran the 14 unclassified failing tests on baseline `00e701b0` and candidate `9197b6e2`, three runs each, alternating, on an idle archMachine. Eleven fail on both trees with the same line and message: two `chunked` time limits, `survive_limit`, the MCP 5000-element snapshot budget (about 137 ms on both), two `https_openssl` negative certificate tests, four `client_openssl` tests and one `tls12_openssl` test. Three pass on both trees: `nonblocking`, the MCP hidden-iframe download and the MCP cookie-banner click. The branch adds no failure. Causes are not classified. Detail: `docs/monitoring.md`.
+
+## Monitoring on Windows (2026-11-17)
+
+The monitoring tests ran once on the Windows 11 VM: `bare-os` (6), `bare-observe` lib (12) and `process` (4), driver monitoring (4), MCP monitoring (1) and `paint_trace_tests` (2). All pass. A metrics capture works and has zero drops, but every process counter is `null`: Windows has no native metrics yet, by design. macOS is untested; the Mac was offline. Detail: `docs/monitoring.md`.
