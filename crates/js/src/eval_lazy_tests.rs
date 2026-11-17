@@ -503,3 +503,18 @@ fn a_native_called_from_the_loop_keeps_results_stacks_and_the_depth_limit() {
         }
     });
 }
+
+/// The registers of an inline call grow by half of the capacity, not by the doubling of `Vec`. A stack goes back to the pool with
+/// its capacity, so the doubling kept up to twice the deepest run of each pooled stack.
+#[test]
+fn the_registers_of_an_inline_call_grow_by_half() {
+    let mut st = bc_vm::RegStack::default();
+    st.grow(100);
+    assert_eq!(st.regs_len_cap(), (100, 100));
+    st.grow(101);
+    assert_eq!(st.regs_len_cap(), (101, 150));
+    st.grow(150);
+    assert_eq!(st.regs_len_cap(), (150, 150));
+    st.grow(400);
+    assert_eq!(st.regs_len_cap(), (400, 400));
+}
