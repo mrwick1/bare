@@ -616,6 +616,24 @@ fn an_svg_draws_only_inside_its_box_and_hidden_ones_draw_nothing() {
 }
 
 #[test]
+fn svg_transforms_nest_and_move_shapes_and_strokes() {
+    // A d3 tree: a translated viewport `g`, nodes placed by `translate`, a path between them. Chrome draws each red square at its own
+    // place, not stacked at the origin.
+    let red = |t: &str| bare(&format!("<style>body{{margin:0}}</style><svg width=200 height=100><g transform='translate(40,20)'><g transform='{t}'><rect width=10 height=10 fill=red /></g></g></svg>"));
+    let at = |t| ink(&red(t), 0, 0, 200, 100, WHITE).map(|b| (b.0, b.1, b.2, b.3));
+    assert_eq!(at("translate(60,30)"), Some((100, 50, 110, 60)), "the translations add up");
+    assert_eq!(at("translate(60)"), Some((100, 20, 110, 30)), "ty defaults to 0");
+    assert_eq!(at("translate(10 5) scale(2)"), Some((50, 25, 70, 45)), "the list applies right to left to the shape");
+    assert_eq!(at("matrix(1,0,0,1,5,6)"), Some((45, 26, 55, 36)));
+    assert_eq!(at("rotate(90)"), Some((30, 20, 40, 30)), "a quarter turn about the origin");
+    assert_eq!(at("rotate(180 5 5)"), Some((40, 20, 50, 30)), "a half turn about the center leaves the square in place");
+    assert_eq!(at("translate(5,5) bogus(1)"), Some((40, 20, 50, 30)), "an invalid list is no transform");
+    // A transform on the shape itself, and on a stroke: the line from (0, 5) to (20, 5), 2 wide, moved by (30, 40).
+    let c = bare("<style>body{margin:0}</style><svg width=100 height=100><rect transform='translate(50 50)' width=10 height=10 fill=red /><path transform='translate(30,40)' d='M0 5 H20' stroke=red stroke-width=2 /></svg>");
+    assert_eq!(ink(&c, 0, 0, 100, 100, WHITE).map(|b| (b.0, b.1, b.2, b.3)), Some((30, 44, 60, 60)));
+}
+
+#[test]
 fn the_svg_fixture() {
     let c = render(fixture!("svg"));
     // The first icon: a chevron of 2 px strokes in the color of the text (#123), with round ends, in a box of 24 px at (8, 8).

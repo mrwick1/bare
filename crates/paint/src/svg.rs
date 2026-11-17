@@ -1,13 +1,15 @@
 //! The drawing of an inline `<svg>` (SVG 2): `path`, `line`, `polyline`, `polygon`, `rect`, `circle`, `ellipse` and `g`, with
 //! `fill` and `stroke` (colors, from the cascade) and `stroke-width`, `stroke-linecap`, `stroke-linejoin` and
 //! `stroke-miterlimit` (attributes, taken from the shape or the nearest element above it). The `viewBox` maps to the box of the
-//! element with `preserveAspectRatio` at its default (`xMidYMid meet`).
+//! element with `preserveAspectRatio` at its default (`xMidYMid meet`). The `transform` attribute (`matrix`, `translate`, `scale`,
+//! `rotate`, `skewX`, `skewY`) applies to an element and all inside it. A stroke under a skew or an unequal scale keeps one width: the
+//! square root of the area scale.
 //!
 //! A shape becomes polygons in pixels, and `Canvas::fill_poly` fills them with the non-zero rule. A fill is the outline of the shape. A
 //! stroke is one quad for each segment, plus a join (a disc, a bevel or a miter) at each corner and a cap at each end, all with the same
 //! winding, so that the non-zero rule makes their union.
 //!
-//! Not built: `fill-rule`, `stroke-dasharray`, `fill-opacity`, `stroke-opacity`, `opacity` on a shape, `transform`, `use`, `text`, `image`,
+//! Not built: `fill-rule`, `stroke-dasharray`, `fill-opacity`, `stroke-opacity`, `opacity` on a shape, `transform` from a style sheet, `use`, `text`, `image`,
 //! paint servers (`url(#a)`), `preserveAspectRatio` other than the default, `stroke-width` from a style sheet, a unit other than `px` or none.
 
 use crate::display::argb;
@@ -34,12 +36,12 @@ impl GeometryMath for NativeMath {
     fn hypot(x:f32,y:f32)->f32{x.hypot(y)}
 }
 
-/// Where the user space of the `<svg>` is in pixels: `x * s + tx`, `y * s + ty`.
+/// Where a user space is in pixels: the matrix `[a c e; b d f]`, so a point goes to `(a x + c y + e, b x + d y + f)`. `s` is the pixels for
+/// each unit, the square root of the area scale: it chooses the segments of a curve and the width of a stroke.
 #[derive(Clone, Copy)]
 struct Map {
+    m: [f32; 6],
     s: f32,
-    tx: f32,
-    ty: f32,
 }
 
 /// One polyline of a shape, in user units, and whether it is closed.
@@ -86,9 +88,9 @@ pub fn draw(doc: &Document, styles: &Styles, root: NodeId, (x, y, w, h): (f32, f
     let map = match view {
         Some((vx, vy, vw, vh)) => {
             let s = (w / vw).min(h / vh);
-            Map { s, tx: x + (w - vw * s) / 2.0 - vx * s, ty: y + (h - vh * s) / 2.0 - vy * s }
+            Map::new([s, 0.0, 0.0, s, x + (w - vw * s) / 2.0 - vx * s, y + (h - vh * s) / 2.0 - vy * s])
         }
-        None => Map { s: 1.0, tx: x, ty: y },
+        None => Map::new([1.0, 0.0, 0.0, 1.0, x, y]),
     };
     let paint = styles.style(root).map_or((None, None), paint_of);
     let mut buf = Vec::new();
@@ -103,6 +105,7 @@ fn walk(doc: &Document, styles: &Styles, root: NodeId, node: NodeId, inherited: 
         }
         // A shape has a style (the rule of the UA sheet hides it, and what is inside a hidden box has none, so a `g` keeps its box).
         let paint = styles.style(child).map_or(inherited, paint_of);
+        let map = attr(doc, child, "transform").and_then(transform).map_or(map, |t| map.then(t));
         let name = doc.element_name(child);
         if name == "g" {
             walk(doc, styles, root, child, paint, map, out, buf);
@@ -137,9 +140,59 @@ fn walk(doc: &Document, styles: &Styles, root: NodeId, node: NodeId, inherited: 
 }
 
 impl Map {
-    fn at(self, (x, y): (f32, f32)) -> (f32, f32) {
-        (x * self.s + self.tx, y * self.s + self.ty)
+    fn new(m: [f32; 6]) -> Map {
+        Map { m, s: (m[0] * m[3] - m[1] * m[2]).abs().sqrt() }
     }
+
+    fn at(self, (x, y): (f32, f32)) -> (f32, f32) {
+        let m = self.m;
+        (m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5])
+    }
+
+    /// This map after `t`: a point goes through `t` first.
+    fn then(self, t: [f32; 6]) -> Map {
+        let (a, b) = (self.m, t);
+        Map::new([
+            a[0] * b[0] + a[2] * b[1],
+            a[1] * b[0] + a[3] * b[1],
+            a[0] * b[2] + a[2] * b[3],
+            a[1] * b[2] + a[3] * b[3],
+            a[0] * b[4] + a[2] * b[5] + a[4],
+            a[1] * b[4] + a[3] * b[5] + a[5],
+        ])
+    }
+}
+
+/// The matrix of a `transform` attribute (SVG 1.1 grammar). A list that does not parse is no transform, as in Chrome.
+fn transform(v: &str) -> Option<[f32; 6]> {
+    let mut map = Map::new([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+    let mut rest = v.trim_start_matches(|c: char| c == ',' || c.is_whitespace());
+    while !rest.is_empty() {
+        let (name, tail) = rest.split_once('(')?;
+        let (args, tail) = tail.split_once(')')?;
+        let n: Vec<f32> = args.split(|c: char| c == ',' || c.is_whitespace()).filter(|t| !t.is_empty()).map(|t| t.parse::<f32>().ok().filter(|n| n.is_finite())).collect::<Option<_>>()?;
+        let t = match (name.trim(), n.as_slice()) {
+            ("matrix", &[a, b, c, d, e, f]) => [a, b, c, d, e, f],
+            ("translate", &[x]) => [1.0, 0.0, 0.0, 1.0, x, 0.0],
+            ("translate", &[x, y]) => [1.0, 0.0, 0.0, 1.0, x, y],
+            ("scale", &[x]) => [x, 0.0, 0.0, x, 0.0, 0.0],
+            ("scale", &[x, y]) => [x, 0.0, 0.0, y, 0.0, 0.0],
+            ("rotate", &[a]) => {
+                let (s, c) = a.to_radians().sin_cos();
+                [c, s, -s, c, 0.0, 0.0]
+            }
+            ("rotate", &[a, x, y]) => {
+                let (s, c) = a.to_radians().sin_cos();
+                [c, s, -s, c, x - c * x + s * y, y - s * x - c * y]
+            }
+            ("skewX", &[a]) => [1.0, 0.0, a.to_radians().tan(), 1.0, 0.0, 0.0],
+            ("skewY", &[a]) => [1.0, a.to_radians().tan(), 0.0, 1.0, 0.0, 0.0],
+            _ => return None,
+        };
+        map = map.then(t);
+        rest = tail.trim_start_matches(|c: char| c == ',' || c.is_whitespace());
+    }
+    Some(map.m)
 }
 
 /// Add a contour to a polygon list.
@@ -606,7 +659,7 @@ mod tests {
     /// The area of the polygons of a stroke, by filling them in a canvas.
     fn coverage(st: &Stroke, sub: &Sub) -> f32 {
         let mut out = Vec::new();
-        st.add(sub, Map { s: 1.0, tx: 0.0, ty: 0.0 }, &mut out);
+        st.add(sub, Map::new([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]), &mut out);
         let mut c = crate::canvas::Canvas::new(40, 40);
         c.pixels.fill(0xff00_0000);
         let bounds = c.bounds();
