@@ -71,6 +71,11 @@ HTTP/2 `h2_ttfb` measures the wait from the end of the last request write (HEADE
 That frame is HEADERS (also an interim 1xx reply), DATA or RST_STREAM. For HEADERS, the time is taken after the header block is decoded.
 It is 0 if the server answers before the request body is fully sent. It emits only if the reply headers arrive, on the caller thread, so it carries the request ids. Only `send_stream` and `send_stream_once` assign a request id.
 
+`request_failed` is one record for a request that fails before its response headers (HTTP/1 and HTTP/2, in `metrics` and `trace`). It carries only fixed fields and no URL, host or error text.
+`kind` is a number from the error kind that `cause::describe` names: 1 dns, 2 connect refused, 3 connect timeout, 4 connect failed, 5 proxy, 6 tls, 7 h2 goaway, 8 body cap, 9 read timeout, 10 reset, 11 closed early, 12 protocol, 13 io, 0 other.
+`retried` is true if the first attempt failed with an HTTP/2 refusal that the server did not process and a second attempt ran. `replay` is true if the replay tape answered or lacked the request.
+`duration_ns` is the time from entry into the request to the failure. It is a number only in `trace` and `null` in `metrics`. The record carries the request ids, like `body`, and a request that gets headers never emits it.
+
 `first_body_byte` measures from body construction after header parsing to first positive caller read.
 It includes caller delay and can include bytes already buffered with the headers.
 The `body` record emits when the wire body is dropped. It preserves its original numeric IDs.
@@ -114,7 +119,7 @@ git diff --check
 ```
 
 No GUI, non-Linux runtime or authenticated traffic is required or tested.
-Error-before-headers outcome records for HTTP/2 remain unavailable.
+Requests that fail before their response headers have a `network/request_failed` record.
 Memory attribution does not account for all engine subsystems or isolate logger allocator usage.
 
 ## Performance acceptance
@@ -218,7 +223,7 @@ Other gate outputs are `/tmp/monitor-foundation-final.log`, `/tmp/monitor-drive-
 
 Final status: partial acceptance. Monitoring-specific functional checks and the measured metrics/trace instruction budgets pass.
 The workspace gate, GUI execution and non-Linux runtime are not accepted. The parent subsequently accepted the disabled-overhead budget on the local fixture.
-HTTP/2 pre-header failure outcomes and complete subsystem memory attribution remain limitations.
+Complete subsystem memory attribution remains a limitation. Failures before the response headers are covered by `network/request_failed`.
 
 ## Parent verification
 
