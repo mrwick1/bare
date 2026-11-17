@@ -386,9 +386,9 @@ code nregs=1 words=9 consts=0 ics=0
 function f(a) { return a ? 1 : 2 }
 ---
 fn0 f
-code nregs=1 words=7 consts=0 ics=0
-0000  GetEnv        r0, 0, 0
-0001  JmpIfNot      r0, -> 0004
+code nregs=2 words=7 consts=0 ics=0
+0000  GetEnv        r1, 0, 0
+0001  JmpIfNot      r1, -> 0004
 0002  LoadI         r0, 1
 0003  Jmp           -> 0005
 0004  LoadI         r0, 2
@@ -601,44 +601,40 @@ code nregs=2 words=7 consts=0 ics=0
 function f(a) { if (a) return 1; else if (a > 2) return 2; return 3 }
 ---
 fn0 f
-code nregs=2 words=14 consts=0 ics=0
+code nregs=1 words=13 consts=1 ics=0
 0000  GetEnv        r0, 0, 0
 0001  JmpIfNot      r0, -> 0005
 0002  LoadI         r0, 1
 0003  Ret           r0
-0004  Jmp           -> 0011
+0004  Jmp           -> 0010
 0005  GetEnv        r0, 0, 0
-0006  LoadI         r1, 2
-0007  Gt            r0, r0, r1
-0008  JmpIfNot      r0, -> 0011
-0009  LoadI         r0, 2
-0010  Ret           r0
-0011  LoadI         r0, 3
-0012  Ret           r0
-0013  RetUndef      
+0006  JnGtK         r0, k0, -> 0010  ; 2
+0008  LoadI         r0, 2
+0009  Ret           r0
+0010  LoadI         r0, 3
+0011  Ret           r0
+0012  RetUndef      
 === while
 function f(n) { var s = 0; while (n > 0) { s += n; n-- } return s }
 ---
 fn0 f
-code nregs=2 words=18 consts=0 ics=0
+code nregs=2 words=17 consts=1 ics=0
 0000  LoadI         r0, 0
 0001  SetEnv        r0, 0, 1
 0002  GetEnv        r0, 0, 0
-0003  LoadI         r1, 0
-0004  Gt            r0, r0, r1
-0005  JmpIfNot      r0, -> 0015
-0006  GetEnv        r0, 0, 1
-0007  GetEnv        r1, 0, 0
-0008  Add           r0, r0, r1
-0009  SetEnv        r0, 0, 1
-0010  GetEnv        r0, 0, 0
-0011  ToNumeric     r0, r0
-0012  Dec           r1, r0
-0013  SetEnv        r1, 0, 0
-0014  Jmp           -> 0002
-0015  GetEnv        r0, 0, 1
-0016  Ret           r0
-0017  RetUndef      
+0003  JnGtK         r0, k0, -> 0014  ; 0
+0005  GetEnv        r0, 0, 1
+0006  GetEnv        r1, 0, 0
+0007  Add           r0, r0, r1
+0008  SetEnv        r0, 0, 1
+0009  GetEnv        r0, 0, 0
+0010  ToNumeric     r0, r0
+0011  Dec           r1, r0
+0012  SetEnv        r1, 0, 0
+0013  Jmp           -> 0002
+0014  GetEnv        r0, 0, 1
+0015  Ret           r0
+0016  RetUndef      
 === do while
 function f(n) { do { n-- } while (n > 0); return n }
 ---
@@ -666,8 +662,7 @@ code nregs=2 words=20 consts=0 ics=0
 0003  SetEnv        r0, 0, 2
 0004  GetEnv        r0, 0, 2
 0005  GetEnv        r1, 0, 0
-0006  Lt            r0, r0, r1
-0007  JmpIfNot      r0, -> 0017
+0006  JnLt          r0, r1, -> 0017
 0008  GetEnv        r0, 0, 1
 0009  GetEnv        r1, 0, 2
 0010  Add           r0, r0, r1
@@ -693,8 +688,7 @@ code nregs=4 words=25 consts=1 ics=1
 0005  CopyEnv       
 0006  GetEnv        r0, 0, 0
 0007  GetEnv        r1, 1, 0
-0008  Lt            r0, r0, r1
-0009  JmpIfNot      r0, -> 0021
+0008  JnLt          r0, r1, -> 0021
 0010  GetEnv        r2, 1, 1
 0011  GetField      r1, r2, ic0, k0  ; name:push
 0013  Closure       r3, fn0
@@ -725,56 +719,51 @@ code nregs=0 words=3 consts=0 ics=0
 function f(n) { var s = 0; for (var i = 0; i < n; i++) { if (i % 2) continue; if (i > 8) break; s += i } return s }
 ---
 fn0 f
-code nregs=2 words=30 consts=0 ics=0
+code nregs=2 words=29 consts=1 ics=0
 0000  LoadI         r0, 0
 0001  SetEnv        r0, 0, 1
 0002  LoadI         r0, 0
 0003  SetEnv        r0, 0, 2
 0004  GetEnv        r0, 0, 2
 0005  GetEnv        r1, 0, 0
-0006  Lt            r0, r0, r1
-0007  JmpIfNot      r0, -> 0027
+0006  JnLt          r0, r1, -> 0026
 0008  GetEnv        r0, 0, 2
 0009  LoadI         r1, 2
 0010  Mod           r0, r0, r1
 0011  JmpIfNot      r0, -> 0013
-0012  Jmp           -> 0022
+0012  Jmp           -> 0021
 0013  GetEnv        r0, 0, 2
-0014  LoadI         r1, 8
-0015  Gt            r0, r0, r1
-0016  JmpIfNot      r0, -> 0018
-0017  Jmp           -> 0027
-0018  GetEnv        r0, 0, 1
-0019  GetEnv        r1, 0, 2
-0020  Add           r0, r0, r1
-0021  SetEnv        r0, 0, 1
-0022  GetEnv        r0, 0, 2
-0023  ToNumeric     r0, r0
-0024  Inc           r1, r0
-0025  SetEnv        r1, 0, 2
-0026  Jmp           -> 0004
-0027  GetEnv        r0, 0, 1
-0028  Ret           r0
-0029  RetUndef      
+0014  JnGtK         r0, k0, -> 0017  ; 8
+0016  Jmp           -> 0026
+0017  GetEnv        r0, 0, 1
+0018  GetEnv        r1, 0, 2
+0019  Add           r0, r0, r1
+0020  SetEnv        r0, 0, 1
+0021  GetEnv        r0, 0, 2
+0022  ToNumeric     r0, r0
+0023  Inc           r1, r0
+0024  SetEnv        r1, 0, 2
+0025  Jmp           -> 0004
+0026  GetEnv        r0, 0, 1
+0027  Ret           r0
+0028  RetUndef      
 === continue in while
 function f(n) { while (n--) { if (n == 3) continue; } return n }
 ---
 fn0 f
-code nregs=2 words=14 consts=0 ics=0
+code nregs=2 words=13 consts=1 ics=0
 0000  GetEnv        r0, 0, 0
 0001  ToNumeric     r0, r0
 0002  Dec           r1, r0
 0003  SetEnv        r1, 0, 0
-0004  JmpIfNot      r0, -> 0011
+0004  JmpIfNot      r0, -> 0010
 0005  GetEnv        r0, 0, 0
-0006  LoadI         r1, 3
-0007  Eq            r0, r0, r1
-0008  JmpIfNot      r0, -> 0010
+0006  JnEqK         r0, k0, -> 0009  ; 3
+0008  Jmp           -> 0000
 0009  Jmp           -> 0000
-0010  Jmp           -> 0000
-0011  GetEnv        r0, 0, 0
-0012  Ret           r0
-0013  RetUndef      
+0010  GetEnv        r0, 0, 0
+0011  Ret           r0
+0012  RetUndef      
 === break out of a block scope
 function f(a) { for (;;) { let x = a; if (x) break; a = () => x } return a }
 ---
@@ -802,46 +791,40 @@ code nregs=1 words=2 consts=0 ics=0
 function f(x) { switch (x) { case 1: return 'one'; case 2: x = 3; break; default: x = 0 } return x }
 ---
 fn0 f
-code nregs=2 words=18 consts=1 ics=0
+code nregs=2 words=16 consts=3 ics=0
 0000  GetEnv        r0, 0, 0
-0001  LoadI         r1, 1
-0002  StrictEq      r1, r0, r1
-0003  JmpIf         r1, -> 0008
-0004  LoadI         r1, 2
-0005  StrictEq      r1, r0, r1
-0006  JmpIf         r1, -> 0010
-0007  Jmp           -> 0013
-0008  LoadK         r1, k0  ; "one"
-0009  Ret           r1
-0010  LoadI         r1, 3
-0011  SetEnv        r1, 0, 0
-0012  Jmp           -> 0015
-0013  LoadI         r1, 0
-0014  SetEnv        r1, 0, 0
-0015  GetEnv        r0, 0, 0
-0016  Ret           r0
-0017  RetUndef      
+0001  JnSNeK        r0, k0, -> 0006  ; 1
+0003  JnSNeK        r0, k1, -> 0008  ; 2
+0005  Jmp           -> 0011
+0006  LoadK         r1, k2  ; "one"
+0007  Ret           r1
+0008  LoadI         r1, 3
+0009  SetEnv        r1, 0, 0
+0010  Jmp           -> 0013
+0011  LoadI         r1, 0
+0012  SetEnv        r1, 0, 0
+0013  GetEnv        r0, 0, 0
+0014  Ret           r0
+0015  RetUndef      
 === switch with lexical names
 function f(x) { switch (x) { case 1: let a = 1; return () => a; default: const b = 2; return b } }
 ---
 fn1 f
-code nregs=2 words=16 consts=0 ics=0
+code nregs=2 words=15 consts=1 ics=0
 0000  GetEnv        r0, 0, 0
 0001  PushEnv       s2
-0002  LoadI         r1, 1
-0003  StrictEq      r1, r0, r1
-0004  JmpIf         r1, -> 0006
-0005  Jmp           -> 0010
-0006  LoadI         r1, 1
-0007  InitEnv       r1, 0, 0
-0008  Closure       r1, fn0
-0009  Ret           r1
-0010  LoadI         r1, 2
-0011  InitEnv       r1, 0, 1
-0012  GetEnv        r1, 0, 1
-0013  Ret           r1
-0014  PopEnv        
-0015  RetUndef      
+0002  JnSNeK        r0, k0, -> 0005  ; 1
+0004  Jmp           -> 0009
+0005  LoadI         r1, 1
+0006  InitEnv       r1, 0, 0
+0007  Closure       r1, fn0
+0008  Ret           r1
+0009  LoadI         r1, 2
+0010  InitEnv       r1, 0, 1
+0011  GetEnv        r1, 0, 1
+0012  Ret           r1
+0013  PopEnv        
+0014  RetUndef      
 fn0 (anonymous)
 code nregs=1 words=2 consts=0 ics=0
 0000  GetEnv        r0, 1, 0
@@ -850,28 +833,24 @@ code nregs=1 words=2 consts=0 ics=0
 function f(x) { var r = 0; switch (x) { case 1: r++; case 2: r++ } return r }
 ---
 fn0 f
-code nregs=3 words=21 consts=0 ics=0
+code nregs=3 words=19 consts=2 ics=0
 0000  LoadI         r0, 0
 0001  SetEnv        r0, 0, 1
 0002  GetEnv        r0, 0, 0
-0003  LoadI         r1, 1
-0004  StrictEq      r1, r0, r1
-0005  JmpIf         r1, -> 0010
-0006  LoadI         r1, 2
-0007  StrictEq      r1, r0, r1
-0008  JmpIf         r1, -> 0014
-0009  Jmp           -> 0018
-0010  GetEnv        r1, 0, 1
-0011  ToNumeric     r1, r1
-0012  Inc           r2, r1
-0013  SetEnv        r2, 0, 1
-0014  GetEnv        r1, 0, 1
-0015  ToNumeric     r1, r1
-0016  Inc           r2, r1
-0017  SetEnv        r2, 0, 1
-0018  GetEnv        r0, 0, 1
-0019  Ret           r0
-0020  RetUndef      
+0003  JnSNeK        r0, k0, -> 0008  ; 1
+0005  JnSNeK        r0, k1, -> 0012  ; 2
+0007  Jmp           -> 0016
+0008  GetEnv        r1, 0, 1
+0009  ToNumeric     r1, r1
+0010  Inc           r2, r1
+0011  SetEnv        r2, 0, 1
+0012  GetEnv        r1, 0, 1
+0013  ToNumeric     r1, r1
+0014  Inc           r2, r1
+0015  SetEnv        r2, 0, 1
+0016  GetEnv        r0, 0, 1
+0017  Ret           r0
+0018  RetUndef      
 === throw
 function f(e) { throw new Error(e) }
 ---
@@ -930,8 +909,7 @@ code nregs=5 words=15 consts=0 ics=0
 0006  LoadI         r2, 0
 0007  SetEnv        r2, 0, 0
 0008  LoadI         r2, 1
-0009  StrictEq      r2, r0, r2
-0010  JmpIfNot      r2, -> 0012
+0009  JnSEq         r2, r0, -> 0012
 0011  Throw         r1
 0012  GetEnv        r0, 0, 0
 0013  Ret           r0
@@ -960,8 +938,7 @@ code nregs=5 words=24 consts=0 ics=0
 0015  Add           r2, r2, r3
 0016  SetEnv        r2, 0, 1
 0017  LoadI         r2, 1
-0018  StrictEq      r2, r0, r2
-0019  JmpIfNot      r2, -> 0021
+0018  JnSEq         r2, r0, -> 0021
 0020  Throw         r1
 0021  GetEnv        r0, 0, 1
 0022  Ret           r0
@@ -986,12 +963,10 @@ code nregs=5 words=21 consts=0 ics=0
 0010  LoadUndef     r4
 0011  Call          r2, r3, 0
 0012  LoadI         r2, 2
-0013  StrictEq      r2, r0, r2
-0014  JmpIfNot      r2, -> 0016
+0013  JnSEq         r2, r0, -> 0016
 0015  Ret           r1
 0016  LoadI         r2, 1
-0017  StrictEq      r2, r0, r2
-0018  JmpIfNot      r2, -> 0020
+0017  JnSEq         r2, r0, -> 0020
 0019  Throw         r1
 0020  RetUndef      
 handler 0000..0006 -> 0008 r1 depth 0
@@ -1014,16 +989,13 @@ code nregs=4 words=29 consts=0 ics=0
 0011  Inc           r3, r2
 0012  SetEnv        r3, 0, 0
 0013  LoadI         r2, 2
-0014  StrictEq      r2, r0, r2
-0015  JmpIfNot      r2, -> 0017
+0014  JnSEq         r2, r0, -> 0017
 0016  Jmp           -> 0026
 0017  LoadI         r2, 3
-0018  StrictEq      r2, r0, r2
-0019  JmpIfNot      r2, -> 0021
+0018  JnSEq         r2, r0, -> 0021
 0020  Jmp           -> 0025
 0021  LoadI         r2, 1
-0022  StrictEq      r2, r0, r2
-0023  JmpIfNot      r2, -> 0025
+0022  JnSEq         r2, r0, -> 0025
 0024  Throw         r1
 0025  Jmp           -> 0000
 0026  GetEnv        r0, 0, 0
@@ -1047,14 +1019,12 @@ code nregs=8 words=37 consts=0 ics=0
 0009  LoadI         r7, 1
 0010  Call          r4, r5, 1
 0011  LoadI         r4, 2
-0012  StrictEq      r4, r2, r4
-0013  JmpIfNot      r4, -> 0017
+0012  JnSEq         r4, r2, -> 0017
 0014  Mov           r1, r3
 0015  LoadI         r0, 2
 0016  Jmp           -> 0024
 0017  LoadI         r4, 1
-0018  StrictEq      r4, r2, r4
-0019  JmpIfNot      r4, -> 0021
+0018  JnSEq         r4, r2, -> 0021
 0020  Throw         r3
 0021  LoadI         r0, 0
 0022  Jmp           -> 0024
@@ -1064,12 +1034,10 @@ code nregs=8 words=37 consts=0 ics=0
 0026  LoadI         r5, 2
 0027  Call          r2, r3, 1
 0028  LoadI         r2, 2
-0029  StrictEq      r2, r0, r2
-0030  JmpIfNot      r2, -> 0032
+0029  JnSEq         r2, r0, -> 0032
 0031  Ret           r1
 0032  LoadI         r2, 1
-0033  StrictEq      r2, r0, r2
-0034  JmpIfNot      r2, -> 0036
+0033  JnSEq         r2, r0, -> 0036
 0035  Throw         r1
 0036  RetUndef      
 handler 0000..0004 -> 0006 r3 depth 0
@@ -1099,13 +1067,11 @@ code nregs=6 words=31 consts=0 ics=0
 0017  GetEnv        r5, 0, 0
 0018  Call          r2, r3, 1
 0019  LoadI         r2, 2
-0020  StrictEq      r2, r0, r2
-0021  JmpIfNot      r2, -> 0024
+0020  JnSEq         r2, r0, -> 0024
 0022  PopEnv        
 0023  Jmp           -> 0030
 0024  LoadI         r2, 1
-0025  StrictEq      r2, r0, r2
-0026  JmpIfNot      r2, -> 0028
+0025  JnSEq         r2, r0, -> 0028
 0027  Throw         r1
 0028  PopEnv        
 0029  Jmp           -> 0000
@@ -1151,8 +1117,8 @@ var g = function h(n) { return n ? h(n - 1) : 0 };
 ---
 fn0 h
 code nregs=5 words=12 consts=0 ics=0
-0000  GetEnv        r0, 0, 1
-0001  JmpIfNot      r0, -> 0009
+0000  GetEnv        r1, 0, 1
+0001  JmpIfNot      r1, -> 0009
 0002  GetEnv        r1, 0, 0
 0003  LoadUndef     r2
 0004  GetEnv        r3, 0, 1

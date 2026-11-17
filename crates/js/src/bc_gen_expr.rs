@@ -138,11 +138,10 @@ impl Gen<'_, '_> {
             }
             ExprKind::Assign { op, target, value } => self.assign(op, target, value, dst),
             ExprKind::Cond { test, cons, alt } => {
-                self.expr(test, dst)?;
-                let j = self.jump(Op::JmpIfNot, dst)?;
+                let j = self.jump_if_false(test)?;
                 self.expr(cons, dst)?;
                 let end = self.jump(Op::Jmp, 0)?;
-                self.patch(j)?;
+                self.patch_all(j)?;
                 self.expr(alt, dst)?;
                 self.patch(end)
             }

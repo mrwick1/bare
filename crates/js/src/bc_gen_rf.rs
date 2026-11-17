@@ -228,7 +228,7 @@ impl Gen<'_, '_> {
     }
 
     /// The constant of a number literal (also `-1`), when it is one of the first 256 constants.
-    fn num_konst(&mut self, e: ExprId) -> Option<u32> {
+    pub(super) fn num_konst(&mut self, e: ExprId) -> Option<u32> {
         let x = e;
         let n = match self.prog.expr(x).kind {
             ExprKind::Number(base) => self.it.num_lit(self.prog.expr(x).span, base),
@@ -246,51 +246,76 @@ impl Gen<'_, '_> {
     }
 
     /// A fused compare and jump with the offset still open: the word of the instruction.
-    fn jump_cmp(&mut self, op: Op, a: u32, b: u32) -> G<usize> {
+    pub(super) fn jump_cmp(&mut self, op: Op, a: u32, b: u32) -> G<usize> {
         let at = self.here();
         self.emit_ins(Ins::new(op, a, b, 0).with_x(0))?;
         Ok(at)
     }
 
-    /// The jump that is taken when `test` is false. In a register function a comparison is one fused op. Otherwise the value of the
-    /// test goes into a register, and `JmpIfNot` tests it. Patch it with `patch`.
-    pub(super) fn jump_if_false(&mut self, test: ExprId) -> G<usize> {
+    /// The jumps that are taken when `test` is false. The code falls through when it is true. Patch them with `patch_all`.
+    pub(super) fn jump_if_false(&mut self, test: ExprId) -> G<Vec<usize>> {
+        let mut out = Vec::new();
+        self.jump_cond(test, false, &mut out)?;
+        Ok(out)
+    }
+
+    pub(super) fn patch_all(&mut self, jumps: Vec<usize>) -> G<()> {
+        jumps.into_iter().try_for_each(|j| self.patch(j))
+    }
+
+    /// Pushes the jumps that are taken when the truthiness of `test` is `when`. The code falls through otherwise. `&&`, `||` and `!`
+    /// choose the targets, so each comparison is one fused op. The fused op of the other truthiness exists for `==`, `!=`, `===`
+    /// and `!==` only: `!(a < b)` is not `a >= b` for a `NaN`.
+    pub(super) fn jump_cond(&mut self, test: ExprId, when: bool, out: &mut Vec<usize>) -> G<()> {
         let mark = self.top;
         let t = test;
-        if self.rf.is_some()
-            && let ExprKind::Binary { op, left, right } = self.prog.expr(t).kind
-        {
-            let ops = match op {
-                BinaryOp::Lt => Some((Op::JnLt, Op::JnLtK)),
-                BinaryOp::Le => Some((Op::JnLe, Op::JnLeK)),
-                BinaryOp::Gt => Some((Op::JnGt, Op::JnGtK)),
-                BinaryOp::Ge => Some((Op::JnGe, Op::JnGeK)),
-                BinaryOp::Eq => Some((Op::JnEq, Op::JnEqK)),
-                BinaryOp::Ne => Some((Op::JnNe, Op::JnNeK)),
-                BinaryOp::StrictEq => Some((Op::JnSEq, Op::JnSEqK)),
-                BinaryOp::StrictNe => Some((Op::JnSNe, Op::JnSNeK)),
-                _ => None,
-            };
-            if let Some((plain, konst)) = ops {
-                let saved = std::mem::replace(&mut self.pos, self.prog.expr(t).span.start);
-                let l = self.operand(left, self.pure(right))?;
-                let at = match self.num_konst(right) {
-                    Some(k) => self.jump_cmp(konst, l, k)?,
-                    None => {
-                        let r = self.operand(right, true)?;
-                        self.jump_cmp(plain, l, r)?
-                    }
-                };
-                self.pos = saved;
-                self.free(mark);
-                return Ok(at);
+        match self.prog.expr(t).kind {
+            ExprKind::Logical { op: op @ (LogicalOp::And | LogicalOp::Or), left, right } => {
+                if (op == LogicalOp::And) != when {
+                    self.jump_cond(left, when, out)?;
+                    return self.jump_cond(right, when, out);
+                }
+                let mut skip = Vec::new();
+                self.jump_cond(left, !when, &mut skip)?;
+                self.jump_cond(right, when, out)?;
+                return self.patch_all(skip);
             }
+            ExprKind::Unary { op: UnaryOp::Not, arg } => return self.jump_cond(arg, !when, out),
+            ExprKind::Binary { op, left, right } => {
+                let ops = match (op, when) {
+                    (BinaryOp::Lt, false) => Some((Op::JnLt, Op::JnLtK)),
+                    (BinaryOp::Le, false) => Some((Op::JnLe, Op::JnLeK)),
+                    (BinaryOp::Gt, false) => Some((Op::JnGt, Op::JnGtK)),
+                    (BinaryOp::Ge, false) => Some((Op::JnGe, Op::JnGeK)),
+                    (BinaryOp::Eq, false) | (BinaryOp::Ne, true) => Some((Op::JnEq, Op::JnEqK)),
+                    (BinaryOp::Ne, false) | (BinaryOp::Eq, true) => Some((Op::JnNe, Op::JnNeK)),
+                    (BinaryOp::StrictEq, false) | (BinaryOp::StrictNe, true) => Some((Op::JnSEq, Op::JnSEqK)),
+                    (BinaryOp::StrictNe, false) | (BinaryOp::StrictEq, true) => Some((Op::JnSNe, Op::JnSNeK)),
+                    _ => None,
+                };
+                if let Some((plain, konst)) = ops {
+                    let saved = std::mem::replace(&mut self.pos, self.prog.expr(t).span.start);
+                    let l = self.operand(left, self.pure(right))?;
+                    let at = match self.num_konst(right) {
+                        Some(k) => self.jump_cmp(konst, l, k)?,
+                        None => {
+                            let r = self.operand(right, true)?;
+                            self.jump_cmp(plain, l, r)?
+                        }
+                    };
+                    self.pos = saved;
+                    self.free(mark);
+                    out.push(at);
+                    return Ok(());
+                }
+            }
+            _ => {}
         }
         let r = self.reg()?;
         self.expr(test, r)?;
-        let j = self.jump(Op::JmpIfNot, r)?;
+        out.push(self.jump(if when { Op::JmpIf } else { Op::JmpIfNot }, r)?);
         self.free(mark);
-        Ok(j)
+        Ok(())
     }
 
     /// Whether `e` writes its register once, as its last op, so the register may be a variable that `e` also reads.
@@ -473,7 +498,7 @@ impl Gen<'_, '_> {
                 let j = self.jump_if_false(test)?;
                 self.expr(cons, dst)?;
                 let end = self.jump(Op::Jmp, 0)?;
-                self.patch(j)?;
+                self.patch_all(j)?;
                 self.expr(alt, dst)?;
                 self.patch(end)?;
             }
@@ -489,7 +514,7 @@ impl Gen<'_, '_> {
         if let ExprKind::Cond { test, cons, alt } = self.prog.expr(x).kind {
             let j = self.jump_if_false(test)?;
             self.return_expr(cons)?;
-            self.patch(j)?;
+            self.patch_all(j)?;
             return self.return_expr(alt);
         }
         let mark = self.top;

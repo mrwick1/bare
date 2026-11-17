@@ -536,3 +536,104 @@ fn global_cells_follow_the_declarations_of_later_scripts() {
         assert!(bad.is_empty(), "{}", bad.join("\n"));
     });
 }
+
+/// The refusal reasons of a run of `src` in `mode`, with their call counts.
+fn refused_in(src: &str, mode: Exec) -> Vec<(&'static str, u64)> {
+    let mut it = Interp::realm(Heap::default(), EvalLimits { max_steps: 50_000_000, ..Default::default() }).unwrap();
+    it.set_exec(mode);
+    let _ = it.run_script(src);
+    let mut r: Vec<_> = it.bc.refused.iter().map(|(k, v)| (*k, *v)).collect();
+    r.sort();
+    r
+}
+
+/// The sources of the shapes whose compare and jump are one op: a test in `if`, `&&`, `||`, `?:`, `!`, a loop condition and a `switch`
+/// case, with a variable or a constant on the right.
+const COMPARE_SHAPES: &[(&str, &str)] = &[
+    ("if", "function f(a, b) { if (a === b) return 1; if (a !== b) return 2; if (a == b) return 3; if (a != b) return 4; return 5; } f(1, 2)"),
+    ("if constant", "function f(a) { if (a === 1) return 1; if (a !== 'x') return 2; if (a === undefined) return 3; return 4; } f(1)"),
+    ("not", "function f(a, b) { if (!(a === b)) return 1; if (!(a < b)) return 2; if (!(a !== 3)) return 3; return 4; } f(1, 2)"),
+    ("and or", "function f(a, b, c) { if (a === 1 && b === 2) return 1; if (a === 3 || b === 4) return 2; if (a === 5 || b === 6 && c !== 7) return 3; if ((a === 8 || b === 9) && c === 0) return 4; return 5; } f(1, 2, 3)"),
+    ("cond", "function f(a, b) { var x = a === 1 ? 'y' : 'n'; return x + (a !== b || b === 2 ? 1 : 2) + (!(a === b) ? 3 : 4); } f(1, 2)"),
+    ("loops", "function f(n) { var s = 0, i = 0; while (i !== n && i !== 99) { i++; s += i; } for (var j = 0; j !== n || j === 2; j++) s += j; do { s++; } while (s === 7); return s; } f(4)"),
+    ("switch", "function f(a) { switch (a) { case 1: return 'a'; case 'x': return 'b'; case undefined: return 'c'; default: return 'd'; } } f(1) + f('x') + f(undefined) + f(2)"),
+    ("finally", "function f(n) { for (var i = 0; i < n; i++) { try { if (i === 1) continue; if (i === 3) break; } finally { n += 0; } } return i; } f(5)"),
+    ("for-of and for-in", "function f(xs) { var s = 0; for (var x of xs) { if (x === 2) continue; if (x !== 9 && x === 4) break; s += x; } for (var k in { a: 1, b: 2 }) if (k === 'b' || k !== 'a') s += 10; return s; } f([1, 2, 3, 4, 5])"),
+    ("labels", "function f() { var r = 0; o: for (var i = 0; i < 4; i++) { for (var j of [0, 1, 2]) { if (j === 2) continue o; if (i === 3 && j !== 1) break o; r++; } } return r; } f()"),
+    ("pattern default", "function f(o, a) { var { x = 1, y = x === 1 ? 2 : 3 } = o; var [p = 4, q = p !== 4 ? 5 : 6] = a; return x + y + p + q; } f({}, []) + f({ x: 7 }, [8])"),
+];
+
+/// No source of `COMPARE_SHAPES` leaves an equality compare directly before a `JmpIf` or `JmpIfNot`. `rf_off` in `listing` makes all
+/// functions stage 1 code, so this covers the code of a function that keeps its variables in the environment.
+#[test]
+fn a_compare_and_its_jump_are_one_op() {
+    big(|| {
+        let mut bad = Vec::new();
+        for (name, src) in COMPARE_SHAPES {
+            let ops: Vec<String> = listing(src).lines().filter_map(|l| l.split_whitespace().nth(1).map(str::to_string)).collect();
+            for w in ops.windows(2) {
+                if matches!(w[0].as_str(), "StrictEq" | "StrictNe" | "Eq" | "Ne") && matches!(w[1].as_str(), "JmpIf" | "JmpIfNot") {
+                    bad.push(format!("{name}: {} then {}", w[0], w[1]));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "{}", bad.join("\n"));
+    });
+}
+
+/// The fused tests agree with the tree walker: `NaN`, `undefined`, `null == undefined`, strings, objects, `-0`, the order of side
+/// effects in both operands, a test in `try`, `finally`, and in loops with `break` and `continue`.
+#[test]
+fn fused_compare_jumps_agree_with_the_tree_walker() {
+    big(|| {
+        const VALS: &str = "var vals = [NaN, undefined, null, 0, -0, 1, '1', 'x', '', true, false, {}, [], 1n];";
+        let mut cases: Vec<(String, String)> = COMPARE_SHAPES.iter().map(|(n, s)| (n.to_string(), s.to_string())).collect();
+        let ops = ["===", "!==", "==", "!=", "<", "<=", ">", ">="];
+        for op in ops {
+            let t = format!("{VALS} var o = []; for (var i = 0; i < vals.length; i++) for (var j = 0; j < vals.length; j++) {{ var a = vals[i], b = vals[j];");
+            let tests = [
+                format!("{t} if (a {op} b) o.push('i'); else o.push('e'); }} o.join('')"),
+                format!("{t} if (!(a {op} b)) o.push('i'); else o.push('e'); }} o.join('')"),
+                format!("{t} o.push(a {op} b && a {op} a ? 1 : 0, a {op} b || b {op} b ? 1 : 0, !(a {op} b) || !(b {op} a) ? 1 : 0); }} o.join('')"),
+                format!("{t} if (a {op} b || a {op} 1) o.push(1); else o.push(0); if (a {op} 'x' && !(b {op} 0)) o.push(2); }} o.join('')"),
+                format!("{t} var k = 0; while (a {op} b && k < 2) k++; do {{ k++; }} while (k < 3 && b {op} a); o.push(k); }} o.join('')"),
+                format!("{t} switch (a) {{ case b: o.push('b'); case 1: o.push('1'); break; case 'x': o.push('x'); break; default: o.push('d'); }} }} o.join('')"),
+            ];
+            cases.extend(tests.into_iter().enumerate().map(|(i, s)| (format!("{op} {i}"), s)));
+        }
+        let more: &[(&str, &str)] = &[
+            ("order of operands", "var log = []; function v(x) { log.push(x); return x; } function f() { if (v(1) === v(2)) return 1; if (v(3) !== v(3) || v(4) === v(5)) return 2; return 0; } f() + log.join()"),
+            ("order with and or", "var log = []; function v(x) { log.push(x); return x; } v(1) === 1 && v(2) !== 2 || v(3) === 3 ? log.push('y') : log.push('n'); if (!(v(4) === v(5) && v(6) === 6)) log.push('z'); log.join()"),
+            ("side effect in operands", "function f() { var i = 0; var r = []; if (i++ === i) r.push('a'); if (i === i++) r.push('b'); if (i !== ++i || i === i--) r.push('c'); return r.join() + i; } f()"),
+            ("-0 and NaN", "function f(a, b) { return [a === b, !(a === b), a < b, !(a < b), !(a >= b), a != b].join(); } f(0, -0) + f(NaN, NaN) + f(NaN, 1)"),
+            ("null and undefined", "function f(a, b) { var r = ''; if (a == b) r += 'e'; if (a != b) r += 'n'; if (a === b || a == 0) r += 's'; if (!(a == null)) r += 'v'; return r; } f(null, undefined) + f(null, 0) + f(undefined, undefined)"),
+            ("objects", "function f() { var o = {}, p = {}, r = ''; if (o === o) r += 'a'; if (o === p) r += 'b'; if (o !== p && o != p) r += 'c'; if (o == { toString() { return o; } }) r += 'd'; return r; } f()"),
+            ("valueOf runs once", "var n = 0; var o = { valueOf() { n++; return 1; } }; function f() { if (o == 1) n += 10; if (!(o != 1)) n += 100; if (o == 2 || o == 1) n += 1000; return n; } f()"),
+            ("in try", "function f(a) { var r = ''; try { if (a === 1) throw 'one'; if (a !== 2 && a !== 3) r += 'x'; } catch (e) { r += e === 'one' ? 'c' : 'o'; } finally { if (a === 1 || a === 2) r += 'f'; } return r; } f(1) + f(2) + f(3)"),
+            ("break and continue", "function f() { var r = ''; for (var i = 0; i < 6; i++) { if (i === 1) continue; if (i === 4 || i === 5 && r) break; while (i === 2) { i++; continue; } r += i; } return r; } f()"),
+            ("labeled", "function f() { var r = ''; o: for (var i = 0; i < 4; i++) { for (var j = 0; j < 4; j++) { if (j === 2) continue o; if (i === 3 && j !== 1) break o; r += i + '' + j; } } return r; } f()"),
+            ("closure over a tested variable", "function f() { var a = 1; function g() { a = 2; return 5; } if (a === g()) return 'eq'; if (a === 2 || a === g()) return 'two'; return 'no'; } f()"),
+            ("script level", "var a = 1, b = 'x', s = ''; if (a === 1) s += 'a'; if (b !== 'x' || a === 1 && b === 'x') s += 'b'; while (a !== 4) a++; s + a"),
+            ("switch fall through and default first", "function f(a) { var r = ''; switch (a) { default: r += 'd'; case 1: r += 'a'; break; case 2: r += 'b'; case 3: r += 'c'; } return r; } f(1) + f(2) + f(3) + f(4)"),
+            ("switch with side effects", "var log = []; function v(x) { log.push(x); return x; } function f(a) { switch (v(a)) { case v(1): return 'a'; case v(2): case v(3): return 'b'; default: return 'd'; } } f(2) + f(9) + log.join()"),
+            ("switch NaN and strings", "function f(a) { switch (a) { case NaN: return 'nan'; case '1': return 's'; case 1: return 'n'; case null: return 'null'; case 0: return 'zero'; } return 'none'; } [NaN, 1, '1', null, undefined, -0].map(f).join()"),
+            ("switch big numbers", "function f(a) { switch (a) { case 0.5: return 1; case 1e300: return 2; case -1: return 3; case 7: return 4; } return 0; } [0.5, 1e300, -1, 7, 8].map(f).join()"),
+        ];
+        cases.extend(more.iter().map(|(n, s)| (n.to_string(), s.to_string())));
+        let mut bad = Vec::new();
+        for (name, src) in &cases {
+            let want = show(src, Exec::Tree);
+            for mode in [Exec::Auto, Exec::Byte] {
+                let got = show(src, mode);
+                if got != want {
+                    bad.push(format!("{name} {mode:?}: {got} (tree {want})"));
+                }
+            }
+            let refused = refused_in(src, Exec::Byte);
+            if !refused.is_empty() {
+                bad.push(format!("{name}: refused {refused:?}"));
+            }
+        }
+        assert!(bad.is_empty(), "{}", bad.join("\n"));
+    });
+}

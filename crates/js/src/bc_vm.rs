@@ -346,7 +346,7 @@ impl<'p> Interp<'p> {
             let mut pc = 0;
             let mut back = false;
             while let Ok((i, n)) = bc::decode(&c.ops, pc) {
-                back |= matches!(i.op, Op::Jmp | Op::JmpIf | Op::JmpIfNot) && i.offset() < 0;
+                back |= (matches!(i.op, Op::Jmp | Op::JmpIf | Op::JmpIfNot) || i.op.is_fused_jump()) && i.offset() < 0;
                 pc += n;
             }
             if !back {
