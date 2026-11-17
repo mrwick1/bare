@@ -616,6 +616,22 @@ fn an_svg_draws_only_inside_its_box_and_hidden_ones_draw_nothing() {
 }
 
 #[test]
+fn an_svg_maps_its_viewport_to_the_content_box() {
+    // The viewport is the content box: inside the 3 px border and the 2 px padding. The red rect is 40 by 40, so it is cut to the
+    // 20 by 20 content box from (5, 5). Chrome 155 draws the same pixels.
+    let c = bare("<svg width=20 height=20 style='border:3px solid; padding:2px'><rect width=40 height=40 fill=red /></svg>");
+    let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0, 0);
+    for y in 0..100 {
+        for x in 0..100 {
+            if c.pixel(x, y) == rgb(255, 0, 0) {
+                (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x + 1), y1.max(y + 1));
+            }
+        }
+    }
+    assert_eq!((x0, y0, x1, y1), (5, 5, 25, 25), "the red sits in the content box");
+}
+
+#[test]
 fn svg_transforms_nest_and_move_shapes_and_strokes() {
     // A d3 tree: a translated viewport `g`, nodes placed by `translate`, a path between them. Chrome draws each red square at its own
     // place, not stacked at the origin.
