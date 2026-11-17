@@ -669,7 +669,7 @@ mod tests {
         let Value::String(id) = v else { panic!() };
         assert_eq!(h.str_units(id).unwrap(), &[0xD800]);
         assert_eq!(str_of("\"\u{7f}\u{2028}\""), u("\u{7f}\u{2028}"));
-        assert_eq!(str_of(r#""""#), vec![]);
+        assert_eq!(str_of(r#""""#), Vec::<u16>::new());
         use Syntax::*;
         for (s, k, at) in [
             ("\"a\nb\"", ControlChar, 2), ("\"\u{1f}\"", ControlChar, 1), ("\"\\x\"", BadEscape, 2), ("\"\\u12\"", BadEscape, 5),

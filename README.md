@@ -92,3 +92,5 @@ Licensed under either of these, at your option:
 - MIT License ([LICENSE-MIT](LICENSE-MIT))
 
 The files in `data/unicode/` are under the Unicode License v3 ([data/unicode/LICENSE.txt](data/unicode/LICENSE.txt)). The file in `data/html/` is under CC BY 4.0 ([data/html/LICENSE.txt](data/html/LICENSE.txt)). The file in `data/css/` is under the MIT License ([data/css/LICENSE.txt](data/css/LICENSE.txt)). The fonts in `data/fonts/` are under the SIL Open Font License ([OFL.txt](data/fonts/OFL.txt), [OFL-Arabic.txt](data/fonts/OFL-Arabic.txt), [OFL-Symbols2.txt](data/fonts/OFL-Symbols2.txt)). The Wycheproof vectors in `data/crypto/ecdsa/` are under the Apache License 2.0 ([LICENSE-wycheproof-APACHE-2.0](data/crypto/ecdsa/LICENSE-wycheproof-APACHE-2.0)).
+
+Engine monitoring is under integration. See [monitoring status and controls](docs/monitoring.md).

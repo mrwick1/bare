@@ -78,6 +78,7 @@ impl Painter {
 
     /// Paint a page into `canvas`. The whole canvas is drawn again: no part of the old picture stays.
     pub fn paint(&mut self, doc: &Document, styles: &Styles, layout: &Layout, canvas: &mut Canvas) {
+        let _observe = bare_observe::process::span("paint", "paint");
         // A sticky box is moved even when the page is not scrolled (`top: 20px` pushes it down): that needs the scroll containers.
         if styles.each().any(|s| s.get(bare_css::values::Property::Position) == bare_css::values::Value::Keyword(bare_css::values::Keyword::Sticky)) {
             let areas = bare_layout::scroll::areas(doc, styles, layout);
@@ -108,6 +109,7 @@ impl Painter {
 
     /// Draw the display list with the scroll offsets of `view`, and the scrollbars of the page.
     pub fn draw_view(&mut self, canvas: &mut Canvas, view: Option<&View>) {
+        let _observe = bare_observe::process::span("paint", "draw");
         let Painter { glyphs, list, clips, layers, saved, offsets, scaled } = self;
         canvas.pixels.fill(list.background);
         clips.clear();

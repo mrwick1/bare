@@ -89,6 +89,7 @@ impl Parser {
 
     /// Add the next piece of the page. Each token that is complete goes to the tree at once.
     pub fn feed(&mut self, text: &str) {
+        let _observe = bare_observe::process::span("html", "parse");
         self.buf.push_str(text);
         if self.buf.len() < self.retry_at {
             return;
@@ -104,6 +105,7 @@ impl Parser {
 
     /// The page is over. Read what is left, and give the tree.
     pub fn finish(mut self) -> Document {
+        let _observe = bare_observe::process::span("html", "finish");
         drive(&mut self.builder, &mut Tokens::for_tree(&self.buf, self.mark, false));
         self.builder.done()
     }

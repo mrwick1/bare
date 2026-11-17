@@ -893,6 +893,7 @@ impl<'p> Interp<'p> {
     /// Run the script once. Returns its completion value (see the module comment). A second call is
     /// `Unsupported` because top-level `let` would be redeclared.
     pub fn run(&mut self) -> Result<Value, Error> {
+        let _observe = bare_observe::process::span("js", "execute");
         if self.ran {
             return Err(unsupported("run called twice", Span::default()));
         }
@@ -902,6 +903,7 @@ impl<'p> Interp<'p> {
 
     /// Call a function value (a closure, a native or a bound function) from the host.
     pub fn call(&mut self, f: Value, this: Value, args: &[Value]) -> Result<Value, Error> {
+        let _observe = bare_observe::process::span("js", "call");
         if self.depth == 0 {
             self.begin();
         }

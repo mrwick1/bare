@@ -14,3 +14,8 @@ license = "MIT OR Apache-2.0"
 
 [profile.release]
 strip = true
+
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false

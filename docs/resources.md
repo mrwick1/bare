@@ -4733,3 +4733,79 @@ Cost (`tools/js/cost_matrix.sh -a -J`, 805 rows, both allocators):
 | Highest row under both | `flex-freeze-many 20000` +0.468% | +0.473% |
 
 No row is over +0.5% under both allocators. Instruction counts on the live pages change by about 10% between runs of one binary, because of the network, so they do not make a cost row. progress.md has the live numbers.
+
+## Chrome vs Bare: one E2E journey (2026-11-17)
+
+Question: how much CPU, memory and time does one E2E test cost in Chrome driven over CDP, and in Bare?
+
+Machine: archMachine, 16 threads (`nproc`), AMD Ryzen 9 5900HX with Radeon Graphics, Linux 7.2.15-zen1. Chrome 155.0.8059.39 (`google-chrome-stable`). Bare commit `421de16f`, `cargo build --release -p bare-drive`. `Cargo.toml` sets only `strip = true` in `[profile.release]`; every other setting is the Cargo default.
+
+Journey (the same for both browsers): a local Python server on 127.0.0.1 serves a page with an input `#name`, a button `#go`, a `<p id="value">` and a `<p id="ready">`. The page fetches `/slow` (the server sleeps 1 s, then answers `done`). The steps: open `/`; type `GUI check` into `#name`; click `#go`; expect `#value` is `GUI check`; expect `#ready` is `done`; exit. `/favicon.ico` is 404. Chrome asks for the favicon. Bare does not.
+
+Method:
+- Each browser runs in its own `systemd-run --user --scope` cgroup. A small `sh` wrapper runs inside the scope. It runs `perf stat -e instructions:u,instructions:k -x,` around the browser, waits until the helper processes leave the cgroup, then reads `cpu.stat`, `memory.peak` and `pids.peak`.
+- Wall time is the wrapper's `date` before and after the browser (it includes the `perf` start). Journey time is Chrome: `Page.navigate` to the last expect true. Bare: the `ms` that `bare-drive` prints.
+- A sampler reads every 20 ms `smaps_rollup` of each PID in `cgroup.procs`. It sums PSS and RSS. The wrapper processes are left out of PSS, RSS and PID counts.
+- Chrome is started by the Node 22 driver over the built-in `WebSocket`. The driver uses the cgroup only for Chrome. The driver CPU and peak RSS are listed apart. Bare has the driver in process, so `bare-drive` is the whole tree.
+- Chrome flags: fresh `--user-data-dir`, `--remote-debugging-port`, `--no-first-run --no-default-browser-check --disable-background-networking --disable-sync --disable-extensions --disable-component-update --window-size=1280,800`. Headless adds `--headless=new`. Windowed adds `--ozone-platform=wayland`. No `--no-sandbox`. The `google-chrome-stable` launcher adds more flags (seen in `ps`): `--enable-features=AcceleratedVideoDecodeLinuxGL,...`, `--ignore-gpu-blocklist`, `--enable-gpu-rasterization`, `--enable-zero-copy`, `--ozone-platform-hint=auto`. The source of these flags was not checked.
+- Typing: a real click on `#name`, then `Input.insertText`. The click uses `Input.dispatchMouseEvent` at the center of `getBoundingClientRect`. The expects poll `Runtime.evaluate` every 50 ms. The driver turns on `Emulation.setFocusEmulationEnabled`.
+- Windowed runs are inside an isolated offstage Cage screen (`bare-drive --window` and Chrome on Wayland). Headless runs are in the shell.
+- Runs: one untimed warm-up for each browser and mode, then 5 timed runs for each, alternating. The order inside a pair flips each run. Every timed run passed. Cells show mean (min–max; spread = (max−min)/mean).
+
+### Headless
+
+| metric | Chrome (CDP) | Bare | Chrome / Bare (mean) |
+|---|---|---|---|
+| journey ms | 1084 (1073–1111; 3%) | 1012 (1011–1013; 0%) | 1.1x |
+| process wall ms | 1762 (1474–1924; 26%) | 1041 (1032–1065; 3%) | 1.7x |
+| CPU ms total | 1283 (965–1411; 35%) | 52 (41–57; 30%) | 24.7x |
+| CPU ms user | 789 (594–865; 34%) | 28 (16–34; 66%) | 28.0x |
+| CPU ms sys | 494 (371–547; 36%) | 24 (21–26; 19%) | 20.9x |
+| instructions:u (M) | 3823.3 (3798.7–3860.1; 2%) | 14.9 (14.9–14.9; 0%) | 256.5x |
+| peak PSS MiB | 256.1 (252.4–263.6; 4%) | 13.5 (13.4–13.7; 2%) | 18.9x |
+| peak RSS-sum MiB | 960.5 (955.2–963.5; 1%) | 16.1 (16.0–16.2; 1%) | 59.6x |
+| memory.peak MiB | 178.2 (177.2–179.3; 1%) | 8.1 (7.8–8.4; 7%) | 22.1x |
+| max PIDs (sampled) | 13 (13–13; 0%) | 1 (1–1; 0%) | 13.0x |
+| pids.peak (incl. wrapper) | 118 (115–120; 4%) | 6 (6–6; 0%) | 19.7x |
+
+Chrome driver (Node, separate process, not in the cgroup): CPU ms 267 (187–295; 40%) (user 235, sys 31); max RSS MiB 74.1 (73.6–74.5; 1%).
+
+### Windowed (Cage, Wayland)
+
+| metric | Chrome (CDP) | Bare | Chrome / Bare (mean) |
+|---|---|---|---|
+| journey ms | 1202 (1025–1459; 36%) | 1009 (1005–1016; 1%) | 1.2x |
+| process wall ms | 2041 (1562–2392; 41%) | 1029 (1016–1047; 3%) | 2.0x |
+| CPU ms total | 1577 (1266–2148; 56%) | 35 (23–51; 78%) | 45.4x |
+| CPU ms user | 962 (779–1325; 57%) | 14 (10–19; 69%) | 69.0x |
+| CPU ms sys | 615 (486–823; 55%) | 21 (14–31; 85%) | 29.6x |
+| instructions:u (M) | 5869.7 (5842.1–5919.3; 1%) | 32.4 (31.4–33.4; 6%) | 181.3x |
+| peak PSS MiB | 336.9 (336.0–337.7; 0%) | 16.6 (16.3–17.7; 8%) | 20.3x |
+| peak RSS-sum MiB | 1109.0 (1104.6–1114.3; 1%) | 21.2 (21.1–21.2; 1%) | 52.4x |
+| memory.peak MiB | 236.9 (229.7–247.1; 7%) | 12.9 (12.0–13.5; 12%) | 18.4x |
+| max PIDs (sampled) | 13 (13–13; 0%) | 1 (1–1; 0%) | 13.0x |
+| pids.peak (incl. wrapper) | 120 (117–122; 4%) | 7 (7–7; 0%) | 17.2x |
+
+Chrome driver (Node, separate process, not in the cgroup): CPU ms 200 (155–274; 59%) (user 172, sys 29); max RSS MiB 73.8 (73.6–74.3; 1%).
+
+### Findings
+
+- Chrome used about 25x (headless) and 45x (windowed) the CPU time of Bare, 250x and 180x the user instructions, and about 19x and 20x the PSS.
+- Chrome runs 13 processes. Bare runs 1.
+- The journey time is close (1.1x to 1.2x). The 1 s server sleep dominates it. The process wall time is 1.7x to 2.0x, because Chrome takes 0.26 s to 0.95 s from spawn to DevTools ready (mean 0.50 s headless, 0.54 s windowed). Then 0.13 s to 0.49 s remain after the journey for exit (process wall minus ready minus journey, approximate).
+- Bare in a window costs more than Bare headless: 32 M instructions against 15 M, PSS 16.6 MiB against 13.5 MiB.
+- Hypothesis: the larger windowed Chrome PSS (337 MiB against 256 MiB) comes from the GPU and compositor path on Wayland. Not measured.
+
+### Caveats
+
+- Load average was 17 to 32 on 16 threads during every batch. It never fell below 2. All wall times are under load and rough. Instruction counts are the trusted numbers.
+- `perf_event_paranoid` is 2. `instructions:k` is not supported, so only `instructions:u` is reported. Kernel work shows only in the `sys` CPU time.
+- `memory.peak` counts only pages charged to the scope, and it includes page cache. For Chrome it is lower than the PSS sum. Hypothesis: shared file pages that an earlier cgroup loaded are in PSS but not charged to this scope.
+- The wrapper (`sh`, `perf`, `date`, `cat`) is inside the cgroup numbers for both browsers. Overhead measured with `sleep 1`, 3 runs: 13.8 ms CPU, 5.5 MiB `memory.peak`, 0.27 M instructions. This is large for Bare (52 ms and 35 ms CPU, 8.1 and 12.9 MiB `memory.peak`) and small for Chrome. PSS, RSS and PID counts do not include it.
+- `pids.peak` includes the wrapper processes. The sampled PID count does not. The 20 ms sampler is slower under load: the mean interval was 35.7 ms for headless Chrome and 20 to 22 ms in the other cases. A peak shorter than the interval can be missed.
+- The Node driver is a separate process. Its numbers are not in the Chrome columns. Add them for the total cost of a CDP test.
+- The Chrome GPU process is counted (a separate idle headless probe showed one `gpu-process`, five renderers, two utility processes, zygote entries and two crashpad handlers). The windowed process mix was not probed.
+- In a diagnostic batch, windowed Chrome failed 3 of 6 runs without a focus check. The text went in before the input had focus, or the first clicks were lost. The final driver clicks `#name` until it has focus, then inserts the text, so the journey time includes that retry. One windowed run needed 1 retry.
+- Bare `open` is lazy. Its page load is counted in the next step, so the Bare journey time includes it.
+- Chrome showed GCM registration errors in the stderr of a failed run, although `--disable-background-networking` was set. Not checked further.
+- One page, one machine, 5 runs. The result does not say how the gap changes on large pages.

@@ -12793,6 +12793,41 @@ The owner grants a cost exception for 4 rows: `builtins_load replace 1` (+0.99%)
 
 `shot` waited for the document and the pictures only. It could take the picture before a page script ran or before the requests of a script ended. Now `shot` waits by the rule of `ready`: the document is in, `load` ran, `Page::idle` is `Ok` on two looks in a row, and no picture loads. This holds in step files and in the MCP `screenshot` tool. The wait ends at the step time limit. The picture is then taken anyway, and the step note says `not ready: ...`. Tests: `crates/drive/tests/shot_ready.rs`. Not tested: a live page such as `https://example.com/`.
 
+## Paint trace events on the window path (2026-11-17)
+
+`Page::paint_at` called `build_band` and `draw_view` directly, so a windowed journey had no `paint` records. Now `DisplayList::make` writes `paint/build` and `Painter::draw_view` writes `paint/draw`. `paint/paint` stays as the outer span of the headless `Painter::paint`. Both new spans are lazy: with tracing off they do no work. Test: `paint_trace_tests` in `crates/bare` runs two window paints of a page with an input. It finds one `build` and two `draw` records with the session id, and no file with `BARE_OBSERVE=off`. It failed before the change (0 `build` records) and passes now. `bare-paint` (51 + 1 + 30 + 6 tests) and `bare-drive --test monitoring` (4 tests) pass. The parent reran the windowed journey once in an isolated Cage screen. It passed with 406 records, 4 `paint/build`, 19 `paint/draw`, a `session_id` on each paint record and zero drops. Not tested: the cost of the spans with tracing on, and non-Linux.
+
+## Monitoring branch: workspace failures predate it (2026-11-17)
+
+The parent ran the 14 unclassified failing tests on baseline `00e701b0` and candidate `9197b6e2`, three runs each, alternating, on an idle archMachine. Eleven fail on both trees with the same line and message: two `chunked` time limits, `survive_limit`, the MCP 5000-element snapshot budget (about 137 ms on both), two `https_openssl` negative certificate tests, four `client_openssl` tests and one `tls12_openssl` test. Three pass on both trees: `nonblocking`, the MCP hidden-iframe download and the MCP cookie-banner click. The branch adds no failure. Causes are not classified. Detail: `docs/monitoring.md`.
+
+## Monitoring on Windows (2026-11-17)
+
+The monitoring tests ran once on the Windows 11 VM: `bare-os` (6), `bare-observe` lib (12) and `process` (4), driver monitoring (4), MCP monitoring (1) and `paint_trace_tests` (2). All pass. A metrics capture works and has zero drops, but every process counter is `null`: Windows has no native metrics yet, by design. macOS is untested; the Mac was offline. Detail: `docs/monitoring.md`.
+
+## Native Windows process metrics (2026-11-17)
+
+`bare_os::metrics::snapshot()` now reads RSS, peak RSS and CPU times on Windows (`K32GetProcessMemoryInfo`, `GetProcessTimes`). Thread count and allocator bytes stay null. `HeapSummary` was built and measured, then dropped: it took 16 ms with 1,000,000 live allocations (14 µs on the default heap). `snapshot()` now takes about 0.65 µs and does not grow with allocations. The Windows test failed before the change and passes after it. A `bare-mcp.exe` capture on the Windows 11 VM had 22 samples with non-null memory and CPU fields and zero drops. CPU time advances in 15.625 ms ticks. Not tested: macOS, release capture. Detail: `docs/monitoring.md`.
+
+## Monitoring: capture file through the OS layer (2026-11-17)
+
+The collector set Unix file mode 0600 in `bare-observe`. This put OS code outside the OS layer, and `tools/portable_check.sh --scan` flagged it. Now `bare_os::fs::create_private` creates the file. The scan flags only the three files that the baseline already flags. Linux and Windows `bare-os` and `bare-observe` tests pass. Windows and macOS workspace checks pass.
+
+## Chrome vs Bare: one E2E journey (2026-11-17)
+
+Measured one E2E journey (open, type, click, two expects, 1 s server fetch) in Chrome 155 over CDP and in Bare `421de16f` (release, `bare-drive`), headless and windowed (Cage, Wayland), on archMachine. 5 timed runs each, all passed, load average 17 to 32. Chrome used about 25x (headless) and 45x (windowed) the CPU time, 250x and 180x the user instructions (3823 M against 14.9 M headless; 5870 M against 32 M windowed) and about 19x and 20x the peak PSS (256 MiB against 13.5 MiB; 337 MiB against 16.6 MiB). Chrome ran 13 processes, Bare 1. Journey time was within 1.2x, because the server sleep dominates. Wall times are under load. `instructions:k` is not available (`perf_event_paranoid` 2). Tables, method and caveats: `docs/resources.md`.
+
+## HTTP/2 first-frame trace record (2026-11-17)
+
+Added `network/h2_ttfb` (field `duration_ns`): the wait from the end of the request writes to the first frame of the reply on the reader thread. With tracing off, a stream stores `None` and the request path takes no `Instant::now()`, no allocation and no new lock. The reader adds one branch per frame. The new test `h2_ttfb_is_the_wait_for_the_first_frame` (a 150 ms server wait, a child process with `BARE_OBSERVE=trace`) failed before the change (no record) and passes after it. The h2 suites keep their counts: 28, 8, 4, 14 and 30 passed. Not tested: error-before-headers outcomes, a release build, a tracing-on CPU cost. Detail: `docs/monitoring.md`.
+
+## Pre-header request failure record (2026-11-17)
+
+Added `network/request_failed` (fields `kind`, `retried`, `replay`, `duration_ns`): one record when a request fails before its response headers. `kind` is a code for the `cause::describe` kind. The record has no URL, host or error text. The success path adds one gated `Instant::now()` at entry to `start()` (trace mode only; with monitoring off it is one atomic load). The new test `a_request_that_fails_before_its_headers_has_a_record` (refused connect, a server that closes with no reply, one good request; a child process with `BARE_OBSERVE=trace`, `metrics` and `off`) failed before the change (0 records) and passes after it. `bare-net` lib keeps 173 passed, 1 ignored; `h2_observe` 12, `h2_edge` 28 and driver `monitoring` 4 pass. Not tested: TLS, DNS, HTTP/2 and replay failures end to end, a release build, a tracing-on CPU cost. Detail: `docs/monitoring.md`.
+
+## Logger queued memory (2026-11-17)
+
+`bare-observe` now counts the heap bytes of records that wait in its queue (`Vec::capacity`): current, peak, and peak record count. Each process sample has `logger_queued_bytes`. The terminal `collector_status` record has `peak_queued_bytes` and `peak_queued_records`. `Status` and `Handle::queued_bytes()` expose them. The producer adds a few relaxed atomic operations per queued record. With monitoring off, no collector exists, so none run. The worst-case terminal record is 319 bytes, within the 512-byte reserve. The new test `queued_memory_is_counted_and_released` failed to compile before the change and passes after it. `bare-observe` has 13 unit tests (was 12) and 4 process tests; `bare-os` 10; the doctest 1. Driver `monitoring` 4 and MCP `monitoring` 1 pass. `cargo check --workspace` passes. Not counted: producer-local record buffers, the channel slot array, and the writer's OS and file buffers. Not tested: a release build, a tracing-on CPU cost of the counters, a capture that subtracts the counter from RSS, Windows and macOS runs.
 ## `sessions` names a session with no document, and the hidden iframe download test (#573, #585, 2026-11-16)
 
 - #573: after a `goto` that fails, `sessions` printed `main: `. Now it prints `main: (no document: the document did not load: network error: connect refused)`. A session with no document and no error prints `main: (no document)`. `load_document` now keeps the kind of the cause (`dns`, `connect refused`, `read timeout`, `reset`...) from `bare_net::cause::describe`. It drops the error text, because the text can name a host or a URL. New test: `sessions_names_a_session_whose_document_did_not_load` (failed before, passes after).
@@ -12914,6 +12949,10 @@ Not done or not tested: `caretPositionFromPoint` (no `CaretPosition` interface y
 - Items with `#[allow(clippy::...)]` and a reason comment: `too_many_arguments` (hot paths `add_rules`, `style_of`, `Regex::backward`, plus `build_response`, `load_document`), `wrong_self_convention` (spec names `to_object`, `to_numeric`, `to_bigint`, `to_bit_width`, `to_dict`, `to_shapes`, `from_clause`), `box_collection` (fields that stay one pointer wide), `type_complexity` (one-off tuple fields), `diverging_sub_expression` (`hx!` early return), `needless_range_loop` (two loops that also use the index), `items_after_test_module`, `drop_non_drop` (test).
 - Compiler warnings: `re_tab_bytes` is used only by tests, so it is `#[cfg(test)]`. The unused import and the needless `mut` are removed.
 - No logic change is intended. `cargo test -q --workspace --lib` passes. Not run: integration tests under `tests/`, Windows builds, benchmarks.
+
+## Monitoring cost on the newest main (2026-11-17)
+
+After the merge of `main` (`8b6a71bb`), the parent ran the cost check on `52b032c9`. User instructions against monitoring off: metrics +0.346%, trace +0.600%. Off against `main`: +0.0038%. Spread is at most 0.003% of the mean. All budgets pass. Detail: `docs/monitoring.md`.
 ## `fill`: the whole text as one edit (2026-11-16)
 
 - Problem: `type` costs 500 M instructions for each key on the editor page of a private React dashboard (100 to 250 ms of CPU). React renders about 1,000 fibers for each key. bare sends the same events as Chrome. The cost is the speed of the tree walker. Design: [design-typing-heavy-forms.md](design-typing-heavy-forms.md).
@@ -12930,3 +12969,7 @@ Not done or not tested: `caretPositionFromPoint` (no `CaretPosition` interface y
 - `fill LOC "text" keys=last` (MCP `last_key: true`): the head is one edit, the last character is one typed key, for a widget that waits for a key. Journey: 12.165 to 12.166 G (3 runs), against 9.655 G for plain `fill` on the same build (1 run). 2 `bare-drive` tests and 2 parse cases.
 - `BARE_JS_EXEC=byte` on the `type` journey: 79.245 to 79.246 G (2 runs), 2.3% more than `tree`. On this base the bytecode lane does not help this React form. #630 makes the lane run lazy functions and changes this result.
 - Not done: a Chrome log of `Input.insertText` for the fixtures.
+
+## Monitoring cost on main `9ba3373e` (2026-11-17)
+
+Rerun after another merge of `main`, on `b21e748b`: metrics +0.353%, trace +0.602%, off against `main` +0.0013%. All budgets pass. With monitoring off, browser peak RSS is about 700 KiB higher than on `main` (16.7 to 17.0 MiB against 16.0 to 16.3 MiB). The cause is not verified. Detail: `docs/monitoring.md`.

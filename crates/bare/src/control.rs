@@ -873,6 +873,7 @@ impl Remote {
 
     /// `open` that starts from a saved state (`None`: empty storage).
     pub fn open_with(url: &str, size: (u32, u32), net: &bare_net::http::Client, state: Option<crate::page::StorageState>, downloads: Option<crate::Downloads>) -> Result<Remote, String> {
+        let observe_ids = bare_observe::process::context();
         let (ready_tx, ready_rx) = mpsc::channel();
         let (url, net) = (url.to_string(), net.fork());
         let ran = Ran::default();
@@ -881,6 +882,7 @@ impl Remote {
         let thread = std::thread::Builder::new()
             .stack_size(stack)
             .spawn(move || {
+                let _context = bare_observe::process::enter(observe_ids);
                 let fail = |e: String, r: &mpsc::Sender<Result<_, String>>| drop(r.send(Err(e)));
                 let t = Instant::now();
                 let mut page = match Page::open_in_with(&url, size, &net, state.as_ref(), downloads) {
@@ -933,7 +935,8 @@ impl Remote {
     /// Run `f` on the page, in the window loop, and give its result.
     pub fn call<R: Send + 'static>(&self, f: impl FnOnce(&mut Page) -> R + Send + 'static) -> Result<R, String> {
         let (tx, rx) = mpsc::sync_channel(1);
-        self.tx.as_ref().ok_or("the window closed")?.send(Box::new(move |p| drop(tx.send(f(p))))).map_err(|_| "the window closed".to_string())?;
+        let ids = bare_observe::process::context();
+        self.tx.as_ref().ok_or("the window closed")?.send(Box::new(move |p| { let _context = bare_observe::process::enter(ids); drop(tx.send(f(p))) })).map_err(|_| "the window closed".to_string())?;
         self.waker.wake();
         rx.recv().map_err(|_| "the window closed".to_string())
     }

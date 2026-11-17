@@ -485,6 +485,10 @@ impl Client {
 
     /// Send one checked request without cache or redirects. The caller reads the body and checks each redirect.
     pub fn send_stream_once(&mut self, req: &Request) -> Result<Streamed, Error> {
+        let mut ids = bare_observe::process::context();
+        if ids.request.is_none() { ids.request = bare_observe::process::next_id(); }
+        let _context = bare_observe::process::enter(ids);
+        let _observe = bare_observe::process::span("network", "request_once");
         check_request(req)?;
         let plan = Plan { cookies: req.cookies, method: req.method, headers: Cow::Borrowed(req.headers), body: req.body, ident: self.identity.clone() };
         let (response, body) = self.start(req.url, &plan, "")?;
@@ -525,6 +529,10 @@ impl Client {
 
     /// Like `send`, with a body that reads from the connection. See `get_stream`.
     pub fn send_stream(&mut self, req: &Request) -> Result<Streamed, Error> {
+        let mut ids = bare_observe::process::context();
+        ids.request = bare_observe::process::next_id();
+        let _context = bare_observe::process::enter(ids);
+        let _observe = bare_observe::process::span("network", "request_head");
         let (response, body) = self.follow(req, true)?;
         Ok(Streamed { response, body: body.expect("a streamed hop has a body") })
     }
@@ -689,7 +697,9 @@ impl Client {
         let headers = h2_headers(url, plan, conditions, &authority, &length);
         let mut clock = trace::Clock::new();
         let sent = Instant::now();
+        let headers_observe = bare_observe::process::span("network", "h2_response_headers");
         let (head, mut body) = conn.request(&headers, plan.body, plan.method == Method::Head, MAX_REPLY, sent + MAX_TIME)?;
+        drop(headers_observe);
         self.note_head(sent.elapsed());
         if let Some(r) = rec {
             r.ttfb = clock.lap();
@@ -708,6 +718,7 @@ impl Client {
         // The clock of the body starts where the head ended.
         body.start = Instant::now();
         body.rec = rec.take();
+        body.observe = ObservedBody::new(head.status);
         let mut live = self.tapped(url, plan, &response, Body(Source::H2(Box::new(body))));
         if let Some(codings) = undo {
             live = Body(Source::Decoded(Box::new(encoding::Decoded::new(live, codings))));
@@ -716,6 +727,8 @@ impl Client {
     }
 
     fn start(&mut self, url: &Url, plan: &Plan, conditions: &str) -> Result<(Response, Body), Error> {
+        let begun = (bare_observe::process::tracing() && bare_observe::process::accepts("network")).then(Instant::now);
+        let mut retried = false;
         let with_cookies;
         let conditions = match self.cookie_line(url, plan) {
             Some(line) => {
@@ -732,7 +745,10 @@ impl Client {
             Some(None) if !tape.as_ref().is_some_and(|t| t.writes()) => Err(format!("replay: no recorded reply for {}", Self::label(url, plan)).into()),
             _ => match self.attempt(url, plan, conditions) {
                 // The server did not start the request (`GOAWAY`, a refused stream): any method may run again, once, on a new connection.
-                Err(e) if e.is::<h2::Unprocessed>() => self.attempt(url, plan, conditions),
+                Err(e) if e.is::<h2::Unprocessed>() => {
+                    retried = true;
+                    self.attempt(url, plan, conditions)
+                }
                 result => result,
             },
         };
@@ -741,6 +757,13 @@ impl Client {
             Err(e) => {
                 if let Some(tape) = tape.as_ref().filter(|t| t.writes() && !replayed) {
                     tape.slot(Self::label(url, plan)).save(&replay::Entry { error: Some(e.to_string()), ..replay::Entry::default() });
+                }
+                if bare_observe::process::accepts("network") {
+                    use bare_observe::{Field, Scalar::{Bool, Null, U64}};
+                    bare_observe::process::emit("network", "request_failed", || [
+                        Field("kind", U64(cause::code(cause::kind(&*e)))), Field("retried", Bool(retried)), Field("replay", Bool(replayed || tape.as_ref().is_some_and(|t| t.reads() && !t.writes()))),
+                        Field("duration_ns", begun.map_or(Null, |t| U64(t.elapsed().as_nanos().min(u64::MAX as u128) as u64))),
+                    ]);
                 }
                 return Err(e);
             }
@@ -909,6 +932,7 @@ impl Client {
         let undo = if head.framing == Framing::None { None } else { head.response.header("content-encoding").and_then(encoding::codings).filter(|c| !c.is_empty()) };
         let mut live = Live::new(stream, leftover, head.framing, reusable.then(|| (self.idle.clone(), server)), head_end);
         live.rec = rec.take();
+        live.observe = ObservedBody::new(head.response.status);
         let live = self.tapped(url, plan, &head.response, Body(Source::Live(Box::new(live))));
         Ok((head.response, match undo {
             Some(codings) => Body(Source::Decoded(Box::new(encoding::Decoded::new(live, codings)))),
@@ -978,6 +1002,7 @@ pub struct Streamed {
 /// `https`: TCP, then a TLS 1.3 handshake with the host name checked against `roots` (loaded from the OS on first use).
 /// The handshake runs under the read and write time limits that `tcp::connect` sets.
 fn open(url: &Url, roots: &OnceLock<Result<(TrustStore, bool), String>>, proxy: Option<&'static Proxy>, rec: &mut Option<Box<trace::Rec>>) -> Result<Stream, Error> {
+    let dns_observe = bare_observe::process::span("network", "dns");
     let mut clock = trace::Clock::new();
     let (host, port) = proxy.map_or((url.host.as_str(), url.port), |p| (p.host.as_str(), p.port));
     let addrs: Vec<SocketAddr> = dns::resolve(host).map_err(|e| cause::Phase("dns", e.into()))?.into_iter().map(|ip| SocketAddr::new(ip, port)).collect();
@@ -986,11 +1011,14 @@ fn open(url: &Url, roots: &OnceLock<Result<(TrustStore, bool), String>>, proxy: 
     }
     // Our own DNS lookup (see `dns.rs`) gives IP addresses. Add the port to each one.
     // JS: `ips.map(ip => ({ ip, port }))`.
+    drop(dns_observe);
+    let tcp_observe = bare_observe::process::span("network", "tcp");
     let mut tcp = tcp::connect(&addrs).map_err(|e| cause::Phase("connect", e.into()))?;
     // Open a connection, with time limits (see `tcp.rs`).
     if let Some(r) = rec {
         r.tcp = clock.lap();
     }
+    drop(tcp_observe);
     if url.scheme == Scheme::Http {
         return Ok(match proxy { Some(p) => Stream::ProxyTcp(Box::new((tcp, p))), None => Stream::Tcp(tcp) });
     }
@@ -999,6 +1027,7 @@ fn open(url: &Url, roots: &OnceLock<Result<(TrustStore, bool), String>>, proxy: 
     }
     let (roots, from_os) = roots.get_or_init(|| trust_store::load_system().map(|r| (r.0, true)).map_err(|e| e.to_string())).as_ref().map_err(|e| e.clone())?;
     // OS roots: a root that the OS has not downloaded yet is fetched on a `NoIssuer` (see `client::connect_os`). Private roots: never.
+    let _tls_observe = bare_observe::process::span("network", "tls");
     let tls = match (*from_os, h1_only()) {
         (true, h1) => client::connect_os(tcp, &url.host, roots, !h1)?,
         (false, true) => client::connect(tcp, &url.host, roots)?,
@@ -1309,6 +1338,7 @@ fn send(stream: &mut Stream, url: &Url, plan: &Plan, conditions: &str) -> Result
 
 /// Read until the blank line after the headers, and parse what came before it.
 fn read_head(stream: &mut impl Read) -> Result<(Head, Vec<u8>), Error> {
+    let mut first_byte = (bare_observe::process::tracing() && bare_observe::process::accepts("network")).then(Instant::now);
     let mut raw = Vec::new();
     // JS: like `const raw = []`. A `Vec` is a growable list. This one holds the bytes we got so far.
     let mut piece = [0u8; 8192];
@@ -1332,6 +1362,9 @@ fn read_head(stream: &mut impl Read) -> Result<(Head, Vec<u8>), Error> {
         if n == 0 {
             return Err("malformed response: no blank line after headers".into());
             // 0 bytes means the server closed the connection, and there will be no more.
+        }
+        if let Some(start) = first_byte.take() {
+            bare_observe::process::emit("network", "ttfb", || [bare_observe::Field("duration_ns", bare_observe::Scalar::U64(start.elapsed().as_nanos().min(u64::MAX as u128) as u64))]);
         }
         raw.extend_from_slice(&piece[..n]);
         // Add the new bytes to the end of the list. `piece[..n]` is JS `piece.slice(0, n)`.
@@ -1537,6 +1570,49 @@ enum Source {
     Tap(Box<Tap>),
 }
 
+/// Streaming wire-body accounting. No response data is retained.
+pub(crate) struct ObservedBody {
+    ids: bare_observe::Ids,
+    start: Option<Instant>,
+    first: bool,
+    bytes: u64,
+    status: u16,
+    outcome: u64,
+}
+impl ObservedBody {
+    fn new(status: u16) -> Option<Self> {
+        bare_observe::process::accepts("network").then(|| Self {
+            ids: bare_observe::process::context(),
+            start: bare_observe::process::tracing().then(Instant::now),
+            first: true, bytes: 0, status, outcome: 0,
+        })
+    }
+    fn read(&mut self, result: &io::Result<usize>) {
+        if let Ok(n) = result {
+            self.bytes += *n as u64;
+            if *n == 0 { self.outcome = 1; }
+            else if self.first {
+                self.first = false;
+                if let Some(start) = self.start {
+                    let _context = bare_observe::process::enter(self.ids);
+                    bare_observe::process::emit("network", "first_body_byte", || [bare_observe::Field("duration_ns", bare_observe::Scalar::U64(start.elapsed().as_nanos().min(u64::MAX as u128) as u64))]);
+                }
+            }
+        } else { self.outcome = 2; }
+    }
+}
+impl Drop for ObservedBody {
+    fn drop(&mut self) {
+        use bare_observe::{Field, Scalar::U64};
+        let _context = bare_observe::process::enter(self.ids);
+        bare_observe::process::emit("network", "body", || [
+            Field("bytes", U64(self.bytes)), Field("status", U64(self.status as u64)),
+            Field("outcome", U64(self.outcome)),
+            Field("body_duration_ns", self.start.map_or(bare_observe::Scalar::Null, |s| U64(s.elapsed().as_nanos().min(u64::MAX as u128) as u64))),
+        ]);
+    }
+}
+
 /// Reads the body below it, and keeps the bytes. At the end of the body, or an error, or when the body is dropped, they go to the tape.
 struct Tap {
     inner: Body,
@@ -1612,6 +1688,7 @@ struct Live {
     done: bool,
     /// The timing record of this request (only when `BARE_NET_TRACE` is set). It goes out when the body is dropped.
     rec: Option<Box<trace::Rec>>,
+    observe: Option<ObservedBody>,
 }
 
 impl Drop for Live {
@@ -1675,7 +1752,7 @@ impl Write for Stream {
 impl Live {
     fn new(stream: Stream, leftover: Vec<u8>, framing: Framing, pool: Option<(Pool, Server)>, start: Instant) -> Live {
         let left = if let Framing::Length(n) = framing { n } else { 0 };
-        Live { stream, buf: leftover, at: 0, framing, left, chunk: Chunk::Size, line: Vec::new(), given: 0, start, limited: true, pool, done: false, rec: None }
+        Live { stream, buf: leftover, at: 0, framing, left, chunk: Chunk::Size, line: Vec::new(), given: 0, start, limited: true, pool, done: false, rec: None, observe: None }
     }
 
     /// Make sure that there are bytes in `buf[at..]`. When there are none after this, the connection has closed.
@@ -1800,6 +1877,14 @@ impl Live {
 impl Read for Body {
     fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
         let r = self.read_body(out);
+        if !out.is_empty() {
+            let observation = match &mut self.0 {
+                Source::Live(live) => &mut live.observe,
+                Source::H2(body) => &mut body.observe,
+                _ => &mut None,
+            };
+            if let Some(o) = observation { o.read(&r); }
+        }
         if let Err(e) = &r {
             self.note(e);
         }

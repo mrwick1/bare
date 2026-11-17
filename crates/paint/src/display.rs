@@ -216,6 +216,7 @@ impl DisplayList {
     }
 
     fn make(&mut self, doc: &Document, styles: &Styles, layout: &Layout, view: IRect, areas: Option<&Areas>, ext: Option<&[[f32; 4]]>) {
+        let _observe = bare_observe::process::span("paint", "build");
         self.items.clear();
         self.chain.clear();
         self.text.clear();

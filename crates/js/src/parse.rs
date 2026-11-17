@@ -197,6 +197,7 @@ const LAZY_MIN_BODY: u32 = 128;
 
 #[inline(always)]
 fn parse_counted<'a>(source: &'a str, mut limits: Limits, used: &mut u32, module: bool, lazy: bool) -> Result<Program<'a>, Error> {
+        let _observe = bare_observe::process::span("js", "parse");
     limits.max_depth = limits.max_depth.min(HARD_MAX_DEPTH);
     if source.len() > limits.max_source {
         let at = limits.max_source.min(u32::MAX as usize) as u32;

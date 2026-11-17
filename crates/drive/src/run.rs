@@ -268,6 +268,8 @@ pub struct CookieOut {
 /// The state of a run between its steps: the page, the network client, what the locators found, and the report so far. `run` drives
 /// one for a step file; a caller that gets its steps one at a time (the MCP server) keeps one and calls `step` for each.
 pub struct Session {
+    observe_id: Option<u64>,
+    observe_step: u64,
     host: Host,
     net: bare_net::http::Client,
     memo: Memo,
@@ -299,7 +301,7 @@ impl Session {
         bare_net::trace::enable();
         let _ = bare_net::trace::take();
         let rep = Report { ok: true, steps: Vec::new(), failure: None, logs: Vec::new(), net: Vec::new(), ms: 0.0, window: opt.window, ticks: Ticks::default(), cookies: Vec::new() };
-        Session { host: Host::None, net, memo: Memo::default(), timeout: opt.timeout, window_cpu: 0, nav_first: 0, start: Instant::now(), preload: None, hist: Default::default(), downloads: None, ready_wait: false, rep }
+        Session { observe_id: bare_observe::process::next_id(), observe_step: 0, host: Host::None, net, memo: Memo::default(), timeout: opt.timeout, window_cpu: 0, nav_first: 0, start: Instant::now(), preload: None, hist: Default::default(), downloads: None, ready_wait: false, rep }
     }
 
     /// Save the downloads of the pages that later `open` steps make in `d`.
@@ -376,6 +378,7 @@ impl Session {
     /// Code with a top-level `await` or `return` runs as an async function: an expression gives its value, statements need a `return`.
     /// A syntax error names its line. Each wrapper starts on the first line of the code, so the lines stay the lines of the agent.
     pub fn eval(&mut self, code: String) -> Result<String, String> {
+        let _context = bare_observe::process::enter(bare_observe::Ids { session: self.observe_id, ..Default::default() });
         let limit = self.timeout;
         self.with_refs(move |p, _| {
             let _ = p.wait_load(Duration::from_secs(10));
@@ -530,6 +533,9 @@ impl Session {
 
     /// Run one step, and add its result to `rep`. False when it failed (`rep.failure` says why).
     pub fn step(&mut self, step: &Step, opt: &Options, red: &mut Redactor) -> bool {
+        if bare_observe::process::enabled() { self.observe_step += 1; }
+        let _context = bare_observe::process::enter(bare_observe::Ids { session: self.observe_id, step: Some(self.observe_step), ..Default::default() });
+        let _observe = bare_observe::process::span("driver", "step");
         self.settle_pictures();
         let Session { host, net, memo, timeout, window_cpu, nav_first, rep, preload, hist, downloads, ready_wait, .. } = self;
     let t0 = Instant::now();
@@ -769,6 +775,7 @@ impl Session {
     /// Run the tasks of the page that are due (`Page::tick`), as a browser runs a tab while nobody acts. Gives when the next task is
     /// due. A page in a window runs on its own thread, so this does nothing for it.
     pub fn tick(&mut self) -> Option<Instant> {
+        let _context = bare_observe::process::enter(bare_observe::Ids { session: self.observe_id, ..Default::default() });
         match &mut self.host {
             Host::Local(p) => p.tick().1,
             _ => None,
@@ -1064,6 +1071,10 @@ fn ready(p: &mut Page, at_end: bool) -> Look {
     let idle = p.idle();
     let fail = p.load_error().map(|why| fail("page", format!("the document did not load: {why}")));
     let stopped = p.stopped();
+    bare_observe::process::emit("driver", "readiness", || {
+        use bare_observe::{Field, Scalar::Bool};
+        [Field("idle", Bool(idle.is_ok())), Field("stopped", Bool(stopped.is_some())), Field("load_failed", Bool(fail.is_some())), Field("at_end", Bool(at_end))]
+    });
     let (status, url) = (p.http_status(), p.url().unwrap_or_default());
     let (mut title, mut text) = (String::new(), String::new());
     if idle.is_ok() || at_end || stopped.is_some() {

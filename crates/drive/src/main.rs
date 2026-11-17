@@ -23,9 +23,11 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 fn main() {
+    let monitor = bare_observe::process::Process::from_env(std::env::args().any(|a| a == "--suite-worker")).unwrap_or_else(|e| { eprintln!("{e}"); std::process::exit(2) });
     bare_net::parallel::limit_malloc_arenas(std::env::args().any(|a| a == "--window"));
     let stack = if cfg!(debug_assertions) { 64 << 20 } else { 8 << 20 };
     let code = std::thread::Builder::new().stack_size(stack).spawn(drive).expect("a thread").join().unwrap_or(1);
+    monitor.shutdown();
     std::process::exit(code);
 }
 

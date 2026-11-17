@@ -1533,7 +1533,7 @@ mod tests {
     #[test]
     fn strings_decode_utf16() {
         assert_eq!(string("'abc'"), u16s("abc"));
-        assert_eq!(string("\"\""), []);
+        assert_eq!(string("\"\""), Vec::<u16>::new());
         assert_eq!(string(r#""a\nb\t\r\b\f\v\0\\\'\"\/""#), u16s("a\nb\t\r\u{8}\u{c}\u{b}\0\\'\"/"));
         assert_eq!(string("'\\x41\\u0042\\u{43}\\u{1F600}'"), u16s("ABC😀"));
         assert_eq!(string("'😀'"), [0xD83D, 0xDE00]); // a real emoji: two code units
@@ -1820,7 +1820,7 @@ mod tests {
         let src = "`\\xg ${a}`";
         let t = Lexer::new(src).unwrap().next(Goal::Div).unwrap();
         assert_eq!(t.kind, Template { part: TemplatePart::Head, bad_escape: true });
-        assert_eq!(one("`${a}`", false).unwrap(), []);
+        assert_eq!(one("`${a}`", false).unwrap(), Vec::<u16>::new());
         // Head, middle and tail strip their own delimiters.
         let src = "`a${x}b${y}c`";
         let mut l = Lexer::new(src).unwrap();
