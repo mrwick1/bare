@@ -2,8 +2,9 @@
 //! `browser_navigation_state.rs`, shared with `history.state`) and `atob` / `btoa` ("forgiving-base64"). Logic of the base64
 //! pair follows Boa's `core/wintertc/src/base64` (Unlicense OR MIT) for the shape and the HTML Standard for the rules.
 //!
-//! - `structuredClone(value, options)`: `options.transfer` must be absent, undefined or empty. A transfer list with items is
-//!   `Unsupported` (a transfer moves a buffer: not done). Errors are `DataCloneError` (see `browser_navigation_state.rs`).
+//! - `structuredClone(value, options)`: `options.transfer` is any iterable of `ArrayBuffer` and `MessagePort` objects (`Dom::transfer_list`;
+//!   else `DataCloneError`). A listed buffer is moved: the result holds its bytes and the source is detached. A listed port moves to a
+//!   new object. Errors are `DataCloneError` (see `browser_navigation_state.rs`).
 //! - `btoa(data)`: a code unit above 0xFF is `InvalidCharacterError`. `atob(data)`: ASCII whitespace is dropped, the length must
 //!   not be 1 mod 4 after up to two trailing `=` are removed (when the length is a multiple of 4), any other character that is
 //!   not in the standard alphabet is `InvalidCharacterError`. The unused bits of the last character are dropped.
@@ -26,25 +27,16 @@ fn need(it: &mut Interp<'_>, a: &[Value], f: &str) -> R<()> {
 
 fn structured_clone(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
     need(it, a, "structuredClone")?;
-    match arg(a, 1) {
-        Value::Undefined | Value::Null => {}
+    let list = match arg(a, 1) {
+        Value::Undefined | Value::Null => Vec::new(),
         o @ Value::Object(_) => {
             let k = d.key(it, "transfer")?;
             let t = it.get_value(o, k)?;
-            if !matches!(t, Value::Undefined) {
-                let Some(mut iter) = it.host_iter_open(t)? else {
-                    return Err(it.type_error("Failed to execute 'structuredClone' on 'Window': The provided value cannot be converted to a sequence."));
-                };
-                let first = it.host_iter_next(&mut iter)?;
-                if first.is_some() {
-                    it.host_iter_close(&mut iter)?;
-                    return Err(Error::Unsupported(unsupported("structuredClone with a transfer list")));
-                }
-            }
+            d.transfer_list(it, t, None, "Failed to execute 'structuredClone' on 'Window'")?
         }
         _ => return Err(it.type_error("Failed to execute 'structuredClone' on 'Window': The provided value is not of type 'StructuredSerializeOptions'.")),
-    }
-    crate::browser_navigation_state::clone(d, it, arg(a, 0))
+    };
+    crate::browser_navigation_state::clone_with(d, it, arg(a, 0), &list).map(|r| r.0)
 }
 
 const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";

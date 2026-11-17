@@ -175,7 +175,7 @@ fn a_limit_in_a_task_stops_the_pump_and_no_more_js_runs() {
         assert_eq!(js(&mut b, "log.length"), "0");
         // Unsupported inside a task also stops the pump
         let mut b = browser();
-        js(&mut b, "var log = []; setTimeout(function () { new MessageChannel().port1.postMessage({}, [1]) }, 0); setTimeout(function () { log.push('after') }, 1)");
+        js(&mut b, "var log = []; setTimeout(function () { setTimeout('1') }, 0); setTimeout(function () { log.push('after') }, 1)");
         assert!(matches!(b.advance_time(5.0, 10), Err(Error::Unsupported(_))));
         assert!(matches!(b.advance_time(5.0, 10), Err(Error::Unsupported(_))));
         assert_eq!(js(&mut b, "log.length"), "0");
@@ -384,8 +384,8 @@ fn payload_and_misuse_gates_are_explicit() {
         assert_eq!(js(&mut b, "p.postMessage({})"), "undefined");
         assert_eq!(js(&mut b, "p.postMessage([1])"), "undefined");
         assert_eq!(js(&mut b, "try { p.postMessage(function () {}) } catch (e) { [e.name, e.code, e instanceof Error].join() }"), "DataCloneError,25,true");
-        assert_eq!(js(&mut b, "p.postMessage('a', [1])"), "unsupported:MessagePort.postMessage transfer list");
-        assert_eq!(js(&mut b, "p.postMessage('a', { transfer: [1] })"), "unsupported:MessagePort.postMessage transfer list");
+        assert_eq!(js(&mut b, "try { p.postMessage('a', [1]) } catch (e) { [e.name, e.code].join() }"), "DataCloneError,25");
+        assert_eq!(js(&mut b, "try { p.postMessage('a', { transfer: [1] }) } catch (e) { e.name }"), "DataCloneError");
         assert_eq!(js(&mut b, "p.postMessage('a', []) === undefined && p.postMessage('a', { transfer: [] }) === undefined && p.postMessage('a', {}) === undefined && p.postMessage('a', null) === undefined"), "true");
         assert_eq!(js(&mut b, "p.postMessage('a', 5)"), "throw:TypeError:Failed to execute 'postMessage' on 'MessagePort': The transfer argument is not an object.");
         assert_eq!(js(&mut b, "p.postMessage()"), "throw:TypeError:Failed to execute 'postMessage' on 'MessagePort': 1 argument required, but only 0 present.");
@@ -619,7 +619,7 @@ fn a_limit_in_a_resumed_class_method_is_sticky_and_replays_no_effect() {
 fn an_async_callback_that_hits_a_gate_stops_the_pump_with_unsupported() {
     big(|| {
         let mut b = browser();
-        js(&mut b, "var log = []; setTimeout(async function () { await null; log.push('a'); new MessageChannel().port1.postMessage({}, [1]); log.push('never'); }, 0); setTimeout(function () { log.push('later'); }, 1); 0");
+        js(&mut b, "var log = []; setTimeout(async function () { await null; log.push('a'); setTimeout('1'); log.push('never'); }, 0); setTimeout(function () { log.push('later'); }, 1); 0");
         assert!(matches!(b.advance_time(5.0, 10), Err(Error::Unsupported(_))));
         assert!(matches!(b.advance_time(5.0, 10), Err(Error::Unsupported(_))));
         assert_eq!(js(&mut b, "log.join()"), "a");
@@ -668,5 +668,134 @@ fn object_messages_keep_clone_errors_and_byte_limits() {
         b.set_sched_limits(SchedLimits { max_queued_message_bytes: 100, ..Default::default() });
         assert_eq!(js(&mut b, "var c = new MessageChannel(); try { c.port1.postMessage({x:'a'.repeat(100)}); } catch(e) { 'caught'; }"), host_limit("message-bytes"));
         assert_eq!(b.sched_stats().queued_messages, 0);
+    });
+}
+
+fn err(b: &mut Browser, src: &str) -> String {
+    js(b, &format!("try {{ {src}; 'no error' }} catch (e) {{ e.name + ':' + e.message }}"))
+}
+
+#[test]
+fn a_transferred_port_keeps_its_peer_and_the_sent_object_is_neutered() {
+    big(|| {
+        let mut b = browser();
+        js(&mut b, "var log = [], c1 = new MessageChannel(), c2 = new MessageChannel(); c2.port2.onmessage = function (e) { log.push('ports' + e.ports.length); e.ports[0].postMessage('hi') }; c1.port2.onmessage = function (e) { log.push(e.data) }; c2.port1.postMessage(null, [c1.port1])");
+        // the sent object is neutered at once
+        assert_eq!(js(&mut b, "c1.port1.postMessage('lost')"), "undefined");
+        adv(&mut b, 0.0);
+        assert_eq!(js(&mut b, "log.join()"), "ports1,hi");
+        assert_eq!(err(&mut b, "c2.port1.postMessage(1, [c1.port1])"), "DataCloneError:Transfer list contains a detached item.");
+        assert_eq!(b.sched_stats().queued_messages, 0);
+    });
+}
+
+#[test]
+fn the_transfer_list_is_checked_before_anything_moves() {
+    big(|| {
+        let mut b = browser();
+        js(&mut b, "var c = new MessageChannel(), d = new MessageChannel(), buf = new ArrayBuffer(4)");
+        assert_eq!(err(&mut b, "c.port1.postMessage(1, [c.port1])"), "DataCloneError:Transfer list contains source port.");
+        assert_eq!(err(&mut b, "c.port1.postMessage(1, [d.port1, d.port1])"), "DataCloneError:Transfer list contains duplicate entries.");
+        assert_eq!(err(&mut b, "c.port1.postMessage(1, [buf, buf])"), "DataCloneError:Transfer list contains duplicate entries.");
+        assert_eq!(err(&mut b, "c.port1.postMessage(1, [{}])"), "DataCloneError:Value not transferable.");
+        assert_eq!(err(&mut b, "c.port1.postMessage(1, [window])"), "DataCloneError:Value not transferable.");
+        assert_eq!(err(&mut b, "c.port1.postMessage(1, [new Uint8Array(1)])"), "DataCloneError:Value not transferable.");
+        // a port in the message but not in the list
+        assert_eq!(err(&mut b, "c.port1.postMessage({ p: d.port1 })"), "DataCloneError:An object could not be cloned.");
+        assert_eq!(err(&mut b, "c.port1.postMessage({ p: d.port1 }, [buf])"), "DataCloneError:An object could not be cloned.");
+        // a failed call moves nothing
+        assert_eq!(js(&mut b, "buf.byteLength + ',' + (d.port1.postMessage(1), 'ok')"), "4,ok");
+        assert_eq!(err(&mut b, "c.port1.postMessage(1, 5)"), "TypeError:Failed to execute 'postMessage' on 'MessagePort': The transfer argument is not an object.");
+        // any iterable is a list
+        assert_eq!(js(&mut b, "c.port1.postMessage(1, new Set([d.port2])); c.port2.onmessage = null; d.port2.postMessage(1)"), "undefined");
+        assert_eq!(err(&mut b, "c.port1.postMessage(1, { transfer: 5 })"), "TypeError:Failed to execute 'postMessage' on 'MessagePort': The provided value cannot be converted to a sequence.");
+        assert_eq!(b.sched_stats().queued_messages, 2);
+    });
+}
+
+#[test]
+fn queued_messages_move_with_a_transferred_port() {
+    big(|| {
+        let mut b = browser();
+        js(&mut b, "var log = [], q = new MessageChannel(), r = new MessageChannel(); q.port1.postMessage('one'); q.port1.postMessage('two'); r.port2.onmessage = function (e) { var p = e.ports[0]; log.push(Object.isFrozen(e.ports) + ':' + e.ports.length + ':' + Array.isArray(e.ports)); p.onmessage = function (m) { log.push(m.data) }; }; r.port1.postMessage(0, [q.port2]); q.port1.postMessage('three')");
+        assert_eq!(b.sched_stats().queued_messages, 4);
+        adv(&mut b, 0.0);
+        assert_eq!(js(&mut b, "log.join()"), "true:1:true,one,two,three");
+        assert_eq!(b.sched_stats().queued_messages, 0);
+        assert_eq!(b.sched_stats().queued_message_bytes, 0);
+    });
+}
+
+#[test]
+fn a_started_port_that_moves_is_disabled_until_the_receiver_starts_it() {
+    big(|| {
+        let mut b = browser();
+        js(&mut b, "var log = [], q = new MessageChannel(), r = new MessageChannel(); q.port2.onmessage = function (e) { log.push('old' + e.data) }; q.port1.postMessage('a'); r.port2.onmessage = function (e) { log.push('got'); e.ports[0].onmessage = function (m) { log.push('new' + m.data) } }; r.port1.postMessage(0, [q.port2])");
+        adv(&mut b, 0.0);
+        assert_eq!(js(&mut b, "log.join()"), "got,newa");
+    });
+}
+
+#[test]
+fn both_ends_can_move_in_one_message() {
+    big(|| {
+        let mut b = browser();
+        js(&mut b, "var log = [], q = new MessageChannel(), r = new MessageChannel(); r.port2.onmessage = function (e) { var a = e.ports[0], z = e.ports[1]; z.onmessage = function (m) { log.push(m.data) }; a.postMessage('x') }; r.port1.postMessage(0, [q.port1, q.port2])");
+        adv(&mut b, 0.0);
+        assert_eq!(js(&mut b, "log.join()"), "x");
+    });
+}
+
+#[test]
+fn array_buffers_move_and_the_source_is_detached() {
+    big(|| {
+        let mut b = browser();
+        js(&mut b, "var log = [], c = new MessageChannel(), buf = new Uint8Array([5, 6, 7]).buffer, view = new Uint8Array(buf); c.port2.onmessage = function (e) { var d = e.data; log.push(d instanceof ArrayBuffer ? new Uint8Array(d).join() : d.a === d.b.buffer ? 'shared:' + d.b.join() : 'copy') }; c.port1.postMessage(buf, [buf])");
+        assert_eq!(js(&mut b, "buf.byteLength + ',' + view.length + ',' + view.byteLength"), "0,0,0");
+        adv(&mut b, 0.0);
+        assert_eq!(js(&mut b, "log.join()"), "5,6,7");
+        // the buffer is in the graph and in the list: one object in the result
+        js(&mut b, "var buf2 = new Uint8Array([1, 2]).buffer; c.port1.postMessage({ a: buf2, b: new Uint8Array(buf2) }, [buf2])");
+        adv(&mut b, 0.0);
+        assert_eq!(js(&mut b, "log.join()"), "5,6,7,shared:1,2");
+        assert_eq!(js(&mut b, "buf2.byteLength"), "0");
+        // a buffer that is only in the graph is copied
+        js(&mut b, "var buf3 = new Uint8Array([9]).buffer; c.port1.postMessage(buf3)");
+        adv(&mut b, 0.0);
+        assert_eq!(js(&mut b, "buf3.byteLength + ',' + log.pop()"), "1,9");
+        // a detached buffer is refused, and a failed clone does not detach
+        assert_eq!(err(&mut b, "c.port1.postMessage(1, [buf])"), "DataCloneError:Transfer list contains a detached item.");
+        js(&mut b, "var buf4 = new ArrayBuffer(3)");
+        assert_eq!(err(&mut b, "c.port1.postMessage({ f: function () {} }, [buf4])"), "DataCloneError:A function could not be cloned.");
+        assert_eq!(js(&mut b, "buf4.byteLength"), "3");
+        // a getter that detaches a listed buffer
+        js(&mut b, "var buf5 = new ArrayBuffer(3)");
+        assert_eq!(err(&mut b, "c.port1.postMessage({ get x() { buf5.transfer(); return 1 } }, [buf5])"), "DataCloneError:A transferred item is detached and could not be cloned.");
+    });
+}
+
+#[test]
+fn transferred_bytes_count_in_the_message_bytes() {
+    big(|| {
+        let mut b = browser();
+        b.set_sched_limits(SchedLimits { max_queued_message_bytes: 1000, ..Default::default() });
+        js(&mut b, "var c = new MessageChannel(), big = new ArrayBuffer(2000)");
+        assert_eq!(js(&mut b, "c.port1.postMessage(1, [big])"), host_limit("message-bytes"));
+    });
+}
+
+#[test]
+fn window_post_message_hands_over_ports() {
+    big(|| {
+        let mut b = browser();
+        js(&mut b, "var log = [], c = new MessageChannel(); c.port2.onmessage = function (e) { log.push(e.data) }; window.addEventListener('message', function (e) { log.push('w' + e.ports.length + Object.isFrozen(e.ports)); e.ports[0].postMessage('via') })");
+        js(&mut b, "window.postMessage('x', { targetOrigin: '*', transfer: [c.port1] })");
+        adv(&mut b, 0.0);
+        assert_eq!(js(&mut b, "log.join()"), "w1true,via");
+        assert_eq!(err(&mut b, "window.postMessage('x', '*', [1])"), "DataCloneError:Value not transferable.");
+        assert_eq!(js(&mut b, "var wb = new ArrayBuffer(2); window.postMessage(wb, '*', [wb]); wb.byteLength"), "0");
+        assert_eq!(js(&mut b, "var seen; window.addEventListener('message', function (e) { seen = e.ports.length + ':' + Object.isFrozen(e.ports) }); window.postMessage('y'); 1"), "1");
+        adv(&mut b, 0.0);
+        assert_eq!(js(&mut b, "seen"), "0:true");
     });
 }
