@@ -1216,11 +1216,21 @@ function f(o) { var {a} = o; return a }
 ---
 fn0 f
 unsupported: destructuring
-=== unsupported: for-of
+=== for-of with a const
 function f(a) { for (const x of a) {} }
 ---
 fn0 f
-unsupported: for-in or for-of
+code nregs=1 words=10 consts=0 ics=0
+0000  GetEnv        r0, 0, 0
+0001  IterOpen      r0
+0002  PushEnv       s2
+0003  IterNext      r0, -> 0008
+0004  CopyEnv       
+0005  InitEnv       r0, 0, 0
+0006  Jmp           -> 0003
+0007  IterClose     
+0008  PopEnv        
+0009  RetUndef      
 === unsupported: spread
 function f(a) { return g(...a) }
 ---

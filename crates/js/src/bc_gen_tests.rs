@@ -340,9 +340,9 @@ fn the_verifier_rejects_broken_code() {
     c.ics = vec![Cell::new(Ic::EMPTY)].into();
     assert!(verify(&c).unwrap_err().contains("inline cache"));
     c.ics = Box::new([]);
-    c.handlers.push(Handler { start: 0, end: 9, target: 1, reg: 0, depth: 0 });
+    c.handlers.push(Handler { start: 0, end: 9, target: 1, reg: 0, depth: 0, iters: 0 });
     assert!(verify(&c).unwrap_err().contains("handler"));
-    c.handlers[0] = Handler { start: 0, end: 1, target: 1, reg: 0, depth: 1 };
+    c.handlers[0] = Handler { start: 0, end: 1, target: 1, reg: 0, depth: 1, iters: 0 };
     assert!(verify(&c).unwrap_err().contains("depth"));
 }
 
@@ -364,6 +364,25 @@ fn a_simple_function_is_a_register_function() {
             assert!(text.contains(want), "{want}\n{text}");
         }
         assert!(!text.contains("Env"), "{text}");
+    });
+}
+
+/// `for-of` and `for-in` in a function with no inner function: a register function. The loop variables are registers.
+#[test]
+fn a_for_of_and_a_for_in_are_register_function_loops() {
+    big(|| {
+        let src = "function f(a, o) { var s = 0; for (const x of a) s += x; for (let k in o) s += k; for (var y of a) {} return s + y; } f([1], {});";
+        let prog = parse_script(src, Limits::default()).unwrap();
+        let mut it = Interp::new(&prog, Heap::default(), EvalLimits::default()).unwrap();
+        let _ = it.run();
+        let root = it.bc_root().unwrap();
+        let (f, _) = it.bc_walk(None, root).funcs[0];
+        let c = it.bc_compile(f).unwrap();
+        verify(&c).unwrap_or_else(|e| panic!("{e}\n{}", c.disassemble()));
+        let text = c.disassemble();
+        assert!(c.regfn && !c.has_env, "{text}");
+        assert!(!text.contains("Env"), "{text}");
+        assert_eq!(text.matches("IterNext").count(), 3, "{text}");
     });
 }
 

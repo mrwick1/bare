@@ -4,6 +4,29 @@ This file records what is built, what comes next and what is missing. Update it 
 
 The reasons for the design are in [decisions.md](decisions.md). Time and memory numbers for each module are in [resources.md](resources.md).
 
+## Bytecode lane runs for-in and for-of (2026-11-17)
+
+`BARE_JS_EXEC=byte` now compiles `for-in` and `for-of` loops. Before, the lane refused them, and they were the largest refusal on a private React dashboard journey (239,306 calls). The default stays `tree`.
+
+- New ops: `IterOpen` (`iter_start`), `ForInOpen` (`for_in_keys`), `IterNext` (the next value, or pop and jump when done) and `IterClose` (`iter_close`).
+- The open iterators of all frames are one stack in `RegStack`. A frame and a handler record its height. A throw closes the iterators above the handler before the handler runs, with `iter_close_throw`. An error that is not a thrown value drops them and runs no JS.
+- `break`, `return` and a `continue` to an outer loop emit `IterClose` before they pop environments. Through a `finally`, the iterators inside the `try` close before the jump to the `finally` block.
+- A `let` or `const` gets a new binding for each iteration (`CopyEnv`). In a register function the loop variable is a register.
+- Still refused: a destructuring target, `for await`, and a `for-in` with an initializer.
+
+Measurements (replay, `BARE_CLOCK=virtual`, base: the lazy-function entry below, #630):
+
+| Workload | before | after |
+|---|---|---|
+| Private React dashboard journey, `byte`, 3 runs | 48.902 to 48.905 G | 46.207 to 46.208 G (-5.5%) |
+| Public React page, `byte`, cost per key (`keycost.sh`) | 180.7 M | 163.3 M (-9.6%) |
+
+Calls on bytecode on the journey: 96.8% (7,150,774 on the lane, 236,744 on the tree walker). The journey in `tree`: 74.535 G (1 run), unchanged. Peak RSS on the public page in `byte`: 33.0 MiB.
+
+Tests: a new test covers arrays, strings, a `Map`, an iterator whose `return` counts the closes, every exit, `for-in` with a deleted key and a prototype key, and a value that is not iterable. Before the change it failed (`calls_tree` 2). A new test checks that both loops compile in a register function. `cargo test -p bare-js`: 1004 passed. `exec_diff.sh`: 79 runs, 0 differences.
+
+Not tested: test262 in byte mode, wall time, Windows and macOS, live sites. Refusals left on the journey (calls): destructuring 104,527, optional chain 69,725, spread 39,783, private name 10,746, regexp literal 9,314, delete 2,390, others under 200.
+
 ## Bytecode lane runs lazy functions (2026-11-17)
 
 `BARE_JS_EXEC=byte` now compiles lazy functions (bodies that `parse_cache` drops in a source of 16 KiB or more). Before, the lane refused them with "no scope", so on a React page most calls stayed on the tree walker. The default stays `tree`.

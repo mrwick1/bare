@@ -325,6 +325,12 @@ impl Gen<'_, '_> {
         }
     }
 
+    /// Write `src` to the member target `e` (a `for-in` or `for-of` target). The caller frees the registers of the place.
+    pub(super) fn put_member(&mut self, e: ExprId, src: u32) -> G<()> {
+        let p = self.place_of(e)?;
+        self.put(&p, src)
+    }
+
     fn get(&mut self, p: &Place, dst: u32) -> G<()> {
         match *p {
             Place::Name(s, n) => self.load(s, n, dst),
