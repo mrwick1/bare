@@ -2604,3 +2604,34 @@ fn act_outcomes_do_not_claim_failed_input_is_safe_to_repeat() {
     assert_eq!(r["result"]["structuredContent"]["verification"], "not_run", "{r}");
     assert_eq!(r["result"]["isError"], true, "{r}");
 }
+
+/// `act fill` is one edit for the whole text (Chrome's `Input.insertText`): one `input`, no key events. The `fill` step line does the same.
+/// Before, `fill` was a name for `type`, so it sent one key for each character.
+#[test]
+fn act_fill_inserts_the_text_as_one_edit_with_no_keys() {
+    let page = "<!doctype html><title>fill</title><body><input id=a value=old aria-label=Name><input id=n type=number value=3><script>
+        window.keys = 0; window.inputs = 0;
+        ['keydown', 'keypress', 'keyup'].forEach(function (t) { document.addEventListener(t, function (e) { if (e.key !== 'Control' && e.key !== 'a') window.keys++ }, true) });
+        document.addEventListener('input', function () { window.inputs++ }, true);
+        </script>";
+    let base = page_server(page.to_string());
+    let mut s = Server::start();
+    let (r, error) = s.tool("open", json!({"url": format!("{base}/"), "snapshot": false}));
+    assert!(!error, "{r}");
+    let (r, error) = s.tool("act", json!({"op": "fill", "loc": "css=\"#a\"", "text": "hello world", "snapshot": false}));
+    assert!(!error, "{r}");
+    let (v, _) = s.tool("eval", json!({"js": "document.getElementById('a').value + '|' + window.keys + '|' + window.inputs"}));
+    assert_eq!(v, json!("hello world|0|1"));
+    let (r, error) = s.tool("act", json!({"op": "fill", "loc": "css=\"#n\"", "text": "5", "snapshot": false}));
+    assert!(!error, "{r}");
+    let (v, _) = s.tool("eval", json!({"js": "document.getElementById('n').value === '5'"}));
+    assert_eq!(v, json!(true));
+    let (r, error) = s.tool("step", json!({"steps": "fill label=\"Name\" \"\"\nexpect css=\"#a\" value=\"\""}));
+    assert!(!error && r["ok"] == true, "{r}");
+    // `last_key`: the head is one edit, the last character is a typed key (keydown, keypress, keyup).
+    let _ = s.tool("eval", json!({"js": "window.keys = 0; window.inputs = 0"}));
+    let (r, error) = s.tool("act", json!({"op": "fill", "loc": "css=\"#a\"", "text": "abc", "last_key": true, "snapshot": false}));
+    assert!(!error, "{r}");
+    let (v, _) = s.tool("eval", json!({"js": "document.getElementById('a').value + '|' + window.keys + '|' + window.inputs"}));
+    assert_eq!(v, json!("abc|3|2"));
+}

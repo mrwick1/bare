@@ -581,6 +581,34 @@ impl Page {
         Ok(())
     }
 
+    /// Fill a field as Playwright `fill` does: `type_start` (the checks, the click, the select all; empty text clears), then the whole text as
+    /// one edit (`insert_text`). The page sees one `beforeinput` and one `input` and no key events, so it renders once and not once for each
+    /// character. `last_key`: the last character is a typed key (`type_char`), so a widget that waits for a key (autocomplete) sees one.
+    /// Gives the field that has the focus (see `type_start`).
+    pub fn fill_text(&mut self, h: Handle, text: &str, last_key: bool) -> Result<Handle, Refusal> {
+        let h = self.type_start(h, text.is_empty())?;
+        let (head, last) = match text.char_indices().last() {
+            Some((i, c)) if last_key => (&text[..i], Some(c)),
+            _ => (text, None),
+        };
+        if !head.is_empty() {
+            self.insert_text(head);
+        }
+        if let Some(c) = last {
+            self.type_char(c);
+        }
+        self.after_action();
+        Ok(h)
+    }
+
+    /// Insert `text` at the focused element as one edit, as Chrome's `Input.insertText` (`Browser::ui_insert_text`).
+    pub fn insert_text(&mut self, text: &str) {
+        let r = self.browser().map(|b| b.ui_insert_text(text));
+        if let Some(r) = r {
+            self.after(r);
+        }
+    }
+
     /// The start of `type_text`: the checks, the click and the select all. `clear` also deletes the old text. A driver then sends one
     /// `type_char` in each tick, as a person types. Gives the field that has the focus: `h`, or the text field that a page script put in its
     /// place on the click (the Vue search of Wikipedia removes its input on focus and focuses a new one). The keys of a person go there too.

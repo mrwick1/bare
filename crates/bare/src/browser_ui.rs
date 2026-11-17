@@ -981,6 +981,22 @@ impl Dom {
         Ok(true)
     }
 
+    /// Insert `text` at the focused element as one edit, as Chrome's `Input.insertText` does (the call of Playwright `fill`): no key events,
+    /// `beforeinput` (cancelable), the change, then `input`, all with `inputType` `insertText` and the whole text as `data`. A line feed is text,
+    /// not Enter. A field cuts the text to its `maxlength`. Nothing happens when no editable element has the focus.
+    fn insert_at_focus(&self, it: &mut Interp<'_>, text: &str) -> R<()> {
+        let Some(f) = self.current_focus(it)? else { return Ok(()) };
+        if let Some(host) = self.editing_host(f) {
+            self.caret_into_host(it, f)?;
+            if self.input_ev(it, host, "beforeinput", "insertText", Some(text))? {
+                self.insert_text(it, text)?;
+            }
+        } else if self.editable(f) {
+            self.edit(it, f, "insertText", Some(text))?;
+        }
+        Ok(())
+    }
+
     /// Change the value of field `n` as `kind` says, with the events of Chrome.
     fn edit(&self, it: &mut Interp<'_>, n: NodeId, kind: &str, text: Option<&str>) -> R<()> {
         let Some(sel) = self.edit_sel(n)? else { return Ok(()) };
@@ -1349,6 +1365,11 @@ impl Browser {
         self.dom.scroll_key_set(true);
         let always = down || k.code == "Space";
         self.ui_call(always, |d, it| d.ui_key(it, &k, down))
+    }
+
+    /// Insert `text` at the focused element as one edit (Chrome's `Input.insertText`). See `Dom::insert_at_focus`.
+    pub fn ui_insert_text(&mut self, text: &str) -> R<UiOutcome> {
+        self.ui_call(true, |d, it| d.insert_at_focus(it, text))
     }
 
     /// The text field whose text a drag with the button down selects now, if any.

@@ -12,6 +12,11 @@
 //! back, forward           the history of the session, as the mouse buttons of the window do
 //! click LOC
 //! type LOC "text"             click the field, select its text, type one key in each tick (a line feed is Enter); "" clears it
+//! fill LOC "text"             click the field, select its text, then insert the whole text as one edit, as Chrome's `Input.insertText`
+//!                             (Playwright `fill`): one `beforeinput` and one `input`, no keys, so a page renders once and not once for each
+//!                             character. A line feed is text. "" clears it. Use `type` for a field that needs keys (autocomplete, masks)
+//! fill LOC "text" keys=last   the same, but the last character is one typed key (a line feed is Enter): a widget that waits for a key
+//!                             (autocomplete) sees one, and the page renders about twice and not once for each character
 //! press [LOC] KEY              at the element (it takes the focus first) or the focused element: Enter, Tab, Escape, a, Shift+Tab, Control+a
 //! scroll LOC|page DY          the wheel over the element (or the middle of the window), DY CSS pixels down
 //! expect LOC STATE            visible hidden enabled disabled checked unchecked focused | count N | text="x" | value~"x"
@@ -74,6 +79,8 @@ pub enum Action {
     Forward,
     Click(Locator),
     Type(Locator, String),
+    /// Click the field, select its text, then insert the whole text as one edit (no keys). `true`: the last character is a typed key.
+    Fill(Locator, String, bool),
     /// Pick options of a `<select>` by label or value.
     Select(Locator, Vec<String>),
     Check(Locator, bool),
@@ -230,10 +237,13 @@ fn parse_line(line: &str, vars: &HashMap<String, String>) -> Result<Action, Stri
             (loc, n) if n == rest.len() => Action::Click(loc),
             _ => return Err("click LOC".into()),
         },
-        "type" => {
+        "type" | "fill" => {
             let (loc, used) = locator(rest, vars)?;
             match &rest[used..] {
-                [Word::Quoted(t)] => Action::Type(loc, expand(t, vars)?),
+                [Word::Quoted(t)] if verb == "fill" => Action::Fill(loc, expand(t, vars)?, false),
+                [Word::Quoted(t), Word::Pair(k, false, v)] if verb == "fill" && k == "keys" && v == "last" => Action::Fill(loc, expand(t, vars)?, true),
+                [Word::Quoted(t)] if verb == "type" => Action::Type(loc, expand(t, vars)?),
+                _ if verb == "fill" => return Err("fill LOC \"text\" [keys=last]".into()),
                 _ => return Err("type LOC \"text\"".into()),
             }
         }
@@ -394,6 +404,11 @@ mod tests {
         assert_eq!(p("click role=menuitem name~\"sign out\""), Ok(Action::Click(Locator::Role("menuitem".into(), Some(Text::Has("sign out".into()))))));
         assert_eq!(p("type label=\"Password\" \"${PASS}\""), Ok(Action::Type(Locator::Label(Text::Is("Password".into())), "p\"w".into())));
         assert_eq!(p("type css=\"input[name=q]\" \"a\\\"b\\n\""), Ok(Action::Type(Locator::Css("input[name=q]".into()), "a\"b\n".into())));
+        assert_eq!(p("fill label=\"Password\" \"${PASS}\""), Ok(Action::Fill(Locator::Label(Text::Is("Password".into())), "p\"w".into(), false)));
+        assert_eq!(p("fill css=\"#q\" \"\""), Ok(Action::Fill(Locator::Css("#q".into()), "".into(), false)));
+        assert_eq!(p("fill css=\"#q\""), Err("fill LOC \"text\" [keys=last]".into()));
+        assert_eq!(p("fill css=\"#q\" \"ab\" keys=last"), Ok(Action::Fill(Locator::Css("#q".into()), "ab".into(), true)));
+        assert_eq!(p("fill css=\"#q\" \"ab\" keys=all"), Err("fill LOC \"text\" [keys=last]".into()));
         assert_eq!(p("select label=\"Country\" \"Kenya\""), Ok(Action::Select(Locator::Label(Text::Is("Country".into())), vec!["Kenya".into()])));
         assert_eq!(p("select css=\"#f\" \"a\" \"b c\""), Ok(Action::Select(Locator::Css("#f".into()), vec!["a".into(), "b c".into()])));
         assert_eq!(p("check ref=e3"), Ok(Action::Check(Locator::Ref(3), true)));
