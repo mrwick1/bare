@@ -2408,3 +2408,15 @@ Issue #443. Enter in an empty list item, Backspace in an empty block, and the li
 - A list command of the same kind turns only the selected items into `div` blocks. The other kind still renames the whole list.
 - `insertText` removes the placeholder `br` of a block that has no other content.
 - Not done: Backspace at the start of a block with content does not merge it with the block before it.
+
+## A transfer list is data beside the clone (2026-11-18)
+
+Step 1 and 2 of `docs/design-gmail-frames.md`: `MessagePort`, `window.postMessage` and `structuredClone` accept a transfer list.
+
+- Decision: the walk of `browser_navigation_state.rs` still writes a heap-free `State`. A listed item is not a node of data. Its node is `SKind::Moved(i)`. The item itself goes in a `Vec<Transfer>` beside the `State`. `Transfer` is `Buffer(Vec<u8>)` or `Port(u64)`. No `ObjId` is in either.
+- Why: a later step sends a message to a page with another heap. The sender then needs no live JS object to hold the message, and the receiver builds new buffers and ports from the list.
+- Buffer: its bytes are copied once into `Transfer::Buffer`, then `Heap::buffer_transfer` detaches the source. The engine has no call that takes the bytes out of a buffer. A copy-free version needs one. It stays out of scope here.
+- Port: `Dom::park_port` takes the record out of the port table into `Sched::parked` under a `u64` key. The sent object stays as a shell (`moved`, no peer, no queue). `Dom::make_ports` gives each key a new object, with the peer link and the queued messages of the old record. A later step can replace the `parked` map with a table outside the heaps.
+- Order: the walk first, then the check of every listed item, then the moves. A message that fails to clone moves nothing.
+- A moved port starts disabled, and its listeners stay with the old object. This is the Standard.
+- A message in a port holds `ports: Box<[ObjId]>` (the new objects). That is the one place where the message still holds objects of the heap. It goes away when messages cross heaps.
