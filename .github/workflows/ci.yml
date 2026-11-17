@@ -1,0 +1,52 @@
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  # Branch protection on main requires these jobs. Automatic fix runs merge
+  # their own PRs, so these checks are the gate for every merge.
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev pkg-config
+      # Skipped here, still run on local machines:
+      # - a_page_that_aborts_task_after_task_...: needs six 500 M-step script
+      #   aborts inside a 120 s budget; a hosted runner takes about 30 s per
+      #   abort in a debug build.
+      # - an_expired_or_not_yet_valid_leaf_is_refused and
+      #   certificate_checks_are_the_same_as_for_tls13: use `openssl x509
+      #   -not_before`, which the runner's OpenSSL 3.0 does not have.
+      # - ecdhe_key_exchange_with_x25519_and_with_p256: the runner's
+      #   `openssl s_server` refuses the group list `P-256:P-256`.
+      - run: >-
+          cargo test --workspace --locked --no-fail-fast --
+          --skip a_page_that_aborts_task_after_task_fails_the_step_with_the_reason
+          --skip an_expired_or_not_yet_valid_leaf_is_refused
+          --skip certificate_checks_are_the_same_as_for_tls13
+          --skip ecdhe_key_exchange_with_x25519_and_with_p256
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --locked -p bare-mcp -p bare-drive
+  # Automatic fix runs push autofix/* branches. They must not change the
+  # workflows, because the workflows are the merge gate.
+  guard:
+    if: github.event_name == 'pull_request' && startsWith(github.head_ref, 'autofix/')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - run: |
+          if git diff --name-only "origin/$GITHUB_BASE_REF...HEAD" | grep '^\.github/'; then
+            echo "autofix branches must not change .github/" >&2
+            exit 1
+          fi
