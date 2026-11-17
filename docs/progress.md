@@ -12714,3 +12714,7 @@ The owner grants a cost exception for 4 rows: `builtins_load replace 1` (+0.99%)
 ## `shot` waits for the page scripts (2026-11-16)
 
 `shot` waited for the document and the pictures only. It could take the picture before a page script ran or before the requests of a script ended. Now `shot` waits by the rule of `ready`: the document is in, `load` ran, `Page::idle` is `Ok` on two looks in a row, and no picture loads. This holds in step files and in the MCP `screenshot` tool. The wait ends at the step time limit. The picture is then taken anyway, and the step note says `not ready: ...`. Tests: `crates/drive/tests/shot_ready.rs`. Not tested: a live page such as `https://example.com/`.
+
+## Paint trace events on the window path (2026-11-17)
+
+`Page::paint_at` called `build_band` and `draw_view` directly, so a windowed journey had no `paint` records. Now `DisplayList::make` writes `paint/build` and `Painter::draw_view` writes `paint/draw`. `paint/paint` stays as the outer span of the headless `Painter::paint`. Both new spans are lazy: with tracing off they do no work. Test: `paint_trace_tests` in `crates/bare` runs two window paints of a page with an input. It finds one `build` and two `draw` records with the session id, and no file with `BARE_OBSERVE=off`. It failed before the change (0 `build` records) and passes now. `bare-paint` (51 + 1 + 30 + 6 tests) and `bare-drive --test monitoring` (4 tests) pass. Not tested: the windowed journey (needs a rerun), the cost of the spans with tracing on, and non-Linux.

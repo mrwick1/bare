@@ -34,6 +34,7 @@ Context guards restore numeric attribution only on the thread that entered the s
 
 Categories are `process`, `engine`, `html`, `js`, `gc`, `style`, `layout`, `paint`, `scheduler`, `network`, `loader`, and `driver`.
 Trace spans use `duration_ns` and info level.
+Paint has three events. `paint/build` times one display-list build. `paint/draw` times one raster pass. `paint/paint` is the headless span, and it encloses a `build` and a `draw`. The window path writes `build` and `draw` only, and it writes no `build` for a redraw with a retained list. To total paint time, sum `paint` or sum `build` and `draw`. Never sum all three.
 HTML feed and finish, JS parse and execution, GC, retained and incremental style, layout, paint, scheduler pumps and individual tasks have duration hooks.
 Scheduler pump results include executed tasks, the cap flag, queued tasks, message count and message bytes.
 Driver readiness includes idle, stopped, load-failed and deadline flags. Arbitrary error text is excluded.
@@ -279,7 +280,7 @@ The first fixture attempt omitted the HTML Content-Type and failed. The correcte
 The parent inspected the rendered window through OCR and a screenshot.
 The corrected capture contains 383 records, including 150 process samples, and terminal status reports zero drops.
 Network, HTML, JS, loader, engine, scheduler, style, layout and driver records are present.
-No paint records are present despite visible rendering. GUI paint instrumentation coverage is therefore not accepted.
+This capture had no paint records despite visible rendering, because the window path bypassed the only paint span. GUI paint events (`paint/build` and `paint/draw`) were added afterwards. They need re-verification in the windowed journey.
 The test-only pass made no engine changes. Non-Linux runtime remains untested.
 
 Evidence: `/tmp/monitor-gui-20261117/` contains the runner, journey, test logs, results, corrected JSONL capture and `trace-screen.png`.
