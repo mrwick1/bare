@@ -77,7 +77,7 @@ impl RegStack {
 /// An open loop iterator (`IterOpen`, `ForInOpen`).
 pub(super) enum BcIter {
     Of(It),
-    In { obj: Value, keys: Vec<PropertyKey>, i: usize, proxied: bool },
+    In(ForIn),
 }
 
 macro_rules! op_consts {
@@ -694,20 +694,6 @@ impl<'p> Interp<'p> {
         let o = h!(self, self.heap.new_object(Some(self.object_proto)));
         self.copy_props(o, src, &used)?;
         Ok(Value::Object(o))
-    }
-
-    /// The next key of a `for-in` that the object still has (`exec_for_each`).
-    fn bc_for_in_next(&mut self, obj: Value, keys: &[PropertyKey], i: &mut usize, proxied: bool) -> Res<Option<Value>> {
-        while let Some(&k) = keys.get(*i) {
-            *i += 1;
-            if let Value::Object(o) = obj
-                && !(if proxied { self.px_for_in_has(o, k)? } else { self.o_has_property(o, k)? })
-            {
-                continue;
-            }
-            return Ok(Some(h!(self, self.heap.key_to_value(k))));
-        }
-        Ok(None)
     }
 
     /// The bindings of the environment of scope `s`, in the order of `bc_binds`.
@@ -1526,14 +1512,13 @@ impl<'p> Interp<'p> {
                         st.iters.push(BcIter::Of(it));
                     }
                     FOR_IN_OPEN => {
-                        let obj = regs[a];
-                        let (keys, proxied) = tri!(at, self.for_in_keys(obj));
-                        st.iters.push(BcIter::In { obj, keys, i: 0, proxied });
+                        let f = tri!(at, self.for_in_open(regs[a]));
+                        st.iters.push(BcIter::In(f));
                     }
                     ITER_NEXT => {
                         let next = match st.iters.last_mut() {
                             Some(BcIter::Of(it)) => self.iter_next(it),
-                            Some(BcIter::In { obj, keys, i, proxied }) => self.bc_for_in_next(*obj, keys, i, *proxied),
+                            Some(BcIter::In(f)) => self.for_in_step(f),
                             None => break 'op Err(unsupported("bad bytecode", Span::default())),
                         };
                         match tri!(at, next) {
@@ -1547,7 +1532,7 @@ impl<'p> Interp<'p> {
                     op @ (ITER_STEP | ITER_REST | OBJ_REST | REQUIRE_OBJ) => tri!(at, self.bc_pattern_op(op, a, b, cc, regs, &mut st.iters)),
                     ITER_CLOSE => match st.iters.pop() {
                         Some(BcIter::Of(mut it)) => tri!(at, self.iter_close(&mut it)),
-                        Some(BcIter::In { .. }) => {}
+                        Some(BcIter::In(_)) => {}
                         None => break 'op Err(unsupported("bad bytecode", Span::default())),
                     },
                     RET => ret!(regs[a]),

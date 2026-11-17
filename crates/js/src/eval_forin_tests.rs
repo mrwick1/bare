@@ -55,18 +55,107 @@ const CASES: &[(&str, &str, &str)] = &[
     ("setter_on_proto_adds_key", r#"var r=[ks([1]),ks([1])]; Object.defineProperty(Object.prototype,'setme',{set(v){ Object.defineProperty(Array.prototype,'viaSetter',{value:v,enumerable:true,configurable:true}) },configurable:true}); var a=[1]; a.setme=5; r.push(ks([1])); delete Array.prototype.viaSetter; delete Object.prototype.setme; r.push(ks([1])); r.join(' ')"#, "0 0 0+viaSetter 0"),
 ];
 
-#[test]
-fn for_in_matches_node_when_a_prototype_tail_changes() {
-    big(|| {
-        let mut bad = Vec::new();
-        for &(name, src, want) in CASES {
+/// Loops inside a function body, so `Auto` and `Byte` run them on the lane. The body ends with `return`. Node 22 gave the texts.
+const LOOP_CASES: &[(&str, &str, &str)] = &[
+    ("order_mixed", r#"var r=[ks({b:1,2:1,a:1,1:1}),ks({z:1,y:1,x:1})]; var d={}; for(var i=0;i<200;i++) d['k'+i]=i; d[5]=1; var s=ks(d).split('+'); r.push(s.length, s[0], s[1], s[2], s[200]); return r.join(' ')"#, "1+2+b+a z+y+x 201 5 k0 k1 k199"),
+    ("own_symbol_skipped", r#"var o={a:1}; o[Symbol('s')]=1; o.b=2; return ks(o)+' '+ks(o)"#, "a+b a+b"),
+    ("own_nonenumerable_skipped", r#"var o={a:1}; Object.defineProperty(o,'h',{value:1}); o.b=1; return ks(o)+' '+ks(o)"#, "a+b a+b"),
+    ("delete_last_key", r#"var o={a:1,b:2,c:3},r=[]; for(var k in o){r.push(k); if(k=='a') delete o.c} return r.join('+')+' '+ks(o)"#, "a+b a+b"),
+    ("delete_then_add_again", r#"var o={a:1,b:2,c:3},r=[]; for(var k in o){r.push(k); if(k=='a'){delete o.b; o.b=5}} return r.join('+')+' '+ks(o)"#, "a+b+c a+c+b"),
+    ("delete_from_getter", r#"var o={a:1,b:2,c:3},r=[]; var g={get x(){delete o.b; return 1}}; for(var k in o){r.push(k); g.x} return r.join('+')"#, "a+c"),
+    ("nested_delete_same_object", r#"var o={a:1,b:2,c:3},r=[]; for(var k in o){ for(var j in o){ r.push(k+j); delete o.b } } return r.join('+')"#, "aa+ac+ca+cc"),
+    ("add_then_delete_during_loop", r#"var o={a:1,b:2},r=[]; for(var k in o){r.push(k); o.n=1; delete o.n} return r.join('+')+' '+ks(o)"#, "a+b a+b"),
+    ("nested_same_object", r#"var o={a:1,b:2,c:3},r=[]; for(var x in o) for(var y in o) r.push(x+y); return r.join('+')"#, "aa+ab+ac+ba+bb+bc+ca+cb+cc"),
+    ("own_and_proto_same_key", r#"var p={x:1,y:1}; var o=Object.create(p); o.x=2; o.z=1; return ks(o)+' '+ks(o)"#, "x+z+y x+z+y"),
+    ("set_prototype_of_during_loop", r#"var o={a:1,b:2},r=[]; for(var k in o){r.push(k); Object.setPrototypeOf(o,{q:1})} return r.join('+')+' '+ks(o)"#, "a+b a+b+q"),
+    ("null_undefined", r#"var n=0; for(var k in null) n++; for(var k in undefined) n++; return n+':'+ks(null)+':'+ks(undefined)"#, "0::"),
+    ("array_hole_and_prop", r#"var a=[1,,3]; a.x=1; return ks(a)+' '+ks([])+' '+ks(new Array(3))"#, "0+2+x  "),
+    ("function_receiver", r#"function f(){} f.a=1; var g=()=>1; g.b=2; return ks(f)+' '+ks(g)"#, "a b"),
+    ("frozen_object", r#"return ks(Object.freeze({a:1,b:2}))+' '+ks(Object.seal({c:1}))"#, "a+b c"),
+    ("exits", r#"var o={a:1,b:2,c:3},r=[]; for(var k in o){ if(k=='b') break; r.push(k) } for(var k in o){ for(var j in o){ if(j=='b') break; r.push(k+j) } } function f(){ for(var k in o){ for(var j in o){ if(j=='b') return k+j } } } r.push(f()); try{ for(var k in o){ for(var j in o){ if(k=='b') throw k+j } } }catch(e){r.push('t'+e)} for(var k in o) r.push(k); return r.join('+')"#, "a+aa+ba+ca+ab+tba+a+b+c"),
+    ("attr_change_mid_loop", r#"var o={a:1,b:2,c:3},r=[]; for(var k in o){r.push(k); Object.defineProperty(o,'c',{enumerable:false})} var p={a:1,b:2},q=[]; for(var k in p){q.push(k); Object.freeze(p)} return r.join('+')+' '+q.join('+')+' '+ks(o)"#, "a+b+c a+b a+b"),
+    ("to_dictionary_mid_loop", r#"var o={a:1,b:2,c:3},r=[]; for(var k in o){r.push(k); if(k=='a'){ for(var i=0;i<200;i++) o['n'+i]=i; delete o.b }} return r.join('+')+' '+ks(o).split('+').length"#, "a+c 202"),
+    ("add_and_delete_many", r#"var o={a:1,b:2,c:3,d:4},r=[]; for(var k in o){r.push(k); o['x'+k]=1; delete o.d; delete o.a} return r.join('+')+' '+ks(o)"#, "a+b+c b+c+xa+xb+xc"),
+    ("proxy_string_typed", r#"return ks(new Proxy({a:1,b:2},{}))+' '+ks('xy')+' '+ks(new String('ab'))+' '+ks(new Uint8Array(2))"#, "a+b 0+1 0+1 0+1"),
+    ("empty_and_create_null", r#"var o=Object.create(null); o.a=1; o.b=2; return ks({})+'|'+ks(o)"#, "|a+b"),
+];
+
+/// Each case in a fresh realm in `Tree`, `Auto` and `Byte`, against the Node text. `wrap` puts the source in a function.
+fn check_modes(cases: &[(&str, &str, &str)], wrap: bool) {
+    let mut bad = Vec::new();
+    for mode in [Exec::Tree, Exec::Auto, Exec::Byte] {
+        for &(name, src, want) in cases {
             let mut it = Interp::realm(Heap::default(), EvalLimits::default()).unwrap();
-            let got = run(&mut it, &format!("{KS}{src}"));
+            it.set_exec(mode);
+            let got = if wrap { run(&mut it, &format!("{KS}(function(){{ {src} }})()")) } else { run(&mut it, &format!("{KS}{src}")) };
             if got != want {
-                bad.push(format!("{name}: node {want:?}, bare {got:?}"));
+                bad.push(format!("{mode:?} {name}: node {want:?}, bare {got:?}"));
             }
         }
-        assert!(bad.is_empty(), "{}", bad.join("\n"));
+    }
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
+}
+
+#[test]
+fn for_in_matches_node_when_a_prototype_tail_changes() {
+    big(|| check_modes(CASES, false));
+}
+
+#[test]
+fn for_in_matches_node_in_every_mode() {
+    big(|| check_modes(LOOP_CASES, true));
+}
+
+/// The failing-first test of the shape path (`docs/design-for-in-keys.md`, design B): a loop over a plain object in shape mode reads
+/// the keys of its shape and builds no list. A dictionary, an array, a proxy and a String wrapper take the list path.
+#[test]
+fn a_for_in_over_a_plain_object_reads_its_shape() {
+    big(|| {
+        // The first loop over `{}` walks `Object.prototype` and certifies it (`enum_tail_certify`). The later loops skip it.
+        let src = "function n(o){var c=0;for(var k in o)c++;return c} n({}); var d={}; for(var i=0;i<200;i++) d['k'+i]=i; \
+                   var w=[n({a:1,b:2}), n(Object.create(null)), n({})]; \
+                   var z=[n(d), n([1,2]), n(new Proxy({a:1},{})), n(new String('ab'))]; w.concat(z).join()";
+        for mode in [Exec::Tree, Exec::Auto, Exec::Byte] {
+            let mut it = Interp::realm(Heap::default(), EvalLimits::default()).unwrap();
+            it.set_exec(mode);
+            let c0 = it.ic_counts().heap.for_in_shape;
+            assert_eq!(run(&mut it, src), "2,0,0,200,2,1,2", "{mode:?}");
+            assert_eq!(it.ic_counts().heap.for_in_shape - c0, 3, "{mode:?}: one for each plain object, none for the others");
+        }
+    });
+}
+
+/// A collect between two scripts sweeps the shapes and gives the live ones new ids. A loop after the sweep reads the new id.
+#[test]
+fn a_shape_sweep_between_two_loops_keeps_the_keys() {
+    big(|| {
+        for mode in [Exec::Tree, Exec::Auto, Exec::Byte] {
+            let mut it = Interp::realm(Heap::default(), EvalLimits::default()).unwrap();
+            it.set_exec(mode);
+            let src = "var o={a:1,b:2}; o.c=3; delete o.a; o.d=4; function f(){var r=[];for(var k in o)r.push(k);return r.join('+')} f()";
+            assert_eq!(run(&mut it, &format!("{KS}{src}")), "b+c+d");
+            // Garbage shapes past `SWEEP_MIN`, so that the collect sweeps.
+            run(&mut it, "(function(){ for (var i = 0; i < 10000; i++) { var t = {}; t['g' + i] = i; } })()");
+            let sweeps = it.heap.shape_sweeps();
+            it.collect(&[]).unwrap();
+            assert_eq!(it.heap.shape_sweeps(), sweeps + 1, "{mode:?}: the collect sweeps the shapes");
+            assert_eq!(run(&mut it, "f() + ' ' + f() + ' ' + ks(o)"), "b+c+d b+c+d b+c+d", "{mode:?}");
+        }
+    });
+}
+
+/// The step limit still bounds a loop over a huge dictionary object: the list path spends a step for each key at entry.
+#[test]
+fn a_for_in_over_a_huge_object_hits_the_step_limit() {
+    big(|| {
+        for mode in [Exec::Tree, Exec::Auto, Exec::Byte] {
+            let mut it = Interp::realm(Heap::default(), EvalLimits::default()).unwrap();
+            it.set_exec(mode);
+            run(&mut it, "var o={}; for (var i = 0; i < 100000; i++) o['k' + i] = i;");
+            it.limits.max_steps = 50_000;
+            let r = it.run_script("(function(){ for (var k in o) {} })()");
+            assert!(matches!(r, Err(Error::Limit(LimitKind::Steps))), "{mode:?}: {r:?}");
+        }
     });
 }
 

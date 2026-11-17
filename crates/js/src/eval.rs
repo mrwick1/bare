@@ -3833,14 +3833,8 @@ impl<'p> Interp<'p> {
                     }
                 }
             } else {
-                let (keys, proxied) = self.for_in_keys(rv)?;
-                for k in keys {
-                    if let Value::Object(o) = rv
-                        && !(if proxied { self.px_for_in_has(o, k)? } else { self.o_has_property(o, k)? })
-                    {
-                        continue;
-                    }
-                    let kv = h!(self, self.heap.key_to_value(k));
+                let mut f = self.for_in_open(rv)?;
+                while let Some(kv) = self.for_in_step(&mut f)? {
                     if !step(self, kv)? {
                         break;
                     }
@@ -3863,6 +3857,45 @@ impl<'p> Interp<'p> {
             self.spend(len as u64)?;
         }
         self.o_own_keys(o)
+    }
+
+    /// Open a `for-in` over `v` (`exec_for_each`, `ForInOpen`). A plain object whose chain has no enumerable key reads its shape in place.
+    fn for_in_open(&mut self, v: Value) -> Res<ForIn> {
+        // `collect` refuses inside a call or a statement frame, so no sweep renumbers the shape while the loop is open. The lane runs a
+        // script body outside both, and that loop takes the list path.
+        if let Value::Object(o) = v
+            && (self.depth != 0 || self.stmt_frames != 0)
+            && let Some((shape, n)) = self.heap.for_in_shape(o)
+        {
+            return Ok(ForIn::Shape { o, shape, i: 0, n });
+        }
+        let (keys, proxied) = self.for_in_keys(v)?;
+        Ok(ForIn::List { obj: v, keys, i: 0, proxied })
+    }
+
+    /// The next key of a `for-in` that the object still has. On the shape path a receiver that still has the shape has the key.
+    fn for_in_step(&mut self, f: &mut ForIn) -> Res<Option<Value>> {
+        match f {
+            ForIn::Shape { o, shape, i, n } => {
+                while let Some((s, same)) = self.heap.for_in_shape_next(*o, *shape, i, *n) {
+                    if same || self.o_has_property(*o, PropertyKey::String(s))? {
+                        return Ok(Some(Value::String(s)));
+                    }
+                }
+            }
+            ForIn::List { obj, keys, i, proxied } => {
+                while let Some(&k) = keys.get(*i) {
+                    *i += 1;
+                    if let Value::Object(o) = *obj
+                        && !(if *proxied { self.px_for_in_has(o, k)? } else { self.o_has_property(o, k)? })
+                    {
+                        continue;
+                    }
+                    return Ok(Some(h!(self, self.heap.key_to_value(k))));
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// The keys of a `for-in`, and whether a proxy is on the chain (then each key is checked again as V8 does: `px_for_in_has`).
@@ -3917,6 +3950,14 @@ impl<'p> Interp<'p> {
         }
         Ok((out, proxied))
     }
+}
+
+/// An open `for-in` (`docs/design-for-in-keys.md`).
+pub(super) enum ForIn {
+    /// The keys are the entries `..n` of `shape`, the shape of `o` at the start (`Heap::for_in_shape`). No collect runs while it is open.
+    Shape { o: ObjId, shape: u32, i: u32, n: u32 },
+    /// A copy of the keys at the start. A proxy on the chain (`proxied`) answers each key again (`px_for_in_has`).
+    List { obj: Value, keys: Vec<PropertyKey>, i: usize, proxied: bool },
 }
 
 type NumBase = crate::lex::NumberBase;
