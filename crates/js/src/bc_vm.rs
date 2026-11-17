@@ -960,6 +960,52 @@ impl<'p> Interp<'p> {
         Ok(r)
     }
 
+    /// A `CallR` that does not stay in the loop. The caller's registers are the arguments: no copy. The loop holds `st.regs`, so
+    /// the callee cannot change them. A native runs here as `call_fn` and `call_fn_inner` would run it, without a second lookup. A
+    /// native that calls script code does it through `call_fn`, which counts and resets the frames. `x`: the second word of the op
+    /// (the call position). A value that is not callable goes to `bc_call`, which names it in the error.
+    #[inline(never)]
+    fn bc_call_r(&mut self, c: &Compiled, pc: usize, regs: &[Value], b: usize, n: usize, x: u32) -> Res<Value> {
+        let Value::Object(o) = regs[b] else { return self.bc_call(c, pc, regs, b, n, false) };
+        let nf = match self.funcs.get(&o) {
+            Some(&Callee::Native(nf)) => nf,
+            Some(_) => return self.bc_call_fn(regs, b, n, x),
+            None => return self.bc_call(c, pc, regs, b, n, false),
+        };
+        self.stk.pos = x & 0x7fff_ffff;
+        let r = self.bc_native(nf, regs[b + 1], &regs[b + 2..b + 2 + n]);
+        self.stk.pos = 0;
+        r
+    }
+
+    /// `bc_call_r` of a callable value that is not a native.
+    #[inline(never)]
+    fn bc_call_fn(&mut self, regs: &[Value], b: usize, n: usize, x: u32) -> Res<Value> {
+        self.stk.pos = x & 0x7fff_ffff;
+        let r = self.call_fn(regs[b], regs[b + 1], &regs[b + 2..b + 2 + n]);
+        self.stk.pos = 0;
+        r
+    }
+
+    /// `call_fn` and `call_fn_inner` for a native callee.
+    #[inline(always)]
+    fn bc_native(&mut self, nf: Nat, this: Value, args: &[Value]) -> Res<Value> {
+        if self.frames >= self.limits.max_traversal_depth {
+            return Err(Error::Limit(LimitKind::TraversalDepth));
+        }
+        if self.depth >= self.limits.max_call_depth {
+            return Err(Error::Limit(LimitKind::CallDepth));
+        }
+        self.tick()?;
+        self.bc.stats.natives += 1;
+        self.frames += 1;
+        self.depth += 1;
+        let r = self.call_native(nf, this, args, false);
+        self.depth -= 1;
+        self.frames -= 1;
+        r
+    }
+
     /// `Closure` and `ClosureName`.
     #[inline(never)]
     fn bc_closure(&mut self, c: &Compiled, fid: FuncId, name: Option<u32>) -> Res<Value> {
@@ -1305,7 +1351,7 @@ impl<'p> Interp<'p> {
                             regs[b + 1] = Value::Undefined;
                         }
                         let Some((callee, fid, cenv, fobj)) = self.bc_target(regs[b]) else {
-                            regs[a] = tri!(at, self.bc_call(c, at, regs, b, cc, false));
+                            regs[a] = tri!(at, self.bc_call_r(c, at, regs, b, cc, x));
                             continue 'run;
                         };
                         // What `call_fn_inner` and `call_script` do for a call, without the Rust frames.

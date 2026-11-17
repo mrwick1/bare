@@ -459,3 +459,47 @@ fn a_call_to_a_lazy_function_of_another_script_stays_in_the_loop() {
         }
     });
 }
+
+/// A lane function calls natives: one that calls back into script code (`map`), one that throws, and `push`. The loop calls
+/// them with its registers as the arguments. Results, `Error.stack` and the depth limit of a recursion through `map` are what
+/// the tree walker gives.
+#[test]
+fn a_native_called_from_the_loop_keeps_results_stacks_and_the_depth_limit() {
+    big(|| {
+        let src = "function k3(v) { return v * 3; }
+             function each(a) { var s = 0, b = a.map(k3), arr = []; for (var i = 0; i < b.length; i++) s += b[i];
+               for (var j = 0; j < 5; j++) arr.push(j, s); return s + '/' + arr.join(); }
+             function bad(o) { return Object.defineProperty(o, 'x', {}); }
+             function cb() { return [1].map(function inner(v) { throw new Error('in ' + v); }); }
+             var st1 = '', st2 = '';
+             try { bad(1); } catch (e) { st1 = e.stack; }
+             try { cb(); } catch (e) { st2 = e.stack; }
+             each([1, 2, 3]) + '|' + st1 + '|' + st2";
+        let deep = "var c = 0; function deep(n) { c++; return [n].map(deep); } deep(0)";
+        let mut want = String::new();
+        for mode in [Exec::Tree, Exec::Auto, Exec::Byte] {
+            let mut it = realm();
+            it.set_exec(mode);
+            let got = match it.run_script(src) {
+                Ok(v) => it.display(v),
+                Err(e) => format!("{e:?}"),
+            };
+            let s = it.bc_stats();
+            let mut d = realm_with(EvalLimits { max_steps: 50_000_000, max_call_depth: 40, ..Default::default() });
+            d.set_exec(mode);
+            let lim = format!("{:?}", d.run_script(deep).map(|_| ()));
+            let got = format!("{got}|{lim}|{}", d.run_script("c").map(|v| d.display(v)).unwrap_or_default());
+            if mode == Exec::Tree {
+                want = got;
+                assert!(want.contains("at bad (") && want.contains("at inner (") && want.contains("at cb ("), "{want}");
+                assert!(want.contains("Limit(CallDepth)"), "{want}");
+                continue;
+            }
+            assert_eq!(got, want, "{mode:?}");
+            if mode == Exec::Byte {
+                // `map` twice, `defineProperty`, `join`, and `push` five times.
+                assert!(s.natives >= 9, "{s:?}");
+            }
+        }
+    });
+}

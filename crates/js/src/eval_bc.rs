@@ -89,6 +89,8 @@ pub struct BcStats {
     /// walker ran because the lane was on and refused the function (or it is a generator or an async function).
     pub calls_lane: u64,
     pub calls_tree: u64,
+    /// Calls of natives that the loop made itself (`CallR`), with the registers as the arguments.
+    pub natives: u64,
 }
 
 /// The state of the bytecode interpreter (B3 of `docs/engine-plan.md`). The format is in `bc.rs`, the loop in `bc_vm.rs`.
@@ -135,7 +137,7 @@ impl Drop for BcState {
         if s.calls_lane + s.calls_tree > 0 && std::env::var_os("BARE_JS_STATS").is_some() {
             let mut r: Vec<_> = self.refused.iter().collect();
             r.sort();
-            eprintln!("bcstats compiled={} fallbacks={} runs={} calls_lane={} calls_tree={} refused={r:?}", s.compiled, s.fallbacks, s.runs, s.calls_lane, s.calls_tree);
+            eprintln!("bcstats compiled={} fallbacks={} runs={} calls_lane={} calls_tree={} natives={} refused={r:?}", s.compiled, s.fallbacks, s.runs, s.calls_lane, s.calls_tree, s.natives);
         }
         #[cfg(feature = "bc-hist")]
         self.hist.report();
