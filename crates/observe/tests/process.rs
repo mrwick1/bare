@@ -38,6 +38,7 @@ fn modes_samples_context_and_shutdown() {
         let samples: Vec<_> = records.iter().filter(|r| r["event"] == "sample").collect();
         assert!(samples.len() >= 2);
         assert!(samples.iter().all(|r| r.get("session_id").is_none()));
+        assert!(samples.iter().all(|r| r["fields"]["logger_queued_bytes"].is_u64()));
         let stats = records.iter().find(|r| r["event"] == "stats").unwrap();
         assert_eq!(stats["session_id"], 7);
         assert_eq!(stats["step_id"], 3);

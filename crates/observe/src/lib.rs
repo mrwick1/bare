@@ -176,6 +176,10 @@ pub struct Status {
     pub dropped: u64,
     pub reason: StopReason,
     pub write_error: Option<String>,
+    /// Heap bytes (`Vec::capacity`) of records waiting in the queue now.
+    pub queued_bytes: u64,
+    pub peak_queued_bytes: u64,
+    pub peak_queued_records: u64,
 }
 struct Shared {
     config: Config,
@@ -185,6 +189,10 @@ struct Shared {
     active: AtomicU64,
     reason: AtomicU8,
     error: Mutex<Option<String>>,
+    queued_bytes: AtomicU64,
+    peak_queued_bytes: AtomicU64,
+    queued_records: AtomicU64,
+    peak_queued_records: AtomicU64,
 }
 impl Shared {
     fn status(&self) -> Status {
@@ -197,6 +205,9 @@ impl Shared {
                 _ => StopReason::Running,
             },
             write_error: self.error.lock().unwrap().clone(),
+            queued_bytes: self.queued_bytes.load(Ordering::Relaxed),
+            peak_queued_bytes: self.peak_queued_bytes.load(Ordering::Relaxed),
+            peak_queued_records: self.peak_queued_records.load(Ordering::Relaxed),
         }
     }
     fn fail(&self, error: io::Error) {
@@ -226,7 +237,14 @@ impl Handle {
                 dropped: 0,
                 reason: StopReason::Shutdown,
                 write_error: None,
+                queued_bytes: 0,
+                peak_queued_bytes: 0,
+                peak_queued_records: 0,
             })
+    }
+    /// Heap bytes of records waiting in the queue; `None` when monitoring is off.
+    pub fn queued_bytes(&self) -> Option<u64> {
+        self.inner.as_ref().map(|(s, _)| s.queued_bytes.load(Ordering::Relaxed))
     }
     /// The closure runs only for enabled, matching events. Names must be fixed literals.
     /// Fields cannot contain raw strings, headers, bodies, source, or typed page input.
@@ -296,12 +314,22 @@ impl Handle {
         if serde_json::to_writer(&mut bytes, &record).is_err() || bytes.write_all(b"\n").is_err() {
             return dropped();
         }
+        // Count before sending so the writer cannot subtract first and underflow.
+        let size = bytes.0.capacity() as u64;
+        let queued = s.queued_bytes.fetch_add(size, Ordering::Relaxed) + size;
+        let records = s.queued_records.fetch_add(1, Ordering::Relaxed) + 1;
+        s.peak_queued_bytes.fetch_max(queued, Ordering::Relaxed);
+        s.peak_queued_records.fetch_max(records, Ordering::Relaxed);
         match tx.try_send(bytes.0) {
             Ok(()) => Emission::Queued,
-            Err(TrySendError::Full(_)) => dropped(),
-            Err(TrySendError::Disconnected(_)) => {
+            Err(error) => {
+                s.queued_bytes.fetch_sub(size, Ordering::Relaxed);
+                s.queued_records.fetch_sub(1, Ordering::Relaxed);
                 dropped();
-                Emission::Stopped
+                match error {
+                    TrySendError::Full(_) => Emission::Dropped,
+                    TrySendError::Disconnected(_) => Emission::Stopped,
+                }
             }
         }
     }
@@ -363,6 +391,10 @@ impl Collector {
             active: AtomicU64::new(0),
             reason: AtomicU8::new(0),
             error: Mutex::new(None),
+            queued_bytes: AtomicU64::new(0),
+            peak_queued_bytes: AtomicU64::new(0),
+            queued_records: AtomicU64::new(0),
+            peak_queued_records: AtomicU64::new(0),
         });
         let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(QUEUE_CAPACITY);
         let s = shared.clone();
@@ -430,6 +462,8 @@ fn run_writer(s: Arc<Shared>, rx: mpsc::Receiver<Vec<u8>>, mut writer: impl Writ
             }
         };
         if !record.is_empty() {
+            s.queued_bytes.fetch_sub(record.capacity() as u64, Ordering::Relaxed);
+            s.queued_records.fetch_sub(1, Ordering::Relaxed);
             if s.reason.load(Ordering::Acquire) >= 2 {
                 s.dropped.fetch_add(1, Ordering::Relaxed);
                 continue;
@@ -470,7 +504,9 @@ fn run_writer(s: Arc<Shared>, rx: mpsc::Receiver<Vec<u8>>, mut writer: impl Writ
             Level::Info,
             "observe",
             "collector_status",
-            json!({"reason": reason, "dropped": s.dropped.load(Ordering::Relaxed)}),
+            json!({"reason": reason, "dropped": s.dropped.load(Ordering::Relaxed),
+                "peak_queued_bytes": s.peak_queued_bytes.load(Ordering::Relaxed),
+                "peak_queued_records": s.peak_queued_records.load(Ordering::Relaxed)}),
         );
         let mut terminal = serde_json::to_vec(&record).expect("scalar JSON");
         terminal.push(b'\n');

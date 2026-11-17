@@ -76,7 +76,7 @@ impl Process {
                 handle.emit(Level::Info, "process", "sample", Ids::default(), || {
                     let s = bare_os::metrics::snapshot();
                     let f = |k, v: Option<u64>| Field(k, v.map_or(Scalar::Null, Scalar::U64));
-                    [f("rss_bytes", s.rss_bytes), f("peak_rss_bytes", s.peak_rss_bytes), f("allocator_live_bytes", s.allocator_live_bytes), f("cpu_user_us", s.cpu_user_us), f("cpu_system_us", s.cpu_system_us), f("thread_count", s.thread_count)]
+                    [f("rss_bytes", s.rss_bytes), f("peak_rss_bytes", s.peak_rss_bytes), f("allocator_live_bytes", s.allocator_live_bytes), f("cpu_user_us", s.cpu_user_us), f("cpu_system_us", s.cpu_system_us), f("thread_count", s.thread_count), f("logger_queued_bytes", handle.queued_bytes())]
                 });
                 if rx.recv_timeout(interval) != Err(mpsc::RecvTimeoutError::Timeout) { break; }
             }

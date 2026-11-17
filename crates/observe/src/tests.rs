@@ -318,3 +318,54 @@ fn failure_after_partial_write_stops_capture() {
     assert_eq!(status.reason, StopReason::WriteFailed);
     assert_eq!(status.dropped, 1);
 }
+
+struct Gated {
+    gate: Arc<(Mutex<bool>, Condvar)>,
+    writes: Arc<Mutex<Vec<Vec<u8>>>>,
+}
+impl Write for Gated {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let (lock, wake) = &*self.gate;
+        let mut open = lock.lock().unwrap();
+        while !*open {
+            open = wake.wait(open).unwrap();
+        }
+        self.writes.lock().unwrap().push(bytes.to_vec());
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+#[test]
+fn queued_memory_is_counted_and_released() {
+    let gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let writes = Arc::new(Mutex::new(Vec::new()));
+    let owner = Collector::with_writer(
+        config(&[]),
+        Gated { gate: gate.clone(), writes: writes.clone() },
+    )
+    .unwrap();
+    let h = owner.handle();
+    assert_eq!(h.queued_bytes(), Some(0));
+    for _ in 0..10 {
+        assert_eq!(h.emit(Level::Info, "net", "x", Ids::default(), || []), Emission::Queued);
+    }
+    // The blocked writer holds at most one received record.
+    let held = h.status();
+    assert!(held.queued_bytes > 0);
+    assert_eq!(h.queued_bytes(), Some(held.queued_bytes));
+    assert!(held.peak_queued_records >= 9);
+    *gate.0.lock().unwrap() = true;
+    gate.1.notify_all();
+    let done = owner.shutdown();
+    let writes = writes.lock().unwrap();
+    let smallest = writes[..10].iter().map(Vec::len).min().unwrap() as u64;
+    assert!(held.peak_queued_bytes >= 9 * smallest);
+    assert_eq!(done.queued_bytes, 0);
+    assert_eq!(done.peak_queued_bytes, held.peak_queued_bytes);
+    assert_eq!(done.peak_queued_records, held.peak_queued_records);
+    let terminal: Value = serde_json::from_slice(writes.last().unwrap()).unwrap();
+    assert_eq!(terminal["fields"]["peak_queued_bytes"], done.peak_queued_bytes);
+    assert_eq!(terminal["fields"]["peak_queued_records"], done.peak_queued_records);
+}
