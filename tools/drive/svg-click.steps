@@ -1,0 +1,9 @@
+# Beta ticket OFS-16: a click on a shape of an inline <svg> (a d3 tree). The shape has a box where it draws, as in Chrome.
+#   (cd tools/fixtures/ui && python3 -m http.server PORT --bind 127.0.0.1) &
+#   bare-drive --size 400x300 --var FIXTURE=http://127.0.0.1:PORT/svg-tree.html tools/drive/svg-click.steps
+timeout 10000
+open ${FIXTURE}
+expect css="g#n1.node rect.body" visible
+click css="g#n1.node rect.body"
+expect js "log.join() === 'r1:r1'"
+expect js "(function () { var r = document.getElementById('r1').getBoundingClientRect(); return [r.x, r.y, r.width, r.height].join() })() === '60,80,80,30'"

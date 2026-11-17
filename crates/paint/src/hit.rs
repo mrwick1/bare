@@ -100,7 +100,8 @@ fn hit(doc: &Document, styles: &Styles, layout: &Layout, scrolled: Option<(&Area
             break;
         }
     }
-    let mut h = Hit { tree, doc, frags, scrolled, window, stacks, flex, ext, fixed_root: Vec::new(), taken: Default::default() };
+    let svg = if doc.has_foreign() { doc.find_atom("svg") } else { None };
+    let mut h = Hit { tree, doc, frags, scrolled, window, stacks, flex, ext, svg, fixed_root: Vec::new(), taken: Default::default() };
     let mut j = 1;
     while j < frags[0].end as usize {
         let g = frags[j];
@@ -139,6 +140,8 @@ struct Hit<'a> {
     flex: bool,
     /// The `extents` of the fragments, if the caller has them: a box whose bounds do not hold the point is skipped with what it holds.
     ext: Option<&'a [[f32; 4]]>,
+    /// The atom of `svg`, if the page has an SVG element: a hit on the box of an `<svg>` goes on into its shapes.
+    svg: Option<bare_html::dom::Atom>,
     /// The fixed boxes (with `z-index: auto`) under the root, and the ones that a box that clips has taken. See `display::fixed_under`.
     fixed_root: Vec<u32>,
     taken: std::cell::RefCell<Vec<u32>>,
@@ -166,6 +169,16 @@ impl Hit<'_> {
     /// Can a pointer hit a box with this style?
     fn hittable(&self, style: &ComputedStyle) -> bool {
         style.get(Property::Visibility) == Value::Keyword(Keyword::Visible) && style.get(Property::PointerEvents) != Value::Keyword(Keyword::None)
+    }
+
+    /// Put the element of the box on `out`. An `<svg>` puts the shapes under the point `p` after it (`svg::hits`), as they are over its box.
+    fn push(&self, out: &mut Vec<NodeId>, f: &Fragment, style: &ComputedStyle, p: Point) {
+        out.push(f.node);
+        if self.svg.is_some() && matches!(self.doc.data(f.node), NodeData::Element { name, .. } if Some(*name) == self.svg) {
+            let from = out.len();
+            crate::svg::hits::<crate::svg::NativeMath>(self.doc, self.tree.styles, f.node, crate::display::svg_area(f, style), p, out);
+            out[from..].reverse();
+        }
     }
 
     /// Is this box an item of a flex or grid container? It paints as an inline-block.
@@ -245,7 +258,7 @@ impl Hit<'_> {
         let mut live = live;
         let mut p = p;
         if live && self.inside(p, f.rect) && self.hittable(style) {
-            out.push(f.node);
+            self.push(out, &f, style, p);
         }
         if i > 0 && clips(&self.tree, f.node) {
             // The inside of a box that clips is reached only through its padding box.
@@ -289,7 +302,7 @@ impl Hit<'_> {
                     match self.layer(&g, style) {
                         Layer::Block => {
                             if live && self.inside(p, g.rect) && self.hittable(style) {
-                                out.push(g.node);
+                                self.push(out, &g, style, p);
                             }
                             j += 1;
                         }
