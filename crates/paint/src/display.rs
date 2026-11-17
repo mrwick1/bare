@@ -1064,10 +1064,17 @@ impl Builder<'_> {
         }
         let (doc, styles, list) = (self.doc, self.tree.styles, &mut *self.list);
         list.items.push(Item::PushClip(b));
-        crate::svg::draw(doc, styles, f.node, (b.x0 as f32, b.y0 as f32, (b.x1 - b.x0) as f32, (b.y1 - b.y0) as f32), &mut |pts, color| {
-            let at = list.points.len() as u32;
-            list.points.extend_from_slice(pts);
-            list.items.push(Item::Poly { at, n: pts.len() as u32, color });
+        crate::svg::draw(doc, styles, f.node, (b.x0 as f32, b.y0 as f32, (b.x1 - b.x0) as f32, (b.y1 - b.y0) as f32), &mut |shape| match shape {
+            crate::svg::Shape::Poly(pts, color) => {
+                let at = list.points.len() as u32;
+                list.points.extend_from_slice(pts);
+                list.items.push(Item::Poly { at, n: pts.len() as u32, color });
+            }
+            crate::svg::Shape::Text { x, baseline, size, color, face, text } => {
+                let at = list.text.len() as u32;
+                list.text.push_str(text);
+                list.items.push(Item::Text { x, baseline: snap(baseline), size, color, at, len: text.len() as u32, face });
+            }
         });
         list.items.push(Item::PopClip);
     }

@@ -634,6 +634,29 @@ fn svg_transforms_nest_and_move_shapes_and_strokes() {
 }
 
 #[test]
+fn svg_text_draws_at_its_position_and_anchor() {
+    let ink_of = |t: &str| {
+        let c = bare(&format!("<style>body{{margin:0}}</style><svg width=300 height=100 font-size=20>{t}</svg>"));
+        ink(&c, 0, 0, 300, 100, WHITE)
+    };
+    // The letters of "HH" start near x 100 and stand on the baseline at y 50.
+    let start = ink_of("<text x=100 y=50 fill=red>HH</text>").expect("letters");
+    assert!((99..=103).contains(&start.0) && (48..=51).contains(&start.3), "{start:?}");
+    // `middle` puts the middle of the run on x; `end` puts its end there.
+    let mid = ink_of("<text x=100 y=50 text-anchor=middle fill=red>HH</text>").expect("letters");
+    assert!((99..=101).contains(&((mid.0 + mid.2) / 2)), "{mid:?}");
+    let end = ink_of("<text x=100 y=50 text-anchor=end fill=red>HH</text>").expect("letters");
+    assert!((97..=101).contains(&end.2), "{end:?}");
+    // `dy` in em of the font (20 px), a translated group, spaces at both ends and a `tspan` that moves on.
+    assert_eq!(ink_of("<text x=100 y=30 dy=1em fill=red>HH</text>"), Some(start));
+    assert_eq!(ink_of("<g transform='translate(50,20)'><text x=50 y=30 fill=red>\n   HH  </text></g>"), Some(start));
+    let two = ink_of("<text x=100 y=50 fill=red>H<tspan dx=40>H</tspan></text>").expect("letters");
+    assert!(two.2 - start.2 >= 38, "the second letter moved by dx: {two:?} {start:?}");
+    // No fill draws nothing.
+    assert_eq!(ink_of("<text x=100 y=50 fill=none>HH</text>"), None);
+}
+
+#[test]
 fn the_svg_fixture() {
     let c = render(fixture!("svg"));
     // The first icon: a chevron of 2 px strokes in the color of the text (#123), with round ends, in a box of 24 px at (8, 8).

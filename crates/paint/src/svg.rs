@@ -5,17 +5,22 @@
 //! `rotate`, `skewX`, `skewY`) applies to an element and all inside it. A stroke under a skew or an unequal scale keeps one width: the
 //! square root of the area scale.
 //!
+//! `text` and the `tspan` inside it draw their letters with the font of the `text` (the cascade, and the `font-*` attributes as hints).
+//! `x`, `y`, `dx` and `dy` (the first number of each, in `px` or `em`) place a run, and `text-anchor` moves each chunk that an `x`
+//! starts. The spaces collapse as in HTML. A run is never turned or skewed: a transform moves it and scales its size.
+//!
 //! A shape becomes polygons in pixels, and `Canvas::fill_poly` fills them with the non-zero rule. A fill is the outline of the shape. A
 //! stroke is one quad for each segment, plus a join (a disc, a bevel or a miter) at each corner and a cap at each end, all with the same
 //! winding, so that the non-zero rule makes their union.
 //!
-//! Not built: `fill-rule`, `stroke-dasharray`, `fill-opacity`, `stroke-opacity`, `opacity` on a shape, `transform` from a style sheet, `use`, `text`, `image`,
+//! Not built: `fill-rule`, `stroke-dasharray`, `fill-opacity`, `stroke-opacity`, `opacity` on a shape, `transform` from a style sheet, `use`, `textPath`, `dominant-baseline`, a style on a `tspan`, `image`,
 //! paint servers (`url(#a)`), `preserveAspectRatio` other than the default, `stroke-width` from a style sheet, a unit other than `px` or none.
 
 use crate::display::argb;
 use bare_css::cascade::{ComputedStyle, Styles};
 use bare_css::values::{Property, Value};
 use bare_html::dom::{Document, NodeData, NodeId};
+use bare_layout::font::{Face, Metrics};
 
 /// Math used when flattening SVG shapes. The browser can supply its software math.
 pub trait GeometryMath {
@@ -75,10 +80,17 @@ fn len(doc: &Document, node: NodeId, name: &str) -> f32 {
     attr(doc, node, name).and_then(num).unwrap_or(0.0)
 }
 
-/// The sink for the polygons that `draw` makes.
-type Out<'a> = &'a mut dyn FnMut(&[(f32, f32)], u32);
+/// What `draw` makes: a polygon list (contours apart by a NaN point) and its color, or a run of text.
+pub enum Shape<'a> {
+    Poly(&'a [(f32, f32)], u32),
+    /// `x` is the left edge of the first letter and `baseline` its baseline, in pixels.
+    Text { x: f32, baseline: f32, size: f32, color: u32, face: Face, text: &'a str },
+}
 
-/// Draw the `<svg>` element `root` in the pixel box `(x, y, w, h)`: `out` gets each polygon list (contours apart by a NaN point) and its color.
+/// The sink for the shapes that `draw` makes.
+type Out<'a> = &'a mut dyn FnMut(Shape<'_>);
+
+/// Draw the `<svg>` element `root` in the pixel box `(x, y, w, h)`: `out` gets each shape, in paint order.
 pub fn draw(doc: &Document, styles: &Styles, root: NodeId, (x, y, w, h): (f32, f32, f32, f32), out: Out<'_>) {
     let view = attr(doc, root, "viewBox").and_then(|v| {
         let mut n = v.split(|c: char| c == ',' || c.is_whitespace()).filter(|t| !t.is_empty()).map(|t| t.parse::<f32>().ok());
@@ -111,6 +123,12 @@ fn walk(doc: &Document, styles: &Styles, root: NodeId, node: NodeId, inherited: 
             walk(doc, styles, root, child, paint, map, out, buf);
             continue;
         }
+        if name == "text" {
+            if let (Some(color), Some(style)) = (paint.0, styles.style(child)) {
+                text(doc, root, child, Metrics::of(style), color, map, out);
+            }
+            continue;
+        }
         let subs = shape::<NativeMath>(doc, child, name, map.s);
         if subs.is_empty() {
             continue;
@@ -123,7 +141,7 @@ fn walk(doc: &Document, styles: &Styles, root: NodeId, node: NodeId, inherited: 
                 }
             }
             if !buf.is_empty() {
-                out(buf, color);
+                out(Shape::Poly(buf, color));
             }
         }
         if let Some(color) = paint.1 {
@@ -133,7 +151,7 @@ fn walk(doc: &Document, styles: &Styles, root: NodeId, node: NodeId, inherited: 
                 st.add(sub, map, buf);
             }
             if !buf.is_empty() {
-                out(buf, color);
+                out(Shape::Poly(buf, color));
             }
         }
     }
@@ -193,6 +211,103 @@ fn transform(v: &str) -> Option<[f32; 6]> {
         rest = tail.trim_start_matches(|c: char| c == ',' || c.is_whitespace());
     }
     Some(map.m)
+}
+
+/// The first number of a list attribute (`x`, `y`, `dx`, `dy`), in user units: a number, `px` or `em` of the font size `em`.
+fn first_len(doc: &Document, node: NodeId, name: &str, em: f32) -> Option<f32> {
+    let v = attr(doc, node, name)?.split(|c: char| c == ',' || c.is_whitespace()).find(|t| !t.is_empty())?;
+    match v.strip_suffix("em") {
+        Some(n) => n.parse::<f32>().ok().filter(|n| n.is_finite()).map(|n| n * em),
+        None => num(v),
+    }
+}
+
+/// Draw the letters of the `text` element `node`. The runs of a chunk (one `x`) move together for `text-anchor`.
+fn text(doc: &Document, root: NodeId, node: NodeId, m: Metrics, color: u32, map: Map, out: Out<'_>) {
+    // (x, y, dx, dy, the letters) of each run, in document order. The positions of an element go to the run that comes next.
+    type Run = (Option<f32>, Option<f32>, f32, f32, String);
+    let mut runs: Vec<Run> = Vec::new();
+    let mut pending = (None, None, 0.0, 0.0);
+    let mut stack = vec![node];
+    let mut order = Vec::new();
+    // The nodes in document order, each element before what is inside it.
+    while let Some(n) = stack.pop() {
+        order.push(n);
+        if n == node || matches!(doc.data(n), NodeData::Element { .. }) && matches!(doc.element_name(n), "tspan" | "a") {
+            let kids: Vec<_> = doc.children(n).collect();
+            stack.extend(kids.into_iter().rev());
+        }
+    }
+    for n in order {
+        match doc.data(n) {
+            NodeData::Element { .. } if n == node || matches!(doc.element_name(n), "tspan" | "a") => {
+                let l = |name| first_len(doc, n, name, m.size);
+                pending = (l("x").or(pending.0), l("y").or(pending.1), pending.2 + l("dx").unwrap_or(0.0), pending.3 + l("dy").unwrap_or(0.0));
+            }
+            &NodeData::Text(span) => {
+                runs.push((pending.0, pending.1, pending.2, pending.3, doc.text(span).to_string()));
+                pending = (None, None, 0.0, 0.0);
+            }
+            _ => {}
+        }
+    }
+    // The spaces collapse across the runs, and the text loses its spaces at both ends.
+    let mut space = true;
+    for r in &mut runs {
+        let mut t = String::with_capacity(r.4.len());
+        for c in r.4.chars() {
+            if c.is_whitespace() {
+                if !space {
+                    t.push(' ');
+                }
+                space = true;
+            } else {
+                t.push(c);
+                space = false;
+            }
+        }
+        r.4 = t;
+    }
+    if let Some(last) = runs.iter_mut().rev().find(|r| !r.4.is_empty()) {
+        last.4.truncate(last.4.trim_end().len());
+    }
+    // `text-anchor` from the `text` or the nearest element above it: 0 start, 0.5 middle, 1 end.
+    let anchor = std::iter::successors(Some(node), |&n| if n == root { None } else { doc.parent(n) })
+        .find_map(|n| attr(doc, n, "text-anchor"))
+        .map_or(0.0, |v| match v.trim() {
+            "middle" => 0.5,
+            "end" => 1.0,
+            _ => 0.0,
+        });
+    let (mut x, mut y) = (0.0, 0.0);
+    let mut placed: Vec<(f32, f32, usize)> = Vec::with_capacity(runs.len());
+    let mut chunk = 0;
+    let shift = |placed: &mut Vec<(f32, f32, usize)>, from: usize, end: f32| {
+        if let Some(&(x0, _, _)) = placed.get(from) {
+            let w = end - x0;
+            for p in &mut placed[from..] {
+                p.0 -= w * anchor;
+            }
+        }
+    };
+    for (i, r) in runs.iter().enumerate() {
+        if r.0.is_some() && i > 0 {
+            shift(&mut placed, chunk, x);
+            chunk = placed.len();
+        }
+        x = r.0.unwrap_or(x) + r.2;
+        y = r.1.unwrap_or(y) + r.3;
+        placed.push((x, y, i));
+        x += bare_layout::controls::text_width(&m, &r.4);
+    }
+    shift(&mut placed, chunk, x);
+    for (x, y, i) in placed {
+        if runs[i].4.is_empty() {
+            continue;
+        }
+        let (px, py) = map.at((x, y));
+        out(Shape::Text { x: px, baseline: py, size: m.size * map.s, color, face: m.face, text: &runs[i].4 });
+    }
 }
 
 /// Add a contour to a polygon list.
