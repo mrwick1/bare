@@ -734,7 +734,8 @@ impl Page {
         if b.has_download_request() || b.it.pending_jobs() > 0 {
             return (true, Some(bare_net::vclock::instant()));
         }
-        let (due, now) = (b.next_scheduled_due(), b.now());
+        // A split document that waits for a download runs no task before it is in: a due task would turn the page for nothing.
+        let (due, now) = (b.next_scheduled_due().filter(|_| !b.tasks_held()), b.now());
         let net = if b.live() { b.live_work() } else { (b.pending_fetches() > 0).then_some(true) };
         let at = due.map(|d| bare_net::vclock::instant() + Duration::from_secs_f64((d - now).max(0.0) / 1000.0));
         let at = if net == Some(false) || images { Some(at.map_or(look(), |a| a.min(look()))) } else { at };

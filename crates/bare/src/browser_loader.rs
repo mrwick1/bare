@@ -972,6 +972,12 @@ impl Browser {
         self.live_work_of(true)
     }
 
+    /// Live: the parser of a split document waits for a download before `DOMContentLoaded`. Its turns run no task until the download
+    /// is in, so a task that is due is not work until then.
+    pub(crate) fn tasks_held(&self) -> bool {
+        self.dom.scripts.parse.borrow().as_ref().is_some_and(|p| p.waiting && p.step <= p.items.iter().filter(|i| i.timing != Timing::Async).count() + 1)
+    }
+
     /// `live_work`; with `streams` false an open event stream is not work: it can stay open for as long as the page lives.
     pub(crate) fn live_work_of(&self, streams: bool) -> Option<bool> {
         let s = &self.dom.scripts;
