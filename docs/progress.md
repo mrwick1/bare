@@ -12997,3 +12997,30 @@ Added: optional chains, spread (calls and arrays), computed keys, `delete` and r
 ## Monitoring cost on main `9ba3373e` (2026-11-17)
 
 Rerun after another merge of `main`, on `b21e748b`: metrics +0.353%, trace +0.602%, off against `main` +0.0013%. All budgets pass. With monitoring off, browser peak RSS is about 700 KiB higher than on `main` (16.7 to 17.0 MiB against 16.0 to 16.3 MiB). The cause is not verified. Detail: `docs/monitoring.md`.
+
+## Calls of other scripts and natives stay in the loop (`call-lane`, 2026-11-17)
+
+Steps 1 and 2 of `docs/design-lane-calls.md`. Base: origin/main `632de066ae` (PR #636). Machine: archMachine. `Auto`, public React page, `#a1`. Instruction counts: minimum of 3 `perf stat` runs, spread at most 0.05%. Narrow rows: `byte`, scale 10.
+
+- `Compiled` records its script. `CallR` runs a lane function of any script in the loop of the caller: no `select`, no `bc_call` chain, no nested `bc_loop`. Ops that read the tables of the current script call `bc_sync` first, outside the hot arms. A callee with an environment is set up in a cold function (`bc_call_env`). The unit tests run in a poison mode (feature `bc-poison` outside the tests): `select` parks an empty `prog` and `cc`, so a missing `bc_sync` panics. The mode caught a sync that was removed on purpose.
+- A native callee gets the register slice of the caller as its arguments (`bc_call_r`): no argument copy, no `call_fn_inner`. `bcstats` has a new counter `natives`.
+- The register stack grows by half of its size, not by the doubling of `Vec`. Calls of other scripts now share one deep stack, and the doubling kept up to twice its depth: +87,004 B of peak heap at 5 keys (massif). With the change the difference is +49,644 B.
+
+| Row | main | now |
+| --- | --- | --- |
+| Page load | 472.11M | 441.03M (-6.6%) |
+| Page 50 keys | 8220.18M | 7167.71M (-12.8%) |
+| `select` calls, 5 keys minus 0 keys (callgrind) | 297,624 | 31,537 |
+| loopfn | 833.06M | 837.05M (+0.48%) |
+| fib | 58.85M | 58.20M |
+| calls | 1604.28M | 1599.28M |
+| loop | 2367.05M | 2369.05M (+0.08%) |
+| closures | 476.49M | 469.74M |
+
+- The `arr.push(i)` micro costs 158 fewer instructions per call (3,420.1 to 3,262.1, callgrind). Step 2 alone: steady page -1.09%.
+- Cost matrix against main (803 rows): 0 rows over +0.5% under both allocators. Mean glibc -1.006%. Two `resources_load small` rows are over under glibc only (+1.10%, +1.19%) and under jemalloc they are -0.21% and -1.03%.
+- Peak RSS, `Auto`, medians of 7 interleaved runs, copies made with `cp --reflink=never`: load 26540 KiB against 26888 on main (-1.3%), 50 keys 34884 against 35300 (-1.2%). `tree` mode: load +0.13%, 50 keys +0.60% (25436/33440 against 25404/33240).
+- Measurement rule for RSS: copy the binary with `cp --reflink=never`. This disk is btrfs with zstd. A reflink copy makes the resident file pages of the 14 MB binary depend on which file it was copied from, not on the code. A byte-identical copy of one binary differed by 1024 KiB of file pages. Earlier RSS numbers in this file that were taken with `cp` (the lane entries of today) carry that error of up to about 1 MiB. Re-measured with byte copies: #636 against its base, `Auto`: load +0.19%, 50 keys +1.20% (run-to-run spread about 1%; not conclusive).
+- Tests: `cargo test -p bare-js --lib` 1018 passed, 1 ignored. `tools/js/exec_diff.sh`: 79 runs, 0 differences, also in the poison build. Clippy on the js crate: only `eval_scripts.rs` `unnecessary_cast`, already on main; `cargo clippy -p bare-js -D warnings` stops at `crates/observe/src/process.rs:92` (main).
+- Not tested: a recursion through natives other than `map` that call back (`forEach`, `sort`, `Function.prototype.call`), the `max_traversal_depth` error in the native arm, the frame stacks (they still double), the private dashboard journey, wall time, Windows and macOS, massif at 50 keys.
+- Next levers (from the design): the call-site cache and a cheaper `select` only after a new profile; one register stack shared by nested runs would remove the duplicated pooled stacks.
