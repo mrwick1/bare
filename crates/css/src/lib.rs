@@ -18,6 +18,7 @@ pub mod selector;
 #[cfg(test)]
 mod shadow_tests;
 pub mod tokenizer;
+pub mod transform;
 pub mod urls;
 pub mod values;
 pub mod var;

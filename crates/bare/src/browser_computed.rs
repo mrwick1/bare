@@ -289,6 +289,8 @@ pub(crate) struct Snap {
     pub(crate) partial: bool,
 }
 
+const NO_MOVE: &str = "a computed transform move that is not in pixels or a percent";
+
 /// A number as Chrome prints it: 6 significant digits, no trailing zeros, no `-0`.
 pub(crate) fn num(n: f32) -> String {
     let v = n as f64;
@@ -993,21 +995,47 @@ impl Dom {
         }
     }
 
-    /// `transform`: the engine keeps only the move (`TranslateX`, `TranslateY`), so the text is `none` or a matrix of a move. A percent needs the box: it is gated.
+    /// `transform`: `none`, or the 2D matrix of the list (`bare_css::transform`). A percent is of the border box, so a list with one runs the layout.
+    /// A real 3D step (`rotateX`, `perspective`, a z move) has a `matrix3d(...)` in Chrome: it is gated.
     fn computed_transform(&self, it: &mut Interp<'_>, el: NodeId, kind: u8) -> R<String> {
+        use bare_css::{grid::Grid, transform::{Func, resolve, text}};
         // `transform` is not inherited: a pseudo-element here has the initial value.
         if kind == PSEUDO {
             return Ok("none".into());
         }
-        let Some(s) = self.snapshot_with(it, el, true)? else { return Ok(String::new()) };
-        let mut xy = [0.0; 2];
-        for (v, p) in xy.iter_mut().zip([Property::TranslateX, Property::TranslateY]) {
-            *v = match s.style.value(p) {
-                Cv::Length(Length::Px(x)) => x,
-                _ => return Err(Self::gate("a computed transform that moves by a percent (it needs the box)")),
-            };
+        let Some(mut s) = self.snapshot_with(it, el, true)? else { return Ok(String::new()) };
+        let (x, y) = (s.style.value(Property::TranslateX), s.style.value(Property::TranslateY));
+        let zero = Cv::Length(Length::Px(0.0));
+        let list = match (x, y) {
+            (Cv::Grid(i), _) => match s.styles.grid(i) {
+                Grid::Transform(l) => l.clone(),
+                _ => return Ok("none".into()),
+            },
+            (x, y) if (x, y) == (zero, zero) => return Ok("none".into()),
+            // A plain move of two lengths.
+            (x, y) => {
+                let l = |v| match v {
+                    Cv::Length(l @ (Length::Px(_) | Length::Percent(_))) => Some(l),
+                    _ => None,
+                };
+                vec![Func::Translate(l(x).ok_or_else(|| Self::gate(NO_MOVE))?, l(y).ok_or_else(|| Self::gate(NO_MOVE))?)]
+            }
+        };
+        let percent = list.iter().any(|f| matches!(f, Func::Translate(Length::Percent(_), _) | Func::Translate(_, Length::Percent(_))));
+        let (mut w, mut h) = (0.0, 0.0);
+        if percent && !s.hidden {
+            if s.partial {
+                s = self.snapshot(it, el)?.expect("in the document");
+            }
+            let (layout, _, _) = self.layout_areas(it, &s.styles, None)?;
+            if let Some(r) = crate::browser_geometry::border_box(&layout, el) {
+                (w, h) = (r.w, r.h);
+            }
         }
-        Ok(if xy == [0.0, 0.0] { "none".into() } else { format!("matrix(1, 0, 0, 1, {}, {})", num(xy[0]), num(xy[1])) })
+        match resolve(&list, w, h) {
+            Some(m) => Ok(text(m)),
+            None => Err(Self::gate("a computed transform with a 3D step (Chrome writes matrix3d)")),
+        }
     }
 
     /// 0 for the element, `PSEUDO` or `EMPTY` (see `computed_value`). Call it after `computed_el` accepted `this`.

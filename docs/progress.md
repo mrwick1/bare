@@ -12802,3 +12802,13 @@ Seen, not fixed: `browser_geometry_tests::external_sheets_embedded_sheets_and_in
 - Fix: `Browser::collect_due` also asks for a collect when the arena has grown by 2 MiB (or a fourth of the live bytes) since the last one; the page driver and `ui_call` use it. `computed-nodes` counts `live_len`, as the DOM cap already did. The cap is not changed.
 - Test: `replacing_a_list_many_times_does_not_reach_computed_nodes` (700 rows of 5 nodes, replaced 50 times, one `getComputedStyle` after each). Before: `computed-nodes` at round 37, `len` 133,006. After: `len` stays at 108,506 from round 32 to round 49.
 - Not tested: live Gmail; the `goto` case of the issue (a new document should have a small arena; not reproduced); peak RSS (arena slots peak at 108,506; without the fix they grow by 3,500 a round, so 175,006 at round 50 by calculation, one run).
+## Computed `transform` as a matrix (#558, 2026-11-17)
+
+`getComputedStyle(el).transform` gave `none` for rotate, scale, skew and `matrix()`, `none` for `translate(0, 0)`, and threw for a percent move. Vaul parses this value in `getTranslate`. Now any list that is not `none` reads as `matrix(a, b, c, d, e, f)` in Chrome's number format (`1.23457e+06`, `1e-05`). A percent is of the border box, read with a layout only when the list has a percent.
+
+- Memory: a plain move (units agree, not zero) stays in `TranslateX` and `TranslateY` as before. Any other list is a `Grid::Transform` in the shared grid table, and `TranslateX` holds its index. The style of an element grows by 0 bytes. A list is stored once per page. The list keeps the steps (translate, or one folded matrix), not one matrix, because a percent after a rotation mixes the width and the height into the move.
+- Layout moves a box by the move of the matrix. Paint still does not rotate or scale. This is out of scope.
+- A real 3D step (`rotateX`, `rotateY`, `perspective`, a z move that is not 0, a `matrix3d` that is not flat) is a good value. It moves nothing, and the read is gated, because Chrome writes `matrix3d(...)`.
+- Chrome (headless, this machine) writes `matrix(0, 1, -1, 0, 0, 0)` for `rotate(90deg)`, not `6.12323e-17`. A multiple of 90 degrees is exact here too. Expected values in the tests come from that Chrome.
+- Changed on purpose: a mix of units (`translateX(5px) translateX(7%)`) is now a good value, as in Chrome. `calc()` inside a list that needs a matrix is still dropped.
+- Not done: the `translate`, `rotate` and `scale` properties do not join the matrix. Not tested: Vaul itself, a transition of a matrix.

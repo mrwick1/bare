@@ -917,3 +917,38 @@ fn transform_reads_as_none_or_matrix() {
     assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('t')).webkitTransform"), "matrix(1, 0, 0, 1, 10, 20)");
     assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('t')).getPropertyValue('transform')"), "matrix(1, 0, 0, 1, 10, 20)");
 }
+
+/// The expected texts are from Chrome (headless, `getComputedStyle(el).transform`); the box is 100px by 200px, the font 16px.
+#[test]
+fn transform_matrix_as_chrome() {
+    let cases = [
+        ("none", "none"),
+        ("rotate(90deg)", "matrix(0, 1, -1, 0, 0, 0)"),
+        ("scale(2)", "matrix(2, 0, 0, 2, 0, 0)"),
+        ("translate(0, 0)", "matrix(1, 0, 0, 1, 0, 0)"),
+        ("translateY(50%)", "matrix(1, 0, 0, 1, 0, 100)"),
+        ("translateX(10px) rotate(45deg)", "matrix(0.707107, 0.707107, -0.707107, 0.707107, 10, 0)"),
+        ("skewX(45deg)", "matrix(1, 0, 1, 1, 0, 0)"),
+        ("matrix(1, 2, 3, 4, 5, 6)", "matrix(1, 2, 3, 4, 5, 6)"),
+        ("translateX(2em)", "matrix(1, 0, 0, 1, 32, 0)"),
+        ("translate(50%, 50%) rotate(90deg)", "matrix(0, 1, -1, 0, 50, 100)"),
+        ("rotate(90deg) translate(50%, 0)", "matrix(0, 1, -1, 0, 0, 50)"),
+        ("translate3d(1px, 2px, 0) scale3d(2, 2, 1)", "matrix(2, 0, 0, 2, 1, 2)"),
+    ];
+    for (css, want) in cases {
+        let mut b = at(&format!("<!doctype html><body style='margin:0;font-size:16px'><div id=t style='width:100px;height:200px;transform:{css}'></div></body>"));
+        assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('t')).transform"), want, "{css}");
+    }
+}
+
+#[test]
+fn transform_matrix_moves_layout_inherits_and_gates_3d() {
+    // Layout still moves the box by the move of the matrix (a percent is of the box).
+    let mut b = at("<!doctype html><body style='margin:0'><div id=t style='width:100px;height:200px;transform:translateX(10px) scale(2) translateY(50%)'></div></body>");
+    assert_eq!(js(&mut b, "JSON.stringify(document.getElementById('t').getBoundingClientRect().x)"), "10");
+    let mut b = at("<!doctype html><body><div style='transform:rotate(90deg);--m:scale(3)'><p id=c style='transform:inherit'></p><p id=v style='transform:var(--m)'></p></div></body>");
+    assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('c')).transform"), "matrix(0, 1, -1, 0, 0, 0)");
+    assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('v')).transform"), "matrix(3, 0, 0, 3, 0, 0)");
+    let mut b = at("<!doctype html><body><div id=t style='transform:rotateX(30deg)'></div></body>");
+    assert!(js(&mut b, "getComputedStyle(document.getElementById('t')).transform").contains("3D step"));
+}
