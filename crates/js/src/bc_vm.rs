@@ -1108,7 +1108,8 @@ impl<'p> Interp<'p> {
                         pc += 1;
                         let (o, v) = (regs[a], regs[b]);
                         let ic = &c.code.ics[cc];
-                        if !matches!(o, Value::Object(ob) if self.heap.ic_store(ob, &ic.get(), v)) {
+                        let e = ic.get();
+                        if !matches!(o, Value::Object(ob) if self.heap.ic_store(ob, &e, v) || matches!(self.heap.ic_add(ob, &e, v), Ok(true))) {
                             tri!(at, self.bc_set_field(o, name!(x), v, ic));
                         }
                     }

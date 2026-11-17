@@ -1015,6 +1015,8 @@ pub struct IcStats {
     pub add_hits: u64,
     pub fill_store: u64,
     pub fill_add: u64,
+    /// Calls of `set_ic`: the writes that the inline store and add hits did not take.
+    pub set_ic_calls: u64,
     /// `for-in` loops that stopped at a certified prototype tail (`Heap::enum_tail_clean`).
     pub enum_tail_skips: u64,
 }
@@ -1529,8 +1531,8 @@ impl Heap {
     /// The caller tried `ic_store` first. Never calls a setter: it returns it, as `set` does.
     #[inline(never)]
     pub fn set_ic(&mut self, o: ObjId, key: PropertyKey, value: Value, ic: &mut Ic) -> R<Set> {
+        self.ic_stats.set_ic_calls += 1;
         if ic.kind == IC_ADD && self.ic_add(o, ic, value)? {
-            self.ic_stats.add_hits += 1;
             return Ok(Set::Done);
         }
         if ic.kind == IC_MEGA {
@@ -1541,10 +1543,14 @@ impl Heap {
 
     /// The add hit: `o` has the shape S of the entry, the same prototype and no change on the chain (the epoch), and it can take a new
     /// key. The new key goes to the end of the slots and the shape becomes S' (in `slot`), as `add_data_fast` does it.
+    /// The lane tries it inline, before the key is built. An exotic receiver never hits: the slow path refuses it as `ic_refuses` does.
     #[inline(always)]
-    fn ic_add(&mut self, o: ObjId, ic: &Ic, v: Value) -> R<bool> {
+    pub fn ic_add(&mut self, o: ObjId, ic: &Ic, v: Value) -> R<bool> {
+        if ic.kind != IC_ADD {
+            return Ok(false);
+        }
         let Some(ob) = self.objects.get(o.index, o.gn) else { return Ok(false) };
-        if ob.shape != ic.shape & !SHAPE_TAG || !ob.extensible || ob.lazy != 0 || ob.ic_chain || ic.epoch != self.proto_epoch {
+        if ob.shape != ic.shape & !SHAPE_TAG || ob.exotic != 0 || !ob.extensible || ob.lazy != 0 || ob.ic_chain || ic.epoch != self.proto_epoch {
             return Ok(false);
         }
         if if ic.depth == 0 { ob.proto.is_some() } else { ob.proto != Some(ic.first) } {
@@ -1559,6 +1565,7 @@ impl Heap {
         ob.shape = ic.slot;
         ob.push_slot(v);
         self.bytes += extra;
+        self.ic_stats.add_hits += 1;
         Ok(true)
     }
 
