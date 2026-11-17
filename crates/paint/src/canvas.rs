@@ -391,7 +391,8 @@ impl<'a> Canvas<'a> {
             return;
         }
         let mut cov = vec![0.0f32; (vis.x1 - vis.x0) as usize];
-        let (mut cross, mut near): (Vec<(f32, i32)>, Vec<&(f32, f32, f32, f32, i32)>) = (Vec::new(), Vec::new());
+        let mut cross: Vec<(f32, i32)> = Vec::new();
+        let mut near: Vec<&(f32, f32, f32, f32, i32)> = Vec::new();
         for y in vis.y0..vis.y1 {
             near.clear();
             near.extend(edges.iter().filter(|e| e.1 < (y + 1) as f32 && e.3 > y as f32));

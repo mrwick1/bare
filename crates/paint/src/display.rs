@@ -690,13 +690,13 @@ impl Builder<'_> {
         if sc {
             self.hoisted(hoist, inside, depth_here);
         }
-        if clip.is_some() {
+        if let Some(clip) = clip {
             if self.areas.is_some() {
                 self.list.items.push(Item::PopScroll);
                 self.scrolls.pop();
                 self.view = outer_view;
                 if self.areas.and_then(|a| a.get(f.node)).is_some_and(|a| a.bars != (false, false)) {
-                    self.list.items.push(Item::Bars { node: f.node, r: clip.expect("checked") });
+                    self.list.items.push(Item::Bars { node: f.node, r: clip });
                 }
             }
             self.list.items.push(Item::PopClip);
