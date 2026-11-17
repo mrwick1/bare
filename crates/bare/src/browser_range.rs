@@ -1305,7 +1305,7 @@ impl Dom {
             if let Some(x) = nodes.iter().find(|x| x.0 == p.0) {
                 return x.2 + p.1;
             }
-            nodes.iter().filter(|x| position(&doc, (x.0, length(&doc, x.0)), p) != Ordering::Greater).last().map_or(0, |x| x.2 + length(&doc, x.0))
+            nodes.iter().rfind(|x| position(&doc, (x.0, length(&doc, x.0)), p) != Ordering::Greater).map_or(0, |x| x.2 + length(&doc, x.0))
         };
         let f = flat(focus);
         let end = at;

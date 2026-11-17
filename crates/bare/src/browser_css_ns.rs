@@ -143,7 +143,7 @@ fn register_property(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<V
     let Some(&dict) = a.first().filter(|v| matches!(v, Value::Object(_))) else {
         return Err(it.type_error("Failed to execute 'registerProperty' on 'CSS': 1 argument required, but only 0 present."));
     };
-    let mut member = |it: &mut Interp<'_>, name: &str| -> R<Option<Value>> {
+    let member = |it: &mut Interp<'_>, name: &str| -> R<Option<Value>> {
         let k = d.key(it, name)?;
         Ok(Some(it.get_value(dict, k)?).filter(|v| !matches!(v, Value::Undefined)))
     };
