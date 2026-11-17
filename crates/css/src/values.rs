@@ -29,7 +29,7 @@
 //! - `!important` is kept as a flag. The cascade uses it.
 //! - Properties that we do not know. They are dropped. The list is what layout and paint will need in module 4 and 5.
 //!   To add one, add a line in `properties!` and a case in `longhand`.
-//! - `font-family` is kept as a class, not as a list: `monospace` or `sans-serif` (see `family`). `box-shadow`: later, when something needs it.
+//! - `font-family` is kept as a class, not as a list: `monospace`, `serif` or `sans-serif` (see `family`). `box-shadow`: later, when something needs it.
 //! - `border-radius` takes one radius for each corner (a circle). The part after a `/` is read and dropped.
 //! - Approximations that we know: `ch` is half an `em` (the real value needs the font; `ex` is 0.536 em, the x-height of the one font). In `background`,
 //!   only the color is used, and the other parts are checked a little and ignored. In `text-decoration`, only the line kind is used.
@@ -327,7 +327,7 @@ keywords! {
     VisibleFill => "visiblefill", VisibleStroke => "visiblestroke",
     Contain => "contain", Cover => "cover", ScaleDown => "scale-down", Repeat => "repeat", NoRepeat => "no-repeat",
     RepeatX => "repeat-x", RepeatY => "repeat-y", Default => "default", Pointer => "pointer",
-    Monospace => "monospace", SansSerif => "sans-serif",
+    Monospace => "monospace", SansSerif => "sans-serif", Serif => "serif",
 }
 
 /// The value of one property. It does not say which property: a `Declared` has that.
@@ -1495,10 +1495,11 @@ fn is_family(parts: &[Part]) -> bool {
     !parts.is_empty() && parts.iter().all(|p| matches!(p, Part::Keyword(_) | Part::Color(_) | Part::ColorExpr(_) | Part::Other))
 }
 
-/// The face for a `font-family` list, after the first `skip` parts of `value`: the keyword `Monospace` or `SansSerif`. The first entry decides. A value is 8
-/// bytes and has no list, and the browser has two faces. A monospace name gives Noto Sans Mono: a name with `mono` in it (`monospace`, `ui-monospace`,
-/// `SFMono-Regular`, `JetBrains Mono`), a name with the word `code` (`Source Code Pro`, `Fira Code`), `Menlo`, `Monaco`, `Consolas` or `Courier`. Any
-/// other name gives Noto Sans: we cannot know that a font is missing, and a page that lists `Verdana, monospace` wants proportional text. A part is one
+/// The face for a `font-family` list, after the first `skip` parts of `value`: the keyword `Monospace`, `Serif` or `SansSerif`. The first entry decides. A value is 8
+/// bytes and has no list, and the browser has three text faces. A monospace name gives Noto Sans Mono: a name with `mono` in it (`monospace`, `ui-monospace`,
+/// `SFMono-Regular`, `JetBrains Mono`), a name with the word `code` (`Source Code Pro`, `Fira Code`), `Menlo`, `Monaco`, `Consolas` or `Courier`. A
+/// serif name (`serif`, `ui-serif`, any name with `serif` and no `sans` in it, `Times New Roman`, `Georgia`, `Cambria`, `Garamond`, `Palatino`, `Book Antiqua`
+/// and a few more) gives Noto Serif. Any other name gives Noto Sans: we cannot know that a font is missing, and a page that lists `Verdana, monospace` wants proportional text. A part is one
 /// token, or one block.
 fn family(value: &str, skip: usize) -> Value {
     let mut tokens = tokenize(value);
@@ -1539,11 +1540,12 @@ fn family(value: &str, skip: usize) -> Value {
             _ => {}
         }
     }
-    let mono = !long
-        && std::str::from_utf8(&buf[..len]).is_ok_and(|name| {
-            name.contains("mono") || name.split(' ').any(|w| w == "code") || matches!(name, "menlo" | "monaco" | "consolas" | "courier" | "courier new")
-        });
-    Value::Keyword(if mono { Keyword::Monospace } else { Keyword::SansSerif })
+    let name = if long { "" } else { std::str::from_utf8(&buf[..len]).unwrap_or("") };
+    let mono = name.contains("mono") || name.split(' ').any(|w| w == "code") || matches!(name, "menlo" | "monaco" | "consolas" | "courier" | "courier new");
+    let serif = (name.contains("serif") && !name.contains("sans"))
+        || ["garamond", "palatino", "baskerville", "caslon"].iter().any(|w| name.contains(w))
+        || matches!(name, "times" | "times new roman" | "georgia" | "cambria" | "book antiqua" | "bookman" | "bookman old style" | "century schoolbook" | "constantia" | "charter" | "didot" | "hoefler text" | "iowan old style" | "bodoni mt");
+    Value::Keyword(if mono { Keyword::Monospace } else if serif { Keyword::Serif } else { Keyword::SansSerif })
 }
 
 /// `font: [style] [weight] size[/line-height] family`. The family is the last part: see `family`.
@@ -2192,6 +2194,13 @@ mod tests {
             assert_eq!(one("font-family", mono), Some(Value::Keyword(K::Monospace)), "{mono}");
         }
         assert_eq!(one("font-family", "Verdana, monospace"), Some(Value::Keyword(K::SansSerif)), "the first entry decides");
+        for serif in ["serif", "SERIF", "ui-serif", "Times", "\"Times New Roman\", Times, serif", "Georgia, serif", "Cambria", "Garamond", "\"EB Garamond\"", "Palatino", "\"Palatino Linotype\"", "\"Book Antiqua\"", "\"Noto Serif\"", "\"Source Serif Pro\"", "Baskerville"] {
+            assert_eq!(one("font-family", serif), Some(Value::Keyword(K::Serif)), "{serif}");
+        }
+        for sans in ["Verdana, serif", "sans-serif", "ui-sans-serif, serif", "\"Noto Sans\", serif", "\"IBM Plex Sans\"", "system-ui", "Arial, \"Times New Roman\"", "\"Serif Mono\"", "Unknown, Georgia"] {
+            assert_ne!(one("font-family", sans), Some(Value::Keyword(K::Serif)), "{sans}");
+        }
+        assert_eq!(one("font-family", "\"Noto Serif Mono\", serif"), Some(Value::Keyword(K::Monospace)), "a monospace name beats serif");
         assert_eq!(one("font-family", "-apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif"), Some(Value::Keyword(K::SansSerif)));
         assert_eq!(parse("font-family", "12px"), vec![]);
         assert_eq!(parse("font-family", ""), vec![]);
@@ -2225,6 +2234,7 @@ mod tests {
         assert_eq!(parse("font", "12px/1.5 \"Courier New\", monospace")[4], (FontFamily, Value::Keyword(K::Monospace)));
         assert_eq!(parse("font", "bold calc(10px + 2px) Menlo")[4], (FontFamily, Value::Keyword(K::Monospace)));
         let list = parse("font", "12px serif");
+        assert_eq!(list[4], (FontFamily, Value::Keyword(K::Serif)));
         assert_eq!(list[0], (FontStyle, Value::Keyword(K::Normal)));
         assert_eq!(list[1], (FontWeight, Value::Number(400.0)));
         assert_eq!(list[3], (LineHeight, Value::Keyword(K::Normal)));

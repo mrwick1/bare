@@ -3770,10 +3770,10 @@ mod tests {
         Value::Color(Color { r, g, b, a: 255 })
     }
 
-    /// `font-family` is inherited. The first entry of the list decides: a monospace name gives Noto Sans Mono, anything else Noto Sans.
+    /// `font-family` is inherited. The first entry of the list decides: a monospace name gives Noto Sans Mono, a serif name Noto Serif, anything else Noto Sans.
     #[test]
     fn font_family_is_inherited_and_the_first_entry_decides() {
-        use Keyword::{Monospace as M, SansSerif as S};
+        use Keyword::{Monospace as M, SansSerif as S, Serif as F};
         let family = |html: &str, sheets: &[&str], id: &str| get(html, sheets, id, Property::FontFamily);
         assert_eq!(family("<p id=p>", &[], "p"), Value::Keyword(S), "the initial value");
         assert_eq!(family("<p id=p style='font-family: Verdana, sans-serif'>", &[], "p"), Value::Keyword(S));
@@ -3783,9 +3783,13 @@ mod tests {
         for name in ["monospace", "MONOSPACE", "ui-monospace", "Menlo", "Monaco", "Consolas", "Courier", "Courier New", "\"Courier New\"", "SFMono-Regular", "Liberation Mono", "DejaVu Sans Mono", "Noto Sans Mono"] {
             assert_eq!(family(&format!("<p id=p style='font-family: {name}, serif'>"), &[], "p"), Value::Keyword(M), "{name}");
         }
-        for name in ["serif", "sans-serif", "system-ui", "Arial", "\"Helvetica Neue\"", "-apple-system"] {
+        for name in ["sans-serif", "system-ui", "Arial", "\"Helvetica Neue\"", "-apple-system"] {
             assert_eq!(family(&format!("<p style='font-family: monospace'><b id=c style='font-family: {name}'>"), &[], "c"), Value::Keyword(S), "{name}");
         }
+        for name in ["serif", "Georgia", "\"Times New Roman\""] {
+            assert_eq!(family(&format!("<p style='font-family: monospace'><b id=c style='font-family: {name}'>"), &[], "c"), Value::Keyword(F), "{name}");
+        }
+        assert_eq!(family("<p style='font-family: Georgia'><b id=c>x", &[], "c"), Value::Keyword(F), "a child inherits");
         assert_eq!(family("<p style='font-family: monospace'><b id=c style='font-family: initial'>", &[], "c"), Value::Keyword(S));
         assert_eq!(family("<p style='font-family: monospace'><b id=c style='font-family: inherit'>", &[], "c"), Value::Keyword(M));
         let long = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans', sans-serif";
@@ -3800,7 +3804,8 @@ mod tests {
         assert_eq!(get(html, &[], "p", Property::FontFamily), Value::Keyword(M));
         assert_eq!(get(html, &[], "p", Property::FontSize), px(12.0));
         assert_eq!(get("<p id=p style='font: bold 12px Verdana, monospace'>", &[], "p", Property::FontFamily), Value::Keyword(S));
-        assert_eq!(get("<p style='font-family: monospace'><b id=c style='font: 12px serif'>", &[], "c", Property::FontFamily), Value::Keyword(S), "the shorthand resets it");
+        assert_eq!(get("<p style='font-family: monospace'><b id=c style='font: 12px serif'>", &[], "c", Property::FontFamily), Value::Keyword(Keyword::Serif), "the shorthand resets it");
+        assert_eq!(get("<p style='font-family: monospace'><b id=c style='font: 12px Verdana, serif'>", &[], "c", Property::FontFamily), Value::Keyword(S), "the shorthand resets it");
         assert_eq!(get("<p style='font-family: monospace'><b id=c style='font: inherit'>", &[], "c", Property::FontFamily), Value::Keyword(M));
     }
 

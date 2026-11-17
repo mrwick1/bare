@@ -246,12 +246,15 @@ fn canvas_font(v: &str) -> bare_layout::font::Metrics {
         size = t[..t.len() - unit.len()].parse::<f32>().ok().filter(|n| n.is_finite() && *n >= 0.0).map(|n| n * scale);
     }
     let Some(size) = size else { return Metrics::new(10.0, Face::Sans) };
-    let mono = v.contains("monospace");
-    Metrics::new(size, match (mono, bold) {
-        (true, false) => Face::Mono,
-        (true, true) => Face::MonoBold,
-        (false, false) => Face::Sans,
-        (false, true) => Face::SansBold,
+    // Like `monospace`, a serif name anywhere in the value counts (not the first entry only). `monospace` wins. `sans-serif` is not serif.
+    let serif = (v.contains("serif") && !v.contains("sans-serif")) || ["Times", "Georgia", "Cambria", "Garamond", "Palatino", "Book Antiqua"].iter().any(|n| v.contains(n));
+    Metrics::new(size, match (v.contains("monospace"), serif, bold) {
+        (true, _, false) => Face::Mono,
+        (true, _, true) => Face::MonoBold,
+        (_, true, false) => Face::Serif,
+        (_, true, true) => Face::SerifBold,
+        (_, false, false) => Face::Sans,
+        (_, false, true) => Face::SansBold,
     })
 }
 

@@ -193,6 +193,33 @@ fn sans_text_uses_the_layout_metrics() {
     assert!(groups[49].1 as f32 <= rect.x + rect.w + 1.0);
 }
 
+/// Serif text is drawn with Noto Serif: the pixels differ from sans, and the glyphs come from the serif faces.
+#[test]
+fn serif_text_uses_the_serif_glyphs() {
+    use bare_layout::font::Face;
+    use bare_paint::canvas::IRect;
+    let clip = IRect { x0: 0, y0: 0, x1: 200, y1: 40 };
+    let hash = |face| {
+        let mut glyphs = bare_paint::glyphs::Glyphs::new();
+        let mut c = Canvas::new(200, 40);
+        c.fill(clip, WHITE);
+        bare_paint::text(&mut c, &mut glyphs, clip, 4.0, 28, 20.0, 0xff00_0000, face, (0.0, 0.0), "Wilma");
+        assert!(c.pixels.iter().any(|&p| p != WHITE));
+        c.hash()
+    };
+    let hashes = [hash(Face::Sans), hash(Face::SansBold), hash(Face::Serif), hash(Face::SerifBold)];
+    for i in 0..4 {
+        for j in i + 1..4 {
+            assert_ne!(hashes[i], hashes[j], "faces {i} and {j} draw alike");
+        }
+    }
+    let g = bare_paint::glyphs::Glyphs::new();
+    assert_eq!(g.glyph(Face::Serif, 'a').0, 6);
+    assert_eq!(g.glyph(Face::SerifBold, 'a').0, 7);
+    assert_eq!(g.glyph(Face::Serif, '\u{2190}').0, 0, "an arrow comes from Noto Sans Mono, as for Sans");
+    assert_eq!(g.glyph(Face::SerifBold, '\u{2190}').0, 1);
+}
+
 /// Each glyph of a word sits where layout puts it: at the sum of the advances of the letters before it, in whole units of 1/1000 em. Drawing the
 /// letters one by one at those places gives the same pixels as drawing the word. (A place is quantised to a quarter of a pixel, so equal pixels
 /// mean the same place to better than 0.02 px for all but a rounding case, and the word is 5 letters of different widths.)

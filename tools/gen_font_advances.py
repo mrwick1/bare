@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-"""Generate crates/layout/src/advances.rs: the advance width of each letter of Noto Sans Regular and Bold.
+"""Generate crates/layout/src/advances.rs: the advance width of each letter of Noto Sans and Noto Serif, Regular and Bold.
 
 Run from the repo root: python3 tools/gen_font_advances.py
 
-Sources: data/fonts/NotoSans-Regular-subset.ttf and data/fonts/NotoSans-Bold-subset.ttf (license in data/fonts/OFL-Sans.txt).
+Sources: data/fonts/NotoSans-{Regular,Bold}-subset.ttf and data/fonts/NotoSerif-{Regular,Bold}-subset.ttf (license in data/fonts/OFL-Sans.txt; Noto Serif has the same one).
 The font has 1000 units to the em, so an advance in `hmtx` is already in 1/1000 em, the unit of `bare_layout::font::Units`.
 The test `the_advance_tables_match_the_font_files` in crates/paint/src/glyphs.rs checks the output against the font files with another reader (ab_glyph).
 """
 
 import struct
 
-FONTS = [("REGULAR", "data/fonts/NotoSans-Regular-subset.ttf"), ("BOLD", "data/fonts/NotoSans-Bold-subset.ttf")]
+FONTS = [("REGULAR", "data/fonts/NotoSans-Regular-subset.ttf"), ("BOLD", "data/fonts/NotoSans-Bold-subset.ttf"),
+         ("SERIF", "data/fonts/NotoSerif-Regular-subset.ttf"), ("SERIF_BOLD", "data/fonts/NotoSerif-Bold-subset.ttf")]
 OUT = "crates/layout/src/advances.rs"
 
 
@@ -88,7 +89,7 @@ def table(name, adv):
     return "\n".join(out)
 
 
-header = """//! Advance widths of Noto Sans Regular and Bold, from `hmtx`, in 1/1000 em. Made by `tools/gen_font_advances.py`: do not edit.
+header = """//! Advance widths of Noto Sans and Noto Serif, Regular and Bold, from `hmtx`, in 1/1000 em. Made by `tools/gen_font_advances.py`: do not edit.
 //! `font::width_of` reads these tables. The letters that the font lacks are not here.
 
 """

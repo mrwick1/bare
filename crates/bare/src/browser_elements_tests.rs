@@ -325,6 +325,7 @@ fn canvas_measure_text_uses_the_font_of_the_context() {
     assert_eq!(js(&mut b, "Math.abs(w('32px sans-serif') - 2 * w('16px sans-serif')) < 0.01"), "true");
     assert_eq!(js(&mut b, "w('bold 16px Arial') > w('16px Arial')"), "true", "bold letters are wider");
     assert_eq!(js(&mut b, "Math.abs(w('12pt serif') - w('16px serif')) < 0.01"), "true", "12pt is 16px");
+    assert_eq!(js(&mut b, "x.font='16px sans-serif'; var s=x.measureText('Wil').width; x.font='16px Georgia, serif'; var r=x.measureText('Wil').width; x.font='bold 16px serif'; var sb=x.measureText('Wil').width; [s,r,sb].join()"), "23.13599967956543,26.832000732421875,28.336000442504883", "serif has its own advances");
     // Deviation: `font` is a plain property, so a value that does not parse stays and measures as the default, 10px sans-serif.
     assert_eq!(js(&mut b, "w('nonsense') === w('10px sans-serif')"), "true");
 }
