@@ -2097,7 +2097,7 @@ mod tests {
             format!("{}x{}", "<b><div>".repeat(20_000), "</b>".repeat(20_000)),
             format!("{}x", "<b id=a><i id=b><div>".repeat(5_000)),
             format!("{}x{}", "<b>".repeat(20_000), "</p>x".repeat(20_000)),
-            format!("{}", "<p><b>x</p>".repeat(20_000)),
+            "<p><b>x</p>".repeat(20_000),
             format!("{}x", "<table><tr><td><b>".repeat(2_000)),
         ];
         for page in pages {

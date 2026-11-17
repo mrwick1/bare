@@ -260,7 +260,7 @@ fn a_filter_with_a_saturated_counter_still_finds_the_path() {
     html += "<p class=c>x</p>";
     html += &"</div>".repeat(300);
     html += "<p class=c>y</p>";
-    check_flat(&html, &".a .c { margin-left: 1px } div > .c { margin-left: 2px } .z .c { margin-left: 3px }".repeat(1), "saturated");
+    check_flat(&html, ".a .c { margin-left: 1px } div > .c { margin-left: 2px } .z .c { margin-left: 3px }", "saturated");
 }
 
 #[test]

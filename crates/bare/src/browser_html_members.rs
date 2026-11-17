@@ -40,7 +40,10 @@ pub(crate) fn members(d: &Dom, it: &mut Interp<'_>, o: ObjId, name: &str) -> R<b
         "HTMLDataElement" => reflect!(d, it, o, &["data"], { "value" => "value": Str }),
         "HTMLTimeElement" => reflect!(d, it, o, &["time"], { "dateTime" => "datetime": Str }),
         "HTMLHtmlElement" => reflect!(d, it, o, &["html"], { "version" => "version": Str }),
-        "HTMLDetailsElement" => reflect!(d, it, o, &["details"], { "open" => "open": Bool, "name" => "name": Str }),
+        "HTMLDetailsElement" => {
+            d.def_get(it, o, "open", crate::browser_details::open_get, Some(crate::browser_details::open_set))?;
+            reflect!(d, it, o, &["details"], { "name" => "name": Str });
+        }
         "HTMLLIElement" => reflect!(d, it, o, &["li"], { "value" => "value": Long(0, i32::MIN) }),
         "HTMLOListElement" => reflect!(d, it, o, &["ol"], { "start" => "start": Long(1, i32::MIN), "reversed" => "reversed": Bool, "type" => "type": Str }),
         "HTMLSourceElement" => reflect!(d, it, o, &["source"], {

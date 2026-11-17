@@ -21,9 +21,34 @@ pub use bare::agent::Event;
 pub use bare::page::StorageState;
 use bare::page::Page;
 use bare_paint::canvas::Canvas;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
+
+thread_local! {
+    /// The cancellation token of the request that this thread runs (`set_cancel`).
+    static CANCEL: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
+}
+
+/// Give the calling thread the token of the request it runs, or `None` when the request ends. A host that runs many requests (the MCP
+/// server) sets it on the thread that owns the session. The driver reads it at its own wait points (`cancelled`): it never stops a
+/// native operation that is already running, such as a blocking read or a script that does not end.
+pub fn set_cancel(token: Option<Arc<AtomicBool>>) {
+    CANCEL.with(|c| *c.borrow_mut() = token);
+}
+
+/// The token of this thread, for a call that starts workers of its own and must pass it on (`suite::Config::cancel`).
+pub fn current_cancel() -> Option<Arc<AtomicBool>> {
+    CANCEL.with(|c| c.borrow().clone())
+}
+
+/// True when the request of this thread was cancelled. Always false when no token is set (the `bare-drive` program).
+pub fn cancelled() -> bool {
+    CANCEL.with(|c| c.borrow().as_ref().is_some_and(|t| t.load(Ordering::Relaxed)))
+}
 
 pub struct Options {
     pub size: (u32, u32),
@@ -142,10 +167,22 @@ impl Host {
     /// Sleep until `until`. In a window, also wake when its loop runs a task of the page after `seen`.
     fn sleep(&mut self, seen: u64, until: Instant) {
         match self {
-            Host::Window(r) => r.wait_work(seen, until),
+            // A window wakes at the next task or at `until`; with a token it also wakes every 100 ms to look at it.
+            Host::Window(r) => r.wait_work(seen, if CANCEL.with(|c| c.borrow().is_some()) { until.min(Instant::now() + Duration::from_millis(100)) } else { until }),
             // On the benchmark clock the page moves the clock to its next event and nothing sleeps (`Page::nap`).
             Host::Local(p) if bare_net::vclock::on() => p.nap(Some(until), Duration::ZERO, Duration::MAX),
-            _ => std::thread::sleep(until.saturating_duration_since(Instant::now())),
+            // The standalone driver has no token: preserve its single sleep instead of adding polling wakeups.
+            _ if CANCEL.with(|c| c.borrow().is_none()) => std::thread::sleep(until.saturating_duration_since(Instant::now())),
+            // In slices, so that a cancellation ends the sleep (the loop then ends the step).
+            _ => {
+                while !cancelled() {
+                    let left = until.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        break;
+                    }
+                    std::thread::sleep(left.min(Duration::from_millis(20)));
+                }
+            }
         }
     }
 }
@@ -385,6 +422,9 @@ impl Session {
                     Some(bare_js::eval::PromiseStatus::Fulfilled(x)) => v = x,
                     Some(bare_js::eval::PromiseStatus::Rejected(x)) => return Err(format!("rejected: {}", thrown_value(b, x))),
                     Some(bare_js::eval::PromiseStatus::Pending) => {
+                        if cancelled() {
+                            return Err("cancelled".into());
+                        }
                         if bare_net::vclock::instant() >= end {
                             return Err(format!("the promise is still pending after {} ms", limit.as_millis()));
                         }
@@ -398,7 +438,7 @@ impl Session {
             // The code started a navigation (a new address, a link `click()`, `form.submit()`, `history.back()`): the ticks follow it
             // until the next document has loaded, as after an `act`. A `#hash` change loads nothing.
             let started = |p: &mut Page| p.loading() || p.browser().map(|b| b.navigation_stats()).is_some_and(|n| n.pending_requests + n.pending_tasks > 0);
-            while started(p) && bare_net::vclock::instant() < end {
+            while started(p) && bare_net::vclock::instant() < end && !cancelled() {
                 let (more, next) = p.tick();
                 if !more {
                     p.nap(next, Duration::from_millis(5), Duration::from_millis(20));
@@ -472,6 +512,11 @@ impl Session {
         self.host.run(|p| p.url()).ok().flatten()
     }
 
+    /// Why the last document did not load, if it did not.
+    pub fn load_error(&mut self) -> Option<String> {
+        self.host.run(|p| p.load_error().map(str::to_string)).ok().flatten()
+    }
+
     /// A copy of the storage of the open page (it holds live credentials). `None` with no page.
     pub fn export_state(&mut self) -> Option<StorageState> {
         self.host.run(|p| p.storage().map(|s| s.export())).ok().flatten()
@@ -520,6 +565,10 @@ impl Session {
         }
     }
     let result: Result<Option<String>, Fail> = loop {
+        // Between two tries only: a try that already sent input to the page is never undone or run again, and its outcome stays unknown.
+        if cancelled() {
+            break Err(fail("cancelled", "the request was cancelled"));
+        }
         tries += 1;
         // On the benchmark clock (`bare_net::vclock`) each try of a step takes a fixed time: the round trip of an input event.
         if bare_net::vclock::on() {
@@ -702,7 +751,7 @@ impl Session {
     }
     if let Err(f) = result {
         rep.ok = false;
-        let shot = opt.out.as_ref().and_then(|dir| {
+        let shot = opt.out.as_ref().filter(|_| f.kind != "cancelled").and_then(|dir| {
             let ws = red.clone();
             let canvas = host.run(move |p| shown(p, &ws).then(|| p.capture())).ok()?;
             Some(match canvas {

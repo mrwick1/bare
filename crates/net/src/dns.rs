@@ -39,7 +39,9 @@ struct Answer {
     // How many seconds we may keep this answer: the smallest TTL of the records we used.
 }
 
-static CACHE: LazyLock<Mutex<HashMap<String, (Vec<IpAddr>, Instant)>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+type Cache = HashMap<String, (Vec<IpAddr>, Instant)>;
+
+static CACHE: LazyLock<Mutex<Cache>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 // One cache for the whole program: name -> (addresses, time it runs out).
 // `static` is a global. JS: a variable at the top of a file.
 // `HashMap` is like a JS object used as a lookup table.

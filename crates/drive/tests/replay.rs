@@ -3,7 +3,7 @@
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 use std::sync::Arc;
 
@@ -56,7 +56,7 @@ fn connection(mut s: TcpStream) {
 }
 
 /// Run a step file as `bare-drive`, with one tape variable set, and more variables in `env`. Gives the exit code and stderr.
-fn drive(dir: &PathBuf, steps: &str, base: &str, tape: (&str, &PathBuf), env: &[(&str, &str)]) -> (i32, String) {
+fn drive(dir: &Path, steps: &str, base: &str, tape: (&str, &PathBuf), env: &[(&str, &str)]) -> (i32, String) {
     let file = dir.join("journey.steps");
     std::fs::write(&file, steps).unwrap();
     let run = std::process::Command::new(env!("CARGO_BIN_EXE_bare-drive"))

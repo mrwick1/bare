@@ -218,11 +218,11 @@ fn fragment_navigation_updates_at_once_and_queues_events() {
         assert_eq!(b.run_navigation_tasks().unwrap(), 1);
         assert_eq!(js(&mut b, "log.join()"), "pop:null:#sec%201,hash:https://a.test/p?q=1>https://a.test/p?q=1#sec%201");
         assert_eq!(b.run_navigation_tasks().unwrap(), 0);
-        // the same fragment again does nothing; href and assign with a fragment make entries; the same URL replaces
+        // the same fragment again does nothing; href with a fragment makes an entry; the same URL replaces and fires no event (issue #564)
         js(&mut b, "log.length = 0; location.hash = '#sec%201'; location.href = '#two'; location.assign('#two'); location.replace('#three')");
         assert_eq!(js(&mut b, "[location.hash, history.length].join()"), "#three,3");
-        assert_eq!(b.run_navigation_tasks().unwrap(), 3);
-        assert_eq!(js(&mut b, "var h = 0; for (var i = 0; i < log.length; i++) if (log[i].indexOf('hash:') == 0) h++; h"), "3");
+        assert_eq!(b.run_navigation_tasks().unwrap(), 2);
+        assert_eq!(js(&mut b, "var h = 0; for (var i = 0; i < log.length; i++) if (log[i].indexOf('hash:') == 0) h++; h"), "2");
         assert!(drain_requests(&mut b).is_empty());
         // `location.hash = ''` leaves an empty fragment ("#"), so it is a fragment navigation too
         js(&mut b, "location.hash = ''");

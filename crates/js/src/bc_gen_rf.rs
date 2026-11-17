@@ -7,6 +7,9 @@
 use super::bc_scope::{BindKind, FnScope, BF_ARGS, BF_DERIVED, BF_INNER, BF_IN_CLASS, BF_NEW_TARGET, BF_SELF_NAME};
 use super::*;
 
+/// The declared names that an inner function uses, and the scopes that hold an inner function.
+type RfcSets = (std::collections::HashSet<(u32, u32)>, std::collections::HashSet<u32>);
+
 impl<'p> Interp<'p> {
     /// The register layout of function `fid` if it can be a register function: the registers of its parameters, `var`s and
     /// top level `let`s and `const`s, in the order of `bc_binds` (so the parameters are registers `0..nparams`).
@@ -45,7 +48,7 @@ impl<'p> Interp<'p> {
     /// bytecode lane and on the tree walker alike, so the variable must be a binding there), and the scopes of `fid` that have an
     /// inner function inside them (each of them keeps its environment, so the hop count of a site in the inner function stays that
     /// of `bc_resolve`). `None` when the walk of an inner function fails.
-    fn rfc_analyze(&mut self, fid: FuncId, fs: &FnScope) -> Option<(std::collections::HashSet<(u32, u32)>, std::collections::HashSet<u32>)> {
+    fn rfc_analyze(&mut self, fid: FuncId, fs: &FnScope) -> Option<RfcSets> {
         let w = self.bc_walk(Some(fid), fs.scope);
         if w.bad.is_some() {
             return None;

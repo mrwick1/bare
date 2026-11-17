@@ -665,7 +665,7 @@ impl Page {
     /// made in the handlers, since its queue does not keep the `keepalive` flag. A page that is stopped or still loading closes at once.
     pub fn hide(&mut self, limit: Duration) {
         let (t, v) = (Instant::now(), bare_net::vclock::instant());
-        if !self.browser().is_some_and(|b| b.hide().is_ok()) {
+        if self.browser().is_none_or(|b| b.hide().is_err()) {
             return;
         }
         while bare_net::vclock::since(v) < limit && self.browser().is_some_and(|b| b.it.pending_jobs() > 0 || b.fetches_since(t) > 0) {

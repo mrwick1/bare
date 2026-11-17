@@ -126,6 +126,8 @@ struct SState {
     by_el: HashMap<NodeId, ObjId>,
     /// element -> the parse of its `style` attribute at the last call.
     blocks: HashMap<NodeId, Block>,
+    // Boxed on purpose: the field is one pointer wide, and most documents have none.
+    #[allow(clippy::box_collection)]
     pending: Option<Box<HashMap<NodeId, Pending>>>,
 }
 

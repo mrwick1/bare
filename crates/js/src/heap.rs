@@ -1049,11 +1049,10 @@ impl Heap {
             h = (h.rotate_left(5) ^ b as u64).wrapping_mul(0x517c_c1b7_2722_0a95);
         }
         let key = (h, s.len());
-        if let Some(&id) = self.shared.get(&key) {
-            if self.strings.get(id.index, id.gn).is_some_and(|st| st.units.iter().copied().eq(s.encode_utf16())) {
+        if let Some(&id) = self.shared.get(&key)
+            && self.strings.get(id.index, id.gn).is_some_and(|st| st.units.iter().copied().eq(s.encode_utf16())) {
                 return Ok(id);
             }
-        }
         let id = self.intern_str(s)?;
         self.shared.insert(key, id);
         Ok(id)
@@ -2383,7 +2382,7 @@ impl Heap {
         }
         self.check_key(key)?;
         self.check_value(v)?;
-        let attrs = w as u8 * shape::A_W | e as u8 * shape::A_E | c as u8 * shape::A_C;
+        let attrs = (w as u8 * shape::A_W) | (e as u8 * shape::A_E) | (c as u8 * shape::A_C);
         let Some(next) = self.shapes.add(ob.shape, key, attrs) else { return Ok(None) };
         let extra = ob.push_bytes();
         self.charge(extra)?;
@@ -2876,7 +2875,7 @@ impl Object {
     #[inline(never)]
     fn sparse_grow_ok(&self, i: usize) -> bool {
         self.is_array || !self.slots().is_empty() || self.dict().is_some_and(|d| d.live > d.index_keys) || self.elems.len() > 4096 ||
-            (self.elems.iter().filter(|e| e.is_some()).count() + 1) * 4 >= i + 1
+            (self.elems.iter().filter(|e| e.is_some()).count() + 1) * 4 > i
     }
 
     /// The bytes that one more named property may cost (an upper bound is enough: `edit` keeps the count exact).

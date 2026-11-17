@@ -19,6 +19,7 @@
 
 use crate::browser::*;
 use crate::browser_events::init_flag;
+use crate::browser_mouse_legacy as lg;
 use crate::browser_ui::{PointerData, Ui, coord, with_ui};
 use bare_js::eval::{Error, Interp};
 use bare_js::value::{ObjId, PropertyKey, Value};
@@ -348,6 +349,14 @@ impl Dom {
             (&[m], "movementX", To::Get(movement_x)),
             (&[m], "movementY", To::Get(movement_y)),
             (&[m], "getModifierState", To::Method(mouse_modifier_state, 1)),
+            (&[m], "which", To::Get(lg::mouse_which)),
+            (&[i], "which", To::Get(lg::zero)),
+            (&[m, k, i], "sourceCapabilities", To::Get(lg::source_capabilities)),
+            (&[m], "layerX", To::Get(lg::layer_x)),
+            (&[m], "layerY", To::Get(lg::layer_y)),
+            (&[m], "fromElement", To::Get(lg::from_element)),
+            (&[m], "toElement", To::Get(lg::to_element)),
+            (&[m], "initMouseEvent", To::Method(lg::init_mouse_event, 15)),
             (&[k], "getModifierState", To::Method(key_modifier_state, 1)),
             (&[pt], "width", To::Get(width)),
             (&[pt], "height", To::Get(height)),

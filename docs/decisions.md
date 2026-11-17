@@ -2392,3 +2392,19 @@ Issue #580: `bare-mcp` aborted with a stack overflow when a snapshot named an el
 - Fix: a reference passes `depth + 1`. The referenced node itself is still shown when hidden (`in_ref`), as accname 1.2 says.
 - Parallel opens were not the cause. A snapshot of that page crashed the server alone.
 - Not done: a loop that fans out over many ids can still cost up to width^32 steps before the limit. No page has shown it.
+
+## Same address again fires no hashchange (issue #564, 2026-11-16)
+
+- Problem: `deck` scans Gmail with `goto` to the same `#search/...` address each cycle. A `goto` or `location` change to the address that the document already has queued `popstate` and `hashchange`. Chrome fires no event then (to verify: from the HTML Standard, which fires `hashchange` only when the fragment changes). A router that renders on `hashchange` rendered the view twice. This can leave a stale search box or a grid count other than 1.
+- Fix: `Dom::navigate` still replaces the entry for the same address. It queues no task. A fragment that changes still queues `popstate` then `hashchange`.
+- Test: `crates/drive/tests/goto_spa_route.rs` (a hash-routed fixture, four `goto` of one address) and `fragment_navigation_updates_at_once_and_queues_events`, which now expects 2 events (it expected 3).
+- Not verified: live Gmail. This is the one difference that a local fixture shows. It is a hypothesis that it is the cause of the live failures.
+## Leaving a list in a contenteditable (2026-11-14)
+
+Issue #443. Enter in an empty list item, Backspace in an empty block, and the list toggle now act on one item, as Chrome does.
+
+- Enter in an empty `li` turns it into a `div` after the list. The items after it go to a clone of the list.
+- Backspace in an empty block removes it and puts the caret at the end of the block before it. The first item of a list becomes a `div` instead.
+- A list command of the same kind turns only the selected items into `div` blocks. The other kind still renames the whole list.
+- `insertText` removes the placeholder `br` of a block that has no other content.
+- Not done: Backspace at the start of a block with content does not merge it with the block before it.

@@ -8,7 +8,12 @@
 //!   identifier, or a value with unbalanced parentheses, is `false`: it cannot widen the condition.
 //! - `CSS.escape(ident)` is "serialize an identifier" (CSSOM): U+0000 is U+FFFD; controls are `\hex `; a digit first, or after a leading
 //!   `-`, is `\3N `; a lone `-` is `\-`; other characters outside `[A-Za-z0-9_-]` and above U+0080 get a backslash.
-//! - Not here: `registerProperty` (the typed OM and Houdini; the property stays undefined), `CSS.highlights`, the unit
+//! - `CSS.registerProperty({name, syntax, inherits, initialValue})` adds an `@property` rule as the last sheet part of the document, so the
+//!   cascade reads it like the rule of a style sheet (no rule is made: `RuleSet::registered`). `TypeError` for a missing `name`, `syntax`
+//!   or `inherits`. `SyntaxError` for a name that is not `--x`, a syntax other than `*` with no `initialValue`, or an `initialValue` with
+//!   `{`, `}` or `;`. `InvalidModificationError` for a name that an earlier call registered. Types are not checked, and a name that a
+//!   style sheet `@property` has is not seen as a duplicate.
+//! - Not here: the typed OM, `CSS.highlights`, the unit
 //!   functions (`CSS.px`) and `CSS.paintWorklet`.
 //!
 //! Lazy: the global `CSS` is an accessor until the first read or write (as `crypto` and `Intl`). A page that never reads it pays for
@@ -42,7 +47,7 @@ fn lazy(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
         return Ok(Value::Undefined);
     }
     let ns = d.obj(it, it.object_prototype())?;
-    for (name, h) in [("supports", supports as H), ("escape", escape)] {
+    for (name, h) in [("supports", supports as H), ("escape", escape), ("registerProperty", register_property)] {
         let key = d.key(it, name)?;
         let f = d.add_fn(it, h, name, 1, false)?;
         it.define_data(ns, key, Value::Object(f), true, true, true)?;
@@ -116,10 +121,9 @@ fn escape(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
     let s = d.string_arg(it, v)?;
     it.charge(1 + (s.len() / 16) as u64)?;
     let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().enumerate().peekable();
     let only = s.chars().count() == 1;
     let first = s.chars().next();
-    while let Some((i, c)) = chars.next() {
+    for (i, c) in s.chars().enumerate() {
         match c {
             '\0' => out.push('\u{FFFD}'),
             '\u{1}'..='\u{1F}' | '\u{7F}' => out.push_str(&format!("\\{:x} ", c as u32)),
@@ -132,5 +136,48 @@ fn escape(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
             }
         }
     }
-    Ok(d.js_str(it, &out)?)
+    d.js_str(it, &out)
+}
+
+fn register_property(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
+    let Some(&dict) = a.first().filter(|v| matches!(v, Value::Object(_))) else {
+        return Err(it.type_error("Failed to execute 'registerProperty' on 'CSS': 1 argument required, but only 0 present."));
+    };
+    let member = |it: &mut Interp<'_>, name: &str| -> R<Option<Value>> {
+        let k = d.key(it, name)?;
+        Ok(Some(it.get_value(dict, k)?).filter(|v| !matches!(v, Value::Undefined)))
+    };
+    let name = member(it, "name")?;
+    let syntax = member(it, "syntax")?;
+    let inherits = member(it, "inherits")?;
+    let initial = member(it, "initialValue")?;
+    let (Some(name), Some(syntax), Some(inherits)) = (name, syntax, inherits) else {
+        return Err(it.type_error("Failed to execute 'registerProperty' on 'CSS': name, syntax and inherits are required."));
+    };
+    let (name, syntax) = (d.string_arg(it, name)?, d.string_arg(it, syntax)?);
+    let inherits = it.heap.to_boolean(inherits).map_err(|e| it.heap_error(e))?;
+    let initial = match initial {
+        Some(v) => Some(d.string_arg(it, v)?),
+        None => None,
+    };
+    let bad = |s: &str| s.contains(['{', '}', ';']);
+    if !name.starts_with("--") || name.len() == 2 || name.contains(|c: char| c.is_whitespace() || c == '{' || c == '}' || c == ';') || bad(&syntax) || syntax.contains('"') {
+        return Err(d.dom_err(it, "SyntaxError", &format!("Failed to execute 'registerProperty' on 'CSS': Invalid property name or syntax '{name}'.")));
+    }
+    if initial.as_deref().is_some_and(|v| bad(v) || v.trim().is_empty()) || (initial.is_none() && syntax.trim() != "*") {
+        return Err(d.dom_err(it, "SyntaxError", "Failed to execute 'registerProperty' on 'CSS': The initial value is missing or not valid."));
+    }
+    if name.len() + syntax.len() + initial.as_ref().map_or(0, |v| v.len()) > d.lim.max_selector_len {
+        return Err(d.lim("dom-selector"));
+    }
+    it.charge(1 + (name.len() / 16) as u64)?;
+    let mut all = d.computed.registered.borrow_mut();
+    if all.iter().any(|r| r.0 == name) {
+        return Err(d.dom_err(it, "InvalidModificationError", &format!("Failed to execute 'registerProperty' on 'CSS': The name '{name}' has already been registered.")));
+    }
+    let init = initial.map_or(String::new(), |v| format!("initial-value: {v};"));
+    all.push((name.clone(), format!("@property {name} {{ syntax: \"{}\"; inherits: {inherits}; {init} }}\n", syntax.trim())));
+    drop(all);
+    d.computed.sheet_gen.set(d.computed.sheet_gen.get() + 1);
+    Ok(Value::Undefined)
 }

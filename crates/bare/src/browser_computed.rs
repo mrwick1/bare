@@ -172,6 +172,8 @@ type LastKey = (u64, u64, usize, [u64; 3], Option<NodeId>);
 pub(crate) struct Built {
     vp: (f32, f32),
     pub(crate) key: Vec<(NodeId, Option<String>, String)>,
+    // Boxed on purpose: the field is one pointer wide, and most documents have none.
+    #[allow(clippy::box_collection)]
     inputs: Option<Box<HashMap<usize, bare_css::cascade::InputSheet>>>,
     /// The rules are shared with other documents when `shared` (`bare_css::rule_cache`): they do not change.
     pub(crate) rules: Rc<RuleSet>,
@@ -214,6 +216,8 @@ pub(crate) struct Computed {
     bound: RefCell<HashMap<NodeId, String>>,
     /// Moves when a supplied sheet is set or removed. `ResizeObserver` reads it to know that styles may have changed.
     pub(crate) sheet_gen: Cell<u64>,
+    /// `CSS.registerProperty`: the name and the `@property` text of each call. They make a last sheet part (`plan`).
+    pub(crate) registered: RefCell<Vec<(String, String)>>,
     pub(crate) cache: RefCell<Option<Built>>,
     /// Styled elements of the last tree that `styled_work` counted, and its key (`revision`, length).
     elements: Cell<Option<((u64, usize), u64)>>,
@@ -260,6 +264,8 @@ const NO_SHORT: &str = "this shorthand has no single computed text (sides differ
 struct Plan {
     /// The tree of the sheet (the document node, or a shadow root), its layer and its text.
     parts: Vec<(NodeId, Option<String>, String)>,
+    // Boxed on purpose: the field is one pointer wide, and most documents have none.
+    #[allow(clippy::box_collection)]
     inputs: Option<Box<HashMap<usize, bare_css::cascade::InputSheet>>>,
     bytes: usize,
     missing: Vec<String>,
@@ -286,6 +292,8 @@ pub(crate) struct Snap {
     /// Only the element and its ancestors have a style in `styles` (`Styles::partial`): layout cannot run on them.
     pub(crate) partial: bool,
 }
+
+const NO_MOVE: &str = "a computed transform move that is not in pixels or a percent";
 
 /// A number as Chrome prints it: 6 significant digits, no trailing zeros, no `-0`.
 pub(crate) fn num(n: f32) -> String {
@@ -401,13 +409,13 @@ impl Dom {
                     }
                     let before = p.parts.len();
                     add(self, &mut p, scope, None, &text)?;
-                    if p.parts.len() > before {
-                        if let Some(inputs) = crate::browser_cssom::sheet_inputs(self, doc, el, &text) {
-                            let bytes = inputs.iter().flatten().flatten().map(|d| d.name.len() + d.value.len()).sum::<usize>();
-                            if bytes > l.max_sheet_bytes.saturating_sub(p.bytes) { return Err(self.lim("computed-sources")); }
-                            p.bytes += bytes;
-                            p.inputs.get_or_insert_with(Default::default).insert(before, inputs);
-                        }
+                    if p.parts.len() > before
+                        && let Some(inputs) = crate::browser_cssom::sheet_inputs(self, doc, el, &text)
+                    {
+                        let bytes = inputs.iter().flatten().flatten().map(|d| d.name.len() + d.value.len()).sum::<usize>();
+                        if bytes > l.max_sheet_bytes.saturating_sub(p.bytes) { return Err(self.lim("computed-sources")); }
+                        p.bytes += bytes;
+                        p.inputs.get_or_insert_with(Default::default).insert(before, inputs);
                     }
                 }
                 Source::Link(href) if href.trim().is_empty() => {}
@@ -449,6 +457,10 @@ impl Dom {
         crate::browser_cssom::adopted(self, &mut adopted);
         for (scope, text) in adopted {
             add(self, &mut p, scope, None, &text)?;
+        }
+        let registered: String = self.computed.registered.borrow().iter().map(|r| r.1.as_str()).collect();
+        if !registered.is_empty() {
+            add(self, &mut p, doc.root(), None, &registered)?;
         }
         drop(bound);
         if record {
@@ -555,7 +567,7 @@ impl Dom {
         let vp = self.plat.s.borrow().viewport;
         let t0 = crate::force::start();
         let builds = self.computed.builds.get();
-        if self.doc.borrow().len() > l.max_nodes {
+        if self.doc.borrow().live_len() > l.max_nodes {
             return Err(self.lim("computed-nodes"));
         }
         let mut doc = self.doc.borrow_mut();
@@ -730,6 +742,8 @@ impl Dom {
         // The cascade of a read keeps what `restyle` needs: the next read after a change updates it.
         let before = built.rules.tested_candidates();
         let styles = Rc::new(if keep || read { built.rules.compute_kept(&doc) } else { built.rules.compute_for(&doc, want) });
+        // New styles may take the address of freed ones: the layout of a read (`layout_shared`, keyed by address) is not theirs.
+        self.geometry.shared.borrow_mut().take();
         // The work cap bounds the compute. Charge the candidates the index tested, not nodes times all rules.
         it.charge(built.rules.tested_candidates() - before)?;
         built.last[slot] = Some((key, keep || read, styles.clone()));
@@ -775,7 +789,7 @@ impl Dom {
         }
         let Some(styles) = Rc::get_mut(styles) else { return Ok(None) };
         let doc = self.doc.borrow();
-        if doc.len() > self.computed.lim.get().max_nodes {
+        if doc.live_len() > self.computed.lim.get().max_nodes {
             return Err(self.lim("computed-nodes"));
         }
         if self.style.has_pending.get() {
@@ -907,6 +921,9 @@ impl Dom {
         if kind == PSEUDO && key == "content" {
             return Ok("normal".into());
         }
+        if key == "transform" || key == "-webkit-transform" {
+            return self.computed_transform(it, el, kind);
+        }
         let long = Property::from_name(&key);
         if !is_custom && long.is_none() && !SHORTHANDS.contains(&key.as_str()) {
             return Ok(String::new());
@@ -943,6 +960,27 @@ impl Dom {
             let name = a.starts_with(|c: char| c.is_alphabetic() || c == '_') && !a.starts_with("span ") && a != "auto";
             return Ok(if b == "auto" || (name && a == b) { a } else { format!("{a} / {b}") });
         }
+        // Chrome writes `font` as style, weight, size, `/ line-height` and family, and leaves out a `normal` style, a 400 weight and a `normal` line height.
+        if key == "font" {
+            let t = |p: Property| pick(p).text(p, ctx.as_ref()).map_err(Self::gate);
+            let mut out = String::new();
+            for (p, default) in [(Property::FontStyle, "normal"), (Property::FontWeight, "400")] {
+                let v = t(p)?;
+                if v != default {
+                    out.push_str(&v);
+                    out.push(' ');
+                }
+            }
+            out.push_str(&t(Property::FontSize)?);
+            let line = t(Property::LineHeight)?;
+            if line != "normal" {
+                out.push_str(" / ");
+                out.push_str(&line);
+            }
+            out.push(' ');
+            out.push_str(&t(Property::FontFamily)?);
+            return Ok(out);
+        }
         let mut text = String::new();
         for &p in longs {
             text.push_str(&format!("{}:{};", p.name(), pick(p).text(p, ctx.as_ref()).map_err(Self::gate)?));
@@ -958,6 +996,49 @@ impl Dom {
         match blk::get(&list, &key, lim.bytes, &mut |n| it.charge(n)).map_err(fail)? {
             Some(t) if !t.is_empty() => Ok(t),
             _ => Err(Self::gate(NO_SHORT)),
+        }
+    }
+
+    /// `transform`: `none`, or the 2D matrix of the list (`bare_css::transform`). A percent is of the border box, so a list with one runs the layout.
+    /// A real 3D step (`rotateX`, `perspective`, a z move) has a `matrix3d(...)` in Chrome: it is gated.
+    fn computed_transform(&self, it: &mut Interp<'_>, el: NodeId, kind: u8) -> R<String> {
+        use bare_css::{grid::Grid, transform::{Func, resolve, text}};
+        // `transform` is not inherited: a pseudo-element here has the initial value.
+        if kind == PSEUDO {
+            return Ok("none".into());
+        }
+        let Some(mut s) = self.snapshot_with(it, el, true)? else { return Ok(String::new()) };
+        let (x, y) = (s.style.value(Property::TranslateX), s.style.value(Property::TranslateY));
+        let zero = Cv::Length(Length::Px(0.0));
+        let list = match (x, y) {
+            (Cv::Grid(i), _) => match s.styles.grid(i) {
+                Grid::Transform(l) => l.clone(),
+                _ => return Ok("none".into()),
+            },
+            (x, y) if (x, y) == (zero, zero) => return Ok("none".into()),
+            // A plain move of two lengths.
+            (x, y) => {
+                let l = |v| match v {
+                    Cv::Length(l @ (Length::Px(_) | Length::Percent(_))) => Some(l),
+                    _ => None,
+                };
+                vec![Func::Translate(l(x).ok_or_else(|| Self::gate(NO_MOVE))?, l(y).ok_or_else(|| Self::gate(NO_MOVE))?)]
+            }
+        };
+        let percent = list.iter().any(|f| matches!(f, Func::Translate(Length::Percent(_), _) | Func::Translate(_, Length::Percent(_))));
+        let (mut w, mut h) = (0.0, 0.0);
+        if percent && !s.hidden {
+            if s.partial {
+                s = self.snapshot(it, el)?.expect("in the document");
+            }
+            let (layout, _, _) = self.layout_areas(it, &s.styles, None)?;
+            if let Some(r) = crate::browser_geometry::border_box(&layout, el) {
+                (w, h) = (r.w, r.h);
+            }
+        }
+        match resolve(&list, w, h) {
+            Some(m) => Ok(text(m)),
+            None => Err(Self::gate("a computed transform with a 3D step (Chrome writes matrix3d)")),
         }
     }
 
@@ -1175,6 +1256,12 @@ fn named_get(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     d.js_str(it, &v)
 }
 
+fn transform_get(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    let el = d.computed_el(it, this)?;
+    let v = d.computed_value(it, el, "transform", d.computed_kind(this))?;
+    d.js_str(it, &v)
+}
+
 fn named_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     let name = current(d, it)?;
     d.computed_el(it, this)?;
@@ -1204,6 +1291,14 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
         for k in &keys {
             let key = d.key(it, k)?;
             d.define_accessor(it, proto, key, gf, Some(sf))?;
+        }
+    }
+    // `transform` is not a property of the style block, so the computed object has its own accessor.
+    for css in ["transform", "-webkit-transform"] {
+        let gf = d.add_fn(it, transform_get, &format!("get {}", keys_of(css)[0]), 0, false)?;
+        for k in keys_of(css) {
+            let key = d.key(it, &k)?;
+            d.define_accessor(it, proto, key, gf, None)?;
         }
     }
     let f = d.def_method(it, g, "getComputedStyle", 1, get_computed_style)?;

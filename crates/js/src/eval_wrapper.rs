@@ -37,6 +37,8 @@ impl<'p> Interp<'p> {
     }
 
     /// ToObject.
+    // Spec name (ToObject); it needs `&mut self` to allocate.
+    #[allow(clippy::wrong_self_convention)]
     fn to_object(&mut self, v: Value) -> Res<Value> {
         if v.is_bigint() {
             let p = self.big_proto()?;

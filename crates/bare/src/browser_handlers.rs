@@ -222,14 +222,14 @@ fn body_element(doc: &Document) -> Option<NodeId> {
 fn hget(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let (k, ty) = d.handler_fn();
     let t = d.handler_owner(it, this, k)?;
-    handler_value(d, it, t, &ty)
+    handler_value(d, it, t, ty)
 }
 
 fn hset(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     let (k, ty) = d.handler_fn();
     let t = d.handler_owner(it, this, k)?;
-    sync(d, t, &ty);
-    handler_set(d, t, &ty, a.first().copied())?;
+    sync(d, t, ty);
+    handler_set(d, t, ty, a.first().copied())?;
     Ok(Value::Undefined)
 }
 

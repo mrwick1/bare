@@ -88,7 +88,7 @@ mod tests {
         assert_eq!(h.own_keys(w).unwrap(), vec![PropertyKey::Index(0), PropertyKey::Index(1), length]);
         let Some(Property::Data { value: Value::String(c), writable: false, enumerable: true, configurable: false }) = h.get_own_property(w, PropertyKey::Index(1)).unwrap() else { panic!("index 1") };
         assert_eq!(h.str_units(c).unwrap(), &[b'b' as u16]);
-        assert_eq!(h.get_own_property(w, PropertyKey::Index(2)).unwrap().is_none(), true);
+        assert!(h.get_own_property(w, PropertyKey::Index(2)).unwrap().is_none());
         // a define that changes a virtual property is rejected, one that keeps it is accepted
         let same = PropertyDescriptor { value: Some(Value::String(c)), ..Default::default() };
         assert_eq!(h.define_own_property(w, PropertyKey::Index(1), &same), Ok(true));

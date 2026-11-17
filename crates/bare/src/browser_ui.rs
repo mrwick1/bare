@@ -301,12 +301,12 @@ fn u16_len(s: &str) -> u32 {
 }
 
 /// The UTF-16 offset one character before `u`.
-fn prev_off(s: &str, u: u32) -> u32 {
+pub(crate) fn prev_off(s: &str, u: u32) -> u32 {
     s[..byte_at(s, u)].chars().next_back().map_or(0, |c| u - c.len_utf16() as u32)
 }
 
 /// The UTF-16 offset one character after `u`.
-fn next_off(s: &str, u: u32) -> u32 {
+pub(crate) fn next_off(s: &str, u: u32) -> u32 {
     s[byte_at(s, u)..].chars().next().map_or(u, |c| u + c.len_utf16() as u32)
 }
 
@@ -542,7 +542,7 @@ impl Dom {
             // The mouse events of a press go to the holder of the capture, if a listener of `pointerdown` set one.
             let t = self.st.borrow().ui.capture.unwrap_or(t);
             if self.mouse_ev(it, t, "mousedown", p, b, p.buttons, count, None)? && button == 0 {
-                self.focus_by_press(it, t, caret, count)?;
+                self.focus_by_press(it, t, caret, count, (p.x, p.y))?;
             }
         } else {
             let down = self.st.borrow_mut().ui.down.take();
@@ -578,7 +578,7 @@ impl Dom {
     }
 
     /// The focus change of a press: the nearest focusable ancestor gets focus, or the page loses it.
-    fn focus_by_press(&self, it: &mut Interp<'_>, t: NodeId, caret: Option<u32>, count: u32) -> R<()> {
+    fn focus_by_press(&self, it: &mut Interp<'_>, t: NodeId, caret: Option<u32>, count: u32, at: (f64, f64)) -> R<()> {
         let mut to = None;
         for n in self.chain(Some(t)) {
             if self.focusable(it, n)? {
@@ -617,6 +617,13 @@ impl Dom {
         // A press in an editing host puts the caret at the end of it, unless the selection is in it already.
         if let Some(f) = to {
             self.caret_into_host(it, f)?;
+        }
+        // Two presses on text outside a text field select the word under the pointer, three the paragraph (the fields did it above).
+        if count >= 2 && caret.is_none() && !to.is_some_and(|f| self.selection_applies(f)) {
+            let hit = self.with_geo(it, |g, s| crate::browser_rects::text_at(g, s, at.0 as f32, at.1 as f32)).unwrap_or(None);
+            if let Some((n, off)) = hit {
+                self.select_at_text(it, n, off, count >= 3)?;
+            }
         }
         Ok(())
     }
@@ -732,6 +739,9 @@ impl Dom {
             self.focus_node(it, c)?;
             return self.user_click(it, c, Some(ui.clone())).map(|_| ());
         }
+        if is_tag(&self.doc.borrow(), t, "summary") {
+            return self.summary_activate(it, t);
+        }
         self.activate(it, t)
     }
 
@@ -804,7 +814,7 @@ impl Dom {
             let t = self.focus_target(it)?;
             let by_space = {
                 let doc = self.doc.borrow();
-                is_tag(&doc, t, "button") || (is_tag(&doc, t, "input") && !text_kind(nd::input_kind(&doc, t)))
+                is_tag(&doc, t, "button") || is_tag(&doc, t, "summary") || (is_tag(&doc, t, "input") && !text_kind(nd::input_kind(&doc, t)))
             };
             if by_space {
                 self.user_click(it, t, Some(self.zero_click()))?;
@@ -852,9 +862,9 @@ impl Dom {
                 self.edit(it, f, if k.key == "Backspace" { "deleteContentBackward" } else { "deleteContentForward" }, None)?;
             }
             "ArrowLeft" | "ArrowRight" | "Home" | "End" if focus.is_some_and(|f| self.selection_applies(f)) => {
-                self.move_caret(it, focus.expect("checked"), &k.key, m.shift)?;
+                self.move_caret(it, focus.expect("checked"), &k.key, m.shift, m.ctrl)?;
             }
-            "ArrowUp" | "ArrowDown" | "ArrowLeft" | "ArrowRight" | "PageUp" | "PageDown" | "Home" | "End" if !m.ctrl && !m.alt && !m.meta && !(matches!(k.key.as_str(), "ArrowUp" | "ArrowDown") && edit.is_some()) => {
+            "ArrowUp" | "ArrowDown" | "ArrowLeft" | "ArrowRight" | "PageUp" | "PageDown" | "Home" | "End" if !(m.ctrl || m.alt || m.meta || matches!(k.key.as_str(), "ArrowUp" | "ArrowDown") && edit.is_some()) => {
                 use crate::browser_scroll::ScrollKey as S;
                 let key = match k.key.as_str() {
                     "ArrowUp" => S::Up,
@@ -884,7 +894,7 @@ impl Dom {
                 // On a button, a checkbox or a radio, Space clicks on key up; elsewhere it scrolls a page.
                 let by_space = {
                     let doc = self.doc.borrow();
-                    is_tag(&doc, t, "button") || (is_tag(&doc, t, "input") && !text_kind(nd::input_kind(&doc, t)))
+                    is_tag(&doc, t, "button") || is_tag(&doc, t, "summary") || (is_tag(&doc, t, "input") && !text_kind(nd::input_kind(&doc, t)))
                 };
                 if !by_space {
                     self.note_scroll_key(if m.shift { crate::browser_scroll::ScrollKey::PageUp } else { crate::browser_scroll::ScrollKey::PageDown });
@@ -925,6 +935,19 @@ impl Dom {
         }
         if m.alt || m.meta {
             return Ok(false);
+        }
+        // Shift with an arrow, Home or End extends the selection (Control: by word, or to the end of the host).
+        if m.shift && matches!(k.key.as_str(), "ArrowLeft" | "ArrowRight" | "Home" | "End") {
+            self.caret_into_host(it, f)?;
+            let fwd = matches!(k.key.as_str(), "ArrowRight" | "End");
+            let gran = match (k.key.as_str(), m.ctrl) {
+                ("ArrowLeft" | "ArrowRight", false) => "character",
+                ("ArrowLeft" | "ArrowRight", true) => "word",
+                (_, false) => "lineboundary",
+                _ => "documentboundary",
+            };
+            self.modify_selection(it, "extend", if fwd { "forward" } else { "backward" }, gran)?;
+            return Ok(true);
         }
         let (kind, text) = match k.key.as_str() {
             "Enter" => (if m.shift { "insertLineBreak" } else { "insertParagraph" }, None),
@@ -1008,7 +1031,7 @@ impl Dom {
         Ok(())
     }
 
-    fn move_caret(&self, it: &mut Interp<'_>, n: NodeId, key: &str, extend: bool) -> R<()> {
+    fn move_caret(&self, it: &mut Interp<'_>, n: NodeId, key: &str, extend: bool, word: bool) -> R<()> {
         let Some((sel, len)) = self.effective(None, n)? else { return Ok(()) };
         let value = self.input_value_of(n).unwrap_or_default();
         // The selection has an anchor and a focus end: Shift moves the focus end.
@@ -1019,6 +1042,8 @@ impl Dom {
                 let c = if left { sel.start } else { sel.end };
                 return self.set_user_selection(it, n, Some(c), Some(c), Dir::Forward);
             }
+            "ArrowLeft" if word => word_move(&value, focus, false),
+            "ArrowRight" if word => word_move(&value, focus, true),
             "ArrowLeft" => prev_off(&value, focus),
             "ArrowRight" => next_off(&value, focus),
             "Home" => 0,
@@ -1286,7 +1311,7 @@ impl Browser {
         }
         // The events are freed by `collect`: keep room for the next call (the cap is `max_events`). A call that runs many events (a typed
         // text) also collects when the heap has grown to twice its live size (`gc_due`), so its garbage does not pile up.
-        if self.dom.st.borrow().events.len() > self.dom.lim.max_events / 2 || self.it.gc_due() {
+        if self.dom.st.borrow().events.len() > self.dom.lim.max_events / 2 || self.collect_due() {
             self.collect(&[])?;
         }
         Ok(UiOutcome { reports, changed: self.dom.st.borrow().ui.epoch != before, intercepted: None })
@@ -1358,9 +1383,27 @@ impl Browser {
     }
 }
 
+/// The offset after Control+Arrow from `u` in `text` (UTF-16 units): spaces are skipped, then the run of letters, digits and `_`, or of
+/// other characters, is crossed. Forward gives its end (Chrome on Linux), backward its start.
+pub(crate) fn word_move(text: &str, u: u32, forward: bool) -> u32 {
+    let class = |ch: char| if ch.is_whitespace() { 0 } else if ch.is_alphanumeric() || ch == '_' { 1 } else { 2 };
+    let mut at = u;
+    let step = |at: u32| if forward { next_off(text, at) } else { prev_off(text, at) };
+    let char_at = |at: u32| if forward { text[byte_at(text, at)..].chars().next() } else { text[..byte_at(text, at)].chars().next_back() };
+    while char_at(at).is_some_and(|c| class(c) == 0) {
+        at = step(at);
+    }
+    if let Some(k) = char_at(at).map(class) {
+        while char_at(at).is_some_and(|c| class(c) == k) {
+            at = step(at);
+        }
+    }
+    at
+}
+
 /// Where a double click at offset `c` of `text` selects (UTF-16 offsets): the run of letters, digits and `_`, or the run of spaces,
 /// that holds the character after `c` (the one before it at the end). Any other character stands alone (Chrome).
-fn word_at(text: &str, c: u32) -> (u32, u32) {
+pub(crate) fn word_at(text: &str, c: u32) -> (u32, u32) {
     let (mut cs, mut u) = (Vec::new(), 0);
     for ch in text.chars() {
         cs.push((u, ch));

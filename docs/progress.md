@@ -4,6 +4,12 @@ This file records what is built, what comes next and what is missing. Update it 
 
 The reasons for the design are in [decisions.md](decisions.md). Time and memory numbers for each module are in [resources.md](resources.md).
 
+## Agent browser integration (2026-11-17)
+
+The MCP combines document-scoped references and observation revisions, removal diffs, typed recovery evidence, independent session workers, cooperative cancellation and an eight-task evaluation corpus. Action outcomes retain execution and verification states alongside failure evidence. Cancellation cannot turn skipped step lines into a successful result. The guide describes the combined workflow.
+
+The combined MCP suites, 62 Python tests and three eight-task scripted smoke runs pass. The full workspace run has 4,202 passes, eight failures and 16 ignored tests. All eight failures reproduce on the unchanged integration base. Details and limits: [Agent browser integration](agent-integration.md). Real-agent browsing, windowed cancellation, Windows and release validation remain unverified.
+
 ## Modules
 
 The module numbers below remain stable for existing code and benchmark references. The next implementation order is S1 to S5 in the staging plan below.
@@ -12750,3 +12756,124 @@ Added `network/request_failed` (fields `kind`, `retried`, `replay`, `duration_ns
 ## Logger queued memory (2026-11-17)
 
 `bare-observe` now counts the heap bytes of records that wait in its queue (`Vec::capacity`): current, peak, and peak record count. Each process sample has `logger_queued_bytes`. The terminal `collector_status` record has `peak_queued_bytes` and `peak_queued_records`. `Status` and `Handle::queued_bytes()` expose them. The producer adds a few relaxed atomic operations per queued record. With monitoring off, no collector exists, so none run. The worst-case terminal record is 319 bytes, within the 512-byte reserve. The new test `queued_memory_is_counted_and_released` failed to compile before the change and passes after it. `bare-observe` has 13 unit tests (was 12) and 4 process tests; `bare-os` 10; the doctest 1. Driver `monitoring` 4 and MCP `monitoring` 1 pass. `cargo check --workspace` passes. Not counted: producer-local record buffers, the channel slot array, and the writer's OS and file buffers. Not tested: a release build, a tracing-on CPU cost of the counters, a capture that subtracts the counter from RSS, Windows and macOS runs.
+## `sessions` names a session with no document, and the hidden iframe download test (#573, #585, 2026-11-16)
+
+- #573: after a `goto` that fails, `sessions` printed `main: `. Now it prints `main: (no document: the document did not load: network error: connect refused)`. A session with no document and no error prints `main: (no document)`. `load_document` now keeps the kind of the cause (`dns`, `connect refused`, `read timeout`, `reset`...) from `bare_net::cause::describe`. It drops the error text, because the text can name a host or a URL. New test: `sessions_names_a_session_whose_document_did_not_load` (failed before, passes after).
+- #585: root cause is the test, not the product. The wait loop counted `" bytes"` in the list. A running download prints `running: <url> (0 bytes)`, so the loop ended at once (the test ended in 0.03 s) and the check for `report.csv (` ran before the file was saved. The loop now counts `" bytes, "`, which only a finished download prints. Before: 5 failures in 10 runs. After: 0 in 10.
+- Not tested: a `read timeout` cause end to end (the test uses a closed port); other load errors (`the time limit passed` and similar) keep their text.
+## Three page reads that threw or gave nothing (#516, #558, #559, 2026-11-16)
+
+- `getComputedStyle(el).font` threw `Unsupported`. It now gives the Chrome text: style, weight, size, `/ line-height` and family, and it leaves out a `normal` style, a 400 weight and a `normal` line height (for example `italic 700 20px / 30px monospace`, `16px sans-serif`).
+- `getComputedStyle(el).transform` and `webkitTransform` were `undefined`, because `transform` is not in the property list of the style block. The computed object now has its own read-only accessors. The value is `none`, or `matrix(1, 0, 0, 1, tx, ty)` for a translate in px. Left: the engine keeps only the move, so rotate and scale read as `none`, `translate(0, 0)` reads as `none` (Chrome gives a matrix), and a percent move is gated (it needs the box). `el.style.transform` is still not supported. #558 is `Refs`, not closed.
+- `innerText` over a `select` threw. Now each `option` of the select (also in an `optgroup`) is one line, as in Chrome. Options have `display: none` in the UA sheet, so the walk reads them from the select. A hidden select gives nothing.
+- Chrome 2026-11 (headless) gave the expected values in the tests. Not tested: `option` text with nested elements or `white-space` collapse, a `select` inside `display: contents`.
+## Issue #568: legacy `Event` members (partial, 2026-11-16)
+
+Gmail's Labels menu click sends no mutation and the page posts to `/jserror`. Live Gmail was not tested. Two parts were checked with local fixtures.
+
+- Reporting: an uncaught listener, timer or microtask exception already reaches `console` and `diagnose` (`Page::take_logs`, level `exception`). An exception that the page catches and reports itself (Closure's reporter posts to `/jserror`) is not uncaught. Chrome shows it nowhere either, so there is no bare fault to fix.
+- Click path: a click on a `menuitemcheckbox` fires the Chrome event order (pointer, mouse, focus, click). `Event.srcElement`, `Event.returnValue` and `Event.cancelBubble` were missing. They are now defined (`browser_events.rs`). Still missing and not fixed: `which`, `layerX`, `layerY`, `fromElement`, `toElement`, `sourceCapabilities` on mouse events and `initMouseEvent`.
+- The cause of `oEd: Xqd` is still open. It is not proven that these members cause it.
+- Test: `legacy_event_members_srcelement_returnvalue_cancelbubble`. `cargo test -p bare --lib`: 1283 passed, 2 failed. `one_image_data_holds_at_most_64_mib` fails on an overflow in `browser_canvas.rs:84` (not touched here). `a_pending_meta_refresh_is_queued_work` failed in the full run and passed alone.
+## 2026-11-15: bare#549, `Response.json` static method
+
+- `Response.json(data, init)` is added. It calls the intrinsic `JSON.stringify`, as `json()` calls the intrinsic `JSON.parse`. The body type is `application/json` unless `init` sets a Content-Type.
+- The status, statusText, header and body rules are those of the `Response` constructor. Both use `init_response`.
+- A value that JSON cannot serialize is a TypeError. The test was written first and failed with `Response.json is not a function`.
+
+### Tests
+
+- `cargo test -p bare --lib response_json_static`: 1 passed.
+- `cargo test -p bare --lib browser_fetch_tests`: 55 passed.
+- `cargo test --workspace --no-fail-fast`: the same 14 tests fail on HEAD `2889fa06`. They are TLS, layout overflow, snapshot timing and session timing. One more test (`a_driver_click_step_returns_and_the_expect_waits_for_the_reply`) failed once with the change. It passed in three reruns alone.
+
+### Not tested
+
+- `bare-mcp` in the isolated browser tests of the parent.
+- A `Response.json` call on a live page.
+### 2026-11-14: contenteditable list exit (issue #443)
+
+`browser_editing.rs` now outdents an empty list item on Enter, removes an empty block on Backspace, and toggles only the selected list items. Tests: `enter_in_an_empty_list_item_leaves_the_list`, `backspace_in_an_empty_block_removes_it`, `list_toggle_changes_only_the_selected_items`. Not done: merging a block with content into the block before it on Backspace.
+## Summary activation and `toggle` (#557, 2026-11-16)
+
+- Done: a window click, Enter or Space on the first `summary` child of a `details` toggles its `open` attribute. A canceled click does not toggle. A click inside a link, button or field in the summary does not toggle, because that control is the activation target.
+- Done: a change of `open` by that activation or by the `details.open` setter queues one `toggle` task. The event is a `ToggleEvent` with `oldState` and `newState`. A task that is still queued for the same `details` is replaced and keeps its old state. Code: `browser_details.rs`.
+- Tests: 6 tests in `browser_ui_tests.rs`. With the summary default action switched off, 3 of them fail (click toggles, keys toggle, second summary). The other 3 pass in that state: 2 check that nothing toggles, and 1 uses the `open` setter.
+- Not done: `setAttribute`, `removeAttribute` and `toggleAttribute` of `open` queue no `toggle` event. The `name` attribute (exclusive group) closes no other `details`. `HTMLElement.click()` on a summary stays gated. An `<a>` with no `href` inside a summary blocks the toggle (the activation target is the `a`).
+- With PR #561 (layout and hit tests of a closed `details`), this completes #557.
+## Flaky tests and clippy (2026-11-16)
+
+Four tests failed on main for reasons that were not product bugs. `a_pending_meta_refresh_is_queued_work` assumed that the virtual clock starts near 0. It starts at the real time since the page origin, so the 5000..5010 window failed 5 of 5 runs. The test now compares the due time with the clock at the start of the refresh. `a_kept_layout_equals_a_full_layout_after_random_changes` overflowed a multiply in its seed in debug builds. It now uses `wrapping_mul`, and all 12 seeds pass. `a_snapshot_of_5000_elements_takes_under_30_ms` took 180 to 250 ms in a debug build. The 30 ms bound now applies to release builds only. The two `chunked` tests timed out at 10 s in debug. A debug build now parses 12,000 rows instead of 40,000, and the 50 ms bounds apply to release builds only. `one_image_data_holds_at_most_64_mib` passes on this base. Nine `type_complexity` errors now have type aliases. `cargo clippy --all-targets -- -D warnings` still fails with 64 errors of other lints in bare-js, bare-css and bare-net. Those are not fixed here. Not tested: a run on a loaded machine.
+## Legacy mouse event members (#568, 2026-11-16)
+
+Gmail code reads old members of mouse events. Now `MouseEvent` has `which`, `sourceCapabilities`, `layerX`, `layerY`, `fromElement`, `toElement` and `initMouseEvent` (15 arguments, no effect while the event dispatches). `KeyboardEvent` and `InputEvent` have `which` and `sourceCapabilities`. The code is in `browser_mouse_legacy.rs`. Each getter computes its value when read. An event stores nothing new.
+
+- `which` of a mouse event is `button + 1` for `mousedown`, `mouseup`, `click`, `dblclick`, `auxclick` and `contextmenu`, and 0 for other types.
+- Approximations: `sourceCapabilities` is always `null` (no `InputDeviceCapabilities`). `layerX` and `layerY` count from the border box of the nearest positioned ancestor, not from the nearest paint layer. bare has no `UIEvent` interface, so the members sit on the three interfaces.
+- Tests: `browser_mouse_legacy_tests.rs`, 9 tests. Not compared with Chrome. Not tested: Gmail. This change alone may not fix #568.
+
+## Load-flaky tests, round 2 (2026-11-17)
+
+- Product bug: `Dom::layout_shared` keyed its cached layout by the address of the `Styles`. A freed address could come back for new styles, so a read used the layout of the old ones. Now the cascade drops the cached layout when it builds new `Styles` (one `RefCell` take for each full cascade, nothing for a read). Test: `a_new_sheet_is_never_read_with_the_layout_of_the_old_one`. Without the fix it fails 10/10 (round 5). Cause of the flake in `external_sheets_embedded_sheets_and_inline_styles_cascade_in_order`: hypothesis, not reproduced alone. A `Weak<Styles>` in the cache was tried first. It makes `Rc::get_mut` fail, so in-place restyle stops: 6 tests in `browser_computed*_tests` failed. Not used.
+- Loader parallel tests (`browser_loader/parallel_tests.rs`): no wall-clock bound any more. The server holds a request until 3 are inside together, so a loader that sends them one at a time fails at the deadline and a correct one passes at any speed.
+- `a_refused_range_goes_back_to_the_first_connection`: the job fails when the first connection ends before a refused range is given back to it. The test throttled that connection to 16 MiB/s, so it relied on timing. Verified: with no throttle it fails 20/20 on an idle machine. The server now holds the first body until the test sees that every split segment is refused and given back. No product change: that failure is correct for a real server. I did not reproduce the old flake (10 runs with 16 and 64 `yes` loads, 6 runs of the module).
+## @property initial-value (2026-11-16, issue #586)
+## @property initial-value (2026-11-17, issue #586, redesign)
+
+`@property` is now a registry in the `RuleSet` (`registered`: name, initial value, inherits). It adds no rule. The first version (PR #588) added a `*` rule for each `inherits: false` property, and a `*` rule is matched against every element on every restyle.
+
+Design: `var::Sets` reads the registry when it looks up a custom property. An element does not take a registered `inherits: false` value from its parent; the lookup gives the initial value. `var(--x)` of a registered property with no value gives the initial value. An element that has no custom property of its own shares the set of its parent only when that set holds no `inherits: false` value (`Sets::blocks_sharing`, O(1)). `@property` inside `@layer` and `@media` is read. `CSS.registerProperty` adds an `@property` text as the last sheet part and restyles; a second call with the same name is `InvalidModificationError`, a bad name or syntax is `SyntaxError`.
+
+Numbers (`cascade_load file`, 2,003 elements, 40 `@property` rules with `inherits: false`, `compute` x 20, `instructions:u`, 3 runs): PR #588 version (75cd58f7) 332,256,467 / 332,256,596 / 332,256,700. Registry 87,710,238 / 87,721,426 / 87,736,839. That is 3.8 times fewer. Same check sum. The result with no `@property` rule is not changed.
+
+Tests: `registered_property_in_layer_and_media_and_perf` (also: 50 `@property` rules add 0 rules), `register_property_from_code`, `register_property_gives_the_initial_value_and_restyles`. The first one fails on 75cd58f7 (checked with its assertions, without `is_registered`).
+
+Not tested: the page of the issue in `bare-mcp`. Syntax types are not checked. A name that a style sheet `@property` has is not a duplicate for `registerProperty`.
+
+Seen, not fixed: `browser_geometry_tests::external_sheets_embedded_sheets_and_inline_styles_cascade_in_order` fails with this change. The layout cache (`browser_scroll.rs:384`) keys on `Rc::as_ptr(styles)`, and a bigger `RuleSet` makes the allocator reuse the address of the old rules (hypothesis, from the key and the stale 77x30; not proven with a tool). A parallel agent owns the layout cache.
+## `computed-nodes` stopped a long SPA session (#550, 2026-11-16)
+
+- Cause: the node arena is freed only by a collect and a reclaim. The page driver collected when the script heap grew (`Interp::gc_due`). A page that replaces a list makes many dead nodes and almost no script heap, so no collect ran. The arena grew with every replace. `computed-nodes` counted `Document::len` (all slots, with free ones), so it fired while the live tree was small.
+- Fix: `Browser::collect_due` also asks for a collect when the arena has grown by 2 MiB (or a fourth of the live bytes) since the last one; the page driver and `ui_call` use it. `computed-nodes` counts `live_len`, as the DOM cap already did. The cap is not changed.
+- Test: `replacing_a_list_many_times_does_not_reach_computed_nodes` (700 rows of 5 nodes, replaced 50 times, one `getComputedStyle` after each). Before: `computed-nodes` at round 37, `len` 133,006. After: `len` stays at 108,506 from round 32 to round 49.
+- Not tested: live Gmail; the `goto` case of the issue (a new document should have a small arena; not reproduced); peak RSS (arena slots peak at 108,506; without the fix they grow by 3,500 a round, so 175,006 at round 50 by calculation, one run).
+## Computed `transform` as a matrix (#558, 2026-11-17)
+
+`getComputedStyle(el).transform` gave `none` for rotate, scale, skew and `matrix()`, `none` for `translate(0, 0)`, and threw for a percent move. Vaul parses this value in `getTranslate`. Now any list that is not `none` reads as `matrix(a, b, c, d, e, f)` in Chrome's number format (`1.23457e+06`, `1e-05`). A percent is of the border box, read with a layout only when the list has a percent.
+
+- Memory: a plain move (units agree, not zero) stays in `TranslateX` and `TranslateY` as before. Any other list is a `Grid::Transform` in the shared grid table, and `TranslateX` holds its index. The style of an element grows by 0 bytes. A list is stored once per page. The list keeps the steps (translate, or one folded matrix), not one matrix, because a percent after a rotation mixes the width and the height into the move.
+- Layout moves a box by the move of the matrix. Paint still does not rotate or scale. This is out of scope.
+- A real 3D step (`rotateX`, `rotateY`, `perspective`, a z move that is not 0, a `matrix3d` that is not flat) is a good value. It moves nothing, and the read is gated, because Chrome writes `matrix3d(...)`.
+- Chrome (headless, this machine) writes `matrix(0, 1, -1, 0, 0, 0)` for `rotate(90deg)`, not `6.12323e-17`. A multiple of 90 degrees is exact here too. Expected values in the tests come from that Chrome.
+- Changed on purpose: a mix of units (`translateX(5px) translateX(7%)`) is now a good value, as in Chrome. `calc()` inside a list that needs a matrix is still dropped.
+- Not done: the `translate`, `rotate` and `scale` properties do not join the matrix. Not tested: Vaul itself, a transition of a matrix.
+## 2026-11-17: Backspace and Delete merge blocks (#443)
+
+Backspace at the start of a block with content moves its children to the end of the block before it. Delete at the end of a block moves the next block into it. The code is `delete_at_block_edge` in `browser_editing.rs`, ported, simplified, from the W3C editing draft "delete" command ("merge blocks") and Ladybird `command_delete_action` (BSD-2).
+
+- A list before the block gives its last item; a next list gives its first item. The first item of a list leaves the list, as for an empty item (#499). Inline formatting moves with the children.
+- Gaps: only sibling blocks merge. The last item of a list does not take the block after the list. A block nested in a `div` is not merged with a block outside it.
+- Tests: 3 new in `browser_editing_tests.rs`. Not compared with Chrome in a live browser.
+## Shift+Arrow extends the selection (#444, 2026-11-16)
+
+Shift with ArrowLeft, ArrowRight, Home and End now extends the selection in a `contenteditable` host. Control makes it by word, or to the end of the host with Home and End. `Selection.modify("move" | "extend", direction, granularity)` is built (granularities `character`, `word`, `lineboundary`, `paragraphboundary`, `documentboundary`). It reads the text of the host once per call, and cuts lines at blocks and `<br>`. In `<input>` and `<textarea>`, Control+Shift+Arrow now moves the selection end by word (`word_move`, shared with `modify`). No new crate: the word rule is the one of `word_at`. Tests: `browser_editing_tests` (three new tests). Before the change they failed ("" instead of "ld"; `modify` was a gate).
+
+Not done: a double click or triple click on text in a `contenteditable` or plain text. A press has no hit test from a point to a text offset outside text fields (`caret_in` in `page.rs` reads the field layout only). Input and textarea already select a word and a line. Not tested: a real pointer on a laid-out page, Chrome comparison of word boundaries with punctuation, plain arrows (no Shift) in a host.
+
+## Double and triple click select text (#444 part 2, 2026-11-16)
+
+A double click on text in a `contenteditable` host or in plain page text now selects the word under the pointer. A triple click selects the nearest block (a paragraph, list item, heading, table cell or the host). Before, the selection stayed collapsed. Input and textarea are unchanged. New: a hit test from a window point to a Text node and a UTF-16 offset (`browser_rects::text_at`), and `document.caretRangeFromPoint(x, y)`.
+
+How the hit test works: `bare_paint::hit` names the top element at the point. The box of that element (or of the nearest ancestor that has one) gives a range of fragments. The Text fragments in that range, whose node is inside the top element, are scored by distance to the point (line first, then side). The nearest wins. The letter boundary nearest to `x` comes from one walk over the letters of that fragment, with the advances and spacing of `Pass::x_at`. No layout runs again. Cost: one hit test (one pass over the fragments), one scan for the box, then the fragments of that box and the letters of one fragment.
+
+Tests: three new tests in `browser_editing_tests`. Before the change, all three failed. After, they pass.
+
+Not done or not tested: `caretPositionFromPoint` (no `CaretPosition` interface yet). A word is cut at the Text node (`he<b>llo</b>` selects one part). A triple click in a block that holds a nested block selects the nested text too. A single press on plain text does not move the caret (a press in a host still puts it at the end). Not tested: scrolled containers, `position: fixed` and sticky text, right-to-left text, a comparison with Chrome on a real page.
+## Clippy clean (`fix/clippy-clean`, 2026-11-17)
+
+`cargo clippy --all-targets -- -D warnings` exits 0 on bare. On the base (f4e1fcd8) clippy stops at the first failing crate, so the counts show only as each crate is fixed. Largest per-crate error counts that cargo printed (lib and test targets overlap): bare-js 49, bare 48, bare-paint 7, bare-css 6, bare-mcp 3 plus 3, bare-net 2 plus 5 (tests), bare-stress 5, bare-drive 1 plus 3 (about 132 in all). After the change: 0.
+
+- Most fixes are the suggested rewrite: collapsed `if let` chains, `is_multiple_of`, `is_empty`, needless borrows, `Default` derive for `bare_net::http::Response`.
+- Items with `#[allow(clippy::...)]` and a reason comment: `too_many_arguments` (hot paths `add_rules`, `style_of`, `Regex::backward`, plus `build_response`, `load_document`), `wrong_self_convention` (spec names `to_object`, `to_numeric`, `to_bigint`, `to_bit_width`, `to_dict`, `to_shapes`, `from_clause`), `box_collection` (fields that stay one pointer wide), `type_complexity` (one-off tuple fields), `diverging_sub_expression` (`hx!` early return), `needless_range_loop` (two loops that also use the index), `items_after_test_module`, `drop_non_drop` (test).
+- Compiler warnings: `re_tab_bytes` is used only by tests, so it is `#[cfg(test)]`. The unused import and the needless `mut` are removed.
+- No logic change is intended. `cargo test -q --workspace --lib` passes. Not run: integration tests under `tests/`, Windows builds, benchmarks.

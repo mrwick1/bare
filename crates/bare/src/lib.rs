@@ -17,6 +17,7 @@ mod browser_handlers;
 mod browser_handler_tests;
 mod browser_focus;
 mod browser_form;
+mod browser_details;
 mod browser_submit;
 #[cfg(test)]
 mod browser_submit_tests;
@@ -24,6 +25,7 @@ pub mod browser_ui;
 mod browser_drive;
 mod browser_point;
 mod browser_uievent;
+mod browser_mouse_legacy;
 pub mod agent;
 pub mod page;
 mod images;
@@ -210,6 +212,8 @@ mod browser_drive_tests;
 mod browser_point_tests;
 #[cfg(test)]
 mod browser_uievent_tests;
+#[cfg(test)]
+mod browser_mouse_legacy_tests;
 #[cfg(test)]
 mod browser_raf_tests;
 #[cfg(test)]

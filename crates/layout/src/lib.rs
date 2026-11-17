@@ -186,8 +186,14 @@ fn layout_with<'a>(doc: &'a Document, styles: &'a Styles, viewport: (f32, f32), 
                 if !moves(style) {
                     continue;
                 }
-                let dx = block::resolve(&cx, style.get(Property::TranslateX), Some(f.rect.w)).unwrap_or(0.0);
-                let dy = block::resolve(&cx, style.get(Property::TranslateY), Some(f.rect.h)).unwrap_or(0.0);
+                let (dx, dy) = match style.get(Property::TranslateX) {
+                    // A matrix: only its move counts (paint does not rotate or scale). A 3D step moves nothing.
+                    Value::Grid(i) => match cx.tree.styles.grid(i) {
+                        bare_css::grid::Grid::Transform(list) => bare_css::transform::resolve(list, f.rect.w, f.rect.h).map_or((0.0, 0.0), |m| (m[4], m[5])),
+                        _ => (0.0, 0.0),
+                    },
+                    x => (block::resolve(&cx, x, Some(f.rect.w)).unwrap_or(0.0), block::resolve(&cx, style.get(Property::TranslateY), Some(f.rect.h)).unwrap_or(0.0)),
+                };
                 cx.out[i].rect.x += dx;
                 cx.out[i].rect.y += dy;
             }

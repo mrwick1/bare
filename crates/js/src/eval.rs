@@ -310,6 +310,7 @@ macro_rules! h {
 /// - `EventTarget.prototype` (`Heap::set_lazy_chain`): once per name;
 /// - the own lazy names of the receiver (`Heap::set_lazy_on`): once per name. These receivers (`window`, the interface
 ///   prototypes) are not host objects.
+///
 /// So one operation asks at most 3 times. A write of an `on<x>` name to `window` does: the frames object, then
 /// `EventTarget.prototype`, then `window` (target.com stopped here at `Heap` with a limit of 2).
 pub(crate) const MAX_FILLS: u8 = 3;
@@ -1125,6 +1126,11 @@ impl<'p> Interp<'p> {
         self.depth == 0
             && self.stmt_frames == 0
             && (self.heap.used_bytes() > GC_MIN_BYTES.max(self.gc_live / 4 * 7) || self.ext_since > EXTERNAL_MIN_BYTES.max(self.ext_live / 4))
+    }
+
+    /// The native bytes that were live after the last collect (`set_external_live`).
+    pub fn external_live(&self) -> usize {
+        self.ext_live
     }
 
     /// The host kept `n` native bytes that only a collect can release (the nodes of a parsed document). They count towards `gc_due`.
@@ -2567,7 +2573,7 @@ impl<'p> Interp<'p> {
                     self.host_fill(owner, index)?;
                 }
                 HeapError::Proxy(_) => return Ok(Get::Value(self.o_get_slow(o, key, base)?)),
-                e => return Err(self.herr(e).into()),
+                e => return Err(self.herr(e)),
             }
             match self.heap.get(o, key) {
                 Ok(g) => return Ok(g),
@@ -2638,7 +2644,7 @@ impl<'p> Interp<'p> {
                 }
                 HeapError::Proxy(_) => return Ok(if self.o_set(o, key, v, base)? { Set::Done } else { Set::Rejected }),
                 HeapError::NeedsBigInt if !matches!(v, Value::BigInt(_) | Value::BigHeap(_)) => v = self.to_bigint(v)?,
-                e => return Err(self.herr(e).into()),
+                e => return Err(self.herr(e)),
             }
             match self.heap.set(o, key, v) {
                 Ok(r) => return Ok(r),
@@ -3179,7 +3185,7 @@ impl<'p> Interp<'p> {
     /// accessor, `__proto__:`, index or duplicate key) gives the same shape every time, so the next run evaluates the values and makes the
     /// object in that shape at once (`object_shaped`). `{}` needs no entry.
     fn eval_object(&mut self, e: ExprId, l: List<Prop>) -> Res<Value> {
-        if l.len() == 0 {
+        if l.is_empty() {
             return Ok(Value::Object(h!(self, self.heap.new_object(Some(self.object_proto)))));
         }
         let site = self.cc.expr_name[e.index()];

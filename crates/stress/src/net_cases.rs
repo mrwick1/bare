@@ -361,7 +361,7 @@ pub fn all() -> Vec<Case> {
         single("net-drip-server", |_| {
             // One byte each 5 seconds: each read succeeds, so a limit for each read never fires.
             fetch(|s, _| {
-                for b in b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n".iter().chain(std::iter::repeat(&b'x').take(100)) {
+                for b in b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n".iter().chain(std::iter::repeat_n(&b'x', 100)) {
                     if s.write_all(&[*b]).is_err() {
                         return;
                     }

@@ -306,7 +306,7 @@ fn held_by(html: &str) -> Vec<(String, bool)> {
     let page = bare_url::Url::parse(&format!("http://127.0.0.1:{}/", srv.port)).unwrap();
     let mut scan = crate::browser_loader::Scan::new(bare_net::http::Client::new(), page, crate::resources::Limits::default(), Instant::now() + Duration::from_secs(20));
     scan.step(html, Instant::now() + Duration::from_secs(1), false);
-    let mut b = crate::browser::Browser::new(bare_html::tree::parse("<p>"), Default::default(), Default::default(), Default::default()).unwrap();
+    let b = crate::browser::Browser::new(bare_html::tree::parse("<p>"), Default::default(), Default::default(), Default::default()).unwrap();
     b.adopt_scan(scan);
     assert!(!b.loaded());
     let mut waiting = Vec::new();

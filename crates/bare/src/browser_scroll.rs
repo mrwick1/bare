@@ -373,7 +373,8 @@ impl Dom {
 
     /// `layout_areas` for a read (`offsetWidth`, `scrollWidth`, `getBoundingClientRect`): the layout of the last read is used again while its
     /// inputs are the same, so a loop of reads over a page that does not change lays it out once and charges one step for each later read.
-    /// The styles are compared by address: the cascade hands out the same `Rc` while it is valid. Not used with a probe or `uncull`
+    /// The styles are compared by address: the cascade hands out the same `Rc` while it is valid, and a new cascade drops this entry (so a new
+    /// `Styles` on the address of a freed one is never read with the old layout). Not used with a probe or `uncull`
     /// (they change what the layout holds).
     pub(crate) fn layout_shared(&self, it: &mut Interp<'_>, styles: &Rc<Styles>) -> R<Rc<Lay>> {
         let key = {

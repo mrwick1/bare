@@ -1,0 +1,5 @@
+# Run outputs belong outside git. If a run writes here, keep it out of commits.
+out/
+*.jsonl
+!tests/fixtures/*.jsonl
+__pycache__/

@@ -116,6 +116,8 @@ pub(super) fn verify(code: &Code) -> Result<(), String> {
     // The exit code of a `break`, `continue` or `return` in a `try` block pops environments before its jump. It cannot throw.
     let safe = |w: usize| matches!(ins[at[w]].1.op, Op::PopEnv | Op::Mov | Op::LoadI | Op::Jmp);
     for h in &code.handlers {
+        // `w` is also the instruction number for `safe`, not only an index into `depth`.
+        #[allow(clippy::needless_range_loop)]
         for w in h.start as usize..h.end as usize {
             if depth[w].is_some_and(|d| d < h.depth as u32) && !safe(w) {
                 return Err(format!("{w:04}: depth below the depth of its handler {}", h.depth));

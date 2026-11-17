@@ -965,6 +965,21 @@ pub(crate) mod tests {
         Rect { x, y, w, h }
     }
 
+    /// The content of a closed `details` has no box (HTML rendering: it is `content-visibility: hidden`, so it takes no room and nothing hits it).
+    /// Only the first `summary` shows. Text that is a child of the `details` is hidden with the rest.
+    #[test]
+    fn a_closed_details_shows_only_its_first_summary() {
+        let body = "<summary id=s>sum</summary><div id=c style='position:absolute;width:50px;height:50px'>c</div><p id=p>para</p><summary id=s2>two</summary>text";
+        let closed = dump(&format!("<details id=d>{body}</details>"), "");
+        assert!(closed.contains("summary#s ") && !closed.contains("#c ") && !closed.contains("p#p") && !closed.contains("#s2") && !closed.contains("para") && !closed.contains("\"text\""), "{closed}");
+        assert_eq!(rect(&format!("<details id=d>{body}</details>"), "", "d").h, 22.0);
+        // Open: all of it shows. An author `display` does not bring a closed child back.
+        let open = dump(&format!("<details id=d open>{body}</details>"), "");
+        assert!(open.contains("#c ") && open.contains("p#p") && open.contains("#s2") && open.contains("\"text\""), "{open}");
+        let styled = dump("<details id=d><summary>s</summary><div id=c style='display:grid;position:absolute'>c</div></details>", "");
+        assert!(!styled.contains("#c "), "{styled}");
+    }
+
     #[test]
     fn a_block_fills_the_width() {
         assert_eq!(dump("<div style='height:50px'></div>", ""), "html 0,0 800x66\n  body 8,8 784x50\n    div 8,8 784x50\n");

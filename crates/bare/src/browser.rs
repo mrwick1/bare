@@ -343,6 +343,8 @@ pub(crate) struct EventState {
     pub is_focus: bool,
     /// `SubmitEvent.submitter` is in `related` (traced). Only a `SubmitEvent` has this set.
     pub is_submit: bool,
+    /// `ToggleEvent.oldState` and `newState`. Only a `ToggleEvent` has this set.
+    pub toggle: Option<(String, String)>,
     /// The fields of a mouse, pointer, keyboard or input event that the window made (`browser_ui.rs`). `related` holds `relatedTarget`.
     pub ui: Option<Box<crate::browser_ui::Ui>>,
     /// `isTrusted`: set for the events of `browser_ui.rs`.
@@ -406,6 +408,7 @@ pub(crate) struct FileRef {
 #[derive(Default)]
 pub(crate) struct State {
     /// The state override of a caret (`browser_editing.rs`): where the caret was and what bold, italic and underline are to be.
+    #[allow(clippy::type_complexity)] // A one-off tuple: a named alias would add nothing.
     pub style_override: Option<((NodeId, u32), [Option<bool>; 3])>,
     pub by_node: IdTab<NodeId, ObjId>,
     pub by_obj: IdTab<ObjId, Target>,
@@ -444,6 +447,7 @@ pub(crate) struct Protos {
     pub form: ObjId,
     pub button: ObjId,
     pub submit: ObjId,
+    pub toggle: ObjId,
     pub chardata: ObjId,
     pub text: ObjId,
     pub comment: ObjId,
@@ -471,6 +475,7 @@ pub(crate) enum P {
     Form,
     Button,
     Submit,
+    Toggle,
     CharData,
     Text,
     Document,
@@ -1165,6 +1170,7 @@ impl Dom {
             P::Form => ps.form,
             P::Button => ps.button,
             P::Submit => ps.submit,
+            P::Toggle => ps.toggle,
             P::CharData => ps.chardata,
             P::Text => ps.text,
             P::Document => ps.document,
@@ -1219,19 +1225,20 @@ impl Dom {
         let custom = mk(it, event)?;
         let focus = mk(it, event)?;
         let submit = mk(it, event)?;
+        let toggle = mk(it, event)?;
         let mouse = mk(it, event)?;
         let pointer = mk(it, mouse)?;
         let keyboard = mk(it, event)?;
         let inputev = mk(it, event)?;
         let domexc = mk(it, ep)?;
-        let _ = self.p.set(Protos { et, node, element, html, svg, input, iframe, link, form, button, submit, chardata, text, comment, document, fragment, shadow, event, custom, focus, mouse, pointer, keyboard, inputev, domexc });
+        let _ = self.p.set(Protos { et, node, element, html, svg, input, iframe, link, form, button, submit, toggle, chardata, text, comment, document, fragment, shadow, event, custom, focus, mouse, pointer, keyboard, inputev, domexc });
         // The global object is `window`: its prototype is `Window.prototype`, an EventTarget.
         let win = mk(it, et)?;
         if let Err(e) = it.heap.set_prototype_of(g, Some(win)) {
             return Err(it.heap_error(e));
         }
         self.st.borrow_mut().by_obj.insert(g, Target::Window);
-        let mut fixed = vec![win, et, node, element, html, svg, input, iframe, link, form, button, submit, chardata, text, comment, document, fragment, shadow, event, custom, focus, mouse, pointer, keyboard, inputev, domexc];
+        let mut fixed = vec![win, et, node, element, html, svg, input, iframe, link, form, button, submit, toggle, chardata, text, comment, document, fragment, shadow, event, custom, focus, mouse, pointer, keyboard, inputev, domexc];
 
         // methods and accessors
         // One buffer for the names "get x" and "set x" (a `format!` for each of the 130 accessors cost 1.5% of the start).
@@ -1273,7 +1280,7 @@ impl Dom {
         }
 
         // interface objects
-        let ifaces: [(&str, ObjId, Option<H>); 25] = [
+        let ifaces: [(&str, ObjId, Option<H>); 26] = [
             ("EventTarget", et, Some(ev::event_target_ctor as H)),
             ("Window", win, None),
             ("Node", node, None),
@@ -1295,6 +1302,7 @@ impl Dom {
             ("CustomEvent", custom, Some(ev::custom_event_ctor as H)),
             ("FocusEvent", focus, Some(crate::browser_focus::focus_event_ctor as H)),
             ("SubmitEvent", submit, Some(crate::browser_form::submit_event_ctor as H)),
+            ("ToggleEvent", toggle, Some(crate::browser_details::toggle_event_ctor as H)),
             ("MouseEvent", mouse, Some(crate::browser_uievent::ctor::<0> as H)),
             ("PointerEvent", pointer, Some(crate::browser_uievent::ctor::<1> as H)),
             ("KeyboardEvent", keyboard, Some(crate::browser_uievent::ctor::<2> as H)),
@@ -1505,6 +1513,7 @@ pub(crate) static DEFS: &[Def] = &[
     Def { on: &[Document], name: "createComment", len: 1, kind: M(nd::create_comment) },
     Def { on: &[Document, Fragment], name: "getElementById", len: 1, kind: M(nd::get_element_by_id) },
     Def { on: &[Document, Shadow], name: "elementFromPoint", len: 2, kind: M(crate::browser_point::element_from_point) },
+    Def { on: &[Document], name: "caretRangeFromPoint", len: 2, kind: M(crate::browser_point::caret_range_from_point) },
     Def { on: &[Document, Shadow], name: "elementsFromPoint", len: 2, kind: M(crate::browser_point::elements_from_point) },
     Def { on: &[Document], name: "documentElement", len: 0, kind: G(nd::document_element) },
     Def { on: &[Document], name: "head", len: 0, kind: G(nd::head) },
@@ -1553,6 +1562,8 @@ pub(crate) static DEFS: &[Def] = &[
     Def { on: &[Input, Button], name: "checkValidity", len: 0, kind: M(crate::browser_submit::control_check_validity) },
     Def { on: &[Input, Button], name: "reportValidity", len: 0, kind: M(crate::browser_submit::control_report_validity) },
     Def { on: &[Submit], name: "submitter", len: 0, kind: G(fm::submit_event_submitter) },
+    Def { on: &[Toggle], name: "oldState", len: 0, kind: G(crate::browser_details::old_state) },
+    Def { on: &[Toggle], name: "newState", len: 0, kind: G(crate::browser_details::new_state) },
     Def { on: &[Event], name: "type", len: 0, kind: G(ev::event_type) },
     Def { on: &[Event], name: "target", len: 0, kind: G(ev::event_target) },
     Def { on: &[Event], name: "currentTarget", len: 0, kind: G(ev::event_current_target) },
@@ -1563,6 +1574,9 @@ pub(crate) static DEFS: &[Def] = &[
     Def { on: &[Event], name: "defaultPrevented", len: 0, kind: G(ev::event_default_prevented) },
     Def { on: &[Event], name: "isTrusted", len: 0, kind: G(ev::event_is_trusted) },
     Def { on: &[Event], name: "timeStamp", len: 0, kind: G(ev::event_time_stamp) },
+    Def { on: &[Event], name: "srcElement", len: 0, kind: G(ev::event_src_element) },
+    Def { on: &[Event], name: "returnValue", len: 0, kind: A(ev::event_return_value, ev::set_event_return_value) },
+    Def { on: &[Event], name: "cancelBubble", len: 0, kind: A(ev::event_cancel_bubble, ev::set_event_cancel_bubble) },
     Def { on: &[Event], name: "preventDefault", len: 0, kind: M(ev::prevent_default) },
     Def { on: &[Event], name: "stopPropagation", len: 0, kind: M(ev::stop_propagation) },
     Def { on: &[Event], name: "stopImmediatePropagation", len: 0, kind: M(ev::stop_immediate_propagation) },
@@ -1801,6 +1815,13 @@ impl Browser {
             let h = self.it.heap.stats();
             [Field("heap_accounted_bytes", U64(h.bytes as u64)), Field("live_objects", U64(h.live_objects as u64)), Field("collections", U64(h.collections)), Field("heap_slab_capacity_bytes", U64(h.slab_capacity_bytes as u64)), Field("text_bytes", U64(s.text_bytes as u64)), Field("attr_slots", U64(s.attr_slots as u64)), Field("nodes", U64(s.nodes as u64)), Field("wrappers", U64(s.wrappers as u64)), Field("listeners", U64(s.listeners as u64)), Field("events", U64(s.events as u64))]
         });
+    }
+
+    /// Is a collect due at a safe point? The heap asks (`Interp::gc_due`), or the node arena has grown by the same rule since the last collect:
+    /// a page that replaces its lists makes dead nodes and little script heap, and only a collect and reclaim free them.
+    pub fn collect_due(&self) -> bool {
+        let live = self.it.external_live();
+        self.it.gc_due() || self.dom.doc.try_borrow().is_ok_and(|d| d.arena_bytes() > live + (2usize << 20).max(live / 4))
     }
 
     /// Collect the heap. Attached wrappers and their listeners live. `extra` are values the caller still holds.

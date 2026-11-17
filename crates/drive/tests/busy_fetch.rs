@@ -73,10 +73,10 @@ fn a_queued_fetch_reaches_the_server_while_scripts_keep_the_page_busy() {
             loop {
                 assert!(t.elapsed() < Duration::from_secs(15), "time limit");
                 let (ran, next) = p.tick();
-                if !ran {
-                    if let Some(next) = next {
-                        std::thread::sleep(next.saturating_duration_since(Instant::now()).min(Duration::from_millis(20)));
-                    }
+                if !ran
+                    && let Some(next) = next
+                {
+                    std::thread::sleep(next.saturating_duration_since(Instant::now()).min(Duration::from_millis(20)));
                 }
                 let Some(b) = p.browser() else { continue };
                 let Ok(v) = b.run_script("var o = document.getElementById('out'); o ? o.textContent : ''") else { continue };

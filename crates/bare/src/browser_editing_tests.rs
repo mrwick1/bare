@@ -1,6 +1,7 @@
 //! Tests of `isContentEditable`, `contentEditable` and the `document.execCommand` text commands (`browser_editing.rs`).
 
 use crate::browser::*;
+use bare_html::dom::NodeId;
 use bare_html::tree;
 use bare_js::eval::{Error, EvalLimits};
 use bare_js::heap::HeapLimits;
@@ -293,5 +294,290 @@ fn bold_button_on_a_caret_styles_the_next_text() {
         assert_eq!(js(&mut b, "e.innerHTML"), "<i>i</i>");
         js(&mut b, "e.innerHTML = '<b>abcd</b>'; s.collapse(e.firstChild.firstChild, 2); document.execCommand('bold'); document.execCommand('insertText', false, 'X');");
         assert_eq!(js(&mut b, "e.innerHTML"), "<b>ab</b>X<b>cd</b>");
+    });
+}
+
+/// Issue 443: a page with host `#e`, the caret in it, and a helper that presses keys through the input path.
+fn keys_host(b: &mut Browser, html: &str) -> NodeId {
+    js(b, &format!("document.body.innerHTML = '<div contenteditable id=e>{html}</div>'; var e = document.getElementById('e');"));
+    let e = b.query("#e").unwrap().unwrap();
+    b.focus(e).unwrap();
+    e
+}
+
+fn press(b: &mut Browser, host: Option<NodeId>, keys: &[&str]) {
+    for (i, k) in keys.iter().enumerate() {
+        b.drive_key(if i == 0 { host } else { None }, k).unwrap();
+    }
+}
+
+#[test]
+fn enter_in_an_empty_list_item_leaves_the_list() {
+    big(|| {
+        let mut b = browser();
+        let e = keys_host(&mut b, "");
+        press(&mut b, Some(e), &["i", "Enter"]);
+        js(&mut b, "document.execCommand('insertUnorderedList')");
+        press(&mut b, None, &["a", "Enter", "b", "Enter", "Enter"]);
+        assert_eq!(js(&mut b, "e.innerHTML"), "<div>i</div><ul><li>a</li><li>b</li></ul><div><br></div>");
+        // The caret is in the new block.
+        press(&mut b, None, &["z"]);
+        assert_eq!(js(&mut b, "e.lastChild.textContent"), "z");
+        // An empty item in the middle splits the list.
+        js(&mut b, "e.innerHTML = '<ul><li>a</li><li><br></li><li>c</li></ul>'; getSelection().collapse(e.children[0].children[1], 0);");
+        press(&mut b, None, &["Enter"]);
+        assert_eq!(js(&mut b, "e.innerHTML"), "<ul><li>a</li></ul><div><br></div><ul><li>c</li></ul>");
+    });
+}
+
+#[test]
+fn backspace_in_an_empty_block_removes_it() {
+    big(|| {
+        let mut b = browser();
+        let e = keys_host(&mut b, "");
+        press(&mut b, Some(e), &["q", "Enter"]);
+        js(&mut b, "document.execCommand('insertUnorderedList')");
+        press(&mut b, None, &["a", "Enter", "Backspace"]);
+        assert_eq!(js(&mut b, "e.innerHTML"), "<div>q</div><ul><li>a</li></ul>");
+        assert_eq!(js(&mut b, "var s = getSelection(); [s.anchorNode.textContent, s.anchorOffset].join()"), "a,1");
+        // The only item of a list leaves the list.
+        js(&mut b, "e.innerHTML = '<div>x</div><ul><li><br></li></ul>'; getSelection().collapse(e.lastChild.firstChild, 0);");
+        press(&mut b, None, &["Backspace"]);
+        assert_eq!(js(&mut b, "e.innerHTML"), "<div>x</div><div><br></div>");
+        // Without a list: the second empty div goes.
+        js(&mut b, "e.innerHTML = '';");
+        press(&mut b, None, &["x", "Enter", "Enter", "Backspace"]);
+        assert_eq!(js(&mut b, "e.innerHTML"), "<div>x</div><div><br></div>");
+    });
+}
+
+#[test]
+fn backspace_at_the_start_of_a_block_merges_it_into_the_one_before() {
+    big(|| {
+        let mut b = browser();
+        let e = keys_host(&mut b, "");
+        let caret = "var s = getSelection(); [s.anchorNode.textContent, s.anchorOffset].join()";
+        js(&mut b, "e.innerHTML = '<p>ab</p><p id=c>cd</p>'; getSelection().collapse(document.getElementById('c').firstChild, 0);");
+        press(&mut b, Some(e), &["Backspace"]);
+        assert_eq!(js(&mut b, "e.innerHTML"), "<p>abcd</p>");
+        assert_eq!(js(&mut b, caret), "ab,2");
+        // List items.
+        js(&mut b, "e.innerHTML = '<ul><li>ab</li><li id=c>cd</li></ul>'; getSelection().collapse(document.getElementById('c').firstChild, 0);");
+        press(&mut b, None, &["Backspace"]);
+        assert_eq!(js(&mut b, "e.innerHTML"), "<ul><li>abcd</li></ul>");
+        assert_eq!(js(&mut b, caret), "ab,2");
+        // The first item of a list leaves the list.
+        js(&mut b, "e.innerHTML = '<ul><li id=c>cd</li><li>ef</li></ul>'; getSelection().collapse(document.getElementById('c').firstChild, 0);");
+        press(&mut b, None, &["Backspace"]);
+        assert_eq!(js(&mut b, "e.innerHTML"), "<div>cd</div><ul><li>ef</li></ul>");
+        assert_eq!(js(&mut b, caret), "cd,0");
+        // A paragraph after a list joins the last item.
+        js(&mut b, "e.innerHTML = '<ul><li>ab</li></ul><p id=c>cd</p>'; getSelection().collapse(document.getElementById('c').firstChild, 0);");
+        press(&mut b, None, &["Backspace"]);
+        assert_eq!(js(&mut b, "e.innerHTML"), "<ul><li>abcd</li></ul>");
+        // Inline formatting stays.
+        js(&mut b, "e.innerHTML = '<p>a<b>b</b></p><p><i id=c>c</i></p>'; getSelection().collapse(document.getElementById('c').firstChild, 0);");
+        press(&mut b, None, &["Backspace"]);
+        assert_eq!(js(&mut b, "e.innerHTML"), "<p>a<b>b</b><i id=\"c\">c</i></p>");
+        assert_eq!(js(&mut b, caret), "b,1");
+        // The first block of the host stays.
+        js(&mut b, "e.innerHTML = '<p id=c>ab</p>'; getSelection().collapse(document.getElementById('c').firstChild, 0);");
+        assert_eq!(js(&mut b, "document.execCommand('delete')"), "false");
+        assert_eq!(js(&mut b, "e.innerHTML"), "<p id=\"c\">ab</p>");
+    });
+}
+
+#[test]
+fn delete_at_the_end_of_a_block_merges_the_next_one() {
+    big(|| {
+        let mut b = browser();
+        let e = keys_host(&mut b, "");
+        let caret = "var s = getSelection(); [s.anchorNode.textContent, s.anchorOffset].join()";
+        js(&mut b, "e.innerHTML = '<p id=c>ab</p><p>cd</p><p>ef</p>'; getSelection().collapse(document.getElementById('c').firstChild, 2);");
+        press(&mut b, Some(e), &["Delete"]);
+        assert_eq!(js(&mut b, "e.innerHTML"), "<p id=\"c\">abcd</p><p>ef</p>");
+        assert_eq!(js(&mut b, caret), "ab,2");
+        js(&mut b, "e.innerHTML = '<ul><li id=c>ab</li><li>cd</li></ul>'; getSelection().collapse(document.getElementById('c').firstChild, 2);");
+        press(&mut b, None, &["Delete"]);
+        assert_eq!(js(&mut b, "e.innerHTML"), "<ul><li id=\"c\">abcd</li></ul>");
+        // The last block of the host has nothing to merge.
+        js(&mut b, "e.innerHTML = '<p id=c>ab</p>'; getSelection().collapse(document.getElementById('c').firstChild, 2);");
+        assert_eq!(js(&mut b, "document.execCommand('forwardDelete')"), "false");
+    });
+}
+
+#[test]
+fn merging_blocks_fires_the_delete_events() {
+    big(|| {
+        let mut b = browser();
+        let e = keys_host(&mut b, "");
+        js(&mut b, "window.log = []; ['beforeinput', 'input'].forEach(function (t) { e.addEventListener(t, function (ev) { log.push(t + ':' + ev.inputType); }); }); \
+            e.innerHTML = '<p id=c>ab</p><p id=d>cd</p>'; getSelection().collapse(document.getElementById('d').firstChild, 0);");
+        press(&mut b, Some(e), &["Backspace"]);
+        js(&mut b, "e.innerHTML = '<p id=c>ab</p><p>cd</p>'; getSelection().collapse(document.getElementById('c').firstChild, 2);");
+        press(&mut b, None, &["Delete"]);
+        assert_eq!(
+            js(&mut b, "log.join(' ')"),
+            "beforeinput:deleteContentBackward input:deleteContentBackward beforeinput:deleteContentForward input:deleteContentForward"
+        );
+    });
+}
+
+#[test]
+fn list_toggle_changes_only_the_selected_items() {
+    big(|| {
+        let mut b = browser();
+        let e = keys_host(&mut b, "");
+        press(&mut b, Some(e), &["r", "Enter"]);
+        js(&mut b, "document.execCommand('insertUnorderedList')");
+        press(&mut b, None, &["a", "Enter"]);
+        js(&mut b, "document.execCommand('insertUnorderedList')");
+        press(&mut b, None, &["z"]);
+        assert_eq!(js(&mut b, "e.innerHTML"), "<div>r</div><ul><li>a</li></ul><div>z</div>");
+        // The middle item of three leaves; the list is split.
+        js(&mut b, "e.innerHTML = '<ul><li>a</li><li id=m>b</li><li>c</li></ul>'; getSelection().collapse(document.getElementById('m').firstChild, 1); document.execCommand('insertUnorderedList');");
+        assert_eq!(js(&mut b, "e.innerHTML"), "<ul><li>a</li></ul><div>b</div><ul><li>c</li></ul>");
+    });
+}
+
+/// Shift with an arrow, Home or End extends the selection in an editing host; Control makes it by word (#444).
+#[test]
+fn shift_arrows_extend_a_contenteditable_selection() {
+    big(|| {
+        let mut b = browser();
+        js(&mut b, "document.body.innerHTML = '<div contenteditable id=e></div>'; var e = document.getElementById('e');");
+        let e = b.query("#e").unwrap().unwrap();
+        b.drive_type(e, "hello world").unwrap();
+        b.drive_key(None, "Shift+ArrowLeft").unwrap();
+        b.drive_key(None, "Shift+ArrowLeft").unwrap();
+        assert_eq!(js(&mut b, "var s = getSelection(); s.toString() + '|' + s.anchorOffset + '|' + s.focusOffset + '|' + s.direction"), "ld|11|9|backward");
+        b.drive_key(None, "Shift+ArrowRight").unwrap();
+        assert_eq!(js(&mut b, "getSelection().toString()"), "d");
+        b.drive_key(None, "Shift+Home").unwrap();
+        assert_eq!(js(&mut b, "getSelection().toString()"), "hello world");
+        b.drive_key(None, "Shift+End").unwrap();
+        assert_eq!(js(&mut b, "getSelection().toString() + '|' + getSelection().direction"), "|none");
+        // By word, from the end.
+        b.drive_key(None, "Control+Shift+ArrowLeft").unwrap();
+        assert_eq!(js(&mut b, "getSelection().toString()"), "world");
+        b.drive_key(None, "Control+Shift+ArrowLeft").unwrap();
+        assert_eq!(js(&mut b, "getSelection().toString()"), "hello world");
+        assert_eq!(js(&mut b, "e.textContent"), "hello world");
+    });
+}
+
+/// `Selection.modify` moves or extends by character, word and line boundary; an unknown argument changes nothing (#444).
+#[test]
+fn selection_modify_moves_and_extends() {
+    big(|| {
+        let mut b = browser();
+        js(&mut b, "document.body.innerHTML = '<p id=p>one <b>two</b> three</p><p id=q>four</p>'; var s = getSelection(); s.collapse(p.firstChild, 0);");
+        js(&mut b, "s.modify('move', 'forward', 'word')");
+        assert_eq!(js(&mut b, "s.anchorOffset + ':' + s.isCollapsed"), "3:true");
+        js(&mut b, "s.modify('extend', 'forward', 'word')");
+        assert_eq!(js(&mut b, "s.toString()"), " two");
+        js(&mut b, "s.modify('extend', 'forward', 'lineboundary')");
+        assert_eq!(js(&mut b, "s.toString()"), " two three");
+        assert_eq!(js(&mut b, "s.modify('move', 'backward', 'lineboundary')"), "undefined");
+        assert_eq!(js(&mut b, "s.anchorNode.data + ':' + s.anchorOffset + ':' + s.isCollapsed"), "one :0:true");
+        js(&mut b, "s.modify('extend', 'forward', 'character')");
+        assert_eq!(js(&mut b, "s.toString()"), "o");
+        js(&mut b, "s.modify('extend', 'sideways', 'character'); s.modify('extend', 'forward', 'sentence')");
+        assert_eq!(js(&mut b, "s.toString()"), "o");
+    });
+}
+
+/// In an `<input>`, Shift+Home and Control+Shift+Arrow move the selection end; Control moves by word (#444).
+#[test]
+fn shift_home_and_word_arrows_extend_an_input_selection() {
+    big(|| {
+        let mut b = browser();
+        js(&mut b, "document.body.innerHTML = '<input id=i value=\"hello big world\">';");
+        let i = b.query("#i").unwrap().unwrap();
+        b.focus(i).unwrap();
+        b.drive_key(None, "End").unwrap();
+        b.drive_key(None, "Shift+Home").unwrap();
+        assert_eq!(js(&mut b, "i.selectionStart + ',' + i.selectionEnd + ',' + i.selectionDirection"), "0,15,backward");
+        b.drive_key(None, "End").unwrap();
+        b.drive_key(None, "Control+Shift+ArrowLeft").unwrap();
+        assert_eq!(js(&mut b, "i.selectionStart + ',' + i.selectionEnd"), "10,15");
+        b.drive_key(None, "Control+Shift+ArrowLeft").unwrap();
+        assert_eq!(js(&mut b, "i.selectionStart + ',' + i.selectionEnd"), "6,15");
+        b.drive_key(None, "Control+Shift+ArrowRight").unwrap();
+        assert_eq!(js(&mut b, "i.selectionStart + ',' + i.selectionEnd"), "9,15");
+    });
+}
+
+/// `n` presses and releases in a row at (`x`, `y`) on `target`, 40 ms apart: a click, a double click or a triple click.
+fn press_n(b: &mut Browser, target: bare_html::dom::NodeId, x: f64, y: f64, n: u32) {
+    let up = crate::browser_ui::Pointer { x, y, ..Default::default() };
+    b.ui_pointer_move(Some(target), up).unwrap();
+    for _ in 0..n {
+        b.ui_pointer_button(Some(target), crate::browser_ui::Pointer { buttons: 1, ..up }, 0, true, None).unwrap();
+        b.advance_time(40.0, 10_000).unwrap();
+        b.ui_pointer_button(Some(target), up, 0, false, None).unwrap();
+        b.advance_time(40.0, 10_000).unwrap();
+    }
+}
+
+/// The window point at the middle of `len` letters from offset `from` of the first Text node of `#id`.
+fn middle_of(b: &mut Browser, id: &str, from: u32, len: u32) -> (f64, f64) {
+    let v = js(b, &format!("var t = document.getElementById('{id}').firstChild, r = document.createRange(); r.setStart(t, {from}); r.setEnd(t, {}); var q = r.getBoundingClientRect(); (q.x + q.width / 2) + ',' + (q.y + q.height / 2)", from + len));
+    let (x, y) = v.split_once(',').unwrap();
+    (x.parse().unwrap(), y.parse().unwrap())
+}
+
+/// A double click on a word in an editing host selects the word, a triple click the paragraph (#444).
+#[test]
+fn double_and_triple_click_select_in_a_contenteditable() {
+    big(|| {
+        let mut b = browser();
+        js(&mut b, "document.body.innerHTML = '<div contenteditable id=e>hello world</div>';");
+        let e = b.query("#e").unwrap().unwrap();
+        let (x, y) = middle_of(&mut b, "e", 6, 5);
+        press_n(&mut b, e, x, y, 2);
+        assert_eq!(js(&mut b, "getSelection().toString()"), "world");
+        let (x, y) = middle_of(&mut b, "e", 0, 5);
+        b.advance_time(1000.0, 10_000).unwrap();
+        press_n(&mut b, e, x, y, 2);
+        assert_eq!(js(&mut b, "getSelection().toString()"), "hello");
+        b.advance_time(1000.0, 10_000).unwrap();
+        press_n(&mut b, e, x, y, 3);
+        assert_eq!(js(&mut b, "getSelection().toString()"), "hello world");
+    });
+}
+
+/// The same in plain page text, and a triple click selects only the paragraph under the pointer.
+#[test]
+fn double_and_triple_click_select_in_page_text() {
+    big(|| {
+        let mut b = browser();
+        js(&mut b, "document.body.innerHTML = '<p id=p>alpha beta</p><p id=q>gamma delta</p>';");
+        let p = b.query("#p").unwrap().unwrap();
+        let (x, y) = middle_of(&mut b, "p", 6, 4);
+        press_n(&mut b, p, x, y, 2);
+        assert_eq!(js(&mut b, "getSelection().toString()"), "beta");
+        b.advance_time(1000.0, 10_000).unwrap();
+        press_n(&mut b, p, x, y, 3);
+        assert_eq!(js(&mut b, "getSelection().toString()"), "alpha beta");
+        let q = b.query("#q").unwrap().unwrap();
+        let (x, y) = middle_of(&mut b, "q", 6, 5);
+        b.advance_time(1000.0, 10_000).unwrap();
+        press_n(&mut b, q, x, y, 2);
+        assert_eq!(js(&mut b, "getSelection().toString()"), "delta");
+    });
+}
+
+/// `caretRangeFromPoint` gives the offset of the letter boundary nearest to the point.
+#[test]
+fn caret_range_from_point_gives_the_text_offset() {
+    big(|| {
+        let mut b = browser();
+        js(&mut b, "document.body.innerHTML = '<p id=p>hello world</p>';");
+        let (x, y) = middle_of(&mut b, "p", 6, 5);
+        assert_eq!(js(&mut b, &format!("var r = document.caretRangeFromPoint({x}, {y}); (r.startContainer === p.firstChild) + ',' + r.startOffset + ',' + r.collapsed")), "true,8,true");
+        assert_eq!(js(&mut b, &format!("document.caretRangeFromPoint(1, {y}).startOffset")), "0");
+        assert_eq!(js(&mut b, &format!("document.caretRangeFromPoint(700, {y}).startOffset")), "11");
+        assert_eq!(js(&mut b, "document.caretRangeFromPoint(-5, 0)"), "null");
     });
 }

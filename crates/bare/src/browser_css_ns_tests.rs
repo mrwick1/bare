@@ -27,7 +27,7 @@ fn js(b: &mut Browser, src: &str) -> String {
 fn css_is_a_namespace_with_supports_and_escape() {
     big(|| {
         let mut b = mk();
-        assert_eq!(js(&mut b, "typeof CSS + ',' + typeof CSS.supports + ',' + typeof CSS.escape + ',' + typeof CSS.registerProperty"), "object,function,function,undefined");
+        assert_eq!(js(&mut b, "typeof CSS + ',' + typeof CSS.supports + ',' + typeof CSS.escape + ',' + typeof CSS.registerProperty"), "object,function,function,function");
         assert_eq!(js(&mut b, "var d = Object.getOwnPropertyDescriptor(window, 'CSS'); [d.writable, d.enumerable, d.configurable, Object.prototype.toString.call(CSS), CSS === window.CSS, CSS.supports.length, CSS.escape.length].join()"), "true,false,true,[object CSS],true,1,1");
         assert_eq!(js(&mut b, "Object.keys(window).indexOf('CSS') < 0"), "true");
         // a write before the first read replaces the accessor
@@ -96,5 +96,20 @@ fn escape_serializes_an_identifier() {
         assert_eq!(js(&mut b, "try { CSS.escape() } catch (e) { e.name }"), "TypeError");
         // the result is usable in a selector
         assert_eq!(js(&mut b, "var e = document.createElement('div'); e.id = '1a.b'; document.body.appendChild(e); document.querySelector('#' + CSS.escape('1a.b')) === e"), "true");
+    });
+}
+
+#[test]
+fn register_property_gives_the_initial_value_and_restyles() {
+    big(|| {
+        let mut b = Browser::new(tree::parse("<body><div id=a><p id=p>x</p></div></body>"), BrowserLimits::default(), EvalLimits { max_steps: 20_000_000, ..Default::default() }, HeapLimits::default()).expect("browser");
+        assert_eq!(js(&mut b, "var s = document.createElement('style'); s.textContent = 'p { color: var(--c, blue) } #a { --c: green }'; document.head.appendChild(s); getComputedStyle(document.getElementById('p')).color"), "rgb(0, 128, 0)");
+        // Registered with inherits: false, the child no longer takes the value of the parent: the initial value shows.
+        assert_eq!(js(&mut b, "CSS.registerProperty({ name: '--c', syntax: '*', inherits: false, initialValue: 'red' }); getComputedStyle(document.getElementById('p')).color"), "rgb(255, 0, 0)");
+        assert_eq!(js(&mut b, "CSS.registerProperty({ name: '--d', syntax: '*', inherits: false, initialValue: 'red' }); s.textContent = 'p { color: var(--d) } #a { --d: green }'; getComputedStyle(document.getElementById('p')).color"), "rgb(255, 0, 0)");
+        assert_eq!(js(&mut b, "try { CSS.registerProperty({ name: '--d', syntax: '*', inherits: false }) } catch (e) { e.name }"), "InvalidModificationError");
+        assert_eq!(js(&mut b, "['x', '--', '--a b', ''].map(function (n) { try { CSS.registerProperty({ name: n, syntax: '*', inherits: false }) } catch (e) { return e.name } }).join()"), "SyntaxError,SyntaxError,SyntaxError,SyntaxError");
+        assert_eq!(js(&mut b, "try { CSS.registerProperty({ name: '--e', syntax: '<length>', inherits: false }) } catch (e) { e.name }"), "SyntaxError");
+        assert_eq!(js(&mut b, "try { CSS.registerProperty() } catch (e) { e.name }"), "TypeError");
     });
 }

@@ -405,7 +405,7 @@ pub struct Document {
     // The attributes of all elements. Each element has a run of them, one after the other.
     text: String,
     // All the text of the page: texts, attribute values, comments and doctypes. See `Span`.
-    class_sets: RefCell<HashMap<usize, HashSet<Box<str>, BuildHasherDefault<Fnv>>, BuildHasherDefault<Fnv>>>,
+    class_sets: RefCell<ClassSets>,
     // The classes of the elements that have a long `class` attribute, as a set. See `has_class`.
     // The attributes of an element never change, so this needs no clean-up.
     class_cache: RefCell<ClassCache>,
@@ -546,6 +546,8 @@ pub enum Mark {
 
 /// A decoded picture: its size and its pixels, `0xAARRGGBB` not premultiplied. Shared, so that one download serves many elements.
 pub type Bitmap = (u32, u32, Pixels);
+type ClassSets = HashMap<usize, HashSet<Box<str>, BuildHasherDefault<Fnv>>, BuildHasherDefault<Fnv>>;
+type UpMap = HashMap<NodeId, (Option<NodeId>, HashSet<NodeId, BuildHasherDefault<Fnv>>), BuildHasherDefault<Fnv>>;
 
 /// The pixels of a picture. A vector makes them at once. `lazy` makes them at the first read (`Deref`, `shared`): an SVG file gives its size
 /// without a raster, and a page that nobody paints or reads never pays for one. Clones share the pixels.
@@ -1305,7 +1307,7 @@ impl Document {
         }
         let template = self.find_atom("template");
         // `up[p]`: the shadow root and the light children of `p` that lead to an element, each once.
-        let mut up: HashMap<NodeId, (Option<NodeId>, HashSet<NodeId, BuildHasherDefault<Fnv>>), BuildHasherDefault<Fnv>> = HashMap::default();
+        let mut up: UpMap = HashMap::default();
         let mut found: HashMap<NodeId, (bool, bool), BuildHasherDefault<Fnv>> = HashMap::default();
         let mut path = Vec::new();
         'each: for &el in made {
@@ -2922,9 +2924,9 @@ mod tests {
     fn the_class_table_gives_one_number_to_a_name() {
         let (a, b) = (Document::new(), Document::new());
         // 5,000 names make the table grow several times; a name is the same number before and after, and in the other document.
-        let ids: Vec<ClassId> = (0..5000).map(|i| a.class_id(&format!("cls-{i}"))).collect();
+        let ids: Vec<ClassId> = (0..5000).map(|i| a.class_id(format!("cls-{i}"))).collect();
         for (i, id) in ids.iter().enumerate() {
-            assert_eq!(b.class_id(&format!("cls-{i}")), *id);
+            assert_eq!(b.class_id(format!("cls-{i}")), *id);
         }
         let mut sorted: Vec<u32> = ids.iter().map(|c| c.index()).collect();
         sorted.sort_unstable();

@@ -284,7 +284,7 @@ fn a_function_three_levels_deep_runs_as_it_would_with_its_body_kept() {
 fn error_stack_positions_in_a_function_below_a_skipped_body_are_the_source_positions() {
     big(|| {
         let nested = format!("function a() {{ {PAD}\n function b() {{ {PAD}\n function c() {{ {PAD}\n return new Error('x').stack; }}\n return c(); }}\n return b(); }}\n a()");
-        let flat = format!("function a() {{\n var _ = 1;\n function b() {{\n var _ = 1;\n function c() {{\n return new Error('x').stack; }}\n return c(); }}\n return b(); }}\n a()");
+        let flat = "function a() {\n var _ = 1;\n function b() {\n var _ = 1;\n function c() {\n return new Error('x').stack; }\n return c(); }\n return b(); }\n a()".to_string();
         let position = |s: &str| -> String { s.lines().next().unwrap_or("").to_string() };
         let (n, f) = (run(&nested), run(&flat));
         // Both runs name the three frames; the line and column of the `new Error` are those of the text, as the first parse gives them.

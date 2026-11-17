@@ -827,7 +827,7 @@ pub fn string_to_bigint(units: &[u16]) -> Option<Int> {
         [b'+', rest @ ..] => (false, 10, rest),
         all => (false, 10, all),
     };
-    if digits.is_empty() || !digits.iter().all(|&c| (c as char).to_digit(radix).is_some()) {
+    if digits.is_empty() || !digits.iter().all(|&c| (c as char).is_digit(radix)) {
         return None;
     }
     let mut i = parse_radix(digits, radix);
@@ -845,7 +845,7 @@ pub fn parse_literal(text: &str) -> Option<Int> {
         [b'0', b'b' | b'B', rest @ ..] => (2, rest),
         all => (10, all),
     };
-    if digits.is_empty() || !digits.iter().all(|&c| (c as char).to_digit(radix).is_some()) {
+    if digits.is_empty() || !digits.iter().all(|&c| (c as char).is_digit(radix)) {
         return None;
     }
     Some(parse_radix(digits, radix))

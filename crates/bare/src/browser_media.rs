@@ -1052,9 +1052,8 @@ fn caption_object(d: &Dom, it: &mut Interp<'_>, n: NodeId) -> R<ObjId> {
 
 fn caption_receiver(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<NodeId> {
     it.charge(d.media.tracks.borrow().len() as u64 + 1)?;
-    if let Value::Object(o) = this {
-        if let Some((&n, _)) = d.media.tracks.borrow().iter().find(|(_, t)| t.object == o) { return Ok(n); }
-    }
+    if let Value::Object(o) = this
+        && let Some((&n, _)) = d.media.tracks.borrow().iter().find(|(_, t)| t.object == o) { return Ok(n); }
     Err(it.type_error("Illegal invocation"))
 }
 

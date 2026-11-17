@@ -367,7 +367,11 @@ impl Dom {
             it.charge(1)?;
             let task = Task::Fragment { old: cur.href(), new: new.href() };
             self.commit(new, None, replace || same);
-            self.nav.s.borrow_mut().tasks.push_back(task);
+            // The same address again replaces the entry and fires no event, as in Chrome (to verify: from the HTML Standard, which fires
+            // `hashchange` only when the fragment changes). A page that routes on `hashchange` must not route twice (issue #564).
+            if !same {
+                self.nav.s.borrow_mut().tasks.push_back(task);
+            }
             return Ok(());
         }
         if self.nav.s.borrow().requests.len() >= lim.max_requests {
@@ -384,7 +388,8 @@ impl Dom {
         if !self.nav.s.borrow().downloads_on {
             return Ok(false);
         }
-        let name = match { let doc = self.doc.borrow(); doc.find_atom("download").and_then(|k| doc.attr(a, k)).map(str::to_string) } {
+        let found = { let doc = self.doc.borrow(); doc.find_atom("download").and_then(|k| doc.attr(a, k)).map(str::to_string) };
+        let name = match found {
             Some(n) => n,
             None => return Ok(false),
         };

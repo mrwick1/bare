@@ -14,7 +14,7 @@ struct Cfg {
     cut: Vec<(usize, usize)>,
     /// From the second request on, the file is this one, with a new ETag.
     change: Option<Vec<u8>>,
-    /// A request with `Range` gets 403.
+    /// A request with `Range` gets 403. The body of a request without `Range` waits for `Srv::release`.
     refuse_ranges: bool,
 }
 
@@ -23,6 +23,8 @@ struct Srv {
     log: Arc<Mutex<Vec<String>>>,
     /// The most connections that sent a body at the same time.
     peak: Arc<AtomicUsize>,
+    /// Lets the held bodies go (see `Cfg::refuse_ranges`).
+    release: Arc<AtomicBool>,
 }
 
 fn pattern(n: usize, seed: u8) -> Vec<u8> {
@@ -36,19 +38,22 @@ fn serve(data: Vec<u8>, cfg: Cfg) -> Srv {
     let (peak, active) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
     let (log2, peak2) = (log.clone(), peak.clone());
     let changed = Arc::new(AtomicBool::new(false));
+    let release = Arc::new(AtomicBool::new(false));
+    let release2 = release.clone();
     std::thread::spawn(move || {
         for c in l.incoming() {
             let Ok(c) = c else { break };
-            let (data, cfg, log, peak, active, changed) = (data.clone(), cfg.clone(), log2.clone(), peak2.clone(), active.clone(), changed.clone());
+            let (data, cfg, log, peak, active, changed, release) = (data.clone(), cfg.clone(), log2.clone(), peak2.clone(), active.clone(), changed.clone(), release2.clone());
             std::thread::spawn(move || {
-                let _ = conn(c, &data, &cfg, &log, &peak, &active, &changed);
+                let _ = conn(c, &data, &cfg, &log, &peak, &active, &changed, &release);
             });
         }
     });
-    Srv { url, log, peak }
+    Srv { url, log, peak, release }
 }
 
-fn conn(c: TcpStream, data: &[u8], cfg: &Cfg, log: &Mutex<Vec<String>>, peak: &AtomicUsize, active: &AtomicUsize, changed: &AtomicBool) -> io::Result<()> {
+#[allow(clippy::too_many_arguments)] // A test server: one flag each, no struct needed.
+fn conn(c: TcpStream, data: &[u8], cfg: &Cfg, log: &Mutex<Vec<String>>, peak: &AtomicUsize, active: &AtomicUsize, changed: &AtomicBool, release: &AtomicBool) -> io::Result<()> {
     let mut r = BufReader::new(c.try_clone()?);
     let mut w = c;
     loop {
@@ -100,6 +105,13 @@ fn conn(c: TcpStream, data: &[u8], cfg: &Cfg, log: &Mutex<Vec<String>>, peak: &A
             None => ("200 OK", data, String::new()),
         };
         write!(w, "HTTP/1.1 {status}\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nETag: {etag}\r\n{accept}{extra}\r\n", body.len())?;
+        if cfg.refuse_ranges && range.is_none() {
+            // The safety end of 30 s only keeps a broken test from hanging.
+            let end = std::time::Instant::now() + Duration::from_secs(30);
+            while !release.load(Ordering::Relaxed) && std::time::Instant::now() < end {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
         let cut = cfg.cut.iter().find(|(i, _)| *i == index).map(|(_, n)| *n);
         let now = active.fetch_add(1, Ordering::Relaxed) + 1;
         peak.fetch_max(now, Ordering::Relaxed);
@@ -238,8 +250,24 @@ fn without_ranges_a_cut_reply_starts_again_once() {
 #[test]
 fn a_refused_range_goes_back_to_the_first_connection() {
     let data = pattern(16 << 20, 7);
-    let srv = serve(data.clone(), Cfg { ranges: true, rate: 16 << 20, refuse_ranges: true, ..Cfg::default() });
-    let (_, d) = fetch(&srv.url, "refused");
+    let srv = serve(data.clone(), Cfg { ranges: true, refuse_ranges: true, ..Cfg::default() });
+    let dl = folder("refused");
+    let id = begin(&dl, &srv.url);
+    // The first connection sends nothing until every split segment has been refused and given back: then it is the only one left.
+    let end = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let job = dl.inner().jobs.get(&id).cloned();
+        if job.is_some_and(|j| {
+            let st = j.lock();
+            st.segs.len() > 1 && st.segs[1..].iter().all(|s| s.pos >= s.end)
+        }) || std::time::Instant::now() > end
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    srv.release.store(true, Ordering::Relaxed);
+    let d = wait(&dl, id);
     check(&d, &data);
 }
 

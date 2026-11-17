@@ -101,7 +101,7 @@ impl Interp<'_> {
         match v {
             Value::Undefined | Value::Symbol(_) => st.put(if in_list { "null" } else { "" }),
             Value::Number(n) if !n.is_finite() => st.put("null"),
-            Value::Number(n) if n == 0.0 => st.put("0"),
+            Value::Number(0.0) => st.put("0"),
             Value::String(_) => {
                 let s = self.display(v);
                 st.quote(&s);

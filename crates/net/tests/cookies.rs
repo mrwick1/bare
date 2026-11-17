@@ -8,16 +8,19 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 
+/// One request seen by the server: the path and its `Cookie` header.
+type Seen = Vec<(String, Option<String>)>;
+
 /// A server that answers each request with `reply(path)` (the whole HTTP message) and records the `Cookie` header of each request.
 struct Server {
     port: u16,
-    seen: Arc<Mutex<Vec<(String, Option<String>)>>>,
+    seen: Arc<Mutex<Seen>>,
 }
 
 fn serve(reply: impl Fn(&str) -> String + Send + 'static) -> Server {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
-    let seen: Arc<Mutex<Vec<(String, Option<String>)>>> = Arc::default();
+    let seen: Arc<Mutex<Seen>> = Arc::default();
     let log = seen.clone();
     std::thread::spawn(move || {
         for stream in listener.incoming() {
@@ -181,7 +184,7 @@ fn same_site_decides_for_a_subresource() {
 fn a_navigation_from_another_site_sends_lax_and_not_strict() {
     let srv = serve(|p| match p {
         "/set" => ok("Set-Cookie: strict=1; SameSite=Strict\r\nSet-Cookie: lax=1; SameSite=Lax\r\nSet-Cookie: plain=1\r\n"),
-        "/bounce" => redirect(&format!("/landing"), ""),
+        "/bounce" => redirect("/landing", ""),
         _ => ok(""),
     });
     let mut c = Client::new();

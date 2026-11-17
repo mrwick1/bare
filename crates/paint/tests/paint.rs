@@ -603,7 +603,7 @@ fn spacing_moves_the_letters() {
     // The spacing after the last letter is room, not ink.
     assert_eq!(right("letter-spacing:10px", "I") - right("", "I"), 0);
     assert_eq!(right("word-spacing:20px", "I I") - right("", "I I"), 20);
-    assert_eq!(right("letter-spacing:5px;word-spacing:20px", "I I") - right("", "I I"), 5 + 5 + 20 + 0);
+    assert_eq!(right("letter-spacing:5px;word-spacing:20px", "I I") - right("", "I I"), 5 + 5 + 20);
 }
 
 #[test]

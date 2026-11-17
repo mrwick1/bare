@@ -435,6 +435,7 @@ struct Pending {
     queued: Option<std::time::Instant>,
     /// Its I/O, started on a worker thread before its turn (see `start_queued`). The outcome and the diagnostics. `None`: the job
     /// did not send it (the bodies that wait were at the cap, or the page is gone); the page thread sends it at its turn.
+    #[allow(clippy::type_complexity)] // A one-off tuple: a named alias would add nothing.
     started: Option<Task<Option<(Outcome, Vec<String>, std::time::Instant)>>>,
 }
 
@@ -554,6 +555,7 @@ pub(crate) struct Fetch {
     protos: OnceCell<[ObjId; 6]>,
     fixed: RefCell<Vec<ObjId>>,
     pub(crate) json_parse: Cell<Option<Value>>,
+    json_stringify: Cell<Option<Value>>,
     /// The function of `shims/drain.js`, made at the first read of a stream body.
     drain: Cell<Option<Value>>,
     /// Live (the window and the control interface): each request starts on a worker at once, and `run_network_tasks` takes only the
@@ -565,7 +567,7 @@ impl Default for Fetch {
     fn default() -> Fetch {
         let mut client = Client::new();
         client.set_identity(crate::browser_web::wire_identity());
-        Fetch { st: RefCell::default(), lim: Cell::new(FetchLimits::default()), client: RefCell::new(client), protos: OnceCell::new(), fixed: RefCell::default(), json_parse: Cell::new(None), drain: Cell::new(None), live: Cell::new(false) }
+        Fetch { st: RefCell::default(), lim: Cell::new(FetchLimits::default()), client: RefCell::new(client), protos: OnceCell::new(), fixed: RefCell::default(), json_parse: Cell::new(None), json_stringify: Cell::new(None), drain: Cell::new(None), live: Cell::new(false) }
     }
 }
 
@@ -583,6 +585,7 @@ impl Fetch {
     pub(crate) fn roots(&self, out: &mut Vec<Value>) {
         out.extend(self.fixed.borrow().iter().map(|&o| Value::Object(o)));
         out.extend(self.json_parse.get());
+        out.extend(self.json_stringify.get());
         out.extend(self.drain.get());
         out.extend(self.st.borrow().queue.iter().flat_map(|p| [p.promise].into_iter().chain(p.xhr.map(|x| Value::Object(x.0)))));
         out.extend(self.st.borrow().streams.iter().map(|s| Value::Object(s.x.0)));
@@ -1417,8 +1420,23 @@ fn status_null_body(s: u16) -> bool {
 
 fn response_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
     let proto = it.host_proto_from_new_target(d.fproto(Pr::Response))?;
+    init_response(d, it, proto, arg(a, 0), arg(a, 1), "construct 'Response'", false)
+}
+
+/// `Response.json(data, init)`: the body is `data` as JSON text, typed `application/json` unless `init` sets a Content-Type.
+/// It uses the intrinsic `JSON.stringify`, as `json()` uses the intrinsic `JSON.parse`.
+fn response_json(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
+    let Some(stringify) = d.fetch.json_stringify.get() else { return Err(Error::Unsupported(unsupported("Response.json without JSON.stringify"))) };
+    let text = it.call(stringify, Value::Undefined, &[arg(a, 0)])?;
+    if !matches!(text, Value::String(_)) {
+        return Err(it.type_error("Failed to execute 'json' on 'Response': Value is not JSON serializable"));
+    }
+    init_response(d, it, d.fproto(Pr::Response), text, arg(a, 1), "execute 'json' on 'Response'", true)
+}
+
+/// A Response with the body `body` (a body init, or the JSON text) and the status, statusText and headers of `init`.
+fn init_response(d: &Dom, it: &mut Interp<'_>, proto: ObjId, body: Value, init: Value, who: &str, json: bool) -> R<Value> {
     let lim = d.fl();
-    let init = arg(a, 1);
     let (mut status, mut text, mut list) = (200u16, String::new(), HeaderList::new(Guard::Response));
     if !matches!(init, Value::Undefined | Value::Null) {
         if !matches!(init, Value::Object(_)) {
@@ -1443,7 +1461,7 @@ fn response_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value
         d.fill(it, &mut list, h)?;
     }
     // A ReadableStream body stays a stream: the body methods read it to the end (`consume`), and `body` gives it back.
-    let src = match arg(a, 0) {
+    let src = match body {
         Value::Object(o) => lock_state(d, o).map(|ld| (o, ld)),
         _ => None,
     };
@@ -1455,12 +1473,13 @@ fn response_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value
             return Err(it.type_error("Response with null body status cannot have body"));
         }
     }
-    let init_body = if src.is_some() { None } else { d.extract_body(it, arg(a, 0), "construct 'Response'")? };
+    let init_body = if src.is_some() { None } else { d.extract_body(it, body, who)? };
     let body = match init_body {
         Some((bytes, ty)) => {
             if status_null_body(status) {
                 return Err(it.type_error("Response with null body status cannot have body"));
             }
+            let ty = if json { Some(Cow::Borrowed("application/json")) } else { ty };
             if let Some(ty) = ty && list.get("content-type").is_none() {
                 list.append(&lim, "content-type".into(), ty.into()).map_err(|e| d.herr(it, e))?;
             }
@@ -2549,6 +2568,8 @@ fn plain_response(d: &Dom, it: &mut Interp<'_>, url: &str, mime: Option<String>,
     Ok(Value::Object(d.add_obj(it, Pr::Response, F::Response(r))?))
 }
 
+// Each argument is a field of the response; a bundle struct would only move the copies.
+#[allow(clippy::too_many_arguments)]
 fn build_response(d: &Dom, it: &mut Interp<'_>, status: u16, url: Url, redirected: bool, headers: Vec<(String, String)>, body: Vec<u8>, taint: Taint) -> R<Value> {
     let lim = d.fl();
     let mut list = HeaderList::new(Guard::Response);
@@ -2931,6 +2952,12 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
         let k = d.key(it, name)?;
         it.define_data(g, k, Value::Object(f), true, false, true)?;
         fixed.push(f);
+        if name == "Response" {
+            let jf = d.add_fn(it, response_json, "json", 1, false)?;
+            let kj = d.key(it, "json")?;
+            it.define_data(f, kj, Value::Object(jf), true, false, true)?;
+            fixed.push(jf);
+        }
     }
     let f = d.add_fn(it, fetch, "fetch", 1, false)?;
     let k = d.key(it, "fetch")?;
@@ -2938,12 +2965,16 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     fixed.push(f);
     streams::install(d, it, protos[Stream as usize], protos[Reader as usize], &mut fixed)?;
     *d.fetch.fixed.borrow_mut() = fixed;
-    // The intrinsic JSON.parse, so a script that replaces it does not change what `json()` runs.
+    // The intrinsic JSON.parse and JSON.stringify, so a script that replaces them does not change what `json()` and `Response.json()` run.
     let json = d.prop(it, Value::Object(g), "JSON")?;
     if let Value::Object(_) = json {
         let parse = d.prop(it, json, "parse")?;
         if it.is_callable_value(parse) {
             d.fetch.json_parse.set(Some(parse));
+        }
+        let stringify = d.prop(it, json, "stringify")?;
+        if it.is_callable_value(stringify) {
+            d.fetch.json_stringify.set(Some(stringify));
         }
     }
     Ok(())

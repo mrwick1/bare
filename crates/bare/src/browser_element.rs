@@ -444,9 +444,6 @@ fn inner_text(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
                 let p = html_name(&doc, c) == "p";
                 if !exit {
                     if visible {
-                        if html_name(&doc, c) == "select" {
-                            return Err(Dom::gate("innerText over a select"));
-                        }
                         out.count(if p { 2 } else { block as usize });
                         if atomic {
                             if out.space {
@@ -455,6 +452,30 @@ fn inner_text(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
                             }
                             out.space = false;
                             out.line_start = true;
+                        }
+                        // The options of a select have no box here (`display: none`), but Chrome renders each one as a line.
+                        if html_name(&doc, c) == "select" {
+                            let mut opts = Vec::new();
+                            let mut todo: Vec<NodeId> = doc.children(c).collect::<Vec<_>>().into_iter().rev().collect();
+                            while let Some(o) = todo.pop() {
+                                it.charge(1)?;
+                                match html_name(&doc, o) {
+                                    "optgroup" => todo.extend(doc.children(o).collect::<Vec<_>>().into_iter().rev()),
+                                    "option" => opts.push(o),
+                                    _ => {}
+                                }
+                            }
+                            for o in opts {
+                                let mut text = String::new();
+                                for t in doc.children(o) {
+                                    if let NodeData::Text(sp) = *doc.data(t) {
+                                        text.push_str(doc.text(sp));
+                                    }
+                                }
+                                out.count(1);
+                                out.text(&text, Keyword::Normal);
+                            }
+                            out.count(1);
                         }
                     }
                     stack.push((c, true));
@@ -550,10 +571,9 @@ fn unmodelled(t: &str, auto: bool) -> usize {
         let Token::Ident(name) = t else { continue };
         if !name.eq_ignore_ascii_case("content-visibility") && !name.eq_ignore_ascii_case("display") { continue; }
         if !matches!(tokens.next(), Some(Token::Colon)) { continue; }
-        if let Some(Token::Ident(value)) = tokens.next() {
-            if name.eq_ignore_ascii_case("display") && value.eq_ignore_ascii_case("contents")
-                || name.eq_ignore_ascii_case("content-visibility") && (value.eq_ignore_ascii_case("hidden") || auto && value.eq_ignore_ascii_case("auto")) { n += 1; }
-        }
+        if let Some(Token::Ident(value)) = tokens.next()
+            && (name.eq_ignore_ascii_case("display") && value.eq_ignore_ascii_case("contents")
+                || name.eq_ignore_ascii_case("content-visibility") && (value.eq_ignore_ascii_case("hidden") || auto && value.eq_ignore_ascii_case("auto"))) { n += 1; }
     }
     n
 }

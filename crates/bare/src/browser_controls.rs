@@ -898,6 +898,7 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)] // Moving the two functions below would make a large diff.
 mod tests {
     use super::*;
 

@@ -83,6 +83,7 @@ pub(super) enum Load {
 struct ImportMap {
     imports: Vec<(String, Option<String>)>,
     /// (resolved scope prefix, entries), the longest prefix first.
+    #[allow(clippy::type_complexity)] // A one-off tuple: a named alias would add nothing.
     scopes: Vec<(String, Vec<(String, Option<String>)>)>,
 }
 

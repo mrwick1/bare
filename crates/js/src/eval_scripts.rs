@@ -181,15 +181,14 @@ impl<'p> Interp<'p> {
         // instantiates it again. Each run still makes its own functions and checks its own declarations. A harness that
         // polls with one text (`expect js`) would otherwise fill `max_scripts`. A full realm refuses first, so a refusal costs no lookup.
         let key = kind.is_classic().then(|| (script_hash(source.as_bytes()) >> (64 - SCRIPT_IDS_BITS)) as usize);
-        if let Some(k) = key {
-            if let Some(&id) = self.script_ids.get(k).filter(|&&id| id != 0) {
+        if let Some(k) = key
+            && let Some(&id) = self.script_ids.get(k).filter(|&&id| id != 0) {
                 let id = id as usize - 1;
                 let prog = if id == self.cur { &self.prog } else { &self.scripts[id].prog };
                 if prog.source == source {
                     return Ok(id);
                 }
             }
-        }
         let src_room = self.limits.max_script_source.saturating_sub(self.script_source);
         let per_script_source = src_room.min(crate::lex::MAX_SOURCE_LEN);
         if source.len() > per_script_source {

@@ -95,10 +95,11 @@ fn the_globals_are_lazy_and_work_when_read() {
 }
 
 #[test]
-fn the_selection_methods_that_are_left_are_gates() {
+fn the_selection_method_that_is_left_is_a_gate() {
     let mut b = page("<p id=p>abc</p>");
     js(&mut b, "var r = document.createRange(); r.selectNodeContents(document.getElementById('p'))");
-    for (m, what) in [("modify('move', 'forward', 'character')", "Selection.modify"), ("deleteFromDocument()", "Selection.deleteFromDocument")] {
+    {
+        let (m, what) = ("deleteFromDocument()", "Selection.deleteFromDocument");
         assert_eq!(js(&mut b, &format!("getSelection().{m}")), format!("unsupported:{what}"));
     }
     // A gate on the wrong receiver is still an illegal invocation, as for the other methods.

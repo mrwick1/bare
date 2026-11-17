@@ -114,3 +114,17 @@ pub(crate) fn elements_from_point(d: &Dom, it: &mut Interp<'_>, this: Value, a: 
     let all = under(d, it, scope, x, y)?;
     wrap_all(d, it, &all)
 }
+
+/// `document.caretRangeFromPoint(x, y)`: a collapsed range at the text position under the point; `null` outside the window or over no text.
+pub(crate) fn caret_range_from_point(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    let (_, x, y) = args(d, it, this, a, "caretRangeFromPoint")?;
+    let at = d.with_geo(it, |g, s| {
+        let (w, h) = g.view();
+        let (px, py) = (x as f32, y as f32);
+        if px.round() >= 0.0 && py.round() >= 0.0 && px.round() < w && py.round() < h { crate::browser_rects::text_at(g, s, px, py) } else { None }
+    })?;
+    match at {
+        Some((n, o)) => d.caret_range(it, n, o),
+        None => Ok(Value::Null),
+    }
+}

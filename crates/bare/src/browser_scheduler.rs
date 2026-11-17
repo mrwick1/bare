@@ -147,6 +147,8 @@ pub(crate) enum Task {
     Media(NodeId, u32, u8),
     /// A step of a CSS transition or animation: its number and the step (`browser_motion.rs`).
     Motion(u64, u8),
+    /// The `toggle` event of a `details` (`browser_details.rs`): the node, the old state, the new state (`true` is open). At most one for each node.
+    Toggle(NodeId, bool, bool),
 }
 
 struct Timer {
@@ -214,6 +216,8 @@ pub(crate) struct Sched {
     changes: usize,
     /// Queued `Task::Media`.
     media: usize,
+    /// The queued `Task::Toggle` of each `details`.
+    pub(crate) toggles: HashMap<NodeId, (Key, bool)>,
     /// Nesting level of the timer task that runs now (0 outside a timer task).
     nesting: u32,
     halted: Option<Error>,
@@ -284,6 +288,7 @@ enum Run {
     IdleTimeout(u32),
     Media(NodeId, u32, u8),
     Motion(u64, u8),
+    Toggle(NodeId, bool, bool),
     Nothing,
 }
 
@@ -368,7 +373,7 @@ impl Dom {
         let ports = &s.ports;
         s.tasks.retain(|_, t| match t {
             Task::Deliver(o) => ports.contains_key(o),
-            Task::Timer(_) | Task::Select(_) | Task::SelectionChange(_) | Task::DocSelectionChange | Task::Render | Task::Scroll | Task::AbortTimeout(_) | Task::Worker(_) | Task::Notify | Task::Idle | Task::IdleTimeout(_) | Task::Media(..) | Task::Motion(..) => true,
+            Task::Timer(_) | Task::Select(_) | Task::SelectionChange(_) | Task::DocSelectionChange | Task::Render | Task::Scroll | Task::AbortTimeout(_) | Task::Worker(_) | Task::Notify | Task::Idle | Task::IdleTimeout(_) | Task::Media(..) | Task::Motion(..) | Task::Toggle(..) => true,
         });
         s.queued = s.ports.values().map(|p| p.inbox.len()).sum();
         s.queued_bytes = s.ports.values().flat_map(|p| p.inbox.iter().map(|m| m.1)).sum();
@@ -578,6 +583,10 @@ impl Dom {
             }
             Task::Scroll => Run::Scroll,
             Task::Motion(id, step) => Run::Motion(id, step),
+            Task::Toggle(n, old, new) => {
+                s.toggles.remove(&n);
+                Run::Toggle(n, old, new)
+            }
             Task::Notify => Run::Notify,
             Task::Idle => Run::Idle,
             Task::IdleTimeout(id) => Run::IdleTimeout(id),
@@ -653,6 +662,11 @@ impl Dom {
                 self.fire_at_document(it, "selectionchange")?;
                 it.host_checkpoint().map(|_| ())
             }),
+            Run::Toggle(n, old, new) => it.host_scope(|it| {
+                it.charge(1)?;
+                self.toggle_task(it, n, old, new)?;
+                it.host_checkpoint().map(|_| ())
+            }),
             Run::Media(n, epoch, step) => it.host_scope(|it| {
                 it.charge(1)?;
                 self.media_task(it, n, epoch, step)?;
@@ -673,12 +687,11 @@ impl Dom {
                 Ok(())
             }
             Run::Motion(id, step) => {
-                let r = it.host_scope(|it| {
+                it.host_scope(|it| {
                     it.charge(1)?;
                     self.motion_task(it, id, step)?;
                     it.host_checkpoint().map(|_| ())
-                });
-                r
+                })
             }
             Run::Idle | Run::IdleTimeout(_) => {
                 let mark = self.settle_mark();
@@ -1432,7 +1445,7 @@ impl Browser {
 /// The nodes that queued tasks name.
 pub(crate) fn held(d: &Dom, out: &mut Vec<NodeId>) {
     out.extend(d.sched.borrow().tasks.values().filter_map(|t| match t {
-        Task::Select(n) | Task::SelectionChange(n) | Task::Media(n, ..) => Some(*n),
+        Task::Select(n) | Task::SelectionChange(n) | Task::Media(n, ..) | Task::Toggle(n, ..) => Some(*n),
         _ => None,
     }));
 }
