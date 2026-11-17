@@ -391,7 +391,10 @@ impl Run<'_> {
             None => {
                 let kept = self.kept();
                 let target = Target { expect: Expect::Script, url: copy(url) };
-                download(&mut self.net, self.https_only, &self.lim, self.deadline, kept, &mut self.res, &target)
+                let r = download(&mut self.net, self.https_only, &self.lim, self.deadline, kept, &mut self.res, &target);
+                // A slot of the window is free: the next module of the page's `modulepreload` links starts.
+                self.prefetch();
+                r
             }
         };
         if let Err(why) = &r {
