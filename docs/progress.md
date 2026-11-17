@@ -13024,3 +13024,22 @@ Steps 1 and 2 of `docs/design-lane-calls.md`. Base: origin/main `632de066ae` (PR
 - Tests: `cargo test -p bare-js --lib` 1018 passed, 1 ignored. `tools/js/exec_diff.sh`: 79 runs, 0 differences, also in the poison build. Clippy on the js crate: only `eval_scripts.rs` `unnecessary_cast`, already on main; `cargo clippy -p bare-js -D warnings` stops at `crates/observe/src/process.rs:92` (main).
 - Not tested: a recursion through natives other than `map` that call back (`forEach`, `sort`, `Function.prototype.call`), the `max_traversal_depth` error in the native arm, the frame stacks (they still double), the private dashboard journey, wall time, Windows and macOS, massif at 50 keys.
 - Next levers (from the design): the call-site cache and a cheaper `select` only after a new profile; one register stack shared by nested runs would remove the duplicated pooled stacks.
+
+## ToInt32 fast path for bit operators (`toint-fast-path`, 2026-11-17)
+
+Lever 1 of `docs/research-lane-profile-after-calls.md`: every `BitAnd` and `BitOr` called `trunc` and `fmod` (about 2M `fmod` calls at 50 keys). Base: origin/main `4d4b5e5442`. Machine: archMachine. `Auto`, public React page, `#a1`. Instruction counts: minimum of 3 `perf stat` runs, spread at most 0.058%. Narrow rows: `byte`, scale 10.
+
+- `to_uint32` returns at once when `n as i32` converts back to exactly `n` (NaN fails the check, -0 gives 0). A new out-of-line helper `bc_binary` runs the bitwise operators and shifts when both operands are numbers; every other case calls `binary`. The hot loop has no new arm.
+
+| Row | main | now |
+| --- | --- | --- |
+| Page load | 441.26M | 436.66M (-1.04%) |
+| Page 50 keys | 7167.74M | 7020.65M (-2.05%) |
+| loopfn / fib / calls / loop | 837.05 / 58.21 / 1599.28 / 2369.05M | unchanged (±0.00%) |
+| closures | 469.74M | 466.70M (-0.65%) |
+
+- The `to_uint32` change alone: 50 keys 7044.46M (-1.72%); the lane helper adds -0.33%.
+- Cost matrix against main (803 rows): 0 rows over +0.5% under either allocator. Mean glibc -0.088%. A first helper converted the operands before it checked the operator, so `**` paid for a slow `to_uint32(1.5)` (`numeric_load pow 10000` +3.84%); it checks the operator first now (+0.148%).
+- Peak RSS, medians of 7 interleaved runs of `cp --reflink=never` copies: load +0.07%, 50 keys -0.02%.
+- Tests: 1019 passed, 1 ignored. The new test `bitwise_operators_wrap_as_in_node_in_every_mode` runs 31 edge values through 11 expressions and 3 BigInt cases against literals from Node, in Tree, Auto and Byte. It passes on main too (behavior does not change); a deliberately wrong fast path (`n as i64`, no range guard) failed it. `tools/js/exec_diff.sh`: 79 runs, 0 differences. `bcstats` unchanged.
+- Not tested: operands in [2^31, 2^32) (for example the result of `x >>> 0`) still take the slow path and were not measured; wall time; Windows and macOS; the private dashboard journey.
