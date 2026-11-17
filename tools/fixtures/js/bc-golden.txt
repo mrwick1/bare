@@ -1208,7 +1208,15 @@ code nregs=1 words=10 consts=0 ics=0
 function f(a) { return g(...a) }
 ---
 fn0 f
-unsupported: spread
+code nregs=5 words=8 consts=1 ics=0
+0000  GetGlobal     r1, k0  ; name:g
+0001  LoadUndef     r2
+0002  NewArray      r3, 1
+0003  GetEnv        r4, 0, 0
+0004  SpreadPush    r3, r4, 1
+0005  CallSpread    r0, r1, 0
+0006  Ret           r0
+0007  RetUndef      
 === unsupported: generator
 function* f() { yield 1 }
 ---

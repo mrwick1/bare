@@ -637,3 +637,121 @@ fn fused_compare_jumps_agree_with_the_tree_walker() {
         assert!(bad.is_empty(), "{}", bad.join("\n"));
     });
 }
+
+/// Run `src` in `mode`: the completion value (an error shows its name and message) and the reasons the generator refused.
+fn run_in(src: &str, mode: Exec) -> (String, Vec<&'static str>) {
+    let mut it = Interp::realm(Heap::default(), EvalLimits { max_steps: 50_000_000, ..Default::default() }).unwrap();
+    it.set_exec(mode);
+    let got = match it.run_script(src) {
+        Ok(v) => it.display(v),
+        Err(Error::Throw(v @ Value::Object(_))) => format!("throw:{}:{}", it.get_str(v, "name"), it.get_str(v, "message")),
+        Err(Error::Throw(v)) => format!("throw:{}", it.display(v)),
+        Err(e) => format!("{e:?}"),
+    };
+    let mut r: Vec<_> = it.bc.refused.keys().copied().collect();
+    r.sort();
+    (got, r)
+}
+
+/// Each case gives the same result in `Tree`, `Auto` and `Byte`, and the generator refuses none of its functions.
+fn same_on_the_lane(cases: &[(&str, &str)]) {
+    let cases: Vec<(String, String)> = cases.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
+    big(move || {
+        for (name, src) in &cases {
+            let (want, _) = run_in(src, Exec::Tree);
+            for mode in [Exec::Auto, Exec::Byte] {
+                let (got, refused) = run_in(src, mode);
+                assert_eq!(got, want, "{name} {mode:?}");
+                assert!(refused.is_empty(), "{name} {mode:?}: refused {refused:?}");
+            }
+        }
+    });
+}
+
+#[test]
+fn optional_chains_run_on_the_lane() {
+    same_on_the_lane(&[
+        ("member", "function f(a) { return a?.b; } [f(null), f(undefined), f({b: 3}), f(0), f('x')].join()"),
+        ("short circuit", "var n = 0; function s() { n++; return 1; } function f(a) { return a?.b.c(s()).d; } [f(null), n].join()"),
+        ("long chain", "function f(a) { return a?.b.c.d; } [f(null), f({b: {c: {d: 7}}})].join()"),
+        ("chain keeps on", "function f(a) { return a?.b.c; } try { f({}); } catch (e) { e.name + ':' + e.message }"),
+        ("index", "function f(a, k) { return a?.[k]; } [f(null, 'x'), f({x: 5}, 'x'), f([1, 2], 1)].join()"),
+        ("index key not read", "var n = 0; function k() { n++; return 'x'; } function f(a) { return a?.[k()]; } f(null); n"),
+        ("method this", "var o = { v: 4, m() { return this.v; } }; function f(a) { return a?.m(); } [f(o), f(null)].join()"),
+        ("method on chain", "var o = { v: 4, m() { return this.v; } }; function f(a) { return a?.b.m(); } f({ b: o })"),
+        ("optional call", "function f(a) { return a?.(); } [f(null), f(undefined), f(() => 9)].join()"),
+        ("optional call this", "var o = { v: 4, m() { return this.v; } }; function f(a) { return a.m?.(); } [f(o), f({})].join()"),
+        ("optional call args not read", "var n = 0; function s() { n++; return 1; } function f(a) { return a.m?.(s()); } f({}); n"),
+        ("optional index call", "var o = { v: 4, m() { return this.v; } }; function f(a) { return a?.['m'](); } [f(o), f(null)].join()"),
+        ("not a function", "function f(a) { return a?.b(); } try { f({}); } catch (e) { e.name + ':' + e.message }"),
+        ("optional not a function", "function f(a) { return a?.b?.c(); } [f({}), f(null), f({b: {c() { return 2; }}})].join()"),
+        ("index of null", "function f(a) { return a.b[a.c]; } try { f({}); } catch (e) { e.name + ':' + e.message }"),
+        ("paren ends chain", "function f(a) { return (a?.b).c; } try { f(null); } catch (e) { e.name + ':' + e.message }"),
+        ("paren call keeps this", "var o = { v: 4, m() { return this.v; } }; function f(a) { return (a?.m)(); } f(o)"),
+        ("paren call of null", "function f(a) { return (a?.m)(); } try { f(null); } catch (e) { e.name + ':' + e.message }"),
+        ("getter order", "var log = []; var o = {}; Object.defineProperty(o, 'a', { get() { log.push('a'); var r = {}; Object.defineProperty(r, 'b', { get() { log.push('b'); return null; } }); return r; } }); function f(x) { return x?.a.b?.c.d; } f(o); log.join()"),
+        ("nested", "function f(a) { return a?.b?.[a?.k]?.(a?.v); } [f({ b: { x: (v) => v + 1 }, k: 'x', v: 1 }), f({ b: null }), f(null)].join()"),
+        ("as operand", "function f(a) { return (a?.b ?? 5) + (a?.c?.d || 1); } [f(null), f({ b: 2, c: { d: 3 } })].join()"),
+        ("in try and loop", "function f(l) { var s = 0; for (var i = 0; i < l.length; i++) { try { s += l[i]?.n ?? 100; } catch (e) { s += 1000; } } return s; } f([{ n: 1 }, null, { n: 2 }, undefined])"),
+        ("closure", "function f(a) { return function () { return a?.b?.(); }; } [f(null)(), f({ b() { return 8; } })()].join()"),
+        ("template and typeof", "function f(a) { return `${a?.b}` + typeof a?.b; } [f(null), f({ b: 1 })].join()"),
+        ("assign value", "function f(a) { var r = a?.b; return r; } [f(null), f({ b: 3 })].join()"),
+        ("new on chain", "function f(a) { return new (a?.C)(); } try { f({}); } catch (e) { e.name + ':' + e.message }"),
+    ]);
+}
+
+#[test]
+fn spread_runs_on_the_lane() {
+    same_on_the_lane(&[
+        ("call", "function g(a, b, c) { return [a, b, c].join(); } function f(x) { return g(...x); } f([1, 2, 3])"),
+        ("call mixed", "function g() { return Array.prototype.join.call(arguments, '-'); } function f(x, y) { return g(0, ...x, 9, ...y); } f([1, 2], 'ab')"),
+        ("call method this", "var o = { v: 5, m() { return this.v + arguments.length; } }; function f(x) { return o.m(...x) + o['m'](...x); } f([1, 2])"),
+        ("call in chain", "var o = { v: 5, m() { return this.v + arguments.length; } }; function f(a, x) { return a?.m(...x); } [f(o, [1, 2]), f(null, [1])].join()"),
+        ("call set and map", "function g() { return arguments.length; } function f() { return g(...new Set([1, 2, 3]), ...new Map([[1, 2]]).keys()); } f()"),
+        ("call iterable", "var it = {}; it[Symbol.iterator] = function () { var i = 0; return { next() { return { done: i >= 2, value: ++i }; } }; }; function g() { return Array.prototype.join.call(arguments); } function f() { return g(...it); } f()"),
+        ("call hole", "function g(a, b) { return String(a) + String(b); } function f() { var h = new Array(2); h[1] = 1; return g(...h); } f()"),
+        ("call not iterable", "function g() {} function f(x) { try { g(...x); } catch (e) { return e.name + ':' + e.message; } } [f(null), f(5), f({})].join('|')"),
+        ("call not a function", "function f(x) { try { var o = {}; o.nope(...x); } catch (e) { return e.name + ':' + e.message; } } f([1])"),
+        ("call order", "var log = []; function a() { log.push('a'); return [1]; } function b() { log.push('b'); return [2]; } function g() { return arguments.length; } function f() { return g(...a(), ...b()) + log.join(); } f()"),
+        ("call array iterator changed", "var orig = Array.prototype[Symbol.iterator]; function g() { return Array.prototype.join.call(arguments); } function f() { return g(...[1, 2]); } var r = [f()]; Array.prototype[Symbol.iterator] = function () { var d = false; return { next() { var r = { done: d, value: 7 }; d = true; return r; } }; }; r.push(f()); Array.prototype[Symbol.iterator] = orig; r.join('|')"),
+        ("array", "function f(x, y) { return [0, ...x, 9, ...y].join(); } f([1, 2], 'ab')"),
+        ("array copy", "function f(x) { var c = [...x]; c.push(4); return x.length + ',' + c.length; } f([1, 2, 3])"),
+        ("array of set", "function f(s) { return [...s, ...s].length; } f(new Set([1, 2]))"),
+        ("array not iterable", "function f(x) { try { return [...x]; } catch (e) { return e.name + ':' + e.message; } } [f(undefined), f(1)].join('|')"),
+        ("array holes read as undefined", "function f(x) { var r = [...x]; return r.length + ',' + (1 in r); } f((function () { var h = new Array(3); h[0] = 1; h[2] = 3; return h; })())"),
+        ("new", "function P(a, b) { this.s = a + b; } function f(x) { return new P(...x).s; } f([1, 2])"),
+        ("new mixed", "function P() { this.n = arguments.length; } function f(x) { return new P(...x, ...x).n; } f([1, 2])"),
+        ("new not a constructor", "function f(x) { try { new (function () {}.bind().call)(...x); } catch (e) { return e.name; } } f([])"),
+        ("in loop and try", "function g() { return arguments.length; } function f(l) { var s = 0; for (var i = 0; i < l.length; i++) { try { s += g(...l[i]); } catch (e) { s += 100; } } return s; } f([[1], null, [1, 2]])"),
+        ("closure", "function f(x) { return function (y) { return [...x, ...y]; }; } f([1])([2]).join()"),
+        ("math", "function f(x) { return Math.max(...x) + Math.min(...x); } f([3, 1, 2])"),
+    ]);
+}
+
+#[test]
+fn computed_keys_delete_and_regexp_literals_run_on_the_lane() {
+    same_on_the_lane(&[
+        ("computed key", "function f(k) { var o = { a: 1, [k]: 2, ['x' + k]: 3, [1 + 1]: 4 }; return JSON.stringify(o); } f('b')"),
+        ("computed key order", "var log = []; function k(n) { log.push('k' + n); return n; } function v(n) { log.push('v' + n); return n; } function f() { var o = { [k('a')]: v(1), [k('b')]: v(2) }; return log.join() + Object.keys(o); } f()"),
+        ("computed key object tostring once", "var n = 0; function f() { var o = { [{ toString() { n++; return 'z'; } }]: 1 }; return Object.keys(o) + n; } f()"),
+        ("computed key symbol", "function f() { var s = Symbol('q'); var o = { [s]: 5 }; return o[s]; } f()"),
+        ("computed key overrides", "function f() { var o = { a: 1, ['a']: 2 }; return o.a; } f()"),
+        ("computed key named function", "function f(k) { var o = { [k]: function inner() {} }; return o[k].name; } f('z')"),
+        ("computed key with throw", "function f() { try { var o = { [(function () { throw new RangeError('k'); })()]: 1 }; } catch (e) { return e.name; } } f()"),
+        ("delete member", "function f() { var o = { a: 1, b: 2 }; var r = delete o.a; return r + ',' + JSON.stringify(o); } f()"),
+        ("delete index", "function f(k) { var o = { a: 1, b: 2 }, a = [1, 2, 3]; var r = delete o[k]; var r2 = delete a[1]; return r + ',' + r2 + JSON.stringify(o) + a.length + (1 in a); } f('b')"),
+        ("delete missing and primitive", "function f() { var o = {}; return [delete o.x, delete 'abc'.length, delete (5).x, delete 3].join(); } f()"),
+        ("delete non configurable", "function f() { var o = {}; Object.defineProperty(o, 'p', { value: 1 }); return delete o.p; } f()"),
+        ("delete non configurable strict", "function f() { 'use strict'; var o = {}; Object.defineProperty(o, 'p', { value: 1 }); try { delete o.p; } catch (e) { return e.name + ':' + e.message; } } f()"),
+        ("delete of null base", "function f(o) { try { delete o.a; } catch (e) { return e.name + ':' + e.message; } } [f(null), f(undefined)].join('|')"),
+        ("delete index of null base", "function f(o) { try { delete o['a']; } catch (e) { return e.name + ':' + e.message; } } [f(null), f(undefined)].join('|')"),
+        ("delete order", "var log = []; function o() { log.push('o'); return { a: 1 }; } function k() { log.push('k'); return 'a'; } function f() { delete o()[k()]; return log.join(); } f()"),
+        ("delete call result", "var n = 0; function g() { n++; return 1; } function f() { return delete g() + ',' + n; } f()"),
+        ("delete optional", "function f(o) { return delete o?.a; } var x = { a: 1 }; [f(null), f(x), JSON.stringify(x)].join()"),
+        ("delete in condition", "function f(o) { if (delete o.a) { return Object.keys(o).length; } return -1; } f({ a: 1, b: 2 })"),
+        ("regexp", "function f(s) { return /b+/.test(s) + ',' + s.replace(/a/g, 'x') + ',' + /(\\d+)-(\\d+)/.exec(s)[2]; } f('aabb 12-34')"),
+        ("regexp new object each time", "function f() { return /a/ === /a/; } function g() { var r = []; for (var i = 0; i < 2; i++) r.push(/a/g); return r[0] === r[1]; } f() + ',' + g()"),
+        ("regexp last index", "function f() { var out = []; for (var i = 0; i < 3; i++) { var r = /a/g; r.test('aaa'); out.push(r.lastIndex); } return out.join(); } f()"),
+        ("regexp flags", "function f() { var r = /A.b/gims; return r.flags + r.source + r.test('a\\nB'); } f()"),
+    ]);
+}
