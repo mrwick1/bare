@@ -816,6 +816,8 @@ pub struct Heap {
     ic_stats: IcStats,
     /// The cache entries of the reads with no site (`get_stub`), direct-mapped by the receiver's shape and the key.
     stubs: Box<[(PropertyKey, Ic); shape::STUBS]>,
+    /// The cache entries of keyed reads and writes with an atom key (`get_keyed`, `set_keyed`), 2-way by the receiver's shape and the key.
+    keyed: Box<[[shape::Keyed; 2]; shape::KEYED_SETS]>,
     /// Setup mode (`set_setup`).
     setup: bool,
     /// A collect frees dead shapes when the shape count reaches this: twice the count after the last shape sweep (step A6).
@@ -867,6 +869,7 @@ impl Heap {
             enum_tail: [None; shape::ENUM_TAILS],
             ic_stats: IcStats::default(),
             stubs: Box::new([(PropertyKey::Index(0), Ic::EMPTY); shape::STUBS]),
+            keyed: vec![[shape::Keyed::EMPTY; 2]; shape::KEYED_SETS].into_boxed_slice().try_into().unwrap_or_else(|_| unreachable!()),
             setup: false,
             shape_sweep_at: shape::SWEEP_MIN,
             shape_sweeps: 0,
@@ -1430,6 +1433,12 @@ impl Heap {
     }
 
     // ----- keys and conversions -----
+
+    /// `s` is an atom that is no index: its property key is `String(s)` (the fast path of `key_from_string`).
+    #[inline]
+    pub fn plain_key(&self, s: StrId) -> bool {
+        self.strings.get(s.index, s.gn).is_some_and(|st| !st.digit)
+    }
 
     /// The key for a string: `Index` for a canonical array index, else `String`.
     #[inline(always)]

@@ -140,6 +140,16 @@ type RecentEntry = (u32, PropertyKey, u32, u8);
 /// Entries of `Heap::stubs`. `recent_at` maps to them.
 pub(super) const STUBS: usize = RECENT;
 
+/// Sets of `Heap::keyed`: 1,024 sets of 2 ways, 2,048 entries of 32 bytes (64 KiB).
+const KEYED_BITS: u32 = 10;
+pub(super) const KEYED_SETS: usize = 1 << KEYED_BITS;
+
+/// The set of `(from, s)` in `Heap::keyed`: the mix of `recent_at` with the shift for `KEYED_SETS`.
+#[inline(always)]
+fn keyed_at(from: u32, s: StrId) -> usize {
+    ((s.index ^ from.rotate_left(16)).wrapping_mul(0x9e37_79b9) >> (32 - KEYED_BITS)) as usize
+}
+
 /// The slot of `(from, key)` in `Shapes::recent`.
 #[inline(always)]
 fn recent_at(from: u32, key: PropertyKey) -> usize {
@@ -998,6 +1008,56 @@ impl Ic {
     };
 }
 
+/// One entry of `Heap::keyed`: the `Ic` of a keyed read or write `o[s]` with an atom key `s` that is no index, in 32 bytes. `key`
+/// and `gn` are the handle of the atom. `write` tells the entry of a write from the entry of a read, so that a read entry and an
+/// add entry for one pair can live in the two ways of a set. An `IC_STORE` entry serves both. A pair that the fill refused keeps an
+/// `IC_EMPTY` entry with the receiver's shape: its next ops take the plain path at once. The entry never inherits a miss counter, so
+/// it is never `IC_MEGA`.
+#[derive(Clone, Copy)]
+pub(super) struct Keyed {
+    shape: u32,
+    key: u32,
+    gn: u32,
+    slot: u32,
+    first: ObjId,
+    epoch: u32,
+    depth: u16,
+    kind: u8,
+    write: bool,
+}
+
+const _: () = assert!(std::mem::size_of::<Keyed>() == 32);
+
+impl Keyed {
+    pub(super) const EMPTY: Keyed =
+        Keyed { shape: u32::MAX, key: 0, gn: 0, slot: 0, first: ObjId { index: 0, gn: 0 }, epoch: 0, depth: 0, kind: IC_EMPTY, write: false };
+
+    #[inline(always)]
+    fn is(&self, shape: u32, s: StrId, write: bool) -> bool {
+        self.shape & !SHAPE_TAG == shape && self.key == s.index && self.gn == s.gn && (self.write == write || self.kind == IC_STORE)
+    }
+
+    #[inline(always)]
+    fn ic(&self) -> Ic {
+        Ic {
+            shape: self.shape,
+            slot: self.slot,
+            kind: self.kind,
+            depth: self.depth,
+            first: self.first,
+            epoch: self.epoch,
+            misses: 0,
+            #[cfg(debug_assertions)]
+            key: Some(PropertyKey::String(StrId { index: self.key, gn: self.gn })),
+        }
+    }
+
+    fn of(ic: &Ic, shape: u32, s: StrId, write: bool) -> Keyed {
+        let shape = if ic.kind == IC_EMPTY { shape } else { ic.shape };
+        Keyed { shape, key: s.index, gn: s.gn, slot: ic.slot, first: ic.first, epoch: ic.epoch, depth: ic.depth, kind: ic.kind, write }
+    }
+}
+
 /// Counters of the cache (`Heap::ic_stats`). The evaluator counts the inline own hits itself.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct IcStats {
@@ -1019,6 +1079,9 @@ pub struct IcStats {
     pub set_ic_calls: u64,
     /// `for-in` loops that stopped at a certified prototype tail (`Heap::enum_tail_clean`).
     pub enum_tail_skips: u64,
+    /// Hits and fills of the keyed table (`Heap::get_keyed`, `Heap::set_keyed`).
+    pub keyed_hits: u64,
+    pub keyed_fills: u64,
     /// `for-in` loops that read the keys of the receiver's shape in place (`Heap::for_in_shape`).
     pub for_in_shape: u64,
     /// `for-in` loops on the list path that read the receiver's own keys without a set, then made one for a prototype key (`Interp::for_in_keys`).
@@ -1040,6 +1103,7 @@ impl Heap {
             o.shape = remap[o.shape as usize];
         }
         self.stubs.fill((PropertyKey::Index(0), Ic::EMPTY));
+        self.keyed.fill([Keyed::EMPTY; 2]);
         self.shape_sweeps += 1;
         // A full table sweeps at the next collect, even when most shapes live.
         self.shape_sweep_at = (2 * self.shapes.len()).clamp(SWEEP_MIN, SHAPE_CAP);
@@ -1196,6 +1260,92 @@ impl Heap {
         }
         self.stubs[i] = (key, ic);
         r
+    }
+
+    /// `get` of a keyed read `o[s]` (the lane's `GetElem`), where `s` is an atom that is no index (`Heap::plain_key`). It uses the
+    /// entry of `keyed` for the receiver's shape and the key, as a site uses its own: the key of a keyed site changes at each
+    /// iteration, so one table serves all sites. A dictionary or a refused receiver is the plain read.
+    pub fn get_keyed(&mut self, o: ObjId, s: StrId) -> R<Get> {
+        let key = PropertyKey::String(s);
+        let shape = match self.objects.get(o.index, o.gn) {
+            Some(ob) if ob.exotic <= EXOTIC && ob.dict().is_none() => ob.shape,
+            _ => return self.get(o, key),
+        };
+        let i = keyed_at(shape, s);
+        let found = self.keyed_find(i, shape, s, false);
+        if found {
+            let e = self.keyed[i][0];
+            let ic = e.ic();
+            if let Some(g) = self.ic_hit(o, key, &ic) {
+                self.ic_stats.keyed_hits += 1;
+                #[cfg(debug_assertions)]
+                self.ic_verify(o, &ic, g);
+                return Ok(g);
+            }
+            if e.kind == IC_EMPTY {
+                return self.get(o, key);
+            }
+        }
+        let mut ic = Ic::EMPTY;
+        let r = self.ic_fill(o, key, &mut ic)?;
+        self.keyed_put(i, found, Keyed::of(&ic, shape, s, false));
+        Ok(r)
+    }
+
+    /// `set` of a keyed write `o[s] = v` (the lane's `SetElem`), as `get_keyed`: a store or add hit, else the plain write, which fills
+    /// the entry. The caller converts a value for a view first. Never calls a setter: it returns it, as `set` does.
+    pub fn set_keyed(&mut self, o: ObjId, s: StrId, v: Value) -> R<Set> {
+        let key = PropertyKey::String(s);
+        let shape = match self.objects.get(o.index, o.gn) {
+            Some(ob) if ob.exotic == 0 && ob.dict().is_none() => ob.shape,
+            _ => return self.set(o, key, v),
+        };
+        let i = keyed_at(shape, s);
+        let found = self.keyed_find(i, shape, s, true);
+        if found {
+            let ic = self.keyed[i][0].ic();
+            if self.ic_store(o, &ic, v) || self.ic_add(o, &ic, v)? {
+                self.ic_stats.keyed_hits += 1;
+                return Ok(Set::Done);
+            }
+            if ic.kind == IC_EMPTY {
+                return self.set(o, key, v);
+            }
+        }
+        let mut ic = Ic::EMPTY;
+        let r = self.set_fill(o, key, v, &mut ic)?;
+        self.keyed_put(i, found, Keyed::of(&ic, shape, s, true));
+        Ok(r)
+    }
+
+    /// The filled entries of `keyed` (tests).
+    #[cfg(test)]
+    pub(crate) fn keyed_entries(&self) -> usize {
+        self.keyed.iter().flatten().filter(|e| e.kind != IC_EMPTY).count()
+    }
+
+    /// Whether set `i` of `keyed` holds the pair. A hit in way 1 moves to way 0 (least recently used order).
+    #[inline(always)]
+    fn keyed_find(&mut self, i: usize, shape: u32, s: StrId, write: bool) -> bool {
+        let set = &mut self.keyed[i];
+        if set[0].is(shape, s, write) {
+            return true;
+        }
+        if set[1].is(shape, s, write) {
+            set.swap(0, 1);
+            return true;
+        }
+        false
+    }
+
+    /// Puts a new entry in way 0 of set `i`: in place of the stale entry of the pair (`found`), else the old way 0 moves to way 1.
+    fn keyed_put(&mut self, i: usize, found: bool, e: Keyed) {
+        self.ic_stats.keyed_fills += 1;
+        let set = &mut self.keyed[i];
+        if !found {
+            set[1] = set[0];
+        }
+        set[0] = e;
     }
 
     /// The miss of `get_ic` and `get_stub`: the plain read, and a new entry in `ic` when the receiver allows one.

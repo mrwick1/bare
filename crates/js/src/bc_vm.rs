@@ -925,8 +925,40 @@ impl<'p> Interp<'p> {
         if is_nullish(base) {
             return Err(self.index_nullish_err(base, iv));
         }
+        if let (Value::Object(o), Value::String(s)) = (base, iv)
+            && self.heap.plain_key(s)
+        {
+            let key = PropertyKey::String(s);
+            let got = match self.heap.get_keyed(o, s) {
+                Ok(g) => g,
+                Err(e) => self.get_miss(o, key, base, e)?,
+            };
+            return match got {
+                Get::Value(v) => Ok(v),
+                Get::Accessor { getter: Some(g) } => self.call_fn(Value::Object(g), base, &[]),
+                Get::Accessor { getter: None } => Ok(Value::Undefined),
+            };
+        }
         let key = self.coerce_key(iv)?;
         self.get_prop(base, key)
+    }
+
+    /// `SetElem`: `o[k] = v`. An atom key that is no index uses the keyed table (`Heap::set_keyed`).
+    #[inline(never)]
+    fn bc_set_elem(&mut self, base: Value, k: Value, v: Value) -> Res<()> {
+        if let (Value::Object(o), Value::String(s)) = (base, k)
+            && self.heap.plain_key(s)
+            && !(self.heap.has_exotics() && self.heap.is_view_index_key(o, PropertyKey::String(s)))
+        {
+            let key = PropertyKey::String(s);
+            let r = match self.heap.set_keyed(o, s, v) {
+                Ok(r) => r,
+                Err(e) => self.set_miss(o, key, v, base, e)?,
+            };
+            return self.put_done(base, key, v, r);
+        }
+        let key = self.coerce_key(k)?;
+        self.put_prop(base, key, v)
     }
 
     /// `ToKey`: a primitive key stays as it is (its property key is the same later); an object becomes a string or a symbol.
@@ -1351,11 +1383,7 @@ impl<'p> Interp<'p> {
                         }
                     }
                     GET_ELEM => regs[a] = tri!(at, self.bc_get_elem(regs[b], regs[cc])),
-                    SET_ELEM => {
-                        let (o, k, v) = (regs[a], regs[b], regs[cc]);
-                        let key = tri!(at, self.coerce_key(k));
-                        tri!(at, self.put_prop(o, key, v));
-                    }
+                    SET_ELEM => tri!(at, self.bc_set_elem(regs[a], regs[b], regs[cc])),
                     TO_KEY => regs[a] = tri!(at, self.bc_to_key(regs[b], regs[cc])),
                     DEF_FIELD => tri!(at, self.bc_def_field(regs[a], name!(cc), regs[b])),
                     ARRAY_PUSH => tri!(at, self.bc_array_push(regs[a], regs[b])),
