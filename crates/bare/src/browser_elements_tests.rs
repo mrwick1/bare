@@ -338,6 +338,23 @@ fn svg_geometry_surface() {
 }
 
 #[test]
+fn svg_text_content_lengths() {
+    // The numbers are from Chrome (headless shell 1248) for Noto Sans Mono at 20 px, 12 px a letter: text 108, tspan 48, (5,1) 12, (0,-1) 108.
+    let mut b = browser("<svg><text id='t' font-size='20' style='font-family:monospace'>abcde<tspan id='ts'> fgh</tspan></text><rect id='r'/></svg>");
+    assert_eq!(js(&mut b, "var t=document.getElementById('t'); t.getComputedTextLength()"), "108");
+    assert_eq!(js(&mut b, "document.getElementById('ts').getComputedTextLength()"), "48");
+    assert_eq!(js(&mut b, "t.getSubStringLength(5, 1)"), "12");
+    assert_eq!(js(&mut b, "t.getSubStringLength(0, -1)"), "108");
+    assert_eq!(js(&mut b, "t.getSubStringLength(1.9, 2.9)"), "24");
+    assert_eq!(js(&mut b, "t.getSubStringLength(2, 0)"), "0");
+    assert_eq!(js(&mut b, "try { t.getSubStringLength(9, 1) } catch (e) { e.name }"), "IndexSizeError");
+    assert_eq!(js(&mut b, "try { document.getElementById('r').getComputedTextLength() } catch (e) { e.name }"), "TypeError");
+    // The length scales with the font size, and the spaces collapse as in HTML.
+    assert_eq!(js(&mut b, "t.setAttribute('font-size', '40'); t.getComputedTextLength()"), "216");
+    assert_eq!(js(&mut b, "t.textContent = '  ab    c  '; t.getComputedTextLength()"), "96");
+}
+
+#[test]
 fn svg_transform_list_consolidates_the_attribute() {
     // d3's interpolateTransformSvg reads `transform.baseVal.consolidate().matrix`. The matrix is the product of the list, by hand.
     let mut b = browser("<svg><g id='g' transform='translate(10,20) scale(2) rotate(90 5 5)'></g><g id='e'></g><g id='x' transform='translate(1) oops(2)'></g></svg>");

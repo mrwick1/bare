@@ -673,6 +673,52 @@ fn svg_text_draws_at_its_position_and_anchor() {
 }
 
 #[test]
+fn svg_text_dominant_baseline_moves_the_letters() {
+    // Offsets measured in Chrome (headless shell 1248, `getBBox().y` of a 100 px Noto Sans text): middle +26.8, central +39, hanging +85.6,
+    // mathematical +53.5, ideographic -29, text-before-edge +107, text-after-edge -29; `auto`, `alphabetic`, `text-top`, `text-bottom` 0.
+    // At 20 px the ascent is 21 and the descent 6 (rounded), so the expected moves below are those of this font size.
+    let bottom = |attrs: &str| {
+        let c = bare(&format!("<style>body{{margin:0}}</style><svg width=300 height=100 font-size=20 {attrs}><text x=100 y=50 fill=red {attrs}>HH</text></svg>"));
+        ink(&c, 0, 0, 300, 100, WHITE).expect("letters").3 as f32
+    };
+    let base = bottom("");
+    for (name, shift) in [("alphabetic", 0.0), ("auto", 0.0), ("text-top", 0.0), ("text-bottom", 0.0), ("middle", 5.4), ("central", 7.5), ("hanging", 16.8), ("mathematical", 10.5), ("ideographic", -6.0), ("text-before-edge", 21.0), ("text-after-edge", -6.0)] {
+        let got = bottom(&format!("dominant-baseline={name}")) - base;
+        assert!((got - shift).abs() <= 1.0, "{name}: moved {got}, expected {shift}");
+    }
+    // It is inherited from a `g`, and a `tspan` on its own `dominant-baseline` or `alignment-baseline` overrides it.
+    let in_g = bare("<style>body{margin:0}</style><svg width=300 height=100 font-size=20><g dominant-baseline=hanging><text x=100 y=50 fill=red>HH</text></g></svg>");
+    assert!((ink(&in_g, 0, 0, 300, 100, WHITE).unwrap().3 as f32 - base - 16.8).abs() <= 1.0);
+    let tspan = bare("<style>body{margin:0}</style><svg width=300 height=100 font-size=20><text x=100 y=50 fill=red dominant-baseline=hanging><tspan alignment-baseline=alphabetic>HH</tspan></text></svg>");
+    // `alignment-baseline` on the tspan is not `dominant-baseline`: the `hanging` of the text stays above it only when nothing overrides it,
+    // and the own attribute wins (alphabetic: no move).
+    assert!((ink(&tspan, 0, 0, 300, 100, WHITE).unwrap().3 as f32 - base).abs() <= 1.0);
+}
+
+#[test]
+fn svg_text_under_a_turn_or_skew_draws_as_outlines() {
+    let ink_of = |t: &str| {
+        let c = bare(&format!("<style>body{{margin:0}}</style><svg width=300 height=300 font-size=40>{t}</svg>"));
+        ink(&c, 0, 0, 300, 300, WHITE).map(|(a, b, c, d)| (a as i32, b as i32, c as i32, d as i32))
+    };
+    let flat = ink_of("<text x=100 y=150 fill=red>HHH</text>").expect("letters");
+    let (fw, fh) = (flat.2 - flat.0, flat.3 - flat.1);
+    assert!(fw > 2 * fh, "{flat:?}");
+    // A quarter turn about the start: the run climbs up the page, so it is as tall as it was wide, and as wide as it was tall.
+    let up = ink_of("<text x=100 y=150 fill=red transform='rotate(-90 100 150)'>HHH</text>").expect("letters");
+    let (uw, uh) = (up.2 - up.0, up.3 - up.1);
+    assert!((uh - fw).abs() <= 3 && (uw - fh).abs() <= 3, "{up:?} from {flat:?}");
+    assert!(up.1 < 150 - fw + 5 && up.3 <= 151, "it climbs from the start point: {up:?}");
+    // A skew leans the letters: the ink is wider by about the height times the tangent, and a flip (scale -1 1) puts the run left of x.
+    let skew = ink_of("<text x=100 y=150 fill=red transform='skewX(-30)'>HHH</text>").expect("letters");
+    assert!(skew.2 - skew.0 > fw + 10, "{skew:?}");
+    let flip = ink_of("<text x=-200 y=150 fill=red transform='scale(-1 1)'>HHH</text>").expect("letters");
+    assert!((flip.0 - flat.0).abs() <= 45 && flip.2 - flip.0 > 2 * fh, "{flip:?}");
+    // A uniform scale and a move are still the text path: same ink as a scaled font.
+    assert_eq!(ink_of("<text x=50 y=75 fill=red transform='scale(2)' font-size=20>HHH</text>"), ink_of("<text x=100 y=150 fill=red font-size=40>HHH</text>"));
+}
+
+#[test]
 fn the_svg_fixture() {
     let c = render(fixture!("svg"));
     // The first icon: a chevron of 2 px strokes in the color of the text (#123), with round ends, in a box of 24 px at (8, 8).

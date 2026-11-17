@@ -207,6 +207,52 @@ impl Glyphs {
     }
 }
 
+/// Add the outline of the letter `c` to `out` as contours (apart by a NaN point), each curve cut in `steps` lines. A point goes through `to`,
+/// given in ems from the pen, with y down. A letter with no outline (a space) adds nothing. Rotated SVG text draws with this. The faces are
+/// read on the first call: a page with no such text never pays for them.
+pub fn flatten(face: bare_layout::font::Face, c: char, steps: usize, to: impl Fn(f32, f32) -> (f32, f32), out: &mut Vec<(f32, f32)>) {
+    use ab_glyph::{OutlineCurve as C, Point};
+    static SHARED: std::sync::OnceLock<Glyphs> = std::sync::OnceLock::new();
+    let g = SHARED.get_or_init(Glyphs::new);
+    let (id, glyph) = g.glyph(face, c);
+    let font = &g.font(id).font;
+    let Some(outline) = font.outline(GlyphId(glyph)) else { return };
+    let k = 1.0 / font.units_per_em().unwrap_or(1000.0);
+    let mut end: Option<Point> = None;
+    let add = |out: &mut Vec<(f32, f32)>, p: Point| out.push(to(p.x * k, -p.y * k));
+    for curve in &outline.curves {
+        let start = match curve { C::Line(a, _) | C::Quad(a, _, _) | C::Cubic(a, _, _, _) => *a };
+        if end != Some(start) {
+            if !out.is_empty() {
+                out.push((f32::NAN, f32::NAN));
+            }
+            add(out, start);
+        }
+        let lerp = |a: Point, b: Point, t: f32| point(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t);
+        match *curve {
+            C::Line(_, b) => {
+                add(out, b);
+                end = Some(b);
+            }
+            C::Quad(a, b, c) => {
+                for i in 1..=steps {
+                    let t = i as f32 / steps as f32;
+                    add(out, lerp(lerp(a, b, t), lerp(b, c, t), t));
+                }
+                end = Some(c);
+            }
+            C::Cubic(a, b, c, d) => {
+                for i in 1..=steps {
+                    let t = i as f32 / steps as f32;
+                    let (p, q, r) = (lerp(a, b, t), lerp(b, c, t), lerp(c, d, t));
+                    add(out, lerp(lerp(p, q, t), lerp(q, r, t), t));
+                }
+                end = Some(d);
+            }
+        }
+    }
+}
+
 impl Default for Glyphs {
     fn default() -> Glyphs {
         Glyphs::new()
