@@ -4,9 +4,9 @@
 //! allocator query are separate operations, so a snapshot is not atomic.
 //! Procfs RSS and peak RSS are approximate kernel counters.
 //!
-//! Windows calls `K32GetProcessMemoryInfo`, `GetProcessTimes` and `HeapSummary`
-//! on the current process. Each call costs O(1) in processes, threads and live
-//! allocations. The calls are separate, so a snapshot is not atomic.
+//! Windows calls `K32GetProcessMemoryInfo` and `GetProcessTimes` on the current
+//! process. Each call costs O(1) in processes, threads and live allocations.
+//! The calls are separate, so a snapshot is not atomic.
 
 /// A best-effort measurement of the current process, across all its threads.
 /// Missing, malformed, overflowing or unsupported measurements are `None`.
@@ -29,8 +29,8 @@ pub struct Snapshot {
     /// Includes allocator overhead and mmap blocks. Cached freed blocks can
     /// remain counted. Excludes other allocators and direct application mmap.
     /// This is allocator accounting, not RSS or engine/JS live-object bytes.
-    /// Windows reports `HeapSummary.cbAllocated` of the process heap, which the
-    /// Rust system allocator uses. Other heaps and `VirtualAlloc` are excluded.
+    /// Always `None` on Windows. `HeapSummary` walks the heap, so it costs O(live
+    /// allocations): 16 ms with 1,000,000 live allocations.
     pub allocator_live_bytes: Option<u64>,
 }
 
@@ -58,7 +58,8 @@ pub fn snapshot() -> Snapshot {
 }
 
 /// Read available process counters. Windows CPU time has 100 ns units,
-/// truncated to whole microseconds. `thread_count` is always `None`.
+/// truncated to whole microseconds. `thread_count` and `allocator_live_bytes`
+/// are always `None`.
 #[cfg(windows)]
 pub fn snapshot() -> Snapshot {
     use std::ffi::c_void;
@@ -84,19 +85,9 @@ pub fn snapshot() -> Snapshot {
         low: u32,
         high: u32,
     }
-    #[repr(C)]
-    #[allow(non_snake_case)]
-    struct HeapSummary {
-        cb: u32,
-        cbAllocated: usize,
-        cbCommitted: usize,
-        cbReserved: usize,
-        cbMaxReserve: usize,
-    }
     #[link(name = "kernel32")]
     unsafe extern "system" {
         fn GetCurrentProcess() -> *mut c_void;
-        fn GetProcessHeap() -> *mut c_void;
         fn K32GetProcessMemoryInfo(process: *mut c_void, counters: *mut ProcessMemoryCounters, cb: u32) -> i32;
         fn GetProcessTimes(
             process: *mut c_void,
@@ -105,7 +96,6 @@ pub fn snapshot() -> Snapshot {
             kernel: *mut FileTime,
             user: *mut FileTime,
         ) -> i32;
-        fn HeapSummary(heap: *mut c_void, flags: u32, summary: *mut HeapSummary) -> i32;
     }
     // A FILETIME counts 100 ns units. Ten units make one microsecond.
     fn us(t: &FileTime) -> Option<u64> {
@@ -113,9 +103,9 @@ pub fn snapshot() -> Snapshot {
     }
 
     let mut result = Snapshot::default();
-    // SAFETY: GetCurrentProcess and GetProcessHeap take no arguments and return
-    // pseudo or process-owned handles. Every pointer below refers to a local
-    // struct with the documented layout, and the size argument is its size.
+    // SAFETY: GetCurrentProcess takes no arguments and returns a pseudo handle.
+    // Every pointer below refers to a local struct with the documented layout,
+    // and the size argument is its size.
     unsafe {
         let process = GetCurrentProcess();
         let mut mem = ProcessMemoryCounters {
@@ -139,16 +129,6 @@ pub fn snapshot() -> Snapshot {
         if GetProcessTimes(process, &mut created, &mut exited, &mut kernel, &mut user) != 0 {
             result.cpu_user_us = us(&user);
             result.cpu_system_us = us(&kernel);
-        }
-        let mut heap = HeapSummary {
-            cb: size_of::<HeapSummary>() as u32,
-            cbAllocated: 0,
-            cbCommitted: 0,
-            cbReserved: 0,
-            cbMaxReserve: 0,
-        };
-        if HeapSummary(GetProcessHeap(), 0, &mut heap) != 0 {
-            result.allocator_live_bytes = u64::try_from(heap.cbAllocated).ok();
         }
     }
     result
@@ -376,11 +356,10 @@ mod windows_tests {
         }
         black_box(&big);
         let third = snapshot();
-        let live = third.allocator_live_bytes.expect("allocator") - second.allocator_live_bytes.expect("allocator");
-        assert!(live >= 60 << 20, "allocator grew {live}");
         let grown = third.rss_bytes.expect("rss") - second.rss_bytes.expect("rss");
         assert!(grown >= 32 << 20, "rss grew {grown}");
         black_box(&big);
         assert_eq!(third.thread_count, None);
+        assert_eq!(third.allocator_live_bytes, None);
     }
 }
