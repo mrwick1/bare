@@ -217,7 +217,16 @@ impl<'p> Interp<'p> {
             });
         }
         self.bc.stats.compiled += 1;
-        Some(Rc::new(Compiled { code, kv: kv.into(), cells: cells.into() }))
+        let rc = Rc::new(Compiled {
+            code,
+            kv: kv.into(),
+            cells: cells.into(),
+            #[cfg(feature = "bc-hist")]
+            hist: Default::default(),
+        });
+        #[cfg(feature = "bc-hist")]
+        self.bc.hist.funcs.push((0, 0, "<script>".into(), rc.clone()));
+        Some(rc)
     }
 
     /// The code of function `fid` of the current script (`script`), compiled when the mode says so. `None`: the tree walker runs it.
@@ -244,6 +253,12 @@ impl<'p> Interp<'p> {
         }
         let r = self.bc_compile(fid);
         let c = self.bc_finish(r);
+        #[cfg(feature = "bc-hist")]
+        if c.is_some() {
+            let f = self.prog.func(fid);
+            let name = f.name.map_or_else(|| format!("@{}", f.span.start), |n| self.prog.text(n).to_string());
+            self.bc.hist.label(script, fid.index() as u32, name);
+        }
         let why = self.bc.why;
         self.bc.codes[s][fid.index()] = match &c {
             Some(c) => BcSlot::Byte(c.clone()),
@@ -703,6 +718,10 @@ impl<'p> Interp<'p> {
     /// `GetField` when the inline own hit failed (`member_ic`).
     #[inline(never)]
     fn bc_get_field(&mut self, base: Value, n: u32, ic: &std::cell::Cell<Ic>) -> Res<Value> {
+        #[cfg(feature = "bc-hist")]
+        {
+            self.bc.hist.miss[0] += 1;
+        }
         let key = self.name_key(n)?;
         let Value::Object(o) = base else { return self.get_prop(base, key) };
         let got = if self.heap.ic_refuses(o) {
@@ -727,6 +746,10 @@ impl<'p> Interp<'p> {
     /// `SetField` when the inline store hit failed (`member_put_ic`).
     #[inline(never)]
     fn bc_set_field(&mut self, base: Value, n: u32, v: Value, ic: &std::cell::Cell<Ic>) -> Res<()> {
+        #[cfg(feature = "bc-hist")]
+        {
+            self.bc.hist.miss[1] += 1;
+        }
         let key = self.name_key(n)?;
         let Value::Object(o) = base else { return self.put_prop(base, key, v) };
         if ic.get().is_mega() || self.heap.ic_refuses(o) || self.heap.has_exotics() && self.heap.is_view_index_key(o, key) {
@@ -905,6 +928,8 @@ impl<'p> Interp<'p> {
             // `Abx`, `AsBx` and `Sj` operands.
             let bx = w >> 16;
             let sbx = w as i32 >> 16;
+            #[cfg(feature = "bc-hist")]
+            self.bc.hist.step(w, at, c);
             let step: Result<(), Error> = 'op: {
                 // The value of a fallible step, or the exit from this instruction with its error.
                 macro_rules! tri {

@@ -5,6 +5,10 @@ version.workspace = true
 edition.workspace = true
 license = "(MIT OR Apache-2.0) AND BSD-3-Clause AND Unicode-3.0"
 
+[features]
+# Counters in the bytecode loop (`tools/js/bc_hist.sh`). Off by default: the loop compiles to the same code.
+bc-hist = []
+
 [dependencies]
 bare-os = { path = "../os" }
 bare-unicode = { path = "../unicode" }
