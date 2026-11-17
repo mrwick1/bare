@@ -280,7 +280,8 @@ The first fixture attempt omitted the HTML Content-Type and failed. The correcte
 The parent inspected the rendered window through OCR and a screenshot.
 The corrected capture contains 383 records, including 150 process samples, and terminal status reports zero drops.
 Network, HTML, JS, loader, engine, scheduler, style, layout and driver records are present.
-This capture had no paint records despite visible rendering, because the window path bypassed the only paint span. GUI paint events (`paint/build` and `paint/draw`) were added afterwards. They need re-verification in the windowed journey.
+This capture had no paint records despite visible rendering, because the window path bypassed the only paint span. GUI paint events (`paint/build` and `paint/draw`) were added afterwards.
+The parent reran the same windowed journey in an isolated Cage screen on 2026-11-17, once. It passed. The capture has 406 records, 4 `paint/build`, 19 `paint/draw` and zero drops. Every paint record has `session_id`. Evidence: the session scratchpad `gui/` directory (temporary).
 The test-only pass made no engine changes. Non-Linux runtime remains untested.
 
 Evidence: `/tmp/monitor-gui-20261117/` contains the runner, journey, test logs, results, corrected JSONL capture and `trace-screen.png`.

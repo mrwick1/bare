@@ -61,7 +61,11 @@ Full workspace acceptance remains open. Two failures were reproduced on the orig
 Other reported failures involve timing/deadlines, MCP fixtures and synthetic TLS certificates. Their sources are unchanged, but their causes remain unclassified. Do not call them baseline failures without reproducing them.
 Non-Linux runtime remains untested. OS fallback compilation was checked by the foundation agent for macOS and Windows; this is not runtime validation.
 
-## First remaining item: GUI paint trace
+## Done: GUI paint trace (2026-11-17)
+
+Fixed. `DisplayList::make` writes `paint/build`. `Painter::draw_view` writes `paint/draw`. Test: `crates/bare/src/paint_trace_tests.rs`. The windowed journey now has paint records. See `docs/monitoring.md`.
+
+## Former first item: GUI paint trace
 
 Verified code path:
 
@@ -83,7 +87,7 @@ Do not change rendering behavior to fix instrumentation.
 4. Optional coverage: HTTP/2 first-byte/frame timing, failure outcomes before response headers, and complete subsystem/logger memory attribution.
 5. Prepare a PR after the agreed acceptance work. Read the PR-writing and identity instructions first. Do not merge without authorization.
 
-Arjun requested GPT-sol models for delegated implementation. Previous agents used `gpt-6.1-sol` with high reasoning through T3 `delegate_task` in isolated worktrees.
+Arjun first requested GPT-sol models. On 2026-11-17 he changed this to Claude models for delegation. Previous agents used `gpt-6.1-sol` with high reasoning through T3 `delegate_task` in isolated worktrees.
 No review agents are needed for small findings. Read the shared routing and delegation instructions before new delegation.
 
 ## Evidence and operational notes
