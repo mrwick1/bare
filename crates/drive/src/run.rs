@@ -304,6 +304,11 @@ impl Session {
         Session { observe_id: bare_observe::process::next_id(), observe_step: 0, host: Host::None, net, memo: Memo::default(), timeout: opt.timeout, window_cpu: 0, nav_first: 0, start: Instant::now(), preload: None, hist: Default::default(), downloads: None, ready_wait: false, rep }
     }
 
+    /// Set the time limit of the next steps; a `timeout` step changes it again.
+    pub fn set_timeout(&mut self, t: Duration) {
+        self.timeout = t;
+    }
+
     /// Save the downloads of the pages that later `open` steps make in `d`.
     pub fn set_downloads(&mut self, d: bare::Downloads) {
         self.downloads = Some(d);

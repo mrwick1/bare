@@ -774,6 +774,9 @@ impl Server {
     /// `run_live` with the failure of this run: the driver `kind` and message, taken from the report of these steps.
     fn run_live_typed(&mut self, args: &Value, src: &str) -> Result<(String, bool, Option<Failure>), String> {
         let live = self.live_mut(args)?;
+        // A `timeout` line lasts only for this call: the next call starts from the default of the session, or from `timeout_ms`.
+        let limit = args.get("timeout_ms").and_then(Value::as_u64).map_or(live.opt.timeout, Duration::from_millis);
+        live.session.set_timeout(limit);
         let mut list = steps::parse(src, &live.vars).map_err(|e| live.red.clean(&e))?;
         for s in &mut list {
             s.line += live.lines;
@@ -1659,7 +1662,7 @@ fn tools() -> Value {
         {
             "name": "step",
             "description": format!("Run one or more step lines on the live session page, until one fails. Returns the report of these steps only. The session stays open after a failure. {syntax}"),
-            "inputSchema": {"type": "object", "properties": {"steps": {"type": "string"}, "session": S, "compact": {"type": "boolean", "description": "A short receipt instead of the JSON report."}}, "required": ["steps"]},
+            "inputSchema": {"type": "object", "properties": {"steps": {"type": "string"}, "session": S, "compact": {"type": "boolean", "description": "A short receipt instead of the JSON report."}, "timeout_ms": {"type": "integer", "description": "Time limit of each step of this call. Default: the timeout_ms of open. A `timeout` line in the steps changes it only until the end of this call."}}, "required": ["steps"]},
         },
         {
             "name": "save_state",
