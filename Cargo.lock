@@ -178,6 +178,7 @@ dependencies = [
  "crc32fast",
  "flate2",
  "miniz_oxide 0.9.1",
+ "serde_json",
 ]
 
 [[package]]
