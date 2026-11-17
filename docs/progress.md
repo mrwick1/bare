@@ -12842,3 +12842,19 @@ Not done or not tested: `caretPositionFromPoint` (no `CaretPosition` interface y
 - Items with `#[allow(clippy::...)]` and a reason comment: `too_many_arguments` (hot paths `add_rules`, `style_of`, `Regex::backward`, plus `build_response`, `load_document`), `wrong_self_convention` (spec names `to_object`, `to_numeric`, `to_bigint`, `to_bit_width`, `to_dict`, `to_shapes`, `from_clause`), `box_collection` (fields that stay one pointer wide), `type_complexity` (one-off tuple fields), `diverging_sub_expression` (`hx!` early return), `needless_range_loop` (two loops that also use the index), `items_after_test_module`, `drop_non_drop` (test).
 - Compiler warnings: `re_tab_bytes` is used only by tests, so it is `#[cfg(test)]`. The unused import and the needless `mut` are removed.
 - No logic change is intended. `cargo test -q --workspace --lib` passes. Not run: integration tests under `tests/`, Windows builds, benchmarks.
+## `fill`: the whole text as one edit (2026-11-16)
+
+- Problem: `type` costs 500 M instructions for each key on the editor page of a private React dashboard (100 to 250 ms of CPU). React renders about 1,000 fibers for each key. bare sends the same events as Chrome. The cost is the speed of the tree walker. Design: [design-typing-heavy-forms.md](design-typing-heavy-forms.md).
+- Done:
+  - The `fill LOC "text"` step and the MCP `act` op `fill`. They click the field and select its text, then insert the whole text as one edit, as `Input.insertText` of Chrome does. That gives one `beforeinput` and one `input`, and no keys.
+  - Before, `act fill` was a name for `type`.
+  - `type` is not changed.
+- Result on the private dashboard journey (3 runs each, main `00e701b0`): 77.456 G to 10.020 G (7.7x). The `type` journey on the branch: 77.455 to 77.457 G (no change).
+- Tests:
+  - 7 browser tests
+  - 4 `bare-drive` tests
+  - 1 parse test
+  - 1 MCP test
+- `fill LOC "text" keys=last` (MCP `last_key: true`): the head is one edit, the last character is one typed key, for a widget that waits for a key. Journey: 12.165 to 12.166 G (3 runs), against 9.655 G for plain `fill` on the same build (1 run). 2 `bare-drive` tests and 2 parse cases.
+- `BARE_JS_EXEC=byte` on the `type` journey: 79.245 to 79.246 G (2 runs), 2.3% more than `tree`. On this base the bytecode lane does not help this React form. #630 makes the lane run lazy functions and changes this result.
+- Not done: a Chrome log of `Input.insertText` for the fixtures.
