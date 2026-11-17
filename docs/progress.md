@@ -12972,4 +12972,4 @@ After the merge of `main` (`8b6a71bb`), the parent ran the cost check on `52b032
 
 ## Monitoring cost on main `9ba3373e` (2026-11-17)
 
-Rerun after another merge of `main`, on `b21e748b`: metrics +0.353%, trace +0.602%, off against `main` +0.0013%. All budgets pass. With monitoring off, browser peak RSS is about 700 KiB higher than on `main` (17.1 to 17.4 MiB against 16.4 to 16.6 MiB). The cause is not verified. Detail: `docs/monitoring.md`.
+Rerun after another merge of `main`, on `b21e748b`: metrics +0.353%, trace +0.602%, off against `main` +0.0013%. All budgets pass. With monitoring off, browser peak RSS is about 700 KiB higher than on `main` (16.7 to 17.0 MiB against 16.0 to 16.3 MiB). The cause is not verified. Detail: `docs/monitoring.md`.
