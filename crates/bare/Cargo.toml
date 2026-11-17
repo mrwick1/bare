@@ -21,3 +21,6 @@ bare-window = { path = "../window" }
 crc32fast = "1"
 miniz_oxide = "0.9"
 psl = "=2.1.253"
+
+[dev-dependencies]
+serde_json = "1"

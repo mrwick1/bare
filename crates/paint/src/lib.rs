@@ -109,6 +109,7 @@ impl Painter {
 
     /// Draw the display list with the scroll offsets of `view`, and the scrollbars of the page.
     pub fn draw_view(&mut self, canvas: &mut Canvas, view: Option<&View>) {
+        let _observe = bare_observe::process::span("paint", "draw");
         let Painter { glyphs, list, clips, layers, saved, offsets, scaled } = self;
         canvas.pixels.fill(list.background);
         clips.clear();
