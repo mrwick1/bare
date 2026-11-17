@@ -242,6 +242,8 @@ impl<'p> Interp<'p> {
 
     /// ToNumeric (section 7.1.3): a Number or a BigInt.
     #[inline(never)]
+    // Spec name (ToNumeric); it needs `&mut self` to run user code.
+    #[allow(clippy::wrong_self_convention)]
     fn to_numeric(&mut self, v: Value) -> Res<Value> {
         if let Value::Number(_) = v {
             return Ok(v);
@@ -257,6 +259,8 @@ impl<'p> Interp<'p> {
     }
 
     /// ToBigInt (section 7.1.13).
+    // Spec name (ToBigInt); it needs `&mut self` to run user code.
+    #[allow(clippy::wrong_self_convention)]
     fn to_bigint(&mut self, v: Value) -> Res<Value> {
         let p = self.coerce_primitive(v, Hint::Number)?;
         match p {
@@ -290,6 +294,8 @@ impl<'p> Interp<'p> {
     }
 
     /// ToIndex-like conversion for the width of `asIntN`: an integer from 0 to 2^53 - 1.
+    // Spec-style conversion; it needs `&mut self` to run user code.
+    #[allow(clippy::wrong_self_convention)]
     fn to_bit_width(&mut self, v: Value) -> Res<u64> {
         let n = self.coerce_number(v)?;
         let n = if n.is_nan() { 0.0 } else { n.trunc() };

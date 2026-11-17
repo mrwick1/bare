@@ -388,7 +388,8 @@ impl Dom {
         if !self.nav.s.borrow().downloads_on {
             return Ok(false);
         }
-        let name = match { let doc = self.doc.borrow(); doc.find_atom("download").and_then(|k| doc.attr(a, k)).map(str::to_string) } {
+        let found = { let doc = self.doc.borrow(); doc.find_atom("download").and_then(|k| doc.attr(a, k)).map(str::to_string) };
+        let name = match found {
             Some(n) => n,
             None => return Ok(false),
         };

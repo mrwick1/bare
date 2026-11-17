@@ -52,10 +52,7 @@ pub(crate) fn toggle_event_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Val
 
 fn state(d: &Dom, it: &mut Interp<'_>, this: Value, new: bool) -> V {
     let o: ObjId = d.event_of(it, this)?;
-    let s = match &d.st.borrow().events[&o].toggle {
-        Some((old, n)) => Some(if new { n.clone() } else { old.clone() }),
-        None => None,
-    };
+    let s = d.st.borrow().events[&o].toggle.as_ref().map(|(old, n)| if new { n.clone() } else { old.clone() });
     match s {
         Some(s) => d.js_str(it, &s),
         None => Err(it.type_error("Illegal invocation")),

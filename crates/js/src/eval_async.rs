@@ -1445,7 +1445,7 @@ impl<'p> Interp<'p> {
             ExprKind::Object(l) => {
                 let Value::Object(o) = sval(run, b) else { return Err(unsupported("object", ex.span)) };
                 let pid = self.list_at(l, i as usize / 2);
-                if i % 2 == 0 {
+                if i.is_multiple_of(2) {
                     // The awaited key. A value that waits too keeps the key in a slot.
                     let key = self.coerce_key(v)?;
                     let p = *prog.prop(pid);

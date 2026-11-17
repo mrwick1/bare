@@ -16,6 +16,7 @@
 //! is the plan's "roots differ by object kind". It costs no `PropMap` (48 bytes) for each wrapper, which a dictionary would.
 //! The object goes to dictionary mode for the reasons above like any other.
 //! - the shape table is full (`SHAPE_CAP`): no new shape is made.
+//!
 //! The chain of an object is as long as its property count, so the "longer than 1024" rule of the plan can never fire and is not coded.
 //! A dead key in a shape never matches a live key: a freed handle gets a new generation.
 //!
@@ -416,8 +417,8 @@ fn obj_of(v: Value) -> Option<ObjId> {
 /// The attribute bits of a property.
 pub(super) fn attrs_of(p: &Property) -> u8 {
     match *p {
-        Property::Data { writable, enumerable, configurable, .. } => writable as u8 * A_W | enumerable as u8 * A_E | configurable as u8 * A_C,
-        Property::Accessor { enumerable, configurable, .. } => A_ACC | enumerable as u8 * A_E | configurable as u8 * A_C,
+        Property::Data { writable, enumerable, configurable, .. } => (writable as u8 * A_W) | (enumerable as u8 * A_E) | (configurable as u8 * A_C),
+        Property::Accessor { enumerable, configurable, .. } => A_ACC | (enumerable as u8 * A_E) | (configurable as u8 * A_C),
     }
 }
 
@@ -567,13 +568,12 @@ impl Object {
     /// The values of a new object in shape mode, which has none yet.
     #[inline]
     pub(super) fn fill_slots(&mut self, vs: &[Value]) {
-        if vs.len() <= INLINE {
-            if let Repr::In(a) = &mut self.repr {
+        if vs.len() <= INLINE
+            && let Repr::In(a) = &mut self.repr {
                 a[..vs.len()].copy_from_slice(vs);
                 self.n = vs.len() as u8;
                 return;
             }
-        }
         self.repr = Repr::Heap(vs.to_vec());
     }
 
@@ -661,6 +661,8 @@ impl Object {
     }
 
     /// Switch to dictionary mode. The properties keep their positions (`own_pos` hints stay true).
+    // `to_dict` switches the mode in place; the name follows the spec term.
+    #[allow(clippy::wrong_self_convention)]
     pub(super) fn to_dict(&mut self, sh: &Shapes) {
         if self.dict().is_some() {
             return;
@@ -676,6 +678,8 @@ impl Object {
 
     /// Leave dictionary mode: the properties get shapes and slots, in their order. `false` (no change) when the dictionary holds an index
     /// key, too many properties, an array `length` that is read-only, or when the shape table is full.
+    // `to_shapes` switches the mode in place; the name follows the spec term.
+    #[allow(clippy::wrong_self_convention)]
     pub(super) fn to_shapes(&mut self, sh: &mut Shapes) -> bool {
         let Some(d) = self.dict() else { return true };
         if d.index_keys > 0 || d.live as usize > MAX_PROPS {

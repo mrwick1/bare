@@ -132,9 +132,9 @@ fn nodes(d: &Dom) -> Vec<NodeId> {
 }
 fn add(map: &mut HashMap<Vec<u16>, NodeId>, keys: &mut Vec<Vec<u16>>, v: &str, n: NodeId) {
     let k: Vec<u16> = v.encode_utf16().collect();
-    if !map.contains_key(&k) {
-        keys.push(k.clone());
-        map.insert(k, n);
+    if let std::collections::hash_map::Entry::Vacant(e) = map.entry(k) {
+        keys.push(e.key().clone());
+        e.insert(n);
     }
 }
 /// What `build` would answer for `key` (not an index of the window), by one walk that stops at the first answer: the node, whether
@@ -215,9 +215,9 @@ fn build(d: &Dom) -> List {
         } else {
             for v in [id, name.filter(|_| matches!(tag, "a" | "embed" | "form" | "img" | "object"))].into_iter().flatten() {
                 let k: Vec<u16> = v.encode_utf16().collect();
-                if !l.win.contains_key(&k) {
-                    el_keys.push(k.clone());
-                    l.win.insert(k, (n, false));
+                if let std::collections::hash_map::Entry::Vacant(e) = l.win.entry(k) {
+                    el_keys.push(e.key().clone());
+                    e.insert((n, false));
                 }
             }
         }
@@ -620,10 +620,10 @@ pub(crate) fn note_owner(d: &Dom, it: &mut Interp<'_>, this: Value, made: Value)
     if !d.frames.active() {
         return;
     }
-    if let (Ok(t), Ok(m)) = (d.nd(it, this), d.nd(it, made)) {
-        if let Some(s) = d.frames.state_mut().as_mut().filter(|s| s.docs.contains_key(&t)) {
-            s.owned.insert(m, t);
-        }
+    if let (Ok(t), Ok(m)) = (d.nd(it, this), d.nd(it, made))
+        && let Some(s) = d.frames.state_mut().as_mut().filter(|s| s.docs.contains_key(&t))
+    {
+        s.owned.insert(m, t);
     }
 }
 #[cold]

@@ -55,9 +55,9 @@ use std::rc::Rc;
 /// One name of an import or export list: the name, its span, whether it is a string, the local name and its span.
 type ImportItem = (Box<str>, Span, bool, Box<str>, Span);
 
-/// The parser checks the pattern and the flags of every regexp literal ([`crate::regexp::Regex::check`]), also in a function body that it
-/// drops (see [`crate::ast::Body::Lazy`]). A bad pattern is [`ErrorKind::Unsupported`], as it was when the first walk compiled the
-/// literal. The compile (the code of the pattern) is done at the first evaluation of the literal.
+// The parser checks the pattern and the flags of every regexp literal ([`crate::regexp::Regex::check`]), also in a function body that it
+// drops (see [`crate::ast::Body::Lazy`]). A bad pattern is [`ErrorKind::Unsupported`], as it was when the first walk compiled the
+// literal. The compile (the code of the pattern) is done at the first evaluation of the literal.
 
 /// Hard recursion ceiling, even when the caller raises `Limits::max_depth`.
 pub const HARD_MAX_DEPTH: u32 = 2048;
@@ -1046,6 +1046,8 @@ impl<'a> Parser<'a> {
     }
 
     /// `from 'specifier'` and the optional attributes clause.
+    // Grammar name (`from` clause); it reads tokens, so it needs `&mut self`.
+    #[allow(clippy::wrong_self_convention)]
     fn from_clause(&mut self) -> R<Box<str>> {
         if !self.is_word("from") {
             return Err(self.unexpected());
@@ -1296,7 +1298,7 @@ impl<'a> Parser<'a> {
             Kind::Ident if self.is_word("async") || (self.is_word("let") && self.let_is_decl(Sc::Top)?) => {
                 if self.is_word("async") {
                     let n = self.peek()?;
-                    if !(n.kind == Kind::Keyword(K::Function) && !n.newline_before) {
+                    if n.kind != Kind::Keyword(K::Function) || n.newline_before {
                         return Err(self.unexpected());
                     }
                 }

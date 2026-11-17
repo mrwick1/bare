@@ -160,7 +160,7 @@ fn the_second_parse_skips_the_lazy_functions_inside_the_function() {
 
 /// The tree of the function at each lazy stub of `p` (and, recursively, of the trees below it) has the functions and statements that the
 /// full parse `eager` has for the same function.
-fn same_as_eager(p: &Program<'static>, eager: &Program<'_>, depth: usize) -> usize {
+fn same_as_eager(p: &Program<'static>, eager: &Program<'_>) -> usize {
     let mut seen = 0;
     for i in 0..p.stats().lazies as u32 {
         let (sub, fid, _) = p.lazy_function(i, Limits::default()).unwrap();
@@ -170,7 +170,7 @@ fn same_as_eager(p: &Program<'static>, eager: &Program<'_>, depth: usize) -> usi
         let (Body::Block(fb), Body::Block(eb)) = (f.body, ef.body) else { panic!("not a block") };
         let spans = |p: &Program<'_>, l| p.list(l).map(|s| p.stmt(s).span).collect::<Vec<_>>();
         assert_eq!(spans(&sub, fb), spans(eager, eb), "statements of the function at {}", f.span.start);
-        seen += 1 + same_as_eager(&sub, eager, depth + 1);
+        seen += 1 + same_as_eager(&sub, eager);
     }
     seen
 }
@@ -202,7 +202,7 @@ fn a_skipped_function_leaves_the_parser_where_the_full_parse_leaves_it() {
         let src = format!("function f() {{ {p} {body} }}");
         let eager = parse_script(&src, Limits::default()).unwrap_or_else(|e| panic!("{src}: {e}"));
         let lz = lazy(&src);
-        assert!(same_as_eager(&lz, &eager, 0) >= 2, "{src}");
+        assert!(same_as_eager(&lz, &eager) >= 2, "{src}");
     }
 }
 

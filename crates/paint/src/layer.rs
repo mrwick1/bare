@@ -37,9 +37,11 @@ pub struct Layer {
 }
 
 /// The pictures that were scaled, by (the pixels of the picture, width, height).
+type ScaledEntry = (bare_html::dom::Pixels, Arc<[u32]>);
+
 #[derive(Default)]
 pub struct Scaled {
-    map: HashMap<(usize, u32, u32), (bare_html::dom::Pixels, Arc<[u32]>)>,
+    map: HashMap<(usize, u32, u32), ScaledEntry>,
     bytes: usize,
     /// How many pictures were scaled (not found in `map`): a test reads it.
     pub made: usize,
@@ -117,9 +119,12 @@ pub const MASK: Props = Props {
     repeat: Property::MaskRepeat,
 };
 
+/// The size, the start and the repeat of a tile.
+pub type Tile = ((u32, u32), (i32, i32), (bool, bool));
+
 /// The size of the tile, the start of the first tile and the repeat of a picture of `image` pixels in `area` (the positioning area), from
 /// the style. `None` when the tile is empty or too large to draw.
-pub fn geometry(set: &Pictures, p: Props, image: (u32, u32), area: IRect) -> Option<((u32, u32), (i32, i32), (bool, bool))> {
+pub fn geometry(set: &Pictures, p: Props, image: (u32, u32), area: IRect) -> Option<Tile> {
     let (iw, ih) = (image.0 as f32, image.1 as f32);
     let (aw, ah) = ((area.x1 - area.x0) as f32, (area.y1 - area.y0) as f32);
     if iw < 1.0 || ih < 1.0 {

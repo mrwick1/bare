@@ -687,12 +687,11 @@ impl Dom {
                 Ok(())
             }
             Run::Motion(id, step) => {
-                let r = it.host_scope(|it| {
+                it.host_scope(|it| {
                     it.charge(1)?;
                     self.motion_task(it, id, step)?;
                     it.host_checkpoint().map(|_| ())
-                });
-                r
+                })
             }
             Run::Idle | Run::IdleTimeout(_) => {
                 let mark = self.settle_mark();

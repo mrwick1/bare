@@ -486,7 +486,7 @@ fn transform_declaration(name: &str, value: &str, important: bool, side: &mut Si
         }
         steps.push(step);
     }
-    if !pure || (steps.len() > 0 && (x, y) == (Length::Px(0.0), Length::Px(0.0))) {
+    if !pure || (!steps.is_empty() && (x, y) == (Length::Px(0.0), Length::Px(0.0))) {
         // Not a plain move, or a move of 0: Chrome gives a matrix (`translate(0, 0)` is not `none`). A `calc()` cannot go in the list.
         let steps = crate::transform::fold(steps);
         if steps.iter().any(|f| matches!(f, crate::transform::Func::Translate(Length::Calc(_), _) | crate::transform::Func::Translate(_, Length::Calc(_)))) {
@@ -661,7 +661,7 @@ impl Parts {
 fn read_calc(name: &str, tokens: &mut Tokens<'_>, calcs: &mut Vec<Linear>) -> Part {
     let mut inner = Vec::new();
     let mut depth = 1u32;
-    while let Some(token) = tokens.next() {
+    for token in tokens.by_ref() {
         match token {
             Token::Function(_) | Token::OpenParen | Token::OpenSquare | Token::OpenCurly => depth += 1,
             Token::CloseParen | Token::CloseSquare | Token::CloseCurly => {

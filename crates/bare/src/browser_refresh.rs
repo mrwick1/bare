@@ -107,6 +107,7 @@ mod tests {
 
     #[test]
     fn the_content_follows_the_standard() {
+        #[allow(clippy::type_complexity)] // A one-off tuple: a named alias would add nothing.
         let cases: [(&str, Option<(u64, Option<&str>)>); 20] = [
             ("5", Some((5, None))),
             ("0", Some((0, None))),

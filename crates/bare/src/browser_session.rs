@@ -515,6 +515,8 @@ pub(crate) fn redirect_allowed(from: &Url, to: &Url) -> bool {
 /// Download one document with the caps of `lim`. Gives the final URL (with the fragment) and the decoded text.
 ///
 /// `keep_errors`: a status outside 200 to 299 still gives the document (a live page shows it), with that status as the last value.
+// Each argument is a separate input of one load; a bundle struct would add a copy.
+#[allow(clippy::too_many_arguments)]
 fn load_document(client: &mut Client, url: &str, from: Option<&str>, body: Option<&Body>, lim: &SessionLimits, deadline: Instant, grab: Option<&Grab>, keep_errors: bool, feed: Option<&Arc<Feed>>) -> Result<(String, String, u16), String> {
     let max_url = NavLimits::default().max_url_bytes;
     if url.len() > max_url { return Err("the document URL is too big".into()); }
@@ -1050,8 +1052,7 @@ mod tests {
     }
 
     fn parsing(html: String, feed: Option<Arc<Feed>>) -> Parsing {
-        let mut lim = crate::resources::Limits::default();
-        lim.max_fetches = 0;
+        let lim = crate::resources::Limits { max_fetches: 0, ..Default::default() };
         let scan = Scan::new(Client::new(), Url::parse("http://127.0.0.1:1/").unwrap(), lim, Instant::now());
         let next = Next { from: None, url: String::new(), body: None, how: How::Push };
         let ended = feed.is_none();

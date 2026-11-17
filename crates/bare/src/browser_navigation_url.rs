@@ -309,11 +309,11 @@ impl Rec {
     }
     pub fn href(&self) -> String {
         let mut s = if self.is_alt() { self.u.path.clone() } else { self.u.to_string() };
-        if let Some(info) = &self.userinfo {
-            if !info.0.is_empty() || !info.1.is_empty() {
-                let auth = if info.1.is_empty() { info.0.clone() } else { format!("{}:{}", info.0, info.1) };
-                s = s.replacen("://", &format!("://{auth}@"), 1);
-            }
+        if let Some(info) = &self.userinfo
+            && (!info.0.is_empty() || !info.1.is_empty())
+        {
+            let auth = if info.1.is_empty() { info.0.clone() } else { format!("{}:{}", info.0, info.1) };
+            s = s.replacen("://", &format!("://{auth}@"), 1);
         }
         if let Some(f) = &self.frag {
             s.push('#');

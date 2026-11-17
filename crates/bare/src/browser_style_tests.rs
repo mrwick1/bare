@@ -242,8 +242,8 @@ fn user_select_and_its_webkit_alias_are_one_property() {
     assert_eq!(js(&mut b, &format!("{names}.map(function(k){{return k in s}}).join()")), "true,true,true,true,true");
     assert_eq!(js(&mut b, &format!("{names}.map(function(k){{return s[k]}}).join('|')")), "||||");
     assert_eq!(js(&mut b, &format!("s.cssText = ''; s.WebkitUserSelect = 'none'; {names}.map(function(k){{return s[k]}}).join('|') + '|' + s.cssText")), "none|none|none|none|none|user-select: none;");
-    assert_eq!(js(&mut b, &format!("s.userSelect = 'text'; s['-webkit-user-select'] + '|' + s.webkitUserSelect + '|' + a.getAttribute('style')")), "text|text|user-select: text;");
-    assert_eq!(js(&mut b, &format!("s.cssText = ''; s.getPropertyValue('-webkit-user-select') + '|' + s.length")), "|0");
+    assert_eq!(js(&mut b, "s.userSelect = 'text'; s['-webkit-user-select'] + '|' + s.webkitUserSelect + '|' + a.getAttribute('style')"), "text|text|user-select: text;");
+    assert_eq!(js(&mut b, "s.cssText = ''; s.getPropertyValue('-webkit-user-select') + '|' + s.length"), "|0");
 }
 
 /// Every supported property has its own accessor pair: set through one name, read back through the css name, and nothing else changes.
@@ -752,7 +752,7 @@ fn kept_parse_is_invisible() {
             let (el, name, value) = (next(2), NAMES[next(NAMES.len())], VALUES[next(VALUES.len())]);
             let op = match next(9) {
                 0 | 1 => format!("s.setProperty('{name}', '{value}', '{}')", ["", "important"][next(2)]),
-                2 => format!("s['{}'] = '{value}'", name.replace(|c: char| c == '-', "").to_lowercase()),
+                2 => format!("s['{}'] = '{value}'", name.replace('-', "").to_lowercase()),
                 3 => format!("s.removeProperty('{name}')"),
                 4 => format!("s.cssText = '{name}: {value}; {}: {};'", NAMES[next(NAMES.len())], VALUES[next(VALUES.len())]),
                 5 => format!("x.setAttribute('style', '{name}: {value}')"),

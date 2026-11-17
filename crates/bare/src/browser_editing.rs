@@ -502,6 +502,7 @@ impl Dom {
     /// - Backspace in an empty block removes it; the caret goes to the end of the block before. The first item of a list leaves the list.
     /// - Backspace in a block with content moves its children to the end of the block before it (a list gives its last item).
     /// - Delete moves the children of the next block (the first item of a next list) to the end of this block.
+    ///
     /// The first block of the host (Backspace) and the last one (Delete) have nothing to merge: false.
     fn delete_at_block_edge(&self, it: &mut Interp<'_>, a: &Act, host: NodeId, back: bool) -> R<bool> {
         enum Plan {

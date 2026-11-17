@@ -513,6 +513,8 @@ impl<'p> Interp<'p> {
     }
 
     /// `Reflect.set`.
+    // `hx!` returns early on a host error; clippy sees the `return` as a diverging operand.
+    #[allow(clippy::diverging_sub_expression)]
     fn ro_reflect_set(&mut self, o: ObjId, key: PropertyKey, mut v: Value, receiver: Value) -> Res<bool> {
         let view = self.heap.has_exotics() && self.heap.is_view_index_key(o, key);
         if matches!(receiver, Value::Object(r) if r == o) {

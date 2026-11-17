@@ -6,7 +6,6 @@ use crate::browser_navigation::NavLimits;
 use bare_html::tree;
 use bare_js::eval::{Error, EvalLimits};
 use bare_js::heap::HeapLimits;
-use bare_js::value::Value;
 
 fn big<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
     std::thread::Builder::new().stack_size(64 << 20).spawn(f).unwrap().join().unwrap()

@@ -268,6 +268,14 @@ pub(crate) fn take(kind: Kind, hash: u64, source: &str) -> Option<(Tree, u32)> {
 }
 
 #[cfg(test)]
+impl Ahead {
+    fn inner_empty(&self) -> bool {
+        let i = self.0.inner.lock().unwrap();
+        i.queue.is_empty()
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::eval::{EvalLimits, Interp};
@@ -503,13 +511,5 @@ mod tests {
         let got = parse_cache::parse(Kind::ClassicLazy, &src, l).map(|p| p.stats()).map_err(|e| e.kind);
         assert_eq!(got, want);
         HERE.with_borrow_mut(|h| *h = None);
-    }
-}
-
-#[cfg(test)]
-impl Ahead {
-    fn inner_empty(&self) -> bool {
-        let i = self.0.inner.lock().unwrap();
-        i.queue.is_empty()
     }
 }

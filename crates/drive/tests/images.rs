@@ -102,7 +102,7 @@ fn every_format_is_drawn_at_the_size_that_chrome_gives() {
 #[test]
 fn a_picture_opened_as_the_document_is_shown_in_an_img() {
     // A link to a picture (Content-Type image/png) opens a document with one `<img>`, as in Chrome.
-    let (w, px, json) = shoot_page("red.png", "img", "");
+    let (_w, px, json) = shoot_page("red.png", "img", "");
     assert!(json.starts_with("{\"ok\":true"), "{json}");
     let first = px.iter().position(|&p| p != 0xffffff).expect("no picture is drawn");
     assert!(near(px[first + 5], (255, 0, 0)), "{:06x}", px[first + 5]);

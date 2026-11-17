@@ -269,7 +269,9 @@ impl Hit<'_> {
             }
         }
         let inside = out.len();
-        let (mut floats, mut lines, mut positioned): (Vec<(usize, Point, bool)>, Vec<Line>, Vec<(usize, Point, bool)>) = (Vec::new(), Vec::new(), Vec::new());
+        let mut floats: Vec<(usize, Point, bool)> = Vec::new();
+        let mut lines: Vec<Line> = Vec::new();
+        let mut positioned: Vec<(usize, Point, bool)> = Vec::new();
         let end = f.end as usize;
         let mut j = i + 1;
         while j < end {

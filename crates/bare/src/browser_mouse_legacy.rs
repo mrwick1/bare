@@ -74,11 +74,11 @@ pub(crate) fn layer_y(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) ->
 
 /// `fromElement` (`to` false) and `toElement` (`to` true).
 fn from_to(d: &Dom, it: &mut Interp<'_>, this: Value, to: bool) -> V {
-    Ok(with_ui(d, it, this, |e, _| match (&*e.ty, to) {
+    with_ui(d, it, this, |e, _| match (&*e.ty, to) {
         ("mouseover" | "mouseenter", false) | ("mouseout" | "mouseleave", true) => e.related,
         ("mouseover" | "mouseenter", true) | ("mouseout" | "mouseleave", false) => e.target,
         _ => Value::Null,
-    })?)
+    })
 }
 
 pub(crate) fn from_element(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {

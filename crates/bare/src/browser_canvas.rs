@@ -117,14 +117,14 @@ fn image_data(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
             Value::Undefined => None,
             v => Some(ulong(it, v, "The source height")?),
         };
-        if len % 4 != 0 {
+        if !len.is_multiple_of(4) {
             return Err(d.dom_err(it, "InvalidStateError", &format!("{who}: The input data length is not a multiple of 4.")));
         }
         if len == 0 || w == 0 {
             return Err(index_size(d, it, who, "The source width is zero or not a number."));
         }
         let rows = len / 4;
-        if rows % w as u64 != 0 {
+        if !rows.is_multiple_of(w as u64) {
             return Err(index_size(d, it, who, "The input data length is not a multiple of (4 * width)."));
         }
         let h = (rows / w as u64) as u32;
@@ -292,12 +292,12 @@ fn pattern(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
     let Value::Object(_) = arg(a, 0) else {
         return Err(it.type_error("Failed to execute 'createPattern' on 'CanvasRenderingContext2D': The provided value is not of type 'CanvasImageSource'."));
     };
-    if let Ok(n) = d.el(it, a[0]) {
-        if d.doc.borrow().is_html(n, "img") {
-            let k = d.key(it, "complete")?;
-            if matches!(it.get_value(a[0], k)?, Value::Bool(false)) {
-                return Ok(Value::Null);
-            }
+    if let Ok(n) = d.el(it, a[0])
+        && d.doc.borrow().is_html(n, "img")
+    {
+        let k = d.key(it, "complete")?;
+        if matches!(it.get_value(a[0], k)?, Value::Bool(false)) {
+            return Ok(Value::Null);
         }
     }
     let o = d.obj(it, it.object_prototype())?;

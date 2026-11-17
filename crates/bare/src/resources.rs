@@ -967,7 +967,7 @@ mod tests {
     fn a_gzip_body_obeys_the_caps_in_every_framing_and_a_cut_one_is_truncated() {
         let cap = 1000;
         // Chunked: a `Content-Length` of the wire size would be refused first when it is over the cap, and stored blocks are longer than their data.
-        let shapes = |n: usize| Shape::Chunked(if n % 2 == 0 { 7 } else { 500 });
+        let shapes = |n: usize| Shape::Chunked(if n.is_multiple_of(2) { 7 } else { 500 });
         let server = serve(move |path| {
             let n: usize = path[1..].parse().unwrap();
             let mut packed = gzip_stored(&vec![b'x'; if n < 2 { cap } else { cap + 1 }]);

@@ -52,6 +52,7 @@ fn serve(data: Vec<u8>, cfg: Cfg) -> Srv {
     Srv { url, log, peak, release }
 }
 
+#[allow(clippy::too_many_arguments)] // A test server: one flag each, no struct needed.
 fn conn(c: TcpStream, data: &[u8], cfg: &Cfg, log: &Mutex<Vec<String>>, peak: &AtomicUsize, active: &AtomicUsize, changed: &AtomicBool, release: &AtomicBool) -> io::Result<()> {
     let mut r = BufReader::new(c.try_clone()?);
     let mut w = c;

@@ -129,6 +129,7 @@ fn exec(name: &str, ops: usize, attrs: usize) {
     }
     expect("sum", run(&mut b, "sum"), sum.to_string());
     let doc = b.document();
+    #[allow(clippy::needless_range_loop)] // `i` also names the element `#e{i}`.
     for i in 0..20usize {
         let el = b.query(&format!("#e{i}")).unwrap_or_else(|e| die(format!("query {e:?}"))).unwrap_or_else(|| die(format!("missing e{i}")));
         let d = doc.borrow();

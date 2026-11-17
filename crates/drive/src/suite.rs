@@ -444,7 +444,7 @@ fn finish(cfg: &Config, _suite: &Suite, tests: &[&Test], mut results: Vec<(usize
     let text = report.to_string();
     let _ = std::fs::write(cfg.out.join("suite.json"), format!("{text}\n"));
     if !cfg.quiet {
-        eprintln!("{:<5} {:<22} {:>8}  {:>6} {}", "", "test", "ms", "worker", "login");
+        eprintln!("      {:<22} {:>8}  {:>6} login", "test", "ms", "worker");
         for r in &rows {
             let line = format!("{:<5} {:<22} {:>8.0}  {:>6} {}", if r["ok"] == true { "ok" } else { "FAIL" }, r["test"].as_str().unwrap_or(""), r["ms"].as_f64().unwrap_or(0.0), r["worker"].as_u64().map_or("-".into(), |w| w.to_string()), r["class"].as_str().unwrap_or(""));
             eprintln!("{line}");

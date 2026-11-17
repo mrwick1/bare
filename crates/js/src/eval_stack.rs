@@ -209,7 +209,7 @@ impl<'p> Interp<'p> {
             let pos = if i + 1 < len { self.stk.frames[i + 1].saved_pos } else { self.stk.pos };
             let l = self.frame_line(fr, pos).map(|v| String::from_utf16_lossy(&v)).unwrap_or_default();
             let prog = if fr.script as usize == self.cur { self.prog.clone() } else { self.scripts[fr.script as usize].prog.clone() };
-            if i + 1 == len { if let Where::Func(f) = fr.at { let sp = prog.func(f).span; eprintln!("TE topfunc span={}..{} text={}", sp.start, sp.end, prog.text(crate::ast::Span { start: sp.start, end: sp.end.min(sp.start + 700) }).replace('\n', " ")); } }
+            if i + 1 == len && let Where::Func(f) = fr.at { let sp = prog.func(f).span; eprintln!("TE topfunc span={}..{} text={}", sp.start, sp.end, prog.text(crate::ast::Span { start: sp.start, end: sp.end.min(sp.start + 700) }).replace('\n', " ")); }
             let p = pos.saturating_sub(1);
             let snip = prog.text(crate::ast::Span { start: p.saturating_sub(160), end: p + 60 }).replace('\n', " ");
             eprintln!("TE {}  ##  {snip}", l.trim());

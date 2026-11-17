@@ -172,6 +172,8 @@ type LastKey = (u64, u64, usize, [u64; 3], Option<NodeId>);
 pub(crate) struct Built {
     vp: (f32, f32),
     pub(crate) key: Vec<(NodeId, Option<String>, String)>,
+    // Boxed on purpose: the field is one pointer wide, and most documents have none.
+    #[allow(clippy::box_collection)]
     inputs: Option<Box<HashMap<usize, bare_css::cascade::InputSheet>>>,
     /// The rules are shared with other documents when `shared` (`bare_css::rule_cache`): they do not change.
     pub(crate) rules: Rc<RuleSet>,
@@ -262,6 +264,8 @@ const NO_SHORT: &str = "this shorthand has no single computed text (sides differ
 struct Plan {
     /// The tree of the sheet (the document node, or a shadow root), its layer and its text.
     parts: Vec<(NodeId, Option<String>, String)>,
+    // Boxed on purpose: the field is one pointer wide, and most documents have none.
+    #[allow(clippy::box_collection)]
     inputs: Option<Box<HashMap<usize, bare_css::cascade::InputSheet>>>,
     bytes: usize,
     missing: Vec<String>,
@@ -405,13 +409,13 @@ impl Dom {
                     }
                     let before = p.parts.len();
                     add(self, &mut p, scope, None, &text)?;
-                    if p.parts.len() > before {
-                        if let Some(inputs) = crate::browser_cssom::sheet_inputs(self, doc, el, &text) {
-                            let bytes = inputs.iter().flatten().flatten().map(|d| d.name.len() + d.value.len()).sum::<usize>();
-                            if bytes > l.max_sheet_bytes.saturating_sub(p.bytes) { return Err(self.lim("computed-sources")); }
-                            p.bytes += bytes;
-                            p.inputs.get_or_insert_with(Default::default).insert(before, inputs);
-                        }
+                    if p.parts.len() > before
+                        && let Some(inputs) = crate::browser_cssom::sheet_inputs(self, doc, el, &text)
+                    {
+                        let bytes = inputs.iter().flatten().flatten().map(|d| d.name.len() + d.value.len()).sum::<usize>();
+                        if bytes > l.max_sheet_bytes.saturating_sub(p.bytes) { return Err(self.lim("computed-sources")); }
+                        p.bytes += bytes;
+                        p.inputs.get_or_insert_with(Default::default).insert(before, inputs);
                     }
                 }
                 Source::Link(href) if href.trim().is_empty() => {}

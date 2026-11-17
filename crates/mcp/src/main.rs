@@ -57,7 +57,6 @@ struct ActionOutcome {
 /// The tools that one worker thread runs for one live session, and also the one-shot calls (`run_steps`, `run_suite`, `sessions`), each on
 /// a thread of its own with an empty `live`. A page is not `Send`: it is built on the thread that owns it and never leaves it. Only JSON
 /// and plain data cross between threads.
-
 struct Server {
     shared: Arc<Shared>,
     /// A session worker holds its one session here, by name (`session`, default `main`).
@@ -212,11 +211,10 @@ impl Shared {
         let Some(id) = msg.get("id").cloned() else {
             // A notification: no `id`, and no reply. The id of the request to cancel is `params.requestId`. An unknown id, a request that
             // already ended and a malformed notification are ignored, as the protocol says.
-            if method == "notifications/cancelled" {
-                if let Some(t) = msg.pointer("/params/requestId").and_then(|r| lock(&self.inflight).get(&r.to_string()).cloned()) {
+            if method == "notifications/cancelled"
+                && let Some(t) = msg.pointer("/params/requestId").and_then(|r| lock(&self.inflight).get(&r.to_string()).cloned()) {
                     t.store(true, Ordering::SeqCst);
                 }
-            }
             return;
         };
         let params = msg.get("params").cloned().unwrap_or(json!({}));
@@ -523,7 +521,7 @@ impl Server {
         }
         // The secrets of the session that the call names, for the evidence of a failure; `close` drops the session, so take them first.
         let red = self.live.get(&session_name(&args)).map(|l| l.red.clone()).unwrap_or_default();
-        let fail = |f: Failure, red: &Redactor| json!({"content": [{"type": "text", "text": red.clean(&f.text)}], "isError": true, "structuredContent": recovery::structured(&f, &red)});
+        let fail = |f: Failure, red: &Redactor| json!({"content": [{"type": "text", "text": red.clean(&f.text)}], "isError": true, "structuredContent": recovery::structured(&f, red)});
         if let Err(e) = known_args(name, &args) {
             return fail(Failure::args(e), &red);
         }
@@ -1009,13 +1007,12 @@ impl Server {
             }
             self.act_inner(args, &mut outcome)
         });
-        if !cancelled() && outcome.action_status != "not_started" {
-            if let Ok(live) = self.live_mut(args) {
+        if !cancelled() && outcome.action_status != "not_started"
+            && let Ok(live) = self.live_mut(args) {
                 outcome.page_status = live.session.with_refs(|p, _| {
                     if !p.loading() && p.inspect(|_, _| ()).is_some() { "ready" } else { "pending" }
                 }).unwrap_or("unknown");
             }
-        }
         let error = result.is_err();
         let red = self.live_mut(args).map(|live| live.red.clone()).unwrap_or_default();
         let mut status = json!({"action_status": outcome.action_status, "page_status": outcome.page_status, "verification": outcome.verification});
@@ -1110,8 +1107,8 @@ impl Server {
         }
         let mark = self.live_mut(args)?.session.hist.mark();
         let mut out = receipt;
-        if ok {
-            if let Some(expect) = expect {
+        if ok
+            && let Some(expect) = expect {
                 outcome.verification = "unknown";
                 let (receipt, verified, check_failure) = self.run_live_typed(&a, expect)?;
                 failure = check_failure;
@@ -1119,7 +1116,6 @@ impl Server {
                 out.push_str("\nverification: ");
                 out.push_str(&receipt);
             }
-        }
         if cancelled() {
             return Err("cancelled".into());
         }

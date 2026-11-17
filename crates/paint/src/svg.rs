@@ -73,8 +73,11 @@ fn len(doc: &Document, node: NodeId, name: &str) -> f32 {
     attr(doc, node, name).and_then(num).unwrap_or(0.0)
 }
 
+/// The sink for the polygons that `draw` makes.
+type Out<'a> = &'a mut dyn FnMut(&[(f32, f32)], u32);
+
 /// Draw the `<svg>` element `root` in the pixel box `(x, y, w, h)`: `out` gets each polygon list (contours apart by a NaN point) and its color.
-pub fn draw(doc: &Document, styles: &Styles, root: NodeId, (x, y, w, h): (f32, f32, f32, f32), out: &mut dyn FnMut(&[(f32, f32)], u32)) {
+pub fn draw(doc: &Document, styles: &Styles, root: NodeId, (x, y, w, h): (f32, f32, f32, f32), out: Out<'_>) {
     let view = attr(doc, root, "viewBox").and_then(|v| {
         let mut n = v.split(|c: char| c == ',' || c.is_whitespace()).filter(|t| !t.is_empty()).map(|t| t.parse::<f32>().ok());
         let (a, b, c, d) = (n.next()??, n.next()??, n.next()??, n.next()??);
@@ -93,7 +96,7 @@ pub fn draw(doc: &Document, styles: &Styles, root: NodeId, (x, y, w, h): (f32, f
 }
 
 #[allow(clippy::too_many_arguments)]
-fn walk(doc: &Document, styles: &Styles, root: NodeId, node: NodeId, inherited: Paint, map: Map, out: &mut dyn FnMut(&[(f32, f32)], u32), buf: &mut Vec<(f32, f32)>) {
+fn walk(doc: &Document, styles: &Styles, root: NodeId, node: NodeId, inherited: Paint, map: Map, out: Out<'_>, buf: &mut Vec<(f32, f32)>) {
     for child in doc.children(node) {
         if !matches!(doc.data(child), NodeData::Element { .. }) {
             continue;

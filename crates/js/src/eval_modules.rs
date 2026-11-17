@@ -602,8 +602,7 @@ impl<'p> Interp<'p> {
             self.mod_exec_sync(m)?;
         }
         if self.modules.mods[m as usize].dfs_anc == self.modules.mods[m as usize].dfs {
-            loop {
-                let Some(r) = stack.pop() else { break };
+            while let Some(r) = stack.pop() {
                 let rec = &mut self.modules.mods[r as usize];
                 rec.status = if rec.order == 0 { MStatus::Evaluated } else { MStatus::EvaluatingAsync };
                 rec.root = m;

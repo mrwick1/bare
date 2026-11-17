@@ -4,6 +4,9 @@
 //!
 //! The random numbers come from a seed, so a run can be repeated: the same seed gives the same inputs.
 
+/// The function that runs one fuzz input.
+type Work = fn(&[u8]) -> Result<(), String>;
+
 use bare_css::cascade::{self, Origin, RuleSet, UA_CSS};
 use bare_html::dom::{Document, NodeId};
 use bare_html::tree;
@@ -26,13 +29,12 @@ pub fn save_current_input() {
     }
     // The program is over its memory limit, and the file write needs memory too. Reset the count.
     crate::LIVE.store(0, Relaxed);
-    if let Ok(cur) = CURRENT.try_lock() {
-        if !cur.1.is_empty() {
+    if let Ok(cur) = CURRENT.try_lock()
+        && !cur.1.is_empty() {
             let path = format!("crash-{}-last.txt", cur.0);
             std::fs::write(&path, &cur.1).ok();
             eprintln!("input saved to {path}");
         }
-    }
 }
 
 /// A small, fast random number generator (xorshift64*). JS: `Math.random()`, but with a seed.
@@ -185,7 +187,7 @@ pub fn run(args: &[String]) {
     let target = args.first().map(String::as_str).unwrap_or("");
     let iterations: usize = args.get(1).and_then(|a| a.parse().ok()).unwrap_or(10_000);
     let seed: u64 = args.get(2).and_then(|a| a.parse().ok()).unwrap_or(1);
-    let (seeds, words, work): (&[&str], &[&str], fn(&[u8]) -> Result<(), String>) = match target {
+    let (seeds, words, work): (&[&str], &[&str], Work) = match target {
         "html" => (HTML_SEEDS, HTML_WORDS, fuzz_html),
         "css" => (CSS_SEEDS, CSS_WORDS, fuzz_css),
         "url" => (URL_SEEDS, URL_WORDS, fuzz_url),
@@ -282,11 +284,10 @@ fn check_tree(doc: &Document) -> Result<(), String> {
             if doc.prev_sibling(child) != prev {
                 return Err("prev_sibling does not match the order".into());
             }
-            if let Some(p) = prev {
-                if doc.next_sibling(p) != Some(child) {
+            if let Some(p) = prev
+                && doc.next_sibling(p) != Some(child) {
                     return Err("next_sibling does not match the order".into());
                 }
-            }
             prev = Some(child);
             stack.push(child);
         }
@@ -370,11 +371,10 @@ fn fuzz_url(input: &[u8]) -> Result<(), String> {
         if again.as_ref() != Ok(&url) {
             return Err(format!("not stable: {url:?} then {again:?}"));
         }
-        if let Ok(joined) = url.join(link) {
-            if !joined.path.starts_with('/') || joined.host.is_empty() {
+        if let Ok(joined) = url.join(link)
+            && (!joined.path.starts_with('/') || joined.host.is_empty()) {
                 return Err(format!("bad join: {joined:?}"));
             }
-        }
     }
     Ok(())
 }

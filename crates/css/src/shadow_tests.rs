@@ -49,10 +49,6 @@ fn color(doc: &Document, styles: &Styles, id: &str) -> Option<Value> {
     styles.style(find(doc, id)).map(|s| s.get(Property::TextColor))
 }
 
-fn rgb(r: u8, g: u8, b: u8) -> Option<Value> {
-    Some(Value::Color(Color { r, g, b, a: 255 }))
-}
-
 const RED: Option<Value> = Some(Value::Color(Color { r: 255, g: 0, b: 0, a: 255 }));
 const BLUE: Option<Value> = Some(Value::Color(Color { r: 0, g: 0, b: 255, a: 255 }));
 const BLACK: Option<Value> = Some(Value::Color(Color::BLACK));

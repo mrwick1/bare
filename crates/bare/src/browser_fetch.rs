@@ -435,6 +435,7 @@ struct Pending {
     queued: Option<std::time::Instant>,
     /// Its I/O, started on a worker thread before its turn (see `start_queued`). The outcome and the diagnostics. `None`: the job
     /// did not send it (the bodies that wait were at the cap, or the page is gone); the page thread sends it at its turn.
+    #[allow(clippy::type_complexity)] // A one-off tuple: a named alias would add nothing.
     started: Option<Task<Option<(Outcome, Vec<String>, std::time::Instant)>>>,
 }
 
@@ -2567,6 +2568,8 @@ fn plain_response(d: &Dom, it: &mut Interp<'_>, url: &str, mime: Option<String>,
     Ok(Value::Object(d.add_obj(it, Pr::Response, F::Response(r))?))
 }
 
+// Each argument is a field of the response; a bundle struct would only move the copies.
+#[allow(clippy::too_many_arguments)]
 fn build_response(d: &Dom, it: &mut Interp<'_>, status: u16, url: Url, redirected: bool, headers: Vec<(String, String)>, body: Vec<u8>, taint: Taint) -> R<Value> {
     let lim = d.fl();
     let mut list = HeaderList::new(Guard::Response);

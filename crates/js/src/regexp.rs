@@ -196,6 +196,8 @@ pub struct Regex {
     flags: Flags,
     groups: usize,
     /// `(name, group number)` of each named group, in pattern order. `None` when the pattern has none.
+    // Boxed on purpose: the field is one pointer wide, and most patterns have no named group.
+    #[allow(clippy::box_collection)]
     names: Option<Box<Vec<(String, u32)>>>,
     nregs: usize,
     tmp_base: usize,
@@ -443,6 +445,8 @@ impl Regex {
 
     #[cold]
     #[inline(never)]
+    // Hot matcher loop: each argument stays a register, a context struct would add indirection.
+    #[allow(clippy::too_many_arguments)]
     fn backward(&self, input: &[u16], regs: &[u32], pos: usize, inst: Inst,
         steps: &mut u64, lim: &Limits, cancel: Option<&AtomicBool>) -> Result<Option<usize>, ExecError> {
         // Read a complete code point before the assertion position in Unicode mode.
@@ -1614,7 +1618,7 @@ impl<'a> Parser<'a> {
             if op != 0 || count == 1 {
                 let dbl = |ch: u16| c == ch && self.p.get(self.i + 1) == Some(&ch);
                 let want = if dbl(b'&' as u16) { b'&' } else if dbl(b'-' as u16) { b'-' } else { 0 };
-                if want == 0 && op != 0 || want != 0 && op != 0 && op != want {
+                if op != 0 && (want == 0 || op != want) {
                     return syn("Invalid set operation in character class", self.i);
                 }
                 if want != 0 {

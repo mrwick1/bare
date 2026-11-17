@@ -182,7 +182,7 @@ fn repeated_observations_advance_the_revision_and_keep_the_document() {
     let a = s.diff("main", json!({}));
     assert!(a.contains("no change"), "{a}");
     let b = s.diff("main", json!({}));
-    assert_eq!((doc_rev(&a), doc_rev(&b)), (((d.clone(), r1 + 1)), (d, r1 + 2)));
+    assert_eq!((doc_rev(&a), doc_rev(&b)), ((d.clone(), r1 + 1), (d, r1 + 2)));
     assert!(b.len() < 120, "{b}");
 }
 

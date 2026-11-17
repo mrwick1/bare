@@ -121,10 +121,9 @@ fn escape(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
     let s = d.string_arg(it, v)?;
     it.charge(1 + (s.len() / 16) as u64)?;
     let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().enumerate().peekable();
     let only = s.chars().count() == 1;
     let first = s.chars().next();
-    while let Some((i, c)) = chars.next() {
+    for (i, c) in s.chars().enumerate() {
         match c {
             '\0' => out.push('\u{FFFD}'),
             '\u{1}'..='\u{1F}' | '\u{7F}' => out.push_str(&format!("\\{:x} ", c as u32)),
@@ -137,14 +136,14 @@ fn escape(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
             }
         }
     }
-    Ok(d.js_str(it, &out)?)
+    d.js_str(it, &out)
 }
 
 fn register_property(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
     let Some(&dict) = a.first().filter(|v| matches!(v, Value::Object(_))) else {
         return Err(it.type_error("Failed to execute 'registerProperty' on 'CSS': 1 argument required, but only 0 present."));
     };
-    let mut member = |it: &mut Interp<'_>, name: &str| -> R<Option<Value>> {
+    let member = |it: &mut Interp<'_>, name: &str| -> R<Option<Value>> {
         let k = d.key(it, name)?;
         Ok(Some(it.get_value(dict, k)?).filter(|v| !matches!(v, Value::Undefined)))
     };
