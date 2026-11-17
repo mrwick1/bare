@@ -4226,6 +4226,10 @@ mod ic_tests;
 mod forin_tests;
 
 #[cfg(test)]
+#[path = "eval_keyed_tests.rs"]
+mod keyed_tests;
+
+#[cfg(test)]
 #[path = "eval_retable_tests.rs"]
 mod retable_tests;
 
