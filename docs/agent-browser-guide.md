@@ -101,7 +101,20 @@ Checks are validated before dispatch. JavaScript assertions and action steps
 are rejected. A failed postcondition keeps `action_status: completed`.
 The `step` examples above remain valid.
 
-## Pending
+## Observation identity and recovery
 
-Observation revisions, stable error codes and session cancellation remain
-separate work. They are not described as available here.
+Snapshots identify the document and observation revision (`doc: dN rev M`). Revisions count full-page observations. They do not prove that the page stayed unchanged between calls. Refs belong to one document of one session. Refresh them after navigation, and never pass a ref to another session.
+
+Diffs list removed controls. Truncated rows, pending removals and supplemental text remain available on a later diff. A root-scoped snapshot preserves the full-page baseline. A mode or document change produces a labelled reset.
+
+A failed tool call includes `structuredContent.failure` with `code`, redacted `message`, `next_action` and `input_dispatched`. On `act`, this object accompanies the execution and verification states. A failed postcondition can therefore report both `action_status: completed` and a recovery suggestion. It does not authorize repeating the action. Failed `step` reports retain their report semantics and include the same failure evidence.
+
+## Concurrent sessions and cancellation
+
+Calls in one session run in arrival order. Independent sessions and control requests can progress while another session waits. Replies can arrive out of order across sessions; match them by JSON-RPC request id.
+
+A client can send `notifications/cancelled` with `params.requestId`. The cancelled request gets no reply. Cancellation is cooperative: it is checked between attempts and at driver wait points. It does not interrupt arbitrary scripts, native blocking reads, or work already sent to the page. Inspect the page before a side-effect retry. Closing input cancels outstanding work and reaps owned suite workers.
+
+## Task evaluation
+
+[Browser task evaluation](agent-evaluation.md) supplies eight seeded local tasks, transcript collection and independent graders. Scripted smoke runs test the protocol and fixtures. They are not evidence of real-agent success.

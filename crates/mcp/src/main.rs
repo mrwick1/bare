@@ -247,7 +247,9 @@ impl Shared {
         let done = Box::new(move |v: Value| sh.send(json!({"jsonrpc": "2.0", "id": id, "result": v})));
         let job = Job { key: Some(key), params, cancel, done };
         if !tool_list().as_array().is_some_and(|t| t.iter().any(|t| t["name"] == tool.as_str())) {
-            let result = Server { shared: self.clone(), live: HashMap::new() }.call(&job.params);
+            let failure = Failure::unknown_tool(&tool);
+            let result = json!({"content": [{"type": "text", "text": failure.text}], "isError": true,
+                "structuredContent": recovery::structured(&failure, &Redactor::default())});
             return self.finish(job, result);
         }
         match tool.as_str() {
@@ -1074,7 +1076,6 @@ impl Server {
         // The cancelled request has no reply; do not enter another wait.
         if cancelled() {
             return Err("cancelled".into());
-
         }
         let mark = self.live_mut(args)?.session.hist.mark();
         let mut out = receipt;
@@ -1652,7 +1653,8 @@ fn tools() -> Value {
             "outputSchema": {"type": "object", "properties": {
                 "action_status": {"type": "string", "enum": ["not_started", "completed", "unknown"], "description": "Completed means the operation succeeded, not that its business result is verified. Unknown may have dispatched input: inspect before retrying."},
                 "page_status": {"type": "string", "enum": ["ready", "pending", "unknown"], "description": "Ready means a layout exists and document loading ended; application data may still be pending."},
-                "verification": {"type": "string", "enum": ["not_requested", "passed", "failed", "not_run", "unknown"]}
+                "verification": {"type": "string", "enum": ["not_requested", "passed", "failed", "not_run", "unknown"]},
+                "failure": {"type": "object", "properties": {"code": {"type": "string"}, "message": {"type": "string"}, "next_action": {"type": "string"}, "input_dispatched": {"type": "string", "enum": ["no", "unknown"]}}, "required": ["code", "message", "next_action", "input_dispatched"]}
             }, "required": ["action_status", "page_status", "verification"]},
             "description": "Act on the live page like a user and get a short receipt (ok, or the failure with a hint, up to 3 script error lines for uncaught errors, new console errors and failed requests, navigation, dialogs and the answer given, tabs the page opened: \"opened tab: main~2 URL\" is a new session that you read with session=main~2 and end with close), then what changed on the page (only the lines marked *, with the lines that hold them; the whole outline after a navigation or with diff false). Ops: click, type (clears the field, then types text; \\n is Enter), press (key: Enter, Escape, Tab, Control+a; with ref it acts on that element, and Enter in a form field submits the form), scroll (dy pixels, over ref or the page), goto (url), reload, back, forward (the history), wait (ref until text state: visible, hidden, enabled, checked, text~\"x\"), select (text = the option label or value; options = several for a multiple select; fires input and change), check and uncheck (a checkbox or radio; clicks only when the state differs), hover (pointer over the element: :hover and mouseenter), dblclick, upload (files = local paths for an <input type=file>, at most 100 MiB each; a hidden input needs loc css=\"input[type=file]\"). The action waits for the element up to the timeout_ms that open set (act takes no timeout_ms).",
             "inputSchema": {"type": "object", "properties": {"session": S, "expect": {"type": "string", "description": "Optional postconditions: one or more expect step lines (no JavaScript). Validated before the action. A failed check keeps action_status completed: inspect before retrying."}, "op": {"type": "string", "enum": ["click", "type", "select", "check", "uncheck", "hover", "dblclick", "upload", "press", "scroll", "goto", "reload", "back", "forward", "wait"]}, "options": {"type": "array", "items": {"type": "string"}, "description": "For select: several options of a multiple select."}, "files": {"type": "array", "items": {"type": "string"}, "description": "For upload: local file paths."}, "dialog": {"type": "string", "enum": ["accept", "dismiss"], "description": "How to answer alert, confirm and prompt dialogs that the action opens. Default accept. The receipt lists each one."}, "prompt_text": {"type": "string", "description": "The answer of an accepted prompt. Default: the default value of the prompt."}, "ref": {"type": "string", "description": "e7 from snapshot or find."}, "loc": {"type": "string", "description": "A step locator instead of ref: role=button name=\"Save\", label=\"Email\", text=\"x\", css=\"...\"."}, "text": {"type": "string"}, "key": {"type": "string"}, "dy": {"type": "number"}, "url": {"type": "string"}, "snapshot": {"type": "boolean", "description": "Default true: add the changes of the page after the action."}, "diff": {"type": "boolean", "description": "Default true. False: add the whole outline instead of the changes."}, "mode": {"type": "string", "enum": ["interactive", "all"]}, "max_chars": {"type": "integer"}}, "required": ["op"]},

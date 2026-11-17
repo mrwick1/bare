@@ -378,3 +378,22 @@ fn queued_close_reopen_and_later_calls_keep_their_order() {
     let (text, error) = c.text(read);
     assert!(!error && text.contains("reopened=yes"), "{text}");
 }
+
+#[test]
+fn cancelling_a_postcondition_does_not_repeat_the_completed_click() {
+    let base = common::serve_route(route);
+    let mut c = Client::start();
+    c.open("a", &base);
+    let js = format!("window.count=0; document.querySelector('button').onclick=()=>{{window.count+=1; fetch('{base}/slow/postcondition');}}");
+    assert!(!c.tool("eval", json!({"session":"a","js":js})).1);
+    let action = c.call("act", json!({"session":"a","op":"click","loc":"role=button name=\"Go\"","expect":"expect text=\"Never rendered\" visible"}));
+    wait_arrived("postcondition");
+    c.cancel(action);
+    let console = c.call("console", json!({"session":"a"}));
+    let r = c.try_reply(console, Duration::from_secs(5)).expect("postcondition cancellation left the session blocked");
+    assert_ne!(r["result"]["isError"], true, "{r}");
+    assert!(c.try_reply(action, Duration::from_millis(100)).is_none());
+    release("postcondition");
+    let (count, error) = c.tool("eval", json!({"session":"a","js":"window.count"}));
+    assert!(!error && count == "1", "{count}");
+}

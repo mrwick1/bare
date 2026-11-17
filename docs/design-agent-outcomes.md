@@ -31,6 +31,7 @@ Every `act` result includes `structuredContent` with these fields:
 - `action_status`: `not_started`, `completed`, or `unknown`.
 - `page_status`: `ready`, `pending`, or `unknown`.
 - `verification`: `not_requested`, `passed`, `failed`, `not_run`, or `unknown`.
+- `failure`: optional typed recovery evidence when the call fails.
 
 `completed` means the driver operation succeeded. It does not prove a business result.
 `unknown` means execution was attempted but completion is not established.
