@@ -93,6 +93,7 @@ pub struct Tree<'a> {
     details: Option<Atom>,
     open: Option<Atom>,
     summary: Option<Atom>,
+    editable: Option<Atom>,
     /// The atoms of the form controls (`controls.rs`).
     pub controls: crate::controls::Atoms,
     // The atoms of these names, if the page has them. A page with no `<br>` has no atom for `br`.
@@ -100,13 +101,20 @@ pub struct Tree<'a> {
 
 impl<'a> Tree<'a> {
     pub fn new(doc: &'a Document, styles: &'a Styles) -> Tree<'a> {
-        Tree { doc, styles, br: doc.find_atom("br"), ol: doc.find_atom("ol"), start: doc.find_atom("start"), value: doc.find_atom("value"), body: doc.find_atom("body"), details: doc.find_atom("details"), open: doc.find_atom("open"), summary: doc.find_atom("summary"), controls: crate::controls::Atoms::new(doc) }
+        Tree { doc, styles, br: doc.find_atom("br"), ol: doc.find_atom("ol"), start: doc.find_atom("start"), value: doc.find_atom("value"), body: doc.find_atom("body"), details: doc.find_atom("details"), open: doc.find_atom("open"), summary: doc.find_atom("summary"), editable: doc.find_atom("contenteditable"), controls: crate::controls::Atoms::new(doc) }
     }
 
     /// The `html` element: the root of the boxes. `None` if it is not shown.
     pub fn root(&self) -> Option<NodeId> {
         let html = self.doc.children(self.doc.root()).find(|&n| matches!(self.doc.data(n), NodeData::Element { .. }))?;
         (self.kind(html) != Kind::None).then_some(html)
+    }
+
+    /// Is `node` an editing host whose parent is not editable (Blink `IsRootEditableElement`)?
+    pub fn editing_root(&self, node: NodeId) -> bool {
+        let Some(a) = self.editable else { return false };
+        let on = |e| self.doc.attr(e, a).map(|v| matches!(v.to_ascii_lowercase().as_str(), "" | "true" | "plaintext-only"));
+        on(node) == Some(true) && std::iter::successors(self.doc.parent(node), |&e| self.doc.parent(e)).find_map(on) != Some(true)
     }
 
     /// The style of a box: of the element, or of the parent element for a text node. An anonymous block has the style of

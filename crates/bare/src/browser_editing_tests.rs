@@ -466,6 +466,32 @@ fn shift_arrows_extend_a_contenteditable_selection() {
     });
 }
 
+/// An arrow, Home or End with no Shift moves the caret in an editing host and collapses a selection, as in Chrome (#444).
+#[test]
+fn plain_arrows_home_and_end_move_the_contenteditable_caret() {
+    big(|| {
+        let mut b = browser();
+        js(&mut b, "document.body.innerHTML = '<div contenteditable id=e></div>'; var e = document.getElementById('e');");
+        let e = b.query("#e").unwrap().unwrap();
+        b.drive_type(e, "hello world").unwrap();
+        let caret = "var s = getSelection(); s.isCollapsed + '|' + s.focusOffset";
+        b.drive_key(None, "Home").unwrap();
+        assert_eq!(js(&mut b, caret), "true|0");
+        b.drive_key(None, "ArrowRight").unwrap();
+        assert_eq!(js(&mut b, caret), "true|1");
+        b.drive_key(None, "Control+ArrowRight").unwrap();
+        assert_eq!(js(&mut b, caret), "true|5");
+        b.drive_key(None, "Shift+End").unwrap();
+        b.drive_key(None, "ArrowLeft").unwrap();
+        assert_eq!(js(&mut b, caret), "true|5");
+        b.drive_key(None, "Shift+Home").unwrap();
+        b.drive_key(None, "End").unwrap();
+        assert_eq!(js(&mut b, caret), "true|11");
+        b.drive_key(None, "Control+Shift+ArrowLeft").unwrap();
+        assert_eq!(js(&mut b, "getSelection().toString()"), "world");
+    });
+}
+
 /// `Selection.modify` moves or extends by character, word and line boundary; an unknown argument changes nothing (#444).
 #[test]
 fn selection_modify_moves_and_extends() {
