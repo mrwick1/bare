@@ -384,7 +384,7 @@ mod tests {
     fn a_kept_layout_equals_a_full_layout_after_random_changes() {
         let mut copied = 0;
         for seed in 1..=12u64 {
-            let mut r = Rng(seed * 0x9E37_79B9_7F4A_7C15);
+            let mut r = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
             let mut doc = parse("<!doctype html><body></body>");
             let body = doc.children(doc.children(doc.root()).last().unwrap()).last().unwrap();
             // A page of nested blocks with text.

@@ -19,6 +19,9 @@
 
 use super::*;
 
+/// The callback of `reclaim`: it visits every span that the caller pins.
+type Pins<'a> = dyn FnMut(&mut dyn FnMut(&mut Span)) + 'a;
+
 /// Make `Node` slots for a freed node look like nothing: an empty comment that no link names. The start of the span is a value that no text has.
 const FREE: NodeData = NodeData::Comment(Span { start: u32::MAX, len: 0 });
 /// A link that no node has: the parent of the top of a dead tree on the list (so the scan does not find it again), and every link of a poisoned node.
@@ -159,7 +162,7 @@ impl Document {
     /// The tree of a dead node is not in the tree of the page, so the page does not change. But the styles and the layout of a host keep a table by
     /// node number, and a reused slot would answer with the old node, so a reclaim that finds a dead tree moves `revision` and tells the readers of the
     /// damage log to start over.
-    pub fn reclaim(&mut self, live: &[NodeId], pins: &mut dyn FnMut(&mut dyn FnMut(&mut Span)), free: Free) -> usize {
+    pub fn reclaim(&mut self, live: &[NodeId], pins: &mut Pins<'_>, free: Free) -> usize {
         let trees = self.queue_dead(live);
         if free != Free::Wait {
             // A dead tree that waits holds its text and attributes. A node that takes a slot counts what the old one held, so a page that goes on
@@ -300,7 +303,7 @@ impl Document {
     }
 
     /// Build `text` and `attrs` again from the nodes that are alive. A node keeps its place: only the spans move.
-    fn rebuild_lists(&mut self, pins: &mut dyn FnMut(&mut dyn FnMut(&mut Span))) {
+    fn rebuild_lists(&mut self, pins: &mut Pins<'_>) {
         let (mut bytes, mut slots) = (0, 0);
         for n in self.nodes.iter().filter(|n| n.data != FREE) {
             match n.data {

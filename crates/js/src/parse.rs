@@ -52,6 +52,9 @@ use std::cell::OnceCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+/// One name of an import or export list: the name, its span, whether it is a string, the local name and its span.
+type ImportItem = (Box<str>, Span, bool, Box<str>, Span);
+
 /// The parser checks the pattern and the flags of every regexp literal ([`crate::regexp::Regex::check`]), also in a function body that it
 /// drops (see [`crate::ast::Body::Lazy`]). A bad pattern is [`ErrorKind::Unsupported`], as it was when the first walk compiled the
 /// literal. The compile (the code of the pattern) is done at the first evaluation of the literal.
@@ -1212,7 +1215,7 @@ impl<'a> Parser<'a> {
             }
             Kind::Punct(P::LBrace) => {
                 self.advance()?;
-                let mut items: Vec<(Box<str>, Span, bool, Box<str>, Span)> = Vec::new();
+                let mut items: Vec<ImportItem> = Vec::new();
                 let mut kws = Vec::new();
                 while !self.is(P::RBrace) {
                     let tok = self.tok;

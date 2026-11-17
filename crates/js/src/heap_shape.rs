@@ -129,10 +129,13 @@ pub(super) struct Shapes {
     /// Recent answers of `Object::shape_get`, direct-mapped as `recent`: `(shape, key, slot, attrs)`, with `slot == u32::MAX` when the
     /// shape has no such key. A shape never changes, so an answer stays true. Native code reads with no inline cache (option bags,
     /// iterator results, a reviver's holders), and most of its reads ask the same few shapes and keys again.
-    found: Box<[Cell<(u32, PropertyKey, u32, u8)>; RECENT]>,
+    found: Box<[Cell<RecentEntry>; RECENT]>,
 }
 
 const RECENT: usize = 256;
+
+/// One answer of `Object::shape_get`: `(shape, key, slot, attrs)`.
+type RecentEntry = (u32, PropertyKey, u32, u8);
 /// Entries of `Heap::stubs`. `recent_at` maps to them.
 pub(super) const STUBS: usize = RECENT;
 
