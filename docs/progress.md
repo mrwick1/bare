@@ -12930,3 +12930,28 @@ Not done or not tested: `caretPositionFromPoint` (no `CaretPosition` interface y
 - `fill LOC "text" keys=last` (MCP `last_key: true`): the head is one edit, the last character is one typed key, for a widget that waits for a key. Journey: 12.165 to 12.166 G (3 runs), against 9.655 G for plain `fill` on the same build (1 run). 2 `bare-drive` tests and 2 parse cases.
 - `BARE_JS_EXEC=byte` on the `type` journey: 79.245 to 79.246 G (2 runs), 2.3% more than `tree`. On this base the bytecode lane does not help this React form. #630 makes the lane run lazy functions and changes this result.
 - Not done: a Chrome log of `Input.insertText` for the fixtures.
+
+## Lane coverage and cost on top of #630 to #634 (`lane-on-main`, 2026-11-17)
+
+Base: origin/main `9ba3373e`. Machine: archMachine. `Auto`, public React page, `#a1`. Instruction counts: minimum of 3 `perf stat` runs, spread at most 0.01%. Narrow rows: `byte`, scale 10.
+
+Added: optional chains, spread (calls and arrays), computed keys, `delete` and regexp literals compile on the lane; rare ops run from one cold `bc_rare` function; every equality and relational test fuses with its jump (`JnSEq` and friends, also for pattern defaults); the cached property add runs inline in `SET_FIELD`; a constructor sizes its new object from the last construction; feature `bc-hist` counts executed ops (`docs/research-lane-op-histogram.md`, `tools/js/bc_hist.sh`; off by default, counts equal with it off); `docs/design-lane-calls.md` and `docs/design-heap-objects.md` are the designs for the next steps.
+
+| Row | main | now |
+| --- | --- | --- |
+| Page load | 489.73M | 472.11M (-3.6%) |
+| Page 50 keys | 8545.19M | 8220.10M (-3.8%) |
+| Calls on the lane | 1678422 of 1717747 (97.7%) | 1713027 of 1717747 (99.73%) |
+| loopfn | 833.05M | 833.05M |
+| fib | 58.94M | 58.85M |
+| calls | 1690.28M | 1604.28M (-5.1%) |
+| loop | 2541.04M | 2367.04M (-6.8%) |
+| closures | 485.14M | 476.49M (-1.8%) |
+
+- Refusals left at 50 keys: `spread` in an object literal (4718 calls), `__proto__` in an object literal (1), a data literal (1).
+- Cost matrix against main, `Auto` (803 rows): 0 rows over +0.5% under either allocator. Mean glibc -0.757%. The two `parse_load deep` rows overflow the stack on main too.
+- Per group (page 50 keys): optional chain -1.5%, spread -0.06%, computed key, `delete` and regexp -0.05%, add-property cache and pre-size -0.10%, fused jumps -1.8% (calls -4.8%, loop -6.4%).
+- Peak RSS, page, 50 keys, medians of 7 interleaved runs of fresh binary copies: `Auto` 34484 KiB against 33740 KiB on main (+2.2%); load 25868 against 25696 (+0.67%). In `tree` mode (5 runs) the branch is 31884 KiB against 32192 KiB on main (-1.0%), so the default mode uses less memory. In `Auto` the lane run adds 2252 KiB over `tree` on this branch and 1512 KiB on main. The JS heap peak is equal (8.489 MB against 8.458 MB) and compiled code grows 72 KB at load, so the cause is not found. It is not within the +0.5% limit; to investigate (hypothesis: register stack or iterator stack high-water of functions that now run on the lane).
+- Tried and not kept: Hash maps with Fx in the code generator. Page load -2.5%, but 12 matrix rows went over +0.5% under both allocators (`lex_load small 1` +2.14%; only `Lexer::next` got slower, its source is unchanged; hypothesis: another codegen unit). Kept on the local branch `port-perf-with-fx`. Spread through the pattern-op arm (loopfn +2.6%) and moving the pattern-op arm into `bc_rare` (50 keys +0.6%, loopfn +1.9%) were slower and are not in the branch.
+- Tests: `cargo test -p bare-js --lib` 1015 passed, 1 ignored. Clippy clean with and without `--features bc-hist`. `tools/js/exec_diff.sh`: 79 runs, 0 differences.
+- Not tested: the private dashboard journey, wall time, Windows and macOS, test262 in `byte` mode.
