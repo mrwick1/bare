@@ -225,14 +225,51 @@ fn context(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
     Ok(Value::Object(o))
 }
 
-fn measure(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
+/// The font of a canvas `font` value (a CSS `font` shorthand): its size in pixels and its face. A value without a size is the
+/// default, `10px sans-serif`.
+fn canvas_font(v: &str) -> bare_layout::font::Metrics {
+    use bare_layout::font::{Face, Metrics};
+    let (mut size, mut bold) = (None, false);
+    for t in v.split_whitespace() {
+        if size.is_some() {
+            break;
+        }
+        bold |= matches!(t, "bold" | "bolder") || t.parse::<f32>().is_ok_and(|w| w >= 600.0);
+        let t = t.split('/').next().unwrap_or(t);
+        let unit = t.trim_start_matches(|c: char| c.is_ascii_digit() || c == '.');
+        let scale = match unit {
+            "px" => 1.0,
+            "pt" => 4.0 / 3.0,
+            "em" | "rem" => 16.0,
+            _ => continue,
+        };
+        size = t[..t.len() - unit.len()].parse::<f32>().ok().filter(|n| n.is_finite() && *n >= 0.0).map(|n| n * scale);
+    }
+    let Some(size) = size else { return Metrics::new(10.0, Face::Sans) };
+    let mono = v.contains("monospace");
+    Metrics::new(size, match (mono, bold) {
+        (true, false) => Face::Mono,
+        (true, true) => Face::MonoBold,
+        (false, false) => Face::Sans,
+        (false, true) => Face::SansBold,
+    })
+}
+
+/// `measureText(text)`: the width of the text in the font of `this.font`, with the metrics that page text uses.
+fn measure(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
     let text = d.string_arg(it, crate::browser_platform::arg(a, 0))?;
+    let k = d.key(it, "font")?;
+    let font = match it.get_value(this, k)? {
+        Value::Undefined => String::new(),
+        v => d.string_arg(it, v)?,
+    };
+    let width = bare_layout::controls::text_width(&canvas_font(&font), &text);
     let o = d.obj(it, it.object_prototype())?;
     let k = d.key(it, "width")?;
     it.define_data(
         o,
         k,
-        Value::Number(text.chars().count() as f64 * 6.0),
+        Value::Number(width as f64),
         false,
         true,
         true,

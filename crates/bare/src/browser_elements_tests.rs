@@ -317,6 +317,19 @@ fn canvas_context_surface() {
 }
 
 #[test]
+fn canvas_measure_text_uses_the_font_of_the_context() {
+    // d3 and chart pages size labels with measureText: the width must be the one that the page draws, at the size of `font`.
+    let mut b = browser("<span id=s style='font:16px sans-serif'>Database</span>");
+    js(&mut b, "var x=document.createElement('canvas').getContext('2d'); var w=f=>{x.font=f; return x.measureText('Database').width}");
+    assert_eq!(js(&mut b, "Math.abs(w('16px sans-serif') - document.getElementById('s').getBoundingClientRect().width) < 0.01"), "true");
+    assert_eq!(js(&mut b, "Math.abs(w('32px sans-serif') - 2 * w('16px sans-serif')) < 0.01"), "true");
+    assert_eq!(js(&mut b, "w('bold 16px Arial') > w('16px Arial')"), "true", "bold letters are wider");
+    assert_eq!(js(&mut b, "Math.abs(w('12pt serif') - w('16px serif')) < 0.01"), "true", "12pt is 16px");
+    // Deviation: `font` is a plain property, so a value that does not parse stays and measures as the default, 10px sans-serif.
+    assert_eq!(js(&mut b, "w('nonsense') === w('10px sans-serif')"), "true");
+}
+
+#[test]
 fn svg_geometry_surface() {
     let mut b = browser("<svg id='s' width='20' height='30' viewBox='0 0 20 30'><rect id='r' x='2' y='3' width='10' height='15'/></svg>");
     assert_eq!(js(&mut b, "var s=document.getElementById('s'); s.width.baseVal.value + ':' + s.viewBox.baseVal.height"), "20:30");
