@@ -192,17 +192,22 @@ fn display_name(p: Property) -> &'static str {
 }
 
 /// The text of a value that compares two styles of two cascades. `None`: the value is not one that a transition reads.
-fn norm(v: Cv, calc: &dyn Fn(u32) -> (f32, f32)) -> Option<String> {
+/// A transform that is not a plain move (`translateZ(0)`, `scale(.9)`) is a grid of steps: the steps are its value.
+fn norm<'g>(v: Cv, calc: &dyn Fn(u32) -> (f32, f32), grid: &dyn Fn(u32) -> Option<&'g Grid>) -> Option<String> {
     match v {
-        Cv::Grid(_) | Cv::Var(_) | Cv::Inherit | Cv::Initial | Cv::Unset => None,
+        Cv::Grid(i) => match grid(i) {
+            Some(Grid::Transform(steps)) => Some(format!("{steps:?}")),
+            _ => None,
+        },
+        Cv::Var(_) | Cv::Inherit | Cv::Initial | Cv::Unset => None,
         Cv::Length(Length::Calc(i)) => Some(format!("calc{:?}", calc(i))),
         v => Some(format!("{v:?}")),
     }
 }
 
 /// The value of the properties of `item` in `s`, as one text.
-fn read(item: &Item, s: &ComputedStyle, calc: &dyn Fn(u32) -> (f32, f32)) -> Option<String> {
-    let parts: Option<Vec<String>> = item.props.iter().map(|&p| norm(s.value(p), calc)).collect();
+fn read<'g>(item: &Item, s: &ComputedStyle, calc: &dyn Fn(u32) -> (f32, f32), grid: &dyn Fn(u32) -> Option<&'g Grid>) -> Option<String> {
+    let parts: Option<Vec<String>> = item.props.iter().map(|&p| norm(s.value(p), calc, grid)).collect();
     parts.map(|p| p.join("|"))
 }
 
@@ -314,11 +319,13 @@ impl Dom {
                 continue;
             }
             let new_calc = |i: u32| styles.calc(i);
+            let new_grid = |i: u32| Some(styles.grid(i));
             for item in transition_items(styles, s) {
                 seen_props.insert((n, item.name.clone()));
                 let Some(before) = old.as_ref().and_then(|o| o.style(n)) else { continue };
                 let old_calc = |i: u32| old.as_ref().map_or((0.0, 0.0), |o| o.calc(i));
-                let (Some(a), Some(b)) = (read(&item, before, &old_calc), read(&item, s, &new_calc)) else { continue };
+                let old_grid = |i: u32| old.as_ref().and_then(|o| o.grid(i));
+                let (Some(a), Some(b)) = (read(&item, before, &old_calc, &old_grid), read(&item, s, &new_calc, &new_grid)) else { continue };
                 if a != b {
                     starts.push((n, item, b));
                 }
