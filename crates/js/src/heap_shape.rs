@@ -1292,8 +1292,8 @@ impl Heap {
         Ok(r)
     }
 
-    /// `set` of a keyed write `o[s] = v` (the lane's `SetElem`), as `get_keyed`: a store or add hit, else the plain write, which fills
-    /// the entry. The caller converts a value for a view first. Never calls a setter: it returns it, as `set` does.
+    /// `set` of a keyed write `o[s] = v` (the lane's `SetElem`), as `get_keyed`: a store or add hit, else the plain write. The first
+    /// miss of a pair only marks it; the second fills the entry. The caller converts a value for a view first. Never calls a setter: it returns it, as `set` does.
     pub fn set_keyed(&mut self, o: ObjId, s: StrId, v: Value) -> R<Set> {
         let key = PropertyKey::String(s);
         let shape = match self.objects.get(o.index, o.gn) {
@@ -1308,11 +1308,17 @@ impl Heap {
                 self.ic_stats.keyed_hits += 1;
                 return Ok(Set::Done);
             }
-            if ic.kind == IC_EMPTY {
+            // A pair seen once (`depth` 1) fills at its second miss. A refused pair (`depth` 0) stays on the plain write.
+            if ic.kind == IC_EMPTY && ic.depth == 0 {
                 return self.set(o, key, v);
             }
         }
         let mut ic = Ic::EMPTY;
+        if !found {
+            // A key that never comes back (`o['k' + i] = i`) costs only the plain write and this mark, not a fill.
+            self.keyed_put(i, false, Keyed { depth: 1, ..Keyed::of(&ic, shape, s, true) });
+            return self.set(o, key, v);
+        }
         let r = self.set_fill(o, key, v, &mut ic)?;
         self.keyed_put(i, found, Keyed::of(&ic, shape, s, true));
         Ok(r)

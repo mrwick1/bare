@@ -943,7 +943,7 @@ impl<'p> Interp<'p> {
         self.get_prop(base, key)
     }
 
-    /// `SetElem`: `o[k] = v`. An atom key that is no index uses the keyed table (`Heap::set_keyed`).
+    /// `SetElem` with a string key: `o[k] = v`. An atom key that is no index uses the keyed table (`Heap::set_keyed`).
     #[inline(never)]
     fn bc_set_elem(&mut self, base: Value, k: Value, v: Value) -> Res<()> {
         if let (Value::Object(o), Value::String(s)) = (base, k)
@@ -1383,7 +1383,15 @@ impl<'p> Interp<'p> {
                         }
                     }
                     GET_ELEM => regs[a] = tri!(at, self.bc_get_elem(regs[b], regs[cc])),
-                    SET_ELEM => tri!(at, self.bc_set_elem(regs[a], regs[b], regs[cc])),
+                    SET_ELEM => {
+                        let (o, k, v) = (regs[a], regs[b], regs[cc]);
+                        if let Value::String(_) = k {
+                            tri!(at, self.bc_set_elem(o, k, v));
+                        } else {
+                            let key = tri!(at, self.coerce_key(k));
+                            tri!(at, self.put_prop(o, key, v));
+                        }
+                    }
                     TO_KEY => regs[a] = tri!(at, self.bc_to_key(regs[b], regs[cc])),
                     DEF_FIELD => tri!(at, self.bc_def_field(regs[a], name!(cc), regs[b])),
                     ARRAY_PUSH => tri!(at, self.bc_array_push(regs[a], regs[b])),
