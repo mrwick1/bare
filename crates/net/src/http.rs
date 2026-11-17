@@ -1348,7 +1348,7 @@ fn slow(e: io::Error) -> io::Error {
 }
 
 /// A parsed HTTP response.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 // `Clone` lets us make a copy with `.clone()`. The cache keeps one copy and gives out another.
 pub struct Response {
     // JS: like an object `{ status, headers, body }`. `pub` lets other crates read the fields.
@@ -1485,11 +1485,6 @@ fn parse_head(raw: &[u8]) -> Result<Option<Head>, String> {
     // The blank line is 4 bytes: `\r\n\r\n`.
 }
 
-impl Default for Response {
-    fn default() -> Response {
-        Response { status: 0, headers: Vec::new(), body: Vec::new(), close: false }
-    }
-}
 
 /// Choose the rule that finds the end of the body.
 fn framing(response: &Response) -> Result<Framing, String> {
@@ -1696,7 +1691,7 @@ impl Live {
     }
 
     /// Give out bytes from `buf`, and no more than `max`.
-    fn from_buf(&mut self, out: &mut [u8], max: usize) -> usize {
+    fn take_buf(&mut self, out: &mut [u8], max: usize) -> usize {
         let n = out.len().min(max).min(self.buf.len() - self.at);
         out[..n].copy_from_slice(&self.buf[self.at..self.at + n]);
         self.at += n;
@@ -1770,7 +1765,7 @@ impl Live {
                     if self.at == self.buf.len() {
                         return Err(ended());
                     }
-                    let n = self.from_buf(&mut out[written..], self.left);
+                    let n = self.take_buf(&mut out[written..], self.left);
                     written += n;
                     self.left -= n;
                     if self.left == 0 {
@@ -1876,7 +1871,7 @@ impl Body {
                     return Ok(0);
                 }
                 let n = if live.at < live.buf.len() {
-                    live.from_buf(out, live.left)
+                    live.take_buf(out, live.left)
                 } else {
                     // Read from the connection straight into the buffer of the caller: no copy in between.
                     let max = out.len().min(live.left);
@@ -1891,7 +1886,7 @@ impl Body {
                 n
             }
             Framing::UntilClose => {
-                let n = if live.at < live.buf.len() { live.from_buf(out, usize::MAX) } else { live.stream.read(out).map_err(slow)? };
+                let n = if live.at < live.buf.len() { live.take_buf(out, usize::MAX) } else { live.stream.read(out).map_err(slow)? };
                 if n == 0 {
                     live.done = true;
                     // The server closed the connection: the body ends here. This is the oldest rule. It cannot tell a

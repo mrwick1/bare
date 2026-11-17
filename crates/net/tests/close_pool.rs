@@ -103,9 +103,9 @@ fn a_post_is_never_sent_twice_to_a_server_that_closes_idle_connections() {
             // A GET leaves a connection that the server closes. A POST that finds it must not be sent again after a failed write.
             let mut c = client.fork();
             get(&mut c, port, &format!("/get{round}")).unwrap();
-            match c.post(&url(port, &format!("/post{round}")), &[], b"x=1") {
-                Ok(r) => assert_eq!(r.body, format!("body of /post{round}").into_bytes()),
-                Err(_) => {} // The server closed first and the POST went to a dead connection: an error, never a second send.
+            // If the server closed first, the POST went to a dead connection: an error, never a second send.
+            if let Ok(r) = c.post(&url(port, &format!("/post{round}")), &[], b"x=1") {
+                assert_eq!(r.body, format!("body of /post{round}").into_bytes());
             }
             // The same on a worker.
             let task = client.spawn(move |c| c.post(&url(port, &format!("/wpost{round}")), &[], b"x=1").map(|_| ()).map_err(|e| e.to_string()));

@@ -184,7 +184,7 @@ fn twenty_requests_pass_a_server_that_allows_one_or_two_streams() {
         // stream was refused and run again on a new connection.
         assert!(peak <= max * conns && (1..=2).contains(&conns), "max {max}: conns {conns} peak {peak}");
         assert_eq!(streams, 21, "max {max}");
-        assert!(took < Duration::from_millis(20 * 20 * 3 / max as u64 + 1500), "max {max}: {took:?}");
+        assert!(took < Duration::from_millis(20 * 20 * 3 / max + 1500), "max {max}: {took:?}");
     }
 }
 
