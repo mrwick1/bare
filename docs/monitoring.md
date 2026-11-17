@@ -373,3 +373,20 @@ Now `bare_os::fs::create_private` creates the capture file: new file only, mode 
 The scan now flags only the three baseline files. The Windows and macOS `cargo check --workspace --all-targets` steps pass.
 The parent reran the tests: Linux `bare-os` 10, collector 12, process 4 and the doctest; Windows VM `bare-os` 7, collector 12, process 4. All pass.
 A second Windows capture had 21 samples with non-null RSS, peak RSS and CPU fields, and zero drops.
+
+## Cost check after the merge of main (2026-11-17)
+
+Candidate: merged head `52b032c9`, `profiling` profile. Baseline: `main` at `8b6a71bb`, release profile with `CARGO_PROFILE_RELEASE_DEBUG=true` and `CARGO_PROFILE_RELEASE_STRIP=false`, because `main` has no `profiling` profile.
+Machine: archMachine. Load average 5.3 to 5.5 during the runs. Instruction counts only; no wall-time claim.
+`tools/monitoring/accept.py` ran 3 runs per mode, 20 journeys per process. A copy of the parent comparison script ran baseline and candidate alternately, both off, 3 runs each.
+
+| Mode | Mean `instructions:u` | Spread | Against off |
+|---|---|---|---|
+| off | 3,239,558,092 | 15,249 | |
+| metrics | 3,250,780,335 | 67,297 | +0.346% |
+| trace | 3,258,980,269 | 25,827 | +0.600% |
+
+Off against `main`: baseline 3,239,362,560 (spread 1,943), candidate 3,239,486,230 (spread 103,731), +0.0038%.
+All three budgets pass: off <= 1%, metrics <= 3%, trace <= 10%.
+Browser peak RSS: off 16,836 to 17,236 KiB, metrics 17,152 to 17,228 KiB, trace 16,988 to 17,268 KiB, `main` 16,748 to 16,992 KiB.
+Metrics wrote 342 records per run and trace 742. No run dropped a record.

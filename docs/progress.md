@@ -12877,3 +12877,7 @@ Not done or not tested: `caretPositionFromPoint` (no `CaretPosition` interface y
 - Items with `#[allow(clippy::...)]` and a reason comment: `too_many_arguments` (hot paths `add_rules`, `style_of`, `Regex::backward`, plus `build_response`, `load_document`), `wrong_self_convention` (spec names `to_object`, `to_numeric`, `to_bigint`, `to_bit_width`, `to_dict`, `to_shapes`, `from_clause`), `box_collection` (fields that stay one pointer wide), `type_complexity` (one-off tuple fields), `diverging_sub_expression` (`hx!` early return), `needless_range_loop` (two loops that also use the index), `items_after_test_module`, `drop_non_drop` (test).
 - Compiler warnings: `re_tab_bytes` is used only by tests, so it is `#[cfg(test)]`. The unused import and the needless `mut` are removed.
 - No logic change is intended. `cargo test -q --workspace --lib` passes. Not run: integration tests under `tests/`, Windows builds, benchmarks.
+
+## Monitoring cost on the newest main (2026-11-17)
+
+After the merge of `main` (`8b6a71bb`), the parent ran the cost check on `52b032c9`. User instructions against monitoring off: metrics +0.346%, trace +0.600%. Off against `main`: +0.0038%. Spread is at most 0.003% of the mean. All budgets pass. Detail: `docs/monitoring.md`.
