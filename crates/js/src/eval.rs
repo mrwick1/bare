@@ -1125,6 +1125,11 @@ impl<'p> Interp<'p> {
             && (self.heap.used_bytes() > GC_MIN_BYTES.max(self.gc_live / 4 * 7) || self.ext_since > EXTERNAL_MIN_BYTES.max(self.ext_live / 4))
     }
 
+    /// The native bytes that were live after the last collect (`set_external_live`).
+    pub fn external_live(&self) -> usize {
+        self.ext_live
+    }
+
     /// The host kept `n` native bytes that only a collect can release (the nodes of a parsed document). They count towards `gc_due`.
     pub fn add_external(&mut self, n: usize) {
         self.ext_since = self.ext_since.saturating_add(n);

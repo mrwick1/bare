@@ -345,3 +345,24 @@ fn a_layout_read_loop_and_a_read_all_loop_stay_bounded() {
         assert_eq!(js(&mut b, all), "error:Limit(Steps)");
     });
 }
+
+/// Issue 550: a long single-page session that replaces a big list again and again must not reach `computed-nodes` while the live tree is small.
+#[test]
+fn replacing_a_list_many_times_does_not_reach_computed_nodes() {
+    big(|| {
+        let mut b = at("<!doctype html><body><div id=list></div></body>");
+        b.use_virtual_clock_at(1000.0).unwrap();
+        let rep = "var l = document.getElementById('list'); var h = ''; for (var i = 0; i < 700; i++) h += '<div class=r><span>a</span><b>b</b></div>'; l.innerHTML = h; 1";
+        for round in 0..50 {
+            let r = js(&mut b, rep);
+            assert_eq!(r, "1", "round {round}");
+            b.advance_time(1.0, 100).unwrap();
+            // The page driver asks at each safe point (`browser_loader.rs`).
+            if b.collect_due() { b.collect(&[]).unwrap(); }
+            let r = js(&mut b, "getComputedStyle(document.getElementById('list')).display");
+            let doc = b.document(); let d = doc.borrow();
+            eprintln!("round {round}: len {} live {} -> {r}", d.len(), d.live_len());
+            assert_eq!(r, "block", "round {round}: len {} live {}", d.len(), d.live_len());
+        }
+    });
+}

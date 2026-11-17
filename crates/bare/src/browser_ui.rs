@@ -1289,7 +1289,7 @@ impl Browser {
         }
         // The events are freed by `collect`: keep room for the next call (the cap is `max_events`). A call that runs many events (a typed
         // text) also collects when the heap has grown to twice its live size (`gc_due`), so its garbage does not pile up.
-        if self.dom.st.borrow().events.len() > self.dom.lim.max_events / 2 || self.it.gc_due() {
+        if self.dom.st.borrow().events.len() > self.dom.lim.max_events / 2 || self.collect_due() {
             self.collect(&[])?;
         }
         Ok(UiOutcome { reports, changed: self.dom.st.borrow().ui.epoch != before, intercepted: None })

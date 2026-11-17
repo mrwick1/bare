@@ -561,7 +561,7 @@ impl Dom {
         let vp = self.plat.s.borrow().viewport;
         let t0 = crate::force::start();
         let builds = self.computed.builds.get();
-        if self.doc.borrow().len() > l.max_nodes {
+        if self.doc.borrow().live_len() > l.max_nodes {
             return Err(self.lim("computed-nodes"));
         }
         let mut doc = self.doc.borrow_mut();
@@ -783,7 +783,7 @@ impl Dom {
         }
         let Some(styles) = Rc::get_mut(styles) else { return Ok(None) };
         let doc = self.doc.borrow();
-        if doc.len() > self.computed.lim.get().max_nodes {
+        if doc.live_len() > self.computed.lim.get().max_nodes {
             return Err(self.lim("computed-nodes"));
         }
         if self.style.has_pending.get() {
