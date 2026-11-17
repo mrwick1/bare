@@ -13107,3 +13107,15 @@ Design: `docs/design-keyed-cache.md`, design A with a compact table. `GetElem` o
 - One difference from Node that also exists on main: `undefined[k] = 1` throws "Cannot read properties of undefined" where Node says "Cannot set properties". All three modes agree; the test compares the error name only.
 - Step 2 of the design (single-search `Heap::set`) is not built. After the table, most adds on the page never reach `Heap::set`; the estimate is about -0.8% at 50 keys, below the gate of -1%. This is an estimate from the design's call counts, not a measurement.
 - Not tested: test262 (its runner ignores `BARE_JS_EXEC` and the default executor is Tree, so the new path does not run there); a callgrind split; the hit rate of the table on the page; a test that frees an atom and reuses its slot; wall time; Windows; the private dashboard journey; release builds of the deliberately broken versions.
+
+## OFS-13: typing into a heavy React-like form (2026-11-17)
+
+Addresses beta ticket OFS-13. Machine: archMachine, load average about 10, so the instruction counts count and the wall times do not.
+Fixture: one input, an `input` handler that rebuilds 250 rows of 4 spans (1250 nodes) on each event. Text: 100 characters.
+- `fill` already exists and inserts the text as one edit: 1 render, 118.5 M instructions (3 runs, spread under 0.001%), about 30 ms CPU.
+- `type`: 101 renders, 2422 M instructions (3 runs, spread under 0.003%), 580-650 ms CPU. About 6 ms per character at this tree size.
+- Page with no input: 29 M instructions.
+- A 400-row tree (1600 spans plus rows) hits `Limit(Host("computed-nodes"))` during `type` on this build. The page logs it and goes on. Cause not checked.
+- Profile of `type` (instructions:u, 3 runs): JS engine 51%, DOM and browser glue 20%, allocator 11-12%, number and string formatting 6-7%, style 0.5%, layout 1.7%, paint 0%. Hottest symbol: `Heap::intern_slice` 9.4%. So per-key cost is the page script rebuilding the tree, not style or layout. Hypothesis: the same split holds on the Next.js form of the ticket.
+- Change: the `type` text of the browser_act and step descriptions now says to use `fill` for long text.
+- Not done: a faster `type`. The cost is the page handler running once for each key. A change in design would be needed, so it is out of scope.
