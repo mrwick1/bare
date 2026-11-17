@@ -532,3 +532,185 @@ a + ' ' + b"#;
         assert_eq!(out[0], out[1]);
     });
 }
+
+/// A module function with hundreds of bindings (a webpack module): its inner functions read and write bindings past index 255,
+/// and an object literal has keys past constant 255. Those words take the wide form. The loop runs them, and byte mode gives the
+/// result of tree mode.
+#[test]
+fn wide_environment_and_field_words_run_on_the_bytecode_lane() {
+    big(|| {
+        let vars: Vec<String> = (0..300).map(|i| format!("var v{i} = {i};")).collect();
+        let keys: Vec<String> = (0..300).map(|i| format!("k{i}: {i}")).collect();
+        let src = format!(
+            "function mod() {{ {} let late = 7; function rd() {{ return v299 + v260 + late; }} function wr(x) {{ v299 = x; return v299; }}
+               function obj() {{ var o = {{ {} }}; return o.k0 + o.k299; }}
+               return [rd(), wr(5), rd(), obj()].join(); }}
+             mod()",
+            vars.join(" "),
+            keys.join(", ")
+        );
+        let mut out = Vec::new();
+        for mode in [Exec::Tree, Exec::Byte] {
+            let mut it = Interp::realm(Heap::default(), EvalLimits::default()).unwrap();
+            it.set_exec(mode);
+            out.push(run(&mut it, &src));
+            if mode == Exec::Byte {
+                let s = it.bc_stats();
+                assert_eq!(s.calls_tree, 0, "{s:?}");
+            }
+        }
+        assert_eq!(out[0], "566,5,272,299");
+        assert_eq!(out[0], out[1]);
+    });
+}
+
+/// Labels as minified code uses them: a labeled block left by `break`, `continue` of an outer loop, a `break` of an outer loop
+/// from a `switch`, a plain `break` inside a labeled block in a loop, two labels on one loop, and a labeled exit through `finally`.
+/// They run on the bytecode lane, and byte mode gives the result of tree mode.
+#[test]
+fn labels_run_on_the_bytecode_lane() {
+    big(|| {
+        let src = r#"function f(n) {
+  var o = [];
+  e: { if (n > 1) break e; o.push('in'); }
+  outer: for (var i = 0; i < 3; i++) {
+    for (var j = 0; j < 3; j++) { if (j === 1) continue outer; if (i === 2) break outer; o.push(i + '' + j); }
+  }
+  loop: while (true) { switch (n >= 2) { case true: break loop; default: n++; continue loop; } }
+  for (var k = 0; k < 3; k++) { blk: { if (k === 1) break; o.push('k' + k); } }
+  a: b: for (var m = 0; m < 4; m++) { if (m === 1) continue a; if (m === 3) break b; o.push('m' + m); }
+  t: { try { o.push('try'); break t; } finally { o.push('fin'); } o.push('never'); }
+  return o.join() + '|' + n;
+}
+f(0) + ' ' + f(3)"#;
+        let mut out = Vec::new();
+        for mode in [Exec::Tree, Exec::Byte] {
+            let mut it = Interp::realm(Heap::default(), EvalLimits::default()).unwrap();
+            it.set_exec(mode);
+            out.push(run(&mut it, src));
+            if mode == Exec::Byte {
+                let s = it.bc_stats();
+                assert_eq!(s.calls_tree, 0, "{s:?}");
+            }
+        }
+        assert_eq!(out[0], "in,00,10,k0,m0,m2,try,fin|2 00,10,k0,m0,m2,try,fin|3");
+        assert_eq!(out[0], out[1]);
+    });
+}
+
+/// `for-in` and `for-of`: arrays, strings, a `Map`, an iterator object whose `return` counts the closes, and the exits that close it
+/// (`break`, `return`, a `continue` to an outer loop, a throw) or not (the end, a `continue`). `let` gives a new binding for each
+/// iteration. A member target, a `var` target and a `for-in` whose object loses a key during the loop. They run on the bytecode
+/// lane, and byte mode gives the result of tree mode.
+#[test]
+fn for_in_and_for_of_run_on_the_bytecode_lane() {
+    big(|| {
+        let src = r#"function mk(n, log) {
+  var i = 0;
+  var it = { next: function () { i++; return i > n ? { done: true } : { value: i, done: false }; },
+             return: function () { log.push('close' + i); return {}; } };
+  it[Symbol.iterator] = function () { return it; };
+  return it;
+}
+function f() {
+  var o = [], fs = [], log = [];
+  for (var x of [1, 2, 3]) o.push(x);
+  for (const c of 'ab') o.push(c);
+  for (let e of new Map([['p', 1]]).entries()) o.push(e[0] + e[1]);
+  for (let i of [1, 2, 3]) fs.push(function () { return i; });
+  o.push(fs.map(function (g) { return g(); }).join(''));
+  for (var y of mk(5, log)) { if (y === 2) continue; if (y === 4) break; o.push('y' + y); }
+  for (var y2 of mk(2, log)) o.push('z' + y2);
+  outer: for (var a of [1, 2]) { for (var b of mk(3, log)) { if (b === 2) continue outer; o.push(a + '' + b); } }
+  try { for (var t of mk(3, log)) { if (t === 2) throw new Error('boom'); } } catch (e) { o.push(e.message); }
+  try { for (var t2 of mk(3, log)) { try { if (t2 === 1) break; } finally { o.push('fin' + t2); } } } finally { o.push('out'); }
+  var holder = {};
+  for (holder.v of [7, 8]) {}
+  o.push(holder.v);
+  var src = { a: 1, b: 2, c: 3 }, proto = Object.create({ inh: 1 }); proto.own = 1;
+  for (var key in src) { o.push(key); Reflect.deleteProperty(src, 'b'); }
+  for (var p in proto) o.push(p);
+  for (var s in 'xy') o.push(s);
+  for (var n in null) o.push('never');
+  try { for (var q of 5) {} } catch (e) { o.push(e.message); }
+  return o.join() + ' | ' + log.join() + ' | ' + g(log);
+}
+function g(log) { for (var r of mk(9, log)) { if (r === 3) return r + ':' + log.length; } }
+f()"#;
+        let mut out = Vec::new();
+        for mode in [Exec::Tree, Exec::Byte] {
+            let mut it = Interp::realm(Heap::default(), EvalLimits::default()).unwrap();
+            it.set_exec(mode);
+            out.push(run(&mut it, src));
+            if mode == Exec::Byte {
+                let s = it.bc_stats();
+                assert_eq!(s.calls_tree, 0, "{s:?}");
+            }
+        }
+        assert_eq!(out[0], "1,2,3,a,b,p1,123,y1,y3,z1,z2,11,21,boom,fin1,out,8,a,c,own,inh,0,1,5 is not iterable | close4,close2,close2,close2,close1 | 3:5");
+        assert_eq!(out[0], out[1]);
+    });
+}
+
+/// Destructuring: object patterns (name, string, number and computed keys, defaults, nesting, rest), array patterns (holes,
+/// rest, defaults, nesting, strings), an iterator whose `return` logs each close (a short pattern closes it, a done iterator does
+/// not, a throw in a default closes it), assignment patterns with a member target, `for-of` and `catch` patterns, parameters, and
+/// the errors for `null` and for a value that is not iterable. They run on the bytecode lane, and byte mode gives the tree result.
+#[test]
+fn destructuring_runs_on_the_bytecode_lane() {
+    big(|| {
+        let src = r#"function mk(n, log) {
+  var i = 0;
+  var it = { next: function () { i++; return i > n ? { done: true } : { value: i, done: false }; },
+             return: function () { log.push('close' + i); return {}; } };
+  it[Symbol.iterator] = function () { return it; };
+  return it;
+}
+function boom() { throw new Error('def'); }
+function h({ a, b = 2 }, [c, , d = 4]) { return a + b + c + d; }
+function f() {
+  var o = [], log = [], k = 'kk';
+  var { x, 'y': y, 1: one, [k]: kk, z = 9, fn = function () {}, n: { m } } = { x: 1, y: 2, 1: 3, kk: 4, n: { m: 5 } };
+  o.push(x, y, one, kk, z, fn.name, m);
+  const { p, ...rest } = { p: 1, q: 2, r: 3 };
+  o.push(p, Object.keys(rest).join(''));
+  let [a, , b = 7, [c2], ...tail] = [1, 2, undefined, [3], 4, 5];
+  o.push(a, b, c2, tail.join(''));
+  var [s1, s2] = 'hi';
+  o.push(s1 + s2);
+  var [i1] = mk(3, log);
+  var [j1, j2, j3, j4] = mk(2, log);
+  o.push(i1, j1, j2, j3, j4);
+  try { var [t1, t2 = boom()] = mk(1, log); } catch (e) { o.push(e.message); }
+  try { var [u1, [u2]] = mk(5, log); } catch (e) { o.push(e.message); }
+  var e1 = 1, e2 = 2;
+  [e1, e2] = [e2, e1];
+  var holder = {};
+  var res = ({ v: holder.w, ...holder.rest } = { v: 8, extra: 1 });
+  o.push(e1, e2, holder.w, Object.keys(holder.rest).join(''), res.v);
+  for (const [key, val] of Object.entries({ a: 1, b: 2 })) o.push(key + val);
+  for (var { len = 0 } of [{ len: 3 }, {}]) o.push(len);
+  try { throw { message: 'caught' }; } catch ({ message }) { o.push(message); }
+  o.push(h({ a: 1 }, [10, 0]));
+  try { var { nope } = null; } catch (e) { o.push(e.message); }
+  try { var [q1] = 5; } catch (e) { o.push(e.message); }
+  var fs = [];
+  for (let [w] of [[1], [2]]) fs.push(function () { return w; });
+  o.push(fs[0]() + fs[1]());
+  return o.join() + ' | ' + log.join();
+}
+f()"#;
+        let mut out = Vec::new();
+        for mode in [Exec::Tree, Exec::Byte] {
+            let mut it = Interp::realm(Heap::default(), EvalLimits::default()).unwrap();
+            it.set_exec(mode);
+            out.push(run(&mut it, src));
+            if mode == Exec::Byte {
+                let s = it.bc_stats();
+                assert_eq!(s.calls_tree, 0, "{s:?}");
+            }
+        }
+        assert_eq!(out[0], "1,2,3,4,9,fn,5,1,qr,1,7,3,45,hi,1,1,2,,,def,2 is not iterable,2,1,8,extra,8,a1,b2,3,0,caught,17,Cannot destructure 'null' as it is null.,5 is not iterable,3 | close1,close2");
+        assert_eq!(out[0], out[1]);
+    });
+}

@@ -185,7 +185,7 @@ fn bad_input_is_an_error_and_never_a_panic() {
 #[test]
 fn handlers_and_source_positions() {
     let mut c = Code::new(4);
-    c.handlers = vec![Handler { start: 4, end: 6, target: 12, reg: 3, depth: 0 }, Handler { start: 2, end: 10, target: 14, reg: 2, depth: 0 }];
+    c.handlers = vec![Handler { start: 4, end: 6, target: 12, reg: 3, depth: 0, iters: 0 }, Handler { start: 2, end: 10, target: 14, reg: 2, depth: 0, iters: 0 }];
     assert_eq!(c.handler_at(1), None);
     assert_eq!(c.handler_at(2).map(|h| h.target), Some(14));
     assert_eq!(c.handler_at(5).map(|h| h.target), Some(12), "the first range that holds the word is the innermost");
@@ -215,7 +215,7 @@ fn the_disassembler_names_operands_constants_and_targets() {
     for i in &prog {
         encode(&mut c.ops, i).unwrap();
     }
-    c.handlers.push(Handler { start: 0, end: 4, target: 9, reg: 4, depth: 1 });
+    c.handlers.push(Handler { start: 0, end: 4, target: 9, reg: 4, depth: 1, iters: 0 });
     let want = "\
 code nregs=5 words=12 consts=3 ics=1
 0000  LoadI         r0, 7

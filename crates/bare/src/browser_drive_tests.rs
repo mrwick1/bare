@@ -222,6 +222,109 @@ fn typing_collects_the_garbage_of_its_own_keys() {
     });
 }
 
+// ------------------------------------------------------------------------------------------ one edit for a whole text
+
+/// Fields for `ui_insert_text` (Chrome's `Input.insertText`, the call of Playwright `fill`). The log has the key and input events, with
+/// `inputType`, `data`, the target and `isTrusted`. `#c` cancels its `beforeinput`.
+const FILL: &str = "<input id=i><input id=m maxlength=5><input id=c value=keep><textarea id=t></textarea><div id=h contenteditable></div><p id=p>x</p><script>
+window.__log = [];
+['keydown', 'keypress', 'keyup', 'beforeinput', 'input', 'change'].forEach(function (t) {
+  document.addEventListener(t, function (e) { window.__log.push(e.type + ':' + (e.inputType || '') + ':' + (e.data == null ? '-' : e.data) + '@' + e.target.id + ':' + e.isTrusted) }, true);
+});
+document.getElementById('c').addEventListener('beforeinput', function (e) { e.preventDefault() });
+</script>";
+
+fn js(b: &mut Browser, src: &str) -> String {
+    let v = b.run_script(src).unwrap();
+    b.it.display(v)
+}
+
+/// Focus `sel` with a click, then clear the log.
+fn focus_fresh(b: &mut Browser, sel: &str) {
+    let n = node(b, sel);
+    b.drive_click(n).unwrap();
+    js(b, "window.__log.length = 0");
+}
+
+#[test]
+fn insert_text_is_one_trusted_edit_with_no_keys() {
+    big(|| {
+        let mut b = browser(FILL);
+        focus_fresh(&mut b, "#i");
+        b.ui_insert_text("hello world").unwrap();
+        assert_eq!(log(&mut b), "beforeinput:insertText:hello world@i:true\ninput:insertText:hello world@i:true");
+        assert_eq!(js(&mut b, "var i = document.getElementById('i'); i.value + '|' + i.selectionStart + '|' + i.selectionEnd"), "hello world|11|11");
+    });
+}
+
+#[test]
+fn insert_text_replaces_the_selected_text() {
+    big(|| {
+        let mut b = browser(FILL);
+        js(&mut b, "document.getElementById('i').value = 'old text'");
+        focus_fresh(&mut b, "#i");
+        b.drive_key(None, "Control+a").unwrap();
+        b.ui_insert_text("new").unwrap();
+        assert_eq!(js(&mut b, "document.getElementById('i').value"), "new");
+    });
+}
+
+#[test]
+fn insert_text_stops_when_beforeinput_is_canceled() {
+    big(|| {
+        let mut b = browser(FILL);
+        focus_fresh(&mut b, "#c");
+        b.ui_insert_text("zzz").unwrap();
+        assert_eq!(log(&mut b), "beforeinput:insertText:zzz@c:true");
+        assert_eq!(js(&mut b, "document.getElementById('c').value"), "keep");
+    });
+}
+
+#[test]
+fn insert_text_is_cut_to_maxlength() {
+    big(|| {
+        let mut b = browser(FILL);
+        focus_fresh(&mut b, "#m");
+        b.ui_insert_text("hello world").unwrap();
+        assert_eq!(log(&mut b), "beforeinput:insertText:hello@m:true\ninput:insertText:hello@m:true");
+        assert_eq!(js(&mut b, "document.getElementById('m').value"), "hello");
+    });
+}
+
+#[test]
+fn insert_text_keeps_line_feeds_in_a_textarea() {
+    big(|| {
+        let mut b = browser(FILL);
+        focus_fresh(&mut b, "#t");
+        b.ui_insert_text("a\nb").unwrap();
+        assert_eq!(log(&mut b), "beforeinput:insertText:a\nb@t:true\ninput:insertText:a\nb@t:true");
+        assert_eq!(js(&mut b, "JSON.stringify(document.getElementById('t').value)"), "\"a\\nb\"");
+    });
+}
+
+#[test]
+fn insert_text_edits_a_contenteditable_host() {
+    big(|| {
+        let mut b = browser(FILL);
+        // The empty host has no box to click: focus it as `drive_type` does.
+        js(&mut b, "document.getElementById('h').focus(); window.__log.length = 0");
+        b.ui_insert_text("hi there").unwrap();
+        assert_eq!(log(&mut b), "beforeinput:insertText:hi there@h:true\ninput:insertText:hi there@h:true");
+        assert_eq!(js(&mut b, "document.getElementById('h').textContent"), "hi there");
+    });
+}
+
+#[test]
+fn insert_text_does_nothing_without_an_editable_focus() {
+    big(|| {
+        let mut b = browser(FILL);
+        focus_fresh(&mut b, "#p");
+        b.ui_insert_text("lost").unwrap();
+        assert_eq!(log(&mut b), "");
+        assert_eq!(js(&mut b, "document.getElementById('p').textContent"), "x");
+    });
+}
+
 // ------------------------------------------------------------------------------------------ the session
 
 fn cfg(url: String) -> SessionConfig {

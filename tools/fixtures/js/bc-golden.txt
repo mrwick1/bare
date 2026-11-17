@@ -1211,16 +1211,33 @@ code nregs=1 words=3 consts=0 ics=0
 0000  GetEnv        r0, 1, 0
 0001  Ret           r0
 0002  RetUndef      
-=== unsupported: destructuring
+=== an object pattern
 function f(o) { var {a} = o; return a }
 ---
 fn0 f
-unsupported: destructuring
-=== unsupported: for-of
+code nregs=2 words=8 consts=1 ics=1
+0000  GetEnv        r0, 0, 0
+0001  RequireObj    r0
+0002  GetField      r1, r0, ic0, k0  ; name:a
+0004  SetEnv        r1, 0, 1
+0005  GetEnv        r0, 0, 1
+0006  Ret           r0
+0007  RetUndef      
+=== for-of with a const
 function f(a) { for (const x of a) {} }
 ---
 fn0 f
-unsupported: for-in or for-of
+code nregs=1 words=10 consts=0 ics=0
+0000  GetEnv        r0, 0, 0
+0001  IterOpen      r0, 0
+0002  PushEnv       s2
+0003  IterNext      r0, -> 0008
+0004  CopyEnv       
+0005  InitEnv       r0, 0, 0
+0006  Jmp           -> 0003
+0007  IterClose     
+0008  PopEnv        
+0009  RetUndef      
 === unsupported: spread
 function f(a) { return g(...a) }
 ---
@@ -1231,8 +1248,11 @@ function* f() { yield 1 }
 ---
 fn0 f
 unsupported: generator or async function
-=== unsupported: label
+=== label: break out of a loop
 function f() { l: for (;;) break l }
 ---
 fn0 f
-unsupported: label
+code nregs=0 words=3 consts=0 ics=0
+0000  Jmp           -> 0002
+0001  Jmp           -> 0000
+0002  RetUndef      

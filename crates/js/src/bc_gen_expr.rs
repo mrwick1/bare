@@ -325,6 +325,12 @@ impl Gen<'_, '_> {
         }
     }
 
+    /// Write `src` to the member target `e` (a `for-in` or `for-of` target). The caller frees the registers of the place.
+    pub(super) fn put_member(&mut self, e: ExprId, src: u32) -> G<()> {
+        let p = self.place_of(e)?;
+        self.put(&p, src)
+    }
+
     fn get(&mut self, p: &Place, dst: u32) -> G<()> {
         match *p {
             Place::Name(s, n) => self.load(s, n, dst),
@@ -351,6 +357,15 @@ impl Gen<'_, '_> {
             PatKind::Member(me) => {
                 // A member target with a member inside a paren has the same place.
                 self.place_of(me)?
+            }
+            PatKind::Array(_) | PatKind::Object(_) if op == AssignOp::Assign => {
+                // The value is in a register of its own: the pattern may write the register of `dst`.
+                let t = self.reg()?;
+                self.expr(value, t)?;
+                self.bind_pat(false, VarKind::Var, target, t)?;
+                self.emit(Op::Mov, dst, t, 0)?;
+                self.free(mark);
+                return Ok(());
             }
             _ => return Err("destructuring"),
         };

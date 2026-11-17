@@ -22,7 +22,7 @@ impl Gen<'_, '_> {
                     self.free(r);
                     return Ok(());
                 }
-                StmtKind::If { .. } | StmtKind::While { .. } | StmtKind::DoWhile { .. } | StmtKind::For { .. } | StmtKind::Try { .. } | StmtKind::Switch { .. } => self.emit(Op::LoadUndef, c, 0, 0)?,
+                StmtKind::If { .. } | StmtKind::While { .. } | StmtKind::DoWhile { .. } | StmtKind::For { .. } | StmtKind::ForIn { .. } | StmtKind::ForOf { .. } | StmtKind::Try { .. } | StmtKind::Switch { .. } => self.emit(Op::LoadUndef, c, 0, 0)?,
                 _ => {}
             }
         }
@@ -133,14 +133,37 @@ impl Gen<'_, '_> {
                 Ok(())
             }
             StmtKind::Break(None) => {
-                let i = self.jumps.len().checked_sub(1).ok_or("break outside a loop")?;
+                let i = self.jumps.iter().rposition(|j| !j.label_only).ok_or("break outside a loop")?;
                 self.exit(Exit::Break(i), 0)
             }
             StmtKind::Continue(None) => {
                 let i = self.jumps.iter().rposition(|j| j.is_loop).ok_or("continue outside a loop")?;
                 self.exit(Exit::Continue(i), 0)
             }
-            StmtKind::Break(Some(_)) | StmtKind::Continue(Some(_)) | StmtKind::Labeled { .. } => Err("label"),
+            StmtKind::Break(Some(l)) => {
+                let n = self.it.name_at(l);
+                let i = self.jumps.iter().rposition(|j| j.labels.contains(&n)).ok_or("break to an unknown label")?;
+                self.exit(Exit::Break(i), 0)
+            }
+            StmtKind::Continue(Some(l)) => {
+                let n = self.it.name_at(l);
+                let i = self.jumps.iter().rposition(|j| j.is_loop && j.labels.contains(&n)).ok_or("continue to an unknown label")?;
+                self.exit(Exit::Continue(i), 0)
+            }
+            StmtKind::Labeled { label, body } => {
+                let n = self.it.name_at(label);
+                self.pending.push(n);
+                match self.prog.stmt(body).kind {
+                    // The `open` of the loop or `switch` takes the labels.
+                    StmtKind::Labeled { .. } | StmtKind::For { .. } | StmtKind::ForIn { .. } | StmtKind::ForOf { .. } | StmtKind::While { .. } | StmtKind::DoWhile { .. } | StmtKind::Switch { .. } => self.stmt(body),
+                    _ => {
+                        let labels = std::mem::take(&mut self.pending);
+                        self.jumps.push(Jumps { is_loop: false, depth: self.depth, fins: self.fins.len(), breaks: Vec::new(), cont: None, conts: Vec::new(), labels, label_only: true, iters: self.iters });
+                        self.stmt(body)?;
+                        self.close()
+                    }
+                }
+            }
             StmtKind::Throw(e) => {
                 let r = self.reg()?;
                 self.expr(e, r)?;
@@ -177,7 +200,9 @@ impl Gen<'_, '_> {
                 Ok(())
             }
             StmtKind::Class(_) => Err("class"),
-            StmtKind::ForIn { .. } | StmtKind::ForOf { .. } => Err("for-in or for-of"),
+            StmtKind::ForIn { left, right, body } => self.for_each(left, right, body, false),
+            StmtKind::ForOf { is_await: true, .. } => Err("async"),
+            StmtKind::ForOf { left, right, body, .. } => self.for_each(left, right, body, true),
             StmtKind::With { .. } => Err("with"),
             StmtKind::ExportDefault(..) => Err("module code"),
             StmtKind::Debugger => Err("debugger"),
@@ -203,7 +228,11 @@ impl Gen<'_, '_> {
         for d in prog.list(decls) {
             let d = *prog.decl(d);
             if !matches!(prog.pat(d.target).kind, PatKind::Ident) {
-                return Err("destructuring");
+                let r = self.reg()?;
+                self.expr(d.init.ok_or("a pattern with no initializer")?, r)?;
+                self.bind_pat(true, kind, d.target, r)?;
+                self.free(r);
+                continue;
             }
             let n = self.it.cc.cold.pat_name[d.target.index()];
             let reg = if self.rf.is_some() { self.rf_decl_opt(self.it.pat_site(d.target.index()), n)? } else { None };
@@ -299,9 +328,10 @@ impl Gen<'_, '_> {
         let depth = self.depth;
         let hdepth = u16::try_from(depth).map_err(|_| "too deep")?;
         let mark = self.top;
+        let iters = u16::try_from(self.iters).map_err(|_| "too deep")?;
         if finalizer.is_some() {
             let (kind, val) = (self.reg()?, self.reg()?);
-            self.fins.push(Fin { kind, val, depth, entry: Vec::new(), exits: Vec::new() });
+            self.fins.push(Fin { kind, val, depth, iters: self.iters, entry: Vec::new(), exits: Vec::new() });
         }
         let start = self.here() as u32;
         self.stmt(block)?;
@@ -310,17 +340,16 @@ impl Gen<'_, '_> {
             ends.push(self.jump(Op::Jmp, 0)?);
             let c = *prog.catch(h);
             let exc = self.reg()?;
-            self.code.handlers.push(Handler { start, end: self.here() as u32, target: self.here() as u32, reg: exc as u16, depth: hdepth });
+            self.code.handlers.push(Handler { start, end: self.here() as u32, target: self.here() as u32, reg: exc as u16, depth: hdepth, iters });
             let sc = *self.scopes.get(&s).ok_or("no catch scope")?;
             if self.rf.is_some() {
                 if self.scope_has_env(sc) {
                     return Err("a catch with an inner function in a register function");
                 }
                 self.rf_scope(sc)?;
-                if let Some(p) = c.param {
-                    if !matches!(prog.pat(p).kind, PatKind::Ident) {
-                        return Err("destructuring");
-                    }
+                if let Some(p) = c.param.filter(|&p| !matches!(prog.pat(p).kind, PatKind::Ident)) {
+                    self.bind_pat(true, VarKind::Let, p, exc)?;
+                } else if let Some(p) = c.param {
                     let n = self.it.cc.cold.pat_name[p.index()];
                     let (key, l) = self.rf_decl(self.it.pat_site(p.index()), n)?;
                     self.emit(Op::Mov, l.reg, exc, 0)?;
@@ -330,10 +359,9 @@ impl Gen<'_, '_> {
                 self.free(exc);
             } else {
                 self.push_env(sc)?;
-                if let Some(p) = c.param {
-                    if !matches!(prog.pat(p).kind, PatKind::Ident) {
-                        return Err("destructuring");
-                    }
+                if let Some(p) = c.param.filter(|&p| !matches!(prog.pat(p).kind, PatKind::Ident)) {
+                    self.bind_pat(true, VarKind::Let, p, exc)?;
+                } else if let Some(p) = c.param {
                     let n = self.it.cc.cold.pat_name[p.index()];
                     let Site::Env { hops: 0, index } = self.site(self.it.pat_site(p.index()), n)? else { return Err("a catch parameter outside its environment") };
                     self.emit(Op::InitEnv, exc, 0, index)?;
@@ -353,7 +381,7 @@ impl Gen<'_, '_> {
             let skip = self.jump(Op::Jmp, 0)?;
             // An empty `try` block with no `catch` cannot throw: no handler.
             if start < tail {
-                self.code.handlers.push(Handler { start, end: tail, target: self.here() as u32, reg: fin.val as u16, depth: hdepth });
+                self.code.handlers.push(Handler { start, end: tail, target: self.here() as u32, reg: fin.val as u16, depth: hdepth, iters });
             }
             self.emit(Op::LoadI, fin.kind, 1, 0)?;
             self.patch(skip)?;
@@ -382,12 +410,16 @@ impl Gen<'_, '_> {
     /// Leave statements for `ex`. A `finally` on the way runs first: the jump goes to it, and it continues the exit at its end.
     /// `val` holds the return value of a `return`.
     pub(super) fn exit(&mut self, ex: Exit, val: u32) -> G<()> {
-        let (fins, depth) = match ex {
-            Exit::Return => (0, 0),
-            Exit::Break(i) | Exit::Continue(i) => (self.jumps[i].fins, self.jumps[i].depth),
+        let (fins, depth, iters) = match ex {
+            Exit::Return => (0, 0, 0),
+            Exit::Break(i) | Exit::Continue(i) => (self.jumps[i].fins, self.jumps[i].depth, self.jumps[i].iters),
         };
+        // The iterators close before the environments pop: a `return` method that throws finds the depth of its handler.
         if self.fins.len() > fins {
             let f = self.fins.len() - 1;
+            for _ in self.fins[f].iters..self.iters {
+                self.emit(Op::IterClose, 0, 0, 0)?;
+            }
             for _ in self.fins[f].depth..self.depth {
                 self.emit(Op::PopEnv, 0, 0, 0)?;
             }
@@ -406,6 +438,9 @@ impl Gen<'_, '_> {
             let j = self.jump(Op::Jmp, 0)?;
             self.fins[f].entry.push(j);
             return Ok(());
+        }
+        for _ in iters..self.iters {
+            self.emit(Op::IterClose, 0, 0, 0)?;
         }
         if ex == Exit::Return {
             return self.emit(Op::Ret, val, 0, 0);
@@ -430,8 +465,182 @@ impl Gen<'_, '_> {
         Ok(())
     }
 
+    /// `for-in` and `for-of` (`exec_for_each`): the value, the iterator, then for each value a new binding (`CopyEnv` for a `let`
+    /// or `const` that a closure captures) and the body. A `break` to the loop lands on its `IterClose`; the end of the iteration
+    /// pops the iterator with no close.
+    fn for_each(&mut self, left: ForLeft, right: ExprId, body: StmtId, of: bool) -> G<()> {
+        let prog = self.prog.clone();
+        let (var, kind, target) = match left {
+            ForLeft::Pat(p) => (None, VarKind::Var, p),
+            ForLeft::Var(v) => {
+                let StmtKind::Var { kind, decls } = prog.stmt(v).kind else { return Err("for left") };
+                let d = prog.list(decls).next().map(|d| *prog.decl(d)).ok_or("for left")?;
+                if d.init.is_some() {
+                    return Err("a for-in initializer");
+                }
+                (Some(v), kind, d.target)
+            }
+        };
+        let r = self.reg()?;
+        self.expr(right, r)?;
+        if of {
+            self.code.calls.push((self.here() as u32, right.index() as u32));
+            self.emit(Op::IterOpen, r, 0, 0)?;
+        } else {
+            self.emit(Op::ForInOpen, r, 0, 0)?;
+        }
+        self.free(r);
+        self.iters += 1;
+        let scope = var.and_then(|v| self.scopes.get(&v).copied());
+        let rf_mark = self.top;
+        let envs = scope.is_some_and(|sc| self.scope_has_env(sc));
+        if let Some(sc) = scope {
+            if envs {
+                self.push_env(sc)?;
+                if self.rf.is_some() {
+                    self.rf_env_scope(sc)?;
+                }
+            } else {
+                self.rf_scope(sc)?;
+            }
+        }
+        let v = self.reg()?;
+        let top = self.here();
+        let done = self.jump(Op::IterNext, v)?;
+        if envs {
+            self.emit(Op::CopyEnv, 0, 0, 0)?;
+        }
+        self.bind_pat(var.is_some(), kind, target, v)?;
+        self.open(true, Some(top));
+        self.stmt(body)?;
+        self.jump_back(Op::Jmp, 0, top)?;
+        self.close()?;
+        self.emit(Op::IterClose, 0, 0, 0)?;
+        self.patch(done)?;
+        self.iters -= 1;
+        if envs {
+            self.pop_env()?;
+        }
+        self.free(if self.rf.is_some() { rf_mark } else { v });
+        Ok(())
+    }
+
+    /// Bind the value in `v` to the pattern `p` (`bind_pattern`): a declaration (`decl`, of `kind`) or an assignment target. `v`
+    /// is not written. The order of reads, defaults and writes is the one of the tree walker.
+    pub(super) fn bind_pat(&mut self, decl: bool, kind: VarKind, p: PatId, v: u32) -> G<()> {
+        let prog = self.prog.clone();
+        let mark = self.top;
+        match prog.pat(p).kind {
+            PatKind::Ident => {
+                let n = self.it.cc.cold.pat_name[p.index()];
+                let site = self.it.pat_site(p.index());
+                let reg = if decl && self.rf.is_some() { self.rf_decl_opt(site, n)? } else { None };
+                if let Some((key, l)) = reg {
+                    self.emit(Op::Mov, l.reg, v, 0)?;
+                    if kind != VarKind::Var {
+                        self.rf_set_init(key);
+                    }
+                } else if decl && kind != VarKind::Var {
+                    let Site::Env { hops: 0, index } = self.site(site, n)? else { return Err("a let or const outside its environment") };
+                    self.emit(Op::InitEnv, v, 0, index)?;
+                } else {
+                    let s = if decl { self.site(site, n)? } else { self.site_w(site, n)? };
+                    self.store(s, n, v)?;
+                }
+            }
+            PatKind::Member(me) if !decl => self.put_member(me, v)?,
+            PatKind::Assign { target, default } => {
+                // `undefined` takes the default (an anonymous function takes the name of a name target).
+                let x = self.reg()?;
+                let t = self.reg()?;
+                self.emit(Op::Mov, x, v, 0)?;
+                self.emit(Op::LoadUndef, t, 0, 0)?;
+                self.emit(Op::StrictEq, t, x, t)?;
+                let j = self.jump(Op::JmpIfNot, t)?;
+                let name = matches!(prog.pat(target).kind, PatKind::Ident).then(|| self.it.cc.cold.pat_name[target.index()]);
+                self.named(default, x, name)?;
+                self.patch(j)?;
+                self.bind_pat(decl, kind, target, x)?;
+            }
+            PatKind::Object(l) => {
+                self.emit(Op::RequireObj, v, 0, 0)?;
+                let rest = prog.list(l).any(|q| matches!(prog.pat(prog.pat_prop(q).value).kind, PatKind::Rest(_)));
+                // With a rest property, each key stays in a register after the one of the rest object, for `ObjRest`.
+                let o = if rest { self.reg()? } else { 0 };
+                let mut nkeys = 0;
+                for q in prog.list(l) {
+                    let pp = *prog.pat_prop(q);
+                    if let PatKind::Rest(t) = prog.pat(pp.value).kind {
+                        self.emit(Op::ObjRest, o, v, nkeys)?;
+                        self.bind_pat(decl, kind, t, o)?;
+                        continue;
+                    }
+                    if let (Key::Name(sp), false) = (pp.key, rest) {
+                        let x = self.reg()?;
+                        self.field(Op::GetField, x, v, sp)?;
+                        self.bind_pat(decl, kind, pp.value, x)?;
+                        self.free(x);
+                        continue;
+                    }
+                    // The key (`coerce_key`), then the value, then the binding.
+                    let k = self.reg()?;
+                    if let Key::Computed(e) = pp.key {
+                        self.expr(e, k)?;
+                        self.emit(Op::ToKey, k, v, k)?;
+                    } else {
+                        let s = match pp.key {
+                            Key::Name(sp) => prog.name(sp).into_owned(),
+                            Key::Str(sp) => {
+                                let mut u = Vec::new();
+                                prog.string(sp, &mut u).map_err(|_| "string")?;
+                                String::from_utf16(&u).map_err(|_| "a key with a lone surrogate")?
+                            }
+                            Key::Num(sp) => number_to_string(self.it.num_lit(sp, num_base(prog.text(sp)))),
+                            _ => return Err("pattern key"),
+                        };
+                        let c = self.konst(KeyOf::String(s.encode_utf16().collect()));
+                        self.emit(Op::LoadK, k, c, 0)?;
+                    }
+                    let x = self.reg()?;
+                    self.emit(Op::GetElem, x, v, k)?;
+                    self.bind_pat(decl, kind, pp.value, x)?;
+                    if rest {
+                        self.free(x);
+                        nkeys += 1;
+                    } else {
+                        self.free(k);
+                    }
+                }
+            }
+            PatKind::Array(l) => {
+                self.emit(Op::IterOpen, v, 1, 0)?;
+                self.iters += 1;
+                let x = self.reg()?;
+                for q in prog.list(l) {
+                    match prog.pat(q).kind {
+                        PatKind::Hole => self.emit(Op::IterStep, x, 0, 0)?,
+                        PatKind::Rest(t) => {
+                            self.emit(Op::IterRest, x, 0, 0)?;
+                            self.bind_pat(decl, kind, t, x)?;
+                        }
+                        _ => {
+                            self.emit(Op::IterStep, x, 0, 0)?;
+                            self.bind_pat(decl, kind, q, x)?;
+                        }
+                    }
+                }
+                self.emit(Op::IterClose, 0, 0, 0)?;
+                self.iters -= 1;
+            }
+            _ => return Err("destructuring"),
+        }
+        self.free(mark);
+        Ok(())
+    }
+
     fn open(&mut self, is_loop: bool, cont: Option<usize>) {
-        self.jumps.push(Jumps { is_loop, depth: self.depth, fins: self.fins.len(), breaks: Vec::new(), cont, conts: Vec::new() });
+        let labels = std::mem::take(&mut self.pending);
+        self.jumps.push(Jumps { is_loop, depth: self.depth, fins: self.fins.len(), breaks: Vec::new(), cont, conts: Vec::new(), labels, label_only: false, iters: self.iters });
     }
 
     /// The `continue` target of the open loop is here.

@@ -68,6 +68,7 @@ pub(super) fn verify(code: &Code) -> Result<(), String> {
             Op::Call | Op::CallR => i.b + 2 + i.c <= nregs,
             Op::New => i.b + 1 + i.c <= nregs,
             Op::Concat => i.c >= 1 && i.b + i.c <= nregs,
+            Op::ObjRest => i.a + 1 + i.c <= nregs,
             _ => true,
         };
         if !regs_ok {
@@ -107,7 +108,7 @@ pub(super) fn verify(code: &Code) -> Result<(), String> {
         };
         match i.op {
             Op::Jmp => work.push((target(pc, len, &i), d)),
-            Op::JmpIf | Op::JmpIfNot | Op::JmpNullish | Op::JmpNotNullish => work.extend([(target(pc, len, &i), d), (pc + len, d)]),
+            Op::JmpIf | Op::JmpIfNot | Op::JmpNullish | Op::JmpNotNullish | Op::IterNext => work.extend([(target(pc, len, &i), d), (pc + len, d)]),
             op if op.is_fused_jump() => work.extend([(target(pc, len, &i), d), (pc + len, d)]),
             Op::Ret | Op::RetUndef | Op::Throw => {}
             _ => work.push((pc + len, d)),

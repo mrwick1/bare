@@ -1200,6 +1200,14 @@ fn attempt(p: &mut Page, m: &mut Memo, a: &Action, out: Option<&PathBuf>, red: &
                 m.keys = None;
                 p.after_action();
             }
+            Action::Fill(loc, text, last_key) => {
+                // The rule of `type`: a field that the page replaced goes on in the new focused field.
+                let h = one_or_replaced(p, m, loc)?;
+                if p.is_password(h) {
+                    m.typed.push(text.clone());
+                }
+                p.fill_text(h, text, *last_key).map_err(|r| refused(p, h, r))?;
+            }
             Action::Select(loc, wanted) => {
                 let h = one(p, m, loc)?;
                 p.select(h, wanted).map_err(|r| refused(p, h, r))?;

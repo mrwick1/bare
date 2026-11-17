@@ -54,6 +54,12 @@ struct Jumps {
     /// The word of the `continue` target when it is known, else the jumps to it.
     cont: Option<usize>,
     conts: Vec<usize>,
+    /// The labels of the statement (interned names).
+    labels: Vec<u32>,
+    /// The open iterators at the statement (a `for-of` or `for-in` counts its own): an exit closes the ones above.
+    iters: u32,
+    /// A labeled statement that is not a loop or a `switch`: only a `break` with its label goes to it.
+    label_only: bool,
 }
 
 /// An open `try` with a `finally` block (see the module comment).
@@ -61,6 +67,7 @@ struct Fin {
     kind: u32,
     val: u32,
     depth: u32,
+    iters: u32,
     /// The jumps to the `finally` block.
     entry: Vec<usize>,
     exits: Vec<Exit>,
@@ -127,6 +134,10 @@ pub(super) struct Gen<'g, 'p> {
     depth: u32,
     jumps: Vec<Jumps>,
     fins: Vec<Fin>,
+    /// The labels in front of the loop or `switch` being compiled: its `open` takes them.
+    pending: Vec<u32>,
+    /// The open iterators of `for-of` and `for-in` loops at this point (`IterOpen` to `IterClose`).
+    iters: u32,
     /// The source offset of the node being compiled, for `Code::lines`.
     pos: u32,
     strict: bool,
@@ -198,6 +209,8 @@ impl<'p> Interp<'p> {
             depth: 0,
             jumps: Vec::new(),
             fins: Vec::new(),
+            pending: Vec::new(),
+            iters: 0,
             pos: f.span.start,
             strict: f.strict,
             compl: None,
@@ -277,6 +290,8 @@ impl<'p> Interp<'p> {
             depth: 0,
             jumps: Vec::new(),
             fins: Vec::new(),
+            pending: Vec::new(),
+            iters: 0,
             pos: 0,
             compl: None,
             rf: None,

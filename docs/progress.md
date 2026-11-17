@@ -4,6 +4,78 @@ This file records what is built, what comes next and what is missing. Update it 
 
 The reasons for the design are in [decisions.md](decisions.md). Time and memory numbers for each module are in [resources.md](resources.md).
 
+## Bytecode lane runs destructuring (2026-11-17)
+
+`BARE_JS_EXEC=byte` now compiles object and array patterns in declarations, assignments, `for-in` and `for-of` heads and `catch` clauses. Before, the lane refused them (104,527 calls on a private React dashboard journey). Parameters with patterns already ran: the tree walker binds them before the code starts. The default stays `tree`.
+
+- `bind_pat` compiles a pattern in the order of `bind_pattern`. Names are registers in a register function and bindings in stage 1.
+- Object patterns: `RequireObj`, then `GetField` with an inline cache for a name key, or `GetElem` for other keys. With a rest property, the keys stay in registers after the rest object, for `ObjRest` (`copy_props`).
+- Array patterns use the iterator stack of `for-of`: `IterOpen` (with `b` = 1, the error names the value), `IterStep` (`undefined` when done), `IterRest`, then `IterClose`. A throw closes the iterator through the handler.
+- Defaults compare with `undefined`. An anonymous function in a default takes the name of its target.
+- The pattern ops run in one function out of the loop (`bc_pattern_op`, `#[inline(never)]`). With their code in the loop, the journey cost 1.25 G (2.7%) more for the same work: the same calls on the lane, compared with the build before. Hypothesis: code layout or register pressure in `bc_loop`. A one-word `ObjRest` (no `x` word) removed the rest of the difference.
+
+Measurements (replay, `BARE_CLOCK=virtual`, base: the `for-in` and `for-of` entry below, #632):
+
+| Workload | before | after |
+|---|---|---|
+| Private React dashboard journey, `byte`, 3 runs | 46.207 to 46.208 G | 45.927 to 45.930 G (-0.6%) |
+| Public React page, `byte`, cost per key (`keycost.sh`) | 163.3 M | 161.1 M (-1.3%) |
+
+The gain is small because most functions with patterns stop now at a spread or an optional chain. Refusals on the journey (calls): spread 99,449 (was 39,783), optional chain 84,567 (was 69,725), private name 10,765, regexp literal 9,316, computed key 4,540, delete 2,390, others under 100. The journey in `tree`: 74.535 G, unchanged. Peak RSS on the public page in `byte`: 33.1 MiB.
+
+Tests: a new test covers every pattern form, iterator closes, defaults, member targets, `for-of`, `catch`, parameters and the two errors. Before the change it failed (`refused` destructuring). A new test checks the pattern ops in a register function with no environment ops. `cargo test -p bare-js`: 1006 passed. `exec_diff.sh`: 79 runs, 0 differences.
+
+Not tested: test262 in byte mode, wall time, Windows and macOS, live sites.
+
+## Bytecode lane runs for-in and for-of (2026-11-17)
+
+`BARE_JS_EXEC=byte` now compiles `for-in` and `for-of` loops. Before, the lane refused them, and they were the largest refusal on a private React dashboard journey (239,306 calls). The default stays `tree`.
+
+- New ops: `IterOpen` (`iter_start`), `ForInOpen` (`for_in_keys`), `IterNext` (the next value, or pop and jump when done) and `IterClose` (`iter_close`).
+- The open iterators of all frames are one stack in `RegStack`. A frame and a handler record its height. A throw closes the iterators above the handler before the handler runs, with `iter_close_throw`. An error that is not a thrown value drops them and runs no JS.
+- `break`, `return` and a `continue` to an outer loop emit `IterClose` before they pop environments. Through a `finally`, the iterators inside the `try` close before the jump to the `finally` block.
+- A `let` or `const` gets a new binding for each iteration (`CopyEnv`). In a register function the loop variable is a register.
+- Still refused: a destructuring target, `for await`, and a `for-in` with an initializer.
+
+Measurements (replay, `BARE_CLOCK=virtual`, base: the lazy-function entry below, #630):
+
+| Workload | before | after |
+|---|---|---|
+| Private React dashboard journey, `byte`, 3 runs | 48.902 to 48.905 G | 46.207 to 46.208 G (-5.5%) |
+| Public React page, `byte`, cost per key (`keycost.sh`) | 180.7 M | 163.3 M (-9.6%) |
+
+Calls on bytecode on the journey: 96.8% (7,150,774 on the lane, 236,744 on the tree walker). The journey in `tree`: 74.535 G (1 run), unchanged. Peak RSS on the public page in `byte`: 33.0 MiB.
+
+Tests: a new test covers arrays, strings, a `Map`, an iterator whose `return` counts the closes, every exit, `for-in` with a deleted key and a prototype key, and a value that is not iterable. Before the change it failed (`calls_tree` 2). A new test checks that both loops compile in a register function. `cargo test -p bare-js`: 1004 passed. `exec_diff.sh`: 79 runs, 0 differences.
+
+Not tested: test262 in byte mode, wall time, Windows and macOS, live sites. Refusals left on the journey (calls): destructuring 104,527, optional chain 69,725, spread 39,783, private name 10,746, regexp literal 9,314, delete 2,390, others under 200.
+
+## Bytecode lane runs lazy functions (2026-11-17)
+
+`BARE_JS_EXEC=byte` now compiles lazy functions (bodies that `parse_cache` drops in a source of 16 KiB or more). Before, the lane refused them with "no scope", so on a React page most calls stayed on the tree walker. The default stays `tree`.
+
+- A lazy function is parsed into its own script slot. Its scopes now carry `owner`, the slot whose walk opened them. `bc_fn_scope`, `bc_scope_end` and `bc_resolve` use `owner` to find the scopes of a lazy tree and to resolve names in the outer slot.
+- A function that holds a lazy inner function stays on stage 1 (all names in the environment). `rfc_analyze` refuses it for stage 2.
+- A named function expression with a lazy body takes `is_expr` from its `LazySlot`. Before this fix, React failed with a TypeError in byte mode.
+- The loop now runs the wide forms of `GetEnv`, `SetEnv`, `InitEnv` and `DefField` (an index above 255). `bc_finish` still refuses other wide words.
+- Labels compile: `break label` and `continue label` on loops, and `break label` out of a labelled block.
+- Calls on bytecode on a private React dashboard journey: 93.6% (6,911,573 on the lane, 475,945 on the tree walker).
+
+Measurements (3 runs each, replay, `BARE_CLOCK=virtual`, main `8b6a71bb`):
+
+| Journey | main `tree` | branch `byte` |
+|---|---|---|
+| Private React dashboard, 230 typed keys | 74.537 to 74.539 G | 48.902 to 48.905 G (-34.4%) |
+| Public React page, cost per key (`keycost.sh`) | 276.9 M | 180.7 M |
+
+Branch `tree` is unchanged (74.538 G). Peak RSS on the public page: 31.6 MiB `tree`, 32.8 MiB `byte`.
+
+Tests: a differential test runs 1,018 cases of 7 fixture corpora with lazy bodies in `tree` and `byte` and expects equal results and no `bc_scope_check` mismatch. New tests cover lazy calls, wide words and labels. `exec_diff.sh`: 79 runs, 0 differences.
+
+Refusals left on the dashboard journey (calls): for-in and for-of 239,306, destructuring 104,472, optional chain 69,676, spread 39,782, private name 10,746, regexp literal 9,314, delete 2,390, others under 200.
+
+Not tested: test262 in byte mode (its runner does not read `BARE_JS_EXEC`), wall time, Windows and macOS, live sites.
+
 ## Agent browser integration (2026-11-17)
 
 The MCP combines document-scoped references and observation revisions, removal diffs, typed recovery evidence, independent session workers, cooperative cancellation and an eight-task evaluation corpus. Action outcomes retain execution and verification states alongside failure evidence. Cancellation cannot turn skipped step lines into a successful result. The guide describes the combined workflow.
@@ -12881,3 +12953,19 @@ Not done or not tested: `caretPositionFromPoint` (no `CaretPosition` interface y
 ## Monitoring cost on the newest main (2026-11-17)
 
 After the merge of `main` (`8b6a71bb`), the parent ran the cost check on `52b032c9`. User instructions against monitoring off: metrics +0.346%, trace +0.600%. Off against `main`: +0.0038%. Spread is at most 0.003% of the mean. All budgets pass. Detail: `docs/monitoring.md`.
+## `fill`: the whole text as one edit (2026-11-16)
+
+- Problem: `type` costs 500 M instructions for each key on the editor page of a private React dashboard (100 to 250 ms of CPU). React renders about 1,000 fibers for each key. bare sends the same events as Chrome. The cost is the speed of the tree walker. Design: [design-typing-heavy-forms.md](design-typing-heavy-forms.md).
+- Done:
+  - The `fill LOC "text"` step and the MCP `act` op `fill`. They click the field and select its text, then insert the whole text as one edit, as `Input.insertText` of Chrome does. That gives one `beforeinput` and one `input`, and no keys.
+  - Before, `act fill` was a name for `type`.
+  - `type` is not changed.
+- Result on the private dashboard journey (3 runs each, main `00e701b0`): 77.456 G to 10.020 G (7.7x). The `type` journey on the branch: 77.455 to 77.457 G (no change).
+- Tests:
+  - 7 browser tests
+  - 4 `bare-drive` tests
+  - 1 parse test
+  - 1 MCP test
+- `fill LOC "text" keys=last` (MCP `last_key: true`): the head is one edit, the last character is one typed key, for a widget that waits for a key. Journey: 12.165 to 12.166 G (3 runs), against 9.655 G for plain `fill` on the same build (1 run). 2 `bare-drive` tests and 2 parse cases.
+- `BARE_JS_EXEC=byte` on the `type` journey: 79.245 to 79.246 G (2 runs), 2.3% more than `tree`. On this base the bytecode lane does not help this React form. #630 makes the lane run lazy functions and changes this result.
+- Not done: a Chrome log of `Input.insertText` for the fixtures.

@@ -38,6 +38,8 @@ pub(super) struct Fr {
     this: This,
     /// The number of environments that the caller pushed. The callee's handlers count from 0.
     depth: u32,
+    /// The first iterator of the caller on `RegStack::iters`.
+    iters: u32,
     /// The environment of the call that the callee made (a callee with an environment, as stage 1 makes), or `u32::MAX`.
     callee_env: u32,
 }
@@ -48,6 +50,14 @@ pub(super) struct Fr {
 pub(super) struct RegStack {
     regs: Vec<Value>,
     frames: Vec<Fr>,
+    /// The open iterators of `for-of` and `for-in` loops of all frames, innermost last. Empty between runs.
+    iters: Vec<BcIter>,
+}
+
+/// An open loop iterator (`IterOpen`, `ForInOpen`).
+pub(super) enum BcIter {
+    Of(It),
+    In { obj: Value, keys: Vec<PropertyKey>, i: usize, proxied: bool },
 }
 
 macro_rules! op_consts {
@@ -56,7 +66,7 @@ macro_rules! op_consts {
 op_consts! {
     NOP = Nop, MOV = Mov, LOAD_UNDEF = LoadUndef, LOAD_NULL = LoadNull, LOAD_TRUE = LoadTrue, LOAD_FALSE = LoadFalse,
     LOAD_THIS = LoadThis, LOAD_I = LoadI, LOAD_K = LoadK, GET_ENV = GetEnv, SET_ENV = SetEnv, INIT_ENV = InitEnv, PUSH_ENV = PushEnv,
-    DECL_ENV = DeclEnv, POP_ENV = PopEnv, COPY_ENV = CopyEnv, GET_GLOBAL = GetGlobal, SET_GLOBAL = SetGlobal,
+    DECL_ENV = DeclEnv, WIDE = Wide, POP_ENV = PopEnv, COPY_ENV = CopyEnv, GET_GLOBAL = GetGlobal, SET_GLOBAL = SetGlobal,
     TYPEOF_GLOBAL = TypeofGlobal, GET_NAME = GetName, SET_NAME = SetName, TYPEOF_NAME = TypeofName, GET_FIELD = GetField,
     SET_FIELD = SetField, GET_ELEM = GetElem, SET_ELEM = SetElem, TO_KEY = ToKey, DEF_FIELD = DefField, ARRAY_PUSH = ArrayPush,
     NEW_OBJECT = NewObject, NEW_ARRAY = NewArray, CLOSURE = Closure, CLOSURE_NAME = ClosureName, CALL = Call, NEW = New,
@@ -68,6 +78,21 @@ op_consts! {
     JN_LT = JnLt, JN_LE = JnLe, JN_GT = JnGt, JN_GE = JnGe, JN_EQ = JnEq, JN_NE = JnNe, JN_SEQ = JnSEq, JN_SNE = JnSNe,
     JN_LT_K = JnLtK, JN_LE_K = JnLeK, JN_GT_K = JnGtK, JN_GE_K = JnGeK, JN_EQ_K = JnEqK, JN_NE_K = JnNeK, JN_SEQ_K = JnSEqK,
     JN_SNE_K = JnSNeK, CALL_R = CallR, ADD_K = AddK, SUB_K = SubK, MUL_K = MulK, DIV_K = DivK, MOD_K = ModK,
+    ITER_OPEN = IterOpen, FOR_IN_OPEN = ForInOpen, ITER_NEXT = IterNext, ITER_CLOSE = IterClose, ITER_STEP = IterStep,
+    ITER_REST = IterRest, OBJ_REST = ObjRest, REQUIRE_OBJ = RequireObj,
+}
+
+/// Every wide word of the (verified) code is one that the loop reads: `GetEnv`, `SetEnv`, `InitEnv` or `DefField`.
+fn bc_wide_ok(ops: &[u32]) -> bool {
+    let mut pc = 0;
+    while pc < ops.len() {
+        let Ok((ins, n)) = bc::decode(ops, pc) else { return false };
+        if ops[pc] as u8 == Op::Wide as u8 && !matches!(ins.op, Op::GetEnv | Op::SetEnv | Op::InitEnv | Op::DefField) {
+            return false;
+        }
+        pc += n;
+    }
+    true
 }
 
 fn binop(op: u8) -> BinaryOp {
@@ -143,14 +168,15 @@ impl<'p> Interp<'p> {
 
     /// Compile `code` into a `Compiled` (verify it and make its constants).
     fn bc_finish(&mut self, r: G<crate::bc::Code>) -> Option<Rc<Compiled>> {
-        // The loop reads only narrow words: code with a wide form stays on the tree walker.
+        // The loop reads the wide form of `GetEnv`, `SetEnv`, `InitEnv` and `DefField` only: code with another wide word stays on the tree
+        // walker.
         let code = match r {
             Ok(c) if bc_verify::verify(&c).is_err() => {
                 self.bc.stats.fallbacks += 1;
                 self.bc.why = "verify";
                 return None;
             }
-            Ok(c) if c.ops.iter().scan(0usize, |skip, &w| Some(if *skip > 0 { *skip -= 1; false } else { *skip = matches!(Op::from_u8(w as u8), Some(o) if o.form() == bc::Form::AbcX) as usize; w as u8 == Op::Wide as u8 })).any(|w| w) => {
+            Ok(c) if !bc_wide_ok(&c.ops) => {
                 self.bc.stats.fallbacks += 1;
                 self.bc.why = "wide form";
                 return None;
@@ -414,9 +440,10 @@ impl<'p> Interp<'p> {
     /// or no handler: the error, and the loop returns it.
     #[cold]
     #[inline(never)]
-    fn bc_catch(&mut self, c: &Compiled, pc: usize, depth: &mut u32, e: Error) -> Res<(usize, usize, Value)> {
+    fn bc_catch(&mut self, c: &Compiled, pc: usize, depth: &mut u32, iters: &mut Vec<BcIter>, ibase: usize, e: Error) -> Res<(usize, usize, Value)> {
         let Error::Throw(v) = e else { return Err(e) };
         let Some(h) = c.code.handler_at(pc as u32) else { return Err(Error::Throw(v)) };
+        let Error::Throw(v) = self.bc_close_iters(iters, ibase + h.iters as usize, Error::Throw(v)) else { unreachable!() };
         while *depth > h.depth as u32 {
             let e = self.env;
             self.env = self.envs[e as usize].parent;
@@ -424,6 +451,81 @@ impl<'p> Interp<'p> {
             *depth -= 1;
         }
         Ok((h.target as usize, h.reg as usize, v))
+    }
+
+    /// Close the iterators above `keep` after the error `e`, innermost first (`iter_close_throw`: an error of `return` is dropped).
+    /// An error that is not a thrown value runs no JS: the iterators are dropped.
+    #[cold]
+    #[inline(never)]
+    fn bc_close_iters(&mut self, iters: &mut Vec<BcIter>, keep: usize, mut e: Error) -> Error {
+        while iters.len() > keep {
+            if let Some(BcIter::Of(mut it)) = iters.pop() {
+                e = self.iter_close_throw(&mut it, e);
+            }
+        }
+        e
+    }
+
+    /// `IterOpen`: `iter_start`, or for an array pattern `iter_start_val`. Out of the loop, as the pattern ops are: their code in
+    /// the loop made every other op slower (2.7% more instructions on a React journey with the same work).
+    #[inline(never)]
+    fn bc_iter_open(&mut self, c: &Compiled, at: usize, v: Value, pattern: bool) -> Res<It> {
+        if pattern { self.iter_start_val(v) } else { self.iter_start(v, Self::bc_call_expr(c, at)) }
+    }
+
+    /// The ops of patterns: `IterStep`, `IterRest`, `ObjRest` (`c` keys after register `a`) and `RequireObj`.
+    #[inline(never)]
+    fn bc_pattern_op(&mut self, op: u8, a: usize, b: usize, c: usize, regs: &mut [Value], iters: &mut [BcIter]) -> Res<()> {
+        match op {
+            ITER_STEP | ITER_REST => {
+                let Some(BcIter::Of(it)) = iters.last_mut() else { return Err(unsupported("bad bytecode", Span::default())) };
+                regs[a] = if op == ITER_STEP { self.iter_next(it)?.unwrap_or(Value::Undefined) } else { self.bc_iter_rest(it)? };
+            }
+            OBJ_REST => regs[a] = self.bc_obj_rest(regs[b], &regs[a + 1..a + 1 + c])?,
+            _ => {
+                let v = regs[a];
+                if is_nullish(v) {
+                    let t = self.display(v);
+                    return Err(self.type_err(&format!("Cannot destructure '{t}' as it is {t}.")));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The values that are left in `it`, as a new array (a rest element, `bind_array_elems`).
+    fn bc_iter_rest(&mut self, it: &mut It) -> Res<Value> {
+        let mut rest = Vec::new();
+        while let Some(x) = self.iter_next(it)? {
+            self.iter_buffer_room(rest.len())?;
+            rest.push(x);
+        }
+        self.new_array_from(&rest)
+    }
+
+    /// A rest property: a new object with the properties of `src` except `keys` (`bind_pattern`).
+    fn bc_obj_rest(&mut self, src: Value, keys: &[Value]) -> Res<Value> {
+        let mut used = Vec::with_capacity(keys.len());
+        for &k in keys {
+            used.push(self.coerce_key(k)?);
+        }
+        let o = h!(self, self.heap.new_object(Some(self.object_proto)));
+        self.copy_props(o, src, &used)?;
+        Ok(Value::Object(o))
+    }
+
+    /// The next key of a `for-in` that the object still has (`exec_for_each`).
+    fn bc_for_in_next(&mut self, obj: Value, keys: &[PropertyKey], i: &mut usize, proxied: bool) -> Res<Option<Value>> {
+        while let Some(&k) = keys.get(*i) {
+            *i += 1;
+            if let Value::Object(o) = obj
+                && !(if proxied { self.px_for_in_has(o, k)? } else { self.o_has_property(o, k)? })
+            {
+                continue;
+            }
+            return Ok(Some(h!(self, self.heap.key_to_value(k))));
+        }
+        Ok(None)
     }
 
     /// The bindings of the environment of scope `s`, in the order of `bc_binds`.
@@ -704,9 +806,15 @@ impl<'p> Interp<'p> {
     #[inline(never)]
     fn bc_closure(&mut self, fid: FuncId, name: Option<u32>) -> Res<Value> {
         let f = *self.prog.func(fid);
-        // Only a named plain function expression gets its own name binding: ask the scope whether the node is an expression.
+        // Only a named plain function expression gets its own name binding: ask the scope whether the node is an expression. A lazy
+        // function has no scope yet: its slot keeps what the first walk saw.
         let is_expr = name.is_some()
-            || f.name.is_some() && f.kind == FuncKind::Normal && self.bc_fn_scope(fid).is_some_and(|s| matches!(self.sc_all[s.scope as usize].kind, RKind::Fn(_, true)));
+            || f.name.is_some()
+                && f.kind == FuncKind::Normal
+                && match f.body {
+                    Body::Lazy(idx) => self.lazy_is_expr(idx),
+                    _ => self.bc_fn_scope(fid).is_some_and(|s| matches!(self.sc_all[s.scope as usize].kind, RKind::Fn(_, true))),
+                };
         let s = match name {
             Some(n) => Some(self.name_str(n)?),
             None => None,
@@ -784,6 +892,9 @@ impl<'p> Interp<'p> {
         let mut base = 0usize;
         let mut regs: &mut [Value] = &mut st.regs[..c.code.nregs as usize];
         let mut pc = 0usize;
+        // The first iterator of the running frame on `st.iters`. A run starts with none.
+        debug_assert!(st.iters.is_empty());
+        let mut ibase = 0usize;
         'run: loop {
             let at = pc;
             let w = ops[pc];
@@ -811,6 +922,40 @@ impl<'p> Interp<'p> {
                             _ => unreachable!("the verifier checks name operands"),
                         }
                     };
+                }
+                // `GetEnv`, `SetEnv` and `InitEnv`: register `$a`, binding `$i` of the environment `$h` levels up.
+                macro_rules! get_env {
+                    ($a:expr, $h:expr, $i:expr) => {{
+                        let (e, i) = self.bc_slot($h as u32, $i as u32);
+                        regs[$a] = match self.envs[e as usize].bindings.get(i) {
+                            Some(bd) if bd.flags & INIT != 0 => bd.value,
+                            _ => tri!(at, Err::<Value, _>(self.bc_env_err(e, i))),
+                        };
+                    }};
+                }
+                macro_rules! set_env {
+                    ($a:expr, $h:expr, $i:expr) => {{
+                        let (e, i) = self.bc_slot($h as u32, $i as u32);
+                        let v = regs[$a];
+                        match self.envs[e as usize].bindings.get_mut(i) {
+                            Some(bd) if bd.flags & (INIT | MUT) == INIT | MUT => bd.value = v,
+                            Some(_) => tri!(at, self.bc_assign(e, i, v)),
+                            None => tri!(at, Err::<(), _>(self.bc_env_err(e, i))),
+                        }
+                    }};
+                }
+                macro_rules! init_env {
+                    ($a:expr, $h:expr, $i:expr) => {{
+                        let (e, i) = self.bc_slot($h as u32, $i as u32);
+                        let v = regs[$a];
+                        match self.envs[e as usize].bindings.get_mut(i) {
+                            Some(bd) => {
+                                bd.value = v;
+                                bd.flags |= INIT;
+                            }
+                            None => tri!(at, Err::<(), _>(self.bc_env_err(e, i))),
+                        }
+                    }};
                 }
                 // `a = f(l, r)` on two numbers, else the general operator.
                 macro_rules! arith {
@@ -866,6 +1011,7 @@ impl<'p> Interp<'p> {
                         let v = $v;
                         let Some(fr) = st.frames.pop() else { return Ok(v) };
                         self.bc_frame_exit(&fr, true, depth);
+                        ibase = fr.iters as usize;
                         code = fr.code;
                         c = &code;
                         ops = &c.code.ops[..];
@@ -892,31 +1038,21 @@ impl<'p> Interp<'p> {
                     }
                     LOAD_I => regs[a] = Value::Number(sbx as f64),
                     LOAD_K => regs[a] = c.kv[bx as usize],
-                    GET_ENV => {
-                        let (e, i) = self.bc_slot(b as u32, cc as u32);
-                        regs[a] = match self.envs[e as usize].bindings.get(i) {
-                            Some(bd) if bd.flags & INIT != 0 => bd.value,
-                            _ => tri!(at, Err::<Value, _>(self.bc_env_err(e, i))),
-                        };
-                    }
-                    SET_ENV => {
-                        let (e, i) = self.bc_slot(b as u32, cc as u32);
-                        let v = regs[a];
-                        match self.envs[e as usize].bindings.get_mut(i) {
-                            Some(bd) if bd.flags & (INIT | MUT) == INIT | MUT => bd.value = v,
-                            Some(_) => tri!(at, self.bc_assign(e, i, v)),
-                            None => tri!(at, Err::<(), _>(self.bc_env_err(e, i))),
-                        }
-                    }
-                    INIT_ENV => {
-                        let (e, i) = self.bc_slot(b as u32, cc as u32);
-                        let v = regs[a];
-                        match self.envs[e as usize].bindings.get_mut(i) {
-                            Some(bd) => {
-                                bd.value = v;
-                                bd.flags |= INIT;
-                            }
-                            None => tri!(at, Err::<(), _>(self.bc_env_err(e, i))),
+                    GET_ENV => get_env!(a, b, cc),
+                    SET_ENV => set_env!(a, b, cc),
+                    INIT_ENV => init_env!(a, b, cc),
+                    // The wide form of the words that name a binding or a constant past 255 (the many bindings of a webpack module
+                    // function, an object literal with many keys). `bc_finish` refuses any other wide word.
+                    WIDE => {
+                        let w2 = ops[pc];
+                        pc += 1;
+                        let (a, b, cc) = ((w >> 16) as usize, (w2 & 0xffff) as usize, (w2 >> 16) as usize);
+                        match (w >> 8) as u8 {
+                            GET_ENV => get_env!(a, b, cc),
+                            SET_ENV => set_env!(a, b, cc),
+                            INIT_ENV => init_env!(a, b, cc),
+                            DEF_FIELD => tri!(at, self.bc_def_field(regs[a], name!(cc), regs[b])),
+                            _ => unreachable!("bc_finish refuses this wide word"),
                         }
                     }
                     PUSH_ENV => {
@@ -1057,7 +1193,8 @@ impl<'p> Interp<'p> {
                         }
                         self.depth += 1;
                         self.strict = k.strict;
-                        st.frames.push(Fr { code: std::mem::replace(&mut code, callee), pc: pc as u32, base: base as u32, dst: a as u32, env: caller_env, this, depth: std::mem::take(depth), callee_env });
+                        st.frames.push(Fr { code: std::mem::replace(&mut code, callee), pc: pc as u32, base: base as u32, dst: a as u32, env: caller_env, this, depth: std::mem::take(depth), iters: ibase as u32, callee_env });
+                        ibase = st.iters.len();
                         c = &code;
                         ops = &c.code.ops[..];
                         this = t;
@@ -1148,6 +1285,35 @@ impl<'p> Interp<'p> {
                             pc = (pc as isize + sbx as isize) as usize;
                         }
                     }
+                    ITER_OPEN => {
+                        let it = tri!(at, self.bc_iter_open(c, at, regs[a], b == 1));
+                        st.iters.push(BcIter::Of(it));
+                    }
+                    FOR_IN_OPEN => {
+                        let obj = regs[a];
+                        let (keys, proxied) = tri!(at, self.for_in_keys(obj));
+                        st.iters.push(BcIter::In { obj, keys, i: 0, proxied });
+                    }
+                    ITER_NEXT => {
+                        let next = match st.iters.last_mut() {
+                            Some(BcIter::Of(it)) => self.iter_next(it),
+                            Some(BcIter::In { obj, keys, i, proxied }) => self.bc_for_in_next(*obj, keys, i, *proxied),
+                            None => break 'op Err(unsupported("bad bytecode", Span::default())),
+                        };
+                        match tri!(at, next) {
+                            Some(v) => regs[a] = v,
+                            None => {
+                                st.iters.pop();
+                                pc = (pc as isize + sbx as isize) as usize;
+                            }
+                        }
+                    }
+                    op @ (ITER_STEP | ITER_REST | OBJ_REST | REQUIRE_OBJ) => tri!(at, self.bc_pattern_op(op, a, b, cc, regs, &mut st.iters)),
+                    ITER_CLOSE => match st.iters.pop() {
+                        Some(BcIter::Of(mut it)) => tri!(at, self.iter_close(&mut it)),
+                        Some(BcIter::In { .. }) => {}
+                        None => break 'op Err(unsupported("bad bytecode", Span::default())),
+                    },
                     RET => ret!(regs[a]),
                     RET_UNDEF => ret!(Value::Undefined),
                     THROW => tri!(at, Err::<(), _>(Error::Throw(regs[a]))),
@@ -1161,14 +1327,17 @@ impl<'p> Interp<'p> {
                 // is not a thrown value leaves the whole loop.
                 let (mut err, mut fault) = (err, at);
                 loop {
-                    match self.bc_catch(c, fault, depth, err) {
+                    match self.bc_catch(c, fault, depth, &mut st.iters, ibase, err) {
                         Ok((t, r, v)) => {
                             regs[r] = v;
                             pc = t;
                             break;
                         }
                         Err(e) => {
+                            // No handler in this frame: its loops close before the caller's handler runs.
+                            let e = self.bc_close_iters(&mut st.iters, ibase, e);
                             if st.frames.is_empty() || !matches!(e, Error::Throw(_)) {
+                                let e = self.bc_close_iters(&mut st.iters, 0, e);
                                 while let Some(fr) = st.frames.pop() {
                                     self.bc_frame_exit(&fr, false, depth);
                                 }
@@ -1176,6 +1345,7 @@ impl<'p> Interp<'p> {
                             }
                             let Some(fr) = st.frames.pop() else { return Err(e) };
                             self.bc_frame_exit(&fr, false, depth);
+                            ibase = fr.iters as usize;
                             code = fr.code;
                             c = &code;
                             ops = &c.code.ops[..];

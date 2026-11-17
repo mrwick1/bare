@@ -258,6 +258,11 @@ impl<'p> Interp<'p> {
         self.lazy.get(&(script, idx)).copied().unwrap_or_default()
     }
 
+    /// The lazy function `idx` of the current script is a function expression (the first walk saw it so).
+    pub(super) fn lazy_is_expr(&self, idx: u32) -> bool {
+        self.lazy_slot(self.cur as u32, idx).is_expr
+    }
+
     /// The first call, in this realm, of the function that the lazy body `idx` of script `script` belongs to: its script slot and function.
     /// The function object `fobj` points at them from now on.
     #[cold]
