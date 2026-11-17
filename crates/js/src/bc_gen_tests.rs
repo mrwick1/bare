@@ -536,3 +536,65 @@ fn global_cells_follow_the_declarations_of_later_scripts() {
         assert!(bad.is_empty(), "{}", bad.join("\n"));
     });
 }
+
+/// Run `src` in `mode`: the completion value (an error shows its name and message) and the reasons the generator refused.
+fn run_in(src: &str, mode: Exec) -> (String, Vec<&'static str>) {
+    let mut it = Interp::realm(Heap::default(), EvalLimits { max_steps: 50_000_000, ..Default::default() }).unwrap();
+    it.set_exec(mode);
+    let got = match it.run_script(src) {
+        Ok(v) => it.display(v),
+        Err(Error::Throw(v @ Value::Object(_))) => format!("throw:{}:{}", it.get_str(v, "name"), it.get_str(v, "message")),
+        Err(Error::Throw(v)) => format!("throw:{}", it.display(v)),
+        Err(e) => format!("{e:?}"),
+    };
+    let mut r: Vec<_> = it.bc.refused.keys().copied().collect();
+    r.sort();
+    (got, r)
+}
+
+/// Each case gives the same result in `Tree`, `Auto` and `Byte`, and the generator refuses none of its functions.
+fn same_on_the_lane(cases: &[(&str, &str)]) {
+    let cases: Vec<(String, String)> = cases.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
+    big(move || {
+        for (name, src) in &cases {
+            let (want, _) = run_in(src, Exec::Tree);
+            for mode in [Exec::Auto, Exec::Byte] {
+                let (got, refused) = run_in(src, mode);
+                assert_eq!(got, want, "{name} {mode:?}");
+                assert!(refused.is_empty(), "{name} {mode:?}: refused {refused:?}");
+            }
+        }
+    });
+}
+
+#[test]
+fn optional_chains_run_on_the_lane() {
+    same_on_the_lane(&[
+        ("member", "function f(a) { return a?.b; } [f(null), f(undefined), f({b: 3}), f(0), f('x')].join()"),
+        ("short circuit", "var n = 0; function s() { n++; return 1; } function f(a) { return a?.b.c(s()).d; } [f(null), n].join()"),
+        ("long chain", "function f(a) { return a?.b.c.d; } [f(null), f({b: {c: {d: 7}}})].join()"),
+        ("chain keeps on", "function f(a) { return a?.b.c; } try { f({}); } catch (e) { e.name + ':' + e.message }"),
+        ("index", "function f(a, k) { return a?.[k]; } [f(null, 'x'), f({x: 5}, 'x'), f([1, 2], 1)].join()"),
+        ("index key not read", "var n = 0; function k() { n++; return 'x'; } function f(a) { return a?.[k()]; } f(null); n"),
+        ("method this", "var o = { v: 4, m() { return this.v; } }; function f(a) { return a?.m(); } [f(o), f(null)].join()"),
+        ("method on chain", "var o = { v: 4, m() { return this.v; } }; function f(a) { return a?.b.m(); } f({ b: o })"),
+        ("optional call", "function f(a) { return a?.(); } [f(null), f(undefined), f(() => 9)].join()"),
+        ("optional call this", "var o = { v: 4, m() { return this.v; } }; function f(a) { return a.m?.(); } [f(o), f({})].join()"),
+        ("optional call args not read", "var n = 0; function s() { n++; return 1; } function f(a) { return a.m?.(s()); } f({}); n"),
+        ("optional index call", "var o = { v: 4, m() { return this.v; } }; function f(a) { return a?.['m'](); } [f(o), f(null)].join()"),
+        ("not a function", "function f(a) { return a?.b(); } try { f({}); } catch (e) { e.name + ':' + e.message }"),
+        ("optional not a function", "function f(a) { return a?.b?.c(); } [f({}), f(null), f({b: {c() { return 2; }}})].join()"),
+        ("index of null", "function f(a) { return a.b[a.c]; } try { f({}); } catch (e) { e.name + ':' + e.message }"),
+        ("paren ends chain", "function f(a) { return (a?.b).c; } try { f(null); } catch (e) { e.name + ':' + e.message }"),
+        ("paren call keeps this", "var o = { v: 4, m() { return this.v; } }; function f(a) { return (a?.m)(); } f(o)"),
+        ("paren call of null", "function f(a) { return (a?.m)(); } try { f(null); } catch (e) { e.name + ':' + e.message }"),
+        ("getter order", "var log = []; var o = {}; Object.defineProperty(o, 'a', { get() { log.push('a'); var r = {}; Object.defineProperty(r, 'b', { get() { log.push('b'); return null; } }); return r; } }); function f(x) { return x?.a.b?.c.d; } f(o); log.join()"),
+        ("nested", "function f(a) { return a?.b?.[a?.k]?.(a?.v); } [f({ b: { x: (v) => v + 1 }, k: 'x', v: 1 }), f({ b: null }), f(null)].join()"),
+        ("as operand", "function f(a) { return (a?.b ?? 5) + (a?.c?.d || 1); } [f(null), f({ b: 2, c: { d: 3 } })].join()"),
+        ("in try and loop", "function f(l) { var s = 0; for (var i = 0; i < l.length; i++) { try { s += l[i]?.n ?? 100; } catch (e) { s += 1000; } } return s; } f([{ n: 1 }, null, { n: 2 }, undefined])"),
+        ("closure", "function f(a) { return function () { return a?.b?.(); }; } [f(null)(), f({ b() { return 8; } })()].join()"),
+        ("template and typeof", "function f(a) { return `${a?.b}` + typeof a?.b; } [f(null), f({ b: 1 })].join()"),
+        ("assign value", "function f(a) { var r = a?.b; return r; } [f(null), f({ b: 3 })].join()"),
+        ("new on chain", "function f(a) { return new (a?.C)(); } try { f({}); } catch (e) { e.name + ':' + e.message }"),
+    ]);
+}

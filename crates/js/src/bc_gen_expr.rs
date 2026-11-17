@@ -146,7 +146,8 @@ impl Gen<'_, '_> {
                 self.expr(alt, dst)?;
                 self.patch(end)
             }
-            ExprKind::Call { callee, args, optional: false } => self.call(e, callee, args, dst),
+            ExprKind::Call { callee, args, optional: false } => self.call(e, callee, args, false, dst, None),
+            ExprKind::Chain(inner) => self.chain(inner, dst),
             ExprKind::New { callee, args } => {
                 let b = self.reg()?;
                 self.expr(callee, b)?;
@@ -174,7 +175,7 @@ impl Gen<'_, '_> {
             ExprKind::Tagged { .. } => Err("tagged template"),
             ExprKind::RegExp => Err("regexp literal"),
             ExprKind::BigInt => Err("bigint literal"),
-            ExprKind::Chain(_) | ExprKind::Call { .. } | ExprKind::Member { .. } | ExprKind::Index { .. } => Err("optional chain"),
+            ExprKind::Call { .. } | ExprKind::Member { .. } | ExprKind::Index { .. } => Err("optional chain"),
             ExprKind::PrivateMember { .. } | ExprKind::PrivateIn { .. } => Err("private name"),
             ExprKind::NewTarget => Err("new.target"),
             ExprKind::Await(_) | ExprKind::Yield { .. } => Err("await or yield"),
@@ -394,39 +395,129 @@ impl Gen<'_, '_> {
         Ok(())
     }
 
-    /// `f(...)`: the callee in `b`, `this` in `b + 1` (the base of a member callee, in parentheses too), the arguments after.
-    fn call(&mut self, e: ExprId, callee: ExprId, args: List<Expr>, dst: u32) -> G<()> {
-        let b = self.reg()?;
-        let this = self.reg()?;
-        let c = callee;
-        match self.prog.expr(c).kind {
-            ExprKind::Member { obj, name, optional: false } => {
-                self.expr(obj, this)?;
-                let saved = std::mem::replace(&mut self.pos, self.prog.expr(c).span.start);
+    /// A whole optional chain: a `?.` that finds `null` or `undefined` leaves the chain with `undefined` (`link`).
+    fn chain(&mut self, inner: ExprId, dst: u32) -> G<()> {
+        let mut exits = Vec::new();
+        self.sub(inner, dst, Some(&mut exits))?;
+        self.end_chain(exits, &[dst])
+    }
+
+    /// Where the chain ends: the jumps in `exits` land on code that sets the registers `r` to `undefined`.
+    fn end_chain(&mut self, exits: Vec<usize>, r: &[u32]) -> G<()> {
+        if exits.is_empty() {
+            return Ok(());
+        }
+        let end = self.jump(Op::Jmp, 0)?;
+        for j in exits {
+            self.patch(j)?;
+        }
+        for &x in r {
+            self.emit(Op::LoadUndef, x, 0, 0)?;
+        }
+        self.patch(end)
+    }
+
+    /// Leave the chain when the register `r` is `null` or `undefined`.
+    fn nullish_exit(&mut self, r: u32, exits: &mut Vec<usize>) -> G<()> {
+        let j = self.jump(Op::JmpNotNullish, r)?;
+        exits.push(self.jump(Op::Jmp, 0)?);
+        self.patch(j)
+    }
+
+    /// `expr`, but a link of the chain that `exits` belongs to (`None`: not in a chain).
+    fn sub(&mut self, e: ExprId, dst: u32, exits: Option<&mut Vec<usize>>) -> G<()> {
+        let Some(exits) = exits else { return self.expr(e, dst) };
+        let prog = self.prog.clone();
+        let ex = *prog.expr(e);
+        let saved = std::mem::replace(&mut self.pos, ex.span.start);
+        let r = match ex.kind {
+            ExprKind::Member { obj, name, optional } => (|| {
+                self.sub(obj, dst, Some(&mut *exits))?;
+                if optional {
+                    self.nullish_exit(dst, exits)?;
+                }
+                self.field(Op::GetField, dst, dst, name)
+            })(),
+            ExprKind::Index { obj, index, optional } => (|| {
+                self.sub(obj, dst, Some(&mut *exits))?;
+                if optional {
+                    self.nullish_exit(dst, exits)?;
+                }
+                let t = self.reg()?;
+                self.expr(index, t)?;
+                self.emit(Op::GetElem, dst, dst, t)?;
+                self.free(t);
+                Ok(())
+            })(),
+            ExprKind::Call { callee, args, optional } => self.call(e, callee, args, optional, dst, Some(exits)),
+            _ => self.expr(e, dst),
+        };
+        self.pos = saved;
+        r
+    }
+
+    /// The callee `c` in `b` and its `this` in `this`: the base of a member callee, `undefined` for the others.
+    fn callee(&mut self, c: ExprId, b: u32, this: u32, mut exits: Option<&mut Vec<usize>>) -> G<()> {
+        let prog = self.prog.clone();
+        match prog.expr(c).kind {
+            ExprKind::Member { obj, name, optional } => {
+                self.sub(obj, this, exits.as_deref_mut())?;
+                if let (true, Some(x)) = (optional, exits) {
+                    self.nullish_exit(this, x)?;
+                }
+                let saved = std::mem::replace(&mut self.pos, prog.expr(c).span.start);
                 let r = self.field(Op::GetField, b, this, name);
                 self.pos = saved;
-                r?;
+                r
             }
-            ExprKind::Index { obj, index, optional: false } => {
-                self.expr(obj, this)?;
+            ExprKind::Index { obj, index, optional } => {
+                self.sub(obj, this, exits.as_deref_mut())?;
+                if let (true, Some(x)) = (optional, exits) {
+                    self.nullish_exit(this, x)?;
+                }
                 let k = self.reg()?;
                 self.expr(index, k)?;
                 self.emit(Op::GetElem, b, this, k)?;
                 self.free(k);
+                Ok(())
             }
-            ExprKind::Super => return Err("super"),
+            ExprKind::Super => Err("super"),
+            // `(a?.b)()`: the chain ends at the paren, and `this` stays the base.
+            ExprKind::Chain(inner) => {
+                let mut local = Vec::new();
+                if matches!(prog.expr(inner).kind, ExprKind::Member { .. } | ExprKind::Index { .. }) {
+                    self.callee(inner, b, this, Some(&mut local))?;
+                } else {
+                    self.sub(inner, b, Some(&mut local))?;
+                    self.emit(Op::LoadUndef, this, 0, 0)?;
+                }
+                self.end_chain(local, &[b, this])
+            }
             _ => {
-                self.expr(callee, b)?;
+                self.sub(c, b, exits)?;
                 // A register function does not load `this`: bit 31 of the call says it is `undefined`.
                 if !self.callr_ok() {
                     self.emit(Op::LoadUndef, this, 0, 0)?;
                 }
+                Ok(())
             }
+        }
+    }
+
+    /// `f(...)`: the callee in `b`, `this` in `b + 1` (the base of a member callee, in parentheses too), the arguments after.
+    /// In a chain (`exits`), an optional call leaves it when the callee is `null` or `undefined`.
+    fn call(&mut self, e: ExprId, callee: ExprId, args: List<Expr>, optional: bool, dst: u32, mut exits: Option<&mut Vec<usize>>) -> G<()> {
+        let b = self.reg()?;
+        let this = self.reg()?;
+        let c = callee;
+        self.callee(c, b, this, exits.as_deref_mut())?;
+        if let (true, Some(x)) = (optional, exits) {
+            self.nullish_exit(b, x)?;
         }
         let n = self.args(args)?;
         self.code.calls.push((self.here() as u32, e.index() as u32));
         if self.callr_ok() {
-            let plain = !matches!(self.prog.expr(c).kind, ExprKind::Member { .. } | ExprKind::Index { .. });
+            let plain = !matches!(self.prog.expr(c).kind, ExprKind::Member { .. } | ExprKind::Index { .. } | ExprKind::Chain(_));
             let x = self.prog.expr(e).span.start.saturating_add(1) & 0x7fff_ffff | (plain as u32) << 31;
             self.emit_ins(Ins::new(Op::CallR, dst, b, n).with_x(x))?;
         } else {
