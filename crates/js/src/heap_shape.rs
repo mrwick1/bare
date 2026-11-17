@@ -1019,6 +1019,10 @@ pub struct IcStats {
     pub set_ic_calls: u64,
     /// `for-in` loops that stopped at a certified prototype tail (`Heap::enum_tail_clean`).
     pub enum_tail_skips: u64,
+    /// `for-in` loops that read the keys of the receiver's shape in place (`Heap::for_in_shape`).
+    pub for_in_shape: u64,
+    /// `for-in` loops on the list path that read the receiver's own keys without a set, then made one for a prototype key (`Interp::for_in_keys`).
+    pub for_in_sets: u64,
 }
 
 // ---------- shape sweep (step A6) ----------
@@ -1435,6 +1439,45 @@ impl Heap {
             self.proto_epoch = self.proto_epoch.saturating_add(1);
             self.ic_stats.epoch_bumps += 1;
         }
+    }
+
+    /// `for-in` over `o` without a key list (`docs/design-for-in-keys.md`, design B): `o` is ordinary, in shape mode, has no element,
+    /// and its prototype chain has no enumerable key (`enum_tail_clean`). Then the keys are the entries of its shape, in order, and
+    /// the loop reads them in place. Gives the shape and its count of entries. A collect must not run while the loop is open: a shape
+    /// sweep renumbers the shapes.
+    pub fn for_in_shape(&mut self, o: ObjId) -> Option<(u32, u32)> {
+        let ob = self.objects.get(o.index, o.gn)?;
+        if ob.exotic != 0 || ob.lazy != 0 || ob.is_array || ob.shape == 0 || !ob.elems.is_empty() {
+            return None;
+        }
+        let (shape, proto) = (ob.shape, ob.proto);
+        if proto.is_some_and(|p| !self.enum_tail_clean(p)) {
+            return None;
+        }
+        self.ic_stats.for_in_shape += 1;
+        Some((shape, self.shapes.count(shape) as u32))
+    }
+
+    /// A `for-in` on the list path made a seen set (`IcStats::for_in_sets`).
+    pub fn count_for_in_set(&mut self) {
+        self.ic_stats.for_in_sets += 1;
+    }
+
+    /// The next enumerable string key of `shape` from `*i` (below `n`), and whether `o` still has `shape`. Entries `..n` stay as they
+    /// were: a table only grows, and only a sweep (a collect) cuts it.
+    #[inline]
+    pub fn for_in_shape_next(&self, o: ObjId, shape: u32, i: &mut u32, n: u32) -> Option<(StrId, bool)> {
+        let es = self.shapes.entries(shape);
+        while *i < n {
+            let e = es[*i as usize];
+            *i += 1;
+            if let PropertyKey::String(s) = e.key
+                && e.attrs & A_E != 0
+            {
+                return Some((s, self.objects.get(o.index, o.gn).is_some_and(|ob| ob.shape == shape)));
+            }
+        }
+        None
     }
 
     /// `for-in`: the chain that starts at `p` has no enumerable string key, so the loop can stop before `p`. `true` only for a tail that
