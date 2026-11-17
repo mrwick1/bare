@@ -66,6 +66,7 @@ dependencies = [
  "crc32fast",
  "miniz_oxide 0.9.1",
  "psl",
+ "serde_json",
 ]
 
 [[package]]
