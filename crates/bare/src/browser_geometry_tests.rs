@@ -144,6 +144,17 @@ fn external_sheets_embedded_sheets_and_inline_styles_cascade_in_order() {
 }
 
 #[test]
+fn a_new_sheet_is_never_read_with_the_layout_of_the_old_one() {
+    // The layout of the last read is reused while the styles have the same address. A freed address must not come back for new styles.
+    let mut b = at("<!doctype html><html><head><link rel=stylesheet href=a.css></head><body><div id=t></div></body></html>");
+    for i in 0..300 {
+        let w = 10 + i % 7;
+        b.set_external_stylesheet("a.css", vec![part(&format!("#t {{ width: {w}px; height: 5px }}"))]).unwrap();
+        assert_eq!(size(&mut b, "t"), format!("{w}x5"), "round {i}");
+    }
+}
+
+#[test]
 fn text_decides_the_width_of_an_inline_block() {
     let css = "#a, #b, #c { display: inline-block; font-size: 10px; margin: 0 } #c { padding: 3px } .row { white-space: nowrap }";
     let mut b = page(css, "<div class=row><span id=a>abcde</span><span id=b>abcdefghij</span><span id=c>abcde</span></div>");

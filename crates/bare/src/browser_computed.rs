@@ -730,6 +730,8 @@ impl Dom {
         // The cascade of a read keeps what `restyle` needs: the next read after a change updates it.
         let before = built.rules.tested_candidates();
         let styles = Rc::new(if keep || read { built.rules.compute_kept(&doc) } else { built.rules.compute_for(&doc, want) });
+        // New styles may take the address of freed ones: the layout of a read (`layout_shared`, keyed by address) is not theirs.
+        self.geometry.shared.borrow_mut().take();
         // The work cap bounds the compute. Charge the candidates the index tested, not nodes times all rules.
         it.charge(built.rules.tested_candidates() - before)?;
         built.last[slot] = Some((key, keep || read, styles.clone()));
