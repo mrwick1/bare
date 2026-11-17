@@ -13072,3 +13072,19 @@ Lever 1 of `docs/research-lane-profile-after-calls.md`: every `BitAnd` and `BitO
 - Peak RSS, medians of 7 interleaved runs of `cp --reflink=never` copies: load +0.07%, 50 keys -0.02%.
 - Tests: 1019 passed, 1 ignored. The new test `bitwise_operators_wrap_as_in_node_in_every_mode` runs 31 edge values through 11 expressions and 3 BigInt cases against literals from Node, in Tree, Auto and Byte. It passes on main too (behavior does not change); a deliberately wrong fast path (`n as i64`, no range guard) failed it. `tools/js/exec_diff.sh`: 79 runs, 0 differences. `bcstats` unchanged.
 - Not tested: operands in [2^31, 2^32) (for example the result of `x >>> 0`) still take the slow path and were not measured; wall time; Windows and macOS; the private dashboard journey.
+
+## For-in reads keys in place from the shape table (`forin-keys-in-place`, 2026-11-17)
+
+Design: `docs/design-for-in-keys.md`, designs B and C. `for_in_keys` was 4.24% of the 50-key page (4,206 instructions for each of 72,406 loop entries): it copied the own keys, built a seen set and a `Vec`, and called `has_property` at each step. Now a loop over a shape-mode object reads the keys in place from the shape table and skips `has_property` while the receiver keeps its shape. A receiver that is not a proxy and has no prototype keys skips the seen set (an exotic receiver too: its own keys are unique); a proxy keeps it, because its `ownKeys` trap may repeat a key. A loop opened outside a call or statement frame takes the list path: the lane also runs script bodies at `depth == 0`, where `collect` can run, so the doc's `depth >= 1` assertion would fire on correct code. Base: origin/main `37618a88`. Machine: archMachine. `Auto`, public React page, `#a1`; minimum of 3 runs, spread at most 0.005%. Narrow rows: `byte`, scale 10.
+
+| Row | main | now |
+| --- | --- | --- |
+| Page load | 436.88M | 429.38M (-1.72%) |
+| Page 50 keys | 7020.61M | 6674.56M (-4.93%) |
+| loopfn / fib / calls / loop / closures | 837.06 / 58.21 / 1599.28 / 2369.05 / 466.69M | 831.05 / 58.25 / 1603.28 / 2373.05 / 467.29M (-0.72% / +0.07% / +0.25% / +0.17% / +0.13%) |
+
+- Evaluator steps per key: 89,347 to 82,227 (the shape path spends no step per key at loop entry). `bcstats`, render counts and page output are unchanged.
+- Cost matrix against main (803 rows): 0 rows over +0.5% under both allocators. `wrapper_load forin` 1000 rows -3.33% glibc / -2.32% jemalloc, 10000 rows -4.86% / -4.45%; `arrobj_load descriptors` 1 -0.82% / -0.44%, 10 -1.38% / -1.23%; `eval_load objects` 1 -0.14% / -0.13%, 10 +0.007% / +0.013% (its for-in work fell from 494K to 169K instructions; +139K comes from `bc_loop` itself, a layout shift of two edited arms). A first step-2 version made `wrapper_load forin` +1.6% / +2.3% because `for_in_step` was no longer inlined; skipping the seen set for exotic receivers fixed it.
+- Peak RSS, byte copies, medians of 7: load 26828 to 26960 KiB (+0.49%, inside the spread of the base runs 26532 to 27084), 50 keys 35288 to 35184 KiB (-0.29%).
+- Tests: `cargo test -p bare-js --lib` 1024 passed, 1 ignored. 25 new loop cases and the 33 existing ones run in Tree, Auto and Byte against Node 22 values; counter tests `for_in_shape` and `for_in_sets` failed first; a `collect` that sweeps shapes between two loops keeps the keys; a 100,000-key dictionary object still hits the step limit. `tools/js/exec_diff.sh`: 79 runs, 0 differences. test262 for-in subset: pass 108, fail 19, the same in `tree`, `auto` and `byte`.
+- Not tested: wall time, Windows, the page in `tree` or `byte` mode, other journeys and the load-test ramps, a callgrind split of the page at 0, 5 and 50 keys, whether a proxy `ownKeys` can repeat a key in bare.
