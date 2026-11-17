@@ -12730,3 +12730,7 @@ The monitoring tests ran once on the Windows 11 VM: `bare-os` (6), `bare-observe
 ## Native Windows process metrics (2026-11-17)
 
 `bare_os::metrics::snapshot()` now reads RSS, peak RSS and CPU times on Windows (`K32GetProcessMemoryInfo`, `GetProcessTimes`). Thread count and allocator bytes stay null. `HeapSummary` was built and measured, then dropped: it took 16 ms with 1,000,000 live allocations (14 µs on the default heap). `snapshot()` now takes about 0.65 µs and does not grow with allocations. The Windows test failed before the change and passes after it. A `bare-mcp.exe` capture on the Windows 11 VM had 22 samples with non-null memory and CPU fields and zero drops. CPU time advances in 15.625 ms ticks. Not tested: macOS, release capture. Detail: `docs/monitoring.md`.
+
+## Monitoring: capture file through the OS layer (2026-11-17)
+
+The collector set Unix file mode 0600 in `bare-observe`. This put OS code outside the OS layer, and `tools/portable_check.sh --scan` flagged it. Now `bare_os::fs::create_private` creates the file. The scan flags only the three files that the baseline already flags. Linux and Windows `bare-os` and `bare-observe` tests pass. Windows and macOS workspace checks pass.

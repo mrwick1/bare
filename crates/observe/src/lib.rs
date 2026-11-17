@@ -6,7 +6,6 @@ use serde_json::{Value, json};
 use std::{
     collections::BTreeSet,
     ffi::OsString,
-    fs::OpenOptions,
     io::{self, Write},
     path::PathBuf,
     sync::{
@@ -344,14 +343,7 @@ impl Collector {
                 worker: None,
             });
         }
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let file = options.open(config.file.as_ref().expect("validated enabled config"))?;
+        let file = bare_os::fs::create_private(config.file.as_ref().expect("validated enabled config"))?;
         Self::with_writer(config, file)
     }
     /// Own a test or embedding sink. Writes and flushes run only on the worker.

@@ -352,3 +352,12 @@ Cost, measured on the Windows 11 VM (4 vCPU, KVM on archMachine), release build,
 A new `bare-mcp.exe` capture (`BARE_OBSERVE=metrics`, 5 ms interval, debug build, one run) wrote 23 records: 22 samples and one `collector_status` (reason `shutdown`, `dropped: 0`). In all 22 samples, `rss_bytes`, `peak_rss_bytes`, `cpu_user_us` and `cpu_system_us` are non-null. RSS ranges from 5402624 to 6115328 bytes. `cpu_user_us` is 0 for 3 samples, then 15625. `cpu_system_us` is 0. `thread_count` and `allocator_live_bytes` are null in all samples, as designed.
 
 Not tested: a release `bare-mcp.exe` capture, longer captures, macOS, and a Windows build with the MSVC dynamic runtime.
+
+### Portability scan (2026-11-17)
+
+`tools/portable_check.sh --scan` fails on original baseline `00e701b0`. It flags `crates/bare/src/downloads/run.rs`, `crates/bare/src/force.rs` and `crates/mcp/src/main.rs`.
+This branch added two more hits: the collector set Unix mode 0600 in `crates/observe/src/lib.rs`, and its test checked the mode in `crates/observe/src/tests.rs`.
+Now `bare_os::fs::create_private` creates the capture file: new file only, mode 0600 on Unix. A `bare-os` unit test checks both rules.
+The scan now flags only the three baseline files. The Windows and macOS `cargo check --workspace --all-targets` steps pass.
+The parent reran the tests: Linux `bare-os` 10, collector 12, process 4 and the doctest; Windows VM `bare-os` 7, collector 12, process 4. All pass.
+A second Windows capture had 21 samples with non-null RSS, peak RSS and CPU fields, and zero drops.

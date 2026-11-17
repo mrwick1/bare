@@ -229,14 +229,6 @@ fn existing_files_are_preserved_and_permissions_are_private() {
     let cfg = config(&[("BARE_OBSERVE_FILE", path.to_str().unwrap())]);
     let owner = Collector::start(cfg.clone()).unwrap();
     assert!(Collector::start(cfg).is_err());
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(
-            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
-    }
     owner.shutdown();
     std::fs::remove_file(path).unwrap();
 }
