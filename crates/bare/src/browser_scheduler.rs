@@ -58,7 +58,7 @@
 //!   of the transfer list). It is not constructible. `isTrusted` is false (the Event getter), which differs from a browser.
 //! - Deviations: `port1` and `port2` are own read-only properties of the channel, not
 //!   prototype getters. A handler set with `onmessage` and an `addEventListener` with the same function count as one
-//!   listener. `onmessageerror`, the `close` event, `window.postMessage` and `BroadcastChannel` are absent.
+//!   listener. `onmessageerror`, the `close` event and `BroadcastChannel` are absent. `window.postMessage` is in `browser_basics.rs`.
 //!
 //! `requestAnimationFrame` and the rendering step are in `browser_frame.rs`. `requestIdleCallback` is in `browser_idle.rs`: an idle
 //! period is `Task::Idle`, queued only by a request. It runs after every task that is due, and after the frame that is queued; its
