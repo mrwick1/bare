@@ -1,8 +1,24 @@
 # bare
 
-`bare` is a web browser written from scratch in Rust. Its purpose is to learn how the core parts of a browser work.
+`bare` is a web browser written from scratch in Rust. It is the only browser of two projects, `deck` and `offstage`. It is also a project to learn how the core parts of a browser work.
 
 The first parts were written by hand: URL parsing, DNS, HTTP, TLS, HTML, CSS, layout and JavaScript. Since 2026-11-05, `bare` also uses or copies open-source parts that are already fast and tested. See [docs/open-source.md](docs/open-source.md).
+
+## Who uses bare
+
+| User | How it uses `bare` | Version | Where its `bare` problems go |
+| --- | --- | --- | --- |
+| [`deck`](https://github.com/mrwick1/deck), a self-hosted AI agent in a web app | Starts `bare-mcp` from `PATH`, or from `bare.command` in `deck.toml`, at the first browser tool call. `bare` is its only browser. | The `bare-mcp` that is on `PATH` | GitHub issue on `mrwick1/bare` with the label `bare-mcp` |
+| [`offstage`](https://github.com/mrwick1/offstage), a caged desktop for AI agents | Installs `bare-mcp` and `bare-drive` from a release and runs them through `bin/offstage-bare-mcp`. `bare` is its only browser. | Pinned in `install.sh` (`BARE_VERSION`, `OFFSTAGE_BARE_VERSION` overrides it) | `offstage` `report_issue`, area `bare` (`BARE_MCP_REPORT=offstage`) |
+| Learning | Each part is a study of how real engines work. Design documents in `docs/` compare `bare` with Chrome, Firefox, Servo, WebKit and Ladybird. | `main` | — |
+
+A lean browser for a small, focused group of users is a possible later goal. No work on it has started.
+
+### Change bare-mcp with both users in mind
+
+- A change to a `bare-mcp` tool, its arguments or its results reaches `deck` at once, and reaches `offstage` at its next pinned release. Check both before you merge.
+- Cut a release (`vX.Y.Z`) with the `bare-mcp` and `bare-drive` binaries when `offstage` needs a fix. Then raise `BARE_VERSION` in `offstage`.
+- Keep `BARE_MCP_REPORT=offstage` working. It is the only switch between the two issue routes.
 
 ## Status
 
@@ -10,7 +26,7 @@ The first parts were written by hand: URL parsing, DNS, HTTP, TLS, HTML, CSS, la
 
 What is done, what comes next and what is missing: [docs/progress.md](docs/progress.md).
 
-`bare` is a learning project. It is not safe for real browsing.
+`bare` is not hardened like a mainstream browser. Do not use it as your everyday browser. `deck` and `offstage` run it for agents.
 
 ## Build and run
 
