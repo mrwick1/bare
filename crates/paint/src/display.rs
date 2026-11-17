@@ -1032,7 +1032,7 @@ impl Builder<'_> {
     #[inline(never)]
     fn svg_of(&mut self, f: &Fragment, style: &ComputedStyle, i: usize) {
         if i > 0 && matches!(self.doc.data(f.node), NodeData::Element { name, .. } if Some(*name) == self.svg) && style.get(Property::Visibility) == Value::Keyword(Keyword::Visible) {
-            self.svg(f);
+            self.svg(f, style);
         }
     }
 
@@ -1056,9 +1056,9 @@ impl Builder<'_> {
         if fitted != r { self.list.items.push(Item::PopClip); }
     }
 
-    /// The shapes of an `<svg>`, clipped to its box.
-    fn svg(&mut self, f: &Fragment) {
-        let b = border_box(f);
+    /// The shapes of an `<svg>`, clipped to its content box.
+    fn svg(&mut self, f: &Fragment, style: &ComputedStyle) {
+        let b = content_box(f, style);
         if b.intersect(self.view).is_empty() {
             return;
         }
@@ -1346,6 +1346,12 @@ fn padding_box(f: &Fragment, style: &ComputedStyle) -> IRect {
     let b = border_box(f);
     let w = |p| style.px(p).max(0.0).floor() as i32;
     IRect { x0: b.x0 + w(Property::BorderLeftWidth), y0: b.y0 + w(Property::BorderTopWidth), x1: b.x1 - w(Property::BorderRightWidth), y1: b.y1 - w(Property::BorderBottomWidth) }
+}
+
+/// The box inside the borders and the padding: the content of a replaced box, such as an `<svg>`.
+fn content_box(f: &Fragment, style: &ComputedStyle) -> IRect {
+    let (b, w) = (padding_box(f, style), |p| style.px(p).max(0.0).floor() as i32);
+    IRect { x0: b.x0 + w(Property::PaddingLeft), y0: b.y0 + w(Property::PaddingTop), x1: b.x1 - w(Property::PaddingRight), y1: b.y1 - w(Property::PaddingBottom) }
 }
 
 /// Has the control the look of the UA style sheet (border, background), so that Chrome draws it with its own theme? A style
