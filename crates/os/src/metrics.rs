@@ -17,7 +17,8 @@ pub struct Snapshot {
     /// Peak resident memory in bytes (`VmHWM` on Linux, `PeakWorkingSetSize` on Windows).
     pub peak_rss_bytes: Option<u64>,
     /// Cumulative user CPU microseconds, including guest time, excluding children.
-    /// Windows reads the `GetProcessTimes` user time, which has 100 ns units.
+    /// Windows reads the `GetProcessTimes` user time. It has 100 ns units but
+    /// advances in scheduler ticks (15.625 ms on the test VM).
     pub cpu_user_us: Option<u64>,
     /// Cumulative system CPU microseconds, excluding children.
     /// Windows reads the `GetProcessTimes` kernel time.
@@ -57,9 +58,9 @@ pub fn snapshot() -> Snapshot {
     result
 }
 
-/// Read available process counters. Windows CPU time has 100 ns units,
-/// truncated to whole microseconds. `thread_count` and `allocator_live_bytes`
-/// are always `None`.
+/// Read available process counters. Windows CPU time advances in scheduler
+/// ticks, truncated to whole microseconds. `thread_count` and
+/// `allocator_live_bytes` are always `None`.
 #[cfg(windows)]
 pub fn snapshot() -> Snapshot {
     use std::ffi::c_void;

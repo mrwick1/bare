@@ -43,6 +43,7 @@ Loader milestones emit at their source without consuming legacy trace records.
 Process samples have no session or document attribution.
 They include optional RSS, peak RSS, allocator bytes, CPU microseconds and thread count.
 Linux supports procfs counters. Allocator accounting requires glibc.
+Windows reads RSS and peak RSS (`WorkingSetSize`, `PeakWorkingSetSize`) from `K32GetProcessMemoryInfo`, and CPU times from `GetProcessTimes`. CPU time advances in scheduler ticks, 15.625 ms on the test VM. Thread count and allocator bytes are null on Windows: no per-process thread call exists without a system-wide enumeration, and `HeapSummary` costs O(live allocations).
 Other platforms return null for unsupported counters.
 Allocator live bytes, resident bytes and JS accounted bytes measure different scopes.
 No complete subsystem memory total is provided.
@@ -331,3 +332,23 @@ A manual `bare-mcp.exe` capture with `BARE_OBSERVE=metrics` and a 5 ms interval 
 Every sample field is `null`: RSS, peak RSS, allocator bytes, CPU times and thread count.
 This matches the design: unsupported platforms return unavailable fields. Native Windows and macOS metrics are not built.
 macOS runtime is untested. The Mac was offline (ssh timeout) during this check.
+
+### Native Windows metrics (2026-11-17)
+
+`bare_os::metrics::snapshot()` now returns native values on Windows. The Windows test `current_process_counters` failed before the change (`rss` was `None`, exit 101) and passes after it. It checks RSS, peak RSS, a CPU increase after 50 ms of spin, an RSS growth of at least 32 MiB with a 64 MiB live buffer, and null thread and allocator fields.
+
+Cost, measured on the Windows 11 VM (4 vCPU, KVM on archMachine), release build, 3 runs of 1000 calls each:
+
+| Call | Live allocations | Mean per call (3 runs) |
+| --- | --- | --- |
+| `HeapSummary` | default heap | 14.16, 13.49, 13.70 µs |
+| `HeapSummary` | 1,000,000 `Box<[u8; 32]>` | 16073, 16320, 16027 µs |
+| `snapshot()` with `HeapSummary` | 1,000,000 | 16018, 16217, 16394 µs |
+| `snapshot()` without `HeapSummary` | default heap | 0.66, 0.64, 0.64 µs |
+| `snapshot()` without `HeapSummary` | 1,000,000 | 0.76, 0.64, 0.65 µs |
+
+`HeapSummary` grows with the live allocation count (about 1000 times slower at 1,000,000 allocations), so it is dropped. `snapshot()` stays flat at about 0.65 µs. The scratch cost test is not kept.
+
+A new `bare-mcp.exe` capture (`BARE_OBSERVE=metrics`, 5 ms interval, debug build, one run) wrote 23 records: 22 samples and one `collector_status` (reason `shutdown`, `dropped: 0`). In all 22 samples, `rss_bytes`, `peak_rss_bytes`, `cpu_user_us` and `cpu_system_us` are non-null. RSS ranges from 5402624 to 6115328 bytes. `cpu_user_us` is 0 for 3 samples, then 15625. `cpu_system_us` is 0. `thread_count` and `allocator_live_bytes` are null in all samples, as designed.
+
+Not tested: a release `bare-mcp.exe` capture, longer captures, macOS, and a Windows build with the MSVC dynamic runtime.

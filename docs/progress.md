@@ -12726,3 +12726,7 @@ The parent ran the 14 unclassified failing tests on baseline `00e701b0` and cand
 ## Monitoring on Windows (2026-11-17)
 
 The monitoring tests ran once on the Windows 11 VM: `bare-os` (6), `bare-observe` lib (12) and `process` (4), driver monitoring (4), MCP monitoring (1) and `paint_trace_tests` (2). All pass. A metrics capture works and has zero drops, but every process counter is `null`: Windows has no native metrics yet, by design. macOS is untested; the Mac was offline. Detail: `docs/monitoring.md`.
+
+## Native Windows process metrics (2026-11-17)
+
+`bare_os::metrics::snapshot()` now reads RSS, peak RSS and CPU times on Windows (`K32GetProcessMemoryInfo`, `GetProcessTimes`). Thread count and allocator bytes stay null. `HeapSummary` was built and measured, then dropped: it took 16 ms with 1,000,000 live allocations (14 µs on the default heap). `snapshot()` now takes about 0.65 µs and does not grow with allocations. The Windows test failed before the change and passes after it. A `bare-mcp.exe` capture on the Windows 11 VM had 22 samples with non-null memory and CPU fields and zero drops. CPU time advances in 15.625 ms ticks. Not tested: macOS, release capture. Detail: `docs/monitoring.md`.
