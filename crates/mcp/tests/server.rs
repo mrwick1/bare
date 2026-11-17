@@ -107,15 +107,13 @@ fn a_live_session_runs_the_journey_one_line_at_a_time() {
     args["report"] = json!(true);
     let (rep, error) = s.tool("open", args);
     assert!(!error && rep["ok"] == true, "{rep}");
-    let mut last = 1;
-    for line in lines {
+    for (n, line) in lines.enumerate() {
         let (rep, error) = s.tool("step", json!({"steps": line}));
         assert!(!error && rep["ok"] == true, "{line}: {rep}");
         // Each call gives only its own step, numbered after the steps before it.
         let got = rep["steps"].as_array().unwrap();
         assert_eq!(got.len(), 1, "{rep}");
-        assert_eq!(got[0]["line"], last + 1);
-        last += 1;
+        assert_eq!(got[0]["line"], n + 2);
     }
     let (rep, error) = s.tool("close", json!({}));
     assert!(!error && rep["steps"].as_array().unwrap().is_empty(), "{rep}");
@@ -917,7 +915,7 @@ fn typing_into_an_input_that_hands_the_focus_away_fails_and_never_drops_the_firs
     let (v, _) = s.tool("eval", json!({"js": "['a', 'b'].map(i => document.getElementById(i).value).join('|')"}));
     // Either all the text is in `a`, or the receipt says that the type failed. The text is never cut or in another box without a failure.
     assert!(v == json!("bare browser|") || (error && r.contains("FAILED") && r.contains("focus")), "{r} {v}");
-    assert!(!(v == json!("|are browser") && !error), "{r} {v}");
+    assert!(v != json!("|are browser") || error, "{r} {v}");
 }
 
 #[test]
@@ -1955,7 +1953,7 @@ fn not_ready_names_the_pending_request_and_network_and_diagnose_list_it() {
     let t = std::time::Instant::now();
     let (rep, _) = s.tool("open", json!({"url": format!("{base}/fetch"), "timeout_ms": 600}));
     let r = rep.as_str().unwrap();
-    assert!(r.contains(&format!("not ready: still loading after")) && r.contains(&format!("1 request pending: fetch GET {base}/api?delay=8000 (")), "{r}");
+    assert!(r.contains("not ready: still loading after") && r.contains(&format!("1 request pending: fetch GET {base}/api?delay=8000 (")), "{r}");
     let (net, _) = s.tool("network", json!({}));
     let net = net.as_str().unwrap().to_string();
     assert!(net.contains(&format!("pending fetch GET {base}/api?delay=8000")), "{net}");
