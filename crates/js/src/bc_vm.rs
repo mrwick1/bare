@@ -79,7 +79,8 @@ op_consts! {
     JN_LT_K = JnLtK, JN_LE_K = JnLeK, JN_GT_K = JnGtK, JN_GE_K = JnGeK, JN_EQ_K = JnEqK, JN_NE_K = JnNeK, JN_SEQ_K = JnSEqK,
     JN_SNE_K = JnSNeK, CALL_R = CallR, ADD_K = AddK, SUB_K = SubK, MUL_K = MulK, DIV_K = DivK, MOD_K = ModK,
     ITER_OPEN = IterOpen, FOR_IN_OPEN = ForInOpen, ITER_NEXT = IterNext, ITER_CLOSE = IterClose, ITER_STEP = IterStep,
-    ITER_REST = IterRest, OBJ_REST = ObjRest, REQUIRE_OBJ = RequireObj,
+    ITER_REST = IterRest, OBJ_REST = ObjRest, REQUIRE_OBJ = RequireObj, SPREAD_PUSH = SpreadPush, CALL_SPREAD = CallSpread,
+    DEF_ELEM = DefElem, REG_EXP_LIT = RegExpLit,
 }
 
 /// Every wide word of the (verified) code is one that the loop reads: `GetEnv`, `SetEnv`, `InitEnv` or `DefField`.
@@ -217,7 +218,16 @@ impl<'p> Interp<'p> {
             });
         }
         self.bc.stats.compiled += 1;
-        Some(Rc::new(Compiled { code, kv: kv.into(), cells: cells.into() }))
+        let rc = Rc::new(Compiled {
+            code,
+            kv: kv.into(),
+            cells: cells.into(),
+            #[cfg(feature = "bc-hist")]
+            hist: Default::default(),
+        });
+        #[cfg(feature = "bc-hist")]
+        self.bc.hist.funcs.push((0, 0, "<script>".into(), rc.clone()));
+        Some(rc)
     }
 
     /// The code of function `fid` of the current script (`script`), compiled when the mode says so. `None`: the tree walker runs it.
@@ -244,6 +254,12 @@ impl<'p> Interp<'p> {
         }
         let r = self.bc_compile(fid);
         let c = self.bc_finish(r);
+        #[cfg(feature = "bc-hist")]
+        if c.is_some() {
+            let f = self.prog.func(fid);
+            let name = f.name.map_or_else(|| format!("@{}", f.span.start), |n| self.prog.text(n).to_string());
+            self.bc.hist.label(script, fid.index() as u32, name);
+        }
         let why = self.bc.why;
         self.bc.codes[s][fid.index()] = match &c {
             Some(c) => BcSlot::Byte(c.clone()),
@@ -331,7 +347,7 @@ impl<'p> Interp<'p> {
             let mut pc = 0;
             let mut back = false;
             while let Ok((i, n)) = bc::decode(&c.ops, pc) {
-                back |= matches!(i.op, Op::Jmp | Op::JmpIf | Op::JmpIfNot) && i.offset() < 0;
+                back |= (matches!(i.op, Op::Jmp | Op::JmpIf | Op::JmpIfNot) || i.op.is_fused_jump()) && i.offset() < 0;
                 pc += n;
             }
             if !back {
@@ -407,7 +423,7 @@ impl<'p> Interp<'p> {
     #[inline(always)]
     fn bc_target(&self, f: Value) -> Option<(Rc<Compiled>, FuncId, u32, ObjId)> {
         let Value::Object(o) = f else { return None };
-        let Some(&Callee::Script { script, fid, env, self_binding: false }) = self.funcs.get(&o) else { return None };
+        let Some(&Callee::Script { script, fid, env, self_binding: false, .. }) = self.funcs.get(&o) else { return None };
         if script as usize != self.cur {
             return None;
         }
@@ -491,6 +507,97 @@ impl<'p> Interp<'p> {
             }
         }
         Ok(())
+    }
+
+    /// The rare ops without an arm in the loop: the word `w` at `at`. They run in one cold call so that they do not change the code
+    /// of the hot arms.
+    #[inline(never)]
+    fn bc_rare(&mut self, code: &Compiled, at: usize, w: u32, regs: &mut [Value]) -> Res<()> {
+        let (op, a, b, c) = (w as u8, (w >> 8 & 255) as usize, (w >> 16 & 255) as usize, (w >> 24) as usize);
+        match op {
+            SPREAD_PUSH => self.bc_spread_push(code, at, regs, a, b, c != 0)?,
+            CALL_SPREAD => regs[a] = self.bc_call_spread(code, at, regs, b, c != 0)?,
+            DELETE => regs[a] = self.bc_delete(regs[b], regs[c])?,
+            DEF_ELEM => self.bc_def_elem(regs[a], regs[b], regs[c])?,
+            REG_EXP_LIT => regs[a] = self.ext_eval_regexp(Self::bc_call_expr(code, at))?,
+            _ => return Err(unsupported("bad bytecode", Span::default())),
+        }
+        Ok(())
+    }
+
+    /// `Delete`: `delete base[key]` (`eval_delete`).
+    fn bc_delete(&mut self, base: Value, kv: Value) -> Res<Value> {
+        let key = self.coerce_key(kv)?;
+        let o = match base {
+            Value::Object(o) => o,
+            Value::Undefined | Value::Null => {
+                let t = self.display(base);
+                let k = self.key_text(key);
+                return Err(self.type_err(&format!("Cannot convert undefined or null to object ({t}, deleting '{k}')")));
+            }
+            _ => return Ok(Value::Bool(true)),
+        };
+        let ok = hxw!(self, self.heap.delete(o, key), self.px_delete(o, key)?);
+        if !ok && self.strict {
+            let k = self.key_text(key);
+            return Err(self.type_err(&format!("Cannot delete property '{k}' of #<Object>")));
+        }
+        Ok(Value::Bool(ok))
+    }
+
+    /// `DefElem`: a computed key of an object literal.
+    fn bc_def_elem(&mut self, o: Value, k: Value, v: Value) -> Res<()> {
+        let Value::Object(o) = o else { return Err(unsupported("DefElem on a value that is not an object", Span::default())) };
+        let key = self.coerce_key(k)?;
+        self.def(o, key, v, true, true, true)
+    }
+
+    /// `SpreadPush`: the values of the iteration of `regs[b]` go to the end of the array `regs[a]`. The call table of the word names
+    /// the spread operand for the error text. `args` is a spread in the arguments of a call (the buffer limit of `eval_args`).
+    fn bc_spread_push(&mut self, c: &Compiled, pc: usize, regs: &[Value], a: usize, b: usize, args: bool) -> Res<()> {
+        let Value::Object(arr) = regs[a] else { return Err(unsupported("SpreadPush on a value that is not an array", Span::default())) };
+        let v = regs[b];
+        let mut n = h!(self, self.heap.array_length(arr)).unwrap_or(0);
+        if !args && let Value::Object(o) = v && let Some(more) = h!(self, self.heap.array_length(o)) {
+            h!(self, self.heap.reserve_elems(arr, more as usize));
+        }
+        let mut it = self.iter_start(v, Self::bc_call_expr(c, pc))?;
+        while let Some(item) = self.iter_next(&mut it)? {
+            if args {
+                self.iter_buffer_room(n as usize)?;
+            }
+            self.def(arr, PropertyKey::Index(n), item, true, true, true)?;
+            n += 1;
+        }
+        Ok(())
+    }
+
+    /// `CallSpread`: `bc_call` with the arguments in an array.
+    fn bc_call_spread(&mut self, c: &Compiled, pc: usize, regs: &[Value], b: usize, new: bool) -> Res<Value> {
+        let e = Self::bc_call_expr(c, pc);
+        let f = regs[b];
+        let Value::Object(arr) = regs[b + if new { 1 } else { 2 }] else { return Err(unsupported("CallSpread without an array", Span::default())) };
+        let mut argv = self.arg_pool.pop().unwrap_or_default();
+        argv.clear();
+        for i in 0..h!(self, self.heap.array_length(arr)).unwrap_or(0) {
+            argv.push(self.get_prop(Value::Object(arr), PropertyKey::Index(i))?);
+        }
+        self.mark_call(e);
+        let callee = match self.prog.expr(e).kind {
+            ExprKind::Call { callee, .. } | ExprKind::New { callee, .. } => callee,
+            _ => e,
+        };
+        let r = if new {
+            self.construct(f, &argv, callee)
+        } else if self.is_callable(f) {
+            self.call_fn(f, regs[b + 1], &argv)
+        } else {
+            Err(self.not_a_function(callee))
+        };
+        self.stk.pos = 0;
+        let r = r?;
+        self.arg_pool.push(argv);
+        Ok(r)
     }
 
     /// The values that are left in `it`, as a new array (a rest element, `bind_array_elems`).
@@ -703,6 +810,10 @@ impl<'p> Interp<'p> {
     /// `GetField` when the inline own hit failed (`member_ic`).
     #[inline(never)]
     fn bc_get_field(&mut self, base: Value, n: u32, ic: &std::cell::Cell<Ic>) -> Res<Value> {
+        #[cfg(feature = "bc-hist")]
+        {
+            self.bc.hist.miss[0] += 1;
+        }
         let key = self.name_key(n)?;
         let Value::Object(o) = base else { return self.get_prop(base, key) };
         let got = if self.heap.ic_refuses(o) {
@@ -727,6 +838,10 @@ impl<'p> Interp<'p> {
     /// `SetField` when the inline store hit failed (`member_put_ic`).
     #[inline(never)]
     fn bc_set_field(&mut self, base: Value, n: u32, v: Value, ic: &std::cell::Cell<Ic>) -> Res<()> {
+        #[cfg(feature = "bc-hist")]
+        {
+            self.bc.hist.miss[1] += 1;
+        }
         let key = self.name_key(n)?;
         let Value::Object(o) = base else { return self.put_prop(base, key, v) };
         if ic.get().is_mega() || self.heap.ic_refuses(o) || self.heap.has_exotics() && self.heap.is_view_index_key(o, key) {
@@ -905,6 +1020,8 @@ impl<'p> Interp<'p> {
             // `Abx`, `AsBx` and `Sj` operands.
             let bx = w >> 16;
             let sbx = w as i32 >> 16;
+            #[cfg(feature = "bc-hist")]
+            self.bc.hist.step(w, at, c);
             let step: Result<(), Error> = 'op: {
                 // The value of a fallible step, or the exit from this instruction with its error.
                 macro_rules! tri {
@@ -1108,7 +1225,8 @@ impl<'p> Interp<'p> {
                         pc += 1;
                         let (o, v) = (regs[a], regs[b]);
                         let ic = &c.code.ics[cc];
-                        if !matches!(o, Value::Object(ob) if self.heap.ic_store(ob, &ic.get(), v)) {
+                        let e = ic.get();
+                        if !matches!(o, Value::Object(ob) if self.heap.ic_store(ob, &e, v) || matches!(self.heap.ic_add(ob, &e, v), Ok(true))) {
                             tri!(at, self.bc_set_field(o, name!(x), v, ic));
                         }
                     }
@@ -1317,8 +1435,8 @@ impl<'p> Interp<'p> {
                     RET => ret!(regs[a]),
                     RET_UNDEF => ret!(Value::Undefined),
                     THROW => tri!(at, Err::<(), _>(Error::Throw(regs[a]))),
-                    DELETE => break 'op Err(unsupported("delete in bytecode", Span::default())),
-                    _ => break 'op Err(unsupported("bad bytecode", Span::default())),
+                    // Every op without an arm here is one cold call: it must not change the code of the hot arms.
+                    _ => tri!(at, self.bc_rare(c, at, w, regs)),
                 }
                 Ok(())
             };

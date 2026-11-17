@@ -2283,6 +2283,11 @@ impl Heap {
 
     /// Room for `n` more own properties, in one allocation of that size. A vector that grows by push takes 4, 8, 16 slots (16 bytes each): an
     /// object made from a literal, or a closure, knows how many it will have, so the slack is not made.
+    pub fn slot_count(&self, o: ObjId) -> usize {
+        self.objects.get(o.index, o.gn).map_or(0, |ob| ob.slots().len())
+    }
+
+    /// Room for `n` more own properties, in one allocation of that size (see `slot_count` for the count a constructor left).
     pub fn reserve_props(&mut self, o: ObjId, n: usize) -> R<()> {
         self.obj(o)?;
         self.edit(o, |ob| ob.reserve_props(n));

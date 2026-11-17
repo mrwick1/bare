@@ -714,3 +714,147 @@ f()"#;
         assert_eq!(out[0], out[1]);
     });
 }
+
+// ---------- the add hit inline in `SetField` and the constructor slot hint ----------
+
+fn run_in(src: &str, mode: Exec) -> (String, IcCounts) {
+    let mut it = Interp::realm(Heap::default(), EvalLimits::default()).unwrap();
+    it.set_exec(mode);
+    let got = run(&mut it, src);
+    (got, it.ic_counts())
+}
+
+/// The same result in `Tree`, `Auto` and `Byte`.
+fn same_in_all_modes(cases: &'static [(&'static str, &'static str)]) {
+    big(move || {
+        let mut bad = Vec::new();
+        for (name, src) in cases {
+            let (want, _) = run_in(src, Exec::Tree);
+            assert!(!want.starts_with("error") && !want.starts_with("throw"), "{name}: {want}");
+            for mode in [Exec::Auto, Exec::Byte] {
+                let (got, _) = run_in(src, mode);
+                if got != want {
+                    bad.push(format!("{name} {mode:?}: tree {want}, got {got}"));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "{}", bad.join("\n"));
+    });
+}
+
+/// 1000 adds of one shape: the lane takes the cached add without `set_ic`.
+#[test]
+fn a_repeated_add_does_not_reach_the_slow_path() {
+    big(|| {
+        let src = "function P(i) { this.a = i; this.b = i; this.c = i; } var s = 0; for (var i = 0; i < 1000; i++) s += new P(i).c; s";
+        let (got, c) = run_in(src, Exec::Byte);
+        assert_eq!(got, "499500");
+        assert!(c.heap.add_hits >= 3 * 990, "{c:?}");
+        assert!(c.heap.set_ic_calls < 3 * 20, "the slow path ran {} times", c.heap.set_ic_calls);
+    });
+}
+
+#[test]
+fn the_inline_add_keeps_every_invalidation_rule() {
+    same_in_all_modes(&[
+        ("setter appears", "function P() { this.k = 1; } var s = [], i; for (i = 0; i < 6; i++) { var o = new P(); s.push(Object.keys(o).length); }
+          var hit = 0; Object.defineProperty(P.prototype, 'k', { set(v) { hit++; }, configurable: true });
+          for (i = 0; i < 4; i++) { var o = new P(); s.push(Object.keys(o).length); } s.join() + ':' + hit"),
+        ("object proto setter", "function P() { this.k = 1; } var s = [], i, hit = 0;
+          for (i = 0; i < 6; i++) s.push(Object.keys(new P()).length);
+          Object.defineProperty(Object.prototype, 'k', { set(v) { hit++; }, configurable: true });
+          for (i = 0; i < 4; i++) s.push(Object.keys(new P()).length);
+          delete Object.prototype.k; s.push(Object.keys(new P()).length); s.join() + ':' + hit"),
+        ("read-only on proto", "function P() { this.k = 1; } var s = [], i;
+          for (i = 0; i < 6; i++) s.push(new P().k);
+          Object.defineProperty(P.prototype, 'k', { value: 7, writable: false });
+          for (i = 0; i < 4; i++) s.push(new P().k); s.join()"),
+        ("freeze", "function add(o) { o.k = 1; return o; } var s = [], i;
+          for (i = 0; i < 6; i++) s.push(Object.keys(add({})).length);
+          for (i = 0; i < 4; i++) { var o = Object.freeze({}); add(o); s.push(Object.keys(o).length); } s.join()"),
+        ("preventExtensions and seal", "function add(o) { o.k = 1; return o; } var s = [], i;
+          for (i = 0; i < 6; i++) s.push(Object.keys(add({})).length);
+          for (i = 0; i < 3; i++) { var o = Object.preventExtensions({}); add(o); s.push(Object.keys(o).length); }
+          for (i = 0; i < 3; i++) { var o = Object.seal({}); add(o); s.push(Object.keys(o).length); } s.join()"),
+        ("defineProperty first", "function add(o) { o.k = 1; return o; } var s = [], i;
+          for (i = 0; i < 6; i++) s.push(JSON.stringify(add({})));
+          for (i = 0; i < 3; i++) { var o = {}; Object.defineProperty(o, 'k', { value: 5, writable: false }); add(o); s.push(JSON.stringify(o) + o.k); } s.join()"),
+        ("delete and re-add", "function add(o) { o.k = 1; return o; } var s = [], i, o = {};
+          for (i = 0; i < 8; i++) { add(o); s.push(Object.keys(o).length); delete o.k; s.push(Object.keys(o).length); } s.join()"),
+        ("setPrototypeOf", "function add(o) { o.k = 1; return o; } var s = [], i, p = { set k(v) { s.push('set'); } };
+          for (i = 0; i < 6; i++) s.push(Object.keys(add({})).length);
+          for (i = 0; i < 3; i++) { var o = {}; Object.setPrototypeOf(o, p); add(o); s.push(Object.keys(o).length); }
+          var q = Object.create(null); add(q); s.push(Object.keys(q).length); s.join()"),
+        ("proxy in the chain", "function add(o) { o.k = 1; return o; } var s = [], i, log = [];
+          for (i = 0; i < 6; i++) s.push(Object.keys(add({})).length);
+          var px = new Proxy({}, { set(t, k, v, r) { log.push(String(k)); return true; } });
+          for (i = 0; i < 3; i++) { var o = Object.create(px); add(o); s.push(Object.keys(o).length); }
+          var p2 = new Proxy({}, {}); add(p2); s.join() + ':' + log.join()"),
+        ("arrays and length", "function add(o) { o.k = 1; return o; } function len(o, n) { o.length = n; return o; } var s = [], i;
+          for (i = 0; i < 6; i++) { s.push(Object.keys(add({})).length); }
+          for (i = 0; i < 4; i++) { var a = add([1, 2]); s.push(a.length + ':' + Object.keys(a).join('+')); }
+          for (i = 0; i < 6; i++) s.push(len({}, i).length);
+          for (i = 0; i < 4; i++) s.push(len([1, 2, 3], i).length);
+          var ta = new Uint8Array(2); add(ta); s.push(ta.k); s.join()"),
+        ("__proto__", "function add(o) { o.__proto__ = null; return o; } function addk(o) { o.k = 1; return o; } var s = [], i;
+          for (i = 0; i < 6; i++) s.push(Object.getPrototypeOf(add({})) === null);
+          for (i = 0; i < 4; i++) s.push(Object.keys(addk(Object.create(null))).length);
+          var o = addk({}); add(o); s.push(Object.keys(o).length, o.k); s.join()"),
+        ("class fields", "class A { x = 1; y = 2; constructor() { this.z = 3; } } class B extends A { w = 4; } var s = [], i;
+          for (i = 0; i < 8; i++) s.push(Object.keys(new B()).join('') + Object.keys(new A()).join(''));
+          Object.defineProperty(A.prototype, 'z', { set(v) { s.push('set'); } });
+          for (i = 0; i < 3; i++) s.push(Object.keys(new B()).join('')); s.join()"),
+        ("dictionary mode", "function add(o, k) { o[k] = 1; return o; } function addk(o) { o.k = 1; return o; } var s = [], i, o = {};
+          for (i = 0; i < 6; i++) s.push(Object.keys(addk({})).length);
+          for (i = 0; i < 400; i++) add(o, 'p' + i);
+          for (i = 0; i < 4; i++) { addk(o); s.push(Object.keys(o).length); delete o.k; } s.join()"),
+    ]);
+}
+
+/// A constructor hint changes no result: values, order and `new.target`.
+#[test]
+fn a_constructor_slot_hint_changes_no_result() {
+    same_in_all_modes(&[
+        ("order", "function P(n) { for (var i = 0; i < n; i++) this['k' + i] = i; } var s = [], i;
+          for (i = 0; i < 6; i++) s.push(Object.keys(new P(i % 2 ? 2 : 20)).join('') + JSON.stringify(new P(5)));
+          s.join()"),
+        ("literal results", "function P(a) { this.a = a; this.b = 2; this.c = 3; this.d = 4; this.e = 5; } var s = [], i;
+          for (i = 0; i < 8; i++) { var o = new P(i); s.push(o.a + o.e + Object.keys(o).length); } s.join()"),
+        ("new.target", "function P() { this.t = new.target === P; this.a = 1; this.b = 2; this.c = 3; this.d = 4; }
+          var s = [], i; for (i = 0; i < 6; i++) s.push(JSON.stringify(new P()));
+          function Q() {} s.push(JSON.stringify(Reflect.construct(P, [], Q)), Reflect.construct(P, [], Q) instanceof Q); s.join()"),
+        ("subclass", "class A { constructor() { this.a = 1; this.b = 2; this.c = 3; this.d = 4; } } class B extends A { constructor() { super(); this.e = 5; } }
+          var s = [], i; for (i = 0; i < 6; i++) s.push(Object.keys(new B()).join('') + Object.keys(new A()).join('')); s.join()"),
+        ("return object", "function P(r) { this.a = 1; this.b = 2; this.c = 3; this.d = 4; if (r) return { z: r }; }
+          var s = [], i; for (i = 0; i < 6; i++) s.push(JSON.stringify(new P(i % 2))); s.join()"),
+        ("reflect construct", "function P() { this.a = 1; this.b = 2; this.c = 3; this.d = 4; this.e = 5; }
+          var s = [], i; for (i = 0; i < 6; i++) s.push(JSON.stringify(Reflect.construct(P, []))); s.join()"),
+        ("grows after hint", "function P(n) { this.a = 1; for (var i = 0; i < n; i++) this['x' + i] = i; }
+          var s = [], i; for (i = 0; i < 4; i++) s.push(Object.keys(new P(3)).length); s.push(Object.keys(new P(50)).length); s.push(Object.keys(new P(0)).length); s.join()"),
+    ]);
+}
+
+/// A constructor remembers the slot count of its last object, at most 64: a class of 2 fields never reserves more than 2.
+#[test]
+fn a_constructor_keeps_the_observed_slot_count_as_a_hint() {
+    big(|| {
+        for mode in [Exec::Auto, Exec::Byte] {
+            let mut it = Interp::realm(Heap::default(), EvalLimits::default()).unwrap();
+            it.set_exec(mode);
+            let src = "function P() { for (var i = 0; i < 16; i++) this['k' + i] = i; } function Q() { this.a = 1; this.b = 2; }
+              function R() { for (var i = 0; i < 100; i++) this['k' + i] = i; } for (var i = 0; i < 3; i++) { new P(); new Q(); new R(); }
+              [P, Q, R]";
+            let Ok(Value::Object(arr)) = it.run_script(src) else { panic!("{mode:?}") };
+            let hints: Vec<u8> = (0..3)
+                .map(|i| {
+                    let Value::Object(f) = it.get_prop(Value::Object(arr), PropertyKey::Index(i)).unwrap() else { panic!() };
+                    let Some(&Callee::Script { hint, .. }) = it.funcs.get(&f) else { panic!() };
+                    hint
+                })
+                .collect();
+            // R stops at 100 properties as dictionary or shape objects: the hint is at most 64 either way.
+            assert_eq!((hints[0], hints[1]), (16, 2), "{mode:?}");
+            assert!(hints[2] <= 64, "{mode:?} {hints:?}");
+        }
+    });
+}

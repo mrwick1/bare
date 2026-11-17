@@ -31,6 +31,9 @@ struct Compiled {
     /// For each constant: its global cell. `GetGlobal` and `SetGlobal` read it. Constants that are not names hold a key that is
     /// never read.
     cells: Box<[GCell]>,
+    /// Operations run and entries at word 0 (`bc-hist`).
+    #[cfg(feature = "bc-hist")]
+    hist: (std::cell::Cell<u64>, std::cell::Cell<u64>),
 }
 
 /// A global name of compiled code and what the loop learned about it (`GetGlobal`, `SetGlobal`). Both hits are what the full path
@@ -107,6 +110,8 @@ struct BcState {
     refused: FxMap<&'static str, u64>,
     /// Why the last `bc_finish` refused.
     why: &'static str,
+    #[cfg(feature = "bc-hist")]
+    hist: bc_hist::Hist,
 }
 
 impl BcState {
@@ -126,6 +131,8 @@ impl Drop for BcState {
             r.sort();
             eprintln!("bcstats compiled={} fallbacks={} runs={} calls_lane={} calls_tree={} refused={r:?}", s.compiled, s.fallbacks, s.runs, s.calls_lane, s.calls_tree);
         }
+        #[cfg(feature = "bc-hist")]
+        self.hist.report();
     }
 }
 
@@ -140,6 +147,11 @@ mod bc_gen;
 #[path = "bc_verify.rs"]
 mod bc_verify;
 pub use bc_gen::GenCheck;
+
+/// The counters of the loop (feature `bc-hist`).
+#[cfg(feature = "bc-hist")]
+#[path = "bc_hist.rs"]
+mod bc_hist;
 
 /// The loop (step B3).
 #[path = "bc_vm.rs"]

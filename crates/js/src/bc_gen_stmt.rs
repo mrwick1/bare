@@ -51,11 +51,11 @@ impl Gen<'_, '_> {
                 self.stmt(cons)?;
                 if let Some(a) = alt {
                     let end = self.jump(Op::Jmp, 0)?;
-                    self.patch(j)?;
+                    self.patch_all(j)?;
                     self.stmt(a)?;
                     self.patch(end)
                 } else {
-                    self.patch(j)
+                    self.patch_all(j)
                 }
             }
             StmtKind::While { test, body } => {
@@ -64,7 +64,7 @@ impl Gen<'_, '_> {
                 self.open(true, Some(top));
                 self.stmt(body)?;
                 self.jump_back(Op::Jmp, 0, top)?;
-                self.patch(j)?;
+                self.patch_all(j)?;
                 self.close()
             }
             StmtKind::DoWhile { body, test } => {
@@ -72,10 +72,11 @@ impl Gen<'_, '_> {
                 self.open(true, None);
                 self.stmt(body)?;
                 self.land_conts()?;
-                let r = self.reg()?;
-                self.expr(test, r)?;
-                self.jump_back(Op::JmpIf, r, top)?;
-                self.free(r);
+                let mut back = Vec::new();
+                self.jump_cond(test, true, &mut back)?;
+                for j in back {
+                    self.patch_to(j, top)?;
+                }
                 self.close()
             }
             StmtKind::For { init, test, update, body } => {
@@ -107,8 +108,8 @@ impl Gen<'_, '_> {
                     self.emit(Op::CopyEnv, 0, 0, 0)?;
                 }
                 let j = match test {
-                    Some(t) => Some(self.jump_if_false(t)?),
-                    None => None,
+                    Some(t) => self.jump_if_false(t)?,
+                    None => Vec::new(),
                 };
                 self.open(true, None);
                 self.stmt(body)?;
@@ -120,9 +121,7 @@ impl Gen<'_, '_> {
                     self.expr_void(u)?;
                 }
                 self.jump_back(Op::Jmp, 0, top)?;
-                if let Some(j) = j {
-                    self.patch(j)?;
-                }
+                self.patch_all(j)?;
                 self.close()?;
                 if envs {
                     self.pop_env()?;
@@ -289,9 +288,14 @@ impl Gen<'_, '_> {
         let mut to = Vec::new();
         for (i, c) in prog.list(cases).enumerate() {
             if let Some(test) = prog.case(c).test {
-                self.expr(test, t)?;
-                self.emit(Op::StrictEq, t, d, t)?;
-                to.push((i, self.jump(Op::JmpIf, t)?));
+                let j = match self.num_konst(test) {
+                    Some(k) => self.jump_cmp(Op::JnSNeK, d, k)?,
+                    None => {
+                        self.expr(test, t)?;
+                        self.jump_cmp(Op::JnSNe, t, d)?
+                    }
+                };
+                to.push((i, j));
             }
         }
         self.free(t);
@@ -392,14 +396,12 @@ impl Gen<'_, '_> {
             let t = self.reg()?;
             for (i, &ex) in fin.exits.iter().enumerate() {
                 self.emit(Op::LoadI, t, 2 + i as u32, 0)?;
-                self.emit(Op::StrictEq, t, fin.kind, t)?;
-                let j = self.jump(Op::JmpIfNot, t)?;
+                let j = self.jump_cmp(Op::JnSEq, t, fin.kind)?;
                 self.exit(ex, fin.val)?;
                 self.patch(j)?;
             }
             self.emit(Op::LoadI, t, 1, 0)?;
-            self.emit(Op::StrictEq, t, fin.kind, t)?;
-            let j = self.jump(Op::JmpIfNot, t)?;
+            let j = self.jump_cmp(Op::JnSEq, t, fin.kind)?;
             self.emit(Op::Throw, fin.val, 0, 0)?;
             self.patch(j)?;
         }
@@ -555,8 +557,7 @@ impl Gen<'_, '_> {
                 let t = self.reg()?;
                 self.emit(Op::Mov, x, v, 0)?;
                 self.emit(Op::LoadUndef, t, 0, 0)?;
-                self.emit(Op::StrictEq, t, x, t)?;
-                let j = self.jump(Op::JmpIfNot, t)?;
+                let j = self.jump_cmp(Op::JnSEq, t, x)?;
                 let name = matches!(prog.pat(target).kind, PatKind::Ident).then(|| self.it.cc.cold.pat_name[target.index()]);
                 self.named(default, x, name)?;
                 self.patch(j)?;
