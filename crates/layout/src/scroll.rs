@@ -10,8 +10,8 @@
 //! `docs/resources.md`, "Scrolling".
 //!
 //! Rules:
-//! - A `position: fixed` box and everything in it is left out: it does not scroll with the page and it does not make the
-//!   page longer.
+//! - A `position: fixed` box and everything in it does not scroll with the page and does not make the page longer. A
+//!   scroll container inside it is still found.
 //! - What a scroll container holds does not count for the boxes around it (it clips). Its own border box does.
 //! - The scrollbars come from layout (`Layout::bars`, which it found when it laid the box out): `overflow: scroll`
 //!   always has them, `auto` only when the content did not fit.
@@ -24,6 +24,9 @@ use bare_css::cascade::Styles;
 use bare_css::values::{Keyword, Property};
 use bare_html::dom::{Document, NodeData, NodeId};
 use std::collections::HashMap;
+
+/// The place in the list of the stand-in for a fixed box in `areas`.
+const FIXED: usize = usize::MAX;
 
 /// One scroll container.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -110,6 +113,9 @@ pub fn areas(doc: &Document, styles: &Styles, layout: &Layout) -> Areas {
     type Open = (u32, usize, f32, f32, f32, f32);
     let mut open: Vec<Open> = Vec::new();
     let finish = |out: &mut Areas, (_, k, r, b, pr, pb): Open| {
+        if k == FIXED {
+            return;
+        }
         let a = &mut out.list[k];
         let c = a.client();
         a.content = ((r + pr - a.pad.x).max(c.0), (b + pb - a.pad.y).max(c.1));
@@ -125,9 +131,11 @@ pub fn areas(doc: &Document, styles: &Styles, layout: &Layout) -> Areas {
         if f.kind == Kind::Box && i > 0 {
             match tree.position(f.node) {
                 Keyword::Fixed if tree.kind(f.node) != crate::boxes::Kind::Inline => {
-                    out.fixed.push(i as u32);
-                    i = f.end as usize;
-                    continue;
+                    // Its content counts for no box around it, but a container inside it scrolls: walk it with a stand-in that takes the extents.
+                    if !open.iter().any(|o| o.1 == FIXED) {
+                        out.fixed.push(i as u32);
+                    }
+                    open.push((f.end, FIXED, 0.0, 0.0, 0.0, 0.0));
                 }
                 Keyword::Sticky => {
                     while sticks.last().is_some_and(|s| s.0 as usize <= i) {
@@ -138,7 +146,7 @@ pub fn areas(doc: &Document, styles: &Styles, layout: &Layout) -> Areas {
                     } else {
                         let k = out.sticky.len() as u32;
                         let rect = Rect::default();
-                        out.sticky.push(Sticky { node: f.node, frag: i as u32, parent: sticks.last().map_or(sticky::NONE, |s| s.1), scroller: open.last().map_or(sticky::NONE, |o| o.1 as u32), view: rect, rect, cb: rect, margin: [0.0; 4], inset: [None; 4] });
+                        out.sticky.push(Sticky { node: f.node, frag: i as u32, parent: sticks.last().map_or(sticky::NONE, |s| s.1), scroller: open.last().filter(|o| o.1 != FIXED).map_or(sticky::NONE, |o| o.1 as u32), view: rect, rect, cb: rect, margin: [0.0; 4], inset: [None; 4] });
                         out.sticky_index.insert(f.node.index() as u32, k);
                         sticks.push((f.end, k));
                     }
