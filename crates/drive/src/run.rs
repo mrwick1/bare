@@ -305,6 +305,11 @@ impl Session {
     }
 
     /// Save the downloads of the pages that later `open` steps make in `d`.
+    /// Set the time limit of the next steps; a `timeout` step changes it again.
+    pub fn set_timeout(&mut self, t: Duration) {
+        self.timeout = t;
+    }
+
     pub fn set_downloads(&mut self, d: bare::Downloads) {
         self.downloads = Some(d);
     }

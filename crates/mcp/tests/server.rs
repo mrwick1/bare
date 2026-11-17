@@ -2635,3 +2635,28 @@ fn act_fill_inserts_the_text_as_one_edit_with_no_keys() {
     let (v, _) = s.tool("eval", json!({"js": "document.getElementById('a').value + '|' + window.keys + '|' + window.inputs"}));
     assert_eq!(v, json!("abc|3|2"));
 }
+
+fn busy_page(_: &str, _: &str, _: &str, _: Option<&str>) -> (u16, &'static str, Vec<u8>) {
+    (200, "text/html", b"<!doctype html><body><p>busy</p><script>setInterval(function () {}, 20)</script></body>".to_vec())
+}
+
+#[test]
+fn a_timeout_line_ends_with_its_step_call() {
+    let mut s = Server::start();
+    s.tool("open", json!({"url": common::serve_route(busy_page), "timeout_ms": 500}));
+    let (rep, _) = s.tool("step", json!({"steps": "timeout 6000"}));
+    assert_eq!(rep["ok"], true, "{rep}");
+    // The session default (500 ms) is back: a failing wait must not take 6 s.
+    let t = std::time::Instant::now();
+    let (rep, _) = s.tool("step", json!({"steps": "wait js \"false\""}));
+    assert_eq!(rep["ok"], false, "{rep}");
+    assert!(t.elapsed().as_millis() < 3000, "waited {:?}", t.elapsed());
+    // `timeout_ms` of the call sets the limit of that call only.
+    let t = std::time::Instant::now();
+    let (rep, _) = s.tool("step", json!({"steps": "wait js \"false\"", "timeout_ms": 1500}));
+    assert_eq!(rep["ok"], false, "{rep}");
+    assert!(t.elapsed().as_millis() >= 1400, "waited {:?}", t.elapsed());
+    let t = std::time::Instant::now();
+    s.tool("step", json!({"steps": "wait js \"false\""}));
+    assert!(t.elapsed().as_millis() < 1400, "waited {:?}", t.elapsed());
+}
