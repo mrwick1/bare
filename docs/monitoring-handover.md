@@ -82,7 +82,7 @@ Do not change rendering behavior to fix instrumentation.
 ## Remaining sequence
 
 1. Fix and verify GUI paint trace coverage.
-2. Classify the other workspace failures against the baseline. Do not widen into unrelated engine fixes without agreement.
+2. Done 2026-11-17: all known workspace failures also fail on the baseline; see `docs/monitoring.md`. Was: classify the other workspace failures against the baseline. Do not widen into unrelated engine fixes without agreement.
 3. Test non-Linux execution when requested and an appropriate environment is available.
 4. Optional coverage: HTTP/2 first-byte/frame timing, failure outcomes before response headers, and complete subsystem/logger memory attribution.
 5. Prepare a PR after the agreed acceptance work. Read the PR-writing and identity instructions first. Do not merge without authorization.

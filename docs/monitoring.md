@@ -285,3 +285,30 @@ The parent reran the same windowed journey in an isolated Cage screen on 2026-11
 The test-only pass made no engine changes. Non-Linux runtime remains untested.
 
 Evidence: `/tmp/monitor-gui-20261117/` contains the runner, journey, test logs, results, corrected JSONL capture and `trace-screen.png`.
+
+## Workspace failure classification (2026-11-17)
+
+The parent ran each unclassified failure on original baseline `00e701b0` and on candidate `9197b6e2`.
+Machine: archMachine, idle at the start (load 0.68). Debug test profile. Three runs per tree, alternating base and candidate, `--test-threads=1`.
+The baseline used a separate target directory, `/data/bare-tmp/base/00e701b089/target`.
+
+Fail on both trees, 3 of 3 runs each, with the same panic line and message:
+
+- `bare-drive --test chunked`: `a_big_document_parses_across_ticks_and_takes_input_during_the_parse` (line 147) and `a_chunked_parse_gives_the_order_and_the_dom_of_a_one_step_parse` (line 173). Both report `time limit`.
+- `bare-drive --test survive_limit`: `a_page_that_aborts_task_after_task_fails_the_step_with_the_reason` (line 59). Base runs took 143.5, 129.7 and 163.9 s. Candidate runs took 150.2, 142.0 and 126.6 s.
+- `bare-mcp --test server`: `a_snapshot_of_5000_elements_takes_under_30_ms` (line 608). Best snapshot time: base 138, 138, 136 ms; candidate 139, 136, 135 ms.
+- `bare-net --test https_openssl`: `an_untrusted_or_wrong_name_peer_gets_no_request_and_no_body` (line 307, `BadSignature`) and `a_redirect_from_a_trusted_server_to_an_untrusted_one_sends_nothing_there` (line 342).
+- `bare-tls --test client_openssl`: 7 passed, 4 failed on both trees. The failed tests are `a_root_that_did_not_sign_the_leaf_is_refused`, `a_root_that_the_peer_sends_is_not_trusted`, `an_empty_trust_set_trusts_nothing` and `an_rsa_chain_with_the_wrong_root_is_refused` (lines 108, 119, 157, 232).
+- `bare-tls --test tls12_openssl`: 6 passed, 1 failed on both trees, at line 133.
+
+Pass on both trees, 3 of 3 runs each:
+
+- `bare-drive --test nonblocking`: `a_driver_click_step_returns_and_the_expect_waits_for_the_reply`.
+- `bare-mcp --test server`: `a_hidden_iframe_download_is_saved` and `a_click_under_a_cookie_banner_fails_fast_and_names_the_banner`.
+
+Hypothesis: these two groups failed earlier because the workspace run loaded the machine. This is not verified.
+
+Result: every failure that remains also fails on the baseline. The monitoring branch introduces no failure in these targets.
+With the meta-refresh and layout-overflow failures above, all known workspace failures predate this branch.
+Causes are not classified. The TLS failures are negative tests: the peer is still refused, but the error differs from the expected one. Hypothesis: the synthetic certificate fixtures or the local OpenSSL version cause `BadSignature`.
+Logs: the session scratchpad `classify/` directory (temporary).
