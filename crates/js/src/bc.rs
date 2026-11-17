@@ -167,6 +167,8 @@ ops! {
     RequireObj Abc "r" "Throw a TypeError when `a` is `undefined` or `null` (an object pattern).",
     SpreadPush Abc "r r n" "Append the values of the iteration of `b` to the array `a` (`...b` in an array literal, or in the arguments when `c` is 1). The call table names the spread expression.",
     CallSpread Abc "r r n" "`a = b(...)` (`c` 0) or `a = new b(...)` (`c` 1) with the arguments in the array at `b+2` (a call, `this` in `b+1`) or `b+1` (`new`).",
+    DefElem Abc "r r r" "Define the own data property with the key `b` (a property key already, see `ToKey`) on `a` with the value `c` (a computed key of an object literal).",
+    RegExpLit Abc "r" "`a` = the regexp literal that the call table names for this word.",
 }
 
 impl Op {
@@ -336,7 +338,7 @@ pub struct Code {
     /// The number of registers of a frame.
     pub nregs: u16,
     /// Pairs `(word, expression)` for each `Call` and `New`, sorted by word: the call or `new` node, for the position of
-    /// `Error.stack` and for the text of a callee in an error.
+    /// `Error.stack` and for the text of a callee in an error. `IterOpen`, `SpreadPush` and `RegExpLit` name their expression here too.
     pub calls: Vec<(u32, u32)>,
     /// Stage 2: the function keeps all its variables in registers (no environment). Registers `0..nparams` are the parameters
     /// and `0..nlocals` all the variables: the loop sets `nparams..nlocals` to `undefined` at a call.

@@ -185,7 +185,10 @@ impl Gen<'_, '_> {
             ExprKind::Super => Err("super"),
             ExprKind::Class(_) => Err("class"),
             ExprKind::Tagged { .. } => Err("tagged template"),
-            ExprKind::RegExp => Err("regexp literal"),
+            ExprKind::RegExp => {
+                self.code.calls.push((self.here() as u32, e.index() as u32));
+                self.emit(Op::RegExpLit, dst, 0, 0)
+            }
             ExprKind::BigInt => Err("bigint literal"),
             ExprKind::Call { .. } | ExprKind::Member { .. } | ExprKind::Index { .. } => Err("optional chain"),
             ExprKind::PrivateMember { .. } | ExprKind::PrivateIn { .. } => Err("private name"),
@@ -260,6 +263,24 @@ impl Gen<'_, '_> {
                 PropKind::Get | PropKind::Set => return Err("getter or setter"),
                 PropKind::Spread => return Err("spread"),
             }
+            if let Key::Computed(ke) = p.key {
+                // The key is converted before the value runs. A value that takes its name from the key stays on the tree walker.
+                let anon = match prog.expr(p.value).kind {
+                    ExprKind::Function(f) => prog.func(f).name.is_none(),
+                    ExprKind::Class(_) => true,
+                    _ => false,
+                };
+                if p.kind != PropKind::Init || anon {
+                    return Err("computed key");
+                }
+                let k = self.reg()?;
+                self.expr(ke, k)?;
+                self.emit(Op::ToKey, k, dst, k)?;
+                self.expr(p.value, t)?;
+                self.emit(Op::DefElem, dst, k, t)?;
+                self.free(k);
+                continue;
+            }
             let s = match p.key {
                 Key::Name(sp) => prog.name(sp).into_owned(),
                 Key::Str(sp) => {
@@ -290,7 +311,7 @@ impl Gen<'_, '_> {
             UnaryOp::BitNot => Op::BitNot,
             UnaryOp::Typeof => Op::Typeof,
             UnaryOp::Void => Op::LoadUndef,
-            UnaryOp::Delete => return Err("delete"),
+            UnaryOp::Delete => return self.delete(arg, dst),
         };
         let a = arg;
         if op == UnaryOp::Typeof && matches!(self.prog.expr(a).kind, ExprKind::Ident) {
@@ -310,6 +331,35 @@ impl Gen<'_, '_> {
         }
         self.expr(arg, dst)?;
         self.emit(o, dst, if o == Op::LoadUndef { 0 } else { dst }, 0)
+    }
+
+    /// `delete` (`eval_delete`): a member or an index deletes. Any other operand except a name is evaluated and gives `true`.
+    fn delete(&mut self, arg: ExprId, dst: u32) -> G<()> {
+        let mark = self.top;
+        match self.prog.expr(arg).kind {
+            ExprKind::Member { obj, name, optional: false } => {
+                let (o, k) = (self.reg()?, self.reg()?);
+                self.expr(obj, o)?;
+                let key: Vec<u16> = self.prog.name(name).encode_utf16().collect();
+                let kc = self.konst(KeyOf::String(key.into()));
+                self.emit(Op::LoadK, k, kc, 0)?;
+                self.emit(Op::Delete, dst, o, k)?;
+            }
+            ExprKind::Index { obj, index, optional: false } => {
+                let (o, k) = (self.reg()?, self.reg()?);
+                self.expr(obj, o)?;
+                self.expr(index, k)?;
+                self.emit(Op::ToKey, k, o, k)?;
+                self.emit(Op::Delete, dst, o, k)?;
+            }
+            ExprKind::Ident => return Err("delete"),
+            _ => {
+                self.expr(arg, dst)?;
+                self.emit(Op::LoadTrue, dst, 0, 0)?;
+            }
+        }
+        self.free(mark);
+        Ok(())
     }
 
     /// Evaluate the base and the key of an update target (`expr_ref`). The registers stay in use until the caller frees them.

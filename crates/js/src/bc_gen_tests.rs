@@ -626,3 +626,31 @@ fn spread_runs_on_the_lane() {
         ("math", "function f(x) { return Math.max(...x) + Math.min(...x); } f([3, 1, 2])"),
     ]);
 }
+
+#[test]
+fn computed_keys_delete_and_regexp_literals_run_on_the_lane() {
+    same_on_the_lane(&[
+        ("computed key", "function f(k) { var o = { a: 1, [k]: 2, ['x' + k]: 3, [1 + 1]: 4 }; return JSON.stringify(o); } f('b')"),
+        ("computed key order", "var log = []; function k(n) { log.push('k' + n); return n; } function v(n) { log.push('v' + n); return n; } function f() { var o = { [k('a')]: v(1), [k('b')]: v(2) }; return log.join() + Object.keys(o); } f()"),
+        ("computed key object tostring once", "var n = 0; function f() { var o = { [{ toString() { n++; return 'z'; } }]: 1 }; return Object.keys(o) + n; } f()"),
+        ("computed key symbol", "function f() { var s = Symbol('q'); var o = { [s]: 5 }; return o[s]; } f()"),
+        ("computed key overrides", "function f() { var o = { a: 1, ['a']: 2 }; return o.a; } f()"),
+        ("computed key named function", "function f(k) { var o = { [k]: function inner() {} }; return o[k].name; } f('z')"),
+        ("computed key with throw", "function f() { try { var o = { [(function () { throw new RangeError('k'); })()]: 1 }; } catch (e) { return e.name; } } f()"),
+        ("delete member", "function f() { var o = { a: 1, b: 2 }; var r = delete o.a; return r + ',' + JSON.stringify(o); } f()"),
+        ("delete index", "function f(k) { var o = { a: 1, b: 2 }, a = [1, 2, 3]; var r = delete o[k]; var r2 = delete a[1]; return r + ',' + r2 + JSON.stringify(o) + a.length + (1 in a); } f('b')"),
+        ("delete missing and primitive", "function f() { var o = {}; return [delete o.x, delete 'abc'.length, delete (5).x, delete 3].join(); } f()"),
+        ("delete non configurable", "function f() { var o = {}; Object.defineProperty(o, 'p', { value: 1 }); return delete o.p; } f()"),
+        ("delete non configurable strict", "function f() { 'use strict'; var o = {}; Object.defineProperty(o, 'p', { value: 1 }); try { delete o.p; } catch (e) { return e.name + ':' + e.message; } } f()"),
+        ("delete of null base", "function f(o) { try { delete o.a; } catch (e) { return e.name + ':' + e.message; } } [f(null), f(undefined)].join('|')"),
+        ("delete index of null base", "function f(o) { try { delete o['a']; } catch (e) { return e.name + ':' + e.message; } } [f(null), f(undefined)].join('|')"),
+        ("delete order", "var log = []; function o() { log.push('o'); return { a: 1 }; } function k() { log.push('k'); return 'a'; } function f() { delete o()[k()]; return log.join(); } f()"),
+        ("delete call result", "var n = 0; function g() { n++; return 1; } function f() { return delete g() + ',' + n; } f()"),
+        ("delete optional", "function f(o) { return delete o?.a; } var x = { a: 1 }; [f(null), f(x), JSON.stringify(x)].join()"),
+        ("delete in condition", "function f(o) { if (delete o.a) { return Object.keys(o).length; } return -1; } f({ a: 1, b: 2 })"),
+        ("regexp", "function f(s) { return /b+/.test(s) + ',' + s.replace(/a/g, 'x') + ',' + /(\\d+)-(\\d+)/.exec(s)[2]; } f('aabb 12-34')"),
+        ("regexp new object each time", "function f() { return /a/ === /a/; } function g() { var r = []; for (var i = 0; i < 2; i++) r.push(/a/g); return r[0] === r[1]; } f() + ',' + g()"),
+        ("regexp last index", "function f() { var out = []; for (var i = 0; i < 3; i++) { var r = /a/g; r.test('aaa'); out.push(r.lastIndex); } return out.join(); } f()"),
+        ("regexp flags", "function f() { var r = /A.b/gims; return r.flags + r.source + r.test('a\\nB'); } f()"),
+    ]);
+}
