@@ -352,6 +352,78 @@ fn backspace_in_an_empty_block_removes_it() {
 }
 
 #[test]
+fn backspace_at_the_start_of_a_block_merges_it_into_the_one_before() {
+    big(|| {
+        let mut b = browser();
+        let e = keys_host(&mut b, "");
+        let caret = "var s = getSelection(); [s.anchorNode.textContent, s.anchorOffset].join()";
+        js(&mut b, "e.innerHTML = '<p>ab</p><p id=c>cd</p>'; getSelection().collapse(document.getElementById('c').firstChild, 0);");
+        press(&mut b, Some(e), &["Backspace"]);
+        assert_eq!(js(&mut b, "e.innerHTML"), "<p>abcd</p>");
+        assert_eq!(js(&mut b, caret), "ab,2");
+        // List items.
+        js(&mut b, "e.innerHTML = '<ul><li>ab</li><li id=c>cd</li></ul>'; getSelection().collapse(document.getElementById('c').firstChild, 0);");
+        press(&mut b, None, &["Backspace"]);
+        assert_eq!(js(&mut b, "e.innerHTML"), "<ul><li>abcd</li></ul>");
+        assert_eq!(js(&mut b, caret), "ab,2");
+        // The first item of a list leaves the list.
+        js(&mut b, "e.innerHTML = '<ul><li id=c>cd</li><li>ef</li></ul>'; getSelection().collapse(document.getElementById('c').firstChild, 0);");
+        press(&mut b, None, &["Backspace"]);
+        assert_eq!(js(&mut b, "e.innerHTML"), "<div>cd</div><ul><li>ef</li></ul>");
+        assert_eq!(js(&mut b, caret), "cd,0");
+        // A paragraph after a list joins the last item.
+        js(&mut b, "e.innerHTML = '<ul><li>ab</li></ul><p id=c>cd</p>'; getSelection().collapse(document.getElementById('c').firstChild, 0);");
+        press(&mut b, None, &["Backspace"]);
+        assert_eq!(js(&mut b, "e.innerHTML"), "<ul><li>abcd</li></ul>");
+        // Inline formatting stays.
+        js(&mut b, "e.innerHTML = '<p>a<b>b</b></p><p><i id=c>c</i></p>'; getSelection().collapse(document.getElementById('c').firstChild, 0);");
+        press(&mut b, None, &["Backspace"]);
+        assert_eq!(js(&mut b, "e.innerHTML"), "<p>a<b>b</b><i id=\"c\">c</i></p>");
+        assert_eq!(js(&mut b, caret), "b,1");
+        // The first block of the host stays.
+        js(&mut b, "e.innerHTML = '<p id=c>ab</p>'; getSelection().collapse(document.getElementById('c').firstChild, 0);");
+        assert_eq!(js(&mut b, "document.execCommand('delete')"), "false");
+        assert_eq!(js(&mut b, "e.innerHTML"), "<p id=\"c\">ab</p>");
+    });
+}
+
+#[test]
+fn delete_at_the_end_of_a_block_merges_the_next_one() {
+    big(|| {
+        let mut b = browser();
+        let e = keys_host(&mut b, "");
+        let caret = "var s = getSelection(); [s.anchorNode.textContent, s.anchorOffset].join()";
+        js(&mut b, "e.innerHTML = '<p id=c>ab</p><p>cd</p><p>ef</p>'; getSelection().collapse(document.getElementById('c').firstChild, 2);");
+        press(&mut b, Some(e), &["Delete"]);
+        assert_eq!(js(&mut b, "e.innerHTML"), "<p id=\"c\">abcd</p><p>ef</p>");
+        assert_eq!(js(&mut b, caret), "ab,2");
+        js(&mut b, "e.innerHTML = '<ul><li id=c>ab</li><li>cd</li></ul>'; getSelection().collapse(document.getElementById('c').firstChild, 2);");
+        press(&mut b, None, &["Delete"]);
+        assert_eq!(js(&mut b, "e.innerHTML"), "<ul><li id=\"c\">abcd</li></ul>");
+        // The last block of the host has nothing to merge.
+        js(&mut b, "e.innerHTML = '<p id=c>ab</p>'; getSelection().collapse(document.getElementById('c').firstChild, 2);");
+        assert_eq!(js(&mut b, "document.execCommand('forwardDelete')"), "false");
+    });
+}
+
+#[test]
+fn merging_blocks_fires_the_delete_events() {
+    big(|| {
+        let mut b = browser();
+        let e = keys_host(&mut b, "");
+        js(&mut b, "window.log = []; ['beforeinput', 'input'].forEach(function (t) { e.addEventListener(t, function (ev) { log.push(t + ':' + ev.inputType); }); }); \
+            e.innerHTML = '<p id=c>ab</p><p id=d>cd</p>'; getSelection().collapse(document.getElementById('d').firstChild, 0);");
+        press(&mut b, Some(e), &["Backspace"]);
+        js(&mut b, "e.innerHTML = '<p id=c>ab</p><p>cd</p>'; getSelection().collapse(document.getElementById('c').firstChild, 2);");
+        press(&mut b, None, &["Delete"]);
+        assert_eq!(
+            js(&mut b, "log.join(' ')"),
+            "beforeinput:deleteContentBackward input:deleteContentBackward beforeinput:deleteContentForward input:deleteContentForward"
+        );
+    });
+}
+
+#[test]
 fn list_toggle_changes_only_the_selected_items() {
     big(|| {
         let mut b = browser();

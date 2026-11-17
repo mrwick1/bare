@@ -12812,3 +12812,10 @@ Seen, not fixed: `browser_geometry_tests::external_sheets_embedded_sheets_and_in
 - Chrome (headless, this machine) writes `matrix(0, 1, -1, 0, 0, 0)` for `rotate(90deg)`, not `6.12323e-17`. A multiple of 90 degrees is exact here too. Expected values in the tests come from that Chrome.
 - Changed on purpose: a mix of units (`translateX(5px) translateX(7%)`) is now a good value, as in Chrome. `calc()` inside a list that needs a matrix is still dropped.
 - Not done: the `translate`, `rotate` and `scale` properties do not join the matrix. Not tested: Vaul itself, a transition of a matrix.
+## 2026-11-17: Backspace and Delete merge blocks (#443)
+
+Backspace at the start of a block with content moves its children to the end of the block before it. Delete at the end of a block moves the next block into it. The code is `delete_at_block_edge` in `browser_editing.rs`, ported, simplified, from the W3C editing draft "delete" command ("merge blocks") and Ladybird `command_delete_action` (BSD-2).
+
+- A list before the block gives its last item; a next list gives its first item. The first item of a list leaves the list, as for an empty item (#499). Inline formatting moves with the children.
+- Gaps: only sibling blocks merge. The last item of a list does not take the block after the list. A block nested in a `div` is not merged with a block outside it.
+- Tests: 3 new in `browser_editing_tests.rs`. Not compared with Chrome in a live browser.
