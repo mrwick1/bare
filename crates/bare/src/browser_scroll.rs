@@ -211,10 +211,15 @@ impl Geo<'_> {
         (s.x, s.y) != (x, y)
     }
 
+    /// The border box of `n` in the layout: its fragments, or for a shape of an `<svg>` its box in the drawing.
+    fn box_of(&self, n: NodeId) -> Option<Rect> {
+        border_box(self.layout, n).or_else(|| crate::browser_svg::layout_box(self, n))
+    }
+
     /// The border box of `n` in window coordinates (what `getBoundingClientRect` gives), with the offsets of the page and of the
     /// containers around it taken off. A box in a fixed box does not move with the page. `None`: no box.
     pub fn client_rect(&self, s: &Scroll, n: NodeId) -> Option<Rect> {
-        let mut r = border_box(self.layout, n)?;
+        let mut r = self.box_of(n)?;
         let (dx, dy) = self.shift(s, n);
         (r.x, r.y) = (r.x + dx, r.y + dy);
         Some(r)
@@ -249,7 +254,7 @@ impl Geo<'_> {
 
     /// Scroll the containers around `n` and then the page so that `n` shows: `ax` along the line, `ay` across it.
     pub fn reveal(&self, s: &mut Scroll, n: NodeId, ax: Align, ay: Align) -> bool {
-        let Some(mut r) = border_box(self.layout, n) else { return false };
+        let Some(mut r) = self.box_of(n) else { return false };
         let (sx, sy) = self.stuck(s, n);
         (r.x, r.y) = (r.x + sx, r.y + sy);
         let before = s.clone();

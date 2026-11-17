@@ -32,7 +32,7 @@ pub trait GeometryMath {
     fn acos(x:f32)->f32;
     fn hypot(x:f32,y:f32)->f32;
 }
-struct NativeMath;
+pub(crate) struct NativeMath;
 impl GeometryMath for NativeMath {
     fn sin(x:f32)->f32{x.sin()}
     fn cos(x:f32)->f32{x.cos()}
@@ -92,21 +92,168 @@ pub enum Shape<'a> {
 type Out<'a> = &'a mut dyn FnMut(Shape<'_>);
 
 /// Draw the `<svg>` element `root` in the pixel box `(x, y, w, h)`: `out` gets each shape, in paint order.
-pub fn draw(doc: &Document, styles: &Styles, root: NodeId, (x, y, w, h): (f32, f32, f32, f32), out: Out<'_>) {
+pub fn draw(doc: &Document, styles: &Styles, root: NodeId, area: (f32, f32, f32, f32), out: Out<'_>) {
+    let map = root_map(doc, root, area);
+    let mut buf = Vec::new();
+    walk(doc, styles, root, root, map, out, &mut buf);
+}
+
+/// Where the user space of the `<svg>` `root` is in the pixel box `(x, y, w, h)`: the `viewBox` fitted in the box.
+fn root_map(doc: &Document, root: NodeId, (x, y, w, h): (f32, f32, f32, f32)) -> Map {
     let view = attr(doc, root, "viewBox").and_then(|v| {
         let mut n = v.split(|c: char| c == ',' || c.is_whitespace()).filter(|t| !t.is_empty()).map(|t| t.parse::<f32>().ok());
         let (a, b, c, d) = (n.next()??, n.next()??, n.next()??, n.next()??);
         (n.next().is_none() && c > 0.0 && d > 0.0).then_some((a, b, c, d))
     });
-    let map = match view {
+    match view {
         Some((vx, vy, vw, vh)) => {
             let s = (w / vw).min(h / vh);
             Map::new([s, 0.0, 0.0, s, x + (w - vw * s) / 2.0 - vx * s, y + (h - vh * s) / 2.0 - vy * s])
         }
         None => Map::new([1.0, 0.0, 0.0, 1.0, x, y]),
-    };
-    let mut buf = Vec::new();
-    walk(doc, styles, root, root, map, out, &mut buf);
+    }
+}
+
+/// A box `[x0, y0, x1, y1]` that grows to hold a point.
+type Span = Option<[f32; 4]>;
+
+fn grow(span: &mut Span, (x, y): (f32, f32)) {
+    match span {
+        Some(b) => *b = [b[0].min(x), b[1].min(y), b[2].max(x), b[3].max(y)],
+        None => *span = Some([x, y, x, y]),
+    }
+}
+
+/// The box of what `node` draws, through `map` (which holds the `transform` of `node` itself). A `g` and the `<svg>` hold the boxes of the
+/// children that show; a shape holds its points; a `text` holds the line box of each run (the ascent and the descent of its font).
+fn extent<M: GeometryMath>(doc: &Document, styles: &Styles, root: NodeId, node: NodeId, map: Map, span: &mut Span) {
+    match doc.element_name(node) {
+        _ if node == root || doc.element_name(node) == "g" => {
+            for child in doc.children(node).filter(|&c| matches!(doc.data(c), NodeData::Element { .. }) && styles.style(c).is_some()) {
+                let map = attr(doc, child, "transform").and_then(transform).map_or(map, |t| map.then(t));
+                extent::<M>(doc, styles, root, child, map, span);
+            }
+        }
+        "text" => {
+            let Some(style) = styles.style(node) else { return };
+            let m = Metrics::of(style);
+            let (runs, placed) = lay(doc, root, node, &m);
+            for (x, y, i) in placed.into_iter().filter(|p| !runs[p.2].4.is_empty()) {
+                let w = bare_layout::controls::text_width(&m, &runs[i].4);
+                for p in [(x, y - m.ascent), (x + w, y - m.ascent), (x, y + m.descent), (x + w, y + m.descent)] {
+                    grow(span, map.at(p));
+                }
+            }
+        }
+        name => {
+            // The polygon of a circle is fitted for its area, so its corners pass the curve: under a matrix that keeps the axes the box is exact.
+            if let ("circle" | "ellipse", true) = (name, map.m[1] == 0.0 && map.m[2] == 0.0) {
+                let l = |n| len(doc, node, n);
+                let (cx, cy, rx, ry) = if name == "circle" { (l("cx"), l("cy"), l("r"), l("r")) } else { (l("cx"), l("cy"), l("rx"), l("ry")) };
+                if rx > 0.0 && ry > 0.0 {
+                    grow(span, map.at((cx - rx, cy - ry)));
+                    grow(span, map.at((cx + rx, cy + ry)));
+                }
+                return;
+            }
+            for sub in shape::<M>(doc, node, name, map.s) {
+                sub.pts.iter().for_each(|&p| grow(span, map.at(p)));
+            }
+        }
+    }
+}
+
+/// The `<svg>` `root` to the pixel box `area`, then the `transform` of each element from `root` down to `node` (`node` last).
+fn map_of(doc: &Document, root: NodeId, area: (f32, f32, f32, f32), node: NodeId) -> Option<Map> {
+    let mut up = Vec::new();
+    let mut cur = node;
+    while cur != root {
+        up.push(cur);
+        cur = doc.parent(cur)?;
+    }
+    Some(up.iter().rev().fold(root_map(doc, root, area), |m, &a| attr(doc, a, "transform").and_then(transform).map_or(m, |t| m.then(t))))
+}
+
+/// The box `[x0, y0, x1, y1]` of `node` (an element of the `<svg>` `root`) in pixels, when the `<svg>` draws in `area`
+/// (`getBoundingClientRect`). `None` when `node` draws nothing.
+pub fn pixel_box<M: GeometryMath>(doc: &Document, styles: &Styles, root: NodeId, area: (f32, f32, f32, f32), node: NodeId) -> Option<[f32; 4]> {
+    let map = map_of(doc, root, area, node)?;
+    let mut span = None;
+    extent::<M>(doc, styles, root, node, map, &mut span);
+    span
+}
+
+/// The box `[x0, y0, x1, y1]` of `node` in its own user space, before its `transform` (`getBBox`). `None` when `node` draws nothing.
+pub fn user_box<M: GeometryMath>(doc: &Document, styles: &Styles, node: NodeId) -> Option<[f32; 4]> {
+    let root = std::iter::successors(Some(node), |&n| doc.parent(n).filter(|&p| doc.element_name(p) == "g" || doc.element_name(p) == "svg")).last()?;
+    let mut span = None;
+    extent::<M>(doc, styles, root, node, Map::new([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]), &mut span);
+    span
+}
+
+/// The elements of the `<svg>` `root` (drawn in `area`) under the pixel point `at`, the topmost first. Each shape or `text` that is painted
+/// and that takes pointer events comes before the `g` that holds it. A fill is hit inside its outline (non-zero rule), a stroke inside its
+/// width around the box of the shape. `root` itself is not listed.
+pub fn hits<M: GeometryMath>(doc: &Document, styles: &Styles, root: NodeId, area: (f32, f32, f32, f32), at: (f32, f32), out: &mut Vec<NodeId>) {
+    hit_walk::<M>(doc, styles, root, root, root_map(doc, root, area), at, out);
+}
+
+fn hit_walk<M: GeometryMath>(doc: &Document, styles: &Styles, root: NodeId, node: NodeId, map: Map, at: (f32, f32), out: &mut Vec<NodeId>) -> bool {
+    let mut any = false;
+    let kids: Vec<NodeId> = doc.children(node).filter(|&c| matches!(doc.data(c), NodeData::Element { .. })).collect();
+    for child in kids.into_iter().rev() {
+        let Some(style) = styles.style(child) else { continue };
+        let map = attr(doc, child, "transform").and_then(transform).map_or(map, |t| map.then(t));
+        let name = doc.element_name(child);
+        if name == "g" {
+            if hit_walk::<M>(doc, styles, root, child, map, at, out) {
+                out.push(child);
+                any = true;
+            }
+            continue;
+        }
+        if style.get(Property::Visibility) != Value::Keyword(bare_css::values::Keyword::Visible) || style.get(Property::PointerEvents) == Value::Keyword(bare_css::values::Keyword::None) {
+            continue;
+        }
+        let (fill, stroke) = paint_of(style);
+        let hit = if name == "text" {
+            let mut span = None;
+            extent::<M>(doc, styles, root, child, map, &mut span);
+            fill.is_some() && span.is_some_and(|b| at.0 >= b[0] && at.0 <= b[2] && at.1 >= b[1] && at.1 <= b[3])
+        } else {
+            let subs = shape::<M>(doc, child, name, map.s);
+            let filled = fill.is_some() && winding(subs.iter().map(|s| s.pts.iter().map(|&p| map.at(p))), at) != 0;
+            filled || stroke.is_some() && {
+                let half = Stroke::of(doc, root, child, map.s).half;
+                let mut span = None;
+                subs.iter().flat_map(|s| s.pts.iter()).for_each(|&p| grow(&mut span, map.at(p)));
+                span.is_some_and(|b| at.0 >= b[0] - half && at.0 <= b[2] + half && at.1 >= b[1] - half && at.1 <= b[3] + half)
+            }
+        };
+        if hit {
+            out.push(child);
+            any = true;
+        }
+    }
+    any
+}
+
+/// The winding number of the closed polygons `polys` around `p`.
+fn winding<I: Iterator<Item = (f32, f32)>>(polys: impl Iterator<Item = I>, p: (f32, f32)) -> i32 {
+    let mut w = 0;
+    for poly in polys {
+        let pts: Vec<(f32, f32)> = poly.collect();
+        for (i, &a) in pts.iter().enumerate() {
+            let b = pts[(i + 1) % pts.len()];
+            let side = (b.0 - a.0) * (p.1 - a.1) - (p.0 - a.0) * (b.1 - a.1);
+            if a.1 <= p.1 && b.1 > p.1 && side > 0.0 {
+                w += 1;
+            } else if a.1 > p.1 && b.1 <= p.1 && side < 0.0 {
+                w -= 1;
+            }
+        }
+    }
+    w
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -311,8 +458,9 @@ fn baseline_shift(doc: &Document, root: NodeId, text_node: NodeId, m: &Metrics) 
         .map_or(0.0, |v| baseline_offset(v, m))
 }
 
-/// Draw the letters of the `text` element `node`. The runs of a chunk (one `x`) move together for `text-anchor`.
-fn text(doc: &Document, root: NodeId, node: NodeId, m: Metrics, color: u32, map: Map, out: Out<'_>) {
+/// The runs of the `text` element `node` and where each one starts: `(x, baseline, index of the run)` in user units. The runs of a chunk (one
+/// `x`) move together for `text-anchor`.
+fn lay(doc: &Document, root: NodeId, node: NodeId, m: &Metrics) -> (Vec<Run>, Vec<(f32, f32, usize)>) {
     let runs = runs(doc, node, m.size);
     // The attributes are rare: a page that has none skips the walk up the tree for each run.
     let shifts = doc.find_atom("dominant-baseline").is_some() || doc.find_atom("alignment-baseline").is_some();
@@ -342,10 +490,16 @@ fn text(doc: &Document, root: NodeId, node: NodeId, m: Metrics, color: u32, map:
         }
         x = r.0.unwrap_or(x) + r.2;
         y = r.1.unwrap_or(y) + r.3;
-        placed.push((x, y + if shifts { baseline_shift(doc, root, r.5, &m) } else { 0.0 }, i));
-        x += bare_layout::controls::text_width(&m, &r.4);
+        placed.push((x, y + if shifts { baseline_shift(doc, root, r.5, m) } else { 0.0 }, i));
+        x += bare_layout::controls::text_width(m, &r.4);
     }
     shift(&mut placed, chunk, x);
+    (runs, placed)
+}
+
+/// Draw the letters of the `text` element `node`. The runs of a chunk (one `x`) move together for `text-anchor`.
+fn text(doc: &Document, root: NodeId, node: NodeId, m: Metrics, color: u32, map: Map, out: Out<'_>) {
+    let (runs, placed) = lay(doc, root, node, &m);
     // A uniform scale and a move keep the run as text: the glyph cache draws it, crisp. Any other matrix draws outlines.
     let upright = map.m[1].abs() < 1e-6 && map.m[2].abs() < 1e-6 && map.m[0] > 0.0 && (map.m[0] - map.m[3]).abs() <= map.m[0] * 1e-4;
     let mut buf = Vec::new();

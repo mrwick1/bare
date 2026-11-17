@@ -18,8 +18,9 @@
 //! The list is a `DOMRectList` and the rectangles are `DOMRect` (`browser_geom.rs`).
 //!
 //! Gates and gaps (recorded, none is faked)
-//! - An SVG or MathML element, or a range that holds one, is `Unsupported` (SVG has no layout here). So is a `col` or `colgroup` (layout makes
-//!   no box for a column; a range that holds one gets no rectangle for it).
+//! - A MathML element, or a range that holds an SVG or MathML element, is `Unsupported`. An element of an `<svg>` has one rectangle, the bounds of
+//!   what it draws (`browser_svg::layout_box`).
+//! - A `col` or `colgroup` is `Unsupported` (layout makes no box for a column; a range that holds one gets no rectangle for it).
 //! - `display: contents` is not a value of the CSS engine: the element is laid out as a block, so it has a rectangle (Chrome: none).
 //! - A `pre-wrap` line that ends in spaces gives one rectangle for the text and one for the spaces in Chrome; here one for the text.
 //! - A tab in `white-space: pre`, a `text-transform` that changes the number of letters, and the margin of an atomic box in a culled
@@ -415,7 +416,7 @@ fn with_pass(d: &Dom, it: &mut Interp<'_>, g: &Geo, s: &Scroll, f: impl Fn(&Pass
     f(&pass(g, s, Some(&plain?))).or_else(|n| if matches!(n, Need::Foreign) { Err(gate(FOREIGN)) } else { Ok(Vec::new()) })
 }
 
-const FOREIGN: &str = "getClientRects of an SVG or MathML element (SVG has no layout)";
+const FOREIGN: &str = "getClientRects of a MathML element, or of a range that holds an SVG or MathML element (no layout for it)";
 
 fn gate(what: &'static str) -> Error {
     Error::Unsupported(unsupported(what))
@@ -427,15 +428,16 @@ pub(crate) fn element_rects(d: &Dom, it: &mut Interp<'_>, el: NodeId) -> R<Vec<R
     if !d.in_document(it, el)? {
         return Ok(Vec::new());
     }
-    {
+    let svg = {
         let doc = d.doc.borrow();
-        if doc.is_foreign(el) {
+        if doc.is_foreign(el) && doc.element_ns(el) != bare_html::dom::Ns::Svg {
             return Err(gate(FOREIGN));
         }
         if matches!(doc.element_name(el), "col" | "colgroup") {
             return Err(gate("getClientRects of a col or colgroup (layout makes no box for a column)"));
         }
-    }
+        doc.is_foreign(el)
+    };
     d.with_geo_it(it, |g, s, it| {
         let one: Vec<Rect> = g
             .layout
@@ -449,6 +451,10 @@ pub(crate) fn element_rects(d: &Dom, it: &mut Interp<'_>, el: NodeId) -> R<Vec<R
             .collect();
         if !one.is_empty() {
             return Ok(one);
+        }
+        // A shape or a group of an `<svg>` has no fragment: its box is where it draws.
+        if svg {
+            return Ok(g.client_rect(s, el).into_iter().collect());
         }
         with_pass(d, it, g, s, |p| p.element(el))
     })?

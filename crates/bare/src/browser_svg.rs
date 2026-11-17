@@ -28,18 +28,28 @@ fn object(d: &Dom, it: &mut Interp<'_>, fields: &[(&str, f64)]) -> R<Value> {
     }
     Ok(Value::Object(o))
 }
+/// The box of an element of an `<svg>` that layout made no box for (a shape, a `g`, a `text`): the bounds of what it draws, through the
+/// `transform` of each element above it and the `viewBox`, in the layout. `None` for an `<svg>` (it has fragments), an element that
+/// draws nothing (a `defs`, a `g` with no shape, `display: none`), or one that is not in a drawn `<svg>`.
+pub(crate) fn layout_box(g: &crate::browser_scroll::Geo, n: NodeId) -> Option<bare_layout::fragment::Rect> {
+    let doc = g.doc;
+    if doc.element_ns(n) != Ns::Svg {
+        return None;
+    }
+    g.styles.style(n)?;
+    let root = std::iter::successors(Some(n), |&c| doc.parent(c).filter(|&p| doc.element_ns(p) == Ns::Svg)).last()?;
+    let f = g.layout.fragments.iter().find(|f| f.node == root && f.kind == bare_layout::fragment::Kind::Box)?;
+    let area = bare_paint::display::svg_area(f, g.styles.style(root)?);
+    let [x0, y0, x1, y1] = bare_paint::svg::pixel_box::<SoftwareMath>(doc, g.styles, root, area, n)?;
+    Some(bare_layout::fragment::Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 })
+}
+/// `getBBox()`: the bounds of what the element draws, in its own user space (before its `transform`).
 fn bbox(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
     let n = node(d, it, this)?;
-    object(
-        d,
-        it,
-        &[
-            ("x", num(d, n, "x")),
-            ("y", num(d, n, "y")),
-            ("width", num(d, n, "width")),
-            ("height", num(d, n, "height")),
-        ],
-    )
+    let styles = d.cascade_now(it)?;
+    let [x0, y0, x1, y1] = bare_paint::svg::user_box::<SoftwareMath>(&d.doc.borrow(), &styles, n).unwrap_or([0.0; 4]);
+    let f = |v: f32| v as f64;
+    object(d, it, &[("x", f(x0)), ("y", f(y0)), ("width", f(x1 - x0)), ("height", f(y1 - y0))])
 }
 fn ctm(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
     node(d, it, this)?;

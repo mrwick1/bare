@@ -1354,6 +1354,12 @@ fn content_box(f: &Fragment, style: &ComputedStyle) -> IRect {
     IRect { x0: b.x0 + w(Property::PaddingLeft), y0: b.y0 + w(Property::PaddingTop), x1: b.x1 - w(Property::PaddingRight), y1: b.y1 - w(Property::PaddingBottom) }
 }
 
+/// The pixel box `(x, y, w, h)` where the `<svg>` of the fragment `f` draws: its content box (what `Builder::svg` gives `svg::draw`).
+pub fn svg_area(f: &Fragment, style: &ComputedStyle) -> (f32, f32, f32, f32) {
+    let b = content_box(f, style);
+    (b.x0 as f32, b.y0 as f32, (b.x1 - b.x0) as f32, (b.y1 - b.y0) as f32)
+}
+
 /// Has the control the look of the UA style sheet (border, background), so that Chrome draws it with its own theme? A style
 /// of the page (`border`, `background`, `appearance: none`) turns the theme off, and the box is then the one of CSS.
 fn is_native(style: &ComputedStyle, c: Control) -> bool {
