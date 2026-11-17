@@ -3,30 +3,40 @@
 //! Linux reads `/proc/self/status` and `/proc/self/stat`. These reads and the
 //! allocator query are separate operations, so a snapshot is not atomic.
 //! Procfs RSS and peak RSS are approximate kernel counters.
+//!
+//! Windows calls `K32GetProcessMemoryInfo`, `GetProcessTimes` and `HeapSummary`
+//! on the current process. Each call costs O(1) in processes, threads and live
+//! allocations. The calls are separate, so a snapshot is not atomic.
 
 /// A best-effort measurement of the current process, across all its threads.
 /// Missing, malformed, overflowing or unsupported measurements are `None`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Snapshot {
-    /// Current resident memory in bytes (`VmRSS` on Linux).
+    /// Current resident memory in bytes (`VmRSS` on Linux, `WorkingSetSize` on Windows).
     pub rss_bytes: Option<u64>,
-    /// Peak resident memory in bytes (`VmHWM` on Linux).
+    /// Peak resident memory in bytes (`VmHWM` on Linux, `PeakWorkingSetSize` on Windows).
     pub peak_rss_bytes: Option<u64>,
     /// Cumulative user CPU microseconds, including guest time, excluding children.
+    /// Windows reads the `GetProcessTimes` user time, which has 100 ns units.
     pub cpu_user_us: Option<u64>,
     /// Cumulative system CPU microseconds, excluding children.
+    /// Windows reads the `GetProcessTimes` kernel time.
     pub cpu_system_us: Option<u64>,
-    /// Current number of threads in this process.
+    /// Current number of threads in this process. Always `None` on Windows:
+    /// no per-process call exists without a system-wide enumeration.
     pub thread_count: Option<u64>,
     /// glibc `mallinfo2.uordblks + hblkhd`, in bytes (requires glibc >= 2.33).
     /// Includes allocator overhead and mmap blocks. Cached freed blocks can
     /// remain counted. Excludes other allocators and direct application mmap.
     /// This is allocator accounting, not RSS or engine/JS live-object bytes.
+    /// Windows reports `HeapSummary.cbAllocated` of the process heap, which the
+    /// Rust system allocator uses. Other heaps and `VirtualAlloc` are excluded.
     pub allocator_live_bytes: Option<u64>,
 }
 
-/// Read available process counters. Non-Linux platforms return all `None`.
-/// CPU time has clock-tick resolution, truncated to whole microseconds.
+/// Read available process counters. Platforms other than Linux and Windows
+/// return all `None`. Linux CPU time has clock-tick resolution, truncated to
+/// whole microseconds.
 #[cfg(target_os = "linux")]
 pub fn snapshot() -> Snapshot {
     let mut result = std::fs::read_to_string("/proc/self/status")
@@ -47,7 +57,104 @@ pub fn snapshot() -> Snapshot {
     result
 }
 
-#[cfg(not(target_os = "linux"))]
+/// Read available process counters. Windows CPU time has 100 ns units,
+/// truncated to whole microseconds. `thread_count` is always `None`.
+#[cfg(windows)]
+pub fn snapshot() -> Snapshot {
+    use std::ffi::c_void;
+    use std::mem::size_of;
+
+    #[repr(C)]
+    #[allow(non_snake_case)]
+    struct ProcessMemoryCounters {
+        cb: u32,
+        PageFaultCount: u32,
+        PeakWorkingSetSize: usize,
+        WorkingSetSize: usize,
+        QuotaPeakPagedPoolUsage: usize,
+        QuotaPagedPoolUsage: usize,
+        QuotaPeakNonPagedPoolUsage: usize,
+        QuotaNonPagedPoolUsage: usize,
+        PagefileUsage: usize,
+        PeakPagefileUsage: usize,
+    }
+    #[repr(C)]
+    #[derive(Default)]
+    struct FileTime {
+        low: u32,
+        high: u32,
+    }
+    #[repr(C)]
+    #[allow(non_snake_case)]
+    struct HeapSummary {
+        cb: u32,
+        cbAllocated: usize,
+        cbCommitted: usize,
+        cbReserved: usize,
+        cbMaxReserve: usize,
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetCurrentProcess() -> *mut c_void;
+        fn GetProcessHeap() -> *mut c_void;
+        fn K32GetProcessMemoryInfo(process: *mut c_void, counters: *mut ProcessMemoryCounters, cb: u32) -> i32;
+        fn GetProcessTimes(
+            process: *mut c_void,
+            creation: *mut FileTime,
+            exit: *mut FileTime,
+            kernel: *mut FileTime,
+            user: *mut FileTime,
+        ) -> i32;
+        fn HeapSummary(heap: *mut c_void, flags: u32, summary: *mut HeapSummary) -> i32;
+    }
+    // A FILETIME counts 100 ns units. Ten units make one microsecond.
+    fn us(t: &FileTime) -> Option<u64> {
+        ((u64::from(t.high) << 32) | u64::from(t.low)).checked_div(10)
+    }
+
+    let mut result = Snapshot::default();
+    // SAFETY: GetCurrentProcess and GetProcessHeap take no arguments and return
+    // pseudo or process-owned handles. Every pointer below refers to a local
+    // struct with the documented layout, and the size argument is its size.
+    unsafe {
+        let process = GetCurrentProcess();
+        let mut mem = ProcessMemoryCounters {
+            cb: size_of::<ProcessMemoryCounters>() as u32,
+            PageFaultCount: 0,
+            PeakWorkingSetSize: 0,
+            WorkingSetSize: 0,
+            QuotaPeakPagedPoolUsage: 0,
+            QuotaPagedPoolUsage: 0,
+            QuotaPeakNonPagedPoolUsage: 0,
+            QuotaNonPagedPoolUsage: 0,
+            PagefileUsage: 0,
+            PeakPagefileUsage: 0,
+        };
+        if K32GetProcessMemoryInfo(process, &mut mem, mem.cb) != 0 {
+            result.rss_bytes = u64::try_from(mem.WorkingSetSize).ok();
+            result.peak_rss_bytes = u64::try_from(mem.PeakWorkingSetSize).ok();
+        }
+        let (mut created, mut exited, mut kernel, mut user) =
+            (FileTime::default(), FileTime::default(), FileTime::default(), FileTime::default());
+        if GetProcessTimes(process, &mut created, &mut exited, &mut kernel, &mut user) != 0 {
+            result.cpu_user_us = us(&user);
+            result.cpu_system_us = us(&kernel);
+        }
+        let mut heap = HeapSummary {
+            cb: size_of::<HeapSummary>() as u32,
+            cbAllocated: 0,
+            cbCommitted: 0,
+            cbReserved: 0,
+            cbMaxReserve: 0,
+        };
+        if HeapSummary(GetProcessHeap(), 0, &mut heap) != 0 {
+            result.allocator_live_bytes = u64::try_from(heap.cbAllocated).ok();
+        }
+    }
+    result
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
 pub fn snapshot() -> Snapshot {
     Snapshot::default()
 }
@@ -232,10 +339,48 @@ mod tests {
     }
 }
 
-#[cfg(all(test, not(target_os = "linux")))]
+#[cfg(all(test, not(any(target_os = "linux", windows))))]
 mod tests {
     #[test]
     fn unsupported_platform_returns_unavailable() {
         assert_eq!(super::snapshot(), super::Snapshot::default());
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    use std::hint::black_box;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn current_process_counters() {
+        let first = snapshot();
+        let rss = first.rss_bytes.expect("rss");
+        assert!(rss > 0);
+        assert!(first.peak_rss_bytes.expect("peak") >= rss);
+
+        let start = Instant::now();
+        let mut x = 0u64;
+        while start.elapsed() < Duration::from_millis(50) {
+            x = black_box(x.wrapping_add(1));
+        }
+        black_box(x);
+        let second = snapshot();
+        assert!(second.cpu_user_us.expect("cpu user") > first.cpu_user_us.expect("cpu user"));
+        assert!(second.cpu_system_us.is_some());
+
+        let mut big = vec![1u8; 64 << 20];
+        for page in big.chunks_mut(4096) {
+            page[0] = 2;
+        }
+        black_box(&big);
+        let third = snapshot();
+        let live = third.allocator_live_bytes.expect("allocator") - second.allocator_live_bytes.expect("allocator");
+        assert!(live >= 60 << 20, "allocator grew {live}");
+        let grown = third.rss_bytes.expect("rss") - second.rss_bytes.expect("rss");
+        assert!(grown >= 32 << 20, "rss grew {grown}");
+        black_box(&big);
+        assert_eq!(third.thread_count, None);
     }
 }
