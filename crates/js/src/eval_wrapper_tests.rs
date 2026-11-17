@@ -27,7 +27,7 @@ fn primitive_method_calls_and_plain_objects_allocate_no_wrapper() {
         assert_eq!(before, after, "no object was allocated for a primitive receiver");
         // a method that is a native keeps the primitive `this`: no wrapper
         assert_eq!(out(&mut it, "var r = Number.prototype.valueOf.call(5) + String.prototype.valueOf.call('x'); r"), "string:5x");
-        assert_eq!(it.heap.stats().total_object_allocs, after.0 + 0, "no object for a native called on a primitive");
+        assert_eq!(it.heap.stats().total_object_allocs, after.0, "no object for a native called on a primitive");
         // a strict function keeps the primitive `this`
         out(&mut it, "function strict() { 'use strict'; return this; } function sloppy() { return this; } strict.call(0); sloppy.call({});");
         let base = it.heap.stats().total_object_allocs;

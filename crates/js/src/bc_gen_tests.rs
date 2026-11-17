@@ -143,7 +143,7 @@ fn every_function_of_the_corpora_compiles_or_says_why() {
 
 fn total_report(r: &GenCheck) {
     let mut u = r.unsupported.clone();
-    u.sort_by(|a, b| b.1.cmp(&a.1));
+    u.sort_by_key(|b| std::cmp::Reverse(b.1));
     eprintln!("{} functions, {} compile ({:.1}%), {} words; unsupported: {u:?}", r.functions, r.compiled, 100.0 * r.compiled as f64 / r.functions.max(1) as f64, r.words);
 }
 

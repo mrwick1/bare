@@ -258,6 +258,7 @@ struct Ext {
 }
 
 impl Ext {
+    #[cfg(test)]
     fn re_tab_bytes(&self) -> usize {
         self.re_tab.e.capacity() * std::mem::size_of::<ReEntry>()
     }

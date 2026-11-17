@@ -837,7 +837,7 @@ fn module_scoping_rules() {
 
 #[test]
 fn a_module_counts_nodes_and_limits() {
-    let big = format!("{}", "export var a = 1;\n".repeat(1).as_str());
+    let big = "export var a = 1;\n".to_string();
     let lim = Limits { max_nodes: 3, ..Limits::default() };
     assert!(matches!(parse_module(&big, lim), Err(Error { kind: ErrorKind::Limit(LimitKind::Nodes), .. })));
     let (r, used) = parse_module_used(&big, Limits::default());

@@ -282,7 +282,9 @@ fn parse_iso(s: &[u16]) -> Option<Parsed> {
             offset = Some(0);
         } else if let Some(u) = c.peek().filter(|&u| u == b'+' as u16 || u == b'-' as u16) {
             c.i += 1;
-            let (oh, om) = (c.num(2)?, if c.eat(':') { c.num(2)? } else { c.num(2)? });
+            let oh = c.num(2)?;
+            c.eat(':');
+            let om = c.num(2)?;
             offset = Some(if u == b'-' as u16 { -(oh * 60 + om) } else { oh * 60 + om });
             if oh > 23 || om > 59 {
                 return Some(Parsed::Time(f64::NAN));
@@ -468,7 +470,7 @@ fn parse_legacy(s: &[u16]) -> Parsed {
     let (mut time, mut nt, mut pm) = ([0i64; 4], 0, NONE);
     let (mut sign, mut th, mut tm) = (NONE, NONE, NONE);
     let mut read_num = false;
-    let time_expects = |nt: usize, n: i64| (nt == 1 && n < 60) || (nt == 2 && n < 60) || (nt == 3 && n < 1000);
+    let time_expects = |nt: usize, n: i64| (matches!(nt, 1 | 2) && n < 60) || (nt == 3 && n < 1000);
     loop {
         let tok = sc.next();
         match tok {

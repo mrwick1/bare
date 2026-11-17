@@ -654,6 +654,8 @@ impl<'p> Interp<'p> {
     }
 
     /// `super.key = v`: OrdinarySet on the home prototype, with `this` as the receiver.
+    // `hx!` returns early on a host error; clippy sees the `return` as a diverging operand.
+    #[allow(clippy::diverging_sub_expression)]
     fn super_set(&mut self, this: Value, key: PropertyKey, v: Value) -> Res<()> {
         let base = self.super_base(Span::default())?;
         let found = match base {
