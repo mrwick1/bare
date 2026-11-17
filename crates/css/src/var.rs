@@ -11,7 +11,7 @@
 //!   `var()` with no value and no fallback, makes the property not set. A normal property in that case is `unset`.
 //! - The set of custom properties of an element is kept once for all the elements that have the same one (`Sets`).
 //!
-//! Left out: `@property` (types, initial values, no inheritance), and `var()` inside `env()` and the like.
+//! `@property` gives an `initial-value` and `inherits: false` (the registry of `RuleSet`, read by `Sets::text`); its types are not checked. Left out: `var()` inside `env()` and the like.
 //! The text is cut and pasted, not split in tokens, so `var(--a)px` with `--a: 1` gives `1px` here, and Chrome does not accept it.
 //! JS: like a template string, where `${}` is replaced and the result is read again.
 
@@ -176,12 +176,20 @@ pub struct Sets {
     /// The name numbers, sorted by name. Made on the first call of `pairs`, and dropped when a name is added.
     /// `OnceCell` holds a value that is made once, on first use. JS: like a lazy getter that keeps its result.
     sorted: std::cell::OnceCell<Vec<u32>>,
+    /// `@property`: the text number of the initial value of a name number, 0 for none. Empty when the page registers nothing.
+    initial: Vec<u32>,
+    /// `@property` with `inherits: false`: the name numbers whose value the child does not take from the parent.
+    not_inherited: Vec<u32>,
+    /// The same, by name number: O(1) to ask.
+    no_inherit: Vec<bool>,
+    /// For each set after the first: does it hold a value of a name in `not_inherited`? An element whose parent set has one cannot share it.
+    flagged: Vec<bool>,
 }
 
 impl Sets {
     /// What stays in place while the real sets are moved out for a while (`mem::replace`): it makes no allocation, and nothing may use it.
     pub fn moved_out() -> Sets {
-        Sets { names: Vec::new(), name_at: HashMap::default(), texts: Vec::new(), text_at: HashMap::default(), sets: Vec::new(), set_at: HashMap::default(), sorted: Default::default() }
+        Sets { names: Vec::new(), name_at: HashMap::default(), texts: Vec::new(), text_at: HashMap::default(), sets: Vec::new(), set_at: HashMap::default(), sorted: Default::default(), initial: Vec::new(), not_inherited: Vec::new(), flagged: Vec::new(), no_inherit: Vec::new() }
     }
 }
 
@@ -189,7 +197,7 @@ impl Default for Sets {
     fn default() -> Sets {
         let mut set_at = HashMap::default();
         set_at.insert(hash(&[]), vec![0]);
-        Sets { names: Vec::new(), name_at: HashMap::default(), texts: vec!["".into()], text_at: HashMap::default(), sets: vec![Box::default()], set_at, sorted: Default::default() }
+        Sets { names: Vec::new(), name_at: HashMap::default(), texts: vec!["".into()], text_at: HashMap::default(), sets: vec![Box::default()], set_at, sorted: Default::default(), initial: Vec::new(), not_inherited: Vec::new(), flagged: vec![false], no_inherit: Vec::new() }
     }
 }
 
@@ -222,11 +230,42 @@ impl Sets {
         self.text(&self.sets[set as usize], n)
     }
 
+    /// The text of a name in a set: the set's own, else the `initial-value` of its `@property`.
     fn text<'a>(&'a self, set: &[u32], name: u32) -> Option<&'a str> {
-        match set.get(name as usize) {
-            Some(&t) if t != 0 => Some(&self.texts[t as usize]),
-            _ => None,
+        let t = match set.get(name as usize) {
+            Some(&t) if t != 0 => t,
+            _ => self.initial.get(name as usize).copied().unwrap_or(0),
+        };
+        (t != 0).then(|| &*self.texts[t as usize])
+    }
+
+    /// What an element takes from the parent set for `name`: nothing for a registered property that is not inherited.
+    fn inherited<'a>(&'a self, set: &[u32], name: u32) -> Option<&'a str> {
+        if self.no_inherit.get(name as usize) == Some(&true) { self.text(&[], name) } else { self.text(set, name) }
+    }
+
+    /// Register `@property name`: `initial` is its `initial-value`. Done once for a new `Sets`, before any element. Types are not checked.
+    pub fn register(&mut self, name: &str, initial: Option<&str>, inherits: bool) {
+        let n = self.name(name) as usize;
+        if let Some(text) = initial {
+            let t = self.text_number(text.to_string());
+            if self.initial.len() <= n {
+                self.initial.resize(n + 1, 0);
+            }
+            self.initial[n] = t;
         }
+        if !inherits {
+            self.not_inherited.push(n as u32);
+            if self.no_inherit.len() <= n {
+                self.no_inherit.resize(n + 1, false);
+            }
+            self.no_inherit[n] = true;
+        }
+    }
+
+    /// Does the set hold a value that a child must not take (`inherits: false`)? O(1).
+    pub fn blocks_sharing(&self, set: u32) -> bool {
+        self.flagged[set as usize]
     }
 
     /// The custom properties of the set `set`, sorted by name: `("--gap", "8px")`.
@@ -260,7 +299,7 @@ impl Sets {
 
         fn get(n: u32, slots: &mut Vec<(u32, Slot)>, at: &At, parent: &[u32], sets: &Sets, depth: usize) -> Option<String> {
             let Some(&i) = at.get(&n) else {
-                return sets.text(parent, n).map(str::to_string);
+                return sets.inherited(parent, n).map(str::to_string);
             };
             match slots[i].1.clone() {
                 Slot::Done(v) => v,
@@ -269,7 +308,7 @@ impl Sets {
                 // The words that every property takes: `initial` is not set, and the others are the value of the parent.
                 Slot::Raw(text) if text.eq_ignore_ascii_case("initial") => None,
                 Slot::Raw(text) if text.eq_ignore_ascii_case("inherit") || text.eq_ignore_ascii_case("unset") => {
-                    let v = sets.text(parent, n).map(str::to_string);
+                    let v = if text.eq_ignore_ascii_case("inherit") { sets.text(parent, n) } else { sets.inherited(parent, n) }.map(str::to_string);
                     slots[i].1 = Slot::Done(v.clone());
                     v
                 }
@@ -294,6 +333,11 @@ impl Sets {
         let len = own.iter().map(|&(n, _)| n as usize + 1).max().unwrap_or(0).max(parent_set.len());
         let mut set = parent_set.to_vec();
         set.resize(len, 0);
+        for &n in &self.not_inherited {
+            if let Some(t) = set.get_mut(n as usize) {
+                *t = 0;
+            }
+        }
         for (n, slot) in slots {
             set[n as usize] = match slot {
                 Slot::Done(Some(v)) => self.text_number(v),
@@ -314,6 +358,7 @@ impl Sets {
             return i;
         }
         let i = self.sets.len() as u32;
+        self.flagged.push(self.not_inherited.iter().any(|&n| set.get(n as usize).is_some_and(|&t| t != 0)));
         self.sets.push(set.into_boxed_slice());
         self.set_at.entry(h).or_default().push(i);
         i
