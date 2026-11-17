@@ -537,6 +537,8 @@ pub struct RuleSet {
     motion: Cell<bool>,
     /// The names of the `@keyframes` rules (`has_keyframes`). Their steps are not read: an animation only needs to know that the name exists.
     keyframes: std::collections::HashSet<Box<str>>,
+    // Boxed on purpose: the field stays one pointer wide, and most sheets have no pending declarations.
+    #[allow(clippy::box_collection)]
     pending: Option<Box<HashMap<NodeId, Vec<InputDeclaration>>>>,
 }
 
@@ -1046,6 +1048,8 @@ impl RuleSet {
     /// Add the rules. A `@media` or `@supports` block that says yes adds the rules inside it, and so does a `@layer` block (in its layer). Other at-rules add nothing:
     /// `@import` is for the app (see `imports`), and `@container` waits for layout.
     /// `scope` is the root of the shadow tree that the sheet belongs to, or 0 for the document.
+    // Recursive walker; a context struct would add a copy per nested rule.
+    #[allow(clippy::too_many_arguments)]
     fn add_rules(&mut self, doc: &mut Document, rules: Vec<Rule<'_>>, origin: Origin, layer: u32, scope: u32, depth: usize, blocks: Option<&[Option<Vec<InputDeclaration>>]>) {
         for (rule_index, rule) in rules.into_iter().enumerate() {
             let rule = match rule {
@@ -1792,6 +1796,8 @@ impl RuleSet {
 
     /// The number of the style of an element. It is found in the cache, or it is made.
     #[inline(always)]
+    // Hot path: each argument is a separate register, a bundle struct would add indirection.
+    #[allow(clippy::too_many_arguments)]
     fn style_of<const PENDING: bool>(&self, styles: &mut Styles, memo: &mut Memo, parent: u32, matched: &[u32], (inline, hint): (Option<&str>, Option<&str>), cx: &Cx<'_>, input: Option<&[InputDeclaration]>) -> u32 {
         let mut key = matched.iter().fold(u64::from(parent), |h, &i| (h ^ u64::from(i)).wrapping_mul(0x0100_0000_01b3));
         // The hint is part of the key: the cells of one table share their hint, and so their style.

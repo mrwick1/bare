@@ -661,7 +661,7 @@ impl Parts {
 fn read_calc(name: &str, tokens: &mut Tokens<'_>, calcs: &mut Vec<Linear>) -> Part {
     let mut inner = Vec::new();
     let mut depth = 1u32;
-    while let Some(token) = tokens.next() {
+    for token in tokens.by_ref() {
         match token {
             Token::Function(_) | Token::OpenParen | Token::OpenSquare | Token::OpenCurly => depth += 1,
             Token::CloseParen | Token::CloseSquare | Token::CloseCurly => {
