@@ -405,6 +405,7 @@ fn transform_declaration(name: &str, value: &str, important: bool, side: &mut Si
         }
     }
     let (mut x, mut y) = (Length::Px(0.0), Length::Px(0.0));
+    let (mut pure, mut steps) = (true, Vec::new());
     if name == "translate" {
         // `translate: x y z`: one to three parts.
         let parts: Vec<&str> = text.split_whitespace().collect();
@@ -474,20 +475,26 @@ fn transform_declaration(name: &str, value: &str, important: bool, side: &mut Si
             }
         }
         args.push(&inner[from..]);
-        let (dx, dy) = match (func.as_str(), args.len()) {
-            ("translatex", 1) => (arg(args[0], side), Some(Length::Px(0.0))),
-            ("translatey", 1) => (Some(Length::Px(0.0)), arg(args[0], side)),
-            ("translate", 1) => (arg(args[0], side), Some(Length::Px(0.0))),
-            ("translate", 2) => (arg(args[0], side), arg(args[1], side)),
-            // The z of `translate3d` must be a length and counts for nothing.
-            ("translate3d", 3) if arg(args[2], side).is_some_and(|z| !matches!(z, Length::Percent(_))) => (arg(args[0], side), arg(args[1], side)),
-            ("matrix" | "matrix3d" | "rotate" | "rotatex" | "rotatey" | "rotatez" | "rotate3d" | "scale" | "scalex" | "scaley" | "scalez" | "scale3d" | "skew" | "skewx"
-            | "skewy" | "perspective", _) => (Some(Length::Px(0.0)), Some(Length::Px(0.0))),
-            _ => return Some(false),
-        };
-        let (Some(dx), Some(dy)) = (dx, dy) else { return Some(false) };
-        let (Some(nx), Some(ny)) = (add(x, dx), add(y, dy)) else { return Some(false) };
-        (x, y) = (nx, ny);
+        let Some(step) = crate::transform::function(&func, &args, &mut |t| arg(t, side)) else { return Some(false) };
+        // A plain move stays two lengths; the sum fails when the units differ.
+        match step {
+            crate::transform::Func::Translate(dx, dy) if pure => match (add(x, dx), add(y, dy)) {
+                (Some(nx), Some(ny)) => (x, y) = (nx, ny),
+                _ => pure = false,
+            },
+            _ => pure = false,
+        }
+        steps.push(step);
+    }
+    if !pure || (steps.len() > 0 && (x, y) == (Length::Px(0.0), Length::Px(0.0))) {
+        // Not a plain move, or a move of 0: Chrome gives a matrix (`translate(0, 0)` is not `none`). A `calc()` cannot go in the list.
+        let steps = crate::transform::fold(steps);
+        if steps.iter().any(|f| matches!(f, crate::transform::Func::Translate(Length::Calc(_), _) | crate::transform::Func::Translate(_, Length::Calc(_)))) {
+            return Some(false);
+        }
+        side.grids.push(crate::grid::Grid::Transform(steps));
+        emit(Value::Grid(side.grids.len() as u32 - 1), zero);
+        return Some(true);
     }
     emit(Value::Length(x), Value::Length(y));
     Some(true)
@@ -1824,15 +1831,24 @@ mod tests {
         assert_eq!(parse("transform", "translateX(-100%)"), vec![(TranslateX, pct(-100.0)), (TranslateY, px(0.0))]);
         assert_eq!(parse("transform", "translateY(12px)"), vec![(TranslateX, px(0.0)), (TranslateY, px(12.0))]);
         assert_eq!(parse("transform", "translate(10px, 50%)"), vec![(TranslateX, px(10.0)), (TranslateY, pct(50.0))]);
-        assert_eq!(parse("transform", "translate3d(-50%, 2px, 9px) scale(2)"), vec![(TranslateX, pct(-50.0)), (TranslateY, px(2.0))]);
+        // A z move that is not 0 is a 3D step: the list is a matrix, and layout moves nothing.
+        assert!(matches!(parse("transform", "translate3d(-50%, 2px, 9px) scale(2)")[0].1, Value::Grid(_)));
+        assert_eq!(parse("transform", "translate3d(-50%, 2px, 0)"), vec![(TranslateX, pct(-50.0)), (TranslateY, px(2.0))]);
         assert_eq!(parse("transform", "translateX(5px) translateX(7px)"), vec![(TranslateX, px(12.0)), (TranslateY, px(0.0))]);
         assert_eq!(parse("transform", "none"), vec![(TranslateX, px(0.0)), (TranslateY, px(0.0))]);
         assert_eq!(parse("transform", "inherit"), vec![(TranslateX, Value::Inherit), (TranslateY, Value::Inherit)]);
         assert_eq!(parse("translate", "10px 20px"), vec![(TranslateX, px(10.0)), (TranslateY, px(20.0))]);
         assert_eq!(parse("translate", "-100%"), vec![(TranslateX, pct(-100.0)), (TranslateY, px(0.0))]);
         assert_eq!(parse("translate", "none"), vec![(TranslateX, px(0.0)), (TranslateY, px(0.0))]);
-        // Not good: a mix of units, a name that is not a transform, a bare number.
-        assert!(parse("transform", "translateX(5px) translateX(7%)").is_empty());
+        // Any other list is a matrix (`Value::Grid`) in `TranslateX`, and `TranslateY` is 0: a turn, a scale, a zero move, a mix of units.
+        for list in ["rotate(90deg)", "scale(2)", "translate(0, 0)", "translateX(5px) translateX(-5px)", "translateX(5px) translateX(7%)", "skewX(10deg) matrix(1, 0, 0, 1, 2, 3)", "translateX(2em) rotate(1turn)"] {
+            let got = parse("transform", list);
+            assert!(matches!(got[0].1, Value::Grid(_)) && got[1] == (TranslateY, px(0.0)), "{list}: {got:?}");
+        }
+        // Not good: a name that is not a transform, a bare number, a bad angle, a `calc()` in a matrix.
+        assert!(parse("transform", "rotate(90)").is_empty());
+        assert!(parse("transform", "scale(2px)").is_empty());
+        assert!(parse("transform", "translateX(calc(1px + 2%)) rotate(1deg)").is_empty());
         assert!(parse("transform", "wobble(1px)").is_empty());
         assert!(parse("transform", "translateX(5)").is_empty());
         assert!(parse("translate", "5").is_empty());

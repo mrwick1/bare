@@ -571,6 +571,8 @@ pub(crate) fn grid_text(styles: &Styles, g: &Grid) -> String {
         Grid::Areas(a) => areas_text(a),
         // The property is not known here: `Snap::text` gives the text of a motion list.
         Grid::Motion(m) => bare_css::motion::text(Property::AnimationName, m),
+        // `transform` is written by `computed_transform`, with the box.
+        Grid::Transform(_) => "none".to_string(),
     }
 }
 

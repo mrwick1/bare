@@ -61,11 +61,11 @@ impl Hash for Bound {
     }
 }
 
-fn len_tag(l: Length) -> u8 {
+pub(crate) fn len_tag(l: Length) -> u8 {
     matches!(l, Length::Percent(_)) as u8
 }
 
-fn len_value(l: Length) -> f32 {
+pub(crate) fn len_value(l: Length) -> f32 {
     match l {
         Length::Px(x) | Length::Percent(x) | Length::Em(x) | Length::Rem(x) | Length::Vw(x) | Length::Vh(x) | Length::Vmin(x) | Length::Vmax(x) => x,
         Length::Calc(_) => 0.0,
@@ -128,6 +128,8 @@ pub enum Grid {
     Areas(Areas),
     /// `transition-*` and `animation-*` lists (`motion.rs`). They share this table, so the cascade keeps them like a track list.
     Motion(crate::motion::Motion),
+    /// `transform` that is not a plain move (`transform.rs`). Shares this table for the same reason.
+    Transform(Vec<crate::transform::Func>),
 }
 
 impl Grid {
@@ -150,8 +152,16 @@ impl Grid {
                 }
             }
         }
-        if let Grid::Tracks(list) = self {
-            parts(list, f);
+        match self {
+            Grid::Tracks(list) => parts(list, f),
+            Grid::Transform(list) => {
+                for step in list {
+                    if let crate::transform::Func::Translate(x, y) = step {
+                        (*x, *y) = (f(*x), f(*y));
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
