@@ -39,16 +39,22 @@ pub enum Face {
     Mono,
     /// Noto Sans Mono Bold. It has the same advance as the Regular one, so layout treats the two alike. Paint draws the bold glyphs.
     MonoBold,
+    /// Noto Serif Regular: `serif` and the common serif names.
+    Serif,
+    /// Noto Serif Bold: the same, with `font-weight` 600 or more.
+    SerifBold,
 }
 
 impl Face {
     pub fn of(style: &ComputedStyle) -> Face {
         let bold = matches!(style.get(Property::FontWeight), Value::Number(w) if w >= 600.0);
-        match (style.get(Property::FontFamily) == Value::Keyword(Keyword::Monospace), bold) {
-            (true, false) => Face::Mono,
-            (true, true) => Face::MonoBold,
-            (false, false) => Face::Sans,
-            (false, true) => Face::SansBold,
+        match (style.get(Property::FontFamily), bold) {
+            (Value::Keyword(Keyword::Monospace), false) => Face::Mono,
+            (Value::Keyword(Keyword::Monospace), true) => Face::MonoBold,
+            (Value::Keyword(Keyword::Serif), false) => Face::Serif,
+            (Value::Keyword(Keyword::Serif), true) => Face::SerifBold,
+            (_, false) => Face::Sans,
+            (_, true) => Face::SansBold,
         }
     }
 
@@ -62,13 +68,18 @@ impl Face {
             LETTER
         } else {
             260
-            // In Noto Sans Regular and Bold alike (the test `advances_by_face` checks it).
+            // In Noto Sans and Noto Serif, Regular and Bold alike (the test `advances_by_face` checks it).
         }
     }
 
     /// The advances of the letters 0 to 127.
     fn ascii(self) -> &'static [u16; 128] {
-        if self == Face::SansBold { &advances::BOLD_ASCII } else { &advances::REGULAR_ASCII }
+        match self {
+            Face::SansBold => &advances::BOLD_ASCII,
+            Face::Serif => &advances::SERIF_ASCII,
+            Face::SerifBold => &advances::SERIF_BOLD_ASCII,
+            _ => &advances::REGULAR_ASCII,
+        }
     }
 }
 
@@ -95,7 +106,7 @@ impl PartialEq for Metrics {
 }
 
 impl Metrics {
-    /// The metrics for a font size in pixels. Noto Sans and Noto Sans Mono alike: ascent 1069 and descent 293 for 1000 units.
+    /// The metrics for a font size in pixels. Noto Sans, Noto Sans Mono and Noto Serif alike: ascent 1069 and descent 293 for 1000 units.
     /// Chrome rounds the ascent and the descent to whole pixels (`SimpleFontData`), so we do too.
     pub fn new(size: f32, face: Face) -> Metrics {
         let size = size.clamp(0.0, MAX_SIZE);
@@ -160,7 +171,12 @@ pub fn width_of(face: Face, c: char) -> Units {
         if cp < 0x80 {
             return face.ascii()[cp as usize] as Units;
         }
-        let table: &[(u32, u16)] = if face == Face::SansBold { &advances::BOLD } else { &advances::REGULAR };
+        let table: &[(u32, u16)] = match face {
+            Face::SansBold => &advances::BOLD,
+            Face::Serif => &advances::SERIF,
+            Face::SerifBold => &advances::SERIF_BOLD,
+            _ => &advances::REGULAR,
+        };
         if let Ok(i) = table.binary_search_by_key(&cp, |&(cp, _)| cp) {
             return table[i].1 as Units;
         }
@@ -301,5 +317,25 @@ mod tests {
             assert_eq!(width_of(Face::Sans, c), LETTER, "{c:?}: Noto Sans lacks it, paint takes the Mono glyph, and layout uses 0.6 em");
             assert_eq!(width_of(Face::SansBold, c), LETTER, "{c:?}");
         }
+        assert_eq!(width_of(Face::Serif, 'W'), 1047);
+        assert_eq!(width_of(Face::SerifBold, 'W'), 1067);
+        assert_eq!(width_of(Face::Serif, ' '), 260);
+        assert_eq!(width_of(Face::SerifBold, ' '), 260);
+        assert_eq!(width(Face::Serif, "Wil"), 1047 + 320 + 310);
+        assert_eq!(width(Face::SerifBold, "Wil"), 1067 + 352 + 352);
+        assert_eq!(width_of(Face::Serif, '\u{e9}'), 535, "a letter of Latin-1 is in the table");
+        assert_eq!(width_of(Face::SerifBold, '\u{e9}'), 572);
+        assert_eq!(width_of(Face::Serif, '\u{4e2d}'), WIDE);
+        assert_eq!(width_of(Face::Serif, '\u{2190}'), LETTER, "Noto Serif lacks the arrows as well");
+    }
+
+    #[test]
+    fn serif_families_choose_the_serif_face() {
+        let w = |css: &str| width_of_text(css, "Wil");
+        let (regular, bold) = (w("font-family: Georgia, serif"), w("font-family: serif; font-weight: bold"));
+        assert!((regular - (1047 + 320 + 310) as f32 * 16.0 / 1000.0).abs() < 0.001, "{regular}");
+        assert!((bold - (1067 + 352 + 352) as f32 * 16.0 / 1000.0).abs() < 0.001, "{bold}");
+        assert_eq!(w("font-family: Verdana, serif"), w(""), "the first entry decides");
+        assert_eq!(Metrics::new(16.0, Face::Serif), Metrics::new(16.0, Face::Sans), "the line numbers are the same");
     }
 }

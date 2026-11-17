@@ -3,7 +3,7 @@
 //! Layout measures with the advance widths of the face (`bare_layout::font`: 0.6 em for Noto Sans Mono, the numbers of `hmtx`
 //! for Noto Sans). Paint draws the outlines of the same face, and it puts each letter where layout says.
 //!
-//! The faces are subsets of Noto Sans Mono and of Noto Sans, each Regular and Bold (Basic Latin, Latin-1, the punctuation
+//! The faces are subsets of Noto Sans Mono, Noto Sans and Noto Serif, each Regular and Bold (Basic Latin, Latin-1, the punctuation
 //! block, currency signs with the rupee, and for Mono also arrows, a few math signs and the geometric shapes; 26 to 32 KB each),
 //! built into the program with `include_bytes!`. Both Mono files have the same advance, so bold Mono text keeps its width. Noto Sans
 //! lacks the arrows, the math signs and the shapes: they are drawn with the Noto Sans Mono glyph (layout gives them 0.6 em).
@@ -26,9 +26,11 @@ static BOLD: &[u8] = include_bytes!("../../../data/fonts/NotoSansMono-Bold-subse
 static SANS_REGULAR: &[u8] = include_bytes!("../../../data/fonts/NotoSans-Regular-subset.ttf");
 static SANS_BOLD: &[u8] = include_bytes!("../../../data/fonts/NotoSans-Bold-subset.ttf");
 static SYMBOLS: &[u8] = include_bytes!("../../../data/fonts/NotoSansSymbols2-subset.ttf");
+static SERIF_REGULAR: &[u8] = include_bytes!("../../../data/fonts/NotoSerif-Regular-subset.ttf");
+static SERIF_BOLD: &[u8] = include_bytes!("../../../data/fonts/NotoSerif-Bold-subset.ttf");
 static ARABIC: &[u8] = include_bytes!("../../../data/fonts/NotoSansArabic-subset.ttf");
 
-/// The face of a glyph: 0 Mono regular, 1 Mono bold, 2 symbols, 3 Arabic, 4 Sans regular, 5 Sans bold.
+/// The face of a glyph: 0 Mono regular, 1 Mono bold, 2 symbols, 3 Arabic, 4 Sans regular, 5 Sans bold, 6 Serif regular, 7 Serif bold.
 pub type FaceId = u8;
 
 /// How many places a glyph can take between two pixels. Skia uses 4 as well.
@@ -93,6 +95,12 @@ fn arabic_face() -> &'static Face {
     FACE.get_or_init(|| Face::new(ARABIC))
 }
 
+/// The Noto Serif faces, Regular and Bold, made on the first serif letter: a page with no serif text never pays for them.
+fn serif_faces() -> &'static [Face; 2] {
+    static FACES: std::sync::OnceLock<[Face; 2]> = std::sync::OnceLock::new();
+    FACES.get_or_init(|| [Face::new(SERIF_REGULAR), Face::new(SERIF_BOLD)])
+}
+
 pub struct Glyphs {
     /// Noto Sans Mono Regular and Bold, and Symbols2.
     faces: [Face; 3],
@@ -116,6 +124,7 @@ impl Glyphs {
         match id {
             3 => arabic_face(),
             4 | 5 => &self.sans[id as usize - 4],
+            6 | 7 => &serif_faces()[id as usize - 6],
             _ => &self.faces[id as usize],
         }
     }
@@ -129,6 +138,8 @@ impl Glyphs {
             F::MonoBold => 1,
             F::Sans => 4,
             F::SansBold => 5,
+            F::Serif => 6,
+            F::SerifBold => 7,
         };
         let font = self.font(main);
         let id = match c as usize {
@@ -148,7 +159,7 @@ impl Glyphs {
         if matches!(c as u32, 0x0600..=0x06ff | 0x0750..=0x077f | 0x08a0..=0x08ff | 0xfb50..=0xfdff | 0xfe70..=0xfeff) {
             return (3, arabic_face().font.glyph_id(c).0);
         }
-        let bold = matches!(face, F::MonoBold | F::SansBold) as FaceId;
+        let bold = matches!(face, F::MonoBold | F::SansBold | F::SerifBold) as FaceId;
         if !face.is_mono() {
             let id = self.faces[bold as usize].font.glyph_id(c).0;
             if id != 0 { return (bold, id); }
@@ -177,6 +188,7 @@ impl Glyphs {
         let face = match face {
             3 => arabic_face(),
             4 | 5 => &self.sans[face as usize - 4],
+            6 | 7 => &serif_faces()[face as usize - 6],
             _ => &self.faces[face as usize],
         };
         let glyph = Glyph { id: GlyphId(id), scale: PxScale::from(size * face.scale), position: point(sub as f32 / SUBPIXELS, 0.0) };
@@ -320,6 +332,8 @@ mod tests {
         for (data, face, ascii, rest) in [
             (SANS_REGULAR, F::Sans, &advances::REGULAR_ASCII[..], &advances::REGULAR[..]),
             (SANS_BOLD, F::SansBold, &advances::BOLD_ASCII[..], &advances::BOLD[..]),
+            (SERIF_REGULAR, F::Serif, &advances::SERIF_ASCII[..], &advances::SERIF[..]),
+            (SERIF_BOLD, F::SerifBold, &advances::SERIF_BOLD_ASCII[..], &advances::SERIF_BOLD[..]),
         ] {
             let font = FontRef::try_from_slice(data).unwrap();
             assert_eq!(font.units_per_em().unwrap(), 1000.0);
