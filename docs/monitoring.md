@@ -390,3 +390,17 @@ Off against `main`: baseline 3,239,362,560 (spread 1,943), candidate 3,239,486,2
 All three budgets pass: off <= 1%, metrics <= 3%, trace <= 10%.
 Browser peak RSS: off 16,836 to 17,236 KiB, metrics 17,152 to 17,228 KiB, trace 16,988 to 17,268 KiB, `main` 16,748 to 16,992 KiB.
 Metrics wrote 342 records per run and trace 742. No run dropped a record.
+
+### Rerun on main `9ba3373e` (2026-11-17)
+
+`main` moved after the check above. The parent merged it (`b21e748b`) and ran the same check against `main` at `9ba3373e`. Load average was 13.7 to 14.8.
+
+| Mode | Mean `instructions:u` | Spread | Against off |
+|---|---|---|---|
+| off | 3,239,410,584 | 38,391 | |
+| metrics | 3,250,840,610 | 321,709 | +0.353% |
+| trace | 3,258,922,195 | 225,599 | +0.602% |
+
+Off against `main`: baseline 3,239,372,283 (spread 51,772), candidate 3,239,414,663 (spread 74,058), +0.0013%. All three budgets pass.
+Browser peak RSS with monitoring off: candidate 17,116 to 17,408 KiB, `main` 16,404 to 16,644 KiB. The candidate is about 700 KiB higher. The first check showed a smaller gap: 16,836 to 17,236 KiB against 16,748 to 16,992 KiB.
+Hypothesis: more code pages from the hooks and `serde_json` in the binary. This is not verified. Three runs per side cannot separate the cause.

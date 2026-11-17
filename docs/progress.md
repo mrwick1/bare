@@ -12969,3 +12969,7 @@ After the merge of `main` (`8b6a71bb`), the parent ran the cost check on `52b032
 - `fill LOC "text" keys=last` (MCP `last_key: true`): the head is one edit, the last character is one typed key, for a widget that waits for a key. Journey: 12.165 to 12.166 G (3 runs), against 9.655 G for plain `fill` on the same build (1 run). 2 `bare-drive` tests and 2 parse cases.
 - `BARE_JS_EXEC=byte` on the `type` journey: 79.245 to 79.246 G (2 runs), 2.3% more than `tree`. On this base the bytecode lane does not help this React form. #630 makes the lane run lazy functions and changes this result.
 - Not done: a Chrome log of `Input.insertText` for the fixtures.
+
+## Monitoring cost on main `9ba3373e` (2026-11-17)
+
+Rerun after another merge of `main`, on `b21e748b`: metrics +0.353%, trace +0.602%, off against `main` +0.0013%. All budgets pass. With monitoring off, browser peak RSS is about 700 KiB higher than on `main` (17.1 to 17.4 MiB against 16.4 to 16.6 MiB). The cause is not verified. Detail: `docs/monitoring.md`.
