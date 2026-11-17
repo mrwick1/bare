@@ -1827,7 +1827,7 @@ impl Heap {
             Some(73) => u.starts_with(&[73, 68, 66]),
             Some(80) => named!("Path2D"),
             Some(112) => named!("parent") || named!("postMessage") || named!("print") || named!("prompt"),
-            Some(116) => named!("top") || named!("toDataURL"),
+            Some(116) => named!("top") || named!("toDataURL") || named!("transform"),
             Some(103) => named!("getContext") || named!("getBBox") || named!("getCTM") || named!("getScreenCTM") || named!("getTotalLength") || named!("getPointAtLength"),
             Some(119) => named!("width") || named!("write") || named!("writeln"),
             Some(104) => named!("height") || named!("hasFocus") || named!("hidden"),

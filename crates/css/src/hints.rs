@@ -13,7 +13,8 @@ use bare_html::dom::{Atom, Document, NodeData, NodeId};
 pub struct Hints {
     table: Option<Atom>,
     svg: Option<Atom>,
-    shapes: [Option<Atom>; 8],
+    shapes: [Option<Atom>; 9],
+    fonts: [Option<Atom>; 3],
     view_box: Option<Atom>,
     fill: Option<Atom>,
     stroke: Option<Atom>,
@@ -47,7 +48,8 @@ impl Hints {
         Some(Hints {
             table,
             svg,
-            shapes: ["g", "path", "line", "polyline", "polygon", "rect", "circle", "ellipse"].map(|n| svg.and_then(|_| a(n))),
+            shapes: ["g", "path", "line", "polyline", "polygon", "rect", "circle", "ellipse", "text"].map(|n| svg.and_then(|_| a(n))),
+            fonts: ["font-size", "font-family", "font-weight"].map(|n| svg.and_then(|_| a(n))),
             view_box: svg.and_then(|_| a("viewBox")),
             fill: svg.and_then(|_| a("fill")),
             stroke: svg.and_then(|_| a("stroke")),
@@ -197,6 +199,13 @@ impl Hints {
         for (name, property) in [(self.fill, "fill"), (self.stroke, "stroke")] {
             if let Some(v) = name.and_then(|n| doc.attr(node, n)).filter(|v| !v.contains([';', '{', '}', '!'])) {
                 out.push_str(&format!("{property}:{v};"));
+            }
+        }
+        // The font of a `text`, also from the `svg` or a `g` above it. A bare number is in pixels.
+        for (name, property) in self.fonts.iter().zip(["font-size", "font-family", "font-weight"]) {
+            if let Some(v) = name.and_then(|n| doc.attr(node, n)).filter(|v| !v.contains([';', '{', '}', '!'])) {
+                let px = property == "font-size" && v.trim().parse::<f32>().is_ok_and(f32::is_finite);
+                out.push_str(&format!("{property}:{}{};", v.trim(), if px { "px" } else { "" }));
             }
         }
     }

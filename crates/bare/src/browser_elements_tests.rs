@@ -317,11 +317,36 @@ fn canvas_context_surface() {
 }
 
 #[test]
+fn canvas_measure_text_uses_the_font_of_the_context() {
+    // d3 and chart pages size labels with measureText: the width must be the one that the page draws, at the size of `font`.
+    let mut b = browser("<span id=s style='font:16px sans-serif'>Database</span>");
+    js(&mut b, "var x=document.createElement('canvas').getContext('2d'); var w=f=>{x.font=f; return x.measureText('Database').width}");
+    assert_eq!(js(&mut b, "Math.abs(w('16px sans-serif') - document.getElementById('s').getBoundingClientRect().width) < 0.01"), "true");
+    assert_eq!(js(&mut b, "Math.abs(w('32px sans-serif') - 2 * w('16px sans-serif')) < 0.01"), "true");
+    assert_eq!(js(&mut b, "w('bold 16px Arial') > w('16px Arial')"), "true", "bold letters are wider");
+    assert_eq!(js(&mut b, "Math.abs(w('12pt serif') - w('16px serif')) < 0.01"), "true", "12pt is 16px");
+    // Deviation: `font` is a plain property, so a value that does not parse stays and measures as the default, 10px sans-serif.
+    assert_eq!(js(&mut b, "w('nonsense') === w('10px sans-serif')"), "true");
+}
+
+#[test]
 fn svg_geometry_surface() {
     let mut b = browser("<svg id='s' width='20' height='30' viewBox='0 0 20 30'><rect id='r' x='2' y='3' width='10' height='15'/></svg>");
     assert_eq!(js(&mut b, "var s=document.getElementById('s'); s.width.baseVal.value + ':' + s.viewBox.baseVal.height"), "20:30");
     assert_eq!(js(&mut b, "var r=document.getElementById('r'); var box=r.getBBox(); box.x+':'+box.y+':'+box.width+':'+box.height"), "2:3:10:15");
     assert_eq!(js(&mut b, "r.getCTM().a"), "1");
+}
+
+#[test]
+fn svg_transform_list_consolidates_the_attribute() {
+    // d3's interpolateTransformSvg reads `transform.baseVal.consolidate().matrix`. The matrix is the product of the list, by hand.
+    let mut b = browser("<svg><g id='g' transform='translate(10,20) scale(2) rotate(90 5 5)'></g><g id='e'></g><g id='x' transform='translate(1) oops(2)'></g></svg>");
+    let m = "var m=document.getElementById('g').transform.baseVal.consolidate().matrix; [m.a,m.b,m.c,m.d,m.e,m.f].map(v=>Math.round(v*1e6)/1e6+0).join(',')";
+    assert_eq!(js(&mut b, m), "0,2,-2,0,30,20");
+    assert_eq!(js(&mut b, "document.getElementById('g').transform.baseVal.numberOfItems"), "3");
+    assert_eq!(js(&mut b, "document.getElementById('e').transform.baseVal.consolidate()"), "null");
+    assert_eq!(js(&mut b, "document.getElementById('x').transform.baseVal.numberOfItems"), "0", "a list that does not parse is empty");
+    assert_eq!(js(&mut b, "document.body.transform"), "undefined", "only SVG elements have it");
 }
 
 #[test]

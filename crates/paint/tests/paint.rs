@@ -616,6 +616,47 @@ fn an_svg_draws_only_inside_its_box_and_hidden_ones_draw_nothing() {
 }
 
 #[test]
+fn svg_transforms_nest_and_move_shapes_and_strokes() {
+    // A d3 tree: a translated viewport `g`, nodes placed by `translate`, a path between them. Chrome draws each red square at its own
+    // place, not stacked at the origin.
+    let red = |t: &str| bare(&format!("<style>body{{margin:0}}</style><svg width=200 height=100><g transform='translate(40,20)'><g transform='{t}'><rect width=10 height=10 fill=red /></g></g></svg>"));
+    let at = |t| ink(&red(t), 0, 0, 200, 100, WHITE).map(|b| (b.0, b.1, b.2, b.3));
+    assert_eq!(at("translate(60,30)"), Some((100, 50, 110, 60)), "the translations add up");
+    assert_eq!(at("translate(60)"), Some((100, 20, 110, 30)), "ty defaults to 0");
+    assert_eq!(at("translate(10 5) scale(2)"), Some((50, 25, 70, 45)), "the list applies right to left to the shape");
+    assert_eq!(at("matrix(1,0,0,1,5,6)"), Some((45, 26, 55, 36)));
+    assert_eq!(at("rotate(90)"), Some((30, 20, 40, 30)), "a quarter turn about the origin");
+    assert_eq!(at("rotate(180 5 5)"), Some((40, 20, 50, 30)), "a half turn about the center leaves the square in place");
+    assert_eq!(at("translate(5,5) bogus(1)"), Some((40, 20, 50, 30)), "an invalid list is no transform");
+    // A transform on the shape itself, and on a stroke: the line from (0, 5) to (20, 5), 2 wide, moved by (30, 40).
+    let c = bare("<style>body{margin:0}</style><svg width=100 height=100><rect transform='translate(50 50)' width=10 height=10 fill=red /><path transform='translate(30,40)' d='M0 5 H20' stroke=red stroke-width=2 /></svg>");
+    assert_eq!(ink(&c, 0, 0, 100, 100, WHITE).map(|b| (b.0, b.1, b.2, b.3)), Some((30, 44, 60, 60)));
+}
+
+#[test]
+fn svg_text_draws_at_its_position_and_anchor() {
+    let ink_of = |t: &str| {
+        let c = bare(&format!("<style>body{{margin:0}}</style><svg width=300 height=100 font-size=20>{t}</svg>"));
+        ink(&c, 0, 0, 300, 100, WHITE)
+    };
+    // The letters of "HH" start near x 100 and stand on the baseline at y 50.
+    let start = ink_of("<text x=100 y=50 fill=red>HH</text>").expect("letters");
+    assert!((99..=103).contains(&start.0) && (48..=51).contains(&start.3), "{start:?}");
+    // `middle` puts the middle of the run on x; `end` puts its end there.
+    let mid = ink_of("<text x=100 y=50 text-anchor=middle fill=red>HH</text>").expect("letters");
+    assert!((99..=101).contains(&((mid.0 + mid.2) / 2)), "{mid:?}");
+    let end = ink_of("<text x=100 y=50 text-anchor=end fill=red>HH</text>").expect("letters");
+    assert!((97..=101).contains(&end.2), "{end:?}");
+    // `dy` in em of the font (20 px), a translated group, spaces at both ends and a `tspan` that moves on.
+    assert_eq!(ink_of("<text x=100 y=30 dy=1em fill=red>HH</text>"), Some(start));
+    assert_eq!(ink_of("<g transform='translate(50,20)'><text x=50 y=30 fill=red>\n   HH  </text></g>"), Some(start));
+    let two = ink_of("<text x=100 y=50 fill=red>H<tspan dx=40>H</tspan></text>").expect("letters");
+    assert!(two.2 - start.2 >= 38, "the second letter moved by dx: {two:?} {start:?}");
+    // No fill draws nothing.
+    assert_eq!(ink_of("<text x=100 y=50 fill=none>HH</text>"), None);
+}
+
+#[test]
 fn the_svg_fixture() {
     let c = render(fixture!("svg"));
     // The first icon: a chevron of 2 px strokes in the color of the text (#123), with round ends, in a box of 24 px at (8, 8).
