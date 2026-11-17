@@ -22,7 +22,7 @@ impl Gen<'_, '_> {
                     self.free(r);
                     return Ok(());
                 }
-                StmtKind::If { .. } | StmtKind::While { .. } | StmtKind::DoWhile { .. } | StmtKind::For { .. } | StmtKind::Try { .. } | StmtKind::Switch { .. } => self.emit(Op::LoadUndef, c, 0, 0)?,
+                StmtKind::If { .. } | StmtKind::While { .. } | StmtKind::DoWhile { .. } | StmtKind::For { .. } | StmtKind::ForIn { .. } | StmtKind::ForOf { .. } | StmtKind::Try { .. } | StmtKind::Switch { .. } => self.emit(Op::LoadUndef, c, 0, 0)?,
                 _ => {}
             }
         }
@@ -155,10 +155,10 @@ impl Gen<'_, '_> {
                 self.pending.push(n);
                 match self.prog.stmt(body).kind {
                     // The `open` of the loop or `switch` takes the labels.
-                    StmtKind::Labeled { .. } | StmtKind::For { .. } | StmtKind::While { .. } | StmtKind::DoWhile { .. } | StmtKind::Switch { .. } => self.stmt(body),
+                    StmtKind::Labeled { .. } | StmtKind::For { .. } | StmtKind::ForIn { .. } | StmtKind::ForOf { .. } | StmtKind::While { .. } | StmtKind::DoWhile { .. } | StmtKind::Switch { .. } => self.stmt(body),
                     _ => {
                         let labels = std::mem::take(&mut self.pending);
-                        self.jumps.push(Jumps { is_loop: false, depth: self.depth, fins: self.fins.len(), breaks: Vec::new(), cont: None, conts: Vec::new(), labels, label_only: true });
+                        self.jumps.push(Jumps { is_loop: false, depth: self.depth, fins: self.fins.len(), breaks: Vec::new(), cont: None, conts: Vec::new(), labels, label_only: true, iters: self.iters });
                         self.stmt(body)?;
                         self.close()
                     }
@@ -200,7 +200,9 @@ impl Gen<'_, '_> {
                 Ok(())
             }
             StmtKind::Class(_) => Err("class"),
-            StmtKind::ForIn { .. } | StmtKind::ForOf { .. } => Err("for-in or for-of"),
+            StmtKind::ForIn { left, right, body } => self.for_each(left, right, body, false),
+            StmtKind::ForOf { is_await: true, .. } => Err("async"),
+            StmtKind::ForOf { left, right, body, .. } => self.for_each(left, right, body, true),
             StmtKind::With { .. } => Err("with"),
             StmtKind::ExportDefault(..) => Err("module code"),
             StmtKind::Debugger => Err("debugger"),
@@ -322,9 +324,10 @@ impl Gen<'_, '_> {
         let depth = self.depth;
         let hdepth = u16::try_from(depth).map_err(|_| "too deep")?;
         let mark = self.top;
+        let iters = u16::try_from(self.iters).map_err(|_| "too deep")?;
         if finalizer.is_some() {
             let (kind, val) = (self.reg()?, self.reg()?);
-            self.fins.push(Fin { kind, val, depth, entry: Vec::new(), exits: Vec::new() });
+            self.fins.push(Fin { kind, val, depth, iters: self.iters, entry: Vec::new(), exits: Vec::new() });
         }
         let start = self.here() as u32;
         self.stmt(block)?;
@@ -333,7 +336,7 @@ impl Gen<'_, '_> {
             ends.push(self.jump(Op::Jmp, 0)?);
             let c = *prog.catch(h);
             let exc = self.reg()?;
-            self.code.handlers.push(Handler { start, end: self.here() as u32, target: self.here() as u32, reg: exc as u16, depth: hdepth });
+            self.code.handlers.push(Handler { start, end: self.here() as u32, target: self.here() as u32, reg: exc as u16, depth: hdepth, iters });
             let sc = *self.scopes.get(&s).ok_or("no catch scope")?;
             if self.rf.is_some() {
                 if self.scope_has_env(sc) {
@@ -376,7 +379,7 @@ impl Gen<'_, '_> {
             let skip = self.jump(Op::Jmp, 0)?;
             // An empty `try` block with no `catch` cannot throw: no handler.
             if start < tail {
-                self.code.handlers.push(Handler { start, end: tail, target: self.here() as u32, reg: fin.val as u16, depth: hdepth });
+                self.code.handlers.push(Handler { start, end: tail, target: self.here() as u32, reg: fin.val as u16, depth: hdepth, iters });
             }
             self.emit(Op::LoadI, fin.kind, 1, 0)?;
             self.patch(skip)?;
@@ -405,12 +408,16 @@ impl Gen<'_, '_> {
     /// Leave statements for `ex`. A `finally` on the way runs first: the jump goes to it, and it continues the exit at its end.
     /// `val` holds the return value of a `return`.
     pub(super) fn exit(&mut self, ex: Exit, val: u32) -> G<()> {
-        let (fins, depth) = match ex {
-            Exit::Return => (0, 0),
-            Exit::Break(i) | Exit::Continue(i) => (self.jumps[i].fins, self.jumps[i].depth),
+        let (fins, depth, iters) = match ex {
+            Exit::Return => (0, 0, 0),
+            Exit::Break(i) | Exit::Continue(i) => (self.jumps[i].fins, self.jumps[i].depth, self.jumps[i].iters),
         };
+        // The iterators close before the environments pop: a `return` method that throws finds the depth of its handler.
         if self.fins.len() > fins {
             let f = self.fins.len() - 1;
+            for _ in self.fins[f].iters..self.iters {
+                self.emit(Op::IterClose, 0, 0, 0)?;
+            }
             for _ in self.fins[f].depth..self.depth {
                 self.emit(Op::PopEnv, 0, 0, 0)?;
             }
@@ -429,6 +436,9 @@ impl Gen<'_, '_> {
             let j = self.jump(Op::Jmp, 0)?;
             self.fins[f].entry.push(j);
             return Ok(());
+        }
+        for _ in iters..self.iters {
+            self.emit(Op::IterClose, 0, 0, 0)?;
         }
         if ex == Exit::Return {
             return self.emit(Op::Ret, val, 0, 0);
@@ -453,9 +463,97 @@ impl Gen<'_, '_> {
         Ok(())
     }
 
+    /// `for-in` and `for-of` (`exec_for_each`): the value, the iterator, then for each value a new binding (`CopyEnv` for a `let`
+    /// or `const` that a closure captures) and the body. A `break` to the loop lands on its `IterClose`; the end of the iteration
+    /// pops the iterator with no close.
+    fn for_each(&mut self, left: ForLeft, right: ExprId, body: StmtId, of: bool) -> G<()> {
+        let prog = self.prog.clone();
+        let (var, kind, target) = match left {
+            ForLeft::Pat(p) => (None, VarKind::Var, p),
+            ForLeft::Var(v) => {
+                let StmtKind::Var { kind, decls } = prog.stmt(v).kind else { return Err("for left") };
+                let d = prog.list(decls).next().map(|d| *prog.decl(d)).ok_or("for left")?;
+                if d.init.is_some() {
+                    return Err("a for-in initializer");
+                }
+                (Some(v), kind, d.target)
+            }
+        };
+        let r = self.reg()?;
+        self.expr(right, r)?;
+        if of {
+            self.code.calls.push((self.here() as u32, right.index() as u32));
+            self.emit(Op::IterOpen, r, 0, 0)?;
+        } else {
+            self.emit(Op::ForInOpen, r, 0, 0)?;
+        }
+        self.free(r);
+        self.iters += 1;
+        let scope = var.and_then(|v| self.scopes.get(&v).copied());
+        let rf_mark = self.top;
+        let envs = scope.is_some_and(|sc| self.scope_has_env(sc));
+        if let Some(sc) = scope {
+            if envs {
+                self.push_env(sc)?;
+                if self.rf.is_some() {
+                    self.rf_env_scope(sc)?;
+                }
+            } else {
+                self.rf_scope(sc)?;
+            }
+        }
+        let v = self.reg()?;
+        let top = self.here();
+        let done = self.jump(Op::IterNext, v)?;
+        if envs {
+            self.emit(Op::CopyEnv, 0, 0, 0)?;
+        }
+        self.bind_each(var.is_some(), kind, target, v)?;
+        self.open(true, Some(top));
+        self.stmt(body)?;
+        self.jump_back(Op::Jmp, 0, top)?;
+        self.close()?;
+        self.emit(Op::IterClose, 0, 0, 0)?;
+        self.patch(done)?;
+        self.iters -= 1;
+        if envs {
+            self.pop_env()?;
+        }
+        self.free(if self.rf.is_some() { rf_mark } else { v });
+        Ok(())
+    }
+
+    /// Bind the value in `v` to the target of a `for-in` or `for-of`: a declaration (`decl`) or an assignment target.
+    fn bind_each(&mut self, decl: bool, kind: VarKind, target: PatId, v: u32) -> G<()> {
+        let mark = self.top;
+        match self.prog.pat(target).kind {
+            PatKind::Ident => {
+                let n = self.it.cc.cold.pat_name[target.index()];
+                let site = self.it.pat_site(target.index());
+                let reg = if decl && self.rf.is_some() { self.rf_decl_opt(site, n)? } else { None };
+                if let Some((key, l)) = reg {
+                    self.emit(Op::Mov, l.reg, v, 0)?;
+                    if kind != VarKind::Var {
+                        self.rf_set_init(key);
+                    }
+                } else if decl && kind != VarKind::Var {
+                    let Site::Env { hops: 0, index } = self.site(site, n)? else { return Err("a let or const outside its environment") };
+                    self.emit(Op::InitEnv, v, 0, index)?;
+                } else {
+                    let s = if decl { self.site(site, n)? } else { self.site_w(site, n)? };
+                    self.store(s, n, v)?;
+                }
+            }
+            PatKind::Member(me) if !decl => self.put_member(me, v)?,
+            _ => return Err("destructuring"),
+        }
+        self.free(mark);
+        Ok(())
+    }
+
     fn open(&mut self, is_loop: bool, cont: Option<usize>) {
         let labels = std::mem::take(&mut self.pending);
-        self.jumps.push(Jumps { is_loop, depth: self.depth, fins: self.fins.len(), breaks: Vec::new(), cont, conts: Vec::new(), labels, label_only: false });
+        self.jumps.push(Jumps { is_loop, depth: self.depth, fins: self.fins.len(), breaks: Vec::new(), cont, conts: Vec::new(), labels, label_only: false, iters: self.iters });
     }
 
     /// The `continue` target of the open loop is here.

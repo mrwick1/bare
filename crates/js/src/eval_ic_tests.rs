@@ -597,3 +597,57 @@ f(0) + ' ' + f(3)"#;
         assert_eq!(out[0], out[1]);
     });
 }
+
+/// `for-in` and `for-of`: arrays, strings, a `Map`, an iterator object whose `return` counts the closes, and the exits that close it
+/// (`break`, `return`, a `continue` to an outer loop, a throw) or not (the end, a `continue`). `let` gives a new binding for each
+/// iteration. A member target, a `var` target and a `for-in` whose object loses a key during the loop. They run on the bytecode
+/// lane, and byte mode gives the result of tree mode.
+#[test]
+fn for_in_and_for_of_run_on_the_bytecode_lane() {
+    big(|| {
+        let src = r#"function mk(n, log) {
+  var i = 0;
+  var it = { next: function () { i++; return i > n ? { done: true } : { value: i, done: false }; },
+             return: function () { log.push('close' + i); return {}; } };
+  it[Symbol.iterator] = function () { return it; };
+  return it;
+}
+function f() {
+  var o = [], fs = [], log = [];
+  for (var x of [1, 2, 3]) o.push(x);
+  for (const c of 'ab') o.push(c);
+  for (let e of new Map([['p', 1]]).entries()) o.push(e[0] + e[1]);
+  for (let i of [1, 2, 3]) fs.push(function () { return i; });
+  o.push(fs.map(function (g) { return g(); }).join(''));
+  for (var y of mk(5, log)) { if (y === 2) continue; if (y === 4) break; o.push('y' + y); }
+  for (var y2 of mk(2, log)) o.push('z' + y2);
+  outer: for (var a of [1, 2]) { for (var b of mk(3, log)) { if (b === 2) continue outer; o.push(a + '' + b); } }
+  try { for (var t of mk(3, log)) { if (t === 2) throw new Error('boom'); } } catch (e) { o.push(e.message); }
+  try { for (var t2 of mk(3, log)) { try { if (t2 === 1) break; } finally { o.push('fin' + t2); } } } finally { o.push('out'); }
+  var holder = {};
+  for (holder.v of [7, 8]) {}
+  o.push(holder.v);
+  var src = { a: 1, b: 2, c: 3 }, proto = Object.create({ inh: 1 }); proto.own = 1;
+  for (var key in src) { o.push(key); Reflect.deleteProperty(src, 'b'); }
+  for (var p in proto) o.push(p);
+  for (var s in 'xy') o.push(s);
+  for (var n in null) o.push('never');
+  try { for (var q of 5) {} } catch (e) { o.push(e.message); }
+  return o.join() + ' | ' + log.join() + ' | ' + g(log);
+}
+function g(log) { for (var r of mk(9, log)) { if (r === 3) return r + ':' + log.length; } }
+f()"#;
+        let mut out = Vec::new();
+        for mode in [Exec::Tree, Exec::Byte] {
+            let mut it = Interp::realm(Heap::default(), EvalLimits::default()).unwrap();
+            it.set_exec(mode);
+            out.push(run(&mut it, src));
+            if mode == Exec::Byte {
+                let s = it.bc_stats();
+                assert_eq!(s.calls_tree, 0, "{s:?}");
+            }
+        }
+        assert_eq!(out[0], "1,2,3,a,b,p1,123,y1,y3,z1,z2,11,21,boom,fin1,out,8,a,c,own,inh,0,1,5 is not iterable | close4,close2,close2,close2,close1 | 3:5");
+        assert_eq!(out[0], out[1]);
+    });
+}
