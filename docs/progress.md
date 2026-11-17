@@ -13024,3 +13024,25 @@ Steps 1 and 2 of `docs/design-lane-calls.md`. Base: origin/main `632de066ae` (PR
 - Tests: `cargo test -p bare-js --lib` 1018 passed, 1 ignored. `tools/js/exec_diff.sh`: 79 runs, 0 differences, also in the poison build. Clippy on the js crate: only `eval_scripts.rs` `unnecessary_cast`, already on main; `cargo clippy -p bare-js -D warnings` stops at `crates/observe/src/process.rs:92` (main).
 - Not tested: a recursion through natives other than `map` that call back (`forEach`, `sort`, `Function.prototype.call`), the `max_traversal_depth` error in the native arm, the frame stacks (they still double), the private dashboard journey, wall time, Windows and macOS, massif at 50 keys.
 - Next levers (from the design): the call-site cache and a cheaper `select` only after a new profile; one register stack shared by nested runs would remove the duplicated pooled stacks.
+
+## Profile of the lane after the calls work (`docs/research-lane-profile-after-calls.md`, 2026-11-17)
+
+Base: origin/main `4d4b5e5442`. Machine: archMachine. `Auto`, public React page, `#a1`. No engine change. Callgrind groups are by name pattern, so approximate.
+
+| Group | Load | Steady 5 keys (712.6M) | Steady 50 keys (6730.6M) |
+| --- | --- | --- | --- |
+| Bytecode loop | 22.4% | 45.4% | 47.7% |
+| Call setup | 2.2% | 3.0% | 3.1% |
+| Property slow paths | 17.9% | 27.4% | 28.8% |
+| GC | 0.1% | 5.8% | 4.9% |
+| Parse and compile | 29.3% | 0.6% | 0.1% |
+| Builtins | 3.3% | 1.4% | 1.0% |
+| `select` | 0.2% | 0.2% | 0.2% |
+| Other | 24.5% | 14.7% | 14.2% |
+
+- Call setup fell from 16.4% to 3.0% of the steady page and `select` from 2.0% to 0.2%: calls are no longer a lever.
+- Op histogram at 50 keys: 54.5M ops (59.5M before), 22 ops cover 90%. The best 8 fused pairs remove 16.2% of dispatches, the best 32 remove 25.1%. A dispatch costs 11.0 to 25.7 instructions.
+- Narrow JIT upper bound (hypothesis): 5.5% to 12.9% of the page at 50 keys and 2.5% to 5.7% at load, before its own compile cost. It cannot touch the property slow paths (28%), GC, out-of-line operators (6.8%), malloc, natives or parsing (29% of load).
+- Ranked levers (share of the 50-key run): (1) `to_uint32` fast path: every `BitAnd` and `BitOr` calls `trunc` and `fmod` (about 2M `fmod` calls at 50 keys); a 4-line throwaway change gave 50 keys 7167.75M to 7044.42M (-1.72%) and load 441.23M to 437.58M (-0.83%); (2) for-in key cache: `for_in_keys` is 4.0%, about 4,150 instructions per loop entry; (3) B1 `NewLit`: `DefField` is 4.3%; (4) copy by shape: `Object.assign` 2.4% and spread/rest 1.7%; (5) keyed `GetElem` and `SetElem` caches: 6.8% (key mix not measured); (6) `GetField` slow path 3.1% (real miss rate 3.7%); (7) fewer GC collections: 5.2%, raises peak memory; (8) fused pairs 1.4% to 3.2%; (9) narrow JIT. The call-site cache is worth 0.5% to 0.7% and a cheaper `select` under 0.2%.
+- Decision: levers 1 to 5 remove a kind of work and together come to about 10% to 13%, close to the whole JIT bound, at lower risk. Build the `to_uint32` fast path first; design for-in key cache, `NewLit` and copy by shape before building. The narrow JIT design doc waits.
+- Not tested: unit tests, clippy, `exec_diff.sh`, cost matrix, narrow rows and peak memory for the `to_uint32` experiment; the `GetElem` and `SetElem` key mix; how polymorphic the `GetField` misses are; the same-shape share of `Object.assign` and spread.
