@@ -802,3 +802,14 @@ fn translate_moves_what_is_painted() {
     let c = bare("<div style='width:100px;height:100px;background:#f00;translate:-50% 10px'></div>");
     assert_eq!(ink(&c, 0, 0, W, H, WHITE), Some((0, 10, 50, 110)), "the part left of the page is cut");
 }
+
+#[test]
+fn svg_display_none_group_and_fill_none_paint_nothing() {
+    let rect = "<rect rx=4 height=18 y=-9 width=18 fill=none></rect>";
+    let hidden = bare(&format!("<style>body{{margin:0}}</style><svg width=200 height=40><g style='display: none;' transform='translate(20,20)'>{rect}</g></svg>"));
+    assert_eq!(ink(&hidden, 0, 0, 200, 40, WHITE), None, "display:none group draws nothing");
+    let shown = bare(&format!("<style>body{{margin:0}}</style><svg width=200 height=40><g transform='translate(20,20)'>{rect}</g></svg>"));
+    assert_eq!(ink(&shown, 0, 0, 200, 40, WHITE), None, "fill=none without stroke draws nothing");
+    let css = bare("<style>body{margin:0}</style><svg width=40 height=40><rect width=18 height=18 style='fill:none'></rect><rect x=20 width=10 height=10 stroke=none fill=none /></svg>");
+    assert_eq!(ink(&css, 0, 0, 40, 40, WHITE), None, "css fill:none and stroke=none draw nothing");
+}

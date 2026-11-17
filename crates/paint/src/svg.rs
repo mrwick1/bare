@@ -105,23 +105,23 @@ pub fn draw(doc: &Document, styles: &Styles, root: NodeId, (x, y, w, h): (f32, f
         }
         None => Map::new([1.0, 0.0, 0.0, 1.0, x, y]),
     };
-    let paint = styles.style(root).map_or((None, None), paint_of);
     let mut buf = Vec::new();
-    walk(doc, styles, root, root, paint, map, out, &mut buf);
+    walk(doc, styles, root, root, map, out, &mut buf);
 }
 
 #[allow(clippy::too_many_arguments)]
-fn walk(doc: &Document, styles: &Styles, root: NodeId, node: NodeId, inherited: Paint, map: Map, out: Out<'_>, buf: &mut Vec<(f32, f32)>) {
+fn walk(doc: &Document, styles: &Styles, root: NodeId, node: NodeId, map: Map, out: Out<'_>, buf: &mut Vec<(f32, f32)>) {
     for child in doc.children(node) {
         if !matches!(doc.data(child), NodeData::Element { .. }) {
             continue;
         }
-        // A shape has a style (the rule of the UA sheet hides it, and what is inside a hidden box has none, so a `g` keeps its box).
-        let paint = styles.style(child).map_or(inherited, paint_of);
+        // A `display:none` element has no style, and nothing inside it is drawn.
+        let Some(style) = styles.style(child) else { continue };
+        let paint = paint_of(style);
         let map = attr(doc, child, "transform").and_then(transform).map_or(map, |t| map.then(t));
         let name = doc.element_name(child);
         if name == "g" {
-            walk(doc, styles, root, child, paint, map, out, buf);
+            walk(doc, styles, root, child, map, out, buf);
             continue;
         }
         if name == "text" {
