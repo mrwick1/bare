@@ -67,6 +67,9 @@ HTTP/1 `ttfb` measures the wait from entry into response-header reading to the f
 It excludes request writes and connection setup. It emits only if a byte arrives.
 HTTP/2 `h2_response_headers` measures the request call through delivery of the complete decoded response headers.
 It includes request writes and stream-slot waits. It is not a first-frame or first-byte measurement.
+HTTP/2 `h2_ttfb` measures the wait from the end of the last request write (HEADERS, CONTINUATION and any DATA) to the moment the reader thread handled the first frame of the stream.
+That frame is HEADERS (also an interim 1xx reply), DATA or RST_STREAM. For HEADERS, the time is taken after the header block is decoded.
+It is 0 if the server answers before the request body is fully sent. It emits only if the reply headers arrive, on the caller thread, so it carries the request ids. Only `send_stream` and `send_stream_once` assign a request id.
 
 `first_body_byte` measures from body construction after header parsing to first positive caller read.
 It includes caller delay and can include bytes already buffered with the headers.
@@ -111,7 +114,7 @@ git diff --check
 ```
 
 No GUI, non-Linux runtime or authenticated traffic is required or tested.
-HTTP/2 first-frame timing and error-before-headers outcome records remain unavailable.
+Error-before-headers outcome records for HTTP/2 remain unavailable.
 Memory attribution does not account for all engine subsystems or isolate logger allocator usage.
 
 ## Performance acceptance
@@ -215,7 +218,7 @@ Other gate outputs are `/tmp/monitor-foundation-final.log`, `/tmp/monitor-drive-
 
 Final status: partial acceptance. Monitoring-specific functional checks and the measured metrics/trace instruction budgets pass.
 The workspace gate, GUI execution and non-Linux runtime are not accepted. The parent subsequently accepted the disabled-overhead budget on the local fixture.
-HTTP/2 first-frame timing, pre-header failure outcomes and complete subsystem memory attribution remain limitations.
+HTTP/2 pre-header failure outcomes and complete subsystem memory attribution remain limitations.
 
 ## Parent verification
 
