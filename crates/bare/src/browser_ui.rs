@@ -542,7 +542,7 @@ impl Dom {
             // The mouse events of a press go to the holder of the capture, if a listener of `pointerdown` set one.
             let t = self.st.borrow().ui.capture.unwrap_or(t);
             if self.mouse_ev(it, t, "mousedown", p, b, p.buttons, count, None)? && button == 0 {
-                self.focus_by_press(it, t, caret, count)?;
+                self.focus_by_press(it, t, caret, count, (p.x, p.y))?;
             }
         } else {
             let down = self.st.borrow_mut().ui.down.take();
@@ -578,7 +578,7 @@ impl Dom {
     }
 
     /// The focus change of a press: the nearest focusable ancestor gets focus, or the page loses it.
-    fn focus_by_press(&self, it: &mut Interp<'_>, t: NodeId, caret: Option<u32>, count: u32) -> R<()> {
+    fn focus_by_press(&self, it: &mut Interp<'_>, t: NodeId, caret: Option<u32>, count: u32, at: (f64, f64)) -> R<()> {
         let mut to = None;
         for n in self.chain(Some(t)) {
             if self.focusable(it, n)? {
@@ -617,6 +617,13 @@ impl Dom {
         // A press in an editing host puts the caret at the end of it, unless the selection is in it already.
         if let Some(f) = to {
             self.caret_into_host(it, f)?;
+        }
+        // Two presses on text outside a text field select the word under the pointer, three the paragraph (the fields did it above).
+        if count >= 2 && caret.is_none() && !to.is_some_and(|f| self.selection_applies(f)) {
+            let hit = self.with_geo(it, |g, s| crate::browser_rects::text_at(g, s, at.0 as f32, at.1 as f32)).unwrap_or(None);
+            if let Some((n, off)) = hit {
+                self.select_at_text(it, n, off, count >= 3)?;
+            }
         }
         Ok(())
     }
@@ -1396,7 +1403,7 @@ pub(crate) fn word_move(text: &str, u: u32, forward: bool) -> u32 {
 
 /// Where a double click at offset `c` of `text` selects (UTF-16 offsets): the run of letters, digits and `_`, or the run of spaces,
 /// that holds the character after `c` (the one before it at the end). Any other character stands alone (Chrome).
-fn word_at(text: &str, c: u32) -> (u32, u32) {
+pub(crate) fn word_at(text: &str, c: u32) -> (u32, u32) {
     let (mut cs, mut u) = (Vec::new(), 0);
     for ch in text.chars() {
         cs.push((u, ch));

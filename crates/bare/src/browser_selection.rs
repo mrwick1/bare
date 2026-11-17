@@ -39,6 +39,8 @@
 //! - Mouse (`browser_ui.rs`, `focus_by_press`): a press in a text field puts the caret at the point, a move with the button down
 //!   extends the selection (`backward` when the pointer is before the press), two presses select the word at the caret (`word_at`),
 //!   three select the value (the line of a textarea). A press more than 5px from the last one starts the count again.
+//!   Outside a text field (a `contenteditable` host or plain text) two presses select the word under the pointer inside its Text node and three
+//!   the nearest block (`Dom::select_at_text`), by the text position that `browser_rects::text_at` finds from the layout.
 //! - Caps: `SchedLimits::max_select_tasks` (`Limit(Host("select-tasks"))`) and `max_selectionchange_tasks`
 //!   (`selectionchange-tasks`). `selection_room` checks every cap a change needs before anything is
 //!   queued or written, so a refused call changes nothing. No task runs after a fatal pump error (the pump is
