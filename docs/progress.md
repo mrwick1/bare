@@ -12734,3 +12734,7 @@ The monitoring tests ran once on the Windows 11 VM: `bare-os` (6), `bare-observe
 ## Monitoring: capture file through the OS layer (2026-11-17)
 
 The collector set Unix file mode 0600 in `bare-observe`. This put OS code outside the OS layer, and `tools/portable_check.sh --scan` flagged it. Now `bare_os::fs::create_private` creates the file. The scan flags only the three files that the baseline already flags. Linux and Windows `bare-os` and `bare-observe` tests pass. Windows and macOS workspace checks pass.
+
+## Chrome vs Bare: one E2E journey (2026-11-17)
+
+Measured one E2E journey (open, type, click, two expects, 1 s server fetch) in Chrome 155 over CDP and in Bare `421de16f` (release, `bare-drive`), headless and windowed (Cage, Wayland), on archMachine. 5 timed runs each, all passed, load average 17 to 32. Chrome used about 25x (headless) and 45x (windowed) the CPU time, 250x and 180x the user instructions (3823 M against 14.9 M headless; 5870 M against 32 M windowed) and about 19x and 20x the peak PSS (256 MiB against 13.5 MiB; 337 MiB against 16.6 MiB). Chrome ran 13 processes, Bare 1. Journey time was within 1.2x, because the server sleep dominates. Wall times are under load. `instructions:k` is not available (`perf_event_paranoid` 2). Tables, method and caveats: `docs/resources.md`.
