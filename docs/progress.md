@@ -4,6 +4,29 @@ This file records what is built, what comes next and what is missing. Update it 
 
 The reasons for the design are in [decisions.md](decisions.md). Time and memory numbers for each module are in [resources.md](resources.md).
 
+## Bytecode lane runs destructuring (2026-11-17)
+
+`BARE_JS_EXEC=byte` now compiles object and array patterns in declarations, assignments, `for-in` and `for-of` heads and `catch` clauses. Before, the lane refused them (104,527 calls on a private React dashboard journey). Parameters with patterns already ran: the tree walker binds them before the code starts. The default stays `tree`.
+
+- `bind_pat` compiles a pattern in the order of `bind_pattern`. Names are registers in a register function and bindings in stage 1.
+- Object patterns: `RequireObj`, then `GetField` with an inline cache for a name key, or `GetElem` for other keys. With a rest property, the keys stay in registers after the rest object, for `ObjRest` (`copy_props`).
+- Array patterns use the iterator stack of `for-of`: `IterOpen` (with `b` = 1, the error names the value), `IterStep` (`undefined` when done), `IterRest`, then `IterClose`. A throw closes the iterator through the handler.
+- Defaults compare with `undefined`. An anonymous function in a default takes the name of its target.
+- The pattern ops run in one function out of the loop (`bc_pattern_op`, `#[inline(never)]`). With their code in the loop, the journey cost 1.25 G (2.7%) more for the same work: the same calls on the lane, compared with the build before. Hypothesis: code layout or register pressure in `bc_loop`. A one-word `ObjRest` (no `x` word) removed the rest of the difference.
+
+Measurements (replay, `BARE_CLOCK=virtual`, base: the `for-in` and `for-of` entry below, #632):
+
+| Workload | before | after |
+|---|---|---|
+| Private React dashboard journey, `byte`, 3 runs | 46.207 to 46.208 G | 45.927 to 45.930 G (-0.6%) |
+| Public React page, `byte`, cost per key (`keycost.sh`) | 163.3 M | 161.1 M (-1.3%) |
+
+The gain is small because most functions with patterns stop now at a spread or an optional chain. Refusals on the journey (calls): spread 99,449 (was 39,783), optional chain 84,567 (was 69,725), private name 10,765, regexp literal 9,316, computed key 4,540, delete 2,390, others under 100. The journey in `tree`: 74.535 G, unchanged. Peak RSS on the public page in `byte`: 33.1 MiB.
+
+Tests: a new test covers every pattern form, iterator closes, defaults, member targets, `for-of`, `catch`, parameters and the two errors. Before the change it failed (`refused` destructuring). A new test checks the pattern ops in a register function with no environment ops. `cargo test -p bare-js`: 1006 passed. `exec_diff.sh`: 79 runs, 0 differences.
+
+Not tested: test262 in byte mode, wall time, Windows and macOS, live sites.
+
 ## Bytecode lane runs for-in and for-of (2026-11-17)
 
 `BARE_JS_EXEC=byte` now compiles `for-in` and `for-of` loops. Before, the lane refused them, and they were the largest refusal on a private React dashboard journey (239,306 calls). The default stays `tree`.

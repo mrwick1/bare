@@ -157,10 +157,14 @@ ops! {
     Ret Abc "r" "Return `a`.",
     RetUndef Abc "" "Return `undefined`.",
     Throw Abc "r" "Throw `a`.",
-    IterOpen Abc "r" "Open the iterator of `a` (`for-of`, `iter_start`) on the iterator stack of the frame.",
+    IterOpen Abc "r n" "Open the iterator of `a` on the iterator stack of the frame (`iter_start`). `b` = 1: an array pattern (`iter_start_val`, the error names the value).",
     ForInOpen Abc "r" "Open the keys of `a` (`for-in`, `for_in_keys`) on the iterator stack of the frame.",
     IterNext AsBx "r j" "`a` = the next value of the top iterator. When it is done, pop it and jump.",
     IterClose Abc "" "Pop the top iterator and close it (`iter_close`; a `for-in` has nothing to close).",
+    IterStep Abc "r" "`a` = the next value of the top iterator, or `undefined` when it is done (an element of an array pattern).",
+    IterRest Abc "r" "`a` = a new array of the values that are left in the top iterator (a rest element).",
+    ObjRest Abc "r r n" "`a` = a new object with the own enumerable properties of `b` except the keys in the `c` registers after `a` (a rest property).",
+    RequireObj Abc "r" "Throw a TypeError when `a` is `undefined` or `null` (an object pattern).",
 }
 
 impl Op {

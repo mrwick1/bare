@@ -651,3 +651,66 @@ f()"#;
         assert_eq!(out[0], out[1]);
     });
 }
+
+/// Destructuring: object patterns (name, string, number and computed keys, defaults, nesting, rest), array patterns (holes,
+/// rest, defaults, nesting, strings), an iterator whose `return` logs each close (a short pattern closes it, a done iterator does
+/// not, a throw in a default closes it), assignment patterns with a member target, `for-of` and `catch` patterns, parameters, and
+/// the errors for `null` and for a value that is not iterable. They run on the bytecode lane, and byte mode gives the tree result.
+#[test]
+fn destructuring_runs_on_the_bytecode_lane() {
+    big(|| {
+        let src = r#"function mk(n, log) {
+  var i = 0;
+  var it = { next: function () { i++; return i > n ? { done: true } : { value: i, done: false }; },
+             return: function () { log.push('close' + i); return {}; } };
+  it[Symbol.iterator] = function () { return it; };
+  return it;
+}
+function boom() { throw new Error('def'); }
+function h({ a, b = 2 }, [c, , d = 4]) { return a + b + c + d; }
+function f() {
+  var o = [], log = [], k = 'kk';
+  var { x, 'y': y, 1: one, [k]: kk, z = 9, fn = function () {}, n: { m } } = { x: 1, y: 2, 1: 3, kk: 4, n: { m: 5 } };
+  o.push(x, y, one, kk, z, fn.name, m);
+  const { p, ...rest } = { p: 1, q: 2, r: 3 };
+  o.push(p, Object.keys(rest).join(''));
+  let [a, , b = 7, [c2], ...tail] = [1, 2, undefined, [3], 4, 5];
+  o.push(a, b, c2, tail.join(''));
+  var [s1, s2] = 'hi';
+  o.push(s1 + s2);
+  var [i1] = mk(3, log);
+  var [j1, j2, j3, j4] = mk(2, log);
+  o.push(i1, j1, j2, j3, j4);
+  try { var [t1, t2 = boom()] = mk(1, log); } catch (e) { o.push(e.message); }
+  try { var [u1, [u2]] = mk(5, log); } catch (e) { o.push(e.message); }
+  var e1 = 1, e2 = 2;
+  [e1, e2] = [e2, e1];
+  var holder = {};
+  var res = ({ v: holder.w, ...holder.rest } = { v: 8, extra: 1 });
+  o.push(e1, e2, holder.w, Object.keys(holder.rest).join(''), res.v);
+  for (const [key, val] of Object.entries({ a: 1, b: 2 })) o.push(key + val);
+  for (var { len = 0 } of [{ len: 3 }, {}]) o.push(len);
+  try { throw { message: 'caught' }; } catch ({ message }) { o.push(message); }
+  o.push(h({ a: 1 }, [10, 0]));
+  try { var { nope } = null; } catch (e) { o.push(e.message); }
+  try { var [q1] = 5; } catch (e) { o.push(e.message); }
+  var fs = [];
+  for (let [w] of [[1], [2]]) fs.push(function () { return w; });
+  o.push(fs[0]() + fs[1]());
+  return o.join() + ' | ' + log.join();
+}
+f()"#;
+        let mut out = Vec::new();
+        for mode in [Exec::Tree, Exec::Byte] {
+            let mut it = Interp::realm(Heap::default(), EvalLimits::default()).unwrap();
+            it.set_exec(mode);
+            out.push(run(&mut it, src));
+            if mode == Exec::Byte {
+                let s = it.bc_stats();
+                assert_eq!(s.calls_tree, 0, "{s:?}");
+            }
+        }
+        assert_eq!(out[0], "1,2,3,4,9,fn,5,1,qr,1,7,3,45,hi,1,1,2,,,def,2 is not iterable,2,1,8,extra,8,a1,b2,3,0,caught,17,Cannot destructure 'null' as it is null.,5 is not iterable,3 | close1,close2");
+        assert_eq!(out[0], out[1]);
+    });
+}
