@@ -260,3 +260,26 @@ Raw outputs, exact input, commit metadata, and binary SHA-256 hashes are in `/tm
 The comparison script is `/tmp/monitor-parent-compare-20261116.py`.
 All three provisional instruction budgets pass on the measured local fixture.
 The full workspace gate remains unaccepted. GUI, non-Linux execution, other workloads and separate logger allocator usage remain untested.
+
+
+## GUI verification, 2026-11-17
+
+The parent ran one pass on archMachine at code head `943272e9`.
+Offstage provided an isolated Cage screen. The screen was destroyed after the tests.
+The MCP launch lacked `XDG_RUNTIME_DIR`; the CLI succeeded with `/run/user/1000`.
+
+All three existing GUI tests passed without skips:
+
+- `bare-window --test live`: `opens_draws_three_frames_and_closes`, with `BARE_WINDOW_LIVE=1`.
+- `bare-drive --test window_wait`: `a_window_step_sees_a_reply_at_once`, through its inner compositor path.
+- `bare-drive --test window_arenas`: `a_window_run_holds_the_window_and_little_more_than_a_headless_run`. This test runs 50 journeys per mode internally.
+
+A local windowed journey with tracing also passed. It typed into an input, clicked a button, verified the changed DOM, and waited for a delayed fetch reply.
+The first fixture attempt omitted the HTML Content-Type and failed. The corrected fixture passed; no browser source was changed.
+The parent inspected the rendered window through OCR and a screenshot.
+The corrected capture contains 383 records, including 150 process samples, and terminal status reports zero drops.
+Network, HTML, JS, loader, engine, scheduler, style, layout and driver records are present.
+No paint records are present despite visible rendering. GUI paint instrumentation coverage is therefore not accepted.
+The test-only pass made no engine changes. Non-Linux runtime remains untested.
+
+Evidence: `/tmp/monitor-gui-20261117/` contains the runner, journey, test logs, results, corrected JSONL capture and `trace-screen.png`.
