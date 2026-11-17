@@ -13088,3 +13088,22 @@ Design: `docs/design-for-in-keys.md`, designs B and C. `for_in_keys` was 4.24% o
 - Peak RSS, byte copies, medians of 7: load 26828 to 26960 KiB (+0.49%, inside the spread of the base runs 26532 to 27084), 50 keys 35288 to 35184 KiB (-0.29%).
 - Tests: `cargo test -p bare-js --lib` 1024 passed, 1 ignored. 25 new loop cases and the 33 existing ones run in Tree, Auto and Byte against Node 22 values; counter tests `for_in_shape` and `for_in_sets` failed first; a `collect` that sweeps shapes between two loops keeps the keys; a 100,000-key dictionary object still hits the step limit. `tools/js/exec_diff.sh`: 79 runs, 0 differences. test262 for-in subset: pass 108, fail 19, the same in `tree`, `auto` and `byte`.
 - Not tested: wall time, Windows, the page in `tree` or `byte` mode, other journeys and the load-test ramps, a callgrind split of the page at 0, 5 and 50 keys, whether a proxy `ownKeys` can repeat a key in bare.
+
+## Keyed table for `GetElem` and `SetElem` (`keyed-cache`, 2026-11-17)
+
+Design: `docs/design-keyed-cache.md`, design A with a compact table. `GetElem` of an own string key and `SetElem` that adds a key were 77% of the keyed cost (7.7% of the steady page); a per-site cache cannot serve them because the key changes on every pass of a for-in loop. Now `Heap` holds one 2-way table of 2,048 entries of 32 bytes (64 KiB) keyed by (shape, key atom). It reuses `ic_hit`, `ic_store`, `ic_add`, `ic_fill` and `set_fill`. The fast path is out of line, at the top of `bc_get_elem` and in a new `bc_set_elem` (called for string keys only). A shape sweep empties the table. A write entry is filled at the second miss of its pair, so unique-key adds (`o['k'+i] = i`) do not pay a fill on every write. Base: origin/main `75c2b1e3`. Machine: archMachine. `Auto`, public React page, `#a1`; minimum of 3 runs, spread at most 0.012%. Narrow rows: `byte`, scale 10.
+
+| Row | main | now |
+| --- | --- | --- |
+| Page load | 429.18M | 425.01M (-0.97%) |
+| Page 50 keys | 6674.50M | 6440.38M (-3.51%) |
+| loopfn / fib / calls / loop | 831.05 / 58.25 / 1603.28 / 2373.05M | 831.07 / 58.26 / 1603.29 / 2373.06M (at most +0.02%) |
+| closures | 467.29M | 467.75M (+0.10%) |
+| Peak RSS load / 50 keys (byte copies, medians of 7) | 26936 / 35276 KiB | 26596 / 35140 KiB (-1.3% / -0.4%) |
+
+- Cost matrix against main (803 rows): 0 rows over +0.5% under either allocator. The first version had 5 rows over (`arrobj_load objects` up to +1.5%, `descriptors`, `adapter_load u8steps 10`, `promise_load fanout 10`): unique-key adds paid a fill on every write, and numeric-key `SetElem` paid an extra out-of-line call. Both are fixed.
+- `bcstats`, render counts and steps per key (82,227) are unchanged.
+- Tests: `cargo test -p bare-js --lib` 1028 passed, 1 ignored. 19 cases from the design's test list run in Tree, Auto and Byte against Node 22 literals; 3 more check that the lane hits the table (Tree gets 0 hits), that a shape sweep empties it, and that two realms keep their own entries. Removing the sweep reset fails the sweep test; ignoring the prototype epoch fails the comparison with Node through the debug `ic_verify` check. Ignoring the key's generation number is not caught (no test frees an atom and reuses its slot). `tools/js/exec_diff.sh`: 79 runs, 0 differences.
+- One difference from Node that also exists on main: `undefined[k] = 1` throws "Cannot read properties of undefined" where Node says "Cannot set properties". All three modes agree; the test compares the error name only.
+- Step 2 of the design (single-search `Heap::set`) is not built. After the table, most adds on the page never reach `Heap::set`; the estimate is about -0.8% at 50 keys, below the gate of -1%. This is an estimate from the design's call counts, not a measurement.
+- Not tested: test262 (its runner ignores `BARE_JS_EXEC` and the default executor is Tree, so the new path does not run there); a callgrind split; the hit rate of the table on the page; a test that frees an atom and reuses its slot; wall time; Windows; the private dashboard journey; release builds of the deliberately broken versions.
