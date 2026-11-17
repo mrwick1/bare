@@ -909,6 +909,15 @@ fn font_shorthand_has_one_text() {
     assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('d')).font"), "16px sans-serif");
 }
 
+/// #656: Chrome writes `transition` as `property duration timing-function delay` for each name, and repeats the shorter lists.
+#[test]
+fn transition_shorthand_has_one_text() {
+    let mut b = at("<!doctype html><body><div id=d></div><div id=a style='transition: opacity 100ms cubic-bezier(0.1, 0.2, 0.3, 0.4) 50ms, transform 2s'></div><div id=r style='transition-property: a, b, c; transition-duration: 1s, 2s'></div></body>");
+    assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('d')).transition"), "all 0s ease 0s");
+    assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('a')).transition"), "opacity 0.1s cubic-bezier(0.1, 0.2, 0.3, 0.4) 0.05s, transform 2s ease 0s");
+    assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('r')).getPropertyValue('transition')"), "a 1s ease 0s, b 2s ease 0s, c 1s ease 0s");
+}
+
 #[test]
 fn transform_reads_as_none_or_matrix() {
     let mut b = at("<!doctype html><body><div id=a></div><div id=t style='transform: translate(10px, 20px)'></div></body>");
