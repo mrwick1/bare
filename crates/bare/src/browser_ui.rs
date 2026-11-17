@@ -936,8 +936,8 @@ impl Dom {
         if m.alt || m.meta {
             return Ok(false);
         }
-        // Shift with an arrow, Home or End extends the selection (Control: by word, or to the end of the host).
-        if m.shift && matches!(k.key.as_str(), "ArrowLeft" | "ArrowRight" | "Home" | "End") {
+        // An arrow, Home or End moves the caret; Shift extends the selection (Control: by word, or to the end of the host).
+        if matches!(k.key.as_str(), "ArrowLeft" | "ArrowRight" | "Home" | "End") {
             self.caret_into_host(it, f)?;
             let fwd = matches!(k.key.as_str(), "ArrowRight" | "End");
             let gran = match (k.key.as_str(), m.ctrl) {
@@ -946,7 +946,7 @@ impl Dom {
                 (_, false) => "lineboundary",
                 _ => "documentboundary",
             };
-            self.modify_selection(it, "extend", if fwd { "forward" } else { "backward" }, gran)?;
+            self.modify_selection(it, if m.shift { "extend" } else { "move" }, if fwd { "forward" } else { "backward" }, gran)?;
             return Ok(true);
         }
         let (kind, text) = match k.key.as_str() {

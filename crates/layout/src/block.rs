@@ -438,6 +438,8 @@ pub(crate) fn sized_with(cx: &mut Cx, node: NodeId, space: Space, forced: Option
         }
     };
     let content_height = floats_bottom.map_or(content_height, |b| content_height.max(b));
+    // Chrome gives an empty editing host one line, so the caret and a click have room (Blink `HasLineIfEmpty`).
+    let content_height = if content_height == 0.0 && cx.out.len() == fragment + 1 && cx.tree.editing_root(node) { crate::font::Metrics::of(style).line_height(style) } else { content_height };
     done.content = content_height;
     // A scrollbar at the bottom is inside the height, if the box has one. Else the box grows by it.
     let natural = content_height;
@@ -978,6 +980,20 @@ pub(crate) mod tests {
         assert!(open.contains("#c ") && open.contains("p#p") && open.contains("#s2") && open.contains("\"text\""), "{open}");
         let styled = dump("<details id=d><summary>s</summary><div id=c style='display:grid;position:absolute'>c</div></details>", "");
         assert!(!styled.contains("#c "), "{styled}");
+    }
+
+    /// Chrome gives an empty editing host one line (Blink `HasLineIfEmpty`), so a click and the caret have room. An editable child of a host, a
+    /// host with content and a plain empty block do not get it.
+    #[test]
+    fn an_empty_editing_host_has_one_line() {
+        assert_eq!(rect("<div id=e contenteditable=true></div>", "", "e").h, 22.0);
+        assert_eq!(rect("<div id=e contenteditable> </div>", "", "e").h, 22.0);
+        assert_eq!(rect("<div id=e contenteditable style='line-height:30px'></div>", "", "e").h, 30.0);
+        assert_eq!(rect("<div contenteditable><div id=e></div></div>", "", "e").h, 0.0);
+        assert_eq!(rect("<div contenteditable><div id=e contenteditable></div></div>", "", "e").h, 0.0);
+        assert_eq!(rect("<div id=e contenteditable=false></div>", "", "e").h, 0.0);
+        assert_eq!(rect("<div id=e></div>", "", "e").h, 0.0);
+        assert_eq!(rect("<div id=e contenteditable style='height:5px'></div>", "", "e").h, 5.0);
     }
 
     #[test]
