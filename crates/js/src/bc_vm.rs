@@ -54,6 +54,26 @@ pub(super) struct RegStack {
     iters: Vec<BcIter>,
 }
 
+impl RegStack {
+    /// Grow the registers to `n` for a call, by at least half of the capacity. A stack goes back to the pool with its capacity, and
+    /// the doubling of `Vec` kept up to twice the deepest run of each stack. Exact growth copied the stack at each new depth.
+    #[cold]
+    #[inline(never)]
+    pub(super) fn grow(&mut self, n: usize) {
+        let c = self.regs.capacity();
+        if c < n {
+            self.regs.reserve_exact(n.max(c + c / 2) - self.regs.len());
+        }
+        self.regs.resize(n, Value::Undefined);
+    }
+
+    /// The length and the capacity of the registers (tests).
+    #[cfg(test)]
+    pub(super) fn regs_len_cap(&self) -> (usize, usize) {
+        (self.regs.len(), self.regs.capacity())
+    }
+}
+
 /// An open loop iterator (`IterOpen`, `ForInOpen`).
 pub(super) enum BcIter {
     Of(It),
@@ -1336,7 +1356,7 @@ impl<'p> Interp<'p> {
                             (t, caller_env, callee_env, from, to) = tri!(at, self.bc_call_env(&callee, (fid, fobj, cenv), this_v, &regs[b + 2..b + 2 + cc], x & 0x7fff_ffff));
                         }
                         if st.regs.len() < nb + nregs {
-                            st.regs.resize(nb + nregs, Value::Undefined);
+                            st.grow(nb + nregs);
                         }
                         // The arguments are the first registers of the callee already. The other variables start as `undefined`.
                         if from < to {
