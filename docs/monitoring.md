@@ -42,6 +42,7 @@ Loader milestones emit at their source without consuming legacy trace records.
 
 Process samples have no session or document attribution.
 They include optional RSS, peak RSS, allocator bytes, CPU microseconds and thread count.
+They also include `logger_queued_bytes`: the heap bytes of records that wait in the logger queue at that moment. Subtract it from RSS or allocator bytes to remove the logger's queued memory.
 Linux supports procfs counters. Allocator accounting requires glibc.
 Windows reads RSS and peak RSS (`WorkingSetSize`, `PeakWorkingSetSize`) from `K32GetProcessMemoryInfo`, and CPU times from `GetProcessTimes`. CPU time advances in scheduler ticks, 15.625 ms on the test VM. Thread count and allocator bytes are null on Windows: no per-process thread call exists without a system-wide enumeration, and `HeapSummary` costs O(live allocations).
 Other platforms return null for unsupported counters.
@@ -94,6 +95,9 @@ Legacy switches retain their behavior. The driver still enables its own legacy n
 
 The queue holds 256 records. Each record is limited to 4096 bytes and 32 fields.
 Queued serialized payload is bounded by 1 MiB, excluding producer-local records and allocator overhead.
+The logger counts the heap bytes of its queued records (`Vec::capacity`, the real allocation, not the JSON length). It keeps the current value, the peak and the peak record count. Each record adds a few relaxed atomic operations. With monitoring off, no collector exists and `Handle::emit` returns before them.
+The terminal `collector_status` record has `peak_queued_bytes` and `peak_queued_records`. `Status` has `queued_bytes`, `peak_queued_bytes` and `peak_queued_records`.
+Not counted: the buffer of a record while a producer builds it (at most one record of 4096 bytes per producing thread), the fixed slot array of the channel, and the writer's OS and file buffers.
 The default file cap is 64 MiB, with room reserved for terminal status.
 Overflow drops records. Cap exhaustion stops recording.
 Terminal status reports dropped records and the stop reason.
@@ -120,7 +124,7 @@ git diff --check
 
 No GUI, non-Linux runtime or authenticated traffic is required or tested.
 Requests that fail before their response headers have a `network/request_failed` record.
-Memory attribution does not account for all engine subsystems or isolate logger allocator usage.
+Memory attribution does not account for all engine subsystems. The logger's queued records are counted (see Bounds); its other buffers are not.
 
 ## Performance acceptance
 
@@ -154,7 +158,7 @@ This does not establish performance on other journeys or sampling intervals.
 The default 1000 ms sample interval was used. Record-count variation comes from interval samples.
 All enabled captures ended with terminal status and zero dropped records.
 No off capture was created. No wall-time result is accepted under concurrent load.
-The queued serialized logger payload limit is 1 MiB; separate logger allocator usage was not measured.
+The queued serialized logger payload limit is 1 MiB. The acceptance captures predate the queued-byte counters, so they did not measure logger memory. Later builds count it (see Bounds).
 Raw artifacts remain at `/tmp/bare-monitor-accept-process-rss` on archMachine.
 
 The continuation did not verify disabled overhead. The parent subsequently completed this comparison; see Parent verification below.
@@ -269,7 +273,7 @@ No capture was created in either mode.
 Raw outputs, exact input, commit metadata, and binary SHA-256 hashes are in `/tmp/monitor-parent-baseline-20261116/results.json` and its sibling files.
 The comparison script is `/tmp/monitor-parent-compare-20261116.py`.
 All three provisional instruction budgets pass on the measured local fixture.
-The full workspace gate remains unaccepted. GUI, non-Linux execution, other workloads and separate logger allocator usage remain untested.
+The full workspace gate remains unaccepted. GUI, non-Linux execution and other workloads remain untested. Logger queued memory is counted since 2026-11-17, but no acceptance capture has used it.
 
 
 ## GUI verification, 2026-11-17

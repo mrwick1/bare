@@ -84,7 +84,7 @@ Do not change rendering behavior to fix instrumentation.
 1. Fix and verify GUI paint trace coverage.
 2. Done 2026-11-17: all known workspace failures also fail on the baseline; see `docs/monitoring.md`. Was: classify the other workspace failures against the baseline. Do not widen into unrelated engine fixes without agreement.
 3. Windows done 2026-11-17: tests pass; native RSS, peak RSS and CPU counters added. Thread count and allocator bytes stay `null` on Windows (no O(1) API). macOS untested (Mac offline). Was: test non-Linux execution when requested and an appropriate environment is available.
-4. Optional coverage: HTTP/2 first-byte/frame timing, failure outcomes before response headers, and complete subsystem/logger memory attribution.
+4. Done 2026-11-17: HTTP/2 first-frame timing, failure outcomes before response headers, and logger queued memory (current and peak). Out of scope by the owner's decision on 2026-11-17: per-subsystem byte totals.
 5. Prepare a PR after the agreed acceptance work. Read the PR-writing and identity instructions first. Do not merge without authorization.
 
 Arjun first requested GPT-sol models. On 2026-11-17 he changed this to Claude models for delegation. Previous agents used `gpt-6.1-sol` with high reasoning through T3 `delegate_task` in isolated worktrees.
