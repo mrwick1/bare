@@ -116,6 +116,15 @@ pub(crate) fn define(d: &Dom, it: &mut Interp<'_>, name: &str) -> R<bool> {
         "getBBox" => {
             d.def_method(it, p, name, 0, bbox)?;
         }
+        "transform" => {
+            // A miss of `transform` on any host object asks once more: install the getter only once.
+            let k = d.key(it, name)?;
+            if it.heap.peek_own_property(p, k).map_err(|e| it.heap_error(e))?.is_none() {
+                let src = it.heap.intern_str(include_str!("shims/svgtransform.js")).map_err(|e| it.heap_error(e))?;
+                let Value::Object(get) = it.eval_global(Value::String(src))? else { return Err(it.type_error("svgtransform.js")) };
+                d.define_accessor(it, p, k, get, None)?;
+            }
+        }
         "getCTM" | "getScreenCTM" => {
             d.def_method(it, p, name, 0, ctm)?;
         }

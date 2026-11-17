@@ -325,6 +325,18 @@ fn svg_geometry_surface() {
 }
 
 #[test]
+fn svg_transform_list_consolidates_the_attribute() {
+    // d3's interpolateTransformSvg reads `transform.baseVal.consolidate().matrix`. The matrix is the product of the list, by hand.
+    let mut b = browser("<svg><g id='g' transform='translate(10,20) scale(2) rotate(90 5 5)'></g><g id='e'></g><g id='x' transform='translate(1) oops(2)'></g></svg>");
+    let m = "var m=document.getElementById('g').transform.baseVal.consolidate().matrix; [m.a,m.b,m.c,m.d,m.e,m.f].map(v=>Math.round(v*1e6)/1e6+0).join(',')";
+    assert_eq!(js(&mut b, m), "0,2,-2,0,30,20");
+    assert_eq!(js(&mut b, "document.getElementById('g').transform.baseVal.numberOfItems"), "3");
+    assert_eq!(js(&mut b, "document.getElementById('e').transform.baseVal.consolidate()"), "null");
+    assert_eq!(js(&mut b, "document.getElementById('x').transform.baseVal.numberOfItems"), "0", "a list that does not parse is empty");
+    assert_eq!(js(&mut b, "document.body.transform"), "undefined", "only SVG elements have it");
+}
+
+#[test]
 fn document_write_surface() {
     let mut b = browser("<p>old</p>");
     assert_eq!(js(&mut b, "document.open(); document.write('<p id=written>hello</p>'); document.close(); document.getElementById('written').textContent"), "hello");
