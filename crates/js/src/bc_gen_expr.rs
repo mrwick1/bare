@@ -352,6 +352,40 @@ impl Gen<'_, '_> {
                 self.emit(Op::Delete, dst, o, k)?;
             }
             ExprKind::Ident => return Err("delete"),
+            // `delete a?.b`: a `?.` that finds `null` or `undefined` leaves the chain with `true`.
+            ExprKind::Chain(inner) if matches!(self.prog.expr(inner).kind, ExprKind::Member { .. } | ExprKind::Index { .. }) => {
+                let (o, k) = (self.reg()?, self.reg()?);
+                let mut exits = Vec::new();
+                match self.prog.expr(inner).kind {
+                    ExprKind::Member { obj, name, optional } => {
+                        self.sub(obj, o, Some(&mut exits))?;
+                        if optional {
+                            self.nullish_exit(o, &mut exits)?;
+                        }
+                        let key: Vec<u16> = self.prog.name(name).encode_utf16().collect();
+                        let kc = self.konst(KeyOf::String(key.into()));
+                        self.emit(Op::LoadK, k, kc, 0)?;
+                    }
+                    ExprKind::Index { obj, index, optional } => {
+                        self.sub(obj, o, Some(&mut exits))?;
+                        if optional {
+                            self.nullish_exit(o, &mut exits)?;
+                        }
+                        self.expr(index, k)?;
+                        self.emit(Op::ToKey, k, o, k)?;
+                    }
+                    _ => unreachable!(),
+                }
+                self.emit(Op::Delete, dst, o, k)?;
+                if !exits.is_empty() {
+                    let end = self.jump(Op::Jmp, 0)?;
+                    for j in exits {
+                        self.patch(j)?;
+                    }
+                    self.emit(Op::LoadTrue, dst, 0, 0)?;
+                    self.patch(end)?;
+                }
+            }
             _ => {
                 self.expr(arg, dst)?;
                 self.emit(Op::LoadTrue, dst, 0, 0)?;
