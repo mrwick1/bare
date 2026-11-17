@@ -421,3 +421,100 @@ fn the_bytecode_lane_agrees_with_the_tree_walker_on_the_corpora_with_lazy_bodies
         assert!(bad.is_empty(), "{} of {n}:\n{}", bad.len(), bad.join("\n"));
     });
 }
+
+/// A lazy function that calls another lazy function: the callee runs in the loop of the caller, though each has its own script
+/// slot. `Error.stack` names each frame with its own script, as the tree walker does.
+#[test]
+fn a_call_to_a_lazy_function_of_another_script_stays_in_the_loop() {
+    big(|| {
+        let src = format!(
+            "function inner(i) {{ {PAD} if (i == 9) throw new Error('boom'); return i + p7; }}
+             function outer(n) {{ {PAD} var s = 0; for (var i = 0; i < n; i++) s += inner(i); return s; }}
+             var st = '';
+             try {{ outer(10); }} catch (e) {{ st = e.stack; }}
+             outer(5) + '|' + st"
+        );
+        let src = format!("/*{}*/{src}", " ".repeat(crate::parse_cache::LAZY_MIN_SOURCE));
+        let mut want = String::new();
+        for mode in [Exec::Tree, Exec::Auto, Exec::Byte] {
+            let mut it = realm();
+            it.set_exec(mode);
+            let got = match it.run_script(&src) {
+                Ok(v) => it.display(v),
+                Err(e) => format!("{e:?}"),
+            };
+            if mode == Exec::Tree {
+                want = got.clone();
+                assert!(want.contains("at inner (script#") && want.contains("at outer (script#"), "{want}");
+                continue;
+            }
+            assert_eq!(got, want, "{mode:?}");
+            if mode == Exec::Byte {
+                // The script body, the two calls of `outer` and the first call of `inner` (it resolves the lazy body) enter the loop.
+                // The other 14 calls of `inner` run in the loop of `outer`.
+                let s = it.bc_stats();
+                assert_eq!(s.calls_tree, 0, "{s:?}");
+                assert!(s.runs <= 4, "{s:?}");
+            }
+        }
+    });
+}
+
+/// A lane function calls natives: one that calls back into script code (`map`), one that throws, and `push`. The loop calls
+/// them with its registers as the arguments. Results, `Error.stack` and the depth limit of a recursion through `map` are what
+/// the tree walker gives.
+#[test]
+fn a_native_called_from_the_loop_keeps_results_stacks_and_the_depth_limit() {
+    big(|| {
+        let src = "function k3(v) { return v * 3; }
+             function each(a) { var s = 0, b = a.map(k3), arr = []; for (var i = 0; i < b.length; i++) s += b[i];
+               for (var j = 0; j < 5; j++) arr.push(j, s); return s + '/' + arr.join(); }
+             function bad(o) { return Object.defineProperty(o, 'x', {}); }
+             function cb() { return [1].map(function inner(v) { throw new Error('in ' + v); }); }
+             var st1 = '', st2 = '';
+             try { bad(1); } catch (e) { st1 = e.stack; }
+             try { cb(); } catch (e) { st2 = e.stack; }
+             each([1, 2, 3]) + '|' + st1 + '|' + st2";
+        let deep = "var c = 0; function deep(n) { c++; return [n].map(deep); } deep(0)";
+        let mut want = String::new();
+        for mode in [Exec::Tree, Exec::Auto, Exec::Byte] {
+            let mut it = realm();
+            it.set_exec(mode);
+            let got = match it.run_script(src) {
+                Ok(v) => it.display(v),
+                Err(e) => format!("{e:?}"),
+            };
+            let s = it.bc_stats();
+            let mut d = realm_with(EvalLimits { max_steps: 50_000_000, max_call_depth: 40, ..Default::default() });
+            d.set_exec(mode);
+            let lim = format!("{:?}", d.run_script(deep).map(|_| ()));
+            let got = format!("{got}|{lim}|{}", d.run_script("c").map(|v| d.display(v)).unwrap_or_default());
+            if mode == Exec::Tree {
+                want = got;
+                assert!(want.contains("at bad (") && want.contains("at inner (") && want.contains("at cb ("), "{want}");
+                assert!(want.contains("Limit(CallDepth)"), "{want}");
+                continue;
+            }
+            assert_eq!(got, want, "{mode:?}");
+            if mode == Exec::Byte {
+                // `map` twice, `defineProperty`, `join`, and `push` five times.
+                assert!(s.natives >= 9, "{s:?}");
+            }
+        }
+    });
+}
+
+/// The registers of an inline call grow by half of the capacity, not by the doubling of `Vec`. A stack goes back to the pool with
+/// its capacity, so the doubling kept up to twice the deepest run of each pooled stack.
+#[test]
+fn the_registers_of_an_inline_call_grow_by_half() {
+    let mut st = bc_vm::RegStack::default();
+    st.grow(100);
+    assert_eq!(st.regs_len_cap(), (100, 100));
+    st.grow(101);
+    assert_eq!(st.regs_len_cap(), (101, 150));
+    st.grow(150);
+    assert_eq!(st.regs_len_cap(), (150, 150));
+    st.grow(400);
+    assert_eq!(st.regs_len_cap(), (400, 400));
+}

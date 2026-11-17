@@ -26,6 +26,9 @@ impl Exec {
 /// The code of a function for the loop (`bc_vm.rs`): the bytecode and the values of its constants.
 struct Compiled {
     code: crate::bc::Code,
+    /// The slot of the script that holds the function. The loop runs the code of any script and selects this one only for the ops
+    /// that read the code tables of the current script (`bc_sync`).
+    script: u32,
     /// For each constant: a number, an interned string (rooted by `bc_roots`), or `undefined` for a name.
     kv: Box<[Value]>,
     /// For each constant: its global cell. `GetGlobal` and `SetGlobal` read it. Constants that are not names hold a key that is
@@ -86,6 +89,8 @@ pub struct BcStats {
     /// walker ran because the lane was on and refused the function (or it is a generator or an async function).
     pub calls_lane: u64,
     pub calls_tree: u64,
+    /// Calls of natives that the loop made itself (`CallR`), with the registers as the arguments.
+    pub natives: u64,
 }
 
 /// The state of the bytecode interpreter (B3 of `docs/engine-plan.md`). The format is in `bc.rs`, the loop in `bc_vm.rs`.
@@ -112,6 +117,9 @@ struct BcState {
     why: &'static str,
     #[cfg(feature = "bc-hist")]
     hist: bc_hist::Hist,
+    /// Poison mode (tests and the feature `bc-poison`): the empty program that `prog` holds while the script is parked.
+    #[cfg(any(test, feature = "bc-poison"))]
+    poison: Option<Rc<crate::ast::Program<'static>>>,
 }
 
 impl BcState {
@@ -129,7 +137,7 @@ impl Drop for BcState {
         if s.calls_lane + s.calls_tree > 0 && std::env::var_os("BARE_JS_STATS").is_some() {
             let mut r: Vec<_> = self.refused.iter().collect();
             r.sort();
-            eprintln!("bcstats compiled={} fallbacks={} runs={} calls_lane={} calls_tree={} refused={r:?}", s.compiled, s.fallbacks, s.runs, s.calls_lane, s.calls_tree);
+            eprintln!("bcstats compiled={} fallbacks={} runs={} calls_lane={} calls_tree={} natives={} refused={r:?}", s.compiled, s.fallbacks, s.runs, s.calls_lane, s.calls_tree, s.natives);
         }
         #[cfg(feature = "bc-hist")]
         self.hist.report();

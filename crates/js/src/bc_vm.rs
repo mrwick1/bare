@@ -54,6 +54,26 @@ pub(super) struct RegStack {
     iters: Vec<BcIter>,
 }
 
+impl RegStack {
+    /// Grow the registers to `n` for a call, by at least half of the capacity. A stack goes back to the pool with its capacity, and
+    /// the doubling of `Vec` kept up to twice the deepest run of each stack. Exact growth copied the stack at each new depth.
+    #[cold]
+    #[inline(never)]
+    pub(super) fn grow(&mut self, n: usize) {
+        let c = self.regs.capacity();
+        if c < n {
+            self.regs.reserve_exact(n.max(c + c / 2) - self.regs.len());
+        }
+        self.regs.resize(n, Value::Undefined);
+    }
+
+    /// The length and the capacity of the registers (tests).
+    #[cfg(test)]
+    pub(super) fn regs_len_cap(&self) -> (usize, usize) {
+        (self.regs.len(), self.regs.capacity())
+    }
+}
+
 /// An open loop iterator (`IterOpen`, `ForInOpen`).
 pub(super) enum BcIter {
     Of(It),
@@ -220,6 +240,7 @@ impl<'p> Interp<'p> {
         self.bc.stats.compiled += 1;
         let rc = Rc::new(Compiled {
             code,
+            script: self.cur as u32,
             kv: kv.into(),
             cells: cells.into(),
             #[cfg(feature = "bc-hist")]
@@ -355,7 +376,10 @@ impl<'p> Interp<'p> {
             }
         }
         let code = self.bc_finish(r)?;
-        let v = match self.bc_run(&code, This::Dynamic) {
+        // The loop may leave another script selected: the tree walker goes on in this one.
+        let v = self.bc_run(&code, This::Dynamic);
+        self.bc_sync(&code);
+        let v = match v {
             Ok(v) => v,
             Err(e) => return Some(Err(Ctl::Err(e))),
         };
@@ -418,18 +442,48 @@ impl<'p> Interp<'p> {
         })
     }
 
-    /// The register function that `f` is, when it can run in the loop of the caller: a script function of the same script whose
-    /// code is a register function. `None`: the call goes through `call_fn`.
+    /// The compiled function that `f` is, of any script: it runs in the loop of the caller. `None`: the call goes through `call_fn`.
     #[inline(always)]
     fn bc_target(&self, f: Value) -> Option<(Rc<Compiled>, FuncId, u32, ObjId)> {
         let Value::Object(o) = f else { return None };
         let Some(&Callee::Script { script, fid, env, self_binding: false, .. }) = self.funcs.get(&o) else { return None };
-        if script as usize != self.cur {
-            return None;
-        }
-        match self.bc.codes.get(self.cur)?.get(fid.index())? {
+        match self.bc.codes.get(script as usize)?.get(fid.index())? {
             BcSlot::Byte(c) => Some((c.clone(), fid, env, o)),
             _ => None,
+        }
+    }
+
+    /// The part of an inline call (`CallR`) of a function with an environment, or of a function that is not a register function:
+    /// the environment and the bindings of `bc_enter`, made in the callee's script and frame (default values of parameters run
+    /// there). It gives `this` of the callee, the caller's environment, the callee's environment and the registers to clear.
+    #[cold]
+    #[inline(never)]
+    fn bc_call_env(&mut self, callee: &Compiled, (fid, fobj, cenv): (FuncId, ObjId, u32), this_v: Value, args: &[Value], pos: u32) -> Res<(This, u32, u32, usize, usize)> {
+        self.bc_sync(callee);
+        let k = &callee.code;
+        let env = self.new_env(cenv, true)?;
+        let caller_env = std::mem::replace(&mut self.env, env);
+        self.stk.frames.push(StackFrame { script: callee.script, at: Where::Func(fid), new: false, saved_pos: pos });
+        self.stk.pos = 0;
+        if let Err(e) = self.bind_call(fobj, fid, env, false, this_v, args) {
+            self.stk.frames.pop();
+            self.stk.pos = pos;
+            self.env = caller_env;
+            self.release(env);
+            return Err(e);
+        }
+        let fixed = if k.regfn { !k.dyn_this } else { self.prog.func(fid).kind != FuncKind::Arrow && self.cc.cold.fflags[fid.index()] == 0 };
+        let t = if fixed { This::Fixed(self.envs[env as usize].this.unwrap_or(Value::Undefined)) } else { This::Dynamic };
+        let (from, to) = if k.regfn { (args.len().min(k.nparams as usize), k.nlocals as usize) } else { (0, k.nregs as usize) };
+        Ok((t, caller_env, env, from, to))
+    }
+
+    /// Select the script of `c` for an op that reads the code tables of the current script (`prog`, `cc`, `cur`). The loop runs
+    /// code of any script and does not select at a call.
+    #[inline(always)]
+    fn bc_sync(&mut self, c: &Compiled) {
+        if self.cur != c.script as usize {
+            self.select(c.script as usize);
         }
     }
 
@@ -486,6 +540,7 @@ impl<'p> Interp<'p> {
     /// the loop made every other op slower (2.7% more instructions on a React journey with the same work).
     #[inline(never)]
     fn bc_iter_open(&mut self, c: &Compiled, at: usize, v: Value, pattern: bool) -> Res<It> {
+        self.bc_sync(c);
         if pattern { self.iter_start_val(v) } else { self.iter_start(v, Self::bc_call_expr(c, at)) }
     }
 
@@ -513,6 +568,7 @@ impl<'p> Interp<'p> {
     /// of the hot arms.
     #[inline(never)]
     fn bc_rare(&mut self, code: &Compiled, at: usize, w: u32, regs: &mut [Value]) -> Res<()> {
+        self.bc_sync(code);
         let (op, a, b, c) = (w as u8, (w >> 8 & 255) as usize, (w >> 16 & 255) as usize, (w >> 24) as usize);
         match op {
             SPREAD_PUSH => self.bc_spread_push(code, at, regs, a, b, c != 0)?,
@@ -649,7 +705,8 @@ impl<'p> Interp<'p> {
 
     /// `PushEnv` and `DeclEnv`: the bindings of scope `s` from the count of the environment on.
     #[inline(never)]
-    fn bc_declare(&mut self, s: u32, push: bool) -> Res<()> {
+    fn bc_declare(&mut self, c: &Compiled, s: u32, push: bool) -> Res<()> {
+        self.bc_sync(c);
         if push {
             self.env = self.new_env(self.env, false)?;
         }
@@ -892,24 +949,30 @@ impl<'p> Interp<'p> {
     /// `Call` and `New`: the callee in register `b`, then `this` (a call) and the arguments.
     #[inline(never)]
     fn bc_call(&mut self, c: &Compiled, pc: usize, regs: &[Value], b: usize, n: usize, new: bool) -> Res<Value> {
-        let e = Self::bc_call_expr(c, pc);
         let f = regs[b];
         let first = b + if new { 1 } else { 2 };
         let mut argv = self.arg_pool.pop().unwrap_or_default();
         argv.clear();
         argv.extend_from_slice(&regs[first..first + n]);
-        self.mark_call(e);
-        let callee = match self.prog.expr(e).kind {
-            ExprKind::Call { callee, .. } | ExprKind::New { callee, .. } => callee,
-            _ => e,
-        };
-        let r = if new {
-            self.construct(f, &argv, callee)
-        } else if self.is_callable(f) {
-            let this = regs[b + 1];
-            self.call_fn(f, this, &argv)
+        // `CallR` holds the position of its call: a callable callee needs no table of the script.
+        let r = if c.code.ops[pc] as u8 == CALL_R && self.is_callable(f) {
+            self.stk.pos = c.code.ops[pc + 1] & 0x7fff_ffff;
+            self.call_fn(f, regs[b + 1], &argv)
         } else {
-            Err(self.not_a_function(callee))
+            self.bc_sync(c);
+            let e = Self::bc_call_expr(c, pc);
+            self.mark_call(e);
+            let callee = match self.prog.expr(e).kind {
+                ExprKind::Call { callee, .. } | ExprKind::New { callee, .. } => callee,
+                _ => e,
+            };
+            if new {
+                self.construct(f, &argv, callee)
+            } else if self.is_callable(f) {
+                self.call_fn(f, regs[b + 1], &argv)
+            } else {
+                Err(self.not_a_function(callee))
+            }
         };
         self.stk.pos = 0;
         let r = r?;
@@ -917,9 +980,56 @@ impl<'p> Interp<'p> {
         Ok(r)
     }
 
+    /// A `CallR` that does not stay in the loop. The caller's registers are the arguments: no copy. The loop holds `st.regs`, so
+    /// the callee cannot change them. A native runs here as `call_fn` and `call_fn_inner` would run it, without a second lookup. A
+    /// native that calls script code does it through `call_fn`, which counts and resets the frames. `x`: the second word of the op
+    /// (the call position). A value that is not callable goes to `bc_call`, which names it in the error.
+    #[inline(never)]
+    fn bc_call_r(&mut self, c: &Compiled, pc: usize, regs: &[Value], b: usize, n: usize, x: u32) -> Res<Value> {
+        let Value::Object(o) = regs[b] else { return self.bc_call(c, pc, regs, b, n, false) };
+        let nf = match self.funcs.get(&o) {
+            Some(&Callee::Native(nf)) => nf,
+            Some(_) => return self.bc_call_fn(regs, b, n, x),
+            None => return self.bc_call(c, pc, regs, b, n, false),
+        };
+        self.stk.pos = x & 0x7fff_ffff;
+        let r = self.bc_native(nf, regs[b + 1], &regs[b + 2..b + 2 + n]);
+        self.stk.pos = 0;
+        r
+    }
+
+    /// `bc_call_r` of a callable value that is not a native.
+    #[inline(never)]
+    fn bc_call_fn(&mut self, regs: &[Value], b: usize, n: usize, x: u32) -> Res<Value> {
+        self.stk.pos = x & 0x7fff_ffff;
+        let r = self.call_fn(regs[b], regs[b + 1], &regs[b + 2..b + 2 + n]);
+        self.stk.pos = 0;
+        r
+    }
+
+    /// `call_fn` and `call_fn_inner` for a native callee.
+    #[inline(always)]
+    fn bc_native(&mut self, nf: Nat, this: Value, args: &[Value]) -> Res<Value> {
+        if self.frames >= self.limits.max_traversal_depth {
+            return Err(Error::Limit(LimitKind::TraversalDepth));
+        }
+        if self.depth >= self.limits.max_call_depth {
+            return Err(Error::Limit(LimitKind::CallDepth));
+        }
+        self.tick()?;
+        self.bc.stats.natives += 1;
+        self.frames += 1;
+        self.depth += 1;
+        let r = self.call_native(nf, this, args, false);
+        self.depth -= 1;
+        self.frames -= 1;
+        r
+    }
+
     /// `Closure` and `ClosureName`.
     #[inline(never)]
-    fn bc_closure(&mut self, fid: FuncId, name: Option<u32>) -> Res<Value> {
+    fn bc_closure(&mut self, c: &Compiled, fid: FuncId, name: Option<u32>) -> Res<Value> {
+        self.bc_sync(c);
         let f = *self.prog.func(fid);
         // Only a named plain function expression gets its own name binding: ask the scope whether the node is an expression. A lazy
         // function has no scope yet: its slot keeps what the first walk saw.
@@ -1022,6 +1132,11 @@ impl<'p> Interp<'p> {
             let sbx = w as i32 >> 16;
             #[cfg(feature = "bc-hist")]
             self.bc.hist.step(w, at, c);
+            // Poison mode: code of another script runs with the current script parked (`select_parked`).
+            #[cfg(any(test, feature = "bc-poison"))]
+            if self.cur != c.script as usize {
+                self.select(PARKED);
+            }
             let step: Result<(), Error> = 'op: {
                 // The value of a fallible step, or the exit from this instruction with its error.
                 macro_rules! tri {
@@ -1173,10 +1288,10 @@ impl<'p> Interp<'p> {
                         }
                     }
                     PUSH_ENV => {
-                        tri!(at, self.bc_declare(bx, true));
+                        tri!(at, self.bc_declare(c, bx, true));
                         *depth += 1;
                     }
-                    DECL_ENV => tri!(at, self.bc_declare(bx, false)),
+                    DECL_ENV => tri!(at, self.bc_declare(c, bx, false)),
                     POP_ENV => {
                         let e = self.env;
                         self.env = self.envs[e as usize].parent;
@@ -1241,11 +1356,11 @@ impl<'p> Interp<'p> {
                     ARRAY_PUSH => tri!(at, self.bc_array_push(regs[a], regs[b])),
                     NEW_OBJECT => regs[a] = Value::Object(tri!(at, self.heap.new_object(Some(self.object_proto)).map_err(|e| self.herr(e)))),
                     NEW_ARRAY => regs[a] = Value::Object(tri!(at, self.heap.new_array(Some(self.array_proto)).map_err(|e| self.herr(e)))),
-                    CLOSURE => regs[a] = tri!(at, self.bc_closure(FuncId::from_index(bx as usize), None)),
+                    CLOSURE => regs[a] = tri!(at, self.bc_closure(c, FuncId::from_index(bx as usize), None)),
                     CLOSURE_NAME => {
                         let x = ops[pc];
                         pc += 1;
-                        regs[a] = tri!(at, self.bc_closure(FuncId::from_index(x as usize), Some(name!(b))));
+                        regs[a] = tri!(at, self.bc_closure(c, FuncId::from_index(x as usize), Some(name!(b))));
                     }
                     CALL => regs[a] = tri!(at, self.bc_call(c, at, regs, b, cc, false)),
                     CALL_R => {
@@ -1256,7 +1371,7 @@ impl<'p> Interp<'p> {
                             regs[b + 1] = Value::Undefined;
                         }
                         let Some((callee, fid, cenv, fobj)) = self.bc_target(regs[b]) else {
-                            regs[a] = tri!(at, self.bc_call(c, at, regs, b, cc, false));
+                            regs[a] = tri!(at, self.bc_call_r(c, at, regs, b, cc, x));
                             continue 'run;
                         };
                         // What `call_fn_inner` and `call_script` do for a call, without the Rust frames.
@@ -1281,29 +1396,13 @@ impl<'p> Interp<'p> {
                             caller_env = std::mem::replace(&mut self.env, cenv);
                             callee_env = u32::MAX;
                             (from, to) = (cc.min(k.nparams as usize), k.nlocals as usize);
-                            self.stk.frames.push(StackFrame { script: self.cur as u32, at: Where::Func(fid), new: false, saved_pos: x & 0x7fff_ffff });
+                            self.stk.frames.push(StackFrame { script: callee.script, at: Where::Func(fid), new: false, saved_pos: x & 0x7fff_ffff });
                             self.stk.pos = 0;
                         } else {
-                            // The environment and the bindings of a call are those of `bc_enter`.
-                            let env = tri!(at, self.new_env(cenv, true));
-                            // Default values of parameters run here, in the callee's environment and frame.
-                            caller_env = std::mem::replace(&mut self.env, env);
-                            self.stk.frames.push(StackFrame { script: self.cur as u32, at: Where::Func(fid), new: false, saved_pos: x & 0x7fff_ffff });
-                            self.stk.pos = 0;
-                            if let Err(e) = self.bind_call(fobj, fid, env, false, this_v, &regs[b + 2..b + 2 + cc]) {
-                                self.stk.frames.pop();
-                                self.stk.pos = x & 0x7fff_ffff;
-                                self.env = caller_env;
-                                self.release(env);
-                                break 'op Err(e);
-                            }
-                            let fixed = if k.regfn { !k.dyn_this } else { self.prog.func(fid).kind != FuncKind::Arrow && self.cc.cold.fflags[fid.index()] == 0 };
-                            t = if fixed { This::Fixed(self.envs[env as usize].this.unwrap_or(Value::Undefined)) } else { This::Dynamic };
-                            callee_env = env;
-                            (from, to) = if k.regfn { (cc.min(k.nparams as usize), k.nlocals as usize) } else { (0, nregs) };
+                            (t, caller_env, callee_env, from, to) = tri!(at, self.bc_call_env(&callee, (fid, fobj, cenv), this_v, &regs[b + 2..b + 2 + cc], x & 0x7fff_ffff));
                         }
                         if st.regs.len() < nb + nregs {
-                            st.regs.resize(nb + nregs, Value::Undefined);
+                            st.grow(nb + nregs);
                         }
                         // The arguments are the first registers of the callee already. The other variables start as `undefined`.
                         if from < to {

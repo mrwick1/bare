@@ -8,6 +8,9 @@ license = "(MIT OR Apache-2.0) AND BSD-3-Clause AND Unicode-3.0"
 [features]
 # Counters in the bytecode loop (`tools/js/bc_hist.sh`). Off by default: the loop compiles to the same code.
 bc-hist = []
+# Poison mode of the bytecode loop (always on in unit tests): code of another script runs with an empty current script, so a read
+# of the code tables without `bc_sync` panics. For `tools/js/exec_diff.sh` on a build with this feature.
+bc-poison = []
 
 [dependencies]
 bare-observe = { path = "../observe" }

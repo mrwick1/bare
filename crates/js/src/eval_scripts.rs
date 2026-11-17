@@ -22,6 +22,9 @@
 
 /// Bits of the hash that pick a bucket of `Interp::script_ids` (4,096 buckets, 16 KiB).
 const SCRIPT_IDS_BITS: u32 = 12;
+/// `cur` while the script is parked (poison mode, see [`Interp::select_parked`]).
+#[cfg(any(test, feature = "bc-poison"))]
+const PARKED: usize = usize::MAX;
 
 /// A multiply hash of the text for `Interp::script_ids`. The last bytes are read as an overlapping word, so it has no copy of a
 /// remainder (a `memcpy` call cost more than the rest for a text of 10 bytes).
@@ -444,6 +447,10 @@ impl<'p> Interp<'p> {
 
     /// Make script `id` the current one: its code and caches go into the `Interp` fields.
     fn select(&mut self, id: usize) {
+        #[cfg(any(test, feature = "bc-poison"))]
+        if id == PARKED || self.cur == PARKED {
+            return self.select_parked(id);
+        }
         if id == self.cur {
             return;
         }
@@ -453,6 +460,32 @@ impl<'p> Interp<'p> {
         // slot `cur` held the placeholder and slot `id` now holds the old current code: exchange them
         self.scripts.swap(self.cur, id);
         self.cur = id;
+    }
+
+    /// Poison mode: `select(PARKED)` puts the code of the current script back in its slot and leaves an empty program and empty
+    /// caches in `prog` and `cc`, so any read of them panics. `select(id)` from there selects `id`. The bytecode loop parks the script
+    /// while it runs code of another script (`bc_loop`), so a test finds every op that reads them without `bc_sync`.
+    #[cfg(any(test, feature = "bc-poison"))]
+    #[cold]
+    fn select_parked(&mut self, id: usize) {
+        if id == self.cur {
+            return;
+        }
+        if self.cur != PARKED {
+            let c = &mut self.scripts[self.cur];
+            std::mem::swap(&mut self.prog, &mut c.prog);
+            std::mem::swap(&mut self.cc, &mut c.cc);
+            self.prog = self.bc.poison.get_or_insert_with(|| Rc::new(crate::parse::parse_script("", Default::default()).expect("empty script").into_owned())).clone();
+            self.cur = PARKED;
+        }
+        if id != PARKED {
+            let c = &mut self.scripts[id];
+            std::mem::swap(&mut self.prog, &mut c.prog);
+            std::mem::swap(&mut self.cc, &mut c.cc);
+            // The slot of the current script holds a placeholder: its program and empty caches.
+            c.prog = self.prog.clone();
+            self.cur = id;
+        }
     }
 
     /// [`Interp::func_of`] without the copy: the call path reads two fields.
