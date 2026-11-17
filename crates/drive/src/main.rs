@@ -143,6 +143,7 @@ fn drive() -> i32 {
             avail_kib: mem_available_kib(),
             quiet: !opt.progress,
             exe: None,
+            cancel: None,
         };
         return suite::run(&cfg);
     }

@@ -4,6 +4,12 @@ This file records what is built, what comes next and what is missing. Update it 
 
 The reasons for the design are in [decisions.md](decisions.md). Time and memory numbers for each module are in [resources.md](resources.md).
 
+## Agent browser integration (2026-11-17)
+
+The MCP combines document-scoped references and observation revisions, removal diffs, typed recovery evidence, independent session workers, cooperative cancellation and an eight-task evaluation corpus. Action outcomes retain execution and verification states alongside failure evidence. Cancellation cannot turn skipped step lines into a successful result. The guide describes the combined workflow.
+
+The combined MCP suites, 62 Python tests and three eight-task scripted smoke runs pass. The full workspace run has 4,202 passes, eight failures and 16 ignored tests. All eight failures reproduce on the unchanged integration base. Details and limits: [Agent browser integration](agent-integration.md). Real-agent browsing, windowed cancellation, Windows and release validation remain unverified.
+
 ## Modules
 
 The module numbers below remain stable for existing code and benchmark references. The next implementation order is S1 to S5 in the staging plan below.

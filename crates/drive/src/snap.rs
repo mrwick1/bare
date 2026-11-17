@@ -2,8 +2,11 @@
 //! query (`find`), the rendered text (`read`) and the links (`links`). One walk of the DOM with the cascade of the last frame: no layout
 //! query per element, so a snapshot of a large page costs a few milliseconds.
 //!
-//! A ref (`e7`) names an element of the document of now. It stays the same for the same element across snapshots of one document, and
-//! fails as stale after a navigation. `*` marks an element that the last snapshot of this document did not show, or showed with another
+//! A ref (`e7`) names an element of the document of now. Its number comes from one counter of the server, so no other document or session
+//! gets it: a ref of an older page or of another session fails, and never names another element. It stays the same for the same element
+//! across snapshots of one document, and fails as stale after a navigation. A document has an opaque id (`d3`) and a revision (the number
+//! of full-page snapshots of it; a revision is a count of observations, not proof that the page was the same between two of them).
+//! A diff also lists the refs that left the outline (`removed:`). `*` marks an element that the last snapshot of this document did not show, or showed with another
 //! name, value or state. Replies are small on purpose (an agent pays for each character): a link line shows its `href` only when it has
 //! no name (`links` has them all), a `diff` snapshot shows only the marked lines and their parents, and tracking parameters are cut from URLs.
 
@@ -15,6 +18,12 @@ use bare_html::dom::{NodeData, NodeId};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
+
+/// The next ref number and the next document id of this process: they never repeat, so a ref or a document id of one session is not
+/// one of another, and a ref of an older document is not minted again.
+static NEXT_REF: AtomicU32 = AtomicU32::new(1);
+static NEXT_DOC: AtomicU32 = AtomicU32::new(1);
 
 fn hash<T: Hash + ?Sized>(t: &T) -> u64 {
     let mut h = DefaultHasher::new();
@@ -26,6 +35,8 @@ fn hash<T: Hash + ?Sized>(t: &T) -> u64 {
 /// of the rendered text, so an interactive diff can name the text that changed.
 #[derive(Default)]
 struct Seen {
+    /// The mode of that snapshot: an outline of another mode shows other rows, so it is no baseline for this one.
+    mode: Mode,
     els: HashMap<NodeId, u64>,
     text: HashSet<u64>,
     read: HashSet<u64>,
@@ -57,50 +68,76 @@ fn clean_url(url: &str) -> String {
     out
 }
 
-/// The refs of one document.
+/// The refs of one session: those of the document of now, and the range of those of older documents (so an old ref fails as stale).
 #[derive(Default)]
 pub struct Refs {
-    doc: usize,
-    nodes: Vec<NodeId>,
+    /// The generation of the page that the refs belong to.
+    generation: Option<usize>,
+    /// The opaque id of that document (`dN`), and the number of full-page snapshots of it.
+    doc: u32,
+    rev: u32,
+    /// The id of the document that this one replaced, until its first snapshot.
+    replaced: Option<u32>,
+    nodes: HashMap<u32, NodeId>,
     ids: HashMap<NodeId, u32>,
+    /// The first and the last ref of this document.
+    span: Option<(u32, u32)>,
     /// What the last snapshot showed, for the `*` marks. `None` before the first snapshot of this document.
     last: Option<Seen>,
-    /// The most refs of an older document, so a ref from it fails as stale, not as unknown.
-    old: u32,
+    /// The first and the last ref of the older documents of the session. Other sessions may have refs inside it: they fail too.
+    old: Option<(u32, u32)>,
 }
 
 impl Refs {
-    fn sync(&mut self, doc: usize) {
-        if self.doc != doc {
-            let old = self.old.max(self.nodes.len() as u32);
-            *self = Refs { doc, old, ..Refs::default() };
+    fn sync(&mut self, generation: usize) {
+        if self.generation != Some(generation) {
+            let old = match (self.old, self.span) {
+                (Some((a, b)), Some((c, d))) => Some((a.min(c), b.max(d))),
+                (a, b) => a.or(b),
+            };
+            let replaced = self.generation.map(|_| self.doc);
+            *self = Refs { generation: Some(generation), doc: NEXT_DOC.fetch_add(1, Relaxed), replaced, old, ..Refs::default() };
         }
     }
 
     fn mint(&mut self, p: &mut Page, n: NodeId) -> u32 {
         p.pin(n);
         *self.ids.entry(n).or_insert_with(|| {
-            self.nodes.push(n);
-            self.nodes.len() as u32
+            let r = NEXT_REF.fetch_add(1, Relaxed);
+            self.nodes.insert(r, n);
+            self.span = Some((self.span.map_or(r, |s| s.0), r));
+            r
         })
     }
 
-    /// The element of ref `r` (1-based), or why there is none.
-    pub fn get(&self, r: u32, doc: usize) -> Result<Handle, String> {
-        let here = self.doc == doc;
-        match self.nodes.get((r as usize).wrapping_sub(1)) {
-            Some(&node) if here => Ok(Handle { doc, node }),
-            _ if r <= self.old || (!here && r as usize <= self.nodes.len()) => Err(format!("e{r} is from an older page (it navigated since): take a new snapshot")),
-            _ if here && !self.nodes.is_empty() => Err(format!("e{r} is not a ref of this page: take a snapshot")),
+    /// The line that names the document and its revision.
+    fn doc_line(&self) -> String {
+        format!("doc: d{} rev {}", self.doc, self.rev)
+    }
+
+    /// The element of ref `r`, or why there is none.
+    pub fn get(&self, r: u32, generation: usize) -> Result<Handle, String> {
+        let here = self.generation == Some(generation);
+        if here && let Some(&node) = self.nodes.get(&r) {
+            return Ok(Handle { doc: generation, node });
+        }
+        let inside = |s: Option<(u32, u32)>| s.is_some_and(|(a, b)| (a..=b).contains(&r));
+        // Before the sync of a new document, the refs of the old one are still here: they are old.
+        if inside(self.old) || (!here && inside(self.span)) {
+            Err(format!("e{r} is from an older page (it navigated since), or not from this session: take a new snapshot"))
+        } else if here && !self.nodes.is_empty() {
+            Err(format!("e{r} is not a ref of this page (it may come from another session): take a snapshot"))
+        } else {
             // No ref was ever minted for this document: refs come from snapshot, find, links and read.
-            _ => Err(format!("e{r}: no snapshot or find gave refs on this page yet: take a snapshot")),
+            Err(format!("e{r}: no snapshot or find gave refs on this page yet: take a snapshot"))
         }
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Default)]
 pub enum Mode {
     /// Controls, headings, landmarks, dialogs and alerts.
+    #[default]
     Interactive,
     /// Those and the text between them.
     All,
@@ -354,7 +391,7 @@ pub fn settle(p: &mut Page) {
         let (more, next) = p.tick();
         let now = std::time::Instant::now();
         let (fetching, due) = p.browser().map_or((false, false), |b| (b.pending_fetches() > 0, b.next_scheduled_due().is_some_and(|d| d - b.now() <= 20.0)));
-        if (!more && !fetching && !due) || now.duration_since(start) > std::time::Duration::from_millis(if fetching { 2000 } else { 300 }) {
+        if (!more && !fetching && !due) || crate::run::cancelled() || now.duration_since(start) > std::time::Duration::from_millis(if fetching { 2000 } else { 300 }) {
             break;
         }
         // No next time: the page stopped, but a `fetch` is still open (or a timer is due). Wait 5 ms, so the loop does not spin.
@@ -365,10 +402,10 @@ pub fn settle(p: &mut Page) {
     }
 }
 
-fn header(p: &mut Page) -> String {
+fn header(p: &mut Page, refs: &Refs) -> String {
     let url = p.url().unwrap_or_default();
     let title = crate::locate::title(p).unwrap_or_default();
-    format!("url: {}\ntitle: {}\n", crate::run::safe_url(&url), norm(&title))
+    format!("url: {}\ntitle: {}\n{}\n", crate::run::safe_url(&url), norm(&title), refs.doc_line())
 }
 
 /// The first and the last ref of `lines`, as `eA–eB`, or `""` when none has a ref.
@@ -382,13 +419,16 @@ fn ref_span(lines: &[String]) -> String {
 
 /// Keep `max` characters: 80 % from the top and 20 % from the end, cut at line ends. A line says what was cut, with the refs that the
 /// cut lines hold (they stay valid). With `page` (snapshot), the lines before `offset` are skipped and the end is not kept: the call
-/// pages forward, and the cut line gives the `offset` of the next page.
-fn budget(lines: Vec<String>, max: usize, page: Option<usize>) -> String {
-    let off = page.unwrap_or(0).min(lines.len());
+/// pages forward, and the cut line gives the `offset` of the next page. It also gives, for each input line, whether the text shows it.
+fn budget(lines: Vec<String>, max: usize, page: Option<usize>) -> (String, Vec<bool>) {
+    let all = lines.len();
+    let off = page.unwrap_or(0).min(all);
+    let mut shown = vec![false; all];
     let lines = &lines[off..];
     let total: usize = lines.iter().map(|l| l.len() + 1).sum();
     if total <= max {
-        return lines.join("\n");
+        shown[off..].fill(true);
+        return (lines.join("\n"), shown);
     }
     // The cut line counts too: room for its longest form (all lines cut, the widest refs) comes off `max`.
     let how = |next: usize| match page {
@@ -418,12 +458,14 @@ fn budget(lines: Vec<String>, max: usize, page: Option<usize>) -> String {
     }
     let cut = lines.len() - head.len() - tail.len();
     let span = ref_span(&lines[head.len()..lines.len() - tail.len()]);
+    shown[off..off + head.len()].fill(true);
+    shown[all - tail.len()..].fill(true);
     let mut out = format!("{}\n… {cut} lines cut{span}; use {} …", head.join("\n"), how(off + head.len()));
     if !tail.is_empty() {
         out.push('\n');
         out.push_str(&tail.join("\n"));
     }
-    out
+    (out, shown)
 }
 
 /// The value, checked and focus states, which live in the page, not in attributes.
@@ -509,8 +551,8 @@ fn format(p: &mut Page, refs: &mut Refs, items: Vec<Item>, seen: Option<&Seen>) 
     rows
 }
 
-/// Only the changed rows, each after the rows that hold it (the nearest row of each lower depth before it).
-fn diff(rows: &[Row]) -> Vec<String> {
+/// Only the changed rows, each after the rows that hold it (the nearest row of each lower depth before it): the index of each row and its line.
+fn diff(rows: &[Row]) -> (Vec<usize>, Vec<String>) {
     let mut keep = vec![false; rows.len()];
     for i in (0..rows.len()).filter(|&i| rows[i].changed) {
         keep[i] = true;
@@ -525,11 +567,20 @@ fn diff(rows: &[Row]) -> Vec<String> {
             }
         }
     }
-    rows.iter().zip(keep).filter(|(_, k)| *k).map(|(r, _)| r.render(true)).collect()
+    let idx: Vec<usize> = (0..rows.len()).filter(|&i| keep[i]).collect();
+    let lines = idx.iter().map(|&i| rows[i].render(true)).collect();
+    (idx, lines)
 }
 
+/// The most refs that a diff lists as removed. The others stay in the baseline, so the next diff lists them.
+const REMOVED: usize = 20;
+
 /// The outline of the page, or of the element `root`, in at most `max` characters. With `diff`, and a snapshot of this document before,
-/// only the lines that changed since then (marked `*`) and the lines that hold them.
+/// only the lines that changed since then (marked `*`), the lines that hold them, and the refs that left the outline (`removed:`).
+///
+/// The baseline of the next diff moves only over what this reply delivered: a row that `offset` skipped or the cut hid keeps its old hash
+/// (or none), so it shows as changed next time. A snapshot with `root` leaves the baseline alone. A diff with no baseline (a new document,
+/// another mode) gives the full outline and says `reset:` and why.
 pub fn snapshot(p: &mut Page, refs: &mut Refs, mode: Mode, root: Option<u32>, offset: usize, max: usize, diff_only: bool) -> Result<String, String> {
     settle(p);
     let doc = p.generation();
@@ -547,7 +598,25 @@ pub fn snapshot(p: &mut Page, refs: &mut Refs, mode: Mode, root: Option<u32>, of
         }
     })
     .ok_or_else(|| p.errors.last().cloned().unwrap_or_else(|| "the page has no document or no layout yet".into()))?;
-    let prev = if root.is_none() { refs.last.take() } else { None };
+    let full = root.is_none();
+    if full {
+        refs.rev += 1;
+    }
+    let mut prev = if full { refs.last.take() } else { None };
+    let mut reset = None;
+    if diff_only && full {
+        reset = match &prev {
+            None => Some(match refs.replaced.filter(|_| refs.rev == 1) {
+                Some(old) => format!("new document d{} replaces d{old}", refs.doc),
+                None => "no earlier snapshot of this document".to_string(),
+            }),
+            Some(s) if s.mode != mode => Some("mode changed since the last snapshot".to_string()),
+            _ => None,
+        };
+    }
+    if prev.as_ref().is_some_and(|s| s.mode != mode) {
+        prev = None;
+    }
     let refs_had_prev = prev.is_some();
     let rows = format(p, refs, items, prev.as_ref());
     // The text lines that the last snapshot did not show, in page order, once each. An interactive outline has no text lines, so
@@ -557,40 +626,91 @@ pub fn snapshot(p: &mut Page, refs: &mut Refs, mode: Mode, root: Option<u32>, of
         let mut once = HashSet::new();
         new_text = text.iter().filter(|t| !prev.read.contains(&hash(t.as_str())) && once.insert(hash(t.as_str()))).collect();
     }
-    if root.is_none() {
-        let mut seen = Seen { read: text.iter().map(|t| hash(t.as_str())).collect(), ..Seen::default() };
-        for r in &rows {
+    // The elements that the last snapshot showed and this outline does not: gone from the page, or hidden.
+    let mut removed: Vec<(u32, NodeId)> = Vec::new();
+    if let Some(prev) = prev.as_ref().filter(|_| full) {
+        let now: HashSet<NodeId> = rows.iter().filter_map(|r| r.node).collect();
+        removed = prev.els.keys().filter(|n| !now.contains(n)).filter_map(|n| refs.ids.get(n).map(|&r| (r, *n))).collect();
+        removed.sort_unstable_by_key(|&(r, _)| r);
+    }
+    let mut pending_text = HashSet::new();
+    let mut delivered = vec![true; rows.len()];
+    let mut listed = removed.len().min(REMOVED);
+    let out = if diff_only && full && refs_had_prev {
+        let changed = rows.iter().filter(|r| r.changed).count();
+        let (idx, lines) = diff(&rows);
+        // A text that a changed line already shows as its name adds nothing.
+        new_text.retain(|t| !lines.iter().any(|l| l.contains(&format!("{t:?}"))));
+        if changed == 0 && new_text.is_empty() && removed.is_empty() {
+            format!("no change ({} lines)\n{}", rows.len(), refs.doc_line())
+        } else {
+            let mut out = String::new();
+            if changed > 0 {
+                let (body, shown) = budget(lines, max, None);
+                for (k, &i) in idx.iter().enumerate() {
+                    delivered[i] = shown[k] || !rows[i].changed;
+                }
+                out = format!("{body}\n({changed} of {} lines changed)", rows.len());
+            }
+            if !removed.is_empty() {
+                let refs_list: Vec<String> = removed[..listed].iter().map(|(r, _)| format!("e{r}")).collect();
+                let _ = write!(out, "\nremoved: {}", refs_list.join(", "));
+                if removed.len() > listed {
+                    let _ = write!(out, " … {} more removed: the next diff lists them", removed.len() - listed);
+                }
+            }
+            for t in new_text.iter().take(TEXT_LINES) {
+                let _ = write!(out, "\ntext: {:?}", short(t, TEXT_CHARS));
+            }
+            if new_text.len() > TEXT_LINES {
+                pending_text.extend(new_text.iter().skip(TEXT_LINES).map(|t| hash(t.as_str())));
+                let _ = write!(out, "\n… {} more changed text lines: use read", new_text.len() - TEXT_LINES);
+            }
+            format!("{}\n{}", out.trim_start_matches('\n'), refs.doc_line())
+        }
+    } else {
+        listed = 0;
+        let lines: Vec<String> = rows.iter().map(|r| r.render(refs_had_prev)).collect();
+        let body = if lines.is_empty() {
+            "(no elements: the page is empty, or it has not rendered yet)".into()
+        } else {
+            let (body, shown) = budget(lines, max, Some(offset));
+            // The rows that `offset` skipped or the cut hid were not delivered. Only a complete outline accounts for removals; a partial one retains them.
+            delivered = shown;
+            body
+        };
+        if offset == 0 && delivered.iter().all(|shown| *shown) {
+            listed = removed.len();
+        }
+        let why = reset.map_or(String::new(), |w| format!("reset: {w}; this is the full outline\n"));
+        header(p, refs) + &why + &body
+    };
+    if full {
+        let mut seen = Seen { mode, read: text.iter().map(|t| hash(t.as_str())).filter(|h| !pending_text.contains(h)).collect(), ..Seen::default() };
+        for (r, ok) in rows.iter().zip(&delivered) {
+            let h = hash(&r.text);
             match r.node {
                 Some(n) => {
-                    seen.els.insert(n, hash(&r.text));
+                    let old = prev.as_ref().and_then(|s| s.els.get(&n)).copied();
+                    if let Some(h) = if *ok { Some(h) } else { old } {
+                        seen.els.insert(n, h);
+                    }
                 }
-                None => {
-                    seen.text.insert(hash(&r.text));
+                None if *ok || prev.as_ref().is_some_and(|s| s.text.contains(&h)) => {
+                    seen.text.insert(h);
                 }
+                None => {}
+            }
+        }
+        // A removal that this reply did not list stays in the baseline.
+        if let Some(prev) = &prev {
+            for &(_, n) in removed.iter().skip(listed) {
+                seen.els.insert(n, prev.els[&n]);
             }
         }
         refs.last = Some(seen);
     }
-    if diff_only && root.is_none() && refs_had_prev {
-        let changed = rows.iter().filter(|r| r.changed).count();
-        let lines = diff(&rows);
-        // A text that a changed line already shows as its name adds nothing.
-        new_text.retain(|t| !lines.iter().any(|l| l.contains(&format!("{t:?}"))));
-        if changed == 0 && new_text.is_empty() {
-            return Ok(format!("no change ({} lines)", rows.len()));
-        }
-        let mut out = if changed == 0 { String::new() } else { format!("{}\n({changed} of {} lines changed)", budget(lines, max, None), rows.len()) };
-        for t in new_text.iter().take(TEXT_LINES) {
-            let _ = write!(out, "\ntext: {:?}", short(t, TEXT_CHARS));
-        }
-        if new_text.len() > TEXT_LINES {
-            let _ = write!(out, "\n… {} more changed text lines: use read", new_text.len() - TEXT_LINES);
-        }
-        return Ok(out.trim_start_matches('\n').to_string());
-    }
-    let lines: Vec<String> = rows.iter().map(|r| r.render(refs_had_prev)).collect();
-    let body = if lines.is_empty() { "(no elements: the page is empty, or it has not rendered yet)".into() } else { budget(lines, max, Some(offset)) };
-    Ok(header(p) + &body)
+    Ok(out)
 }
 
 /// The elements that `loc` matches, as snapshot lines with refs.
@@ -627,7 +747,7 @@ pub fn find(p: &mut Page, refs: &mut Refs, loc: &crate::locate::Locator, scope: 
     let lines: Vec<String> = format(p, refs, items, None).iter().map(|r| r.render(false)).collect();
     if !lines.is_empty() {
         out.push('\n');
-        out.push_str(&budget(lines, max, None));
+        out.push_str(&budget(lines, max, None).0);
     }
     Ok(out)
 }
@@ -647,7 +767,7 @@ pub fn read(p: &mut Page, refs: &mut Refs, root: Option<u32>, offset: usize, max
     let text = items.join("\n");
     let total = text.chars().count();
     // The whole reply fits in `max`: the header, the count line and the more line (each with the widest numbers) come off it.
-    let head = header(p);
+    let head = header(p, refs);
     let room = max.saturating_sub(head.chars().count() + format!("chars {offset}-{total} of {total}\n").chars().count());
     let room = if total.saturating_sub(offset) <= room { room } else { room.saturating_sub(format!("\n… {total} more characters: read again with offset={total}").chars().count()) };
     let page: String = text.chars().skip(offset).take(room).collect();
@@ -799,12 +919,12 @@ pub fn links(p: &mut Page, refs: &mut Refs, max: usize, text: Option<&str>, root
         lines.push(format!("[e{}]{name} -> {shown}{lm}", refs.mint(p, n)));
     }
     if lines.is_empty() && (text.is_some() || root.is_some() || external) {
-        return Ok(format!("{}no link matches the filters", header(p)));
+        return Ok(format!("{}no link matches the filters", header(p, refs)));
     }
     // The header and the count line count in `max` too.
-    let head = format!("{}{} link(s)\n", header(p), lines.len());
+    let head = format!("{}{} link(s)\n", header(p, refs), lines.len());
     let room = max.saturating_sub(head.len());
-    let out = head + &budget(lines, room, None);
+    let out = head + &budget(lines, room, None).0;
     if out.chars().count() > max {
         return Err(format!("max_chars {max} is too small for the header and the cut line: pass at least {}", out.chars().count() + 100));
     }
@@ -819,4 +939,36 @@ pub fn size(p: &mut Page) -> Option<(usize, usize)> {
         walk(&cx, d.root(), Mode::All, &HashSet::new(), &mut items);
         (d.len(), items.len())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A `Refs` that gave `n` refs to document `generation`, without a page.
+    fn refs_with(generation: usize, n: u32) -> Refs {
+        let mut r = Refs::default();
+        r.sync(generation);
+        let node = bare_html::dom::Document::new().root();
+        for _ in 0..n {
+            let id = NEXT_REF.fetch_add(1, Relaxed);
+            r.nodes.insert(id, node);
+            r.span = Some((r.span.map_or(id, |s| s.0), id));
+        }
+        r
+    }
+
+    #[test]
+    fn two_sessions_never_share_a_ref_and_a_new_document_refuses_the_old_ones() {
+        let (mut a, b) = (refs_with(1, 2), refs_with(1, 2));
+        let (ra, rb) = (*a.nodes.keys().min().unwrap(), *b.nodes.keys().min().unwrap());
+        assert_ne!(ra, rb);
+        assert!(a.get(ra, 1).is_ok() && b.get(ra, 1).is_err() && a.get(rb, 1).is_err());
+        let doc = a.doc;
+        // Before the sync of the new document, and after it, the old ref is old, and the new document has other ids and refs.
+        assert!(a.get(ra, 2).unwrap_err().contains("older page"));
+        a.sync(2);
+        assert_ne!(a.doc, doc);
+        assert!(a.get(ra, 2).unwrap_err().contains("older page"));
+    }
 }

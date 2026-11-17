@@ -23,7 +23,8 @@ use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -202,6 +203,15 @@ pub struct Config {
     pub quiet: bool,
     /// The program that runs as a worker (`--suite-worker`). `None`: this program. A host that is not `bare-drive` (the MCP server) gives the path of `bare-drive`.
     pub exe: Option<PathBuf>,
+    /// Set by a host to cancel the run: the owned worker processes are killed and reaped, no test starts, and `run_report` gives `Err("cancelled")`
+    /// with no partial report. The host owns the capture folder.
+    pub cancel: Option<Arc<AtomicBool>>,
+}
+
+impl Config {
+    fn cancelled(&self) -> bool {
+        self.cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed))
+    }
 }
 
 struct Worker {
@@ -245,9 +255,22 @@ fn spawn(cfg: &Config, id: usize) -> Result<Worker, String> {
 }
 
 /// Give a worker a test and wait for its line. `Err` is a worker that died or ran past the limit (it is killed).
-fn exchange(w: &mut Worker, name: &str, limit: Duration) -> Result<Value, String> {
+fn exchange(w: &mut Worker, name: &str, cfg: &Config) -> Result<Value, String> {
+    let limit = cfg.test_limit;
     writeln!(w.stdin, "{name}").and_then(|_| w.stdin.flush()).map_err(|e| format!("worker {} is gone: {e}", w.id))?;
-    match w.rx.recv_timeout(limit) {
+    // Wait in slices of 25 ms, so a cancellation kills the worker (its owner reaps it in `retire`) without waiting for the test.
+    let end = Instant::now() + limit;
+    let got = loop {
+        if cfg.cancelled() {
+            let _ = w.child.kill();
+            return Err("cancelled".into());
+        }
+        match w.rx.recv_timeout(end.saturating_duration_since(Instant::now()).min(Duration::from_millis(25))) {
+            Err(RecvTimeoutError::Timeout) if Instant::now() < end => {}
+            other => break other,
+        }
+    };
+    match got {
         Ok(l) => {
             let v: Value = serde_json::from_str(&l).map_err(|e| format!("bad line from worker {}: {e}", w.id))?;
             w.tests += 1;
@@ -287,6 +310,9 @@ struct Shared<'a> {
 fn pull(sh: &Shared, mut w: Option<Worker>) {
     let mut error = None;
     loop {
+        if sh.cfg.cancelled() {
+            break;
+        }
         let Some(i) = sh.queue.lock().unwrap().pop_front() else { break };
         let t = sh.tests[i];
         if w.is_none() {
@@ -300,7 +326,7 @@ fn pull(sh: &Shared, mut w: Option<Worker>) {
         }
         let Some(wk) = w.as_mut() else { break };
         let id = wk.id;
-        let (mut v, end) = match exchange(wk, &t.name, sh.cfg.test_limit) {
+        let (mut v, end) = match exchange(wk, &t.name, sh.cfg) {
             Ok(v) if v["ok"] == true => (v, None),
             Ok(v) => (v, Some("a test failed")),
             Err(e) => (json!({"name": t.name, "ok": false, "ms": 0.0, "steps": 0, "failure": {"line": 0, "kind": "worker", "message": e}}), Some("died or timed out")),
@@ -358,7 +384,11 @@ pub fn run_report(cfg: &Config) -> Result<Value, String> {
     // The setup runs in the first worker, which then keeps the caches that it warmed.
     let mut setup = Value::Null;
     if shared || (suite.setup.is_some() && !cfg.login_each && tests.iter().any(|t| t.class == Class::Own)) {
-        let r = exchange(&mut first, "setup", cfg.test_limit).unwrap_or_else(|e| json!({"name": "setup", "ok": false, "ms": 0.0, "failure": {"line": 0, "kind": "worker", "message": e}}));
+        let r = exchange(&mut first, "setup", cfg).unwrap_or_else(|e| json!({"name": "setup", "ok": false, "ms": 0.0, "failure": {"line": 0, "kind": "worker", "message": e}}));
+        if cfg.cancelled() {
+            retire(first, "cancelled");
+            return Err("cancelled".into());
+        }
         if r["ok"] != true {
             let s = retire(first, "the setup failed");
             return Ok(finish(cfg, &suite, &tests, vec![], vec![s], r, 0, "the setup failed: no test ran".into(), t0));
@@ -378,6 +408,9 @@ pub fn run_report(cfg: &Config) -> Result<Value, String> {
             sc.spawn(move || pull(sh, w));
         }
     });
+    if cfg.cancelled() {
+        return Err("cancelled".into());
+    }
     let results = std::mem::take(&mut *sh.results.lock().unwrap());
     let stats = std::mem::take(&mut *sh.stats.lock().unwrap());
     Ok(finish(cfg, &suite, &tests, results, stats, setup, k, rule, t0))
