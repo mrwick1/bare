@@ -93,6 +93,9 @@ struct RScope {
     with: bool,
     /// The scope is in the tree of a lazy function (`lazy_load`). It follows the scopes of every script that was walked before it.
     lazy: bool,
+    /// The script slot whose walk opened the scope. A lazy function's tree names scopes of the script that holds it: the bytecode
+    /// compiler reads their bindings in that script (`bc_resolve`).
+    owner: u32,
 }
 
 /// Slots of the identifier sites of one script. The scopes that they refer to are in `Interp::sc_all`.
@@ -118,7 +121,7 @@ impl<'p> Interp<'p> {
     /// Open a scope in the walk. Give the result to `sc_end`.
     fn sc_begin(&mut self, kind: RKind) -> u32 {
         let saved = self.sc_cur;
-        self.sc_all.push(RScope { parent: saved, kind, start: NONE, len: 0, base: NONE, func: self.sc_fn as u32, with: false, lazy: self.sc_lazy });
+        self.sc_all.push(RScope { parent: saved, kind, start: NONE, len: 0, base: NONE, func: self.sc_fn as u32, with: false, lazy: self.sc_lazy, owner: self.cur as u32 });
         self.sc_cur = self.sc_all.len() as u32 - 1;
         saved
     }

@@ -1231,8 +1231,11 @@ function* f() { yield 1 }
 ---
 fn0 f
 unsupported: generator or async function
-=== unsupported: label
+=== label: break out of a loop
 function f() { l: for (;;) break l }
 ---
 fn0 f
-unsupported: label
+code nregs=0 words=3 consts=0 ics=0
+0000  Jmp           -> 0002
+0001  Jmp           -> 0000
+0002  RetUndef      

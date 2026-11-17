@@ -133,14 +133,37 @@ impl Gen<'_, '_> {
                 Ok(())
             }
             StmtKind::Break(None) => {
-                let i = self.jumps.len().checked_sub(1).ok_or("break outside a loop")?;
+                let i = self.jumps.iter().rposition(|j| !j.label_only).ok_or("break outside a loop")?;
                 self.exit(Exit::Break(i), 0)
             }
             StmtKind::Continue(None) => {
                 let i = self.jumps.iter().rposition(|j| j.is_loop).ok_or("continue outside a loop")?;
                 self.exit(Exit::Continue(i), 0)
             }
-            StmtKind::Break(Some(_)) | StmtKind::Continue(Some(_)) | StmtKind::Labeled { .. } => Err("label"),
+            StmtKind::Break(Some(l)) => {
+                let n = self.it.name_at(l);
+                let i = self.jumps.iter().rposition(|j| j.labels.contains(&n)).ok_or("break to an unknown label")?;
+                self.exit(Exit::Break(i), 0)
+            }
+            StmtKind::Continue(Some(l)) => {
+                let n = self.it.name_at(l);
+                let i = self.jumps.iter().rposition(|j| j.is_loop && j.labels.contains(&n)).ok_or("continue to an unknown label")?;
+                self.exit(Exit::Continue(i), 0)
+            }
+            StmtKind::Labeled { label, body } => {
+                let n = self.it.name_at(label);
+                self.pending.push(n);
+                match self.prog.stmt(body).kind {
+                    // The `open` of the loop or `switch` takes the labels.
+                    StmtKind::Labeled { .. } | StmtKind::For { .. } | StmtKind::While { .. } | StmtKind::DoWhile { .. } | StmtKind::Switch { .. } => self.stmt(body),
+                    _ => {
+                        let labels = std::mem::take(&mut self.pending);
+                        self.jumps.push(Jumps { is_loop: false, depth: self.depth, fins: self.fins.len(), breaks: Vec::new(), cont: None, conts: Vec::new(), labels, label_only: true });
+                        self.stmt(body)?;
+                        self.close()
+                    }
+                }
+            }
             StmtKind::Throw(e) => {
                 let r = self.reg()?;
                 self.expr(e, r)?;
@@ -431,7 +454,8 @@ impl Gen<'_, '_> {
     }
 
     fn open(&mut self, is_loop: bool, cont: Option<usize>) {
-        self.jumps.push(Jumps { is_loop, depth: self.depth, fins: self.fins.len(), breaks: Vec::new(), cont, conts: Vec::new() });
+        let labels = std::mem::take(&mut self.pending);
+        self.jumps.push(Jumps { is_loop, depth: self.depth, fins: self.fins.len(), breaks: Vec::new(), cont, conts: Vec::new(), labels, label_only: false });
     }
 
     /// The `continue` target of the open loop is here.

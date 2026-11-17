@@ -108,6 +108,8 @@ pub(super) struct ScopeWalk {
     pub stmts: Vec<(StmtId, u32)>,
     /// Each inner function and its scope. The walk does not go into it.
     pub funcs: Vec<(FuncId, u32)>,
+    /// An inner function has a lazy body (`Body::Lazy`): it has no scope yet, and the names that it takes are not known.
+    pub lazy_inner: bool,
     /// The first place where a scope of `sc_all` was not the one the walk expected (a bug of the walk).
     pub bad: Option<u32>,
 }
@@ -160,10 +162,15 @@ impl<'p> Interp<'p> {
 
     /// One after the last scope inside scope `i` (its inner scopes follow it in `sc_all`).
     pub(super) fn bc_scope_end(&self, i: u32) -> u32 {
+        let (lazy, owner) = (self.sc_all[i as usize].lazy, self.sc_all[i as usize].owner);
         let mut j = i + 1;
         while (j as usize) < self.sc_all.len() {
-            // The scopes of a lazy function belong to its own tree.
-            if self.sc_all[j as usize].lazy {
+            // The scopes of a lazy function belong to its own tree. The scopes of one tree are in one run, made by one walk.
+            let sj = &self.sc_all[j as usize];
+            if sj.lazy && !(lazy && sj.owner == owner) {
+                if lazy {
+                    break;
+                }
                 j += 1;
                 continue;
             }
@@ -187,7 +194,17 @@ impl<'p> Interp<'p> {
         }
         if self.bc.fn_scopes[cur].is_empty() {
             let mut t = vec![NONE; self.prog.stats().funcs + 1].into_boxed_slice();
-            if let Some(r) = self.bc_root() {
+            if self.prog.is_lazy_tree() {
+                // The tree of a lazy function: its walk (`lazy_walk`) opened one run of scopes, the first is the function.
+                let me = cur as u32;
+                if let Some(first) = self.sc_all.iter().position(|s| s.lazy && s.owner == me) {
+                    for (i, sc) in self.sc_all.iter().enumerate().skip(first).take_while(|(_, s)| s.lazy && s.owner == me) {
+                        if let RKind::Fn(f, _) = sc.kind {
+                            t[f.index()] = i as u32;
+                        }
+                    }
+                }
+            } else if let Some(r) = self.bc_root() {
                 for i in r + 1..self.bc_scope_end(r) {
                     if let RKind::Fn(f, _) = self.sc_all[i as usize].kind
                         && !self.sc_all[i as usize].lazy
@@ -359,15 +376,22 @@ impl<'p> Interp<'p> {
             if matches!(self.sc_all[scope as usize].kind, RKind::Barrier) {
                 return Site::Dynamic;
             }
-            if self.bc_declares(scope, n) {
+            // A scope around a lazy function belongs to the script that holds it: its bindings come from that tree.
+            let owner = self.sc_all[scope as usize].owner;
+            let (old, other) = (self.cur, owner as usize != self.cur);
+            if other {
+                self.select(owner as usize);
+            }
+            let found = self.bc_declares(scope, n).then(|| {
+                if matches!(self.sc_all[scope as usize].kind, RKind::Root) { self.find_in(0, n) } else { self.bc_tmpl(scope).iter().position(|b| b.0 == n) }
+            });
+            if other {
+                self.select(old);
+            }
+            if let Some(index) = found {
                 if hops >= MAX_HOPS {
                     return Site::Dynamic;
                 }
-                let index = if matches!(self.sc_all[scope as usize].kind, RKind::Root) {
-                    self.find_in(0, n)
-                } else {
-                    self.bc_tmpl(scope).iter().position(|b| b.0 == n)
-                };
                 return match index {
                     Some(i) if i < 0xFFFF => Site::Env { hops, index: i as u32 },
                     _ => Site::Dynamic,
@@ -420,10 +444,14 @@ impl<'p> Interp<'p> {
 
     /// An inner function: record it and skip its scopes.
     fn sw_func(&self, w: &mut ScopeWalk, fid: FuncId) {
+        // A lazy function opened no scope in the first walk (`w_func_inner`). Its first call walks its own tree.
+        if matches!(self.prog.func(fid).body, Body::Lazy(_)) {
+            w.lazy_inner = true;
+            return;
+        }
         let i = w.next;
         match self.sc_all.get(i as usize) {
-            // A lazy function has no scope in `sc_all` yet.
-            Some(sc) if same_kind(sc.kind, RKind::Fn(fid, false)) && sc.parent == w.cur && !matches!(self.prog.func(fid).body, Body::Lazy(_)) => {}
+            Some(sc) if same_kind(sc.kind, RKind::Fn(fid, false)) && sc.parent == w.cur => {}
             _ => {
                 w.bad.get_or_insert(i);
             }
@@ -654,8 +682,17 @@ impl<'p> Interp<'p> {
     }
 
     fn bc_check_script(&mut self, r: &mut ScopeCheck) {
-        let Some(root) = self.bc_root() else { return };
-        let mut todo = vec![(None, root)];
+        let mut todo = if self.prog.is_lazy_tree() {
+            // The tree of a lazy function: its function is the last one, and it has a scope once a call walked it.
+            let fid = FuncId::from_index(self.prog.funcs.len() - 1);
+            match self.bc_fn_scope(fid) {
+                Some(fs) => vec![(Some(fid), fs.scope)],
+                None => return,
+            }
+        } else {
+            let Some(root) = self.bc_root() else { return };
+            vec![(None, root)]
+        };
         while let Some((fid, scope)) = todo.pop() {
             let w = self.bc_walk(fid, scope);
             if let Some(b) = w.bad {
