@@ -39,9 +39,11 @@
 //! - `queryCommandValue` stays `""`; `styleWithCSS`, `foreColor` and the other formatting commands are not built.
 //! - `document.designMode` stays "off" (`browser_basics.rs`); the setter ignores "on".
 //! - `insertText` puts the text in as given: no `&nbsp;` for a space at an edge, and a line feed in the text is a line feed.
-//! - `delete` and `forwardDelete` do not merge two blocks at a block boundary; they return false there. A range across blocks is cut
-//!   with `deleteContents`, which keeps both blocks. One exception (issue 443): Backspace in an empty block removes it, or turns the
-//!   first item of a list into a `div`. A block with content is not merged with the one before it.
+//! - `delete` and `forwardDelete` at a block edge merge two sibling blocks (issue 443; `delete_at_block_edge`): Backspace moves the
+//!   block into the one before it (a list gives its last item), Delete moves the next block into this one. An empty block is removed.
+//!   The first item of a list leaves the list. Only the next or previous sibling counts: the last item of a list does not take the
+//!   block after the list, and a block nested in a `div` is not merged with a block outside it. A range across blocks is cut with
+//!   `deleteContents`, which keeps both blocks.
 //! - `insertParagraph` makes a `div` in the host and clones the block it splits (a `p` gives `p`). Enter in an empty list item turns
 //!   it into a `div` after the list (the items after it go to a new list). Tables are not special.
 //! - A list command on a caret or selection in a list of the same kind turns only the selected items into `div` blocks and splits
@@ -191,6 +193,20 @@ fn find_del(doc: &Document, host: NodeId, mut c: NodeId, mut o: u32, back: bool)
             let p = doc.parent(c)?;
             (o, c) = (index(doc, c) + !back as u32, p);
         }
+    }
+}
+
+/// The position at the end of the content of `n`: after its last Text, going down through the last children.
+fn end_pos(doc: &Document, mut n: NodeId) -> (NodeId, u32) {
+    loop {
+        let Some(l) = doc.children(n).last() else { break (n, 0) };
+        if let Some(u) = units(doc, l) {
+            break (l, u.len() as u32);
+        }
+        if is_void(doc, l) {
+            break (n, doc.children(n).count() as u32 - 1);
+        }
+        n = l;
     }
 }
 
@@ -449,7 +465,7 @@ impl Dom {
             return Ok(true);
         }
         let found = find_del(&self.doc.borrow(), host, a.start.0, a.start.1, back);
-        let Some(found) = found else { return if back { self.delete_empty_block(it, &a, host) } else { Ok(false) } };
+        let Some(found) = found else { return self.delete_at_block_edge(it, &a, host, back) };
         match found {
             Del::Chars(n, from, to) => {
                 let w = self.wrap(it, n)?;
@@ -481,56 +497,87 @@ impl Dom {
         Ok(true)
     }
 
-    /// Backspace at the start of an empty block. The first item of a list leaves the list. Any other empty block is removed and the
-    /// caret goes to the end of the block before it. A block with content, and the first block of the host, stay as they are.
-    fn delete_empty_block(&self, it: &mut Interp<'_>, a: &Act, host: NodeId) -> R<bool> {
-        let (block, prev, list) = {
+    /// Backspace at the start of a block, or Delete at the end of one (the caret is at a block edge). Ported, simplified, from the
+    /// "delete" command of the W3C editing draft ("merge blocks") and Ladybird `command_delete_action`.
+    /// - Backspace in an empty block removes it; the caret goes to the end of the block before. The first item of a list leaves the list.
+    /// - Backspace in a block with content moves its children to the end of the block before it (a list gives its last item).
+    /// - Delete moves the children of the next block (the first item of a next list) to the end of this block.
+    /// The first block of the host (Backspace) and the last one (Delete) have nothing to merge: false.
+    fn delete_at_block_edge(&self, it: &mut Interp<'_>, a: &Act, host: NodeId, back: bool) -> R<bool> {
+        enum Plan {
+            Outdent(NodeId, u32),
+            Merge { from: NodeId, to: NodeId, drop_list: Option<NodeId>, clear_to: bool },
+            Remove(NodeId),
+        }
+        let is_empty = |doc: &Document, n: NodeId| doc.children(n).all(|k| units(doc, k).is_some_and(|u| u.is_empty()) || tag(doc, k) == "br");
+        let plan = {
             let doc = self.doc.borrow();
             let mut b = element_of(&doc, a.start.0).expect("in the host");
             while b != host && !is_block(&doc, b) {
                 b = doc.parent(b).expect("in the host");
             }
-            let empty = doc.children(b).all(|k| units(&doc, k).is_some_and(|u| u.is_empty()) || tag(&doc, k) == "br");
             let list = doc.parent(b).filter(|&p| matches!(tag(&doc, p), "ul" | "ol"));
-            (b, doc.prev_sibling(b), list.filter(|_| empty))
+            let empty = is_empty(&doc, b);
+            if b == host {
+                return Ok(false);
+            }
+            let item_of = |n: NodeId| if matches!(tag(&doc, n), "ul" | "ol") { doc.children(n).find(|&k| is_element(&doc, k)) } else { Some(n) };
+            if back {
+                match (doc.prev_sibling(b), list) {
+                    (None, Some(l)) => Plan::Outdent(l, index(&doc, b)),
+                    (None, None) => return Ok(false),
+                    (Some(p), _) if empty && is_block(&doc, p) => Plan::Remove(b),
+                    (Some(p), _) => {
+                        // The target: the last item of a list before the block.
+                        let mut to = p;
+                        while matches!(tag(&doc, to), "ul" | "ol") {
+                            let Some(l) = doc.children(to).filter(|&k| is_element(&doc, k)).last() else { return Ok(false) };
+                            to = l;
+                        }
+                        if !is_element(&doc, to) || !is_block(&doc, to) {
+                            return Ok(false);
+                        }
+                        Plan::Merge { from: b, to, drop_list: None, clear_to: is_empty(&doc, to) }
+                    }
+                }
+            } else {
+                let Some(next) = doc.next_sibling(b).filter(|&n| is_element(&doc, n) && is_block(&doc, n)) else { return Ok(false) };
+                let Some(from) = item_of(next) else { return Ok(false) };
+                Plan::Merge { from, to: b, drop_list: (from != next).then_some(next), clear_to: empty }
+            }
         };
-        let empty = self.doc.borrow().children(block).all(|k| units(&self.doc.borrow(), k).is_some_and(|u| u.is_empty()) || tag(&self.doc.borrow(), k) == "br");
-        if block == host || !empty {
-            return Ok(false);
-        }
-        match (list, prev) {
-            (Some(l), None) => {
-                let i = index(&self.doc.borrow(), block);
+        match plan {
+            Plan::Outdent(l, i) => {
                 let divs = self.outdent(it, l, i, i)?;
                 let (t, o) = deep_start(&self.doc.borrow(), divs[0]);
                 caret(self, it, a.sel, t, o)?;
             }
-            (_, Some(p)) => {
+            Plan::Remove(block) => {
+                let prev = self.doc.borrow().prev_sibling(block).expect("checked");
                 self.remove(it, block)?;
-                self.caret_end_of(it, a, p)?;
+                self.caret_end_of(it, a, prev)?;
             }
-            _ => return Ok(false),
+            Plan::Merge { from, to, drop_list, clear_to } => {
+                let kids: Vec<NodeId> = if clear_to { self.doc.borrow().children(to).collect() } else { Vec::new() };
+                for k in kids {
+                    self.remove(it, k)?;
+                }
+                // Where the caret goes: the end of the target, before the moved children.
+                let pos = if back || clear_to { end_pos(&self.doc.borrow(), to) } else { a.start };
+                let tw = self.wrap(it, to)?;
+                self.move_children(it, from, tw)?;
+                let gone = drop_list.filter(|&l| self.doc.borrow().children(l).count() == 1).unwrap_or(from);
+                self.remove(it, gone)?;
+                caret(self, it, a.sel, pos.0, pos.1)?;
+            }
         }
-        let kind = "deleteContentBackward";
-        self.input_event(it, host, kind, None)?;
+        self.input_event(it, host, if back { "deleteContentBackward" } else { "deleteContentForward" }, None)?;
         Ok(true)
     }
 
     /// The caret at the end of the content of `n`: after its last Text, going down through the last children.
-    fn caret_end_of(&self, it: &mut Interp<'_>, a: &Act, mut n: NodeId) -> R<()> {
-        let pos = {
-            let doc = self.doc.borrow();
-            loop {
-                let Some(l) = doc.children(n).last() else { break (n, 0) };
-                if let Some(u) = units(&doc, l) {
-                    break (l, u.len() as u32);
-                }
-                if is_void(&doc, l) {
-                    break (n, doc.children(n).count() as u32 - 1);
-                }
-                n = l;
-            }
-        };
+    fn caret_end_of(&self, it: &mut Interp<'_>, a: &Act, n: NodeId) -> R<()> {
+        let pos = end_pos(&self.doc.borrow(), n);
         caret(self, it, a.sel, pos.0, pos.1)
     }
 
