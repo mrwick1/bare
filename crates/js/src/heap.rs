@@ -2198,6 +2198,41 @@ impl Heap {
         Ok(keys)
     }
 
+    /// The own keys of an ordinary object for a `for-in`, in `own_keys` order without the symbols: the enumerable ones go to `out`, the
+    /// others to `hidden` (they still hide a prototype key). Reads the enumerable bit from the shape entry or the dictionary entry.
+    /// Gives the count of keys scanned (symbols too), or `None` for an exotic or a lazy object (then `own_keys` and `o_peek`).
+    pub fn for_in_own(&self, o: ObjId, out: &mut Vec<PropertyKey>, hidden: &mut Vec<PropertyKey>) -> Option<usize> {
+        let ob = self.objects.get(o.index, o.gn)?;
+        if ob.exotic != 0 || ob.lazy != 0 {
+            return None;
+        }
+        let elems = ob.elems.iter().enumerate().filter(|(_, v)| v.is_some()).map(|(i, _)| i as u32);
+        let Some(d) = ob.dict() else {
+            let es = self.shapes.entries(ob.shape);
+            out.reserve(ob.elems.len() + es.len());
+            let before = out.len();
+            out.extend(elems.map(PropertyKey::Index));
+            let n = out.len() - before + es.len();
+            for e in es.iter().filter(|e| matches!(e.key, PropertyKey::String(_))) {
+                if e.attrs & shape::A_E != 0 { out.push(e.key) } else { hidden.push(e.key) }
+            }
+            return Some(n);
+        };
+        // An index key lives in `elems` or in the dictionary. Dictionary index keys come mixed with the names: sort them all.
+        let mut idx: Vec<(u32, bool)> = elems.map(|i| (i, true)).collect();
+        if d.index_keys > 0 {
+            idx.extend(d.iter().filter_map(|(k, p)| if let PropertyKey::Index(i) = k { Some((i, p.enumerable())) } else { None }));
+            idx.sort_unstable_by_key(|x| x.0);
+        }
+        let n = idx.len() + (d.live - d.index_keys) as usize;
+        out.reserve(n);
+        let keys = idx.into_iter().map(|(i, e)| (PropertyKey::Index(i), e));
+        for (k, e) in keys.chain(d.iter().filter(|(k, _)| matches!(k, PropertyKey::String(_))).map(|(k, p)| (k, p.enumerable()))) {
+            if e { out.push(k) } else { hidden.push(k) }
+        }
+        Some(n)
+    }
+
     /// Upper bound on keys and storage slots scanned by `own_keys`, without allocating.
     /// Includes dense holes, removed property slots and virtual byte-view indices.
     pub fn own_key_slots(&self, o: ObjId) -> R<usize> {

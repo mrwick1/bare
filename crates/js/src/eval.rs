@@ -3905,8 +3905,11 @@ impl<'p> Interp<'p> {
             Value::String(s) => return Ok(((0..h!(self, self.heap.str_len(s)) as u32).map(PropertyKey::Index).collect(), false)),
             _ => return Ok((Vec::new(), false)),
         };
+        // The own keys of one object are unique, so the seen set is made only when a prototype gives a key. Until then the keys seen
+        // are `out` and `hidden` (the receiver's keys that are not enumerable).
         let mut seen: FxSet<PropertyKey> = FxSet::default();
-        let mut out = Vec::new();
+        let (mut out, mut hidden) = (Vec::new(), Vec::new());
+        let mut lazy = false;
         let mut proxied = false;
         // The first object of the run of objects, after the receiver, that have no enumerable key. A walk to the end of the chain that
         // ends in such a run records it (`Heap::enum_tail_certify`), and a later walk stops before it (`Heap::enum_tail_clean`).
@@ -3915,23 +3918,39 @@ impl<'p> Interp<'p> {
             let proxy = self.heap.is_proxy(o);
             proxied |= proxy;
             let mut dirty = proxy;
-            for k in self.property_keys(o)? {
-                self.tick()?;
-                if matches!(k, PropertyKey::Symbol(_)) {
-                    continue;
+            if first && let Some(n) = self.heap.for_in_own(o, &mut out, &mut hidden) {
+                self.spend(n as u64)?;
+                lazy = true;
+            } else {
+                let keys = self.property_keys(o)?;
+                if lazy && !keys.is_empty() {
+                    self.heap.count_for_in_set();
+                    seen.extend(out.iter().chain(&hidden).copied());
+                    lazy = false;
                 }
-                let new = seen.insert(k);
-                // A key that a closer object hides still counts for the run: a hidden enumerable key is one more key that the run holds.
-                if !new && (first || dirty) {
-                    continue;
-                }
-                // V8 does not ask a proxy for the enumerability of its keys here: it asks at each step of the loop.
-                if proxy || matches!(self.o_peek(o, k)?, Some(p) if p.enumerable()) {
-                    dirty = true;
-                    if new {
-                        out.push(k);
+                // The receiver's own keys need no set, unless a proxy gives them (its `ownKeys` trap may repeat a key).
+                let own = first && !proxy;
+                for k in keys {
+                    self.tick()?;
+                    if matches!(k, PropertyKey::Symbol(_)) {
+                        continue;
+                    }
+                    let new = own || seen.insert(k);
+                    // A key that a closer object hides still counts for the run: a hidden enumerable key is one more key that the run holds.
+                    if !new && (first || dirty) {
+                        continue;
+                    }
+                    // V8 does not ask a proxy for the enumerability of its keys here: it asks at each step of the loop.
+                    if proxy || matches!(self.o_peek(o, k)?, Some(p) if p.enumerable()) {
+                        dirty = true;
+                        if new {
+                            out.push(k);
+                        }
+                    } else if own {
+                        hidden.push(k);
                     }
                 }
+                lazy |= own;
             }
             if !first {
                 clean_from = if dirty { None } else { clean_from.or(Some(o)) };

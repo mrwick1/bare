@@ -78,6 +78,10 @@ const LOOP_CASES: &[(&str, &str, &str)] = &[
     ("add_and_delete_many", r#"var o={a:1,b:2,c:3,d:4},r=[]; for(var k in o){r.push(k); o['x'+k]=1; delete o.d; delete o.a} return r.join('+')+' '+ks(o)"#, "a+b+c b+c+xa+xb+xc"),
     ("proxy_string_typed", r#"return ks(new Proxy({a:1,b:2},{}))+' '+ks('xy')+' '+ks(new String('ab'))+' '+ks(new Uint8Array(2))"#, "a+b 0+1 0+1 0+1"),
     ("empty_and_create_null", r#"var o=Object.create(null); o.a=1; o.b=2; return ks({})+'|'+ks(o)"#, "|a+b"),
+    ("dict_receiver_shadows_proto", r#"var p={x:1,y:2}; var d=Object.create(p); for(var i=0;i<200;i++) d['k'+i]=i; Object.defineProperty(d,'x',{value:1,enumerable:false}); var s=ks(d).split('+'); return s.length+' '+s[0]+' '+s[199]+' '+s[200]"#, "201 k0 k199 y"),
+    ("sparse_array_list_path", r#"var a=[]; a[5]=1; a[1000000]=2; a[2]=3; Object.defineProperty(a,3,{value:1,enumerable:false}); a.z=1; return ks(a)+' '+ks(a)"#, "2+5+1000000+z 2+5+1000000+z"),
+    ("array_proto_with_elements", r#"var p=[9,9,9]; var a=Object.create(p); a[1]=1; a.q=1; return ks(a)+' '+ks(a)"#, "1+q+0+2 1+q+0+2"),
+    ("dict_delete_during_loop", r#"var d={}; for(var i=0;i<200;i++) d['k'+i]=i; var r=[]; for(var k in d){ r.push(k); delete d.k1; delete d.k199 } return r.length+' '+r[1]+' '+r[197]"#, "198 k2 k198"),
 ];
 
 /// Each case in a fresh realm in `Tree`, `Auto` and `Byte`, against the Node text. `wrap` puts the source in a function.
@@ -185,5 +189,23 @@ fn a_clean_tail_is_not_walked_again() {
         let c1 = it.ic_counts().heap.enum_tail_skips;
         steps_of(&mut it, src);
         assert_eq!(it.ic_counts().heap.enum_tail_skips - c1, 2);
+    });
+}
+
+/// The list path (design C): a receiver's own keys are unique, so the loop makes a seen set only when a prototype gives a key.
+#[test]
+fn the_list_path_makes_a_seen_set_only_for_prototype_keys() {
+    big(|| {
+        // The first loops walk the prototypes (their keys are not enumerable) and certify them.
+        let warm = "function n(o){var c=0;for(var k in o)c++;return c} n({}); n([]); var d={}; for(var i=0;i<200;i++) d['k'+i]=i;";
+        let src = "var p={x:1}, q=Object.create(p); q[0]=1; [n(d), n([1,2]), n(d), n(q)].join()";
+        for mode in [Exec::Tree, Exec::Auto, Exec::Byte] {
+            let mut it = Interp::realm(Heap::default(), EvalLimits::default()).unwrap();
+            it.set_exec(mode);
+            run(&mut it, warm);
+            let c0 = it.ic_counts().heap.for_in_sets;
+            assert_eq!(run(&mut it, src), "200,2,200,2", "{mode:?}");
+            assert_eq!(it.ic_counts().heap.for_in_sets - c0, 1, "{mode:?}: only the loop over q, whose prototype gives x");
+        }
     });
 }

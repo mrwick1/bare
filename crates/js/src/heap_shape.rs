@@ -1021,6 +1021,8 @@ pub struct IcStats {
     pub enum_tail_skips: u64,
     /// `for-in` loops that read the keys of the receiver's shape in place (`Heap::for_in_shape`).
     pub for_in_shape: u64,
+    /// `for-in` loops on the list path that read the receiver's own keys without a set, then made one for a prototype key (`Interp::for_in_keys`).
+    pub for_in_sets: u64,
 }
 
 // ---------- shape sweep (step A6) ----------
@@ -1454,6 +1456,11 @@ impl Heap {
         }
         self.ic_stats.for_in_shape += 1;
         Some((shape, self.shapes.count(shape) as u32))
+    }
+
+    /// A `for-in` on the list path made a seen set (`IcStats::for_in_sets`).
+    pub fn count_for_in_set(&mut self) {
+        self.ic_stats.for_in_sets += 1;
     }
 
     /// The next enumerable string key of `shape` from `*i` (below `n`), and whether `o` still has `shape`. Entries `..n` stay as they
