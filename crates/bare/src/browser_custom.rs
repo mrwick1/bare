@@ -103,7 +103,7 @@ known! {
 
 /// Is `n`, an HTML element name, an `HTMLUnknownElement`? Not when it has an interface of its own, nor when it is a valid custom element name.
 pub(crate) fn is_unknown(n: &str) -> bool {
-    !is_known(n) && !(n.contains('-') && valid_custom_name(n))
+    !(is_known(n) || n.contains('-') && valid_custom_name(n))
 }
 
 /// The index in `IFACES` of the interface of the HTML element `local`, or `usize::MAX` when bare has none for it.
@@ -1423,7 +1423,7 @@ crate::browser_lazy::lazy_global!(lazy_registry, "CustomElementRegistry", ensure
 
 /// Install last: a new host function earlier in the list of `Dom::install` moves the id of each one after it.
 pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    crate::browser_lazy::install(d, it, &&[&[("CustomElementRegistry", lazy_registry as H), ("HTMLUnknownElement", lazy_unknown)], &crate::browser_face::LAZY[..]].concat())?;
+    crate::browser_lazy::install(d, it, &[&[("CustomElementRegistry", lazy_registry as H), ("HTMLUnknownElement", lazy_unknown)], &crate::browser_face::LAZY[..]].concat())?;
     // As in Chrome, `customElements` stays an accessor of `window` with no setter.
     let g = *d.global.get().expect("installed");
     let key = d.key(it, "customElements")?;

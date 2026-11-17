@@ -176,6 +176,7 @@ fn document_images_links_anchors_and_embeds_list_their_elements_in_tree_order() 
     assert_eq!(list("links"), "l1,l2");
     assert_eq!(list("anchors"), "n1");
     assert_eq!(list("embeds"), "e1");
+    #[allow(clippy::drop_non_drop)] // Ends the `&mut b` borrow of the closure.
     drop(list);
     assert_eq!(js(&mut b, "document.images.length + ',' + (document.images[0] === document.getElementById('i1'))"), "2,true");
 }

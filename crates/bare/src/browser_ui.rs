@@ -864,7 +864,7 @@ impl Dom {
             "ArrowLeft" | "ArrowRight" | "Home" | "End" if focus.is_some_and(|f| self.selection_applies(f)) => {
                 self.move_caret(it, focus.expect("checked"), &k.key, m.shift, m.ctrl)?;
             }
-            "ArrowUp" | "ArrowDown" | "ArrowLeft" | "ArrowRight" | "PageUp" | "PageDown" | "Home" | "End" if !m.ctrl && !m.alt && !m.meta && !(matches!(k.key.as_str(), "ArrowUp" | "ArrowDown") && edit.is_some()) => {
+            "ArrowUp" | "ArrowDown" | "ArrowLeft" | "ArrowRight" | "PageUp" | "PageDown" | "Home" | "End" if !(m.ctrl || m.alt || m.meta || matches!(k.key.as_str(), "ArrowUp" | "ArrowDown") && edit.is_some()) => {
                 use crate::browser_scroll::ScrollKey as S;
                 let key = match k.key.as_str() {
                     "ArrowUp" => S::Up,

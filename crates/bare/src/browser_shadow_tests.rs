@@ -245,7 +245,8 @@ fn option_getters_may_change_the_host_and_the_checks_run_after_them() {
 #[test]
 fn unsupported_option_values_are_refused_before_anything_changes() {
     let mut b = browser();
-    for opts in ["{mode: 'open', slotAssignment: 'manual'}"] {
+    {
+        let opts = "{mode: 'open', slotAssignment: 'manual'}";
         let before = b.stats().nodes;
         let out = js(&mut b, &format!("var h = document.createElement('div'); try {{ h.attachShadow({opts}); 'attached' }} catch (e) {{ 'caught' }}"));
         // `Unsupported` is not a JS exception: `catch` cannot see it, and the run ends with it.

@@ -258,7 +258,7 @@ fn static_timeout(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
         return Err(it.type_error("Failed to execute 'timeout' on 'AbortSignal': 1 argument required, but only 0 present."));
     }
     let n = it.to_js_number(a[0])?;
-    if !n.is_finite() || n < 0.0 || n > 18446744073709551615.0 {
+    if !n.is_finite() || !(0.0..=18446744073709551615.0).contains(&n) {
         return Err(it.type_error("Failed to execute 'timeout' on 'AbortSignal': Value is outside the range of an unsigned long long."));
     }
     let o = d.new_signal(it)?;

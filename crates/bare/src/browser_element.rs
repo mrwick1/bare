@@ -571,10 +571,9 @@ fn unmodelled(t: &str, auto: bool) -> usize {
         let Token::Ident(name) = t else { continue };
         if !name.eq_ignore_ascii_case("content-visibility") && !name.eq_ignore_ascii_case("display") { continue; }
         if !matches!(tokens.next(), Some(Token::Colon)) { continue; }
-        if let Some(Token::Ident(value)) = tokens.next() {
-            if name.eq_ignore_ascii_case("display") && value.eq_ignore_ascii_case("contents")
-                || name.eq_ignore_ascii_case("content-visibility") && (value.eq_ignore_ascii_case("hidden") || auto && value.eq_ignore_ascii_case("auto")) { n += 1; }
-        }
+        if let Some(Token::Ident(value)) = tokens.next()
+            && (name.eq_ignore_ascii_case("display") && value.eq_ignore_ascii_case("contents")
+                || name.eq_ignore_ascii_case("content-visibility") && (value.eq_ignore_ascii_case("hidden") || auto && value.eq_ignore_ascii_case("auto"))) { n += 1; }
     }
     n
 }

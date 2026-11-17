@@ -277,8 +277,7 @@ impl Job {
         let mut client = self.own_client();
         let mut piece = vec![0u8; PIECE];
         let mut tries = 0;
-        loop {
-            let Some((pos, end)) = self.seg(i, generation) else { break };
+        while let Some((pos, end)) = self.seg(i, generation) {
             if pos >= end {
                 break;
             }

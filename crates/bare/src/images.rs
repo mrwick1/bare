@@ -44,6 +44,7 @@ pub(crate) struct Images {
     known: std::collections::HashSet<NodeId>,
     queue: VecDeque<(String, Vec<NodeId>)>,
     /// The pictures on their way: the elements, the job, and the URL and the start (for `Page::pending`).
+    #[allow(clippy::type_complexity)] // A one-off tuple: a named alias would add nothing.
     jobs: Vec<(Vec<NodeId>, Task<Option<Bitmap>>, String, std::time::Instant)>,
     /// The CSS pictures: the numbers that were asked for, the ones that wait for a worker, and the ones on their way.
     css_seen: std::collections::HashSet<u32>,

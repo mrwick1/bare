@@ -77,7 +77,7 @@ fn main() {
         }
         std::process::exit(run_page(arg.to_string(), viewport));
     }
-    let url = Url::parse(&arg);
+    let url = Url::parse(arg);
     let result = url
         .as_ref()
         // Split the URL into its parts. The `&` means "read it, but do not take it".
