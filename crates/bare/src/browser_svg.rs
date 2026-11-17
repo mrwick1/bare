@@ -125,6 +125,12 @@ pub(crate) fn define(d: &Dom, it: &mut Interp<'_>, name: &str) -> R<bool> {
                 d.define_accessor(it, p, k, get, None)?;
             }
         }
+        "getComputedTextLength" => {
+            d.def_method(it, p, name, 0, |d, it, t, a| text_length(d, it, t, a, false))?;
+        }
+        "getSubStringLength" => {
+            d.def_method(it, p, name, 2, |d, it, t, a| text_length(d, it, t, a, true))?;
+        }
         "getCTM" | "getScreenCTM" => {
             d.def_method(it, p, name, 0, ctm)?;
         }
@@ -146,6 +152,36 @@ pub(crate) fn define(d: &Dom, it: &mut Interp<'_>, name: &str) -> R<bool> {
         _ => return Ok(false),
     }
     Ok(true)
+}
+/// `getComputedTextLength()` and `getSubStringLength(start, n)` of a `text` or a `tspan`: the advance of the letters in user units.
+fn text_length(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], sub: bool) -> R<Value> {
+    let n = node(d, it, this)?;
+    // WebIDL `unsigned long`: NaN and infinity are 0, and -1 is the biggest number.
+    let mut ulong = |i| -> R<usize> {
+        let x = it.to_js_number(crate::browser_platform::arg(a, i))?;
+        Ok(if x.is_finite() { x.trunc().rem_euclid(4294967296.0) as usize } else { 0 })
+    };
+    let (start, count) = if sub { (ulong(0)?, ulong(1)?) } else { (0, usize::MAX) };
+    // The font of a `tspan` is the one of its `text` (a `tspan` has no style of its own here).
+    let text = {
+        let doc = d.doc.borrow();
+        match doc.element_name(n) {
+            "text" => n,
+            "tspan" => match std::iter::successors(doc.parent(n), |&p| doc.parent(p)).find(|&p| doc.element_ns(p) == Ns::Svg && doc.element_name(p) == "text") {
+                Some(p) => p,
+                None => return Err(it.type_error("Illegal invocation")),
+            },
+            _ => return Err(it.type_error("Illegal invocation")),
+        }
+    };
+    let Some(snap) = d.snapshot_with(it, text, true)? else { return Ok(Value::Number(0.0)) };
+    let m = bare_layout::font::Metrics::of(&snap.style);
+    let width = bare_paint::svg::text_length(&d.doc.borrow(), text, n, &m, start, count);
+    match width {
+        Some(w) => Ok(Value::Number(w as f64)),
+        None if start == 0 && !sub => Ok(Value::Number(0.0)),
+        None => Err(d.dom_err(it, "IndexSizeError", "The start index is out of range")),
+    }
 }
 fn metrics(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], point: bool) -> R<Value> {
     let n = node(d, it, this)?;
