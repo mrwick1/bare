@@ -15,7 +15,10 @@
 //! Only JSON goes to stdout: the protocol owns it. Progress and errors go to stderr. JS: like a Node script that reads `readline`
 //! lines from `process.stdin` and writes `JSON.stringify(reply)` lines to `process.stdout`.
 
+mod recovery;
+
 use bare_drive::{DownloadState, Downloads};
+use recovery::Failure;
 use bare_drive::locate::{Locator, Text};
 use bare_drive::run::{Event, Options, Redactor, Report, Session, StorageState, cancelled, set_cancel};
 use bare_drive::snap::{self, Mode};
@@ -244,7 +247,8 @@ impl Shared {
         let done = Box::new(move |v: Value| sh.send(json!({"jsonrpc": "2.0", "id": id, "result": v})));
         let job = Job { key: Some(key), params, cancel, done };
         if !tool_list().as_array().is_some_and(|t| t.iter().any(|t| t["name"] == tool.as_str())) {
-            return self.finish(job, error_result(format!("unknown tool {tool}")));
+            let result = Server { shared: self.clone(), live: HashMap::new() }.call(&job.params);
+            return self.finish(job, result);
         }
         match tool.as_str() {
             "run_steps" | "run_suite" | "sessions" => self.oneshot(job),
@@ -290,7 +294,8 @@ impl Shared {
         }
         if !creates {
             drop(map);
-            return self.finish(job, error_result(format!("no live session {name}: call open first")));
+            let result = Server { shared: self.clone(), live: HashMap::new() }.call(&job.params);
+            return self.finish(job, result);
         }
         let (tx, rx) = mpsc::sync_channel(QUEUE);
         let (url, busy) = (Arc::new(Mutex::new(String::new())), Arc::new(AtomicUsize::new(1)));
@@ -489,36 +494,51 @@ impl Server {
         if name == "act" {
             return self.act(&args);
         }
+        // The secrets of the session that the call names, for the evidence of a failure; `close` drops the session, so take them first.
+        let red = self.live.get(&session_name(&args)).map(|l| l.red.clone()).unwrap_or_default();
+        let fail = |f: Failure, red: &Redactor| json!({"content": [{"type": "text", "text": red.clean(&f.text)}], "isError": true, "structuredContent": recovery::structured(&f, &red)});
         if let Err(e) = known_args(name, &args) {
-            return json!({"content": [{"type": "text", "text": e}], "isError": true});
+            return fail(Failure::args(e), &red);
         }
-        let done = match name {
-            "run_steps" => self.run_steps(&args),
-            "run_suite" => self.run_suite(&args),
-            "open" => self.open(&args),
-            "step" => self.step(&args),
-            "save_state" => self.save_state(&args),
-            "ensure_session" => self.ensure_session(&args),
-            "close" => self.close(&args),
-            "snapshot" => self.snapshot(&args),
-            "find" => self.find(&args),
-            "read" => self.read(&args),
-            "links" => self.links(&args),
-            "downloads" => self.downloads(&args),
-            "eval" => self.eval(&args),
-            "console" => self.console(&args),
-            "network" => self.network(&args),
-            "diagnose" => self.diagnose(&args),
+        // The tools that act on a live session: the lookup of the session is the source of `missing_session`, before any argument is used.
+        if matches!(name, "step" | "close" | "snapshot" | "find" | "read" | "links" | "act" | "downloads" | "eval" | "console" | "network" | "diagnose" | "screenshot" | "storage" | "save_state")
+            && !self.live.contains_key(&session_name(&args))
+        {
+            return fail(Failure::no_session(&session_name(&args)), &red);
+        }
+        // The failure of a step that did not make the call an error: it is only in the structured part, from this call's own report.
+        let mut step_failure = None;
+        let done: Result<String, Failure> = match name {
+            "run_steps" => self.run_steps(&args).map_err(Failure::from),
+            "run_suite" => self.run_suite(&args).map_err(Failure::from),
+            "open" => self.open(&args).map_err(Failure::from),
+            "step" => self.step(&args).map(|(t, f)| { step_failure = f; t }).map_err(Failure::from),
+            "save_state" => self.save_state(&args).map_err(Failure::from),
+            "ensure_session" => self.ensure_session(&args).map_err(Failure::from),
+            "close" => self.close(&args).map_err(Failure::from),
+            "snapshot" => self.snapshot(&args).map_err(Failure::from),
+            "find" => self.find(&args).map_err(Failure::from),
+            "read" => self.read(&args).map_err(Failure::from),
+            "links" => self.links(&args).map_err(Failure::from),
+            "downloads" => self.downloads(&args).map_err(Failure::from),
+            "eval" => self.eval(&args).map_err(Failure::from),
+            "console" => self.console(&args).map_err(Failure::from),
+            "network" => self.network(&args).map_err(Failure::from),
+            "diagnose" => self.diagnose(&args).map_err(Failure::from),
             "sessions" => Ok(self.sessions()),
-            // Internal: `sessions` asks an idle session for its tabs and dialogs. Not in the tool list, so a client cannot call it.
-            "sessions_probe" => self.live_mut(&args).and_then(|l| l.session.collect()).and_then(|_| self.late(&args)),
-            "storage" => self.storage(&args),
-            "screenshot" => return self.screenshot(&args).unwrap_or_else(|e| json!({"content": [{"type": "text", "text": e}], "isError": true})),
-            n => Err(format!("unknown tool {n}")),
+            "sessions_probe" => self.live_mut(&args).and_then(|l| l.session.collect()).and_then(|_| self.late(&args)).map_err(Failure::from),
+            "storage" => self.storage(&args).map_err(Failure::from),
+            "screenshot" => return self.screenshot(&args).unwrap_or_else(|e| fail(Failure::from(e), &red)),
+            n => Err(Failure::unknown_tool(n)),
         };
+        // A step can learn a new password. Use the redactor after execution for its evidence.
+        let red = self.live.get(&session_name(&args)).map(|l| l.red.clone()).unwrap_or(red);
         match done {
-            Ok(text) => json!({"content": [{"type": "text", "text": text}]}),
-            Err(e) => json!({"content": [{"type": "text", "text": e}], "isError": true}),
+            Ok(text) => match step_failure {
+                Some(f) => json!({"content": [{"type": "text", "text": text}], "structuredContent": recovery::structured(&f, &red)}),
+                None => json!({"content": [{"type": "text", "text": text}]}),
+            },
+            Err(f) => fail(f, &red),
         }
     }
 
@@ -706,9 +726,10 @@ impl Server {
         Ok(with_session(rep, if had { "recreated" } else { "created" }))
     }
 
-    fn step(&mut self, args: &Value) -> Result<String, String> {
+    fn step(&mut self, args: &Value) -> Result<(String, Option<Failure>), String> {
         let src = args.get("steps").and_then(Value::as_str).ok_or("steps (one or more step lines) is required")?;
-        Ok(self.run_live(args, src)?.0)
+        let (text, _, failure) = self.run_live_typed(args, src)?;
+        Ok((text, failure))
     }
 
     fn close(&mut self, args: &Value) -> Result<String, String> {
@@ -719,6 +740,11 @@ impl Server {
 
     /// Run step lines on the live session until one fails, and give the report of these lines.
     fn run_live(&mut self, args: &Value, src: &str) -> Result<(String, bool), String> {
+        self.run_live_typed(args, src).map(|(t, ok, _)| (t, ok))
+    }
+
+    /// `run_live` with the failure of this run: the driver `kind` and message, taken from the report of these steps.
+    fn run_live_typed(&mut self, args: &Value, src: &str) -> Result<(String, bool, Option<Failure>), String> {
         let live = self.live_mut(args)?;
         let mut list = steps::parse(src, &live.vars).map_err(|e| live.red.clean(&e))?;
         for s in &mut list {
@@ -730,11 +756,15 @@ impl Server {
                 break;
             }
         }
-        let ok = live.session.rep.failure.is_none();
-        if args.get("compact").and_then(Value::as_bool) == Some(true) {
-            return Ok((compact(&live.session.drain(), &live.red), ok));
-        }
-        Ok((with_out(live.session.drain().json(&live.red), &live.opt, false), ok))
+        let failure = live.session.rep.failure.as_ref().map(|(_, f, _)| (f.kind, f.message.clone()));
+        let ok = failure.is_none();
+        let text = if args.get("compact").and_then(Value::as_bool) == Some(true) {
+            compact(&live.session.drain(), &live.red)
+        } else {
+            with_out(live.session.drain().json(&live.red), &live.opt, false)
+        };
+        let failure = failure.map(|(k, m)| Failure::driver(k, m, text.clone()));
+        Ok((text, ok, failure))
     }
 
     fn live_mut(&mut self, args: &Value) -> Result<&mut Live, String> {
@@ -940,8 +970,13 @@ impl Server {
     /// One action on an element or the page, as a step line; gives a short receipt and, unless `snapshot` is false, the new snapshot.
     fn act(&mut self, args: &Value) -> Value {
         let mut outcome = ActionOutcome { action_status: "not_started", page_status: "unknown", verification: if args.get("expect").is_some() { "not_run" } else { "not_requested" } };
-        let result = known_args("act", args).and_then(|_| self.act_inner(args, &mut outcome));
-        if outcome.action_status != "not_started" {
+        let result = known_args("act", args).map_err(Failure::args).and_then(|_| {
+            if !self.live.contains_key(&session_name(args)) {
+                return Err(Failure::no_session(&session_name(args)));
+            }
+            self.act_inner(args, &mut outcome)
+        });
+        if !cancelled() && outcome.action_status != "not_started" {
             if let Ok(live) = self.live_mut(args) {
                 outcome.page_status = live.session.with_refs(|p, _| {
                     if !p.loading() && p.inspect(|_, _| ()).is_some() { "ready" } else { "pending" }
@@ -949,27 +984,35 @@ impl Server {
             }
         }
         let error = result.is_err();
-        let text = result.unwrap_or_else(|e| e);
-        let text = self.live_mut(args).map(|live| live.red.clean(&text)).unwrap_or(text);
-        let status = json!({"action_status": outcome.action_status, "page_status": outcome.page_status, "verification": outcome.verification});
+        let red = self.live_mut(args).map(|live| live.red.clone()).unwrap_or_default();
+        let mut status = json!({"action_status": outcome.action_status, "page_status": outcome.page_status, "verification": outcome.verification});
+        let text = match result {
+            Ok(text) => text,
+            Err(f) => {
+                status["failure"] = recovery::structured(&f, &red)["failure"].clone();
+                f.text
+            }
+        };
+        let text = red.clean(&text);
         json!({"content": [{"type": "text", "text": text}, {"type": "text", "text": status.to_string()}], "structuredContent": status, "isError": error})
     }
 
-    fn act_inner(&mut self, args: &Value, outcome: &mut ActionOutcome) -> Result<String, String> {
+    fn act_inner(&mut self, args: &Value, outcome: &mut ActionOutcome) -> Result<String, Failure> {
         // Validate every assertion before the operation can change the page.
         let expect = match args.get("expect") {
             None => None,
             Some(v) => {
-                let src = v.as_str().ok_or("expect must be a string of expect steps")?;
+                let src = v.as_str().ok_or_else(|| Failure::args("expect must be a string of expect steps"))?;
                 let live = self.live_mut(args)?;
-                let checks = steps::parse(src, &live.vars).map_err(|e| live.red.clean(&e))?;
+                let checks = steps::parse(src, &live.vars).map_err(|e| Failure::args(live.red.clean(&e)))?;
                 if checks.is_empty() || checks.iter().any(|s| !matches!(&s.action, steps::Action::Expect(c) if !matches!(c, steps::Check::Js(_)))) {
-                    return Err("expect needs one or more expect steps, without JavaScript".into());
+                    return Err(Failure::args("expect needs one or more expect steps, without JavaScript"));
                 }
                 Some(src)
             }
         };
 
+        let (line, accept) = (|| -> Result<(String, bool), String> {
         let op = args.get("op").and_then(Value::as_str).unwrap_or("click");
         let target = match (args.get("ref").and_then(Value::as_str), args.get("loc").and_then(Value::as_str)) {
             (Some(r), _) => format!("ref={}", r.trim()),
@@ -1015,6 +1058,8 @@ impl Server {
             Some("dismiss") => false,
             Some(_) => return Err("dialog must be accept or dismiss".into()),
         };
+        Ok((line, accept))
+        })().map_err(Failure::args)?;
         let mut a = args.clone();
         a["compact"] = json!(true);
         let live = self.live_mut(args)?;
@@ -1022,7 +1067,7 @@ impl Server {
         let before = live.session.url();
         // A driver failure can happen after input was dispatched. Do not claim it is safe to retry.
         outcome.action_status = "unknown";
-        let (receipt, ok) = self.run_live(&a, &line)?;
+        let (receipt, ok, mut failure) = self.run_live_typed(&a, &line)?;
         if ok {
             outcome.action_status = "completed";
         }
@@ -1036,11 +1081,15 @@ impl Server {
         if ok {
             if let Some(expect) = expect {
                 outcome.verification = "unknown";
-                let (receipt, verified) = self.run_live(&a, expect)?;
+                let (receipt, verified, check_failure) = self.run_live_typed(&a, expect)?;
+                failure = check_failure;
                 outcome.verification = if verified { "passed" } else { "failed" };
                 out.push_str("\nverification: ");
                 out.push_str(&receipt);
             }
+        }
+        if cancelled() {
+            return Err("cancelled".into());
         }
         let snap = if ok && args.get("snapshot").and_then(Value::as_bool) != Some(false) {
             // The action ran: a page with no layout yet (a style sheet still on its way) does not make it a failure, or the agent acts twice.
@@ -1066,7 +1115,11 @@ impl Server {
             out.push('\n');
             out.push_str(&s);
         }
-        if ok && outcome.verification != "failed" { Ok(out) } else { Err(out) }
+        match failure {
+            None => Ok(out),
+            // The receipt stays the text of the error; the driver kind and message are the structured part.
+            Some(f) => Err(Failure { text: out, ..f }),
+        }
     }
 
     /// Wait up to the step time limit for the downloads that run, and for a page load that may be one. Then say what finished since the last
