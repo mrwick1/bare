@@ -511,6 +511,8 @@ pub struct RuleSet {
     layer_by_name: HashMap<(u32, Box<str>), u32>,
     /// The custom properties of all rules (`--gap: 8px`), one after the other.
     customs: RefCell<Vec<CustomDecl>>,
+    /// `@property` and `CSS.registerProperty`: name, initial value, inherits. Not rules: `var::Sets` reads it at lookup.
+    registered: HashMap<Box<str>, (Option<Box<str>>, bool)>,
     /// The rules of the document (and the browser's), found by what the last compound reads.
     index: Index,
     /// The rules of each shadow tree that has any, by `NodeId::index` of its root.
@@ -751,7 +753,7 @@ impl RuleSet {
     }
 
     pub fn new(viewport: (f32, f32)) -> RuleSet {
-        RuleSet { viewport, entries: Vec::new(), bodies: Vec::new(), sources: Vec::new(), source: 0, decls: RefCell::default(), side: RefCell::default(), layers: vec![Layer { parent: 0 }], layer_by_name: HashMap::new(), customs: RefCell::default(), index: Index::default(), shadows: HashMap::default(), parts: Vec::new(), user: 0, scopes: Scopes::default(), reach: std::cell::OnceCell::new(), tested: std::cell::Cell::new(0), styled: std::cell::Cell::new(0), logical: Cell::new(false), motion: Cell::new(false), pending: None, keyframes: std::collections::HashSet::new() }
+        RuleSet { viewport, entries: Vec::new(), bodies: Vec::new(), sources: Vec::new(), source: 0, decls: RefCell::default(), side: RefCell::default(), layers: vec![Layer { parent: 0 }], layer_by_name: HashMap::new(), customs: RefCell::default(), registered: HashMap::new(), index: Index::default(), shadows: HashMap::default(), parts: Vec::new(), user: 0, scopes: Scopes::default(), reach: std::cell::OnceCell::new(), tested: std::cell::Cell::new(0), styled: std::cell::Cell::new(0), logical: Cell::new(false), motion: Cell::new(false), pending: None, keyframes: std::collections::HashSet::new() }
     }
 
     /// Which user action state (`:hover`, `:active`, the focus pseudo-classes) some rule reads: the bits `selector::USES_*`.
@@ -1065,23 +1067,19 @@ impl RuleSet {
                     }
                     continue;
                 }
-                // `@property --x { syntax: "*"; inherits: false; initial-value: v }`: the value of `--x` when nothing sets it. A rule of the
-                // browser origin gives it, so any author value wins. It lands on `*` (not inherited) or on `:root` (inherited). Types are not checked.
+                // `@property --x { syntax; inherits; initial-value }` goes in `registered`. It adds no rule: `var::Sets` reads it when a value
+                // is looked up. A later `@property` of the same name wins. Types are not checked.
                 Rule::At(at) if &*at.name == "property" => {
                     let AtBody::Declarations(ds) = &at.body else { continue };
                     let name = at.prelude.trim();
                     let get = |n: &str| ds.iter().rev().find(|d| d.name.eq_ignore_ascii_case(n)).map(|d| d.value.trim());
-                    let (Some(_), Some(inherits), Some(value)) = (get("syntax"), get("inherits"), get("initial-value")) else { continue };
-                    if !name.starts_with("--") || name.len() == 2 || !(inherits.eq_ignore_ascii_case("true") || inherits.eq_ignore_ascii_case("false")) {
+                    let (Some(syntax), Some(inherits)) = (get("syntax"), get("inherits")) else { continue };
+                    let initial = get("initial-value").filter(|v| !v.is_empty());
+                    // A syntax other than `*` needs an initial value.
+                    if !name.starts_with("--") || name.len() == 2 || !(inherits.eq_ignore_ascii_case("true") || inherits.eq_ignore_ascii_case("false")) || (initial.is_none() && syntax.trim_matches(['"', '\'']).trim() != "*") {
                         continue;
                     }
-                    let Some(selectors) = parse_selector_list_in(if inherits.eq_ignore_ascii_case("true") { ":root" } else { "*" }, doc, if scope == 0 { Mode::Document } else { Mode::Shadow }) else { continue };
-                    let Some(body) = self.read_block(|_, _, customs| customs.push(CustomDecl { name: name.into(), text: value.into(), important: false })) else { continue };
-                    self.bodies.push(body);
-                    let body = self.bodies.len() as u32 - 1;
-                    for selector in selectors {
-                        self.push(selector, body, layer, Origin::UserAgent, scope);
-                    }
+                    self.registered.insert(name.into(), (initial.map(Box::from), inherits.eq_ignore_ascii_case("true")));
                     continue;
                 }
                 Rule::At(at) => {
@@ -1167,6 +1165,29 @@ impl RuleSet {
         }
         let ancestors = ancestor_hashes(&selector, false);
         self.entries.push(Entry { selector, body, layer, origin, ancestors, ctx });
+    }
+
+    /// `CSS.registerProperty`: false when `name` is registered already. A new style is needed after it (the caller restyles). Types are not checked.
+    pub fn register_property(&mut self, name: &str, initial: Option<&str>, inherits: bool) -> bool {
+        if self.registered.contains_key(name) {
+            return false;
+        }
+        self.registered.insert(name.into(), (initial.map(Box::from), inherits));
+        true
+    }
+
+    /// Is `name` registered (`@property` or `CSS.registerProperty`)?
+    pub fn is_registered(&self, name: &str) -> bool {
+        self.registered.contains_key(name)
+    }
+
+    /// A new `var::Sets` that holds the registered properties.
+    fn sets(&self) -> var::Sets {
+        let mut sets = var::Sets::default();
+        for (name, (initial, inherits)) in &self.registered {
+            sets.register(name, initial.as_deref(), *inherits);
+        }
+        sets
     }
 
     /// Read the declarations of a block into the lists of the rule set: `read` adds them. Gives the body, or `None` when the block has no declaration.
@@ -1265,7 +1286,7 @@ impl RuleSet {
         let mut way = Way { want, path: Vec::new(), sorted: Vec::new(), on: false, at: 0 };
         let mut styles = Styles { styles: vec![ComputedStyle::initial()], of_node: vec![NONE; doc.len()], calcs: Vec::new(), grids: Vec::new(), customs: var::Sets::default(), spaced: false, wrapping: false, kept: None, partial: false };
         // Style 0 is the starting style. It is the parent style of the `html` element.
-        let mut cx = Cx { viewport: self.viewport, root_font_size: 16.0, layer_order: self.layer_order(), declared: &self.side, inline: RefCell::default(), computed: RefCell::default(), grids: RefCell::default(), customs: RefCell::default(), merges: RefCell::default() };
+        let mut cx = Cx { viewport: self.viewport, root_font_size: 16.0, layer_order: self.layer_order(), declared: &self.side, inline: RefCell::default(), computed: RefCell::default(), grids: RefCell::default(), customs: RefCell::new(self.sets()), merges: RefCell::default() };
         let style_atom = doc.find_atom("style");
         let hints = crate::hints::Hints::new(doc);
         let mut filter = AncestorFilter::new(TRACK);
@@ -1957,7 +1978,7 @@ impl RuleSet {
         // The custom properties: the ones of the parent, and the ones of this element. Most elements set none, and share the set of the parent.
         let custom = if let Some(m) = merged {
             m
-        } else if own.is_empty() {
+        } else if own.is_empty() && !cx.customs.borrow().blocks_sharing(parent.1) {
             parent.1
         } else {
             let mut sets = cx.customs.borrow_mut();
@@ -2437,7 +2458,7 @@ impl StyleChain {
     /// No element has a style yet. It is the size of `doc`: the document must not change while the chain is used.
     pub fn new(rules: &RuleSet, doc: &Document) -> StyleChain {
         let kept = StyleKeep { memo: Memo::default(), calcs: HashMap::default(), grids: grid::Kept::default(), rem: 16.0, base: 1 };
-        let styles = Styles { styles: vec![ComputedStyle::initial()], of_node: vec![NONE; doc.len()], calcs: Vec::new(), grids: Vec::new(), customs: var::Sets::default(), spaced: false, wrapping: false, kept: Some(Box::new(kept)), partial: true };
+        let styles = Styles { styles: vec![ComputedStyle::initial()], of_node: vec![NONE; doc.len()], calcs: Vec::new(), grids: Vec::new(), customs: rules.sets(), spaced: false, wrapping: false, kept: Some(Box::new(kept)), partial: true };
         StyleChain {
             styles: Rc::new(styles),
             filter: AncestorFilter::new(rules.tracks()),
@@ -4578,6 +4599,43 @@ mod tests {
         let inh = "@property --c { syntax: \"*\"; inherits: true; initial-value: red }";
         assert_eq!(color(&format!("{inh} #a {{ --c: blue }} p {{ color: var(--c) }}"), "p"), blue);
         assert_eq!(color(&format!("{inh} p {{ color: var(--c) }}"), "p"), red);
+    }
+
+    #[test]
+    fn registered_property_in_layer_and_media_and_perf() {
+        let (red, blue) = (rgb(255, 0, 0), rgb(0, 0, 255));
+        let color = |css: &str, id: &str| {
+            let mut doc = parse("<div id=a><p id=p>x</p></div>");
+            let mut rules = RuleSet::new(VIEW);
+            rules.add(&mut doc, css, Origin::Author);
+            rules.compute(&doc).style(by_id(&doc, id)).unwrap().get(Property::TextColor)
+        };
+        let reg = "@property --c { syntax: \"*\"; inherits: false; initial-value: red }";
+        assert_eq!(color(&format!("@layer base {{ {reg} }} p {{ color: var(--c) }}"), "p"), red);
+        assert_eq!(color(&format!("@media screen {{ {reg} }} p {{ color: var(--c) }}"), "p"), red);
+        // No initial value: still not inherited (the fallback shows).
+        assert_eq!(color("@property --c { syntax: \"*\"; inherits: false } #a { --c: blue } p { color: var(--c, red) }", "p"), red);
+        // A custom property that uses a registered one.
+        assert_eq!(color(&format!("{reg} p {{ --d: var(--c); color: var(--d) }}"), "p"), red);
+        assert_eq!(color(&format!("{reg} #a {{ --c: blue }} p {{ --d: var(--c); color: var(--d) }}"), "p"), red);
+        assert_eq!(color(&format!("{reg} #a {{ --c: blue }} #a {{ --d: var(--c); color: var(--d) }}"), "a"), blue);
+        // 50 @property rules add no rule.
+        let mut doc = parse("<div id=a><p id=p>x</p></div>");
+        let mut rules = RuleSet::new(VIEW);
+        let css: String = (0..50).map(|i| format!("@property --p{i} {{ syntax: \"*\"; inherits: {}; initial-value: {i}px }}", i % 2 == 0)).collect();
+        rules.add(&mut doc, &css, Origin::Author);
+        assert_eq!(rules.len(), 0);
+        assert!(rules.is_registered("--p49"));
+    }
+
+    #[test]
+    fn register_property_from_code() {
+        let mut doc = parse("<div id=a><p id=p>x</p></div>");
+        let mut rules = RuleSet::new(VIEW);
+        assert!(rules.register_property("--c", Some("red"), false));
+        assert!(!rules.register_property("--c", Some("blue"), true));
+        rules.add(&mut doc, "p { color: var(--c) }", Origin::Author);
+        assert_eq!(rules.compute(&doc).style(by_id(&doc, "p")).unwrap().get(Property::TextColor), rgb(255, 0, 0));
     }
 
     #[test]
