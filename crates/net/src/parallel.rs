@@ -2,8 +2,10 @@
 //! trip (about 40 ms to the staging server), so 17 files cost 17 round trips. `Client::spawn` runs a request on a worker thread
 //! and gives a `Task` to wait on, so the caller can start many and take the results in the order that it wants.
 //!
-//! - At most `MAX_WORKERS` run at once for a client and all its forks (`Client::fork`). Chrome opens 6 connections for each
-//!   server with HTTP/1.1, and so do we. More jobs wait in a queue, which is not bounded here: the caller bounds what it starts.
+//! - At most `MAX_WORKERS` run at once for a client and all its forks (`Client::fork`). More jobs wait in a queue, which is not
+//!   bounded here: the caller bounds what it starts. An HTTP/2 server takes many requests on one connection, up to its
+//!   `SETTINGS_MAX_CONCURRENT_STREAMS` (`h2.rs` waits above it). Chrome opens 6 connections for each server with HTTP/1.1, and so
+//!   do we (`MAX_PER_SERVER`, in `http.rs`): a worker waits for one of them.
 //! - A worker thread waits `PARK` for a job, then ends. A parked worker uses no CPU. A page that asks for files a few at a time
 //!   starts at most `MAX_WORKERS` threads, not one for each file.
 //! - The workers use the connection pool of the client: a connection that a worker is done with serves the next request.
@@ -18,8 +20,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-/// Worker threads at once for one client and its forks.
-pub const MAX_WORKERS: usize = 6;
+/// Worker threads at once for one client and its forks. A worker blocks on its request, so this is the number of requests in flight.
+/// A replay of github.com with 400 ms of latency per request loaded in 9.7 s with 6, 5.0 s with 32 and 3.9 s with 128. Peak RSS rose
+/// from 151 to 156 MiB.
+pub const MAX_WORKERS: usize = 128;
+
+/// HTTP/1.1 connections in use at once to one server, as in Chrome.
+pub const MAX_PER_SERVER: usize = 6;
 
 /// Give glibc two malloc arenas, not up to 8 for each core. Each worker thread of a page took an arena of its own, and the memory
 /// that it freed there stayed in it: the page thread could not use it, and the next worker took a new arena. In 15 runs of one journey
@@ -376,7 +383,7 @@ mod tests {
         assert!(took >= LATENCY * 2 && took < LATENCY * 5, "took {took:?}");
         assert_eq!(bodies, (0..12).map(|i| format!("body of /{i}")).collect::<Vec<_>>());
         // 6 connections, each used twice.
-        assert_eq!(accepted.load(Ordering::SeqCst), MAX_WORKERS);
+        assert_eq!(accepted.load(Ordering::SeqCst), MAX_PER_SERVER);
     }
 
     #[test]

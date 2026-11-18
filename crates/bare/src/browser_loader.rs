@@ -1075,10 +1075,10 @@ struct Net {
     ahead: bare_js::parse_ahead::Ahead,
 }
 
-/// Downloads that are started and not taken at once. The workers run `MAX_WORKERS` of them at a time (Chrome opens 6 connections for
-/// HTTP/1.1), in the order they were started. A file that is done waits here until its element takes it, and does not hold a worker:
+/// Downloads that are started and not taken at once. The workers run `MAX_WORKERS` of them at a time (6 for each HTTP/1.1 server, as
+/// Chrome), in the order they were started. A file that is done waits here until its element takes it, and does not hold a worker:
 /// with a window of 6, a slow first script kept the 5 files after it from being replaced, and the connections stood idle.
-const WINDOW: usize = 32;
+const WINDOW: usize = bare_net::parallel::MAX_WORKERS;
 
 impl Net {
     fn new(client: Client) -> Net {
