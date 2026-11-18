@@ -70,6 +70,8 @@ struct Cold {
     /// Class walk flags (see `eval_classes.rs`): per function and per class of this script.
     fflags: Vec<u8>,
     cflags: Vec<u8>,
+    /// The script is the code of a direct eval: its root has `RScope::with` (`eval_direct`).
+    direct: bool,
 }
 
 impl Caches {
@@ -87,6 +89,7 @@ impl Caches {
                 prop_str: vec![None; st.props],
                 fflags: vec![0; st.funcs],
                 cflags: vec![0; st.classes],
+                direct: false,
             }),
         }
     }
@@ -177,18 +180,24 @@ impl<'p> Interp<'p> {
     }
 
     fn add_script_kind(&mut self, source: &str, kind: crate::parse_cache::Kind) -> Res<usize> {
+        self.add_script_in(source, kind, false)
+    }
+
+    /// `direct`: the code of a direct eval. Its sites that leave its root are dynamic, so it keeps a cache slot apart from the same text
+    /// as a script.
+    fn add_script_in(&mut self, source: &str, kind: crate::parse_cache::Kind, direct: bool) -> Res<usize> {
         if self.scripts.len() - self.n_lazy >= self.limits.max_scripts {
             return Err(Error::Limit(LimitKind::Scripts));
         }
         // The same classic text keeps one slot: its code and caches do not depend on how often it runs, and a new run only
         // instantiates it again. Each run still makes its own functions and checks its own declarations. A harness that
         // polls with one text (`expect js`) would otherwise fill `max_scripts`. A full realm refuses first, so a refusal costs no lookup.
-        let key = kind.is_classic().then(|| (script_hash(source.as_bytes()) >> (64 - SCRIPT_IDS_BITS)) as usize);
+        let key = kind.is_classic().then(|| (script_hash(source.as_bytes()) >> (64 - SCRIPT_IDS_BITS)) as usize ^ direct as usize);
         if let Some(k) = key
             && let Some(&id) = self.script_ids.get(k).filter(|&&id| id != 0) {
                 let id = id as usize - 1;
-                let prog = if id == self.cur { &self.prog } else { &self.scripts[id].prog };
-                if prog.source == source {
+                let (prog, cc) = if id == self.cur { (&self.prog, &self.cc) } else { (&self.scripts[id].prog, &self.scripts[id].cc) };
+                if prog.source == source && cc.cold.direct == direct {
                     return Ok(id);
                 }
             }
@@ -212,6 +221,13 @@ impl<'p> Interp<'p> {
         self.scripts.push(Code::new(parsed));
         self.select(id);
         let r = self.in_call(|it| it.walk_program());
+        if direct {
+            // Sites resolve when they run, so the flag is in time. The walk opened the root at `sc_mark`.
+            self.cc.cold.direct = true;
+            if let Some(root) = self.sc_all.get_mut(sc_mark) {
+                root.with = true;
+            }
+        }
         self.select(old);
         if let Err(e) = r {
             self.scripts.pop();
@@ -345,9 +361,40 @@ impl<'p> Interp<'p> {
     #[cold]
     #[inline(never)]
     pub fn eval_global(&mut self, value: Value) -> Res<Value> {
+        self.eval_code(value, false)
+    }
+
+    /// The realm's `%eval%`, made at the first ask. A host defines the global `eval` with it.
+    pub fn eval_function(&mut self) -> Res<ObjId> {
+        if let Some(f) = self.eval_fn {
+            return Ok(f);
+        }
+        let f = self.native(Nat::Eval, "eval", 1)?;
+        self.eval_fn = Some(f);
+        Ok(f)
+    }
+
+    /// The call `e` is `eval(...)`: the plain name `eval` as its callee, not optional. The walk gives its function `FL_EVAL`. The call is a
+    /// direct eval if the name holds `%eval%` when it runs (`eval_direct`).
+    fn direct_eval_call(&self, e: ExprId) -> bool {
+        matches!(self.prog.expr(e).kind, ExprKind::Call { callee, optional: false, .. }
+            if matches!(self.prog.expr(callee).kind, ExprKind::Ident) && self.cc.expr_name[callee.index()] == self.n_eval)
+    }
+
+    /// Direct eval (ECMA-262 PerformEval with `direct` true): run the code in a new environment under the environment of the call, so
+    /// it reads and writes the caller's bindings and `this`. Deviations: its `var`s and functions stay in that new environment also in
+    /// sloppy code (they do not join the caller's), a strict caller makes only the top level of the code strict, and `arguments`,
+    /// `new.target` and `super` of the caller are not visible.
+    #[cold]
+    #[inline(never)]
+    fn eval_direct(&mut self, value: Value) -> Res<Value> {
+        self.eval_code(value, true)
+    }
+
+    fn eval_code(&mut self, value: Value, direct: bool) -> Res<Value> {
         let Value::String(s)=value else { return Ok(value) };
         let source=h!(self,self.heap.to_string_lossy(s));
-        let id=self.add_script(&source)?;
+        let id=self.add_script_in(&source, crate::parse_cache::Kind::Classic, direct)?;
         let (old,env,strict,completion)=(self.cur,self.env,self.strict,self.completion);
         let scope=std::mem::take(&mut self.hs.scope);
         // Completion tracking uses depth zero. Keep the remaining call budget.
@@ -355,17 +402,17 @@ impl<'p> Interp<'p> {
         self.limits.max_call_depth=call_limit.saturating_sub(depth);
         self.depth=0;
         self.select(id);
-        self.strict=self.prog.strict;
+        self.strict=self.prog.strict || (direct && strict);
         let mut eval_env=None;
         let r=(|| {
-            self.env=self.new_env(0,self.strict)?;
+            self.env=if direct { self.new_env(env,true)? } else { self.new_env(0,self.strict)? };
             eval_env=Some(self.env);
             self.completion=Value::Undefined;
             let prog=self.prog.clone();
             let top=self.cc.scopes.len()-1;
             for i in 0..self.cc.scopes[top].vars.len() {
                 let n=self.cc.scopes[top].vars[i];
-                if self.strict { self.env_declare(self.env,n,INIT|MUT,Value::Undefined); }
+                if self.strict || direct { self.env_declare(self.env,n,INIT|MUT,Value::Undefined); }
                 else {
                     if self.find_in(0,n).is_some() { return Err(self.mk_err(4,"Eval var conflicts with a global lexical binding")); }
                     let k=self.name_key(n)?;
@@ -381,7 +428,7 @@ impl<'p> Interp<'p> {
                     StmtKind::Function(fid)=>{
                         let f=self.make_closure(fid,None,false)?;
                         let n=self.cc.cold.func_name[fid.index()];
-                        if self.strict {self.env_declare(self.env,n,INIT|MUT,f);}
+                        if self.strict || direct {self.env_declare(self.env,n,INIT|MUT,f);}
                         else {
                             if self.find_in(0,n).is_some() {return Err(self.mk_err(4,"Eval function conflicts with a global lexical binding"));}
                             let k=self.name_key(n)?;

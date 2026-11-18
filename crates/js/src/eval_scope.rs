@@ -26,14 +26,19 @@
 // Ideas taken from engines: V8 resolves a name at parse time to a context slot (depth, index) when no `with` or sloppy
 // `eval` is in the way. QuickJS resolves it to a closure variable reference at compile time. SpiderMonkey keeps a
 // `BindingKind` for each name, and it keeps a binding that no closure captures out of the environment object. This
-// engine has no `eval`, and its environments are an arena (`envs`), so the hop count and the slot index are enough, except behind
-// a `with`. A function that has no inner function or class keeps its variables in a frame, not in an environment (see
-// "Frame slots" below). A function with an inner function or class keeps its environment: not done.
+// engine's direct `eval` adds no binding to the caller, and its environments are an arena (`envs`), so the hop count and the slot
+// index are enough, except behind a `with` or out of the code of a direct eval. A function that has no inner function or class
+// keeps its variables in a frame, not in an environment (see "Frame slots" below). A function with an inner function or class
+// keeps its environment: not done.
 //
 // `with` opens a `Barrier` for its body (`eval_with.rs`): a site that must leave the body is dynamic, because an object environment is
 // in the chain and a hop count cannot see it. A site that a scope inside the body declares is resolved. The function that holds the
-// `with` has no frame slots (`FL_NOFR`). A direct `eval` would have to open a `Barrier` for the code that it can reach. The engine has
-// none.
+// `with` has no frame slots (`FL_NOFR`).
+//
+// A direct `eval` (`eval_direct`) runs its code in a new environment under the environment of the call. The root of that code has
+// `RScope::with` set: a site that leaves the root is dynamic, so it finds the locals of the caller by the full search. The function
+// that holds the call keeps its variables in its environment (`FL_EVAL`). The eval declares its `var`s and functions in its own
+// environment, so the static resolution of the caller stays true.
 
 const UNRES: u32 = 1 << 31;
 /// With `UNRES`: the site ran once, with the full search. Its second run resolves it.
@@ -55,6 +60,9 @@ const FRAME_ENV: u32 = 1;
 const FL_NOFR: u8 = 1;
 const FL_THIS: u8 = 2;
 const FL_EAGER: u8 = 4;
+/// `FL_EVAL`: it or an inner function holds a direct eval (`eval_direct`). The eval reads the locals by name, so the function also has
+/// `FL_NOFR`, and the bytecode compiler refuses it. The function whose code holds the call also has `FL_THIS`.
+const FL_EVAL: u8 = 8;
 /// The most frame slots of one function. A larger one keeps its environment.
 const FR_MAX: usize = 255;
 /// In `stmt_label`: a block, a `switch` or a loop head with `let` or `const` in frame slots: `FR_MARK | base << 12 | len`. A `try`
@@ -89,7 +97,8 @@ struct RScope {
     base: u32,
     /// The function that the scope is in (an index of `Interp::scopes`; the script for a scope outside functions).
     func: u32,
-    /// The scope is the body of a `with` (a `Barrier` too). The bytecode compiler refuses a function inside it.
+    /// The scope is the body of a `with` (a `Barrier` too), or the root of the code of a direct eval. The bytecode compiler refuses a
+    /// function inside it.
     with: bool,
     /// The scope is in the tree of a lazy function (`lazy_load`). It follows the scopes of every script that was walked before it.
     lazy: bool,
@@ -288,7 +297,8 @@ impl<'p> Interp<'p> {
             }
             let p = self.sc_all[scope as usize].parent;
             if p == NONE {
-                return GLOBAL;
+                // The root of the code of a direct eval: the caller's environments follow.
+                return if self.sc_all[scope as usize].with { 0 } else { GLOBAL };
             }
             hops += !frame as u32;
             scope = p;
@@ -435,7 +445,7 @@ const FR_ON: u8 = 4;
 // class (so no closure can read a variable of it), no `arguments`, no `new.target`, no `super`, no `delete name`, no `this`
 // (an arrow function may use `this`: it reads the one of its closure), and it is a plain synchronous function with simple
 // parameters. Async functions and generators keep their environment because their variables must survive a suspension.
-// This engine has no `eval`, and a function that holds a `with` keeps its environment (`FL_NOFR`), so no code can name a local by a string.
+// A function that holds a direct `eval` or a `with` keeps its environment (`FL_NOFR`), so no code can name a frame slot by a string.
 //
 // When: a function with a loop or a call (`FScope::eager`) gets its frame at its first call: one call can be long or recursive.
 // A function with neither gets it at its second call, so a function that runs once pays no layout. Its first call keeps an

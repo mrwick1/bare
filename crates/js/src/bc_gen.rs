@@ -182,6 +182,10 @@ impl<'p> Interp<'p> {
             return Err("generator or async function");
         }
         let fs = self.bc_fn_scope(fid).ok_or("no scope")?;
+        // A direct eval reads the locals by name: the walker keeps them in the environment.
+        if self.cc.scopes[fid.index()].fl & FL_EVAL != 0 {
+            return Err("direct eval");
+        }
         // A name that leaves a `with` body meets its object environment, which the loop does not search: the walker runs it.
         let mut p = self.sc_all[fs.scope as usize].parent;
         while p != NONE {
@@ -270,6 +274,10 @@ impl<'p> Interp<'p> {
     /// Compile the body of the current script. Call it after `declare_scope` ran for it (`exec_current`): the code does not
     /// declare the names of the script. The code returns the completion value.
     pub(super) fn bc_compile_script(&mut self) -> G<Code> {
+        // A direct eval in the body: the walker runs the call.
+        if self.cc.scopes.last().is_some_and(|s| s.fl & FL_EVAL != 0) {
+            return Err("direct eval");
+        }
         let root = self.bc_root().ok_or("no scope")?;
         let w = self.bc_walk(None, root);
         if w.bad.is_some() {

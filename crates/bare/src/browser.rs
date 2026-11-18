@@ -867,7 +867,9 @@ pub(crate) fn define_window(d: &Dom, it: &mut Interp<'_>, name: &str) -> R<bool>
         return Ok(true);
     }
     if name == "eval" {
-        d.def_method(it,it.global_object(),"eval",1,|_,it,_,a|it.eval_global(a.first().copied().unwrap_or(Value::Undefined)))?;
+        // The engine's own `%eval%`: a call `eval(x)` by that name is a direct eval.
+        let (f, k) = (it.eval_function()?, d.key(it, "eval")?);
+        it.define_data(it.global_object(), k, Value::Object(f), true, false, true)?;
         return Ok(true);
     }
     if name == "event" { crate::browser_gaps::define_event(d, it)?; return Ok(true); }

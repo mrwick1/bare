@@ -177,8 +177,8 @@ fn two_generators_and_a_leaf_function_do_not_share_slots() {
 
 #[test]
 fn eval_and_with_cannot_see_or_hide_the_locals_of_a_function() {
-    // The engine has no `eval`. `with` reaches a local only through an object that the code gives it. `Function` makes a function of
-    // the global scope, so no code can reach a local by name.
+    // This realm defines no global `eval` (`eval_direct_tests.rs` has one). `with` reaches a local only through an object that the
+    // code gives it. `Function` makes a function of the global scope, so no code can reach a local by name.
     assert_eq!(run_one("function f() { var local = 1; return eval('local') } f()"), "throw:ReferenceError");
     assert_eq!(run_one("function f() { var local = 1; with ({ local: 2 }) { return local } } f()"), "2");
     assert_eq!(run_one("function f() { var local = 1; with ({}) { return local } } f()"), "1");

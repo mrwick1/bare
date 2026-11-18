@@ -456,6 +456,8 @@ enum Nat {
     DecodeUriComponent,
     Escape,
     Unescape,
+    /// `%eval%`. Called as a function, it is the indirect eval.
+    Eval,
     /// JSON, RegExp and String.prototype bindings (`eval_builtins.rs`).
     Ext(Bi),
     Bin(BinFn),
@@ -675,6 +677,9 @@ pub struct Interp<'p> {
     // Walk context
     cur_strict: bool,
     n_arguments: u32,
+    n_eval: u32,
+    /// The realm's `%eval%` (`eval_function`). A call of it by the name `eval` in walked code is a direct eval (`eval_direct`).
+    eval_fn: Option<ObjId>,
     /// Class state (see `eval_classes.rs`).
     cls: ClassState,
     /// Inline caches of the member sites of the tree walker (see `eval_ic.rs`).
@@ -856,11 +861,14 @@ impl<'p> Interp<'p> {
             stk: StackState::default(),
             host_nt: None,
             n_arguments: 0,
+            n_eval: 0,
+            eval_fn: None,
             cls: ClassState::default(),
             ics: IcState::default(),
             bc: BcState::new(limits.exec),
         };
         it.n_arguments = it.intern_name("arguments");
+        it.n_eval = it.intern_name("eval");
         it.cls_init();
         h!(it, it.heap.set_lazy_prototype(it.object_proto, it.k_prototype, it.k_constructor));
         // The global lexical environment: id 0, never freed.
@@ -1389,8 +1397,10 @@ impl<'p> Interp<'p> {
         self.sc_fn = parent;
         let fsd = &mut self.cc.scopes[me];
         fsd.lo = lo;
-        // The function is an inner function of the one that holds it: that one has no frame slots.
+        // The function is an inner function of the one that holds it: that one has no frame slots. A direct eval in it can name the
+        // locals of the outer functions, so they keep `FL_EVAL` too.
         let fl = std::mem::replace(&mut self.fl, outer_fl | FL_NOFR);
+        self.fl |= fl & FL_EVAL;
         fsd.fl = fl;
         // The first call decides nothing, so a function that is never called pays nothing here, and one that runs once pays one store.
         if self.sc_class == 0 && f.mode == FuncMode::Plain {
@@ -1695,6 +1705,11 @@ impl<'p> Interp<'p> {
             ExprKind::Call { callee, args, .. } | ExprKind::New { callee, args } => {
                 self.fl |= FL_EAGER;
                 self.w_expr(callee, fs, ac)?;
+                if self.direct_eval_call(e) {
+                    self.fl |= FL_EVAL | FL_NOFR | FL_THIS;
+                    // The script body keeps it too: `bc_compile_script` refuses that body.
+                    self.cc.scopes[fs].fl |= FL_EVAL;
+                }
                 for x in prog.list(args) {
                     self.w_expr(x, fs, ac)?;
                 }
@@ -2951,7 +2966,16 @@ impl<'p> Interp<'p> {
                 }
                 let argv = self.eval_args(args)?;
                 self.mark_call(e);
-                let r = if self.is_callable(f) { self.call_fn(f, this, &argv) } else { Err(self.not_a_function(callee)) };
+                let r = if let Value::Object(o) = f
+                    && self.eval_fn == Some(o)
+                    && self.direct_eval_call(e)
+                {
+                    self.eval_direct(argv.first().copied().unwrap_or(Value::Undefined))
+                } else if self.is_callable(f) {
+                    self.call_fn(f, this, &argv)
+                } else {
+                    Err(self.not_a_function(callee))
+                };
                 self.stk.pos = 0;
                 let r = r?;
                 self.arg_pool.push(argv);
@@ -4104,6 +4128,9 @@ mod module_tests;
 #[cfg(test)]
 #[path = "eval_scope_tests.rs"]
 mod scope_tests;
+#[cfg(test)]
+#[path = "eval_direct_tests.rs"]
+mod direct_eval_tests;
 #[cfg(test)]
 #[path = "eval_builtins_tests.rs"]
 mod builtin_tests;
