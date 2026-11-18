@@ -450,6 +450,40 @@ fn timers_and_queued_messages_keep_their_callbacks_alive_across_collect_and_scri
 }
 
 #[test]
+fn a_cleared_or_finished_timer_frees_its_callback_at_the_next_collect() {
+    big(|| {
+        let mut b = browser();
+        js(&mut b, "var w = {}; function arm(tag, ms) { var f = function () {}; w[tag] = new WeakRef(f); return setTimeout(f, ms) } clearTimeout(arm('cleared', 50)); arm('done', 0); arm('waiting', 100); 0");
+        adv(&mut b, 10.0);
+        b.collect(&[]).unwrap();
+        assert_eq!(js(&mut b, "['cleared', 'done', 'waiting'].map(t => w[t].deref() === undefined).join()"), "true,true,false");
+        // The freed slots are used again: many short timers do not grow the table of persistent handles past one round.
+        let mut sizes = Vec::new();
+        for _ in 0..3 {
+            js(&mut b, "for (var i = 0; i < 200; i++) setTimeout(function () {}, 0)");
+            adv(&mut b, 1.0);
+            b.collect(&[]).unwrap();
+            sizes.push(b.it.persistent_slots());
+        }
+        assert!(sizes[0] <= 203 && sizes[1] == sizes[0] && sizes[2] == sizes[0], "{sizes:?}");
+        assert_eq!(js(&mut b, "typeof w.waiting.deref()"), "function");
+    });
+}
+
+#[test]
+fn timer_arguments_survive_a_collect() {
+    big(|| {
+        let mut b = browser();
+        // Only the timer holds the object and the string; the primitives need no handle.
+        js(&mut b, "var got; setTimeout(function (o, s, n, u, z) { got = [o.k, s, n, u, z].join() }, 50, { k: 'obj' }, 'st' + 'r', 1.5, undefined, 7n); 0");
+        b.collect(&[]).unwrap();
+        js(&mut b, "var junk = []; for (var i = 0; i < 100; i++) junk.push({ k: i }, 'x' + i); junk = null; 0");
+        adv(&mut b, 60.0);
+        assert_eq!(js(&mut b, "got"), "obj,str,1.5,,7");
+    });
+}
+
+#[test]
 fn unreachable_channels_prune_with_their_queued_messages_and_slots_do_not_alias() {
     big(|| {
         let mut b = browser();

@@ -1,16 +1,17 @@
 // The old engine behind the host interface `bare-js-api` (plan step S0.3). Included by `eval.rs`.
 //
-// The handle stack and the persistent table are two vectors of `Value` in the realm; `roots` and `collect` treat both as roots. This
-// engine collects only between tasks, so `safepoint` does nothing. An engine error that is not an exception crosses the interface as
-// `Abort`; the original `Error` waits in `ApiState::abort`, so a host that passes the abort on gives back the same error.
+// The handle stack and the persistent table are two vectors of `Value` in the realm; `roots` and `collect` treat the stack and the live
+// persistent slots as roots. This engine collects only between tasks, so `safepoint` does nothing. An engine error that is not an
+// exception crosses the interface as `Abort`; the original `Error` waits in `ApiState::abort`, so a host that passes the abort on
+// gives back the same error.
 
 /// The realm state of the host interface.
 #[derive(Default)]
 pub(crate) struct ApiState<'p> {
     stack: Vec<Value>,
+    /// The persistent table. A slot whose bit in `slots` is clear is free; its old value is no root and waits to be overwritten.
     persistent: Vec<Value>,
-    /// Released slots of `persistent`.
-    free: Vec<u32>,
+    slots: Rc<bare_js_api::Slots>,
     host: Option<Rc<dyn bare_js_api::Host<Interp<'p>>>>,
     abort: Option<Error>,
 }
@@ -18,11 +19,39 @@ pub(crate) struct ApiState<'p> {
 impl ApiState<'_> {
     fn values(&self, out: &mut Vec<Value>) {
         out.extend_from_slice(&self.stack);
-        out.extend_from_slice(&self.persistent);
+        self.slots.for_each(|id| out.push(self.persistent[id as usize]));
     }
 }
 
 impl<'p> Interp<'p> {
+    /// A persistent handle of `v`, for host code that still holds values (plan step S0.4).
+    #[inline]
+    pub fn persist_value(&mut self, v: Value) -> bare_js_api::Persistent {
+        bare_js_api::Persistent::from_id(self.api_persist(v), self.api.slots.clone())
+    }
+
+    #[inline]
+    fn api_persist(&mut self, v: Value) -> u32 {
+        let a = &mut *self.api;
+        let id = a.slots.take();
+        match a.persistent.get_mut(id as usize) {
+            Some(slot) => *slot = v,
+            None => a.persistent.push(v),
+        }
+        id
+    }
+
+    /// The value of a persistent handle of this realm, for host code that still holds values (plan step S0.4).
+    #[inline]
+    pub fn persistent_value(&self, p: &bare_js_api::Persistent) -> Value {
+        self.api.persistent[p.id() as usize]
+    }
+
+    /// The length of the persistent table: live handles and free slots.
+    pub fn persistent_slots(&self) -> usize {
+        self.api.persistent.len()
+    }
+
     fn api_push<'s>(&mut self, v: Value) -> bare_js_api::Local<'s> {
         self.api.stack.push(v);
         bare_js_api::Local::from_slot(self.api.stack.len() as u32 - 1)
@@ -103,26 +132,15 @@ impl<'p> bare_js_api::Engine for Interp<'p> {
     }
 
     fn persist(&mut self, v: bare_js_api::Local<'_>) -> u32 {
-        let v = self.api_at(v);
-        match self.api.free.pop() {
-            Some(id) => {
-                self.api.persistent[id as usize] = v;
-                id
-            }
-            None => {
-                self.api.persistent.push(v);
-                self.api.persistent.len() as u32 - 1
-            }
-        }
+        self.api_persist(self.api_at(v))
     }
 
     fn persistent<'s>(&mut self, id: u32) -> bare_js_api::Local<'s> {
         self.api_push(self.api.persistent[id as usize])
     }
 
-    fn release(&mut self, id: u32) {
-        self.api.persistent[id as usize] = Value::Undefined;
-        self.api.free.push(id);
+    fn slots(&self) -> &Rc<bare_js_api::Slots> {
+        &self.api.slots
     }
 
     fn undefined<'s>(&mut self) -> bare_js_api::Local<'s> {

@@ -117,9 +117,13 @@ fn a_persistent_handle_keeps_its_value_through_a_collection() {
         it.collect(&[]).unwrap();
         assert_eq!(out(&mut it, "kept(0).tag"), "kept");
         let p = h.kept.borrow_mut().pop().unwrap();
-        enter(&mut it, |s| s.release(p));
-        assert!(matches!(it.api.persistent[..], [Value::Undefined]));
-        assert_eq!(it.api.free, vec![0]);
+        drop(p);
+        let mut roots = Vec::new();
+        it.api.values(&mut roots);
+        assert!(roots.is_empty(), "a dropped handle is no root");
+        out(&mut it, "keep(1)");
+        assert_eq!(it.api.persistent.len(), 1, "the freed slot is used again");
+        assert_eq!(out(&mut it, "kept(0)"), "1");
     });
 }
 

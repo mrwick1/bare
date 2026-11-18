@@ -14,7 +14,8 @@ enum V {
 #[derive(Default)]
 struct Toy {
     stack: Vec<V>,
-    persistent: Vec<Option<V>>,
+    persistent: Vec<V>,
+    slots: Rc<Slots>,
     objects: Vec<Vec<(V, V)>>,
 }
 
@@ -40,15 +41,18 @@ impl Engine for Toy {
         self.stack[to as usize] = self.stack[from as usize].clone();
     }
     fn persist(&mut self, v: Local<'_>) -> u32 {
-        self.persistent.push(Some(self.at(v).clone()));
-        self.persistent.len() as u32 - 1
+        let (id, v) = (self.slots.take(), self.at(v).clone());
+        match self.persistent.get_mut(id as usize) {
+            Some(slot) => *slot = v,
+            None => self.persistent.push(v),
+        }
+        id
     }
     fn persistent<'s>(&mut self, id: u32) -> Local<'s> {
-        let v = self.persistent[id as usize].clone().expect("released");
-        self.push(v)
+        self.push(self.persistent[id as usize].clone())
     }
-    fn release(&mut self, id: u32) {
-        self.persistent[id as usize] = None;
+    fn slots(&self) -> &Rc<Slots> {
+        &self.slots
     }
     fn undefined<'s>(&mut self) -> Local<'s> {
         self.push(V::Undefined)
@@ -169,7 +173,7 @@ fn escape_scope_keeps_only_the_result_or_the_exception() {
 }
 
 #[test]
-fn a_persistent_handle_outlives_its_scope_until_release() {
+fn a_persistent_handle_outlives_its_scope_until_it_is_dropped() {
     let mut e = toy();
     let p = enter(&mut e, |s| {
         let v = s.string("listener").unwrap();
@@ -181,7 +185,25 @@ fn a_persistent_handle_outlives_its_scope_until_release() {
         assert_eq!(s.type_of(v), Type::String);
         s.release(p);
     });
-    assert_eq!(e.persistent, vec![None]);
+    let live = |e: &Toy| {
+        let mut v = Vec::new();
+        e.slots.for_each(|id| v.push(id));
+        v
+    };
+    assert_eq!(live(&e), Vec::<u32>::new(), "a dropped slot is free at once");
+    let (q, r) = enter(&mut e, |s| {
+        let v = s.number(2.0);
+        (s.persist(v), s.persist(v))
+    });
+    assert_eq!((q.id(), r.id()), (0, 1), "the lowest free slot first");
+    drop(q);
+    assert_eq!(live(&e), vec![1], "a plain drop needs no scope");
+    let t = enter(&mut e, |s| {
+        let v = s.number(3.0);
+        s.persist(v)
+    });
+    assert_eq!(t.id(), 0, "a freed slot is used again");
+    assert_eq!(live(&e), vec![0, 1]);
 }
 
 #[test]
