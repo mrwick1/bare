@@ -126,7 +126,7 @@ impl<'p> Interp<'p> {
     }
 
     fn call_host(&mut self, id: u32, this: Value, args: &[Value], is_new: bool, nt: Option<ObjId>) -> Res<Value> {
-        let Some(host) = self.host.clone() else { return Err(unsupported("host function without a host", Span::default())) };
+        let Some(host) = self.host.clone() else { return self.call_api_host(id, this, args, is_new, nt) };
         // This call sees its own `new.target` (none for a plain call). The caller's comes back on every exit.
         let saved = std::mem::replace(&mut self.host_nt, nt);
         let r = host.call(self, id, this, args, is_new);

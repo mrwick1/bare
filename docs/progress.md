@@ -13403,3 +13403,18 @@ A new crate `crates/js-api` (`bare-js-api`) holds the interface between the brow
 Checks: 4 unit tests with a toy engine (scope pops, escape of a value or an exception, persistent handles, arguments) and 5 doc tests. 4 of the doc tests must fail to compile, each with its error code: a local that leaves its scope (E0521), an inner local kept in the outer scope (E0521), a string borrow held across a call (E0502), and a released persistent handle (E0382). Clippy is clean. The 4 unit tests also pass on the Windows 11 VM (`cargo xwin test --target x86_64-pc-windows-msvc`).
 
 Not done: no engine implements the trait yet (S0.3), so no instruction numbers.
+
+## 2026-11-18: the old engine behind the host interface (plan step S0.3)
+
+`bare-js` implements `bare_js_api::Engine` for `Interp` (`crates/js/src/eval_api.rs`). The handle stack and the persistent table are two vectors of `Value` in the realm. `Interp::roots` and `Interp::collect` treat both as roots. This engine collects only between tasks, so `safepoint` does nothing. A host set through the interface gets the host calls; the old `Host` path stays as it was and is checked first. An engine error that is not an exception crosses the interface as `Abort`. The original error waits in the realm, so a host that passes the abort on gives back the same error (a step limit stays `Limit(Steps)`).
+
+Interface changes: `Engine` no longer needs `'static`, because `Interp` has a lifetime parameter. `Scope::engine` (hidden) lets an engine read a slot before the scope ends. `Host::call` takes `this` as `Local<'s>`.
+
+Checks:
+
+- 4 adapter tests with a host that is written only against the interface: host functions, a call back into script, a thrown value, an escape scope, a step limit through the host, a persistent handle through a collection, and plain values. The 42 old host tests pass.
+- Windows: the adapter tests, the 10 `host_tests` and the `bare-js-api` tests pass on the Windows 11 VM (`cargo xwin test`, run on the VM).
+- Cost rows (`tools/js/cost_matrix.sh`, archMachine, base = the parent commit `cf3830c5`, 3 runs per row): no row over +0.5%; mean +0.004% (glibc). A first version that checked the interface host before the old host put 5 host-call rows over +0.5% (up to +0.91% on `select_load react 1000`). The interface path is now a cold function after the old host check.
+- `parse_load deep 1` and `deep 10` abort (exit 134) on the base tree too, so they are not counted.
+
+Not done: the browser does not use the interface yet (S0.4).
