@@ -1,11 +1,12 @@
 //! Load test for the evaluator. One case at one scale per process, so that the peak memory belongs to that run.
 //!
-//!   eval_load CASE SCALE      CASE: loop | loopfn | calls | fib | closures | objects | webpack | throws | concat | concat_n | concat_pre_n    SCALE: 1, 10, 100 (concat_n and concat_pre_n: the number of parts)
+//!   eval_load CASE SCALE [--source]      CASE: loop | loopfn | calls | fib | closures | objects | webpack | throws | concat | concat_n | concat_pre_n    SCALE: 1, 10, 100 (concat_n and concat_pre_n: the number of parts)
 //!
 //! Each case builds a small program, runs it, and checks the result against the same computation done in Rust
 //! (the checksum). A wrong checksum exits with status 1 and prints no timing. It prints parse, setup and run
 //! time (wall), CPU time, peak resident memory, allocations of the run, steps, the environments and functions the
 //! evaluator holds, and what an explicit `collect` frees. `tools/js/eval_load.sh` runs the matrix with caps.
+//! With `--source` it prints the expected result on the first line and the program after it, and runs nothing.
 
 use bare_js::eval::*;
 use bare_js::heap::{Get, Heap};
@@ -278,11 +279,17 @@ fn run_case(name: String, scale: usize) {
 
 fn main() {
     let a: Vec<String> = std::env::args().collect();
-    if a.len() != 3 {
-        die("usage: eval_load CASE SCALE".into());
+    if a.len() != 3 && !(a.len() == 4 && a[3] == "--source") {
+        die("usage: eval_load CASE SCALE [--source]".into());
     }
     let scale: usize = a[2].parse().unwrap_or_else(|_| die("scale".into()));
     let name = a[1].clone();
+    // `--source` prints the program of the case and its expected result, for other engines (tools/js/engine_compare.py).
+    if a.len() == 4 {
+        let c = case(&name, scale);
+        println!("{}\n{}", c.expect, c.src);
+        return;
+    }
     // 16 MiB: a JS call level needs a few KiB of native stack and max_call_depth is 100.
     std::thread::Builder::new().stack_size(16 << 20).spawn(move || run_case(name, scale)).unwrap().join().unwrap_or_else(|_| die("panic".into()));
 }
