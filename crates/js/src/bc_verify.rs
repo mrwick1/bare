@@ -53,6 +53,7 @@ pub(super) fn verify(code: &Code) -> Result<(), String> {
                 },
                 Some('q') => match code.consts.get(v as usize) {
                     Some(Const::Number(_)) => {}
+                    Some(Const::String(_) | Const::Null | Const::Undefined) if matches!(i.op, Op::JnEqK | Op::JnNeK | Op::JnSEqK | Op::JnSNeK) => {}
                     _ => return err("the constant is not a number"),
                 },
                 Some('c') => match ic_used.get_mut(v as usize) {
