@@ -319,7 +319,7 @@ impl<'a> Cx<'a> {
                 "range" => "slider",
                 "number" => "spinbutton",
                 "search" => "searchbox",
-                "hidden" | "file" | "color" | "date" | "datetime-local" | "month" | "time" | "week" => return None,
+                "hidden" | "file" | "color" => return None,
                 _ => "textbox",
             },
             "textarea" => "textbox",

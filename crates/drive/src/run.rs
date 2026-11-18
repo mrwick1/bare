@@ -1169,6 +1169,11 @@ fn attempt(p: &mut Page, m: &mut Memo, a: &Action, out: Option<&PathBuf>, red: &
                     if p.is_password(h) {
                         m.typed.push(text.clone());
                     }
+                    // A date or time field takes no keys: it is filled at once.
+                    if p.is_date_input(h) {
+                        p.fill_date(h, text).map_err(|r| refused(p, h, r))?;
+                        return Ok(None);
+                    }
                     // The page can put a new field in the place of `h` on the click: the keys go to that one.
                     let h = p.type_start(h, text.is_empty()).map_err(|r| refused(p, h, r))?;
                     m.keys = Some((h, text.chars().rev().collect()));

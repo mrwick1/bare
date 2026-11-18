@@ -589,6 +589,9 @@ impl Page {
     /// Type `text` into a field as a user does: click it, select its text with Control+A (so the new text replaces it), then press one key
     /// for each character (a line feed is Enter). Empty text clears the field with Backspace.
     pub fn type_text(&mut self, h: Handle, text: &str) -> Result<(), Refusal> {
+        if self.is_date_input(h) {
+            return self.fill_date(h, text).map(drop);
+        }
         self.type_start(h, text.is_empty())?;
         for c in text.chars() {
             self.type_char(c);
@@ -602,6 +605,9 @@ impl Page {
     /// character. `last_key`: the last character is a typed key (`type_char`), so a widget that waits for a key (autocomplete) sees one.
     /// Gives the field that has the focus (see `type_start`).
     pub fn fill_text(&mut self, h: Handle, text: &str, last_key: bool) -> Result<Handle, Refusal> {
+        if self.is_date_input(h) {
+            return self.fill_date(h, text);
+        }
         let h = self.type_start(h, text.is_empty())?;
         let (head, last) = match text.char_indices().last() {
             Some((i, c)) if last_key => (&text[..i], Some(c)),
@@ -612,6 +618,40 @@ impl Page {
         }
         if let Some(c) = last {
             self.type_char(c);
+        }
+        self.after_action();
+        Ok(h)
+    }
+
+    /// Is `h` a date or time `<input>` that the user can edit? It takes no keys: `fill_date` fills it.
+    pub fn is_date_input(&mut self, h: Handle) -> bool {
+        self.browser().is_some_and(|b| b.date_kind(h.node).is_some())
+    }
+
+    /// Fill a date or time `<input>` as Playwright `fill` does: the trimmed `text` must be a value that the field keeps as it is (2026-11-18,
+    /// 2026-11, 2026-W47, 10:30, 2026-11-18T10:30; empty clears). Focus the field, set the value, then `input` and `change` fire. No key
+    /// events: a person picks the date in a widget.
+    pub fn fill_date(&mut self, h: Handle, text: &str) -> Result<Handle, Refusal> {
+        self.visible_box(h)?;
+        if self.disabled(h) {
+            return Err(Refusal::Disabled);
+        }
+        let Some(kind) = self.browser().and_then(|b| b.date_kind(h.node)) else { return Err(Refusal::NotEditable) };
+        let v = text.trim();
+        if crate::browser_controls::sanitize(kind, false, v) != v {
+            let like = match kind {
+                "date" => "2026-11-18",
+                "month" => "2026-11",
+                "week" => "2026-W47",
+                "time" => "10:30",
+                _ => "2026-11-18T10:30",
+            };
+            return Err(Refusal::Wrong("malformed_value", format!("{} is a {kind} field: it takes a value such as {like}, not {v:?}", self.describe(h))));
+        }
+        self.focus(h)?;
+        let r = self.browser().map(|b| b.drive_value(h.node, v.to_string()));
+        if let Some(r) = r {
+            self.after(r);
         }
         self.after_action();
         Ok(h)
