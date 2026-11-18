@@ -10,9 +10,8 @@
 //! - The five traps (`get`, `set`, `has`, `defineProperty`, `deleteProperty`) are host functions that are shared by all the windows of
 //!   a realm. A trap finds its window by the target (`Kids::win_of`).
 //! - `postMessage` puts the message in the outbox of the page (`Kids::send`). The driver moves it to the other page, which checks the
-//!   target origin and queues a `message` event (`browser_child.rs`, "Messages"). A `MessagePort` in the transfer list does not cross
-//!   yet (step 3c of `docs/design-gmail-frames.md`): the message is dropped and the console gets a warning. `blur`, `focus` and
-//!   `close` do nothing yet.
+//!   target origin and queues a `message` event (`browser_child.rs`, "Messages"). A `MessagePort` in the transfer list crosses as an end
+//!   of the port hub (`Dom::export_ports`, `browser_child.rs` "Ports"). `blur`, `focus` and `close` do nothing yet.
 //! - `length` is 0: the child frames of a child are not counted yet.
 //! - `location`: a write to `iframe.contentWindow.location` navigates the child. A read gives an object with `replace(url)` and a `href`
 //!   setter (the getter throws `SecurityError`). In a child, `parent.location = url` does nothing yet: the parent is not reachable
@@ -153,14 +152,11 @@ fn win_post(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> 
     if matches!(to, Side::Child(id) if !d.kids.alive(id)) {
         return Ok(Value::Undefined);
     }
-    if list.iter().any(|&o| !matches!(it.clone_class(o), bare_js::eval::CloneClass::Buffer)) {
-        crate::browser_console::push_text(d, it, crate::browser_console::ConsoleLevel::Warn, "A MessagePort cannot move to another page yet");
-        return Ok(Value::Undefined);
-    }
     if d.kids.outbox_len() >= d.max_messages() {
         return Err(d.lim("messages"));
     }
-    let (state, transfer) = crate::browser_navigation_state::clone_state_with(d, it, a[0], &list)?;
+    let (state, mut transfer) = crate::browser_navigation_state::clone_state_with(d, it, a[0], &list)?;
+    d.export_ports(it, &mut transfer)?;
     d.kids.send(Out { to, target_origin, origin, state, transfer });
     Ok(Value::Undefined)
 }

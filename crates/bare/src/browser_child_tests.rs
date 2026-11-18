@@ -432,27 +432,6 @@ fn an_array_buffer_in_the_transfer_list_moves_to_the_other_page() {
 }
 
 #[test]
-fn a_message_port_does_not_cross_to_another_page_yet() {
-    big(|| {
-        let other = server(|| vec![("/c", page("addEventListener('message', function(e){ log('got') })"))]);
-        let o = other.url("/c");
-        let srv = server(move || {
-            vec![(
-                "/",
-                framed(&o, &format!("{STORE}; f.addEventListener('load', function(){{ var mc = new MessageChannel(); mc.port2.onmessage = function(e){{ console.log('local:' + e.data) }}; store('ret', String(w.postMessage('x', '*', [mc.port1]))); mc.port1.postMessage('hi') }})")),
-            )]
-        });
-        let (mut s, r) = run(srv.url("/"), |_| {});
-        assert_eq!(r.stop, SessionStop::Page(Stop::Settled), "{r:?}");
-        assert_eq!(get(&s, &srv, "ret").as_deref(), Some("undefined"));
-        assert_eq!(get(&s, &other, "log"), None);
-        let lines = console(&mut s);
-        assert_eq!(lines.iter().filter(|l| l.contains("A MessagePort cannot move to another page yet")).count(), 1, "{lines:?}");
-        assert!(lines.contains(&"local:hi".to_string()), "{lines:?}");
-    });
-}
-
-#[test]
 fn a_message_to_a_child_that_still_loads_is_dropped_and_the_parent_settles() {
     big(|| {
         let other = server(|| vec![("/c", page("addEventListener('message', function(e){ log(e.data) })"))]);
@@ -504,5 +483,238 @@ fn a_message_to_a_removed_frame_never_reaches_a_later_frame() {
         let (mut s, r) = run(srv.url("/"), |_| {});
         assert_eq!(r.stop, SessionStop::Page(Stop::Settled), "{r:?}");
         assert_eq!(console(&mut s), vec!["second loaded".to_string()]);
+    });
+}
+
+// ---------------------------------------------------------------------------------------------- ports across pages
+
+/// A `MessagePort` pair is split across the parent and a child. The console of the top page shows each page's lines in run order.
+fn lines(srv: &Server, tune: impl FnOnce(&mut SessionConfig)) -> (Session, Vec<String>) {
+    let (mut s, r) = run(srv.url("/"), tune);
+    assert_eq!(r.stop, SessionStop::Page(Stop::Settled), "{r:?}");
+    let l = console(&mut s);
+    (s, l)
+}
+
+/// Each line of the child gets a prefix with its URL. This strips it so the test reads the same for any port.
+fn plain(v: &[String]) -> Vec<String> {
+    v.iter().map(|l| l.rsplit_once(": ").map_or(l.clone(), |p| p.1.to_string())).collect()
+}
+
+#[test]
+fn a_port_moves_from_the_parent_to_a_child_and_they_talk_three_times_in_the_same_order() {
+    big(|| {
+        let other = server(|| {
+            vec![("/c", page("addEventListener('message', function(e){ var p = e.ports[0]; p.onmessage = function(m){ console.log('c' + m.data); p.postMessage('r' + m.data) }; p.postMessage('r0') })"))]
+        });
+        let o = other.url("/c");
+        let srv = server(move || {
+            vec![(
+                "/",
+                framed(&o, "f.addEventListener('load', function(){ var mc = new MessageChannel(); var n = 0; mc.port1.onmessage = function(e){ console.log('p' + e.data); if (++n < 4) mc.port1.postMessage(n) }; w.postMessage('init', '*', [mc.port2]) })"),
+            )]
+        });
+        let mut all = Vec::new();
+        for _ in 0..2 {
+            let (_, l) = lines(&srv, |_| {});
+            all.push(plain(&l));
+        }
+        assert_eq!(all[0], all[1]);
+        assert_eq!(all[0], ["pr0", "c1", "pr1", "c2", "pr2", "c3", "pr3"].map(String::from).to_vec(), "{:?}", all[0]);
+    });
+}
+
+#[test]
+fn a_child_sends_a_port_to_its_parent_and_the_parent_replies_over_it() {
+    big(|| {
+        let other = server(|| {
+            vec![("/c", page("var mc = new MessageChannel(); mc.port1.onmessage = function(e){ console.log('child got ' + e.data) }; parent.postMessage('hello', '*', [mc.port2])"))]
+        });
+        let o = other.url("/c");
+        let srv = server(move || {
+            vec![("/", framed(&o, "addEventListener('message', function(e){ console.log('parent got ' + e.data + ' ' + e.ports.length); e.ports[0].postMessage('reply') })"))]
+        });
+        let (_, l) = lines(&srv, |_| {});
+        assert_eq!(plain(&l), ["parent got hello 1", "child got reply"].map(String::from).to_vec(), "{l:?}");
+    });
+}
+
+#[test]
+fn messages_posted_before_the_move_arrive_first_and_in_order() {
+    big(|| {
+        let other = server(|| vec![("/c", page("addEventListener('message', function(e){ e.ports[0].onmessage = function(m){ console.log('c' + m.data) } })"))]);
+        let o = other.url("/c");
+        let srv = server(move || {
+            vec![(
+                "/",
+                framed(&o, "f.addEventListener('load', function(){ var mc = new MessageChannel(); mc.port1.postMessage('a'); mc.port1.postMessage('b'); w.postMessage('init', '*', [mc.port2]); mc.port1.postMessage('c') })"),
+            )]
+        });
+        let (_, l) = lines(&srv, |_| {});
+        assert_eq!(plain(&l), ["ca", "cb", "cc"].map(String::from).to_vec(), "{l:?}");
+    });
+}
+
+#[test]
+fn a_listener_gets_nothing_before_start_and_the_queued_messages_after_it() {
+    big(|| {
+        let other = server(|| {
+            vec![(
+                "/c",
+                page("addEventListener('message', function(e){ var p = e.ports[0]; p.addEventListener('message', function(m){ console.log('c' + m.data) }); setTimeout(function(){ console.log('before start'); p.start() }, 30) })"),
+            )]
+        });
+        let o = other.url("/c");
+        let srv = server(move || {
+            vec![("/", framed(&o, "f.addEventListener('load', function(){ var mc = new MessageChannel(); w.postMessage('init', '*', [mc.port2]); mc.port1.postMessage('a'); mc.port1.postMessage('b') })"))]
+        });
+        let (_, l) = lines(&srv, |_| {});
+        assert_eq!(plain(&l), ["before start", "ca", "cb"].map(String::from).to_vec(), "{l:?}");
+    });
+}
+
+#[test]
+fn a_port_that_a_child_got_goes_back_to_the_parent_and_the_pair_still_works() {
+    big(|| {
+        let other = server(|| {
+            vec![("/c", page("addEventListener('message', function(e){ if (e.data === 'init') parent.postMessage('back', '*', [e.ports[0]]) })"))]
+        });
+        let o = other.url("/c");
+        let srv = server(move || {
+            vec![(
+                "/",
+                framed(&o, "var mc; f.addEventListener('load', function(){ mc = new MessageChannel(); mc.port1.onmessage = function(e){ console.log('p1 got ' + e.data) }; w.postMessage('init', '*', [mc.port2]) }); addEventListener('message', function(e){ var back = e.ports[0]; back.onmessage = function(m){ console.log('back got ' + m.data) }; mc.port1.postMessage('x'); back.postMessage('y') })"),
+            )]
+        });
+        let (_, l) = lines(&srv, |_| {});
+        assert_eq!(plain(&l), ["back got x", "p1 got y"].map(String::from).to_vec(), "{l:?}");
+    });
+}
+
+#[test]
+fn both_ends_of_a_channel_sent_in_one_message_still_talk_to_each_other() {
+    big(|| {
+        let other = server(|| {
+            vec![("/c", page("addEventListener('message', function(e){ var a = e.ports[0], b = e.ports[1]; b.onmessage = function(m){ console.log('b got ' + m.data) }; a.postMessage('ping') })"))]
+        });
+        let o = other.url("/c");
+        let srv = server(move || {
+            vec![("/", framed(&o, "f.addEventListener('load', function(){ var mc = new MessageChannel(); w.postMessage('init', '*', [mc.port1, mc.port2]) })"))]
+        });
+        let (_, l) = lines(&srv, |_| {});
+        assert_eq!(plain(&l), ["b got ping"].map(String::from).to_vec(), "{l:?}");
+    });
+}
+
+#[test]
+fn an_array_buffer_in_a_message_over_a_cross_page_port_is_detached_and_arrives() {
+    big(|| {
+        let other = server(|| {
+            vec![("/c", page("addEventListener('message', function(e){ e.ports[0].onmessage = function(m){ console.log('bytes ' + new Uint8Array(m.data).join('-')) } })"))]
+        });
+        let o = other.url("/c");
+        let srv = server(move || {
+            vec![(
+                "/",
+                framed(&o, "f.addEventListener('load', function(){ var mc = new MessageChannel(); w.postMessage('init', '*', [mc.port2]); var b = new Uint8Array([4, 5, 6]).buffer; mc.port1.postMessage(b, [b]); console.log('len ' + b.byteLength) })"),
+            )]
+        });
+        let (_, l) = lines(&srv, |_| {});
+        assert_eq!(l.iter().filter(|x| *x == "len 0").count(), 1, "{l:?}");
+        assert!(plain(&l).contains(&"bytes 4-5-6".to_string()), "{l:?}");
+    });
+}
+
+#[test]
+fn a_grandchild_and_the_top_page_talk_over_a_port_that_the_middle_page_passed_down() {
+    big(|| {
+        let leaf = server(|| {
+            vec![("/l", page("addEventListener('message', function(e){ var p = e.ports[0]; p.onmessage = function(m){ console.log('leaf got ' + m.data); p.postMessage('pong') }; p.postMessage('hi') })"))]
+        });
+        let l = leaf.url("/l");
+        let mid = server(move || {
+            vec![(
+                "/m",
+                html(&format!(
+                    "<iframe id=g src='{l}'></iframe><script>var g = document.getElementById('g'); g.addEventListener('load', function(){{ addEventListener('message', function(e){{ g.contentWindow.postMessage('down', '*', [e.ports[0]]) }}); parent.postMessage('ready', '*') }})</script>"
+                )),
+            )]
+        });
+        let m = mid.url("/m");
+        let srv = server(move || {
+            vec![(
+                "/",
+                framed(&m, "addEventListener('message', function(e){ if (e.data !== 'ready') return; var mc = new MessageChannel(); mc.port1.onmessage = function(x){ console.log('top got ' + x.data); if (x.data === 'hi') mc.port1.postMessage('ping') }; w.postMessage('port', '*', [mc.port2]) })"),
+            )]
+        });
+        let (_, l) = lines(&srv, |_| {});
+        assert_eq!(plain(&l), ["top got hi", "leaf got ping", "top got pong"].map(String::from).to_vec(), "{l:?}");
+    });
+}
+
+#[test]
+fn close_on_one_side_drops_later_messages_from_the_other_and_the_page_settles() {
+    big(|| {
+        let other = server(|| {
+            vec![("/c", page("addEventListener('message', function(e){ var p = e.ports[0]; p.onmessage = function(m){ console.log('c' + m.data); if (m.data === 'a') { p.close(); parent.postMessage('closed', '*') } } })"))]
+        });
+        let o = other.url("/c");
+        let srv = server(move || {
+            vec![(
+                "/",
+                framed(&o, "var mc; f.addEventListener('load', function(){ mc = new MessageChannel(); w.postMessage('init', '*', [mc.port2]); mc.port1.postMessage('a') }); addEventListener('message', function(e){ mc.port1.postMessage('late'); console.log('sent late') })"),
+            )]
+        });
+        let (_, l) = lines(&srv, |_| {});
+        assert_eq!(plain(&l), ["ca", "sent late"].map(String::from).to_vec(), "{l:?}");
+    });
+}
+
+#[test]
+fn removing_the_iframe_ends_its_ports_and_a_later_post_is_dropped_silently() {
+    big(|| {
+        let other = server(|| vec![("/c", page("addEventListener('message', function(e){ e.ports[0].onmessage = function(m){ console.log('child got ' + m.data) } })"))]);
+        let o = other.url("/c");
+        let srv = server(move || {
+            vec![(
+                "/",
+                framed(&o, "f.addEventListener('load', function(){ var mc = new MessageChannel(); w.postMessage('init', '*', [mc.port2]); setTimeout(function(){ f.remove(); setTimeout(function(){ try { mc.port1.postMessage('after'); console.log('posted') } catch (e) { console.log('threw ' + e) } }, 50) }, 50) })"),
+            )]
+        });
+        let (_, l) = lines(&srv, |_| {});
+        assert_eq!(plain(&l), ["posted"].map(String::from).to_vec(), "{l:?}");
+    });
+}
+
+#[test]
+fn the_parent_does_not_settle_while_a_port_message_is_in_flight() {
+    big(|| {
+        let other = server(|| {
+            vec![("/c", page("var mc = new MessageChannel(); parent.postMessage('p', '*', [mc.port2]); addEventListener('load', function(){ mc.port1.postMessage('late') })"))]
+        });
+        let o = other.url("/c");
+        let srv = server(move || {
+            vec![("/", framed(&o, "addEventListener('message', function(e){ e.ports[0].onmessage = function(m){ localStorage.setItem('m', m.data) } })"))]
+        });
+        let (s, _) = lines(&srv, |_| {});
+        assert_eq!(get(&s, &srv, "m").as_deref(), Some("late"));
+    });
+}
+
+#[test]
+fn a_queued_message_that_holds_ports_is_dropped_with_one_warning_when_its_port_moves() {
+    big(|| {
+        let other = server(|| vec![("/c", page("addEventListener('message', function(e){ var p = e.ports[0]; p.onmessage = function(m){ console.log('c got ' + m.data) } })"))]);
+        let o = other.url("/c");
+        let srv = server(move || {
+            vec![(
+                "/",
+                framed(&o, "f.addEventListener('load', function(){ var mc = new MessageChannel(); var x = new MessageChannel(); mc.port1.postMessage('has ports', [x.port1]); mc.port1.postMessage('plain'); w.postMessage('init', '*', [mc.port2]) })"),
+            )]
+        });
+        let (_, l) = lines(&srv, |_| {});
+        assert_eq!(l.iter().filter(|x| x.contains("carried ports was dropped")).count(), 1, "{l:?}");
+        let p = plain(&l);
+        assert!(p.contains(&"c got plain".to_string()) && !p.iter().any(|x| x.contains("has ports")), "{l:?}");
     });
 }
