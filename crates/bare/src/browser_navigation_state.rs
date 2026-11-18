@@ -8,6 +8,11 @@
 //! keys, copied through `[[Get]]` so getters run, in key order, with no host borrow; the prototype is lost, so a class instance
 //! becomes a plain object); `ArrayBuffer`, every typed array and `DataView` (a buffer shared by two views is copied once);
 //! `Error` and its six subtypes (`name`, `message`, `stack` and `cause`).
+//! Transfer list (HTML "StructuredSerializeWithTransfer"): `clone_state_with` takes the listed objects (`ArrayBuffer` or `MessagePort`,
+//! checked by `Dom::transfer_list`). A listed item is not copied. Its node is `SKind::Moved(i)`, and `Transfer` number `i` holds it
+//! in a list beside the `State`: the bytes of a buffer (the source is detached) or the key of a parked port. `Transfer` has no JS
+//! object, so a later step can send the pair to another heap. `materialize_with` builds the buffers and ports from that list. A buffer
+//! in the list and in the graph is one object in the result. The sources change only after the walk succeeded.
 //! `DataCloneError`: a function, a symbol, a DOM wrapper, `URL`, `URLSearchParams`, an `AbortController` or `AbortSignal`, a Proxy, a
 //! Promise, a WeakMap, a WeakSet, a WeakRef, an iterator, a generator, an `Intl` object, a Symbol wrapper, a detached buffer.
 //! There is no internal Error slot in the engine: an object with an `Error.prototype` in its chain is an Error.
@@ -55,6 +60,16 @@ pub(crate) enum SKind {
     Buffer(Vec<u8>),
     /// `(buffer node, byte offset, length in elements, type)`.
     View(u32, usize, usize, Elem),
+    /// A transferred buffer or port: the number of its item in the `Transfer` list.
+    Moved(u32),
+}
+
+/// An item of a transfer list, as data. It holds no JS object.
+pub(crate) enum Transfer {
+    /// The bytes of a detached `ArrayBuffer`.
+    Buffer(Vec<u8>),
+    /// A port that `Dom::park_port` took out of the port table.
+    Port(u64),
 }
 
 pub(crate) struct SNode {
@@ -79,6 +94,8 @@ struct Bounds {
 
 struct Ser {
     seen: HashMap<ObjId, u32>,
+    /// The listed items and their numbers. Empty (no allocation) when there is no transfer list.
+    xfer: HashMap<ObjId, u32>,
     nodes: Vec<SNode>,
     bytes: usize,
     b: Bounds,
@@ -100,27 +117,59 @@ fn clone_err(d: &Dom, it: &mut Interp<'_>, what: &str) -> Error {
 pub(crate) fn serialize(d: &Dom, it: &mut Interp<'_>, v: Value) -> R<State> {
     let l: NavLimits = d.nav.lim.get();
     let b = Bounds { bytes: l.max_state_bytes, depth: l.max_state_depth.min(128), nodes: l.max_state_nodes, names: ["history-state-bytes", "history-state-depth", "history-state-nodes"] };
-    match walk(d, it, v, b) {
+    match walk(d, it, v, b, &[]) {
         // The size is the page's choice: a catchable error, as in Firefox. The depth cap stays a limit.
         Err(Error::Limit(LimitKind::Host("history-state-bytes" | "history-state-nodes"))) => Err(clone_err(d, it, "A state over the size cap")),
         r => r,
     }
 }
 
-/// `structuredClone(v)`.
-pub(crate) fn clone(d: &Dom, it: &mut Interp<'_>, v: Value) -> R<Value> {
-    let st = clone_state(d, it, v)?;
-    materialize(d, it, &st)
+/// `structuredClone(v, { transfer })` and a message: the copy, the new ports of the transfer list (in list order) and the byte cost.
+/// `list` comes from `Dom::transfer_list`.
+pub(crate) fn clone_with(d: &Dom, it: &mut Interp<'_>, v: Value, list: &[ObjId]) -> R<(Value, Vec<ObjId>, usize)> {
+    let (st, xf) = clone_state_with(d, it, v, list)?;
+    let (val, ports) = materialize_with(d, it, &st, xf)?;
+    Ok((val, ports, st.bytes))
 }
 
-/// A snapshot with structured-clone limits. Resource limits remain uncatchable.
-pub(crate) fn clone_state(d: &Dom, it: &mut Interp<'_>, v: Value) -> R<State> {
-    walk(d, it, v, Bounds { bytes: 64 << 20, depth: 256, nodes: 1 << 20, names: ["clone-bytes", "clone-depth", "clone-nodes"] })
+/// A snapshot with structured-clone limits, and the transfer list as data. Resource limits remain uncatchable. The listed buffers
+/// are detached and the listed ports are parked after the walk succeeded. A listed item that changed during the walk (a getter
+/// detached it) throws `DataCloneError` before any item moves.
+pub(crate) fn clone_state_with(d: &Dom, it: &mut Interp<'_>, v: Value, list: &[ObjId]) -> R<(State, Vec<Transfer>)> {
+    let st = walk(d, it, v, Bounds { bytes: 64 << 20, depth: 256, nodes: 1 << 20, names: ["clone-bytes", "clone-depth", "clone-nodes"] }, list)?;
+    let is_buf = |it: &Interp<'_>, o: ObjId| matches!(it.clone_class(o), CloneClass::Buffer);
+    for &o in list {
+        let ok = if is_buf(it, o) { !it.heap.buffer_detached(o) } else { d.port_movable(o) };
+        if !ok {
+            return Err(clone_err(d, it, "A transferred item is detached and"));
+        }
+    }
+    let mut xf = Vec::with_capacity(list.len());
+    for &o in list {
+        xf.push(if is_buf(it, o) {
+            let bytes = it.heap.bytes(o).expect("a buffer").to_vec();
+            it.heap.buffer_transfer(None, o, 0).map_err(|e| it.heap_error(e))?;
+            Transfer::Buffer(bytes)
+        } else {
+            Transfer::Port(d.park_port(o))
+        });
+    }
+    Ok((st, xf))
 }
 
-fn walk(d: &Dom, it: &mut Interp<'_>, v: Value, b: Bounds) -> R<State> {
-    let mut c = Ser { seen: HashMap::new(), nodes: Vec::new(), bytes: 0, b };
+fn walk(d: &Dom, it: &mut Interp<'_>, v: Value, b: Bounds, list: &[ObjId]) -> R<State> {
+    let xfer = list.iter().enumerate().map(|(i, &o)| (o, i as u32)).collect();
+    let mut c = Ser { seen: HashMap::new(), xfer, nodes: Vec::new(), bytes: 0, b };
     let root = ser(d, it, &mut c, v, 0)?;
+    // A listed item that the graph does not use still costs its bytes.
+    for o in list {
+        if c.seen.contains_key(o) {
+            continue;
+        }
+        let n = it.heap.buffer_len(*o).unwrap_or(0);
+        add(&mut c, d, 64 + n)?;
+        it.charge((n / 64) as u64)?;
+    }
     Ok(State { root, nodes: c.nodes, bytes: c.bytes })
 }
 
@@ -151,6 +200,20 @@ fn ser(d: &Dom, it: &mut Interp<'_>, c: &mut Ser, v: Value, depth: usize) -> R<S
         Value::Object(o) => {
             if let Some(&i) = c.seen.get(&o) {
                 return Ok(SV::Obj(i));
+            }
+            if !c.xfer.is_empty()
+                && let Some(&i) = c.xfer.get(&o)
+            {
+                if c.nodes.len() >= c.b.nodes {
+                    return Err(d.lim(c.b.names[2]));
+                }
+                let n = it.heap.buffer_len(o).unwrap_or(0);
+                add(c, d, 64 + n)?;
+                it.charge((n / 64) as u64)?;
+                let idx = c.nodes.len() as u32;
+                c.seen.insert(o, idx);
+                c.nodes.push(SNode { kind: SKind::Moved(i), props: Vec::new() });
+                return Ok(SV::Obj(idx));
             }
             if it.is_callable_value(v) {
                 return Err(clone_err(d, it, "A function"));
@@ -298,6 +361,18 @@ fn sv_value(it: &mut Interp<'_>, objs: &[Option<ObjId>], v: &SV) -> R<Value> {
 
 /// A new object graph for `st`. No JS runs (the objects are new, so no setter can be hit).
 pub(crate) fn materialize(d: &Dom, it: &mut Interp<'_>, st: &State) -> R<Value> {
+    materialize_with(d, it, st, Vec::new()).map(|r| r.0)
+}
+
+/// `materialize` with a transfer list: the graph and the new ports of the list, in list order. A listed buffer that no node uses is dropped.
+pub(crate) fn materialize_with(d: &Dom, it: &mut Interp<'_>, st: &State, mut xf: Vec<Transfer>) -> R<(Value, Vec<ObjId>)> {
+    let keys: Vec<u64> = xf.iter().filter_map(|t| if let Transfer::Port(k) = t { Some(*k) } else { None }).collect();
+    let ports = d.make_ports(it, &keys)?;
+    let mut by_item: Vec<Option<ObjId>> = Vec::new();
+    if !xf.is_empty() {
+        let mut next = ports.iter();
+        by_item = xf.iter().map(|t| if matches!(t, Transfer::Port(_)) { next.next().copied() } else { None }).collect();
+    }
     let mut objs: Vec<Option<ObjId>> = vec![None; st.nodes.len()];
     // Views come second: the buffer of a view can be a later node.
     for views in [false, true] {
@@ -326,6 +401,13 @@ pub(crate) fn materialize(d: &Dom, it: &mut Interp<'_>, st: &State) -> R<Value> 
                     _ => unreachable!(),
                 },
                 SKind::View(b, off, len, ty) => it.clone_new_view(objs[*b as usize].expect("buffers come first"), *off, *len, *ty)?,
+                SKind::Moved(i) => match &mut xf[*i as usize] {
+                    Transfer::Buffer(b) => match it.new_array_buffer(std::mem::take(b))? {
+                        Value::Object(o) => o,
+                        _ => unreachable!(),
+                    },
+                    Transfer::Port(_) => by_item[*i as usize].expect("made"),
+                },
             };
             objs[i] = Some(o);
         }
@@ -367,5 +449,5 @@ pub(crate) fn materialize(d: &Dom, it: &mut Interp<'_>, st: &State) -> R<Value> 
             _ => {}
         }
     }
-    sv_value(it, &objs, &st.root)
+    Ok((sv_value(it, &objs, &st.root)?, ports))
 }

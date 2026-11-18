@@ -47,12 +47,18 @@
 //!   queued before the close are still delivered, to both ports (the HTML Standard queues no check on the closed
 //!   state, and Node behaves the same; not checked in a browser).
 //! - Payloads use structured clone, including object graphs and arrays. Functions, symbols and host objects
-//!   throw `DataCloneError`. A non-empty transfer list is `Unsupported`.
-//! - `MessageEvent` has `data`, `origin` (empty), `lastEventId` (empty), `source` (null) and `ports` (an empty array).
-//!   It is not constructible. `isTrusted` is false (the Event getter), which differs from a browser.
-//! - Deviations: `ports` is not frozen. `port1` and `port2` are own read-only properties of the channel, not
+//!   throw `DataCloneError`.
+//! - Transfer list (HTML "StructuredSerializeWithTransfer"): `postMessage(message, [items])` or `{ transfer }`, any iterable. An item is a
+//!   `MessagePort` or an `ArrayBuffer`, once, not detached and not the posting port; else `DataCloneError`. A buffer moves: the receiver
+//!   holds its bytes and the source is detached. A port moves: the sent object becomes a shell (no peer, no queue; `postMessage` does
+//!   nothing and it cannot be sent again). A new port object takes its peer link and its queued messages. It starts disabled, and
+//!   its listeners stay with the old object. The data in a message is the heap-free `State` of `browser_navigation_state.rs`, and the
+//!   items go in a `Transfer` list beside it. A port in the message but not in the list is `DataCloneError`.
+//! - `MessageEvent` has `data`, `origin` (empty), `lastEventId` (empty), `source` (null) and `ports` (a frozen array of the new ports
+//!   of the transfer list). It is not constructible. `isTrusted` is false (the Event getter), which differs from a browser.
+//! - Deviations: `port1` and `port2` are own read-only properties of the channel, not
 //!   prototype getters. A handler set with `onmessage` and an `addEventListener` with the same function count as one
-//!   listener. `onmessageerror`, the `close` event, `window.postMessage` and `BroadcastChannel` are absent.
+//!   listener. `onmessageerror`, the `close` event and `BroadcastChannel` are absent. `window.postMessage` is in `browser_basics.rs`.
 //!
 //! `requestAnimationFrame` and the rendering step are in `browser_frame.rs`. `requestIdleCallback` is in `browser_idle.rs`: an idle
 //! period is `Task::Idle`, queued only by a request. It runs after every task that is due, and after the frame that is queued; its
@@ -60,8 +66,8 @@
 //! reported exceptions, `ErrorEvent`.
 //!
 //! GC: timers keep their callbacks and arguments (they are roots). A port that has queued delivery tasks is a root.
-//! A port keeps its peer, its queued payloads and its listeners alive. So an unreachable channel (a cycle) is pruned,
-//! with its queued messages, at the next `collect`. Ids of ports are generation checked, so a reused slot never
+//! A port keeps its peer, its queued payloads (and the new ports in them) and its listeners alive. So an unreachable channel (a cycle) is pruned,
+//! with its queued messages, at the next `collect`. A parked port (`park_port`) lives only between the walk and `make_ports` of one call. Ids of ports are generation checked, so a reused slot never
 //! finds the state of an old port. Events are pruned by `collect` only: collect between pumps in a long run.
 
 use crate::browser::*;
@@ -168,16 +174,34 @@ struct Timer {
 struct Port {
     peer: Option<ObjId>,
     enabled: bool,
-    /// Queued messages with their byte cost.
-    inbox: VecDeque<(Value, usize)>,
+    /// Queued messages.
+    inbox: VecDeque<Msg>,
     /// The queued delivery tasks of this port, oldest first: one per message once the port is enabled, else none.
     keys: VecDeque<Key>,
     /// Listener id of the `onmessage` handler.
     handler: Option<u64>,
+    /// The port was transferred. The object stays, with no peer and no queue. It cannot be transferred again.
+    moved: bool,
+}
+
+/// A queued message: the clone, its byte cost and the new ports of its transfer list (`MessageEvent.ports`).
+struct Msg {
+    data: Value,
+    bytes: usize,
+    ports: Box<[ObjId]>,
+}
+
+impl Port {
+    fn new(peer: Option<ObjId>, enabled: bool) -> Port {
+        Port { peer, enabled, inbox: VecDeque::new(), keys: VecDeque::new(), handler: None, moved: false }
+    }
 }
 
 struct MsgEvent {
     data: Value,
+    /// The new ports of the transfer list.
+    moved: Box<[ObjId]>,
+    /// The frozen `ports` array, made on the first read.
     ports: Option<Value>,
     /// A message of `window.postMessage` (`browser_basics.rs`): `origin` is the document origin and `source` is the window.
     win: bool,
@@ -207,6 +231,9 @@ pub(crate) struct Sched {
     next_timer: u64,
     timers: HashMap<u64, Timer>,
     ports: IdMap<ObjId, Port>,
+    /// Ports taken out of `ports` by a transfer, until `make_ports` gives them a new object. The key is heap-free.
+    parked: HashMap<u64, (ObjId, Port)>,
+    next_park: u64,
     msg_events: IdMap<ObjId, MsgEvent>,
     queued: usize,
     queued_bytes: usize,
@@ -275,7 +302,7 @@ pub struct SchedStats {
 /// A task taken out of the queue, ready to run without any borrow.
 enum Run {
     Timer { id: u64, cb: Value, args: Vec<Value>, nesting: u32, repeat: bool },
-    Deliver { port: ObjId, data: Value },
+    Deliver { port: ObjId, data: Value, ports: Box<[ObjId]> },
     Select(NodeId),
     SelectionChange(NodeId),
     DocSelectionChange,
@@ -358,9 +385,13 @@ impl Dom {
         let s = self.sched.borrow();
         if let Some(p) = s.ports.get(&owner) {
             out.extend(p.peer.map(Value::Object));
-            out.extend(p.inbox.iter().map(|m| m.0));
+            for m in &p.inbox {
+                out.push(m.data);
+                out.extend(m.ports.iter().map(|&o| Value::Object(o)));
+            }
         } else if let Some(e) = s.msg_events.get(&owner) {
             out.push(e.data);
+            out.extend(e.moved.iter().map(|&o| Value::Object(o)));
             out.extend(e.ports);
         }
     }
@@ -376,7 +407,7 @@ impl Dom {
             Task::Timer(_) | Task::Select(_) | Task::SelectionChange(_) | Task::DocSelectionChange | Task::Render | Task::Scroll | Task::AbortTimeout(_) | Task::Worker(_) | Task::Notify | Task::Idle | Task::IdleTimeout(_) | Task::Media(..) | Task::Motion(..) | Task::Toggle(..) => true,
         });
         s.queued = s.ports.values().map(|p| p.inbox.len()).sum();
-        s.queued_bytes = s.ports.values().flat_map(|p| p.inbox.iter().map(|m| m.1)).sum();
+        s.queued_bytes = s.ports.values().flat_map(|p| p.inbox.iter().map(|m| m.bytes)).sum();
     }
 
     // ------------------------------------------------------------ settle
@@ -596,10 +627,10 @@ impl Dom {
                 Some(p) if p.keys.front() == Some(&key) => {
                     p.keys.pop_front();
                     match p.inbox.pop_front() {
-                        Some((data, bytes)) => {
+                        Some(Msg { data, bytes, ports }) => {
                             s.queued -= 1;
                             s.queued_bytes -= bytes;
-                            Run::Deliver { port, data }
+                            Run::Deliver { port, data, ports }
                         }
                         None => Run::Nothing,
                     }
@@ -730,14 +761,14 @@ impl Dom {
                 self.worker_failed(it, o)?;
                 it.host_checkpoint().map(|_| ())
             }),
-            Run::Deliver { port, data } => {
+            Run::Deliver { port, data, ports } => {
                 let mark = self.settle_mark();
                 it.host_scope(|it| {
                     it.charge(1)?;
                     let win = self.global.get() == Some(&port);
                     let target = if win { Target::Window } else { Target::Obj(port) };
                     if self.has_message_listener(target) {
-                        let ev = self.new_msg_event(it, data, win)?;
+                        let ev = self.new_msg_event(it, data, win, ports)?;
                         self.dispatch(it, target, ev)?;
                     }
                     it.host_checkpoint().map(|_| ())
@@ -834,7 +865,7 @@ impl Dom {
     // ------------------------------------------------------------ messages
 
     /// Queue a `message` event for the window: one delivery task. The window is a port of the table with no peer. `data` is already cloned.
-    pub(crate) fn post_window(&self, data: Value) -> R<()> {
+    pub(crate) fn post_window(&self, data: Value, ports: Box<[ObjId]>) -> R<()> {
         let cost = crate::browser_basics::MESSAGE_COST;
         let g = *self.global.get().expect("installed");
         {
@@ -850,16 +881,16 @@ impl Dom {
         let mut s = self.sched.borrow_mut();
         s.queued += 1;
         s.queued_bytes += cost;
-        let p = s.ports.entry(g).or_insert(Port { peer: None, enabled: true, inbox: VecDeque::new(), keys: VecDeque::new(), handler: None });
-        p.inbox.push_back((data, cost));
+        let p = s.ports.entry(g).or_insert(Port::new(None, true));
+        p.inbox.push_back(Msg { data, bytes: cost, ports });
         p.keys.push_back(key);
         Ok(())
     }
 
-    fn new_msg_event(&self, it: &mut Interp<'_>, data: Value, win: bool) -> R<ObjId> {
+    fn new_msg_event(&self, it: &mut Interp<'_>, data: Value, win: bool, moved: Box<[ObjId]>) -> R<ObjId> {
         let proto = self.sched.borrow().protos.expect("installed").event;
         let e = self.new_event_proto(it, "message", false, false, false, proto)?;
-        self.sched.borrow_mut().msg_events.insert(e, MsgEvent { data, ports: None, win });
+        self.sched.borrow_mut().msg_events.insert(e, MsgEvent { data, moved, ports: None, win });
         Ok(e)
     }
 
@@ -892,55 +923,146 @@ impl Dom {
         Ok(())
     }
 
-    /// The cost of a message and the message, or the error that `postMessage` throws.
-    fn clone_payload(&self, it: &mut Interp<'_>, v: Value) -> R<(Value, usize)> {
+    /// The message, its byte cost and the new ports of its transfer list, or the error that `postMessage` throws.
+    /// No list: a scalar needs no snapshot.
+    pub(crate) fn clone_payload(&self, it: &mut Interp<'_>, v: Value, list: &[ObjId]) -> R<(Value, usize, Box<[ObjId]>)> {
+        if !list.is_empty() {
+            let (data, ports, bytes) = crate::browser_navigation_state::clone_with(self, it, v, list)?;
+            return Ok((data, 16usize.saturating_add(bytes), ports.into_boxed_slice()));
+        }
+        let none = Box::default();
         match v {
-            Value::Undefined | Value::Null | Value::Bool(_) | Value::Number(_) => Ok((v, 16)),
+            Value::Undefined | Value::Null | Value::Bool(_) | Value::Number(_) => Ok((v, 16, none)),
             Value::String(s) => {
                 let len = it.heap.str_len(s).map_err(Error::Heap)?;
                 it.charge((len / 64) as u64)?;
-                Ok((v, 16usize.saturating_add(len.saturating_mul(2))))
+                Ok((v, 16usize.saturating_add(len.saturating_mul(2)), none))
             }
             Value::Symbol(_) => Err(self.dom_err(it, "DataCloneError", "Symbol could not be cloned.")),
-            Value::BigInt(_) | Value::BigHeap(_) => Ok((v, 16usize.saturating_add(it.heap.bigint_limbs(v).saturating_mul(8)))),
+            Value::BigInt(_) | Value::BigHeap(_) => Ok((v, 16usize.saturating_add(it.heap.bigint_limbs(v).saturating_mul(8)), none)),
             Value::Object(_) if it.is_callable_value(v) => Err(self.dom_err(it, "DataCloneError", "function could not be cloned.")),
             Value::Object(_) => {
-                let snapshot = crate::browser_navigation_state::clone_state(self, it, v)?;
+                let snapshot = crate::browser_navigation_state::clone_state_with(self, it, v, &[])?.0;
                 let bytes = 16usize.saturating_add(snapshot.bytes);
                 let data = crate::browser_navigation_state::materialize(self, it, &snapshot)?;
-                Ok((data, bytes))
-            },
+                Ok((data, bytes, none))
+            }
         }
     }
 
-    /// A transfer list or `{ transfer }` option must be empty.
-    pub(crate) fn no_transfer(&self, it: &mut Interp<'_>, v: Value) -> R<()> {
-        let list = match v {
-            Value::Undefined | Value::Null => return Ok(()),
-            Value::Object(_) => {
-                if self.is_array_like(it, v)? {
-                    v
-                } else {
+    /// The transfer argument of `MessagePort.postMessage`: a sequence, or a `{ transfer }` dictionary.
+    fn transfer_arg(&self, it: &mut Interp<'_>, v: Value, own: Option<ObjId>) -> R<Vec<ObjId>> {
+        const CTX: &str = "Failed to execute 'postMessage' on 'MessagePort'";
+        match v {
+            Value::Undefined | Value::Null => Ok(Vec::new()),
+            Value::Object(_) => match it.host_iter_open(v)? {
+                Some(iter) => self.transfer_items(it, iter, own),
+                None => {
                     let kt = self.key(it, "transfer")?;
-                    it.get_value(v, kt)?
+                    let t = it.get_value(v, kt)?;
+                    self.transfer_list(it, t, own, CTX)
+                }
+            },
+            _ => Err(it.type_error(&format!("{CTX}: The transfer argument is not an object."))),
+        }
+    }
+
+    /// The items of a transfer list (HTML "StructuredSerializeWithTransfer", step 1). `v` is `undefined`, `null` or an iterable
+    /// of objects. Each item is a `MessagePort` or an `ArrayBuffer`, once, and not detached or transferred before; `own` (the port
+    /// of `postMessage`) is not allowed. Anything else throws `DataCloneError`. Nothing changes.
+    pub(crate) fn transfer_list(&self, it: &mut Interp<'_>, v: Value, own: Option<ObjId>, ctx: &str) -> R<Vec<ObjId>> {
+        if matches!(v, Value::Undefined | Value::Null) {
+            return Ok(Vec::new());
+        }
+        let Some(iter) = it.host_iter_open(v)? else {
+            return Err(it.type_error(&format!("{ctx}: The provided value cannot be converted to a sequence.")));
+        };
+        self.transfer_items(it, iter, own)
+    }
+
+    fn transfer_items(&self, it: &mut Interp<'_>, mut iter: bare_js::eval::HostIter, own: Option<ObjId>) -> R<Vec<ObjId>> {
+        let mut list: Vec<ObjId> = Vec::new();
+        while let Some(v) = it.host_iter_next(&mut iter)? {
+            let bad = |d: &Dom, it: &mut Interp<'_>, why: &str| d.dom_err(it, "DataCloneError", why);
+            let Value::Object(o) = v else { return Err(bad(self, it, "Value not transferable.")) };
+            let buffer = matches!(it.clone_class(o), bare_js::eval::CloneClass::Buffer);
+            if !buffer && !self.sched.borrow().ports.contains_key(&o) || self.global.get() == Some(&o) {
+                return Err(bad(self, it, "Value not transferable."));
+            }
+            if Some(o) == own {
+                return Err(bad(self, it, "Transfer list contains source port."));
+            }
+            if buffer && it.heap.buffer_detached(o) || !buffer && !self.port_movable(o) {
+                return Err(bad(self, it, "Transfer list contains a detached item."));
+            }
+            if list.contains(&o) {
+                return Err(bad(self, it, "Transfer list contains duplicate entries."));
+            }
+            list.push(o);
+        }
+        Ok(list)
+    }
+
+    /// Is `o` a port that no transfer has moved?
+    pub(crate) fn port_movable(&self, o: ObjId) -> bool {
+        self.global.get() != Some(&o) && self.sched.borrow().ports.get(&o).is_some_and(|p| !p.moved)
+    }
+
+    /// Take the port `o` out of the port table for a transfer. The object stays as a neutered shell. Its queued delivery tasks are
+    /// dropped (the new port starts disabled, as in the Standard, and `start_port` queues them again). Returns the key for `make_ports`.
+    pub(crate) fn park_port(&self, o: ObjId) -> u64 {
+        let mut s = self.sched.borrow_mut();
+        let s = &mut *s;
+        let mut shell = Port::new(None, false);
+        shell.moved = true;
+        let mut rec = std::mem::replace(s.ports.get_mut(&o).expect("checked"), shell);
+        for k in rec.keys.drain(..) {
+            s.tasks.remove(&k);
+        }
+        rec.enabled = false;
+        rec.handler = None;
+        s.next_park += 1;
+        let key = s.next_park;
+        s.parked.insert(key, (o, rec));
+        key
+    }
+
+    /// New port objects for parked records, in the order of `keys`. Each takes the peer link, the queue and the byte cost of its
+    /// record. The peer, if it is not in `keys` too, points to the new object.
+    pub(crate) fn make_ports(&self, it: &mut Interp<'_>, keys: &[u64]) -> R<Vec<ObjId>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        if self.sched.borrow().ports.len() + keys.len() > self.sched.borrow().limits.max_ports {
+            return Err(self.lim("message-ports"));
+        }
+        if self.st.borrow().by_obj.len() + keys.len() > self.lim.max_wrappers {
+            return Err(self.lim("dom-wrappers"));
+        }
+        let proto = self.sched.borrow().protos.expect("installed").port;
+        let mut news = Vec::with_capacity(keys.len());
+        for _ in keys {
+            news.push(self.obj(it, proto)?);
+        }
+        let mut st = self.st.borrow_mut();
+        let mut s = self.sched.borrow_mut();
+        let olds: Vec<ObjId> = keys.iter().map(|k| s.parked[k].0).collect();
+        for (k, &new) in keys.iter().zip(&news) {
+            let (old, mut rec) = s.parked.remove(k).expect("parked");
+            if let Some(q) = rec.peer {
+                match olds.iter().position(|&o| o == q) {
+                    Some(i) => rec.peer = Some(news[i]),
+                    None => {
+                        if let Some(r) = s.ports.get_mut(&q).filter(|r| r.peer == Some(old)) {
+                            r.peer = Some(new);
+                        }
+                    }
                 }
             }
-            _ => return Err(it.type_error("Failed to execute 'postMessage' on 'MessagePort': The transfer argument is not an object.")),
-        };
-        if matches!(list, Value::Undefined | Value::Null) {
-            return Ok(());
+            st.by_obj.insert(new, Target::Obj(new));
+            s.ports.insert(new, rec);
         }
-        let kl = self.key(it, "length")?;
-        let n = it.get_value(list, kl)?;
-        if it.to_js_number(n)? != 0.0 {
-            return Err(Error::Unsupported(unsupported("MessagePort.postMessage transfer list")));
-        }
-        Ok(())
-    }
-
-    fn is_array_like(&self, it: &mut Interp<'_>, v: Value) -> R<bool> {
-        let kl = self.key(it, "length")?;
-        Ok(matches!(it.get_value(v, kl)?, Value::Number(_)))
+        Ok(news)
     }
 }
 
@@ -1065,7 +1187,7 @@ fn message_channel_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> 
     let mut s = d.sched.borrow_mut();
     for (me, peer) in [(p1, p2), (p2, p1)] {
         st.by_obj.insert(me, Target::Obj(me));
-        s.ports.insert(me, Port { peer: Some(peer), enabled: false, inbox: VecDeque::new(), keys: VecDeque::new(), handler: None });
+        s.ports.insert(me, Port::new(Some(peer), false));
     }
     Ok(Value::Object(ch))
 }
@@ -1082,7 +1204,7 @@ impl Dom {
         let protos = self.sched.borrow().protos.expect("installed");
         let p = self.obj(it, protos.port)?;
         self.st.borrow_mut().by_obj.insert(p, Target::Obj(p));
-        self.sched.borrow_mut().ports.insert(p, Port { peer: None, enabled: false, inbox: VecDeque::new(), keys: VecDeque::new(), handler: None });
+        self.sched.borrow_mut().ports.insert(p, Port::new(None, false));
         Ok(p)
     }
 }
@@ -1092,8 +1214,8 @@ fn port_post_message(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> 
     if a.is_empty() {
         return Err(it.type_error("Failed to execute 'postMessage' on 'MessagePort': 1 argument required, but only 0 present."));
     }
-    d.no_transfer(it, arg(a, 1))?;
-    let (data, bytes) = d.clone_payload(it, a[0])?;
+    let list = d.transfer_arg(it, arg(a, 1), Some(port))?;
+    let (data, bytes, moved) = d.clone_payload(it, a[0], &list)?;
     let now = d.now_ms();
     let target = {
         let s = d.sched.borrow();
@@ -1113,7 +1235,7 @@ fn port_post_message(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> 
     s.queued += 1;
     s.queued_bytes += bytes;
     let t = s.ports.get_mut(&target).expect("checked");
-    t.inbox.push_back((data, bytes));
+    t.inbox.push_back(Msg { data, bytes, ports: moved });
     t.keys.extend(key);
     Ok(Value::Undefined)
 }
@@ -1221,7 +1343,11 @@ fn msg_ports(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     if let Some(v) = msg_event(d, it, this, |e| e.ports)? {
         return Ok(v);
     }
-    let arr = it.array_from(&[])?;
+    let moved: Vec<Value> = msg_event(d, it, this, |e| e.moved.iter().map(|&o| Value::Object(o)).collect())?;
+    let arr = it.array_from(&moved)?;
+    if let Value::Object(o) = arr {
+        it.heap.set_integrity(o, true).map_err(|e| it.heap_error(e))?;
+    }
     msg_event(d, it, this, |e| e.ports = Some(arr))?;
     Ok(arr)
 }

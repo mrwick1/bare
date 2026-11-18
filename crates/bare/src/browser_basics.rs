@@ -20,7 +20,9 @@
 //! `alert` does nothing, `confirm` gives false, `prompt` gives null and `open` gives null (a blocked popup, as it does for a driver). `postMessage(message, targetOrigin | { targetOrigin, transfer })` clones the message (`structuredClone`), drops
 //! it when `targetOrigin` is not "*", "/" or the origin of the document (an unparsable `targetOrigin` is a `SyntaxError`), and queues a
 //! `message` event for the window as one task (`Dom::post_window`). The event has `origin` (the document origin), `source` (the window)
-//! and no ports. A transfer list with items is `Unsupported`, as for `MessagePort`.
+//! and `ports` (a frozen array of the new ports of the transfer list). The transfer list is the one of `MessagePort.postMessage`
+//! (`Dom::transfer_list`): `ArrayBuffer` and `MessagePort` items, else `DataCloneError`. A message to another origin is dropped before
+//! the list is read, so its buffers stay attached.
 //!
 //! `navigator`: `vendor` "Google Inc.", `maxTouchPoints` 0, `webdriver` false, `pdfViewerEnabled` true, `appName` "Netscape", `appVersion`
 //! (the user agent without "Mozilla/"), `product` "Gecko", `productSub` "20030107", `vendorSub` "", `doNotTrack` null, `javaEnabled()`
@@ -292,7 +294,7 @@ fn post_message(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Val
             it.heap.to_string_lossy(s).map_err(|e| it.heap_error(e))?
         }
     };
-    d.no_transfer(it, transfer)?;
+    let list = d.transfer_list(it, transfer, None, "Failed to execute 'postMessage' on 'Window'")?;
     if target != "*" && target != "/" {
         let Ok(r) = crate::browser_navigation_url::parse(&target, None) else {
             return Err(d.dom_err(it, "SyntaxError", &format!("Failed to execute 'postMessage' on 'Window': Invalid target origin '{target}' in a call to 'postMessage'.")));
@@ -301,8 +303,8 @@ fn post_message(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Val
             return Ok(Value::Undefined);
         }
     }
-    let data = crate::browser_navigation_state::clone(d, it, a[0])?;
-    d.post_window(data)?;
+    let (data, ports, _) = crate::browser_navigation_state::clone_with(d, it, a[0], &list)?;
+    d.post_window(data, ports.into_boxed_slice())?;
     Ok(Value::Undefined)
 }
 

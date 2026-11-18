@@ -83,7 +83,9 @@ fn fetch_with_an_aborted_signal_rejects_with_the_reason_before_any_io() {
 fn structured_clone_gates_and_limits() {
     big(|| {
         let mut b = browser();
-        assert_eq!(js(&mut b, "structuredClone(1, { transfer: [new ArrayBuffer(1)] })"), "unsupported:structuredClone with a transfer list");
+        assert_eq!(js(&mut b, "structuredClone(1, { transfer: [new ArrayBuffer(1)] })"), "1");
+        assert_eq!(js(&mut b, "var t = new Uint8Array([1, 2, 3]), r = structuredClone(t.buffer, { transfer: [t.buffer] }); [r.byteLength, new Uint8Array(r).join(), t.buffer.byteLength, t.length].join('|')"), "3|1,2,3|0|0");
+        assert_eq!(js(&mut b, "structuredClone(1, { transfer: [1] })"), "throw:DataCloneError:Value not transferable.");
         assert_eq!(js(&mut b, "var u = new Uint8Array(70 << 20); structuredClone(u)"), "limit:Host(\"clone-bytes\")");
         assert_eq!(js(&mut b, "var d = {}, c = d; for (var i = 0; i < 300; i++) { c.n = {}; c = c.n; } structuredClone(d)"), "limit:Host(\"clone-depth\")");
         assert_eq!(js(&mut b, "var b = new ArrayBuffer(8); b.transfer(); structuredClone(b)"), "throw:DataCloneError:An ArrayBuffer is detached and could not be cloned.");

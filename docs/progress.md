@@ -13119,3 +13119,16 @@ Fixture: one input, an `input` handler that rebuilds 250 rows of 4 spans (1250 n
 - Profile of `type` (instructions:u, 3 runs): JS engine 51%, DOM and browser glue 20%, allocator 11-12%, number and string formatting 6-7%, style 0.5%, layout 1.7%, paint 0%. Hottest symbol: `Heap::intern_slice` 9.4%. So per-key cost is the page script rebuilding the tree, not style or layout. Hypothesis: the same split holds on the Next.js form of the ticket.
 - Change: the `type` text of the browser_act and step descriptions now says to use `fill` for long text.
 - Not done: a faster `type`. The cost is the page handler running once for each key. A change in design would be needed, so it is out of scope.
+
+## Transfer lists in postMessage and structuredClone (2026-11-18)
+
+Step 1 and 2 of `docs/design-gmail-frames.md`. A transfer list now works for `MessagePort.postMessage`, `window.postMessage` and `structuredClone`. Before, a non-empty list was `Unsupported`, which ended the page. Base: main `6c18070b`.
+
+- Change: the list is read by `Dom::transfer_list` (any iterable of `ArrayBuffer` and `MessagePort`, no duplicates, nothing detached, not the posting port, else `DataCloneError`). The clone walk records a listed item as `SKind::Moved(i)` and keeps the item in a heap-free `Vec<Transfer>` beside the `State`. A buffer is copied once into the list and the source is detached with `Heap::buffer_transfer`. A port is parked under a `u64` key, and `make_ports` builds the new object with the peer link and the queued messages. `MessageEvent.ports` is a frozen array of the new ports. Decision: `docs/decisions.md`.
+- Tests: 10 new cases in `browser_scheduler_tests.rs` and 2 changed assertions (`browser_scheduler_tests.rs`, `browser_abort_tests.rs`). `cargo test --release -p bare -- scheduler abort encoding navigation_state basics`: 73 passed. The workspace test command (4 skips): exit 0.
+- Cost gate (arjun-e16, `tools/js/cost_matrix.sh -j 6`, instruction counts, minimum of 3 runs): 803 rows in 53 s. Mean change: glibc +0.013%. Exit 1.
+  - Over +0.5% under both allocators: `dataset_load keys 10000 50` (+0.616% glibc, +0.617% jemalloc) and `dataset_load keys 1000 50` (+0.581%, +0.580%). Other `dataset_load keys` rows: +0.18% and +0.30%.
+  - `parse_load deep 1` and `parse_load deep 10` fail to run (stack overflow). They fail the same way on the base build.
+  - Cause of the dataset rows: the codegen-unit split of `bare`, not new work. No changed code is on that path. A profile of both builds with symbols shows `Heap::exotic_own` and `Heap::define_own_property` inlined differently. With `RUSTFLAGS="-C codegen-units=1"` both trees give the same count (arjun-e16, minimum of 3 runs, glibc): `keys 1000 50` 345,601,615 base and 345,603,418 new (+0.0005%); `keys 10000 50` 3,241,706,567 and 3,241,710,148 (+0.0001%).
+  - The owner grants a cost exception for these 2 rows (2026-11-18). The reason: the codegen-unit split, not new work.
+- Not tested: wall time, peak memory, a transfer to another heap (no later step exists yet), GC with a moved port across a `collect`, a live Gmail account menu.
