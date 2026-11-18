@@ -229,25 +229,25 @@ fn hset(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     let (k, ty) = d.handler_fn();
     let t = d.handler_owner(it, this, k)?;
     sync(d, t, ty);
-    handler_set(d, t, ty, a.first().copied())?;
+    handler_set(d, it, t, ty, a.first().copied())?;
     Ok(Value::Undefined)
 }
 
 fn sig_get(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let t = d.handler_owner(it, this, SIGNAL)?;
-    Ok(handler_get(d, t, "abort"))
+    Ok(handler_get(d, it, t, "abort"))
 }
 
 fn sig_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     let t = d.handler_owner(it, this, SIGNAL)?;
-    handler_set(d, t, "abort", a.first().copied())?;
+    handler_set(d, it, t, "abort", a.first().copied())?;
     Ok(Value::Undefined)
 }
 
 /// The value of the handler `on<ty>` of `t`, or `null`, with no attribute and no compile (for the host-made targets).
-pub(crate) fn handler_get(d: &Dom, t: Target, ty: &str) -> Value {
+pub(crate) fn handler_get(d: &Dom, it: &mut Interp<'_>, t: Target, ty: &str) -> Value {
     let st = d.st.borrow();
-    st.listeners.get(&t).and_then(|v| v.iter().find(|l| l.handler && *l.ty == *ty)).map_or(Value::Null, |l| Value::Object(l.cb))
+    st.listeners.get(&t).and_then(|v| v.iter().find(|l| l.handler && *l.ty == *ty)).map_or(Value::Null, |l| it.traced_value(&l.cb))
 }
 
 /// The value of the handler `on<ty>` of `t` (the getter): the attribute is read and compiled if it is new.
@@ -255,17 +255,17 @@ fn handler_value(d: &Dom, it: &mut Interp<'_>, t: Target, ty: &str) -> V {
     sync(d, t, ty);
     let found = {
         let st = d.st.borrow();
-        st.listeners.get(&t).and_then(|v| v.iter().find(|l| l.handler && *l.ty == *ty)).map(|l| (l.id, l.cb, !st.hd.raw.is_empty() && st.hd.raw.contains_key(&l.id)))
+        st.listeners.get(&t).and_then(|v| v.iter().find(|l| l.handler && *l.ty == *ty)).map(|l| (l.id, it.traced_value(&l.cb), !st.hd.raw.is_empty() && st.hd.raw.contains_key(&l.id)))
     };
     match found {
         None => Ok(Value::Null),
         Some((id, _, true)) => compile_slot(d, it, t, ty, id),
-        Some((_, cb, false)) => Ok(Value::Object(cb)),
+        Some((_, cb, false)) => Ok(cb),
     }
 }
 
 /// Set the handler `on<ty>` of `t` (see the header for the rules).
-pub(crate) fn handler_set(d: &Dom, t: Target, ty: &str, value: Option<Value>) -> R<()> {
+pub(crate) fn handler_set(d: &Dom, it: &mut Interp<'_>, t: Target, ty: &str, value: Option<Value>) -> R<()> {
     let cb: Option<ObjId> = match value {
         Some(Value::Object(o)) => Some(o),
         _ => None,
@@ -276,10 +276,11 @@ pub(crate) fn handler_set(d: &Dom, t: Target, ty: &str, value: Option<Value>) ->
     match (at, cb) {
         (Some(i), Some(cb)) => {
             let l = &mut st.listeners.get_mut(&t).expect("found")[i];
-            l.cb = cb;
+            it.store_value(&mut l.cb, Value::Object(cb));
             if !st.hd.raw.is_empty() {
                 st.hd.raw.remove(&l.id);
             }
+            d.own_listeners(st, it, t);
         }
         (Some(i), None) => {
             let v = st.listeners.get_mut(&t).expect("found");
@@ -301,8 +302,10 @@ pub(crate) fn handler_set(d: &Dom, t: Target, ty: &str, value: Option<Value>) ->
             }
             st.next_id += 1;
             let id = st.next_id;
+            let cb = it.trace_value(Value::Object(cb));
             st.listeners.entry(t).or_default().push(Listener { id, ty: Rc::from(ty), cb, capture: false, once: false, passive: false, handler: true });
             st.n_listeners += 1;
+            d.own_listeners(st, it, t);
         }
         (None, None) => {}
     }
@@ -425,7 +428,8 @@ fn sync_one(d: &Dom, doc: &Document, st: &mut State, t: Target, ty: &Rc<str>, at
 fn activate(d: &Dom, st: &mut State, t: Target, ty: &Rc<str>, src: Rc<str>) {
     let g = *d.global.get().expect("installed");
     if let Some(l) = st.listeners.get_mut(&t).and_then(|v| v.iter_mut().find(|l| l.handler && *l.ty == **ty)) {
-        l.cb = g;
+        // The global is a placeholder until the compile. It is always live, so it needs no write barrier and no owner.
+        l.cb.set_raw(Value::Object(g));
         st.hd.raw.insert(l.id, src);
         return;
     }
@@ -435,7 +439,7 @@ fn activate(d: &Dom, st: &mut State, t: Target, ty: &Rc<str>, src: Rc<str>) {
     }
     st.next_id += 1;
     let id = st.next_id;
-    st.listeners.entry(t).or_default().push(Listener { id, ty: ty.clone(), cb: g, capture: false, once: false, passive: false, handler: true });
+    st.listeners.entry(t).or_default().push(Listener { id, ty: ty.clone(), cb: bare_js_api::Traced::from_raw(Value::Object(g)), capture: false, once: false, passive: false, handler: true });
     st.n_listeners += 1;
     st.hd.raw.insert(id, src);
 }
@@ -463,8 +467,11 @@ pub(crate) fn compile_slot(d: &Dom, it: &mut Interp<'_>, t: Target, ty: &str, id
     };
     match it.compile_function(&format!("on{}", ty.to_ascii_lowercase()), params, &src) {
         Ok(f) => {
-            if let Some(l) = d.st.borrow_mut().listeners.get_mut(&t).and_then(|v| v.iter_mut().find(|l| l.id == id)) {
-                l.cb = f;
+            let mut st = d.st.borrow_mut();
+            let st = &mut *st;
+            if let Some(l) = st.listeners.get_mut(&t).and_then(|v| v.iter_mut().find(|l| l.id == id)) {
+                it.store_value(&mut l.cb, Value::Object(f));
+                d.own_listeners(st, it, t);
             }
             Ok(Value::Object(f))
         }

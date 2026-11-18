@@ -186,7 +186,7 @@ impl Dom {
         }
         if let Some(r) = related {
             let v = self.wrap(it, r)?;
-            self.st.borrow_mut().events.get_mut(&ev).expect("just made").related = v;
+            it.store_value(&mut self.st.borrow_mut().events.get_mut(&ev).expect("just made").related, v);
         }
         self.dispatch(it, Target::Node(target), ev).map(|_| ())
     }
@@ -305,7 +305,7 @@ pub(crate) fn related_target(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Val
     if !d.st.borrow().events[&o].is_focus {
         return Err(it.type_error("Illegal invocation"));
     }
-    Ok(d.st.borrow().events[&o].related)
+    Ok(it.traced_value(&d.st.borrow().events[&o].related))
 }
 
 pub(crate) fn focus_event_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
@@ -335,7 +335,7 @@ pub(crate) fn focus_event_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Valu
     {
         let mut st = d.st.borrow_mut();
         let event = st.events.get_mut(&e).expect("just made");
-        event.related = related;
+        it.store_value(&mut event.related, related);
         event.is_focus = true;
     }
     Ok(Value::Object(e))

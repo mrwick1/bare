@@ -148,3 +148,68 @@ fn values_objects_and_strings_through_a_scope() {
         assert_eq!(it.stack_len(), 0);
     });
 }
+
+/// A host that keeps one traced value per owner: `own(o, v)` makes `o` an owner of `v`.
+#[derive(Default)]
+struct Owners {
+    refs: RefCell<Vec<Option<bare_js_api::Traced<Value>>>>,
+    dead: RefCell<Vec<u32>>,
+}
+
+impl<'p> bare_js_api::Host<Interp<'p>> for Owners {
+    fn call<'s>(&self, s: &mut Scope<'s, Interp<'p>>, _id: u32, _this: Local<'s>, args: Args<'s>, _is_new: bool) -> Result<Local<'s>, bare_js_api::Error<'s>> {
+        let (o, v) = (args.get(0).unwrap(), args.get(1).unwrap());
+        let key = self.refs.borrow().len() as u32;
+        s.set_host_owner(o, key)?;
+        let t = s.trace_ref(v);
+        self.refs.borrow_mut().push(Some(t));
+        Ok(s.undefined())
+    }
+
+    fn trace(&self, key: u32, t: &mut bare_js_api::Tracer<'_, Value>) {
+        if let Some(Some(r)) = self.refs.borrow().get(key as usize) {
+            t.visit(r);
+        }
+    }
+
+    fn prune(&self, dead: &[u32]) {
+        for &k in dead {
+            self.refs.borrow_mut()[k as usize] = None;
+        }
+        self.dead.borrow_mut().extend_from_slice(dead);
+    }
+}
+
+#[test]
+fn an_owner_keeps_its_traced_values_while_it_lives() {
+    big(|| {
+        let mut it = Interp::realm(Heap::default(), EvalLimits { max_steps: 100_000, ..Default::default() }).unwrap();
+        let h = Rc::new(Owners::default());
+        enter(&mut it, |s| {
+            s.set_host(h.clone());
+            let (g, f, k) = (s.global(), s.host_function("own", 0, 2).unwrap(), s.string("own").unwrap());
+            s.define(g, k, f, Attrs::METHOD).unwrap();
+        });
+        // Key 0 has no weak reference to its value (a reached WeakRef target is a heap root). Key 1 shows the value go.
+        out(&mut it, "var o = {}; own(o, { tag: 'kept' }); var p = {}, v = { tag: 'weak' }, w = new WeakRef(v); own(p, v); v = null; 0");
+        it.collect(&[]).unwrap();
+        assert_eq!(out(&mut it, "w.deref() && w.deref().tag"), "weak", "the owner keeps the value");
+        // The heap itself keeps the value too: new objects do not take its slot.
+        out(&mut it, "for (var i = 0; i < 1000; i++) ({ junk: i }); 0");
+        let tag = enter(&mut it, |s| {
+            let r = h.refs.borrow();
+            let (v, k) = (s.traced(r[0].as_ref().unwrap()), s.string("tag").unwrap());
+            let t = s.get(v, k).unwrap();
+            s.as_str(t).unwrap().to_string_lossy()
+        });
+        assert_eq!(tag, "kept");
+        assert!(h.dead.borrow().is_empty());
+        out(&mut it, "o = null; p = null; 0");
+        it.collect(&[]).unwrap();
+        let mut dead = h.dead.borrow().clone();
+        dead.sort();
+        assert_eq!(dead, vec![0, 1], "a dead owner's key goes to prune");
+        assert_eq!(out(&mut it, "w.deref() === undefined"), "true", "the value goes with its owner");
+        assert!(it.api.owners.is_empty());
+    });
+}

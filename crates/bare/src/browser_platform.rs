@@ -306,10 +306,10 @@ impl Dom {
     }
 
     /// The listener of `onchange`, when it is still registered.
-    fn handler_cb(&self, o: ObjId) -> Option<ObjId> {
+    fn handler_cb(&self, it: &mut Interp<'_>, o: ObjId) -> Option<Value> {
         let id = self.plat.s.borrow().mql.get(&o)?.handler?;
         let st = self.st.borrow();
-        st.listeners.get(&Target::Obj(o))?.iter().find(|l| l.id == id).map(|l| l.cb)
+        st.listeners.get(&Target::Obj(o))?.iter().find(|l| l.id == id).map(|l| it.traced_value(&l.cb))
     }
 }
 
@@ -371,7 +371,7 @@ fn remove_listener(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V 
 
 fn onchange_get(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let o = d.mql_of(it, this)?;
-    Ok(d.handler_cb(o).map_or(Value::Null, Value::Object))
+    Ok(d.handler_cb(it, o).unwrap_or(Value::Null))
 }
 
 fn onchange_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
@@ -383,10 +383,14 @@ fn onchange_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     };
     let t = Target::Obj(o);
     let old = d.plat.s.borrow().mql[&o].handler;
-    let mut st = d.st.borrow_mut();
+    let mut guard = d.st.borrow_mut();
+    let st = &mut *guard;
     let present = old.and_then(|id| st.listeners.get(&t).and_then(|l| l.iter().position(|x| x.id == id)));
     match (cb, present) {
-        (Some(f), Some(i)) => st.listeners.get_mut(&t).expect("listed")[i].cb = f,
+        (Some(f), Some(i)) => {
+            it.store_value(&mut st.listeners.get_mut(&t).expect("listed")[i].cb, Value::Object(f));
+            d.own_listeners(st, it, t);
+        }
         (Some(f), None) => {
             if st.n_listeners >= d.lim.max_listeners {
                 return Err(d.lim("dom-listeners"));
@@ -396,13 +400,14 @@ fn onchange_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
             }
             st.next_id += 1;
             let id = st.next_id;
-            st.listeners.entry(t).or_default().push(Listener { id, ty: Rc::from("change"), cb: f, capture: false, once: false, passive: false, handler: false });
+            let cb = it.trace_value(Value::Object(f));
+            st.listeners.entry(t).or_default().push(Listener { id, ty: Rc::from("change"), cb, capture: false, once: false, passive: false, handler: false });
             st.n_listeners += 1;
-            drop(st);
+            d.own_listeners(st, it, t);
             d.plat.s.borrow_mut().mql.get_mut(&o).expect("checked").handler = Some(id);
         }
         (None, Some(_)) => {
-            drop(st);
+            drop(guard);
             d.remove_listener(t, old.expect("present"));
             d.plat.s.borrow_mut().mql.get_mut(&o).expect("checked").handler = None;
         }

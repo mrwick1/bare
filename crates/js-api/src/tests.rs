@@ -17,6 +17,7 @@ struct Toy {
     persistent: Vec<V>,
     slots: Rc<Slots>,
     objects: Vec<Vec<(V, V)>>,
+    owners: Vec<(usize, u32)>,
 }
 
 impl Toy {
@@ -31,6 +32,7 @@ impl Toy {
 }
 
 impl Engine for Toy {
+    type Raw = V;
     fn stack_len(&self) -> u32 {
         self.stack.len() as u32
     }
@@ -118,6 +120,18 @@ impl Engine for Toy {
         Err(Error::Abort(Abort::Unsupported("host functions")))
     }
     fn set_host(&mut self, _host: Rc<dyn Host<Self>>) {}
+    fn raw(&self, v: Local<'_>) -> V {
+        self.at(v).clone()
+    }
+    fn raw_local<'s>(&mut self, r: &V) -> Local<'s> {
+        self.push(r.clone())
+    }
+    fn set_host_owner<'s>(&mut self, obj: Local<'_>, key: u32) -> Result<(), Error<'s>> {
+        let V::Obj(o) = *self.at(obj) else { return Err(Error::Throw(Local::from_slot(obj.slot()))) };
+        self.owners.retain(|&(x, _)| x != o);
+        self.owners.push((o, key));
+        Ok(())
+    }
     fn safepoint(&mut self) {}
 }
 
@@ -218,4 +232,30 @@ fn args_are_consecutive_slots() {
         assert_eq!(args.get(2), None);
         assert_eq!(args.iter().count(), 2);
     });
+}
+
+#[test]
+fn a_traced_value_is_read_stored_and_visited_through_its_owner() {
+    let mut e = toy();
+    let mut t = enter(&mut e, |s| {
+        let v = s.number(1.0);
+        s.trace_ref(v)
+    });
+    assert_eq!(e.stack_len(), 0, "a traced value holds no slot");
+    let mut work = Vec::new();
+    enter(&mut e, |s| {
+        assert_eq!(s.traced(&t).slot(), 0);
+        let v = s.traced(&t);
+        assert_eq!(s.as_number(v), Some(1.0));
+        let w = s.string("cb").unwrap();
+        s.store(&mut t, w);
+        let o = s.new_object().unwrap();
+        s.set_host_owner(o, 7).unwrap();
+        s.set_host_owner(o, 8).unwrap();
+        let n = s.null();
+        assert!(matches!(s.set_host_owner(n, 9), Err(Error::Throw(_))), "only an object owns");
+    });
+    assert_eq!(e.owners, vec![(1, 8)], "a new key replaces the old one");
+    Tracer::new(&mut work).visit(&t);
+    assert_eq!(work, vec![V::Str("cb".encode_utf16().collect())]);
 }

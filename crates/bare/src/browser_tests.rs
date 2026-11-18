@@ -595,6 +595,40 @@ fn collect_with_an_event_target_and_a_stale_event() {
 }
 
 #[test]
+fn listener_owners_free_detached_cycles_and_reuse_their_keys() {
+    big(|| {
+        let mut b = browser();
+        // Each listener closure holds its own detached node: a cycle that only the owner tracer can break.
+        let make = "for (var i = 0; i < 200; i++) (function () { var n = document.createElement('div'); n.addEventListener('t', function () { n.x = 1 }); })();";
+        js(&mut b, make);
+        gc(&mut b, &[]);
+        let after = b.stats();
+        assert!(after.wrappers < 20, "wrappers {}", after.wrappers);
+        assert_eq!(after.listeners, 0);
+        let keys = b.dom.st.borrow().owners.len();
+        // A second round takes the freed keys: the owner table does not grow.
+        js(&mut b, make);
+        gc(&mut b, &[]);
+        assert_eq!(b.dom.st.borrow().owners.len(), keys);
+        assert!(b.dom.st.borrow().target_keys.len() < 20);
+    });
+}
+
+#[test]
+fn window_listeners_and_a_kept_event_survive_collect() {
+    big(|| {
+        let mut b = browser();
+        js(&mut b, "var hits = 0; (function () { var mark = {n: 1}; window.addEventListener('w', function () { hits += mark.n }); })();
+            var kept; (function () { var d = document.createElement('p'); d.id = 'held'; var ev = new CustomEvent('c', {detail: {v: 7}}); d.addEventListener('c', function (e) { kept = e }); d.dispatchEvent(ev); })();");
+        gc(&mut b, &[]);
+        gc(&mut b, &[]);
+        assert_eq!(js(&mut b, "window.dispatchEvent(new Event('w')); hits"), "1");
+        // The event is held only by `kept`: its target and detail stay alive through it.
+        assert_eq!(js(&mut b, "kept.target.id + ',' + kept.detail.v + ',' + kept.currentTarget"), "held,7,null");
+    });
+}
+
+#[test]
 fn caps_return_distinct_limit_errors() {
     big(|| {
         let l = BrowserLimits { max_nodes: 80, max_wrappers: 70, max_listeners: 5, max_listeners_per_target: 3, max_events: 4, max_results: 6, max_text_bytes: 4096, max_tree_depth: 8, max_attr_slots: 60, max_names: 40, ..Default::default() };

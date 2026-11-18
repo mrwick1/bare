@@ -1083,6 +1083,7 @@ impl<'p> Interp<'p> {
                 h.trace(o, &mut host_vals);
                 work.extend_from_slice(&host_vals[from..]);
             }
+            self.api_trace(o, &mut host_vals, &mut work);
             if let Some((buf, _, _)) = self.heap.view_parts(o) {
                 work.push(Value::Object(buf));
             }
@@ -1116,6 +1117,7 @@ impl<'p> Interp<'p> {
         if let Some(h) = &host {
             h.prune(&|o| seen.contains(&o));
         }
+        self.api_prune(|o| seen.contains(o));
         self.sc_prune(&seen);
         self.weak_prune(&seen);
         self.date_prune(&seen);

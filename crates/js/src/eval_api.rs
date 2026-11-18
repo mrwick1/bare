@@ -14,6 +14,9 @@ pub(crate) struct ApiState<'p> {
     slots: Rc<bare_js_api::Slots>,
     host: Option<Rc<dyn bare_js_api::Host<Interp<'p>>>>,
     abort: Option<Error>,
+    /// The objects with a host key (`set_host_owner`). `collect` calls the interface host's `trace` for them, and its `prune` with
+    /// the keys of the dead ones.
+    owners: FxMap<ObjId, u32>,
 }
 
 impl ApiState<'_> {
@@ -24,6 +27,58 @@ impl ApiState<'_> {
 }
 
 impl<'p> Interp<'p> {
+    /// The interface host's references of a reached object. `collect` calls it for each object it marks.
+    /// The heap marks its objects again from roots, so the values also go to `roots` (as the old host's values do).
+    #[inline]
+    pub(crate) fn api_trace(&self, o: ObjId, roots: &mut Vec<Value>, work: &mut Vec<Value>) {
+        if !self.api.owners.is_empty()
+            && let Some(&key) = self.api.owners.get(&o)
+            && let Some(h) = &self.api.host
+        {
+            let from = roots.len();
+            h.trace(key, &mut bare_js_api::Tracer::new(roots));
+            work.extend_from_slice(&roots[from..]);
+        }
+    }
+
+    /// Drop the owners that `collect` did not reach, and give their keys to the interface host.
+    pub(crate) fn api_prune(&mut self, live: impl Fn(&ObjId) -> bool) {
+        if self.api.owners.is_empty() {
+            return;
+        }
+        let mut dead = Vec::new();
+        self.api.owners.retain(|o, &mut k| live(o) || {
+            dead.push(k);
+            false
+        });
+        if let (false, Some(h)) = (dead.is_empty(), self.api.host.clone()) {
+            h.prune(&dead);
+        }
+    }
+
+    /// A traced reference of `v`, for host code that still holds values (plan step S0.4).
+    #[inline]
+    pub fn trace_value(&self, v: Value) -> bare_js_api::Traced<Value> {
+        bare_js_api::Traced::from_raw(v)
+    }
+
+    /// The value of a traced reference, for host code that still holds values (plan step S0.4).
+    #[inline]
+    pub fn traced_value(&self, t: &bare_js_api::Traced<Value>) -> Value {
+        *t.raw()
+    }
+
+    /// A store into a traced reference, for host code that still holds values (plan step S0.4).
+    #[inline]
+    pub fn store_value(&mut self, t: &mut bare_js_api::Traced<Value>, v: Value) {
+        t.set_raw(v);
+    }
+
+    /// `set_host_owner` for host code that still holds values (plan step S0.4).
+    pub fn set_host_owner_obj(&mut self, o: ObjId, key: u32) {
+        self.api.owners.insert(o, key);
+    }
+
     /// A persistent handle of `v`, for host code that still holds values (plan step S0.4).
     #[inline]
     pub fn persist_value(&mut self, v: Value) -> bare_js_api::Persistent {
@@ -119,6 +174,8 @@ impl<'p> Interp<'p> {
 }
 
 impl<'p> bare_js_api::Engine for Interp<'p> {
+    type Raw = Value;
+
     fn stack_len(&self) -> u32 {
         self.api.stack.len() as u32
     }
@@ -254,6 +311,24 @@ impl<'p> bare_js_api::Engine for Interp<'p> {
 
     fn set_host(&mut self, host: Rc<dyn bare_js_api::Host<Self>>) {
         self.api.host = Some(host);
+    }
+
+    fn raw(&self, v: bare_js_api::Local<'_>) -> Value {
+        self.api_at(v)
+    }
+
+    fn raw_local<'s>(&mut self, r: &Value) -> bare_js_api::Local<'s> {
+        self.api_push(*r)
+    }
+
+    fn set_host_owner<'s>(&mut self, obj: bare_js_api::Local<'_>, key: u32) -> Result<(), bare_js_api::Error<'s>> {
+        match self.api_obj(obj) {
+            Ok(o) => {
+                self.api.owners.insert(o, key);
+                Ok(())
+            }
+            Err(e) => Err(self.api_err(e)),
+        }
     }
 
     fn safepoint(&mut self) {}

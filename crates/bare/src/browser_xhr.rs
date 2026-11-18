@@ -875,12 +875,12 @@ fn resp_of(status: u16, url: &Url, headers: Vec<(String, String)>, body: Vec<u8>
 
 fn xh_get<const N: usize>(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let t = d.xhr_target(it, this)?;
-    Ok(handler_get(d, t, TYPES[N]))
+    Ok(handler_get(d, it, t, TYPES[N]))
 }
 
 fn xh_set<const N: usize>(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     let t = d.xhr_target(it, this)?;
-    handler_set(d, t, TYPES[N], a.first().copied())?;
+    handler_set(d, it, t, TYPES[N], a.first().copied())?;
     Ok(Value::Undefined)
 }
 

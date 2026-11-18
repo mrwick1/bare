@@ -612,7 +612,7 @@ fn handler_get(d: &Dom, it: &mut Interp<'_>, this: Value, is_error: bool) -> V {
     let n = d.el(it, this)?;
     let Some(id) = d.scripts.handlers.borrow().get(&(n, is_error)).copied() else { return Ok(Value::Null) };
     let st = d.st.borrow();
-    Ok(st.listeners.get(&EvTarget::Node(n)).and_then(|v| v.iter().find(|l| l.id == id)).map_or(Value::Null, |l| Value::Object(l.cb)))
+    Ok(st.listeners.get(&EvTarget::Node(n)).and_then(|v| v.iter().find(|l| l.id == id)).map_or(Value::Null, |l| it.traced_value(&l.cb)))
 }
 
 fn handler_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], is_error: bool) -> V {
@@ -627,7 +627,10 @@ fn handler_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], is_error:
     let st = &mut *st;
     let at = old.and_then(|id| st.listeners.get(&t).and_then(|v| v.iter().position(|l| l.id == id)));
     match (at, cb) {
-        (Some(i), Some(cb)) => st.listeners.get_mut(&t).expect("found")[i].cb = cb,
+        (Some(i), Some(cb)) => {
+            it.store_value(&mut st.listeners.get_mut(&t).expect("found")[i].cb, Value::Object(cb));
+            d.own_listeners(st, it, t);
+        }
         (Some(i), None) => {
             let v = st.listeners.get_mut(&t).expect("found");
             v.remove(i);
@@ -647,8 +650,9 @@ fn handler_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], is_error:
             }
             st.next_id += 1;
             let id = st.next_id;
-            list.push(Listener { id, ty: ty.into(), cb, capture: false, once: false, passive: false, handler: false });
+            list.push(Listener { id, ty: ty.into(), cb: it.trace_value(Value::Object(cb)), capture: false, once: false, passive: false, handler: false });
             st.n_listeners += 1;
+            d.own_listeners(st, it, t);
             d.scripts.handlers.borrow_mut().insert((n, is_error), id);
         }
         (None, None) => {}
