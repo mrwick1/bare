@@ -136,6 +136,43 @@ fn twelve_parsed_scripts_download_together_and_run_in_order() {
     });
 }
 
+/// `/m<N>.js` is a module that imports `/m<N+1>.js` (the last of `last` imports nothing) and pushes `m<N>` to `log` after its import ran.
+fn chain(last: usize, wait: impl Fn() + Send + Sync + 'static) -> Server {
+    serve(move |path| {
+        wait();
+        let n: usize = path.trim_start_matches("/m").trim_end_matches(".js").parse().unwrap_or(0);
+        let import = if n < last { format!("import './m{}.js';", n + 1) } else { String::new() };
+        Reply::js(format!("{import} log.push('m{n}')"))
+    })
+}
+
+#[test]
+fn modulepreload_links_download_together_and_the_graph_runs_in_order() {
+    big(|| {
+        // m0 imports m1, m1 imports m2, ... m5. A loader that reads each import only after its module came asks for one file at a time.
+        // The page names m1 to m5 in `modulepreload` links, so their downloads start together.
+        let meet = Arc::new(Meet::default());
+        let m = meet.clone();
+        let srv = chain(5, move || m.hold(3));
+        let links: String = (1..=5).map(|i| format!("<link rel=modulepreload href=/m{i}.js>")).collect();
+        let (log, r, _) = run(&format!("<head><script>var log = []</script>{links}</head><body><script type=module src=/m0.js></script></body>"), &srv);
+        assert_eq!(log, "m5|m4|m3|m2|m1|m0");
+        assert_eq!((r.load_errors, r.fetches), (0, 6));
+        assert!(meet.met(3), "peak {}", meet.peak.load(SeqCst));
+    });
+}
+
+#[test]
+fn a_modulepreload_link_that_no_import_uses_does_not_change_the_run() {
+    big(|| {
+        let srv = chain(1, || std::thread::sleep(LATENCY));
+        // m7 is named and never imported. Its download holds nothing: the page loads and its modules run in the order of the imports.
+        let (log, r, _) = run("<head><script>var log = []</script><link rel=modulepreload href=/m1.js><link rel=modulepreload href=/m7.js></head><body><script type=module src=/m0.js></script></body>", &srv);
+        assert_eq!(log, "m1|m0");
+        assert_eq!(r.load_errors, 0);
+    });
+}
+
 #[test]
 fn import_calls_of_one_checkpoint_download_together() {
     big(|| {

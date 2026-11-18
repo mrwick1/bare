@@ -895,7 +895,7 @@ impl Browser {
         let parse = dom.scripts.parse.borrow_mut().take().map(|p| *p);
         let split = parse.is_some();
         let p = parse.unwrap_or_else(|| Parse {
-            disc: resources::Discovery { items: Vec::new(), targets: Vec::new(), base: String::new() },
+            disc: resources::Discovery { items: Vec::new(), targets: Vec::new(), hints: Vec::new(), base: String::new() },
             items: Vec::new(),
             cache: Vec::new(),
             refs: Vec::new(),
@@ -1706,13 +1706,13 @@ impl Run<'_> {
         let room = WINDOW.saturating_sub(self.net.started.len()).min(lim.max_fetches.saturating_sub(self.res.fetches + self.net.started.len()));
         let allowed = |https_only: bool, u: &Url| !(https_only && u.scheme == bare_url::Scheme::Http);
         let mut cursor = self.cursor;
-        let mut todo: Vec<(Expect, &Url, bool)> = Vec::new();
+        let mut todo: Vec<(Expect, &Url, bool, bool)> = Vec::new();
         while cursor < self.disc.targets.len() && todo.len() < room {
             let t = &self.disc.targets[cursor];
             if allowed(self.https_only, &t.url) && !self.net.direct.contains(&Net::tag(t.expect, &t.url)) {
                 // Only a target that no module element names is a classic script (`parse_ahead` parses classic text).
                 let classic = t.expect == Expect::Script && !self.items.iter().any(|p| p.module && matches!(p.source, Source::External(i) if i == cursor));
-                todo.push((t.expect, &t.url, classic));
+                todo.push((t.expect, &t.url, classic, false));
             }
             cursor += 1;
         }
@@ -1720,7 +1720,14 @@ impl Run<'_> {
         let external = self.dom.scripts.external.borrow();
         for e in external.iter().take(WINDOW) {
             if let Ext::Fetch(_, u) = e && todo.len() < room && allowed(self.https_only, u) && !preloads.has_script(u) {
-                todo.push((Expect::Script, u, false));
+                todo.push((Expect::Script, u, false, false));
+            }
+        }
+        // The modules that `<link rel=modulepreload>` names: the page imports them later, one level of the graph at a time. Each waits in
+        // `started` until its import takes it (`Net::fetch`), and holds nothing until then (`Net::hints`).
+        for u in &self.disc.hints {
+            if todo.len() < room && allowed(self.https_only, u) && !preloads.has_script(u) && !self.net.direct.contains(&Net::tag(Expect::Script, u)) && !self.net.started.contains_key(&Net::key(Expect::Script, u)) {
+                todo.push((Expect::Script, u, false, true));
             }
         }
         if !self.split && todo.len() + self.net.started.len() < 2 {
@@ -1728,12 +1735,17 @@ impl Run<'_> {
         }
         self.cursor = cursor;
         let kept = self.kept();
-        for (expect, url, classic) in todo {
+        for (expect, url, classic, hint) in todo {
             let mut lim = lim.clone();
             if expect == Expect::Style {
                 lim.max_resource_bytes = lim.max_resource_bytes.min(sheets::MAX_BODY);
             }
+            let key = Net::key(expect, url);
+            let new = hint && !self.net.started.contains_key(&key);
             self.net.start_with(expect, url, &lim, self.deadline, kept, classic);
+            if new && self.net.started.contains_key(&key) {
+                self.net.hints.insert(key);
+            }
         }
     }
 
