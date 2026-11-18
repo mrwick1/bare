@@ -135,6 +135,8 @@ Numbers that bear on our choices:
 - Maglev compiles about 10 times slower than Sparkplug and 10 times faster than TurboFan.
 - Pointer compression: tagged values were about 70% of the V8 heap. Compression made the V8 heap up to 43% smaller and the renderer up to 20% smaller.
 
+How V8 handles each module, with its published numbers: `research-v8-reference.md`.
+
 What we take from them:
 
 - A good interpreter and a good object model come first. V8, SpiderMonkey and JavaScriptCore keep locals in registers or frame slots and use a 4-byte or 8-byte value. QuickJS uses a 16-byte value, as bare does today.
