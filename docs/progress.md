@@ -13340,3 +13340,21 @@ Staging journey with `bc-hist` (archMachine, `auto`, 2 runs each, all `ok`; base
 Cost rows (`tools/js/instr.sh`, `eval_load` at scale 10, `auto`, base main): every case within ±0.01%.
 
 P0.4 (8.5%) and P0.5 (2.8%) together remove about 11% of the lane ops on the staging journey with two small changes to the code generator. This supports the design's view that the compiler can remove a large share of ops (design 6.11). Not measured: the two together, staging instructions without `bc-hist`, the typing page, Windows.
+## 2026-11-18: constant operands on either side of a compare (plan step P0.4)
+
+A fused compare and jump now takes a constant operand on either side. `1 < n` compiles as `n > 1` (`JnGtK`), and `null !== e` as `e !== null` (`JnSNeK`). The constant has no side effect, so the order of the operands does not matter. Equalities (`==`, `!=`, `===`, `!==`) also take a string, `null` or `void 0` as the constant: the constant table gains `Const::Null` and `Const::Undefined`, and the verifier allows them and strings only on these four ops. `<`, `<=`, `>` and `>=` keep number constants only.
+
+Staging journey with `bc-hist` (archMachine, `auto`, 2 runs each, all `ok`; base is main with the P0.3 counters):
+
+| Build | Lane ops | `LoadI` | `LoadK` | `LoadNull` | `LoadUndef` | `Jn*K` |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| base | 78.6 M, 79.3 M | 4.19%, 4.16% | 3.13%, 3.20% | 6.14%, 6.07% | 0.31%, 0.31% | 2.74%, 2.75% |
+| P0.4 | 73.0 M, 71.7 M | 3.36%, 3.37% | 2.91%, 2.90% | 2.46%, 2.45% | 0.24%, 0.24% | 8.37%, 8.44% |
+
+- Lane ops fall by about 8.5% (live pages: the spread between runs of one build is up to 1.8%).
+- `LoadNull` falls from 6.1% to 2.5% of ops. Minified code writes `null!==e` and `void 0===t`.
+- A first version that swapped only number constants moved `LoadI` from 4.2% to 3.3% and left `LoadNull` and `LoadK` as they were.
+
+Cost rows (`tools/js/instr.sh`, `eval_load` at scale 10, `auto`, base main): every case within ±0.11% (`webpack` −0.11%). These programs seldom put a constant on the left.
+
+Not tested: staging instructions and CPU without `bc-hist`, the typing page, Windows.

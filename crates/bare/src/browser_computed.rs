@@ -1311,7 +1311,7 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
             d.define_accessor(it, proto, key, gf, Some(sf))?;
         }
     }
-    // `transform` is not a property of the style block, so the computed object has its own accessor.
+    // The computed `transform` is the matrix of the list (`computed_transform`), so the computed object has its own accessor.
     for css in ["transform", "-webkit-transform"] {
         let gf = d.add_fn(it, transform_get, &format!("get {}", keys_of(css)[0]), 0, false)?;
         for k in keys_of(css) {
