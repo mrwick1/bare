@@ -13322,3 +13322,7 @@ Not tested: windowed runs (paint), the RSS cost of `auto` by part, the mode A/B 
 - `eval_load CASE SCALE --source` prints the program and its expected result, so every engine runs the same program and every run is checked.
 - Check: on archMachine, 80 rows against the scratch run of the same day (`docs/research-quickjs-reference.md`): all Bare rows within 0.1%; QuickJS and Node within 2.5%, except one effect below.
 - Found: on QuickJS, `throws` moved from 85 M to 99 M instructions with the length of the script path (each `Error` stack holds the file name; 8 path lengths from 34 to 73 characters gave 85.3 M to 98.9 M). The tool runs QuickJS and Node in the script's directory with a relative name, so the count does not depend on `$BARE_TMP`. With it, `throws` 10 is 871.7 M, as in the reference.
+
+## 2026-11-18: new engine crate (plan step S1.1)
+
+A new crate `crates/js2` (`bare-js2`) holds the new engine. It runs no scripts yet. `BARE_JS_EXEC=new` stops the browser with exit code 2 and the message `BARE_JS_EXEC=new: the new JavaScript engine (bare-js2) cannot run scripts yet; use BARE_JS_EXEC=tree, auto or byte`. The crate denies `unsafe` code; stage S1 allows it in the `value` and `heap` modules only. A new CI job `miri` runs `cargo miri test -p bare-js2` on nightly. It ran locally on nightly 2026-11-17 (0 tests).

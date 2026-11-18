@@ -127,6 +127,15 @@ pub struct SessionConfig {
     pub downloads: Option<downloads::Downloads>,
 }
 
+/// The engine mode of `BARE_JS_EXEC`: `tree`, `auto` or `byte` for `bare-js`; other values give the default. `new` (`bare-js2`) is an
+/// error until the new engine runs scripts.
+fn exec_from(v: &str) -> Result<Exec, &'static str> {
+    if v == "new" {
+        return Err(bare_js2::NOT_READY);
+    }
+    Ok(Exec::from_name(v).unwrap_or_default())
+}
+
 impl SessionConfig {
     pub fn new(url: &str) -> SessionConfig {
         SessionConfig {
@@ -136,7 +145,13 @@ impl SessionConfig {
             fetch: FetchLimits::default(),
             limits: SessionLimits::default(),
             browser: BrowserLimits::default(),
-            eval: EvalLimits { exec: Exec::from_name(&std::env::var("BARE_JS_EXEC").unwrap_or_default()).unwrap_or_default(), ..EvalLimits::session() },
+            eval: EvalLimits {
+                exec: exec_from(&std::env::var("BARE_JS_EXEC").unwrap_or_default()).unwrap_or_else(|e| {
+                    eprintln!("BARE_JS_EXEC=new: {e}");
+                    std::process::exit(2)
+                }),
+                ..EvalLimits::session()
+            },
             heap: HeapLimits::default(),
             viewport: None,
             virtual_clock: bare_net::vclock::on(),
@@ -1038,6 +1053,13 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bare_js_exec_new_is_an_error_until_the_new_engine_runs() {
+        assert_eq!(exec_from("new"), Err(bare_js2::NOT_READY));
+        assert_eq!(exec_from("byte"), Ok(Exec::Byte));
+        assert_eq!(exec_from(""), Ok(Exec::default()));
+    }
 
     fn saved_pages() -> Vec<String> {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
