@@ -13326,6 +13326,9 @@ Not tested: windowed runs (paint), the RSS cost of `auto` by part, the mode A/B 
 ## 2026-11-18: new engine crate (plan step S1.1)
 
 A new crate `crates/js2` (`bare-js2`) holds the new engine. It runs no scripts yet. `BARE_JS_EXEC=new` stops the browser with exit code 2 and the message `BARE_JS_EXEC=new: the new JavaScript engine (bare-js2) cannot run scripts yet; use BARE_JS_EXEC=tree, auto or byte`. The crate denies `unsafe` code; stage S1 allows it in the `value` and `heap` modules only. A new CI job `miri` runs `cargo miri test -p bare-js2` on nightly. It ran locally on nightly 2026-11-17 (0 tests).
+## 2026-11-18: host interface inventory (plan step S0.1)
+
+`docs/design-host-interface.md` lists what the browser uses of `bare-js`, grouped by kind: values, the realm, objects and properties, host functions, lazy wrappers, promises and microtasks, modules, binary data and clone, the collector contract, and limits. 219 files of `crates/bare` name `bare_js` (91 of them tests); `drive` uses 5 items; `mcp` none. The browser calls `it.heap` directly at 221 sites through 63 `Heap` methods. The page ends with six questions for S0.2. It waits for the owner's review.
 ## 2026-11-18: constant operands on either side of a compare (plan step P0.4)
 
 A fused compare and jump now takes a constant operand on either side. `1 < n` compiles as `n > 1` (`JnGtK`), and `null !== e` as `e !== null` (`JnSNeK`). The constant has no side effect, so the order of the operands does not matter. Equalities (`==`, `!=`, `===`, `!==`) also take a string, `null` or `void 0` as the constant: the constant table gains `Const::Null` and `Const::Undefined`, and the verifier allows them and strings only on these four ops. `<`, `<=`, `>` and `>=` keep number constants only.
