@@ -13273,6 +13273,26 @@ JS engine mode on the journey (3 runs each, mean, range):
 
 Not tested: windowed runs (paint), the RSS cost of `auto` by part, the mode A/B on other journeys, wall time on an idle machine.
 
+## 2026-11-18: collector counters (plan step P0.2)
+
+`BARE_JS_STATS=1` now prints one `gcstats` line per realm when the realm ends: collections, young objects (made since the last collect), young objects that survived their first collect, and `task_alloc_max` (the largest heap growth between two safe points, that is one task). These numbers size the young space and the in-task trigger of the hybrid collector (design section 10, Q11).
+
+Cost (`tools/js/instr.sh`, `BARE_JS_EXEC=auto`, `eval_load`, base `d89f0299`): objects 10 +0.010%, closures 10 +0.026%, throws 10 +0.046% instructions.
+
+Typing page (`type_load /data/bare-tmp/jit-page '#a1' 50`, `auto`, 3 runs, the same each time): 13 collections, 438,033 young objects, 96,567 kept (22.0%), `task_alloc_max` 4,388,944 B (4.19 MiB).
+
+Staging journey (archMachine, `auto`, 3 runs, all `ok`, 4 realms each):
+
+| Run | Collections | Young objects | Kept | Survival | Largest task |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | 20 | 814,994 | 262,015 | 32.2% | 4,227,240 B |
+| 2 | 21 | 838,012 | 270,910 | 32.3% | 4,227,240 B |
+| 3 | 18 | 727,376 | 247,451 | 34.0% | 4,222,208 B |
+
+- Between 22% and 34% of young objects survive their first collect. That is high for a young generation: V8 and others plan for about 10% or less. Hypothesis: one collect covers many tasks, so objects that live for a few tasks count as kept. A per-task count would split them.
+- No task on these workloads grows the heap by more than 4.2 MiB. An in-task trigger at a few MiB would rarely fire here; it matters for loops like `eval_load throws`.
+
+Not tested: per-task survival, other journeys, the e16 machine.
 ## Engine rewrite design: two rounds of a four-model review (2026-11-18)
 
 - Design: `docs/design-engine-rewrite.md` (PR #681). Reviewers: Claude Sonnet 5.5, Claude Opus 5.5, GPT-6.2 Sol and GPT-6.2 Astra, high effort, one brief on data structures and algorithms for resource use. Static review; no builds or journeys ran.

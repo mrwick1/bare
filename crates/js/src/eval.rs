@@ -627,6 +627,7 @@ pub struct Interp<'p> {
     /// Native bytes that the host added since the previous `collect`, and the native bytes that it said were live after it (see `gc_due`).
     ext_since: usize,
     ext_live: usize,
+    gc_counters: GcCounters,
     live_envs: usize,
     funcs: ObjTab<Callee>,
     // run state
@@ -817,6 +818,7 @@ impl<'p> Interp<'p> {
             gc_live: 0,
             ext_since: 0,
             ext_live: 0,
+            gc_counters: GcCounters::default(),
             live_envs: 0,
             funcs: ObjTab::default(),
             env: 0,
@@ -1123,6 +1125,10 @@ impl<'p> Interp<'p> {
         }
         self.gc_allocs = self.heap.stats().total_object_allocs;
         self.gc_live = self.heap.used_bytes();
+        let c = &mut self.gc_counters;
+        c.task_from.set(c.task_from.get().min(self.gc_live));
+        let st = self.heap.stats();
+        (c.collections, c.young_objects, c.young_kept) = (st.collections, st.young_objects, st.young_objects_kept);
         self.ext_since = 0;
         Ok(r)
     }
@@ -1131,9 +1137,17 @@ impl<'p> Interp<'p> {
     /// The driver asks at each safe point (between tasks, after each key or click), so garbage cannot pile up while one call of the host
     /// runs many events. QuickJS and SpiderMonkey use the same rule: a limit that is a factor of the live size after the last collect.
     pub fn gc_due(&self) -> bool {
+        let (used, c) = (self.heap.used_bytes(), &self.gc_counters);
+        c.task_max.set(c.task_max.get().max(used.saturating_sub(c.task_from.get())));
+        c.task_from.set(used);
         self.depth == 0
             && self.stmt_frames == 0
             && (self.heap.used_bytes() > GC_MIN_BYTES.max(self.gc_live / 4 * 7) || self.ext_since > EXTERNAL_MIN_BYTES.max(self.ext_live / 4))
+    }
+
+    /// The largest growth of the heap between two safe points (`gc_due`): the most that one task allocated.
+    pub fn task_alloc_max(&self) -> usize {
+        self.gc_counters.task_max.get()
     }
 
     /// The native bytes that were live after the last collect (`set_external_live`).
@@ -4296,3 +4310,31 @@ mod inspect_tests;
 #[cfg(test)]
 #[path = "eval_exact_fit_tests.rs"]
 mod exact_fit_tests;
+
+/// Collector counters for the measurement of the collector (docs/plan-engine-rewrite.md, P0.2). `BARE_JS_STATS=1` prints them when
+/// the interpreter goes: the collects, the objects made since the previous collect and how many of them survived, and the most that
+/// one task allocated (the largest heap growth between two safe points, `gc_due`).
+#[derive(Default)]
+struct GcCounters {
+    /// Heap bytes at the previous safe point.
+    task_from: std::cell::Cell<usize>,
+    task_max: std::cell::Cell<usize>,
+    /// Copies of the heap's counters at the end of the last collect.
+    collections: u64,
+    young_objects: u64,
+    young_kept: u64,
+}
+
+impl Drop for GcCounters {
+    fn drop(&mut self) {
+        if std::env::var_os("BARE_JS_STATS").is_some() {
+            eprintln!(
+                "gcstats collections={} young_objects={} young_kept={} task_alloc_max={}",
+                self.collections,
+                self.young_objects,
+                self.young_kept,
+                self.task_max.get()
+            );
+        }
+    }
+}
