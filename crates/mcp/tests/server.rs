@@ -681,6 +681,20 @@ fn an_agent_fills_a_form_with_select_check_hover_dblclick_and_upload() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// An ARIA switch (a button with `role=switch` and `aria-checked`) reads as checked, and check and uncheck click it.
+#[test]
+fn check_and_expect_checked_work_on_an_aria_switch() {
+    let mut s = Server::start();
+    let base = common::serve();
+    let steps = format!("open {base}/forms\nclick css=\"#sw\"\nexpect css=\"#sw\" checked\nuncheck css=\"#sw\"\nexpect css=\"#sw\" unchecked\ncheck css=\"#sw\"\nexpect css=\"#sw\" checked\n");
+    let (r, error) = s.tool("run_steps", json!({"steps": steps, "timeout_ms": 3000}));
+    assert!(!error && r["ok"] == true, "{r}");
+    // The outline marks it checked after a check.
+    s.tool("open", json!({"url": format!("{base}/forms")}));
+    let (r, error) = s.tool("act", json!({"op": "check", "loc": "css=\"#sw\"", "diff": false}));
+    assert!(!error && r.as_str().unwrap().contains("switch \"Wifi\" (checked"), "{r}");
+}
+
 /// Click each link or button of the downloads page and check the file that the receipt names: its bytes, and that the page did not change.
 #[test]
 fn a_download_goes_to_a_file_and_the_page_stays() {

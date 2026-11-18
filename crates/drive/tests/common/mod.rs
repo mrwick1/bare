@@ -93,7 +93,7 @@ fn pages(method: &str, target: &str, body: &str, auth: Option<&str>) -> (u16, &'
     }
 }
 
-/// A page of form controls for the form actions: two selects, a checkbox, a hover menu, a double click, and a file input with a
+/// A page of form controls for the form actions: two selects, a checkbox, an ARIA switch, a hover menu, a double click, and a file input with a
 /// submitted form and a `fetch` with `FormData`.
 const FORMS: &str = "<!DOCTYPE html><title>Forms</title>\
 <style>#menu { display: none; position: absolute } #hv:hover #menu { display: block }</style>\
@@ -105,7 +105,9 @@ const FORMS: &str = "<!DOCTYPE html><title>Forms</title>\
 <button id=dbl>Double target</button><p id=dbls>single</p>\
 <form method=post action=/upload enctype=multipart/form-data><input type=file name=doc aria-label=Document><button>Send file</button></form>\
 <button id=go>Fetch file</button><p id=fetched></p>\
+<button type=button role=switch aria-checked=false id=sw>Wifi</button>\
 <script>\
+document.getElementById('sw').addEventListener('click', function () { this.setAttribute('aria-checked', this.getAttribute('aria-checked') == 'true' ? 'false' : 'true') });\
 var ev = function (e) { document.getElementById('events').textContent += ' ' + e.target.id + ':' + e.type };\
 ['country', 'fruit'].forEach(function (id) { ['input', 'change'].forEach(function (t) { document.getElementById(id).addEventListener(t, ev) }) });\
 document.getElementById('hv').addEventListener('mouseenter', function () { document.getElementById('entered').textContent = 'hot' });\
