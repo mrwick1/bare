@@ -37,6 +37,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --locked -p bare-mcp -p bare-drive
+  # The new engine (crates/js2): only its `value` and `heap` modules may hold
+  # `unsafe` code, so its tests run under Miri.
+  miri:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with: { components: miri }
+      - run: cargo miri test --locked -p bare-js2
   # Automatic fix runs push autofix/* branches. They must not change the
   # workflows, because the workflows are the merge gate.
   guard:

@@ -13360,6 +13360,9 @@ Staging journey with `bc-hist` (archMachine, `auto`, 2 runs each, all `ok`; base
 Cost rows (`tools/js/instr.sh`, `eval_load` at scale 10, `auto`, base main): every case within ±0.01%.
 
 P0.4 (8.5%) and P0.5 (2.8%) together remove about 11% of the lane ops on the staging journey with two small changes to the code generator. This supports the design's view that the compiler can remove a large share of ops (design 6.11). Not measured: the two together, staging instructions without `bc-hist`, the typing page, Windows.
+## 2026-11-18: new engine crate (plan step S1.1)
+
+A new crate `crates/js2` (`bare-js2`) holds the new engine. It runs no scripts yet. `BARE_JS_EXEC=new` stops the browser with exit code 2 and the message `BARE_JS_EXEC=new: the new JavaScript engine (bare-js2) cannot run scripts yet; use BARE_JS_EXEC=tree, auto or byte`. The crate denies `unsafe` code; stage S1 allows it in the `value` and `heap` modules only. A new CI job `miri` runs `cargo miri test -p bare-js2` on nightly. It ran locally on nightly 2026-11-17 (0 tests).
 ## 2026-11-18: feature census (plan step P0.1)
 
 The cargo feature `census` of `bare-js` counts each syntax kind that the parser keeps and each native built-in call. When a realm ends, it writes the totals to the file in `BARE_JS_CENSUS`. With the feature off, every census line is compiled out, so the cost rows cannot move.
@@ -13413,6 +13416,13 @@ Cost rows (`tools/js/instr.sh`, `eval_load` at scale 10, `auto`, base main): eve
 
 Not tested: staging instructions and CPU without `bc-hist`, the typing page, Windows.
 
+## 2026-11-18: NaN-boxed value (plan step S1.2)
+
+`bare-js2` has a `Value` of 8 bytes (`crates/js2/src/value.rs`, design 6.1). A double is stored as it is. Every other value has a tag in the top 16 bits from `0xFFF9`: a 32-bit integer, `undefined`, `null` and the booleans, and pointers to a string, symbol, BigInt or object cell. "Is a double" is one unsigned compare. A NaN whose bits reach the tag space becomes the canonical NaN on entry (`Value::number`), with the same one compare. Pointers go through the exposed-provenance API, so the module has no `unsafe` code; the heap will hold the 48-bit address check (design 6.1); here it is a debug check.
+
+Checks: 5 unit tests, also under Miri (nightly 2026-11-17), including a pointer round trip that reads the cell. Micro row `crates/js2/examples/value_load.rs` (archMachine, release, `tools/js/instr.sh`, min of 3): 327,816,398 instructions for 10,000,000 values and 315,465 for none, so 32.7 instructions per value for one encode and one decode of mixed kinds, with the loop and the checksum.
+
+Not measured: the same row on today's 16-byte `Value`, arm64.
 ## 2026-11-18: host interface crate (plan step S0.2)
 
 A new crate `crates/js-api` (`bare-js-api`) holds the interface between the browser and an engine. It has no engine code. The browser will be generic over its `Engine` trait, and a session picks the engine when it starts (owner decision, 2026-11-18). The host holds handles, not values: a `Local` (a slot in the handle stack of a `Scope`) or a `Persistent` (a slot in a table of the realm). A method that takes `&mut Scope` may collect; a method that takes `&Scope` never does. The decisions on the six questions of S0.1 are in `docs/design-host-interface.md`.
@@ -13420,3 +13430,18 @@ A new crate `crates/js-api` (`bare-js-api`) holds the interface between the brow
 Checks: 4 unit tests with a toy engine (scope pops, escape of a value or an exception, persistent handles, arguments) and 5 doc tests. 4 of the doc tests must fail to compile, each with its error code: a local that leaves its scope (E0521), an inner local kept in the outer scope (E0521), a string borrow held across a call (E0502), and a released persistent handle (E0382). Clippy is clean. The 4 unit tests also pass on the Windows 11 VM (`cargo xwin test --target x86_64-pc-windows-msvc`).
 
 Not done: no engine implements the trait yet (S0.3), so no instruction numbers.
+
+## 2026-11-18: the old engine behind the host interface (plan step S0.3)
+
+`bare-js` implements `bare_js_api::Engine` for `Interp` (`crates/js/src/eval_api.rs`). The handle stack and the persistent table are two vectors of `Value` in the realm. `Interp::roots` and `Interp::collect` treat both as roots. This engine collects only between tasks, so `safepoint` does nothing. A host set through the interface gets the host calls; the old `Host` path stays as it was and is checked first. An engine error that is not an exception crosses the interface as `Abort`. The original error waits in the realm, so a host that passes the abort on gives back the same error (a step limit stays `Limit(Steps)`).
+
+Interface changes: `Engine` no longer needs `'static`, because `Interp` has a lifetime parameter. `Scope::engine` (hidden) lets an engine read a slot before the scope ends. `Host::call` takes `this` as `Local<'s>`.
+
+Checks:
+
+- 4 adapter tests with a host that is written only against the interface: host functions, a call back into script, a thrown value, an escape scope, a step limit through the host, a persistent handle through a collection, and plain values. The 42 old host tests pass.
+- Windows: the adapter tests, the 10 `host_tests` and the `bare-js-api` tests pass on the Windows 11 VM (`cargo xwin test`, run on the VM).
+- Cost rows (`tools/js/cost_matrix.sh`, archMachine, base = the parent commit `cf3830c5`, 3 runs per row): no row over +0.5%; mean +0.004% (glibc). A first version that checked the interface host before the old host put 5 host-call rows over +0.5% (up to +0.91% on `select_load react 1000`). The interface path is now a cold function after the old host check.
+- `parse_load deep 1` and `deep 10` abort (exit 134) on the base tree too, so they are not counted.
+
+Not done: the browser does not use the interface yet (S0.4).

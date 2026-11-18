@@ -239,12 +239,12 @@ pub enum Abort {
 /// The host side of the browser: the engine calls it for host functions.
 pub trait Host<E: Engine> {
     /// Run host function `id` (from [`Scope::host_function`]). `is_new` is true for `new f()`.
-    fn call<'s>(&self, s: &mut Scope<'s, E>, id: u32, this: Local<'_>, args: Args<'s>, is_new: bool) -> Result<Local<'s>, Error<'s>>;
+    fn call<'s>(&self, s: &mut Scope<'s, E>, id: u32, this: Local<'s>, args: Args<'s>, is_new: bool) -> Result<Local<'s>, Error<'s>>;
 }
 
 /// A JavaScript realm. The host calls these methods only through [`Scope`]; each value that a method returns is pushed onto the
 /// handle stack. Methods that take `&self` must not collect.
-pub trait Engine: Sized + 'static {
+pub trait Engine: Sized {
     /// The number of slots in the handle stack.
     fn stack_len(&self) -> u32;
     /// Drop the slots from `len` up.
@@ -422,6 +422,12 @@ impl<'s, E: Engine> Scope<'s, E> {
 
     pub fn safepoint(&mut self) {
         self.e.safepoint();
+    }
+
+    /// For engines: the engine of this scope, to read the value of a slot before the scope ends.
+    #[doc(hidden)]
+    pub fn engine(&mut self) -> &mut E {
+        self.e
     }
 }
 

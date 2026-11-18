@@ -1,0 +1,9 @@
+# JavaScript: the new engine (docs/design-engine-rewrite.md, docs/plan-engine-rewrite.md). It runs no scripts yet.
+# Only the `value` and `heap` modules may hold `unsafe` code; CI runs them under Miri.
+[package]
+name = "bare-js2"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

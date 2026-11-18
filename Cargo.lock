@@ -56,6 +56,7 @@ dependencies = [
  "bare-html",
  "bare-image",
  "bare-js",
+ "bare-js2",
  "bare-layout",
  "bare-net",
  "bare-observe",
@@ -126,6 +127,7 @@ dependencies = [
 name = "bare-js"
 version = "0.1.0"
 dependencies = [
+ "bare-js-api",
  "bare-observe",
  "bare-os",
  "bare-unicode",
@@ -147,6 +149,10 @@ dependencies = [
 
 [[package]]
 name = "bare-js-api"
+version = "0.1.0"
+
+[[package]]
+name = "bare-js2"
 version = "0.1.0"
 
 [[package]]
