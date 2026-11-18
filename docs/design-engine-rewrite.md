@@ -15,18 +15,19 @@ Words used in this file:
 
 The current engine spends its time and memory on its own bookkeeping, not on the work of the script. Three facts from the journey show it:
 
-- One op costs about 210 instructions on average (16.1 G of JS work for 76.3 M ops in `auto` mode). Decode and dispatch is about 23 of them (research of 2026-11-17). So a JIT that removes dispatch alone removes about 10% of the JS work. This matches the old bound (5.5% to 12.9%).
-- The heaviest ops are moves and variable reads: `Mov` 12.8%, `GetField` 12.6%, `GetEnv` 12.4%, `SetEnv` 3.3%. Local variables live in heap environments. Each call makes an `Env` with a `Vec` of 24-byte bindings.
+- Hypothesis: one op costs about 210 instructions on average. This is an estimate, not a measured count: 22.23 G instructions times the JS share of CPU samples (72.3% in the `jscat.py` run, 71.3% in the `classify.py` run) gives 15.9 to 16.1 G, over 76.3 M ops. It includes natives, parse, GC and allocation that ops call. Decode and dispatch was about 23 instructions per op in the research of 2026-11-17 (a different workload; that number also includes spills and code with no source line). So a JIT that removes dispatch alone would remove roughly 10% of the JS work (hypothesis). The old bound (5.5% to 12.9%) used another page and denominator; it points the same way but does not prove this number.
+- The heaviest ops are moves and variable reads: `Mov` 12.8%, `GetField` 12.6%, `GetEnv` 12.4%, `SetEnv` 3.3%. Register functions already keep locals in registers (`bc_vm.rs:323`). A function with inner functions still makes an `Env` per call, and all its named variables that inner functions can see live there (stage 1 of `bc_gen.rs`). `GetEnv` reads them through the environment chain.
 - An object costs 104 bytes plus 8 bytes of slot metadata, before any property is stored out of line. A value is 16 bytes. V8 stores an object with two fields in about 20 bytes (hypothesis: from the published layout, not measured here).
 
 Recommendation (section 7): build a new engine crate, `bare-js2`, next to the old one, and switch it on per session with `BARE_JS_EXEC=new`. Its core is:
 
 1. Values in 64 bits (NaN-boxing) with direct pointers into the GC heap. No slot table, no generation check.
 2. A compiler that goes from the parse straight to register bytecode, with scope analysis. Locals and arguments live in registers. Only captured variables go to a small context object.
-3. Objects as a shape pointer and inline slots, with polymorphic inline caches (up to 4 shapes).
-4. A mark-region heap (Immix): bump allocation in 32 KiB blocks of 128-byte lines, non-moving, with sticky mark bits for a young generation.
+3. Objects as a shape pointer and inline slots. Inline caches start with one shape and grow to at most 4 when a site sees more (polymorphic caches).
+4. A mark-region heap (Immix): bump allocation in 32 KiB blocks of 128-byte lines, non-moving, with sticky mark bits for a young generation. S1 compares it against a plain non-generational mark-sweep with the same roots before it is chosen.
 5. One interpreter (no tree walker). Then a baseline JIT that keeps the interpreter's frame layout (the Sparkplug model), on `dynasm-rs` for x64 and arm64.
 6. The syntax tree is dropped after compile. Bytecode of a function that has not run for a while is dropped and compiled again on the next call (bytecode flushing).
+7. A written GC safety contract at the host boundary (section 6.8): safepoints, scoped and persistent roots, wrapper identity and barriers. It is a condition of S0 and S1.
 
 Expected result on the journey, all hypotheses until stage gates measure them: JS work down 50% to 65% before the JIT, and another 10% to 20% of what is left with the baseline JIT. JS heap at the peak down 40% to 55% (about 51 MiB to 23 to 30 MiB).
 
@@ -68,7 +69,7 @@ JS work in `auto`, by kind (share of all CPU; a sample goes to the first matchin
 
 ### 3.2 What the bytecode runs
 
-76,322,599 ops in 4 realms. 21 ops give 91%.
+76,322,599 ops in 4 realms. 21 ops give 90.1%.
 
 | Op         | Share |     | Op       | Share |
 | ---------- | ----: | --- | -------- | ----: |
@@ -82,8 +83,8 @@ JS work in `auto`, by kind (share of all CPU; a sample goes to the first matchin
 | `SetField` |  3.8% |     | `Wide`   |  1.6% |
 
 - The top pair is `GetEnv` then `GetField` (2.7 M): read a variable from the environment, then a field of it.
-- `Mov` and `GetEnv` together are 25% of all ops. A compiler with locals in registers removes most of both (hypothesis; V8's Ignition reads locals as registers, so the same React code would run neither op).
-- Inline caches: `GetField` misses 11.8% (1,137,155 of 9,632,782). `SetField` misses 1.3%. The cache holds one shape. A miss takes the slow path.
+- `Mov` and `GetEnv` together are 25% of all ops. A compiler that keeps every non-captured variable in a register removes most `GetEnv` (hypothesis). Which `Mov` go away depends on the register allocator of the new compiler (hypothesis).
+- Inline caches: 11.8% of `GetField` executions (1,137,155 of 9,632,782) leave the inline own-property path. That count includes prototype cache hits and primitive receivers, so the true miss rate is lower and not measured. `SetField`: 1.3%. The cache holds one shape.
 - Lane coverage: 98.5% of calls (2,363,990 on the lane, 34,864 on the tree walker).
 
 ### 3.3 Where the memory goes
@@ -96,7 +97,9 @@ Peak heap 61.6 MiB plus 9.3 MiB of malloc overhead. Peak RSS of normal runs: 83 
 | Source and syntax trees            | 12.9 |
 | Collector work lists at the peak   |  4.9 |
 | Scopes, closures and strings       |  4.9 |
-| Inline caches (`Caches::new`)      |  3.3 |
+| Per-script name and scope tables (`Caches::new`, indexed by syntax node) | 3.3 |
+
+The split is approximate. It groups massif allocation stacks by the first engine frame, in the default mode (`tree`). Some rows mix kinds (for example `ObjTab::retain` is counted with objects). Source, syntax tree, bytecode, feedback and transient collector memory in `auto` are not measured separately (section 9).
 
 `auto` adds 6.7 MiB of peak RSS over `tree` (the bytecode, kept next to the syntax tree; hypothesis, not split by part).
 
@@ -106,8 +109,8 @@ Peak heap 61.6 MiB plus 9.3 MiB of malloc overhead. Peak RSS of normal runs: 83 
 | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Value         | `enum Value`, 16 bytes; a string, symbol or object is a handle (slot index and generation)                                                              | Every heap access goes handle → slot table → dense `Vec` → payload, with a generation check. Twice the memory of an 8-byte value in every slot, register and array element. |
 | Object        | `struct Object`, 104 bytes: prototype, shape id, flags, `elems: Vec<Option<Value>>`, 3 inline values, then a `Vec` for more, and an optional dictionary | A fourth property moves all values to a `Vec` (one more allocation, one more pointer hop). Arrays pay a `Vec` header and a 16-byte `Option<Value>` per element.             |
-| Variables     | `Env { parent, bindings: Vec<Binding>, index: Option<FxMap>, ... }` per call and per block                                                              | One heap environment and one `Vec` per call. A local read is `GetEnv` (hops and index) through the environment chain. Closures keep whole environments alive.               |
-| Inline caches | One shape per site, in a side table                                                                                                                     | 11.8% misses on `GetField`. A miss runs the generic lookup.                                                                                                                 |
+| Variables | Register functions keep locals in registers. A function with inner functions makes `Env { parent, bindings: Vec<Binding>, index: Option<FxMap>, ... }` per call, and per block where needed | One heap environment and one `Vec` per such call. Variables that inner functions see are read with `GetEnv` (hops and index). Closures keep whole environments alive. |
+| Inline caches | One shape per site, in a side table | 11.8% of `GetField` executions leave the inline own-property path. That count includes prototype cache hits and primitive receivers, so it is not a miss rate. Miss reasons by site are not measured. |
 | Execution     | Tree walker for first calls and refused code, bytecode from the second call                                                                             | Two engines for every feature. Every semantic rule is written twice. The bytecode stays next to the tree, so memory grows.                                                  |
 | Front end     | Lexer → arena syntax tree (kept) → bytecode on demand                                                                                                   | The tree stays for the life of the script (12.9 MiB with the source). Lazy bodies are parsed again at the first call.                                                       |
 | Collector     | Mark and sweep over slabs, at safe points, non-generational; every collect walks the whole live heap                                                    | The cost of one collect grows with the live heap, not with the garbage. Freed memory goes back to malloc, so allocation is a `malloc` call.                                 |
@@ -126,13 +129,13 @@ Sources read on 2026-11-18: <https://v8.dev/blog/sparkplug>, <https://v8.dev/blo
 
 Numbers that bear on our choices:
 
-- Sparkplug (baseline JIT, no IR, one linear pass over the bytecode, keeps the interpreter's frame layout): 5% to 15% on real-world benchmarks over Ignition with TurboFan. 41% on Speedometer over Ignition alone (Maglev blog, Chrome 117).
+- Sparkplug (baseline JIT, no IR, keeps the interpreter's frame layout; the published version has a prepass that finds loops and one code-generation pass): about 5% to 15% of V8 main-thread time on browsing benchmarks, and 5% to 10% on Speedometer, over Ignition with TurboFan. The Maglev blog gives 41% on Speedometer over Ignition alone (Chrome 117). These are reference results of another engine, not a forecast for bare.
 - Maglev compiles about 10 times slower than Sparkplug and 10 times faster than TurboFan.
 - Pointer compression: tagged values were about 70% of the V8 heap. Compression made the V8 heap up to 43% smaller and the renderer up to 20% smaller.
 
 What we take from them:
 
-- A good interpreter and a good object model come first. Every engine above has registers or frame slots for locals and an 8-byte (or 4-byte) value.
+- A good interpreter and a good object model come first. V8, SpiderMonkey and JavaScriptCore keep locals in registers or frame slots and use a 4-byte or 8-byte value. QuickJS uses a 16-byte value, as bare does today.
 - A baseline JIT in the Sparkplug model is cheap to build and keeps the interpreter's frames. That makes deoptimization unneeded, because nothing is speculated.
 - The spike of 2026-11-17 measured one field copy in JIT code at 83 instructions with today's checked handles and 49 with a raw object pointer. Direct pointers are part of the JIT's gain.
 - JavaScriptCore shows that a non-moving collector with sticky mark bits can be generational. That fits Rust, where moving objects needs precise rooting of every pointer.
@@ -151,6 +154,12 @@ Each part has at least two options. The recommended one is first.
 
 Option B can come later for object slots only, as a separate step with its own measurement.
 
+Conditions of option A:
+
+- Address invariant: every GC pointer must fit the payload. On Linux x64, `mmap` returns addresses above 47 bits only when the caller asks for them with a high hint (5-level paging). The heap reserves its own address range at start and checks every block address against the payload width. If the check fails, the value stores a 32-bit offset from the reservation base instead (option B for pointers only).
+- Rust pointer provenance: values hold pointers as integers. Use the exposed-provenance API (`expose_provenance`, `with_exposed_provenance`) in one module, and run that module under Miri.
+- NaN canonicalization: every double that enters from outside (arithmetic results, `Float64Array` and `DataView` reads, host numbers) is checked, and a NaN with a payload is replaced by the canonical NaN. Otherwise a crafted NaN could look like a pointer.
+
 ### 6.2 Heap and collector
 
 | Option                                                           | Data structures                                                                                       | Allocation                                                      | Collect cost                                                                                                                                                     | Fit for Rust                                                                                                                                                     |
@@ -159,6 +168,12 @@ Option B can come later for object slots only, as a separate step with its own m
 | B. Copying young generation, mark-compact old (V8)               | Two semispaces for the young generation                                                               | Bump pointer                                                    | Young collection costs the survivors only                                                                                                                        | Every pointer in Rust locals must be rooted and updated. A missed root is memory corruption.                                                                     |
 | C. Reference counting with a cycle collector (QuickJS)           | Count in each object                                                                                  | `malloc`                                                        | Pays on every store; cycles need a second pass                                                                                                                   | Simple, but slow on the store-heavy code that React runs.                                                                                                        |
 
+Notes on option A:
+
+- Original Immix also moves some objects (opportunistic evacuation) to fight fragmentation. This design leaves evacuation out, so fragmentation must be measured: live bytes against committed bytes, and pages given back to the OS after churn.
+- The write barrier (old object gets a pointer to a young object) costs instructions on every pointer store, in the interpreter and in JIT code. S1 measures it.
+- S1 builds a plain non-generational mark-sweep with the same roots first, and compares both on the same rows. The sticky-mark young generation is kept only if it wins on instructions and peak RSS.
+
 ### 6.3 Variables and calls
 
 | Option                                              | How                                                                                                                                                                                        | Effect                                                                                                      |
@@ -166,12 +181,19 @@ Option B can come later for object slots only, as a separate step with its own m
 | **A. Scope analysis at compile time** (recommended) | The compiler knows each name: a register (local, not captured), a context slot (captured by a closure), or a global (cached by shape). A call pushes one frame of registers on a JS stack. | `GetEnv` becomes `Mov` or nothing. No heap environment per call. Closures keep only the captured variables. |
 | B. Keep environments, cache lookups                 | Environments as today, with (hops, index) cached per site                                                                                                                                  | Removes the search, keeps the allocation and the hop chain.                                                 |
 
+What option A must also design (in S2, before the compiler is built):
+
+- Dynamic scopes: direct `eval`, `with` and sloppy-mode mapped `arguments` can read or create variables at run time. A function that contains them keeps its variables in a context object with a name table, as today.
+- Resumable frames: generators and async functions keep their registers in a heap object while suspended. The collector traces it.
+
 ### 6.4 Objects and property access
 
 | Option                                                                                    | How                                                                                                                                                                                                                           | Effect                                                                                                                                                                                                       |
 | ----------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | **A. Shape pointer + inline slots + out-of-line slots; polymorphic caches** (recommended) | Header: shape pointer, prototype in the shape, elements pointer. A fixed number of inline slots chosen per allocation site from the shape's observed size (slack tracking). Caches of up to 4 (shape, offset) pairs per site. | An object `{a, b}` is about 32 bytes (hypothesis: 8 header + 8 elements + 2 × 8 slots). A cache hit is a compare and a load. The 11.8% misses fall, because most React sites see 2 to 4 shapes (hypothesis). |
 | B. Keep today's 104-byte object, add polymorphic caches                                   | as today, plus 4-entry caches                                                                                                                                                                                                 | Fixes the misses, not the memory.                                                                                                                                                                            |
+
+Cache rules: a site starts with one entry and grows to at most 4 when it sees new shapes; past 4 it becomes megamorphic and uses a global (shape, key) table. A hit on a prototype property is guarded by a validity cell that the prototype clears when its keys change. Dictionary-mode and exotic objects (proxies, host objects with named properties, typed arrays) always take the slow path. S1 measures miss reasons per site before the size 4 is fixed.
 
 Arrays: a dense elements store of 8-byte values with kinds (integers, doubles, any), and holes marked by a reserved NaN value.
 
@@ -188,7 +210,7 @@ The lexer, the parse cache and parse-ahead on a worker thread stay as ideas. The
 
 | Option                                                                  | Tiers                                                                                                                                                                                                                                                                             | Gain                                                                                                                                                                                                        | Cost                                                                                                                                      |
 | ----------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| **A. Interpreter, then a baseline JIT (Sparkplug model)** (recommended) | One register interpreter (no tree walker). A function that runs often compiles to machine code in one pass over its bytecode. Same frame layout, so no deoptimization. Hot ops (field access, compares, jumps, integer math) are inline; the rest call the interpreter's helpers. | Sparkplug: 5% to 15% over a tuned interpreter on real-world pages. Removes dispatch and decode (about 10% of today's JS work; more once the other costs are gone, because dispatch becomes a larger share). | Two assembler back ends (x64, arm64). Code memory (the design caps it and drops cold code).                                               |
+| **A. Interpreter, then a baseline JIT (Sparkplug model)** (recommended) | One register interpreter (no tree walker). A function that runs often compiles to machine code in a prepass and one code-generation pass over its bytecode. Same frame layout, so no deoptimization. Hot ops (field access, compares, jumps, integer math) are inline; the rest call the interpreter's helpers. | Reference: Sparkplug gave 5% to 15% of V8 main-thread time (section 5). Removes dispatch and decode (about 10% of today's JS work, hypothesis; more once the other costs are gone, because dispatch becomes a larger share). | Two assembler back ends (x64, arm64). Code memory (the design caps it and drops cold code).                                               |
 | B. A JIT with Cranelift                                                 | Bytecode → Cranelift IR → machine code                                                                                                                                                                                                                                            | Better register use, later a path to an optimizing tier                                                                                                                                                     | The spike of 2026-11-17 (branch `baseline-jit-design`) measured 1.65 M instructions of compile for each inline property op, and +3.0 to 4.9 MB of binary. Better as a later optimizing tier. |
 | C. An optimizing tier with speculation (Maglev-like)                    | SSA with type feedback and deoptimization                                                                                                                                                                                                                                         | The largest gain on hot loops                                                                                                                                                                               | Deoptimization, feedback vectors and an SSA compiler. Not before A is measured.                                                           |
 
@@ -201,6 +223,18 @@ JIT tools: `dynasm-rs` (an assembler crate with x64 and arm64), or a small hand-
 | **A. New crate next to the old one** (recommended)           | `crates/js2` with its own value, heap, compiler and interpreter. The browser talks to the engine through one trait (the host interface: DOM wrappers, callbacks, microtasks, modules). `BARE_JS_EXEC=new` picks it per session. Journeys run on both until the new one passes every gate, then the old crate is removed. | Two engines for a while. The host interface must be written once for both.                                                 |
 | B. Replace parts of `crates/js` in place                     | Change the value, then the heap, then the scopes, inside the current crate                                                                                                                                                                                                                                               | Every step touches 65,000 lines and both tiers. The value change alone touches nearly every file.                          |
 | C. Embed an existing engine (QuickJS through a crate, or V8) | Bind it to the host interface                                                                                                                                                                                                                                                                                            | Fast to mature, but not the owner's design, and V8 conflicts with the memory goal. Kept as a reference to measure against. |
+
+### 6.8 GC safety at the host boundary
+
+Today the collector refuses to run during a call (`eval.rs:983`), and host code relies on it: `HostIter` lives in Rust locals with no rooting (`eval_host.rs:22`). DOM wrappers keep listeners and other wrappers alive through edges that the host owns (`crates/bare/src/browser.rs`). With raw pointers, a mistake here is memory corruption, not a stale-handle error. The new engine needs a written contract before S1:
+
+- Safepoints: the collector runs only at listed points: the interpreter's allocation slow path, loop back edges and calls, and the host's explicit `safepoint()` calls. Host code between safepoints may hold raw pointers.
+- Scoped roots: a host function that keeps a JS value across a safepoint puts it in a handle scope (a stack of roots, popped when the scope ends).
+- Persistent roots: host objects that live longer than a call (listeners, timers, wrappers in DOM nodes) hold realm-bound persistent handles. A realm frees all of them when it ends.
+- Re-entrancy: JS called from the host may collect. Host code must not hold a Rust borrow of engine memory across such a call. The API makes this a compile error where it can (the borrow ends before the call).
+- Wrapper identity: one wrapper per DOM node, kept in a weak table. A wrapper with no other reference is pruned at collection. Cycles of wrapper → listener → closure → wrapper through a detached node are collected.
+- Barriers: host stores of JS values into old objects, and JIT stores, run the same write barrier as the interpreter.
+- Gates: a stress mode that collects at every allowed safepoint runs the journeys in S0 (old engine, to prove the contract) and in S1 and later (new engine). A test shows that a detached subtree with listeners in a cycle is reclaimed.
 
 ## 7. Recommended architecture
 
@@ -216,7 +250,7 @@ function tree (temporary) ─► compiler with scope analysis ─► register by
                                      interpreter (one loop) ◄──┤  feedback: call counts, cache shapes
                                                                │  hot
                                                                ▼
-                                                  baseline JIT (one pass, same frames)
+                                                  baseline JIT (prepass + one emit pass, same frames)
 
 values: 64-bit NaN-boxed      objects: shape* | elements* | inline slots
 heap: Immix blocks/lines, bump allocation, sticky-mark young generation, write barrier
@@ -226,14 +260,14 @@ Steps, each behind `BARE_JS_EXEC=new`, each with a gate before the next:
 
 | Stage | Builds                                                                                                                                                         | Gate                                                                                               |
 | ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| S0    | Host interface trait; the old engine behind it with no change                                                                                                  | All journeys pass; instruction delta under 0.5%                                                    |
-| S1    | Values, Immix heap, collector, strings, shapes and objects; unit tests and a stress test                                                                       | Allocation and collection micro rows; no leaks under the stress test                               |
-| S2    | Lexer, pre-parser, compiler with scope analysis, interpreter for the core language (no generators, async or classes yet)                                       | test262 core subset; `eval_load` rows at least 2x faster than today's `byte` (hypothesis target)   |
-| S3    | All the language: classes, generators, async, modules, `eval`, `with`, destructuring, spread, private names                                                    | test262 at today's pass rate or better                                                             |
-| S4    | Built-ins, ported group by group (Object, Function, Array, String, Number, Math, JSON, RegExp, Promise, Map and Set, typed arrays, Date, Intl, Proxy, Reflect) | test262 per group; built-in rows of the cost matrix                                                |
-| S5    | Browser on the new engine                                                                                                                                      | Every public journey and the staging journey pass; instructions and peak RSS below `auto` of today |
-| S6    | Baseline JIT, x64 first, then arm64                                                                                                                            | Differential fuzz against the interpreter is clean; journey gain at least 5%; RSS within +2%       |
-| S7    | Remove the old engine                                                                                                                                          | Owner decision                                                                                     |
+| S0 | Host interface trait with the GC contract of section 6.8; the old engine behind it with no change | All journeys pass; instruction delta under 0.5%; journeys pass with collection forced at every allowed safepoint |
+| S1 | Values, heap, collector (plain mark-sweep, then sticky Immix), strings, shapes and objects; unit tests and a stress test | Allocation and collection micro rows; the generational heap kept only if it wins; barrier cost, fragmentation (live vs committed bytes) and page release measured; no leaks under the stress test; Miri on the value and heap modules |
+| S2 | Lexer, pre-parser, compiler with scope analysis (incl. dynamic scopes and resumable frames by design), interpreter for the core language, and the built-ins that core tests need (Object, Function, Array, Error) | test262 core subset at a pinned revision with a skip list; `eval_load` rows at least 2x faster than today's `byte` (hypothesis target) |
+| S3 | All the language: classes, generators, async, modules, `eval`, `with`, destructuring, spread, private names; with Promise and the iterator built-ins that they need. A DOM vertical slice: one public journey runs on the new engine | Per-test test262 outcome compared with the old engine (no test that passes today fails); resource-limit tests kept; the vertical-slice journey passes |
+| S4 | The other built-ins, ported group by group (String, Number, Math, JSON, RegExp, Map and Set, typed arrays, Date, Intl, Proxy, Reflect) | test262 per group, per test against the old engine; built-in rows of the cost matrix |
+| S5 | Browser on the new engine; a JIT platform spike in parallel (signed macOS arm64 with `MAP_JIT` and instruction-cache flush; Windows x64 calling convention, unwind registration and `FlushInstructionCache`) | Every public journey and the staging journey pass; instructions, peak RSS and cold readiness (definition: owner question 1) below `auto` of today, over repeated runs; the spike runs one compiled function on all three platforms |
+| S6 | Baseline JIT, x64 first, then arm64; interpreter-only when executable memory is not available | Differential fuzz against the interpreter is clean; JIT-on against JIT-off: journey instructions at least 5% lower and RSS within +2%, compile time, code and metadata included |
+| S7 | Remove the old engine | All gates passed on Linux x64, Windows x64 and macOS arm64; owner decision |
 
 Each stage records its numbers in `docs/progress.md` and gets a learning page.
 
@@ -244,6 +278,8 @@ Each stage records its numbers in `docs/progress.md` and gets a learning page.
 - Correctness drift: two engines can disagree. A differential runner (same script on both, compare output) runs on every PR from S2.
 - Memory of the JIT: machine code is larger than bytecode (hypothesis: 3x to 6x). Compile only hot functions, cap the code space, drop cold code.
 - The baseline JIT may gain less than Sparkplug did, because V8's interpreter was already tuned. Gate S6 decides.
+- GC rooting: host code that keeps a raw pointer across a safepoint is memory corruption. Control: the contract of section 6.8, the forced-collection stress mode, and Miri on the heap module.
+- Bytecode flushing: dropping code that is still running or suspended is a crash; flushing too often costs recompiles. Control: pin code of active and suspended frames; count recompiles and measure cold readiness.
 
 ## 9. Not measured
 
@@ -252,3 +288,17 @@ Each stage records its numbers in `docs/progress.md` and gets a learning page.
 - How many shapes each `GetField` site sees (the case for 4-entry caches).
 - Windowed runs, paint, other journeys, wall time on an idle machine.
 - Any number for the new design. Every gain in sections 1, 6 and 7 is a hypothesis until its stage gate measures it.
+- Retired-instruction attribution on a matched replay of the journey (one classifier for all categories). The category split of section 3.1 comes from CPU-time samples and broad name rules.
+- Miss reasons per `GetField` site.
+- Call allocation: how many calls make an `Env` today.
+
+## 10. Questions for the owner
+
+1. Which event defines cold readiness (first paint, first interactive step, or the end of the login step), and what regression budget applies on each platform?
+2. Is an interpreter-only engine acceptable where executable memory is not available (for example a locked-down macOS or Windows setup)?
+3. NaN-boxing (recommended) or compressed 32-bit pointers for the first heap?
+4. Approve the new crate next to the old one (section 6.7, option A)?
+
+## 11. Review
+
+A reviewer (GPT-6.2 Sol, 2026-11-18) read this design. Its findings changed: sections 1, 3.2 and 3.3 (estimates labeled, the cache count and the memory labels corrected), 6.1 (address, provenance and NaN rules), 6.2 (evacuation, barrier, a mark-sweep baseline), 6.3 (dynamic scopes, resumable frames), 6.4 (cache rules), 6.8 (new: GC safety at the host boundary), 7 (gates) and 8.
