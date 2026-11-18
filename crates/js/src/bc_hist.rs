@@ -9,13 +9,17 @@ pub(super) struct Hist {
     prev: [u8; 2],
     /// Misses of the inline cache: `GetField`, `SetField`.
     pub miss: [u64; 2],
+    /// `GetEnv` runs by hop count (8 and more in the last), and the hop-0 runs in functions whose locals stay in the environment
+    /// only because `rfc_analyze` met a lazy inner function.
+    hops: [u64; 9],
+    hops0_lazy: u64,
     /// Script, function, name, code.
     pub funcs: Vec<(u32, u32, String, Rc<Compiled>)>,
 }
 
 impl Default for Hist {
     fn default() -> Self {
-        Hist { ops: vec![0; 256], pairs: vec![0; 1 << 16], triples: vec![0; 1 << 24], prev: [0; 2], miss: [0; 2], funcs: Vec::new() }
+        Hist { ops: vec![0; 256], pairs: vec![0; 1 << 16], triples: vec![0; 1 << 24], prev: [0; 2], miss: [0; 2], hops: [0; 9], hops0_lazy: 0, funcs: Vec::new() }
     }
 }
 
@@ -35,6 +39,11 @@ impl Hist {
         c.hist.0.set(c.hist.0.get() + 1);
         if at == 0 {
             c.hist.1.set(c.hist.1.get() + 1);
+        }
+        if o == Op::GetEnv as u8 {
+            let h = (w >> 16 & 255) as usize;
+            self.hops[h.min(8)] += 1;
+            self.hops0_lazy += (h == 0 && c.hist.2) as u64;
         }
     }
 
@@ -98,6 +107,11 @@ impl Hist {
             }
         }
         let n = |k: &[Op]| k.iter().map(|o| self.ops[*o as usize]).sum::<u64>();
+        let envs: u64 = self.hops.iter().sum();
+        for (h, n) in self.hops.iter().enumerate().filter(|x| *x.1 > 0) {
+            eprintln!("bchist getenv hops={}{} {:>12} {:6.2}% of GetEnv", h, if h == 8 { "+" } else { "" }, n, *n as f64 * 100.0 / envs as f64);
+        }
+        eprintln!("bchist getenv hops=0 in functions kept in the environment by a lazy inner function: {}", self.hops0_lazy);
         eprintln!("bchist funcs={} ic GetField execs={} misses={} SetField execs={} misses={}", f.len(), n(&[Op::GetField]), self.miss[0], n(&[Op::SetField]), self.miss[1]);
     }
 }

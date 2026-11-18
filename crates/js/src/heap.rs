@@ -528,6 +528,12 @@ struct Slab<T> {
     allocs: u64,
     /// `allocs` at the previous sweep, to measure how much a mutator allocates between sweeps.
     allocs_at_sweep: u64,
+    /// `live.len()` after the previous sweep. A new value is pushed at the end of `live` and a sweep keeps the order, so the values
+    /// from this position on are the ones made since that sweep.
+    len_at_sweep: usize,
+    /// Over all sweeps: the values made since the previous sweep, and how many of them a sweep kept (the survival rate).
+    young: u64,
+    young_kept: u64,
 }
 
 /// Payload capacity is released only when at least this many bytes would be freed.
@@ -535,7 +541,7 @@ const TRIM_MIN_BYTES: usize = 1 << 20;
 
 impl<T> Slab<T> {
     fn new(max: usize) -> Self {
-        Slab { meta: Vec::new(), live: Vec::new(), back: Vec::new(), free: Vec::new(), marks: Vec::new(), retired: 0, max, allocs: 0, allocs_at_sweep: 0 }
+        Slab { meta: Vec::new(), live: Vec::new(), back: Vec::new(), free: Vec::new(), marks: Vec::new(), retired: 0, max, allocs: 0, allocs_at_sweep: 0, len_at_sweep: 0, young: 0, young_kept: 0 }
     }
     fn can_alloc(&self) -> bool {
         !self.free.is_empty() || (self.meta.len() < self.max && self.meta.len() < u32::MAX as usize)
@@ -576,6 +582,9 @@ impl<T> Slab<T> {
     /// Marks are left stale: `collect` rebuilds them.
     fn sweep(&mut self, mut f: impl FnMut(&T)) -> usize {
         let before = self.live.len();
+        let from = self.len_at_sweep.min(before);
+        self.young += (before - from) as u64;
+        self.young_kept += self.marks[from..before].iter().filter(|&&m| m).count() as u64;
         let Slab { meta, live, back, free, marks, retired, .. } = self;
         // One pass: drop the dead in order, and compact `back` and rewrite `dense` in step.
         let (mut i, mut w) = (0, 0);
@@ -607,6 +616,7 @@ impl<T> Slab<T> {
         self.marks.clear();
         self.trim();
         self.allocs_at_sweep = self.allocs;
+        self.len_at_sweep = self.live.len();
         before - self.live.len()
     }
     /// Give back large excess payload capacity. Keep room for twice the live values and for as
@@ -726,6 +736,9 @@ pub struct Stats {
     /// Capacity bytes of all slab vectors (metadata, payload, mappings, free lists, marks).
     pub slab_capacity_bytes: usize,
     pub total_object_allocs: u64,
+    /// Objects made since the previous collect, summed over all collects, and how many of them the collect kept.
+    pub young_objects: u64,
+    pub young_objects_kept: u64,
     pub total_string_allocs: u64,
     pub total_symbol_allocs: u64,
     pub collections: u64,
@@ -947,6 +960,8 @@ impl Heap {
             retired_slots: self.objects.retired + self.strings.retired + self.ropes.retired + self.symbols.retired + self.bigs.retired,
             bytes: self.bytes + self.flat_bytes.get(),
             total_object_allocs: self.objects.allocs,
+            young_objects: self.objects.young,
+            young_objects_kept: self.objects.young_kept,
             total_string_allocs: self.strings.allocs + self.ropes.allocs,
             total_symbol_allocs: self.symbols.allocs,
             collections: self.collections,
@@ -3020,6 +3035,21 @@ mod tests {
         assert_eq!(h.get(o, PropertyKey::String(five)).err(), Some(HeapError::InvalidKey));
         let one_a = h.intern_str("1a").unwrap();
         assert!(matches!(h.get(o, PropertyKey::String(one_a)), Ok(Get::Value(Value::Undefined))));
+    }
+
+    #[test]
+    fn collect_counts_the_objects_made_since_the_last_collect_that_survive() {
+        let mut h = Heap::default();
+        let old = h.new_object(None).unwrap();
+        h.collect(&[Value::Object(old)]).unwrap();
+        let s0 = h.stats();
+        // 10 new objects; 3 of them stay reachable. The old object stays too, but it is not new.
+        let new: Vec<_> = (0..10).map(|_| h.new_object(None).unwrap()).collect();
+        let roots: Vec<_> = [old, new[0], new[4], new[9]].iter().map(|&o| Value::Object(o)).collect();
+        h.collect(&roots).unwrap();
+        let s1 = h.stats();
+        assert_eq!(s1.young_objects - s0.young_objects, 10);
+        assert_eq!(s1.young_objects_kept - s0.young_objects_kept, 3);
     }
 
     #[test]

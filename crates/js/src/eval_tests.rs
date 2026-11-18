@@ -257,6 +257,33 @@ fn collect_with_plain_arrays_keeps_what_hangs_on_an_array() {
     });
 }
 
+/// `task_alloc_max` is the largest growth of the heap between two safe points (two calls of `gc_due`): the most that one task allocated.
+#[test]
+fn task_alloc_max_is_the_largest_heap_growth_between_two_safe_points() {
+    big(|| {
+        let prog = parse_script("var x = 1;", Limits::default()).unwrap();
+        let mut it = setup(&prog, EvalLimits { max_steps: u64::MAX / 2, ..Default::default() });
+        it.run().unwrap();
+        it.gc_due();
+        let first = it.task_alloc_max(); // the setup and the run of the script
+        assert!(first > 0);
+        let u0 = it.heap.used_bytes();
+        for _ in 0..5000 {
+            it.heap.new_object(None).unwrap();
+        }
+        let big_task = it.heap.used_bytes() - u0;
+        it.gc_due();
+        it.heap.new_object(None).unwrap();
+        it.gc_due();
+        assert!(big_task > first);
+        assert_eq!(it.task_alloc_max(), big_task);
+        // A collect between tasks starts the next task from the live size.
+        it.collect(&[]).unwrap();
+        it.gc_due();
+        assert_eq!(it.task_alloc_max(), big_task);
+    });
+}
+
 /// Native memory that only a collect can release (the nodes of a parsed document) also asks for a collect: 4 MiB since the last one, or a
 /// fourth of the native bytes that were live after it. The collect resets the count.
 #[test]
