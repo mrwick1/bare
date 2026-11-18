@@ -13273,6 +13273,49 @@ JS engine mode on the journey (3 runs each, mean, range):
 
 Not tested: windowed runs (paint), the RSS cost of `auto` by part, the mode A/B on other journeys, wall time on an idle machine.
 
+## Engine rewrite design: two rounds of a four-model review (2026-11-18)
+
+- Design: `docs/design-engine-rewrite.md` (PR #681). Reviewers: Claude Sonnet 5.5, Claude Opus 5.5, GPT-6.2 Sol and GPT-6.2 Astra, high effort, one brief on data structures and algorithms for resource use. Static review; no builds or journeys ran.
+- Round 1 added section 6.10 (23 changes). Round 2 added section 6.11 (19 changes) and corrected five items of round 1.
+- Facts checked against the code: the collector copies every live binding and script string into one roots `Vec` (`eval.rs:932-941`); the object slab at the peak is a doubled `Vec` (one 13,631,488-byte block); constant operands exist only for numbers on the right side of a compare; `switch` is a linear chain; `gc_due` collects only between tasks; parse-ahead copies the text before its duplicate check; a DOM wrapper makes the wrappers of all ancestors.
+- New measurement (1 run, `auto`): samples with a collector frame anywhere on the stack are 1,229 of 13,026 (9.4% of CPU). The leaf-first split showed 4.7%.
+- Round 2 corrections: the write barrier may be skipped only when no collection can happen before the store; ropes stay; runtime atoms stay weak; cache records live in a per-realm feedback vector, not in shared code; the dictionary cache entry is kept, not lost.
+- Open owner questions: section 10, items 2 to 4 and 6 to 13.
+
+## QuickJS, Bare and Node on the eval_load cases (2026-11-18)
+
+- Machine: archMachine (AMD Ryzen 9 5900HX), load about 2.4. Bare `eval_load` at `d89f0299` (release, `tree` and `auto`); QuickJS 2026-06-04 (`-O2`, LTO); Node 22.18.0 with and without its JIT. 8 cases at scale 1 and 10, 3 runs each. Instructions: minimum of `perf stat -e instructions:u`, spread under 1% on all but two Node rows. Peak RSS: median of `wait4` through a small C wrapper.
+- Scale 10, instructions, Bare `auto` against QuickJS: `loop` 2,373 M / 635 M, `calls` 1,603 M / 594 M, `objects` 1,935 M / 512 M, `throws` 1,395 M / 870 M, `closures` 467 M / 280 M, `fib` 58 M / 36 M, `webpack` 51 M / 42 M (Bare `tree` 38 M), `concat` 4.0 M / 2.1 M.
+- Peak RSS: QuickJS 3.3 MiB on most cases, Bare 5.6 to 5.9 MiB, Node 44 to 52 MiB. `throws` 10: Bare 32.4 MiB, QuickJS 3.3 MiB (reference counting frees each `Error` at once; Bare collects only between tasks).
+- Node starts with about 94 M instructions and 46 MiB. Its JIT wins only on `loop` 10 and `calls` 10.
+- Details, method and the design notes: `docs/research-quickjs-reference.md`. Data and scripts: `/data/bare-tmp/quickjs-baseline-2026-11-18/`.
+- A first RSS pass through a Python parent read 14.2 MiB on every row: a forked child keeps the parent's peak RSS through `exec`. The C wrapper fixed it (floor 1.5 MiB).
+
+## Owner decision: the engine rewrite targets the daily workload (2026-11-18)
+
+- Decision: the new engine is built and tuned for the daily journeys (the staging journey, the typing page and the public journeys). No speculating JIT. The baseline JIT is optional and is built only if a profile of the daily journeys shows hot code that pays for it. The interpreter is a full engine.
+- A feature census of the daily journeys on today's engine (new in S0) decides which language features and built-ins are ported. A feature outside the census throws a `TypeError` that names it and is logged.
+- Why: on short, cold code a JIT does not pay back its start cost (Node: about 94 M instructions and 46 MiB at start), and QuickJS without a JIT is 1.6 to 3.8 times below today's `auto` (`research-quickjs-reference.md`).
+- Design: `docs/design-engine-rewrite.md` section 6.12 (PR #681).
+
+## Engine rewrite: open design questions decided (2026-11-18)
+
+- The owner asked for the best choice for speed and resource use on each open question of `docs/design-engine-rewrite.md` section 10. Each answer there lists the reasons for and against.
+- Values: NaN-boxing; compressed slots only if the S1 census shows value slots are a large share of the peak.
+- New crate next to the old one: yes.
+- Collector: between tasks by default, and inside a task at the allocation slow path when the task passes the trigger, with compiler root maps (reason: `throws` 10 peaks at 32.4 MiB on Bare against 3.3 MiB on QuickJS).
+- Disk code cache: allowed, cold against cold Chrome and warm against warm Chrome.
+- Long sessions: memory must stay flat; a 20-round session row in S5; flushing and compaction only if it grows.
+- Ready: the first journey step can act; the browser with all helpers counts; engine comparisons on a replayed network cache.
+- Before S1: the measurements and two small compiler changes land in today's engine.
+- Gates: S2 browser slice; `eval_load` at or below QuickJS on instructions in S2, and on peak RSS by S5.
+- The speculating JIT is checked last (new stage S8), only if a daily-journey profile shows hot loops.
+
+## Engine rewrite: implementation plan (2026-11-18)
+
+- `docs/plan-engine-rewrite.md` splits the design into PR-sized tasks: measurement tools (M1 to M5), changes in today's engine first (P0.1 to P0.5), then stages S0 to S8 with files, checks and sizes.
+- First PRs: the engine comparison tool (M1), the feature census (P0.1), the collector counters (P0.2), the `GetEnv` hop histogram (P0.3), then constants on either side of a compare (P0.4) and the effect context (P0.5).
+- S0 is the largest early stage: 184 files of `crates/bare` use `bare_js` directly; they move to a host interface crate one subsystem per PR.
 ## Engine comparison tool: Bare, QuickJS and Node on the eval_load cases (2026-11-18)
 
 - `tools/js/engine_compare.py` runs the `eval_load` cases on Bare (`tree`, `auto`, later `new`), QuickJS 2026-06-04 and Node, with and without its JIT. Instructions: minimum of 3 `perf stat` runs. Peak RSS: median of 3 runs through `tools/js/rss_peak.c`. It downloads QuickJS once, checks its SHA-256 and builds it in `$BARE_TMP`.
