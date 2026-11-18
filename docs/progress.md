@@ -13344,3 +13344,11 @@ Staging journey with `bc-hist` (archMachine, `auto`, 2 runs each, all `ok`; base
 Cost rows (`tools/js/instr.sh`, `eval_load` at scale 10, `auto`, base main): every case within ±0.11% (`webpack` −0.11%). These programs seldom put a constant on the left.
 
 Not tested: staging instructions and CPU without `bc-hist`, the typing page, Windows.
+
+## 2026-11-18: NaN-boxed value (plan step S1.2)
+
+`bare-js2` has a `Value` of 8 bytes (`crates/js2/src/value.rs`, design 6.1). A double is stored as it is. Every other value has a tag in the top 16 bits from `0xFFF9`: a 32-bit integer, `undefined`, `null` and the booleans, and pointers to a string, symbol, BigInt or object cell. "Is a double" is one unsigned compare. A NaN whose bits reach the tag space becomes the canonical NaN on entry (`Value::number`), with the same one compare. Pointers go through the exposed-provenance API, so the module has no `unsafe` code; the heap will hold the 48-bit address check (design 6.1); here it is a debug check.
+
+Checks: 5 unit tests, also under Miri (nightly 2026-11-17), including a pointer round trip that reads the cell. Micro row `crates/js2/examples/value_load.rs` (archMachine, release, `tools/js/instr.sh`, min of 3): 327,816,398 instructions for 10,000,000 values and 315,465 for none, so 32.7 instructions per value for one encode and one decode of mixed kinds, with the loop and the checksum.
+
+Not measured: the same row on today's 16-byte `Value`, arm64.
