@@ -2,7 +2,7 @@
 //!
 //! One child page = one `Browser`: its own heap, DOM, timers and `fetch` queue, on the same thread as its parent. The parent holds it,
 //! keyed by the iframe node. There is no object that both pages share. `RemoteWindow` (`browser_remote_window.rs`) is the only link a
-//! script sees. Messages between pages are step 3b, ports across pages 3c.
+//! script sees. Messages between pages work since step 3b ("Messages" below). Ports across pages are step 3c.
 //!
 //! Which frames. An iframe that is connected and has a `src` that resolves to an http(s) URL other than `about:blank` gets a child page at
 //! once (rule "eager, after parent work"). It does not matter if the frame is hidden, 0x0, or of the same origin. A frame with no `src`, an
@@ -30,6 +30,17 @@
 //! its turn. So the order is fixed: the iframe elements in the order that the driver met them (document order for the frames of the
 //! parsed page, then the order of insertion), depth first.
 //! A turn of a child that waits for a network reply blocks the parent in this turn (the same as the parent does when it is not live).
+//!
+//! Messages. `postMessage` on a `RemoteWindow` clones the message in the sender and puts it in the outbox of the sender's `Dom`
+//! (`Kids::outbox`: target side, target origin, sender origin, a heap-free `State`, the transfer list as data). The driver moves it, so
+//! no object crosses a heap. Before a child's turn, the parent moves its messages for that child into it. After the turn, the parent
+//! drains the outbox of the child: a message for `Parent` is delivered in this page, with the window of the child as `source`. A message
+//! for `Top` is delivered here when this page is the top page, with `source` null (the top page has no window for a grandchild), else it
+//! goes up one level in the outbox of this page. Delivery checks the target origin against the origin of the target document ("*"
+//! matches all, a mismatch drops the message), builds the clone in the target heap and queues one `message` event as `post_window` does,
+//! charged `16 + bytes`. `source` is the window of the sender in the target heap, and it is a GC root while the message is queued. A
+//! message for a child that loads or is empty is dropped. Each moved message counts as `Turn::work`, so the parent does not settle with
+//! a message in flight. A `MessagePort` in the transfer list of a message to another page drops the message (step 3c).
 //!
 //! Load events. The iframe element gets `load` in the parent when the child's own `load` event has run (or when its load failed). The
 //! `load` of the parent window waits for the children that exist at that time (`Kids::loaded`). A frame added after the parent's `load`
