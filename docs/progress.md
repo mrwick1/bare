@@ -13210,3 +13210,65 @@ Findings:
 - The journey is 1.16x to 1.25x faster in Bare. Most of the time is network and server wait.
 
 Not tested: arjun-e16; a real Hyprland window (only headless `cage`); more than 6 and 4 runs; a Chrome profile with a warm HTTP cache across runs (each run used a fresh profile, and Bare has no disk cache); Playwright itself (a plain CDP driver was used). The scripts and raw results are local, in the session scratchpad: `chrome_steps.mjs`, `harness.py`, `monitor.py`, `report.py`, `out-main/`.
+
+## Where Bare spends CPU and memory on the staging E2E, and the bytecode lane on it (2026-11-18)
+
+This entry splits the cost of the journey above (create and delete a client and an agent) by browser subsystem. It also measures the JS engine modes on the same journey. No product code changed.
+
+How it was measured:
+
+- Binary: `bare-drive` at `25126702`, release, with line tables and frame pointers (`-C force-frame-pointers=yes`). Absolute times of this build are higher than in the benchmark. Use only the shares.
+- Machine: archMachine, headless, live staging. Load average 0.8 to 9 (other agents ran). Shares and instruction counts hold under load.
+- CPU split: `perf record -F 4000 -e cpu-clock --call-graph fp`, 3 runs in the default mode (`tree`). A sample goes to the first own frame from the leaf (crate and module rules in `classify.py`).
+- Memory split: one run under `valgrind --tool=massif`. The peak heap tree is grouped by the first own frame from the allocation.
+- Mode A/B: `BARE_JS_EXEC=tree`, `auto` and `byte`, 3 runs each, interleaved, with `perf stat -e instructions:u,task-clock`.
+- All 13 runs passed. The cleanup found no test client left.
+- Scripts and raw output: `/data/bare-tmp/voicebot-e2e-2026-11-18/subsystem-profile/` (not in the repository).
+
+CPU by subsystem, default mode (3 runs, spread about 0.5 points):
+
+| Subsystem | Share of CPU |
+| --- | ---: |
+| JS engine | 78.0 to 78.7% |
+| of it: run the code (tree walker and builtins) | 63.9 to 65.1% |
+| of it: parse and compile | 7.0 to 7.6% |
+| of it: collect garbage | 6.0 to 7.0% |
+| Style (match, cascade, `var()`) | 8.7 to 9.0% |
+| DOM and Web APIs | 3.2 to 3.3% |
+| Network, TLS, HTTP | 3.1 to 3.3% |
+| Layout and text | 2.6 to 2.9% |
+| HTML parse | 1.8 to 2.0% |
+| Driver | 1.4 to 1.6% |
+| Paint | 0% (headless runs do not paint) |
+
+Style is spread over many functions. The largest is `RuleSet::cascade_as` at 0.8%. By trigger: CSS animation and transition frames (`motion_frame`) 3.5 to 3.9%, the rendering update 3.1 to 3.2%, script reads such as `getComputedStyle` 1.7 to 1.9%.
+
+Peak heap (massif, one run): 61.6 MiB of heap and 9.3 MiB of malloc overhead. The JS engine holds 50.7 MiB (82%):
+
+| Part | MiB |
+| --- | ---: |
+| JS objects, shapes and property slots | 23.6 |
+| JS source and syntax trees (`with_shared_source` 9.7, `parse_cache` 2.1) | 12.9 |
+| JS collector work lists at the peak | 4.9 |
+| JS inline caches (`Caches::new`) | 3.3 |
+| JS scopes, closures and strings | 4.9 |
+| Network (`Client::keep`) | 2.6 |
+| HTML, DOM and style together | 1.4 |
+| Small sites under the massif threshold | 7.0 |
+
+Peak RSS of the normal runs is 83 to 97 MiB. Hypothesis: the rest of RSS (about 14 MiB) is code and shared libraries. I did not measure it in this run.
+
+JS engine mode on the journey (3 runs each, mean, range):
+
+| Mode | Instructions | CPU | Journey | Peak RSS |
+| --- | ---: | ---: | ---: | ---: |
+| `tree` (default) | 29.85 G (28.99 to 30.54) | 4,180 ms (4,075 to 4,270) | 6,606 ms | 84.6 MiB (83.0 to 86.9) |
+| `auto` | 22.23 G (21.61 to 23.18) | 3,231 ms (3,153 to 3,304) | 5,843 ms | 91.3 MiB (90.7 to 92.2) |
+| `byte` | 21.93 G (21.41 to 22.27) | 3,182 ms (3,022 to 3,402) | 5,699 ms | 91.8 MiB (90.5 to 93.4) |
+
+- `auto` takes 26% of the instructions and 23% of the CPU off the journey. Peak RSS grows by 6.7 MiB (+8%).
+- Chrome used 25.4 G instructions on this journey (entry above). Bare in `auto` uses fewer.
+- Lane coverage in `auto` (`BARE_JS_STATS`, one run, 4 realms): 2,363,990 calls on the lane and 34,864 on the tree walker (98.5% on the lane). The largest refusals are private names (18,165 calls) and spread (15,074 calls).
+- Profile in `auto`: the JS engine is 71.3% of CPU (run the code 54.6%, collect 9.0%, parse and compile 7.7%). Style is 11.6%. `bc_loop` is the top function at 14.3%.
+
+Not tested: windowed runs (paint), the RSS cost of `auto` by part, the mode A/B on other journeys, wall time on an idle machine.
