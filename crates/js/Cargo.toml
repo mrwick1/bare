@@ -15,6 +15,7 @@ bc-poison = []
 census = []
 
 [dependencies]
+bare-js-api = { path = "../js-api" }
 bare-observe = { path = "../observe" }
 bare-os = { path = "../os" }
 bare-unicode = { path = "../unicode" }

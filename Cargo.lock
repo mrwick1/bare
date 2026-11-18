@@ -127,6 +127,7 @@ dependencies = [
 name = "bare-js"
 version = "0.1.0"
 dependencies = [
+ "bare-js-api",
  "bare-observe",
  "bare-os",
  "bare-unicode",
