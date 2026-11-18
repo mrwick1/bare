@@ -87,6 +87,8 @@ enum KeyOf {
     Number(u64),
     String(Box<[u16]>),
     Name(u32),
+    Null,
+    Undefined,
 }
 
 /// A variable of a register function.
@@ -386,6 +388,8 @@ impl Gen<'_, '_> {
             KeyOf::Number(b) => Const::Number(f64::from_bits(*b)),
             KeyOf::String(u) => Const::String(u.clone()),
             KeyOf::Name(n) => Const::Name(*n),
+            KeyOf::Null => Const::Null,
+            KeyOf::Undefined => Const::Undefined,
         });
         self.pool.insert(k, i);
         i
