@@ -552,6 +552,8 @@ enum Ref {
 // ------------------------------------------------------------------ the interpreter
 
 pub struct Interp<'p> {
+    #[cfg(feature = "census")]
+    _census: crate::census::Flush,
     /// The code of the current script. See `eval_scripts.rs`.
     prog: Rc<Program<'static>>,
     cur: usize,
@@ -771,6 +773,8 @@ impl<'p> Interp<'p> {
         ];
         let p = &prog;
         let mut it = Interp {
+            #[cfg(feature = "census")]
+            _census: Default::default(),
             cur: 0,
             scripts: vec![Code::placeholder(&prog)],
             hs: Box::default(),

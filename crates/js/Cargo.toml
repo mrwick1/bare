@@ -11,6 +11,8 @@ bc-hist = []
 # Poison mode of the bytecode loop (always on in unit tests): code of another script runs with an empty current script, so a read
 # of the code tables without `bc_sync` panics. For `tools/js/exec_diff.sh` on a build with this feature.
 bc-poison = []
+# Feature census (`src/census.rs`): counts syntax kinds and native built-in calls, written to `BARE_JS_CENSUS` when a realm ends.
+census = []
 
 [dependencies]
 bare-js-api = { path = "../js-api" }
