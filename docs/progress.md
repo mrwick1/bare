@@ -13533,3 +13533,9 @@ Versions measured (rows over +0.5% under both allocators):
 `callgrind` on `focus_load focus 1` showed where the first version spent: +627K instructions in the per-object probe, +286K in map inserts for each event, +249K in the map retain at each collection.
 
 Not done: the staging journey A/B. The DOM wrappers (`by_node`) are the next step of S0.4; then `visit_raw` goes.
+
+## 2026-11-19: DOM wrapper design (plan step S0.4)
+
+`docs/design-dom-wrappers.md`. Measured on origin/main `32e6d597` (callgrind, archMachine, one run per row): the old per-object `Host::trace` hook is 8.9% of `browser_load mutation 1`, 2.7% of `browser_load lookup 1`, 0.5% of `fragment_load parse 1` and 0.3% of `attr_load react 1`. On `mutation 1`, 11 subsystem `trace` functions cost 0.22 M to 0.40 M each: one probe for each marked object.
+
+Owner decisions (2026-11-19): option A (a wrapper is the owner of its target, and its trace visits its neighbours); lazy properties in a separate PR; the children walk is accepted until a row shows it.

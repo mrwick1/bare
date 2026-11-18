@@ -1,6 +1,6 @@
 # DOM wrappers through the host interface
 
-Status: proposal for owner review (plan step S0.4, DOM wrappers). Nothing is built.
+Status: decided by the owner, 2026-11-19 (plan step S0.4, DOM wrappers). See "Decisions" at the end.
 
 ## Problem
 
@@ -103,3 +103,9 @@ They stay an engine feature (S0.2 decision). Proposal: a separate PR after A, be
 1. Option A (proposed), B, C or D?
 2. Lazy properties: a separate PR after the wrappers (proposed), or in the same PR?
 3. The children walk of option A: accept O(children of wrapped nodes) now, and move to B only if a row shows it? (proposed: yes)
+
+## Decisions (owner, 2026-11-19)
+
+1. Option A: a wrapper is the owner of its target; its trace visits its neighbours.
+2. Lazy and virtual properties come in a separate PR after the wrappers.
+3. The children walk of option A is accepted. Option B comes only if a measured row shows the walk.
