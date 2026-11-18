@@ -24,7 +24,7 @@ Recommendation (section 7): build a new engine crate, `bare-js2`, next to the ol
 1. Values in 64 bits (NaN-boxing) with direct pointers into the GC heap. No slot table, no generation check.
 2. A compiler that goes from the parse straight to register bytecode, with scope analysis. The pre-parser records which variables each inner function captures, so a lazy inner function no longer forces all variables of its parent into an environment. Locals and arguments live in registers. Only captured variables go to a small context object. Moves are removed with direct register operands and copy coalescing.
 3. Objects as a shape pointer and inline slots: a plain object has an 8-byte header; element and overflow pointers exist only in layouts that need them. Object literals with fixed keys get their final shape at once. Inline caches are allocated on the second use, start with one shape and grow to a small polymorphic cache only where the shape keeps changing.
-4. A mark-region heap (Immix): bump allocation in 32 KiB blocks of 128-byte lines, non-moving, with sticky mark bits for a young generation. S1 compares it against a plain non-generational mark-sweep with the same roots before it is chosen.
+4. A non-moving heap of size-class blocks with lazy sweep (section 6.10). Immix and a sticky-mark young generation are kept only if they beat it on the journey's measured object lifetimes (section 6.11).
 5. One interpreter (no tree walker). Then a baseline JIT that keeps the interpreter's frame layout (the Sparkplug model), on `dynasm-rs` for x64 and arm64.
 6. The syntax tree is dropped after compile. Bytecode of a function that has not run for a while is dropped and compiled again on the next call (bytecode flushing).
 7. A written GC safety contract at the host boundary (section 6.8): safepoints, scoped and persistent roots, wrapper identity and barriers. It is a condition of S0 and S1.
@@ -66,6 +66,8 @@ JS work in `auto`, by kind (share of all CPU; a sample goes to the first matchin
 | Tree walker (code that the lane refuses)                 |  1.8% |
 | Variable lookup                                          |  1.5% |
 | Other                                                    |  2.8% |
+
+The collector row counts only samples whose leaf is in the collector. Samples with `Interp::collect` or `Heap::collect` anywhere on the stack: 1,229 of 13,026, so 9.4% of all CPU (1 run, round 2 review). The collector work in `free`, `Vec` and shape lookups goes to other rows in the table.
 
 ### 3.2 What the bytecode runs
 
@@ -162,11 +164,11 @@ Conditions of option A:
 
 ### 6.2 Heap and collector
 
-| Option                                                           | Data structures                                                                                       | Allocation                                                      | Collect cost                                                                                                                                                     | Fit for Rust                                                                                                                                                     |
-| ---------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **A. Immix mark-region, non-moving, sticky marks** (recommended) | 32 KiB blocks of 128-byte lines; a mark bit per object and per line; large objects in their own pages | Bump pointer inside free lines: a few instructions, no `malloc` | Young collections mark only new objects (sticky mark bits and a write barrier on old → young stores). Full collections mark the live heap; sweeping is per line. | Objects never move, so a Rust pointer held across a collect stays valid. Roots: the JS register stack, the globals and an explicit handle stack for native code. |
-| B. Copying young generation, mark-compact old (V8)               | Two semispaces for the young generation                                                               | Bump pointer                                                    | Young collection costs the survivors only                                                                                                                        | Every pointer in Rust locals must be rooted and updated. A missed root is memory corruption.                                                                     |
-| C. Reference counting with a cycle collector (QuickJS)           | Count in each object                                                                                  | `malloc`                                                        | Pays on every store; cycles need a second pass                                                                                                                   | Simple, but slow on the store-heavy code that React runs.                                                                                                        |
+| Option                                                                                                | Data structures                                                                                       | Allocation                                                      | Collect cost                                                                                                                                                     | Fit for Rust                                                                                                                                                     |
+| ----------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A. Immix mark-region, non-moving, sticky marks (candidate; must beat size-class blocks, section 6.10) | 32 KiB blocks of 128-byte lines; a mark bit per object and per line; large objects in their own pages | Bump pointer inside free lines: a few instructions, no `malloc` | Young collections mark only new objects (sticky mark bits and a write barrier on old → young stores). Full collections mark the live heap; sweeping is per line. | Objects never move, so a Rust pointer held across a collect stays valid. Roots: the JS register stack, the globals and an explicit handle stack for native code. |
+| B. Copying young generation, mark-compact old (V8)                                                    | Two semispaces for the young generation                                                               | Bump pointer                                                    | Young collection costs the survivors only                                                                                                                        | Every pointer in Rust locals must be rooted and updated. A missed root is memory corruption.                                                                     |
+| C. Reference counting with a cycle collector (QuickJS)                                                | Count in each object                                                                                  | `malloc`                                                        | Pays on every store; cycles need a second pass                                                                                                                   | Simple, but slow on the store-heavy code that React runs.                                                                                                        |
 
 Notes on option A:
 
@@ -263,7 +265,7 @@ Four reviewers (Claude Sonnet 5.5, Claude Opus 5.5, GPT-6.2 Sol, GPT-6.2 Astra; 
 - `switch` compiles to a linear chain of compares (`bc_gen_stmt.rs:288`).
 - `Wide` words are allowed only for `GetEnv`, `SetEnv`, `InitEnv` and `DefField` (`bc_vm.rs:107`). Environment slots past 255 happen, so captured-variable layout matters.
 - A call fills every non-argument register with `undefined` (`bc_vm.rs:1446`).
-- A dictionary-mode read resets the cache site (`get_dict`, `heap_shape.rs:1372`), so a site that sees a dictionary object loses its entry each time.
+- A dictionary-mode read clears the cache site and then installs a dictionary entry (`IC_DICT`) for an own key (`get_dict`, `heap_shape.rs:1372`). Correction from round 2: the site does not lose its entry each time; it loses the previous shape entry when receivers alternate.
 
 The design takes these changes. Every gain is a hypothesis until its gate measures it.
 
@@ -272,7 +274,7 @@ Interpreter and bytecode:
 1. Constant operands for `null`, `undefined`, booleans and atoms in compare-jumps and in `SetField`, not only numbers. This removes a load and a register per compare.
 2. `switch` with constant cases compiles to a jump table (dense integers) or a hashed table (atoms). A linear chain stays for small or mixed cases.
 3. A lean dispatch loop is designed and measured first, before the JIT: hot state in locals, one decode per op, no per-op checks that the verifier already proved. S2 records instructions per op by kind.
-4. A frame does not clear dead registers. The compiler proves that a register is written before it is read. Only registers that the collector can see before the first write get a hole value. This removes the fill at each call.
+4. A frame does not clear dead registers. The compiler proves that a register is written before it is read. Only registers that the collector can see before the first write get a hole value. This removes the fill at each call. Round 2 condition: safe only with collection between tasks or with root maps per safepoint (section 6.11).
 5. Destination-driven code generation: an expression writes into the register its parent asks for. This removes most `Mov` at the source (`Mov` is 12.8% of ops).
 6. Fused `GetCtxField` (context slot, then field) for the top pair `GetEnv` then `GetField`. `GetEnv` carries a hop count. A variable in its temporal dead zone holds a hole value, so a read checks one value, not a flag.
 7. Constants split by kind: numbers and atoms inline in the word where they fit, others in a per-function table.
@@ -286,15 +288,15 @@ Functions and calls:
 Objects, caches and strings:
 
 11. The overflow layout is fixed at allocation: inline capacity from slack tracking, plus one overflow record when a store passes it. An object never moves to grow.
-12. A cache record splits into a hot part (shape, offset; 8 to 16 bytes, next to the code) and a cold part (miss counts, prototype cell). A dictionary-mode hit keeps its own entry kind. It does not reset the site.
-13. Strings: one-byte (Latin-1) and two-byte forms. Short strings keep their characters inline in the cell. No ropes at first. A concatenation census in S1 decides if ropes are needed.
-14. Atoms are interned once per session and shared by all realms (an atom has no realm state). This removes a re-intern per realm of the same chunk.
+12. A cache record splits into a hot part (shape, offset; 8 to 16 bytes, in the per-realm feedback vector of section 6.11, not in the shared code) and a cold part (miss counts, prototype cell). A dictionary-mode hit keeps its own entry kind. It does not reset the site.
+13. Strings: one-byte (Latin-1) and two-byte forms. Short strings keep their characters inline in the cell. Ropes stay for long concatenations, as today (`heap.rs:1312`); round 2 corrected "no ropes". A concatenation census in S1 checks them.
+14. Atoms from source text are interned once per session and shared by all realms (an atom has no realm state). Atoms made at run time stay weak and collectable (round 2 scope rule). The main gain is fewer roots and shareable code; interning itself is about 0.25% of instructions (`progress.md`).
 
 Heap and collector:
 
 15. The baseline allocator is size-class blocks with lazy sweep (sweep a block when it is next allocated from). Immix and the young generation must beat it.
 16. The marker sets the mark bit before it pushes a cell, and it walks edges as a stream. A fixed-size mark stack, with an overflow scan of the heap, replaces a growing `Vec`. Roots are walked in place, not copied (see the first fact above).
-17. A store into a young object that was just allocated (for example, while a literal is filled) does not run the write barrier. The compiler marks these stores.
+17. A store into a young object that was just allocated does not run the write barrier, only when no collection can happen between the allocation and the store. Round 2 correction: a literal value can call JS and collect, so literals use the one-op fill of section 6.11.
 
 Startup and code cache:
 
@@ -312,6 +314,62 @@ Host boundary:
 23. Wrapper ownership: a wrapper keeps its expando properties as long as its DOM node is reachable. A detached cycle of node, wrapper, listener and closure is reclaimed. The `IdTab` of node ids and the edges that native code traces stay.
 
 Gates added: S1 records the census in `auto` mode (the massif run of section 3 was in tree mode). S6 repeats the absolute gate of S5 (lower than today's engine and Chrome), not only the JIT-on against JIT-off delta.
+
+### 6.11 Changes from the four-model review, round 2
+
+The same four reviewers read the design again, with section 6.10 in place. I checked their claims against the code. Facts they found:
+
+- The collector is 9.4% of CPU when counted by any collector frame on the stack, not 4.7% (section 3.1). It ranks above parse and calls.
+- Today the collector runs only between tasks: `gc_due` requires `depth == 0` and `stmt_frames == 0` (`eval.rs:1126`).
+- A compare uses a constant operand only for the right side (`num_konst(right)`, `bc_gen_rf.rs:297`). Minified code puts the constant first (`null!==e`, `0===t`). Measured pairs: `LoadNull` then `GetEnv` 1.37%, `LoadI` then `GetEnv` 1.08% (realm 2).
+- The effect-only compile (`expr_void`, `bc_gen_rf.rs:345`) has no case for `&&`, `||` or `?:`, so `null!==e&&f()` makes a value and then tests it. `StrictNe` then `JmpIfNot` is 1.77% of ops.
+- `expr_into` (`bc_gen_rf.rs:332`) already writes some results straight into the target register. Section 6.10 item 5 extends it; it is not new.
+- The roots `Vec` also copies the name, site and property strings of every script at each collection (`eval.rs:932-934`).
+- In the first realm, 84,949 of 824,634 `GetField` runs leave the inline path (10.3%). The 11.8% counts all realms.
+- Parse-ahead copies the source text and allocates a job before it checks for a queued duplicate (`parse_ahead.rs:151`).
+- Making the wrapper of one DOM node also makes the wrappers of all its ancestors (`browser.rs:1024`).
+- The host tracer calls every subsystem for every owner (`Dom::trace`, `browser.rs:676`).
+- A shape-backed `for-in` prototype measured -4.80% instructions at 50 keys and -1.67% at load on the typing page (`design-for-in-keys.md`; prototype not kept).
+
+The design takes these changes. Every gain is a hypothesis until its gate measures it.
+
+Collector and roots:
+
+1. Collect only between tasks, with an empty JS stack, as today. The roots are then the globals, the host's persistent roots and the job queues. This removes a whole kind of work: no scan of JS frames, no root maps, and no handle scopes for most host code. It also makes 6.10 item 4 (no register fill) and item 17 (no barrier on a new object) safe. Collection inside a task is added only if the largest allocation within one task on the journey is large. Then each safepoint gets a root map of live, initialized slots, shared by suspended frames and both tiers.
+2. Measure in today's engine before S1: survival per collection (objects made since the last collection that survive it), the largest allocation within one task, a `GetEnv` hop-count histogram, and the reads kept in the environment only because of `lazy_inner` (`bc_gen_rf.rs:51`). The young generation and the S1 allocator choice depend on journey lifetimes, which S1 micro rows cannot show. The allocator choice is checked again on the S2 browser slice.
+3. The mark work list grows in chunks that are allocated on demand and freed after collection. It does not rescan the heap on overflow. Ephemeron (WeakMap) wake-ups keyed by the key object stay, as today (`eval_weak.rs:36`).
+4. Host tracers are registered per owner when it gets host state, so a collection does not probe every subsystem for each owner.
+
+Compiler and bytecode:
+
+5. Constant operands on either side of a compare: swap the operands for `==`, `!=`, `===` and `!==`, and mirror `<` and `>`.
+6. Three result contexts in the compiler: value, effect and test (V8's result scopes). In effect context, `&&`, `||` and `?:` compile to jumps, and pure parts are dropped. A comma expression evaluates its non-last parts for effect only.
+7. An object literal computes its values first and then allocates and fills the object in one op (`NewObjectFromRegs shape, base, n`). No collection can happen between the allocation and the stores. This removes one `DefField` dispatch per field.
+8. Superinstructions from the histogram taken after S2, before the JIT. Measured today: fusing 8 pairs removes 17.7% of dispatches, 32 pairs remove 26.2% (first realm). The pair mix changes after the new compiler, so it is counted again.
+9. If the hop histogram shows that most `GetEnv` reads go up to the module function (webpack factories), a closure or frame keeps a direct pointer to the module context: one load instead of a parent walk.
+10. A `for-in` over a plain object walks the shape's keys with a cursor and no key `Vec`. In the loop, `src[k]` reads the slot directly while the receiver, the key and the shape still match.
+
+Code, caches and realms:
+
+11. Bytecode and baseline JIT code hold no heap pointers. Each closure and realm has a feedback vector (cache records, per-realm constants), reached from the frame record (V8's feedback cell). The code is then shared by all realms and can go to a disk cache later. This settles the conflict between 6.9 item 6 and 6.10 items 7 and 12.
+12. The object header is a 32-bit shape id and 32 bits of kind, flags and collector state (JavaScriptCore's cell layout), compared in S1 with a raw 8-byte shape pointer. With ids, a cache compares ids and the marker does not read the shape.
+13. S1 compares two cache designs with the shapes-per-site census: one entry per site plus a global (shape, key) table, against a site that grows to 4.
+14. The overflow pointer is reserved only in layouts of objects that grow. S1 compares this with a pointer in every object.
+15. Shapes that differ only in prototype or inline capacity share one descriptor table, as today's shared key tables do (`heap_shape.rs:78`).
+
+Front end and host:
+
+16. Parse-ahead claims the (source identity, parse mode) entry before it copies the text. One worker publishes the bytecode and the lazy data; a duplicate is never parsed.
+17. Only the wrapper that is asked for is made. The collector follows native reachability through nodes that have no wrapper (WebKit's opaque roots). Expandos and listeners of live nodes stay.
+18. DOM wrappers are plain objects with getters on shared prototypes. A cache entry kind calls a native getter. This is an S4 option, measured by `GetField` on wrapper receivers.
+
+JIT:
+
+19. The first JIT enters at calls only. On-stack replacement at loop headers comes later, if a profile after S2 shows long loops that pay for it. The compiler records loop headers, so the JIT needs no loop-discovery pass.
+
+Lower value than round 1 assumed: realm recipes (6.10 item 18; a realm costs about 70 K to 166 K instructions, `progress.md`) stay as today's lazy built-ins, with no stage item. Eager compile (6.10 item 10) does not catch webpack module functions, which are not wrapped in parentheses; it stays low priority.
+
+Stage changes: S2 gains a browser slice gate (the typing page and a frozen copy of the staging scripts, through the real host interface). The measurements of item 2 come before S1. The typing page gets a subsystem profile before S5.
 
 ## 7. Recommended architecture
 
@@ -337,16 +395,16 @@ heap: size-class pages or Immix (S1 decides), one typed graph walk per collectio
 
 Steps, each behind `BARE_JS_EXEC=new`, each with a gate before the next:
 
-| Stage | Builds                                                                                                                                                                                                                               | Gate                                                                                                                                                                                                                                                                                                                                                |
-| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| S0    | Host interface trait with the GC contract of section 6.8; the old engine behind it with no change                                                                                                                                    | All journeys pass; instruction delta under 0.5%; journeys pass with collection forced at every allowed safepoint                                                                                                                                                                                                                                    |
-| S1    | Values, heap, collector (plain mark-sweep, then sticky Immix), strings, shapes and objects; unit tests and a stress test. First: record today's `auto` peak bytes by layout (objects, shapes, elements, strings, bytecode, feedback) | The layout census exists before the allocator and the cache width are chosen; allocation and collection micro rows; size-class pages against Immix; the generational heap kept only if it wins; barrier cost, fragmentation (live vs committed bytes) and page release measured; no leaks under the stress test; Miri on the value and heap modules |
-| S2    | Lexer, pre-parser, compiler with scope analysis (incl. dynamic scopes and resumable frames by design), interpreter for the core language, and the built-ins that core tests need (Object, Function, Array, Error)                    | test262 core subset at a pinned revision with a skip list; `eval_load` rows at least 2x faster than today's `byte` (hypothesis target)                                                                                                                                                                                                              |
-| S3    | All the language: classes, generators, async, modules, `eval`, `with`, destructuring, spread, private names; with Promise and the iterator built-ins that they need. A DOM vertical slice: one public journey runs on the new engine | Per-test test262 outcome compared with the old engine (no test that passes today fails); resource-limit tests kept; the vertical-slice journey passes                                                                                                                                                                                               |
-| S4    | The other built-ins, ported group by group (String, Number, Math, JSON, RegExp, Map and Set, typed arrays, Date, Intl, Proxy, Reflect)                                                                                               | test262 per group, per test against the old engine; built-in rows of the cost matrix                                                                                                                                                                                                                                                                |
-| S5    | Browser on the new engine; a JIT platform spike in parallel (signed macOS arm64 with `MAP_JIT` and instruction-cache flush; Windows x64 calling convention, unwind registration and `FlushInstructionCache`)                         | Every public journey and the staging journey pass; on the staging journey and the typing page (`type_load` load and 50-key rows), instructions, CPU, peak RSS and time to ready are lower than both today's engine (`auto`) and Chrome, over repeated runs (section 10, answer 1); the spike runs one compiled function on all three platforms      |
-| S6    | Baseline JIT, x64 first, then arm64; interpreter-only when executable memory is not available                                                                                                                                        | Differential fuzz against the interpreter is clean; JIT-on against JIT-off: journey instructions at least 5% lower and RSS within +2%, compile time, code and metadata included; the S5 absolute gate passes again with the JIT on |
-| S7    | Remove the old engine                                                                                                                                                                                                                | All gates passed on Linux x64, Windows x64 and macOS arm64; owner decision                                                                                                                                                                                                                                                                          |
+| Stage | Builds                                                                                                                                                                                                                                                                                                        | Gate                                                                                                                                                                                                                                                                                                                                                |
+| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| S0    | Host interface trait with the GC contract of section 6.8; the old engine behind it with no change                                                                                                                                                                                                             | All journeys pass; instruction delta under 0.5%; journeys pass with collection forced at every allowed safepoint                                                                                                                                                                                                                                    |
+| S1    | Values, heap, collector (size-class blocks with lazy sweep; Immix and a young generation only if the journey survival data favor them), strings, shapes and objects; unit tests and a stress test. First: record today's `auto` peak bytes by layout (objects, shapes, elements, strings, bytecode, feedback) | The layout census exists before the allocator and the cache width are chosen; allocation and collection micro rows; size-class pages against Immix; the generational heap kept only if it wins; barrier cost, fragmentation (live vs committed bytes) and page release measured; no leaks under the stress test; Miri on the value and heap modules |
+| S2    | Lexer, pre-parser, compiler with scope analysis (incl. dynamic scopes and resumable frames by design), interpreter for the core language, and the built-ins that core tests need (Object, Function, Array, Error)                                                                                             | test262 core subset at a pinned revision with a skip list; `eval_load` rows at least 2x faster than today's `byte` (hypothesis target); a browser slice (the typing page and a frozen copy of the staging scripts, through the real host interface) measured against today's `auto`: load, 50 keys and first usable input (section 6.11)            |
+| S3    | All the language: classes, generators, async, modules, `eval`, `with`, destructuring, spread, private names; with Promise and the iterator built-ins that they need. A DOM vertical slice: one public journey runs on the new engine                                                                          | Per-test test262 outcome compared with the old engine (no test that passes today fails); resource-limit tests kept; the vertical-slice journey passes                                                                                                                                                                                               |
+| S4    | The other built-ins, ported group by group (String, Number, Math, JSON, RegExp, Map and Set, typed arrays, Date, Intl, Proxy, Reflect)                                                                                                                                                                        | test262 per group, per test against the old engine; built-in rows of the cost matrix                                                                                                                                                                                                                                                                |
+| S5    | Browser on the new engine; a JIT platform spike in parallel (signed macOS arm64 with `MAP_JIT` and instruction-cache flush; Windows x64 calling convention, unwind registration and `FlushInstructionCache`)                                                                                                  | Every public journey and the staging journey pass; on the staging journey and the typing page (`type_load` load and 50-key rows), instructions, CPU, peak RSS and time to ready are lower than both today's engine (`auto`) and Chrome, over repeated runs (section 10, answer 1); the spike runs one compiled function on all three platforms      |
+| S6    | Baseline JIT, x64 first, then arm64; interpreter-only when executable memory is not available                                                                                                                                                                                                                 | Differential fuzz against the interpreter is clean; JIT-on against JIT-off: journey instructions at least 5% lower and RSS within +2%, compile time, code and metadata included; the S5 absolute gate passes again with the JIT on                                                                                                                  |
+| S7    | Remove the old engine                                                                                                                                                                                                                                                                                         | All gates passed on Linux x64, Windows x64 and macOS arm64; owner decision                                                                                                                                                                                                                                                                          |
 
 Each stage records its numbers in `docs/progress.md` and gets a learning page.
 
@@ -389,7 +447,13 @@ From the round 1 review (open):
 7. May the collector run only where no native frame holds a raw pointer (the safepoints of 6.8), even if a long host call then delays a collection?
 8. May the JIT stay optional per build or per platform, with the interpreter as the full engine?
 9. Are long sessions (hours, many navigations) in scope? This decides how much flushing and compaction matter.
-10. Which event marks "ready", and do we count one process or the browser with its helpers?
+10. Which event marks "ready", and do we count one process or the browser with its helpers? Is ready measured on a replayed network cache, so engine time is apart from network time?
+
+From the round 2 review (open):
+
+11. May the new engine collect only between tasks (section 6.11, item 1), and add collection inside a task only when a measured task needs it?
+12. May small measurement and compiler changes land in today's engine before S1 (section 6.11, item 2)? The work is partly thrown away, but it tests the op-count claims early.
+13. Is the S2 browser slice (the typing page and a frozen staging bundle) the right first performance gate?
 
 ## 11. Review
 
@@ -398,3 +462,5 @@ A reviewer (GPT-6.2 Sol, 2026-11-18) read this design. Its findings changed: sec
 A second review (GPT-6.2 Sol, 2026-11-18) on data structures and algorithms added section 6.9 and changed the S1 and S5 gates.
 
 Round 1 of a four-model review (Claude Sonnet 5.5, Claude Opus 5.5, GPT-6.2 Sol, GPT-6.2 Astra; 2026-11-18) added section 6.10, the S6 gate, three rows of section 9 and questions 6 to 10.
+
+Round 2 of the same review (same four models, 2026-11-18) added section 6.11, the collector note of section 3.1, the S2 browser slice and questions 11 to 13. It corrected section 1 item 4, the section 6.2 recommendation, the S1 heap order, items 4, 12, 13, 14 and 17 of section 6.10, and one fact of section 6.10 (the dictionary cache entry).
