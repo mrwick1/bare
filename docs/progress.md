@@ -13180,3 +13180,33 @@ Step 3c of `docs/design-gmail-frames.md`. A `MessagePort` in the transfer list o
 - Cost gate (arjun-e16, `tools/js/cost_matrix.sh -j 6`, instruction counts): 803 rows in 53 s. Mean change: glibc +0.006%, jemalloc +0.000%. Over under one allocator: 0. Over under both: 0. `parse_load deep 1` and `deep 10` fail to run (the known failure, base too). No codegen-units=1 check was needed.
 - Known limits: a queued message that holds ports is dropped when its port moves (one console warning). After `close()` the wires that wait for the closed end are dropped. A message over the bounds of the receiver is dropped with a console warning.
 - Not tested: the cost of a page that moves ports (no benchmark row has an iframe with a src), peak memory, wall time, live Gmail (the account menu), the real-time clock and live window mode with ports, GC with a split port across a `collect`, the bounds of the hub (`messages`, `message-bytes`), a port in a message that is dropped for an origin mismatch, a page that navigates while a port is in flight, `workers` (step 5).
+
+## Chrome vs Bare on a live staging E2E: create and delete a client and an agent (2026-11-18)
+
+Question: what does one real E2E test cost in Chrome over CDP and in Bare? The earlier comparison (resources.md, 2026-11-17) used a small local page. This one uses the live staging app.
+
+Journey (one step file for both browsers): log in, create a client, create an agent with the 3-step wizard (setup, name and voice, review), delete the agent from its detail page, delete the client from its settings. A Node CDP driver runs the same step file in Chrome. It uses real mouse events and waits for a stable box before each click, as Playwright does. An API cleanup after each run found no leftover client.
+
+Setup: archMachine, Bare `532cc4e9` (release `bare-drive`), Chrome 155.0.8059.39. Method as in resources.md: one systemd scope per browser, `perf stat -e instructions:u`, cgroup `cpu.stat` and `memory.peak`, a PSS sampler every 20 ms. Windowed runs ran in an isolated headless `cage`. Other agent threads, 29 containers, the Windows VM, 34 user timers and syncthing were paused. Load average stayed between 0.3 and 0.9. Runs alternated, with no warm-up, because trial runs had already warmed the caches: 6 headless pairs and 4 windowed pairs. All 20 runs passed. Values are means, with the spread as (max-min)/mean.
+
+| metric | headless Chrome | headless Bare | ratio | windowed Chrome | windowed Bare | ratio |
+|---|---|---|---|---|---|---|
+| journey ms | 8,265 (14%) | 6,632 (13%) | 1.25x | 7,962 (10%) | 6,836 (7%) | 1.16x |
+| CPU ms total | 5,117 (3%) | 3,948 (2%) | 1.30x | 5,510 (4%) | 4,453 (2%) | 1.24x |
+| CPU ms user | 4,229 | 3,852 | 1.10x | 4,302 | 4,357 | 0.99x |
+| CPU ms sys | 888 | 96 | 9.3x | 1,208 | 96 | 12.6x |
+| instructions:u (M) | 25,403 (2%) | 29,652 (2%) | 0.86x | 28,032 (5%) | 34,458 (3%) | 0.81x |
+| peak PSS MiB | 429 (3%) | 84 (2%) | 5.1x | 528 (1%) | 91 (5%) | 5.8x |
+| peak RSS sum MiB | 1,217 | 87 | 14.1x | 1,403 | 94 | 14.9x |
+| memory.peak MiB | 353 | 79 | 4.5x | 398 | 86 | 4.6x |
+| processes | 13 | 1 | | 15 | 1 | |
+
+The Chrome CDP driver is a separate process and is not in the Chrome columns: 280 ms CPU and 76 MiB RSS per run.
+
+Findings:
+- Memory is the clear gain: 5x less PSS and 14x less RSS. Bare runs as one process.
+- On this app Bare runs about 17% to 23% more user instructions than Chrome, because the JS engine is a tree walker and V8 compiles. On the small page of resources.md Bare ran 250x fewer. The difference is the JS work of the page: here React and the staging app scripts are most of it. Hypothesis: the JIT and the lane work are what close this gap.
+- Total CPU is still 1.24x to 1.30x lower in Bare, because Chrome spends 9x to 13x more system time (process start, IPC, GPU process).
+- The journey is 1.16x to 1.25x faster in Bare. Most of the time is network and server wait.
+
+Not tested: arjun-e16; a real Hyprland window (only headless `cage`); more than 6 and 4 runs; a Chrome profile with a warm HTTP cache across runs (each run used a fresh profile, and Bare has no disk cache); Playwright itself (a plain CDP driver was used). The scripts and raw results are local, in the session scratchpad: `chrome_steps.mjs`, `harness.py`, `monitor.py`, `report.py`, `out-main/`.
