@@ -282,12 +282,12 @@ fn terminate(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
 
 fn hget<const N: usize>(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let o = d.worker_of(it, this)?;
-    Ok(handler_get(d, Target::Obj(o), TYPES[N]))
+    Ok(handler_get(d, it, Target::Obj(o), TYPES[N]))
 }
 
 fn hset<const N: usize>(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     let o = d.worker_of(it, this)?;
-    handler_set(d, Target::Obj(o), TYPES[N], a.first().copied())?;
+    handler_set(d, it, Target::Obj(o), TYPES[N], a.first().copied())?;
     Ok(Value::Undefined)
 }
 

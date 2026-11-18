@@ -162,6 +162,14 @@ pub(crate) struct UiState {
 
 // ------------------------------------------------------------------------------------------ getters
 
+/// A traced value of the UI event `this`, or `null` when `f` gives none.
+pub(crate) fn ui_value(d: &Dom, it: &mut Interp<'_>, this: Value, f: impl for<'a> FnOnce(&'a EventState) -> Option<&'a bare_js_api::Traced<Value>>) -> V {
+    with_ui(d, it, this, |_, _| ())?;
+    let o = d.event_of(it, this)?;
+    let st = d.st.borrow();
+    Ok(f(&st.events[&o]).map_or(Value::Null, |v| it.traced_value(v)))
+}
+
 pub(crate) fn with_ui<T>(d: &Dom, it: &mut Interp<'_>, this: Value, f: impl FnOnce(&EventState, &Ui) -> T) -> R<T> {
     let o = d.event_of(it, this)?;
     let st = d.st.borrow();
@@ -221,7 +229,7 @@ impl PointerData {
 }
 
 pub(crate) fn related(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    with_ui(d, it, this, |e, _| e.related)
+    ui_value(d, it, this, |e| Some(&e.related))
 }
 
 pub(crate) fn pointer_type(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
@@ -346,7 +354,7 @@ impl Dom {
             let e = st.events.get_mut(&ev).expect("just made");
             e.ui = Some(Box::new(ui));
             e.trusted = true;
-            e.related = rel;
+            it.store_value(&mut e.related, rel);
         }
         self.dispatch(it, Target::Node(target), ev)
     }

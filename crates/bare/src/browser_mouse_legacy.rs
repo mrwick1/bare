@@ -46,7 +46,8 @@ pub(crate) fn source_capabilities(d: &Dom, it: &mut Interp<'_>, this: Value, _: 
 }
 
 fn layer(d: &Dom, it: &mut Interp<'_>, this: Value, y: bool) -> V {
-    let (target, u) = with_ui(d, it, this, |e, u| (e.target, u.clone()))?;
+    let target = crate::browser_ui::ui_value(d, it, this, |e| Some(&e.target))?;
+    let u = with_ui(d, it, this, |_, u| u.clone())?;
     let mut v = if y { u.page.1 } else { u.page.0 };
     if let Some(n) = d.node_of(target).filter(|&n| d.is_element(n)) && d.in_document(it, n)?
         && let Some(r) = d.with_geo(it, |g, s| {
@@ -74,10 +75,10 @@ pub(crate) fn layer_y(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) ->
 
 /// `fromElement` (`to` false) and `toElement` (`to` true).
 fn from_to(d: &Dom, it: &mut Interp<'_>, this: Value, to: bool) -> V {
-    with_ui(d, it, this, |e, _| match (&*e.ty, to) {
-        ("mouseover" | "mouseenter", false) | ("mouseout" | "mouseleave", true) => e.related,
-        ("mouseover" | "mouseenter", true) | ("mouseout" | "mouseleave", false) => e.target,
-        _ => Value::Null,
+    crate::browser_ui::ui_value(d, it, this, |e| match (&*e.ty, to) {
+        ("mouseover" | "mouseenter", false) | ("mouseout" | "mouseleave", true) => Some(&e.related),
+        ("mouseover" | "mouseenter", true) | ("mouseout" | "mouseleave", false) => Some(&e.target),
+        _ => None,
     })
 }
 
@@ -126,7 +127,9 @@ pub(crate) fn init_mouse_event(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[V
         return Ok(Value::Undefined);
     }
     (e.ty, e.bubbles, e.cancelable) = (Rc::from(ty.as_str()), bubbles, cancelable);
-    (e.stop, e.stop_imm, e.canceled, e.target, e.related) = (false, false, false, Value::Null, related);
+    (e.stop, e.stop_imm, e.canceled) = (false, false, false);
+    it.store_value(&mut e.target, Value::Null);
+    it.store_value(&mut e.related, related);
     let u = e.ui.as_mut().expect("checked");
     u.view = view;
     u.detail = n[0] as i32;

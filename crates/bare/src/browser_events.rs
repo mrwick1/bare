@@ -21,6 +21,14 @@ fn arg(a: &[Value], i: usize) -> Value {
     a.get(i).copied().unwrap_or(Value::Undefined)
 }
 
+/// A listener of one turn of `fire`. Its callback is read at its turn.
+struct Turn {
+    id: u64,
+    once: bool,
+    passive: bool,
+    handler: bool,
+}
+
 impl Dom {
     /// `this` of an `EventTarget` method. `undefined` and `null` mean `window`, as in a browser.
     fn target_of(&self, it: &mut Interp<'_>, this: Value) -> R<Target> {
@@ -54,7 +62,7 @@ impl Dom {
         let p = self.p();
         let o = self.new_event_proto(it, ty, bubbles, cancelable, composed, if detail.is_none() { p.event } else { p.custom })?;
         if let Some(d) = detail {
-            self.st.borrow_mut().events.get_mut(&o).expect("just made").detail = d;
+            it.store_value(&mut self.st.borrow_mut().events.get_mut(&o).expect("just made").detail, d);
         }
         Ok(o)
     }
@@ -81,19 +89,22 @@ impl Dom {
             dispatching: false,
             in_passive: false,
             phase: 0,
-            target: Value::Null,
-            current: Value::Null,
-            detail: Value::Null,
+            target: it.trace_value(Value::Null),
+            current: it.trace_value(Value::Null),
+            detail: it.trace_value(Value::Null),
             path: Vec::new(),
             time: self.now_ms(),
-            related: Value::Null,
+            related: it.trace_value(Value::Null),
             is_focus: false,
             is_submit: false,
             toggle: None,
             ui: None,
             trusted: false,
         };
-        self.st.borrow_mut().events.insert(o, e);
+        let mut st = self.st.borrow_mut();
+        st.events.insert(o, e);
+        let k = st.owners.key(crate::browser::Owner::Event(o));
+        it.set_host_owner_obj(o, k);
         Ok(o)
     }
 
@@ -115,7 +126,8 @@ impl Dom {
         st.hd.event = prev;
         let e = st.events.get_mut(&ev).expect("event is registered");
         let not_canceled = !e.canceled;
-        (e.dispatching, e.stop, e.stop_imm, e.in_passive, e.phase, e.current) = (false, false, false, false, 0, Value::Null);
+        (e.dispatching, e.stop, e.stop_imm, e.in_passive, e.phase) = (false, false, false, false, 0);
+        it.store_value(&mut e.current, Value::Null);
         e.path.clear();
         r.map(|_| not_canceled)
     }
@@ -148,7 +160,7 @@ impl Dom {
         let bubbles = {
             let mut st = self.st.borrow_mut();
             let e = st.events.get_mut(&ev).expect("event is registered");
-            e.target = tv;
+            it.store_value(&mut e.target, tv);
             e.path = path.clone();
             e.bubbles
         };
@@ -172,14 +184,15 @@ impl Dom {
 
     /// The listeners of `t` for this event, capturing or not, one turn.
     fn fire(&self, it: &mut Interp<'_>, ev: ObjId, ty: &str, t: Target, phase: u8, capture: bool) -> R<()> {
-        // Most calls find no listener: they leave before the event is looked up.
-        let snapshot: Vec<Listener> = {
+        // Most calls find no listener: they leave before the event is looked up. The callback is read at each turn, so the snapshot
+        // keeps only the flags.
+        let snapshot: Vec<Turn> = {
             let st = self.st.borrow();
             // A plain loop: the iterator chain keeps `Cloned::next` out of line, and its cost moves with unrelated code.
             let mut list = Vec::new();
             for l in st.listeners.get(&t).into_iter().flatten() {
                 if l.capture == capture && *l.ty == *ty {
-                    list.push(l.clone());
+                    list.push(Turn { id: l.id, once: l.once, passive: l.passive, handler: l.handler });
                 }
             }
             list
@@ -191,24 +204,25 @@ impl Dom {
         {
             let mut st = self.st.borrow_mut();
             let e = st.events.get_mut(&ev).expect("event is registered");
-            (e.phase, e.current) = (phase, cur);
+            e.phase = phase;
+            it.store_value(&mut e.current, cur);
         }
-        for mut l in snapshot {
-            let raw = {
+        for l in snapshot {
+            let (mut cb, raw) = {
                 let st = self.st.borrow();
                 if st.events[&ev].stop_imm {
                     break;
                 }
                 // A property handler is called with its value at its turn (a replacement is seen, a removal skips it).
-                match st.listeners.get(&t).and_then(|v| v.iter().find(|x| x.id == l.id)) {
-                    Some(x) => l.cb = x.cb,
+                let cb = match st.listeners.get(&t).and_then(|v| v.iter().find(|x| x.id == l.id)) {
+                    Some(x) => it.traced_value(&x.cb),
                     None => continue,
-                }
-                l.handler && !st.hd.raw.is_empty() && st.hd.raw.contains_key(&l.id)
+                };
+                (cb, l.handler && !st.hd.raw.is_empty() && st.hd.raw.contains_key(&l.id))
             };
             if raw {
                 match crate::browser_handlers::compile_slot(self, it, t, ty, l.id)? {
-                    Value::Object(f) => l.cb = f,
+                    f @ Value::Object(_) => cb = f,
                     _ => continue,
                 }
             }
@@ -218,7 +232,7 @@ impl Dom {
             self.st.borrow_mut().events.get_mut(&ev).expect("event is registered").in_passive = l.passive;
             it.charge(1)?;
             self.st.borrow_mut().ui.epoch += 1;
-            let r = if l.handler { self.call_handler(it, t, &l, cur, ev) } else { self.call_listener(it, &l, cur, Value::Object(ev)) };
+            let r = if l.handler { self.call_handler(it, t, ty, cb, cur, ev) } else { self.call_listener(it, cb, cur, Value::Object(ev)) };
             self.st.borrow_mut().events.get_mut(&ev).expect("event is registered").in_passive = false;
             match r {
                 Ok(_) => {}
@@ -238,7 +252,7 @@ impl Dom {
             && let Some(i) = v.iter().position(|l| l.id == id)
         {
             v.remove(i);
-            if v.is_empty() {
+            if v.removable() {
                 st.listeners.remove(&t);
             }
             st.n_listeners -= 1;
@@ -249,16 +263,16 @@ impl Dom {
     /// the current target, and a return value of `false` sets the canceled flag (as `preventDefault` would).
     /// Two cases differ: the `error` handler of `window` for an `ErrorEvent` gets `(message, filename, lineno, colno, error)` and `true`
     /// cancels; code of a content attribute looks its names up in the element, its form owner and the document first.
-    fn call_handler(&self, it: &mut Interp<'_>, t: Target, l: &Listener, this: Value, ev: ObjId) -> V {
-        let cb = Value::Object(l.cb);
+    fn call_handler(&self, it: &mut Interp<'_>, t: Target, ty: &str, cb: Value, this: Value, ev: ObjId) -> V {
+        let Value::Object(f) = cb else { return Ok(Value::Undefined) };
         if !it.is_callable_value(cb) {
             return Ok(Value::Undefined);
         }
-        if (matches!(t, Target::Window) && &*l.ty == "error") || it.is_scoped_function(l.cb) {
-            return self.call_handler_special(it, t, l, this, ev);
+        if (matches!(t, Target::Window) && ty == "error") || it.is_scoped_function(f) {
+            return self.call_handler_special(it, t, ty, f, this, ev);
         }
         let r = it.call(cb, this, &[Value::Object(ev)])?;
-        if matches!(r, Value::Bool(false)) && !(matches!(t, Target::Window) && &*l.ty == "beforeunload") {
+        if matches!(r, Value::Bool(false)) && !(matches!(t, Target::Window) && ty == "beforeunload") {
             let mut st = self.st.borrow_mut();
             let e = st.events.get_mut(&ev).expect("event is registered");
             e.canceled |= e.cancelable && !e.in_passive;
@@ -268,10 +282,10 @@ impl Dom {
 
     /// `call_handler` for the `error` handler of `window` or code of a content attribute.
     #[inline(never)]
-    fn call_handler_special(&self, it: &mut Interp<'_>, t: Target, l: &Listener, this: Value, ev: ObjId) -> V {
-        let cb = Value::Object(l.cb);
-        let win_err = matches!(t, Target::Window) && &*l.ty == "error" && self.st.borrow().events[&ev].err;
-        let scope = if it.is_scoped_function(l.cb) { crate::browser_handlers::scope_of(self, it, t)? } else { Vec::new() };
+    fn call_handler_special(&self, it: &mut Interp<'_>, t: Target, ty: &str, f: ObjId, this: Value, ev: ObjId) -> V {
+        let cb = Value::Object(f);
+        let win_err = matches!(t, Target::Window) && ty == "error" && self.st.borrow().events[&ev].err;
+        let scope = if it.is_scoped_function(f) { crate::browser_handlers::scope_of(self, it, t)? } else { Vec::new() };
         let mut args = [Value::Object(ev); 5];
         let n = if win_err {
             for (i, name) in ["message", "filename", "lineno", "colno", "error"].into_iter().enumerate() {
@@ -283,7 +297,7 @@ impl Dom {
             1
         };
         let r = if scope.is_empty() { it.call(cb, this, &args[..n])? } else { it.call_scoped(cb, this, &args[..n], &scope)? };
-        if matches!(r, Value::Bool(b) if b == win_err) && !(matches!(t, Target::Window) && &*l.ty == "beforeunload") {
+        if matches!(r, Value::Bool(b) if b == win_err) && !(matches!(t, Target::Window) && ty == "beforeunload") {
             let mut st = self.st.borrow_mut();
             let e = st.events.get_mut(&ev).expect("event is registered");
             e.canceled |= e.cancelable && !e.in_passive;
@@ -291,8 +305,7 @@ impl Dom {
         Ok(r)
     }
 
-    fn call_listener(&self, it: &mut Interp<'_>, l: &Listener, this: Value, ev: Value) -> V {
-        let cb = Value::Object(l.cb);
+    fn call_listener(&self, it: &mut Interp<'_>, cb: Value, this: Value, ev: Value) -> V {
         if it.is_callable_value(cb) {
             return it.call(cb, this, &[ev]);
         }
@@ -436,7 +449,7 @@ fn make_event(d: &Dom, it: &mut Interp<'_>, a: &[Value], custom: bool) -> V {
     let proto = it.host_proto_from_new_target(if custom { d.p().custom } else { d.p().event })?;
     let e = d.new_event_proto(it, &ty, bubbles, cancelable, composed, proto)?;
     if custom {
-        d.st.borrow_mut().events.get_mut(&e).expect("just made").detail = detail;
+        it.store_value(&mut d.st.borrow_mut().events.get_mut(&e).expect("just made").detail, detail);
     }
     Ok(Value::Object(e))
 }
@@ -494,7 +507,7 @@ pub(crate) fn add_event_listener(d: &Dom, it: &mut Interp<'_>, this: Value, a: &
     let mut guard = d.st.borrow_mut();
     let st = &mut *guard;
     let list = st.listeners.entry(t).or_default();
-    if list.iter().any(|l| *l.ty == *ty && !l.handler && l.cb == cb && l.capture == capture) {
+    if list.iter().any(|l| *l.ty == *ty && !l.handler && matches!(it.traced_value(&l.cb), Value::Object(x) if x == cb) && l.capture == capture) {
         return Ok(Value::Undefined);
     }
     if st.n_listeners >= d.lim.max_listeners {
@@ -505,8 +518,9 @@ pub(crate) fn add_event_listener(d: &Dom, it: &mut Interp<'_>, this: Value, a: &
     }
     st.next_id += 1;
     let id = st.next_id;
-    list.push(Listener { id, ty: Rc::from(ty.as_str()), cb, capture, once, passive, handler: false });
+    list.push(Listener { id, ty: Rc::from(ty.as_str()), cb: it.trace_value(Value::Object(cb)), capture, once, passive, handler: false });
     st.n_listeners += 1;
+    d.own(&mut st.owners, &st.by_node, it, t, list);
     drop(guard);
     if let Some(s) = signal
         && let Err(e) = d.signal_add_algo(s, crate::browser_abort::Algo::Remove(t, id))
@@ -525,7 +539,7 @@ pub(crate) fn remove_event_listener(d: &Dom, it: &mut Interp<'_>, this: Value, a
         opts @ Value::Object(_) => init_flag(d, it, opts, "capture")?,
         v => it.to_js_bool(v)?,
     };
-    let found = d.st.borrow().listeners.get(&t).and_then(|v| v.iter().find(|l| !l.handler && *l.ty == *ty && l.cb == cb && l.capture == capture).map(|l| l.id));
+    let found = d.st.borrow().listeners.get(&t).and_then(|v| v.iter().find(|l| !l.handler && *l.ty == *ty && matches!(it.traced_value(&l.cb), Value::Object(x) if x == cb) && l.capture == capture).map(|l| l.id));
     if let Some(id) = found {
         d.remove_listener(t, id);
     }
@@ -548,17 +562,24 @@ fn with_event<T>(d: &Dom, it: &mut Interp<'_>, this: Value, f: impl FnOnce(&mut 
     Ok(f(d.st.borrow_mut().events.get_mut(&o).expect("checked")))
 }
 
+/// A traced value of the event `this`.
+pub(crate) fn event_value(d: &Dom, it: &mut Interp<'_>, this: Value, f: impl FnOnce(&EventState) -> &bare_js_api::Traced<Value>) -> V {
+    let o = d.event_of(it, this)?;
+    let st = d.st.borrow();
+    Ok(it.traced_value(f(&st.events[&o])))
+}
+
 pub(crate) fn event_type(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let ty = with_event(d, it, this, |e| e.ty.clone())?;
     d.js_str(it, &ty)
 }
 
 pub(crate) fn event_target(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    with_event(d, it, this, |e| e.target)
+    event_value(d, it, this, |e| &e.target)
 }
 
 pub(crate) fn event_current_target(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    with_event(d, it, this, |e| e.current)
+    event_value(d, it, this, |e| &e.current)
 }
 
 pub(crate) fn event_phase(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
@@ -642,7 +663,7 @@ pub(crate) fn composed_path(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Valu
 }
 
 pub(crate) fn custom_detail(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    with_event(d, it, this, |e| e.detail)
+    event_value(d, it, this, |e| &e.detail)
 }
 
 // ------------------------------------------------------------------------------------------ createEvent
@@ -672,18 +693,21 @@ fn init(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], what: &str, deta
     }
     let ty = d.string_arg(it, a[0])?;
     let (bubbles, cancelable) = (it.to_js_bool(arg(a, 1))?, it.to_js_bool(arg(a, 2))?);
-    with_event(d, it, this, |e| {
-        if !e.dispatching {
-            (e.ty, e.bubbles, e.cancelable) = (Rc::from(ty.as_str()), bubbles, cancelable);
-            (e.stop, e.stop_imm, e.canceled, e.trusted, e.target) = (false, false, false, false, Value::Null);
-            if detail {
-                e.detail = match arg(a, 3) {
-                    Value::Undefined => Value::Null,
-                    v => v,
-                };
-            }
+    let o = d.event_of(it, this)?;
+    let mut st = d.st.borrow_mut();
+    let e = st.events.get_mut(&o).expect("checked");
+    if !e.dispatching {
+        (e.ty, e.bubbles, e.cancelable) = (Rc::from(ty.as_str()), bubbles, cancelable);
+        (e.stop, e.stop_imm, e.canceled, e.trusted) = (false, false, false, false);
+        it.store_value(&mut e.target, Value::Null);
+        if detail {
+            let v = match arg(a, 3) {
+                Value::Undefined => Value::Null,
+                v => v,
+            };
+            it.store_value(&mut e.detail, v);
         }
-    })?;
+    }
     Ok(Value::Undefined)
 }
 

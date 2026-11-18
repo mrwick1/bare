@@ -405,7 +405,7 @@ pub(crate) fn submit_event_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Val
     let e = d.new_event_proto(it, &ty, bubbles, cancelable, composed, proto)?;
     let mut st = d.st.borrow_mut();
     let ev = st.events.get_mut(&e).expect("just made");
-    ev.related = submitter;
+    it.store_value(&mut ev.related, submitter);
     ev.is_submit = true;
     Ok(Value::Object(e))
 }
@@ -414,5 +414,5 @@ pub(crate) fn submit_event_submitter(d: &Dom, it: &mut Interp<'_>, this: Value, 
     let o: ObjId = d.event_of(it, this)?;
     let st = d.st.borrow();
     let ev = &st.events[&o];
-    if ev.is_submit { Ok(ev.related) } else { Err(illegal(it)) }
+    if ev.is_submit { Ok(it.traced_value(&ev.related)) } else { drop(st); Err(illegal(it)) }
 }

@@ -13,6 +13,12 @@
 //!   call (listeners, timers, wrappers) keep these. A drop needs no engine: it clears the bit of its slot in [`Slots`], so the slot
 //!   is free at once and is no root at the next collection.
 //!
+//! A value that an object keeps through host state (a listener of a target, the target of an event) is not a root. The host keeps it
+//! in a [`Traced`] and registers the object as an owner with a host key ([`Scope::set_host_owner`]). When the collector reaches the
+//! owner, it calls [`Host::trace`] with the key, and the host visits the owner's references. After the collection, [`Host::prune`]
+//! gets the keys of dead owners. So a detached cycle of node, wrapper, listener and closure is collected
+//! (`docs/design-host-tracing.md`).
+//!
 //! The collector may run in any method that takes `&mut Scope` (an allocation, a call into script, [`Scope::safepoint`]). A method
 //! that takes `&Scope` never collects. A borrow of engine memory ([`Scope::as_str`]) is tied to `&Scope`, so it cannot be held across
 //! a call that may collect.
@@ -88,6 +94,14 @@
 //! fn twice<'s, E: Engine>(s: &mut Scope<'s, E>, p: Persistent) {
 //!     s.release(p);
 //!     let _ = s.local(&p);
+//! }
+//! ```
+//!
+//! A traced value has one place, so it cannot be copied:
+//!
+//! ```compile_fail,E0599
+//! fn dup<R>(t: &bare_js_api::Traced<R>) -> bare_js_api::Traced<R> {
+//!     t.clone()
 //! }
 //! ```
 //!
@@ -205,6 +219,62 @@ impl Slots {
     }
 }
 
+/// A value that an owner keeps through host state. It is no root: the owner's [`Host::trace`] visits it. Not `Clone`: one place,
+/// one owner. `R` is the engine's raw value ([`Engine::Raw`]).
+#[derive(Debug)]
+pub struct Traced<R> {
+    raw: R,
+}
+
+impl<R> Traced<R> {
+    /// For engines: a reference to `raw`.
+    #[doc(hidden)]
+    #[inline]
+    pub fn from_raw(raw: R) -> Self {
+        Traced { raw }
+    }
+
+    /// For engines: the raw value.
+    #[doc(hidden)]
+    #[inline]
+    pub fn raw(&self) -> &R {
+        &self.raw
+    }
+
+    /// For engines: replace the raw value.
+    #[doc(hidden)]
+    #[inline]
+    pub fn set_raw(&mut self, raw: R) {
+        self.raw = raw;
+    }
+}
+
+/// The work list of the collector, given to [`Host::trace`].
+pub struct Tracer<'a, R> {
+    out: &'a mut Vec<R>,
+}
+
+impl<'a, R: Clone> Tracer<'a, R> {
+    /// For engines: a tracer that adds to `out`.
+    #[doc(hidden)]
+    pub fn new(out: &'a mut Vec<R>) -> Self {
+        Tracer { out }
+    }
+
+    /// Keep the value of `t` alive.
+    #[inline]
+    pub fn visit(&mut self, t: &Traced<R>) {
+        self.out.push(t.raw.clone());
+    }
+
+    /// For host code that still holds raw engine values (plan step S0.4). It goes away when the last of them is a `Traced`.
+    #[doc(hidden)]
+    #[inline]
+    pub fn visit_raw(&mut self, r: R) {
+        self.out.push(r);
+    }
+}
+
 /// The arguments of a host call: consecutive slots of the handle stack.
 #[derive(Clone, Copy, Debug)]
 pub struct Args<'s> {
@@ -316,11 +386,19 @@ pub enum Abort {
 pub trait Host<E: Engine> {
     /// Run host function `id` (from [`Scope::host_function`]). `is_new` is true for `new f()`.
     fn call<'s>(&self, s: &mut Scope<'s, E>, id: u32, this: Local<'s>, args: Args<'s>, is_new: bool) -> Result<Local<'s>, Error<'s>>;
+    /// The collector reached the owner with host key `key` ([`Scope::set_host_owner`]): visit the [`Traced`] values it keeps. The
+    /// engine runs no script and allocates nothing here. The host must not hold a borrow that this method needs.
+    fn trace(&self, _key: u32, _t: &mut Tracer<'_, E::Raw>) {}
+    /// The owners with these keys died in the last collection. Their `Traced` values are dangling: drop them.
+    fn prune(&self, _dead: &[u32]) {}
 }
 
 /// A JavaScript realm. The host calls these methods only through [`Scope`]; each value that a method returns is pushed onto the
 /// handle stack. Methods that take `&self` must not collect.
 pub trait Engine: Sized {
+    /// A value as the engine stores it, for [`Traced`].
+    type Raw: Clone + 'static;
+
     /// The number of slots in the handle stack.
     fn stack_len(&self) -> u32;
     /// Drop the slots from `len` up.
@@ -357,6 +435,17 @@ pub trait Engine: Sized {
     /// A function whose calls go to [`Host::call`] with `id`.
     fn host_function<'s>(&mut self, name: &str, id: u32, length: u32) -> Result<Local<'s>, Error<'s>>;
     fn set_host(&mut self, host: Rc<dyn Host<Self>>);
+
+    /// The raw value of a local, for a [`Traced`].
+    fn raw(&self, v: Local<'_>) -> Self::Raw;
+    /// A local of a raw value from a [`Traced`].
+    fn raw_local<'s>(&mut self, r: &Self::Raw) -> Local<'s>;
+    /// A store of `v` into a `Traced` of an owner: the place of a write barrier.
+    fn store_raw(&mut self, t: &mut Traced<Self::Raw>, v: Local<'_>) {
+        t.set_raw(self.raw(v));
+    }
+    /// Register `obj` as an owner with host key `key`. A key that the host gives again replaces the old one of this object.
+    fn set_host_owner<'s>(&mut self, obj: Local<'_>, key: u32) -> Result<(), Error<'s>>;
 
     /// A point where the collector may run.
     fn safepoint(&mut self);
@@ -416,6 +505,25 @@ impl<'s, E: Engine> Scope<'s, E> {
 
     pub fn local(&mut self, p: &Persistent) -> Local<'s> {
         self.e.persistent(p.id)
+    }
+
+    /// A reference that the owner's [`Host::trace`] keeps alive.
+    pub fn trace_ref(&mut self, v: Local<'_>) -> Traced<E::Raw> {
+        Traced::from_raw(self.e.raw(v))
+    }
+
+    pub fn traced(&mut self, t: &Traced<E::Raw>) -> Local<'s> {
+        self.e.raw_local(t.raw())
+    }
+
+    pub fn store(&mut self, t: &mut Traced<E::Raw>, v: Local<'_>) {
+        self.e.store_raw(t, v);
+    }
+
+    /// From now on the collector calls [`Host::trace`] with `key` when it reaches `obj`, and [`Host::prune`] when `obj` dies. Throws a
+    /// `TypeError` when `obj` is not an object.
+    pub fn set_host_owner(&mut self, obj: Local<'_>, key: u32) -> Result<(), Error<'s>> {
+        self.e.set_host_owner(obj, key)
     }
 
     /// Drop `p`. The same as `drop(p)`.

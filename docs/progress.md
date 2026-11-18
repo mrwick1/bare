@@ -13498,3 +13498,38 @@ Notes:
 - `instr.sh` takes the case and the scale as two arguments. In zsh, `$r` with a space does not split; use `${=r}`.
 
 Not done: the staging journey A/B. The other subsystems of S0.4.
+
+## 2026-11-19: event listeners and event state through host owners (plan step S0.4, events)
+
+Listeners and event state keep their engine values in `Traced` fields of `bare-js-api` (`docs/design-host-tracing.md`, option A). The owner of a value traces it. The old host `trace` no longer visits listeners and events.
+
+Interface changes:
+
+- `Traced<R>` holds a raw engine value. It is not a root, and it is not `Copy` or `Clone`. `Tracer::visit` visits one. `Tracer::visit_raw` is transitional: event paths use it for node wrappers until the wrapper step.
+- `Engine` has `Raw`, `raw`, `raw_local`, `store_raw` (the write barrier point) and `set_host_owner`. `Host` has `trace(key, tracer)` and `prune(dead keys)`.
+- The old engine keeps owners in a list of object and key pairs. `collect` reads the list when its work list is empty and traces the reached owners that it did not trace yet. The traced values also go to the heap roots, because the heap marks again from roots.
+
+Browser changes:
+
+- The owners are a target (its listener list) or an event object (`target`, `currentTarget`, `detail`, `relatedTarget`). The host key indexes an owner table. A freed key is reused.
+- The key of a target is in its listener entry. An entry with a key stays when its list is empty, so a target that adds and removes listeners keeps one key. The entry goes when its target dies.
+- A node without a wrapper is no owner. Its handler placeholder holds the global object until a wrapper exists.
+
+Checks:
+
+- New tests: a detached node whose listener holds the node is collected, and its key is reused; a live target with 300 add and remove rounds keeps one key (this check fails when an empty entry is removed); a window listener and an event kept by a script survive two collections; a chain of 50 owners, each reached only through the listener of the one before, survives. In `bare-js`, an owner keeps its value in the heap after 1000 new objects (this check fails when the traced values do not go to the heap roots).
+- Linux: `bare` lib 1638 passed; `bare-js` lib 1045 passed; `bare-js-api` 5 passed and 1 doc test. Windows 11 VM: 336 event, handler, collect and listener tests of `bare`, 5 interface tests of `bare-js` and 5 tests of `bare-js-api` pass.
+- Cost matrix (`tools/js/cost_matrix.sh -j 4`, archMachine, base = origin/main `e3eb5b9b`, 3 runs per row, 805 rows): no row over +0.5% under both allocators. Mean change +0.017% (glibc). `form_load gates 1` and `gates 10` are +0.90% and +0.92% under glibc only (jemalloc -0.34% and -0.38%). `parse_load deep 1` and `deep 10` abort on the base too.
+
+Versions measured (rows over +0.5% under both allocators):
+
+| Version | Rows over |
+| --- | ---: |
+| An object to key map in the engine, probed for each marked object; a target to key map in the browser | 28 (`focus_load focus 10` +2.35%, `web_apis_load abort 10` +2.03%) |
+| The owner list, read when the work list is empty | 2 (`abort 1` +0.94%, `abort 10` +1.04%) |
+| The target key in the listener entry | 2 (`abort 1` +0.63%, `abort 10` +0.65%) |
+| The key checked in place when a listener is added (kept) | 0 |
+
+`callgrind` on `focus_load focus 1` showed where the first version spent: +627K instructions in the per-object probe, +286K in map inserts for each event, +249K in the map retain at each collection.
+
+Not done: the staging journey A/B. The DOM wrappers (`by_node`) are the next step of S0.4; then `visit_raw` goes.

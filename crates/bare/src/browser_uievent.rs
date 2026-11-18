@@ -181,7 +181,7 @@ pub(crate) fn ctor<const K: u8>(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Val
     let mut st = d.st.borrow_mut();
     let ev = st.events.get_mut(&e).expect("just made");
     ev.ui = Some(Box::new(ui));
-    ev.related = related;
+    it.store_value(&mut ev.related, related);
     Ok(Value::Object(e))
 }
 
@@ -228,7 +228,8 @@ fn view(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
 
 fn offset(d: &Dom, it: &mut Interp<'_>, this: Value, y: bool) -> V {
         let _caller = crate::force::tag("event offsetX/Y");
-    let (target, u) = with_ui(d, it, this, |e, u| (e.target, u.clone()))?;
+    let target = crate::browser_ui::ui_value(d, it, this, |e| Some(&e.target))?;
+    let u = with_ui(d, it, this, |_, u| u.clone())?;
     let (client, page) = if y { (u.y, u.page.1) } else { (u.x, u.page.0) };
     let mut v = page;
     if let Some(n) = d.node_of(target).filter(|&n| d.is_element(n)) && d.in_document(it, n)?

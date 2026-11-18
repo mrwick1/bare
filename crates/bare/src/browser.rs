@@ -305,6 +305,115 @@ impl Default for BrowserLimits {
 /// Bytes of selector text that `Dom::selectors` keeps parsed. A parsed selector is up to about 50 times its text.
 pub(crate) const SEL_CACHE_BYTES: usize = 128 << 10;
 
+/// What keeps traced values for a host key: the listeners of a target, or the state of an event object.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Owner {
+    Target(Target),
+    Event(ObjId),
+}
+
+/// The owners of traced values, by host key (`docs/design-host-tracing.md`). A free key holds `None`.
+#[derive(Default)]
+pub(crate) struct Owners {
+    pub slots: Vec<Option<Owner>>,
+    free: Vec<u32>,
+}
+
+impl Owners {
+    /// A free host key for `o`.
+    pub(crate) fn key(&mut self, o: Owner) -> u32 {
+        match self.free.pop() {
+            Some(k) => {
+                self.slots[k as usize] = Some(o);
+                k
+            }
+            None => {
+                self.slots.push(Some(o));
+                self.slots.len() as u32 - 1
+            }
+        }
+    }
+
+    pub(crate) fn release(&mut self, k: u32) {
+        self.slots[k as usize] = None;
+        self.free.push(k);
+    }
+}
+
+impl Dom {
+    /// Make the object of `t` the owner of its listeners, once. Call it where a function goes into a listener.
+    pub(crate) fn own_listeners(&self, st: &mut State, it: &mut Interp<'_>, t: Target) {
+        if let Some(l) = st.listeners.get_mut(&t) {
+            self.own(&mut st.owners, &st.by_node, it, t, l);
+        }
+    }
+
+    /// `own_listeners` for the list `l` of `t`. The key in the list is checked against the owner table, so a freed key that another
+    /// owner took is not trusted. A node without a wrapper is skipped: its listeners hold the global object until a wrapper exists
+    /// (`browser_handlers.rs`).
+    #[inline]
+    pub(crate) fn own(&self, owners: &mut Owners, by_node: &IdTab<NodeId, ObjId>, it: &mut Interp<'_>, t: Target, l: &mut Listeners) {
+        if l.key != NO_KEY && matches!(owners.slots.get(l.key as usize), Some(Some(Owner::Target(x))) if *x == t) {
+            return;
+        }
+        // The object whose life the listeners follow: the global object, the wrapper of a node, or the target object.
+        let o = match t {
+            Target::Window => *self.global.get().expect("installed"),
+            Target::Node(n) => match by_node.get(&n) {
+                Some(&o) => o,
+                None => return,
+            },
+            Target::Obj(o) => o,
+        };
+        l.key = owners.key(Owner::Target(t));
+        it.set_host_owner_obj(o, l.key);
+    }
+}
+
+/// No host key.
+pub(crate) const NO_KEY: u32 = u32::MAX;
+
+/// The listeners of one target, and the host key of their owner (`own_listeners`). An entry with a key stays when its list is empty,
+/// so the target keeps one key; it goes when its target dies.
+pub(crate) struct Listeners {
+    pub key: u32,
+    pub list: Vec<Listener>,
+}
+
+impl Default for Listeners {
+    fn default() -> Self {
+        Listeners { key: NO_KEY, list: Vec::new() }
+    }
+}
+
+impl Listeners {
+    /// An empty list without an owner key.
+    pub(crate) fn removable(&self) -> bool {
+        self.list.is_empty() && self.key == NO_KEY
+    }
+}
+
+impl std::ops::Deref for Listeners {
+    type Target = Vec<Listener>;
+    fn deref(&self) -> &Vec<Listener> {
+        &self.list
+    }
+}
+
+impl std::ops::DerefMut for Listeners {
+    fn deref_mut(&mut self) -> &mut Vec<Listener> {
+        &mut self.list
+    }
+}
+
+impl<'a> IntoIterator for &'a Listeners {
+    type Item = &'a Listener;
+    type IntoIter = std::slice::Iter<'a, Listener>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.list.iter()
+    }
+}
+
 /// What a JS event target is on the Rust side.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) enum Target {
@@ -314,11 +423,11 @@ pub(crate) enum Target {
     Obj(ObjId),
 }
 
-#[derive(Clone)]
 pub(crate) struct Listener {
     pub id: u64,
     pub ty: Rc<str>,
-    pub cb: ObjId,
+    /// A function or an object with `handleEvent`. The owner of the target traces it (`own_listeners`).
+    pub cb: bare_js_api::Traced<Value>,
     pub capture: bool,
     pub once: bool,
     pub passive: bool,
@@ -339,13 +448,14 @@ pub(crate) struct EventState {
     pub dispatching: bool,
     pub in_passive: bool,
     pub phase: u8,
-    pub target: Value,
-    pub current: Value,
-    pub detail: Value,
+    /// The event object is the owner of these (`Owner::Event`).
+    pub target: bare_js_api::Traced<Value>,
+    pub current: bare_js_api::Traced<Value>,
+    pub detail: bare_js_api::Traced<Value>,
     pub path: Vec<Target>,
     pub time: f64,
     /// `FocusEvent.relatedTarget` (null for other events). Traced, so a saved event keeps the node.
-    pub related: Value,
+    pub related: bare_js_api::Traced<Value>,
     pub is_focus: bool,
     /// `SubmitEvent.submitter` is in `related` (traced). Only a `SubmitEvent` has this set.
     pub is_submit: bool,
@@ -418,8 +528,9 @@ pub(crate) struct State {
     pub style_override: Option<((NodeId, u32), [Option<bool>; 3])>,
     pub by_node: IdTab<NodeId, ObjId>,
     pub by_obj: IdTab<ObjId, Target>,
-    pub listeners: IdMap<Target, Vec<Listener>>,
+    pub listeners: IdMap<Target, Listeners>,
     pub n_listeners: usize,
+    pub owners: Owners,
     pub next_id: u64,
     pub events: IdMap<ObjId, EventState>,
     pub inputs: IdMap<NodeId, Input>,
@@ -621,6 +732,53 @@ pub struct Dom {
     pub(crate) reclaim: crate::browser_reclaim::Reclaim,
 }
 
+/// The host of `bare-js-api`: only the references that owners keep (`docs/design-host-tracing.md`). Host functions still go through
+/// the old `Host` until the browser is generic over the engine.
+impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
+    fn call<'s>(&self, _s: &mut bare_js_api::Scope<'s, Interp<'p>>, _id: u32, _this: bare_js_api::Local<'s>, _args: bare_js_api::Args<'s>, _is_new: bool) -> Result<bare_js_api::Local<'s>, bare_js_api::Error<'s>> {
+        Err(bare_js_api::Error::Abort(bare_js_api::Abort::Unsupported("browser host functions through the interface")))
+    }
+
+    fn trace(&self, key: u32, t: &mut bare_js_api::Tracer<'_, Value>) {
+        let st = self.st.borrow();
+        match st.owners.slots.get(key as usize).copied().flatten() {
+            Some(Owner::Target(tg)) => {
+                for l in st.listeners.get(&tg).into_iter().flatten() {
+                    t.visit(&l.cb);
+                }
+            }
+            Some(Owner::Event(o)) => {
+                let Some(e) = st.events.get(&o) else { return };
+                for v in [&e.target, &e.current, &e.detail, &e.related] {
+                    t.visit(v);
+                }
+                // The path lives only during a dispatch. Its wrappers become traced references with the DOM wrapper step of S0.4.
+                for &p in &e.path {
+                    match p {
+                        Target::Node(n) => {
+                            if let Some(&w) = st.by_node.get(&n) {
+                                t.visit_raw(Value::Object(w));
+                            }
+                        }
+                        Target::Obj(x) => t.visit_raw(Value::Object(x)),
+                        Target::Window => {}
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+
+    fn prune(&self, dead: &[u32]) {
+        let mut guard = self.st.borrow_mut();
+        let st = &mut *guard;
+        for &k in dead {
+            // The listeners of a dead target went with the old host's prune.
+            st.owners.release(k);
+        }
+    }
+}
+
 impl Host for Dom {
     fn call(&self, it: &mut Interp<'_>, id: u32, this: Value, args: &[Value], is_new: bool) -> R<Value> {
         let (h, needs_new) = self.handlers.borrow()[id as usize];
@@ -698,24 +856,12 @@ impl Host for Dom {
         }
         let st = self.st.borrow();
         if let Some(&t) = st.by_obj.get(&owner) {
-            for l in st.listeners.get(&t).into_iter().flatten() {
-                out.push(Value::Object(l.cb));
-            }
             if let Target::Node(n) = t {
                 let doc = self.doc.borrow();
                 out.extend(doc.parent(n).and_then(|p| st.by_node.get(&p)).map(|&o| Value::Object(o)));
                 out.extend(doc.children(n).filter_map(|c| st.by_node.get(&c)).map(|&o| Value::Object(o)));
                 // A host and its root (either mode) keep each other's wrapper alive, so a detached pair is one cycle and an expando is not lost.
                 out.extend(doc.shadow_host(n).into_iter().chain(doc.shadow_root(n)).chain(doc.template_content(n)).filter_map(|x| st.by_node.get(&x)).map(|&o| Value::Object(o)));
-            }
-        } else if let Some(e) = st.events.get(&owner) {
-            out.extend([e.target, e.current, e.detail, e.related]);
-            for &t in &e.path {
-                match t {
-                    Target::Node(n) => out.extend(st.by_node.get(&n).map(|&o| Value::Object(o))),
-                    Target::Obj(o) => out.push(Value::Object(o)),
-                    Target::Window => {}
-                }
             }
         }
         self.fetch.trace(owner, out);
@@ -751,7 +897,7 @@ impl Host for Dom {
             Target::Node(n) => by_node.contains_key(n),
             Target::Obj(o) => by_obj.contains_key(o),
         });
-        st.n_listeners = st.listeners.values().map(Vec::len).sum();
+        st.n_listeners = st.listeners.values().map(|l| l.len()).sum();
         st.events.retain(|&o, _| live(o));
         drop(guard);
         self.sched_prune(live);
@@ -1740,6 +1886,7 @@ impl Browser {
             reclaim: Default::default(),
         });
         it.set_host(dom.clone())?;
+        bare_js_api::Engine::set_host(&mut it, dom.clone());
         it.heap.set_indexed_source(dom.clone());
         it.heap.set_named_source(dom.clone());
         it.host_scope(|it| {

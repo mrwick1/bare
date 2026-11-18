@@ -35,8 +35,9 @@ The common rule: the owner's trace visits the references. Only true roots (timer
 ### A. Traced references and a tracer for each owner (recommended)
 
 - `Traced`: an engine value that the host stores in its own structures. It is not a root. It is 8 bytes (the raw engine value). It is neither `Copy` nor `Clone`, so one store has one owner.
-- An owner registers with the engine: `Scope::set_host_owner(obj: Local, key: u32)`. The key is a host number, for example the index of the target in the host's table. The engine keeps the key in the object (old engine: a side table; new engine: a header bit and a slot).
-- When the collector marks an object with a host key, it calls `Host::trace(key, &mut Tracer)`. The host visits the `Traced` fields of that owner only. Objects without a key cost nothing.
+- An owner registers with the engine: `Scope::set_host_owner(obj: Local, key: u32)`. The key is a host number, for example the index of the target in the host's table. The engine keeps the key in the object (old engine: a list of object and key pairs; new engine: a header bit and a slot).
+- When the collector has reached an object with a host key, it calls `Host::trace(key, &mut Tracer)`. The host visits the `Traced` fields of that owner only. Objects without a key cost nothing.
+- As built in the old engine: the collector reads the owner list each time its work list is empty, and traces the reached owners that it did not trace yet. A marked object pays nothing. A map from object to key, probed for each marked object, cost up to +2.3% on event rows (`docs/progress.md`). A chain of owners, each reached only through the one before, needs one pass for each link.
 - After marking, the engine calls `Host::prune(&Dead)` with the keys of dead owners. The host drops their entries.
 - Reads and stores need a scope: `s.traced(&t) -> Local` and `s.store(&mut t, v)`. `store` is the place for the write barrier of a generational or incremental collector (design 6.8, barriers).
 - Cost: one store per reference, no table entry, no reference count. The collector does one host call per owner, not one per object and subsystem. Memory: 8 bytes per reference, as today.

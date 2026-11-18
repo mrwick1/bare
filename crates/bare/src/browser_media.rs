@@ -204,12 +204,12 @@ fn illegal_ctor<const I: usize>(_: &Dom, it: &mut Interp<'_>, _: Value, _: &[Val
 /// The handler `on<EVENTS[N]>` of a media element.
 fn on_get<const N: usize>(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let n = media_el(d, it, this, None)?;
-    Ok(crate::browser_handlers::handler_get(d, Target::Node(n), EVENTS[N]))
+    Ok(crate::browser_handlers::handler_get(d, it, Target::Node(n), EVENTS[N]))
 }
 
 fn on_set<const N: usize>(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     let n = media_el(d, it, this, None)?;
-    crate::browser_handlers::handler_set(d, Target::Node(n), EVENTS[N], a.first().copied())?;
+    crate::browser_handlers::handler_set(d, it, Target::Node(n), EVENTS[N], a.first().copied())?;
     Ok(Value::Undefined)
 }
 

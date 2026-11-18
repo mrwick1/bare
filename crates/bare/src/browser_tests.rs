@@ -595,6 +595,55 @@ fn collect_with_an_event_target_and_a_stale_event() {
 }
 
 #[test]
+fn listener_owners_free_detached_cycles_and_reuse_their_keys() {
+    big(|| {
+        let mut b = browser();
+        // Each listener closure holds its own detached node: a cycle that only the owner tracer can break.
+        let make = "for (var i = 0; i < 200; i++) (function () { var n = document.createElement('div'); n.addEventListener('t', function () { n.x = 1 }); })();";
+        js(&mut b, make);
+        gc(&mut b, &[]);
+        let after = b.stats();
+        assert!(after.wrappers < 20, "wrappers {}", after.wrappers);
+        assert_eq!(after.listeners, 0);
+        let keys = b.dom.st.borrow().owners.slots.len();
+        // A second round takes the freed keys: the owner table does not grow.
+        js(&mut b, make);
+        gc(&mut b, &[]);
+        assert_eq!(b.dom.st.borrow().owners.slots.len(), keys);
+        assert!(b.dom.st.borrow().listeners.len() < 20);
+        // A live target that adds and removes a listener many times keeps one key.
+        js(&mut b, "var keep = new EventTarget(); function f() {} for (var i = 0; i < 300; i++) { keep.addEventListener('t', f); keep.removeEventListener('t', f); }");
+        assert!(b.dom.st.borrow().owners.slots.len() <= keys + 1);
+    });
+}
+
+#[test]
+fn a_chain_of_owners_reached_only_through_listeners_survives_collect() {
+    big(|| {
+        let mut b = browser();
+        // Node i is reached only through the listener of node i - 1: each scan of the owners finds one more.
+        js(&mut b, "var head = null, hits = 0; for (var i = 0; i < 50; i++) (function (next) { var n = document.createElement('i'); n.addEventListener('t', function () { hits++; if (next) next.dispatchEvent(new Event('t')); }); head = n; })(head);");
+        gc(&mut b, &[]);
+        gc(&mut b, &[]);
+        assert_eq!(js(&mut b, "head.dispatchEvent(new Event('t')); hits"), "50");
+    });
+}
+
+#[test]
+fn window_listeners_and_a_kept_event_survive_collect() {
+    big(|| {
+        let mut b = browser();
+        js(&mut b, "var hits = 0; (function () { var mark = {n: 1}; window.addEventListener('w', function () { hits += mark.n }); })();
+            var kept; (function () { var d = document.createElement('p'); d.id = 'held'; var ev = new CustomEvent('c', {detail: {v: 7}}); d.addEventListener('c', function (e) { kept = e }); d.dispatchEvent(ev); })();");
+        gc(&mut b, &[]);
+        gc(&mut b, &[]);
+        assert_eq!(js(&mut b, "window.dispatchEvent(new Event('w')); hits"), "1");
+        // The event is held only by `kept`: its target and detail stay alive through it.
+        assert_eq!(js(&mut b, "kept.target.id + ',' + kept.detail.v + ',' + kept.currentTarget"), "held,7,null");
+    });
+}
+
+#[test]
 fn caps_return_distinct_limit_errors() {
     big(|| {
         let l = BrowserLimits { max_nodes: 80, max_wrappers: 70, max_listeners: 5, max_listeners_per_target: 3, max_events: 4, max_results: 6, max_text_bytes: 4096, max_tree_depth: 8, max_attr_slots: 60, max_names: 40, ..Default::default() };

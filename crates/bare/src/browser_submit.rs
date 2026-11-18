@@ -274,7 +274,7 @@ impl Dom {
                 let mut st = self.st.borrow_mut();
                 let trusted = st.ui.active;
                 let ev = st.events.get_mut(&e).expect("just made");
-                ev.related = who;
+                it.store_value(&mut ev.related, who);
                 ev.is_submit = true;
                 ev.trusted = trusted;
             }

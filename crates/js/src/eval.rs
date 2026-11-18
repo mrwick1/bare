@@ -260,7 +260,7 @@ type FxSet<K> = HashSet<K, BuildHasherDefault<Fx>>;
 /// The objects a collect pass has reached: for each heap slot, the generation of the handle that reached it, plus one (0 is unreached).
 /// A set of handles cost a hash for each insert and each test of the prune pass; this costs one load. A handle of an older generation
 /// of the slot is not in the set.
-struct Seen(Vec<u64>);
+pub(crate) struct Seen(Vec<u64>);
 impl Seen {
     fn insert(&mut self, o: ObjId) -> bool {
         std::mem::replace(&mut self.0[o.slot()], o.gn as u64 + 1) != o.gn as u64 + 1
@@ -1003,6 +1003,7 @@ impl<'p> Interp<'p> {
             return Err(unsupported("collect during a call", Span::default()));
         }
         let mut seen = Seen(vec![0; self.heap.object_slots()]);
+        let mut owners_done = 0;
         let mut env_seen = vec![false; self.envs.len()];
         env_seen[FRAME_ENV as usize] = true;
         let mut work: Vec<Value> = vec![Value::Object(self.global), Value::Object(self.object_proto), Value::Object(self.function_proto), Value::Object(self.array_proto), self.ret, self.completion];
@@ -1049,6 +1050,9 @@ impl<'p> Interp<'p> {
             }
             let Some(v) = work.pop() else {
                 if !self.promise.caps.is_empty() && self.caps_trace(&seen, &mut work) {
+                    continue;
+                }
+                if owners_done < self.api.owners.len() && self.api_trace(&seen, &mut owners_done, &mut host_vals, &mut work) {
                     continue;
                 }
                 break;
@@ -1116,6 +1120,7 @@ impl<'p> Interp<'p> {
         if let Some(h) = &host {
             h.prune(&|o| seen.contains(&o));
         }
+        self.api_prune(|o| seen.contains(o));
         self.sc_prune(&seen);
         self.weak_prune(&seen);
         self.date_prune(&seen);

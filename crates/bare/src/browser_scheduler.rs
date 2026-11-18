@@ -1526,7 +1526,7 @@ fn port_onmessage(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let port = d.port_of(it, this)?;
     let Some(id) = d.sched.borrow().ports[&port].handler else { return Ok(Value::Null) };
     let st = d.st.borrow();
-    Ok(st.listeners.get(&Target::Obj(port)).and_then(|v| v.iter().find(|l| l.id == id)).map_or(Value::Null, |l| Value::Object(l.cb)))
+    Ok(st.listeners.get(&Target::Obj(port)).and_then(|v| v.iter().find(|l| l.id == id)).map_or(Value::Null, |l| it.traced_value(&l.cb)))
 }
 
 fn set_port_onmessage(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
@@ -1542,11 +1542,14 @@ fn set_port_onmessage(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) ->
     let st = &mut *st;
     let existing = old.and_then(|id| st.listeners.get(&t).and_then(|v| v.iter().position(|l| l.id == id)));
     match (existing, cb) {
-        (Some(i), Some(cb)) => st.listeners.get_mut(&t).expect("found")[i].cb = cb,
+        (Some(i), Some(cb)) => {
+            it.store_value(&mut st.listeners.get_mut(&t).expect("found")[i].cb, Value::Object(cb));
+            d.own_listeners(st, it, t);
+        }
         (Some(i), None) => {
             let v = st.listeners.get_mut(&t).expect("found");
             v.remove(i);
-            if v.is_empty() {
+            if v.removable() {
                 st.listeners.remove(&t);
             }
             st.n_listeners -= 1;
@@ -1562,8 +1565,9 @@ fn set_port_onmessage(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) ->
             }
             st.next_id += 1;
             let id = st.next_id;
-            list.push(Listener { id, ty: "message".into(), cb, capture: false, once: false, passive: false, handler: false });
+            list.push(Listener { id, ty: "message".into(), cb: it.trace_value(Value::Object(cb)), capture: false, once: false, passive: false, handler: false });
             st.n_listeners += 1;
+            d.own_listeners(st, it, t);
             d.sched.borrow_mut().ports.get_mut(&port).expect("checked").handler = Some(id);
         }
         (None, None) => {}
