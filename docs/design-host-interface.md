@@ -135,3 +135,16 @@ These are questions for the design of `bare-js-api`, not decisions.
 6. Statistics and checks (`ic_counts`, `bc_scope_check`, `bc_gen_check`, `heap::Ic`) are engine-specific. They stay outside the interface, behind a feature or a debug trait.
 
 Not done: a count by operation of the 221 direct heap sites, the call graph from DOM subsystems to these items, and the cost of each item on the daily journeys.
+
+## Decisions in S0.2 (2026-11-18)
+
+The crate `crates/js-api` (`bare-js-api`) holds the interface. It has traits and handle types only.
+
+- Dispatch: the browser is generic over the `Engine` trait. It is compiled once for each engine, and a session picks one when it starts (`BARE_JS_EXEC`). An engine call costs what a direct call costs. The cost is a larger binary while both engines exist. Decided by the owner, 2026-11-18.
+- Question 2 (raw references): the host holds handles, not values. A `Local` is a slot in the handle stack of a `Scope`: 4 bytes, `Copy`, and the borrow checker keeps it inside its scope. A `Persistent` lives in a table of the realm until `release` or the end of the realm. Host structures that live longer than a call keep persistent handles. `Host::roots` goes away once the browser uses them.
+- Collection points: a method that takes `&mut Scope` may collect; a method that takes `&Scope` never does. A borrow of engine memory (`as_str`) is tied to `&Scope`, so the compiler refuses it across a call that may collect. Doc tests show four rules that fail to compile.
+- Question 1 (direct heap access): the interface has no heap access. S0.2 has the core set: values, strings, `get`, `set`, `define`, `call`, host functions, the global object and `safepoint`. Each S0.4 PR adds the operations that its subsystem uses, from a count of its own sites.
+- Question 3 (lazy and virtual objects): they stay an engine feature. The interface gets them with the DOM wrapper PR of S0.4. Wrapper identity and the edges that the host holds for an object (`Host::trace`, design 6.8) come with it.
+- Question 4: one `Host::call` with an integer id stays. Its arguments are consecutive stack slots (`Args`), so a call allocates nothing.
+- Question 5 (helpers with no engine state): they move to `bare-js-api` in their own PR, so the browser does not depend on an engine for them.
+- Question 6: statistics and checks stay outside the interface.

@@ -13383,3 +13383,11 @@ Staging journey with `bc-hist` (archMachine, `auto`, 2 runs each, all `ok`; base
 Cost rows (`tools/js/instr.sh`, `eval_load` at scale 10, `auto`, base main): every case within ±0.11% (`webpack` −0.11%). These programs seldom put a constant on the left.
 
 Not tested: staging instructions and CPU without `bc-hist`, the typing page, Windows.
+
+## 2026-11-18: host interface crate (plan step S0.2)
+
+A new crate `crates/js-api` (`bare-js-api`) holds the interface between the browser and an engine. It has no engine code. The browser will be generic over its `Engine` trait, and a session picks the engine when it starts (owner decision, 2026-11-18). The host holds handles, not values: a `Local` (a slot in the handle stack of a `Scope`) or a `Persistent` (a slot in a table of the realm). A method that takes `&mut Scope` may collect; a method that takes `&Scope` never does. The decisions on the six questions of S0.1 are in `docs/design-host-interface.md`.
+
+Checks: 4 unit tests with a toy engine (scope pops, escape of a value or an exception, persistent handles, arguments) and 5 doc tests. 4 of the doc tests must fail to compile, each with its error code: a local that leaves its scope (E0521), an inner local kept in the outer scope (E0521), a string borrow held across a call (E0502), and a released persistent handle (E0382). Clippy is clean. The 4 unit tests also pass on the Windows 11 VM (`cargo xwin test --target x86_64-pc-windows-msvc`).
+
+Not done: no engine implements the trait yet (S0.3), so no instruction numbers.

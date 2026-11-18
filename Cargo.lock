@@ -146,6 +146,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "bare-js-api"
+version = "0.1.0"
+
+[[package]]
 name = "bare-layout"
 version = "0.1.0"
 dependencies = [
