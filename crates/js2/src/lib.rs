@@ -9,3 +9,5 @@ pub const NOT_READY: &str = "the new JavaScript engine (bare-js2) cannot run scr
 
 
 pub mod value;
+#[allow(unsafe_code)]
+pub mod heap;

@@ -6,5 +6,6 @@
 pub mod dns;
 pub mod fs;
 pub mod metrics;
+pub mod pages;
 pub mod random;
 pub mod trust;
