@@ -137,6 +137,8 @@ Numbers that bear on our choices:
 
 How V8 handles each module, with its published numbers: `research-v8-reference.md`.
 
+How QuickJS handles each module, read from its source, and a measured baseline of QuickJS, Bare and Node on the `eval_load` cases: `research-quickjs-reference.md`.
+
 What we take from them:
 
 - A good interpreter and a good object model come first. V8, SpiderMonkey and JavaScriptCore keep locals in registers or frame slots and use a 4-byte or 8-byte value. QuickJS uses a 16-byte value, as bare does today.
@@ -456,6 +458,10 @@ From the round 2 review (open):
 11. May the new engine collect only between tasks (section 6.11, item 1), and add collection inside a task only when a measured task needs it?
 12. May small measurement and compiler changes land in today's engine before S1 (section 6.11, item 2)? The work is partly thrown away, but it tests the op-count claims early.
 13. Is the S2 browser slice (the typing page and a frozen staging bundle) the right first performance gate?
+
+From the QuickJS baseline (open):
+
+14. Should the S2 gate be "at or below QuickJS on instructions and peak RSS on every `eval_load` row"? QuickJS is 1.6 to 3.8 times below today's `auto` (`research-quickjs-reference.md`).
 
 ## 11. Review
 

@@ -13281,3 +13281,12 @@ Not tested: windowed runs (paint), the RSS cost of `auto` by part, the mode A/B 
 - New measurement (1 run, `auto`): samples with a collector frame anywhere on the stack are 1,229 of 13,026 (9.4% of CPU). The leaf-first split showed 4.7%.
 - Round 2 corrections: the write barrier may be skipped only when no collection can happen before the store; ropes stay; runtime atoms stay weak; cache records live in a per-realm feedback vector, not in shared code; the dictionary cache entry is kept, not lost.
 - Open owner questions: section 10, items 2 to 4 and 6 to 13.
+
+## QuickJS, Bare and Node on the eval_load cases (2026-11-18)
+
+- Machine: archMachine (AMD Ryzen 9 5900HX), load about 2.4. Bare `eval_load` at `d89f0299` (release, `tree` and `auto`); QuickJS 2026-06-04 (`-O2`, LTO); Node 22.18.0 with and without its JIT. 8 cases at scale 1 and 10, 3 runs each. Instructions: minimum of `perf stat -e instructions:u`, spread under 1% on all but two Node rows. Peak RSS: median of `wait4` through a small C wrapper.
+- Scale 10, instructions, Bare `auto` against QuickJS: `loop` 2,373 M / 635 M, `calls` 1,603 M / 594 M, `objects` 1,935 M / 512 M, `throws` 1,395 M / 870 M, `closures` 467 M / 280 M, `fib` 58 M / 36 M, `webpack` 51 M / 42 M (Bare `tree` 38 M), `concat` 4.0 M / 2.1 M.
+- Peak RSS: QuickJS 3.3 MiB on most cases, Bare 5.6 to 5.9 MiB, Node 44 to 52 MiB. `throws` 10: Bare 32.4 MiB, QuickJS 3.3 MiB (reference counting frees each `Error` at once; Bare collects only between tasks).
+- Node starts with about 94 M instructions and 46 MiB. Its JIT wins only on `loop` 10 and `calls` 10.
+- Details, method and the design notes: `docs/research-quickjs-reference.md`. Data and scripts: `/data/bare-tmp/quickjs-baseline-2026-11-18/`.
+- A first RSS pass through a Python parent read 14.2 MiB on every row: a forked child keeps the parent's peak RSS through `exec`. The C wrapper fixed it (floor 1.5 MiB).
