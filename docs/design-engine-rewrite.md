@@ -2,7 +2,7 @@
 
 Status: design; all owner questions decided (section 10). Implementation plan: `plan-engine-rewrite.md`. No engine code changed. Date: 2026-11-18. Base: main `25126702` (measurements) and `d89f0299` (this document).
 
-Owner decision (2026-11-18): rewrite the whole engine (`crates/js`) and add a JIT. The goals are CPU, memory, a design that the owner can explain and defend, and simpler code.
+Owner decision (2026-11-18): rewrite the whole engine (`crates/js`) and add a JIT. The goals are CPU, memory, a clear design, and simpler code.
 
 Words used in this file:
 
@@ -427,7 +427,7 @@ Steps, each behind `BARE_JS_EXEC=new`, each with a gate before the next:
 | S7    | Remove the old engine                                                                                                                                                                                                                                                                                         | Every daily journey passes; all gates passed on Linux x64, Windows x64 and macOS arm64; owner decision                                                                                                                                                                                                                                                                                                                                                                                  |
 | S8    | Speculating JIT (option C of 6.6), checked last: profile the daily journeys on the finished engine                                                                                                                                                                                                            | Built only if hot loops are a large share of the profile; then the same absolute gate as S5 with it on, and differential fuzz against the interpreter                                                                                                                                                                                                                                                                                                                                   |
 
-Each stage records its numbers in `docs/progress.md` and gets a learning page.
+Each stage records its numbers in `docs/progress.md`.
 
 ## 8. Risks
 

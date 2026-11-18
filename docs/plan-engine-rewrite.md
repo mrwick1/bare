@@ -14,7 +14,7 @@ This plan turns `design-engine-rewrite.md` (the design) into pull requests. The 
 - One PR is one concern, at most about 400 changed lines of code (tests not counted). A larger task is split.
 - Every PR runs `cargo test --locked -p <crate>` for the crates that it touches, and the cost rows of the files that it touches (`tools/js/cost_matrix.sh -g`). CI runs the whole workspace.
 - Every PR that changes a number records it in `docs/progress.md`: the machine, the inputs, the run count and the spread. Instruction counts are the minimum of 3 runs. Wall time counts only on an idle machine.
-- Every stage ends with a gate (design section 7) and a learning page in `docs/learn/` that explains the stage in plain words.
+- Every stage ends with a gate (design section 7).
 - The old engine stays the default until S5 passes. `BARE_JS_EXEC=new` selects the new engine.
 - One `Closes #N` per line in a PR body.
 
