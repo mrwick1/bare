@@ -13355,3 +13355,20 @@ Not tested: staging instructions and CPU without `bc-hist`, the typing page, Win
 Checks: 5 unit tests, also under Miri (nightly 2026-11-17), including a pointer round trip that reads the cell. Micro row `crates/js2/examples/value_load.rs` (archMachine, release, `tools/js/instr.sh`, min of 3): 327,816,398 instructions for 10,000,000 values and 315,465 for none, so 32.7 instructions per value for one encode and one decode of mixed kinds, with the loop and the checksum.
 
 Not measured: the same row on today's 16-byte `Value`, arm64.
+
+## 2026-11-18: size-class block allocator (plan step S1.3)
+
+`bare-js2` has the allocator of its heap (`crates/js2/src/heap.rs`, design 6.10 item 15). A block is 64 KiB, aligned to its size, and comes from the new `bare_os::pages` module (`mmap` on Unix, `VirtualAlloc` on Windows, `std::alloc` under Miri). The block header holds the cell size and one mark bit per cell, so a mark finds its bit from the cell address with no table. A request of at most 8,192 bytes takes a cell of the smallest of 16 size classes. Each class has a free list through its free cells. A larger request gets a mapping of its own. Small blocks are swept lazily: a block is swept when its class next needs cells. A block with no live cell goes to a pool of 4 blocks; the rest go back to the OS. A block above the 48-bit address limit is given back, and the allocation fails.
+
+Checks: 5 heap tests and 1 `pages` test, all 10 `bare-js2` tests also under Miri (nightly 2026-11-17). `cargo xwin check -p bare-os -p bare-js2` for `x86_64-pc-windows-msvc` passes. Miri warns once about the integer-to-pointer cast in `Value::as_pointer`. This is expected with exposed provenance, and the test passes.
+
+Micro row `crates/js2/examples/heap_load.rs` (archMachine, release, `tools/js/instr.sh`, min of 3): 10,000,000 allocations of 32 bytes in rounds of 100,000; after each round a collection keeps the last 1,000 cells. The `malloc` row runs the same pattern with `Box`.
+
+| Row | Instructions (10 M) | Per allocation | Peak RSS (3 runs) |
+| --- | ---: | ---: | --- |
+| heap | 211,217,586 | 21.1 | 12,016 to 12,344 KiB |
+| malloc | 2,049,041,388 | 204.9 | 12,256 to 12,344 KiB |
+
+The heap row includes the mark of the kept cells and the lazy sweep. The heap keeps 3,276,800 bytes mapped (50 blocks) at the end. The peak RSS of both rows is mostly the 100,000-entry round vector and the process.
+
+Not measured: Windows and arm64 runs, a heap of mixed sizes, the cost of `start_mark` on a large heap.

@@ -149,6 +149,9 @@ dependencies = [
 [[package]]
 name = "bare-js2"
 version = "0.1.0"
+dependencies = [
+ "bare-os",
+]
 
 [[package]]
 name = "bare-layout"
