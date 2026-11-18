@@ -1406,6 +1406,13 @@ impl Browser {
         self.dom.editable(node)
     }
 
+    /// The kind of `node` when it is a date or time `<input>` (`date`, `month`, `week`, `time`, `datetime-local`) that the user can edit.
+    pub fn date_kind(&self, node: NodeId) -> Option<&'static str> {
+        let doc = self.dom.doc.borrow();
+        let kind = is_tag(&doc, node, "input").then(|| nd::input_kind(&doc, node))?;
+        (matches!(kind, "date" | "month" | "week" | "time" | "datetime-local") && attr(&doc, node, "readonly").is_none()).then_some(kind)
+    }
+
     /// Does `node` have a child node?
     pub fn has_children(&self, node: NodeId) -> bool {
         self.dom.doc.borrow().children(node).next().is_some()

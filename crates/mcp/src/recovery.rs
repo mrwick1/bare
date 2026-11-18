@@ -59,7 +59,7 @@ pub fn next_action(code: &str) -> &'static str {
         "duplicate" | "not_editable" | "no_focus" | "focus_lost" => "refine_target",
         "covered" => "dismiss_overlay",
         "disabled" => "wait_for_condition",
-        "invalid_arguments" | "unknown_tool" => "correct_arguments",
+        "invalid_arguments" | "unknown_tool" | "malformed_value" => "correct_arguments",
         "missing_session" => "open_session",
         "not_found" | "hidden" | "expect" => "inspect_page",
         // page, cookie, state, shot and the fallback: the driver has no more specific fact, so look at the console and the network.

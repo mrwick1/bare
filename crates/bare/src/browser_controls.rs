@@ -19,7 +19,8 @@
 //!   The text of the e-mail messages follows Chrome (missing `@`, incomplete part, wrong symbol, wrong dot, else "Please enter an email
 //!   address."). `title` does not change the pattern message in Chrome, so it does not here.
 //! - Value sanitization (`sanitize`): text, search, tel and password lose line breaks; url and email also lose the white space at both ends
-//!   (`multiple` e-mail: around each address); a number that is not a valid floating-point number is the empty string. It runs for the `value`
+//!   (`multiple` e-mail: around each address); a number that is not a valid floating-point number is the empty string, and so is a date,
+//!   month, week, time or local date and time that is not valid (a valid local date and time takes its normalized form). It runs for the `value`
 //!   setter and for the `value` attribute that a clean input shows. The text that a user types is not sanitized.
 //! - `labels` (a live `NodeList`, one object for each control; `null` for a `hidden` input), `HTMLLabelElement` with `control`, `htmlFor` and
 //!   `form`. The label and its control are found by the HTML rules (`for` names the first element with that ID of the label's tree; else the
@@ -108,6 +109,79 @@ fn valid_float(s: &str) -> Option<f64> {
     if i != b.len() { None } else { s.parse::<f64>().ok().filter(|v| v.is_finite()) }
 }
 
+/// `n` ASCII digits at the start of `s`: their number and the rest.
+fn digits_of(s: &str, n: usize) -> Option<(u32, &str)> {
+    let d = s.get(..n)?;
+    if !d.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some((d.parse().ok()?, &s[n..]))
+}
+
+fn leap(y: u32) -> bool {
+    y % 4 == 0 && (y % 100 != 0 || y % 400 == 0)
+}
+
+/// A valid month string at the start of `s` (a year of four or more digits above zero, `-`, a month): the year, the month and the rest.
+fn month_of(s: &str) -> Option<(u32, u32, &str)> {
+    let n = s.bytes().take_while(u8::is_ascii_digit).count();
+    let (y, s) = if n >= 4 { digits_of(s, n)? } else { return None };
+    let (m, s) = digits_of(s.strip_prefix('-')?, 2)?;
+    (y > 0 && (1..=12).contains(&m)).then_some((y, m, s))
+}
+
+/// A valid date string at the start of `s`: the rest.
+fn date_of(s: &str) -> Option<&str> {
+    let (y, m, s) = month_of(s)?;
+    let (d, s) = digits_of(s.strip_prefix('-')?, 2)?;
+    let last = match m {
+        2 => 28 + u32::from(leap(y)),
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    (1..=last).contains(&d).then_some(s)
+}
+
+/// A valid week string. A year has 53 weeks when it starts on a Thursday, or on a Wednesday in a leap year.
+fn valid_week(s: &str) -> bool {
+    let n = s.bytes().take_while(u8::is_ascii_digit).count();
+    let Some((y, s)) = (n >= 4).then(|| digits_of(s, n)).flatten() else { return false };
+    let Some((w, rest)) = s.strip_prefix("-W").and_then(|s| digits_of(s, 2)) else { return false };
+    let p = y.wrapping_sub(1);
+    // The day of the week of January 1 (0 is Sunday), by Gauss.
+    let jan1 = (1 + 5 * (p % 4) + 4 * (p % 100) + 6 * (p % 400)) % 7;
+    let last = if jan1 == 4 || (jan1 == 3 && leap(y)) { 53 } else { 52 };
+    y > 0 && rest.is_empty() && (1..=last).contains(&w)
+}
+
+/// A valid time string at the start of `s`: its normalized form (the seconds and the fraction only when they are not zero) and the rest.
+fn time_of(s: &str) -> Option<(String, &str)> {
+    let (h, s) = digits_of(s, 2)?;
+    let (m, mut s) = digits_of(s.strip_prefix(':')?, 2)?;
+    if h > 23 || m > 59 {
+        return None;
+    }
+    let (mut sec, mut frac) = (0, "");
+    if let Some(r) = s.strip_prefix(':') {
+        (sec, s) = digits_of(r, 2).filter(|&(v, _)| v <= 59)?;
+        if let Some(r) = s.strip_prefix('.') {
+            let n = r.bytes().take_while(u8::is_ascii_digit).count();
+            if !(1..=3).contains(&n) {
+                return None;
+            }
+            (frac, s) = (r[..n].trim_end_matches('0'), &r[n..]);
+        }
+    }
+    let mut out = format!("{h:02}:{m:02}");
+    if sec != 0 || !frac.is_empty() {
+        out += &format!(":{sec:02}");
+    }
+    if !frac.is_empty() {
+        out = out + "." + frac;
+    }
+    Some((out, s))
+}
+
 /// The value sanitization algorithm of an input of `kind`.
 pub(crate) fn sanitize<'a>(kind: &str, multiple: bool, s: &'a str) -> Cow<'a, str> {
     match kind {
@@ -122,6 +196,22 @@ pub(crate) fn sanitize<'a>(kind: &str, multiple: bool, s: &'a str) -> Cow<'a, st
             Cow::Owned(o) => Cow::Owned(o.trim_matches(blank).to_string()),
         },
         "number" if valid_float(s).is_none() => Cow::Borrowed(""),
+        "date" if date_of(s) != Some("") => Cow::Borrowed(""),
+        "month" if !month_of(s).is_some_and(|(_, _, r)| r.is_empty()) => Cow::Borrowed(""),
+        "week" if !valid_week(s) => Cow::Borrowed(""),
+        "time" if !time_of(s).is_some_and(|(_, r)| r.is_empty()) => Cow::Borrowed(""),
+        // A valid local date and time string becomes its normalized form: `T`, and the shortest time.
+        "datetime-local" => {
+            let local = date_of(s).and_then(|r| {
+                let (t, rest) = time_of(r.strip_prefix(['T', ' '])?)?;
+                rest.is_empty().then(|| format!("{}T{t}", &s[..s.len() - r.len()]))
+            });
+            match local {
+                Some(v) if v == s => Cow::Borrowed(s),
+                Some(v) => Cow::Owned(v),
+                None => Cow::Borrowed(""),
+            }
+        }
         _ => Cow::Borrowed(s),
     }
 }
@@ -909,6 +999,35 @@ mod tests {
         assert_eq!(sanitize("email", true, " a@b , c@d "), "a@b,c@d");
         for (v, ok) in [("5", true), (".5", true), ("-.5", true), ("1e5", true), ("5.", false), ("+5", false), ("1e", false), ("1e400", false), ] {
             assert_eq!(sanitize("number", false, v) == v, ok, "{v:?}");
+        }
+    }
+
+    #[test]
+    fn date_and_time_values_are_valid_or_empty() {
+        for (kind, v, want) in [
+            ("date", "2026-11-18", "2026-11-18"),
+            ("date", "2024-02-29", "2024-02-29"),
+            ("date", "2026-02-29", ""),
+            ("date", "2026-11-31", ""),
+            ("date", "26-11-18", ""),
+            ("date", "0000-01-01", ""),
+            ("date", "11/18/2026", ""),
+            ("month", "2026-11", "2026-11"),
+            ("month", "2026-13", ""),
+            ("week", "2026-W53", "2026-W53"),
+            ("week", "2025-W53", ""),
+            ("week", "2026-W00", ""),
+            ("time", "10:30", "10:30"),
+            ("time", "10:30:00.500", "10:30:00.500"),
+            ("time", "24:00", ""),
+            ("time", "10:30:00.1234", ""),
+            ("datetime-local", "2026-11-18T10:30", "2026-11-18T10:30"),
+            ("datetime-local", "2026-11-18 10:30:00", "2026-11-18T10:30"),
+            ("datetime-local", "2026-11-18T10:30:05.500", "2026-11-18T10:30:05.5"),
+            ("datetime-local", "2026-11-18", ""),
+            ("datetime-local", "111820261030", ""),
+        ] {
+            assert_eq!(sanitize(kind, false, v), want, "{kind} {v:?}");
         }
     }
 

@@ -313,6 +313,16 @@ impl Browser {
         })
     }
 
+    /// The value of a date or time `<input>`, set at once: then `input` and `change` fire, as for a pick in the date picker.
+    pub fn drive_value(&mut self, node: NodeId, value: String) -> R<UiOutcome> {
+        self.ui_call(true, |d, it| {
+            d.put_input_value(Some(it), node, value)?;
+            d.fire_plain(it, node, "input")?;
+            d.fire_plain(it, node, "change")?;
+            Ok(())
+        })
+    }
+
     /// Typed text in a text `<input>` or a `<textarea>`. See the header.
     pub fn drive_type(&mut self, node: NodeId, text: &str) -> R<UiOutcome> {
         let host = self.is_editing_host(node);
