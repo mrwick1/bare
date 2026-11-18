@@ -1,6 +1,6 @@
 # Design: references that the host holds for an object
 
-Status: proposal for owner review (plan step S0.4, before the events PR). No code is built.
+Status: decided by the owner, 2026-11-19 (plan step S0.4, before the events PR). See "Decisions" at the end.
 
 ## Problem
 
@@ -109,3 +109,9 @@ Rules:
 1. Option A, B or C?
 2. The key: a host number (proposed), or the engine object itself? A host number lets the host index its tables directly; an object key needs a hash map in the host, as today.
 3. Debug check of unvisited `Traced` references: in the S0.x stress mode only (proposed), or in every debug build?
+
+## Decisions (owner, 2026-11-19)
+
+1. Option A: traced references and a tracer for each owner.
+2. The key is a host number, given with `set_host_owner`.
+3. The check for unvisited `Traced` references runs in the S0.x stress mode only.
