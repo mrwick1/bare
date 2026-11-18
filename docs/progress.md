@@ -13323,6 +13323,25 @@ Not tested: windowed runs (paint), the RSS cost of `auto` by part, the mode A/B 
 - Check: on archMachine, 80 rows against the scratch run of the same day (`docs/research-quickjs-reference.md`): all Bare rows within 0.1%; QuickJS and Node within 2.5%, except one effect below.
 - Found: on QuickJS, `throws` moved from 85 M to 99 M instructions with the length of the script path (each `Error` stack holds the file name; 8 path lengths from 34 to 73 characters gave 85.3 M to 98.9 M). The tool runs QuickJS and Node in the script's directory with a relative name, so the count does not depend on `$BARE_TMP`. With it, `throws` 10 is 871.7 M, as in the reference.
 
+## 2026-11-18: scope hop histogram (plan step P0.3)
+
+The `bc-hist` feature now counts each `GetEnv` by its hop count. It also counts the hop-0 reads in functions whose locals stay in the environment only because `rfc_analyze` met a lazy inner function (`w.lazy_inner`, `bc_gen_rf.rs`). That count is an upper bound: a variable that an inner function names stays in the environment anyway.
+
+Staging journey (archMachine, `BARE_JS_EXEC=auto`, release with `bc-hist`, one run, 4 realms summed): 68,216,179 ops on the lane, 8,439,665 of them `GetEnv` (12.4%).
+
+| Hops | `GetEnv` runs | Share |
+| ---: | ---: | ---: |
+| 0 | 7,434,670 | 88.09% |
+| 1 | 561,016 | 6.65% |
+| 2 | 291,217 | 3.45% |
+| 3 | 128,479 | 1.52% |
+| 4 | 21,742 | 0.26% |
+| 5 to 7 | 2,541 | 0.03% |
+
+- 88% of the reads are of the function's own environment. Deep chains are rare: 0.29% of reads go 4 or more hops.
+- 3,824,240 hop-0 reads (51.4% of hop 0, 5.6% of all ops) are in functions that a lazy inner function keeps in the environment. Hypothesis: most of these can be registers once the first parse records which names each lazy function uses (design 6.3).
+
+Not tested: other journeys, the typing page, more than one run.
 ## 2026-11-18: host interface inventory (plan step S0.1)
 
 `docs/design-host-interface.md` lists what the browser uses of `bare-js`, grouped by kind: values, the realm, objects and properties, host functions, lazy wrappers, promises and microtasks, modules, binary data and clone, the collector contract, and limits. 219 files of `crates/bare` name `bare_js` (91 of them tests); `drive` uses 5 items; `mcp` none. The browser calls `it.heap` directly at 221 sites through 63 `Heap` methods. The page ends with six questions for S0.2. It waits for the owner's review.
