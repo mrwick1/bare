@@ -19,7 +19,7 @@ The plan: `offstage` becomes the only way an agent reaches `bare`, `deck` includ
 ### Change bare-mcp with both users in mind
 
 - A change to a `bare-mcp` tool, its arguments or its results reaches `deck` at once, and reaches `offstage` at the next `bare` release. Check both before you merge.
-- `offstage` installs the newest release. A release reaches every `offstage` user at the next install or update.
+- `offstage` installs the newest release. A release reaches every `offstage` user at the next install or update. The `gate` job of `release.yml` runs the offstage browser test (`TestBareBrowser`, offstage `beta`) against the new Linux amd64 binaries. The release is published only when it passes.
 - `bare-mcp` has no issue route and no host-specific option. The host (`offstage` or `deck`) gives its agent the rule for where to report problems, and places any window through `WAYLAND_DISPLAY`.
 
 ## Status
