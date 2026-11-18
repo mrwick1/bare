@@ -13130,4 +13130,5 @@ Step 1 and 2 of `docs/design-gmail-frames.md`. A transfer list now works for `Me
   - Over +0.5% under both allocators: `dataset_load keys 10000 50` (+0.616% glibc, +0.617% jemalloc) and `dataset_load keys 1000 50` (+0.581%, +0.580%). Other `dataset_load keys` rows: +0.18% and +0.30%.
   - `parse_load deep 1` and `parse_load deep 10` fail to run (stack overflow). They fail the same way on the base build.
   - Cause of the dataset rows: the codegen-unit split of `bare`, not new work. No changed code is on that path. A profile of both builds with symbols shows `Heap::exotic_own` and `Heap::define_own_property` inlined differently. With `RUSTFLAGS="-C codegen-units=1"` both trees give the same count (arjun-e16, minimum of 3 runs, glibc): `keys 1000 50` 345,601,615 base and 345,603,418 new (+0.0005%); `keys 10000 50` 3,241,706,567 and 3,241,710,148 (+0.0001%).
+  - The owner grants a cost exception for these 2 rows (2026-11-18). The reason: the codegen-unit split, not new work.
 - Not tested: wall time, peak memory, a transfer to another heap (no later step exists yet), GC with a moved port across a `collect`, a live Gmail account menu.
