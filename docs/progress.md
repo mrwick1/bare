@@ -13343,6 +13343,23 @@ Not tested: per-task survival, other journeys, the e16 machine.
 - Check: on archMachine, 80 rows against the scratch run of the same day (`docs/research-quickjs-reference.md`): all Bare rows within 0.1%; QuickJS and Node within 2.5%, except one effect below.
 - Found: on QuickJS, `throws` moved from 85 M to 99 M instructions with the length of the script path (each `Error` stack holds the file name; 8 path lengths from 34 to 73 characters gave 85.3 M to 98.9 M). The tool runs QuickJS and Node in the script's directory with a relative name, so the count does not depend on `$BARE_TMP`. With it, `throws` 10 is 871.7 M, as in the reference.
 
+## 2026-11-18: effect context for `&&`, `||`, `?:` and comma (plan step P0.5)
+
+An expression whose value nobody reads (`expr_void`) now compiles `a && b`, `a || b` and `c ? x : y` as a test and jumps. Each compare in the test is one fused op (`jump_cond`), and the parts that run keep no value either. In a comma expression, the parts before the last are `expr_void` too. Before, `a === 1 && f()` as a statement computed the compare into a register (`StrictEq`), then jumped on it (`JmpIfNot`). The golden listing `sequence` changes one temporary register; the op count is the same.
+
+Staging journey with `bc-hist` (archMachine, `auto`, 2 runs each, all `ok`; base is main with the P0.3 counters):
+
+| Build | Lane ops | Compare then `JmpIf`/`JmpIfNot` (top 40 pairs) |
+| --- | ---: | ---: |
+| base | 78.6 M, 79.3 M | 1.91%, 1.93% |
+| P0.5 | 77.1 M, 76.5 M | 0.00%, 0.00% |
+
+- Lane ops fall by about 2.8% (live pages: the spread between runs of one build is up to 1.8%).
+- No compare and jump pair is left among the 40 most common pairs.
+
+Cost rows (`tools/js/instr.sh`, `eval_load` at scale 10, `auto`, base main): every case within ±0.01%.
+
+P0.4 (8.5%) and P0.5 (2.8%) together remove about 11% of the lane ops on the staging journey with two small changes to the code generator. This supports the design's view that the compiler can remove a large share of ops (design 6.11). Not measured: the two together, staging instructions without `bc-hist`, the typing page, Windows.
 ## 2026-11-18: new engine crate (plan step S1.1)
 
 A new crate `crates/js2` (`bare-js2`) holds the new engine. It runs no scripts yet. `BARE_JS_EXEC=new` stops the browser with exit code 2 and the message `BARE_JS_EXEC=new: the new JavaScript engine (bare-js2) cannot run scripts yet; use BARE_JS_EXEC=tree, auto or byte`. The crate denies `unsafe` code; stage S1 allows it in the `value` and `heap` modules only. A new CI job `miri` runs `cargo miri test -p bare-js2` on nightly. It ran locally on nightly 2026-11-17 (0 tests).
