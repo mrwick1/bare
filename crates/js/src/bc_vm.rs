@@ -264,7 +264,7 @@ impl<'p> Interp<'p> {
             kv: kv.into(),
             cells: cells.into(),
             #[cfg(feature = "bc-hist")]
-            hist: Default::default(),
+            hist: (Default::default(), Default::default(), std::mem::take(&mut self.bc.lazy_env)),
         });
         #[cfg(feature = "bc-hist")]
         self.bc.hist.funcs.push((0, 0, "<script>".into(), rc.clone()));

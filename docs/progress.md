@@ -13273,6 +13273,26 @@ JS engine mode on the journey (3 runs each, mean, range):
 
 Not tested: windowed runs (paint), the RSS cost of `auto` by part, the mode A/B on other journeys, wall time on an idle machine.
 
+## 2026-11-18: collector counters (plan step P0.2)
+
+`BARE_JS_STATS=1` now prints one `gcstats` line per realm when the realm ends: collections, young objects (made since the last collect), young objects that survived their first collect, and `task_alloc_max` (the largest heap growth between two safe points, that is one task). These numbers size the young space and the in-task trigger of the hybrid collector (design section 10, Q11).
+
+Cost (`tools/js/instr.sh`, `BARE_JS_EXEC=auto`, `eval_load`, base `d89f0299`): objects 10 +0.010%, closures 10 +0.026%, throws 10 +0.046% instructions.
+
+Typing page (`type_load /data/bare-tmp/jit-page '#a1' 50`, `auto`, 3 runs, the same each time): 13 collections, 438,033 young objects, 96,567 kept (22.0%), `task_alloc_max` 4,388,944 B (4.19 MiB).
+
+Staging journey (archMachine, `auto`, 3 runs, all `ok`, 4 realms each):
+
+| Run | Collections | Young objects | Kept | Survival | Largest task |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | 20 | 814,994 | 262,015 | 32.2% | 4,227,240 B |
+| 2 | 21 | 838,012 | 270,910 | 32.3% | 4,227,240 B |
+| 3 | 18 | 727,376 | 247,451 | 34.0% | 4,222,208 B |
+
+- Between 22% and 34% of young objects survive their first collect. That is high for a young generation: V8 and others plan for about 10% or less. Hypothesis: one collect covers many tasks, so objects that live for a few tasks count as kept. A per-task count would split them.
+- No task on these workloads grows the heap by more than 4.2 MiB. An in-task trigger at a few MiB would rarely fire here; it matters for loops like `eval_load throws`.
+
+Not tested: per-task survival, other journeys, the e16 machine.
 ## Engine rewrite design: two rounds of a four-model review (2026-11-18)
 
 - Design: `docs/design-engine-rewrite.md` (PR #681). Reviewers: Claude Sonnet 5.5, Claude Opus 5.5, GPT-6.2 Sol and GPT-6.2 Astra, high effort, one brief on data structures and algorithms for resource use. Static review; no builds or journeys ran.
@@ -13340,6 +13360,25 @@ Staging journey with `bc-hist` (archMachine, `auto`, 2 runs each, all `ok`; base
 Cost rows (`tools/js/instr.sh`, `eval_load` at scale 10, `auto`, base main): every case within ±0.01%.
 
 P0.4 (8.5%) and P0.5 (2.8%) together remove about 11% of the lane ops on the staging journey with two small changes to the code generator. This supports the design's view that the compiler can remove a large share of ops (design 6.11). Not measured: the two together, staging instructions without `bc-hist`, the typing page, Windows.
+## 2026-11-18: scope hop histogram (plan step P0.3)
+
+The `bc-hist` feature now counts each `GetEnv` by its hop count. It also counts the hop-0 reads in functions whose locals stay in the environment only because `rfc_analyze` met a lazy inner function (`w.lazy_inner`, `bc_gen_rf.rs`). That count is an upper bound: a variable that an inner function names stays in the environment anyway.
+
+Staging journey (archMachine, `BARE_JS_EXEC=auto`, release with `bc-hist`, one run, 4 realms summed): 68,216,179 ops on the lane, 8,439,665 of them `GetEnv` (12.4%).
+
+| Hops | `GetEnv` runs | Share |
+| ---: | ---: | ---: |
+| 0 | 7,434,670 | 88.09% |
+| 1 | 561,016 | 6.65% |
+| 2 | 291,217 | 3.45% |
+| 3 | 128,479 | 1.52% |
+| 4 | 21,742 | 0.26% |
+| 5 to 7 | 2,541 | 0.03% |
+
+- 88% of the reads are of the function's own environment. Deep chains are rare: 0.29% of reads go 4 or more hops.
+- 3,824,240 hop-0 reads (51.4% of hop 0, 5.6% of all ops) are in functions that a lazy inner function keeps in the environment. Hypothesis: most of these can be registers once the first parse records which names each lazy function uses (design 6.3).
+
+Not tested: other journeys, the typing page, more than one run.
 ## 2026-11-18: host interface inventory (plan step S0.1)
 
 `docs/design-host-interface.md` lists what the browser uses of `bare-js`, grouped by kind: values, the realm, objects and properties, host functions, lazy wrappers, promises and microtasks, modules, binary data and clone, the collector contract, and limits. 219 files of `crates/bare` name `bare_js` (91 of them tests); `drive` uses 5 items; `mcp` none. The browser calls `it.heap` directly at 221 sites through 63 `Heap` methods. The page ends with six questions for S0.2. It waits for the owner's review.
@@ -13361,3 +13400,11 @@ Staging journey with `bc-hist` (archMachine, `auto`, 2 runs each, all `ok`; base
 Cost rows (`tools/js/instr.sh`, `eval_load` at scale 10, `auto`, base main): every case within ±0.11% (`webpack` −0.11%). These programs seldom put a constant on the left.
 
 Not tested: staging instructions and CPU without `bc-hist`, the typing page, Windows.
+
+## 2026-11-18: host interface crate (plan step S0.2)
+
+A new crate `crates/js-api` (`bare-js-api`) holds the interface between the browser and an engine. It has no engine code. The browser will be generic over its `Engine` trait, and a session picks the engine when it starts (owner decision, 2026-11-18). The host holds handles, not values: a `Local` (a slot in the handle stack of a `Scope`) or a `Persistent` (a slot in a table of the realm). A method that takes `&mut Scope` may collect; a method that takes `&Scope` never does. The decisions on the six questions of S0.1 are in `docs/design-host-interface.md`.
+
+Checks: 4 unit tests with a toy engine (scope pops, escape of a value or an exception, persistent handles, arguments) and 5 doc tests. 4 of the doc tests must fail to compile, each with its error code: a local that leaves its scope (E0521), an inner local kept in the outer scope (E0521), a string borrow held across a call (E0502), and a released persistent handle (E0382). Clippy is clean. The 4 unit tests also pass on the Windows 11 VM (`cargo xwin test --target x86_64-pc-windows-msvc`).
+
+Not done: no engine implements the trait yet (S0.3), so no instruction numbers.

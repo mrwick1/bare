@@ -21,6 +21,10 @@ impl<'p> Interp<'p> {
             && !f.is_generator()
             && self.cc.cold.fflags[fid.index()] == 0
             && fs.flags & (BF_ARGS | BF_NEW_TARGET | BF_DERIVED | BF_IN_CLASS | BF_SELF_NAME) == 0;
+        #[cfg(feature = "bc-hist")]
+        {
+            self.bc.lazy_env = false;
+        }
         if !ok {
             return None;
         }
@@ -52,6 +56,10 @@ impl<'p> Interp<'p> {
         let w = self.bc_walk(Some(fid), fs.scope);
         // A lazy inner function can name any variable: they all stay in the environment (stage 1).
         if w.bad.is_some() || w.lazy_inner {
+            #[cfg(feature = "bc-hist")]
+            {
+                self.bc.lazy_env = w.bad.is_none();
+            }
             return None;
         }
         let own: std::collections::HashSet<u32> = std::iter::once(fs.scope).chain(w.stmts.iter().map(|&(_, s)| s)).collect();
@@ -68,6 +76,10 @@ impl<'p> Interp<'p> {
         while let Some((f, isc)) = todo.pop() {
             let iw = self.bc_walk(Some(f), isc);
             if iw.bad.is_some() || iw.lazy_inner {
+                #[cfg(feature = "bc-hist")]
+                {
+                    self.bc.lazy_env = iw.bad.is_none();
+                }
                 return None;
             }
             todo.extend(iw.funcs);
