@@ -2434,3 +2434,14 @@ Step 3a of `docs/design-gmail-frames.md`. An iframe with an http(s) `src` loads 
 - Window: `contentWindow`, and `parent` and `top` in a child, are `RemoteWindow` objects: a `Proxy` over a target that holds the cross-origin window API. Other keys throw `SecurityError`. `postMessage` does nothing yet (3b).
 - Proxy creation: `Heap::new_proxy` alone does not prepare the engine to find the traps (`ProxyState::ready` is set in `proxy_create`). A host function cannot `new Proxy`. So `RemoteWindow` calls `Proxy.revocable`. The cost is one small object for each window.
 - Bounds: 64 child pages in all and depth 8 (`BrowserLimits::max_child_pages`, `max_child_depth`). An iframe over a bound stays empty, with one console warning.
+
+## Messages between a page and its child pages (2026-11-18)
+
+Step 3b of `docs/design-gmail-frames.md`. `postMessage` on a `RemoteWindow` sends a message to the other page. Code: `browser_child.rs`, `browser_remote_window.rs`, `browser_scheduler.rs`.
+
+- Routing through the driver: the sender clones the message with `clone_state_with` and puts a heap-free record in the outbox of its own `Dom`. The driver of the parent (`kids_turn`) moves it. It moves the parent's messages into a child before the turn of that child, and drains the outbox of a child after its turn. So only one `Browser` is borrowed at a time, and no object lives in two heaps.
+- Origin check at delivery: the sender stores the target origin ("/" becomes the sender origin). The target page compares it with its own document origin when the message arrives. A page that navigated meanwhile therefore does not get a message for the old origin. This is the rule of the Standard.
+- Dropped: a message to a child that still loads or is empty (a browser posts it to the initial blank document, which is replaced), and a message with a target origin that does not match. Both drop with no error and no diagnostic.
+- Ports: a `MessagePort` in the transfer list of a message to another page drops the message, with one console warning in the sender. The check runs before the clone, so no port is parked and no buffer is detached. Step 3c moves ports. `ArrayBuffer`s move.
+- `source`: in the parent, the `RemoteWindow` of the child (made if no script read it yet). In a child, its `parent` window. For a message from a grandchild to the top page, `source` is null, because the top page has no window object for a grandchild. The message goes up one level in each turn.
+- Cost: `Msg` and `MsgEvent` hold an optional boxed sender (origin and window). A message of the own window pays one `None`. A page without children has an empty outbox and runs no new code on the round loop.

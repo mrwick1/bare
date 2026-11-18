@@ -2,7 +2,7 @@
 //!
 //! One child page = one `Browser`: its own heap, DOM, timers and `fetch` queue, on the same thread as its parent. The parent holds it,
 //! keyed by the iframe node. There is no object that both pages share. `RemoteWindow` (`browser_remote_window.rs`) is the only link a
-//! script sees. Messages between pages are step 3b, ports across pages 3c.
+//! script sees. Messages between pages work since step 3b ("Messages" below). Ports across pages are step 3c.
 //!
 //! Which frames. An iframe that is connected and has a `src` that resolves to an http(s) URL other than `about:blank` gets a child page at
 //! once (rule "eager, after parent work"). It does not matter if the frame is hidden, 0x0, or of the same origin. A frame with no `src`, an
@@ -31,6 +31,17 @@
 //! parsed page, then the order of insertion), depth first.
 //! A turn of a child that waits for a network reply blocks the parent in this turn (the same as the parent does when it is not live).
 //!
+//! Messages. `postMessage` on a `RemoteWindow` clones the message in the sender and puts it in the outbox of the sender's `Dom`
+//! (`Kids::outbox`: target side, target origin, sender origin, a heap-free `State`, the transfer list as data). The driver moves it, so
+//! no object crosses a heap. Before a child's turn, the parent moves its messages for that child into it. After the turn, the parent
+//! drains the outbox of the child: a message for `Parent` is delivered in this page, with the window of the child as `source`. A message
+//! for `Top` is delivered here when this page is the top page, with `source` null (the top page has no window for a grandchild), else it
+//! goes up one level in the outbox of this page. Delivery checks the target origin against the origin of the target document ("*"
+//! matches all, a mismatch drops the message), builds the clone in the target heap and queues one `message` event as `post_window` does,
+//! charged `16 + bytes`. `source` is the window of the sender in the target heap, and it is a GC root while the message is queued. A
+//! message for a child that loads or is empty is dropped. Each moved message counts as `Turn::work`, so the parent does not settle with
+//! a message in flight. A `MessagePort` in the transfer list of a message to another page drops the message (step 3c).
+//!
 //! Load events. The iframe element gets `load` in the parent when the child's own `load` event has run (or when its load failed). The
 //! `load` of the parent window waits for the children that exist at that time (`Kids::loaded`). A frame added after the parent's `load`
 //! does not hold it.
@@ -56,14 +67,16 @@ use crate::browser::{Browser, BrowserLimits, Dom};
 use crate::browser_console::ConsoleLevel;
 use crate::browser_fetch::FetchLimits;
 use crate::browser_loader::{PageConfig, PageLimits, Stop, deadline_after, label};
+use crate::browser::R;
 use crate::browser_remote_window::{Common, Side, Win};
+use crate::browser_scheduler::Sender;
 use crate::browser_session::{SessionLimits, load_document};
 use crate::downloads::{Downloads, Grab};
 use bare_html::dom::{Document, NodeId};
 use bare_html::tree;
 use bare_js::eval::{EvalLimits, Interp};
 use bare_js::heap::HeapLimits;
-use bare_js::value::ObjId;
+use bare_js::value::{ObjId, Value};
 use bare_net::http::Client;
 use bare_net::parallel::Task;
 use bare_url::Url;
@@ -137,6 +150,17 @@ struct Child {
     site: Option<String>,
 }
 
+/// A message that a script of this page posted to a window of another page, until the driver moves it (`Kids::outbox`).
+pub(crate) struct Out {
+    pub to: Side,
+    /// "*", or the origin that the target document must have ("/" is the origin of this page).
+    pub target_origin: String,
+    /// The origin of this page, for the `origin` of the event.
+    pub origin: String,
+    pub state: crate::browser_navigation_state::State,
+    pub transfer: Vec<crate::browser_navigation_state::Transfer>,
+}
+
 /// The children of one page: the slots (what a script sees), the states (what the driver runs), and the windows.
 #[derive(Default)]
 pub(crate) struct Kids {
@@ -145,6 +169,8 @@ pub(crate) struct Kids {
     slots: RefCell<Vec<Option<Slot>>>,
     kids: RefCell<Vec<Option<Child>>>,
     wins: RefCell<HashMap<ObjId, Win>>,
+    /// Messages to other pages, in post order.
+    outbox: RefCell<Vec<Out>>,
     pub(crate) common: Cell<Option<Common>>,
     /// This page is a child page: a round of `run_page` returns after one pass and never waits.
     pub(crate) poll: Cell<bool>,
@@ -204,6 +230,27 @@ impl Kids {
 
     pub(crate) fn add_win(&self, target: ObjId, w: Win) {
         self.wins.borrow_mut().insert(target, w);
+    }
+
+    pub(crate) fn send(&self, m: Out) {
+        self.outbox.borrow_mut().push(m);
+    }
+
+    pub(crate) fn outbox_len(&self) -> usize {
+        self.outbox.borrow().len()
+    }
+
+    /// Take the messages of the outbox for which `f` is true, in order.
+    fn take_out(&self, f: impl Fn(&Out) -> bool) -> Vec<Out> {
+        let mut out = self.outbox.borrow_mut();
+        let (take, keep) = std::mem::take(&mut *out).into_iter().partition(|m| f(m));
+        *out = keep;
+        take
+    }
+
+    /// The window of `side` in this heap, if a script or the setup made it.
+    fn proxy_of(&self, side: Side) -> Option<ObjId> {
+        self.wins.borrow().values().find(|w| w.side == side && !w.location).map(|w| w.proxy)
     }
 
     /// The target of the window `proxy` (not of its location).
@@ -450,6 +497,7 @@ impl Browser {
         for i in 0..n {
             let Some(mut ch) = self.dom.kids.kids.borrow_mut().get_mut(i).and_then(|k| k.take()) else { continue };
             let Some(node) = self.dom.kids.slots.borrow().get(i).and_then(|s| s.as_ref()).map(|s| s.node) else { continue };
+            let down = if self.dom.kids.outbox_len() > 0 { self.dom.kids.take_out(|m| m.to == Side::Child(i as FrameId)) } else { Vec::new() };
             let fail = |ch: &mut Child, t: &mut Turn, why: String| {
                 t.diags.push(format!("frame {}: {why}", ch.label));
                 if !ch.notified {
@@ -477,6 +525,13 @@ impl Browser {
                     }
                 }
                 State::Run(mut b) => {
+                    let parent = b.dom.kids.proxy_of(Side::Parent);
+                    for m in down {
+                        t.work += 1;
+                        if let Err(e) = b.it.host_scope(|it| b.dom.deliver(it, m, parent)) {
+                            t.diags.push(format!("frame {}: a message was dropped: {e:?}", ch.label));
+                        }
+                    }
                     let url = b.document_url().unwrap_or_default();
                     let ready = b.ready_level();
                     if advance && self.uses_virtual_clock() {
@@ -505,6 +560,12 @@ impl Browser {
                         t.diags.push(format!("frame {}: {line}", ch.label));
                     }
                     self.take_child_output(&mut b, &ch.label);
+                    if b.dom.kids.outbox_len() > 0 {
+                        for m in b.dom.kids.take_out(|m| !matches!(m.to, Side::Child(_))) {
+                            t.work += 1;
+                            self.route_up(&cfg, i as FrameId, m, &mut t);
+                        }
+                    }
                     match r.stop {
                         Stop::Settled => {
                             if b.loaded() && !ch.notified {
@@ -536,7 +597,34 @@ impl Browser {
                 *slot = Some(ch);
             }
         }
+        // Each live child took its messages above. What is left is for a frame that was removed: drop it.
+        if self.dom.kids.outbox_len() > 0 {
+            drop(self.dom.kids.take_out(|m| matches!(m.to, Side::Child(_))));
+        }
         t
+    }
+
+    /// A message that the child `i` posted to its parent or to the top page. A message for the top page goes up one level in each turn.
+    fn route_up(&mut self, cfg: &Cfg, i: FrameId, m: Out, t: &mut Turn) {
+        if m.to == Side::Top && cfg.depth > 0 {
+            return self.dom.kids.send(m);
+        }
+        // The top page sees only its own children as windows, so a deeper sender has no `source`.
+        let from_child = m.to == Side::Parent;
+        let r = self.it.host_scope(|it| {
+            let source = if from_child {
+                match self.dom.child_window(it, i)? {
+                    Value::Object(o) => Some(o),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            self.dom.deliver(it, m, source)
+        });
+        if let Err(e) = r {
+            t.diags.push(format!("a message was dropped: {e:?}"));
+        }
     }
 
     /// Move the console records and the reports of a child into this page, with the label of the child as their source.
@@ -558,6 +646,17 @@ impl Browser {
 }
 
 impl Dom {
+    /// A message from another page reaches this page: drop it if the target origin does not match, else queue a `message` event for the
+    /// window. `source` is the window of the sender in this heap.
+    fn deliver(&self, it: &mut Interp<'_>, m: Out, source: Option<ObjId>) -> R<()> {
+        if m.target_origin != "*" && m.target_origin != self.window_origin() {
+            return Ok(());
+        }
+        let bytes = 16usize.saturating_add(m.state.bytes);
+        let (data, ports) = crate::browser_navigation_state::materialize_with(self, it, &m.state, m.transfer)?;
+        self.queue_window(data, ports.into_boxed_slice(), bytes, Some(Box::new(Sender { origin: m.origin, source })))
+    }
+
     /// The size of the layout box of `n` in the last layout of this page, if there is one. It never makes a layout.
     pub(crate) fn cached_box_size(&self, n: NodeId) -> Option<(f32, f32)> {
         let shared = self.geometry.shared.borrow();
