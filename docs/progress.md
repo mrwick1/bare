@@ -13272,3 +13272,10 @@ JS engine mode on the journey (3 runs each, mean, range):
 - Profile in `auto`: the JS engine is 71.3% of CPU (run the code 54.6%, collect 9.0%, parse and compile 7.7%). Style is 11.6%. `bc_loop` is the top function at 14.3%.
 
 Not tested: windowed runs (paint), the RSS cost of `auto` by part, the mode A/B on other journeys, wall time on an idle machine.
+
+## Engine comparison tool: Bare, QuickJS and Node on the eval_load cases (2026-11-18)
+
+- `tools/js/engine_compare.py` runs the `eval_load` cases on Bare (`tree`, `auto`, later `new`), QuickJS 2026-06-04 and Node, with and without its JIT. Instructions: minimum of 3 `perf stat` runs. Peak RSS: median of 3 runs through `tools/js/rss_peak.c`. It downloads QuickJS once, checks its SHA-256 and builds it in `$BARE_TMP`.
+- `eval_load CASE SCALE --source` prints the program and its expected result, so every engine runs the same program and every run is checked.
+- Check: on archMachine, 80 rows against the scratch run of the same day (`docs/research-quickjs-reference.md`): all Bare rows within 0.1%; QuickJS and Node within 2.5%, except one effect below.
+- Found: on QuickJS, `throws` moved from 85 M to 99 M instructions with the length of the script path (each `Error` stack holds the file name; 8 path lengths from 34 to 73 characters gave 85.3 M to 98.9 M). The tool runs QuickJS and Node in the script's directory with a relative name, so the count does not depend on `$BARE_TMP`. With it, `throws` 10 is 871.7 M, as in the reference.
