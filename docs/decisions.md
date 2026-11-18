@@ -2420,3 +2420,17 @@ Step 1 and 2 of `docs/design-gmail-frames.md`: `MessagePort`, `window.postMessag
 - Order: the walk first, then the check of every listed item, then the moves. A message that fails to clone moves nothing.
 - A moved port starts disabled, and its listeners stay with the old object. This is the Standard.
 - A message in a port holds `ports: Box<[ObjId]>` (the new objects). That is the one place where the message still holds objects of the heap. It goes away when messages cross heaps.
+
+## A child page for each iframe with an http(s) src (2026-11-18)
+
+Step 3a of `docs/design-gmail-frames.md`. An iframe with an http(s) `src` loads and runs as its own page. Code: `browser_child.rs`, `browser_remote_window.rs`.
+
+- Where children live: the `Dom` of the parent holds the slots (`Kids`: iframe node, URL, window objects). The `Browser` of the parent holds the child `Browser`s in a `Vec<Option<Child>>`, one per slot. A child is taken out of the `Vec` while it runs. So the `Dom` never needs two `Browser` borrows. Each child has its own `Interp`, heap, `Dom` and timers, on the thread of the parent.
+- Load rule (owner): eager, after parent work. The fetch of the child document starts when the iframe is connected. A child runs its tasks only when the parent has no task due now.
+- Both origins are child pages (owner). `contentDocument` stays `null` for a same-origin frame. This differs from Chrome. A live same-origin document needs one heap for two pages (D2 of the design). Blank frames (no `src`, empty `src`, `about:blank`, `srcdoc`) are unchanged. `srcdoc` wins over `src`.
+- Cookie context: `Ctx::Embedded` with the site of the top page, and `Sec-Fetch-Dest: iframe`. It is the closest context that exists. Hypothesis: the top-level `Ctx::Navigation` would send `SameSite=Strict` cookies to a cross-site frame (not tested).
+- Round order: slot order (document order of the first request). Per round, the parent runs first. Then each child runs one turn. Under the virtual clock all pages advance to the same time, and the child clock is the parent clock minus a fixed delta. The same fixture gives the same console order.
+- Settle rule: a page is not settled while a child loads or has a timer or task in the window. The `load` of the iframe fires after the `load` of the child. The `load` of the parent waits for all children. A failed child load leaves the frame empty, fires `load` on the iframe, and adds a diagnostic. It is not fatal.
+- Window: `contentWindow`, and `parent` and `top` in a child, are `RemoteWindow` objects: a `Proxy` over a target that holds the cross-origin window API. Other keys throw `SecurityError`. `postMessage` does nothing yet (3b).
+- Proxy creation: `Heap::new_proxy` alone does not prepare the engine to find the traps (`ProxyState::ready` is set in `proxy_create`). A host function cannot `new Proxy`. So `RemoteWindow` calls `Proxy.revocable`. The cost is one small object for each window.
+- Bounds: 64 child pages in all and depth 8 (`BrowserLimits::max_child_pages`, `max_child_depth`). An iframe over a bound stays empty, with one console warning.

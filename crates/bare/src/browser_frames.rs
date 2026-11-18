@@ -1,6 +1,8 @@
 //! Named access on `Window` (the `WindowProperties` object) and named properties of `Document`, and live named access to inert
-//! iframe windows. No child document is fetched or executed. (A same-origin `src` is asked for only to catch a download:
-//! `Dom::frame_src`.)
+//! iframe windows. A blank frame has a document of its own that shares the parent realm. An iframe with an http(s) `src` is a child page
+//! (`browser_child.rs`): this module only gives its `RemoteWindow` as `contentWindow`, and `null` as `contentDocument`. Where no child
+//! driver runs (a `Browser` that `run_page` never ran), no child document is fetched or executed, and a same-origin `src` is asked for only
+//! to catch a download (`Dom::frame_src`).
 //!
 //! - The inert window of an iframe is an `EventTarget` (a `Target::Obj`: `addEventListener`, `removeEventListener`, `dispatchEvent`).
 //!   An iframe with no `src` (or an empty one, or `about:blank`) and no `srcdoc` gets an initial `about:blank` document at the first
@@ -489,6 +491,14 @@ pub(crate) fn fill(d: &Dom, it: &mut Interp<'_>, owner: ObjId, index: u32) -> R<
 }
 fn context(d: &Dom, it: &mut Interp<'_>, n: NodeId) -> R<Value> {
     activate(d, it)?;
+    // A child page (`browser_child.rs`): its window is a `RemoteWindow`.
+    if let Some(id) = d.kids.id_of(n) {
+        let w = d.child_window(it, id)?;
+        if let (Value::Object(o), Some(mut s)) = (w, d.frames.state_mut()) {
+            s.contexts.insert(n, o);
+        }
+        return Ok(w);
+    }
     if let Some(o) = d
         .frames
         .state()
@@ -566,6 +576,10 @@ fn initial_blank(d: &Dom, n: NodeId) -> bool {
 /// `iframe.contentDocument`: the initial `about:blank` document of `contentWindow`, else `null` (see the header).
 pub(crate) fn content_document(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
     let w = content_window(d, it, this, a)?;
+    // A child page has no document that the parent can read.
+    if d.kids.any() && let Value::Object(_) = w && let Ok(n) = d.el(it, this) && d.kids.id_of(n).is_some() {
+        return Ok(Value::Null);
+    }
     if matches!(w, Value::Null) {
         return Ok(w);
     }

@@ -116,7 +116,7 @@ fn nested_browsing_contexts_are_inert() {
 }
 
 #[test]
-fn no_child_document_is_ever_fetched() {
+fn only_frames_with_a_src_and_no_srcdoc_fetch_a_child_document() {
     big(|| {
         let srv = serve(|_| Reply::new(404, Some("text/plain"), "no"));
         let html = "<head><script>var log = []</script></head><body><iframe id=p src='/child.html'></iframe><script>\
@@ -128,8 +128,10 @@ fn no_child_document_is_ever_fetched() {
         let r = b.run_page(PageConfig { url: srv.url("/page.html"), client: Client::new(), limits: PageLimits { quiet: Duration::from_millis(100), ..Default::default() }, fetch: None });
         assert_eq!(js(&mut b, "String(window.ok)"), "true", );
         assert_eq!((r.script_throws, r.scripts_run), (0, 2));
-        for p in ["/child.html", "/dyn.html", "/dyn2.html", "/dyn3.html", "/inner.js"] {
-            assert_eq!(srv.hits(p), 0, "{p} was fetched");
+        // A frame with an http(s) `src` is a child page (`browser_child.rs`) and its document is fetched once. The `src` that a script
+        // replaced before the load started is not fetched. `srcdoc` wins over `src`: that frame stays blank. Nothing runs `inner.js`.
+        for (p, n) in [("/child.html", 1), ("/dyn.html", 0), ("/dyn2.html", 0), ("/dyn3.html", 1), ("/inner.js", 0)] {
+            assert_eq!(srv.hits(p), n, "{p}");
         }
         assert_eq!(r.load_errors, 0);
     });

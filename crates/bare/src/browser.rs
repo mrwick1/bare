@@ -273,6 +273,10 @@ pub struct BrowserLimits {
     pub max_reports: usize,
     /// Tasks that a script budget may abort (`Browser::survive`). The next one is fatal.
     pub max_task_aborts: usize,
+    /// Child pages that are live in one top page, at all depths (`browser_child.rs`). An iframe over it stays empty.
+    pub max_child_pages: usize,
+    /// Nesting depth of child pages. An iframe over it stays empty.
+    pub max_child_depth: usize,
 }
 
 impl Default for BrowserLimits {
@@ -292,6 +296,8 @@ impl Default for BrowserLimits {
             max_string_bytes: 16 << 20,
             max_reports: 256,
             max_task_aborts: 5,
+            max_child_pages: 64,
+            max_child_depth: 8,
         }
     }
 }
@@ -551,6 +557,7 @@ pub struct Dom {
     pub(crate) screen_iface: std::cell::Cell<Option<crate::browser_geom::Iface>>,
     /// The `mark` and `measure` entries of `performance` (`browser_perf.rs`).
     pub(crate) frames: crate::browser_frames::Frames,
+    pub(crate) kids: crate::browser_child::Kids,
     pub(crate) perf_entries: RefCell<Vec<crate::browser_perf::Entry>>,
     /// The times of the load of this document, for its navigation entry (`browser_perf.rs`).
     pub(crate) load_times: RefCell<crate::browser_perf::LoadTimes>,
@@ -663,6 +670,7 @@ impl Host for Dom {
         self.ce_roots(out);
         crate::browser_geom::roots(self, out);
         crate::browser_worker::roots(self, out);
+        self.kids.roots(out);
     }
 
     fn trace(&self, owner: ObjId, out: &mut Vec<Value>) {
@@ -1695,6 +1703,7 @@ impl Browser {
             perf_ifaces: Default::default(),
             screen_iface: Default::default(),
             frames: Default::default(),
+            kids: Default::default(),
             perf_entries: Default::default(),
             load_times: Default::default(),
             html_ifaces: Default::default(),
