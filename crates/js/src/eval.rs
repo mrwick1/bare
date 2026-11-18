@@ -650,6 +650,8 @@ pub struct Interp<'p> {
     /// JSON, RegExp and String bindings: state of `eval_builtins.rs`.
     ext: Ext,
     host: Option<Rc<dyn Host>>,
+    /// The host interface `bare-js-api` (`eval_api.rs`).
+    api: Box<ApiState<'p>>,
     bin: BinaryState,
     ao: AoState,
     sc: ScState,
@@ -780,6 +782,7 @@ impl<'p> Interp<'p> {
             sc_lazy: false,
             script_ids: Vec::new(),
             _p: PhantomData,
+            api: Box::default(),
             strict: prog.strict,
             cur_strict: prog.strict,
             prog: prog.clone(),
@@ -956,6 +959,7 @@ impl<'p> Interp<'p> {
         if let Some(h) = &self.host {
             h.roots(&mut v);
         }
+        self.api.values(&mut v);
         self.sc_roots(&mut v);
         self.sc_all_values(&mut v);
         self.weak_roots(&mut v);
@@ -1008,6 +1012,7 @@ impl<'p> Interp<'p> {
             h.roots(&mut host_vals);
             work.extend_from_slice(&host_vals);
         }
+        self.api.values(&mut work);
         self.binary_roots(&mut work);
         self.sc_roots(&mut work);
         self.weak_roots(&mut work);
@@ -4066,6 +4071,7 @@ include!("eval_regexp_exec.rs");
 include!("eval_json_stringify.rs");
 include!("eval_json_revive.rs");
 include!("eval_host.rs");
+include!("eval_api.rs");
 include!("eval_array_object.rs");
 include!("eval_array_more.rs");
 include!("eval_numeric.rs");
@@ -4150,6 +4156,10 @@ mod revive_tests;
 #[cfg(test)]
 #[path = "eval_host_tests.rs"]
 mod host_tests;
+
+#[cfg(test)]
+#[path = "eval_api_tests.rs"]
+mod api_tests;
 
 #[cfg(test)]
 #[path = "eval_host_nt_tests.rs"]
