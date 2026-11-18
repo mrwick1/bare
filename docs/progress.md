@@ -13340,6 +13340,9 @@ Staging journey with `bc-hist` (archMachine, `auto`, 2 runs each, all `ok`; base
 Cost rows (`tools/js/instr.sh`, `eval_load` at scale 10, `auto`, base main): every case within ±0.01%.
 
 P0.4 (8.5%) and P0.5 (2.8%) together remove about 11% of the lane ops on the staging journey with two small changes to the code generator. This supports the design's view that the compiler can remove a large share of ops (design 6.11). Not measured: the two together, staging instructions without `bc-hist`, the typing page, Windows.
+## 2026-11-18: host interface inventory (plan step S0.1)
+
+`docs/design-host-interface.md` lists what the browser uses of `bare-js`, grouped by kind: values, the realm, objects and properties, host functions, lazy wrappers, promises and microtasks, modules, binary data and clone, the collector contract, and limits. 219 files of `crates/bare` name `bare_js` (91 of them tests); `drive` uses 5 items; `mcp` none. The browser calls `it.heap` directly at 221 sites through 63 `Heap` methods. The page ends with six questions for S0.2. It waits for the owner's review.
 ## 2026-11-18: constant operands on either side of a compare (plan step P0.4)
 
 A fused compare and jump now takes a constant operand on either side. `1 < n` compiles as `n > 1` (`JnGtK`), and `null !== e` as `e !== null` (`JnSNeK`). The constant has no side effect, so the order of the operands does not matter. Equalities (`==`, `!=`, `===`, `!==`) also take a string, `null` or `void 0` as the constant: the constant table gains `Const::Null` and `Const::Undefined`, and the verifier allows them and strings only on these four ops. `<`, `<=`, `>` and `>=` keep number constants only.
