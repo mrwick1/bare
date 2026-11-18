@@ -69,7 +69,8 @@
 //! deadline is `min(50 ms, next task)`. `Task::IdleTimeout` runs a callback whose `timeout` passed. Not here: `setImmediate`, an `error` event or `onerror` for
 //! reported exceptions, `ErrorEvent`.
 //!
-//! GC: timers keep their callbacks and arguments (they are roots). A port that has queued delivery tasks is a root. So is an enabled port
+//! GC: timers keep their callbacks and arguments in persistent handles of `bare-js-api` (the engine roots them; a cleared or finished
+//! timer drops them). A port that has queued delivery tasks is a root. So is an enabled port
 //! with a peer in another page (a message can come at any time). `sched_prune` removes the end of a port that the GC drops.
 //! A port keeps its peer, its queued payloads (and the new ports in them) and its listeners alive. So an unreachable channel (a cycle) is pruned,
 //! with its queued messages, at the next `collect`. A parked port (`park_port`) lives only between the walk and `make_ports` of one call. Ids of ports are generation checked, so a reused slot never
@@ -164,9 +165,36 @@ pub(crate) enum Task {
     Toggle(NodeId, bool, bool),
 }
 
+/// The callback of a timer and its arguments.
+struct TimerCall {
+    cb: bare_js_api::Persistent,
+    args: Vec<TimerArg>,
+}
+
+/// An argument of a timer. A value with no reference into the heap needs no root, so it stays as it is.
+enum TimerArg {
+    Plain(Value),
+    Held(bare_js_api::Persistent),
+}
+
+impl TimerArg {
+    fn new(it: &mut Interp<'_>, v: Value) -> Self {
+        match v {
+            Value::Undefined | Value::Null | Value::Bool(_) | Value::Number(_) | Value::BigInt(_) => TimerArg::Plain(v),
+            _ => TimerArg::Held(it.persist_value(v)),
+        }
+    }
+
+    fn value(&self, it: &Interp<'_>) -> Value {
+        match self {
+            TimerArg::Plain(v) => *v,
+            TimerArg::Held(p) => it.persistent_value(p),
+        }
+    }
+}
+
 struct Timer {
-    cb: Value,
-    args: Vec<Value>,
+    call: TimerCall,
     /// `Some(ms)` for `setInterval`.
     interval: Option<u32>,
     nesting: u32,
@@ -324,7 +352,8 @@ pub struct SchedStats {
 
 /// A task taken out of the queue, ready to run without any borrow.
 enum Run {
-    Timer { id: u64, cb: Value, args: Vec<Value>, nesting: u32, repeat: bool },
+    /// `call` is taken from a timeout; an interval keeps it in its `Timer`.
+    Timer { id: u64, call: Option<TimerCall>, nesting: u32, repeat: bool },
     Deliver { port: ObjId, data: Value, ports: Box<[ObjId]>, from: Option<Box<Sender>> },
     Select(NodeId),
     SelectionChange(NodeId),
@@ -390,15 +419,11 @@ impl Dom {
         }
     }
 
-    /// The roots of the scheduler: prototypes, the callbacks and arguments of timers, and the ports with queued tasks.
+    /// The roots of the scheduler: prototypes and the ports with queued tasks. Timers hold persistent handles, which the engine roots.
     pub(crate) fn sched_roots(&self, out: &mut Vec<Value>) {
         let s = self.sched.borrow();
         if let Some(p) = s.protos {
             out.extend([p.port, p.channel, p.event, p.perf].map(Value::Object));
-        }
-        for t in s.timers.values() {
-            out.push(t.cb);
-            out.extend_from_slice(&t.args);
         }
         // A port with a peer in another page that listens is a root: a message can come at any time.
         out.extend(s.ports.iter().filter(|(_, p)| !p.keys.is_empty() || p.remote.is_some() && p.enabled).map(|(&o, _)| Value::Object(o)));
@@ -615,13 +640,14 @@ impl Dom {
             Task::Timer(id) => match s.timers.get_mut(&id) {
                 None => Run::Nothing,
                 Some(t) => {
-                    let (cb, args, nesting, repeat) = (t.cb, t.args.clone(), t.nesting, t.interval.is_some());
-                    if repeat {
+                    let (nesting, repeat) = (t.nesting, t.interval.is_some());
+                    let call = if repeat {
                         t.key = None;
+                        None
                     } else {
-                        s.timers.remove(&id);
-                    }
-                    Run::Timer { id, cb, args, nesting, repeat }
+                        s.timers.remove(&id).map(|t| t.call)
+                    };
+                    Run::Timer { id, call, nesting, repeat }
                 }
             },
             Task::Select(n) => {
@@ -681,7 +707,16 @@ impl Dom {
     fn run_task(&self, it: &mut Interp<'_>, run: Run) -> R<()> {
         match run {
             Run::Nothing => Ok(()),
-            Run::Timer { id, cb, args, nesting, repeat } => {
+            Run::Timer { id, call, nesting, repeat } => {
+                let values = |c: &TimerCall| (it.persistent_value(&c.cb), c.args.iter().map(|a| a.value(it)).collect::<Vec<Value>>());
+                let (cb, args) = match &call {
+                    Some(c) => values(c),
+                    None => match self.sched.borrow().timers.get(&id) {
+                        Some(t) => values(&t.call),
+                        None => return Ok(()),
+                    },
+                };
+                drop(call);
                 let mark = self.settle_mark();
                 {
                     let mut s = self.sched.borrow_mut();
@@ -1165,7 +1200,8 @@ fn set_timer(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], repeat: boo
         delay = 4;
     }
     it.charge(1 + argc as u64)?;
-    let args: Vec<Value> = a.iter().skip(2).copied().collect();
+    let args = if argc == 0 { Vec::new() } else { a[2..].iter().map(|&v| TimerArg::new(it, v)).collect() };
+    let call = TimerCall { cb: it.persist_value(cb), args };
     let key = d.schedule(now + delay as f64, Task::Timer(id))?;
     let mut s = d.sched.borrow_mut();
     s.next_timer = id;
@@ -1174,7 +1210,7 @@ fn set_timer(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], repeat: boo
     if rearm && period > 0 {
         s.rearmed = Some(id);
     }
-    s.timers.insert(id, Timer { cb, args, interval: repeat.then_some(delay), nesting: level, key: Some(key), period, idle: false });
+    s.timers.insert(id, Timer { call, interval: repeat.then_some(delay), nesting: level, key: Some(key), period, idle: false });
     Ok(Value::Number(id as f64))
 }
 

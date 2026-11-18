@@ -13462,3 +13462,39 @@ Checks:
 - `parse_load deep 1` and `deep 10` abort (exit 134) on the base tree too, so they are not counted.
 
 Not done: the browser does not use the interface yet (S0.4).
+
+## 2026-11-18: timers in persistent handles (plan step S0.4, first PR)
+
+Timers keep their callback and their arguments in persistent handles of `bare-js-api`, not in `Value`s that `sched_roots` reports. A cleared or finished timer drops its handles. The engine roots only live handles.
+
+Interface changes:
+
+- A `Persistent` frees its slot when it is dropped. It holds an `Rc` of the realm's `Slots`: one bit per slot of the persistent table. A drop clears the bit, so the slot is free at once and no root at the next collection. `Scope::release` is now the same as `drop`. `Engine::release` is replaced by `Engine::slots`.
+- `persist` takes the lowest free slot. The roots of the table come from the bits, so a table that once held many handles costs one word per 64 slots at a collection.
+- A timer argument that has no reference into the heap (undefined, null, a boolean, a number, a small BigInt) stays as it is. Only the other arguments get a handle.
+
+Checks:
+
+- Tests: a cleared, a finished and a waiting timer (only the waiting callback stays after a collection); the table does not grow over 3 rounds of 200 timers; object and string arguments survive a collection (this test fails when an object argument gets no handle). 41 scheduler tests, 4 adapter tests and 4 `bare-js-api` tests pass on Linux and on the Windows 11 VM.
+- Cost matrix (`tools/js/cost_matrix.sh`, archMachine, base = `9a2c5c5a`, 805 rows): 1 row over +0.5% under both allocators, `scheduler_load timers 10`, +0.780% glibc and +0.757% jemalloc. `mixed 1` and `mixed 10` are under +0.1%. `gen_load finally 10` is +0.501% under glibc only (jemalloc -0.002%). `parse_load deep 1` and `deep 10` abort on the base too.
+- The cost of `timers 10` is real work, not codegen noise. With `-C codegen-units=1` on both trees: `timers 10` +0.64% glibc and +0.68% jemalloc; `timers 100` +0.70%. That is about 128 instructions per timer. One handle create and drop costs about 70 instructions, fully inlined (a loop of 1 M handles: 75 per handle). The rest is the timer call record and its drop.
+- The owner grants a cost exception for `scheduler_load timers 10` (2026-11-18). Reason: design 6.8 names persistent handles for timers, and the old engine will be replaced.
+
+Variants measured on `timers 10` (glibc, `instr.sh`):
+
+| Variant | Change |
+| --- | ---: |
+| First version: a drop list, a free list, a handle for each argument | +2.76% |
+| No `Rc` around the call record; no argument vector when there are no arguments | +1.58% |
+| Free slots sorted and the table truncated at each collection | +2.90% (worse, not kept) |
+| A live bitmap in the engine, with a drop list | +1.44% |
+| The bitmap shared with the handles, no drop list (kept) | +1.36% |
+| `#[inline]` on the handle functions (kept) | +1.30% |
+| Primitive arguments without a handle (kept) | +0.77% |
+
+Notes:
+
+- `callgrind` counts of `scheduler_load` change by up to 1% between two runs of the same binary. Use `perf stat` (`instr.sh`) for A/B.
+- `instr.sh` takes the case and the scale as two arguments. In zsh, `$r` with a space does not split; use `${=r}`.
+
+Not done: the staging journey A/B. The other subsystems of S0.4.

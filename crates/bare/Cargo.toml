@@ -11,6 +11,7 @@ bare-css = { path = "../css" }
 bare-html = { path = "../html" }
 bare-image = { path = "../image" }
 bare-js = { path = "../js" }
+bare-js-api = { path = "../js-api" }
 bare-js2 = { path = "../js2" }
 bare-layout = { path = "../layout" }
 bare-net = { path = "../net" }

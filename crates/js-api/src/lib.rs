@@ -9,8 +9,9 @@
 //!
 //! - A [`Local`] is a slot in the handle stack of a [`Scope`]. It is `Copy` and costs 4 bytes. It lives until its scope ends, and the
 //!   borrow checker stops it from leaving the scope.
-//! - A [`Persistent`] lives in a table of the realm until [`Scope::release`] or the end of the realm. Host structures that live
-//!   longer than a call (listeners, timers, wrappers) keep these.
+//! - A [`Persistent`] lives in a table of the realm until it is dropped or the realm ends. Host structures that live longer than a
+//!   call (listeners, timers, wrappers) keep these. A drop needs no engine: it clears the bit of its slot in [`Slots`], so the slot
+//!   is free at once and is no root at the next collection.
 //!
 //! The collector may run in any method that takes `&mut Scope` (an allocation, a call into script, [`Scope::safepoint`]). A method
 //! that takes `&Scope` never collects. A borrow of engine memory ([`Scope::as_str`]) is tied to `&Scope`, so it cannot be held across
@@ -98,6 +99,7 @@
 //! engine runs its write barrier there.
 #![forbid(unsafe_code)]
 
+use std::cell::{Cell, RefCell};
 use std::marker::PhantomData;
 use std::rc::Rc;
 
@@ -122,11 +124,85 @@ impl<'s> Local<'s> {
     }
 }
 
-/// A value that the realm keeps until [`Scope::release`] or the end of the realm. Not `Clone`: one handle, one release.
-#[must_use = "a persistent handle keeps its value alive until it is released"]
+/// A value that the realm keeps until this handle is dropped or the realm ends. Not `Clone`: one handle, one slot.
+#[must_use = "a persistent handle keeps its value alive until it is dropped"]
 #[derive(Debug)]
 pub struct Persistent {
     id: u32,
+    slots: Rc<Slots>,
+}
+
+impl Persistent {
+    /// For engines: a handle of slot `id`, which [`Slots::take`] gave and the engine filled.
+    #[doc(hidden)]
+    #[inline]
+    pub fn from_id(id: u32, slots: Rc<Slots>) -> Self {
+        Persistent { id, slots }
+    }
+
+    /// For engines: the slot in the persistent table.
+    #[doc(hidden)]
+    #[inline]
+    pub fn id(&self) -> u32 {
+        self.id
+    }
+}
+
+impl Drop for Persistent {
+    #[inline]
+    fn drop(&mut self) {
+        self.slots.free(self.id);
+    }
+}
+
+/// The slots of the persistent table that hold live handles: one bit per slot, shared by the realm and its handles. The live slots
+/// are the roots, so a table that once held many handles costs one word per 64 slots at a collection.
+#[derive(Debug, Default)]
+pub struct Slots {
+    bits: RefCell<Vec<u64>>,
+    /// The words before this one have no free bit.
+    first: Cell<usize>,
+}
+
+impl Slots {
+    /// For engines: mark the lowest free slot live and give it.
+    #[doc(hidden)]
+    #[inline]
+    pub fn take(&self) -> u32 {
+        let mut bits = self.bits.borrow_mut();
+        let mut w = self.first.get();
+        while w < bits.len() && bits[w] == !0 {
+            w += 1;
+        }
+        if w == bits.len() {
+            bits.push(0);
+        }
+        let b = (!bits[w]).trailing_zeros();
+        bits[w] |= 1 << b;
+        self.first.set(w);
+        w as u32 * 64 + b
+    }
+
+    /// For engines: each live slot, in order.
+    #[doc(hidden)]
+    pub fn for_each(&self, mut f: impl FnMut(u32)) {
+        for (w, &word) in self.bits.borrow().iter().enumerate() {
+            let mut b = word;
+            while b != 0 {
+                f(w as u32 * 64 + b.trailing_zeros());
+                b &= b - 1;
+            }
+        }
+    }
+
+    #[inline]
+    fn free(&self, id: u32) {
+        let w = id as usize / 64;
+        self.bits.borrow_mut()[w] &= !(1 << (id % 64));
+        if w < self.first.get() {
+            self.first.set(w);
+        }
+    }
 }
 
 /// The arguments of a host call: consecutive slots of the handle stack.
@@ -255,7 +331,8 @@ pub trait Engine: Sized {
     /// Put the value in the persistent table; give its id.
     fn persist(&mut self, v: Local<'_>) -> u32;
     fn persistent<'s>(&mut self, id: u32) -> Local<'s>;
-    fn release(&mut self, id: u32);
+    /// The live slots of the persistent table.
+    fn slots(&self) -> &Rc<Slots>;
 
     fn undefined<'s>(&mut self) -> Local<'s>;
     fn null<'s>(&mut self) -> Local<'s>;
@@ -334,15 +411,16 @@ impl<'s, E: Engine> Scope<'s, E> {
     }
 
     pub fn persist(&mut self, v: Local<'_>) -> Persistent {
-        Persistent { id: self.e.persist(v) }
+        Persistent { id: self.e.persist(v), slots: self.e.slots().clone() }
     }
 
     pub fn local(&mut self, p: &Persistent) -> Local<'s> {
         self.e.persistent(p.id)
     }
 
+    /// Drop `p`. The same as `drop(p)`.
     pub fn release(&mut self, p: Persistent) {
-        self.e.release(p.id);
+        drop(p);
     }
 
     pub fn undefined(&mut self) -> Local<'s> {
