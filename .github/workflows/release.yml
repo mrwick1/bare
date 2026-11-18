@@ -53,8 +53,44 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
-  release:
+  # offstage installs the newest release, so a release reaches every agent at once.
+  # Run offstage's real-Bare test against the candidate before it is published.
+  gate:
     needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: bare-linux-amd64
+          path: bin
+      - name: Put the candidate on PATH
+        working-directory: bin
+        run: |
+          mv bare-mcp-linux-amd64 bare-mcp
+          mv bare-drive-linux-amd64 bare-drive
+          chmod +x bare-mcp bare-drive
+          echo "$PWD" >> "$GITHUB_PATH"
+      - name: Install runtime packages
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon0
+      - uses: actions/checkout@v4
+        with:
+          repository: mrwick1/offstage
+          ref: beta
+          path: offstage
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: offstage/go.mod
+          cache-dependency-path: offstage/go.sum
+      - name: Run the offstage browser test
+        working-directory: offstage
+        # The test skips when it finds no Bare. A skip must fail the gate.
+        run: |
+          out=$(go test ./internal/mcpserver -run '^TestBareBrowser$' -count=1 -v 2>&1) || { echo "$out"; exit 1; }
+          echo "$out"
+          grep -q -- '--- PASS: TestBareBrowser' <<<"$out" || { echo "TestBareBrowser did not run against Bare"; exit 1; }
+
+  release:
+    needs: [build, gate]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
     steps:
