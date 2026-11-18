@@ -13272,3 +13272,12 @@ JS engine mode on the journey (3 runs each, mean, range):
 - Profile in `auto`: the JS engine is 71.3% of CPU (run the code 54.6%, collect 9.0%, parse and compile 7.7%). Style is 11.6%. `bc_loop` is the top function at 14.3%.
 
 Not tested: windowed runs (paint), the RSS cost of `auto` by part, the mode A/B on other journeys, wall time on an idle machine.
+
+## Engine rewrite design: two rounds of a four-model review (2026-11-18)
+
+- Design: `docs/design-engine-rewrite.md` (PR #681). Reviewers: Claude Sonnet 5.5, Claude Opus 5.5, GPT-6.2 Sol and GPT-6.2 Astra, high effort, one brief on data structures and algorithms for resource use. Static review; no builds or journeys ran.
+- Round 1 added section 6.10 (23 changes). Round 2 added section 6.11 (19 changes) and corrected five items of round 1.
+- Facts checked against the code: the collector copies every live binding and script string into one roots `Vec` (`eval.rs:932-941`); the object slab at the peak is a doubled `Vec` (one 13,631,488-byte block); constant operands exist only for numbers on the right side of a compare; `switch` is a linear chain; `gc_due` collects only between tasks; parse-ahead copies the text before its duplicate check; a DOM wrapper makes the wrappers of all ancestors.
+- New measurement (1 run, `auto`): samples with a collector frame anywhere on the stack are 1,229 of 13,026 (9.4% of CPU). The leaf-first split showed 4.7%.
+- Round 2 corrections: the write barrier may be skipped only when no collection can happen before the store; ropes stay; runtime atoms stay weak; cache records live in a per-realm feedback vector, not in shared code; the dictionary cache entry is kept, not lost.
+- Open owner questions: section 10, items 2 to 4 and 6 to 13.
