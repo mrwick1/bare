@@ -13335,6 +13335,9 @@ Workloads (archMachine, `BARE_JS_EXEC=auto`, one run each, all `ok`): the stagin
 - Used, so S3 must have them: spread (31 workloads), `for-in` (27), object destructuring (22), `await` (21), async functions and arrows (18 and 15), classes (13), async generators (7), generators and `yield` (5), private names (5), tagged templates (6), `import()` (4).
 
 Limits: the parser count includes code that never runs, except lazy function bodies (counted on their first call). Not counted: promise functions, host (DOM) calls and built-ins that the bytecode lane runs without a call. One run per workload; live pages change.
+## 2026-11-18: host interface inventory (plan step S0.1)
+
+`docs/design-host-interface.md` lists what the browser uses of `bare-js`, grouped by kind: values, the realm, objects and properties, host functions, lazy wrappers, promises and microtasks, modules, binary data and clone, the collector contract, and limits. 219 files of `crates/bare` name `bare_js` (91 of them tests); `drive` uses 5 items; `mcp` none. The browser calls `it.heap` directly at 221 sites through 63 `Heap` methods. The page ends with six questions for S0.2. It waits for the owner's review.
 ## 2026-11-18: constant operands on either side of a compare (plan step P0.4)
 
 A fused compare and jump now takes a constant operand on either side. `1 < n` compiles as `n > 1` (`JnGtK`), and `null !== e` as `e !== null` (`JnSNeK`). The constant has no side effect, so the order of the operands does not matter. Equalities (`==`, `!=`, `===`, `!==`) also take a string, `null` or `void 0` as the constant: the constant table gains `Const::Null` and `Const::Undefined`, and the verifier allows them and strings only on these four ops. `<`, `<=`, `>` and `>=` keep number constants only.
