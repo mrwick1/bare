@@ -13297,3 +13297,16 @@ Not tested: windowed runs (paint), the RSS cost of `auto` by part, the mode A/B 
 - A feature census of the daily journeys on today's engine (new in S0) decides which language features and built-ins are ported. A feature outside the census throws a `TypeError` that names it and is logged.
 - Why: on short, cold code a JIT does not pay back its start cost (Node: about 94 M instructions and 46 MiB at start), and QuickJS without a JIT is 1.6 to 3.8 times below today's `auto` (`research-quickjs-reference.md`).
 - Design: `docs/design-engine-rewrite.md` section 6.12 (PR #681).
+
+## Engine rewrite: open design questions decided (2026-11-18)
+
+- The owner asked for the best choice for speed and resource use on each open question of `docs/design-engine-rewrite.md` section 10. Each answer there lists the reasons for and against.
+- Values: NaN-boxing; compressed slots only if the S1 census shows value slots are a large share of the peak.
+- New crate next to the old one: yes.
+- Collector: between tasks by default, and inside a task at the allocation slow path when the task passes the trigger, with compiler root maps (reason: `throws` 10 peaks at 32.4 MiB on Bare against 3.3 MiB on QuickJS).
+- Disk code cache: allowed, cold against cold Chrome and warm against warm Chrome.
+- Long sessions: memory must stay flat; a 20-round session row in S5; flushing and compaction only if it grows.
+- Ready: the first journey step can act; the browser with all helpers counts; engine comparisons on a replayed network cache.
+- Before S1: the measurements and two small compiler changes land in today's engine.
+- Gates: S2 browser slice; `eval_load` at or below QuickJS on instructions in S2, and on peak RSS by S5.
+- The speculating JIT is checked last (new stage S8), only if a daily-journey profile shows hot loops.
