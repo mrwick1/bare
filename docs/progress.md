@@ -13394,3 +13394,10 @@ Not tested: staging instructions and CPU without `bc-hist`, the typing page, Win
 Checks: 5 unit tests, also under Miri (nightly 2026-11-17), including a pointer round trip that reads the cell. Micro row `crates/js2/examples/value_load.rs` (archMachine, release, `tools/js/instr.sh`, min of 3): 327,816,398 instructions for 10,000,000 values and 315,465 for none, so 32.7 instructions per value for one encode and one decode of mixed kinds, with the loop and the checksum.
 
 Not measured: the same row on today's 16-byte `Value`, arm64.
+## 2026-11-18: host interface crate (plan step S0.2)
+
+A new crate `crates/js-api` (`bare-js-api`) holds the interface between the browser and an engine. It has no engine code. The browser will be generic over its `Engine` trait, and a session picks the engine when it starts (owner decision, 2026-11-18). The host holds handles, not values: a `Local` (a slot in the handle stack of a `Scope`) or a `Persistent` (a slot in a table of the realm). A method that takes `&mut Scope` may collect; a method that takes `&Scope` never does. The decisions on the six questions of S0.1 are in `docs/design-host-interface.md`.
+
+Checks: 4 unit tests with a toy engine (scope pops, escape of a value or an exception, persistent handles, arguments) and 5 doc tests. 4 of the doc tests must fail to compile, each with its error code: a local that leaves its scope (E0521), an inner local kept in the outer scope (E0521), a string borrow held across a call (E0502), and a released persistent handle (E0382). Clippy is clean. The 4 unit tests also pass on the Windows 11 VM (`cargo xwin test --target x86_64-pc-windows-msvc`).
+
+Not done: no engine implements the trait yet (S0.3), so no instruction numbers.
