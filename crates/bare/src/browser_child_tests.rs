@@ -489,3 +489,20 @@ fn the_parent_does_not_settle_while_a_message_is_in_flight() {
         assert_eq!(get(&s, &srv, "m").as_deref(), Some("late"));
     });
 }
+
+#[test]
+fn a_message_to_a_removed_frame_never_reaches_a_later_frame() {
+    big(|| {
+        let other = server(|| vec![("/c", page("addEventListener('message', function(e){ console.log('got ' + e.data) })"))]);
+        let o = other.url("/c");
+        let srv = server(move || {
+            vec![(
+                "/",
+                framed(&o, &format!("f.addEventListener('load', function(){{ w.postMessage('old', '*'); f.remove(); setTimeout(function(){{ var g = document.createElement('iframe'); g.src = '{o}'; g.onload = function(){{ console.log('second loaded') }}; document.body.appendChild(g) }}, 50) }})")),
+            )]
+        });
+        let (mut s, r) = run(srv.url("/"), |_| {});
+        assert_eq!(r.stop, SessionStop::Page(Stop::Settled), "{r:?}");
+        assert_eq!(console(&mut s), vec!["second loaded".to_string()]);
+    });
+}

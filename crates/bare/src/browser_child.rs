@@ -597,6 +597,10 @@ impl Browser {
                 *slot = Some(ch);
             }
         }
+        // Each live child took its messages above. What is left is for a frame that was removed: drop it.
+        if self.dom.kids.outbox_len() > 0 {
+            drop(self.dom.kids.take_out(|m| matches!(m.to, Side::Child(_))));
+        }
         t
     }
 
