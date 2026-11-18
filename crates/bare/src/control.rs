@@ -308,8 +308,23 @@ impl Page {
         self.browser().and_then(|b| b.selected_labels(h.node))
     }
 
+    /// The checked state of a native checkbox or radio, else `aria-checked="true"` of an ARIA checkable widget (a switch, say).
     pub fn checked(&mut self, h: Handle) -> bool {
-        self.browser().is_some_and(|b| b.input_checked(h.node))
+        match self.aria_checked(h) {
+            Some(on) => on,
+            None => self.browser().is_some_and(|b| b.input_checked(h.node)),
+        }
+    }
+
+    /// For an element that is not an `<input>` and has a checkable ARIA role: is its `aria-checked` "true"? Else `None`.
+    fn aria_checked(&mut self, h: Handle) -> Option<bool> {
+        let b = self.browser()?;
+        let doc = b.document();
+        let doc = doc.borrow();
+        let get = |name| doc.find_atom(name).and_then(|a| doc.attr(h.node, a));
+        let role = get("role")?.split_whitespace().next()?;
+        let checkable = matches!(role, "checkbox" | "radio" | "switch" | "menuitemcheckbox" | "menuitemradio");
+        (checkable && !doc.is_html(h.node, "input")).then(|| get("aria-checked").is_some_and(|v| v.trim() == "true"))
     }
 
     pub fn focused(&mut self, h: Handle) -> bool {
@@ -484,14 +499,15 @@ impl Page {
         Ok((x, y))
     }
 
-    /// Put a checkbox or a radio in the state `on`: a click only when the state differs, then a check of the state.
+    /// Put a checkbox, a radio or an ARIA checkable widget (a switch, say) in the state `on`: a click only when the state differs, then a
+    /// check of the state.
     pub fn set_checked(&mut self, h: Handle, on: bool) -> Result<(), Refusal> {
         let kind = self.browser().and_then(|b| {
             let doc = b.document();
             let doc = doc.borrow();
             doc.is_html(h.node, "input").then(|| crate::browser_dom::input_kind(&doc, h.node))
         });
-        if !matches!(kind, Some("checkbox" | "radio")) {
+        if !matches!(kind, Some("checkbox" | "radio")) && self.aria_checked(h).is_none() {
             return Err(Refusal::Wrong("not_checkable", format!("{} is not a checkbox or a radio", self.describe(h))));
         }
         if self.checked(h) != on {
