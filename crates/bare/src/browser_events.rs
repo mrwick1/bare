@@ -103,7 +103,7 @@ impl Dom {
         };
         let mut st = self.st.borrow_mut();
         st.events.insert(o, e);
-        let k = st.owner_key(crate::browser::Owner::Event(o));
+        let k = st.owners.key(crate::browser::Owner::Event(o));
         it.set_host_owner_obj(o, k);
         Ok(o)
     }
@@ -252,7 +252,7 @@ impl Dom {
             && let Some(i) = v.iter().position(|l| l.id == id)
         {
             v.remove(i);
-            if v.is_empty() {
+            if v.removable() {
                 st.listeners.remove(&t);
             }
             st.n_listeners -= 1;
@@ -520,7 +520,7 @@ pub(crate) fn add_event_listener(d: &Dom, it: &mut Interp<'_>, this: Value, a: &
     let id = st.next_id;
     list.push(Listener { id, ty: Rc::from(ty.as_str()), cb: it.trace_value(Value::Object(cb)), capture, once, passive, handler: false });
     st.n_listeners += 1;
-    d.own_listeners(st, it, t);
+    d.own(&mut st.owners, &st.by_node, it, t, list);
     drop(guard);
     if let Some(s) = signal
         && let Err(e) = d.signal_add_algo(s, crate::browser_abort::Algo::Remove(t, id))

@@ -288,7 +288,7 @@ pub(crate) fn handler_set(d: &Dom, it: &mut Interp<'_>, t: Target, ty: &str, val
             if !st.hd.raw.is_empty() {
                 st.hd.raw.remove(&id);
             }
-            if v.is_empty() {
+            if v.removable() {
                 st.listeners.remove(&t);
             }
             st.n_listeners -= 1;
@@ -297,7 +297,7 @@ pub(crate) fn handler_set(d: &Dom, it: &mut Interp<'_>, t: Target, ty: &str, val
             if st.n_listeners >= d.lim.max_listeners {
                 return Err(d.lim("dom-listeners"));
             }
-            if st.listeners.get(&t).map_or(0, Vec::len) >= d.lim.max_listeners_per_target {
+            if st.listeners.get(&t).map_or(0, |l| l.len()) >= d.lim.max_listeners_per_target {
                 return Err(d.lim("dom-listeners-per-target"));
             }
             st.next_id += 1;
@@ -434,7 +434,7 @@ fn activate(d: &Dom, st: &mut State, t: Target, ty: &Rc<str>, src: Rc<str>) {
         return;
     }
     // At a cap the attribute is not made a handler (the property setter reports the cap; a markup attribute has no caller to tell).
-    if st.n_listeners >= d.lim.max_listeners || st.listeners.get(&t).map_or(0, Vec::len) >= d.lim.max_listeners_per_target {
+    if st.n_listeners >= d.lim.max_listeners || st.listeners.get(&t).map_or(0, |l| l.len()) >= d.lim.max_listeners_per_target {
         return;
     }
     st.next_id += 1;
@@ -448,7 +448,7 @@ fn deactivate(st: &mut State, t: Target, ty: &Rc<str>) {
     let Some(v) = st.listeners.get_mut(&t) else { return };
     let Some(i) = v.iter().position(|l| l.handler && *l.ty == **ty) else { return };
     st.hd.raw.remove(&v.remove(i).id);
-    if v.is_empty() {
+    if v.removable() {
         st.listeners.remove(&t);
     }
     st.n_listeners -= 1;

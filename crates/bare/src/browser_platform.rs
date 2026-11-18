@@ -150,7 +150,7 @@ pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
         return;
     }
     let st = d.st.borrow();
-    out.extend(s.mql.keys().filter(|&&o| st.listeners.contains_key(&Target::Obj(o))).map(|&o| Value::Object(o)));
+    out.extend(s.mql.keys().filter(|&&o| st.listeners.get(&Target::Obj(o)).is_some_and(|l| !l.is_empty())).map(|&o| Value::Object(o)));
 }
 
 pub(crate) fn trace(d: &Dom, owner: ObjId, out: &mut Vec<Value>) {
@@ -395,7 +395,7 @@ fn onchange_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
             if st.n_listeners >= d.lim.max_listeners {
                 return Err(d.lim("dom-listeners"));
             }
-            if st.listeners.get(&t).map_or(0, Vec::len) >= d.lim.max_listeners_per_target {
+            if st.listeners.get(&t).map_or(0, |l| l.len()) >= d.lim.max_listeners_per_target {
                 return Err(d.lim("dom-listeners-per-target"));
             }
             st.next_id += 1;
@@ -433,7 +433,7 @@ impl Browser {
         let (s, st) = (self.dom.plat.s.borrow(), self.dom.st.borrow());
         PlatformStats {
             media_lists: s.mql.len(),
-            rooted_media_lists: s.mql.keys().filter(|&&o| st.listeners.contains_key(&Target::Obj(o))).count(),
+            rooted_media_lists: s.mql.keys().filter(|&&o| st.listeners.get(&Target::Obj(o)).is_some_and(|l| !l.is_empty())).count(),
             token_lists: s.lists.len(),
             token_iters: s.iters.len(),
         }

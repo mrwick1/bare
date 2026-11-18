@@ -14,9 +14,10 @@ pub(crate) struct ApiState<'p> {
     slots: Rc<bare_js_api::Slots>,
     host: Option<Rc<dyn bare_js_api::Host<Interp<'p>>>>,
     abort: Option<Error>,
-    /// The objects with a host key (`set_host_owner`). `collect` calls the interface host's `trace` for them, and its `prune` with
-    /// the keys of the dead ones.
-    owners: FxMap<ObjId, u32>,
+    /// The objects with a host key (`set_host_owner`), in no order. `collect` calls the interface host's `trace` for the reached
+    /// ones, and its `prune` with the keys of the dead ones. A list, not a map: a new owner is one push, and `collect` reads the
+    /// list only when its work list is empty, so a marked object pays nothing for it.
+    owners: Vec<(ObjId, u32)>,
 }
 
 impl ApiState<'_> {
@@ -27,18 +28,22 @@ impl ApiState<'_> {
 }
 
 impl<'p> Interp<'p> {
-    /// The interface host's references of a reached object. `collect` calls it for each object it marks.
-    /// The heap marks its objects again from roots, so the values also go to `roots` (as the old host's values do).
-    #[inline]
-    pub(crate) fn api_trace(&self, o: ObjId, roots: &mut Vec<Value>, work: &mut Vec<Value>) {
-        if !self.api.owners.is_empty()
-            && let Some(&key) = self.api.owners.get(&o)
-            && let Some(h) = &self.api.host
-        {
-            let from = roots.len();
-            h.trace(key, &mut bare_js_api::Tracer::new(roots));
-            work.extend_from_slice(&roots[from..]);
+    /// Trace the owners that `collect` reached since the last call. `collect` calls it when its work list is empty, and goes on
+    /// when it gives new work. The traced owners move to the front of the list: `done` of them are traced. A pass reads only the
+    /// owners not traced yet. The heap marks its objects again from roots, so the values also go to `roots` (as the old host's
+    /// values do).
+    pub(crate) fn api_trace(&mut self, seen: &Seen, done: &mut usize, roots: &mut Vec<Value>, work: &mut Vec<Value>) -> bool {
+        let Some(h) = self.api.host.clone() else { return false };
+        let (from, owners) = (roots.len(), &mut self.api.owners);
+        for i in *done..owners.len() {
+            if seen.contains(&owners[i].0) {
+                owners.swap(*done, i);
+                h.trace(owners[*done].1, &mut bare_js_api::Tracer::new(roots));
+                *done += 1;
+            }
         }
+        work.extend_from_slice(&roots[from..]);
+        roots.len() > from
     }
 
     /// Drop the owners that `collect` did not reach, and give their keys to the interface host.
@@ -47,7 +52,7 @@ impl<'p> Interp<'p> {
             return;
         }
         let mut dead = Vec::new();
-        self.api.owners.retain(|o, &mut k| live(o) || {
+        self.api.owners.retain(|&(o, k)| live(&o) || {
             dead.push(k);
             false
         });
@@ -76,7 +81,7 @@ impl<'p> Interp<'p> {
 
     /// `set_host_owner` for host code that still holds values (plan step S0.4).
     pub fn set_host_owner_obj(&mut self, o: ObjId, key: u32) {
-        self.api.owners.insert(o, key);
+        self.api.owners.push((o, key));
     }
 
     /// A persistent handle of `v`, for host code that still holds values (plan step S0.4).
@@ -324,7 +329,7 @@ impl<'p> bare_js_api::Engine for Interp<'p> {
     fn set_host_owner<'s>(&mut self, obj: bare_js_api::Local<'_>, key: u32) -> Result<(), bare_js_api::Error<'s>> {
         match self.api_obj(obj) {
             Ok(o) => {
-                self.api.owners.insert(o, key);
+                self.api.owners.push((o, key));
                 Ok(())
             }
             Err(e) => Err(self.api_err(e)),

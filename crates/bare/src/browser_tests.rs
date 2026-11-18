@@ -605,12 +605,27 @@ fn listener_owners_free_detached_cycles_and_reuse_their_keys() {
         let after = b.stats();
         assert!(after.wrappers < 20, "wrappers {}", after.wrappers);
         assert_eq!(after.listeners, 0);
-        let keys = b.dom.st.borrow().owners.len();
+        let keys = b.dom.st.borrow().owners.slots.len();
         // A second round takes the freed keys: the owner table does not grow.
         js(&mut b, make);
         gc(&mut b, &[]);
-        assert_eq!(b.dom.st.borrow().owners.len(), keys);
-        assert!(b.dom.st.borrow().target_keys.len() < 20);
+        assert_eq!(b.dom.st.borrow().owners.slots.len(), keys);
+        assert!(b.dom.st.borrow().listeners.len() < 20);
+        // A live target that adds and removes a listener many times keeps one key.
+        js(&mut b, "var keep = new EventTarget(); function f() {} for (var i = 0; i < 300; i++) { keep.addEventListener('t', f); keep.removeEventListener('t', f); }");
+        assert!(b.dom.st.borrow().owners.slots.len() <= keys + 1);
+    });
+}
+
+#[test]
+fn a_chain_of_owners_reached_only_through_listeners_survives_collect() {
+    big(|| {
+        let mut b = browser();
+        // Node i is reached only through the listener of node i - 1: each scan of the owners finds one more.
+        js(&mut b, "var head = null, hits = 0; for (var i = 0; i < 50; i++) (function (next) { var n = document.createElement('i'); n.addEventListener('t', function () { hits++; if (next) next.dispatchEvent(new Event('t')); }); head = n; })(head);");
+        gc(&mut b, &[]);
+        gc(&mut b, &[]);
+        assert_eq!(js(&mut b, "head.dispatchEvent(new Event('t')); hits"), "50");
     });
 }
 

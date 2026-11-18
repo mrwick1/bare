@@ -634,7 +634,7 @@ fn handler_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], is_error:
         (Some(i), None) => {
             let v = st.listeners.get_mut(&t).expect("found");
             v.remove(i);
-            if v.is_empty() {
+            if v.removable() {
                 st.listeners.remove(&t);
             }
             st.n_listeners -= 1;

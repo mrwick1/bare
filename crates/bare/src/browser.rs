@@ -312,42 +312,105 @@ pub(crate) enum Owner {
     Event(ObjId),
 }
 
-impl State {
+/// The owners of traced values, by host key (`docs/design-host-tracing.md`). A free key holds `None`.
+#[derive(Default)]
+pub(crate) struct Owners {
+    pub slots: Vec<Option<Owner>>,
+    free: Vec<u32>,
+}
+
+impl Owners {
     /// A free host key for `o`.
-    pub(crate) fn owner_key(&mut self, o: Owner) -> u32 {
-        match self.free_owners.pop() {
+    pub(crate) fn key(&mut self, o: Owner) -> u32 {
+        match self.free.pop() {
             Some(k) => {
-                self.owners[k as usize] = Some(o);
+                self.slots[k as usize] = Some(o);
                 k
             }
             None => {
-                self.owners.push(Some(o));
-                self.owners.len() as u32 - 1
+                self.slots.push(Some(o));
+                self.slots.len() as u32 - 1
             }
         }
     }
 
-    /// The object whose life the listeners of `t` follow: the global object, the wrapper of a node, or the target object.
-    fn owner_of(&self, t: Target, global: ObjId) -> Option<ObjId> {
-        match t {
-            Target::Window => Some(global),
-            Target::Node(n) => self.by_node.get(&n).copied(),
-            Target::Obj(o) => Some(o),
-        }
+    pub(crate) fn release(&mut self, k: u32) {
+        self.slots[k as usize] = None;
+        self.free.push(k);
     }
 }
 
 impl Dom {
-    /// Make the object of `t` the owner of its listeners, once. Call it where a function goes into a listener. A node without a wrapper
-    /// is skipped: its listeners hold the global object until a wrapper exists (`browser_handlers.rs`).
+    /// Make the object of `t` the owner of its listeners, once. Call it where a function goes into a listener.
     pub(crate) fn own_listeners(&self, st: &mut State, it: &mut Interp<'_>, t: Target) {
-        if st.target_keys.contains_key(&t) {
+        if let Some(l) = st.listeners.get_mut(&t) {
+            self.own(&mut st.owners, &st.by_node, it, t, l);
+        }
+    }
+
+    /// `own_listeners` for the list `l` of `t`. The key in the list is checked against the owner table, so a freed key that another
+    /// owner took is not trusted. A node without a wrapper is skipped: its listeners hold the global object until a wrapper exists
+    /// (`browser_handlers.rs`).
+    #[inline]
+    pub(crate) fn own(&self, owners: &mut Owners, by_node: &IdTab<NodeId, ObjId>, it: &mut Interp<'_>, t: Target, l: &mut Listeners) {
+        if l.key != NO_KEY && matches!(owners.slots.get(l.key as usize), Some(Some(Owner::Target(x))) if *x == t) {
             return;
         }
-        let Some(o) = st.owner_of(t, *self.global.get().expect("installed")) else { return };
-        let k = st.owner_key(Owner::Target(t));
-        st.target_keys.insert(t, k);
-        it.set_host_owner_obj(o, k);
+        // The object whose life the listeners follow: the global object, the wrapper of a node, or the target object.
+        let o = match t {
+            Target::Window => *self.global.get().expect("installed"),
+            Target::Node(n) => match by_node.get(&n) {
+                Some(&o) => o,
+                None => return,
+            },
+            Target::Obj(o) => o,
+        };
+        l.key = owners.key(Owner::Target(t));
+        it.set_host_owner_obj(o, l.key);
+    }
+}
+
+/// No host key.
+pub(crate) const NO_KEY: u32 = u32::MAX;
+
+/// The listeners of one target, and the host key of their owner (`own_listeners`). An entry with a key stays when its list is empty,
+/// so the target keeps one key; it goes when its target dies.
+pub(crate) struct Listeners {
+    pub key: u32,
+    pub list: Vec<Listener>,
+}
+
+impl Default for Listeners {
+    fn default() -> Self {
+        Listeners { key: NO_KEY, list: Vec::new() }
+    }
+}
+
+impl Listeners {
+    /// An empty list without an owner key.
+    pub(crate) fn removable(&self) -> bool {
+        self.list.is_empty() && self.key == NO_KEY
+    }
+}
+
+impl std::ops::Deref for Listeners {
+    type Target = Vec<Listener>;
+    fn deref(&self) -> &Vec<Listener> {
+        &self.list
+    }
+}
+
+impl std::ops::DerefMut for Listeners {
+    fn deref_mut(&mut self) -> &mut Vec<Listener> {
+        &mut self.list
+    }
+}
+
+impl<'a> IntoIterator for &'a Listeners {
+    type Item = &'a Listener;
+    type IntoIter = std::slice::Iter<'a, Listener>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.list.iter()
     }
 }
 
@@ -465,13 +528,9 @@ pub(crate) struct State {
     pub style_override: Option<((NodeId, u32), [Option<bool>; 3])>,
     pub by_node: IdTab<NodeId, ObjId>,
     pub by_obj: IdTab<ObjId, Target>,
-    pub listeners: IdMap<Target, Vec<Listener>>,
+    pub listeners: IdMap<Target, Listeners>,
     pub n_listeners: usize,
-    /// The owners of traced values, by host key (`docs/design-host-tracing.md`). A free key holds `None`.
-    pub owners: Vec<Option<Owner>>,
-    pub free_owners: Vec<u32>,
-    /// The host key of each target whose listeners have an owner.
-    pub target_keys: IdMap<Target, u32>,
+    pub owners: Owners,
     pub next_id: u64,
     pub events: IdMap<ObjId, EventState>,
     pub inputs: IdMap<NodeId, Input>,
@@ -682,7 +741,7 @@ impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
 
     fn trace(&self, key: u32, t: &mut bare_js_api::Tracer<'_, Value>) {
         let st = self.st.borrow();
-        match st.owners.get(key as usize).copied().flatten() {
+        match st.owners.slots.get(key as usize).copied().flatten() {
             Some(Owner::Target(tg)) => {
                 for l in st.listeners.get(&tg).into_iter().flatten() {
                     t.visit(&l.cb);
@@ -714,10 +773,8 @@ impl<'p> bare_js_api::Host<Interp<'p>> for Dom {
         let mut guard = self.st.borrow_mut();
         let st = &mut *guard;
         for &k in dead {
-            if let Some(Owner::Target(t)) = st.owners[k as usize].take() {
-                st.target_keys.remove(&t);
-            }
-            st.free_owners.push(k);
+            // The listeners of a dead target went with the old host's prune.
+            st.owners.release(k);
         }
     }
 }
@@ -840,7 +897,7 @@ impl Host for Dom {
             Target::Node(n) => by_node.contains_key(n),
             Target::Obj(o) => by_obj.contains_key(o),
         });
-        st.n_listeners = st.listeners.values().map(Vec::len).sum();
+        st.n_listeners = st.listeners.values().map(|l| l.len()).sum();
         st.events.retain(|&o, _| live(o));
         drop(guard);
         self.sched_prune(live);
