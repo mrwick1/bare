@@ -25,7 +25,7 @@ impl Server {
         let mut s = Server { child, stdin, stdout, id: 0, forbid: Vec::new() };
         let init = s.ask("initialize", json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "0"}}));
         assert_eq!(init["result"]["serverInfo"]["name"], "bare-mcp");
-        assert!(init["result"]["instructions"].as_str().unwrap().contains("label bare-mcp"));
+        assert!(init["result"]["instructions"].as_str().unwrap().starts_with("Loop:"));
         writeln!(s.stdin, "{}", json!({"jsonrpc": "2.0", "method": "notifications/initialized"})).unwrap();
         s
     }

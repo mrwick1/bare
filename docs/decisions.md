@@ -2461,3 +2461,12 @@ Step 3c of `docs/design-gmail-frames.md`. A `MessagePort` in the transfer list o
 - GC rule: a port with `remote` that is enabled is a root. A disabled port, or one with only `me`, is not, and is dropped when nothing reaches it.
 - Settle: a page is not settled while the hub holds a wire (`Kids::blocks`).
 - Differences from a browser: after `close()` the wires that wait for the closed end are dropped, while a local port still delivers the messages queued before a close. The `close` and `messageerror` events are not there.
+
+## bare-mcp has no issue route and no host option (2026-11-18)
+
+Phase 1 of `docs/design-agent-interface.md`. A standalone browser must not know its hosts. Code: `crates/mcp/src/main.rs`.
+
+- The `initialize` text explains the tools only. It names no issue route. The host (`offstage`, `deck`) gives that rule to its agent.
+- `BARE_MCP_REPORT` is removed. `offstage` sets it; the variable now has no effect.
+- `--workspace N` and the `hyprctl` window rule are removed. `bare-mcp` takes no arguments. A host places a window through `WAYLAND_DISPLAY`. `offstage` does this with its own screens.
+- Breaking change: a client that starts `bare-mcp --workspace N` gets a usage error. Remove the argument.
