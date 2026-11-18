@@ -67,6 +67,9 @@ pub(crate) enum Kind {
     /// A supported shorthand.
     Short,
     Custom,
+    /// `transform`: owned by its name, like a custom property, but the engine checks the value and its mask holds the
+    /// engine's move longhands (`TranslateX`, `TranslateY`, not exposed) for the cascade.
+    Whole,
     Opaque,
 }
 
@@ -91,7 +94,19 @@ pub(crate) fn custom(name: &str) -> bool {
 }
 
 pub(crate) fn supported(name: &str) -> bool {
-    Property::from_name(name).is_some() || SHORTHANDS.contains(&name)
+    Property::from_name(name).is_some() || SHORTHANDS.contains(&name) || WHOLE.contains(&name)
+}
+
+/// The supported names of `Kind::Whole`.
+pub(crate) const WHOLE: [&str; 1] = ["transform"];
+
+/// A name that one declaration owns as a whole: a custom property, or one of `WHOLE`.
+fn by_name(name: &str) -> bool {
+    custom(name) || WHOLE.contains(&name)
+}
+
+fn named(k: Kind) -> bool {
+    matches!(k, Kind::Custom | Kind::Whole)
 }
 
 /// The longhands a supported name sets, in the order of the standard. Empty for anything else.
@@ -232,6 +247,16 @@ fn classify(name: &str, value: &str, important: bool) -> Decl {
     if custom(name) {
         return mk(own(), Kind::Custom, 0);
     }
+    if let Some(&w) = WHOLE.iter().find(|&&w| w == name) {
+        let mut side = Side::default();
+        return match SCRATCH.with_borrow_mut(|out| {
+            out.clear();
+            parse_declaration(name, value, important, &mut side, out).then(|| out.iter().fold(0, |m, x| m | bit(x.property)))
+        }) {
+            Some(mask) => mk(Cow::Borrowed(w), Kind::Whole, mask),
+            None => mk(own(), Kind::Opaque, 0),
+        };
+    }
     let long = Property::from_name(name);
     let fixed = long.map(Property::name).or_else(|| SHORTHANDS.iter().copied().find(|&s| s == name));
     match fixed {
@@ -249,7 +274,7 @@ fn classify(name: &str, value: &str, important: bool) -> Decl {
 /// Does a new declaration take every longhand of `e`, or the name of `e`?
 fn vanishes(e: &Decl, new: &Decl) -> bool {
     match e.kind {
-        Kind::Custom => new.kind == Kind::Custom && e.name == new.name,
+        Kind::Custom | Kind::Whole => e.kind == new.kind && e.name == new.name,
         Kind::Long | Kind::Short => e.mask & new.mask != 0 && e.mask & !new.mask == 0,
         Kind::Opaque => false,
     }
@@ -263,12 +288,12 @@ fn absorb(list: &mut Vec<Decl>, mut new: Decl, parsing: bool) {
         return;
     }
     if parsing {
-        if new.kind == Kind::Custom {
-            if list.iter().any(|e| e.important && !new.important && e.kind == Kind::Custom && e.name == new.name) {
+        if named(new.kind) {
+            if list.iter().any(|e| e.important && !new.important && e.kind == new.kind && e.name == new.name) {
                 return;
             }
         } else {
-            let keep = list.iter().filter(|e| e.important && !new.important).fold(new.mask, |m, e| m & !e.mask);
+            let keep = list.iter().filter(|e| e.important && !new.important && !named(e.kind)).fold(new.mask, |m, e| m & !e.mask);
             if keep == 0 {
                 return;
             }
@@ -278,14 +303,14 @@ fn absorb(list: &mut Vec<Decl>, mut new: Decl, parsing: bool) {
     let (mut at, mut kept, mut after) = (None, 0usize, false);
     list.retain_mut(|e| {
         let hit = match e.kind {
-            Kind::Custom => new.kind == Kind::Custom && e.name == new.name,
-            Kind::Long | Kind::Short => e.mask & new.mask != 0,
+            Kind::Custom | Kind::Whole => e.kind == new.kind && e.name == new.name,
+            Kind::Long | Kind::Short => !named(new.kind) && e.mask & new.mask != 0,
             Kind::Opaque => false,
         };
         let mut keep = true;
         if hit {
             at.get_or_insert(kept);
-            if e.kind == Kind::Custom {
+            if named(e.kind) {
                 keep = false;
             } else {
                 let taken = e.mask & new.mask;
@@ -332,14 +357,14 @@ pub(crate) fn parse(text: &str, lim: Lim, charge: Charge) -> F<Vec<Decl>> {
 // ------------------------------------------------------------------------------------------------ reads
 
 pub(crate) fn length(list: &[Decl]) -> usize {
-    list.iter().map(|d| if d.kind == Kind::Custom { 1 } else { d.mask.count_ones() as usize }).sum()
+    list.iter().map(|d| if named(d.kind) { 1 } else { d.mask.count_ones() as usize }).sum()
 }
 
 /// The `i`-th longhand or custom property name, in the order of the list.
 pub(crate) fn item(list: &[Decl], i: usize) -> Option<String> {
     list.iter().flat_map(|d| -> Vec<String> {
         match d.kind {
-            Kind::Custom => vec![d.name.to_string()],
+            Kind::Custom | Kind::Whole => vec![d.name.to_string()],
             Kind::Long | Kind::Short => owned(d).map(|p| p.name().to_string()).collect(),
             Kind::Opaque => vec![],
         }
@@ -432,8 +457,8 @@ fn build(list: &[Decl], name: &str, how: Join, max: usize, charge: Charge) -> F<
 
 /// `getPropertyValue`. `None`: nothing to read (the property is not set, or a shorthand that cannot be written).
 pub(crate) fn get(list: &[Decl], name: &str, max: usize, charge: Charge) -> F<Option<String>> {
-    if custom(name) {
-        return Ok(list.iter().find(|d| d.kind == Kind::Custom && d.name == name).map(|d| d.value.clone()));
+    if by_name(name) {
+        return Ok(list.iter().find(|d| named(d.kind) && d.name == name).map(|d| d.value.clone()));
     }
     if let Some(p) = Property::from_name(name) {
         return match owner(list, p) {
@@ -459,8 +484,8 @@ pub(crate) fn get(list: &[Decl], name: &str, max: usize, charge: Charge) -> F<Op
 
 /// `getPropertyPriority`: all the longhands are set, and all are important.
 pub(crate) fn priority(list: &[Decl], name: &str) -> bool {
-    if custom(name) {
-        return list.iter().any(|d| d.kind == Kind::Custom && d.name == name && d.important);
+    if by_name(name) {
+        return list.iter().any(|d| named(d.kind) && d.name == name && d.important);
     }
     let l = longs(name);
     !l.is_empty() && l.iter().all(|&p| owner(list, p).is_some_and(|i| list[i].important))
@@ -509,8 +534,8 @@ pub(crate) fn remove(list: &mut Vec<Decl>, name: &str, max: usize, charge: Charg
     let old = get(list, name, max, charge)?.unwrap_or_default();
     charge(1 + list.len() as u64)?;
     let before = (list.len(), length(list));
-    if custom(name) {
-        list.retain(|d| !(d.kind == Kind::Custom && d.name == name));
+    if by_name(name) {
+        list.retain(|d| !(named(d.kind) && d.name == name));
     } else {
         let m = mask_of(name);
         for d in list.iter_mut().filter(|d| matches!(d.kind, Kind::Long | Kind::Short)) {
@@ -605,7 +630,7 @@ pub(crate) fn serialize(list: &[Decl], lim: Lim, s: &mut String, charge: Charge)
     let mut pending = false;
     for d in list {
         match d.kind {
-            Kind::Custom | Kind::Opaque => out.decl(&d.name, &d.value, d.important)?,
+            Kind::Custom | Kind::Whole | Kind::Opaque => out.decl(&d.name, &d.value, d.important)?,
             Kind::Short if d.mask == mask_of(&d.name) && d.mask & done == 0 => {
                 out.decl(&d.name, &d.value, d.important)?;
                 done |= d.mask;

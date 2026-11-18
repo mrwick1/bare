@@ -221,7 +221,7 @@ fn named_properties_and_feature_detection() {
     let mut b = at(PAGE);
     js(&mut b, A);
     assert_eq!(js(&mut b, "['color','marginTop','margin-top','margin','cssFloat','float','WebkitBorderHorizontalSpacing','webkitBorderHorizontalSpacing','-webkit-border-horizontal-spacing','backgroundColor','gridTemplateColumns','placeItems'].map(function(k){return k in s}).join()"), "true,true,true,true,true,true,true,true,true,true,true,true");
-    assert_eq!(js(&mut b, "['WebkitAnimation','webkitAnimation','animation','transition','animationend','AnimationEvent','MozAnimation','transform','foo','length2'].map(function(k){return k in s}).join()"), "false,false,true,true,false,false,false,false,false,false");
+    assert_eq!(js(&mut b, "['WebkitAnimation','webkitAnimation','animation','transition','animationend','AnimationEvent','MozAnimation','transform','foo','length2'].map(function(k){return k in s}).join()"), "false,false,true,true,false,false,false,true,false,false");
     // An unsupported name stays a plain JS property: it does not reach the attribute.
     assert_eq!(js(&mut b, "var before = a.getAttribute('style'); s.filter = 'x 1s'; s.filter + (a.getAttribute('style') === before)"), "x 1strue");
     js(&mut b, "s.cssText = ''; delete s.filter");
@@ -791,4 +791,21 @@ fn indexes_and_the_iterator_give_the_longhand_names() {
     assert_eq!(js(&mut b, "var d = document.implementation.createHTMLDocument(''); var e = d.createElement('div'); e.setAttribute('style', 'color: red'); [...e.style].join(',')"), "color");
     // Indexes are read only.
     assert_eq!(js(&mut b, "a.style.cssText = 'color: red'; a.style[0] = 'x'; a.style[0]"), "color");
+}
+
+/// React writes a style object key by key (`style[name] = value`). A popper library writes `transform` this way, so the inline
+/// style must keep it, and the box must move.
+#[test]
+fn transform_named_write_reaches_the_attribute() {
+    let mut b = at("<!doctype html><div id=a style='position: fixed; left: 0; top: 0'></div>");
+    assert_eq!(js(&mut b, "var a = document.getElementById('a'); 'transform' in a.style"), "true");
+    assert_eq!(js(&mut b, "a.style.transform = 'translate(556px, 52px)'; a.getAttribute('style')"), "position: fixed; left: 0; top: 0; transform: translate(556px, 52px);");
+    assert_eq!(js(&mut b, "a.style.transform"), "translate(556px, 52px)");
+    assert_eq!(js(&mut b, "a.style.getPropertyValue('transform')"), "translate(556px, 52px)");
+    assert_eq!(js(&mut b, "a.style.transform = 'translate(0, -200%)'; a.style.transform"), "translate(0, -200%)");
+    assert_eq!(js(&mut b, "a.style.removeProperty('transform'); a.getAttribute('style')"), "position: fixed; left: 0; top: 0;");
+    assert_eq!(js(&mut b, "a.style.setProperty('transform', 'translateX(4px) rotate(10deg)'); a.style.transform"), "translateX(4px) rotate(10deg)");
+    assert_eq!(js(&mut b, "a.style.cssText = 'transform: translate(1px, 2px)'; a.style.length + ',' + a.style.transform"), "1,translate(1px, 2px)");
+    assert_eq!(js(&mut b, "a.style.item(0) + ',' + getComputedStyle(a).transform"), "transform,matrix(1, 0, 0, 1, 1, 2)");
+    assert_eq!(js(&mut b, "a.style.transform = 'wobble(1px)'; a.style.transform"), "translate(1px, 2px)");
 }
