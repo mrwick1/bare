@@ -8,6 +8,8 @@ fn arg(args: &[Value], i: usize) -> Value {
 
 impl<'p> Interp<'p> {
     fn call_native(&mut self, n: Nat, this: Value, args: &[Value], is_new: bool) -> Res<Value> {
+        #[cfg(feature = "census")]
+        crate::census::native(&n);
         let a0 = arg(args, 0);
         match n {
             Nat::Bin(f) => self.call_binary(f, this, args, is_new),

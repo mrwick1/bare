@@ -19,6 +19,8 @@ pub mod regexp;
 pub mod text;
 
 pub mod eval;
+#[cfg(feature = "census")]
+mod census;
 pub mod bc;
 
 mod number;
