@@ -7,3 +7,5 @@
 /// The error of `BARE_JS_EXEC=new` until the new engine runs scripts (plan stage S2).
 pub const NOT_READY: &str = "the new JavaScript engine (bare-js2) cannot run scripts yet; use BARE_JS_EXEC=tree, auto or byte";
 
+
+pub mod value;

@@ -13399,6 +13399,13 @@ Cost rows (`tools/js/instr.sh`, `eval_load` at scale 10, `auto`, base main): eve
 
 Not tested: staging instructions and CPU without `bc-hist`, the typing page, Windows.
 
+## 2026-11-18: NaN-boxed value (plan step S1.2)
+
+`bare-js2` has a `Value` of 8 bytes (`crates/js2/src/value.rs`, design 6.1). A double is stored as it is. Every other value has a tag in the top 16 bits from `0xFFF9`: a 32-bit integer, `undefined`, `null` and the booleans, and pointers to a string, symbol, BigInt or object cell. "Is a double" is one unsigned compare. A NaN whose bits reach the tag space becomes the canonical NaN on entry (`Value::number`), with the same one compare. Pointers go through the exposed-provenance API, so the module has no `unsafe` code; the heap will hold the 48-bit address check (design 6.1); here it is a debug check.
+
+Checks: 5 unit tests, also under Miri (nightly 2026-11-17), including a pointer round trip that reads the cell. Micro row `crates/js2/examples/value_load.rs` (archMachine, release, `tools/js/instr.sh`, min of 3): 327,816,398 instructions for 10,000,000 values and 315,465 for none, so 32.7 instructions per value for one encode and one decode of mixed kinds, with the loop and the checksum.
+
+Not measured: the same row on today's 16-byte `Value`, arm64.
 ## 2026-11-18: host interface crate (plan step S0.2)
 
 A new crate `crates/js-api` (`bare-js-api`) holds the interface between the browser and an engine. It has no engine code. The browser will be generic over its `Engine` trait, and a session picks the engine when it starts (owner decision, 2026-11-18). The host holds handles, not values: a `Local` (a slot in the handle stack of a `Scope`) or a `Persistent` (a slot in a table of the realm). A method that takes `&mut Scope` may collect; a method that takes `&Scope` never does. The decisions on the six questions of S0.1 are in `docs/design-host-interface.md`.
