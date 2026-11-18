@@ -330,6 +330,51 @@ fn random_changes_draw_the_frame_made_from_nothing() {
     });
 }
 
+/// Random changes to a page with shadow trees and slots: a class in a shadow tree, the `slot` of a light child, the `name` of a slot, a
+/// light child added or removed. Each frame equals a frame made from nothing, and most frames style and lay out only what changed.
+#[test]
+fn random_changes_in_shadow_trees_draw_the_frame_made_from_nothing() {
+    big(|| {
+        let mut html = String::from("<!doctype html><style>body{margin:4px}.l{height:20px}.big{height:34px}</style>");
+        for i in 0..12 {
+            html.push_str(&format!("<x-h id=h{i}><div class=l id=a{i}>first {i}</div><div class=l slot=s id=b{i}>second {i}</div>text {i}</x-h>"));
+        }
+        let mut p = page(&html, 300, 200);
+        js(&mut p, "var $ = id => document.getElementById(id), n = 0;\
+            for (const h of document.querySelectorAll('x-h')) h.attachShadow({mode: 'open'}).innerHTML = '<style>:host{display:block;border:1px solid #888}\
+            :host(.on){padding-left:9px} .w{width:150px} .hide{display:none} .t{height:12px;background:#cde} ::slotted(.big){background:#9c9}\
+            slot[name=s]::slotted(*){color:#a00} div > slot{display:block;margin-left:6px}</style><div class=t id=t>top</div><slot></slot><div><slot name=s>fallback</slot></div>';\
+            0");
+        frame(&mut p, "start");
+        let mut seed = 0x5AD0_77E5_1234_9876u64;
+        let mut rnd = |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        let k0 = p.kept;
+        for step in 0..300 {
+            let i = rnd(12);
+            let host = format!("$('h{i}')");
+            let src = match rnd(9) {
+                0 => format!("{host}.shadowRoot.getElementById('t').classList.toggle(['w', 'hide', 'big'][n++ % 3])"),
+                1 => format!("{host}.classList.toggle('on')"),
+                2 => format!("var c = {host}.children[n++ % Math.max(1, {host}.children.length)]; if (c) c.slot = ['', 's', 'x'][n % 3]"),
+                3 => format!("{host}.shadowRoot.querySelectorAll('slot')[n++ % 2].name = ['', 's', 'x'][n % 3]"),
+                4 => format!("var d = document.createElement('div'); d.className = 'l'; d.slot = n % 2 ? 's' : ''; d.textContent = 'added ' + (++n); {host}.append(d)"),
+                5 => format!("if ({host}.children.length > 1) {host}.lastElementChild.remove()"),
+                6 => format!("var c = {host}.firstElementChild; if (c) c.classList.toggle('big')"),
+                7 => format!("var c = {host}.firstElementChild; if (c) $('h{}').append(c)", rnd(12)),
+                _ => format!("{host}.shadowRoot.getElementById('t').textContent = 'top ' + (++n)"),
+            };
+            js(&mut p, &format!("{src}; 0"));
+            frame(&mut p, &format!("step {step}: {src}"));
+        }
+        assert!(p.kept - k0 > 150, "{} of the frames styled and laid out only what changed", p.kept - k0);
+    });
+}
+
 /// The window paints each frame straight into the free one of its two buffers, which holds the frame of two commits ago (or nothing,
 /// after a resize). After a series of small changes each shown buffer must equal the canvas of a headless page that got the same changes.
 #[test]
