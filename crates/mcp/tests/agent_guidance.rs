@@ -78,14 +78,14 @@ fn ref_of(lines: &str, what: &str) -> String {
 }
 
 #[test]
-fn initialize_teaches_the_loop_and_keeps_both_report_rules() {
+fn initialize_teaches_the_loop_and_names_no_report_route() {
     let (_s, init) = Server::start();
     let text = init["result"]["instructions"].as_str().unwrap();
     for tool in ["open", "snapshot", "find", "act", "read", "step", "ensure_session"] {
         assert!(text.contains(tool), "the recipe does not name {tool}");
     }
-    // The default report target, GitHub, stays.
-    assert!(text.contains("GitHub issue on mrwick1/bare") && text.contains("bare-mcp"));
+    // The host that runs the server gives the report route, not the server.
+    assert!(!text.contains("GitHub") && !text.contains("report_issue"), "{text}");
 }
 
 /// Every tool and argument that the guide uses exists in `tools/list`.

@@ -87,7 +87,7 @@ Test: `a_named_second_session_runs_beside_main`. `the_tools_and_arguments_of_the
 
 ## When bare is wrong
 
-If a step fails and the page looks fine in a real browser, call `diagnose`. It gives a verdict: site problem, bare gap, network or unclear. Report a bare gap as the server instructions say (GitHub issue by default, or offstage `report_issue` when `BARE_MCP_REPORT=offstage`). Give the tool call, the result and the expected result.
+If a step fails and the page looks fine in a real browser, call `diagnose`. It gives a verdict: site problem, bare gap, network or unclear. Report a bare gap by the route that your host gives (offstage: `report_issue`, area `bare`; else a GitHub issue on `mrwick1/bare` with the label `bare-mcp`). Give the tool call, the result and the expected result.
 
 ## Action outcomes
 
