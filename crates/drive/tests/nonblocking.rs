@@ -71,6 +71,11 @@ q.addEventListener('input', function () {
   setTimeout(function () { log.push('t' + n); document.getElementById('log').textContent = log.join(',') }, 0)
 })</script></body></html>"#;
 
+/// A timer of 0 ms, then a slow script that the parser waits for. The timer is due while the document waits.
+const HELD: &str = r#"<!doctype html><html><head><script>var log = []; function show(s) { log.push(s); document.getElementById('log').textContent = log.sort().join(',') }
+setTimeout(function () { show('t') }, 0)</script>
+<script src="/js?1"></script><script>show('s')</script></head><body><p id="log"></p></body></html>"#;
+
 /// A red page, served after 500 ms.
 const RED: &str = "<!doctype html><html><body style='background: rgb(255, 0, 0)'><p id=red>red</p></body></html>";
 
@@ -109,6 +114,7 @@ fn connection(mut s: TcpStream) {
             "/scripts" => ("text/html", SCRIPTS),
             "/early" => ("text/html", EARLY),
             "/type" => ("text/html", TYPE),
+            "/held" => ("text/html", HELD),
             "/slow.css" => {
                 std::thread::sleep(SLOW);
                 ("text/css", "#css { color: rgb(255, 0, 0) }")
@@ -303,6 +309,32 @@ fn a_new_document_runs_its_slow_scripts_across_ticks_and_takes_input_between_the
         worst = worst.max(t.elapsed());
         assert!(worst < Duration::from_millis(50), "a tick took {worst:?}");
         assert_eq!(text(&mut p, "log"), ORDER);
+    });
+}
+
+#[test]
+fn a_due_timer_does_not_turn_the_page_while_the_parser_waits_for_a_script() {
+    let origin = serve();
+    big(move || {
+        let mut p = Page::open(&format!("{origin}/"), (800, 600)).unwrap();
+        p.wait_load(std::time::Duration::from_secs(10)).unwrap();
+        p.quiet = true;
+        // A document that a navigation loads runs its scripts in turns (a split document).
+        let (doc, t) = (p.generation(), Instant::now());
+        p.browser().unwrap().run_script("location.href = '/held'").unwrap();
+        // A turn cannot run the timer before the script is in: a tick that says it ran would spin until then.
+        let mut turns = 0;
+        while p.generation() == doc || p.browser().is_none() || text(&mut p, "log") != "1,s,t" {
+            assert!(t.elapsed() < Duration::from_secs(5), "time limit: log {:?}, {turns} turns", p.browser().is_some().then(|| text(&mut p, "log")));
+            let (ran, next) = p.tick();
+            if ran {
+                turns += 1;
+            } else if let Some(next) = next {
+                std::thread::sleep(next.saturating_duration_since(Instant::now()));
+            }
+        }
+        assert!(t.elapsed() >= SLOW);
+        assert!(turns < 50, "{turns} turns in {:?}", t.elapsed());
     });
 }
 
