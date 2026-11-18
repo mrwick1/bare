@@ -308,8 +308,23 @@ impl Page {
         self.browser().and_then(|b| b.selected_labels(h.node))
     }
 
+    /// The checked state of a native checkbox or radio, else `aria-checked="true"` of an ARIA checkable widget (a switch, say).
     pub fn checked(&mut self, h: Handle) -> bool {
-        self.browser().is_some_and(|b| b.input_checked(h.node))
+        match self.aria_checked(h) {
+            Some(on) => on,
+            None => self.browser().is_some_and(|b| b.input_checked(h.node)),
+        }
+    }
+
+    /// For an element that is not an `<input>` and has a checkable ARIA role: is its `aria-checked` "true"? Else `None`.
+    fn aria_checked(&mut self, h: Handle) -> Option<bool> {
+        let b = self.browser()?;
+        let doc = b.document();
+        let doc = doc.borrow();
+        let get = |name| doc.find_atom(name).and_then(|a| doc.attr(h.node, a));
+        let role = get("role")?.split_whitespace().next()?;
+        let checkable = matches!(role, "checkbox" | "radio" | "switch" | "menuitemcheckbox" | "menuitemradio");
+        (checkable && !doc.is_html(h.node, "input")).then(|| get("aria-checked").is_some_and(|v| v.trim() == "true"))
     }
 
     pub fn focused(&mut self, h: Handle) -> bool {
@@ -484,14 +499,15 @@ impl Page {
         Ok((x, y))
     }
 
-    /// Put a checkbox or a radio in the state `on`: a click only when the state differs, then a check of the state.
+    /// Put a checkbox, a radio or an ARIA checkable widget (a switch, say) in the state `on`: a click only when the state differs, then a
+    /// check of the state.
     pub fn set_checked(&mut self, h: Handle, on: bool) -> Result<(), Refusal> {
         let kind = self.browser().and_then(|b| {
             let doc = b.document();
             let doc = doc.borrow();
             doc.is_html(h.node, "input").then(|| crate::browser_dom::input_kind(&doc, h.node))
         });
-        if !matches!(kind, Some("checkbox" | "radio")) {
+        if !matches!(kind, Some("checkbox" | "radio")) && self.aria_checked(h).is_none() {
             return Err(Refusal::Wrong("not_checkable", format!("{} is not a checkbox or a radio", self.describe(h))));
         }
         if self.checked(h) != on {
@@ -573,6 +589,9 @@ impl Page {
     /// Type `text` into a field as a user does: click it, select its text with Control+A (so the new text replaces it), then press one key
     /// for each character (a line feed is Enter). Empty text clears the field with Backspace.
     pub fn type_text(&mut self, h: Handle, text: &str) -> Result<(), Refusal> {
+        if self.is_date_input(h) {
+            return self.fill_date(h, text).map(drop);
+        }
         self.type_start(h, text.is_empty())?;
         for c in text.chars() {
             self.type_char(c);
@@ -586,6 +605,9 @@ impl Page {
     /// character. `last_key`: the last character is a typed key (`type_char`), so a widget that waits for a key (autocomplete) sees one.
     /// Gives the field that has the focus (see `type_start`).
     pub fn fill_text(&mut self, h: Handle, text: &str, last_key: bool) -> Result<Handle, Refusal> {
+        if self.is_date_input(h) {
+            return self.fill_date(h, text);
+        }
         let h = self.type_start(h, text.is_empty())?;
         let (head, last) = match text.char_indices().last() {
             Some((i, c)) if last_key => (&text[..i], Some(c)),
@@ -596,6 +618,40 @@ impl Page {
         }
         if let Some(c) = last {
             self.type_char(c);
+        }
+        self.after_action();
+        Ok(h)
+    }
+
+    /// Is `h` a date or time `<input>` that the user can edit? It takes no keys: `fill_date` fills it.
+    pub fn is_date_input(&mut self, h: Handle) -> bool {
+        self.browser().is_some_and(|b| b.date_kind(h.node).is_some())
+    }
+
+    /// Fill a date or time `<input>` as Playwright `fill` does: the trimmed `text` must be a value that the field keeps as it is (2026-11-18,
+    /// 2026-11, 2026-W47, 10:30, 2026-11-18T10:30; empty clears). Focus the field, set the value, then `input` and `change` fire. No key
+    /// events: a person picks the date in a widget.
+    pub fn fill_date(&mut self, h: Handle, text: &str) -> Result<Handle, Refusal> {
+        self.visible_box(h)?;
+        if self.disabled(h) {
+            return Err(Refusal::Disabled);
+        }
+        let Some(kind) = self.browser().and_then(|b| b.date_kind(h.node)) else { return Err(Refusal::NotEditable) };
+        let v = text.trim();
+        if crate::browser_controls::sanitize(kind, false, v) != v {
+            let like = match kind {
+                "date" => "2026-11-18",
+                "month" => "2026-11",
+                "week" => "2026-W47",
+                "time" => "10:30",
+                _ => "2026-11-18T10:30",
+            };
+            return Err(Refusal::Wrong("malformed_value", format!("{} is a {kind} field: it takes a value such as {like}, not {v:?}", self.describe(h))));
+        }
+        self.focus(h)?;
+        let r = self.browser().map(|b| b.drive_value(h.node, v.to_string()));
+        if let Some(r) = r {
+            self.after(r);
         }
         self.after_action();
         Ok(h)

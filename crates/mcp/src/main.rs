@@ -1,4 +1,4 @@
-//! `bare-mcp [--workspace N]`: an MCP server over stdio for end-to-end tests in `bare`.
+//! `bare-mcp`: an MCP server over stdio for end-to-end tests in `bare`.
 //!
 //! An agent (Claude Code, Codex) starts this program and talks JSON-RPC 2.0 to it: one JSON object on each line of stdin and stdout.
 //! The tools use the test driver (`bare-drive`), so each click and key goes through the same hit testing and input path as a user.
@@ -9,8 +9,7 @@
 //! - `open`, `step`, `close`: a live session. `open` loads a page, each `step` call runs more step lines on the same page, and `close`
 //!   ends it. Each call gives the report of its own steps only, so the server keeps no old records.
 //!
-//! Headless by default. With `window: true` the page shows in a Wayland window. `--workspace N` puts that window on Hyprland workspace
-//! N without taking the focus.
+//! Headless by default. With `window: true` the page shows in a Wayland window on the display that `WAYLAND_DISPLAY` names.
 //!
 //! Only JSON goes to stdout: the protocol owns it. Progress and errors go to stderr. JS: like a Node script that reads `readline`
 //! lines from `process.stdin` and writes `JSON.stringify(reply)` lines to `process.stdout`.
@@ -66,7 +65,6 @@ struct Server {
 
 /// What every thread shares. No lock is held while a page runs: each lock guards a short read or write of a map.
 struct Shared {
-    workspace: Option<u32>,
     /// Saved sessions by name: cookies and storage, in this process only. A file is written only when a call gives `file`.
     saved: Mutex<HashMap<String, StorageState>>,
     /// A counter for the capture folders of this process.
@@ -130,16 +128,8 @@ fn error_result(text: impl Into<String>) -> Value {
 
 fn main() {
     let _monitor = bare_observe::process::Process::from_env(false).unwrap_or_else(|e| { eprintln!("{e}"); std::process::exit(2) });
-    let mut workspace = None;
-    let mut args = std::env::args().skip(1);
-    while let Some(a) = args.next() {
-        match a.as_str() {
-            "--workspace" => match args.next().and_then(|n| n.parse().ok()) {
-                Some(n) => workspace = Some(n),
-                None => return eprintln!("bare-mcp: --workspace N needs a number"),
-            },
-            _ => return eprintln!("usage: bare-mcp [--workspace N]"),
-        }
+    if std::env::args().len() > 1 {
+        return eprintln!("usage: bare-mcp");
     }
     bare_net::parallel::limit_malloc_arenas(false);
     // This thread only reads requests and routes them (`Shared::handle_line`), so `ping`, `tools/list` and `notifications/cancelled` are
@@ -179,7 +169,6 @@ fn main() {
         let _ = itx.send(Input::Eof);
     });
     let shared = Arc::new(Shared {
-        workspace,
         saved: Mutex::new(HashMap::new()),
         runs: AtomicU32::new(0),
         net: Mutex::new(bare_net::http::Client::new()),
@@ -226,7 +215,7 @@ impl Shared {
                 "protocolVersion": params.get("protocolVersion").cloned().unwrap_or(json!("2025-06-18")),
                 "capabilities": {"tools": {}},
                 "serverInfo": {"name": "bare-mcp", "version": env!("CARGO_PKG_VERSION")},
-                "instructions": instructions(std::env::var("BARE_MCP_REPORT").ok().as_deref()),
+                "instructions": instructions(),
             })),
             "ping" => Ok(json!({})),
             "tools/list" => Ok(json!({"tools": tools()})),
@@ -573,7 +562,6 @@ impl Server {
         let src = args.get("steps").and_then(Value::as_str).ok_or("steps (the text of a step file) is required")?;
         let (opt, mut red, vars) = self.options(args)?;
         let list = steps::parse(src, &vars).map_err(|e| red.clean(&e))?;
-        self.place_window(&opt)?;
         let report = bare_drive::run::run(&list, &opt, &mut red);
         Ok(with_out(report.json(&red), &opt, true))
     }
@@ -668,7 +656,6 @@ impl Server {
         let name = session_name(args);
         let _ = self.close(args);
         let (opt, red, vars) = self.options(args)?;
-        self.place_window(&opt)?;
         // One client for the server: a script or a style sheet that an earlier `open` loaded is in its reply cache, and its connections stay
         // open. `fresh` gives this open a clean client. Cookies and storage are the document's own either way.
         let net = if args.get("fresh").and_then(Value::as_bool) == Some(true) { bare_net::http::Client::new() } else { lock(&self.shared.net).fork() };
@@ -1240,7 +1227,6 @@ impl Server {
         let (size, timeout, window, red, vars, state) = (l.opt.size, l.opt.timeout, l.opt.window, l.red.clone(), l.vars.clone(), l.session.export_state());
         let (mut opt, _, _) = self.options(&json!({"width": size.0, "height": size.1, "timeout_ms": timeout.as_millis() as u64, "window": window}))?;
         opt.progress = false;
-        self.place_window(&opt)?;
         let (done, wait) = mpsc::channel();
         let name = self.shared.start_tab(base, Tab { opt, red, vars, state, url: url.to_string(), done })?;
         loop {
@@ -1390,36 +1376,14 @@ impl Server {
         }
         Ok((opt, red, vars))
     }
-
-    /// Before a window opens: ask Hyprland to put the driven window on the workspace, without the focus. The rule lives in the running
-    /// compositor only (a config reload drops it), so it is set again before each window.
-    fn place_window(&self, opt: &Options) -> Result<(), String> {
-        let (true, Some(n)) = (opt.window, self.shared.workspace) else { return Ok(()) };
-        // The Lua config of Hyprland 0.56 (`hyprctl keyword` refuses it). A named rule replaces the rule of the same name, so the rules do
-        // not pile up. `silent`: the window does not take the focus or move the view.
-        let rule = format!(r#"hl.window_rule({{ name = "bare-mcp", match = {{ class = "^(bare)$", title = "^(bare \\(driven\\))$" }}, workspace = "{n} silent" }})"#);
-        let out = std::process::Command::new("hyprctl").args(["eval", &rule]).output().map_err(|e| format!("hyprctl: {e}"))?;
-        let said = String::from_utf8_lossy(&out.stdout);
-        if !out.status.success() || !said.trim().eq_ignore_ascii_case("ok") {
-            return Err(format!("hyprctl did not set the window rule: {}", said.trim()));
-        }
-        Ok(())
-    }
 }
 
-/// The `initialize` text. `BARE_MCP_REPORT=offstage` sends reports through offstage, not GitHub.
-fn instructions(report: Option<&str>) -> String {
-    let first = "Loop: open a URL (a live session; session=NAME runs more beside main); snapshot or find to get refs; act with a fresh ref or a loc such as label=\"Email\"; \
+/// The `initialize` text: how to use the tools. The host that runs this server gives its own rules, such as where to report problems.
+fn instructions() -> &'static str {
+    "Loop: open a URL (a live session; session=NAME runs more beside main); snapshot or find to get refs; act with a fresh ref or a loc such as label=\"Email\"; \
         then check evidence on the page (step expect, read, links, a screenshot), never the click receipt alone. On a failure read the error and the page before you retry a side effect. \
         Refs end at navigation; act type replaces a field's text; a dialog that act opens is accepted unless dialog=dismiss; a tab the page opens is session NAME~2. \
-        Use eval to read, not to click or type. Call ensure_session only for a logged-in journey: it restores a saved login (save_state name) or logs in again; a public page needs only open. \
-        Details: docs/agent-browser-guide.md. ";
-    let rest = if report == Some("offstage") {
-        "When this server fails or behaves wrong, report it with the offstage tool report_issue, area \"bare\". Never open a GitHub issue. Give the tool call, the result and the expected result."
-    } else {
-        "When this server fails or behaves wrong, file an issue: a GitHub issue on mrwick1/bare with the label bare-mcp. Give the tool call, the result and the expected result."
-    };
-    format!("{first}{rest}")
+        Use eval to read, not to click or type. Call ensure_session only for a logged-in journey: it restores a saved login (save_state name) or logs in again; a public page needs only open."
 }
 
 /// Add the capture folder to a report, so the agent can read the pictures of `shot` steps and failures. At the `end` of a run an empty
@@ -1698,8 +1662,8 @@ fn tools() -> Value {
                 "verification": {"type": "string", "enum": ["not_requested", "passed", "failed", "not_run", "unknown"]},
                 "failure": {"type": "object", "properties": {"code": {"type": "string"}, "message": {"type": "string"}, "next_action": {"type": "string"}, "input_dispatched": {"type": "string", "enum": ["no", "unknown"]}}, "required": ["code", "message", "next_action", "input_dispatched"]}
             }, "required": ["action_status", "page_status", "verification"]},
-            "description": "Act on the live page like a user and get a short receipt (ok, or the failure with a hint, up to 3 script error lines for uncaught errors, new console errors and failed requests, navigation, dialogs and the answer given, tabs the page opened: \"opened tab: main~2 URL\" is a new session that you read with session=main~2 and end with close), then what changed on the page (only the lines marked *, with the lines that hold them; the whole outline after a navigation or with diff false). Ops: click, fill (clears the field, then inserts text as one edit with no key events, like Playwright fill: one render on a heavy React form; use it for plain fields; last_key true types the last character as a key, for autocomplete), type (clears the field, then types text one key at a time; \\n is Enter; for fields that need keys: autocomplete, masks; each key runs the page handlers, so on a heavy form a long text costs one render per character: use fill for long text), press (key: Enter, Escape, Tab, Control+a; with ref it acts on that element, and Enter in a form field submits the form), scroll (dy pixels, over ref or the page), goto (url), reload, back, forward (the history), wait (ref until text state: visible, hidden, enabled, checked, text~\"x\"), select (text = the option label or value; options = several for a multiple select; fires input and change), check and uncheck (a checkbox or radio; clicks only when the state differs), hover (pointer over the element: :hover and mouseenter), dblclick, upload (files = local paths for an <input type=file>, at most 100 MiB each; a hidden input needs loc css=\"input[type=file]\"). The action waits for the element up to the timeout_ms that open set (act takes no timeout_ms).",
-            "inputSchema": {"type": "object", "properties": {"session": S, "expect": {"type": "string", "description": "Optional postconditions: one or more expect step lines (no JavaScript). Validated before the action. A failed check keeps action_status completed: inspect before retrying."}, "op": {"type": "string", "enum": ["click", "fill", "type", "select", "check", "uncheck", "hover", "dblclick", "upload", "press", "scroll", "goto", "reload", "back", "forward", "wait"]}, "options": {"type": "array", "items": {"type": "string"}, "description": "For select: several options of a multiple select."}, "files": {"type": "array", "items": {"type": "string"}, "description": "For upload: local file paths."}, "dialog": {"type": "string", "enum": ["accept", "dismiss"], "description": "How to answer alert, confirm and prompt dialogs that the action opens. Default accept. The receipt lists each one."}, "prompt_text": {"type": "string", "description": "The answer of an accepted prompt. Default: the default value of the prompt."}, "ref": {"type": "string", "description": "e7 from snapshot or find."}, "loc": {"type": "string", "description": "A step locator instead of ref: role=button name=\"Save\", label=\"Email\", text=\"x\", css=\"...\"."}, "text": {"type": "string"}, "last_key": {"type": "boolean", "description": "For fill: type the last character as a key (autocomplete sees a key). Default false."}, "key": {"type": "string"}, "dy": {"type": "number"}, "url": {"type": "string"}, "snapshot": {"type": "boolean", "description": "Default true: add the changes of the page after the action."}, "diff": {"type": "boolean", "description": "Default true. False: add the whole outline instead of the changes."}, "mode": {"type": "string", "enum": ["interactive", "all"]}, "max_chars": {"type": "integer"}}, "required": ["op"]},
+            "description": "Act on the live page like a user and get a short receipt (ok, or the failure with a hint, up to 3 script error lines for uncaught errors, new console errors and failed requests, navigation, dialogs and the answer given, tabs the page opened: \"opened tab: main~2 URL\" is a new session that you read with session=main~2 and end with close), then what changed on the page (only the lines marked *, with the lines that hold them; the whole outline after a navigation or with diff false). Ops: click, fill (clears the field, then inserts text as one edit with no key events, like Playwright fill: one render on a heavy React form; use it for plain fields; last_key true types the last character as a key, for autocomplete), type (clears the field, then types text one key at a time; \\n is Enter; for fields that need keys: autocomplete, masks; each key runs the page handlers, so on a heavy form a long text costs one render per character: use fill for long text), press (key: Enter, Escape, Tab, Control+a; with ref it acts on that element, and Enter in a form field submits the form), scroll (dy pixels, over ref or the page), goto (url), reload, back, forward (the history), wait (ref until text state: visible, hidden, enabled, checked, text~\"x\"), select (text = the option label or value; options = several for a multiple select; fires input and change), check and uncheck (a checkbox, a radio, or an ARIA role=switch, checkbox or radio with aria-checked; clicks only when the state differs), hover (pointer over the element: :hover and mouseenter), dblclick, upload (files = local paths for an <input type=file>, at most 100 MiB each; a hidden input needs loc css=\"input[type=file]\"). The action waits for the element up to the timeout_ms that open set (act takes no timeout_ms).",
+            "inputSchema": {"type": "object", "properties": {"session": S, "expect": {"type": "string", "description": "Optional postconditions: one or more expect step lines (no JavaScript). Validated before the action. A failed check keeps action_status completed: inspect before retrying."}, "op": {"type": "string", "enum": ["click", "fill", "type", "select", "check", "uncheck", "hover", "dblclick", "upload", "press", "scroll", "goto", "reload", "back", "forward", "wait"]}, "options": {"type": "array", "items": {"type": "string"}, "description": "For select: several options of a multiple select."}, "files": {"type": "array", "items": {"type": "string"}, "description": "For upload: local file paths."}, "dialog": {"type": "string", "enum": ["accept", "dismiss"], "description": "How to answer alert, confirm and prompt dialogs that the action opens. Default accept. The receipt lists each one."}, "prompt_text": {"type": "string", "description": "The answer of an accepted prompt. Default: the default value of the prompt."}, "ref": {"type": "string", "description": "e7 from snapshot or find."}, "loc": {"type": "string", "description": "A step locator instead of ref: role=button name=\"Save\", label=\"Email\", text=\"x\", css=\"...\"."}, "text": {"type": "string", "description": "For type and fill. A date or time field takes its value format: 2026-11-18, 2026-11, 2026-W47, 10:30 or 2026-11-18T10:30."}, "last_key": {"type": "boolean", "description": "For fill: type the last character as a key (autocomplete sees a key). Default false."}, "key": {"type": "string"}, "dy": {"type": "number"}, "url": {"type": "string"}, "snapshot": {"type": "boolean", "description": "Default true: add the changes of the page after the action."}, "diff": {"type": "boolean", "description": "Default true. False: add the whole outline instead of the changes."}, "mode": {"type": "string", "enum": ["interactive", "all"]}, "max_chars": {"type": "integer"}}, "required": ["op"]},
         },
         {
             "name": "find",
@@ -1764,14 +1728,12 @@ mod instructions_tests {
     use super::instructions;
 
     #[test]
-    fn report_target_follows_the_variable() {
-        let gh = instructions(None);
-        assert!(gh.contains("GitHub issue on mrwick1/bare"));
-        assert_eq!(gh, instructions(Some("other")));
-        let off = instructions(Some("offstage"));
-        assert!(off.contains("report_issue, area \"bare\". Never open a GitHub issue."));
-        assert!(!off.contains("mrwick1/bare"));
-        assert_eq!(gh[..gh.find("When").unwrap()], off[..off.find("When").unwrap()]);
+    fn text_names_no_issue_route_or_host() {
+        let t = instructions();
+        assert!(t.starts_with("Loop: open a URL"));
+        for word in ["issue", "report", "GitHub", "offstage", "mrwick1", "docs/"] {
+            assert!(!t.contains(word), "{word} in {t}");
+        }
     }
 }
 
@@ -1782,7 +1744,7 @@ mod dispatch_tests {
     fn test_shared() -> Arc<Shared> {
         let (out, _output) = mpsc::channel();
         Arc::new(Shared {
-            workspace: None, saved: Mutex::new(HashMap::new()), runs: AtomicU32::new(0),
+            saved: Mutex::new(HashMap::new()), runs: AtomicU32::new(0),
             net: Mutex::new(bare_net::http::Client::new()), out,
             sessions: Mutex::new(HashMap::new()), inflight: Mutex::new(HashMap::new()),
             threads: Mutex::new(Vec::new()), closing: AtomicBool::new(false),

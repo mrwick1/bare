@@ -158,7 +158,7 @@ pub(crate) fn set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], tags: 
     };
     crate::browser_dom::attr_set(d, it, n, attr, &s)?;
     if attr == "src" {
-        d.frame_src(n);
+        d.frame_src(it, n);
     }
     Ok(Value::Undefined)
 }

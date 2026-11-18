@@ -569,6 +569,14 @@ impl Reach {
                         }
                         continue;
                     }
+                    Simple::Host(h) => {
+                        // `:host(.a)` reads the host. `:host-context(.a)` also reads its ancestors, so a change there reaches down to the host.
+                        let at = if h.context { at.max(Scope::Subtree) } else { at };
+                        for a in &h.args {
+                            simples(me, a, at);
+                        }
+                        continue;
+                    }
                     Simple::Complex(cx) => {
                         // A compound of the argument left of a combinator is read on an ancestor or an earlier sibling, like one of the selector.
                         for a in &cx.args {
@@ -590,7 +598,8 @@ impl Reach {
                 *slot = (*slot).max(at);
             }
         }
-        let mut at = Scope::Own;
+        // `::slotted()` and `::part()` style the nodes below the element that the compounds read: a slot, or a host.
+        let mut at = pseudo_args(selector, |list| simples(self, list, Scope::Own));
         for (i, c) in selector.compounds.iter().enumerate() {
             if i > 0 {
                 at = at.max(match selector.compounds[i - 1].combinator {
@@ -601,6 +610,53 @@ impl Reach {
             simples(self, &c.simples, at);
         }
     }
+}
+
+/// The host of the shadow tree whose slots a change can make take other nodes, or whose shadow root gets other children: the change
+/// reaches all of the host. That is a node linked to or unlinked from a host, a shadow root, or a shadow tree with a `<slot>` in it, and
+/// a change of `slot` on a child of a host or of `name` on a slot. `None` for other changes.
+pub fn slot_host(doc: &Document, mark: Mark) -> Option<NodeId> {
+    if !doc.has_shadow_roots() {
+        return None;
+    }
+    let slot = doc.find_atom("slot");
+    let is_slot = |n: NodeId| matches!(*doc.data(n), NodeData::Element { name, .. } if Some(name) == slot);
+    let host_of_tree = |n: NodeId| doc.shadow_host(doc.tree_root(n));
+    match mark {
+        Mark::Link { parent, node } | Mark::Unlink { parent, node } => {
+            if doc.shadow_root(parent).is_some() {
+                Some(parent)
+            } else if let Some(host) = doc.shadow_host(parent) {
+                Some(host)
+            } else {
+                host_of_tree(parent).filter(|_| {
+                    let mut stack = vec![node];
+                    let mut found = false;
+                    while let Some(n) = stack.pop()
+                        && !found
+                    {
+                        found = is_slot(n);
+                        stack.extend(doc.children(n));
+                    }
+                    found
+                })
+            }
+        }
+        Mark::Attr { el, name, .. } if Some(name) == slot => doc.parent(el).filter(|&p| doc.shadow_root(p).is_some()),
+        Mark::Attr { el, name, .. } if Some(name) == doc.find_atom("name") && is_slot(el) => host_of_tree(el),
+        _ => None,
+    }
+}
+
+/// Give `f` the compound of `::slotted()` or `::part()`, which the styled node reads itself. Gives the scope of the compounds of the selector:
+/// `Subtree` with one of the two (the styled node is below the slot or the host that they read), else `Own`.
+fn pseudo_args(selector: &Selector, mut f: impl FnMut(&[Simple])) -> Scope {
+    match selector.pseudo.as_deref() {
+        None => return Scope::Own,
+        Some(ShadowPseudo::Slotted(arg)) => f(arg),
+        Some(ShadowPseudo::Part { then, .. }) => f(then),
+    }
+    Scope::Subtree
 }
 
 /// Which elements a change of the attribute `name` of `el` can move in or out of a form pseudo-class (`form.rs`). `Scope::None`:
@@ -706,6 +762,14 @@ impl Scopes {
                         }
                         continue;
                     }
+                    Simple::Host(h) => {
+                        // `:host(.a)` reads the host. `:host-context(.a)` also reads its ancestors, so a change there reaches down to the host.
+                        let at = if h.context { at.max(Scope::Subtree) } else { at };
+                        for a in &h.args {
+                            simples(me, a, at);
+                        }
+                        continue;
+                    }
                     Simple::Complex(cx) => {
                         // As in `Reach::add`. A `+` or `~` in the argument also makes the place of a sibling count.
                         for a in &cx.args {
@@ -731,7 +795,7 @@ impl Scopes {
                 *slot = (*slot).max(at);
             }
         }
-        let mut at = Scope::Own;
+        let mut at = pseudo_args(selector, |list| simples(self, list, Scope::Own));
         for (i, c) in selector.compounds.iter().enumerate() {
             if i > 0 {
                 let way = match selector.compounds[i - 1].combinator {
@@ -796,6 +860,7 @@ impl RuleSet {
             }
             Scopes::at(sc.empty, parent, doc, out);
         };
+        out.extend(slot_host(doc, mark).map(|h| (h, true)));
         match mark {
             Mark::Link { parent, node } => {
                 out.push((node, true));
@@ -1391,7 +1456,9 @@ impl RuleSet {
     }
 
     fn restyle_with<const PENDING: bool>(&self, doc: &Document, styles: &mut Styles, roots: &[(NodeId, bool)], changed: &mut Vec<(NodeId, u32)>) -> bool {
-        if self.scoped(doc) {
+        let shadowed = doc.has_shadow_roots();
+        // A change reaches a part through its host and each `exportparts` on the way: not followed here.
+        if shadowed && (!self.parts.is_empty() || self.shadows.values().any(|t| !t.parts.is_empty())) {
             return false;
         }
         let html = doc.children(doc.root()).find(|&n| matches!(doc.data(n), NodeData::Element { .. }));
@@ -1412,12 +1479,24 @@ impl RuleSet {
         // them. The drop is made here and not in the walk below, which is hot and gets slower with a set in it. A subtree root always styles
         // its whole subtree, or hides it (then a root inside has a hidden ancestor and the walk skips it too). A root that is not a
         // subtree root styles it only when its own style changes: it covers nothing here.
-        let mut order: Vec<(usize, NodeId, bool)> = roots.iter().map(|&(n, sub)| (std::iter::successors(Some(n), |&p| doc.flat_parent(p)).count(), n, sub)).collect();
+        // A root that is not shown has no style, and neither has what is below it, though it moved there from a place that is shown. Done
+        // before the drop below: the root that covers it may be a hidden element that does not look inside.
+        for &(n, _) in roots.iter().filter(|r| matches!(doc.data(r.0), NodeData::Element { .. })) {
+            let shown = std::iter::successors(doc.style_parent(n), |&p| doc.style_parent(p)).try_for_each(|a| {
+                let s = styles.of_node[a.index()];
+                let hidden = a != doc.root() && (s == NONE || styles.styles[s as usize].get(Property::Display) == Value::Keyword(Keyword::None));
+                if hidden || a == doc.root() { Err(!hidden) } else { Ok(()) }
+            });
+            if shown != Err(true) {
+                Self::unstyle(doc, styles, vec![n]);
+            }
+        }
+        let mut order: Vec<(usize, NodeId, bool)> = roots.iter().map(|&(n, sub)| (std::iter::successors(Some(n), |&p| doc.style_parent(p)).count(), n, sub)).collect();
         order.sort_unstable_by_key(|r| (r.0, r.1.index(), !r.2));
         order.dedup_by(|a, b| a.1 == b.1);
         let mut whole: std::collections::HashSet<usize, BuildHasherDefault<Fnv>> = Default::default();
         order.retain(|&(_, n, sub)| {
-            if !whole.is_empty() && std::iter::successors(doc.flat_parent(n), |&p| doc.flat_parent(p)).any(|p| whole.contains(&p.index())) {
+            if !whole.is_empty() && std::iter::successors(doc.style_parent(n), |&p| doc.style_parent(p)).any(|p| whole.contains(&p.index())) {
                 return false;
             }
             if sub && matches!(doc.data(n), NodeData::Element { .. }) {
@@ -1426,17 +1505,16 @@ impl RuleSet {
             true
         });
         let (mut candidates, mut matched): (Vec<u32>, Vec<u32>) = (Vec::new(), Vec::new());
-        // As in `walk`: the flat tree, and only the browser's rules in a shadow tree. The third value says the node is in one.
-        let mut stack: Vec<(NodeId, bool, bool)> = Vec::new();
-        let in_shadow = |n: NodeId| doc.has_shadow_roots() && doc.parent(n).is_some_and(|p| doc.shadow_host(p).is_some());
+        // As in `walk`: the tree of the cascade (the flat tree with the slots in it), and in a shadow tree the browser's rules and the rules
+        // of the tree. The third value is the tree of the node (`scope_of`).
+        let mut stack: Vec<(NodeId, bool, u32)> = Vec::new();
         'roots: for &(_, root, subtree) in &order {
             if !matches!(doc.data(root), NodeData::Element { .. }) {
                 continue;
             }
             // Only a connected root that is shown: inside `display: none` all styles are `NONE`, and the hidden element has its own.
             let mut filter = AncestorFilter::new(self.tracks());
-            let mut shadow = in_shadow(root);
-            let mut up = doc.flat_parent(root);
+            let mut up = doc.style_parent(root);
             while let Some(a) = up {
                 if a == doc.root() {
                     break;
@@ -1446,15 +1524,14 @@ impl RuleSet {
                     continue 'roots;
                 }
                 filter.add_element(doc, a);
-                shadow |= in_shadow(a);
-                up = doc.flat_parent(a);
+                up = doc.style_parent(a);
             }
             if up.is_none() {
                 continue;
             }
             stack.clear();
-            stack.push((root, false, shadow));
-            while let Some((node, leaving, shadow)) = stack.pop() {
+            stack.push((root, false, if shadowed { scope_of(doc, root) } else { 0 }));
+            while let Some((node, leaving, scope)) = stack.pop() {
                 if !matches!(doc.data(node), NodeData::Element { .. }) {
                     continue;
                 }
@@ -1462,18 +1539,19 @@ impl RuleSet {
                     filter.remove_element(doc, node);
                     continue;
                 }
-                let parent = doc.flat_parent(node).map_or(0, |p| styles.of_node[p.index()]);
+                let parent = doc.style_parent(node).map_or(0, |p| styles.of_node[p.index()]);
                 let parent = if parent == NONE { 0 } else { parent };
-                self.candidates(doc, node, &mut candidates, &filter);
-                if shadow {
-                    candidates.retain(|&i| self.entries[i as usize].origin == Origin::UserAgent);
-                }
-                matched.clear();
-                for &i in &candidates {
-                    let e = &self.entries[i as usize];
-                    let possible = e.ancestors.iter().take_while(|&&h| h != 0).all(|&h| filter.may_contain(h));
-                    if possible && matches(doc, node, &e.selector) {
-                        matched.push(i);
+                if shadowed {
+                    self.match_shadowed(doc, node, scope, &filter, &mut (&mut candidates, &mut matched));
+                } else {
+                    self.candidates(doc, node, &mut candidates, &filter);
+                    matched.clear();
+                    for &i in &candidates {
+                        let e = &self.entries[i as usize];
+                        let possible = e.ancestors.iter().take_while(|&&h| h != 0).all(|&h| filter.may_contain(h));
+                        if possible && matches(doc, node, &e.selector) {
+                            matched.push(i);
+                        }
                     }
                 }
                 matched.sort_unstable();
@@ -1493,12 +1571,8 @@ impl RuleSet {
                 if styles.styles[id as usize].get(Property::Display) == Value::Keyword(Keyword::None) {
                     // Nothing inside has a style now.
                     if old != NONE && styles.styles[old as usize].get(Property::Display) != Value::Keyword(Keyword::None) {
-                        let mut gone: Vec<NodeId> = doc.flat_children(node).collect();
-                        while let Some(n) = gone.pop() {
-                            if std::mem::replace(&mut styles.of_node[n.index()], NONE) != NONE {
-                                gone.extend(doc.flat_children(n));
-                            }
-                        }
+                        Self::unstyle(doc, styles, vec![node]);
+                        styles.of_node[node.index()] = id;
                     }
                     continue;
                 }
@@ -1506,12 +1580,19 @@ impl RuleSet {
                     continue;
                 }
                 filter.add_element(doc, node);
-                stack.push((node, true, shadow));
-                let host = doc.shadow_root(node);
-                let mut child = doc.last_child(host.unwrap_or(node));
-                while let Some(c) = child {
-                    stack.push((c, false, shadow || host.is_some()));
-                    child = doc.prev_sibling(c);
+                stack.push((node, true, scope));
+                if shadowed {
+                    // The light children of a host that no slot takes, and the fallback of a slot that takes nodes, are not in the tree of
+                    // the cascade now: a full walk leaves them with no style.
+                    let out = if doc.shadow_root(node).is_some() { doc.children(node).filter(|&c| doc.style_parent(c).is_none()).collect() } else if doc.is_slot(node) && !doc.assigned_nodes(node).is_empty() { doc.children(node).collect() } else { Vec::new() };
+                    Self::unstyle(doc, styles, out);
+                    push_children(doc, node, scope, &mut stack);
+                } else {
+                    let mut child = doc.last_child(node);
+                    while let Some(c) = child {
+                        stack.push((c, false, 0));
+                        child = doc.prev_sibling(c);
+                    }
                 }
             }
         }
@@ -1519,8 +1600,19 @@ impl RuleSet {
         ok
     }
 
-    /// Does the cascade of `doc` use the rules of a shadow tree, or slots? A partial restyle cannot follow them: a change reaches through the host, a slot
-    /// and a part, and `restyle` and `style_hidden` give up (the caller runs the whole cascade).
+    /// Take the styles of `nodes` and of all the nodes below them: in the tree, in a shadow tree, and the nodes that a slot takes. A node
+    /// with no style can have one below it: a node that moved there keeps the style of its old place.
+    fn unstyle(doc: &Document, styles: &mut Styles, mut nodes: Vec<NodeId>) {
+        while let Some(n) = nodes.pop() {
+            styles.of_node[n.index()] = NONE;
+            nodes.extend(doc.children(n));
+            nodes.extend(doc.shadow_root(n).into_iter().flat_map(|r| doc.children(r)));
+            nodes.extend(doc.assigned_nodes(n));
+        }
+    }
+
+    /// Does the cascade of `doc` use the rules of a shadow tree, or slots? `style_hidden` cannot follow them: a change reaches through the host, a slot
+    /// and a part, and it gives up (the caller runs the whole cascade).
     fn scoped(&self, doc: &Document) -> bool {
         doc.has_shadow_roots() && (!self.shadows.is_empty() || !self.parts.is_empty() || doc.has_slots())
     }

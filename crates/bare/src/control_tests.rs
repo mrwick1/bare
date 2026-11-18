@@ -148,6 +148,27 @@ fn refusals_send_no_event() {
     });
 }
 
+/// A date or time field is filled as Playwright `fill` does: a valid value is set, then `input` and `change` fire, with no key events.
+/// A value that the field would not keep as it is is refused, and nothing is sent.
+#[test]
+fn date_fields_take_a_valid_value() {
+    big(|| {
+        let mut p = page(
+            r#"<body style="margin:0"><input id=dt type=datetime-local><input id=d type=date readonly>
+<script>window.log = []; for (const n of ['keydown', 'input', 'change']) document.getElementById('dt').addEventListener(n, function () { log.push(n) });</script></body>"#,
+            300,
+        );
+        let (dt, d) = (one(&mut p, "#dt"), one(&mut p, "#d"));
+        assert!(matches!(p.type_text(dt, "11182026"), Err(Refusal::Wrong("malformed_value", _))));
+        assert_eq!(js(&mut p, "log.join()"), "");
+        assert!(p.type_text(dt, " 2026-11-18T10:30 ").is_ok());
+        assert_eq!(js(&mut p, "document.getElementById('dt').value + ' ' + log.join() + ' ' + document.activeElement.id"), "2026-11-18T10:30 input,change dt");
+        assert!(p.fill_text(dt, "2026-12-01T08:00", false).is_ok());
+        assert_eq!(js(&mut p, "document.getElementById('dt').value"), "2026-12-01T08:00");
+        assert_eq!(p.type_text(d, "2026-11-18"), Err(Refusal::NotEditable));
+    });
+}
+
 /// A wheel turn moves the boxes under a still pointer: `:hover` and the boundary events follow the new layout before the next action,
 /// as Chrome's fake mouse move does.
 #[test]

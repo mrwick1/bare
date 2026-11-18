@@ -30,7 +30,7 @@ use std::io::{self, ErrorKind, Read, Write};
 // These give us the `read` and `write` functions on a connection.
 // Rust needs this import before you can call them.
 use std::net::{SocketAddr, TcpStream};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 // JS: like a shared reference. `Arc` lets two owners hold one value, and a copy of the `Arc` costs nothing.
 // `SocketAddr` is an IP address plus a port. `TcpStream` is an open connection.
 use std::time::{Duration, Instant};
@@ -81,7 +81,41 @@ type Server = (Scheme, String, u32);
 /// connection back to it. A server keeps at most `MAX_IDLE_PER_SERVER`: the number of connections that one page uses at once.
 type Pool = Arc<Mutex<HashMap<Server, Vec<IdleConnection>>>>;
 
-const MAX_IDLE_PER_SERVER: usize = parallel::MAX_WORKERS;
+const MAX_IDLE_PER_SERVER: usize = parallel::MAX_PER_SERVER;
+
+/// The HTTP/1.1 connections in use, by server. A request waits while a server has `MAX_PER_SERVER` (`Slots::take`).
+#[derive(Default)]
+struct Slots {
+    used: Mutex<HashMap<Server, usize>>,
+    free: Condvar,
+}
+
+/// One HTTP/1.1 connection in use. Dropped: the server has one more free.
+struct Slot(Arc<Slots>, Server);
+
+impl Slots {
+    fn take(self: &Arc<Self>, server: &Server) -> Slot {
+        let mut used = self.used.lock().unwrap_or_else(|e| e.into_inner());
+        while used.get(server).is_some_and(|&n| n >= parallel::MAX_PER_SERVER) {
+            used = self.free.wait(used).unwrap_or_else(|e| e.into_inner());
+        }
+        *used.entry(server.clone()).or_default() += 1;
+        Slot(self.clone(), server.clone())
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        let mut used = self.0.used.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = used.get_mut(&self.1) {
+            *n -= 1;
+            if *n == 0 {
+                used.remove(&self.1);
+            }
+        }
+        self.0.free.notify_all();
+    }
+}
 
 /// The HTTP/2 session of each server that has one. A session takes many requests at once, so it is never taken out of the map.
 type Sessions = Arc<Mutex<HashMap<Server, Arc<h2::Conn>>>>;
@@ -299,6 +333,8 @@ pub struct Client {
     idle: Pool,
     // The HTTP/2 sessions, by server (see `h2.rs`). A fork shares them.
     sessions: Sessions,
+    // The HTTP/1.1 connections in use, by server. A fork shares them.
+    slots: Arc<Slots>,
     // The open connections that wait for a next request.
     // The key is the server: its scheme, host and port. A connection only works for the server
     // it was opened to. The value is the connection and the time it became idle.
@@ -389,7 +425,7 @@ impl Client {
 
     /// A second client that shares the connections, the root certificates and the worker threads of this one. The reply cache is not shared.
     pub fn fork(&self) -> Client {
-        Client { idle: self.idle.clone(), sessions: self.sessions.clone(), cache: self.cache.clone(), roots: self.roots.clone(), workers: self.workers.clone(), jar: self.jar.clone(), site: self.site.clone(), identity: self.identity.clone(), tape: self.tape.clone(), big: false }
+        Client { idle: self.idle.clone(), sessions: self.sessions.clone(), slots: self.slots.clone(), cache: self.cache.clone(), roots: self.roots.clone(), workers: self.workers.clone(), jar: self.jar.clone(), site: self.site.clone(), identity: self.identity.clone(), tape: self.tape.clone(), big: false }
     }
 
     /// Let a reply declare more than `MAX_REPLY` bytes. The body still stops at `MAX_REPLY` and at `MAX_TIME` until the caller calls
@@ -401,7 +437,7 @@ impl Client {
     /// A fork with connections of its own: no idle connection and no HTTP/2 session is shared. A download range must not share the TCP
     /// connection of another range.
     pub fn fork_alone(&self) -> Client {
-        Client { idle: Pool::default(), sessions: Sessions::default(), ..self.fork() }
+        Client { idle: Pool::default(), sessions: Sessions::default(), slots: Arc::default(), ..self.fork() }
     }
 
     /// Whom a reply answers: every jar (0) when it says `public` or `immutable`, else the jar of this client.
@@ -868,8 +904,6 @@ impl Client {
         let configured = proxy_config()?;
         let proxy = configured.filter(|_| !loopback(&url.host));
         let server = (url.scheme, url.host.clone(), u32::from(url.port) | (u32::from(proxy.is_some()) << 16));
-        // An empty list stays in the map: the next connection that goes idle needs it, and the map has one key for each server.
-        let idle = self.idle.lock().unwrap().get_mut(&server).and_then(Vec::pop);
         let get = plan.method.safe();
         let session = if url.scheme == Scheme::Https { self.sessions.lock().unwrap().get(&server).filter(|c| c.usable()).cloned() } else { None };
         if let Some(conn) = session {
@@ -880,6 +914,10 @@ impl Client {
                 result => return result,
             }
         }
+        // An HTTP/1.1 connection, or the first one to a server that may answer with HTTP/2 (then the slot goes back).
+        let slot = self.slots.take(&server);
+        // An empty list stays in the map: the next connection that goes idle needs it, and the map has one key for each server.
+        let idle = self.idle.lock().unwrap().get_mut(&server).and_then(Vec::pop);
         let (mut stream, reused) = match idle {
             // `pop` takes the connection out of the list. While we use it, nobody else can.
             Some((stream, since)) if since.elapsed() < MAX_IDLE && (get || alive(&stream)) => (stream, true),
@@ -887,7 +925,10 @@ impl Client {
             // server to have kept it: we cannot retry a POST after a write, so we look first.
             _ => match self.dial(url, &server, proxy, rec)? {
                 Dialed::H1(stream) => (stream, false),
-                Dialed::H2(conn) => return self.h2_start(&conn, url, plan, conditions, rec, false),
+                Dialed::H2(conn) => {
+                    drop(slot);
+                    return self.h2_start(&conn, url, plan, conditions, rec, false);
+                }
             },
             // `_` means "anything else": no connection, or an old one. Open a new one.
             // An old connection is dropped here, and Rust closes it for us.
@@ -903,7 +944,10 @@ impl Client {
             // Never for a POST: the server may have got the request and done what it says, and a second one would do it twice.
             stream = match self.dial(url, &server, proxy, rec)? {
                 Dialed::H1(stream) => stream,
-                Dialed::H2(conn) => return self.h2_start(&conn, url, plan, conditions, rec, false),
+                Dialed::H2(conn) => {
+                    drop(slot);
+                    return self.h2_start(&conn, url, plan, conditions, rec, false);
+                }
             };
             clock = trace::Clock::new();
             sent = Instant::now();
@@ -931,6 +975,7 @@ impl Client {
         let reusable = !head.response.close && head.framing != Framing::UntilClose;
         let undo = if head.framing == Framing::None { None } else { head.response.header("content-encoding").and_then(encoding::codings).filter(|c| !c.is_empty()) };
         let mut live = Live::new(stream, leftover, head.framing, reusable.then(|| (self.idle.clone(), server)), head_end);
+        live.slot = Some(slot);
         live.rec = rec.take();
         live.observe = ObservedBody::new(head.response.status);
         let live = self.tapped(url, plan, &head.response, Body(Source::Live(Box::new(live))));
@@ -1689,6 +1734,8 @@ struct Live {
     /// The timing record of this request (only when `BARE_NET_TRACE` is set). It goes out when the body is dropped.
     rec: Option<Box<trace::Rec>>,
     observe: Option<ObservedBody>,
+    /// The connection is in use until the body ends (`finish`) or is dropped.
+    slot: Option<Slot>,
 }
 
 impl Drop for Live {
@@ -1752,7 +1799,7 @@ impl Write for Stream {
 impl Live {
     fn new(stream: Stream, leftover: Vec<u8>, framing: Framing, pool: Option<(Pool, Server)>, start: Instant) -> Live {
         let left = if let Framing::Length(n) = framing { n } else { 0 };
-        Live { stream, buf: leftover, at: 0, framing, left, chunk: Chunk::Size, line: Vec::new(), given: 0, start, limited: true, pool, done: false, rec: None, observe: None }
+        Live { stream, buf: leftover, at: 0, framing, left, chunk: Chunk::Size, line: Vec::new(), given: 0, start, limited: true, pool, done: false, rec: None, observe: None, slot: None }
     }
 
     /// Make sure that there are bytes in `buf[at..]`. When there are none after this, the connection has closed.
@@ -1796,6 +1843,7 @@ impl Live {
             }
             list.push((stream, Instant::now()));
         }
+        self.slot = None;
     }
 
     /// Read bytes up to the end of the line (`\r\n`). Gives the line without it.

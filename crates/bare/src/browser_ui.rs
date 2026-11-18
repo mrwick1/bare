@@ -1254,6 +1254,7 @@ impl Browser {
             let doc = dom.doc.borrow();
             // The boxes that layout must lay out again: the changed ones and all their ancestors.
             let mut dirty: Vec<bool> = Vec::new();
+            let shadowed = doc.has_shadow_roots();
             let mut seed = |n: NodeId| {
                 if dirty.is_empty() {
                     dirty.resize(doc.len(), false);
@@ -1263,8 +1264,26 @@ impl Browser {
                     dirty[c.index()] = true;
                     cur = doc.parent(c);
                 }
+                if shadowed {
+                    // The boxes are in the flat tree: up through the slot that takes a node, and from a shadow root to its host. The walk
+                    // above stops at a shadow root, so this one goes on past nodes that are dirty already.
+                    let mut cur = Some(n);
+                    while let Some(c) = cur {
+                        dirty[c.index()] = true;
+                        cur = doc.flat_parent(c).or_else(|| doc.parent(c).and_then(|p| doc.shadow_host(p)));
+                    }
+                }
             };
             for m in &marks {
+                if let Some(host) = bare_css::cascade::slot_host(&doc, *m) {
+                    // The nodes that the slots take move: their old boxes are anywhere in the host.
+                    let mut all = vec![host];
+                    while let Some(n) = all.pop() {
+                        seed(n);
+                        all.extend(doc.children(n));
+                        all.extend(doc.shadow_root(n).into_iter().flat_map(|r| doc.children(r)));
+                    }
+                }
                 match *m {
                     // A node that moved inside its parent is laid out again too.
                     Mark::Link { parent, node } => {
@@ -1385,6 +1404,13 @@ impl Browser {
     /// Is `node` an `<input>` that takes text and that the user can edit?
     pub fn is_text_input(&self, node: NodeId) -> bool {
         self.dom.editable(node)
+    }
+
+    /// The kind of `node` when it is a date or time `<input>` (`date`, `month`, `week`, `time`, `datetime-local`) that the user can edit.
+    pub fn date_kind(&self, node: NodeId) -> Option<&'static str> {
+        let doc = self.dom.doc.borrow();
+        let kind = is_tag(&doc, node, "input").then(|| nd::input_kind(&doc, node))?;
+        (matches!(kind, "date" | "month" | "week" | "time" | "datetime-local") && attr(&doc, node, "readonly").is_none()).then_some(kind)
     }
 
     /// Does `node` have a child node?

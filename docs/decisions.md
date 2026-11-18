@@ -2420,3 +2420,53 @@ Step 1 and 2 of `docs/design-gmail-frames.md`: `MessagePort`, `window.postMessag
 - Order: the walk first, then the check of every listed item, then the moves. A message that fails to clone moves nothing.
 - A moved port starts disabled, and its listeners stay with the old object. This is the Standard.
 - A message in a port holds `ports: Box<[ObjId]>` (the new objects). That is the one place where the message still holds objects of the heap. It goes away when messages cross heaps.
+
+## A child page for each iframe with an http(s) src (2026-11-18)
+
+Step 3a of `docs/design-gmail-frames.md`. An iframe with an http(s) `src` loads and runs as its own page. Code: `browser_child.rs`, `browser_remote_window.rs`.
+
+- Where children live: the `Dom` of the parent holds the slots (`Kids`: iframe node, URL, window objects). The `Browser` of the parent holds the child `Browser`s in a `Vec<Option<Child>>`, one per slot. A child is taken out of the `Vec` while it runs. So the `Dom` never needs two `Browser` borrows. Each child has its own `Interp`, heap, `Dom` and timers, on the thread of the parent.
+- Load rule (owner): eager, after parent work. The fetch of the child document starts when the iframe is connected. A child runs its tasks only when the parent has no task due now.
+- Both origins are child pages (owner). `contentDocument` stays `null` for a same-origin frame. This differs from Chrome. A live same-origin document needs one heap for two pages (D2 of the design). Blank frames (no `src`, empty `src`, `about:blank`, `srcdoc`) are unchanged. `srcdoc` wins over `src`.
+- Cookie context: `Ctx::Embedded` with the site of the top page, and `Sec-Fetch-Dest: iframe`. It is the closest context that exists. Hypothesis: the top-level `Ctx::Navigation` would send `SameSite=Strict` cookies to a cross-site frame (not tested).
+- Round order: slot order (document order of the first request). Per round, the parent runs first. Then each child runs one turn. Under the virtual clock all pages advance to the same time, and the child clock is the parent clock minus a fixed delta. The same fixture gives the same console order.
+- Settle rule: a page is not settled while a child loads or has a timer or task in the window. The `load` of the iframe fires after the `load` of the child. The `load` of the parent waits for all children. A failed child load leaves the frame empty, fires `load` on the iframe, and adds a diagnostic. It is not fatal.
+- Window: `contentWindow`, and `parent` and `top` in a child, are `RemoteWindow` objects: a `Proxy` over a target that holds the cross-origin window API. Other keys throw `SecurityError`. `postMessage` does nothing yet (3b).
+- Proxy creation: `Heap::new_proxy` alone does not prepare the engine to find the traps (`ProxyState::ready` is set in `proxy_create`). A host function cannot `new Proxy`. So `RemoteWindow` calls `Proxy.revocable`. The cost is one small object for each window.
+- Bounds: 64 child pages in all and depth 8 (`BrowserLimits::max_child_pages`, `max_child_depth`). An iframe over a bound stays empty, with one console warning.
+
+## Messages between a page and its child pages (2026-11-18)
+
+Step 3b of `docs/design-gmail-frames.md`. `postMessage` on a `RemoteWindow` sends a message to the other page. Code: `browser_child.rs`, `browser_remote_window.rs`, `browser_scheduler.rs`.
+
+- Routing through the driver: the sender clones the message with `clone_state_with` and puts a heap-free record in the outbox of its own `Dom`. The driver of the parent (`kids_turn`) moves it. It moves the parent's messages into a child before the turn of that child, and drains the outbox of a child after its turn. So only one `Browser` is borrowed at a time, and no object lives in two heaps.
+- Origin check at delivery: the sender stores the target origin ("/" becomes the sender origin). The target page compares it with its own document origin when the message arrives. A page that navigated meanwhile therefore does not get a message for the old origin. This is the rule of the Standard.
+- Dropped: a message to a child that still loads or is empty (a browser posts it to the initial blank document, which is replaced), and a message with a target origin that does not match. Both drop with no error and no diagnostic.
+- Ports: a `MessagePort` in the transfer list of a message to another page drops the message, with one console warning in the sender. The check runs before the clone, so no port is parked and no buffer is detached. Step 3c moves ports. `ArrayBuffer`s move.
+- `source`: in the parent, the `RemoteWindow` of the child (made if no script read it yet). In a child, its `parent` window. For a message from a grandchild to the top page, `source` is null, because the top page has no window object for a grandchild. The message goes up one level in each turn.
+- Cost: `Msg` and `MsgEvent` hold an optional boxed sender (origin and window). A message of the own window pays one `None`. A page without children has an empty outbox and runs no new code on the round loop.
+
+## A MessagePort moves from one page to another through a port hub (2026-11-18)
+
+Step 3c of `docs/design-gmail-frames.md`. A `MessagePort` in the transfer list of a message to another page now crosses. Code: `browser_port_hub.rs`, `browser_scheduler.rs`, `browser_child.rs`, `browser_navigation_state.rs`, `browser_remote_window.rs`.
+
+- Hub: one `PortHub` is shared by all pages of one top page (`Cfg::hub`). It holds data only: ends (`u64` ids, an owner page number or `None` in flight, a queue of wires) and two counters (wires and bytes). A wire is a heap-free `State`, a transfer list with no `Transfer::Port`, and its byte cost. The hub never holds an `ObjId`. The map from end id to port object is in the `Sched` of the owner page (`Sched::ends`, a `BTreeMap`, so a take runs in id order).
+- Page numbers: the top page is 0. A child gets the next number from the hub when its `Browser` is made (`Kids::page`).
+- Export (sender): `clone_state_with` parks the ports as before. `Dom::export_ports` then turns each parked record into `Transfer::End { me, remote }`. A port with a local peer: both get an end. The peer stays in the sender page with `peer = None`, `remote = new end`, `me = its own end`. A port that crossed before keeps its ends. A port with no peer gets one end. Both ends of a pair in one list get ids that point at each other.
+- Waiting messages: messages in the inbox of a port that moves are cloned again as wires and go to the front of the queue of its end, in order. They leave the counts of the sender. A waiting message that carries ports is dropped with one console warning. This is a known limit.
+- Import (receiver): `Dom::import_ends` makes a new port for each end (same checks as `make_ports`), disabled, and takes the owner role in the hub. It then takes the wires that wait for the end. A message over the bounds of the receiver is dropped with a console warning, not a limit error.
+- Send: a port with `remote` posts a wire to the hub. A missing end drops the message silently. The bounds are the wires and the bytes of the whole hub against `max_queued_messages` and `max_queued_message_bytes` of the sender (`Limit(messages)` and `Limit(message-bytes)`, as for a full local queue).
+- Take: when the hub holds a wire, `kids_turn` takes the wires of the ends of its page first, and of a child before that child's turn. Each wire counts as `Turn::work`. `Kids::any` is true while a wire waits, so the top page gets turns even without a child. A page that never moves a port does one integer read for each turn.
+- Removal: `close()` removes the end. A page that ends removes its ends (`Drop for Kids`). A message that is dropped (origin mismatch, a child that loads or is gone, an outbox of a page that ends, a full queue) removes the ends that it carried (`PortHub::release`), so no wire waits for ever. The GC removes the end of a port that it drops (`sched_prune`).
+- GC rule: a port with `remote` that is enabled is a root. A disabled port, or one with only `me`, is not, and is dropped when nothing reaches it.
+- Settle: a page is not settled while the hub holds a wire (`Kids::blocks`).
+- Differences from a browser: after `close()` the wires that wait for the closed end are dropped, while a local port still delivers the messages queued before a close. The `close` and `messageerror` events are not there.
+
+## bare-mcp has no issue route and no host option (2026-11-18)
+
+Phase 1 of `docs/design-agent-interface.md`. A standalone browser must not know its hosts. Code: `crates/mcp/src/main.rs`.
+
+- The `initialize` text explains the tools only. It names no issue route. The host (`offstage`, `deck`) gives that rule to its agent.
+- `BARE_MCP_REPORT` is removed. `offstage` sets it; the variable now has no effect.
+- `--workspace N` and the `hyprctl` window rule are removed. `bare-mcp` takes no arguments. A host places a window through `WAYLAND_DISPLAY`. `offstage` does this with its own screens.
+- Breaking change: a client that starts `bare-mcp --workspace N` gets a usage error. Remove the argument.

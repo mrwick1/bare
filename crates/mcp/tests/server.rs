@@ -25,7 +25,7 @@ impl Server {
         let mut s = Server { child, stdin, stdout, id: 0, forbid: Vec::new() };
         let init = s.ask("initialize", json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "0"}}));
         assert_eq!(init["result"]["serverInfo"]["name"], "bare-mcp");
-        assert!(init["result"]["instructions"].as_str().unwrap().contains("label bare-mcp"));
+        assert!(init["result"]["instructions"].as_str().unwrap().starts_with("Loop:"));
         writeln!(s.stdin, "{}", json!({"jsonrpc": "2.0", "method": "notifications/initialized"})).unwrap();
         s
     }
@@ -679,6 +679,20 @@ fn an_agent_fills_a_form_with_select_check_hover_dblclick_and_upload() {
     let (r, error) = s.tool("run_steps", json!({"steps": format!("open {base}/forms\nselect css=\"#country\" \"Tanzania\"\ncheck label=\"Agree\"\nexpect label=\"Agree\" checked\nuncheck label=\"Agree\"\nhover text=\"Hover target\"\ndblclick css=\"#dbl\"\nexpect css=\"#dbls\" text=\"double\"\nupload css=\"input[type=file]\" \"{file}\"\n")}));
     assert!(!error && r["ok"] == true, "{r}");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An ARIA switch (a button with `role=switch` and `aria-checked`) reads as checked, and check and uncheck click it.
+#[test]
+fn check_and_expect_checked_work_on_an_aria_switch() {
+    let mut s = Server::start();
+    let base = common::serve();
+    let steps = format!("open {base}/forms\nclick css=\"#sw\"\nexpect css=\"#sw\" checked\nuncheck css=\"#sw\"\nexpect css=\"#sw\" unchecked\ncheck css=\"#sw\"\nexpect css=\"#sw\" checked\n");
+    let (r, error) = s.tool("run_steps", json!({"steps": steps, "timeout_ms": 3000}));
+    assert!(!error && r["ok"] == true, "{r}");
+    // The outline marks it checked after a check.
+    s.tool("open", json!({"url": format!("{base}/forms")}));
+    let (r, error) = s.tool("act", json!({"op": "check", "loc": "css=\"#sw\"", "diff": false}));
+    assert!(!error && r.as_str().unwrap().contains("switch \"Wifi\" (checked"), "{r}");
 }
 
 /// Click each link or button of the downloads page and check the file that the receipt names: its bytes, and that the page did not change.
@@ -2339,7 +2353,7 @@ document.getElementById('c').onclick = function () { frame('http://localhost:' +
 }
 
 /// A page saves a file through a hidden iframe (Gmail's Download button): a same-origin `src` that replies with a download is saved,
-/// on insertion and on a later `src` change. A frame of a page saves nothing, and a cross-origin frame is never asked for.
+/// on insertion and on a later `src` change. A frame of a page saves nothing. A cross-origin frame is a child page, so its download is saved too.
 #[test]
 fn a_hidden_iframe_download_is_saved() {
     let mut s = Server::start();
@@ -2373,10 +2387,12 @@ fn a_hidden_iframe_download_is_saved() {
     assert!(list.contains("invoice.pdf ("), "{list}");
     click(&mut s, "p");
     click(&mut s, "c");
+    let list = wait(&mut s, 3);
+    assert!(list.contains("cross.csv ("), "{list}");
     std::thread::sleep(std::time::Duration::from_millis(500));
     let (list, _) = s.tool("downloads", json!({}));
-    assert_eq!(list.as_str().unwrap().lines().count(), 2, "{list}");
-    assert_eq!(CROSS_HITS.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(list.as_str().unwrap().lines().count(), 3, "{list}");
+    assert_eq!(CROSS_HITS.load(std::sync::atomic::Ordering::SeqCst), 1);
     let (r, _) = s.tool("eval", json!({"js": "location.pathname"}));
     assert_eq!(r, json!("/frames"));
     let _ = std::fs::remove_dir_all(&dir);

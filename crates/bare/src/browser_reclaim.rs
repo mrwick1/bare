@@ -130,6 +130,7 @@ impl Dom {
         crate::browser_controls::held(self, &mut live);
         crate::browser_cssom::held(self, &mut live);
         crate::browser_frames::held(self, &mut live);
+        self.kids.held(&mut live);
         crate::browser_img::held(self, &mut live);
         crate::browser_loader::held(self, &mut live);
         crate::browser_media::held(self, &mut live);

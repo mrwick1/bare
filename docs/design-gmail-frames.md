@@ -190,24 +190,16 @@ A frame costs a page. Chrome pays for all frames (50 MB of JS on this journey). 
 | R2. On use | the parent posts a message to it, an agent acts in its box, or the frame becomes visible with a size above 0 × 0 | Frames that nobody talks to and nobody sees cost nothing. | A frame that must start first and talk first (it posts to its parent on load) is late. Hidden helper frames of this kind exist in Gmail (hypothesis). |
 | R3. Eager for small, on use for the rest | R1 for frames whose document is under a size budget; R2 else | | A budget is a limit, which the project rules call a sign of a design problem. Not chosen. |
 
-Recommended: **R2, with one addition**: a frame that the parent has given a `name` and then targets (a `postMessage`, a form `target`, a link `target`) starts at that moment. Before R2 is built, measure on Gmail which frames start a talk on load (an instrumented Chrome run: the order of the first `message` event per frame). If such a frame exists, R2 must start it eagerly, and the rule needs a case for it.
+Decision (owner, 2026-11-18): **eager, after parent work.** Every connected iframe with an http(s) `src` gets a child page at once. The fetch may start at once. The child runs its tasks only when the parent has no task due now. This is R1 with an order rule, so a frame that posts to its parent on load is not late. R2 is not built.
 
-### 5.5 Where messages run
-
-D1 runs every page on the page thread, one task at a time. This keeps the virtual clock and the replay determinate and needs no `Send` heap. Chrome and Firefox run other-site frames in parallel, in other processes. A thread per child page is possible later, because a child shares no object with its parent: only the `Wire` and the port ids cross. `Heap` is `!Send` on purpose (`Rc` host); a page would be made on its own thread, not moved.
-
-### 5.6 What D1 does not cover
-
-- The same-origin frame with a `src` keeps the inert window. Gmail's helper frames on `mail.google.com` that read the parent directly stay broken if they exist (hypothesis: not counted). D2 is the answer for them, if the count says it is needed.
-- `navigator.serviceWorker`. A service worker is a worker page with a fetch hook between the page and the network. It needs D1 step 5 first, and an HTTP cache (the reload gap in 2.5). It is the next design after this one.
-- Interpreter cost (`design-gmail-js.md`).
+Measured facts that led to this: an empty `Browser::new` costs about 5.5 M instructions and 0.9 MiB. A child page that has loaded costs its document, its scripts and its heap on top of that. A page without iframes pays nothing, because no child state exists. Both origins are child pages. `contentDocument` stays `null` for a same-origin frame (D2 would be needed for a live same-origin document).
 
 ## 6. Ranking
 
 | Rank | Design | What it gives | Instructions | Risk | Work |
 | --- | --- | --- | --- | --- | --- |
 | 1 | D1 steps 1 and 2 (wire format, ports, transfer) | No more `Unsupported` stop on a transfer list (Gmail and any page that uses `MessageChannel` or `structuredClone` with transfer) | About 0 | Low | M |
-| 2 | D1 step 3 with R2 (cross-origin child page, `postMessage`) | Account and apps menus; other frame parts of Gmail can run (hypothesis) | Up, only for frames in use | Medium | L |
+| 2 | D1 step 3 with the eager rule (cross-origin child page, `postMessage`) | Account and apps menus; other frame parts of Gmail can run (hypothesis) | Up, only for frames in use | Medium | L |
 | 3 | D1 steps 4 and 5 (paint and hit test of a child; dedicated worker) | Visible frame content; pages that need a worker (OpenStreetMap, svelte.dev: decisions.md) | Up, only for frames in use | Medium | L |
 | 4 | D2 several realms in one heap | Exact same-origin frames | Up on every call (a realm switch) | High | XL |
 | — | D3 answer the calls | Nothing that works | 0 | Low | S, rejected |

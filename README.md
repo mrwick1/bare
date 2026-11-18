@@ -8,17 +8,19 @@ The first parts were written by hand: URL parsing, DNS, HTTP, TLS, HTML, CSS, la
 
 | User | How it uses `bare` | Version | Where its `bare` problems go |
 | --- | --- | --- | --- |
-| [`deck`](https://github.com/mrwick1/deck), a self-hosted AI agent in a web app | Starts `bare-mcp` from `PATH`, or from `bare.command` in `deck.toml`, at the first browser tool call. `bare` is its only browser. | The `bare-mcp` that is on `PATH` | GitHub issue on `mrwick1/bare` with the label `bare-mcp` |
-| [`offstage`](https://github.com/mrwick1/offstage), a caged desktop for AI agents | Installs `bare-mcp` and `bare-drive` from a release and runs them through `bin/offstage-bare-mcp`. `bare` is its only browser. | Pinned in `install.sh` (`BARE_VERSION`, `OFFSTAGE_BARE_VERSION` overrides it) | `offstage` `report_issue`, area `bare` (`BARE_MCP_REPORT=offstage`) |
+| [`deck`](https://github.com/mrwick1/deck), a self-hosted AI agent in a web app | Starts `bare-mcp` from `PATH`, or from `bare.command` in `deck.toml`, at the first browser tool call. `bare` is its only browser. | The `bare-mcp` that is on `PATH` | As `deck` tells its agent |
+| [`offstage`](https://github.com/mrwick1/offstage), a caged desktop for AI agents | Installs `bare-mcp` and `bare-drive` from a release. It starts one `bare-mcp` for each browser session and gives its tools as `browser_*`. `bare` is its only browser. | The newest release (`OFFSTAGE_BARE_VERSION` in `install.sh` overrides it) | `offstage` `report_issue`, area `bare` |
 | Learning | Each part is a study of how real engines work. Design documents in `docs/` compare `bare` with Chrome, Firefox, Servo, WebKit and Ladybird. | `main` | — |
 
 A lean browser for a small, focused group of users is a possible later goal. No work on it has started.
 
+The plan: `offstage` becomes the only way an agent reaches `bare`, `deck` included, and `bare` gets WebDriver BiDi as its public interface. See [docs/design-agent-interface.md](docs/design-agent-interface.md).
+
 ### Change bare-mcp with both users in mind
 
-- A change to a `bare-mcp` tool, its arguments or its results reaches `deck` at once, and reaches `offstage` at its next pinned release. Check both before you merge.
-- Cut a release (`vX.Y.Z`) with the `bare-mcp` and `bare-drive` binaries when `offstage` needs a fix. Then raise `BARE_VERSION` in `offstage`.
-- Keep `BARE_MCP_REPORT=offstage` working. It is the only switch between the two issue routes.
+- A change to a `bare-mcp` tool, its arguments or its results reaches `deck` at once, and reaches `offstage` at the next `bare` release. Check both before you merge.
+- `offstage` installs the newest release. A release reaches every `offstage` user at the next install or update. The `gate` job of `release.yml` runs the offstage browser test (`TestBareBrowser`, offstage `beta`) against the new Linux amd64 binaries. The release is published only when it passes.
+- `bare-mcp` has no issue route and no host-specific option. The host (`offstage` or `deck`) gives its agent the rule for where to report problems, and places any window through `WAYLAND_DISPLAY`.
 
 ## Status
 
@@ -42,7 +44,7 @@ cargo run -p bare -- http://example.com --run      # load the page, run its scri
 cargo run -p bare -- --paint=out.png page.html     # paint a local file into a PNG, with no network
 cargo run -p bare -- --window page.html            # open a Wayland window that shows the painted page (a local file or an http(s) URL)
 cargo run -p bare-drive -- STEPS           # run a step file (a user journey); --window shows it
-cargo run -p bare-mcp -- --workspace 6     # an MCP server over stdio: agents run journeys (headless, or a window on Hyprland workspace 6)
+cargo run -p bare-mcp                      # an MCP server over stdio: agents run journeys (headless, or a window on WAYLAND_DISPLAY)
 cargo test --workspace
 ```
 
@@ -64,7 +66,7 @@ Each release carries prebuilt `bare-mcp` and `bare-drive` binaries for Linux amd
 
 Agents: read [docs/agent-browser-guide.md](docs/agent-browser-guide.md) for the open, inspect, act, verify and recover loop.
 
-Agents that use `bare-mcp` must file each problem with it as an issue. File a GitHub issue on `mrwick1/bare` with the label `bare-mcp`. Give the tool call, the result and the expected result. The owner's agents can file in the private Plane project "bare MCP" (`BMCP`) instead. Its API key is in the owner's vault as `bare/plane`. The server also sends this rule to the client in `initialize`. Set `BARE_MCP_REPORT=offstage` to send the rule "report through the offstage tool `report_issue`, area `bare`" instead. Closed-beta testers use this.
+Agents that use `bare-mcp` must report each problem with it. The host gives the route: `offstage` agents use `report_issue`, area `bare`. Others file a GitHub issue on `mrwick1/bare` with the label `bare-mcp`. Give the tool call, the result and the expected result. The owner's agents can file in the private Plane project "bare MCP" (`BMCP`) instead. Its API key is in the owner's vault as `bare/plane`.
 
 Linux is the first target. The core must also build and run on Windows and macOS (see "Cross-platform core" in [docs/decisions.md](docs/decisions.md)). Today the code builds for both, and only Linux has a window. `tools/portable_check.sh` checks this.
 

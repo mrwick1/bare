@@ -4,6 +4,23 @@ This file records what is built, what comes next and what is missing. Update it 
 
 The reasons for the design are in [decisions.md](decisions.md). Time and memory numbers for each module are in [resources.md](resources.md).
 
+## import() calls of one checkpoint download together (2026-11-17, Plane OFS-18)
+
+`serve_imports` answered the `import()` calls of one checkpoint one at a time. Each `load_graph` blocked the page thread on its own download. The MDN page asks for 23 chunks in one `Promise.all`, so the page waited 23 round trips in a row. Now `serve_imports` first starts the downloads of the whole batch on the workers, as `load_deps` does for the imports of one module. The order in which modules run does not change.
+
+Measurements (live, Linux, `bare-mcp` `open`, runs of base and new alternate, 5 pairs, network not controlled):
+
+| Page | base, s | new, s |
+|---|---|---|
+| developer.mozilla.org/en-US/docs/Web/HTML | 3.6, 2.5, 2.8, 3.2, 3.1 (median 3.1) | 1.4, 1.4, 2.0, 2.0, 2.5 (median 2.0) |
+| github.com/microsoft/playwright | 18.8 to 24.1 (median 21.3) | 9.9 to 24.4 (median 19.1) |
+
+Peak RSS: MDN 34 to 36 MiB on both, GitHub 162 to 168 MiB on both. GitHub still waits on other blocking downloads. The network of the test machine varied by a factor of 3 between runs.
+
+Tests: `import_calls_of_one_checkpoint_download_together` fails before the change (at most 1 request in the server at a time) and passes after it.
+
+Not tested: Windows, wall time on an idle machine, other sites.
+
 ## Bytecode lane runs destructuring (2026-11-17)
 
 `BARE_JS_EXEC=byte` now compiles object and array patterns in declarations, assignments, `for-in` and `for-of` heads and `catch` clauses. Before, the lane refused them (104,527 calls on a private React dashboard journey). Parameters with patterns already ran: the tree walker binds them before the code starts. The default stays `tree`.
@@ -13132,3 +13149,126 @@ Step 1 and 2 of `docs/design-gmail-frames.md`. A transfer list now works for `Me
   - Cause of the dataset rows: the codegen-unit split of `bare`, not new work. No changed code is on that path. A profile of both builds with symbols shows `Heap::exotic_own` and `Heap::define_own_property` inlined differently. With `RUSTFLAGS="-C codegen-units=1"` both trees give the same count (arjun-e16, minimum of 3 runs, glibc): `keys 1000 50` 345,601,615 base and 345,603,418 new (+0.0005%); `keys 10000 50` 3,241,706,567 and 3,241,710,148 (+0.0001%).
   - The owner grants a cost exception for these 2 rows (2026-11-18). The reason: the codegen-unit split, not new work.
 - Not tested: wall time, peak memory, a transfer to another heap (no later step exists yet), GC with a moved port across a `collect`, a live Gmail account menu.
+
+## Child pages for iframes with an http(s) src (2026-11-18)
+
+Step 3a of `docs/design-gmail-frames.md`. An iframe with an http(s) `src` loads and runs as its own child page, with its own `Browser`, heap, DOM and timers, on the thread of the parent. The load rule is eager, after parent work. Base: main `7fab55f3`. Decision: `docs/decisions.md`.
+
+- Change: `browser_child.rs` (slots, child driver, load, settle, clock, bounds, diagnostics) and `browser_remote_window.rs` (`RemoteWindow`: `contentWindow`, and `parent` and `top` in a child). The parent's `load` waits for its children. A page without iframes holds no child state.
+- Tests: 16 new cases in `browser_child_tests.rs`. One old case changed: `browser_iframe_tests::no_child_document_is_ever_fetched` asserted that no child document is fetched. It is now `only_frames_with_a_src_and_no_srcdoc_fetch_a_child_document`. `cargo test --release -p bare`: 1603 passed, 0 failed, 6 ignored. The new cases passed 40 of 40 runs in a debug build (before a fix of two causes of a spin they failed in 3 of 20).
+- Found and fixed while testing: (1) a parent that had nothing else to do spun on the round budget while a child document loaded. It now waits for the load. (2) The due time of a child task, moved to the parent clock and back, differed by one ulp, so the task never ran and the parent spun. The child clock now takes the due time itself.
+- Workspace tests (4 skips, debug build, arjun-e16): the `bare` crate passes. Two failures remain. `crates/net/tests/h2_node_edge.rs` `a_header_block_over_16_kib_arrives_in_continuation_frames` failed once and passed 3 of 3 alone (crates/net is not changed; hypothesis: a node server start-up race under load). `crates/mcp/tests/server.rs` `a_hidden_iframe_download_is_saved` asserted the old rule: a cross-origin frame is never fetched (`CROSS_HITS == 0`), and the download list has 2 entries. A cross-origin frame is now a child page, so its attachment is saved as the third entry. The test now expects 3 entries and 1 fetch. The same-origin downloads do not change. The MCP server tests pass 3 of 3 runs.
+- Cost gate (arjun-e16, `tools/js/cost_matrix.sh -j 6`, instruction counts): 803 rows. Mean change: glibc +0.002%, jemalloc +0.000%. No row over +0.5% under either allocator. `parse_load deep 1` and `deep 10` fail to run on the base build too. No codegen-units=1 check was needed. Again after the rebase on main `b4f049c5` (arjun-e16, `-j 6`, base rebuilt at `b4f049c5`): 803 rows, mean glibc -0.002%, jemalloc +0.000%, no row over +0.5%. The same 2 `parse_load deep` rows fail on both builds.
+- Not tested: the cost of a page that has children (no benchmark row has an iframe with a src), peak memory, wall time, live Gmail, `postMessage` across pages (3b), paint and hit test of a child, cookie behaviour of a frame with `SameSite` cookies, the real-time (not virtual) clock with children, and the live window mode with children.
+
+## Messages between a page and its child pages (2026-11-18)
+
+Step 3b of `docs/design-gmail-frames.md`. `postMessage` on a `RemoteWindow` now sends a message to the other page. Base: main `b4c0d1d3`. Decision: `docs/decisions.md`.
+
+- Change: the sender clones the message into a heap-free record in its outbox (`Kids::outbox`). The driver (`kids_turn`) moves it into a child before that child's turn, and drains a child's outbox after its turn. The target page checks the target origin and queues a `message` event with a per-message `origin` and `source` (`Msg` and `MsgEvent` hold an optional sender). The argument parsing is shared with the own-window `postMessage` (`post_args`, `target_origin` in `browser_basics.rs`). A `MessagePort` in the list of a message to another page drops the message with one console warning (3c).
+- Tests: 10 new cases in `browser_child_tests.rs` (parent to child, child to parent, 3 round trips in a fixed order, target origin cases, sender errors, `ArrayBuffer` transfer, port dropped, message to a loading child, grandchild to top with null `source`, no settle with a message in flight). They passed 20 of 20 runs in a debug build. `cargo test --release -p bare`: 1615 passed, 1 failed, 6 ignored. The failure is `downloads::run::tests::a_changed_file_starts_again_from_zero`. It fails the same way on the base `b4c0d1d3` in a full run and passes alone 3 of 3 (hypothesis: load). `cargo test -p bare-mcp --test server`: 104 passed.
+- Cost gate (arjun-e16, `tools/js/cost_matrix.sh -j 6`, instruction counts): 803 rows. Mean change: glibc -0.002%, jemalloc +0.000%. Over under both allocators: 0. `parse_load deep 1` and `deep 10` fail to run on the base too. Again after the rebase on main `21fc94c9` (base rebuilt): mean glibc -0.001%, jemalloc +0.000%, 0 rows over. `cargo test --release -p bare`: 1618 passed, 0 failed.
+- Review fix: a message for a frame that was removed stayed in the outbox until a later frame took the same slot. It counted against the outbox bound. The driver now drops it at the end of the turn. Test: `a_message_to_a_removed_frame_never_reaches_a_later_frame`.
+- Not tested: the cost of a page that has children, peak memory, wall time, live Gmail, a message to a child that navigates, the real-time clock with messages, the limit error of a full outbox, ports across pages (3c).
+
+## A MessagePort moves from one page to another (2026-11-18)
+
+Step 3c of `docs/design-gmail-frames.md`. A `MessagePort` in the transfer list of a message to another page now crosses, and the two ports talk over a shared port hub that holds data only. Base: main `99a29345`. Decision: `docs/decisions.md`.
+
+- Change: new `browser_port_hub.rs` (ends, wires, counters). `Dom::export_ports`, `import_ends`, `take_wires` in `browser_scheduler.rs`. `Transfer::End` in `browser_navigation_state.rs`. The driver takes wires in `kids_turn` and a page that ends removes its ends (`browser_child.rs`). `win_post` exports the ports instead of dropping the message (`browser_remote_window.rs`). A page that never moves a port makes no end.
+- Tests: 12 new cases in `browser_child_tests.rs` (parent to child, child to parent, order of messages sent before the move, `start()` and `onmessage`, a port that goes back, both ends of a pair in one message, `ArrayBuffer` over a split port, grandchild to top, `close()`, removed iframe, no settle with a message in flight, queued message that holds ports). The old case that asserted the drop is removed. 38 `browser_child_tests` passed 20 of 20 runs in a debug build. `cargo test --release -p bare`: 1629 passed, 0 failed, 6 ignored. One full run before that showed `downloads::run::tests::a_changed_file_starts_again_from_zero` failing. It passed alone 3 of 3 and in the next full run (the same case failed in a full run on an earlier base, see the 3b entry).
+- Cost gate (arjun-e16, `tools/js/cost_matrix.sh -j 6`, instruction counts): 803 rows in 53 s. Mean change: glibc +0.006%, jemalloc +0.000%. Over under one allocator: 0. Over under both: 0. `parse_load deep 1` and `deep 10` fail to run (the known failure, base too). No codegen-units=1 check was needed.
+- Known limits: a queued message that holds ports is dropped when its port moves (one console warning). After `close()` the wires that wait for the closed end are dropped. A message over the bounds of the receiver is dropped with a console warning.
+- Not tested: the cost of a page that moves ports (no benchmark row has an iframe with a src), peak memory, wall time, live Gmail (the account menu), the real-time clock and live window mode with ports, GC with a split port across a `collect`, the bounds of the hub (`messages`, `message-bytes`), a port in a message that is dropped for an origin mismatch, a page that navigates while a port is in flight, `workers` (step 5).
+
+## Chrome vs Bare on a live staging E2E: create and delete a client and an agent (2026-11-18)
+
+Question: what does one real E2E test cost in Chrome over CDP and in Bare? The earlier comparison (resources.md, 2026-11-17) used a small local page. This one uses the live staging app.
+
+Journey (one step file for both browsers): log in, create a client, create an agent with the 3-step wizard (setup, name and voice, review), delete the agent from its detail page, delete the client from its settings. A Node CDP driver runs the same step file in Chrome. It uses real mouse events and waits for a stable box before each click, as Playwright does. An API cleanup after each run found no leftover client.
+
+Setup: archMachine, Bare `532cc4e9` (release `bare-drive`), Chrome 155.0.8059.39. Method as in resources.md: one systemd scope per browser, `perf stat -e instructions:u`, cgroup `cpu.stat` and `memory.peak`, a PSS sampler every 20 ms. Windowed runs ran in an isolated headless `cage`. Other agent threads, 29 containers, the Windows VM, 34 user timers and syncthing were paused. Load average stayed between 0.3 and 0.9. Runs alternated, with no warm-up, because trial runs had already warmed the caches: 6 headless pairs and 4 windowed pairs. All 20 runs passed. Values are means, with the spread as (max-min)/mean.
+
+| metric | headless Chrome | headless Bare | ratio | windowed Chrome | windowed Bare | ratio |
+|---|---|---|---|---|---|---|
+| journey ms | 8,265 (14%) | 6,632 (13%) | 1.25x | 7,962 (10%) | 6,836 (7%) | 1.16x |
+| CPU ms total | 5,117 (3%) | 3,948 (2%) | 1.30x | 5,510 (4%) | 4,453 (2%) | 1.24x |
+| CPU ms user | 4,229 | 3,852 | 1.10x | 4,302 | 4,357 | 0.99x |
+| CPU ms sys | 888 | 96 | 9.3x | 1,208 | 96 | 12.6x |
+| instructions:u (M) | 25,403 (2%) | 29,652 (2%) | 0.86x | 28,032 (5%) | 34,458 (3%) | 0.81x |
+| peak PSS MiB | 429 (3%) | 84 (2%) | 5.1x | 528 (1%) | 91 (5%) | 5.8x |
+| peak RSS sum MiB | 1,217 | 87 | 14.1x | 1,403 | 94 | 14.9x |
+| memory.peak MiB | 353 | 79 | 4.5x | 398 | 86 | 4.6x |
+| processes | 13 | 1 | | 15 | 1 | |
+
+The Chrome CDP driver is a separate process and is not in the Chrome columns: 280 ms CPU and 76 MiB RSS per run.
+
+Findings:
+- Memory is the clear gain: 5x less PSS and 14x less RSS. Bare runs as one process.
+- On this app Bare runs about 17% to 23% more user instructions than Chrome, because the JS engine is a tree walker and V8 compiles. On the small page of resources.md Bare ran 250x fewer. The difference is the JS work of the page: here React and the staging app scripts are most of it. Hypothesis: the JIT and the lane work are what close this gap.
+- Total CPU is still 1.24x to 1.30x lower in Bare, because Chrome spends 9x to 13x more system time (process start, IPC, GPU process).
+- The journey is 1.16x to 1.25x faster in Bare. Most of the time is network and server wait.
+
+Not tested: arjun-e16; a real Hyprland window (only headless `cage`); more than 6 and 4 runs; a Chrome profile with a warm HTTP cache across runs (each run used a fresh profile, and Bare has no disk cache); Playwright itself (a plain CDP driver was used). The scripts and raw results are local, in the session scratchpad: `chrome_steps.mjs`, `harness.py`, `monitor.py`, `report.py`, `out-main/`.
+
+## Where Bare spends CPU and memory on the staging E2E, and the bytecode lane on it (2026-11-18)
+
+This entry splits the cost of the journey above (create and delete a client and an agent) by browser subsystem. It also measures the JS engine modes on the same journey. No product code changed.
+
+How it was measured:
+
+- Binary: `bare-drive` at `25126702`, release, with line tables and frame pointers (`-C force-frame-pointers=yes`). Absolute times of this build are higher than in the benchmark. Use only the shares.
+- Machine: archMachine, headless, live staging. Load average 0.8 to 9 (other agents ran). Shares and instruction counts hold under load.
+- CPU split: `perf record -F 4000 -e cpu-clock --call-graph fp`, 3 runs in the default mode (`tree`). A sample goes to the first own frame from the leaf (crate and module rules in `classify.py`).
+- Memory split: one run under `valgrind --tool=massif`. The peak heap tree is grouped by the first own frame from the allocation.
+- Mode A/B: `BARE_JS_EXEC=tree`, `auto` and `byte`, 3 runs each, interleaved, with `perf stat -e instructions:u,task-clock`.
+- All 13 runs passed. The cleanup found no test client left.
+- Scripts and raw output: `/data/bare-tmp/voicebot-e2e-2026-11-18/subsystem-profile/` (not in the repository).
+
+CPU by subsystem, default mode (3 runs, spread about 0.5 points):
+
+| Subsystem | Share of CPU |
+| --- | ---: |
+| JS engine | 78.0 to 78.7% |
+| of it: run the code (tree walker and builtins) | 63.9 to 65.1% |
+| of it: parse and compile | 7.0 to 7.6% |
+| of it: collect garbage | 6.0 to 7.0% |
+| Style (match, cascade, `var()`) | 8.7 to 9.0% |
+| DOM and Web APIs | 3.2 to 3.3% |
+| Network, TLS, HTTP | 3.1 to 3.3% |
+| Layout and text | 2.6 to 2.9% |
+| HTML parse | 1.8 to 2.0% |
+| Driver | 1.4 to 1.6% |
+| Paint | 0% (headless runs do not paint) |
+
+Style is spread over many functions. The largest is `RuleSet::cascade_as` at 0.8%. By trigger: CSS animation and transition frames (`motion_frame`) 3.5 to 3.9%, the rendering update 3.1 to 3.2%, script reads such as `getComputedStyle` 1.7 to 1.9%.
+
+Peak heap (massif, one run): 61.6 MiB of heap and 9.3 MiB of malloc overhead. The JS engine holds 50.7 MiB (82%):
+
+| Part | MiB |
+| --- | ---: |
+| JS objects, shapes and property slots | 23.6 |
+| JS source and syntax trees (`with_shared_source` 9.7, `parse_cache` 2.1) | 12.9 |
+| JS collector work lists at the peak | 4.9 |
+| JS inline caches (`Caches::new`) | 3.3 |
+| JS scopes, closures and strings | 4.9 |
+| Network (`Client::keep`) | 2.6 |
+| HTML, DOM and style together | 1.4 |
+| Small sites under the massif threshold | 7.0 |
+
+Peak RSS of the normal runs is 83 to 97 MiB. Hypothesis: the rest of RSS (about 14 MiB) is code and shared libraries. I did not measure it in this run.
+
+JS engine mode on the journey (3 runs each, mean, range):
+
+| Mode | Instructions | CPU | Journey | Peak RSS |
+| --- | ---: | ---: | ---: | ---: |
+| `tree` (default) | 29.85 G (28.99 to 30.54) | 4,180 ms (4,075 to 4,270) | 6,606 ms | 84.6 MiB (83.0 to 86.9) |
+| `auto` | 22.23 G (21.61 to 23.18) | 3,231 ms (3,153 to 3,304) | 5,843 ms | 91.3 MiB (90.7 to 92.2) |
+| `byte` | 21.93 G (21.41 to 22.27) | 3,182 ms (3,022 to 3,402) | 5,699 ms | 91.8 MiB (90.5 to 93.4) |
+
+- `auto` takes 26% of the instructions and 23% of the CPU off the journey. Peak RSS grows by 6.7 MiB (+8%).
+- Chrome used 25.4 G instructions on this journey (entry above). Bare in `auto` uses fewer.
+- Lane coverage in `auto` (`BARE_JS_STATS`, one run, 4 realms): 2,363,990 calls on the lane and 34,864 on the tree walker (98.5% on the lane). The largest refusals are private names (18,165 calls) and spread (15,074 calls).
+- Profile in `auto`: the JS engine is 71.3% of CPU (run the code 54.6%, collect 9.0%, parse and compile 7.7%). Style is 11.6%. `bc_loop` is the top function at 14.3%.
+
+Not tested: windowed runs (paint), the RSS cost of `auto` by part, the mode A/B on other journeys, wall time on an idle machine.

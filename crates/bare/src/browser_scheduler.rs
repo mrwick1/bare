@@ -56,6 +56,10 @@
 //!   items go in a `Transfer` list beside it. A port in the message but not in the list is `DataCloneError`.
 //! - `MessageEvent` has `data`, `origin` (empty), `lastEventId` (empty), `source` (null) and `ports` (a frozen array of the new ports
 //!   of the transfer list). It is not constructible. `isTrusted` is false (the Event getter), which differs from a browser.
+//! - A port can move to another page (`Dom::export_ports`; `browser_port_hub.rs`). Then the pair is split: each port has an end in the hub
+//!   (`Port::me`, and `Port::remote` for the peer). A post goes to the hub as a wire, and the page that owns the peer takes it
+//!   (`Dom::take_wires`). `close()` removes the end: later posts to it are dropped. A message that waited in a port when it moved goes with
+//!   it, in order. If that message carried ports, it is dropped with one console warning.
 //! - Deviations: `port1` and `port2` are own read-only properties of the channel, not
 //!   prototype getters. A handler set with `onmessage` and an `addEventListener` with the same function count as one
 //!   listener. `onmessageerror`, the `close` event and `BroadcastChannel` are absent. `window.postMessage` is in `browser_basics.rs`.
@@ -65,12 +69,15 @@
 //! deadline is `min(50 ms, next task)`. `Task::IdleTimeout` runs a callback whose `timeout` passed. Not here: `setImmediate`, an `error` event or `onerror` for
 //! reported exceptions, `ErrorEvent`.
 //!
-//! GC: timers keep their callbacks and arguments (they are roots). A port that has queued delivery tasks is a root.
+//! GC: timers keep their callbacks and arguments (they are roots). A port that has queued delivery tasks is a root. So is an enabled port
+//! with a peer in another page (a message can come at any time). `sched_prune` removes the end of a port that the GC drops.
 //! A port keeps its peer, its queued payloads (and the new ports in them) and its listeners alive. So an unreachable channel (a cycle) is pruned,
 //! with its queued messages, at the next `collect`. A parked port (`park_port`) lives only between the walk and `make_ports` of one call. Ids of ports are generation checked, so a reused slot never
 //! finds the state of an old port. Events are pruned by `collect` only: collect between pumps in a long run.
 
 use crate::browser::*;
+use crate::browser_navigation_state::Transfer;
+use crate::browser_port_hub::Wire;
 use bare_html::dom::NodeId;
 use bare_js::eval::{Error, Interp, WallClock};
 use bare_js::value::{ObjId, Value};
@@ -182,6 +189,10 @@ struct Port {
     handler: Option<u64>,
     /// The port was transferred. The object stays, with no peer and no queue. It cannot be transferred again.
     moved: bool,
+    /// Its end in the port hub, once the port crossed to another page or its peer did (`browser_port_hub.rs`).
+    me: Option<u64>,
+    /// The end of its peer, when the peer is in another page. A port has `peer` or `remote`, never both.
+    remote: Option<u64>,
 }
 
 /// A queued message: the clone, its byte cost and the new ports of its transfer list (`MessageEvent.ports`).
@@ -189,11 +200,19 @@ struct Msg {
     data: Value,
     bytes: usize,
     ports: Box<[ObjId]>,
+    /// A message from another page (`browser_child.rs`); `None`: a message of this page.
+    from: Option<Box<Sender>>,
+}
+
+/// The sender of a message from another page: its origin, and its window in this heap (`None`: no window for it, as for a grandchild).
+pub(crate) struct Sender {
+    pub origin: String,
+    pub source: Option<ObjId>,
 }
 
 impl Port {
     fn new(peer: Option<ObjId>, enabled: bool) -> Port {
-        Port { peer, enabled, inbox: VecDeque::new(), keys: VecDeque::new(), handler: None, moved: false }
+        Port { peer, enabled, inbox: VecDeque::new(), keys: VecDeque::new(), handler: None, moved: false, me: None, remote: None }
     }
 }
 
@@ -205,6 +224,8 @@ struct MsgEvent {
     ports: Option<Value>,
     /// A message of `window.postMessage` (`browser_basics.rs`): `origin` is the document origin and `source` is the window.
     win: bool,
+    /// A message from another page: its `origin` and `source`. Else `win` decides.
+    from: Option<Box<Sender>>,
 }
 
 #[derive(Clone, Copy)]
@@ -234,6 +255,8 @@ pub(crate) struct Sched {
     /// Ports taken out of `ports` by a transfer, until `make_ports` gives them a new object. The key is heap-free.
     parked: HashMap<u64, (ObjId, Port)>,
     next_park: u64,
+    /// The ports of this page that have an end in the hub, by end id (in id order, so a take is deterministic).
+    ends: BTreeMap<u64, ObjId>,
     msg_events: IdMap<ObjId, MsgEvent>,
     queued: usize,
     queued_bytes: usize,
@@ -302,7 +325,7 @@ pub struct SchedStats {
 /// A task taken out of the queue, ready to run without any borrow.
 enum Run {
     Timer { id: u64, cb: Value, args: Vec<Value>, nesting: u32, repeat: bool },
-    Deliver { port: ObjId, data: Value, ports: Box<[ObjId]> },
+    Deliver { port: ObjId, data: Value, ports: Box<[ObjId]>, from: Option<Box<Sender>> },
     Select(NodeId),
     SelectionChange(NodeId),
     DocSelectionChange,
@@ -377,7 +400,8 @@ impl Dom {
             out.push(t.cb);
             out.extend_from_slice(&t.args);
         }
-        out.extend(s.ports.iter().filter(|(_, p)| !p.keys.is_empty()).map(|(&o, _)| Value::Object(o)));
+        // A port with a peer in another page that listens is a root: a message can come at any time.
+        out.extend(s.ports.iter().filter(|(_, p)| !p.keys.is_empty() || p.remote.is_some() && p.enabled).map(|(&o, _)| Value::Object(o)));
         out.extend(s.tasks.values().filter_map(|t| if let Task::AbortTimeout(o) | Task::Worker(o) = t { Some(Value::Object(*o)) } else { None }));
     }
 
@@ -388,17 +412,29 @@ impl Dom {
             for m in &p.inbox {
                 out.push(m.data);
                 out.extend(m.ports.iter().map(|&o| Value::Object(o)));
+                out.extend(m.from.iter().filter_map(|f| f.source).map(Value::Object));
             }
         } else if let Some(e) = s.msg_events.get(&owner) {
             out.push(e.data);
             out.extend(e.moved.iter().map(|&o| Value::Object(o)));
             out.extend(e.ports);
+            out.extend(e.from.iter().filter_map(|f| f.source).map(Value::Object));
         }
     }
 
     pub(crate) fn sched_prune(&self, live: &dyn Fn(ObjId) -> bool) {
         let mut s = self.sched.borrow_mut();
         let s = &mut *s;
+        if !s.ends.is_empty() {
+            let hub = self.kids.hub();
+            s.ends.retain(|&e, &mut o| {
+                let keep = live(o);
+                if !keep && let Some(h) = &hub {
+                    h.remove_end(e);
+                }
+                keep
+            });
+        }
         s.ports.retain(|&o, _| live(o));
         s.msg_events.retain(|&o, _| live(o));
         let ports = &s.ports;
@@ -627,10 +663,10 @@ impl Dom {
                 Some(p) if p.keys.front() == Some(&key) => {
                     p.keys.pop_front();
                     match p.inbox.pop_front() {
-                        Some(Msg { data, bytes, ports }) => {
+                        Some(Msg { data, bytes, ports, from }) => {
                             s.queued -= 1;
                             s.queued_bytes -= bytes;
-                            Run::Deliver { port, data, ports }
+                            Run::Deliver { port, data, ports, from }
                         }
                         None => Run::Nothing,
                     }
@@ -761,14 +797,14 @@ impl Dom {
                 self.worker_failed(it, o)?;
                 it.host_checkpoint().map(|_| ())
             }),
-            Run::Deliver { port, data, ports } => {
+            Run::Deliver { port, data, ports, from } => {
                 let mark = self.settle_mark();
                 it.host_scope(|it| {
                     it.charge(1)?;
                     let win = self.global.get() == Some(&port);
                     let target = if win { Target::Window } else { Target::Obj(port) };
                     if self.has_message_listener(target) {
-                        let ev = self.new_msg_event(it, data, win, ports)?;
+                        let ev = self.new_msg_event(it, data, win, ports, from)?;
                         self.dispatch(it, target, ev)?;
                     }
                     it.host_checkpoint().map(|_| ())
@@ -866,7 +902,16 @@ impl Dom {
 
     /// Queue a `message` event for the window: one delivery task. The window is a port of the table with no peer. `data` is already cloned.
     pub(crate) fn post_window(&self, data: Value, ports: Box<[ObjId]>) -> R<()> {
-        let cost = crate::browser_basics::MESSAGE_COST;
+        self.queue_window(data, ports, crate::browser_basics::MESSAGE_COST, None)
+    }
+
+    /// The most messages that a page queues (also the bound of the outbox for other pages).
+    pub(crate) fn max_messages(&self) -> usize {
+        self.sched.borrow().limits.max_queued_messages
+    }
+
+    /// `post_window` with the byte cost, and the sender when the message comes from another page.
+    pub(crate) fn queue_window(&self, data: Value, ports: Box<[ObjId]>, cost: usize, from: Option<Box<Sender>>) -> R<()> {
         let g = *self.global.get().expect("installed");
         {
             let s = self.sched.borrow();
@@ -882,15 +927,15 @@ impl Dom {
         s.queued += 1;
         s.queued_bytes += cost;
         let p = s.ports.entry(g).or_insert(Port::new(None, true));
-        p.inbox.push_back(Msg { data, bytes: cost, ports });
+        p.inbox.push_back(Msg { data, bytes: cost, ports, from });
         p.keys.push_back(key);
         Ok(())
     }
 
-    fn new_msg_event(&self, it: &mut Interp<'_>, data: Value, win: bool, moved: Box<[ObjId]>) -> R<ObjId> {
+    fn new_msg_event(&self, it: &mut Interp<'_>, data: Value, win: bool, moved: Box<[ObjId]>, from: Option<Box<Sender>>) -> R<ObjId> {
         let proto = self.sched.borrow().protos.expect("installed").event;
         let e = self.new_event_proto(it, "message", false, false, false, proto)?;
-        self.sched.borrow_mut().msg_events.insert(e, MsgEvent { data, moved, ports: None, win });
+        self.sched.borrow_mut().msg_events.insert(e, MsgEvent { data, moved, ports: None, win, from });
         Ok(e)
     }
 
@@ -1060,6 +1105,9 @@ impl Dom {
                 }
             }
             st.by_obj.insert(new, Target::Obj(new));
+            if let Some(e) = rec.me {
+                s.ends.insert(e, new);
+            }
             s.ports.insert(new, rec);
         }
         Ok(news)
@@ -1193,6 +1241,158 @@ fn message_channel_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> 
 }
 
 impl Dom {
+    /// The ports of a transfer list `xf` (made by `clone_state_with`, so still `Transfer::Port`) leave for another page: each becomes a
+    /// `Transfer::End`. A port with a peer in this page makes the peer a port with an end here: the pair is split. A port that crossed
+    /// before keeps its ends. The messages that wait in the port move with it, as wires, in order. A waiting message that carries ports
+    /// is dropped, with one warning (a known limit).
+    pub(crate) fn export_ports(&self, it: &mut Interp<'_>, xf: &mut [Transfer]) -> R<()> {
+        if !xf.iter().any(|t| matches!(t, Transfer::Port(_))) {
+            return Ok(());
+        }
+        let Some(hub) = self.kids.hub() else {
+            return Err(self.dom_err(it, "DataCloneError", "A MessagePort could not move to another page."));
+        };
+        let page = self.kids.page.get();
+        let mut recs: Vec<(usize, ObjId, Port)> = Vec::new();
+        {
+            let mut s = self.sched.borrow_mut();
+            for (i, t) in xf.iter().enumerate() {
+                if let Transfer::Port(k) = t {
+                    let (o, rec) = s.parked.remove(k).expect("parked");
+                    s.queued -= rec.inbox.len();
+                    s.queued_bytes -= rec.inbox.iter().map(|m| m.bytes).sum::<usize>();
+                    recs.push((i, o, rec));
+                }
+            }
+        }
+        let mut warned = false;
+        let mut waiting: Vec<Vec<Wire>> = Vec::with_capacity(recs.len());
+        for (_, _, rec) in &mut recs {
+            let mut ws = Vec::with_capacity(rec.inbox.len());
+            for m in std::mem::take(&mut rec.inbox) {
+                if !m.ports.is_empty() {
+                    if !std::mem::replace(&mut warned, true) {
+                        crate::browser_console::push_text(self, it, crate::browser_console::ConsoleLevel::Warn, "A message that waited in a MessagePort and carried ports was dropped when the port moved to another page");
+                    }
+                    continue;
+                }
+                let (state, transfer) = crate::browser_navigation_state::clone_state_with(self, it, m.data, &[])?;
+                ws.push(Wire { state, transfer, bytes: m.bytes });
+            }
+            waiting.push(ws);
+        }
+        let olds: Vec<ObjId> = recs.iter().map(|r| r.1).collect();
+        let ids: Vec<u64> = recs.iter().map(|r| r.2.me.unwrap_or_else(|| hub.new_end(None))).collect();
+        for (j, (i, _, rec)) in recs.iter().enumerate() {
+            let me = ids[j];
+            let remote = match (rec.me, rec.peer) {
+                (Some(_), _) => rec.remote,
+                (None, Some(q)) => match olds.iter().position(|&o| o == q) {
+                    // Both ends of the pair are in the list.
+                    Some(k) => Some(ids[k]),
+                    // The peer stays here: it gets an end of this page.
+                    None => {
+                        let mut s = self.sched.borrow_mut();
+                        let s = &mut *s;
+                        s.ports.get_mut(&q).map(|qp| {
+                            let eq = hub.new_end(Some(page));
+                            (qp.peer, qp.remote, qp.me) = (None, Some(me), Some(eq));
+                            s.ends.insert(eq, q);
+                            eq
+                        })
+                    }
+                },
+                (None, None) => None,
+            };
+            hub.set_owner(me, None);
+            hub.prepend(me, std::mem::take(&mut waiting[j]));
+            self.sched.borrow_mut().ends.remove(&me);
+            xf[*i] = Transfer::End { me, remote };
+        }
+        Ok(())
+    }
+
+    /// New port objects for the ends of a message that came from another page, in the order of `ends`. Each port starts disabled and
+    /// takes the wires that wait for its end. The page owns the ends from now on.
+    pub(crate) fn import_ends(&self, it: &mut Interp<'_>, ends: &[(u64, Option<u64>)]) -> R<Vec<ObjId>> {
+        let Some(hub) = self.kids.hub() else {
+            return Err(self.dom_err(it, "DataCloneError", "A MessagePort could not move to this page."));
+        };
+        if self.sched.borrow().ports.len() + ends.len() > self.sched.borrow().limits.max_ports {
+            return Err(self.lim("message-ports"));
+        }
+        if self.st.borrow().by_obj.len() + ends.len() > self.lim.max_wrappers {
+            return Err(self.lim("dom-wrappers"));
+        }
+        let proto = self.sched.borrow().protos.expect("installed").port;
+        let mut news = Vec::with_capacity(ends.len());
+        for _ in ends {
+            news.push(self.obj(it, proto)?);
+        }
+        let page = self.kids.page.get();
+        {
+            let mut st = self.st.borrow_mut();
+            let mut s = self.sched.borrow_mut();
+            for (&(me, remote), &new) in ends.iter().zip(&news) {
+                let mut p = Port::new(None, false);
+                // An end that was removed while the port was in flight (its message was dropped, or its page ended) leaves a closed port.
+                if hub.has(me) {
+                    (p.me, p.remote) = (Some(me), remote);
+                    hub.set_owner(me, Some(page));
+                    s.ends.insert(me, new);
+                }
+                st.by_obj.insert(new, Target::Obj(new));
+                s.ports.insert(new, p);
+            }
+        }
+        for (&(me, _), &new) in ends.iter().zip(&news) {
+            if self.sched.borrow().ends.get(&me) == Some(&new) {
+                self.take_end(it, &hub, me, new)?;
+            }
+        }
+        Ok(news)
+    }
+
+    /// Move the wires that wait for the ends of this page into their ports (the driver calls it when the hub is busy). Returns the count.
+    pub(crate) fn take_wires(&self, it: &mut Interp<'_>) -> R<usize> {
+        let Some(hub) = self.kids.hub() else { return Ok(0) };
+        let ends: Vec<(u64, ObjId)> = self.sched.borrow().ends.iter().map(|(&e, &o)| (e, o)).collect();
+        let mut n = 0;
+        for (e, o) in ends {
+            n += self.take_end(it, &hub, e, o)?;
+        }
+        Ok(n)
+    }
+
+    /// The wires of `end` become messages of its port `obj`, in order. A message over the bounds of this page is dropped, with a warning.
+    fn take_end(&self, it: &mut Interp<'_>, hub: &crate::browser_port_hub::PortHub, end: u64, obj: ObjId) -> R<usize> {
+        let mut n = 0;
+        while let Some(w) = hub.pop(end) {
+            n += 1;
+            let full = {
+                let s = self.sched.borrow();
+                s.queued >= s.limits.max_queued_messages || s.queued_bytes.saturating_add(w.bytes) > s.limits.max_queued_message_bytes
+            };
+            if full {
+                hub.release(&w.transfer);
+                crate::browser_console::push_text(self, it, crate::browser_console::ConsoleLevel::Warn, "A message for a MessagePort was dropped: the queue of its page is full");
+                continue;
+            }
+            let bytes = w.bytes;
+            let (data, ports) = crate::browser_navigation_state::materialize_with(self, it, &w.state, w.transfer)?;
+            let enabled = self.sched.borrow().ports.get(&obj).is_some_and(|p| p.enabled);
+            let key = if enabled { Some(self.schedule(self.now_ms(), Task::Deliver(obj))?) } else { None };
+            let mut s = self.sched.borrow_mut();
+            s.queued += 1;
+            s.queued_bytes += bytes;
+            if let Some(p) = s.ports.get_mut(&obj) {
+                p.inbox.push_back(Msg { data, bytes, ports: ports.into_boxed_slice(), from: None });
+                p.keys.extend(key);
+            }
+        }
+        Ok(n)
+    }
+
     /// A `MessagePort` with no peer (the `port` of a `SharedWorker` that did not start): it takes messages and delivers none.
     pub(crate) fn new_port(&self, it: &mut Interp<'_>) -> R<ObjId> {
         if self.sched.borrow().ports.len() + 1 > self.sched.borrow().limits.max_ports {
@@ -1215,6 +1415,10 @@ fn port_post_message(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> 
         return Err(it.type_error("Failed to execute 'postMessage' on 'MessagePort': 1 argument required, but only 0 present."));
     }
     let list = d.transfer_arg(it, arg(a, 1), Some(port))?;
+    let remote = d.sched.borrow().ports.get(&port).and_then(|p| p.remote);
+    if let Some(end) = remote {
+        return post_remote(d, it, a[0], &list, end);
+    }
     let (data, bytes, moved) = d.clone_payload(it, a[0], &list)?;
     let now = d.now_ms();
     let target = {
@@ -1235,8 +1439,26 @@ fn port_post_message(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> 
     s.queued += 1;
     s.queued_bytes += bytes;
     let t = s.ports.get_mut(&target).expect("checked");
-    t.inbox.push_back(Msg { data, bytes, ports: moved });
+    t.inbox.push_back(Msg { data, bytes, ports: moved, from: None });
     t.keys.extend(key);
+    Ok(Value::Undefined)
+}
+
+/// `postMessage` of a port whose peer is in another page: the message goes to the hub as data. A missing end drops it.
+fn post_remote(d: &Dom, it: &mut Interp<'_>, v: Value, list: &[ObjId], end: u64) -> V {
+    let Some(hub) = d.kids.hub() else { return Ok(Value::Undefined) };
+    if hub.wires() >= d.max_messages() {
+        return Err(d.lim("messages"));
+    }
+    let (state, mut transfer) = crate::browser_navigation_state::clone_state_with(d, it, v, list)?;
+    d.export_ports(it, &mut transfer)?;
+    let bytes = 16usize.saturating_add(state.bytes);
+    if hub.bytes().saturating_add(bytes) > d.sched.borrow().limits.max_queued_message_bytes {
+        return Err(d.lim("message-bytes"));
+    }
+    if let Err(w) = hub.push(end, Wire { state, transfer, bytes }) {
+        hub.release(&w.transfer);
+    }
     Ok(Value::Undefined)
 }
 
@@ -1249,9 +1471,17 @@ fn port_start(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
 fn port_close(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let port = d.port_of(it, this)?;
     let mut s = d.sched.borrow_mut();
-    let peer = s.ports.get_mut(&port).expect("checked").peer.take();
+    let p = s.ports.get_mut(&port).expect("checked");
+    let (peer, me) = (p.peer.take(), p.me.take());
+    p.remote = None;
     if let Some(q) = peer.and_then(|q| s.ports.get_mut(&q)) {
         q.peer = None;
+    }
+    if let Some(e) = me {
+        s.ends.remove(&e);
+        if let Some(h) = d.kids.hub() {
+            h.remove_end(e);
+        }
     }
     Ok(Value::Undefined)
 }
@@ -1330,13 +1560,17 @@ fn msg_empty(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
 }
 
 fn msg_origin(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let win = msg_event(d, it, this, |e| e.win)?;
-    d.js_str(it, &if win { d.window_origin() } else { String::new() })
+    let (win, from) = msg_event(d, it, this, |e| (e.win, e.from.as_ref().map(|f| f.origin.clone())))?;
+    d.js_str(it, &from.unwrap_or_else(|| if win { d.window_origin() } else { String::new() }))
 }
 
 fn msg_source(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let win = msg_event(d, it, this, |e| e.win)?;
-    Ok(if win { Value::Object(*d.global.get().expect("installed")) } else { Value::Null })
+    let (win, from) = msg_event(d, it, this, |e| (e.win, e.from.as_ref().map(|f| f.source)))?;
+    Ok(match from {
+        Some(src) => src.map_or(Value::Null, Value::Object),
+        None if win => Value::Object(*d.global.get().expect("installed")),
+        None => Value::Null,
+    })
 }
 
 fn msg_ports(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
@@ -1419,13 +1653,21 @@ impl Browser {
 
     /// Due time of the earliest queued task.
     pub fn next_scheduled_due(&self) -> Option<f64> {
-        self.dom.next_due()
+        let own = self.dom.next_due();
+        if !self.dom.kids.any() {
+            return own;
+        }
+        // The tasks of the child pages count too (`browser_child.rs`), on this page's clock.
+        match (own, self.dom.kids.next_due()) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     /// Does a queued task due at `limit` ms or before keep the page from being settled? See "Settled" in the header.
     pub fn blocks_settle(&self, limit: f64) -> bool {
         let s = self.dom.sched.borrow();
-        s.tasks.iter().take_while(|(k, _)| f64::from_bits(k.0) <= limit).any(|(_, t)| !s.skips(t))
+        s.tasks.iter().take_while(|(k, _)| f64::from_bits(k.0) <= limit).any(|(_, t)| !s.skips(t)) || self.dom.kids.blocks(&self.dom, limit)
     }
 
     /// For `BARE_NET_TRACE`: the first queued task due at `limit` ms or before that blocks the settle, and its due time.

@@ -258,7 +258,7 @@ fn flags(cx: &Cx, n: NodeId, role: &str, href: bool) -> Vec<String> {
     {
         f.push(format!("href={}", short(&clean_url(h), 80)));
     }
-    if cx.tag(n) == "input" && matches!(cx.input_type(n).as_str(), "email" | "password" | "tel" | "url" | "number" | "date" | "search") {
+    if cx.tag(n) == "input" && matches!(cx.input_type(n).as_str(), "email" | "password" | "tel" | "url" | "number" | "date" | "search" | "time" | "datetime-local" | "month" | "week") {
         f.push(cx.input_type(n));
     }
     f

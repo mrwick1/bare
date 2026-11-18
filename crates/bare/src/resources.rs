@@ -141,6 +141,9 @@ pub struct Discovery {
     /// In the order of the page. A URL that two items use is one target.
     pub items: Vec<Item>,
     pub targets: Vec<Target>,
+    /// The `href` URLs of `<link rel=modulepreload>` in the page, in its order. The page names these modules before any script runs.
+    /// `prefetch` starts them early; no item or target refers to them.
+    pub hints: Vec<Url>,
     /// The document base URL (the first good `<base href>`, else the page). A script that the page adds later resolves against it.
     pub base: String,
 }
@@ -230,6 +233,7 @@ pub fn discover(doc: &Document, page: &Url, limits: &Limits) -> Result<Discovery
 
     // One walk, in the order of the page. Collect the candidates. The base can come after a script, so URLs wait.
     let mut candidates: Vec<NodeId> = Vec::new();
+    let mut hint_nodes: Vec<NodeId> = Vec::new();
     let mut base: Option<Url> = None;
     let mut stack = vec![doc.root()];
     while let Some(node) = stack.pop() {
@@ -247,6 +251,8 @@ pub fn discover(doc: &Document, page: &Url, limits: &Limits) -> Result<Discovery
                     let has = |word: &str| rel.split_ascii_whitespace().any(|w| w.eq_ignore_ascii_case(word));
                     if has("stylesheet") && !has("alternate") && attr(node, at.disabled).is_none() && !attr(node, at.media).is_some_and(print_only) {
                         candidates.push(node);
+                    } else if has("modulepreload") && hint_nodes.len() < limits.max_fetches {
+                        hint_nodes.push(node);
                     }
                 }
             } else if tag == at.base && base.is_none() {
@@ -342,7 +348,8 @@ pub fn discover(doc: &Document, page: &Url, limits: &Limits) -> Result<Discovery
         let kind = if is_script { Kind::Script { module, timing: timing(true), source: Source::External(index) } } else { Kind::Stylesheet { target: index } };
         items.push(Item { node, kind });
     }
-    Ok(Discovery { items, targets, base: base.to_string() })
+    let hints = hint_nodes.into_iter().filter_map(|n| attr(n, at.href).map(|h| h.trim_matches(WS)).filter(|h| !h.is_empty()).and_then(|h| base.join(h).ok())).collect();
+    Ok(Discovery { items, targets, hints, base: base.to_string() })
 }
 
 /// The document base URL now: the first `<base href>` that resolves against `page`, else `None` (the base is `page`; the rule of `discover`).

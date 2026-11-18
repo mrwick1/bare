@@ -402,7 +402,7 @@ impl Dom {
         };
         for s in found {
             if self.doc.borrow().is_html(s, "iframe") {
-                self.frame_src(s);
+                self.frame_src(it, s);
             } else {
                 self.prepare_script(it, s)?;
             }
@@ -420,7 +420,7 @@ impl Dom {
             // Only a script in the tree is prepared (`script_inserted` checks it and walks one node).
             self.script_inserted(it, node)?;
         }
-        self.frame_src(node);
+        self.frame_src(it, node);
         Ok(())
     }
 
@@ -730,6 +730,32 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
 // ---------------------------------------------------------------------------------------------- the driver
 
 impl Browser {
+    /// The iframes of the parsed document ask for their child pages, in document order.
+    fn scan_frames(&mut self) {
+        let dom = self.dom.clone();
+        let frames: Vec<NodeId> = {
+            let doc = dom.doc.borrow();
+            let Some(iframe) = doc.find_atom("iframe") else { return };
+            let mut out = Vec::new();
+            let mut stack = vec![doc.root()];
+            while let Some(n) = stack.pop() {
+                if let NodeData::Element { name, .. } = *doc.data(n)
+                    && name == iframe && !doc.is_foreign(n) {
+                    out.push(n);
+                }
+                let mut c = doc.last_child(n);
+                while let Some(k) = c {
+                    stack.push(k);
+                    c = doc.prev_sibling(k);
+                }
+            }
+            out
+        };
+        for n in frames {
+            dom.frame_src(&mut self.it, n);
+        }
+    }
+
     /// Dispatch a new non-cancelable event at `t`. A checkpoint follows each listener (the driver flag).
     fn fire(&mut self, t: EvTarget, ty: &str, bubbles: bool) -> R<()> {
         let dom = self.dom.clone();
@@ -775,6 +801,8 @@ impl Browser {
             None => dom.fetch.client.borrow_mut().use_jar(jar.clone()),
         }
         dom.nav.s.borrow_mut().store.use_jar(jar);
+        // The child pages of this document (`browser_child.rs`) load with a fork of this client and these limits.
+        dom.kids.configure(dom.lim, cfg.client.fork(), cfg.limits.clone(), cfg.fetch.as_ref().map_or_else(FetchLimits::default, |f| f.1), Some(bare_net::cookie::site_of(&page)));
         if let Some((client, limits)) = cfg.fetch
             && self.configure_fetch(FetchConfig { base_url: Some(cfg.url.clone()), client, limits }).is_err() {
             setup(&mut res, "the fetch origin could not be configured".into());
@@ -802,6 +830,7 @@ impl Browser {
                 return res;
             }
         };
+        self.scan_frames();
         let s = &dom.scripts;
         *s.base.borrow_mut() = Some(disc.base.clone());
         s.caps.set((cfg.limits.max_pending_scripts, cfg.limits.max_pending_script_bytes));
@@ -895,7 +924,7 @@ impl Browser {
         let parse = dom.scripts.parse.borrow_mut().take().map(|p| *p);
         let split = parse.is_some();
         let p = parse.unwrap_or_else(|| Parse {
-            disc: resources::Discovery { items: Vec::new(), targets: Vec::new(), base: String::new() },
+            disc: resources::Discovery { items: Vec::new(), targets: Vec::new(), hints: Vec::new(), base: String::new() },
             items: Vec::new(),
             cache: Vec::new(),
             refs: Vec::new(),
@@ -972,6 +1001,12 @@ impl Browser {
         self.live_work_of(true)
     }
 
+    /// Live: the parser of a split document waits for a download before `DOMContentLoaded`. Its turns run no task until the download
+    /// is in, so a task that is due is not work until then.
+    pub(crate) fn tasks_held(&self) -> bool {
+        self.dom.scripts.parse.borrow().as_ref().is_some_and(|p| p.waiting && p.step <= p.items.iter().filter(|i| i.timing != Timing::Async).count() + 1)
+    }
+
     /// `live_work`; with `streams` false an open event stream is not work: it can stay open for as long as the page lives.
     pub(crate) fn live_work_of(&self, streams: bool) -> Option<bool> {
         let s = &self.dom.scripts;
@@ -996,9 +1031,18 @@ impl Browser {
             (None, None) => None,
             _ => Some(false),
         };
-        match (net, script, waits, parse) {
+        let own = match (net, script, waits, parse) {
             (Some(true), ..) | (_, Some(true), ..) | (.., Some(true), _) | (.., Some(true)) => Some(true),
             (None, None, None, None | Some(false)) => None,
+            _ => Some(false),
+        };
+        // The child pages are part of the page (`browser_child.rs`).
+        if !self.dom.kids.any() {
+            return own;
+        }
+        match (own, self.dom.kids.live_work(streams)) {
+            (Some(true), _) | (_, Some(true)) => Some(true),
+            (None, None) => None,
             _ => Some(false),
         }
     }
@@ -1075,10 +1119,10 @@ struct Net {
     ahead: bare_js::parse_ahead::Ahead,
 }
 
-/// Downloads that are started and not taken at once. The workers run `MAX_WORKERS` of them at a time (Chrome opens 6 connections for
-/// HTTP/1.1), in the order they were started. A file that is done waits here until its element takes it, and does not hold a worker:
+/// Downloads that are started and not taken at once. The workers run `MAX_WORKERS` of them at a time (6 for each HTTP/1.1 server, as
+/// Chrome), in the order they were started. A file that is done waits here until its element takes it, and does not hold a worker:
 /// with a window of 6, a slow first script kept the 5 files after it from being replaced, and the connections stood idle.
-const WINDOW: usize = 32;
+const WINDOW: usize = bare_net::parallel::MAX_WORKERS;
 
 impl Net {
     fn new(client: Client) -> Net {
@@ -1569,6 +1613,22 @@ impl Run<'_> {
 
     /// Live, after `load`: start the downloads of the queued dynamic scripts, and say whether the first one is still on its way. Then it
     /// waits in the queue for a later turn, and the scripts after it too (they run in the order of the queue).
+    /// One turn for each child page. Its tasks count in the budget of this page, its `load` events go to the iframe elements.
+    fn kids_round(&mut self, advance: bool, wait: bool) -> Result<usize, Stop> {
+        self.budget()?;
+        let t = self.b.kids_turn(advance, wait);
+        self.res.tasks += t.tasks;
+        for line in t.diags {
+            self.diag(line);
+        }
+        let n = t.work + t.loaded.len();
+        for node in t.loaded {
+            self.fire(EvTarget::Node(node), "load", false)?;
+            self.after_js()?;
+        }
+        Ok(n)
+    }
+
     fn live_wait(&mut self) -> bool {
         let kept = self.kept();
         let first = {
@@ -1706,13 +1766,13 @@ impl Run<'_> {
         let room = WINDOW.saturating_sub(self.net.started.len()).min(lim.max_fetches.saturating_sub(self.res.fetches + self.net.started.len()));
         let allowed = |https_only: bool, u: &Url| !(https_only && u.scheme == bare_url::Scheme::Http);
         let mut cursor = self.cursor;
-        let mut todo: Vec<(Expect, &Url, bool)> = Vec::new();
+        let mut todo: Vec<(Expect, &Url, bool, bool)> = Vec::new();
         while cursor < self.disc.targets.len() && todo.len() < room {
             let t = &self.disc.targets[cursor];
             if allowed(self.https_only, &t.url) && !self.net.direct.contains(&Net::tag(t.expect, &t.url)) {
                 // Only a target that no module element names is a classic script (`parse_ahead` parses classic text).
                 let classic = t.expect == Expect::Script && !self.items.iter().any(|p| p.module && matches!(p.source, Source::External(i) if i == cursor));
-                todo.push((t.expect, &t.url, classic));
+                todo.push((t.expect, &t.url, classic, false));
             }
             cursor += 1;
         }
@@ -1720,7 +1780,14 @@ impl Run<'_> {
         let external = self.dom.scripts.external.borrow();
         for e in external.iter().take(WINDOW) {
             if let Ext::Fetch(_, u) = e && todo.len() < room && allowed(self.https_only, u) && !preloads.has_script(u) {
-                todo.push((Expect::Script, u, false));
+                todo.push((Expect::Script, u, false, false));
+            }
+        }
+        // The modules that `<link rel=modulepreload>` names: the page imports them later, one level of the graph at a time. Each waits in
+        // `started` until its import takes it (`Net::fetch`), and holds nothing until then (`Net::hints`).
+        for u in &self.disc.hints {
+            if todo.len() < room && allowed(self.https_only, u) && !preloads.has_script(u) && !self.net.direct.contains(&Net::tag(Expect::Script, u)) && !self.net.started.contains_key(&Net::key(Expect::Script, u)) {
+                todo.push((Expect::Script, u, false, true));
             }
         }
         if !self.split && todo.len() + self.net.started.len() < 2 {
@@ -1728,12 +1795,17 @@ impl Run<'_> {
         }
         self.cursor = cursor;
         let kept = self.kept();
-        for (expect, url, classic) in todo {
+        for (expect, url, classic, hint) in todo {
             let mut lim = lim.clone();
             if expect == Expect::Style {
                 lim.max_resource_bytes = lim.max_resource_bytes.min(sheets::MAX_BODY);
             }
+            let key = Net::key(expect, url);
+            let new = hint && !self.net.started.contains_key(&key);
             self.net.start_with(expect, url, &lim, self.deadline, kept, classic);
+            if new && self.net.started.contains_key(&key) {
+                self.net.hints.insert(key);
+            }
         }
     }
 
@@ -1831,7 +1903,7 @@ impl Run<'_> {
             self.budget()?;
             self.feed_if_ran()?;
             let mut did = 0usize;
-            if !self.loaded && self.async_queue.is_empty() && self.dom.scripts.external.borrow().is_empty() && self.net.waits.is_empty() {
+            if !self.loaded && self.async_queue.is_empty() && self.dom.scripts.external.borrow().is_empty() && self.net.waits.is_empty() && self.dom.kids.loaded(&self.dom) {
                 self.loaded = true;
                 self.set_ready(2)?;
                 self.dom.load_times.borrow_mut().complete = self.dom.now_ms();
@@ -1912,6 +1984,22 @@ impl Run<'_> {
             if self.res.rounds.is_multiple_of(self.lim.collect_every.max(1)) || self.b.collect_due() {
                 self.b.collect(&[]).map_err(fatal_of)?;
             }
+            // The child pages run when this page has no task of its own in the round (`browser_child.rs`).
+            if did == 0 && self.dom.kids.any() {
+                did += self.kids_round(false, false)?;
+            }
+            // A child page: one pass, no wait. The page that holds it waits and moves the clock.
+            if self.dom.kids.poll.get() {
+                if did == 0 && let Some(t) = self.dom.kids.poll_to.take() && self.b.uses_virtual_clock() {
+                    let ran = match self.b.advance_to(t, 1) {
+                        Ok(pump) => pump.ran,
+                        Err(e) => self.abort(e, "timer or queued task").map(|_| 1)?,
+                    };
+                    self.res.tasks += ran;
+                    self.after_js()?;
+                }
+                return Err(Stop::Settled);
+            }
             if did > 0 {
                 if bare_net::trace::on() {
                     bare_net::trace::mark(|| format!("round {} did {did}", self.res.rounds), 0);
@@ -1933,6 +2021,11 @@ impl Run<'_> {
                 bare_net::trace::mark(|| "settled".into(), 0);
                 return Err(Stop::Settled);
             }
+            // A child that still loads: this page has nothing else to do, so it waits for the document (no spin on the round budget).
+            if self.dom.kids.loading(&self.dom) {
+                self.kids_round(false, true)?;
+                continue;
+            }
             let due = self.b.next_scheduled_due().unwrap_or(now);
             let gap = due - now;
             if bare_net::trace::on() {
@@ -1946,6 +2039,10 @@ impl Run<'_> {
                 };
                 self.res.tasks += ran;
                 self.after_js()?;
+                // One clock: the children go to the time of this page (`browser_child.rs`).
+                if self.dom.kids.any() {
+                    self.kids_round(true, false)?;
+                }
             } else {
                 let wait = Duration::from_secs_f64(gap.max(0.0) / 1000.0);
                 // `gap` is at most `quiet` here, so this cannot overflow.
