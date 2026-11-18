@@ -13290,3 +13290,10 @@ Not tested: windowed runs (paint), the RSS cost of `auto` by part, the mode A/B 
 - Node starts with about 94 M instructions and 46 MiB. Its JIT wins only on `loop` 10 and `calls` 10.
 - Details, method and the design notes: `docs/research-quickjs-reference.md`. Data and scripts: `/data/bare-tmp/quickjs-baseline-2026-11-18/`.
 - A first RSS pass through a Python parent read 14.2 MiB on every row: a forked child keeps the parent's peak RSS through `exec`. The C wrapper fixed it (floor 1.5 MiB).
+
+## Owner decision: the engine rewrite targets the daily workload (2026-11-18)
+
+- Decision: the new engine is built and tuned for the daily journeys (the staging journey, the typing page and the public journeys). No speculating JIT. The baseline JIT is optional and is built only if a profile of the daily journeys shows hot code that pays for it. The interpreter is a full engine.
+- A feature census of the daily journeys on today's engine (new in S0) decides which language features and built-ins are ported. A feature outside the census throws a `TypeError` that names it and is logged.
+- Why: on short, cold code a JIT does not pay back its start cost (Node: about 94 M instructions and 46 MiB at start), and QuickJS without a JIT is 1.6 to 3.8 times below today's `auto` (`research-quickjs-reference.md`).
+- Design: `docs/design-engine-rewrite.md` section 6.12 (PR #681).
