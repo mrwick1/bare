@@ -12,7 +12,7 @@
 //!   Partial pending shorthands keep their source and surviving mask separately. Attribute spans invalidate this state.
 //! - `el.style` is one object for each element while the element wrapper lives (`SameObject`): the wrapper traces the
 //!   declaration and the declaration traces the wrapper. The setter forwards to `cssText` (`[PutForwards=cssText]`).
-//! - Supported properties are exactly the ones `bare_css` understands: `values::Property::ALL` and `values::SHORTHANDS`.
+//! - Supported properties are exactly the ones `bare_css` understands: `values::Property::ALL`, `values::SHORTHANDS` and `transform` (`blk::WHOLE`).
 //!   For each one the prototype has camelCase and dashed accessors (and `cssFloat`; `-webkit-` names also get the
 //!   `webkitX` form), so `"x" in style` is true only for a property that really works. `transition`, `animation` and their
 //!   `transition-*` / `animation-*` longhands are supported (`bare_css::motion`; the events are in `browser_motion.rs`). `WebkitAnimation`,
@@ -631,6 +631,7 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
 
     let mut props: Vec<&'static str> = Property::LISTED.iter().map(|p| p.name()).collect();
     props.extend(SHORTHANDS);
+    props.extend(blk::WHOLE);
     // Legacy aliases have their own accessor names and share the canonical property.
     props.extend(["-webkit-user-select", "word-wrap"]);
     let mut nm = String::new();
