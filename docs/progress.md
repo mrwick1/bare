@@ -13346,6 +13346,18 @@ Not tested: per-task survival, other journeys, the e16 machine.
 ## 2026-11-18: new engine crate (plan step S1.1)
 
 A new crate `crates/js2` (`bare-js2`) holds the new engine. It runs no scripts yet. `BARE_JS_EXEC=new` stops the browser with exit code 2 and the message `BARE_JS_EXEC=new: the new JavaScript engine (bare-js2) cannot run scripts yet; use BARE_JS_EXEC=tree, auto or byte`. The crate denies `unsafe` code; stage S1 allows it in the `value` and `heap` modules only. A new CI job `miri` runs `cargo miri test -p bare-js2` on nightly. It ran locally on nightly 2026-11-17 (0 tests).
+## 2026-11-18: feature census (plan step P0.1)
+
+The cargo feature `census` of `bare-js` counts each syntax kind that the parser keeps and each native built-in call. When a realm ends, it writes the totals to the file in `BARE_JS_CENSUS`. With the feature off, every census line is compiled out, so the cost rows cannot move.
+
+Workloads (archMachine, `BARE_JS_EXEC=auto`, one run each, all `ok`): the staging journey, the typing page (`type_load '#a1' 50`) and the 48 public journeys. Full list: `docs/census/2026-11-18.tsv` (379 keys: 79 expression kinds, 20 statement kinds, 7 pattern kinds, 16 function kinds, 5 class element kinds, 252 native built-ins).
+
+- Native calls, the top 5: `Object.prototype.hasOwnProperty` (701,166 calls, 27 workloads), `Function.prototype.call` (417,375), `Array.prototype.push` (337,225), `String.prototype.charCodeAt` (222,435), `RegExp.prototype.test` (217,866).
+- 55 native built-ins appear in only one workload. `eval` is called once, in one workload.
+- `with` never appears.
+- Used, so S3 must have them: spread (31 workloads), `for-in` (27), object destructuring (22), `await` (21), async functions and arrows (18 and 15), classes (13), async generators (7), generators and `yield` (5), private names (5), tagged templates (6), `import()` (4).
+
+Limits: the parser count includes code that never runs, except lazy function bodies (counted on their first call). Not counted: promise functions, host (DOM) calls and built-ins that the bytecode lane runs without a call. One run per workload; live pages change.
 ## 2026-11-18: scope hop histogram (plan step P0.3)
 
 The `bc-hist` feature now counts each `GetEnv` by its hop count. It also counts the hop-0 reads in functions whose locals stay in the environment only because `rfc_analyze` met a lazy inner function (`w.lazy_inner`, `bc_gen_rf.rs`). That count is an upper bound: a variable that an inner function names stays in the environment anyway.
