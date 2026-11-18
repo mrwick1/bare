@@ -4,6 +4,23 @@ This file records what is built, what comes next and what is missing. Update it 
 
 The reasons for the design are in [decisions.md](decisions.md). Time and memory numbers for each module are in [resources.md](resources.md).
 
+## import() calls of one checkpoint download together (2026-11-17, Plane OFS-18)
+
+`serve_imports` answered the `import()` calls of one checkpoint one at a time. Each `load_graph` blocked the page thread on its own download. The MDN page asks for 23 chunks in one `Promise.all`, so the page waited 23 round trips in a row. Now `serve_imports` first starts the downloads of the whole batch on the workers, as `load_deps` does for the imports of one module. The order in which modules run does not change.
+
+Measurements (live, Linux, `bare-mcp` `open`, runs of base and new alternate, 5 pairs, network not controlled):
+
+| Page | base, s | new, s |
+|---|---|---|
+| developer.mozilla.org/en-US/docs/Web/HTML | 3.6, 2.5, 2.8, 3.2, 3.1 (median 3.1) | 1.4, 1.4, 2.0, 2.0, 2.5 (median 2.0) |
+| github.com/microsoft/playwright | 18.8 to 24.1 (median 21.3) | 9.9 to 24.4 (median 19.1) |
+
+Peak RSS: MDN 34 to 36 MiB on both, GitHub 162 to 168 MiB on both. GitHub still waits on other blocking downloads. The network of the test machine varied by a factor of 3 between runs.
+
+Tests: `import_calls_of_one_checkpoint_download_together` fails before the change (at most 1 request in the server at a time) and passes after it.
+
+Not tested: Windows, wall time on an idle machine, other sites.
+
 ## Bytecode lane runs destructuring (2026-11-17)
 
 `BARE_JS_EXEC=byte` now compiles object and array patterns in declarations, assignments, `for-in` and `for-of` heads and `catch` clauses. Before, the lane refused them (104,527 calls on a private React dashboard journey). Parameters with patterns already ran: the tree walker binds them before the code starts. The default stays `tree`.

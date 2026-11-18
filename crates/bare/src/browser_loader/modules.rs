@@ -588,20 +588,47 @@ impl Run<'_> {
         self.dom.scripts.modules.borrow_mut().evals.extend(keep);
     }
 
+    /// What an `import()` in the module `referrer` (or in the document) resolves against. The referrer of a `data:` module has no URL:
+    /// the document stands in (see `load_data`).
+    fn import_base(&mut self, referrer: Option<u32>) -> Option<Url> {
+        match referrer {
+            Some(m) => Url::parse(self.b.it.module_url(m)).ok().or_else(|| self.doc_base()),
+            None => self.doc_base(),
+        }
+    }
+
     /// Answer the `import()` calls that ran. True when there were any (the caller runs the microtasks again).
     pub(super) fn serve_imports(&mut self) -> Result<bool, Stop> {
         let reqs = self.b.it.take_dynamic_imports();
         if reqs.is_empty() {
             return Ok(false);
         }
+        // The calls of one checkpoint ask for their files together: start every download first, as `load_deps` does for the imports of
+        // one module. Each `load_graph` below then takes its file from a worker, and the page thread does not wait for one reply at a time.
+        let mut todo: Vec<Url> = Vec::new();
+        for r in &reqs {
+            if is_data(&r.specifier) {
+                continue;
+            }
+            let Some(base) = self.import_base(r.referrer) else { continue };
+            let Ok(u) = self.resolve_spec(&r.specifier, &base) else { continue };
+            let (m, preloads) = (self.dom.scripts.modules.borrow(), self.dom.scripts.preloads.borrow());
+            let key = u.to_string();
+            let wanted = !m.ids.contains_key(&key) && !m.failed.contains_key(&key) && !preloads.has_script(&u) && !(self.https_only && u.scheme == bare_url::Scheme::Http);
+            if wanted && !todo.iter().any(|t| t.to_string() == key) {
+                todo.push(u);
+            }
+        }
+        if todo.len() >= 2 || (!todo.is_empty() && self.net.client.parallel_pays()) {
+            let kept = self.kept();
+            for u in &todo {
+                self.net.start(Expect::Script, u, &self.lim.resources, self.deadline, kept);
+            }
+        }
         for r in reqs {
             self.budget()?;
             self.res.tasks += 1;
-            // The referrer of a `data:` module has no URL to resolve against: the document stands in (see `load_data`).
-            let base = match r.referrer {
-                Some(m) => Url::parse(self.b.it.module_url(m)).ok().or_else(|| self.doc_base()),
-                None => self.doc_base(),
-            };
+            let base = self.import_base(r.referrer);
             let loaded = match base {
                 Some(_) if is_data(&r.specifier) => {
                     let mut made = Vec::new();

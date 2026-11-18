@@ -137,6 +137,22 @@ fn twelve_parsed_scripts_download_together_and_run_in_order() {
 }
 
 #[test]
+fn import_calls_of_one_checkpoint_download_together() {
+    big(|| {
+        // Six `import()` calls in one task: their files are asked for together, and the page does not wait for one reply at a time.
+        let imports: String = (1..=6).map(|i| format!("import('/s{i}.js')")).collect::<Vec<_>>().join(", ");
+        let (srv, meet) = together();
+        let (log, r, _) = run(&format!("<body><script>var log = []; Promise.all([{imports}])</script>"), &srv);
+        let mut got: Vec<&str> = log.split('|').collect();
+        got.sort();
+        assert_eq!(got, ["s1", "s2", "s3", "s4", "s5", "s6"]);
+        assert_eq!((r.load_errors, r.fetches), (0, 6));
+        // One at a time, no 3 requests are in together.
+        assert!(meet.met(3), "peak {}", meet.peak.load(SeqCst));
+    });
+}
+
+#[test]
 fn a_slow_first_script_does_not_change_the_order() {
     big(|| {
         // Script 0 is the slowest and script 5 the fastest: they finish in the reverse order.
