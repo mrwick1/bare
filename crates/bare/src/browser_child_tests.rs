@@ -317,3 +317,175 @@ fn the_order_of_child_rounds_is_fixed_under_the_virtual_clock() {
         }
     });
 }
+
+// ---------------------------------------------------------------------------------------------- postMessage across pages
+
+/// The page of `a` with an iframe `f` on `child`, and `script` after it.
+fn framed(child: &str, script: &str) -> String {
+    html(&format!("<iframe id=f src='{child}'></iframe><script>{LOG}; var f = document.getElementById('f'); var w = f.contentWindow; {script}</script>"))
+}
+
+fn page(script: &str) -> String {
+    html(&format!("<script>{LOG}; {script}</script>"))
+}
+
+const STORE: &str = "function store(k, v){localStorage.setItem(k, v)}";
+
+#[test]
+fn the_parent_posts_to_a_child_and_the_child_sees_the_origin_and_source() {
+    big(|| {
+        let other = server(|| vec![("/c", page("addEventListener('message', function(e){ localStorage.setItem('m', [JSON.stringify(e.data), e.origin, e.source === parent, e.ports.length].join('|')) })"))]);
+        let o = other.url("/c");
+        let srv = server(move || vec![("/", framed(&o, "f.addEventListener('load', function(){ w.postMessage({k: [1, 'x']}, '*') })"))]);
+        let (s, r) = run(srv.url("/"), |_| {});
+        assert_eq!(r.stop, SessionStop::Page(Stop::Settled), "{r:?}");
+        assert_eq!(get(&s, &other, "m"), Some(format!("{{\"k\":[1,\"x\"]}}|{}|true|0", srv.url(""))));
+    });
+}
+
+#[test]
+fn a_child_posts_to_its_parent_and_the_parent_sees_the_origin_and_the_frame_window() {
+    big(|| {
+        let other = server(|| vec![("/c", page("parent.postMessage({a: [1, 2]}, '*')"))]);
+        let o = other.url("/c");
+        let srv = server(move || vec![("/", framed(&o, "addEventListener('message', function(e){ localStorage.setItem('m', [JSON.stringify(e.data), e.origin, e.source === w].join('|')) })"))]);
+        let (s, r) = run(srv.url("/"), |_| {});
+        assert_eq!(r.stop, SessionStop::Page(Stop::Settled), "{r:?}");
+        assert_eq!(get(&s, &srv, "m"), Some(format!("{{\"a\":[1,2]}}|{}|true", other.url(""))));
+    });
+}
+
+#[test]
+fn three_round_trips_run_in_the_same_order_each_time() {
+    big(|| {
+        let other = server(|| vec![("/c", page("addEventListener('message', function(e){ console.log('c' + e.data); parent.postMessage(e.data, '*') })"))]);
+        let o = other.url("/c");
+        let srv = server(move || {
+            vec![("/", framed(&o, "f.addEventListener('load', function(){ w.postMessage(1, '*') }); addEventListener('message', function(e){ console.log('p' + e.data); if (e.data < 3) w.postMessage(e.data + 1, '*') })"))]
+        });
+        let c = other.url("/c");
+        let want = [format!("{c}: c1"), "p1".to_string(), format!("{c}: c2"), "p2".to_string(), format!("{c}: c3"), "p3".to_string()];
+        for _ in 0..2 {
+            let (mut s, r) = run(srv.url("/"), |_| {});
+            assert_eq!(r.stop, SessionStop::Page(Stop::Settled), "{r:?}");
+            assert_eq!(console(&mut s), want);
+        }
+    });
+}
+
+#[test]
+fn the_target_origin_is_checked_when_the_message_arrives() {
+    big(|| {
+        let other = server(|| {
+            vec![(
+                "/c",
+                page("addEventListener('message', function(e){ log(e.data) }); parent.postMessage('slash', '/'); parent.postMessage('star', '*'); parent.postMessage('no', 'http://nope.example'); window.onload = function(){ localStorage.setItem('seen', localStorage.getItem('log')) }"),
+            )]
+        });
+        let o = other.url("/c");
+        let oo = other.url("");
+        let srv = server(move || {
+            vec![(
+                "/",
+                framed(&o, &format!("addEventListener('message', function(e){{ log(e.data) }}); f.addEventListener('load', function(){{ w.postMessage('a', 'http://nope.example'); w.postMessage('b', '{oo}'); w.postMessage('c', '*'); w.postMessage('d', '/'); w.postMessage('e', {{ targetOrigin: '{oo}' }}) }})")),
+            )]
+        });
+        let (s, r) = run(srv.url("/"), |_| {});
+        assert_eq!(r.stop, SessionStop::Page(Stop::Settled), "{r:?}");
+        // the parent got only "star": "/" names the child origin, and the other origin is not the parent
+        assert_eq!(get(&s, &srv, "log").as_deref(), Some("star,"));
+        // the child got b, c and e
+        assert_eq!(get(&s, &other, "log").as_deref(), Some("b,c,e,"));
+    });
+}
+
+#[test]
+fn an_unparsable_target_origin_and_a_function_throw_in_the_sender() {
+    big(|| {
+        let other = server(|| vec![("/c", page(""))]);
+        let o = other.url("/c");
+        let srv = server(move || {
+            vec![(
+                "/",
+                framed(&o, &format!("{STORE}; f.addEventListener('load', function(){{ var r = []; try {{ w.postMessage('a', 'not a url') }} catch (e) {{ r.push(e.name) }} try {{ w.postMessage(function(){{}}, '*') }} catch (e) {{ r.push(e.name) }} try {{ w.postMessage({{ f: function(){{}} }}, '*') }} catch (e) {{ r.push(e.name) }} try {{ w.postMessage() }} catch (e) {{ r.push(e.name) }} try {{ w.postMessage.call({{}}, 1) }} catch (e) {{ r.push(e.name) }} store('r', r.join('|')) }})")),
+            )]
+        });
+        let (s, r) = run(srv.url("/"), |_| {});
+        assert_eq!(r.stop, SessionStop::Page(Stop::Settled), "{r:?}");
+        assert_eq!(get(&s, &srv, "r").as_deref(), Some("SyntaxError|DataCloneError|DataCloneError|TypeError|TypeError"));
+    });
+}
+
+#[test]
+fn an_array_buffer_in_the_transfer_list_moves_to_the_other_page() {
+    big(|| {
+        let other = server(|| vec![("/c", page("addEventListener('message', function(e){ localStorage.setItem('m', new Uint8Array(e.data).join('-') + '|' + e.data.byteLength) })"))]);
+        let o = other.url("/c");
+        let srv = server(move || {
+            vec![("/", framed(&o, &format!("{STORE}; f.addEventListener('load', function(){{ var b = new Uint8Array([1, 2, 3]).buffer; w.postMessage(b, '*', [b]); store('len', b.byteLength) }})")))]
+        });
+        let (s, r) = run(srv.url("/"), |_| {});
+        assert_eq!(r.stop, SessionStop::Page(Stop::Settled), "{r:?}");
+        assert_eq!(get(&s, &srv, "len").as_deref(), Some("0"));
+        assert_eq!(get(&s, &other, "m").as_deref(), Some("1-2-3|3"));
+    });
+}
+
+#[test]
+fn a_message_port_does_not_cross_to_another_page_yet() {
+    big(|| {
+        let other = server(|| vec![("/c", page("addEventListener('message', function(e){ log('got') })"))]);
+        let o = other.url("/c");
+        let srv = server(move || {
+            vec![(
+                "/",
+                framed(&o, &format!("{STORE}; f.addEventListener('load', function(){{ var mc = new MessageChannel(); mc.port2.onmessage = function(e){{ console.log('local:' + e.data) }}; store('ret', String(w.postMessage('x', '*', [mc.port1]))); mc.port1.postMessage('hi') }})")),
+            )]
+        });
+        let (mut s, r) = run(srv.url("/"), |_| {});
+        assert_eq!(r.stop, SessionStop::Page(Stop::Settled), "{r:?}");
+        assert_eq!(get(&s, &srv, "ret").as_deref(), Some("undefined"));
+        assert_eq!(get(&s, &other, "log"), None);
+        let lines = console(&mut s);
+        assert_eq!(lines.iter().filter(|l| l.contains("A MessagePort cannot move to another page yet")).count(), 1, "{lines:?}");
+        assert!(lines.contains(&"local:hi".to_string()), "{lines:?}");
+    });
+}
+
+#[test]
+fn a_message_to_a_child_that_still_loads_is_dropped_and_the_parent_settles() {
+    big(|| {
+        let other = server(|| vec![("/c", page("addEventListener('message', function(e){ log(e.data) })"))]);
+        let o = other.url("/c");
+        let srv = server(move || vec![("/", framed(&o, "w.postMessage('early', '*')"))]);
+        let (s, r) = run(srv.url("/"), |_| {});
+        assert_eq!(r.stop, SessionStop::Page(Stop::Settled), "{r:?}");
+        assert_eq!(get(&s, &other, "log"), None);
+    });
+}
+
+#[test]
+fn a_grandchild_reaches_the_top_page_with_a_null_source() {
+    big(|| {
+        let leaf = server(|| vec![("/l", page("top.postMessage({deep: 1}, '*')"))]);
+        let l = leaf.url("/l");
+        let mid = server(move || vec![("/m", html(&format!("<iframe src='{l}'></iframe>")))]);
+        let m = mid.url("/m");
+        let srv = server(move || vec![("/", framed(&m, "addEventListener('message', function(e){ localStorage.setItem('m', [JSON.stringify(e.data), e.origin, e.source === null].join('|')) })"))]);
+        let (s, r) = run(srv.url("/"), |_| {});
+        assert_eq!(r.stop, SessionStop::Page(Stop::Settled), "{r:?}");
+        assert_eq!(get(&s, &srv, "m"), Some(format!("{{\"deep\":1}}|{}|true", leaf.url(""))));
+    });
+}
+
+#[test]
+fn the_parent_does_not_settle_while_a_message_is_in_flight() {
+    big(|| {
+        let other = server(|| vec![("/c", page("addEventListener('load', function(){ parent.postMessage('late', '*') })"))]);
+        let o = other.url("/c");
+        let srv = server(move || vec![("/", framed(&o, "addEventListener('message', function(e){ localStorage.setItem('m', e.data) })"))]);
+        let (s, r) = run(srv.url("/"), |_| {});
+        assert_eq!(r.stop, SessionStop::Page(Stop::Settled), "{r:?}");
+        assert_eq!(get(&s, &srv, "m").as_deref(), Some("late"));
+    });
+}

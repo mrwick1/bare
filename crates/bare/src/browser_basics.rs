@@ -36,7 +36,7 @@ use crate::browser::*;
 use crate::browser_platform::arg;
 use bare_html::dom::{Document, NodeData};
 use bare_js::eval::Interp;
-use bare_js::value::Value;
+use bare_js::value::{ObjId, Value};
 use std::cell::Cell;
 
 /// The keepalive quota: bytes of request bodies in flight (Fetch Standard, "keepalive").
@@ -267,18 +267,12 @@ impl Dom {
     }
 }
 
-fn post_message(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    // The window of a blank frame has no message listeners that run here, so a message to it is dropped.
-    if matches!(this, Value::Object(o) if crate::browser_frames::is_blank_window(d, o)) {
-        return Ok(Value::Undefined);
-    }
-    if !matches!(this, Value::Undefined | Value::Null) && !matches!(this, Value::Object(o) if Some(&o) == d.global.get()) {
-        return Err(it.type_error("Illegal invocation"));
-    }
+/// The arguments of `window.postMessage`, own or remote: the target origin as given ("/" when absent) and the transfer list.
+/// `postMessage(message, targetOrigin, transfer)` or `postMessage(message, { targetOrigin, transfer })`.
+pub(crate) fn post_args(d: &Dom, it: &mut Interp<'_>, a: &[Value]) -> R<(String, Vec<ObjId>)> {
     if a.is_empty() {
         return Err(it.type_error("Failed to execute 'postMessage' on 'Window': 1 argument required, but only 0 present."));
     }
-    // `postMessage(message, targetOrigin, transfer)` or `postMessage(message, { targetOrigin, transfer })`.
     let (target, transfer) = match arg(a, 1) {
         Value::Undefined | Value::Null => (Value::Undefined, Value::Undefined),
         o @ Value::Object(_) => {
@@ -295,13 +289,33 @@ fn post_message(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Val
         }
     };
     let list = d.transfer_list(it, transfer, None, "Failed to execute 'postMessage' on 'Window'")?;
-    if target != "*" && target != "/" {
-        let Ok(r) = crate::browser_navigation_url::parse(&target, None) else {
-            return Err(d.dom_err(it, "SyntaxError", &format!("Failed to execute 'postMessage' on 'Window': Invalid target origin '{target}' in a call to 'postMessage'.")));
-        };
-        if r.origin() != doc_origin(d) {
-            return Ok(Value::Undefined);
-        }
+    Ok((target, list))
+}
+
+/// The origin that a target origin names: `None` for "*" and "/", else the origin of the URL (`SyntaxError` when it does not parse).
+pub(crate) fn target_origin(it: &mut Interp<'_>, d: &Dom, target: &str) -> R<Option<String>> {
+    if target == "*" || target == "/" {
+        return Ok(None);
+    }
+    match crate::browser_navigation_url::parse(target, None) {
+        Ok(r) => Ok(Some(r.origin())),
+        Err(_) => Err(d.dom_err(it, "SyntaxError", &format!("Failed to execute 'postMessage' on 'Window': Invalid target origin '{target}' in a call to 'postMessage'."))),
+    }
+}
+
+fn post_message(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
+    // The window of a blank frame has no message listeners that run here, so a message to it is dropped.
+    if matches!(this, Value::Object(o) if crate::browser_frames::is_blank_window(d, o)) {
+        return Ok(Value::Undefined);
+    }
+    if !matches!(this, Value::Undefined | Value::Null) && !matches!(this, Value::Object(o) if Some(&o) == d.global.get()) {
+        return Err(it.type_error("Illegal invocation"));
+    }
+    let (target, list) = post_args(d, it, a)?;
+    if let Some(origin) = target_origin(it, d, &target)?
+        && origin != doc_origin(d)
+    {
+        return Ok(Value::Undefined);
     }
     let (data, ports, _) = crate::browser_navigation_state::clone_with(d, it, a[0], &list)?;
     d.post_window(data, ports.into_boxed_slice())?;

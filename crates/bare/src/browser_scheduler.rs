@@ -189,6 +189,14 @@ struct Msg {
     data: Value,
     bytes: usize,
     ports: Box<[ObjId]>,
+    /// A message from another page (`browser_child.rs`); `None`: a message of this page.
+    from: Option<Box<Sender>>,
+}
+
+/// The sender of a message from another page: its origin, and its window in this heap (`None`: no window for it, as for a grandchild).
+pub(crate) struct Sender {
+    pub origin: String,
+    pub source: Option<ObjId>,
 }
 
 impl Port {
@@ -205,6 +213,8 @@ struct MsgEvent {
     ports: Option<Value>,
     /// A message of `window.postMessage` (`browser_basics.rs`): `origin` is the document origin and `source` is the window.
     win: bool,
+    /// A message from another page: its `origin` and `source`. Else `win` decides.
+    from: Option<Box<Sender>>,
 }
 
 #[derive(Clone, Copy)]
@@ -302,7 +312,7 @@ pub struct SchedStats {
 /// A task taken out of the queue, ready to run without any borrow.
 enum Run {
     Timer { id: u64, cb: Value, args: Vec<Value>, nesting: u32, repeat: bool },
-    Deliver { port: ObjId, data: Value, ports: Box<[ObjId]> },
+    Deliver { port: ObjId, data: Value, ports: Box<[ObjId]>, from: Option<Box<Sender>> },
     Select(NodeId),
     SelectionChange(NodeId),
     DocSelectionChange,
@@ -388,11 +398,13 @@ impl Dom {
             for m in &p.inbox {
                 out.push(m.data);
                 out.extend(m.ports.iter().map(|&o| Value::Object(o)));
+                out.extend(m.from.iter().filter_map(|f| f.source).map(Value::Object));
             }
         } else if let Some(e) = s.msg_events.get(&owner) {
             out.push(e.data);
             out.extend(e.moved.iter().map(|&o| Value::Object(o)));
             out.extend(e.ports);
+            out.extend(e.from.iter().filter_map(|f| f.source).map(Value::Object));
         }
     }
 
@@ -627,10 +639,10 @@ impl Dom {
                 Some(p) if p.keys.front() == Some(&key) => {
                     p.keys.pop_front();
                     match p.inbox.pop_front() {
-                        Some(Msg { data, bytes, ports }) => {
+                        Some(Msg { data, bytes, ports, from }) => {
                             s.queued -= 1;
                             s.queued_bytes -= bytes;
-                            Run::Deliver { port, data, ports }
+                            Run::Deliver { port, data, ports, from }
                         }
                         None => Run::Nothing,
                     }
@@ -761,14 +773,14 @@ impl Dom {
                 self.worker_failed(it, o)?;
                 it.host_checkpoint().map(|_| ())
             }),
-            Run::Deliver { port, data, ports } => {
+            Run::Deliver { port, data, ports, from } => {
                 let mark = self.settle_mark();
                 it.host_scope(|it| {
                     it.charge(1)?;
                     let win = self.global.get() == Some(&port);
                     let target = if win { Target::Window } else { Target::Obj(port) };
                     if self.has_message_listener(target) {
-                        let ev = self.new_msg_event(it, data, win, ports)?;
+                        let ev = self.new_msg_event(it, data, win, ports, from)?;
                         self.dispatch(it, target, ev)?;
                     }
                     it.host_checkpoint().map(|_| ())
@@ -866,7 +878,16 @@ impl Dom {
 
     /// Queue a `message` event for the window: one delivery task. The window is a port of the table with no peer. `data` is already cloned.
     pub(crate) fn post_window(&self, data: Value, ports: Box<[ObjId]>) -> R<()> {
-        let cost = crate::browser_basics::MESSAGE_COST;
+        self.queue_window(data, ports, crate::browser_basics::MESSAGE_COST, None)
+    }
+
+    /// The most messages that a page queues (also the bound of the outbox for other pages).
+    pub(crate) fn max_messages(&self) -> usize {
+        self.sched.borrow().limits.max_queued_messages
+    }
+
+    /// `post_window` with the byte cost, and the sender when the message comes from another page.
+    pub(crate) fn queue_window(&self, data: Value, ports: Box<[ObjId]>, cost: usize, from: Option<Box<Sender>>) -> R<()> {
         let g = *self.global.get().expect("installed");
         {
             let s = self.sched.borrow();
@@ -882,15 +903,15 @@ impl Dom {
         s.queued += 1;
         s.queued_bytes += cost;
         let p = s.ports.entry(g).or_insert(Port::new(None, true));
-        p.inbox.push_back(Msg { data, bytes: cost, ports });
+        p.inbox.push_back(Msg { data, bytes: cost, ports, from });
         p.keys.push_back(key);
         Ok(())
     }
 
-    fn new_msg_event(&self, it: &mut Interp<'_>, data: Value, win: bool, moved: Box<[ObjId]>) -> R<ObjId> {
+    fn new_msg_event(&self, it: &mut Interp<'_>, data: Value, win: bool, moved: Box<[ObjId]>, from: Option<Box<Sender>>) -> R<ObjId> {
         let proto = self.sched.borrow().protos.expect("installed").event;
         let e = self.new_event_proto(it, "message", false, false, false, proto)?;
-        self.sched.borrow_mut().msg_events.insert(e, MsgEvent { data, moved, ports: None, win });
+        self.sched.borrow_mut().msg_events.insert(e, MsgEvent { data, moved, ports: None, win, from });
         Ok(e)
     }
 
@@ -1235,7 +1256,7 @@ fn port_post_message(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> 
     s.queued += 1;
     s.queued_bytes += bytes;
     let t = s.ports.get_mut(&target).expect("checked");
-    t.inbox.push_back(Msg { data, bytes, ports: moved });
+    t.inbox.push_back(Msg { data, bytes, ports: moved, from: None });
     t.keys.extend(key);
     Ok(Value::Undefined)
 }
@@ -1330,13 +1351,17 @@ fn msg_empty(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
 }
 
 fn msg_origin(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let win = msg_event(d, it, this, |e| e.win)?;
-    d.js_str(it, &if win { d.window_origin() } else { String::new() })
+    let (win, from) = msg_event(d, it, this, |e| (e.win, e.from.as_ref().map(|f| f.origin.clone())))?;
+    d.js_str(it, &from.unwrap_or_else(|| if win { d.window_origin() } else { String::new() }))
 }
 
 fn msg_source(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let win = msg_event(d, it, this, |e| e.win)?;
-    Ok(if win { Value::Object(*d.global.get().expect("installed")) } else { Value::Null })
+    let (win, from) = msg_event(d, it, this, |e| (e.win, e.from.as_ref().map(|f| f.source)))?;
+    Ok(match from {
+        Some(src) => src.map_or(Value::Null, Value::Object),
+        None if win => Value::Object(*d.global.get().expect("installed")),
+        None => Value::Null,
+    })
 }
 
 fn msg_ports(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {

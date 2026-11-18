@@ -9,7 +9,10 @@
 //!
 //! - The five traps (`get`, `set`, `has`, `defineProperty`, `deleteProperty`) are host functions that are shared by all the windows of
 //!   a realm. A trap finds its window by the target (`Kids::win_of`).
-//! - `postMessage`, `blur`, `focus` and `close` do nothing yet. `postMessage` across pages is step 3b of `docs/design-gmail-frames.md`.
+//! - `postMessage` puts the message in the outbox of the page (`Kids::send`). The driver moves it to the other page, which checks the
+//!   target origin and queues a `message` event (`browser_child.rs`, "Messages"). A `MessagePort` in the transfer list does not cross
+//!   yet (step 3c of `docs/design-gmail-frames.md`): the message is dropped and the console gets a warning. `blur`, `focus` and
+//!   `close` do nothing yet.
 //! - `length` is 0: the child frames of a child are not counted yet.
 //! - `location`: a write to `iframe.contentWindow.location` navigates the child. A read gives an object with `replace(url)` and a `href`
 //!   setter (the getter throws `SecurityError`). In a child, `parent.location = url` does nothing yet: the parent is not reachable
@@ -18,7 +21,7 @@
 //!   parent window and the top window are one object when the child is a frame of the top page. In a deeper child, the `parent` of
 //!   the parent window is taken as the top window (the exact grandparent needs 3b).
 use crate::browser::*;
-use crate::browser_child::FrameId;
+use crate::browser_child::{FrameId, Out};
 use bare_js::eval::{Error, Interp};
 use bare_js::value::{ObjId, Value};
 
@@ -133,6 +136,35 @@ fn win_closed(d: &Dom, _: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value>
     }))
 }
 
+/// `postMessage` of a remote window: the message goes to the outbox of this page. The driver routes it (`Browser::kids_turn`).
+fn win_post(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
+    let win = match this {
+        Value::Object(p) => d.kids.target_of(p).and_then(|t| d.kids.win_of(t)),
+        _ => None,
+    };
+    let Some(Win { side: to, .. }) = win else { return Err(it.type_error("Illegal invocation")) };
+    let (target, list) = crate::browser_basics::post_args(d, it, a)?;
+    let origin = d.window_origin();
+    let target_origin = match crate::browser_basics::target_origin(it, d, &target)? {
+        Some(o) => o,
+        None if target == "*" => target,
+        None => origin.clone(),
+    };
+    if matches!(to, Side::Child(id) if !d.kids.alive(id)) {
+        return Ok(Value::Undefined);
+    }
+    if list.iter().any(|&o| !matches!(it.clone_class(o), bare_js::eval::CloneClass::Buffer)) {
+        crate::browser_console::push_text(d, it, crate::browser_console::ConsoleLevel::Warn, "A MessagePort cannot move to another page yet");
+        return Ok(Value::Undefined);
+    }
+    if d.kids.outbox_len() >= d.max_messages() {
+        return Err(d.lim("messages"));
+    }
+    let (state, transfer) = crate::browser_navigation_state::clone_state_with(d, it, a[0], &list)?;
+    d.kids.send(Out { to, target_origin, origin, state, transfer });
+    Ok(Value::Undefined)
+}
+
 fn loc_target(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<Win> {
     let found = match this {
         Value::Object(t) => d.kids.win_of(t).filter(|w| w.location),
@@ -171,7 +203,7 @@ fn common(d: &Dom, it: &mut Interp<'_>) -> R<Common> {
     }
     let mut no_op = [handler; 4];
     for (slot, name) in no_op.iter_mut().zip(["postMessage", "blur", "focus", "close"]) {
-        *slot = d.add_fn(it, |_, _, _, _| Ok(Value::Undefined), name, 0, false)?;
+        *slot = if name == "postMessage" { d.add_fn(it, win_post, name, 1, false)? } else { d.add_fn(it, |_, _, _, _| Ok(Value::Undefined), name, 0, false)? };
     }
     let closed = d.add_fn(it, win_closed, "get closed", 0, false)?;
     let replace = d.add_fn(it, loc_replace, "replace", 1, false)?;
