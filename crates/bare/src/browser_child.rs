@@ -298,7 +298,7 @@ impl Kids {
         out.extend(self.slots.borrow().iter().flatten().map(|s| s.node));
     }
 
-    /// Drop the children of iframes that left the document, and request the documents that are marked. Returns the number of slots now.
+    /// Drop the children of iframes that left the document, and request the documents that are marked.
     fn sync(&self, d: &Dom, cfg: &Cfg) {
         let from = base_url(d);
         let mut slots = self.slots.borrow_mut();

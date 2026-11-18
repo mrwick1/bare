@@ -2353,7 +2353,7 @@ document.getElementById('c').onclick = function () { frame('http://localhost:' +
 }
 
 /// A page saves a file through a hidden iframe (Gmail's Download button): a same-origin `src` that replies with a download is saved,
-/// on insertion and on a later `src` change. A frame of a page saves nothing, and a cross-origin frame is never asked for.
+/// on insertion and on a later `src` change. A frame of a page saves nothing. A cross-origin frame is a child page, so its download is saved too.
 #[test]
 fn a_hidden_iframe_download_is_saved() {
     let mut s = Server::start();
@@ -2387,10 +2387,12 @@ fn a_hidden_iframe_download_is_saved() {
     assert!(list.contains("invoice.pdf ("), "{list}");
     click(&mut s, "p");
     click(&mut s, "c");
+    let list = wait(&mut s, 3);
+    assert!(list.contains("cross.csv ("), "{list}");
     std::thread::sleep(std::time::Duration::from_millis(500));
     let (list, _) = s.tool("downloads", json!({}));
-    assert_eq!(list.as_str().unwrap().lines().count(), 2, "{list}");
-    assert_eq!(CROSS_HITS.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(list.as_str().unwrap().lines().count(), 3, "{list}");
+    assert_eq!(CROSS_HITS.load(std::sync::atomic::Ordering::SeqCst), 1);
     let (r, _) = s.tool("eval", json!({"js": "location.pathname"}));
     assert_eq!(r, json!("/frames"));
     let _ = std::fs::remove_dir_all(&dir);
