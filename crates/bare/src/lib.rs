@@ -290,6 +290,7 @@ mod browser_child;
 #[cfg(test)]
 mod browser_child_tests;
 mod browser_remote_window;
+mod browser_port_hub;
 
 #[cfg(test)]
 mod browser_steps_tests;

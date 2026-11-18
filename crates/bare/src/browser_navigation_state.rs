@@ -10,8 +10,9 @@
 //! `Error` and its six subtypes (`name`, `message`, `stack` and `cause`).
 //! Transfer list (HTML "StructuredSerializeWithTransfer"): `clone_state_with` takes the listed objects (`ArrayBuffer` or `MessagePort`,
 //! checked by `Dom::transfer_list`). A listed item is not copied. Its node is `SKind::Moved(i)`, and `Transfer` number `i` holds it
-//! in a list beside the `State`: the bytes of a buffer (the source is detached) or the key of a parked port. `Transfer` has no JS
-//! object, so a later step can send the pair to another heap. `materialize_with` builds the buffers and ports from that list. A buffer
+//! in a list beside the `State`: the bytes of a buffer (the source is detached), the key of a parked port, or (for a message to another
+//! page, after `Dom::export_ports`) the end ids of a port in the hub. `Transfer` has no JS object, so the pair can go to another heap.
+//! `materialize_with` builds the buffers and ports from that list. A buffer
 //! in the list and in the graph is one object in the result. The sources change only after the walk succeeded.
 //! `DataCloneError`: a function, a symbol, a DOM wrapper, `URL`, `URLSearchParams`, an `AbortController` or `AbortSignal`, a Proxy, a
 //! Promise, a WeakMap, a WeakSet, a WeakRef, an iterator, a generator, an `Intl` object, a Symbol wrapper, a detached buffer.
@@ -68,8 +69,11 @@ pub(crate) enum SKind {
 pub(crate) enum Transfer {
     /// The bytes of a detached `ArrayBuffer`.
     Buffer(Vec<u8>),
-    /// A port that `Dom::park_port` took out of the port table.
+    /// A port that `Dom::park_port` took out of the port table. It stays inside one page.
     Port(u64),
+    /// A port that moves to another page (`browser_port_hub.rs`): its end in the hub and the end of its peer, if the peer is in the hub.
+    /// `Dom::export_ports` makes it from a `Port`. `Dom::import_ends` makes the new port.
+    End { me: u64, remote: Option<u64> },
 }
 
 pub(crate) struct SNode {
@@ -367,11 +371,21 @@ pub(crate) fn materialize(d: &Dom, it: &mut Interp<'_>, st: &State) -> R<Value> 
 /// `materialize` with a transfer list: the graph and the new ports of the list, in list order. A listed buffer that no node uses is dropped.
 pub(crate) fn materialize_with(d: &Dom, it: &mut Interp<'_>, st: &State, mut xf: Vec<Transfer>) -> R<(Value, Vec<ObjId>)> {
     let keys: Vec<u64> = xf.iter().filter_map(|t| if let Transfer::Port(k) = t { Some(*k) } else { None }).collect();
-    let ports = d.make_ports(it, &keys)?;
+    let mut ports = d.make_ports(it, &keys)?;
     let mut by_item: Vec<Option<ObjId>> = Vec::new();
     if !xf.is_empty() {
-        let mut next = ports.iter();
-        by_item = xf.iter().map(|t| if matches!(t, Transfer::Port(_)) { next.next().copied() } else { None }).collect();
+        let ends: Vec<(u64, Option<u64>)> = xf.iter().filter_map(|t| if let Transfer::End { me, remote } = t { Some((*me, *remote)) } else { None }).collect();
+        let moved = if ends.is_empty() { Vec::new() } else { d.import_ends(it, &ends)? };
+        let (mut next, mut next_end) = (ports.iter(), moved.iter());
+        by_item = xf.iter().map(|t| match t {
+            Transfer::Port(_) => next.next().copied(),
+            Transfer::End { .. } => next_end.next().copied(),
+            Transfer::Buffer(_) => None,
+        }).collect();
+        if !moved.is_empty() {
+            // The ports of the result, in list order.
+            ports = by_item.iter().flatten().copied().collect();
+        }
     }
     let mut objs: Vec<Option<ObjId>> = vec![None; st.nodes.len()];
     // Views come second: the buffer of a view can be a later node.
@@ -406,7 +420,7 @@ pub(crate) fn materialize_with(d: &Dom, it: &mut Interp<'_>, st: &State, mut xf:
                         Value::Object(o) => o,
                         _ => unreachable!(),
                     },
-                    Transfer::Port(_) => by_item[*i as usize].expect("made"),
+                    Transfer::Port(_) | Transfer::End { .. } => by_item[*i as usize].expect("made"),
                 },
             };
             objs[i] = Some(o);

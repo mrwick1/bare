@@ -69,6 +69,7 @@ use crate::browser_fetch::FetchLimits;
 use crate::browser_loader::{PageConfig, PageLimits, Stop, deadline_after, label};
 use crate::browser::R;
 use crate::browser_remote_window::{Common, Side, Win};
+use crate::browser_port_hub::PortHub;
 use crate::browser_scheduler::Sender;
 use crate::browser_session::{SessionLimits, load_document};
 use crate::downloads::{Downloads, Grab};
@@ -116,6 +117,8 @@ pub(crate) struct Cfg {
     depth: u8,
     /// The site of the top page: the site for the cookies of a frame load.
     top_site: Option<String>,
+    /// The messages of the ports that are split across the pages of this top page (`browser_port_hub.rs`).
+    hub: Rc<PortHub>,
 }
 
 struct Slot {
@@ -172,6 +175,8 @@ pub(crate) struct Kids {
     /// Messages to other pages, in post order.
     outbox: RefCell<Vec<Out>>,
     pub(crate) common: Cell<Option<Common>>,
+    /// The number of this page in the port hub (0: the top page).
+    pub(crate) page: Cell<u32>,
     /// This page is a child page: a round of `run_page` returns after one pass and never waits.
     pub(crate) poll: Cell<bool>,
     /// A child page, virtual clock: the page time that the next idle round moves the clock to.
@@ -183,6 +188,11 @@ impl Drop for Kids {
         if let Some(cfg) = self.cfg.get_mut() {
             let live = self.slots.get_mut().iter().flatten().count();
             cfg.total.set(cfg.total.get().saturating_sub(live));
+            // The page ends: its ends go, and the ports of the messages that never left it.
+            cfg.hub.drop_page(self.page.get());
+            for m in self.outbox.get_mut().drain(..) {
+                cfg.hub.release(&m.transfer);
+            }
         }
     }
 }
@@ -210,10 +220,20 @@ fn start_load(cfg: &Cfg, url: String, from: String) -> Fetched {
 }
 
 impl Kids {
-    /// Does this page have a child page, or a slot for one?
+    /// Does this page have a child page, or a slot for one, or does a wire wait in the port hub? The driver gives such a page a turn.
     #[inline]
     pub(crate) fn any(&self) -> bool {
-        !self.slots.borrow().is_empty()
+        !self.slots.borrow().is_empty() || self.hub_busy()
+    }
+
+    /// Does a wire wait in the port hub?
+    #[inline]
+    fn hub_busy(&self) -> bool {
+        self.cfg.borrow().as_ref().is_some_and(|c| c.hub.busy())
+    }
+
+    pub(crate) fn hub(&self) -> Option<Rc<PortHub>> {
+        self.cfg.borrow().as_ref().map(|c| c.hub.clone())
     }
 
     pub(crate) fn configured(&self) -> bool {
@@ -284,7 +304,7 @@ impl Kids {
             return;
         }
         let env = self.env.borrow_mut().take().unwrap_or_default();
-        *self.cfg.borrow_mut() = Some(Rc::new(Cfg { env, client, page, fetch, browser: dom_lim, total: Rc::new(Cell::new(0)), depth: 0, top_site }));
+        *self.cfg.borrow_mut() = Some(Rc::new(Cfg { env, client, page, fetch, browser: dom_lim, total: Rc::new(Cell::new(0)), depth: 0, top_site, hub: Rc::default() }));
     }
 
     pub(crate) fn set_env(&self, env: KidEnv) {
@@ -390,6 +410,10 @@ impl Kids {
 
     /// Does a child keep the page from settling (a queued task of it, due by `limit` on the page clock, that blocks; or a load)?
     pub(crate) fn blocks(&self, d: &Dom, limit: f64) -> bool {
+        // A wire in the hub waits for a page to take it.
+        if self.hub_busy() {
+            return true;
+        }
         let slots = self.slots.borrow();
         if slots.is_empty() {
             return false;
@@ -477,8 +501,9 @@ impl Browser {
         }
         b.start_refresh();
         let depth = cfg.depth + 1;
-        let kid = Cfg { env: cfg.env.clone(), client: cfg.client.fork(), page: cfg.page.clone(), fetch: cfg.fetch, browser: cfg.browser, total: cfg.total.clone(), depth, top_site: cfg.top_site.clone() };
+        let kid = Cfg { env: cfg.env.clone(), client: cfg.client.fork(), page: cfg.page.clone(), fetch: cfg.fetch, browser: cfg.browser, total: cfg.total.clone(), depth, top_site: cfg.top_site.clone(), hub: cfg.hub.clone() };
         *b.dom.kids.cfg.borrow_mut() = Some(Rc::new(kid));
+        b.dom.kids.page.set(cfg.hub.new_page());
         b.dom.kids.poll.set(true);
         let dom = b.dom.clone();
         b.it.host_scope(|it| crate::browser_remote_window::install_up(&dom, it, depth)).map_err(|_| "the window could not be set up".to_string())?;
@@ -494,10 +519,17 @@ impl Browser {
         self.dom.kids.sync(&self.dom, &cfg);
         let n = self.dom.kids.kids.borrow().len();
         let block = wait || !self.live();
+        // The wires for the ports of this page (a page that has no split port has no end: the call does nothing).
+        if cfg.hub.busy() {
+            match self.it.host_scope(|it| self.dom.take_wires(it)) {
+                Ok(k) => t.work += k,
+                Err(e) => t.diags.push(format!("a message was dropped: {e:?}")),
+            }
+        }
         for i in 0..n {
             let Some(mut ch) = self.dom.kids.kids.borrow_mut().get_mut(i).and_then(|k| k.take()) else { continue };
             let Some(node) = self.dom.kids.slots.borrow().get(i).and_then(|s| s.as_ref()).map(|s| s.node) else { continue };
-            let down = if self.dom.kids.outbox_len() > 0 { self.dom.kids.take_out(|m| m.to == Side::Child(i as FrameId)) } else { Vec::new() };
+            let mut down = if self.dom.kids.outbox_len() > 0 { self.dom.kids.take_out(|m| m.to == Side::Child(i as FrameId)) } else { Vec::new() };
             let fail = |ch: &mut Child, t: &mut Turn, why: String| {
                 t.diags.push(format!("frame {}: {why}", ch.label));
                 if !ch.notified {
@@ -526,7 +558,13 @@ impl Browser {
                 }
                 State::Run(mut b) => {
                     let parent = b.dom.kids.proxy_of(Side::Parent);
-                    for m in down {
+                    if cfg.hub.busy() {
+                        match b.it.host_scope(|it| b.dom.take_wires(it)) {
+                            Ok(k) => t.work += k,
+                            Err(e) => t.diags.push(format!("frame {}: a message was dropped: {e:?}", ch.label)),
+                        }
+                    }
+                    for m in std::mem::take(&mut down) {
                         t.work += 1;
                         if let Err(e) = b.it.host_scope(|it| b.dom.deliver(it, m, parent)) {
                             t.diags.push(format!("frame {}: a message was dropped: {e:?}", ch.label));
@@ -593,13 +631,19 @@ impl Browser {
                 }
                 State::Empty => State::Empty,
             };
+            // A message for a child that did not run is dropped: its ports never arrive.
+            for m in down {
+                cfg.hub.release(&m.transfer);
+            }
             if let Some(slot) = self.dom.kids.kids.borrow_mut().get_mut(i) {
                 *slot = Some(ch);
             }
         }
         // Each live child took its messages above. What is left is for a frame that was removed: drop it.
         if self.dom.kids.outbox_len() > 0 {
-            drop(self.dom.kids.take_out(|m| matches!(m.to, Side::Child(_))));
+            for m in self.dom.kids.take_out(|m| matches!(m.to, Side::Child(_))) {
+                cfg.hub.release(&m.transfer);
+            }
         }
         t
     }
@@ -650,6 +694,9 @@ impl Dom {
     /// window. `source` is the window of the sender in this heap.
     fn deliver(&self, it: &mut Interp<'_>, m: Out, source: Option<ObjId>) -> R<()> {
         if m.target_origin != "*" && m.target_origin != self.window_origin() {
+            if let Some(h) = self.kids.hub() {
+                h.release(&m.transfer);
+            }
             return Ok(());
         }
         let bytes = 16usize.saturating_add(m.state.bytes);

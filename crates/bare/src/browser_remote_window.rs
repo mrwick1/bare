@@ -153,14 +153,11 @@ fn win_post(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> 
     if matches!(to, Side::Child(id) if !d.kids.alive(id)) {
         return Ok(Value::Undefined);
     }
-    if list.iter().any(|&o| !matches!(it.clone_class(o), bare_js::eval::CloneClass::Buffer)) {
-        crate::browser_console::push_text(d, it, crate::browser_console::ConsoleLevel::Warn, "A MessagePort cannot move to another page yet");
-        return Ok(Value::Undefined);
-    }
     if d.kids.outbox_len() >= d.max_messages() {
         return Err(d.lim("messages"));
     }
-    let (state, transfer) = crate::browser_navigation_state::clone_state_with(d, it, a[0], &list)?;
+    let (state, mut transfer) = crate::browser_navigation_state::clone_state_with(d, it, a[0], &list)?;
+    d.export_ports(it, &mut transfer)?;
     d.kids.send(Out { to, target_origin, origin, state, transfer });
     Ok(Value::Undefined)
 }
