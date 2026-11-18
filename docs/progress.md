@@ -13310,3 +13310,9 @@ Not tested: windowed runs (paint), the RSS cost of `auto` by part, the mode A/B 
 - Before S1: the measurements and two small compiler changes land in today's engine.
 - Gates: S2 browser slice; `eval_load` at or below QuickJS on instructions in S2, and on peak RSS by S5.
 - The speculating JIT is checked last (new stage S8), only if a daily-journey profile shows hot loops.
+
+## Engine rewrite: implementation plan (2026-11-18)
+
+- `docs/plan-engine-rewrite.md` splits the design into PR-sized tasks: measurement tools (M1 to M5), changes in today's engine first (P0.1 to P0.5), then stages S0 to S8 with files, checks and sizes.
+- First PRs: the engine comparison tool (M1), the feature census (P0.1), the collector counters (P0.2), the `GetEnv` hop histogram (P0.3), then constants on either side of a compare (P0.4) and the effect context (P0.5).
+- S0 is the largest early stage: 184 files of `crates/bare` use `bare_js` directly; they move to a host interface crate one subsystem per PR.

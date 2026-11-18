@@ -1,6 +1,6 @@
-# Design: a new JavaScript engine for bare, with a JIT
+# Design: a new JavaScript engine for bare
 
-Status: design, for review by the owner. No engine code changed. Date: 2026-11-18. Base: main `25126702` (measurements) and `d89f0299` (this document).
+Status: design; all owner questions decided (section 10). Implementation plan: `plan-engine-rewrite.md`. No engine code changed. Date: 2026-11-18. Base: main `25126702` (measurements) and `d89f0299` (this document).
 
 Owner decision (2026-11-18): rewrite the whole engine (`crates/js`) and add a JIT. The goals are CPU, memory, a design that the owner can explain and defend, and simpler code.
 
